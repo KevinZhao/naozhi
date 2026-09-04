@@ -3,7 +3,7 @@ package sysession
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -12,7 +12,7 @@ import (
 // EventEntriesForKey carries behaviour; the rest record that the
 // pass-through reached the raw router.
 type rawRouterStub struct {
-	entries           map[string][]cli.EventEntry
+	entries           map[string][]clievent.EventEntry
 	visitCalled       bool
 	setLabelArgs      [3]string
 	clearKey          string
@@ -40,7 +40,7 @@ func (s *rawRouterStub) RegisterSystemStub(key, workspace, lastPrompt string) {
 	s.registerStubKey = key
 }
 
-func (s *rawRouterStub) EventEntriesForKey(key string) []cli.EventEntry {
+func (s *rawRouterStub) EventEntriesForKey(key string) []clievent.EventEntry {
 	return s.entries[key]
 }
 
@@ -53,7 +53,7 @@ func (s *rawRouterStub) EventEntriesForKey(key string) []cli.EventEntry {
 func TestRouterAdapter_EventEntriesProjection(t *testing.T) {
 	t.Parallel()
 	raw := &rawRouterStub{
-		entries: map[string][]cli.EventEntry{
+		entries: map[string][]clievent.EventEntry{
 			"sys:auto:1": {
 				{Type: "user", Summary: "问题一", Time: 100, Detail: "ignored"},
 				{Type: "text", Summary: "回复", Tool: "Read"},
@@ -99,7 +99,7 @@ func TestRouterAdapter_EventEntriesProjection(t *testing.T) {
 // (R20260602-PERF-1 / #1578).
 func TestRouterAdapter_AllNonUserCollapsesToNil(t *testing.T) {
 	t.Parallel()
-	raw := &rawRouterStub{entries: map[string][]cli.EventEntry{
+	raw := &rawRouterStub{entries: map[string][]clievent.EventEntry{
 		"sys:auto:1": {
 			{Type: "text", Summary: "回复"},
 			{Type: "tool_use", Summary: "Read"},
@@ -117,7 +117,7 @@ func TestRouterAdapter_AllNonUserCollapsesToNil(t *testing.T) {
 // observes).
 func TestRouterAdapter_EmptyAndNil(t *testing.T) {
 	t.Parallel()
-	raw := &rawRouterStub{entries: map[string][]cli.EventEntry{
+	raw := &rawRouterStub{entries: map[string][]clievent.EventEntry{
 		"empty": {},
 	}}
 	a := wrapRouter(raw)

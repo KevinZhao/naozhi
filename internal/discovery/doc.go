@@ -12,7 +12,7 @@
 // and proposed splitting into discovery/path + discovery/proc +
 // history/claudejsonl. Until that lands, treat this godoc as the
 // topographical map; the in-domain extraction is constrained by the
-// cli-package import graph (cli.EventEntry is produced here in
+// cli-package import graph (clievent.EventEntry is produced here in
 // LoadHistory/parseJSONL) and is best done in lockstep with the
 // R237-ARCH-13 eventlog rename so the history-source boundary moves only
 // once. Sub-domains today:
@@ -33,7 +33,7 @@
 //   - History loading — history.go, history_tail.go, recent.go,
 //     scanner.go (the LookupSummaries / extractLastPrompt half),
 //     retired_store.go, safe_json_test.go: parses Claude's JSONL
-//     transcripts into cli.EventEntry, builds the recent-sessions
+//     transcripts into clievent.EventEntry, builds the recent-sessions
 //     view, and tail-watches active sessions. The semantically
 //     largest sub-domain (~3.5 kLoC). Future home:
 //     internal/history/claudejsonl, merging with the existing
@@ -57,7 +57,7 @@
 //
 // Splitting requires either:
 //
-//  1. Moving cli.EventEntry into a non-cli package so the new
+//  1. Moving clievent.EventEntry into a non-cli package so the new
 //     history/claudejsonl can import it without pulling cli's
 //     process-management surface, OR
 //  2. Defining a discovery-level event type and bridging at the

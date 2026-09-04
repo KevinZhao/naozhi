@@ -6,17 +6,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // stubHistoryLoader returns a fixed batch so loadResumeHistoryOnSpawn's load
 // path is exercised without touching the filesystem.
 type stubHistoryLoader struct {
-	entries []cli.EventEntry
+	entries []clievent.EventEntry
 	called  chan struct{}
 }
 
-func (l stubHistoryLoader) LoadHistoryChainTail(_ context.Context, _ string, _ []string, _ string, _ int) []cli.EventEntry {
+func (l stubHistoryLoader) LoadHistoryChainTail(_ context.Context, _ string, _ []string, _ string, _ int) []clievent.EventEntry {
 	if l.called != nil {
 		close(l.called)
 	}

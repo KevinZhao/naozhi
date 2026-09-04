@@ -45,6 +45,7 @@ import (
 	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
 )
 
@@ -189,7 +190,7 @@ type kiroMessageMeta struct {
 // underlying contract treats them as end-of-history (history.Source
 // godoc), so an unreadable jsonl falls through to MergedSource's
 // non-fatal logging path rather than aborting pagination.
-func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -262,7 +263,7 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 // offset. The offset stays well under 1000 (kiro Prompt timestamps are
 // unix seconds, so adjacent prompts are ≥1000 ms apart) so chronology
 // across prompts is preserved.
-func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cli.EventEntry {
+func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []clievent.EventEntry {
 	// Read the LAST maxFileBytes, not the first. kiro appends chronologically
 	// to a single rotation-free file, so a long session can exceed the cap;
 	// reading from offset 0 would surface only the oldest prompts and the
@@ -318,7 +319,7 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	scanner := bufio.NewScanner(br)
 	scanner.Buffer(*bufPtr, maxLineBytes)
 
-	out := make([]cli.EventEntry, 0, 16)
+	out := make([]clievent.EventEntry, 0, 16)
 	processed := 0
 	// State across lines for assistant-timestamp salvage. Starts from the
 	// head anchor so assistants that precede the first in-window Prompt
@@ -562,7 +563,7 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 // through so an AssistantMessage with no meta.timestamp inherits its
 // owning Prompt's ts plus a monotonic offset. Pass (0, 0) for the
 // stateless legacy semantics — orphan assistants are then dropped.
-func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bool) {
+func decodeLine(line []byte, lastPromptMS, asstOffset int64) (clievent.EventEntry, bool) {
 	var rec kiroRecord
 	if err := json.Unmarshal(line, &rec); err != nil {
 		// Silent skip: this is the partial-final-line case during
@@ -570,7 +571,7 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 		// emit non-JSON-friendly lines. Logging at debug rather than
 		// warn so a single mid-write tail doesn't spam ops dashboards.
 		slog.Debug("kirojsonl: skip malformed line", "err", err)
-		return cli.EventEntry{}, false
+		return clievent.EventEntry{}, false
 	}
 
 	var entryType string
@@ -590,13 +591,13 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 		// rather than emitted as a generic "system" entry. Emitting
 		// would risk surfacing internal kiro events in the chat view;
 		// a follow-up sprint can map specific kinds explicitly.
-		return cli.EventEntry{}, false
+		return clievent.EventEntry{}, false
 	}
 
 	var data kiroMessageData
 	if err := json.Unmarshal(rec.Data, &data); err != nil {
 		slog.Debug("kirojsonl: skip line with bad data payload", "kind", rec.Kind, "err", err)
-		return cli.EventEntry{}, false
+		return clievent.EventEntry{}, false
 	}
 
 	timeMS, ok := extractTimestampMS(data.Meta)
@@ -609,7 +610,7 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 		// rather than forge ts=0, which would corrupt the strict-<
 		// pagination boundary by collapsing many records to epoch.
 		if entryType != "text" || lastPromptMS <= 0 {
-			return cli.EventEntry{}, false
+			return clievent.EventEntry{}, false
 		}
 		timeMS = lastPromptMS + 1 + asstOffset
 	}
@@ -623,7 +624,7 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 	// Prompts (user messages) keep the legacy permissive behaviour:
 	// surface even an empty Summary so pagination time cursors advance.
 	if entryType == "text" && strings.TrimSpace(fullText) == "" {
-		return cli.EventEntry{}, false
+		return clievent.EventEntry{}, false
 	}
 
 	// Truncation caps and the deterministic dedup UUID (#2336) come from the

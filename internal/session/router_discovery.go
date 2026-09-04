@@ -18,7 +18,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -161,7 +161,7 @@ func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
 // prefers the live process's ring buffer and falls back to persistedHistory
 // when the session is dead/suspended. r.mu is released before the read so the
 // inner historyMu acquisition does not nest under r.mu.
-func (r *Router) EventEntriesForKey(key string) []cli.EventEntry {
+func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
 	r.mu.RLock()
 	s := r.ss.sessions[key]
 	r.mu.RUnlock()
@@ -180,7 +180,7 @@ func (r *Router) EventEntriesForKey(key string) []cli.EventEntry {
 //
 // Ownership matches ManagedSession.EventEntriesAppend: the caller must not
 // retain dst across calls; the returned slice shares dst's backing array.
-func (r *Router) EventEntriesForKeyAppend(dst []cli.EventEntry, key string) []cli.EventEntry {
+func (r *Router) EventEntriesForKeyAppend(dst []clievent.EventEntry, key string) []clievent.EventEntry {
 	r.mu.RLock()
 	s := r.ss.sessions[key]
 	r.mu.RUnlock()

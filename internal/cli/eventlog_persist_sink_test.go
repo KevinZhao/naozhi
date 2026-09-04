@@ -4,6 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // captureSink records every invocation so tests can assert what
@@ -11,17 +13,17 @@ import (
 // may be called from any goroutine.
 type captureSink struct {
 	mu        sync.Mutex
-	batches   [][]EventEntry
+	batches   [][]clievent.EventEntry
 	replays   []bool
 	callCount atomic.Int64
 }
 
 func (c *captureSink) asSink() PersistSink {
-	return func(entries []EventEntry, replayPhase bool) {
+	return func(entries []clievent.EventEntry, replayPhase bool) {
 		c.mu.Lock()
 		// Copy the slice so the ring buffer can reuse its backing
 		// array without clobbering our captured history.
-		cp := make([]EventEntry, len(entries))
+		cp := make([]clievent.EventEntry, len(entries))
 		copy(cp, entries)
 		c.batches = append(c.batches, cp)
 		c.replays = append(c.replays, replayPhase)
@@ -30,7 +32,7 @@ func (c *captureSink) asSink() PersistSink {
 	}
 }
 
-func (c *captureSink) lastBatch() ([]EventEntry, bool, bool) {
+func (c *captureSink) lastBatch() ([]clievent.EventEntry, bool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.batches) == 0 {
@@ -49,7 +51,7 @@ func (c *captureSink) batchCount() int {
 // history shows duplicates.
 func TestEventLog_StampUUID_Append(t *testing.T) {
 	l := NewEventLog(16)
-	l.Append(EventEntry{Type: "user", Summary: "hi"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "hi"})
 	got := l.Entries()
 	if len(got) != 1 {
 		t.Fatalf("got %d entries", len(got))
@@ -68,7 +70,7 @@ func TestEventLog_StampUUID_Append(t *testing.T) {
 // events.
 func TestEventLog_StampUUID_AppendBatch(t *testing.T) {
 	l := NewEventLog(16)
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "user", Summary: "a"},
 		{Type: "user", Summary: "b"},
 		{Type: "user", Summary: "c"},
@@ -95,7 +97,7 @@ func TestEventLog_StampUUID_AppendBatch(t *testing.T) {
 // across naozhi restarts.
 func TestEventLog_StampUUID_PreservesCaller(t *testing.T) {
 	l := NewEventLog(16)
-	l.Append(EventEntry{Type: "user", UUID: "aaaabbbbccccdddd0000111122223333"})
+	l.Append(clievent.EventEntry{Type: "user", UUID: "aaaabbbbccccdddd0000111122223333"})
 	got := l.Entries()
 	if got[0].UUID != "aaaabbbbccccdddd0000111122223333" {
 		t.Errorf("UUID overwritten: %q", got[0].UUID)
@@ -108,7 +110,7 @@ func TestEventLog_SinkFires_Append(t *testing.T) {
 	l := NewEventLog(16)
 	c := &captureSink{}
 	l.SetPersistSink(c.asSink())
-	l.Append(EventEntry{Type: "user", Summary: "hi"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "hi"})
 	if c.batchCount() != 1 {
 		t.Errorf("sink called %d times, want 1", c.batchCount())
 	}
@@ -133,7 +135,7 @@ func TestEventLog_SinkFires_AppendBatch(t *testing.T) {
 	l := NewEventLog(16)
 	c := &captureSink{}
 	l.SetPersistSink(c.asSink())
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "user", Summary: "a"},
 		{Type: "user", Summary: "b"},
 		{Type: "user", Summary: "c"},
@@ -166,7 +168,7 @@ func TestEventLog_AppendBatchReplay_NeverPersistsAfterSinkReady(t *testing.T) {
 	l.SetPersistSink(c.asSink())
 	// Replay historical entries — this simulates a late InjectHistory after
 	// the persister already flipped sinkReady=true.
-	l.AppendBatchReplay([]EventEntry{
+	l.AppendBatchReplay([]clievent.EventEntry{
 		{Type: "user", Summary: "old-1"},
 		{Type: "text", Summary: "old-2"},
 	})
@@ -175,7 +177,7 @@ func TestEventLog_AppendBatchReplay_NeverPersistsAfterSinkReady(t *testing.T) {
 		t.Fatalf("replay batch leaked to persist sink: calls=%d batch=%+v replayPhase=%v", c.batchCount(), batch, replay)
 	}
 	// A subsequent live AppendBatch must still persist normally.
-	l.AppendBatch([]EventEntry{{Type: "user", Summary: "live"}})
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "live"}})
 	if c.batchCount() != 1 {
 		t.Fatalf("live batch after replay should persist exactly once, got %d calls", c.batchCount())
 	}
@@ -193,13 +195,13 @@ func TestEventLog_AppendBatchReplay_NeverPersistsAfterSinkReady(t *testing.T) {
 // SetPersistSink-ordering contract's positive path.
 func TestEventLog_ReplayPhase_WithoutSink(t *testing.T) {
 	l := NewEventLog(16)
-	l.AppendBatch([]EventEntry{{Type: "user", Summary: "replay"}})
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "replay"}})
 	// No sink set yet — the batch should be committed to the ring
 	// but nothing should land in any capture.
 	c := &captureSink{}
 	l.SetPersistSink(c.asSink())
 	// A post-Set Append now should NOT see the earlier replay batch.
-	l.Append(EventEntry{Type: "user", Summary: "live"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "live"})
 	if c.batchCount() != 1 {
 		t.Fatalf("sink called %d times, want 1 (only the live append)", c.batchCount())
 	}
@@ -245,7 +247,7 @@ func TestEventLog_ReplayPhase_NilResetsSinkReady(t *testing.T) {
 		t.Errorf("SetPersistSink(real) after nil did not flip sinkReady=true")
 	}
 
-	l.Append(EventEntry{Type: "user", Summary: "post-reinstall"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "post-reinstall"})
 	_, replay, _ := c2.lastBatch()
 	if replay {
 		t.Errorf("post-reinstall live Append marked replayPhase=true")
@@ -322,7 +324,7 @@ func TestEventLog_SetPersistSinkPair_NilBatchResetsSinkReady(t *testing.T) {
 func TestEventLog_SinkNotCalledWhenUnset(t *testing.T) {
 	l := NewEventLog(16)
 	// No SetPersistSink call at all.
-	l.Append(EventEntry{Type: "user", Summary: "alone"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "alone"})
 	// Nothing to assert except that we reach here without panic and
 	// the entry is visible in the ring.
 	got := l.Entries()
@@ -339,16 +341,16 @@ func TestEventLog_SinkReceivesDefensiveCopy(t *testing.T) {
 	c := &captureSink{}
 	l.SetPersistSink(c.asSink())
 
-	l.Append(EventEntry{Type: "user", Summary: "one"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "one"})
 	// Capture the first batch's entry.
 	firstBatch, _, _ := c.lastBatch()
 	firstUUID := firstBatch[0].UUID
 
 	// Now wrap the ring with 3 more appends — last one will overwrite
 	// slot 0 (where "one" lived).
-	l.Append(EventEntry{Type: "user", Summary: "two"})
-	l.Append(EventEntry{Type: "user", Summary: "three"})
-	l.Append(EventEntry{Type: "user", Summary: "four"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "two"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "three"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "four"})
 
 	// The first batch captured earlier must still show "one".
 	if firstBatch[0].Summary != "one" {
@@ -379,8 +381,8 @@ func TestEventLog_ReplayInvokeTotal_PreSinkAttach(t *testing.T) {
 	// still false (which only happens via the
 	// persistSinkPtr.Store-then-sinkReady.Store window inside
 	// SetPersistSink itself, normally too tight to observe in tests).
-	l.Append(EventEntry{Type: "user", Summary: "pre1"})
-	l.AppendBatch([]EventEntry{{Type: "user", Summary: "pre2"}})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "pre1"})
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "pre2"}})
 
 	if got := l.ReplayInvokeTotal(); got != 0 {
 		t.Errorf("counter bumped without an attached sink: %d", got)
@@ -390,8 +392,8 @@ func TestEventLog_ReplayInvokeTotal_PreSinkAttach(t *testing.T) {
 	// count — sinkReady flipped to true atomically with the pointer
 	// Store, so replay=false on every subsequent invocation.
 	l.SetPersistSink(c.asSink())
-	l.Append(EventEntry{Type: "user", Summary: "post1"})
-	l.AppendBatch([]EventEntry{{Type: "user", Summary: "post2"}})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "post1"})
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "post2"}})
 
 	if got := l.ReplayInvokeTotal(); got != 0 {
 		t.Errorf("counter bumped on live-phase batch: %d", got)
@@ -482,7 +484,7 @@ func TestEventLog_SinkConcurrent(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			l.Append(EventEntry{Type: "user", Summary: "x"})
+			l.Append(clievent.EventEntry{Type: "user", Summary: "x"})
 		}
 	}()
 	// Sink swapper.
@@ -514,7 +516,7 @@ func TestEventLog_AppendBatch_RingMatchesSink(t *testing.T) {
 	l := NewEventLog(64)
 	c := &captureSink{}
 	l.SetPersistSink(c.asSink())
-	in := []EventEntry{
+	in := []clievent.EventEntry{
 		{Type: "user", Summary: "a"},                   // Time=0 → triggers default-time path
 		{Type: "text", Summary: "b", Time: 1700000},    // explicit Time preserved
 		{Type: "tool_use", Summary: "c", Tool: "Read"}, // tool field preserved
@@ -564,7 +566,7 @@ func TestEventLog_AppendBatch_RingMatchesSink(t *testing.T) {
 func TestEventLog_AppendBatch_NoSinkFastPath(t *testing.T) {
 	l := NewEventLog(16)
 	// No SetPersistSink call — captureForSink will be false.
-	in := []EventEntry{
+	in := []clievent.EventEntry{
 		{Type: "user", Summary: "x"}, // Time=0 → default-time
 		{Type: "text", Summary: "y", Time: 1700001},
 	}

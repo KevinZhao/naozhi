@@ -3,7 +3,7 @@ package session
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestSnapshotPrevSessionIDs_DefensiveClone asserts the accessor returns a
@@ -64,7 +64,7 @@ func TestReplacePrevSessionIDs_EmptyClears(t *testing.T) {
 func TestSnapshotPersistedHistory_DefensiveCopy(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{
-		persistedHistory: []cli.EventEntry{
+		persistedHistory: []clievent.EventEntry{
 			{Type: "user", Summary: "first"},
 			{Type: "assistant", Summary: "second"},
 		},

@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
 )
 
@@ -148,7 +149,7 @@ type codexEventMsg struct {
 // Errors are informational: the history.Source contract treats them as
 // end-of-history, so an unreadable rollout falls through to MergedSource's
 // non-fatal logging path rather than aborting pagination.
-func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -263,7 +264,7 @@ func (s *Source) findRollout(sid string) (string, error) {
 // types, and unparseable timestamps are individually skipped so a bad line
 // never poisons the rest of the file. Returns entries in arrival order
 // (chronological per codex's append contract).
-func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cli.EventEntry {
+func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []clievent.EventEntry {
 	// Read the LAST maxFileBytes of the file, not the first. codex appends
 	// chronologically with no rotation, so a long agentic session can exceed
 	// the cap; reading from offset 0 would surface only the oldest turns and
@@ -311,7 +312,7 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		scanner.Buffer(*bufPtr, maxLineBytes)
 	}
 
-	out := make([]cli.EventEntry, 0, 16)
+	out := make([]clievent.EventEntry, 0, 16)
 	processed := 0
 	for {
 		for scanner.Scan() {
@@ -378,20 +379,20 @@ func discardRestOfLine(br *bufio.Reader) bool {
 // (EventEntry{}, false) when the line is not a renderable event_msg
 // (user_message / agent_message), is malformed, has no parseable timestamp,
 // or carries empty text.
-func decodeLine(line []byte) (cli.EventEntry, bool) {
+func decodeLine(line []byte) (clievent.EventEntry, bool) {
 	var rec codexRecord
 	if err := json.Unmarshal(line, &rec); err != nil {
 		slog.Debug("codexjsonl: skip malformed line", "err", err)
-		return cli.EventEntry{}, false
+		return clievent.EventEntry{}, false
 	}
 	if rec.Type != "event_msg" || len(rec.Payload) == 0 {
-		return cli.EventEntry{}, false
+		return clievent.EventEntry{}, false
 	}
 
 	var ev codexEventMsg
 	if err := json.Unmarshal(rec.Payload, &ev); err != nil {
 		slog.Debug("codexjsonl: skip line with bad payload", "err", err)
-		return cli.EventEntry{}, false
+		return clievent.EventEntry{}, false
 	}
 
 	var entryType string
@@ -405,16 +406,16 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 		entryType = "text"
 	default:
 		// system / reasoning / token_count / task_* lines are not chat bubbles.
-		return cli.EventEntry{}, false
+		return clievent.EventEntry{}, false
 	}
 
 	if strings.TrimSpace(ev.Message) == "" {
-		return cli.EventEntry{}, false
+		return clievent.EventEntry{}, false
 	}
 
 	timeMS, ok := parseISOms(rec.Timestamp)
 	if !ok {
-		return cli.EventEntry{}, false
+		return clievent.EventEntry{}, false
 	}
 
 	// Truncation caps and the deterministic dedup UUID (#2336) come from the

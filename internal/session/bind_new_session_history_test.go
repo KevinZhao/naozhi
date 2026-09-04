@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestBindNewSessionHistory_NoPersisterSafe pins R242-ARCH-11 (#733): the
@@ -27,7 +27,7 @@ func TestBindNewSessionHistory_NoPersisterSafe(t *testing.T) {
 	// Pre-seed persistedHistory so loadResumeHistoryOnSpawn / InjectHistory
 	// have content to carry; the absence of a prevSessionID chain keeps the
 	// resume walk a no-op while still driving the helper end-to-end.
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{UUID: "aaa", Time: 100, Type: "user", Summary: "hi"},
 	})
 

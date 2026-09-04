@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 )
@@ -34,9 +34,9 @@ func TestCapHistoryBatch(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			in := make([]cli.EventEntry, c.inLen)
+			in := make([]clievent.EventEntry, c.inLen)
 			for i := 0; i < c.inLen; i++ {
-				in[i] = cli.EventEntry{Time: int64(i)}
+				in[i] = clievent.EventEntry{Time: int64(i)}
 			}
 			got := capHistoryBatch(in)
 			if len(got) != c.wantLen {

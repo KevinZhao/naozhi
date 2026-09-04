@@ -46,6 +46,8 @@
 // leave the uuid dedup to the client.
 package cli
 
+import "github.com/naozhi/naozhi/internal/cli/clievent"
+
 // SinceCursor tracks a streaming watermark over EventLog entries with
 // same-millisecond UUID dedup. See the file header for the rationale.
 type SinceCursor struct {
@@ -87,7 +89,7 @@ func (s *SinceCursor) QueryAfter() int64 {
 // delivered. Entries with Time > watermark are always new. The input
 // slice's backing array is reused in place (the write index never overtakes
 // the read index), so no extra allocation occurs on the hot streaming path.
-func (s *SinceCursor) Filter(cand []EventEntry) []EventEntry {
+func (s *SinceCursor) Filter(cand []clievent.EventEntry) []clievent.EventEntry {
 	out := cand[:0]
 	for _, e := range cand {
 		if e.Time == s.watermark && s.containsWM(e.UUID) {
@@ -114,7 +116,7 @@ func (s *SinceCursor) containsWM(uuid string) bool {
 // chronological, so the last one carries the new high-water timestamp. When
 // the watermark moves forward the dedup set is rebuilt for the new trailing
 // millisecond; same-millisecond redeliveries accumulate into it.
-func (s *SinceCursor) Advance(delivered []EventEntry) {
+func (s *SinceCursor) Advance(delivered []clievent.EventEntry) {
 	if len(delivered) == 0 {
 		return
 	}

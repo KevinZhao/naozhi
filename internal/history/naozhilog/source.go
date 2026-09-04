@@ -11,10 +11,10 @@
 //	      → persist.ReadAllIdx + log frame decode
 //	    → claudejsonl.Source.LoadBefore  (fallback)
 //
-// naozhilog stores cli.EventEntry records in their persistence-layer
+// naozhilog stores clievent.EventEntry records in their persistence-layer
 // envelope (schema.Record wrapping EventEntry JSON). The read path
 // reverses the framing, decodes the envelope, and returns
-// cli.EventEntry slices to callers so they can be fed back through
+// clievent.EventEntry slices to callers so they can be fed back through
 // ManagedSession.InjectHistory without further translation.
 //
 // Design constraints (from RFC §3.4):
@@ -41,7 +41,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
 )
@@ -95,7 +95,7 @@ var bufReaderPool = sync.Pool{
 // Called once per session at startup by session.Router to pre-fill
 // persistedHistory, so its performance budget is "20-50ms per
 // session × number of resurrected sessions" — acceptable.
-func (s *Source) LoadLatest(ctx context.Context, limit int) ([]cli.EventEntry, error) {
+func (s *Source) LoadLatest(ctx context.Context, limit int) ([]clievent.EventEntry, error) {
 	if s == nil || s.dir == "" || s.key == "" || limit <= 0 {
 		return nil, nil
 	}
@@ -129,7 +129,7 @@ func (s *Source) LoadLatest(ctx context.Context, limit int) ([]cli.EventEntry, e
 //
 // beforeMS <= 0 is treated as "no upper bound" and falls through to
 // LoadLatest's behavior.
-func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if s == nil || s.dir == "" || s.key == "" || limit <= 0 {
 		return nil, nil
 	}
@@ -148,12 +148,12 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 
 // loadBeforeFullScan is the index-free baseline: decode the whole log,
 // filter to Time < beforeMS, keep the newest `limit`.
-func (s *Source) loadBeforeFullScan(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func (s *Source) loadBeforeFullScan(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	all, err := s.readAllEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
-	filtered := make([]cli.EventEntry, 0, len(all))
+	filtered := make([]clievent.EventEntry, 0, len(all))
 	for _, e := range all {
 		if e.Time < beforeMS {
 			filtered = append(filtered, e)
@@ -188,7 +188,7 @@ func (s *Source) idxPath() string {
 // newest `limit` qualifying records. Decoding forward from that offset
 // and keeping the last `limit` records with Time < beforeMS yields the
 // exact same result as the full scan while touching only the tail window.
-func (s *Source) loadBeforeViaIdx(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, bool, error) {
+func (s *Source) loadBeforeViaIdx(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, bool, error) {
 	idx, err := persist.ReadAllIdx(s.idxPath())
 	if err != nil || len(idx) == 0 {
 		// Missing/unreadable idx → fall back. ReadAllIdx returns an empty
@@ -244,7 +244,7 @@ func (s *Source) loadBeforeViaIdx(ctx context.Context, beforeMS int64, limit int
 		return nil, false, nil
 	}
 
-	filtered := make([]cli.EventEntry, 0, len(entries))
+	filtered := make([]clievent.EventEntry, 0, len(entries))
 	for _, e := range entries {
 		if e.Time < beforeMS {
 			filtered = append(filtered, e)
@@ -266,10 +266,10 @@ func (s *Source) loadBeforeViaIdx(ctx context.Context, beforeMS int64, limit int
 }
 
 // decodeFrom opens the log, seeks to byteOff, and decodes every record
-// from there to EOF into cli.EventEntry values (chronological order).
+// from there to EOF into clievent.EventEntry values (chronological order).
 // byteOff must fall on a record-frame boundary (it always does when it
 // comes from an idx entry's ByteOff).
-func (s *Source) decodeFrom(ctx context.Context, byteOff int64) ([]cli.EventEntry, error) {
+func (s *Source) decodeFrom(ctx context.Context, byteOff int64) ([]clievent.EventEntry, error) {
 	path := persist.LogPath(s.dir, s.key)
 	f, err := os.Open(path)
 	if err != nil {
@@ -287,7 +287,7 @@ func (s *Source) decodeFrom(ctx context.Context, byteOff int64) ([]cli.EventEntr
 		br.Reset(nil) // release the *os.File so the pooled reader pins no fd
 		bufReaderPool.Put(br)
 	}()
-	out := make([]cli.EventEntry, 0, 512)
+	out := make([]clievent.EventEntry, 0, 512)
 	if err := decodeRecords(ctx, br, path, &out); err != nil {
 		return nil, err
 	}
@@ -302,7 +302,7 @@ func (s *Source) decodeFrom(ctx context.Context, byteOff int64) ([]cli.EventEntr
 // (nil, nil) + slog.Warn; the caller falls back to Claude JSONL.
 // We never surface the error to the caller because that would
 // prevent the fallback from running.
-func (s *Source) readAllEntries(ctx context.Context) ([]cli.EventEntry, error) {
+func (s *Source) readAllEntries(ctx context.Context) ([]clievent.EventEntry, error) {
 	path := persist.LogPath(s.dir, s.key)
 	f, err := os.Open(path)
 	if err != nil {
@@ -325,7 +325,7 @@ func (s *Source) readAllEntries(ctx context.Context) ([]cli.EventEntry, error) {
 	// (LoadLatest's limit ≈ 500); over-shooting reads still grow normally.
 	// R20260530-PERF-3.
 	const estEntries = 512
-	out := make([]cli.EventEntry, 0, estEntries)
+	out := make([]clievent.EventEntry, 0, estEntries)
 	if err := decodeRecords(ctx, br, path, &out); err != nil {
 		return nil, err
 	}
@@ -333,7 +333,7 @@ func (s *Source) readAllEntries(ctx context.Context) ([]cli.EventEntry, error) {
 }
 
 // decodeRecords decodes log frames from br (positioned at a frame
-// boundary), appending the decoded cli.EventEntry values to *out in log
+// boundary), appending the decoded clievent.EventEntry values to *out in log
 // (chronological) order. Header / empty / undecodable records are skipped
 // with a warning; an unsupported wire version aborts the whole read and
 // resets *out so the caller falls back to the Claude JSONL source. The
@@ -343,7 +343,7 @@ func (s *Source) readAllEntries(ctx context.Context) ([]cli.EventEntry, error) {
 // Shared by readAllEntries (whole-file) and decodeFrom (idx-seek window)
 // so the framing / skip / UUID-warn contract stays identical across both
 // read paths. R20260530-PERF-1 (#1485).
-func decodeRecords(ctx context.Context, br *bufio.Reader, path string, out *[]cli.EventEntry) error {
+func decodeRecords(ctx context.Context, br *bufio.Reader, path string, out *[]clievent.EventEntry) error {
 	// R112714-PERF-7: check ctx.Err() every 32 records instead of on every
 	// iteration. ctx.Err() acquires a mutex internally; at decode throughput
 	// the per-record cost is measurable on long files.
@@ -387,7 +387,7 @@ func decodeRecords(ctx context.Context, br *bufio.Reader, path string, out *[]cl
 			continue
 		}
 
-		var entry cli.EventEntry
+		var entry clievent.EventEntry
 		if err := json.Unmarshal(rec.Entry, &entry); err != nil {
 			slog.Warn("naozhilog: entry JSON decode failed; skipping",
 				"path", path, "seq", rec.Seq, "err", err)

@@ -14,7 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
@@ -283,8 +283,8 @@ func TestWS_SubscribeMissingKey(t *testing.T) {
 func TestWS_SubscribeAndHistory(t *testing.T) {
 	hub, router := newTestHub("")
 	proc := session.NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, Type: "system", Summary: "init"})
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, Type: "text", Summary: "hello"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "system", Summary: "init"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, Type: "text", Summary: "hello"})
 	router.InjectSession("test:d:u:general", proc)
 
 	url, cleanup := startWSServer(t, hub)
@@ -323,9 +323,9 @@ func TestWS_SubscribeAndHistory(t *testing.T) {
 func TestWS_SubscribeWithAfter(t *testing.T) {
 	hub, router := newTestHub("")
 	proc := session.NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, Type: "system", Summary: "init"})
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, Type: "text", Summary: "hello"})
-	proc.EventLog.Append(cli.EventEntry{Time: 3000, Type: "result", Summary: "done"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "system", Summary: "init"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, Type: "text", Summary: "hello"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 3000, Type: "result", Summary: "done"})
 	router.InjectSession("test:d:u:general", proc)
 
 	url, cleanup := startWSServer(t, hub)
@@ -359,7 +359,7 @@ func TestWS_SubscribeWithLimit(t *testing.T) {
 	hub, router := newTestHub("")
 	proc := session.NewTestProcess()
 	for i := 1; i <= 5; i++ {
-		proc.EventLog.Append(cli.EventEntry{Time: int64(i * 1000), Type: "text", Summary: "msg"})
+		proc.EventLog.Append(clievent.EventEntry{Time: int64(i * 1000), Type: "text", Summary: "msg"})
 	}
 	router.InjectSession("test:d:u:general", proc)
 
@@ -399,7 +399,7 @@ func TestWS_SubscribeLimitHasMore(t *testing.T) {
 	hub, router := newTestHub("")
 	proc := session.NewTestProcess()
 	for i := 1; i <= 5; i++ {
-		proc.EventLog.Append(cli.EventEntry{Time: int64(i * 1000), Type: "text", Summary: "msg"})
+		proc.EventLog.Append(clievent.EventEntry{Time: int64(i * 1000), Type: "text", Summary: "msg"})
 	}
 	router.InjectSession("test:d:u:general", proc)
 
@@ -432,7 +432,7 @@ func TestWS_SubscribeLimitHasMore(t *testing.T) {
 func TestWS_SubscribeLimitNoMore(t *testing.T) {
 	hub, router := newTestHub("")
 	proc := session.NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, Type: "text", Summary: "only"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "text", Summary: "only"})
 	router.InjectSession("test:d:u:general", proc)
 
 	url, cleanup := startWSServer(t, hub)
@@ -464,8 +464,8 @@ func TestWS_SubscribeLimitNoMore(t *testing.T) {
 func TestWS_SubscribeAfterOmitsHasMore(t *testing.T) {
 	hub, router := newTestHub("")
 	proc := session.NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, Type: "text"})
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, Type: "text"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "text"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, Type: "text"})
 	router.InjectSession("test:d:u:general", proc)
 
 	url, cleanup := startWSServer(t, hub)
@@ -523,7 +523,7 @@ func TestWS_EventPush(t *testing.T) {
 	wsReadEmptyInitialHistory(t, conn)
 
 	// Now append an event
-	proc.EventLog.Append(cli.EventEntry{Time: time.Now().UnixMilli(), Type: "thinking", Summary: "reasoning"})
+	proc.EventLog.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "thinking", Summary: "reasoning"})
 
 	// Should receive the push (batched as history)
 	resp = wsRead(t, conn)
@@ -557,11 +557,11 @@ func TestWS_EventPushMultiple(t *testing.T) {
 
 	// Append multiple events
 	now := time.Now().UnixMilli()
-	proc.EventLog.Append(cli.EventEntry{Time: now, Type: "thinking", Summary: "step1"})
-	proc.EventLog.Append(cli.EventEntry{Time: now + 1, Type: "tool_use", Summary: "Read", Tool: "Read"})
+	proc.EventLog.Append(clievent.EventEntry{Time: now, Type: "thinking", Summary: "step1"})
+	proc.EventLog.Append(clievent.EventEntry{Time: now + 1, Type: "tool_use", Summary: "Read", Tool: "Read"})
 
 	// Should receive both events (possibly in one or two history batches)
-	var received []cli.EventEntry
+	var received []clievent.EventEntry
 	for len(received) < 2 {
 		resp := wsRead(t, conn)
 		if resp.Type == "history" {
@@ -826,7 +826,7 @@ func TestWS_MultipleClientsReceiveEvents(t *testing.T) {
 	wsReadEmptyInitialHistory(t, conn2)
 
 	// Append event
-	proc.EventLog.Append(cli.EventEntry{Time: time.Now().UnixMilli(), Type: "text", Summary: "shared event"})
+	proc.EventLog.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "text", Summary: "shared event"})
 
 	// Both should receive it
 	var wg sync.WaitGroup
@@ -880,7 +880,7 @@ func TestWS_HubShutdown(t *testing.T) {
 func TestWS_FullFlow(t *testing.T) {
 	hub, router := newTestHub("tok")
 	proc := session.NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, Type: "system", Summary: "init"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "system", Summary: "init"})
 	router.InjectSession("test:d:u:general", proc)
 
 	url, cleanup := startWSServer(t, hub)
@@ -911,7 +911,7 @@ func TestWS_FullFlow(t *testing.T) {
 	}
 
 	// 3. Event push (batched as history)
-	proc.EventLog.Append(cli.EventEntry{Time: time.Now().UnixMilli(), Type: "thinking", Summary: "reasoning..."})
+	proc.EventLog.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "thinking", Summary: "reasoning..."})
 	resp = wsRead(t, conn)
 	if resp.Type != "history" {
 		t.Fatalf("push: type = %q, want history", resp.Type)
@@ -934,7 +934,7 @@ func TestWsServerMsg_JSONRoundtrip(t *testing.T) {
 	msg := node.ServerMsg{
 		Type:  "event",
 		Key:   "test:d:u:general",
-		Event: &cli.EventEntry{Time: 1000, Type: "text", Summary: "hello", Detail: "hello world", Tool: ""},
+		Event: &clievent.EventEntry{Time: 1000, Type: "text", Summary: "hello", Detail: "hello world", Tool: ""},
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {

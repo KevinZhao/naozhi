@@ -3,7 +3,7 @@ package session
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestSnapshot_MessageCount_ProcNilFromPersistedHistory pins #1644: a session
@@ -13,7 +13,7 @@ import (
 // skips the session forever.
 func TestSnapshot_MessageCount_ProcNilFromPersistedHistory(t *testing.T) {
 	s := &ManagedSession{key: "dashboard:direct:user:general"}
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 1, Type: "user", Summary: "q1"},
 		{Time: 2, Type: "text", Summary: "a1"},
 		{Time: 3, Type: "user", Summary: "q2"},
@@ -36,7 +36,7 @@ func TestSnapshot_MessageCount_ProcNilFromPersistedHistory(t *testing.T) {
 // should stay at 0 so the min-turn gate still suppresses it).
 func TestSnapshot_MessageCount_ProcNilNoUserEntries(t *testing.T) {
 	s := &ManagedSession{key: "dashboard:direct:user:general"}
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 1, Type: "init", Summary: "boot"},
 		{Time: 2, Type: "text", Summary: "a"},
 	})
@@ -50,11 +50,11 @@ func TestSnapshot_MessageCount_ProcNilNoUserEntries(t *testing.T) {
 // incremental InjectHistory appends.
 func TestRecountPersistedUserTurns_AfterAppend(t *testing.T) {
 	s := &ManagedSession{key: "k"}
-	s.InjectHistory([]cli.EventEntry{{Time: 1, Type: "user"}})
+	s.InjectHistory([]clievent.EventEntry{{Time: 1, Type: "user"}})
 	if got := s.persistedUserTurns.Load(); got != 1 {
 		t.Fatalf("after first append = %d, want 1", got)
 	}
-	s.InjectHistory([]cli.EventEntry{{Time: 2, Type: "user"}, {Time: 3, Type: "user"}})
+	s.InjectHistory([]clievent.EventEntry{{Time: 2, Type: "user"}, {Time: 3, Type: "user"}})
 	if got := s.persistedUserTurns.Load(); got != 3 {
 		t.Fatalf("after second append = %d, want 3", got)
 	}
@@ -68,7 +68,7 @@ func TestRecountPersistedUserTurns_AfterAppend(t *testing.T) {
 // (struct construction + historyMu-protected recount).
 func TestInstallFreshSessionLocked_RecountsPersistedUserTurns(t *testing.T) {
 	t.Parallel()
-	oldHistory := []cli.EventEntry{
+	oldHistory := []clievent.EventEntry{
 		{Time: 1, Type: "user", Summary: "q1"},
 		{Time: 2, Type: "text", Summary: "a1"},
 		{Time: 3, Type: "user", Summary: "q2"},
@@ -108,7 +108,7 @@ func TestRenameSession_RecountsPersistedUserTurns(t *testing.T) {
 	s := &ManagedSession{key: oldKey}
 	// Inject history directly; InjectHistory will set persistedUserTurns on s,
 	// but the rename must preserve/recount on the fresh struct.
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 1, Type: "user", Summary: "q1"},
 		{Time: 2, Type: "text", Summary: "a1"},
 		{Time: 3, Type: "user", Summary: "q2"},

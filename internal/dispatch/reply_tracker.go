@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
@@ -234,7 +235,7 @@ func (t *replyTracker) todoLoop() {
 // user staring at an empty status line. The card is essentially a UI
 // notification with its own 15s budget; it should outlive the originating
 // turn so the user actually sees the question.
-func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
+func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 	if aq == nil || len(aq.Items) == 0 {
 		return
 	}
@@ -291,7 +292,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 // sendAskQuestionFallback posts a plain-text message listing the questions +
 // options so a user on a platform without native card support can still reply
 // free-form (their next message becomes the answer).
-func (t *replyTracker) sendAskQuestionFallback(ctx context.Context, aq *cli.AskQuestion) {
+func (t *replyTracker) sendAskQuestionFallback(ctx context.Context, aq *clievent.AskQuestion) {
 	var b strings.Builder
 	b.WriteString("Claude 想请你确认：\n")
 	for qi, q := range aq.Items {

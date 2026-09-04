@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestEventLog_Notify_DoesNotHoldSubMuDuringSend asserts that subMu is NOT
@@ -47,7 +49,7 @@ func TestEventLog_Notify_DoesNotHoldSubMuDuringSend(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				l.Append(EventEntry{Type: "user", Summary: "x"})
+				l.Append(clievent.EventEntry{Type: "user", Summary: "x"})
 			}
 		}
 	}()
@@ -102,7 +104,7 @@ func TestEventLog_Cancel_ClosesChannelExactlyOnce(t *testing.T) {
 	}
 
 	// B is still live: an Append must still wake it.
-	l.Append(EventEntry{Type: "user", Summary: "wake-b"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "wake-b"})
 	select {
 	case _, ok := <-chB:
 		if !ok {

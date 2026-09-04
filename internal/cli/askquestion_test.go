@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // askUserQuestionLine is a captured fixture from the live validation harness
@@ -163,15 +165,15 @@ func TestEventEntriesFromEventAt_AskQuestionEntry(t *testing.T) {
 // the WS path (the dashboard receives EventEntry as JSON).
 func TestEventEntry_AskQuestion_JSONRoundTrip(t *testing.T) {
 	t.Parallel()
-	e := EventEntry{
+	e := clievent.EventEntry{
 		Time: 42,
 		Type: "ask_question",
 		Tool: "AskUserQuestion",
-		AskQuestion: &AskQuestion{
+		AskQuestion: &clievent.AskQuestion{
 			ToolUseID: "toolu_abc",
-			Items: []AskQuestionItem{{
+			Items: []clievent.AskQuestionItem{{
 				Question: "q?", Header: "H",
-				Options: []AskQuestionOpt{{Label: "A"}, {Label: "B"}},
+				Options: []clievent.AskQuestionOpt{{Label: "A"}, {Label: "B"}},
 			}},
 		},
 	}
@@ -179,7 +181,7 @@ func TestEventEntry_AskQuestion_JSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal err=%v", err)
 	}
-	var got EventEntry
+	var got clievent.EventEntry
 	if err := json.Unmarshal(buf, &got); err != nil {
 		t.Fatalf("Unmarshal err=%v", err)
 	}

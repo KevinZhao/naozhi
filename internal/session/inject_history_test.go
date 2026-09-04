@@ -3,7 +3,7 @@ package session
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestInjectHistory_UpdatesLastPromptAndActivity locks the semantic contract
@@ -14,7 +14,7 @@ func TestInjectHistory_UpdatesLastPromptAndActivity(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
 
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Type: "user", Summary: "first question"},
 		{Type: "tool_use", Summary: "Read file.go"},
 		{Type: "thinking", Summary: "considering"}, // older activity does not override tool_use when scanned end-to-start
@@ -40,7 +40,7 @@ func TestInjectHistory_DoesNotOverwriteNonEmpty(t *testing.T) {
 	storeAtomicString(&s.lastPrompt, "set by send")
 	storeAtomicString(&s.lastActivity, "live tool")
 
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Type: "user", Summary: "historical prompt"},
 		{Type: "tool_use", Summary: "historical tool"},
 	})
@@ -59,7 +59,7 @@ func TestInjectHistory_DoesNotOverwriteNonEmpty(t *testing.T) {
 func TestInjectHistory_PersistsEntries(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 1000, Type: "user", Summary: "q1"},
 		{Time: 2000, Type: "user", Summary: "q2"},
 	})
@@ -80,9 +80,9 @@ func TestInjectHistory_PersistsEntries(t *testing.T) {
 func TestInjectHistory_TrimsToMaxPersisted(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
-	oversized := make([]cli.EventEntry, maxPersistedHistory+50)
+	oversized := make([]clievent.EventEntry, maxPersistedHistory+50)
 	for i := range oversized {
-		oversized[i] = cli.EventEntry{Time: int64(i), Type: "user", Summary: "x"}
+		oversized[i] = clievent.EventEntry{Time: int64(i), Type: "user", Summary: "x"}
 	}
 	s.InjectHistory(oversized)
 

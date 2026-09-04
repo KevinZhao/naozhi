@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/testhelper"
@@ -62,10 +62,10 @@ func TestEventLogIntegration_DirectSinkWorks(t *testing.T) {
 	sink := newEventLogSink(sinkBuilder, nil, "")
 
 	// Replay path: sinkReady=true as we pass replayPhase=true.
-	sink([]cli.EventEntry{{UUID: "aa", Time: 100, Type: "user", Summary: "replay"}}, true)
+	sink([]clievent.EventEntry{{UUID: "aa", Time: 100, Type: "user", Summary: "replay"}}, true)
 
 	// Live path.
-	sink([]cli.EventEntry{{UUID: "bb", Time: 200, Type: "user", Summary: "live"}}, false)
+	sink([]clievent.EventEntry{{UUID: "bb", Time: 200, Type: "user", Summary: "live"}}, false)
 
 	// Wait for the persister to drain + fsync.
 	testhelper.Eventually(t, func() bool {
@@ -102,7 +102,7 @@ func TestEventLogIntegration_RouterDropKeyRemovesFiles(t *testing.T) {
 	// Direct sink so we don't need a full cli.Process — the Router's
 	// Remove path exercises DropKey independently of spawnSession.
 	sink := newEventLogSink(r.eventLogPersister.SinkFor(key), nil, "")
-	sink([]cli.EventEntry{{UUID: "aa", Time: 1, Type: "user"}}, false)
+	sink([]clievent.EventEntry{{UUID: "aa", Time: 1, Type: "user"}}, false)
 
 	// Flush so the file definitely exists on disk before we remove.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -146,7 +146,7 @@ func TestEventLogIntegration_RestartLoadsLatest(t *testing.T) {
 	})
 	key := "dashboard:direct:alice:general"
 	sink := newEventLogSink(r1.eventLogPersister.SinkFor(key), nil, "")
-	sink([]cli.EventEntry{
+	sink([]clievent.EventEntry{
 		{UUID: "aaa", Time: 100, Type: "user", Summary: "hi", Images: []string{"data:image/jpeg;base64,XYZ="}},
 		{UUID: "bbb", Time: 200, Type: "text", Summary: "hello"},
 		{UUID: "ccc", Time: 300, Type: "user", Summary: "again"},
@@ -199,7 +199,7 @@ func TestEventLogIntegration_ReplayLeakObservable(t *testing.T) {
 			t.Errorf("DevMode replay should not panic post-R242-GO-11, got: %v", rec)
 		}
 	}()
-	sink([]cli.EventEntry{{UUID: "aa", Time: 1, Type: "user"}}, true)
+	sink([]clievent.EventEntry{{UUID: "aa", Time: 1, Type: "user"}}, true)
 
 	if got := r.eventLogPersister.Stats().ReplayLeak; got == 0 {
 		t.Errorf("Stats().ReplayLeak=%d want >0", got)

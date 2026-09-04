@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // fakeHistorySource drives the disk-tier fallback without touching the
@@ -13,11 +13,11 @@ import (
 // consulted.
 type fakeHistorySource struct {
 	calls   int
-	entries []cli.EventEntry
+	entries []clievent.EventEntry
 	err     error
 }
 
-func (f *fakeHistorySource) LoadBefore(_ context.Context, _ int64, _ int) ([]cli.EventEntry, error) {
+func (f *fakeHistorySource) LoadBefore(_ context.Context, _ int64, _ int) ([]clievent.EventEntry, error) {
 	f.calls++
 	if f.err != nil {
 		return nil, f.err
@@ -30,7 +30,7 @@ func TestEventEntriesSince_ReturnsSorted(t *testing.T) {
 	s := &ManagedSession{key: "k"}
 	// Interleaved timestamps — mimics the real persistedHistory state after
 	// multiple InjectHistory calls across a session chain.
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 300, Summary: "c"},
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
@@ -54,7 +54,7 @@ func TestEventEntriesSince_ReturnsSorted(t *testing.T) {
 func TestEventEntriesBefore_ReturnsSorted(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 300, Summary: "c"},
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
@@ -82,7 +82,7 @@ func TestEventEntriesBeforeCtx_FallsBackToSourceWhenMemoryEmpty(t *testing.T) {
 	// persistedHistory is empty → memory tier yields nothing → Source must
 	// be consulted.
 	fake := &fakeHistorySource{
-		entries: []cli.EventEntry{
+		entries: []clievent.EventEntry{
 			{Time: 10, Summary: "old-1"},
 			{Time: 20, Summary: "old-2"},
 		},
@@ -104,11 +104,11 @@ func TestEventEntriesBeforeCtx_FallsBackToSourceWhenMemoryEmpty(t *testing.T) {
 func TestEventEntriesBeforeCtx_SkipsSourceWhenMemoryHit(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 50, Summary: "mem-a"},
 	}
 	fake := &fakeHistorySource{
-		entries: []cli.EventEntry{{Time: 10, Summary: "disk"}},
+		entries: []clievent.EventEntry{{Time: 10, Summary: "disk"}},
 	}
 	s.SetHistorySource(fake)
 
@@ -152,7 +152,7 @@ func TestEventEntriesBeforeCtx_SourceErrorTreatedAsEnd(t *testing.T) {
 func TestEventEntriesBeforeCtx_LimitZeroShortCircuits(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	fake := &fakeHistorySource{entries: []cli.EventEntry{{Time: 1}}}
+	fake := &fakeHistorySource{entries: []clievent.EventEntry{{Time: 1}}}
 	s.SetHistorySource(fake)
 
 	got := s.EventEntriesBeforeCtx(context.Background(), 100, 0)
@@ -210,7 +210,7 @@ func TestSnapshotChainIDs_AllEmpty(t *testing.T) {
 func TestEventEntriesSince_MonotonicInjectKeepsSortedFlag(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -219,7 +219,7 @@ func TestEventEntriesSince_MonotonicInjectKeepsSortedFlag(t *testing.T) {
 		t.Fatalf("monotonic InjectHistory should set persistedHistorySorted=true")
 	}
 	// Second monotonic batch (continuing the tail) keeps the flag.
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 400, Summary: "d"},
 		{Time: 500, Summary: "e"},
 	})
@@ -247,7 +247,7 @@ func TestEventEntriesSince_MonotonicInjectKeepsSortedFlag(t *testing.T) {
 func TestEventEntriesSince_OutOfOrderInjectSortsEagerly(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 300, Summary: "c"},
 		{Time: 100, Summary: "a"}, // breaks order vs the previous entry
 		{Time: 200, Summary: "b"},
@@ -277,7 +277,7 @@ func TestEventEntriesSince_OutOfOrderInjectSortsEagerly(t *testing.T) {
 func TestEventEntriesSinceDeadSessionShortCircuit(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -315,7 +315,7 @@ func TestEventEntriesSinceDeadSessionShortCircuit(t *testing.T) {
 func TestEventEntriesSinceAppend_EquivalentToSince(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -340,13 +340,13 @@ func TestEventEntriesSinceAppend_EquivalentToSince(t *testing.T) {
 func TestEventEntriesSinceAppend_ReusesBuffer(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 	}
 	s.persistedHistorySorted = true
 
-	pool := make([]cli.EventEntry, 0, 8)
+	pool := make([]clievent.EventEntry, 0, 8)
 	got := s.EventEntriesSinceAppend(pool, 0)
 	if len(got) != 2 {
 		t.Fatalf("len = %d want 2", len(got))
@@ -376,7 +376,7 @@ func TestEventEntriesSinceAppend_LiveProcessNilDstNoExtraCopy(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	proc := NewTestProcess()
-	proc.InjectHistory([]cli.EventEntry{
+	proc.InjectHistory([]clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -404,13 +404,13 @@ func TestEventEntriesSinceAppend_LiveProcessAppendsToNonEmptyDst(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	proc := NewTestProcess()
-	proc.InjectHistory([]cli.EventEntry{
+	proc.InjectHistory([]clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 	})
 	s.storeProcess(proc)
 
-	dst := []cli.EventEntry{{Time: 1, Summary: "prefix"}}
+	dst := []clievent.EventEntry{{Time: 1, Summary: "prefix"}}
 	got := s.EventEntriesSinceAppend(dst, 0)
 	if len(got) != 3 {
 		t.Fatalf("len = %d want 3 (prefix + 2 entries)", len(got))
@@ -427,7 +427,7 @@ func TestEventEntriesSinceAppend_LiveProcessAppendsToNonEmptyDst(t *testing.T) {
 // R20260607-PERF-002 (#1922): on the live-process path a NON-empty dst that
 // still has spare capacity must have the matched entries appended into that
 // spare capacity (reusing the backing array) rather than triggering a fresh
-// []cli.EventEntry allocation inside EventLog. Before the fix the non-empty
+// []clievent.EventEntry allocation inside EventLog. Before the fix the non-empty
 // branch called proc.EventEntriesSince (fresh alloc) + append, so the
 // resubscribe catch-up path silently lost the #1740 reuse win whenever dst
 // carried residual entries.
@@ -435,7 +435,7 @@ func TestEventEntriesSinceAppend_LiveProcessNonEmptyDstReusesBuffer(t *testing.T
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	proc := NewTestProcess()
-	proc.InjectHistory([]cli.EventEntry{
+	proc.InjectHistory([]clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -444,8 +444,8 @@ func TestEventEntriesSinceAppend_LiveProcessNonEmptyDstReusesBuffer(t *testing.T
 
 	// Buffer with a residual prefix plus ample spare capacity. The two matched
 	// entries (Time > 150) must land in the spare slots, sharing dst's array.
-	buf := make([]cli.EventEntry, 0, 8)
-	buf = append(buf, cli.EventEntry{Time: 1, Summary: "prefix"})
+	buf := make([]clievent.EventEntry, 0, 8)
+	buf = append(buf, clievent.EventEntry{Time: 1, Summary: "prefix"})
 	got := s.EventEntriesSinceAppend(buf, 150)
 	if len(got) != 3 {
 		t.Fatalf("len=%d want 3 (prefix + b + c)", len(got))
@@ -469,15 +469,15 @@ func TestEventEntriesSinceAppend_LiveProcessNonEmptyDstNoSpareGrows(t *testing.T
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	proc := NewTestProcess()
-	proc.InjectHistory([]cli.EventEntry{
+	proc.InjectHistory([]clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 	})
 	s.storeProcess(proc)
 
 	// len == cap so there is no spare capacity past the prefix.
-	dst := make([]cli.EventEntry, 0, 1)
-	dst = append(dst, cli.EventEntry{Time: 1, Summary: "prefix"})
+	dst := make([]clievent.EventEntry, 0, 1)
+	dst = append(dst, clievent.EventEntry{Time: 1, Summary: "prefix"})
 	got := s.EventEntriesSinceAppend(dst, 0)
 	if len(got) != 3 {
 		t.Fatalf("len=%d want 3 (prefix + a + b)", len(got))
@@ -497,7 +497,7 @@ func TestEventEntriesSinceAppend_LiveProcessReusesBuffer(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	proc := NewTestProcess()
-	proc.InjectHistory([]cli.EventEntry{
+	proc.InjectHistory([]clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -506,7 +506,7 @@ func TestEventEntriesSinceAppend_LiveProcessReusesBuffer(t *testing.T) {
 
 	// Pre-grow a buffer, then poll with buf[:0]. The returned slice must share
 	// the same backing array (no allocation) AND carry the correct entries.
-	buf := make([]cli.EventEntry, 0, 8)
+	buf := make([]clievent.EventEntry, 0, 8)
 	got := s.EventEntriesSinceAppend(buf[:0], 150)
 	if len(got) != 2 {
 		t.Fatalf("len=%d want 2 (entries after Time=150)", len(got))
@@ -526,7 +526,7 @@ func TestEventEntriesSinceAppend_LiveProcessReusesBuffer(t *testing.T) {
 func TestEventEntriesBefore_SortedFlagSkipsSort(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -558,7 +558,7 @@ func TestEventEntriesBefore_UnsortedFlagFallsBackToSort(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	// Out-of-order insertion order.
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 300, Summary: "c"},
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
@@ -594,7 +594,7 @@ func TestEventEntriesBefore_SortedEmptyReturnsNil(t *testing.T) {
 func TestEventEntriesAppend_EquivalentToEventEntries(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -619,12 +619,12 @@ func TestEventEntriesAppend_EquivalentToEventEntries(t *testing.T) {
 func TestEventEntriesAppend_ReusesBuffer(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 	}
 
-	pool := make([]cli.EventEntry, 0, 8)
+	pool := make([]clievent.EventEntry, 0, 8)
 	got := s.EventEntriesAppend(pool)
 	if len(got) != 2 {
 		t.Fatalf("len = %d want 2", len(got))
@@ -635,7 +635,7 @@ func TestEventEntriesAppend_ReusesBuffer(t *testing.T) {
 	// Second session reusing the same backing array (after dst[:0]) must not
 	// see the first session's entries leak through.
 	s2 := &ManagedSession{key: "k2"}
-	s2.persistedHistory = []cli.EventEntry{{Time: 400, Summary: "z"}}
+	s2.persistedHistory = []clievent.EventEntry{{Time: 400, Summary: "z"}}
 	got2 := s2.EventEntriesAppend(got[:0])
 	if len(got2) != 1 || got2[0].Summary != "z" {
 		t.Fatalf("reuse leaked prior entries: got %+v", got2)
@@ -657,9 +657,9 @@ func TestEventEntriesAppend_EmptyHistoryNilDst(t *testing.T) {
 func TestEventEntriesAppend_PreservesPrefix(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{{Time: 200, Summary: "b"}}
+	s.persistedHistory = []clievent.EventEntry{{Time: 200, Summary: "b"}}
 
-	dst := []cli.EventEntry{{Time: 1, Summary: "prefix"}}
+	dst := []clievent.EventEntry{{Time: 1, Summary: "prefix"}}
 	got := s.EventEntriesAppend(dst)
 	if len(got) != 2 || got[0].Summary != "prefix" || got[1].Summary != "b" {
 		t.Fatalf("prefix not preserved: got %+v", got)
@@ -672,13 +672,13 @@ func TestEventEntriesAppend_LiveProcessPreservesPrefix(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	proc := NewTestProcess()
-	proc.InjectHistory([]cli.EventEntry{
+	proc.InjectHistory([]clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 	})
 	s.storeProcess(proc)
 
-	dst := []cli.EventEntry{{Time: 1, Summary: "prefix"}}
+	dst := []clievent.EventEntry{{Time: 1, Summary: "prefix"}}
 	got := s.EventEntriesAppend(dst)
 	want := proc.EventEntries()
 	if len(got) != len(want)+1 {
@@ -695,13 +695,13 @@ func TestEventEntriesForKeyAppend(t *testing.T) {
 	t.Parallel()
 	r := NewRouter(RouterConfig{})
 	s := &ManagedSession{key: "alpha"}
-	s.persistedHistory = []cli.EventEntry{{Time: 100, Summary: "a"}}
+	s.persistedHistory = []clievent.EventEntry{{Time: 100, Summary: "a"}}
 	r.mu.Lock()
 	r.ss.sessions["alpha"] = s
 	r.mu.Unlock()
 
 	// Unknown key: dst unchanged.
-	dst := []cli.EventEntry{{Time: 1, Summary: "keep"}}
+	dst := []clievent.EventEntry{{Time: 1, Summary: "keep"}}
 	if got := r.EventEntriesForKeyAppend(dst, "missing"); len(got) != 1 || got[0].Summary != "keep" {
 		t.Fatalf("unknown key mutated dst: got %+v", got)
 	}
@@ -720,8 +720,8 @@ func TestEventEntriesForKeyAppend(t *testing.T) {
 // old O(n) loop).  R20260613-PERF-1.
 
 // helper: linearSince returns entries with Time > afterMS by brute-force scan.
-func linearSince(history []cli.EventEntry, afterMS int64) []cli.EventEntry {
-	var out []cli.EventEntry
+func linearSince(history []clievent.EventEntry, afterMS int64) []clievent.EventEntry {
+	var out []clievent.EventEntry
 	for _, e := range history {
 		if e.Time > afterMS {
 			out = append(out, e)
@@ -730,7 +730,7 @@ func linearSince(history []cli.EventEntry, afterMS int64) []cli.EventEntry {
 	return out
 }
 
-func assertEntriesEqual(t *testing.T, label string, got, want []cli.EventEntry) {
+func assertEntriesEqual(t *testing.T, label string, got, want []clievent.EventEntry) {
 	t.Helper()
 	if len(got) != len(want) {
 		t.Errorf("%s: len got=%d want=%d", label, len(got), len(want))
@@ -757,7 +757,7 @@ func TestEventEntriesSinceAppend_BinarySearch_Empty(t *testing.T) {
 func TestEventEntriesSinceAppend_BinarySearch_AllBelowOrEqual(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -778,7 +778,7 @@ func TestEventEntriesSinceAppend_BinarySearch_AllBelowOrEqual(t *testing.T) {
 func TestEventEntriesSinceAppend_BinarySearch_AllAbove(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -795,7 +795,7 @@ func TestEventEntriesSinceAppend_BinarySearch_BoundaryExact(t *testing.T) {
 	// Strict > semantics: afterMS exactly equal to an entry's Time must NOT
 	// include that entry.
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 100, Summary: "a"},
 		{Time: 200, Summary: "b"},
 		{Time: 300, Summary: "c"},
@@ -815,7 +815,7 @@ func TestEventEntriesSinceAppend_BinarySearch_DuplicateTimes(t *testing.T) {
 	// correct: all entries with Time == afterMS are excluded; all with Time
 	// strictly greater are included.
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 100, Summary: "a1"},
 		{Time: 100, Summary: "a2"},
 		{Time: 200, Summary: "b1"},
@@ -840,7 +840,7 @@ func TestEventEntriesSinceAppend_BinarySearch_MatchesLinear(t *testing.T) {
 	// Comprehensive cross-check: binary search result equals the old linear
 	// scan for every possible afterMS boundary in the history.
 	s := &ManagedSession{key: "k"}
-	s.persistedHistory = []cli.EventEntry{
+	s.persistedHistory = []clievent.EventEntry{
 		{Time: 10, Summary: "a"},
 		{Time: 20, Summary: "b"},
 		{Time: 30, Summary: "c"},

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/history/kirojsonl"
 	"github.com/naozhi/naozhi/internal/history/merged"
@@ -21,7 +22,7 @@ type instrumentedSource struct {
 	calls atomic.Int64
 }
 
-func (s *instrumentedSource) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func (s *instrumentedSource) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	s.calls.Add(1)
 	return nil, nil
 }

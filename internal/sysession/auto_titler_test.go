@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -29,7 +29,7 @@ import (
 type snapshotFakeRouter struct {
 	*fakeRouter
 	snaps   []session.SessionSnapshot
-	entries map[string][]cli.EventEntry
+	entries map[string][]clievent.EventEntry
 
 	// rejectAuto, when true, makes SetUserLabelWithOrigin return false
 	// for origin="auto" — simulates the race-window guard firing.
@@ -55,7 +55,7 @@ func (s *snapshotFakeRouter) SetUserLabelWithOrigin(key, label, origin string) b
 	return s.fakeRouter.SetUserLabelWithOrigin(key, label, origin)
 }
 
-func (s *snapshotFakeRouter) EventEntriesForKey(key string) []cli.EventEntry {
+func (s *snapshotFakeRouter) EventEntriesForKey(key string) []clievent.EventEntry {
 	if e, ok := s.entries[key]; ok {
 		return e
 	}
@@ -64,7 +64,7 @@ func (s *snapshotFakeRouter) EventEntriesForKey(key string) []cli.EventEntry {
 	// excerpt and the old assertions still pass.
 	for _, snap := range s.snaps {
 		if snap.Key == key && snap.LastPrompt != "" {
-			return []cli.EventEntry{{Type: "user", Summary: snap.LastPrompt}}
+			return []clievent.EventEntry{{Type: "user", Summary: snap.LastPrompt}}
 		}
 	}
 	return nil
@@ -1060,14 +1060,14 @@ func TestAutoTitler_PromptIncludesAllUserTurns(t *testing.T) {
 		// event log via EventEntriesForKey below.
 		LastPrompt: "第三个问题",
 	}
-	history := []cli.EventEntry{
+	history := []clievent.EventEntry{
 		{Time: 100, Type: "user", Summary: "讨论 deploy 流程"},
 		{Time: 110, Type: "text", Summary: "好的"},
 		{Time: 200, Type: "user", Summary: "切到 docker"},
 		{Time: 300, Type: "user", Summary: "第三个问题"},
 	}
 	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap})
-	router.entries = map[string][]cli.EventEntry{key: history}
+	router.entries = map[string][]clievent.EventEntry{key: history}
 
 	captured := make(chan string, 1)
 	runner := &capturingRunner{captured: captured, resp: "部署流程讨论"}
@@ -1102,16 +1102,16 @@ func TestAutoTitler_LongConversationNotTruncated(t *testing.T) {
 	snap := session.SessionSnapshot{
 		Key: key, MessageCount: 200, LastPrompt: "marker-tail",
 	}
-	history := make([]cli.EventEntry, 0, 200)
+	history := make([]clievent.EventEntry, 0, 200)
 	for i := 0; i < 200; i++ {
-		history = append(history, cli.EventEntry{
+		history = append(history, clievent.EventEntry{
 			Time:    int64(i + 1),
 			Type:    "user",
 			Summary: "marker-" + strings.Repeat("x", 32),
 		})
 	}
 	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap})
-	router.entries = map[string][]cli.EventEntry{key: history}
+	router.entries = map[string][]clievent.EventEntry{key: history}
 
 	captured := make(chan string, 1)
 	runner := &capturingRunner{captured: captured, resp: "长对话标题"}

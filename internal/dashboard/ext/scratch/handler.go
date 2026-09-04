@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
@@ -254,7 +255,7 @@ func inheritSourceTuning(base session.AgentOpts, snap session.SessionSnapshot) s
 // the in-memory ring buffer (dead session, ring rotated past) still gets
 // historical context via the disk-tier history.Source instead of returning
 // empty (R229-GO-8).
-func collectScratchContext(ctx context.Context, sess *session.ManagedSession, sourceMessageTime int64, turns int) (before, after []cli.EventEntry) {
+func collectScratchContext(ctx context.Context, sess *session.ManagedSession, sourceMessageTime int64, turns int) (before, after []clievent.EventEntry) {
 	if sess == nil || turns <= 0 {
 		return nil, nil
 	}
@@ -279,7 +280,7 @@ func collectScratchContext(ctx context.Context, sess *session.ManagedSession, so
 		if afterCap > fetch {
 			afterCap = fetch
 		}
-		after = make([]cli.EventEntry, 0, afterCap)
+		after = make([]clievent.EventEntry, 0, afterCap)
 		for _, e := range raw {
 			if e.Time == sourceMessageTime {
 				continue

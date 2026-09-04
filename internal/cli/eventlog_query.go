@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -30,7 +31,7 @@ import (
 // caller-owned backing array via sync.Pool. Entries() is retained as the
 // "give me everything" convenience used by tests and one-shot history dumps;
 // the documented expectation is that production hot paths bound their reads.
-func (l *EventLog) Entries() []EventEntry {
+func (l *EventLog) Entries() []clievent.EventEntry {
 	return l.LastNAppend(nil, 0)
 }
 
@@ -39,7 +40,7 @@ func (l *EventLog) Entries() []EventEntry {
 //
 // Uses defer RUnlock; see Entries for rationale. Backing array pooled —
 // see Entries godoc for the lifetime contract.
-func (l *EventLog) LastN(n int) []EventEntry {
+func (l *EventLog) LastN(n int) []clievent.EventEntry {
 	return l.LastNAppend(nil, n)
 }
 
@@ -59,13 +60,13 @@ func (l *EventLog) LastN(n int) []EventEntry {
 // EventLog never retains a reference. Callers that route the slice
 // onto a channel must NOT recycle it until the consumer signals
 // completion — standard pool-of-slice discipline.
-func (l *EventLog) EntriesAppend(dst []EventEntry) []EventEntry {
+func (l *EventLog) EntriesAppend(dst []clievent.EventEntry) []clievent.EventEntry {
 	return l.LastNAppend(dst, 0)
 }
 
 // LastNAppend is the buffer-reusing variant of LastN. See EntriesAppend
 // for the lifetime contract; pass `n<=0` for "all entries" semantics.
-func (l *EventLog) LastNAppend(dst []EventEntry, n int) []EventEntry {
+func (l *EventLog) LastNAppend(dst []clievent.EventEntry, n int) []clievent.EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	count := l.count
@@ -75,7 +76,7 @@ func (l *EventLog) LastNAppend(dst []EventEntry, n int) []EventEntry {
 	if cap(dst) >= count {
 		dst = dst[:count]
 	} else {
-		dst = make([]EventEntry, count)
+		dst = make([]clievent.EventEntry, count)
 	}
 	start := (l.head - count + l.maxSize) % l.maxSize
 	// Branch-on-wrap: avoid per-step modulo on the hot WS polling path.
@@ -115,7 +116,7 @@ func (l *EventLog) LastNAppend(dst []EventEntry, n int) []EventEntry {
 // The earliest Time in the returned slice is the cursor a caller uses to
 // continue paginating into the disk tier (EventEntriesBeforeCtx) when the ring
 // alone could not satisfy visibleTarget.
-func (l *EventLog) LastNVisible(visibleTarget, maxTotal int) []EventEntry {
+func (l *EventLog) LastNVisible(visibleTarget, maxTotal int) []clievent.EventEntry {
 	return l.LastNVisibleAppend(nil, visibleTarget, maxTotal)
 }
 
@@ -140,7 +141,7 @@ func (l *EventLog) LastNVisible(visibleTarget, maxTotal int) []EventEntry {
 // returns; the EventLog never retains a reference. Passing nil falls back
 // to LastNVisible's allocate-and-return behaviour (and returns nil on an
 // empty ring, preserving the original API contract).
-func (l *EventLog) LastNVisibleAppend(dst []EventEntry, visibleTarget, maxTotal int) []EventEntry {
+func (l *EventLog) LastNVisibleAppend(dst []clievent.EventEntry, visibleTarget, maxTotal int) []clievent.EventEntry {
 	l.mu.RLock()
 	count := l.count
 	if count == 0 {
@@ -160,7 +161,7 @@ func (l *EventLog) LastNVisibleAppend(dst []EventEntry, visibleTarget, maxTotal 
 	// organically otherwise.
 	rev := dst[:0]
 	if cap(rev) < limit {
-		rev = make([]EventEntry, 0, limit)
+		rev = make([]clievent.EventEntry, 0, limit)
 	}
 	visible := 0
 	idx := l.head - 1
@@ -220,7 +221,7 @@ func (l *EventLog) Count() int {
 // each with their own encoding). Future contributors: do NOT introduce a
 // JSON cache at this layer; extend the hub-side coalescer if a new fan-out
 // site needs the same coalescing.
-func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
+func (l *EventLog) EntriesSince(afterMS int64) []clievent.EventEntry {
 	return l.EntriesSinceAppend(nil, afterMS)
 }
 
@@ -240,7 +241,7 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 // match (preserving the pre-existing API contract). Lifetime: the returned
 // slice is fully owned by the caller after the call returns; the EventLog
 // never retains a reference.
-func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEntry {
+func (l *EventLog) EntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry {
 	l.mu.RLock()
 	if l.count == 0 {
 		l.mu.RUnlock()
@@ -277,7 +278,7 @@ func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEn
 			if initialCap > entriesSinceInitialCap {
 				initialCap = entriesSinceInitialCap
 			}
-			rev = make([]EventEntry, 0, initialCap)
+			rev = make([]clievent.EventEntry, 0, initialCap)
 		}
 		rev = append(rev, l.entries[idx])
 		idx--
@@ -306,7 +307,7 @@ func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEn
 //
 // A beforeMS of 0 is treated as "no upper bound" (equivalent to LastN).
 // A non-positive limit returns nil.
-func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
+func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []clievent.EventEntry {
 	return l.EntriesBeforeAppend(nil, beforeMS, limit)
 }
 
@@ -316,7 +317,7 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 // (#937): wired alongside EntriesSinceAppend so dashboard pagination
 // callers can rotate a single sync.Pool[*[]EventEntry] across both
 // streaming-tail and load-earlier paths.
-func (l *EventLog) EntriesBeforeAppend(dst []EventEntry, beforeMS int64, limit int) []EventEntry {
+func (l *EventLog) EntriesBeforeAppend(dst []clievent.EventEntry, beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 {
 		if dst == nil {
 			return nil
@@ -375,7 +376,7 @@ func (l *EventLog) EntriesBeforeAppend(dst []EventEntry, beforeMS int64, limit i
 			if remaining := i + 1; remaining < initialCap {
 				initialCap = remaining
 			}
-			rev = make([]EventEntry, 0, initialCap)
+			rev = make([]clievent.EventEntry, 0, initialCap)
 			allocated = true
 		}
 		rev = append(rev, l.entries[idx])

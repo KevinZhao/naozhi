@@ -12,7 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -297,21 +297,21 @@ func (c *ReverseConn) FetchDiscovered(ctx context.Context) ([]map[string]any, er
 	return result, json.Unmarshal(raw, &result)
 }
 
-func (c *ReverseConn) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error) {
+func (c *ReverseConn) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]clievent.EventEntry, error) {
 	raw, err := c.rpc(ctx, "fetch_discovered_preview", map[string]string{"session_id": sessionID})
 	if err != nil {
 		return nil, err
 	}
-	var result []cli.EventEntry
+	var result []clievent.EventEntry
 	return result, json.Unmarshal(raw, &result)
 }
 
-func (c *ReverseConn) FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error) {
+func (c *ReverseConn) FetchEvents(ctx context.Context, key string, after int64) ([]clievent.EventEntry, error) {
 	raw, err := c.rpc(ctx, "fetch_events", map[string]any{"key": key, "after": after})
 	if err != nil {
 		return nil, err
 	}
-	var result []cli.EventEntry
+	var result []clievent.EventEntry
 	return result, json.Unmarshal(raw, &result)
 }
 

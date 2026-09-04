@@ -8,6 +8,8 @@ package cli
 import (
 	"sync"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestEventLog_Count_MirrorsAppends(t *testing.T) {
@@ -20,7 +22,7 @@ func TestEventLog_Count_MirrorsAppends(t *testing.T) {
 
 	// Append below capacity: Count tracks N exactly.
 	for i := 1; i <= 5; i++ {
-		l.Append(EventEntry{Time: int64(i), Type: "text"})
+		l.Append(clievent.EventEntry{Time: int64(i), Type: "text"})
 		if got := l.Count(); got != i {
 			t.Fatalf("after %d appends: want %d got %d", i, i, got)
 		}
@@ -29,7 +31,7 @@ func TestEventLog_Count_MirrorsAppends(t *testing.T) {
 	// Append past capacity: Count caps at maxSize (count is monotonic up to
 	// maxSize, never decremented on ring eviction).
 	for i := 6; i <= 12; i++ {
-		l.Append(EventEntry{Time: int64(i), Type: "text"})
+		l.Append(clievent.EventEntry{Time: int64(i), Type: "text"})
 	}
 	if got := l.Count(); got != 8 {
 		t.Fatalf("after overwrite: want 8 got %d", got)
@@ -58,7 +60,7 @@ func TestEventLog_Count_ConcurrentAppendRead(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < appends; i++ {
-			l.Append(EventEntry{Time: int64(i), Type: "text"})
+			l.Append(clievent.EventEntry{Time: int64(i), Type: "text"})
 		}
 	}()
 

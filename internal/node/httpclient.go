@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // HTTPClient is an HTTP client for a remote naozhi instance.
@@ -161,7 +161,7 @@ func (n *HTTPClient) FetchSessions(ctx context.Context) ([]map[string]any, error
 }
 
 // FetchEvents fetches event entries from the remote node via GET /api/sessions/events.
-func (n *HTTPClient) FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error) {
+func (n *HTTPClient) FetchEvents(ctx context.Context, key string, after int64) ([]clievent.EventEntry, error) {
 	path := "/api/sessions/events?key=" + url.QueryEscape(key)
 	if after > 0 {
 		path += "&after=" + strconv.FormatInt(after, 10)
@@ -177,7 +177,7 @@ func (n *HTTPClient) FetchEvents(ctx context.Context, key string, after int64) (
 		return nil, fmt.Errorf("fetch events from %s: status %d", n.ID, resp.StatusCode)
 	}
 
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&entries); err != nil {
 		return nil, fmt.Errorf("decode events from %s: %w", n.ID, err)
 	}
@@ -248,7 +248,7 @@ func (n *HTTPClient) FetchDiscovered(ctx context.Context) ([]map[string]any, err
 }
 
 // FetchDiscoveredPreview fetches conversation history for a discovered session from the remote node.
-func (n *HTTPClient) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error) {
+func (n *HTTPClient) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]clievent.EventEntry, error) {
 	resp, err := n.doRequest(ctx, http.MethodGet, "/api/discovered/preview?session_id="+url.QueryEscape(sessionID), nil)
 	if err != nil {
 		return nil, fmt.Errorf("fetch discovered preview from %s: %w", n.ID, err)
@@ -260,7 +260,7 @@ func (n *HTTPClient) FetchDiscoveredPreview(ctx context.Context, sessionID strin
 		return nil, fmt.Errorf("fetch discovered preview from %s: status %d", n.ID, resp.StatusCode)
 	}
 
-	var result []cli.EventEntry
+	var result []clievent.EventEntry
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode discovered preview from %s: %w", n.ID, err)
 	}

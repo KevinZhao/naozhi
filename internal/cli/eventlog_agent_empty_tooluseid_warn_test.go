@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestApplyEntryStateLocked_EmptyToolUseID_WarnLogged pins R20260527-COR-14
@@ -24,7 +26,7 @@ func TestApplyEntryStateLocked_EmptyToolUseID_WarnLogged(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	l := NewEventLog(0)
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:      "agent",
 		Subagent:  "code-reviewer",
 		Summary:   "review-batch-1",
@@ -55,7 +57,7 @@ func TestApplyEntryStateLocked_NonEmptyToolUseID_NoWarn(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	l := NewEventLog(0)
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:      "agent",
 		Subagent:  "code-reviewer",
 		Summary:   "review-batch-1",

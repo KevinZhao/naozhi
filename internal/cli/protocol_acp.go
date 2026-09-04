@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -1109,7 +1110,7 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 			SubType:   "tool_use",
 			SessionID: update.SessionID,
 			ToolUseID: update.Update.ToolCallID,
-			ToolCall: &ToolCall{
+			ToolCall: &clievent.ToolCall{
 				ID:        update.Update.ToolCallID,
 				Title:     sanitizedTitle,
 				Kind:      sanitizeToolCallLabel(update.Update.Kind),
@@ -1127,7 +1128,7 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 			SubType:   "tool_result",
 			SessionID: update.SessionID,
 			ToolUseID: update.Update.ToolCallID,
-			ToolCall: &ToolCall{
+			ToolCall: &clievent.ToolCall{
 				ID:         update.Update.ToolCallID,
 				Title:      sanitizeToolCallLabel(update.Update.Title),
 				Kind:       sanitizeToolCallLabel(update.Update.Kind),

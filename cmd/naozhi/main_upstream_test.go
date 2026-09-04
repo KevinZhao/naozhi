@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -23,7 +23,7 @@ func TestNewUpstreamPreviewFunc_EmptyOnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preview returned err = %v, want nil (errors are swallowed to []) ", err)
 	}
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	if uerr := json.Unmarshal(raw, &entries); uerr != nil {
 		t.Fatalf("preview payload is not a JSON array: %q (%v)", raw, uerr)
 	}

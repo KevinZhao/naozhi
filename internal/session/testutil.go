@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestProcess is a mock processIface for use in tests outside the session package.
@@ -107,22 +108,22 @@ func (p *TestProcess) SupportsPassthrough() bool { return false }
 // SessionID / State mirror the idiomatic processIface accessor names
 // established by the R219-CR-9 (#665) rename, shipped under ADR-0001
 // PR-2 (#463).
-func (p *TestProcess) SessionID() string                 { return "" }
-func (p *TestProcess) State() cli.ProcessState           { return p.StateVal }
-func (p *TestProcess) DeathReason() string               { return p.DeathReasonVal }
-func (p *TestProcess) TotalCost() float64                { return 0 }
-func (p *TestProcess) EventEntries() []cli.EventEntry    { return p.EventLog.Entries() }
-func (p *TestProcess) EventLastN(n int) []cli.EventEntry { return p.EventLog.LastN(n) }
-func (p *TestProcess) EventLastNVisible(visibleTarget, maxTotal int) []cli.EventEntry {
+func (p *TestProcess) SessionID() string                      { return "" }
+func (p *TestProcess) State() cli.ProcessState                { return p.StateVal }
+func (p *TestProcess) DeathReason() string                    { return p.DeathReasonVal }
+func (p *TestProcess) TotalCost() float64                     { return 0 }
+func (p *TestProcess) EventEntries() []clievent.EventEntry    { return p.EventLog.Entries() }
+func (p *TestProcess) EventLastN(n int) []clievent.EventEntry { return p.EventLog.LastN(n) }
+func (p *TestProcess) EventLastNVisible(visibleTarget, maxTotal int) []clievent.EventEntry {
 	return p.EventLog.LastNVisible(visibleTarget, maxTotal)
 }
-func (p *TestProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
+func (p *TestProcess) EventEntriesSince(afterMS int64) []clievent.EventEntry {
 	return p.EventLog.EntriesSince(afterMS)
 }
-func (p *TestProcess) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry {
+func (p *TestProcess) EventEntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry {
 	return p.EventLog.EntriesSinceAppend(dst, afterMS)
 }
-func (p *TestProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
+func (p *TestProcess) EventEntriesBefore(beforeMS int64, limit int) []clievent.EventEntry {
 	return p.EventLog.EntriesBefore(beforeMS, limit)
 }
 func (p *TestProcess) LastActivitySummary() string                { return p.EventLog.LastActivitySummary() }
@@ -132,7 +133,7 @@ func (p *TestProcess) UserTurnCount() int64                       { return p.Eve
 func (p *TestProcess) ProtocolName() string                       { return "test" }
 func (p *TestProcess) SubscribeEvents() (<-chan struct{}, func()) { return p.EventLog.Subscribe() }
 func (p *TestProcess) PID() int                                   { return 0 }
-func (p *TestProcess) InjectHistory(entries []cli.EventEntry) {
+func (p *TestProcess) InjectHistory(entries []clievent.EventEntry) {
 	for _, e := range entries {
 		p.EventLog.Append(e)
 	}

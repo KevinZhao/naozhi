@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestSanitizeQuote(t *testing.T) {
@@ -277,7 +277,7 @@ func TestScratchPool_AgentIDWithColonSanitized(t *testing.T) {
 // conversational turns, and that only user/text/result survive into the
 // rendered block.
 func TestRenderContextTurns_FiltersNoise(t *testing.T) {
-	before := []cli.EventEntry{
+	before := []clievent.EventEntry{
 		{Type: "user", Detail: "first question"},
 		{Type: "tool_use", Tool: "Read", Summary: "Read file"},
 		{Type: "thinking", Summary: "pondering"},
@@ -309,11 +309,11 @@ func TestRenderContextTurns_FiltersNoise(t *testing.T) {
 // followed by all after entries (oldest→newest). The quote itself is not
 // part of either slice — the caller excludes it.
 func TestRenderContextTurns_OrderBeforeThenAfter(t *testing.T) {
-	before := []cli.EventEntry{
+	before := []clievent.EventEntry{
 		{Type: "user", Detail: "b1"},
 		{Type: "text", Detail: "b2"},
 	}
-	after := []cli.EventEntry{
+	after := []clievent.EventEntry{
 		{Type: "text", Detail: "a1"},
 		{Type: "user", Detail: "a2"},
 	}
@@ -341,12 +341,12 @@ func TestRenderContextTurns_OrderBeforeThenAfter(t *testing.T) {
 // ones retained (tail of `before`, head of `after`).
 func TestRenderContextTurns_BudgetTruncation(t *testing.T) {
 	big := strings.Repeat("x", 1024) // 1 KiB payload per entry
-	before := []cli.EventEntry{
+	before := []clievent.EventEntry{
 		{Type: "user", Detail: "farthest:" + big},
 		{Type: "text", Detail: "middle:" + big},
 		{Type: "user", Detail: "closest-before:" + big},
 	}
-	after := []cli.EventEntry{
+	after := []clievent.EventEntry{
 		{Type: "text", Detail: "closest-after:" + big},
 		{Type: "user", Detail: "distant-after:" + big},
 	}
@@ -384,7 +384,7 @@ func TestRenderContextTurns_EmptyInputs(t *testing.T) {
 // TestRenderContextTurns_ZeroBudget with candidates available must report
 // truncation (context was suppressed) and return an empty block.
 func TestRenderContextTurns_ZeroBudget(t *testing.T) {
-	before := []cli.EventEntry{{Type: "user", Detail: "q"}}
+	before := []clievent.EventEntry{{Type: "user", Detail: "q"}}
 	block, turns, trunc := renderContextTurns(before, nil, 0)
 	if block != "" {
 		t.Errorf("block should be empty when budget=0, got %q", block)
@@ -402,11 +402,11 @@ func TestRenderContextTurns_ZeroBudget(t *testing.T) {
 // the router, and populates the Scratch metadata.
 func TestScratchPool_OpenInjectsContextBlock(t *testing.T) {
 	p := NewScratchPool(nil, 5, time.Minute)
-	before := []cli.EventEntry{
+	before := []clievent.EventEntry{
 		{Type: "user", Detail: "what is the circuit breaker?"},
 		{Type: "text", Detail: "a guard that trips on error."},
 	}
-	after := []cli.EventEntry{
+	after := []clievent.EventEntry{
 		{Type: "user", Detail: "how do I tune it?"},
 	}
 	sc, err := p.Open(OpenOptions{
@@ -473,7 +473,7 @@ func TestScratchPool_OpenContextSharesBudgetWithQuote(t *testing.T) {
 	p := NewScratchPool(nil, 5, time.Minute)
 	hugeQuote := strings.Repeat("y", MaxScratchQuoteBytes) // fills the quote cap
 	big := strings.Repeat("x", 2048)
-	before := []cli.EventEntry{
+	before := []clievent.EventEntry{
 		{Type: "user", Detail: big},
 		{Type: "text", Detail: big},
 	}

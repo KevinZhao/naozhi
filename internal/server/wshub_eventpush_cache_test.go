@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -23,7 +23,7 @@ func TestHistoryMarshalCache_HitOnRepeatFingerprint(t *testing.T) {
 	t.Parallel()
 	cache := newHistoryMarshalCache()
 
-	entries := []cli.EventEntry{
+	entries := []clievent.EventEntry{
 		{Time: 100, Type: "text", Summary: "first"},
 		{Time: 200, Type: "tool_use", Tool: "Read"},
 	}
@@ -86,12 +86,12 @@ func TestHistoryMarshalCache_MissOnFingerprintDrift(t *testing.T) {
 	t.Parallel()
 	cache := newHistoryMarshalCache()
 
-	tail1 := []cli.EventEntry{{Time: 100, Type: "text"}}
-	tail2 := []cli.EventEntry{{Time: 100, Type: "text"}, {Time: 200, Type: "result"}}
+	tail1 := []clievent.EventEntry{{Time: 100, Type: "text"}}
+	tail2 := []clievent.EventEntry{{Time: 100, Type: "text"}, {Time: 200, Type: "result"}}
 	const key = "feishu:p2p:user-bbb"
 
 	var marshalCount int
-	makeMarshal := func(entries []cli.EventEntry) func() ([]byte, error) {
+	makeMarshal := func(entries []clievent.EventEntry) func() ([]byte, error) {
 		return func() ([]byte, error) {
 			marshalCount++
 			return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
@@ -123,7 +123,7 @@ func TestHistoryMarshalCache_PerKeyIsolation(t *testing.T) {
 	t.Parallel()
 	cache := newHistoryMarshalCache()
 
-	entries := []cli.EventEntry{{Time: 1, Type: "text", Summary: "shared-tail"}}
+	entries := []clievent.EventEntry{{Time: 1, Type: "text", Summary: "shared-tail"}}
 
 	a, _, err := cache.getOrMarshal("feishu:p2p:user-A", 0, entries, func() ([]byte, error) {
 		return marshalPooled(node.ServerMsg{Type: "history", Key: "feishu:p2p:user-A", Events: entries})
@@ -149,7 +149,7 @@ func TestHistoryMarshalCache_DropFreesSlot(t *testing.T) {
 	t.Parallel()
 	cache := newHistoryMarshalCache()
 
-	entries := []cli.EventEntry{{Time: 1}}
+	entries := []clievent.EventEntry{{Time: 1}}
 	const key = "k"
 
 	var marshalCount int
@@ -179,7 +179,7 @@ func TestHistoryMarshalCache_ConcurrentFanOut(t *testing.T) {
 	t.Parallel()
 	cache := newHistoryMarshalCache()
 
-	entries := []cli.EventEntry{
+	entries := []clievent.EventEntry{
 		{Time: 1000, Type: "init"},
 		{Time: 2000, Type: "thinking", Summary: "x"},
 		{Time: 3000, Type: "text", Summary: "y"},
@@ -238,7 +238,7 @@ func TestHistoryMarshalCache_EmptyEntriesBypass(t *testing.T) {
 	if _, hit, _ := cache.getOrMarshal("k", 0, nil, marshal); hit {
 		t.Fatal("empty entries must always miss")
 	}
-	if _, hit, _ := cache.getOrMarshal("k", 0, []cli.EventEntry{}, marshal); hit {
+	if _, hit, _ := cache.getOrMarshal("k", 0, []clievent.EventEntry{}, marshal); hit {
 		t.Fatal("empty entries (zero-len slice) must always miss")
 	}
 	if marshalCount != 2 {
@@ -253,7 +253,7 @@ func TestHistoryMarshalCache_EmptyEntriesBypass(t *testing.T) {
 func TestHub_MarshalHistoryFrame_NilCacheFallback(t *testing.T) {
 	t.Parallel()
 	h := &Hub{} // no cache
-	entries := []cli.EventEntry{{Time: 1, Type: "text"}}
+	entries := []clievent.EventEntry{{Time: 1, Type: "text"}}
 	got, err := h.marshalHistoryFrame("k", 0, entries)
 	if err != nil {
 		t.Fatalf("marshalHistoryFrame: %v", err)
@@ -274,7 +274,7 @@ func TestHub_MarshalHistoryFrame_NilCacheFallback(t *testing.T) {
 func TestHub_MarshalHistoryFrame_CoalescesWithCache(t *testing.T) {
 	t.Parallel()
 	h := &Hub{historyMarshalCache: newHistoryMarshalCache()}
-	entries := []cli.EventEntry{{Time: 1}, {Time: 2}}
+	entries := []clievent.EventEntry{{Time: 1}, {Time: 2}}
 	a, err := h.marshalHistoryFrame("kk", 0, entries)
 	if err != nil {
 		t.Fatal(err)

@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -63,7 +63,7 @@ func TestEventPush_SameMillisecondAcrossNotifyWaves(t *testing.T) {
 	proc := session.NewTestProcess()
 	// Seed one history entry so the initial subscribe push exercises the
 	// cursor-seeding path in completeSubscribe too.
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, UUID: "seed", Type: "user", Summary: "hi"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, UUID: "seed", Type: "user", Summary: "hi"})
 	router.InjectSession("test:d:u:general", proc)
 
 	url, cleanup := startWSServer(t, hub)
@@ -87,7 +87,7 @@ func TestEventPush_SameMillisecondAcrossNotifyWaves(t *testing.T) {
 	// after seeing only "thinking" — exactly the interleaving that
 	// dropped the text entry under the old lastTime cursor.
 	const turnEndMS = 5000
-	proc.EventLog.Append(cli.EventEntry{
+	proc.EventLog.Append(clievent.EventEntry{
 		Time: turnEndMS, UUID: "ev-thinking", Type: "thinking", Summary: "..."})
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -97,7 +97,7 @@ func TestEventPush_SameMillisecondAcrossNotifyWaves(t *testing.T) {
 
 	// Cursor watermark is now turnEndMS. Append the visible reply in the
 	// SAME millisecond — a later notify wave.
-	proc.EventLog.Append(cli.EventEntry{
+	proc.EventLog.Append(clievent.EventEntry{
 		Time: turnEndMS, UUID: "ev-text", Type: "text", Summary: "the reply"})
 
 	deadline = time.Now().Add(3 * time.Second)
@@ -135,15 +135,15 @@ func TestEventPush_SameMillisecondNoDuplicates(t *testing.T) {
 	}
 
 	const ms = 7000
-	proc.EventLog.Append(cli.EventEntry{Time: ms, UUID: "a", Type: "text", Summary: "a"})
+	proc.EventLog.Append(clievent.EventEntry{Time: ms, UUID: "a", Type: "text", Summary: "a"})
 	deadline := time.Now().Add(3 * time.Second)
 	if _, ok := readUntilHistoryWith(t, conn, "a", deadline); !ok {
 		t.Fatal("entry a never delivered")
 	}
-	proc.EventLog.Append(cli.EventEntry{Time: ms, UUID: "b", Type: "text", Summary: "b"})
+	proc.EventLog.Append(clievent.EventEntry{Time: ms, UUID: "b", Type: "text", Summary: "b"})
 	// Follow-up wave at a LATER millisecond: c must arrive, and the frames
 	// observed along the way must not contain a second copy of "a".
-	proc.EventLog.Append(cli.EventEntry{Time: ms + 10, UUID: "c", Type: "text", Summary: "c"})
+	proc.EventLog.Append(clievent.EventEntry{Time: ms + 10, UUID: "c", Type: "text", Summary: "c"})
 
 	seen := map[string]int{"a": 1} // a was already delivered once above
 	deadline = time.Now().Add(3 * time.Second)

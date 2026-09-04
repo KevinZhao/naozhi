@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // seedSubscriberCounts populates both the source map and the lock-free
@@ -34,7 +34,7 @@ func TestSingleSubscriberFastPath_BypassesCache(t *testing.T) {
 		historyMarshalCache: newHistoryMarshalCache(),
 	}
 	seedSubscriberCounts(h, map[string]int{"only-tab": 1})
-	entries := []cli.EventEntry{{Time: 1, Type: "user"}}
+	entries := []clievent.EventEntry{{Time: 1, Type: "user"}}
 	if _, err := h.marshalHistoryFrame("only-tab", 0, entries); err != nil {
 		t.Fatalf("marshalHistoryFrame: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestSingleSubscriberFastPath_MultiSubStillUsesCache(t *testing.T) {
 		historyMarshalCache: newHistoryMarshalCache(),
 	}
 	seedSubscriberCounts(h, map[string]int{"two-tabs": 2})
-	entries := []cli.EventEntry{{Time: 1, Type: "user"}}
+	entries := []clievent.EventEntry{{Time: 1, Type: "user"}}
 	if _, err := h.marshalHistoryFrame("two-tabs", 0, entries); err != nil {
 		t.Fatalf("marshalHistoryFrame: %v", err)
 	}

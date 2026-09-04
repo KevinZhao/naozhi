@@ -1,7 +1,7 @@
 // Package file group eventlog*.go is the IN-MEMORY ring-buffer leg of the
 // three "eventlog" packages identified by R237-ARCH-13 (#610). This file
-// (eventlog.go) holds the EventLog struct, constants, the EventEntry alias,
-// and NewEventLog; the rest is split by responsibility per
+// (eventlog.go) holds the EventLog struct, constants, and NewEventLog
+// (EventEntry itself lives in clievent); the rest is split by responsibility per
 // docs/rfc/eventlog-split.md (ARCH-EVENTLOG-SPLIT):
 //   eventlog_append.go    write path (Append / AppendBatch / ring eviction)
 //   eventlog_agents.go    per-turn subagent tracking + task_done callbacks
@@ -80,14 +80,6 @@ const entriesSinceInitialCap = 16
 // S15 (Round 174).
 const imageDataURIPrefix = "data:image/"
 
-// EventEntry is the simplified event record for the dashboard. The struct
-// itself lives in `internal/cli/clievent` (R217-ARCH-3 #626 — diamond
-// import break); the alias here keeps every existing call site
-// (`cli.EventEntry`) compiling. Future leaf consumers (e.g. discovery)
-// should import the leaf pkg directly to avoid pulling in the whole cli
-// surface.
-type EventEntry = clievent.EventEntry
-
 // EventLog is a thread-safe, bounded event log backed by a ring buffer.
 //
 // Position in the data flow (R237-ARCH-13): EventLog is the IN-MEMORY
@@ -100,9 +92,9 @@ type EventEntry = clievent.EventEntry
 // would force callers to wait on fsync.
 type EventLog struct {
 	mu      sync.RWMutex
-	entries []EventEntry // ring buffer, pre-allocated to maxSize
-	head    int          // next write position
-	count   int          // number of valid entries (0..maxSize)
+	entries []clievent.EventEntry // ring buffer, pre-allocated to maxSize
+	head    int                   // next write position
+	count   int                   // number of valid entries (0..maxSize)
 	maxSize int
 
 	// Cached summaries updated atomically on Append for efficient access
@@ -289,5 +281,5 @@ func NewEventLog(maxSize int) *EventLog {
 	if maxSize <= 0 {
 		maxSize = defaultEventLogSize
 	}
-	return &EventLog{maxSize: maxSize, entries: make([]EventEntry, maxSize)}
+	return &EventLog{maxSize: maxSize, entries: make([]clievent.EventEntry, maxSize)}
 }

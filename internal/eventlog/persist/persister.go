@@ -418,7 +418,7 @@ type Persister struct {
 
 // batchJob is the internal queue element. Key is the original
 // (un-hashed) session key. Entries are already schema-marshalled
-// bodies pulled from cli.EventEntry upstream.
+// bodies pulled from clievent.EventEntry upstream.
 //
 // arena (R20260531A-PERF-3, #1524) is an optional pooled buffer that
 // owns the backing bytes for every Entry.JSON in this batch. When the

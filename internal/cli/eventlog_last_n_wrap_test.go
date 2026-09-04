@@ -12,19 +12,21 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // referenceLastN is the original modulo-per-step loop used before the
 // branch-on-wrap optimisation. It exists solely to cross-check the fast
 // path; it is NOT part of production code.
-func referenceLastN(l *EventLog, n int) []EventEntry {
+func referenceLastN(l *EventLog, n int) []clievent.EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	count := l.count
 	if n > 0 && n < count {
 		count = n
 	}
-	dst := make([]EventEntry, count)
+	dst := make([]clievent.EventEntry, count)
 	start := (l.head - count + l.maxSize) % l.maxSize
 	for i := 0; i < count; i++ {
 		dst[i] = l.entries[(start+i)%l.maxSize]
@@ -110,7 +112,7 @@ func TestLastNAppend_BranchOnWrap(t *testing.T) {
 			t.Parallel()
 			l := NewEventLog(c.maxSize)
 			for _, ts := range c.times {
-				l.Append(EventEntry{Time: ts, Type: "text"})
+				l.Append(clievent.EventEntry{Time: ts, Type: "text"})
 			}
 
 			want := referenceLastN(l, c.n)

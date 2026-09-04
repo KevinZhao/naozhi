@@ -14,7 +14,7 @@
 // hot paths (R215/R228/R240-PERF pooling). Nothing imports this package yet;
 // adopting it is staged behind the bench evals the issue requires.
 //
-// The contract is expressed in terms of cli.EventEntry — the canonical
+// The contract is expressed in terms of clievent.EventEntry — the canonical
 // in-flight unit every tier already speaks — and reuses cli.HistorySource
 // for the read side so the two definitions cannot drift (the same
 // drift-prevention rationale as history.Source's alias, R246-ARCH-1 #761).
@@ -24,6 +24,7 @@ package api
 
 import (
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // Appender is the write side of an event store. Append enqueues a single
@@ -32,8 +33,8 @@ import (
 // cli.EventLog.Append contract is "never stall the producer", and any
 // registry-injected backend is held to the same guarantee.
 type Appender interface {
-	Append(e cli.EventEntry)
-	AppendBatch(entries []cli.EventEntry)
+	Append(e clievent.EventEntry)
+	AppendBatch(entries []clievent.EventEntry)
 }
 
 // Reader is the historical read side. It is exactly cli.HistorySource

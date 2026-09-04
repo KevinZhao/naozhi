@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // Fixture pieces shared by the #2332 tests.
@@ -56,7 +56,7 @@ func padWith(sb *strings.Builder, line string, until int) {
 	}
 }
 
-func parseTempSession(t *testing.T, body string) []cli.EventEntry {
+func parseTempSession(t *testing.T, body string) []clievent.EventEntry {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.jsonl")
@@ -66,7 +66,7 @@ func parseTempSession(t *testing.T, body string) []cli.EventEntry {
 	return parseSessionFile(t, dir, path)
 }
 
-func parseSessionFile(t *testing.T, dir, path string) []cli.EventEntry {
+func parseSessionFile(t *testing.T, dir, path string) []clievent.EventEntry {
 	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
@@ -77,7 +77,7 @@ func parseSessionFile(t *testing.T, dir, path string) []cli.EventEntry {
 	return s.parseFile(context.Background(), f, 0)
 }
 
-func assertNoDecoyAnchor(t *testing.T, got []cli.EventEntry) {
+func assertNoDecoyAnchor(t *testing.T, got []clievent.EventEntry) {
 	t.Helper()
 	for _, e := range got {
 		if e.Time >= decoyTS*1000 && e.Time < (decoyTS+1)*1000 {
@@ -232,8 +232,8 @@ func TestParseFile_TailSeekAnchorStableAcrossAppend(t *testing.T) {
 		t.Fatalf("write session: %v", err)
 	}
 
-	snapshot := func() map[string]cli.EventEntry {
-		m := make(map[string]cli.EventEntry)
+	snapshot := func() map[string]clievent.EventEntry {
+		m := make(map[string]clievent.EventEntry)
 		for _, e := range parseSessionFile(t, dir, path) {
 			m[strings.Fields(e.Summary)[0]] = e
 		}

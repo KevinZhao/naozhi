@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	clipkg "github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -41,10 +42,10 @@ func (f *fakeConn) FetchProjects(_ context.Context) ([]map[string]any, error) {
 func (f *fakeConn) FetchDiscovered(_ context.Context) ([]map[string]any, error) {
 	return nil, nil
 }
-func (f *fakeConn) FetchDiscoveredPreview(_ context.Context, _ string) ([]clipkg.EventEntry, error) {
+func (f *fakeConn) FetchDiscoveredPreview(_ context.Context, _ string) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
-func (f *fakeConn) FetchEvents(_ context.Context, _ string, _ int64) ([]clipkg.EventEntry, error) {
+func (f *fakeConn) FetchEvents(_ context.Context, _ string, _ int64) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
 func (f *fakeConn) Send(_ context.Context, _, _, _ string) error { return nil }

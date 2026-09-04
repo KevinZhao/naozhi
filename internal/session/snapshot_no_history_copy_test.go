@@ -4,7 +4,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestSnapshot_DoesNotCopyPersistedHistory pins the R214-PERF-2 (#411)
@@ -28,9 +28,9 @@ func TestSnapshot_DoesNotCopyPersistedHistory(t *testing.T) {
 
 	// Fill persistedHistory to its cap so a regression that copies it
 	// would be loud — 500 EventEntry copies are unmissable in allocs/op.
-	bigHistory := make([]cli.EventEntry, maxPersistedHistory)
+	bigHistory := make([]clievent.EventEntry, maxPersistedHistory)
 	for i := range bigHistory {
-		bigHistory[i] = cli.EventEntry{
+		bigHistory[i] = clievent.EventEntry{
 			Type:    "text",
 			Summary: "entry summary line that is a realistic length",
 			Detail:  "detail field with somewhat-realistic content payload size",
@@ -98,7 +98,7 @@ func TestSnapshot_ScalarFieldsOnly(t *testing.T) {
 	// Even with persistedHistory full, a no-process Snapshot must not pay
 	// for it. allocs check above already enforces this; the read-back here
 	// provides a behavioural cross-check.
-	bigHistory := make([]cli.EventEntry, maxPersistedHistory)
+	bigHistory := make([]clievent.EventEntry, maxPersistedHistory)
 	s.historyMu.Lock()
 	s.persistedHistory = bigHistory
 	s.historyMu.Unlock()

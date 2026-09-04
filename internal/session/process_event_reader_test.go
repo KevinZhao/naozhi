@@ -16,7 +16,7 @@ package session
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestProcessEventReader_SubsetOfProcessIface(t *testing.T) {
@@ -33,5 +33,5 @@ func TestProcessEventReader_SubsetOfProcessIface(t *testing.T) {
 		// nil is fine for a fresh process; just ensure the call dispatches.
 		_ = got
 	}
-	_ = []cli.EventEntry(nil) // anchor the cli import for forward-compat
+	_ = []clievent.EventEntry(nil) // anchor the cli import for forward-compat
 }

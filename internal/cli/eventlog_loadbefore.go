@@ -6,7 +6,11 @@
 
 package cli
 
-import "context"
+import (
+	"context"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+)
 
 // LoadBefore adapts the ring to the canonical HistorySource pagination
 // contract: up to `limit` entries strictly older than beforeMS, oldest →
@@ -19,6 +23,6 @@ import "context"
 // cli.HistorySource（= eventlog/api.Reader），让 *EventLog 无需 wrapper
 // struct 即满足 api.EventStore。编译期守卫见
 // internal/eventlog/api/api_assert_test.go。
-func (l *EventLog) LoadBefore(_ context.Context, beforeMS int64, limit int) ([]EventEntry, error) {
+func (l *EventLog) LoadBefore(_ context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	return l.EntriesBefore(beforeMS, limit), nil
 }

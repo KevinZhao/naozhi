@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
@@ -110,13 +111,13 @@ type ProcessEventReader interface {
 	// EventEntries returns a defensive copy of every entry currently in
 	// the live EventLog ring (chronological order). Used by the dashboard
 	// "full history" path before pagination cut over to EventEntriesBefore.
-	EventEntries() []cli.EventEntry
+	EventEntries() []clievent.EventEntry
 	// EventLastN returns the last N entries (chronological). Used by IM
 	// reply rendering to assemble the trailing thinking / tool_use chain.
-	EventLastN(n int) []cli.EventEntry
+	EventLastN(n int) []clievent.EventEntry
 	// EventEntriesSince returns entries with Time > afterMS, used by the
 	// dashboard 1Hz incremental poll path.
-	EventEntriesSince(afterMS int64) []cli.EventEntry
+	EventEntriesSince(afterMS int64) []clievent.EventEntry
 	// EventEntriesSinceAppend is the buffer-reusing variant of
 	// EventEntriesSince: matched entries are appended into dst (callers pass
 	// dst[:0] from a per-subscription buffer so the common 0-5-entry
@@ -124,11 +125,11 @@ type ProcessEventReader interface {
 	// preserves EventEntriesSince's "nil when empty" contract. The returned
 	// slice is owned by the caller; the reader retains no reference.
 	// R20260604-PERF-25 (#1740).
-	EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry
+	EventEntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry
 	// EventEntriesBefore returns up to `limit` entries with Time < beforeMS
 	// drawn from the live ring (chronological). Used by the dashboard
 	// pagination handler when a tab scrolls back past the in-memory tail.
-	EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry
+	EventEntriesBefore(beforeMS int64, limit int) []clievent.EventEntry
 	// LastEventAt returns the wall-clock time of the most recent live event
 	// appended to the EventLog, or zero when nothing has arrived yet.
 	LastEventAt() time.Time
@@ -177,7 +178,7 @@ type HistoryInjector interface {
 	// EventLog before the first live turn so dashboard/IM history renders
 	// continuously across a resume. Called once, under the spawn path,
 	// before SetPersistSink flips sinkReady true.
-	InjectHistory(entries []cli.EventEntry)
+	InjectHistory(entries []clievent.EventEntry)
 	// TurnAgents returns the subagent roster the process has observed this
 	// turn (task_started → agent linkage). Feeds the dashboard agent-team
 	// view; empty for backends without a subagent concept.
@@ -225,16 +226,16 @@ type processIface interface {
 	// reason has not been classified yet.
 	DeathReason() string
 	TotalCost() float64
-	EventEntries() []cli.EventEntry
-	EventLastN(n int) []cli.EventEntry
+	EventEntries() []clievent.EventEntry
+	EventLastN(n int) []clievent.EventEntry
 	// EventLastNVisible returns a contiguous tail carrying at least
 	// visibleTarget visible entries (or up to maxTotal). Backs the
 	// dashboard's visible-aware initial-history read so a parallel agent
 	// team's internal-event flood can't blank the first paint.
-	EventLastNVisible(visibleTarget, maxTotal int) []cli.EventEntry
-	EventEntriesSince(afterMS int64) []cli.EventEntry
-	EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry
-	EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry
+	EventLastNVisible(visibleTarget, maxTotal int) []clievent.EventEntry
+	EventEntriesSince(afterMS int64) []clievent.EventEntry
+	EventEntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry
+	EventEntriesBefore(beforeMS int64, limit int) []clievent.EventEntry
 	LastActivitySummary() string
 	// LastResponseSummary returns the summary of the most recent assistant
 	// "text" entry the process's EventLog has seen. Used by Snapshot to feed
@@ -514,7 +515,7 @@ type ManagedSession struct {
 
 	// persistedHistory stores event entries that survive process restarts.
 	// Populated by InjectHistory and carried over when the process is replaced.
-	persistedHistory []cli.EventEntry
+	persistedHistory []clievent.EventEntry
 
 	// persistedUserTurns caches the number of Type=="user" entries currently
 	// present in persistedHistory. Recomputed under historyMu whenever

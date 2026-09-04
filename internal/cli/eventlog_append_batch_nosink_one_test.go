@@ -10,6 +10,8 @@ package cli
 import (
 	"reflect"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestAppendBatch_NoSink_Len1_DefaultTimeApplied verifies that a zero-Time
@@ -17,7 +19,7 @@ import (
 func TestAppendBatch_NoSink_Len1_DefaultTimeApplied(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(8)
-	l.AppendBatch([]EventEntry{{Type: "user", Summary: "single"}})
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "single"}})
 
 	entries := l.Entries()
 	if len(entries) != 1 {
@@ -33,7 +35,7 @@ func TestAppendBatch_NoSink_Len1_DefaultTimeApplied(t *testing.T) {
 func TestAppendBatch_NoSink_Len1_UUIDStamped(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(8)
-	in := []EventEntry{{Type: "user", Summary: "stamp"}}
+	in := []clievent.EventEntry{{Type: "user", Summary: "stamp"}}
 	l.AppendBatch(in)
 
 	if in[0].UUID == "" {
@@ -53,7 +55,7 @@ func TestAppendBatch_NoSink_Len1_UUIDStamped(t *testing.T) {
 func TestAppendBatch_NoSink_Len1_ImagesSanitized(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(8)
-	l.AppendBatch([]EventEntry{{
+	l.AppendBatch([]clievent.EventEntry{{
 		Type: "user",
 		Images: []string{
 			"data:image/png;base64,A",
@@ -78,7 +80,7 @@ func TestAppendBatch_NoSink_Len1_ImagesSanitized(t *testing.T) {
 func TestAppendBatch_NoSink_Len1_CallerSliceNotMutated(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(8)
-	in := []EventEntry{{
+	in := []clievent.EventEntry{{
 		Type: "user",
 		Images: []string{
 			"data:image/png;base64,A",
@@ -105,7 +107,7 @@ func TestAppendBatch_NoSink_Len1_CallerSliceNotMutated(t *testing.T) {
 func TestAppendBatch_NoSink_Len1_EntryInRingBuffer(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(8)
-	l.AppendBatch([]EventEntry{{Type: "user", Summary: "ring-scalar"}})
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "ring-scalar"}})
 
 	entries := l.Entries()
 	if len(entries) != 1 {
@@ -121,7 +123,7 @@ func TestAppendBatch_NoSink_Len1_EntryInRingBuffer(t *testing.T) {
 func TestAppendBatch_NoSink_Len1_ExplicitTimePreserved(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(8)
-	l.AppendBatch([]EventEntry{{Type: "user", Summary: "ts", Time: 99999}})
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "ts", Time: 99999}})
 
 	entries := l.Entries()
 	if len(entries) != 1 {
@@ -139,11 +141,11 @@ func TestAppendBatch_NoSink_Len1_VsLen2_Parity(t *testing.T) {
 	t.Parallel()
 
 	l1 := NewEventLog(8)
-	l1.AppendBatch([]EventEntry{{Type: "user", Summary: "parity", Time: 12345}})
+	l1.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "parity", Time: 12345}})
 	e1 := l1.Entries()
 
 	l2 := NewEventLog(8)
-	l2.AppendBatch([]EventEntry{
+	l2.AppendBatch([]clievent.EventEntry{
 		{Type: "user", Summary: "parity", Time: 12345},
 		{Type: "user", Summary: "extra", Time: 12346},
 	})

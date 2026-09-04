@@ -13,6 +13,7 @@ package cli
 import (
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -21,7 +22,7 @@ import (
 // resume the task_id → jsonl mapping established in a previous process
 // lifetime (RFC v4 agent-team-ui §3.3.7 — A3 defence against CLI-dead
 // respawn changing session_uuid).
-func (p *Process) InjectHistory(entries []EventEntry) {
+func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 	// Replay path: AppendBatchReplay skips applyEntryStateLocked under l.mu.
 	// SetPersistSink runs AFTER InjectHistory and the on-task-done callback
 	// is wired by the server tailer registry only on live spawn, so replay
@@ -51,7 +52,7 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 	// for the same task_id; the fast path inside Resolve is cached after
 	// the first hit but we want to avoid the goroutine churn.
 	seen := make(map[string]struct{})
-	taskStartByToolUse := make(map[string]EventEntry, len(entries))
+	taskStartByToolUse := make(map[string]clievent.EventEntry, len(entries))
 	for _, e := range entries {
 		if e.Type == "task_start" && e.ToolUseID != "" {
 			taskStartByToolUse[e.ToolUseID] = e
@@ -203,12 +204,12 @@ func (p *Process) SetCwdForLinker(cwd string) {
 }
 
 // EventEntries returns a copy of all event log entries.
-func (p *Process) EventEntries() []EventEntry {
+func (p *Process) EventEntries() []clievent.EventEntry {
 	return p.eventLog.Entries()
 }
 
 // EventLastN returns the most recent n event log entries.
-func (p *Process) EventLastN(n int) []EventEntry {
+func (p *Process) EventLastN(n int) []clievent.EventEntry {
 	return p.eventLog.LastN(n)
 }
 
@@ -216,12 +217,12 @@ func (p *Process) EventLastN(n int) []EventEntry {
 // least visibleTarget visible entries (or up to maxTotal entries, whichever
 // trips first). See EventLog.LastNVisible for the full contract — this is the
 // thin Process-level forwarder used by the dashboard initial-subscribe path.
-func (p *Process) EventLastNVisible(visibleTarget, maxTotal int) []EventEntry {
+func (p *Process) EventLastNVisible(visibleTarget, maxTotal int) []clievent.EventEntry {
 	return p.eventLog.LastNVisible(visibleTarget, maxTotal)
 }
 
 // EventEntriesSince returns event log entries after the given unix ms timestamp.
-func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
+func (p *Process) EventEntriesSince(afterMS int64) []clievent.EventEntry {
 	return p.eventLog.EntriesSince(afterMS)
 }
 
@@ -229,14 +230,14 @@ func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
 // it forwards to EventLog.EntriesSinceAppend so the live-session WS backfill
 // path can reuse a per-subscription buffer instead of allocating a fresh
 // []EventEntry per notify wave. R20260604-PERF-25 (#1740).
-func (p *Process) EventEntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEntry {
+func (p *Process) EventEntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry {
 	return p.eventLog.EntriesSinceAppend(dst, afterMS)
 }
 
 // EventEntriesBefore returns up to `limit` event log entries strictly older
 // than beforeMS, in chronological order. Used by dashboard pagination to
 // load earlier pages of history.
-func (p *Process) EventEntriesBefore(beforeMS int64, limit int) []EventEntry {
+func (p *Process) EventEntriesBefore(beforeMS int64, limit int) []clievent.EventEntry {
 	return p.eventLog.EntriesBefore(beforeMS, limit)
 }
 

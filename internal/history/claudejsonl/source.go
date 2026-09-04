@@ -19,6 +19,7 @@ import (
 	"context"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
@@ -76,7 +77,7 @@ func factory(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource
 // LoadBefore returns up to `limit` entries strictly older than beforeMS,
 // in chronological order. Walks the session chain newest → oldest and
 // stops as soon as the limit is met or ctx is cancelled.
-func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if limit <= 0 {
 		return nil, nil
 	}

@@ -19,6 +19,8 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestAppendBatch_Len1_SinkPair_UsesSingleSink verifies that the len==1
@@ -31,7 +33,7 @@ func TestAppendBatch_Len1_SinkPair_UsesSingleSink(t *testing.T) {
 	one := &captureSinkOne{}
 	l.SetPersistSinkPair(batch.asSink(), one.asSink())
 
-	l.AppendBatch([]EventEntry{{Type: "user", Summary: "hello"}})
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "hello"}})
 
 	if one.count() != 1 {
 		t.Errorf("single sink call count = %d, want 1", one.count())
@@ -60,7 +62,7 @@ func TestAppendBatch_Len1_BatchOnlySink_UsesBatchSink(t *testing.T) {
 	batch := &captureSink{}
 	l.SetPersistSink(batch.asSink())
 
-	l.AppendBatch([]EventEntry{{Type: "user", Summary: "world"}})
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "world"}})
 
 	if batch.batchCount() != 1 {
 		t.Errorf("batch sink call count = %d, want 1", batch.batchCount())
@@ -89,7 +91,7 @@ func TestAppendBatch_LenGT1_SinkPair_UsesBatchSink(t *testing.T) {
 	one := &captureSinkOne{}
 	l.SetPersistSinkPair(batch.asSink(), one.asSink())
 
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "user", Summary: "a"},
 		{Type: "text", Summary: "b"},
 	})
@@ -113,9 +115,9 @@ func TestAppendBatch_Len1_SinkPair_UUIDStampedInPlace(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(16)
 	one := &captureSinkOne{}
-	l.SetPersistSinkPair(func([]EventEntry, bool) {}, one.asSink())
+	l.SetPersistSinkPair(func([]clievent.EventEntry, bool) {}, one.asSink())
 
-	in := []EventEntry{{Type: "user", Summary: "stamp-test"}}
+	in := []clievent.EventEntry{{Type: "user", Summary: "stamp-test"}}
 	l.AppendBatch(in)
 
 	if in[0].UUID == "" {
@@ -131,9 +133,9 @@ func TestAppendBatch_Len1_SinkPair_CallerTimeNotMutated(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(16)
 	one := &captureSinkOne{}
-	l.SetPersistSinkPair(func([]EventEntry, bool) {}, one.asSink())
+	l.SetPersistSinkPair(func([]clievent.EventEntry, bool) {}, one.asSink())
 
-	in := []EventEntry{{Type: "user", Summary: "time-test"}} // Time==0
+	in := []clievent.EventEntry{{Type: "user", Summary: "time-test"}} // Time==0
 	l.AppendBatch(in)
 
 	if in[0].Time != 0 {
@@ -156,9 +158,9 @@ func TestAppendBatch_Len1_SinkPair_EntryInRingBuffer(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(16)
 	one := &captureSinkOne{}
-	l.SetPersistSinkPair(func([]EventEntry, bool) {}, one.asSink())
+	l.SetPersistSinkPair(func([]clievent.EventEntry, bool) {}, one.asSink())
 
-	l.AppendBatch([]EventEntry{{Type: "user", Summary: "ring-check"}})
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "ring-check"}})
 
 	entries := l.Entries()
 	if len(entries) != 1 {

@@ -1,6 +1,10 @@
 package cli
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+)
 
 // TestEventLog_LastResponseSummary_Append locks the per-Append store contract
 // for the R110-P1 sidebar response preview. Only EventEntry.Type == "text"
@@ -18,15 +22,15 @@ func TestEventLog_LastResponseSummary_Append(t *testing.T) {
 	}
 
 	// Non-text entries must NOT touch lastResponseSummary.
-	l.Append(EventEntry{Type: "user", Summary: "what is 2+2?"})
-	l.Append(EventEntry{Type: "thinking", Summary: "let me see"})
-	l.Append(EventEntry{Type: "tool_use", Summary: "Read"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "what is 2+2?"})
+	l.Append(clievent.EventEntry{Type: "thinking", Summary: "let me see"})
+	l.Append(clievent.EventEntry{Type: "tool_use", Summary: "Read"})
 	if got := l.LastResponseSummary(); got != "" {
 		t.Errorf("after non-text appends summary = %q, want \"\"", got)
 	}
 
 	// First assistant text reply lands.
-	l.Append(EventEntry{Type: "text", Summary: "the answer is 4"})
+	l.Append(clievent.EventEntry{Type: "text", Summary: "the answer is 4"})
 	if got, want := l.LastResponseSummary(), "the answer is 4"; got != want {
 		t.Errorf("after first text summary = %q, want %q", got, want)
 	}
@@ -34,14 +38,14 @@ func TestEventLog_LastResponseSummary_Append(t *testing.T) {
 	// Result event (turn boundary) leaves the summary intact — sidebar
 	// should keep showing the most recent assistant reply, not blank out
 	// when the turn closes.
-	l.Append(EventEntry{Type: "result", Summary: "done"})
+	l.Append(clievent.EventEntry{Type: "result", Summary: "done"})
 	if got, want := l.LastResponseSummary(), "the answer is 4"; got != want {
 		t.Errorf("after result summary = %q, want %q (must survive turn close)", got, want)
 	}
 
 	// Newer assistant text replaces the cache.
-	l.Append(EventEntry{Type: "user", Summary: "what about 3+3?"})
-	l.Append(EventEntry{Type: "text", Summary: "six"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "what about 3+3?"})
+	l.Append(clievent.EventEntry{Type: "text", Summary: "six"})
 	if got, want := l.LastResponseSummary(), "six"; got != want {
 		t.Errorf("after second text summary = %q, want %q", got, want)
 	}
@@ -58,7 +62,7 @@ func TestEventLog_LastResponseSummary_AppendBatch(t *testing.T) {
 	l := NewEventLog(20)
 
 	// Batch with multiple text entries: only the trailing one wins.
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "user", Summary: "ping"},
 		{Type: "text", Summary: "first reply"},
 		{Type: "thinking", Summary: "..."},
@@ -69,7 +73,7 @@ func TestEventLog_LastResponseSummary_AppendBatch(t *testing.T) {
 	}
 
 	// Activity-only batch must not blank the cache.
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "thinking", Summary: "more"},
 		{Type: "tool_use", Summary: "Grep"},
 	})

@@ -12,14 +12,14 @@ import (
 // confined to the single adapter in router_adapter.go, which is the one
 // file in this package that still touches internal/cli.
 //
-// Field names intentionally track cli.EventEntry (Type, Summary) so the
+// Field names intentionally track clievent.EventEntry (Type, Summary) so the
 // adapter is a trivial field copy; if a future daemon needs more fields,
 // widen this struct and the adapter together.
 type SystemEventEntry struct {
-	// Type mirrors cli.EventEntry.Type ("user", "text", "tool_use", …).
+	// Type mirrors clievent.EventEntry.Type ("user", "text", "tool_use", …).
 	// AutoTitler filters on Type == "user".
 	Type string
-	// Summary mirrors cli.EventEntry.Summary — the brief per-turn text
+	// Summary mirrors clievent.EventEntry.Summary — the brief per-turn text
 	// AutoTitler stitches into the rename excerpt.
 	Summary string
 }
@@ -85,9 +85,9 @@ type SystemSessionRouter interface {
 	// otherwise the persisted history slice.
 	//
 	// R260528-ARCH-9 (#1370): the return type is the sysession-local
-	// SystemEventEntry mirror, not cli.EventEntry, so this daemon-facing
+	// SystemEventEntry mirror, not clievent.EventEntry, so this daemon-facing
 	// interface no longer imports internal/cli. The concrete
-	// *session.Router (which returns []cli.EventEntry) is bridged in via
+	// *session.Router (which returns []clievent.EventEntry) is bridged in via
 	// the routerAdapter in router_adapter.go — the only file in this
 	// package still importing internal/cli.
 	EventEntriesForKey(key string) []SystemEventEntry

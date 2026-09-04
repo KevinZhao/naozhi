@@ -3,6 +3,8 @@ package cli
 import (
 	"reflect"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // sanitizeImages is the test-only single-arg convenience wrapper around
@@ -138,7 +140,7 @@ func TestEventLog_Append_FiltersInvalidImages(t *testing.T) {
 	t.Parallel()
 
 	l := NewEventLog(4)
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type: "user",
 		Images: []string{
 			"data:image/jpeg;base64,OK",
@@ -164,7 +166,7 @@ func TestEventLog_AppendBatch_FiltersInvalidImages(t *testing.T) {
 	t.Parallel()
 
 	l := NewEventLog(8)
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{
 			Type: "user",
 			Images: []string{

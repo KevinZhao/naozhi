@@ -30,7 +30,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
@@ -227,7 +227,7 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 			entries = nil
 		}
 		if entries == nil {
-			entries = []cli.EventEntry{}
+			entries = []clievent.EventEntry{}
 		}
 		httputil.WriteJSON(w, entries)
 		return
@@ -268,7 +268,7 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 		entries = nil
 	}
 	if entries == nil {
-		entries = []cli.EventEntry{}
+		entries = []clievent.EventEntry{}
 	}
 
 	httputil.WriteJSON(w, entries)

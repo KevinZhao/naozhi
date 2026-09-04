@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -1142,7 +1143,7 @@ func TestProcess_InjectHistory(t *testing.T) {
 	go p.readLoop()
 	defer srv.Close()
 
-	entries := []EventEntry{
+	entries := []clievent.EventEntry{
 		{Type: "user", Summary: "msg1", Time: 1000},
 		{Type: "result", Summary: "result1", Time: 2000},
 	}
@@ -1167,7 +1168,7 @@ func TestProcess_InjectHistory(t *testing.T) {
 	// helpers were retired in DEADCODE-8. The test still needs the same
 	// "find the most recent entry of type X" semantic to validate the
 	// EventLog ring buffer's user-turn bookkeeping.
-	last := func() EventEntry {
+	last := func() clievent.EventEntry {
 		l := p.eventLog
 		l.mu.RLock()
 		defer l.mu.RUnlock()
@@ -1177,7 +1178,7 @@ func TestProcess_InjectHistory(t *testing.T) {
 				return l.entries[idx]
 			}
 		}
-		return EventEntry{}
+		return clievent.EventEntry{}
 	}()
 	if last.Type != "user" {
 		t.Errorf("lastEntryOfType(user).Type = %q, want user", last.Type)
@@ -1200,7 +1201,7 @@ func TestProcess_SubscribeEvents(t *testing.T) {
 	ch, unsub := p.SubscribeEvents()
 	defer unsub()
 
-	p.InjectHistory([]EventEntry{{Type: "user", Summary: "hi", Time: 1000}})
+	p.InjectHistory([]clievent.EventEntry{{Type: "user", Summary: "hi", Time: 1000}})
 
 	// May or may not notify depending on timing; just verify no panic
 	select {
@@ -1222,7 +1223,7 @@ func TestProcess_FindResultSince(t *testing.T) {
 		t.Errorf("empty log: want nil, got %v", r)
 	}
 
-	p.eventLog.Append(EventEntry{Type: "result", Detail: "done", Time: 2000})
+	p.eventLog.Append(clievent.EventEntry{Type: "result", Detail: "done", Time: 2000})
 
 	if r := p.findResultSince(1000); r == nil {
 		t.Error("should find result entry after 1000ms")
@@ -1248,8 +1249,8 @@ func TestProcess_FindResultSince_RecoversTextFromAssistantEntry(t *testing.T) {
 
 	// Realistic readLoop shape: an assistant "text" entry carrying the reply,
 	// then a "result" entry that carries cost only (Detail/Summary empty).
-	p.eventLog.Append(EventEntry{Type: "text", Summary: "Hello", Detail: "Hello, full answer.", Time: 1500})
-	p.eventLog.Append(EventEntry{Type: "result", Cost: 0.0042, Time: 2000})
+	p.eventLog.Append(clievent.EventEntry{Type: "text", Summary: "Hello", Detail: "Hello, full answer.", Time: 1500})
+	p.eventLog.Append(clievent.EventEntry{Type: "result", Cost: 0.0042, Time: 2000})
 
 	r := p.findResultSince(1000)
 	if r == nil {
@@ -1271,7 +1272,7 @@ func TestProcess_FindResultSince_EmptyWhenNoText(t *testing.T) {
 	go p.readLoop()
 	defer srv.Close()
 
-	p.eventLog.Append(EventEntry{Type: "result", Cost: 0.001, Time: 2000})
+	p.eventLog.Append(clievent.EventEntry{Type: "result", Cost: 0.001, Time: 2000})
 
 	r := p.findResultSince(1000)
 	if r == nil {

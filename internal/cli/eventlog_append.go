@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -98,7 +99,7 @@ func sanitizeImagesAligned(imgs, paths []string) ([]string, []string) {
 // the ring buffer always stores the definitive UUID downstream
 // readers (Entries, EntriesSince, EntriesBefore, invokePersistSink)
 // see.
-func stampUUID(e *EventEntry) {
+func stampUUID(e *clievent.EventEntry) {
 	if e.UUID == "" {
 		e.UUID = newEventUUID()
 	}
@@ -106,7 +107,7 @@ func stampUUID(e *EventEntry) {
 
 // Append adds an entry to the log, overwriting the oldest entry when full.
 // Signals all subscribers non-blockingly after appending.
-func (l *EventLog) Append(e EventEntry) {
+func (l *EventLog) Append(e clievent.EventEntry) {
 	// R225-PERF-11: stamp UUID *before* taking l.mu — newEventUUID calls
 	// crypto/rand.Read which on Linux is a getrandom() syscall. Holding l.mu
 	// across that syscall serialises every concurrent Append behind the
@@ -229,7 +230,7 @@ func (l *EventLog) Append(e EventEntry) {
 	// contract — opting into SetPersistSinkPair is the way to skip it.
 	if !l.invokePersistSinkOne(e) {
 		if l.persistSinkPtr.Load() != nil {
-			l.invokePersistSink([]EventEntry{e})
+			l.invokePersistSink([]clievent.EventEntry{e})
 		}
 	}
 
@@ -246,7 +247,7 @@ func (l *EventLog) Append(e EventEntry) {
 // l.mu to avoid a race with concurrent Append: if a live event ran Store
 // after our Unlock but before our own Store, our older batch value would
 // clobber it.
-func (l *EventLog) AppendBatch(entries []EventEntry) {
+func (l *EventLog) AppendBatch(entries []clievent.EventEntry) {
 	l.appendBatch(entries, false)
 }
 
@@ -257,11 +258,11 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 // turn/bg agent slice scans inside l.mu are pure overhead. R240-PERF-3
 // (#1042). Live AppendBatch callers MUST keep isReplay=false so task_done
 // callbacks continue to fire on real turn-end events.
-func (l *EventLog) AppendBatchReplay(entries []EventEntry) {
+func (l *EventLog) AppendBatchReplay(entries []clievent.EventEntry) {
 	l.appendBatch(entries, true)
 }
 
-func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
+func (l *EventLog) appendBatch(entries []clievent.EventEntry, isReplay bool) {
 	if len(entries) == 0 {
 		return
 	}
@@ -362,18 +363,18 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// every entry before e := entries[i] copies the value — only the
 	// prepared/sinkCopy destination changes for the len==1 path.
 	var (
-		sinkCopy       []EventEntry
-		prepared       []EventEntry
-		sinkOne        EventEntry
+		sinkCopy       []clievent.EventEntry
+		prepared       []clievent.EventEntry
+		sinkOne        clievent.EventEntry
 		sinkOneSet     bool
-		preparedOne    EventEntry
+		preparedOne    clievent.EventEntry
 		preparedOneSet bool
 	)
 	if captureForSink {
 		if len(entries) == 1 {
 			sinkOneSet = true // use sinkOne scalar; sinkCopy stays nil
 		} else {
-			sinkCopy = make([]EventEntry, len(entries))
+			sinkCopy = make([]clievent.EventEntry, len(entries))
 		}
 	} else if len(entries) == 1 {
 		// R20260603-PERF-4: mirror the sinkOne fast path for the no-sink
@@ -381,7 +382,7 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		// entry; use a stack scalar instead. prepared stays nil.
 		preparedOneSet = true
 	} else {
-		prepared = make([]EventEntry, len(entries))
+		prepared = make([]clievent.EventEntry, len(entries))
 	}
 	for i := range entries {
 		// R20260602190132-PERF-12: stamp the UUID in place on the caller's
@@ -392,7 +393,7 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		// and then `dest[i] = e`, a second full EventEntry struct copy
 		// (~240 B) per entry on top of the in-place stamp.
 		stampUUID(&entries[i])
-		var dst *EventEntry
+		var dst *clievent.EventEntry
 		if sinkOneSet {
 			sinkOne = entries[i]
 			dst = &sinkOne
@@ -427,7 +428,7 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		// state-tracking code reads from the canonical store without paying a
 		// second per-entry struct copy through a range-loop local, and
 		// without running sanitizeImagesAligned (a string scan) inside l.mu.
-		var ePtr *EventEntry
+		var ePtr *clievent.EventEntry
 		if sinkOneSet {
 			// len==1 fast path: sinkOne holds the pre-prepared entry;
 			// sinkCopy is nil (allocation skipped). R20260602190132-PERF-3.
@@ -543,7 +544,7 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	if !isReplay {
 		if sinkOneSet {
 			if !l.invokePersistSinkOne(sinkOne) {
-				l.invokePersistSink([]EventEntry{sinkOne})
+				l.invokePersistSink([]clievent.EventEntry{sinkOne})
 			}
 		} else {
 			l.invokePersistSink(sinkCopy)

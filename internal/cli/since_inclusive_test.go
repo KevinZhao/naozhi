@@ -1,6 +1,10 @@
 package cli
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+)
 
 func TestSinceInclusive(t *testing.T) {
 	t.Parallel()
@@ -23,9 +27,9 @@ func TestSinceInclusive(t *testing.T) {
 func TestSinceInclusive_EntriesSinceReadmitsWatermark(t *testing.T) {
 	t.Parallel()
 	log := NewEventLog(0)
-	log.Append(EventEntry{Time: 1000, UUID: "old", Type: "user"})
-	log.Append(EventEntry{Time: 2000, UUID: "a", Type: "thinking"})
-	log.Append(EventEntry{Time: 2000, UUID: "b", Type: "text"})
+	log.Append(clievent.EventEntry{Time: 1000, UUID: "old", Type: "user"})
+	log.Append(clievent.EventEntry{Time: 2000, UUID: "a", Type: "thinking"})
+	log.Append(clievent.EventEntry{Time: 2000, UUID: "b", Type: "text"})
 
 	got := log.EntriesSince(SinceInclusive(2000))
 	if len(got) != 2 || got[0].UUID != "a" || got[1].UUID != "b" {

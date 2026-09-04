@@ -11,6 +11,8 @@ package cli
 import (
 	"reflect"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestAppendBatch_NoSink_DefaultTimeApplied verifies that zero-Time entries
@@ -19,7 +21,7 @@ import (
 func TestAppendBatch_NoSink_DefaultTimeApplied(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(8)
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "user", Summary: "no-time"},         // Time==0 → defaulted
 		{Type: "text", Time: 12345, Summary: "ts"}, // explicit Time preserved
 		{Type: "user", Summary: "no-time-2"},       // Time==0 → defaulted
@@ -54,7 +56,7 @@ func TestAppendBatch_NoSink_DefaultTimeApplied(t *testing.T) {
 func TestAppendBatch_NoSink_UUIDStamped(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(8)
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "user", Summary: "a"},                     // empty UUID → stamped
 		{Type: "user", UUID: "fixed-uuid", Summary: "b"}, // preserved
 	})
@@ -76,7 +78,7 @@ func TestAppendBatch_NoSink_UUIDStamped(t *testing.T) {
 func TestAppendBatch_NoSink_ImagesSanitized(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(8)
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{
 			Type: "user",
 			Images: []string{
@@ -104,7 +106,7 @@ func TestAppendBatch_NoSink_ImagesSanitized(t *testing.T) {
 func TestAppendBatch_NoSink_CallerSliceNotMutated(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(8)
-	in := []EventEntry{
+	in := []clievent.EventEntry{
 		{
 			Type: "user",
 			Images: []string{

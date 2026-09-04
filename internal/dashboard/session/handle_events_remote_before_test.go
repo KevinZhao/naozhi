@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -15,11 +15,11 @@ import (
 // embedded nil interface covers the rest (never called by HandleEvents).
 type fakeEventsConn struct {
 	node.Conn
-	entries  []cli.EventEntry
+	entries  []clievent.EventEntry
 	gotAfter int64
 }
 
-func (c *fakeEventsConn) FetchEvents(_ context.Context, _ string, after int64) ([]cli.EventEntry, error) {
+func (c *fakeEventsConn) FetchEvents(_ context.Context, _ string, after int64) ([]clievent.EventEntry, error) {
 	c.gotAfter = after
 	return c.entries, nil
 }
@@ -33,15 +33,15 @@ func (a fakeEventsNodeAccessor) LookupNode(http.ResponseWriter, string) (node.Co
 	return a.conn, true
 }
 
-func remoteEventsFixture(n int) []cli.EventEntry {
-	out := make([]cli.EventEntry, 0, n)
+func remoteEventsFixture(n int) []clievent.EventEntry {
+	out := make([]clievent.EventEntry, 0, n)
 	for i := 1; i <= n; i++ {
-		out = append(out, cli.EventEntry{Time: int64(i), Type: "text", Summary: "e"})
+		out = append(out, clievent.EventEntry{Time: int64(i), Type: "text", Summary: "e"})
 	}
 	return out
 }
 
-func doRemoteEvents(t *testing.T, h *Handlers, query string) (*httptest.ResponseRecorder, []cli.EventEntry) {
+func doRemoteEvents(t *testing.T, h *Handlers, query string) (*httptest.ResponseRecorder, []clievent.EventEntry) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events?key=feishu:p2p:u1:general&node=peer"+query, nil)
 	rec := httptest.NewRecorder()
@@ -49,14 +49,14 @@ func doRemoteEvents(t *testing.T, h *Handlers, query string) (*httptest.Response
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var got []cli.EventEntry
+	var got []clievent.EventEntry
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
 	}
 	return rec, got
 }
 
-func times(es []cli.EventEntry) []int64 {
+func times(es []clievent.EventEntry) []int64 {
 	out := make([]int64, 0, len(es))
 	for _, e := range es {
 		out = append(out, e.Time)

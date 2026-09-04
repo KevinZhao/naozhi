@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestClientMsgJSONRoundTrip(t *testing.T) {
@@ -88,7 +88,7 @@ func TestServerMsgJSONRoundTrip(t *testing.T) {
 				Type:  "event",
 				Key:   "feishu:group:123",
 				Node:  "node-1",
-				Event: &cli.EventEntry{Time: 1000, Type: "text", Summary: "hello"},
+				Event: &clievent.EventEntry{Time: 1000, Type: "text", Summary: "hello"},
 			},
 		},
 		{
@@ -96,7 +96,7 @@ func TestServerMsgJSONRoundTrip(t *testing.T) {
 			msg: ServerMsg{
 				Type: "history",
 				Key:  "feishu:group:123",
-				Events: []cli.EventEntry{
+				Events: []clievent.EventEntry{
 					{Time: 1000, Type: "text", Summary: "a"},
 					{Time: 2000, Type: "tool_use", Summary: "b", Tool: "Bash"},
 				},
@@ -172,7 +172,7 @@ func TestReverseMsgJSONRoundTrip(t *testing.T) {
 			msg: ReverseMsg{
 				Type:  "event",
 				Key:   "feishu:group:123",
-				Event: &cli.EventEntry{Time: 5000, Type: "text", Summary: "msg"},
+				Event: &clievent.EventEntry{Time: 5000, Type: "text", Summary: "msg"},
 			},
 		},
 	}

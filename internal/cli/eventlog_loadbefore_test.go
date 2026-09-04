@@ -4,6 +4,8 @@ import (
 	"context"
 	"reflect"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestEventLogLoadBefore_MatchesEntriesBefore 钉死 LoadBefore 是
@@ -15,13 +17,13 @@ func TestEventLogLoadBefore_MatchesEntriesBefore(t *testing.T) {
 
 	filled := NewEventLog(4)
 	for i, ts := range []int64{1000, 2000, 3000} {
-		filled.Append(EventEntry{Time: ts, Type: "user", Summary: string(rune('a' + i))})
+		filled.Append(clievent.EventEntry{Time: ts, Type: "user", Summary: string(rune('a' + i))})
 	}
 
 	// 溢出态：cap-4 ring 塞 6 条，最旧两条被挤出。
 	overflow := NewEventLog(4)
 	for i, ts := range []int64{100, 200, 300, 400, 500, 600} {
-		overflow.Append(EventEntry{Time: ts, Type: "user", Summary: string(rune('a' + i))})
+		overflow.Append(clievent.EventEntry{Time: ts, Type: "user", Summary: string(rune('a' + i))})
 	}
 
 	cases := []struct {

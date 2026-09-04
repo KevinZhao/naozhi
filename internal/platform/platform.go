@@ -232,7 +232,7 @@ type QuestionCard struct {
 	Items []QuestionItem
 }
 
-// QuestionItem mirrors cli.AskQuestionItem but lives in the platform package
+// QuestionItem mirrors clievent.AskQuestionItem but lives in the platform package
 // so adapters don't need a reverse dependency on internal/cli. Kept as a
 // plain struct so tests can build fixtures without importing cli.
 type QuestionItem struct {

@@ -3,10 +3,12 @@ package cli
 import (
 	"testing"
 	"unsafe"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // countVisible counts entries the dashboard would render (non-internal).
-func countVisible(entries []EventEntry) int {
+func countVisible(entries []clievent.EventEntry) int {
 	n := 0
 	for i := range entries {
 		if IsVisibleEntry(entries[i]) {
@@ -23,7 +25,7 @@ func TestIsInternalEventType(t *testing.T) {
 		if !IsInternalEventType(ty) {
 			t.Errorf("IsInternalEventType(%q) = false, want true", ty)
 		}
-		if IsVisibleEntry(EventEntry{Type: ty}) {
+		if IsVisibleEntry(clievent.EventEntry{Type: ty}) {
 			t.Errorf("IsVisibleEntry(%q) = true, want false", ty)
 		}
 	}
@@ -32,7 +34,7 @@ func TestIsInternalEventType(t *testing.T) {
 		if IsInternalEventType(ty) {
 			t.Errorf("IsInternalEventType(%q) = true, want false", ty)
 		}
-		if !IsVisibleEntry(EventEntry{Type: ty}) {
+		if !IsVisibleEntry(clievent.EventEntry{Type: ty}) {
 			t.Errorf("IsVisibleEntry(%q) = false, want true", ty)
 		}
 	}
@@ -50,7 +52,7 @@ func TestLastNVisible_VisibleSufficient(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
 	for i := 0; i < 10; i++ {
-		l.Append(EventEntry{Time: int64(i + 1), Type: "text", Summary: "msg"})
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: "text", Summary: "msg"})
 	}
 	got := l.LastNVisible(3, 100)
 	// Stops as soon as 3 visible entries are collected, walking from newest.
@@ -79,10 +81,10 @@ func TestLastNVisible_SparseVisible(t *testing.T) {
 	// 3 visible messages, each followed by 50 internal events.
 	for m := 0; m < 3; m++ {
 		tm++
-		l.Append(EventEntry{Time: tm, Type: "text", Summary: "real message"})
+		l.Append(clievent.EventEntry{Time: tm, Type: "text", Summary: "real message"})
 		for i := 0; i < 50; i++ {
 			tm++
-			l.Append(EventEntry{Time: tm, Type: "task_progress", Summary: "agent working"})
+			l.Append(clievent.EventEntry{Time: tm, Type: "task_progress", Summary: "agent working"})
 		}
 	}
 	// Ask for 2 visible with a generous total ceiling.
@@ -100,7 +102,7 @@ func TestLastNVisible_AllInternal(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(200)
 	for i := 0; i < 200; i++ {
-		l.Append(EventEntry{Time: int64(i + 1), Type: "tool_use", Summary: "Grep"})
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: "tool_use", Summary: "Grep"})
 	}
 	got := l.LastNVisible(30, 100)
 	if countVisible(got) != 0 {
@@ -117,7 +119,7 @@ func TestLastNVisible_MaxTotalCap(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(500)
 	for i := 0; i < 500; i++ {
-		l.Append(EventEntry{Time: int64(i + 1), Type: "task_progress"})
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: "task_progress"})
 	}
 	got := l.LastNVisible(30, 50)
 	if len(got) != 50 {
@@ -130,7 +132,7 @@ func TestLastNVisible_ZeroTargetFallsBackToLastN(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
 	for i := 0; i < 20; i++ {
-		l.Append(EventEntry{Time: int64(i + 1), Type: "text"})
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: "text"})
 	}
 	got := l.LastNVisible(0, 10)
 	if len(got) != 10 {
@@ -143,7 +145,7 @@ func TestLastNVisible_ZeroTargetFallsBackToLastN(t *testing.T) {
 
 // sliceData returns the backing-array address of a slice for identity
 // comparison in the buffer-reuse test (R20260602-PERF-8, #1631).
-func sliceData(s []EventEntry) uintptr {
+func sliceData(s []clievent.EventEntry) uintptr {
 	if cap(s) == 0 {
 		return 0
 	}
@@ -159,10 +161,10 @@ func TestLastNVisibleAppend_ReusesBuffer(t *testing.T) {
 	l := NewEventLog(500)
 	// All-internal entries so the maxTotal=200 cap trips (not visibleTarget).
 	for i := 0; i < 300; i++ {
-		l.Append(EventEntry{Time: int64(i + 1), Type: "task_progress"})
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: "task_progress"})
 	}
 	// Pre-grown buffer with capacity >= maxTotal so no realloc is needed.
-	buf := make([]EventEntry, 0, 200)
+	buf := make([]clievent.EventEntry, 0, 200)
 	wantData := sliceData(buf)
 
 	got := l.LastNVisibleAppend(buf[:0], 50, 200)
@@ -184,9 +186,9 @@ func TestLastNVisibleAppend_GrowsWhenTooSmall(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(500)
 	for i := 0; i < 300; i++ {
-		l.Append(EventEntry{Time: int64(i + 1), Type: "task_progress"})
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: "task_progress"})
 	}
-	got := l.LastNVisibleAppend(make([]EventEntry, 0, 4), 50, 200)
+	got := l.LastNVisibleAppend(make([]clievent.EventEntry, 0, 4), 50, 200)
 	if len(got) != 200 {
 		t.Fatalf("len = %d, want 200 (buffer must grow, not truncate)", len(got))
 	}
@@ -203,7 +205,7 @@ func TestLastNVisibleAppend_EmptyRingContract(t *testing.T) {
 	if got := l.LastNVisibleAppend(nil, 5, 10); got != nil {
 		t.Errorf("nil dst on empty ring = %v, want nil", got)
 	}
-	buf := make([]EventEntry, 0, 8)
+	buf := make([]clievent.EventEntry, 0, 8)
 	got := l.LastNVisibleAppend(buf[:0], 5, 10)
 	if got == nil {
 		t.Errorf("dst[:0] on empty ring = nil, want length-zero buffer (caller retains it)")
@@ -223,10 +225,10 @@ func TestLastNVisibleAppend_MatchesLastNVisible(t *testing.T) {
 		if i%7 == 0 {
 			ty = "text"
 		}
-		l.Append(EventEntry{Time: int64(i + 1), Type: ty})
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: ty})
 	}
 	want := l.LastNVisible(30, 100)
-	got := l.LastNVisibleAppend(make([]EventEntry, 0, 100), 30, 100)
+	got := l.LastNVisibleAppend(make([]clievent.EventEntry, 0, 100), 30, 100)
 	if len(got) != len(want) {
 		t.Fatalf("len mismatch: append=%d direct=%d", len(got), len(want))
 	}

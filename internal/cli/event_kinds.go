@@ -1,5 +1,7 @@
 package cli
 
+import "github.com/naozhi/naozhi/internal/cli/clievent"
+
 // IsActivityType reports whether the given EventEntry.Type belongs to the
 // "activity" set tracked by EventLog.lastActivitySummary. Both EventLog
 // (Append / AppendBatch) and session.ManagedSession (history scan in
@@ -56,6 +58,6 @@ func IsInternalEventType(t string) bool {
 // IsVisibleEntry reports whether the dashboard would render this entry as a
 // visible chat bubble. The inverse of IsInternalEventType, lifted to the
 // EventEntry shape for the visible-aware history readers.
-func IsVisibleEntry(e EventEntry) bool {
+func IsVisibleEntry(e clievent.EventEntry) bool {
 	return !IsInternalEventType(e.Type)
 }

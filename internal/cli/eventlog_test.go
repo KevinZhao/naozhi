@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestNewEventLog_DefaultSize(t *testing.T) {
@@ -25,8 +27,8 @@ func TestNewEventLog_CustomSize(t *testing.T) {
 func TestEventLog_Append_And_Entries(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(10)
-	l.Append(EventEntry{Time: 1000, Type: "thinking", Summary: "hello"})
-	l.Append(EventEntry{Time: 2000, Type: "tool_use", Summary: "Read"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "thinking", Summary: "hello"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "tool_use", Summary: "Read"})
 
 	entries := l.Entries()
 	if len(entries) != 2 {
@@ -40,7 +42,7 @@ func TestEventLog_Append_And_Entries(t *testing.T) {
 func TestEventLog_Append_AutoTimestamp(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(10)
-	l.Append(EventEntry{Type: "system"})
+	l.Append(clievent.EventEntry{Type: "system"})
 	entries := l.Entries()
 	if entries[0].Time == 0 {
 		t.Error("expected auto-assigned timestamp")
@@ -51,7 +53,7 @@ func TestEventLog_Append_Overflow(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(10)
 	for i := 0; i < 20; i++ {
-		l.Append(EventEntry{Time: int64(i + 1), Type: "test"})
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: "test"})
 	}
 	entries := l.Entries()
 	if len(entries) > 10 {
@@ -66,9 +68,9 @@ func TestEventLog_Append_Overflow(t *testing.T) {
 func TestEventLog_EntriesSince(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
-	l.Append(EventEntry{Time: 1000, Type: "a"})
-	l.Append(EventEntry{Time: 2000, Type: "b"})
-	l.Append(EventEntry{Time: 3000, Type: "c"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "b"})
+	l.Append(clievent.EventEntry{Time: 3000, Type: "c"})
 
 	entries := l.EntriesSince(1500)
 	if len(entries) != 2 {
@@ -82,7 +84,7 @@ func TestEventLog_EntriesSince(t *testing.T) {
 func TestEventLog_EntriesSince_NoMatch(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
-	l.Append(EventEntry{Time: 1000, Type: "a"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
 	entries := l.EntriesSince(2000)
 	if len(entries) != 0 {
 		t.Errorf("len = %d, want 0", len(entries))
@@ -92,10 +94,10 @@ func TestEventLog_EntriesSince_NoMatch(t *testing.T) {
 func TestEventLog_EntriesBefore_Pagination(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
-	l.Append(EventEntry{Time: 1000, Type: "a"})
-	l.Append(EventEntry{Time: 2000, Type: "b"})
-	l.Append(EventEntry{Time: 3000, Type: "c"})
-	l.Append(EventEntry{Time: 4000, Type: "d"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "b"})
+	l.Append(clievent.EventEntry{Time: 3000, Type: "c"})
+	l.Append(clievent.EventEntry{Time: 4000, Type: "d"})
 
 	// before=3000 → entries with Time < 3000 → {a, b}
 	// limit=10 (generous) → all matches returned.
@@ -112,7 +114,7 @@ func TestEventLog_EntriesBefore_LimitHonored(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
 	for i := 0; i < 10; i++ {
-		l.Append(EventEntry{Time: int64((i + 1) * 1000), Type: "x"})
+		l.Append(clievent.EventEntry{Time: int64((i + 1) * 1000), Type: "x"})
 	}
 
 	// before=11000 (after every entry) + limit=3 → newest 3 entries in
@@ -130,7 +132,7 @@ func TestEventLog_EntriesBefore_LimitHonored(t *testing.T) {
 func TestEventLog_EntriesBefore_ZeroLimitReturnsNil(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
-	l.Append(EventEntry{Time: 1000, Type: "x"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "x"})
 	if got := l.EntriesBefore(2000, 0); got != nil {
 		t.Errorf("expected nil for limit=0, got %v", got)
 	}
@@ -142,8 +144,8 @@ func TestEventLog_EntriesBefore_ZeroLimitReturnsNil(t *testing.T) {
 func TestEventLog_EntriesBefore_ZeroBeforeIsUnbounded(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
-	l.Append(EventEntry{Time: 1000, Type: "a"})
-	l.Append(EventEntry{Time: 2000, Type: "b"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "b"})
 
 	// before=0 is interpreted as "no upper bound" so it must return the
 	// newest `limit` entries, like LastN.
@@ -167,7 +169,7 @@ func TestEventLog_EntriesBefore_EmptyLog(t *testing.T) {
 func TestEventLog_Entries_IsCopy(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(10)
-	l.Append(EventEntry{Time: 1000, Type: "a"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
 	entries := l.Entries()
 	entries[0].Type = "modified"
 
@@ -185,7 +187,7 @@ func TestEventLog_Subscribe_Notified(t *testing.T) {
 	ch, unsub := l.Subscribe()
 	defer unsub()
 
-	l.Append(EventEntry{Time: 1000, Type: "test"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "test"})
 
 	select {
 	case <-ch:
@@ -201,16 +203,16 @@ func TestEventLog_Subscribe_NonBlockingWhenFull(t *testing.T) {
 	defer unsub()
 
 	// Fill the buffered(1) channel
-	l.Append(EventEntry{Time: 1000, Type: "a"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
 	<-ch
 
 	// Fill the channel again
-	l.Append(EventEntry{Time: 2000, Type: "b"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "b"})
 
 	// Append again without draining: must not block
 	done := make(chan struct{})
 	go func() {
-		l.Append(EventEntry{Time: 3000, Type: "c"})
+		l.Append(clievent.EventEntry{Time: 3000, Type: "c"})
 		close(done)
 	}()
 
@@ -229,7 +231,7 @@ func TestEventLog_Subscribe_MultipleSubscribers(t *testing.T) {
 	ch2, unsub2 := l.Subscribe()
 	defer unsub2()
 
-	l.Append(EventEntry{Time: 1000, Type: "test"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "test"})
 
 	for i, ch := range []<-chan struct{}{ch1, ch2} {
 		select {
@@ -280,7 +282,7 @@ func TestEventLog_Subscribe_ConcurrentSafe(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ch, unsub := l.Subscribe()
-			l.Append(EventEntry{Time: time.Now().UnixMilli(), Type: "concurrent"})
+			l.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "concurrent"})
 			select {
 			case <-ch:
 			case <-time.After(time.Second):
@@ -358,7 +360,7 @@ func TestEventLog_Unsubscribe_SwapToEnd_PreservesOthers(t *testing.T) {
 	// Drive a notify and confirm every survivor — including chD,
 	// whose backing-array slot was swapped into chB's vacated index —
 	// receives the signal.
-	l.Append(EventEntry{Time: time.Now().UnixMilli(), Type: "swap_test"})
+	l.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "swap_test"})
 
 	check := func(name string, ch <-chan struct{}) {
 		t.Helper()
@@ -376,7 +378,7 @@ func TestEventLog_Unsubscribe_SwapToEnd_PreservesOthers(t *testing.T) {
 func TestEventLog_DetailAndToolFields(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(10)
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Time:   1000,
 		Type:   "tool_use",
 		Tool:   "Read",
@@ -396,34 +398,34 @@ func TestEventLog_BackgroundAgents(t *testing.T) {
 	l := NewEventLog(100)
 
 	// Background agent IS cleared by result or user events (same as foreground).
-	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "team1", Background: true})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "team1", Background: true})
 
 	agents := l.TurnAgents()
 	if len(agents) != 1 || agents[0].Name != "team1" || !agents[0].Background {
 		t.Errorf("before result TurnAgents = %v, want [team1 (bg)]", agents)
 	}
 
-	l.Append(EventEntry{Time: 2000, Type: "result", Summary: "done"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "result", Summary: "done"})
 	if agents := l.TurnAgents(); agents != nil {
 		t.Errorf("after result TurnAgents = %v, want nil", agents)
 	}
 
 	// Background agent added again, cleared by user event.
-	l.Append(EventEntry{Time: 3000, Type: "agent", Subagent: "team1", Background: true})
-	l.Append(EventEntry{Time: 4000, Type: "user", Summary: "next"})
+	l.Append(clievent.EventEntry{Time: 3000, Type: "agent", Subagent: "team1", Background: true})
+	l.Append(clievent.EventEntry{Time: 4000, Type: "user", Summary: "next"})
 	if agents := l.TurnAgents(); agents != nil {
 		t.Errorf("after user TurnAgents = %v, want nil", agents)
 	}
 
 	// Foreground + background coexist in the same turn, both cleared on result.
-	l.Append(EventEntry{Time: 5000, Type: "agent", Subagent: "team1", Background: true})
-	l.Append(EventEntry{Time: 6000, Type: "agent", Subagent: "Explore"})
+	l.Append(clievent.EventEntry{Time: 5000, Type: "agent", Subagent: "team1", Background: true})
+	l.Append(clievent.EventEntry{Time: 6000, Type: "agent", Subagent: "Explore"})
 	agents = l.TurnAgents()
 	if len(agents) != 2 {
 		t.Fatalf("TurnAgents len = %d, want 2 (foreground+background)", len(agents))
 	}
 
-	l.Append(EventEntry{Time: 7000, Type: "result", Summary: "done"})
+	l.Append(clievent.EventEntry{Time: 7000, Type: "result", Summary: "done"})
 	if agents := l.TurnAgents(); agents != nil {
 		t.Errorf("after second result TurnAgents = %v, want nil", agents)
 	}
@@ -439,8 +441,8 @@ func TestEventLog_TurnAgents(t *testing.T) {
 	}
 
 	// Spawn two agents in a turn.
-	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
-	l.Append(EventEntry{Time: 2000, Type: "agent", Subagent: "go-reviewer"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "agent", Subagent: "go-reviewer"})
 
 	agents := l.TurnAgents()
 	if len(agents) != 2 {
@@ -451,20 +453,20 @@ func TestEventLog_TurnAgents(t *testing.T) {
 	}
 
 	// Result event resets the turn.
-	l.Append(EventEntry{Time: 3000, Type: "result", Summary: "done"})
+	l.Append(clievent.EventEntry{Time: 3000, Type: "result", Summary: "done"})
 	if agents := l.TurnAgents(); agents != nil {
 		t.Errorf("after result TurnAgents = %v, want nil", agents)
 	}
 
 	// New turn with one agent.
-	l.Append(EventEntry{Time: 4000, Type: "agent", Subagent: "planner"})
+	l.Append(clievent.EventEntry{Time: 4000, Type: "agent", Subagent: "planner"})
 	agents = l.TurnAgents()
 	if len(agents) != 1 || agents[0].Name != "planner" {
 		t.Errorf("new turn TurnAgents = %v, want [planner]", agents)
 	}
 
 	// User event also resets.
-	l.Append(EventEntry{Time: 5000, Type: "user", Summary: "hello"})
+	l.Append(clievent.EventEntry{Time: 5000, Type: "user", Summary: "hello"})
 	if agents := l.TurnAgents(); agents != nil {
 		t.Errorf("after user TurnAgents = %v, want nil", agents)
 	}
@@ -473,7 +475,7 @@ func TestEventLog_TurnAgents(t *testing.T) {
 func TestEventLog_TurnAgents_EmptySubagent(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
-	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: ""})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: ""})
 
 	agents := l.TurnAgents()
 	if len(agents) != 1 || agents[0].Name != "agent" {
@@ -484,7 +486,7 @@ func TestEventLog_TurnAgents_EmptySubagent(t *testing.T) {
 func TestEventLog_TurnAgents_IsCopy(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(100)
-	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
 
 	agents := l.TurnAgents()
 	agents[0].Name = "modified"
@@ -504,8 +506,8 @@ func TestEventLog_TurnAgents_SingleSide(t *testing.T) {
 	t.Run("turn_only", func(t *testing.T) {
 		t.Parallel()
 		l := NewEventLog(100)
-		l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
-		l.Append(EventEntry{Time: 2000, Type: "agent", Subagent: "Review"})
+		l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+		l.Append(clievent.EventEntry{Time: 2000, Type: "agent", Subagent: "Review"})
 
 		got := l.TurnAgents()
 		if len(got) != 2 {
@@ -524,7 +526,7 @@ func TestEventLog_TurnAgents_SingleSide(t *testing.T) {
 	t.Run("bg_only", func(t *testing.T) {
 		t.Parallel()
 		l := NewEventLog(100)
-		l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "bg-task", Background: true})
+		l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "bg-task", Background: true})
 
 		got := l.TurnAgents()
 		if len(got) != 1 {
@@ -551,25 +553,25 @@ func TestEventLog_TurnAgentCount(t *testing.T) {
 		t.Errorf("initial count = %d, want 0", got)
 	}
 
-	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
 	if got := l.turnAgentCount.Load(); got != 1 {
 		t.Errorf("after foreground spawn count = %d, want 1", got)
 	}
 
-	l.Append(EventEntry{Time: 2000, Type: "agent", Subagent: "bg-task", Background: true})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "agent", Subagent: "bg-task", Background: true})
 	if got := l.turnAgentCount.Load(); got != 2 {
 		t.Errorf("after bg spawn count = %d, want 2 (1 fg + 1 bg)", got)
 	}
 
 	// result resets both slices and the counter.
-	l.Append(EventEntry{Time: 3000, Type: "result", Summary: "done"})
+	l.Append(clievent.EventEntry{Time: 3000, Type: "result", Summary: "done"})
 	if got := l.turnAgentCount.Load(); got != 0 {
 		t.Errorf("after result count = %d, want 0", got)
 	}
 
 	// user also resets.
-	l.Append(EventEntry{Time: 4000, Type: "agent", Subagent: "planner"})
-	l.Append(EventEntry{Time: 5000, Type: "user", Summary: "hello"})
+	l.Append(clievent.EventEntry{Time: 4000, Type: "agent", Subagent: "planner"})
+	l.Append(clievent.EventEntry{Time: 5000, Type: "user", Summary: "hello"})
 	if got := l.turnAgentCount.Load(); got != 0 {
 		t.Errorf("after user count = %d, want 0", got)
 	}
@@ -588,7 +590,7 @@ func TestEventLog_LastEventAt(t *testing.T) {
 	}
 
 	before := time.Now()
-	l.Append(EventEntry{Type: "thinking", Summary: "working"})
+	l.Append(clievent.EventEntry{Type: "thinking", Summary: "working"})
 	after := time.Now()
 
 	got := l.LastEventAt()
@@ -606,7 +608,7 @@ func TestEventLog_LastEventAt(t *testing.T) {
 	// Append at line 476 so got.After(prevLive) is never a same-tick tie.
 	// No condition to poll — we are waiting for wall-clock to advance.
 	time.Sleep(10 * time.Millisecond)
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "user", Time: 1000, Summary: "ancient"},
 		{Type: "assistant", Time: 2000, Summary: "older"},
 	})
@@ -615,7 +617,7 @@ func TestEventLog_LastEventAt(t *testing.T) {
 	}
 
 	// A subsequent live Append must advance it again.
-	l.Append(EventEntry{Type: "tool_use", Summary: "Read"})
+	l.Append(clievent.EventEntry{Type: "tool_use", Summary: "Read"})
 	if got := l.LastEventAt(); !got.After(prevLive) {
 		t.Errorf("live Append after batch did not advance LastEventAt: %v vs prev %v", got, prevLive)
 	}

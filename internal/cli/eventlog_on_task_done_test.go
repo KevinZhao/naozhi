@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestOnAgentTaskDone_FiresOnTaskDone(t *testing.T) {
@@ -24,7 +26,7 @@ func TestOnAgentTaskDone_FiresOnTaskDone(t *testing.T) {
 	})
 	defer cancel()
 
-	l.Append(EventEntry{Type: "task_done", TaskID: "t1"})
+	l.Append(clievent.EventEntry{Type: "task_done", TaskID: "t1"})
 
 	if got := atomic.LoadInt32(&fired); got != 1 {
 		t.Fatalf("callback fired %d times, want 1", got)
@@ -42,7 +44,7 @@ func TestOnAgentTaskDone_CancelDetaches(t *testing.T) {
 
 	cancel()
 
-	l.Append(EventEntry{Type: "task_done", TaskID: "t1"})
+	l.Append(clievent.EventEntry{Type: "task_done", TaskID: "t1"})
 
 	if got := atomic.LoadInt32(&fired); got != 0 {
 		t.Fatalf("callback fired after Cancel: %d", got)
@@ -74,7 +76,7 @@ func TestOnAgentTaskDone_StaleCancelDoesNotClearLaterRegistration(t *testing.T) 
 	// Calling the stale cancel must NOT clear the live B callback.
 	cancelA()
 
-	l.Append(EventEntry{Type: "task_done", TaskID: "t1"})
+	l.Append(clievent.EventEntry{Type: "task_done", TaskID: "t1"})
 
 	if got := atomic.LoadInt32(&firedA); got != 0 {
 		t.Errorf("stale callback A fired: %d", got)
@@ -97,7 +99,7 @@ func TestOnAgentTaskDone_NilFnReturnsNoopCancel(t *testing.T) {
 	// ...and the returned cancel must be a no-op.
 	cancel()
 
-	l.Append(EventEntry{Type: "task_done", TaskID: "t1"})
+	l.Append(clievent.EventEntry{Type: "task_done", TaskID: "t1"})
 
 	if got := atomic.LoadInt32(&fired); got != 1 {
 		t.Fatalf("pre-existing callback was clobbered by nil registration: fired=%d", got)
@@ -123,7 +125,7 @@ func TestOnAgentTaskDone_CancelRacingAppend(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 32; i++ {
-			l.Append(EventEntry{Type: "task_done", TaskID: "t"})
+			l.Append(clievent.EventEntry{Type: "task_done", TaskID: "t"})
 		}
 	}()
 	cancel()
@@ -134,7 +136,7 @@ func TestOnAgentTaskDone_CancelRacingAppend(t *testing.T) {
 	// What we MUST NOT see is fires after wg.Wait() -- a follow-up
 	// Append below confirms cancel really took effect.
 	atomic.StoreInt32(&fired, 0)
-	l.Append(EventEntry{Type: "task_done", TaskID: "after"})
+	l.Append(clievent.EventEntry{Type: "task_done", TaskID: "after"})
 	if got := atomic.LoadInt32(&fired); got != 0 {
 		t.Fatalf("callback fired after Cancel returned + wait completed: %d", got)
 	}

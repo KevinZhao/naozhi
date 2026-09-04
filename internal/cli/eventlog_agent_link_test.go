@@ -3,6 +3,8 @@ package cli
 import (
 	"sync"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // The four tests below pin RFC v4 agent-team-ui §3.2.2 / §3.3.7 state machine
@@ -21,7 +23,7 @@ func TestEventLog_AgentLifecycle_TurnAgents(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
 
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:      "agent",
 		Subagent:  "lister-1",
 		TeamName:  "file-listers",
@@ -37,7 +39,7 @@ func TestEventLog_AgentLifecycle_TurnAgents(t *testing.T) {
 		t.Errorf("after agent: %+v", got[0])
 	}
 
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:      "task_start",
 		TaskID:    "t562ubj97",
 		ToolUseID: "toolu_bdrk_01A",
@@ -51,7 +53,7 @@ func TestEventLog_AgentLifecycle_TurnAgents(t *testing.T) {
 		t.Errorf("StartedAtMS = %d, want 1700000000", got[0].StartedAtMS)
 	}
 
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:       "task_progress",
 		TaskID:     "t562ubj97",
 		LastTool:   "Bash",
@@ -63,7 +65,7 @@ func TestEventLog_AgentLifecycle_TurnAgents(t *testing.T) {
 		t.Errorf("after task_progress: %+v", got[0])
 	}
 
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:       "task_done",
 		TaskID:     "t562ubj97",
 		Status:     "completed",
@@ -74,7 +76,7 @@ func TestEventLog_AgentLifecycle_TurnAgents(t *testing.T) {
 		t.Errorf("after task_done: %+v", got[0])
 	}
 
-	l.Append(EventEntry{Type: "result"})
+	l.Append(clievent.EventEntry{Type: "result"})
 	got = l.Subagents()
 	if len(got) != 0 {
 		t.Errorf("result should clear turnAgents, got %d", len(got))
@@ -85,7 +87,7 @@ func TestEventLog_AgentLifecycle_Background(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
 
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:       "agent",
 		Subagent:   "bg-scout",
 		Background: true,
@@ -96,7 +98,7 @@ func TestEventLog_AgentLifecycle_Background(t *testing.T) {
 		t.Fatalf("bg subagents = %+v", got)
 	}
 
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:      "task_start",
 		TaskID:    "bg_task_1",
 		ToolUseID: "toolu_bg_01",
@@ -106,7 +108,7 @@ func TestEventLog_AgentLifecycle_Background(t *testing.T) {
 		t.Errorf("bg after task_start: %+v", bg[0])
 	}
 
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:   "task_done",
 		TaskID: "bg_task_1",
 		Status: "error",
@@ -121,12 +123,12 @@ func TestEventLog_SetAgentInternalID_BackfillsLiveAndRing(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
 
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:      "agent",
 		Subagent:  "lister-1",
 		ToolUseID: "toolu_A",
 	})
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:      "task_start",
 		TaskID:    "t1",
 		ToolUseID: "toolu_A",
@@ -140,7 +142,7 @@ func TestEventLog_SetAgentInternalID_BackfillsLiveAndRing(t *testing.T) {
 	}
 
 	ents := l.Entries()
-	var agentEnt, taskEnt *EventEntry
+	var agentEnt, taskEnt *clievent.EventEntry
 	for i := range ents {
 		switch ents[i].Type {
 		case "agent":
@@ -152,7 +154,7 @@ func TestEventLog_SetAgentInternalID_BackfillsLiveAndRing(t *testing.T) {
 	if agentEnt == nil || taskEnt == nil {
 		t.Fatalf("missing entries: %+v", ents)
 	}
-	for _, e := range []*EventEntry{agentEnt, taskEnt} {
+	for _, e := range []*clievent.EventEntry{agentEnt, taskEnt} {
 		if e.InternalAgentID != "agent-0123456789abcdef0" {
 			t.Errorf("%s entry InternalAgentID=%q", e.Type, e.InternalAgentID)
 		}
@@ -168,7 +170,7 @@ func TestEventLog_SetAgentInternalID_BackfillsLiveAndRing(t *testing.T) {
 func TestEventLog_SetAgentInternalID_UnknownToolUseID_NoOp(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
-	l.Append(EventEntry{Type: "agent", Subagent: "lister-1", ToolUseID: "toolu_A"})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "lister-1", ToolUseID: "toolu_A"})
 
 	// Distinct id — nothing should change.
 	l.SetAgentInternalID("toolu_B", "agent-feedfeedfeedfeedf", "/x.jsonl", "p")
@@ -194,7 +196,7 @@ func TestEventLog_SetAgentInternalID_ConcurrentWithAppend(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 100; i++ {
-			l.Append(EventEntry{
+			l.Append(clievent.EventEntry{
 				Type:      "agent",
 				Subagent:  "a",
 				ToolUseID: "toolu_A",
@@ -224,10 +226,10 @@ func TestEventLog_SetAgentInternalID_Sidecar_FanoutRouting(t *testing.T) {
 	l := NewEventLog(50)
 
 	// 3 foreground + 1 background agent, distinct ToolUseIDs.
-	l.Append(EventEntry{Type: "agent", Subagent: "fg-0", ToolUseID: "toolu_0"})
-	l.Append(EventEntry{Type: "agent", Subagent: "fg-1", ToolUseID: "toolu_1"})
-	l.Append(EventEntry{Type: "agent", Subagent: "fg-2", ToolUseID: "toolu_2"})
-	l.Append(EventEntry{Type: "agent", Subagent: "bg-0", ToolUseID: "toolu_bg", Background: true})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "fg-0", ToolUseID: "toolu_0"})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "fg-1", ToolUseID: "toolu_1"})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "fg-2", ToolUseID: "toolu_2"})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "bg-0", ToolUseID: "toolu_bg", Background: true})
 
 	l.SetAgentInternalID("toolu_1", "agent-1111111111111111a", "/p/1.jsonl", "p1")
 	l.SetAgentInternalID("toolu_bg", "agent-bbbbbbbbbbbbbbbbb", "/p/bg.jsonl", "pbg")
@@ -252,7 +254,7 @@ func TestEventLog_SetAgentInternalID_Sidecar_FanoutRouting(t *testing.T) {
 func TestEventLog_BackfillSubagentInternalID_StaleIndexFallsBack(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
-	l.Append(EventEntry{Type: "agent", Subagent: "a", ToolUseID: "toolu_A"})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "a", ToolUseID: "toolu_A"})
 
 	// Corrupt the sidecar so the indexed slot mismatches the key.
 	l.mu.Lock()
@@ -287,7 +289,7 @@ func TestEventLog_AppendBatchReplay_SkipsTaskDoneCallback(t *testing.T) {
 	// Replay path: two task_done events MUST NOT fire the callback.
 	// (Mirrors InjectHistory's typical content — terminal task entries
 	// already persisted from a prior process lifetime.)
-	l.AppendBatchReplay([]EventEntry{
+	l.AppendBatchReplay([]clievent.EventEntry{
 		{Type: "task_done", TaskID: "replay_1", Summary: "ok"},
 		{Type: "task_done", TaskID: "replay_2", Summary: "ok"},
 	})
@@ -297,7 +299,7 @@ func TestEventLog_AppendBatchReplay_SkipsTaskDoneCallback(t *testing.T) {
 
 	// Live path on the same log: callback must still fire. Status defaults
 	// to "completed" inside applyEntryStateLocked when the entry omits one.
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "task_done", TaskID: "live_1", Summary: "ok"},
 	})
 	if len(fired) != 1 || fired[0] != "live_1:completed" {

@@ -13,7 +13,7 @@ package server
 import (
 	"sync"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // tailerSubsPool reuses []*wsClient slices across pollOnce ticks so the
@@ -85,7 +85,7 @@ func releaseTailerSubsSlice(s []*wsClient, h tailerSubsHandle) {
 	tailerSubsPool.Put(h.sp)
 }
 
-// tailerBufferedPool reuses []cli.EventEntry buffers used by attach()
+// tailerBufferedPool reuses []clievent.EventEntry buffers used by attach()
 // to copy the in-memory ring under lock and replay events to a new
 // subscriber outside the lock. Without the pool, every agent_subscribe
 // path allocated a fresh buffer of up to 500 EventEntry values
@@ -102,7 +102,7 @@ func releaseTailerSubsSlice(s []*wsClient, h tailerSubsHandle) {
 // subsequent attaches at similar sizes skip the growth.
 var tailerBufferedPool = sync.Pool{
 	New: func() any {
-		s := make([]cli.EventEntry, 0, 16)
+		s := make([]clievent.EventEntry, 0, 16)
 		return &s
 	},
 }
@@ -112,17 +112,17 @@ var tailerBufferedPool = sync.Pool{
 // tailerSubsHandle (taking &local would force the local to escape to
 // the heap on every attach call).
 type tailerBufferedHandle struct {
-	sp *[]cli.EventEntry
+	sp *[]clievent.EventEntry
 }
 
-// acquireTailerBufferedSlice returns a reusable []cli.EventEntry with
+// acquireTailerBufferedSlice returns a reusable []clievent.EventEntry with
 // len==0 and cap >= hint plus the handle the caller must hand back.
 // R249-PERF-4 (#926).
-func acquireTailerBufferedSlice(hint int) ([]cli.EventEntry, tailerBufferedHandle) {
-	sp := tailerBufferedPool.Get().(*[]cli.EventEntry)
+func acquireTailerBufferedSlice(hint int) ([]clievent.EventEntry, tailerBufferedHandle) {
+	sp := tailerBufferedPool.Get().(*[]clievent.EventEntry)
 	s := (*sp)[:0]
 	if cap(s) < hint {
-		s = make([]cli.EventEntry, 0, hint)
+		s = make([]clievent.EventEntry, 0, hint)
 	}
 	*sp = s
 	return s, tailerBufferedHandle{sp: sp}
@@ -132,12 +132,12 @@ func acquireTailerBufferedSlice(hint int) ([]cli.EventEntry, tailerBufferedHandl
 // embedded pointers — Images, ToolCall, Message bytes — become
 // GC-eligible immediately rather than pinning whatever the previous
 // attach handed us) and returns the slice to the pool. Nil-handle-safe.
-func releaseTailerBufferedSlice(s []cli.EventEntry, h tailerBufferedHandle) {
+func releaseTailerBufferedSlice(s []clievent.EventEntry, h tailerBufferedHandle) {
 	if h.sp == nil {
 		return
 	}
 	for i := range s {
-		s[i] = cli.EventEntry{}
+		s[i] = clievent.EventEntry{}
 	}
 	*h.sp = s[:0]
 	tailerBufferedPool.Put(h.sp)

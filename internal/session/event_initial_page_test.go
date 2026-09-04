@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestEventInitialPageCtx_HasMoreWhenOlderExists is the regression for the
@@ -19,16 +19,16 @@ func TestEventInitialPageCtx_HasMoreWhenOlderExists(t *testing.T) {
 	// Memory tier all-internal so the visible-aware read pages into disk and
 	// the returned slice does NOT include the very oldest entries.
 	for i := 0; i < 5; i++ {
-		s.persistedHistory = append(s.persistedHistory, cli.EventEntry{Time: int64(901 + i), Type: "tool_use"})
+		s.persistedHistory = append(s.persistedHistory, clievent.EventEntry{Time: int64(901 + i), Type: "tool_use"})
 	}
 	// Disk: 900 entries, a visible bubble every 10th → 90 visible total.
-	var disk []cli.EventEntry
+	var disk []clievent.EventEntry
 	for i := 1; i <= 900; i++ {
 		ty := "tool_use"
 		if i%10 == 0 {
 			ty = "text"
 		}
-		disk = append(disk, cli.EventEntry{Time: int64(i), Type: ty})
+		disk = append(disk, clievent.EventEntry{Time: int64(i), Type: ty})
 	}
 	s.SetHistorySource(&pagingHistorySource{all: disk})
 
@@ -50,7 +50,7 @@ func TestEventInitialPageCtx_NoMoreWhenSliceIsOldest(t *testing.T) {
 	s := &ManagedSession{key: "k"}
 	// 10 visible events entirely in memory, none on disk.
 	for i := 1; i <= 10; i++ {
-		s.persistedHistory = append(s.persistedHistory, cli.EventEntry{Time: int64(i), Type: "text"})
+		s.persistedHistory = append(s.persistedHistory, clievent.EventEntry{Time: int64(i), Type: "text"})
 	}
 	fake := &pagingHistorySource{all: nil}
 	s.SetHistorySource(fake)
@@ -82,14 +82,14 @@ func TestEventInitialPageCtx_EmptySession(t *testing.T) {
 // disk source aborts a reverse JSONL scan mid-walk. Used to prove the hasMore
 // probe fails OPEN when its shared ctx budget is already spent.
 type ctxCancelAwareSource struct {
-	all []cli.EventEntry // chronological; older history that exists on disk
+	all []clievent.EventEntry // chronological; older history that exists on disk
 }
 
-func (s *ctxCancelAwareSource) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func (s *ctxCancelAwareSource) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	var picked []cli.EventEntry
+	var picked []clievent.EventEntry
 	for i := len(s.all) - 1; i >= 0 && len(picked) < limit; i-- {
 		if beforeMS > 0 && s.all[i].Time >= beforeMS {
 			continue
@@ -117,13 +117,13 @@ func TestEventInitialPageCtx_FailsOpenOnCtxCancel(t *testing.T) {
 	// from memory alone (no disk walk needed for the slice itself), so the slice
 	// is non-empty and entries[0] is a real anchor.
 	for i := 1; i <= DefaultVisibleTarget+5; i++ {
-		s.persistedHistory = append(s.persistedHistory, cli.EventEntry{Time: int64(1000 + i), Type: "text"})
+		s.persistedHistory = append(s.persistedHistory, clievent.EventEntry{Time: int64(1000 + i), Type: "text"})
 	}
 	// Disk genuinely holds older history (times 1..900), but the cancelled ctx
 	// will prevent the probe from ever seeing it.
-	var disk []cli.EventEntry
+	var disk []clievent.EventEntry
 	for i := 1; i <= 900; i++ {
-		disk = append(disk, cli.EventEntry{Time: int64(i), Type: "text"})
+		disk = append(disk, clievent.EventEntry{Time: int64(i), Type: "text"})
 	}
 	s.SetHistorySource(&ctxCancelAwareSource{all: disk})
 
@@ -146,7 +146,7 @@ func TestEventInitialPageCtx_CleanEmptyProbeReportsNoMore(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	for i := 1; i <= 10; i++ {
-		s.persistedHistory = append(s.persistedHistory, cli.EventEntry{Time: int64(i), Type: "text"})
+		s.persistedHistory = append(s.persistedHistory, clievent.EventEntry{Time: int64(i), Type: "text"})
 	}
 	// Live ctx, no older history on disk.
 	s.SetHistorySource(&ctxCancelAwareSource{all: nil})
@@ -170,7 +170,7 @@ func TestEventInitialPageCtx_MemoryHasOlder(t *testing.T) {
 	// returns only the last DefaultVisibleTarget, leaving older ones in the ring.
 	n := 2 * DefaultVisibleTarget
 	for i := 1; i <= n; i++ {
-		s.persistedHistory = append(s.persistedHistory, cli.EventEntry{Time: int64(i), Type: "text"})
+		s.persistedHistory = append(s.persistedHistory, clievent.EventEntry{Time: int64(i), Type: "text"})
 	}
 	// No disk source: the limit=1 probe must find the older entry in memory.
 	entries, hasMore := s.EventInitialPageCtx(context.Background(), DefaultVisibleTarget, maxVisibleTotal)

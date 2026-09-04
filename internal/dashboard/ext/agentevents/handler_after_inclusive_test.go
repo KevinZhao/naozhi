@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
@@ -30,7 +31,7 @@ func TestAgentEvents_AfterReadmitsWatermarkMillisecond(t *testing.T) {
 	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", lines)
 
 	linker := cli.NewSubagentLinker()
-	linker.SeedFromHistory([]cli.EventEntry{{
+	linker.SeedFromHistory([]clievent.EventEntry{{
 		Type:            "task_start",
 		ToolUseID:       "toolu_T",
 		TaskID:          "t1",
@@ -40,14 +41,14 @@ func TestAgentEvents_AfterReadmitsWatermarkMillisecond(t *testing.T) {
 	}})
 	h := &Handler{linkerFor: func(string) agentlink.AgentLinker { return linker }}
 
-	fetch := func(after, limit string) []cli.EventEntry {
+	fetch := func(after, limit string) []clievent.EventEntry {
 		t.Helper()
 		w := httptest.NewRecorder()
 		h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", after, limit))
 		if w.Code != http.StatusOK {
 			t.Fatalf("after=%s limit=%s: status=%d body=%s", after, limit, w.Code, w.Body.String())
 		}
-		var got []cli.EventEntry
+		var got []clievent.EventEntry
 		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 			t.Fatalf("decode: %v", err)
 		}

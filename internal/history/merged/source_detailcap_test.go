@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -24,10 +25,10 @@ func TestMerged_CrossSourceContentDedup_DetailCapMismatch(t *testing.T) {
 		t.Fatalf("fixture must exercise the cap mismatch: details are equal")
 	}
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "nativecryptorand0000000000000000", Time: 100, Type: "text", Summary: "long", Detail: localDetail},
 		}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "derivedfallbackuuid0000000000000", Time: 100, Type: "text", Summary: "long", Detail: fallbackDetail},
 		}},
 	}
@@ -47,10 +48,10 @@ func TestMerged_CrossSourceContentDedup_DetailCapMismatch(t *testing.T) {
 func TestMerged_CrossSourceContentDedup_LongDistinctNotCollapsed(t *testing.T) {
 	base := strings.Repeat("x", cli.EventDetailMaxRunes+1000)
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "u1", Time: 100, Type: "text", Summary: "long", Detail: textutil.TruncateRunes("A"+base, cli.EventDetailMaxRunes)},
 		}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "u2", Time: 100, Type: "text", Summary: "long", Detail: textutil.TruncateRunes("B"+base, history.DetailMaxRunes)},
 		}},
 	}

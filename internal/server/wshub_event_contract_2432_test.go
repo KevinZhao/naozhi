@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -28,7 +28,7 @@ import (
 func TestEventPush_MultiSubscriber_SameMsWaves_DistinctUUIDs(t *testing.T) {
 	hub, router := newTestHub("")
 	proc := session.NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, UUID: "seed", Type: "user", Summary: "hi"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, UUID: "seed", Type: "user", Summary: "hi"})
 	router.InjectSession("test:d:u:general", proc)
 
 	url, cleanup := startWSServer(t, hub)
@@ -58,7 +58,7 @@ func TestEventPush_MultiSubscriber_SameMsWaves_DistinctUUIDs(t *testing.T) {
 	// next so each pushLoop's cursor is at T with exactly one entry per wave.
 	const turnEndMS = 5000
 	for _, uuid := range []string{"e1", "e2", "e3"} {
-		proc.EventLog.Append(cli.EventEntry{Time: turnEndMS, UUID: uuid, Type: "text", Summary: uuid})
+		proc.EventLog.Append(clievent.EventEntry{Time: turnEndMS, UUID: uuid, Type: "text", Summary: uuid})
 		for i, conn := range conns {
 			deadline := time.Now().Add(3 * time.Second)
 			if _, ok := readUntilHistoryWith(t, conn, uuid, deadline); !ok {
@@ -76,9 +76,9 @@ func TestEventPush_MultiSubscriber_SameMsWaves_DistinctUUIDs(t *testing.T) {
 func TestWS_SubscribeWithAfter_ReadmitsAfterMillisecond(t *testing.T) {
 	hub, router := newTestHub("")
 	proc := session.NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, UUID: "a", Type: "thinking", Summary: "..."})
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, UUID: "b", Type: "text", Summary: "reply"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, UUID: "a", Type: "thinking", Summary: "..."})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, UUID: "b", Type: "text", Summary: "reply"})
 	router.InjectSession("test:d:u:general", proc)
 
 	url, cleanup := startWSServer(t, hub)

@@ -11,7 +11,9 @@
 // History / motivation: docs/TODO.md R239-ARCH-I, R248-ARCH-4 (#375).
 package agentlink
 
-import "github.com/naozhi/naozhi/internal/cli"
+import (
+	"github.com/naozhi/naozhi/internal/cli"
+)
 
 // The four consuming concerns are declared as three single-responsibility
 // interfaces (R248-ARCH-4 #375 part c). AgentLinker embeds all three so the
@@ -60,7 +62,7 @@ type PathProvider interface {
 // tombstone — no fake-pointer dance.
 //
 // Why cli.LinkInfo and not a mirrored struct? Server already imports
-// internal/cli for cli.NewTranscriptReader + cli.EventEntry, so reusing
+// internal/cli for cli.NewTranscriptReader + clievent.EventEntry, so reusing
 // the existing concrete value type avoids a churn-heavy adapter layer
 // for zero behavioural gain. The decoupling that matters is the map-key
 // identity and the method set, not the value type each method returns.

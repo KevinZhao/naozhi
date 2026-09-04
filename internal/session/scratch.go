@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -223,8 +223,8 @@ type OpenOptions struct {
 	// These feed the <conversation_context> block in the system prompt so
 	// the CLI sees a few turns of surrounding conversation rather than a
 	// lone quoted snippet. Either slice may be empty.
-	ContextBefore []cli.EventEntry
-	ContextAfter  []cli.EventEntry
+	ContextBefore []clievent.EventEntry
+	ContextAfter  []clievent.EventEntry
 }
 
 // Open creates a new scratch session and returns it. The quote is sanitized
@@ -569,7 +569,7 @@ func stripArgvControlBytes(s string) string {
 // many entries actually made it in; ctxTrunc reports whether any candidate
 // entries were rejected. An empty block (no candidates survived filtering)
 // returns ("", 0, false).
-func renderContextTurns(before, after []cli.EventEntry, budgetBytes int) (string, int, bool) {
+func renderContextTurns(before, after []clievent.EventEntry, budgetBytes int) (string, int, bool) {
 	// Filter once up front so both the zero-budget short-circuit and the
 	// normal-budget walk share a single allocation. Previously the zero-
 	// budget arm re-filtered just to check len() > 0, wasting two slices
@@ -691,11 +691,11 @@ func renderContextTurns(before, after []cli.EventEntry, budgetBytes int) (string
 // meaning (user prompts and assistant text / result replies). Everything
 // else — tool_use, thinking, init, system, todo, agent, task_* — is dropped.
 // The returned slice is a new allocation, not aliased.
-func filterContextEntries(in []cli.EventEntry) []cli.EventEntry {
+func filterContextEntries(in []clievent.EventEntry) []clievent.EventEntry {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]cli.EventEntry, 0, len(in))
+	out := make([]clievent.EventEntry, 0, len(in))
 	for _, e := range in {
 		switch e.Type {
 		case "user", "text", "result":
@@ -721,7 +721,7 @@ func filterContextEntries(in []cli.EventEntry) []cli.EventEntry {
 // for the <conversation_context> block. The role comes from the entry type;
 // the payload is sanitized (control chars / bidi stripped) and truncated so
 // one noisy multi-KB entry cannot eat the whole budget on its own.
-func renderTurnLine(e cli.EventEntry) string {
+func renderTurnLine(e clievent.EventEntry) string {
 	role := "assistant"
 	if e.Type == "user" {
 		role = "user"
@@ -741,7 +741,7 @@ func renderTurnLine(e cli.EventEntry) string {
 // pickEntryText returns the best textual payload for a context entry,
 // preferring Detail (fuller form used by dashboard) and falling back to
 // Summary when Detail is empty.
-func pickEntryText(e cli.EventEntry) string {
+func pickEntryText(e clievent.EventEntry) string {
 	if e.Detail != "" {
 		return e.Detail
 	}

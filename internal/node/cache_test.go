@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // stubConn implements Conn for cache tests.
@@ -42,10 +42,10 @@ func (s *stubConn) FetchProjects(_ context.Context) ([]map[string]any, error) {
 func (s *stubConn) FetchDiscovered(_ context.Context) ([]map[string]any, error) {
 	return s.disc, s.discErr
 }
-func (s *stubConn) FetchDiscoveredPreview(_ context.Context, _ string) ([]cli.EventEntry, error) {
+func (s *stubConn) FetchDiscoveredPreview(_ context.Context, _ string) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
-func (s *stubConn) FetchEvents(_ context.Context, _ string, _ int64) ([]cli.EventEntry, error) {
+func (s *stubConn) FetchEvents(_ context.Context, _ string, _ int64) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
 func (s *stubConn) FetchBackends(_ context.Context) (json.RawMessage, error) {

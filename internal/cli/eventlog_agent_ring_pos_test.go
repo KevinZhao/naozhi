@@ -2,6 +2,8 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // R260528-PERF-22 (#1360) regression coverage. The sidecar must:
@@ -20,8 +22,8 @@ func TestEventLog_AgentRingPos_Sidecar_PopulatedOnAppend(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
 
-	l.Append(EventEntry{Type: "agent", Subagent: "a1", ToolUseID: "toolu_X"})
-	l.Append(EventEntry{Type: "task_start", TaskID: "t_X", ToolUseID: "toolu_X"})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "a1", ToolUseID: "toolu_X"})
+	l.Append(clievent.EventEntry{Type: "task_start", TaskID: "t_X", ToolUseID: "toolu_X"})
 
 	l.mu.RLock()
 	pos, ok := l.agentRingByToolUse["toolu_X"]
@@ -41,8 +43,8 @@ func TestEventLog_AgentRingPos_FastPathBackfill(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
 
-	l.Append(EventEntry{Type: "agent", Subagent: "a1", ToolUseID: "toolu_Y"})
-	l.Append(EventEntry{Type: "task_start", TaskID: "t_Y", ToolUseID: "toolu_Y"})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "a1", ToolUseID: "toolu_Y"})
+	l.Append(clievent.EventEntry{Type: "task_start", TaskID: "t_Y", ToolUseID: "toolu_Y"})
 
 	// Sanity: sidecar present so SetAgentInternalID hits the fast path.
 	l.SetAgentInternalID("toolu_Y", "agent-aaaaaaaaaaaaaaaaa", "/p/Y.jsonl", "p_Y")
@@ -71,8 +73,8 @@ func TestEventLog_AgentRingPos_FallbackScanWhenSidecarCleared(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
 
-	l.Append(EventEntry{Type: "agent", Subagent: "a1", ToolUseID: "toolu_Z"})
-	l.Append(EventEntry{Type: "task_start", TaskID: "t_Z", ToolUseID: "toolu_Z"})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "a1", ToolUseID: "toolu_Z"})
+	l.Append(clievent.EventEntry{Type: "task_start", TaskID: "t_Z", ToolUseID: "toolu_Z"})
 
 	// Simulate a stale-sidecar state: clear the map but leave ring
 	// entries intact. SetAgentInternalID must still backfill via the
@@ -96,10 +98,10 @@ func TestEventLog_AgentRingPos_ResetOnResultBoundary(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
 
-	l.Append(EventEntry{Type: "agent", Subagent: "a1", ToolUseID: "toolu_W"})
-	l.Append(EventEntry{Type: "task_start", TaskID: "t_W", ToolUseID: "toolu_W"})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "a1", ToolUseID: "toolu_W"})
+	l.Append(clievent.EventEntry{Type: "task_start", TaskID: "t_W", ToolUseID: "toolu_W"})
 
-	l.Append(EventEntry{Type: "result"})
+	l.Append(clievent.EventEntry{Type: "result"})
 
 	l.mu.RLock()
 	_, ok := l.agentRingByToolUse["toolu_W"]
@@ -117,8 +119,8 @@ func TestEventLog_AgentRingPos_IgnoresEmptyToolUseID(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
 
-	l.Append(EventEntry{Type: "agent", Subagent: "a1", ToolUseID: ""})
-	l.Append(EventEntry{Type: "task_start", TaskID: "t_E", ToolUseID: ""})
+	l.Append(clievent.EventEntry{Type: "agent", Subagent: "a1", ToolUseID: ""})
+	l.Append(clievent.EventEntry{Type: "task_start", TaskID: "t_E", ToolUseID: ""})
 
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -131,8 +133,8 @@ func TestEventLog_AgentRingPos_IgnoresOtherEntryTypes(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(20)
 
-	l.Append(EventEntry{Type: "tool_use", ToolUseID: "toolu_unrelated"})
-	l.Append(EventEntry{Type: "tool_result", ToolUseID: "toolu_unrelated"})
+	l.Append(clievent.EventEntry{Type: "tool_use", ToolUseID: "toolu_unrelated"})
+	l.Append(clievent.EventEntry{Type: "tool_result", ToolUseID: "toolu_unrelated"})
 
 	l.mu.RLock()
 	defer l.mu.RUnlock()

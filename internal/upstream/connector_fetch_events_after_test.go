@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -23,13 +23,13 @@ func TestHandleRequest_FetchEvents_AfterReadmitsWatermarkMillisecond(t *testing.
 	const key = "feishu:direct:alice:general"
 	router := makeRouter()
 	proc := session.NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, UUID: "a", Type: "thinking", Summary: "..."})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, UUID: "a", Type: "thinking", Summary: "..."})
 	router.InjectSession(key, proc)
 	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, router, nil, nil)
 
 	// The dashboard rendered "a" (cursor 2000); its same-ms sibling lands next.
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, UUID: "b", Type: "text", Summary: "answer"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, UUID: "b", Type: "text", Summary: "answer"})
 
 	params, _ := json.Marshal(map[string]any{"key": key, "after": int64(2000)})
 	req := node.ReverseMsg{Method: "fetch_events", Params: params}
@@ -37,7 +37,7 @@ func TestHandleRequest_FetchEvents_AfterReadmitsWatermarkMillisecond(t *testing.
 	if err != nil {
 		t.Fatalf("fetch_events: %v", err)
 	}
-	var got []cli.EventEntry
+	var got []clievent.EventEntry
 	if err := json.Unmarshal(result, &got); err != nil {
 		t.Fatalf("decode %s: %v", result, err)
 	}

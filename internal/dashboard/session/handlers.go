@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/cronview"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -942,8 +943,8 @@ const maxEventsPageLimit = 500
 // eventsBefore returns the entries strictly older than the `before` cursor
 // (unix ms), preserving the input's chronological order. Always returns a
 // non-nil slice so an exhausted page serialises as [] rather than null.
-func eventsBefore(entries []cli.EventEntry, before int64) []cli.EventEntry {
-	out := make([]cli.EventEntry, 0, len(entries))
+func eventsBefore(entries []clievent.EventEntry, before int64) []clievent.EventEntry {
+	out := make([]clievent.EventEntry, 0, len(entries))
 	for _, e := range entries {
 		if e.Time < before {
 			out = append(out, e)
@@ -1088,7 +1089,7 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	switch {
 	case afterStr != "":
 		entries = sess.EventEntriesSince(cli.SinceInclusive(after))
