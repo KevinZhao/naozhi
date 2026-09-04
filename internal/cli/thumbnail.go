@@ -10,11 +10,8 @@ import (
 	_ "image/png"
 	"log/slog"
 
-	// Register decoders for additional inbound image formats. The dashboard
-	// (dashboard_send.go) and Discord adapter already accept webp/bmp uploads;
-	// previously those formats silently produced an empty thumbnail because
-	// only the stdlib gif/jpeg/png decoders were registered. Output is still
-	// normalized to JPEG — we only need decoder-side support here.
+	// Decoder-only registration for webp/bmp uploads accepted by the
+	// dashboard and Discord adapter; output is always normalized to JPEG.
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/webp"
 )
@@ -24,15 +21,9 @@ import (
 // full RGBA decode (e.g., 4096x4096 = 64 MB RGBA).
 const maxThumbnailPixels = 4096 * 4096
 
-// thumbnailWorkerCap is the maximum number of concurrent image decode
-// operations (and the matching maximum number of worker goroutines spawned
-// per multi-image user message in process_send.go).
-//
-// R247-PERF-21 (#569): single source of truth for the concurrency cap so
-// process_send.go's worker-pool sizing cannot drift from the actual
-// serialisation point in MakeThumbnail. Previously the cap=4 lived only
-// in this file and process_send.go spawned len(images) goroutines, paying
-// 8KB stack × N even though the inner thumbSem made anything past 4 idle.
+// thumbnailWorkerCap bounds concurrent image decodes and is also the
+// worker-pool size process_send.go uses per multi-image message, so the two
+// cannot drift (#569).
 const thumbnailWorkerCap = 4
 
 // thumbSem limits concurrent image decode operations to cap aggregate memory.
@@ -41,20 +32,10 @@ var thumbSem = make(chan struct{}, thumbnailWorkerCap)
 // MakeThumbnail generates a small JPEG data URI from raw image bytes.
 // Returns empty string if the image cannot be decoded or is too large.
 //
-// PANIC SAFETY: the pure-Go decoders registered above (webp, bmp, gif, png,
-// jpeg) have historically panicked on crafted-malformed inputs (upstream
-// x/image has accepted several hardening patches over the years, but we
-// decode user-supplied images from the dashboard / Discord / Slack /
-// Feishu adapters — any crash here would tear down the whole process).
-// Treat decoder panics as decode-failures and return the empty string so
-// the caller renders the message without a thumbnail rather than killing
-// the server.
-//
-// R243-GO-1 [BREAKING-LOCAL]: log via slog.Error so panics are observable.
-// The previous silent recover meant the outer recover wrapper in
-// process_send.go's thumbnail goroutine was dead code (panic was already
-// swallowed here before reaching the goroutine boundary), AND every
-// crafted-malformed image was a hidden monitoring blind spot.
+// The pure-Go decoders can panic on crafted inputs and the bytes are
+// user-supplied (dashboard / IM adapters), so a decoder panic is treated as a
+// decode failure (logged at Error so it stays observable) instead of taking
+// down the process.
 func MakeThumbnail(data []byte, maxDim int) (result string) {
 	defer func() {
 		if r := recover(); r != nil {

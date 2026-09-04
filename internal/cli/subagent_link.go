@@ -17,60 +17,27 @@ import (
 )
 
 // agentHexRe whitelists the hex component of an agent-<hex>.jsonl filename
-// before we accept it from the subagents/ directory. Claude CLI today emits
-// 17-char lowercase hex; we accept 8-64 for forward compatibility but refuse
-// anything containing path separators, dots, or shell metacharacters.
-// R201-SEC-M2 defense-in-depth: filepath.Join(dir, "agent-"+hex+".jsonl")
-// with a malformed hex would normally be cleaned by filepath.Clean, but
-// having the sanity gate here removes any doubt about cross-platform
-// traversal corner cases (Windows short names, symlink prefix collapse).
+// (CLI emits 17 chars; 8-64 accepted) and refuses path separators, dots and
+// metacharacters before the value reaches filepath.Join — defence in depth
+// against cross-platform traversal corner cases.
 var agentHexRe = regexp.MustCompile(`^[A-Za-z0-9]{8,64}$`)
 
-// SubagentLinker maps agent task_ids (and their originating Agent tool_use_ids)
-// to the on-disk transcript jsonl Claude CLI writes under
-// <projectDir>/<sessionID>/subagents/agent-<hex>.jsonl. The dashboard uses
-// this mapping to render each agent's internal event stream when the user
-// clicks an agent row in the banner (RFC v4 agent-team-ui §3.3).
-//
-// Resolve is async — the CLI emits system.task_started immediately after the
-// parent-stream Agent tool_use, but flushes the first .meta.json / jsonl row
-// 0-500 ms later. Callers spawn Resolve in a goroutine with a bounded grace
-// window (default 3 s). The on-resolve callback then starts the silent
-// TranscriptReader tailer and backfills EventEntry.InternalAgentID so
-// persistHistory captures the linkage (see §3.3.7 SeedFromHistory).
-// maxConcurrentResolves caps the number of Resolve goroutines that may
-// execute concurrently per SubagentLinker. Each Resolve sleeps up to
-// retryLimit*retryInterval (default 3 s) waiting for the CLI to flush its
-// jsonl; a single multi-agent turn can emit 10+ task_started events in
-// rapid succession, each spawning a goroutine. Without a cap, long-running
-// agents accumulate hundreds of parked goroutines per session.
+// maxConcurrentResolves caps concurrent Resolve calls per SubagentLinker.
+// Each Resolve may sleep up to retryLimit*retryInterval (3 s) waiting for the
+// CLI to flush its jsonl, and a multi-agent turn emits 10+ task_started in a
+// burst.
 const maxConcurrentResolves = 8
 
-// resolveWorkerCount and resolveQueueDepth size the dispatch pool used by
-// DispatchResolve. R214-PERF-6 (#415): readLoop and InjectHistory previously
-// did `go linker.Resolve(...)` for every system.task_started event, so a
-// burst of 10+ task_started events (multi-agent turn) spawned 10+ goroutines
-// that lived 0–3 s each waiting on resolveSem and the retry loop.
-//
-// The pool replaces the goroutine-per-event pattern with a fixed set of
-// long-lived workers consuming a bounded queue. Sizing notes:
-//   - workers: 4 — enough headroom for parallel agent turns without
-//     starving on a single slow Resolve, well under the resolveSem cap of
-//     8 so concurrent Resolves still benefit from the existing back-pressure.
-//   - queue depth: 16 — soaks bursty task_started replays (shim reconnect
-//     can fan in dozens at once); deeper would just delay the "queue full"
-//     fallback warning that signals a malformed CLI stream.
-//
-// Queue full → DispatchResolve falls back to inline Resolve with a warning
-// (per the issue's proposal) so we never silently drop a task_started.
+// resolveWorkerCount and resolveQueueDepth size DispatchResolve's worker pool
+// (#415). 4 workers stay under the resolveSem cap of 8; a depth of 16 soaks
+// bursty task_started replays on shim reconnect. A full queue falls back to an
+// inline Resolve with a warning so no task_started is dropped.
 const (
 	resolveWorkerCount = 4
 	resolveQueueDepth  = 16
 )
 
-// resolveJob carries one Resolve invocation across the dispatch queue. The
-// fields mirror Resolve's argument list verbatim so workers can splat them
-// without the closure-allocation cost of capturing locals at the call site.
+// resolveJob carries one Resolve invocation across the dispatch queue.
 type resolveJob struct {
 	ctx              context.Context
 	taskID           string
@@ -80,56 +47,31 @@ type resolveJob struct {
 	agentToolUseTime int64
 }
 
-// staleAgentReuseSlack is the lookback grace window applied when comparing
-// an agent jsonl's first-row timestamp to the parent's Agent tool_use
-// timestamp during candidate filtering. If the jsonl row predates the
-// tool_use by more than this slack, we treat the file as a stale same-name
-// reuse from a prior turn and drop it from the candidate set.
-//
-// 10 s is empirically sufficient: the Claude CLI flushes the first jsonl
-// row within ~500 ms of the parent-stream Agent tool_use under normal
-// load; the slack absorbs filesystem-level mtime/timestamp skew (NFS
-// granularity, agent-side bufio flush staggering) without admitting the
-// previous turn's transcript when the operator re-invokes the same named
-// agent within the same session. R10 anchor — see subagent_link.go Resolve
-// step 5 cross-check.
+// staleAgentReuseSlack is the lookback grace applied when comparing an agent
+// jsonl's first-row timestamp to the parent Agent tool_use: a row older than
+// this is a stale same-name reuse from a prior turn. The CLI flushes within
+// ~500 ms; 10 s absorbs timestamp skew without admitting the previous turn.
 const staleAgentReuseSlack = 10 * time.Second
 
-// maxMetaCacheEntries caps the number of path→firstLineMeta entries held in
-// the per-Resolve metaCache. Under normal usage the cache holds one entry per
-// surviving candidate (a handful per retry attempt). In a directory with
-// hundreds of stale agent files the map could accumulate hundreds of entries
-// across retryLimit+1 attempts. When the map exceeds this limit we clear it
-// so the next attempt starts with a fresh map, avoiding unbounded growth while
-// retaining the cache-hit benefit for the common case. R050103G-PERF-1.
+// maxMetaCacheEntries bounds the per-Resolve path→firstLineMeta cache; a
+// directory with hundreds of stale agent files would otherwise grow it across
+// retry attempts. The cache is cleared when exceeded.
 const maxMetaCacheEntries = 256
 
-// maxNamedLinkHistory caps how many resolved LinkInfo records the linker
-// retains per agent name in byName. byName is only consulted for same-name
-// respawn detection (Resolve step 7b), which needs nothing more than a small
-// window of recent FirstPromptIDs to spot a duplicate-name reuse. Long-lived
-// sessions that reinvoke the same agent type ("orchestrator", …) hundreds of
-// turns over would otherwise grow byName[name] without bound — one LinkInfo
-// per resolved task, leaking ~steady-state memory for the process lifetime.
-// Keeping the most recent N preserves the detection semantics (we still hold
-// the latest distinct promptIDs) while bounding the slice. R250531-PERF-4.
+// maxNamedLinkHistory caps LinkInfo records retained per agent name in byName,
+// which is consulted only for same-name respawn detection (recent
+// FirstPromptIDs suffice). Unbounded, a long session re-invoking the same
+// agent type would leak one LinkInfo per task.
 const maxNamedLinkHistory = 32
 
-// appendNamedLink appends info to the byName slice for name, trimming the
-// slice to at most maxNamedLinkHistory most-recent entries. Trimming reuses
-// the tail in place (copy down) so the backing array does not grow unbounded
-// across the hundreds of appends a long session accumulates. Caller must hold
-// l.mu as a write lock.
+// appendNamedLink appends info to byName[name], keeping at most the newest
+// maxNamedLinkHistory entries. Caller must hold l.mu as a write lock.
 func (l *SubagentLinker) appendNamedLink(name string, info LinkInfo) {
 	cur := l.byName[name]
 	cur = append(cur, info)
 	if len(cur) > maxNamedLinkHistory {
-		// Drop the oldest entries; keep the newest maxNamedLinkHistory.
-		// If the backing array has grown far beyond the cap (e.g. a slice
-		// that ballooned to 256 before this trim), the in-place copy-down
-		// keeps the whole oversized backing array alive for the session's
-		// lifetime. Re-allocate a tightly-sized array in that case so the
-		// oversized backing store can be garbage-collected. R20260531-CR-004.
+		// Re-allocate when the backing array ballooned so the oversized
+		// store can be collected; otherwise copy down in place.
 		if cap(cur) > maxNamedLinkHistory*2 {
 			trimmed := make([]LinkInfo, maxNamedLinkHistory)
 			copy(trimmed, cur[len(cur)-maxNamedLinkHistory:])
@@ -142,6 +84,14 @@ func (l *SubagentLinker) appendNamedLink(name string, info LinkInfo) {
 	l.byName[name] = cur
 }
 
+// SubagentLinker maps agent task_ids (and their originating Agent
+// tool_use_ids) to the transcript jsonl Claude CLI writes under
+// <projectDir>/<sessionID>/subagents/agent-<hex>.jsonl, so the dashboard can
+// render each agent's internal event stream. Resolve is async: the CLI emits
+// system.task_started immediately but flushes the first jsonl row 0-500 ms
+// later, so Resolve retries within a bounded grace window (default 3 s) and
+// the OnResolve callbacks then start the tailer and backfill
+// EventEntry.InternalAgentID for persistence.
 type SubagentLinker struct {
 	mu              sync.RWMutex
 	byTaskID        map[string]LinkInfo
@@ -158,44 +108,26 @@ type SubagentLinker struct {
 	onResolveMu  sync.Mutex
 	onResolveFns []func(taskID, toolUseID, internalAgentID string)
 
-	// resolveSem bounds concurrent Resolve goroutines. Buffered channel
-	// acts as a counting semaphore: acquire by sending, release by receiving.
+	// resolveSem is a counting semaphore bounding concurrent Resolve calls.
 	resolveSem chan struct{}
 
-	// resolveJobs carries dispatched Resolve invocations to the long-lived
-	// worker pool started by DispatchResolve. Buffered with resolveQueueDepth.
-	// nil until first DispatchResolve call (lazy init).
+	// resolveJobs feeds the worker pool started lazily by DispatchResolve;
+	// nil until the first call.
 	resolveJobs chan resolveJob
 
-	// resolvePoolOnce guards lazy creation of the worker pool. The pool
-	// inherits poolCtx (set via SetPoolContext) as its lifetime so workers
-	// exit when the owning Process dies — never the per-request ctx of
-	// whichever caller happened to dispatch first. R20260603030037-GO-2
-	// (#1661): binding worker lifetime to the first caller's ctx meant a
-	// short-lived per-request ctx could cancel all workers, leaving later
-	// jobs (pushed under Process.lifecycleContext()) with no consumer.
+	// resolvePoolOnce guards pool creation. Workers live on poolCtx, never
+	// the per-request ctx of the first dispatcher — a short-lived ctx would
+	// otherwise cancel all workers and leave later jobs unconsumed (#1661).
 	resolvePoolOnce sync.Once
 
-	// poolCtx governs worker-pool lifetime, decoupled from per-job ctx.
-	// Set once by SetPoolContext(Process.lifecycleContext()). When unset
-	// (legacy &SubagentLinker{} test fixtures), DispatchResolve falls back
-	// to the first caller's ctx to preserve prior behaviour.
+	// poolCtx governs worker-pool lifetime (SetPoolContext with
+	// Process.lifecycleContext()). Unset in bare test fixtures, in which case
+	// DispatchResolve falls back to the first caller's ctx.
 	poolCtx context.Context
 
-	// inflightTasks tracks taskIDs whose Resolve goroutine is already
-	// running (or about to start). Callers (notifyLinker on the readLoop
-	// hot path, InjectHistory replay) use TryMarkResolveInflight to skip
-	// the goroutine spawn for duplicate task_started events the CLI emits
-	// across reconnects/replays. Without this, every replayed
-	// task_started for the same task_id would schedule a fresh goroutine
-	// that hits the existing Query fast-path inside Resolve and returns —
-	// wasted scheduler work + closure allocation. R260528-PERF-7 (#1354).
-	//
-	// sync.Map is the right shape: writes happen at the readLoop
-	// goroutine's pace (one per unique task_id, never more than ~32 per
-	// turn), reads happen on every task_started event. LoadOrStore is
-	// the atomic "claim if absent" primitive we need; the slice in the
-	// hotter Append/Subscribe paths can keep its own RLock.
+	// inflightTasks holds taskIDs with a Resolve already running so callers
+	// can skip spawning duplicates for replayed task_started events (#1354).
+	// sync.Map: one write per unique task_id, a read per task_started.
 	inflightTasks sync.Map // map[taskID]struct{}
 
 	// Tunable via tests. Defaults: 250ms * 12 = 3s grace; 200ms dir cache.
@@ -203,15 +135,11 @@ type SubagentLinker struct {
 	retryLimit    int
 	cacheTTL      time.Duration
 
-	// Optional hook fired after every rawScan of the subagents directory.
-	// Wired by TestLinker_Resolve_DirCacheTTL to count cache hits/misses
-	// without adding a telemetry atomic to production code.
+	// scanHook fires after every rawScan (test-only cache hit/miss counting).
 	scanHook func()
 
-	// Optional hook fired on every readFirstLineMeta cache MISS inside the
-	// Resolve retry loop. Wired by the R20260607-PERF-2 (#1883) regression
-	// test to assert a stable candidate's first line is parsed at most once
-	// across all retry attempts. nil in production.
+	// readMetaHook fires on every readFirstLineMeta cache miss in the retry
+	// loop (test-only); nil in production.
 	readMetaHook func()
 }
 
@@ -249,13 +177,10 @@ func NewSubagentLinker() *SubagentLinker {
 	}
 }
 
-// SetPoolContext binds the resolve worker-pool lifetime to a long-lived,
-// process-scoped context (Process.lifecycleContext()). R20260603030037-GO-2
-// (#1661): without this, the pool captured the first DispatchResolve caller's
-// ctx, so a short-lived per-request ctx could cancel the workers while later
-// jobs were still being enqueued. Call once, before the first DispatchResolve;
-// later calls are ignored (the pool starts at most once via resolvePoolOnce).
-// Safe to call with a nil ctx (treated as unset).
+// SetPoolContext binds the resolve worker-pool lifetime to a process-scoped
+// context (Process.lifecycleContext()) so a short-lived per-request ctx can
+// never cancel the workers (#1661). Call once before the first
+// DispatchResolve; later calls are ignored. nil is treated as unset.
 func (l *SubagentLinker) SetPoolContext(ctx context.Context) {
 	l.mu.Lock()
 	if l.poolCtx == nil {
@@ -280,13 +205,8 @@ func (l *SubagentLinker) SetContext(projectDir, parentSessionID string) {
 }
 
 // OnResolve appends a callback fired after every Resolve (success or
-// tombstone). Multiple subscribers compose: the cli package registers one
-// that writes InternalAgentID back to the EventLog; the server package
-// registers another to kick off agent_tailer. Callbacks run in append
-// order, outside l.mu but serialised by onResolveMu.
-//
-// Tombstone resolutions fire with internalAgentID="" so the server tailer
-// layer can skip starting a silent tailer rather than waiting forever.
+// tombstone, the latter with internalAgentID="" so tailers are not started).
+// Callbacks run in append order, outside l.mu, serialised by onResolveMu.
 func (l *SubagentLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {
 	if fn == nil {
 		return
@@ -296,10 +216,9 @@ func (l *SubagentLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID st
 	l.onResolveMu.Unlock()
 }
 
-// Query returns the cached mapping for taskID without scanning disk. Used by
-// the HTTP /api/sessions/agent_events handler; returns ok=false for unknown
-// task_ids and ok=true+empty InternalAgentID for tombstones so the handler
-// can distinguish "still resolving" (202) from "no record" (404).
+// Query returns the cached mapping for taskID without scanning disk:
+// ok=false for unknown task_ids, ok=true with empty InternalAgentID for
+// tombstones, so HTTP handlers can distinguish 202 from 404.
 func (l *SubagentLinker) Query(taskID string) (LinkInfo, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -308,20 +227,10 @@ func (l *SubagentLinker) Query(taskID string) (LinkInfo, bool) {
 }
 
 // QueryOrResolveFast returns a cached mapping when available; otherwise runs
-// the fast-path stat once (no retry loop, no scan fallback) and returns the
-// result. HTTP endpoints use this instead of Query so users who click an
-// agent row whose live task_started never reached the Linker (e.g. because
-// the event happened pre-restart and shim replay didn't include it) get a
-// direct answer from disk in a single stat call — typically < 1 ms.
-//
-// Returns (zeroLinkInfo, false) when:
-//   - projectDir or parentSessionID is not yet set (Linker not ready)
-//   - the direct-path stat missed (no such agent-<task_id>.jsonl file)
-//
-// The caller distinguishes these by Linker state: the endpoint already
-// null-checks Linker. "Not yet ready" surfaces as 202 pending; the endpoint
-// keeps that contract with this helper so the client retry loop still
-// converges on the "give up" toast after MAX_SWITCH_RETRIES.
+// the direct-path stat once (no retry loop, no scan) so an agent row whose
+// task_started never reached the Linker (pre-restart) still resolves from
+// disk in <1 ms. Returns (LinkInfo{}, false) when the Linker has no context
+// yet or the stat missed.
 func (l *SubagentLinker) QueryOrResolveFast(taskID string) (LinkInfo, bool) {
 	l.mu.RLock()
 	if info, ok := l.byTaskID[taskID]; ok {
@@ -340,23 +249,9 @@ func (l *SubagentLinker) QueryOrResolveFast(taskID string) (LinkInfo, bool) {
 }
 
 // TryMarkResolveInflight atomically claims the in-flight slot for taskID.
-// Returns ok=true on first claim; subsequent callers for the same taskID
-// receive ok=false and SHOULD skip spawning their Resolve goroutine. The
-// claim is cleared by Resolve's defer once the resolution completes (or
-// times out / is cancelled). R260528-PERF-7 (#1354): without this gate,
-// burst-replayed task_started events (shim reconnect, dashboard
-// snapshot-history fan-in) each spawn a goroutine that promptly bails on
-// Query's fast path — wasted scheduler work and a transient stack
-// footprint roughly equal to (replay_size × 8KB) per turn.
-//
-// Empty taskID returns ok=false so callers don't accumulate empty-key
-// inflight entries; the production caller already short-circuits on
-// taskID == "" earlier so this is defence-in-depth.
-//
-// Idempotent: re-entering with a taskID whose claim was cleared (the
-// previous Resolve completed) succeeds again, so a late-arriving
-// duplicate after a successful resolution still gets a chance to
-// re-trigger if Query's resolved-cache was somehow evicted.
+// ok=true on first claim; later callers get ok=false and SHOULD skip spawning
+// a Resolve. Resolve's defer clears the claim, so a duplicate arriving after
+// completion may re-claim. Empty taskID returns ok=false (#1354).
 func (l *SubagentLinker) TryMarkResolveInflight(taskID string) bool {
 	if taskID == "" {
 		return false
@@ -365,28 +260,11 @@ func (l *SubagentLinker) TryMarkResolveInflight(taskID string) bool {
 	return !loaded
 }
 
-// DispatchResolve enqueues a Resolve invocation onto the long-lived worker
-// pool instead of spawning a fresh goroutine per call. R214-PERF-6 (#415):
-// the previous pattern (`go linker.Resolve(...)`) allocated one goroutine
-// per system.task_started event — 5–10 per multi-agent turn, each parking on
-// resolveSem for up to 3 s. The pool collapses that to resolveWorkerCount
-// workers consuming a bounded queue.
-//
-// Behaviour on a full queue: fall back to inline Resolve with a warning
-// (per the issue's proposal). Inline fallback preserves "no event silently
-// dropped" semantics; the warning gives operators a signal that the CLI is
-// emitting task_started faster than the pool can drain — which would only
-// happen under a pathological multi-agent burst far beyond observed loads.
-//
-// First call lazily starts resolveWorkerCount workers tied to poolCtx
-// (SetPoolContext) — the process-scoped lifetime, never this caller's ctx.
-// Each job still carries its own per-request ctx for the actual Resolve
-// call; the pool-wide ctx only governs worker lifetime. R20260603030037-GO-2
-// (#1661): decoupling these prevents a short-lived first caller's ctx from
-// cancelling the workers out from under later jobs.
-//
-// Empty taskID is a no-op — the upstream callers already short-circuit on
-// empty taskID before reaching us, so this is defence in depth.
+// DispatchResolve enqueues a Resolve onto the long-lived worker pool (#415).
+// The first call starts resolveWorkerCount workers on poolCtx — never this
+// caller's ctx (#1661); each job still carries its own ctx for the Resolve
+// itself. A full queue falls back to an inline goroutine with a warning so
+// no task_started is dropped. Empty taskID is a no-op.
 func (l *SubagentLinker) DispatchResolve(ctx context.Context, taskID, toolUseID, name, description string, agentToolUseMS int64) {
 	if taskID == "" {
 		return
@@ -395,10 +273,8 @@ func (l *SubagentLinker) DispatchResolve(ctx context.Context, taskID, toolUseID,
 		ctx = context.Background()
 	}
 	l.resolvePoolOnce.Do(func() {
-		// Worker lifetime binds to poolCtx (the process-scoped ctx set via
-		// SetPoolContext), NOT the per-request ctx of this first caller —
-		// R20260603030037-GO-2 (#1661). Fall back to the caller's ctx only
-		// when SetPoolContext was never called (legacy test fixtures).
+		// Fall back to the caller's ctx only when SetPoolContext was never
+		// called (bare test fixtures).
 		l.mu.RLock()
 		lifetime := l.poolCtx
 		l.mu.RUnlock()
@@ -422,21 +298,17 @@ func (l *SubagentLinker) DispatchResolve(ctx context.Context, taskID, toolUseID,
 	case l.resolveJobs <- job:
 		return
 	default:
-		// Queue full: fall back to inline Resolve in a goroutine so the
-		// readLoop doesn't block on the up-to-3-s retry budget. Logging at
-		// Warn level (not Debug) because a saturated queue means upstream
-		// is producing task_started faster than 4 workers × ~3s budget can
-		// drain — the operator should investigate.
+		// Queue full: inline goroutine so readLoop never blocks on the 3 s
+		// retry budget. Warn because saturation means the CLI is emitting
+		// task_started faster than the pool drains.
 		slog.Warn("agent_link: resolve queue full, falling back to inline goroutine",
 			"task_id", taskID, "queue_depth", resolveQueueDepth)
 		go l.Resolve(ctx, taskID, toolUseID, name, description, agentToolUseMS)
 	}
 }
 
-// resolveWorker is the long-lived consumer for the dispatch queue. Exits
-// when ctx is canceled (process shutdown). Workers do not panic-recover —
-// Resolve already returns errors via the cache and slog; an unrecovered
-// panic would surface in the test/operator log loud and clear.
+// resolveWorker is the long-lived consumer for the dispatch queue; exits when
+// ctx is canceled. No panic-recover on purpose: a panic should surface loudly.
 func (l *SubagentLinker) resolveWorker(ctx context.Context) {
 	for {
 		select {
@@ -451,11 +323,8 @@ func (l *SubagentLinker) resolveWorker(ctx context.Context) {
 	}
 }
 
-// clearResolveInflight is the unexported pair to TryMarkResolveInflight.
-// Resolve calls it via defer once the resolution completes so a future
-// task_started for the same taskID can re-claim if needed (eg the cache
-// got evicted, or the prior attempt produced a tombstone the caller
-// wants to retry against a fresh disk state). Safe on empty taskID.
+// clearResolveInflight releases the TryMarkResolveInflight claim; Resolve
+// defers it so a later task_started for the same taskID can re-claim.
 func (l *SubagentLinker) clearResolveInflight(taskID string) {
 	if taskID == "" {
 		return
@@ -463,12 +332,8 @@ func (l *SubagentLinker) clearResolveInflight(taskID string) {
 	l.inflightTasks.Delete(taskID)
 }
 
-// ConfigureForTest overrides the default grace/poll/cache timings so tests
-// reach terminal verdicts in milliseconds rather than 3+ seconds. Not meant
-// for production callers — the private fields it mutates are the same ones
-// subagent_link_test.go manipulates directly via the test-only in-package
-// access; this entrypoint exists so cross-package tests (server/httptest)
-// can dial them in too.
+// ConfigureForTest overrides the grace/poll/cache timings so cross-package
+// tests reach terminal verdicts in milliseconds. Not for production callers.
 func (l *SubagentLinker) ConfigureForTest(retryIntervalNS int64, retryLimit int, cacheTTLNS int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -477,9 +342,8 @@ func (l *SubagentLinker) ConfigureForTest(retryIntervalNS int64, retryLimit int,
 	l.cacheTTL = time.Duration(cacheTTLNS)
 }
 
-// ProjectSessionDir returns <projectDir>/<parentSessionID>. Empty if context
-// not yet installed. Used by the /api/sessions/tool_result endpoint to anchor
-// path-traversal defence (§4 Security).
+// ProjectSessionDir returns <projectDir>/<parentSessionID>, or "" before
+// SetContext. Anchors the /api/sessions/tool_result path-traversal defence.
 func (l *SubagentLinker) ProjectSessionDir() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -489,10 +353,9 @@ func (l *SubagentLinker) ProjectSessionDir() string {
 	return filepath.Join(l.projectDir, l.parentSessionID)
 }
 
-// sleepOrCancel waits for d to elapse and returns true, or returns false
-// if ctx is canceled first. Used by Resolve's retry loop so process
-// shutdown observes at most one retryInterval (≤ 250ms) of delay rather
-// than the full retryLimit*retryInterval (≤ 3s) budget. R218B-GO-3 (#644).
+// sleepOrCancel waits for d and returns true, or false if ctx is canceled
+// first, so shutdown waits at most one retryInterval instead of the full
+// retry budget (#644).
 func sleepOrCancel(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -504,42 +367,19 @@ func sleepOrCancel(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// Resolve executes the 7-step algorithm in RFC §3.3.1.
-// Returns the LinkInfo and whether Resolve has reached a terminal verdict
-// (Resolved=true). Idempotent: once cached, subsequent calls are O(1).
-//
-// ctx (R218B-GO-3, #644): callers should pass a Process-lifetime context
-// so the up-to-3s retry budget collapses to near-zero on shutdown
-// (process exit / Kill / shim disconnect). Resolve checks ctx.Done()
-// at every retry sleep and at the resolveSem acquire arm; on cancel it
-// returns (LinkInfo{}, false) without writing any cache entry — a
-// subsequent attempt (e.g. a reattach into the same project) starts
-// fresh. Pass context.Background() in tests / synthetic callers that
-// don't need cancellation.
-//
-// Tombstones are cached so repeated Resolve attempts on a permanently-missing
-// task_id do not re-scan every poll.
-//
-// Claude CLI 2.1.132 emits subagents/agent-<task_id>.jsonl (the hex component
-// is literally the task_id). We try that direct path first — it skips the
-// scan entirely for the common case, and also covers historical entries
-// replayed via InjectHistory where `name` is empty (so the original scan +
-// agentType match would always miss). The legacy scan stays as a fallback
-// for older CLI versions or sidechain agents whose filename convention
-// differs.
+// Resolve maps taskID to its on-disk transcript and returns the LinkInfo plus
+// whether a terminal verdict (Resolved=true) was reached. Idempotent: cached
+// results (including tombstones for permanently missing task_ids) are O(1).
+// The direct agent-<task_id>.jsonl path is tried first (covers replayed
+// entries with empty name); the agentType scan with retry is the fallback for
+// older CLIs. ctx should be Process-scoped: cancellation is observed at every
+// retry sleep and the semaphore acquire, returning (LinkInfo{}, false) with no
+// cache write (#644).
 func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, description string, agentToolUseMS int64) (LinkInfo, bool) {
 	if ctx == nil {
-		// Defensive: no caller should pass nil, but a TODO!Background()
-		// gives the rest of the function a non-nil ctx to range over.
 		ctx = context.Background()
 	}
-	// R260528-PERF-7 (#1354): clear the in-flight claim on every exit
-	// path so a duplicate task_started for the same taskID arriving after
-	// this Resolve returns (success / tombstone / cancellation) can
-	// re-claim. Callers (notifyLinker, InjectHistory.kick) use
-	// TryMarkResolveInflight as a goroutine-spawn gate; clearing here is
-	// the unique pair-up. Safe-to-call when no claim was made (empty
-	// taskID short-circuits inside the helper).
+	// Clear the TryMarkResolveInflight claim on every exit path (#1354).
 	defer l.clearResolveInflight(taskID)
 	// Step 1: already resolved? (cheap fast path, no semaphore needed)
 	l.mu.RLock()
@@ -559,27 +399,16 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 
 	subagentDir := filepath.Join(projectDir, sessionID, "subagents")
 
-	// Fast path: Claude 2.1.132 puts the task_id directly into the filename.
-	// Try that before the name-based scan — cheap stat beats scanning a
-	// directory of dozens/hundreds of candidate meta files, and handles the
-	// shim-reconnect case where historical EventEntry has empty name.
+	// Fast path: one stat on agent-<task_id>.jsonl beats scanning the
+	// directory, and works when the replayed entry has an empty name.
 	if info, ok := l.resolveByTaskIDFast(taskID, toolUseID, subagentDir, sessionID); ok {
 		return info, true
 	}
 
-	// Acquire a slot before the retry loop. Each retry sleeps up to
-	// retryInterval, so a multi-agent turn that emits 10+ task_started
-	// events would park 10+ goroutines for up to 3 s each without this cap.
-	// resolveSem is nil in linkers constructed by tests that don't call
-	// NewSubagentLinker (legacy test helpers), so guard with a nil check.
-	//
-	// Timeout matches the total retry budget (retryLimit * retryInterval)
-	// so we drop rather than extend the grace window when all slots are busy.
+	// Acquire a slot before the retry loop (nil in bare test fixtures). The
+	// wait is bounded by the retry budget so a busy pool drops rather than
+	// extends the grace window.
 	if l.resolveSem != nil {
-		// Use context.WithTimeout to bound the semaphore-acquire wait
-		// instead of a raw time.NewTimer — the context plumbing handles
-		// timer Stop automatically on cancel/timeout, removing the manual
-		// Stop+drain boilerplate on every exit arm. [R112714-PERF-10]
 		semTimeout := time.Duration(l.retryLimit+1) * l.retryInterval
 		semCtx, cancelSem := context.WithTimeout(ctx, semTimeout)
 		select {
@@ -589,10 +418,8 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 		case <-semCtx.Done():
 			cancelSem()
 			if ctx.Err() != nil {
-				// Parent ctx canceled (process shutdown).
 				slog.Debug("agent_link: resolve canceled while waiting for semaphore", "task_id", taskID, "err", ctx.Err())
 			} else {
-				// Semaphore timeout.
 				slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
 			}
 			return LinkInfo{}, false
@@ -602,9 +429,7 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	var picked metaEntry
 	var pickedFirst firstLineMeta
 
-	// Step 5 scratch type — hoisted so candidates/filtered slices can be
-	// reused across retry attempts with [:0] instead of re-allocating each
-	// iteration. [R112714-PERF-3]
+	// Step 5 scratch type; slices are reused across retry attempts.
 	type scored struct {
 		entry   metaEntry
 		first   firstLineMeta
@@ -614,12 +439,9 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	var candidates []metaEntry
 	var filtered []scored
 
-	// R20260607-PERF-2 (#1883): cache first-line meta across retry attempts.
-	// The retry loop runs up to retryLimit+1 times and re-stat+open+32KB-bufio
-	// +json.Unmarshal'd every surviving candidate on EVERY attempt, even
-	// though an agent jsonl's first line is immutable once written. Cache by
-	// path, keyed on ModTime+Size so a candidate that is created or rewritten
-	// mid-retry is re-read, but a stable file is parsed at most once.
+	// First-line meta is immutable once written, so cache it per path across
+	// retry attempts, keyed on ModTime+Size so a rewritten candidate is
+	// re-read (#1883).
 	type metaCacheEntry struct {
 		modTime time.Time
 		size    int64
@@ -630,18 +452,10 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 
 	// Steps 2-4: scan, filter by agentType, retry while empty.
 	for attempt := 0; attempt <= l.retryLimit; attempt++ {
-		// Safety valve: if the directory had hundreds of candidates the cache
-		// can accumulate hundreds of entries across attempts. Reset it when it
-		// grows beyond maxMetaCacheEntries so memory stays bounded. The next
-		// iteration re-reads only the files it actually inspects.
 		if len(metaCache) > maxMetaCacheEntries {
 			clear(metaCache)
 		}
 		entries := l.scanMetaFiles(subagentDir)
-		// Reuse the hoisted slices: reset to zero length, keep backing
-		// array from the previous attempt to avoid re-allocating on each
-		// retry. Grow to len(entries) capacity only on the first pass or
-		// when the directory grew since the last scan.
 		candidates = candidates[:0]
 		if cap(candidates) < len(entries) {
 			candidates = make([]metaEntry, 0, len(entries))
@@ -672,8 +486,6 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 			if err != nil || st.Size() == 0 {
 				continue
 			}
-			// R20260607-PERF-2 (#1883): reuse the cached parse when the file's
-			// ModTime+Size are unchanged since we last read it this Resolve.
 			ce, cached := metaCache[cand.jsonlPath]
 			if !cached || !ce.modTime.Equal(st.ModTime()) || ce.size != st.Size() {
 				if l.readMetaHook != nil {
@@ -690,9 +502,8 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 			if first.SessionID != "" && first.SessionID != sessionID {
 				continue
 			}
-			// R10: if the jsonl's first row timestamp predates the parent's
-			// Agent tool_use by more than staleAgentReuseSlack, treat as stale
-			// (same-name reuse from a prior turn).
+			// A first row older than the parent tool_use by more than the slack
+			// is a same-name reuse from a prior turn.
 			if !first.Timestamp.IsZero() && agentToolUseMS > 0 {
 				agentTS := time.UnixMilli(agentToolUseMS)
 				if first.Timestamp.Before(agentTS.Add(-staleAgentReuseSlack)) {
@@ -752,10 +563,8 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 		FirstPromptID:   pickedFirst.PromptID,
 	}
 
-	// Step 7b: same-name respawn defence. If we've already resolved a
-	// LinkInfo for `name` with a different promptId, we're looking at a
-	// CLI same-name reuse. Log it and refuse to touch existing task_id
-	// mappings — only this new task_id gets the new LinkInfo.
+	// Step 7b: same-name respawn — log it; existing task_id mappings stay
+	// untouched and only this task_id gets the new LinkInfo.
 	if existing := l.byName[name]; len(existing) > 0 && pickedFirst.PromptID != "" {
 		for _, prev := range existing {
 			if prev.FirstPromptID != "" && prev.FirstPromptID != pickedFirst.PromptID {
@@ -779,16 +588,10 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	return info, true
 }
 
-// resolveByTaskIDFast covers the Claude 2.1.132 convention where the
-// subagents/agent-<hex>.jsonl filename's hex component IS the task_id.
-// On a cache miss + empty candidate set (the original name-based scan would
-// retry for 3 s grace and then tombstone), we stat the direct path first —
-// cheap, stable, and robust to missing/empty `name` (which is exactly the
-// shim-reconnect + history-replay case).
-//
-// Returns ok=true only on a positive stat with a non-empty first-line session
-// match. ok=false falls through to the original scan (and its retry loop) so
-// older CLIs / sidechain agents whose filename scheme differs still work.
+// resolveByTaskIDFast resolves via the agent-<task_id>.jsonl filename
+// convention with a single stat, robust to an empty `name`. ok=true only on a
+// positive stat with a matching first-line sessionId; ok=false falls through
+// to the agentType scan for CLIs whose filename scheme differs.
 func (l *SubagentLinker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, sessionID string) (LinkInfo, bool) {
 	if !agentHexRe.MatchString(taskID) {
 		slog.Debug("agent_link: fast-path skip, bad hex", "task_id", taskID)
@@ -805,17 +608,13 @@ func (l *SubagentLinker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, ses
 	if err != nil {
 		return LinkInfo{}, false
 	}
-	// sessionId cross-check defends against the lossy projectDir encoding
-	// collision (§3.3.2) — two distinct cwds mapping to the same encoded
-	// directory must not let agent jsonl from one session leak into another.
+	// sessionId cross-check: the projectDir encoding is lossy, so two cwds
+	// can share a directory and must not leak jsonl across sessions.
 	if first.SessionID != "" && first.SessionID != sessionID {
 		return LinkInfo{}, false
 	}
 
-	// Optionally pull the agent name from the sibling meta.json for
-	// display purposes. Not required for Resolve to succeed; leave empty
-	// on any error since the dashboard already has the name from the
-	// parent-stream `agent` EventEntry when present.
+	// Display name from the sibling meta.json; optional.
 	name := ""
 	if data, err := os.ReadFile(filepath.Join(subagentDir, "agent-"+taskID+".meta.json")); err == nil {
 		var m struct {
@@ -835,7 +634,6 @@ func (l *SubagentLinker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, ses
 	}
 
 	l.mu.Lock()
-	// Re-check under write lock (another goroutine may have raced in).
 	if cached, ok := l.byTaskID[taskID]; ok {
 		l.mu.Unlock()
 		return cached, cached.Resolved
@@ -854,27 +652,16 @@ func (l *SubagentLinker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, ses
 	return info, true
 }
 
-// SeedFromHistory pre-populates the cache from persisted EventEntry records.
-// Called by Process.InjectHistory after AppendBatch so that shim reconnect
-// / CLI-dead respawn do not lose the task_id → jsonl mapping established in
-// a previous session lifetime (A3 defence, §3.3.7).
-//
-// Tolerant of gaps: EventEntry with empty InternalAgentID or JSONLPath is
-// skipped silently — the Linker will re-Resolve on live events as usual.
-//
-// Defense in depth (R201-SEC-M1): the persisted JSONL file is writable by
-// anything running as the naozhi uid, but we still refuse to trust a path
-// that does not live under the expected ~/.claude/projects/ tree. Without
-// this check, an attacker who could mutate sessions/*.jsonl (e.g. via a
-// separate file-disclosure bug or filesystem-level compromise) could
-// redirect agent_events streaming to an arbitrary readable file.
+// SeedFromHistory pre-populates the cache from persisted EventEntry records
+// (Process.InjectHistory after AppendBatch) so reconnect/respawn keeps the
+// task_id → jsonl mapping. Entries missing InternalAgentID or JSONLPath are
+// skipped. Paths outside ~/.claude/projects are refused: a mutated
+// sessions/*.jsonl must not redirect agent_events streaming to an arbitrary
+// readable file.
 func (l *SubagentLinker) SeedFromHistory(entries []clievent.EventEntry) {
 	if len(entries) == 0 {
 		return
 	}
-	// Lock against concurrent Resolve + snapshot the project root for the
-	// prefix check. projectDir comes from resolveProjectDir(cwd), so it
-	// already ends at ~/.claude/projects/<encoded>.
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	claudeRoot := claudeProjectsRoot()
@@ -882,20 +669,15 @@ func (l *SubagentLinker) SeedFromHistory(entries []clievent.EventEntry) {
 		if e.TaskID == "" || e.InternalAgentID == "" || e.JSONLPath == "" {
 			continue
 		}
-		// Refuse jsonl paths that escape the claude projects root. Accept
-		// either l.projectDir (strictest) OR claudeRoot (for entries
-		// persisted under a previous cwd whose projectDir no longer matches
-		// — shim reconnect after `cd` within the same session). Rejecting
-		// an otherwise-valid historical entry just costs us Resolve having
-		// to re-scan, which is the exact path Linker was designed to handle.
+		// claudeRoot (not l.projectDir) so entries persisted under a previous
+		// cwd in the same session are still accepted.
 		clean := filepath.Clean(e.JSONLPath)
 		if !strings.HasPrefix(clean, claudeRoot+string(filepath.Separator)) {
 			slog.Warn("agent_link: SeedFromHistory rejected jsonl path outside claude projects root",
 				"task_id", e.TaskID, "path", e.JSONLPath)
 			continue
 		}
-		// Don't overwrite an already-cached task_id — a live Resolve
-		// outranks historical data.
+		// A live Resolve outranks historical data.
 		if _, ok := l.byTaskID[e.TaskID]; ok {
 			continue
 		}
@@ -919,10 +701,8 @@ func (l *SubagentLinker) SeedFromHistory(entries []clievent.EventEntry) {
 	}
 }
 
-// claudeProjectsRoot returns ~/.claude/projects exactly as resolveProjectDir
-// derives it. Kept as a separate helper so SeedFromHistory's prefix check
-// stays in lockstep with Resolve's path construction; changing one without
-// the other would either let a bogus path through or reject valid entries.
+// claudeProjectsRoot returns ~/.claude/projects; shared by resolveProjectDir
+// and SeedFromHistory's prefix check so the two cannot drift.
 func claudeProjectsRoot() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -931,29 +711,13 @@ func claudeProjectsRoot() string {
 	return filepath.Join(home, ".claude", "projects")
 }
 
-// fireCallbacksDropLock runs every registered callback OUTSIDE the main mu
-// lock but INSIDE onResolveMu to guarantee serial delivery across all
-// subscribers. Caller MUST hold l.mu as a write lock; this function
-// releases l.mu around the callback dispatch and re-acquires it before
-// returning, so the caller's `defer l.mu.Unlock()` still fires correctly.
-//
-// The name carries the lock contract: previously named ...Locked (the
-// usual Go convention is "caller holds the lock and the function does not
-// touch it"), but this function intentionally drops and re-acquires l.mu —
-// the rename to ...DropLock prevents future maintainers from treating it
-// as a normal "Locked" helper and double-unlocking. (R227-GO-3)
-//
-// R222-GO-3 archive anchor: the prior concern about a callback re-entering
-// linker.Query under nested lock release is non-issue because (a) Query
-// takes RLock against l.mu which is fully released between the Unlock above
-// and the deferred re-Lock below, and (b) onResolveMu copy-then-drop
-// (lines 575–578) serialises subscriber dispatch independently of l.mu.
-// A callback that calls back into Resolve still goes through Resolve's own
-// mu acquisition, so the dispatch order is well-defined.
+// fireCallbacksDropLock runs every registered callback with l.mu RELEASED
+// (callbacks may re-enter Query/Resolve) and onResolveMu serialising delivery.
+// Caller MUST hold l.mu as a write lock; the function drops it around dispatch
+// and re-acquires it before returning so the caller's deferred Unlock is
+// balanced — hence "DropLock", not "Locked".
 func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentID string) {
 	l.onResolveMu.Lock()
-	// Skip make+copy when no callbacks are registered — the common case
-	// during early startup and in test linkers. [R112714-PERF-5]
 	if len(l.onResolveFns) == 0 {
 		l.onResolveMu.Unlock()
 		return
@@ -962,35 +726,19 @@ func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentI
 	copy(fns, l.onResolveFns)
 	l.onResolveMu.Unlock()
 	l.mu.Unlock()
-	// Re-acquire l.mu via defer so a panicking callback still leaves
-	// l.mu Locked when the stack unwinds — otherwise the caller's own
-	// `defer l.mu.Unlock()` would unlock an already-unlocked mutex and
-	// fault, and the second panic from sync would also corrupt the
-	// readLoop's panic-recover bookkeeping. (R227-GO-1)
+	// Re-acquire via defer so a panicking callback still leaves l.mu locked
+	// for the caller's deferred Unlock.
 	defer l.mu.Lock()
 	for _, fn := range fns {
 		fn(taskID, toolUseID, internalAgentID)
 	}
 }
 
-// scanMetaFiles reads subagentDir and parses each .meta.json to surface
-// (hex, agentType) pairs. TTL-cached (default 200ms) so a burst of 3+
-// concurrent Resolve calls during the same turn share one disk scan.
-//
-// Cache miss → rawScan populates dirCache. Cache hit → returns the cached
-// slice by reference; callers must not mutate it.
-//
-// Hot-path RLock fast-path (R215-CR-P2-4): under a turn with N parallel
-// Agent tool_use events, every Resolve calls scanMetaFiles. Without the
-// fast-path each one serialises on l.mu (write lock) even when the cache
-// is fresh — pure cache hits should run concurrently. We try RLock
-// first; if the cache is fresh, return immediately. On miss we upgrade
-// to the write lock and double-check (another goroutine may have
-// populated the cache between our RUnlock and Lock).
+// scanMetaFiles reads subagentDir and parses each .meta.json into
+// (hex, agentType) pairs, TTL-cached (default 200ms) so concurrent Resolves
+// in one turn share a scan. Cache hits return the cached slice by reference
+// (callers must not mutate) under RLock so they run concurrently.
 func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
-	// Snapshot now once to avoid two separate time.Now() syscalls for the
-	// TTL check in the RLock fast-path and the write-lock double-check.
-	// [R112714-PERF-9]
 	now := time.Now()
 	l.mu.RLock()
 	if !l.dirCache.at.IsZero() && now.Sub(l.dirCache.at) < l.cacheTTL {
@@ -1000,17 +748,10 @@ func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
 	}
 	l.mu.RUnlock()
 
-	// R164029-PERF-3 (#1595): rawScanSubagentsDir does os.ReadDir + an
-	// os.ReadFile per *.meta.json — blocking disk IO that previously ran
-	// while holding l.mu.Lock, stalling every concurrent Resolve fast-path
-	// (which only needs an RLock for its cache double-check). Do the scan
-	// WITHOUT the lock, then take the write lock just long enough to publish
-	// into the cache. The TTL double-check both before and after the scan
-	// keeps a stampede of concurrent misses cheap and preserves the
-	// "freshest snapshot wins" semantics.
-	// R20260602-GO-002: scannedAt must be captured BEFORE the scan begins so
-	// that a goroutine starting a scan later (with a larger scannedAt) will
-	// win the "freshest snapshot wins" comparison and not be suppressed.
+	// Scan WITHOUT l.mu (ReadDir + ReadFile per meta is blocking IO that
+	// would stall every concurrent fast-path RLock), then publish under the
+	// write lock. scannedAt is captured BEFORE the scan so a later-started
+	// scan wins the "freshest snapshot" comparison (#1595).
 	scannedAt := time.Now()
 	if l.scanHook != nil {
 		l.scanHook()
@@ -1019,8 +760,7 @@ func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	// Another goroutine may have published a fresher cache while we scanned
-	// unlocked. If so, prefer it and discard our (now-stale-or-equal) result.
+	// Prefer a fresher cache published while we scanned unlocked.
 	if !l.dirCache.at.IsZero() && l.dirCache.at.After(scannedAt) {
 		return l.dirCache.entries
 	}
@@ -1048,9 +788,8 @@ func rawScanSubagentsDir(dir string) []metaEntry {
 			continue
 		}
 		metaPath := filepath.Join(dir, name)
-		// agentType is a short identifier; legitimate meta files are well under
-		// 8 KiB. Cap the read so a corrupt/oversized file (or a name collision
-		// with a stray multi-MB JSON) cannot inflate scan latency.
+		// Real meta files are well under 8 KiB; cap so a stray multi-MB file
+		// cannot inflate scan latency.
 		const maxMetaBytes = 8 * 1024
 		if info, err := ent.Info(); err != nil || info.Size() > maxMetaBytes {
 			continue
@@ -1086,9 +825,7 @@ type firstLineMeta struct {
 }
 
 // errFirstLineTooLong signals that the agent jsonl's first line exceeds the
-// 32KB ReadSlice buffer. Without this sentinel, Unmarshal on the truncated
-// prefix would return a generic JSON syntax error and silently degrade the
-// fast path. R222-GO-7.
+// 32KB ReadSlice buffer, so the truncated prefix is never fed to Unmarshal.
 var errFirstLineTooLong = errors.New("agent jsonl first line exceeds 32KB buffer")
 
 func readFirstLineMeta(path string) (firstLineMeta, error) {
@@ -1100,10 +837,6 @@ func readFirstLineMeta(path string) (firstLineMeta, error) {
 	reader := bufio.NewReaderSize(f, 32*1024)
 	line, err := reader.ReadSlice('\n')
 	if err != nil {
-		// ErrBufferFull means we got a partial line; do not feed truncated
-		// bytes to Unmarshal — surface the condition explicitly so the
-		// caller's "skip this candidate" branch is reached without logging
-		// a misleading JSON syntax error. R222-GO-7.
 		if errors.Is(err, bufio.ErrBufferFull) {
 			return firstLineMeta{}, errFirstLineTooLong
 		}
@@ -1128,15 +861,11 @@ func readFirstLineMeta(path string) (firstLineMeta, error) {
 	return out, nil
 }
 
-// resolveProjectDir mirrors Claude CLI's encoded-cwd convention used for
-// ~/.claude/projects/<encoded>. Walks runes and replaces every non-[A-Za-z0-9]
-// rune with a single '-'. Does NOT collapse consecutive dashes — "/tmp/a--b"
-// and "/tmp/a..b" encode differently. Empty input → empty output (callers
-// treat this as "no project dir", i.e. Resolve bails).
-//
-// The encoding is lossy: "/tmp/a.b", "/tmp/a_b", "/tmp/a-b" all collide to
-// "-tmp-a-b". Resolve defends against this via the first-line sessionId
-// cross-check (§3.3.1 step 5).
+// resolveProjectDir mirrors Claude CLI's encoded-cwd convention for
+// ~/.claude/projects/<encoded>: every non-[A-Za-z0-9] rune becomes '-'
+// (consecutive dashes are NOT collapsed). Empty input → "" (Resolve bails).
+// The encoding is lossy ("/tmp/a.b" and "/tmp/a_b" collide), which the
+// first-line sessionId cross-check in Resolve defends against.
 func resolveProjectDir(cwd string) string {
 	if cwd == "" {
 		return ""

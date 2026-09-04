@@ -1,20 +1,8 @@
 package cli
 
 // process_send.go — user-message outbound path and CLI-level interrupts.
-//
-// This file owns:
-//   - EventCallback type (cross-package public; consumed by
-//     cli.SendPassthrough, session.managed.Send/SendPassthrough,
-//     session.testutil.TestProcess, dispatch, server — changing its
-//     signature is breaking across 4 packages).
-//   - buildUserEntry (also called by cli.passthrough.go).
-//   - Send — legacy non-passthrough outbound.
-//   - Interrupt / InterruptViaControl — turn-abort primitives.
-//
-// findResultSince and drainStaleEvents live in process_turn.go.
-//
-// R227-ARCH-19: dropped the "Phase 3 of process-split / zero semantic
-// change" preamble; refactor is complete, history lives in git log.
+// EventCallback is consumed cross-package (session, dispatch, server); changing
+// its signature is breaking. findResultSince / drainStaleEvents: process_turn.go.
 
 import (
 	"context"
@@ -33,13 +21,9 @@ import (
 // EventCallback is called for each intermediate event during Send.
 type EventCallback func(ev Event)
 
-// buildUserEntry renders the EventLog entry that represents a single user
-// message, including per-image thumbnail generation. Shared between Send
-// (legacy collect mode) and SendPassthrough so the dashboard sees the same
-// bubble regardless of dispatch path — passthrough mode used to skip this
-// because the CLI echoes a replay event, but readLoop filters replays out
-// of EventLog (see process.go ~755), so without an explicit append the
-// user's typed message disappears on the next session re-subscribe.
+// buildUserEntry renders the EventLog entry for a single user message. Shared
+// by Send and SendPassthrough: readLoop filters the CLI's replay echo out of
+// EventLog, so both paths must append the bubble explicitly.
 func buildUserEntry(text string, images []Attachment) clievent.EventEntry {
 	entry := clievent.EventEntry{
 		Time:    time.Now().UnixMilli(),
@@ -53,29 +37,8 @@ func buildUserEntry(text string, images []Attachment) clievent.EventEntry {
 		if len(images) == 1 {
 			thumbs[0] = MakeThumbnail(images[0].Data, 600)
 		} else {
-			// R243-GO-3 [REPEAT-3] / R243-CR-P2-1: drop the outer cap=4 sem.
-			// MakeThumbnail's internal thumbSem (thumbnail.go:27) is already
-			// cap=4 covering the actual heavy work (image.Decode + jpeg.Encode);
-			// the outer sem was a redundant gate. Concurrency cap is enforced
-			// by thumbSem alone, every goroutine starts immediately.
-			//
-			// R243-GO-1 [BREAKING-LOCAL]: outer recover wrapper removed —
-			// MakeThumbnail's internal recover (thumbnail.go:41) catches all
-			// decoder panics before they ever propagate up, so the outer
-			// wrapper was always dead code. The inner recover now logs via
-			// slog.Error so panic events are no longer silent.
-			//
-			// R247-PERF-21 (#569): cap goroutine spawn at thumbnailWorkerCap
-			// rather than spawning one per image. The previous "go per
-			// image" path paid 8KB stack × N for messages with many images
-			// (slack/discord uploads can carry 10+); the inner thumbSem
-			// cap=4 already serialises actual decode/encode work, so the
-			// extra goroutines past 4 just sat blocked on the sem channel.
-			// For N ≤ cap we keep one goroutine per image (no contention,
-			// matches prior latency); for N > cap we run a fixed worker
-			// pool of `cap` goroutines pulling indices from a channel —
-			// goroutine count stays bounded regardless of N, no behavioural
-			// change vs. thumbSem since both serialise to the same cap.
+			// Bounded pool: MakeThumbnail's thumbSem already serialises the work, so
+			// more than thumbnailWorkerCap goroutines would just block on it (#569).
 			workerCount := len(images)
 			if workerCount > thumbnailWorkerCap {
 				workerCount = thumbnailWorkerCap
@@ -97,13 +60,9 @@ func buildUserEntry(text string, images []Attachment) clievent.EventEntry {
 			close(jobs)
 			wg.Wait()
 		}
-		// ImagePaths rides alongside Images so the dashboard can offer
-		// "view original" without bloating the eventlog with full-size
-		// base64. sanitizeImages can drop entries (invalid/empty data
-		// URI), so build ImagePaths from the same index set that
-		// survives that filter: walk pre-sanitize, emit (thumb, path)
-		// pairs only when the thumb is valid. Preserves the
-		// index-alignment contract documented on EventEntry.ImagePaths.
+		// ImagePaths lets the dashboard offer "view original" without full-size
+		// base64. Emit (thumb, path) pairs only for thumbs that survive sanitize,
+		// preserving the index-alignment contract on EventEntry.ImagePaths.
 		sanitizedThumbs := make([]string, 0, len(thumbs))
 		sanitizedPaths := make([]string, 0, len(images))
 		anyPath := false
@@ -133,16 +92,10 @@ func buildUserEntry(text string, images []Attachment) clievent.EventEntry {
 
 // Send writes a user message to stdin and reads events until result.
 //
-// onEvent semantics (R229-GO-3): the callback fires only for assistant events
-// whose Message.Content contains at least one "thinking" or "tool_use" block.
-// Plain assistant text deltas (block.Type=="text") and ACP tool_call_update
-// progress events (ev.SubType=="tool_result", ev.Message==nil) do NOT trigger
-// it, so callers driving streaming-progress UIs (cron status updates, upstream
-// /api/sessions/{key}/progress, dashboard interim bubbles) MUST treat onEvent
-// as "long-running tool activity heartbeat", not "any new content arrived".
-// Subscribers that need the full event stream should attach via EventLog.Subscribe
-// instead — Send writes every event to the log under the same lock that this
-// callback fires from, so no events are lost.
+// onEvent fires only for assistant events carrying a "thinking" or "tool_use"
+// block — not text deltas or ACP tool_call_update progress — so treat it as a
+// tool-activity heartbeat, not "new content". Full-stream consumers use
+// EventLog.Subscribe; Send logs every event under the same lock, nothing is lost.
 func (p *Process) Send(ctx context.Context, text string, images []Attachment, onEvent EventCallback) (*SendResult, error) {
 	p.mu.Lock()
 	if p.state == StateRunning {
@@ -160,38 +113,27 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 		p.mu.Unlock()
 	}()
 
-	// Drain stale events from a previous turn that completed while no Send()
-	// was active (e.g., CLI was mid-turn when service restarted and reconnected
-	// to shim). These events are already logged to EventLog by readLoop.
-	//
-	// When the previous turn was interrupted (SIGINT), the CLI may still be
-	// producing the interrupted result. Wait briefly for it so it doesn't
-	// pollute this turn's event stream.
+	// Drain stale events from a previous turn that completed with no Send()
+	// active (readLoop already logged them). After a SIGINT the CLI may still be
+	// producing the interrupted result, so wait briefly for it.
 	if err := p.drainStaleEvents(ctx); err != nil {
 		return nil, err
 	}
 
-	// Shrink oversized inline images to the vision backend's resize limits
-	// once, before the write, so both the CLI payload and the dashboard
-	// bubble (buildUserEntry) reference the same smaller bytes and every
-	// transcript replay this session reuses them. Best-effort / fail-safe:
+	// Downscale oversized images once, before the write, so the CLI payload and
+	// the dashboard bubble (buildUserEntry) share the same bytes. Best-effort:
 	// undecodable or already-small images pass through unchanged.
 	images = downscaleImagesForVision(images)
 
-	// Record turn start time so we can check EventLog as fallback if eventCh
-	// drops events (non-blocking send when buffer is full).
+	// Turn start for the EventLog fallback when eventCh drops events.
 	turnStartMS := time.Now().UnixMilli()
 
 	if err := p.protocol.WriteMessage(p.shimStdinWriter(), text, images); err != nil {
 		return nil, fmt.Errorf("write message: %w", err)
 	}
 
-	// Log user message AFTER successful protocol write so a rejected write
-	// does not leave a ghost entry in EventLog (R20260527122801-GO-002).
-	// Mirrors the passthrough.go ordering at line ~132 — both paths must
-	// commit the user bubble only once the CLI has accepted the bytes,
-	// otherwise a transient stdin-write failure leaves a permanent orphan
-	// user message in the dashboard transcript.
+	// Log the user message AFTER a successful write so a rejected write leaves
+	// no ghost entry; passthrough.go orders the same way.
 	p.eventLog.Append(buildUserEntry(text, images))
 
 	noOutputDur := p.noOutputTimeout
@@ -203,16 +145,9 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 		totalDur = DefaultTotalTimeout
 	}
 
-	// Watchdog via a single periodic timer instead of per-event timer
-	// Stop/drain/Reset (three timer-heap ops per event). The interval
-	// caps timeout precision, but timeouts are minutes so this is acceptable.
-	//
-	// R246-PERF-3: replaced time.NewTicker with time.NewTimer + Reset so
-	// each Send pays one runtime timer allocation (NewTicker also creates
-	// the timer+chan but lacks a public Reset that lets us re-arm without
-	// rebuilding the underlying timer state). The timer is re-armed from
-	// the watchdog branch after each fire; Stop()+drain on early-return
-	// (via defer) keeps the goroutine local to this Send invocation.
+	// Watchdog: one periodic timer instead of per-event Stop/drain/Reset. The
+	// interval caps timeout precision, fine for minute-scale timeouts. Re-armed
+	// after each fire; Stop()+drain on early return via defer.
 	checkInterval := noOutputDur / 4
 	if checkInterval < time.Second {
 		checkInterval = time.Second
@@ -224,9 +159,7 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 	lastOutput := turnStart
 	watchdog := time.NewTimer(checkInterval)
 	defer func() {
-		// Stop returns false if the timer already fired and its value was
-		// not yet drained; drain in that case so a subsequent leak detector
-		// (or the next Send if we ever pool watchdogs) sees a clean state.
+		// Drain if the timer fired undrained so leak detectors see a clean state.
 		if !watchdog.Stop() {
 			select {
 			case <-watchdog.C:
@@ -238,18 +171,14 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 	for {
 		select {
 		case <-ctx.Done():
-			// Context cancelled (shutdown or user interrupt).
-			// Don't Kill the CLI — during graceful shutdown, router.Shutdown
-			// calls Detach() to keep the shim alive for zero-downtime restart.
-			// The readLoop will detect the disconnection and close eventCh,
-			// causing the next iteration to hit the !ok branch and return.
+			// Don't Kill the CLI: during graceful shutdown router.Shutdown calls
+			// Detach() to keep the shim alive for zero-downtime restart. readLoop
+			// detects the disconnect and closes eventCh, hitting the !ok branch.
 			return nil, ctx.Err()
 		case ev, ok := <-p.eventCh:
 			if !ok {
-				// eventCh closed — process exited. Check EventLog for a result
-				// that readLoop already logged but wasn't delivered via eventCh
-				// (e.g., non-blocking send dropped it, or it arrived just before
-				// the channel closed).
+				// eventCh closed — process exited. Fall back to EventLog for a result
+				// readLoop logged but eventCh dropped or delivered too late.
 				if sr := p.findResultSince(turnStartMS); sr != nil {
 					return sr, nil
 				}
@@ -258,47 +187,29 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 
 			lastOutput = time.Now()
 
-			// Capture session ID from init event.
-			// logEvent (called by readLoop) already skips init events.
-			//
-			// CLI2 (#393): always overwrite when ev.SessionID is non-empty
-			// instead of only-set-when-empty. After --resume the CLI emits a
-			// fresh init carrying the new (forked) session_id; the previous
-			// "first-non-empty" guard pinned p.sessionID to the original ID
-			// and the field went stale relative to the underlying CLI's view.
-			// Init always carries a valid session_id, so the empty-check on
-			// ev.SessionID is just a paranoia guard against future protocol
-			// regressions.
+			// Capture session ID from init; always overwrite when non-empty because
+			// --resume emits a fresh init with the forked session_id and a
+			// first-non-empty guard would pin the stale one (#393).
 			if ev.Type == "system" && ev.SubType == "init" {
 				p.mu.Lock()
 				if ev.SessionID != "" {
 					p.sessionID = ev.SessionID
 				}
 				p.mu.Unlock()
-				// UI Round 5 R5-3: claude advertises the resolved model
-				// in system/init (e.g.
-				// "global.anthropic.claude-opus-4-7[1m]"). Spawn-time
-				// SpawnOptions.Model is empty for claude (CLI resolves
-				// from env / defaults internally), so this is the
-				// authoritative source. Only overwrite when init event
-				// actually has a value — guards against future CLI
-				// versions dropping the field.
+				// system/init advertises the resolved model; SpawnOptions.Model is empty
+				// for claude, so this is authoritative. Only overwrite when present.
 				if ev.Model != "" {
 					p.setModel(ev.Model)
 				}
-				// R20260612-live-version: parallel hook to readLoop's —
-				// capture the self-reported CLI binary version here too
-				// for the case where Send() drains the init frame before
-				// readLoop observes it. First writer wins; identical value.
+				// Mirror readLoop's hook in case Send drains the init frame first.
+				// First writer wins; identical value.
 				if ev.ClaudeCodeVersion != "" {
 					p.setLiveVersion(ev.ClaudeCodeVersion)
 				}
 				continue
 			}
 
-			// Event is already logged to EventLog by readLoop.
-
-			// Deliver intermediate events via callback
+			// Already logged to EventLog by readLoop; only fan out here.
 			if onEvent != nil && ev.Type == "assistant" && ev.Message != nil {
 				for _, block := range ev.Message.Content {
 					if block.Type == "thinking" || block.Type == "tool_use" {
@@ -308,12 +219,9 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 				}
 			}
 
-			// Result means this turn is done
 			if ev.Type == "result" {
-				// CLI2 (#393): mirror the init-path fix — accept any
-				// non-empty session_id so --resume's new ID is recorded
-				// even if the init event was missed (e.g. dropped by a
-				// downstream channel buffer).
+				// Mirror the init-path fix: accept any non-empty session_id so
+				// --resume's new ID is recorded even if init was missed (#393).
 				p.mu.Lock()
 				if ev.SessionID != "" {
 					p.sessionID = ev.SessionID
@@ -330,25 +238,17 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 			if sr != nil || err != nil {
 				return sr, err
 			}
-			// Re-arm. watchdog.C was just drained by the case-receive so
-			// Reset on a stopped/expired timer is safe per stdlib docs.
+			// Re-arm: C was just drained, so Reset on the expired timer is safe.
 			watchdog.Reset(checkInterval)
 		}
 	}
 }
 
-// clearInflightFlags resets the interrupt-bookkeeping atomics. Called when
-// the watchdog kills the CLI on a no-output / total-turn timeout — the
-// process is about to be in StateDead so any leftover interrupted/
-// interruptedRun flags can never be consumed by drainStaleEvents in this
-// process's lifetime, but a future Send on a recycled Process struct
-// (unlikely; routers spawn fresh) would otherwise burn the 500ms settle
-// window for a result event that will never arrive. R242-ARCH-27 (#770):
-// coordinates interruptedSettleWindow with runDeadlineWatchdog completion
-// so the two timers no longer leave inconsistent state behind. Held under
-// p.mu to match the Interrupt() / InterruptViaControl() locking contract
-// (those callers also Store under p.mu so a concurrent Interrupt and a
-// watchdog kill cannot race the flags into a torn state).
+// clearInflightFlags resets the interrupt atomics after a watchdog kill: a
+// leftover flag would make a future Send on a recycled Process burn the 500ms
+// settle window for a result that never arrives (#770). Held under p.mu to
+// match Interrupt() / InterruptViaControl(), so a concurrent Interrupt and a
+// watchdog kill cannot race the flags into a torn state.
 func (p *Process) clearInflightFlags() {
 	p.mu.Lock()
 	p.interrupted.Store(false)
@@ -356,19 +256,11 @@ func (p *Process) clearInflightFlags() {
 	p.mu.Unlock()
 }
 
-// handleWatchdogTick evaluates the no-output and total-turn deadlines for a
-// single watchdog wakeup. It returns:
-//
-//   - (sr, nil) when the deadline elapsed but a result event already landed
-//     in the EventLog (eventCh non-blocking send dropped it); caller returns
-//     sr.
-//   - (nil, err) when the deadline elapsed and no fallback result is
-//     available; caller returns the error after Kill() has been issued.
-//   - (nil, nil) when neither deadline has fired; caller re-arms the
-//     watchdog and continues the receive loop.
-//
-// Extracted from Send so the watchdog branch is independently testable and
-// the parent function reads as a flat select. R237-GO-3.
+// handleWatchdogTick evaluates the no-output and total-turn deadlines for one
+// watchdog wakeup. Returns (sr, nil) when a deadline elapsed but a result
+// already landed in EventLog (eventCh dropped it); (nil, err) when it elapsed
+// with no fallback (Kill() already issued); (nil, nil) when neither fired and
+// the caller should re-arm.
 func (p *Process) handleWatchdogTick(
 	now, lastOutput, turnStart time.Time,
 	turnStartMS int64,
@@ -378,18 +270,14 @@ func (p *Process) handleWatchdogTick(
 		if sr := p.findResultSince(turnStartMS); sr != nil {
 			return sr, nil
 		}
-		// Set death reason BEFORE Kill so readLoop's shim_eof/
-		// shim_read_error classification (triggered by shimConn.Close)
-		// cannot overwrite the true root cause. setDeathReason is
-		// first-writer-wins, so the earlier set wins the CAS.
+		// Set death reason BEFORE Kill so readLoop's shim_eof/shim_read_error
+		// classification (triggered by shimConn.Close) cannot overwrite the true
+		// root cause; setDeathReason is first-writer-wins.
 		p.setDeathReason(DeathReasonNoOutputTimeout)
 		p.slogger().Error("watchdog: no output timeout", "timeout", noOutputDur)
 		p.Kill()
-		// R242-ARCH-27 (#770): clear inflight settle flags so the
-		// 500ms drainStaleEvents wait cannot fire against a
-		// watchdog-killed process whose result event will never
-		// arrive. See clearInflightFlags doc for the coordination
-		// rationale with interruptedSettleWindow.
+		// Clear inflight settle flags so drainStaleEvents' 500ms wait cannot
+		// fire against a watchdog-killed process (#770; see clearInflightFlags).
 		p.clearInflightFlags()
 		return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
 	}
@@ -411,12 +299,9 @@ func (p *Process) Interrupt() {
 	if !p.Alive() {
 		return
 	}
-	// Set the atomics while holding p.mu so Send()'s State→Running transition
-	// (also under p.mu) serialises with us. Without the lock coverage, a
-	// concurrent Send() could flip State to Running between our unlock and
-	// our atomics Store, leaving interrupted=true with interruptedRun=false —
-	// drainStaleEvents would then skip the settle wait and the interrupted
-	// result event from the in-flight turn would leak into the next turn.
+	// Store the atomics under p.mu so Send()'s State→Running transition (also
+	// under p.mu) serialises with us; otherwise interrupted=true could land with
+	// interruptedRun=false and the interrupted result would leak into the next turn.
 	p.mu.Lock()
 	state := p.state
 	p.interrupted.Store(true)
@@ -424,11 +309,9 @@ func (p *Process) Interrupt() {
 		p.interruptedRun.Store(true)
 	}
 	p.mu.Unlock()
-	// While the CLI is still spawning, its REPL hasn't initialised and the
-	// Claude CLI silently drops SIGINT. Skip the wire send entirely; also
-	// avoid marking interruptedRun so drainStaleEvents will not enter the
-	// settle loop (interrupted=true alone drains without waiting, since
-	// there is no stale result to absorb).
+	// While spawning the CLI's REPL isn't up and silently drops SIGINT: skip the
+	// wire send and leave interruptedRun unset so drainStaleEvents does not enter
+	// the settle loop (there is no stale result to absorb).
 	if state == StateSpawning {
 		return
 	}
@@ -437,42 +320,21 @@ func (p *Process) Interrupt() {
 	}
 }
 
-// InterruptViaControl requests the CLI to abort the active turn by writing an
-// in-band control_request to stdin (stream-json protocol only). Verified
-// behaviour on CLI 2.1.119: within ~300ms the CLI kills any in-flight tool
-// invocation (bash processes receive SIGKILL), emits a `result` event with
-// stop_reason=tool_use (or end_turn for pure-generation turns), and the
-// session remains usable for the next user message on the same process.
-//
-// Unlike Interrupt(), this path:
-//   - Does not send SIGINT to the CLI (no signal handler dependency).
-//   - Does not cross the shim's interrupt command (uses plain `write`).
-//   - Is officially supported by the Claude CLI stream-json protocol.
-//
-// Return values:
-//   - nil: control_request was written; the next Send() will drain the
-//     interrupted result via the settle loop.
-//   - ErrNoActiveTurn: process is alive but no turn is in flight; nothing
-//     was written, no flags were set. Callers should not log success.
-//   - ErrInterruptUnsupported: protocol (e.g. ACP) has no stdin-level
-//     interrupt primitive; callers should fall back to Interrupt().
-//   - wrapped transport error: the write failed; flags are rolled back so
-//     a subsequent Send() does not burn the settle budget waiting for a
-//     result that will never come.
+// InterruptViaControl aborts the active turn via an in-band control_request
+// on stdin (stream-json only) — no SIGINT, no shim interrupt command. The CLI
+// (verified on 2.1.119) kills in-flight tools within ~300ms, emits a `result`,
+// and the session stays usable. Returns nil (written; next Send drains the
+// result), ErrNoActiveTurn (idle; nothing written, no flags set),
+// ErrInterruptUnsupported (fall back to Interrupt()), or a wrapped transport
+// error (flags rolled back so the next Send does not burn the settle budget).
 func (p *Process) InterruptViaControl() error {
 	if !p.Alive() {
 		return ErrNoActiveTurn
 	}
-	// Snapshot state and pre-commit the atomics under p.mu so a concurrent
-	// Send() flipping State to Running after our read cannot race us into
-	// "wrote control_request but skipped the settle flags".
-	//
-	// R260528-BUG-4: use CompareAndSwap rather than unconditional Store
-	// so we can tell — at write-failure rollback time — which flags WE
-	// actually set vs. which were already true via a concurrent
-	// Interrupt(). Unconditional Store(false) on rollback would clobber
-	// the concurrent Interrupt()'s state and lose the settle hint that
-	// path needs.
+	// Snapshot state and pre-commit the atomics under p.mu so a concurrent Send()
+	// flipping State to Running cannot race us into "wrote control_request but
+	// skipped the settle flags". CompareAndSwap records which flags WE set, so a
+	// write-failure rollback cannot clobber a concurrent Interrupt()'s flags.
 	var iSet, rSet bool
 	p.mu.Lock()
 	state := p.state
@@ -481,25 +343,16 @@ func (p *Process) InterruptViaControl() error {
 		rSet = p.interruptedRun.CompareAndSwap(false, true)
 	}
 	p.mu.Unlock()
-	// No turn in flight → nothing to interrupt. Do NOT write the
-	// control_request: the CLI would buffer it for the next turn start and
-	// produce a spurious control_response against a turn the caller never
-	// intended to cancel.
+	// Do NOT write the control_request when idle: the CLI would buffer it for
+	// the next turn and produce a spurious control_response against a turn the
+	// caller never intended to cancel.
 	if state != StateRunning {
 		return ErrNoActiveTurn
 	}
-	// R179-PERF-P3: direct concat + strconv avoids fmt.Sprintf's reflection
-	// + scratch buffer. reqID is only used for local control-response echo
-	// matching, so format quality doesn't matter.
 	reqID := "naozhi-int-" + strconv.FormatInt(p.interruptSeq.Add(1), 10)
 	if err := p.protocol.WriteInterrupt(p.shimStdinWriter(), reqID); err != nil {
-		// Write failed: no control_request reached the CLI, so there is no
-		// trailing result event to drain. Roll back ONLY the flags we
-		// just CAS'd from false→true — a concurrent real Interrupt()
-		// that won the CAS race owns the flag and its rollback (if any)
-		// is its own concern. Pre-fix this branch unconditionally
-		// Store(false), which clobbered a concurrent Interrupt()'s
-		// flags and dropped the settle hint that path needs.
+		// Nothing reached the CLI, so no trailing result to drain. Roll back ONLY
+		// the flags we CAS'd — a concurrent Interrupt() that won owns its flag.
 		if iSet {
 			p.interrupted.Store(false)
 		}
@@ -511,19 +364,15 @@ func (p *Process) InterruptViaControl() error {
 	return nil
 }
 
-// setModelAckTimeout caps how long SetModel waits for the CLI's
-// acknowledgement. Sized from live measurement: claude processes control
-// requests in streaming gaps — a mid-turn ack took 7.5s on 2.1.251
-// (docs/rfc/dashboard-model-effort-control.md §1 F14) — so anything
-// single-digit risks false timeouts under load. 30s matches
-// acpHandshakeTimeout's order of magnitude for "the CLI is expected to
-// answer but may be busy".
+// setModelAckTimeout caps how long SetModel waits for the CLI's ack. claude
+// processes control requests in streaming gaps — a mid-turn ack took 7.5s on
+// 2.1.251 (docs/rfc/dashboard-model-effort-control.md §1 F14) — so anything
+// single-digit risks false timeouts; 30s matches acpHandshakeTimeout's scale.
 const setModelAckTimeout = 30 * time.Second
 
-// registerControlAck installs an ack waiter for a control request_id.
-// The returned channel receives nil (success ack), an error (error ack,
-// carrying the CLI's rejection text — F7), and is buffered so a delivery
-// racing the waiter's timeout never blocks the readLoop.
+// registerControlAck installs an ack waiter for a control request_id. The
+// channel receives nil (success) or an error carrying the CLI's rejection
+// text; it is buffered so a delivery racing the timeout never blocks readLoop.
 func (p *Process) registerControlAck(reqID string) chan error {
 	ch := make(chan error, 1)
 	p.controlAckMu.Lock()
@@ -543,10 +392,9 @@ func (p *Process) unregisterControlAck(reqID string) {
 	p.controlAckMu.Unlock()
 }
 
-// deliverControlAck routes a control_ack Event from the readLoop to its
-// registered waiter. Unmatched acks (waiter timed out and unregistered, or
-// an interrupt's control_response — those never register) are dropped: they
-// are fire-and-forget from the CLI's perspective and carry no turn state.
+// deliverControlAck routes a control_ack Event from readLoop to its waiter.
+// Unmatched acks (waiter timed out, or an interrupt's control_response —
+// those never register) are dropped: fire-and-forget, no turn state.
 func (p *Process) deliverControlAck(ev Event) {
 	p.controlAckMu.Lock()
 	ch, ok := p.controlAcks[ev.RPCRequestID]
@@ -566,38 +414,19 @@ func (p *Process) deliverControlAck(ev Event) {
 	ch <- nil
 }
 
-// ErrSetModelRejected wraps a CLI-side rejection of a set_model request —
-// claude org-policy restriction (F7) or unknown model (F15). The wrapped
-// text is the CLI's own message; callers surface it verbatim to the
-// operator and MUST NOT record the override (RFC §6 R8: ack-before-persist).
+// ErrSetModelRejected wraps a CLI-side rejection of set_model (org policy or
+// unknown model). The wrapped text is the CLI's own message; callers surface it
+// verbatim and MUST NOT record the override (RFC §6 R8: ack-before-persist).
 var ErrSetModelRejected = errors.New("set_model rejected by CLI")
 
-// SetModel switches the live session's model in place, without restarting
-// the CLI process. Protocol mapping and verified semantics are on the
-// ModelSetter godoc (protocol.go); this method owns the ack correlation:
-//
-//  1. Register an ack waiter under a fresh request_id.
-//  2. Write the protocol-specific request (ACP session/set_model RPC /
-//     claude set_model control_request).
-//  3. Block until the CLI acks, the process dies, or ctx/timeout expires.
-//
-// Returns:
-//   - nil: the CLI acknowledged the switch (kiro: RPC {} response — no wire
-//     echo of the model exists, F11, so ack==confirmation; claude:
-//     control_response success).
-//   - ErrSetModelRejected-wrapped: the CLI refused (claude F7/F15). The
-//     caller must not persist the override.
-//   - ErrSetModelUnsupported: protocol has no runtime channel (codex) or
-//     the ACP handshake hasn't produced a session yet. Callers fall back
-//     to record-only ("applies next spawn").
-//   - other errors: transport write failure / process death / timeout.
-//
-// Mid-turn safety was verified live on both backends (F13/F14): the request
-// does not interrupt an in-flight turn, so callers do not need to gate on
-// State==Running. NOTE for kiro callers: set_model resets the session's
-// effort tier to the new model's default (F9) — Router.SetSessionTuning is
-// responsible for choosing the respawn path instead when an effort tier is
-// in force; this method deliberately stays policy-free.
+// SetModel switches the live session's model in place without restarting the
+// CLI (protocol mapping: ModelSetter godoc). It registers an ack waiter under a
+// fresh request_id, writes the request, and blocks until ack / process death /
+// ctx / timeout. Safe mid-turn. Returns nil on ack (kiro's RPC {} carries no
+// model echo, so ack == confirmation), ErrSetModelRejected-wrapped when the CLI
+// refused (caller must not persist), ErrSetModelUnsupported when the protocol
+// has no runtime channel (record-only), or a transport/death/timeout error.
+// Policy-free: kiro's set_model resets the effort tier; the Router handles that.
 func (p *Process) SetModel(ctx context.Context, model string) error {
 	ms, ok := p.protocol.(ModelSetter)
 	if !ok {
@@ -617,11 +446,9 @@ func (p *Process) SetModel(ctx context.Context, model string) error {
 	select {
 	case err := <-ch:
 		if err == nil {
-			// F11: kiro's ack carries no model echo, and claude's live value
-			// only refreshes on the next system/init — so on ack success WE
-			// update the live-process model mirror. Snapshot prefers
-			// proc.Model() over the persisted session field; without this
-			// the header would keep showing the old model until respawn.
+			// Neither backend echoes the model on ack (claude's live value only refreshes
+			// on the next system/init), so update the live-process mirror here; Snapshot
+			// prefers proc.Model() over the persisted session field.
 			p.setModel(model)
 		}
 		return err
@@ -630,9 +457,8 @@ func (p *Process) SetModel(ctx context.Context, model string) error {
 	case <-p.killCh:
 		return fmt.Errorf("set_model: process terminated while awaiting ack")
 	case <-p.done:
-		// Natural exit (EOF / cli_exited → readLoop returned) never closes
-		// killCh; without this arm the ack wait sat out the full
-		// setModelAckTimeout against an already-dead process.
+		// Natural exit (EOF → readLoop returned) never closes killCh; without this
+		// arm the ack wait would sit out the full timeout against a dead process.
 		return fmt.Errorf("set_model: process exited while awaiting ack")
 	case <-timer.C:
 		return fmt.Errorf("set_model: no ack within %s", setModelAckTimeout)

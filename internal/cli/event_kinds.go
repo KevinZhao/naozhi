@@ -3,18 +3,9 @@ package cli
 import "github.com/naozhi/naozhi/internal/cli/clievent"
 
 // IsActivityType reports whether the given EventEntry.Type belongs to the
-// "activity" set tracked by EventLog.lastActivitySummary. Both EventLog
-// (Append / AppendBatch) and session.ManagedSession (history scan in
-// extractLastPromptFromProcess) need the predicate; centralising it here
-// removes the previous duplicate definition in session.isActivityType
-// whose godoc had to remind future maintainers to keep the two switches in
-// sync. R228-CR-3.
-//
-// The set must stay aligned with the cases that EventLog.Append /
-// AppendBatch use to update lastActivitySummary — adding a new type to one
-// without updating the other would leave history backfill blind to events
-// the live path counts as activity. eventlog_activity_contract_test.go
-// pins the set.
+// "activity" set tracked by EventLog.lastActivitySummary. Shared by EventLog
+// (Append / AppendBatch) and session.ManagedSession's history scan so live and
+// replay tails agree; eventlog_activity_contract_test.go pins the set.
 func IsActivityType(t string) bool {
 	switch t {
 	case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
@@ -23,20 +14,13 @@ func IsActivityType(t string) bool {
 	return false
 }
 
-// internalEventTypes MUST stay byte-for-byte aligned with the
-// INTERNAL_EVENT_TYPES Set in internal/server/static/dashboard.js. These are
-// the event types the dashboard's processEventsForDisplay() filters out — they
-// never render a chat bubble. The server's visible-aware history readers
+// internalEventTypes MUST stay byte-for-byte aligned with INTERNAL_EVENT_TYPES
+// in internal/server/static/dashboard.js: the types processEventsForDisplay()
+// filters out (no chat bubble). The visible-aware history readers
 // (EventLog.LastNVisible, ManagedSession.EventLastNVisibleCtx) count entries
-// NOT in this set so the initial payload always carries enough renderable
-// events; if a parallel agent team floods the trailing window with tool_use /
-// task_progress events, the reader keeps walking back until it finds real
-// messages instead of handing the dashboard a page that renders to a blank
-// "该会话最近仅有 agent 活动" placeholder.
-//
-// Drift between this set and the JS Set silently breaks that guarantee, so
-// static_ux_contract_test.go pins the two together — adding a type to one
-// without the other turns CI red.
+// NOT in this set so the first page always carries renderable messages even
+// when an agent team floods the tail with tool_use / task_progress.
+// static_ux_contract_test.go pins the two sets together.
 var internalEventTypes = map[string]struct{}{
 	"tool_use":      {},
 	"result":        {},

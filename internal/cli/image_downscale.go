@@ -16,48 +16,33 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
-// Anthropic's vision models resize any image that exceeds ~1568 px on its
-// longest edge OR ~1.15 megapixels of area before the model ever sees it
-// (a larger image is downsampled server-side to fit within a fixed tile
-// budget, ~1600 vision tokens max). Sending a larger image therefore buys
-// nothing: you pay the upload + base64 bloat + a redundant server-side
-// resize, and — because the stream-json process replays the full transcript
-// every turn — you pay it AGAIN on every follow-up in the same session.
-//
-// downscaleForVision shrinks an inline image to the largest size that is
-// still fully honoured by the model, so every turn ships the minimum bytes
-// with zero loss of information the model would actually have used. A 1200×1600
-// photo (1.92 MP) becomes ~928×1238 (1.15 MP): the exact resolution the API
-// would have downsampled it to, but computed once at send time.
+// Anthropic's vision models downsample any image over ~1568 px on the long
+// edge or ~1.15 MP of area before the model sees it, so larger uploads only
+// cost base64 bloat — and the stream-json process replays the full transcript
+// every turn, so they cost it again on every follow-up. downscaleForVision
+// shrinks inline images to that ceiling once, at send time.
 const (
-	// maxVisionLongEdge is the longest-edge ceiling above which the vision
-	// backend downsamples. Match it so we never send pixels the model drops.
+	// maxVisionLongEdge matches the backend's longest-edge ceiling.
 	maxVisionLongEdge = 1568
 
-	// maxVisionPixels is the total-area ceiling (~1.15 MP). This is the knee
-	// that bites tall/wide document photos whose long edge is under 1568 but
-	// whose area still exceeds the tile budget (e.g. 1200×1600 = 1.92 MP).
+	// maxVisionPixels is the total-area ceiling that bites document photos
+	// whose long edge is under 1568 (e.g. 1200×1600 = 1.92 MP).
 	maxVisionPixels = 1_150_000
 
-	// visionReencodeQuality balances legibility of printed/handwritten text
-	// (the dominant vision workload here) against payload size. Higher than
-	// MakeThumbnail's 70 because this is the actual model input, not a preview.
+	// visionReencodeQuality favours legibility of printed/handwritten text;
+	// higher than MakeThumbnail's 70 because this is the model input.
 	visionReencodeQuality = 85
 
-	// downscaleSkipRatio: if the computed scale is within this fraction of 1.0
-	// the image is already effectively at target size, so we return the
-	// original bytes untouched rather than paying a lossy re-encode for a
-	// sub-percent dimension change.
+	// downscaleSkipRatio: scales this close to 1.0 return the original bytes
+	// rather than pay a lossy re-encode for a sub-percent change.
 	downscaleSkipRatio = 0.995
 )
 
 // downscaleImagesForVision returns a new slice in which every inline raster
-// image larger than the vision backend's resize thresholds has been shrunk to
-// fit. It is immutable (never mutates the input slice or its Attachment values)
-// and best-effort: any image that cannot be decoded, is a non-image
-// attachment (file_ref), or fails to re-encode is passed through byte-for-byte.
-// Callers apply this at the CLI write boundary so the shrink happens once and
-// every subsequent transcript replay reuses the smaller bytes.
+// image over the vision resize thresholds has been shrunk. Never mutates the
+// input; best-effort — undecodable images, file_ref attachments and re-encode
+// failures pass through byte-for-byte. Applied at the CLI write boundary so
+// every transcript replay reuses the smaller bytes.
 func downscaleImagesForVision(images []Attachment) []Attachment {
 	if len(images) == 0 {
 		return images
@@ -80,16 +65,11 @@ func downscaleImagesForVision(images []Attachment) []Attachment {
 	return out
 }
 
-// downscaleForVision shrinks a single image's raw bytes to fit within the
-// vision backend's edge + area limits, re-encoding to JPEG. It returns
-// (newBytes, newMimeType, true) when a resize happened, or (nil, "", false)
-// when the image is already within limits, cannot be decoded, or fails to
-// re-encode — in every false case the caller keeps the original bytes.
-//
-// Safety mirrors RotateJPEG / MakeThumbnail: a DecodeConfig pre-check caps the
-// pixel count before the full RGBA decode (bounding memory), the shared
-// thumbSem serialises concurrent decodes, and a recover() treats a decoder
-// panic on crafted-malformed input as a pass-through rather than a crash.
+// downscaleForVision shrinks one image to the vision edge + area limits and
+// re-encodes to JPEG. Returns (bytes, mime, true) on resize, or
+// (nil, "", false) when already within limits, undecodable or un-encodable —
+// the caller keeps the original bytes. Same safety as MakeThumbnail:
+// DecodeConfig pixel pre-check, thumbSem, and recover() on decoder panics.
 func downscaleForVision(data []byte) (out []byte, mime string, changed bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -107,8 +87,7 @@ func downscaleForVision(data []byte) (out []byte, mime string, changed bool) {
 	if sw <= 0 || sh <= 0 {
 		return nil, "", false
 	}
-	// Refuse to decode absurdly large sources (same ceiling as thumbnail /
-	// rotate) — a full RGBA decode of a 4096×4096 image is already 64 MB.
+	// Same ceiling as thumbnail / rotate: a 4096×4096 RGBA decode is 64 MB.
 	if int64(sw)*int64(sh) >= maxThumbnailPixels {
 		return nil, "", false
 	}
@@ -126,8 +105,6 @@ func downscaleForVision(data []byte) (out []byte, mime string, changed bool) {
 		dh = 1
 	}
 
-	// Limit concurrent decodes to cap aggregate memory usage. Reuse thumbSem —
-	// downscale, like MakeThumbnail, runs on the outbound send path.
 	thumbSem <- struct{}{}
 	defer func() { <-thumbSem }()
 
@@ -136,15 +113,11 @@ func downscaleForVision(data []byte) (out []byte, mime string, changed bool) {
 		return nil, "", false
 	}
 	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
-	// JPEG has no alpha channel, so transparent regions of a source PNG must
-	// be flattened onto a solid background. Pre-fill white (not the RGBA zero
-	// value, which is transparent BLACK) so a cropped/rounded screenshot or a
-	// diagram with a transparent background comes out on white — the natural
-	// backdrop for the document/OCR vision workload — instead of darkened.
-	// Then composite the scaled source Over the white fill.
+	// JPEG has no alpha: pre-fill white (the RGBA zero value is transparent
+	// BLACK) so transparent PNG regions flatten onto the natural document
+	// backdrop, then composite the scaled source Over it.
 	draw.Draw(dst, dst.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
-	// CatmullRom keeps printed/handwritten text legible on downscale far
-	// better than nearest-neighbour — the vision workload here is OCR-heavy.
+	// CatmullRom keeps text legible on downscale (OCR-heavy workload).
 	draw.CatmullRom.Scale(dst, dst.Bounds(), src, src.Bounds(), draw.Over, nil)
 
 	var buf bytes.Buffer

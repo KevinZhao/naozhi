@@ -19,34 +19,23 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// codexHandshakeTimeout caps how long a handshake RPC (initialize /
-// thread/start / thread/resume) waits for its response. Distinct constant
-// from acpHandshakeTimeout so the two backends tune independently; codex
-// model warmup can be slower than kiro's, so start a touch higher.
+// codexHandshakeTimeout caps handshake RPC waits (initialize / thread/start /
+// thread/resume). Separate from acpHandshakeTimeout; codex model warmup is slower.
 const codexHandshakeTimeout = 45 * time.Second
 
-// CodexProtocol implements Protocol for OpenAI's `codex app-server` —
-// JSON-RPC 2.0 over stdio NDJSON, long-lived, bidirectional. It shares
-// ACPProtocol's "long RPC + interleaved notifications" shape (turn/start is a
-// request whose response only arrives after every item/* notification) but
-// uses codex's own method names and payloads, so it is a SEPARATE
-// implementation rather than a reuse of ACPProtocol (RFC docs/rfc/codex-backend.md §1.3).
-//
-// The wire contract was validated against codex-cli 0.141.0 on 2026-06-21;
-// see docs/rfc/codex-backend-validation.md for the captured frames.
+// CodexProtocol implements Protocol for OpenAI's `codex app-server` (JSON-RPC
+// 2.0 over stdio NDJSON). It shares ACPProtocol's "long RPC + interleaved
+// notifications" shape but uses codex's own methods and payloads, so it is a
+// SEPARATE implementation (docs/rfc/codex-backend.md §1.3). Wire contract
+// validated against codex-cli 0.141.0 (docs/rfc/codex-backend-validation.md).
 type CodexProtocol struct {
 	mu sync.Mutex
-	// nextID mirrors ACPProtocol.nextID — int64 to avoid sign flip, narrowed
-	// to int in allocID for RPCRequest.ID JSON compatibility (64-bit only).
+	// nextID mirrors ACPProtocol.nextID (int64, narrowed to int in allocID; 64-bit only).
 	nextID atomic.Int64
-	// threadID is the codex thread this protocol instance drives. Written once
-	// by Init (thread/start result.thread.id), read concurrently by
-	// WriteMessage / WriteInterrupt / readLoop. atomic.Pointer so per-chunk
-	// textBuf writes under mu never contend with these reads (mirrors
-	// ACPProtocol.sessionID rationale).
+	// threadID is written once by Init (thread/start result.thread.id) and read
+	// concurrently; atomic.Pointer so reads never contend with textBuf writes under mu.
 	threadID atomic.Pointer[string]
-	// textBuf accumulates item/agentMessage/delta text during a turn, flushed
-	// at turn/completed. Guarded by mu.
+	// textBuf accumulates item/agentMessage/delta text, flushed at turn/completed. Guarded by mu.
 	textBuf strings.Builder
 	// BackendID labels per-backend metric increments (RFC multi-backend §10).
 	BackendID string
@@ -55,14 +44,12 @@ type CodexProtocol struct {
 // ErrCodexRPC wraps a JSON-RPC error returned by codex app-server.
 var ErrCodexRPC = errors.New("codex rpc error")
 
-// ErrCodexTimeout is returned when readUntilResponse gives up on a specific
-// JSON-RPC id after codexHandshakeTimeout. Callers treat it as transient.
+// ErrCodexTimeout is returned when readUntilResponse times out on an id; treated as transient.
 var ErrCodexTimeout = errors.New("codex response timeout")
 
 func (p *CodexProtocol) Name() string { return "codex" }
 
-// Clone returns a fresh instance retaining BackendID so the spawn pipeline's
-// proto.Clone() preserves metric labelling.
+// Clone returns a fresh instance retaining BackendID so metric labelling survives proto.Clone().
 func (p *CodexProtocol) Clone() Protocol { return &CodexProtocol{BackendID: p.BackendID} }
 
 func (p *CodexProtocol) storeThreadID(id string) { p.threadID.Store(&id) }
@@ -76,12 +63,10 @@ func (p *CodexProtocol) loadThreadID() string {
 
 func (p *CodexProtocol) allocID() int { return int(p.nextID.Add(1) - 1) }
 
-// BuildArgs launches `codex app-server`. Model / sandbox / approval flow over
-// RPC and config (-c) rather than per-turn flags. approval_policy=never +
-// sandbox_mode=workspace-write mirrors claude's --dangerously-skip-permissions
-// stance; danger-full-access is intentionally NOT used because codex 0.141
-// rejects approval_policy=never with danger-full-access and silently falls
-// back to read-only (validation §2.5).
+// BuildArgs launches `codex app-server`; model / sandbox / approval flow via
+// config (-c). approval_policy=never + sandbox_mode=workspace-write mirrors
+// claude's --dangerously-skip-permissions; danger-full-access is NOT used
+// because codex 0.141 then silently falls back to read-only (validation §2.5).
 func (p *CodexProtocol) BuildArgs(opts SpawnOptions) []string {
 	args := []string{"app-server"}
 	if opts.Model != "" {
@@ -122,9 +107,8 @@ type codexThreadStartResult struct {
 	} `json:"thread"`
 }
 
-// codexUserInput is one entry of turn/start's input array. The input is a
-// UserInput[] (validation §3.2), not a bare string — sending a string yields
-// -32600 "expected a sequence".
+// codexUserInput is one entry of turn/start's UserInput[] (validation §3.2);
+// a bare string yields -32600 "expected a sequence".
 type codexUserInput struct {
 	Type     string `json:"type"`
 	Text     string `json:"text,omitempty"`
@@ -141,7 +125,6 @@ type codexTurnInterruptParams struct {
 }
 
 func (p *CodexProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, error) {
-	// Step 1: initialize handshake (request → result).
 	initReq := RPCRequest{
 		JSONRPC: "2.0", ID: p.allocID(), Method: "initialize",
 		Params: codexInitParams{ClientInfo: codexClientInfo{Name: "naozhi", Version: "1.0.0"}},
@@ -150,13 +133,11 @@ func (p *CodexProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, e
 		return "", fmt.Errorf("codex initialize: %w", err)
 	}
 
-	// Step 2: `initialized` notification (no id). Until this is sent the server
-	// rejects every other method with "Not initialized".
+	// Until `initialized` (no id) is sent the server rejects every method with "Not initialized".
 	if err := p.writeNotification(rw.W, "initialized", nil); err != nil {
 		return "", fmt.Errorf("codex initialized notify: %w", err)
 	}
 
-	// Step 3: thread/start or thread/resume.
 	if cwd == "" {
 		cwd = os.TempDir()
 	}
@@ -204,9 +185,8 @@ func (p *CodexProtocol) WriteMessage(w io.Writer, text string, images []Attachme
 
 	input := make([]codexUserInput, 0, len(images)+1)
 	for _, img := range images {
-		// codex responses image input takes a data: URL (base64). image_input
-		// is advertised in the profile Features map for the gpt-5.x path; the
-		// gpt-oss Bedrock path does not accept images (validation §4).
+		// Image input is a data: URL; only the gpt-5.x path accepts images, the
+		// gpt-oss Bedrock path does not (validation §4).
 		input = append(input, codexUserInput{
 			Type:     "image",
 			ImageURL: "data:" + img.MimeType + ";base64," + encodeImageBase64(img.Data),
@@ -228,13 +208,10 @@ func (p *CodexProtocol) WriteMessage(w io.Writer, text string, images []Attachme
 	return err
 }
 
-// WriteInterrupt sends a turn/interrupt request to abort the in-flight turn.
-// Unlike ACP's session/cancel (a notification), codex models interrupt as a
-// request (validation: TurnInterruptParams has threadId). We fire-and-forget
-// the request over stdin under the caller-held write lock and let the readLoop
-// observe the resulting turn/completed; we do not block on the interrupt's own
-// response. Returns ErrInterruptUnsupported before the handshake establishes a
-// thread (nothing to interrupt yet), so callers fall back to SIGINT.
+// WriteInterrupt sends a turn/interrupt request (unlike ACP's notification) to
+// abort the in-flight turn. Fire-and-forget under the caller-held write lock;
+// readLoop observes the resulting turn/completed. Returns
+// ErrInterruptUnsupported before a thread exists (callers fall back to SIGINT).
 func (p *CodexProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	tid := p.loadThreadID()
 	if tid == "" {
@@ -251,15 +228,12 @@ func (p *CodexProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	if _, err := w.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("codex write turn/interrupt: %w", err)
 	}
-	// Multi-backend RFC §10: record successful cancels per backend (mirrors
-	// ACPProtocol.WriteInterrupt). The pre-handshake early return above does
-	// not count — no real interrupt reached the agent.
+	// Only successful cancels count; the pre-handshake return never reached the agent.
 	metrics.RecordACPCancel(p.BackendID)
 	return nil
 }
 
-// WriteUserMessageLocked ignores uuid/priority — codex has no replay/priority
-// concept in phase1 (turn/steer is a phase2 optimisation, RFC §3).
+// WriteUserMessageLocked ignores uuid/priority — codex has no replay/priority concept (RFC §3).
 func (p *CodexProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []Attachment, _ string) error {
 	return p.WriteMessage(w, text, images)
 }
@@ -267,12 +241,9 @@ func (p *CodexProtocol) WriteUserMessageLocked(w io.Writer, _, text string, imag
 func (p *CodexProtocol) SupportsPriority() bool { return false }
 func (p *CodexProtocol) SupportsReplay() bool   { return false }
 
-// Capabilities: codex has a clean soft-interrupt (turn/interrupt request) once
-// a thread is established; pre-handshake WriteInterrupt still returns
-// ErrInterruptUnsupported. Not stream-json. RFC §6.
-// EffortTier=false: codex exposes no equivalent tier flag (its own reasoning
-// controls ride on `-c model_reasoning_effort=`, a different axis this RFC does
-// not model), so it cannot be derived from StreamJSON like ACP's can.
+// Capabilities: SoftInterrupt via turn/interrupt once a thread exists; not
+// stream-json. EffortTier=false: codex's reasoning control rides on
+// `-c model_reasoning_effort=`, a different axis this RFC does not model.
 func (p *CodexProtocol) Capabilities() Caps {
 	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false,
 		EffortTier: false}
@@ -327,14 +298,12 @@ func (p *CodexProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		return nil, false, err
 	}
 
-	// Notification dispatch.
 	if msg.IsNotification() {
 		return p.handleNotification(msg)
 	}
 
-	// Reverse request from server (approval / userInput / elicitation) — these
-	// carry an id AND a method. Surface as a synthetic permission_request so
-	// HandleEvent can auto-allow; round-trip the id.
+	// Reverse requests (id AND method): approvals become a synthetic
+	// permission_request so HandleEvent can auto-allow; the id round-trips.
 	if msg.IsRequest() {
 		if strings.HasSuffix(msg.Method, "/requestApproval") {
 			rid, _ := msg.IDAsString()
@@ -345,24 +314,18 @@ func (p *CodexProtocol) ReadEvent(line string) ([]Event, bool, error) {
 				RawParams:    msg.Params,
 			}}, false, nil
 		}
-		// Other reverse requests (requestUserInput / elicitation) are not yet
-		// wired to interactive cards (phase2). Ignore so the turn does not hang
-		// on our side — codex applies its own default after a timeout.
+		// requestUserInput / elicitation are not wired to cards yet; ignore so the
+		// turn does not hang on our side — codex applies its own default on timeout.
 		slog.Debug("codex: unhandled reverse request", "method", msg.Method)
 		return nil, false, nil
 	}
 
-	// id-bearing response. During Init these are consumed by readUntilResponse;
-	// on the main readLoop the only id-bearing response we see is the deferred
-	// turn/start reply. A success reply carries no extra visible payload (text
-	// already streamed via item/agentMessage/delta + flushed at turn/completed),
-	// but an ERROR reply must close the turn and be recorded — otherwise a
-	// post-handshake turn/start failure is silently swallowed and the session
-	// hangs in state=running (mirrors ACP protocol_acp.go:611 rationale).
+	// The only id-bearing response on the readLoop is the deferred turn/start
+	// reply. Success carries nothing visible, but an ERROR must close the turn
+	// and be recorded or the session hangs in state=running (mirrors ACP).
 	if msg.IsResponse() && msg.Error != nil {
 		metrics.RecordProtocolRPCError(p.BackendID, "turn/start", strconv.Itoa(msg.Error.Code))
-		// Flush any partial text so the dashboard sees what streamed before the
-		// failure, then surface a synthetic error so readLoop closes the turn.
+		// Discard partial text and surface a synthetic error so readLoop closes the turn.
 		p.mu.Lock()
 		p.textBuf.Reset()
 		p.mu.Unlock()
@@ -421,10 +384,8 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 				},
 			}}, false, nil
 		default:
-			// userMessage / agentMessage / reasoning / plan items: text is
-			// already streamed via item/agentMessage/delta and flushed at
-			// turn/completed, so the lifecycle markers themselves carry no
-			// extra visible payload. Skip.
+			// userMessage / agentMessage / reasoning / plan lifecycle markers carry
+			// no visible payload (text streams via deltas); skip.
 			return nil, false, nil
 		}
 
@@ -455,19 +416,9 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 		p.textBuf.Reset()
 		p.mu.Unlock()
 
-		// Turn boundary emits up to TWO events, mirroring ACPProtocol.ReadEvent:
-		//
-		//   1. A synthesised assistant frame carrying the accumulated text as a
-		//      single "text" content block. This is the ONLY place the visible
-		//      reply materialises — item/agentMessage/delta notifications feed
-		//      textBuf but never make it onto EventLog, so without this frame
-		//      the dashboard has no bubble to render
-		//      (process_event_format.go derives bubbles only from
-		//      ev.Message.Content, never from a result event's Result field).
-		//   2. A pure result event carrying stopReason/threadId. Result is still
-		//      populated so process_send.Send can plumb text into
-		//      SendResult.Text for passthrough callers, but the EventLog
-		//      converter treats result strictly as turn metadata.
+		// Turn boundary emits up to TWO events (mirrors ACP): an assistant frame
+		// with the accumulated text — the ONLY place the visible reply materialises
+		// — and a result event whose Result feeds SendResult.Text only.
 		var events []Event
 		if text != "" {
 			events = append(events, Event{
@@ -480,9 +431,7 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 		}
 		result := Event{Type: "result", SessionID: c.ThreadID, Result: text}
 		if c.Turn.Status == "failed" && c.Turn.Error != nil {
-			// Keep the accumulated text (if any) on the assistant frame above;
-			// the result carries the failure reason in SubType so partial
-			// streamed content is not lost (review #5).
+			// Failure reason goes in the result; the assistant frame keeps partial text.
 			result.SubType = "error"
 			result.Result = osutil.SanitizeForLog(c.Turn.Error.Message, 1024)
 		}
@@ -490,8 +439,7 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 		return events, true, nil
 
 	case "error":
-		// Stream-level error notification (e.g. provider 5xx). Surface as a
-		// system event; turn/completed with status:failed follows separately.
+		// Stream-level error (e.g. provider 5xx); turn/completed status:failed follows.
 		var e struct {
 			Error struct {
 				Message string `json:"message"`
@@ -505,12 +453,10 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 		"configWarning", "warning", "remoteControl/status/changed",
 		"item/reasoning/textDelta", "item/reasoning/summaryTextDelta",
 		"turn/plan/updated", "turn/diff/updated":
-		// Known-but-uninteresting lifecycle / reasoning / plan frames. Skip
-		// quietly so they do not pollute the event log.
+		// Known-but-uninteresting lifecycle / reasoning / plan frames.
 		return nil, false, nil
 
 	default:
-		// Forward-compat: unknown methods are tolerated.
 		slog.Debug("codex: unknown notification", "method", msg.Method)
 		return nil, false, nil
 	}
@@ -520,12 +466,9 @@ func (p *CodexProtocol) HandleEvent(w io.Writer, ev Event) bool {
 	if ev.Type != "permission_request" {
 		return false
 	}
-	// Auto-allow every approval request (validation §3.4: */requestApproval).
-	// Round-trip the id; codex approval responses take {decision: "approved"}.
-	// requestApproval ids may be numeric or string; reuse ACP HandleEvent's
-	// numeric-fast-path / string-marshal split (protocol_acp.go:809). If the
-	// source string parses as an integer it is already a valid JSON number
-	// literal — reuse it verbatim and skip a marshal; otherwise quote it.
+	// Auto-allow every */requestApproval with {decision: "approved"}. Ids may be
+	// numeric or string: an integer-parsable source string is already a valid
+	// JSON number literal, so reuse it verbatim; otherwise quote via json.Marshal.
 	idRaw := json.RawMessage(`null`)
 	if ev.RPCRequestID != "" {
 		if _, err := strconv.Atoi(ev.RPCRequestID); err == nil {
@@ -569,11 +512,8 @@ func (p *CodexProtocol) writeNotification(w io.Writer, method string, params any
 }
 
 // sendAndWaitResponse writes req then blocks until the matching response
-// arrives, consuming interleaved notifications. Reuses ACP's readUntilResponse
-// (shared JSONRW + RPCMessage matching). The handshake RPCs (initialize /
-// thread/start / thread/resume) reply promptly; turn/start is NOT sent through
-// here (its response is deferred until after all item/* notifications and is
-// instead surfaced via ReadEvent on the readLoop).
+// arrives, consuming interleaved notifications. turn/start is NOT sent through
+// here: its response is deferred past all item/* notifications (see ReadEvent).
 func (p *CodexProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) (*RPCMessage, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -589,12 +529,9 @@ func (p *CodexProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) (*RPCMes
 	return resp, err
 }
 
-// readUntilResponse reads lines until a JSON-RPC response with the matching id
-// arrives, consuming interleaved notifications. Modelled on
-// ACPProtocol.readUntilResponse (same timeout + shim-deadline-pulse contract);
-// kept separate so the two handshake state machines stay independent and a
-// codex schema change cannot perturb the kiro path. Times out after
-// codexHandshakeTimeout.
+// readUntilResponse reads lines until the response with the matching id
+// arrives, consuming notifications. Modelled on ACPProtocol.readUntilResponse
+// but kept separate so a codex schema change cannot perturb the kiro path.
 func (p *CodexProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage, error) {
 	type readResult struct {
 		msg *RPCMessage
@@ -653,16 +590,12 @@ func (p *CodexProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessa
 		return r.msg, r.err
 	case <-timer.C:
 		done.Store(true)
-		// Mirror ACP's shim read-deadline pulse so a reader parked inside
-		// bufio.ReadBytes unblocks instead of lingering for the connection's
-		// lifetime (R184-CONCUR-H1).
+		// Mirror ACP's read-deadline pulse so a reader parked in bufio.ReadBytes unblocks.
 		if sl, ok := rw.R.(*shimLineReader); ok && sl.proc != nil && sl.proc.shimConn != nil {
 			_ = sl.proc.shimConn.SetReadDeadline(time.Now())
 			_ = sl.proc.shimConn.SetReadDeadline(time.Time{})
 		}
-		// Non-shim readers (no SetReadDeadline hook) leak the goroutine until
-		// the underlying codex process pipe closes — same known limitation as
-		// ACP's R224-GO-2.
+		// Non-shim readers leak the goroutine until the pipe closes (same limitation as ACP).
 		return nil, fmt.Errorf("%w (id=%d)", ErrCodexTimeout, expectedID)
 	}
 }

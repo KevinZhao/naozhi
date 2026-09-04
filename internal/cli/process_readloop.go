@@ -1,18 +1,10 @@
 package cli
 
 // process_readloop.go — inbound shim socket read goroutine and heartbeat.
-//
-// Owns: readLoop (inbound stdout pump), the shim heartbeat loop, and
-// shimMsg (the inbound wire frame, also consumed by wrapper.go's Spawn
-// handshake).
-//
-// Related constants — maxScannerBufBytes / lineBufShrinkThreshold — live
-// in process.go's const block alongside DefaultNoOutputTimeout because
-// they are timing-budget knobs grouped semantically rather than
-// physically.
-//
-// R227-ARCH-19: dropped the "Phase 2 of process-split / zero semantic
-// change" preamble; refactor is complete, history lives in git log.
+// Owns readLoop, heartbeatLoop and shimMsg (the inbound wire frame, also
+// consumed by wrapper.go's Spawn handshake). maxScannerBufBytes /
+// lineBufShrinkThreshold live in process.go's const block with the other
+// timing-budget knobs.
 
 import (
 	"bufio"
@@ -31,13 +23,8 @@ import (
 )
 
 // shimMsg is a minimal struct for parsing shim protocol messages in readLoop.
-//
-// R222-PERF-13: Code uses a custom (int, bool) pair instead of *int so
-// every cli_exited frame avoids the 1× heap allocation that *int would
-// trigger when json.Unmarshal materialises the integer behind a pointer.
-// json.Unmarshal calls UnmarshalJSON which sets CodePresent=true; an
-// absent "code" field leaves CodePresent=false. Equivalent to the
-// pointer encoding's "distinguishes 0 from absent" guarantee.
+// Code is a (int64, bool) pair rather than *int so a cli_exited frame does not
+// heap-allocate; Present=false when the "code" key is absent.
 type shimMsg struct {
 	Type   string      `json:"type"`
 	Seq    int64       `json:"seq,omitempty"`
@@ -47,32 +34,21 @@ type shimMsg struct {
 	Signal string      `json:"signal,omitempty"`
 }
 
-// shimMsgCode wraps an int64 so json.Unmarshal can distinguish absent
-// from explicit zero without allocating *int. Decode-only; never
-// emitted from naozhi side. R222-PERF-13.
-//
-// R202606f-GO-001: Value is int64 (not int) so a large exit code does not
-// silently wrap on a 32-bit build — int is 32-bit there and parseJSONInt64Bytes
-// already produces a full int64, so the previous int(v) narrowing truncated.
+// shimMsgCode wraps an int64 so json.Unmarshal can distinguish absent from
+// explicit zero without allocating *int. Decode-only. int64 (not int) so a
+// large exit code does not wrap on a 32-bit build.
 type shimMsgCode struct {
 	Value   int64
 	Present bool
 }
 
-// UnmarshalJSON implements json.Unmarshaler so the shim protocol's
-// optional "code" field decodes without per-message heap allocation.
-// json.Unmarshal calls this method only when the JSON object actually
-// contains a "code" key — absent keys leave the zero value
-// (Present=false). R222-PERF-13.
+// UnmarshalJSON implements json.Unmarshaler; json.Unmarshal calls it only when
+// the object contains a "code" key, so an absent key leaves Present=false.
 func (c *shimMsgCode) UnmarshalJSON(data []byte) error {
 	c.Present = true
-	// Parse the raw JSON integer token directly from []byte with no
-	// string(data) conversion — that conversion allocates a temporary
-	// string on every cli_exited frame on the readLoop hot path.
-	// Hand-parse: accept optional leading '-', then one or more ASCII
-	// digits, reject empty / non-digit / leading '+' / leading zeros
-	// (except bare "0") to match JSON integer semantics. Supports
-	// negative exit codes (e.g. signal kill returns -1). R20260602190132-PERF-1.
+	// Hand-parse the raw integer token from []byte: string(data) would allocate
+	// on every cli_exited frame on the readLoop hot path. Negative exit codes
+	// (signal kill = -1) are accepted.
 	v, err := parseJSONInt64Bytes(data)
 	if err != nil {
 		return err
@@ -152,35 +128,19 @@ func (e shimIntParseError) Error() string { return string(e) }
 // readLoop reads NDJSON messages from the shim socket and dispatches events.
 func (p *Process) readLoop() {
 	log := p.slogger()
-	// RNEW-007: Defers execute LIFO. Declaration order below is:
-	//   close(eventCh) -> close(done) -> CloseSubscribers -> recover
-	// Execution order on return is the reverse:
-	//   1. recover block: transition p.state to StateDead and fire onTurnDone
-	//   2. CloseSubscribers: unblock EventLog subscribers
-	//   3. close(done): signal readLoop exit to waiters
-	//   4. close(eventCh): isChanAlive relies on done closing BEFORE eventCh so
-	//      any producer guarded by "is done open?" never sends on a closed
-	//      eventCh. See drainStaleEvents / isChanAlive (defined in
-	//      process_turn.go) for the invariant.
-	// If you reorder these defers, re-verify the isChanAlive invariant.
+	// Defers run LIFO: recover (state→Dead, onTurnDone) → CloseSubscribers →
+	// close(done) → close(eventCh). isChanAlive relies on done closing BEFORE
+	// eventCh so a producer guarded by "is done open?" never sends on a closed
+	// eventCh (see drainStaleEvents / isChanAlive in process_turn.go). If you
+	// reorder these defers, re-verify that invariant.
 	defer close(p.eventCh)
 	defer close(p.done)
 	defer p.eventLog.CloseSubscribers()
-	// Panic recover: a malformed shim message or protocol bug must not take
-	// the whole process down silently. We log stack + transition to Dead so
-	// the router can reap this session and the dashboard surfaces the failure
-	// instead of the user seeing a stalled "running" forever.
-	//
-	// R222-GO-9 onTurnDone partial-state contract: when this recover fires,
-	// onTurnDone is invoked BEFORE the deferred close(p.done) above runs (the
-	// recover defer was registered AFTER close(p.done), so it executes first
-	// in LIFO order). Callbacks therefore observe p.done still open even
-	// though State==Dead. This is intentional: onTurnDone semantics are
-	// "turn boundary reached, reap progress" rather than "process channels
-	// fully torn down" — the normal terminal path also fires onTurnDone
-	// before the deferred channel closes. Callbacks must NOT use p.done as
-	// a "process is fully torn down" signal; use IsRunning / GetState
-	// instead, both of which already reflect StateDead at this point.
+	// Panic recover: a malformed shim message must not stall the session as
+	// "running" forever — log the stack and transition to Dead so the router
+	// reaps it. This fires BEFORE the deferred close(p.done), so onTurnDone
+	// callbacks observe p.done still open while State==Dead; they must use
+	// IsRunning / State, never p.done, as the "torn down" signal.
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("readLoop panic recovered",
@@ -193,53 +153,25 @@ func (p *Process) readLoop() {
 			if cb != nil {
 				cb()
 			}
-			// R202606f-GO-008: unblock any SendPassthrough callers parked on
-			// their slot.resultCh/errCh. The normal transitionToDead path
-			// calls discardAllPending after onTurnDone; the panic recover
-			// previously did not, so a panic left passthrough callers blocked
-			// until the totalTimeout+30s bail timer (~5.5min) fired. Plain
-			// Send callers are unblocked by the deferred close(eventCh), but
-			// passthrough does not consume eventCh, so they need this explicit
-			// discard. discardAllPending is idempotent (it nils both slot
-			// slices), so a later transitionToDead — which never runs after a
-			// panic here, but is safe regardless — is a no-op second call.
+			// Unblock SendPassthrough callers parked on slot.resultCh/errCh;
+			// they don't consume eventCh, so the deferred close(eventCh) alone
+			// would leave them blocked until the totalTimeout+30s tripwire.
+			// discardAllPending is idempotent.
 			p.discardAllPending(ErrProcessExited)
 		}
 	}()
 
-	// Reuse the line accumulator across iterations to avoid an allocation
-	// per event. Most stream-json events are well under 4KB; the 4096 cap
-	// matches bufio's default buffer so single-chunk lines rarely grow.
-	// We reset length (not capacity) at the top of each iteration, and
-	// carry any grown capacity forward via lineBuf = line so a single large
-	// event doesn't force every subsequent iteration to re-grow from 4KB.
+	// Reuse the line accumulator across iterations; 4096 matches bufio's
+	// default buffer so single-chunk lines rarely grow. Grown capacity is
+	// carried forward via lineBuf = line below.
 	lineBuf := make([]byte, 0, 4096)
 	for {
 		line, capExceeded, readErr := readShimLine(p.shimR, lineBuf)
-		// Propagate grown capacity so the next iteration starts with the
-		// expanded backing array instead of reverting to the original 4096.
-		// Without this, a single large event forces every subsequent
-		// iteration to re-grow from 4KB through a chain of doublings.
-		//
-		// Exception 1: on capExceeded we shrink back to a fresh 4KB buffer.
-		// Holding onto a ~16MB backing array forever because one malformed
-		// shim message grew us there is a silent memory hog.
-		//
-		// Exception 2: if a single legitimate large event pushed capacity
-		// past lineBufShrinkThreshold (256 KiB), reset too. Most
-		// stream-json events are <4 KiB; common tool_result / assistant
-		// text chunks run 50-200 KiB and we want to RETAIN that capacity
-		// (pay the realloc once per session, not once per event). Only
-		// truly exceptional events (>256 KiB) trigger the shrink, so the
-		// permanent RSS footprint is bounded by 50 sessions × 256 KiB
-		// ≈ 12.8 MiB worst case, an acceptable ceiling relative to the
-		// realloc churn the lower threshold caused on every common event.
-		// Decide lineBuf in a single step. The capExceeded branch previously
-		// did `lineBuf = line` then immediately `lineBuf = make(...)`, which
-		// pinned a transient second reference to `line`'s large backing
-		// array until the next GC. Folding the two cases into one guard
-		// also avoids doing an unnecessary `make` on the hot path when the
-		// shrink isn't needed.
+		// Carry grown capacity forward so one large event doesn't force every
+		// later iteration to re-grow from 4 KiB — but shrink back to a fresh
+		// buffer on capExceeded (don't pin a ~16 MiB array forever) or when a
+		// legitimate event pushed cap past lineBufShrinkThreshold. Single-step
+		// assignment avoids pinning a transient second reference to `line`.
 		if capExceeded || cap(line) > lineBufShrinkThreshold {
 			lineBuf = make([]byte, 0, 4096)
 		} else {
@@ -279,19 +211,15 @@ func (p *Process) readLoop() {
 		}
 	}
 
-	// readLoop fell out of the read loop without hitting cli_exited — the
-	// caller-facing reason was already recorded above when the read error was
-	// classified (shim EOF / read error / drained). If none of those paths
-	// fired, Kill() was what unblocked ReadSlice via shimConn.Close, which
-	// surfaces as net.ErrClosed and is already classified as DeathReasonShimEOF.
+	// Fell out of the loop without cli_exited: the death reason was already
+	// stamped by classifyEOF (Kill() surfaces as net.ErrClosed → ShimEOF).
 	p.transitionToDead()
 }
 
 // shimDispatchOutcome encodes the readLoop control transition produced by
 // handleShimMessage. shimDispatchContinue is the zero value so the default
-// path through readLoop is the cheapest; shimDispatchReturn signals the
-// outer loop must unwind (cli_exited terminal frame or a stdout dispatch
-// observed killCh). R214-CODE-3.
+// path is cheapest; shimDispatchReturn means the outer loop must unwind
+// (cli_exited terminal frame or a stdout dispatch observed killCh).
 type shimDispatchOutcome int
 
 const (
@@ -299,33 +227,15 @@ const (
 	shimDispatchReturn
 )
 
-// classifyEOF stamps the appropriate deathReason for a shim-socket read
-// error and emits a single log line at the matching level. afterDrain
-// flags the post-oversize-drain branch so the log message reflects which
-// readLoop path observed the error. Pure side-effects: no return value
-// because the caller's break-from-loop decision is independent of the
-// classification (any non-nil readErr breaks). R214-CODE-3.
-//
-// R20260527-GO-19 (#1288): the afterDrain && closed arm previously stamped
-// DeathReasonShimEOF — semantically misleading because the shim socket
-// closure was preceded by an oversize protocol frame (the drain loop was
-// running BECAUSE we had just refused a >maxScannerBufBytes line). Health
-// dashboards conflating the two arms could not distinguish a normal shim
-// shutdown from a degraded shim that emitted a malformed/giant frame
-// before the pipe gave up. Stamp DeathReasonShimOversizeThenEOF so the
-// two operational signatures are separable. The log lines were already
-// distinct (kept as-is); only the deathReason channel changes.
+// classifyEOF stamps the deathReason for a shim-socket read error and emits one
+// log line. afterDrain flags the post-oversize-drain branch: a closure preceded
+// by a >maxScannerBufBytes frame is stamped ShimOversizeThenEOF/Err so health
+// dashboards can separate a clean shim shutdown from a degraded shim (#1288).
+// No return value: any non-nil readErr breaks the loop regardless.
 func (p *Process) classifyEOF(readErr error, afterDrain bool, log *slog.Logger) {
 	closed := errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed)
 	if closed {
 		if afterDrain {
-			// R20260527-GO-19 (#1288): preserve the fact that a
-			// capExceeded oversize line preceded the EOF. Collapsing
-			// this into plain DeathReasonShimEOF hid the upstream
-			// shim-side overflow that triggered the close, making
-			// dashboard/health forensics ambiguous between "clean
-			// shim shutdown" and "shim died right after emitting
-			// >maxScannerBufBytes".
 			log.Info("readLoop: shim connection closed after oversize drain")
 			p.setDeathReason(DeathReasonShimOversizeThenEOF)
 			return
@@ -343,11 +253,9 @@ func (p *Process) classifyEOF(readErr error, afterDrain bool, log *slog.Logger) 
 	p.setDeathReason(DeathReasonShimReadErr)
 }
 
-// handleShimMessage dispatches one parsed shim frame. Carved out of
-// readLoop's inner switch so the outer loop body stays at the I/O +
-// framing layer and per-frame protocol decisions live here. Returns
-// shimDispatchReturn when readLoop must unwind (cli_exited terminal frame
-// or a stdout dispatch observed killCh). R214-CODE-3.
+// handleShimMessage dispatches one parsed shim frame so readLoop's body stays
+// at the I/O + framing layer. Returns shimDispatchReturn when readLoop must
+// unwind (cli_exited terminal frame or a stdout dispatch observed killCh).
 func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchOutcome {
 	switch msg.Type {
 	case "stdout":
@@ -368,18 +276,10 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 		}
 
 	case "error":
-		// Sanitize shim-supplied message: shim wire is a semi-trusted
-		// boundary (degraded/tampered shim could emit arbitrary bytes).
-		// Mirrors the R183-SEC-H1 / R184-SEC-M1 policy used for
-		// cli_exited.Signal and ACP rpc error messages.
-		//
-		// R202606f-ARCH-1: the shim emits error frames as
-		// ServerMsg{Type:"error", Msg:"..."} (internal/shim/server.go) —
-		// the human-readable text lives in the `msg` JSON field, not
-		// `line`. Reading msg.Line here left every "shim error" log with
-		// msg="" so operators could not see duplicate-attach / replay
-		// failures. Prefer Msg; fall back to Line for any legacy frame
-		// that still carries text there.
+		// The shim wire is a semi-trusted boundary (a degraded/tampered shim
+		// could emit arbitrary bytes), so sanitize like cli_exited.Signal. The
+		// shim puts the text in `msg` (ServerMsg{Type:"error", Msg}); Line is a
+		// fallback for legacy frames.
 		errText := msg.Msg
 		if errText == "" {
 			errText = msg.Line
@@ -412,44 +312,30 @@ func rpcErrorTurnEnd(err error) (tag string, ok bool) {
 
 // handleShimStdout decodes a stdout frame into one or more protocol Events
 // and runs each through HandleEvent / dispatchProtocolEvent. Returns
-// shimDispatchReturn when dispatch reports killCh fired so the readLoop
-// teardown path can unwind. R214-CODE-3.
+// shimDispatchReturn when dispatch reports killCh fired.
 func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOutcome {
 	p.lastSeq.Store(msg.Seq)
-	// R20260603-PERF-10 (#1676): prefer the allocation-aware ReadEventInto so
-	// the dominant single-event frame reuses p.readEventBuf instead of
-	// allocating a fresh 1-element []Event per stdout line. Falls back to
-	// ReadEvent for any Protocol that does not implement the optional variant.
+	// Prefer ReadEventInto so the dominant single-event frame reuses
+	// p.readEventBuf instead of allocating a []Event per stdout line (#1676).
 	var (
 		events []Event
 		err    error
 	)
-	// done is intentionally discarded (R202606f-ARCH-5, #2303): turn-end is
-	// driven authoritatively by a result Event in the dispatch loop below
-	// (and by the rpcErrorTurnEnd synthesis path on err), never by this
-	// advisory bool. A protocol that needs a turn to close MUST emit a result
-	// Event — see ProtocolCore.ReadEvent.
+	// done is intentionally discarded (#2303): turn-end is driven only by a
+	// result Event in the dispatch loop below (or the rpcErrorTurnEnd synthesis
+	// on err), never by this advisory bool. A protocol that needs a turn to
+	// close MUST emit a result Event — see ProtocolCore.ReadEvent.
 	if ri, ok := p.protocol.(eventReaderInto); ok {
 		events, _, err = ri.ReadEventInto(msg.Line, p.readEventBuf[:0])
 	} else {
 		events, _, err = p.protocol.ReadEvent(msg.Line)
 	}
 	if err != nil {
-		// Protocol RPC errors: the backend returned an error response to a
-		// request we sent (ACP/kiro: session/prompt; codex: the deferred
-		// turn/start reply on the main readLoop). The turn is over from the
-		// backend's POV — done=true comes back from ReadEvent so we can
-		// synthesize a visible "result" event and let the active Send()
-		// unblock. Without this, state stays "running" forever (operator-
-		// visible as "session never replies"; ACP reproduced 2026-05-19
-		// r3-cancel/r3-lifecycle stuck after restart; codex turn/start is
-		// sent fire-and-forget via WriteMessage so any error reply — e.g.
-		// -32001 overload — lands here and must close the turn).
-		//
-		// Both backends use distinct sentinels (ErrACPRPC / ErrCodexRPC);
-		// rpcErrorTurnEnd centralises the recognition so a new protocol that
-		// surfaces RPC errors this way only needs to register its sentinel
-		// there — otherwise its post-handshake failures are silently swallowed.
+		// Backend RPC error (ACP/kiro session/prompt reject; codex's deferred
+		// turn/start reply, e.g. -32001 overload): the turn is over from the
+		// backend's POV, so synthesize a visible "result" and let the active
+		// Send() unblock — otherwise state stays "running" forever. New
+		// protocols must register their sentinel in rpcErrorTurnEnd.
 		if tag, ok := rpcErrorTurnEnd(err); ok {
 			events = []Event{{
 				Type:    "result",
@@ -465,22 +351,15 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 			return shimDispatchContinue
 		}
 	}
-	// ReadEvent now returns a slice. Today the only multi-event frame
-	// is ACPProtocol's stopReason response, which emits
-	// (assistant text, result) — iterating preserves the single-event
-	// claude semantics while letting the ACP turn-end split land
-	// naturally. dispatchProtocolEvent reports back when killCh fired
-	// so the outer readLoop can return and trigger teardown.
+	// The only multi-event frame today is ACP's stopReason response (assistant
+	// text, result); iterating preserves single-event claude semantics.
 	for _, ev := range events {
 		if ev.Type == "" {
 			continue
 		}
-		// control_ack is Process-internal plumbing: it resolves a pending
-		// SetModel waiter (deliverControlAck) and must never reach
+		// control_ack resolves a pending SetModel waiter and must never reach
 		// HandleEvent / EventLog / the dashboard — it is an RPC ack, not
-		// conversation content. Intercepted before HandleEvent so a
-		// protocol cannot accidentally swallow it.
-		// docs/rfc/dashboard-model-effort-control.md §4.4.
+		// conversation content (docs/rfc/dashboard-model-effort-control.md §4.4).
 		if ev.Type == "control_ack" {
 			p.deliverControlAck(ev)
 			continue
@@ -496,10 +375,8 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 }
 
 // handleShimCLIExited finalises a cli_exited terminal frame: stamps
-// deathReason (sanitising any shim-supplied signal name), transitions
-// State to Dead, and closes the shim socket so heartbeatLoop stops
-// pinging into a dead fd. The caller (handleShimMessage) returns
-// shimDispatchReturn so readLoop unwinds. R214-CODE-3.
+// deathReason (sanitising any shim-supplied signal name), transitions State to
+// Dead, and closes the shim socket so heartbeatLoop stops pinging a dead fd.
 func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 	var code int64
 	if msg.Code.Present {
@@ -507,60 +384,30 @@ func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 	}
 	log.Info("CLI exited via shim", "code", code)
 	reason := DeathReasonCLIExited
-	// R180-PERF-P2: string concat + strconv avoids fmt.Sprintf's
-	// reflection + scratch-buffer allocation. The death reason is
-	// stored in an atomic.Pointer[string] and consumed by health
-	// dashboards, so the cold-path savings are trivial but the
-	// replacement is zero-risk.
 	if code != 0 {
 		reason = DeathReasonCLIExited + "_code_" + strconv.FormatInt(code, 10)
 	} else if msg.Signal != "" {
-		// R183-SEC-H1: msg.Signal is the Signal field of the shim's
-		// cli_exited JSON frame. Normal shim builds emit canonical
-		// signal names ("SIGKILL", "SIGTERM"), but the shim is a
-		// separate process: a tampered shim (local attacker, future
-		// downgrade attack via stale binary) could ship arbitrary
-		// bytes. deathReason flows into slog attrs and the dashboard
-		// JSON for "/api/sessions" → HTML. Mirror the SanitizeForLog
-		// pattern (R172-SEC-M4 / R175-SEC-P1) used across the
-		// codebase; the numeric `code` branch is safe via Itoa.
+		// msg.Signal comes from a separate, tamperable process and flows into
+		// slog attrs and /api/sessions JSON → HTML, so sanitize it; the numeric
+		// branch is safe via FormatInt.
 		reason = DeathReasonCLIExited + "_signal_" + osutil.SanitizeForLog(msg.Signal, 32)
 	}
 	p.setDeathReason(reason)
 	p.transitionToDead()
-	// Close shim conn so heartbeatLoop stops writing pings into a dead
-	// socket and the bufio.Writer's fd is released promptly. Without
-	// this, if the process isn't subsequently Kill/Detach'd (e.g. when
-	// Router.Cleanup evicts it from the map), the fd leaks to GC.
-	// closeShimConn is sync.Once-guarded so a later Kill/Detach is safe
-	// without producing a "use of closed network connection" debug log
-	// on the second close attempt. R219-GO-3.
+	// Close the shim conn so heartbeatLoop stops writing pings into a dead
+	// socket and the fd is released promptly (otherwise it leaks to GC if the
+	// process is never Kill/Detach'd). closeShimConn is sync.Once-guarded.
 	p.closeShimConn()
 }
 
 // transitionToDead performs the closing handshake when readLoop concludes a
-// process has stopped producing events: flips State to Dead, fires the
-// onTurnDone callback once, and unblocks any SendPassthrough callers parked
-// on pendingSlots with ErrProcessExited.
-//
-// Called from two readLoop exit points:
-//
-//  1. The cli_exited shim message (orderly CLI exit). Caller sets the
-//     deathReason explicitly and follows up with closeShimConn() to release
-//     the heartbeat fd. R219-GO-3.
-//
-//  2. The fallback exit when readLoop falls past the read loop without a
-//     cli_exited frame (Kill() / shim EOF / read error). Caller has already
-//     stamped DeathReasonShimEOF when classifying the read error; no
-//     closeShimConn here because Kill()/shimConn.Close is what unblocked us.
-//
-// This helper deliberately does NOT call setDeathReason or closeShimConn so
-// each caller keeps its specific death-classification + cleanup contract.
-//
-// onTurnDone idempotency: this function may run after a partial-state
-// recovery in the panic defer (R222-GO-9). The defer guards against
-// double-fire by checking p.state before calling cb, so callers here can
-// rely on at-most-once semantics for the callback per readLoop instance.
+// process has stopped producing events: flips State to Dead, fires onTurnDone
+// once, and unblocks SendPassthrough callers parked on pendingSlots with
+// ErrProcessExited. Called from the cli_exited frame (caller stamps deathReason
+// and then closeShimConn) and from the fall-out exit (Kill / shim EOF / read
+// error; classifyEOF already stamped the reason, and Kill's shimConn.Close is
+// what unblocked us). Deliberately does NOT call setDeathReason or
+// closeShimConn so each caller keeps its own classification + cleanup contract.
 func (p *Process) transitionToDead() {
 	p.mu.Lock()
 	p.state = StateDead
@@ -576,50 +423,26 @@ func (p *Process) transitionToDead() {
 }
 
 // readShimLine reads one complete shim message line from r, accumulating
-// chunks across ReadSlice calls until a '\n' is found. Two distinct failure
-// modes are surfaced via the (capExceeded, readErr) pair:
-//
-//   - capExceeded=true: the assembled line would exceed maxScannerBufBytes.
-//     The helper drains the rest of the overlong line so the next call
-//     starts cleanly at the following message boundary. Caller should
-//     discard `line` and continue. If draining hits its own read error,
-//     readErr carries it forward so the caller can classify cause-of-death
-//     under the "after oversize drain" branch.
-//
-//   - readErr != nil (with capExceeded=false): a primary read error
-//     (io.EOF / net.ErrClosed / unexpected I/O fault). `line` may carry
-//     a partial message from before the error; caller decides whether
-//     to process or drop it.
-//
-// lineBuf is the previous iteration's accumulator: the helper truncates
-// it to length 0 and reuses its capacity. Caller owns the lifetime —
-// after this returns, caller must decide whether to retain (line) for
-// the next call (saves alloc) or shrink back to a fresh 4 KiB buffer.
-// See readLoop for the lineBufShrinkThreshold decision.
-//
-// R182-GO-P1-2: errors.Is on bufio.ErrBufferFull (not == comparison) so
-// future middleware that wraps the error still matches.
-//
-// No side effects on Process state — pure I/O. Extracted from readLoop
-// so per-fix churn on the line accumulator (R182-GO-P1-2 / R225-CR-7 /
-// R229-PERF-3 ground) lands in this helper instead of further bloating
-// the long readLoop body.
+// ReadSlice chunks until '\n'. lineBuf's capacity is reused; the caller decides
+// whether to retain `line` or shrink (see readLoop). Pure I/O. Failure modes:
+//   - capExceeded=true: the line would exceed maxScannerBufBytes; the rest of
+//     the overlong line is drained so the next call starts at a message
+//     boundary. Caller discards `line`. A read error while draining is carried
+//     in readErr so death can be classified as "after oversize drain".
+//   - readErr != nil, capExceeded=false: primary read error (io.EOF /
+//     net.ErrClosed / I/O fault); `line` may hold a partial message.
 func readShimLine(r *bufio.Reader, lineBuf []byte) (line []byte, capExceeded bool, readErr error) {
 	line = lineBuf[:0]
-	// chunkTerminated tracks whether the cap-exceeding chunk already contained
-	// the message terminator ('\n'). When true, the next call starts cleanly
-	// at the next message boundary and we MUST NOT drain — draining would
-	// consume the following message. R234-PERF-13 (#1014).
+	// chunkTerminated: the cap-exceeding chunk already contained '\n', so the
+	// reader is positioned at the next message and we MUST NOT drain — that
+	// would consume the following message (#1014).
 	chunkTerminated := false
 	for {
 		chunk, err := r.ReadSlice('\n')
 		if len(chunk) > 0 {
 			if len(line)+len(chunk) > maxScannerBufBytes {
 				capExceeded = true
-				// ReadSlice returns nil error iff chunk ended on '\n'; that
-				// chunk IS the message terminator, so the bufio reader is
-				// already positioned at the next message and the drain
-				// loop below would erroneously eat it.
+				// ReadSlice returns nil error iff the chunk ended on '\n'.
 				chunkTerminated = err == nil
 				break
 			}
@@ -634,11 +457,8 @@ func readShimLine(r *bufio.Reader, lineBuf []byte) (line []byte, capExceeded boo
 		readErr = err
 		return line, false, readErr
 	}
-	// capExceeded path: drain the rest of the overlong line so the next call
-	// doesn't read its tail as a separate message. Skip when the cap-exceeding
-	// chunk already terminated the line (see chunkTerminated above).
-	// ReadSlice returns nil on '\n' delimiter; ErrBufferFull means buffer
-	// filled with no newline.
+	// Drain the rest of the overlong line so its tail isn't read as a separate
+	// message, unless the cap-exceeding chunk already terminated it.
 	if !chunkTerminated {
 		for {
 			_, err := r.ReadSlice('\n')
@@ -654,22 +474,12 @@ func readShimLine(r *bufio.Reader, lineBuf []byte) (line []byte, capExceeded boo
 	return line, true, readErr
 }
 
-// dispatchProtocolEvent runs the per-Event side of readLoop: passthrough hooks,
-// linker plumbing, EventLog append, mid-turn reconnect bookkeeping, and the
-// non-blocking handoff to Send via eventCh. Returns true if a kill signal was
-// observed during dispatch and the caller should unwind the read loop.
-//
-// Extracted from the inline switch body when Protocol.ReadEvent moved from a
 // passthroughShouldFanOut reports whether a passthrough-mode assistant event
-// should be delivered to onEvent callbacks. It mirrors the gate in the legacy
-// Send path (process_send.go:286-293): only events carrying a thinking or
-// tool_use content block, or an AskQuestion payload, warrant fan-out.
-// Plain text-only assistant events are intentionally excluded so that spurious
-// replyTracker walks and other onEvent side-effects do not fire for every
-// streamed text chunk.
-//
-// ev.Message may be nil for unexpected protocol extensions; in that case the
-// guard treats the event as not fan-out-worthy (safe default).
+// should be delivered to onEvent callbacks. Mirrors the gate in the legacy Send
+// path (process_send.go): only events carrying a thinking or tool_use content
+// block, or an AskQuestion payload, warrant fan-out; text-only assistant events
+// are excluded so replyTracker walks don't fire per streamed chunk. A nil
+// ev.Message is treated as not fan-out-worthy.
 func passthroughShouldFanOut(ev Event) bool {
 	if ev.AskQuestion != nil {
 		return true
@@ -685,28 +495,22 @@ func passthroughShouldFanOut(ev Event) bool {
 	return false
 }
 
-// single Event to a slice (ACP turn-end emits assistant+result), so each
-// dispatched Event sees the full pipeline regardless of how many wire frames
-// fed it.
+// dispatchProtocolEvent runs the per-Event side of readLoop: passthrough hooks,
+// linker plumbing, EventLog append, mid-turn reconnect bookkeeping, and the
+// non-blocking handoff to Send via eventCh. Returns true if a kill signal was
+// observed during dispatch and the caller should unwind the read loop.
 func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
-	// Type:"metadata" is a normalize-channel event (kiro
-	// _kiro.dev/metadata today; future backends use the same
-	// shape). Apply to Process atomic state and skip downstream
-	// dispatch — these are status frames, not assistant output, so
-	// they should not flow through eventCh / EventLog. Snapshot
-	// reads the values lock-free.
-	// See docs/rfc/multi-backend.md §8.8.
+	// Type:"metadata" is a normalize-channel status frame (kiro _kiro.dev/
+	// metadata), not assistant output: apply to atomic state and skip
+	// eventCh / EventLog. See docs/rfc/multi-backend.md §8.8.
 	if ev.Type == "metadata" {
 		p.applyMetadata(ev.Metadata)
 		return false
 	}
 
-	// Capture one time.Now() shared between ev.recvAt (handed to
-	// drainStaleEvents) and the EventEntry.Time values produced by
-	// logEventAt. Previously the two read wall-clock independently,
-	// which is measurable at 5-50 events/s × N active sessions.
-	// R67-PERF-9. Also cache UnixMilli once — used up to 4× per
-	// event by the dispatch below.
+	// One time.Now() shared between ev.recvAt (for drainStaleEvents) and the
+	// EventEntry.Time values from logEventAt; UnixMilli cached for the up-to-4
+	// uses below.
 	now := time.Now()
 	nowMS := now.UnixMilli()
 
@@ -715,13 +519,10 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	// They are cheap no-ops when passthrough is not in use (zero
 	// pending slots, inTurn=false, protocol doesn't support replay).
 
-	// system/init: mark start of new turn for turn-aggregation owner
-	// tracking and watchdog baseline. Keeping this unconditional is
-	// harmless — onSystemInit only matters when pendingSlots is
-	// non-empty and a replay arrives later.
-	// R234-PERF-12: 同一帧后续 (line ~518) 还要再判一次 system/init，
-	// 提前在这里求值一次复用，省两次 string 比较
-	// (5-50 events/s × N session)。
+	// system/init: mark start of new turn for turn-aggregation owner tracking
+	// and watchdog baseline. Unconditional is harmless — onSystemInit only
+	// matters when pendingSlots is non-empty and a replay arrives later.
+	// isSystemInit 在这里求值一次，下方复用。
 	isSystemInit := ev.Type == "system" && ev.SubType == "init"
 	if isSystemInit && p.caps.Replay {
 		p.onSystemInit()
@@ -737,22 +538,11 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 		return false
 	}
 
-	// #1958: assistant interim events under passthrough: deliver to
-	// currentTurnSlots owners' onEvent so AskUserQuestion cards (and
-	// thinking/tool_use status banners) reach the IM tracker.
-	// The legacy Send path does this inside process_send.go's drain loop;
-	// passthrough's readLoop-only path was previously skipping these
-	// frames entirely, so AskUserQuestion never fired askQuestionFired and
-	// its bailout text was not suppressed. We do NOT skip legacy eventCh
-	// delivery — EventLog + eventCh consumers still need these events.
-	// Holding slotsMu only long enough to snapshot the owner slice so the
-	// onEvent callbacks run outside the lock (they may block on Reply).
-	//
-	// R20260608133928-GO-6: narrow the gate to match the legacy Send path
-	// (process_send.go:286-293) — only fan-out when the event carries a
-	// thinking/tool_use block or an AskQuestion payload. Plain-text assistant
-	// events (text-only content) must not trigger onEvent; that avoids spurious
-	// replyTracker walks and aligns passthrough behaviour with legacy.
+	// Passthrough interim assistant events: deliver to currentTurnSlots owners'
+	// onEvent so AskUserQuestion cards and thinking/tool_use banners reach the
+	// IM tracker (#1958); gated like the legacy Send path via
+	// passthroughShouldFanOut. Legacy eventCh delivery still happens below.
+	// slotsMu is held only to snapshot owners — callbacks may block on Reply.
 	if ev.Type == "assistant" && p.caps.Replay && passthroughShouldFanOut(ev) {
 		p.slotsMu.Lock()
 		owners := make([]*sendSlot, len(p.currentTurnSlots))
@@ -790,57 +580,29 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 			fanoutTurnResult(owners, ev)
 			return false
 		}
-		// No owners claim this result. Under passthrough this means
-		// either (a) an abort with no claimed slots, or (b) a true
-		// stray/reconnect result.
-		//
-		// (a) abort: log it here and skip the legacy path — the abort
-		//     errors were already fired above, so there is nothing for
-		//     deliverEvent / the legacy eventCh consumer to do.
+		// No owner claimed this result. (a) abort with no claimed slots: log
+		// here and skip the legacy path — abort errors already fired above.
+		// (b) true stray result (reconnect, no active Send): fall through so the
+		// unconditional logEventAt below records the turn-complete entry (#1483);
+		// under passthrough no legacy eventCh consumer would append it.
 		if ev.SubType == "error_during_execution" {
 			p.logEventAt(ev, nowMS)
 			return false
 		}
-		// (b) true stray result (reconnect with no active Send): #1483 —
-		//     do NOT skip; fall through so the unconditional
-		//     p.logEventAt at the bottom of this function records the
-		//     turn-complete entry in EventLog. Returning false here would
-		//     silently drop it from the dashboard transcript, since under
-		//     passthrough no legacy eventCh consumer is guaranteed to
-		//     append it.
 	}
 
-	// SubagentLinker plumbing for RFC v4 agent-team-ui.
-	//   - system.init carries the parent session_uuid used as the
-	//     sub-key under ~/.claude/projects/<projectDir>/.
-	//   - system.task_started with task_type=="in_process_teammate"
-	//     is our cue that the CLI has (or is about to) write
-	//     subagents/agent-<hex>.jsonl; kick off an async Resolve
-	//     bounded by the linker's retry budget so readLoop stays
-	//     responsive.
-	// UI Round 5 R5-3: claude advertises the resolved model in
-	// system/init. readLoop is the always-on path (active even
-	// during reconnect when no Send() is consuming events), so
-	// capture here too — the parallel hook in process_send.go
-	// covers the case where Send() drains init before readLoop
-	// observes it (race; first to call setModel wins, both
-	// values are the same so it doesn't matter). Only overwrite
-	// when init event actually carries a model value.
-	// isSystemInit 已在上方求值，直接复用 (R234-PERF-12)。
+	// claude advertises the resolved model + binary version in system/init.
+	// readLoop is the always-on path (active during reconnect when no Send()
+	// consumes events), so capture here too; process_send.go has a parallel
+	// hook for when Send() drains init first (same value, first writer wins).
 	if isSystemInit && ev.Model != "" {
 		p.setModel(ev.Model)
 	}
-	// R20260612-live-version: the same init frame self-reports the running
-	// CLI binary version. Capture it so the dashboard reflects the version
-	// THIS process exec'd, not the spawn-time Wrapper.CLIVersion detected
-	// once at naozhi startup (stale after a host claude upgrade).
+	// Live version reflects the binary THIS process exec'd, not the spawn-time
+	// Wrapper.CLIVersion (stale after a host claude upgrade).
 	if isSystemInit && ev.ClaudeCodeVersion != "" {
 		p.setLiveVersion(ev.ClaudeCodeVersion)
 	}
-	// R237-GO-5 (#628): linker plumbing extracted into notifyLinker so
-	// dispatchProtocolEvent stays focused on the EventLog/eventCh dispatch
-	// pipeline. Behaviour is byte-identical; the helper internally re-
-	// gates on linker presence and Type/SubType.
 	p.notifyLinker(ev, nowMS, isSystemInit)
 
 	// Always log to EventLog so dashboard subscribers see events
@@ -848,20 +610,11 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	// reconnects to a shim that's mid-turn).
 	p.logEventAt(ev, nowMS)
 
-	// If a result event arrives while no Send() is active (e.g.,
-	// after shim reconnect set state to Running via isMidTurn but
-	// the CLI finished before anyone called Send), transition
-	// back to Ready so the dashboard doesn't show a stale "running".
-	//
-	// The transition is gated on reconnectedMidTurn: outside the
-	// reconnect path, State=Running means Send() is actively waiting
-	// for this result and owns the State→Ready transition via its
-	// defer. Racing readLoop into that transition briefly flips the
-	// dashboard to "ready" before Send() returns, and — worse — lets a
-	// concurrent Send() start immediately after Send() unlocks mu but
-	// before its defer runs. The flag is one-shot: consumed on first
-	// stray-result here so a genuine next-turn Send() after reconnect
-	// is not confused with another stray result.
+	// A result with no active Send() (reconnect set Running via isMidTurn but
+	// the CLI finished first) transitions back to Ready. Gated on
+	// reconnectedMidTurn: otherwise State=Running means Send() owns the
+	// State→Ready transition via its defer, and racing it would let a second
+	// Send() start before that defer runs. The flag is one-shot.
 	if ev.Type == "result" && p.reconnectedMidTurn.CompareAndSwap(true, false) {
 		p.mu.Lock()
 		wasRunning := p.state == StateRunning
@@ -871,10 +624,8 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 		cb := p.onTurnDone
 		p.mu.Unlock()
 		if wasRunning && cb != nil {
-			// R183-CONCUR-M1: the killCh select below may fire cb again
-			// in the same readLoop iteration if Kill() was racing this
-			// stray-result path. See onTurnDone godoc for the idempotency
-			// contract that makes this safe.
+			// The killCh select in deliverEvent may fire cb again in the same
+			// iteration if Kill() raced this path (onTurnDone is idempotent).
 			cb()
 		}
 	}
@@ -882,28 +633,21 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	return p.deliverEvent(ev, now, log)
 }
 
-// notifyLinker forwards system/init context and system/task_started events
-// to the SubagentLinker. Extracted from dispatchProtocolEvent so the linker
-// plumbing (~50 lines mixing context-set + Resolve fan-out) doesn't crowd
-// the parent function's flat dispatch reading; behaviour is byte-identical.
-// R237-GO-5 (#628). Re-gates internally on `p.linker != nil` so the caller
+// notifyLinker forwards system/init context and system/task_started events to
+// the SubagentLinker. Re-gates internally on `p.linker != nil` so the caller
 // can pass any event without a pre-check.
 func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 	if p.linker == nil {
 		return
 	}
 	if isSystemInit && ev.SessionID != "" {
-		// Use the pre-computed cachedProjectDir to avoid a rune scan +
-		// os.UserHomeDir syscall on every system/init event. [R112714-PERF-2]
+		// cachedProjectDir avoids a rune scan + os.UserHomeDir syscall per init.
 		p.linker.SetContext(p.cachedProjectDir, ev.SessionID)
 	}
-	// Trigger Resolve for BOTH in-process teammates (TeamCreate's
-	// Agent spawns; task_type="in_process_teammate") AND standalone
-	// sub-agents (Task(subagent_type=...); task_type often empty
-	// or vendor-specific). Both write subagents/agent-<task_id>.jsonl,
-	// so the linker's fast path (stat by task_id) is the right common
-	// denominator. Exclude local_bash — those only persist to
-	// tool-results/ and have no internal transcript.
+	// Resolve for BOTH in-process teammates (task_type="in_process_teammate")
+	// AND standalone sub-agents (task_type often empty/vendor-specific): both
+	// write subagents/agent-<task_id>.jsonl. Exclude local_bash — those only
+	// persist to tool-results/ and have no internal transcript.
 	if ev.Type != "system" || ev.SubType != "task_started" ||
 		ev.TaskType == "local_bash" || ev.TaskID == "" || ev.ToolUseID == "" {
 		return
@@ -911,71 +655,44 @@ func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 	taskID := ev.TaskID
 	toolUseID := ev.ToolUseID
 	linker := p.linker
-	// R241-PERF-5 (#478): cache fast-path BEFORE the goroutine spawn so
-	// repeated task_started events for the same task_id (which can fire
-	// across reconnect/replay paths or claude's own progress envelopes)
-	// do not each pay a goroutine schedule. Resolve already runs the
-	// same byTaskID RLock check inside, but reaching it requires the
-	// goroutine to be scheduled and to allocate a closure capture for
-	// taskID/toolUseID/name/desc — Query short-circuits that.
+	// Resolved fast-path BEFORE the dispatch so repeated task_started events for
+	// the same task_id (reconnect/replay, progress envelopes) don't each pay a
+	// schedule + closure capture (#478).
 	if info, ok := linker.Query(taskID); ok && info.Resolved {
 		return
 	}
-	// R260528-PERF-7 (#1354): in-flight dedup. The Query check above only
-	// catches *resolved* taskIDs; while a Resolve goroutine is mid-poll
-	// (250 ms × 12 retries = up to 3 s grace window), the byTaskID map
-	// stays empty for that taskID. Without this gate, every duplicate
-	// task_started in that 3s window — which the CLI emits across
-	// progress envelopes and shim reconnect replays — schedules a fresh
-	// goroutine that promptly re-bails inside Resolve. TryMarkResolveInflight
-	// makes the dedup explicit at the readLoop hot path, eliminating the
-	// goroutine schedule + closure allocation for the duplicates.
+	// In-flight dedup (#1354): while a Resolve is mid-poll (up to ~3 s) the
+	// byTaskID map is still empty for this taskID, so Query alone lets every
+	// duplicate task_started in that window schedule a fresh resolve.
 	if !linker.TryMarkResolveInflight(taskID) {
 		return
 	}
-	// task_started.description is "<name>: <prompt body>" for
-	// teammates; for sub-agents it's just the prompt. The
-	// linker's fast path works either way; trimming to the
-	// name prefix only helps the name-scan fallback. Single
-	// TrimSpace pass — the colon-prefix branch trims again
-	// because the prefix can carry leading whitespace from
-	// the producer. (R227-PERF-20)
+	// task_started.description is "<name>: <prompt body>" for teammates and
+	// just the prompt for sub-agents; trimming to the name prefix only helps
+	// the name-scan fallback. The prefix can carry leading whitespace, hence
+	// the second TrimSpace.
 	name := strings.TrimSpace(ev.Description)
 	if idx := strings.IndexByte(name, ':'); idx > 0 {
 		name = strings.TrimSpace(name[:idx])
 	}
-	// R225-CR-10 / R230B-PERF-7: cap description before handing it to a
-	// goroutine closure. ev.Description is unbounded user/agent text that
-	// the Resolve goroutine pins until the resolveSem slot frees, so a
-	// burst of multi-KB descriptions × 8 max parallel resolves can retain
-	// MBs of strings transiently. SubagentLinker only retains the string
-	// for the bounded resolveSem window and never decodes it, so a
-	// byte-level cap is sufficient: any UTF-8 payload ≤ 8000 bytes already
-	// contains ≤ 8000 runes (and at the 2000-rune retention budget
-	// previously used here, 2000 × 4 max bytes/rune = 8000). Skipping the
-	// rune-decode loop avoids the per-event utf8 scan on the readLoop hot
-	// path. Cut at the nearest rune boundary so any operator-side dump of
-	// the value remains valid UTF-8.
+	// Cap description before handing it to the resolve worker: ev.Description
+	// is unbounded text pinned until the resolveSem slot frees, so a burst of
+	// multi-KB descriptions × 8 parallel resolves can retain MBs. The linker
+	// never decodes it, so a byte cap at a rune boundary suffices (≤ 8000
+	// bytes ⇒ ≤ 8000 runes) and skips a per-event utf8 scan.
 	const maxResolveDescBytes = 8000
 	desc := ev.Description
 	if len(desc) > maxResolveDescBytes {
 		desc = desc[:textutil.TruncateAtRuneBoundary(desc, maxResolveDescBytes)]
 	}
-	// R214-PERF-6 (#415): hand off to the linker's worker pool instead of
-	// spawning a per-event goroutine. Multi-agent turns previously emitted
-	// 5–10 task_started events that each spawned a goroutine parked on
-	// resolveSem for up to 3 s; the pool collapses that to a fixed worker
-	// set with bounded queue + inline-fallback on overflow.
+	// Hand off to the linker's worker pool (bounded queue, inline fallback on
+	// overflow) instead of a per-event goroutine parked on resolveSem (#415).
 	linker.DispatchResolve(p.lifecycleContext(), taskID, toolUseID, name, desc, nowMS)
 }
 
 // deliverEvent runs the post-EventLog dispatch arm of dispatchProtocolEvent:
 // killCh probe followed by the non-blocking handoff to eventCh for Send()
-// consumption. Returns true when killCh fired and the read loop should
-// unwind. Extracted from dispatchProtocolEvent so the kill/deliver decision
-// reads as a single helper and the parent function ends with a flat tail
-// call. R237-GO-5 (#628). Behaviour is byte-identical to the inline
-// version: same death-reason set, same drainage, same drop-log levels.
+// consumption. Returns true when killCh fired and the read loop should unwind.
 func (p *Process) deliverEvent(ev Event, now time.Time, log *slog.Logger) bool {
 	select {
 	case <-p.killCh:
@@ -997,26 +714,18 @@ func (p *Process) deliverEvent(ev Event, now time.Time, log *slog.Logger) bool {
 	default:
 	}
 
-	// Deliver to Send() for result detection and callback delivery.
-	// Non-blocking: if buffer is full (no active Send), the event
-	// is already safely in EventLog for dashboard visibility.
-	// recvAt is set just before handoff so drainStaleEvents can tell
-	// events queued before a new turn started from events produced
-	// for the new turn.
+	// Non-blocking handoff to Send(): if the buffer is full (no active Send)
+	// the event is already in EventLog for the dashboard. recvAt is set just
+	// before handoff so drainStaleEvents can separate events queued before a
+	// new turn from events produced for it.
 	ev.recvAt = now
 	select {
 	case p.eventCh <- ev:
 	default:
-		// Full buffer: drop is safe (EventLog kept the entry) but
-		// dropping a `result` event forces a non-Replay Send() into the
-		// findResultSince fallback, so log at Warn for observability.
-		//
-		// R225-CR-13: under Replay-capable backends (passthrough), result
-		// events fall through here only when there is no owning slot
-		// (e.g. all slots already claimed and fanned out, or pre-handshake
-		// strays). That is an expected pathway, not an observability
-		// signal — keep it at Debug to avoid noise that masks the real
-		// non-Replay drop case below.
+		// Drop is safe (EventLog kept the entry), but a dropped `result` forces
+		// a non-Replay Send() into the findResultSince fallback — Warn. Under
+		// Replay backends a result lands here only when no slot owns it (an
+		// expected pathway), so Debug to avoid masking the real drop case.
 		switch {
 		case ev.Type == "result" && !p.caps.Replay:
 			log.Warn("eventCh full, dropped result", "subtype", ev.SubType)
@@ -1054,16 +763,10 @@ func (p *Process) heartbeatLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			// R225-GO-6: drain any pongs that may have queued in pongRecv
-			// during a scheduler stall in this heartbeatLoop goroutine.
-			// pongRecv was bumped to capacity maxMisses+1 so the readLoop's
-			// non-blocking send no longer drops pongs during stalls — but a
-			// pong delivered just before this iteration also must not
-			// satisfy the wait below for the *next* ping (otherwise we'd
-			// declare the shim healthy before it has had a chance to
-			// respond to the upcoming ping). Empty the buffer first so the
-			// pong consumed in the select is unambiguously the response to
-			// the ping we are about to send.
+			// Drain pongs queued during a scheduler stall so the pong consumed
+			// in the select below is unambiguously the response to the ping
+			// we are about to send, not a late one that would declare the shim
+			// healthy before it has answered.
 			for {
 				select {
 				case <-p.pongRecv:
@@ -1072,30 +775,19 @@ func (p *Process) heartbeatLoop() {
 				}
 				break
 			}
-			// R222-PERF-14: heartbeat ping payload is fully static (no
-			// runtime field). Using a pre-marshalled []byte skips the
-			// encodeShimMsg pool acquire + json.Encoder reflection
-			// every 30s × N live processes.
+			// Ping payload is fully static; a pre-marshalled []byte skips the
+			// encoder pool + reflection every 30s × N live processes.
 			if err := p.shimSendRaw(shimPingBytes); err != nil {
 				log.Debug("heartbeat ping failed", "err", err)
 				p.Kill()
 				return
 			}
 
-			// Wait for pong within half the interval. Note on drain: Go 1.23+
-			// guarantees that after Stop returns, no further ticks will be
-			// delivered to the timer's channel — i.e. Reset is safe without
-			// the historical `if !Stop() { <-C }` drain dance. (Already-
-			// delivered ticks still need to be drained by the receiver in
-			// the normal way, but here the only receiver is the select
-			// below, which discards a stale tick on the next iteration.)
-			//
-			// LOCKED to toolchain ≥1.23: go.mod sets `go 1.26.3` so the
-			// post-Stop no-future-tick guarantee holds. Down-revving go.mod
-			// below 1.23 would reintroduce a stale-tick path where Reset
-			// returns while a previous fire is still pending in the channel —
-			// recreate the explicit drain dance before lowering the
-			// toolchain. R222-GO-4.
+			// Wait for pong within half the interval. Go ≥1.23 guarantees no
+			// tick is delivered after Stop returns, so Reset is safe without the
+			// `if !Stop() { <-C }` drain dance (a stale already-delivered tick is
+			// discarded by the next iteration). go.mod pins go 1.26.3 — down-
+			// revving below 1.23 requires reinstating the explicit drain.
 			pongTimer.Reset(interval / 2)
 			select {
 			case <-p.pongRecv:

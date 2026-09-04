@@ -3,40 +3,27 @@ package cli
 import "context"
 
 // Placement identifies WHERE a CLI job runs — the placement axis of the
-// agentcore-cloud-sandbox RFC (§4.2): a job is flavor × placement, where
-// flavor (claude / kiro) is owned by backend.Profile and placement is owned
-// by the Runner seam below. "local" is the only placement today; "sandbox"
-// (AgentCore microVM) arrives with the agentcoreRunner.
+// agentcore-cloud-sandbox RFC (§4.2): a job is flavor (backend.Profile) ×
+// placement (Runner). "local" is the only placement today.
 type Placement string
 
-// PlacementLocal runs the CLI as a child process on this host via the shim
-// transport — the historical (and default) behaviour.
+// PlacementLocal runs the CLI as a child process on this host via the shim.
 const PlacementLocal Placement = "local"
 
 // Runner abstracts where a CLI process is spawned (placement axis), so the
-// session router depends on "something that can start a job" instead of the
-// concrete local exec + shim transport. agentcore-cloud-sandbox RFC §4.2:
-// localRunner is the pure extraction of today's behaviour; agentcoreRunner
-// (InvokeAgentRuntime + payload injection + hold event-stream) implements
-// the same interface in a later PR without touching protocol parsing —
-// both placements speak claude stream-json through the same Protocol.
-//
-// Deliberately small (Go style: 1-3 methods). Reconnect is NOT part of the
-// interface: shim reattach is a local-placement capability (sandbox jobs
-// are run-once and never reattach, RFC §3.1), so SpawnReconnect stays a
-// *Wrapper method and local-only callers keep using it directly.
+// session router depends on "something that can start a job" rather than the
+// local exec + shim transport (RFC §4.2). Reconnect is deliberately NOT part of
+// it: shim reattach is local-only (sandbox jobs are run-once, RFC §3.1), so
+// SpawnReconnect stays a *Wrapper method.
 type Runner interface {
-	// Spawn starts a new CLI job at this placement and returns a connected
-	// Process. Semantics match (*Wrapper).Spawn for the local placement.
+	// Spawn starts a CLI job at this placement; semantics match (*Wrapper).Spawn.
 	Spawn(ctx context.Context, opts SpawnOptions) (*Process, error)
-	// Placement reports where this runner executes jobs. Used for
-	// dispatch decisions, run-record metadata, and dashboard badges
-	// (RFC §7.2) — never for behavioural branching inside cli.
+	// Placement reports where this runner executes jobs — for dispatch, run
+	// records and dashboard badges (RFC §7.2), never for branching inside cli.
 	Placement() Placement
 }
 
-// localRunner adapts *Wrapper to the Runner interface. Pure delegation —
-// zero behaviour change. Constructed via (*Wrapper).Runner().
+// localRunner adapts *Wrapper to Runner by pure delegation.
 type localRunner struct {
 	w *Wrapper
 }
@@ -51,25 +38,10 @@ func (r *localRunner) Placement() Placement {
 	return PlacementLocal
 }
 
-// Runner returns the wrapper's placement runner (today always local).
-// Nil-safe: a nil wrapper yields a nil Runner so callers can keep their
-// existing `wrapper == nil` guard semantics — mirrors Manager()'s
-// nil-receiver contract.
-//
-// Evolution note (RFC §4.2): this PR deliberately keeps runner construction
-// ON the wrapper — the shallowest behaviour-preserving seam. When
-// agentcoreRunner lands, placement selection moves UP to the spawn-params
-// resolution level (session.resolveSpawnParamsLocked returns a Runner
-// chosen from config `placement:`, falling back to wrapper.Runner() for
-// local) — the sandbox runner is constructed from profile/config, not from
-// a Wrapper. Callers should treat wrapper.Runner() as "the local runner",
-// not "the runner registry".
-//
-// Relation to the planned cli.Transport seam (R242-ARCH-3 / #721, see
-// Wrapper.ShimManager godoc): orthogonal axes. Transport = how bytes move
-// for a LOCAL process (shim socket vs direct exec); Runner = WHERE the job
-// executes (local vs sandbox microVM). agentcoreRunner bypasses Transport
-// entirely — its byte path is the AgentCore event-stream.
+// Runner returns the wrapper's placement runner (today always local); nil-safe
+// like Manager(). Treat it as "the local runner", not a registry: placement
+// selection belongs at spawn-params resolution (RFC §4.2). Orthogonal to the
+// cli.Transport seam (#721): Transport = how bytes move, Runner = WHERE it runs.
 func (w *Wrapper) Runner() Runner {
 	if w == nil {
 		return nil

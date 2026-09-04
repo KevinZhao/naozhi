@@ -9,72 +9,39 @@ import (
 	"sync/atomic"
 )
 
-// newEventUUID returns a fresh 16-byte crypto/rand identity encoded
-// as 32 lowercase hex characters. Used by EventLog.Append on every
-// entry that arrives without a UUID set, making UUID the authoritative
-// identity key for downstream persistence and merge dedup.
-//
-// Collision probability: at 2^-64 per pair, a naozhi process would
-// need to write ~4 billion events before even a 1% chance of a
-// collision. The live system caps EventLog ring at 500 entries, and
-// on-disk persist caps per-session files at ~100 MiB (well under
-// 2^32 records total), so collisions are not a practical concern.
-//
-// crypto/rand never returns short reads on Linux; an error here is
-// a sign of a hard OS failure. We fall back to a deterministic-ish
-// hash-of-seed identity rather than panicking — the Append call
-// came from an event hot path and must not crash the whole server.
-//
-// R233B-PERF-7: high-frequency event ingest (50 sessions × 50 evt/s =
-// 2500 events/s) makes the 16-byte getrandom syscall a measurable
-// fraction of Append cost. We refill goroutine-local pools per call so
-// steady-state Append pulls from a slice rather than the kernel.
-//
-// R214-PERF-7: bumped the pool from 256 → 4096 bytes (16 → 256 UUIDs
-// per refill) so the syscall amortisation is 256× rather than 16×. At
-// 2500 events/s this drops getrandom from ~156/s to ~10/s — well below
-// the noise floor of any other per-event work — without rolling our own
-// per-session AES-CSPRNG (which the original triage proposed). The
-// memory footprint is bounded: each goroutine that issues UUIDs holds
-// at most one bucket = 4 KiB; sync.Pool reclaims idle buckets via GC.
-// Defensive zeroing on consume (below) erases each UUID's source bytes
-// immediately, so a larger bucket does not extend the lifetime of any
-// individual issued value's randomness.
+// newEventUUID returns a fresh 16-byte crypto/rand identity encoded as 32
+// lowercase hex characters; EventLog.Append stamps it on every entry that
+// arrives without a UUID, making UUID the identity key for persistence and
+// merge dedup (collision odds are negligible at the ring/persist sizes).
+// Random bytes come from a pooled bucket so steady-state Append avoids a
+// getrandom syscall per event. crypto/rand never short-reads on Linux; an
+// error is a hard OS failure and we fall back to a hashed counter rather than
+// panic on the event hot path.
 func newEventUUID() string {
 	var raw [16]byte
 	pulled := pullFromUUIDPool(raw[:])
 	if !pulled {
 		if _, err := rand.Read(raw[:]); err != nil {
-			// Defensive fallback: hash a monotonic nanosecond counter so
-			// at least UUIDs remain unique within one process even in an
-			// error scenario. The returned bytes are still 16 long so
-			// the schema shape doesn't shift.
+			// Hash a monotonic counter so UUIDs stay unique in-process and the
+			// 16-byte shape is preserved.
 			sum := sha256.Sum256([]byte("naozhi-crypto-rand-fallback-" + strconv.FormatInt(int64(uuidFallbackSeq.Add(1)), 10)))
 			copy(raw[:], sum[:])
 		}
 	}
-	// hex.Encode into a stack-resident array avoids the intermediate
-	// []byte allocation that hex.EncodeToString performs internally.
+	// Stack array avoids hex.EncodeToString's intermediate allocation.
 	var dst [32]byte
 	hex.Encode(dst[:], raw[:])
 	return string(dst[:])
 }
 
-// uuidPoolBytes is the per-bucket refill size. 4096 bytes = 256 UUIDs.
-// Sized so the rand.Read syscall amortises ~256× per refill (R214-PERF-7
-// bumped from the initial 256 bytes / 16 UUIDs). Each goroutine holds at
-// most one bucket via sync.Pool, so the per-process memory ceiling is
-// bounded by the active goroutine count × 4 KiB — sync.Pool's GC reclaim
-// path drops idle buckets between cycles. Larger sizes keep diminishing
-// returns (kernel cost dominated by per-call entry overhead, not byte
-// count) and would also widen the window before sync.Pool GC reclaims an
-// idle bucket's stale randomness. 4 KiB is the sweet spot.
+// uuidPoolBytes is the per-bucket refill size: 4096 bytes = 256 UUIDs per
+// rand.Read. Memory is bounded at one bucket per active goroutine (sync.Pool
+// reclaims idle ones); larger buckets give diminishing returns and hold stale
+// randomness longer.
 const uuidPoolBytes = 4096
 
-// uuidPool buckets pre-fetched random bytes per goroutine. Each
-// bucket carries a uuidPoolBytes-byte buffer + cursor. When the cursor
-// reaches the end, the next pull triggers a refill (one rand.Read per
-// uuidPoolBytes/16 UUIDs amortised — currently 256).
+// uuidBucket is a pooled buffer of pre-fetched random bytes plus a cursor;
+// a pull past the end triggers a refill.
 type uuidBucket struct {
 	buf [uuidPoolBytes]byte
 	pos int
@@ -84,9 +51,8 @@ var uuidPool = sync.Pool{
 	New: func() any { return &uuidBucket{pos: uuidPoolBytes} },
 }
 
-// pullFromUUIDPool fills dst (16 bytes) from a goroutine-local random
-// bucket and returns true on success. Returns false when the bucket
-// refill itself fails — caller falls back to a direct rand.Read.
+// pullFromUUIDPool fills dst (16 bytes) from a pooled random bucket and
+// returns false when the refill fails (caller falls back to rand.Read).
 func pullFromUUIDPool(dst []byte) bool {
 	b := uuidPool.Get().(*uuidBucket)
 	defer uuidPool.Put(b)
@@ -98,10 +64,8 @@ func pullFromUUIDPool(dst []byte) bool {
 		b.pos = 0
 	}
 	copy(dst, b.buf[b.pos:b.pos+16])
-	// Zero the consumed slot defensively — pooled buckets may live
-	// across multiple goroutines via sync.Pool's GC churn, so we don't
-	// want a freshly-handed-out bucket to expose another goroutine's
-	// already-issued UUIDs to a debugger.
+	// Zero the consumed slot so a bucket handed to another goroutine never
+	// exposes already-issued UUIDs.
 	for i := b.pos; i < b.pos+16; i++ {
 		b.buf[i] = 0
 	}
@@ -109,8 +73,6 @@ func pullFromUUIDPool(dst []byte) bool {
 	return true
 }
 
-// uuidFallbackSeq is the monotonic counter the crypto/rand fallback
-// path reads. Package-scoped so it survives across goroutines in the
-// (extremely unlikely) event that multiple fallback allocations
-// happen in quick succession.
+// uuidFallbackSeq is the monotonic counter the crypto/rand fallback path
+// reads (shared with newSlotUUID).
 var uuidFallbackSeq atomic.Int64

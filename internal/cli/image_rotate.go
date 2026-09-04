@@ -13,44 +13,25 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
-// orientWorkerCap bounds concurrent EXIF-less auto-orient decodes. Orient is
-// a user-triggered, rate-limited path (POST /api/sessions/orient, gated by
-// uploadLimiter at 10/min) that performs exactly one decode per request, so a
-// small ceiling of 2 lets a pair of concurrent orient requests proceed
-// without ever touching the thumbnail budget. It is intentionally NOT
-// thumbnailWorkerCap: that constant is the single source of truth for the
-// thumbnail worker-pool sizing in process_send.go and must not be repurposed.
+// orientWorkerCap bounds concurrent auto-orient decodes. Orient is a
+// user-triggered, rate-limited path (POST /api/sessions/orient, 10/min) with
+// one decode per request, so 2 suffices. Deliberately not thumbnailWorkerCap,
+// which sizes the thumbnail worker pool in process_send.go.
 const orientWorkerCap = 2
 
-// orientSem is a SEPARATE semaphore from thumbSem so auto-orient decodes and
-// multi-image thumbnail generation no longer contend for the same slots and
-// cannot starve each other. Like thumbSem it is a finite ceiling that bounds
-// aggregate decode memory; orient just gets its own budget.
+// orientSem is separate from thumbSem so auto-orient and multi-image
+// thumbnail generation cannot starve each other.
 var orientSem = make(chan struct{}, orientWorkerCap)
 
 // RotateJPEG decodes raw image bytes, rotates the pixels clockwise by
 // `degCW` (must be 90, 180, or 270), and re-encodes to JPEG. degCW==0
-// returns the input unchanged. Any other value is rejected.
+// returns the input unchanged. Used by auto-orient to bake the rotation into
+// EXIF-less images so every downstream consumer sees them upright.
 //
-// Rationale: phone/scanner images that carry NO EXIF orientation flag
-// (e.g. a sideways document photo) can't be corrected by the
-// createImageBitmap(from-image) path — the bytes are physically rotated
-// with nothing to signal it. The auto-orient feature asks a vision model
-// which way is up and bakes the rotation into the pixels here so every
-// downstream consumer (Claude, the dashboard lightbox, IM channels) sees
-// an upright image.
-//
-// Safety mirrors MakeThumbnail (thumbnail.go): a DecodeConfig pre-check
-// caps pixel count before the full RGBA decode to bound memory, the
-// orientSem cap serialises concurrent decodes, and a recover() treats a
-// decoder panic on crafted-malformed input as a failure rather than
-// crashing the process. orientSem is a SEPARATE semaphore from thumbSem so
-// orient and thumbnail generation no longer starve each other on a shared
-// slot pool.
-//
-// On any failure (bad degrees, undecodable input, oversize, encode error,
-// decoder panic) it returns (nil, false) and the caller MUST fall back to
-// the original bytes — auto-orient is best-effort and never destructive.
+// Same safety as MakeThumbnail: DecodeConfig pixel pre-check, orientSem, and
+// recover() on decoder panics. On any failure it returns (nil, false) and the
+// caller MUST fall back to the original bytes — auto-orient is best-effort
+// and never destructive.
 func RotateJPEG(data []byte, degCW int) (out []byte, ok bool) {
 	if degCW == 0 {
 		return data, true
@@ -88,11 +69,8 @@ func RotateJPEG(data []byte, degCW int) (out []byte, ok bool) {
 		return nil, false
 	}
 
-	// For 90/270 the output dimensions swap; for 180 they stay. The
-	// destination pixel (dx,dy) is filled from the source coordinate that
-	// maps onto it under a clockwise rotation. Nearest-neighbour copy with
-	// no interpolation — a multiple-of-90 rotation is a lossless pixel
-	// permutation, so there's nothing to interpolate.
+	// 90/270 swap the output dimensions; 180 keeps them. A multiple-of-90
+	// rotation is a lossless pixel permutation, so no interpolation.
 	var dst *image.RGBA
 	switch degCW {
 	case 90:
@@ -131,10 +109,7 @@ func RotateJPEG(data []byte, degCW int) (out []byte, ok bool) {
 	}
 
 	var buf bytes.Buffer
-	// Quality 90: this is the user's actual attachment (not a thumbnail),
-	// so preserve more detail than MakeThumbnail's 70. The frontend already
-	// downscaled to <=1600px / q0.8 in normalizeImage, so a re-encode here
-	// is a one-time, bounded quality cost.
+	// Quality 90: this is the user's actual attachment, not a thumbnail.
 	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 90}); err != nil {
 		return nil, false
 	}
