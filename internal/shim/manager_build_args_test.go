@@ -29,6 +29,7 @@ func TestBuildShimArgs_BaseShape(t *testing.T) {
 		"",
 		"/home/user/work",
 		nil,
+		"",
 	)
 
 	want := []string{
@@ -60,12 +61,12 @@ func TestBuildShimArgs_BackendAppended(t *testing.T) {
 		watchdogTimeout: 10 * time.Second,
 	}
 
-	withBackend := m.buildShimArgs("k", "s", "f", "/c", "kiro", "/w", nil)
+	withBackend := m.buildShimArgs("k", "s", "f", "/c", "kiro", "/w", nil, "")
 	if !containsPair(withBackend, "--backend", "kiro") {
 		t.Fatalf("expected --backend kiro pair: %v", withBackend)
 	}
 
-	withoutBackend := m.buildShimArgs("k", "s", "f", "/c", "", "/w", nil)
+	withoutBackend := m.buildShimArgs("k", "s", "f", "/c", "", "/w", nil, "")
 	for _, a := range withoutBackend {
 		if a == "--backend" {
 			t.Fatalf("empty backend should not append flag, got: %v", withoutBackend)
@@ -86,7 +87,7 @@ func TestBuildShimArgs_CLIArgsForwarded(t *testing.T) {
 	}
 
 	cliArgs := []string{"--model", "opus-4.7", "--resume", "abc-123"}
-	got := m.buildShimArgs("k", "s", "f", "/c", "", "/w", cliArgs)
+	got := m.buildShimArgs("k", "s", "f", "/c", "", "/w", cliArgs, "")
 
 	// Each cliArgs entry must appear as a flag value preceded by --cli-arg.
 	count := 0
@@ -103,6 +104,65 @@ func TestBuildShimArgs_CLIArgsForwarded(t *testing.T) {
 			t.Errorf("cliArg %q not forwarded; got: %v", a, got)
 		}
 	}
+}
+
+// TestBuildShimArgs_SpawnOverlayAppended pins the #2494 wire contract: a
+// non-empty overlay lands as ONE `--spawn-overlay <json>` pair AFTER the
+// --cli-arg run (so the pinned base shape and the repeated-flag tail keep
+// their order), and an empty string emits no flag at all — legacy callers
+// (StartShim) keep spawning byte-identical argv.
+func TestBuildShimArgs_SpawnOverlayAppended(t *testing.T) {
+	m := &Manager{
+		bufferSize:      4096,
+		maxBufBytes:     1 << 20,
+		idleTimeout:     time.Hour,
+		watchdogTimeout: 10 * time.Second,
+	}
+
+	overlay, err := EncodeSpawnOverlay(&SpawnOverlay{Model: "sonnet", ExtraArgs: []string{"--x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	with := m.buildShimArgs("k", "s", "f", "/c", "claude", "/w", []string{"--model", "sonnet"}, overlay)
+	if !containsPair(with, "--spawn-overlay", overlay) {
+		t.Fatalf("expected --spawn-overlay %s pair: %v", overlay, with)
+	}
+	lastCLIArg := -1
+	for i, a := range with {
+		if a == "--cli-arg" {
+			lastCLIArg = i
+		}
+	}
+	if idx := indexOf(with, "--spawn-overlay"); idx < lastCLIArg {
+		t.Errorf("--spawn-overlay (%d) must follow the --cli-arg run (last at %d): %v", idx, lastCLIArg, with)
+	}
+	if n := countOf(with, "--spawn-overlay"); n != 1 {
+		t.Errorf("--spawn-overlay occurrences = %d, want 1", n)
+	}
+
+	without := m.buildShimArgs("k", "s", "f", "/c", "claude", "/w", []string{"--model", "sonnet"}, "")
+	if contains(without, "--spawn-overlay") {
+		t.Errorf("empty overlay must emit no flag: %v", without)
+	}
+}
+
+func indexOf(s []string, want string) int {
+	for i, v := range s {
+		if v == want {
+			return i
+		}
+	}
+	return -1
+}
+
+func countOf(s []string, want string) int {
+	n := 0
+	for _, v := range s {
+		if v == want {
+			n++
+		}
+	}
+	return n
 }
 
 // equalStrSlice compares two []string by value; used in place of

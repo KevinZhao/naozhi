@@ -118,6 +118,17 @@ type SpawnOptions struct {
 	// unvalidated path turns "no MCP" into "no naozhi". Only ClaudeProtocol
 	// consumes this; ACP / codex backends ignore it.
 	MCPConfigFile string
+
+	// SpawnOverlay is the per-request layer (agents[].model / .effort /
+	// .extra_args, resolved access profile) the session router merged into
+	// Model/Effort/ExtraArgs above. BuildArgs never reads it — it is passed
+	// through to the shim and recorded in its state file so the router can
+	// re-merge it against current config on the next restart instead of
+	// misreading every agent-level override as arg-drift (#2494). Nil records
+	// nothing; the router always passes a non-nil value (empty when no
+	// override applied) so "known and empty" is distinguishable from
+	// "written by a pre-#2494 shim".
+	SpawnOverlay *shim.SpawnOverlay
 }
 
 // PermissionMode selects how a Claude-CLI spawn handles tool permissions.
@@ -695,7 +706,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	// path + backend ID so multi-backend deployments launch each shim
 	// against the correct binary and record its backend in state for
 	// post-restart reconnect routing.
-	handle, err := w.ShimManager.StartShimWithBackend(ctx, opts.Key, w.CLIPath, w.BackendID, cliArgs, cwd, opts.EnvOverlay)
+	handle, err := w.ShimManager.StartShimWithBackend(ctx, opts.Key, w.CLIPath, w.BackendID, cliArgs, cwd, opts.EnvOverlay, opts.SpawnOverlay)
 	if err != nil {
 		return nil, fmt.Errorf("start shim: %w", err)
 	}
