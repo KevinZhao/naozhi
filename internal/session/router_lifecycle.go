@@ -27,6 +27,7 @@ import (
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/shim"
 )
 
 // publishSessionLocked is the single funnel for installing a freshly-built
@@ -459,6 +460,14 @@ type spawnParams struct {
 	// reads must not happen under the lock). Kept raw here because
 	// resolveSpawnParamsLocked runs under r.mu.
 	AccessProfileEnv map[string]string
+	// Overlay is the per-request layer that went into Model/Effort/Args
+	// (opts.Model/Effort/ExtraArgs + the resolved AccessProfileID). spawnSession
+	// hands it to the shim, which persists it in its state file, so the
+	// arg-drift comparison on the next restart can re-merge it against
+	// current config instead of misreading every agent-level override as
+	// drift (#2494). Always populated — a spawn with no overrides yields the
+	// zero value, which the shim records as "known and empty".
+	Overlay shim.SpawnOverlay
 }
 
 // resolveSpawnParamsLocked computes the merged spawn parameters for a new
@@ -560,11 +569,9 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		accessProfileID = r.defaultAccessProfile
 	}
 	var accessProfileEnv map[string]string
-	var profileDefaultModel string
 	if accessProfileID != "" {
 		if ap, ok := r.accessProfiles[accessProfileID]; ok {
 			accessProfileEnv = ap.Env
-			profileDefaultModel = ap.DefaultModel
 		} else {
 			slog.Warn("access profile not found; falling back to global default",
 				"key", key, "access_profile", accessProfileID)
@@ -572,55 +579,45 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		}
 	}
 
-	// Model merge: router default ← backend override ← per-request opts.
-	// Args: backend-scoped replacement wins over router-wide extraArgs, then
-	// per-request ExtraArgs is appended. REPLACE (not append) semantics for
-	// the backend level matches RouterConfig.BackendExtraArgs godoc
-	// (R53-ARCH-002). backendDefaultsFor consolidates the lookup that
-	// previously sat inline here and in router_shim drift detection
-	// (R222-ARCH-14, #739).
-	bd := r.backendDefaultsFor(backendID)
-	model, baseArgs := bd.Model, bd.Args
+	// Per-request overlay: what THIS spawn layered above the backend defaults.
+	// Recorded on spawnParams so the shim can persist it and the drift check
+	// can re-merge it later (#2494). AccessProfile is the RESOLVED id (after
+	// the fallbacks above), so the drift side resolves the profile's
+	// default_model exactly the way mergeArgvLayers does here. ExtraArgs is
+	// cloned: the overlay outlives r.mu (spawnSession JSON-encodes it after
+	// the unlock, inside StartShimWithBackend), so it must not alias the
+	// caller's slice.
+	overlay := shim.SpawnOverlay{
+		Model:         opts.Model,
+		Effort:        opts.Effort,
+		ExtraArgs:     slices.Clone(opts.ExtraArgs),
+		AccessProfile: accessProfileID,
+	}
+
+	// Model / effort / args merge lives in mergeArgvLayers, shared verbatim
+	// with driftCompareArgs so the two argv cannot diverge on precedence.
+	// Backend tier: router default ← backend override; args REPLACE (not
+	// append) at the backend level per RouterConfig.BackendExtraArgs
+	// (R53-ARCH-002), folded into backendDefaultsFor (R222-ARCH-14, #739).
 	// Access-profile default_model layers above the backend default but below
-	// any explicit per-request / PlannerModel choice (which arrives in
-	// opts.Model). RFC §2 model chain.
-	if profileDefaultModel != "" {
-		model = profileDefaultModel
-	}
-	if opts.Model != "" {
-		model = opts.Model
-	}
-	args := make([]string, len(baseArgs))
-	copy(args, baseArgs)
-	args = append(args, opts.ExtraArgs...)
-
-	// Effort merge: cli.effort ← cli.backends[].effort (both folded into
-	// backendDefaultsFor) ← agents[].effort. Deliberately NO access-profile
-	// tier: profiles exist to constrain which auth chain / model an identity
-	// may use, and a thinking-effort tier carries no such security meaning —
-	// one less layer is one less precedence question.
-	// docs/rfc/kiro-effort-control.md §4.2
-	effort := bd.Effort
-	if opts.Effort != "" {
-		effort = opts.Effort
-	}
-
-	// Session tuning overrides — the TOP of both chains. An operator's
-	// dashboard pick for THIS session outranks every config tier (deployer
-	// declarations about a CLASS of sessions) and the per-request opts
-	// (agent/planner defaults). Values were tuningspec-validated at write
-	// (SetSessionTuning) and re-validated at store load, so they are safe
-	// to feed BuildArgs. Read from the existing session entry: fresh keys
-	// have no entry and therefore no override, by construction.
+	// any explicit per-request / PlannerModel choice (opts.Model). RFC §2
+	// model chain. Effort has deliberately NO access-profile tier
+	// (docs/rfc/kiro-effort-control.md §4.2). Session tuning sits on TOP of
+	// both chains — the operator's dashboard pick for THIS session outranks
+	// every config tier and the per-request opts; values were
+	// tuningspec-validated at write (SetSessionTuning) and re-validated at
+	// store load, so they are safe to feed BuildArgs. Fresh keys have no
+	// entry and therefore no override, by construction.
 	// docs/rfc/dashboard-model-effort-control.md §4.3.
+	var tuningModel, tuningEffort string
 	if old := r.ss.sessions[key]; old != nil {
-		if tm := old.TuningModel(); tm != "" {
-			model = tm
-		}
-		if te := old.TuningEffort(); te != "" {
-			effort = te
-		}
+		tuningModel, tuningEffort = old.TuningModel(), old.TuningEffort()
 	}
+	merged := mergeArgvLayers(
+		r.backendDefaultsFor(backendID),
+		profileDefaultModelFor(r.accessProfiles, accessProfileID),
+		overlay, tuningModel, tuningEffort)
+	model, effort, args := merged.Model, merged.Effort, merged.Args
 
 	// Workspace: opts override > per-chat override > old session workspace > default.
 	//
@@ -689,6 +686,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		ResumeID:         resumeID,
 		AccessProfileID:  accessProfileID,
 		AccessProfileEnv: accessProfileEnv,
+		Overlay:          overlay,
 	}
 }
 
@@ -1033,6 +1031,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// strips it from the stored argv (stripResumeArgs) precisely so a resumed
 	// session is not read as drift.
 	spawnOpts.ResumeID = resumeID
+	// Per-request overlay for the shim's state file (#2494). Always non-nil:
+	// an empty overlay must be recorded as "known and empty", not omitted,
+	// or the drift check would treat this shim as pre-#2494 legacy.
+	spawnOverlay := sp.Overlay
+	spawnOpts.SpawnOverlay = &spawnOverlay
 	// Process wiring BuildArgs never reads.
 	spawnOpts.Key = key
 	spawnOpts.WorkingDir = workspace

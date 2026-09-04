@@ -254,8 +254,11 @@ type Router struct {
 	// project-access-profile). Read-only after NewRouter; resolveSpawnParamsLocked
 	// looks up a profile by ID and hands its raw Env to spawnSession, which
 	// expands *_FILE references (I/O) after releasing r.mu. Nil/empty ⇒ every
-	// session runs on the global baseline (legacy behaviour).
-	// 读写: core (init), lifecycle (resolveSpawnParamsLocked read-only)
+	// session runs on the global baseline (legacy behaviour). Copy-on-write:
+	// AddAccessProfile swaps the whole map under the write lock, so readers
+	// outside r.mu snapshot the pointer under RLock (accessProfileDefaultModel,
+	// used by the shim arg-drift compare, #2494).
+	// 读写: core (init), access_profile (AddAccessProfile swap), lifecycle (resolveSpawnParamsLocked read-only), spawn_layers (accessProfileDefaultModel RLock)
 	accessProfiles map[string]AccessProfile
 	// defaultAccessProfile is the profile ID applied when a session resolves to
 	// no explicit profile (lowest precedence). "" = legacy global-baseline

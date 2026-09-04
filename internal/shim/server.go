@@ -173,6 +173,10 @@ type Config struct {
 	Backend         string // "claude" | "kiro" | ...; stored for reconnect routing
 	CLIArgs         []string
 	CWD             string
+	// SpawnOverlay is recorded verbatim in the state file for the parent's
+	// arg-drift comparison (#2494). Nil when the spawning naozhi predates
+	// the --spawn-overlay flag; opaque to the shim otherwise.
+	SpawnOverlay *SpawnOverlay
 }
 
 // Run is the main entry point for the shim process.
@@ -254,16 +258,17 @@ func Run(cfg Config) error {
 
 	// Write state file
 	state := State{
-		ShimPID:   os.Getpid(),
-		CLIPID:    cli.pid(),
-		Socket:    cfg.SocketPath,
-		AuthToken: tokenB64,
-		Key:       cfg.Key,
-		Workspace: cfg.CWD,
-		Backend:   cfg.Backend,
-		CLIArgs:   cfg.CLIArgs,
-		CLIAlive:  true,
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		ShimPID:      os.Getpid(),
+		CLIPID:       cli.pid(),
+		Socket:       cfg.SocketPath,
+		AuthToken:    tokenB64,
+		Key:          cfg.Key,
+		Workspace:    cfg.CWD,
+		Backend:      cfg.Backend,
+		CLIArgs:      cfg.CLIArgs,
+		SpawnOverlay: cfg.SpawnOverlay,
+		CLIAlive:     true,
+		StartedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := WriteStateFile(cfg.StateFile, state); err != nil {
 		slog.Warn("failed to write state file", "err", err)

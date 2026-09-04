@@ -31,6 +31,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
+	"github.com/naozhi/naozhi/internal/shim"
 )
 
 // mkClaudeDriftRouter builds a router whose default backend is claude — the
@@ -73,7 +74,7 @@ func TestDebugFileDriftParity_NoFalseDrift(t *testing.T) {
 		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugFileFor(key), bd.Args))
 
 	// Drift-side reconstruction for the surviving shim of the same session.
-	driftArgs := r.driftCompareArgs(wrapper, backendID, key, s)
+	driftArgs := r.driftCompareArgs(wrapper, backendID, key, s, &shim.SpawnOverlay{})
 
 	if !slices.Equal(realArgs, driftArgs) {
 		t.Fatalf("drift reconstruction diverges from real spawn — every naozhi "+
@@ -119,7 +120,7 @@ func TestDebugFileDriftParity_ReadOnlyWhenComparing(t *testing.T) {
 	key := "dashboard:direct:never-respawns:general"
 	wrapper, backendID := r.wrapperFor("claude")
 
-	_ = r.driftCompareArgs(wrapper, backendID, key, nil)
+	_ = r.driftCompareArgs(wrapper, backendID, key, nil, nil)
 
 	entries, err := filepath.Glob(filepath.Join(debugDir, "*"))
 	if err != nil {
@@ -138,7 +139,7 @@ func TestDebugFileDriftParity_CaptureOffEmitsNoFlag(t *testing.T) {
 	key := "dashboard:direct:no-capture:general"
 	wrapper, backendID := r.wrapperFor("claude")
 
-	args := r.driftCompareArgs(wrapper, backendID, key, nil)
+	args := r.driftCompareArgs(wrapper, backendID, key, nil, nil)
 	if slices.Contains(args, "--debug-file") {
 		t.Errorf("capture disabled but argv carries --debug-file: %v", args)
 	}

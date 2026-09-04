@@ -193,33 +193,63 @@ func shutdownShimViaReconnect(
 // effort) are supplied by argvSpawnOptions rather than spelled out here — see
 // that function for why mirroring them by hand kept regressing.
 //
-// KNOWN LIMITATION (pre-existing, widened not introduced): this comparison
-// only sees backend-level defaults + session tuning, so any per-AGENT
-// override reads as drift. Verified for effort (backend "high" vs
-// agents[x].effort "max") and identically for the older agents[x].model.
-// Fixing it means changing what drift compares — either persisting the
-// effective argv into shim state, or restricting the comparison to the
-// backend-decidable subset — which affects every agent-level override and so
-// stays out of scope. docs/rfc/kiro-effort-control.md §4.5.1. Session tuning
-// does NOT share that limitation: the ManagedSession is available right here,
-// so there is no excuse to leave the same trap twice.
-func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID, key string, sess *ManagedSession) []string {
-	bd := r.backendDefaultsFor(backendID)
-	model, effort := bd.Model, bd.Effort
-	if sess != nil {
-		if tm := sess.TuningModel(); tm != "" {
-			model = tm
-		}
-		if te := sess.TuningEffort(); te != "" {
-			effort = te
-		}
+// overlay is the per-request layer the surviving shim recorded at spawn
+// (shim.State.SpawnOverlay, #2494): agents[].model / .effort / .extra_args
+// and the resolved access profile. The Router does not own config.Agents, so
+// it cannot re-derive that layer — it reads back what the spawn persisted and
+// re-merges it with CURRENT backend defaults through the same mergeArgvLayers
+// the spawn used. A config edit therefore still reads as drift; an
+// agent-level override no longer does. nil (state written by a pre-#2494
+// shim) degrades to the pre-fix backend-defaults-only comparison — the
+// caller logs that once per shim so the resulting restart is attributable.
+//
+// Lock: called WITHOUT r.mu (reconnectShims releases it before this runs);
+// the only lock-guarded read is the access-profile registry, taken under
+// RLock inside accessProfileDefaultModel.
+func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID, key string, sess *ManagedSession, overlay *shim.SpawnOverlay) []string {
+	var ov shim.SpawnOverlay
+	if overlay != nil {
+		ov = *overlay
 	}
+	var tuningModel, tuningEffort string
+	if sess != nil {
+		tuningModel, tuningEffort = sess.TuningModel(), sess.TuningEffort()
+	}
+	merged := mergeArgvLayers(
+		r.backendDefaultsFor(backendID),
+		r.accessProfileDefaultModel(ov.AccessProfile),
+		ov, tuningModel, tuningEffort)
 	// Every argv-bearing field is mirrored by construction — see
 	// argvSpawnOptions for why this is a shared function and not another
 	// hand-copied struct literal. cliDebugPathFor (not cliDebugFileFor) keeps
 	// the comparison read-only: this runs for every surviving shim at startup.
 	return recWrapper.Protocol.BuildArgs(
-		r.argvSpawnOptions(model, effort, r.cliDebugPathFor(key), bd.Args))
+		r.argvSpawnOptions(merged.Model, merged.Effort, r.cliDebugPathFor(key), merged.Args))
+}
+
+// shimArgsDrift is the arg-drift predicate reconnectShims feeds
+// classifyShimState: does the argv the surviving shim recorded (minus the
+// session-specific --resume pair) still equal what a fresh spawn of the same
+// session would use today? Returns both argv so the caller can log the first
+// divergence. Never drifts on an empty stored argv (a state file that predates
+// CLIArgs recording has nothing to compare).
+//
+// state.SpawnOverlay == nil marks a shim spawned before the overlay was
+// persisted (#2494 upgrade window): the comparison then cannot see
+// agents[].model/.effort and may restart that session ONCE; its replacement
+// shim records the overlay and is exempt from then on. Logged here, once per
+// shim, so the operator can attribute that single restart.
+func (r *Router) shimArgsDrift(recWrapper *cli.Wrapper, backendID string, state shim.State, sess *ManagedSession) (drift bool, storedBase, currentArgs []string) {
+	storedBase = stripResumeArgs(state.CLIArgs)
+	if len(storedBase) == 0 {
+		return false, storedBase, nil
+	}
+	if state.SpawnOverlay == nil {
+		slog.Info("shim state predates spawn-overlay persistence; drift compare falls back to backend defaults",
+			"key", state.Key, "pid", state.ShimPID)
+	}
+	currentArgs = r.driftCompareArgs(recWrapper, backendID, state.Key, sess, state.SpawnOverlay)
+	return !slices.Equal(storedBase, currentArgs), storedBase, currentArgs
 }
 
 // firstArgvDivergence returns the first differing token of two argv slices as
@@ -349,9 +379,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		var argsDrift bool
 		var storedBase, currentArgs []string
 		if recWrapper != nil {
-			storedBase = stripResumeArgs(state.CLIArgs)
-			currentArgs = r.driftCompareArgs(recWrapper, recBackendID, state.Key, sess)
-			argsDrift = len(storedBase) > 0 && !slices.Equal(storedBase, currentArgs)
+			argsDrift, storedBase, currentArgs = r.shimArgsDrift(recWrapper, recBackendID, state, sess)
 		}
 
 		// Adopt-before-classify (#1875): a live shim whose key is absent from
@@ -422,16 +450,17 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		case shimStateDrift:
 			// Naming the first divergence lets an operator tell an EXPECTED
 			// restart ("I changed cli.backends[].effort") from a spurious one
-			// (a per-agent override the backend-only comparison cannot see —
-			// see the KNOWN LIMITATION at the BuildArgs call above). Lengths
-			// alone left both looking identical in the log.
+			// (a pre-#2494 shim whose state carries no overlay — see the
+			// legacy_state attr). Lengths alone left both looking identical
+			// in the log.
 			oldTok, newTok := firstArgvDivergence(storedBase, currentArgs)
 			slog.Info("shim config drifted, shutting down old shim",
 				"key", state.Key,
 				"old_args_len", len(storedBase),
 				"new_args_len", len(currentArgs),
 				"first_diff_old", oldTok,
-				"first_diff_new", newTok)
+				"first_diff_new", newTok,
+				"legacy_state", state.SpawnOverlay == nil)
 			// Drift path: classify guarantees recWrapper is non-nil, so no
 			// SIGUSR2 fallback needed — if Reconnect fails, the 30s tick
 			// will revisit.

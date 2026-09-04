@@ -45,6 +45,7 @@ func runShimRun(args []string) {
 	cliPath := fs.String("cli-path", "", "path to CLI binary")
 	backend := fs.String("backend", "", "backend id (claude/kiro); recorded in state file")
 	cwd := fs.String("cwd", "", "working directory for CLI")
+	spawnOverlayJSON := fs.String("spawn-overlay", "", "JSON per-request spawn overlay; recorded verbatim in the state file (#2494)")
 
 	// Collect --cli-arg flags (repeated)
 	var cliArgs cliArgSlice
@@ -62,6 +63,16 @@ func runShimRun(args []string) {
 	// Setup minimal logging (JSON to stderr before we close it)
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
+	// The overlay is written by the parent naozhi (shim.EncodeSpawnOverlay), so
+	// a decode failure is a version skew, not operator input. Refuse to start:
+	// a shim that silently dropped it would read as "legacy, overlay unknown"
+	// on the next restart and re-open the very misclassification this fixes.
+	spawnOverlay, err := shim.DecodeSpawnOverlay(*spawnOverlayJSON)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid --spawn-overlay: %v\n", err)
+		os.Exit(1)
+	}
+
 	cfg := shim.Config{
 		Key:             *key,
 		SocketPath:      *socket,
@@ -74,6 +85,7 @@ func runShimRun(args []string) {
 		Backend:         *backend,
 		CLIArgs:         []string(cliArgs),
 		CWD:             *cwd,
+		SpawnOverlay:    spawnOverlay,
 	}
 
 	if err := shim.Run(cfg); err != nil {

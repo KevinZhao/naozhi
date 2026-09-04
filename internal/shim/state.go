@@ -47,6 +47,75 @@ type State struct {
 	StartedAt       string   `json:"started_at"`
 	LastConnectedAt string   `json:"last_connected_at,omitempty"`
 	BufferCount     int      `json:"buffer_count"`
+	// SpawnOverlay is the per-request override layer the session router
+	// applied on top of the backend defaults when it built CLIArgs (#2494).
+	// Three-valued on read:
+	//   - nil: the state was written by a shim that predates the field
+	//     (upgrade window). The reader cannot know which overrides went
+	//     into CLIArgs and must fall back to its legacy comparison.
+	//   - non-nil, zero value: spawned with NO per-request overrides — the
+	//     writer knew the layer and it was empty. Encoded as `{}`.
+	//   - non-nil, populated: the overrides that were in effect.
+	// Additive field: omitempty, no SchemaVersion bump (see the struct-level
+	// "Versioning contract" — bumping would make a rolled-back binary refuse
+	// to reconnect to every shim spawned by the newer one).
+	SpawnOverlay *SpawnOverlay `json:"spawn_overlay,omitempty"`
+}
+
+// SpawnOverlay is the per-request layer of spawn parameters that the session
+// router merges above the backend-level defaults (config.yaml
+// cli.model/effort/extra_args, cli.backends[]) and below the per-session
+// dashboard tuning. It records WHAT was requested (agents[].model,
+// agents[].effort, agents[].extra_args, the resolved access-profile ID), not
+// the merged result: the drift comparison on the next naozhi start re-merges
+// the persisted overlay with the CURRENT backend defaults, so an operator's
+// config change is still detected as drift while an agent-level override is
+// no longer misread as one (#2494).
+//
+// The shim treats this as opaque metadata — it is decoded from the
+// --spawn-overlay flag, written into the state file, and never interpreted.
+//
+// Extension contract: a new argv-bearing per-request field on
+// session.AgentOpts (e.g. AppendSystemPrompt, #2493) must gain a field here
+// with the same name so the drift rebuild can carry it; a field added to
+// AgentOpts but not here reproduces #2494 for that field.
+type SpawnOverlay struct {
+	Model     string   `json:"model,omitempty"`
+	Effort    string   `json:"effort,omitempty"`
+	ExtraArgs []string `json:"extra_args,omitempty"`
+	// AccessProfile is the RESOLVED profile ID (after one-shot override,
+	// resume lock and default_access_profile fell through), "" = global
+	// baseline. The profile's default_model is looked up from current config
+	// at compare time, so the ID — not the model it resolved to — is what
+	// travels.
+	AccessProfile string `json:"access_profile,omitempty"`
+}
+
+// EncodeSpawnOverlay serialises ov for the --spawn-overlay flag. Nil encodes
+// to "" (caller omits the flag); a non-nil zero value encodes to "{}" so the
+// shim records "known and empty" rather than "unknown" (see State.SpawnOverlay).
+func EncodeSpawnOverlay(ov *SpawnOverlay) (string, error) {
+	if ov == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(ov)
+	if err != nil {
+		return "", fmt.Errorf("encode spawn overlay: %w", err)
+	}
+	return string(data), nil
+}
+
+// DecodeSpawnOverlay is the inverse of EncodeSpawnOverlay: "" yields nil
+// (flag absent — legacy caller), anything else must be a JSON object.
+func DecodeSpawnOverlay(s string) (*SpawnOverlay, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var ov SpawnOverlay
+	if err := json.Unmarshal([]byte(s), &ov); err != nil {
+		return nil, fmt.Errorf("decode spawn overlay: %w", err)
+	}
+	return &ov, nil
 }
 
 const stateVersion = 1

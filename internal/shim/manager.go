@@ -309,7 +309,7 @@ func (m *Manager) reconnectKey(key string) *sync.Mutex {
 // Kept as a wrapper around StartShimWithBackend for callers that don't need
 // multi-backend routing.
 func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, cwd string) (*ShimHandle, error) {
-	return m.StartShimWithBackend(ctx, key, m.cliPath, "", cliArgs, cwd, nil)
+	return m.StartShimWithBackend(ctx, key, m.cliPath, "", cliArgs, cwd, nil, nil)
 }
 
 // buildShimArgs assembles the argv for the shim subprocess. Extracted from
@@ -322,7 +322,14 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 // Pure function of its inputs (no Manager mutation, no I/O), so the
 // argv-shape regression test can call it directly without spawning a real
 // shim.
-func (m *Manager) buildShimArgs(key, socketPath, stateFile, cliPath, backend, cwd string, cliArgs []string) []string {
+//
+// spawnOverlay (#2494) rides along as one JSON-encoded `--spawn-overlay`
+// flag, appended after the --cli-arg run so the base shape stays pinned. Nil
+// omits the flag (legacy callers → the shim records no overlay). It is a
+// single argv token rather than one flag per field so a new overlay field is
+// a struct change, not a wire change; MAX_ARG_STRLEN (128 KiB on Linux)
+// bounds it the same way it already bounds any individual --cli-arg value.
+func (m *Manager) buildShimArgs(key, socketPath, stateFile, cliPath, backend, cwd string, cliArgs []string, spawnOverlay string) []string {
 	args := []string{"shim", "run",
 		"--key", key,
 		"--socket", socketPath,
@@ -342,6 +349,9 @@ func (m *Manager) buildShimArgs(key, socketPath, stateFile, cliPath, backend, cw
 	}
 	for _, a := range cliArgs {
 		args = append(args, "--cli-arg", a)
+	}
+	if spawnOverlay != "" {
+		args = append(args, "--spawn-overlay", spawnOverlay)
 	}
 	return args
 }
@@ -426,7 +436,12 @@ func awaitReady(ctx context.Context, stdout io.ReadCloser, timeout time.Duration
 // baseline (m.shimEnv), byte-identical to legacy behaviour. Non-empty entries
 // override baseline values for THIS shim only and are re-gated through
 // filterShimEnv by mergeShimEnv — never a whitelist bypass.
-func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backend string, cliArgs []string, cwd string, envOverlay map[string]string) (*ShimHandle, error) {
+//
+// spawnOverlay (#2494) is the per-request spawn layer the caller merged into
+// cliArgs; it is recorded verbatim in the shim's state file so the parent can
+// re-merge it against current config on the next restart instead of guessing.
+// Nil records nothing (the state file then reads as "overlay unknown").
+func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backend string, cliArgs []string, cwd string, envOverlay map[string]string, spawnOverlay *SpawnOverlay) (*ShimHandle, error) {
 	// Defence-in-depth: the key flows into the shim argv as `--key <key>`.
 	// Upstream callers (HTTP / WS / reverse-RPC) already run
 	// session.ValidateSessionKey, but the shim manager must not trust
@@ -472,7 +487,14 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	socketPath := SocketPath(keyHash)
 	stateFile := StateFilePath(m.stateDir, keyHash)
 
-	args := m.buildShimArgs(key, socketPath, stateFile, cliPath, backend, cwd, cliArgs)
+	overlayJSON, err := EncodeSpawnOverlay(spawnOverlay)
+	if err != nil {
+		// Produced in-process by json.Marshal on a plain struct; failing here
+		// means a programming error, not an environment one. Fail the spawn
+		// rather than start a shim whose state would silently read as legacy.
+		return nil, err
+	}
+	args := m.buildShimArgs(key, socketPath, stateFile, cliPath, backend, cwd, cliArgs, overlayJSON)
 
 	// Use exec.Command (not CommandContext): shim must outlive naozhi.
 	// Context is only used for the startup handshake timeout below.

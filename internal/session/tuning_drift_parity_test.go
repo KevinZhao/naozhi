@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/shim"
 )
 
 func mkTuningRouter(t *testing.T) *Router {
@@ -56,9 +57,10 @@ func TestTuningDriftParity_NoFalseDrift(t *testing.T) {
 	realArgs := sp.Wrapper.Protocol.BuildArgs(
 		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.Args))
 
-	// Drift-side reconstruction for the surviving shim of the same session.
+	// Drift-side reconstruction for the surviving shim of the same session,
+	// fed the overlay the spawn persisted into shim state (#2494).
 	wrapper, backendID := r.wrapperFor("kiro")
-	driftArgs := r.driftCompareArgs(wrapper, backendID, key, s)
+	driftArgs := r.driftCompareArgs(wrapper, backendID, key, s, &sp.Overlay)
 
 	if !slices.Equal(realArgs, driftArgs) {
 		t.Fatalf("drift reconstruction diverges from real spawn — every naozhi "+
@@ -86,10 +88,11 @@ func TestTuningDriftParity_ChangedOverrideIsRealDrift(t *testing.T) {
 	r.ss.sessions[key] = s
 
 	wrapper, backendID := r.wrapperFor("kiro")
-	storedArgs := r.driftCompareArgs(wrapper, backendID, key, s) // argv the shim recorded at spawn
+	noOverlay := &shim.SpawnOverlay{}                                       // spawned with no agent-level override
+	storedArgs := r.driftCompareArgs(wrapper, backendID, key, s, noOverlay) // argv the shim recorded at spawn
 
 	s.SetTuningModel("claude-sonnet-4.6") // operator switches model, then naozhi restarts
-	newArgs := r.driftCompareArgs(wrapper, backendID, key, s)
+	newArgs := r.driftCompareArgs(wrapper, backendID, key, s, noOverlay)
 
 	if slices.Equal(storedArgs, newArgs) {
 		t.Fatal("changed override did not surface as drift — the respawn that " +
@@ -104,7 +107,7 @@ func TestTuningDriftParity_ChangedOverrideIsRealDrift(t *testing.T) {
 func TestTuningDriftParity_NilSessionFallsBack(t *testing.T) {
 	r := mkTuningRouter(t)
 	wrapper, backendID := r.wrapperFor("kiro")
-	args := r.driftCompareArgs(wrapper, backendID, "dash:direct:adopt:general", nil)
+	args := r.driftCompareArgs(wrapper, backendID, "dash:direct:adopt:general", nil, nil)
 	if !slices.Contains(args, "claude-fable-5") || !slices.Contains(args, "high") {
 		t.Errorf("nil-session drift args must carry backend defaults, got %v", args)
 	}
@@ -143,7 +146,7 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 	)
 
 	wrapper, backendID := r.wrapperFor("kiro")
-	driftArgs := r.driftCompareArgs(wrapper, backendID, key, fresh)
+	driftArgs := r.driftCompareArgs(wrapper, backendID, key, fresh, &sp.Overlay)
 	if !slices.Equal(realArgs, driftArgs) {
 		t.Fatalf("post-respawn entry diverges from the argv it was spawned with — "+
 			"the next naozhi restart would rebuild this tuned session as default.\n"+
