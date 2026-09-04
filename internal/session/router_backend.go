@@ -53,6 +53,14 @@ type backendStore struct {
 	// value = global default.
 	// 读写: backend (Set/GetSessionAccessProfile), core (init), lifecycle (unregisterSessionLocked / resolveSpawnParams consume)
 	accessProfileOverrides map[string]string
+	// tuningOverrides: model/effort picked for a session that has no
+	// ManagedSession yet (dashboard header chip before the first message).
+	// One-shot like backendOverrides: resolveSpawnParamsLocked reads it for
+	// the first argv and spawnSession moves it onto the fresh ManagedSession's
+	// tuning fields, after which the entry is gone. Values are
+	// tuningspec-validated at write. docs/rfc/dashboard-model-effort-control.md §4.3.
+	// 读写: tuning (SetSessionTuning record), core (init), lifecycle (resolveSpawnParams read / spawnSession consume / unregisterSessionLocked / RenameSession)
+	tuningOverrides map[string]pendingTuning
 	// configuredModelLists: operator-declared manifest per backend ID
 	// (cli.backends[].models). docs/rfc/dashboard-model-effort-control.md §4.2.
 	// 读写: backend (BackendModelManifest), core (init)

@@ -43,9 +43,24 @@ const (
 	TuningAppliedDeferred = "deferred"
 )
 
-// ErrTuningUnknownSession is returned when key has no ManagedSession —
-// tuning targets an existing conversation, never creates one.
-var ErrTuningUnknownSession = errors.New("no session for key")
+// pendingTuning is a model/effort pick recorded for a key that has no
+// ManagedSession yet (bkStore.tuningOverrides). A freshly created dashboard
+// session exists only client-side until its first message spawns the CLI,
+// yet its header chips are already clickable — so the pick is parked here
+// and spawnSession moves it onto the new entry. Empty field = no override.
+type pendingTuning struct {
+	Model  string
+	Effort string
+}
+
+// maxTuningOverrides caps bkStore.tuningOverrides for the same reason as
+// maxBackendOverrides: an authenticated caller can POST unique keys and an
+// abandoned pick is only cleared on spawn / Reset / Remove.
+const maxTuningOverrides = 1024
+
+// ErrTuningCapacity is returned when a pre-spawn pick cannot be recorded
+// because bkStore.tuningOverrides is at maxTuningOverrides.
+var ErrTuningCapacity = errors.New("too many pending tuning overrides")
 
 // ErrTuningEffortUnsupported is returned when an effort tier is set for a
 // session whose backend protocol does not honour SpawnOptions.Effort (see
@@ -82,8 +97,14 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 	r.mu.Lock()
 	sess := r.ss.sessions[key]
 	if sess == nil {
+		err := r.setPendingTuningLocked(key, model, effort)
 		r.mu.Unlock()
-		return "", ErrTuningUnknownSession
+		if err != nil {
+			return "", err
+		}
+		slog.Info("session tuning recorded for a session not yet spawned",
+			"key", osutil.SanitizeForLog(key, 64), "model_set", model != nil, "effort_set", effort != nil)
+		return TuningAppliedDeferred, nil
 	}
 	wrapper, backendID := r.wrapperFor(sess.Backend())
 	// A missing wrapper degrades to zero caps: a model override is still safe
@@ -230,4 +251,30 @@ func procSetModel(ctx context.Context, proc processIface, model string) error {
 		return cli.ErrSetModelUnsupported
 	}
 	return ms.SetModel(ctx, model)
+}
+
+// setPendingTuningLocked records (or clears) the pre-spawn pick for key.
+// nil leaves a field as is; "" clears it; a record with both fields empty is
+// deleted so a "恢复默认" on a never-spawned session leaves no residue.
+// Caller holds r.mu.
+func (r *Router) setPendingTuningLocked(key string, model, effort *string) error {
+	cur, exists := r.bkStore.tuningOverrides[key]
+	if model != nil {
+		cur.Model = *model
+	}
+	if effort != nil {
+		cur.Effort = *effort
+	}
+	if cur.Model == "" && cur.Effort == "" {
+		delete(r.bkStore.tuningOverrides, key)
+		return nil
+	}
+	if !exists && len(r.bkStore.tuningOverrides) >= maxTuningOverrides {
+		return ErrTuningCapacity
+	}
+	if r.bkStore.tuningOverrides == nil {
+		r.bkStore.tuningOverrides = make(map[string]pendingTuning)
+	}
+	r.bkStore.tuningOverrides[key] = cur
+	return nil
 }

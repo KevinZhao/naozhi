@@ -114,6 +114,10 @@ const sessionWorkspaces = {};
 const sessionNodes = {};
 const sessionBackends = {}; // per-session CLI backend picked at creation ("claude" / "kiro" / ...)
 const sessionAccessProfiles = {}; // per-session access profile picked at creation ("" = global default)
+// Header-chip picks made on a session that has no server entry yet (created,
+// no message sent). The server parks them and applies them on first spawn;
+// this mirror lets the chips show the pick meanwhile. Dropped on promotion.
+const sessionPendingTuning = {}; // key -> { model, effort }
 let cliBackends = null; // cached LOCAL /api/cli/backends response: {backends, default, detected}
 let cliBackendsFetchedAt = 0;
 // Per-node backend manifest cache for the node-aware new-session picker.
@@ -596,6 +600,7 @@ async function fetchSessions() {
         delete sessionNodes[key];
         delete sessionBackends[key];
         delete sessionAccessProfiles[key];
+        delete sessionPendingTuning[key];
         reconciledAny = true;
       }
     }
@@ -3237,6 +3242,9 @@ function setHeaderEffortChip(sessions) {
     } else {
       effort = (sessionsData[sid(selectedKey, selectedNode)] || {}).effort;
     }
+    if (!effort && !sessionsData[sid(selectedKey, selectedNode)] && sessionPendingTuning[selectedKey]) {
+      effort = sessionPendingTuning[selectedKey].effort || '';
+    }
   }
   const html = effortTagHtml(effort);
   if (el.innerHTML !== html) el.innerHTML = html;
@@ -3319,7 +3327,9 @@ function openTuningPopover(kind) {
     tuningToast('远程节点会话暂不支持切换模型/档位', false);
     return;
   }
-  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+  const s = sessionsData[sid(selectedKey, selectedNode)] ||
+    // Not spawned yet: show the parked pick as current so a re-open marks it.
+    (sessionPendingTuning[selectedKey] || {});
   const running = s.state === 'running';
   const rows = [];
   const current = kind === 'model' ? (s.model || '') : (s.effort || '');
@@ -3450,7 +3460,16 @@ async function postTuningOverride(kind, value) {
     const data = await resp.json();
     const via = data.applied_via || '';
     const label = kind === 'model' ? '模型' : '档位';
-    if (via === 'rpc') {
+    // No server row for this key = the session has not spawned yet; the pick
+    // was parked server-side. Mirror it so the chips show it until promotion.
+    const isPending = !sessionsData[sid(key, selectedNode)];
+    if (isPending) {
+      const prev = sessionPendingTuning[key] || {};
+      const next = Object.assign({}, prev);
+      next[kind] = value;
+      sessionPendingTuning[key] = next;
+      tuningToast(label + (value ? '已记录，发送首条消息时生效' : '已恢复默认'), false);
+    } else if (via === 'rpc') {
       tuningToast(label + '已切换（对下一轮生效）', false);
     } else if (via === 'respawn') {
       tuningToast(label + '已记录，CLI 进程将重启并恢复上下文（下条消息生效）', false);
@@ -3978,7 +3997,9 @@ function mainHeaderHtml(s) {
   // We compress noisy claude-style identifiers (e.g.
   // "global.anthropic.claude-opus-4-7[1m]" → "claude-opus-4.7 1M") for
   // the dashboard but keep the raw value in `title` for debug.
-  const rawModel = s.model || '';
+  const rawModel = s.model ||
+    (!sessionsData[sid(selectedKey, selectedNode)] && sessionPendingTuning[selectedKey]
+      ? (sessionPendingTuning[selectedKey].model || '') : '');
   const compactModel = rawModel
     .replace(/^(global|us|eu|apac)\.anthropic\./, '') // strip Bedrock inference-profile prefix
     .replace(/-(\d+)-(\d+)/, '-$1.$2')          // 4-7 → 4.7 (matches kiro list)

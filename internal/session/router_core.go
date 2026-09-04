@@ -159,7 +159,7 @@ type Router struct {
 	// No lock of its own — mutations ONLY under r.mu write lock, reads under
 	// RLock. The annotation below is the UNION of all domains; the lint
 	// recurses one level into backendStore's own annotations.
-	// 读写: core (init), backend (wrapperFor/managerFor/BackendIDs/BackendWrapper/DefaultBackend/CLIName/CLIVersion/CLIPath/backendDefaultsFor/Set/GetSessionBackend), lifecycle (spawn/resolveSpawnParams/unregisterSessionLocked/RenameSession), shim (shimManagers)
+	// 读写: core (init), backend (wrapperFor/managerFor/BackendIDs/BackendWrapper/DefaultBackend/CLIName/CLIVersion/CLIPath/backendDefaultsFor/Set/GetSessionBackend), lifecycle (spawn/resolveSpawnParams/unregisterSessionLocked/RenameSession), shim (shimManagers), tuning (SetSessionTuning pending pick)
 	bkStore backendStore
 	// accessProfiles is the named auth/upstream overlay registry (RFC
 	// project-access-profile). Nil/empty ⇒ every session runs on the global
@@ -706,6 +706,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.bkStore.modelManifests = make(map[string][]cli.ModelInfo)
 	r.bkStore.backendOverrides = make(map[string]string)
 	r.bkStore.accessProfileOverrides = make(map[string]string)
+	r.bkStore.tuningOverrides = make(map[string]pendingTuning)
 	r.accessProfiles = cfg.AccessProfiles
 	r.defaultAccessProfile = cfg.DefaultAccessProfile
 	// Run-history store is rooted next to the session store (its own config,
