@@ -54,8 +54,6 @@ func (h *Handlers) HandleOverride(w http.ResponseWriter, r *http.Request) {
 	appliedVia, err := h.router.SetSessionTuning(r.Context(), req.Key, req.Model, req.Effort)
 	if err != nil {
 		switch {
-		case errors.Is(err, sessionpkg.ErrTuningUnknownSession):
-			http.Error(w, "session not found", http.StatusNotFound)
 		case errors.Is(err, cli.ErrSetModelRejected):
 			// CLI text is safe: sanitized at the protocol layer
 			// (parseControlAck / ACP interception) before it entered the

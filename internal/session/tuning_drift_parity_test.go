@@ -123,7 +123,6 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 	// installFreshSessionLocked touches the id indexes that NewRouter
 	// normally allocates; the minimal fixture above does not.
 	r.ss.idToKey = map[string]string{}
-	r.kid.ids = map[string]bool{}
 	key := "dash:direct:drift3:general"
 	s := newSessionWithID(key, "sess-drift-3")
 	s.SetBackend("kiro")

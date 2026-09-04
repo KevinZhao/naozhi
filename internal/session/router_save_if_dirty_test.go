@@ -69,9 +69,8 @@ func TestSaveIfDirty_NoopWhenClean(t *testing.T) {
 	}
 }
 
-// TestSaveIfDirty_KnownIDsThrottleCommit verifies the known-IDs save path still
-// commits knownIDsSavedAt (now under the short write-locked section) and
-// persists the IDs when the throttle interval has elapsed.
+// TestSaveIfDirty_KnownIDsThrottleCommit verifies the known-IDs save path
+// commits savedAt and persists the IDs when the throttle window is open.
 func TestSaveIfDirty_KnownIDsThrottleCommit(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "sessions.json")
@@ -82,22 +81,18 @@ func TestSaveIfDirty_KnownIDsThrottleCommit(t *testing.T) {
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,
 		storePath: storePath,
-		kid:       knownIDsStore{ids: map[string]bool{"sess-1": true, "sess-2": true}},
 	}
-	r.mu.Lock()
-	r.kid.dirty = true
-	r.kid.savedAt = time.Now().Add(-2 * knownIDsSaveInterval)
-	before := r.kid.savedAt
-	r.mu.Unlock()
+	// Track dirties the store; savedAt is zero so the throttle gate is open.
+	r.kid.Track("sess-1")
+	r.kid.Track("sess-2")
+	before := time.Now()
 
 	r.saveIfDirty()
 
-	r.mu.RLock()
-	savedAt := r.kid.savedAt
-	dirty := r.kid.dirty
-	r.mu.RUnlock()
-	if !savedAt.After(before) {
-		t.Error("knownIDsSavedAt must be advanced after a due known-IDs save")
+	savedAt := r.kid.SavedAt()
+	dirty := r.kid.Dirty()
+	if savedAt.IsZero() || savedAt.Before(before) {
+		t.Errorf("knownIDsSavedAt must be stamped by a due known-IDs save; got %v", savedAt)
 	}
 	if dirty {
 		t.Error("knownIDsDirty should be cleared after a successful save")
@@ -135,19 +130,13 @@ func TestSaveIfDirty_KnownIDsSaveFailure_ResetsThrottle(t *testing.T) {
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,
 		storePath: badStorePath,
-		kid:       knownIDsStore{ids: map[string]bool{"sess-x": true}},
 	}
-	r.mu.Lock()
-	r.kid.dirty = true
-	// Set savedAt far enough in the past so the throttle gate is open.
-	r.kid.savedAt = time.Now().Add(-2 * knownIDsSaveInterval)
-	r.mu.Unlock()
+	// Track dirties the store with the throttle gate open.
+	r.kid.Track("sess-x")
 
 	r.saveIfDirty()
 
-	r.mu.RLock()
-	savedAt := r.kid.savedAt
-	r.mu.RUnlock()
+	savedAt := r.kid.SavedAt()
 
 	// After a failed save the timestamp must be zero so the next tick
 	// finds time.Since(zero) >> knownIDsSaveInterval and retries.
@@ -173,21 +162,14 @@ func TestCleanup_KnownIDsSaveFailure_ResetsThrottle(t *testing.T) {
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,
 		storePath: badStorePath,
-		kid:       knownIDsStore{ids: map[string]bool{"sess-y": true}},
 	}
-	r.mu.Lock()
-	r.kid.dirty = true
-	// Age savedAt so the throttle is open.
-	r.kid.savedAt = time.Now().Add(-2 * knownIDsSaveInterval)
-	r.mu.Unlock()
+	// Track dirties the store with the throttle gate open.
+	r.kid.Track("sess-y")
 
-	// Cleanup calls saveKnownIDs via its snapshot path; the bad storePath
-	// ensures the write fails.
+	// Cleanup claims the known-IDs save; the bad storePath makes the write fail.
 	r.Cleanup()
 
-	r.mu.RLock()
-	savedAt := r.kid.savedAt
-	r.mu.RUnlock()
+	savedAt := r.kid.SavedAt()
 
 	if !savedAt.IsZero() {
 		t.Errorf("R20260603-CODE-4 Cleanup path: knownIDsSavedAt must be reset to zero on save failure; got %v", savedAt)

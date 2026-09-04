@@ -66,7 +66,6 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 			spawningKeys:     make(map[string]chan struct{}),
 			shimStuckOnReset: make(map[string]bool),
 		},
-		kid: knownIDsStore{ids: make(map[string]bool)},
 	}
 	r.bkStore.backendOverrides = make(map[string]string)
 	const key = "stuck:key:test"
@@ -108,7 +107,6 @@ func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 			spawningKeys:     make(map[string]chan struct{}),
 			shimStuckOnReset: make(map[string]bool),
 		},
-		kid: knownIDsStore{ids: make(map[string]bool)},
 	}
 	r.bkStore.backendOverrides = make(map[string]string)
 	const stuckKey = "key:A"
@@ -143,7 +141,6 @@ func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
 			spawningKeys:     make(map[string]chan struct{}),
 			shimStuckOnReset: make(map[string]bool),
 		},
-		kid: knownIDsStore{ids: make(map[string]bool)},
 	}
 	r.bkStore.backendOverrides = make(map[string]string)
 	s := &ManagedSession{key: key}
@@ -213,7 +210,6 @@ func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
 			spawningKeys:     make(map[string]chan struct{}),
 			shimStuckOnReset: make(map[string]bool),
 		},
-		kid: knownIDsStore{ids: make(map[string]bool)},
 	}
 	r.bkStore.backendOverrides = make(map[string]string)
 	s := &ManagedSession{key: key}
