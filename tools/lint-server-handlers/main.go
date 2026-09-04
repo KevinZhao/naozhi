@@ -2,7 +2,7 @@
 // (docs/design/server-split-phase4-design.md §六.2 / §九.2):
 //
 //   - handle_decl: no `func (s *Server) handle*` method outside the
-//     exemptions.yaml handle_baseline.
+//     exemptions.yaml handle_baseline (ownership rule: internal/server/doc.go).
 //   - file_size: internal/server/ ≤ 500 lines, internal/dashboard/*/ ≤ 800
 //     (non-test); exemptions.yaml entries with `until_phase` may not grow.
 //   - field_block: wshub_*.go godoc 头必须含 Field-block contract / WRITES: /
@@ -10,6 +10,8 @@
 //   - iface_match: godoc `satisfies:` 注释的接口必须出现在
 //     consumer-contracts.md。
 //   - stale_exemption: exemptions 条目必须指向存在的文件。
+//   - api_route_owner: routes.go 中 pattern 含 /api/ 的 mux 注册不得指向
+//     Server 方法（拆开 auth(...) 等包装后判定）。
 //
 // mode=warn (default) prints violations to stderr and exits 0; mode=fail
 // exits 1 on any violation. -sarif emits SARIF 2.1.0 on stdout.
@@ -41,7 +43,7 @@ const (
 )
 
 type Violation struct {
-	Rule    string // handle_decl / file_size / field_block / iface_match
+	Rule    string // handle_decl / file_size / field_block / iface_match / stale_exemption / api_route_owner
 	File    string
 	Line    int
 	Message string
@@ -115,7 +117,7 @@ func main() {
 		vs = append(vs, Violation{
 			Rule:    "handle_decl",
 			File:    *serverPkg + "/server.go",
-			Message: fmt.Sprintf("new Server.handle* method %q is forbidden after Phase 0; move it to a dashboard sub-package or add to exemptions.yaml handle_baseline (with justification)", h),
+			Message: fmt.Sprintf("%q is a Server handler: internal/server owns only the HTTP pipe, every /api/* handler lives in an internal/dashboard/<sub> package behind a Deps struct (internal/server/doc.go); only the static shell is exempt via exemptions.yaml handle_baseline", h),
 		})
 	}
 
@@ -137,6 +139,14 @@ func main() {
 
 	// Rule 5: stale_exemption
 	vs = append(vs, scanStaleExemption(exempts)...)
+
+	// Rule 6: api_route_owner
+	routeVs, err := scanAPIRouteOwner(filepath.Join(*serverPkg, "routes.go"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scan routes: %v\n", err)
+		os.Exit(2)
+	}
+	vs = append(vs, routeVs...)
 
 	if os.Getenv("LINT_VERBOSE") == "1" {
 		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b (AST field_block) due Phase 4b; rule 4 method-set 对账 + rule 5 git tag 对账 due Phase 1 (server-split-phase4-design.md v0.6.1 §六.2.0.4)")
@@ -316,7 +326,7 @@ func emitText(vs []Violation) {
 // emitSARIF prints a minimal SARIF 2.1.0 report on stdout (consumed by
 // codeql/upload-sarif). Inline producer avoids a sarif-go dependency.
 func emitSARIF(vs []Violation) {
-	const head = `{"$schema":"https://docs.oasis-open.org/sarif/sarif/v2.1.0/cos02/schemas/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint-server-handlers","informationUri":"https://github.com/naozhi/naozhi/blob/master/docs/design/server-split-phase4-design.md","rules":[{"id":"handle_decl"},{"id":"file_size"},{"id":"field_block"},{"id":"iface_match"},{"id":"stale_exemption"}]}},"results":[`
+	const head = `{"$schema":"https://docs.oasis-open.org/sarif/sarif/v2.1.0/cos02/schemas/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint-server-handlers","informationUri":"https://github.com/naozhi/naozhi/blob/master/docs/design/server-split-phase4-design.md","rules":[{"id":"handle_decl"},{"id":"file_size"},{"id":"field_block"},{"id":"iface_match"},{"id":"stale_exemption"},{"id":"api_route_owner"}]}},"results":[`
 	const tail = `]}]}`
 	var sb strings.Builder
 	sb.WriteString(head)

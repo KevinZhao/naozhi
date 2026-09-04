@@ -19,30 +19,23 @@ import (
 	extccassets "github.com/naozhi/naozhi/internal/dashboard/ext/ccassets"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/planner"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
-	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/ratelimit"
-	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/uiprefs"
 )
 
-const (
-	defaultDedupCapacity = 10000
-
-	// maxRequestBodyBytes is the per-handler request-body read limit
-	// (http.MaxBytesReader); source of truth is internal/dashboard/httputil.
-	maxRequestBodyBytes = httputil.MaxRequestBodyBytes
-)
+const defaultDedupCapacity = 10000
 
 // Server is the HTTP entry point for Naozhi.
 //
@@ -62,7 +55,7 @@ type Server struct {
 	logger    *slog.Logger    // 读写: server.go (injected component logger; nil → slog.Default via s.log())
 
 	// ── core deps ──────────────────────────────────────
-	router     *session.Router  // 读写: server.go, dashboard.go, dashboard_system.go, send.go, takeover.go, consumer.go
+	router     *session.Router  // 读写: server.go, dashboard.go, send.go, takeover.go, consumer.go
 	scheduler  cronScheduler    // 读写: server.go, dashboard.go, dashboard_cron.go, dashboard_cron_transcript.go, wshub.go (narrowed to the cronScheduler consumer view, #1648)
 	hub        *Hub             // 读写: server.go, dashboard.go, send.go (WebSocket hub)
 	projectMgr *project.Manager // 读写: server.go, dashboard.go, project_api.go, project_files.go
@@ -102,25 +95,14 @@ type Server struct {
 	workspaceName  string               // 读写: server.go (ctor only; copied into SessionHandlers/HealthHandler)
 	discoveryCache *discoveryCache      // 读写: server.go (background-cached local discovery results)
 	scratchPool    *session.ScratchPool // 读写: server.go, dashboard.go, wshub.go (ephemeral aside sessions for preview drawer)
-	sysessionMgr   *sysession.Manager   // 读写: dashboard.go, dashboard_system.go (system-daemon Tick scheduling)
+	sysessionMgr   *sysession.Manager   // 读写: dashboard.go (system-daemon Tick scheduling)
 	orient         *orientConfig        // 读: routes.go (image auto-orientation; nil = feature off)
 	uiSettingsH    *uisettings.Handler  // 读: routes.go (GET/PUT /api/settings; dashboard/ext/uisettings)
 	// accessProfilesH serves GET+POST /api/access-profiles; empty ConfigPath
 	// keeps create disabled (400). 读: routes.go.
 	accessProfilesH *accessprofile.Handler
-
-	// ── self-update state ──────────────────────────────
-	// updateStatus/updateChecker are nil when the checker is disabled (GET
-	// then reports only buildVersion). updateInstallEnabled gates POST
-	// .../apply; updateApplyLimiter is global, see newUpdateApplyLimiter.
-	// updateApplyFn is a test seam; nil ⇒ updateChecker.InstallLatest.
-	// 读: dashboard_update.go.
-	updateStatus         *selfupdate.Status
-	updateChecker        *selfupdate.Checker
-	buildVersion         string
-	updateInstallEnabled bool
-	updateApplyLimiter   *ratelimit.Limiter
-	updateApplyFn        func(ctx context.Context, restart bool) error
+	systemH         *system.Handlers  // 读: routes.go (/api/system/*; dashboard/ext/system)
+	plannerH        *planner.Handlers // 读: routes.go (GET /api/planner/stats; dashboard/ext/planner)
 
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars)
@@ -277,13 +259,9 @@ func buildServer(opts ServerOptions) *Server {
 		resolver:        resolver,
 		nodes:           nodes,
 		sysessionMgr:    opts.SysessionManager,
-		updateStatus:    opts.UpdateStatus,
-		updateChecker:   opts.UpdateChecker,
-		buildVersion:    opts.Version,
-		// nil ⇒ enabled, matching config.UpdateDashboardInstall's default.
-		updateInstallEnabled: opts.UpdateDashboardInstall == nil || *opts.UpdateDashboardInstall,
-		updateApplyLimiter:   newUpdateApplyLimiter(),
-		orient:               buildOrientConfig(opts),
+		orient:          buildOrientConfig(opts),
+		systemH:         buildSystemHandlers(opts, router),
+		plannerH:        planner.New(planner.Deps{Router: router}),
 		// Empty StateDir yields an in-memory prefs store (no persistence).
 		uiSettingsH: uisettings.New(uiprefs.New(opts.StateDir)),
 		// Empty ConfigPath keeps the create endpoint disabled (400).

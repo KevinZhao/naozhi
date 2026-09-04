@@ -1,8 +1,9 @@
-// Package server — consumer.go: per-consumer interface subsets of
-// *session.Router (HubRouter / ScratchRouter / SendRouter) and *Hub
-// (HubBroadcaster). Declared here (not in session) so tests can inject fakes;
-// the concrete types satisfy them structurally, guarded by
-// consumer_contract_test.go. See docs/rfc/consumer-interfaces.md §3.2.2.
+// consumer.go: per-consumer interface subsets of *session.Router (HubRouter /
+// ScratchRouter / SendRouter) and *Hub (HubBroadcaster). Declared here (not in
+// session) so tests can inject fakes; the concrete types satisfy them
+// structurally, guarded by consumer_contract_test.go. See
+// docs/rfc/consumer-interfaces.md §3.2.2.
+
 package server
 
 import (

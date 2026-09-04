@@ -1,12 +1,4 @@
-// dashboard_update.go — self-update state and apply for the dashboard.
-//
-//	GET  /api/system/update        version state + what the operator can do
-//	POST /api/system/update/apply  carry it out (install and/or restart)
-//
-// The browser must NOT compare versions itself: `action` is computed here
-// (selfupdate.StatusSnapshot.Action) because getting "download" vs "just
-// restart" wrong destroys the rollback backup. See docs/rfc/dashboard-update-notice.md.
-package server
+package system
 
 import (
 	"context"
@@ -17,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/selfupdate"
 	"golang.org/x/time/rate"
@@ -70,31 +63,34 @@ type updateStatusResponse struct {
 	RollbackHint string `json:"rollback_hint,omitempty"`
 }
 
-// handleUpdateStatus serves the self-update state.
+// HandleUpdateStatus serves the self-update state.
 //
 // Always 200 with a complete object, even when the checker is disabled or the
-// version is unknown; `enabled` and `action` carry that instead.
-func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
+// version is unknown; `enabled` and `action` carry that instead. The browser
+// must NOT compare versions itself: `action` is computed here
+// (selfupdate.StatusSnapshot.Action) because getting "download" vs "just
+// restart" wrong destroys the rollback backup (docs/rfc/dashboard-update-notice.md).
+func (h *Handlers) HandleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	// Cold-start fill while no tag has ever been learned (a failed check
 	// advances checkedAt but not `latest`, so a boot-time blip is retried on
 	// the next poll). CheckNow throttles globally so N polling tabs cannot
 	// amplify into N GitHub requests.
-	if s.updateChecker != nil {
-		if _, latest := s.updateStatus.LastCheck(); latest == "" {
+	if h.updateChecker != nil {
+		if _, latest := h.updateStatus.LastCheck(); latest == "" {
 			// Bounded so a hanging GitHub cannot hold the polled status page
 			// hostage; a fill that misses the window is picked up next poll.
 			// Errors are ignored: CheckNow already recorded them into Status.
 			ctx, cancel := context.WithTimeout(r.Context(), updateColdStartFillTimeout)
-			_ = s.updateChecker.CheckNow(ctx)
+			_ = h.updateChecker.CheckNow(ctx)
 			cancel()
 		}
 	}
 
-	snap := s.updateStatus.Snapshot()
+	snap := h.updateStatus.Snapshot()
 	// Fall back to the build ldflag so "关于" always has a value.
 	current := snap.Current
 	if current == "" {
-		current = s.buildVersion
+		current = h.buildVersion
 	}
 	snap.Current = current
 
@@ -117,9 +113,9 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		CanApply:         pre.CanApply,
 		BlockedReason:    pre.Reason,
 		RestartSupported: serviceRunning,
-		RunningSessions:  s.runningSessionCount(),
-		Enabled:          s.updateChecker != nil,
-		InstallEnabled:   s.updateInstallEnabled && s.updateChecker != nil,
+		RunningSessions:  h.runningSessionCount(),
+		Enabled:          h.updateChecker != nil,
+		InstallEnabled:   h.installEnabled && h.updateChecker != nil,
 		ManualCommand:    selfupdate.ManualCommand(action, serviceRunning),
 	}
 	if action != selfupdate.ActionNone {
@@ -128,7 +124,7 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	if !snap.CheckedAt.IsZero() {
 		resp.CheckedAt = snap.CheckedAt.Format(time.RFC3339)
 	}
-	writeJSON(w, resp)
+	httputil.WriteJSON(w, resp)
 }
 
 // updateApplyRequest is the POST body.
@@ -164,39 +160,39 @@ const updateColdStartFillTimeout = 10 * time.Second
 // applyBackgroundTimeout bounds the detached download+verify work.
 const applyBackgroundTimeout = 10 * time.Minute
 
-// handleUpdateApply carries out what handleUpdateStatus reported.
+// HandleUpdateApply carries out what HandleUpdateStatus reported.
 //
 // Returns 202 and does the work in a detached goroutine: the successful path
 // ends with this process being SIGTERMed, so a synchronous handler would die
 // before its response reached the browser. The client learns the outcome by
 // polling GET.
-func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	// CSRF is covered by the auth middleware's Origin check on non-safe methods.
-	if !s.updateInstallEnabled {
+	if !h.installEnabled {
 		http.Error(w, "dashboard install disabled (update.dashboard_install=false)", http.StatusForbidden)
 		return
 	}
 	// Throttle before the state checks; a rejected attempt consuming the
 	// window is intended.
-	if s.updateApplyLimiter != nil && !s.updateApplyLimiter.Allow(updateApplyKey) {
+	if h.applyLimiter != nil && !h.applyLimiter.Allow(updateApplyKey) {
 		http.Error(w, "too many update attempts; wait a moment", http.StatusTooManyRequests)
 		return
 	}
-	if s.updateChecker == nil {
+	if h.updateChecker == nil {
 		http.Error(w, "auto-update is disabled (update.enabled=false)", http.StatusConflict)
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
 	var req updateApplyRequest
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 
-	snap := s.updateStatus.Snapshot()
+	snap := h.updateStatus.Snapshot()
 	if snap.Current == "" {
-		snap.Current = s.buildVersion
+		snap.Current = h.buildVersion
 	}
 	action := snap.Action()
 	if action == selfupdate.ActionNone {
@@ -216,20 +212,20 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apply := s.updateApplyFn
+	apply := h.applyFn
 	if apply == nil {
-		apply = s.updateChecker.InstallLatest
+		apply = h.updateChecker.InstallLatest
 	}
 	slog.Info("dashboard update: apply requested",
 		"action", action, "current", snap.Current, "latest", snap.Latest,
 		"staged", snap.Staged, "restart", restart,
-		"running_sessions", s.runningSessionCount())
+		"running_sessions", h.runningSessionCount())
 
 	// Write AND FLUSH the 202 before the work starts: net/http buffers the
 	// response until the handler returns, and on the restart path the goroutine
 	// can SIGTERM this process within milliseconds — the browser would see a
 	// dropped connection ("升级请求失败") at the exact moment it is succeeding.
-	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "started"})
+	httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "started"})
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -241,7 +237,7 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
 				slog.Error("dashboard update: apply goroutine panicked", "action", action, "panic", rec)
-				s.updateStatus.MarkFailed(fmt.Errorf("apply aborted: %v", rec))
+				h.updateStatus.MarkFailed(fmt.Errorf("apply aborted: %v", rec))
 			}
 		}()
 		// context.Background, NOT r.Context(): the request is already finished
@@ -275,13 +271,13 @@ func phaseOrIdle(p selfupdate.Phase) selfupdate.Phase {
 //
 // StateSpawning also stringifies to "running"; that is intended — a spawning
 // session is in-flight work too.
-func (s *Server) runningSessionCount() int {
-	if s.router == nil {
+func (h *Handlers) runningSessionCount() int {
+	if h.router == nil {
 		return 0
 	}
 	running := cli.StateRunning.String()
 	n := 0
-	for _, snap := range s.router.ListSessions() {
+	for _, snap := range h.router.ListSessions() {
 		if snap.State == running {
 			n++
 		}

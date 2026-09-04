@@ -1,12 +1,9 @@
-package server
+package system
 
 import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -16,11 +13,11 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// applyTestServer builds a Server whose apply path is stubbed, so these tests
+// applyTestHandlers builds Handlers whose apply path is stubbed, so these tests
 // exercise the HTTP contract without any chance of a real install (or a GitHub
 // request) escaping a unit test. The returned func reports how many times the
 // apply actually ran and with what `restart` argument.
-func applyTestServer(t *testing.T, fixture selfupdate.StatusFixture) (*Server, func() (int, bool)) {
+func applyTestHandlers(t *testing.T, fixture selfupdate.StatusFixture) (*Handlers, func() (int, bool)) {
 	t.Helper()
 	// The preflight verdict is cached process-wide and keyed on nothing, so a
 	// neighbouring case's version could otherwise decide this one's outcome.
@@ -32,8 +29,8 @@ func applyTestServer(t *testing.T, fixture selfupdate.StatusFixture) (*Server, f
 		Workspace: t.TempDir(),
 	})
 	// A real Checker so the handler's "auto-update disabled" branch is not the
-	// one under test. POST never reaches it (updateApplyFn wins), but GET DOES:
-	// handleUpdateStatus calls CheckNow whenever Status.Latest is empty, and a
+	// one under test. POST never reaches it (applyFn wins), but GET DOES:
+	// HandleUpdateStatus calls CheckNow whenever Status.Latest is empty, and a
 	// fixture without Latest would send this unit test to GitHub. CurrentVersion
 	// is pinned to "dev" so CheckNow refuses before the network (ErrCheckSkippedDev)
 	// — the handler never reads the Checker's version, only the Status's, so the
@@ -42,20 +39,19 @@ func applyTestServer(t *testing.T, fixture selfupdate.StatusFixture) (*Server, f
 		CurrentVersion: "dev",
 		Interval:       time.Hour,
 	})
-	srv := NewWithOptions(ServerOptions{
-		Addr:          ":0",
-		Router:        router,
-		Backend:       "claude",
-		Version:       fixture.Current,
-		UpdateStatus:  selfupdate.NewStatusFixture(fixture),
-		UpdateChecker: checker,
+	h := New(Deps{
+		Router:         router,
+		BuildVersion:   fixture.Current,
+		UpdateStatus:   selfupdate.NewStatusFixture(fixture),
+		UpdateChecker:  checker,
+		InstallEnabled: true,
 	})
 
 	var mu sync.Mutex
 	var calls int
 	var lastRestart bool
 	done := make(chan struct{}, 8)
-	srv.updateApplyFn = func(_ context.Context, restart bool) error {
+	h.applyFn = func(_ context.Context, restart bool) error {
 		mu.Lock()
 		calls++
 		lastRestart = restart
@@ -63,7 +59,7 @@ func applyTestServer(t *testing.T, fixture selfupdate.StatusFixture) (*Server, f
 		done <- struct{}{}
 		return nil
 	}
-	return srv, func() (int, bool) {
+	return h, func() (int, bool) {
 		// The apply is detached, so give the goroutine a bounded moment to land
 		// rather than reading the counter immediately.
 		select {
@@ -76,12 +72,12 @@ func applyTestServer(t *testing.T, fixture selfupdate.StatusFixture) (*Server, f
 	}
 }
 
-func postApply(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
+func postApply(t *testing.T, h *Handlers, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, "/api/system/update/apply", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleUpdateApply(w, r)
+	h.HandleUpdateApply(w, r)
 	return w
 }
 
@@ -96,9 +92,9 @@ func installFixture() selfupdate.StatusFixture {
 }
 
 func TestUpdateApply_Accepted(t *testing.T) {
-	srv, applied := applyTestServer(t, installFixture())
+	h, applied := applyTestHandlers(t, installFixture())
 
-	w := postApply(t, srv, `{"confirm_action":"install"}`)
+	w := postApply(t, h, `{"confirm_action":"install"}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202; body=%q", w.Code, w.Body.String())
 	}
@@ -116,16 +112,16 @@ func TestUpdateApply_Accepted(t *testing.T) {
 // would never get its response out — the browser would see a dropped connection
 // and no way to tell success from failure.
 func TestUpdateApply_RespondsBeforeWorkCompletes(t *testing.T) {
-	srv, _ := applyTestServer(t, installFixture())
+	h, _ := applyTestHandlers(t, installFixture())
 	release := make(chan struct{})
 	entered := make(chan struct{})
-	srv.updateApplyFn = func(context.Context, bool) error {
+	h.applyFn = func(context.Context, bool) error {
 		close(entered)
 		<-release
 		return nil
 	}
 
-	w := postApply(t, srv, `{"confirm_action":"install"}`)
+	w := postApply(t, h, `{"confirm_action":"install"}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202 while the apply is still running", w.Code)
 	}
@@ -145,23 +141,22 @@ func TestUpdateApply_RespondsBeforeWorkCompletes(t *testing.T) {
 //
 // The live assertion can only check the context the apply actually receives —
 // under httptest the request context is never cancelled, so it cannot prove
-// where the context came from. The source guard below covers that half, in the
-// style of internal/selfupdate/checker_restart_guard_test.go.
+// where the context came from. The source guard below covers that half.
 func TestUpdateApply_BackgroundContextSurvivesRequest(t *testing.T) {
-	srv, _ := applyTestServer(t, installFixture())
+	h, _ := applyTestHandlers(t, installFixture())
 	type probe struct {
 		err         error
 		hasDeadline bool
 	}
 	got := make(chan probe, 1)
-	srv.updateApplyFn = func(ctx context.Context, _ bool) error {
+	h.applyFn = func(ctx context.Context, _ bool) error {
 		p := probe{err: ctx.Err()}
 		_, p.hasDeadline = ctx.Deadline()
 		got <- p
 		return nil
 	}
 
-	if w := postApply(t, srv, `{"confirm_action":"install"}`); w.Code != http.StatusAccepted {
+	if w := postApply(t, h, `{"confirm_action":"install"}`); w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", w.Code)
 	}
 	select {
@@ -180,22 +175,14 @@ func TestUpdateApply_BackgroundContextSurvivesRequest(t *testing.T) {
 // Source guard for the half the runtime test cannot see: the detached goroutine
 // must build its own context from Background(), never from the request.
 func TestUpdateApply_DetachedContextSourceGuard(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller(0) failed")
-	}
-	b, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "dashboard_update.go"))
-	if err != nil {
-		t.Fatalf("read dashboard_update.go: %v", err)
-	}
-	src := string(b)
-	at := strings.Index(src, "func (s *Server) handleUpdateApply")
+	src := readUpdateSource(t, false)
+	at := strings.Index(src, "func (h *Handlers) HandleUpdateApply")
 	if at < 0 {
-		t.Fatal("handleUpdateApply not found")
+		t.Fatal("HandleUpdateApply not found")
 	}
 	goAt := strings.Index(src[at:], "go func()")
 	if goAt < 0 {
-		t.Fatal("handleUpdateApply must do its work in a detached goroutine (the process is killed mid-restart, so a synchronous response never ships)")
+		t.Fatal("HandleUpdateApply must do its work in a detached goroutine (the process is killed mid-restart, so a synchronous response never ships)")
 	}
 	// Strip comment lines: the code deliberately EXPLAINS why r.Context() is
 	// wrong, and a naive scan would read that explanation as the violation.
@@ -236,12 +223,12 @@ func (f *flushRecorder) Flush() { f.once.Do(func() { close(f.flushed) }) }
 // applyUpdate() reports as "升级请求失败" on an apply that is in fact working.
 // So the 202 must be written AND flushed before the work is started.
 func TestUpdateApply_FlushesAcceptedBeforeStartingWork(t *testing.T) {
-	srv, _ := applyTestServer(t, installFixture())
+	h, _ := applyTestHandlers(t, installFixture())
 	fr := &flushRecorder{ResponseRecorder: httptest.NewRecorder(), flushed: make(chan struct{})}
 	// Reported through a channel rather than a plain variable: the apply runs on
 	// another goroutine and -race would (rightly) flag a shared bool.
 	sawFlush := make(chan bool, 1)
-	srv.updateApplyFn = func(context.Context, bool) error {
+	h.applyFn = func(context.Context, bool) error {
 		select {
 		case <-fr.flushed:
 			sawFlush <- true
@@ -254,7 +241,7 @@ func TestUpdateApply_FlushesAcceptedBeforeStartingWork(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/api/system/update/apply",
 		strings.NewReader(`{"confirm_action":"install"}`))
 	r.Header.Set("Content-Type", "application/json")
-	srv.handleUpdateApply(fr, r)
+	h.HandleUpdateApply(fr, r)
 
 	if fr.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202; body=%q", fr.Code, fr.Body.String())
@@ -277,42 +264,18 @@ func TestUpdateApply_FlushesAcceptedBeforeStartingWork(t *testing.T) {
 // TestUpdateApply_FlushOrderSourceGuard covers what the live test cannot: under
 // httptest the flush always wins by a wide margin, so a future edit that moved
 // the write back below `go func()` would keep passing there. The ordering is the
-// invariant, so the ordering is what gets pinned. Same technique as
-// TestUpdateApply_DetachedContextSourceGuard above.
+// invariant, so the ordering is what gets pinned.
 func TestUpdateApply_FlushOrderSourceGuard(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller(0) failed")
-	}
-	b, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "dashboard_update.go"))
-	if err != nil {
-		t.Fatalf("read dashboard_update.go: %v", err)
-	}
-	src := string(b)
-	at := strings.Index(src, "func (s *Server) handleUpdateApply")
-	if at < 0 {
-		t.Fatal("handleUpdateApply not found")
-	}
-	body := src[at:]
-	// Comments in this handler discuss both the goroutine and the flush; scanning
-	// them would match the explanation instead of the code.
-	var code []string
-	for _, line := range strings.Split(body, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "//") {
-			continue
-		}
-		code = append(code, line)
-	}
-	body = strings.Join(code, "\n")
+	body := funcBody(t, readUpdateSource(t, true), "HandleUpdateApply")
 
-	writeAt := strings.Index(body, "writeJSONStatus(w, http.StatusAccepted")
+	writeAt := strings.Index(body, "httputil.WriteJSONStatus(w, http.StatusAccepted")
 	flushAt := strings.Index(body, "f.Flush()")
 	goAt := strings.Index(body, "go func()")
 	if writeAt < 0 || goAt < 0 {
-		t.Fatal("expected handleUpdateApply to write a 202 and detach the work")
+		t.Fatal("expected HandleUpdateApply to write a 202 and detach the work")
 	}
 	if flushAt < 0 {
-		t.Fatal("handleUpdateApply must Flush the 202: writing it is not shipping it, and the restart can kill this process before the handler returns")
+		t.Fatal("HandleUpdateApply must Flush the 202: writing it is not shipping it, and the restart can kill this process before the handler returns")
 	}
 	if writeAt > goAt || flushAt > goAt {
 		t.Error("the 202 must be written AND flushed BEFORE the apply goroutine starts — otherwise a restart-only apply can SIGTERM this process while the response is still buffered")
@@ -324,9 +287,9 @@ func TestUpdateApply_FlushOrderSourceGuard(t *testing.T) {
 // situation in between, the click must be refused rather than silently mean
 // something else — in the worst case, a second install over a staged binary.
 func TestUpdateApply_ConfirmActionMismatch(t *testing.T) {
-	srv, applied := applyTestServer(t, installFixture())
+	h, applied := applyTestHandlers(t, installFixture())
 
-	w := postApply(t, srv, `{"confirm_action":"restart"}`)
+	w := postApply(t, h, `{"confirm_action":"restart"}`)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 on a stale confirm_action; body=%q", w.Code, w.Body.String())
 	}
@@ -336,9 +299,9 @@ func TestUpdateApply_ConfirmActionMismatch(t *testing.T) {
 }
 
 func TestUpdateApply_NothingToDo(t *testing.T) {
-	srv, applied := applyTestServer(t, selfupdate.StatusFixture{Current: "v1.0.0"})
+	h, applied := applyTestHandlers(t, selfupdate.StatusFixture{Current: "v1.0.0"})
 
-	w := postApply(t, srv, `{"confirm_action":"install"}`)
+	w := postApply(t, h, `{"confirm_action":"install"}`)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 when there is nothing to apply", w.Code)
 	}
@@ -351,12 +314,12 @@ func TestUpdateApply_NothingToDo(t *testing.T) {
 // with no managed service is the real-world case: the binary is staged but only
 // a human can restart the process.
 func TestUpdateApply_BlockedPreflightStartsNothing(t *testing.T) {
-	srv, applied := applyTestServer(t, selfupdate.StatusFixture{
+	h, applied := applyTestHandlers(t, selfupdate.StatusFixture{
 		Current: "v1.0.0", Latest: "v1.1.0", Staged: "v1.1.0",
 		Phase: selfupdate.PhaseStaged,
 	})
 
-	w := postApply(t, srv, `{"confirm_action":"restart"}`)
+	w := postApply(t, h, `{"confirm_action":"restart"}`)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 when preflight blocks; body=%q", w.Code, w.Body.String())
 	}
@@ -370,26 +333,23 @@ func TestUpdateApply_BlockedPreflightStartsNothing(t *testing.T) {
 func TestUpdateApply_DisabledByConfig(t *testing.T) {
 	selfupdate.InvalidatePreflightCache()
 	t.Cleanup(selfupdate.InvalidatePreflightCache)
-	disabled := false
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 2, Workspace: t.TempDir()})
-	srv := NewWithOptions(ServerOptions{
-		Addr:                   ":0",
-		Router:                 router,
-		Backend:                "claude",
-		Version:                "v1.0.0",
-		UpdateStatus:           selfupdate.NewStatusFixture(installFixture()),
-		UpdateDashboardInstall: &disabled,
+	h := New(Deps{
+		Router:         router,
+		BuildVersion:   "v1.0.0",
+		UpdateStatus:   selfupdate.NewStatusFixture(installFixture()),
+		InstallEnabled: false,
 	})
-	srv.updateApplyFn = func(context.Context, bool) error {
+	h.applyFn = func(context.Context, bool) error {
 		t.Error("apply must not run when update.dashboard_install is false")
 		return nil
 	}
 
-	if w := postApply(t, srv, `{"confirm_action":"install"}`); w.Code != http.StatusForbidden {
+	if w := postApply(t, h, `{"confirm_action":"install"}`); w.Code != http.StatusForbidden {
 		t.Errorf("apply status = %d, want 403", w.Code)
 	}
 	// GET is unaffected: an operator who cannot click still needs to know.
-	code, body := getUpdateStatus(t, srv)
+	code, body := getUpdateStatus(t, h)
 	if code != http.StatusOK {
 		t.Fatalf("status endpoint = %d, want 200 with installs disabled", code)
 	}
@@ -407,18 +367,17 @@ func TestUpdateApply_NoCheckerConflicts(t *testing.T) {
 	selfupdate.InvalidatePreflightCache()
 	t.Cleanup(selfupdate.InvalidatePreflightCache)
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 2, Workspace: t.TempDir()})
-	srv := NewWithOptions(ServerOptions{
-		Addr:         ":0",
+	h := New(Deps{
 		Router:       router,
-		Backend:      "claude",
-		Version:      "v1.0.0",
+		BuildVersion: "v1.0.0",
 		UpdateStatus: selfupdate.NewStatusFixture(installFixture()),
 		// UpdateChecker nil.
+		InstallEnabled: true,
 	})
-	if w := postApply(t, srv, `{"confirm_action":"install"}`); w.Code != http.StatusConflict {
+	if w := postApply(t, h, `{"confirm_action":"install"}`); w.Code != http.StatusConflict {
 		t.Errorf("status = %d, want 409 with no checker wired", w.Code)
 	}
-	_, body := getUpdateStatus(t, srv)
+	_, body := getUpdateStatus(t, h)
 	if got := body["install_enabled"]; got != false {
 		t.Errorf("install_enabled = %v, want false when no checker can perform the install", got)
 	}
@@ -428,12 +387,12 @@ func TestUpdateApply_NoCheckerConflicts(t *testing.T) {
 // on the install branch, GitHub requests). Rejected attempts consume the window
 // too — the aim is to bound attempts, not successes.
 func TestUpdateApply_RateLimited(t *testing.T) {
-	srv, _ := applyTestServer(t, selfupdate.StatusFixture{Current: "v1.0.0"})
+	h, _ := applyTestHandlers(t, selfupdate.StatusFixture{Current: "v1.0.0"})
 
-	if w := postApply(t, srv, `{"confirm_action":"install"}`); w.Code != http.StatusConflict {
+	if w := postApply(t, h, `{"confirm_action":"install"}`); w.Code != http.StatusConflict {
 		t.Fatalf("first attempt status = %d, want 409 (nothing to do)", w.Code)
 	}
-	if w := postApply(t, srv, `{"confirm_action":"install"}`); w.Code != http.StatusTooManyRequests {
+	if w := postApply(t, h, `{"confirm_action":"install"}`); w.Code != http.StatusTooManyRequests {
 		t.Errorf("second attempt status = %d, want 429", w.Code)
 	}
 }
@@ -449,8 +408,8 @@ func TestUpdateApply_InvalidBody(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, applied := applyTestServer(t, installFixture())
-			if w := postApply(t, srv, tc.body); w.Code != http.StatusBadRequest {
+			h, applied := applyTestHandlers(t, installFixture())
+			if w := postApply(t, h, tc.body); w.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want 400; body=%q", w.Code, w.Body.String())
 			}
 			if calls, _ := applied(); calls != 0 {
@@ -460,50 +419,15 @@ func TestUpdateApply_InvalidBody(t *testing.T) {
 	}
 }
 
-// The route must be registered as POST-only under the authenticated /api tree:
-// GET on it would otherwise fall through to a 405-or-worse and, more to the
-// point, an apply must never be reachable by a link or a prefetch.
-func TestUpdateApply_RouteIsPostOnly(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-
-	r := httptest.NewRequest(http.MethodGet, "/api/system/update/apply", nil)
-	w := httptest.NewRecorder()
-	srv.mux.ServeHTTP(w, r)
-	if w.Code == http.StatusOK || w.Code == http.StatusAccepted {
-		t.Errorf("GET on the apply route returned %d; it must be POST-only", w.Code)
-	}
-}
-
-// Unauthenticated callers get 401 on both endpoints — the apply is behind the
-// same dashboard token as everything else under /api.
-func TestUpdateEndpoints_RequireAuth(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret-token")
-
-	for _, tc := range []struct {
-		method, path string
-	}{
-		{http.MethodGet, "/api/system/update"},
-		{http.MethodPost, "/api/system/update/apply"},
-	} {
-		r := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{"confirm_action":"install"}`))
-		r.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-		srv.mux.ServeHTTP(w, r)
-		if w.Code != http.StatusUnauthorized {
-			t.Errorf("%s %s = %d, want 401 without a token", tc.method, tc.path, w.Code)
-		}
-	}
-}
-
 // TestUpdateStatusRollbackHint: the recovery command must be in the payload
 // BEFORE anything is applied. If the new build does not boot, the dashboard that
 // would have carried this advice is exactly what is gone.
 func TestUpdateStatusRollbackHint(t *testing.T) {
 	selfupdate.InvalidatePreflightCache()
 	t.Cleanup(selfupdate.InvalidatePreflightCache)
-	srv := newUpdateTestServer(t, selfupdate.NewStatusFixture(installFixture()), "v1.0.0")
+	h := newUpdateHandlers(t, selfupdate.NewStatusFixture(installFixture()), "v1.0.0")
 
-	_, body := getUpdateStatus(t, srv)
+	_, body := getUpdateStatus(t, h)
 	hint, _ := body["rollback_hint"].(string)
 	if hint == "" {
 		t.Fatal("rollback_hint empty while an update is actionable")
@@ -513,8 +437,8 @@ func TestUpdateStatusRollbackHint(t *testing.T) {
 	}
 
 	// Nothing to apply ⇒ no hint to give.
-	srv2 := newUpdateTestServer(t, selfupdate.NewStatusFixture(selfupdate.StatusFixture{Current: "v1.0.0"}), "v1.0.0")
-	_, body2 := getUpdateStatus(t, srv2)
+	h2 := newUpdateHandlers(t, selfupdate.NewStatusFixture(selfupdate.StatusFixture{Current: "v1.0.0"}), "v1.0.0")
+	_, body2 := getUpdateStatus(t, h2)
 	if _, present := body2["rollback_hint"]; present {
 		t.Errorf("rollback_hint present with nothing to apply: %v", body2["rollback_hint"])
 	}
@@ -526,16 +450,16 @@ func TestUpdateStatusRollbackHint(t *testing.T) {
 // restart naozhi` would hit the wrong service). The managed-restart variant
 // lives in selfupdate.TestManualCommand where the probe can be stubbed.
 func TestUpdateStatusManualCommand(t *testing.T) {
-	srv, _ := applyTestServer(t, installFixture())
-	_, body := getUpdateStatus(t, srv)
+	h, _ := applyTestHandlers(t, installFixture())
+	_, body := getUpdateStatus(t, h)
 	if got := body["manual_command"]; got != "naozhi upgrade" {
 		t.Errorf("manual_command = %v for action=install, want naozhi upgrade", got)
 	}
 
-	srv2, _ := applyTestServer(t, selfupdate.StatusFixture{
+	h2, _ := applyTestHandlers(t, selfupdate.StatusFixture{
 		Current: "v1.0.0", Latest: "v1.1.0", Staged: "v1.1.0", Phase: selfupdate.PhaseStaged,
 	})
-	_, body2 := getUpdateStatus(t, srv2)
+	_, body2 := getUpdateStatus(t, h2)
 	if got, present := body2["manual_command"]; !present {
 		t.Error("manual_command must always be present (empty when there is nothing to paste)")
 	} else if body2["restart_supported"] == false && got != "" {
@@ -546,13 +470,13 @@ func TestUpdateStatusManualCommand(t *testing.T) {
 // A panic inside the detached apply must neither crash the process nor leave
 // the status parked on a busy phase with nothing to show.
 func TestUpdateApply_PanicIsRecovered(t *testing.T) {
-	srv, _ := applyTestServer(t, installFixture())
+	h, _ := applyTestHandlers(t, installFixture())
 	entered := make(chan struct{})
-	srv.updateApplyFn = func(context.Context, bool) error {
+	h.applyFn = func(context.Context, bool) error {
 		defer close(entered)
 		panic("boom")
 	}
-	w := postApply(t, srv, `{"confirm_action":"install"}`)
+	w := postApply(t, h, `{"confirm_action":"install"}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202; body=%q", w.Code, w.Body.String())
 	}
@@ -568,7 +492,7 @@ func TestUpdateApply_PanicIsRecovered(t *testing.T) {
 	// unwinding, so in practice it completes on the first or second poll.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		snap := srv.updateStatus.Snapshot()
+		snap := h.updateStatus.Snapshot()
 		if snap.Phase == selfupdate.PhaseFailed {
 			if snap.LastErr == "" {
 				t.Error("last_error must carry the panic so the operator sees why")
