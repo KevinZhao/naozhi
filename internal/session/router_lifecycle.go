@@ -903,7 +903,7 @@ func (r *Router) installFreshSessionLocked(
 		runStore:         r.sessionRuns,
 		onSessionID: func(id string) {
 			r.mu.Lock()
-			r.trackSessionID(id)
+			r.kid.Track(id)
 			if id != "" {
 				r.ss.idToKey[id] = key
 			}
@@ -971,7 +971,7 @@ func (r *Router) installFreshSessionLocked(
 		}
 	}
 	if effectiveSID != "" {
-		r.trackSessionID(effectiveSID)
+		r.kid.Track(effectiveSID)
 		r.ss.idToKey[effectiveSID] = key
 	}
 	s.touchLastActive()
@@ -1352,7 +1352,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		runStore:         r.sessionRuns,
 		onSessionID: func(id string) {
 			r.mu.Lock()
-			r.trackSessionID(id)
+			r.kid.Track(id)
 			if id != "" {
 				r.ss.idToKey[id] = newKey
 			}

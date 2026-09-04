@@ -22,6 +22,7 @@ import (
 	// internal/wireup, not here, so this package stays backend-agnostic; the
 	// generic naozhilog tier is constructed via eventlog_bridge.go (#403, #567).
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/session/knownids"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 	"github.com/naozhi/naozhi/internal/session/workspacestore"
 	"github.com/naozhi/naozhi/internal/sessionconst"
@@ -133,7 +134,7 @@ const (
 // Router manages session key -> ManagedSession mapping.
 //
 // Lock ordering: s.sendMu -> r.mu. The onSessionID callback acquires r.mu
-// while sendMu is held (Send → onSessionID → trackSessionID). Code that
+// while sendMu is held (Send → onSessionID → kid.Track + idToKey). Code that
 // holds r.mu (write) must NEVER acquire sendMu — release r.mu first.
 // s.historyMu protects persistedHistory independently; never held with sendMu or r.mu.
 // Read-only operations (ListSessions, SessionFor, Stats, Version) use RLock.
@@ -225,13 +226,13 @@ type Router struct {
 	// 读写: core (init/spawn-config injection), lifecycle (spawn-config injection), discovery (takeover/register injection), cleanup (Invalidate/Close), runhistory (List/Stats read)
 	sessionRuns *runhistory.Store
 
-	// kid is the known-session-IDs facet (#600): IDs set, insertion-order
-	// slice, dirty flag, gen and the gen-memoised sorted cache (knownIDsStore,
-	// store.go). No lock of its own — read/written only under r.mu. gen /
-	// sortedGen are PLAIN uint64: they have no lock-free reader. The annotation
-	// below is the UNION of all domains; the lint recurses into knownIDsStore.
-	// 读写: core (init/load), discovery (trackSessionID), cleanup (Cleanup/saveIfDirty/Shutdown save), store (snapshotKnownIDsSortedLocked)
-	kid knownIDsStore
+	// kid is the known-session-IDs facet: IDs set, FIFO order, dirty flag,
+	// gen and the gen-memoised save snapshot, in internal/session/knownids.
+	// Owns its own mutex and is never guarded by r.mu; Track runs with r.mu
+	// held at the publish sites, fixing the lock order r.mu → kid.mu (the
+	// store never calls back into Router). Zero value is usable.
+	// 读写: core (init/load/restore), lifecycle (spawn/reset publish), shim (reconnect), discovery (RegisterForResume), cleanup (Cleanup/saveIfDirty/Shutdown save)
+	kid knownids.Store
 
 	// 读写: core (init), lifecycle (spawn config), shim (reconnect spawn config)
 	noOutputTimeout time.Duration
@@ -684,14 +685,13 @@ func NewRouter(cfg RouterConfig) *Router {
 		historyLoader:    cfg.HistoryLoader,
 		resolver:         cfg.Resolver,
 	}
-	// Value facets (ss / kid / pp / bkStore) have no lock of their own and are
-	// not composite-literal initialised, so their maps are allocated here.
-	// wsStore is zero-value usable (maps allocated lazily on first write).
+	// Value facets (ss / pp / bkStore) have no lock of their own and are not
+	// composite-literal initialised, so their maps are allocated here.
+	// wsStore and kid are zero-value usable (maps allocated lazily).
 	r.ss.sessions = make(map[string]*ManagedSession)
 	r.ss.byChat = make(map[string]map[string]struct{})
 	r.ss.keyhash = make(map[string]string)
 	r.ss.idToKey = make(map[string]string)
-	r.kid.ids = make(map[string]bool)
 	r.pp.spawningKeys = make(map[string]chan struct{})
 	r.pp.shimStuckOnReset = make(map[string]bool)
 	r.bkStore.wrapper = defaultWrapper
@@ -753,16 +753,8 @@ func NewRouter(cfg RouterConfig) *Router {
 	// reconnect-time JSONL parses abort promptly on slow filesystems.
 	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
 
-	// Load every session ID ever used. Insertion order is lost on reload (persisted
-	// as an unordered list); seed the order slice from the map so FIFO eviction
-	// resumes after the first (arbitrary-order) post-restart overflow.
-	if loaded := loadKnownIDs(r.storePath); loaded != nil {
-		r.kid.ids = loaded
-		r.kid.order = make([]string, 0, len(loaded))
-		for id := range loaded {
-			r.kid.order = append(r.kid.order, id)
-		}
-	}
+	// Load every session ID ever used; Seed(nil) is a no-op.
+	r.kid.Seed(loadKnownIDs(r.storePath))
 
 	// Load persisted workspace overrides (/cd settings)
 	r.wsStore.Seed(loadWorkspaceOverrides(r.storePath))
@@ -898,7 +890,7 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 	// publishSessionLocked funnels attachHistorySource + map insert + index
 	// update so the triple-index invariant is a property of the publish step.
 	r.publishSessionLocked(key, s, false)
-	r.trackSessionID(entry.SessionID)
+	r.kid.Track(entry.SessionID)
 	if entry.SessionID != "" {
 		r.ss.idToKey[entry.SessionID] = key
 	}

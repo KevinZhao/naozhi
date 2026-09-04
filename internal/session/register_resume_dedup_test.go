@@ -22,7 +22,6 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 	t.Parallel()
 
 	r := minimalRouter(t)
-	r.kid.ids = map[string]bool{} // trackSessionID writes here on the fresh path
 
 	const (
 		reusedKey = "dashboard:pj:wshashabc:general" // deterministic ProjectStableKey
@@ -85,7 +84,6 @@ func TestRegisterForResume_LegitimateChainDedupStillWorks(t *testing.T) {
 	t.Parallel()
 
 	r := minimalRouter(t)
-	r.kid.ids = map[string]bool{}
 
 	const (
 		liveKey = "dashboard:pj:wshashxyz:general"

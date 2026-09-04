@@ -528,9 +528,9 @@ func loadKnownIDs(storePath string) map[string]bool {
 }
 
 // saveKnownIDs persists the set of all session IDs ever used by naozhi.
-// PRECONDITION: sortedIDs is ALREADY sorted ascending (see
-// Router.snapshotKnownIDsSortedLocked, memoised by gen, #1638). Deterministic
-// on-disk order keeps backup/audit diffs noise-free; this does NOT re-sort.
+// PRECONDITION: sortedIDs is ALREADY sorted ascending
+// (knownids.Store.SortedSnapshot). Deterministic on-disk order keeps
+// backup/audit diffs noise-free; this does NOT re-sort.
 func saveKnownIDs(storePath string, sortedIDs []string) error {
 	data, err := json.Marshal(sortedIDs)
 	if err != nil {
@@ -539,9 +539,9 @@ func saveKnownIDs(storePath string, sortedIDs []string) error {
 	return saveKnownIDsBytes(storePath, data)
 }
 
-// saveKnownIDsBytes persists already-marshaled known-ID JSON. The periodic save
-// path hands it the gen-memoised bytes from snapshotKnownIDsMarshaledLocked
-// (#2143); saveKnownIDs is the thin marshal+delegate wrapper for []string callers.
+// saveKnownIDsBytes persists already-marshaled known-ID JSON. The save paths
+// hand it the gen-memoised bytes from knownids.Store.ClaimSave /
+// MarshalSnapshot; saveKnownIDs is the marshal+delegate wrapper for []string callers.
 func saveKnownIDsBytes(storePath string, data []byte) error {
 	path := knownIDsPath(storePath)
 	if path == "" {
@@ -600,97 +600,6 @@ type sessionStore struct {
 	// lock-free on the dashboard poll path.
 	// 读写: core (Version lock-free), lifecycle (BumpVersion), cleanup (BumpVersion), discovery (BumpVersion), capacity (evictOldest BumpVersion), shim (reconnect BumpVersion)
 	gen atomic.Uint64
-}
-
-// knownIDsStore groups the correlated known-session-ID fields (#600). Value
-// field on Router, NO lock of its own, read/written ONLY under Router.mu.
-// The gen-invalidation chain lives inside this struct under one lock:
-// trackSessionID bumps gen (the SOLE mutator) and the snapshot helpers rebuild
-// only when their cached gen != gen, so the invalidation cannot tear.
-// gen and sortedGen are PLAIN uint64, NOT atomic — there is no lock-free reader.
-type knownIDsStore struct {
-	// ids tracks ALL session IDs ever used, including removed/reset/evicted
-	// ones, so discovery can match CLI processes to naozhi keys.
-	// 读写: core (init), discovery (trackSessionID/Discovery*), cleanup (saveIfDirty)
-	ids map[string]bool
-	// order preserves insertion order so overflow eviction is FIFO: random
-	// map-order eviction could drop a still-active ID and make discovery
-	// misclassify its CLI process as external. Live window is order[orderHead:]
-	// (amortized O(1) eviction); the dead prefix is compacted when large.
-	// 读写: core (init), discovery (trackSessionID)
-	order []string
-	// orderHead is the index of the oldest live entry in order; entries before
-	// it are evicted and cleared. order[orderHead:] mirrors the keys of ids.
-	// 读写: core (init reset), discovery (trackSessionID)
-	orderHead int
-	// 读写: discovery, cleanup
-	dirty bool
-	// 读写: discovery, cleanup
-	gen uint64 // incremented on each ids mutation (add/evict)
-	// sortedCache memoises the sorted input for saveKnownIDs by gen so the sort
-	// is paid once per mutation generation, not per save tick (#1638).
-	// 读写: cleanup (Cleanup/saveIfDirty snapshot), discovery (invalidated via gen)
-	sortedCache []string
-	// 读写: store.go (snapshotKnownIDsSortedLocked rebuild/compare; invoked from cleanup saveIfDirty)
-	sortedGen uint64 // gen the cache slice was sorted at; 0 = unbuilt
-	// marshaledCache memoises the JSON of sortedCache by gen so an unchanged set
-	// is not re-marshaled every throttled tick (#2143). nil = unbuilt.
-	// 读写: store.go (snapshotKnownIDsMarshaledLocked rebuild; invoked from cleanup saveIfDirty/Shutdown)
-	marshaledCache []byte
-	// 读写: store.go (snapshotKnownIDsMarshaledLocked rebuild/compare)
-	marshaledGen uint64 // gen the marshaled cache was built at; 0 = unbuilt
-	// 读写: cleanup (Cleanup/saveIfDirty)
-	savedAt time.Time // last successful saveKnownIDs; throttles fsync to 5min
-}
-
-// snapshotKnownIDsSortedLocked returns a sorted copy of the known-session-ID
-// set for saveKnownIDs. Caller MUST hold r.mu. The sort is memoised by gen
-// (#1638), so an unchanged tick is an O(N) copy with no sort. A fresh copy is
-// always returned so it can be serialized outside the lock without aliasing
-// the cache, whose backing array a later rebuild would replace.
-func (r *Router) snapshotKnownIDsSortedLocked() []string {
-	if r.kid.sortedCache == nil || r.kid.sortedGen != r.kid.gen {
-		sorted := make([]string, 0, len(r.kid.ids))
-		for id := range r.kid.ids {
-			sorted = append(sorted, id)
-		}
-		// Deterministic on-disk order — see saveKnownIDs.
-		slices.Sort(sorted)
-		r.kid.sortedCache = sorted
-		r.kid.sortedGen = r.kid.gen
-	}
-	// Return a copy: callers serialize outside r.mu, and a later rebuild
-	// would otherwise replace the cache slice's backing array under them.
-	return slices.Clone(r.kid.sortedCache)
-}
-
-// snapshotKnownIDsMarshaledLocked returns the JSON of the known-session-ID set
-// for saveKnownIDsBytes. Caller MUST hold r.mu. The marshal is memoised by gen
-// like sortedCache (#2143); one gen bump invalidates both. Returns a copy so
-// callers can write outside r.mu without aliasing the cache, whose backing
-// array a concurrent trackSessionID-triggered rebuild would replace.
-func (r *Router) snapshotKnownIDsMarshaledLocked() ([]byte, error) {
-	if r.kid.marshaledCache == nil || r.kid.marshaledGen != r.kid.gen {
-		// Refresh the sorted cache first (same gen gate) and marshal it directly
-		// rather than a clone, avoiding an extra copy on the rebuild path.
-		if r.kid.sortedCache == nil || r.kid.sortedGen != r.kid.gen {
-			sorted := make([]string, 0, len(r.kid.ids))
-			for id := range r.kid.ids {
-				sorted = append(sorted, id)
-			}
-			// Deterministic on-disk order — see saveKnownIDsBytes.
-			slices.Sort(sorted)
-			r.kid.sortedCache = sorted
-			r.kid.sortedGen = r.kid.gen
-		}
-		data, err := json.Marshal(r.kid.sortedCache)
-		if err != nil {
-			return nil, fmt.Errorf("marshal known IDs: %w", err)
-		}
-		r.kid.marshaledCache = data
-		r.kid.marshaledGen = r.kid.gen
-	}
-	return slices.Clone(r.kid.marshaledCache), nil
 }
 
 // workspaceOverridesPath derives the overrides path (sessions.json → workspace-overrides.json).
