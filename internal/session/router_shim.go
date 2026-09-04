@@ -298,7 +298,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		if ok {
 			sessPrevIDs = slices.Clone(sess.prevSessionIDs)
 		}
-		_, spawning := r.pp.spawningKeys[state.Key]
+		_, spawning := r.pp.SpawnInFlight(state.Key)
 		r.mu.Unlock()
 
 		// Resolve the wrapper recorded at shim startup so reconnect uses the
@@ -332,7 +332,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				if sess.isAlive() {
 					hasLiveProcess = true
 				}
-			} else if _, racingSpawn := r.pp.spawningKeys[state.Key]; racingSpawn {
+			} else if _, racingSpawn := r.pp.SpawnInFlight(state.Key); racingSpawn {
 				// spawnSession started inside the adopt window but hasn't
 				// published yet: promote spawning so classifyShimState routes
 				// to skip rather than adopting a competing copy.

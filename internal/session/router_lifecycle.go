@@ -272,7 +272,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			// not-found path: a second concurrent spawnSession would reuse the
 			// in-flight channel and its defer would close an already-closed
 			// channel → panic (#2221). The winner owns the close.
-			if ch, inflight := r.pp.spawningKeys[key]; inflight {
+			if ch, inflight := r.pp.SpawnInFlight(key); inflight {
 				r.mu.Unlock()
 				select {
 				case <-ctx.Done():
@@ -289,7 +289,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			}
 			return s, SessionResumed, nil
 		}
-		ch, inflight := r.pp.spawningKeys[key]
+		ch, inflight := r.pp.SpawnInFlight(key)
 		if !inflight {
 			break
 		}
@@ -306,13 +306,10 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 
 	// Debug, not Info: spawnSession logs "session spawned" at Info moments later.
 	slog.Debug("creating new session", "key", key)
-	// Consume the per-key shimStuckOnReset flag (set by a Reset whose
+	// Consume the per-key shim-stuck flag (set by a Reset whose
 	// socket-gone wait timed out, #1324) under r.mu BEFORE spawnSession,
 	// which unlocks/relocks internally; apply the wrap on the error path.
-	stuck := r.pp.shimStuckOnReset[key]
-	if stuck {
-		delete(r.pp.shimStuckOnReset, key)
-	}
+	stuck := r.pp.ConsumeShimStuck(key)
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
 		if stuck {
@@ -650,15 +647,6 @@ func countUserTurns(entries []clievent.EventEntry) int64 {
 	return n
 }
 
-// markSpawnDoneLocked closes the per-spawn done channel and removes the
-// spawningKeys map entry for key. Caller MUST hold r.mu. Both ops are
-// commutative under r.mu (waiters observe the close via the channel reference
-// they already hold, not via map lookup); close-before-delete is convention.
-func (r *Router) markSpawnDoneLocked(key string, ch chan struct{}) {
-	close(ch)
-	delete(r.pp.spawningKeys, key)
-}
-
 // spawnSession creates a new process, optionally resuming an existing session.
 // LOCK: enter with r.mu held. This function releases and re-acquires r.mu
 // internally (around Spawn() and history collection) to avoid blocking other
@@ -675,24 +663,15 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		return nil, ErrRouterStopped
 	}
 
-	// Mark this key as spawning so ReconnectShims does not mistake the fresh
-	// shim's state file for an orphan. Every return path below leaves r.mu
-	// unlocked, so the defer reacquires it. The value is a per-spawn
-	// done-channel: close(ch) wakes every GetOrCreate parked on the key.
-	if r.pp.spawningKeys == nil {
-		r.pp.spawningKeys = make(map[string]chan struct{})
-	}
-	// Reuse a guard channel pre-installed by the caller (ResetAndRecreate)
-	// so the in-flight marker is continuous from the caller's unlock through
-	// this defer and no concurrent GetOrCreate can spawn with other opts (#775).
-	doneCh, reused := r.pp.spawningKeys[key]
-	if !reused {
-		doneCh = make(chan struct{})
-		r.pp.spawningKeys[key] = doneCh
-	}
+	// Mark this key as spawning so ReconnectShims does not treat the fresh
+	// shim's state file as an orphan. Every return path below leaves r.mu
+	// unlocked; the defer relocks and close(doneCh) wakes parked GetOrCreates.
+	// BeginSpawn reuses a guard pre-installed by ResetAndRecreate so the marker
+	// stays continuous and no concurrent GetOrCreate spawns with other opts (#775).
+	doneCh := r.pp.BeginSpawn(key)
 	defer func() {
 		r.mu.Lock()
-		r.markSpawnDoneLocked(key, doneCh)
+		r.pp.EndSpawn(key, doneCh)
 		r.mu.Unlock()
 	}()
 
@@ -702,7 +681,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// drift from undetected process exits before refusing. All three
 		// checks run under r.mu; int64 locals avoid 32-bit wrap.
 		maxProcs64 := int64(r.maxProcs)
-		pending64 := int64(r.pp.pendingSpawns)
+		pending64 := int64(r.pp.PendingSpawns())
 		if r.ss.activeCount.Load()+pending64 >= maxProcs64 {
 			r.countActive()
 		}
@@ -714,7 +693,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			// evictOldest() drops r.mu around proc.Close(), so pendingSpawns
 			// may have changed; re-read it or a stale value over-spawns past
 			// maxProcs / falsely refuses (#2082).
-			pending64 = int64(r.pp.pendingSpawns)
+			pending64 = int64(r.pp.PendingSpawns())
 			if r.ss.activeCount.Load()+pending64 >= maxProcs64 {
 				r.mu.Unlock()
 				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
@@ -1101,9 +1080,9 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 		// terminal removal must clear it so an abandoned pick does not leak.
 		delete(r.bkStore.accessProfileOverrides, key)
 		delete(r.bkStore.tuningOverrides, key)
-		// shimStuckOnReset is only consumed by GetOrCreate, so terminal
+		// The shim-stuck flag is only consumed by GetOrCreate, so terminal
 		// removals must clear it or the entry lives for the process lifetime.
-		delete(r.pp.shimStuckOnReset, key)
+		r.pp.ClearShimStuck(key)
 	}
 }
 
@@ -1182,10 +1161,7 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	if !gone {
 		// Flag the key so the next GetOrCreate wraps any spawn error with
 		// ErrShimStuck (#1324); cleared by that GetOrCreate.
-		if r.pp.shimStuckOnReset == nil {
-			r.pp.shimStuckOnReset = make(map[string]bool)
-		}
-		r.pp.shimStuckOnReset[key] = true
+		r.pp.MarkShimStuck(key)
 		slog.Warn("shim socket still bound after Reset wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
 			"key", key)
 	}
@@ -1202,14 +1178,14 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 // waitSocketGoneForKey waits up to maxWait for the shim socket derived from
 // key to disappear; returns false on timeout. Socket naming lives behind
 // cli.WaitSocketGoneForKey so this package does not reach into internal/shim
-// (#711). Reset callers use the false branch to flag shimStuckOnReset (#1324).
+// (#711). Reset callers use the false branch to mark the key shim-stuck (#1324).
 func waitSocketGoneForKey(key string, maxWait time.Duration) bool {
 	return cli.WaitSocketGoneForKey(key, maxWait)
 }
 
 // ResetAndRecreate atomically resets a session and spawns a new one for the
 // same key, so no concurrent message can create a session with other opts. A
-// guard channel is installed in r.pp.spawningKeys[key] BEFORE r.mu is released
+// guard channel is installed via r.pp.BeginSpawn(key) BEFORE r.mu is released
 // for proc.Close(); spawnSession reuses it, so the in-flight marker is
 // continuous from the first unlock through spawnSession's defer (#775).
 func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
@@ -1240,12 +1216,7 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			// Install the guardCh BEFORE releasing r.mu so a concurrent
 			// GetOrCreate parks instead of spawning with different opts;
 			// spawnSession reuses it and its defer closes+removes it (#775).
-			if r.pp.spawningKeys == nil {
-				r.pp.spawningKeys = make(map[string]chan struct{})
-			}
-			if _, exists := r.pp.spawningKeys[key]; !exists {
-				r.pp.spawningKeys[key] = make(chan struct{})
-			}
+			r.pp.BeginSpawn(key)
 			r.mu.Unlock()
 			proc.Close()
 			// As in Reset: the shim socket must be gone before spawnSession's
@@ -1255,10 +1226,7 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			if !gone {
 				// Flag for the ErrShimStuck wrap on the spawn failure path
 				// below (#1324); consumed inline here, not by GetOrCreate.
-				if r.pp.shimStuckOnReset == nil {
-					r.pp.shimStuckOnReset = make(map[string]bool)
-				}
-				r.pp.shimStuckOnReset[key] = true
+				r.pp.MarkShimStuck(key)
 				slog.Warn("shim socket still bound after ResetAndRecreate wait — flagging key for ErrShimStuck wrap on spawn failure",
 					"key", key)
 			}
@@ -1270,11 +1238,8 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 	}
 
 	// Still holding r.mu (spawnSession handles unlock/relock); consume the
-	// shimStuckOnReset flag set above.
-	stuck := r.pp.shimStuckOnReset[key]
-	if stuck {
-		delete(r.pp.shimStuckOnReset, key)
-	}
+	// shim-stuck flag set above.
+	stuck := r.pp.ConsumeShimStuck(key)
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
 		// spawnSession already unlocked mu on error
@@ -1294,7 +1259,7 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 }
 
 // warnShimStuckReuse logs the shim-stuck diagnostic when ResetAndRecreate set
-// shimStuckOnReset but spawnSession returned a usable session without error
+// shim-stuck but spawnSession returned a usable session without error
 // (TOCTOU guard reused a concurrently-spawned session), so the signal is not
 // lost on the success path (#1702).
 func warnShimStuckReuse(stuck bool, key string) {

@@ -16,7 +16,7 @@ import (
 // spawningKeys coalesce guard the fresh-spawn path uses. The first caller
 // installed a per-spawn done-channel (reused=false); a concurrent caller's
 // spawnSession prologue then reused that same channel (reused=true) and both
-// defers ran markSpawnDoneLocked → close of an already-closed channel → panic
+// defers ran EndSpawn → close of an already-closed channel → panic
 // ("close of closed channel"). This is a process-killing panic, so the only
 // assertion needed is "the concurrent storm completes without panicking".
 //
@@ -67,12 +67,8 @@ func TestGetOrCreate_DeadSessionParksOnInflightGuard(t *testing.T) {
 	key := "feishu:direct:dead-parks:general"
 	injectSession(r, key, newDeadProc())
 
-	guardCh := make(chan struct{})
 	r.mu.Lock()
-	if r.pp.spawningKeys == nil {
-		r.pp.spawningKeys = make(map[string]chan struct{})
-	}
-	r.pp.spawningKeys[key] = guardCh
+	guardCh := r.pp.BeginSpawn(key)
 	r.mu.Unlock()
 
 	const N = 5
@@ -103,8 +99,7 @@ func TestGetOrCreate_DeadSessionParksOnInflightGuard(t *testing.T) {
 	// session is still present, no in-flight marker) fall through to their own
 	// resume spawnSession, which fails fast against the nonexistent binary.
 	r.mu.Lock()
-	close(guardCh)
-	delete(r.pp.spawningKeys, key)
+	r.pp.EndSpawn(key, guardCh)
 	r.mu.Unlock()
 
 	done := make(chan struct{})

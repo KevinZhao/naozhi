@@ -25,12 +25,11 @@ import (
 
 // newTakeoverTestRouter builds a Router that has every map Takeover and
 // spawnSession touch which the older newTestRouter helper leaves nil
-// (wsStore is zero-value usable and needs no init).
+// (wsStore and pp are zero-value usable and need no init).
 func newTakeoverTestRouter(maxProcs int) *Router {
 	r := newTestRouter(maxProcs)
 	r.bkStore.backendOverrides = map[string]string{}
 	r.ss.idToKey = map[string]string{}
-	r.pp.spawningKeys = map[string]chan struct{}{}
 	return r
 }
 

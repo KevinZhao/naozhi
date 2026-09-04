@@ -33,7 +33,7 @@ func TestSpawnSession_RechecksPendingAfterEvictWindow(t *testing.T) {
 		// Runs after evictOldest has released r.mu for proc.Close(). Mimic a
 		// concurrent spawnSession that acquired a pending slot in the window.
 		r.mu.Lock()
-		r.pp.pendingSpawns++
+		r.pp.AcquireSpawnSlot()
 		r.mu.Unlock()
 	})
 	old := injectSession(r, "old-key", hook)

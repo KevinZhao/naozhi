@@ -80,7 +80,7 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 		// A dashboard close is often followed by an immediate same-key
 		// re-create; wait for the shim socket so the next GetOrCreate does not
 		// hit the "refusing to clobber" guard. Deliberately do NOT set
-		// shimStuckOnReset[key]: Remove is terminal and unregisterSessionLocked
+		// shim-stuck flag: Remove is terminal and unregisterSessionLocked
 		// already cleared it; re-inserting leaks an entry per one-shot key (#2261).
 		if !waitSocketGoneForKey(key, 2*time.Second) {
 			slog.Warn("shim socket still bound after Remove wait — terminal removal, not flagging key (Remove never reuses the key)",
@@ -133,9 +133,9 @@ func (r *Router) RemoveAsync(key string) bool {
 	if !ok {
 		return false
 	}
-	r.pp.removeWg.Add(1)
+	r.pp.TrackRemove()
 	go func() {
-		defer r.pp.removeWg.Done()
+		defer r.pp.RemoveDone()
 		// HandleDelete has already returned 200, so a panic in the teardown
 		// chain has no caller to recover it. Swallow + count it.
 		defer func() {

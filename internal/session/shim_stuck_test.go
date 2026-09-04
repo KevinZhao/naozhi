@@ -62,14 +62,10 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 			sessions: make(map[string]*ManagedSession),
 			idToKey:  make(map[string]string),
 		},
-		pp: processPool{
-			spawningKeys:     make(map[string]chan struct{}),
-			shimStuckOnReset: make(map[string]bool),
-		},
 	}
 	r.bkStore.backendOverrides = make(map[string]string)
 	const key = "stuck:key:test"
-	r.pp.shimStuckOnReset[key] = true
+	r.pp.MarkShimStuck(key)
 
 	_, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
 	if err == nil {
@@ -78,7 +74,7 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 	if !errors.Is(err, ErrShimStuck) {
 		t.Errorf("first GetOrCreate err did not wrap ErrShimStuck: %v", err)
 	}
-	if _, still := r.pp.shimStuckOnReset[key]; still {
+	if r.pp.ShimStuck(key) {
 		t.Error("shimStuckOnReset[key] still set after GetOrCreate; flag must be consumed")
 	}
 
@@ -103,15 +99,11 @@ func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 			sessions: make(map[string]*ManagedSession),
 			idToKey:  make(map[string]string),
 		},
-		pp: processPool{
-			spawningKeys:     make(map[string]chan struct{}),
-			shimStuckOnReset: make(map[string]bool),
-		},
 	}
 	r.bkStore.backendOverrides = make(map[string]string)
 	const stuckKey = "key:A"
 	const cleanKey = "key:B"
-	r.pp.shimStuckOnReset[stuckKey] = true
+	r.pp.MarkShimStuck(stuckKey)
 
 	_, _, errClean := r.GetOrCreate(context.Background(), cleanKey, AgentOpts{})
 	if errClean == nil {
@@ -120,7 +112,7 @@ func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 	if errors.Is(errClean, ErrShimStuck) {
 		t.Errorf("clean key got ErrShimStuck wrap: %v", errClean)
 	}
-	if !r.pp.shimStuckOnReset[stuckKey] {
+	if !r.pp.ShimStuck(stuckKey) {
 		t.Error("stuckKey flag must remain after GetOrCreate(cleanKey)")
 	}
 }
@@ -137,21 +129,17 @@ func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
 			sessions: make(map[string]*ManagedSession),
 			idToKey:  make(map[string]string),
 		},
-		pp: processPool{
-			spawningKeys:     make(map[string]chan struct{}),
-			shimStuckOnReset: make(map[string]bool),
-		},
 	}
 	r.bkStore.backendOverrides = make(map[string]string)
 	s := &ManagedSession{key: key}
 	r.ss.sessions[key] = s
-	r.pp.shimStuckOnReset[key] = true
+	r.pp.MarkShimStuck(key)
 
 	r.mu.Lock()
 	r.unregisterSessionLocked(key, s, false)
 	r.mu.Unlock()
 
-	if _, found := r.pp.shimStuckOnReset[key]; found {
+	if r.pp.ShimStuck(key) {
 		t.Error("shimStuckOnReset[key] must be deleted on terminal removal (keepBackendOverride=false)")
 	}
 }
@@ -206,21 +194,17 @@ func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
 			sessions: make(map[string]*ManagedSession),
 			idToKey:  make(map[string]string),
 		},
-		pp: processPool{
-			spawningKeys:     make(map[string]chan struct{}),
-			shimStuckOnReset: make(map[string]bool),
-		},
 	}
 	r.bkStore.backendOverrides = make(map[string]string)
 	s := &ManagedSession{key: key}
 	r.ss.sessions[key] = s
-	r.pp.shimStuckOnReset[key] = true
+	r.pp.MarkShimStuck(key)
 
 	r.mu.Lock()
 	r.unregisterSessionLocked(key, s, true)
 	r.mu.Unlock()
 
-	if !r.pp.shimStuckOnReset[key] {
+	if !r.pp.ShimStuck(key) {
 		t.Error("shimStuckOnReset[key] must survive unregisterSessionLocked with keepBackendOverride=true")
 	}
 }
