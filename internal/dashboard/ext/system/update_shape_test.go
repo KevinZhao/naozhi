@@ -1,4 +1,4 @@
-package server
+package system
 
 import (
 	"encoding/json"
@@ -15,29 +15,28 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// newUpdateTestServer builds a minimal Server for exercising
+// newUpdateHandlers builds minimal Handlers for exercising
 // GET /api/system/update.
-func newUpdateTestServer(t *testing.T, status *selfupdate.Status, version string) *Server {
+func newUpdateHandlers(t *testing.T, status *selfupdate.Status, version string) *Handlers {
 	t.Helper()
 	router := session.NewRouter(session.RouterConfig{
 		MaxProcs:  2,
 		Workspace: t.TempDir(),
 	})
-	return NewWithOptions(ServerOptions{
-		Addr:         ":0",
+	return New(Deps{
 		Router:       router,
-		Backend:      "claude",
-		Version:      version,
+		BuildVersion: version,
 		UpdateStatus: status,
 		// UpdateChecker deliberately nil: these tests must never reach GitHub.
+		InstallEnabled: true,
 	})
 }
 
-func getUpdateStatus(t *testing.T, srv *Server) (int, map[string]any) {
+func getUpdateStatus(t *testing.T, h *Handlers) (int, map[string]any) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/system/update", nil)
 	w := httptest.NewRecorder()
-	srv.handleUpdateStatus(w, req)
+	h.HandleUpdateStatus(w, req)
 	var body map[string]any
 	if w.Body.Len() > 0 {
 		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
@@ -47,27 +46,21 @@ func getUpdateStatus(t *testing.T, srv *Server) (int, map[string]any) {
 	return w.Code, body
 }
 
-// TestUpdateHandlers_ProbeServiceOnce keeps the service probe to one call per
-// request in each handler.
-//
-// It is a source guard because the cost is only visible on darwin, where
-// ServiceRunning() forks `launchctl list` (service.go's verifiedLaunchdLabel) —
-// a behavioural test would have to stub a probe that is not stubbable there, and
-// on linux the fork does not exist to be counted. GET is polled by every open
-// dashboard (every 3s while an apply is in flight), and three call sites once
-// grew out of one fact: the preflight gate, the restart_supported field, and
-// RollbackHint. Whoever needs the verdict should take the caller's copy.
-func TestUpdateHandlers_ProbeServiceOnce(t *testing.T) {
+// readUpdateSource returns update.go with comment lines stripped, so source
+// guards match code rather than the prose that explains it.
+func readUpdateSource(t *testing.T, stripComments bool) string {
+	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
 	}
-	b, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "dashboard_update.go"))
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "update.go"))
 	if err != nil {
-		t.Fatalf("read dashboard_update.go: %v", err)
+		t.Fatalf("read update.go: %v", err)
 	}
-	// Comments in this file discuss the probe at length; counting them would
-	// report violations that do not exist.
+	if !stripComments {
+		return string(b)
+	}
 	var code []string
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "//") {
@@ -75,25 +68,43 @@ func TestUpdateHandlers_ProbeServiceOnce(t *testing.T) {
 		}
 		code = append(code, line)
 	}
-	src := strings.Join(code, "\n")
+	return strings.Join(code, "\n")
+}
 
-	for _, fn := range []string{"handleUpdateStatus", "handleUpdateApply"} {
-		at := strings.Index(src, "func (s *Server) "+fn)
-		if at < 0 {
-			t.Fatalf("%s not found", fn)
-		}
-		body := src[at:]
-		// Bound the block at the next top-level declaration.
-		if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
-			body = body[:end+1]
-		}
+// funcBody returns the source of the named method, bounded at the next
+// top-level declaration.
+func funcBody(t *testing.T, src, fn string) string {
+	t.Helper()
+	at := strings.Index(src, "func (h *Handlers) "+fn)
+	if at < 0 {
+		t.Fatalf("%s not found", fn)
+	}
+	body := src[at:]
+	if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
+		body = body[:end+1]
+	}
+	return body
+}
+
+// TestUpdateHandlers_ProbeServiceOnce keeps the service probe to one call per
+// request in each handler.
+//
+// It is a source guard because the cost is only visible on darwin, where
+// ServiceRunning() forks `launchctl list` — a behavioural test would have to
+// stub a probe that is not stubbable there, and on linux the fork does not
+// exist to be counted. GET is polled by every open dashboard (every 3s while
+// an apply is in flight); whoever needs the verdict takes the caller's copy.
+func TestUpdateHandlers_ProbeServiceOnce(t *testing.T) {
+	src := readUpdateSource(t, true)
+	for _, fn := range []string{"HandleUpdateStatus", "HandleUpdateApply"} {
+		body := funcBody(t, src, fn)
 		n := strings.Count(body, "selfupdate.ServiceManagesThisProcess()") + strings.Count(body, "selfupdate.ServiceRunning()")
 		if n > 1 {
 			t.Errorf("%s probes the service %d times; probe once and pass the result to CheckPreflight / RollbackHint / the response field", fn, n)
 		}
 		// The dashboard restarts THIS process. ServiceRunning() answers "is any
 		// naozhi unit active", which from an unmanaged instance beside the
-		// system service would restart the wrong one (F2).
+		// system service would restart the wrong one.
 		if strings.Contains(body, "selfupdate.ServiceRunning()") {
 			t.Errorf("%s must probe selfupdate.ServiceManagesThisProcess(), not ServiceRunning(): the restart has to land on this process", fn)
 		}
@@ -101,7 +112,7 @@ func TestUpdateHandlers_ProbeServiceOnce(t *testing.T) {
 }
 
 // TestUpdateStatus_ColdStartFillGuard pins the two properties of the on-demand
-// fill in handleUpdateStatus that a behavioural test cannot reach without a
+// fill in HandleUpdateStatus that a behavioural test cannot reach without a
 // GitHub stub (the release lookup seam is internal to selfupdate):
 //
 //   - the gate is `latest == ""` alone. A failed check advances checkedAt, so a
@@ -110,28 +121,12 @@ func TestUpdateHandlers_ProbeServiceOnce(t *testing.T) {
 //   - the check runs under updateColdStartFillTimeout, not CheckNow's own 60s:
 //     this is inline in a polled GET.
 func TestUpdateStatus_ColdStartFillGuard(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller(0) failed")
-	}
-	b, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "dashboard_update.go"))
-	if err != nil {
-		t.Fatalf("read dashboard_update.go: %v", err)
-	}
-	src := string(b)
-	at := strings.Index(src, "func (s *Server) handleUpdateStatus")
-	if at < 0 {
-		t.Fatal("handleUpdateStatus not found")
-	}
-	body := src[at:]
-	if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
-		body = body[:end+1]
-	}
+	body := funcBody(t, readUpdateSource(t, false), "HandleUpdateStatus")
 	if !strings.Contains(body, `latest == "" {`) {
 		t.Error(`the cold-start fill must gate on latest == "" only`)
 	}
 	if strings.Contains(body, "at.IsZero()") {
-		t.Error("the cold-start fill must not require checkedAt to be zero: a failed check stamps it, which would disable the fill after one blip (F8)")
+		t.Error("the cold-start fill must not require checkedAt to be zero: a failed check stamps it, which would disable the fill after one blip")
 	}
 	if !strings.Contains(body, "updateColdStartFillTimeout") {
 		t.Error("CheckNow from the GET handler must run under updateColdStartFillTimeout")
@@ -147,19 +142,19 @@ func TestUpdateStatus_ColdStartFillGuard(t *testing.T) {
 // way nobody notices until an upgrade is missed.
 func TestUpdateStatusShape(t *testing.T) {
 	st := selfupdate.NewStatus("v1.0.0")
-	srv := newUpdateTestServer(t, st, "v1.0.0")
+	h := newUpdateHandlers(t, st, "v1.0.0")
 
-	code, body := getUpdateStatus(t, srv)
+	code, body := getUpdateStatus(t, h)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
 
 	// Always present, even with nothing to report — the dashboard polls this
 	// and must not have to distinguish "absent" from "nothing to do".
-	// install_enabled is load bearing rather than informational: the chip offers
-	// the button only when can_apply AND install_enabled are both true, so if
-	// this field ever stopped being emitted the feature would silently degrade
-	// to "always show the manual command" with every other test still green.
+	// install_enabled is load bearing: the chip offers the button only when
+	// can_apply AND install_enabled are both true, so if this field ever
+	// stopped being emitted the feature would silently degrade to "always show
+	// the manual command" with every other test still green.
 	//
 	// manual_command is what the chip prints when it cannot apply; it is always
 	// emitted (empty when there is nothing to paste) so the browser never has to
@@ -203,15 +198,14 @@ func TestUpdateStatusEnabledTracksChecker(t *testing.T) {
 		CurrentVersion: "dev",
 		Interval:       time.Hour,
 	})
-	srv := NewWithOptions(ServerOptions{
-		Addr:          ":0",
-		Router:        router,
-		Backend:       "claude",
-		Version:       "dev",
-		UpdateStatus:  selfupdate.NewStatus("dev"),
-		UpdateChecker: checker,
+	h := New(Deps{
+		Router:         router,
+		BuildVersion:   "dev",
+		UpdateStatus:   selfupdate.NewStatus("dev"),
+		UpdateChecker:  checker,
+		InstallEnabled: true,
 	})
-	code, body := getUpdateStatus(t, srv)
+	code, body := getUpdateStatus(t, h)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
@@ -267,9 +261,9 @@ func TestUpdateStatusActionMatrix(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			st := selfupdate.NewStatusFixture(tc.fixture)
-			srv := newUpdateTestServer(t, st, tc.fixture.Current)
+			h := newUpdateHandlers(t, st, tc.fixture.Current)
 
-			code, body := getUpdateStatus(t, srv)
+			code, body := getUpdateStatus(t, h)
 			if code != http.StatusOK {
 				t.Fatalf("status = %d, want 200", code)
 			}
@@ -289,9 +283,9 @@ func TestUpdateStatusActionMatrix(t *testing.T) {
 // endpoint must still report the running version rather than 404 or an empty
 // object, so the dashboard can show which build is live.
 func TestUpdateStatusNilStatus(t *testing.T) {
-	srv := newUpdateTestServer(t, nil, "v0.9.0")
+	h := newUpdateHandlers(t, nil, "v0.9.0")
 
-	code, body := getUpdateStatus(t, srv)
+	code, body := getUpdateStatus(t, h)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
@@ -316,9 +310,9 @@ func TestUpdateStatusErrorsAreSanitized(t *testing.T) {
 		Current:  "v1.0.0",
 		CheckErr: "Get \"https://objects.githubusercontent.com/x?…\": timeout",
 	})
-	srv := newUpdateTestServer(t, st, "v1.0.0")
+	h := newUpdateHandlers(t, st, "v1.0.0")
 
-	_, body := getUpdateStatus(t, srv)
+	_, body := getUpdateStatus(t, h)
 	msg, _ := body["check_error"].(string)
 	if msg == "" {
 		t.Fatal("check_error empty; the failure should be reported to the operator")

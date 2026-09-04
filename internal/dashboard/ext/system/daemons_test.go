@@ -1,4 +1,4 @@
-package server
+package system
 
 import (
 	"encoding/json"
@@ -6,17 +6,25 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/session"
 )
 
-func TestHandleSystemDaemons_DisabledReturnsEmptyArray(t *testing.T) {
+// newDaemonHandlers builds Handlers with sysession disabled (nil Daemons) and a
+// real Router, matching a dashboard-only deployment.
+func newDaemonHandlers() *Handlers {
+	return New(Deps{Router: session.NewRouter(session.RouterConfig{})})
+}
+
+func TestHandleDaemons_DisabledReturnsEmptyArray(t *testing.T) {
 	t.Parallel()
-	srv := newTestServer(&mockPlatform{})
-	// SysessionManager intentionally nil — test the disabled-path
-	// contract (must still return valid JSON array, not 404).
+	h := newDaemonHandlers()
+	// Daemons intentionally nil — test the disabled-path contract (must still
+	// return valid JSON array, not 404).
 
 	r := httptest.NewRequest(http.MethodGet, "/api/system/daemons", nil)
 	w := httptest.NewRecorder()
-	srv.mux.ServeHTTP(w, r)
+	h.HandleDaemons(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
@@ -29,7 +37,7 @@ func TestHandleSystemDaemons_DisabledReturnsEmptyArray(t *testing.T) {
 
 func TestHandleClearLabelOrigin_RequiresKey(t *testing.T) {
 	t.Parallel()
-	srv := newTestServer(&mockPlatform{})
+	h := newDaemonHandlers()
 
 	cases := []struct {
 		name string
@@ -52,7 +60,7 @@ func TestHandleClearLabelOrigin_RequiresKey(t *testing.T) {
 				strings.NewReader(c.body))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
-			srv.mux.ServeHTTP(w, r)
+			h.HandleClearLabelOrigin(w, r)
 			if w.Code != c.want {
 				t.Errorf("status = %d, want %d; body=%q", w.Code, c.want, w.Body.String())
 			}
@@ -62,41 +70,35 @@ func TestHandleClearLabelOrigin_RequiresKey(t *testing.T) {
 
 func TestHandleClearLabelOrigin_UnknownKeyReturns404(t *testing.T) {
 	t.Parallel()
-	srv := newTestServer(&mockPlatform{})
+	h := newDaemonHandlers()
 
 	body := `{"key":"feishu:direct:nobody:general"}`
 	r := httptest.NewRequest(http.MethodPost,
 		"/api/system/labels/clear-origin", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.mux.ServeHTTP(w, r)
+	h.HandleClearLabelOrigin(w, r)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404; body=%q", w.Code, w.Body.String())
 	}
 }
 
-// TestHandleSystemDaemons_JSONShape sanity-checks the top-level shape
-// when sysession is wired:  response is a JSON array (possibly empty
-// in unconfigured tests), each element has the documented field set.
-// We don't construct a real Manager here — that's exercised by the
-// sysession package tests directly.  This handler test only locks the
-// HTTP-layer contract.
-func TestHandleSystemDaemons_JSONShape(t *testing.T) {
+// TestHandleDaemons_JSONShape sanity-checks the top-level shape: the response
+// is a JSON array (empty in unconfigured tests). A real Manager is exercised
+// by the sysession package tests; this only locks the HTTP-layer contract.
+func TestHandleDaemons_JSONShape(t *testing.T) {
 	t.Parallel()
-	srv := newTestServer(&mockPlatform{})
+	h := newDaemonHandlers()
 
 	r := httptest.NewRequest(http.MethodGet, "/api/system/daemons", nil)
 	w := httptest.NewRecorder()
-	srv.mux.ServeHTTP(w, r)
+	h.HandleDaemons(w, r)
 
 	var got []map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
 		t.Fatalf("decode body: %v; body=%q", err, w.Body.String())
 	}
-	// Disabled Manager → empty list.  Asserting len here keeps the
-	// test green even if a future contributor wires a default daemon
-	// — they'd then need to update both this assertion and the
-	// disabled-path assumption.
+	// Disabled Manager → empty list.
 	if len(got) != 0 {
 		t.Errorf("disabled handler: expected empty list, got %v", got)
 	}

@@ -8,6 +8,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	dashdiscovery "github.com/naozhi/naozhi/internal/dashboard/discovery"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -203,4 +204,23 @@ func platformStatusMap(names map[string]struct{}) map[string]string {
 		out[name] = "registered"
 	}
 	return out
+}
+
+// buildSystemHandlers constructs the /api/system/* group. A nil
+// SysessionManager must become a nil interface, not a non-nil interface
+// wrapping nil, or the daemons endpoint's disabled path never fires.
+func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Handlers {
+	var daemons system.DaemonInspector
+	if opts.SysessionManager != nil {
+		daemons = opts.SysessionManager
+	}
+	return system.New(system.Deps{
+		Daemons:       daemons,
+		Router:        router,
+		UpdateStatus:  opts.UpdateStatus,
+		UpdateChecker: opts.UpdateChecker,
+		BuildVersion:  opts.Version,
+		// nil ⇒ enabled, matching config.UpdateDashboardInstall's default.
+		InstallEnabled: opts.UpdateDashboardInstall == nil || *opts.UpdateDashboardInstall,
+	})
 }

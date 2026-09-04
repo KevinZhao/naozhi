@@ -1,21 +1,46 @@
-// dashboard_planner_stats.go — GET /api/planner/stats process-resource probe:
-// process-wide runtime.MemStats + goroutine count + attached planner keys.
-// Per-planner-CLI RSS/CPU is future work (#452). Pull-only; the dashboard
-// polls it so the non-debug panel stays off the loopback-only debug surface.
-// Auth: same middleware as the rest of /api/*; process-wide aggregate only,
-// so not gated on debug_mode.
-package server
+// Package planner hosts the dashboard /api/planner/* endpoints.
+//
+//	GET /api/planner/stats  process-resource probe: runtime.MemStats +
+//	                        goroutine count + attached planner keys
+//
+// Pull-only; the dashboard polls it so the non-debug panel stays off the
+// loopback-only debug surface. Same auth middleware as the rest of /api/*;
+// process-wide aggregate only, so not gated on debug_mode.
+package planner
 
 import (
 	"net/http"
 	"runtime"
 	"sort"
 
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// plannerStatsResponse is the JSON wire shape for GET /api/planner/stats.
-type plannerStatsResponse struct {
+// Router is the consumer-side subset of *session.Router the stats probe
+// reads, so the sub-package never imports internal/server.
+type Router interface {
+	ListSessions() []session.SessionSnapshot
+}
+
+// Deps carries what the handlers read; the server wires it once at build.
+type Deps struct {
+	Router Router
+}
+
+// Handlers serves the /api/planner/* endpoint family.
+type Handlers struct {
+	router Router
+}
+
+// New returns Handlers wired from d.
+func New(d Deps) *Handlers {
+	return &Handlers{router: d.Router}
+}
+
+// statsResponse is the JSON wire shape for GET /api/planner/stats.
+type statsResponse struct {
 	// NaozhiRSSBytes is runtime.MemStats.Sys — closer to RSS than HeapAlloc
 	// (includes stacks + GC metadata), though not byte-equal to `ps -o rss`.
 	NaozhiRSSBytes uint64 `json:"naozhi_rss_bytes"`
@@ -33,13 +58,12 @@ type plannerStatsResponse struct {
 	PlannerKeys []string `json:"planner_keys"`
 }
 
-// handlePlannerStats serves GET /api/planner/stats. A Server method because
-// the data is process-scoped, like handleSystemDaemons.
-func (s *Server) handlePlannerStats(w http.ResponseWriter, _ *http.Request) {
+// HandleStats serves GET /api/planner/stats.
+func (h *Handlers) HandleStats(w http.ResponseWriter, _ *http.Request) {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 
-	resp := plannerStatsResponse{
+	resp := statsResponse{
 		NaozhiRSSBytes:       ms.Sys,
 		NaozhiHeapAllocBytes: ms.HeapAlloc,
 		NaozhiHeapInuseBytes: ms.HeapInuse,
@@ -47,9 +71,9 @@ func (s *Server) handlePlannerStats(w http.ResponseWriter, _ *http.Request) {
 		PlannerKeys:          []string{}, // explicit empty so JSON emits []
 	}
 
-	if s.router != nil {
+	if h.router != nil {
 		// Same snapshot /api/sessions uses, so counts match the sidebar.
-		for _, snap := range s.router.ListSessions() {
+		for _, snap := range h.router.ListSessions() {
 			if sessionkey.IsPlannerKey(snap.Key) {
 				resp.PlannerKeys = append(resp.PlannerKeys, snap.Key)
 			}
@@ -58,5 +82,5 @@ func (s *Server) handlePlannerStats(w http.ResponseWriter, _ *http.Request) {
 		resp.PlannerSessionsCount = len(resp.PlannerKeys)
 	}
 
-	writeJSON(w, resp)
+	httputil.WriteJSON(w, resp)
 }
