@@ -4,11 +4,8 @@ import (
 	"fmt"
 )
 
-// Built-in daemon names. These are the single source of truth for the
-// kebab-case identifiers used in builtinDaemons, each daemon's Name(),
-// and config-translation wiring (cmd/naozhi). Referencing the constant
-// instead of a string literal makes a rename a compile-time concern
-// rather than a silent drift between registry and wiring (#1634).
+// Built-in daemon names: single source of truth for builtinDaemons, each
+// daemon's Name(), and cmd/naozhi config wiring (#1634).
 const (
 	DaemonAutoTitler   = "auto-titler"
 	DaemonAttachmentGC = "attachment-gc"
@@ -18,9 +15,7 @@ const (
 //
 //	^[a-z][a-z0-9-]{1,30}$
 //
-// Lower-case ASCII only, leading letter, total length 2..31 (1 leading
-// + 1..30 trailing chars). R236-PERF-3: hand-written check avoids a
-// regexp.MustCompile at package init for the cold-path NewManager call.
+// Hand-written to avoid a regexp.MustCompile at package init.
 func validateDaemonName(name string) error {
 	if len(name) < 2 || len(name) > 31 {
 		return fmt.Errorf("sysession: daemon name %q must be 2..31 chars (kebab-case)", name)
@@ -37,26 +32,19 @@ func validateDaemonName(name string) error {
 	return nil
 }
 
-// builtinDaemonFactory builds a Daemon from runtime dependencies.  We
-// return a factory rather than a value because daemons need access to
-// Router, Runner, and per-daemon DaemonConfig — none of which exist at
-// package init time.
-//
-// Each entry in the slice below corresponds to one compiled-in daemon.
-// To register a new one:
+// builtinDaemonFactory builds a Daemon from runtime dependencies (Router,
+// Runner, DaemonConfig), none of which exist at package init. To register a
+// new daemon:
 //
 //  1. Implement Daemon (and optionally Configurable).
-//  2. Append a builtinDaemonFactory{Name: ..., Build: ...} below.
-//  3. Add a sane default to sysession.Config.Daemons so operators can
-//     opt in without re-reading the source.
+//  2. Append a builtinDaemonFactory{Name: ..., Build: ...} to builtinDaemons.
+//  3. Add a sane default to sysession.Config.Daemons.
 type builtinDaemonFactory struct {
 	Name  string
 	Build func(deps DaemonDeps) (Daemon, error)
 }
 
-// DaemonDeps bundles runtime dependencies handed to each daemon's
-// Build function.  Keeps the factory signature stable when we grow
-// dependencies later.
+// DaemonDeps bundles runtime dependencies handed to each daemon's Build.
 type DaemonDeps struct {
 	Router SystemSessionRouter
 	Runner Runner
@@ -66,36 +54,12 @@ type DaemonDeps struct {
 	WorkspaceRoots WorkspaceRootLister
 }
 
-// builtinDaemons is the immutable list of compiled-in daemons.  Order
-// determines startup order (which doesn't matter for Phase 1 since
-// daemons are independent, but pinning it lets tests assert
-// deterministic behaviour).
-//
-// Phase 1 is shipped with AutoTitler only.  TransientSweeper / other
-// future daemons land in Phase 2 (RFC §12).
-//
-// R244-ARCH-18 (#1055): this is a static slice literal, NOT cli/history's
-// blank-import + init()-driven registry.  The divergence is deliberate, so
-// record it here rather than have it re-flagged as accidental inconsistency
-// (mirroring our standing precedent of promoting an implicit decision to a
-// documented anchor).  The two reasons cli/history adopts the init() pattern
-// are both absent for sysession:
-//
-//  1. No import cycle to break.  Every built-in daemon (auto-titler,
-//     attachment-gc, ...) is compiled into this same package, so there is no
-//     peer package that would have to import the registry — nothing to
-//     decouple via blank import.
-//  2. No out-of-package daemon contract.  Registering a daemon is an
-//     in-package slice append, exactly the three steps documented on
-//     builtinDaemonFactory above; there is no external plugin surface that
-//     would benefit from self-registration in an init().
-//
-// The holistic "should every subsystem share one unified Registry[T]"
-// question is tracked separately under R244-ARCH-4 (#1058, internal/wireup);
-// sysession deliberately does not pre-commit and stays on this slice literal
-// until that decision lands.  TestBuiltinDaemonsSliceLiteralInvariant pins
-// this so any future move to an init()-based registry is a deliberate edit
-// of both that test and this comment.
+// builtinDaemons is the immutable list of compiled-in daemons; order pins
+// startup order so tests are deterministic. It is deliberately a static slice
+// literal, NOT an init()-driven registry like cli/history: every daemon is
+// compiled into this package, so there is no import cycle to break and no
+// external plugin surface. TestBuiltinDaemonsSliceLiteralInvariant pins this
+// (#1055).
 var builtinDaemons = []builtinDaemonFactory{
 	{
 		Name: DaemonAutoTitler,
@@ -111,14 +75,9 @@ var builtinDaemons = []builtinDaemonFactory{
 	},
 }
 
-// validateBuiltinDaemonNames panics if any compiled-in daemon name
-// violates the kebab-case rule or duplicates another.  Called from
-// NewManager so a misconfiguration becomes a startup failure rather
-// than a quiet runtime degradation.
-//
-// We could do this in a TestMain init, but a runtime check covers
-// downstream consumers that compile a fork with their own daemons
-// added — they'd skip our test suite but still hit this panic.
+// validateBuiltinDaemonNames panics (from NewManager) if any compiled-in
+// daemon name violates the kebab-case rule or duplicates another. A runtime
+// check rather than a test so forks that add their own daemons hit it too.
 func validateBuiltinDaemonNames() {
 	seen := make(map[string]struct{}, len(builtinDaemons))
 	for _, f := range builtinDaemons {

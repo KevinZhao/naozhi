@@ -4,10 +4,8 @@ package persist
 
 import "errors"
 
-// DetectFS on unsupported platforms returns "unknown" without
-// attempting a syscall. The production target is Linux (with macOS
-// as a best-effort dev surface); Windows / BSD builds shouldn't
-// crash if someone experiments.
+// DetectFS on platforms other than Linux/macOS returns "unknown" without a
+// syscall so experimental Windows / BSD builds do not crash.
 func DetectFS(dir string) FSDetection {
 	return FSDetection{
 		Type:      FSTypeUnknown,

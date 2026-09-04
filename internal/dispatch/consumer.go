@@ -1,23 +1,12 @@
 // Package dispatch — consumer.go
 //
-// SessionRouter is the consumer-side interface that Dispatcher relies
-// on for router operations. Declared here (not in session) so:
-//   - session.Router can evolve without cascading breakage across the
-//     three consumer packages (dispatch / server / upstream);
-//   - Dispatcher tests can inject a fake without wiring a full router
-//     graph (cli.Wrapper, shim.Manager, eventLogPersister, tmp
-//     workspace, etc.).
-//
-// *session.Router satisfies this interface implicitly via Go structural
-// typing. An editorial drift (e.g. Router adds an argument to
-// GetOrCreate) is caught at compile time by
-// internal/session/contract_test.go where `var _ dispatch.SessionRouter
-// = (*session.Router)(nil)` acts as a cross-package pin.
-//
-// Design: single interface per consumer (cron.SessionRouter is the
-// existing precedent). See docs/rfc/consumer-interfaces.md §3.4 for
-// why we do NOT split into Lifecycle/Reader/Controller sub-interfaces
-// at this size (8 methods).
+// SessionRouter is the consumer-side interface Dispatcher relies on for
+// router operations. Declared here (not in session) so session.Router can
+// evolve without cascading breakage across consumer packages and Dispatcher
+// tests can inject a fake without a full router graph. *session.Router
+// satisfies it implicitly; internal/session/contract_test.go pins the
+// contract at compile time. One interface per consumer by design — see
+// docs/rfc/consumer-interfaces.md §3.4.
 package dispatch
 
 import (
@@ -28,21 +17,13 @@ import (
 )
 
 // SessionRouter is the subset of *session.Router that Dispatcher uses.
-// Method list is derived from `grep 'd\.router\.' internal/dispatch/`
-// (13 d.router.* call sites, dedup to 8 distinct methods). Adding a
-// new Router call from dispatch requires extending this interface —
+// Adding a new Router call from dispatch requires extending this interface —
 // kept small so growth is visible in review.
 type SessionRouter interface {
 	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
 	// DiscardPassthroughPending clears in-flight passthrough sends for the
-	// keyed session (no-op when the session is absent). Routed through the
-	// interface so discardQueue does not reach the concrete
-	// *session.ManagedSession behind a session lookup — keeps the consumer
-	// seam intact for fakes and router-rename guards (R20260602190132-ARCH-4,
-	// #1612). This replaced dispatch's only production GetSession call, so
-	// GetSession is no longer part of this interface: shrinking it trims one
-	// of the two *session.ManagedSession-leaking methods the consumer seam
-	// exposed (R20260602141221-ARCH-2, #1587).
+	// keyed session (no-op when absent). Routed through the interface so
+	// discardQueue never touches the concrete *session.ManagedSession (#1612).
 	DiscardPassthroughPending(key string, reason error)
 	Reset(key string)
 	ResetChat(chatKeyPrefix string)
@@ -56,22 +37,11 @@ type SessionRouter interface {
 }
 
 // ProjectStore is the subset of *project.Manager that Dispatcher's slash-
-// command handlers use (/project, /cd, /new project-echo). Declared here
-// (ARCH-DISP-1, #457) so the slash-command tests can inject a fake binding
-// store without standing up a real project.Manager (projects.root dir +
-// on-disk binding file). *project.Manager satisfies this implicitly via
-// structural typing; the compile-time pin `var _ dispatch.ProjectStore =
-// (*project.Manager)(nil)` in internal/session/contract_test.go (alongside
-// the SessionRouter pins, R260528-ARCH-21 / #1380) catches signature drift.
-//
-// Method list derived from `grep 'd\.projectMgr\.' internal/dispatch/`
-// (5 distinct methods). Adding a new projectMgr call from dispatch
-// requires extending this interface, keeping growth visible in review.
-//
-// Return types stay *project.Project / []*project.Project — the value
-// type, not the manager — so the handlers keep reading proj.Name /
-// proj.Path. Mirrors SessionRouter returning session.AgentOpts: the
-// decoupling that matters is the manager method set, not the leaf value.
+// command handlers use (/project, /cd, /new project-echo), so tests can
+// inject a fake binding store (#457). *project.Manager satisfies it
+// implicitly; internal/session/contract_test.go pins the contract. Return
+// types stay *project.Project — the decoupling that matters is the manager
+// method set, not the leaf value.
 type ProjectStore interface {
 	Get(name string) *project.Project
 	All() []*project.Project

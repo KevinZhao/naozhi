@@ -8,27 +8,19 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
-// reactionAckTimeout bounds how long AddReaction/RemoveReaction can block.
-// The reaction is UX sugar on the IM hot path — if the platform API is slow,
-// fall back to text notice rather than stall the inbound handler. 3s is
-// generous for cross-region HTTP but well below user perception of "stuck".
+// reactionAckTimeout bounds how long AddReaction/RemoveReaction can block:
+// reactions are UX sugar on the IM hot path, so a slow platform API falls back
+// to the text notice rather than stalling the inbound handler.
 const reactionAckTimeout = 3 * time.Second
 
-// ackQueuedWithReaction attempts to signal "message queued" by adding a
-// reaction on the user's inbound message. Returns true if the reaction
-// landed (caller should suppress the text fallback); false if the platform
-// lacks Reactor capability, the message has no ID, or the API call failed.
-//
-// Best-effort by design: a reaction that fails to send is not worth retrying
-// — the caller falls back to the rate-limited text notice, and the user
-// still learns their message was received.
+// ackQueuedWithReaction signals "message queued" by adding a reaction on the
+// user's inbound message. Returns true if it landed (caller suppresses the
+// text fallback); false if the platform lacks Reactor capability, the
+// message has no ID, or the API call failed. Best-effort: on failure the
+// caller falls back to the rate-limited text notice.
 func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.IncomingMessage, lg *slog.Logger) bool {
-	// R260528-BUG-22: emit a Debug trace at every false-return arm so the
-	// "fell back to text" decision is investigable from logs alone.
-	// Pre-fix only the AddReaction error arm logged; the platform-not-
-	// reactor / no-MessageID / no-platform paths fell back silently and
-	// any "why didn't I get a reaction?" investigation had to bisect
-	// through code reading instead of grep.
+	// Debug-trace every false-return arm so the "fell back to text" decision
+	// is investigable from logs alone.
 	useLg := lg
 	if useLg == nil {
 		useLg = slog.Default()
@@ -52,8 +44,6 @@ func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.Inc
 	rctx, cancel := context.WithTimeout(ctx, reactionAckTimeout)
 	defer cancel()
 	if err := reactor.AddReaction(rctx, msg.MessageID, platform.ReactionQueued); err != nil {
-		// R230-CQ-3: align nil-handling with clearQueuedReactions — fall back to
-		// slog.Default() so a missing logger never silently drops the failure.
 		useLg.Debug("ack queued reaction skipped", "reason", "api_error", "err", err)
 		return false
 	}
@@ -61,27 +51,17 @@ func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.Inc
 }
 
 // ackMergedFollower signals that this user message was merged into another
-// message's reply (passthrough head/follower fan-out). Preferred surface is
-// a reaction on the user's message; fall back to a short text reply when
-// the platform is not reactor-capable. Rate-limited via ShouldNotify so a
-// burst of follower acks doesn't spam the chat.
-//
-// #1784: key is the resolved session key (the same bucket the rest of the
-// dispatch path rate-limits on, e.g. handleQueuedNonOwner's ShouldNotify(key)).
-// The pre-fix code passed msg.ChatID, which keys a different bucket than the
-// per-key MessageQueue tracks — so the cooldown never matched and a follower
-// burst could either over- or under-fire the text fallback.
+// message's reply (passthrough head/follower fan-out): a reaction when the
+// platform supports it, else a short text reply rate-limited via
+// ShouldNotify. key must be the resolved session key so the cooldown shares
+// the bucket the rest of the dispatch path rate-limits on (#1784).
 func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.IncomingMessage, key string, mergedCount int, lg *slog.Logger) {
 	if d.ackQueuedWithReaction(ctx, msg, lg) {
 		return
 	}
-	// #2260: single-use reply-token platforms (WeChat/iLink) cache one
-	// context_token per user that the head slot's reply already consumed.
-	// Reusing it here for the text fallback is rejected upstream (the
-	// notice is silently dropped) and worse, races the head's real answer
-	// for the last-write-wins cached token. Mirror the #2136 gate: when
-	// the platform uses single-use tokens and offers no reaction surface,
-	// rely on reaction-only ack and skip the doomed text fallback.
+	// Single-use reply-token platforms (WeChat/iLink) have already spent the
+	// cached token on the head slot's reply; a text fallback would be dropped
+	// upstream and race the real answer, so rely on the reaction only (#2260).
 	if p := d.platforms[msg.Platform]; p != nil && platform.UsesSingleUseReplyToken(p) {
 		useLg := lg
 		if useLg == nil {
@@ -97,17 +77,12 @@ func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.Incomin
 	d.replyText(ctx, msg, "已合并到上一条回复。", lg)
 }
 
-// clearQueuedReaction removes the single "queued" (HOURGLASS) reaction from
-// one message after the turn that consumed it has completed. Used by the
-// passthrough / /urgent path (#1946), where the message is dispatched in its
-// own detached goroutine and never enters ownerLoop's drain batch — the only
-// place clearQueuedReactions runs. Without this the HOURGLASS hangs until the
-// platform's reaction-cache TTL (feishu: 12h) GCs it, falsely signalling
-// "still processing" long after the reply landed.
-//
-// Best-effort and nil-safe: a missing MessageID, non-reactor platform, or API
-// error is logged at Debug and swallowed — a lingering reaction is cosmetic,
-// not user-blocking.
+// clearQueuedReaction removes the "queued" (HOURGLASS) reaction from one
+// message after the turn that consumed it completed. Used by the passthrough
+// / /urgent path (#1946), which never enters ownerLoop's drain batch where
+// clearQueuedReactions runs; otherwise the HOURGLASS lingers until the
+// platform's reaction-cache TTL. Best-effort and nil-safe: failures are
+// logged at Debug and swallowed.
 func (d *Dispatcher) clearQueuedReaction(ctx context.Context, platformName, messageID string, lg *slog.Logger) {
 	if messageID == "" {
 		return
@@ -132,10 +107,8 @@ func (d *Dispatcher) clearQueuedReaction(ctx context.Context, platformName, mess
 }
 
 // clearQueuedReactions removes the "queued" reaction from each drained
-// message. Called from ownerLoop after a drain-batch has been processed.
-// Errors are logged and swallowed — a lingering reaction is cosmetically
-// unfortunate but not user-blocking, and retrying here would require more
-// state without meaningful gain.
+// message; called from ownerLoop after a drain batch. Errors are logged and
+// swallowed — a lingering reaction is cosmetic.
 func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName string, queued []QueuedMsg, lg *slog.Logger) {
 	if len(queued) == 0 {
 		return
@@ -148,13 +121,8 @@ func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName stri
 	if !ok {
 		return
 	}
-	// One shared timeout budget for the whole batch instead of
-	// context.WithTimeout per iteration. The old per-message ctx created a
-	// runtime timer + *timerCtx heap alloc and goroutine per queued msg.
-	// Sharing one ctx also means a stalling IM API cannot drag the full
-	// reactionAckTimeout × N — the whole cleanup aborts together, which is
-	// the desired behaviour since the reactions are purely cosmetic.
-	// R60-PERF-6.
+	// One shared timeout budget for the whole batch: a stalling IM API cannot
+	// drag reactionAckTimeout × N, and the reactions are purely cosmetic.
 	rctx, cancel := context.WithTimeout(ctx, reactionAckTimeout)
 	defer cancel()
 	for _, m := range queued {
@@ -162,14 +130,10 @@ func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName stri
 			continue
 		}
 		if rctx.Err() != nil {
-			// Batch deadline exceeded; further RemoveReaction calls would
-			// fail immediately. Stop iterating so we don't log N identical
-			// timeout warnings.
+			// Batch deadline exceeded; stop rather than log N identical failures.
 			return
 		}
 		if err := reactor.RemoveReaction(rctx, m.MessageID, platform.ReactionQueued); err != nil {
-			// R230-CQ-3: collapsed if/else into one fallback to match the
-			// pattern used in ackQueuedWithReaction / scheduler.go's `lg`.
 			useLg := lg
 			if useLg == nil {
 				useLg = slog.Default()

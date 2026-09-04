@@ -2,26 +2,16 @@ package sysession
 
 import "sync"
 
-// runRingCap caps how many DaemonRun records we keep per daemon.  Phase 1
-// is in-memory only (RFC §3.4); 50 is enough for the dashboard "recent
-// activity" panel and small enough that a daemon spinning at 1Hz for an
-// hour can't eat measurable RAM.
+// runRingCap caps DaemonRun records kept per daemon: enough for the dashboard
+// "recent activity" panel, small enough to bound RAM (RFC §3.4).
 const runRingCap = 50
 
-// runRing is a fixed-size ring buffer of DaemonRun records, scoped per
-// daemon.  Append is O(1); Snapshot returns a chronological copy
-// (oldest → newest) so callers don't have to think about the head/tail
-// pointer.
+// runRing is a fixed-size per-daemon ring buffer of DaemonRun records. Append
+// is O(1); Snapshot returns a chronological copy. All access is mu-protected.
 //
-// All access is mu-protected.  We use a regular sync.Mutex (not RWMutex)
-// because reads happen from a single dashboard goroutine on a low cadence
-// (≤ 1Hz) so the lock-upgrade complexity isn't worth it.
-//
-// Invariants (R234-GO-14)：
-//   - len(buf) == runRingCap throughout the lifetime of the ring (set
-//     once in newRunRing, never reassigned).
-//   - 0 <= head < runRingCap at all times. Append wraps to 0 the moment
-//     it would otherwise advance to runRingCap.
+// Invariants:
+//   - len(buf) == runRingCap for the ring's lifetime (set once in newRunRing).
+//   - 0 <= head < runRingCap at all times; Append wraps to 0 at runRingCap.
 //   - filled becomes true on the first wrap and never returns to false.
 //
 // Snapshot 的两段 copy 依赖 0 <= head < runRingCap；任何重构要保持此约束，
@@ -37,8 +27,7 @@ func newRunRing() *runRing {
 	return &runRing{buf: make([]DaemonRun, runRingCap)}
 }
 
-// Append records a finished run.  Old entries are overwritten without
-// notice once the ring is full — that's the contract.
+// Append records a finished run; old entries are overwritten once the ring is full.
 func (r *runRing) Append(run DaemonRun) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -50,11 +39,8 @@ func (r *runRing) Append(run DaemonRun) {
 	}
 }
 
-// Snapshot returns a chronologically ordered copy (oldest → newest) of
-// every recorded run.  Returns an empty slice (not nil) when no runs
-// have been recorded.
-//
-// The caller owns the returned slice.
+// Snapshot returns a caller-owned, chronologically ordered (oldest → newest)
+// copy of every recorded run; an empty slice (not nil) when none.
 func (r *runRing) Snapshot() []DaemonRun {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -71,9 +57,7 @@ func (r *runRing) Snapshot() []DaemonRun {
 	return out
 }
 
-// Latest returns the most recently appended run, or zero-value + false
-// when the ring is empty.  Cheaper than Snapshot when callers only need
-// the last entry (dashboard "last_run_*" fields).
+// Latest returns the most recently appended run, or zero-value + false when empty.
 func (r *runRing) Latest() (DaemonRun, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

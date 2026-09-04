@@ -17,21 +17,16 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// trimUnicodeSpace strips all Unicode whitespace (including full-width
-// ideographic space U+3000, NBSP, zero-width space) from both ends of s.
-// Plain strings.TrimSpace only handles ASCII + \t\n\v\f\r, so CJK users
-// who pressed space on a Chinese IME see their /cd path / /project arg
-// silently fall through to the "unknown command" branch.
+// trimUnicodeSpace strips all Unicode whitespace (U+3000 ideographic space,
+// NBSP, zero-width space, ...) from both ends of s so CJK IME input doesn't
+// fall through to the "unknown command" branch.
 func trimUnicodeSpace(s string) string {
 	return strings.TrimFunc(s, unicode.IsSpace)
 }
 
-// replyText sends a text reply to msg.ChatID via the matching platform, logging
-// but not returning errors. Resolves d.platforms[msg.Platform] internally and
-// is a no-op if that platform is not registered. Returns true if the reply was
-// attempted (regardless of success), false if the platform was unknown — this
-// lets callers short-circuit follow-up logic that only makes sense when a user
-// actually receives feedback.
+// replyText sends a text reply to msg.ChatID via the matching platform,
+// logging but not returning errors. Returns false (no-op) when the platform
+// is unregistered so callers can skip follow-up logic.
 func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage, text string, log *slog.Logger) bool {
 	p := d.platforms[msg.Platform]
 	if p == nil {
@@ -41,12 +36,8 @@ func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage
 		if log != nil {
 			log.Warn("reply failed", "err", err)
 		} else {
-			// R188-SEC-M1: when nil log is passed (callers: handleHelpCommand,
-			// handleOwnerLoopPanic recovery), msg.ChatID / msg.Platform come from
-			// webhook payloads and are never sanitized upstream. Apply the same
-			// SanitizeLogAttr guard BuildHandler uses for the enriched logger so
-			// control chars / bidi overrides from malicious chat IDs cannot
-			// fragment journald structured fields.
+			// nil log: msg.ChatID/Platform come straight from webhook payloads,
+			// so sanitize like BuildHandler's enriched logger does.
 			slog.Warn("reply failed",
 				"platform", session.SanitizeLogAttr(msg.Platform),
 				"chat", session.SanitizeLogAttr(msg.ChatID),
@@ -56,36 +47,25 @@ func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage
 	return true
 }
 
-// normalizeSlashCommand lowercases the leading "/command" token only, leaving
-// arguments untouched. CJK mobile IMEs commonly auto-capitalize the first
-// letter of a line (e.g. "/New foo") which would otherwise fall through to
-// the unknown-command branch. Trailing whitespace is stripped so IMEs that
-// append a space before Enter do not break the bare "/help" equality check.
+// normalizeSlashCommand lowercases the leading "/command" token only (CJK
+// IMEs auto-capitalize, e.g. "/New foo") and strips trailing whitespace so
+// IMEs that append a space don't break the bare "/help" equality check.
 func normalizeSlashCommand(trimmed string) string {
 	if !strings.HasPrefix(trimmed, "/") {
 		return trimmed
 	}
 	sp := strings.IndexByte(trimmed, ' ')
 	if sp < 0 {
-		// No ASCII space but the command may still carry trailing unicode
-		// whitespace (e.g. U+3000 IDEOGRAPHIC SPACE from a CJK IME). Without
-		// TrimRight those bare commands would fail the `trimmed == "/help"`
-		// equality check and fall through to the unknown-command branch.
+		// No ASCII space, but trailing unicode whitespace (U+3000) may remain.
 		return strings.TrimRightFunc(strings.ToLower(trimmed), unicode.IsSpace)
 	}
 	return strings.TrimRightFunc(strings.ToLower(trimmed[:sp])+trimmed[sp:], unicode.IsSpace)
 }
 
 // dispatchCommand handles slash commands (/help, /new, /clear, /cron, /cd, /pwd, /project).
-// Returns true if the message was a command and was handled.
-//
-// Why a switch rather than a map[string]commandHandler table (R218-CR-1):
-// each arm carries unique preconditions — /cd consults projectMgr before
-// dispatching, /urgent splits empty-args (usage hint) from /urgent <text>,
-// /cron short-circuits when scheduler is nil — that don't compress into a
-// uniform `func(ctx, msg, args)` signature without losing the pre-handler
-// guards inline. If a future command grows to >12 arms or the per-arm
-// preconditions become uniform, revisit the table-driven refactor.
+// Returns true if the message was a command and was handled. A switch rather
+// than a handler table: arms carry unique preconditions (/cd consults the
+// project binding, /urgent splits empty args, /cron needs a scheduler).
 func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) bool {
 	trimmed = normalizeSlashCommand(trimmed)
 	switch {
@@ -100,13 +80,8 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		return true
 
 	case strings.HasPrefix(trimmed, "/cd "):
-		// R218B-ARCH-2 (#648): route project read through resolver so the
-		// /cd guard sees the same project snapshot the IM hot path's key
-		// derivation used. Pre-fix, dispatch.projectMgr was a parallel
-		// info source that could disagree with the resolver under a
-		// concurrent /project bind/unbind. Resolver is always non-nil
-		// after NewDispatcher; ProjectBindingForChat returns Bound=false
-		// when project feature is disabled or chat unbound.
+		// Read project state through the resolver so /cd sees the same snapshot
+		// the IM hot path's key derivation used (#648).
 		if b := d.resolver.ProjectBindingForChat(msg.Platform, msg.ChatType, msg.ChatID); b.Bound {
 			d.replyText(ctx, msg, fmt.Sprintf("当前已绑定项目 %s，工作目录固定为项目路径。如需切换，请先 /project off 解绑。", b.Name), log)
 			return true
@@ -121,11 +96,7 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 			d.replyText(ctx, msg, "当前工作目录: （未设置，使用进程默认）", log)
 			return true
 		}
-		// R188-SEC-H1: defence-in-depth sanitize before echoing to IM channel.
-		// absPath is stored by /cd (already EvalSymlinks-resolved and bounded by
-		// allowedRoot prefix check), but operator-supplied state dirs may still
-		// contain control chars from mis-configuration. Same hardening as /cd
-		// echo (R185-SEC-H1).
+		// Defence-in-depth: operator-supplied state dirs may carry control chars.
 		d.replyText(ctx, msg, "当前工作目录: "+osutil.SanitizeForLog(ws, 4096), log)
 		return true
 
@@ -156,19 +127,11 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 	}
 }
 
-// handleStopCommand aborts the in-flight turn for this chat's session.
-// Uses the CLI's native control_request interrupt (stream-json) when
-// available; ACP-backed sessions fall back to SIGINT-equivalent Interrupt().
-// In passthrough mode, pending slots remain queued — only the active turn
-// is dropped; CLI moves on to the next message automatically.
-//
-// #1944: a chat can host multiple agent sessions (general/planner plus any
-// agent-command sessions like /review→code-reviewer). The previous
-// implementation hard-coded the "general" key, so /stop was a no-op for
-// agent-command turns and replied with the misleading "no reply in progress".
-// We now broadcast the control interrupt across every agent the chat could
-// have a live session for and aggregate the outcomes, mirroring /cd's
-// chat-wide ResetChat semantics.
+// handleStopCommand aborts the in-flight turn for this chat's session via the
+// CLI's control_request interrupt (ACP sessions fall back to Interrupt()). In
+// passthrough mode pending slots stay queued — only the active turn drops. The
+// interrupt is broadcast across every agent the chat could have a live session
+// for, so /stop also works for agent-command turns (#1944).
 func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.IncomingMessage, log *slog.Logger) {
 	outcome := d.interruptChat(msg.Platform, msg.ChatType, msg.ChatID)
 	switch outcome {
@@ -184,16 +147,13 @@ func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.Incomin
 }
 
 // interruptChat broadcasts a control_request interrupt across every agent
-// session a chat may own (general/planner + every configured agent-command
-// target) and folds the per-key outcomes into a single user-facing result.
-//
-// Folding precedence (best-news-wins, so an idle planner session never masks
-// an actually-interrupted code-reviewer turn):
+// session a chat may own (general/planner + every agent-command target) and
+// folds the outcomes best-news-wins, so an idle planner never masks an
+// actually-interrupted code-reviewer turn:
 //
 //	Sent > Error > Unsupported > NoTurn > NoSession
 //
-// Keys are deduplicated because the same agentID can be reachable through
-// multiple slash commands, and because general/planner are always probed.
+// Keys are deduplicated: one agentID may be reachable via several commands.
 func (d *Dispatcher) interruptChat(platform, chatType, chatID string) session.InterruptOutcome {
 	agentIDs := make(map[string]struct{}, len(d.agentCommands)+2)
 	agentIDs["general"] = struct{}{}
@@ -232,25 +192,18 @@ func (d *Dispatcher) interruptChat(platform, chatType, chatID string) session.In
 	return best
 }
 
-// handleUrgentCommand dispatches a priority:"now" passthrough message. The
-// CLI aborts any in-flight turn and processes the urgent message next;
-// pending messages written before this /urgent are failed with
-// ErrAbortedByUrgent so the user sees which ones were superseded.
-//
-// When the session's protocol doesn't support passthrough (ACP), we fall
-// back to InterruptViaControl + legacy Send so /urgent still has user-
-// visible "cancel current + run this" semantics.
+// handleUrgentCommand dispatches a priority:"now" passthrough message: the CLI
+// aborts any in-flight turn and runs the urgent message next; pending messages
+// are failed with ErrAbortedByUrgent. Protocols without passthrough (ACP) fall
+// back to InterruptViaControl + legacy Send.
 func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.IncomingMessage, text string, log *slog.Logger) {
 	if text == "" {
 		d.replyText(ctx, msg, "用法：/urgent <紧急消息>", log)
 		return
 	}
 
-	// Resolve session key and opts — delegate to KeyResolver so /urgent
-	// gets the same project-bound opts as the main IM path (previously
-	// /urgent set only Exempt+Workspace and silently dropped planner
-	// model/prompt overrides — see docs/rfc/key-resolver.md §2.1 #3).
-	// NewDispatcher always builds a resolver, so no nil-branch fallback.
+	// Resolve via KeyResolver so /urgent gets the same project-bound opts as
+	// the main IM path (docs/rfc/key-resolver.md §2.1 #3).
 	agentID := "general"
 	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 
@@ -259,20 +212,10 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 	// Ack with a reaction so the user knows the urgent was received.
 	d.ackQueuedWithReaction(ctx, msg, log)
 
-	// Spawn in its own goroutine like regular passthrough sends — sendAndReply
-	// will handle GetOrCreate + reply. The priority field is threaded through
-	// dispatch → SendPassthrough via ctx + the priorityCtxKey extension.
-	//
-	// R20260531070014-ARCH-3: use mergeStopAndValues(d.stopCtx, ctx) rather
-	// than the bare context.WithoutCancel(ctx) previously used here. The
-	// regular passthrough path (dispatch.go) migrated from WithoutCancel to
-	// mergeStopAndValues in #1320 so that detached goroutines abort on SIGTERM
-	// instead of running through their full internal totalTimeout and causing
-	// systemd TimeoutStopSec breaches. /urgent had re-introduced the old
-	// pattern, meaning /urgent goroutines were the only remaining path that
-	// could not be stopped on graceful shutdown.
-	// cancelSrc = d.stopCtx  → goroutine aborts when the service shuts down.
-	// valuesSrc = ctx         → per-request slog attrs / auth values survive.
+	// Spawn like regular passthrough sends; priority travels via ctx. Cancel
+	// from d.stopCtx so the goroutine aborts on SIGTERM instead of running its
+	// full totalTimeout (systemd TimeoutStopSec, #1320); values from ctx so
+	// per-request slog attrs / auth survive.
 	sendCtx := mergeStopAndValues(d.stopCtx, ctx)
 	d.goSendAndReply(WithUrgent(WithPassthrough(sendCtx)), key, text, nil, agentID, opts, msg, log, false)
 }
@@ -290,10 +233,7 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 		"  /cron <add|list|del|pause|resume> — 定时任务"
 	if len(d.agentCommands) > 0 {
 		help += "\n\n可用 Agent:"
-		// R190-MAP-L1: map iteration is non-deterministic, so /help would
-		// return agent lines in a random order each call, confusing users
-		// and breaking golden-file tests. Sort by command name so output is
-		// stable and comparable across invocations.
+		// Sort so /help output is stable (map iteration order is random).
 		cmds := make([]string, 0, len(d.agentCommands))
 		for cmd := range d.agentCommands {
 			cmds = append(cmds, cmd)
@@ -301,33 +241,18 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 		slices.Sort(cmds)
 		for _, cmd := range cmds {
 			agentID := d.agentCommands[cmd]
-			// R188-GO-L2: cmd/agentID from operator config.yaml agent_commands;
-			// low-risk but sanitize for consistency with per-output policy —
-			// a misconfigured agent name with bidi/C1 runes would otherwise
-			// be forwarded to potentially many group-chat users.
+			// Sanitize operator-configured names before forwarding to group chats.
 			help += "\n  /" + osutil.SanitizeForLog(cmd, 64) + " → " + osutil.SanitizeForLog(agentID, 64)
 		}
 	}
 	d.replyText(ctx, msg, help, nil)
 }
 
-// resolveAgentToken maps a user-supplied /new <agent> token to a stored
-// agent ID. agentToReset is expected already lowercased (handleNewCommand
-// normalizes it). Resolution is two-stage:
-//
-//  1. exact lookup against agentCommands keys (keys are pre-normalized to
-//     lowercase in applyDefaults);
-//  2. EqualFold scan over the stored values — operator-supplied agent IDs
-//     may legitimately carry mixed case (e.g. "ReviewerBot"), so a user
-//     typing "/new ReviewerBot" still resolves even though the lookup key
-//     was lowercased (R250-CR-26).
-//
-// R0530-CR-1: both the project-bound and unbound branches of
-// handleNewCommand share this helper so the EqualFold fallback can't drift
-// out of one branch — previously only the unbound branch had stage 2, so
-// "/new ReviewerBot" worked in unbound chats but returned "未知的 agent"
-// in project-bound chats. The linear scan stays — agentCommands is a small
-// operator-curated map, not a hot path.
+// resolveAgentToken maps a user-supplied (lowercased) /new <agent> token to a
+// stored agent ID: exact lookup against agentCommands keys (pre-lowercased in
+// applyDefaults), then an EqualFold scan over values so mixed-case operator
+// IDs like "ReviewerBot" still resolve. Shared by both handleNewCommand
+// branches so the fallback can't drift between them.
 func (d *Dispatcher) resolveAgentToken(agentToReset string) (string, bool) {
 	if id, ok := d.agentCommands[agentToReset]; ok {
 		return id, true
@@ -343,37 +268,22 @@ func (d *Dispatcher) resolveAgentToken(agentToReset string) (string, bool) {
 func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
 	agentToReset := ""
 	if parts := strings.SplitN(trimmed, " ", 2); len(parts) > 1 {
-		// agentCommands keys are pre-normalized to lowercase in applyDefaults;
-		// match the user-supplied agent name case-insensitively so "/new REVIEW"
-		// still resolves.
+		// agentCommands keys are lowercased in applyDefaults; match case-insensitively.
 		agentToReset = strings.ToLower(trimUnicodeSpace(parts[1]))
 	}
 
-	// In project-bound mode: /new resets planner, /new {agent} resets that agent.
-	// Probe the project-bound-ness via KeyResolver.KeyForChat: for agentID
-	// "general", a bound chat yields a planner key (prefixed "project:"),
-	// unbound yields an IM key. The project name is recovered from the
-	// router-side metadata (slog attr) not re-fetched here.
-	//
-	// R218B-ARCH-2 (#648): read project state through resolver so /new and
-	// the IM hot path see the same snapshot — funnelling slash-command
-	// reads through KeyResolver.ProjectBindingForChat closes the
-	// resolver-vs-projectMgr dual-info-source race.
+	// Project-bound chat: /new resets planner, /new {agent} resets that agent.
+	// Read the binding through the resolver so /new and the IM hot path see
+	// the same snapshot (#648).
 	if b := d.resolver.ProjectBindingForChat(msg.Platform, msg.ChatType, msg.ChatID); b.Bound {
 		if agentToReset == "" {
 			plannerKey := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
-			// #2185: discardQueue BEFORE Reset. Reset synchronously fires
-			// onKeyRetired → msgQueue.Cleanup, which deletes the queue ring
-			// without clearing each parked message's HOURGLASS reaction. Run
-			// the drain-aware discardQueue (the #2013 drain+clear) first, while
-			// the ring is still populated, so those ⏳ marks are cleared.
+			// discardQueue BEFORE Reset: Reset fires onKeyRetired → msgQueue.Cleanup,
+			// which drops the ring without clearing parked ⏳ reactions (#2185).
 			d.discardQueue(ctx, msg, plannerKey)
 			d.router.Reset(plannerKey)
 			d.replyText(ctx, msg, "项目 "+b.Name+" 的 planner 已重置。", log)
 		} else {
-			// R0530-CR-1: resolve via the shared helper so this branch gets
-			// the same EqualFold fallback the unbound branch has — otherwise
-			// "/new ReviewerBot" resolves in unbound chats but not here.
 			if id, ok := d.resolveAgentToken(agentToReset); ok {
 				key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
 				// #2185: discardQueue before Reset — see the planner branch above.
@@ -381,9 +291,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 				d.router.Reset(key)
 				d.replyText(ctx, msg, "会话已重置 ("+id+")。", log)
 			} else {
-				// R187-SEC-M1: agentToReset is user IM input, sanitize
-				// before echo into group chat to prevent bidi-override
-				// visual spoofing. Matches /cd/echo sanitize (R185-SEC-H1).
+				// User input: sanitize before echoing into chat (bidi spoofing).
 				d.replyText(ctx, msg, "未知的 agent: "+osutil.SanitizeForLog(agentToReset, 64), log)
 			}
 		}
@@ -392,18 +300,13 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 
 	agentID := "general"
 	if agentToReset != "" {
-		// R250-CR-26 / R0530-CR-1: resolve via the shared helper (exact key
-		// lookup then EqualFold value scan) so mixed-case operator agent IDs
-		// like "ReviewerBot" resolve regardless of bound/unbound branch.
 		if id, ok := d.resolveAgentToken(agentToReset); ok {
 			agentID = id
 		} else {
-			// R187-SEC-M1: agentToReset is user IM input, sanitize before
-			// echo back to avoid bidi-override visual spoofing.
+			// User input: sanitize before echoing back (bidi spoofing).
 			errMsg := "未知的 agent: " + osutil.SanitizeForLog(agentToReset, 64)
 			if len(d.agentCommands) > 0 {
-				// R190-MAP-L1: sort so the hint line is stable across
-				// calls; otherwise the "可用:" list shuffles randomly.
+				// Sort so the hint line is stable.
 				names := make([]string, 0, len(d.agentCommands))
 				for cmd := range d.agentCommands {
 					names = append(names, cmd)
@@ -428,12 +331,6 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 }
 
 // handleCronCommand dispatches /cron subcommands (add, list, del, pause, resume).
-//
-// R239-CR-8 (#885): the inline 5-arm switch grew to 126 lines and forced
-// readers to scan past every arm to find the one they cared about.
-// Subcommands are now extracted into per-arm helpers so this dispatcher
-// stays narrow (parse → route) and each arm reads as a self-contained
-// unit. The reply / log surface is unchanged — only the call shape moves.
 func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
 	if d.platforms[msg.Platform] == nil {
 		return
@@ -490,26 +387,13 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		CreatedBy: msg.UserID,
 	})
 	if err != nil {
-		// AddJob wraps the raw schedule string + robfig/cron parser
-		// internals into the error; echoing that to IM leaks both the
-		// server-normalized form of the attacker's input and parser
-		// token positions. Log the detail for operator triage, reply
-		// with a generic message. Mirrors dashboard_cron handleCreate.
-		// R188-LOG-M1: schedule comes from user IM input; ParseCronAdd
-		// only gates ASCII C0/DEL, leaving C1 controls / bidi / LS/PS
-		// that can fragment journald structured fields.
+		// Never echo err.Error(): it leaks the normalized schedule and parser
+		// internals. Log (sanitized — ParseCronAdd only gates ASCII C0/DEL) for
+		// operators, reply generically. ErrInvalidPrompt is the one sentinel
+		// AddJob surfaces, so steer it to a prompt-specific hint rather than
+		// misleading the user about the schedule.
 		log.Warn("cron AddJob rejected", "err", err,
 			"schedule", osutil.SanitizeForLog(schedule, 256))
-		// AddJob fails for distinct reasons (bad schedule, prompt policy
-		// violation, per-chat/global job limit). Collapsing them all into
-		// "请检查定时表达式格式" misleads a user whose schedule was fine but
-		// whose prompt was rejected — the same class of bug R20260531-ARCH-2
-		// fixed for the del/pause/resume handlers via cronMutationErrReply.
-		// CronCodeInvalidPrompt is the one cause that carries a sentinel
-		// through AddJob (ValidatePromptStrict → ErrInvalidPrompt); steer
-		// those to a prompt-specific hint. Raw err.Error() is never echoed
-		// (it can leak the normalized schedule / parser internals); the
-		// detail is already logged above for operator triage.
 		if d.scheduler.ClassifyError(err) == CronCodeInvalidPrompt {
 			reply("创建失败：任务内容不合法（为空、过长或含控制字符）")
 			return
@@ -517,9 +401,7 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		reply("创建失败：请检查定时表达式格式")
 		return
 	}
-	// R190-LOG-M1: even though ParseCronAdd rejects C0/C1/bidi runes now,
-	// defence-in-depth: any future parser change that relaxes the policy
-	// must not leak visual-spoofing bytes back into group-chat replies.
+	// Defence-in-depth against future parser relaxations.
 	reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s",
 		job.ID,
 		osutil.SanitizeForLog(job.Schedule, 256),
@@ -528,13 +410,10 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		"schedule", osutil.SanitizeForLog(job.Schedule, 256))
 }
 
-// sanitizeCronDisplay sanitizes a cron job field (Schedule or Prompt) for
-// safe display in IM replies. It strips \n/\t that would break table
-// formatting, truncates to maxRunes runes to prevent layout abuse, applies
-// SanitizeForLog (strips C0/C1/bidi), and replaces markdown link-syntax
-// characters to prevent link-smuggling. R112714-ARCH-1.
+// sanitizeCronDisplay prepares a cron job field (Schedule or Prompt) for IM
+// display: collapses \n/\t, truncates to maxRunes, strips C0/C1/bidi and
+// escapes markdown link punctuation to prevent link-smuggling.
 func sanitizeCronDisplay(s string, maxRunes int) string {
-	// Strip newlines and tabs that would break the table row.
 	s = strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || r == '\t' {
 			return ' '
@@ -549,11 +428,8 @@ func sanitizeCronDisplay(s string, maxRunes int) string {
 	} else {
 		s = string(runes)
 	}
-	// Strip C0/C1 controls, bidi overrides, zero-width chars.
 	s = osutil.SanitizeForLog(s, len(s)*4+16)
-	// Prevent markdown link-smuggling via [text](url) patterns.
-	// R20260603140013-ARCH-1 (#1707): use the leaf textutil helper directly so
-	// the IM display path no longer couples to the cron domain package.
+	// Prevent markdown link-smuggling via [text](url) (#1707).
 	s = textutil.EscapeCronMarkdownPunct(s)
 	return s
 }
@@ -580,18 +456,11 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 }
 
 // cronMutationErrReply maps a /cron del|pause|resume failure to a specific
-// user-facing reply. R20260531-ARCH-2: the prior handlers collapsed every
-// error into one "请确认 ID 正确" string, so an ambiguous-prefix match
-// (multiple jobs) misleadingly told the user the ID was wrong instead of
-// "type a longer ID to disambiguate", and a pause/resume state conflict was
-// indistinguishable from a bad ID.
-//
-// code is the wire code from CronCommands.ClassifyError (#1164 — was
-// previously cron.ClassifyError called inline, which pinned the
-// dispatch→cron import). Raw err.Error() is never echoed (it leaks
-// normalized ID form / lock annotations); the caller still logs the raw
-// error at Warn. verb is the Chinese action label ("删除" / "暂停" /
-// "恢复") used in the generic fallback.
+// user-facing reply so an ambiguous prefix or a pause/resume state conflict
+// is distinguishable from a bad ID. code is the wire code from
+// CronCommands.ClassifyError (#1164); raw err.Error() is never echoed (it
+// leaks normalized ID form / lock annotations). verb is the Chinese action
+// label used in the generic fallback.
 func cronMutationErrReply(verb, code string) string {
 	switch code {
 	case CronCodeAmbiguousPrefix:
@@ -614,9 +483,7 @@ func (d *Dispatcher) handleCronDel(msg platform.IncomingMessage, parts []string,
 	}
 	j, err := d.scheduler.DeleteJob(parts[2], msg.Platform, msg.ChatID)
 	if err != nil {
-		// Echoing err.Error() to IM leaks internal scheduler state
-		// (normalized ID form, lock annotations). Dashboard already
-		// sanitises analogous handlers. Log raw, reply generic.
+		// Never echo err.Error() (leaks scheduler internals); log raw, reply generic.
 		log.Warn("cron DeleteJob failed", "err", err, "id_prefix", parts[2])
 		reply(cronMutationErrReply("删除", d.scheduler.ClassifyError(err)))
 		return
@@ -655,10 +522,8 @@ func (d *Dispatcher) handleCronResume(msg platform.IncomingMessage, parts []stri
 	log.Info("cron job resumed", "id", j.ID)
 }
 
-// validateCronIDArg checks that parts contains a third token (the cron job ID)
-// and that the token is within maxCronIDLen.  Sends a usage / "无效 ID" reply
-// and returns false on failure so callers can early-return.  Centralises the
-// guard previously duplicated across /cron del | pause | resume.
+// validateCronIDArg checks parts has a third token (the job ID) within
+// maxCronIDLen; replies usage / "无效 ID" and returns false otherwise.
 func validateCronIDArg(parts []string, sub string, reply func(string)) bool {
 	if len(parts) < 3 {
 		reply("用法: /cron " + sub + " <id>")
@@ -715,21 +580,15 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 		d.replyText(ctx, msg, "可用项目:\n"+strings.Join(lines, "\n"), log)
 
 	default:
-		// Validate at the IM trust boundary before Get / BindChat so a crafted
-		// /project <bidi_or_C0_name> cannot inject into slog attrs (via the
-		// manager's internal logging) or get echoed back into the chat reply.
-		// Also keeps symmetry with the dashboard + reverse-RPC gates that
-		// already share project.ValidateProjectName (R181-SEC-P2-2).
+		// Validate at the IM trust boundary so a crafted name cannot inject
+		// into slog attrs or be echoed back; same gate as dashboard/reverse-RPC.
 		if err := project.ValidateProjectName(arg); err != nil {
 			d.replyText(ctx, msg, "项目名不合法。\n使用 /project list 查看可用项目。", log)
 			return
 		}
 		proj := d.projectMgr.Get(arg)
 		if proj == nil {
-			// Do NOT echo the unvalidated user-supplied name back into the
-			// reply body: even after name validation, avoiding echo eliminates
-			// a whole class of social-engineering games where the bot mirrors
-			// attacker text into a group chat. R184-SEC-H1b.
+			// Never echo the user-supplied name back into a group chat.
 			d.replyText(ctx, msg, "项目不存在。\n使用 /project list 查看可用项目。", log)
 			return
 		}
@@ -755,19 +614,13 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		return
 	}
 
-	// R185-QUAL-M1: preserve the original user-typed form for the reply echo.
-	// tilde expansion below mutates `path` to the absolute home-rooted form,
-	// which would leak the server's /home/<user> prefix back into the IM
-	// channel (violates the same policy as R184-SEC-M2). Echo the pre-expansion
-	// shape instead; slog still logs the resolved absPath for operator debugging.
+	// Echo the user-typed form later: tilde expansion would leak the server's
+	// /home/<user> prefix into the IM channel.
 	originalInput := path
 
 	if strings.HasPrefix(path, "~") {
-		// R186-GO-M1: silently ignoring os.UserHomeDir error leaves path as "~/foo",
-		// which later fails filepath.IsAbs → relative path branch → EvalSymlinks
-		// against an irrelevant base → misleading "目录不存在或无权限" message.
-		// Fail fast with an actionable hint so operators know to use an absolute
-		// path instead.
+		// Fail fast: leaving "~/foo" unexpanded would hit the relative-path
+		// branch and yield a misleading "目录不存在或无权限".
 		home, err := os.UserHomeDir()
 		if err != nil {
 			d.replyText(ctx, msg, "无法获取用户主目录，请使用绝对路径（例: /cd /home/ubuntu/project）", log)
@@ -783,9 +636,8 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		absPath = filepath.Clean(path)
 	} else {
 		currentWS := d.router.Workspace(chatKey)
-		// R185-GO-L3: relative path requires a prior /cd <abs> to anchor
-		// workspace; without it, filepath.Join("", rel) == rel and EvalSymlinks
-		// resolves against process cwd, which is meaningless to the user.
+		// A relative path needs a prior /cd <abs> anchor; otherwise it would
+		// resolve against the process cwd, meaningless to the user.
 		if currentWS == "" {
 			d.replyText(ctx, msg, "请先用绝对路径设置工作目录（例: /cd /home/ubuntu/project）再使用相对路径", log)
 			return
@@ -793,11 +645,9 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		absPath = filepath.Join(currentWS, path)
 	}
 
-	// Resolve symlinks BEFORE Stat + allowedRoot check so a swap between
-	// Stat and EvalSymlinks cannot hand us different filesystem entries —
-	// same ordering as server.validateWorkspace, closes a TOCTOU window
-	// where a symlink re-target between the two calls would let a user
-	// cd outside allowedRoot.
+	// Resolve symlinks BEFORE Stat + allowedRoot check (same order as
+	// server.validateWorkspace) so a symlink re-target between the calls
+	// cannot let a user cd outside allowedRoot.
 	resolved, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		d.replyText(ctx, msg, "目录不存在或无权限", log)
@@ -812,14 +662,10 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 	}
 
 	if d.allowedRoot != "" {
-		// Resolve allowedRoot the same way absPath was resolved above so the
-		// containment check compares two canonical paths. EvalSymlinks failure
-		// (root temporarily unmounted) falls back to the raw string — matches
-		// server.validateWorkspace / cron.workDirResolveUnderRoot. The shared
-		// osutil.PathContainedInRoot then byte-compares with an inode-walk
-		// fallback, so a case-insensitive fs (macOS APFS) where the operator's
-		// configured root differs in case from the typed path no longer
-		// rejects a legitimate /cd target.
+		// Canonicalise allowedRoot the same way as absPath; on EvalSymlinks
+		// failure fall back to the raw string (matches server.validateWorkspace
+		// / cron.workDirResolveUnderRoot). PathContainedInRoot byte-compares
+		// with an inode-walk fallback for case-insensitive filesystems.
 		rootResolved := d.allowedRoot
 		if r, err := filepath.EvalSymlinks(d.allowedRoot); err == nil {
 			rootResolved = r
@@ -830,22 +676,14 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		}
 	}
 
-	// Atomic reset+set under a single Router lock so a concurrent message for
-	// the same chat key cannot slip in between (see #2342): a non-atomic
-	// ResetChat()+SetWorkspace() pair leaves a window where the chat is reset
-	// AND the override deleted, letting GetOrCreate spawn a session in the old
-	// (default) workspace before the new path is installed.
+	// Atomic reset+set under one Router lock (#2342): a separate ResetChat +
+	// SetWorkspace pair lets a concurrent GetOrCreate spawn a session in the
+	// old workspace before the new path is installed.
 	d.router.ResetChatAndSetWorkspace(chatKey, absPath)
 
-	// R184-SEC-M2 / R185-QUAL-M1: echo the user-supplied form (pre-tilde
-	// expansion + Clean) rather than absPath or post-expansion path, which
-	// would disclose resolved symlink targets / server home directory on the
-	// server. slog still captures absPath for operator debugging; only the IM
-	// reply body is user-facing.
+	// Echo the pre-expansion input, never absPath (symlink targets / home dir).
 	displayPath := filepath.Clean(originalInput)
-	// R185-SEC-H1: scrub bidi overrides / C0/C1 control chars before echoing
-	// back into the IM channel so a crafted `/cd /tmp/‮kcatta` cannot render
-	// deceptively inside chat clients (same hardening as slog sanitize).
+	// Scrub bidi overrides / control chars before echoing into chat.
 	displayPath = osutil.SanitizeForLog(displayPath, 4096)
 	d.replyText(ctx, msg, "工作目录已切换到: "+displayPath+"\n所有会话已重置，新消息将在此目录下执行。", log)
 	log.Info("workspace changed", "chat_key", chatKey, "path", absPath)
@@ -864,17 +702,8 @@ var smartQuoteNormalizer = strings.NewReplacer(
 	"\u2019", "\"", // RIGHT SINGLE QUOTATION MARK ’
 )
 
-// Cron input bounds are shared with the dashboard HTTP path; see
-// internal/cron/limits.go for rationale. Aliased here to avoid renaming
-// every existing call site. R216-CR-1.
-//
-// R20260527122801-ARCH-3 (#1315): the prompt/schedule byte caps moved into
-// textutil.ValidateCronPromptStrict / textutil.ValidateCronScheduleChars (which
-// ParseCronAdd now delegates to), so the prior maxCronPromptBytes /
-// maxCronScheduleBytes aliases became dead. Only the ID-length alias survives —
-// it still guards the `/cron <op> <id>` token in validateCronJobIDArg.
-// R20260603140013-ARCH-1 (#1707): aliased from the leaf textutil package so the
-// `/cron` slash-command edge no longer imports the cron domain package for it.
+// maxCronIDLen guards the `/cron <op> <id>` token; aliased from the leaf
+// textutil package so this edge doesn't import the cron domain package (#1707).
 const maxCronIDLen = textutil.MaxCronIDLen
 
 // ParseCronAdd parses the args of /cron add: "schedule" prompt
@@ -883,43 +712,23 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 	if !strings.HasPrefix(args, "\"") {
 		return "", "", fmt.Errorf("schedule must be quoted, e.g. \"@every 30m\"")
 	}
-	// strings.Cut handles the "" closing quote search + tail separation as a
-	// single operation, avoiding manual byte arithmetic that could surprise
-	// on non-ASCII schedule text (e.g. someone embedding Chinese in a desc).
 	rest, tail, ok := strings.Cut(args[1:], "\"")
 	if !ok {
 		return "", "", fmt.Errorf("missing closing quote for schedule")
 	}
 	schedule = rest
-	// R20260527122801-ARCH-3 (#1315): delegate the schedule size + UTF-8 +
-	// C0/DEL/C1/bidi/LS/PS scan to textutil.ValidateCronScheduleChars so the IM
-	// `/cron add` edge and the dashboard validateCronScheduleChars edge share
-	// one policy. Previously this hand-wrote a byte loop + rune loop that
-	// could silently drift from the dashboard copy when a new forbidden
-	// character was added on one side only. R20260603140013-ARCH-1 (#1707):
-	// the validator lives in the leaf textutil package so this edge no longer
-	// couples to the cron domain package for it.
+	// Shared with the dashboard edge so the two policies cannot drift (#1315).
 	if err := textutil.ValidateCronScheduleChars(schedule); err != nil {
 		return "", "", err
 	}
-	// R20260603-GEN-4: ValidateScheduleChars only screens the character set, so
-	// an all-whitespace schedule (e.g. /cron add " " run now) passes it and then
-	// surfaces a confusing generic robfig parse error. Reject it here with a
-	// clear message before prompt parsing.
+	// Char screening alone passes an all-whitespace schedule; reject it clearly.
 	if strings.TrimSpace(schedule) == "" {
 		return "", "", fmt.Errorf("定时表达式不能为空")
 	}
 	prompt = strings.TrimSpace(tail)
-	// R20260527122801-ARCH-3 (#1315): delegate the prompt empty/size/UTF-8/
-	// C0/DEL/C1/bidi/LS/PS scan to textutil.ValidateCronPromptStrict — the same
-	// helper the dashboard validateCronPrompt and Scheduler.SetJobPrompt call —
-	// so IM and dashboard ingress can never diverge. Null bytes are truncated by
-	// execve, C1/bidi runes corrupt terminal log viewers; LF and Tab stay
-	// allowed for multi-line / indented playbooks (json.Marshal escapes them
-	// on the stream-json wire). Unlike the dashboard, the IM edge does not
-	// additionally reject CR because IM prompts never surface raw to log
-	// pipelines. R20260603140013-ARCH-1 (#1707): validator now lives in leaf
-	// textutil so this edge no longer couples to cron for it.
+	// Same helper as dashboard validateCronPrompt / Scheduler.SetJobPrompt so
+	// IM and dashboard ingress never diverge (#1315). LF/Tab stay allowed for
+	// multi-line playbooks; CR is not rejected here unlike the dashboard.
 	if err := textutil.ValidateCronPromptStrict(prompt); err != nil {
 		return "", "", err
 	}

@@ -11,33 +11,16 @@ import (
 	"strings"
 )
 
-// moveToShimsCgroup is a no-op on Darwin. Linux needs an explicit cgroup /
-// systemd-scope move so SIGTERM at service-stop time does not propagate to
-// the shim subtree (default `KillMode=control-group` reaches every PID in
-// the cgroup). launchd's default kill semantics on macOS only target the
-// plist's main process, and a child started with Setsid: true is reparented
-// to launchd (PID 1) when the parent exits — so the shim survives a naozhi
-// restart for free, no external lifecycle move required.
+// moveToShimsCgroup is a no-op on Darwin: launchd's kill semantics only target
+// the plist's main process, and a Setsid child is reparented to launchd on
+// parent exit, so the shim survives a naozhi restart without a cgroup move.
 func moveToShimsCgroup(_ context.Context, _, _ int, _ string) {}
 
-// shimPIDBinaryMismatch reports whether the running process at pid is NOT
-// the same binary as wantBin. Linux compares /proc/PID/exe against the
-// absolute path; Darwin has no /proc, so we fall back to comparing the
-// program name reported by `ps -o comm=` against filepath.Base(wantBin).
-//
-// This is a weaker check than the Linux path:
-//   - basename collision is theoretically possible (two `naozhi` binaries
-//     installed on the same host),
-//   - rebuild detection is implicit (mach-O does not surface a
-//     "(deleted)" marker), so the gate skips the false-positive class
-//     entirely instead of stripping a suffix.
-//
-// In practice the gate exists to defeat PID reuse (naozhi shim exits, an
-// unrelated process gets the same PID before reconnect runs); a basename
-// match is sufficient for that, and matches the behavior of every other
-// shim-identity check on macOS deployments. Returns (false, err) when ps
-// fails so the caller can skip the gate the same way the Linux side
-// handles a stat error.
+// shimPIDBinaryMismatch reports whether the process at pid is NOT wantBin.
+// Darwin has no /proc, so compare `ps -o comm=` against filepath.Base(wantBin).
+// Weaker than Linux (basename collision possible, no "(deleted)" rebuild
+// marker) but sufficient for its purpose: defeating PID reuse before
+// reconnect. Returns (false, err) when ps fails so the caller skips the gate.
 func shimPIDBinaryMismatch(pid int, wantBin string) (bool, error) {
 	out, err := exec.Command("/bin/ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {

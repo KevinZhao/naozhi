@@ -10,28 +10,14 @@ import (
 	"time"
 )
 
-// SweepOldJSONL deletes JSONL files in dir whose mtime is older than
-// maxAge.  Returns the count of files removed and a non-nil error only
-// if the directory itself can't be read; per-file delete errors are
-// logged with slog.Warn and counted toward the success path (one bad
-// file shouldn't abort the whole sweep).
-//
-// SEMANTICS — single-shot only (R232-CR-10): this function performs ONE
-// pass over dir and returns. There is no internal ticker / goroutine.
-// Callers wanting periodic gardening must invoke SweepOldJSONL from
-// their own scheduler (e.g. a cron job or a Manager.Tick implementation).
-//
-// This is the Phase 1 gardening hook for dataDir/sys-sessions/ — every
-// transient system session leaves a JSONL behind in the CLI's project
-// dir, and at default 30s tick that's ~2880 files/day.  RFC §6.5 plans
-// to upgrade this into a long-running TransientSweeper daemon in
-// Phase 2 (tracked at docs/TODO.md R232-CR-10); the function shape
-// stays the same so the migration is a pull-up.
-//
-// We deliberately match only "*.jsonl" — claude CLI writes nothing
-// else under cwd, but if a future binary version drops other file
-// types (say, transient lock files) we'd rather not sweep them on
-// behalf of behaviour we don't control.
+// SweepOldJSONL performs ONE pass over dir (no internal ticker; callers
+// schedule it) deleting "*.jsonl" files whose mtime is older than maxAge.
+// Returns the count removed; the error is non-nil only if the directory
+// itself can't be read — per-file delete errors are logged and skipped. Only
+// .jsonl is matched so files a future CLI might drop (e.g. lock files) are
+// never swept on behalf of behaviour we don't control. Gardening hook for
+// dataDir/sys-sessions/, where every transient system session leaves a JSONL
+// (~2880/day at a 30s tick).
 func SweepOldJSONL(dir string, maxAge time.Duration) (int, error) {
 	if dir == "" || maxAge <= 0 {
 		return 0, nil
@@ -78,12 +64,10 @@ func SweepOldJSONL(dir string, maxAge time.Duration) (int, error) {
 	return deleted, nil
 }
 
-// EnsureWorkDir creates dir with mode 0700 if it doesn't exist, or
-// chmod's an existing dir to 0700.  Returns the absolute path.
-//
-// 0700 is load-bearing:  Runner subprocesses dump prompts (containing
-// user conversation excerpts) into JSONL inside this dir; only the
-// naozhi process user should be able to read them.
+// EnsureWorkDir creates dir with mode 0700 (or chmods an existing dir to
+// 0700) and returns the absolute path. 0700 is load-bearing: Runner
+// subprocesses dump prompts containing user conversation excerpts into JSONL
+// here; only the naozhi process user may read them.
 func EnsureWorkDir(dir string) (string, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {

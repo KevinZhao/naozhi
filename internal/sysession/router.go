@@ -4,91 +4,46 @@ import (
 	"github.com/naozhi/naozhi/internal/session/api"
 )
 
-// SystemEventEntry is the sysession-local mirror of the ≤4 event-record
-// fields AutoTitler actually reads (Type / Summary). It exists so the
-// daemon-facing SystemSessionRouter interface no longer has to import
-// internal/cli purely for the EventEntriesForKey return type
-// (R260528-ARCH-9 / #1370). The cli→SystemEventEntry conversion is
-// confined to the single adapter in router_adapter.go, which is the one
-// file in this package that still touches internal/cli.
-//
-// Field names intentionally track clievent.EventEntry (Type, Summary) so the
-// adapter is a trivial field copy; if a future daemon needs more fields,
-// widen this struct and the adapter together.
+// SystemEventEntry is the sysession-local mirror of the clievent.EventEntry
+// fields AutoTitler reads, so the daemon-facing SystemSessionRouter does not
+// import internal/cli (#1370). The conversion lives solely in
+// router_adapter.go; widen this struct and the adapter together.
 type SystemEventEntry struct {
-	// Type mirrors clievent.EventEntry.Type ("user", "text", "tool_use", …).
-	// AutoTitler filters on Type == "user".
+	// Type mirrors clievent.EventEntry.Type; AutoTitler filters on "user".
 	Type string
-	// Summary mirrors clievent.EventEntry.Summary — the brief per-turn text
-	// AutoTitler stitches into the rename excerpt.
+	// Summary mirrors clievent.EventEntry.Summary (brief per-turn text).
 	Summary string
 }
 
-// SystemSessionRouter is the minimal slice of session.Router that the
-// sysession package depends on.  Defined here (consumer-side) so:
-//
-//  1. Tests can inject fakes without pulling the whole router graph.
-//  2. A future router refactor only needs to preserve these methods to
-//     stay sysession-compatible — accidental surface-area growth becomes
-//     a compile error in main.go's wiring instead of a silent regression.
-//
-// The concrete *session.Router automatically satisfies this interface;
-// no helper required.
-//
-// This is the post-RFC-v2.1 shape:  no Reset (transient subprocess path
-// doesn't share long-lived state), no Snapshot()-as-slice in the daemon
-// hot path — VisitSessions is the streaming alternative, and dashboard
-// one-shot reads go through ListSessions on *session.Router directly
-// (this interface intentionally doesn't expose them so daemons stay on
-// the streaming path).
+// SystemSessionRouter is the minimal slice of session.Router that sysession
+// depends on, defined consumer-side so tests can inject fakes and router
+// surface growth becomes a compile error in main.go's wiring. *session.Router
+// satisfies it via routerAdapter. Daemons stay on the streaming VisitSessions
+// path; ListSessions is intentionally not exposed.
 type SystemSessionRouter interface {
-	// VisitSessions streams every session through fn (embedded from
-	// api.SessionVisitor).  fn returning false stops iteration early.
-	// Used by AutoTitler to filter candidates without materialising a
-	// slice.
-	//
-	// fn must NOT call back into Router methods that take r.mu (it
-	// runs under RLock).  The idiomatic pattern is to copy fields the
-	// daemon needs and resume work after the visit returns.
-	//
-	// Embedding the shared api.SessionVisitor mixin (instead of
-	// re-declaring VisitSessions inline) is the first sysession step of
-	// the R246-ARCH-11 / R240-ARCH-15 consolidation (#791 / #1032): the
-	// streaming-read capability now has a single canonical signature
-	// that all consumers share.
+	// VisitSessions (embedded from api.SessionVisitor) streams every session
+	// through fn; fn returning false stops early. fn runs under RLock and MUST
+	// NOT call back into Router methods that take r.mu — copy the fields the
+	// daemon needs, then resume work after the visit returns (#791).
 	api.SessionVisitor
 
-	// SetUserLabelWithOrigin is the daemon-aware label writer.  It
-	// MUST re-read LabelOrigin under r.mu before applying the write,
-	// rejecting (return false) when origin=="auto" but the live origin
-	// is "user".  See docs/rfc/system-session.md §11.1 for the race
-	// invariant.
+	// SetUserLabelWithOrigin MUST re-read LabelOrigin under r.mu before
+	// writing, returning false when origin=="auto" but the live origin is
+	// "user" (race invariant: docs/rfc/system-session.md §11.1).
 	SetUserLabelWithOrigin(key, label, origin string) bool
 
-	// ClearUserLabelOrigin is the dashboard "restore auto naming"
-	// path.  Implementation MUST clear both UserLabel AND LabelOrigin
-	// so the legacy "empty origin = user-set" rule remains
-	// unambiguous (RFC §7.3).  Returns false for unknown keys.
+	// ClearUserLabelOrigin MUST clear both UserLabel AND LabelOrigin so the
+	// "empty origin = user-set" rule stays unambiguous (RFC §7.3). Returns
+	// false for unknown keys.
 	ClearUserLabelOrigin(key string) bool
 
-	// RegisterSystemStub is reserved for future daemons that need a
-	// long-lived ManagedSession entry.  Phase 1 daemons (Runner-based)
-	// don't use it.  Misuse with a non-sys: key panics — see
-	// session.RegisterSystemStub.
+	// RegisterSystemStub is reserved for daemons needing a long-lived
+	// ManagedSession entry; a non-sys: key panics (session.RegisterSystemStub).
 	RegisterSystemStub(key, workspace, lastPrompt string)
 
-	// EventEntriesForKey returns the event-log entries for the given
-	// session key, or nil when unknown. Used by AutoTitler so the
-	// rename prompt can review the entire user-turn history rather
-	// than just the most recent prompt cached on SessionSnapshot.
-	// Returns the live process's EventLog when the session is alive,
-	// otherwise the persisted history slice.
-	//
-	// R260528-ARCH-9 (#1370): the return type is the sysession-local
-	// SystemEventEntry mirror, not clievent.EventEntry, so this daemon-facing
-	// interface no longer imports internal/cli. The concrete
-	// *session.Router (which returns []clievent.EventEntry) is bridged in via
-	// the routerAdapter in router_adapter.go — the only file in this
-	// package still importing internal/cli.
+	// EventEntriesForKey returns the event-log entries for key (live EventLog
+	// when alive, else persisted history), or nil when unknown. Returns the
+	// cli-free SystemEventEntry mirror; routerAdapter bridges from
+	// []clievent.EventEntry (#1370).
 	EventEntriesForKey(key string) []SystemEventEntry
 }

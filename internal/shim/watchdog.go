@@ -6,21 +6,15 @@ import (
 	"time"
 )
 
-// Watchdog monitors CLI health during disconnect.
-// When enabled, if no stdout line is pushed for the configured timeout,
-// the fire callback is invoked (typically to SIGKILL the CLI).
+// Watchdog monitors CLI health during disconnect: if no stdout line is pushed
+// for the configured timeout, onFire is invoked (typically SIGKILL the CLI).
 //
-// Generation counter: each Reset/Stop increments gen so that any
-// AfterFunc callback that was already scheduled but not yet running
-// will see a stale generation and exit without firing. This eliminates
-// the race where time.Timer.Reset returns false (timer already expired)
-// and the old callback fires concurrently with the new timer.
+// Generation counter: each Reset/Stop increments gen so an AfterFunc callback
+// already scheduled but not yet running sees a stale generation and exits
+// (a timer whose Reset/Stop returned false cannot race the new timer).
 //
-// The fired channel is per-Start(): once a watchdog fires we keep the
-// channel closed so the consumer observes it; on the next Start() a
-// fresh channel is allocated so a later consumer can wait again (used
-// by tests that reuse a Watchdog across scenarios; in production the
-// shim exits after a fire so this reuse does not apply).
+// The fired channel is per-Start(): once fired it stays closed for the
+// consumer; the next Start() allocates a fresh channel.
 type Watchdog struct {
 	mu      sync.Mutex
 	timeout time.Duration
@@ -28,8 +22,7 @@ type Watchdog struct {
 	fired   chan struct{}
 	running bool
 	gen     int64       // incremented on every Reset/Stop to invalidate old callbacks
-	timer   *time.Timer // current in-flight AfterFunc; stopped on Reset/Stop so
-	// high-frequency Reset does not leak runtime timers waiting their full duration.
+	timer   *time.Timer // current AfterFunc; stopped on Reset/Stop so timers do not leak
 }
 
 // NewWatchdog creates a watchdog with the given no-output timeout.
@@ -45,11 +38,9 @@ func NewWatchdog(timeout time.Duration, onFire func()) *Watchdog {
 	}
 }
 
-// scheduleTimer creates a new AfterFunc timer bound to the current generation.
-// Stops the previous timer so the runtime does not hold idle timers; gen is
-// still the correctness barrier against Stop() returning false for a callback
-// already in flight.
-// Must be called with w.mu held.
+// scheduleTimer arms a new AfterFunc bound to the current generation, stopping
+// the previous timer so idle timers are not held; gen remains the correctness
+// barrier against a callback already in flight. Must be called with w.mu held.
 func (w *Watchdog) scheduleTimer() {
 	if w.timer != nil {
 		w.timer.Stop()
@@ -69,9 +60,8 @@ func (w *Watchdog) fireIfCurrent(g int64) {
 		return
 	}
 	w.running = false
-	// Snapshot the channel under lock so a concurrent Start() that reallocates
-	// `w.fired` cannot make us double-close. The close is observable to the
-	// consumer that was already waiting on this generation's channel.
+	// Snapshot under lock so a concurrent Start() reallocating w.fired cannot
+	// cause a double-close.
 	ch := w.fired
 	w.mu.Unlock()
 
@@ -87,10 +77,8 @@ func (w *Watchdog) fireIfCurrent(g int64) {
 	}
 }
 
-// Start enables the watchdog. Called when naozhi disconnects.
-// If the watchdog previously fired, a fresh `fired` channel is allocated so
-// new consumers (e.g., the shim main loop after a reconnect scenario) do not
-// immediately observe a stale closed channel.
+// Start enables the watchdog (naozhi disconnected). A fresh fired channel is
+// allocated so new consumers do not observe a stale closed one.
 func (w *Watchdog) Start() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -98,23 +86,11 @@ func (w *Watchdog) Start() {
 	if w.running {
 		return
 	}
-	// Always allocate a fresh channel on Start. The previous select-based
-	// branch that only replaced on observed close had a race: fireIfCurrent
-	// snapshots `w.fired` under the lock and closes outside it, so Start()
-	// could race the close and observe the old channel as still-open, skip
-	// reallocation, and then Fired() would return a channel that
-	// fireIfCurrent closes moments later — giving new consumers a
-	// pre-closed handle for a superseded generation.
-	//
-	// It is safe to always reallocate because fireIfCurrent always closes
-	// the channel it snapshotted, not the current `w.fired`.
+	// Always reallocate: fireIfCurrent closes the channel it snapshotted, not
+	// the current w.fired, so this is safe and avoids racing an in-flight close.
 	w.fired = make(chan struct{})
-	// Bump the generation so any in-flight timer callback scheduled by a
-	// previous Start (post-fire, pre-reallocation) sees a stale gen in
-	// fireIfCurrent and exits without re-closing the fresh channel.
-	// Without this, two timers with the same gen can be live simultaneously:
-	// the stale one would match w.gen and close the *new* w.fired, giving
-	// new consumers a spurious fire.
+	// Bump gen so an in-flight callback from a previous Start cannot match and
+	// close the *new* w.fired (spurious fire for new consumers).
 	w.gen++
 	w.running = true
 	w.scheduleTimer()

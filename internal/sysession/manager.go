@@ -14,38 +14,21 @@ import (
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// osExit was previously the default Stop deadline-exceeded exit hook,
-// indirected through a package var so tests could swap it for panic
-// recovery. Per #1287 (R20260527-GO-5) the default OnHardFail now binds
-// os.Exit directly so a swap of this var does NOT bleed into Manager
-// instances that left cfg.OnHardFail unset. Tests that want to observe
-// the hard-fail path MUST set cfg.OnHardFail explicitly (e.g. wrap this
-// var, or supply their own no-op / panic-recovery func). Kept exported
-// at package scope only because legacy in-pkg tests may still wire
-// through it via cfg.OnHardFail = func(c int) { osExit(c) }.
+// osExit is the legacy test hook for the Stop hard-fail path. The default
+// OnHardFail binds os.Exit directly, so swapping this var only affects
+// Managers whose cfg.OnHardFail explicitly routes through it (#1287).
 var osExit = os.Exit
 
-// StopPolicyForceExit is the documented Stop-overflow strategy this
-// Manager honours: when the per-call ctx expires with daemons still in
-// flight, Stop fires OnHardFail (default os.Exit(2)). The process exits
-// rather than leaking goroutines that could touch a torn-down router.
+// StopPolicyForceExit names the Stop-overflow strategy this Manager
+// honours: when stopCtx expires with daemons still in flight, Stop fires
+// OnHardFail (default os.Exit(2)) rather than leaking goroutines that
+// could touch a torn-down router. Doc-only; not consulted at runtime (#1060).
 //
-// Why this is a string constant rather than a typed enum: cron uses
-// StopPolicyBudgetThenLeak (see internal/cron/scheduler.go) and the
-// divergence is a deliberate security decision (Sec-LOW-2 / RFC
-// system-session.md §5.2). sysession daemons run user-prompt-derived
-// strings through a CLI subprocess; a stuck goroutine touching a
-// torn-down router would risk echoing conversation excerpts into a
-// different session's reply path. cron deliveries pass through dispatch's
-// outbound retry which re-resolves the active session, so cron's
-// budget+leak strategy is safe. Aligning the two policies would
-// require reopening Sec-LOW-2; do not "harmonise" without revisiting it.
-//
-// Closes #1060 (R244-ARCH-7) — promotes the implicit decision (lived
-// only in Stop's godoc) to a typed constant operators can reference in
-// alerts / runbooks. NOT used in sysession's control flow today;
-// intentionally doc-only so future "let's check policy at runtime"
-// callers must add the comparison and its tests deliberately.
+// Deliberately diverges from cron's StopPolicyBudgetThenLeak (see
+// RFC system-session.md §5.2): sysession daemons run user-conversation
+// excerpts through a CLI subprocess and a stuck goroutine could echo them
+// into another session's reply path; cron deliveries re-resolve the active
+// session via dispatch's outbound retry, so leaking is safe there.
 const StopPolicyForceExit = "force_exit"
 
 // Config is the top-level sysession configuration handed to NewManager.
@@ -60,17 +43,13 @@ type Config struct {
 	// to defaultTickTimeout.
 	TickTimeout time.Duration
 
-	// Runner is the LLM-call abstraction shared by all daemons.
-	// Required when Enabled and at least one daemon is enabled — daemons
-	// that don't actually call an LLM (future TransientSweeper) can
-	// safely ignore the Runner.
+	// Runner is the LLM-call abstraction shared by all daemons. Required
+	// when Enabled and at least one daemon calls an LLM.
 	Runner Runner
 
-	// Router is the session router subset the daemons need.  Required
-	// when Enabled.  Accepts the producer-side RawSystemSessionRouter
-	// (satisfied directly by *session.Router); NewManager wraps it into
-	// the cli-free SystemSessionRouter the daemons consume
-	// (R260528-ARCH-9 / #1370).
+	// Router is the session router subset the daemons need. Required when
+	// Enabled. NewManager wraps the producer-side RawSystemSessionRouter
+	// (*session.Router) into the cli-free SystemSessionRouter (#1370).
 	Router RawSystemSessionRouter
 
 	// Daemons is the per-daemon config map.  Key is daemon name (must
@@ -78,32 +57,18 @@ type Config struct {
 	// tick interval + daemon-specific knobs.
 	Daemons map[string]DaemonRuntimeConfig
 
-	// WorkspaceRoots enumerates the distinct workspace roots the
-	// attachment-gc daemon sweeps. Optional — only the attachment-gc
-	// daemon consumes it; nil disables that daemon's work (it logs and
-	// no-ops). Wired in cmd/naozhi from router default workspace +
-	// per-chat overrides + project paths (docs/rfc/attachment-gc-daemon.md
-	// §4.4). Kept out of Router because it spans router + project manager.
+	// WorkspaceRoots enumerates the workspace roots the attachment-gc
+	// daemon sweeps; nil makes that daemon log and no-op. Kept out of
+	// Router because it spans router + project manager.
 	WorkspaceRoots WorkspaceRootLister
 
-	// NewTicker is an optional injection point for tests.  nil means
-	// time.NewTicker.  Test usage:
-	//
-	//   ch := make(chan time.Time, 1)
-	//   cfg.NewTicker = func(d time.Duration) (<-chan time.Time, func()) {
-	//       return ch, func() {}
-	//   }
-	//   // poke ch to drive runOnce
+	// NewTicker is an optional test injection point; nil means
+	// time.NewTicker. Tests return a channel they poke to drive runOnce.
 	NewTicker tickerFactory
 
-	// OnHardFail is invoked from Stop when stopCtx expires before
-	// daemons drain. Defaults to os.Exit (bound directly, not through
-	// the osExit package var — see #1287 / R20260527-GO-5).
-	// Embedders that wrap sysession in a larger process (tests,
-	// future supervisor that hosts cron + sysession + server in one
-	// binary) can override this to shut down cleanly without taking
-	// the whole process down. Signature mirrors os.Exit so the
-	// default is a one-line wrapper. R240-ARCH-22.
+	// OnHardFail is invoked from Stop when stopCtx expires before daemons
+	// drain. Defaults to os.Exit; embedders hosting sysession in a larger
+	// process can override it to shut down without killing the process.
 	OnHardFail func(code int)
 }
 
@@ -113,14 +78,10 @@ type Config struct {
 type DaemonRuntimeConfig struct {
 	Enabled bool
 	Tick    time.Duration
-	// RunOnStart makes runDaemonLoop fire one Tick immediately at
-	// startup, BEFORE the initial jitter + ticker loop. Without it a
-	// daemon's first Tick lands one full tick interval later (plus
-	// jitter), and a process that restarts more often than the tick
-	// interval may never tick at all. Low-frequency sweeper daemons
-	// (e.g. attachment-gc at 6h) need this; high-frequency daemons
-	// (auto-titler at 30s) generally don't. See
-	// docs/rfc/attachment-gc-daemon.md §4.6-3.
+	// RunOnStart fires one Tick immediately at startup, before the jitter +
+	// ticker loop, so a low-frequency sweeper (attachment-gc at 6h) makes
+	// progress even when the process restarts more often than its tick
+	// interval (docs/rfc/attachment-gc-daemon.md §4.6-3).
 	RunOnStart bool
 	Specific   DaemonConfig
 }
@@ -128,16 +89,13 @@ type DaemonRuntimeConfig struct {
 const (
 	defaultTickTimeout = 30 * time.Second
 
-	// defaultDaemonTickInterval is the fallback tick cadence when a daemon
-	// runtime config leaves Tick zero/negative. Distinct from
-	// defaultTickTimeout (per-Tick context budget) — this one drives how
-	// often runOnce gets scheduled.
+	// defaultDaemonTickInterval is the tick cadence when config leaves Tick
+	// zero/negative (distinct from defaultTickTimeout, the per-Tick budget).
 	defaultDaemonTickInterval = 30 * time.Second
 
-	// consecutiveCLIFailureLimit is the breaker threshold (RFC §7.4).
-	// Hit this many CLI/panic failures in a row and Manager stops the
-	// daemon until process restart.  Validation/timeout failures DO NOT
-	// count toward this limit.
+	// consecutiveCLIFailureLimit is the breaker threshold (RFC §7.4): this
+	// many CLI/panic failures in a row disable the daemon until restart.
+	// Validation/timeout failures do not count.
 	consecutiveCLIFailureLimit = 5
 )
 
@@ -150,23 +108,18 @@ func stdTickerFactory(d time.Duration) (<-chan time.Time, func()) {
 	return t.C, t.Stop
 }
 
-// daemonRecord is the per-daemon runtime state.  We hold pointers in
-// Manager.daemons (not values) so atomic fields don't relocate when
-// the slice grows during NewManager and so the runDaemonLoop goroutine
-// shares one canonical record with the rest of Manager.
+// daemonRecord is the per-daemon runtime state. Held by pointer so the
+// atomic fields never relocate and runDaemonLoop shares one record with
+// the rest of Manager.
 type daemonRecord struct {
 	daemon Daemon
 	tick   time.Duration
 
-	// inflight is the per-daemon overlap gate.  CompareAndSwap(false,
-	// true) before Tick; defer Store(false).  Manager uses atomic.Bool
-	// (not a sync.Mutex) so a stuck Tick doesn't queue new ticks behind
-	// it — overlapping ticks are explicitly skipped, not deferred.
+	// inflight is the per-daemon overlap gate: atomic.Bool rather than a
+	// mutex so overlapping ticks are skipped, not queued behind a stuck Tick.
 	inflight atomic.Bool
 
-	// disabled is set when consecutiveCLIFailures crosses the breaker
-	// threshold.  A disabled daemon's ticks short-circuit before
-	// invoking the daemon's Tick.
+	// disabled is set when the breaker trips; ticks then short-circuit.
 	disabled atomic.Bool
 
 	// Failure counters.  Atomic so the dashboard endpoint can read them
@@ -174,26 +127,20 @@ type daemonRecord struct {
 	consecutiveCLIFailures        atomic.Int32
 	consecutiveValidationFailures atomic.Int32
 
-	// processStartedAt is captured once at NewManager time so the
-	// dashboard can show "no run since process start" vs "never ran"
-	// in the UI.  Same value for every record on the same Manager
-	// instance.
+	// processStartedAt lets the dashboard distinguish "no run since process
+	// start" from "never ran"; identical for every record on a Manager.
 	processStartedAt time.Time
 
 	// runs holds the per-daemon ring buffer of completed DaemonRuns.
 	runs *runRing
 
-	// runOnStart mirrors DaemonRuntimeConfig.RunOnStart: fire one Tick
-	// at startup before the jitter+ticker loop. See DaemonRuntimeConfig.
+	// runOnStart mirrors DaemonRuntimeConfig.RunOnStart.
 	runOnStart bool
 }
 
-// ctxCancel bundles the daemon-loop context with its cancel function so
-// both are published through a single atomic.Pointer store. Folding them
-// together (R20260603-GO-4, #1653) eliminates the window that existed when
-// ctx was a plain struct field written before the cancel pointer was
-// atomically stored: a concurrent Stop could observe the cancel pointer as
-// nil while the freshly-written ctx was already driving spawned goroutines.
+// ctxCancel bundles the daemon-loop ctx with its cancel so both publish
+// through one atomic store; a concurrent Stop can never observe a live
+// ctx with a nil cancel (#1653).
 type ctxCancel struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -214,49 +161,26 @@ type Manager struct {
 	// without taking a lock.
 	daemons []*daemonRecord
 	wg      sync.WaitGroup
-	// lifeP holds the daemon-loop ctx + its cancel function once Start
-	// has installed them and spawned goroutines. nil pointer ⇒ Start has
-	// not run; non-nil ⇒ ctx is live and cancellable. R242-GO-6 replaced
-	// the previous "started atomic.Bool + plain cancel field" pair with a
-	// single atomic.Pointer; R20260603-GO-4 (#1653) further folds the
-	// plain `ctx` field into the same atomic so there is no window between
-	// the ctx field write and the cancel publish — a concurrent Stop that
-	// observes a non-nil pointer is guaranteed to see a fully-populated
-	// ctx+cancel, and runDaemonLoop reads the same single source of truth.
-	// The atomic store/load is the single happens-before edge between
-	// Start, Stop, and the daemon goroutines.
+	// lifeP holds ctx+cancel once Start has spawned goroutines; nil ⇒ Start
+	// has not run. The atomic store/load is the single happens-before edge
+	// between Start, Stop and the daemon goroutines (#1653).
 	lifeP atomic.Pointer[ctxCancel]
 
-	// telemetry holds the runtelemetry.Broadcaster registered by the host
-	// (server.Hub) so Manager produces run-lifecycle events directly onto
-	// the shared seam cron also uses (#1723 Phase 1). Held under
-	// atomic.Pointer because SetTelemetry (called late during startup
-	// wiring, after the Hub is built) can race the emitRun{Started,Ended}
-	// reads on every Tick. nil pointer ⇒ no broadcaster registered yet
-	// (tests / no-WS) and emit* is a silent no-op.
-	//
-	// R20260527-GO-1 alignment: identical atomic.Pointer[Broadcaster]
-	// shape to cron.Scheduler.telemetry — one pattern across both
-	// schedulers for the "wired late, read often" lifecycle, and the race
-	// detector enforces the invariant rather than a "main is
-	// single-threaded" doc comment. Replaces the previous
-	// atomic.Pointer[onRun*Holder] callback-pair + SetCallbacks API
-	// (deleted with hook_holders.go).
+	// telemetry is the host's runtelemetry.Broadcaster (#1723), the same
+	// seam cron uses. atomic.Pointer because SetTelemetry is wired late
+	// (after the Hub is built) and races emitRun* reads on every Tick;
+	// nil ⇒ emit* is a silent no-op. Same shape as cron.Scheduler.telemetry.
 	telemetry atomic.Pointer[runtelemetry.Broadcaster]
 
 	startOnce sync.Once
 	stopOnce  sync.Once
 }
 
-// NewManager builds a Manager from cfg.  Validates the built-in daemon
-// list, builds enabled daemons, and pre-allocates their runRings.
-//
-// Disabled (cfg.Enabled=false) returns a Manager whose Start is a no-op.
-//
-// Errors only when the configuration is internally inconsistent (a
-// daemon's Build fails, an invalid name slipped into builtinDaemons).
-// Per-daemon "enabled but no Tick interval" defaults silently, matching
-// the rest of naozhi's config approach.
+// NewManager builds a Manager from cfg: validates the built-in daemon
+// list, builds enabled daemons and pre-allocates their runRings.
+// cfg.Enabled=false yields a Manager whose Start is a no-op. Errors only
+// when the configuration is internally inconsistent; a missing Tick
+// interval defaults silently.
 func NewManager(cfg Config) (*Manager, error) {
 	validateBuiltinDaemonNames()
 
@@ -266,15 +190,9 @@ func NewManager(cfg Config) (*Manager, error) {
 	if cfg.TickTimeout <= 0 {
 		cfg.TickTimeout = defaultTickTimeout
 	}
-	// R240-ARCH-22 / #1287 (R20260527-GO-5): caller-overridable hard-fail
-	// hook. Default binds os.Exit directly (NOT through the osExit pkg
-	// var) so a test that swaps osExit AND constructs another Manager
-	// without supplying cfg.OnHardFail won't see this Manager's "default"
-	// closure read the swapped osExit at call time. Tests that need to
-	// observe the hard-fail path MUST supply cfg.OnHardFail explicitly;
-	// the osExit pkg-var is reserved for the legacy in-pkg test patterns
-	// that wire NewManager directly without setting cfg.OnHardFail and
-	// rely on the caller-side var swap (see osExit godoc).
+	// Default hard-fail hook binds os.Exit directly (not the osExit var) so
+	// a test swapping osExit can't leak into Managers that left OnHardFail
+	// unset (#1287).
 	if cfg.OnHardFail == nil {
 		cfg.OnHardFail = os.Exit
 	}
@@ -284,9 +202,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		cfg:     cfg,
 		tickFn:  cfg.NewTicker,
 	}
-	// telemetry starts nil (no broadcaster). The host wires it late via
-	// SetTelemetry once the Hub exists (#1723 Phase 1) — same late-inject
-	// shape cron uses. Until then emit* is a silent no-op.
+	// telemetry stays nil until the host wires it via SetTelemetry.
 	if !cfg.Enabled {
 		// Build nothing; Start is a no-op.
 		return m, nil
@@ -294,16 +210,11 @@ func NewManager(cfg Config) (*Manager, error) {
 	if cfg.Router == nil {
 		return nil, fmt.Errorf("sysession: NewManager requires Router when enabled")
 	}
-	// Adapt the producer-side router into the cli-free daemon-facing
-	// interface once; every daemon below gets the wrapped form so none
-	// of the daemon code path references internal/cli (R260528-ARCH-9 /
-	// #1370).
+	// Wrap once so no daemon code path references internal/cli (#1370).
 	daemonRouter := wrapRouter(cfg.Router)
 
-	// Single timestamp shared by every daemonRecord on this Manager
-	// instance — Manager represents one process start, so all daemons
-	// agree on the "since process start" baseline shown in the
-	// dashboard.
+	// One timestamp shared by every daemonRecord: a Manager represents
+	// one process start.
 	now := time.Now()
 	for _, factory := range builtinDaemons {
 		runtime, ok := cfg.Daemons[factory.Name]
@@ -320,9 +231,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		if err != nil {
 			return nil, fmt.Errorf("sysession: build daemon %q: %w", factory.Name, err)
 		}
-		// Allow Configurable daemons to surface configuration errors
-		// (Build itself can already fail; Configure is the lazy hook
-		// for daemons that prefer to validate after construction).
+		// Configure is the post-construction validation hook.
 		if c, ok := d.(Configurable); ok {
 			if err := c.Configure(runtime.Specific); err != nil {
 				return nil, fmt.Errorf("sysession: configure daemon %q: %w", factory.Name, err)
@@ -343,32 +252,12 @@ func NewManager(cfg Config) (*Manager, error) {
 	return m, nil
 }
 
-// Start launches one goroutine per enabled daemon. Start is idempotent:
-// the second and subsequent calls are no-ops — sync.Once guards the
-// goroutine spawn and a Warn line records the redundant call so an
-// embedder mis-wiring is still visible without process-killing
-// semantics.
-//
-// R260528-ARCH-16 (#1377): pre-fix this panic'd on the second call.
-// That diverged from cron.Scheduler.Start (CAS-idempotent, returns nil
-// on the second call) and made embedders that wrap naozhi as a library
-// fragile: a parent restarting only the network layer could trigger
-// SIGABRT here despite the wrapper having no clean way to coordinate
-// the start lifecycle. Aligning with the cron CAS pattern keeps the
-// "logic error in calling code" loud (slog.Warn) without taking the
-// host process down.
-//
-// Returns immediately; daemons run asynchronously. Callers should
-// invoke Stop during shutdown.
-//
-// R260528-ARCH-13 (#1374): a nil parent ctx used to panic deep inside
-// context.WithCancel (which requires non-nil parent per its contract).
-// The wireup path (internal/wireup/schedulers.go) already passes a real
-// ctx, but library embedders that forward a zero-value ctx through
-// helper layers would crash with an unhelpful stack. Fall back to
-// context.Background() with a Warn so the misuse is loud but the daemon
-// goroutines still come up — the eventual Stop(stopCtx) cancels via
-// m.lifeP regardless of which parent was used at Start.
+// Start launches one goroutine per enabled daemon and returns
+// immediately; callers invoke Stop during shutdown. Idempotent: repeat
+// calls are a Warn'd no-op, matching cron.Scheduler.Start (#1377). A nil
+// parent ctx falls back to context.Background with a Warn instead of
+// panicking inside context.WithCancel (#1374); Stop(stopCtx) cancels via
+// m.lifeP regardless.
 func (m *Manager) Start(parent context.Context) {
 	if !m.enabled {
 		return
@@ -382,15 +271,10 @@ func (m *Manager) Start(parent context.Context) {
 	m.startOnce.Do(func() {
 		ctx, cancel := context.WithCancel(parent)
 		life := &ctxCancel{ctx: ctx, cancel: cancel}
-		// Publish ctx+cancel as one atomic store BEFORE spawning the
-		// daemon goroutines (R20260603-GO-4, #1653). The store is the
-		// single happens-before edge for Start↔Stop and Start↔daemon:
-		// a concurrent Stop now either observes nil (no goroutines exist
-		// yet, nothing to cancel) or a fully-populated life (ctx is live
-		// and cancellable). The goroutines receive `life` by value at
-		// spawn, so each daemon's ctx read is ordered after this store
-		// via goroutine-creation happens-before. There is no longer a
-		// window where ctx is live but cancel is unpublished.
+		// Publish ctx+cancel as one atomic store BEFORE spawning goroutines:
+		// it is the single happens-before edge for Start↔Stop and
+		// Start↔daemon (goroutines receive `life` by value at spawn), so Stop
+		// sees either nil or a fully-populated life (#1653).
 		m.lifeP.Store(life)
 		for _, rec := range m.daemons {
 			m.wg.Add(1)
@@ -404,83 +288,37 @@ func (m *Manager) Start(parent context.Context) {
 	}
 }
 
-// Stop cancels the daemon ctx and waits for all goroutines to finish.
-// stopCtx bounds the wait — when it expires before goroutines drain we
-// log loudly and force-exit with code 2 rather than leaking goroutines
-// that may still call into Router after Router.Stop.  RFC v2.1 §5.2:
-// Tick must honour ctx; if it doesn't, the daemon is broken and the
-// operator should hear about it loudly at shutdown rather than
-// silently corrupting state.
+// Stop cancels the daemon ctx and waits for all goroutines. When stopCtx
+// expires first it logs loudly and fires OnHardFail (default exit 2)
+// rather than leaking goroutines that may call into Router after
+// Router.Stop (RFC v2.1 §5.2). Exit, not panic: a panic would dump
+// goroutine stacks carrying in-flight buildExcerpt strings (user
+// conversation fragments) into container logs (RFC §9.4),
+// and exit code 2 is a discriminable signal to systemd. The divergence
+// from cron's budget+leak Stop is deliberate; see StopPolicyForceExit.
 //
-// We prefer os.Exit(2) over panic for the deadline path:
-//   - panic would dump goroutine stacks to stderr; those stacks may
-//     contain in-flight buildExcerpt strings (= user conversation
-//     fragments).  Container logs would then leak conversation
-//     content that the deliberately-omitted WS ErrorMsg field works
-//     hard to keep server-side (RFC §9.4 / Sec-LOW-2).
-//   - exit code 2 is a discriminable signal to systemd that this was
-//     a hard shutdown failure, not a clean exit (0) and not a panic
-//     (typically 2 already, but the explicit slog message makes the
-//     cause attributable).
-//
-// R232-ARCH-13: this divergence from cron Stop's "budget + leak" stance
-// is intentional — sysession daemons run user-prompt-derived strings
-// through a CLI subprocess and a stuck goroutine touching a torn-down
-// Router would risk leaking those into another session's reply (the
-// server side of "Sec-LOW-2"). Cron's budget+leak path is safe because
-// cron deliveries pass through dispatch's outbound retry which
-// re-resolves the active session. Aligning the two policies would
-// require either (a) sysession giving up its strict no-leak invariant
-// or (b) cron adopting force-exit (regression for cron jobs that legit
-// take longer than budget). Tracked as long-running design tension; do
-// not "harmonise" without revisiting Sec-LOW-2 and cron-shutdown-budget.
-//
-// Stop is idempotent.  Subsequent calls are no-ops.
+// Stop is idempotent.
 func (m *Manager) Stop(stopCtx context.Context) {
 	if !m.enabled {
 		return
 	}
-	// R232-GO-3 / R242-GO-6 / R20260603-GO-4: short-circuit when Start was
-	// never called. lifeP (ctx+cancel) is published inside startOnce.Do as a
-	// single atomic store BEFORE goroutines spawn, so the only way to observe
-	// nil here is "Start has not entered its critical section yet" — in that
-	// case there are no goroutines in flight and no daemons to cancel and
-	// no wg slots to drain.
-	//
-	// R20260527122801-GO-003: do NOT consume stopOnce on this early path.
-	// Burning stopOnce here would silently disarm a later legitimate Stop:
-	// in a Stop→Start→Stop sequence the second Stop would observe the
-	// already-fired stopOnce and skip cancelling daemon ctx, leaking the
-	// daemon goroutines until process exit. Returning without touching
-	// stopOnce keeps the early path a true no-op so a real Stop after a
-	// successful Start still cancels the daemon ctx exactly once.
+	// lifeP is published inside startOnce.Do BEFORE goroutines spawn, so
+	// nil here means Start never ran: nothing to cancel or drain. Do NOT
+	// consume stopOnce on this path, or a Stop→Start→Stop sequence would
+	// skip the real cancel and leak the daemon goroutines.
 	life := m.lifeP.Load()
 	if life == nil {
 		return
 	}
 	m.stopOnce.Do(func() {
-		// life was loaded above and is published as a single atomic
-		// store inside Start (ctx+cancel together) — the load is the
-		// happens-before pair for that store. R20260603-GO-4 (#1653):
-		// observing non-nil life guarantees cancel is valid, so there
-		// is no window where we could see a live ctx but a nil cancel.
+		// Non-nil life guarantees cancel is valid (#1653).
 		life.cancel()
 		done := make(chan struct{})
-		// R234-GO-5: this watcher goroutine is intentionally not tracked
-		// in any WaitGroup. The only termination path on the stopCtx
-		// timeout branch is osExit(2), which terminates the entire
-		// process — abandoning the goroutine is therefore safe in
-		// production.
-		//
-		// CAVEAT for test harnesses that swap osExit (see osExit pkg
-		// var): if osExit is replaced with panic-recovery or no-op, this
-		// goroutine will block on m.wg.Wait() until some daemon finally
-		// returns, leaking a goroutine for the lifetime of the test
-		// binary. Tests that swap osExit MUST also drive every spawned
-		// daemon to return so wg.Wait can complete. Do not "fix" this
-		// by adding a context to wg.Wait — the production semantic is
-		// "block forever or kill the process", and weakening it lets
-		// stuck-daemon shutdowns silently torn-down the router.
+		// The watcher goroutine is deliberately untracked: on the timeout
+		// branch the process exits. Tests that override OnHardFail with a
+		// no-op MUST drive every daemon to return so wg.Wait completes. Do
+		// not add a ctx to wg.Wait — "block or kill the process" is the
+		// production semantic.
 		go func() {
 			m.wg.Wait()
 			close(done)
@@ -491,20 +329,10 @@ func (m *Manager) Stop(stopCtx context.Context) {
 		case <-stopCtx.Done():
 			slog.Error("sysession: Stop deadline exceeded; daemons did not honour ctx — this is a daemon bug, not a transient error",
 				"hint", "force-exit so leaking goroutines don't write to a torn-down router")
-			// R240-ARCH-22: dispatch through the configurable hook so
-			// embedders aren't forced to swap a package-level var to
-			// avoid taking the host process down. Default hook still
-			// calls osExit(2) — semantics unchanged for naozhi binary.
-			//
-			// #1286 (R20260527-COR-6): isolate the call in a recover
-			// frame. The default os.Exit never returns and never panics,
-			// but a test-supplied OnHardFail might panic. Without recover
-			// the panic propagates out of stopOnce.Do, leaves stopOnce
-			// already-fired, and (depending on the call site) leaks the
-			// watcher goroutine spawned above which is still parked on
-			// m.wg.Wait(). Logging the panic and returning normally lets
-			// Stop callers observe a clean return — they were going to be
-			// terminated anyway in the production default path.
+			// Call the configurable hook inside a recover frame: os.Exit never
+			// returns, but a test-supplied OnHardFail might panic, and an
+			// unrecovered panic would leak the watcher parked on m.wg.Wait()
+			// (#1286).
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -558,24 +386,17 @@ type DaemonStatus struct {
 	ConsecutiveValidationFailures int           `json:"consecutive_validation_failures"`
 }
 
-// runDaemonLoop is the per-daemon goroutine body.  Picks up an initial
-// jitter delay so all daemons don't fire simultaneously at t=0, then
-// drives the ticker until ctx cancellation.
-//
-// time.NewTimer + Stop on the jitter (NOT time.After) so a fast-shutdown
-// case doesn't leak the timer past goroutine exit.  RFC v2.1 §5.1.
+// runDaemonLoop is the per-daemon goroutine body: optional RunOnStart
+// tick, initial jitter so daemons don't fire in lockstep at t=0, then
+// the ticker until ctx cancellation. time.NewTimer + Stop (not
+// time.After) so a fast shutdown doesn't leak the timer (RFC v2.1 §5.1).
 func (m *Manager) runDaemonLoop(rec *daemonRecord, life *ctxCancel) {
 	defer m.wg.Done()
-	// life is passed by Start at spawn time (R20260603-GO-4, #1653); reading
-	// life.ctx here is ordered after Start's atomic store via goroutine-
-	// creation happens-before, so no atomic load is needed on this hot path.
+	// life arrives by value at spawn; reading life.ctx needs no atomic load.
 	ctx := life.ctx
 
-	// RunOnStart: fire one Tick immediately, before the jitter+ticker
-	// loop. Low-frequency sweepers (attachment-gc) need a deterministic
-	// startup run so a process that restarts more often than its tick
-	// interval still makes progress. Honour ctx + breaker first so a
-	// cancelled/disabled daemon doesn't tick. See DaemonRuntimeConfig.
+	// RunOnStart: honour ctx + breaker so a cancelled/disabled daemon
+	// doesn't tick.
 	if rec.runOnStart {
 		select {
 		case <-ctx.Done():
@@ -587,12 +408,9 @@ func (m *Manager) runDaemonLoop(rec *daemonRecord, life *ctxCancel) {
 		}
 	}
 
-	// Jitter range = [0, tick).  Done before the first tick so daemons
-	// with similar tick periods (e.g. two daemons both at 30s) don't
-	// pile up in lockstep.
+	// Jitter in [0, tick) so daemons with equal periods don't pile up.
 	if rec.tick > 0 {
-		// rec.tick is at least 1ns by construction; mrand.Int64N panics
-		// on n<=0, so the guard above is required.
+		// mrand.Int64N panics on n<=0, so the guard above is required.
 		delay := time.Duration(mrand.Int64N(int64(rec.tick)))
 		jitter := time.NewTimer(delay)
 		select {
@@ -619,15 +437,10 @@ func (m *Manager) runDaemonLoop(rec *daemonRecord, life *ctxCancel) {
 	}
 }
 
-// runOnce executes one Tick on rec.  Combines the CAS gate, panic
-// recovery, ctx-with-timeout, and run recording into a single
-// well-ordered defer.
-//
-// The single combined defer (panic recovery + inflight reset +
-// recordRun) is intentional:  splitting them across multiple defers
-// creates an ordering bug where panic-recover may run before
-// inflight.Store(false), potentially leaving the daemon's CAS gate
-// stuck open.  Keep this in one place.  RFC v2.1 §5.1.
+// runOnce executes one Tick on rec. Panic recovery, inflight reset and
+// recordRun live in ONE defer on purpose: split across defers, recover
+// could run before inflight.Store(false) and leave the CAS gate stuck
+// (RFC v2.1 §5.1).
 func (m *Manager) runOnce(ctx context.Context, rec *daemonRecord, trigger DaemonTriggerKind) {
 	if !rec.inflight.CompareAndSwap(false, true) {
 		slog.Debug("sysession: skipping overlapping tick",
@@ -645,13 +458,9 @@ func (m *Manager) runOnce(ctx context.Context, rec *daemonRecord, trigger Daemon
 		isPanic bool
 	)
 
-	// R232-GO-5/GO-6: declare tickCtx + defer cancel BEFORE the combined
-	// recover/inflight/recordRun defer. defer is LIFO, so this layout
-	// makes the combined defer run first (handles panic + clears CAS +
-	// records the run), then cancel() releases the timeout context.
-	// Reversing the order leaves any goroutine reading tickCtx during
-	// recordRun observing a context that was already cancelled by the
-	// inner defer — easy to misclassify as DaemonErrorClassCanceled.
+	// cancel is deferred BEFORE the combined defer (LIFO) so the run is
+	// recorded before the timeout ctx is cancelled; reversed, a goroutine
+	// reading tickCtx during recordRun would see it already cancelled.
 	tickCtx, cancel := context.WithTimeout(ctx, m.cfg.TickTimeout)
 	defer cancel()
 
@@ -660,17 +469,13 @@ func (m *Manager) runOnce(ctx context.Context, rec *daemonRecord, trigger Daemon
 			isPanic = true
 			tickErr = fmt.Errorf("sysession: daemon %q panicked: %v",
 				rec.daemon.Name(), r)
-			// The recover value can echo arbitrary daemon state (e.g. a
-			// panic carrying conversation text); scrub it before logging so
-			// the same SanitizeForLog policy as env.go/runner.go applies.
+			// The recover value can carry conversation text; scrub before logging.
 			slog.Error("sysession: daemon panic",
 				"daemon", rec.daemon.Name(),
 				"recover", osutil.SanitizeForLog(fmt.Sprintf("%v", r), 256))
 		}
-		// inflight reset MUST happen after recover so a panicking Tick
-		// can't permanently jam the CAS gate.  The single combined
-		// defer (recover + Store + recordRun) makes this ordering
-		// observable in one place.
+		// inflight reset MUST follow recover so a panicking Tick can't jam
+		// the CAS gate.
 		rec.inflight.Store(false)
 		m.recordRun(rec, runID, trigger, startedAt, report, tickErr, isPanic)
 	}()
@@ -678,19 +483,14 @@ func (m *Manager) runOnce(ctx context.Context, rec *daemonRecord, trigger Daemon
 	report, tickErr = rec.daemon.Tick(tickCtx)
 }
 
-// recordRun writes the DaemonRun to the per-daemon ring, updates the
-// failure counters, trips the breaker if needed, and fires emitRunEnded.
-//
-// Failure-class counters (RFC §7.4):
-//
-//   - Upstream / Panic:  consecutiveCLIFailures++.  At ≥ limit, set
-//     rec.disabled = true.
-//   - Validation:  consecutiveValidationFailures++.  Does NOT trip the
-//     breaker (one bad candidate shouldn't kill the daemon).
-//   - Timeout:  surfaced for observability.  Does NOT trip the breaker
-//     and does NOT clear other counters (a stretch of timeouts followed
-//     by an upstream error would still trigger the breaker correctly).
-//   - Success:  resets BOTH counters.
+// recordRun appends the DaemonRun to the ring, updates failure counters,
+// trips the breaker and fires emitRunEnded. Counters (RFC §7.4):
+//   - Upstream / Panic: consecutiveCLIFailures++; at ≥ limit set disabled.
+//   - Validation: consecutiveValidationFailures++; never trips the breaker.
+//   - Timeout / Canceled: recorded only; counters untouched, so a timeout
+//     streak followed by an upstream error still trips, and an orderly
+//     shutdown doesn't reset a success streak.
+//   - Success: resets both counters.
 func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTriggerKind,
 	startedAt time.Time, report TickReport, err error, isPanic bool) {
 	endedAt := time.Now()
@@ -707,18 +507,10 @@ func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTrigg
 		Stats:      flattenTickReport(report),
 	}
 	if err != nil {
-		// R260528-BUG-21: belt-and-braces sanitisation on the persisted
-		// error message. runner.go already SanitizeForLog's stderr before
-		// fmt.Errorf wraps it (see "sysession: runner stderr" path), but
-		// other err sources reaching recordRun (timeouts, panics-as-error,
-		// validation errors carrying user-supplied strings) bypass that
-		// hop, so a control rune or oversized payload can land in the
-		// run-history JSONL and propagate to the dashboard / log via the
-		// DaemonRunEnded callback. Sanitise here as the centralised gate.
-		// 1024 cap matches the dashboard run-history line budget — long
-		// enough to preserve the meaningful tail of a wrapped error chain
-		// without letting a misbehaving daemon write multi-KB strings to
-		// every run record.
+		// Centralised sanitisation: panics-as-error and validation errors
+		// carrying user strings bypass runner.go's stderr scrub and would
+		// otherwise reach run-history JSONL and the dashboard. 1024 matches
+		// the dashboard run-history line budget.
 		dr.ErrorMsg = osutil.SanitizeForLog(err.Error(), 1024)
 	}
 	rec.runs.Append(dr)
@@ -738,15 +530,10 @@ func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTrigg
 				"last_error", err)
 		}
 	case DaemonErrorClassTimeout:
-		// Intentionally do nothing — see comment above.  Timeouts
-		// surface via the run record (state=DaemonRunTimedOut) without
-		// touching counters.
+		// Timeouts surface via the run record only.
 	case DaemonErrorClassCanceled:
-		// Same as Timeout — Canceled means the operator shut us down
-		// or naozhi is restarting, NOT that the daemon is broken.
-		// State=DaemonRunCanceled records the event without touching
-		// the breaker counters or the success counters (so a long
-		// success streak is not nuked by an orderly shutdown). R236-QA-05.
+		// Canceled means orderly shutdown, not a broken daemon; leave all
+		// counters alone.
 	}
 
 	m.emitRunEnded(rec.daemon.Name(), runID, dr.State, dr.DurationMS, dr.ErrorClass, dr.Trigger)

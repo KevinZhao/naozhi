@@ -28,8 +28,7 @@ func notifyUSR2(ch chan<- os.Signal) {
 	signal.Notify(ch, syscall.SIGUSR2)
 }
 
-// setSetsid sets Setsid on cmd so it starts in a new session, detached from
-// the parent process group. This allows the shim to outlive its parent.
+// setSetsid starts cmd in a new session so the shim can outlive its parent.
 func setSetsid(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}

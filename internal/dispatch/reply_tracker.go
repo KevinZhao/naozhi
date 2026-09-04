@@ -15,109 +15,72 @@ import (
 )
 
 // replyTracker manages IM status message streaming (thinking -> tool_use -> result).
-//
-// statusLines is read+mutated under linesMu by onEvent (called serially by the
-// CLI event loop) and read by editLoop. Joining to a single string is deferred
-// to the read path so we don't waste allocations on events that are coalesced
-// away by the 1-per-second rate limit.
+// statusLines is mutated under linesMu by onEvent (serial CLI event loop) and
+// read by editLoop; joining is deferred to the read path so events coalesced
+// away by the 1/s rate limit cost no allocation.
 type replyTracker struct {
 	ctx    context.Context
 	p      platform.Platform
 	chatID string
-	// chatType is the originating session's chat type ("direct"/"group"),
-	// embedded into AskUserQuestion cards so transports that can't recover it
-	// from the card-action callback (Feishu WS) route the answer back to the
-	// same session key the question was asked in. See QuestionCard.ChatType.
+	// chatType ("direct"/"group") is embedded into AskUserQuestion cards so
+	// transports that can't recover it from the card callback (Feishu WS)
+	// route the answer back to the originating session key.
 	chatType string
-	// agentID is the originating session's agent id, embedded into
-	// AskUserQuestion cards so the card-click answer routes back to the same
-	// agent session that asked the question rather than "general" (#2148).
-	// See QuestionCard.AgentID.
+	// agentID is embedded into AskUserQuestion cards so the answer routes back
+	// to the asking agent session rather than "general" (#2148).
 	agentID string
 	// thinkingMsgID is written by the Reply goroutine spawned in onEvent and
-	// read by editLoop + by sendAndReply (via waitReady→ctx.Done fallback).
-	// When ctx cancels, waitReady can return before msgIDReady is closed,
-	// so the subsequent read can race the goroutine's write. atomic.Pointer
-	// gives race-detector–clean visibility without extending linesMu's scope.
+	// read by editLoop/sendAndReply; on ctx cancel waitReady may return before
+	// msgIDReady closes, so the read races the write — hence atomic.
 	thinkingMsgID atomic.Pointer[string]
 	msgIDReady    chan struct{}
 	sent          sync.Once
 	editCh        chan struct{} // buffered(1), signals editLoop to redraw
 	done          chan struct{} // closed when the owning turn completes; exits editLoop
-	// finalized is set by sendAndReply just before it writes the final
-	// answer onto the thinking banner. editLoop checks it after waking on a
-	// buffered editCh signal: a late status redraw firing between the final
-	// EditMessage and the deferred stop() would otherwise overwrite the
-	// real answer with stale interim status (#2291). The window exists
-	// because stop() is deferred — editLoop is still live across the final
-	// edit and editCh (cap 1) may hold a residual signal.
+	// finalized is set by sendAndReply just before it writes the final answer
+	// onto the banner. editLoop checks it on wake so a residual buffered editCh
+	// signal cannot repaint stale interim status over the real answer (#2291).
 	finalized atomic.Bool
 	linesMu   sync.Mutex // guards statusLines
-	// statusLines is a pre-allocated slice capped at maxStatusLines (8) by
-	// appendStatusLine — it grows up to that bound and then drops the head
-	// via copy-to-front (see status.go). Joining to a single string is
-	// deferred to the read path (renderStatus). R230-CQ-15.
+	// statusLines is capped at maxStatusLines by appendStatusLine (drops the
+	// head when full); joined lazily in renderStatus.
 	statusLines []string
 
-	// TodoWrite delivery: onEvent publishes the latest checklist text into
-	// pendingTodo (atomic.Pointer — single-writer race-free overwrite) and
-	// signals todoWake (buffered(1)) so todoLoop consumes exactly once per
-	// burst. Claude Code emits TodoWrite as a full snapshot on every
-	// mutation, so dropping intermediate states is safe (last render ==
-	// latest truth). Replaces the previous drain-and-replace channel pattern
-	// which had a TOCTOU race where todoLoop could consume the drained
-	// value before onEvent's replace write, silently dropping the newest
-	// snapshot.
+	// TodoWrite delivery: onEvent stores the latest checklist into pendingTodo
+	// (last-write-wins; TodoWrite is a full snapshot so intermediate states are
+	// discardable) and signals todoWake (buffered(1)) so todoLoop consumes once
+	// per burst with no drain-vs-replace TOCTOU window.
 	pendingTodo atomic.Pointer[string]
 	todoWake    chan struct{}
-	// lastTodoText is the last checklist text posted to chat; read and
-	// written only from todoLoop so no synchronisation is required.
+	// lastTodoText is read/written only from todoLoop; no synchronisation needed.
 	lastTodoText string
 
-	// loopWG tracks editLoop + todoLoop + (reserved) the initial-Reply
-	// goroutine so stop() can wait for them before sendAndReply returns.
-	// Without this, a slow goroutine parked inside a 15s platform Reply
-	// could leak into the next turn and post a stale checklist for the
-	// wrong session.
+	// loopWG tracks editLoop + todoLoop + the reserved initial-Reply goroutine
+	// so stop() waits for them; otherwise a goroutine parked in a slow platform
+	// Reply could leak into the next turn and post for the wrong session.
 	loopWG sync.WaitGroup
 
-	// initialReplyReservation ensures the pre-allocated loopWG slot for the
-	// initial-Reply goroutine is Done'd exactly once — either by the
-	// onEvent goroutine itself when it finishes the Reply, or by stop()
-	// when the turn ends before any event fires. Pre-allocating the slot
-	// (versus Add'ing inside sent.Do) avoids the WaitGroup race where
-	// Add(1) could execute after Wait() returned with counter == 0.
-	// supportsInterim=false trackers never reserve this slot, so releaseIfReserved
-	// is a no-op.
+	// initialReplyReservation Done's the pre-allocated loopWG slot for the
+	// initial-Reply goroutine exactly once — from that goroutine or from stop()
+	// if the turn ends before any event. Pre-allocating avoids Add(1) racing a
+	// Wait() that already returned. Unreserved when supportsInterim=false.
 	initialReplyReservation   sync.Once
 	initialReplyReservationOn bool
 
-	// supportsInterim caches platform.SupportsInterimMessages(p) at
-	// construction time. The value is stable for the lifetime of a turn
-	// and the function is called per streaming event in onEvent — caching
-	// removes one interface dispatch per event on busy sessions.
-	// R216-PERF-13.
+	// supportsInterim caches platform.SupportsInterimMessages(p); it is
+	// consulted per streaming event.
 	supportsInterim bool
 
-	// singleUseToken caches platform.UsesSingleUseReplyToken(p) at
-	// construction time. When true the platform (e.g. Weixin iLink) can
-	// deliver only ONE reply per inbound message — its context_token is
-	// consumed by the first Reply and rejected on reuse. #2147: a standalone
-	// TodoWrite (or any non-final) Reply would burn that token before the
-	// final answer is sent via sendAndReply, so the real answer is rejected
-	// upstream and silently lost. We therefore suppress the standalone
-	// TodoWrite delivery entirely on these platforms (and skip starting
-	// todoLoop), reserving the single reply for the final answer.
+	// singleUseToken caches platform.UsesSingleUseReplyToken(p). Such
+	// platforms (Weixin iLink) accept ONE reply per inbound message, so a
+	// standalone TodoWrite Reply would burn the token and the final answer
+	// would be rejected upstream; TodoWrite delivery is suppressed (#2147).
 	singleUseToken bool
 
-	// askQuestionFired signals that this turn emitted at least one
-	// AskUserQuestion card. Read by sendAndReply to suppress the bailout
-	// text that `claude -p` always produces after auto-rejecting the
-	// tool ("I've asked you..."). Without this suppression users see a
-	// redundant message next to the card; with it, only the card surfaces
-	// and the session "appears" to be waiting for the answer. Written
-	// from onEvent (readLoop goroutine) and read after waitReady returns,
-	// so atomic access is sufficient.
+	// askQuestionFired records that this turn emitted an AskUserQuestion card;
+	// sendAndReply uses it to suppress the bailout text `claude -p` produces
+	// after auto-rejecting the tool, so only the card surfaces. Written from
+	// onEvent, read after waitReady — atomic suffices.
 	askQuestionFired atomic.Bool
 }
 
@@ -130,10 +93,8 @@ func (t *replyTracker) releaseInitialReplySlot() {
 	})
 }
 
-// markFinalized signals that the final answer is being (or has been)
-// committed to the banner. After this, editLoop drops any pending status
-// redraw rather than overwriting the answer with stale interim status
-// (#2291). Idempotent.
+// markFinalized signals that the final answer is being committed to the
+// banner; editLoop then drops pending status redraws (#2291). Idempotent.
 func (t *replyTracker) markFinalized() {
 	t.finalized.Store(true)
 }
@@ -162,9 +123,7 @@ func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatTyp
 		supportsInterim: supportsInterim,
 		singleUseToken:  singleUseToken,
 	}
-	// statusLines is only ever written when supportsInterim is true (see
-	// onEvent's gate). Skip the per-turn make on platforms (Weixin,
-	// non-edit Discord) that never use it. R216-PERF-19.
+	// statusLines is only written when supportsInterim (onEvent's gate).
 	if supportsInterim {
 		t.statusLines = make([]string, 0, maxStatusLines)
 	}
@@ -175,19 +134,14 @@ func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatTyp
 	} else {
 		t.loopWG.Add(1)
 		go t.editLoop()
-		// Reserve a WaitGroup slot for the initial-Reply goroutine spawned
-		// in onEvent's sent.Do. Adding inside sent.Do races stop()'s
-		// loopWG.Wait() — once Wait observes counter == 0 it may return
-		// before onEvent fires, and a later Add(1) is forbidden. The
-		// reservation is released exactly once by releaseInitialReplySlot,
-		// called either from the onEvent goroutine's defer or from stop().
+		// Reserve the loopWG slot for the initial-Reply goroutine here: Add(1)
+		// inside sent.Do could run after stop()'s Wait returned with counter 0.
+		// Released exactly once via releaseInitialReplySlot.
 		t.loopWG.Add(1)
 		t.initialReplyReservationOn = true
 	}
-	// #2147: skip todoLoop on single-use-token platforms. A standalone
-	// TodoWrite Reply would consume the one-shot context_token before the
-	// final answer is sent, so the real answer is rejected upstream and
-	// lost. The onEvent TodoWrite branch is gated on the same flag below.
+	// Single-use-token platforms never post standalone TodoWrite (#2147); see
+	// the matching gate in onEvent.
 	if !t.singleUseToken {
 		t.loopWG.Add(1)
 		go t.todoLoop()
@@ -195,15 +149,10 @@ func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatTyp
 	return t
 }
 
-// todoLoop reads the latest pendingTodo snapshot on each wake signal and
-// posts it synchronously so at most one Reply is in flight at a time. The
-// atomic.Pointer mailbox + wake semaphore pattern avoids the TOCTOU window
-// that a drain-and-replace channel had: onEvent can overwrite pendingTodo
-// unconditionally, todoLoop always reads the freshest value. Exits when
-// t.done closes or ctx cancels. Defers Done so loopWG.Wait() unblocks in
-// stop(). A final pendingTodo check on ctx.Done is deliberately skipped —
-// if the turn was cancelled, posting a stale checklist to the chat is
-// worse than dropping it.
+// todoLoop posts the latest pendingTodo snapshot on each wake, synchronously
+// so at most one Reply is in flight. Exits when t.done closes or ctx cancels;
+// a final pendingTodo flush on ctx.Done is deliberately skipped — posting a
+// stale checklist to a cancelled turn is worse than dropping it.
 func (t *replyTracker) todoLoop() {
 	defer t.loopWG.Done()
 	for {
@@ -220,21 +169,14 @@ func (t *replyTracker) todoLoop() {
 	}
 }
 
-// sendAskQuestionCard posts the AskUserQuestion card on a detached goroutine.
-// onEvent runs on the readLoop path; a synchronous Feishu Open API call
-// could park there for up to 15s on flaky networks, stalling every event
-// for every session multiplexed through this process. The handler returns
-// immediately while the card post completes in the background, bounded by
-// its own 15s ctx. Any error falls back to a plain-text fallback post.
-//
-// Safety: snapshot (p, chatID) so later mutations to t don't race with the
-// goroutine. R218-GO-1: rctx derives from context.Background() rather than
-// turnCtx — the turn ctx may already be near its deadline (or cancelled by
-// a fresh /new from the user) by the time the card is dispatched, which
-// would silently abort the Feishu Open API call mid-flight and leave the
-// user staring at an empty status line. The card is essentially a UI
-// notification with its own 15s budget; it should outlive the originating
-// turn so the user actually sees the question.
+// sendAskQuestionCard posts the AskUserQuestion card on a detached goroutine:
+// onEvent runs on the readLoop path and a synchronous Feishu call could park
+// it for up to 15s, stalling every session in this process. The card's ctx
+// derives from context.Background(), not the turn ctx: the turn may be near
+// its deadline or cancelled by a fresh /new, which would abort the API call
+// mid-flight and leave the user with no question. Errors fall back to a
+// plain-text post. (p, chatID) are snapshotted so later mutations to t don't
+// race the goroutine.
 func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 	if aq == nil || len(aq.Items) == 0 {
 		return
@@ -242,9 +184,8 @@ func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 	p := t.p
 	chatID := t.chatID
 
-	// Track on loopWG so stop() blocks until the card send finishes — without
-	// it a slow Feishu Reply parked inside SendQuestionCard could leak past the
-	// turn boundary and post for the wrong session. R249-GO-1.
+	// Track on loopWG so stop() blocks until the card send finishes and cannot
+	// leak past the turn boundary.
 	t.loopWG.Add(1)
 	go func() {
 		defer t.loopWG.Done()
@@ -254,10 +195,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "panic", r)
 			}
 		}()
-		// R247-ARCH-10 (#632): card-send detach goes through NotifyCtx
-		// alongside the other dispatch sites. The card must outlive the
-		// originating turn so a near-deadline /new doesn't drop it
-		// mid-flight (R218-GO-1).
+		// Detached via NotifyCtx like the other dispatch reply sites (#632).
 		rctx, cancel := NotifyCtx(context.Background(), NotifyKindAskQuestionCard, platformReplyTimeout)
 		defer cancel()
 
@@ -318,12 +256,9 @@ func (t *replyTracker) sendAskQuestionFallback(ctx context.Context, aq *clievent
 	}
 }
 
-// sendTodoMessage posts the rendered checklist as a standalone Reply. Identical
-// consecutive checklists are suppressed so repeated TodoWrite calls that didn't
-// change anything don't spam the chat. Uses an independent bounded ctx so a
-// hung platform call can't outlive the turn. todoLoop is the sole caller and
-// runs in a single goroutine, so the dedup field is unsynchronised by design —
-// the mutex Round 47 had was protecting a field with only one reader/writer.
+// sendTodoMessage posts the rendered checklist as a standalone Reply, skipping
+// identical consecutive checklists. todoLoop is the sole caller (one
+// goroutine), so lastTodoText needs no lock.
 func (t *replyTracker) sendTodoMessage(text string) {
 	if text == "" {
 		return
@@ -333,77 +268,47 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	}
 	t.lastTodoText = text
 
-	// R236-GO-1: detach from t.ctx so a near-deadline turn can still finish writing TodoWrite.
-	// R247-ARCH-10 (#632): routed through NotifyCtx for parity with the
-	// other dispatch detached-reply sites.
+	// Detached from t.ctx via NotifyCtx so a near-deadline turn still delivers (#632).
 	rctx, cancel := NotifyCtx(t.ctx, NotifyKindTodoMessage, platformReplyTimeout)
 	defer cancel()
 	if _, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
-		// R238-CR-5: previously slog.Debug — silent because R236-GO-1
-		// detached this Reply from t.ctx, so cancellation no longer
-		// short-circuits errors. Promote to Warn to match the
-		// ask_question card-send failure path on the same tracker
-		// (Warn is the in-this-file convention for platform Reply
-		// failures the user-visible turn cared about).
+		// Warn, not Debug: the Reply is detached, so cancellation no longer masks errors.
 		slog.Warn("todo reply failed", "chat_id", t.chatID, "err", err)
 	}
 }
 
-// stop signals the editLoop and todoLoop goroutines to exit and waits for
-// them to finish. Safe to call multiple times. Waiting prevents a loop
-// parked inside a slow platform Reply from leaking into the next turn and
-// posting a stale status/checklist for the wrong session.
+// stop signals editLoop/todoLoop to exit and waits for them, so a loop parked
+// in a slow platform Reply cannot leak into the next turn and post a stale
+// status/checklist for the wrong session. Safe to call multiple times.
 func (t *replyTracker) stop() {
 	select {
 	case <-t.done:
 	default:
 		close(t.done)
 	}
-	// Release the pre-allocated initial-Reply slot if onEvent never fired.
-	// releaseInitialReplySlot is a no-op when the slot was already released
-	// by the onEvent goroutine's defer.
+	// No-op if the onEvent goroutine already released the slot.
 	t.releaseInitialReplySlot()
 	t.loopWG.Wait()
-	// R246-GO-14: clear the pendingTodo mailbox after the loop has exited.
-	// onEvent may have stashed a final todo snapshot just before close(t.done)
-	// raced ahead of todoLoop's wake; without this Store(nil) the *string
-	// (and its underlying byte buffer) stays reachable from the tracker
-	// instance until the tracker itself is GC'd, holding ~few-hundred bytes
-	// per stopped session for an extra GC cycle. Done after loopWG.Wait so
-	// the loop cannot be racing against this Store at the same instant.
+	// Clear the mailbox after the loop exited so a final snapshot stashed just
+	// before close(t.done) doesn't stay reachable until the tracker is GC'd.
 	t.pendingTodo.Store(nil)
 }
 
 func (t *replyTracker) onEvent(ev cli.Event) {
-	// AskUserQuestion: when the assistant emits a tool_use for this tool,
-	// the CLI auto-rejects it (verified in test/e2e/askuser — CC injects
-	// is_error:true tool_result within ~3ms in -p mode). We surface the
-	// question as a native interactive card (or a plain-text fallback)
-	// so the next user turn carries the selected option(s).
+	// The CLI auto-rejects AskUserQuestion in -p mode (is_error tool_result
+	// within ~3ms); surface it as a card (or text fallback) so the next user
+	// turn carries the selected option(s).
 	if ev.AskQuestion != nil {
 		t.askQuestionFired.Store(true)
 		t.sendAskQuestionCard(ev.AskQuestion)
-		// Fall through so the existing status-banner logic (tool_use line etc.)
-		// also runs — the card is a parallel surface, not a replacement.
+		// Fall through: the card is a parallel surface, the status banner still runs.
 	}
 
-	// TodoWrite gets its own chat bubble: send as a standalone Reply so it
-	// isn't overwritten by the next banner edit, and so platforms that don't
-	// support interim edits (Weixin) still surface the checklist — the task
-	// list is terminal output, not a transient "thinking" banner.
-	//
-	// Hand off to todoLoop via an atomic.Pointer mailbox + wake semaphore:
-	// overwrite pendingTodo unconditionally (last-write-wins; TodoWrite is a
-	// full snapshot so intermediate states are discardable), then signal
-	// todoWake with a non-blocking send. todoLoop Swap-reads the pointer on
-	// each wake so it always sees the freshest value — no race window where
-	// a consumer drains and the producer's replace finds an empty queue.
+	// TodoWrite gets its own chat bubble so it isn't overwritten by the next
+	// banner edit and still surfaces on platforms without interim edits. Hand
+	// off to todoLoop via the pendingTodo mailbox + todoWake (see fields).
 	if text, ok := extractTodoMessage(ev); ok {
-		// #2147: on single-use-token platforms (Weixin iLink) a standalone
-		// TodoWrite Reply would burn the one-shot context_token before the
-		// final answer, so suppress it — the checklist is interim output and
-		// the single reply must be reserved for the real answer. todoLoop is
-		// not started for these platforms, so just drop the snapshot.
+		// Single-use-token platforms: drop it, todoLoop isn't running (#2147).
 		if t.singleUseToken {
 			return
 		}
@@ -411,8 +316,7 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 		select {
 		case t.todoWake <- struct{}{}:
 		default:
-			// Wake already pending; todoLoop will pick up the fresher
-			// pendingTodo value when it processes the existing signal.
+			// Wake already pending; todoLoop will read the fresher value.
 		}
 		return
 	}
@@ -421,13 +325,9 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 		return
 	}
 
-	// #1957: Only assistant events carry meaningful status content.
-	// Result events and other non-assistant frames must not fire the
-	// initial Reply banner: in passthrough mode a result event is
-	// delivered to onEvent for each slot owner (including merged-follower
-	// slots), and result events have ev.Message==nil which would cause
-	// formatEventLine to return "" → fallback "💭 思考中..." → a permanent
-	// orphan banner on platforms that support interim edits (Feishu).
+	// Only assistant events carry status content (#1957): in passthrough mode
+	// result events (ev.Message==nil) reach every slot owner and would fire a
+	// permanent orphan "💭 思考中..." banner.
 	if ev.Type != "assistant" {
 		return
 	}
@@ -445,20 +345,12 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 	// defer rendering to editLoop's rate-limited drain.
 	t.sent.Do(func() {
 		snapshot := t.renderStatus()
-		// The WaitGroup slot was pre-allocated in newIMEventTracker so that
-		// stop() can't observe counter == 0 and return before this goroutine
-		// finishes. releaseInitialReplySlot (via its sync.Once) ensures
-		// the slot is Done'd exactly once regardless of whether onEvent
-		// or stop runs first.
+		// The loopWG slot was pre-reserved in newIMEventTracker; see releaseInitialReplySlot.
 		go func() {
 			defer t.releaseInitialReplySlot()
 			defer close(t.msgIDReady)
-			// Independent bounded ctx: a hung platform HTTP call would
-			// otherwise keep this goroutine alive for the full turn timeout
-			// (5min), blocking the editLoop waiter and downstream
-			// shutdown WaitGroups. 15s is well above normal p99 Feishu
-			// reply latency (<2s) and respects the parent ctx for early
-			// cancel.
+			// Bounded ctx: a hung platform call must not hold this goroutine
+			// (and editLoop + shutdown WaitGroups) for the full turn timeout.
 			rctx, cancel := context.WithTimeout(t.ctx, platformReplyTimeout)
 			defer cancel()
 			id, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: snapshot})
@@ -483,9 +375,7 @@ func (t *replyTracker) renderStatus() string {
 	if len(t.statusLines) == 0 {
 		return ""
 	}
-	// strings.Join allocates both a growing []byte scratch buffer and the
-	// final string. For the common 3-10 line case a Builder with a capacity
-	// estimate issues a single allocation.
+	// Builder+Grow: one allocation instead of strings.Join's two.
 	total := len(t.statusLines) - 1 // separators
 	for _, l := range t.statusLines {
 		total += len(l)
@@ -514,23 +404,17 @@ func (t *replyTracker) editLoop() {
 		return
 	}
 
-	// Go 1.23+ made timer Stop/Reset self-draining; the manual channel drain
-	// of pre-1.23 idioms is no longer needed (and would even deadlock on a
-	// zero-duration timer that has not yet fired on a slow scheduler).
 	rateTimer := time.NewTimer(0)
 	defer rateTimer.Stop()
 
 	for {
 		select {
 		case <-t.editCh:
-			// #2291: skip the redraw once sendAndReply has committed (or is
-			// about to commit) the final answer onto the banner. A residual
-			// buffered editCh signal must not repaint stale interim status
-			// over the real reply.
+			// Skip the redraw once sendAndReply committed the final answer; a
+			// residual buffered signal must not repaint stale status (#2291).
 			if t.finalized.Load() {
 				continue
 			}
-			// Render lazily — only once per rate-limited edit rather than per event.
 			text := t.renderStatus()
 			if msgID := t.getThinkingMsgID(); msgID != "" && text != "" {
 				if err := t.p.EditMessage(t.ctx, msgID, text); err != nil {

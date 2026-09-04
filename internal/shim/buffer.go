@@ -24,21 +24,13 @@ type bufLine struct {
 	data []byte
 }
 
-// defaultRingMaxLines is the fallback line-count cap when NewRingBuffer
-// is called with maxLines<=0. 10k lines covers a typical Claude turn's
-// stdout (a few hundred lines of streaming) with margin for replay on
-// reconnect.
-//
-// Single source of truth: ManagerConfig.BufferSize (manager.go) defaults
-// to this constant directly — the previous "keep these in sync" caveat
-// from R237-CR-13 is closed by the shared reference, so a future bump
-// only needs to land here.
+// defaultRingMaxLines is the fallback line cap when maxLines<=0; 10k covers a
+// typical Claude turn with replay margin. ManagerConfig.BufferSize references
+// it directly (single source of truth).
 const defaultRingMaxLines = 10000
 
-// defaultRingMaxBytes is the fallback byte cap (50 MiB). Whichever cap
-// (lines or bytes) trips first drives eviction. Single source of truth
-// shared with ManagerConfig.MaxBufBytes (manager.go) — see
-// defaultRingMaxLines for the closed-sync rationale.
+// defaultRingMaxBytes is the fallback byte cap (50 MiB); whichever cap trips
+// first drives eviction. Shared with ManagerConfig.MaxBufBytes.
 const defaultRingMaxBytes int64 = 50 * 1024 * 1024
 
 // NewRingBuffer creates a ring buffer with the given limits. Non-positive
@@ -60,21 +52,14 @@ func NewRingBuffer(maxLines int, maxBytes int64) *RingBuffer {
 // Push appends a line to the buffer, evicting the oldest if necessary.
 // Returns the assigned sequence number.
 //
-// Protocol contract: `seq` is advanced on EVERY call, including the
-// oversize-drop branch (a line longer than maxBytes that cannot fit even
-// after evicting everything). Clients see a monotonically increasing seq
-// space with potential holes — the shim<->naozhi replay protocol already
-// tolerates holes because LinesSince returns only the seqs present in
-// the ring, and the caller treats the delta as "delivered slice" rather
-// than "must be contiguous". Rationale: the stdout line that triggered
-// the drop was still observed and counted by the shim's read loop, and
-// surfacing a skipped seq to the reconnecting client is more honest than
-// pretending the read never happened. R55-CORR-003.
+// Protocol contract: seq advances on EVERY call, including the oversize-drop
+// branch, so clients see a monotonic seq space with holes. The replay
+// protocol tolerates holes (LinesSince returns only present seqs; callers
+// treat the delta as "delivered slice", not contiguous); a skipped seq is
+// more honest than pretending the read never happened.
 func (b *RingBuffer) Push(data []byte) int64 {
-	// Copy data before acquiring the lock so concurrent readers
-	// (LinesSince) don't wait on our allocation. The copy is required for
-	// ownership — the caller's buffer is the bufio.Scanner line slice and
-	// is reused on the next Scan.
+	// Copy before taking the lock (ownership: the caller's slice is the
+	// bufio.Scanner line, reused on the next Scan).
 	copied := append([]byte(nil), data...)
 
 	b.mu.Lock()
@@ -83,12 +68,9 @@ func (b *RingBuffer) Push(data []byte) int64 {
 	b.seq++
 	assigned := b.seq
 
-	// Drop oversized lines that exceed maxBytes on their own BEFORE evicting
-	// anything (#2182): the old order ran the byte-eviction loop first, so a
-	// single line larger than maxBytes wiped the entire ring and then got
-	// dropped anyway — losing all replay history to a line that could never
-	// be stored. The seq bump above still happens so the drop leaves a hole
-	// rather than reusing the slot (R55-CORR-003 monotonic-seq contract).
+	// Check oversize BEFORE evicting: otherwise a single line > maxBytes wipes
+	// the whole ring and is dropped anyway (#2182). seq was still bumped, so
+	// the drop leaves a hole per the monotonic-seq contract.
 	if int64(len(copied)) > b.maxBytes {
 		slog.Warn("dropping oversized line from ring buffer", "size", len(copied), "max", b.maxBytes)
 		return assigned
@@ -132,26 +114,16 @@ func (b *RingBuffer) LinesSince(afterSeq int64) []bufLine {
 	if b.count == 0 {
 		return nil
 	}
-	// b.seq is the last assigned sequence. A caller already caught up
-	// (afterSeq >= b.seq) cannot possibly have new lines; short-circuit
-	// the O(n) scan so an idle reconnecting client doesn't block every
-	// concurrent Push for the full ring duration just to find zero
-	// matches. Critical on 10k-line ring buffers where the scan is the
-	// dominant mutex hold time.
+	// Caught-up caller (afterSeq >= b.seq): short-circuit the O(n) scan so an
+	// idle reconnect doesn't block every concurrent Push under the mutex.
 	if afterSeq >= b.seq {
 		return nil
 	}
 
-	// Stored lines are in strictly-increasing seq order along the logical
-	// window [0, count) — Push assigns seq monotonically and appends at
-	// head, so even after the ring wraps (oldest physical index > head) the
-	// logical index walk via the modulo below visits entries in ascending
-	// seq. That lets us binary-search the first matching logical index
-	// instead of scanning and per-element comparing all `count` entries,
-	// then copy the matching tail in one pre-sized append. On a full
-	// 10k-line ring serving an almost-caught-up reconnect this turns an
-	// O(count) hot scan (held under the mutex against every concurrent
-	// Push) into O(log count) + a single contiguous copy.
+	// Entries along the logical window [0, count) are in strictly increasing
+	// seq (Push assigns monotonically and appends at head, even after wrap),
+	// so binary-search the first match and copy the tail in one pre-sized
+	// append: O(log n) + one copy under the mutex instead of O(n).
 	start := (b.head - b.count + b.maxLines) % b.maxLines
 	first := sort.Search(b.count, func(i int) bool {
 		idx := (start + i) % b.maxLines

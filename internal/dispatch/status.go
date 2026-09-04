@@ -21,10 +21,8 @@ func formatEventLine(ev cli.Event) string {
 			if block.Text == "" {
 				return ""
 			}
-			// Show first meaningful line of thinking, truncated. Strip ANSI /
-			// OSC / DCS escape bytes (#836) — thinking text occasionally
-			// echoes terminal output the model just observed, and those
-			// would render as garbled bytes inside the IM status banner.
+			// First line of thinking, truncated; strip escape bytes (#836) since
+			// thinking text may echo terminal output.
 			first := textutil.FirstLine(block.Text)
 			return "💭 " + textutil.TruncateRunes(stripANSI(first), 50)
 		case "tool_use":
@@ -56,8 +54,7 @@ func extractTodoMessage(ev cli.Event) (string, bool) {
 }
 
 // Per-tool input structs — zero-alloc alternative to generic map decoding.
-// Read/Edit/Write share the single-field file_path shape so they reuse one
-// decoder struct; other tools have distinct shapes and stay separate.
+// Read/Edit/Write share the file_path shape.
 type filePathInput struct {
 	FilePath string `json:"file_path"`
 }
@@ -75,15 +72,11 @@ type agentInput struct {
 }
 
 // TodoWrite is intentionally NOT handled here: dispatch.go onEvent sends the
-// checklist as a standalone Reply so it gets its own chat bubble instead of
-// being overwritten by the next banner edit. The status banner falls through
-// to the generic "🔧 TodoWrite" marker below, which is a fine placeholder.
+// checklist as a standalone Reply so it gets its own chat bubble; the banner
+// falls through to the generic "🔧 TodoWrite" marker.
 
 func formatToolUse(name string, input json.RawMessage) string {
-	// R240-PERF-5: Read/Edit/Write share the filePathInput shape, so decode
-	// once at the head of the dispatch and let the case arms format the
-	// already-parsed value. Saves two duplicate json.Unmarshal calls per
-	// status banner update on the most common tool_use types.
+	// Read/Edit/Write share filePathInput: decode once, format per arm.
 	switch name {
 	case "Read", "Edit", "Write":
 		var s filePathInput
@@ -116,9 +109,8 @@ func formatToolUse(name string, input json.RawMessage) string {
 	case "Agent":
 		var s agentInput
 		if json.Unmarshal(input, &s) == nil && s.Description != "" {
-			// R184-GO-L1: Agent.Description can be multi-line or arbitrarily
-			// long (matches the CLI spawn arg); all other tool_use arms truncate
-			// to a status-banner-friendly rune count, so mirror that here.
+			// Agent.Description can be multi-line / long; truncate like the
+			// other arms.
 			return "🤖 " + textutil.TruncateRunes(s.Description, 50)
 		}
 	}
@@ -136,14 +128,11 @@ func shortenPath(p string) string {
 	return dir + "/" + base
 }
 
-// maxStatusLines is the maximum number of status lines retained in the
-// IM thinking banner before head entries are dropped via copy-to-front
-// in appendStatusLine.
+// maxStatusLines caps the status lines retained in the IM thinking banner.
 const maxStatusLines = 8
 
 // appendStatusLine adds a status line, collapsing consecutive thinking lines.
 func appendStatusLine(lines []string, line string) []string {
-	// Collapse consecutive thinking lines (replace last thinking with new one)
 	if strings.HasPrefix(line, "💭") && len(lines) > 0 && strings.HasPrefix(lines[len(lines)-1], "💭") {
 		lines[len(lines)-1] = line
 	} else {
@@ -151,8 +140,7 @@ func appendStatusLine(lines []string, line string) []string {
 	}
 	if len(lines) > maxStatusLines {
 		// copy-to-front instead of reslicing so the backing array's head isn't
-		// permanently abandoned; a long turn would otherwise leak backing
-		// capacity each time we drop a head entry, forcing eventual realloc.
+		// abandoned (would leak capacity each drop on a long turn).
 		copy(lines, lines[len(lines)-maxStatusLines:])
 		lines = lines[:maxStatusLines]
 	}

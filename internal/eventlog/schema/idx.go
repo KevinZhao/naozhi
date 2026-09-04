@@ -17,20 +17,12 @@ import (
 //	offset 20 int64   TimeMS      8
 const IdxEntrySize = 28
 
-// IdxEntry is one row of the .idx sidecar. It maps a persisted record's
-// Seq to its byte offset in the .log file plus its total framed length
-// (including the length-prefix line AND the trailing newline).
-//
-// Having Len stored avoids an extra seek+read to determine how many
-// bytes the record occupies when doing rotate tail-cut or recovery
-// truncation — the startup recovery path (persist.Recover) uses
-// ByteOff + Len as the idx-backed "safe edge" and truncates the log
-// there if it exceeds log file size.
-//
-// The idx is sparse: only every N-th entry is written (default N=32,
-// see persist.DefaultIdxStride). Readers use it as a coarse seek hint;
-// the exact record at seq=S is found by starting from the nearest
-// idx entry ≤ S and scanning forward.
+// IdxEntry is one row of the .idx sidecar: a record's Seq, its byte offset
+// in the .log file and its total framed length (length-prefix line AND
+// trailing newline), so rotate/recovery can use ByteOff + Len as the
+// idx-backed safe edge without reading the log. The idx is sparse (every
+// N-th record, see persist.DefaultIdxStride): find seq=S from the nearest
+// idx entry <= S and scan forward.
 type IdxEntry struct {
 	Seq     uint64
 	ByteOff int64
@@ -38,9 +30,8 @@ type IdxEntry struct {
 	TimeMS  int64
 }
 
-// MarshalIdxEntry encodes e into out, which MUST be at least
-// IdxEntrySize bytes long. The return value is `out[:IdxEntrySize]`
-// for caller convenience.
+// MarshalIdxEntry encodes e into out (MUST be >= IdxEntrySize bytes) and
+// returns out[:IdxEntrySize].
 func MarshalIdxEntry(out []byte, e IdxEntry) []byte {
 	_ = out[IdxEntrySize-1] // bounds check hint
 	binary.LittleEndian.PutUint64(out[0:8], e.Seq)
@@ -50,8 +41,7 @@ func MarshalIdxEntry(out []byte, e IdxEntry) []byte {
 	return out[:IdxEntrySize]
 }
 
-// UnmarshalIdxEntry decodes a single IdxEntry from buf. Returns
-// ErrShortIdxBuf if buf is too short.
+// UnmarshalIdxEntry decodes one IdxEntry; ErrShortIdxBuf if buf is too short.
 func UnmarshalIdxEntry(buf []byte) (IdxEntry, error) {
 	if len(buf) < IdxEntrySize {
 		return IdxEntry{}, ErrShortIdxBuf
@@ -64,9 +54,8 @@ func UnmarshalIdxEntry(buf []byte) (IdxEntry, error) {
 	}, nil
 }
 
-// ReadIdxEntryAt reads a single idx entry from r at the given byte
-// offset. Used by rotate to read the cut-point entry without slurping
-// the whole idx file.
+// ReadIdxEntryAt reads a single idx entry from r at offset without reading
+// the whole file.
 func ReadIdxEntryAt(r io.ReaderAt, offset int64) (IdxEntry, error) {
 	var buf [IdxEntrySize]byte
 	if _, err := r.ReadAt(buf[:], offset); err != nil {
@@ -75,13 +64,11 @@ func ReadIdxEntryAt(r io.ReaderAt, offset int64) (IdxEntry, error) {
 	return UnmarshalIdxEntry(buf[:])
 }
 
-// AlignIdxSize rounds size down to the nearest IdxEntrySize multiple.
-// Used by recovery to regularize a partially-written idx tail (the
-// final write may have been interrupted mid-entry).
+// AlignIdxSize rounds size down to the nearest IdxEntrySize multiple
+// (recovery of a partially written idx tail).
 func AlignIdxSize(size int64) int64 {
 	return (size / IdxEntrySize) * IdxEntrySize
 }
 
-// ErrShortIdxBuf is returned when an idx decode operation receives
-// fewer than IdxEntrySize bytes.
+// ErrShortIdxBuf is returned when an idx decode receives < IdxEntrySize bytes.
 var ErrShortIdxBuf = errors.New("schema: idx buffer shorter than IdxEntrySize")

@@ -23,58 +23,17 @@ import (
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
-// platformReplyTimeout caps every outbound platform.Reply / EditMessage
-// call dispatch makes. Shared by all four call sites so a future per-
-// platform tuning lands in one place. R228-ARCH-12.
+// platformReplyTimeout caps every outbound platform.Reply / EditMessage call.
 const platformReplyTimeout = 15 * time.Second
 
-// shutdownReplyTimeout caps platform.Reply attempts on the shutdown /
-// context.Canceled fallback path. Deliberately shorter than
-// platformReplyTimeout (15s): the surrounding ctx is already Done because
-// the dispatcher / session subsystem is tearing down, so we want a fast
-// best-effort notice ("系统正在重启，请稍后重试。") rather than blocking
-// the shutdown sequence on a slow IM API. 5s matches the conservative end
-// of platform retry budgets so the message still has a realistic chance of
-// landing before systemctl SIGKILLs the process. R239-CR-5.
+// shutdownReplyTimeout caps best-effort replies on the shutdown /
+// context.Canceled path; shorter than platformReplyTimeout so teardown is
+// not blocked on a slow IM API yet the notice still lands before SIGKILL.
 const shutdownReplyTimeout = 5 * time.Second
 
-// platformReplyMaxAttempts moved to internal/limits.PlatformReplyMaxAttempts
-// (R20260527-ARCH-8) so internal/cron's notifyTarget path and internal/dispatch's
-// reply paths share one source-of-truth constant instead of mirrored copies.
-
-// SessionGuard prevents multiple concurrent messages to the same session.
-// MessageQueue is the production implementation; the IM path injects a
-// MessageQueue here so queue-mode gates and the guard contract stay
-// compatible. session.Guard happens to satisfy the same shape and is
-// retained as a structural option for future Dashboard/WS reuse — note
-// that today server/send.go references *session.Guard concretely rather
-// than going through this interface.
-//
-// Keep the method set minimal: any future guard variant has to fit.
-//
-// R228-ARCH-11 (archive 2026-05-23): the ticket framed this as "1 method
-// interface that's actually either-or — delete it, use the concrete type".
-// That misreads the consumer surface. Three implementations live behind
-// SessionGuard today: MessageQueue (prod IM path), session.Guard (prod
-// Dashboard/WS via msgqueue.go SessionGuard-compat methods), and the
-// dispatch_test.go::fakeGuard test seam. Collapsing to a concrete type
-// would force test wiring through MessageQueue's full enqueue/drain
-// machinery just to exercise busy-flag transitions — losing the unit-
-// level isolation that fakeGuard delivers in ~10 LOC. The "either-or"
-// branch in dispatch.go is a runtime selector between queue-mode and
-// guard-mode wiring (NewDispatcher's d.queue != nil vs d.guard fallback),
-// not a structural redundancy. Keep the interface; the cost is one extra
-// indirection on a path already dominated by queue.Enqueue / Release.
-//
-// R250-ARCH-7 (#1170): rediscovered the same collapse argument with new
-// framing — "MessageQueue already exposes SessionGuard's surface plus
-// more, the interface is a strict subset". Reaffirmed: the collapse
-// proposal still ignores fakeGuard's role. The structural-subset claim
-// is true but conflates implementation surface with consumer surface;
-// dispatch consumes 3 methods, while MessageQueue's full API
-// (Enqueue/DoneOrDrain/Discard/Cleanup/Depth/...) is irrelevant to
-// dispatch's busy-gating contract. Documenting the rejection here so
-// the next rediscovery has a single durable rebuttal to point at.
+// SessionGuard gates concurrent messages to one session. MessageQueue is the
+// production IM implementation; session.Guard and test fakes also satisfy it,
+// so keep the method set minimal. Kept as an interface deliberately (#1170).
 type SessionGuard interface {
 	TryAcquire(key string) bool
 	ShouldSendWait(key string) bool
@@ -84,64 +43,28 @@ type SessionGuard interface {
 // Dispatcher holds the dependencies needed to dispatch incoming IM messages
 // to the session router, handle slash commands, and stream results back.
 type Dispatcher struct {
-	// router is the SessionRouter subset used by dispatch (consumer.go).
-	// *session.Router satisfies this implicitly; kept as an interface so
-	// tests can inject fakes and a future Router sub-aggregation can
-	// swap implementations without touching dispatch internals. The
-	// router field itself is guaranteed non-nil in production wiring.
+	// router is the SessionRouter subset used by dispatch (consumer.go);
+	// non-nil in production wiring.
 	router    SessionRouter
 	platforms map[string]platform.Platform
-	// agents / agentCommands are populated from DispatcherConfig at
-	// NewDispatcher and treated as immutable thereafter. The IM hot path
-	// (BuildHandler, sendAndReply, slash commands) reads these maps without
-	// any lock, so any future code that needs to mutate them MUST switch to
-	// atomic.Pointer[map[...]] swap-on-write or guard with a new mutex.
-	// Document mirrors `internal/cron/scheduler.go` Scheduler.agents
-	// (R242-GO-18) so the contract is identical across both consumers of
-	// session.AgentOpts maps.
+	// agents / agentCommands are immutable after NewDispatcher; the IM hot
+	// path reads them lock-free, so any future mutation MUST switch to
+	// atomic.Pointer swap-on-write or add a mutex.
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
-	// knownAgentIDs is a read-only reverse-lookup set of every agentID that
-	// isKnownAgent accepts: the agentCommands values plus the always-probed
-	// "general"/"planner". Built once in NewDispatcher from agentCommands
-	// (which is immutable thereafter, see above), so isKnownAgent is O(1)
-	// instead of an O(k) scan over agentCommands on every inbound message
-	// that carries an explicit AgentID (#2148 card answers). [R202606b-PERF-001]
+	// knownAgentIDs is the read-only set isKnownAgent accepts: agentCommands
+	// values plus "general"/"planner"; built once in NewDispatcher (#2148).
 	knownAgentIDs map[string]struct{}
-	// scheduler is the cron-side consumer surface dispatch slash-commands
-	// need (CronCommands, cron_consumer.go). Production wiring passes the
-	// server-side cronDispatchAdapter; tests inject a fake without
-	// constructing a real Scheduler + tempdir. R250-ARCH-17 (#1178),
-	// projection-typed since R250-ARCH-1 (#1164). nil when cron is
-	// disabled at the operator level — every call site already gates on
-	// `d.scheduler != nil`, preserving the no-cron-feature exit path.
-	// (See dispatchCommand in commands.go for the gate.)
+	// scheduler is the cron consumer surface for /cron commands (#1178).
+	// nil when cron is disabled; every call site gates on `d.scheduler != nil`.
 	scheduler CronCommands
-	// projectMgr is used by slash-command handlers for: (a) UX echo of
-	// the bound project's name from /new, /cd, /project; (b) /cd guard
-	// against workspace-fixed projects; (c) /new resolution of planner
-	// vs agent keys when chat is bound; (d) /project [off|list|<name>]
-	// state mutations.
-	//
-	// Routing decisions on the IM hot path (BuildHandler / sendAndReply)
-	// MUST go through resolver only — do not reintroduce ProjectForChat
-	// / EffectivePlanner* calls in the IM / queue / send paths or the
-	// legacy duplicate-routing branches that R-key-resolver collapsed
-	// will quietly come back.  Any new ProjectForChat / EffectivePlanner*
-	// read on the hot path should fail review.
-	//
-	// ARCH-DISP-1 (#457): typed as the ProjectStore consumer interface
-	// (consumer.go) rather than *project.Manager so slash-command handler
-	// tests can inject a fake binding store. *project.Manager satisfies it
-	// implicitly; NewDispatcher assigns cfg.ProjectMgr directly. nil when
-	// projects.root is unconfigured — every handler gates on
-	// `d.projectMgr == nil` first (see handleProjectCommand).
+	// projectMgr backs slash-command project handling (/new, /cd, /project).
+	// Routing on the IM hot path MUST go through resolver only — do not
+	// reintroduce ProjectForChat / EffectivePlanner* reads there.
+	// nil when projects.root is unconfigured; handlers gate on nil (#457).
 	projectMgr ProjectStore
-	// resolver centralises (key, opts) derivation for the IM and slash-
-	// command paths. NewDispatcher guarantees this field is non-nil — when
-	// callers don't supply a resolver the constructor fabricates a project-
-	// less fallback so call sites can dereference unconditionally.
-	// See docs/rfc/key-resolver.md Phase 2.
+	// resolver centralises (key, opts) derivation; NewDispatcher guarantees
+	// non-nil. See docs/rfc/key-resolver.md.
 	resolver    *session.KeyResolver
 	guard       SessionGuard // used by Dashboard/WS path
 	queue       *MessageQueue
@@ -154,23 +77,14 @@ type Dispatcher struct {
 	watchdogNoOutputKills *atomic.Int64
 	watchdogTotalKills    *atomic.Int64
 
-	// imageReader resolves cli-extracted image paths to bytes for the
-	// outbound platform.Image payload (sendAndReply). Production wires
-	// osImageReader{} which delegates to os.ReadFile; tests inject an
-	// in-memory map so reply-footer / image-attachment assertions don't
-	// touch disk. R245-ARCH-33 (#884) — previously dispatch.go reached
-	// for os.ReadFile directly, leaving no seam for tests to mock the
-	// filesystem branch. Always non-nil after NewDispatcher.
+	// imageReader resolves cli-extracted image paths for outbound
+	// platform.Image payloads; tests inject an in-memory fake (#884).
+	// Always non-nil after NewDispatcher.
 	imageReader ImageReader
 
-	// stopCtx is the long-lived process-shutdown signal context. The
-	// passthrough send branch detaches the per-webhook ctx (handlers
-	// return in seconds while LLM turns take minutes) but must still
-	// observe SIGTERM-driven graceful shutdown — without this binding the
-	// detached goroutine has no path to abort early during shutdown and
-	// only stops on its internal totalTimeout (5min). NewDispatcher seeds
-	// stopCtx from cfg.StopCtx (or context.Background() if nil) so call
-	// sites can dereference unconditionally. (#1320)
+	// stopCtx is the process-shutdown context. The passthrough send branch
+	// detaches from the per-webhook ctx but must still observe SIGTERM via
+	// this; NewDispatcher defaults it to context.Background() (#1320).
 	stopCtx context.Context
 
 	// Operational counters exposed via /health for triaging. Incremented
@@ -180,66 +94,34 @@ type Dispatcher struct {
 	sendFailCount      atomic.Int64 // user-visible reply failures (platform send errors)
 	lastReplySuccessNs atomic.Int64 // UnixNano of most recent successful user-visible reply; 0 until first success
 
-	// caps groups the host-supplied hooks (Send / Takeover / ReplyFooter)
-	// that Dispatcher needs to reach back into the surrounding Server.
-	// Always non-nil after NewDispatcher: callers either set
-	// DispatcherConfig.Capabilities directly or supply legacy *Fn closures
-	// (which the constructor wraps in a closureCapabilities adapter); when
-	// neither is provided, NoopCapabilities{} is installed so the hot path
-	// can call methods unconditionally.
-	//
-	// Wireup contract:
-	//   - Capabilities.Send is required for production. R250-ARCH-12:
-	//     NewDispatcher returns ErrSendWireupMissing when no usable Send is
-	//     supplied (no Capabilities, no SendFn, no AllowMissingSender) so
-	//     the caller controls the failure mode (callable from systemd-aware
-	//     boot path) instead of crashing with a panic. NoopCapabilities.Send
-	//     still panics if reached at runtime to catch the AllowMissingSender
-	//     opt-out cases that misuse the dispatcher.
-	//   - Capabilities.Takeover defaults to false (no external session).
-	//   - Capabilities.ReplyFooter defaults to "" (no footer).
-	//
-	// See internal/dispatch/capabilities.go for the interface and the
-	// NoopCapabilities default. R243-ARCH-10 collapsed three closure
-	// fields (sendFn / takeoverFn / replyFooterFn) into this single
-	// interface to make wireup harder to forget.
+	// caps groups the host-supplied hooks (Send / Takeover / ReplyFooter).
+	// Always non-nil after NewDispatcher (Capabilities, wrapped legacy *Fn
+	// closures, or NoopCapabilities{}). NewDispatcher returns
+	// ErrSendWireupMissing when no usable Send is supplied and
+	// AllowMissingSender is false; NoopCapabilities.Send still panics if reached.
 	caps Capabilities
 
-	// inboundLogCache memoizes the per-(platform,user,chat) slog.Logger built
-	// in prepareInbound so a chat that bursts N messages reuses one handler
-	// chain instead of allocating slog.With(platform,user,chat) N times.
-	// R202606c-PERF-010 (#2233). Zero value is ready to use; entries are
-	// immutable *slog.Logger values (safe for concurrent use). See
-	// inbound_logcache.go for the bounded-map semantics.
+	// inboundLogCache memoizes the per-(platform,user,chat) logger built in
+	// prepareInbound (#2233). Zero value ready; see inbound_logcache.go.
 	inboundLogCache inboundLogCache
 }
 
-// keyForChat returns the routed session key for the given chat coordinates
-// and agentID. Delegates to KeyResolver, which encodes project-bound
-// general → planner precedence. NewDispatcher guarantees resolver is
-// non-nil even for headless/test wiring (falls back to a project-less
-// resolver), so no nil-branch is needed here. Kept as a Dispatcher method
-// so slash-command handlers share a single derivation path with the main
-// IM path — see docs/rfc/key-resolver.md §4.2-4.4.
+// keyForChat returns the routed session key for the chat coordinates and
+// agentID via KeyResolver (project-bound general → planner precedence).
 func (d *Dispatcher) keyForChat(platform, chatType, chatID, agentID string) string {
 	return d.resolver.KeyForChat(platform, chatType, chatID, agentID)
 }
 
-// isKnownAgent reports whether agentID is a recognised agent target —
-// "general", "planner" (always probed; see interruptChat), or any agentID
-// reachable through a configured slash command. Used to whitelist-validate an
-// explicit IncomingMessage.AgentID (e.g. from a Feishu AskUserQuestion card
-// click) before it can override slash-command resolution, so a hostile or
-// replayed card value can't route an answer into an arbitrary agent (#2148).
+// isKnownAgent reports whether agentID is a recognised agent target, used to
+// whitelist an explicit IncomingMessage.AgentID (e.g. a Feishu card click) so
+// a hostile or replayed value cannot route into an arbitrary agent (#2148).
 func (d *Dispatcher) isKnownAgent(agentID string) bool {
 	_, ok := d.knownAgentIDs[agentID]
 	return ok
 }
 
-// Metrics returns a snapshot of operational counters for /health.
-// Counter values are monotonic since process start. lastReplySuccess is the
-// wall-clock time of the most recent successful user-visible reply; the zero
-// value means "no reply has succeeded yet this process".
+// Metrics returns a snapshot of operational counters for /health. Counters are
+// monotonic since process start; lastReplySuccess is zero until a reply succeeds.
 func (d *Dispatcher) Metrics() (messageCount, replyErrorCount, sendFailCount int64, lastReplySuccess time.Time) {
 	ns := d.lastReplySuccessNs.Load()
 	if ns != 0 {
@@ -248,8 +130,7 @@ func (d *Dispatcher) Metrics() (messageCount, replyErrorCount, sendFailCount int
 	return d.messageCount.Load(), d.replyErrorCount.Load(), d.sendFailCount.Load(), lastReplySuccess
 }
 
-// markReplySuccess records the wall-clock instant of the most recent
-// successful reply (non-empty text to the user's chat).
+// markReplySuccess records the time of the most recent successful reply.
 func (d *Dispatcher) markReplySuccess() {
 	d.lastReplySuccessNs.Store(time.Now().UnixNano())
 }
@@ -260,17 +141,11 @@ type DispatcherConfig struct {
 	Platforms     map[string]platform.Platform
 	Agents        map[string]session.AgentOpts
 	AgentCommands map[string]string
-	// Scheduler is the cron consumer surface (CronCommands). Production
-	// wiring passes the server-side cronDispatchAdapter; test wiring may
-	// inject a fake. nil disables /cron commands at runtime.
-	// R250-ARCH-17 (#1178), projection-typed since R250-ARCH-1 (#1164).
+	// Scheduler is the cron consumer surface; nil disables /cron commands.
 	Scheduler  CronCommands
 	ProjectMgr *project.Manager
 	// Resolver is the central (key, opts) derivation. Optional: when nil,
-	// NewDispatcher fabricates a fallback resolver from cfg.Agents and a
-	// DataSource derived from cfg.ProjectMgr (which may itself be nil for
-	// pure-headless tests). Production wiring in cmd/naozhi.main always
-	// passes a shared live KeyResolver.
+	// NewDispatcher fabricates a fallback from Agents / ProjectMgr.
 	Resolver    *session.KeyResolver
 	Guard       SessionGuard
 	Queue       *MessageQueue
@@ -279,46 +154,17 @@ type DispatcherConfig struct {
 	ClaudeDir   string
 
 	// Capabilities groups the host-supplied hooks (Send / Takeover /
-	// ReplyFooter) that Dispatcher needs to reach back into the surrounding
-	// Server. Preferred over the legacy SendFn / TakeoverFn / ReplyFooterFn
-	// closures below — when both are set, Capabilities wins.
-	//
-	// nil is allowed: NewDispatcher falls back to the legacy *Fn closures
-	// (wrapped in an internal closureCapabilities adapter) and finally to
-	// NoopCapabilities{} if those are nil too. NoopCapabilities.Send panics
-	// to mirror the legacy "no fallback" contract for the send path.
-	//
-	// Tracked under R243-ARCH-10. See capabilities.go for the interface.
+	// ReplyFooter). Wins over the legacy *Fn closures when both are set;
+	// nil falls back to the closures, then NoopCapabilities{}.
 	Capabilities Capabilities
 
 	// ReplyFooterFn returns the per-session reply tag (e.g. "cc" / "kiro")
-	// given the session's backend ID. The IM reply path appends "\n\n— <tag>"
-	// to outbound messages so users can see which backend produced the reply.
-	// Empty backend means "session has no backend pinned yet" — fn typically
-	// resolves to the router default's tag.
+	// for a backend ID; empty backend means "not pinned yet". nil means no
+	// footer.
 	//
-	// nil means "no footer", same as the legacy ReplyFooter="" default.
-	// docs/rfc/multi-backend.md §7 (per-session ReplyTag).
-	//
-	// Deprecated: prefer DispatcherConfig.Capabilities. R243-ARCH-10 collapsed
-	// the three closure fields into Capabilities so wireup is harder to forget
-	// and future hooks add an interface method instead of a new closure +
-	// nil-fallback line. This field is still honoured for backward
-	// compatibility but new code should set Capabilities directly.
-	//
-	// Removal trigger (#374): production has been Capabilities-only since
-	// R243-ARCH-10 (server.go::Server.Start uses serverCaps; cmd/* and
-	// internal/platform/* never reference *Fn). The remaining call sites
-	// are tests (internal/dispatch/dispatch_test.go::buildDispatcher,
-	// internal/server/server_test.go and capability-adapter coverage in
-	// dispatch_test.go::TestNewDispatcher_*Capabilities*). Once those tests
-	// migrate to dispatch.closureCapabilities literals or a small test
-	// helper, ReplyFooterFn / SendFn / TakeoverFn plus the
-	// closureCapabilities adapter and the legacy-detection branch in
-	// NewDispatcher (the "if cfg.SendFn != nil ..." block and the
-	// Capabilities-and-*Fn-both-set slog.Warn) can be removed in one
-	// pass. Target: 2026-Q3, gated on those test migrations landing.
-	// See R248-ARCH-3 in docs/TODO.md (linked from issue #374).
+	// Deprecated: prefer DispatcherConfig.Capabilities. Removal, together
+	// with SendFn / TakeoverFn / closureCapabilities, is gated on test
+	// migrations (#374).
 	ReplyFooterFn func(backendID string) string
 
 	NoOutputTimeout       time.Duration
@@ -326,92 +172,44 @@ type DispatcherConfig struct {
 	WatchdogNoOutputKills *atomic.Int64
 	WatchdogTotalKills    *atomic.Int64
 
-	// ImageReader resolves outbound image paths to bytes when the cli
-	// reply contains attachment markers. Optional — NewDispatcher
-	// installs osImageReader{} (os.ReadFile delegation) when nil so
-	// production wiring keeps zero-config. Tests inject a fake to
-	// exercise the read-success / read-failure branches without
-	// touching the filesystem. R245-ARCH-33 (#884).
+	// ImageReader resolves outbound image paths to bytes. Optional —
+	// defaults to osImageReader{}; tests inject a fake (#884).
 	ImageReader ImageReader
 
 	// SendFn forwards a turn payload to the session router after guard /
-	// queue gating has succeeded. Production wires Server.sendWithBroadcast.
+	// queue gating has succeeded.
 	//
-	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn
-	// for the consolidated removal trigger (#374).
+	// Deprecated: prefer DispatcherConfig.Capabilities (#374).
 	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 	// TakeoverFn is the optional auto-takeover hook invoked on the first
 	// message of every chat. nil is treated as "return false".
 	//
-	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn
-	// for the consolidated removal trigger (#374).
+	// Deprecated: prefer DispatcherConfig.Capabilities (#374).
 	TakeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 
-	// StopCtx is the long-lived process-shutdown signal context. Passed
-	// into Dispatcher so the passthrough goroutine launched per inbound
-	// message can observe SIGTERM-driven graceful shutdown rather than
-	// living its full totalTimeout independent of process lifecycle.
-	// Optional — when nil, NewDispatcher falls back to context.Background()
-	// (preserving the legacy never-cancels behaviour for headless / test
-	// wiring). Production wiring (server.Start) passes the long-lived
-	// service ctx so the passthrough send aborts on shutdown. (#1320)
+	// StopCtx is the process-shutdown context the passthrough goroutine
+	// observes. Optional — nil falls back to context.Background() (#1320).
 	StopCtx context.Context
 
 	// AllowMissingSender opts out of the constructor-time "Send must be
-	// wired" check. Test wiring that builds a Dispatcher without ever
-	// touching the IM send path (e.g. pure routing / queue / commands tests)
-	// sets this true so NewDispatcher does not panic.
-	//
-	// Production code MUST leave this false: production wiring always sets
-	// Capabilities (or, legacy, SendFn). Without the gate, a missing
-	// wireup surfaces as a runtime panic on the first user message —
-	// healthcheck-ok-then-systemd-restart-loop, which is worse than
-	// silent drop because it leaves no clear failure signal at boot.
-	// R248-ARCH-2.
+	// wired" check for tests that never touch the send path. Production
+	// MUST leave this false so a missing wireup fails loud at boot instead
+	// of panicking on the first user message.
 	AllowMissingSender bool
 }
 
-// NewDispatcher creates a Dispatcher from the given config.
-//
-// cfg.Router is a concrete *session.Router but Dispatcher.router is
-// the SessionRouter interface. Assigning a nil *session.Router into
-// an interface field produces a typed-nil: the field compares !=
-// nil yet dereferences panic. Normalise to untyped nil so call-site
-// guards like `if d.router != nil` behave as readers expect.
-// Production wiring (server.Start) never passes nil; the guard covers
-// headless/test wiring that may leave the field zeroed.
-//
-// Resolver is required for the main IM path. To keep test/headless
-// constructions ergonomic the constructor builds a fallback resolver
-// from (cfg.Agents, project DataSource derived from cfg.ProjectMgr)
-// when cfg.Resolver is nil — the project data source short-circuits
-// when ProjectMgr is also nil so behaviour matches pre-resolver code.
-// This eliminates the legacy nil-resolver inline branches scattered
-// across dispatch / commands / urgent.
-// ErrSendWireupMissing is returned by NewDispatcher when no usable Send
-// hook was supplied. R250-ARCH-12: prefer surfacing missing wireup as an
-// error the caller can branch on, rather than as a panic that crashes
-// systemd before logs flush. Tests that intentionally omit Send wireup
-// can opt out via DispatcherConfig.AllowMissingSender.
+// ErrSendWireupMissing is returned by NewDispatcher when no usable Send hook
+// was supplied; tests may opt out via DispatcherConfig.AllowMissingSender.
 var ErrSendWireupMissing = errors.New("dispatch: Capabilities.Send is required (set DispatcherConfig.Capabilities or DispatcherConfig.SendFn; tests may set AllowMissingSender)")
 
-// resolveOrFabricateKeyResolver returns the live KeyResolver Dispatcher
-// must hold. Precedence (single track — drift here = bug, no inline copy
-// elsewhere is permitted; see #543 R215-CR-P2-3):
+// resolveOrFabricateKeyResolver returns the KeyResolver Dispatcher holds.
+// Precedence (single track — do not copy this chain elsewhere, #543):
 //
-//  1. cfg.Resolver — explicit caller-supplied singleton.
-//  2. cfg.Router.Resolver() — the Router-attached singleton from
-//     session.RouterConfig.Resolver (R237-ARCH-12 / #604) so Dispatcher /
-//     Hub / upstream see the same agents-config snapshot.
-//  3. Fabricate a fresh resolver from cfg.Agents and a project data
-//     source derived from cfg.ProjectMgr (nil-safe — NewKeyResolver and
-//     project.NewDataSource both accept nil inputs).
+//  1. cfg.Resolver
+//  2. cfg.Router.Resolver() (Router-attached singleton, #604)
+//  3. a fresh resolver from cfg.Agents + project data source (nil-safe)
 //
-// All three branches return a non-nil *KeyResolver, so call sites
-// downstream of NewDispatcher can dereference d.resolver without a guard.
-// Adding a fourth branch (or copying this fallback chain into a
-// caller) is the legacy-double-track failure mode this helper exists
-// to prevent.
+// Always non-nil, so callers dereference d.resolver without a guard.
 func resolveOrFabricateKeyResolver(cfg DispatcherConfig) *session.KeyResolver {
 	if cfg.Resolver != nil {
 		return cfg.Resolver
@@ -428,27 +226,19 @@ func resolveOrFabricateKeyResolver(cfg DispatcherConfig) *session.KeyResolver {
 	return session.NewKeyResolver(cfg.Agents, data)
 }
 
-// NewDispatcher constructs a Dispatcher from cfg. Returns
-// ErrSendWireupMissing when neither cfg.Capabilities (with non-noop Send)
-// nor cfg.SendFn is set and AllowMissingSender is false. R250-ARCH-12
-// converted this from a constructor-time panic to a returned error so the
-// caller controls the failure mode (systemd-friendly logging vs panic
-// stack trace).
+// NewDispatcher constructs a Dispatcher from cfg. Returns ErrSendWireupMissing
+// when neither cfg.Capabilities (with a non-noop Send) nor cfg.SendFn is set
+// and AllowMissingSender is false. Nil cfg.Router / cfg.Scheduler /
+// cfg.ProjectMgr pointers are collapsed to untyped nil so `!= nil` gates behave.
 func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	var router SessionRouter
 	if cfg.Router != nil {
 		router = cfg.Router
 	}
 	resolver := resolveOrFabricateKeyResolver(cfg)
-	// Resolve Capabilities precedence:
-	//   1. cfg.Capabilities wins when set (preferred path);
-	//   2. otherwise, if any legacy *Fn closure is non-nil, wrap them in a
-	//      closureCapabilities adapter (preserves the historical wireup so
-	//      existing test seams keep building);
-	//   3. otherwise, NoopCapabilities{} so the hot path always has a
-	//      non-nil receiver. NoopCapabilities.Send panics — mirroring the
-	//      legacy "no fallback for SendFn" contract — while Takeover and
-	//      ReplyFooter return their documented defaults (false / "").
+	// Capabilities precedence: cfg.Capabilities, else legacy *Fn closures
+	// wrapped in closureCapabilities, else NoopCapabilities{} (whose Send
+	// panics; Takeover / ReplyFooter return false / "").
 	caps := cfg.Capabilities
 	if caps == nil {
 		if cfg.SendFn != nil || cfg.TakeoverFn != nil || cfg.ReplyFooterFn != nil {
@@ -461,14 +251,9 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 			caps = NoopCapabilities{}
 		}
 	}
-	// R248-ARCH-2 boot-panic gate: surface missing Send wireup at
-	// constructor-time, not on the first user message. The legacy
-	// NoopCapabilities.Send / closureCapabilities (with c.send==nil) both
-	// panic when actually invoked — but that arrives AFTER healthcheck,
-	// systemd marks the unit healthy, and the first user message turns into
-	// a panic-restart loop. Catching it here lets a misconfigured boot fail
-	// loud before any traffic is accepted. Tests that genuinely never call
-	// Send opt out via AllowMissingSender.
+	// Surface missing Send wireup at constructor time: a runtime panic on
+	// the first message would arrive after healthcheck and put systemd into
+	// a restart loop.
 	if !cfg.AllowMissingSender {
 		hasSend := false
 		switch c := caps.(type) {
@@ -477,31 +262,21 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		case closureCapabilities:
 			hasSend = c.send != nil
 		default:
-			// Any other Capabilities implementation is presumed to wire
-			// Send; if its Send actually panics that is the contract the
-			// caller chose, not a missing wireup we can detect lexically.
+			// Other implementations are presumed to wire Send.
 			hasSend = true
 		}
 		if !hasSend {
 			return nil, ErrSendWireupMissing
 		}
 	}
-	// R248-GO-2: warn when Capabilities and the legacy *Fn fields are both
-	// set — Capabilities wins and the *Fn closures are silently ignored,
-	// which is a common transition-period misuse. One-time slog.Warn at
-	// constructor time, no hot-path cost.
 	if cfg.Capabilities != nil && (cfg.SendFn != nil || cfg.TakeoverFn != nil || cfg.ReplyFooterFn != nil) {
 		slog.Warn("dispatch: DispatcherConfig.Capabilities set; legacy SendFn/TakeoverFn/ReplyFooterFn ignored",
 			"send_fn_set", cfg.SendFn != nil,
 			"takeover_fn_set", cfg.TakeoverFn != nil,
 			"reply_footer_fn_set", cfg.ReplyFooterFn != nil)
 	}
-	// Defend against the Go typed-nil-interface trap: a caller that boxes
-	// a nil concrete pointer into the CronCommands interface produces a
-	// value that is not == nil. Every slash-command gate uses
-	// `d.scheduler != nil`, so we collapse the typed-nil here exactly
-	// once. R250-ARCH-17 (#1178). Production now passes a struct adapter
-	// value (#1164) so the pointer case is defensive, not load-bearing.
+	// Collapse a typed-nil CronCommands (nil pointer boxed into the
+	// interface) so `d.scheduler != nil` gates behave (#1178).
 	scheduler := cfg.Scheduler
 	if scheduler != nil {
 		v := reflect.ValueOf(scheduler)
@@ -509,11 +284,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 			scheduler = nil
 		}
 	}
-	// ARCH-DISP-1 (#457): same typed-nil-interface trap for ProjectStore.
-	// cfg.ProjectMgr is a concrete *project.Manager; a nil pointer boxed
-	// into the ProjectStore field is != nil, which would defeat every
-	// `d.projectMgr == nil` gate (handleProjectCommand / /cd / /new).
-	// Collapse it to a true nil interface here, mirroring scheduler above.
+	// Same typed-nil collapse for ProjectStore (#457).
 	var projectStore ProjectStore
 	if cfg.ProjectMgr != nil {
 		projectStore = cfg.ProjectMgr
@@ -537,33 +308,24 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		watchdogTotalKills:    cfg.WatchdogTotalKills,
 		caps:                  caps,
 	}
-	// Prebuild the known-agent reverse-lookup set so isKnownAgent is O(1)
-	// on the inbound hot path (#2148 card answers). agentCommands is
-	// immutable after construction (see Dispatcher.agentCommands doc), so
-	// this snapshot stays correct for the dispatcher's lifetime.
-	// [R202606b-PERF-001]
+	// agentCommands is immutable after construction, so this snapshot stays
+	// correct for the dispatcher's lifetime (#2148).
 	d.knownAgentIDs = make(map[string]struct{}, len(d.agentCommands)+2)
 	d.knownAgentIDs["general"] = struct{}{}
 	d.knownAgentIDs["planner"] = struct{}{}
 	for _, id := range d.agentCommands {
 		d.knownAgentIDs[id] = struct{}{}
 	}
-	// Headless / test wirings may also leave the watchdog kill counters
-	// unset. Production wiring sets them, but tests routinely build a
-	// Dispatcher without these fields. The watchdog hot path calls
-	// .Add(1) unconditionally; nil here would panic. (R227-CR-12)
+	// Headless / test wiring may leave the watchdog counters nil; the
+	// watchdog path calls .Add(1) unconditionally.
 	if d.watchdogNoOutputKills == nil {
 		d.watchdogNoOutputKills = new(atomic.Int64)
 	}
 	if d.watchdogTotalKills == nil {
 		d.watchdogTotalKills = new(atomic.Int64)
 	}
-	// BuildHandler's hot path calls d.dedup.Seen(...) unconditionally. The
-	// caps / watchdog counters above already noop-fallback for headless
-	// and test wiring; the same convention applies here. Without this, a
-	// constructor missing cfg.Dedup would crash on the very first incoming
-	// message (nil-pointer deref inside Seen). Default capacity matches
-	// platform.NewDedup's own zero-cap fallback (10000). (R237-GO-12)
+	// prepareInbound calls d.dedup.Seen unconditionally; default capacity
+	// matches platform.NewDedup's zero-cap fallback.
 	if d.dedup == nil {
 		d.dedup = platform.NewDedup(0)
 	}
@@ -572,11 +334,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	} else {
 		d.imageReader = osImageReader{}
 	}
-	// stopCtx defaults to context.Background() so headless / test wiring
-	// that omits cfg.StopCtx behaves like the legacy WithoutCancel branch
-	// (never cancels). Production wiring (server.Start) passes the long-
-	// lived service ctx so the passthrough goroutine aborts on shutdown.
-	// (#1320)
+	// Background (never cancels) for headless / test wiring (#1320).
 	if cfg.StopCtx != nil {
 		d.stopCtx = cfg.StopCtx
 	} else {
@@ -585,26 +343,16 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	return d, nil
 }
 
-// fallbackDedupKey builds a composite dedup key for messages whose
-// adapter left EventID empty. The shape "fallback:<platform>:<chatID>:
-// <messageID>:<unixMinute>" gives platform retries within the same
-// minute a stable identity so platform.Dedup.Seen short-circuits them
-// rather than passing through (Seen("") returns false, never records).
-//
-// The "fallback:" prefix segregates the fallback namespace from real
-// EventIDs so a legitimate EventID that happens to look like a colon-
-// joined tuple cannot collide with a fallback. now is plumbed in so
-// tests can drive deterministic minute boundaries. (#1310)
+// fallbackDedupKey builds "fallback:<platform>:<chatID>:<messageID>:<unixMinute>"
+// for messages whose adapter left EventID empty (Seen("") never records), so
+// platform retries within the same minute dedup. The prefix keeps the
+// namespace disjoint from real EventIDs; now is injected for tests (#1310).
 func fallbackDedupKey(msg platform.IncomingMessage, now time.Time) string {
 	return "fallback:" + msg.Platform + ":" + msg.ChatID + ":" + msg.MessageID + ":" + strconv.FormatInt(now.Unix()/60, 10)
 }
 
-// preparedInbound carries the resolved per-message state produced by
-// prepareInbound and consumed by the dispatch-strategy tail of BuildHandler.
-// R20260531A-ARCH-3 (#1527): bundling these into one value keeps the front-
-// matter extraction (dedup → group-gate → command → agent-resolve → key/opts
-// → image-convert) in a single named helper without widening the strategy
-// switch's parameter list.
+// preparedInbound is the per-message state prepareInbound resolves for the
+// dispatch-strategy tail of BuildHandler (#1527).
 type preparedInbound struct {
 	lg        *slog.Logger
 	agentID   string
@@ -614,30 +362,15 @@ type preparedInbound struct {
 	images    []cli.Attachment
 }
 
-// prepareInbound runs the message front-matter common to every dispatch
-// strategy: dedup, group-mention gate, log-attr sanitisation, slash-command
-// dispatch, agent resolution, unknown-command echo, accounting, key/opts
-// resolution, and platform→CLI image conversion. It returns (prepared, true)
-// when the caller should proceed to a dispatch strategy, or (_, false) when the
-// message was fully handled / dropped here (dedup hit, gated, command consumed,
-// empty body, unknown command). Extracted verbatim from BuildHandler
-// (R20260531A-ARCH-3 / #1527) — behaviour-preserving.
+// prepareInbound runs the front-matter common to every dispatch strategy
+// (dedup, group-mention gate, slash commands, agent resolution, accounting,
+// key/opts resolution, image conversion). Returns false when the message was
+// fully handled or dropped here.
 func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (preparedInbound, bool) {
-	// Dedup check at the top prevents duplicate processing from platform
-	// retries (e.g., Feishu webhook timeout → re-delivery with same event_id).
-	// Note: if guard fails below, the eventID is still consumed. This means
-	// a platform retry during guard contention won't be re-processed. In
-	// practice this is benign — the handler responds fast enough that
-	// platforms don't retry, and the user is told to resend.
-	//
-	// Empty EventID fallback (#1310): some adapters (older Feishu webhook
-	// shapes, raw HTTP test clients) leave EventID empty. platform.Dedup.Seen
-	// treats "" as "not seen" and never records — meaning a platform retry
-	// of the same message_id would call BuildHandler N times: token double-
-	// charge, queue noise ("正在处理上一条消息"), LLM N-fold dispatch. Build
-	// a composite fallback key from (Platform, ChatID, MessageID, minute-
-	// bucketed wall clock). The minute bucket bounds collision risk for the
-	// degenerate "no MessageID either" case to a single replay window.
+	// Dedup first: platform retries (e.g. Feishu webhook re-delivery) must
+	// not double-dispatch. Empty EventID (#1310) falls back to a composite
+	// minute-bucketed key since Seen("") never records. The ID is consumed
+	// even if the message is later gated/dropped — benign in practice.
 	dedupID := msg.EventID
 	if dedupID == "" {
 		dedupID = fallbackDedupKey(msg, time.Now())
@@ -646,39 +379,17 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 		return preparedInbound{}, false
 	}
 
-	// Group chat gate: in group chats, only respond when explicitly mentioned.
-	// Direct (1:1) chats are unaffected — every message is processed.
-	//
-	// Rationale: bots deployed in multi-user group chats should not reply to
-	// every utterance; standard IM UX (Slack, Discord, Feishu bot guidance)
-	// expects @bot to be the activation signal. Naozhi's primary usage is
-	// 1:1 operator → agent, so groups are the exception.
-	//
-	// MentionMe is populated by each platform's transport layer:
-	//   - slack / discord / weixin: already matched against bot self-ID (accurate)
-	//   - feishu: currently "any mention" (loose) — tightened in a follow-up commit
-	//
-	// Gate is placed BEFORE dispatchCommand so slash commands in groups also
-	// require @bot — consistent with social etiquette and simpler (single decision
-	// point). Gated messages are silently dropped: no reply, no metric increment,
-	// dedup entry stays consumed (platform retry won't re-process).
+	// Group chats respond only when @mentioned (1:1 chats unaffected).
+	// Placed BEFORE dispatchCommand so slash commands in groups also need
+	// @bot. Gated messages are silently dropped (no reply, no metric).
 	if msg.ChatType == "group" && !msg.MentionMe {
 		return preparedInbound{}, false
 	}
 
-	// Sanitize the IM-originated attrs before they reach slog. Platform,
-	// UserID, and ChatID all flow through adversary-controlled IM webhook
-	// fields; an attacker-chosen chat ID with embedded \n, \t, or ANSI
-	// escape bytes would otherwise fragment log lines and let the
-	// attacker forge entries. session.SanitizeLogAttr mirrors the
-	// session-key component sanitization (strips C0/bidi/zero-width,
-	// replaces colons, bounds length) so the logger's attr view matches
-	// the session-key view in the log. R60-GO-H1.
-	// #2233: a chat bursting many messages would otherwise pay
-	// slog.With(platform,user,chat) — a fresh handler chain — per message.
-	// Memoize on the sanitized triple so repeat traffic from the same
-	// (platform,user,chat) reuses one logger. The sanitized values ARE the
-	// attr values, so the cache key cannot diverge from the logger contents.
+	// Platform / UserID / ChatID are adversary-controlled webhook fields;
+	// sanitize before slog so embedded \n / ANSI bytes cannot forge log
+	// lines. The logger is memoized on the sanitized triple (#2233), so the
+	// cache key cannot diverge from the attr values.
 	sp := session.SanitizeLogAttr(msg.Platform)
 	su := session.SanitizeLogAttr(msg.UserID)
 	sc := session.SanitizeLogAttr(msg.ChatID)
@@ -690,7 +401,6 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	}
 	trimmed := strings.TrimSpace(msg.Text)
 
-	// Dispatch slash commands (/help, /new, /cron, /cd, /pwd, /project)
 	if d.dispatchCommand(ctx, msg, trimmed, lg) {
 		return preparedInbound{}, false
 	}
@@ -698,15 +408,10 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	// Resolve agent from command prefix (e.g. "/review code" -> agent=code-reviewer, text="code")
 	agentID, cleanText := session.ResolveAgent(trimmed, d.agentCommands)
 
-	// #2148: a synthetic message (e.g. a Feishu AskUserQuestion card click) can
-	// pin its target agent explicitly via msg.AgentID, bypassing slash-command
-	// resolution — the answer must route back to the SAME agent session that
-	// asked the question, not default to "general". The card answer text has no
-	// /agent prefix, so ResolveAgent above already returned ("general", text);
-	// we only swap the agentID, leaving cleanText (the full answer) intact.
-	// Whitelist-validate against the known agent set so a hostile/replayed
-	// value can't route into an arbitrary agent — unknown ids are ignored and
-	// the original resolution stands.
+	// #2148: a synthetic message (e.g. a Feishu AskUserQuestion card click)
+	// pins its target agent via msg.AgentID so the answer routes back to the
+	// asking session; cleanText stays intact. Whitelist-validated so a
+	// hostile/replayed value cannot route into an arbitrary agent.
 	if msg.AgentID != "" && d.isKnownAgent(msg.AgentID) {
 		agentID = msg.AgentID
 	}
@@ -726,33 +431,24 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 			cmd = cleanText[:idx]
 		}
 		if !strings.Contains(cmd[1:], "/") {
-			// R20260527122801-CR-15: sanitize the user-controlled cmd
-			// before echoing — IM renderers may interpret embedded ANSI
-			// escape sequences or control bytes as formatting / injected
-			// log fields. SanitizeForLog scrubs C0/C1, DEL, and the
-			// bidi/LS-PS rune classes; the cap also bounds reply size
-			// against an attacker stuffing a 4KB "/" prefix into chat.
+			// Sanitize the user-controlled cmd before echoing so embedded
+			// ANSI / control bytes cannot inject formatting; the cap bounds
+			// reply size.
 			safeCmd := osutil.SanitizeForLog(cmd, 64)
 			d.replyText(ctx, msg, "未知命令: "+safeCmd+"\n输入 /help 查看可用命令，或直接发送消息。", lg)
 			return preparedInbound{}, false
 		}
 	}
 
-	// Count accepted messages (post-dedup, post-command-filter). Does not
-	// include slash commands, ignored non-text items, or dedup hits.
-	// Per-Dispatcher counter feeds /health; expvar mirror feeds
-	// /debug/vars. R245-ARCH-36 (#892).
+	// Accepted messages only (post-dedup, post-command). Feeds /health and
+	// /debug/vars (#892).
 	d.messageCount.Add(1)
 	dispatchMessageTotal.Add(1)
 
-	// Determine session key and opts via KeyResolver — single source of
-	// truth for project-binding precedence and aliasing-safe ExtraArgs
-	// merge (see docs/rfc/key-resolver.md §3.1 and session/routing.go).
-	// NewDispatcher always builds a resolver, so no nil-branch fallback
-	// is needed.
+	// KeyResolver is the single source of truth for project-binding
+	// precedence and ExtraArgs merge (docs/rfc/key-resolver.md §3.1).
 	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 
-	// Convert platform images to CLI image data
 	var images []cli.Attachment
 	if len(msg.Images) > 0 {
 		images = make([]cli.Attachment, 0, len(msg.Images))
@@ -773,38 +469,26 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 
 // handleQueuedNonOwner runs the queue non-owner branch: interrupt-mode control
 // request for the active turn, plus the enqueue-vs-disabled acknowledgement.
-// Extracted from BuildHandler (R20260531A-ARCH-3 / #1527) — behaviour-
-// preserving. shouldInterrupt / enqueued / evictedID come from queue.Enqueue.
-// A non-empty evictedID means this enqueue dropped the oldest queued message
-// for the key (queue-full backpressure); its dangling HOURGLASS reaction is
-// cleared so the evicted user is not left with a permanent "still queued"
-// indicator (#1945).
+// shouldInterrupt / enqueued / evictedID come from queue.Enqueue; a non-empty
+// evictedID is the oldest queued message dropped by backpressure, whose
+// HOURGLASS reaction is cleared here (#1945).
 func (d *Dispatcher) handleQueuedNonOwner(ctx context.Context, msg platform.IncomingMessage, p preparedInbound, shouldInterrupt, enqueued bool, evictedID string) {
 	lg, key := p.lg, p.key
-	// #1945: an evicted message's queued reaction must be removed — it never
-	// enters a DoneOrDrain batch, so ownerLoop's clearQueuedReactions never
-	// touches it. Without this its HOURGLASS hangs until the platform reaction
-	// cache TTL (feishu: 12h) GCs it, falsely telling the dropped user "still
-	// queued". The evicted message shares this inbound msg.Platform (same chat).
+	// An evicted message never enters a DoneOrDrain batch, so ownerLoop's
+	// clearQueuedReactions never reaches it; clear its HOURGLASS here (#1945).
 	if evictedID != "" {
 		d.clearQueuedReaction(ctx, msg.Platform, evictedID, lg)
 	}
-	// Interrupt mode: the first queued follow-up for the active
-	// turn fires a control_request to the CLI so the in-flight
-	// turn aborts within ~300ms. The ongoing owner loop's Send()
-	// will observe the CLI's natural result event, return, then
-	// drain this queued message as the next prompt. All non-Sent
-	// outcomes degrade to Collect semantics: the queued message
-	// is still processed once the turn completes naturally.
+	// Interrupt mode: fire a control_request so the in-flight turn aborts;
+	// the owner loop's Send() then returns and drains this message as the
+	// next prompt. All non-Sent outcomes degrade to Collect semantics.
 	if shouldInterrupt {
 		switch outcome := d.router.InterruptSessionViaControl(key); outcome {
 		case session.InterruptSent:
 			lg.Info("interrupt mode: aborted active turn to process follow-up",
 				"key", key)
 		case session.InterruptNoTurn:
-			// Session is spawning or idle — the turn isn't active yet,
-			// so nothing to interrupt. The follow-up will be drained
-			// by the owner loop after the first turn completes.
+			// Turn not active yet; the owner loop drains the follow-up later.
 			lg.Debug("interrupt mode: session idle or spawning, will process follow-up after current turn",
 				"key", key)
 		case session.InterruptNoSession:
@@ -814,25 +498,21 @@ func (d *Dispatcher) handleQueuedNonOwner(ctx context.Context, msg platform.Inco
 			lg.Debug("interrupt mode: protocol does not support stdin interrupt, falling back to collect",
 				"key", key)
 		case session.InterruptError:
-			// Warn already emitted inside ManagedSession.InterruptViaControl;
-			// keep a paired trace here to anchor the dispatch side.
+			// ManagedSession.InterruptViaControl already warned; paired dispatch-side trace.
 			lg.Warn("interrupt mode: transport error, falling back to collect",
 				"key", key)
 		}
 	}
 	if enqueued {
-		// Prefer an in-place reaction on the user's own message
-		// (non-intrusive) over a new bot chat bubble. Fall back to
-		// the text notice if the platform isn't Reactor-capable,
-		// has no inbound MessageID, or the reaction call fails —
-		// ShouldNotify still rate-limits the fallback.
+		// Prefer an in-place reaction on the user's message; fall back to the
+		// rate-limited text notice if the platform can't react.
 		if !d.ackQueuedWithReaction(ctx, msg, lg) {
 			if d.queue.ShouldNotify(key) {
 				d.replyText(ctx, msg, "消息已收到，待当前回复完成后一并处理。", lg)
 			}
 		}
 	} else {
-		// Queue disabled (maxDepth<=0) — degrade to old drop behavior.
+		// Queue disabled (maxDepth<=0): drop with a rate-limited notice.
 		if d.queue.ShouldNotify(key) {
 			d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", lg)
 		}
@@ -849,42 +529,19 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		lg, agentID, cleanText := p.lg, p.agentID, p.cleanText
 		key, opts, images := p.key, p.opts, p.images
 
-		// Passthrough mode: direct dispatch — every message gets its own
-		// goroutine. Ordering and merging handled by the CLI's commandQueue
-		// plus the Process-level sendSlot FIFO. No naozhi-side coalesce.
-		//
-		// Fallback: if the session's protocol does not expose the
-		// --replay-user-messages primitive (e.g. ACP), sendFn silently
-		// downgrades to the legacy sendMu-serialized Send path. That loses
-		// the passthrough merge optimization but preserves correctness: each
-		// of N concurrent goroutines blocks on sendMu in arrival order.
+		// Passthrough: every message gets its own goroutine; ordering/merging
+		// is handled by the CLI commandQueue + Process sendSlot FIFO. Protocols
+		// without --replay-user-messages (e.g. ACP) silently downgrade to the
+		// sendMu-serialized Send path.
 		if d.queue != nil && d.queue.Mode() == ModePassthrough {
 			lg.Info("message received (passthrough)", "agent", agentID, "text_len", len(cleanText), "images", len(images))
-			// Detach from the platform handler ctx: webhook handlers return
-			// in seconds while LLM turns take minutes. If we keep the caller
-			// ctx, handler-return cancels it and SendPassthrough bails early,
-			// leaking slots into the 5.5-min bail timer.
-			//
-			// R20260527122801-CR-6 (#1320): the original context.WithoutCancel
-			// dropped the cancellation source entirely — including the long-
-			// lived service ctx whose cancel signals graceful shutdown. The
-			// passthrough goroutine therefore had no path to abort on
-			// SIGTERM and only stopped on its internal totalTimeout (5min),
-			// pushing systemd TimeoutStopSec breaches at restart. Instead
-			// merge stopCtx (cancel source) with the webhook ctx (values
-			// source) so log attrs survive while shutdown still aborts the
-			// send.
+			// Detach from the webhook ctx (handlers return in seconds, turns
+			// take minutes) but keep d.stopCtx as the cancel source so the
+			// goroutine still aborts on SIGTERM (#1320).
 			sendCtx := mergeStopAndValues(d.stopCtx, ctx)
-			// Ack arrival BEFORE spawning the turn goroutine, matching the
-			// /urgent path (commands.go: ack then goSendAndReply). The ack's
-			// AddReaction stores the reaction_id synchronously; the goroutine's
-			// defer clearQueuedReaction (goSendAndReply :1067) is the only clear
-			// on this detached path. R20260608-133914-LB-3 (#1963): with the
-			// pre-fix order (spawn then ack) a fast-fail turn (GetOrCreate/Send
-			// early-return) could run the goroutine's clear — a LoadAndDelete
-			// no-op against the not-yet-stored reaction — before this ack landed
-			// its AddReaction, leaving a permanent HOURGLASS that no later clear
-			// removes. Acking first establishes the AddReaction-then-clear order.
+			// Ack BEFORE spawning so AddReaction stores the reaction_id before
+			// goSendAndReply's deferred clearQueuedReaction can run on a fast-fail
+			// turn; the reverse order leaves a permanent HOURGLASS (#1963).
 			d.ackQueuedWithReaction(ctx, msg, lg)
 			d.goSendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, lg, true)
 			return
@@ -924,16 +581,10 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 	}
 }
 
-// discardQueue is a nil-safe helper to clear queued messages for a key.
-// In passthrough mode it also fires ErrSessionReset to any in-flight
-// SendPassthrough callers so the IM user sees the turn as cancelled rather
-// than silently hanging.
-//
-// #2013: it also clears the HOURGLASS reaction of every dropped message so a
-// /new or /clear issued while follow-ups are queued does not leave dangling
-// ⏳ marks. ctx/msg supply the platform and a cleanup deadline; both are the
-// command handler's live request context (not yet Done) so no detach is
-// needed here.
+// discardQueue is a nil-safe helper to clear queued messages for a key. In
+// passthrough mode it also fires ErrSessionReset to in-flight SendPassthrough
+// callers, and it clears the HOURGLASS reaction of every dropped message
+// (#2013). ctx is the command handler's live request ctx, so no detach.
 func (d *Dispatcher) discardQueue(ctx context.Context, msg platform.IncomingMessage, key string) {
 	if d.queue != nil {
 		dropped := d.queue.DiscardAndReturn(key)
@@ -944,16 +595,11 @@ func (d *Dispatcher) discardQueue(ctx context.Context, msg platform.IncomingMess
 	}
 }
 
-// ownerLoop processes the first message directly, then drains and coalesces
-// any queued messages until the queue is empty. The owner goroutine is the
-// platform handler goroutine that first acquired ownership via Enqueue.
-//
-// gen is the generation cookie from Enqueue. If Discard bumps the generation
-// (e.g., user sends /new), DoneOrDrain returns nil and ownerLoop exits,
-// preventing two goroutines from owning the same key.
-//
-// Panic-safe: a deferred recover releases ownership so a panic in SendFn
-// doesn't leave the queue permanently locked.
+// ownerLoop processes the first message, then drains and coalesces queued
+// messages until the queue is empty. gen is the Enqueue generation cookie: if
+// Discard bumps it (e.g. /new), DoneOrDrain returns nil and the loop exits so
+// two goroutines never own the same key. A deferred recover releases
+// ownership on panic.
 func (d *Dispatcher) ownerLoop(
 	ctx context.Context,
 	key string,
@@ -964,59 +610,27 @@ func (d *Dispatcher) ownerLoop(
 	msg platform.IncomingMessage,
 	lg *slog.Logger,
 ) {
-	// Enrich the logger once for the whole ownerLoop lifetime. Previously
-	// sendAndReply re-did this `log.With` on every drained turn — a coalesced
-	// burst of 5 follow-ups meant 5 identical handler-chain allocs. Lifting
-	// it here costs exactly one alloc per ownerLoop regardless of drain
-	// depth. R61-PERF-12.
+	// Enrich once per ownerLoop rather than per drained turn.
 	lg = lg.With("key", key, "agent", agentID)
-	// Defer order matters here. Go runs deferred funcs LIFO, so the LAST
-	// registered defer runs FIRST. We want this exit order on every path
-	// (clean return AND panic):
-	//   1. recover() runs first  — catches a panic from sendAndReply,
-	//      logs it via handleOwnerLoopPanic, and stops it propagating.
-	//   2. NotifyIdle runs second — marks the session idle only after
-	//      panic recovery has logged context, so an external watcher
-	//      reading "idle" never sees a state where a panic is still
-	//      mid-flight. (R237-GO-8)
-	//
-	// This means NotifyIdle must be registered BEFORE the recover defer
-	// (so it runs after, by LIFO). Reversing this ordering would let
-	// NotifyIdle run while the panic is still propagating, which races
-	// with anyone observing the idle signal as "turn complete".
+	// Defer order matters (LIFO): NotifyIdle is registered first so it runs
+	// AFTER the recover below — the session must not read "idle" while a
+	// panic is still mid-flight.
 	defer d.router.NotifyIdle()
-	// R20260614-LOGIC-001: a drain batch is pulled OUT of the ring by
-	// DoneOrDrain before sendAndReply processes it. If sendAndReply then
-	// panics, handleOwnerLoopPanic's DiscardAndReturn only surfaces the
-	// messages STILL in the ring (those that arrived after the drain) — it
-	// can no longer see this already-drained batch, so their HOURGLASS
-	// reactions would hang until the platform reaction cache TTL (feishu:
-	// 12h), falsely telling the user the message is still queued. We track
-	// the most recent drained-but-not-yet-cleared batch here and clear it in
-	// the recover defer before delegating to handleOwnerLoopPanic for the
-	// ring remainder. `first` is intentionally NOT tracked: the owner's own
-	// message never receives a queued reaction (the isOwner path at
-	// BuildHandler enters ownerLoop directly, skipping ackQueuedWithReaction).
+	// A drained batch is out of the ring before sendAndReply runs; on panic
+	// handleOwnerLoopPanic's DiscardAndReturn cannot see it, so track it here
+	// and clear its reactions in the recover defer. `first` is not tracked:
+	// the owner's own message never gets a queued reaction.
 	var pendingClear []QueuedMsg
 	defer func() {
 		if r := recover(); r != nil {
-			// Clear the drained batch's reactions first; the turn ctx may
-			// already be Done (e.g. shutdown racing the panic), so detach
-			// via WithoutCancel — mirrors handleOwnerLoopPanic's own cleanup.
+			// Turn ctx may already be Done (shutdown racing the panic); detach.
 			if len(pendingClear) > 0 {
 				d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, pendingClear, lg)
 			}
-			// R230-CQ-11: pass the enriched ownerLoop logger so the panic
-			// path inherits the same key/agent/platform attrs as the rest
-			// of this turn's log lines. The recover trigger means the
-			// loop's normal `log.Info("message replied", ...)` already
-			// fired this turn or never will — operators grepping by key
-			// see the panic stitched into the same context window.
 			d.handleOwnerLoopPanic(key, msg, r, lg)
 		}
 	}()
 
-	// Process first message.
 	d.sendAndReply(ctx, key, first.Text, first.Images, agentID, opts, msg, lg, true)
 
 	// Drain loop: after each turn, wait collectDelay then drain.
@@ -1025,14 +639,9 @@ func (d *Dispatcher) ownerLoop(
 	for {
 		select {
 		case <-ctx.Done():
-			// #2013: clear the HOURGLASS reactions of any messages still
-			// queued when the turn ctx is cancelled (e.g. a systemctl
-			// restart cancelling the process-level stopCtx). Without this
-			// the ⏳ hangs — and survives the restart in the platform's
-			// reaction cache while our in-memory bookkeeping is gone —
-			// falsely telling the user the message is still queued. The
-			// turn ctx is already Done, so detach via WithoutCancel for the
-			// best-effort cleanup (mirrors the passthrough discard path).
+			// Clear HOURGLASS on messages still queued when the ctx is
+			// cancelled (e.g. restart); the ⏳ would otherwise survive in the
+			// platform's reaction cache. ctx is Done, so detach (#2013).
 			dropped := d.queue.DiscardAndReturn(key)
 			d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, dropped, lg)
 			return
@@ -1044,54 +653,28 @@ func (d *Dispatcher) ownerLoop(
 			return // Queue empty or generation mismatch — stop.
 		}
 
-		// R20260614-LOGIC-001: from here until the clearQueuedReactions below
-		// these messages are out of the ring; a sendAndReply panic must clear
-		// their reactions via the recover defer (handleOwnerLoopPanic can't).
+		// Out of the ring from here until cleared below; the recover defer
+		// owns cleanup on panic.
 		pendingClear = queued
 		text, images := CoalesceMessages(queued)
 		lg.Info("processing queued messages", "count", len(queued), "merged_len", len(text))
 		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, false)
-		// Drained queued messages were acknowledged with a queue reaction
-		// when they arrived; clear those reactions now that their content
-		// was processed. Best-effort — errors only log.
-		//
-		// #2262: detach via WithoutCancel like the sibling discard path
-		// above. ownerLoop's ctx is the platform stopCtx; on a
-		// shutdown-during-turn race it is already Done by the time we reach
-		// here, and a child WithTimeout would be born cancelled — every
-		// RemoveReaction would short-circuit and the ⏳ HOURGLASS on this
-		// just-drained batch would hang until the platform's ~12h reaction
-		// TTL. This was the only clear point in ownerLoop still using the
-		// live (cancellable) ctx.
+		// Clear the drained batch's queued reactions. Detached via
+		// WithoutCancel: on a shutdown-during-turn race ctx is already Done and
+		// a child WithTimeout would be born cancelled (#2262).
 		d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, queued, lg)
-		// Reactions cleared on the normal path — drop the recover-defer's
-		// fallback handle so a panic in the NEXT loop iteration (before the
-		// next DoneOrDrain) doesn't redundantly re-clear this batch.
+		// Cleared normally; drop the recover fallback handle.
 		pendingClear = nil
 		// Go 1.23+: Reset on a Timer whose channel was just consumed by the case arm above is race-free; no Stop+drain needed.
 		collectTimer.Reset(d.queue.CollectDelay())
 	}
 }
 
-// handleOwnerLoopPanic is the deferred panic recovery helper for ownerLoop.
-// Split out of the defer so the recover path can be unit-tested directly
-// without having to construct a real panicking ownerLoop stack (GetOrCreate
-// short-circuits before sendFn in the test harness). It:
-//
-//  1. Logs the panic with a full stack trace for operator triage.
-//  2. Clears the message queue so a stale owner is not left holding the key.
-//  3. Replies to the user with a "please retry" message so the IM peer is not
-//     left waiting indefinitely for a response the process can no longer
-//     produce. RETRY3.
-//
-// A nested recover around the reply call absorbs a cascading panic (e.g.,
-// platform SDK panicking on a nil chat handle) so the outer defer always
-// completes and the process can drain other owners cleanly.
-//
-// R230-CQ-11: lg carries the ownerLoop's enriched key/agent attrs so the
-// panic and reply-panic log lines share context with the rest of the turn.
-// nil is tolerated for callers that don't have an ownerLoop logger handy
-// (e.g. unit tests) — falls back to the package-level slog.
+// handleOwnerLoopPanic is the deferred panic recovery for ownerLoop (split
+// out so it is unit-testable): logs the panic with stack, discards the queue
+// so a stale owner is not left holding the key, and replies "please retry".
+// A nested recover absorbs a cascading panic from the reply. lg may be nil
+// (falls back to slog.Default).
 func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessage, r any, lg *slog.Logger) {
 	metrics.PanicRecoveredTotal.Add(1)
 	if lg == nil {
@@ -1099,12 +682,8 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 	}
 	lg.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
 	if d.queue != nil {
-		// #2013: the process survives a recovered panic and the platform is
-		// still reachable, so we CAN (and must) clear the HOURGLASS reactions
-		// of the messages this discard drops — otherwise they hang as a
-		// permanent "still queued" signal. Detach the cleanup ctx from any
-		// turn ctx via WithoutCancel; this helper runs from a defer with no
-		// live request ctx in scope.
+		// The process survives and the platform is reachable, so clear the
+		// HOURGLASS of the dropped messages (#2013). No live request ctx here.
 		dropped := d.queue.DiscardAndReturn(key)
 		d.clearQueuedReactions(context.WithoutCancel(context.Background()), msg.Platform, dropped, lg)
 	}
@@ -1114,21 +693,15 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 				lg.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
 			}
 		}()
-		// R247-ARCH-10 (#632): NotifyCtx centralises the "detach from
-		// parent because the turn ctx is already Done" pattern.
 		notifyCtx, cancel := NotifyCtx(context.Background(), NotifyKindOwnerLoopPanic, platformReplyTimeout)
 		defer cancel()
 		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
 	}()
 }
 
-// goSendAndReply spawns sendAndReply in its own goroutine with a deferred
-// panic recover. The passthrough and /urgent paths detach each inbound
-// message into a bare goroutine; without recover, a panic anywhere in
-// sendAndReply (platform SDK, CLI wrapper, reply path) would crash the whole
-// process rather than failing just that one turn. #1773. We reuse
-// handleOwnerLoopPanic so the detached path gets the same log + queue-discard
-// + "请稍后重试" reply behaviour as the ownerLoop recover.
+// goSendAndReply runs sendAndReply in its own goroutine with a panic recover,
+// so a panic in one detached passthrough / /urgent turn fails only that turn
+// (#1773). Reuses handleOwnerLoopPanic for log + discard + retry reply.
 func (d *Dispatcher) goSendAndReply(
 	ctx context.Context,
 	key, text string,
@@ -1145,71 +718,38 @@ func (d *Dispatcher) goSendAndReply(
 				d.handleOwnerLoopPanic(key, msg, r, lg)
 			}
 		}()
-		// #1946: clear the HOURGLASS the passthrough / /urgent ack added once
-		// this turn finishes. The detached goroutine never enters ownerLoop's
-		// drain loop (the only other caller of the reaction-clear path), so
-		// without this the queued reaction hangs until the platform's reaction
-		// cache TTL GCs it (feishu: 12h), falsely showing "still processing".
-		// WithoutCancel: the turn's ctx often carries a per-turn deadline that
-		// has elapsed by reply time, and on shutdown it is Canceled — either
-		// would make RemoveReaction fail fast. Strip cancellation/deadline but
-		// keep request-scoped values; clearQueuedReaction re-bounds with its
-		// own reactionAckTimeout.
+		// Clear the HOURGLASS the passthrough / /urgent ack added once the
+		// turn finishes; this path never enters ownerLoop's drain loop (#1946).
+		// WithoutCancel: the turn ctx may be expired or Canceled by then;
+		// clearQueuedReaction re-bounds with its own timeout.
 		defer d.clearQueuedReaction(context.WithoutCancel(ctx), msg.Platform, msg.MessageID, lg)
 		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, isFirst)
 	}()
 }
 
-// resolveReplyCtx returns a context safe for an end-of-turn reply: when
-// ctx is already Done because of a shutdown-style cancellation
-// (context.Canceled), it returns a fresh NotifyCtx with the
-// shutdownReplyTimeout budget so the platform.Reply call can actually
-// land. Otherwise it returns ctx unchanged with a no-op cleanup.
-//
-// Centralising this swap removes the per-branch shutdown-ctx replacement
-// the previous sendAndReply / handleGetOrCreateError variants each
-// re-implemented (R242-GO-4, #550). Callers MUST defer cleanup() before
-// dispatching the reply or leak the timer goroutine on the swap path.
-//
-// Only context.Canceled triggers the swap. context.DeadlineExceeded is
-// treated as a legitimate per-turn timeout the caller asked for and is
-// not auto-extended — that would be silently lengthening a configured
-// budget. Pure ctx.Err() == nil short-circuits to the cheap "no swap"
-// branch so the helper costs nothing on the happy path.
+// resolveReplyCtx returns a context safe for an end-of-turn reply: when ctx is
+// Done with context.Canceled (shutdown), it returns a fresh NotifyCtx with the
+// shutdownReplyTimeout budget; otherwise ctx unchanged and a nil cleanup.
+// Callers MUST defer cleanup() when non-nil or the timer goroutine leaks.
+// DeadlineExceeded is a legitimate per-turn timeout and is NOT extended (#550).
 func resolveReplyCtx(ctx context.Context) (replyCtx context.Context, cleanup func()) {
 	if ctx == nil {
-		// nil parent: caller already lost its turn ctx. Mint a fresh
-		// shutdown-budget ctx so the reply can still land. NotifyCtx
-		// detaches from the parent regardless, so Background is
-		// equivalent to the nil we used to forward here.
+		// Caller lost its turn ctx; mint a shutdown-budget ctx.
 		return NotifyCtx(context.Background(), NotifyKindShutdown, shutdownReplyTimeout)
 	}
 	if !errors.Is(ctx.Err(), context.Canceled) {
-		// Happy path: cleanup is nil so callers using the
-		// `if cleanup != nil { defer cleanup() }` idiom skip the defer.
 		return ctx, nil
 	}
 	notifyCtx, cancel := NotifyCtx(ctx, NotifyKindShutdown, shutdownReplyTimeout)
 	return notifyCtx, cancel
 }
 
-// handleGetOrCreateError maps a router.GetOrCreate failure into the
-// user-facing reply ctx, an optional ctx.cancel cleanup, and a Chinese
-// error message. Pulled out of sendAndReply so the seven-stage main
-// path stays focused on the happy-path turn flow (R245-ARCH-39 / #894).
-// The sentinel → Chinese-message mapping is delegated to
-// usermsg.ForSendError (R20260531-ARCH-1) so it cannot drift from the
-// WS send_ack path; this helper only owns the log-level and reply-ctx
-// (shutdown-swap) policy, which unit tests can target directly without
-// standing up a full Dispatcher.
-//
-// cleanup is non-nil when this returns a fresh background ctx (the
-// shutdown / context.Canceled branch). Callers MUST defer it before
-// using replyCtx, or the timeout goroutine leaks.
-//
-// Error logging policy: shutdown-path cancellation is expected noise on
-// every restart and downgrades to Info so ops dashboards don't light up;
-// every other GetOrCreate failure stays at Error.
+// handleGetOrCreateError maps a router.GetOrCreate failure into the reply ctx,
+// an optional cleanup, and a Chinese error message (via usermsg.ForSendError
+// so it cannot drift from the WS send_ack path). cleanup is non-nil on the
+// shutdown / context.Canceled branch and MUST be deferred by the caller.
+// Shutdown cancellation logs at Info (expected on every restart), other
+// failures at Error.
 func (d *Dispatcher) handleGetOrCreateError(
 	ctx context.Context,
 	err error,
@@ -1220,37 +760,15 @@ func (d *Dispatcher) handleGetOrCreateError(
 	} else {
 		lg.Error("get session", "err", err)
 	}
-	// R20260531-ARCH-1 (#754 follow-up): the per-sentinel switch here
-	// duplicated usermsg.ForSendError's mapping for ErrMaxProcs /
-	// ErrMaxExemptSessions / ErrNoCLIWrapper / context.Canceled, drifting
-	// from it over time. Delegate to the shared classifier so a new
-	// session-side sentinel only needs registering once (in usermsg).
-	// The empty key keeps the regular (non-cron) phrasing; GetOrCreate
-	// failures are not the cron-namespace ErrNoActiveProcess case that
-	// would want the key. Unknown errors fall through to ForSendError's
-	// generic "/new 重置" hint (was a near-identical literal here).
+	// Empty key keeps the regular (non-cron) phrasing.
 	errMsg = usermsg.ForSendError(err, "")
-	// R242-GO-4 (#550): the shutdown-ctx swap is one helper, not a
-	// per-branch repeat. resolveReplyCtx returns ctx unchanged when no
-	// swap is needed (cheap), and a fresh NotifyCtx + cancel when ctx
-	// was canceled — without it the user-facing reply would silently
-	// drop at the platform layer (R188-CONC-M1).
 	replyCtx, cleanup = resolveReplyCtx(ctx)
 	return replyCtx, cleanup, errMsg
 }
 
-// handleSendError maps a Capabilities.Send failure into the user-facing
-// error reply, watchdog counter bumps, and metrics increments. Pulled
-// out of sendAndReply so the seven-stage main path stays focused on the
-// happy turn flow (R237-GO-4 / #624). The per-sentinel switch is the
-// part most likely to grow as new send-side failure modes are added
-// (e.g. backend disabled, model deprecated) and now has a single home
-// that unit tests can target without standing up a full Dispatcher.
-//
-// Caller has already entered the err != nil branch and consumed the
-// Send result; this method does NOT signal whether a reply was actually
-// delivered — failure to land the error reply is logged at Warn but
-// not surfaced.
+// handleSendError maps a Capabilities.Send failure into the user-facing error
+// reply, watchdog counter bumps, and metrics increments (#624). It does NOT
+// report whether the error reply landed — that failure is only logged at Warn.
 func (d *Dispatcher) handleSendError(
 	ctx context.Context,
 	err error,
@@ -1259,29 +777,17 @@ func (d *Dispatcher) handleSendError(
 	p platform.Platform,
 	lg *slog.Logger,
 ) {
-	// /clear early-return mirrors the prior behaviour: the user just
-	// triggered the reset, so we suppress the extra "会话已重置" reply.
-	// R260528-GO-2: ErrSessionReset is a control-flow signal from the
-	// user (/new /clear), not an error — bail before bumping the
-	// /health error counters so idle sessions don't pollute reply-error
-	// metrics.
+	// ErrSessionReset is a user control-flow signal (/new, /clear), not an
+	// error: no extra reply and no /health error-counter bump.
 	if errors.Is(err, cli.ErrSessionReset) {
 		return
 	}
 	d.replyErrorCount.Add(1)
 	dispatchReplyErrorTotal.Add(1)
 	lg.Error("send to claude", "err", err)
-	// IM path uses the timeout-aware helper (it renders the configured
-	// no-output / total durations in Chinese) and prepends a clock
-	// emoji for visibility on chat surfaces. Dashboard send path
-	// (server/errors_usermsg.go) calls usermsg.ForSendError directly
-	// so the timeout cases collapse to the generic "处理超时，请简化任务后重试。"
-	// — it has no per-session timeout configured. R249-DISPATCH-1 (#419)
-	// extracted usermsg.UserMessage so a new sentinel only registers
-	// once, instead of two parallel switches with cross-package
-	// "keep in sync" comments.
-	// Watchdog counters stay in dispatch because they are owned by the
-	// IM-side configuration; the shared helper only renders text.
+	// usermsg.UserMessage renders the configured timeout durations in
+	// Chinese (dashboard uses the generic ForSendError). Watchdog counters
+	// stay here because the IM side owns that configuration.
 	switch {
 	case errors.Is(err, cli.ErrNoOutputTimeout):
 		d.watchdogNoOutputKills.Add(1)
@@ -1294,12 +800,8 @@ func (d *Dispatcher) handleSendError(
 	if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
 		errMsg = "⏱️ " + errMsg
 	}
-	// R242-GO-4 (#550): on shutdown the inbound ctx is already Done; the
-	// user-facing error reply must still land. resolveReplyCtx swaps in a
-	// fresh NotifyCtx with the shutdown budget when applicable; otherwise
-	// returns ctx unchanged with nil cleanup. Identical to the swap done
-	// in handleGetOrCreateError so the two error-reply paths share one
-	// truth.
+	// On shutdown the inbound ctx is already Done; swap so the error reply
+	// still lands.
 	replyCtx, cleanup := resolveReplyCtx(ctx)
 	if cleanup != nil {
 		defer cleanup()
@@ -1324,21 +826,9 @@ func (d *Dispatcher) sendAndReply(
 	lg *slog.Logger,
 	isFirst bool,
 ) {
-	// Session-key + agent attrs are attached once in ownerLoop (R61-PERF-12)
-	// so every Info/Warn/Error line below carries enough context for an
-	// operator to grep a full turn end-to-end without paying a per-call
-	// handler-chain alloc.
-
-	// Takeover check only on first message for a key.
-	//
-	// RNEW-010: takeoverFn returns bool to indicate whether an external
-	// Claude session was adopted. We intentionally ignore the result here:
-	// success means the old process was killed and the session was
-	// registered for resume — GetOrCreate below will rebuild with the
-	// resumed SessionID. Failure (returns false) means no external session
-	// was found, which is the common case; GetOrCreate still needs to run
-	// to spawn a fresh one. Either way the caller behaviour is identical,
-	// so we discard explicitly rather than branch on it.
+	// Takeover only on the first message. The bool result is ignored: on
+	// success the external session was registered for resume and GetOrCreate
+	// rebuilds with it; on false GetOrCreate spawns fresh. Same caller flow.
 	if isFirst {
 		_ = d.caps.Takeover(ctx, session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
 	}
@@ -1378,26 +868,16 @@ func (d *Dispatcher) sendAndReply(
 	lg.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD,
 		"merged_count", result.MergedCount, "merged_with_head", result.MergedWithHead)
 
-	// Passthrough merge fan-out: follower slots get MergedCount>1 and an
-	// empty Text. The head slot for the merge group delivered the full
-	// reply on its own bubble; followers should surface a short "合并" hint
-	// on the user's original message instead of echoing the same text again.
+	// Passthrough merge fan-out: follower slots get MergedCount>1 and empty
+	// Text; the head slot delivered the reply, so followers surface a short
+	// "合并" hint on the user's message instead.
 	if result.MergedCount > 1 && result.Text == "" {
-		// #2290: a follower's tracker may have already posted a "💭思考中…"
-		// banner if interim assistant events fanned out to its onEvent
-		// before the merge collapsed the turn (process_readloop interim
-		// fan-out claims all currentTurnSlots, followers included). The
-		// follower carries no final text to overwrite that banner, so
-		// without an explicit edit the bubble is orphaned forever. Wait
-		// for any pending banner Reply to land, then collapse it into the
-		// same merge hint the follower surfaces on the user's message.
+		// A follower's tracker may already have posted a "💭思考中…" banner
+		// (interim fan-out claims all slots); with no final text it would be
+		// orphaned, so collapse it into the merge hint (#2290).
 		tracker.waitReady(ctx)
-		// #2338: mark the turn finalized before the banner edit so a late
-		// editLoop redraw (a residual buffered editCh signal firing after this
-		// EditMessage but before the deferred stop()) skips the repaint instead
-		// of overwriting the merge hint with the stale "💭思考中…" banner. This
-		// is the same guard the success path applies at #2291; this early-return
-		// follower path was the one delivery path left without it.
+		// Finalize before the edit so a late editLoop redraw does not
+		// overwrite the hint with the stale banner (#2338).
 		tracker.markFinalized()
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, "已合并到上一条回复。"); err != nil {
@@ -1409,31 +889,16 @@ func (d *Dispatcher) sendAndReply(
 		return
 	}
 
-	// Record turn success regardless of reply text length. A successful
-	// sendFn with empty result (e.g. a turn that only produces tool calls
-	// or whose text was stripped) still constitutes a healthy end-to-end
-	// roundtrip; gating markReplySuccess on non-empty text previously made
-	// /health's lastReplySuccess go stale on otherwise-healthy sessions.
+	// Record success regardless of text length: an empty result (tool-only
+	// turn) is still a healthy roundtrip for /health's lastReplySuccess.
 	d.markReplySuccess()
 
-	// R219-CR-7 (#656): decorateReplyText folds the localize step, the
-	// merge-group chip, and the per-session ReplyFooter into one helper so
-	// sendAndReply isn't a 240-line linear stack of post-processing
-	// passes. Pure function on (result, sess) — easy to unit-test without
-	// spinning up a Dispatcher / Router / platform.
 	replyText := d.decorateReplyText(result, sess)
 	outImages, replyText := d.readTurnImages(replyText)
 
-	// R20260623-LB-6 (#2316): on graceful shutdown the passthrough turn ctx
-	// is bound to d.stopCtx (mergeStopAndValues) so an in-flight turn can
-	// observe SIGTERM. If the cancel lands in the race window between
-	// d.caps.Send returning (answer already generated, markReplySuccess
-	// recorded above) and the reply being delivered, every delivery below
-	// reuses a Done ctx and the http request aborts — silently dropping the
-	// answer the user waited for. The two error-reply paths and the panic /
-	// card / todo paths already swap to a fresh shutdown-budget ctx via
-	// resolveReplyCtx; the success path was the only delivery path left on a
-	// bare ctx. Align it so the real answer also lands during shutdown.
+	// Passthrough turns are bound to d.stopCtx; if SIGTERM lands between
+	// Send returning and delivery, a Done ctx would silently drop the answer.
+	// Swap to the shutdown-budget ctx like the error paths (#2316).
 	ctx, cleanup := resolveReplyCtx(ctx)
 	if cleanup != nil {
 		defer cleanup()
@@ -1441,28 +906,17 @@ func (d *Dispatcher) sendAndReply(
 
 	tracker.waitReady(ctx)
 
-	// #2291: mark the turn finalized before the final banner edit so a late
-	// editLoop redraw (residual buffered editCh signal firing after the
-	// final EditMessage but before the deferred stop()) skips the repaint
-	// instead of overwriting the real answer with stale interim status.
+	// Finalize before the final edit so a late editLoop redraw cannot
+	// overwrite the real answer with stale interim status (#2291).
 	tracker.markFinalized()
 
-	// AskUserQuestion suppression: when this turn surfaced an interactive
-	// question card, `claude -p` also emits a bailout text ("I've asked you
-	// two questions ...") because it auto-rejects the tool to unblock
-	// headless mode. That text is redundant with the card and makes the
-	// session look "finished" instead of "waiting for answer". Replace it
-	// with a short wait-hint on the thinking banner so the user's next view
-	// on the IM channel is the card + a single "waiting" line, nothing else.
-	// The card itself stays rendered above; clicking it sends the answer.
-	//
-	// Dashboard is not affected: it already renders the card as a native
-	// bubble separate from the reply stream, and suppressing the text
-	// simply removes the duplicate final bubble.
+	// AskUserQuestion: `claude -p` auto-rejects the tool and emits a bailout
+	// text redundant with the card; replace it with a wait-hint on the banner
+	// so the IM view is card + one "waiting" line. Dashboard renders the card
+	// natively, so suppressing the text only drops a duplicate bubble.
 	if tracker.askQuestionFired.Load() {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
-			// Best-effort — if the banner edit fails, we log and move on;
-			// there's no user-visible recovery better than "tried to clear".
+			// Best-effort; log and move on.
 			if err := p.EditMessage(ctx, msgID, "⏳ 等待你的选择…"); err != nil {
 				slog.Debug("ask_question: banner edit failed", "err", err)
 			}
@@ -1479,38 +933,23 @@ func (d *Dispatcher) sendAndReply(
 		}
 	}
 
-	// #1959: outImages is derived from replyText (same source). When
-	// askQuestionFired suppresses replyText, its associated images must
-	// also be suppressed — otherwise orphaned /tmp image bubbles are sent
-	// after the AskUserQuestion card, confusing the user.
+	// outImages derive from replyText; when the card suppresses the text,
+	// suppress its images too or orphaned bubbles follow the card (#1959).
 	if !tracker.askQuestionFired.Load() {
 		d.sendOutboundImages(ctx, p, msg.ChatID, outImages)
 	}
 }
 
 // sendOutboundImages delivers each turn image as its own reply bubble.
-//
-// Extracted from sendAndReply (mirroring readTurnImages) so the
-// failure-accounting contract is unit-testable without a full sendAndReply
-// roundtrip.
 func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform, chatID string, images []platform.Image) {
 	for _, img := range images {
-		// R20260623-LB-3 (#2305): deliver via ReplyWithRetry (not bare
-		// Reply) so an outbound image inherits the same token-invalidation
-		// one-shot retry the text path gets. Previously a single-image
-		// reply that hit Feishu token-expiry (99991671) was lost silently:
-		// the platform cleared the cache but the bare Reply never retried
-		// with the rotated token. ReplyWithRetry grants the extra rotation
-		// attempt so the image lands on the fresh token.
+		// ReplyWithRetry (not bare Reply) so an image gets the same
+		// token-rotation retry as text (#2305).
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{
 			ChatID: chatID,
 			Images: []platform.Image{img},
 		}, limits.PlatformReplyMaxAttempts); err != nil {
-			// R202606j-CR-007: a failed outbound image send must be visible
-			// in /health metrics, matching the text reply paths (single-use
-			// token, split chunk, error reply). Without this an image-only
-			// reply that fails after retries was lost silently — invisible
-			// to dispatchSendFailTotal / sendFailCount.
+			// Failed image sends must show in /health like text failures.
 			d.sendFailCount.Add(1)
 			dispatchSendFailTotal.Add(1)
 			slog.Warn("send image failed", "err", err)
@@ -1518,37 +957,14 @@ func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform
 	}
 }
 
-// decorateReplyText post-processes the raw CLI result text for IM
-// delivery: localises Anthropic API errors to Chinese, appends the
-// merge-group chip when the head slot covers N messages, and appends
-// the per-session ReplyFooter (resolved from sess.Backend(), or the
-// router default when sess is nil — a cron edge case where the session
-// has been pruned but the reply path still fires).
-//
-// Extracted from sendAndReply for R219-CR-7 (#656). Keeping this as a
-// method on *Dispatcher (rather than a free function) gives the helper
-// access to d.caps.ReplyFooter without pushing the Capabilities
-// dependency through a parameter list.
-//
-// Returns the empty string when the input result.Text is empty AND no
-// footer applies — callers typically gate on `replyText != ""` before
-// dispatching to the platform, so an empty return is the existing
-// "nothing to send" sentinel.
-// maxTurnImageBytes caps the total bytes of outbound images attached to a
-// single reply turn (#2196). ExtractImagePaths caps at 10 paths and each
-// image is capped at 10 MiB (cli/image.go maxImageFileSize), so without a
-// running total a single turn could hold ~100 MiB in memory. 20 MiB covers
-// a realistic multi-image reply while bounding worst-case heap pressure.
+// maxTurnImageBytes caps total outbound image bytes per reply turn (#2196):
+// up to 10 paths × 10 MiB each could otherwise hold ~100 MiB in memory.
 const maxTurnImageBytes = 20 * 1024 * 1024
 
-// readTurnImages resolves the local image paths embedded in replyText into
-// platform.Image attachments and returns the text with every path rewritten
-// to "[图片]". It enforces maxTurnImageBytes across the whole turn: once the
-// running total would exceed the budget, further images are skipped (their
-// paths are STILL rewritten so the user-visible text is identical regardless
-// of attachment outcome). Extracted as a pure-ish helper mirroring
-// decorateReplyText so the byte budget is unit-testable without a Dispatcher
-// roundtrip.
+// readTurnImages resolves the image paths embedded in replyText into
+// platform.Image attachments and rewrites every path to "[图片]". Images past
+// the maxTurnImageBytes budget are skipped but their paths are STILL rewritten
+// so the visible text is identical regardless of attachment outcome.
 func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string) {
 	imagePaths := cli.ExtractImagePaths(replyText)
 	if len(imagePaths) == 0 {
@@ -1556,13 +972,9 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 	}
 	var outImages []platform.Image
 	var turnImageBytes int
-	// R112714-PERF-8: use strings.ReplaceAll loop instead of
-	// strings.NewReplacer. ExtractImagePaths returns at most a handful of
-	// paths per reply (typically 1-2), so the per-call trie allocation in
-	// strings.NewReplacer costs more than N simple verbatim scans. Each
-	// path is always replaced (even when ReadFile fails or the byte budget
-	// is exhausted) so user-visible behaviour is unchanged: every extracted
-	// path becomes "[图片]".
+	// ReplaceAll loop beats strings.NewReplacer for the 1-2 paths typical
+	// here. Every path is replaced even when ReadFile fails or the budget
+	// is exhausted.
 	for _, path := range imagePaths {
 		data, err := d.imageReader.ReadFile(path)
 		if err == nil {
@@ -1577,38 +989,26 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 	return outImages, replyText
 }
 
+// decorateReplyText post-processes the raw CLI result text for IM delivery:
+// redacts secrets, localises API errors, appends the merge-group chip and the
+// per-session ReplyFooter. Returns "" when nothing should be sent (#656).
 func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.ManagedSession) string {
-	// R103901-CODE-1: scrub well-known credential token shapes (sk-ant-, ghp_,
-	// AKIA, …) BEFORE localising the API error, mirroring the cron notify
-	// path (scheduler_run.go: sanitise → localize, privacy-first ordering).
-	// Without this a Claude reply that echoes a plaintext token would land
-	// verbatim on the IM channel.
-	// R20260602-091302-ARCH-1 (#1571): redactor now lives in the leaf package
-	// internal/textutil; dispatch no longer couples this security-critical
-	// path to the cron domain package for scrubbing.
+	// Redact credential shapes (sk-ant-, ghp_, AKIA, …) BEFORE localising so
+	// an echoed plaintext token never reaches the IM channel (#1571).
 	replyText := localizeAPIError(textutil.RedactSecrets(result.Text))
 	// Head slot of a merge group: append a small chip so the user knows the
 	// single bot bubble covers N messages.
 	if result.MergedCount > 1 && replyText != "" {
-		// R20260526-PERF-005: hot path on every merge-group head reply,
-		// avoid fmt.Sprintf's reflect/format overhead for a single int.
 		replyText += "\n\n*— 合并了 " + strconv.Itoa(result.MergedCount) + " 条消息的回复*"
 	}
-	// Per-session ReplyFooter: when sess is non-nil we resolve the tag from
-	// sess.Backend(); when nil (cron edge case where the session has been
-	// pruned but the reply path still fires) Capabilities.ReplyFooter
-	// receives "" and the implementation falls back to the router default.
-	// NoopCapabilities returns "" so an unwired host yields no footer (same
-	// as the legacy nil-closure behaviour).
+	// nil sess (session pruned but reply still fires) passes "" so
+	// ReplyFooter falls back to the router default; NoopCapabilities yields "".
 	var backendID string
 	if sess != nil {
 		backendID = sess.Backend()
 	}
-	// #1985: guard on replyText != "" (mirroring the merge-chip branch above)
-	// so an empty-text turn returns the empty "nothing to send" sentinel
-	// instead of an orphan "— cc" footer bubble. Without this guard a healthy
-	// empty result (e.g. error_max_turns) plus the default footer would emit a
-	// lone footer message to the IM channel.
+	// Guard on replyText != "" so an empty-text turn does not emit a lone
+	// "— cc" footer bubble (#1985).
 	if footer := d.caps.ReplyFooter(backendID); footer != "" && replyText != "" {
 		replyText += "\n\n— " + footer
 	}
@@ -1616,10 +1016,8 @@ func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.Man
 }
 
 // pageSuffixRuneWidth returns the rune width of the worst-case page suffix
-// "\n— [i/total]" for a reply split into total chunks. i can be at most
-// total, so the widest "i" has the same digit count as total. The fixed
-// glyphs are: '\n' + '—' + ' ' + '[' + '/' + ']' = 6 runes (the em dash is a
-// single rune); plus the two numbers. #2008.
+// "\n— [i/total]": 6 fixed runes ('\n' '—' ' ' '[' '/' ']') plus two numbers
+// with total's digit count (#2008).
 func pageSuffixRuneWidth(total int) int {
 	if total < 1 {
 		total = 1
@@ -1628,22 +1026,11 @@ func pageSuffixRuneWidth(total int) int {
 	return 6 + 2*digits
 }
 
-// upperBoundChunks returns a ceiling estimate of how many chunks SplitText
-// would produce for runeCount runes at the given split width. It must never
-// under-estimate, because the caller reserves the page-suffix budget for
-// this count before the real split happens.
-//
-// #2056: a naive ceil(runeCount/splitWidth) under-estimates. SplitText may
-// break EARLY at a newline whenever the newline's byte offset is past the
-// chunk midpoint (`idx > end/2`), so the shortest possible chunk is roughly
-// half the split width (~floor(splitWidth/2)+1 runes for ASCII). A reply
-// dense with newlines (markdown) can therefore yield up to ~2x the naive
-// estimate. When the true count crosses a decimal digit boundary (e.g.
-// estimate 9 → suffix width 8, but real 10 → suffix width 10) the reserved
-// budget falls short and a chunk+suffix exceeds maxLen — the exact loss
-// mode #2008 set out to prevent, with a gap. Bound by the minimum chunk
-// size ceil(splitWidth/2) so the estimate covers the newline-halving worst
-// case.
+// upperBoundChunks returns a ceiling on how many chunks SplitText produces for
+// runeCount runes at splitWidth; it must never under-estimate because the
+// caller reserves the page-suffix budget from it. SplitText may break early at
+// a newline past the chunk midpoint, so the shortest chunk is ~ceil(splitWidth/2)
+// — a naive ceil(runeCount/splitWidth) can under-estimate by 2x (#2056).
 func upperBoundChunks(runeCount, splitWidth int) int {
 	if splitWidth <= 0 {
 		return runeCount + 1
@@ -1659,20 +1046,12 @@ func upperBoundChunks(runeCount, splitWidth int) int {
 // a single-use-token platform must be truncated to fit one message. #2136.
 const singleReplyTruncMarker = "\n…(truncated)"
 
-// singleReplyTruncMarkerRunes is the rune width of singleReplyTruncMarker,
-// computed once at init rather than on every truncateForSingleReply call
-// (the marker is a compile-time constant). R202606e-PERF-003.
+// singleReplyTruncMarkerRunes is the rune width of singleReplyTruncMarker.
 var singleReplyTruncMarkerRunes = utf8.RuneCountInString(singleReplyTruncMarker)
 
 // truncateForSingleReply trims text to at most maxRunes runes, reserving room
-// for a visible truncation marker so the user knows the reply was cut. When
-// maxRunes is too small to fit the marker, it falls back to a bare rune-safe
-// truncation (content kept maximal, marker dropped).
-//
-// R202606e-PERF-001: uses textutil.TruncateRunesNoEllipsis, which walks at most
-// the truncation point and returns a zero-alloc sub-slice of the original
-// string, rather than materialising the whole reply as a []rune (cost ∝ total
-// length, not the kept prefix).
+// for a visible truncation marker; when maxRunes cannot fit the marker it
+// falls back to bare rune-safe truncation.
 func truncateForSingleReply(text string, maxRunes int) string {
 	keep := maxRunes - singleReplyTruncMarkerRunes
 	if keep <= 0 {
@@ -1686,18 +1065,12 @@ func truncateForSingleReply(text string, maxRunes int) string {
 func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
 	maxLen := p.MaxReplyLength()
 	if maxLen <= 0 {
-		// R228-ARCH-1: fall back to the package-level default rather than a
-		// floating literal so a bump in platform.DefaultMaxReplyLen is
-		// picked up here automatically.
 		maxLen = platform.DefaultMaxReplyLen
 	}
 
-	// #2136: platforms whose reply is authorised by a single-use token (e.g.
-	// WeChat iLink) can deliver only ONE message per inbound turn — the token
-	// is consumed by the first send and reuse is rejected upstream. Fanning a
-	// long reply into N chunks would deliver only chunk [1/N] and silently
-	// lose [2/N]..[N/N]. Collapse to a single rune-safe-truncated message with
-	// a visible "…(truncated)" marker so the user knows the reply was cut.
+	// Single-use-token platforms (e.g. WeChat iLink) can deliver only ONE
+	// message per inbound turn; N chunks would lose [2/N]..[N/N]. Collapse
+	// to one truncated message with a visible marker (#2136).
 	if platform.UsesSingleUseReplyToken(p) {
 		if utf8.RuneCountInString(text) > maxLen {
 			text = truncateForSingleReply(text, maxLen)
@@ -1712,14 +1085,8 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		return
 	}
 
-	// R202606j-PERF-006: byte-length fast path. maxLen is a rune count
-	// (compared against utf8.RuneCountInString below). Since a string's byte
-	// length is an upper bound on its rune count, len(text) <= maxLen implies
-	// the rune count is also <= maxLen, so the reply can never need splitting.
-	// Emit the single chunk directly and skip the full-text rune scan (which
-	// on a ~50KB reply would walk every byte just to conclude "no split").
-	// Mirrors the single-chunk branch of the loop below (no page suffix,
-	// one ReplyWithRetry, markReplySuccess on success).
+	// Byte-length fast path: len(text) is an upper bound on the rune count,
+	// so len(text) <= maxLen means no split is needed; skip the rune scan.
 	if len(text) <= maxLen {
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: text}, limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
@@ -1731,35 +1098,17 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		return
 	}
 
-	// #2008: when the reply needs splitting we append a "\n— [i/N]" page
-	// suffix to each chunk. Splitting at the raw platform limit yields a
-	// full chunk of exactly maxLen runes; the suffix then pushes it to
-	// maxLen+len(suffix), which on platforms with a hard API ceiling (e.g.
-	// Discord, MaxReplyLen=2000 with zero headroom) is rejected outright
-	// (400 BASE_TYPE_MAX_LENGTH) rather than truncated — and ReplyWithRetry
-	// blindly re-sends the same oversized payload, losing the chunk. Reserve
-	// room for the worst-case suffix before splitting so every emitted
-	// message stays within the platform limit.
-	//
-	// The suffix width depends on the digit count of total, which in turn
-	// depends on the split width — a mild circularity. We break it with a
-	// conservative upper bound on the chunk count (rune length / split
-	// width, rounded up) computed at the reduced width, then reserve for the
-	// worst-case suffix of that count. Reserving at the upper-bound count can
-	// only over-reserve, never under-reserve, so every emitted chunk stays
-	// within maxLen.
+	// When splitting, each chunk gets a "\n— [i/N]" suffix; splitting at the
+	// raw limit would push full chunks past hard API ceilings (Discord 2000,
+	// rejected outright, and ReplyWithRetry re-sends the same payload). Reserve
+	// the worst-case suffix using an upper-bound chunk count computed at the
+	// reduced width — over-reserving is safe, under-reserving is not (#2008).
 	splitLen := maxLen
-	// #2057: when maxLen is smaller than the page suffix itself (a tiny or
-	// mis-configured max_reply_length — constructors only clamp <=0, there
-	// is no positive lower bound in config validation), the reservation
-	// below goes non-positive. The old code silently fell back to
-	// splitLen=maxLen and STILL appended the suffix, so every chunk landed
-	// at maxLen+suffix > maxLen. Detect that case and suppress the page
-	// suffix entirely rather than emit guaranteed-oversized chunks.
+	// maxLen smaller than the suffix itself (config only clamps <=0) makes the
+	// reservation non-positive; suppress the suffix instead of emitting
+	// guaranteed-oversized chunks (#2057).
 	suppressSuffix := false
-	// #2283: compute the rune count once here and reuse it both for the
-	// page-suffix reservation and SplitTextWithCount below, instead of
-	// scanning the same string twice (here + inside platform.SplitText).
+	// Count runes once for both the reservation and SplitTextWithCount (#2283).
 	runeCount := utf8.RuneCountInString(text)
 	if runeCount > maxLen {
 		// First-pass reservation assuming a 1-digit count, then widen the
@@ -1778,8 +1127,6 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	total := len(chunks)
 	for i, chunk := range chunks {
 		if total > 1 && !suppressSuffix {
-			// R20260526-PERF-005: per-chunk on every multi-chunk reply,
-			// strconv.Itoa avoids fmt.Sprintf's per-call alloc/format.
 			chunk += "\n— [" + strconv.Itoa(i+1) + "/" + strconv.Itoa(total) + "]"
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, limits.PlatformReplyMaxAttempts); err != nil {

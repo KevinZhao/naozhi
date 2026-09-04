@@ -12,23 +12,15 @@ import (
 )
 
 // WorkspaceRootLister enumerates the distinct workspace roots whose
-// <root>/.naozhi/attachments subtree the attachment-gc daemon sweeps.
+// <root>/.naozhi/attachments subtree attachment-gc sweeps: the router default
+// workspace ∪ every per-chat workspace override ∪ every bound project Path
+// (docs/rfc/attachment-gc-daemon.md §4.4 E1). It is intentionally NOT derived
+// from the live session table — pruned sessions' attachment dirs are exactly
+// the ones most in need of GC, and roots are stable across prune.
 //
-// The set is the UNION of (docs/rfc/attachment-gc-daemon.md §4.4 E1):
-//   - the router default workspace,
-//   - every per-chat workspace override value,
-//   - every bound project's Path.
-//
-// It is intentionally NOT derived from the live session table: that set
-// shrinks as sessions are pruned, but the attachment dirs of pruned
-// sessions are exactly the ones most in need of GC. Workspace *roots*
-// are stable across prune, so enumerating roots covers dead-session
-// attachments too.
-//
-// Implementations MUST return paths already normalised+deduplicated
-// (abs + EvalSymlinks) so the daemon does not double-sweep the same
-// directory reached via two different strings (E2). Returning nil is
-// allowed and means "nothing to sweep this tick".
+// Implementations MUST return paths already normalised+deduplicated (abs +
+// EvalSymlinks) so the same directory is not double-swept via two spellings
+// (E2). nil means "nothing to sweep this tick".
 type WorkspaceRootLister interface {
 	KnownWorkspaceRoots() []string
 }
@@ -38,17 +30,14 @@ const (
 	attachmentGCDefaultRefTTL     = attachment.DefaultRefTTL // 30d
 	attachmentGCDefaultPerRootCap = 500
 	attachmentGCDefaultMetaGrace  = 5 * time.Minute
-	// AttachmentGCMinTick floors the configured tick so a misconfigured
-	// short interval (e.g. 30s) cannot make the daemon re-walk every
-	// attachment dir continuously. GC is low-frequency by nature.
-	// Wiring layers (e.g. cmd/naozhi/main_helpers.go) should reference
-	// this constant instead of inlining time.Hour.
+	// AttachmentGCMinTick floors the configured tick so a misconfigured short
+	// interval cannot re-walk every attachment dir continuously. Wiring layers
+	// should reference this constant instead of inlining time.Hour.
 	AttachmentGCMinTick = time.Hour
 )
 
-// attachmentGC is the refcount-aware attachment reaper daemon. It owns
-// no LLM Runner — it is a pure filesystem sweeper, the first member of
-// the sysession §12 "sweeper" family. See docs/rfc/attachment-gc-daemon.md.
+// attachmentGC is the refcount-aware attachment reaper: a pure filesystem
+// sweeper with no LLM Runner. See docs/rfc/attachment-gc-daemon.md.
 type attachmentGC struct {
 	roots WorkspaceRootLister
 
@@ -58,10 +47,9 @@ type attachmentGC struct {
 	metaGrace  time.Duration
 	dryRun     bool
 
-	// cursor is the round-robin start offset across roots so a single
-	// high-churn root that repeatedly hits perRootCap cannot starve the
-	// others (E3). In-memory only; reset to 0 on restart is harmless
-	// because GCWithRefs is idempotent.
+	// cursor is the round-robin start offset across roots so a high-churn root
+	// that keeps hitting perRootCap cannot starve the others (E3). In-memory
+	// only; GCWithRefs is idempotent so reset-on-restart is harmless.
 	cursor int
 
 	// nowFn is injected in tests; nil → time.Now.
@@ -76,18 +64,16 @@ func newAttachmentGC(deps DaemonDeps) (Daemon, error) {
 		perRootCap: attachmentGCDefaultPerRootCap,
 		metaGrace:  attachmentGCDefaultMetaGrace,
 	}
-	// deps.WorkspaceRoots may be nil if the host did not wire it; Tick
-	// degrades to a logged no-op rather than failing construction, so a
-	// misconfigured host still boots.
+	// A nil WorkspaceRoots degrades Tick to a logged no-op rather than failing
+	// construction, so a misconfigured host still boots.
 	return a, nil
 }
 
 func (a *attachmentGC) Name() string        { return DaemonAttachmentGC }
 func (a *attachmentGC) Description() string { return "回收超过 TTL 且无引用的附件文件" }
 
-// Configure reads the attachment-gc knobs. Unknown keys ignored
-// (forward-compat). Validates ref_ttl >= upload_ttl. Clamps tick-adjacent
-// numeric knobs defensively.
+// Configure reads the attachment-gc knobs; unknown keys are ignored.
+// Validates ref_ttl >= upload_ttl.
 func (a *attachmentGC) Configure(cfg DaemonConfig) error {
 	if v, ok := cfg["upload_ttl"].(time.Duration); ok && v > 0 {
 		a.uploadTTL = v
@@ -117,10 +103,9 @@ func (a *attachmentGC) now() time.Time {
 	return time.Now()
 }
 
-// Tick sweeps every known workspace root once. Per-root budget +
-// round-robin cursor bound the per-tick deletion work and prevent
-// root starvation (RFC §4.3 / §4.6-2). ctx is honoured both between
-// roots and (via GCWithRefs) inside a single root's walk.
+// Tick sweeps every known workspace root once. Per-root budget + round-robin
+// cursor bound per-tick deletion work and prevent root starvation (RFC §4.3);
+// ctx is honoured between roots and, via GCWithRefs, inside a root's walk.
 func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 	metrics.AttachmentGCSweepTotal.Add(1)
 
@@ -160,8 +145,7 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 		})
 		if err != nil {
 			if ctx.Err() != nil {
-				// Context cancelled mid-sweep: do NOT count the root as
-				// examined — the sweep did not complete. [R20260601-CR-6]
+				// Cancelled mid-sweep: the root did not complete, so it is not counted as examined.
 				firstErr = err
 				break
 			}
@@ -170,8 +154,7 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 			if firstErr == nil {
 				firstErr = err
 			}
-			// Still count as examined: we attempted and got a real error
-			// (not a cancel), so the root was processed this tick.
+			// A real (non-cancel) error still counts as examined.
 			report.Examined++
 			recordWouldReap(res)
 			continue
@@ -183,17 +166,15 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 			report.Acted += res.Removed
 		}
 		if res.Stopped {
-			// Per-root cap hit; cursor already advanced so a starved
-			// root gets first crack next tick.
+			// Cap hit; cursor already advanced so a starved root goes first next tick.
 			report.Skipped["cap_hit"]++
 		}
 	}
 	return report, firstErr
 }
 
-// recordWouldReap fans the per-reason would-remove counts out to the
-// bucketed expvar counters (RFC §6 E4). Called in both dry-run and live
-// mode for observability.
+// recordWouldReap fans per-reason would-remove counts out to the bucketed
+// expvar counters (RFC §6 E4), in both dry-run and live mode.
 func recordWouldReap(res attachment.GCResult) {
 	for reason, n := range res.WouldRemove {
 		switch reason {

@@ -14,37 +14,24 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// osStat is a package-level alias for os.Stat used by
-// resolveBinPathFromEnv.  Keeping it as a function var lets unit tests
-// stub the filesystem walk without touching disk; production callers
-// pay one indirect call per PATH entry which is negligible (PATH walk
-// happens once at NewRunner, not per Run).
+// osStat lets unit tests stub the PATH walk in resolveBinPathFromEnv.
 var osStat = os.Stat
 
-// Runner is the LLM-call abstraction used by all daemons.  Each Run()
-// invocation execs a fresh "claude -p" subprocess (= one transient
-// system session) and returns the trimmed stdout.  The subprocess
-// terminates the moment exec.Cmd.Output returns; there is no shared
-// long-lived state between calls (RFC §6.1 — the SharedCLI route was
-// rejected as self-contradictory).
+// Runner is the LLM-call abstraction used by all daemons. Each Run execs
+// a fresh "claude -p" subprocess (one transient system session) and
+// returns trimmed stdout; nothing is shared between calls (RFC §6.1).
 //
 // Implementations MUST:
-//   - Pipe prompt through stdin (NOT argv) — prompts can contain user
-//     conversation excerpts and `ps aux` would leak them otherwise.
-//   - Set --setting-sources "" so naozhi-host claude hooks don't
-//     re-enter.  Project rule: never inherit hooks across embedded
-//     CLI invocations (would dead-loop the AutoTitler with the host's
-//     own learning hooks).
-//   - Honour ctx — exec.CommandContext is the standard mechanism.
+//   - Pipe the prompt through stdin, NOT argv — prompts carry user
+//     conversation excerpts and `ps aux` would leak them.
+//   - Pass --setting-sources "" so the host's claude hooks don't re-enter
+//     and dead-loop the AutoTitler.
+//   - Honour ctx (exec.CommandContext).
 type Runner interface {
-	// Run execs a subprocess to evaluate prompt.  Returns trimmed
-	// stdout.  Prefers ctx.Err() when the subprocess exit is
-	// attributable to context cancellation (i.e. cmd's error chain
-	// contains context.Canceled or context.DeadlineExceeded), so
-	// callers can errors.Is(err, context.DeadlineExceeded) without
-	// reaching for exit codes.  In the rare race where ctx fires
-	// concurrently with an organic non-zero exit, the raw exec error
-	// is returned instead so the dashboard sees the real failure.
+	// Run execs a subprocess for prompt and returns trimmed stdout. Returns
+	// ctx.Err() when the exit is attributable to cancellation so callers
+	// can errors.Is it; if ctx fires concurrently with an organic non-zero
+	// exit, the raw exec error wins so the dashboard sees the real failure.
 	Run(ctx context.Context, prompt string) (string, error)
 }
 
@@ -54,35 +41,27 @@ type RunnerConfig struct {
 	// "claude" up via $PATH if empty.
 	BinPath string
 
-	// WorkDir is the cwd for spawned subprocesses.  Daemons MUST keep
-	// this isolated from user workspaces (RFC §6.5):  use
-	// <dataDir>/sys-sessions/ chmodded 0700.
+	// WorkDir is the cwd for subprocesses. MUST be isolated from user
+	// workspaces (RFC §6.5): <dataDir>/sys-sessions/ chmod 0700.
 	WorkDir string
 
 	// Model overrides --model.  Empty leaves --model off so the binary
 	// uses its own default.
 	Model string
 
-	// EnvAllowlist is a list of environment variable names that are
-	// passed through to the subprocess (in addition to PATH and HOME
-	// which are always passed).  Everything else is stripped — daemons
-	// must NOT inherit IM tokens, dashboard secrets, or AWS creds.
+	// EnvAllowlist names the env vars passed to the subprocess (PATH and
+	// HOME always pass). Everything else is stripped: daemons must NOT
+	// inherit IM tokens, dashboard secrets or AWS creds.
 	EnvAllowlist []string
 }
 
-// NewRunner returns a process-based Runner.  Returns an error if the
-// configuration is unusable (e.g. WorkDir doesn't exist).
-//
-// The returned Runner is safe for concurrent use across goroutines —
-// each Run() exec'd a separate subprocess with its own pipes, so there
-// is no shared mutable state to race on.
+// NewRunner returns a process-based Runner; errors when the
+// configuration is unusable. Safe for concurrent use: each Run has its
+// own subprocess and pipes.
 func NewRunner(cfg RunnerConfig) (Runner, error) {
 	if cfg.BinPath == "" {
-		// Resolve via PATH.  We don't fail here; LookPath happens lazily
-		// inside Run so a missing binary surfaces as an upstream error
-		// (not a startup error).  This matches naozhi's default policy
-		// of degrading gracefully when an optional CLI isn't installed
-		// yet — operator can fix it without restarting.
+		// Resolved via PATH below; a missing binary surfaces lazily at Run as
+		// an upstream error so an operator can install it without restarting.
 		cfg.BinPath = "claude"
 	}
 	if cfg.WorkDir == "" {
@@ -93,46 +72,23 @@ func NewRunner(cfg RunnerConfig) (Runner, error) {
 		return nil, fmt.Errorf("sysession: resolve WorkDir: %w", err)
 	}
 	cfg.WorkDir = abs
-	// EnvAllowlist + parent env are stable post-construction, so the
-	// filtered "KEY=value" slice is computed once. Avoids an os.Environ()
-	// syscall + O(N) scan on every Run() (AutoTitler call rate). R230-PERF-3.
+	// Allowlist + parent env are stable post-construction; filter once.
 	env := filterEnv(cfg.EnvAllowlist)
-	// R245-SEC-11: pin BinPath to an absolute path at construction time
-	// using the PATH snapshot embedded in env.  Otherwise NewRunner
-	// snapshots filtered PATH into env but Run() lets exec.CommandContext
-	// resolve a relative BinPath via os.Getenv("PATH") at *call* time —
-	// any later os.Setenv("PATH", ...) (tests, plugin loaders, etc.)
-	// causes the binary picked up by Run() to diverge from what env says.
-	// The race window is dashboard-restart wide: PATH-mutating goroutines
-	// with NewRunner+Run pairs can land arbitrary CLI bins.
-	//
-	// We re-implement a minimal PATH walk because exec.LookPath uses the
-	// process's live os.Getenv("PATH"), which is exactly the value we're
-	// trying to insulate from. resolveBinPathFromEnv reads the PATH= entry
-	// out of env (which is the snapshot we already commit to) and walks
-	// it for the first executable file matching cfg.BinPath. On miss we
-	// keep the original relative name so Run() still degrades gracefully
-	// with an upstream error (matches the godoc above).
+	// Pin BinPath to an absolute path using the PATH snapshot inside env.
+	// exec.CommandContext would otherwise resolve a relative BinPath via
+	// the live os.Getenv("PATH") at call time, so a later os.Setenv could
+	// make Run spawn a binary that diverges from what env says. On miss
+	// keep the relative name so Run still degrades gracefully.
 	if !filepath.IsAbs(cfg.BinPath) && !strings.ContainsRune(cfg.BinPath, filepath.Separator) {
 		if abs, ok := resolveBinPathFromEnv(cfg.BinPath, env); ok {
 			cfg.BinPath = abs
 		}
 	} else {
-		// R247-SEC-19 / R245-SEC-15: when caller supplies an absolute path
-		// or a path containing a separator we skip the PATH walk, but we
-		// still want the regular-file + executable gate
-		// resolveBinPathFromEnv enforces on PATH-resolved hits. Otherwise
-		// Run() can be tricked into spawning a 0644 config file
-		// ("/etc/claude.yaml"), a directory, or a device node when an
-		// operator misconfigures BinPath; exec.CommandContext only fails
-		// at fork-time with a confusing "permission denied".
-		//
-		// We use os.Stat (follows symlinks) on purpose: distro-packaged
-		// `claude` is commonly a symlink chain
-		// (/usr/local/bin/claude → /opt/claude/cli/claude) and rejecting
-		// all symlinks would break production. The terminal target is
-		// what matters; if the chain ends at a regular executable file
-		// the spawn is safe.
+		// Operator-supplied path: skip the PATH walk but keep the
+		// regular-file + executable gate so Run can't be pointed at a 0644
+		// config file, a directory or a device node. os.Stat (follows
+		// symlinks) on purpose: a distro `claude` is commonly a symlink
+		// chain and only the terminal target matters.
 		if info, err := os.Stat(cfg.BinPath); err != nil {
 			return nil, fmt.Errorf("sysession: BinPath %q: %w", cfg.BinPath, err)
 		} else if !info.Mode().IsRegular() {
@@ -141,25 +97,11 @@ func NewRunner(cfg RunnerConfig) (Runner, error) {
 			return nil, fmt.Errorf("sysession: BinPath %q is not executable", cfg.BinPath)
 		}
 	}
-	// R247-SEC-19 (REPEAT-2 of R245-SEC-15): if cfg.BinPath is now an
-	// absolute path (either operator-supplied or resolved out of the
-	// snapshotted PATH above), Stat the eventual target and reject
-	// anything that isn't a regular file with at least one executable
-	// bit set. Stat (not Lstat) is intentional — a symlinked
-	// /usr/local/bin/claude → /opt/.../claude is the dominant
-	// installation pattern (Homebrew, pkg managers) and refusing it
-	// would break operators on common setups. The TOCTOU window between
-	// this check and Run() exec is the same as exec.LookPath's; this
-	// guard catches the construction-time class (operator points
-	// BinPath at a config dir / dangling link / dir-confused path) so
-	// an obviously misconfigured Runner fails fast with a clear error
-	// rather than degrading at first Tick.
-	//
-	// Relative names left in cfg.BinPath (resolveBinPathFromEnv missed)
-	// fall through without validation — that path is already documented
-	// to "degrade gracefully" via Run's exec.CommandContext and we keep
-	// the same behaviour so a missing or mid-install CLI doesn't fail
-	// naozhi startup.
+	// Fail fast at construction when an absolute BinPath isn't a regular
+	// executable (Stat, not Lstat: symlinked installs are the norm). The
+	// TOCTOU window to exec matches exec.LookPath's. Relative names that
+	// resolveBinPathFromEnv missed fall through unvalidated so a missing
+	// CLI doesn't fail startup.
 	if filepath.IsAbs(cfg.BinPath) {
 		info, err := os.Stat(cfg.BinPath)
 		if err != nil {
@@ -176,15 +118,10 @@ func NewRunner(cfg RunnerConfig) (Runner, error) {
 	return &runnerImpl{cfg: cfg, env: env}, nil
 }
 
-// resolveBinPathFromEnv walks the PATH= entry inside env (env-slice
-// form: "KEY=value" lines) for an executable whose basename equals
-// name. Returns ("", false) when no PATH entry exists or no candidate
-// is executable; the caller should leave cfg.BinPath as a relative
-// name and let Run()'s exec.CommandContext degrade gracefully.
-//
-// We deliberately do not consult os.Getenv("PATH"): the whole point of
-// this function is to insulate from a parent PATH that may be racing
-// with another goroutine via os.Setenv. R245-SEC-11.
+// resolveBinPathFromEnv walks the PATH= entry of env ("KEY=value" lines)
+// for an executable named name; ("", false) when none, so the caller
+// keeps a relative BinPath. It deliberately ignores os.Getenv("PATH"):
+// insulating from a racing parent PATH is the whole point.
 func resolveBinPathFromEnv(name string, env []string) (string, bool) {
 	const pathPrefix = "PATH="
 	var path string
@@ -199,9 +136,8 @@ func resolveBinPathFromEnv(name string, env []string) (string, bool) {
 	}
 	for _, dir := range filepath.SplitList(path) {
 		if dir == "" {
-			// POSIX: empty entry is implicit "."; we refuse to honour it
-			// because cwd-relative resolution is exactly the
-			// cross-tenant attack vector we're trying to close.
+			// POSIX treats an empty entry as "."; refuse it — cwd-relative
+			// resolution is the attack vector being closed.
 			continue
 		}
 		candidate := filepath.Join(dir, name)
@@ -212,9 +148,7 @@ func resolveBinPathFromEnv(name string, env []string) (string, bool) {
 		if info.IsDir() {
 			continue
 		}
-		// Mode()&0o111 != 0 mirrors exec.LookPath's executability check
-		// (any user/group/other +x bit).  Avoids trying to spawn a 0644
-		// "claude" config file someone dropped in $PATH.
+		// Mirrors exec.LookPath's +x check (any user/group/other bit).
 		if info.Mode()&0o111 == 0 {
 			continue
 		}
@@ -228,60 +162,30 @@ type runnerImpl struct {
 	env []string
 }
 
-// runnerStderrCapBytes caps the bytes captured from "claude -p" stderr.
-// 4 KiB is enough to surface the typical CLI diagnostic prefix
-// ("Error: model not found", "auth failed", "context too long" with
-// snippet, etc.) while bounding how much stdin-echo can leak into
-// the error wrap. The first 256 bytes additionally land in slog.Warn
-// (see Run's stderr-head log) — that is a separate, smaller cap and
-// is intentional defence-in-depth, not a duplicate.
+// runnerStderrCapBytes caps captured stderr: enough for the CLI's
+// diagnostic prefix while bounding how much stdin-echo (prompt content)
+// can leak into the error wrap. The 256-byte slog head in Run is a
+// separate, tighter cap on purpose.
 const runnerStderrCapBytes = 4096
 
-// runnerStdoutCapBytes caps "claude -p" stdout. AutoTitler validates
-// titles at ≤24 runes; even with reasoning prefixes legitimate
-// upstream output is well below this 64 KiB cap. The cap exists so a
-// runaway CLI (infinite-loop reasoning, base64-blob hallucination)
-// cannot OOM the parent naozhi process. limitedWriter lies about
-// n=len(p) so exec.Cmd's stdout pump does not spin re-trying past
-// the cap (see limitedWriter godoc).
+// runnerStdoutCapBytes bounds stdout so a runaway CLI can't OOM naozhi;
+// legitimate titles are far below 64 KiB. limitedWriter claims
+// n=len(p) so exec.Cmd's pump doesn't spin past the cap.
 const runnerStdoutCapBytes = 64 * 1024
 
-// runnerImplBaseArgs is the fixed argv prefix for every "claude -p"
-// invocation issued by sysession daemons (AutoTitler etc.).
-//
-// Closes R236-QA-17. These flags MUST stay in sync with the host
-// session protocol contract that internal/cli/wrapper.go assumes:
-//
-//   - "-p"                  one-shot prompt mode (no stream-json).
-//   - "--output-format text" parsed by Run() as a plain UTF-8 string;
-//     switching to json/stream-json silently breaks every daemon.
-//   - "--setting-sources \"\"" disables host hooks so naozhi's own
-//     learning hooks do not re-enter on the daemon's CLI invocation
-//     (would dead-loop the AutoTitler with the host's own hooks —
-//     see Runner godoc and DESIGN.md §6.5).
-//
-// Any change here is a contract change for sysession + auto_titler.
-// Verify against internal/cli/wrapper.go's spawn argv before editing.
-//
-// NEEDS-DESIGN (R241-ARCH-14): this slice is conceptually duplicated
-// by internal/cli/protocol_claude.go:BuildArgs (which constructs the
-// same -p / --output-format / --setting-sources triplet for
-// ManagedSession one-shots). Today we keep them aligned by hand and
-// rely on the inline reminder above. Plan: extend backend.Profile
-// with a OneshotArgs() method so a new backend can express its
-// streaming-vs-oneshot argv contract once; runnerImplBaseArgs and
-// BuildArgs both consume that shared output. Deferred until a
-// second backend (gemini-cli) needs the split, since premature
-// abstraction here would commit cli + sysession to a Profile shape
-// that doesn't yet have a non-Claude consumer to constrain it.
+// runnerImplBaseArgs is the fixed argv prefix for every daemon "claude -p"
+// call. Contract with internal/cli (check protocol_claude.go BuildArgs,
+// which duplicates it by hand, before editing):
+//   - "-p": one-shot mode (no stream-json).
+//   - "--output-format text": Run parses stdout as plain UTF-8; json or
+//     stream-json silently breaks every daemon.
+//   - `--setting-sources ""`: disables host hooks so naozhi's own hooks
+//     don't re-enter and dead-loop the daemon's CLI call (DESIGN.md §6.5).
 var runnerImplBaseArgs = []string{"-p", "--output-format", "text", "--setting-sources", ""}
 
 func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
-	// Copy the package-level prefix so per-call --model append cannot
-	// race with another concurrent Run mutating the shared backing
-	// array. Cap the slice exactly at len(runnerImplBaseArgs) so the
-	// first append always allocates fresh storage (defence-in-depth
-	// against a future len/cap drift).
+	// Copy the shared prefix so the per-call --model append can't race
+	// another Run on the same backing array.
 	args := append([]string(nil), runnerImplBaseArgs...)
 	if r.cfg.Model != "" {
 		args = append(args, "--model", r.cfg.Model)
@@ -292,57 +196,32 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = r.env
 
-	// Capture stderr separately so panic-debug isn't lost when stdout is
-	// empty (e.g. binary error before output).  We only return stderr
-	// in the error wrap — never in the success path. See
-	// runnerStderrCapBytes for the cap rationale.
+	// stderr is only surfaced in the error wrap, never on success.
 	var stderr strings.Builder
 	cmd.Stderr = &limitedWriter{w: &stderr, max: runnerStderrCapBytes}
 
-	// Cap stdout so a runaway "claude -p" can't OOM the parent process.
-	// See runnerStdoutCapBytes for sizing rationale. limitedWriter lies
-	// about n=len(p) so exec.Cmd's pump doesn't spin re-trying past the
-	// cap.
+	// Cap stdout; see runnerStdoutCapBytes.
 	var stdout bytes.Buffer
 	cmd.Stdout = &limitedWriter{w: &stdout, max: runnerStdoutCapBytes}
 
 	err := cmd.Run()
 	if err != nil {
-		// When ctx is cancelled/timed-out, cmd.Run() returns *exec.ExitError
-		// (process killed by signal), not context.Canceled/DeadlineExceeded.
-		// So checking errors.Is on err is always false for the kill path and
-		// the ctx error would be silently dropped. Check ctx.Err() alone.
+		// On ctx cancel cmd.Run returns *exec.ExitError (killed by signal),
+		// not the ctx error, so check ctx.Err() directly.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr
 		}
-		// Sec-LOW-2:  stderr from claude -p can echo back portions of
-		// stdin (= the prompt = user conversation excerpts) when the
-		// CLI errors — e.g. "context too long" diagnostics.  We log a
-		// truncated head at Warn so a tripping breaker is debuggable
-		// from journalctl without operators having to flip slog level.
-		// 256 bytes is enough to see the CLI's diagnostic prefix
-		// ("Error: model not found", "auth failed", etc.) while
-		// limiting how much prompt content can leak into log
-		// aggregators.  ErrorMsg in the breaker log line is still
-		// sanitized (only "exit status N").
-		// R238-GO-12 (#804): also fold a sanitized stderr head into the
-		// returned error so the dashboard breaker's last_error field has
-		// a meaningful diagnostic instead of just "exit status N".
-		// Pre-compute once here and use the same head for both the slog
-		// Warn and the error wrap below — keeps the cap rationale single-
-		// sourced and avoids re-sanitizing.
+		// stderr can echo stdin (= user conversation excerpts) on CLI
+		// errors. Log a 256-byte sanitized head at Warn so a tripping
+		// breaker is debuggable from journalctl while limiting prompt leakage,
+		// and fold the same head into the returned error so the dashboard's
+		// last_error is more than "exit status N" (#804).
 		var stderrHead string
 		if stderr.Len() > 0 {
-			// SanitizeForLog handles both byte-level truncation and
-			// rune-boundary safety, so a multi-byte CJK character at the
-			// 256-byte cap doesn't leak invalid UTF-8 into structured log
-			// sinks. It also scrubs C0/C1/bidi bytes the prompt fragment
-			// (echoed back by the CLI on error) might carry.
-			// 不在此处预截：byte-slice 截断会把多字节 rune 切到中段，而
-			// SanitizeForLog 的 walk-back rune 边界修正只在 mapped 长度
-			// 超过 maxLen 时触发；slow-path strings.Map 把非法 rune 替换
-			// 为 '_'（1 字节），mapped 长度 ≤ 输入长度，于是 walk-back
-			// 不会跑，最终输出残留 mid-rune 字节。
+			// SanitizeForLog does byte truncation, rune-boundary walk-back and
+			// C0/C1/bidi scrubbing in one pass. 不在此处预截：byte-slice 截断会把
+			// 多字节 rune 切到中段，而 SanitizeForLog 的 walk-back 只在 mapped
+			// 长度超过 maxLen 时触发，最终会残留 mid-rune 字节。
 			stderrHead = osutil.SanitizeForLog(stderr.String(), 256)
 			slog.Warn("sysession: runner stderr",
 				"binary", filepath.Base(r.cfg.BinPath),
@@ -355,62 +234,40 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("sysession: %s -p failed: %w",
 			filepath.Base(r.cfg.BinPath), err)
 	}
-	// bytes.TrimSpace operates on []byte directly; the final string()
-	// conversion is the only allocation, vs strings.TrimSpace(string(out))
-	// which copies twice.
+	// bytes.TrimSpace first so string() is the only allocation.
 	return string(bytes.TrimSpace(stdout.Bytes())), nil
 }
 
-// Compile-time guarantee that runnerImpl satisfies the Runner contract
-// described above (stdin pipe / --setting-sources / ctx honour). Adding
-// an unrelated method to the interface fails the build in this file.
+// Compile-time check that runnerImpl satisfies Runner.
 var _ Runner = (*runnerImpl)(nil)
 
 // limitedWriter caps an io.Writer so a runaway subprocess can't fill
-// memory with stderr.  Discards everything past max.  We don't emit a
-// "[truncated]" marker because the stderr is only used in error
-// messages — readability beats fidelity here.
+// memory; bytes past max are discarded with no "[truncated]" marker.
+// Pointer receiver is required: cmd.Stderr holds an interface value and
+// a value receiver would see a fresh n=0 every call.
 //
-// Pointer-receiver Write is intentional:  cmd.Stderr stores an
-// io.Writer interface value, and a value-receiver Write would let
-// every call see a fresh n=0 copy of the struct, defeating the cap.
-//
-// io.Writer CONTRACT VIOLATION (R232-GO-4): Write always returns
-// (len(p), nil) — including the discard-after-cap path AND the inner
-// writer error path. Returning (n<len(p), err) is what io.Writer
-// formally requires, but exec.Cmd's stderr pump (and io.Copy in
-// general) treats short writes as "retry forever", which would either
-// loop on the cap or cascade an inner-writer fault into a stderr
-// pump that never finishes. Callers of limitedWriter MUST be aware
-// they will never see write errors and MUST NOT chain it into pipes
-// that demand the standard contract. Currently only used as
-// cmd.Stderr / cmd.Stdout for the sysession one-shot Run path; do
-// NOT expose it beyond the package without revisiting this trade-off.
+// io.Writer CONTRACT VIOLATION: Write always returns (len(p), nil), on
+// the discard path AND on inner-writer error. exec.Cmd's pump (and
+// io.Copy) treats short writes as "retry forever", which would loop on
+// the cap or cascade a sink fault. Callers never see write errors; do
+// NOT expose this beyond the sysession one-shot Run path.
 type limitedWriter struct {
 	w      io.Writer
 	max    int
 	n      int
-	failed bool // R238-GO-5 (#794): set once inner.Write reports err.
+	failed bool // set once the inner Write errors (#794).
 }
 
 func (lw *limitedWriter) Write(p []byte) (int, error) {
-	// Always claim we consumed the whole input — io.Writer's contract
-	// says n must equal len(p) when err is nil, and exec.Cmd's stderr
-	// pump treats n<len(p) as a partial write and re-tries indefinitely.
-	// Anything past max is silently discarded.
+	// Always claim the whole input consumed (see type godoc); past max
+	// is silently discarded.
 	remaining := lw.max - lw.n
 	if remaining <= 0 {
 		return len(p), nil
 	}
-	// R238-GO-5 (#794): once the inner writer has errored, do not call
-	// it again. The previous shape kept invoking lw.w.Write on every
-	// subsequent chunk; if the writer was a strings.Builder backed by a
-	// dead buffer or a wrapped-fd that hit ENOSPC, lw.n never grew so
-	// the cap-fast-path never engaged and we burned a syscall per
-	// stderr line for the rest of the subprocess lifetime. The failed
-	// flag short-circuits to the same swallow-and-claim-success
-	// behaviour the cap-overflow path already uses, so the pump still
-	// makes forward progress without re-trying a known-broken sink.
+	// Once the inner writer has errored, never call it again: lw.n would
+	// never grow, the cap fast-path would never engage, and every chunk
+	// would burn a call on a known-broken sink (#794).
 	if lw.failed {
 		return len(p), nil
 	}
@@ -420,17 +277,9 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	}
 	written, err := lw.w.Write(chunk)
 	lw.n += written
-	// io.Writer contract: when err != nil, n MUST be < len(p). Surfacing
-	// (len(p), err) violates that and confuses callers (and exec.Cmd's
-	// stderr pump). On the discard path we already swallow overflow
-	// without an error; do the same on writer error so the pump treats
-	// the chunk as fully accepted and keeps draining.
-	//
-	// #2253: we still MUST NOT propagate err (the pump-safety invariant is
-	// load-bearing — see the type godoc), but a fully silent swallow gave an
-	// ENOSPC / dead-sink zero observability. Emit a one-shot Warn on the
-	// failed-transition so the dropped output is at least diagnosable in the
-	// logs; subsequent chunks short-circuit above without re-logging.
+	// Never propagate err (pump-safety invariant, see type godoc), but
+	// Warn once on the failed transition so a dead sink / ENOSPC is
+	// diagnosable (#2253).
 	if err != nil && !lw.failed {
 		lw.failed = true
 		slog.Warn("sysession: limitedWriter inner sink failed; discarding remaining output",

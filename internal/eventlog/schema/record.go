@@ -8,35 +8,19 @@ import (
 	"sync"
 )
 
-// WireVersion is the current schema version for Record envelopes and
-// <keyhash>.log file formats. Bump this constant when the JSON shape
-// changes in a way older readers cannot safely ignore.
+// WireVersion is the schema version of Record envelopes and <keyhash>.log
+// files. Bump policy:
+//   - Additive EventEntry fields with omitempty → no bump.
+//   - New Record.Type values or a changed field JSON shape → bump.
 //
-// Policy:
-//   - Additive EventEntry fields with `omitempty` → no bump (old readers
-//     simply drop the unknown field).
-//   - New Record.Type values → bump (older readers would treat them as
-//     malformed and skip the entire line, losing events).
-//   - Changing a field's JSON shape (int → string, etc.) → bump.
-//
-// Readers MUST refuse to load a file whose header declares a WireVersion
-// greater than this constant, falling back to the Claude CLI JSONL source.
-// This failure mode is intentional — silently parsing a newer-format file
-// with a best-effort subset would mask real compatibility breakage.
+// Readers MUST refuse a file whose header declares a WireVersion greater
+// than this constant and fall back to the Claude CLI JSONL source.
 const WireVersion = 1
 
-// MinReadVersion is the oldest WireVersion that the current reader will
-// still accept. R230B-ARCH-21: when WireVersion bumps to 2, callers
-// upgrading from a v1-only build need to either drop their v1 files or
-// keep this value at 1 for one release cycle so the dashboard can still
-// read pre-bump history. Bumping MinReadVersion to N is the explicit
-// "we no longer guarantee back-compat with versions < N" signal.
-//
-// Today MinReadVersion == WireVersion == 1; Validate / UnmarshalRecord
-// reject anything below MinReadVersion AND anything above WireVersion.
-// The two boundaries are kept distinct so a future bump can advance
-// WireVersion (writes new format) while leaving MinReadVersion behind
-// (reads continue to accept the old format) for the migration window.
+// MinReadVersion is the oldest WireVersion the reader still accepts.
+// Validate / UnmarshalRecord reject v < MinReadVersion and v > WireVersion.
+// Kept distinct from WireVersion so a future bump can advance the write
+// format while still reading the old one for a migration window.
 const MinReadVersion = 1
 
 // Record types. Exactly one of Header / Entry is populated per record,
@@ -46,26 +30,19 @@ const (
 	TypeEntry  = "entry"
 )
 
-// MaxRecordBytes caps the size of a single serialized Record (header +
-// length-prefix line content together), enforced by the framing layer.
-// 4 MiB is enough for a large multi-image user message (several 80 KiB
-// thumbnails + Detail text) while bounding peak write amplification and
-// memory use on the reader side. Records over this limit are rejected at
-// write time; rejections are a bug in the caller, not a data condition
-// the reader should try to recover from.
+// MaxRecordBytes caps a single serialized Record, enforced by the framing
+// layer. 4 MiB fits a large multi-image user message while bounding reader
+// memory; an oversize record is a caller bug, rejected at write time.
 const MaxRecordBytes = 4 * 1024 * 1024
 
 // Record is the envelope every persisted line carries.
 //
 // Invariants (enforced by Validate):
-//
-//   - V must match WireVersion (readers check; writers never emit other)
-//   - Seq must be strictly monotonic within a file (0, 1, 2, …) — the
-//     header is always Seq=0
-//   - Exactly one of Header (when Type == TypeHeader) / Entry (when
-//     Type == TypeEntry) is non-zero
-//   - Entry is kept as json.RawMessage so schema owns framing but not
-//     EventEntry semantics
+//   - V equals WireVersion
+//   - Seq is strictly monotonic within a file; the header is always Seq=0
+//   - Exactly one of Header (TypeHeader) / Entry (TypeEntry) is set
+//   - Entry stays json.RawMessage: schema owns framing, not EventEntry
+//     semantics
 type Record struct {
 	V      int             `json:"v"`
 	Seq    uint64          `json:"seq"`
@@ -84,10 +61,8 @@ type FileHeader struct {
 	Generator string `json:"gen,omitempty"`
 }
 
-// marshalRecordBufPool reuses bytes.Buffer instances so MarshalRecord
-// avoids the per-call backing-array alloc that json.Marshal performs
-// internally. Persister.handleBatch is the hot caller (~50 sess × 50
-// evt/s ≈ 2500 marshal/s in 500-session deployments). R245-PERF-12.
+// marshalRecordBufPool reuses bytes.Buffer instances so MarshalRecord avoids
+// json.Marshal's per-call backing-array alloc.
 var marshalRecordBufPool = sync.Pool{
 	New: func() any {
 		return bytes.NewBuffer(make([]byte, 0, 4*1024))
@@ -99,34 +74,14 @@ var marshalRecordBufPool = sync.Pool{
 // process lifetime.
 const marshalRecordPoolMaxCap = 64 * 1024
 
-// MarshalRecord serializes r to JSON and validates invariants before
-// writing. Callers (the persist package) must pair this with the
-// length-prefix framing in persist.
+// MarshalRecord validates r and serializes it to JSON; the persist layer
+// pairs the bytes with length-prefix framing. Returns ErrRecordTooLarge
+// when the encoding exceeds MaxRecordBytes.
 //
-// Returns ErrRecordTooLarge when the encoded bytes exceed MaxRecordBytes
-// — the persist layer will drop the batch and counter the loss rather
-// than block.
-//
-// The encoded JSON is built via a pooled bytes.Buffer + json.Encoder
-// (R245-PERF-12) to avoid the per-call backing-array alloc that
-// json.Marshal performs internally. The returned []byte is a fresh
-// copy (independent of the pooled buffer) so the caller may retain
-// it past the end of MarshalRecord — the buffer is reset and re-filed
-// before return.
-//
-// R249-PERF-22 (#996) verify-stale: the trailing `out := make + copy`
-// at the end is a hard correctness invariant of the pooled-buffer
-// design, not a missed optimisation. Returning `body` directly would
-// hand the caller a slice whose backing array gets re-filed into the
-// pool by the defer below; the next pool consumer would Reset() that
-// array and start writing into the byte range a previous caller still
-// holds. Hot-path callers (Persister.handleBatch) avoid the copy by
-// using MarshalRecordInto with their own scratch buffer; the surviving
-// MarshalRecord callers (initial header write, tests, recovery) run
-// at most once per file lifetime so the per-call alloc is in the
-// noise. Do not "optimise" by removing the copy — see
-// MarshalRecordInto immediately below for the API that lets callers
-// own the buffer.
+// The returned []byte is a fresh copy: the pooled buffer is re-filed by the
+// defer, so returning its bytes directly would let the next pool user
+// overwrite a slice a caller still holds (#996). Hot-path callers avoid the
+// copy via MarshalRecordInto.
 func MarshalRecord(r *Record) ([]byte, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
@@ -158,26 +113,11 @@ func MarshalRecord(r *Record) ([]byte, error) {
 	return out, nil
 }
 
-// MarshalRecordInto encodes r as JSON and appends the bytes to dst,
-// returning the slice of dst that holds the encoded record. dst MUST
-// be empty (or have its content treated as already-flushed) because
-// callers walk the returned slice as a self-contained record body.
-//
-// Mirrors MarshalRecord's validation and ErrRecordTooLarge contract,
-// but lets the caller pool the destination buffer to avoid the
-// per-call alloc that json.Marshal performs for its own scratch
-// space (encodeState in encoding/json).
-//
-// R245-PERF-12 [REFACTOR R242-PERF-13]: persister.handleBatch is the
-// hot path (≥5 events/s × N sessions) and was the heaviest remaining
-// reflection alloc in the persist tier; this helper plus a
-// sync.Pool-backed bytes.Buffer in persister gets handleBatch off
-// the per-event encodeState alloc, mirroring bridgeEncPool in
-// internal/session/eventlog_bridge.go.
-//
-// json.Encoder always appends a trailing '\n' after the JSON object;
-// we strip it here so the returned slice is byte-identical to
-// MarshalRecord's output (the framing layer adds its own newline).
+// MarshalRecordInto encodes r and appends it to buf, returning the slice of
+// buf holding the record. buf MUST be empty or already flushed since
+// callers treat the returned slice as a self-contained body. Same
+// validation and ErrRecordTooLarge contract as MarshalRecord, minus the
+// per-call alloc — Persister.handleBatch pools the destination buffer.
 func MarshalRecordInto(buf *bytes.Buffer, r *Record) ([]byte, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
@@ -186,30 +126,17 @@ func MarshalRecordInto(buf *bytes.Buffer, r *Record) ([]byte, error) {
 		return nil, fmt.Errorf("marshal record: nil buffer")
 	}
 	startLen := buf.Len()
-	// R20260531070014-PERF-3 (#1537): json.NewEncoder allocates an
-	// encodeState (reflection scratch) on every call. handleBatch drives
-	// this per entry on the persist hot path, so we borrow a pooled
-	// encoder (bound to its own scratch buffer) instead of building a
-	// fresh one each time. The encoder cannot be retargeted to `buf`
-	// (encoding/json.Encoder has no Reset), so it writes into its own
-	// pooled buffer and we copy the finished body into the caller's
-	// `buf` — that copy is the JSON-body copy the persist tier needs
-	// anyway (see #1524), so the only cost amortised away here is the
-	// per-call encodeState alloc.
+	// json.NewEncoder allocates an encodeState per call, so borrow a pooled
+	// encoder bound to its own buffer (Encoder has no Reset) and copy the
+	// finished body into buf (#1537).
 	enc := recordEncPool.Get().(*recordEnc)
 	enc.buf.Reset()
-	// Escape behaviour is preserved from the pre-pool implementation
-	// (json.NewEncoder default = HTML escaping ON). The on-disk format is
-	// consumed only via UnmarshalRecord, so escaped (<) and raw (<)
-	// bytes decode identically; #1537 only swaps the encoder allocation
-	// strategy and must not change existing entry-record output.
+	// Default HTML escaping stays ON: on-disk output must remain
+	// byte-identical to earlier entry records (#1537).
 	if err := enc.enc.Encode(r); err != nil {
 		putRecordEnc(enc)
 		return nil, fmt.Errorf("marshal record: %w", err)
 	}
-	// Encode appended bytes plus a trailing '\n'. Strip the newline so
-	// the returned slice matches MarshalRecord exactly — the framing
-	// layer adds its own '\n' separator.
 	enc.buf.Truncate(enc.buf.Len() - 1) // Encode always appends one '\n'
 	if enc.buf.Len() > MaxRecordBytes {
 		size := enc.buf.Len()
@@ -217,17 +144,14 @@ func MarshalRecordInto(buf *bytes.Buffer, r *Record) ([]byte, error) {
 		return nil, fmt.Errorf("record seq=%d size=%d: %w",
 			r.Seq, size, ErrRecordTooLarge)
 	}
-	// Copy the encoded body into the caller's buffer so the returned
-	// slice survives the pooled encoder going back into recordEncPool.
+	// Copy into buf so the returned slice outlives the pooled encoder.
 	buf.Write(enc.buf.Bytes())
 	putRecordEnc(enc)
 	return buf.Bytes()[startLen:], nil
 }
 
 // recordEnc pairs a bytes.Buffer with a json.Encoder bound to it so the
-// encodeState reflection scratch is reused across MarshalRecordInto
-// calls. Mirrors the bridgeEncPool idiom in
-// internal/session/eventlog_bridge.go. R20260531070014-PERF-3 (#1537).
+// encodeState scratch is reused across MarshalRecordInto calls.
 type recordEnc struct {
 	buf *bytes.Buffer
 	enc *json.Encoder
@@ -236,8 +160,7 @@ type recordEnc struct {
 var recordEncPool = sync.Pool{
 	New: func() any {
 		buf := bytes.NewBuffer(make([]byte, 0, 4*1024))
-		// Default escape behaviour (HTML escaping ON) — preserves the
-		// pre-pool MarshalRecordInto output. See its body comment.
+		// HTML escaping stays ON; see MarshalRecordInto.
 		return &recordEnc{buf: buf, enc: json.NewEncoder(buf)}
 	},
 }
@@ -257,16 +180,11 @@ func putRecordEnc(e *recordEnc) {
 	recordEncPool.Put(e)
 }
 
-// UnmarshalRecord parses a single JSON-encoded record. Returns
-// ErrUnsupportedVersion when the record declares a WireVersion newer
-// than we can read; callers should stop reading the file on this error
-// (subsequent bytes are undefined).
-//
-// Does NOT validate Header / Entry exclusivity — a reader may want to
-// accept forward-compatible record types it doesn't fully understand
-// (see readers_accept_unknown_record_types in
-// internal/eventlog/persist). Use Validate() explicitly when strict
-// checking is required.
+// UnmarshalRecord parses one JSON record. Returns ErrUnsupportedVersion for
+// a version outside [MinReadVersion, WireVersion]; callers should stop
+// reading the file (subsequent bytes are undefined). Does NOT check
+// Header / Entry exclusivity so readers can accept forward-compatible
+// record types; call Validate for strict checking.
 func UnmarshalRecord(data []byte) (*Record, error) {
 	var r Record
 	if err := json.Unmarshal(data, &r); err != nil {
@@ -278,15 +196,8 @@ func UnmarshalRecord(data []byte) (*Record, error) {
 	if r.V > WireVersion {
 		return nil, fmt.Errorf("record v=%d: %w", r.V, ErrUnsupportedVersion)
 	}
-	// R230B-ARCH-21: forward-compat negotiation. v < MinReadVersion is
-	// flagged the same way as v > WireVersion — readers refuse rather
-	// than silently fudge through a known-broken format. Today
-	// MinReadVersion == 1 so this branch is unreachable, but pinning
-	// the contract now means a later bump (e.g. WireVersion=2,
-	// MinReadVersion=2 after migration) only requires changing two
-	// constants, not adding a new check. Order matters: r.V <= 0 is
-	// checked first so malformed records (negative / zero) keep
-	// surfacing ErrInvalidVersion rather than the unsupported alias.
+	// Checked after r.V <= 0 so malformed (zero/negative) versions keep
+	// surfacing ErrInvalidVersion rather than ErrUnsupportedVersion.
 	if r.V < MinReadVersion {
 		return nil, fmt.Errorf("record v=%d: %w", r.V, ErrUnsupportedVersion)
 	}
@@ -337,9 +248,8 @@ func (r *Record) Validate() error {
 	return nil
 }
 
-// NewHeader constructs a valid TypeHeader Record from the given metadata.
-// A convenience wrapper so callers don't have to remember the Version-V
-// mirror rule or Seq=0 constraint.
+// NewHeader constructs a valid TypeHeader Record (Header.Version mirrors V,
+// Seq=0).
 func NewHeader(key string, createdAtMS int64, generator string) *Record {
 	return &Record{
 		V:    WireVersion,
@@ -354,16 +264,10 @@ func NewHeader(key string, createdAtMS int64, generator string) *Record {
 	}
 }
 
-// NewEntry constructs a valid TypeEntry Record from an already-serialized
-// payload. `seq` must be > 0 (seq=0 is the header slot). `entryJSON` is
-// the raw JSON of an EventEntry (or compatible payload); schema does not
-// validate its shape beyond "non-empty".
-//
-// Ownership: entryJSON is assumed freshly allocated by the caller (e.g.
-// json.Marshal output in invokePersistSink) and is taken over by the
-// returned Record. Callers must not retain or mutate entryJSON after this
-// call. Skipping the defensive copy halves per-entry alloc on the persist
-// hot path.
+// NewEntry constructs a TypeEntry Record from an already-serialized
+// payload. seq must be > 0 (0 is the header slot). entryJSON is taken over
+// by the returned Record without copying: callers must not retain or
+// mutate it afterwards.
 func NewEntry(seq uint64, entryJSON []byte) *Record {
 	return &Record{
 		V:     WireVersion,

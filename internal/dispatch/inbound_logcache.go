@@ -5,17 +5,14 @@ import (
 	"sync"
 )
 
-// inboundLogMaxEntries bounds the per-(platform,user,chat) logger cache so a
-// long-lived dispatcher serving many distinct chats cannot grow it without
-// limit. When exceeded the whole map is dropped and rebuilt — the cache is a
-// pure allocation optimization, so a rare cold rebuild only re-pays the
-// slog.With cost we were paying every message before #2233.
+// inboundLogMaxEntries bounds the per-(platform,user,chat) logger cache. When
+// exceeded the whole map is dropped and rebuilt — the cache is a pure
+// allocation optimization, so a rare cold rebuild only re-pays slog.With.
 const inboundLogMaxEntries = 4096
 
 // inboundLogCache memoizes the sanitized-attr inbound logger keyed by the
-// (platform, user, chat) triple. Loggers are immutable handler chains, so a
-// cached *slog.Logger is safe to share across the concurrent inbound
-// goroutines. Zero value is ready to use. R202606c-PERF-010 (#2233).
+// (platform, user, chat) triple. Loggers are immutable, so a cached
+// *slog.Logger is safe to share across goroutines. Zero value ready (#2233).
 type inboundLogCache struct {
 	mu sync.RWMutex
 	m  map[string]*slog.Logger

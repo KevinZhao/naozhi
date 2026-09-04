@@ -11,43 +11,9 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
 )
 
-// Recover brings a (<stem>.log, <stem>.idx) pair into a consistent
-// state before the writer goroutine opens them for append.
-//
-// The invariants we enforce on exit:
-//
-//  1. Idx size is a multiple of schema.IdxEntrySize.
-//     Anything less is a torn final write — we round down.
-//  2. The log's on-disk byte length equals LAST_IDX_EDGE, where
-//     LAST_IDX_EDGE = lastIdxEntry.ByteOff + lastIdxEntry.Len.
-//     The strict write order (log.Sync → idx.Sync, see package doc)
-//     means the log is at least as far along as the idx. Any bytes
-//     past LAST_IDX_EDGE are idx-unbacked; recovery truncates them
-//     because they may be a partial record the writer never finished
-//     (framing layer would detect it, but removing avoids the ambiguity
-//     for the next writer's byte counter).
-//  3. If the idx claims an edge PAST the log, the idx is the anomaly.
-//     This is the "idx ahead of log" pathological case the RFC's §3.2.4
-//     write-ordering specifically prevents — it should be impossible
-//     when writers obey that ordering, but if we see it (e.g. after
-//     ext4 journal replay ordering surprise, or a naozhi version with
-//     buggy write order), we walk idx backwards to find the first
-//     entry whose edge is within the log and truncate idx there.
-//
-// No Recover step writes more bytes than it removes — recovery is
-// strictly a truncation. A session that lost trailing events loses
-// them permanently (by design: half-written records cannot be safely
-// reconstructed).
-//
-// Returns the post-recovery (log size, next seq, last entry time) so
-// the Persister can initialize perKeyWriter without re-reading the
-// file. A missing pair returns (0, 1, 0, nil) — the caller treats
-// this as "fresh file, seq starts at 1 (after the header which is
-// seq=0)".
-//
-// Errors from file I/O surface as-is; Recover does NOT attempt to
-// continue past them, because an I/O failure here could mask a
-// far larger disk problem.
+// RecoverResult is what Recover reports so the Persister can initialise a
+// perKeyWriter without re-reading the file. A missing pair yields
+// (LogSize 0, NextSeq 1): fresh file, the header takes seq=0.
 type RecoverResult struct {
 	LogSize     int64  // post-truncation log size in bytes
 	NextSeq     uint64 // the Seq the next appended entry should use
@@ -56,34 +22,17 @@ type RecoverResult struct {
 	Repaired    bool   // true when Recover made any truncation
 }
 
-// maxIdxEntryLen is the largest framed-record length an IdxEntry.Len
-// may legitimately carry. A frame is `<digits>\n<body>\n`, so the
-// upper bound is the body cap plus the longest tolerated length prefix
-// plus the two newlines. Anything beyond this is corruption, not a
-// large record.
+// maxIdxEntryLen is the largest framed length an IdxEntry.Len may carry:
+// body cap + longest tolerated length prefix + two newlines. Anything
+// beyond is corruption, not a large record.
 const maxIdxEntryLen = int64(schema.MaxRecordBytes) + maxLengthDigits + 2
 
-// idxEntrySane reports whether e's offset/length fields are within the
-// ranges a writer could actually have produced.
-//
-// WHY this exists: schema.UnmarshalIdxEntry decodes Len with a bare
-// uint32->int32 cast and ByteOff with a bare uint64->int64 cast
-// (schema/idx.go), so a single bit flip in the .idx sidecar that sets
-// the high bit yields a NEGATIVE Len or ByteOff. Recovery uses
-// ByteOff+Len as the log truncation edge, so an unvalidated negative
-// value is actively destructive:
-//
-//   - Len=-1 makes the edge one byte BELOW ByteOff, which is still a
-//     plausible-looking offset inside the log. Recovery then truncates
-//     the log there, slicing a committed record in half, and reports
-//     success — silent data loss.
-//   - Len=math.MinInt32 makes the edge negative, so ftruncate(2) fails
-//     EINVAL and the whole session's Persister refuses to start with an
-//     error that never names the real cause.
-//
-// rotate.go's chooseCutIndex already guards the header entry against
-// exactly this hazard (R20260605B-CORR-13 / #1817); recovery is the
-// remaining unguarded consumer of the same field.
+// idxEntrySane reports whether e's offset/length could have been produced
+// by a writer. schema.UnmarshalIdxEntry casts uint32->int32 / uint64->int64
+// unchecked, so a flipped high bit yields a NEGATIVE Len or ByteOff;
+// recovery uses ByteOff+Len as the truncation edge, so Len=-1 would slice
+// a committed record in half silently and Len=MinInt32 makes ftruncate
+// fail EINVAL (#1817).
 func idxEntrySane(e schema.IdxEntry) bool {
 	if e.ByteOff < 0 || e.Len < 0 {
 		return false
@@ -91,17 +40,23 @@ func idxEntrySane(e schema.IdxEntry) bool {
 	if int64(e.Len) > maxIdxEntryLen {
 		return false
 	}
-	// Guard the addition itself so a huge ByteOff cannot overflow into
-	// a negative edge.
+	// Guard the addition so a huge ByteOff cannot overflow to a negative edge.
 	return e.ByteOff <= math.MaxInt64-int64(e.Len)
 }
 
-// Recover opens log + idx at the given paths, aligns them, and
-// closes the files. The caller opens fresh writers afterward.
+// Recover brings a (<stem>.log, <stem>.idx) pair into a consistent state
+// and closes the files; the caller opens fresh writers. Invariants on exit:
+//  1. Idx size is a multiple of schema.IdxEntrySize (torn tail rounded down).
+//  2. Log length == lastIdx.ByteOff + lastIdx.Len: the log.Sync → idx.Sync
+//     write order makes bytes past that edge idx-unbacked (possibly a
+//     partial record), so they are truncated.
+//  3. If the idx edge lies PAST the log (impossible under that order), idx
+//     is walked backwards to the newest entry within the log.
+//
+// Recovery only truncates, never reconstructs; I/O errors surface as-is.
 func Recover(logPath, idxPath string) (*RecoverResult, error) {
-	// Phase 1: align idx tail to IdxEntrySize boundary. A torn tail
-	// IS a repair — callers rely on Repaired=true so alerting can
-	// surface every non-clean recovery.
+	// Phase 1: align idx tail. A torn tail IS a repair — Repaired=true
+	// drives alerting on every non-clean recovery.
 	idxAligned, err := alignIdxTail(idxPath)
 	if err != nil {
 		return nil, fmt.Errorf("align idx: %w", err)
@@ -118,8 +73,6 @@ func Recover(logPath, idxPath string) (*RecoverResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stat log: %w", err)
 	}
-	// mergeRepaired unions repair flags so every path's returned
-	// RecoverResult correctly reflects the phase-1 tail align.
 	mergeRepaired := func(res *RecoverResult) *RecoverResult {
 		if idxAligned {
 			res.Repaired = true
@@ -133,12 +86,9 @@ func Recover(logPath, idxPath string) (*RecoverResult, error) {
 		return mergeRepaired(&RecoverResult{NextSeq: 1}), nil
 
 	case !hasLast && logExists:
-		// Log file exists but idx is empty/missing. This happens on
-		// the very first record's write window: log was extended past
-		// 0 bytes before idx received its first write. We must NOT
-		// trust the log in that state — idx is the source of truth
-		// for "what's durably persisted". Truncate log to 0 so next
-		// startup is a clean slate.
+		// Log has bytes but idx is empty: crashed inside the first record's
+		// write window. idx is the source of truth for what is durable, so
+		// truncate the log to 0.
 		slog.Warn("event log recovery: log has bytes but idx is empty; truncating log",
 			"log", logPath, "log_size", logSize)
 		if err := truncateFile(logPath, 0); err != nil {
@@ -147,9 +97,8 @@ func Recover(logPath, idxPath string) (*RecoverResult, error) {
 		return mergeRepaired(&RecoverResult{NextSeq: 1, Repaired: true}), nil
 
 	case hasLast && !logExists:
-		// Idx exists but log doesn't. The only way this happens is
-		// operator-hand surgery (someone rm'd the log); the data is
-		// irrecoverable. Drop the idx to match.
+		// Idx without log only happens via operator hand surgery; the data
+		// is irrecoverable, drop the idx to match.
 		slog.Warn("event log recovery: idx exists but log is missing; clearing idx",
 			"idx", idxPath)
 		if err := os.Remove(idxPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -158,13 +107,9 @@ func Recover(logPath, idxPath string) (*RecoverResult, error) {
 		return mergeRepaired(&RecoverResult{NextSeq: 1, Repaired: true}), nil
 	}
 
-	// Both exist, both have data.
-	//
-	// A corrupt last entry cannot be used to derive a truncation edge.
-	// Fall through to the backwards reconcile walk, which skips insane
-	// entries and lands on the newest trustworthy one — that preserves
-	// every record up to that point rather than guessing an edge from
-	// garbage.
+	// Both exist. A corrupt last entry cannot yield a truncation edge; the
+	// backwards walk skips insane entries and lands on the newest
+	// trustworthy one.
 	if !idxEntrySane(last) {
 		slog.Warn("event log recovery: last idx entry is corrupt; backing off to newest sane entry",
 			"log", logPath, "idx", idxPath,
@@ -189,9 +134,8 @@ func Recover(logPath, idxPath string) (*RecoverResult, error) {
 		}), nil
 
 	case edge < logSize:
-		// Log has trailing bytes idx doesn't back. These may be a
-		// partial record (writer crashed mid-write after log.Sync but
-		// before idx.Sync); truncate to the idx-backed edge.
+		// Trailing bytes idx does not back (crash after log.Sync, before
+		// idx.Sync): truncate to the idx-backed edge.
 		slog.Info("event log recovery: truncating log tail beyond idx edge",
 			"log", logPath, "log_size", logSize, "idx_edge", edge,
 			"trimmed_bytes", logSize-edge)
@@ -207,9 +151,8 @@ func Recover(logPath, idxPath string) (*RecoverResult, error) {
 		}), nil
 
 	default:
-		// Idx ahead of log — see case 3 in the Recover godoc. Walk idx
-		// entries backwards to find the first one whose edge is still
-		// within the log. Everything after that point is dropped.
+		// Idx ahead of log (invariant 3): walk idx backwards to the newest
+		// entry whose edge is within the log.
 		slog.Warn("event log recovery: idx ahead of log; backing off idx",
 			"log", logPath, "idx", idxPath,
 			"log_size", logSize, "idx_edge", edge)
@@ -221,11 +164,9 @@ func Recover(logPath, idxPath string) (*RecoverResult, error) {
 	}
 }
 
-// alignIdxTail rounds the idx file size down to the nearest
-// IdxEntrySize multiple, discarding any partial tail. Returns true
-// when a truncation actually occurred (i.e. the file had a torn
-// trailing entry), so Recover can mark its RecoverResult.Repaired
-// correctly.
+// alignIdxTail rounds the idx file size down to an IdxEntrySize multiple,
+// discarding a torn trailing entry. Returns true when it truncated so
+// Recover can set Repaired.
 func alignIdxTail(path string) (bool, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -246,14 +187,10 @@ func alignIdxTail(path string) (bool, error) {
 	return true, nil
 }
 
-// reconcileIdxAheadOfLog handles the "idx thinks we wrote more than
-// log actually has" case. Walks idx entries backwards; stops at the
-// first entry whose edge (ByteOff + Len) is ≤ logSize. Everything
-// after that point is truncated off the idx.
-//
-// If no idx entry fits (they all point past log end), we wipe idx
-// entirely and also truncate log to 0 — the persisted state is too
-// inconsistent to be trustworthy.
+// reconcileIdxAheadOfLog walks idx entries backwards to the first sane one
+// whose edge (ByteOff + Len) is <= logSize and truncates idx (and log, if
+// longer) there. If no entry fits, both files are wiped — the persisted
+// state is too inconsistent to trust.
 func reconcileIdxAheadOfLog(logPath, idxPath string, logSize int64) (*RecoverResult, error) {
 	entries, err := ReadAllIdx(idxPath)
 	if err != nil {
@@ -262,10 +199,9 @@ func reconcileIdxAheadOfLog(logPath, idxPath string, logSize int64) (*RecoverRes
 	safeIdx := -1
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
-		// idxEntrySane must be checked FIRST: a negative Len makes
-		// ByteOff+Len smaller than ByteOff, so the <= logSize test
-		// below would happily accept a corrupt entry as "safe" and
-		// truncate the log to a mid-record offset.
+		// Sanity first: a negative Len makes ByteOff+Len < ByteOff, so the
+		// <= logSize test would accept a corrupt entry and truncate the log
+		// mid-record.
 		if !idxEntrySane(e) {
 			continue
 		}
@@ -275,7 +211,6 @@ func reconcileIdxAheadOfLog(logPath, idxPath string, logSize int64) (*RecoverRes
 		}
 	}
 	if safeIdx < 0 {
-		// No entry fits — wipe both.
 		slog.Warn("event log recovery: no idx entry fits within log; wiping both",
 			"log", logPath, "idx", idxPath)
 		if err := truncateFile(idxPath, 0); err != nil {
@@ -287,8 +222,6 @@ func reconcileIdxAheadOfLog(logPath, idxPath string, logSize int64) (*RecoverRes
 		return &RecoverResult{NextSeq: 1, Repaired: true}, nil
 	}
 
-	// Truncate idx to (safeIdx+1) entries and log to that entry's
-	// edge.
 	keepIdxBytes := int64(safeIdx+1) * schema.IdxEntrySize
 	if err := truncateFile(idxPath, keepIdxBytes); err != nil {
 		return nil, fmt.Errorf("truncate idx: %w", err)
@@ -309,8 +242,7 @@ func reconcileIdxAheadOfLog(logPath, idxPath string, logSize int64) (*RecoverRes
 	}, nil
 }
 
-// fileSize is a small helper that returns (size, exists, err). A
-// nonexistent file yields (0, false, nil) rather than an error.
+// fileSize returns (size, exists, err); a nonexistent file is (0, false, nil).
 func fileSize(path string) (int64, bool, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -322,16 +254,10 @@ func fileSize(path string) (int64, bool, error) {
 	return fi.Size(), true, nil
 }
 
-// truncateFile opens + truncates + closes, returning a clearer error
-// than the bare os.Truncate (which silently succeeds on nonexistent
-// files in some environments).
-//
-// O_CREATE is necessary because reconcileIdxAheadOfLog can call us
-// against a logfile that a concurrent rotate / external operator just
-// removed; without O_CREATE we'd surface ENOENT and Recover would fail
-// the entire Persister startup. Mode 0o600 matches the per-shard log
-// permissions set by the Persister at file-creation time so a crash
-// recovery does not silently widen access. R20260527122801-CR-5.
+// truncateFile opens + truncates + syncs. O_CREATE because
+// reconcileIdxAheadOfLog may run against a log an operator just removed;
+// ENOENT would fail the whole Persister startup. Mode 0o600 matches the
+// Persister's file-creation perms so recovery never widens access.
 func truncateFile(path string, size int64) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
@@ -344,13 +270,9 @@ func truncateFile(path string, size int64) error {
 	return f.Sync()
 }
 
-// SweepOrphans removes rotate-staging files (*.tmp.*) from dir. Called
-// by Persister startup so any crash-during-rotate leftovers don't
-// accumulate. Returns the number of files removed.
-//
-// Any non-tmp file is left alone — a sibling naozhi version or a
-// future rotate format might legitimately store something else in
-// events/, and an aggressive sweep would lose their data.
+// SweepOrphans removes rotate-staging files (*.tmp.*) from dir at Persister
+// startup and returns the count. Non-tmp files are left alone: a sibling
+// naozhi version may legitimately store something else in events/.
 func SweepOrphans(dir string) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

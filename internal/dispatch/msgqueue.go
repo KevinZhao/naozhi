@@ -14,10 +14,8 @@ import (
 type QueuedMsg struct {
 	Text   string
 	Images []cli.Attachment
-	// MessageID is the platform-native inbound message ID (optional).
-	// Dispatch uses it to add/remove a reaction on the user's original
-	// message as a non-intrusive "queued" acknowledgement. Empty when the
-	// platform doesn't report an ID or isn't Reactor-capable.
+	// MessageID is the platform-native inbound message ID (optional); used to
+	// add/remove the "queued" reaction on the user's original message.
 	MessageID string
 	EnqueueAt time.Time
 }
@@ -31,18 +29,14 @@ const (
 	// finish naturally; after a short settle delay the queued messages are
 	// coalesced into a single follow-up prompt. Lowest cost, highest latency.
 	ModeCollect QueueMode = iota
-	// ModeInterrupt queues the new messages AND asks the dispatcher to send
-	// an in-band control_request to the CLI so the active turn aborts
-	// immediately. The queued messages are then coalesced and sent as the
-	// next prompt on the same live process. Fastest user-facing pivot, but
-	// burns the tokens already spent on the aborted turn.
+	// ModeInterrupt queues the new messages AND sends an in-band control_request
+	// so the active turn aborts immediately; the queue is then coalesced into the
+	// next prompt. Fastest pivot, but burns the aborted turn's tokens.
 	ModeInterrupt
-	// ModePassthrough writes each user message directly to the CLI and lets
-	// the CLI's own commandQueue handle merging. Every message gets an
-	// independent result (or a merged-group result with head/follower
-	// semantics). Requires Protocol.SupportsReplay()==true; sessions whose
-	// protocol can't provide replay events silently fall back to ModeCollect.
-	// See docs/rfc/passthrough-mode.md.
+	// ModePassthrough writes each user message directly to the CLI and lets its
+	// commandQueue merge; every message gets an independent (or merged-group)
+	// result. Requires Protocol.SupportsReplay(); otherwise falls back to
+	// ModeCollect. See docs/rfc/passthrough-mode.md.
 	ModePassthrough
 )
 
@@ -64,38 +58,21 @@ func ParseQueueMode(s string) QueueMode {
 type sessionQueue struct {
 	busy bool
 	gen  uint64 // incremented on Discard to invalidate stale owners
-	// ring holds the queued messages in a fixed-capacity FIFO ring buffer.
-	// O(1) push (with O(1) head-advance eviction when full) replaces the
-	// O(N) slice-memmove that #570 R247-PERF-23 flagged at maxDepth=16
-	// every Enqueue under sustained backpressure. See msgRing for layout.
+	// ring holds queued messages in a fixed-capacity FIFO ring buffer (#570).
 	ring         msgRing
-	lastNotifyNs int64 // unix nanoseconds of last ShouldNotify call (replaces lastNotify map)
+	lastNotifyNs int64 // unix nanoseconds of last ShouldNotify call
 	lastEvictNs  int64 // unix nanoseconds of last eviction Warn log (rate-limit)
 
-	// interruptRequested is true once an interrupt has been triggered for the
-	// currently running turn. Cleared by DoneOrDrain when ownership is
-	// consumed for the next turn. Prevents multiple follow-up messages on the
-	// same turn each firing a separate control_request (redundant and noisy
-	// in CLI stderr) while still allowing a fresh interrupt on the next turn.
+	// interruptRequested is set once an interrupt fired for the running turn
+	// and cleared by DoneOrDrain, so follow-ups on the same turn don't each
+	// send a redundant control_request.
 	interruptRequested bool
 }
 
-// msgRing is a single-producer / single-consumer FIFO ring buffer used by
-// sessionQueue.msgs. All access is serialised under MessageQueue.mu — the
-// ring carries no internal locking. The capacity is fixed by the first
-// push (set to MessageQueue.maxDepth via push's `cap` argument) so once
-// allocated the backing array never grows; eviction-on-full is an O(1)
-// head advance (with the evicted slot zeroed for GC) instead of the
-// previous slice-memmove. R247-PERF-23 (#570).
-//
-// Empty / one-shot semantics:
-//   - len()==0 and the underlying buf is nil → ring has never been used.
-//     Callers that treat the ring as logically absent (Depth -> 0,
-//     DoneOrDrain "no messages" branch) can detect this via len()==0.
-//   - drainAll resets the ring to the empty-and-cleared state but keeps
-//     the backing array, so subsequent pushes reuse it without realloc.
-//
-// The buffer is laid out as:
+// msgRing is a single-producer / single-consumer FIFO ring buffer; all access
+// is serialised under MessageQueue.mu. Capacity is fixed by the first push
+// (MessageQueue.maxDepth) and never grows; eviction-on-full is an O(1) head
+// advance with the evicted slot zeroed for GC (#570). Layout:
 //
 //	buf:   [_, A, B, C, _, _]
 //	head=1, used=3 → logical view = [A, B, C]
@@ -106,35 +83,25 @@ type msgRing struct {
 	head int // index of the oldest live element when used > 0
 	used int // number of live elements; 0 <= used <= cap(buf)
 
-	// scratch is a reusable backing array for drainInto. The owner goroutine
-	// drains one batch per turn (DoneOrDrain) / once at release
-	// (ReleaseWithDrain) and fully consumes the returned slice before the next
-	// drain on the same ring, so a single per-ring scratch can be reused across
-	// turns without copying — this removes the per-turn `make([]QueuedMsg,
-	// r.used)` that ModeCollect paid on every coalesced follow-up turn
-	// (R20260606-PERF-3, #1827). Reuse is sound because each *sessionQueue owns
-	// its ring exclusively under MessageQueue.mu and the gen-cookie/single-owner
-	// invariant forbids two concurrent drains of the same ring.
+	// scratch is the reusable backing array for drainInto: the owner drains one
+	// batch per turn and fully consumes it before the next drain, so one
+	// per-ring scratch avoids a per-turn allocation (#1827). Sound because each
+	// *sessionQueue owns its ring exclusively under MessageQueue.mu.
 	scratch []QueuedMsg
 }
 
 // len returns the current number of queued messages.
 func (r *msgRing) len() int { return r.used }
 
-// push appends m. When the ring is at the supplied capacity (cap, the
-// MessageQueue's maxDepth), the head is advanced and the oldest element
-// is overwritten — returns evicted=true plus a copy of the dropped message
-// so the caller can emit the rate-limited warn log AND clear the dropped
-// message's queued reaction (#1945). The first push allocates the backing
-// array at the requested capacity; subsequent pushes reuse it.
+// push appends m. When the ring holds capacity (MessageQueue.maxDepth)
+// elements the oldest is overwritten and returned as dropped with
+// evicted=true so the caller can warn and clear its queued reaction (#1945).
 func (r *msgRing) push(m QueuedMsg, capacity int) (evicted bool, dropped QueuedMsg) {
 	if cap(r.buf) == 0 {
 		r.buf = make([]QueuedMsg, capacity)
 	}
 	if r.used == capacity {
-		// Full: drop oldest. Capture it before zeroing so the caller can
-		// clear its dangling HOURGLASS reaction. Zero the slot so any held
-		// image data becomes GC-eligible immediately.
+		// Capture the dropped message before zeroing the slot (frees held image data).
 		dropped = r.buf[r.head]
 		r.buf[r.head] = QueuedMsg{}
 		r.head = (r.head + 1) % capacity
@@ -147,19 +114,11 @@ func (r *msgRing) push(m QueuedMsg, capacity int) (evicted bool, dropped QueuedM
 	return evicted, dropped
 }
 
-// drainInto returns the queued messages in FIFO order and resets the ring to
-// empty (head=used=0), writing them into dst. The backing array is retained
-// for reuse but each consumed slot is zeroed so retained image data becomes
-// GC-eligible. Returns nil when empty (mirrors the previous nil-vs-slice
-// distinction the queue exposed via sq.msgs == nil).
-//
-// dst is reused when it has enough capacity (its contents are overwritten and
-// its length re-sliced to r.used); otherwise a fresh slice is allocated. The
-// caller MUST fully consume the returned slice before the next drainInto/drainAll
-// on the same ring — the owner drain loop satisfies this (each batch is
-// coalesced + acknowledged before DoneOrDrain runs again). Passing the previous
-// return value back as dst lets the owner loop reuse one backing array across
-// turns instead of allocating per turn (R20260606-PERF-3, #1827).
+// drainInto returns the queued messages in FIFO order and resets the ring,
+// zeroing consumed slots so retained image data is GC-eligible. Returns nil
+// when empty. dst is reused when it has enough capacity, else a fresh slice
+// is allocated. The caller MUST fully consume the returned slice before the
+// next drainInto/drainAll on the same ring (#1827).
 func (r *msgRing) drainInto(dst []QueuedMsg) []QueuedMsg {
 	if r.used == 0 {
 		return nil
@@ -182,8 +141,7 @@ func (r *msgRing) drainInto(dst []QueuedMsg) []QueuedMsg {
 }
 
 // drainAll returns the queued messages in a freshly allocated slice (FIFO
-// order) and resets the ring to empty. Equivalent to drainInto(nil); retained
-// for callers/tests that want an independently-owned slice with no scratch.
+// order) and resets the ring. Equivalent to drainInto(nil).
 func (r *msgRing) drainAll() []QueuedMsg {
 	return r.drainInto(nil)
 }
@@ -203,16 +161,12 @@ func (r *msgRing) reset() {
 	r.used = 0
 }
 
-// MessageQueue replaces SessionGuard with per-session message queuing.
-// When a session is busy, incoming messages are queued (up to MaxDepth)
-// instead of being dropped. The owner goroutine drains the queue after
-// each turn completes.
+// MessageQueue implements per-session message queuing: when a session is
+// busy, incoming messages are queued (up to MaxDepth) instead of dropped and
+// the owner goroutine drains the queue after each turn.
 //
-// Thread-safe: all mutating methods acquire mu (write lock); ShouldNotify's
-// fast cooldown-active path takes mu.RLock() only — see R20260528-PERF-19
-// (#1358). Switching from sync.Mutex to sync.RWMutex is non-breaking
-// because RWMutex.Lock/Unlock match Mutex's surface; existing call sites
-// that use Lock continue to serialise correctly.
+// Thread-safe: mutating methods take mu.Lock; ShouldNotify's cooldown-active
+// fast path takes mu.RLock only (#1358).
 type MessageQueue struct {
 	mu           sync.RWMutex
 	queues       map[string]*sessionQueue
@@ -220,59 +174,32 @@ type MessageQueue struct {
 	collectDelay time.Duration
 	mode         QueueMode
 
-	// dropNotifyTimes is a bounded per-key cooldown map for notifies that
-	// happen when no sessionQueue exists (the drop path with maxDepth<=0
-	// or the window between Discard and a new owner). Keeping per-key state
-	// avoids cross-user interference where one chat's notify silences
-	// another's; the map is capped to dropNotifyMaxKeys via LRU eviction.
-	//
-	// Implementation: a classic list+map LRU. List front holds the most
-	// recent insertion/update; back holds the least recent. This yields O(1)
-	// insert, refresh, and evict — critical since ShouldNotify runs under
-	// mu on the IM hot path.
-	// dropNotifyLRU orders entries by recency (front = most recent) purely for
-	// O(1) eviction. dropNotifyIndex maps key → *dropNotifyEntry directly so the
-	// hot ShouldNotify probe reads the timestamp off a concrete struct instead
-	// of paying a `list.Element.Value.(*dropNotifyEntry)` interface assertion on
-	// every IM message (R249-PERF-12, #932). Each entry keeps a back-pointer to
-	// its list element so refresh/evict can splice the list without a second
-	// map lookup.
+	// dropNotifyLRU/dropNotifyIndex form a bounded per-key cooldown LRU for
+	// notifies when no sessionQueue exists (maxDepth<=0 drop path, or between
+	// Discard and a new owner), so one chat's notify never silences another's.
+	// The index maps key → *dropNotifyEntry directly so the hot ShouldNotify
+	// probe avoids a list.Element.Value assertion (#932).
 	dropNotifyLRU   *list.List                  // element.Value = *dropNotifyEntry
 	dropNotifyIndex map[string]*dropNotifyEntry // key → entry
 
-	// dropNotifyPool recycles *dropNotifyEntry structs across the steady-state
-	// cold-key churn in ShouldNotify: once dropNotifyLRU is saturated at
-	// dropNotifyMaxKeys, every new cold key evicts one tail entry and inserts
-	// a fresh one. Returning the evicted entry to the pool and reusing it for
-	// the insert avoids a per-cold-key heap allocation (R20260603-PERF-6,
-	// #1694). Entries are reset before reuse; the back-pointer elem is always
-	// reassigned by PushFront so it needs no clearing for correctness, but we
-	// nil it on return so a pooled-but-never-reused entry doesn't pin a removed
-	// list.Element.
+	// dropNotifyPool recycles *dropNotifyEntry structs so steady-state cold-key
+	// churn (evict tail + insert) does not heap-allocate per key (#1694).
+	// Entries are reset before reuse and nil'd on return so a pooled entry
+	// doesn't pin a removed list.Element.
 	dropNotifyPool sync.Pool
 
-	// onStranded, when non-nil, is invoked by Release for every message that
-	// was parked in the ring at release time (FIFO order, outside q.mu). It
-	// closes R37-REL1 (#769): the SessionGuard Release path (Dashboard/WS)
-	// used to leave messages that landed via a concurrent IM-side Enqueue
-	// stranded until the *next* Enqueue happened to make a new owner; on a
-	// quiet key that next Enqueue might never arrive, silently losing the
-	// message. With a handler registered, Release drains those messages back
-	// through the dispatcher so they get processed even when no follow-up
-	// IM message is coming. nil preserves the legacy park-in-place contract
-	// (used by tests and Guard-only deployments without a re-dispatch path).
+	// onStranded, when non-nil, is invoked by Release (FIFO, outside q.mu) for
+	// every message still parked in the ring — otherwise messages enqueued
+	// while a Dashboard/WS Guard caller held the key would sit until the next
+	// Enqueue, which on a quiet key may never come (#769). nil keeps the
+	// park-in-place contract (tests / Guard-only deployments).
 	onStranded func(key string, msg QueuedMsg)
 }
 
 // SetStrandHandler registers the callback Release uses to recover messages
-// that were parked by a concurrent IM-side Enqueue while a SessionGuard
-// caller (Dashboard/WS) held the key. Passing nil restores the legacy
-// "leave parked for the next Enqueue owner" behaviour. R37-REL1 (#769).
-//
-// The handler is invoked once per stranded message, in FIFO order, after
-// q.mu has been released and the key marked idle — so the callback may
-// safely re-enter Enqueue without re-entrant locking, mirroring
-// ReleaseWithDrain's delivery contract.
+// parked by a concurrent Enqueue while a SessionGuard caller held the key;
+// nil restores park-in-place (#769). The handler runs once per message, FIFO,
+// after q.mu is released and the key is idle, so it may re-enter Enqueue.
 func (q *MessageQueue) SetStrandHandler(fn func(key string, msg QueuedMsg)) {
 	q.mu.Lock()
 	q.onStranded = fn
@@ -287,11 +214,9 @@ type dropNotifyEntry struct {
 	elem *list.Element
 }
 
-// takePooledEntry returns a *dropNotifyEntry ready for reuse. If preferred is
-// non-nil (the entry just evicted from the LRU tail), it is reset and returned
-// directly — the most common steady-state path, recycling in place without
-// touching the pool. Otherwise it draws from dropNotifyPool, falling back to a
-// fresh allocation only when the pool is empty. Callers must hold q.mu.
+// takePooledEntry returns a reset *dropNotifyEntry: preferred (the entry just
+// evicted from the LRU tail) if non-nil, else one from dropNotifyPool, else a
+// fresh allocation. Callers must hold q.mu.
 func (q *MessageQueue) takePooledEntry(preferred *dropNotifyEntry) *dropNotifyEntry {
 	if preferred != nil {
 		preferred.key = ""
@@ -309,10 +234,8 @@ func (q *MessageQueue) takePooledEntry(preferred *dropNotifyEntry) *dropNotifyEn
 	return &dropNotifyEntry{}
 }
 
-// releasePooledEntry returns an entry that has already been spliced out of
-// dropNotifyLRU/dropNotifyIndex to dropNotifyPool for later reuse. It nils the
-// fields so the pooled struct does not pin the removed key string or list
-// element. Callers must hold q.mu and must not touch the entry afterwards.
+// releasePooledEntry returns an already-unlinked entry to dropNotifyPool,
+// nil'ing its fields so it pins nothing. Callers must hold q.mu.
 func (q *MessageQueue) releasePooledEntry(e *dropNotifyEntry) {
 	if e == nil {
 		return
@@ -323,14 +246,12 @@ func (q *MessageQueue) releasePooledEntry(e *dropNotifyEntry) {
 	q.dropNotifyPool.Put(e)
 }
 
-// dropNotifyMaxKeys bounds dropNotifyTimes; oldest entry is evicted on insert
-// when at capacity. 1024 covers realistic IM concurrency with minimal memory.
+// dropNotifyMaxKeys bounds dropNotifyLRU; the oldest entry is evicted on
+// insert when at capacity.
 const dropNotifyMaxKeys = 1024
 
-// evictWarnCooldownNs rate-limits the per-key "queue full" eviction Warn log
-// so a sustained flood does not drown operator signals. 5s is long enough
-// that the first line proves the condition but short enough that a second
-// burst after recovery produces a fresh datum.
+// evictWarnCooldownNs rate-limits the per-key "queue full" eviction Warn so a
+// sustained flood does not drown operator signals.
 const evictWarnCooldownNs = int64(5 * time.Second)
 
 // NewMessageQueueWithMode creates a MessageQueue with an explicit queue mode.
@@ -362,23 +283,15 @@ func (q *MessageQueue) getOrCreate(key string) *sessionQueue {
 	return sq
 }
 
-// Enqueue adds a message for key.
+// Enqueue adds a message for key and returns:
+//   - isOwner=true: caller becomes the owner goroutine (queue was idle); gen is
+//     the generation cookie.
+//   - isOwner=false, enqueued=true: appended to the queue; shouldInterrupt is
+//     true in ModeInterrupt for the first follow-up of the running turn.
+//   - isOwner=false, enqueued=false: queue disabled (maxDepth<=0).
 //
-// Returns:
-//   - isOwner=true:  caller becomes the owner goroutine, should process the
-//     message directly (queue was idle). gen is the generation cookie.
-//   - isOwner=false, enqueued=true: message was appended to the queue.
-//     shouldInterrupt=true when mode is ModeInterrupt and this is the first
-//     follow-up for the currently running turn — the caller should trigger
-//     an in-band CLI interrupt so the active turn aborts promptly.
-//   - isOwner=false, enqueued=false: queue is disabled (maxDepth<=0).
-//     Caller should reply "please wait".
-//
-// evictedID is the MessageID of an oldest message dropped to make room for
-// this one (queue-full backpressure), or "" when nothing was evicted. The
-// caller uses it to clear that message's dangling queued reaction (#1945) —
-// otherwise the evicted message's HOURGLASS hangs until the platform's
-// reaction-cache TTL (feishu: 12h), falsely signalling "still queued".
+// evictedID is the MessageID of the oldest message dropped to make room, or
+// "" — the caller clears that message's dangling queued reaction (#1945).
 func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued, shouldInterrupt bool, gen uint64, evictedID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -389,38 +302,26 @@ func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued, sh
 		return true, false, false, sq.gen, ""
 	}
 
-	// maxDepth<=0: degrade to drop (backward-compatible with old Guard behavior).
+	// maxDepth<=0: queue disabled, degrade to drop.
 	if q.maxDepth <= 0 {
 		return false, false, false, 0, ""
 	}
 
-	// Push into the ring buffer. Eviction on full is O(1) (head advance);
-	// the previous slice-memmove was O(N) on every push at full depth.
-	// R247-PERF-23 (#570).
 	if evicted, dropped := sq.ring.push(msg, q.maxDepth); evicted {
 		evictedID = dropped.MessageID
-		// Queue-full eviction is silent data loss: the user that sent the
-		// evicted message gets no feedback. Log at Warn so operators can
-		// observe backpressure (single chat overwhelmed, or CLI hung).
-		// Rate-limit per key to 1/5s so a sustained flood does not drown
-		// the log; a single log line is enough to prove the condition, and
-		// repeated lines add no operator signal once the alert fires.
+		// Queue-full eviction is silent data loss for the sender; Warn so
+		// operators can observe backpressure, rate-limited per key.
 		now := time.Now().UnixNano()
-		// delta < 0 means NTP stepped backwards (wall-clock moved into the
-		// past). Without re-anchoring lastEvictNs to `now`, the next check
-		// would again see delta < 0 and log, defeating the rate-limit; we
-		// also need to update the anchor in the fire path below. Mirrors
-		// the pattern in ShouldNotify.
+		// delta < 0 means the wall clock stepped backwards; re-anchor so the
+		// rate-limit is not defeated (mirrors ShouldNotify).
 		if delta := now - sq.lastEvictNs; delta < 0 || delta >= evictWarnCooldownNs {
 			slog.Warn("msgqueue: dropping oldest message (queue full)",
 				"key", key, "depth", sq.ring.len(), "max_depth", q.maxDepth)
 			sq.lastEvictNs = now
 		}
 	}
-	// In Interrupt mode the first queued follow-up for the active turn flips
-	// interruptRequested. Subsequent queued messages for the same turn skip
-	// the interrupt — the first control_request already cancels the turn,
-	// and the CLI would ignore a second one mid-abort.
+	// Only the first queued follow-up of the active turn fires the interrupt;
+	// the CLI would ignore a second control_request mid-abort.
 	if q.mode == ModeInterrupt && !sq.interruptRequested {
 		sq.interruptRequested = true
 		return false, true, true, 0, evictedID
@@ -429,17 +330,12 @@ func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued, sh
 }
 
 // DoneOrDrain is called by the owner goroutine after processing a message.
-//
-// gen must match the generation returned by Enqueue; a mismatch means
-// Discard was called (e.g., /new) and a new owner may have started.
-// The stale owner should stop its loop.
-//
-// If the queue is empty (or gen mismatches), ownership is released and nil is returned.
-// If the queue has messages, all are drained and returned; ownership is kept.
-//
-// Atomicity is critical: the check-and-release must happen under the same
-// lock to prevent a message from being enqueued between check and release,
-// which would leave it stranded (no owner to process it).
+// gen must match the generation returned by Enqueue; a mismatch means Discard
+// ran (e.g. /new) and a new owner may have started — the stale owner must stop.
+// If the queue is empty (or gen mismatches) ownership is released and nil is
+// returned; otherwise all messages are drained and returned and ownership kept.
+// The check-and-release MUST happen under one lock so a message cannot be
+// enqueued between check and release and be stranded without an owner.
 func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -450,25 +346,16 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 		return nil
 	}
 
-	// Generation mismatch: Discard was called and possibly a new owner started.
-	// Stale owner must stop. Do NOT release ownership — the new owner holds it.
+	// Stale owner: do NOT release ownership — the new owner holds it.
 	if sq.gen != gen {
 		return nil
 	}
 
 	if sq.ring.len() == 0 {
-		// Release ownership. Also purge any stale dropNotify LRU entry so
-		// the next notification goes through a consistent cooldown path:
-		// otherwise ShouldNotify would fall from the queue branch (which
-		// uses sq.lastNotifyNs) to the LRU branch (which still has a stale
-		// timestamp from before this session was queued), silencing a
-		// legitimate notification.
-		//
-		// Note: deleting the map entry implicitly drops interruptRequested
-		// (getOrCreate allocates a fresh sessionQueue on the next Enqueue).
-		// We zero the field explicitly anyway so any future refactor that
-		// reuses the *sessionQueue instance cannot silently suppress the
-		// first interrupt of the next turn.
+		// Release ownership. Also purge any stale dropNotify LRU entry so the
+		// next ShouldNotify doesn't fall through to a stale LRU timestamp and
+		// silence a legitimate notification. interruptRequested is zeroed
+		// explicitly in case a future refactor reuses the *sessionQueue.
 		sq.interruptRequested = false
 		delete(q.queues, key)
 		if e, ok := q.dropNotifyIndex[key]; ok {
@@ -479,46 +366,29 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 		return nil
 	}
 
-	// Drain all; keep ownership. Clearing interruptRequested here is crucial:
-	// once the owner takes the drained batch, the NEXT in-flight turn is a
-	// fresh target for a future interrupt, so subsequent queued messages
-	// during that new turn must be able to trigger another control_request.
-	// Reuse the ring's scratch across turns: the owner fully consumes the
-	// returned batch (coalesce + clear reactions) before the next DoneOrDrain,
-	// so a single backing array can carry every coalesced follow-up turn
-	// without a per-turn alloc (R20260606-PERF-3, #1827).
+	// Drain all; keep ownership. Clearing interruptRequested makes the next
+	// in-flight turn a fresh interrupt target. The ring's scratch is reused
+	// across turns — the owner fully consumes each batch before the next
+	// DoneOrDrain (#1827).
 	msgs := sq.ring.drainInto(sq.ring.scratch)
 	sq.ring.scratch = msgs
 	sq.interruptRequested = false
 	return msgs
 }
 
-// Discard clears all queued messages and releases ownership for key.
-// Bumps the generation so stale ownerLoops stop on their next DoneOrDrain.
-// Used when the user sends /new or /stop.
-//
-// The generation bump MUST persist in the map so a concurrent Enqueue that
-// becomes the new owner picks up gen+1 rather than starting from gen=0 and
-// colliding with the stale owner's check. We therefore keep the entry
-// around; panic-recovery callers do not leave orphaned entries in practice
-// because a subsequent Enqueue reuses this same sessionQueue.
+// Discard clears all queued messages and releases ownership for key, bumping
+// the generation so stale ownerLoops stop on their next DoneOrDrain (/new,
+// /stop). The bumped gen MUST persist in the map so a concurrent Enqueue that
+// becomes the new owner picks up gen+1 rather than colliding with the stale
+// owner's check — hence the entry is kept.
 func (q *MessageQueue) Discard(key string) {
 	q.DiscardAndReturn(key)
 }
 
-// DiscardAndReturn is the drain-aware variant of Discard: it performs the
-// same gen-bump / busy-clear / cooldown-cleanup teardown but returns the
-// messages that were queued (FIFO order) instead of silently dropping them.
-//
-// #2013: queued messages each carry a HOURGLASS ("queued") reaction added at
-// Enqueue time. The plain Discard path (ownerLoop ctx.Done on a systemctl
-// restart, ownerLoop panic recovery, and the /new + /clear command paths)
-// reset the ring without surfacing the dropped IDs, so those reactions hang
-// forever — and after a restart the in-memory reaction bookkeeping is gone,
-// so the user sees a permanent ⏳ falsely signalling "still queued". Callers
-// use the returned slice to clear those reactions (best-effort).
-//
-// Returns nil when no messages were queued.
+// DiscardAndReturn is Discard but returns the queued messages (FIFO) instead
+// of dropping them, so callers can clear each message's HOURGLASS "queued"
+// reaction — otherwise it hangs forever after /new, /clear, panic recovery or
+// a restart (#2013). Returns nil when nothing was queued.
 func (q *MessageQueue) DiscardAndReturn(key string) []QueuedMsg {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -530,10 +400,8 @@ func (q *MessageQueue) DiscardAndReturn(key string) []QueuedMsg {
 		sq.lastNotifyNs = 0
 		sq.interruptRequested = false
 	}
-	// Mirror DoneOrDrain's LRU cleanup: a pre-Discard drop-path cooldown
-	// (chat entered via /new after being idle for >3s) would otherwise keep
-	// its stale timestamp and silence the first legitimate notify after
-	// Discard. Safe to delete even if no entry exists.
+	// Mirror DoneOrDrain's LRU cleanup so a pre-Discard drop-path cooldown
+	// cannot silence the first notify after Discard.
 	if e, ok := q.dropNotifyIndex[key]; ok {
 		q.dropNotifyLRU.Remove(e.elem)
 		delete(q.dropNotifyIndex, key)
@@ -544,11 +412,9 @@ func (q *MessageQueue) DiscardAndReturn(key string) []QueuedMsg {
 
 // Cleanup UNCONDITIONALLY deletes the map entry for key — the only public
 // method allowed to break gen-monotonicity. Callers MUST ensure no in-flight
-// owner can arrive on this key afterwards (otherwise a stale owner whose gen
-// equals the from-scratch 0 could drain a newly-enqueued batch). Intended
-// caller: session.Router on user-initiated terminal removal (Reset/Remove),
-// where the preceding Discard already signalled any racing owner to stop.
-// No-op for unknown keys. Also clears the dropNotifyLRU entry for key.
+// owner can arrive on this key afterwards (a stale owner with gen 0 could
+// drain a newly-enqueued batch). Intended caller: session.Router on terminal
+// removal, after Discard has signalled any racing owner. No-op for unknown keys.
 func (q *MessageQueue) Cleanup(key string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -575,43 +441,24 @@ func (q *MessageQueue) CollectDelay() time.Duration {
 	return q.collectDelay
 }
 
-// ShouldNotify returns true if enough time (3s) has passed since the last
-// enqueue notification for key. Prevents spamming users with "message received"
-// confirmations when they send many messages in quick succession.
+// ShouldNotify returns true if the 3s cooldown since the last enqueue
+// notification for key has elapsed, so rapid-fire messages don't each get a
+// "message received" confirmation. The drop-path cooldown uses the bounded
+// list+map LRU so chat A's notify does not silence chat B's. All O(1).
 //
-// Must not leak map entries: the drop-path cooldown uses a bounded list+map
-// LRU so chat A's notify does not silence chat B's without unbounded growth
-// on the maxDepth<=0 code path. All operations here are O(1).
-//
-// R20260528-PERF-19 (#1358): the cooldown-active fast path takes mu.RLock
-// only. The vast majority of busy-chat ShouldNotify calls land in the
-// "still inside the 3s cooldown" branch — that observation has no side
-// effects (no timestamp update, no LRU mutation), so a read lock is
-// sufficient and concurrent IM messages on different chats no longer
-// serialise on the write lock. Cooldown-expired or cold-key paths fall
-// through to the original Lock+Unlock branch where mutation happens.
-// Read-then-write is racy with another goroutine racing to Lock between
-// our RUnlock and Lock: the second goroutine may also see the cooldown
-// expired under RLock and both will try to fire the notify. The Lock
-// branch re-checks the cooldown under the write lock, so the second
-// goroutine observes the just-published timestamp and silently returns
-// false — at most one extra observation per cooldown window per key,
-// which the user-facing semantics already tolerate (the cooldown is
-// "approximately 3s", not strictly monotonic).
+// The cooldown-active fast path takes mu.RLock only (#1358); the expired /
+// cold-key path re-checks under mu.Lock before mutating, so two goroutines
+// racing through the RUnlock→Lock window yield at most one extra notify per
+// window — acceptable since the cooldown is "approximately 3s".
 func (q *MessageQueue) ShouldNotify(key string) bool {
 	const cooldown = int64(3 * time.Second)
 	now := time.Now().UnixNano()
 
-	// Fast path: RLock-only probe. Returns false (no notify) when the
-	// cooldown is clearly active. Returns from the read-lock window so
-	// we do not promote to the write lock for the common busy-chat case.
+	// Fast path: RLock-only probe; return early while the cooldown is active.
 	q.mu.RLock()
 	if sq, ok := q.queues[key]; ok {
-		// Guard against NTP backwards-step: if now < lastNotifyNs the int64
-		// subtraction yields a negative value which is < positive cooldown,
-		// silencing notifications indefinitely. Treat any non-monotonic
-		// jump as "cooldown satisfied" and fall through to the slow path
-		// where the anchor gets reset under the write lock.
+		// delta < 0 means the wall clock stepped backwards; treat as expired so
+		// the slow path re-anchors instead of silencing notifications forever.
 		if delta := now - sq.lastNotifyNs; delta >= 0 && delta < cooldown {
 			q.mu.RUnlock()
 			return false
@@ -624,12 +471,8 @@ func (q *MessageQueue) ShouldNotify(key string) bool {
 	}
 	q.mu.RUnlock()
 
-	// Slow path: the cooldown is expired (or the key is cold). Acquire
-	// the write lock and re-check under it before mutating; a sibling
-	// goroutine may have raced through the same RUnlock→Lock window and
-	// already published a fresh timestamp, in which case we observe the
-	// new value and return false. At-most-one-extra-fire-per-window is
-	// the bounded race outcome — see method godoc above.
+	// Slow path: re-check under the write lock — a sibling may have published
+	// a fresh timestamp in the RUnlock→Lock window.
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if sq, ok := q.queues[key]; ok {
@@ -645,13 +488,11 @@ func (q *MessageQueue) ShouldNotify(key string) bool {
 			return false
 		}
 		entry.ts = now
-		// Refresh LRU ordering — most-recently used to front.
 		q.dropNotifyLRU.MoveToFront(entry.elem)
 		return true
 	}
-	// Insert new entry; evict the LRU tail if at capacity. The evicted entry
-	// is returned to dropNotifyPool so the insert below can reuse it instead
-	// of allocating a fresh struct on every cold key in steady state (#1694).
+	// Insert new entry; evict the LRU tail if at capacity and recycle the
+	// evicted struct for this insert (#1694).
 	var reuse *dropNotifyEntry
 	if q.dropNotifyLRU.Len() >= dropNotifyMaxKeys {
 		if oldest := q.dropNotifyLRU.Back(); oldest != nil {
@@ -672,8 +513,7 @@ func (q *MessageQueue) ShouldNotify(key string) bool {
 }
 
 // --- SessionGuard compatibility ---
-// These methods implement the SessionGuard interface so the Dashboard/WS
-// path (server/send.go) can continue using Guard without changes.
+// The Dashboard/WS path (server/send.go) uses MessageQueue through SessionGuard.
 
 // TryAcquire implements SessionGuard. For the message queue, this checks
 // if the session is idle (not busy). Used by Dashboard path only.
@@ -693,24 +533,14 @@ func (q *MessageQueue) ShouldSendWait(key string) bool {
 	return q.ShouldNotify(key)
 }
 
-// Release implements SessionGuard. Releases ownership for key.
-//
-// R37-REL1 (#769): if messages landed during the busy window (a concurrent
-// Enqueue while a Dashboard/WS Guard caller held the session), they would
-// otherwise be parked in the ring until the *next* Enqueue happened to
-// become a new owner and sweep them via DoneOrDrain — on a quiet key that
-// next Enqueue may never arrive, silently stranding the message. When a
-// strand handler is registered (SetStrandHandler), Release drains those
-// parked messages back through the handler so they are processed even with
-// no follow-up IM message. Without a handler the legacy park-in-place
-// contract is preserved (messages stay for a future Enqueue owner), and a
-// Warn is logged so the silent-loss condition stays observable.
+// Release implements SessionGuard. Messages enqueued while a Dashboard/WS
+// Guard caller held the key would otherwise be parked until the next Enqueue,
+// which on a quiet key may never come (#769). With a strand handler
+// registered (SetStrandHandler) Release drains them through it; without one
+// they stay parked and a Warn is logged.
 func (q *MessageQueue) Release(key string) {
-	// Snapshot the strand handler + pending depth under the lock so the
-	// decision (drain vs park) reflects a consistent view. Enqueue callers
-	// racing this unlock can shift the real depth, which is acceptable: a
-	// message that arrives after the snapshot lands on the now-idle key and
-	// either becomes owner or re-queues normally.
+	// Snapshot handler + depth under the lock; an Enqueue racing the unlock
+	// simply lands on the now-idle key and becomes owner or re-queues.
 	q.mu.Lock()
 	handler := q.onStranded
 	depth := 0
@@ -720,34 +550,24 @@ func (q *MessageQueue) Release(key string) {
 	q.mu.Unlock()
 
 	if handler != nil {
-		// Recover stranded messages through the dispatcher's re-dispatch
-		// path. ReleaseWithDrain clears the ring + marks the key idle before
-		// invoking onDrain, so the handler can safely re-enter Enqueue.
+		// ReleaseWithDrain clears the ring + marks the key idle before onDrain,
+		// so the handler may re-enter Enqueue.
 		q.ReleaseWithDrain(key, func(m QueuedMsg) { handler(key, m) })
 		return
 	}
 
 	if depth > 0 {
-		// No handler: keep the no-drain contract but make the strand visible.
-		// pending_snapshot is a lock-release snapshot (see above).
+		// No handler: keep park-in-place but make the strand visible.
 		slog.Warn("msgqueue release with pending messages and no strand handler, message may be stranded until next Enqueue",
 			"key", key, "pending_snapshot", depth)
 	}
 	q.ReleaseWithDrain(key, nil)
 }
 
-// ReleaseWithDrain is the drain-aware variant of Release. If messages are
-// queued when ownership is released, onDrain is invoked once per message in
-// FIFO order while the internal queue state has already been cleared and the
-// session marked idle — so the callback can safely re-enter Enqueue or
-// otherwise process each message without re-acquiring q.mu re-entrantly.
-//
-// onDrain may be nil; in that case behaviour matches the legacy Release
-// (messages stay in sq.msgs waiting for a future Enqueue owner to sweep
-// them via DoneOrDrain).
-//
-// Callback invocation happens AFTER the queue state is cleared and the lock
-// released, mirroring DoneOrDrain's out-of-lock delivery contract.
+// ReleaseWithDrain is the drain-aware variant of Release: queued messages are
+// handed to onDrain one at a time, FIFO, AFTER the ring is cleared, the
+// session marked idle and q.mu released — so onDrain may re-enter Enqueue.
+// A nil onDrain leaves messages parked for a future Enqueue owner.
 func (q *MessageQueue) ReleaseWithDrain(key string, onDrain func(QueuedMsg)) {
 	q.mu.Lock()
 	var drained []QueuedMsg
@@ -756,25 +576,12 @@ func (q *MessageQueue) ReleaseWithDrain(key string, onDrain func(QueuedMsg)) {
 		if sq.ring.len() == 0 {
 			delete(q.queues, key)
 		} else if onDrain != nil {
-			// Transfer the queued batch to the caller and clear the
-			// internal ring so a later Enqueue starts fresh. Ownership
-			// is released (busy=false) so the next Enqueue becomes
-			// owner; if we kept the msgs in place, that owner would
-			// still receive them via DoneOrDrain — but nothing
-			// guarantees a next Enqueue arrives. Draining here ensures
-			// progress even on a quiet session.
-			// Reuse the ring's scratch instead of allocating a fresh slice
-			// (R20260606-PERF-3, mirrors DoneOrDrain). Aliasing is safe here:
-			// the entry is deleted from q.queues immediately below, so this
-			// ring is never reused — a later Enqueue for the same key builds a
-			// brand-new sessionQueue — and the drained batch is fully consumed
-			// by the out-of-lock onDrain loop before this call returns, with no
-			// concurrent drainInto/drainAll able to clobber the backing array.
+			// Hand the batch to the caller and clear the ring so progress is
+			// guaranteed even if no further Enqueue arrives. Reusing scratch is
+			// safe: the entry is deleted below, so this ring is never reused,
+			// and the batch is consumed by the out-of-lock loop before return.
 			drained = sq.ring.drainInto(sq.ring.scratch)
 			sq.ring.scratch = drained
-			// Entry becomes eligible for deletion now that it carries no
-			// queued state; mirroring the empty branch above keeps the map
-			// from accumulating idle sessionQueue instances.
 			delete(q.queues, key)
 		}
 	}

@@ -6,14 +6,8 @@ import (
 	"syscall"
 )
 
-// Linux filesystem magic numbers. Sourced from
-// /usr/include/linux/magic.h and confirmed against `man 2 statfs`.
-// Hex literals kept in the constants (not computed) so the source
-// reads like the header — operators grepping for "0xef53 ext4" find
-// it here.
-//
-// The macOS build (fstype_darwin.go) does not read these; they are
-// Linux-kernel values.
+// Linux filesystem magic numbers from /usr/include/linux/magic.h (`man 2
+// statfs`); hex literals kept as in the header so "0xef53 ext4" greps here.
 const (
 	magicExt4    = 0xef53
 	magicXFS     = 0x58465342
@@ -21,19 +15,13 @@ const (
 	magicTmpfs   = 0x01021994
 	magicNFS     = 0x6969
 	magicOverlay = 0x794c7630
-	// FUSE on modern Linux kernels reports a single magic; fuseblk
-	// (older 3.x kernels) shares the same code, so only one constant
-	// is needed.
+	// fuseblk (older kernels) shares this code.
 	magicFUSE = 0x65735546
 )
 
-// DetectFS classifies the filesystem hosting dir. The classification
-// drives /health.eventlog.fs_type and the supportedness banner
-// described in RFC §5.4.
-//
-// The syscall is cheap (~1μs) so we run it once per NewPersister
-// and once per /health request that needs it. No caching here —
-// caching would hide admin-time mount changes.
+// DetectFS classifies the filesystem hosting dir for /health.eventlog.fs_type
+// (RFC §5.4). Statfs is ~1μs and deliberately uncached so admin-time mount
+// changes show up.
 func DetectFS(dir string) FSDetection {
 	var s syscall.Statfs_t
 	if err := syscall.Statfs(dir, &s); err != nil {
@@ -43,9 +31,8 @@ func DetectFS(dir string) FSDetection {
 			Err:       err,
 		}
 	}
-	// Statfs_t.Type is int32 on some arches and int64 on others;
-	// cast through uint64 so the comparisons below are
-	// platform-agnostic.
+	// Statfs_t.Type is int32 on some arches and int64 on others; cast
+	// through uint64 so the comparisons are platform-agnostic.
 	code := uint64(s.Type)
 	switch code {
 	case magicExt4:
@@ -53,13 +40,10 @@ func DetectFS(dir string) FSDetection {
 	case magicXFS:
 		return FSDetection{Type: FSTypeXFS, Supported: true}
 	case magicBtrfs:
-		// Btrfs supports fsync properly on modern kernels; list as
-		// supported but we document "use with COW caveats" in the
-		// runbook.
+		// Supported; the runbook documents the COW caveats.
 		return FSDetection{Type: FSTypeBtrfs, Supported: true}
 	case magicTmpfs:
-		// tmpfs loses data on reboot by design; we expose the fact
-		// so operators don't mistake ephemeral storage for durable.
+		// Ephemeral by design; exposed so operators do not mistake it for durable.
 		return FSDetection{Type: FSTypeTmpfs, Supported: false}
 	case magicNFS:
 		return FSDetection{Type: FSTypeNFS, Supported: false}

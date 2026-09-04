@@ -10,50 +10,30 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
 )
 
-// DefaultIdxStride is the number of records between successive idx
-// entries. 32 is a compromise:
-//   - Sparse enough that 1000 records cost ~32 idx entries × 28 bytes
-//     = 896 bytes, dwarfed by the 40 MiB worst-case log.
-//   - Dense enough that "scan forward from nearest idx entry to find
-//     seq=S" costs at most 31 record decodes.
-//
-// The stride is per-Persister configurable (see Options); this
-// constant documents the default.
+// DefaultIdxStride is the number of records between idx entries. 32 keeps
+// 1000 records at ~32 entries × 28 B while bounding a "scan forward from
+// nearest idx entry" to 31 record decodes. Per-Persister configurable via
+// Options.
 const DefaultIdxStride = 32
 
-// IdxWriter is a thin append-only writer on top of os.File. Each
-// AppendEntry call writes exactly IdxEntrySize bytes. No buffering —
-// callers batch at the Persister layer and Sync() on fsync boundaries.
+// IdxWriter is an unbuffered append-only writer over os.File; each entry is
+// exactly IdxEntrySize bytes. Callers batch and Sync at the Persister layer.
 type IdxWriter struct {
 	f *os.File
 
-	// batchBuf is a scratch slice reused across AppendBatch calls so the
-	// flush hot path (~200ms cadence × N sessions) does not allocate a
-	// fresh `make([]byte, IdxEntrySize*len(entries))` per flush. The
-	// slice is owned exclusively by the Persister's single writer
-	// goroutine — every call to AppendBatch resets it via [:0] and
-	// re-appends. Capacity grows monotonically toward the largest
-	// observed batch and persists for the writer's lifetime, which is
-	// fine: each entry is 28 B and a typical idx batch is ≤32 entries
-	// (DefaultIdxStride window) ≈ 896 B. R237-PERF-11.
+	// batchBuf is scratch reused across AppendBatch calls so the flush hot
+	// path does not allocate per flush. Owned by the Persister's single
+	// writer goroutine; capacity grows toward the largest batch seen.
 	batchBuf []byte
 
-	// syncFailHook is a test-only seam. When non-nil and it returns a
-	// non-nil error, Sync returns that error WITHOUT touching the fd,
-	// letting tests simulate a transient fsync fault (e.g. EIO) to verify
-	// flush's retry-buffer ordering (R20260605B-CORR-12, #1816). Always
-	// nil in production.
+	// syncFailHook is a test-only seam: when it returns an error, Sync
+	// returns it WITHOUT touching the fd (#1816). Always nil in production.
 	syncFailHook func() error
 }
 
-// NewIdxWriter opens idx at the given path in append mode. Callers
-// (Recover / Persister) supply an already-resolved path; this helper
-// does not compose it.
-//
-// The file is opened O_APPEND to let concurrent crash-recovery tools
-// that re-open the idx not clobber in-flight writes. Production has
-// only one writer, but defense in depth matters when someone attaches
-// a debug utility.
+// NewIdxWriter opens idx at path (already resolved by the caller) with
+// O_APPEND so a debug tool that re-opens the idx cannot clobber in-flight
+// writes.
 func NewIdxWriter(path string, perm os.FileMode) (*IdxWriter, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, perm)
 	if err != nil {
@@ -74,23 +54,13 @@ func (w *IdxWriter) Append(e schema.IdxEntry) error {
 	return nil
 }
 
-// AppendBatch writes many entries in one syscall. Used by rotate's
-// reindex path where we write ~1000 entries back-to-back. Saves 999
-// syscalls vs Append per-entry.
+// AppendBatch writes many entries in one syscall, reusing w.batchBuf
+// (single writer goroutine, no synchronisation).
 //
-// The marshal scratch (`w.batchBuf`) is reused across calls — a single
-// Persister writer goroutine owns this writer, so no synchronisation
-// is required. R237-PERF-11.
-//
-// Slice ownership contract (R243-PERF-10): `entries` is consumed
-// synchronously — marshalled into w.batchBuf and written before this
-// method returns. AppendBatch does NOT retain a reference past return,
-// so callers may safely alias the input with a buffer they reset (e.g.
-// pendingIdx[:0]) immediately after the call. Any future change that
-// defers consumption (e.g. async write) MUST first defensively copy
-// `entries`, otherwise perKeyWriter.flush's stride<=1 fast-path —
-// where `kept == pending` and the caller resets pendingIdx to []—
-// would corrupt previously-queued entries.
+// Ownership: `entries` is consumed synchronously and never retained, so
+// callers may alias it with a buffer they reset right after the call
+// (perKeyWriter.flush's stride<=1 fast path does: kept == pending). Any
+// future deferred/async consumption MUST copy `entries` first.
 func (w *IdxWriter) AppendBatch(entries []schema.IdxEntry) error {
 	if len(entries) == 0 {
 		return nil
@@ -122,24 +92,20 @@ func (w *IdxWriter) Sync() error {
 	return w.f.Sync()
 }
 
-// Truncate cuts the idx file to size bytes. Used by:
-//   - Startup recovery when the tail idx entry points past log end.
-//   - Rotate when rebuilding the idx into a fresh file via tmp rename
-//     (not via Truncate — rotate uses a new file then renames).
+// Truncate cuts the idx file to size bytes (startup recovery when the tail
+// idx entry points past log end).
 func (w *IdxWriter) Truncate(size int64) error {
 	if err := w.f.Truncate(size); err != nil {
 		return fmt.Errorf("truncate idx: %w", err)
 	}
-	// Seek back to EOF so further Append starts at the truncated end,
-	// not at a stale offset.
+	// Seek to EOF so further Append starts at the truncated end.
 	if _, err := w.f.Seek(0, io.SeekEnd); err != nil {
 		return fmt.Errorf("seek idx to end: %w", err)
 	}
 	return nil
 }
 
-// Size returns the current size of the idx file. Used by recovery to
-// decide whether a partial trailing entry needs aligning.
+// Size returns the current size of the idx file.
 func (w *IdxWriter) Size() (int64, error) {
 	fi, err := w.f.Stat()
 	if err != nil {
@@ -148,9 +114,8 @@ func (w *IdxWriter) Size() (int64, error) {
 	return fi.Size(), nil
 }
 
-// Close releases the file descriptor. Callers should Sync before
-// Close if they want durability guarantees; Close alone does not
-// imply fsync.
+// Close releases the file descriptor; it does not imply fsync, Sync first
+// for durability.
 func (w *IdxWriter) Close() error {
 	if w.f == nil {
 		return nil
@@ -160,18 +125,10 @@ func (w *IdxWriter) Close() error {
 	return err
 }
 
-// ReadAllIdx reads every IdxEntry from the file at path, in order.
-// Returns an empty slice (not nil) when the file doesn't exist.
-// Tolerates trailing partial entries by rounding size down to the
-// nearest IdxEntrySize boundary — startup recovery is expected to
-// call Align() afterwards to match that rounding on disk too.
-//
-// "Read all" is appropriate here because:
-//   - Typical idx has <= 2000 entries (500 records / 1-record stride
-//     for small files; 500/32 ≈ 16 for normal ones); < 60 KiB.
-//   - Rotate needs to walk the whole thing anyway to pick a cut
-//     point, so streaming wouldn't save anything.
-//   - Startup reads once per session at boot, not a hot path.
+// ReadAllIdx reads every IdxEntry from path in order; a missing file yields
+// an empty (non-nil) slice. Trailing partial entries are dropped by
+// rounding down to an IdxEntrySize boundary. Whole-file read is fine: a
+// typical idx is < 60 KiB and rotate needs all of it anyway.
 func ReadAllIdx(path string) ([]schema.IdxEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -183,10 +140,8 @@ func ReadAllIdx(path string) ([]schema.IdxEntry, error) {
 	return decodeIdxBytes(data), nil
 }
 
-// decodeIdxBytes is the pure decode path shared by ReadAllIdx and any
-// future in-memory tests. Truncated tail bytes (size % 28 != 0) are
-// discarded silently; callers that want the exact boundary position
-// should prefer schema.AlignIdxSize on the file's Stat size.
+// decodeIdxBytes is the pure decode path behind ReadAllIdx; unaligned tail
+// bytes are discarded silently.
 func decodeIdxBytes(data []byte) []schema.IdxEntry {
 	aligned := schema.AlignIdxSize(int64(len(data)))
 	count := int(aligned / schema.IdxEntrySize)
@@ -199,14 +154,9 @@ func decodeIdxBytes(data []byte) []schema.IdxEntry {
 			data[i*schema.IdxEntrySize : (i+1)*schema.IdxEntrySize],
 		)
 		if err != nil {
-			// Cannot happen given the alignment — schema.UnmarshalIdxEntry
-			// only returns ErrShortIdxBuf, which we pre-checked. Keep
-			// the error path explicit so future edits to schema can't
-			// silently introduce a new error class. R20260526-CR-020:
-			// since this is recovery-critical the path MUST surface a
-			// log line on the way out — silent truncation would mask a
-			// schema-evolution bug or an on-disk corruption that an
-			// operator needs to investigate before recovery completes.
+			// Unreachable given the alignment (UnmarshalIdxEntry only returns
+			// ErrShortIdxBuf), but recovery-critical: a future schema error
+			// class must surface a log line rather than truncate silently.
 			slog.Warn("event log persist: idx decode unexpected error; truncating",
 				"i", i,
 				"count", count,
@@ -218,9 +168,8 @@ func decodeIdxBytes(data []byte) []schema.IdxEntry {
 	return out
 }
 
-// LastIdxEntry returns the final idx entry in path, or (zero, false)
-// when the file is empty / doesn't exist. Used by recovery's "is idx
-// ahead of log" check without requiring a full read.
+// LastIdxEntry returns the final idx entry in path, or (zero, false) when
+// the file is empty / missing, without reading the whole file.
 func LastIdxEntry(path string) (schema.IdxEntry, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
