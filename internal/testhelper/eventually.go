@@ -1,5 +1,33 @@
 // Package testhelper provides shared test utilities, chiefly Eventually, which
 // polls a condition instead of a fixed sleep so slow CI gives a clear diagnostic.
+//
+// Replacing a bare time.Sleep (the ratchet in sleep_ratchet_test.go rejects
+// new ones):
+//
+//	// Waiting for an async counter / state flip:
+//	//   time.Sleep(30 * time.Millisecond)
+//	//   if got := counter.Load(); got != 2 { ... }
+//	testhelper.Eventually(t, func() bool { return counter.Load() == 2 },
+//		2*time.Second, "OnRegister should fire twice")
+//
+//	// Waiting for a callback: prefer a channel join over polling.
+//	done := make(chan struct{}, 1)
+//	obj.OnEvent = func() { done <- struct{}{} }
+//	select {
+//	case <-done:
+//	case <-time.After(2 * time.Second):
+//		t.Fatal("OnEvent never fired")
+//	}
+//
+//	// Waiting for a file / external resource with a slow producer:
+//	testhelper.EventuallyWithInterval(t, func() bool {
+//		_, err := os.Stat(path)
+//		return err == nil
+//	}, 5*time.Second, 100*time.Millisecond, "sidecar file should appear")
+//
+// A sleep that is genuinely about elapsed time (creating a measurable
+// duration, expiring a TTL) keeps time.Sleep with a `// sleep-ok: <reason>`
+// annotation on the same line.
 package testhelper
 
 import (
