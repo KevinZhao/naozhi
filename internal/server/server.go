@@ -379,6 +379,9 @@ func buildServer(opts ServerOptions) *Server {
 		watchdogNoOut:      s.watchdog.noOutPtr(),
 		watchdogTotal:      s.watchdog.totalPtr(),
 		nodeAccess:         s.nodes,
+		configSHA256:       opts.ConfigSHA256,
+		configLoadedAt:     opts.ConfigLoadedAt,
+		configPath:         opts.ConfigPath,
 		platforms:          platNames,
 		platformsStatus:    platformStatusMap(platNames),
 		hubDropped: func() int64 {

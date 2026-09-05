@@ -412,6 +412,8 @@ func main() {
 		// ConfigPath enables the access-profile create endpoint; absolute so the
 		// write target survives cwd changes. Secrets dir holds *_FILE tokens (0600).
 		ConfigPath:              absConfigPath(*configPath),
+		ConfigSHA256:            cfg.Fingerprint.SHA256,
+		ConfigLoadedAt:          cfg.Fingerprint.LoadedAt,
 		AccessProfileSecretsDir: filepath.Join(filepath.Dir(storePath), "access-profile-secrets"),
 		NoOutputTimeout:         noOutputTimeout,
 		TotalTimeout:            totalTimeout,

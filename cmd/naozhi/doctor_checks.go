@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -308,4 +310,64 @@ func runOutput(cmd *exec.Cmd) (string, error) {
 	bound := exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
 	out, err := bound.CombinedOutput()
 	return string(out), err
+}
+
+// checkConfigDrift compares the disk config's sha256 with the fingerprint the
+// running process reports on authenticated /health (#2538): a mismatch means
+// config.yaml changed after the process loaded it — restart required. No
+// token / unreachable process / unreadable config degrade to a skip, not a
+// fail: this check is about drift, not liveness (checkHealth owns that).
+func (d *doctor) checkConfigDrift() {
+	if d.token == "" {
+		d.add("config-drift", "pass", "skipped (no token; auth-scoped)")
+		return
+	}
+	data, err := os.ReadFile(d.configPath)
+	if err != nil {
+		d.add("config-drift", "pass", "skipped (config unreadable: "+err.Error()+")")
+		return
+	}
+	diskSum := fmt.Sprintf("%x", sha256.Sum256(data))
+
+	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.addr+"/health", nil)
+	if err != nil {
+		d.add("config-drift", "fail", "request build: "+err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+d.token)
+	resp, err := d.httpClient().Do(req)
+	if err != nil {
+		d.add("config-drift", "pass", "skipped (process unreachable: "+err.Error()+")")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		d.add("config-drift", "pass", fmt.Sprintf("skipped (/health status=%d)", resp.StatusCode))
+		return
+	}
+	var health struct {
+		ConfigSHA256   string `json:"config_sha256"`
+		ConfigLoadedAt string `json:"config_loaded_at"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&health); err != nil {
+		d.add("config-drift", "warn", "cannot parse /health JSON: "+err.Error())
+		return
+	}
+	if health.ConfigSHA256 == "" {
+		d.add("config-drift", "warn", "process reports no config fingerprint (predates #2538); upgrade to compare")
+		return
+	}
+	if health.ConfigSHA256 == diskSum {
+		d.add("config-drift", "pass", "config_sha256 match ("+diskSum[:12]+"…), loaded_at="+health.ConfigLoadedAt)
+		return
+	}
+	mtime := ""
+	if fi, statErr := os.Stat(d.configPath); statErr == nil {
+		mtime = fi.ModTime().Format(time.RFC3339)
+	}
+	d.add("config-drift", "warn", fmt.Sprintf(
+		"restart required: config.yaml changed at %s after process loaded at %s (disk %s… vs process %s…)",
+		mtime, health.ConfigLoadedAt, diskSum[:12], health.ConfigSHA256[:12]))
 }

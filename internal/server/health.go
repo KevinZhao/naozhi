@@ -38,6 +38,11 @@ type HealthHandler struct {
 	// Injected after Start() wires the Dispatcher; nil-safe. last_reply_success
 	// is zero-valued until the first successful user-visible reply.
 	dispatcherMetrics func() (int64, int64, int64, time.Time)
+	// configSHA256 / configLoadedAt / configPath are the loaded config's
+	// fingerprint (#2538); auth-only fields, empty when unknown.
+	configSHA256   string
+	configLoadedAt time.Time
+	configPath     string
 }
 
 // healthWatchdogStats is the /health "watchdog" sub-object.
@@ -79,6 +84,12 @@ type healthAuthSection struct {
 	WSDropped         *int64                  `json:"ws_dropped,omitempty"`
 	Dispatch          *healthDispatchStats    `json:"dispatch,omitempty"`
 	CLIAvailable      bool                    `json:"cli_available"`
+	// ConfigSHA256 / ConfigLoadedAt / ConfigPath fingerprint the config the
+	// process loaded (#2538). Auth-only by construction (this struct is the
+	// authenticated section), so a public probe cannot read the hash or path.
+	ConfigSHA256   string `json:"config_sha256,omitempty"`
+	ConfigLoadedAt string `json:"config_loaded_at,omitempty"`
+	ConfigPath     string `json:"config_path,omitempty"`
 	Nodes             map[string]string       `json:"nodes,omitempty"`
 	Platforms         map[string]string       `json:"platforms"`
 	EventLog          *healthEventLogStats    `json:"eventlog,omitempty"`
@@ -204,6 +215,11 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 			TotalTimeout:    h.totalTimeoutStr,
 		},
 		CLIAvailable: cliAvailable(h.router.CLIPath()),
+		ConfigSHA256: h.configSHA256,
+		ConfigPath:   h.configPath,
+	}
+	if !h.configLoadedAt.IsZero() {
+		auth.ConfigLoadedAt = h.configLoadedAt.Format(time.RFC3339)
 	}
 	if nodeStatus := h.nodeAccess.NodesStatus(); len(nodeStatus) > 0 {
 		auth.Nodes = nodeStatus
