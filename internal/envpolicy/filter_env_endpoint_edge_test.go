@@ -1,10 +1,10 @@
-package shim
+package envpolicy
 
 import "testing"
 
 // TestValidateShimEndpointURL_EdgeLiterals extends the #1713 pin table with
 // the literals a hand-rolled classifier tends to mishandle, now that range
-// membership comes from envpolicy.ClassifyHost (#2300). Every row here was
+// membership comes from ClassifyHost (#2300). Every row here was
 // verified against the pre-#2300 shimEndpointInternalIP implementation; the
 // table is the behaviour matrix, not a wish-list — do not flip a row without
 // a policy decision.

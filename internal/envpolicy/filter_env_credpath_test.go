@@ -1,4 +1,4 @@
-package shim
+package envpolicy
 
 import (
 	"strings"
@@ -36,10 +36,10 @@ func TestFilterShimEnv_CredPathValidation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := filterShimEnv([]string{tc.entry})
+			got := FilterShimEnv([]string{tc.entry})
 			kept := len(got) == 1 && got[0] == tc.entry
 			if kept != tc.wantKept {
-				t.Fatalf("filterShimEnv(%q) kept=%v, want %v (got=%v)", tc.entry, kept, tc.wantKept, got)
+				t.Fatalf("FilterShimEnv(%q) kept=%v, want %v (got=%v)", tc.entry, kept, tc.wantKept, got)
 			}
 		})
 	}
@@ -91,8 +91,8 @@ func TestIsSafeShimCredPath(t *testing.T) {
 		{strings.Repeat("/a", 100), true},
 	}
 	for _, tc := range cases {
-		if got := isSafeShimCredPath(tc.val); got != tc.want {
-			t.Errorf("isSafeShimCredPath(%q) = %v, want %v", tc.val, got, tc.want)
+		if got := isSafeCredFilePath(tc.val); got != tc.want {
+			t.Errorf("isSafeCredFilePath(%q) = %v, want %v", tc.val, got, tc.want)
 		}
 	}
 }

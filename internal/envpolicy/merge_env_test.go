@@ -1,4 +1,4 @@
-package shim
+package envpolicy
 
 import (
 	"strings"
@@ -18,12 +18,12 @@ func envMap(kvs []string) map[string]string {
 
 func TestMergeShimEnv_NilOverlayReturnsBaseline(t *testing.T) {
 	baseline := []string{"ANTHROPIC_BASE_URL=https://api.anthropic.com", "AWS_REGION=us-east-1"}
-	got := mergeShimEnv(baseline, nil)
+	got := MergeShimEnv(baseline, nil)
 	// Byte-identical: nil overlay must be a no-op (same backing slice is fine).
 	if len(got) != len(baseline) {
 		t.Fatalf("nil overlay changed length: got %d want %d", len(got), len(baseline))
 	}
-	got = mergeShimEnv(baseline, map[string]string{})
+	got = MergeShimEnv(baseline, map[string]string{})
 	if len(got) != len(baseline) {
 		t.Fatalf("empty overlay changed length: got %d want %d", len(got), len(baseline))
 	}
@@ -33,13 +33,13 @@ func TestMergeShimEnv_OverlayOverridesBaselineValue(t *testing.T) {
 	baseline := []string{
 		"CLAUDE_CODE_USE_BEDROCK=1",
 		"ANTHROPIC_BEDROCK_BASE_URL=http://127.0.0.1:8889",
-		"LD_PRELOAD=/tmp/x.so", // not in allowlist — dropped by filterShimEnv
+		"LD_PRELOAD=/tmp/x.so", // not in allowlist — dropped by FilterShimEnv
 	}
 	overlay := map[string]string{
 		"CLAUDE_CODE_USE_BEDROCK": "0",
 		"ANTHROPIC_BASE_URL":      "https://api.anthropic.com",
 	}
-	m := envMap(mergeShimEnv(baseline, overlay))
+	m := envMap(MergeShimEnv(baseline, overlay))
 	if m["CLAUDE_CODE_USE_BEDROCK"] != "0" {
 		t.Errorf("overlay did not override selector: got %q", m["CLAUDE_CODE_USE_BEDROCK"])
 	}
@@ -50,7 +50,7 @@ func TestMergeShimEnv_OverlayOverridesBaselineValue(t *testing.T) {
 	// baseline bedrock URL survives only because it's allowlisted, but the
 	// selector is now off.
 	if _, ok := m["LD_PRELOAD"]; ok {
-		t.Errorf("non-allowlisted baseline key LD_PRELOAD leaked through filterShimEnv")
+		t.Errorf("non-allowlisted baseline key LD_PRELOAD leaked through FilterShimEnv")
 	}
 }
 
@@ -84,9 +84,9 @@ func TestMergeShimEnv_OverlayStillGated(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := envMap(mergeShimEnv(baseline, tt.overlay))
+			m := envMap(MergeShimEnv(baseline, tt.overlay))
 			if _, ok := m[tt.wantAbsent]; ok {
-				t.Errorf("overlay bypassed filterShimEnv: %q present in result %v", tt.wantAbsent, m)
+				t.Errorf("overlay bypassed FilterShimEnv: %q present in result %v", tt.wantAbsent, m)
 			}
 			// Baseline safe key survives.
 			if m["AWS_REGION"] != "us-east-1" {
@@ -98,7 +98,7 @@ func TestMergeShimEnv_OverlayStillGated(t *testing.T) {
 
 func TestMergeShimEnv_LoopbackBedrockOverlayAllowed(t *testing.T) {
 	// The company-Bedrock profile: overlay points at the local proxy port.
-	m := envMap(mergeShimEnv(nil, map[string]string{
+	m := envMap(MergeShimEnv(nil, map[string]string{
 		"CLAUDE_CODE_USE_BEDROCK":    "1",
 		"ANTHROPIC_BEDROCK_BASE_URL": "http://127.0.0.1:8890",
 		"AWS_REGION":                 "us-west-2",

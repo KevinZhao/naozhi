@@ -1,4 +1,4 @@
-package shim
+package envpolicy
 
 import (
 	"strings"
@@ -13,8 +13,8 @@ import (
 func TestFilterShimEnv_ProfileValidation(t *testing.T) {
 	t.Parallel()
 
-	// Only AWS_PROFILE is in shimEnvAllowedPrefixes (AWS_DEFAULT_PROFILE is
-	// intentionally not forwarded), so the filterShimEnv integration cases use
+	// Only AWS_PROFILE is in the Table's shim column (AWS_DEFAULT_PROFILE is
+	// intentionally not forwarded), so the FilterShimEnv integration cases use
 	// AWS_PROFILE. The validator's coverage of AWS_DEFAULT_PROFILE is asserted
 	// separately via shimProfileEnvDropped below.
 	const profileKey = "AWS_PROFILE="
@@ -39,10 +39,10 @@ func TestFilterShimEnv_ProfileValidation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := filterShimEnv([]string{tc.entry})
+			got := FilterShimEnv([]string{tc.entry})
 			kept := len(got) == 1 && got[0] == tc.entry
 			if kept != tc.wantKept {
-				t.Fatalf("filterShimEnv(%q) kept=%v, want %v (got=%v)", tc.entry, kept, tc.wantKept, got)
+				t.Fatalf("FilterShimEnv(%q) kept=%v, want %v (got=%v)", tc.entry, kept, tc.wantKept, got)
 			}
 		})
 	}
