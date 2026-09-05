@@ -117,6 +117,7 @@ func (p *TestProcess) TurnAgents() []cli.SubagentInfo { return p.EventLog.TurnAg
 // SessionSnapshot assertions stable.
 func (p *TestProcess) ContextUsagePercent() float64       { return 0 }
 func (p *TestProcess) TurnDurationMs() int64              { return 0 }
+func (p *TestProcess) SpawnDiags() []cli.SpawnDiag        { return nil }
 func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return p.MeteringVal }
 func (p *TestProcess) TakeShadowUsage() cli.ShadowUsage {
 	u := p.ShadowVal

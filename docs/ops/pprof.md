@@ -306,6 +306,7 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 | `naozhi_session_active_by_backend` | gauge | `backend` | per-backend 活动 session 数 | 与 `_active` 总和应相等；不等 = 簿记漂移（`reconcileSessionActiveByBackendLocked` 兜底） |
 | `naozhi_protocol_rpc_error_total` | counter | `backend, method, code` | JSON-RPC 错误（仅 ACP 协议；stream-json 不上报） | 单 (backend, code) 突增 = agent 端某类 RPC 出问题；method=`""` 表示 ReadEvent 路径无法关联请求 |
 | `naozhi_acp_cancel_total` | counter | `backend` | `ACPProtocol.WriteInterrupt` 成功送出 `session/cancel` notification（pre-handshake 失败不计） | 与 `naozhi_interrupt_*` 一族 cross-check：`acp_cancel_total ≈ interrupt_sent_total` 中 ACP 部分；不等 = 路由 fallback SIGINT |
+| `naozhi_spawn_diag_total` | counter | `layer, action` | spawn 门禁拒绝/忽略了配置输入（`cli.EmitSpawnDiags`，按 scope+layer+key 去重后首个才计数） | 非零 = 有配置"看起来生效实际被剥掉"（#2412/#2493 形态），按 layer 定位是 argv denylist / caps / deprecated 字段 |
 | `naozhi_metrics_label_overflow_total` | counter | — | label tuple 长度超过 `maxLabelKeyLen=256` 折叠到 `_overflow_` 桶的累计次数 | **必须稳态 0**；非零 = 某 caller 未做 label sanitize（agent 注入的 method/code 字符串过长） |
 
 ### 拉取示例

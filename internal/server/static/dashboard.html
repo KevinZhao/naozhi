@@ -1550,6 +1550,13 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    they shed the mute downgrade. Weight + colour only — a high tier is a
    deliberate setting, not a fault, and --nz-amber already means "running". */
 .main-header .detail-effort .effort-hot{color:var(--nz-text);font-weight:600}
+/* Spawn-gate warning chip (#2532): configured input the spawn pipeline
+   dropped/ignored. A fault signal, so it takes the warn badge tokens; :empty
+   collapses it when everything took effect. */
+.main-header .detail-spawndiag{display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;font-size:var(--nz-fs-sm)}
+.main-header .detail-spawndiag:empty{display:none}
+.main-header .detail-spawndiag .spawn-diag-tag{color:var(--nz-badge-warn);cursor:help}
+.main-header .detail-spawndiag .spawn-diag-tag::before{content:"·";margin-right:4px;opacity:.45;color:var(--nz-text-mute)}
 /* Git branch / worktree chip in the session-detail header. Filled async by
    renderGitChip; :empty collapses it so a non-repo workspace leaves no gap.
    The chip is the operator's "which checkout am I editing" signal, so a

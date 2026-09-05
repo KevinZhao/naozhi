@@ -679,10 +679,16 @@ func (cfg *Config) Normalize() {
 	case len(cfg.Workspaces) > 0 && len(cfg.Nodes) == 0:
 		cfg.Nodes = cfg.Workspaces
 	case len(cfg.Nodes) > 0 && len(cfg.Workspaces) == 0:
-		slog.Warn("'nodes' config key is deprecated, please rename to 'workspaces'")
+		cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
+			Layer: "config-deprecated", Key: "nodes", Action: "rewritten",
+			Reason: "'nodes' is deprecated, please rename to 'workspaces'",
+		}})
 		cfg.Workspaces = cfg.Nodes
 	case len(cfg.Workspaces) > 0 && len(cfg.Nodes) > 0:
-		slog.Warn("both 'nodes' and 'workspaces' configured; using 'workspaces', ignoring 'nodes'")
+		cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
+			Layer: "config-deprecated", Key: "nodes", Action: "ignored",
+			Reason: "both 'nodes' and 'workspaces' configured; using 'workspaces'",
+		}})
 		cfg.Nodes = cfg.Workspaces
 	}
 }
@@ -721,11 +727,17 @@ func applyDefaults(cfg *Config) {
 	// trip the deprecation warning.
 	if cfg.Session.CWD != "" {
 		if cfg.Session.Workspace != "" && cfg.Session.Workspace != cfg.Session.CWD {
-			slog.Warn("both 'session.cwd' and deprecated 'session.workspace' configured; using 'cwd'")
+			cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
+				Layer: "config-deprecated", Key: "session.workspace", Action: "ignored",
+				Reason: "both 'session.cwd' and deprecated 'session.workspace' configured; using 'cwd'",
+			}})
 		}
 		cfg.Session.Workspace = cfg.Session.CWD
 	} else if cfg.Session.Workspace != "" {
-		slog.Warn("'session.workspace' is deprecated, please rename to 'session.cwd'")
+		cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
+			Layer: "config-deprecated", Key: "session.workspace", Action: "rewritten",
+			Reason: "'session.workspace' is deprecated, please rename to 'session.cwd'",
+		}})
 		cfg.Session.CWD = cfg.Session.Workspace
 	} else {
 		// Mirror the default into the alias so readers of either field work.
@@ -734,7 +746,10 @@ func applyDefaults(cfg *Config) {
 	}
 
 	if cfg.Session.AutoChain.Enabled != nil || cfg.Session.AutoChain.WindowHours != 0 || cfg.Session.AutoChain.Cap != 0 {
-		slog.Warn("'session.auto_chain' is deprecated and has no effect; the feature was replaced by project-stable session keys — remove this block from config")
+		cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
+			Layer: "config-deprecated", Key: "session.auto_chain", Action: "ignored",
+			Reason: "'session.auto_chain' is deprecated and has no effect; remove this block from config",
+		}})
 	}
 
 	if cfg.UpdateEnabled() {
@@ -1157,8 +1172,10 @@ func validateArgvStrings(field string, args []string) error {
 			}
 		}
 		if cli.IsDeniedExtraFlag(a) {
-			slog.Warn("config: args contains a flag the spawn pipeline strips; it will NOT reach the CLI — use the dedicated config field instead",
-				"field", fmt.Sprintf("%s[%d]", field, i), "flag", a)
+			cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
+				Layer: "argv-denylist", Key: a, Action: "dropped",
+				Reason: fmt.Sprintf("%s[%d]: the spawn pipeline strips this flag; it will NOT reach the CLI — use the dedicated config field instead", field, i),
+			}})
 		}
 	}
 	return nil

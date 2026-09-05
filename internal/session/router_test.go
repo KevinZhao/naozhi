@@ -23,6 +23,7 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeProcess struct {
+	spawnDiags    []cli.SpawnDiag
 	mu            sync.Mutex
 	isAlive       bool
 	isRunning     bool
@@ -247,6 +248,7 @@ func (f *fakeProcess) TurnAgents() []cli.SubagentInfo        { return nil }
 // preserve historical SessionSnapshot output.
 func (f *fakeProcess) ContextUsagePercent() float64       { return 0 }
 func (f *fakeProcess) TurnDurationMs() int64              { return 0 }
+func (f *fakeProcess) SpawnDiags() []cli.SpawnDiag        { return f.spawnDiags }
 func (f *fakeProcess) MeteringUsage() []cli.MeteringEntry { return nil }
 func (f *fakeProcess) MeteringGen() uint64                { return 0 }
 func (f *fakeProcess) Model() string                      { return "" }

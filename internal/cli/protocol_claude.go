@@ -197,16 +197,24 @@ func IsDeniedExtraFlag(arg string) bool { return isDeniedFlag(arg) }
 // is a duplicate or an injection. Returns the input unchanged when clean;
 // nil (logged) when over the byte cap; a filtered copy when flags were stripped.
 func capExtraArgsBytes(extra []string) []string {
+	if _, over := extraArgsOverCap(extra); over {
+		return nil
+	}
+	return filterDeniedFlags(extra)
+}
+
+// extraArgsOverCap reports whether extra exceeds maxExtraArgsBytes, returning
+// the running byte total at the point of overflow. Shared by the argv gate
+// and SpawnDiagsFor so the drop and its diagnostic cannot disagree.
+func extraArgsOverCap(extra []string) (int, bool) {
 	total := 0
 	for _, a := range extra {
 		total += len(a) + 1 // +1 for argv NUL separator
 		if total > maxExtraArgsBytes {
-			slog.Warn("cli: ExtraArgs exceeds byte cap, dropping",
-				"total_bytes", total, "cap", maxExtraArgsBytes, "count", len(extra))
-			return nil
+			return total, true
 		}
 	}
-	return filterDeniedFlags(extra)
+	return total, false
 }
 
 // deniedExtraFlags lists Claude/ACP CLI flags that callers must not inject
@@ -254,32 +262,27 @@ func filterDeniedFlags(extra []string) []string {
 		return extra
 	}
 	out := make([]string, 0, len(extra))
-	dropped := 0
 	for i := 0; i < len(extra); i++ {
 		a := extra[i]
 		// `--name=value` form: deny by prefix match before '='.
 		if eq := strings.IndexByte(a, '='); eq > 0 && strings.HasPrefix(a, "--") {
 			if _, bad := deniedExtraFlags[a[:eq]]; bad {
-				dropped++
 				continue
 			}
 		}
 		// `--name value` form: deny the flag and skip the following value element
 		// unless it is itself a flag (then the current one was a boolean).
 		if _, bad := deniedExtraFlags[a]; bad {
-			dropped++
 			if i+1 < len(extra) && !strings.HasPrefix(extra[i+1], "-") {
 				i++
-				dropped++
 			}
 			continue
 		}
 		out = append(out, a)
 	}
-	if dropped > 0 {
-		slog.Warn("cli: ExtraArgs contained denied flags; stripped",
-			"dropped", dropped, "kept", len(out))
-	}
+	// The strip itself is silent: real spawn paths report it through
+	// SpawnDiagsFor + EmitSpawnDiags (with the session key as scope), so the
+	// 30s shim-reconcile heartbeat re-deriving argv cannot spam the log.
 	return out
 }
 

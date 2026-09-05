@@ -49,6 +49,13 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			pattern: `metrics\.RecordCLISpawn\(`,
 		},
 		{
+			// #2532: every spawn-gate rejection goes through the single
+			// emitter; RecordSpawnDiag must only fire there (dedup-gated).
+			name:    "RecordSpawnDiag fires only in the EmitSpawnDiags emitter",
+			path:    "../cli/spawn_diag.go",
+			pattern: `metrics\.RecordSpawnDiag\(`,
+		},
+		{
 			// R243-ARCH-2 split: handleAuth lives in wshub_upgrade.go.
 			// R237-ARCH-5 (#582): the server layer no longer reaches into the
 			// metrics globals directly — it increments through the

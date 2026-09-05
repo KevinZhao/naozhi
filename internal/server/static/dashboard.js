@@ -526,6 +526,7 @@ async function fetchSessions() {
     // earlier revision of this code sat and silently never fired.
     // docs/rfc/kiro-effort-visibility.md §5.1 / R1b
     if (selectedKey) setHeaderEffortChip(data.sessions);
+    if (selectedKey) setHeaderSpawnDiagChip(data.sessions);
     // #2431: under WS-fallback polling this REST poll is the ONLY state source,
     // and process state transitions (running↔ready, last_response, sc-time)
     // never advance stats.version — storeGen moves on add/remove/rename/reset
@@ -3254,6 +3255,41 @@ function setHeaderEffortChip(sessions) {
   if (el.innerHTML !== html) el.innerHTML = html;
 }
 
+// spawnDiagChipHtml renders the "配置未生效" warning chip for a session whose
+// spawn gates dropped or ignored configured input (#2532: --effort stripped
+// for months with only a log line as evidence). Empty when everything took
+// effect; the tooltip lists each ineffective item.
+function spawnDiagChipHtml(diags) {
+  if (!diags || !diags.length) return '';
+  const lines = diags.map(function (d) {
+    return d.key + ' (' + d.action + ')' + (d.reason ? ': ' + d.reason : '');
+  });
+  const tip = '以下配置未生效：\n' + lines.join('\n');
+  return '<span class="spawn-diag-tag" title="' + escAttr(tip) + '" aria-label="' + escAttr(tip) + '">' +
+      '⚠ 配置未生效</span>';
+}
+
+// setHeaderSpawnDiagChip mirrors setHeaderEffortChip — same two call sites,
+// same "before the stats.version short-circuit" constraint: spawn_diags is a
+// runtime observation on each /api/sessions row and never advances
+// stats.version, so the poll path must repaint it unconditionally.
+function setHeaderSpawnDiagChip(sessions) {
+  const el = document.getElementById('header-spawndiag');
+  if (!el) return;
+  let diags = null;
+  if (selectedKey) {
+    if (sessions) {
+      const node = selectedNode || 'local';
+      const row = sessions.find(s => s && s.key === selectedKey && (s.node || 'local') === node);
+      diags = row ? row.spawn_diags : null;
+    } else {
+      diags = (sessionsData[sid(selectedKey, selectedNode)] || {}).spawn_diags;
+    }
+  }
+  const html = spawnDiagChipHtml(diags);
+  if (el.innerHTML !== html) el.innerHTML = html;
+}
+
 // ===== Session tuning popover =====
 // Per-session model/effort switching from the header chips.
 // docs/rfc/dashboard-model-effort-control.md §4.1. Control lives where the
@@ -4075,6 +4111,10 @@ function mainHeaderHtml(s) {
         // change lands without waiting for a header rebuild; collapses via
         // :empty for backends that report no effort.
         '<span class="detail-effort" id="header-effort"></span>' +
+        // Spawn-gate warnings (#2532). Built empty and filled by
+        // setHeaderSpawnDiagChip (same lifecycle as the effort chip);
+        // collapses via :empty when every configured input took effect.
+        '<span class="detail-spawndiag" id="header-spawndiag"></span>' +
         turnTimerHtml +
         // Run-history overview ("N 轮 · 均 X · 最长 X"). Built empty here and
         // filled asynchronously by renderSessionRunsPanel once /api/sessions/runs
@@ -4101,6 +4141,7 @@ function renderMainHeader() {
   // refetch exactly as renderMainShell's tail does.
   repaintGitChip();
   setHeaderEffortChip();
+  setHeaderSpawnDiagChip();
   fetchSessionRuns(selectedKey, selectedNode);
 }
 
@@ -4201,6 +4242,7 @@ function renderMainShell() {
   repaintGitChip();
   // Same rationale as repaintGitChip: the rebuild emptied #header-effort.
   setHeaderEffortChip();
+  setHeaderSpawnDiagChip();
 }
 
 // _fetchEventsInFlight gates concurrent HTTP polls of `/api/sessions/events`.

@@ -223,6 +223,13 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		// EffortTier backends pre-seed it from the spawn pin
 		// (cli.Process.seedEffort); kiro's metadata report overwrites.
 		snap.Effort = proc.Effort()
+		if diags := proc.SpawnDiags(); len(diags) > 0 {
+			snap.SpawnDiags = diags
+		}
+	}
+	if snap.SpawnDiags == nil {
+		// Contract: spawn_diags is always an array in /api/sessions.
+		snap.SpawnDiags = []cli.SpawnDiag{}
 	}
 
 	// Derived from backend even when proc is nil so an evicted session still
