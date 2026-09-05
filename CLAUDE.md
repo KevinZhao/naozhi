@@ -80,6 +80,7 @@ cmd/naozhi/main.go
   -> i18n         Locale 解析与消息渲染
   -> metrics      进程级计数器（expvar）
   -> runtelemetry 跨子系统 run 生命周期事件类型
+  -> costledger   统一 cost 账本叶子包（按天 JSONL append-only + rollup + 累计差分）
   -> naozhisettings  naozhi 托管的 Claude settings 文件
   -> uiprefs      Dashboard 展示偏好持久化
   -> registry     插件 / 扩展注册表的 canonical home

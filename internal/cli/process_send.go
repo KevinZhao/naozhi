@@ -228,9 +228,10 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 				}
 				p.mu.Unlock()
 				return &SendResult{
-					Text:      ev.Result,
-					SessionID: ev.SessionID,
-					CostUSD:   ev.CostUSD,
+					Text:       ev.Result,
+					SessionID:  ev.SessionID,
+					CostUSD:    ev.CostUSD,
+					ModelUsage: ev.ModelUsage,
 				}, nil
 			}
 		case <-watchdog.C:

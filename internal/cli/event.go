@@ -12,12 +12,16 @@ import (
 
 // Event represents a parsed stream-json event from claude CLI stdout.
 type Event struct {
-	Type      string            `json:"type"`
-	SubType   string            `json:"subtype,omitempty"`
-	SessionID string            `json:"session_id,omitempty"`
-	Result    string            `json:"result,omitempty"`
-	CostUSD   float64           `json:"total_cost_usd,omitempty"`
-	Message   *AssistantMessage `json:"message,omitempty"`
+	Type      string  `json:"type"`
+	SubType   string  `json:"subtype,omitempty"`
+	SessionID string  `json:"session_id,omitempty"`
+	Result    string  `json:"result,omitempty"`
+	CostUSD   float64 `json:"total_cost_usd,omitempty"`
+	// ModelUsage is the result frame's per-model cumulative usage (same
+	// per-incarnation running-total semantics as CostUSD). nil on every
+	// other frame and on ACP/codex. See docs/rfc/cost-ledger.md §5.1.
+	ModelUsage map[string]ModelUsage `json:"modelUsage,omitempty"`
+	Message    *AssistantMessage     `json:"message,omitempty"`
 	// Model is the resolved model id the claude CLI advertises on system/init
 	// (claude resolves env/CLI defaults internally, so it is only known after
 	// init). readLoop forwards it to Process.setModel for the live dashboard
@@ -117,6 +121,24 @@ type MeteringEntry struct {
 	Value      float64 `json:"value"`
 	Unit       string  `json:"unit"`
 	UnitPlural string  `json:"unit_plural,omitempty"`
+}
+
+// ModelUsage mirrors one entry of the claude CLI result frame's modelUsage
+// map: cumulative tokens and estimated USD for one model within the current
+// process incarnation. CostBasis tells which price table produced CostUSD:
+// "list" (CLI built-in), "managed" (settings modelPricing) or "unknown" (no
+// price row matched; the CLI guessed at the default model's rate).
+type ModelUsage struct {
+	InputTokens              int64   `json:"inputTokens"`
+	OutputTokens             int64   `json:"outputTokens"`
+	CacheReadInputTokens     int64   `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int64   `json:"cacheCreationInputTokens"`
+	ThinkingTokens           int64   `json:"thinkingTokens,omitempty"`
+	WebSearchRequests        int64   `json:"webSearchRequests"`
+	CostUSD                  float64 `json:"costUSD"`
+	CanonicalModel           string  `json:"canonicalModel,omitempty"`
+	Provider                 string  `json:"provider,omitempty"`
+	CostBasis                string  `json:"costBasis,omitempty"`
 }
 
 // TaskUsage holds resource consumption stats from agent task events.
@@ -462,6 +484,10 @@ type SendResult struct {
 	Text      string
 	SessionID string
 	CostUSD   float64
+	// ModelUsage is the result frame's per-model cumulative snapshot (nil when
+	// the frame carried none, e.g. ACP backends or an EventLog fallback).
+	// Cumulative like CostUSD: consumers difference it, never sum it.
+	ModelUsage map[string]ModelUsage
 
 	// Merge metadata. Zero means "single-slot result, no merge".
 	MergedCount    int    // total slots sharing this result (>=2 in a merge)

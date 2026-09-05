@@ -315,6 +315,7 @@ func fanoutTurnResult(owners []*sendSlot, ev Event) {
 		Text:        ev.Result,
 		SessionID:   ev.SessionID,
 		CostUSD:     ev.CostUSD,
+		ModelUsage:  ev.ModelUsage,
 		MergedCount: mergedCount,
 	}
 	deliverSlotResult(head, headRes)

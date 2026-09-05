@@ -105,7 +105,12 @@ func (s *ManagedSession) recoverLeakedToolcall(
 		Text:      rec.Text,
 		SessionID: firstNonEmpty(rec.SessionID, result.SessionID),
 		// Cumulative total already includes the leaked turn; never sum (#2355).
+		// ModelUsage carries the same cumulative semantics and MUST travel with
+		// it, otherwise the recovered turn's per-model delta is lost. Sharing
+		// the map is safe: ReadEvent copies the Event out of its pool before
+		// returning, so nothing else mutates it.
 		CostUSD:     rec.CostUSD,
+		ModelUsage:  rec.ModelUsage,
 		MergedCount: rec.MergedCount,
 	}
 }
