@@ -183,7 +183,9 @@ test.describe('Session selection & events', () => {
     await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
     await page.waitForSelector('#events-scroll');
 
-    // Should display events
+    // Should display events. The initial events fetch resolves after the
+    // shell renders, so wait for the first .event instead of racing it.
+    await page.waitForSelector('.event');
     const events = await page.$$('.event');
     expect(events.length).toBeGreaterThanOrEqual(2);
 

@@ -6,6 +6,10 @@ const fs = require('fs');
 const path = require('path');
 
 const STATIC_DIR = path.join(__dirname, '..', '..', 'internal', 'server', 'static');
+// The generated backend contract — the same file the dashboard loads. Stub
+// paths reference it so a route rename breaks the mock in the same commit
+// that regenerates contract.js (#2539).
+const NZ_CONTRACT = require(path.join(STATIC_DIR, 'contract.js'));
 
 function defaultSessions() {
   return {
@@ -284,7 +288,7 @@ function startMockServer(overrides = {}) {
     }
 
     // Auth routes
-    if (pathname === '/api/auth/login' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.auth_login && req.method === 'POST') {
       let body = '';
       req.on('data', c => (body += c));
       req.on('end', () => {
@@ -311,7 +315,7 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (pathname === '/api/auth/logout' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.auth_logout && req.method === 'POST') {
       res.writeHead(200, {
         'Content-Type': 'application/json',
         'Set-Cookie': 'naozhi_auth=; Path=/; HttpOnly; Max-Age=0',
@@ -321,14 +325,14 @@ function startMockServer(overrides = {}) {
     }
 
     // Session routes
-    if (pathname === '/api/sessions' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.sessions && req.method === 'GET') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(sessionsData));
       return;
     }
 
-    if (pathname === '/api/sessions/events' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.sessions_events && req.method === 'GET') {
       if (!checkAuth()) return;
       // Mirror EventLog.EntriesSince: `after` is strictly greater-than, so the
       // 1 s poll never re-delivers the watermark millisecond.
@@ -364,7 +368,7 @@ function startMockServer(overrides = {}) {
 
     // Rename (user_label). Records the call and patches the snapshot like the
     // real handler; bumps stats.version so the next poll re-renders the card.
-    if (pathname === '/api/sessions/label' && req.method === 'PATCH') {
+    if (pathname === NZ_CONTRACT.API.sessions_label && req.method === 'PATCH') {
       if (!checkAuth()) return;
       let body = '';
       req.on('data', c => (body += c));
@@ -386,7 +390,7 @@ function startMockServer(overrides = {}) {
     // different sessions different checkouts (main tree vs linked worktree vs
     // non-repo). Unknown keys fall through to the is_repo:false shape, which
     // is what the real handler returns for a plain folder.
-    if (pathname === '/api/sessions/git' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.sessions_git && req.method === 'GET') {
       if (!checkAuth()) return;
       const key = url.searchParams.get('key') || '';
       const state = gitStates[key] || { is_repo: false };
@@ -399,7 +403,7 @@ function startMockServer(overrides = {}) {
     // promotes into the header's .detail-runstats. Only served for keys a
     // test opted into; the default 404 mirrors a session with no recorded
     // runs (dashboard hides the panel and leaves the header slot empty).
-    if (pathname === '/api/sessions/runs' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.sessions_runs && req.method === 'GET') {
       if (!checkAuth()) return;
       const key = url.searchParams.get('key') || '';
       const payload = sessionRuns[key];
@@ -416,7 +420,7 @@ function startMockServer(overrides = {}) {
     // Full-size attachment fetch used by the lightbox (data-full URL).
     // Serves a tiny valid PNG so naturalWidth>0; ?path=missing.png returns
     // 404 to exercise the thumb-fallback path.
-    if (pathname === '/api/sessions/attachment' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.sessions_attachment && req.method === 'GET') {
       if (!checkAuth()) return;
       const p = url.searchParams.get('path') || '';
       if (p.includes('missing')) {
@@ -433,7 +437,7 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (pathname === '/api/sessions/send' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.sessions_send && req.method === 'POST') {
       if (!checkAuth()) return;
       const status = overrides.sendStatus || 200;
       let body = '';
@@ -455,7 +459,7 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (pathname === '/api/sessions/bind' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.sessions_bind && req.method === 'POST') {
       if (!checkAuth()) return;
       let body = '';
       req.on('data', c => (body += c));
@@ -467,7 +471,7 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (pathname === '/api/sessions' && req.method === 'DELETE') {
+    if (pathname === NZ_CONTRACT.API.sessions && req.method === 'DELETE') {
       if (!checkAuth()) return;
       if (deleteStatus !== 200) {
         res.writeHead(deleteStatus, { 'Content-Type': 'application/json' });
@@ -479,7 +483,7 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (pathname === '/api/sessions/resume' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.sessions_resume && req.method === 'POST') {
       if (!checkAuth()) return;
       let body = '';
       req.on('data', c => (body += c));
@@ -491,21 +495,21 @@ function startMockServer(overrides = {}) {
     }
 
     // Discovery routes
-    if (pathname === '/api/discovered' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.discovered && req.method === 'GET') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(discoveredData));
       return;
     }
 
-    if (pathname === '/api/discovered/preview' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.discovered_preview && req.method === 'GET') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('[]');
       return;
     }
 
-    if (pathname === '/api/discovered/close' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.discovered_close && req.method === 'POST') {
       if (!checkAuth()) return;
       let body = '';
       req.on('data', c => (body += c));
@@ -518,7 +522,7 @@ function startMockServer(overrides = {}) {
     }
 
     // Cron routes
-    if (pathname === '/api/cron' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.cron && req.method === 'GET') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       // Dashboard expects { jobs: [...] } format (+ recent_runs_cap / timezone meta)
@@ -526,7 +530,7 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (pathname === '/api/cron' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.cron && req.method === 'POST') {
       if (!checkAuth()) return;
       let body = '';
       req.on('data', c => (body += c));
@@ -539,28 +543,28 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (pathname === '/api/cron' && req.method === 'DELETE') {
+    if (pathname === NZ_CONTRACT.API.cron && req.method === 'DELETE') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
       return;
     }
 
-    if (pathname === '/api/cron/pause' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.cron_pause && req.method === 'POST') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
       return;
     }
 
-    if (pathname === '/api/cron/resume' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.cron_resume && req.method === 'POST') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
       return;
     }
 
-    if (pathname === '/api/cron/preview' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.cron_preview && req.method === 'GET') {
       if (!checkAuth()) return;
       const schedule = url.searchParams.get('schedule') || '';
       const count = Math.min(Math.max(parseInt(url.searchParams.get('count') || '1', 10), 1), 10);
@@ -619,7 +623,7 @@ function startMockServer(overrides = {}) {
     }
 
     // /api/cron/runs?job_id=&limit=&before= — 翻页加载历史 runs (PR-1 加载更多)
-    if (pathname === '/api/cron/runs' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.cron_runs && req.method === 'GET') {
       if (!checkAuth()) return;
       const jobId = url.searchParams.get('job_id') || '';
       const job = cronJobsData.find(j => j.id === jobId);
@@ -631,13 +635,13 @@ function startMockServer(overrides = {}) {
     }
 
     // Project routes
-    if (pathname === '/api/projects' && req.method === 'GET') {
+    if (pathname === NZ_CONTRACT.API.projects && req.method === 'GET') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(defaultProjects()));
       return;
     }
-    if (pathname === '/api/projects/favorite' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.projects_favorite && req.method === 'POST') {
       if (!checkAuth()) return;
       const name = url.searchParams.get('name');
       const fav = url.searchParams.get('favorite') === 'true';
@@ -658,7 +662,7 @@ function startMockServer(overrides = {}) {
     }
 
     // Transcribe route
-    if (pathname === '/api/transcribe' && req.method === 'POST') {
+    if (pathname === NZ_CONTRACT.API.transcribe && req.method === 'POST') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ text: 'transcribed text' }));

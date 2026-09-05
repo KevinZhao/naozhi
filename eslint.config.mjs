@@ -86,6 +86,8 @@ const browserGlobals = ro([
   'indexedDB',
   'CSS',
   'createImageBitmap',
+  // Generated contract global (contract.js loads first, #2539).
+  'NZ_CONTRACT',
 ]);
 
 // Cross-file whitelists (js-deps-freeze --globals output, frozen 2026-09-05).
@@ -219,7 +221,7 @@ const perFile = Object.entries(deps).map(([file, globals]) => ({
 export default [
   {
     files: ['internal/server/static/*.js'],
-    ignores: ['internal/server/static/sw.js'],
+    ignores: ['internal/server/static/sw.js', 'internal/server/static/contract.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
@@ -233,6 +235,12 @@ export default [
       // vars:'local' skips top-level (shared-scope) names — other files may be
       // their only consumer; locals inside functions/IIFEs are still checked.
       'no-unused-vars': ['error', { vars: 'local', args: 'none', caughtErrors: 'none' }],
+      // Backend API paths come from the generated NZ_CONTRACT.API table
+      // (#2539); a new hardcoded '/api/…' literal bypasses the contract.
+      'no-restricted-syntax': ['error', {
+        selector: "Literal[value=/^\\u002Fapi\\u002F/]",
+        message: 'use NZ_CONTRACT.API.* (generated contract.js) instead of a hardcoded /api/ path',
+      }],
     },
   },
   // sw.js is a service worker: its own scope, no cross-file references.
