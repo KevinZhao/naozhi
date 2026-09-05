@@ -224,6 +224,9 @@ func TestNewWrapper_ExplicitPathTakesPrecedence(t *testing.T) {
 // detectCLI's resolved absolute path into CLIPath — without depending on
 // the host having claude on its real PATH.
 func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	dir := t.TempDir()
 	ext := ""
 	if runtime.GOOS == "windows" {

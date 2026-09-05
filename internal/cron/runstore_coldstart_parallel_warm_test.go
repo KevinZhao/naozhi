@@ -11,6 +11,9 @@ import (
 // just the first. The serial loop was replaced by a bounded goroutine pool
 // (warmJobsParallel); this asserts the fan-out still warms all jobs.
 func TestRunStore_TrimAll_ParallelWarm_AllJobs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 

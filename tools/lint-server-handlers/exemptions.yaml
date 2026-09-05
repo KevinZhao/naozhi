@@ -57,7 +57,7 @@ file_size:
       limit: 800
       until_phase: "5"        # Phase 5 内部拆分
     - path: internal/server/server.go
-      current: 705                          # 2026-09-05 重采（#2286：cost ledger handler 字段 + 构造 + limiter 守卫）
+      current: 708                          # 2026-09-05 +3（#2538：config fingerprint 三行接线进 HealthHandler）
       limit: 500
       until_phase: "5"
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线

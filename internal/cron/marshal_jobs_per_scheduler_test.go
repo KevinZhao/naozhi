@@ -28,6 +28,9 @@ import (
 // This is the contract test #867 asks for to prevent a future refactor
 // from reverting to a package-level atomic.
 func TestMarshalJobs_PerSchedulerIsolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 
 	dirA := t.TempDir()

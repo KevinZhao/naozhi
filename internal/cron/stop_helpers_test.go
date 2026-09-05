@@ -114,6 +114,9 @@ func TestWaitGCDrain_DoesNotBlockWhenGCEmpty(t *testing.T) {
 // helper past gcWaitBudget. Confirms the timer arm fires when the
 // drain channel doesn't.
 func TestWaitGCDrain_BoundedByBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5}, SchedulerDeps{})
 

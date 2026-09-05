@@ -27,6 +27,9 @@ import (
 // Append) is intentional: Append refuses non-hex names at the rune
 // level so the orphan rows could not be created via the public API.
 func TestScanSortedRunDir_CapBoundedByKeepCount(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	const keepCount = 4
 	const orphanCount = 100

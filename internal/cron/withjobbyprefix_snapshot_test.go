@@ -78,6 +78,9 @@ func TestWithJobByPrefix_ReturnsSnapshot(t *testing.T) {
 // This is a structural race test; the -race flag is required to catch the
 // regression reliably. Without -race it still validates the copy invariant.
 func TestWithJobByPrefix_SnapshotRaceDeleteJob(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{

@@ -231,6 +231,9 @@ func TestHandleFilesList_PublicTmpRejected(t *testing.T) {
 }
 
 func TestHandleFilesList_Truncation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	files := make(map[string]string, maxListEntries+50)
 	for i := 0; i < maxListEntries+10; i++ {
 		files["f"+itoa(i)+".txt"] = "x"

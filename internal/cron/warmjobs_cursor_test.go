@@ -13,6 +13,9 @@ import (
 // cold or race the per-entry warm. We use 50 jobs (>> 8 workers) to force many
 // FetchAdd steals per worker.
 func TestRunStore_WarmJobsParallel_CursorCoversAllJobs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 

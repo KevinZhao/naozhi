@@ -94,6 +94,9 @@ func TestInterrupt_IdleBranch_CancelsInFlightSend(t *testing.T) {
 // unblock its peer Send via sendCancel. Verifies (a) no races on
 // sendCancel atomics, (b) no goroutine leaks behind a never-cancelled ctx.
 func TestInterrupt_ConcurrentSendRace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("stress loop; skipped under -short")
