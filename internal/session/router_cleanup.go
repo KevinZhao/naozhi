@@ -753,4 +753,8 @@ func (r *Router) shutdown() {
 	// Flush the session-run-history write worker so records from the final
 	// turns reach disk. Close blocks on the bounded queue draining; nil store is a no-op.
 	r.sessionRuns.Close()
+	// Same for the cost ledger: its worker fsyncs the tail of the day file.
+	if r.costAcct != nil {
+		r.costAcct.ledger.Close()
+	}
 }

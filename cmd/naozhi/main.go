@@ -203,9 +203,14 @@ func main() {
 		MCPConfigFile:        mcpConfigFile,
 		Workspace:            workspace,
 		StorePath:            storePath,
-		NoOutputTimeout:      noOutputTimeout,
-		TotalTimeout:         totalTimeout,
-		ClaudeDir:            claudeDir,
+		CostLedger: session.CostLedgerConfig{
+			Disabled:      !cfg.Cost.IsEnabled(),
+			RetentionDays: cfg.Cost.RetentionDays,
+			RollupDays:    cfg.Cost.RollupDays,
+		},
+		NoOutputTimeout: noOutputTimeout,
+		TotalTimeout:    totalTimeout,
+		ClaudeDir:       claudeDir,
 		// KiroSessionsDir / CodexSessionsDir feed the jsonl history factories so
 		// "load earlier" survives a naozhi restart (the CLIs' documented paths).
 		KiroSessionsDir: osutil.ExpandHome("~/.kiro/sessions/cli"),

@@ -69,6 +69,7 @@ type Config struct {
 	Sysession   SysessionConfig   `yaml:"sysession,omitempty"`
 	Update      UpdateConfig      `yaml:"update,omitempty"`
 	ImageOrient ImageOrientConfig `yaml:"image_orient,omitempty"`
+	Cost        CostConfig        `yaml:"cost,omitempty"`
 
 	// Parsed durations, populated once in Load.
 	cachedTTL             time.Duration `yaml:"-"`
@@ -1473,3 +1474,15 @@ func containsYAMLBreakingByte(s string) bool {
 func containsEnvPlaceholder(s string) bool {
 	return strings.Contains(s, "${")
 }
+
+// CostConfig tunes the cost ledger (docs/rfc/cost-ledger.md §9). Enabled
+// defaults to true; the ledger lives beside session.store_path, so it is also
+// off when that is empty. Out-of-range day counts are clamped by the ledger.
+type CostConfig struct {
+	Enabled       *bool `yaml:"enabled,omitempty"`
+	RetentionDays int   `yaml:"retention_days,omitempty"`
+	RollupDays    int   `yaml:"rollup_days,omitempty"`
+}
+
+// IsEnabled resolves the tri-state Enabled flag (nil = true).
+func (c CostConfig) IsEnabled() bool { return c.Enabled == nil || *c.Enabled }

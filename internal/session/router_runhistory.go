@@ -1,6 +1,7 @@
 package session
 
 import (
+	"github.com/naozhi/naozhi/internal/costledger"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/session/runhistory"
@@ -19,4 +20,26 @@ func (r *Router) SessionRuns(key string, limit int, before time.Time) []runhisto
 // runs. Zero value when persistence is disabled or the session has no runs.
 func (r *Router) SessionRunStats(key string) runhistory.SessionRunStats {
 	return r.sessionRuns.Stats(key)
+}
+
+// CostLedgerConfig is the router-side view of config.cost.
+type CostLedgerConfig struct {
+	Disabled      bool
+	RetentionDays int
+	RollupDays    int
+}
+
+// CostLedger exposes the shared ledger for the dashboard cost API; nil when
+// the router has no persistence. Read-only consumers only.
+func (r *Router) CostLedger() *costledger.Store {
+	if r.costAcct == nil {
+		return nil
+	}
+	return r.costAcct.ledger
+}
+
+// SetCostRunOwnership installs the gate that tells accountTurnCost a turn is
+// owned by a cron run (which writes the ledger itself). nil disables the gate.
+func (r *Router) SetCostRunOwnership(fn func(key string) bool) {
+	r.costAcct.setRunOwnership(fn)
 }

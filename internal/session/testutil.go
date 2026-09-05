@@ -33,7 +33,10 @@ type TestProcess struct {
 	// EffortVal lets snapshot tests drive proc.Effort() — the backend-reported
 	// thinking-effort tier.
 	EffortVal string
-	SendFunc  func(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// MeteringVal lets cost tests drive proc.MeteringUsage() (the process-level
+	// running sum kiro/codex report).
+	MeteringVal []cli.MeteringEntry
+	SendFunc    func(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
@@ -112,7 +115,7 @@ func (p *TestProcess) TurnAgents() []cli.SubagentInfo { return p.EventLog.TurnAg
 // SessionSnapshot assertions stable.
 func (p *TestProcess) ContextUsagePercent() float64       { return 0 }
 func (p *TestProcess) TurnDurationMs() int64              { return 0 }
-func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return nil }
+func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return p.MeteringVal }
 func (p *TestProcess) MeteringGen() uint64                { return 0 }
 func (p *TestProcess) Model() string                      { return p.ModelVal }
 func (p *TestProcess) LiveVersion() string                { return p.LiveVersionVal }
