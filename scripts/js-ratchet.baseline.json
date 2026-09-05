@@ -1,0 +1,38 @@
+{
+  "agent_view.js": {
+    "lines": 729,
+    "maxFunctionLines": 0,
+    "functionsOver100": 0,
+    "topLevelLetVar": 0
+  },
+  "asset_browser.js": {
+    "lines": 250,
+    "maxFunctionLines": 0,
+    "functionsOver100": 0,
+    "topLevelLetVar": 0
+  },
+  "cron_view.js": {
+    "lines": 4735,
+    "maxFunctionLines": 147,
+    "functionsOver100": 4,
+    "topLevelLetVar": 17
+  },
+  "dashboard.js": {
+    "lines": 16172,
+    "maxFunctionLines": 303,
+    "functionsOver100": 17,
+    "topLevelLetVar": 104
+  },
+  "files_view.js": {
+    "lines": 457,
+    "maxFunctionLines": 0,
+    "functionsOver100": 0,
+    "topLevelLetVar": 0
+  },
+  "nz_util.js": {
+    "lines": 162,
+    "maxFunctionLines": 0,
+    "functionsOver100": 0,
+    "topLevelLetVar": 0
+  }
+}
