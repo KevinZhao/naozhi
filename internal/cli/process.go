@@ -185,6 +185,10 @@ type Process struct {
 	// when never reported. A string, not an enum, so an unrecognised future tier
 	// still reaches the dashboard (docs/rfc/kiro-effort-visibility.md §2).
 	effort atomic.Pointer[string]
+	// spawnDiags is the gate decisions of this spawn (SpawnDiagsFor), set once
+	// by Wrapper.Spawn before readLoop; runtime observation only, never
+	// persisted (same lifecycle as effort). nil = none.
+	spawnDiags atomic.Pointer[[]SpawnDiag]
 	// shadowMu guards shadow, the token usage of assistant frames since the
 	// last result frame (see ShadowUsage).
 	shadowMu sync.Mutex
@@ -743,6 +747,24 @@ func effortFromArgs(args []string) string {
 		}
 	}
 	return tier
+}
+
+// setSpawnDiags records this spawn's gate decisions. Called once by
+// Wrapper.Spawn before readLoop starts; never re-set afterwards.
+func (p *Process) setSpawnDiags(diags []SpawnDiag) {
+	if len(diags) == 0 {
+		return
+	}
+	p.spawnDiags.Store(&diags)
+}
+
+// SpawnDiags returns the gate decisions of this spawn (nil when every
+// configured input took effect). Lock-free; callers must not mutate.
+func (p *Process) SpawnDiags() []SpawnDiag {
+	if d := p.spawnDiags.Load(); d != nil {
+		return *d
+	}
+	return nil
 }
 
 // setModel records the spawn-time model. Called once by Wrapper.Spawn

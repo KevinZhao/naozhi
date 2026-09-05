@@ -179,8 +179,11 @@ func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID, key string
 	// systemPrompt is "" by design: AgentOpts.SystemPrompt is per-session and
 	// not reconstructible here, so stripResumeArgs removes the stored
 	// --append-system-prompt pair instead (#2493).
-	return recWrapper.Protocol.BuildArgs(
-		r.argvSpawnOptions(merged.Model, merged.Effort, r.cliDebugPathFor(key), merged.SystemPrompt, merged.Args))
+	opts := r.argvSpawnOptions(merged.Model, merged.Effort, r.cliDebugPathFor(key), merged.SystemPrompt, merged.Args)
+	// Re-deriving argv re-hits the same gates every 30s reconcile tick; the
+	// emitter's per-scope dedup keeps that as one Warn then Debug repeats.
+	cli.EmitSpawnDiags(key, cli.SpawnDiagsFor(opts, cli.ProtocolCaps(recWrapper.Protocol)))
+	return recWrapper.Protocol.BuildArgs(opts)
 }
 
 // shimArgsDrift is the arg-drift predicate for classifyShimState: does the

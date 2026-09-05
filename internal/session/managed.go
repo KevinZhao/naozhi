@@ -171,6 +171,9 @@ type processIface interface {
 	// estimator lands. Lock-free.
 	ContextUsagePercent() float64
 	TurnDurationMs() int64
+	// SpawnDiags returns the spawn gates' drop/ignore decisions for this
+	// process (#2532); nil when everything took effect.
+	SpawnDiags() []cli.SpawnDiag
 	MeteringUsage() []cli.MeteringEntry
 	// MeteringGen versions MeteringUsage so Snapshot can cache its copy per
 	// (process, gen) (#2345). Implementations that do not version their rows
@@ -481,4 +484,9 @@ type SessionSnapshot struct {
 	// dashboard hides the tag. Not persisted, so it resets across restarts
 	// (docs/rfc/kiro-effort-visibility.md).
 	Effort string `json:"effort,omitempty"`
+	// SpawnDiags is what the spawn gates dropped/ignored for the live process
+	// (#2532). Always serialised — an empty array, not undefined, so the
+	// dashboard can index it unconditionally. Runtime observation like
+	// Effort: empty for evicted sessions and across restarts.
+	SpawnDiags []cli.SpawnDiag `json:"spawn_diags"`
 }

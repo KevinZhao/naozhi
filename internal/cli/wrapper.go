@@ -481,6 +481,10 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 
 	proto := w.Protocol.Clone()
 	cliArgs := proto.BuildArgs(opts)
+	// Gate decisions of this argv derivation: emitted (log + metrics) with the
+	// session key as dedup scope, and kept for the session snapshot below.
+	spawnDiags := SpawnDiagsFor(opts, ProtocolCaps(proto))
+	EmitSpawnDiags(opts.Key, spawnDiags)
 
 	cwd := opts.WorkingDir
 	if cwd == "" {
@@ -545,6 +549,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	// `--effort` is a spawn pin, so argv is the truth for the process. Seeded
 	// before readLoop so a kiro metadata report can only overwrite, never race.
 	proc.seedEffort(opts.Effort)
+	proc.setSpawnDiags(spawnDiags)
 	// Push the self-reported binary version (init frame) up for the global banner.
 	proc.SetOnLiveVersion(w.ObserveLiveVersion)
 
