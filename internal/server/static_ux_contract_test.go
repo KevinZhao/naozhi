@@ -136,7 +136,6 @@ func TestDashboardJS_RNEW_SEC008_DataRawAlwaysEscAttr(t *testing.T) {
 	}
 }
 
-
 // TestDashboardJS_EscIsPureString pins R244-SEC-P3-6: esc() must NOT use
 // a shared `_escEl = document.createElement('div')` scratch element with
 // textContent/innerHTML round-trip, because a recursive esc() call (custom
