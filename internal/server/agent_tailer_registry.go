@@ -10,7 +10,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // tailerRegistry is per-Hub and owns all active agentTailers. Installed via
@@ -209,21 +209,21 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 	defer releaseTailerBufferedSlice(buffered, bufferedHandle)
 	for i := range buffered {
 		e := buffered[i]
-		c.SendJSON(node.ServerMsg{
-			Type:   "agent_event",
+		c.SendJSON(wsproto.NewAgentEvent(wsproto.AgentEvent{
+
 			Key:    t.key,
 			TaskID: t.taskID,
 			Event:  &e,
-		})
+		}))
 	}
 	if meta.ToolUses > 0 || meta.DurationMS > 0 || meta.LastTool != "" {
 		m := meta
-		c.SendJSON(node.ServerMsg{
-			Type:      "agent_meta",
+		c.SendJSON(wsproto.NewAgentMeta(wsproto.AgentMeta{
+
 			Key:       t.key,
 			TaskID:    t.taskID,
 			AgentMeta: &m,
-		})
+		}))
 	}
 	return true
 }

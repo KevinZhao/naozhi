@@ -48,7 +48,7 @@ func TestRemoteHistoryFrames_MarkOpeningPage(t *testing.T) {
 		}
 		found := false
 		for _, line := range strings.Split(body, "\n") {
-			if !strings.Contains(line, `Type: "history"`) {
+			if !strings.Contains(line, "wsproto.NewHistory(") {
 				continue
 			}
 			found = true

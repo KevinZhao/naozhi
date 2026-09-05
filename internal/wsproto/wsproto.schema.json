@@ -1,0 +1,480 @@
+{
+  "types": [
+    "agent_done",
+    "agent_event",
+    "agent_meta",
+    "agent_subscribe_rejected",
+    "auth_fail",
+    "auth_ok",
+    "cron_run_ended",
+    "cron_run_started",
+    "daemon_run_ended",
+    "daemon_run_started",
+    "error",
+    "event",
+    "history",
+    "interrupt_ack",
+    "pong",
+    "send_ack",
+    "send_error",
+    "session_state",
+    "sessions_update",
+    "subscribed",
+    "unsubscribed"
+  ],
+  "frames": {
+    "agent_done": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "agent_event": {
+      "properties": {
+        "event": {
+          "type": "object",
+          "$ref": "clievent.EventEntry"
+        },
+        "key": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "agent_meta": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "meta": {
+          "type": "object",
+          "$ref": "wsproto.AgentMetaPatch"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "agent_subscribe_rejected": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "auth_fail": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "retry_after": {
+          "type": "integer"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "auth_ok": {
+      "properties": {
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "cron_run_ended": {
+      "properties": {
+        "duration_ms": {
+          "type": "integer"
+        },
+        "ended_at": {
+          "type": "integer"
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "error_msg": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ended_at",
+        "job_id",
+        "run_id",
+        "started_at",
+        "state",
+        "type"
+      ]
+    },
+    "cron_run_started": {
+      "properties": {
+        "fresh": {
+          "type": "boolean"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id",
+        "run_id",
+        "started_at",
+        "type"
+      ]
+    },
+    "daemon_run_ended": {
+      "properties": {
+        "duration_ms": {
+          "type": "integer"
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "run_id",
+        "state",
+        "type"
+      ]
+    },
+    "daemon_run_started": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "run_id",
+        "started_at",
+        "type"
+      ]
+    },
+    "error": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "event": {
+      "properties": {
+        "event": {
+          "type": "object",
+          "$ref": "clievent.EventEntry"
+        },
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "history": {
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "clievent.EventEntry"
+          }
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "initial": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "interrupt_ack": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "pong": {
+      "properties": {
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "send_ack": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "send_error": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "session_state": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "sessions_update": {
+      "properties": {
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "subscribed": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "unsubscribed": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    }
+  }
+}

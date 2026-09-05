@@ -15,9 +15,9 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
-	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // sessionsUpdateMsg is the pre-marshaled sessions_update frame, derived from
@@ -26,7 +26,7 @@ import (
 var sessionsUpdateMsg = marshalSessionsUpdate()
 
 func marshalSessionsUpdate() []byte {
-	data, err := json.Marshal(node.ServerMsg{Type: "sessions_update"})
+	data, err := json.Marshal(wsproto.NewSessionsUpdate())
 	if err != nil {
 		panic("server: marshal sessions_update frame: " + err.Error())
 	}
@@ -142,14 +142,14 @@ func (h *Hub) marshalBroadcastAuth(v any) {
 // so the final state must also reach everyone — otherwise clients not subscribed
 // to this session would see a stale "running" dot in the sidebar forever.
 func (h *Hub) broadcastState(key, state, reason string) {
-	h.marshalBroadcastAuth(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
+	h.marshalBroadcastAuth(wsproto.NewSessionState(wsproto.SessionState{Key: key, State: state, Reason: reason}))
 }
 
 // BroadcastSessionReady sends a session_state "running" to ALL authenticated clients
 // so they can auto-subscribe. Unlike broadcastState, this is not limited to already-
 // subscribed clients — needed for new sessions where nobody is subscribed yet.
 func (h *Hub) BroadcastSessionReady(key string) {
-	h.marshalBroadcastAuth(node.ServerMsg{Type: "session_state", Key: key, State: "running"})
+	h.marshalBroadcastAuth(wsproto.NewSessionState(wsproto.SessionState{Key: key, State: "running"}))
 }
 
 // BroadcastSessionsUpdate debounces notifications: resets a 50ms timer on each
@@ -227,47 +227,19 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 	h.broadcastToAuthenticated(data)
 }
 
-// cronRunStartedMsg / cronRunEndedMsg are the cron-run-history WS payloads.
-// Result text is not carried inline; clients fetch it via
-// /api/cron/jobs/<id>/runs/<runID> when needed.
-type cronRunStartedMsg struct {
-	Type      string `json:"type"`
-	JobID     string `json:"job_id"`
-	RunID     string `json:"run_id"`
-	StartedAt int64  `json:"started_at"`
-	Trigger   string `json:"trigger,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	Fresh     bool   `json:"fresh,omitempty"`
-}
-
-type cronRunEndedMsg struct {
-	Type       string `json:"type"`
-	JobID      string `json:"job_id"`
-	RunID      string `json:"run_id"`
-	State      string `json:"state"`
-	StartedAt  int64  `json:"started_at"`
-	EndedAt    int64  `json:"ended_at"`
-	DurationMS int64  `json:"duration_ms,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
-	ErrorClass string `json:"error_class,omitempty"`
-	ErrorMsg   string `json:"error_msg,omitempty"`
-	Trigger    string `json:"trigger,omitempty"`
-}
-
 // BroadcastCronRunStarted emits cron_run_started to authenticated clients.
 // Called from the cron scheduler's onRunStarted hook (set in dashboard.go).
 func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, trigger, sessionID string, fresh bool) {
 	// jobID / runID come from cron.generateHexID; sanitizeHexIDForBroadcast
 	// skips SanitizeForLog's allocating slow path when the hex shape holds.
-	h.marshalBroadcastAuth(cronRunStartedMsg{
-		Type:      "cron_run_started",
+	h.marshalBroadcastAuth(wsproto.NewCronRunStarted(wsproto.CronRunStarted{
 		JobID:     sanitizeHexIDForBroadcast(jobID, 64),
 		RunID:     sanitizeHexIDForBroadcast(runID, 64),
 		StartedAt: startedAt.UnixMilli(),
 		Trigger:   sanitizeTriggerForBroadcast(trigger),
 		SessionID: sanitizeSessionIDForBroadcast(sessionID),
 		Fresh:     fresh,
-	})
+	}))
 }
 
 // BroadcastCronRunEnded emits cron_run_ended for every terminal state
@@ -278,8 +250,7 @@ func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, 
 func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, endedAt time.Time, durationMS int64, sessionID, errClass, errMsg, trigger string) {
 	// errClass/trigger are typed enums today; sanitising anyway shields a future
 	// path that derives them from external config from payload injection.
-	h.marshalBroadcastAuth(cronRunEndedMsg{
-		Type:       "cron_run_ended",
+	h.marshalBroadcastAuth(wsproto.NewCronRunEnded(wsproto.CronRunEnded{
 		JobID:      sanitizeHexIDForBroadcast(jobID, 64),
 		RunID:      sanitizeHexIDForBroadcast(runID, 64),
 		State:      state,
@@ -290,7 +261,7 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 		ErrorClass: osutil.SanitizeForLog(errClass, 64),
 		ErrorMsg:   errMsg,
 		Trigger:    sanitizeTriggerForBroadcast(trigger),
-	})
+	}))
 }
 
 // broadcastSessionSystemEvent pushes a synthetic `system`-type event frame to
@@ -311,7 +282,7 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 			Type:    "system",
 			Summary: summary,
 		}
-		return node.ServerMsg{Type: "event", Key: key, Event: &ev}
+		return wsproto.NewEvent(wsproto.Event{Key: key, Event: &ev})
 	})
 }
 
@@ -332,54 +303,29 @@ func (h *Hub) LegacySendInvokes() int64 {
 	return h.legacySendInvokes.Load()
 }
 
-// daemonRunStartedMsg / daemonRunEndedMsg are the sysession WS payloads
-// (docs/rfc/system-session.md §9.4). They deliberately carry NO ErrorMsg:
-// daemon Runner errors can echo user-prompt fragments, and broadcasting that
-// to every authenticated dashboard would be cross-tenant leakage. Server-side
-// slog still carries the full error.
-type daemonRunStartedMsg struct {
-	Type      string `json:"type"`
-	Name      string `json:"name"`
-	RunID     string `json:"run_id"`
-	Trigger   string `json:"trigger,omitempty"`
-	StartedAt int64  `json:"started_at"`
-}
-
-type daemonRunEndedMsg struct {
-	Type       string `json:"type"`
-	Name       string `json:"name"`
-	RunID      string `json:"run_id"`
-	State      string `json:"state"`
-	DurationMS int64  `json:"duration_ms,omitempty"`
-	ErrorClass string `json:"error_class,omitempty"`
-	Trigger    string `json:"trigger,omitempty"`
-}
-
 // BroadcastDaemonRunStarted emits daemon_run_started. name / runID / trigger
 // are compiled-in enums today; sanitising at the broadcast boundary is
 // defence-in-depth against a future config-derived caller.
 func (h *Hub) BroadcastDaemonRunStarted(name, runID, trigger string, startedAt time.Time) {
-	h.marshalBroadcastAuth(daemonRunStartedMsg{
-		Type:      "daemon_run_started",
+	h.marshalBroadcastAuth(wsproto.NewDaemonRunStarted(wsproto.DaemonRunStarted{
 		Name:      osutil.SanitizeForLog(name, 64),
 		RunID:     sanitizeHexIDForBroadcast(runID, 64),
 		Trigger:   osutil.SanitizeForLog(trigger, 32),
 		StartedAt: startedAt.UnixMilli(),
-	})
+	}))
 }
 
 // BroadcastDaemonRunEnded emits daemon_run_ended.  ErrorMsg is
 // intentionally absent — see daemonRunEndedMsg above.
 func (h *Hub) BroadcastDaemonRunEnded(name, runID, state, errClass, trigger string, durationMS int64) {
-	h.marshalBroadcastAuth(daemonRunEndedMsg{
-		Type:       "daemon_run_ended",
+	h.marshalBroadcastAuth(wsproto.NewDaemonRunEnded(wsproto.DaemonRunEnded{
 		Name:       osutil.SanitizeForLog(name, 64),
 		RunID:      sanitizeHexIDForBroadcast(runID, 64),
 		State:      osutil.SanitizeForLog(state, 32),
 		DurationMS: durationMS,
 		ErrorClass: osutil.SanitizeForLog(errClass, 64),
 		Trigger:    osutil.SanitizeForLog(trigger, 32),
-	})
+	}))
 }
 
 // sanitizeHexIDForBroadcast returns id unchanged when it matches the

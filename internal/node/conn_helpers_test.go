@@ -1,6 +1,7 @@
 package node
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 )
@@ -16,6 +17,20 @@ type mockSink struct {
 }
 
 func (m *mockSink) SendJSON(v any) {
+	// Normalise every frame into the legacy ServerMsg decode view: production
+	// code sends per-type wsproto frames (#2535), and the assertions here
+	// type-assert `.(ServerMsg)` — round-tripping through JSON keeps them
+	// working against whatever struct the sender used, exactly like the
+	// browser's JSON.parse does.
+	if data, err := json.Marshal(v); err == nil {
+		var msg ServerMsg
+		if json.Unmarshal(data, &msg) == nil && msg.Type != "" {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			m.jsonMsgs = append(m.jsonMsgs, msg)
+			return
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.jsonMsgs = append(m.jsonMsgs, v)

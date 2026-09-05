@@ -20,6 +20,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // wsAuthRetryAfterSeconds is the advisory "try again in N seconds" value in
@@ -220,11 +221,11 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	if h.wsAuthLimiter != nil && !h.wsAuthLimiter(c.remoteIP) {
 		// Advisory RetryAfter matches the HTTP /api/auth/login 429 branch so WS
 		// and HTTP lockouts surface identical countdowns.
-		c.SendJSON(node.ServerMsg{
-			Type:       "auth_fail",
+		c.SendJSON(wsproto.NewAuthFail(wsproto.AuthFail{
+
 			Error:      "too many attempts",
 			RetryAfter: wsAuthRetryAfterSeconds,
-		})
+		}))
 		// Rate-limited auth_fail counts toward the blended auth_fail metric plus
 		// the dedicated rate-limited split so operators can tell a looping client
 		// from a credential spray pacing under the limiter.
@@ -236,7 +237,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	// do not touch msg.Token or run the ConstantTimeCompare so the
 	// cookie-authed and token-authed paths are cleanly separated.
 	if c.authenticated.Load() {
-		c.SendRaw([]byte(wsAuthOkMsg))
+		c.SendRaw([]byte(wsproto.RawAuthOK))
 		return
 	}
 	// Pre-hash both sides to normalize length — subtle.ConstantTimeCompare
@@ -270,7 +271,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 				// newOwner is at the per-owner ceiling; rekeyOwnerSlot left the
 				// slot on oldOwner. Refuse: owner stays oldOwner, closing the
 				// conn unwinds the pumps which unregister against oldOwner.
-				c.SendRaw([]byte(wsAuthFailInvalidMsg))
+				c.SendRaw([]byte(wsproto.RawAuthFailInvalid))
 				serverMetrics.WSAuthFail()
 				if c.conn != nil {
 					_ = c.conn.Close()
@@ -283,9 +284,9 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		// (#1409). The Store above must precede the mirror write so a concurrent
 		// broadcast that sees the mirror entry also sees authenticated==true.
 		h.markAuthenticated(c)
-		c.SendRaw([]byte(wsAuthOkMsg))
+		c.SendRaw([]byte(wsproto.RawAuthOK))
 	} else {
-		c.SendRaw([]byte(wsAuthFailInvalidMsg))
+		c.SendRaw([]byte(wsproto.RawAuthFailInvalid))
 		// The dedicated invalid-token split distinguishes credential spray from
 		// throttling storms.
 		serverMetrics.WSAuthFail()

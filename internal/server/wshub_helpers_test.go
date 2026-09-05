@@ -7,6 +7,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // TestCapHistoryBatch locks in R68-PERF-H1: eventPushLoop must truncate
@@ -99,21 +100,24 @@ func repeatByte(b byte, n int) string {
 	return string(out)
 }
 
-// TestWSPreMarshalledFrames locks the byte-for-byte contract between
-// wshub.go's pre-encoded error frames and the JSON output that the
+// TestWSPreMarshalledFrames locks the byte-for-byte contract between the
+// wsproto pre-encoded frames the hub sends raw and the JSON output the
 // equivalent SendJSON(node.ServerMsg{...}) call would produce. Field
-// reordering or omitempty changes in node.ServerMsg would silently
+// reordering or omitempty changes in either struct family would silently
 // break older clients that rely on a specific JSON shape, so any drift
 // must surface here. R229-PERF-4.
 func TestWSPreMarshalledFrames(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		got  string // R241-SEC-13: now a const string; SendRaw call sites convert via []byte(...)
+		got  string // SendRaw call sites convert via []byte(...)
 		msg  node.ServerMsg
 	}{
-		{"not authenticated", wsErrNotAuthMsg, node.ServerMsg{Type: "error", Error: "not authenticated"}},
-		{"rate limited", wsErrRateLimitedMsg, node.ServerMsg{Type: "error", Error: "rate limited"}},
+		{"not authenticated", wsproto.RawErrNotAuth, node.ServerMsg{Type: "error", Error: "not authenticated"}},
+		{"rate limited", wsproto.RawErrRateLimited, node.ServerMsg{Type: "error", Error: "rate limited"}},
+		{"auth ok", wsproto.RawAuthOK, node.ServerMsg{Type: "auth_ok"}},
+		{"pong", wsproto.RawPong, node.ServerMsg{Type: "pong"}},
+		{"auth fail invalid", wsproto.RawAuthFailInvalid, node.ServerMsg{Type: "auth_fail", Error: "invalid token"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -172,7 +172,7 @@ func TestServerMsg_InitialFlagOnlyOnOpeningFrames(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		file string
-		// wantInitial: every `Type: "history"` construction in this file is an
+		// wantInitial: every wsproto.NewHistory construction in this file is an
 		// opening frame and must carry Initial: true. Otherwise none may.
 		wantInitial bool
 	}{
@@ -187,22 +187,35 @@ func TestServerMsg_InitialFlagOnlyOnOpeningFrames(t *testing.T) {
 			t.Fatalf("read %s: %v", tc.file, err)
 		}
 		found := 0
-		for i, line := range strings.Split(string(src), "\n") {
-			if !strings.Contains(line, `Type: "history"`) {
-				continue
+		text := string(src)
+		for idx := strings.Index(text, "wsproto.NewHistory("); idx >= 0; idx = strings.Index(text, "wsproto.NewHistory(") {
+			// Scan the balanced construction block (frames span lines).
+			depth, end := 0, idx
+			for ; end < len(text); end++ {
+				switch text[end] {
+				case '(':
+					depth++
+				case ')':
+					depth--
+				}
+				if depth == 0 && text[end] == ')' {
+					break
+				}
 			}
+			block := text[idx:end]
 			found++
-			has := strings.Contains(line, "Initial: true")
+			has := strings.Contains(block, "Initial: true")
 			if has != tc.wantInitial {
-				t.Errorf("%s:%d: history frame Initial=%v, want %v\n  %s",
-					tc.file, i+1, has, tc.wantInitial, strings.TrimSpace(line))
+				t.Errorf("%s: history frame Initial=%v, want %v\n  %s",
+					tc.file, has, tc.wantInitial, strings.TrimSpace(block))
 			}
+			text = text[end:]
 		}
 		// Without this the loop is vacuously green if the emitter is renamed
-		// or moved (e.g. `Type: historyType`) — the test would then pin
-		// nothing. Mirrors internal/node/initial_frame_contract_test.go.
+		// or moved — the test would then pin nothing. Mirrors
+		// internal/node/initial_frame_contract_test.go.
 		if found == 0 {
-			t.Errorf("%s: expected at least one `Type: \"history\"` frame to pin, found none — did the emitter move?", tc.file)
+			t.Errorf("%s: expected at least one wsproto.NewHistory frame to pin, found none — did the emitter move?", tc.file)
 		}
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // recvRaw drains one raw frame from a captured client's send channel.
@@ -33,14 +35,14 @@ func TestMarshalBroadcastAuth_FansOutToAllAuthenticated(t *testing.T) {
 	registerSub(hub, c1, "")
 	registerSub(hub, c2, "")
 
-	hub.marshalBroadcastAuth(cronRunStartedMsg{Type: "cron_run_started", JobID: "abc", RunID: "def"})
+	hub.marshalBroadcastAuth(wsproto.NewCronRunStarted(wsproto.CronRunStarted{JobID: "abc", RunID: "def"}))
 
 	for i, c := range []*wsClient{c1, c2} {
 		data, ok := recvRaw(t, c)
 		if !ok {
 			t.Fatalf("client %d received no frame", i)
 		}
-		var msg cronRunStartedMsg
+		var msg wsproto.CronRunStarted
 		if err := json.Unmarshal(data, &msg); err != nil {
 			t.Fatalf("client %d unmarshal: %v", i, err)
 		}
@@ -128,7 +130,7 @@ func TestMarshalBroadcastAuth_WithAuthClient_Delivers(t *testing.T) {
 	if !ok {
 		t.Fatal("authenticated client received no frame")
 	}
-	var msg cronRunStartedMsg
+	var msg wsproto.CronRunStarted
 	if err := json.Unmarshal(data, &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

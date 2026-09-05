@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/wsproto"
+
 	"github.com/gorilla/websocket"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -387,9 +389,9 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 			if err != nil {
 				return
 			}
-			cl.SendJSON(ServerMsg{Type: "subscribed", Key: key, Node: c.id})
+			cl.SendJSON(wsproto.NewSubscribed(wsproto.Subscribed{Key: key, Node: c.id}))
 			if len(entries) > 0 {
-				cl.SendJSON(ServerMsg{Type: "history", Key: key, Node: c.id, Events: entries, Initial: true})
+				cl.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Node: c.id, Events: entries, Initial: true}))
 			}
 		}()
 	} else {
@@ -419,7 +421,7 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 				return
 			}
 			if len(entries) > 0 {
-				cl.SendJSON(ServerMsg{Type: "history", Key: key, Node: c.id, Events: entries, Initial: true})
+				cl.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Node: c.id, Events: entries, Initial: true}))
 			}
 		}()
 	}
@@ -449,7 +451,7 @@ func (c *ReverseConn) Unsubscribe(cl EventSink, key string) {
 			slog.Debug("reverseconn: unsubscribe write failed", "node", c.id, "key", key, "err", err)
 		}
 	}
-	cl.SendJSON(ServerMsg{Type: "unsubscribed", Key: key, Node: c.id})
+	cl.SendJSON(wsproto.NewUnsubscribed(wsproto.Unsubscribed{Key: key, Node: c.id}))
 }
 
 func (c *ReverseConn) RemoveClient(cl EventSink) {
@@ -475,7 +477,7 @@ var subSnapPool = sync.Pool{
 
 // broadcastToSubs snapshots subscribers for key, marshals out, and sends to all.
 // If deleteKey is true, the key is removed from the subscription map.
-func (c *ReverseConn) broadcastToSubs(key string, out ServerMsg, deleteKey bool) {
+func (c *ReverseConn) broadcastToSubs(key string, out any, deleteKey bool) {
 	c.subMu.Lock()
 	subs := c.subs[key]
 	snapPtr := subSnapPool.Get().(*[]EventSink)
@@ -568,7 +570,7 @@ func (c *ReverseConn) readLoop() {
 			}
 
 		case "event":
-			c.broadcastToSubs(msg.Key, ServerMsg{Type: "event", Key: msg.Key, Event: msg.Event, Node: c.id}, false)
+			c.broadcastToSubs(msg.Key, wsproto.NewEvent(wsproto.Event{Key: msg.Key, Event: msg.Event, Node: c.id}), false)
 
 		case "events":
 			// Keep the tail (most recent) when capping.
@@ -576,16 +578,16 @@ func (c *ReverseConn) readLoop() {
 			if len(events) > maxPushedHistoryEvents {
 				events = events[len(events)-maxPushedHistoryEvents:]
 			}
-			c.broadcastToSubs(msg.Key, ServerMsg{Type: "history", Key: msg.Key, Events: events, Node: c.id}, false)
+			c.broadcastToSubs(msg.Key, wsproto.NewHistory(wsproto.History{Key: msg.Key, Events: events, Node: c.id}), false)
 
 		case "session_state":
-			c.broadcastToSubs(msg.Key, ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Reason: truncateLabelUTF8(msg.Reason, maxPushedNodeStringBytes), Node: c.id}, false)
+			c.broadcastToSubs(msg.Key, wsproto.NewSessionState(wsproto.SessionState{Key: msg.Key, State: msg.State, Reason: truncateLabelUTF8(msg.Reason, maxPushedNodeStringBytes), Node: c.id}), false)
 
 		case "subscribed":
-			c.broadcastToSubs(msg.Key, ServerMsg{Type: "subscribed", Key: msg.Key, Node: c.id}, false)
+			c.broadcastToSubs(msg.Key, wsproto.NewSubscribed(wsproto.Subscribed{Key: msg.Key, Node: c.id}), false)
 
 		case "subscribe_error":
-			c.broadcastToSubs(msg.Key, ServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: truncateLabelUTF8(msg.Error, maxPushedNodeStringBytes)}, true)
+			c.broadcastToSubs(msg.Key, wsproto.NewError(wsproto.Error{Key: msg.Key, Node: c.id, Error: truncateLabelUTF8(msg.Error, maxPushedNodeStringBytes)}), true)
 		}
 	}
 }

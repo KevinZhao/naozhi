@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/wsproto"
+
 	"github.com/gorilla/websocket"
 	"golang.org/x/time/rate"
 
@@ -262,7 +264,7 @@ func (c *wsClient) readPump() {
 		}
 
 		switch msg.Type {
-		case "auth":
+		case string(wsproto.TypeAuth):
 			if c.authAttempts.Add(1) > 3 {
 				return // closes connection via defer
 			}
@@ -275,57 +277,57 @@ func (c *wsClient) readPump() {
 					return
 				}
 			}
-		case "subscribe":
+		case string(wsproto.TypeSubscribe):
 			if !c.authenticated.Load() {
 				// Pre-marshalled frame avoids reflect.Marshal on the rejection
 				// path; byte-equality is locked by TestWSPreMarshalledFrames.
-				c.SendRaw([]byte(wsErrNotAuthMsg))
+				c.SendRaw([]byte(wsproto.RawErrNotAuth))
 				continue
 			}
 			c.hub.handleSubscribe(c, msg)
-		case "unsubscribe":
+		case string(wsproto.TypeUnsubscribe):
 			if !c.authenticated.Load() {
 				continue
 			}
 			c.hub.handleUnsubscribe(c, msg)
-		case "send":
+		case string(wsproto.TypeSend):
 			if !c.authenticated.Load() {
-				c.SendRaw([]byte(wsErrNotAuthMsg))
+				c.SendRaw([]byte(wsproto.RawErrNotAuth))
 				continue
 			}
 			if !c.sendLimiter.Allow() {
-				c.SendRaw([]byte(wsErrRateLimitedMsg))
+				c.SendRaw([]byte(wsproto.RawErrRateLimited))
 				continue
 			}
 			// Per-user (uploadOwner) ceiling so N tabs cannot multiply the burst
 			// budget by N; consulted only after the per-conn limiter admits the
 			// call, preserving single-tab burst semantics (#888).
 			if !c.hub.allowSendForOwner(c.uploadOwnerKey()) {
-				c.SendRaw([]byte(wsErrRateLimitedMsg))
+				c.SendRaw([]byte(wsproto.RawErrRateLimited))
 				continue
 			}
 			c.hub.handleSend(c, msg)
-		case "interrupt":
+		case string(wsproto.TypeInterrupt):
 			if !c.authenticated.Load() {
-				c.SendRaw([]byte(wsErrNotAuthMsg))
+				c.SendRaw([]byte(wsproto.RawErrNotAuth))
 				continue
 			}
 			if !c.interruptLimiter.Allow() {
-				c.SendRaw([]byte(wsErrRateLimitedMsg))
+				c.SendRaw([]byte(wsproto.RawErrRateLimited))
 				continue
 			}
 			c.hub.handleInterrupt(c, msg)
-		case "ping":
+		case string(wsproto.TypePing):
 			// Reuse sendLimiter so a ping flood cannot amplify channel sends;
 			// applied unconditionally so unauthenticated connections also pay
 			// before wsAuthTimeout evicts them.
 			if !c.sendLimiter.Allow() {
 				continue
 			}
-			c.SendRaw([]byte(wsPongMsg))
-		case "agent_subscribe":
+			c.SendRaw([]byte(wsproto.RawPong))
+		case string(wsproto.TypeAgentSubscribe):
 			if !c.authenticated.Load() {
-				c.SendRaw([]byte(wsErrNotAuthMsg))
+				c.SendRaw([]byte(wsproto.RawErrNotAuth))
 				continue
 			}
 			// Reuse sendLimiter's budget — a client cannot spin subscribe
@@ -334,7 +336,7 @@ func (c *wsClient) readPump() {
 				continue
 			}
 			c.hub.handleAgentSubscribe(c, msg)
-		case "agent_unsubscribe":
+		case string(wsproto.TypeAgentUnsubscribe):
 			if !c.authenticated.Load() {
 				continue
 			}

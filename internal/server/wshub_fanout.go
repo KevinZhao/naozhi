@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // broadcastSendError pushes a `send_error` frame to every dashboard subscribed
@@ -26,7 +26,7 @@ func (h *Hub) broadcastSendError(key, errMsg string) {
 		return
 	}
 	h.fanOutToSubscribers(key, func() any {
-		return node.ServerMsg{Type: "send_error", Key: key, Error: errMsg}
+		return wsproto.NewSendError(wsproto.SendError{Key: key, Error: errMsg})
 	})
 }
 

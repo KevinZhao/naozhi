@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // wsFileNotFoundMsg is the WS-path TakeAll miss label: the HTTP sentinel text
@@ -43,7 +44,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 
 	key := msg.Key
 	if key == "" {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "key is required"})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "key is required"}))
 		return
 	}
 	// Same trust-boundary gate every other ws path (subscribe / unsubscribe /
@@ -51,22 +52,22 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	// MaxSessionKeyBytes before the key reaches the dispatch queue, slog attrs,
 	// or sessions.json.
 	if err := session.ValidateSessionKey(key); err != nil {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "invalid key"})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "invalid key"}))
 		return
 	}
 	if msg.Text == "" && len(msg.FileIDs) == 0 {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text or files required"})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "text or files required"}))
 		return
 	}
 	// Per-field byte cap. wsMaxMessageSize bounds the whole frame, but queued
 	// max-size payloads get concatenated by CoalesceMessages into a single
 	// stdin write; maxCoalescedTextBytes and maxStdinLineBytes backstop that.
 	if len(msg.Text) > maxWSSendTextBytes {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text too long"})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "text too long"}))
 		return
 	}
 	if len(msg.FileIDs) > maxFilesPerSend {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: errTooManyFiles})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: errTooManyFiles}))
 		return
 	}
 
@@ -78,14 +79,14 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	var images []cli.Attachment
 	if len(msg.FileIDs) > 0 {
 		if h.uploadStore == nil {
-			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "uploads not configured"})
+			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "uploads not configured"}))
 			return
 		}
 		taken, err := h.uploadStore.TakeAll(msg.FileIDs, c.uploadOwnerKey())
 		if err != nil {
 			// Never echo fids (user-controlled) back in the error; log internally.
 			slog.Debug("ws send: one or more file_ids not found or expired", "count", len(msg.FileIDs))
-			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: wsFileNotFoundMsg})
+			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: wsFileNotFoundMsg}))
 			return
 		}
 		images = append(images, taken...)
@@ -102,12 +103,12 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		if err != nil {
 			slog.Warn("ws attachment workspace validation failed",
 				"key", key, "err", err)
-			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "invalid workspace"})
+			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "invalid workspace"}))
 			return
 		}
 		resolved, rb, perr := persistFileRefs(validatedWS, images, key, c.uploadOwnerKey())
 		if perr != nil {
-			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: perr.msg})
+			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: perr.msg}))
 			return
 		}
 		images = resolved
@@ -126,13 +127,13 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	}, func(_ error, errMsg string) {
 		// Originator-only channel: informational outcomes (/urgent abort,
 		// reset) are reported here on purpose — the sender wants to know.
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Error: errMsg})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: "error", Key: capturedKey, Error: errMsg}))
 	})
 	if err != nil {
 		if wsRollback != nil {
 			wsRollback()
 		}
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: asyncErrorMessage(err)})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: asyncErrorMessage(err)}))
 		return
 	}
 	// sessionSend accepted (or reset-processed) the request — files stay on
@@ -144,22 +145,22 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	if reset {
 		// HTTP path reports "reset"; keep the WS path in sync so clients can
 		// distinguish reset from accepted/queued turns.
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "reset", Key: key})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "reset", Key: key}))
 		return
 	}
-	c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: string(status), Key: key})
+	c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: string(status), Key: key}))
 }
 
 func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 	key := msg.Key
 	if key == "" {
-		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Error: "key is required"})
+		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: msg.ID, Status: "error", Error: "key is required"}))
 		return
 	}
 	// Same policy as handleSubscribe / HTTP handlers: reject C1 / bidi /
 	// multi-KB keys before they reach router lookup + slog attrs.
 	if err := session.ValidateSessionKey(key); err != nil {
-		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Error: "invalid key"})
+		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: msg.ID, Status: "error", Error: "invalid key"}))
 		return
 	}
 
@@ -174,27 +175,27 @@ func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 	switch h.router.InterruptSessionSafe(key) {
 	case session.InterruptSent:
 		slog.Info("session interrupted via dashboard", "key", key)
-		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "ok", Key: key})
+		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: msg.ID, Status: "ok", Key: key}))
 	case session.InterruptNoSession:
-		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "not_running", Key: key})
+		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: msg.ID, Status: "not_running", Key: key}))
 	default:
 		// control_request returned a non-terminal outcome AND the SIGINT
 		// fallback also failed (e.g. session evicted mid-call). Treat as
 		// not_running so the dashboard re-queries state.
-		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "not_running", Key: key})
+		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: msg.ID, Status: "not_running", Key: key}))
 	}
 }
 
 func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 	if !isValidNodeID(msg.Node) {
-		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"})
+		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"}))
 		return
 	}
 	nodeID := msg.Node
 	conn, ok := h.lookupNode(nodeID)
 	if !ok {
 		slog.Debug("ws interrupt: unknown node", "node", nodeID)
-		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"})
+		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"}))
 		return
 	}
 	// Only a single proxy RPC is forwarded here, so depend on the narrow
@@ -203,7 +204,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 
 	release, shuttingDown := h.TrackSend()
 	if shuttingDown {
-		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Node: nodeID, Error: "server shutting down"})
+		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: msg.ID, Status: "error", Key: msg.Key, Node: nodeID, Error: "server shutting down"}))
 		return
 	}
 	go func() {
@@ -223,9 +224,9 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 				slog.Debug("remote ws interrupt goroutine panic: stack",
 					"node", nodeID, "key", capturedKey,
 					"stack", string(debug.Stack()))
-				c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID,
+				c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: capturedID,
 					Status: "error", Key: capturedKey, Node: nodeID,
-					Error: "internal error"})
+					Error: "internal error"}))
 			}
 		}()
 		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
@@ -242,7 +243,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 				// why the action is rejected instead of burying the cause.
 				errMsg = "remote node needs upgrade to support this action"
 			}
-			c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: errMsg})
+			c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: errMsg}))
 			// interrupt_ack reaches only the originating tab; fan the failure out
 			// to every dashboard subscribed to this remote session. The summary
 			// is re-sanitised because it is broadcast verbatim (#433).
@@ -255,26 +256,26 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		} else {
 			slog.Info("remote session interrupted via dashboard", "node", nodeID, "key", capturedKey)
 		}
-		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID, Status: status, Key: capturedKey, Node: nodeID})
+		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: capturedID, Status: status, Key: capturedKey, Node: nodeID}))
 	}()
 }
 
 func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	if !isValidNodeID(msg.Node) {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "unknown node"})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "unknown node"}))
 		return
 	}
 	// Syntactic workspace validation on the primary: the remote's own
 	// EvalSymlinks check uses the remote's defaults, and an unconfigured
 	// defaultWorkspace there would pass any absolute path (e.g. `/etc`).
 	if err := validateRemoteWorkspace(msg.Workspace); err != nil {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid workspace"})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid workspace"}))
 		return
 	}
 	// Same per-field text cap as handleSend; otherwise a remote-targeted send
 	// bypasses the local cap and amplifies via coalesce at the remote shim.
 	if len(msg.Text) > maxWSSendTextBytes {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "text too long"})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: "text too long"}))
 		return
 	}
 	nodeID := msg.Node
@@ -282,7 +283,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	// a 4 KB / control-char bag into the send_ack error echo. Empty backend
 	// flows through to the router default.
 	if !isValidBackendID(msg.Backend) {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid backend id"})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid backend id"}))
 		return
 	}
 	// A session bound to a non-default access profile must not be dispatched
@@ -290,7 +291,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	// the remote would spawn on the wrong account. Fail loud before the RPC.
 	if err := gateRemoteAccessProfile(h.resolver, nodeID, msg.Key); err != nil {
 		slog.Debug("ws send: access-profile remote-dispatch rejected", "node", nodeID, "key", msg.Key, "err", err)
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()}))
 		return
 	}
 	nc, err := selectNodeForBackend(hubNodeLookup{h}, nodeID, msg.Backend)
@@ -298,7 +299,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		slog.Debug("ws send: backend route rejected", "node", nodeID, "backend", msg.Backend, "err", err)
 		// ErrNodeMissingCap / ErrUnknownBackend / ErrNodeNotConnected are
 		// surfaced verbatim: fixed constants (no host paths, no token bytes).
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()}))
 		return
 	}
 	if nc == nil {
@@ -306,7 +307,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		// so selectNodeForBackend should not return (nil, nil) here.
 		// Treat as unknown node to keep the existing 400-ish surface.
 		slog.Debug("ws send: unknown node", "node", nodeID)
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "unknown node"})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "unknown node"}))
 		return
 	}
 
@@ -316,7 +317,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	// and refuses a send that races Shutdown instead of slipping past clientWG.
 	release, shuttingDown := h.TrackSend()
 	if shuttingDown {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Node: nodeID, Error: "server shutting down"})
+		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Node: nodeID, Error: "server shutting down"}))
 		return
 	}
 	go func() {
@@ -335,9 +336,9 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 				slog.Debug("remote ws send goroutine panic: stack",
 					"node", nodeID, "key", capturedKey,
 					"stack", string(debug.Stack()))
-				c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID,
+				c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID,
 					Status: "error", Key: capturedKey, Node: nodeID,
-					Error: "internal error"})
+					Error: "internal error"}))
 			}
 		}()
 		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
@@ -349,13 +350,13 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 			// Do not surface the raw err: transport-level messages can leak
 			// internal host/port/auth details back to authenticated browser
 			// clients. Operators still see the detail in the slog above.
-			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed"})
+			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed"}))
 			// send_ack reaches only the originating tab; fan the failure out to
 			// every dashboard subscribed to this remote session (whose EventLog
 			// lives on the node). Summary is re-sanitised: broadcast verbatim (#433).
 			h.broadcastSessionSystemEvent(capturedKey, "发送失败："+osutil.SanitizeForLog(err.Error(), 512))
 		} else {
-			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "accepted", Key: capturedKey, Node: nodeID})
+			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: "accepted", Key: capturedKey, Node: nodeID}))
 			// Refresh the remote subscription so the connector re-creates
 			// its streamEvents goroutine if the previous one exited (e.g.
 			// process died between the last subscribe and this send).

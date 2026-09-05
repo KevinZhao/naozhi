@@ -14,8 +14,8 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // resubscribeMaxAttempts × resubscribeInterval (60s) is the wait budget for
@@ -55,16 +55,16 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []clievent
 	// entries (#1888); it never touches Time, so the fingerprint is unaffected.
 	if h.historyMarshalCache == nil {
 		// Hand-constructed test Hubs may skip the field; use the uncached path.
-		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: redactEntrySecrets(entries)})
+		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: redactEntrySecrets(entries)}))
 	}
 	// Single-subscriber fast path (#944): with one tab every notify advances
 	// lastTime so the cache always misses; skip the sync.Map + mutex round-trip.
 	// count != 1 (or counter unwired in tests) falls through to the cached path.
 	if h.singleSubscriber(key) {
-		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: redactEntrySecrets(entries)})
+		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: redactEntrySecrets(entries)}))
 	}
 	data, _, err := h.historyMarshalCache.getOrMarshal(key, lastTime, entries, func() ([]byte, error) {
-		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: redactEntrySecrets(entries)})
+		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: redactEntrySecrets(entries)}))
 	})
 	return data, err
 }
@@ -312,6 +312,6 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	if dropCache && h.historyMarshalCache != nil {
 		h.historyMarshalCache.drop(key)
 	}
-	c.SendJSON(node.ServerMsg{Type: "session_state", Key: key, State: "ready", Reason: "subscription_timeout"})
+	c.SendJSON(wsproto.NewSessionState(wsproto.SessionState{Key: key, State: "ready", Reason: "subscription_timeout"}))
 	return false, nil
 }

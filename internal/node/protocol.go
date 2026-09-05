@@ -4,9 +4,15 @@ import (
 	"encoding/json"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
-// ServerMsg is a message sent from the server to the WebSocket client.
+// ServerMsg is the legacy flat union of every browser WS frame. DECODE-ONLY
+// since #2535: construction goes through internal/wsproto's per-type New*
+// frames (wsproto's literal-ban test rejects new ServerMsg{Type: …}
+// literals); this type survives for the relay's client-side decode and for
+// tests that unmarshal frames. Removal comes with the {type,payload}
+// envelope phase.
 type ServerMsg struct {
 	Type   string                `json:"type"`             // auth_ok, auth_fail, subscribed, unsubscribed, history, event, send_ack, send_error, pong, error, agent_event, agent_meta, agent_done, agent_subscribe_rejected
 	Key    string                `json:"key,omitempty"`    // session key
@@ -43,14 +49,10 @@ type ServerMsg struct {
 	Initial bool `json:"initial,omitempty"`
 }
 
-// AgentMetaPatch carries aggregator counters pushed out-of-band so the
-// dashboard can refresh a banner row without re-rendering the agent view.
-type AgentMetaPatch struct {
-	LastTool   string `json:"last_tool,omitempty"`
-	LastDetail string `json:"last_detail,omitempty"`
-	ToolUses   int    `json:"tool_uses,omitempty"`
-	DurationMS int64  `json:"duration_ms,omitempty"`
-}
+// AgentMetaPatch aliases the wsproto definition — the browser protocol owns
+// the shape (#2535); this name survives for the decode-side consumers of
+// ServerMsg.
+type AgentMetaPatch = wsproto.AgentMetaPatch
 
 // ClientMsg is a message sent from the WebSocket client.
 type ClientMsg struct {
