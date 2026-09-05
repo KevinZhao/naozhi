@@ -528,6 +528,9 @@ func TestRunStore_ListSkipsCorruptEntries(t *testing.T) {
 // diskDecodeParallelThreshold == 16, so we need > 16 candidates to reach
 // decodeRunsParallel. We append 18 runs and make one unreadable.
 func TestRunStore_DecodeParallel_UnreadableCountedSeparately(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	if os.Getuid() == 0 {
 		t.Skip("running as root: chmod 0000 does not deny access")
 	}
@@ -615,6 +618,9 @@ func TestRunStore_ListBeforeCutoff(t *testing.T) {
 // Append once; final disk count must equal 50 (modulo trimming, so use a
 // generous keepCount). Run with -race to surface mutex bugs.
 func TestRunStore_ConcurrentAppendsSameJobAreSerialised(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 1000, 30*24*time.Hour)
 	jobID := mustGenerateID()
@@ -639,6 +645,9 @@ func TestRunStore_ConcurrentAppendsSameJobAreSerialised(t *testing.T) {
 // TestRunStore_TrimAllScansAllJobs — three jobs, each with five runs; one
 // of them has two stale entries. trimAll must touch only that job.
 func TestRunStore_TrimAllScansAllJobs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 10, 24*time.Hour)
 	s.enableTrimGC = false
@@ -736,6 +745,9 @@ func TestRunStore_MarshalRunPooledMatchesStdlib(t *testing.T) {
 // verify NOT all jobs were trimmed (early-exit path) — i.e. at least one
 // job retains its full pre-trim file count.
 func TestRunStore_TrimAllCtxCancelled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 10, 24*time.Hour)
 	s.enableTrimGC = false
@@ -835,6 +847,9 @@ func TestRunStore_RecentReturnsNewestFirst(t *testing.T) {
 // (200). An operator who raised retention above 200 previously could never
 // page the extra rows because the read side silently truncated at 200.
 func TestRunStore_ListHonoursConfiguredKeepCount(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	const keep = DefaultRunsKeepCount + 50 // 250 — above the old hardcoded clamp
 	s := newTestStore(t, keep, 30*24*time.Hour)

@@ -89,6 +89,9 @@ func (c *capturingLogger) String() string {
 // Running these tests in parallel with anything that also touches those
 // would produce races and flaky assertions.
 func TestConnector_CircuitBreakerTripsAndEmitsSingleWARN(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	origThreshold := circuitBreakerThreshold
 	origBreakerBackoff := circuitBreakerBackoff
 	circuitBreakerThreshold = 2
@@ -150,6 +153,9 @@ func TestConnector_CircuitBreakerTripsAndEmitsSingleWARN(t *testing.T) {
 // Running these tests in parallel with anything that also touches those
 // would produce races and flaky assertions.
 func TestConnector_CircuitBreakerResetsOnSuccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	origThreshold := circuitBreakerThreshold
 	origBreakerBackoff := circuitBreakerBackoff
 	origDrainBudget := handleConnDrainBudget

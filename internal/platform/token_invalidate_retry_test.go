@@ -82,6 +82,9 @@ func (s *scriptedPlat) MaxReplyLength() int                               { retu
 // upstream-not-yet-active token on attempt 2 still gets a 4th attempt
 // to land the freshly-propagated token. Issue #1339.
 func TestReplyWithRetry_TokenInvalidatedGrantsExtraRetry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	tokenErr := &fakeTokenErr{msg: "tenant token invalid", tokenInval: true}
 	transientErr := errors.New("upstream token-not-yet-active")
@@ -115,6 +118,9 @@ func TestReplyWithRetry_TokenInvalidatedGrantsExtraRetry(t *testing.T) {
 // Without this guard a misbehaving upstream returning IsTokenExpired
 // every call would loop indefinitely. Issue #1339.
 func TestReplyWithRetry_TokenInvalidatedExtraGrantedAtMostOnce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	tokenErr := &fakeTokenErr{msg: "tenant token invalid", tokenInval: true}
 	sp := &scriptedPlat{

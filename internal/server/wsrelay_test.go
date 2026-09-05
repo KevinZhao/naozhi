@@ -280,6 +280,9 @@ func TestWSRelay_Close(t *testing.T) {
 }
 
 func TestWSRelay_Reconnect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	mock := newMockRemoteWS("")
 	ts := httptest.NewServer(mock.handler)
 	defer ts.Close()

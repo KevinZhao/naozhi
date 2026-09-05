@@ -90,6 +90,9 @@ func TestResolveWorkspaces_FallbackDoesNotHoldLockDuringFSIO(t *testing.T) {
 // fix introduced a projRef snapshot built under the RLock; this exercises that
 // snapshot against concurrent writes.
 func TestResolveWorkspaces_ConcurrentWithWriters(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "real")

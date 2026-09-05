@@ -287,6 +287,9 @@ func TestUpdateApply_FlushOrderSourceGuard(t *testing.T) {
 // situation in between, the click must be refused rather than silently mean
 // something else — in the worst case, a second install over a staged binary.
 func TestUpdateApply_ConfirmActionMismatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	h, applied := applyTestHandlers(t, installFixture())
 
 	w := postApply(t, h, `{"confirm_action":"restart"}`)
@@ -299,6 +302,9 @@ func TestUpdateApply_ConfirmActionMismatch(t *testing.T) {
 }
 
 func TestUpdateApply_NothingToDo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	h, applied := applyTestHandlers(t, selfupdate.StatusFixture{Current: "v1.0.0"})
 
 	w := postApply(t, h, `{"confirm_action":"install"}`)
@@ -314,6 +320,9 @@ func TestUpdateApply_NothingToDo(t *testing.T) {
 // with no managed service is the real-world case: the binary is staged but only
 // a human can restart the process.
 func TestUpdateApply_BlockedPreflightStartsNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	h, applied := applyTestHandlers(t, selfupdate.StatusFixture{
 		Current: "v1.0.0", Latest: "v1.1.0", Staged: "v1.1.0",
 		Phase: selfupdate.PhaseStaged,
@@ -398,6 +407,9 @@ func TestUpdateApply_RateLimited(t *testing.T) {
 }
 
 func TestUpdateApply_InvalidBody(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	cases := []struct {
 		name string
 		body string

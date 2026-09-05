@@ -87,6 +87,9 @@ func TestHandleSend_AsyncFailureReachesSubscribers(t *testing.T) {
 // contract for the new frame: subscribers of the key get it, everyone else
 // stays silent, and empty args are a no-op.
 func TestBroadcastSendError_Scoping(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	hub, _ := newTestHub("tok")
 	t.Cleanup(hub.Shutdown)
 

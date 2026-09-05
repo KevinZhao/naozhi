@@ -22,6 +22,9 @@ import (
 // that never disappears (so waitSocketGoneForKey returns false), then asserts
 // the flag is NOT present afterwards.
 func TestFinishRemoveCleanup_DoesNotReinsertShimStuck(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	// Point the shim socket dir at a temp dir we control, then plant a file at
 	// the computed socket path so WaitSocketGone (a pure os.Stat poll) keeps
 	// finding it and times out after the 2s wait.

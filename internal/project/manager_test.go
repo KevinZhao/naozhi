@@ -1067,6 +1067,9 @@ func TestResolveWorkspaces_FallbackCacheInvalidatedOnScan(t *testing.T) {
 // asserts the binding is never lost. The -race detector also flags the
 // concurrent m.projects access if the locking ever regresses.
 func TestBindChat_ConcurrentScan_DoesNotDropBinding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	const iters = 200
 	for i := 0; i < iters; i++ {

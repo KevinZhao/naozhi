@@ -26,6 +26,9 @@ import (
 // loop collects the entire qualifying suffix rather than stopping at the first
 // match.
 func TestCacheGetBefore_NoEarlyExitOnFirstMatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 
 	const keepCount = 500

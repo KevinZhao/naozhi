@@ -63,6 +63,9 @@ func TestHandleClose_PidReuseReturns409(t *testing.T) {
 // injected ProcStartTime matches the request expectation, the handler signals
 // the process and returns 200. (#1670)
 func TestHandleClose_MatchingIdentitySucceeds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot start child: %v", err)

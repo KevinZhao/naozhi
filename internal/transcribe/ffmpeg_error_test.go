@@ -118,6 +118,9 @@ func itoa(n int) string {
 // "audio convert" error rather than the silent ("", nil) success the discarded
 // pcm.Close() used to produce.
 func TestStreamFromFFmpeg_ConvertErrorSurfaces(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	fakeFFmpeg(t, "", "Invalid data found when processing input", 1)
 
 	pcm, err := startPCMStream(context.Background(), []byte("not-real-audio"))

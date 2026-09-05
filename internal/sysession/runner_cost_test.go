@@ -65,6 +65,9 @@ func metricValue(t *testing.T, name string) int64 {
 }
 
 func TestRunner_Run_DecodesResultAndBooksCostToRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	r, ledger := fakeJSONRunner(t, fakeResultJSON)
 	ctx := withRunInfo(context.Background(), "auto-titler", "0123456789abcdef")
 	out, err := r.Run(ctx, "prompt")

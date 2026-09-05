@@ -17,6 +17,9 @@ import (
 // assert the externally-visible contract: identical newest-first results
 // regardless of the internal serial/parallel choice.
 func TestDiskListNewestFirst_SmallLimitOverLargeDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	// keepCount large enough that List won't clamp our small limit.
 	s := newTestStore(t, 500, 30*24*time.Hour)
