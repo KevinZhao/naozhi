@@ -6,7 +6,10 @@ package cron
 // counts as a lifecycle scalar, so ParentCtx (and the AllowNilRouter bool)
 // stay on SchedulerConfig. Pinned by deps_boundary_test.go.
 
-import "github.com/naozhi/naozhi/internal/runtelemetry"
+import (
+	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
+)
 
 // SchedulerDeps carries the injected components the cron Scheduler talks to.
 // All fields are optional (nil/empty = feature off) except Router, which is
@@ -30,4 +33,14 @@ type SchedulerDeps struct {
 	// never imports the AWS SDK. nil = such jobs terminate with
 	// ErrClassCronSandboxUnavailable instead of silently running locally.
 	Sandbox SandboxRunner
+	// Ledger receives one cost entry per run (local: session CostTotals
+	// delta; sandbox: receipt). nil = no ledger.
+	Ledger CostLedger
+}
+
+// CostLedger is the append-only sink cron writes run costs to; satisfied by
+// *costledger.Store, whose nil receiver reports Enabled()==false.
+type CostLedger interface {
+	Enabled() bool
+	Append(costledger.Entry) bool
 }

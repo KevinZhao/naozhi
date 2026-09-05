@@ -5,7 +5,10 @@
 // init() panics if the SessionStatus/InterruptOutcome ordinals diverge.
 package cron
 
-import "context"
+import (
+	"context"
+	"github.com/naozhi/naozhi/internal/costledger"
+)
 
 // AgentOpts is the cron-local view of session-spawn parameters — only the
 // subset cron's scheduler reads; the wireup adapter translates from
@@ -52,14 +55,19 @@ type Session interface {
 }
 
 // SendResult is the cron-local subset of cli.SendResult: Text (IM notify +
-// run history), SessionID (stub chain refresh) and CostUSD (per-run cost
-// for local runs, which have no SandboxMeta receipt to carry it, #2280).
+// run history) and SessionID (stub chain refresh). Cost is NOT carried here:
+// the CLI figure is a process-cumulative total, so cron reads the session's
+// monotonic CostTotals before and after the turn instead (docs/rfc/cost-ledger.md §5.3).
 type SendResult struct {
 	Text      string
 	SessionID string
-	// CostUSD is the CLI's cumulative total_cost_usd for the run (mirrors
-	// cli.SendResult.CostUSD); local cron runs persist it onto CronRun.
-	CostUSD float64
+}
+
+// CostReporter is the optional Session capability cron uses to attribute a
+// run's spend: the difference of two CostTotals snapshots taken around Send.
+// Sessions without it (test fakes) record zero cost.
+type CostReporter interface {
+	CostTotals() costledger.Totals
 }
 
 // InterruptOutcome mirrors session.InterruptOutcome value-for-value AND

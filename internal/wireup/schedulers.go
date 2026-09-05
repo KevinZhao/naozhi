@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
 
@@ -119,11 +120,21 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		AgentCommands: deps.Cfg.AgentCommands,
 		Telemetry:     deps.Telemetry,
 		Sandbox:       sandboxRunner,
+		Ledger:        deps.Router.CostLedger(),
 	})
 	if err := scheduler.Start(); err != nil {
 		return out, fmt.Errorf("start cron scheduler: %w", err)
 	}
 	out.Cron = scheduler
+	// A turn on a cron key that lands inside an in-flight run belongs to that
+	// run: cron writes its ledger entry, the session layer stays silent.
+	deps.Router.SetCostRunOwnership(func(key string) bool {
+		if !sessionkey.IsCronKey(key) {
+			return false
+		}
+		_, running := scheduler.CurrentRun(sessionkey.CronJobIDFromKey(key))
+		return running
+	})
 
 	// Recorded after a successful cron.Start so the audit step reflects a live
 	// scheduler; not in requiredBootSteps because sysession is degradable (#2314).

@@ -193,6 +193,9 @@ type Scheduler struct {
 	// transparently (tests / no-disk deployments).
 	runStore *runStore
 
+	// ledger is the cost ledger every terminal run writes one entry to; nil-safe.
+	ledger CostLedger
+
 	// sandboxPendingMu guards sandboxPendingIndex, independent of s.mu so the
 	// hot delete path never contends with job CRUD. RWMutex so the pure-read
 	// lookup (lookupSandboxPendingIndex) does not serialize against reads.
@@ -313,6 +316,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		stopCtx:               stopCtx,
 		stopCancel:            stopCancel,
 		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
+		ledger:                deps.Ledger,
 		sandboxPendingIndex:   make(map[string]string),
 		// Tests swap a fake via the withClock seam.
 		clock: defaultClock,

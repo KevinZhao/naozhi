@@ -7,6 +7,7 @@ package cron
 import (
 	"context"
 	"errors"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"log/slog"
 	"path/filepath"
 	"time"
@@ -413,7 +414,7 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 		sendBudget = minSendBudget
 	}
 
-	result, ok := s.execSend(execSendArgs{
+	result, costInc, ok := s.execSend(execSendArgs{
 		job: j, sess: sess, snap: snap, cleanText: cleanText,
 		sendBudget: sendBudget, spawnElapsed: spawnElapsed, jobTimeout: jobTimeout,
 		key: key, runID: runID, startedAt: startedAt, trigger: trigger,
@@ -424,7 +425,7 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 		return
 	}
 
-	s.execFinishSuccess(j, snap, key, result, runID, startedAt, trigger, lg, notifyTo, finalizer)
+	s.execFinishSuccess(j, snap, key, result, costInc, runID, startedAt, trigger, lg, notifyTo, finalizer)
 }
 
 // execAcquireSlot is the CAS admission gate of a cron run.
@@ -675,9 +676,13 @@ type execSendArgs struct {
 //
 // CTX OWNERSHIP: sendCtx is created here, independent of the spawn ctx, and never
 // escapes; sendWithWatchdog cancels it at Send completion, the defer is the safety net.
-func (s *Scheduler) execSend(a execSendArgs) (result SendResult, ok bool) {
+func (s *Scheduler) execSend(a execSendArgs) (result SendResult, costInc costledger.Increment, ok bool) {
 	sendCtx, sendCancel := context.WithTimeout(s.stopCtx, a.sendBudget)
 	defer sendCancel()
+	// Cost is attributed by differencing the session's monotonic totals
+	// around the turn; read through the held Session (the router may Reset
+	// the key before finishRun runs).
+	before := costTotalsOf(a.sess)
 	// Structured signal when spawn already consumed >spawnElapsedWarnRatio of
 	// jobTimeout: the wall-clock doubling is intentional but operators of 300s+
 	// jobs need an event to alert on (counter + slog pair).
@@ -701,20 +706,30 @@ func (s *Scheduler) execSend(a execSendArgs) (result SendResult, ok bool) {
 	// abortCh AFTER cancelling sendCtx) so a refactor here cannot let the next
 	// Reset race the in-flight interrupt write; see its godoc.
 	result, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, a.sess, a.cleanText)
+	costInc = costTotalsOf(a.sess).Sub(before)
 	if err != nil {
-		s.execSendError(a, abort, err)
-		return SendResult{}, false
+		s.execSendError(a, abort, err, costInc)
+		return SendResult{}, costledger.Increment{}, false
 	}
 	if result.SessionID != "" {
 		a.inflight.setSessionID(result.SessionID)
 	}
-	return result, true
+	return result, costInc, true
+}
+
+// costTotalsOf reads the session's spend snapshot; sessions without the
+// capability report zero.
+func costTotalsOf(sess Session) costledger.Totals {
+	if cr, ok := sess.(CostReporter); ok {
+		return cr.CostTotals()
+	}
+	return costledger.Totals{}
 }
 
 // execSendError terminates a run whose Send failed: classify, log, reap the
 // fresh session while the CAS gate is held, finishRun, notify, and refresh
 // the sidebar stub.
-func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error) {
+func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, costInc costledger.Increment) {
 	j, snap, key := a.job, a.snap, a.key
 	runID, startedAt, trigger := a.runID, a.startedAt, a.trigger
 	lg, notifyTo, finalizer, stubRefresh := a.lg, a.notifyTo, a.finalizer, a.stubRefresh
@@ -752,6 +767,7 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error) 
 			skipPersist: true,
 			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			finalizer: finalizer,
+			costInc:   costInc,
 		})
 		return
 	}
@@ -792,6 +808,7 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error) 
 		state: state, errClass: errClass, errMsg: "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		finalizer: finalizer,
+		costInc:   costInc,
 	})
 	s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
 }
@@ -799,7 +816,7 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error) 
 // execFinishSuccess records a successful run: latency observability, the
 // fresh-session reap (while the CAS gate is held), the success finishRun, and
 // the sanitised IM notice.
-func (s *Scheduler) execFinishSuccess(j *Job, snap jobSnapshot, key string, result SendResult, runID string, startedAt time.Time, trigger TriggerKind, lg *slog.Logger, notifyTo NotifyTarget, finalizer *runFinalizer) {
+func (s *Scheduler) execFinishSuccess(j *Job, snap jobSnapshot, key string, result SendResult, costInc costledger.Increment, runID string, startedAt time.Time, trigger TriggerKind, lg *slog.Logger, notifyTo NotifyTarget, finalizer *runFinalizer) {
 	// successEndedAt is read once from the injectable clock and shared by
 	// observeSuccessLatency and finishRun so elapsed and DurationMS come from
 	// the same reading (step-based test clocks stay deterministic).
@@ -822,8 +839,7 @@ func (s *Scheduler) execFinishSuccess(j *Job, snap jobSnapshot, key string, resu
 		job: j, runID: runID, startedAt: startedAt, endedAt: successEndedAt, trigger: trigger,
 		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-		// persist the local-run cost so per-job monthly aggregates are not 0 (#2280).
-		costUSD:   result.CostUSD,
+		costInc:   costInc,
 		finalizer: finalizer,
 	})
 
