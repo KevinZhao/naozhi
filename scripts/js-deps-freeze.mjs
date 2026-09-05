@@ -112,9 +112,11 @@ function stripComments(src) {
 
 // Column-0 declarations. The static files only use single-name declarators at
 // the top level (verified: no `let a, b` / destructuring at column 0).
+// The optional `export` prefix covers files already migrated to ES modules
+// (D3): an exported declaration is still that file's top-level name.
 function topLevelDecls(stripped) {
   const decls = new Map(); // name -> kind
-  const re = /^(?:(async\s+)?function\s+([A-Za-z_$][\w$]*)|(let|const|var)\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*))/gm;
+  const re = /^(?:export\s+)?(?:(async\s+)?function\s+([A-Za-z_$][\w$]*)|(let|const|var)\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*))/gm;
   for (const m of stripped.matchAll(re)) {
     if (m[2]) decls.set(m[2], 'function');
     else if (m[4]) decls.set(m[4], m[3]);
@@ -127,6 +129,16 @@ function windowExports(stripped) {
   const names = new Set();
   const re = /window\.([A-Za-z_$][\w$]*)\s*=(?!=)/g;
   for (const m of stripped.matchAll(re)) names.add(m[1]);
+  // D3 bridge form: a migrated module re-exports its globals in one batch,
+  // `Object.assign(window, { esc, escAttr, fn: impl })`. Each property key
+  // becomes a window.<key> export exactly like a single assignment.
+  const assignRe = /Object\.assign\(\s*window\s*,\s*\{([^}]*)\}/g;
+  for (const m of stripped.matchAll(assignRe)) {
+    for (const entry of m[1].split(',')) {
+      const key = entry.split(':')[0].trim();
+      if (/^[A-Za-z_$][\w$]*$/.test(key)) names.add(key);
+    }
+  }
   return names;
 }
 
@@ -140,6 +152,16 @@ function bareIdents(stripped) {
     idents.add(m[0]);
   }
   return idents;
+}
+
+// window.<name> property references, counted per name (reads, calls and
+// assignments alike). Cross-referenced against other files' declarations in
+// analyze() to count D3 bridge references — the PR-E goes-to-zero metric.
+function windowRefs(stripped) {
+  const counts = new Map(); // name -> occurrence count
+  const re = /window\.([A-Za-z_$][\w$]*)/g;
+  for (const m of stripped.matchAll(re)) counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+  return counts;
 }
 
 function typeofGuardCount(stripped) {
@@ -159,13 +181,30 @@ function analyze() {
       exports: windowExports(stripped),
       idents: bareIdents(stripped),
       typeofGuards: typeofGuardCount(stripped),
+      windowRefs: windowRefs(stripped),
     };
+  }
+
+  // Bridge references: window.<name> where <name> is another file's top-level
+  // declaration or export and not the referencing file's own binding. Zero
+  // while everything is a classic script (cross-file access is bare); grows
+  // during the D3 module migration; must be back to zero after PR-E.
+  const bridgeRefs = {};
+  for (const from of LOAD_ORDER) {
+    let count = 0;
+    for (const [name, c] of files[from].windowRefs) {
+      if (files[from].decls.has(name) || files[from].exports.has(name)) continue;
+      const definedElsewhere = LOAD_ORDER.some(
+        (to) => to !== from && (files[to].decls.has(name) || files[to].exports.has(name))
+      );
+      if (definedElsewhere) count += c;
+    }
+    if (count) bridgeRefs[from] = count;
   }
 
   // referencing file -> defining file -> sorted names
   const matrix = {};
   const tdz = {}; // "referencer -> definer" -> let/const names (referencer loads first)
-  const orphans = {}; // file -> names it references that NO file defines… filled below
   for (const from of LOAD_ORDER) {
     for (const to of LOAD_ORDER) {
       if (from === to) continue;
@@ -187,13 +226,13 @@ function analyze() {
       }
     }
   }
-  return { files, matrix, tdz };
+  return { files, matrix, tdz, bridgeRefs };
 }
 
-function buildSnapshot({ files, matrix, tdz }) {
+function buildSnapshot({ files, matrix, tdz, bridgeRefs }) {
   const typeofGuards = {};
   for (const name of LOAD_ORDER) typeofGuards[name] = files[name].typeofGuards;
-  return { matrix, tdz, typeofGuards };
+  return { matrix, tdz, typeofGuards, bridgeRefs };
 }
 
 // eslint per-file globals: everything this file references that another file
@@ -258,6 +297,20 @@ function check(current) {
       failures++;
     } else if (cur < base) {
       console.log(`typeof-guard count dropped in ${file}: ${base} -> ${cur} (refresh with --write)`);
+      stale++;
+    }
+  }
+
+  for (const file of LOAD_ORDER) {
+    const cur = current.bridgeRefs?.[file] ?? 0;
+    const base = baseline.bridgeRefs?.[file] ?? 0;
+    if (cur > base) {
+      // Bridge growth is expected while a D3 migration PR is in flight, but
+      // it must land as a reviewed baseline diff, not silently.
+      console.error(`window.* bridge ref count grew in ${file}: ${base} -> ${cur} (if intentional D3 migration, rerun --write and commit the baseline diff)`);
+      failures++;
+    } else if (cur < base) {
+      console.log(`window.* bridge ref count dropped in ${file}: ${base} -> ${cur} (refresh with --write)`);
       stale++;
     }
   }

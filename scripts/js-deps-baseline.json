@@ -147,5 +147,10 @@
     "agent_view.js": 0,
     "asset_browser.js": 0,
     "files_view.js": 0
+  },
+  "bridgeRefs": {
+    "dashboard.js": 23,
+    "agent_view.js": 8,
+    "files_view.js": 4
   }
 }
