@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,7 +25,7 @@ import (
 // 1 at least one FAIL, 2 invalid flags. Each line is `<icon> <category> <detail>`
 // with icon ✓/⚠/✗ so scripts can filter on the leading byte.
 func runDoctor(args []string) {
-	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	fs, configPath := newSubFlagSet("doctor", "config.yaml")
 	addr := fs.String("addr", envDefault("NAOZHI_BASE_URL", "http://127.0.0.1:8180"),
 		"base URL for HTTP checks (NAOZHI_BASE_URL)")
 	tokenFlag := fs.String("token", "",
@@ -35,8 +34,6 @@ func runDoctor(args []string) {
 		"per-HTTP-check deadline")
 	jsonOut := fs.Bool("json", false,
 		"emit findings as JSON (one object per line) — easier to consume from CI / monitoring")
-	configPath := fs.String("config", "config.yaml",
-		"path to config.yaml; used to render the CLI Backends section (multi-backend RFC §11.2)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
