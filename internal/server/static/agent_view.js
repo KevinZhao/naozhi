@@ -227,7 +227,7 @@
       '&node=' + encodeURIComponent(node) +
       '&task_id=' + encodeURIComponent(taskID) +
       '&limit=200';
-    fetch('/api/sessions/agent_events' + qs, { credentials: 'same-origin' })
+    fetch(NZ_CONTRACT.API.sessions_agent_events + qs, { credentials: 'same-origin' })
       .then(function (r) {
         // Stale switch? Drop.
         if (seq !== state.switchSeq || selectedKey !== dispatchKey) return;
@@ -604,7 +604,7 @@
         '&task_id=' + encodeURIComponent(taskID) +
         '&after=' + state.pollAfterMS +
         '&limit=200';
-      fetch('/api/sessions/agent_events' + qs, { credentials: 'same-origin' })
+      fetch(NZ_CONTRACT.API.sessions_agent_events + qs, { credentials: 'same-origin' })
         .then(function (r) {
           if (taskID !== state.activeTaskID) return;
           // 202 = tailer still spinning up; no body to parse, wait next tick.

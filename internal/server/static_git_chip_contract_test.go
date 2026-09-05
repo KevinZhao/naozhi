@@ -28,7 +28,7 @@ func TestDashboardJS_GitChipWiring(t *testing.T) {
 
 	for _, want := range []string{
 		// Endpoint + the async fill path.
-		`'/api/sessions/git?key='`,
+		`NZ_CONTRACT.API.sessions_git + '?key='`,
 		`function fetchGitState(`,
 		`function gitChipHtml(`,
 		`function setHeaderGitChip(`,

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"testing"
 
+	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
+
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -57,13 +59,8 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 	// Required fields — always present regardless of project manager /
 	// remote nodes configuration. `projects` is omitempty when nothing is
 	// configured so it is NOT required here.
-	required := []string{
-		"backend", "cli_name", "cli_version", "max_procs",
-		"default_workspace", "workspace_id", "workspace_name",
-		"system", "agents",
-		"active", "running", "ready", "total",
-		"version", "uptime", "watchdog",
-	}
+	// Derived from the same struct contract.js reflects over (#2539).
+	required, optional := contractFields(dashsession.ContractStats)
 	for _, k := range required {
 		if _, ok := stats[k]; !ok {
 			gotKeys := make([]string, 0, len(stats))
@@ -81,8 +78,9 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 	for _, k := range required {
 		expected[k] = true
 	}
-	expected["projects"] = true    // optional — omitted when no project manager
-	expected["version_tag"] = true // optional — omitted when -X main.version is not set
+	for _, k := range optional {
+		expected[k] = true
+	}
 	for k := range stats {
 		if !expected[k] {
 			t.Errorf("unexpected stats.%s — add to dashboard.js contract before shipping", k)

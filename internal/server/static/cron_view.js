@@ -1125,7 +1125,7 @@ async function doCreateCronJob() {
     }
     let data;
     try {
-      data = await fetchJSON('/api/cron', {timeoutMs: 10000, method: 'POST', headers, body: JSON.stringify(body)});
+      data = await fetchJSON(NZ_CONTRACT.API.cron, {timeoutMs: 10000, method: 'POST', headers, body: JSON.stringify(body)});
     } catch (err) {
       if (err && err.status) showAPIError('创建定时任务', err.status, err.message || '');
       else showNetworkError('创建定时任务', err);
@@ -2267,7 +2267,7 @@ async function cronAttentionRefresh() {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const data = await fetchJSON('/api/cron/attention', { headers, timeoutMs: 8000 });
+    const data = await fetchJSON(NZ_CONTRACT.API.cron_attention, { headers, timeoutMs: 8000 });
     cronAttentionState = { items: (data && Array.isArray(data.items)) ? data.items : [], loaded: true };
   } catch (e) {
     if (e && e.status) return; // auth / rate-limit — leave the last good state
@@ -2282,7 +2282,7 @@ async function cronAttentionConfirm(runId) {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron/runs/' + encodeURIComponent(runId) + '/confirm', { method: 'POST', headers });
+    const r = await fetch(NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/confirm', { method: 'POST', headers });
     if (!r.ok) {
       const raw = await r.text().catch(() => '');
       showAPIError('确认 run', r.status, raw);
@@ -2316,7 +2316,7 @@ async function cronReplayRunInner(jobId, runId, fromQueue) {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron/runs/' + encodeURIComponent(runId) + '/replay',
+    const r = await fetch(NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/replay',
       { method: 'POST', headers, body: JSON.stringify({ job_id: jobId }) });
     if (!r.ok) {
       const raw = await r.text().catch(() => '');
@@ -2345,7 +2345,7 @@ async function cronJobCostRefresh(jobId) {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const to = new Date();
     const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
-    const resp = await fetch('/api/cost/summary?group_by=job&job_id=' + encodeURIComponent(jobId) +
+    const resp = await fetch(NZ_CONTRACT.API.cost_summary + '?group_by=job&job_id=' + encodeURIComponent(jobId) +
       '&from=' + encodeURIComponent(from.toISOString()) + '&to=' + encodeURIComponent(to.toISOString()), { headers });
     if (!resp.ok) return;
     const data = await resp.json();
@@ -2908,7 +2908,7 @@ async function cronTimelineFetchDetail(jobId, runId) {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const url = '/api/cron/runs/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
+    const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     // Preserve sticky annotations (__transcript / __snapshot) across a
     // collapse→re-expand re-fetch: wholesale replacement would drop them
@@ -2957,7 +2957,7 @@ async function cronTimelineFetchTranscript(jobId, runId) {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const url = '/api/cron/runs/' + encodeURIComponent(runId) + '/transcript?job_id=' + encodeURIComponent(jobId);
+    const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/transcript?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 12000 });
     if (st.details && st.details[runId]) {
       st.details[runId].__transcript = data || { fallback: 'missing', turns: [] };
@@ -2984,7 +2984,7 @@ async function cronTimelineFetchSnapshot(jobId, runId) {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const url = '/api/cron/runs/' + encodeURIComponent(runId) + '/snapshot?job_id=' + encodeURIComponent(jobId);
+    const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/snapshot?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     if (st.details && st.details[runId]) {
       st.details[runId].__snapshot = data || { available: false };
@@ -3081,7 +3081,7 @@ function cronTimelineLoadMore(jobId, onDone) {
       const headers = {};
       const t = getToken();
       if (t) headers['Authorization'] = 'Bearer ' + t;
-      let url = '/api/cron/runs?job_id=' + encodeURIComponent(jobId) + '&limit=50';
+      let url = NZ_CONTRACT.API.cron_runs + '?job_id=' + encodeURIComponent(jobId) + '&limit=50';
       if (st.nextBefore) url += '&before=' + st.nextBefore;
       const data = await fetchJSON(url, { headers, timeoutMs: 10000 });
       const more = (data && Array.isArray(data.runs)) ? data.runs : [];
@@ -3197,7 +3197,7 @@ async function cronTimelineRefreshHead(jobId) {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const url = '/api/cron/runs?job_id=' + encodeURIComponent(jobId) + '&limit=10';
+    const url = NZ_CONTRACT.API.cron_runs + '?job_id=' + encodeURIComponent(jobId) + '&limit=10';
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     // 过期请求：开始 fetch 之后又有更新一轮 refreshHead 启动了，丢弃本次结果。
     if (st._refreshToken !== token) return;
@@ -4152,7 +4152,7 @@ async function fetchCronJobs() {
     // needs the bytes.
     let data;
     try {
-      data = await fetchJSON('/api/cron?compact=1', { headers, timeoutMs: 8000 });
+      data = await fetchJSON(NZ_CONTRACT.API.cron + '?compact=1', { headers, timeoutMs: 8000 });
     } catch (err) {
       if (err.status) return;
       throw err;
@@ -4283,7 +4283,7 @@ async function cronTriggerNow(id) {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron/trigger', { method: 'POST', headers, body: JSON.stringify({ id }) });
+    const r = await fetch(NZ_CONTRACT.API.cron_trigger, { method: 'POST', headers, body: JSON.stringify({ id }) });
     if (!r.ok) {
       // Failure — clear the cooldown immediately so the user can retry.
       // The 10 s floor would be punishing on a transient 502.
@@ -4315,7 +4315,7 @@ async function cronPause(id) {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    await fetchJSON('/api/cron/pause', { method: 'POST', headers, body: JSON.stringify({ id }) });
+    await fetchJSON(NZ_CONTRACT.API.cron_pause, { method: 'POST', headers, body: JSON.stringify({ id }) });
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) {
     if (e && e.status) { showAPIError('暂停定时任务', e.status, (e.message || '').slice(0, 500)); return; }
@@ -4329,7 +4329,7 @@ async function cronResume(id) {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    await fetchJSON('/api/cron/resume', { method: 'POST', headers, body: JSON.stringify({ id }) });
+    await fetchJSON(NZ_CONTRACT.API.cron_resume, { method: 'POST', headers, body: JSON.stringify({ id }) });
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) {
     if (e && e.status) { showAPIError('恢复定时任务', e.status, (e.message || '').slice(0, 500)); return; }
@@ -4388,7 +4388,7 @@ async function cronDelete(id) {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    await fetchJSON('/api/cron?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
+    await fetchJSON(NZ_CONTRACT.API.cron + '?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
     // R220-FE-2: 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
     // 游标 / fetched 标记），避免 cronTimelineState 累积已删除 job 的内存。
     if (cronTimelineState[id]) delete cronTimelineState[id];
@@ -4434,7 +4434,7 @@ async function cronRefetchFullJob(id) {
     // exposed; the rate limiter on the list route is shared with the
     // poll, and an editor open is a once-per-user-action event so the
     // extra body is not a hot path.
-    const data = await fetchJSON('/api/cron', { headers, timeoutMs: 8000 });
+    const data = await fetchJSON(NZ_CONTRACT.API.cron, { headers, timeoutMs: 8000 });
     const jobs = (data && data.jobs) || [];
     const fresh = jobs.find(j => j.id === id);
     if (fresh && !fresh.prompt_truncated) {
@@ -4684,7 +4684,7 @@ async function doEditCronJob(id) {
 
   try {
     const headers = Object.assign({ 'Content-Type': 'application/json' }, authHeaders());
-    const r = await fetch('/api/cron?id=' + encodeURIComponent(id), {
+    const r = await fetch(NZ_CONTRACT.API.cron + '?id=' + encodeURIComponent(id), {
       method: 'PATCH', headers, body: JSON.stringify(body),
     });
     if (!r.ok) {

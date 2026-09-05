@@ -41,7 +41,7 @@
     if (state.loaded && !force) { render(); return; }
     var box = $('asset-sidebar-list');
     if (box) box.innerHTML = '<div class="asset-empty">加载中…</div>';
-    fetchJSON('/api/cc/assets').then(function (inv) {
+    fetchJSON(NZ_CONTRACT.API.cc_assets).then(function (inv) {
       state.inv = inv; state.loaded = true; buildKindTabs(); render();
     }).catch(function (e) {
       if (box) box.innerHTML = '<div class="asset-empty">加载失败：' + esc(e.message) + '</div>';
@@ -154,7 +154,7 @@
       (a.source.project ? '&project=' + encodeURIComponent(a.source.project) : '') +
       '&rel=' + encodeURIComponent(a.rel_path) +
       (a.anchor ? '&anchor=' + encodeURIComponent(a.anchor) : '');
-    fetch('/api/cc/assets/raw' + qs, { credentials: 'same-origin' })
+    fetch(NZ_CONTRACT.API.cc_assets_raw + qs, { credentials: 'same-origin' })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
       .then(function (txt) {
         var html = '';

@@ -235,3 +235,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp.healthAuthSection = auth
 	writeJSON(w, resp)
 }
+
+// ContractHealthAuth exposes the authenticated /health section to the
+// contract.js generator (#2539) — reflect-only; the type stays unexported.
+var ContractHealthAuth any = healthAuthSection{}

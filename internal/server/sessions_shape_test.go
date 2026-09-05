@@ -84,7 +84,10 @@ func TestDashboardJSON_Sessions_ShapeContract(t *testing.T) {
 	// reverse-RPC forwarder both dereference unconditionally. Optional
 	// omitempty fields (workspace, summary, project, death_reason, …) are
 	// NOT enforced so a bare resume-only row still passes.
-	for _, k := range []string{"key", "state", "last_active", "session_id"} {
+	// Required set derived from the same struct contract.js reflects over
+	// (#2539): every non-omitempty SessionSnapshot field must be present.
+	requiredSessionFields, _ := contractFields(session.SessionSnapshot{})
+	for _, k := range requiredSessionFields {
 		if _, ok := first[k]; !ok {
 			t.Errorf("sessions[0].%s missing; body=%s", k, w.Body.String())
 		}

@@ -1,5 +1,10 @@
 {
   "matrix": {
+    "contract.js": {
+      "dashboard.js": [
+        "takeover"
+      ]
+    },
     "dashboard.js": {
       "nz_util.js": [
         "esc",
@@ -135,6 +140,7 @@
     }
   },
   "typeofGuards": {
+    "contract.js": 0,
     "nz_util.js": 1,
     "dashboard.js": 35,
     "cron_view.js": 13,

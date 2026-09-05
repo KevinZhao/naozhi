@@ -273,7 +273,7 @@ function eagerBindWorkspace(key, workspace, node) {
     const headers = { 'Content-Type': 'application/json' };
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-    fetch('/api/sessions/bind', {
+    fetch(NZ_CONTRACT.API.sessions_bind, {
       method: 'POST', headers,
       body: JSON.stringify({ key: key, node: nd, workspace: workspace }),
     }).catch(() => {});
@@ -323,7 +323,7 @@ function persistTheme(theme) {
   const headers = { 'Content-Type': 'application/json' };
   const t = getToken();
   if (t) headers['Authorization'] = 'Bearer ' + t;
-  fetchJSON('/api/settings', { method: 'PUT', headers, body: JSON.stringify({ theme: theme }), timeoutMs: 10000 })
+  fetchJSON(NZ_CONTRACT.API.settings, { method: 'PUT', headers, body: JSON.stringify({ theme: theme }), timeoutMs: 10000 })
     .catch(function (err) {
       if (typeof showToast === 'function') showToast('主题已应用，但未能保存到服务器', 'error');
       else console.warn('persist theme failed', err);
@@ -337,7 +337,7 @@ function syncThemeFromServer() {
   const headers = {};
   const t = getToken();
   if (t) headers['Authorization'] = 'Bearer ' + t;
-  fetchJSON('/api/settings', { headers, timeoutMs: 8000 })
+  fetchJSON(NZ_CONTRACT.API.settings, { headers, timeoutMs: 8000 })
     .then(function (s) {
       const srv = s && s.theme;
       if (THEME_ORDER.indexOf(srv) < 0) return;       // unknown/empty → keep local
@@ -504,7 +504,7 @@ async function fetchSessions() {
     // response must release before the next tick fires.
     let data;
     try {
-      data = await fetchJSON('/api/sessions', { headers, timeoutMs: 8000 });
+      data = await fetchJSON(NZ_CONTRACT.API.sessions, { headers, timeoutMs: 8000 });
     } catch (err) {
       if (err.status === 401 || err.status === 403) {
         showAuthModal({ auto: true }); // background poll: respects de-dupe + cooldown
@@ -1284,7 +1284,7 @@ async function toggleFavorite(name, node) {
     const qs = 'name=' + encodeURIComponent(name) + '&favorite=' + (next ? 'true' : 'false') +
       (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
     try {
-      await fetchJSON('/api/projects/favorite?' + qs, { timeoutMs: 10000, method: 'POST', headers });
+      await fetchJSON(NZ_CONTRACT.API.projects_favorite + '?' + qs, { timeoutMs: 10000, method: 'POST', headers });
     } catch (err) {
       if (err && err.status) {
         showAPIError(next ? '收藏项目' : '取消收藏', err.status, '');
@@ -1324,7 +1324,7 @@ async function openProjectSettings(name) {
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const [c] = await Promise.all([
-      fetchJSON('/api/projects/config?name=' + encodeURIComponent(name), { timeoutMs: 10000, headers, credentials: 'same-origin' }),
+      fetchJSON(NZ_CONTRACT.API.projects_config + '?name=' + encodeURIComponent(name), { timeoutMs: 10000, headers, credentials: 'same-origin' }),
       fetchCLIBackends(),
       fetchAccessProfiles(),
     ]);
@@ -1533,7 +1533,7 @@ function openCreateAccessProfile(onCreated) {
       const headers = { 'Content-Type': 'application/json' };
       const t = getToken();
       if (t) headers['Authorization'] = 'Bearer ' + t;
-      await fetchJSON('/api/access-profiles', {
+      await fetchJSON(NZ_CONTRACT.API.access_profiles, {
         timeoutMs: 10000, method: 'POST', headers, credentials: 'same-origin',
         body: JSON.stringify(body),
       });
@@ -1587,7 +1587,7 @@ async function saveProjectSettings(name, baseCfg, overlay) {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    await fetchJSON('/api/projects/config?name=' + encodeURIComponent(name), {
+    await fetchJSON(NZ_CONTRACT.API.projects_config + '?name=' + encodeURIComponent(name), {
       timeoutMs: 10000, method: 'PUT', headers, credentials: 'same-origin',
       body: JSON.stringify(cfg),
     });
@@ -1714,7 +1714,7 @@ function setUpdateApplying(on) {
 
 async function fetchUpdateStatus() {
   try {
-    const r = await fetch('/api/system/update');
+    const r = await fetch(NZ_CONTRACT.API.system_update);
     if (!r.ok) return;
     updateState = await r.json();
     // An apply has landed somewhere terminal — succeeded (nothing left to do),
@@ -1947,7 +1947,7 @@ async function applyUpdate(action) {
   if (btn) btn.classList.add('is-busy');
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const r = await fetch('/api/system/update/apply', {
+    const r = await fetch(NZ_CONTRACT.API.system_update_apply, {
       method: 'POST', headers, credentials: 'same-origin',
       body: JSON.stringify({ confirm_action: action }),
     });
@@ -2583,7 +2583,7 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
     const headers = {'Content-Type': 'application/json'};
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-    const r = await fetch('/api/sessions/resume', {
+    const r = await fetch(NZ_CONTRACT.API.sessions_resume, {
       method: 'POST', headers,
       body: JSON.stringify({session_id: sessionId, workspace: workspace || '', last_prompt: lastPrompt || ''})
     });
@@ -2620,7 +2620,7 @@ async function previewRecentSession(expectedKey, sessionId, cwd) {
     // resume; if the backend stalls, drop the preview rather than hang.
     let entries;
     try {
-      entries = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + cwdParam, { headers, timeoutMs: 5000 });
+      entries = await fetchJSON(NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(sessionId) + cwdParam, { headers, timeoutMs: 5000 });
     } catch (err) {
       if (err.status) return;
       throw err;
@@ -3104,7 +3104,7 @@ async function fetchSessionRuns(key, node) {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const resp = await fetch('/api/sessions/runs?key=' + encodeURIComponent(key), { headers });
+    const resp = await fetch(NZ_CONTRACT.API.sessions_runs + '?key=' + encodeURIComponent(key), { headers });
     // Stale-check the error branch too: the header we would clear belongs to
     // whichever session is selected NOW, not the one this fetch was for.
     if (!resp.ok) { if (selectedKey !== key) return; panel.hidden = true; setHeaderRunStats(''); return; }
@@ -3522,7 +3522,7 @@ async function postTuningOverride(kind, value) {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = { key };
     body[kind] = value;
-    const resp = await fetch('/api/sessions/override', {
+    const resp = await fetch(NZ_CONTRACT.API.sessions_override, {
       method: 'POST', headers, body: JSON.stringify(body),
     });
     if (!resp.ok) {
@@ -3580,7 +3580,7 @@ async function fetchGitState(key, node) {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const resp = await fetch('/api/sessions/git?key=' + encodeURIComponent(key), { headers });
+    const resp = await fetch(NZ_CONTRACT.API.sessions_git + '?key=' + encodeURIComponent(key), { headers });
     // The cache entry is per-session so dropping it is always right; the
     // header chip is only cleared when this session is still the selected one.
     if (!resp.ok) { delete gitStateCache[cacheKey]; if (selectedKey !== key || selectedNode !== node) return; setHeaderGitChip(''); return; }
@@ -3685,7 +3685,7 @@ async function dismissSession(key, node, opts) {
       const token = getToken();
       if (token) headers['Authorization'] = 'Bearer ' + token;
       try {
-        await fetchJSON('/api/discovered/close', {
+        await fetchJSON(NZ_CONTRACT.API.discovered_close, {
           timeoutMs: 10000,
           method: 'POST', headers,
           body: JSON.stringify({pid: d.pid, session_id: d.session_id || '', cwd: d.cwd || '', proc_start_time: d.proc_start_time || 0, node: node || ''})
@@ -3735,7 +3735,7 @@ async function dismissSession(key, node, opts) {
   if (node && node !== 'local') body.node = node;
   // Fire-and-forget: do NOT await — the UI is already updated. On failure we
   // re-sync from the server so a genuinely-undeleted session reappears.
-  fetchJSON('/api/sessions', {timeoutMs: 10000, method: 'DELETE', headers, body: JSON.stringify(body)})
+  fetchJSON(NZ_CONTRACT.API.sessions, {timeoutMs: 10000, method: 'DELETE', headers, body: JSON.stringify(body)})
     .catch(err => {
       // 404 means the session was already gone — that's the outcome we want,
       // so swallow it. Any other error means the delete may not have landed:
@@ -3784,7 +3784,7 @@ async function renameSession() {
   const body = {key: selectedKey, label: next};
   if (selectedNode && selectedNode !== 'local') body.node = selectedNode;
   try {
-    await fetchJSON('/api/sessions/label', {
+    await fetchJSON(NZ_CONTRACT.API.sessions_label, {
       timeoutMs: 10000,
       method: 'PATCH', headers,
       body: JSON.stringify(body),
@@ -3938,7 +3938,7 @@ function exportEventKey(e) {
 // "new entries after dedup", not by the cursor moving.
 async function fetchAllSessionEvents(key, node, headers) {
   const remote = !!(node && node !== 'local');
-  const base = '/api/sessions/events?key=' + encodeURIComponent(key) +
+  const base = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(key) +
     (remote ? '&node=' + encodeURIComponent(node) : '');
   const r = await fetch(base, { headers });
   if (!r.ok) return { status: r.status };
@@ -4320,7 +4320,7 @@ async function fetchEvents(full) {
   const stale = () => selectedKey !== dispatchKey || selectedNode !== dispatchNode || gen !== _fetchEventsGen;
   _fetchEventsInFlight = true;
   try {
-    let url = '/api/sessions/events?key=' + encodeURIComponent(dispatchKey);
+    let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(dispatchKey);
     if (dispatchNode && dispatchNode !== 'local') url += '&node=' + encodeURIComponent(dispatchNode);
     if (!full && lastEventTime > 0) {
       url += '&after=' + lastEventTime;
@@ -4462,7 +4462,7 @@ async function loadEarlierEvents() {
   _earlierLoading = true;
   updateEarlierButton('loading');
   try {
-    let url = '/api/sessions/events?key=' + encodeURIComponent(key) +
+    let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(key) +
               '&before=' + oldestTime + '&limit=' + EARLIER_PAGE_LIMIT;
     if (node && node !== 'local') url += '&node=' + encodeURIComponent(node);
     const headers = {};
@@ -5105,7 +5105,7 @@ async function sendAskAnswerViaAPI(text, card) {
   if (token) headers['Authorization'] = 'Bearer ' + token;
   const payload = { key: key, text: text };
   if (node && node !== 'local') payload.node = node;
-  const r = await fetch('/api/sessions/send', { method: 'POST', headers, body: JSON.stringify(payload) });
+  const r = await fetch(NZ_CONTRACT.API.sessions_send, { method: 'POST', headers, body: JSON.stringify(payload) });
   if (!r.ok) {
     const raw = await r.text().catch(() => '');
     throw new Error('send failed: ' + r.status + ' ' + raw.slice(0, 200));
@@ -5289,7 +5289,7 @@ function eventHtml(e, opts) {
       : '';
     var persistedBtn = '';
     if (persistedPath && selectedKey) {
-      var toolURL = '/api/sessions/tool_result?key=' + encodeURIComponent(selectedKey) +
+      var toolURL = NZ_CONTRACT.API.sessions_tool_result + '?key=' + encodeURIComponent(selectedKey) +
         '&node=' + encodeURIComponent(selectedNode || 'local') +
         '&path=' + encodeURIComponent(persistedPath);
       persistedBtn = '<a class="tr-persisted" href="' + escAttr(toolURL) +
@@ -5329,7 +5329,7 @@ function eventHtml(e, opts) {
       const p = paths[i] || '';
       let full = src;
       if (p && selectedKey) {
-        full = '/api/sessions/attachment?key=' + encodeURIComponent(selectedKey) +
+        full = NZ_CONTRACT.API.sessions_attachment + '?key=' + encodeURIComponent(selectedKey) +
           '&path=' + encodeURIComponent(p) + cacheBust;
       }
       // No inline onclick: a document-level delegated listener in the
@@ -5562,7 +5562,7 @@ async function sendMessage() {
       const headers = {'Content-Type': 'application/json'};
       const token = getToken();
       if (token) headers['Authorization'] = 'Bearer ' + token;
-      const r = await fetch('/api/discovered/takeover', {
+      const r = await fetch(NZ_CONTRACT.API.discovered_takeover, {
         method: 'POST', headers,
         body: JSON.stringify({pid: pd.pid, session_id: pd.sessionId, cwd: pd.cwd, proc_start_time: pd.procStartTime || 0, node: pd.node || ''})
       });
@@ -5783,7 +5783,7 @@ async function sendComposerTurn(targetKey, targetNode) {
     // any time after the server has the request.
     const sentSid = sid(selectedKey, selectedNode);
     httpSendPending.add(sentSid);
-    const r = await fetch('/api/sessions/send', {method:'POST', headers, body: JSON.stringify(payload)});
+    const r = await fetch(NZ_CONTRACT.API.sessions_send, {method:'POST', headers, body: JSON.stringify(payload)});
 
     if (!r.ok) {
       httpSendPending.delete(sentSid); // rejected synchronously — no async frame will follow
@@ -6348,7 +6348,7 @@ function interruptSession() {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = { key: selectedKey };
     if (targetNode) body.node = targetNode;
-    fetch('/api/sessions/interrupt', {
+    fetch(NZ_CONTRACT.API.sessions_interrupt, {
       method: 'POST',
       headers,
       body: JSON.stringify(body)
@@ -7057,7 +7057,7 @@ async function uploadEntry(entry) {
     const headers = {};
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-    const r = await fetch('/api/sessions/upload', { method: 'POST', headers, body: fd });
+    const r = await fetch(NZ_CONTRACT.API.sessions_upload, { method: 'POST', headers, body: fd });
     if (r.status === 401 || r.status === 403) { showAuthModal(); throw new Error('unauthorized'); }
     if (!r.ok) {
       const txt = await r.text().catch(() => '');
@@ -7121,7 +7121,7 @@ async function maybeAutoOrient(entry) {
     const headers = { 'Content-Type': 'application/json' };
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-    const r = await fetch('/api/sessions/orient', {
+    const r = await fetch(NZ_CONTRACT.API.sessions_orient, {
       method: 'POST', headers, body: JSON.stringify({ id: entry.id }), signal: ctrl.signal,
     });
     if (!r.ok) return; // 404/expired/etc — nothing to do
@@ -7638,7 +7638,7 @@ function transcribeAudio(blob, autoSend) {
   const ac = new AbortController();
   const timeoutId = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
   // Tag fetch-level failures so .catch can distinguish network from server.
-  fetch('/api/transcribe', {
+  fetch(NZ_CONTRACT.API.transcribe, {
     method: 'POST',
     headers: headers,
     credentials: 'same-origin',
@@ -7782,7 +7782,7 @@ async function saveToken() {
   const t = input && input.value.trim();
   if (!t) return;
   try {
-    const r = await fetch('/api/auth/login', {
+    const r = await fetch(NZ_CONTRACT.API.auth_login, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({token: t})
@@ -7927,8 +7927,8 @@ async function fetchCLIBackends(node) {
     // RNEW-UX-003: default 10s timeout is fine here — this fetch is cached
     // for 60s and only fires at modal-open time, not on a poll.
     const url = isLocal
-      ? '/api/cli/backends'
-      : '/api/cli/backends?node=' + encodeURIComponent(node);
+      ? NZ_CONTRACT.API.cli_backends
+      : NZ_CONTRACT.API.cli_backends + '?node=' + encodeURIComponent(node);
     const data = await fetchJSON(url, {credentials: 'same-origin'});
     const manifest = data && Array.isArray(data.backends) ? data : null;
     if (isLocal) {
@@ -7974,7 +7974,7 @@ async function fetchAccessProfiles() {
     return accessProfiles;
   }
   try {
-    const data = await fetchJSON('/api/access-profiles', {credentials: 'same-origin'});
+    const data = await fetchJSON(NZ_CONTRACT.API.access_profiles, {credentials: 'same-origin'});
     accessProfiles = data && Array.isArray(data.profiles) ? data : null;
     accessProfilesFetchedAt = Date.now();
     return accessProfiles;
@@ -9488,7 +9488,7 @@ async function refreshCostSummary() {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const to = new Date();
     const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
-    const resp = await fetch('/api/cost/summary?group_by=unit&from=' + encodeURIComponent(from.toISOString()) +
+    const resp = await fetch(NZ_CONTRACT.API.cost_summary + '?group_by=unit&from=' + encodeURIComponent(from.toISOString()) +
       '&to=' + encodeURIComponent(to.toISOString()), { headers });
     if (!resp.ok) return;
     costSummaryCache = summarizeCostBuckets(await resp.json());
@@ -10964,7 +10964,7 @@ async function flushFileRefBatch() {
     // path; a stalled disk shouldn't leak pending renders forever.
     let data;
     try {
-      data = await fetchJSON('/api/projects/files/exists', {
+      data = await fetchJSON(NZ_CONTRACT.API.projects_files_exists, {
         method: 'POST', headers,
         body: JSON.stringify({ project: batch.project, node: batch.node, paths }),
         timeoutMs: 10000,
@@ -11043,7 +11043,7 @@ function fileApiUrl(project, node, path, mode) {
     '&path=' + encodeURIComponent(path) +
     '&mode=' + encodeURIComponent(mode) +
     (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
-  return '/api/projects/file?' + qs;
+  return NZ_CONTRACT.API.projects_file + '?' + qs;
 }
 
 function triggerFileDownload(wrapEl) {
@@ -12454,7 +12454,7 @@ function stopSystemPoll() {
 async function fetchSystemDaemons() {
   // 8s timeout mirrors the cron poll. The endpoint always returns a JSON array
   // (empty when sysession is off), so a non-array is treated as empty.
-  const data = await fetchJSON('/api/system/daemons', { timeoutMs: 8000 });
+  const data = await fetchJSON(NZ_CONTRACT.API.system_daemons, { timeoutMs: 8000 });
   systemDaemons = Array.isArray(data) ? data : [];
   updateSystemBadge();
   return systemDaemons;
@@ -13942,7 +13942,7 @@ async function scanDiscovered() {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     // RNEW-UX-003: 10s timeout — /api/discovered walks the filesystem, so a
     // stalled disk shouldn't wedge the scan button forever.
-    const data = await fetchJSON('/api/discovered', { headers, timeoutMs: 10000 });
+    const data = await fetchJSON(NZ_CONTRACT.API.discovered, { headers, timeoutMs: 10000 });
     discoveredItems = data || [];
     // #1770: only force a full sidebar re-render when the discovered set
     // actually changed. Previously every 30s (connected) / 5s (disconnected)
@@ -14032,7 +14032,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     // "加载中..." splash indefinitely.
     let events;
     try {
-      events = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam, { headers, timeoutMs: 10000 });
+      events = await fetchJSON(NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam, { headers, timeoutMs: 10000 });
     } catch (err) {
       if (gen !== _previewGen) return;
       const errText = err.message || '';
@@ -14080,7 +14080,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         const headers2 = {};
         const t2 = getToken();
         if (t2) headers2['Authorization'] = 'Bearer ' + t2;
-        const r2 = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(capturedSid) + nodeParam + cwdParam, { headers: headers2 });
+        const r2 = await fetch(NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(capturedSid) + nodeParam + cwdParam, { headers: headers2 });
         if (!r2.ok) return;
         const all = await r2.json();
         if (gen !== _previewGen) return;
@@ -14127,7 +14127,7 @@ async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
     const headers = {'Content-Type': 'application/json'};
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-    const r = await fetch('/api/discovered/takeover', {
+    const r = await fetch(NZ_CONTRACT.API.discovered_takeover, {
       method: 'POST', headers,
       body: JSON.stringify({pid: pid, session_id: sessionId, cwd: cwd, proc_start_time: procStartTime || 0, node: node || ''})
     });
@@ -15506,7 +15506,7 @@ initSwipeBack();
     elInput.value = '';
     if (!id) return;
     try {
-      await fetch('/api/scratch/' + encodeURIComponent(id), {
+      await fetch(NZ_CONTRACT.API.scratch_id.replace('{id}', encodeURIComponent(id)), {
         method: 'DELETE', headers: authHeaders(),
       });
     } catch (_) { /* best effort */ }
@@ -15669,7 +15669,7 @@ initSwipeBack();
   async function pollOnce() {
     if (!state) return;
     try {
-      let url = '/api/sessions/events?key=' + encodeURIComponent(state.key);
+      let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(state.key);
       if (state.lastEventTime > 0) url += '&after=' + state.lastEventTime;
       else url += '&limit=50';
       const r = await fetch(url, { headers: authHeaders() });
@@ -15734,7 +15734,7 @@ initSwipeBack();
       await closeScratch(true);
     }
     try {
-      const r = await fetch('/api/scratch/open', {
+      const r = await fetch(NZ_CONTRACT.API.scratch_open, {
         method: 'POST',
         headers: authHeaders({'Content-Type': 'application/json'}),
         body: JSON.stringify({
@@ -15828,7 +15828,7 @@ initSwipeBack();
     renderNewEvents([{type: 'user', detail: text, time: Date.now()}]);
     elInput.value = '';
     try {
-      const r = await fetch('/api/sessions/send', {
+      const r = await fetch(NZ_CONTRACT.API.sessions_send, {
         method: 'POST',
         headers: authHeaders({'Content-Type': 'application/json'}),
         body: JSON.stringify({key: state.key, text}),
@@ -15863,7 +15863,7 @@ initSwipeBack();
     }
     const id = state.scratchId;
     try {
-      const r = await fetch('/api/scratch/' + encodeURIComponent(id) + '/promote', {
+      const r = await fetch(NZ_CONTRACT.API.scratch_id_promote.replace('{id}', encodeURIComponent(id)), {
         method: 'POST', headers: authHeaders(),
       });
       if (!r.ok) {
@@ -16092,7 +16092,7 @@ initSwipeBack();
     // returns `undefined` (preserves caller's "transient — retry next
     // hover" semantics).
     try {
-      const data = await fetchJSON('/api/memory/' + encodeURIComponent(slug), {
+      const data = await fetchJSON(NZ_CONTRACT.API.memory_slug.replace('{slug}', encodeURIComponent(slug)), {
         headers: typeof authHeaders === 'function' ? authHeaders() : {},
       });
       if (!data || !data.found) {

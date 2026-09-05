@@ -142,6 +142,7 @@ func TestDashboardJS_FetchCLIBackends_DoesNotCacheNullRemote(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
 	script := `
+const NZ_CONTRACT = require('./static/contract.js');
 let cliBackends = null, cliBackendsFetchedAt = 0;
 const cliBackendsByNode = {};
 function applyFeatureGates() {}

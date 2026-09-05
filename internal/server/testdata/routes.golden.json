@@ -26,6 +26,16 @@
   },
   {
     "method": "GET",
+    "path": "/api/cc/assets",
+    "handler_type": "*extccassets.Handler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/cc/assets/raw",
+    "handler_type": "*extccassets.Handler"
+  },
+  {
+    "method": "GET",
     "path": "/api/cli/backends",
     "handler_type": "*cli.Handler"
   },
@@ -382,6 +392,11 @@
   {
     "method": "GET",
     "path": "/static/asset_browser.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/contract.js",
     "handler_type": "http.HandlerFunc"
   },
   {
