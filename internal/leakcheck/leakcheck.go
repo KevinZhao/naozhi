@@ -10,6 +10,8 @@
 package leakcheck
 
 import (
+	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -79,4 +81,33 @@ func dumpStacks() string {
 		out = out[i+1:]
 	}
 	return out
+}
+
+// Main wraps a package's TestMain body with a package-level goroutine
+// baseline compare (#2537): snapshot before m.Run, settle-and-compare after.
+// In warn mode a leak prints to stderr but leaves the exit code alone —
+// the soak mode for newly instrumented packages; flip warnOnly to false once
+// a package has run clean for a while. The grace is wider than the per-test
+// Check default because package-scoped servers (httptest keep-alives,
+// singleton reapers) legitimately outlive the last test.
+func Main(m interface{ Run() int }, warnOnly bool) int {
+	baseline := runtime.NumGoroutine()
+	code := m.Run()
+	const grace = 8
+	settle := 4 * DefaultSettleWindow
+	deadline := time.Now().Add(settle)
+	current := runtime.NumGoroutine()
+	for current > baseline+grace && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		current = runtime.NumGoroutine()
+	}
+	if current > baseline+grace {
+		fmt.Fprintf(os.Stderr,
+			"leakcheck(package): goroutine count grew from %d to %d (grace %d, settle %s) — WARN mode, not failing (#2537)\n%s\n",
+			baseline, current, grace, settle, dumpStacks())
+		if !warnOnly && code == 0 {
+			code = 1
+		}
+	}
+	return code
 }
