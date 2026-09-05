@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // derivedCaps returns the sorted union of RequiredNodeCaps across every
@@ -27,9 +28,12 @@ func derivedCaps() []string {
 			seen[c] = struct{}{}
 		}
 	}
-	if len(seen) == 0 {
-		return nil
+	if seen == nil {
+		seen = make(map[string]struct{}, 1)
 	}
+	// Always advertised: the EventEntry schema this binary speaks, so a
+	// mixed-version primary can gate a future semantic change (#2496).
+	seen[clievent.SchemaCap] = struct{}{}
 	out := make([]string, 0, len(seen))
 	for c := range seen {
 		out = append(out, c)

@@ -93,3 +93,23 @@ type AskQuestionOpt struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
 }
+
+// SchemaVersion is the semantic version of the EventEntry shape shared by
+// the three surfaces that carry it: the persisted event log
+// (eventlog/schema.WireVersion pairs with it), the node RPC (the register
+// handshake advertises "evententry.v<N>" so a peer can gate a future
+// semantic change), and the dashboard WS wire.
+//
+// Bump policy (mirrors eventlog/schema.WireVersion):
+//   - Additive fields with omitempty → NO bump; readers ignore unknowns.
+//   - Renaming/removing a field, changing a field's meaning, or changing
+//     its JSON shape → bump, together with the paired constants (the
+//     linkage tests in eventlog/schema, internal/node and internal/upstream
+//     go red until every pairing is updated deliberately).
+const SchemaVersion = 1
+
+// SchemaCap is the capability tag remote nodes advertise on the register
+// handshake for this EventEntry schema. It must never appear in any
+// backend.Profile.RequiredNodeCaps — it describes what the peer speaks,
+// not what a backend needs.
+const SchemaCap = "evententry.v1"

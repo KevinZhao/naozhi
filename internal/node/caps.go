@@ -3,12 +3,15 @@ package node
 import (
 	"log/slog"
 	"sort"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // knownServerCaps is the capability set this binary understands. Unknown
 // advertised caps only WARN (mixed-version signal); the node still registers.
 // Add here when a new capability is introduced on the client side.
 var knownServerCaps = map[string]struct{}{
+	clievent.SchemaCap: {},
 	"gemini":           {},
 	"acp":              {},
 	"codex-app-server": {},
