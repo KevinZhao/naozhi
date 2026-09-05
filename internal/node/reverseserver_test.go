@@ -2,10 +2,11 @@ package node
 
 import (
 	"crypto/sha256"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,12 +57,8 @@ func newTestReverseServer(nodeID, token string, trustedProxy bool) *ReverseServe
 func TestReverseServer_Register_ok(t *testing.T) {
 	rs := newTestReverseServer("node-1", "secret", false)
 
-	var registered atomic.Bool
-	rs.OnRegister = func(id string, conn *ReverseConn) {
-		if id == "node-1" {
-			registered.Store(true)
-		}
-	}
+	registered := make(chan string, 1)
+	rs.OnRegister = func(id string, conn *ReverseConn) { registered <- id }
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws-node", rs)
@@ -76,9 +73,13 @@ func TestReverseServer_Register_ok(t *testing.T) {
 		t.Fatalf("expected 'registered', got %q (err: %q)", resp.Type, resp.Error)
 	}
 
-	// Give OnRegister a moment to be called.
-	time.Sleep(30 * time.Millisecond)
-	if !registered.Load() {
+	// OnRegister fires on the server goroutine; join deterministically.
+	select {
+	case id := <-registered:
+		if id != "node-1" {
+			t.Errorf("OnRegister id = %q, want node-1", id)
+		}
+	case <-time.After(2 * time.Second):
 		t.Error("OnRegister was not called")
 	}
 }
@@ -248,8 +249,8 @@ func TestReverseServer_AllNodes_includesDisconnected(t *testing.T) {
 func TestReverseServer_Reconnect_closesOldConn(t *testing.T) {
 	rs := newTestReverseServer("node-1", "tok", false)
 
-	var registerCount atomic.Int32
-	rs.OnRegister = func(id string, conn *ReverseConn) { registerCount.Add(1) }
+	registered := make(chan struct{}, 4)
+	rs.OnRegister = func(id string, conn *ReverseConn) { registered <- struct{}{} }
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws-node", rs)
@@ -269,16 +270,35 @@ func TestReverseServer_Reconnect_closesOldConn(t *testing.T) {
 	}
 	defer conn2.Close()
 
-	// conn1 should be closed by the server.
+	// conn1 must be closed by the server; drain any non-close frame still in
+	// flight and only accept a real close (a read deadline means it never
+	// happened).
 	conn1.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, _, err := conn1.ReadMessage()
-	if err == nil {
-		t.Error("expected conn1 to be closed after reconnect with same node_id")
+	for {
+		_, _, err := conn1.ReadMessage()
+		if err == nil {
+			continue
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Error("conn1 was not closed after reconnect with same node_id (read timed out)")
+		}
+		break
 	}
 
-	time.Sleep(30 * time.Millisecond)
-	if registerCount.Load() != 2 {
-		t.Errorf("expected OnRegister called twice, got %d", registerCount.Load())
+	// OnRegister fires on the server goroutine after each registered ack;
+	// join both deterministically instead of sleeping.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-registered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("OnRegister fired %d time(s), want 2", i)
+		}
+	}
+	select {
+	case <-registered:
+		t.Error("OnRegister fired more than twice")
+	default:
 	}
 }
 

@@ -245,3 +245,7 @@ func TestFilesViewJS_RenderEmptyNotDoubleEscaped(t *testing.T) {
 		t.Errorf("files_view.js double-escapes a renderEmpty argument: %q (renderEmpty escapes internally)", m)
 	}
 }
+
+// Matches `--nz-z-NAME:VALUE;` token definitions in :root (moved from the
+// deleted static_zindex_scale_test.go, #2533 A2b).
+var reZIndexToken = regexp.MustCompile(`--nz-z-([a-z]+):(\d+)`)
