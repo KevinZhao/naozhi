@@ -1,8 +1,8 @@
 package config
 
 import (
-	"crypto/sha256"
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"

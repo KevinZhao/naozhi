@@ -74,22 +74,22 @@ type healthDispatchStats struct {
 type healthAuthSection struct {
 	// Version is the build tag. Auth-only so a public /health cannot
 	// fingerprint the running binary.
-	Version           string                  `json:"version,omitempty"`
-	Sessions          healthSessionStats      `json:"sessions"`
-	WorkspaceID       string                  `json:"workspace_id"`
-	WorkspaceName     string                  `json:"workspace_name"`
-	System            map[string]any          `json:"system"`
-	Goroutines        int                     `json:"goroutines"`
-	Watchdog          healthWatchdogStats     `json:"watchdog"`
-	WSDropped         *int64                  `json:"ws_dropped,omitempty"`
-	Dispatch          *healthDispatchStats    `json:"dispatch,omitempty"`
-	CLIAvailable      bool                    `json:"cli_available"`
+	Version       string               `json:"version,omitempty"`
+	Sessions      healthSessionStats   `json:"sessions"`
+	WorkspaceID   string               `json:"workspace_id"`
+	WorkspaceName string               `json:"workspace_name"`
+	System        map[string]any       `json:"system"`
+	Goroutines    int                  `json:"goroutines"`
+	Watchdog      healthWatchdogStats  `json:"watchdog"`
+	WSDropped     *int64               `json:"ws_dropped,omitempty"`
+	Dispatch      *healthDispatchStats `json:"dispatch,omitempty"`
+	CLIAvailable  bool                 `json:"cli_available"`
 	// ConfigSHA256 / ConfigLoadedAt / ConfigPath fingerprint the config the
 	// process loaded (#2538). Auth-only by construction (this struct is the
 	// authenticated section), so a public probe cannot read the hash or path.
-	ConfigSHA256   string `json:"config_sha256,omitempty"`
-	ConfigLoadedAt string `json:"config_loaded_at,omitempty"`
-	ConfigPath     string `json:"config_path,omitempty"`
+	ConfigSHA256      string                  `json:"config_sha256,omitempty"`
+	ConfigLoadedAt    string                  `json:"config_loaded_at,omitempty"`
+	ConfigPath        string                  `json:"config_path,omitempty"`
 	Nodes             map[string]string       `json:"nodes,omitempty"`
 	Platforms         map[string]string       `json:"platforms"`
 	EventLog          *healthEventLogStats    `json:"eventlog,omitempty"`
