@@ -1,4 +1,4 @@
-package shim
+package envpolicy
 
 import (
 	"context"
@@ -44,7 +44,7 @@ func TestFilterShimEnv_OversizeWarningCap(t *testing.T) {
 		input = append(input, "BIG_VAR="+big) // oversized — must be dropped
 	}
 
-	got := filterShimEnv(input)
+	got := FilterShimEnv(input)
 
 	// Only the benign HOME entry survives; every oversized entry is dropped.
 	if len(got) != 1 || got[0] != "HOME=/home/user" {

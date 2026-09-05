@@ -1,4 +1,4 @@
-package shim
+package envpolicy
 
 import (
 	"strings"
@@ -17,14 +17,14 @@ func TestFilterShimEnv_OversizedEntryRejected(t *testing.T) {
 		"ANTHROPIC_API_KEY=sk-test", // allowed, normal
 		"BIG_SECRET=" + bigVal,      // oversized — must be rejected
 	}
-	got := filterShimEnv(input)
+	got := FilterShimEnv(input)
 	// Only the two normal entries must survive.
 	if len(got) != 2 {
 		t.Fatalf("expected 2 entries (oversized rejected), got %d: %v", len(got), got)
 	}
 	for _, kv := range got {
 		if len(kv) > maxShimEnvEntryBytes {
-			t.Errorf("oversized entry leaked through filterShimEnv: len=%d key=%s", len(kv), kvKeyPrefix(kv))
+			t.Errorf("oversized entry leaked through FilterShimEnv: len=%d key=%s", len(kv), kvKeyPrefix(kv))
 		}
 	}
 }

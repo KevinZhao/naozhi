@@ -1357,79 +1357,15 @@ func (c *Config) QueueMode() string {
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 
-// envExpansionDenyPrefixes are upstream-credential env prefixes never expanded
-// in config.yaml: an operator mistaking ${ANTHROPIC_API_KEY} for a generic
-// alias would materialise the key into a string field that may be logged or
-// echoed by the dashboard. Case-insensitive prefix match on the full name; a
-// future need should add a NAOZHI_-prefixed alias, not relax this list (#1047).
-var envExpansionDenyPrefixes = []string{
-	"ANTHROPIC_",
-	"CLAUDE_",
-	"AWS_",
-	"AZURE_",
-	"GCP_",
-	"GOOGLE_",
-	"OCI_",
-	"OPENAI_",
-	"GITHUB_TOKEN",
-	"GH_TOKEN",
-	"OPENROUTER_",
-	"MISTRAL_",
-	"HUGGINGFACE_",
-	"HUGGING_FACE_",
-	"SECRET_",
-	"PASSWORD_",
-}
-
-// envExpansionDenySuffixes are generic secret-naming suffixes (DATABASE_PASSWORD,
-// SOME_API_TOKEN) refused regardless of prefix, for the same leak reason.
-// Kept conservative so non-secret aliases stay usable; envExpansionAllowPrefixes
-// overrides them (#2320).
-var envExpansionDenySuffixes = []string{
-	"_SECRET",
-	"_PASSWORD",
-	"_PASSWD",
-	"_TOKEN",
-	"_APIKEY",
-	"_API_KEY",
-	"_ACCESS_KEY",
-	"_SECRET_KEY",
-	"_PRIVATE_KEY",
-	"_CREDENTIALS",
-}
-
-// envExpansionAllowPrefixes are naozhi-owned namespaces (NAOZHI_DASHBOARD_TOKEN,
-// FEISHU_APP_SECRET, …) whose values ARE the legitimate config inputs; a match
-// re-permits a deny-suffix but never a deny-prefix.
-var envExpansionAllowPrefixes = []string{
-	"NAOZHI_",
-	"FEISHU_",
-	"SLACK_",
-	"PC_",
-	"IM_",
-}
-
 // allowEnvExpansion reports whether key is safe to expand in config.yaml; on
 // false the caller leaves the placeholder intact so the secret never reaches
-// the in-memory Config.
+// the in-memory Config. Policy lives in the envpolicy Table
+// (SourceExpansion): upstream-credential and secret-suffixed names are
+// refused, naozhi-owned namespaces are the legitimate config inputs,
+// everything else expands.
 func allowEnvExpansion(key string) bool {
-	upper := strings.ToUpper(key)
-	for _, p := range envExpansionDenyPrefixes {
-		if strings.HasPrefix(upper, p) {
-			return false
-		}
-	}
-	for _, p := range envExpansionAllowPrefixes {
-		if strings.HasPrefix(upper, p) {
-			return true
-		}
-	}
-	for _, s := range envExpansionDenySuffixes {
-		if strings.HasSuffix(upper, s) {
-			return false
-		}
-	}
-	return true
+	_, ok := envpolicy.Allowed(key, envpolicy.SourceExpansion)
+	return ok
 }
 
 // expandEnvVars resolves ${VAR} placeholders in the YAML payload. Denied names

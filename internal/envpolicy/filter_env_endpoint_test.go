@@ -1,4 +1,4 @@
-package shim
+package envpolicy
 
 import (
 	"context"
@@ -23,7 +23,7 @@ func TestFilterShimEnv_EndpointSSRFGuard(t *testing.T) {
 		"AWS_ENDPOINT_URL=https://gw.corp.example.com", // https — keep
 		"AWS_BEDROCK_ENDPOINT=http://127.0.0.1:8080",   // loopback http — keep
 	}
-	got := filterShimEnv(input)
+	got := FilterShimEnv(input)
 	gotSet := map[string]bool{}
 	for _, kv := range got {
 		gotSet[kv] = true

@@ -22,49 +22,6 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// claudeEnvAllowedPrefixes restricts which settings.json env vars may enter
-// the naozhi process: only what Claude CLI and its AWS/Anthropic plumbing
-// consume, so a third-party extension cannot widen the attack surface.
-var claudeEnvAllowedPrefixes = []string{
-	"ANTHROPIC_",
-	"CLAUDE_",
-	"AWS_",
-	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
-	"http_proxy", "https_proxy", "no_proxy",
-}
-
-// proxyEnvKeys are the proxy vars whose VALUE steers ALL outbound traffic
-// (Feishu bearer token, message bodies, upstream). A tampered settings.json
-// could set HTTPS_PROXY=http://attacker, so the value gets the same
-// non-loopback-https guard as base URLs (#1660). NO_PROXY is not a URL.
-var proxyEnvKeys = map[string]bool{
-	"HTTP_PROXY":  true,
-	"HTTPS_PROXY": true,
-	"http_proxy":  true,
-	"https_proxy": true,
-}
-
-// claudeEnvDenyList blocks CLI kill-switch / mock-mode keys inside the
-// wholesale-allowed CLAUDE_ prefix: settings.json is writable by a Claude
-// tool and these change security-relevant behaviour of shim/CLI children (#1660).
-var claudeEnvDenyList = map[string]bool{
-	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
-	"CLAUDE_CODE_USE_MOCK_RESPONSES":           true,
-}
-
-// awsEnvDenyList 在 AWS_ 前缀允许之上再禁止会改变 AWS 认证来源的键（角色切换、
-// 凭据文件重定向）：settings.json 可被 Claude tool 写入，放行等于凭据劫持通道。
-var awsEnvDenyList = map[string]bool{
-	"AWS_ROLE_ARN":                true,
-	"AWS_WEB_IDENTITY_TOKEN_FILE": true,
-	"AWS_SHARED_CREDENTIALS_FILE": true,
-	"AWS_CONFIG_FILE":             true,
-	"AWS_PROFILE":                 true,
-	"AWS_DEFAULT_PROFILE":         true,
-	"AWS_CA_BUNDLE":               true,
-	"AWS_ENDPOINT_URL":            true,
-}
-
 // settingsErrSeverity classifies applyClaudeEnvSettings failures for main():
 // file-missing (first run) and ctx-cancel (shutdown) stay at Warn; corrupt
 // JSON is operator-actionable and surfaces at Error.
@@ -134,23 +91,29 @@ func readJSONWithRetryFn(ctx context.Context, path string, attempts int, sleep t
 	return nil, lastParseErr
 }
 
-// filterClaudeEnv returns the entries of in that pass the prefix allowlist,
-// the AWS/CLAUDE deny lists and the per-value checks (no NUL/newline, ≤4096
-// bytes, https for non-loopback URLs). Rejected keys are logged at WARN.
+// filterClaudeEnv returns the entries of in whose key the envpolicy Table
+// allows for SourceSettings (Claude/AWS/proxy plumbing minus the
+// auth-source-changing and kill-switch keys) and whose value passes both the
+// generic checks (no NUL/newline, ≤4096 bytes) and the key's per-source guard
+// (https-for-non-loopback for base URLs and proxies). Rejected keys are
+// logged at WARN; keys outside the allowed namespaces are skipped silently.
 // cc children do not go through this path (they read settings.json directly),
 // so the parent-env view may intentionally differ from cc's (RFC §7.1).
 func filterClaudeEnv(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
-		if !matchesAnyPrefix(k, claudeEnvAllowedPrefixes) {
-			continue
-		}
-		if awsEnvDenyList[k] {
-			slog.Warn("claude settings env: refusing to propagate auth-source AWS var", "key", k)
-			continue
-		}
-		if claudeEnvDenyList[k] {
-			slog.Warn("claude settings env: refusing to propagate CLAUDE_ kill-switch var", "key", k)
+		rule, allowed := envpolicy.Allowed(k, envpolicy.SourceSettings)
+		if !allowed {
+			// An explicitly denied key (matched a table rule) is worth a
+			// warning — the operator put it in settings.json expecting effect;
+			// a key outside the allowed namespaces is everyday noise.
+			if rule.Pattern != "" {
+				if strings.HasPrefix(k, "AWS_") {
+					slog.Warn("claude settings env: refusing to propagate auth-source AWS var", "key", k)
+				} else {
+					slog.Warn("claude settings env: refusing to propagate CLAUDE_ kill-switch var", "key", k)
+				}
+			}
 			continue
 		}
 		// Children inherit the env via execve; NUL/newline or huge values must
@@ -159,39 +122,18 @@ func filterClaudeEnv(in map[string]string) map[string]string {
 			slog.Warn("claude settings env: rejecting unsafe value", "key", k, "len", len(v))
 			continue
 		}
-		// Base URLs steer API traffic; a tampered file could aim them at an
-		// attacker host or IMDS (169.254.169.254). https unless loopback (#1576).
-		if claudeBaseURLEnvKeys[k] {
-			if err := validateClaudeBaseURLEnv(v); err != nil {
+		// Base URLs and proxies steer API / outbound traffic; a tampered file
+		// could aim them at an attacker host or IMDS. https unless loopback
+		// (#1576, #1660).
+		if guard := envpolicy.GuardFor(k, envpolicy.SourceSettings); guard != nil {
+			if err := guard(v); err != nil {
 				slog.Warn("claude settings env: rejecting unsafe base_url", "key", k, "err", err)
-				continue
-			}
-		}
-		// Same guard for proxies: no remote plaintext-http interceptor (#1660).
-		if proxyEnvKeys[k] {
-			if err := validateClaudeBaseURLEnv(v); err != nil {
-				slog.Warn("claude settings env: rejecting unsafe proxy", "key", k, "err", err)
 				continue
 			}
 		}
 		out[k] = v
 	}
 	return out
-}
-
-// claudeBaseURLEnvKeys are the env keys whose value is an API endpoint URL;
-// each is SSRF-guarded by validateClaudeBaseURLEnv (#1576).
-var claudeBaseURLEnvKeys = map[string]bool{
-	"ANTHROPIC_BASE_URL":         true,
-	"ANTHROPIC_BEDROCK_BASE_URL": true,
-	"ANTHROPIC_VERTEX_BASE_URL":  true,
-}
-
-// validateClaudeBaseURLEnv requires https:// unless the host is loopback
-// (local mock gateways); empty is accepted. Shared with the sysession Runner
-// guard via internal/envpolicy.
-func validateClaudeBaseURLEnv(v string) error {
-	return envpolicy.ValidateBaseURLValue(v)
 }
 
 // applyClaudeEnvSettings applies the settings.json env section to the current
@@ -272,19 +214,4 @@ func resolveNaozhiSettingsFile(cfg *config.Config, storePath, claudeDir string) 
 			"path", path, "seeded_from_local", seeded)
 	}
 	return path
-}
-
-// matchesAnyPrefix reports whether s matches any prefix: entries ending in
-// "_" match a namespace, others match the exact name.
-func matchesAnyPrefix(s string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasSuffix(p, "_") {
-			if strings.HasPrefix(s, p) {
-				return true
-			}
-		} else if s == p {
-			return true
-		}
-	}
-	return false
 }

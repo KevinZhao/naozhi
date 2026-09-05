@@ -1,9 +1,9 @@
-package shim
+package envpolicy
 
 import "testing"
 
 // TestFilterShimEnv_SettingsOwnedKeysNotForwarded locks in the contract written
-// on shimEnvAllowedPrefixes: functional Claude knobs that live in
+// on the Table's shim column: functional Claude knobs that live in
 // ~/.claude/settings.json must NOT be forwarded through the shim env allowlist.
 //
 // The spawned claude reads settings.json itself via `--setting-sources user`,
@@ -12,7 +12,7 @@ import "testing"
 // would be redundant and would re-widen the secret-leak surface the allowlist
 // bounds (the CLI's Bash tool can `env | grep` whatever we pass through).
 //
-// If a future edit adds one of these to shimEnvAllowedPrefixes to "make a
+// If a future edit adds one of these to the Table's shim column to "make a
 // setting take effect", this test fails and points the author back to
 // settings.json as the single source of truth.
 func TestFilterShimEnv_SettingsOwnedKeysNotForwarded(t *testing.T) {
@@ -32,8 +32,8 @@ func TestFilterShimEnv_SettingsOwnedKeysNotForwarded(t *testing.T) {
 	}
 
 	for _, kv := range settingsOwned {
-		if got := filterShimEnv([]string{kv}); len(got) != 0 {
-			t.Errorf("filterShimEnv(%q) forwarded %v; settings.json-owned keys must NOT be in the shim allowlist (see shimEnvAllowedPrefixes contract — settings.json is the single source of truth)", kv, got)
+		if got := FilterShimEnv([]string{kv}); len(got) != 0 {
+			t.Errorf("FilterShimEnv(%q) forwarded %v; settings.json-owned keys must NOT be in the shim allowlist (see the Table's shim column contract — settings.json is the single source of truth)", kv, got)
 		}
 	}
 }
@@ -61,8 +61,8 @@ func TestFilterShimEnv_PlumbingStillForwarded(t *testing.T) {
 	}
 
 	for _, kv := range mustForward {
-		if got := filterShimEnv([]string{kv}); len(got) != 1 || got[0] != kv {
-			t.Errorf("filterShimEnv(%q) = %v; required plumbing/credential var must be forwarded", kv, got)
+		if got := FilterShimEnv([]string{kv}); len(got) != 1 || got[0] != kv {
+			t.Errorf("FilterShimEnv(%q) = %v; required plumbing/credential var must be forwarded", kv, got)
 		}
 	}
 }
