@@ -4,6 +4,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const STATIC_DIR = path.join(__dirname, '..', '..', 'internal', 'server', 'static');
 // The generated backend contract — the same file the dashboard loads. Stub
@@ -206,6 +207,10 @@ function defaultGitStates() {
  * @param {number} [overrides.sendStatus] - Status code for POST /api/sessions/send.
  * @param {object} [overrides.sessionRuns] - session key → GET /api/sessions/runs payload ({runs, stats}); unknown keys 404 (header runstats stay empty).
  * @param {object[]} [overrides.discovered] - GET /api/discovered payload (default: none).
+ * @param {boolean} [overrides.ws] - If true, accept /ws upgrades with a minimal
+ *   WebSocket server (auth → auth_ok, everything else recorded). Default keeps
+ *   the historical behavior: no upgrade listener, so the dashboard falls back
+ *   to polling and the whole existing suite keeps exercising that path.
  * @returns {Promise<{server: http.Server, port: number, url: string}>}
  */
 function startMockServer(overrides = {}) {
@@ -681,6 +686,75 @@ function startMockServer(overrides = {}) {
     res.end();
   });
 
+  // Minimal in-process WebSocket server (opt-in via overrides.ws). Real
+  // browsers send /ws as an HTTP Upgrade, which never reaches the request
+  // handler above — without an 'upgrade' listener node just destroys the
+  // socket and the dashboard falls back to polling (the default the whole
+  // suite relies on). With ws:true we complete the RFC6455 handshake, answer
+  // the dashboard's {type:'auth'} with auth_ok, record every client message,
+  // and let the test push arbitrary frames — enough to cover the
+  // connect → auth → onMessage dispatch path that polling tests never touch.
+  const wsConnections = [];
+  if (overrides.ws) {
+    server.on('upgrade', (req, socket) => {
+      if (new URL(req.url, 'http://x').pathname !== '/ws') { socket.destroy(); return; }
+      const accept = crypto
+        .createHash('sha1')
+        .update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+        .digest('base64');
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+        'Upgrade: websocket\r\nConnection: Upgrade\r\n' +
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+      );
+      const conn = {
+        messages: [],
+        send(obj) {
+          const payload = Buffer.from(JSON.stringify(obj));
+          const head =
+            payload.length < 126
+              ? Buffer.from([0x81, payload.length])
+              : Buffer.concat([Buffer.from([0x81, 126]), (() => { const b = Buffer.alloc(2); b.writeUInt16BE(payload.length); return b; })()]);
+          socket.write(Buffer.concat([head, payload]));
+        },
+        close() { socket.end(); },
+      };
+      wsConnections.push(conn);
+      let buf = Buffer.alloc(0);
+      socket.on('data', (chunk) => {
+        buf = Buffer.concat([buf, chunk]);
+        // Client frames are always masked; lengths in this suite stay < 64 KiB.
+        for (;;) {
+          if (buf.length < 2) return;
+          const opcode = buf[0] & 0x0f;
+          let len = buf[1] & 0x7f;
+          let off = 2;
+          if (len === 126) {
+            if (buf.length < 4) return;
+            len = buf.readUInt16BE(2);
+            off = 4;
+          }
+          const masked = (buf[1] & 0x80) !== 0;
+          const maskOff = off;
+          if (masked) off += 4;
+          if (buf.length < off + len) return;
+          const payload = buf.subarray(off, off + len);
+          if (masked) {
+            for (let i = 0; i < payload.length; i++) payload[i] ^= buf[maskOff + (i % 4)];
+          }
+          buf = buf.subarray(off + len);
+          if (opcode === 8) { socket.end(); return; }
+          if (opcode !== 1) continue; // ignore ping/pong/binary
+          let msg;
+          try { msg = JSON.parse(payload.toString('utf8')); } catch { continue; }
+          conn.messages.push(msg);
+          if (msg.type === 'auth') conn.send({ type: 'auth_ok' });
+        }
+      });
+      socket.on('error', () => {});
+    });
+  }
+
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
@@ -696,6 +770,7 @@ function startMockServer(overrides = {}) {
         get favoriteCalls() { return favoriteCalls; },
         get labelCalls() { return labelCalls; },
         get discoveredCloseCalls() { return discoveredCloseCalls; },
+        get wsConnections() { return wsConnections; },
         // Mutators for tests that need the snapshot to CHANGE mid-run (e.g. a
         // /cd that moves a session's workspace). Bumping stats.version is what
         // makes the dashboard's version short-circuit re-render.
