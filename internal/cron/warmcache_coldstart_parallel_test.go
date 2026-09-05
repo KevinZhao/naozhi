@@ -16,6 +16,9 @@ import (
 // constructed store (cold cache, no prior warm) returns the runs newest-first
 // with intact payload after the parallel warm.
 func TestWarmCache_ColdStartParallelDecode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	s.enableTrimGC = false

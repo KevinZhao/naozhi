@@ -292,6 +292,9 @@ func TestP1_DisabledStoreNoOps(t *testing.T) {
 // we bypass executeOpt; this only stresses runStore.Append's per-jobID
 // mutex). All records persist, none lost. Race-clean under -race.
 func TestP1_ConcurrentFinishRunSerialised(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")

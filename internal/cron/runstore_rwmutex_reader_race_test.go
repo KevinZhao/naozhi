@@ -17,6 +17,9 @@ import (
 // concurrent writer's ring/head/count mutation, and that each reader snapshot
 // is internally consistent (count matches slice len, RunIDs unique).
 func TestRunStore_RWMutexReaders_NoRaceUnderConcurrentAppend(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")

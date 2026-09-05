@@ -15,6 +15,9 @@ import (
 // duplicates. Run under -race to catch any unsynchronised ring access if a
 // future refactor narrows the jobLock window.
 func TestRunStore_WarmCacheLocked_ConcurrentWarmAndGet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 

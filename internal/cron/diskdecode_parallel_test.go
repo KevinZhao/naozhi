@@ -14,6 +14,9 @@ import (
 // R249-PERF-7 / #928). scanSortedRunDir sorts by mtime DESC, so we stagger
 // each run's file mtime to give a deterministic expected ordering.
 func TestDiskListNewestFirst_ParallelDecodePreservesOrder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	s.enableTrimGC = false
@@ -57,6 +60,9 @@ func TestDiskListNewestFirst_ParallelDecodePreservesOrder(t *testing.T) {
 // branch counts corrupt files exactly like the serial branch and still
 // returns the readable rows in newest-first order.
 func TestDiskListNewestFirst_ParallelDecodeSkipsCorrupt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	s.enableTrimGC = false
@@ -100,6 +106,9 @@ func TestDiskListNewestFirst_ParallelDecodeSkipsCorrupt(t *testing.T) {
 // the newest `limit` candidates (not the whole directory) and returns them
 // newest-first.
 func TestDiskListNewestFirst_ParallelLimitTrimsToNewest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	s.enableTrimGC = false
@@ -138,6 +147,9 @@ func TestDiskListNewestFirst_ParallelLimitTrimsToNewest(t *testing.T) {
 // the fix the parallel branch hard-capped at n=min(len,limit) and dropped the
 // corrupt slot with no backfill, returning fewer than `limit` rows.
 func TestDiskListNewestFirst_ParallelBackfillsOverCorruptInOverCapWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	s.enableTrimGC = false

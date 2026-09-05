@@ -55,6 +55,9 @@ func TestStateDirSize_SumsFiles(t *testing.T) {
 }
 
 func TestStateDirSize_TruncatesOverBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: skipped in -short")
+	}
 	t.Parallel()
 	dir := t.TempDir()
 	// Create just over the budget worth of tiny files.

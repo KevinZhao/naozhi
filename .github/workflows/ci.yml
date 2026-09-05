@@ -187,11 +187,16 @@ jobs:
 
   # darwin hard gate: catches proc_darwin.go / sdnotify_darwin / symlink
   # path divergences that pass Linux silently (e.g. /var → /private/var).
-  # Promoted from soft gate (continue-on-error) after tool_result symlink
-  # fix confirmed zero flakes on 2026-05-15.
+  # Scope (#2542): full build+vet, but tests only for the packages carrying
+  # platform-divergent code — the ones with //go:build darwin files
+  # (internal/discovery, internal/eventlog/persist, internal/selfupdate,
+  # internal/shim) plus internal/osutil (direct syscall use). Everything else
+  # is platform-neutral Go the Linux job already ran under -race; re-running
+  # it here doubled CI machine time (276s) without ever catching a
+  # darwin-only red. -short keeps the Short-gated whale tests out.
   test-macos:
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -203,14 +208,22 @@ jobs:
       - name: Build (darwin hard gate)
         run: go build ./...
 
-      - name: Test
+      - name: Vet (darwin hard gate)
+        run: go vet ./...
+
+      - name: Test platform packages
         run: |
           pattern=$(grep -v '^#' .github/quarantine.txt 2>/dev/null | grep -v '^$' | paste -sd'|' -)
           skip=""
           if [ -n "$pattern" ]; then
             skip="-skip $pattern"
           fi
-          go test -race -timeout 300s -short $skip ./...
+          go test -race -timeout 300s -short $skip \
+            ./internal/osutil/... \
+            ./internal/shim/... \
+            ./internal/discovery/... \
+            ./internal/eventlog/persist/... \
+            ./internal/selfupdate/...
 
   # Playwright mock-server suite (test/e2e). Offline and deterministic: the
   # mock server stubs every API endpoint, and the live multibackend.* specs
