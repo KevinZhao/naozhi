@@ -105,5 +105,3 @@ func TestEventuallyWithInterval_CustomCadence(t *testing.T) {
 		t.Errorf("elapsed = %v, want >=40ms (2nd poll must come after interval)", elapsed)
 	}
 }
-
-func TestRatchetCIProbe(t *testing.T) { time.Sleep(1 * time.Nanosecond) }
