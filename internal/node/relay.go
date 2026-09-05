@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/wsproto"
+
 	"github.com/gorilla/websocket"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -74,14 +76,14 @@ func newWSRelay(node *HTTPClient) *wsRelay {
 // Connects to the remote node on first call.
 func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 	if err := r.ensureConnected(); err != nil {
-		c.SendJSON(ServerMsg{Type: "error", Key: key, Node: r.node.ID, Error: "relay connect: " + err.Error()})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Node: r.node.ID, Error: "relay connect: " + err.Error()}))
 		return
 	}
 
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		c.SendJSON(ServerMsg{Type: "error", Key: key, Node: r.node.ID, Error: "relay closed"})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Node: r.node.ID, Error: "relay closed"}))
 		return
 	}
 	alreadySubscribed := len(r.subs[key]) > 0
@@ -113,7 +115,7 @@ func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 
 	// First subscriber or remote rebuild: the remote answers with `subscribed`
 	// + an Initial history frame that readLoop fans out to every local subscriber.
-	r.writeJSON(ClientMsg{Type: "subscribe", Key: key, After: after})
+	r.writeJSON(ClientMsg{Type: string(wsproto.TypeSubscribe), Key: key, After: after})
 }
 
 // Unsubscribe removes a local client from a remote session key.
@@ -127,9 +129,9 @@ func (r *wsRelay) Unsubscribe(c EventSink, key string) {
 	r.mu.Unlock()
 
 	if empty {
-		r.writeJSON(ClientMsg{Type: "unsubscribe", Key: key})
+		r.writeJSON(ClientMsg{Type: string(wsproto.TypeUnsubscribe), Key: key})
 	}
-	c.SendJSON(ServerMsg{Type: "unsubscribed", Key: key, Node: r.node.ID})
+	c.SendJSON(wsproto.NewUnsubscribed(wsproto.Unsubscribed{Key: key, Node: r.node.ID}))
 }
 
 // RemoveClient removes a client from all subscriptions (called on disconnect).
@@ -143,7 +145,7 @@ func (r *wsRelay) RemoveClient(c EventSink) {
 	r.mu.Unlock()
 
 	for _, key := range emptyKeys {
-		r.writeJSON(ClientMsg{Type: "unsubscribe", Key: key})
+		r.writeJSON(ClientMsg{Type: string(wsproto.TypeUnsubscribe), Key: key})
 	}
 }
 
@@ -242,7 +244,7 @@ func (r *wsRelay) connect() error {
 		return fmt.Errorf("dial %s: %w", r.node.ID, err)
 	}
 
-	if err := conn.WriteJSON(ClientMsg{Type: "auth", Token: r.node.Token}); err != nil {
+	if err := conn.WriteJSON(ClientMsg{Type: string(wsproto.TypeAuth), Token: r.node.Token}); err != nil {
 		conn.Close()
 		return fmt.Errorf("auth write %s: %w", r.node.ID, err)
 	}
@@ -491,7 +493,7 @@ func (r *wsRelay) reconnect() {
 		r.mu.Unlock()
 
 		for _, e := range resubscribes {
-			r.writeJSON(ClientMsg{Type: "subscribe", Key: e.key, After: e.after})
+			r.writeJSON(ClientMsg{Type: string(wsproto.TypeSubscribe), Key: e.key, After: e.after})
 		}
 		// writeJSON silently returns once r.closed, so a Close() racing the
 		// loop above would otherwise be reported as a false "reconnected".
@@ -521,7 +523,7 @@ func (r *wsRelay) reconnect() {
 func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
 	defer r.wg.Done()
 
-	c.SendJSON(ServerMsg{Type: "subscribed", Key: key, Node: r.node.ID})
+	c.SendJSON(wsproto.NewSubscribed(wsproto.Subscribed{Key: key, Node: r.node.ID}))
 
 	// Derived from baseCtx so Close() cancels every in-flight fetch.
 	ctx, cancel := context.WithTimeout(r.baseCtx, 5*time.Second)
@@ -533,7 +535,7 @@ func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
 		return
 	}
 	if len(entries) > 0 {
-		c.SendJSON(ServerMsg{Type: "history", Key: key, Node: r.node.ID, Events: entries, Initial: true})
+		c.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Node: r.node.ID, Events: entries, Initial: true}))
 	}
 }
 

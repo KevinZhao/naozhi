@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // agentTaskDoneSetter is the server-side view of the parent-stream EventLog
@@ -130,11 +131,11 @@ var agentTaskIDRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
 
 func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 	if err := session.ValidateSessionKey(msg.Key); err != nil {
-		c.SendJSON(node.ServerMsg{Type: "error", Error: "invalid key"})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Error: "invalid key"}))
 		return
 	}
 	if !agentTaskIDRe.MatchString(msg.TaskID) {
-		c.SendJSON(node.ServerMsg{Type: "error", Error: "invalid task_id"})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Error: "invalid task_id"}))
 		return
 	}
 	// Remote-node agent subscriptions are not yet supported — the tailer
@@ -142,32 +143,32 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 	// back to the HTTP endpoint (which rejects remote with 404 today,
 	// same effective UX).
 	if msg.Node != "" && msg.Node != "local" {
-		c.SendJSON(node.ServerMsg{
-			Type:   "agent_subscribe_rejected",
+		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
+
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
 			Reason: "remote_not_supported",
-		})
+		}))
 		return
 	}
 	sess := h.router.SessionFor(msg.Key)
 	if sess == nil {
-		c.SendJSON(node.ServerMsg{
-			Type:   "agent_subscribe_rejected",
+		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
+
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
 			Reason: "session_not_found",
-		})
+		}))
 		return
 	}
 	linker := sess.SubagentLinker()
 	if linker == nil {
-		c.SendJSON(node.ServerMsg{
-			Type:   "agent_subscribe_rejected",
+		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
+
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
 			Reason: "no_linker",
-		})
+		}))
 		return
 	}
 	info, ok := linker.QueryOrResolveFast(msg.TaskID)
@@ -175,21 +176,21 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 		// Linker context not yet installed (awaiting init event). The HTTP
 		// endpoint returns 202 on the same condition; tell WS clients to
 		// retry once the polling loop settles.
-		c.SendJSON(node.ServerMsg{
-			Type:   "agent_subscribe_rejected",
+		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
+
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
 			Reason: "pending",
-		})
+		}))
 		return
 	}
 	if info.InternalAgentID == "" || info.JSONLPath == "" {
-		c.SendJSON(node.ServerMsg{
-			Type:   "agent_subscribe_rejected",
+		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
+
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
 			Reason: "tombstone",
-		})
+		}))
 		return
 	}
 	// toolUseID isn't strictly needed by the tailer (all lookups use taskID)
@@ -197,21 +198,21 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 	// not expose it on the WS layer.
 	t, ok := h.tailers.ensureTailer(msg.Key, msg.TaskID, "", info.JSONLPath)
 	if !ok || t == nil {
-		c.SendJSON(node.ServerMsg{
-			Type:   "agent_subscribe_rejected",
+		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
+
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
 			Reason: "capacity",
-		})
+		}))
 		return
 	}
 	if !h.tailers.attach(tailerKey{msg.Key, msg.TaskID}, c) {
-		c.SendJSON(node.ServerMsg{
-			Type:   "agent_subscribe_rejected",
+		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
+
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
 			Reason: "closed",
-		})
+		}))
 		return
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // initialHistoryDiskTimeout bounds the disk-tier walk EventLastNVisibleCtx may
@@ -75,7 +76,7 @@ const maxSubscriptionsPerClient = 50
 func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	key := msg.Key
 	if key == "" {
-		c.SendJSON(node.ServerMsg{Type: "error", Error: "key is required"})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Error: "key is required"}))
 		return
 	}
 	// Same gate as the HTTP session handlers: without it a WS client can post a
@@ -83,7 +84,7 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// in c.subscriptions and land in sessions.json. ValidateSessionKey also
 	// caps length at MaxSessionKeyBytes.
 	if err := session.ValidateSessionKey(key); err != nil {
-		c.SendJSON(node.ServerMsg{Type: "error", Error: "invalid key"})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Error: "invalid key"}))
 		return
 	}
 
@@ -100,7 +101,7 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	h.mu.Lock()
 	if _, alreadySub := c.subscriptions[key]; !alreadySub && len(c.subscriptions) >= maxSubscriptionsPerClient {
 		h.mu.Unlock()
-		c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "too many subscriptions"})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Error: "too many subscriptions"}))
 		return
 	}
 	// Per-session-key cap across all connections via h.subscriberCount[key],
@@ -111,7 +112,7 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// and eagerly initialising the map must not silently activate them (#1401).
 	if !alreadySub && h.enforceCaps && h.subscriberCount[key] >= maxSubscribersPerKey {
 		h.mu.Unlock()
-		c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "too many subscribers for key"})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Error: "too many subscribers for key"}))
 		return
 	}
 	// Unsubscribe from previous subscription. The counter stays unchanged
@@ -156,7 +157,7 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	}
 	h.mu.Unlock()
 
-	c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "session not found"})
+	c.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Error: "session not found"}))
 }
 
 // completeSubscribe finishes a subscription once a valid session is available.
@@ -174,7 +175,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		h.mu.Unlock()
 
 		snap := sess.Snapshot()
-		c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State, Reason: "suspended"})
+		c.SendJSON(wsproto.NewSubscribed(wsproto.Subscribed{Key: key, State: snap.State, Reason: "suspended"}))
 
 		var entries []clievent.EventEntry
 		var hasMore bool
@@ -190,7 +191,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 			entries = sess.EventLastN(0)
 		}
 		if len(entries) > 0 || emptyInitialHistoryWanted(msg, snap.State) { // #2432
-			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: nonNilEntries(entries), HasMore: initialHasMorePtr(msg, hasMore), Initial: true})
+			c.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Events: nonNilEntries(entries), HasMore: initialHasMorePtr(msg, hasMore), Initial: true}))
 		}
 		slog.Debug("completeSubscribe: no process, sent persisted history", "key", key, "entries", len(entries), "has_more", hasMore)
 		return
@@ -277,23 +278,23 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	}
 
 	slog.Debug("completeSubscribe: sending history", "key", key, "entries", len(entries), "state", snap.State, "has_more", hasMore)
-	c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State})
+	c.SendJSON(wsproto.NewSubscribed(wsproto.Subscribed{Key: key, State: snap.State}))
 
 	csr := cli.NewSinceCursor() // #2402: Advance below seeds the pushLoop watermark
 	if len(entries) > 0 {
 		// Pooled marshal: initial history payloads can be hundreds of KB.
 		hm := initialHasMorePtr(msg, hasMore)
-		if data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: hm, Initial: true}); err == nil {
+		if data, err := marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: entries, HasMore: hm, Initial: true})); err == nil {
 			c.SendRaw(data)
 		} else {
 			slog.Warn("history marshal failed, falling back", "err", err, "key", key)
-			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: hm, Initial: true})
+			c.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Events: entries, HasMore: hm, Initial: true}))
 		}
 		csr.Advance(entries)
 	} else if emptyInitialHistoryWanted(msg, snap.State) {
 		// Empty Initial frame consumes the client's _initialSubscribe flag so
 		// the pane shows a placeholder instead of staying blank (#2432).
-		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: []clievent.EventEntry{}, HasMore: initialHasMorePtr(msg, hasMore), Initial: true})
+		c.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Events: []clievent.EventEntry{}, HasMore: initialHasMorePtr(msg, hasMore), Initial: true}))
 	}
 
 	spawned = true
@@ -310,7 +311,7 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	// bytes would land in the echoed "unsubscribed" reply and log attrs. Gate
 	// BEFORE remote delegation since handleRemoteUnsubscribe reads msg.Key too.
 	if err := session.ValidateSessionKey(key); err != nil {
-		c.SendJSON(node.ServerMsg{Type: "error", Error: "invalid key"})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Error: "invalid key"}))
 		return
 	}
 
@@ -342,7 +343,7 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	if dropMarshalCache && h.historyMarshalCache != nil {
 		h.historyMarshalCache.drop(key)
 	}
-	c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: key})
+	c.SendJSON(wsproto.NewUnsubscribed(wsproto.Unsubscribed{Key: key}))
 }
 
 // decSubscriberCountLocked decrements h.subscriberCount[key] and removes the
@@ -387,7 +388,7 @@ func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
 	// Reject malformed node IDs BEFORE calling slog to prevent log injection
 	// via ANSI/newline bytes in the attacker-controlled Node field.
 	if !isValidNodeID(msg.Node) {
-		c.SendJSON(node.ServerMsg{Type: "error", Key: msg.Key, Error: "unknown node"})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Key: msg.Key, Error: "unknown node"}))
 		return
 	}
 	conn, ok := h.lookupNode(msg.Node)
@@ -396,7 +397,7 @@ func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
 		// JS consumer rendering the field via innerHTML would turn a crafted
 		// node value into reflected XSS. Log internally for operator triage.
 		slog.Debug("ws subscribe: unknown node", "node", msg.Node)
-		c.SendJSON(node.ServerMsg{Type: "error", Key: msg.Key, Error: "unknown node"})
+		c.SendJSON(wsproto.NewError(wsproto.Error{Key: msg.Key, Error: "unknown node"}))
 		return
 	}
 	// Subscribe only needs the pub-sub role; narrow to node.NodeSubscriber (#435).
@@ -408,12 +409,12 @@ func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	if !isValidNodeID(msg.Node) {
 		// Mirror the success shape so slow clients can drop state even when
 		// the node ID is malformed — behaviour equivalent to "no such node".
-		c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: msg.Key})
+		c.SendJSON(wsproto.NewUnsubscribed(wsproto.Unsubscribed{Key: msg.Key}))
 		return
 	}
 	conn, ok := h.lookupNode(msg.Node)
 	if !ok {
-		c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: msg.Key, Node: msg.Node})
+		c.SendJSON(wsproto.NewUnsubscribed(wsproto.Unsubscribed{Key: msg.Key, Node: msg.Node}))
 		return
 	}
 	// Unsubscribe only needs the pub-sub role (#435).
@@ -424,7 +425,7 @@ func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
 // PurgeNodeSubscriptions notifies all browser clients that a node disconnected,
 // so they can deselect stale sessions.
 func (h *Hub) PurgeNodeSubscriptions(nodeID string) {
-	data, err := marshalPooled(node.ServerMsg{Type: "error", Node: nodeID, Error: "node disconnected"})
+	data, err := marshalPooled(wsproto.NewError(wsproto.Error{Node: nodeID, Error: "node disconnected"}))
 	if err != nil {
 		return
 	}

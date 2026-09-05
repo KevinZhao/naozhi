@@ -1,10 +1,10 @@
 package server
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -30,44 +30,25 @@ func wsOnMessageBody(t *testing.T, js string) string {
 	return js[start : start+end]
 }
 
-// backendWSFrameTypes scans every non-test wshub*.go file in this package
-// and collects the `type` values the server can push to a dashboard client:
-// struct literals of the form `...Msg{Type: "x"` (node.ServerMsg and the
-// dedicated broadcast structs) plus the pre-encoded frame constants
-// (`{"type":"x"}`) in wshub.go.
+// backendWSFrameTypes returns every frame type the backend declares, read
+// from the wsproto schema — the single source of truth the constructors,
+// the Go contract tests and test/e2e/check-ws-contract.mjs all share (#2535).
 func backendWSFrameTypes(t *testing.T) []string {
 	t.Helper()
-	files, err := filepath.Glob("wshub*.go")
+	data, err := os.ReadFile(filepath.Join("..", "wsproto", "wsproto.schema.json"))
 	if err != nil {
-		t.Fatalf("glob wshub*.go: %v", err)
+		t.Fatalf("read wsproto schema: %v", err)
 	}
-	literalRe := regexp.MustCompile(`(?s)Msg\{\s*Type:\s*"([a-z_]+)"`)
-	constRe := regexp.MustCompile(`\{"type":"([a-z_]+)"`)
-	seen := map[string]bool{}
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
-		}
-		for _, m := range literalRe.FindAllStringSubmatch(string(src), -1) {
-			seen[m[1]] = true
-		}
-		for _, m := range constRe.FindAllStringSubmatch(string(src), -1) {
-			seen[m[1]] = true
-		}
+	var doc struct {
+		Types []string `json:"types"`
 	}
-	out := make([]string, 0, len(seen))
-	for k := range seen {
-		out = append(out, k)
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parse wsproto schema: %v", err)
 	}
-	sort.Strings(out)
-	if len(out) < 10 {
-		t.Fatalf("backend frame-type extraction looks broken: only %d types found (%v)", len(out), out)
+	if len(doc.Types) == 0 {
+		t.Fatal("wsproto schema lists no types — regenerate with `go generate ./internal/wsproto`")
 	}
-	return out
+	return doc.Types
 }
 
 // TestDashboardJS_WSSwitchCoversBackendFrameTypes pins that every frame type

@@ -21,18 +21,6 @@ import (
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
-// Pre-encoded WS frames for bodies that never vary (auth / pong / common
-// readPump errors). Kept as string constants and converted to []byte at each
-// send site so no shared buffer can be appended to concurrently. Text must
-// stay byte-identical to node.ServerMsg JSON output (Type before Error).
-const (
-	wsAuthOkMsg          = `{"type":"auth_ok"}`
-	wsPongMsg            = `{"type":"pong"}`
-	wsAuthFailInvalidMsg = `{"type":"auth_fail","error":"invalid token"}`
-	wsErrNotAuthMsg      = `{"type":"error","error":"not authenticated"}`
-	wsErrRateLimitedMsg  = `{"type":"error","error":"rate limited"}`
-)
-
 // Hub manages WebSocket client connections and event subscriptions.
 //
 // Field-block contract: fields are grouped into 7 blocks — lifecycle

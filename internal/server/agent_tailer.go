@@ -9,6 +9,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // Agent tailer layer — streams each team agent's on-disk transcript to the
@@ -128,30 +129,30 @@ func (t *agentTailer) pollOnce() bool {
 	for i := range events {
 		e := events[i]
 		if len(subs) == 1 {
-			subs[0].SendJSON(node.ServerMsg{
-				Type:   "agent_event",
+			subs[0].SendJSON(wsproto.NewAgentEvent(wsproto.AgentEvent{
+
 				Key:    t.key,
 				TaskID: t.taskID,
 				Event:  &e,
-			})
+			}))
 			continue
 		}
-		data, err := marshalPooled(node.ServerMsg{
-			Type:   "agent_event",
+		data, err := marshalPooled(wsproto.NewAgentEvent(wsproto.AgentEvent{
+
 			Key:    t.key,
 			TaskID: t.taskID,
 			Event:  &e,
-		})
+		}))
 		if err != nil {
 			// Marshal cannot fail in practice; fall back to per-subscriber
 			// SendJSON rather than silently dropping the frame.
 			for _, c := range subs {
-				c.SendJSON(node.ServerMsg{
-					Type:   "agent_event",
+				c.SendJSON(wsproto.NewAgentEvent(wsproto.AgentEvent{
+
 					Key:    t.key,
 					TaskID: t.taskID,
 					Event:  &e,
-				})
+				}))
 			}
 			continue
 		}
@@ -162,27 +163,27 @@ func (t *agentTailer) pollOnce() bool {
 	if len(events) > 0 && len(subs) > 0 {
 		m := meta
 		if len(subs) == 1 {
-			subs[0].SendJSON(node.ServerMsg{
-				Type:      "agent_meta",
+			subs[0].SendJSON(wsproto.NewAgentMeta(wsproto.AgentMeta{
+
 				Key:       t.key,
 				TaskID:    t.taskID,
 				AgentMeta: &m,
-			})
+			}))
 		} else {
-			data, err := marshalPooled(node.ServerMsg{
-				Type:      "agent_meta",
+			data, err := marshalPooled(wsproto.NewAgentMeta(wsproto.AgentMeta{
+
 				Key:       t.key,
 				TaskID:    t.taskID,
 				AgentMeta: &m,
-			})
+			}))
 			if err != nil {
 				for _, c := range subs {
-					c.SendJSON(node.ServerMsg{
-						Type:      "agent_meta",
+					c.SendJSON(wsproto.NewAgentMeta(wsproto.AgentMeta{
+
 						Key:       t.key,
 						TaskID:    t.taskID,
 						AgentMeta: &m,
-					})
+					}))
 				}
 			} else {
 				for _, c := range subs {
@@ -255,18 +256,18 @@ func (t *agentTailer) finalize(status string) {
 			status = "completed"
 		}
 		m := meta
-		metaMsg := node.ServerMsg{
-			Type:      "agent_meta",
+		metaMsg := wsproto.NewAgentMeta(wsproto.AgentMeta{
+
 			Key:       t.key,
 			TaskID:    t.taskID,
 			AgentMeta: &m,
-		}
-		doneMsg := node.ServerMsg{
-			Type:   "agent_done",
+		})
+		doneMsg := wsproto.NewAgentDone(wsproto.AgentDone{
+
 			Key:    t.key,
 			TaskID: t.taskID,
 			Status: status,
-		}
+		})
 		// Mirror pollOnce: marshal once + SendRaw for multi-tab fan-out;
 		// single subscriber keeps SendJSON; marshal error falls back per-sub.
 		if len(subs) == 1 {

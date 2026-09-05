@@ -286,6 +286,9 @@ jobs:
       - name: Check growth ratchet
         run: node scripts/js-ratchet.mjs --check
 
+      - name: Check WS contract (wsproto schema vs dashboard dispatch)
+        run: node test/e2e/check-ws-contract.mjs
+
   # RNEW-TEST-432: Windows build-only job. Not a supported runtime — the
   # gate exists to surface regressions in packages that must compile on
   # all platforms. Shim/discovery syscall isolation was completed 2026-05-15

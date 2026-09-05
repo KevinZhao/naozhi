@@ -85,6 +85,7 @@ cmd/naozhi/main.go
   -> uiprefs      Dashboard 展示偏好持久化
   -> registry     插件 / 扩展注册表的 canonical home
   -> envpolicy    共享 env 过滤原语
+  -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame + schema）
   -> datadir      数据根目录磁盘布局策略
 
   叶子工具
