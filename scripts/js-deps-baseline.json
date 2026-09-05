@@ -1,0 +1,145 @@
+{
+  "matrix": {
+    "dashboard.js": {
+      "nz_util.js": [
+        "esc",
+        "escAttr",
+        "fetchJSON",
+        "nz",
+        "showToast",
+        "trapFocus"
+      ],
+      "cron_view.js": [
+        "appendEventsToContainer",
+        "authHeaders",
+        "cronApplyRunEnded",
+        "cronApplyRunStarted",
+        "cronJobs",
+        "cronTimelineRefreshHeadDebounced",
+        "ensureCronLiveSubscription",
+        "fetchCronJobs",
+        "formatCostUSD",
+        "formatDurationShort",
+        "formatRunDuration",
+        "isCronLiveKey",
+        "isCronSessionFrozen",
+        "isCronSessionKey",
+        "openCronPanel",
+        "renderCronPanel",
+        "repaintCronLive",
+        "setCronLiveStatus",
+        "updateCronLiveTruncated"
+      ],
+      "agent_view.js": [
+        "findAgentByTaskId",
+        "findAgentByToolUseId",
+        "initAgentsFromSession",
+        "renderAgentRows"
+      ]
+    },
+    "cron_view.js": {
+      "nz_util.js": [
+        "esc",
+        "escAttr",
+        "escJs",
+        "fetchJSON",
+        "nz",
+        "showToast",
+        "trapFocus"
+      ],
+      "dashboard.js": [
+        "CRON_LIVE_AGENT_ONLY_HTML",
+        "CRON_LIVE_MAX_EVENTS",
+        "EVENT_DIVIDER_GAP_MS",
+        "INTERNAL_EVENT_TYPES",
+        "activeView",
+        "appendEvents",
+        "confirmDialog",
+        "defaultWorkspace",
+        "eventHtml",
+        "eventTimer",
+        "fetchCLIBackends",
+        "formatAbsTime",
+        "getToken",
+        "isInternalEvent",
+        "lastDividerTime",
+        "lsGet",
+        "lsSet",
+        "mobileBack",
+        "navUserEls",
+        "processEventsForDisplay",
+        "projectsData",
+        "regroupAvatars",
+        "renderBackendPicker",
+        "renderEventsWithDividers",
+        "renderMd",
+        "runPendingAsync",
+        "selectSession",
+        "selectedKey",
+        "sending",
+        "sessionsData",
+        "setActiveSessionCard",
+        "setActivityView",
+        "shortPath",
+        "showAPIError",
+        "showAuthModal",
+        "showNetworkError",
+        "timeDividerHtml",
+        "turnState",
+        "wsm"
+      ]
+    },
+    "agent_view.js": {
+      "nz_util.js": [
+        "esc",
+        "escAttr",
+        "showToast"
+      ],
+      "dashboard.js": [
+        "fmtDuration",
+        "refreshBanner",
+        "selectedKey",
+        "selectedNode",
+        "sessionScrollPos",
+        "sessionsData",
+        "sid",
+        "turnState",
+        "wsm"
+      ]
+    },
+    "asset_browser.js": {
+      "nz_util.js": [
+        "esc",
+        "fetchJSON",
+        "nz"
+      ]
+    },
+    "files_view.js": {
+      "nz_util.js": [
+        "esc",
+        "escAttr",
+        "fetchJSON",
+        "nz"
+      ],
+      "dashboard.js": [
+        "fileApiUrl",
+        "renderSandboxedBlob"
+      ]
+    }
+  },
+  "tdz": {
+    "dashboard.js": {
+      "cron_view.js": [
+        "cronJobs"
+      ]
+    }
+  },
+  "typeofGuards": {
+    "nz_util.js": 1,
+    "dashboard.js": 35,
+    "cron_view.js": 13,
+    "agent_view.js": 0,
+    "asset_browser.js": 0,
+    "files_view.js": 0
+  }
+}
