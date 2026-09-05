@@ -220,11 +220,15 @@ func equivalenceCorpus() []string {
 func TestTableEquivalence_Shim(t *testing.T) {
 	t.Parallel()
 	for _, key := range equivalenceCorpus() {
-		kv := key + "=x"
-		got := shimKeyAllowed(kv)
-		want := retiredShimKeyAllowed(kv)
-		if got != want {
-			t.Errorf("shim column: key %q allowed=%v, retired allowlist says %v", key, got, want)
+		// Both shapes: "KEY=value" and a malformed entry without '=' — the
+		// retired list stored exact keys as "KEY=" prefixes, so namespace
+		// rules match without '=' but exact-key rules must not.
+		for _, kv := range []string{key + "=x", key} {
+			got := shimKeyAllowed(kv)
+			want := retiredShimKeyAllowed(kv)
+			if got != want {
+				t.Errorf("shim column: entry %q allowed=%v, retired allowlist says %v", kv, got, want)
+			}
 		}
 	}
 }
@@ -268,15 +272,38 @@ func TestTableEquivalence_Expansion(t *testing.T) {
 	}
 }
 
+// TestOverlayFileKeysResolveToAllowedKeys guards the *_FILE indirection map
+// against typos: every concrete key a file key expands into must itself be
+// overlay-allowed in the Table (the pre-table ValidateOverlayEntry carried
+// this as an inline defence-in-depth check).
+func TestOverlayFileKeysResolveToAllowedKeys(t *testing.T) {
+	t.Parallel()
+	for fileKey, concrete := range overlayFileKeys {
+		if _, ok := Allowed(concrete, SourceOverlay); !ok {
+			t.Errorf("overlayFileKeys[%q] = %q, which the Table does not allow for SourceOverlay", fileKey, concrete)
+		}
+		if _, ok := Allowed(fileKey, SourceOverlay); !ok {
+			t.Errorf("file key %q itself is not overlay-allowed in the Table", fileKey)
+		}
+	}
+}
+
 // TestTableInvariants checks structural properties every rule must hold:
 // Allowed ⊆ Specified, guards only on specified sources, and patterns use at
 // most one wildcard, at an end.
 func TestTableInvariants(t *testing.T) {
 	t.Parallel()
+	seen := map[string]Source{}
 	for _, r := range Table {
 		if r.Allowed&^r.Specified != 0 {
 			t.Errorf("rule %q: Allowed %04b not a subset of Specified %04b", r.Pattern, r.Allowed, r.Specified)
 		}
+		// Two rules with the same pattern deciding the same source would tie
+		// on specificity and silently resolve by slice order.
+		if overlap := seen[r.Pattern] & r.Specified; overlap != 0 {
+			t.Errorf("rule %q: duplicate pattern with overlapping Specified %04b", r.Pattern, overlap)
+		}
+		seen[r.Pattern] |= r.Specified
 		for src := range r.Guards {
 			if r.Specified&src == 0 {
 				t.Errorf("rule %q: guard for unspecified source %04b", r.Pattern, src)

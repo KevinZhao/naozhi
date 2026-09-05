@@ -337,10 +337,11 @@ var Table = []Rule{
 }
 
 // Allowed reports whether from may set (or expand) key, returning the rule
-// that decided. When no matching rule specifies the source, the zero Rule is
-// returned with the per-source default: allow for SourceExpansion, deny
-// otherwise. Value guards are NOT applied here — callers run
-// GuardFor(key, from) on the value after the key-level allow.
+// that decided. from must be a single Source bit — passing a combined mask
+// would blend per-source verdicts. When no matching rule specifies the
+// source, the zero Rule is returned with the per-source default: allow for
+// SourceExpansion, deny otherwise. Value guards are NOT applied here —
+// callers run GuardFor(key, from) on the value after the key-level allow.
 func Allowed(key string, from Source) (Rule, bool) {
 	if from == SourceExpansion {
 		// The expansion pipeline has always matched case-insensitively

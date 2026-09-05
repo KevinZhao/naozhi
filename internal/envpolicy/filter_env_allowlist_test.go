@@ -65,7 +65,7 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 
 		// Blocked — R222-SEC-2: trim Python/conda/nvm code-loading vectors
 		// previously allowed by bare "CONDA_" / VIRTUAL_ENV / NVM_DIR /
-		// PYTHONPATH / PYTHONHOME entries. See manager.go:shimEnvAllowedPrefixes
+		// PYTHONPATH / PYTHONHOME entries. See the Table shim column (table.go)
 		// for the per-key rationale.
 		{"NVM_DIR=/home/user/.nvm", false},
 		{"PYTHONPATH=/usr/lib/python3", false},
