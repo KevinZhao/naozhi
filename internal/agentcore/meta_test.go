@@ -6,6 +6,25 @@ import (
 	"testing"
 )
 
+// TestResultMetaOf_ModelUsage pins the per-model drill-down carried into the
+// sandbox receipt (docs/rfc/cost-ledger.md §5.4 Phase 2).
+func TestResultMetaOf_ModelUsage(t *testing.T) {
+	line := json.RawMessage(`{"type":"result","subtype":"success","total_cost_usd":0.9,"duration_ms":10,` +
+		`"modelUsage":{"us.anthropic.claude-fable-5-1[1m]":{"inputTokens":2,"outputTokens":4,"cacheCreationInputTokens":44990,` +
+		`"costUSD":0.9,"canonicalModel":"claude-fable-5-1","provider":"bedrock","costBasis":"managed"}}}`)
+	m, ok := ResultMetaOf(line)
+	if !ok || len(m.Models) != 1 {
+		t.Fatalf("meta = %+v ok=%v", m, ok)
+	}
+	if m.Models[0].Model != "claude-fable-5-1" || m.Models[0].CacheWrite != 44990 || m.Models[0].CostUSD != 0.9 || m.Basis != "managed" {
+		t.Fatalf("models = %+v basis=%q", m.Models, m.Basis)
+	}
+	plain, _ := ResultMetaOf(json.RawMessage(`{"type":"result","total_cost_usd":0.1}`))
+	if plain.Models != nil || plain.Basis != "" {
+		t.Fatalf("no modelUsage must yield nil models: %+v", plain)
+	}
+}
+
 func TestResultMetaOf(t *testing.T) {
 	tests := []struct {
 		name     string

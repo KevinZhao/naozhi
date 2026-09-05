@@ -3,6 +3,7 @@ package cron
 import (
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -43,7 +44,7 @@ func TestSandbox_MetaFlowsIntoRunRecord(t *testing.T) {
 	}
 	got := *run.SandboxMeta
 	want := runner.outcome.Meta
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SandboxMeta = %+v, want %+v", got, want)
 	}
 }

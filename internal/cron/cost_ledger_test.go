@@ -157,7 +157,8 @@ func TestAppendLedger_SandboxReceiptAndMetering(t *testing.T) {
 	s := &Scheduler{ledger: ledger}
 	job := &Job{ID: "job-sb", Backend: "claude"}
 	s.appendLedger(finishArgs{job: job, runID: "r1", workDir: "/w/alpha",
-		sandboxMeta: &SandboxRunMeta{CostUSD: 1.25}, sandbox: true})
+		sandboxMeta: &SandboxRunMeta{CostUSD: 1.25, Basis: costledger.BasisManaged,
+			Models: []costledger.ModelDelta{{Model: "m", CostUSD: 1.25, Tokens: costledger.Tokens{Output: 7}}}}, sandbox: true})
 	s.appendLedger(finishArgs{job: job, runID: "r2", sandboxMeta: &SandboxRunMeta{CostUSD: 0}, sandbox: true})
 	s.appendLedger(finishArgs{job: &Job{ID: "job-k", Backend: "kiro"}, runID: "r3",
 		costInc: costledger.Increment{Metered: map[costledger.Unit]float64{costledger.UnitCredits: 3}}})
@@ -176,6 +177,9 @@ func TestAppendLedger_SandboxReceiptAndMetering(t *testing.T) {
 	}
 	if receipt == nil || receipt.Source != costledger.SourceCronSandbox || receipt.Amount != 1.25 || receipt.Workspace != "alpha" || receipt.RunID != "r1" {
 		t.Fatalf("receipt = %+v", receipt)
+	}
+	if receipt.Basis != costledger.BasisManaged || len(receipt.Models) != 1 || receipt.Models[0].Output != 7 {
+		t.Fatalf("receipt drill-down = %+v", receipt)
 	}
 	if metered == nil || metered.Unit != costledger.UnitCredits || metered.Amount != 3 || metered.Backend != "kiro" {
 		t.Fatalf("metered = %+v", metered)

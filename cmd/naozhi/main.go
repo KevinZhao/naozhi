@@ -60,6 +60,9 @@ func main() {
 		case "upgrade":
 			runUpgrade(os.Args[2:])
 			return
+		case "cost":
+			runCost(os.Args[2:])
+			return
 		}
 	}
 

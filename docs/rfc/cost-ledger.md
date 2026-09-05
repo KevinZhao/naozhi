@@ -196,8 +196,8 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 - 目录 `<stateDir>/cost/`（`MkdirAll 0700`），文件 `YYYY-MM-DD.jsonl`（UTC 日切，`0600`，`O_WRONLY|O_APPEND|O_CREATE|O_NOFOLLOW`，打开前 `Lstat` 拒绝 symlink），每行一 Entry。
 - 写路径：`Append` 非阻塞投递到有界 channel（**cap 4096**，≈ 40 s 的 100 turn/s 突发），单 worker 批量写 + 每 1 s 或 64 条 fsync（复用 `runhistory.Store` 的 AppendAsync/DropTotal 模式 `store.go:80-128`）。满 → 丢弃 + `dropped` 计数 + 每分钟一条 warn。**任何路径不阻塞 turn**。
-- 内存 rollup：**只预聚合低基数维度** `(day, unit, source, backend, model, basis)`；`session_key / job_id / workspace / run_id` 维度的查询走窗口内日分片顺序扫描（700 KB/天 < 10 ms）。启动懒加载最近 `rollup_days`（默认 35）。
-- 查询窗口：默认最大 **90 天**；`retention_days` 全窗需 `allow_full_range=1`。Phase 2 加月度 rollup 文件 `YYYY-MM.json` 让 400 天查询 < 200 ms。
+- 内存 rollup：**只预聚合低基数维度** `(day, unit, source, backend, model, basis)`；`session_key / job_id / workspace / run_id` 维度的查询走窗口内日分片顺序扫描（700 KB/天 < 10 ms）。启动加载最近 `rollup_days`（默认 = `retention_days`，即整个保留期：低基数日聚合体积极小，全窗口 summary 不必扫文件）。
+- 查询窗口：默认最大 **90 天**；`retention_days` 全窗需 `allow_full_range=1`。全窗口低基数 summary 走内存 rollup（覆盖整个保留期），高基数维度才扫日分片。
 - 保留：`retention_days` 默认 400，启动 + 每日 sweep 删过期分片。
 - 容量：2000 turn/天 × 350 B ≈ 700 KB/天，1 年 ≈ 250 MB；rollup 内存 O(models × days) < 1 MB。
 - 崩溃一致性：尾部半行加载时跳过并 warn（同 eventlog）。
@@ -236,9 +236,9 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
   cost:
     enabled: true        # false = 不写 ledger，/api/cost/* 返回 503
     retention_days: 400  # [1, 3650]
-    rollup_days: 35      # [1, retention_days]
+    rollup_days: 400     # [1, retention_days]，默认 = retention_days；启动同步加载，慢于 1s 会打 Info 日志
   ```
-- 历史回填（Phase 2，可选 `naozhi cost backfill`）：从 `session-runs/` 与 `runs/` 导入 `Kind=backfill`，以 run_id 去重。
+- 历史回填 `naozhi cost backfill [-config] [-dry-run]`：从 `session-runs/` 与 cron `runs/` 导入 `Kind=backfill`（TS=StartedAt，以 run_id 去重，超出保留期跳过）；persistent 模式 cron 旧记录是累计值，**跳过不导**；导入落在过去日期文件，需重启 naozhi 刷新内存 rollup。
 
 ## 10. 可观测性
 
@@ -275,8 +275,8 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 | **0** | PR-2a | session：`accountTurnCost` 拆分 + `lastCumulative` + `CostTotals()` + ledger 写入（**含 cron key，暂以 `Source=session` 入账**）+ kiro/codex 差分 | P4 P6 P7 |
 | **0** | PR-2b | cron：`CostTotals` 前后差分 + `CronRun.CostUSD` 改增量 + cron_local/cron_sandbox 写入 + **同一 PR 内注入 `ownedByRun` 门**（门与写入同进同退，避免 2a→2b 之间或 2b 回滚期间 cron 成本真空）+ 删 `cron.SendResult.CostUSD` | P2 |
 | **0** | PR-3 | `/api/cost/summary|entries` + 服务概览卡 + cron per-job 聚合（config 已随 PR-2a 落地） | P9 P10 |
-| 1 | PR-4 | sysession json runner + 写入 | P3 |
-| 2 | — | 回填命令；月度 rollup；agentcore envelope 带 modelUsage | — |
+| 1 | PR-4 | sysession json runner + 写入（Runner 经 ctx `RunInfo` 归属到 Manager 的 runID） | P3 |
+| 2 | PR-5 | `naozhi cost backfill`；rollup 覆盖整个保留期（取代月度 rollup 文件）；agentcore 回执带 modelUsage；服务概览健康条 dropped/unknown 告警 | — |
 | 3（可选） | — | 5.6 影子 token 账 | P5 |
 
 每个 PR 可独立合并与回滚：PR-1 纯新增；PR-2a 纯新增写入；PR-2b 改 cron 口径（回滚回到累计值，ledger 仍为权威）；PR-3 纯读。

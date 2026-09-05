@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -95,13 +96,18 @@ type SandboxRunMeta struct {
 	CostUSD         float64 `json:"cost_usd,omitempty"`
 	DurationMS      int64   `json:"duration_ms,omitempty"`
 	MemoryPeakBytes int64   `json:"memory_peak_bytes,omitempty"`
+	// Models / Basis are the CLI result's per-model drill-down and worst
+	// price basis, carried into the ledger receipt.
+	Models []costledger.ModelDelta `json:"models,omitempty"`
+	Basis  costledger.Basis        `json:"basis,omitempty"`
 }
 
 // isZero reports whether the receipt carries no information (every field
 // at its zero value) — used to decide whether to attach it to the run
 // record at all, so non-sandbox runs never grow a `sandbox_meta` key.
 func (m SandboxRunMeta) isZero() bool {
-	return m == SandboxRunMeta{}
+	return m.RuntimeARN == "" && m.ImageVersion == "" && m.ExitStatus == 0 && m.CostUSD == 0 &&
+		m.DurationMS == 0 && m.MemoryPeakBytes == 0 && len(m.Models) == 0 && m.Basis == ""
 }
 
 // SandboxRunner executes run-once jobs at the sandbox placement. The

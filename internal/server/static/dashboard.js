@@ -9359,6 +9359,21 @@ function summarizeCostBuckets(data) {
   return out;
 }
 
+// buildCostHealthLines adds a warn line when the ledger reports dropped
+// entries or unknown-priced models, so the figure on the card is read with
+// the right amount of trust. [] when the ledger is healthy or not loaded.
+function buildCostHealthLines(c) {
+  if (!c) return [];
+  const lines = [];
+  if (c.dropped > 0) {
+    lines.push({ text: '成本账本丢弃 ' + c.dropped + ' 条（写入队列满），金额偏低', kind: 'warn' });
+  }
+  if (c.unknown > 0) {
+    lines.push({ text: '成本账本含 ' + c.unknown + ' 条未知定价（模型不在 CLI 价表）', kind: 'warn' });
+  }
+  return lines;
+}
+
 // costCardTitle explains what the ledger figure is (and is not): a CLI
 // estimate at list/contract price, never an invoice.
 function costCardTitle(c) {
@@ -9445,6 +9460,7 @@ function renderServiceOverviewHtml() {
       costStatHtml(stats) +
     '</div>';
   const healthLines = buildHomeHealthLines(lastStatsSnapshot);
+  for (const l of buildCostHealthLines(costSummaryCache)) healthLines.push(l);
   const healthHtml = healthLines.length === 0
     ? ''
     : '<div class="svc-health" role="status" aria-label="服务健康">' +

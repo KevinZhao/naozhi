@@ -112,7 +112,9 @@ func (s *Store) validate(q *Query) error {
 	}
 	limit := MaxQueryDays * 24 * time.Hour
 	if q.AllowFullRange {
-		limit = s.retention
+		// One day of slack: a caller spanning "retention ago" to "now (+ε)"
+		// at sub-day precision exceeds the window by the fraction of today.
+		limit = s.retention + 24*time.Hour
 	}
 	if q.To.Sub(q.From) > limit {
 		return ErrBadQuery
@@ -167,17 +169,39 @@ func (s *Store) Entries(q Query, limit int) ([]Entry, error) {
 	return out, nil
 }
 
+// Scan streams every entry matching q (filters + window) through fn in day
+// order, stopping when fn returns false. Backfill and audits use it; the
+// same validation and caps as Summarize apply.
+func (s *Store) Scan(q Query, fn func(Entry) bool) error {
+	if s == nil || s.disabled {
+		return nil
+	}
+	if q.GroupBy == "" {
+		q.GroupBy = GroupByDay
+	}
+	if err := s.validate(&q); err != nil {
+		return err
+	}
+	s.scanRange(q, fn)
+	return nil
+}
+
 // scanRange streams every day file overlapping the window through fn,
 // applying q's filters.
 func (s *Store) scanRange(q Query, fn func(Entry) bool) {
 	from, to := q.From.Format(dayLayout), q.To.Format(dayLayout)
+	stopped := false
 	for _, d := range s.dayFiles() {
+		if stopped {
+			return
+		}
 		if d < from || d > to {
 			continue
 		}
 		s.scanDay(d, func(e Entry) bool {
-			if q.match(e) {
-				return fn(e)
+			if q.match(e) && !fn(e) {
+				stopped = true
+				return false
 			}
 			return true
 		})
