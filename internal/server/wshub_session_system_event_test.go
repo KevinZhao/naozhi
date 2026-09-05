@@ -54,6 +54,29 @@ func recvMsg(t *testing.T, out <-chan node.ServerMsg) (node.ServerMsg, bool) {
 	}
 }
 
+// recvNone asserts none of the channels delivers a frame within a single
+// shared window. broadcastSessionSystemEvent fans out synchronously, but each
+// captured client relays send→out through a goroutine, so a short grace
+// period is needed for a wrongly-sent frame to surface; sharing one window
+// across all channels keeps the negative path O(window), not O(channels).
+func recvNone(t *testing.T, outs ...<-chan node.ServerMsg) {
+	t.Helper()
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for {
+		for i, out := range outs {
+			select {
+			case msg := <-out:
+				t.Fatalf("channel %d must not receive a frame, got %+v", i, msg)
+			default:
+			}
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestBroadcastSessionSystemEvent_ReachesSubscribers verifies R176-ARCH-NX
 // (#433) parity: a remote-send failure fans out to every dashboard subscribed
 // to the session key as a `system` event, not just the originating tab.
@@ -102,9 +125,7 @@ func TestBroadcastSessionSystemEvent_SkipsNonSubscribers(t *testing.T) {
 
 	hub.broadcastSessionSystemEvent("feishu:p2p:alice", "发送失败：remote down")
 
-	if _, ok := recvMsg(t, otherOut); ok {
-		t.Fatal("non-subscriber should not receive the system event")
-	}
+	recvNone(t, otherOut)
 }
 
 // TestBroadcastSessionSystemEvent_NoSubscribersNoop verifies the
@@ -120,9 +141,7 @@ func TestBroadcastSessionSystemEvent_NoSubscribersNoop(t *testing.T) {
 
 	hub.broadcastSessionSystemEvent("node1:p2p:unwatched", "发送失败：x")
 
-	if _, ok := recvMsg(t, out); ok {
-		t.Fatal("a session with no subscribers should deliver nothing")
-	}
+	recvNone(t, out)
 }
 
 // TestBroadcastSessionSystemEvent_ZeroCountFastPath verifies R202606g-PERF-003
@@ -141,9 +160,7 @@ func TestBroadcastSessionSystemEvent_ZeroCountFastPath(t *testing.T) {
 
 	hub.broadcastSessionSystemEvent("feishu:p2p:zero", "发送失败：x")
 
-	if _, ok := recvMsg(t, out); ok {
-		t.Fatal("zero-subscriber key must deliver nothing via the fast path")
-	}
+	recvNone(t, out)
 }
 
 // TestBroadcastSessionSystemEvent_MultipleSubscribers verifies every client
@@ -175,9 +192,7 @@ func TestBroadcastSessionSystemEvent_MultipleSubscribers(t *testing.T) {
 			t.Fatalf("subscriber %d got unexpected frame: %+v", i, msg)
 		}
 	}
-	if _, ok := recvMsg(t, otherOut); ok {
-		t.Fatal("subscriber on a different key must not receive the event")
-	}
+	recvNone(t, otherOut)
 }
 
 // TestBroadcastSessionSystemEvent_ConcurrentChurn exercises the #1902 lock
@@ -317,11 +332,7 @@ func TestBroadcastSessionSystemEvent_ChunkedFilter(t *testing.T) {
 			t.Fatalf("subscriber %d got unexpected frame: %+v", i, msg)
 		}
 	}
-	for i, out := range otherOuts {
-		if _, ok := recvMsg(t, out); ok {
-			t.Fatalf("non-subscriber %d must not receive the event", i)
-		}
-	}
+	recvNone(t, otherOuts...)
 }
 
 // TestBroadcastSessionSystemEvent_EmptyArgsNoop guards the early return so an
@@ -336,7 +347,5 @@ func TestBroadcastSessionSystemEvent_EmptyArgsNoop(t *testing.T) {
 	hub.broadcastSessionSystemEvent("", "发送失败：x")
 	hub.broadcastSessionSystemEvent("feishu:p2p:alice", "")
 
-	if _, ok := recvMsg(t, subOut); ok {
-		t.Fatal("empty key/summary should emit nothing")
-	}
+	recvNone(t, subOut)
 }
