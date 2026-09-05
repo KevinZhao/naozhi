@@ -1,0 +1,2 @@
+# Quarantined flaky tests (#2537): one Go test name (regex-safe) per line.
+# Required CI jobs skip these; the non-blocking test-quarantined job runs them.
