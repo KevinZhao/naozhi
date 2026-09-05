@@ -48,11 +48,11 @@ func TestFilterClaudeEnv_DenyLogWording(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	got := filterClaudeEnv(map[string]string{
-		"AWS_PROFILE":                    "admin",
-		"AWS_SHARED_CREDENTIALS_FILE":    "/x",
-		"CLAUDE_CODE_USE_MOCK_RESPONSES": "1",
+		"AWS_PROFILE":                              "admin",
+		"AWS_SHARED_CREDENTIALS_FILE":              "/x",
+		"CLAUDE_CODE_USE_MOCK_RESPONSES":           "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-		"UNRELATED_VAR": "silent-skip", // outside namespaces: no warn at all
+		"UNRELATED_VAR":                            "silent-skip", // outside namespaces: no warn at all
 	})
 	if len(got) != 0 {
 		t.Fatalf("all inputs must be dropped, got %v", got)
@@ -61,9 +61,9 @@ func TestFilterClaudeEnv_DenyLogWording(t *testing.T) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	want := map[string]string{
-		"AWS_PROFILE":                    "claude settings env: refusing to propagate auth-source AWS var",
-		"AWS_SHARED_CREDENTIALS_FILE":    "claude settings env: refusing to propagate auth-source AWS var",
-		"CLAUDE_CODE_USE_MOCK_RESPONSES": "claude settings env: refusing to propagate CLAUDE_ kill-switch var",
+		"AWS_PROFILE":                              "claude settings env: refusing to propagate auth-source AWS var",
+		"AWS_SHARED_CREDENTIALS_FILE":              "claude settings env: refusing to propagate auth-source AWS var",
+		"CLAUDE_CODE_USE_MOCK_RESPONSES":           "claude settings env: refusing to propagate CLAUDE_ kill-switch var",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "claude settings env: refusing to propagate CLAUDE_ kill-switch var",
 	}
 	for key, msg := range want {
