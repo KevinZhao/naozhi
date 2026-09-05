@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"sync"
@@ -152,6 +153,52 @@ func (s *ManagedSession) accountTurnCost(result *cli.SendResult, runID string) f
 		}
 	}
 	return inc.USD
+}
+
+// shadowUsageTaker is the optional process capability behind partial-turn
+// accounting; *cli.Process implements it, test stubs may not.
+type shadowUsageTaker interface {
+	TakeShadowUsage() cli.ShadowUsage
+}
+
+// isProcessDeathErr reports whether err means the process will not deliver
+// the turn's result (it exited or is being killed), so the tokens its
+// assistant frames reported would otherwise be lost.
+func isProcessDeathErr(err error) bool {
+	return errors.Is(err, cli.ErrProcessExited) || errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout)
+}
+
+// bookPartialTurn records a Kind=partial entry (tokens only, no amount) for
+// a turn the process died on. Turns that fail with the process still alive
+// are skipped: their tokens surface in the next result's cumulative modelUsage.
+func (s *ManagedSession) bookPartialTurn(proc processIface, err error, runID string) {
+	if !isProcessDeathErr(err) || s.costAcct == nil || !s.costAcct.ledger.Enabled() {
+		return
+	}
+	taker, ok := proc.(shadowUsageTaker)
+	if !ok {
+		return
+	}
+	u := taker.TakeShadowUsage()
+	if u.IsZero() || s.costAcct.owned(s.key) {
+		return
+	}
+	e := costledger.Entry{
+		Source: costledger.SourceSession, Kind: costledger.KindPartial,
+		SessionKey: s.key, RunID: runID, Workspace: filepath.Base(s.Workspace()), Backend: s.Backend(),
+		Unit: costledger.UnitUSD, Amount: 0,
+		Models: []costledger.ModelDelta{{
+			Model: costledger.CanonicalModel("", u.Model), RawModel: u.Model,
+			Tokens: costledger.Tokens{Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite},
+		}},
+	}
+	if e.Backend == "" {
+		e.Backend = "claude"
+	}
+	if e.Models[0].Model == "" {
+		e.Models[0].Model = "unknown"
+	}
+	s.costAcct.ledger.Append(e)
 }
 
 // ledgerEntries renders an Increment as ledger rows: one USD row carrying the

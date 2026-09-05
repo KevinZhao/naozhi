@@ -113,8 +113,8 @@ func TestFinishRun_ConcurrentOutOfOrderNoOverCount(t *testing.T) {
 	rt1 := &runTimer{started: time.Now()}
 	rt2 := &runTimer{started: time.Now()}
 	done := make(chan struct{}, 2)
-	go func() { s.finishRun(rt1, &cli.SendResult{CostUSD: 5.0}, nil); done <- struct{}{} }()
-	go func() { s.finishRun(rt2, &cli.SendResult{CostUSD: 2.0}, nil); done <- struct{}{} }()
+	go func() { s.finishRun(rt1, nil, &cli.SendResult{CostUSD: 5.0}, nil); done <- struct{}{} }()
+	go func() { s.finishRun(rt2, nil, &cli.SendResult{CostUSD: 2.0}, nil); done <- struct{}{} }()
 	<-done
 	<-done
 

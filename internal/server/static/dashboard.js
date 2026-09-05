@@ -9345,7 +9345,7 @@ function renderRecentSessionsPanel() {
 // summarizeCostBuckets folds a /api/cost/summary (group_by=unit) payload into
 // the card model. Pure so a contract test can drive it without the DOM.
 function summarizeCostBuckets(data) {
-  const out = { usd: 0, credits: 0, tokens: 0, entries: 0, unknown: 0, dropped: 0, loadedAt: Date.now() };
+  const out = { usd: 0, credits: 0, tokens: 0, entries: 0, unknown: 0, dropped: 0, partial: 0, loadedAt: Date.now() };
   const buckets = data && Array.isArray(data.buckets) ? data.buckets : [];
   for (const b of buckets) {
     if (!b || typeof b.amount !== 'number' || !isFinite(b.amount)) continue;
@@ -9356,6 +9356,7 @@ function summarizeCostBuckets(data) {
   }
   if (data && data.basis && typeof data.basis.unknown === 'number') out.unknown = data.basis.unknown;
   if (data && typeof data.dropped === 'number') out.dropped = data.dropped;
+  if (data && data.kinds && typeof data.kinds.partial === 'number') out.partial = data.kinds.partial;
   return out;
 }
 
@@ -9370,6 +9371,9 @@ function buildCostHealthLines(c) {
   }
   if (c.unknown > 0) {
     lines.push({ text: '成本账本含 ' + c.unknown + ' 条未知定价（模型不在 CLI 价表）', kind: 'warn' });
+  }
+  if (c.partial > 0) {
+    lines.push({ text: '成本账本含 ' + c.partial + ' 个进程中断的轮次（只记 token，未计价）', kind: 'info' });
   }
   return lines;
 }

@@ -203,6 +203,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 // logEventAt converts an Event to one or more EventEntry values and appends them to the event log.
 // readLoop passes the same time.Now() value that stamps ev.recvAt so timestamps match.
 func (p *Process) logEventAt(ev Event, nowMS int64) {
+	p.trackShadowUsage(ev)
 	entries := EventEntriesFromEventAt(ev, nowMS)
 	if len(entries) == 0 {
 		return
@@ -213,6 +214,42 @@ func (p *Process) logEventAt(ev Event, nowMS int64) {
 	// AppendBatch takes l.mu and notifies subscribers ONCE; per-entry Append
 	// would lock N times and wake eventPushLoop spuriously per block.
 	p.eventLog.AppendBatch(entries)
+}
+
+// trackShadowUsage folds an assistant frame's usage into the shadow account
+// and clears it on the result frame, whose modelUsage supersedes it.
+func (p *Process) trackShadowUsage(ev Event) {
+	switch ev.Type {
+	case "assistant":
+		if ev.Message == nil || ev.Message.Usage == nil {
+			return
+		}
+		u := ev.Message.Usage
+		p.shadowMu.Lock()
+		p.shadow.Input += u.InputTokens
+		p.shadow.Output += u.OutputTokens
+		p.shadow.CacheRead += u.CacheReadInputTokens
+		p.shadow.CacheWrite += u.CacheCreationInputTokens
+		if ev.Message.Model != "" {
+			p.shadow.Model = ev.Message.Model
+		}
+		p.shadowMu.Unlock()
+	case "result":
+		p.shadowMu.Lock()
+		p.shadow = ShadowUsage{}
+		p.shadowMu.Unlock()
+	}
+}
+
+// TakeShadowUsage returns and clears the tokens consumed since the last
+// result frame. Callers use it when a turn ends without a result and the
+// process will not produce one (death / timeout kill).
+func (p *Process) TakeShadowUsage() ShadowUsage {
+	p.shadowMu.Lock()
+	u := p.shadow
+	p.shadow = ShadowUsage{}
+	p.shadowMu.Unlock()
+	return u
 }
 
 // agentInput holds the parsed fields from an Agent tool call input.

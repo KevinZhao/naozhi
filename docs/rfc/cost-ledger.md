@@ -188,9 +188,11 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - `runnerStdoutCapBytes` 64 KiB → 256 KiB（JSON 信封 + `permission_denials` 等约 2–4 KiB）；解析失败（截断/非 JSON/`is_error`）**返回 error**（不能把 JSON 垃圾当标题回给 daemon）+ `SysessionRunnerParseFailTotal` 计数 + warn。
 - 每次 Run 是独立 `-p` 进程，`total_cost_usd` 即 per-run 值，无需差分。
 
-### 5.6 P5（无 result turn）— Phase 3 可选
+### 5.6 P5（无 result turn）— Phase 3
 
-- 在 assistant 帧的 `message.usage` 上维护"影子 token 账"（per-process）；进程异常退出且本 turn 无 result 时，flush 一条 `Kind=partial` 的 entry（只带 tokens，Amount=0 或按 naozhi 侧价表估算）。需要新的价表来源，后置。
+- `cli.Process` 在每个 assistant 帧的 `message.usage`（`model` 一并记录）上累计"影子 token 账"（`ShadowUsage`），result 帧到达即清零（其 `modelUsage` 覆盖同一批 token）。
+- `finishRun` 在 `result==nil` 且错误属于进程死亡类（`ErrProcessExited` / `ErrNoOutputTimeout` / `ErrTotalTimeout`，即 mapSendError 记 deathReason 的同一集合）时 `TakeShadowUsage()`，写一条 `Kind=partial`、`Amount=0`、只带 `Models[].tokens` 的 entry；进程仍活着的失败不写（token 会并入下一 result 的累计）。cron 归属门同样生效。
+- 不做 naozhi 侧价表估算：`Amount` 保持 0，UI 的 `kinds.partial` 计数提示"有未计价的中断轮次"。
 
 ## 6. 存储与聚合
 
@@ -277,7 +279,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 | **0** | PR-3 | `/api/cost/summary|entries` + 服务概览卡 + cron per-job 聚合（config 已随 PR-2a 落地） | P9 P10 |
 | 1 | PR-4 | sysession json runner + 写入（Runner 经 ctx `RunInfo` 归属到 Manager 的 runID） | P3 |
 | 2 | PR-5 | `naozhi cost backfill`；rollup 覆盖整个保留期（取代月度 rollup 文件）；agentcore 回执带 modelUsage；服务概览健康条 dropped/unknown 告警 | — |
-| 3（可选） | — | 5.6 影子 token 账 | P5 |
+| 3 | PR-6 | 5.6 影子 token 账（进程死亡的 turn 记 `Kind=partial` tokens-only entry；服务概览健康条提示 partial 计数） | P5 |
 
 每个 PR 可独立合并与回滚：PR-1 纯新增；PR-2a 纯新增写入；PR-2b 改 cron 口径（回滚回到累计值，ledger 仍为权威）；PR-3 纯读。
 

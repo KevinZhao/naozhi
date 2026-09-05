@@ -36,7 +36,9 @@ type TestProcess struct {
 	// MeteringVal lets cost tests drive proc.MeteringUsage() (the process-level
 	// running sum kiro/codex report).
 	MeteringVal []cli.MeteringEntry
-	SendFunc    func(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// ShadowVal is returned once by TakeShadowUsage (partial-turn accounting).
+	ShadowVal cli.ShadowUsage
+	SendFunc  func(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
@@ -116,10 +118,15 @@ func (p *TestProcess) TurnAgents() []cli.SubagentInfo { return p.EventLog.TurnAg
 func (p *TestProcess) ContextUsagePercent() float64       { return 0 }
 func (p *TestProcess) TurnDurationMs() int64              { return 0 }
 func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return p.MeteringVal }
-func (p *TestProcess) MeteringGen() uint64                { return 0 }
-func (p *TestProcess) Model() string                      { return p.ModelVal }
-func (p *TestProcess) LiveVersion() string                { return p.LiveVersionVal }
-func (p *TestProcess) Effort() string                     { return p.EffortVal }
+func (p *TestProcess) TakeShadowUsage() cli.ShadowUsage {
+	u := p.ShadowVal
+	p.ShadowVal = cli.ShadowUsage{}
+	return u
+}
+func (p *TestProcess) MeteringGen() uint64 { return 0 }
+func (p *TestProcess) Model() string       { return p.ModelVal }
+func (p *TestProcess) LiveVersion() string { return p.LiveVersionVal }
+func (p *TestProcess) Effort() string      { return p.EffortVal }
 
 // InjectSession inserts a session with the given TestProcess into the router.
 // For use in tests that need sessions without spawning real CLI processes.

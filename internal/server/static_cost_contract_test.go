@@ -27,7 +27,7 @@ func TestStaticCostLedgerContract(t *testing.T) {
 	for _, want := range []string{
 		"/api/cost/summary?group_by=unit", "function summarizeCostBuckets", "function costStatHtml",
 		"function refreshCostSummary", "近 30 天花费", "累计花费", "costCardTitle(c)", "svc-stat-sub",
-		"function buildCostHealthLines", "buildCostHealthLines(costSummaryCache)", "成本账本丢弃",
+		"function buildCostHealthLines", "buildCostHealthLines(costSummaryCache)", "成本账本丢弃", "data.kinds.partial", "进程中断的轮次",
 	} {
 		if !strings.Contains(string(dash), want) {
 			t.Errorf("dashboard.js missing %q", want)

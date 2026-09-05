@@ -121,6 +121,10 @@ func modelGrowth(cur, base ModelUsage) (d ModelDelta, next ModelUsage, grew bool
 	return d, next, grew
 }
 
+// CanonicalModel returns the CLI's canonical model id, falling back to the
+// raw key with any [1m]/[2m] context suffix stripped.
+func CanonicalModel(canonical, raw string) string { return canonicalOr(canonical, raw) }
+
 // canonicalOr returns the CLI's canonical model id, falling back to the raw
 // key with any [1m]/[2m] context suffix stripped.
 func canonicalOr(canonical, raw string) string {
