@@ -107,6 +107,17 @@ sudo journalctl -u naozhi --no-pager -n 30
 ```
 **不要**自行 kill 再起。向用户报告现状。
 
+## 发版归档：shim state golden（#2543）
+
+打 tag 前由**发版人**检查：本次 release 是否改动了 `internal/shim/state.go`
+的 `State` / `SpawnOverlay` 形态（新增/改名/删字段、json tag 变化）。
+
+- 改过：在 `internal/shim/testdata/` 新增 `state_v<新tag>.json` fixture，并在
+  `internal/shim/state_golden_test.go` 加对应期望值断言（每个 omitempty
+  字段取非零值）。fixture 值一律用显式占位（`FIXTURE-NOT-A-REAL-TOKEN`
+  类），**不得**复制真实 state 文件。
+- 未改：跳过，golden 矩阵只在形态变化时增长。
+
 ## 回滚
 
 ```bash

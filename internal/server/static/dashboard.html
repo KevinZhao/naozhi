@@ -1557,6 +1557,13 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .main-header .detail-spawndiag:empty{display:none}
 .main-header .detail-spawndiag .spawn-diag-tag{color:var(--nz-badge-warn);cursor:help}
 .main-header .detail-spawndiag .spawn-diag-tag::before{content:"·";margin-right:4px;opacity:.45;color:var(--nz-text-mute)}
+/* Overlay-drift chip (#2543): live argv differs from a fresh spawn under the
+   current config; restart the session to apply. Warn badge tokens, :empty
+   collapses when there is no drift. */
+.main-header .detail-overlaydrift{display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;font-size:var(--nz-fs-sm)}
+.main-header .detail-overlaydrift:empty{display:none}
+.main-header .detail-overlaydrift .overlay-drift-tag{color:var(--nz-badge-warn);cursor:help}
+.main-header .detail-overlaydrift .overlay-drift-tag::before{content:"·";margin-right:4px;opacity:.45;color:var(--nz-text-mute)}
 /* Git branch / worktree chip in the session-detail header. Filled async by
    renderGitChip; :empty collapses it so a non-repo workspace leaves no gap.
    The chip is the operator's "which checkout am I editing" signal, so a

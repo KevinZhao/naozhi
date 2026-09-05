@@ -289,6 +289,10 @@ type ManagedSession struct {
 	// updateCLIIdentity (CAS loop) so single-field setters compose safely.
 	cliIdentity atomic.Pointer[cliIdentityBox]
 	deathReason atomic.Pointer[string] // why process died, empty if alive
+	// overlayDrift is the reconcile-computed per-field diff between the live
+	// shim's argv and a fresh spawn under current config (#2543). Written by
+	// reconnectShims outside r.mu, read lock-free by snapshot(); nil = none.
+	overlayDrift atomic.Pointer[[]OverlayFieldDrift]
 	// userLabel is an operator-set display name overriding summary/last_prompt
 	// in the dashboard. Empty = unset.
 	userLabel atomic.Pointer[string]
@@ -489,4 +493,9 @@ type SessionSnapshot struct {
 	// dashboard can index it unconditionally. Runtime observation like
 	// Effort: empty for evicted sessions and across restarts.
 	SpawnDiags []cli.SpawnDiag `json:"spawn_diags"`
+	// OverlayDrift lists the argv-bearing fields whose live value differs
+	// from what a fresh spawn under the current config would use (#2543);
+	// remedy is restarting the session. Same always-an-array contract as
+	// SpawnDiags.
+	OverlayDrift []OverlayFieldDrift `json:"overlay_drift"`
 }

@@ -316,6 +316,17 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		if recWrapper != nil {
 			argsDrift, storedBase, currentArgs = r.shimArgsDrift(recWrapper, recBackendID, state, sess)
 		}
+		// Surface the drift per-field on the session (#2543): live sessions
+		// hit shimStateSkip below and would otherwise discard it. Lock-free
+		// store; also clears a stale marker once config and argv re-agree.
+		if sess != nil && recWrapper != nil {
+			if argsDrift {
+				d := overlayDriftFields(storedBase, currentArgs)
+				sess.overlayDrift.Store(&d)
+			} else {
+				sess.overlayDrift.Store(nil)
+			}
+		}
 
 		// Adopt-before-classify (#1875): a live shim absent from sessions.json is
 		// not necessarily an orphan — the store is written lazily (saveIfDirty
