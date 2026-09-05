@@ -190,6 +190,40 @@ jobs:
       - name: Test
         run: go test -race -timeout 300s -short ./...
 
+  # Playwright mock-server suite (test/e2e). Offline and deterministic: the
+  # mock server stubs every API endpoint, and the live multibackend.* specs
+  # self-skip without NAOZHI_LIVE_E2E=1. This is the layer that catches real
+  # dashboard behaviour regressions in a browser; chromium only — the
+  # mobile-safari project stays a local/release concern.
+  # No workflow-level paths filter: a required check must report a status on
+  # every PR, and a paths-filtered job stays "expected" forever on PRs that
+  # don't touch the dashboard, blocking the merge.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Playwright + chromium
+        working-directory: test/e2e
+        # npm install (not ci): repo policy gitignores package-lock.json
+        # (.gitignore:18), and the suite has a single pinned dep.
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Run mock-server suite (desktop-chrome)
+        working-directory: test/e2e
+        run: npx playwright test --project=desktop-chrome
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-e2e-test-results
+          path: test/e2e/test-results/
+          retention-days: 7
+
   # RNEW-TEST-432: Windows build-only job. Not a supported runtime — the
   # gate exists to surface regressions in packages that must compile on
   # all platforms. Shim/discovery syscall isolation was completed 2026-05-15
