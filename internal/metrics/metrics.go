@@ -202,6 +202,11 @@ var (
 	// inside emitRunEnded before the nil-broadcaster early return.
 	SysessionRunEndedTotal = expvar.NewInt("naozhi_sysession_run_ended_total")
 
+	// SysessionRunnerParseFailTotal counts daemon `claude -p` calls whose
+	// stdout was not a parsable json result envelope (truncated / non-JSON);
+	// the daemon sees an error instead of a garbage reply.
+	SysessionRunnerParseFailTotal = expvar.NewInt("naozhi_sysession_runner_parse_fail_total")
+
 	// CronRunInflight gauges currently executing cron runs. No `_total`
 	// suffix so the doc-sync regex treats it as a gauge.
 	CronRunInflight = expvar.NewInt("naozhi_cron_run_inflight")

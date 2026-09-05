@@ -274,6 +274,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		BinPath: binPath,
 		WorkDir: resolvedWorkDir,
 		Model:   cfg.Sysession.Runner.Model,
+		Ledger:  router.CostLedger(),
 		// Same Bedrock/Anthropic/proxy plumbing as session spawns. Trailing
 		// underscore = prefix match. AWS_ auth-source vars never reach naozhi's
 		// env in the first place (filterClaudeEnv denylist).

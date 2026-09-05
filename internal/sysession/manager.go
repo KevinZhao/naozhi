@@ -463,6 +463,9 @@ func (m *Manager) runOnce(ctx context.Context, rec *daemonRecord, trigger Daemon
 	// reading tickCtx during recordRun would see it already cancelled.
 	tickCtx, cancel := context.WithTimeout(ctx, m.cfg.TickTimeout)
 	defer cancel()
+	// Runner calls inside Tick book their cost to this run; daemons must
+	// derive child contexts from the ctx they receive, never Background().
+	tickCtx = withRunInfo(tickCtx, rec.daemon.Name(), runID)
 
 	defer func() {
 		if r := recover(); r != nil {

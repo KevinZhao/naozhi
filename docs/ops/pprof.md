@@ -152,6 +152,7 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_cron_run_ended_total` | cron run 终态计数（聚合 succeeded/failed/skipped/timed_out/canceled） | 与 `_started_total` 配合判断"开了但没收尾"的 run 数 |
 | `naozhi_sysession_run_started_total` | sysession daemon run 开始计数（CAS gate 通过后；#1723 RFC §6 Phase 1.5，对称于 cron 的 `_started_total`） | 与 `naozhi_sysession_run_ended_total` 差值远大于在途 = 进程崩溃打断在途 run；查 panic 日志 |
 | `naozhi_sysession_run_ended_total` | sysession daemon run 终态计数（聚合所有终态） | 与 `naozhi_sysession_run_started_total` 配合判断"开了但没收尾"的 run 数 |
+| `naozhi_sysession_runner_parse_fail_total` | daemon `claude -p` 的 stdout 不是可解析的 json result 信封（截断 / 非 JSON）；daemon 收到 error 而非垃圾回复 | 持续增长 = CLI 输出格式变了或 stdout 超 256 KiB 上限；看 `sysession: runner` 日志 |
 | `naozhi_cron_run_succeeded_total` | succeeded 终态计数 | 比例骤降 = backend / prompt 退化；对比 failed/timed_out 看根因 |
 | `naozhi_cron_run_failed_total` | failed 终态计数（session_error / send_error / workdir_* 等非超时错误） | 持续涨 = job 配置或目标不可达；按 LastErrorClass 分组排查 |
 | `naozhi_cron_sandbox_run_failed_total` | sandbox placement 的 cron run 非成功终态计数（sandbox_failed / sandbox_transport / sandbox_unavailable）；**不含 timed_out**（见下行，#2091） | 任何 sandbox_transport 涨都值得看：断流意味着 microVM 状态未知（双跑风险，RFC §6.2）；unavailable 涨 = cron.sandbox 配置缺失或失效 |

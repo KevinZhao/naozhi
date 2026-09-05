@@ -53,6 +53,10 @@ type RunnerConfig struct {
 	// HOME always pass). Everything else is stripped: daemons must NOT
 	// inherit IM tokens, dashboard secrets or AWS creds.
 	EnvAllowlist []string
+
+	// Ledger receives one cost entry per Run, attributed to the daemon run
+	// carried on the context (RunInfoFromContext). nil = not recorded.
+	Ledger CostLedger
 }
 
 // NewRunner returns a process-based Runner; errors when the
@@ -168,20 +172,24 @@ type runnerImpl struct {
 // separate, tighter cap on purpose.
 const runnerStderrCapBytes = 4096
 
-// runnerStdoutCapBytes bounds stdout so a runaway CLI can't OOM naozhi;
-// legitimate titles are far below 64 KiB. limitedWriter claims
+// runnerStdoutCapBytes bounds stdout so a runaway CLI can't OOM naozhi. The
+// json envelope adds a few KiB (usage, modelUsage, permission_denials) around
+// a reply that is itself far below 64 KiB; an output that hits the cap is
+// truncated JSON and Run reports it as an error. limitedWriter claims
 // n=len(p) so exec.Cmd's pump doesn't spin past the cap.
-const runnerStdoutCapBytes = 64 * 1024
+const runnerStdoutCapBytes = 256 * 1024
 
 // runnerImplBaseArgs is the fixed argv prefix for every daemon "claude -p"
-// call. Contract with internal/cli (check protocol_claude.go BuildArgs,
-// which duplicates it by hand, before editing):
+// call (one-shot; unrelated to the stream-json argv protocol_claude.go
+// BuildArgs builds for long-lived sessions). Pinned by
+// TestRunnerImplBaseArgs_Contract:
 //   - "-p": one-shot mode (no stream-json).
-//   - "--output-format text": Run parses stdout as plain UTF-8; json or
-//     stream-json silently breaks every daemon.
+//   - "--output-format json": Run decodes the single result envelope and
+//     hands the daemon its `result` string; the envelope also carries the
+//     cost receipt booked to the ledger. text/stream-json break every daemon.
 //   - `--setting-sources ""`: disables host hooks so naozhi's own hooks
 //     don't re-enter and dead-loop the daemon's CLI call (DESIGN.md §6.5).
-var runnerImplBaseArgs = []string{"-p", "--output-format", "text", "--setting-sources", ""}
+var runnerImplBaseArgs = []string{"-p", "--output-format", "json", "--setting-sources", ""}
 
 func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 	// Copy the shared prefix so the per-call --model append can't race
@@ -234,8 +242,18 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("sysession: %s -p failed: %w",
 			filepath.Base(r.cfg.BinPath), err)
 	}
-	// bytes.TrimSpace first so string() is the only allocation.
-	return string(bytes.TrimSpace(stdout.Bytes())), nil
+	env, err := parseResultEnvelope(stdout.Bytes())
+	// Book before judging the outcome: a run that failed after several
+	// model calls still spent the money (unparsable output books nothing).
+	ri, ok := RunInfoFromContext(ctx)
+	if !ok {
+		ri = RunInfo{Daemon: "unmanaged"}
+	}
+	r.bookRunCost(env, ri)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(env.Result), nil
 }
 
 // Compile-time check that runnerImpl satisfies Runner.

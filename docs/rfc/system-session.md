@@ -473,7 +473,7 @@ type runnerImpl struct {
 func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
     cmd := exec.CommandContext(ctx, r.binPath,
         "-p",
-        "--output-format", "text",
+        "--output-format", "json",
         "--setting-sources", "",
         "--model", r.model,
     )
