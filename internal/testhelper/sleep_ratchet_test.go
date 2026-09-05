@@ -17,11 +17,11 @@ import (
 
 // bareSleepBaseline is the number of un-annotated `time.Sleep(` occurrences
 // in *_test.go files (2026-09-05, #2534; occurrences, not lines — one line
-// carries two, hence 215 vs the issue's line-count 213). Lower it when you remove sleeps;
+// carries two, hence 213 (post-#2571) vs the issue's line-count 213). Lower it when you remove sleeps;
 // raising it is not an option — poll with Eventually or annotate the line
 // with `// sleep-ok: <reason>` if the sleep is genuinely about elapsed time
 // (e.g. producing a measurable duration, not awaiting an effect).
-const bareSleepBaseline = 215
+const bareSleepBaseline = 213
 
 // exemptSleepBaseline counts the `// sleep-ok:` annotated sleeps; also
 // ratcheted so exemptions cannot become the new default.
