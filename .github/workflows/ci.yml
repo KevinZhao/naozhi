@@ -7,6 +7,14 @@ on:
   pull_request:
     branches:
       - master
+  # flaky_probe forces a synthetic failure so the flaky-report job can be
+  # exercised end-to-end without a real master red (#2537).
+  workflow_dispatch:
+    inputs:
+      flaky_probe:
+        description: force a synthetic failure to exercise flaky-report
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,7 +40,14 @@ jobs:
       - name: Test
         # go test -race implicitly builds and vets all packages before running.
         # Separate Build and Vet steps are redundant and have been removed.
-        run: go test -race -timeout 300s ./...
+        # Tests quarantined in .github/quarantine.txt (#2537) are skipped here
+        # and run in the non-blocking test-quarantined job instead.
+        run: |
+          skip=""
+          if [ -s .github/quarantine.txt ]; then
+            skip="-skip $(grep -v '^#' .github/quarantine.txt | paste -sd'|' -)"
+          fi
+          go test -race -timeout 300s $skip ./...
 
   # gofmt (make lint-gofmt). fail mode from the start: the backlog this job was
   # added alongside is at 0, and formatting has an unambiguous fix (gofmt -w)
@@ -188,7 +203,12 @@ jobs:
         run: go build ./...
 
       - name: Test
-        run: go test -race -timeout 300s -short ./...
+        run: |
+          skip=""
+          if [ -s .github/quarantine.txt ]; then
+            skip="-skip $(grep -v '^#' .github/quarantine.txt | paste -sd'|' -)"
+          fi
+          go test -race -timeout 300s -short $skip ./...
 
   # Playwright mock-server suite (test/e2e). Offline and deterministic: the
   # mock server stubs every API endpoint, and the live multibackend.* specs
@@ -268,3 +288,112 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+  # Non-blocking runner for quarantined tests (#2537): they stay visible (a
+  # fix can be verified here) without holding the merge queue hostage.
+  test-quarantined:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run quarantined tests
+        run: |
+          if [ ! -s .github/quarantine.txt ] || ! grep -vq '^#' .github/quarantine.txt; then
+            echo "quarantine list empty — nothing to run"
+            exit 0
+          fi
+          run=$(grep -v '^#' .github/quarantine.txt | paste -sd'|' -)
+          go test -race -timeout 300s -run "$run" ./...
+
+  # Synthetic failure for exercising flaky-report end-to-end (#2537); only
+  # runs on a manual dispatch with flaky_probe=true, skipped otherwise.
+  probe-fail:
+    if: github.event_name == 'workflow_dispatch' && inputs.flaky_probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Synthetic failure
+        run: |
+          echo "--- FAIL: TestFlakyProbeSynthetic (0.00s)"
+          exit 1
+
+  # master red → auto-file a [flaky] issue per failing test (#2537): the last
+  # 40 master runs had 4 reds, all flaky, none registered. Reads the failed
+  # jobs' logs and dedupes by issue title.
+  flaky-report:
+    needs: [test, test-macos, probe-fail]
+    if: always() && contains(join(needs.*.result, ','), 'failure') && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const { data: jobsResp } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+              per_page: 100,
+            });
+            const failures = new Map(); // test name -> job name
+            for (const job of jobsResp.jobs) {
+              if (job.conclusion !== 'failure') continue;
+              let log = '';
+              try {
+                const resp = await github.request('GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs', {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  job_id: job.id,
+                });
+                log = String(resp.data);
+              } catch (e) {
+                core.warning(`fetch logs for ${job.name}: ${e}`);
+                continue;
+              }
+              for (const m of log.matchAll(/--- FAIL: (Test[\w/]+)/g)) {
+                if (!failures.has(m[1])) failures.set(m[1], job.name);
+              }
+            }
+            if (failures.size === 0) {
+              core.info('no --- FAIL lines found in failed job logs');
+              return;
+            }
+            const runURL = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'flaky,automated',
+              per_page: 100,
+            });
+            for (const [test, jobName] of failures) {
+              const title = `[flaky] ${test}`;
+              const body = `master red on ${context.sha.slice(0, 8)} — job \`${jobName}\`, [run](${runURL}).`;
+              const existing = open.find(i => i.title === title);
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  body,
+                });
+              } else {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body: body + '\n\nAuto-filed by the flaky-report CI job (#2537). Deflake or quarantine via .github/quarantine.txt.',
+                  labels: ['flaky', 'automated'],
+                });
+              }
+            }
+
