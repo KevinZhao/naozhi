@@ -16,6 +16,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -798,6 +799,12 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		oldSID = old.getSessionID()
 	}
 	oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, oldOverrides := snapshotOldSessionLocked(old)
+	// Monotonic spend (metering units, per-model totals) follows the logical
+	// session across process replacement just like costSpent does.
+	var oldSpent costledger.Totals
+	if old != nil {
+		oldSpent = old.CostTotals()
+	}
 	if old == nil {
 		oldOverrides = r.consumePendingTuningLocked(key, oldOverrides)
 	}
@@ -821,6 +828,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		oldHistory, prevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, opts.Exempt, oldSID,
 		oldUserTurns, oldOverrides,
 	)
+	s.costMu.Lock()
+	s.spent = oldSpent
+	s.costMu.Unlock()
 	r.mu.Unlock()
 
 	r.bindNewSessionHistory(ctx, s, proc, key, resumeID, workspace, prevIDs, oldHistory)
@@ -880,6 +890,7 @@ func (r *Router) installFreshSessionLocked(
 		prevSessionIDs:   prevIDs,
 		exempt:           exempt,
 		runStore:         r.sessionRuns,
+		costAcct:         r.costAcct,
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.kid.Track(id)
@@ -1315,6 +1326,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		prevSessionIDs:   slices.Clone(old.prevSessionIDs),
 		exempt:           old.exempt,
 		runStore:         r.sessionRuns,
+		costAcct:         r.costAcct,
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.kid.Track(id)
@@ -1332,8 +1344,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	storeTotalCost(&fresh.totalCost, loadTotalCost(&old.totalCost))
 	// Rename keeps the SAME live process, so the delta baseline carries over
 	// too — resetting it would double-count the next turn.
-	storeTotalCost(&fresh.costSpent, loadTotalCost(&old.costSpent))
-	storeTotalCost(&fresh.lastCumulativeCost, loadTotalCost(&old.lastCumulativeCost))
+	copyCostBaseline(fresh, old)
 	fresh.setWorkspace(old.Workspace())
 	// Atomic fields: plain Load/Store round-trips are race-safe; r.mu blocks
 	// all concurrent writers except the Send hot path (lastPrompt /

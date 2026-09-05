@@ -41,21 +41,18 @@ func (s *ManagedSession) instrumentRun(onEvent cli.EventCallback) (*runTimer, cl
 	return rt, wrapped
 }
 
-// finishRun computes the run record from the timer + outcome and enqueues it
-// for async persistence. No-op when timing was not instrumented (nil timer /
-// nil store). Its work is cheap and the enqueue is NON-BLOCKING, so calling it
-// while sendMu is still held (the Send path) does not extend the lock window.
+// finishRun accounts the turn's cost (always) and, when timing was
+// instrumented (non-nil timer / store), enqueues the run record for async
+// persistence. Its work is cheap and the enqueue is NON-BLOCKING, so calling
+// it while sendMu is still held (the Send path) does not extend the lock window.
 func (s *ManagedSession) finishRun(rt *runTimer, result *cli.SendResult, err error) {
-	if rt == nil || s.runStore == nil {
+	runID := newRunID()
+	delta := s.accountTurnCost(result, runID)
+	if rt == nil || s.runStore == nil || runID == "" {
 		return
 	}
 	ended := time.Now()
 	oc, cls := runhistory.Classify(err)
-
-	runID, idErr := runhistory.NewRunID()
-	if idErr != nil {
-		return // crypto/rand unavailable — drop silently, never block the turn
-	}
 
 	rec := runhistory.SessionRun{
 		RunID:      runID,
@@ -74,21 +71,6 @@ func (s *ManagedSession) finishRun(rt *runTimer, result *cli.SendResult, err err
 			rec.FirstByteMS = 0
 		}
 	}
-	if result != nil {
-		// result.CostUSD is the CLI's cumulative cost for the current process
-		// incarnation (resets on resume/restart); convert to a per-turn delta and
-		// fold into the monotonic total. costMu serialises the read-compute-store:
-		// under passthrough concurrent same-session turns call finishRun on
-		// separate goroutines and would otherwise interleave and lose an update.
-		s.costMu.Lock()
-		prev := loadTotalCost(&s.lastCumulativeCost)
-		delta, next := runhistory.TurnCostDelta(result.CostUSD, prev)
-		storeTotalCost(&s.lastCumulativeCost, next)
-		if delta != 0 {
-			storeTotalCost(&s.costSpent, loadTotalCost(&s.costSpent)+delta)
-		}
-		s.costMu.Unlock()
-		rec.CostUSD = delta
-	}
+	rec.CostUSD = delta
 	s.runStore.AppendAsync(rec)
 }

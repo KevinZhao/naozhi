@@ -8,6 +8,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
@@ -317,9 +318,19 @@ type ManagedSession struct {
 	// runhistory.TurnCostDelta): monotonic across process replacements,
 	// unlike totalCost which RESETS on resume. lastCumulativeCost is the
 	// previous raw CLI reading the next delta diffs against. Both are
-	// Float64bits-packed and written only from finishRun.
+	// Float64bits-packed and written only from accountTurnCost.
 	costSpent          atomic.Uint64
 	lastCumulativeCost atomic.Uint64
+	// lastCumulative is the full per-incarnation baseline (USD, per-model
+	// rows, backend metering) the next turn differences against; spent is the
+	// monotonic total across incarnations. modelsBaselineUnknown marks a
+	// store-restored session whose per-model baseline was not persisted, so
+	// the first turn's model drill-down is withheld. All three under costMu.
+	lastCumulative        costledger.Cumulative
+	spent                 costledger.Totals
+	modelsBaselineUnknown bool
+	// costAcct is the router-wide ledger sink; nil in tests that don't wire one.
+	costAcct *costAccounting
 
 	// persistedHistory stores event entries that survive process restarts.
 	// Populated by InjectHistory and carried over when the process is replaced.

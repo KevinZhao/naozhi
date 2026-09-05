@@ -15,6 +15,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 
@@ -224,6 +225,9 @@ type Router struct {
 	// StorePath is empty. Closed in Shutdown to flush the async write worker.
 	// 读写: core (init/spawn-config injection), lifecycle (spawn-config injection), discovery (takeover/register injection), cleanup (Invalidate/Close), runhistory (List/Stats read)
 	sessionRuns *runhistory.Store
+	// costAcct is the shared ledger sink handed to every ManagedSession.
+	// 读写: core (init/spawn-config injection), lifecycle (spawn-config injection), discovery (takeover/register injection), cleanup (Close), runhistory (CostLedger/SetCostRunOwnership)
+	costAcct *costAccounting
 
 	// kid is the known-session-IDs facet: IDs set, FIFO order, dirty flag,
 	// gen and the gen-memoised save snapshot, in internal/session/knownids.
@@ -562,9 +566,11 @@ type RouterConfig struct {
 	DefaultAccessProfile string
 	Workspace            string
 	StorePath            string
-	NoOutputTimeout      time.Duration
-	TotalTimeout         time.Duration
-	ClaudeDir            string
+	// CostLedger tunes the cost ledger rooted beside StorePath.
+	CostLedger      CostLedgerConfig
+	NoOutputTimeout time.Duration
+	TotalTimeout    time.Duration
+	ClaudeDir       string
 	// NaozhiSettingsFile, when non-empty, is the naozhi-owned Claude settings
 	// file (RFC naozhi-owned-settings-v3): every ClaudeProtocol spawn then runs
 	// `--setting-sources "" --settings <file>` instead of `--setting-sources
@@ -711,6 +717,16 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.StorePath != "" {
 		r.sessionRuns = runhistory.NewStore(filepath.Dir(cfg.StorePath), 0, 0)
 	}
+	// Cost ledger lives beside the session store; disabled by config or when
+	// nothing persists. costAcct is always non-nil so sessions never nil-check.
+	var ledger *costledger.Store
+	if cfg.StorePath != "" && !cfg.CostLedger.Disabled {
+		ledger = costledger.NewStore(filepath.Join(filepath.Dir(cfg.StorePath), "cost"), costledger.Options{
+			RetentionDays: cfg.CostLedger.RetentionDays,
+			RollupDays:    cfg.CostLedger.RollupDays,
+		})
+	}
+	r.costAcct = newCostAccounting(ledger)
 
 	// nil HistoryLoader → production discovery-backed implementation so the
 	// rest of the router can call r.historyLoader unconditionally (#458).
@@ -820,6 +836,7 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 		prevSessionOrigins: entry.PrevSessionOrigins,
 		exempt:             isExemptKey(key),
 		runStore:           r.sessionRuns,
+		costAcct:           r.costAcct,
 	}
 	storeTotalCost(&s.totalCost, entry.TotalCost)
 	// Legacy stores (predating cost_spent) seed costSpent from TotalCost so the
@@ -831,6 +848,11 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 		storeTotalCost(&s.costSpent, entry.TotalCost)
 	}
 	storeTotalCost(&s.lastCumulativeCost, entry.LastCumulativeCost)
+	// The store keeps only the USD baseline: a shim-reconnected CLI keeps
+	// counting from there, but its per-model rows are unknown until the next
+	// result, so the first turn reports no model drill-down.
+	s.lastCumulative = costledger.Cumulative{USD: entry.LastCumulativeCost}
+	s.modelsBaselineUnknown = entry.LastCumulativeCost > 0
 	s.setWorkspace(entry.Workspace)
 	s.SetBackend(restoreBackendID)
 	// Restore the recorded access profile so a resume relocks the same auth
