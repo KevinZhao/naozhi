@@ -527,6 +527,7 @@ async function fetchSessions() {
     // docs/rfc/kiro-effort-visibility.md §5.1 / R1b
     if (selectedKey) setHeaderEffortChip(data.sessions);
     if (selectedKey) setHeaderSpawnDiagChip(data.sessions);
+    if (selectedKey) setHeaderOverlayDriftChip(data.sessions);
     // #2431: under WS-fallback polling this REST poll is the ONLY state source,
     // and process state transitions (running↔ready, last_response, sc-time)
     // never advance stats.version — storeGen moves on add/remove/rename/reset
@@ -3290,6 +3291,40 @@ function setHeaderSpawnDiagChip(sessions) {
   if (el.innerHTML !== html) el.innerHTML = html;
 }
 
+// overlayDriftChipHtml renders the "配置漂移" chip for a session whose live
+// argv no longer matches what a fresh spawn under the current config would
+// use (#2543). The remedy is restarting the session — nothing auto-restarts
+// a live session over drift.
+function overlayDriftChipHtml(drift) {
+  if (!drift || !drift.length) return '';
+  const lines = drift.map(function (d) {
+    return d.field + ': ' + (d.stored || '(空)') + ' → ' + (d.current || '(空)');
+  });
+  const tip = '配置漂移，重启会话以应用新配置：\n' + lines.join('\n');
+  return '<span class="overlay-drift-tag" title="' + escAttr(tip) + '" aria-label="' + escAttr(tip) + '">' +
+      '⟳ 配置漂移</span>';
+}
+
+// setHeaderOverlayDriftChip mirrors setHeaderSpawnDiagChip — same two call
+// sites, same before-version-gate constraint: overlay_drift is refreshed by
+// the 30s reconcile and never advances stats.version.
+function setHeaderOverlayDriftChip(sessions) {
+  const el = document.getElementById('header-overlaydrift');
+  if (!el) return;
+  let drift = null;
+  if (selectedKey) {
+    if (sessions) {
+      const node = selectedNode || 'local';
+      const row = sessions.find(s => s && s.key === selectedKey && (s.node || 'local') === node);
+      drift = row ? row.overlay_drift : null;
+    } else {
+      drift = (sessionsData[sid(selectedKey, selectedNode)] || {}).overlay_drift;
+    }
+  }
+  const html = overlayDriftChipHtml(drift);
+  if (el.innerHTML !== html) el.innerHTML = html;
+}
+
 // ===== Session tuning popover =====
 // Per-session model/effort switching from the header chips.
 // docs/rfc/dashboard-model-effort-control.md §4.1. Control lives where the
@@ -4115,6 +4150,9 @@ function mainHeaderHtml(s) {
         // setHeaderSpawnDiagChip (same lifecycle as the effort chip);
         // collapses via :empty when every configured input took effect.
         '<span class="detail-spawndiag" id="header-spawndiag"></span>' +
+        // Overlay drift (#2543): live argv vs a fresh spawn under current
+        // config. Same lifecycle as the spawn-diag chip; :empty collapses.
+        '<span class="detail-overlaydrift" id="header-overlaydrift"></span>' +
         turnTimerHtml +
         // Run-history overview ("N 轮 · 均 X · 最长 X"). Built empty here and
         // filled asynchronously by renderSessionRunsPanel once /api/sessions/runs
@@ -4142,6 +4180,7 @@ function renderMainHeader() {
   repaintGitChip();
   setHeaderEffortChip();
   setHeaderSpawnDiagChip();
+  setHeaderOverlayDriftChip();
   fetchSessionRuns(selectedKey, selectedNode);
 }
 
@@ -4243,6 +4282,7 @@ function renderMainShell() {
   // Same rationale as repaintGitChip: the rebuild emptied #header-effort.
   setHeaderEffortChip();
   setHeaderSpawnDiagChip();
+  setHeaderOverlayDriftChip();
 }
 
 // _fetchEventsInFlight gates concurrent HTTP polls of `/api/sessions/events`.

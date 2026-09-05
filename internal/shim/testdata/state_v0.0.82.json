@@ -1,0 +1,29 @@
+{
+    "version": 1,
+    "schema_version": 1,
+    "shim_pid": 50001,
+    "cli_pid": 50002,
+    "socket": "/run/user/1000/naozhi/eeff0011.sock",
+    "auth_token": "R29sZGVuRml4dHVyZVRva2VuLXYwLjAuODItMzJieXRlcw==",
+    "key": "dashboard:direct:2026-09-01-120000-1:myproject",
+    "session_id": "1f23a6b5-8c2f-4d8c-a054-4b6b2c3d4e5f",
+    "workspace": "/home/ec2-user/workspace/myproject",
+    "backend": "kiro",
+    "cli_args": [
+        "acp",
+        "--effort", "high",
+        "--model", "claude-fable-5",
+        "--resume", "1f23a6b5-8c2f-4d8c-a054-4b6b2c3d4e5f"
+    ],
+    "cli_alive": true,
+    "started_at": "2026-09-01T12:00:00Z",
+    "last_connected_at": "2026-09-02T08:30:00Z",
+    "buffer_count": 0,
+    "spawn_overlay": {
+        "model": "claude-fable-5",
+        "effort": "high",
+        "extra_args": ["--debug"],
+        "access_profile": "team-bedrock",
+        "append_system_prompt": "回答保持简短。"
+    }
+}

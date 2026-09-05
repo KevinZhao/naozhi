@@ -1,0 +1,26 @@
+{
+    "version": 1,
+    "shim_pid": 40001,
+    "cli_pid": 40002,
+    "socket": "/run/user/1000/naozhi/aabbccdd.sock",
+    "auth_token": "R29sZGVuRml4dHVyZVRva2VuLXYwLjAuODEtMzJieXRlcw==",
+    "key": "feishu:p2p:golden-81",
+    "session_id": "0e12f5a4-9d1e-4c7b-9f43-3a5a1b2c3d4e",
+    "workspace": "/home/ec2-user/workspace/naozhi",
+    "backend": "claude",
+    "cli_args": [
+        "-p",
+        "--output-format", "stream-json",
+        "--input-format", "stream-json",
+        "--verbose",
+        "--replay-user-messages",
+        "--setting-sources", "user",
+        "--dangerously-skip-permissions",
+        "--model", "claude-opus-4.7",
+        "--resume", "0e12f5a4-9d1e-4c7b-9f43-3a5a1b2c3d4e"
+    ],
+    "cli_alive": true,
+    "started_at": "2026-08-20T09:00:00Z",
+    "last_connected_at": "2026-08-21T10:00:00Z",
+    "buffer_count": 3
+}

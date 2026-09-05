@@ -9,7 +9,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -150,7 +152,7 @@ func runShimStop(args []string) {
 }
 
 func runShimList(args []string) {
-	fs := flag.NewFlagSet("naozhi shim list", flag.ExitOnError)
+	fs, configPath := newSubFlagSet("naozhi shim list", "config.yaml")
 	stateDir := fs.String("state-dir", "", "shim state directory")
 	fs.Parse(args) //nolint:errcheck
 
@@ -175,6 +177,13 @@ func runShimList(args []string) {
 		return
 	}
 
+	// Drift against current config is best-effort: an unreadable config only
+	// disables the drift lines, it never breaks the listing.
+	cfg, cfgErr := config.Load(*configPath)
+	if cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "note: config unavailable (%v); overlay drift check skipped\n", cfgErr)
+	}
+
 	fmt.Printf("%-6s %-6s %-5s %-40s %s\n", "SHIM", "CLI", "ALIVE", "KEY", "SESSION")
 	for _, s := range states {
 		alive := "yes"
@@ -186,8 +195,45 @@ func runShimList(args []string) {
 			sid = sid[:12] + "..."
 		}
 		fmt.Printf("%-6d %-6d %-5s %-40s %s\n", s.ShimPID, s.CLIPID, alive, s.Key, sid)
+		if cfg != nil {
+			printShimDrift(cfg, s)
+		}
 	}
 	fmt.Printf("\n%d shim(s)\n", len(states))
+}
+
+// printShimDrift prints the overlay-drift view of one shim state against the
+// loaded config (#2543). append_system_prompt / extra_args differences are
+// DRIFT; model/effort go out as advisory only — the dashboard tuning layer
+// is invisible offline, so a hard DRIFT there would brand every tuned,
+// healthy session as broken (the authoritative per-field signal is
+// /api/sessions overlay_drift).
+func printShimDrift(cfg *config.Config, st shim.State) {
+	var defModel, defEffort string
+	var defArgs []string
+	for _, b := range cfg.EnabledBackends() {
+		id := b.ID
+		if id == "" {
+			id = "claude"
+		}
+		if id == st.Backend || (st.Backend == "" && id == "claude") {
+			defModel, defEffort, defArgs = b.Model, b.Effort, b.Args
+			break
+		}
+	}
+	profileModel := ""
+	if st.SpawnOverlay != nil && st.SpawnOverlay.AccessProfile != "" {
+		if p, ok := cfg.AccessProfiles[st.SpawnOverlay.AccessProfile]; ok {
+			profileModel = p.DefaultModel
+		}
+	}
+	advisory, drift := session.ShimListDrift(defModel, defEffort, defArgs, profileModel, st)
+	for _, d := range drift {
+		fmt.Printf("       DRIFT %s: %q -> %q — 重启会话以应用新配置\n", d.Field, d.Stored, d.Current)
+	}
+	for _, d := range advisory {
+		fmt.Printf("       note %s: stored %q, config now %q（不含 dashboard tuning 层，以 /api/sessions 的 overlay_drift 为准）\n", d.Field, d.Stored, d.Current)
+	}
 }
 
 // cliArgSlice implements flag.Value for repeated --cli-arg flags.
