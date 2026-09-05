@@ -209,6 +209,9 @@ func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerF
 	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.HandleList))
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.HandleEvents))
 	s.mux.HandleFunc("GET /api/sessions/runs", auth(s.sessionH.HandleRuns))
+	// Cost ledger read API (docs/rfc/cost-ledger.md §7); unit-bucketed, rate limited.
+	s.mux.HandleFunc("GET /api/cost/summary", auth(s.costH.HandleSummary))
+	s.mux.HandleFunc("GET /api/cost/entries", auth(s.costH.HandleEntries))
 	s.mux.HandleFunc("GET /api/sessions/git", auth(s.sessionH.HandleGit))
 	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
 	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))

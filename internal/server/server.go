@@ -12,6 +12,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
+	dashcost "github.com/naozhi/naozhi/internal/dashboard/cost"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/accessprofile"
@@ -71,6 +72,7 @@ type Server struct {
 	discoveryH   *discovery.Handlers   // 读写: server.go, dashboard.go
 	projectH     *dashproject.Handlers // 读写: server.go, dashboard.go
 	sessionH     *dashsession.Handlers // 读写: server.go, dashboard.go
+	costH        *dashcost.Handlers    // 读写: server.go, routes.go
 	healthH      *HealthHandler        // 读写: server.go (ctor only)
 	sendH        *SendHandler          // 读写: dashboard.go (ctor only in server.go)
 	cliH         *cli.Handler          // 读写: server.go, dashboard.go
@@ -299,6 +301,7 @@ func buildServer(opts ServerOptions) *Server {
 	// ProjectHandlers' baseCtx is wired by registerDashboard once s.hub exists.
 	s.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache)
 	agentIDs := agentIDList(agents)
+	s.costH = buildCostHandlers(opts, router)
 	s.sessionH = dashsession.New(dashsession.Deps{
 		Router:        router,
 		ProjectMgr:    opts.ProjectManager,
@@ -409,6 +412,9 @@ func buildServer(opts ServerOptions) *Server {
 	// The cron handlers nil-guard their limiters (partial construction in
 	// tests), so a refactor that forgets to wire one would silently run
 	// unlimited. Fail fast at boot instead of under attack.
+	if s.costH != nil && !s.costH.HasLimiter() {
+		panic("server: cost limiter must be non-nil")
+	}
 	if s.scheduler != nil && s.cronH != nil {
 		if !s.cronH.HasRunsLimiter() {
 			panic("server: runsLimiter must be non-nil when scheduler is wired")

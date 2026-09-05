@@ -1600,6 +1600,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .svc-stats{display:flex;gap:var(--nz-space-6);margin-bottom:12px}
 .svc-stat-value{font-size:var(--nz-fs-lg);font-weight:600;color:var(--nz-text-strong);font-variant-numeric:tabular-nums;line-height:1.2}
 .svc-stat-label{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:2px}
+.svc-stat-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.svc-stat-flag{font-size:var(--nz-fs-sm);color:var(--nz-amber,var(--nz-text-mute))}
 .svc-health{display:flex;flex-direction:column;gap:2px}
 .svc-health-line{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);line-height:1.5;font-variant-numeric:tabular-nums}
 .svc-health-line.warn{color:var(--nz-amber)}
@@ -2231,6 +2233,8 @@ body.kbd-open .input-hints{display:none}
 .ctr-detail .ctr-meta-item.ctr-meta-exit{color:var(--nz-red);border-color:rgba(248,81,73,.35)}
 .cron-timeline-panel .ctr-sub .ctr-cost{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
 .cron-timeline-panel .ct-cost-sum{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-left:auto;font-variant-numeric:tabular-nums}
+.cron-timeline-panel .ct-cost-ledger{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-left:auto;font-variant-numeric:tabular-nums}
+.cron-timeline-panel .ct-cost-ledger + .ct-cost-sum{margin-left:var(--nz-space-3)}
 /* §7.3 input-snapshot collapsible (replay preview). */
 .ctr-detail .ctr-snapshot{margin-top:10px;border-top:1px solid var(--nz-border);padding-top:8px}
 .ctr-detail .ctr-snapshot>summary{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);cursor:pointer;user-select:none}

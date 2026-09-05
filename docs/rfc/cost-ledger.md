@@ -222,7 +222,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 ## 8. Dashboard
 
-- Home「总花费」卡：改读 `/api/cost/summary?from=<30d>&group_by=source`，USD 主数字，credits 有值另起一行；hover 标注 "CLI 估算（list 价）/ 合同价 / 含 N 条未知定价"；`dropped>0` 显示 ⚠。
+- 服务概览「花费」卡：改读 `/api/cost/summary?from=<30d>&group_by=unit`（按单位分桶即够用），USD 主数字，credits 有值另起一行；hover 标注 "CLI 估算口径，非账单 / 含 N 条未知定价 / 账本丢弃 N 条"；`unknown>0 || dropped>0` 显示 ⚠；账本未加载前回退到 live session 求和并标注「累计花费」。
 - cron job 详情：新增 per-job 30 天聚合（`group_by=job` 或 `job_id=` 过滤），时间轴"已加载 run 之和"小字保留（口径不同，文案已区分）。
 - session header run-stats 不变。
 - 前端契约测试（`static_ux_contract_test.go` 模式）锁定 unit 不混算。
@@ -274,7 +274,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 | **0** | PR-1 | `cli.Event/SendResult.ModelUsage` + leak-recovery 拷贝 + 基准；`internal/costledger`（entry/Delta/store/rollup/summary/leaf 测试） | P1 |
 | **0** | PR-2a | session：`accountTurnCost` 拆分 + `lastCumulative` + `CostTotals()` + ledger 写入（**含 cron key，暂以 `Source=session` 入账**）+ kiro/codex 差分 | P4 P6 P7 |
 | **0** | PR-2b | cron：`CostTotals` 前后差分 + `CronRun.CostUSD` 改增量 + cron_local/cron_sandbox 写入 + **同一 PR 内注入 `ownedByRun` 门**（门与写入同进同退，避免 2a→2b 之间或 2b 回滚期间 cron 成本真空）+ 删 `cron.SendResult.CostUSD` | P2 |
-| **0** | PR-3 | `/api/cost/summary|entries` + config + Home 卡 + cron per-job 聚合 | P9 P10 |
+| **0** | PR-3 | `/api/cost/summary|entries` + 服务概览卡 + cron per-job 聚合（config 已随 PR-2a 落地） | P9 P10 |
 | 1 | PR-4 | sysession json runner + 写入 | P3 |
 | 2 | — | 回填命令；月度 rollup；agentcore envelope 带 modelUsage | — |
 | 3（可选） | — | 5.6 影子 token 账 | P5 |
