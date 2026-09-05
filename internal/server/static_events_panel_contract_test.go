@@ -181,3 +181,12 @@ func TestDashboardJS_HeaderFetchErrorPathsStaleChecked(t *testing.T) {
 		t.Error("fetchGitState catch branch must stale-check key+node before clearing #header-git")
 	}
 }
+
+func readDashboardJS(t *testing.T) string {
+	t.Helper()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	return string(data)
+}
