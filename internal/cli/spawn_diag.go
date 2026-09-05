@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/naozhi/naozhi/internal/metrics"
 )
@@ -37,6 +38,19 @@ type SpawnDiag struct {
 // observed", not "heartbeat ticks".
 var spawnDiagSeen sync.Map
 
+// spawnDiagObserver, when non-nil, receives every emitted diag before the
+// dedup/log step (so an observer sees repeats too). `naozhi config check`
+// installs one to collect the diags config.Load emits.
+var spawnDiagObserver atomic.Pointer[func(scope string, d SpawnDiag)]
+
+// ObserveSpawnDiags installs fn as the process-wide diag observer and returns
+// a restore func. Single observer by design — the only consumer is the
+// one-shot config check command.
+func ObserveSpawnDiags(fn func(scope string, d SpawnDiag)) (restore func()) {
+	spawnDiagObserver.Store(&fn)
+	return func() { spawnDiagObserver.Store(nil) }
+}
+
 // EmitSpawnDiags logs and counts diags. scope groups the dedup — the session
 // key on spawn paths, "config" for load-time diags. The "config" scope skips
 // dedup entirely: config loading is one-shot per process, and every finding
@@ -44,6 +58,9 @@ var spawnDiagSeen sync.Map
 // loader).
 func EmitSpawnDiags(scope string, diags []SpawnDiag) {
 	for _, d := range diags {
+		if obs := spawnDiagObserver.Load(); obs != nil {
+			(*obs)(scope, d)
+		}
 		repeat := false
 		if scope != "config" {
 			dedupKey := scope + "\x00" + d.Layer + "\x00" + d.Key

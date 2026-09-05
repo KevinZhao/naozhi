@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -81,8 +80,7 @@ func runSetup(args []string) {
 }
 
 func runSetupWeixin(args []string) {
-	fs := flag.NewFlagSet("setup weixin", flag.ExitOnError)
-	configPath := fs.String("config", "", "config file path (default ~/.naozhi/config.yaml)")
+	fs, configPath := newSubFlagSet("setup weixin", "")
 	fs.Parse(args)
 
 	if *configPath == "" {
