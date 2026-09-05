@@ -244,7 +244,7 @@ func TestLimitedWriter_LogsInnerFailureOnce(t *testing.T) {
 //   - "-p": one-shot prompt mode.
 func TestRunnerImplBaseArgs_Contract(t *testing.T) {
 	t.Parallel()
-	want := []string{"-p", "--output-format", "text", "--setting-sources", ""}
+	want := []string{"-p", "--output-format", "json", "--setting-sources", ""}
 	if len(runnerImplBaseArgs) != len(want) {
 		t.Fatalf("runnerImplBaseArgs = %q, want %q", runnerImplBaseArgs, want)
 	}
@@ -260,7 +260,7 @@ func TestRunnerImplBaseArgs_Contract(t *testing.T) {
 	// Belt-and-suspenders on the two highest-risk invariants regardless of
 	// position, so a reorder that keeps the slice the same length but moves
 	// these pairs still surfaces a readable failure.
-	assertFlagValue(t, runnerImplBaseArgs, "--output-format", "text")
+	assertFlagValue(t, runnerImplBaseArgs, "--output-format", "json")
 	assertFlagValue(t, runnerImplBaseArgs, "--setting-sources", "")
 }
 

@@ -46,6 +46,8 @@ type Daemon interface {
 	// is cancelled on Manager.Stop or when TickTimeout expires. A non-nil error
 	// feeds classifyError (RFC §7.4); a partial TickReport returned alongside
 	// an error is still credited to Acted/Examined.
+	// ctx carries the run identity Runner calls book their cost to; derive
+	// child contexts from it, never from context.Background().
 	Tick(ctx context.Context) (TickReport, error)
 }
 
