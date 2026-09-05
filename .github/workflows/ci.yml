@@ -224,6 +224,27 @@ jobs:
           path: test/e2e/test-results/
           retention-days: 7
 
+  # JS no-undef gate + cross-file dependency freeze for the dashboard's
+  # classic <script defer> files. eslint.config.mjs holds a per-file globals
+  # whitelist (the explicit dependency graph); scripts/js-deps-freeze.mjs
+  # enforces that the implicit cross-file reference matrix only shrinks
+  # (baseline: scripts/js-deps-baseline.json).
+  lint-js:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install eslint
+        working-directory: test/e2e
+        run: npm install
+
+      - name: Run eslint (no-undef gate)
+        run: test/e2e/node_modules/.bin/eslint 'internal/server/static/*.js'
+
+      - name: Check cross-file dependency freeze
+        run: node scripts/js-deps-freeze.mjs --check
+
   # RNEW-TEST-432: Windows build-only job. Not a supported runtime — the
   # gate exists to surface regressions in packages that must compile on
   # all platforms. Shim/discovery syscall isolation was completed 2026-05-15
