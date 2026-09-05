@@ -86,6 +86,7 @@ cmd/naozhi/main.go
   -> registry     插件 / 扩展注册表的 canonical home
   -> envpolicy    共享 env 过滤原语
   -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame + schema）
+  -> contractjs   生成 static/contract.js 的构建器（WS/API/字段名三段）
   -> datadir      数据根目录磁盘布局策略
 
   叶子工具
