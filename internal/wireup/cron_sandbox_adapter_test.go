@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -225,7 +226,7 @@ func TestAdapter_MapsMetaFromRunResult(t *testing.T) {
 		DurationMS:      1888,
 		MemoryPeakBytes: 268435456,
 	}
-	if out.Meta != want {
+	if !reflect.DeepEqual(out.Meta, want) {
 		t.Fatalf("Meta = %+v, want %+v", out.Meta, want)
 	}
 }

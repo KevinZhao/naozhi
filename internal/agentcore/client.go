@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"io"
 	"log/slog"
 
@@ -99,6 +100,10 @@ type RunResult struct {
 	ExitCode int
 	// CostUSD is total_cost_usd from the CLI result event; 0 when none arrived.
 	CostUSD float64
+	// Models / Basis are the result event's per-model drill-down and worst
+	// price basis; nil / "" when none arrived.
+	Models []costledger.ModelDelta
+	Basis  costledger.Basis
 	// DurationMS is duration_ms from the CLI result event; 0 when none arrived.
 	DurationMS int64
 	// ImageVersion / MemoryPeakBytes come from the bootstrap kind=meta frame.
@@ -197,6 +202,7 @@ func holdStream(ctx context.Context, runID string, body io.Reader, sink EventSin
 			if m, ok := ResultMetaOf(env.Line); ok {
 				res.CostUSD = m.CostUSD
 				res.DurationMS = m.DurationMS
+				res.Models, res.Basis = m.Models, m.Basis
 			}
 		}
 		if env.Kind == KindKeepalive {

@@ -27,6 +27,7 @@ func (s *Scheduler) appendLedger(a finishArgs) {
 		if a.sandboxMeta.CostUSD > 0 {
 			e := base
 			e.Source, e.Kind, e.Unit, e.Amount = costledger.SourceCronSandbox, costledger.KindReceipt, costledger.UnitUSD, a.sandboxMeta.CostUSD
+			e.Models, e.Basis = a.sandboxMeta.Models, a.sandboxMeta.Basis
 			s.ledger.Append(e)
 		}
 		return

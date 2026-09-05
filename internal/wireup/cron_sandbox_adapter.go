@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"log/slog"
 	"time"
 
@@ -114,6 +115,13 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 		CostUSD:         res.CostUSD,
 		DurationMS:      res.DurationMS,
 		MemoryPeakBytes: res.MemoryPeakBytes,
+		Models:          res.Models,
+		Basis:           res.Basis,
+	}
+	// The run record has a 32 KiB cap; the ledger caps rows on Append, the
+	// record needs the same bound here.
+	if len(meta.Models) > costledger.MaxModels {
+		meta.Models = meta.Models[:costledger.MaxModels]
 	}
 
 	switch res.State {

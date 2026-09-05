@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/limits"
 )
 
@@ -49,12 +50,50 @@ type Envelope struct {
 // needs (classification, final text, cost/duration receipt), decoded once via
 // ParseResultLine (#2321). Full event parsing belongs to cli.Protocol.
 type resultProbe struct {
-	Type       string  `json:"type"`
-	Subtype    string  `json:"subtype"`
-	IsError    bool    `json:"is_error"`
-	Result     string  `json:"result"`
-	CostUSD    float64 `json:"total_cost_usd"`
-	DurationMS int64   `json:"duration_ms"`
+	Type       string                   `json:"type"`
+	Subtype    string                   `json:"subtype"`
+	IsError    bool                     `json:"is_error"`
+	Result     string                   `json:"result"`
+	CostUSD    float64                  `json:"total_cost_usd"`
+	DurationMS int64                    `json:"duration_ms"`
+	ModelUsage map[string]modelUsageRow `json:"modelUsage"`
+}
+
+// modelUsageRow mirrors one CLI modelUsage entry (per-model cumulative usage
+// of the sandbox's one-shot process, so it is also the run's increment).
+type modelUsageRow struct {
+	InputTokens              int64   `json:"inputTokens"`
+	OutputTokens             int64   `json:"outputTokens"`
+	CacheReadInputTokens     int64   `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int64   `json:"cacheCreationInputTokens"`
+	ThinkingTokens           int64   `json:"thinkingTokens"`
+	WebSearchRequests        int64   `json:"webSearchRequests"`
+	CostUSD                  float64 `json:"costUSD"`
+	CanonicalModel           string  `json:"canonicalModel"`
+	Provider                 string  `json:"provider"`
+	CostBasis                string  `json:"costBasis"`
+}
+
+// modelDeltas converts the probe's modelUsage into ledger rows plus the worst
+// price basis among them.
+func (p resultProbe) modelDeltas() ([]costledger.ModelDelta, costledger.Basis) {
+	if len(p.ModelUsage) == 0 {
+		return nil, costledger.BasisNone
+	}
+	raw := costledger.Cumulative{Models: make(map[string]costledger.ModelUsage, len(p.ModelUsage))}
+	for k, v := range p.ModelUsage {
+		raw.Models[k] = costledger.ModelUsage{
+			Tokens: costledger.Tokens{
+				Input: v.InputTokens, Output: v.OutputTokens,
+				CacheRead: v.CacheReadInputTokens, CacheWrite: v.CacheCreationInputTokens,
+				Thinking: v.ThinkingTokens, WebSearch: v.WebSearchRequests,
+			},
+			CostUSD: v.CostUSD, Canonical: v.CanonicalModel, Provider: v.Provider,
+			Basis: costledger.Basis(v.CostBasis),
+		}
+	}
+	inc, _ := costledger.Delta(raw, costledger.Cumulative{})
+	return inc.Models, inc.Basis
 }
 
 // resultTypeMarker gates the Unmarshal: only one result among thousands of lines.
@@ -96,6 +135,10 @@ func ResultText(line json.RawMessage) (text string, ok bool) {
 type ResultMeta struct {
 	CostUSD    float64
 	DurationMS int64
+	// Models is the per-model drill-down (nil when the CLI sent none) and
+	// Basis the worst price basis among them.
+	Models []costledger.ModelDelta
+	Basis  costledger.Basis
 }
 
 // ResultMetaOf extracts the cost/duration receipt when the line is the result event.
@@ -104,5 +147,6 @@ func ResultMetaOf(line json.RawMessage) (m ResultMeta, ok bool) {
 	if !ok {
 		return ResultMeta{}, false
 	}
-	return ResultMeta{CostUSD: p.CostUSD, DurationMS: p.DurationMS}, true
+	models, basis := p.modelDeltas()
+	return ResultMeta{CostUSD: p.CostUSD, DurationMS: p.DurationMS, Models: models, Basis: basis}, true
 }

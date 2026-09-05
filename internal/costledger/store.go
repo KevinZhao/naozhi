@@ -25,7 +25,6 @@ const (
 	dropLogEvery = time.Minute
 
 	DefaultRetentionDays = 400
-	DefaultRollupDays    = 35
 	MaxRetentionDays     = 3650
 )
 
@@ -93,7 +92,9 @@ func NewStore(dir string, opts Options) *Store {
 }
 
 // clampDays applies the documented ranges: retention [1, MaxRetentionDays],
-// rollup [1, retention]; out-of-range values warn and clamp, never fail.
+// rollup [1, retention] defaulting to the whole retention window (the
+// per-day low-cardinality aggregates are tiny, so a full-window summary
+// never has to scan files); out-of-range values warn and clamp, never fail.
 func clampDays(retention, rollup int) (int, int) {
 	if retention <= 0 {
 		retention = DefaultRetentionDays
@@ -103,7 +104,7 @@ func clampDays(retention, rollup int) (int, int) {
 		retention = MaxRetentionDays
 	}
 	if rollup <= 0 {
-		rollup = DefaultRollupDays
+		rollup = retention
 	}
 	if rollup > retention {
 		slog.Warn("costledger: rollup_days above retention_days, clamping", "requested", rollup, "retention", retention)
@@ -312,14 +313,22 @@ func (s *Store) sweep() {
 	}
 }
 
-// warmRollup folds the last RollupDays of day files into memory.
+// warmRollup folds the last RollupDays of day files into memory. It runs
+// synchronously at open so the first summary is complete; a slow warm (many
+// large day files) is logged so operators can lower rollup_days.
 func (s *Store) warmRollup() {
+	start := time.Now()
 	since := s.now().UTC().Add(-s.rollupWin).Format(dayLayout)
+	n := 0
 	for _, d := range s.dayFiles() {
 		if d < since {
 			continue
 		}
+		n++
 		s.scanDay(d, func(e Entry) bool { s.rollup.add(e); return true })
+	}
+	if took := time.Since(start); took > time.Second {
+		slog.Info("costledger: rollup warm took a while; consider a smaller cost.rollup_days", "days", n, "took", took)
 	}
 	// Set even when no file was loaded: every day >= since is now covered
 	// (possibly empty), so summaries over that range may use the rollup.

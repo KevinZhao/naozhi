@@ -295,8 +295,8 @@ func TestStore_RefusesSymlinkDayFile(t *testing.T) {
 
 func TestStore_ClampsDays(t *testing.T) {
 	r, u := clampDays(0, 0)
-	if r != DefaultRetentionDays || u != DefaultRollupDays {
-		t.Fatalf("defaults = %d/%d", r, u)
+	if r != DefaultRetentionDays || u != DefaultRetentionDays {
+		t.Fatalf("defaults = %d/%d (rollup must default to the whole retention window)", r, u)
 	}
 	r, u = clampDays(99999, 500)
 	if r != MaxRetentionDays || u != 500 {
@@ -305,6 +305,27 @@ func TestStore_ClampsDays(t *testing.T) {
 	if r, u = clampDays(10, 20); u != 10 {
 		t.Fatalf("rollup must not exceed retention: %d/%d", r, u)
 	}
+}
+
+func TestStore_ScanStreamsMatchingEntriesAndStops(t *testing.T) {
+	s, _ := newTestStore(t, t0)
+	seed(t, s)
+	var seen []costledgerRunTag
+	err := s.Scan(Query{From: t0.Add(-72 * time.Hour), To: t0.Add(time.Hour), AllowFullRange: true}, func(e Entry) bool {
+		seen = append(seen, costledgerRunTag{e.Source, e.Unit})
+		return len(seen) < 3
+	})
+	if err != nil || len(seen) != 3 {
+		t.Fatalf("seen=%d err=%v", len(seen), err)
+	}
+	if err := s.Scan(Query{GroupBy: "nope", From: t0.Add(-time.Hour), To: t0}, func(Entry) bool { return true }); err == nil {
+		t.Fatal("bad group_by must be rejected")
+	}
+}
+
+type costledgerRunTag struct {
+	Source Source
+	Unit   Unit
 }
 
 func TestStore_DisabledIsNoop(t *testing.T) {
