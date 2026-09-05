@@ -136,6 +136,13 @@ type ServerOptions struct {
 	// ImageOrientRunner is the image-capable one-off runner. nil disables the
 	// feature regardless of ImageOrientEnabled.
 	ImageOrientRunner VisionOrienter
+	// ConfigSHA256 / ConfigLoadedAt are the loaded config's fingerprint
+	// (config.Fingerprint, #2538), surfaced auth-only on /health so doctor
+	// and the deploy playbook can detect "disk config changed after load —
+	// restart required". Empty/zero when the caller built the config
+	// programmatically.
+	ConfigSHA256   string
+	ConfigLoadedAt time.Time
 	// ConfigPath is the resolved path to config.yaml. Non-empty enables the
 	// POST /api/access-profiles create endpoint (appends via yaml.Node
 	// surgery); empty makes it return 400.

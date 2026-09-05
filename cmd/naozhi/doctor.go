@@ -164,6 +164,7 @@ func (d *doctor) run() {
 	d.checkSystemd()
 	d.checkHealth()
 	d.checkAuth()
+	d.checkConfigDrift()
 	d.checkPprof()
 	d.checkExpvar()
 	d.checkStateDir()

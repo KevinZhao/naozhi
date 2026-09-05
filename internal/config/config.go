@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,6 +30,10 @@ import (
 // Config.Workspaces (remote-nodes map, alias of Nodes) and
 // SessionConfig.Workspace (deprecated alias of Session.CWD).
 type Config struct {
+	// Fingerprint is the raw-bytes identity of the loaded file (#2538).
+	// Populated by Load; zero for programmatically constructed configs.
+	Fingerprint Fingerprint `yaml:"-"`
+
 	// SchemaVersion pins the config schema this file targets; absent/0 is
 	// normalized to CurrentSchemaVersion, newer than the binary is rejected.
 	SchemaVersion int `yaml:"schema_version,omitempty"`
@@ -598,6 +603,17 @@ type TranscribeConfig struct {
 	Language string `yaml:"language"` // BCP-47, default: zh-CN
 }
 
+// Fingerprint identifies WHICH config file bytes a process loaded: sha256 of
+// the raw file (before env expansion, so a placeholder edit changes it and
+// default-filling cannot mask an edit), plus when and from where. /health
+// exposes it (auth-only) so doctor and the deploy playbook can tell "disk
+// config changed after the process loaded it — restart required" (#2538).
+type Fingerprint struct {
+	SHA256   string
+	LoadedAt time.Time
+	Path     string
+}
+
 // Load reads and parses a YAML config file.
 func Load(path string) (*Config, error) {
 	// The file carries secrets: reject symlinks (Lstat, so a link to a 0644
@@ -644,6 +660,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config file %s exceeds %d bytes", path, maxConfigBytes)
 	}
 
+	fp := Fingerprint{
+		SHA256:   fmt.Sprintf("%x", sha256.Sum256(data)),
+		LoadedAt: time.Now(),
+		Path:     path,
+	}
+
 	expanded := expandEnvVars(data)
 
 	var cfg Config
@@ -667,6 +689,7 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	cfg.Fingerprint = fp
 	return &cfg, nil
 }
 
