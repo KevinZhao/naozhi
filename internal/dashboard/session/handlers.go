@@ -1464,3 +1464,7 @@ func (h *Handlers) PruneRetiredStore(cutoffMs int64) {
 		h.retiredStore.Prune(cutoffMs)
 	}
 }
+
+// ContractStats exposes the /api/sessions "stats" wire struct to the
+// contract.js generator (#2539) — reflect-only; the type stays unexported.
+var ContractStats any = sessionStats{}

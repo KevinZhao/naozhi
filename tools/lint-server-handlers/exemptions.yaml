@@ -65,7 +65,7 @@ file_size:
       limit: 500
       until_phase: 4b
     - path: internal/server/routes.go         # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 519                          # 2026-09-05 重采（#2286：/api/cost/summary|entries 两条路由）
+      current: 536                          # 2026-09-05 +17（#2539：handleContractJS + /static/contract.js 路由）
       limit: 500
       until_phase: "5"
     # internal/server/agent_tailer.go: entry removed 2026-07-31 — tailerRegistry

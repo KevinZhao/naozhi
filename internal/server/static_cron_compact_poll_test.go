@@ -33,7 +33,7 @@ func TestDashboardJS_CronCompactPoll(t *testing.T) {
 	js := string(data)
 
 	// 1. Poll URL carries ?compact=1.
-	if !strings.Contains(js, "/api/cron?compact=1") {
+	if !strings.Contains(js, "NZ_CONTRACT.API.cron + '?compact=1'") {
 		t.Error("dashboard.js: fetchCronJobs must hit /api/cron?compact=1 (R236-SEC-08 / #494): " +
 			"the bandwidth-bounded wire shape is opt-in via this exact query param; " +
 			"any other shape (compact=true, no param) regresses to the legacy 400 KiB/s polling.")

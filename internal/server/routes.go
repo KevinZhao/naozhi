@@ -191,6 +191,7 @@ func (s *Server) registerDashboard() {
 	// Dashboard JS is auth-gated: it embeds the API endpoint list and client
 	// schema, a free recon surface for unauthenticated scanners. The login
 	// page loads no JS from /static/ so the bootstrap is unaffected (#1328).
+	s.mux.HandleFunc("GET /static/contract.js", auth(handleContractJS))
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(handleNzUtilJS))
 	s.mux.HandleFunc("GET /static/dashboard.js", auth(handleDashboardJS))
 	s.mux.HandleFunc("GET /static/cron_view.js", auth(handleCronViewJS))
@@ -401,6 +402,22 @@ func handleDashboardJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "dashboard.js")
+}
+
+// handleContractJS serves static/contract.js (generated backend contract,
+// loaded before every other script so NZ_CONTRACT exists at parse time).
+func handleContractJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("contract.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "contract.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "contract.js")
 }
 
 // handleNzUtilJS serves static/nz_util.js (shared utility layer loaded before dashboard.js).

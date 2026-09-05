@@ -71,7 +71,7 @@
 
   // ---- roots (projects) ----
   function loadRoots() {
-    return fetchJSON('/api/projects').then(function (list) {
+    return fetchJSON(NZ_CONTRACT.API.projects).then(function (list) {
       // Local, path-bearing projects only — remote nodes have no readable FS.
       // Array.isArray guards against a non-array error body ({error:…}) which
       // would otherwise throw on .filter and surface a confusing message.
@@ -159,7 +159,7 @@
     if (box) box.innerHTML = '<div class="files-empty">加载中…</div>';
     var qs = 'project=' + encodeURIComponent(state.project) +
       (state.dir ? '&dir=' + encodeURIComponent(state.dir) : '');
-    fetchJSON('/api/projects/files/list?' + qs).then(function (res) {
+    fetchJSON(NZ_CONTRACT.API.projects_files_list + '?' + qs).then(function (res) {
       state.loaded = true;
       renderCrumbs();
       renderList(res);
@@ -332,7 +332,7 @@
     fd.append('project', state.project);
     if (state.dir) fd.append('dir', state.dir);
     fd.append('file', file, file.name);
-    var url = '/api/projects/files/upload' + (overwrite ? '?overwrite=1' : '');
+    var url = NZ_CONTRACT.API.projects_files_upload + (overwrite ? '?overwrite=1' : '');
     var bar = showProgress(file.name);
     var xhr = new XMLHttpRequest();
     xhr.open('POST', url);

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
+
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -86,10 +88,9 @@ func TestDashboardJSON_Projects_ShapeContract(t *testing.T) {
 	// nested ProjectConfig object (schedule, planner prompt, favorite
 	// mirror); its internal shape is pinned by project package tests, so
 	// here we only assert its presence at this layer.
-	required := []string{
-		"name", "path", "planner_state", "planner_model",
-		"config", "favorite", "git_remote_url", "github",
-	}
+	// Derived from the same struct contract.js reflects over (#2539);
+	// omitempty fields are optional at this layer by construction.
+	required, _ := contractFields(dashproject.ContractProjectsEntry)
 	for _, k := range required {
 		if _, ok := first[k]; !ok {
 			t.Errorf("projects[0].%s missing; body=%s", k, w.Body.String())

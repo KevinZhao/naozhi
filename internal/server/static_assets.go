@@ -25,6 +25,9 @@ var swJS embed.FS
 //go:embed static/nz_util.js
 var nzUtilJS embed.FS
 
+//go:embed static/contract.js
+var contractJS embed.FS
+
 //go:embed static/dashboard.js
 var dashboardJS embed.FS
 
@@ -106,6 +109,7 @@ var staticAssets = func() map[string]staticAsset {
 	}{
 		{"dashboard.html", dashboardHTML, "static/dashboard.html", true},
 		{"nz_util.js", nzUtilJS, "static/nz_util.js", true},
+		{"contract.js", contractJS, "static/contract.js", true},
 		{"dashboard.js", dashboardJS, "static/dashboard.js", true},
 		{"cron_view.js", cronViewJS, "static/cron_view.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},

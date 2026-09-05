@@ -35,6 +35,7 @@ const BASELINE_PATH = path.join(ROOT, 'scripts', 'js-deps-baseline.json');
 // <script defer> order from dashboard.html — the de-facto dependency order.
 // sw.js is a service worker with its own scope and is deliberately excluded.
 const LOAD_ORDER = [
+  'contract.js',
   'nz_util.js',
   'dashboard.js',
   'cron_view.js',

@@ -294,7 +294,7 @@ func TestDashboardJS_SystemViewContract(t *testing.T) {
 		"function stopSystemPoll(",       // teardown on leave
 		"function updateSystemBadge(",    // rail attention badge
 		"function daemonNeedsAttention(", // shared attention predicate
-		"'/api/system/daemons'",          // the read-only backend endpoint
+		"NZ_CONTRACT.API.system_daemons", // the read-only backend endpoint
 		// Leaving the view must stop the poll so a backgrounded view doesn't
 		// keep hitting the endpoint.
 		"if (prev === 'system' && view !== 'system') stopSystemPoll();",

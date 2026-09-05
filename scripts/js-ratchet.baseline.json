@@ -11,6 +11,12 @@
     "functionsOver100": 0,
     "topLevelLetVar": 0
   },
+  "contract.js": {
+    "lines": 202,
+    "maxFunctionLines": 0,
+    "functionsOver100": 0,
+    "topLevelLetVar": 0
+  },
   "cron_view.js": {
     "lines": 4735,
     "maxFunctionLines": 147,

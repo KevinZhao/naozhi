@@ -25,7 +25,7 @@ func TestStaticCostLedgerContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"/api/cost/summary?group_by=unit", "function summarizeCostBuckets", "function costStatHtml",
+		"NZ_CONTRACT.API.cost_summary + '?group_by=unit", "function summarizeCostBuckets", "function costStatHtml",
 		"function refreshCostSummary", "近 30 天花费", "累计花费", "costCardTitle(c)", "svc-stat-sub",
 		"function buildCostHealthLines", "buildCostHealthLines(costSummaryCache)", "成本账本丢弃", "data.kinds.partial", "进程中断的轮次",
 	} {
@@ -34,7 +34,7 @@ func TestStaticCostLedgerContract(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"/api/cost/summary?group_by=job", "function cronJobCostRefresh", "function cronJobLedgerCostHtml",
+		"NZ_CONTRACT.API.cost_summary + '?group_by=job", "function cronJobCostRefresh", "function cronJobLedgerCostHtml",
 		"cronJobCostRefresh(jobId)", "ct-cost-ledger",
 	} {
 		if !strings.Contains(string(cron), want) {
