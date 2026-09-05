@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -36,42 +35,36 @@ import (
 var version = "dev"
 
 func main() {
-	// Subcommands (before flag.Parse)
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "setup":
-			runSetup(os.Args[2:])
-			return
-		case "install":
-			runInstall(os.Args[2:])
-			return
-		case "uninstall":
-			runUninstall(os.Args[2:])
-			return
-		case "version", "--version":
-			fmt.Println(version)
-			return
-		case "shim":
-			runShim(os.Args[2:])
-			return
-		case "doctor":
-			runDoctor(os.Args[2:])
-			return
-		case "upgrade":
-			runUpgrade(os.Args[2:])
-			return
-		case "cost":
-			runCost(os.Args[2:])
-			return
+	// Subcommand dispatch (before any flag parsing). A word that is not in
+	// the registry — and a bare `naozhi` — prints the generated listing and
+	// exits non-zero; the server path requires explicit flags (every service
+	// unit passes --config), so a typoed subcommand can no longer silently
+	// boot a server.
+	if len(os.Args) <= 1 {
+		printUsage(os.Stderr)
+		os.Exit(2)
+	}
+	if os.Args[1] == "--version" {
+		fmt.Println(version)
+		return
+	}
+	if !strings.HasPrefix(os.Args[1], "-") {
+		sc := findSubcmd(os.Args[1])
+		if sc == nil {
+			fmt.Fprintf(os.Stderr, "naozhi: unknown command %q\n\n", os.Args[1])
+			printUsage(os.Stderr)
+			os.Exit(2)
 		}
+		sc.run(os.Args[2:])
+		return
 	}
 
 	// t0 anchors every startup phase gauge; captured after subcommand dispatch
 	// so setup/install/doctor do not pollute the boot histogram.
 	t0 := time.Now()
 
-	configPath := flag.String("config", "config.yaml", "path to config file")
-	flag.Parse()
+	fs, configPath := newSubFlagSet("naozhi", "config.yaml")
+	fs.Parse(os.Args[1:])
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {

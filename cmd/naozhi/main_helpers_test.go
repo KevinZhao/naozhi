@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -78,34 +79,19 @@ func TestChatIDSuffix(t *testing.T) {
 	}
 }
 
-// TestMain_DispatchesDiagnosticSubcommands pins the Round 130 audit: the
-// `naozhi` CLI must keep `doctor` as a first-class subcommand and the
-// production entry path must register pprof on startup. Both of these
-// serve on-call runbooks and ship with dedicated docs / tests; a silent
-// removal (e.g. during a CLI refactor that collapses the dispatch
-// switch) would leave the runbook steps broken with no error until
-// someone paged at 3am. This test fails immediately on such a drop.
-//
-// The assertion reads main.go source — Go's os.Args-driven dispatch
-// isn't reflectable at runtime without invoking the process, so a
-// string-level contract is the simplest way to catch the regression.
-// Keep the regex tolerant to whitespace/comment additions.
+// TestMain_DispatchesDiagnosticSubcommands guards the ops runbook: `naozhi
+// doctor` must stay reachable from the CLI. The dispatch is a registry
+// (subcmd.go) now, so this asserts the registry entry resolves and points at
+// runDoctor — a dropped table row or a rewired run func fails immediately
+// instead of at 3am.
 func TestMain_DispatchesDiagnosticSubcommands(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatalf("read main.go: %v", err)
+	sc := findSubcmd("doctor")
+	if sc == nil {
+		t.Fatal(`registry has no "doctor" entry — runDoctor would be unreachable from the CLI`)
 	}
-	src := string(data)
-
-	// doctor subcommand must still be in the dispatch switch. The
-	// case body is short enough that pinning the exact two lines
-	// (case + runDoctor) makes reordering / renaming obvious.
-	if !strings.Contains(src, `case "doctor":`) {
-		t.Error(`main.go dispatch missing "case \"doctor\":" — runDoctor would be unreachable from the CLI`)
-	}
-	if !strings.Contains(src, "runDoctor(os.Args[2:])") {
-		t.Error(`main.go dispatch missing runDoctor call — "naozhi doctor" args would not forward`)
+	if got, want := reflect.ValueOf(sc.run).Pointer(), reflect.ValueOf(runDoctor).Pointer(); got != want {
+		t.Error(`registry "doctor" entry does not run runDoctor — "naozhi doctor" args would not forward`)
 	}
 }
 

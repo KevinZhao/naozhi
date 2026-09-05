@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -23,8 +22,7 @@ func runCost(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: naozhi cost backfill [-config config.yaml] [-dry-run]")
 		os.Exit(2)
 	}
-	fs := flag.NewFlagSet("cost backfill", flag.ExitOnError)
-	configPath := fs.String("config", "config.yaml", "path to config.yaml")
+	fs, configPath := newSubFlagSet("cost backfill", "config.yaml")
 	dryRun := fs.Bool("dry-run", false, "report what would be imported without writing")
 	if err := fs.Parse(args[1:]); err != nil {
 		os.Exit(2)

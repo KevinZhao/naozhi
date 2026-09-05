@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"html"
 	iofs "io/fs"
@@ -65,8 +64,7 @@ func serviceUser() (user, home string) {
 }
 
 func runInstall(args []string) {
-	fs := flag.NewFlagSet("install", flag.ExitOnError)
-	configPath := fs.String("config", "", "config file path (default ~/.naozhi/config.yaml)")
+	fs, configPath := newSubFlagSet("install", "")
 	dryRun := fs.Bool("dry-run", false, "print what would change without writing unit file or invoking systemctl")
 	// -force bypasses the unchanged-unit shortcut (hand-edited unit, or
 	// restart after a binary swap); orthogonal to -dry-run.
