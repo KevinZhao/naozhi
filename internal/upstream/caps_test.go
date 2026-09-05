@@ -7,6 +7,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // withDefaultBackendsForTest seeds backend.RegisterDefaults exactly
@@ -36,7 +37,7 @@ func TestDerivedCaps_FromDefaultRegistry(t *testing.T) {
 	seedDefaultBackends(t)
 
 	got := derivedCaps()
-	want := []string{"acp", "codex-app-server"}
+	want := []string{"acp", "codex-app-server", clievent.SchemaCap}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("derivedCaps() = %v; want %v", got, want)
 	}
