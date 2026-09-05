@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -119,9 +120,14 @@ func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendRes
 	if r == nil {
 		return cron.SendResult{}, err
 	}
-	// CostUSD crosses the boundary so local runs persist their cost (#2280).
-	return cron.SendResult{Text: r.Text, SessionID: r.SessionID, CostUSD: r.CostUSD}, err
+	return cron.SendResult{Text: r.Text, SessionID: r.SessionID}, err
 }
+
+// CostTotals satisfies cron.CostReporter: cron differences two snapshots
+// around Send to attribute the run's spend (docs/rfc/cost-ledger.md §5.3).
+func (c cronSessionAdapter) CostTotals() costledger.Totals { return c.s.CostTotals() }
+
+var _ cron.CostReporter = cronSessionAdapter{}
 
 // SessionID lets the cron inflight broadcast fill in the CLI session id
 // mid-Send. Assumes c.s is non-nil (always constructed with a live session).

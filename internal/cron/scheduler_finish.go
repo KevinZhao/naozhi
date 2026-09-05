@@ -8,6 +8,7 @@ package cron
 
 import (
 	"context"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"io/fs"
 	"log/slog"
 	"regexp"
@@ -221,9 +222,9 @@ type finishArgs struct {
 	// sandboxMeta is the cloud-execution receipt for placement=sandbox runs
 	// (RFC §7.3); nil for local runs, whose record then carries no sandbox_meta.
 	sandboxMeta *SandboxRunMeta
-	// costUSD is the per-run cost for LOCAL runs (SendResult.CostUSD, #2280);
-	// sandbox runs leave it 0 and carry cost via sandboxMeta.
-	costUSD float64
+	// costInc is the LOCAL run's spend (session CostTotals after − before);
+	// sandbox runs leave it zero and carry cost via sandboxMeta.
+	costInc costledger.Increment
 	// sandbox marks a placement=sandbox run so bumpRunStateMetrics also
 	// advances the CronSandboxRun{Failed,TimedOut}Total buckets (#2173).
 	// Deliberately separate from sandboxMeta != nil: pre-invoke failures
@@ -324,8 +325,8 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			ReplayOf:    a.replayOf,
 			// nil for local runs, so their record carries no sandbox_meta key.
 			SandboxMeta: a.sandboxMeta,
-			// local-run cost; 0 for sandbox runs, which report via SandboxMeta.
-			CostUSD: a.costUSD,
+			// local-run cost increment; 0 for sandbox runs, which report via SandboxMeta.
+			CostUSD: a.costInc.USD,
 		})
 		// #2479 (2): post-write re-check; see above.
 		if !s.jobStillExists(a.job.ID) {
@@ -337,6 +338,11 @@ func (s *Scheduler) finishRun(a finishArgs) {
 		// about; drop the snapshot so the next KnownSessionIDs() call rebuilds.
 		s.invalidateKnownSessionsCache()
 	}
+
+	// The ledger is independent of run-record persistence: money was spent
+	// even when the record is skipped (cancel / skipPersist paths included),
+	// dropped as orphan, or has no store.
+	s.appendLedger(a)
 
 	// Finalize before the broadcast (#689) so a dashboard list arriving
 	// concurrently with cron_run_ended observes CurrentRun(jobID) == ok:false.
