@@ -12,9 +12,10 @@ import (
 )
 
 // derivedCaps returns the sorted union of RequiredNodeCaps across every
-// registered backend.Profile. Returns nil (not []string{}) when empty so the
-// ReverseMsg omits Capabilities via omitempty, keeping wire compatibility
-// with primaries that predate capability negotiation.
+// registered backend.Profile, plus the always-advertised EventEntry schema
+// tag (#2496) — so the result is never empty and every register frame
+// carries Capabilities. Primaries predating capability negotiation ignore
+// unknown tags (WARN only), so this stays wire-compatible.
 func derivedCaps() []string {
 	var seen map[string]struct{}
 	for _, p := range backend.All() {
