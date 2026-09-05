@@ -185,6 +185,10 @@ type Process struct {
 	// when never reported. A string, not an enum, so an unrecognised future tier
 	// still reaches the dashboard (docs/rfc/kiro-effort-visibility.md §2).
 	effort atomic.Pointer[string]
+	// shadowMu guards shadow, the token usage of assistant frames since the
+	// last result frame (see ShadowUsage).
+	shadowMu sync.Mutex
+	shadow   ShadowUsage
 	// meteringMu guards meteringUsage (read-mostly: 1 Hz × N-tab polls, ≤1
 	// write/turn). meteringLen mirrors len(meteringUsage) under meteringMu so
 	// MeteringUsage() can skip the RLock when empty (claude-class backends).

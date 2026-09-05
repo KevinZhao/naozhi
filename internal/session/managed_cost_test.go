@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -208,7 +209,7 @@ func TestAccountTurnCost_ConcurrentTurnsNoLostOrDoubleUpdate(t *testing.T) {
 	done := make(chan struct{})
 	for _, c := range []float64{1, 3, 2, 4} {
 		go func(c float64) {
-			s.finishRun(nil, &cli.SendResult{Text: "x", CostUSD: c,
+			s.finishRun(nil, nil, &cli.SendResult{Text: "x", CostUSD: c,
 				ModelUsage: map[string]cli.ModelUsage{"m": {CostUSD: c, InputTokens: int64(c * 10)}}}, nil)
 			done <- struct{}{}
 		}(c)
@@ -265,5 +266,37 @@ func TestCopyCostBaseline_RenameKeepsDeltaBaseline(t *testing.T) {
 	old.lastCumulative.Models["m"] = costledger.ModelUsage{CostUSD: 99}
 	if fresh.lastCumulative.Models["m"].CostUSD != 2 {
 		t.Fatal("rename must clone the baseline maps, not alias them")
+	}
+}
+
+// A turn the process died on books its assistant-frame tokens as a partial
+// entry (no amount); a failure with the process alive books nothing, since
+// the next result's cumulative modelUsage will carry those tokens.
+func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
+	dead := &TestProcess{AliveVal: true, ShadowVal: cli.ShadowUsage{Model: "m[1m]", Input: 40, Output: 8}}
+	dead.SendFunc = func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error) {
+		return nil, cli.ErrProcessExited
+	}
+	s, ledger := newLedgerSession(t, "feishu:p2p:dead", dead)
+	if _, err := s.Send(context.Background(), "hi", nil, nil); err == nil {
+		t.Fatal("expected error")
+	}
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 || ents[0].Kind != costledger.KindPartial || ents[0].Amount != 0 ||
+		len(ents[0].Models) != 1 || ents[0].Models[0].Input != 40 || ents[0].Models[0].Model != "m" || ents[0].Models[0].RawModel != "m[1m]" {
+		t.Fatalf("partial entry = %+v", ents)
+	}
+
+	alive := &TestProcess{AliveVal: true, ShadowVal: cli.ShadowUsage{Input: 40}}
+	alive.SendFunc = func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error) {
+		return nil, errors.New("transient")
+	}
+	s2, ledger2 := newLedgerSession(t, "feishu:p2p:alive", alive)
+	s2.Send(context.Background(), "hi", nil, nil)
+	if ents := allEntries(t, ledger2); len(ents) != 0 {
+		t.Fatalf("alive failure must not book partial: %+v", ents)
+	}
+	if alive.ShadowVal.Input != 40 {
+		t.Fatal("shadow account must be left for the next result to supersede")
 	}
 }

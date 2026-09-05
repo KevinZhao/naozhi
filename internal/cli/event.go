@@ -151,6 +151,32 @@ type TaskUsage struct {
 type AssistantMessage struct {
 	Role    string         `json:"role"`
 	Content []ContentBlock `json:"content"`
+	// Model / Usage are the API message's model id and per-call token usage
+	// (claude stream-json only); they feed the shadow usage account that
+	// survives a turn that ends without a result frame.
+	Model string        `json:"model,omitempty"`
+	Usage *MessageUsage `json:"usage,omitempty"`
+}
+
+// MessageUsage is one API call's token usage as carried on an assistant frame.
+type MessageUsage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+}
+
+// ShadowUsage is the token total of the assistant frames seen since the last
+// result frame: what an unfinished turn (process died, timeout) consumed but
+// never reported through total_cost_usd / modelUsage.
+type ShadowUsage struct {
+	Model                                string
+	Input, Output, CacheRead, CacheWrite int64
+}
+
+// IsZero reports whether nothing was consumed.
+func (u ShadowUsage) IsZero() bool {
+	return u.Input == 0 && u.Output == 0 && u.CacheRead == 0 && u.CacheWrite == 0
 }
 
 type ContentBlock struct {
@@ -208,11 +234,13 @@ func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
+		Model   string          `json:"model"`
+		Usage   *MessageUsage   `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	m.Role = raw.Role
+	m.Role, m.Model, m.Usage = raw.Role, raw.Model, raw.Usage
 	if len(raw.Content) == 0 {
 		m.Content = nil
 		return nil
