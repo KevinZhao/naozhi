@@ -43,9 +43,10 @@ jobs:
         # Tests quarantined in .github/quarantine.txt (#2537) are skipped here
         # and run in the non-blocking test-quarantined job instead.
         run: |
+          pattern=$(grep -v '^#' .github/quarantine.txt 2>/dev/null | grep -v '^$' | paste -sd'|' -)
           skip=""
-          if [ -s .github/quarantine.txt ]; then
-            skip="-skip $(grep -v '^#' .github/quarantine.txt | paste -sd'|' -)"
+          if [ -n "$pattern" ]; then
+            skip="-skip $pattern"
           fi
           go test -race -timeout 300s $skip ./...
 
@@ -204,9 +205,10 @@ jobs:
 
       - name: Test
         run: |
+          pattern=$(grep -v '^#' .github/quarantine.txt 2>/dev/null | grep -v '^$' | paste -sd'|' -)
           skip=""
-          if [ -s .github/quarantine.txt ]; then
-            skip="-skip $(grep -v '^#' .github/quarantine.txt | paste -sd'|' -)"
+          if [ -n "$pattern" ]; then
+            skip="-skip $pattern"
           fi
           go test -race -timeout 300s -short $skip ./...
 
@@ -303,11 +305,11 @@ jobs:
           cache: true
       - name: Run quarantined tests
         run: |
-          if [ ! -s .github/quarantine.txt ] || ! grep -vq '^#' .github/quarantine.txt; then
+          run=$(grep -v '^#' .github/quarantine.txt 2>/dev/null | grep -v '^$' | paste -sd'|' -)
+          if [ -z "$run" ]; then
             echo "quarantine list empty — nothing to run"
             exit 0
           fi
-          run=$(grep -v '^#' .github/quarantine.txt | paste -sd'|' -)
           go test -race -timeout 300s -run "$run" ./...
 
   # Synthetic failure for exercising flaky-report end-to-end (#2537); only
