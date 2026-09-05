@@ -231,6 +231,13 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		// Contract: spawn_diags is always an array in /api/sessions.
 		snap.SpawnDiags = []cli.SpawnDiag{}
 	}
+	if d := s.overlayDrift.Load(); d != nil {
+		snap.OverlayDrift = *d
+	}
+	if snap.OverlayDrift == nil {
+		// Same always-an-array contract as spawn_diags.
+		snap.OverlayDrift = []OverlayFieldDrift{}
+	}
 
 	// Derived from backend even when proc is nil so an evicted session still
 	// renders the right cost label; claude is the default for legacy stores.

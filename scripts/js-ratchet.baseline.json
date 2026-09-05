@@ -18,7 +18,7 @@
     "topLevelLetVar": 17
   },
   "dashboard.js": {
-    "lines": 16214,
+    "lines": 16254,
     "maxFunctionLines": 303,
     "functionsOver100": 17,
     "topLevelLetVar": 104

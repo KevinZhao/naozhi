@@ -92,12 +92,17 @@ socat - UNIX-CONNECT:/tmp/naozhi-test-shim.sock
 ./bin/naozhi shim list
 # 或指定 state 目录:
 ./bin/naozhi shim list --state-dir ~/.naozhi/shims
+# -config（默认 ./config.yaml）用于 overlay 漂移比对；config 不可读时
+# 只跳过漂移列，不影响列表本身
+./bin/naozhi shim list -config /path/to/config.yaml
 ```
 
 输出示例：
 ```
 SHIM   CLI    ALIVE KEY                                      SESSION
 12345  23456  yes   feishu:d:alice:general                    sess_abc123...
+       DRIFT append_system_prompt: "旧提示" -> "新提示" — 重启会话以应用新配置
+       note model: stored "claude-opus-4.7", config now "claude-fable-5"（不含 dashboard tuning 层，以 /api/sessions 的 overlay_drift 为准）
 12346  23457  yes   feishu:d:bob:code-reviewer                sess_def456...
 
 2 shim(s)
