@@ -103,6 +103,10 @@ function cronTimezoneNote() {
 //     instead of selectedKey.
 //   - F5 / reload does NOT persist (RFC §4.5 Q5).
 let cronDetailJobId = null;
+// cronJobCostCache: jobId → last-30-day ledger totals for the job (local +
+// sandbox runs), fetched when the drawer opens; complements the timeline's
+// "已加载 N 条" sum which only covers loaded rows.
+const cronJobCostCache = {};
 
 // _cronDrawerFetchedFor tracks per-jobId reconcile attempts inside the
 // drawer's "task missing" branch. Without this guard, deep-linking to a
@@ -2125,6 +2129,7 @@ function cronTimelineHtml(jobId, job, st) {
   // §7.5 cost小字：纯前端聚合已加载 run 的 cost_usd（只有云沙箱 run 带）。
   // 标注"已加载 N 条"避免误读为全量账单——这是轻量可见性，非账单系统。
   const costSummary = cronTimelineCostSummaryHtml(st.runs);
+  const ledgerCost = cronJobLedgerCostHtml(jobId);
   const rowsHtml = st.runs.length === 0
     ? '<div class="ct-empty">暂无执行记录。下次调度或点击「立即执行」触发首次运行。</div>'
     : st.runs.map(r => cronTimelineRowHtml(jobId, r, st)).join('');
@@ -2164,6 +2169,7 @@ function cronTimelineHtml(jobId, job, st) {
   return queueBanner +
     '<div class="ct-head">' +
       '<h3>' + esc(headTitle) + '</h3>' +
+      ledgerCost +
       costSummary +
     '</div>' +
     '<div class="ct-rows" data-collapsed="' + initiallyCollapsed + '" data-job-id="' + escAttr(jobId) + '">' + rowsHtml + '</div>' +
@@ -2326,6 +2332,40 @@ async function cronReplayRunInner(jobId, runId, fromQueue) {
   }
   // Refresh the timeline so the new replay run shows up at the head.
   if (cronDetailJobId === jobId) cronTimelineRefreshHeadDebounced(jobId);
+}
+
+// cronJobCostRefresh pulls the job's 30-day ledger total and repaints the
+// timeline head when the drawer still shows this job. Errors leave the
+// previous figure in place.
+async function cronJobCostRefresh(jobId) {
+  if (!jobId) return;
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const to = new Date();
+    const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
+    const resp = await fetch('/api/cost/summary?group_by=job&job_id=' + encodeURIComponent(jobId) +
+      '&from=' + encodeURIComponent(from.toISOString()) + '&to=' + encodeURIComponent(to.toISOString()), { headers });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    let usd = 0, entries = 0;
+    for (const b of (data && Array.isArray(data.buckets) ? data.buckets : [])) {
+      if (b && b.unit === 'USD' && typeof b.amount === 'number') { usd += b.amount; entries += (b.entries | 0); }
+    }
+    cronJobCostCache[jobId] = { usd: usd, entries: entries, dropped: (data && data.dropped) | 0 };
+    if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
+  } catch (_) {}
+}
+
+// cronJobLedgerCostHtml renders the job's 30-day ledger figure (all runs,
+// local + sandbox) or '' before the fetch lands / when nothing was spent.
+function cronJobLedgerCostHtml(jobId) {
+  const c = cronJobCostCache[jobId];
+  if (!c || !(c.usd > 0)) return '';
+  const title = '近 30 天账本合计：' + c.entries + ' 次运行（本地 + 云沙箱），CLI 估算口径' +
+    (c.dropped > 0 ? '；账本曾丢弃 ' + c.dropped + ' 条，可能偏低' : '');
+  return '<span class="ct-cost-ledger" title="' + escAttr(title) + '">30 天 ' + esc(formatCostUSD(c.usd)) + '</span>';
 }
 
 // cronTimelineCostSummaryHtml sums cost_usd over the loaded runs for the
@@ -4004,6 +4044,7 @@ function openCronDetail(jobId, originRow) {
   }
   cronDetailJobId = jobId;
   cronAttentionRefresh().catch(() => {}); // §7.4: pull confirmation queue on open
+  cronJobCostRefresh(jobId).catch(() => {});
   // openCronPanel handles selectedKey reset / WS unsubscribe / mobile
   // shell push and triggers renderCronPanel — that path repaints both
   // the list (with .is-active on the new row) AND the drawer in one

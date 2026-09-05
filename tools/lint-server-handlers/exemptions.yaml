@@ -57,7 +57,7 @@ file_size:
       limit: 800
       until_phase: "5"        # Phase 5 内部拆分
     - path: internal/server/server.go
-      current: 699                          # 2026-09-04 重采（#2498：self-update 字段组迁 dashboard/ext/system）
+      current: 705                          # 2026-09-05 重采（#2286：cost ledger handler 字段 + 构造 + limiter 守卫）
       limit: 500
       until_phase: "5"
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线
@@ -65,7 +65,7 @@ file_size:
       limit: 500
       until_phase: 4b
     - path: internal/server/routes.go         # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 516                          # 2026-09-04 重采（#2498：/api/system + /api/planner 注册 dashboard/ext handler）
+      current: 519                          # 2026-09-05 重采（#2286：/api/cost/summary|entries 两条路由）
       limit: 500
       until_phase: "5"
     # internal/server/agent_tailer.go: entry removed 2026-07-31 — tailerRegistry

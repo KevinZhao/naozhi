@@ -30,6 +30,16 @@
     "handler_type": "*cli.Handler"
   },
   {
+    "method": "GET",
+    "path": "/api/cost/entries",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "GET",
+    "path": "/api/cost/summary",
+    "handler_type": "*Server"
+  },
+  {
     "method": "DELETE",
     "path": "/api/cron",
     "handler_type": "*dashcron.Handlers"

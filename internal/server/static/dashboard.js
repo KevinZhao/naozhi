@@ -38,6 +38,10 @@ let oldestFetchedEventTime = 0;
 let lastCompositionEnd = 0;
 let sessionsData = {};
 let allSessionsCache = [];
+// costSummaryCache is the ledger's last-30-day unit-bucketed total from
+// /api/cost/summary (null until the first fetch lands); the 服务概览 花费 card
+// prefers it over the live-session sum, which forgets deleted sessions and cron.
+let costSummaryCache = null;
 // Keys (sid(key,node)) optimistically removed by dismissSession before the
 // DELETE round-trips. fetchSessions/renderSidebar skip these so an in-flight
 // poll or sessions_update WS event that still lists the session cannot
@@ -9338,6 +9342,62 @@ function renderRecentSessionsPanel() {
     '</div>';
 }
 
+// summarizeCostBuckets folds a /api/cost/summary (group_by=unit) payload into
+// the card model. Pure so a contract test can drive it without the DOM.
+function summarizeCostBuckets(data) {
+  const out = { usd: 0, credits: 0, tokens: 0, entries: 0, unknown: 0, dropped: 0, loadedAt: Date.now() };
+  const buckets = data && Array.isArray(data.buckets) ? data.buckets : [];
+  for (const b of buckets) {
+    if (!b || typeof b.amount !== 'number' || !isFinite(b.amount)) continue;
+    if (b.unit === 'USD') out.usd += b.amount;
+    else if (b.unit === 'credits') out.credits += b.amount;
+    else if (b.unit === 'tokens') out.tokens += b.amount;
+    out.entries += (b.entries | 0);
+  }
+  if (data && data.basis && typeof data.basis.unknown === 'number') out.unknown = data.basis.unknown;
+  if (data && typeof data.dropped === 'number') out.dropped = data.dropped;
+  return out;
+}
+
+// costCardTitle explains what the ledger figure is (and is not): a CLI
+// estimate at list/contract price, never an invoice.
+function costCardTitle(c) {
+  let t = '近 30 天账本合计（会话 + cron + 云沙箱），CLI 估算口径，非账单';
+  if (c.unknown > 0) t += '；含 ' + c.unknown + ' 条未知定价（模型不在 CLI 价表，按默认模型估算）';
+  if (c.dropped > 0) t += '；账本曾丢弃 ' + c.dropped + ' 条，金额可能偏低';
+  return t;
+}
+
+// refreshCostSummary pulls the ledger's last-30-day totals at most once per
+// 30 s (attempts, not successes, so a failing endpoint is not hammered on
+// every repaint), one fetch in flight at a time, and repaints the system
+// view when it is showing. Failures keep the previous snapshot (or the
+// session-sum fallback) — never blank the card.
+const COST_SUMMARY_TTL_MS = 30 * 1000;
+let costSummaryLastAttempt = 0;
+let costSummaryInFlight = false;
+async function refreshCostSummary() {
+  const now = Date.now();
+  if (costSummaryInFlight || (now - costSummaryLastAttempt) < COST_SUMMARY_TTL_MS) return;
+  costSummaryLastAttempt = now;
+  costSummaryInFlight = true;
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const to = new Date();
+    const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
+    const resp = await fetch('/api/cost/summary?group_by=unit&from=' + encodeURIComponent(from.toISOString()) +
+      '&to=' + encodeURIComponent(to.toISOString()), { headers });
+    if (!resp.ok) return;
+    costSummaryCache = summarizeCostBuckets(await resp.json());
+    if (activeView === 'system') renderSystemView();
+  } catch (_) {
+  } finally {
+    costSummaryInFlight = false;
+  }
+}
+
 // renderServiceOverviewHtml builds the 服务概览 section for the 系统 view:
 // the aggregate stats (today active / prompts / cost), the health strip
 // derived from the /api/sessions stats snapshot, and the multi-backend
@@ -9345,6 +9405,30 @@ function renderRecentSessionsPanel() {
 // — the pure helpers stayed put, only the call site and CSS classes
 // (svc-*) changed. Version identity lines also render in the settings
 // 关于 section (renderSettingsView) for discoverability.
+// costStatHtml renders the 花费 card: ledger figure when loaded (with a
+// credits sub-line for kiro sessions and an honest hover explanation),
+// otherwise the legacy live-session sum labelled as such.
+function costStatHtml(stats) {
+  const c = costSummaryCache;
+  if (!c) {
+    return '<div class="svc-stat" title="当前会话列表 total_cost 之和（不含已删会话 / cron）">' +
+        '<div class="svc-stat-value">' + esc(formatHomeCost(stats.totalCost)) + '</div>' +
+        '<div class="svc-stat-label">累计花费</div>' +
+      '</div>';
+  }
+  const sub = c.credits > 0
+    ? '<div class="svc-stat-sub">' + esc(c.credits.toFixed(2)) + ' credits</div>'
+    : '';
+  const flag = (c.unknown > 0 || c.dropped > 0)
+    ? ' <span class="svc-stat-flag" role="img" aria-label="金额存疑">⚠</span>'
+    : '';
+  return '<div class="svc-stat" title="' + escAttr(costCardTitle(c)) + '">' +
+      '<div class="svc-stat-value">' + esc(formatHomeCost(c.usd)) + flag + '</div>' +
+      sub +
+      '<div class="svc-stat-label">近 30 天花费</div>' +
+    '</div>';
+}
+
 function renderServiceOverviewHtml() {
   const items = Array.isArray(allSessionsCache) ? allSessionsCache : [];
   const stats = computeHomeStats(items, Date.now());
@@ -9358,10 +9442,7 @@ function renderServiceOverviewHtml() {
         '<div class="svc-stat-value">' + stats.totalPrompts + '</div>' +
         '<div class="svc-stat-label">已处理 prompt</div>' +
       '</div>' +
-      '<div class="svc-stat">' +
-        '<div class="svc-stat-value">' + esc(formatHomeCost(stats.totalCost)) + '</div>' +
-        '<div class="svc-stat-label">累计花费</div>' +
-      '</div>' +
+      costStatHtml(stats) +
     '</div>';
   const healthLines = buildHomeHealthLines(lastStatsSnapshot);
   const healthHtml = healthLines.length === 0
@@ -12349,6 +12430,7 @@ function systemStatLabel(key) {
 function renderSystemView() {
   const root = document.getElementById('system-main');
   if (!root) return;
+  refreshCostSummary().catch(() => {});
   const cards = systemDaemons.map(function (d) {
     const lr = d.last_run;
     const st = systemStateMeta(lr && lr.state);

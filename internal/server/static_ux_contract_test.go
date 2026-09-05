@@ -4217,10 +4217,25 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 	}
 	// Chinese labels — operators should see Chinese copy. "已处理 prompt"
 	// is the #445 third card sourced from aggregated message_count.
-	for _, want := range []string{"今日活跃会话", "已处理 prompt", "累计花费"} {
+	// The cost card lives in costStatHtml (ledger figure with a
+	// session-sum fallback), so its labels are checked in that body.
+	costIdx := strings.Index(js, "function costStatHtml(")
+	if costIdx < 0 {
+		t.Fatal("dashboard.js missing costStatHtml()")
+	}
+	costBody := js[costIdx:min(costIdx+3000, len(js))]
+	for _, want := range []string{"今日活跃会话", "已处理 prompt"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderServiceOverviewHtml stats strip missing Chinese label %q", want)
 		}
+	}
+	for _, want := range []string{"累计花费", "近 30 天花费"} {
+		if !strings.Contains(costBody, want) {
+			t.Errorf("costStatHtml missing Chinese label %q", want)
+		}
+	}
+	if !strings.Contains(body, "costStatHtml(stats)") {
+		t.Error("renderServiceOverviewHtml must render the cost card via costStatHtml(stats)")
 	}
 	// #445: the prompt-count card must read stats.totalPrompts (the new
 	// aggregate) rather than re-deriving a constant — a regression that

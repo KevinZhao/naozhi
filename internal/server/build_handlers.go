@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
+	dashcost "github.com/naozhi/naozhi/internal/dashboard/cost"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	dashdiscovery "github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
@@ -64,6 +66,22 @@ func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers 
 		TranscriptSemCap: cronTranscriptSemCap,
 		ValidateWS:       validateWorkspace,
 		ClassifyWSErr:    classifyWorkspaceErr,
+	})
+}
+
+// buildCostHandlers serves the cost ledger read API at the dashboard's 1 Hz
+// poll budget (2/s, burst 30); the ledger may be nil/disabled (503).
+func buildCostHandlers(opts ServerOptions, router *session.Router) *dashcost.Handlers {
+	var ledger *costledger.Store
+	if router != nil {
+		ledger = router.CostLedger()
+	}
+	return dashcost.New(dashcost.Deps{
+		Ledger: ledger,
+		Limiter: newIPLimiterWithCap(
+			rate.Every(500*time.Millisecond), 30,
+			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
+		),
 	})
 }
 
