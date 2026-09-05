@@ -136,46 +136,6 @@ func TestDashboardJS_RNEW_SEC008_DataRawAlwaysEscAttr(t *testing.T) {
 	}
 }
 
-// it does not track string literals, so a comment-like sequence inside a
-// string would still be stripped; for the narrow windows this test works
-// with, that's an acceptable trade. If the window starts INSIDE a block
-// comment (e.g. the caller sliced starting at a JSDoc anchor phrase),
-// we still skip everything up to the first `*/` so the stripped text
-// begins with real code.
-func stripJSComments(src string) string {
-	var b strings.Builder
-	b.Grow(len(src))
-	i, n := 0, len(src)
-	// If the window starts within a block comment, skip to the
-	// terminator before scanning normally.
-	if idx := strings.Index(src, "*/"); idx >= 0 {
-		// Only treat as continuation if no opening /* appears before it.
-		if open := strings.Index(src[:idx], "/*"); open < 0 {
-			i = idx + 2
-		}
-	}
-	for i < n {
-		if i+1 < n && src[i] == '/' && src[i+1] == '*' {
-			end := strings.Index(src[i+2:], "*/")
-			if end < 0 {
-				break
-			}
-			i += 2 + end + 2
-			continue
-		}
-		if i+1 < n && src[i] == '/' && src[i+1] == '/' {
-			end := strings.IndexByte(src[i:], '\n')
-			if end < 0 {
-				break
-			}
-			i += end
-			continue
-		}
-		b.WriteByte(src[i])
-		i++
-	}
-	return b.String()
-}
 
 // TestDashboardJS_EscIsPureString pins R244-SEC-P3-6: esc() must NOT use
 // a shared `_escEl = document.createElement('div')` scratch element with
