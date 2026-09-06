@@ -1,4 +1,4 @@
-import { esc, escAttr, escJs, fetchJSON, showToast, trapFocus, nzState } from './nz_util.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, registerActions } from './nz_util.js';
 // cron_view.js — Cron (定时任务) dashboard view.
 //
 // RFC docs/rfc/dashboard-cron-view-extraction.md (PR-1). Extracted verbatim
@@ -487,7 +487,7 @@ function buildFreqPickerHtml(initial) {
   const time = d.time || '09:00';
   const timeInput =
     '<input class="freq-time" id="freq-time" type="time" value="' + esc(time) + '"' +
-      ' onchange="freqMarkTouched();freqUpdate()" oninput="freqMarkTouched();freqUpdate()"' +
+      ' data-action-change="cron-freq-update" data-action-input="cron-freq-update"' +
       (mode === 'hourly' ? ' style="display:none"' : '') + '>';
 
   // weekly 的星期下拉（单选）。默认 Monday。
@@ -495,7 +495,7 @@ function buildFreqPickerHtml(initial) {
   const dowOption = (i, label) =>
     '<option value="' + i + '"' + (weeklyDow === i ? ' selected' : '') + '>' + esc(label) + '</option>';
   const weeklySelect =
-    '<select class="freq-extra" id="freq-weekly-dow" onchange="freqMarkTouched();freqUpdate()"' +
+    '<select class="freq-extra" id="freq-weekly-dow" data-action-change="cron-freq-update"' +
       (mode === 'weekly' ? '' : ' style="display:none"') + '>' +
       dowOption(1, '星期一') + dowOption(2, '星期二') + dowOption(3, '星期三') +
       dowOption(4, '星期四') + dowOption(5, '星期五') + dowOption(6, '星期六') +
@@ -509,13 +509,13 @@ function buildFreqPickerHtml(initial) {
     dayOpts += '<option value="' + i + '"' + (monthlyDay === i ? ' selected' : '') + '>' + i + ' 日</option>';
   }
   const monthlySelect =
-    '<select class="freq-extra" id="freq-monthly-day" onchange="freqMarkTouched();freqUpdate()"' +
+    '<select class="freq-extra" id="freq-monthly-day" data-action-change="cron-freq-update"' +
       (mode === 'monthly' ? '' : ' style="display:none"') + '>' +
       dayOpts +
     '</select>';
 
   return '<div class="freq-row-inline">' +
-      '<select class="freq-mode-select" id="freq-mode-select" aria-label="频率模式" onchange="freqSelectMode(this.value)">' +
+      '<select class="freq-mode-select" id="freq-mode-select" aria-label="频率模式" data-action-change="cron-freq-mode">' +
         modeOption('hourly', 'Hourly') +
         modeOption('daily', 'Daily') +
         modeOption('weekdays', 'Weekdays') +
@@ -642,7 +642,7 @@ function buildCronWorkspaceBodyInternal(opts) {
   // 下拉按钮，点击 toggle popover
   const buttonHtml =
     '<button type="button" class="ws-dropdown-btn" id="' + escAttr(opts.buttonId || 'cron-ws-dropdown') + '"' +
-      ' aria-haspopup="listbox" aria-expanded="false" onclick="toggleCronWsDropdown(event)">' +
+      ' aria-haspopup="listbox" aria-expanded="false" data-action="cron-ws-dropdown">' +
       '<span class="ws-dropdown-icon" aria-hidden="true">&#128193;</span>' +
       '<span class="ws-dropdown-label">' + esc(label) + '</span>' +
       '<span class="ws-dropdown-caret" aria-hidden="true">&#9662;</span>' +
@@ -654,14 +654,14 @@ function buildCronWorkspaceBodyInternal(opts) {
       const sel = selected && p.path === selected;
       return '<li role="option" data-path="' + escAttr(p.path) + '"' +
         (sel ? ' class="selected" aria-selected="true"' : ' aria-selected="false"') +
-        ' onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
+        ' data-action="cron-ws-select">' +
           '<div class="pp-name">' + esc(p.name) + '</div>' +
           '<div class="pp-path">' + esc(window.shortPath(p.path)) + '</div>' +
         '</li>';
     }).join('');
   }
   listItems +=
-    '<li id="cron-ws-custom-toggle" role="option" onclick="toggleCronWsCustom()">' +
+    '<li id="cron-ws-custom-toggle" role="option" data-action="cron-ws-custom">' +
       '<div class="pp-custom"><span class="pp-custom-icon">+</span> 自定义路径</div>' +
     '</li>';
 
@@ -729,7 +729,7 @@ function openCronCreateModal(backendHtml) {
     '<div class="modal cron-modal" role="dialog" aria-modal="true" aria-label="新建定时任务">' +
       '<div class="cm-header">' +
         '<h3>新建定时任务</h3>' +
-        '<button type="button" class="cm-close" onclick="this.closest(\'.modal-overlay\').remove()" aria-label="关闭">✕</button>' +
+        '<button type="button" class="cm-close" data-action="cron-modal-dismiss" aria-label="关闭">✕</button>' +
       '</div>' +
       renderCronModalBody({
         scheduleHtml, wsBody, notifyHtml, contextHtml,
@@ -738,8 +738,8 @@ function openCronCreateModal(backendHtml) {
         promptPlaceholder: '例如：总结昨天的代码变更，push 到日报频道',
       }) +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
-        '<button type="button" class="primary" onclick="doCreateCronJob()">创建</button>' +
+        '<button type="button" data-action="cron-modal-dismiss">取消</button>' +
+        '<button type="button" class="primary" data-action="cron-create-save">创建</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
@@ -915,13 +915,13 @@ function buildCronNotifyToggleHtml(currentNotify, hasOverride, overridePlat, ove
   const overrideShow = hasOverride ? ' show' : '';
   return '<label class="cron-toggle" id="cron-notify-toggle">' +
       '<input type="checkbox" id="cron-notify-on" ' + (notifyOn ? 'checked' : '') +
-        ' data-touched="' + touched + '" onchange="cronNotifyOnChange(this)">' +
+        ' data-touched="' + touched + '" data-action-change="cron-notify-on">' +
       '<span class="ct-main">完成后通知我' +
         '<span class="ct-hint" id="cron-notify-default-hint">' + defaultHint + '</span>' +
       '</span>' +
     '</label>' +
     '<label class="cron-toggle" id="cron-notify-override-toggle-wrap" style="margin-top:-4px">' +
-      '<input type="checkbox" id="cron-notify-override" ' + (hasOverride ? 'checked' : '') + ' onchange="cronNotifyOverrideToggle(this)">' +
+      '<input type="checkbox" id="cron-notify-override" ' + (hasOverride ? 'checked' : '') + ' data-action-change="cron-notify-override">' +
       '<span class="ct-main" style="font-size:12px;color:var(--nz-text-mute)">自定义此任务的通知目标</span>' +
     '</label>' +
     '<div id="cron-notify-override-form" class="cron-notify-target' + overrideShow + '">' +
@@ -1353,7 +1353,7 @@ function handleCronMenuClick(ev) {
   const btn = ev.target.closest('.cj-menu-item');
   if (!btn) return;
   ev.stopPropagation();
-  const action = btn.getAttribute('data-action');
+  const action = btn.getAttribute('data-menu-action');
   const id = btn.getAttribute('data-id');
   closeCronMenus();
   const fn = CRON_MENU_ACTIONS[action];
@@ -1361,7 +1361,7 @@ function handleCronMenuClick(ev) {
 }
 
 function toggleCronMenu(id) {
-  const sel = '.cj-row[data-cron-id="' + id.replace(/"/g, '\\"') + '"]';
+  const sel = '.cj-row[data-cron-id="' + id.split('"').join('\\"') + '"]';
   const row = document.querySelector(sel);
   if (!row) return;
   // Toggle off if this row's menu is already open.
@@ -1385,7 +1385,7 @@ function toggleCronMenu(id) {
   menu.innerHTML = items.map(it => {
     if (it.sep) return '<div class="cj-menu-sep"></div>';
     return '<button type="button" class="cj-menu-item' + (it.danger ? ' danger' : '') +
-      '" data-action="' + escAttr(it.action) +
+      '" data-menu-action="' + escAttr(it.action) +
       '" data-id="' + escAttr(id) + '">' +
       esc(it.label) + '</button>';
   }).join('');
@@ -1772,8 +1772,7 @@ function ensureCronRunningTick() {
 //
 // The outer div keeps the legacy `cron-card` class as an anchor for E2E
 // selectors (e2e/dashboard.test.js never asserts inner structure). The new
-// visual class is `cj-row`. A hidden `.cc-actions` wrapper is preserved so
-// the R110-P2 contract test continues to pass unchanged.
+// visual class is `cj-row`.
 function cronJobCardHtml(j) {
   const nextAbs = j.next_run ? window.formatAbsTime(j.next_run) : '';
   const lastAbs = j.last_run_at ? window.formatAbsTime(j.last_run_at) : '';
@@ -1839,8 +1838,7 @@ function cronJobCardHtml(j) {
   // handler so a keyboard user can open the edit modal focused at the
   // schedule field without mousing.
   const scheduleChip = '<span class="cj-schedule" role="button" tabindex="0"' +
-    ' onclick="event.stopPropagation();editCronJob(\'' + escJs(j.id) + '\')"' +
-    ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();event.stopPropagation();editCronJob(\'' + escJs(j.id) + '\')}"' +
+    ' data-action="cron-edit" data-action-keydown="cron-edit"' +
     ' title="点击修改时间">' + esc(human + cronTimezoneSuffix()) + '</span>';
   let iconGlyphs = '';
   // ☁️ placement 徽标（RFC §7.2）：第三个正交标识，排最前；
@@ -1874,29 +1872,11 @@ function cronJobCardHtml(j) {
     : '';
 
   // Actions: ghost Run + ⋯ menu trigger. Run hidden for paused rows (the
-  // backend rejects TriggerNow with 409 ErrJobPaused). Keep `const runBtn =
-  // j.paused` spelling to satisfy TestDashboardJS_R110P2_CronRunNowButton's
-  // invariant-1 literal search.
+  // backend rejects TriggerNow with 409 ErrJobPaused).
   const runBtn = j.paused
     ? ''
-    : '<button type="button" class="cc-btn cj-run" onclick="event.stopPropagation();cronTriggerNow(\'' + escJs(j.id) + '\')" title="立即执行一次" aria-label="立即执行一次"><span aria-hidden="true">▷</span> 运行</button>';
-  const menuBtn = '<button type="button" class="cj-menu-btn" onclick="event.stopPropagation();toggleCronMenu(\'' + escJs(j.id) + '\')" aria-label="更多操作" aria-haspopup="true">⋯</button>';
-
-  // TestDashboardJS_R110P2_CronRunNowButton greps the source for the legacy
-  // .cc-actions wrapper structure. The v3 row design moved actions into
-  // .cj-actions + ⋯ menu, so the legacy markup is only referenced from this
-  // always-false branch — kept as a source-level contract anchor but never
-  // emitted into the DOM (avoids N×4 hidden buttons per row).
-  if (typeof cronJobCardHtml.__unused === 'symbol') {
-    return '<div class="cc-actions" onclick="event.stopPropagation()">' +
-      runBtn +
-      '<button type="button" class="cc-btn" onclick="editCronJob(\'' + escJs(j.id) + '\')">edit</button>' +
-      (j.paused
-        ? '<button type="button" class="cc-btn" onclick="cronResume(\'' + escJs(j.id) + '\')">resume</button>'
-        : '<button type="button" class="cc-btn" onclick="cronPause(\'' + escJs(j.id) + '\')">pause</button>') +
-      '<button type="button" class="cc-btn danger" onclick="cronDelete(\'' + escJs(j.id) + '\')">delete</button>' +
-    '</div>';
-  }
+    : '<button type="button" class="cc-btn cj-run" data-action="cron-run-now" title="立即执行一次" aria-label="立即执行一次"><span aria-hidden="true">▷</span> 运行</button>';
+  const menuBtn = '<button type="button" class="cj-menu-btn" data-action="cron-menu-toggle" aria-label="更多操作" aria-haspopup="true">⋯</button>';
 
   // Status dot is the only at-a-glance signal of a job's run state; give it a
   // text label so it doesn't rely on colour alone (a11y) and so hover/SR users
@@ -1908,8 +1888,7 @@ function cronJobCardHtml(j) {
     : '已启用';
 
   return '<div class="' + rowClasses.join(' ') + ' cron-card" data-cron-id="' + escAttr(j.id) + '" role="button" tabindex="0" ' +
-    'onclick="openCronDetail(\'' + escJs(j.id) + '\', this)" ' +
-    'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronDetail(\'' + escJs(j.id) + '\', this)}">' +
+    'data-action="cron-open" data-action-keydown="cron-open">' +
     '<span class="cj-dot" role="img" title="' + escAttr(dotLabel) + '" aria-label="' + escAttr('状态：' + dotLabel) + '"></span>' +
     '<div class="cj-main">' +
       '<div class="cj-title' + (hasTitle ? '' : ' placeholder') + '" title="' + escAttr(titleStr || emptyPromptHint) + '">' + esc(displayTitle) + '</div>' +
@@ -2149,7 +2128,7 @@ function cronTimelineHtml(jobId, job, st) {
       // 折叠态："查看全部 N 条"——展开后再让既有 [加载更多] 接管分页。
       moreBtn = '<button type="button" class="ct-more-btn ct-show-all"' +
         ' data-hidden-count="' + hiddenCount + '"' +
-        ' onclick="cronTimelineToggleShowAll(this)">' +
+        ' data-action="cron-tl-showall">' +
         '查看全部 ' + st.runs.length + ' 条' +
       '</button>';
     } else if (st.done) {
@@ -2157,7 +2136,7 @@ function cronTimelineHtml(jobId, job, st) {
     } else {
       moreBtn = '<button type="button" class="ct-more-btn"' +
         (st.loading ? ' disabled' : '') +
-        ' onclick="cronTimelineLoadMore(\'' + escJs(jobId) + '\')">' +
+        ' data-action="cron-tl-more" data-job="' + escAttr(jobId) + '">' +
         (st.loading ? '加载中…' : '加载更多') +
       '</button>';
     }
@@ -2240,10 +2219,10 @@ function cronAttentionCardHtml(it) {
       '</div>' +
       '<div class="ctr-queue-actions">' +
         '<button type="button" class="ctr-queue-confirm"' +
-          ' onclick="cronAttentionConfirm(\'' + escJs(it.run_id) + '\')"' +
+          ' data-action="cron-att-confirm" data-run="' + escAttr(it.run_id) + '"' +
           ' title="' + escAttr('副作用已发生 / 不需重跑——从队列移除') + '">确认已完成</button>' +
         '<button type="button" class="ctr-queue-replay"' +
-          ' onclick="cronAttentionReplay(\'' + escJs(it.job_id) + '\',\'' + escJs(it.run_id) + '\')"' +
+          ' data-action="cron-att-replay" data-job="' + escAttr(it.job_id) + '" data-run="' + escAttr(it.run_id) + '"' +
           ' title="' + escAttr('副作用未发生——先终止原微VM再用快照重放') + '">确认未完成，重放</button>' +
       '</div>' +
     '</div>';
@@ -2410,7 +2389,7 @@ function cronTimelineToggleShowAll(btn) {
   } else {
     next.innerHTML = '<button type="button" class="ct-more-btn"' +
       (st.loading ? ' disabled' : '') +
-      ' onclick="cronTimelineLoadMore(\'' + escJs(jobId) + '\')">' +
+      ' data-action="cron-tl-more" data-job="' + escAttr(jobId) + '">' +
       (st.loading ? '加载中…' : '加载更多') +
     '</button>';
   }
@@ -2465,16 +2444,12 @@ function cronTimelineRowHtml(jobId, r, st) {
       '</div>';
   }
 
-  // 行 onclick/onkeydown 是 cronTimelineSelectRun（同 run 二次点击 = collapse）。
-  // .ctr-detail 嵌在行内，不加 closest('.ctr-detail') 守卫的话点 <details>
-  // 输入快照 / ↩ 重放自 / ↻ 重放 / 拖选文字都会把行折起来。守卫写在行
-  // handler 里而不是给 detail 再挂一个 onclick，是为了不增加 inline onclick
-  // 计数（CSP ratchet TestDashboardCSP_GeneratedHandlerSurfaceRatchet）。
-  const detailGuard = '!event.target.closest(\'.ctr-detail\')';
+  // 行 click/keydown 走 cron-tl-select（同 run 二次点击 = collapse）。
+  // .ctr-detail 嵌在行内，handler 里有 closest('.ctr-detail') 守卫——否则点
+  // <details> 输入快照 / ↩ 重放自 / ↻ 重放 / 拖选文字都会把行折起来。
   return '<div class="ctr' + (isExpanded ? ' is-selected is-expanded' : '') + '" data-run-id="' + escAttr(runId) + '"' +
-      ' onclick="if(' + detailGuard + ')cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
-      ' role="button" tabindex="0" aria-pressed="' + (isExpanded ? 'true' : 'false') + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '"' +
-      ' onkeydown="if((event.key===\'Enter\'||event.key===\' \')&&' + detailGuard + '){event.preventDefault();cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')}">' +
+      ' data-action="cron-tl-select" data-action-keydown="cron-tl-select" data-job="' + escAttr(jobId) + '"' +
+      ' role="button" tabindex="0" aria-pressed="' + (isExpanded ? 'true' : 'false') + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '">' +
     '<div class="ctr-main">' +
       '<span class="ctr-dot ' + dotCls + '" aria-hidden="true"></span>' +
       '<span class="ctr-state">' + esc(stateLbl) + '</span>' +
@@ -2598,7 +2573,7 @@ function cronReplayBarHtml(jobId, runId, detail) {
   const parts = [];
   if (detail.replay_of) {
     parts.push('<button type="button" class="ctr-replay-of"' +
-      ' onclick="cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(detail.replay_of) + '\')"' +
+      ' data-action="cron-tl-jump" data-job="' + escAttr(jobId) + '" data-run="' + escAttr(detail.replay_of) + '"' +
       ' title="' + escAttr('这是一次重放，点击查看原始 run') + '">↩ 重放自 ' + esc(String(detail.replay_of).slice(0, 8)) + '</button>');
   }
   const isTransport = detail.error_class === 'sandbox_transport';
@@ -2608,7 +2583,7 @@ function cronReplayBarHtml(jobId, runId, detail) {
     parts.push('<span class="ctr-replay-hint">⚠ 状态未知，走待确认队列</span>');
   } else {
     parts.push('<button type="button" class="ctr-replay-btn"' +
-      ' onclick="cronReplayRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
+      ' data-action="cron-replay" data-job="' + escAttr(jobId) + '" data-run="' + escAttr(runId) + '"' +
       ' title="' + escAttr('用同一份输入快照重新跑一遍（进全新微VM）') + '">↻ 重放</button>');
   }
   return '<div class="ctr-replay-bar">' + parts.join('') + '</div>';
@@ -3255,7 +3230,7 @@ function renderCronList() {
         '<div class="cron-empty-icon" aria-hidden="true">&#9201;</div>' +
         '<div class="cron-empty-hint">还没有定时任务</div>' +
         '<div class="cron-empty-sub">按计划自动在某个工作目录下运行提示词</div>' +
-        '<button type="button" class="cron-empty-cta" onclick="createNewCronJob()">创建第一个定时任务</button>' +
+        '<button type="button" class="cron-empty-cta" data-action="cron-new">创建第一个定时任务</button>' +
       '</div>';
     return;
   }
@@ -3350,7 +3325,7 @@ function renderCronDrawer() {
         '<div class="cdh-row1">' +
           '<h2 class="cdh-title placeholder" tabindex="-1">任务已不在列表中</h2>' +
           '<div class="cdh-actions">' +
-            '<button class="cdh-btn-icon" onclick="closeCronDetail()" title="关闭" aria-label="关闭">&times;</button>' +
+            '<button class="cdh-btn-icon" data-action="cron-detail-close" title="关闭" aria-label="关闭">&times;</button>' +
           '</div>' +
         '</div>' +
       '</header>' +
@@ -3427,7 +3402,7 @@ function cronDrawerHtml(j) {
     '<div class="cdh-row1">' +
       '<h2 class="cdh-title" tabindex="-1" title="' + escAttr(titleStr) + '">' + esc(titleStr) + '</h2>' +
       '<div class="cdh-actions">' +
-        '<button class="cdh-btn-icon" onclick="closeCronDetail()" title="关闭 (Esc)" aria-label="关闭">&times;</button>' +
+        '<button class="cdh-btn-icon" data-action="cron-detail-close" title="关闭 (Esc)" aria-label="关闭">&times;</button>' +
       '</div>' +
     '</div>' +
   '</header>';
@@ -3475,16 +3450,16 @@ function cronDrawerHtml(j) {
   const triggerTooltip = trig.tooltip;
   const triggerCls = trig.cls;
   const pauseBtn = isPaused
-    ? '<button type="button" class="cda-btn" onclick="cronResume(\'' + escJs(id) + '\')" title="恢复任务调度">\u25B6 恢复</button>'
-    : '<button type="button" class="cda-btn" onclick="cronPause(\'' + escJs(id) + '\')" title="暂停后调度跳过">\u23F8 暂停</button>';
+    ? '<button type="button" class="cda-btn" data-action="cron-resume" data-id="' + escAttr(id) + '" title="恢复任务调度">\u25B6 恢复</button>'
+    : '<button type="button" class="cda-btn" data-action="cron-pause" data-id="' + escAttr(id) + '" title="暂停后调度跳过">\u23F8 暂停</button>';
   const actionsHtml = '<nav class="cron-drawer-actions" aria-label="任务操作">' +
     '<button type="button" class="' + triggerCls + '"' +
       (triggerDisabled ? ' disabled aria-disabled="true"' : '') +
-      ' onclick="cronTriggerNow(\'' + escJs(id) + '\')"' +
+      ' data-action="cron-run-now" data-id="' + escAttr(id) + '"' +
       ' title="' + escAttr(triggerTooltip) + '">' + esc(triggerLabel) + '</button>' +
     pauseBtn +
     // P3 §5: ✎ 编辑按钮已移除——spec 卡可点击进编辑 modal。
-    '<button type="button" class="cda-btn danger" onclick="cronDelete(\'' + escJs(id) + '\')" title="删除任务及其历史">\uD83D\uDDD1 删除</button>' +
+    '<button type="button" class="cda-btn danger" data-action="cron-delete" data-id="' + escAttr(id) + '" title="删除任务及其历史">\uD83D\uDDD1 删除</button>' +
   '</nav>';
 
   // Current execution (conditional). cron-dashboard-redesign P1 §4.3 —
@@ -3636,8 +3611,7 @@ function cronDrawerSpecHtml(j) {
   const schedule = humanizeCron(j.schedule);
   const nextMs = j.next_run;
   const workdir = j.work_dir || '';
-  const editAttr = ' onclick="editCronJob(\'' + escJs(id) + '\')"' +
-    ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();editCronJob(\'' + escJs(id) + '\')}"' +
+  const editAttr = ' data-action="cron-edit" data-action-keydown="cron-edit" data-id="' + escAttr(id) + '"' +
     ' role="button" tabindex="0"';
 
   // 做什么 — prompt body. CSS line-clamps to 6 lines via -webkit-line-clamp
@@ -3647,7 +3621,7 @@ function cronDrawerSpecHtml(j) {
   const promptBody = promptText
     ? '<div class="css-prompt" data-clamped="true">' +
         '<pre class="css-prompt-body">' + esc(promptText) + '</pre>' +
-        '<button type="button" class="css-prompt-toggle" onclick="cronDrawerSpecPromptToggle(this)" aria-expanded="false">展开</button>' +
+        '<button type="button" class="css-prompt-toggle" data-action="cron-spec-toggle" aria-expanded="false">展开</button>' +
       '</div>'
     : '<div class="css-empty">尚未设置提示词。点击「编辑」补充。</div>';
 
@@ -3835,7 +3809,7 @@ function renderCronPanel() {
   // 的红点导航保持一致的"点进去看哪些 job 需要关注"语义。
   const missedCount = cronJobs.filter(j => j.missed).length;
   const missedBanner = missedCount > 0
-    ? '<div class="cron-missed-banner" role="alert" onclick="setCronStatusFilter(\'attention\')" title="进程重启或休眠期间错过的调度不会自动补跑">' +
+    ? '<div class="cron-missed-banner" role="alert" data-action="cron-filter" data-status="attention" title="进程重启或休眠期间错过的调度不会自动补跑">' +
         '<span class="cmb-icon">&#9888;</span>' +
         '<span class="cmb-text">有 ' + missedCount + ' 个任务曾错过调度 — 进程重启或休眠空窗期未补跑。点此查看。</span>' +
       '</div>'
@@ -3870,14 +3844,14 @@ function renderCronPanel() {
   // 单一 chip 模板：新增 需关注 chip 的同时不增加 inline onclick 字面量数
   // （CSP ratchet TestDashboardCSP_GeneratedHandlerSurfaceRatchet）。
   const statusChip = (status, label, extraCls) =>
-    '<button type="button" class="cron-status-chip' + (extraCls ? ' ' + extraCls : '') + chipActive(status) + '" data-status="' + status + '" aria-pressed="' + chipPressed(status) + '" onclick="setCronStatusFilter(\'' + status + '\')">' + label + '</button>';
+    '<button type="button" class="cron-status-chip' + (extraCls ? ' ' + extraCls : '') + chipActive(status) + '" data-status="' + status + '" aria-pressed="' + chipPressed(status) + '" data-action="cron-filter">' + label + '</button>';
   const attentionChip = (attentionCount > 0 || cronFilterStatus === 'attention')
     ? statusChip('attention', '需关注 ' + attentionCount, 'attention')
     : '';
   const searchRow = showSearchRow
     ? '<div class="cron-search-row">' +
-        '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、提示词、目录..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
-        '<button type="button" class="cron-search-clear" onclick="clearCronSearch()" title="清空搜索" aria-label="清空搜索">&times;</button>' +
+        '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、提示词、目录..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" data-action-input="cron-search" />' +
+        '<button type="button" class="cron-search-clear" data-action="cron-search-clear" title="清空搜索" aria-label="清空搜索">&times;</button>' +
       '</div>'
     : '';
   const filterBar = showFilterBar
@@ -3888,7 +3862,7 @@ function renderCronPanel() {
           statusChip('active', '运行中') +
           attentionChip +
           // cron-v2-polish §3.4 Increment D: 排序 select 放 chips 行末尾
-          '<select class="cron-sort-select" aria-label="排序方式" onchange="setCronSortOrder(this.value)">' +
+          '<select class="cron-sort-select" aria-label="排序方式" data-action-change="cron-sort">' +
             '<option value="created_desc"' + (cronSortOrder === 'created_desc' ? ' selected' : '') + '>最新创建</option>' +
             '<option value="next_asc"' + (cronSortOrder === 'next_asc' ? ' selected' : '') + '>接下来</option>' +
             '<option value="last_desc"' + (cronSortOrder === 'last_desc' ? ' selected' : '') + '>最近运行</option>' +
@@ -3903,10 +3877,10 @@ function renderCronPanel() {
         '<div class="cron-list-pane" id="cron-list-pane">' +
           '<div class="cron-list-head">' +
             '<div class="cron-list-head-title">' +
-              '<button class="btn-mobile-back" onclick="mobileBack()" title="返回会话列表" aria-label="返回会话列表">&#8592;</button>' +
+              '<button class="btn-mobile-back" data-action="cron-mobile-back" title="返回会话列表" aria-label="返回会话列表">&#8592;</button>' +
               '<h3>定时任务' + summaryChip + '</h3>' +
             '</div>' +
-            '<button type="button" class="cron-new-btn" onclick="createNewCronJob()" aria-label="新建定时任务">' +
+            '<button type="button" class="cron-new-btn" data-action="cron-new" aria-label="新建定时任务">' +
               '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
               ' 新建' +
             '</button>' +
@@ -4524,7 +4498,7 @@ function openCronEditModal(id, job, backendHtml) {
     '<div class="modal cron-modal" role="dialog" aria-modal="true" aria-label="编辑定时任务">' +
       '<div class="cm-header">' +
         '<h3>编辑定时任务</h3>' +
-        '<button type="button" class="cm-close" onclick="this.closest(\'.modal-overlay\').remove()" aria-label="关闭">✕</button>' +
+        '<button type="button" class="cm-close" data-action="cron-modal-dismiss" aria-label="关闭">✕</button>' +
       '</div>' +
       renderCronModalBody({
         scheduleHtml, wsBody, notifyHtml, contextHtml,
@@ -4534,8 +4508,8 @@ function openCronEditModal(id, job, backendHtml) {
         titleId: 'edit-cron-title',
       }) +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
-        '<button type="button" class="primary" onclick="doEditCronJob(\'' + escJs(id) + '\')">保存</button>' +
+        '<button type="button" data-action="cron-modal-dismiss">取消</button>' +
+        '<button type="button" class="primary" data-action="cron-edit-save" data-id="' + escAttr(id) + '">保存</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
@@ -4734,6 +4708,78 @@ document.addEventListener('keydown', function(e) {
 // Bootstrap moved from dashboard.js: load initial cron state for the sidebar
 // badge. Runs after all cron functions above are defined.
 fetchCronJobs();
+
+
+// ─── data-action registry (#1980, docs/rfc/csp-data-action.md) ─────────────
+// Every handler the cron view's generated HTML wires via data-action(-<type>)
+// attributes. Parameters ride sibling data-* attributes (escAttr, always
+// double-quoted); keys are code literals by contract.
+//
+// stopPropagation note: the pre-#1980 inline handlers on nested controls
+// (schedule chip / run / menu inside a clickable row) used
+// event.stopPropagation() to keep the row's open handler from firing. The
+// dispatcher's closest()-single-dispatch makes that structural: a click on
+// the button resolves to the button's action only, so the calls are dropped.
+// Document-level closers (cron menu / dashboard popovers) now see these
+// clicks — each has its own provenance guard (menu.contains, closest
+// checks), audited per RFC.
+
+// cronIdOf resolves a job id for row-scoped actions: explicit data-id on the
+// element (drawer buttons) or the enclosing row's data-cron-id.
+function cronIdOf(el) {
+  if (el.dataset.id) return el.dataset.id;
+  const row = el.closest('[data-cron-id]');
+  return row ? row.dataset.cronId : '';
+}
+// activate() adapts a click action for keyboard activation when the same key
+// is also wired as data-action-keydown: Enter/Space activates (with
+// preventDefault to stop scrolling/submit), anything else falls through.
+const activate = (fn) => (el, e) => {
+  if (e.type === 'keydown') {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+  }
+  fn(el, e);
+};
+registerActions({
+  'cron-freq-update': () => { freqMarkTouched(); freqUpdate(); },
+  'cron-freq-mode': (el) => freqSelectMode(el.value),
+  'cron-ws-dropdown': (el, e) => toggleCronWsDropdown(e),
+  'cron-ws-select': (el) => cronSelectWorkspace(el, el.dataset.path),
+  'cron-ws-custom': () => toggleCronWsCustom(),
+  'cron-modal-dismiss': (el) => { const o = el.closest('.modal-overlay'); if (o) o.remove(); },
+  'cron-create-save': () => doCreateCronJob(),
+  'cron-notify-on': (el) => cronNotifyOnChange(el),
+  'cron-notify-override': (el) => cronNotifyOverrideToggle(el),
+  'cron-edit': activate((el) => editCronJob(cronIdOf(el))),
+  'cron-run-now': (el) => cronTriggerNow(cronIdOf(el)),
+  'cron-menu-toggle': (el) => toggleCronMenu(cronIdOf(el)),
+  'cron-open': activate((el) => openCronDetail(cronIdOf(el), el)),
+  'cron-tl-showall': (el) => cronTimelineToggleShowAll(el),
+  'cron-tl-more': (el) => cronTimelineLoadMore(el.dataset.job),
+  'cron-att-confirm': (el) => cronAttentionConfirm(el.dataset.run),
+  'cron-att-replay': (el) => cronAttentionReplay(el.dataset.job, el.dataset.run),
+  'cron-tl-select': activate((el, e) => {
+    // Guard: clicks inside the expanded .ctr-detail (input snapshot, replay
+    // buttons, text selection) must not collapse the row.
+    if (e.target instanceof Element && e.target.closest('.ctr-detail')) return;
+    cronTimelineSelectRun(el.dataset.job, el.dataset.runId);
+  }),
+  'cron-tl-jump': (el) => cronTimelineSelectRun(el.dataset.job, el.dataset.run),
+  'cron-replay': (el) => cronReplayRun(el.dataset.job, el.dataset.run),
+  'cron-new': () => createNewCronJob(),
+  'cron-detail-close': () => closeCronDetail(),
+  'cron-resume': (el) => cronResume(cronIdOf(el)),
+  'cron-pause': (el) => cronPause(cronIdOf(el)),
+  'cron-delete': (el) => cronDelete(cronIdOf(el)),
+  'cron-edit-save': (el) => doEditCronJob(el.dataset.id),
+  'cron-spec-toggle': (el) => cronDrawerSpecPromptToggle(el),
+  'cron-filter': (el) => setCronStatusFilter(el.dataset.status),
+  'cron-search': () => onCronSearchInput(),
+  'cron-search-clear': () => clearCronSearch(),
+  'cron-sort': (el) => setCronSortOrder(el.value),
+  'cron-mobile-back': () => window.mobileBack(),
+});
 
 // ─── D3 ES-module bridge (RFC docs/rfc/dashboard-es-modules.md) ────────────
 // cron_view is a module now, so its top-level names are no longer globals.

@@ -24,17 +24,8 @@
         "nz"
       ],
       "dashboard.js": [
-        "CRON_LIVE_MAX_EVENTS",
-        "INTERNAL_EVENT_TYPES",
-        "appendEvents",
-        "lastDividerTime",
-        "mobileBack",
-        "navUserEls",
         "regroupAvatars",
-        "selectSession",
-        "selectedKey",
         "sending",
-        "turnState",
         "wsm"
       ]
     },
@@ -63,7 +54,7 @@
   },
   "bridgeRefs": {
     "dashboard.js": 59,
-    "cron_view.js": 102,
+    "cron_view.js": 103,
     "agent_view.js": 22,
     "files_view.js": 8
   }

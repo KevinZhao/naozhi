@@ -69,8 +69,13 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	if !ok {
 		t.Fatal("dashboard.js: cronTimelineRowHtml 函数体边界 `}\\n` 未找到 — 解析失败,断言无意义")
 	}
-	if !strings.Contains(rowBody, "cronTimelineSelectRun(") {
-		t.Error("cronTimelineRowHtml: 行 onclick 必须调 cronTimelineSelectRun")
+	// #1980 PR-1: 行 click/keydown 经 data-action 委托进注册表，注册表条目
+	// 调 cronTimelineSelectRun。
+	if !strings.Contains(rowBody, `data-action="cron-tl-select"`) {
+		t.Error("cronTimelineRowHtml: 行必须挂 data-action=cron-tl-select")
+	}
+	if !strings.Contains(js, "cronTimelineSelectRun(el.dataset.job, el.dataset.runId)") {
+		t.Error("cron-tl-select action 必须调 cronTimelineSelectRun")
 	}
 
 	// 4. Inline expand 标志：选中行 emit ctr-detail 容器（v2 inline 形态回归）。

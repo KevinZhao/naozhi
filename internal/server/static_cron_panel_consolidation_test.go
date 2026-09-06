@@ -61,11 +61,14 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 		cardEnd = len(js)
 	}
 	cardBody := js[cardIdx:cardEnd]
-	if !strings.Contains(cardBody, "onclick=\"openCronDetail(\\'' + escJs(j.id)") {
-		t.Error("cronJobCardHtml: row click must invoke openCronDetail (was openCronSession before consolidation)")
+	// #1980 PR-1: row click is delegated — the row carries data-action=
+	// cron-open and the registry entry passes the row element into
+	// openCronDetail so closeCronDetail can restore focus (RFC §6.4).
+	if !strings.Contains(cardBody, `data-action="cron-open"`) {
+		t.Error("cronJobCardHtml: row must carry data-action=cron-open (was openCronSession before consolidation)")
 	}
-	if !strings.Contains(cardBody, "openCronDetail(\\'' + escJs(j.id) + '\\', this)") {
-		t.Error("cronJobCardHtml: must pass `this` (the row element) into openCronDetail so closeCronDetail can restore focus (RFC §6.4)")
+	if !strings.Contains(js, "openCronDetail(cronIdOf(el), el)") {
+		t.Error("cron-open action must pass the row element into openCronDetail so closeCronDetail can restore focus (RFC §6.4)")
 	}
 	// is-active class wiring.
 	if !strings.Contains(cardBody, "cronDetailJobId === j.id") {

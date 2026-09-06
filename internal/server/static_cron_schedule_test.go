@@ -46,17 +46,21 @@ func TestDashboardJS_CronEditScheduleSafety(t *testing.T) {
 			"before the user clicks save (otherwise open-then-save submits empty)")
 	}
 
-	// 4) Freq controls must mark touched on change
-	//    time input (both onchange and oninput fire in browsers — same handler chain)
-	if !strings.Contains(js, `onchange="freqMarkTouched();freqUpdate()" oninput="freqMarkTouched();freqUpdate()"`) {
-		t.Error("time input must call freqMarkTouched before freqUpdate in both onchange and oninput")
+	// 4) Freq controls must mark touched on change. Since #1980 PR-1 the
+	//    handlers are wired via data-action delegation: the controls carry
+	//    the cron-freq-update key (change + input on the time input) and the
+	//    registry entry calls freqMarkTouched before freqUpdate.
+	if !strings.Contains(js, `data-action-change="cron-freq-update" data-action-input="cron-freq-update"`) {
+		t.Error("time input must wire cron-freq-update on both change and input")
 	}
-	//    weekly / monthly selects
-	if !strings.Contains(js, `id="freq-weekly-dow" onchange="freqMarkTouched();freqUpdate()"`) {
-		t.Error("weekly-dow select must call freqMarkTouched before freqUpdate")
+	if !strings.Contains(js, `id="freq-weekly-dow" data-action-change="cron-freq-update"`) {
+		t.Error("weekly-dow select must wire cron-freq-update on change")
 	}
-	if !strings.Contains(js, `id="freq-monthly-day" onchange="freqMarkTouched();freqUpdate()"`) {
-		t.Error("monthly-day select must call freqMarkTouched before freqUpdate")
+	if !strings.Contains(js, `id="freq-monthly-day" data-action-change="cron-freq-update"`) {
+		t.Error("monthly-day select must wire cron-freq-update on change")
+	}
+	if !strings.Contains(js, `'cron-freq-update': () => { freqMarkTouched(); freqUpdate(); }`) {
+		t.Error("cron-freq-update action must call freqMarkTouched before freqUpdate")
 	}
 	//    freqSelectMode must call freqMarkTouched
 	if !strings.Contains(js, "freqMarkTouched();\n  freqUpdate();") {
