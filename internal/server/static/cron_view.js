@@ -527,17 +527,15 @@ function buildFreqPickerHtml(initial) {
   // 损坏场景。
   const time = d.time || '09:00';
   const timeInput =
-    '<input class="freq-time" id="freq-time" type="time" value="' + esc(time) + '"' +
-      ' data-action-change="cron-freq-update" data-action-input="cron-freq-update"' +
-      (mode === 'hourly' ? ' style="display:none"' : '') + '>';
+    '<input class="freq-time' + (mode === 'hourly' ? ' nz-hidden' : '') + '" id="freq-time" type="time" value="' + esc(time) + '"' +
+      ' data-action-change="cron-freq-update" data-action-input="cron-freq-update"' + '>';
 
   // weekly 的星期下拉（单选）。默认 Monday。
   const weeklyDow = (mode === 'weekly' && Array.isArray(d.dows) && d.dows.length > 0) ? d.dows[0] : 1;
   const dowOption = (i, label) =>
     '<option value="' + i + '"' + (weeklyDow === i ? ' selected' : '') + '>' + esc(label) + '</option>';
   const weeklySelect =
-    '<select class="freq-extra" id="freq-weekly-dow" data-action-change="cron-freq-update"' +
-      (mode === 'weekly' ? '' : ' style="display:none"') + '>' +
+    '<select class="freq-extra' + (mode === 'weekly' ? '' : ' nz-hidden') + '" id="freq-weekly-dow" data-action-change="cron-freq-update"' + '>' +
       dowOption(1, '星期一') + dowOption(2, '星期二') + dowOption(3, '星期三') +
       dowOption(4, '星期四') + dowOption(5, '星期五') + dowOption(6, '星期六') +
       dowOption(0, '星期日') +
@@ -550,8 +548,7 @@ function buildFreqPickerHtml(initial) {
     dayOpts += '<option value="' + i + '"' + (monthlyDay === i ? ' selected' : '') + '>' + i + ' 日</option>';
   }
   const monthlySelect =
-    '<select class="freq-extra" id="freq-monthly-day" data-action-change="cron-freq-update"' +
-      (mode === 'monthly' ? '' : ' style="display:none"') + '>' +
+    '<select class="freq-extra' + (mode === 'monthly' ? '' : ' nz-hidden') + '" id="freq-monthly-day" data-action-change="cron-freq-update"' + '>' +
       dayOpts +
     '</select>';
 
@@ -612,9 +609,11 @@ function freqSelectMode(mode) {
   const time = document.getElementById('freq-time');
   const dow = document.getElementById('freq-weekly-dow');
   const day = document.getElementById('freq-monthly-day');
-  if (time) time.style.display = (mode === 'hourly') ? 'none' : '';
-  if (dow) dow.style.display = (mode === 'weekly') ? '' : 'none';
-  if (day) day.style.display = (mode === 'monthly') ? '' : 'none';
+  // Class toggle, matching the renderer's .nz-hidden (#2559 D6-3): mixing an
+  // inline display with the class would leave the stale inline value winning.
+  if (time) time.classList.toggle('nz-hidden', mode === 'hourly');
+  if (dow) dow.classList.toggle('nz-hidden', mode !== 'weekly');
+  if (day) day.classList.toggle('nz-hidden', mode !== 'monthly');
   freqMarkTouched();
   freqUpdate();
 }
@@ -711,7 +710,7 @@ function buildCronWorkspaceBodyInternal(opts) {
       '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
         listItems +
       '</ul>' +
-      '<div id="cron-ws-custom-form" style="display:' + (selected && !nzState.projectsData.find(p => p.path === selected) ? '' : 'none') + ';padding:8px">' +
+      '<div id="cron-ws-custom-form" class="nz-cron-ws-custom' + (selected && !nzState.projectsData.find(p => p.path === selected) ? '' : ' nz-hidden') + '">' +
         '<input id="' + escAttr(opts.inputId) + '" placeholder="' + escAttr(nzState.defaultWorkspace || '/home/user/project') + '"' +
           ' value="' + escAttr(selected && !nzState.projectsData.find(p => p.path === selected) ? selected : '') + '"' +
           ' aria-label="工作目录路径">' +
@@ -832,7 +831,7 @@ function renderCronModalBody(opts) {
   // 关联：docs/rfc/cron-v2-polish.md §3.1 Increment A。
   const titleField =
     '<div class="cron-field cron-f-title">' +
-      '<div class="cf-label">名称 <span style="color:var(--nz-text-faint);font-weight:normal;font-size:11px">（可选）</span></div>' +
+      '<div class="cf-label">名称 <span class="nz-hint-faint">（可选）</span></div>' +
       '<input id="' + escAttr(opts.titleId || 'cron-title') + '" type="text" placeholder="' + escAttr(opts.titlePlaceholder || '例如：日报总结 · 周一早会准备') + '" maxlength="256" aria-label="任务名称">' +
     '</div>';
   // backendHtml 由 caller 提供（Sprint 6c）。仅在多 backend 模式下非空，
@@ -892,13 +891,13 @@ function buildCronContextToggleHtml(initialFresh) {
 function buildCronPlacementHtml(initialPlacement, selectId) {
   const sandboxSel = initialPlacement === 'sandbox' ? ' selected' : '';
   const localSel = sandboxSel ? '' : ' selected';
-  return '<div class="cron-placement-block" style="margin-bottom:12px">' +
-      '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="' + escAttr(selectId) + '">运行位置</label>' +
-      '<select id="' + escAttr(selectId) + '" aria-label="运行位置" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
+  return '<div class="cron-placement-block nz-field">' +
+      '<label class="nz-field-label" for="' + escAttr(selectId) + '">运行位置</label>' +
+      '<select id="' + escAttr(selectId) + '" aria-label="运行位置" class="nz-input-block">' +
         '<option value=""' + localSel + '>本机</option>' +
         '<option value="sandbox"' + sandboxSel + '>云沙箱 ☁️</option>' +
       '</select>' +
-      '<span class="ct-hint" id="' + escAttr(selectId) + '-hint" style="display:' + (sandboxSel ? 'block' : 'none') + ';margin-top:4px">云沙箱为一次性隔离运行（跑完即焚）：限 60 分钟内任务，暂不支持工作目录与本地 MCP。</span>' +
+      '<span class="ct-hint nz-cron-sandbox-hint' + (sandboxSel ? '' : ' nz-hidden') + '" id="' + escAttr(selectId) + '-hint">云沙箱为一次性隔离运行（跑完即焚）：限 60 分钟内任务，暂不支持工作目录与本地 MCP。</span>' +
     '</div>';
 }
 
@@ -917,7 +916,10 @@ function cronPlacementBindHint(selectId) {
   const hint = document.getElementById(selectId + '-hint');
   if (!el || !hint) return;
   el.addEventListener('change', function() {
-    hint.style.display = el.value === 'sandbox' ? 'block' : 'none';
+    // Class toggle, not style.display: the hint ships with .nz-hidden from
+    // the renderer, so mixing the two would leave a stale inline value
+    // winning over the class (#2559 D6-3).
+    hint.classList.toggle('nz-hidden', el.value !== 'sandbox');
   });
 }
 
@@ -961,9 +963,9 @@ function buildCronNotifyToggleHtml(currentNotify, hasOverride, overridePlat, ove
         '<span class="ct-hint" id="cron-notify-default-hint">' + defaultHint + '</span>' +
       '</span>' +
     '</label>' +
-    '<label class="cron-toggle" id="cron-notify-override-toggle-wrap" style="margin-top:-4px">' +
+    '<label class="cron-toggle nz-tighten-top" id="cron-notify-override-toggle-wrap">' +
       '<input type="checkbox" id="cron-notify-override" ' + (hasOverride ? 'checked' : '') + ' data-action-change="cron-notify-override">' +
-      '<span class="ct-main" style="font-size:12px;color:var(--nz-text-mute)">自定义此任务的通知目标</span>' +
+      '<span class="ct-main nz-hint">自定义此任务的通知目标</span>' +
     '</label>' +
     '<div id="cron-notify-override-form" class="cron-notify-target' + overrideShow + '">' +
       '<input id="cron-notify-platform" placeholder="feishu" value="' + escAttr(overridePlat || '') + '" aria-label="IM 平台">' +
@@ -1064,7 +1066,7 @@ function cronSelectWorkspace(el, path) {
   el.setAttribute('aria-selected', 'true');
   const customForm = document.getElementById('cron-ws-custom-form');
   if (customForm) {
-    customForm.style.display = 'none';
+    customForm.classList.add('nz-hidden');
     // Clear the hidden custom input so the submit path (which falls back
     // to wdInput.value when non-empty) can't resurrect a stale path after
     // the user picked a different project. Matters in the edit modal,
@@ -1073,7 +1075,7 @@ function cronSelectWorkspace(el, path) {
     if (input) input.value = '';
   }
   const toggle = document.getElementById('cron-ws-custom-toggle');
-  if (toggle) toggle.style.display = '';
+  if (toggle) toggle.classList.remove('nz-hidden');
   // v2 polish: 选中即把 popover 折叠 + 把按钮文本更新为项目名
   updateCronWsDropdownLabel(path);
   closeCronWsPopover();
@@ -1100,9 +1102,11 @@ function toggleCronWsCustom() {
   const form = document.getElementById('cron-ws-custom-form');
   const toggle = document.getElementById('cron-ws-custom-toggle');
   if (!form) return;
-  if (form.style.display === 'none') {
-    form.style.display = '';
-    if (toggle) toggle.style.display = 'none';
+  // .nz-hidden is the single source of truth for this form's visibility
+  // (#2559 D6-3) — the renderer ships it and every toggle site flips the class.
+  if (form.classList.contains('nz-hidden')) {
+    form.classList.remove('nz-hidden');
+    if (toggle) toggle.classList.add('nz-hidden');
     // Clear project selection
     const overlay = form.closest('.modal-overlay');
     if (overlay) overlay._cronWorkDir = '';
@@ -1113,8 +1117,8 @@ function toggleCronWsCustom() {
     const input = form.querySelector('input');
     if (input) input.focus();
   } else {
-    form.style.display = 'none';
-    if (toggle) toggle.style.display = '';
+    form.classList.add('nz-hidden');
+    if (toggle) toggle.classList.remove('nz-hidden');
   }
 }
 

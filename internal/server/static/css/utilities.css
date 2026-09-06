@@ -1,0 +1,54 @@
+/* utilities.css — the class equivalents of the style="" attributes JS used
+ * to emit (#2559 D6-3). Named for the role they play, not for the
+ * declarations they carry, so a future token change edits one rule instead
+ * of every call site. Dropping the inline attributes is what lets the CSP
+ * lose style-src 'unsafe-inline'. */
+.nz-field{margin-bottom:12px}
+.nz-field-label{font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px}
+.nz-hidden{display:none}
+.nz-flex-fill{flex:1;min-width:0}
+.nz-clickable{cursor:pointer}
+.nz-form-error{display:none;color:var(--nz-danger,#e5484d);font-size:12px;margin-bottom:8px}
+.nz-chip-row{padding:8px 12px 0;display:flex;gap:12px;flex-wrap:wrap}
+.nz-accent{color:var(--nz-accent)}
+.nz-mute{color:var(--nz-text-mute)}
+.nz-hint-faint{color:var(--nz-text-faint);font-weight:normal;font-size:11px}
+.nz-input-block{width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px}
+.nz-tighten-top{margin-top:-4px}
+.nz-hint{font-size:12px;color:var(--nz-text-mute)}
+.nz-dim{color:var(--nz-text-dim)}
+.nz-accent-strong{color:var(--nz-accent);font-weight:600}
+.nz-faint-lead{color:var(--nz-text-faint);margin-right:6px}
+.nz-field-tight{margin:-6px 0 12px}
+.nz-link-btn{background:none;border:none;color:var(--nz-accent);font-size:12px;cursor:pointer;padding:0}
+.nz-note-box{font-size:12px;color:var(--nz-text-mute);margin-bottom:12px;padding:8px;background:var(--nz-bg-0);border-radius:4px}
+.nz-hint-sm{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
+.nz-list-head{padding:6px 12px;color:var(--nz-text-mute);font-size:12px;border-bottom:1px solid var(--nz-bg-2)}
+.nz-list-empty{padding:6px 12px;color:var(--nz-text-faint);font-size:12px}
+.nz-list-row{padding:6px 12px}
+.nz-list-foot{padding:6px 12px;color:var(--nz-text-faint);font-size:11px;border-top:1px solid var(--nz-bg-2)}
+.nz-stack{flex-direction:column;gap:14px}
+.nz-empty-glyph{font-size:40px;opacity:.35}
+.nz-empty-title{color:var(--nz-text);font-size:17px}
+.nz-hint-dim{font-size:12px;color:var(--nz-text-dim)}
+/* Picker <select> chrome. Was the PICKER_SELECT_STYLE / _ONLY_STYLE string
+   constants spliced into style="" at five call sites; the -only variant adds
+   the custom-arrow treatment on top (#2559 D6-3). */
+.nz-picker-select{width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px}
+.nz-picker-select-only{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:pointer;font:inherit;font-size:var(--nz-fs-sm2)}
+/* Textarea variant of the picker chrome (workspace / prompt fields). */
+.nz-picker-textarea{width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px;resize:vertical}
+/* Tuning popover rows (#2559 D6-3: was three concatenated style strings). */
+.nz-tuning-input{width:100%;box-sizing:border-box;background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:6px;padding:5px 8px;color:var(--nz-text);font-size:12px}
+.nz-tuning-opt{padding:7px 12px;cursor:pointer;color:var(--nz-text)}
+.nz-tuning-opt.is-active{font-weight:600;color:var(--nz-accent)}
+.nz-tuning-opt.is-reset{border-top:1px solid var(--nz-bg-2);color:var(--nz-text-mute)}
+/* Conditional visibility that JS used to write as style="display:…". The
+   element ships with .nz-hidden and JS toggles the class instead, so the CSP
+   needs no style-src 'unsafe-inline' (#2559 D6-3). */
+.nz-cron-ws-custom{padding:8px 0 0}
+.nz-cron-sandbox-hint{margin-top:4px}
+/* Static markup helpers used by dashboard.html (#2559 D6-3). */
+.nz-empty-body{color:var(--nz-text);font-size:var(--nz-fs-md)}
+.nz-empty-hint{font-size:var(--nz-fs-sm);color:var(--nz-text-dim)}
+.nz-meta-faint{font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}

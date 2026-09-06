@@ -34,6 +34,7 @@
 <link rel="stylesheet" href="/static/css/responsive.css">
 <link rel="stylesheet" href="/static/css/cron.css">
 <link rel="stylesheet" href="/static/css/mobile_polish.css">
+<link rel="stylesheet" href="/static/css/utilities.css">
 </head>
 <body>
 <div class="container">
@@ -94,7 +95,7 @@
         <h1>naozhi</h1>
         <div class="hdr-btns">
           <button type="button" class="hdr-btn hdr-btn-update" id="btn-update" hidden title="" aria-label=""><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg><span class="hdr-update-tag" id="update-tag"></span></button>
-          <button type="button" class="hdr-btn" id="btn-history" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none" aria-label="历史记录数"></span></button>
+          <button type="button" class="hdr-btn" id="btn-history" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge nz-hidden" id="history-badge" aria-label="历史记录数"></span></button>
           <button type="button" class="hdr-btn" id="btn-new-session" title="New Session" aria-label="Create new session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
@@ -125,14 +126,14 @@
          "问点什么？"输入框即空态主 CTA — 敲字 Enter 直接起一个 quick session
          （默认工作目录 + general agent），跳过项目 palette 与弹窗选择，
          最贴近"快速查询"的使用心智。侧栏的 `+` 入口保留给项目化工作流。 -->
-    <div class="empty-state empty-cta empty-quick" style="flex-direction:column;gap:14px">
+    <div class="empty-state empty-cta empty-quick nz-stack">
       <span class="nz-prompt" aria-hidden="true">&gt;<b>_</b></span>
-      <div style="color:var(--nz-text);font-size:var(--nz-fs-md)">问点什么？</div>
+      <div class="nz-empty-body">问点什么？</div>
       <form class="quick-ask-form" id="quick-ask-form">
         <textarea id="quick-ask-input" class="quick-ask-input" rows="1" placeholder="Enter 发送 · Shift+Enter 换行" autocomplete="off" spellcheck="false" aria-label="快速提问输入框"></textarea>
         <button type="submit" class="quick-ask-send" aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
       </form>
-      <div style="font-size:var(--nz-fs-sm);color:var(--nz-text-dim)">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>
+      <div class="nz-empty-hint">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>
       <!-- R110-P1 Home panel slot: renderRecentSessionsPanel() fills this
            with up to 5 most-recently-active session cards after fetchSessions
            lands. Stays empty on cold-start (no data yet) or when there are
@@ -153,7 +154,7 @@
     <div class="asset-kindtabs" id="asset-kindtabs" role="tablist"></div>
     <label class="asset-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input id="asset-search" placeholder="搜索 name…" autocomplete="off" spellcheck="false" aria-label="搜索资产"></label>
     <div class="asset-list" id="asset-sidebar-list" role="list"></div>
-    <div class="asset-cards" id="asset-sidebar-cards" style="display:none"></div>
+    <div class="asset-cards nz-hidden" id="asset-sidebar-cards"></div>
   </nav>
   <main class="asset-main" id="asset-main" aria-label="资产原文" hidden>
     <div class="asset-main-head" id="asset-main-head" hidden>
@@ -238,11 +239,11 @@
   <div class="ad-quote-chip" id="ad-quote-chip" title="点击展开/回到源消息">
     <span class="ad-arrow">↳</span>
     <span class="ad-preview" id="ad-quote-preview"></span>
-    <span class="ad-trunc" id="ad-quote-trunc" style="display:none">(已截断)</span>
-    <span class="ad-ctx" id="ad-quote-ctx" style="display:none" title="已将源会话中此消息前后若干轮作为上下文注入"></span>
+    <span class="ad-trunc nz-hidden" id="ad-quote-trunc">(已截断)</span>
+    <span class="ad-ctx nz-hidden" id="ad-quote-ctx" title="已将源会话中此消息前后若干轮作为上下文注入"></span>
   </div>
   <div class="ad-messages" id="ad-messages">
-    <div class="ad-empty" id="ad-empty">就这段内容问点什么？<br><span style="font-size:var(--nz-fs-xs);color:var(--nz-text-faint)">此窗口的对话不会出现在主窗口</span></div>
+    <div class="ad-empty" id="ad-empty">就这段内容问点什么？<br><span class="nz-meta-faint">此窗口的对话不会出现在主窗口</span></div>
   </div>
   <div class="ad-loading" id="ad-loading">正在思考…</div>
   <div class="ad-input-area">

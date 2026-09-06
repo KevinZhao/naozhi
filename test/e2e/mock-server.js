@@ -16,7 +16,7 @@ const NZ_CONTRACT = require(path.join(STATIC_DIR, 'contract.js'));
 // A Go drift test (TestDashboardCSP_MockServerHeaderInSync) compares this
 // literal against the runtime header, so edit both together.
 const MOCK_DASHBOARD_CSP =
-  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g=' https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css; font-src 'self' https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/fonts/; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
+  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g=' https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js; connect-src 'self'; style-src 'self' https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css; font-src 'self' https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/fonts/; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
 
 function defaultSessions() {
   return {

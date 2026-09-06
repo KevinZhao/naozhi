@@ -963,7 +963,7 @@ async function fetchSessions() {
         // banner (live activity, or zero-downtime background agents) is left
         // untouched, so this can't flicker a banner that's correctly showing.
         const banner = document.getElementById('running-banner');
-        if (banner && banner.style.display === 'none') {
+        if (banner && banner.classList.contains('nz-hidden')) {
           updateMainState('running', sd.death_reason);
         }
       }
@@ -1462,7 +1462,7 @@ function applyHistoryFilter(merged, query) {
     const abs = s.last_active ? formatAbsTime(s.last_active) : '';
     return dayHeader +
       '<div class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" data-action="history-resume">' +
-      (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt" style="color:var(--nz-text-dim)">未命名</div>') +
+      (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt nz-dim">未命名</div>') +
       '<div class="hp-meta">' +
         (s.project ? '<span class="hp-project">' + esc(s.project) + '</span><span class="hp-dot">&middot;</span>' : '') +
         (ago ? '<span' + (abs ? ' title="' + escAttr(abs) + '"' : '') + '>' + ago + '</span>' : '') +
@@ -1711,7 +1711,7 @@ function sessionCardHtml(s) {
   // hue is derived from the node id (nodeColor) so it matches the palette's
   // .cp-node badge and the modal node picker.
   const nodeBadge = (isMultiNode() && sNode !== 'local')
-    ? '<span class="sc-node" style="background:' + nodeColor(sNode) + '" title="' + escAttr(getNodeDisplayName(sNode)) + '">' + esc(getNodeDisplayName(sNode)) + '</span>'
+    ? '<span class="sc-node" data-nz-bg="' + escAttr(nodeColor(sNode)) + '" title="' + escAttr(getNodeDisplayName(sNode)) + '">' + esc(getNodeDisplayName(sNode)) + '</span>'
     : '';
 
   const dismissBtn = '<button type="button" class="btn-close btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" data-action="session-dismiss" title="移除" aria-label="移除会话">' + ICONS.close + '</button>';
@@ -2480,8 +2480,8 @@ function mainHeaderHtml(s) {
     .replace(/-(\d+)-(\d+)/, '-$1.$2')          // 4-7 → 4.7 (matches kiro list)
     .replace(/\[(\d+m)\]$/i, ' $1');            // [1m] → " 1m"
   const modelLabel = rawModel
-    ? '<span class="model-label" id="header-model" data-action="tuning-model" style="cursor:pointer" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
-    : '<span class="model-label model-label-unset" id="header-model" data-action="tuning-model" style="cursor:pointer" title="model 未在 system/init 上报；可能仍在 spawn 中 — 点击可指定模型">· (模型未配置)</span>';
+    ? '<span class="model-label nz-clickable" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
+    : '<span class="model-label model-label-unset nz-clickable" id="header-model" data-action="tuning-model" title="model 未在 system/init 上报；可能仍在 spawn 中 — 点击可指定模型">· (模型未配置)</span>';
   const headerOriginBadge = originBadgeHtml(selectedKey);
   // UI Round 5 R5-2: header backend chip removed. The "kiro v2.3.0" /
   // "claude-code 2.1.143" cliLabel already names the backend; the
@@ -2615,14 +2615,14 @@ function renderMainShell() {
       '<span class="nav-counter" id="nav-counter" data-action="nav-show-list" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
       '<button type="button" data-action="nav-msg" data-dir="next" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
     '</div>' +
-    '<div class="running-banner" id="running-banner" style="display:none" role="status" aria-live="polite">' +
+    '<div class="running-banner nz-hidden" id="running-banner" role="status" aria-live="polite">' +
       '<div class="rb-tool-row">' +
         '<span class="running-status"><span class="running-dot" aria-hidden="true"></span><span id="tool-activity">处理中...</span></span>' +
         '<span class="rb-elapsed" id="rb-elapsed"></span>' +
       '</div>' +
-      '<div class="rb-thinking-summary" id="rb-thinking-summary" style="display:none"></div>' +
+      '<div class="rb-thinking-summary nz-hidden" id="rb-thinking-summary"></div>' +
       '<div class="rb-agents" id="rb-agents"></div>' +
-      '<div class="rb-stats" id="rb-stats" style="display:none"></div>' +
+      '<div class="rb-stats nz-hidden" id="rb-stats"></div>' +
     '</div>' +
     '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
@@ -2635,7 +2635,7 @@ function renderMainShell() {
         '<button type="button" class="btn-icon btn-stop" id="btn-stop" data-action="session-interrupt" title="停止" aria-label="停止当前回合">' + ICONS.stop + '</button>' +
       '</div>' +
       '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
-      '<input type="file" id="file-input" accept="image/*,application/pdf" multiple style="display:none" data-action-change="file-input-change">' +
+      '<input type="file" id="file-input" accept="image/*,application/pdf" multiple class="nz-hidden" data-action-change="file-input-change">' +
     '</div>';
 
   // Enable drag-drop

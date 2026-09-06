@@ -1411,7 +1411,10 @@ test.describe('File upload UI', () => {
     const accept = await page.$eval('#file-input', el => el.accept);
     expect(accept).toBe('image/*,application/pdf');
 
-    const isHidden = await page.$eval('#file-input', el => el.style.display);
+    // #2559 D6-3: the hidden state comes from the .nz-hidden class now (the
+    // inline style="display:none" is gone so the CSP can drop style-src
+    // 'unsafe-inline'); assert what the browser actually computes.
+    const isHidden = await page.$eval('#file-input', el => getComputedStyle(el).display);
     expect(isHidden).toBe('none');
 
     await ctx.close();

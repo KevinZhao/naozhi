@@ -236,6 +236,7 @@ var dashboardCSSFiles = []string{
 	"css/responsive.css",
 	"css/cron.css",
 	"css/mobile_polish.css",
+	"css/utilities.css",
 }
 
 func readDashboardHTMLAndCSS(t *testing.T) string {

@@ -350,9 +350,9 @@ function renderAccessProfilePicker(profilesData, opts) {
     const label = (p.display_name || id) + (broken ? ' ⚠ 凭证缺失' : '');
     return '<option value="' + escAttr(id) + '"' + selected + disabled + '>' + esc(label) + '</option>';
   }).join('');
-  return '<div style="margin-bottom:12px">' +
-    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="' + escAttr(selectId) + '">访问档</label>' +
-    '<select id="' + escAttr(selectId) + '" style="' + PICKER_SELECT_STYLE + '">' +
+  return '<div class="nz-field">' +
+    '<label class="nz-field-label" for="' + escAttr(selectId) + '">访问档</label>' +
+    '<select id="' + escAttr(selectId) + '" class="nz-picker-select">' +
     options +
     '</select>' +
     '</div>';
@@ -393,7 +393,7 @@ function accessProfileChipHtml(profileID) {
   const info = accessProfileChipInfo(profileID);
   if (!info) return '';
   return '<span class="sc-access-profile-chip" data-access-profile="' + escAttr(profileID || '') +
-    '" style="background-color:' + escAttr(info.color) + '" title="' + escAttr(info.tooltip) +
+    '" data-nz-bg="' + escAttr(info.color) + '" title="' + escAttr(info.tooltip) +
     '">' + esc(info.label) + '</span>';
 }
 
@@ -446,9 +446,9 @@ function renderBackendPicker(backendsData, opts) {
     const disabled = b.available === false ? ' disabled' : '';
     return '<option value="' + escAttr(b.id) + '"' + selected + disabled + '>' + esc(label) + '</option>';
   }).join('');
-  return '<div style="margin-bottom:12px">' +
-    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="' + escAttr(selectId) + '">CLI backend</label>' +
-    '<span class="picker-select-wrap"><select id="' + escAttr(selectId) + '" style="' + PICKER_SELECT_ONLY_STYLE + '">' +
+  return '<div class="nz-field">' +
+    '<label class="nz-field-label" for="' + escAttr(selectId) + '">CLI backend</label>' +
+    '<span class="picker-select-wrap"><select id="' + escAttr(selectId) + '" class="nz-picker-select nz-picker-select-only">' +
     options +
     '</select></span>' +
     '</div>';
@@ -526,9 +526,9 @@ function renderNodePicker() {
     const label = deps.getNodeDisplayName(id) + ' · ' + deps.statusLabelForNode(status);
     return '<option value="' + escAttr(id) + '"' + selected + '>' + esc(label) + '</option>';
   }).join('');
-  return '<div style="margin-bottom:12px">' +
-    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-node">连接</label>' +
-    '<span class="picker-select-wrap"><select id="new-node" style="' + PICKER_SELECT_ONLY_STYLE + '">' +
+  return '<div class="nz-field">' +
+    '<label class="nz-field-label" for="new-node">连接</label>' +
+    '<span class="picker-select-wrap"><select id="new-node" class="nz-picker-select nz-picker-select-only">' +
     options +
     '</select></span>' +
     '</div>';
@@ -738,8 +738,8 @@ function createNewSession() {
           accessProfilePicker +
           '<div id="new-backend-slot">' + backendPicker + '</div>' +
           renderNodePicker() +
-          '<div style="margin-bottom:12px">' +
-            '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录</label>' +
+          '<div class="nz-field">' +
+            '<label class="nz-field-label" for="new-workspace">工作目录</label>' +
             '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" data-action-keydown="create-session-key">' +
           '</div>' +
           '<div class="modal-btns">' +
@@ -823,10 +823,10 @@ function openProjectPalette(backendsData, profilesData) {
   // picker in-place via refreshBackendPicker. min-width:0 keeps it collapsed
   // when empty so the flex row layout is unchanged for single-backend nodes.
   const pickerSlot = (accessProfilePicker || backendPicker || nodePicker)
-    ? '<div class="cmd-palette-backend" style="padding:8px 12px 0;display:flex;gap:12px;flex-wrap:wrap">' +
-        (accessProfilePicker ? '<div style="flex:1;min-width:0">' + accessProfilePicker + '</div>' : '') +
-        '<div id="cp-backend-slot" style="flex:1;min-width:0">' + backendPicker + '</div>' +
-        (nodePicker ? '<div style="flex:1;min-width:0">' + nodePicker + '</div>' : '') +
+    ? '<div class="cmd-palette-backend nz-chip-row">' +
+        (accessProfilePicker ? '<div class="nz-flex-fill">' + accessProfilePicker + '</div>' : '') +
+        '<div id="cp-backend-slot" class="nz-flex-fill">' + backendPicker + '</div>' +
+        (nodePicker ? '<div class="nz-flex-fill">' + nodePicker + '</div>' : '') +
       '</div>'
     : '';
   const overlay = document.createElement('div');
@@ -1051,7 +1051,7 @@ function buildProjectRow(s, idx) {
   el.dataset.idx = String(idx);
   const nodeId = p.node || 'local';
   const nodeBadge = nodeId !== 'local'
-    ? '<span class="cp-node" style="background:' + deps.nodeColor(nodeId) + '">' + esc(nodeId) + '</span>'
+    ? '<span class="cp-node" data-nz-bg="' + escAttr(deps.nodeColor(nodeId)) + '">' + esc(nodeId) + '</span>'
     : '';
   // R110-P3 palette favorite indicator: replace the leading ▸ glyph with
   // a ★ when the project is favorited so the tier-0 ranking is visually
@@ -1129,11 +1129,11 @@ function buildCustomRow(query, idx) {
   el.dataset.idx = String(idx);
   const looksLikePath = query && (query.startsWith('/') || query.startsWith('~'));
   const label = looksLikePath
-    ? '打开自定义工作目录：<span style="color:var(--nz-accent)">' + esc(query) + '</span>'
+    ? '打开自定义工作目录：<span class="nz-accent">' + esc(query) + '</span>'
     : '打开自定义工作目录…';
   el.innerHTML =
     '<span class="cp-icon">+</span>' +
-    '<div class="cp-main"><div class="cp-name" style="color:var(--nz-text-mute)">' + label + '</div></div>';
+    '<div class="cp-main"><div class="cp-name nz-mute">' + label + '</div></div>';
   el.addEventListener('click', () => pickPaletteCustom(query));
   return el;
 }
@@ -1239,8 +1239,8 @@ function pickPaletteCustom(initialValue) {
       accessProfilePicker +
       '<div id="cw-backend-slot">' + picker + '</div>' +
       nodePicker +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录路径</label>' +
+      '<div class="nz-field">' +
+        '<label class="nz-field-label" for="new-workspace">工作目录路径</label>' +
         '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" data-action-keydown="create-session-key">' +
       '</div>' +
       '<div class="modal-btns">' +

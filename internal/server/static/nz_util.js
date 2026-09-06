@@ -183,6 +183,33 @@ nz.views = nzViews;
 export const nzTest = {};
 nz.test = nzTest;
 
+// data-nz-bg (#2559 D6-3): the only styling JS still computes per element is
+// a node / access-profile colour, which no class can express. Rather than
+// emitting style="" (the last thing keeping style-src 'unsafe-inline' alive),
+// the renderers put the value in a data attribute and this observer applies it
+// via CSSOM — a property assignment, not an inline attribute, so the CSP does
+// not have to allow inline styles.
+function applyDataBg(root) {
+  const els = root.querySelectorAll ? root.querySelectorAll('[data-nz-bg]') : [];
+  for (const el of els) {
+    const v = el.dataset.nzBg;
+    if (v && el.style.background !== v) el.style.background = v;
+  }
+}
+new MutationObserver((records) => {
+  for (const r of records) {
+    for (const n of r.addedNodes) {
+      if (n.nodeType !== 1) continue;
+      if (n.hasAttribute('data-nz-bg')) {
+        const v = n.dataset.nzBg;
+        if (v) n.style.background = v;
+      }
+      applyDataBg(n);
+    }
+  }
+}).observe(document.documentElement, { childList: true, subtree: true });
+document.addEventListener('DOMContentLoaded', () => applyDataBg(document));
+
 // data-action delegation (#1980, docs/rfc/csp-data-action.md): one registry,
 // one document-level dispatcher per event type, so generated HTML carries
 // `data-action="key"` attributes instead of inline on*="…" handlers (the

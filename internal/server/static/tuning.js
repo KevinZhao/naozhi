@@ -158,28 +158,27 @@ function openTuningPopover(kind) {
   const hint = kind === 'effort'
     ? 'ⓘ 将重启 CLI 进程并恢复上下文' + (running ? '（会中断当前回合）' : '')
     : 'ⓘ 生效时机以返回的应用路径为准';
-  let html = '<div style="padding:6px 12px;color:var(--nz-text-mute);font-size:12px;border-bottom:1px solid var(--nz-bg-2)">' +
+  let html = '<div class="nz-list-head">' +
     (kind === 'model' ? '切换模型' : '切换 effort 档位') + '</div>';
   for (const rowSpec of rows) {
     if (rowSpec.header) {
-      html += '<div style="padding:6px 12px;color:var(--nz-text-faint);font-size:12px">' + esc(rowSpec.label) + '</div>';
+      html += '<div class="nz-list-empty">' + esc(rowSpec.label) + '</div>';
       continue;
     }
     if (rowSpec.input) {
-      html += '<div style="padding:6px 12px"><input id="tuning-manual-input" type="text" placeholder="model id…" ' +
-        'style="width:100%;box-sizing:border-box;background:var(--nz-bg-2);border:1px solid var(--nz-border);' +
-        'border-radius:6px;padding:5px 8px;color:var(--nz-text);font-size:12px"></div>';
+      html += '<div class="nz-list-row"><input id="tuning-manual-input" type="text" placeholder="model id…" ' +
+        'class="nz-tuning-input"></div>';
       continue;
     }
     const mark = rowSpec.active ? '● ' : (rowSpec.reset ? '↺ ' : '○ ');
-    html += '<div class="tuning-opt" data-value="' + escAttr(rowSpec.value) + '"' +
-      ' style="padding:7px 12px;cursor:pointer;color:var(--nz-text);' +
-      (rowSpec.active ? 'font-weight:600;color:var(--nz-accent);' : '') +
-      (rowSpec.reset ? 'border-top:1px solid var(--nz-bg-2);color:var(--nz-text-mute);' : '') + '"' +
+    html += '<div class="tuning-opt nz-tuning-opt' +
+      (rowSpec.active ? ' is-active' : '') +
+      (rowSpec.reset ? ' is-reset' : '') +
+      '" data-value="' + escAttr(rowSpec.value) + '"' +
       (rowSpec.desc ? ' title="' + escAttr(rowSpec.desc) + '"' : '') + '>' +
       mark + esc(rowSpec.label) + '</div>';
   }
-  html += '<div style="padding:6px 12px;color:var(--nz-text-faint);font-size:11px;border-top:1px solid var(--nz-bg-2)">' + esc(hint) + '</div>';
+  html += '<div class="nz-list-foot">' + esc(hint) + '</div>';
   pop.innerHTML = html;
   document.body.appendChild(pop);
 
