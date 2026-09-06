@@ -18,13 +18,13 @@
     "topLevelLetVar": 0
   },
   "cron_view.js": {
-    "lines": 4735,
+    "lines": 4815,
     "maxFunctionLines": 147,
     "functionsOver100": 4,
     "topLevelLetVar": 17
   },
   "dashboard.js": {
-    "lines": 16284,
+    "lines": 16286,
     "maxFunctionLines": 303,
     "functionsOver100": 17,
     "topLevelLetVar": 104

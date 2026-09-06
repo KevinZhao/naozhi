@@ -13117,8 +13117,10 @@ const wsm = {
     // 仍含上轮事件，可回看）。
     if (this.cronLive.jobId) {
       const jobId = this.cronLive.jobId;
-      const job = (typeof cronJobs !== 'undefined' && Array.isArray(cronJobs))
-        ? cronJobs.find(j => j && j.id === jobId)
+      // cron_view is an ES module (D3 PR-C1): its cronJobs binding is reached
+      // through the nz.state accessor it registers, not a bare global.
+      const job = Array.isArray(nz.state.cronJobs)
+        ? nz.state.cronJobs.find(j => j && j.id === jobId)
         : null;
       const isRunning = !!(job && job.current_run && job.current_run.started_at);
       if (isRunning) {
