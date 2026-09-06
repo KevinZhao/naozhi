@@ -10348,24 +10348,43 @@ registerActions({
 });
 
 // ─── D3 ES-module bridge (RFC docs/rfc/dashboard-es-modules.md §3) ─────────
-// nz.state accessors: migrated modules (agent_view, cron_view) reach
+// nz.state accessors: the extracted modules reach
 // dashboard's reassignable top-level bindings through these accessors — a
 // classic script's let never lands on window, and a copied value would go
 // stale on reassignment. Setters exist only for the names cron_view
 // legitimately writes today (activeView / eventTimer / selectedKey); keep
 // the rest getter-only so a new cross-file write is a reviewed decision.
 Object.defineProperties(nzState, {
+  accessProfiles: { get: function () { return accessProfiles; }, set: function (v) { accessProfiles = v; } },
+  accessProfilesFetchedAt: { get: function () { return accessProfilesFetchedAt; }, set: function (v) { accessProfilesFetchedAt = v; } },
+  activePopover: { get: function () { return activePopover; }, set: function (v) { activePopover = v; } },
   activeView: { get: function () { return activeView; }, set: function (v) { activeView = v; } },
+  _autoPageBackCount: { get: function () { return _autoPageBackCount; }, set: function (v) { _autoPageBackCount = v; } },
+  cliBackends: { get: function () { return cliBackends; }, set: function (v) { cliBackends = v; } },
+  cliBackendsFetchedAt: { get: function () { return cliBackendsFetchedAt; }, set: function (v) { cliBackendsFetchedAt = v; } },
   defaultWorkspace: { get: function () { return defaultWorkspace; } },
+  discoveredItems: { get: function () { return discoveredItems; }, set: function (v) { discoveredItems = v; } },
+  _earlierGen: { get: function () { return _earlierGen; }, set: function (v) { _earlierGen = v; } },
+  _earlierLoading: { get: function () { return _earlierLoading; }, set: function (v) { _earlierLoading = v; } },
   eventTimer: { get: function () { return eventTimer; }, set: function (v) { eventTimer = v; } },
+  _lastAppliedMainState: { get: function () { return _lastAppliedMainState; }, set: function (v) { _lastAppliedMainState = v; } },
+  lastDiscoveredJSON: { get: function () { return lastDiscoveredJSON; }, set: function (v) { lastDiscoveredJSON = v; } },
   lastEventTime: { get: function () { return lastEventTime; }, set: function (v) { lastEventTime = v; } },
-  navUserEls: { get: function () { return navUserEls; } },
+  lastRenderedEventTime: { get: function () { return lastRenderedEventTime; }, set: function (v) { lastRenderedEventTime = v; } },
+  lastVersion: { get: function () { return lastVersion; }, set: function (v) { lastVersion = v; } },
+  navIdx: { get: function () { return navIdx; }, set: function (v) { navIdx = v; } },
+  navPopoverOpen: { get: function () { return navPopoverOpen; }, set: function (v) { navPopoverOpen = v; } },
+  navUserEls: { get: function () { return navUserEls; }, set: function (v) { navUserEls = v; } },
   nodesData: { get: function () { return nodesData; } },
+  oldestFetchedEventTime: { get: function () { return oldestFetchedEventTime; }, set: function (v) { oldestFetchedEventTime = v; } },
+  pendingDiscovered: { get: function () { return pendingDiscovered; }, set: function (v) { pendingDiscovered = v; } },
   pendingFiles: { get: function () { return pendingFiles; }, set: function (v) { pendingFiles = v; } },
+  previewEventCount: { get: function () { return previewEventCount; }, set: function (v) { previewEventCount = v; } },
   projectsData: { get: function () { return projectsData; } },
   selectedKey: { get: function () { return selectedKey; }, set: function (v) { selectedKey = v; } },
   selectedNode: { get: function () { return selectedNode; }, set: function (v) { selectedNode = v; } },
-  sending: { get: function () { return sending; } },
+  sending: { get: function () { return sending; }, set: function (v) { sending = v; } },
+  sessionCounter: { get: function () { return sessionCounter; }, set: function (v) { sessionCounter = v; } },
   sessionDrafts: { get: function () { return sessionDrafts; } },
   sessionLastSent: { get: function () { return sessionLastSent; } },
   sessionPendingTuning: { get: function () { return sessionPendingTuning; } },
