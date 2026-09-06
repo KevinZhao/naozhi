@@ -335,8 +335,10 @@ process.stdout.write(JSON.stringify(out));
 func TestDashboardJS_HomeHealthLine_DistinguishesRunningFromUptime(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
+	// #2558 D4-5: buildHomeHealthLines moved to utilities.js, where dashboard
+	// helpers arrive as injected deps — stub that surface for the harness.
 	script := `
-const cliBackends = null;
+const deps = { cliBackends: null };
 ` + extractJSFunction(t, js, "buildHomeHealthLines") + `
 const lines = buildHomeHealthLines({ running: 2, ready: 1, total: 3, uptime: '3h2m' });
 process.stdout.write(JSON.stringify(lines[0].text));

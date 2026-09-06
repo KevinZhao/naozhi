@@ -286,6 +286,7 @@ var packageFuncType = map[string]string{
 	"handleSystemViewJS":    "http.HandlerFunc",
 	"handleRunningBannerJS": "http.HandlerFunc",
 	"handleFileRefsJS":      "http.HandlerFunc",
+	"handleUtilitiesJS":     "http.HandlerFunc",
 	"handleDashboardJS":     "http.HandlerFunc",
 	"handleCronViewJS":      "http.HandlerFunc",
 	"handleAgentViewJS":     "http.HandlerFunc",

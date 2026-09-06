@@ -65,7 +65,7 @@ file_size:
       limit: 500
       until_phase: 4b
     - path: internal/server/routes.go         # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 545                          # 2026-09-06 +9（#2558 D4：7 个抽出模块的静态路由；handler 体放 static_assets.go）
+      current: 546                          # 2026-09-06 +10（#2558 D4：8 个抽出模块的静态路由；handler 体放 static_assets.go）
       limit: 500
       until_phase: "5"
     # internal/server/agent_tailer.go: entry removed 2026-07-31 — tailerRegistry

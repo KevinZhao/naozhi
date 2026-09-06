@@ -24,16 +24,16 @@
     "topLevelLetVar": 0
   },
   "cron_view.js": {
-    "lines": 4644,
+    "lines": 4660,
     "maxFunctionLines": 137,
     "functionsOver100": 4,
     "topLevelLetVar": 18
   },
   "dashboard.js": {
-    "lines": 11487,
+    "lines": 10473,
     "maxFunctionLines": 249,
     "functionsOver100": 12,
-    "topLevelLetVar": 69
+    "topLevelLetVar": 65
   },
   "file_refs.js": {
     "lines": 937,
@@ -94,6 +94,12 @@
     "maxFunctionLines": 73,
     "functionsOver100": 0,
     "topLevelLetVar": 2
+  },
+  "utilities.js": {
+    "lines": 1094,
+    "maxFunctionLines": 91,
+    "functionsOver100": 0,
+    "topLevelLetVar": 4
   },
   "voice.js": {
     "lines": 491,

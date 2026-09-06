@@ -204,6 +204,7 @@ func readDashboardJS(t *testing.T) string {
 		"system_view.js",
 		"running_banner.js",
 		"file_refs.js",
+		"utilities.js",
 	} {
 		data := staticAssetBytes(name)
 		if data == nil {

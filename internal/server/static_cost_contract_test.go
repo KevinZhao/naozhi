@@ -12,10 +12,16 @@ import (
 // and each file defines the helpers it calls (multi-script split rule).
 func TestStaticCostLedgerContract(t *testing.T) {
 	t.Parallel()
-	dash, err := os.ReadFile("static/dashboard.js")
+	// #2558 D4-5: the cost-summary helpers moved to utilities.js.
+	util, err := os.ReadFile("static/utilities.js")
+	if err != nil {
+		t.Fatalf("read utilities.js: %v", err)
+	}
+	dashOnly, err := os.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatal(err)
 	}
+	dash := append(append([]byte{}, dashOnly...), util...)
 	cron, err := os.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatal(err)
