@@ -1,10 +1,5 @@
 {
   "matrix": {
-    "contract.js": {
-      "dashboard.js": [
-        "takeover"
-      ]
-    },
     "dashboard.js": {
       "nz_util.js": [
         "nz"
@@ -44,7 +39,5 @@
     "asset_browser.js": 0,
     "files_view.js": 0
   },
-  "bridgeRefs": {
-    "dashboard.js": 30
-  }
+  "bridgeRefs": {}
 }

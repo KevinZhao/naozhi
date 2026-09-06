@@ -77,9 +77,9 @@ func TestDashboardJS_AgentViewModuleLoaded(t *testing.T) {
 		}
 	}
 
-	// AgentView namespace export — Phase 3 callers will land here.
-	if !strings.Contains(avStr, "window.AgentView") {
-		t.Error("agent_view.js missing window.AgentView namespace export")
+	// The view's public surface registers on nz.views (#2557 PR-E3).
+	if !strings.Contains(avStr, "nzViews.agent = {") {
+		t.Error("agent_view.js missing nzViews.agent namespace registration")
 	}
 
 	// agent_view.js must consume the shared bubble renderers via their

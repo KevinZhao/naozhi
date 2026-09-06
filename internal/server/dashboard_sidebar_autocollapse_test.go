@@ -28,9 +28,11 @@ func TestDashboardJS_SidebarAutoCollapseWired(t *testing.T) {
 	// Exactly the three drawer entry points must invoke the helper. We count
 	// call sites (not the declaration) to catch both a dropped wiring and an
 	// accidental stray call that would collapse the sidebar in the wrong flow.
+	// #2557 PR-E3 deleted previewCodeBlock (a dead code-block preview entry
+	// with no remaining caller), so two drawer entry points remain.
 	const call = "collapseSidebarForDrawer();"
-	if got := strings.Count(js, call); got != 3 {
-		t.Fatalf("collapseSidebarForDrawer() call-site count = %d, want 3 (追问 / file preview / code-block preview)", got)
+	if got := strings.Count(js, call); got != 2 {
+		t.Fatalf("collapseSidebarForDrawer() call-site count = %d, want 2 (追问 / file preview)", got)
 	}
 
 	// The helper must NOT persist the collapse — a transient, context-driven
@@ -92,8 +94,9 @@ func TestDashboardJS_SidebarAutoRestoreWired(t *testing.T) {
 	if !strings.Contains(body, "nzAnyDrawerOpen") {
 		t.Error("restoreSidebarAfterDrawer must bail via nzAnyDrawerOpen while a drawer is still open — only the last close restores")
 	}
-	if !strings.Contains(js, "window.nzAnyDrawerOpen = anyDrawerOpen") {
-		t.Error("split-view block must export anyDrawerOpen as window.nzAnyDrawerOpen for the sidebar-restore guard")
+	// #2557 PR-E3: the export became a module-scope late-bound hook.
+	if !strings.Contains(js, "nzAnyDrawerOpen = anyDrawerOpen") {
+		t.Error("split-view block must assign anyDrawerOpen to the nzAnyDrawerOpen hook for the sidebar-restore guard")
 	}
 
 	// The collapse side must arm the flag, and a manual toggle must disarm it

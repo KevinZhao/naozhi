@@ -220,7 +220,14 @@ function defaultGitStates() {
  * @returns {Promise<{server: http.Server, port: number, url: string}>}
  */
 function startMockServer(overrides = {}) {
-  const html = fs.readFileSync(path.join(STATIC_DIR, 'dashboard.html'), 'utf8');
+  // e2e-shim (#2557 PR-E3): production exports exactly one global —
+  // window.nz. The legacy suite probes dashboard bindings as bare
+  // identifiers, so the mock injects a test-only script that mirrors the
+  // nz.test instrumentation surface onto window (accessor properties keep
+  // reads live and route writes back). New tests should use nz.test.*.
+  const html = fs
+    .readFileSync(path.join(STATIC_DIR, 'dashboard.html'), 'utf8')
+    .replace('</body>', '<script type="module" src="/e2e-shim.js"></script>\n</body>');
   const manifest = fs.readFileSync(path.join(STATIC_DIR, 'manifest.json'), 'utf8');
 
   const sessionsData = overrides.sessions || defaultSessions();
@@ -265,6 +272,19 @@ function startMockServer(overrides = {}) {
 
     const url = new URL(req.url, 'http://localhost');
     const pathname = url.pathname;
+
+    if (pathname === '/e2e-shim.js') {
+      res.writeHead(200, { 'Content-Type': 'application/javascript' });
+      res.end(
+        "import { nzTest } from '/static/nz_util.js';\n" +
+        "for (const k of Object.getOwnPropertyNames(nzTest)) {\n" +
+        "  const d = Object.getOwnPropertyDescriptor(nzTest, k);\n" +
+        "  if (d.get) Object.defineProperty(window, k, { get: d.get, set: d.set, configurable: true });\n" +
+        "  else Object.defineProperty(window, k, { get: () => nzTest[k], set: (v) => { nzTest[k] = v; }, configurable: true });\n" +
+        "}\n"
+      );
+      return;
+    }
 
     // Static routes
     if (pathname === '/dashboard') {

@@ -108,8 +108,8 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 		t.Fatal("dashboard.js: Esc handler 闭合 `\\n});\\n` 未找到 — 解析失败,断言无意义")
 	}
 	escBody := dashJS[escIdx : escIdx+escEndRel]
-	if !strings.Contains(escBody, "window.nzCronEscClose") {
-		t.Error("Global Esc handler: 必须经 window.nzCronEscClose() 委托关 cron 层 — " +
+	if !strings.Contains(escBody, "nzViews.cron") {
+		t.Error("Global Esc handler: 必须经 nz.views.cron.escClose() 委托关 cron 层 — " +
 			"不得在 dashboard.js 内联 cron 关闭逻辑（B1 解耦）")
 	}
 	// 反向断言（dashboard.js 的 Esc handler 不得跨脚本裸引用 cron 内部符号，
@@ -136,9 +136,9 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	if collapseIdx > 0 && drawerCloseIdx > 0 && collapseIdx > drawerCloseIdx {
 		t.Error("cronEscClose: cronTimelineCollapse 必须在 closeCronDetail 之前（行展开是更靠前的状态）")
 	}
-	// dashboard.js 须挂 nzCronEscClose（导出委托入口）。
-	if !strings.Contains(cronJS, "window.nzCronEscClose = cronEscClose") {
-		t.Error("cron_view.js: 必须 window.nzCronEscClose = cronEscClose 导出委托入口")
+	// cron_view.js 须在 nz.views 注册委托入口（#2557 PR-E3）。
+	if !strings.Contains(cronJS, "nzViews.cron = { escClose: cronEscClose }") {
+		t.Error("cron_view.js: 必须 nzViews.cron = { escClose: cronEscClose } 注册委托入口")
 	}
 
 	// 6. ↑↓ 方向编码行为契约：↑=prev（更新的 run）、↓=next（更旧的 run）。这条精确

@@ -189,9 +189,11 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 	if start < 0 {
 		t.Fatal("previewDiscovered not found")
 	}
-	end := strings.Index(js[start:], "function handleTakeoverClick(")
+	// Bound the function at its column-0 closing brace (#2557 PR-E3 removed
+	// the dead handleTakeoverClick that used to follow it).
+	end := strings.Index(js[start:], "\n}")
 	if end < 0 {
-		t.Fatal("handleTakeoverClick must follow previewDiscovered")
+		t.Fatal("previewDiscovered body end not found")
 	}
 	fn := js[start : start+end]
 	if !strings.Contains(js, "let _previewGen = 0;") {

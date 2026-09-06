@@ -14,7 +14,7 @@
 // escAttr, not esc, for attribute-value context: nz_util's esc deliberately
 // leaves quotes alone, so a file named `a"b` would truncate data-name="…" and
 // the click handler navigated to the wrong path.
-import { esc, escAttr, showToast, fetchJSON } from './nz_util.js';
+import { esc, escAttr, showToast, fetchJSON, nzViews } from './nz_util.js';
 import { fileApiUrl, formatFileSize, renderSandboxedBlob } from './dashboard.js';
 
 (function () {
@@ -436,5 +436,5 @@ import { fileApiUrl, formatFileSize, renderSandboxedBlob } from './dashboard.js'
     document.body.classList.remove('files-reading');
   }
 
-  window.nzFilesView = { show: show, hide: hide };
+  nzViews.files = { show: show, hide: hide };
 })();

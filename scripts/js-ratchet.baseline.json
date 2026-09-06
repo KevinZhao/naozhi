@@ -1,12 +1,12 @@
 {
   "agent_view.js": {
-    "lines": 736,
+    "lines": 731,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0
   },
   "asset_browser.js": {
-    "lines": 250,
+    "lines": 252,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0
@@ -18,16 +18,16 @@
     "topLevelLetVar": 0
   },
   "cron_view.js": {
-    "lines": 4682,
+    "lines": 4640,
     "maxFunctionLines": 137,
     "functionsOver100": 4,
-    "topLevelLetVar": 17
+    "topLevelLetVar": 18
   },
   "dashboard.js": {
-    "lines": 16500,
+    "lines": 16151,
     "maxFunctionLines": 303,
     "functionsOver100": 16,
-    "topLevelLetVar": 102
+    "topLevelLetVar": 110
   },
   "files_view.js": {
     "lines": 440,
@@ -36,7 +36,7 @@
     "topLevelLetVar": 0
   },
   "nz_util.js": {
-    "lines": 260,
+    "lines": 233,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0

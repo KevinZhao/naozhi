@@ -1,4 +1,4 @@
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, registerActions, formatCostUSD, formatDurationShort, formatRunDuration, isCronSessionKey } from './nz_util.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, nzViews, nzTest, registerActions, formatCostUSD, formatDurationShort, formatRunDuration, isCronSessionKey } from './nz_util.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
@@ -104,7 +104,6 @@ let previewEventCount = 0;
 let _previewGen = 0;
 let pendingDiscovered = null; // {pid, sessionId, cwd, procStartTime, node} when previewing a discovered session
 let sessionCounter = 0;
-let availableAgents = ['general'];
 let defaultWorkspace = '';
 let projectsData = []; // [{name, path, node}] from API
 let defaultCLIName = '';
@@ -200,7 +199,6 @@ function collectWorkspaceSessionIDs(sessions) {
 // future breaking changes (bump + migrate on read). All three helpers
 // swallow quota/disabled errors so callers never need their own try/catch.
 const LS_PREFIX = 'nz:';
-const LS_SCHEMA = 1; // bump when structure breaks
 function lsSet(key, value) { try { localStorage.setItem(LS_PREFIX + key, JSON.stringify(value)); } catch (e) { /* quota / disabled */ } }
 function lsGet(key, fallback) { try { const v = localStorage.getItem(LS_PREFIX + key); return v == null ? fallback : JSON.parse(v); } catch (e) { return fallback; } }
 function lsRemove(key) { try { localStorage.removeItem(LS_PREFIX + key); } catch (e) {} }
@@ -418,7 +416,6 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 function getToken() { return ''; }
-function setToken(t) { /* token stored in HttpOnly cookie only */ }
 // authHeaders builds the Authorization header set for fetch calls. Moved
 // here from cron_view (#2557 PR-E1): it wraps getToken, which lives in this
 // file, and both views consume it.
@@ -465,8 +462,8 @@ function setActivityView(view) {
   const sysm = document.getElementById('system-main');
   if (sysm) sysm.hidden = view !== 'system';
   // Tear down the previous view if it owns external state.
-  if (prev === 'assets' && view !== 'assets' && window.nzAssetView) window.nzAssetView.hide();
-  if (prev === 'files' && view !== 'files' && window.nzFilesView) window.nzFilesView.hide();
+  if (prev === 'assets' && view !== 'assets' && nzViews.asset) nzViews.asset.hide();
+  if (prev === 'files' && view !== 'files' && nzViews.files) nzViews.files.hide();
   if (prev === 'system' && view !== 'system') stopSystemPoll();
   // Leaving chat: close any docked preview / 追问 drawer. They are position:fixed
   // siblings of .container with no nz-view-* hide rule, so without this they
@@ -474,11 +471,11 @@ function setActivityView(view) {
   // reserved. Both close paths run nzSplitExit, clearing nz-split-open.
   if (prev === 'chat' && view !== 'chat') {
     closeFilePreview();
-    if (typeof window.__closeScratchDrawer === 'function') window.__closeScratchDrawer();
+    if (closeScratchDrawer) closeScratchDrawer();
   }
   // Enter the target view.
-  if (view === 'assets') { if (window.nzAssetView) window.nzAssetView.show(); }
-  else if (view === 'files') { if (window.nzFilesView) window.nzFilesView.show(); }
+  if (view === 'assets') { if (nzViews.asset) nzViews.asset.show(); }
+  else if (view === 'files') { if (nzViews.files) nzViews.files.show(); }
   else if (view === 'cron') { emitCron('cron:open-panel'); }
   else if (view === 'system') { openSystemPanel(); }
   else if (view === 'settings') { renderSettingsView(); }
@@ -551,7 +548,6 @@ async function fetchSessions() {
     lastNodesJSON = nodesHash;
     lastHistoryJSON = historyHash;
     if (data.nodes) nodesData = data.nodes;
-    if (data.stats.agents) availableAgents = data.stats.agents;
     if (data.stats.default_workspace) defaultWorkspace = data.stats.default_workspace;
     if (data.stats.projects) projectsData = data.stats.projects;
     if (data.stats.cli_name) defaultCLIName = data.stats.cli_name;
@@ -775,7 +771,6 @@ function debouncedFetchSessions() {
 function renderSidebar(data) {
   const st = data.stats;
   updateStatusBar();
-  if (st.agents) availableAgents = st.agents;
   if (st.default_workspace) defaultWorkspace = st.default_workspace;
   if (st.projects) projectsData = st.projects;
 
@@ -2150,11 +2145,6 @@ function applyHistoryFilter(merged, query) {
   }).join('');
 }
 
-function majorMinor(ver) {
-  const parts = ver.split('.');
-  return parts.length >= 2 ? parts[0] + '.' + parts[1] : ver;
-}
-
 function sessionTypeTag(cliName, entrypoint) {
   var label;
   if (cliName === 'kiro') { label = 'Kiro CLI'; }
@@ -2229,51 +2219,6 @@ function originBadgeHtml(key) {
   const info = originBadgeInfo(key);
   if (!info) return '';
   return '<span class="sc-origin kind-' + esc(info.kind) + '" title="' + escAttr(info.label) + '">' + esc(info.label) + '</span>';
-}
-
-// backendChipInfo derives the dashboard chip payload (label + color) for a
-// session's backend ID. Returns null when the deployment is single-backend
-// (cliBackends has 0 or 1 entry) so callers don't render a stray chip on
-// claude-only deployments. Multi-Backend RFC §8.3 D1.
-//
-// Falls back gracefully when:
-//   - cliBackends has not been fetched yet → returns null (chip will appear
-//     on next render once the cache populates; renderHeader is re-run on
-//     every snapshot/event update so the latency is sub-second).
-//   - The session.backend value isn't in cliBackends.backends — could happen
-//     for an evicted-and-removed-from-config backend; we display a neutral
-//     chip with the raw id so operators can see the orphan record.
-function backendChipInfo(backendID) {
-  if (!cliBackends || !Array.isArray(cliBackends.backends)) return null;
-  if (cliBackends.backends.length <= 1) return null; // single-backend mode
-  if (!backendID) backendID = cliBackends.default || '';
-  const entry = cliBackends.backends.find(b => b && b.id === backendID);
-  if (!entry) {
-    // Orphan record: keep the chip but use a neutral color so operators
-    // notice. Don't return null — losing the chip silently would hide a
-    // real "session pinned to a removed backend" state.
-    return {
-      label: backendID || 'unknown',
-      color: 'var(--nz-text-mute)',
-      tooltip: 'Backend not currently configured: ' + (backendID || '(empty)'),
-    };
-  }
-  return {
-    label: entry.reply_tag || entry.id,
-    color: entry.chip_color || 'var(--nz-accent)',
-    tooltip: (entry.display_name || entry.id) + (entry.version ? ' v' + entry.version : ''),
-  };
-}
-
-// backendChipHtml renders the per-session backend chip — the small colored
-// pill next to the IM origin badge. Empty string when single-backend mode
-// (no chip rendered, layout unchanged).
-function backendChipHtml(backendID) {
-  const info = backendChipInfo(backendID);
-  if (!info) return '';
-  return '<span class="sc-backend-chip" data-backend="' + escAttr(backendID || '') +
-    '" style="background-color:' + escAttr(info.color) + '" title="' + escAttr(info.tooltip) +
-    '">' + esc(info.label) + '</span>';
 }
 
 // featureForBackend resolves a backend feature flag (RFC §8.2). Returns
@@ -2854,8 +2799,8 @@ function selectSession(key, node) {
   // Close any open agent drill-in view before the selectedKey flips
   // (RFC v4 agent-team-ui §3.6.6). Must run BEFORE saveScrollPos so the
   // agent-view scroll snapshot still keys off the old session id.
-  if (window.AgentView && typeof window.AgentView.onSessionSwitch === 'function') {
-    window.AgentView.onSessionSwitch(key, node);
+  if (nzViews.agent) {
+    nzViews.agent.onSessionSwitch(key, node);
   }
   // Recent session card click → trigger resume flow
   // Discovered session card click → trigger preview flow
@@ -5067,8 +5012,8 @@ async function sendAskAnswerViaAPI(text, card) {
   let key = selectedKey;
   let node = selectedNode;
   if (card && card.closest && card.closest('#aside-drawer')) {
-    const scratchKey = (typeof window.__getActiveScratchKey === 'function')
-      ? window.__getActiveScratchKey()
+    const scratchKey = getActiveScratchKey
+      ? getActiveScratchKey()
       : '';
     if (!scratchKey) throw new Error('no active scratch session');
     key = scratchKey;
@@ -5368,10 +5313,8 @@ function eventAlreadyRendered(scrollEl, uuid) {
 // Expose the bubble renderer for agent_view.js (RFC v4 agent-team-ui §3.6).
 // The sub-agent transcript panel must use the same layout as the parent view —
 // tool_result folding, markdown, image thumbnails, copy/ask buttons — so one
-// eventHtml is the source of truth. Exporting here prevents silent drift when
-// agent_view.js was referencing a non-existent window.renderEvent (which
-// always fell through to a plain-text fallback, losing the entire bubble UI).
-window.eventHtml = eventHtml;
+// eventHtml is the source of truth (agent_view imports it; a past revision
+// referenced a non-existent stub and silently lost the entire bubble UI).
 
 // Walk a list of events and produce an HTML string with time dividers inserted
 // whenever the gap between adjacent VISIBLE (non-null) bubbles exceeds
@@ -5393,8 +5336,6 @@ function renderEventsWithDividers(events, prevTime, opts) {
   }
   return out;
 }
-// Shared with agent_view.js — see window.eventHtml comment above.
-window.renderEventsWithDividers = renderEventsWithDividers;
 
 // Read the data-time of the last event-time-divider in the scroll container so
 // incremental appenders can decide whether a new divider is needed.
@@ -5466,7 +5407,6 @@ function handleKey(e) {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && Date.now() - lastCompositionEnd > 30) { e.preventDefault(); sendMessage(); }
 }
 
-function autoGrow(el) {} // no-op: contenteditable auto-sizes
 function getMsgValue(el) { return (el ? el.innerText : '').trim(); }
 function setMsgValue(el, v) { if (el) el.innerText = v; }
 function clearMsg(el) { if (el) el.textContent = ''; }
@@ -6131,7 +6071,7 @@ function refreshBanner() {
 
   // Agent rows
   if (agEl) {
-    agEl.innerHTML = window.renderAgentRows();
+    agEl.innerHTML = nzViews.agent ? nzViews.agent.renderAgentRows() : '';
   }
 
   // Stats line (hidden when agents are shown)
@@ -6221,14 +6161,14 @@ function applyEventToTurnState(ev) {
       updateSidebarAgentBadge();
       break;
     case 'task_start':
-      var a1 = window.findAgentByToolUseId(ev.tool_use_id);
+      var a1 = nzViews.agent && nzViews.agent.findByToolUseId(ev.tool_use_id);
       if (a1) {
         a1.taskId = ev.task_id;
         a1.status = 'running';
       }
       break;
     case 'task_progress':
-      var a2 = window.findAgentByTaskId(ev.task_id) || window.findAgentByToolUseId(ev.tool_use_id);
+      var a2 = nzViews.agent && (nzViews.agent.findByTaskId(ev.task_id) || nzViews.agent.findByToolUseId(ev.tool_use_id));
       if (a2) {
         if (!a2.taskId) a2.taskId = ev.task_id;
         a2.status = 'running';
@@ -6240,7 +6180,7 @@ function applyEventToTurnState(ev) {
       }
       break;
     case 'task_done':
-      var a3 = window.findAgentByTaskId(ev.task_id) || window.findAgentByToolUseId(ev.tool_use_id);
+      var a3 = nzViews.agent && (nzViews.agent.findByTaskId(ev.task_id) || nzViews.agent.findByToolUseId(ev.tool_use_id));
       if (a3) {
         if (!a3.taskId) a3.taskId = ev.task_id;
         a3.status = ev.status || 'completed';
@@ -6334,11 +6274,6 @@ function interruptSession() {
   }
 }
 
-function scrollEventsToBottom() {
-  const el = document.getElementById('events-scroll');
-  if (el) el.scrollTop = el.scrollHeight;
-}
-
 // saveScrollPos / restoreScrollPos: 按 (key,node) 保存离开时的滚动位置，
 // 回到同一会话时恢复。用「距底距离」而不是 scrollTop，因为会话再进入时
 // 可能会多加载更早的事件导致 scrollHeight 变大，距底更稳定。atBottom 单
@@ -6390,15 +6325,6 @@ function restoreScrollPos(key, node) {
 //   - WS push assistant_chunk      → maybeStickBottom (only if at bottom)
 //   - WS push result event         → maybeStickBottom (only if at bottom)
 const scrollSlackPx = 80;
-function maybeStickBottom() {
-  const el = document.getElementById('events-scroll');
-  if (!el) return;
-  const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-  if (distance < scrollSlackPx) {
-    stickEventsBottom();
-  }
-}
-
 // stickEventsBottom forces the events pane to the last bubble and keeps it there
 // across the async layout tail — lazy-loaded images, mermaid diagrams, katex
 // formulas, and the "load earlier" button that inserts at the top after the
@@ -6715,10 +6641,10 @@ document.addEventListener('keydown', function(e) {
   // 的 cronEscClose 里，dashboard.js 仅经委托——绝不跨脚本裸引用 cron 内部状态
   // （cronExpandedRunId / cronDetailJobId），否则 cron_view.js 未加载时这里会抛
   // `cronExpandedRunId is not defined`（dashboard-cron-view-extraction §2.6 B1）。
-  // window.nzCronEscClose 缺席（cron_view.js 没加载）时优雅降级，不影响其它 Esc 分支。
+  // nz.views.cron 缺席（cron_view.js 没加载）时优雅降级，不影响其它 Esc 分支。
   // 独立 if（非 else if）：忠实保留迁移前语义——cron 分支独立于上方 popover 分支，
   // 即便同一次 Esc 已关掉 history/nav-list popover，仍会继续关 cron 展开/drawer。
-  if (window.nzCronEscClose && window.nzCronEscClose()) { closed = true; }
+  if (nzViews.cron && nzViews.cron.escClose()) { closed = true; }
   if (closed) e.preventDefault();
 });
 
@@ -6825,7 +6751,7 @@ function updateSendButton(state) {
     if (banner) banner.style.display = '';
     if (sendBtn) sendBtn.style.display = 'none';
     if (stopBtn) stopBtn.style.display = 'flex';
-    window.initAgentsFromSession();
+    if (nzViews.agent) nzViews.agent.initFromSession();
     refreshBanner();
     startTurnWatchdog();
   } else {
@@ -9723,15 +9649,6 @@ function fallbackCopy(text) {
   document.body.removeChild(ta);
 }
 
-function copyText(text) {
-  if (navigator.clipboard) {
-    navigator.clipboard.writeText(text).then(() => showToast('已复制', 'success')).catch(() => { fallbackCopy(text); showToast('已复制', 'success'); });
-  } else {
-    fallbackCopy(text);
-    showToast('已复制', 'success');
-  }
-}
-
 // Flash a button to "copied!" state for ~1.5s then revert.
 function flashCopyButton(btn) {
   btn.textContent = 'copied!';
@@ -9759,28 +9676,6 @@ function copyCodeBlock(btn) {
   copyWithFeedback(btn, code);
 }
 
-// Map common markdown fence languages to file extensions for download filenames.
-const _codeLangExt = {
-  javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts', jsx: 'jsx', tsx: 'tsx',
-  python: 'py', py: 'py', ruby: 'rb', rb: 'rb', go: 'go', golang: 'go',
-  rust: 'rs', rs: 'rs', java: 'java', kotlin: 'kt', kt: 'kt', swift: 'swift',
-  c: 'c', 'c++': 'cpp', cpp: 'cpp', cxx: 'cpp', cc: 'cpp', h: 'h', hpp: 'hpp',
-  'c#': 'cs', csharp: 'cs', cs: 'cs', php: 'php', perl: 'pl', pl: 'pl',
-  lua: 'lua', scala: 'scala', r: 'r', dart: 'dart',
-  html: 'html', htm: 'html', css: 'css', scss: 'scss', sass: 'sass', less: 'less',
-  json: 'json', yaml: 'yml', yml: 'yml', toml: 'toml', xml: 'xml',
-  markdown: 'md', md: 'md', sql: 'sql', graphql: 'graphql', proto: 'proto',
-  shell: 'sh', bash: 'sh', sh: 'sh', zsh: 'sh', fish: 'fish',
-  ini: 'ini', diff: 'diff', patch: 'patch', vim: 'vim', tex: 'tex', latex: 'tex',
-};
-
-// Languages that render to a bare filename (no "snippet." prefix, no ext
-// separator). Prevents `snippet.Dockerfile` when the intent is `Dockerfile`.
-const _codeLangBareName = {
-  dockerfile: 'Dockerfile', docker: 'Dockerfile',
-  makefile: 'Makefile', make: 'Makefile',
-};
-
 function _codeBlockInfo(btn) {
   const wrap = btn.closest('.md-code-wrap');
   if (!wrap) return { code: '', lang: '' };
@@ -9800,63 +9695,9 @@ function _codeBlockInfo(btn) {
   return { code, lang };
 }
 
-function _codeBlockFilename(lang) {
-  if (_codeLangBareName[lang]) return _codeLangBareName[lang];
-  const ext = _codeLangExt[lang] || (lang || 'txt');
-  // Ext must be a short alnum-ish token; otherwise use .txt to avoid
-  // writing unsafe names like `snippet.<script>`.
-  if (!/^[a-z0-9]{1,12}$/i.test(ext)) return 'snippet.txt';
-  return 'snippet.' + ext;
-}
-
 // Snippet payload for preview drawer. Storing in a module variable instead of
 // drawer.dataset avoids the multi-MB attribute truncation and DOM-serialize cost.
 let _pendingSnippet = null;
-
-function previewCodeBlock(btn) {
-  const { code, lang } = _codeBlockInfo(btn);
-  if (!code) return;
-  const drawer = document.getElementById('fv-drawer');
-  const body = document.getElementById('fv-body');
-  const title = document.getElementById('fv-title');
-  const meta = document.getElementById('fv-meta');
-  if (!drawer || !body || !title || !meta) return;
-  const name = _codeBlockFilename(lang);
-  drawer.classList.remove('hidden');
-  drawer.classList.add('fv-open');
-  collapseSidebarForDrawer();
-  // Mark as snippet so the drawer header copy/download buttons fall back to
-  // the inline code instead of trying to fetch a server file.
-  drawer.dataset.project = '';
-  drawer.dataset.node = '';
-  drawer.dataset.path = '';
-  drawer.dataset.snippetMode = '1';
-  drawer.dataset.snippetName = name;
-  _pendingSnippet = code;
-  title.textContent = name;
-  meta.textContent = (lang ? lang + ' · ' : '') + formatFileSize(new Blob([code]).size);
-  // Always render snippets as escaped plain text. The markdown branch
-  // previously piped user-controlled LLM output through renderMd which can
-  // reinsert HTML (math tokens, etc.). The CSP has `unsafe-inline` so HTML
-  // injection in the drawer is a real risk — keep snippets escape-only.
-  body.innerHTML = '<pre><code class="fv-code">' + esc(code) + '</code></pre>';
-}
-
-function downloadCodeBlock(btn) {
-  const { code, lang } = _codeBlockInfo(btn);
-  if (!code) return;
-  const name = _codeBlockFilename(lang);
-  const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
 
 function copyEventContent(btn) {
   const text = btn.dataset.raw || btn.closest('.event').querySelector('.event-content').textContent;
@@ -9963,12 +9804,6 @@ function formatAbsTime(ms) {
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
     ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) +
     ' (' + tz + ')';
-}
-
-function sessionTimeHint(key) {
-  const m = (key || '').match(/:(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})/);
-  if (m) return m[2] + '/' + m[3] + ' ' + m[4] + ':' + m[5];
-  return '\u2014';
 }
 
 // trapFocus moved to nz_util.js (PR-0a). Available as window.nz.util.trapFocus
@@ -11057,9 +10892,9 @@ async function openFilePreview(wrapEl) {
   drawer.classList.add('fv-open');
   // Dock as a right-hand split on desktop so the transcript stays visible
   // beside the preview (no-op on phone — falls back to the overlay).
-  if (typeof window.nzSplitEnter === 'function') window.nzSplitEnter();
+  if (nzSplitEnter) nzSplitEnter();
   // Opened last → stack on top of the 追问 pane if both are docked.
-  if (typeof window.nzSplitBringToFront === 'function') window.nzSplitBringToFront('preview');
+  if (nzSplitBringToFront) nzSplitBringToFront('preview');
   collapseSidebarForDrawer();
   drawer.dataset.project = project;
   drawer.dataset.node = node;
@@ -11267,7 +11102,7 @@ function closeFilePreview() {
   drawer.classList.remove('fv-open');
   drawer.classList.add('hidden');
   // Undock the split (no-op if the 追问 drawer is still open).
-  if (typeof window.nzSplitExit === 'function') window.nzSplitExit();
+  if (nzSplitExit) nzSplitExit();
   // Re-expand the sidebar if the open path auto-collapsed it (no-op if the
   // 追问 drawer is still open or the user collapsed it themselves).
   restoreSidebarAfterDrawer();
@@ -11409,7 +11244,7 @@ function regroupAvatars(container) {
     prevTime = t; // 0 when undated → next bubble can't group against it
   }
 }
-window.regroupAvatars = regroupAvatars;
+
 
 // KaTeX environment names we split out as block-level math. Whitelisted —
 // feeding KaTeX an environment it doesn't support just emits an error span
@@ -12192,19 +12027,6 @@ function getNodeStatus(id) {
   return nd.status || 'offline';
 }
 
-// getNodeSessionCount returns how many sessions are filed under a node in the
-// last-rendered cache. Used in the dropdown rows and for the aggregated alert
-// dot. Cheap to call (linear scan over allSessionsCache; bounded by the sidebar
-// render pass).
-function getNodeSessionCount(id) {
-  if (!allSessionsCache || allSessionsCache.length === 0) return 0;
-  let n = 0;
-  for (const s of allSessionsCache) {
-    if ((s.node || 'local') === id) n++;
-  }
-  return n;
-}
-
 // statusLabelForNode maps a normalized status to a short Chinese/English label
 // used inside the trigger and each dropdown row.
 function statusLabelForNode(status) {
@@ -12511,6 +12333,20 @@ const WS_STATES = { OFF: 'off', CONNECTING: 'connecting', AUTH: 'authenticating'
 // EventTarget dispatch is synchronous, so ordering semantics match the
 // old direct calls; if cron_view ever failed to load, dispatch is a no-op
 // (same resilience the old typeof guards bought).
+
+// Late-bound intra-module hooks (#2557 PR-E3): these used to be IIFE
+// self-exports on window; they are module-scope lets now, assigned when the
+// owning IIFE runs and read at event time (never at load time).
+let nzAnyDrawerOpen = null;
+let nzSplitEnter = null;
+let nzSplitExit = null;
+let nzSplitBringToFront = null;
+let openLightboxGroup = null;
+let openLightboxFromThumb = null;
+let getActiveScratchKey = null;
+let closeScratchDrawer = null;
+let askAside = null;
+
 const emitCron = (type, detail) => nzBus.dispatchEvent(new CustomEvent(type, { detail }));
 
 const wsm = {
@@ -12870,16 +12706,16 @@ const wsm = {
       // live in agent_view.js so new agent-view functionality doesn't
       // mean touching this dispatch table.
       case 'agent_event':
-        if (window.AgentView) window.AgentView.onAgentEvent(msg);
+        if (nzViews.agent) nzViews.agent.onAgentEvent(msg);
         break;
       case 'agent_meta':
-        if (window.AgentView) window.AgentView.onAgentMeta(msg);
+        if (nzViews.agent) nzViews.agent.onAgentMeta(msg);
         break;
       case 'agent_done':
-        if (window.AgentView) window.AgentView.onAgentDone(msg);
+        if (nzViews.agent) nzViews.agent.onAgentDone(msg);
         break;
       case 'agent_subscribe_rejected':
-        if (window.AgentView) window.AgentView.onAgentSubscribeRejected(msg);
+        if (nzViews.agent) nzViews.agent.onAgentSubscribeRejected(msg);
         break;
     }
   },
@@ -13278,7 +13114,7 @@ const wsm = {
     // agent, the events-scroll pane belongs to that agent; parent events
     // still feed into turnState / banner (handled above) but must not
     // land in the DOM until the user returns.
-    if (window.AgentView && window.AgentView.activeTaskID()) return;
+    if (nzViews.agent && nzViews.agent.activeTaskID()) return;
     const html = eventHtml(ev);
     if (!html) return;
     const el = document.getElementById('events-scroll');
@@ -13833,10 +13669,6 @@ async function scanDiscovered() {
   }
 }
 
-function handleDiscoveredClick(el) {
-  previewDiscovered(el.dataset.sessionId, el.dataset.cwd, Number(el.dataset.pid), Number(el.dataset.pst), el.dataset.node || '');
-}
-
 async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliName, entrypoint) {
   // Generation guard: two rapid clicks on different discovered cards both
   // pass the synchronous prologue, then the first call's awaited fetch used to
@@ -13985,47 +13817,6 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     }, 2000);
   } catch (e) {
     showNetworkError('预览会话', e);
-  }
-}
-
-function handleTakeoverClick(el) {
-  takeover(el, Number(el.dataset.pid), el.dataset.sessionId, el.dataset.cwd, Number(el.dataset.pst), el.dataset.node || '');
-}
-
-async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
-  btn.classList.add('taking');
-  btn.textContent = '接管中...';
-  try {
-    const headers = {'Content-Type': 'application/json'};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
-    const r = await fetch(NZ_CONTRACT.API.discovered_takeover, {
-      method: 'POST', headers,
-      body: JSON.stringify({pid: pid, session_id: sessionId, cwd: cwd, proc_start_time: procStartTime || 0, node: node || ''})
-    });
-    if (!r.ok) {
-      const text = await r.text().catch(() => '');
-      showAPIError('接管进程', r.status, text);
-      btn.classList.remove('taking');
-      btn.textContent = '接管';
-      return;
-    }
-    const data = await r.json();
-    showToast('已接管会话', 'success');
-    // Remove from discoveredItems so renderSidebar won't re-create the card
-    dropDiscovered(pid, node);
-    // Immediately remove the discovered card from DOM
-    removeSidebarCard(discoveredKey(pid, node));
-    // Force refresh (clear cache so renderSidebar runs)
-    lastVersion = 0;
-    await fetchSessions();
-    if (data.key) {
-      selectSession(data.key, node || 'local');
-    }
-  } catch (e) {
-    showNetworkError('接管进程', e);
-    btn.classList.remove('taking');
-    btn.textContent = '接管';
   }
 }
 
@@ -14536,7 +14327,7 @@ function initSwipeBack() {
   // Exported for restoreSidebarAfterDrawer — keeps the "which drawers exist"
   // knowledge in one place so adding a third drawer can't drift between the
   // split-exit guard and the sidebar-restore guard.
-  window.nzAnyDrawerOpen = anyDrawerOpen;
+  nzAnyDrawerOpen = anyDrawerOpen;
   // Was the transcript scrolled to (or near) the bottom? 40px slack mirrors
   // the main-window wasBottom checks elsewhere in this file.
   function eventsAtBottom() {
@@ -14553,7 +14344,7 @@ function initSwipeBack() {
     });
   }
 
-  window.nzSplitEnter = function() {
+  nzSplitEnter = function() {
     if (isMobileVp()) return;  // phone keeps the full-width overlay
     if (document.body.classList.contains('nz-split-open')) return;
     const wasBottom = eventsAtBottom();
@@ -14564,7 +14355,7 @@ function initSwipeBack() {
     document.body.classList.add('nz-split-open');
     preserveBottom(wasBottom);
   };
-  window.nzSplitExit = function() {
+  nzSplitExit = function() {
     // Keep the split open while either drawer is still docked (mutually
     // exclusive today, but cheap to be correct if that ever changes).
     if (anyDrawerOpen()) return;
@@ -14577,7 +14368,7 @@ function initSwipeBack() {
   // was opened LAST should stack on top. Stamp .nz-split-front on the given
   // drawer and strip it from the other so exactly one pane is ever in front.
   // Called from both open paths (openFilePreview / scratch showDrawer).
-  window.nzSplitBringToFront = function(which) {
+  nzSplitBringToFront = function(which) {
     const ids = { preview: 'fv-drawer', scratch: 'aside-drawer' };
     const frontId = ids[which];
     if (!frontId) return;
@@ -14727,7 +14518,7 @@ function collapseSidebarForDrawer() {
 function restoreSidebarAfterDrawer() {
   if (isMobileViewport()) return;
   if (!_sidebarAutoCollapsed) return;
-  if (typeof window.nzAnyDrawerOpen === 'function' && window.nzAnyDrawerOpen()) return;
+  if (nzAnyDrawerOpen && nzAnyDrawerOpen()) return;
   _sidebarAutoCollapsed = false;
   applySidebarCollapsed(false, false);
 }
@@ -15215,7 +15006,7 @@ initSwipeBack();
   // openLightboxGroup(list, start) opens a gallery over `list`, an array of
   // {full, thumb} URL-string snapshots, starting at index `start`. Single
   // lightbox instance: calling while already open simply replaces the group.
-  window.openLightboxGroup=function(list,start){
+  openLightboxGroup=function(list,start){
     items=(list&&list.length)?list:[];
     if(!items.length)return;
     preloaded={};
@@ -15233,25 +15024,22 @@ initSwipeBack();
   // clicked .event-images container into a gallery group. dataset reads copy
   // plain strings — no DOM references survive into `items`, so poll-driven
   // innerHTML re-renders can't invalidate an open lightbox.
-  window.openLightboxFromThumb=function(el){
+  openLightboxFromThumb=function(el){
     var box=el.closest&&el.closest('.event-images');
     var imgs=box?Array.prototype.slice.call(box.querySelectorAll('img[data-full]')):[el];
     var list=imgs.map(function(i){return{full:i.dataset.full||i.src,thumb:i.dataset.thumb||i.src}});
     // indexOf can only miss if `el` somehow lacks data-full (not rendered by
     // eventHtml); degrade to the first image rather than refusing to open.
-    window.openLightboxGroup(list,Math.max(0,imgs.indexOf(el)));
+    openLightboxGroup(list,Math.max(0,imgs.indexOf(el)));
   };
   // Compatibility shell: the historical single-image entry point. Kept so
   // any caller outside eventHtml (or user bookmarklets) keeps working.
-  window.openLightbox=function(src,fallback){
-    window.openLightboxGroup([{full:src,thumb:fallback}],0);
-  };
   // Delegated thumbnail click handler — registered once on document, so it
   // survives the chat transcript's innerHTML re-renders (eventHtml emits the
   // thumbnails without inline onclick; RFC lightbox-gallery-nav §3).
   document.addEventListener('click',function(e){
     var t=e.target&&e.target.closest&&e.target.closest('.event-images img[data-full]');
-    if(t)window.openLightboxFromThumb(t);
+    if(t)openLightboxFromThumb(t);
   });
   document.addEventListener('keydown',function(e){
     if(!ov.classList.contains('active'))return;
@@ -15344,13 +15132,13 @@ initSwipeBack();
   function showDrawer() {
     drawer.classList.add('visible');
     // Dock as a right-hand split on desktop (no-op on phone overlay).
-    if (typeof window.nzSplitEnter === 'function') window.nzSplitEnter();
+    if (nzSplitEnter) nzSplitEnter();
     // Opened last → stack on top of the preview pane if both are docked.
-    if (typeof window.nzSplitBringToFront === 'function') window.nzSplitBringToFront('scratch');
+    if (nzSplitBringToFront) nzSplitBringToFront('scratch');
   }
   function hideDrawer() {
     drawer.classList.remove('visible');
-    if (typeof window.nzSplitExit === 'function') window.nzSplitExit();
+    if (nzSplitExit) nzSplitExit();
     // Re-expand the sidebar if openScratch auto-collapsed it (no-op if the
     // preview drawer is still open or the user collapsed it themselves).
     restoreSidebarAfterDrawer();
@@ -15759,7 +15547,7 @@ initSwipeBack();
   // AskUserQuestion submit handler) can route answers to the scratch CLI
   // instead of the parent session whose `selectedKey` is what `onAskSubmit`
   // would otherwise read. Returns '' when no scratch is open.
-  window.__getActiveScratchKey = function() {
+  getActiveScratchKey = function() {
     return (state && state.key) ? state.key : '';
   };
 
@@ -15767,10 +15555,10 @@ initSwipeBack();
   // when leaving the chat view — the drawer is position:fixed and would
   // otherwise float over assets/cron/settings. closeScratch handles the
   // no-op-when-closed case internally.
-  window.__closeScratchDrawer = function() { closeScratch(true); };
+  closeScratchDrawer = function() { closeScratch(true); };
 
   // Expose the global used by the ↗ button in eventHtml.
-  window.askAside = function(btn) {
+  askAside = function(btn) {
     if (!btn) return;
     const raw = btn.getAttribute('data-raw') || '';
     const msgTime = Number(btn.getAttribute('data-msg-time') || 0);
@@ -16202,7 +15990,7 @@ registerActions({
   'ask-option-toggle': (el) => onAskOptionToggle(el),
   'ask-submit': (el) => onAskSubmit(el),
   'event-copy': (el) => copyEventContent(el),
-  'ask-aside': (el) => window.askAside(el),
+  'ask-aside': (el) => askAside(el),
   'upload-retry': (el) => retryUpload(thumbIdxOf(el)),
   'file-remove': (el) => removeFile(thumbIdxOf(el)),
   'thumb-dragstart': (el, e) => onThumbDragStart(e, thumbIdxOf(el)),
@@ -16250,27 +16038,20 @@ Object.defineProperties(nzState, {
   sessionsData: { get: function () { return sessionsData; } },
   turnState: { get: function () { return turnState; } },
 });
-// Legacy global surface (window bridge). Everything below was a global
-// before dashboard.js became a module; the consumers that still resolve
-// through the global scope are (1) inline on*="…" handler strings in
-// generated HTML — they compile with the global scope chain, (2) the other
-// view modules' window.* call-site dereferences, and (3) the Playwright
-// suite's page.evaluate probes. Inline handlers move to data-action with
-// #1980 (D5) and the bridge shrinks at PR-E; until then this list may only
-// shrink — additions need the same scrutiny as a new API.
-//
-// Reassignable bindings get window accessor properties so an outside read
-// always sees the live value and an outside write (oncompositionend=
-// "lastCompositionEnd=Date.now()") lands back on the module binding —
-// a plain copy would silently fork the state.
-Object.defineProperties(window, {
+// ─── nz.test: Playwright instrumentation surface (#2557 PR-E3) ─────────────
+// The e2e suite probes these bindings (page.evaluate). Reassignable lets are
+// exposed as accessors so a probe read always sees the live binding and a
+// probe write lands back on it; functions/consts ride plain properties.
+// Production code must never read nz.test — the mock server mirrors it onto
+// window (test/e2e e2e-shim) for the suite's legacy bare-identifier probes.
+// This list may only shrink as tests migrate to first-class assertions.
+Object.defineProperties(nzTest, {
   _lastSidebarData: { get: function () { return _lastSidebarData; }, set: function (v) { _lastSidebarData = v; } },
   _lastSidebarHtml: { get: function () { return _lastSidebarHtml; }, set: function (v) { _lastSidebarHtml = v; } },
   activeView: { get: function () { return activeView; }, set: function (v) { activeView = v; } },
   discoveredItems: { get: function () { return discoveredItems; }, set: function (v) { discoveredItems = v; } },
   discoveredPollTimer: { get: function () { return discoveredPollTimer; }, set: function (v) { discoveredPollTimer = v; } },
   katexReady: { get: function () { return katexReady; }, set: function (v) { katexReady = v; } },
-  lastCompositionEnd: { get: function () { return lastCompositionEnd; }, set: function (v) { lastCompositionEnd = v; } },
   lastEventTime: { get: function () { return lastEventTime; }, set: function (v) { lastEventTime = v; } },
   lastRenderedEventTime: { get: function () { return lastRenderedEventTime; }, set: function (v) { lastRenderedEventTime = v; } },
   lastVersion: { get: function () { return lastVersion; }, set: function (v) { lastVersion = v; } },
@@ -16288,15 +16069,10 @@ Object.defineProperties(window, {
   voiceRecTimer: { get: function () { return voiceRecTimer; }, set: function (v) { voiceRecTimer = v; } },
   voiceState: { get: function () { return voiceState; }, set: function (v) { voiceState = v; } },
 });
-Object.assign(window, {
-  authHeaders: authHeaders,
-  renderEvents: renderEvents,
-  renderOptimisticUserMsg: renderOptimisticUserMsg,
-  splitPathLine: splitPathLine,
+Object.assign(nzTest, {
   BLOCK_SPLIT_RE: BLOCK_SPLIT_RE,
-  CRON_LIVE_AGENT_ONLY_HTML: CRON_LIVE_AGENT_ONLY_HTML,
-  CRON_LIVE_MAX_EVENTS: CRON_LIVE_MAX_EVENTS,
-  EVENT_DIVIDER_GAP_MS: EVENT_DIVIDER_GAP_MS,
+  isFileRefCandidate: isFileRefCandidate,
+  splitPathLine: splitPathLine,
   LIST_ITEM_RE: LIST_ITEM_RE,
   LIST_SHAPE_RE: LIST_SHAPE_RE,
   MAX_LIST_DEPTH: MAX_LIST_DEPTH,
@@ -16306,195 +16082,70 @@ Object.assign(window, {
   WS_STATES: WS_STATES,
   _askAnswered: _askAnswered,
   _mdCache: _mdCache,
-  katexPending: katexPending,
-  scrollSlackPx: scrollSlackPx,
-  sessionDrafts: sessionDrafts,
-  sessionNodes: sessionNodes,
-  sessionScrollPos: sessionScrollPos,
-  sessionWorkspaces: sessionWorkspaces,
-  wsm: wsm,
-  accessProfileDefaultModel: accessProfileDefaultModel,
-  announce: announce,
   appendEvents: appendEvents,
   applyFeatureGates: applyFeatureGates,
-  applyHistoryFilter: applyHistoryFilter,
   awaitPendingOrients: awaitPendingOrients,
   clearPendingFiles: clearPendingFiles,
-  closeContextMenu: closeContextMenu,
   closeHistoryPopover: closeHistoryPopover,
-  confirmDialog: confirmDialog,
-  copyCodeBlock: copyCodeBlock,
-  copyEventContent: copyEventContent,
-  costCardTitle: costCardTitle,
   createNewSession: createNewSession,
   debouncedFetchSessions: debouncedFetchSessions,
-  decodeEscEntities: decodeEscEntities,
-  dismissAuthModal: dismissAuthModal,
-  dismissCheatsheet: dismissCheatsheet,
-  dismissOnboarding: dismissOnboarding,
   dismissSession: dismissSession,
   doCreateInProject: doCreateInProject,
-  doCreateSession: doCreateSession,
-  downloadSessionMarkdown: downloadSessionMarkdown,
-  enqueueUpload: enqueueUpload,
   eventAlreadyRendered: eventAlreadyRendered,
   eventHtml: eventHtml,
-  fallbackCopy: fallbackCopy,
-  fencedPathList: fencedPathList,
-  fetchCLIBackends: fetchCLIBackends,
   fetchEvents: fetchEvents,
   fetchSessions: fetchSessions,
-  fileApiUrl: fileApiUrl,
-  fileRefCode: fileRefCode,
-  fmtDuration: fmtDuration,
-  formatAbsTime: formatAbsTime,
-  formatFileSize: formatFileSize,
-  formatHomeCost: formatHomeCost,
-  formatTimeFull: formatTimeFull,
-  formatTimeShort: formatTimeShort,
   getMsgValue: getMsgValue,
-  getNodeDisplayName: getNodeDisplayName,
   getNodeStatus: getNodeStatus,
   getSelectedNode: getSelectedNode,
-  getToken: getToken,
-  handleFiles: handleFiles,
-  handleKey: handleKey,
-  handlePaletteKey: handlePaletteKey,
   highlight: highlight,
-  inlineMd: inlineMd,
   interruptSession: interruptSession,
-  isFileRefCandidate: isFileRefCandidate,
-  isInternalEvent: isInternalEvent,
   isMathDisplay: isMathDisplay,
   isMathInline: isMathInline,
-  keyTailDisplay: keyTailDisplay,
-  lastDividerTime: lastDividerTime,
-  listItemHtml: listItemHtml,
-  localizeAPIError: localizeAPIError,
-  lsGet: lsGet,
-  lsSet: lsSet,
-  mainEmptyHtml: mainEmptyHtml,
+  katexPending: katexPending,
   markSessionOptimisticRunning: markSessionOptimisticRunning,
   maybeAutoOrient: maybeAutoOrient,
-  maybeAutoPageBack: maybeAutoPageBack,
   maybeShowOnboarding: maybeShowOnboarding,
-  mobileBack: mobileBack,
   mobileEnterChat: mobileEnterChat,
   mobileShowList: mobileShowList,
   navDismissPopover: navDismissPopover,
-  navMsg: navMsg,
-  navShowList: navShowList,
-  nodeColor: nodeColor,
-  normalizeImage: normalizeImage,
-  onAskOptionToggle: onAskOptionToggle,
-  onAskSubmit: onAskSubmit,
-  onThumbDragEnd: onThumbDragEnd,
-  onThumbDragLeave: onThumbDragLeave,
-  onThumbDragOver: onThumbDragOver,
-  onThumbDragStart: onThumbDragStart,
-  onThumbDrop: onThumbDrop,
-  onThumbKeyDown: onThumbKeyDown,
-  openFilePicker: openFilePicker,
   openProjectPalette: openProjectPalette,
-  openProjectSettings: openProjectSettings,
-  openSystemPanel: openSystemPanel,
   parseListItem: parseListItem,
   pickPaletteCustom: pickPaletteCustom,
-  pickPaletteProject: pickPaletteProject,
-  pickPaletteQuick: pickPaletteQuick,
-  processEventsForDisplay: processEventsForDisplay,
   promptDialog: promptDialog,
   reconcileSelectedNode: reconcileSelectedNode,
-  reconnectNow: reconnectNow,
-  refreshBackendPicker: refreshBackendPicker,
-  refreshBanner: refreshBanner,
-  regroupAvatars: regroupAvatars,
-  removeFile: removeFile,
   removeSidebarCard: removeSidebarCard,
   renameSession: renameSession,
-  renderAskQuestionCard: renderAskQuestionCard,
-  renderBackendPicker: renderBackendPicker,
-  renderCheatsheetHTML: renderCheatsheetHTML,
-  renderEventsWithDividers: renderEventsWithDividers,
+  renderEvents: renderEvents,
   renderFilePreviews: renderFilePreviews,
   renderKatex: renderKatex,
   renderMainShell: renderMainShell,
   renderMd: renderMd,
   renderNodePicker: renderNodePicker,
-  renderPaletteList: renderPaletteList,
-  renderRich: renderRich,
-  renderSandboxedBlob: renderSandboxedBlob,
+  renderOptimisticUserMsg: renderOptimisticUserMsg,
   renderSessionRunsPanel: renderSessionRunsPanel,
-  renderSettingsView: renderSettingsView,
   renderSidebar: renderSidebar,
-  renderSystemView: renderSystemView,
   renderTable: renderTable,
-  renderTexDoc: renderTexDoc,
   restorePending: restorePending,
-  resumeRecentSession: resumeRecentSession,
-  retryUpload: retryUpload,
-  runKatex: runKatex,
-  runPendingAsync: runPendingAsync,
-  saveProjectSettings: saveProjectSettings,
-  saveToken: saveToken,
   scanDiscovered: scanDiscovered,
+  scrollSlackPx: scrollSlackPx,
   selectSession: selectSession,
   sendMessage: sendMessage,
   sessionCardKey: sessionCardKey,
-  sessionRunStatLabel: sessionRunStatLabel,
-  sessionRunTotalLabel: sessionRunTotalLabel,
-  sessionTypeTag: sessionTypeTag,
-  setActiveSessionCard: setActiveSessionCard,
+  sessionDrafts: sessionDrafts,
+  sessionNodes: sessionNodes,
+  sessionWorkspaces: sessionWorkspaces,
   setActivityView: setActivityView,
-  setHeaderGitChip: setHeaderGitChip,
-  setHeaderRunStats: setHeaderRunStats,
   setMsgValue: setMsgValue,
-  shortPath: shortPath,
-  showAPIError: showAPIError,
-  showAuthModal: showAuthModal,
   showGitRemote: showGitRemote,
-  showNetworkError: showNetworkError,
+  showToast: showToast,
   sid: sid,
-  statusLabelForNode: statusLabelForNode,
-  stopSystemPoll: stopSystemPoll,
-  syncThemeColorMeta: syncThemeColorMeta,
-  systemStatLabel: systemStatLabel,
-  systemTickLabel: systemTickLabel,
-  timeAgo: timeAgo,
-  timeDividerHtml: timeDividerHtml,
-  toggleFavorite: toggleFavorite,
   toggleHistory: toggleHistory,
-  toggleInputMode: toggleInputMode,
   toggleProjectCollapsed: toggleProjectCollapsed,
-  toggleSidebarCollapsed: toggleSidebarCollapsed,
   trimEventsScroll: trimEventsScroll,
   updateHeaderCLI: updateHeaderCLI,
-  updateSendButton: updateSendButton,
   updateStatusBar: updateStatusBar,
   updateVoiceTimer: updateVoiceTimer,
   wireNodePicker: wireNodePicker,
-  wireQuickAskInput: wireQuickAskInput,
-  workspaceFallbackName: workspaceFallbackName,
-});
-// Dead-or-unreferenced globals (no in-repo reader outside this file; kept
-// solely because they were part of the pre-module global surface —
-// deletion candidates, tracked on the D3 epic).
-Object.defineProperties(window, {
-  availableAgents: { get: function () { return availableAgents; }, set: function (v) { availableAgents = v; } },
-});
-Object.assign(window, {
-  LS_SCHEMA: LS_SCHEMA,
-  autoGrow: autoGrow,
-  backendChipHtml: backendChipHtml,
-  copyText: copyText,
-  downloadCodeBlock: downloadCodeBlock,
-  getNodeSessionCount: getNodeSessionCount,
-  handleDiscoveredClick: handleDiscoveredClick,
-  handleTakeoverClick: handleTakeoverClick,
-  majorMinor: majorMinor,
-  maybeStickBottom: maybeStickBottom,
-  previewCodeBlock: previewCodeBlock,
-  scrollEventsToBottom: scrollEventsToBottom,
-  sessionTimeHint: sessionTimeHint,
-  setToken: setToken,
+  wsm: wsm,
 });

@@ -131,7 +131,7 @@ func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 		// 系统 must be a registered view and route to its panel opener.
 		`const ACTIVITY_VIEWS = ['chat', 'assets', 'files', 'cron', 'system', 'settings'];`,
 		"else if (view === 'system') { openSystemPanel(); }",
-		"else if (view === 'files') { if (window.nzFilesView) window.nzFilesView.show(); }",
+		"else if (view === 'files') { if (nzViews.files) nzViews.files.show(); }",
 	}
 	for _, w := range wants {
 		if !strings.Contains(js, w) {
