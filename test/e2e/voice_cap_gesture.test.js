@@ -46,14 +46,21 @@ const stubMedia = () => {
   // @ts-ignore
   window.MediaRecorder = FakeRecorder;
   // Count toasts by message so the test can assert the cap toast fired once.
+  // Observed at the #toast DOM sink rather than by stubbing window.showToast:
+  // since D3 the dashboard module calls its imported showToast binding, so a
+  // window-level wrapper never intercepts. Every showToast() writes
+  // textContent + re-adds the 'show' class, so class-attribute flips with a
+  // non-empty text are exactly one record per call.
   window.__toasts = [];
-  const origShow = window.showToast;
-  const wrap = (fn) => (msg, type, dur) => { window.__toasts.push(String(msg)); return fn ? fn(msg, type, dur) : undefined; };
-  let cur = wrap(origShow);
-  Object.defineProperty(window, 'showToast', {
-    configurable: true,
-    get() { return cur; },
-    set(fn) { cur = wrap(fn); },
+  document.addEventListener('DOMContentLoaded', () => {
+    const el = document.getElementById('toast');
+    if (!el) return;
+    new MutationObserver(() => {
+      if (el.classList.contains('show') && el.textContent) {
+        const last = window.__toasts[window.__toasts.length - 1];
+        if (last !== el.textContent) window.__toasts.push(el.textContent);
+      }
+    }).observe(el, { attributes: true, attributeFilter: ['class'], characterData: true, subtree: true });
   });
 };
 
