@@ -182,22 +182,9 @@ const deps = {
     // handlers (cronDrawerSpecPromptToggle).
     ...ro(['event']),
   },
-  'agent_view.js': {
-    ...ro([
-      'esc',
-      'escAttr',
-      'fmtDuration',
-      'refreshBanner',
-      'selectedKey',
-      'selectedNode',
-      'sessionScrollPos',
-      'sessionsData',
-      'showToast',
-      'sid',
-      'turnState',
-      'wsm',
-    ]),
-  },
+  // ES module since D3 PR-B: utilities and nz.state come in via import;
+  // dashboard globals are window.* dereferences.
+  'agent_view.js': {},
   // ES modules since D3 PR-A: cross-file consumption is explicit (import /
   // window.* deref), so no bare-global whitelist.
   'asset_browser.js': {},
@@ -206,7 +193,7 @@ const deps = {
 
 // Files migrated to ES modules (D3, docs/rfc/dashboard-es-modules.md).
 // sourceType 'module' makes no-undef a real scope check for them.
-const moduleFiles = new Set(['nz_util.js', 'asset_browser.js', 'files_view.js']);
+const moduleFiles = new Set(['nz_util.js', 'agent_view.js', 'asset_browser.js', 'files_view.js']);
 
 const perFile = Object.entries(deps).map(([file, globals]) => ({
   files: [`internal/server/static/${file}`],

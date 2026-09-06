@@ -16252,3 +16252,19 @@ initSwipeBack();
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('copy', onCopy);
 })();
+
+// ─── D3 ES-module bridge (RFC docs/rfc/dashboard-es-modules.md §3) ─────────
+// nz.state accessors: migrated modules (agent_view) read dashboard's
+// reassignable top-level bindings through these getters — a classic script's
+// let never lands on window, and a copied value would go stale on
+// reassignment. Getter-only: no migrated module writes dashboard state yet;
+// add a setter here the day one legitimately needs to.
+Object.defineProperties(nz.state, {
+  selectedKey: { get: function () { return selectedKey; } },
+  selectedNode: { get: function () { return selectedNode; } },
+  sessionsData: { get: function () { return sessionsData; } },
+  turnState: { get: function () { return turnState; } },
+});
+// Never-reassigned consts consumed by migrated modules — a one-time window
+// export is safe (the object identity is stable for the page's lifetime).
+Object.assign(window, { wsm: wsm, sessionScrollPos: sessionScrollPos });
