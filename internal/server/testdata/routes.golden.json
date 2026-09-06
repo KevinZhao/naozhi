@@ -426,6 +426,16 @@
   },
   {
     "method": "GET",
+    "path": "/static/self_update.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/voice.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/sw.js",
     "handler_type": "http.HandlerFunc"
   },

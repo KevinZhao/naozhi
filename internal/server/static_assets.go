@@ -34,6 +34,12 @@ var dashboardJS embed.FS
 //go:embed static/render_md.js
 var renderMdJS embed.FS
 
+//go:embed static/self_update.js
+var selfUpdateJS embed.FS
+
+//go:embed static/voice.js
+var voiceJS embed.FS
+
 //go:embed static/cron_view.js
 var cronViewJS embed.FS
 
@@ -115,6 +121,8 @@ var staticAssets = func() map[string]staticAsset {
 		{"contract.js", contractJS, "static/contract.js", true},
 		{"dashboard.js", dashboardJS, "static/dashboard.js", true},
 		{"render_md.js", renderMdJS, "static/render_md.js", true},
+		{"self_update.js", selfUpdateJS, "static/self_update.js", true},
+		{"voice.js", voiceJS, "static/voice.js", true},
 		{"cron_view.js", cronViewJS, "static/cron_view.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
@@ -205,4 +213,36 @@ func handleRenderMdJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "render_md.js")
+}
+
+// handleSelfUpdateJS serves static/self_update.js (self-update chip,
+// imported by dashboard.js).
+func handleSelfUpdateJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("self_update.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "self_update.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "self_update.js")
+}
+
+// handleVoiceJS serves static/voice.js (hold-to-talk voice input, imported
+// by dashboard.js).
+func handleVoiceJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("voice.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "voice.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "voice.js")
 }
