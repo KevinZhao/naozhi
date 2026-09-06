@@ -455,13 +455,16 @@ func TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate(t *testing.T) {
 	// disables the inline handlers (CSP3 ignores 'unsafe-inline' once a nonce
 	// or strict-dynamic appears). The migration must drop 'unsafe-inline' in
 	// the same change.
-	for _, tok := range []string{"'nonce-", "'strict-dynamic'", "nonce-"} {
+	// 'sha256-…' has the same CSP3 semantics as a nonce: its presence makes
+	// the browser ignore 'unsafe-inline', so the theme-bootstrap hash (#1980
+	// PR-3) must land atomically with the 'unsafe-inline' removal.
+	for _, tok := range []string{"'nonce-", "'strict-dynamic'", "nonce-", "'sha256-"} {
 		if strings.Contains(scriptSrc, tok) {
 			t.Errorf("R20260531A-SEC-10 (#1526): script-src introduced %q while still listing "+
 				"`'unsafe-inline'` — per CSP3 the browser now ignores `'unsafe-inline'`, "+
 				"silently breaking the dashboard's inline onclick handlers. The nonce/"+
-				"strict-dynamic migration MUST remove `'unsafe-inline'` (and migrate the "+
-				"inline handlers) in the same change. got script-src %q", tok, scriptSrc)
+				"hash/strict-dynamic migration MUST remove `'unsafe-inline'` (and migrate "+
+				"the inline handlers) in the same change. got script-src %q", tok, scriptSrc)
 		}
 	}
 }
@@ -503,14 +506,15 @@ var generatedOnclickBundle = []string{
 // must be rejected — add a data-action dispatch entry instead. (Pure file
 // splits that move handlers between bundle files leave the total unchanged.)
 //
-// 83 = dashboard.js 42 + cron_view.js 41; every other bundle file is at 0.
+// 42 = dashboard.js 42; cron_view.js went 41 -> 0 in the #1980 PR-1
+// data-action migration; every other bundle file is at 0.
 // It was 86 while two comments (dashboard.js, nz_util.js) still spelled out the
 // counted token — the count is textual, so prose inflated it by 2 and made
 // nz_util.js look like it had a handler when it had none. Both were reworded,
 // and TestDashboardCSP_RatchetCountsNoCommentTokens now fails if prose
 // reintroduces one, which would otherwise let this cap drift upward while the
 // real handler surface stood still.
-const generatedOnclickCap = 83
+const generatedOnclickCap = 42
 
 // TestDashboardCSP_GeneratedHandlerSurfaceRatchet pins the JS-generated inline
 // `onclick=` surface across the whole dashboard JS bundle as a downward-only

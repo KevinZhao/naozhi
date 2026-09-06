@@ -151,6 +151,45 @@ export function trapFocus(overlay) {
 const nz = (window.nz = window.nz || {});
 nz.util = { esc, escAttr, escJs, fetchJSON, showToast, trapFocus };
 
+// data-action delegation (#1980, docs/rfc/csp-data-action.md): one registry,
+// one document-level dispatcher per event type, so generated HTML carries
+// `data-action="key"` attributes instead of inline on*="…" handlers (the
+// blocker for dropping CSP script-src 'unsafe-inline').
+//
+// Registry has no prototype and the dispatcher type-checks the entry, so an
+// attribute-injected "__proto__" / "constructor" can never reach a callable
+// gadget. Keys are code literals by contract (never interpolate data into
+// data-action; parameters ride sibling data-* attributes, escAttr'd and
+// always double-quoted).
+export const nzActions = Object.create(null); // key → fn(el, event)
+nz.actions = nzActions;
+export function registerActions(map) {
+  for (const k of Object.keys(map)) {
+    if (!/^[a-z][a-z0-9-]*$/.test(k)) throw new Error('bad action key: ' + k);
+    if (k in nzActions) throw new Error('duplicate action key: ' + k);
+    if (typeof map[k] !== 'function') throw new Error('action not a function: ' + k);
+    nzActions[k] = map[k];
+  }
+}
+// Bubble phase on purpose: a capture listener at document would run before
+// every existing stopPropagation shield (e.g. the #session-list long-press
+// click swallower) and double-dispatch. error/load are NOT delegated — the
+// codebase only ever assigns them as element properties (CSP-legal).
+const DELEGATED = ['click', 'keydown', 'change', 'input', 'compositionend',
+  'dragstart', 'dragover', 'dragleave', 'drop', 'dragend'];
+for (const type of DELEGATED) {
+  document.addEventListener(type, (e) => {
+    const attr = type === 'click' ? 'data-action' : 'data-action-' + type;
+    const el = e.target instanceof Element ? e.target.closest('[' + attr + ']') : null;
+    if (!el) return;
+    // The registry has a null prototype and registerActions only accepts
+    // functions, so any truthy lookup here is a registered handler — an
+    // attribute-injected "__proto__"/"constructor" resolves to undefined.
+    const fn = nzActions[el.getAttribute(attr)];
+    if (fn) fn(el, e);
+  });
+}
+
 // Cross-file mutable state accessors (D3 RFC §3): dashboard.js — still a
 // classic script — registers getters onto this object for its reassignable
 // top-level bindings (a classic script's let/const never lands on window,
