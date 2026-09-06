@@ -1,4 +1,34 @@
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, registerActions, formatCostUSD, formatRunDuration } from './nz_util.js';
+import {
+  CRON_LIVE_AGENT_ONLY_HTML,
+  CRON_LIVE_MAX_EVENTS,
+  EVENT_DIVIDER_GAP_MS,
+  authHeaders,
+  confirmDialog,
+  eventHtml,
+  fetchCLIBackends,
+  formatAbsTime,
+  getToken,
+  isInternalEvent,
+  lastDividerTime,
+  lsGet,
+  lsSet,
+  mobileBack,
+  processEventsForDisplay,
+  regroupAvatars,
+  renderBackendPicker,
+  renderEventsWithDividers,
+  renderMd,
+  runPendingAsync,
+  setActiveSessionCard,
+  setActivityView,
+  shortPath,
+  showAPIError,
+  showAuthModal,
+  showNetworkError,
+  timeDividerHtml,
+  wsm,
+} from './dashboard.js';
 // cron_view.js — Cron (定时任务) dashboard view.
 //
 // RFC docs/rfc/dashboard-cron-view-extraction.md (PR-1). Extracted verbatim
@@ -182,7 +212,7 @@ let cronSortOrder = (function() {
   // RNEW-UX-004 demo: migrated to unified lsGet helper. Keyspace changed
   // from 'nz_cron_sort' to 'nz:cron_sort' — one-time loss of the saved
   // preference is acceptable (falls back to 'created_desc').
-  const saved = window.lsGet('cron_sort', '');
+  const saved = lsGet('cron_sort', '');
   if (saved && cronSortComparatorsHasKey(saved)) return saved;
   return 'created_desc';
 })();
@@ -191,7 +221,7 @@ let cronSortOrder = (function() {
 function setCronSortOrder(order) {
   if (!cronSortComparatorsHasKey(order)) return;
   cronSortOrder = order;
-  window.lsSet('cron_sort', order); // RNEW-UX-004 demo: unified helper (see top-of-file lsSet)
+  lsSet('cron_sort', order); // RNEW-UX-004 demo: unified helper (see top-of-file lsSet)
   renderCronList();
 }
 
@@ -624,7 +654,7 @@ function buildCronWorkspaceBodyInternal(opts) {
   let label = '默认工作目录';
   if (selected) {
     const match = nzState.projectsData.find(p => p.path === selected);
-    label = match ? match.name : window.shortPath(selected);
+    label = match ? match.name : shortPath(selected);
   }
   // 下拉按钮，点击 toggle popover
   const buttonHtml =
@@ -643,7 +673,7 @@ function buildCronWorkspaceBodyInternal(opts) {
         (sel ? ' class="selected" aria-selected="true"' : ' aria-selected="false"') +
         ' data-action="cron-ws-select">' +
           '<div class="pp-name">' + esc(p.name) + '</div>' +
-          '<div class="pp-path">' + esc(window.shortPath(p.path)) + '</div>' +
+          '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
         '</li>';
     }).join('');
   }
@@ -692,8 +722,8 @@ function createNewCronJob() {
   // Sprint 6c: fetch backends upfront so the picker (if any) is ready when
   // the modal renders. Failure / single-backend deploys map to '' which
   // collapses the picker section — same pattern as createNewSession.
-  window.fetchCLIBackends().then(backendsData => {
-    const backendHtml = window.renderBackendPicker(backendsData, { selectId: 'cron-backend' });
+  fetchCLIBackends().then(backendsData => {
+    const backendHtml = renderBackendPicker(backendsData, { selectId: 'cron-backend' });
     openCronCreateModal(backendHtml);
   }).catch(() => openCronCreateModal(''));
 }
@@ -1032,7 +1062,7 @@ function updateCronWsDropdownLabel(path) {
   if (!labelEl) return;
   if (!path) { labelEl.textContent = '默认工作目录'; return; }
   const match = nzState.projectsData.find(p => p.path === path);
-  labelEl.textContent = match ? match.name : window.shortPath(path);
+  labelEl.textContent = match ? match.name : shortPath(path);
 }
 
 function closeCronWsPopover() {
@@ -1085,7 +1115,7 @@ async function doCreateCronJob() {
   if (wdInput && wdInput.value.trim()) workDir = wdInput.value.trim();
   try {
     const headers = {'Content-Type': 'application/json'};
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = {schedule};
     if (prompt) body.prompt = prompt;
@@ -1115,8 +1145,8 @@ async function doCreateCronJob() {
     try {
       data = await fetchJSON(NZ_CONTRACT.API.cron, {timeoutMs: 10000, method: 'POST', headers, body: JSON.stringify(body)});
     } catch (err) {
-      if (err && err.status) window.showAPIError('创建定时任务', err.status, err.message || '');
-      else window.showNetworkError('创建定时任务', err);
+      if (err && err.status) showAPIError('创建定时任务', err.status, err.message || '');
+      else showNetworkError('创建定时任务', err);
       return;
     }
     if (!data) data = {};
@@ -1130,7 +1160,7 @@ async function doCreateCronJob() {
       // directly so the operator sees the row they just configured.
       openCronDetail(data.id);
     }
-  } catch (e) { window.showNetworkError('创建定时任务', e); }
+  } catch (e) { showNetworkError('创建定时任务', e); }
 }
 
 function openCronPanel() {
@@ -1139,14 +1169,14 @@ function openCronPanel() {
   // into openCronPanel — so the guard below is already satisfied on re-entry
   // and we don't recurse. Direct callers (legacy #btn-cron, openCronDetail)
   // route through here and get the view switch for free.
-  if (nzState.activeView !== 'cron') { window.setActivityView('cron'); return; }
+  if (nzState.activeView !== 'cron') { setActivityView('cron'); return; }
   // Deselect managed session via selectedKey only — selectedNode is the
   // sidebar filter now (see previewDiscovered comment) and must survive
   // opening the cron panel so the user comes back to the right node list.
   nzState.selectedKey = null;
-  if (window.wsm.subscribedKey) window.wsm.unsubscribe();
+  if (wsm.subscribedKey) wsm.unsubscribe();
   if (nzState.eventTimer) { clearInterval(nzState.eventTimer); nzState.eventTimer = null; }
-  window.setActiveSessionCard(null);
+  setActiveSessionCard(null);
   // NOTE: no mobileEnterChat() here. Cron is a standalone view, not a chat
   // session — entering chat view would hide the bottom tab bar (the only nav
   // surface on mobile) and strand the user. The cron view is full-screen via
@@ -1437,18 +1467,18 @@ function cronApplyRunStarted(msg) {
   // 即使 ensureCronLiveSubscription 短路（jobId 已订）也要清。runStartedAt
   // 更新成新 run 的 started_at，让 onConnected / onCronLiveSessionState 的
   // re-sub 路径用正确的 after= 阈值。
-  if (typeof wsm !== 'undefined' && window.wsm.cronLive && window.wsm.cronLive.jobId === msg.job_id) {
-    window.wsm.cronLive.events = [];
-    window.wsm.cronLive.lastEventTimeMs = 0;
-    window.wsm.cronLive.truncatedCount = 0;
-    window.wsm.cronLive.runStartedAt = msg.started_at || Date.now();
-    window.wsm.cronLive.status = 'pending';
+  if (typeof wsm !== 'undefined' && wsm.cronLive && wsm.cronLive.jobId === msg.job_id) {
+    wsm.cronLive.events = [];
+    wsm.cronLive.lastEventTimeMs = 0;
+    wsm.cronLive.truncatedCount = 0;
+    wsm.cronLive.runStartedAt = msg.started_at || Date.now();
+    wsm.cronLive.status = 'pending';
     setCronLiveStatus('pending');
   }
   renderCronPanel();
   // cron-live RFC §3: drawer 已开 + 该 job 起跑 → 触发订阅。renderCronPanel
   // 已先调到 renderCronDrawer，drawer 内的 #cron-live-events 容器此时已就位。
-  if (typeof ensureCronLiveSubscription === 'function') ensureCronLiveSubscription();
+  ensureCronLiveSubscription();
 }
 
 // cronFrozenRuns 是 timed_out（或其他非 succeeded/skipped 终态）后
@@ -1491,8 +1521,8 @@ function cronApplyRunEnded(msg) {
   // cron-live RFC §3 / §6: 任务进入终态（任意 state），cron live 订阅保留供
   // 操作员回看，但 status 切到 'stopped' 让用户清楚区分"直播中"vs"已结束"。
   // unsub 仅在 closeCronDetail / 切换 jobId 时发生。
-  if (typeof wsm !== 'undefined' && window.wsm.cronLive && window.wsm.cronLive.jobId === msg.job_id) {
-    window.wsm.cronLive.status = 'stopped';
+  if (typeof wsm !== 'undefined' && wsm.cronLive && wsm.cronLive.jobId === msg.job_id) {
+    wsm.cronLive.status = 'stopped';
     setCronLiveStatus('stopped');
   }
   renderCronPanel();
@@ -1516,7 +1546,7 @@ function isCronSessionFrozen(key) {
 function isCronLiveKey(key) {
   if (!key) return false;
   if (key === nzState.selectedKey) return false;
-  const cl = window.wsm.cronLive;
+  const cl = wsm.cronLive;
   if (cl.subscribedKey && key === cl.subscribedKey) return true;
   if (cl.pendingJobId && key === ('cron:' + cl.pendingJobId)) return true;
   return false;
@@ -1540,7 +1570,7 @@ function setCronLiveStatus(state) {
 function updateCronLiveTruncated() {
   const trunc = document.getElementById('cron-live-truncated');
   if (!trunc) return;
-  const n = window.wsm.cronLive.truncatedCount || 0;
+  const n = wsm.cronLive.truncatedCount || 0;
   if (n > 0) {
     trunc.hidden = false;
     trunc.textContent = '已折叠 ' + n + ' 条更早事件，请等任务结束后查看历史详情';
@@ -1557,13 +1587,13 @@ function repaintCronLive() {
   const el = document.getElementById('cron-live-events');
   if (!el) return;
   const drawerJobId = (typeof cronDetailJobId !== 'undefined') ? cronDetailJobId : null;
-  if (drawerJobId && window.wsm.cronLive.jobId && window.wsm.cronLive.jobId !== drawerJobId) {
+  if (drawerJobId && wsm.cronLive.jobId && wsm.cronLive.jobId !== drawerJobId) {
     el.innerHTML = '';
     return;
   }
-  const events = window.wsm.cronLive.events || [];
-  const display = window.processEventsForDisplay(events);
-  const html = window.renderEventsWithDividers(display, 0);
+  const events = wsm.cronLive.events || [];
+  const display = processEventsForDisplay(events);
+  const html = renderEventsWithDividers(display, 0);
   if (html) {
     el.innerHTML = html;
   } else if (events.length > 0) {
@@ -1571,14 +1601,14 @@ function repaintCronLive() {
     // 整段都是 agent / task_* / tool_use）。若留空 innerHTML，CSS
     // .cdl-events:empty::before 会误报"暂无事件"，与顶部"已折叠 N 条"自相矛盾。
     // 渲染占位文案，对齐主面板 appendEvents 的同款兜底。
-    el.innerHTML = window.CRON_LIVE_AGENT_ONLY_HTML;
+    el.innerHTML = CRON_LIVE_AGENT_ONLY_HTML;
   } else {
     el.innerHTML = '';
   }
-  if (typeof regroupAvatars === 'function') window.regroupAvatars(el);
+  regroupAvatars(el);
   el.scrollTop = el.scrollHeight;
   updateCronLiveTruncated();
-  setCronLiveStatus(window.wsm.cronLive.status);
+  setCronLiveStatus(wsm.cronLive.status);
 }
 
 // appendEventsToContainer 是 appendEvents 的容器化变体：不动主面板的
@@ -1590,13 +1620,13 @@ function appendEventsToContainer(el, events) {
   // 若容器当前只挂着 agent-only 占位（repaintCronLive 渲过），在追加真实
   // 事件前清掉它，避免占位与事件并存。lastDividerTime 等读取也不会被它干扰。
   if (el.querySelector('.cdl-agent-only')) el.innerHTML = '';
-  let prevT = window.lastDividerTime(el);
+  let prevT = lastDividerTime(el);
   events.forEach(e => {
-    if (window.isInternalEvent(e)) return;
-    const h = window.eventHtml(e); if (!h) return;
+    if (isInternalEvent(e)) return;
+    const h = eventHtml(e); if (!h) return;
     const t = e.time || 0;
-    if (t && (prevT === 0 || t - prevT >= window.EVENT_DIVIDER_GAP_MS)) {
-      el.insertAdjacentHTML('beforeend', window.timeDividerHtml(t));
+    if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
+      el.insertAdjacentHTML('beforeend', timeDividerHtml(t));
     }
     el.insertAdjacentHTML('beforeend', h);
     if (t) prevT = t;
@@ -1606,9 +1636,9 @@ function appendEventsToContainer(el, events) {
   // container DOM grew unbounded across a long cron run. Trim the oldest
   // .event bubbles from the top to keep the DOM in sync with the data cap.
   let bubbles = el.querySelectorAll(':scope > .event').length;
-  if (bubbles > window.CRON_LIVE_MAX_EVENTS) {
+  if (bubbles > CRON_LIVE_MAX_EVENTS) {
     let node = el.firstChild;
-    while (node && bubbles > window.CRON_LIVE_MAX_EVENTS) {
+    while (node && bubbles > CRON_LIVE_MAX_EVENTS) {
       const next = node.nextSibling;
       if (node.nodeType === 1 && node.classList && node.classList.contains('event')) bubbles--;
       el.removeChild(node);
@@ -1617,7 +1647,7 @@ function appendEventsToContainer(el, events) {
   }
   // 头像分组：cron live 容器在 #events-scroll 之外，不被主 observer 覆盖，
   // 追加后显式重算 .nz-grouped（与 appendEvents/抽屉同款）。
-  if (typeof regroupAvatars === 'function') window.regroupAvatars(el);
+  regroupAvatars(el);
   if (wasBottom) el.scrollTop = el.scrollHeight;
 }
 
@@ -1631,13 +1661,13 @@ function appendEventsToContainer(el, events) {
 function ensureCronLiveSubscription() {
   if (typeof cronDetailJobId === 'undefined') return;
   const jobId = cronDetailJobId;
-  const cl = window.wsm.cronLive;
+  const cl = wsm.cronLive;
   if (!jobId) {
-    if (cl.jobId) window.wsm.unsubscribeCronLive();
+    if (cl.jobId) wsm.unsubscribeCronLive();
     return;
   }
   if (cl.jobId && cl.jobId !== jobId) {
-    window.wsm.unsubscribeCronLive();
+    wsm.unsubscribeCronLive();
   }
   if (cl.jobId === jobId) return;
   const job = (typeof cronJobs !== 'undefined' && Array.isArray(cronJobs))
@@ -1645,7 +1675,7 @@ function ensureCronLiveSubscription() {
     : null;
   const isRunning = !!(job && job.current_run && job.current_run.started_at);
   if (!isRunning) return;
-  window.wsm.subscribeCronLive(jobId, job.current_run.started_at);
+  wsm.subscribeCronLive(jobId, job.current_run.started_at);
 }
 
 // formatRunningElapsed returns a colloquial "正在运行 12s / 2m" label for
@@ -1761,8 +1791,8 @@ function ensureCronRunningTick() {
 // selectors (e2e/dashboard.test.js never asserts inner structure). The new
 // visual class is `cj-row`.
 function cronJobCardHtml(j) {
-  const nextAbs = j.next_run ? window.formatAbsTime(j.next_run) : '';
-  const lastAbs = j.last_run_at ? window.formatAbsTime(j.last_run_at) : '';
+  const nextAbs = j.next_run ? formatAbsTime(j.next_run) : '';
+  const lastAbs = j.last_run_at ? formatAbsTime(j.last_run_at) : '';
   const agoStr = j.last_run_at ? formatAgoColloquial(j.last_run_at) : '';
   const titleStr = (j.title || '').trim() || firstNonEmptyLine(j.prompt || '', 60);
   const hasTitle = !!titleStr;
@@ -1838,7 +1868,7 @@ function cronJobCardHtml(j) {
     iconGlyphs += '<span class="cj-icon fresh" title="每次运行前重置会话">&#128260;</span>';
   }
   if (isMissed) {
-    const sinceAbs = j.missed_since ? window.formatAbsTime(j.missed_since) : '';
+    const sinceAbs = j.missed_since ? formatAbsTime(j.missed_since) : '';
     const tip = sinceAbs ? '上次应跑于 ' + sinceAbs + '；进程可能刚重启或休眠过' : '已错过至少一次调度';
     iconGlyphs += '<span class="cj-icon missed" title="' + escAttr(tip) + '">&#9888;</span>';
   }
@@ -1916,7 +1946,7 @@ function cronStatsBadgeHtml(j) {
   const dotsHtml = recent.length > 0
     ? recent.map(r => {
         const st = (r && r.state) || '';
-        const tip = window.formatAbsTime((r && r.started_at) || 0) +
+        const tip = formatAbsTime((r && r.started_at) || 0) +
           (st ? ' · ' + cronStateLabel(st) : '') +
           (r && r.trigger ? ' · ' + r.trigger : '');
         return '<span class="cj-stats-dot ' + cronStateDotClass(st) + '" title="' + escAttr(tip) + '"></span>';
@@ -2209,7 +2239,7 @@ function cronFormatTime(ms) {
 async function cronAttentionRefresh() {
   try {
     const headers = {};
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const data = await fetchJSON(NZ_CONTRACT.API.cron_attention, { headers, timeoutMs: 8000 });
     cronAttentionState = { items: (data && Array.isArray(data.items)) ? data.items : [], loaded: true };
@@ -2224,16 +2254,16 @@ async function cronAttentionRefresh() {
 async function cronAttentionConfirm(runId) {
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch(NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/confirm', { method: 'POST', headers });
     if (!r.ok) {
       const raw = await r.text().catch(() => '');
-      window.showAPIError('确认 run', r.status, raw);
+      showAPIError('确认 run', r.status, raw);
       return;
     }
   } catch (e) {
-    window.showAPIError('确认 run', 0, String(e));
+    showAPIError('确认 run', 0, String(e));
     return;
   }
   await cronAttentionRefresh();
@@ -2258,17 +2288,17 @@ async function cronReplayRun(jobId, runId) {
 async function cronReplayRunInner(jobId, runId, fromQueue) {
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch(NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/replay',
       { method: 'POST', headers, body: JSON.stringify({ job_id: jobId }) });
     if (!r.ok) {
       const raw = await r.text().catch(() => '');
-      window.showAPIError('重放 run', r.status, raw);
+      showAPIError('重放 run', r.status, raw);
       return;
     }
   } catch (e) {
-    window.showAPIError('重放 run', 0, String(e));
+    showAPIError('重放 run', 0, String(e));
     return;
   }
   if (fromQueue) {
@@ -2285,7 +2315,7 @@ async function cronJobCostRefresh(jobId) {
   if (!jobId) return;
   try {
     const headers = {};
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const to = new Date();
     const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
@@ -2370,7 +2400,7 @@ function cronTimelineRowHtml(jobId, r, st) {
   if (!r) return '';
   const runId = r.run_id || '';
   const state = r.state || '';
-  const startedAbs = r.started_at ? window.formatAbsTime(r.started_at) : '';
+  const startedAbs = r.started_at ? formatAbsTime(r.started_at) : '';
   // 行主时间用紧凑显示（"5月17日 14:30"）；hover 看完整 ISO。
   const startedShort = r.started_at ? formatCronTimelineShort(r.started_at) : '—';
   const dur = state === 'running'
@@ -2500,11 +2530,11 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
       '</div>';
   } else if (detail.result) {
     body = '<div class="ctr-final">' +
-        '<div class="ctr-final-body md">' + window.renderMd(detail.result) + '</div>' +
+        '<div class="ctr-final-body md">' + renderMd(detail.result) + '</div>' +
       '</div>';
   } else if (lastAssistant) {
     body = '<div class="ctr-final">' +
-        '<div class="ctr-final-body md">' + window.renderMd(lastAssistant.text) + '</div>' +
+        '<div class="ctr-final-body md">' + renderMd(lastAssistant.text) + '</div>' +
       '</div>';
   } else if (transcript) {
     // transcript 已落地（成功 / fallback=missing / fallback=raw / 无 turns）
@@ -2726,7 +2756,7 @@ async function cronTimelineFetchDetail(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
     const headers = {};
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
@@ -2750,7 +2780,7 @@ async function cronTimelineFetchDetail(jobId, runId) {
     // R220-FE-5: 401/403 走 authModal，与 fetchSessions 等其它路径保持一致；
     // 单 cron 详情失败不应让用户看到 "HTTP 401" 字样而不知所措。
     if (err && (err.status === 401 || err.status === 403)) {
-      window.showAuthModal();
+      showAuthModal();
       st.details[runId] = { __error: '认证失败，请重新登录' };
     } else if (err && err.status === 404) {
       st.details[runId] = { __error: '记录不存在或已被清理' };
@@ -2775,7 +2805,7 @@ async function cronTimelineFetchTranscript(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
     const headers = {};
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/transcript?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 12000 });
@@ -2802,7 +2832,7 @@ async function cronTimelineFetchSnapshot(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
     const headers = {};
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/snapshot?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
@@ -2880,7 +2910,7 @@ function renderCronTimelinePanel(jobId) {
   // result 走 renderMd 后会埋入 mermaid/katex 异步占位（mermaid-N / ktx-N），
   // 必须在 attach 到 DOM 后调用一次才能完成异步渲染。与 events bubble 路径
   // 的 stickEventsBottom / runPendingAsync 调用语义保持一致。
-  window.runPendingAsync();
+  runPendingAsync();
 }
 
 // cronTimelineLoadMore — 分页加载更早的 run 列表。
@@ -2899,7 +2929,7 @@ function cronTimelineLoadMore(jobId, onDone) {
     let loaded = false;
     try {
       const headers = {};
-      const t = window.getToken();
+      const t = getToken();
       if (t) headers['Authorization'] = 'Bearer ' + t;
       let url = NZ_CONTRACT.API.cron_runs + '?job_id=' + encodeURIComponent(jobId) + '&limit=50';
       if (st.nextBefore) url += '&before=' + st.nextBefore;
@@ -2922,11 +2952,11 @@ function cronTimelineLoadMore(jobId, onDone) {
       // R220-FE-5: 401/403 走 authModal；showAPIError 仅做 toast 提示，不会
       // 把用户带回登录态——这里要主动唤起 modal。
       if (err && (err.status === 401 || err.status === 403)) {
-        window.showAuthModal();
+        showAuthModal();
       } else if (err && err.status) {
-        window.showAPIError('加载执行历史', err.status, err.message || '');
+        showAPIError('加载执行历史', err.status, err.message || '');
       } else {
-        window.showNetworkError('加载执行历史', err);
+        showNetworkError('加载执行历史', err);
       }
     } finally {
       st.loading = false;
@@ -2994,7 +3024,7 @@ async function cronTimelineRefreshHead(jobId) {
   st._refreshToken = token;
   try {
     const headers = {};
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const url = NZ_CONTRACT.API.cron_runs + '?job_id=' + encodeURIComponent(jobId) + '&limit=10';
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
@@ -3178,8 +3208,8 @@ function renderCronDrawer() {
   // unsub 旧的并清空 events 数组），然后才 repaint —— 顺序反了会把上一个
   // drawer 的事件渲到新 drawer 上。repaintCronLive 自身也校验 jobId 一致性，
   // 双保险。
-  if (typeof ensureCronLiveSubscription === 'function') ensureCronLiveSubscription();
-  if (typeof repaintCronLive === 'function') repaintCronLive();
+  ensureCronLiveSubscription();
+  repaintCronLive();
 }
 
 // syncCronDrawerHeaderHeight publishes the sticky drawer header's measured
@@ -3313,8 +3343,8 @@ function cronDrawerHtml(j) {
   // cron-live RFC §4.1: 实时输出容器。任务跑中或本轮已积累事件时显示，
   // 让 run 结束后操作员还能回看本轮事件流。container 元素由 wsm.cronLive
   // 状态驱动，repaintCronLive / appendEventsToContainer 写入。
-  const liveJobId = (typeof wsm !== 'undefined' && window.wsm.cronLive) ? window.wsm.cronLive.jobId : null;
-  const hasLiveEvents = liveJobId === id && window.wsm.cronLive.events && window.wsm.cronLive.events.length > 0;
+  const liveJobId = (typeof wsm !== 'undefined' && wsm.cronLive) ? wsm.cronLive.jobId : null;
+  const hasLiveEvents = liveJobId === id && wsm.cronLive.events && wsm.cronLive.events.length > 0;
   let liveHtml = '';
   if (isRunning || hasLiveEvents) {
     liveHtml = '<section class="cron-drawer-live" data-job-id="' + escAttr(id) + '">' +
@@ -3455,7 +3485,7 @@ function cronDrawerSpecHtml(j) {
   } else if (nextMs) {
     const w = formatWhenColloquial(nextMs);
     const rel = w && w.label ? w.label : formatAgoColloquial(nextMs);
-    const abs = window.formatAbsTime(nextMs) || '';
+    const abs = formatAbsTime(nextMs) || '';
     const relCls = w && w.imminent ? ' css-when-rel imminent' : ' css-when-rel';
     nextLine = '<span class="' + relCls + '">下次：' + esc(rel) + '</span>' +
       (abs ? ' <span class="css-when-abs">· ' + esc(abs) + '</span>' : '');
@@ -3830,7 +3860,7 @@ function openCronDetail(jobId, originRow) {
   // shell push and triggers renderCronPanel — that path repaints both
   // the list (with .is-active on the new row) AND the drawer in one
   // shell-preserving pass. No second renderCronPanel needed.
-  if (typeof openCronPanel === 'function') openCronPanel();
+  openCronPanel();
   // Move keyboard focus into the drawer header on the next frame so the
   // h2 has been laid out by the time .focus() runs. tabindex="-1" is
   // applied via cronDrawerHtml so the h2 is a programmatic focus target
@@ -3853,7 +3883,7 @@ function openCronDetail(jobId, originRow) {
   // (timeout / 5xx) silently retain the truncated cache — the user
   // still sees the first 256 bytes plus the cron-spec edit affordance,
   // and the next poll will reconcile.
-  if (typeof cronRefetchFullJob === 'function') {
+  {
     cronRefetchFullJob(jobId).then(res => {
       // Drawer is read-only: if the refetch failed we keep the truncated
       // cache rendered. Only re-render on a success result so the drawer
@@ -3878,8 +3908,8 @@ function closeCronDetail() {
   }
   // cron-live RFC §3: drawer 关闭即撤销 cron live 订阅；事件数组随 unsub 清空，
   // 下次再开任意 drawer 不会带过来旧 job 的事件。
-  if (typeof wsm !== 'undefined' && window.wsm.cronLive && window.wsm.cronLive.jobId) {
-    window.wsm.unsubscribeCronLive();
+  if (typeof wsm !== 'undefined' && wsm.cronLive && wsm.cronLive.jobId) {
+    wsm.unsubscribeCronLive();
   }
   cronDetailJobId = null;
   // Remove `.is-active` from any list row so the sidebar-style highlight
@@ -3910,7 +3940,7 @@ function closeCronDetail() {
 async function fetchCronJobs() {
   try {
     const headers = {};
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     // RNEW-UX-003: 8s timeout — cron list is polled periodically; a hung
     // disk/fs call must release before the next tick fires.
@@ -4053,7 +4083,7 @@ async function cronTriggerNow(id) {
   if (cronDetailJobId === id) renderCronDrawer();
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch(NZ_CONTRACT.API.cron_trigger, { method: 'POST', headers, body: JSON.stringify({ id }) });
     if (!r.ok) {
@@ -4062,7 +4092,7 @@ async function cronTriggerNow(id) {
       cronTriggerCooldownClear(id);
       if (cronDetailJobId === id) renderCronDrawer();
       const raw = await r.text().catch(() => '');
-      window.showAPIError('立即执行定时任务', r.status, raw);
+      showAPIError('立即执行定时任务', r.status, raw);
       return;
     }
     // Success — leave cooldown in place; the tick timer will transition
@@ -4073,7 +4103,7 @@ async function cronTriggerNow(id) {
   } catch (e) {
     cronTriggerCooldownClear(id);
     if (cronDetailJobId === id) renderCronDrawer();
-    window.showNetworkError('立即执行定时任务', e);
+    showNetworkError('立即执行定时任务', e);
   }
 }
 
@@ -4085,13 +4115,13 @@ async function cronPause(id) {
   // failures and route to showNetworkError.
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     await fetchJSON(NZ_CONTRACT.API.cron_pause, { method: 'POST', headers, body: JSON.stringify({ id }) });
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) {
-    if (e && e.status) { window.showAPIError('暂停定时任务', e.status, (e.message || '').slice(0, 500)); return; }
-    window.showNetworkError('暂停定时任务', e);
+    if (e && e.status) { showAPIError('暂停定时任务', e.status, (e.message || '').slice(0, 500)); return; }
+    showNetworkError('暂停定时任务', e);
   }
 }
 
@@ -4099,13 +4129,13 @@ async function cronResume(id) {
   // RNEW-UX-003 (#444): see cronPause godoc for fetchJSON migration rationale.
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     await fetchJSON(NZ_CONTRACT.API.cron_resume, { method: 'POST', headers, body: JSON.stringify({ id }) });
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) {
-    if (e && e.status) { window.showAPIError('恢复定时任务', e.status, (e.message || '').slice(0, 500)); return; }
-    window.showNetworkError('恢复定时任务', e);
+    if (e && e.status) { showAPIError('恢复定时任务', e.status, (e.message || '').slice(0, 500)); return; }
+    showNetworkError('恢复定时任务', e);
   }
 }
 
@@ -4143,7 +4173,7 @@ async function cronDelete(id) {
     body = '此操作将永久删除该任务，不可撤销。该任务尚未执行过，不会有历史会话残留。';
   }
 
-  const ok = await window.confirmDialog({
+  const ok = await confirmDialog({
     title: headline,
     message: body,
     detail: promptPreview ? promptPreview : ('id: ' + id),
@@ -4158,7 +4188,7 @@ async function cronDelete(id) {
   // confirm flow above so a deterministic timeout is the right surface.
   try {
     const headers = {};
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     await fetchJSON(NZ_CONTRACT.API.cron + '?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
     // R220-FE-2: 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
@@ -4174,8 +4204,8 @@ async function cronDelete(id) {
     }
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) {
-    if (e && e.status) { window.showAPIError('删除定时任务', e.status, (e.message || '').slice(0, 500)); return; }
-    window.showNetworkError('删除定时任务', e);
+    if (e && e.status) { showAPIError('删除定时任务', e.status, (e.message || '').slice(0, 500)); return; }
+    showNetworkError('删除定时任务', e);
   }
 }
 
@@ -4199,7 +4229,7 @@ async function cronRefetchFullJob(id) {
   if (!cached.prompt_truncated) return { ok: true, job: cached };
   try {
     const headers = {};
-    const t = window.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     // No compact param — list endpoint returns full prompts. We pull
     // the whole list here because there is no per-job GET endpoint
@@ -4251,8 +4281,8 @@ function editCronJob(id) {
     // multi-backend deploy) can pre-select the persisted value. Single-
     // backend deploys collapse the picker — no UI difference for legacy
     // installs.
-    window.fetchCLIBackends().then(backendsData => {
-      const backendHtml = window.renderBackendPicker(backendsData, {
+    fetchCLIBackends().then(backendsData => {
+      const backendHtml = renderBackendPicker(backendsData, {
         selectId: 'edit-cron-backend',
         selectedId: job.backend || '',
       });
@@ -4448,20 +4478,20 @@ async function doEditCronJob(id) {
   if (body.schedule === '') { showToast('频率不能为空', 'warning'); return; }
 
   try {
-    const headers = Object.assign({ 'Content-Type': 'application/json' }, window.authHeaders());
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, authHeaders());
     const r = await fetch(NZ_CONTRACT.API.cron + '?id=' + encodeURIComponent(id), {
       method: 'PATCH', headers, body: JSON.stringify(body),
     });
     if (!r.ok) {
       const raw = await r.text().catch(() => '');
-      window.showAPIError('保存定时任务', r.status, raw);
+      showAPIError('保存定时任务', r.status, raw);
       return;
     }
     overlay.remove();
     showToast('定时任务已更新', 'success');
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) {
-    window.showNetworkError('保存定时任务', e);
+    showNetworkError('保存定时任务', e);
   }
 }
 
@@ -4568,7 +4598,7 @@ registerActions({
   'cron-search': () => onCronSearchInput(),
   'cron-search-clear': () => clearCronSearch(),
   'cron-sort': (el) => setCronSortOrder(el.value),
-  'cron-mobile-back': () => window.mobileBack(),
+  'cron-mobile-back': () => mobileBack(),
 });
 
 // ─── nz.bus subscriptions (#2557 PR-E1) ────────────────────────────────────

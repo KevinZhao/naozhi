@@ -15,6 +15,7 @@
 // leaves quotes alone, so a file named `a"b` would truncate data-name="…" and
 // the click handler navigated to the wrong path.
 import { esc, escAttr, showToast, fetchJSON } from './nz_util.js';
+import { fileApiUrl, formatFileSize, renderSandboxedBlob } from './dashboard.js';
 
 (function () {
   'use strict';
@@ -177,13 +178,7 @@ import { esc, escAttr, showToast, fetchJSON } from './nz_util.js';
     wrap.innerHTML = html;
   }
 
-  function fmtSize(n) {
-    if (typeof window.formatFileSize === 'function') return window.formatFileSize(n);
-    if (n == null) return '';
-    if (n < 1024) return n + ' B';
-    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
-    return (n / 1048576).toFixed(1) + ' MB';
-  }
+  function fmtSize(n) { return formatFileSize(n); }
 
   function renderList(res) {
     var box = $('files-list');
@@ -235,7 +230,7 @@ import { esc, escAttr, showToast, fetchJSON } from './nz_util.js';
   function download(rel, name) {
     if (rel == null) { rel = state.previewRel; name = state.previewName; }
     if (!rel) return;
-    var url = window.fileApiUrl(state.project, 'local', rel, 'download');
+    var url = fileApiUrl(state.project, 'local', rel, 'download');
     var a = document.createElement('a');
     a.href = url; a.download = name || (rel.split('/').pop() || 'file'); a.rel = 'noopener';
     document.body.appendChild(a); a.click(); a.remove();
@@ -256,13 +251,13 @@ import { esc, escAttr, showToast, fetchJSON } from './nz_util.js';
     var imgExt = { png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, bmp: 1, ico: 1 };
     if (ext === 'svg') {
       body.innerHTML = '';
-      window.renderSandboxedBlob(state.project, 'local', rel, body, 'image/svg+xml');
+      renderSandboxedBlob(state.project, 'local', rel, body, 'image/svg+xml');
       return;
     }
     if (imgExt[ext]) {
       body.innerHTML = '';
       var img = document.createElement('img');
-      img.src = window.fileApiUrl(state.project, 'local', rel, 'raw');
+      img.src = fileApiUrl(state.project, 'local', rel, 'raw');
       img.alt = name; img.loading = 'lazy';
       body.appendChild(img);
       return;
@@ -277,18 +272,18 @@ import { esc, escAttr, showToast, fetchJSON } from './nz_util.js';
       // JS same-origin. sandbox="" grants zero capabilities — no scripts, no
       // plugins — while still allowing the browser's native PDF viewer.
       frame.setAttribute('sandbox', '');
-      frame.src = window.fileApiUrl(state.project, 'local', rel, 'raw');
+      frame.src = fileApiUrl(state.project, 'local', rel, 'raw');
       frame.title = name;
       body.appendChild(frame);
       return;
     }
     if (ext === 'html' || ext === 'htm' || ext === 'xhtml') {
       body.innerHTML = '';
-      window.renderSandboxedBlob(state.project, 'local', rel, body, 'text/html');
+      renderSandboxedBlob(state.project, 'local', rel, body, 'text/html');
       return;
     }
     // Text / unknown → preview JSON {content, truncated, size, mime}.
-    fetchJSON(window.fileApiUrl(state.project, 'local', rel, 'preview')).then(function (res) {
+    fetchJSON(fileApiUrl(state.project, 'local', rel, 'preview')).then(function (res) {
       // Server shape for non-text files is {content:"", binary:true}.
       if (res && res.binary) {
         body.innerHTML = '<div class="files-empty">该文件不可预览，请下载查看。</div>';

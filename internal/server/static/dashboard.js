@@ -326,8 +326,7 @@ function persistTheme(theme) {
   if (t) headers['Authorization'] = 'Bearer ' + t;
   fetchJSON(NZ_CONTRACT.API.settings, { method: 'PUT', headers, body: JSON.stringify({ theme: theme }), timeoutMs: 10000 })
     .catch(function (err) {
-      if (typeof showToast === 'function') showToast('主题已应用，但未能保存到服务器', 'error');
-      else console.warn('persist theme failed', err);
+      showToast('主题已应用，但未能保存到服务器', 'error');
     });
 }
 // syncThemeFromServer pulls the server-persisted theme on load and reconciles
@@ -474,7 +473,7 @@ function setActivityView(view) {
   // float over the assets/cron/settings view and leave the split padding
   // reserved. Both close paths run nzSplitExit, clearing nz-split-open.
   if (prev === 'chat' && view !== 'chat') {
-    if (typeof closeFilePreview === 'function') closeFilePreview();
+    closeFilePreview();
     if (typeof window.__closeScratchDrawer === 'function') window.__closeScratchDrawer();
   }
   // Enter the target view.
@@ -3006,7 +3005,7 @@ function sessionRunRowHtml(r) {
   if (typeof r.first_byte_ms === 'number' && r.first_byte_ms > 0) {
     sub.push('<span title="首字节延迟">首字节 ' + esc(sessionRunStatLabel(r.first_byte_ms)) + '</span>');
   }
-  if (r.cost_usd && typeof formatCostUSD === 'function') {
+  if (r.cost_usd) {
     sub.push('<span title="本次成本估算">' + esc(formatCostUSD(r.cost_usd)) + '</span>');
   }
   const subRow = sub.length
@@ -6650,7 +6649,7 @@ document.addEventListener('paste', function(e) {
   }
   if (imageFiles.length > 0) {
     e.preventDefault();
-    if (typeof handleFiles === 'function') handleFiles(imageFiles);
+    handleFiles(imageFiles);
     return;
   }
 
@@ -7918,7 +7917,7 @@ async function fetchCLIBackends(node) {
       // controls update once the manifest is available. Remote-node fetches
       // must NOT drive feature gates (the input controls operate on the
       // locally-selected session), so this stays inside the isLocal branch.
-      if (typeof applyFeatureGates === 'function') applyFeatureGates();
+      applyFeatureGates();
     } else if (manifest) {
       cliBackendsByNode[node] = { data: manifest, at: Date.now() };
     } else {
@@ -9124,7 +9123,7 @@ function submitQuickAsk(e) {
     const btn2 = document.querySelector('.quick-ask-send');
     if (ta2) { ta2.disabled = false; ta2.value = strandedText; ta2.focus(); }
     if (btn2) btn2.disabled = false;
-    if (typeof showToast === 'function') showToast('发送失败，请重试', 'error');
+    showToast('发送失败，请重试', 'error');
   });
 }
 
@@ -11179,7 +11178,7 @@ async function openFilePreview(wrapEl) {
     runPendingAsync();
     // Mirror chat-side file-ref chip injection so paths inside the preview
     // body also get [preview]/[download] affordances.
-    if (typeof scanEventForFileRefs === 'function') {
+    {
       body.querySelectorAll('.fv-rich').forEach(scanEventForFileRefs);
     }
     if (line) scrollToPreviewLine(body, parseInt(line, 10));
@@ -14550,11 +14549,7 @@ function initSwipeBack() {
   function preserveBottom(wasBottom) {
     if (!wasBottom) return;
     requestAnimationFrame(() => {
-      if (typeof stickEventsBottom === 'function') stickEventsBottom();
-      else {
-        const el = document.getElementById('events-scroll');
-        if (el) el.scrollTop = el.scrollHeight;
-      }
+      stickEventsBottom();
     });
   }
 
@@ -14985,9 +14980,7 @@ wsm.connect();
         line: ev && ev.lineno,
         col: ev && ev.colno,
       });
-      if (typeof showToast === 'function') {
-        showToast('页面遇到异常，可能需要刷新：' + msg, 'warning', 4000);
-      }
+      showToast('页面遇到异常，可能需要刷新：' + msg, 'warning', 4000);
     } catch (_) { /* last-resort: never throw from the error handler */ }
   }
   window.addEventListener('error', handle, true);
@@ -15382,7 +15375,6 @@ initSwipeBack();
         method: 'DELETE', headers: authHeaders(),
       });
     } catch (_) { /* best effort */ }
-    if (!silent && typeof showToast === 'function') { /* no toast on normal close */ }
   }
 
   function previewText(s) {
@@ -15506,13 +15498,13 @@ initSwipeBack();
       if (matchesPendingEcho(e)) continue;
       // Reuse the main event renderer so aside bubbles match the transcript
       // style (markdown, code blocks, etc.) without duplicating logic.
-      const h = (typeof eventHtml === 'function') ? eventHtml(e) : '';
+      const h = eventHtml(e);
       if (!h) continue;
       const t = e.time || 0;
       // Insert a divider when the gap between adjacent visible bubbles
       // exceeds EVENT_DIVIDER_GAP_MS — matches the main-window grammar.
       if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)
-          && typeof timeDividerHtml === 'function') {
+      ) {
         elMsgs.insertAdjacentHTML('beforeend', timeDividerHtml(t));
       }
       const tmp = document.createElement('div');
@@ -15526,7 +15518,7 @@ initSwipeBack();
     // Apply WeChat-style avatar grouping in the aside too (it reuses eventHtml
     // and the same .nz-grouped CSS, but lives outside the #events-scroll
     // observer, so tag it explicitly).
-    if (typeof regroupAvatars === 'function') regroupAvatars(elMsgs);
+    regroupAvatars(elMsgs);
     // Scroll policy, aligned with main window:
     //  - the user just sent (sawUser on a local-render call): force-pin.
     //  - otherwise: only stick if they were already at the bottom.
@@ -15621,7 +15613,7 @@ initSwipeBack();
       });
       if (!r.ok) {
         const txt = await r.text().catch(() => '');
-        if (typeof showAPIError === 'function') showAPIError('打开追问', r.status, txt);
+        showAPIError('打开追问', r.status, txt);
         return;
       }
       const data = await r.json();
@@ -15673,7 +15665,7 @@ initSwipeBack();
       startPolling();
     } catch (e) {
       console.error('open scratch', e);
-      if (typeof showNetworkError === 'function') showNetworkError('打开追问', e);
+      showNetworkError('打开追问', e);
     }
   }
 
@@ -15707,7 +15699,7 @@ initSwipeBack();
       });
       if (!r.ok) {
         const txt = await r.text().catch(() => '');
-        if (typeof showAPIError === 'function') showAPIError('发送消息', r.status, txt);
+        showAPIError('发送消息', r.status, txt);
         elLoading.classList.remove('visible');
       } else {
         // The user just sent a turn, so the session is now live and events
@@ -15719,7 +15711,7 @@ initSwipeBack();
       }
     } catch (e) {
       console.error('scratch send', e);
-      if (typeof showNetworkError === 'function') showNetworkError('发送消息', e);
+      showNetworkError('发送消息', e);
       elLoading.classList.remove('visible');
     } finally {
       sending = false;
@@ -15730,7 +15722,7 @@ initSwipeBack();
 
   async function promoteScratch() {
     if (!state) {
-      if (typeof showToast === 'function') showToast('追问会话已关闭，无法保存');
+      showToast('追问会话已关闭，无法保存');
       return;
     }
     const id = state.scratchId;
@@ -15740,7 +15732,7 @@ initSwipeBack();
       });
       if (!r.ok) {
         const txt = await r.text().catch(() => '');
-        if (typeof showAPIError === 'function') showAPIError('保存为正式会话', r.status, txt);
+        showAPIError('保存为正式会话', r.status, txt);
         return;
       }
       const data = await r.json();
@@ -15750,16 +15742,16 @@ initSwipeBack();
       clearMessages();
       elSave.classList.remove('visible');
       elInput.value = '';
-      if (typeof showToast === 'function') showToast('已保存为正式会话');
+      showToast('已保存为正式会话');
       // Refresh sidebar and try to select the new key.
       try {
         if (typeof lastVersion !== 'undefined') lastVersion = 0;
-        if (typeof fetchSessions === 'function') await fetchSessions();
-        if (typeof selectSession === 'function' && data.key) selectSession(data.key, 'local');
+        await fetchSessions();
+        if (data.key) selectSession(data.key, 'local');
       } catch (_) {}
     } catch (e) {
       console.error('promote scratch', e);
-      if (typeof showNetworkError === 'function') showNetworkError('保存为正式会话', e);
+      showNetworkError('保存为正式会话', e);
     }
   }
 
@@ -15784,7 +15776,7 @@ initSwipeBack();
     const msgTime = Number(btn.getAttribute('data-msg-time') || 0);
     if (!raw || raw.length < 1) return;
     if (!selectedKey) {
-      if (typeof showToast === 'function') showToast('请先选择会话');
+      showToast('请先选择会话');
       return;
     }
     // Derive agentId from the current session key (4th segment) so the
@@ -16126,6 +16118,53 @@ initSwipeBack();
 })();
 
 
+
+// ─── module exports (#2557 PR-E2) ───────────────────────────────────────────
+// The view modules import these instead of dereferencing the window bridge.
+// dashboard is the dependency root: it imports only nz_util, so the graph
+// stays acyclic and module execution order matches the historical tag order.
+// (let bindings like lastEventTime export as live views — reassignment here
+// is visible to importers, unlike a window-property copy.)
+export {
+  CRON_LIVE_AGENT_ONLY_HTML,
+  CRON_LIVE_MAX_EVENTS,
+  EVENT_DIVIDER_GAP_MS,
+  authHeaders,
+  confirmDialog,
+  eventHtml,
+  fetchCLIBackends,
+  fetchEvents,
+  fileApiUrl,
+  fmtDuration,
+  formatAbsTime,
+  formatFileSize,
+  getToken,
+  isInternalEvent,
+  lastDividerTime,
+  lastEventTime,
+  lsGet,
+  lsSet,
+  mobileBack,
+  processEventsForDisplay,
+  refreshBanner,
+  regroupAvatars,
+  renderBackendPicker,
+  renderEventsWithDividers,
+  renderMd,
+  renderSandboxedBlob,
+  runPendingAsync,
+  sessionScrollPos,
+  setActiveSessionCard,
+  setActivityView,
+  shortPath,
+  showAPIError,
+  showAuthModal,
+  showNetworkError,
+  sid,
+  timeDividerHtml,
+  wsm,
+};
+
 // ─── data-action registry (#1980 PR-2, docs/rfc/csp-data-action.md) ────────
 // Every handler the dashboard's generated HTML wires via data-action(-<type>)
 // attributes, plus the absorbed project-header / tuning-chip / modal-close
@@ -16202,6 +16241,7 @@ Object.defineProperties(nzState, {
   activeView: { get: function () { return activeView; }, set: function (v) { activeView = v; } },
   defaultWorkspace: { get: function () { return defaultWorkspace; } },
   eventTimer: { get: function () { return eventTimer; }, set: function (v) { eventTimer = v; } },
+  lastEventTime: { get: function () { return lastEventTime; }, set: function (v) { lastEventTime = v; } },
   navUserEls: { get: function () { return navUserEls; } },
   projectsData: { get: function () { return projectsData; } },
   selectedKey: { get: function () { return selectedKey; }, set: function (v) { selectedKey = v; } },
