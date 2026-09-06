@@ -36,14 +36,14 @@
      on top; the other stays at its base z-index 200. The JS controller moves
      the class on each open. A subtle shadow on the front pane hints depth. */
   body.nz-split-open .fv-drawer.nz-split-front,
-  body.nz-split-open .aside-drawer.nz-split-front{z-index:202;box-shadow:var(--nz-shadow-drawer)}
+  body.nz-split-open .aside-drawer.nz-split-front{z-index:var(--nz-z-split-front);box-shadow:var(--nz-shadow-drawer)}
   /* Draggable seam. Sits exactly on the left edge of the reserved strip;
      the 6px hit area straddles the seam (margin-right:-3px), so it must paint
      above BOTH panes — including the .nz-split-front one at 202 — or the 3px
      overlapping the front drawer are swallowed and the drag target halves
      (#2434). Background stays transparent until hover, so the higher z-index
      has no visual cost. */
-  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:203;background:transparent;transition:background .15s}
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:var(--nz-z-split-resizer);background:transparent;transition:background .15s}
   body.nz-split-open #split-resizer:hover,#split-resizer.dragging{background:var(--nz-accent)}
 }
 
@@ -288,8 +288,8 @@
    transient popover, not a blocking modal. z-index 99 sits just under the
    desktop .history-popover (100); the mobile sheet (200) gets the heavier
    variant below. */
-.history-backdrop{position:fixed;inset:0;z-index:99;background:transparent;animation:fade-in .15s ease}
-.history-backdrop.is-sheet{z-index:199;background:rgba(0,0,0,.4)}
+.history-backdrop{position:fixed;inset:0;z-index:var(--nz-z-backdrop);background:transparent;animation:fade-in .15s ease}
+.history-backdrop.is-sheet{z-index:var(--nz-z-backdrop-sheet);background:rgba(0,0,0,.4)}
 @keyframes fade-in{from{opacity:0}to{opacity:1}}
 .history-popover{position:absolute;top:100%;left:0;z-index:var(--nz-z-popover);min-width:280px;max-width:360px;max-height:320px;overflow-y:auto;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2);padding:0;animation:pop-in .15s ease}
 @keyframes pop-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}

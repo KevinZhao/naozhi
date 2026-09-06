@@ -128,7 +128,7 @@ func TestDashboardHTML_HistoryDayHeaderStacksAboveItems(t *testing.T) {
 // --nz-z-drawer (200) and were therefore covered while a split was open.
 func TestDashboardHTML_ModalTierAboveSplitFront(t *testing.T) {
 	t.Parallel()
-	html := readStaticAsset(t, "dashboard.html")
+	html := readDashboardHTMLAndCSS(t)
 
 	tokens := map[string]int{}
 	for _, m := range reZIndexToken.FindAllStringSubmatch(html, -1) {
@@ -139,12 +139,14 @@ func TestDashboardHTML_ModalTierAboveSplitFront(t *testing.T) {
 	if !ok {
 		t.Fatal("--nz-z-modal token not defined in :root — modal / cmd-palette have no tier above the split-front drawer (202)")
 	}
-	frontRe := regexp.MustCompile(`\.nz-split-front\{z-index:(\d+)`)
-	fm := frontRe.FindStringSubmatch(html)
-	if fm == nil {
-		t.Fatal(".nz-split-front z-index literal not found")
+	// #2559 D6-2: the split-front tier became a token (same value, 202).
+	front, ok := tokens["split-front"]
+	if !ok {
+		t.Fatal("--nz-z-split-front token not defined in :root")
 	}
-	front, _ := strconv.Atoi(fm[1])
+	if !strings.Contains(html, ".nz-split-front{z-index:var(--nz-z-split-front)") {
+		t.Error(".nz-split-front must take its tier from var(--nz-z-split-front)")
+	}
 	if modal <= front {
 		t.Errorf("--nz-z-modal=%d must exceed the split-front drawer z-index %d", modal, front)
 	}
@@ -250,4 +252,4 @@ func TestFilesViewJS_RenderEmptyNotDoubleEscaped(t *testing.T) {
 
 // Matches `--nz-z-NAME:VALUE;` token definitions in :root (moved from the
 // deleted static_zindex_scale_test.go, #2533 A2b).
-var reZIndexToken = regexp.MustCompile(`--nz-z-([a-z]+):(\d+)`)
+var reZIndexToken = regexp.MustCompile(`--nz-z-([a-z-]+):(\d+)`)

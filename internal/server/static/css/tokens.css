@@ -134,6 +134,22 @@
                  "录音失败" / "下载失败" error it reports about them. #2434)
      Sub-steps (+1/+2) stay as literal offsets at the rule (e.g. ctx-menu sits
      one above its overlay) to avoid a token per micro-layer. */
+  /* Below the popover tier: surfaces that must clear the page chrome but stay
+     under any popover/drawer. #2559 D6-2 replaced these literals in place —
+     values are unchanged, only the name is new.
+       rail      mobile activity bar pinned to the viewport bottom (was 30)
+       chip-pop  hover card anchored to a list row, e.g. cj-stats-pop (was 50)
+       backdrop  transparent click-away layer under the history popover (99);
+                 its sheet variant dims and sits just under the split-front
+                 drawer (199) */
+  --nz-z-rail:30;
+  --nz-z-chip-pop:50;
+  --nz-z-backdrop:99;
+  --nz-z-backdrop-sheet:199;
+  /* Split view lifts the front drawer above the modal-adjacent tier and keeps
+     the resizer seam one step above it so neither pane occludes the handle. */
+  --nz-z-split-front:202;
+  --nz-z-split-resizer:203;
   --nz-z-popover:100;
   --nz-z-drawer:200;
   --nz-z-modal:205;

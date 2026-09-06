@@ -232,7 +232,7 @@
 .cj-stats.mid{color:var(--nz-text);border-color:var(--nz-border)}
 .cj-stats.bad{color:var(--nz-red);border-color:rgba(218,54,51,.4);background:rgba(218,54,51,.1);font-weight:600}
 .cj-stats-label{white-space:nowrap}
-.cj-stats-pop{position:absolute;bottom:calc(100% + 6px);right:0;display:none;min-width:180px;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2);z-index:50;cursor:default;white-space:normal}
+.cj-stats-pop{position:absolute;bottom:calc(100% + 6px);right:0;display:none;min-width:180px;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2);z-index:var(--nz-z-chip-pop);cursor:default;white-space:normal}
 .cj-stats:hover .cj-stats-pop,.cj-stats:focus-within .cj-stats-pop{display:block}
 .cj-stats-pop-row{display:flex;gap:6px;margin-bottom:6px}
 .cj-stats-dot{width:8px;height:8px;border-radius:50%;background:var(--nz-text-faint);flex-shrink:0;display:inline-block}

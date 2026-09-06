@@ -227,18 +227,21 @@ func readDashboardJS(t *testing.T) string {
 // in one file; concatenating keeps them valid without each test having to know
 // which stylesheet a rule landed in. A test that must pin one file reads that
 // file directly.
+// dashboardCSSFiles is the stylesheet set dashboard.html links, in cascade
+// order (#2559 D6).
+var dashboardCSSFiles = []string{
+	"css/tokens.css",
+	"css/views.css",
+	"css/split_view.css",
+	"css/responsive.css",
+	"css/cron.css",
+	"css/mobile_polish.css",
+}
+
 func readDashboardHTMLAndCSS(t *testing.T) string {
 	t.Helper()
 	var b []byte
-	for _, name := range []string{
-		"dashboard.html",
-		"css/tokens.css",
-		"css/views.css",
-		"css/split_view.css",
-		"css/responsive.css",
-		"css/cron.css",
-		"css/mobile_polish.css",
-	} {
+	for _, name := range append([]string{"dashboard.html"}, dashboardCSSFiles...) {
 		data := staticAssetBytes(name)
 		if data == nil {
 			t.Fatalf("%s not embedded", name)
