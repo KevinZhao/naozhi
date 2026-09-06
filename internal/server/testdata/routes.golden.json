@@ -396,6 +396,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/auth_modal.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/composer_files.js",
     "handler_type": "http.HandlerFunc"
   },
@@ -457,6 +462,11 @@
   {
     "method": "GET",
     "path": "/static/self_update.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/send_message.js",
     "handler_type": "http.HandlerFunc"
   },
   {

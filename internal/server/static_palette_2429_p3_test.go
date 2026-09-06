@@ -52,17 +52,20 @@ func TestDashboardJS_QuickRow_FollowsSelectedNode(t *testing.T) {
 		t.Errorf("buildQuickRow must derive its subtitle from quickRowHint(selectedNode), got:\n%s", row)
 	}
 	script := `
-let defaultWorkspace = '/home/ec2-user/workspace/naozhi';
-const nodesData = { n1: { display_name: 'GPU 盒子' }, n2: {} };
-function shortPath(p) { return p.replace('/home/ec2-user', '~'); }
-function getNodeDisplayName(id) {
-  if (!id || id === 'local') return '本地';
-  const nd = nodesData[id];
-  return nd && nd.display_name ? nd.display_name : id;
-}
+// #2558 D4-7: quickRowHint moved to auth_modal.js — dashboard state arrives
+// via nz.state and helpers via injected deps; mirror both surfaces.
+const nzState = { defaultWorkspace: '/home/ec2-user/workspace/naozhi', nodesData: { n1: { display_name: 'GPU 盒子' }, n2: {} } };
+const deps = {
+  shortPath: (p) => p.replace('/home/ec2-user', '~'),
+  getNodeDisplayName: (id) => {
+    if (!id || id === 'local') return '本地';
+    const nd = nzState.nodesData[id];
+    return nd && nd.display_name ? nd.display_name : id;
+  },
+};
 ` + extractJSFunction(t, js, "quickRowHint") + `
 const out = { local: quickRowHint('local'), empty: quickRowHint(''), n1: quickRowHint('n1'), n2: quickRowHint('n2') };
-defaultWorkspace = '';
+nzState.defaultWorkspace = '';
 out.localNoWs = quickRowHint('local');
 process.stdout.write(JSON.stringify(out));
 `
@@ -144,8 +147,11 @@ func TestDashboardJS_FetchCLIBackends_DoesNotCacheNullRemote(t *testing.T) {
 	script := `
 const NZ_CONTRACT = require('./static/contract.js');
 let cliBackends = null, cliBackendsFetchedAt = 0;
+// #2558 D4-7: fetchCLIBackends moved to auth_modal.js — its dashboard
+// collaborators arrive as injected deps and cliBackends via nz.state.
 const cliBackendsByNode = {};
-function applyFeatureGates() {}
+const nzState = { cliBackends: null, cliBackendsFetchedAt: 0 };
+const deps = { cliBackendsByNode, applyFeatureGates: () => {}, getToken: () => '' };
 const good = { backends: [{ id: 'claude' }, { id: 'codex' }], default: 'claude' };
 let calls = 0;
 const responses = [null, () => { throw new Error('502'); }, good, good];
@@ -160,7 +166,7 @@ async function fetchJSON() {
   const b = await fetchCLIBackends('n1');
   const c = await fetchCLIBackends('n1');
   const d = await fetchCLIBackends('n1'); // cached
-  process.stdout.write(JSON.stringify({ a, b, c, d, calls, cached: !!cliBackendsByNode.n1 }));
+  process.stdout.write(JSON.stringify({ a, b, c, d, calls, cached: !!deps.cliBackendsByNode.n1 }));
 })();
 `
 	var res struct {
@@ -193,11 +199,11 @@ async function fetchJSON() {
 	// and only repaint via refreshBackendPicker on a node switch; both must
 	// route a null remote manifest through refreshBackendPicker on open too.
 	palette := extractJSFunction(t, js, "openProjectPalette")
-	if !strings.Contains(palette, "if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');") {
+	if !strings.Contains(palette, "if (!backendsData && (nzState.selectedNode || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');") {
 		t.Error("openProjectPalette must call refreshBackendPicker('cp-backend-slot') when opened with a null manifest on a remote node (#2429 M1)")
 	}
 	create := extractJSFunction(t, js, "createNewSession")
-	if !strings.Contains(create, "if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('new-backend-slot');") {
+	if !strings.Contains(create, "if (!backendsData && (nzState.selectedNode || 'local') !== 'local') refreshBackendPicker('new-backend-slot');") {
 		t.Error("createNewSession no-projects modal must call refreshBackendPicker('new-backend-slot') when opened with a null manifest on a remote node (#2429 M1)")
 	}
 }
@@ -338,7 +344,8 @@ func TestDashboardJS_HomeHealthLine_DistinguishesRunningFromUptime(t *testing.T)
 	// #2558 D4-5: buildHomeHealthLines moved to utilities.js, where dashboard
 	// helpers arrive as injected deps — stub that surface for the harness.
 	script := `
-const deps = { cliBackends: null };
+const nzState = { defaultWorkspace: '', selectedNode: 'local', cliBackends: null, nodesData: {} };
+const deps = { cliBackends: null, shortPath: (p) => p };
 ` + extractJSFunction(t, js, "buildHomeHealthLines") + `
 const lines = buildHomeHealthLines({ running: 2, ready: 1, total: 3, uptime: '3h2m' });
 process.stdout.write(JSON.stringify(lines[0].text));

@@ -11,6 +11,12 @@
     "functionsOver100": 0,
     "topLevelLetVar": 0
   },
+  "auth_modal.js": {
+    "lines": 1570,
+    "maxFunctionLines": 101,
+    "functionsOver100": 1,
+    "topLevelLetVar": 2
+  },
   "composer_files.js": {
     "lines": 468,
     "maxFunctionLines": 65,
@@ -24,16 +30,16 @@
     "topLevelLetVar": 0
   },
   "cron_view.js": {
-    "lines": 4660,
+    "lines": 4662,
     "maxFunctionLines": 137,
     "functionsOver100": 4,
     "topLevelLetVar": 18
   },
   "dashboard.js": {
-    "lines": 8920,
+    "lines": 6936,
     "maxFunctionLines": 249,
-    "functionsOver100": 7,
-    "topLevelLetVar": 59
+    "functionsOver100": 4,
+    "topLevelLetVar": 56
   },
   "discovery.js": {
     "lines": 253,
@@ -88,6 +94,12 @@
     "maxFunctionLines": 61,
     "functionsOver100": 0,
     "topLevelLetVar": 5
+  },
+  "send_message.js": {
+    "lines": 602,
+    "maxFunctionLines": 223,
+    "functionsOver100": 2,
+    "topLevelLetVar": 1
   },
   "session_header.js": {
     "lines": 415,
