@@ -466,6 +466,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/utilities.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/voice.js",
     "handler_type": "http.HandlerFunc"
   },

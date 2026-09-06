@@ -213,11 +213,7 @@ func TestDashboardJS_EscIsPureString(t *testing.T) {
 // past) or relax the scheme set without an explicit test update.
 func TestDashboardJS_ShowGitRemoteSchemeAllowlist(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	// Allowlist must include exactly the three permitted schemes.
 	wantAllowlist := "const allowed = ['https://', 'http://', 'git://'];"
@@ -266,11 +262,7 @@ func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read render_md.js: %v", err)
 	}
-	dj, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(rmd) + "\n" + string(dj)
+	js := string(rmd) + "\n" + readDashboardJS(t)
 
 	// (1) safeUrl() must reject any URL whose scheme is not http(s) or
 	// a fragment-only `#...`. The current allowlist regex is the

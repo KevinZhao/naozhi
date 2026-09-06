@@ -171,12 +171,19 @@ const restText = lines.filter((_, i) => !movedLines.has(i + 1)).join('\n');
 const movedDecls = topLevelNames(movedText);
 const { reads: movedFree, writes: movedWrites } = freeNames(movedText);
 const restDecls = topLevelNames(restText);
-const { reads: restFree } = freeNames(restText);
+const { reads: restFree, writes: restWrites } = freeNames(restText);
 
 // A "need" is a free name in the moved text that the remainder declares.
 const needs = [...movedFree].filter((n) => restDecls.has(n)).sort();
 // "exposed" is a moved declaration the remainder still references.
 const exposed = [...movedDecls.keys()].filter((n) => restFree.has(n)).sort();
+// …and of those, the ones dashboard ASSIGNS. An import binding is read-only,
+// so leaving such a name in the module makes dashboard throw "Assignment to
+// constant variable" at runtime — silent in lint, and in the browser it only
+// shows up as the surrounding feature quietly not working (the first attempt
+// at moving Message navigation broke session switching this way: 26 e2e specs
+// failed on navUserEls / navIdx / _lastAppliedMainState).
+const exposedWrittenByDash = exposed.filter((n) => restWrites.has(n));
 // Writes that land on a dashboard binding.
 const writesToDash = needs.filter((n) => movedWrites.has(n));
 
@@ -228,6 +235,11 @@ if (otherWrites.length) console.log(`  ! writes a non-state dashboard binding (N
   if (!dryRun && (missing.length || needSetter.length)) {
     fail('refusing to move: add the nz.state accessors listed above to dashboard.js first');
   }
+}
+
+if (exposedWrittenByDash.length) {
+  console.log(`  ! dashboard ASSIGNS these moved names (import bindings are read-only): ${exposedWrittenByDash.join(', ')}`);
+  if (!dryRun) fail('refusing to move: keep those declarations in dashboard (or promote them to nz.state with setters) and re-run');
 }
 
 if (otherWrites.length) fail('refusing to move: the region assigns a dashboard binding that is not nz.state-backed — promote it to nz.state (or move its owner too) first');

@@ -22,11 +22,7 @@ import (
 func TestDashboardJS_LiveEventDOMCap(t *testing.T) {
 	t.Parallel()
 
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	if !strings.Contains(js, "const MAX_LIVE_DOM_EVENTS") {
 		t.Error("dashboard.js: MAX_LIVE_DOM_EVENTS ceiling constant must exist (#398): " +

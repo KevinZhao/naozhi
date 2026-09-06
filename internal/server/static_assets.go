@@ -61,6 +61,9 @@ var runningBannerJS embed.FS
 //go:embed static/file_refs.js
 var fileRefsJS embed.FS
 
+//go:embed static/utilities.js
+var utilitiesJS embed.FS
+
 //go:embed static/cron_view.js
 var cronViewJS embed.FS
 
@@ -151,6 +154,7 @@ var staticAssets = func() map[string]staticAsset {
 		{"system_view.js", systemViewJS, "static/system_view.js", true},
 		{"running_banner.js", runningBannerJS, "static/running_banner.js", true},
 		{"file_refs.js", fileRefsJS, "static/file_refs.js", true},
+		{"utilities.js", utilitiesJS, "static/utilities.js", true},
 		{"cron_view.js", cronViewJS, "static/cron_view.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
@@ -378,4 +382,20 @@ func handleFileRefsJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "file_refs.js")
+}
+
+// handleUtilitiesJS serves static/utilities.js (shared dashboard utilities:
+// dialogs, time/cost formatting, toasts, clipboard helpers).
+func handleUtilitiesJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("utilities.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "utilities.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "utilities.js")
 }

@@ -202,6 +202,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /static/system_view.js", auth(handleSystemViewJS))
 	s.mux.HandleFunc("GET /static/running_banner.js", auth(handleRunningBannerJS))
 	s.mux.HandleFunc("GET /static/file_refs.js", auth(handleFileRefsJS))
+	s.mux.HandleFunc("GET /static/utilities.js", auth(handleUtilitiesJS))
 	s.mux.HandleFunc("GET /static/dashboard.js", auth(handleDashboardJS))
 	s.mux.HandleFunc("GET /static/cron_view.js", auth(handleCronViewJS))
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))
