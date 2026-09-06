@@ -138,10 +138,12 @@ func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 
 	// Mobile long-press rename must go through selectSession so renderMainHeader
 	// repaints the shell that actually belongs to the renamed session.
-	if strings.Contains(js, "        selectedKey = key;\n        selectedNode = node;\n        renameSession();") {
+	// #2558 D4-3: the long-press action moved to mobile_nav.js, where the
+	// dashboard entry points are injected deps.
+	if strings.Contains(js, "nzState.selectedKey = key;\n        nzState.selectedNode = node;\n        deps.renameSession();") {
 		t.Error("long-press rename must not flip selectedKey/selectedNode directly before renameSession()")
 	}
-	if !strings.Contains(js, "        selectSession(key, node);\n        renameSession();") {
+	if !strings.Contains(js, "        deps.selectSession(key, node);\n        deps.renameSession();") {
 		t.Error("long-press rename must call selectSession(key, node) before renameSession()")
 	}
 
@@ -163,10 +165,10 @@ func TestDashboardJS_HeaderFetchErrorPathsStaleChecked(t *testing.T) {
 	if runs == "" {
 		t.Fatal("fetchSessionRuns not found")
 	}
-	if !strings.Contains(runs, "if (!resp.ok) { if (selectedKey !== key) return; panel.hidden = true; setHeaderRunStats(''); return; }") {
+	if !strings.Contains(runs, "if (!resp.ok) { if (nzState.selectedKey !== key) return; panel.hidden = true; setHeaderRunStats(''); return; }") {
 		t.Error("fetchSessionRuns !resp.ok branch must stale-check selectedKey before clearing #header-runstats")
 	}
-	if !strings.Contains(runs, "} catch (_) {\n    if (selectedKey !== key) return;\n    panel.hidden = true;\n    setHeaderRunStats('');") {
+	if !strings.Contains(runs, "} catch (_) {\n    if (nzState.selectedKey !== key) return;\n    panel.hidden = true;\n    setHeaderRunStats('');") {
 		t.Error("fetchSessionRuns catch branch must stale-check selectedKey before clearing #header-runstats")
 	}
 
@@ -182,11 +184,28 @@ func TestDashboardJS_HeaderFetchErrorPathsStaleChecked(t *testing.T) {
 	}
 }
 
+// readDashboardJS returns the dashboard's own module PLUS the modules split
+// out of it (#2558 D4). Source-level contract tests assert on behaviour that
+// used to live in one file; concatenating keeps them valid across the split
+// without each test having to know which module a helper landed in. Tests
+// that must pin a specific file read that file directly instead.
 func readDashboardJS(t *testing.T) string {
 	t.Helper()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+	var b []byte
+	for _, name := range []string{
+		"dashboard.js",
+		"render_md.js",
+		"self_update.js",
+		"voice.js",
+		"session_header.js",
+		"composer_files.js",
+		"mobile_nav.js",
+	} {
+		data := staticAssetBytes(name)
+		if data == nil {
+			t.Fatalf("%s not embedded", name)
+		}
+		b = append(append(b, data...), '\n')
 	}
-	return string(data)
+	return string(b)
 }

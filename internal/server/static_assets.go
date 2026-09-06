@@ -40,6 +40,15 @@ var selfUpdateJS embed.FS
 //go:embed static/voice.js
 var voiceJS embed.FS
 
+//go:embed static/session_header.js
+var sessionHeaderJS embed.FS
+
+//go:embed static/composer_files.js
+var composerFilesJS embed.FS
+
+//go:embed static/mobile_nav.js
+var mobileNavJS embed.FS
+
 //go:embed static/cron_view.js
 var cronViewJS embed.FS
 
@@ -123,6 +132,9 @@ var staticAssets = func() map[string]staticAsset {
 		{"render_md.js", renderMdJS, "static/render_md.js", true},
 		{"self_update.js", selfUpdateJS, "static/self_update.js", true},
 		{"voice.js", voiceJS, "static/voice.js", true},
+		{"session_header.js", sessionHeaderJS, "static/session_header.js", true},
+		{"composer_files.js", composerFilesJS, "static/composer_files.js", true},
+		{"mobile_nav.js", mobileNavJS, "static/mobile_nav.js", true},
 		{"cron_view.js", cronViewJS, "static/cron_view.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
@@ -245,4 +257,49 @@ func handleVoiceJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "voice.js")
+}
+
+// handleSessionHeaderJS serves static/session_header.js (the chat header run-history panel + status chips, imported by dashboard.js).
+func handleSessionHeaderJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("session_header.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "session_header.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "session_header.js")
+}
+
+// handleComposerFilesJS serves static/composer_files.js (composer attachments, imported by dashboard.js).
+func handleComposerFilesJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("composer_files.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "composer_files.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "composer_files.js")
+}
+
+// handleMobileNavJS serves static/mobile_nav.js (mobile shell navigation, imported by dashboard.js).
+func handleMobileNavJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("mobile_nav.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "mobile_nav.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "mobile_nav.js")
 }

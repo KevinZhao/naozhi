@@ -17,11 +17,7 @@ import (
 // payloads do not sneak in via sidebar / key fallback displays.
 func TestDashboardJS_SanitizeKeySlug_UnicodeColons(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	// Window the search to the sanitizeKeySlug body so an unrelated regex
 	// elsewhere (e.g. message-rendering) doesn't produce a false positive.
@@ -66,11 +62,7 @@ func TestDashboardJS_SanitizeKeySlug_UnicodeColons(t *testing.T) {
 // lifetime.
 func TestDashboardJS_CopyStringToClipboard_FinallyDetach(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	fnIdx := strings.Index(js, "async function copyStringToClipboard(s)")
 	if fnIdx < 0 {

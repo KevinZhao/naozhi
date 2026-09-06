@@ -20,11 +20,7 @@ import (
 
 func TestDashboardJS_GitChipWiring(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	for _, want := range []string{
 		// Endpoint + the async fill path.
@@ -69,11 +65,7 @@ func TestDashboardJS_GitChipWiring(t *testing.T) {
 // missing esc() would be a stored-XSS vector in the dashboard header.
 func TestDashboardJS_GitChipEscapesDynamicValues(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	body, ok := funcBody(js, "function gitChipHtml(")
 	if !ok {
