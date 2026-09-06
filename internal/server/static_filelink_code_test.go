@@ -114,11 +114,7 @@ func TestDashboardJS_FileRefCode_Helper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read render_md.js: %v", err)
 	}
-	dj, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(rmd) + "\n" + string(dj)
+	js := string(rmd) + "\n" + readDashboardJS(t)
 
 	// 1. The helper must exist.
 	fnIdx := strings.Index(js, "function fileRefCode(inner, className)")

@@ -14,13 +14,17 @@ import { esc, escAttr, showToast, nzState, nzViews } from './nz_util.js';
 import {
   eventHtml,
   fetchEvents,
-  fmtDuration,
-  refreshBanner,
   renderEventsWithDividers,
   sessionScrollPos,
-  sid,
   wsm,
 } from './dashboard.js';
+import {
+  sid,
+} from './file_refs.js';
+import {
+  fmtDuration,
+  refreshBanner,
+} from './running_banner.js';
 
 (function () {
   'use strict';

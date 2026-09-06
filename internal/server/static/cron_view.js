@@ -14,11 +14,8 @@ import {
   lsGet,
   lsSet,
   mobileBack,
-  processEventsForDisplay,
-  regroupAvatars,
   renderBackendPicker,
   renderEventsWithDividers,
-  setActiveSessionCard,
   setActivityView,
   shortPath,
   showAPIError,
@@ -27,6 +24,11 @@ import {
   timeDividerHtml,
   wsm,
 } from './dashboard.js';
+import {
+  processEventsForDisplay,
+  regroupAvatars,
+  setActiveSessionCard,
+} from './file_refs.js';
 import {
   renderMd,
   runPendingAsync,

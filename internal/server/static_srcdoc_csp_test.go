@@ -18,15 +18,16 @@ import (
 // TestHandleFileGet_RenderInlineIframeOnly.
 func TestDashboardJS_SandboxedPreviewViaEndpoint(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// #2558 D4-4: the preview helpers moved to file_refs.js.
+	data, err := fileRefsJS.ReadFile("static/file_refs.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read file_refs.js: %v", err)
 	}
 	js := string(data)
 
 	idx := strings.Index(js, "function renderSandboxedBlob(")
 	if idx < 0 {
-		t.Fatal("renderSandboxedBlob not found in dashboard.js")
+		t.Fatal("renderSandboxedBlob not found in file_refs.js")
 	}
 	end := strings.Index(js[idx:], "\n}")
 	if end < 0 {

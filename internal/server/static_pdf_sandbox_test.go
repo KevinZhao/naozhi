@@ -31,11 +31,8 @@ func pdfIframeBlock(t *testing.T, js, anchor string) string {
 // same-origin to the dashboard. sandbox="" is the defense-in-depth.
 func TestDashboardJS_PDFIframe_Sandboxed(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	block := pdfIframeBlock(t, string(data), "mime === 'application/pdf'")
+	js := readDashboardJS(t)
+	block := pdfIframeBlock(t, js, "mime === 'application/pdf'")
 	if !strings.Contains(block, "sandbox") {
 		t.Error("dashboard.js PDF preview iframe must set a sandbox attribute (defense-in-depth, [R202606g-SEC-4])")
 	}

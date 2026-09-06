@@ -49,6 +49,18 @@ var composerFilesJS embed.FS
 //go:embed static/mobile_nav.js
 var mobileNavJS embed.FS
 
+//go:embed static/split_view.js
+var splitViewJS embed.FS
+
+//go:embed static/system_view.js
+var systemViewJS embed.FS
+
+//go:embed static/running_banner.js
+var runningBannerJS embed.FS
+
+//go:embed static/file_refs.js
+var fileRefsJS embed.FS
+
 //go:embed static/cron_view.js
 var cronViewJS embed.FS
 
@@ -135,6 +147,10 @@ var staticAssets = func() map[string]staticAsset {
 		{"session_header.js", sessionHeaderJS, "static/session_header.js", true},
 		{"composer_files.js", composerFilesJS, "static/composer_files.js", true},
 		{"mobile_nav.js", mobileNavJS, "static/mobile_nav.js", true},
+		{"split_view.js", splitViewJS, "static/split_view.js", true},
+		{"system_view.js", systemViewJS, "static/system_view.js", true},
+		{"running_banner.js", runningBannerJS, "static/running_banner.js", true},
+		{"file_refs.js", fileRefsJS, "static/file_refs.js", true},
 		{"cron_view.js", cronViewJS, "static/cron_view.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
@@ -302,4 +318,64 @@ func handleMobileNavJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "mobile_nav.js")
+}
+
+// handleSplitViewJS serves static/split_view.js (desktop split-view docking, imported by dashboard.js).
+func handleSplitViewJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("split_view.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "split_view.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "split_view.js")
+}
+
+// handleSystemViewJS serves static/system_view.js (the 系统 top-level view, imported by dashboard.js).
+func handleSystemViewJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("system_view.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "system_view.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "system_view.js")
+}
+
+// handleRunningBannerJS serves static/running_banner.js (the transcript running banner, imported by dashboard.js).
+func handleRunningBannerJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("running_banner.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "running_banner.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "running_banner.js")
+}
+
+// handleFileRefsJS serves static/file_refs.js (file-reference buttons + preview drawer, imported by dashboard.js).
+func handleFileRefsJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("file_refs.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "file_refs.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "file_refs.js")
 }
