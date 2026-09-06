@@ -203,11 +203,7 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 //  3. 移动端 .ctr-detail 收紧 max-height 到 50vh
 func TestDashboardHTML_CronHistoryRedesign_InlineExpandMarkup(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
-	html := string(data)
+	html := readDashboardHTMLAndCSS(t)
 
 	// 1. Sheet 容器已删除。
 	for _, banned := range []string{

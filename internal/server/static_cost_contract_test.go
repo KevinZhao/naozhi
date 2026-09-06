@@ -26,10 +26,7 @@ func TestStaticCostLedgerContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	html, err := os.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatal(err)
-	}
+	html := []byte(readDashboardHTMLAndCSS(t))
 	for _, want := range []string{
 		"NZ_CONTRACT.API.cost_summary + '?group_by=unit", "function summarizeCostBuckets", "function costStatHtml",
 		"function refreshCostSummary", "近 30 天花费", "累计花费", "costCardTitle(c)", "svc-stat-sub",

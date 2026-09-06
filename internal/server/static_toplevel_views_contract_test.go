@@ -22,11 +22,7 @@ import (
 // mobile bottom-tab-bar CSS.
 func TestDashboardHTML_RailStructure(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
-	html := string(data)
+	html := readDashboardHTMLAndCSS(t)
 
 	wants := []string{
 		`class="ab-top"`,                       // top nav group
@@ -58,11 +54,7 @@ func TestDashboardHTML_RailStructure(t *testing.T) {
 // shows exactly one view at a time.
 func TestDashboardHTML_TopLevelViewContainers(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
-	html := string(data)
+	html := readDashboardHTMLAndCSS(t)
 
 	// Containers exist and are hidden by default (shown only under their view
 	// class).
@@ -249,11 +241,7 @@ func TestDashboardJS_ValidDotClassesIncludesUnreachable(t *testing.T) {
 // top-nav controls.
 func TestDashboardHTML_RailA11yLabelsLocalized(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
-	html := string(data)
+	html := readDashboardHTMLAndCSS(t)
 	wants := []string{
 		`id="abnav-cron" data-view="cron" title="定时任务" aria-label="自动化视图"`,
 		`id="abnav-system" data-view="system" title="系统任务（内置后台守护）" aria-label="系统任务视图"`,

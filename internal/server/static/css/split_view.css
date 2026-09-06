@@ -1,0 +1,593 @@
+/* split_view.css — extracted verbatim from dashboard.html's inline <style> block
+ * (#2559 D6). The split is sequential: each file is a contiguous slice of the
+ * original block and dashboard.html links them in the same order, so the
+ * cascade (later rule wins at equal specificity, @media position) is
+ * unchanged. Edit a view's rules here, next to the module that renders it.
+ */
+/* ===== Split view (desktop) =====
+   When a preview / 追问 drawer opens, instead of overlaying the transcript we
+   dock it as a right-hand split: the .container reserves `--nz-split-w` of
+   right padding so the flex children (activity-bar + sidebar + main) compress
+   into the remaining width, and the fixed drawer fills the reserved strip.
+   The transcript stays fully visible (and keeps showing its latest progress —
+   see syncSplitScroll in dashboard.js). A draggable #split-resizer sits on the
+   seam. Phone (≤768px) keeps the original full-width slide-over overlay, so
+   every rule here is gated behind the ≥769px breakpoint. */
+/* --nz-split-w defaults to half the viewport at runtime (set by the JS
+   controller's splitDefaultW); the 50vw fallback here keeps the very first
+   paint sensible before JS runs. The split docks the preview / 追问 panes at
+   half the dashboard width on PC. */
+:root{--nz-split-w:50vw}
+#split-resizer{display:none}
+/* The split docks the preview / 追问 drawers, which only exist in the chat
+   view. The padding-right + seam are therefore scoped to chat (body carries
+   NONE of the nz-view-* classes); without this guard, switching to the
+   assets / cron / settings views while a drawer is open would squeeze those
+   (drawer-less) views into the left strip and reserve an empty right strip.
+   The .nz-split-chat shorthand keeps the long :not() chain in one place. */
+@media(min-width:769px){
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) .container{padding-right:var(--nz-split-w)}
+  /* Docked drawers fill the reserved strip and drop the floating shadow —
+     the border-left now reads as the split seam, not a drawer edge. */
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) .fv-drawer.fv-open,
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) .aside-drawer.visible{width:var(--nz-split-w);box-shadow:none}
+  /* Z-order: preview and 追问 can be open at once and share the right strip.
+     The drawer opened LAST gets .nz-split-front (z-index 202) so it stacks
+     on top; the other stays at its base z-index 200. The JS controller moves
+     the class on each open. A subtle shadow on the front pane hints depth. */
+  body.nz-split-open .fv-drawer.nz-split-front,
+  body.nz-split-open .aside-drawer.nz-split-front{z-index:202;box-shadow:var(--nz-shadow-drawer)}
+  /* Draggable seam. Sits exactly on the left edge of the reserved strip;
+     the 6px hit area straddles the seam (margin-right:-3px), so it must paint
+     above BOTH panes — including the .nz-split-front one at 202 — or the 3px
+     overlapping the front drawer are swallowed and the drag target halves
+     (#2434). Background stays transparent until hover, so the higher z-index
+     has no visual cost. */
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:203;background:transparent;transition:background .15s}
+  body.nz-split-open #split-resizer:hover,#split-resizer.dragging{background:var(--nz-accent)}
+}
+
+/* Voice recording overlay */
+.voice-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:var(--nz-scrim);z-index:var(--nz-z-overlay);display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
+.voice-overlay.show{opacity:1;pointer-events:auto}
+.vo-card{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xl);padding:32px 40px;display:flex;flex-direction:column;align-items:center;gap:16px;min-width:200px;transition:border-color .2s}
+.vo-timer{font-size:48px;color:var(--nz-text-strong);font-weight:300;font-family:'SF Mono',ui-monospace,monospace;letter-spacing:2px}
+.vo-wave{display:flex;align-items:center;justify-content:center;gap:3px;height:40px}
+.vo-wave span{display:block;width:4px;background:var(--nz-green);border-radius:2px;transition:background .2s;animation:wave-bar .8s ease-in-out infinite}
+.vo-wave span:nth-child(1){animation-delay:0s;height:12px}
+.vo-wave span:nth-child(2){animation-delay:.1s;height:20px}
+.vo-wave span:nth-child(3){animation-delay:.2s;height:28px}
+.vo-wave span:nth-child(4){animation-delay:.3s;height:24px}
+.vo-wave span:nth-child(5){animation-delay:.15s;height:16px}
+.vo-wave span:nth-child(6){animation-delay:.25s;height:32px}
+.vo-wave span:nth-child(7){animation-delay:.35s;height:20px}
+@keyframes wave-bar{0%,100%{transform:scaleY(1)}50%{transform:scaleY(2.5)}}
+.vo-hint{font-size:var(--nz-fs-base);color:var(--nz-text-mute);transition:all .2s}
+.voice-overlay.cancel .vo-wave span{background:var(--nz-red)}
+.voice-overlay.cancel .vo-hint{color:var(--nz-red);font-weight:600}
+.voice-overlay.cancel .vo-card{border-color:var(--nz-red)}
+.voice-overlay.transcribing .vo-wave span{animation:none;height:4px;background:var(--nz-accent)}
+.voice-overlay.transcribing .vo-hint{color:var(--nz-accent)}
+
+/* ui-polish-light-theme D5: the keyboard cheat line only matters while
+   composing — fade it in on focus instead of narrating full-time. Reserved
+   height stays (opacity, not display) so the input area doesn't jump. */
+.input-hints{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);margin-top:4px;text-align:right;user-select:none;opacity:0;transition:opacity var(--nz-dur) var(--nz-ease)}
+.input-area:focus-within .input-hints{opacity:1}
+/* ui-polish-light-theme D5: the banner is a high-frequency companion, not an
+   alert — full-width tinted strip + accent text shouted. Quiet chrome: plain
+   border, muted text; the pulsing dot alone signals "running". Click-to-
+   scroll behaviour unchanged. */
+.running-banner{border-bottom:1px solid var(--nz-border);font-size:var(--nz-fs-sm2);color:var(--nz-text-mute);flex-shrink:0;animation:rb-appear .18s ease-out}
+@keyframes rb-appear{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.rb-tool-row{display:flex;align-items:center;padding:6px 12px;gap:8px}
+.rb-tool-row .running-status{flex:1;min-width:0;display:flex;align-items:center;gap:4px;overflow:hidden}
+.rb-tool-row .running-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--nz-accent);flex-shrink:0;animation:pulse var(--nz-dur-loop) ease-in-out infinite,rb-dot-ripple var(--nz-dur-loop) ease-out infinite}
+@keyframes rb-dot-ripple{0%{box-shadow:0 0 0 0 rgba(88,166,255,.55)}70%{box-shadow:0 0 0 6px rgba(88,166,255,0)}100%{box-shadow:0 0 0 0 rgba(88,166,255,0)}}
+#tool-activity{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rb-elapsed{color:var(--nz-text-mute);font-size:var(--nz-fs-sm);flex-shrink:0;font-variant-numeric:tabular-nums}
+.rb-thinking-summary{padding:0 12px 4px 22px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rb-agents{max-height:120px;overflow-y:auto}
+.rb-agent-row{display:flex;align-items:center;gap:5px;padding:3px 12px 3px 22px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.rb-agent-row .sa-dot{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--nz-accent);flex-shrink:0;animation:pulse var(--nz-dur-loop) ease-in-out infinite}
+.rb-agent-row.done .sa-dot{background:var(--nz-green);animation:none}
+.rb-agent-row .sa-bg{color:var(--nz-amber);margin-right:2px;font-size:var(--nz-fs-2xs)}
+.rb-agent-row .sa-name{color:var(--nz-text);font-weight:500}
+.rb-agent-row .sa-detail{color:var(--nz-text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rb-agent-row .sa-stat{color:var(--nz-text-dim);flex-shrink:0}
+.rb-agent-row.done .sa-name{color:var(--nz-text-dim)}
+.rb-agent-row.done .sa-detail{color:var(--nz-text-faint)}
+.rb-team-header{padding:3px 12px 1px 22px;font-size:var(--nz-fs-xs);color:var(--nz-amber);display:flex;align-items:center;gap:4px}
+.rb-team-header .team-icon{font-size:var(--nz-fs-2xs)}
+.rb-team-header .team-count{color:var(--nz-text-dim);font-size:var(--nz-fs-2xs)}
+.rb-stats{padding:2px 12px 4px 22px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* RFC v4 agent-team-ui §3.6 — drill-in affordances.
+   The banner's agent rows are clickable; "active" row shows which internal
+   stream the main event area is rendering. Breadcrumb sits above the
+   events-scroll pane in agent-view mode with a back arrow. */
+.rb-agent-row[role="button"]{cursor:pointer;border-radius:var(--nz-radius-sm);transition:background-color .15s}
+.rb-agent-row[role="button"]:hover{background:var(--nz-bg-2)}
+.rb-agent-row[role="button"]:focus{outline:2px solid var(--nz-accent);outline-offset:-1px}
+.rb-agent-row.active{background:var(--nz-bg-2);box-shadow:inset 2px 0 0 var(--nz-selected-bar)}
+.rb-agent-row.active .sa-name{color:var(--nz-accent)}
+
+.agent-breadcrumb{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1);font-size:var(--nz-fs-sm);flex-wrap:wrap}
+.agent-breadcrumb .bc-back{background:transparent;color:var(--nz-accent);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:2px 10px;font-size:var(--nz-fs-sm);cursor:pointer}
+.agent-breadcrumb .bc-back:hover{background:var(--nz-bg-2)}
+.agent-breadcrumb .bc-tag{display:inline-block;background:var(--nz-accent);color:#fff;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);padding:1px 6px;text-transform:uppercase}
+.agent-breadcrumb .bc-name{color:var(--nz-text);font-weight:500}
+.agent-breadcrumb .bc-team{color:var(--nz-amber);font-size:var(--nz-fs-xs)}
+.agent-breadcrumb .bc-stat{color:var(--nz-text-dim);margin-left:auto;font-size:var(--nz-fs-xs)}
+
+/* tool_result folded render — details/summary pattern for low-noise view. */
+.event.tool_result .tr-wrap{border-left:2px solid var(--nz-border);padding-left:10px;margin:2px 0}
+.event.tool_result .tr-summary{color:var(--nz-text-dim);cursor:pointer;font-size:var(--nz-fs-sm);padding:2px 0}
+.event.tool_result .tr-summary:hover{color:var(--nz-text)}
+.event.tool_result .tr-detail{margin:4px 0;padding:6px 8px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-xs);max-height:400px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.event.tool_result .tr-persisted{display:inline-block;margin-top:4px;font-size:var(--nz-fs-xs);color:var(--nz-accent);text-decoration:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:2px 8px}
+.event.tool_result .tr-persisted:hover{background:var(--nz-bg-2)}
+
+/* Toast */
+/* z-index 210 keeps the toast above a docked split drawer (z-index 200) so
+   feedback (errors, "copied", cron results) stays visible while a preview /
+   追问 pane occupies the right strip; still below ctx-menu (211). */
+.toast{position:fixed;bottom:20px;right:20px;background:var(--nz-red);color:#fff;padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-base);z-index:var(--nz-z-toast);opacity:0;pointer-events:none;transition:opacity .3s}
+/* Stays pointer-events:none while shown: the toast is the topmost layer
+   (--nz-z-toast) and has no click handler, so taps must fall through to the
+   lightbox toolbar / voice overlay underneath instead of being swallowed. */
+.toast.show{opacity:1}
+/* RNEW-UX-010 — visually hidden live region for assistive tech. Uses the
+   standard "sr-only" recipe: in flow but clipped to 1x1, so screen readers
+   pick it up but sighted users never see it. Display:none would suppress
+   announcement, hence the clip() trick instead. */
+.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* RNEW-UX-012 — skeleton placeholders while the first sessions fetch is in
+   flight. Matches .session-card metrics (padding 12x16, ~54px tall) so the
+   transition to real cards doesn't shift layout. Shimmer is a left-to-right
+   gradient sweep over ~1.4s — fast enough to read as "loading", slow enough
+   not to distract. */
+.skeleton-card{padding:12px 16px;border-bottom:1px solid var(--nz-bg-2);display:flex;flex-direction:column;gap:8px}
+.skeleton-line{height:12px;border-radius:var(--nz-radius-sm);background:linear-gradient(90deg,var(--nz-bg-1) 0,var(--nz-bg-2) 40%,var(--nz-bg-1) 80%);background-size:200% 100%;animation:skeleton-shimmer var(--nz-dur-loop) ease-in-out infinite}
+.skeleton-line.sk-title{width:70%;height:14px}
+.skeleton-line.sk-meta{width:45%;height:10px}
+@keyframes skeleton-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+/* Auth modal */
+/* Modal scrim: 0.75 matches macOS / Material Design spec for system-level
+   modals — 0.6 (pre-Round 128) let 40% of the main content bleed through,
+   competing for attention with the dialog. Modal body itself is opaque
+   (background:var(--nz-bg-1)) so this value only controls the dim behind
+   the card. Don't push above 0.8 — that reads as "page has crashed / is
+   disabled" rather than "focus on this dialog". */
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:var(--nz-scrim);display:flex;align-items:center;justify-content:center;z-index:var(--nz-z-modal)}
+.modal{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);padding:24px;width:360px}
+.modal h3{font-size:15px;color:var(--nz-text-strong);margin-bottom:12px}
+.modal input{width:100%;padding:8px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-base);outline:none}
+.modal input:focus{border-color:var(--nz-rust)}
+.modal .modal-btns{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+.modal .modal-btns button{padding:6px 16px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:var(--nz-fs-base)}
+.modal .modal-btns button.primary{background:#238636;border-color:#238636;color:#fff}
+/* UX2: .modal-btns button.danger — red variant for destructive confirm dialogs
+   (delete session, delete cron). Uses the same --nz-red token as .cron-card
+   .cc-btn.danger so the destructive palette is consistent across surfaces. */
+.modal .modal-btns button.danger{background:var(--nz-red);border-color:var(--nz-red);color:#fff}
+.modal .modal-btns button.danger:hover{filter:brightness(1.1)}
+.modal.confirm-dialog p{margin:8px 0 4px;color:var(--nz-text);line-height:1.5}
+/* Round 2 R-12: .confirm-msg honours newlines for multi-paragraph
+ * destructive copy (RFC §7.5). Default <p> styling collapses them, so
+ * white-space:pre-wrap is required. Other dialogs that pass single-line
+ * `message` strings render identically because pre-wrap is a superset
+ * of normal whitespace handling. */
+.modal.confirm-dialog .confirm-msg{white-space:pre-wrap;word-break:break-word}
+.modal.confirm-dialog .confirm-detail{color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);margin-top:8px;word-break:break-all}
+/* Round 2 R-12: countdown disables the destructive primary for N s; the
+ * built-in [disabled] dimming reads as "waiting" but isn't directional.
+ * A subtle pulse on the disabled state communicates "tick…tick…tick" so
+ * fat-finger Enter doesn't feel like a broken button. */
+.modal.confirm-dialog .modal-btns button.danger[disabled]{opacity:.55;cursor:not-allowed;animation:confirmCountdown 1s ease-in-out infinite;background:var(--nz-red);border-color:var(--nz-red);color:#fff}
+@keyframes confirmCountdown{0%,100%{opacity:.55}50%{opacity:.75}}
+@media (prefers-reduced-motion:reduce){
+  .modal.confirm-dialog .modal-btns button.danger[disabled]{animation:none}
+}
+/* RNEW-UX-013 prompt-dialog shares modal shell with confirm-dialog but has an
+   input. Message above the input uses the mute colour so the input itself
+   stays the primary focal point. */
+.modal.prompt-dialog .prompt-message{margin:8px 0 10px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);line-height:1.5}
+.modal.prompt-dialog .prompt-input{margin-top:4px}
+.modal textarea{width:100%;padding:8px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-base);font-family:inherit;outline:none;resize:vertical}
+.modal textarea:focus{border-color:var(--nz-rust)}
+.modal-section-label{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-bottom:6px}
+/* Auth modal hint: tells first-time operators where the token lives so the
+   dashboard isn't a dead-end for someone with the URL but no prior context.
+   Inline <code> spans use the same pill treatment as .md-code for visual
+   parity with the rest of the UI's inline code. */
+.modal .auth-hint{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin:-4px 0 10px 0;line-height:1.5}
+.modal .auth-hint code{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:0 5px;font-size:var(--nz-fs-xs);color:var(--nz-text);font-family:'SF Mono',ui-monospace,monospace}
+/* R110-P3 登录页 brand lockup: a small mark + wordmark anchors the auth modal
+   so first-time operators recognize they're on the right service. Using text
+   characters (naozhi) avoids shipping a logo asset — the bracket mark
+   matches the `>_` motif used in the empty state. Keep subtle: bigger than
+   body copy but still secondary to the primary action (token input). */
+.modal .auth-brand{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.modal .auth-brand .ab-mark{width:36px;height:36px;border-radius:var(--nz-radius-md);background:linear-gradient(135deg,rgba(31,111,235,.18),rgba(88,166,255,.08));border:1px solid var(--nz-blue);color:var(--nz-accent);display:flex;align-items:center;justify-content:center;font-family:'SF Mono',ui-monospace,monospace;font-size:17px;font-weight:700;line-height:1}
+.modal .auth-brand .ab-wordmark{display:flex;flex-direction:column;line-height:1.2}
+.modal .auth-brand .ab-wordmark .ab-name{font-size:15px;color:var(--nz-text-strong);font-weight:600}
+.modal .auth-brand .ab-wordmark .ab-tag{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+/* R110-P1 long-press context menu: surfaces session-card actions (rename /
+   delete / copy key) on touch devices where hover-only buttons are invisible.
+   Rendered as an overlay + positioned menu pair so click-outside-to-close is
+   cheap to implement. The overlay sits one step below --nz-z-menu (211),
+   above .modal-overlay (205), so the menu can opt to layer on top of a
+   confirm dialog mid-flight without swapping stacking contexts. Animation: none — a 120ms fade-in would hurt
+   perceived latency on the long-press target state that already takes 500ms
+   to trigger. */
+.ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:calc(var(--nz-z-menu) - 1)}
+.ctx-menu{position:fixed;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:4px;min-width:160px;box-shadow:var(--nz-shadow-2);z-index:var(--nz-z-menu);user-select:none;-webkit-user-select:none}
+.ctx-menu-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--nz-radius-ms);cursor:pointer;color:var(--nz-text);font-size:var(--nz-fs-base);min-height:44px;-webkit-tap-highlight-color:transparent;transition:background .1s}
+.ctx-menu-item:hover,.ctx-menu-item:focus-visible{background:var(--nz-bg-2);outline:none}
+.ctx-menu-item.danger{color:var(--nz-red)}
+.ctx-menu-item.danger:hover{background:rgba(218,54,51,.15)}
+.ctx-menu-item .ctx-icon{width:16px;flex-shrink:0;text-align:center;opacity:.7}
+.session-card.long-pressing{background:rgba(88,166,255,.08);transition:background .12s}
+/* Picker list used in modals (presets, projects, workspaces) */
+.proj-pick{list-style:none;margin:0;padding:0;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-0);max-height:220px;overflow-y:auto}
+.proj-pick li{padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--nz-bg-2);transition:background .12s;min-height:44px;display:flex;flex-direction:column;justify-content:center;-webkit-tap-highlight-color:transparent}
+.proj-pick li:last-child{border-bottom:none}
+.proj-pick li:hover{background:var(--nz-bg-1)}
+.proj-pick li.selected,.proj-pick li[aria-selected="true"]{background:var(--nz-selected-bg);box-shadow:inset 2px 0 0 var(--nz-selected-bar)}
+.proj-pick .pp-name{font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proj-pick .pp-path{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.proj-pick .pp-custom{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);display:flex;align-items:center;gap:6px}
+.proj-pick .pp-custom-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:var(--nz-radius-sm);background:var(--nz-bg-2);color:var(--nz-text-mute);font-size:var(--nz-fs-sm);line-height:1;flex-shrink:0}
+/* New session command palette */
+.cmd-palette-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:var(--nz-scrim);display:flex;align-items:flex-start;justify-content:center;z-index:var(--nz-z-modal);padding-top:12vh}
+.cmd-palette{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);width:min(560px,92vw);max-height:72vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:var(--nz-shadow-3)}
+.cmd-palette-header{padding:14px 16px;border-bottom:1px solid var(--nz-bg-2);flex-shrink:0}
+.cmd-palette-header input{width:100%;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-base);outline:none}
+.cmd-palette-header input:focus{border-color:var(--nz-rust)}
+.cmd-palette-list{flex:1;overflow-y:auto;padding:6px;min-height:0}
+.cmd-palette-item{padding:8px 10px;border-radius:var(--nz-radius-ms);cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .1s}
+.cmd-palette-item:hover{background:var(--nz-hover-bg)}
+.cmd-palette-item.active{background:var(--nz-selected-bg);box-shadow:inset 2px 0 0 var(--nz-selected-bar)}
+.cmd-palette-item .cp-main{flex:1;min-width:0}
+.cmd-palette-item .cp-name{font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cp-backend-fail{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);white-space:nowrap}
+.cmd-palette-item .cp-path{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,monospace}
+.cmd-palette-item .cp-node{font-size:var(--nz-fs-2xs);padding:1px 5px;border-radius:var(--nz-radius-xs);color:#fff;flex-shrink:0}
+.cmd-palette-item .cp-icon{color:var(--nz-text-mute);font-size:var(--nz-fs-base);flex-shrink:0;width:16px;text-align:center}
+/* R110-P3 palette favorite indicator: gold star at the row icon slot.
+   Same slot as the default ▸ glyph so layout doesn't shift. Color matches
+   the sidebar .section-header .sh-btn.star-on treatment (--nz-star-fg) so the
+   two "this project is starred" surfaces read as the same state. */
+.cmd-palette-item .cp-icon-fav{color:var(--nz-star-fg)}
+.cmd-palette-item mark{background:transparent;color:var(--nz-accent);font-weight:600}
+.cmd-palette-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-sm2)}
+.cmd-palette-footer{padding:8px 14px;border-top:1px solid var(--nz-bg-2);font-size:var(--nz-fs-xs);color:var(--nz-text-dim);display:flex;gap:14px;flex-wrap:wrap;flex-shrink:0;background:var(--nz-bg-0)}
+.cmd-palette-footer kbd{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:0 4px;font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);font-family:inherit}
+
+/* Toast variants */
+.toast.warning{background:#9e6a03}
+.toast.success{background:#238636}
+.toast.error{background:#8e1519}
+
+.node-badge{display:inline-block;padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.3px;color:#fff;vertical-align:middle;margin-right:4px}
+.node-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin:0 1px 0 6px;vertical-align:middle}
+.node-dot:first-child{margin-left:0}
+.node-dot.ok{background:var(--nz-green)}
+.node-dot.error{background:var(--nz-red)}
+.node-info{color:var(--nz-text-mute);font-size:var(--nz-fs-sm2)}
+
+/* History popover/sheet backdrop. Before R20260605 the popover had no
+   backdrop, so its fixed box silently sat on top of the node switcher and
+   session list: clicking those covered controls only dismissed the popover
+   (the document-level outside-click handler) without actuating the control,
+   and there was no visual "a layer is open" cue. The backdrop captures that
+   click explicitly (→ closeHistoryPopover) and dims the background a touch.
+   Lighter than .modal-overlay's .75 scrim because a history list is a
+   transient popover, not a blocking modal. z-index 99 sits just under the
+   desktop .history-popover (100); the mobile sheet (200) gets the heavier
+   variant below. */
+.history-backdrop{position:fixed;inset:0;z-index:99;background:transparent;animation:fade-in .15s ease}
+.history-backdrop.is-sheet{z-index:199;background:rgba(0,0,0,.4)}
+@keyframes fade-in{from{opacity:0}to{opacity:1}}
+.history-popover{position:absolute;top:100%;left:0;z-index:var(--nz-z-popover);min-width:280px;max-width:360px;max-height:320px;overflow-y:auto;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2);padding:0;animation:pop-in .15s ease}
+@keyframes pop-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.history-popover-header{padding:8px 12px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);border-bottom:1px solid var(--nz-bg-2);font-weight:600;letter-spacing:.3px;background:var(--nz-bg-0);border-radius:var(--nz-radius-md) 8px 0 0}
+.history-popover-header .hp-count{color:var(--nz-text-dim);font-weight:500;margin-left:4px}
+.history-popover-header .hp-subtitle{display:block;margin-top:3px;font-size:var(--nz-fs-2xs);font-weight:400;letter-spacing:0;color:var(--nz-text-mute)}
+/* R110-P1 history-drawer search: the input sits between the header and
+   the items list. Not sticky because the `.hp-day-header` rule already
+   uses position:sticky with top:0 relative to the popover scroll
+   container; adding a second sticky element at the same anchor would
+   make them fight for the top slot on scroll. Operators get their
+   day-anchor; the search stays where they typed. */
+.history-popover-search{padding:6px 12px;background:var(--nz-bg-0);border-bottom:1px solid var(--nz-bg-2)}
+.hp-search-input{width:100%;padding:5px 8px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);color:var(--nz-text);font-size:var(--nz-fs-sm);font-family:inherit;outline:none;transition:border-color .1s}
+.hp-search-input:focus{border-color:var(--nz-rust)}
+.hp-search-input::placeholder{color:var(--nz-text-placeholder)}
+.history-popover-item{padding:8px 12px;cursor:pointer;transition:background .1s;border-bottom:1px solid var(--nz-bg-2);position:relative}
+.history-popover-item:last-child{border-bottom:none}
+.history-popover-item:hover{background:var(--nz-hover-bg)}
+.history-popover-item .hp-prompt{font-size:var(--nz-fs-sm2);color:var(--nz-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.history-popover-item .hp-meta{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:3px;display:flex;align-items:center;gap:6px}
+.history-popover-item .hp-meta .hp-project{color:var(--nz-project-label-fg);font-weight:500}
+.history-popover-item .hp-meta .hp-tool{color:var(--nz-accent)}
+.history-popover-item .hp-meta .hp-dot{color:var(--nz-border)}
+/* Day group header inside the history popover. Dropped text-transform:uppercase
+   in Round 129 — the browser returns "Wed, Apr 29" for English locales and
+   中文 weekdays like "周三" for CJK locales; uppercase made the former shout
+   ("WED, APR 29") and did nothing for the latter, creating a mixed-register
+   look. Typography now reads naturally in both locales. */
+.hp-day-header{padding:6px 12px 4px;font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);font-weight:600;letter-spacing:.3px;background:var(--nz-bg-0);border-bottom:1px solid var(--nz-bg-2);position:sticky;top:0;z-index:1}
+.history-popover-empty{padding:16px;text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-sm)}
+.history-popover-empty .hp-empty-hint{display:inline-block;margin-top:6px;color:var(--nz-text-faint);font-size:var(--nz-fs-xs)}
+
+.workspace-path{font-size:var(--nz-fs-sm);color:var(--nz-text-dim);margin-top:4px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'SF Mono',SFMono-Regular,Consolas,monospace}
+.workspace-path:hover{color:var(--nz-text-mute);text-decoration:underline}
+
+/* Markdown rendering */
+.md-pre{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:10px 12px;margin:8px 0;overflow-x:auto;font-size:var(--nz-fs-sm2);line-height:1.6;max-width:100%}
+.md-pre code{color:var(--nz-code-fg);font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;white-space:pre}
+.md-code-wrap{position:relative;max-width:100%}
+.md-code-actions{position:absolute;top:6px;right:6px;display:flex;gap:4px;opacity:0;transition:opacity .15s}
+.md-code-wrap:hover .md-code-actions{opacity:1}
+@media (hover:none){
+  .md-code-actions{opacity:1}
+}
+.md-code-btn{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);color:var(--nz-text-mute);font-size:var(--nz-fs-xs);padding:2px 8px;cursor:pointer;line-height:1.6;font-family:inherit;transition:color .15s,border-color .15s,background .15s}
+.md-code-btn:hover{background:var(--nz-border);color:var(--nz-text);border-color:var(--nz-accent)}
+.md-copy-btn.copied{color:var(--nz-green);border-color:var(--nz-green)}
+/* Path-list fence: a ```-block whose every line is a file path. Rendered as
+   clickable rows (each <code> picks up a preview/download button via the
+   inline file-ref scanner) instead of verbatim <pre> text. */
+.md-pathlist{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:10px 12px;margin:8px 0;overflow-x:auto;display:flex;flex-direction:column;gap:4px}
+.md-pathline{font-size:var(--nz-fs-sm2);line-height:1.6}
+.md-pathline code{font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;color:var(--nz-code-fg);white-space:pre}
+.md-pathnote{margin-left:10px;color:var(--nz-text-dim);font-size:var(--nz-fs-sm)}
+.md-code{background:var(--nz-bg-2);color:var(--nz-code-fg);padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-sm2);font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace}
+.md-h1,.md-h2,.md-h3,.md-h4{display:block;color:var(--nz-text-strong);margin:8px 0 4px}
+.md-h1{font-size:var(--nz-fs-md)}.md-h2{font-size:15px}.md-h3{font-size:var(--nz-fs-base)}
+.md-ul{margin:6px 0 6px 16px;padding:0;list-style:disc}
+.md-quote{margin:6px 0;padding:2px 0 2px 10px;border-left:3px solid var(--nz-border);color:var(--nz-text-mute)}
+.md-task{margin:0 4px 0 0;vertical-align:middle}
+.md-ul li{margin:2px 0;line-height:1.6}
+.md-ol{margin:6px 0 6px 16px;padding:0;list-style:decimal}
+.md-ol li{margin:2px 0;line-height:1.6}
+.md-ul>li>.md-ul,.md-ul>li>.md-ol,.md-ol>li>.md-ul,.md-ol>li>.md-ol{margin:2px 0 2px 16px}
+.md-ul>li>.md-ul,.md-ol>li>.md-ul{list-style:circle}
+.md-ul>li>.md-ul>li>.md-ul,.md-ol>li>.md-ul>li>.md-ul,.md-ul>li>.md-ol>li>.md-ul,.md-ol>li>.md-ol>li>.md-ul{list-style:square}
+.md-link{color:var(--nz-accent);text-decoration:none}
+.md-link:hover{text-decoration:underline}
+.md-table-wrap{overflow-x:auto;max-width:100%;margin:8px 0}
+.md-table{width:100%;border-collapse:collapse;font-size:var(--nz-fs-base)}
+.md-table th,.md-table td{border:1px solid var(--nz-border);padding:5px 10px;text-align:left}
+.md-table th{background:var(--nz-bg-1);color:var(--nz-text-strong);font-weight:600;font-size:var(--nz-fs-sm2)}
+.md-table td{color:var(--nz-text)}
+.md-table tr:hover td{background:rgba(88,166,255,.04)}
+.mermaid-wrap{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:12px;margin:8px 0;overflow-x:auto;text-align:center;max-width:100%}
+.mermaid-wrap svg{max-width:100%;height:auto}
+.md-math-display{margin:8px 0;overflow-x:auto;padding-left:1em;max-width:100%}
+.md-math-display .katex-display{margin:0.5em 0}
+.katex{font-size:1.1em}
+.katex-html{overflow-wrap:break-word}
+/* Placeholder shown while KaTeX lazy-loads; raw TeX stays readable so users
+   on slow connections don't stare at nothing. runKatex() swaps this span
+   for the rendered formula once the bundle lands. */
+.katex-pending{font-family:'SF Mono',Consolas,monospace;color:var(--nz-text-dim);font-size:0.95em;padding:0 2px;background:var(--nz-bg-1);border-radius:var(--nz-radius-xs)}
+/* renderRich output host — preview drawer today, scratch/aside drawers
+   tomorrow. Block-level so list/table/code children stack naturally;
+   .md-* styles continue to apply to markdown content inside. */
+.fv-rich{padding:8px 12px;font-size:var(--nz-fs-sm2);line-height:1.7}
+.fv-rich>.md-math-display{margin:12px 0}
+/* Preformatted text emitted by renderTexDoc for non-math fragments in
+   .tex/.latex files. Visually close to .fv-lined <pre> so switching
+   between file types doesn't jolt the reader. */
+.rich-plain{margin:0 0 8px 0;padding:0;white-space:pre-wrap;word-break:break-word;font-family:'SF Mono',Consolas,monospace;color:var(--nz-text);background:transparent;border:none}
+.ts-subagent{display:inline-block;background:var(--nz-chip-info-bg);color:var(--nz-chip-info-fg);padding:0 5px;border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-xs);font-weight:600;margin-left:2px}
+
+
+
+/* Header buttons */
+.hdr-btns{display:flex;gap:4px;align-items:center}
+.hdr-btn{background:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text-mute);cursor:pointer;padding:0;position:relative;transition:all .15s;line-height:1;white-space:nowrap;width:32px;height:32px;display:flex;align-items:center;justify-content:center}
+.hdr-btn:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-text-faint)}
+.hdr-btn.active{background:var(--nz-bg-2);color:var(--nz-accent);border-color:var(--nz-accent)}
+.hdr-btn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+/* Header badges (history count, cron attention count) are neutral by
+   default — red is opt-in via .is-alert (see Track D variants below).
+   Before Round 127 this rule hard-coded --nz-red, then a later Track D
+   rule at ~L800 shadowed the color. Two rules with different intents
+   for the same selector made future refactors error-prone; canonical
+   definition is consolidated here and Track D now only owns the
+   attention / warn variants. */
+.hdr-badge{position:absolute;top:-5px;right:-5px;background:var(--nz-badge-info);color:var(--nz-badge-info-text);border:1px solid var(--nz-border);font-size:9px;min-width:15px;height:15px;border-radius:var(--nz-radius-md);display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1}
+/* Self-update chip (docs/rfc/dashboard-update-notice.md §3.4): a width-auto
+   .hdr-btn variant carrying an icon + the target version tag. Hidden by
+   default; dashboard.js reveals it based on the `action` from
+   /api/system/update. Accent border reuses the existing .hdr-btn.active
+   emphasis rather than introducing a colour of its own. */
+.hdr-btn-update{width:auto;padding:0 7px;gap:4px;color:var(--nz-accent);border-color:var(--nz-accent)}
+.hdr-btn-update .hdr-update-tag{font-size:var(--nz-fs-2xs);font-weight:600;font-family:var(--nz-font-mono);letter-spacing:-.01em}
+.hdr-btn-update.is-busy{opacity:.6;pointer-events:none}
+/* Spin the glyph while an apply is in flight: the dim + pointer-events:none
+   above says "not clickable" but nothing says "still working", and the poll it
+   is waiting on is 3s apart. Reuses the existing spin keyframes and duration
+   token (same pair as .upload-status.uploading); the site-wide
+   prefers-reduced-motion guard neutralises it without a rule of its own. */
+.hdr-btn-update.is-busy svg{animation:spin var(--nz-dur-spin) linear infinite}
+.hdr-btn-update.is-failed{color:var(--nz-red);border-color:var(--nz-red)}
+/* Section header */
+.section-header{padding:6px 12px 6px 16px;font-size:var(--nz-fs-sm);font-weight:600;color:var(--nz-text-mute);text-transform:none;letter-spacing:0;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-bottom:1px solid var(--nz-bg-2);position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:6px}
+.section-header .sh-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.section-header .sh-btn{background:none;border:none;color:var(--nz-text-faint);cursor:pointer;padding:2px 4px;border-radius:var(--nz-radius-sm);display:inline-flex;align-items:center;justify-content:center;line-height:1;transition:color .15s,background .15s;font-size:var(--nz-fs-sm2)}
+.section-header .sh-btn:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.section-header .sh-btn.star-on{color:var(--nz-star-fg)}
+.section-header .sh-btn.star-on:hover{color:var(--nz-star-fg-hover)}
+.section-header .sh-btn.github-on{color:var(--nz-accent)}
+.section-header .sh-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.section-header .sh-btn.star-on svg{fill:currentColor}
+/* Collapse chevron: ▾ pointing down = expanded; rotated -90deg (→) when
+   collapsed. Reuses the sh-btn base so the size / hover / focus-visible
+   treatments line up with star/github/+ buttons already in the header. */
+.section-header .sh-btn.sh-collapse svg{transition:transform .15s ease}
+.section-header .sh-btn.sh-collapse.collapsed svg{transform:rotate(-90deg)}
+/* Count badge next to the project name when collapsed — tells the operator
+   how many sessions are hidden so they don't forget what's tucked away. */
+.section-header .sh-count{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:10px;padding:0 6px;line-height:1.6;font-variant-numeric:tabular-nums;flex-shrink:0}
+.section-header.is-collapsed{border-bottom-color:var(--nz-border)}
+/* Fallback section-header: workspace-basename groups are ad-hoc (no registered
+   ProjectManager project), so we drop the background emphasis and italicize
+   the name to distinguish them from real project sections. The workspace
+   path lives in the sh-name title attribute (tooltip on hover). */
+.section-header-fallback{background:transparent;color:var(--nz-text-faint)}
+.section-header-fallback .sh-name{font-style:italic;font-weight:500}
+/* Session card v2 (two-line flat, IM-style) */
+/* ui-polish-light-theme D4: 18px inline mark inside .sc-meta (was a 36px
+   dedicated column that out-shouted the card title). */
+.sc-cli-icon{width:18px;height:18px;flex-shrink:0;border-radius:var(--nz-radius-xs)}
+.sc-body{flex:1;min-width:0}
+.session-card .sc-header{display:flex;align-items:baseline;gap:8px}
+/* Title uses --nz-text-strong (theme-adaptive) — was hardcoded near-white
+   #e6edf3 which is nearly invisible in light theme (root cause of the
+   "list titles look disabled" finding). Hierarchy now: title = strong +
+   500 weight, meta/time = mute (set below). R20260606. */
+.session-card .sc-prompt{font-size:15px;color:var(--nz-text-strong);font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-card.new-card{border-left-style:dashed;border-left-color:var(--nz-accent)}
+.session-card.active.dead-card{opacity:1}
+.session-card .sc-meta{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);display:flex;align-items:center;gap:4px;margin-top:3px;overflow:hidden;white-space:nowrap}
+/* R110-P1: dim 30-rune assistant response preview slotted between prompt and meta. */
+.session-card .sc-response{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3}
+.sc-dot{display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.dot-running{background:var(--nz-status-running);animation:pulse var(--nz-dur-loop) ease-in-out infinite}
+.dot-ready{background:var(--nz-status-ready)}
+.dot-new{background:var(--nz-status-new);border:1px dashed var(--nz-accent);width:5px;height:5px}
+.sc-time{flex-shrink:0;font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
+/* Chat-style unread chip — shown on sidebar cards when a turn finished
+   (running -> ready/dead) for a session the operator isn't currently viewing.
+   Sits between prompt text and time so long prompts still truncate first. */
+.sc-unread{flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 6px;border-radius:9px;background:var(--nz-red);color:#fff;font-size:var(--nz-fs-xs);font-weight:700;line-height:1;font-family:var(--nz-font-mono);letter-spacing:.2px}
+/* Per-card node badge: disambiguates which connection a session lives on
+   now that the sidebar lists every connected node's sessions together (the
+   node picker moved into the New Session modal). Only rendered for non-local
+   nodes — local sessions are the unmarked default. Color is derived from the
+   node id (nodeColor) so the same remote keeps a stable hue across cards and
+   the palette's .cp-node badge. */
+.sc-node{font-size:var(--nz-fs-2xs);padding:1px 5px;border-radius:var(--nz-radius-xs);color:#fff;flex-shrink:0;line-height:1.3;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* UI Round 5 R5-3: spawn-time model label rendered inline next to the
+   cli identity in the main header detail row. Mute-tone keeps cli name
+   primary; the unset variant uses the dim foreground + italic so
+   "(模型未配置)" reads as a hint, not an error. */
+.main-header .model-label{margin-left:6px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-variant-numeric:tabular-nums}
+.main-header .model-label-unset{color:var(--nz-text-faint);font-style:italic}
+/* kiro thinking-effort tier (low/medium/high/xhigh/max). Joins the
+   .model-label / .detail-turn-timer family — bare inline text, no border or
+   fill — because the .detail row already carries two bordered chips
+   (.sc-origin, .git-chip) and a third would outweigh the primary cli/model
+   label. Empty for backends that report no effort, so the wrapper collapses.
+   docs/rfc/kiro-effort-visibility.md §5.1 */
+/* max-width + nowrap: the tier string comes from the kiro process, so a
+   pathological value must not wrap and grow the header height (measured: an
+   unbounded 400-char tier took .main-header from 64px to 135px, pushing the
+   transcript down). flex-shrink:0 keeps the 5 real tiers from being squeezed
+   to an ellipsis on a narrow viewport. */
+.main-header .detail-effort{display:inline-flex;align-items:center;flex-shrink:0;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--nz-text-mute);font-size:var(--nz-fs-sm);letter-spacing:.2px;margin-right:auto}
+.main-header .detail-effort:empty{display:none}
+.main-header .detail-effort .effort-tag::before{content:"·";margin-right:4px;opacity:.45}
+/* xhigh / max: the first thing to check when a turn ran slow or expensive, so
+   they shed the mute downgrade. Weight + colour only — a high tier is a
+   deliberate setting, not a fault, and --nz-amber already means "running". */
+.main-header .detail-effort .effort-hot{color:var(--nz-text);font-weight:600}
+/* Spawn-gate warning chip (#2532): configured input the spawn pipeline
+   dropped/ignored. A fault signal, so it takes the warn badge tokens; :empty
+   collapses it when everything took effect. */
+.main-header .detail-spawndiag{display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;font-size:var(--nz-fs-sm)}
+.main-header .detail-spawndiag:empty{display:none}
+.main-header .detail-spawndiag .spawn-diag-tag{color:var(--nz-badge-warn);cursor:help}
+.main-header .detail-spawndiag .spawn-diag-tag::before{content:"·";margin-right:4px;opacity:.45;color:var(--nz-text-mute)}
+/* Overlay-drift chip (#2543): live argv differs from a fresh spawn under the
+   current config; restart the session to apply. Warn badge tokens, :empty
+   collapses when there is no drift. */
+.main-header .detail-overlaydrift{display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;font-size:var(--nz-fs-sm)}
+.main-header .detail-overlaydrift:empty{display:none}
+.main-header .detail-overlaydrift .overlay-drift-tag{color:var(--nz-badge-warn);cursor:help}
+.main-header .detail-overlaydrift .overlay-drift-tag::before{content:"·";margin-right:4px;opacity:.45;color:var(--nz-text-mute)}
+/* Git branch / worktree chip in the session-detail header. Filled async by
+   renderGitChip; :empty collapses it so a non-repo workspace leaves no gap.
+   The chip is the operator's "which checkout am I editing" signal, so a
+   linked worktree gets the accent tint (the case worth noticing) while a
+   plain main-tree branch stays neutral. */
+/* margin-right:auto keeps the chip anchored next to the cli/model group.
+   Without it, .detail's `justify-content:space-between` flings the chip to the
+   far right while no runstats exist, then snaps it back to the left once
+   #header-runstats (which carries margin-left:auto) fills in — the chip would
+   visibly jump position a beat after the session opens. */
+.main-header .detail-git{display:inline-flex;align-items:center;min-width:0;flex-shrink:1;margin-right:auto;overflow:hidden}
+.main-header .detail-git:empty{display:none}
+/* Only ONE element in the row may claim the free space: in flex the first auto
+   margin absorbs all of it, so with both chips present the git chip would eat
+   the slack and leave the effort tag stranded at the far right. The effort tag
+   sits after the git chip in DOM order, so when it has a value IT owns the auto
+   margin and the git chip drops back to a plain gap. */
+.main-header .detail:has(.detail-effort:not(:empty)) .detail-git{margin-right:0}
+.git-chip{display:inline-flex;align-items:center;gap:3px;max-width:220px;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);cursor:default}
+.git-chip-icon{font-weight:400;opacity:.75}
+.git-chip-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.git-chip-sep{margin:0 3px;opacity:.45}
+.git-chip-worktree{color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);border-color:rgba(0,122,255,.35)}
+.git-chip-detached{color:var(--nz-amber);background:rgba(255,159,10,.12);border-color:rgba(255,159,10,.35);font-variant-numeric:tabular-nums}
+.sc-type-tag{display:inline-block;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;color:var(--nz-text-mute);background:var(--nz-bg-2);letter-spacing:.2px;flex-shrink:0;margin-left:auto}
+.sc-agents{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);flex-shrink:0;margin-left:auto}
+/* R110-P1 Home panel (idle main area): "最近会话" compact list that appears
+   below the cold-start CTA when sessionsData has entries. Keeps density low
+   (max 5 rows, 36px each) so it doesn't dominate the empty state, but gives
+   users a direct click target to their recent work without going through the
+   sidebar. Zero-session cold-start stays untouched (the wrap renders empty). */
+.recent-panel-wrap{width:100%;max-width:480px}
+/* ui-polish-light-theme D3: the Home panel dropped its card chrome along
+   with the stats/health strips (now 系统 view .svc-*) — a border around the
+   sole remaining list read as a third nesting level under the empty-state.
+   Rows carry their own hover affordance. */
+.recent-panel{margin-top:8px}
+.recent-panel-title{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:none;letter-spacing:.2px;margin-bottom:8px;font-weight:600}
+.recent-panel-list{display:flex;flex-direction:column;gap:4px}
+/* 服务概览 (系统 view, ui-polish-light-theme D3) — the aggregate stats +
+   health strip + doctor panel that used to crowd the Home empty-state.
+   Stats render as bare figures (no per-stat card border: the section
+   already sits inside the system-body flow, boxes-in-boxes read heavy).
+   `.warn` kind flips to amber so watchdog incidents ping the operator
+   without shouting. */
+.svc-overview{margin-bottom:var(--nz-space-5);padding-bottom:var(--nz-space-4);border-bottom:1px solid var(--nz-border)}
+.svc-overview-title{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);font-weight:600;margin-bottom:10px}
+.svc-stats{display:flex;gap:var(--nz-space-6);margin-bottom:12px}
+.svc-stat-value{font-size:var(--nz-fs-lg);font-weight:600;color:var(--nz-text-strong);font-variant-numeric:tabular-nums;line-height:1.2}
+.svc-stat-label{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:2px}
+.svc-stat-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.svc-stat-flag{font-size:var(--nz-fs-sm);color:var(--nz-amber,var(--nz-text-mute))}
+.svc-health{display:flex;flex-direction:column;gap:2px}
+.svc-health-line{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);line-height:1.5;font-variant-numeric:tabular-nums}
+.svc-health-line.warn{color:var(--nz-amber)}
+.recent-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid transparent;border-radius:var(--nz-radius-ms);background:transparent;color:var(--nz-text);cursor:pointer;font-family:inherit;font-size:var(--nz-fs-sm2);text-align:left;transition:all .12s}
+.recent-row:hover{background:var(--nz-bg-2);border-color:var(--nz-border);color:var(--nz-text-strong)}
+.recent-row:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+.recent-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.recent-dot.dot-running{background:var(--nz-status-running);animation:pulse var(--nz-dur-loop) ease-in-out infinite}
+.recent-dot.dot-ready{background:var(--nz-status-ready)}
+.recent-dot.dot-new{background:var(--nz-status-new);border:1px dashed var(--nz-accent)}
+.recent-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recent-time{color:var(--nz-text-dim);font-size:var(--nz-fs-xs);flex-shrink:0;font-variant-numeric:tabular-nums}
+/* R110-P3 IM-origin chip: shared structure, per-platform hue variants. The
+   base rule stays muted so unrecognized/future platforms still render safely
+   (originBadgeHtml returns '' for unknowns, but defence in depth). Platform
+   hues pick brand-adjacent colors; keep alpha conservative so the chip
+   doesn't compete with the session title for attention. */
+.sc-origin{display:inline-flex;align-items:center;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;flex-shrink:0;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border)}
+.sc-origin.kind-feishu{color:var(--nz-chip-info-fg);background:rgba(0,122,255,.14);border-color:rgba(0,122,255,.35)}
+.sc-origin.kind-slack{color:var(--nz-origin-slack-fg);background:rgba(168,85,247,.14);border-color:rgba(168,85,247,.35)}
+.sc-origin.kind-discord{color:var(--nz-origin-discord-fg);background:rgba(88,101,242,.16);border-color:rgba(88,101,242,.38)}
+.sc-origin.kind-weixin{color:var(--nz-origin-weixin-fg);background:rgba(16,185,129,.14);border-color:rgba(16,185,129,.35)}
+/* History bottom sheet (mobile) */
+.history-sheet{position:fixed;bottom:0;left:0;right:0;z-index:var(--nz-z-drawer);background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-radius:var(--nz-radius-xl) 16px 0 0;max-height:60vh;overflow-y:auto;animation:sheet-in .25s ease;padding-bottom:max(8px,env(safe-area-inset-bottom))}
+.sheet-handle{width:36px;height:4px;background:var(--nz-text-faint);border-radius:2px;margin:8px auto}
+

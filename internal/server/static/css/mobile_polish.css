@@ -1,0 +1,331 @@
+/* mobile_polish.css — extracted verbatim from dashboard.html's inline <style> block
+ * (#2559 D6). The split is sequential: each file is a contiguous slice of the
+ * original block and dashboard.html links them in the same order, so the
+ * cascade (later rule wins at equal specificity, @media position) is
+ * unchanged. Edit a view's rules here, next to the module that renders it.
+ */
+/* ---- Track A: touch-target sizing on coarse pointers (mobile + tablet) ---- */
+/* WCAG 2.5.5 Target Size — minimum 44x44 on touch input.
+   Uses (pointer:coarse) so mouse-driven desktops keep their compact sizes. */
+@media (pointer: coarse){
+  .btn-icon,.btn-send,.btn-stop{min-width:44px;min-height:44px}
+  /* R110-P1 touch-target: bump to WCAG AAA 44x44 baseline (matched to
+     .btn-icon / .btn-send) so three header icons packed in a 390px
+     viewport stop being sub-Fitts targets. Paired with .hdr-btns gap
+     bump below so adjacent 44px targets don't overlap the 8px fuzzy
+     zone between tap centers. */
+  .hdr-btn{min-width:44px;min-height:44px}
+  .hdr-btns{gap:8px}
+  .section-header .sh-btn{min-width:32px;min-height:32px;padding:6px}
+  /* RNEW-UX-011: bumped from 40 to 44 to hit the WCAG 2.5.5 AA floor for
+     touch targets. The visual footprint stays the same (padding + icon
+     are unchanged); only the hit-box widens. */
+  .session-card .btn-dismiss{min-width:44px;min-height:44px;padding:8px;font-size:19px;opacity:.75}
+  .btn-mobile-back{min-width:44px;min-height:44px}
+  /* RNEW-UX-011: manual-reconnect chip was 22px tall — impossible to tap
+     reliably on a phone right after a WS blip. Only grow the hit-box on
+     coarse pointers so desktop keeps the compact 11px / 22px chrome. */
+  .sidebar-status .status-reconnect{min-width:44px;min-height:44px;padding:8px 12px;font-size:var(--nz-fs-sm2)}
+  .empty-cta-btn{min-height:44px}
+  /* R20260610-UI-8: cron-job kebab + cron-drawer header icon buttons were
+     28/32px hard targets with no coarse bump — below the WCAG 2.5.5 floor.
+     Widen only the hit-box on touch; the glyph/footprint is unchanged. */
+  .cj-menu-btn,.cron-drawer-header .cdh-btn-icon{min-width:44px;min-height:44px}
+  .fv-btn{min-width:40px;min-height:40px}
+  /* Inline @file reference chips: keep the visual small but grow the tap area. */
+  .file-ref .fr-btn{min-width:32px;min-height:32px;padding:4px 8px}
+  /* "Load earlier" pagination button in event stream. */
+  .earlier-events-btn{min-height:36px}
+}
+
+/* ---- Track B: font-size floors to prevent iOS Safari auto-zoom on focus ---- */
+/* Any editable control needs >=16px computed font-size or Safari zooms in. */
+.login-panel input[type="password"]{font-size:var(--nz-fs-md)}
+@media(max-width:768px){
+  .freq-num,.freq-time,.freq-select{font-size:var(--nz-fs-md)}
+  /* Todo chips / task metadata shouldn't overpower the message body on narrow screens. */
+  .md-task-chip,.todo-chip{font-size:var(--nz-fs-sm);line-height:1.35}
+}
+
+/* ---- Track C: responsive breakpoints for landscape phones & small tablets ---- */
+/* iPhone landscape (844x390) and similar touch devices with limited vertical space
+   should use the same drawer UX as portrait phones. Adds to existing 768px rule,
+   does not override it. */
+@media (max-width: 950px) and (orientation: landscape) and (pointer: coarse){
+  .container{display:block;height:100%;overflow:hidden}
+  .sidebar{position:fixed;inset:0;width:100%!important;min-width:0;max-width:none;z-index:10;background:var(--nz-bg-0);transform:translateX(0);transition:transform .25s ease;border-right:none;overflow:hidden}
+  body.mobile-chat-view .sidebar{transform:translateX(-100%)}
+  body.mobile-list-view .sidebar{transform:translateX(0)}
+  .resizer{display:none}
+  .main{position:fixed;top:var(--vv-top,0);left:0;right:0;height:var(--vv-height,100dvh);width:100%;display:flex;flex-direction:column;z-index:5;overflow:hidden;padding-bottom:var(--nz-tabbar-h)}
+  .sidebar{top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}
+  .btn-mobile-back{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:40px;height:40px;background:none;border:none;color:var(--nz-text-mute);font-size:var(--nz-fs-lg);cursor:pointer;padding:0;border-radius:var(--nz-radius-ms);-webkit-tap-highlight-color:transparent}
+}
+
+/* ---- Track D: semantic badge colors — red only means "needs attention" ---- */
+/* Tokens are consumed by the canonical .hdr-badge rule earlier in this
+   file (base=neutral). Alert / warn variants stay here so the "opt-in
+   red" intent is obvious at the point of definition: JS adds .is-alert
+   when attention > 0, never by default. */
+:root{
+  --nz-badge-info:#30363d;       /* neutral count */
+  --nz-badge-info-text:#c9d1d9;
+  --nz-badge-warn:#d29922;       /* amber */
+  --nz-badge-danger:#da3633;     /* unchanged red, opt-in */
+}
+.hdr-badge.is-alert{background:var(--nz-badge-danger);color:#fff;border-color:transparent}
+.hdr-badge.is-warn{background:var(--nz-badge-warn);color:#1b1b1b;border-color:transparent}
+
+/* ==========================================================================
+   UX sweep vol.2 — high-resolution desktop layout (2026-04-27)
+   Targets QHD (2560x1440), 4K, ultrawide. Leaves <=1440px untouched.
+   All rules are min-width queries that stack progressively; the legacy
+   1200px clamp on .event still applies below 1600px.
+   ========================================================================== */
+
+/* Reading column widens proportionally so wide screens don't feel empty. */
+@media (min-width: 1600px){
+  .event{max-width:min(1320px, 72vw)}
+  .event.text .event-content{max-width:min(1240px, 68vw)}
+  .event.todo .event-content{max-width:min(1000px, 58vw)}
+  .event.user .event-content{max-width:min(80%, 640px)}
+}
+@media (min-width: 2200px){   /* QHD bracket — 2560x1440 lands here */
+  .event{max-width:min(1560px, 62vw)}
+  .event.text .event-content{max-width:min(1460px, 58vw)}
+  .event.todo .event-content{max-width:min(1100px, 50vw)}
+}
+@media (min-width: 3200px){   /* 4K / 5K / ultrawide */
+  .event{max-width:min(1800px, 52vw)}
+  .event.text .event-content{max-width:min(1700px, 48vw)}
+  .event.todo .event-content{max-width:min(1200px, 42vw)}
+}
+
+/* Main-header + composer align to the reading column so the "full-width shell
+   + narrow content" feeling disappears at 2560+. */
+@media (min-width: 1600px){
+  .main-header{max-width:min(1380px, 75vw);margin-left:auto;margin-right:auto;width:100%}
+  .input-area{max-width:min(1380px, 75vw);margin-left:auto;margin-right:auto;width:100%}
+}
+@media (min-width: 2200px){
+  .main-header{max-width:min(1580px, 64vw)}
+  .input-area{max-width:min(1580px, 64vw)}
+}
+@media (min-width: 3200px){
+  .main-header{max-width:min(1820px, 54vw)}
+  .input-area{max-width:min(1820px, 54vw)}
+}
+
+/* Sidebar widens gently so it's not a thin stripe. Inline style set by the
+   .resizer JS uses element.style.width, which has higher specificity than
+   these rules, so users who manually resized keep their choice. */
+@media (min-width: 1920px){ .sidebar{width:400px} }
+@media (min-width: 2560px){ .sidebar{width:420px} }
+@media (min-width: 3200px){ .sidebar{width:460px} }
+
+/* Aside (scratch) drawer — right-side preview pane for follow-up questions
+   ("追问"). Intentionally mirrors .fv-drawer's surface treatment (bg-1,
+   box-shadow, z-index, slide transition) so the dashboard has a single
+   "drawer" visual vocabulary, and reuses .main-header + .input-area token
+   spacing so the input/header feel matches the main transcript. */
+.aside-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:var(--nz-z-drawer);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:var(--nz-shadow-drawer)}
+.aside-drawer.visible{transform:translateX(0)}
+/* Header shares .fv-header's proportions (10px 14px padding, min-height 48px,
+   13px title). Background inherits .aside-drawer bg-1; no separate color so
+   the header melts into the drawer body like file-viewer does. */
+.aside-drawer .ad-header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--nz-border);flex-shrink:0;min-height:48px}
+.aside-drawer .ad-title{flex:1;min-width:0;display:flex;align-items:center;gap:6px;font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.aside-drawer .ad-title .ad-agent{color:var(--nz-text-dim);font-weight:400;font-size:var(--nz-fs-sm);margin-left:4px;overflow:hidden;text-overflow:ellipsis}
+.aside-drawer .ad-actions{display:flex;gap:6px;flex-shrink:0}
+/* Close button borrows .fv-close directly (font-size:18;line-height:1;padding:0 8px)
+   so its optical weight matches the file-viewer drawer users already know. */
+.aside-drawer .ad-close{height:26px;padding:0 8px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-2);color:var(--nz-text);font-size:18px;line-height:1;font-family:inherit;cursor:pointer;transition:all .15s}
+.aside-drawer .ad-close:hover{background:var(--nz-bg-0);border-color:var(--nz-accent);color:var(--nz-accent)}
+.aside-drawer .ad-quote-chip{padding:6px 14px;font-size:var(--nz-fs-xs);color:var(--nz-text-dim);background:var(--nz-bg-2);border-bottom:1px solid var(--nz-border);cursor:pointer;display:flex;align-items:center;gap:6px;user-select:none;flex-shrink:0}
+.aside-drawer .ad-quote-chip:hover{color:var(--nz-text-mute)}
+.aside-drawer .ad-quote-chip .ad-arrow{color:var(--nz-text-faint);flex-shrink:0}
+.aside-drawer .ad-quote-chip .ad-preview{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-style:italic}
+.aside-drawer .ad-quote-chip.expanded .ad-preview{white-space:pre-wrap;font-style:normal}
+.aside-drawer .ad-quote-chip .ad-trunc{color:var(--nz-red);font-size:var(--nz-fs-2xs);margin-left:4px;flex-shrink:0}
+.aside-drawer .ad-quote-chip .ad-ctx{color:var(--nz-text-faint);font-size:var(--nz-fs-2xs);margin-left:4px;flex-shrink:0}
+/* Messages area mirrors .events (padding:16px 0, thin scrollbar). */
+.aside-drawer .ad-messages{flex:1;overflow-y:auto;overflow-x:hidden;padding:16px 0;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent;min-width:0;background:var(--nz-bg-0)}
+/* Narrow-drawer compression for .event rows: main window uses 6px 24px but
+   on a 420px drawer that leaves too little content width. Mobile overrides
+   below restore the main-window padding when the drawer is full-screen. */
+.aside-drawer .ad-messages .event{max-width:100%;padding:4px 14px}
+.aside-drawer .ad-messages .event.user .event-content,
+.aside-drawer .ad-messages .event.text .event-content{max-width:95%}
+.aside-drawer .ad-empty{padding:40px 20px;text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-sm2);line-height:1.5}
+/* Input area reuses .input-area's visual weight (12px 20px → 10px 14px here
+   for the narrower drawer; bg-0 keeps the "floor" feel aligned). */
+.aside-drawer .ad-input-area{border-top:1px solid var(--nz-border);padding:10px 14px;flex-shrink:0;background:var(--nz-bg-0)}
+.aside-drawer .ad-input-row{display:flex;gap:8px;align-items:flex-end}
+/* Input shares #msg-input's box model exactly: same bg, radius, padding,
+   min-height 38px, font-size 16px (iOS-zoom safe), max-height 120px. */
+.aside-drawer .ad-input{flex:1;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text);padding:8px 12px;font-family:inherit;font-size:var(--nz-fs-md);min-height:38px;max-height:120px;outline:none;line-height:1.4;resize:none;overflow-y:auto;-webkit-user-select:text;user-select:text}
+.aside-drawer .ad-input:focus{border-color:var(--nz-rust)}
+.aside-drawer .ad-input::placeholder{color:var(--nz-text-placeholder)}
+/* Send button IS .btn-icon + .btn-send in visual terms — copy their tokens
+   so the hover colour, green fill, border-radius, and 36×36 size match
+   the main transcript send key. Feels like the same button. */
+.aside-drawer .ad-send{width:36px;height:36px;border:1px solid #238636;background:#238636;border-radius:var(--nz-radius-md);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;transition:all .15s}
+.aside-drawer .ad-send:hover{background:#2ea043}
+.aside-drawer .ad-send:disabled{opacity:.5;cursor:default;pointer-events:none}
+/* Save button follows .btn-icon but full-width + neutral fill. */
+.aside-drawer .ad-save-btn{display:none;margin-top:8px;width:100%;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text);padding:8px 12px;font-size:var(--nz-fs-sm2);cursor:pointer;transition:all .15s;font-family:inherit;min-height:36px}
+.aside-drawer .ad-save-btn.visible{display:block}
+.aside-drawer .ad-save-btn:hover{background:var(--nz-bg-2);border-color:var(--nz-accent);color:var(--nz-accent)}
+.aside-drawer .ad-loading{display:none;padding:6px 14px;font-size:var(--nz-fs-xs);color:var(--nz-text-faint);font-style:italic;animation:pulse var(--nz-dur-loop) ease-in-out infinite}
+.aside-drawer .ad-loading.visible{display:block}
+/* Phone breakpoint: match .fv-drawer's full-width treatment and apply the
+   same safe-area handling the main .input-area uses so the composer doesn't
+   disappear behind the notch / home indicator. */
+@media (max-width: 768px){
+  /* top/height follow --vv-* like .main so the soft keyboard shrinks the
+     drawer instead of covering .ad-input-area (#2434). */
+  .aside-drawer{width:100%;max-width:100vw;border-left:none;top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}
+  .aside-drawer .ad-header{padding:max(10px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 10px max(14px,env(safe-area-inset-left))}
+  .aside-drawer .ad-messages .event{padding:6px 20px}
+  .aside-drawer .ad-input-area{padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));padding-bottom:max(10px,env(safe-area-inset-bottom))}
+  /* Follow the main window's touch-target scaling: .btn-icon grows to 40×40
+     under ≤768 and to min 44×44 under pointer:coarse. Mirror here so the
+     send key on phones is the same size as the main composer's. */
+  .aside-drawer .ad-send{width:40px;height:40px}
+}
+/* Landscape phones (769–950px, coarse pointer) are above the ≤768 breakpoint
+   but still get the soft keyboard; mirror the .main/.sidebar landscape block
+   so both drawers follow --vv-* there too (#2434). Sits after both drawers'
+   base rules so it wins the same-specificity cascade. */
+@media (max-width: 950px) and (orientation: landscape) and (pointer: coarse){
+  .fv-drawer,.aside-drawer{top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}
+}
+@media (pointer: coarse){
+  .aside-drawer .ad-send,.aside-drawer .ad-close,.aside-drawer .ad-save-btn{min-width:44px;min-height:44px}
+}
+/* Ask-aside (↗ 追问) button on AI bubbles. Sits next to the copy button in
+   the bubble footer; borrows the same box model so the two buttons line up
+   pixel-for-pixel. Tap target enlarges under pointer:coarse along with
+   .event-copy-btn — kept in sync so both bubble actions grow together. */
+.event-ask-btn{display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);color:var(--nz-text-faint);font-size:var(--nz-fs-xs);padding:1px 8px;cursor:pointer;transition:color .15s,border-color .15s,opacity .12s;line-height:1.6;margin-top:8px;margin-left:6px}
+.event-ask-btn:hover{color:var(--nz-accent);border-color:var(--nz-accent)}
+/* Mirror .event-copy-btn.hover-only so both bubble actions reveal
+   together on hover / keyboard focus and stay hidden otherwise. */
+.event-ask-btn.hover-only{opacity:0}
+.event:hover .event-ask-btn.hover-only,.event-ask-btn.hover-only:focus-visible{opacity:1}
+@media (hover:none){
+  .event-ask-btn.hover-only{opacity:1}
+}
+@media (pointer: coarse){
+  .event-ask-btn,.event-copy-btn{font-size:var(--nz-fs-sm);padding:4px 10px;min-height:32px}
+}
+
+/* AskUserQuestion interactive card. Rendered as a bubble of type
+   .event.ask_question; mirrors .event.todo density (tight vertical rhythm,
+   high contrast borders) so the card reads as an actionable block without
+   overwhelming the conversation. */
+.event.ask_question .ask-card{border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:12px 14px;background:var(--nz-bg-1)}
+.event.ask_question .ask-title{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px}
+.ask-q-group + .ask-q-group{margin-top:14px;padding-top:12px;border-top:1px solid var(--nz-bg-2)}
+.ask-q-header{font-size:var(--nz-fs-sm);color:var(--nz-text-faint);margin-bottom:2px}
+.ask-q-text{font-size:var(--nz-fs-base);line-height:1.5;color:var(--nz-text);margin-bottom:6px}
+.ask-q-hint{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);margin-bottom:8px;font-style:italic}
+.ask-opts{display:flex;flex-direction:column;gap:6px}
+.ask-opt{text-align:left;display:flex;flex-direction:column;gap:2px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:8px 10px;cursor:pointer;color:var(--nz-text);font:inherit;transition:border-color .15s,background .15s,color .15s;width:100%;box-sizing:border-box;min-width:0;white-space:normal;word-break:break-word;overflow-wrap:anywhere}
+.ask-opt:hover:not([disabled]){border-color:var(--nz-accent);background:var(--nz-bg-2)}
+.ask-opt.selected{border-color:var(--nz-accent);background:var(--nz-bg-2);color:var(--nz-accent)}
+.ask-opt[disabled]{opacity:.55;cursor:not-allowed}
+.ask-opt-label{font-size:var(--nz-fs-base);font-weight:500;word-break:break-word;overflow-wrap:anywhere}
+.ask-opt-desc{font-size:var(--nz-fs-sm);color:var(--nz-text-faint);line-height:1.45;word-break:break-word;overflow-wrap:anywhere}
+.ask-submit-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--nz-bg-2);display:flex;justify-content:flex-end}
+.ask-submit{background:var(--nz-accent);color:var(--nz-bg-0);border:none;border-radius:var(--nz-radius-ms);padding:8px 18px;font-size:var(--nz-fs-sm2);font-weight:500;cursor:pointer;font:inherit;transition:opacity .15s}
+.ask-submit[disabled]{opacity:.4;cursor:not-allowed}
+.ask-status{margin-top:10px;font-size:var(--nz-fs-sm);color:var(--nz-text-faint);padding-top:8px;border-top:1px dashed var(--nz-bg-2);word-break:break-word;overflow-wrap:anywhere}
+@media (pointer: coarse){
+  .ask-opt{padding:10px 12px}
+  .ask-submit{min-height:36px;padding:8px 16px}
+}
+/* AskUserQuestion 卡片在手机上的紧凑布局：
+   1) 卡片 padding 收紧，把横向空间还给选项
+   2) 提交按钮全宽（手机上拇指难以精准命中右下角小按钮）
+   3) degraded 卡同样收紧，避免左侧 border + 内边距双重缩水可读区
+   4) 防止长 label / 选项文本撑破 .ask-card 触发横向滚动 */
+@media(max-width:768px){
+  .event.ask_question .ask-card{padding:10px 12px}
+  .ask-q-group + .ask-q-group{margin-top:12px;padding-top:10px}
+  .ask-submit-row{justify-content:stretch}
+  .ask-submit{width:100%;padding:10px 16px;font-size:var(--nz-fs-base)}
+  .ask-degraded .ask-degraded-q{padding:6px 8px}
+}
+@media(max-width:480px){
+  .event.ask_question .ask-card{padding:8px 10px}
+  .ask-q-text{font-size:var(--nz-fs-sm2);line-height:1.45}
+  .ask-opt-label{font-size:var(--nz-fs-sm2)}
+  .ask-opt-desc{font-size:var(--nz-fs-xs)}
+}
+
+/* Memory wiki-link [[slug]] inline marker + hover/click popover.
+   docs/rfc/memory-link-rendering.md. The .md-memlink span is emitted by
+   inlineMd; the popover container lives at the end of body and is
+   positioned via JS. Broken-link variant uses dotted underline so users
+   can tell at a glance which links resolved. */
+/* Chip variant (B+D): type emoji + short label, color-coded per memory type.
+   Full slug + body still appear in the hover popover below. */
+.md-memlink{display:inline-flex;align-items:baseline;gap:4px;
+  padding:0 8px 1px 7px;border-radius:10px;
+  background:var(--nz-bg-2);color:var(--nz-text);
+  border:1px solid transparent;
+  font-size:var(--nz-fs-sm);line-height:1.5;cursor:help;text-decoration:none;
+  vertical-align:baseline;
+  transition:background .12s, border-color .12s, box-shadow .12s}
+.md-memlink:hover,.md-memlink:focus{background:var(--nz-bg-1);
+  border-color:var(--nz-accent);outline:none;
+  box-shadow:0 0 0 1px rgba(88,166,255,.15)}
+.md-memlink-icon{font-size:10.5px;display:inline-block;flex:0 0 auto;
+  filter:saturate(.9)}
+.md-memlink-label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px;letter-spacing:.01em}
+.md-memlink[data-type="feedback"]{background:var(--nz-memlink-feedback-bg);color:var(--nz-memlink-feedback-fg)}
+.md-memlink[data-type="user"]{background:var(--nz-memlink-user-bg);color:var(--nz-memlink-user-fg)}
+.md-memlink[data-type="project"]{background:var(--nz-memlink-project-bg);color:var(--nz-memlink-project-fg)}
+.md-memlink[data-type="reference"]{background:var(--nz-memlink-reference-bg);color:var(--nz-memlink-reference-fg)}
+.md-memlink[data-type="memory"]{background:var(--nz-bg-2);color:var(--nz-text)}
+.md-memlink-broken,.md-memlink-broken[data-type]{
+  background:transparent !important;color:var(--nz-text-mute) !important;
+  border:1px dashed var(--nz-text-mute);cursor:not-allowed}
+.md-memlink-broken .md-memlink-icon{filter:grayscale(1) opacity(.6)}
+.md-memlink-broken:hover{background:rgba(139,148,158,.08) !important}
+#mem-popover{position:fixed;z-index:var(--nz-z-overlay);max-width:560px;min-width:320px;
+  max-height:60vh;overflow:auto;background:var(--nz-bg-1);
+  border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);
+  box-shadow:var(--nz-shadow-2);padding:14px 16px;
+  font-size:var(--nz-fs-sm2);line-height:1.55;color:var(--nz-text);display:none}
+#mem-popover.show{display:block}
+#mem-popover.pinned{box-shadow:var(--nz-shadow-2),
+  0 0 0 1px var(--nz-accent)}
+.mem-pop-header{display:flex;align-items:center;gap:8px;margin-bottom:6px;
+  padding-bottom:8px;border-bottom:1px solid var(--nz-bg-2);
+  font-size:var(--nz-fs-xs);color:var(--nz-text-mute);flex-wrap:wrap}
+.mem-pop-type{padding:1px 8px;background:var(--nz-bg-2);border-radius:10px;
+  font-size:var(--nz-fs-xs);text-transform:uppercase;letter-spacing:.04em;
+  color:var(--nz-text-strong)}
+.mem-pop-type[data-type="feedback"]{background:var(--nz-memlink-feedback-bg);color:var(--nz-memlink-feedback-fg)}
+.mem-pop-type[data-type="user"]{background:var(--nz-memlink-user-bg);color:var(--nz-memlink-user-fg)}
+.mem-pop-type[data-type="project"]{background:var(--nz-memlink-project-bg);color:var(--nz-memlink-project-fg)}
+.mem-pop-type[data-type="reference"]{background:var(--nz-memlink-reference-bg);color:var(--nz-memlink-reference-fg)}
+.mem-pop-scope{color:var(--nz-text-faint)}
+.mem-pop-slug{font-family:ui-monospace,Menlo,monospace;color:var(--nz-text-strong);
+  font-size:var(--nz-fs-sm2);font-weight:500;margin-bottom:4px;word-break:break-all}
+.mem-pop-desc{color:var(--nz-text);margin-bottom:10px;font-style:italic}
+.mem-pop-body{color:var(--nz-text);font-size:var(--nz-fs-sm2)}
+.mem-pop-body p:first-child{margin-top:0}
+.mem-pop-body p:last-child{margin-bottom:0}
+.mem-pop-body pre{background:var(--nz-bg-0);padding:8px;border-radius:var(--nz-radius-sm);
+  overflow-x:auto;font-size:var(--nz-fs-sm)}
+.mem-pop-error{color:var(--nz-text-mute);font-style:italic}
+.mem-pop-close{position:absolute;top:8px;right:10px;background:none;border:none;
+  color:var(--nz-text-mute);font-size:18px;cursor:pointer;line-height:1;
+  padding:2px 6px;display:none}
+#mem-popover.pinned .mem-pop-close{display:block}
+.mem-pop-close:hover{color:var(--nz-text-strong)}
+

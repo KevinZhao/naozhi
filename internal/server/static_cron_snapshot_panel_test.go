@@ -39,11 +39,7 @@ func TestDashboardJS_CronSnapshotPanel(t *testing.T) {
 // TestDashboardHTML_CronSnapshotPanelCSS pins the panel CSS classes.
 func TestDashboardHTML_CronSnapshotPanelCSS(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
-	html := string(data)
+	html := readDashboardHTMLAndCSS(t)
 	for _, frag := range []string{
 		".ctr-snapshot{",
 		".ctr-snap-body{",

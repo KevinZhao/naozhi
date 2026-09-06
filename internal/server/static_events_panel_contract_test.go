@@ -220,3 +220,30 @@ func readDashboardJS(t *testing.T) string {
 	}
 	return string(b)
 }
+
+// readDashboardHTMLAndCSS returns dashboard.html concatenated with every
+// stylesheet split out of its former inline <style> block (#2559 D6). The
+// source-level CSS contract tests assert on markup AND rules that used to live
+// in one file; concatenating keeps them valid without each test having to know
+// which stylesheet a rule landed in. A test that must pin one file reads that
+// file directly.
+func readDashboardHTMLAndCSS(t *testing.T) string {
+	t.Helper()
+	var b []byte
+	for _, name := range []string{
+		"dashboard.html",
+		"css/tokens.css",
+		"css/views.css",
+		"css/split_view.css",
+		"css/responsive.css",
+		"css/cron.css",
+		"css/mobile_polish.css",
+	} {
+		data := staticAssetBytes(name)
+		if data == nil {
+			t.Fatalf("%s not embedded", name)
+		}
+		b = append(append(b, data...), '\n')
+	}
+	return string(b)
+}

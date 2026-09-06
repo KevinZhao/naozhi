@@ -266,3 +266,22 @@ func handleSendMessageJS(w http.ResponseWriter, r *http.Request) {
 	}
 	writeStaticAssetBody(w, r, "send_message.js")
 }
+
+// handleDashboardCSS serves static/css/*.css (the dashboard stylesheets split
+// out of the inline <style> block, #2559). One handler for the directory: the
+// file name comes from the request path and is looked up in the asset table,
+// so an unknown name 404s instead of reaching the filesystem.
+func handleDashboardCSS(w http.ResponseWriter, r *http.Request) {
+	name := "css/" + r.PathValue("file")
+	if staticAssetBytes(name) == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, name) {
+		return
+	}
+	writeStaticAssetBody(w, r, name)
+}

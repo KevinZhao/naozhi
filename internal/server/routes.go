@@ -190,6 +190,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /favicon.svg", handleFavicon)
 	// Dashboard JS is auth-gated: it embeds the API endpoint list + client
 	// schema (recon surface); the login page loads no /static/ JS (#1328).
+	s.mux.HandleFunc("GET /static/css/{file}", auth(handleDashboardCSS))
 	s.mux.HandleFunc("GET /static/contract.js", auth(handleContractJS))
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(handleNzUtilJS))
 	s.mux.HandleFunc("GET /static/render_md.js", auth(handleRenderMdJS))

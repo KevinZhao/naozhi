@@ -18,11 +18,7 @@ import (
 // DOMContentLoaded.
 func TestDashboardHTML_ScriptsDeferred(t *testing.T) {
 	t.Parallel()
-	data := staticAssetBytes("dashboard.html")
-	if data == nil {
-		t.Fatal("dashboard.html not embedded")
-	}
-	html := string(data)
+	html := readDashboardHTMLAndCSS(t)
 	// contract.js stays a classic defer script (it must populate the global
 	// before everything else); all six view files are ES modules (D3,
 	// docs/rfc/dashboard-es-modules.md) — modules are deferred by definition
