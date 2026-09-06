@@ -12,15 +12,14 @@
 // so this still executes before dashboard.js (dashboard.html order is frozen
 // during the migration; see the comment there).
 //
-// Exports: real ES exports for migrated modules, plus
-//   window.nz.util.{esc, escAttr, escJs, fetchJSON, showToast, trapFocus}
-// and legacy top-level aliases (window.esc, window.escAttr, …) so existing
-// call sites in the not-yet-migrated classic files keep working unchanged.
-// The aliases are the migration bridge; they go away in D3 PR-E.
+// Exports: real ES exports for the view modules, plus the single
+// window.nz namespace (util / state / actions / bus / views / test).
 //
-// SECURITY: esc / escAttr / escJs are the single source of truth for HTML /
-// attribute / JS-string escaping. Do NOT copy these into any view module —
-// duplicated escapers drift and reintroduce XSS. Always reuse this layer.
+// SECURITY: esc / escAttr are the single source of truth for HTML /
+// attribute escaping. Do NOT copy these into any view module — duplicated
+// escapers drift and reintroduce XSS. Always reuse this layer. (escJs was
+// deleted with the last JS-string-literal sink, #1980 — inline handlers are
+// gone; do not resurrect it without resurrecting the review that guarded it.)
 
 // esc() escapes the three structural HTML characters only. We deliberately
 // do NOT escape quote characters here: escAttr (below) layers quote-escaping
@@ -40,40 +39,6 @@ export function esc(s) {
 // single- or double-quoted attributes, so we escape both to be safe.
 export function escAttr(s) {
   return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-// Escape for embedding inside a JS string literal (e.g. an inline click
-// attribute of the form f('…')). Prose here deliberately avoids the literal
-// `onclick` + `=` token: the CSP ratchet in dashboard_csp_test.go counts that
-// token by text, so a mention in a comment would inflate this file's count
-// and keep it from ever reaching 0.
-export function escJs(s) {
-  if (!s) return '';
-  // R202606j-SEC-9 (#2344): besides the obvious string-breakers, escape
-  // every C0/C1 control char (U+0000-001F, U+007F-009F) plus Unicode
-  // zero-width / bidi format chars (ZWSP..RLM, LRE..RLO/PDF, WJ, isolates),
-  // the line/paragraph separators U+2028/U+2029 (which are raw JS line
-  // terminators and can break the literal), and the BOM U+FEFF. Such runes
-  // can survive a filesystem path name and ride into the inline onclick
-  // attribute; mapping each to its \\uXXXX escape keeps the emitted literal
-  // inert and prevents visual path spoofing. Printables (CJK, emoji,
-  // accented latin) pass through unchanged.
-  let out = String(s)
-    .replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n').replace(/\r/g, '\\r')
-    .replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
-  return out.replace(/[\s\S]/g, ch => {
-    const c = ch.charCodeAt(0);
-    const dangerous =
-      (c <= 0x1f) ||
-      (c >= 0x7f && c <= 0x9f) ||
-      (c >= 0x200b && c <= 0x200f) ||
-      (c >= 0x202a && c <= 0x202e) ||
-      c === 0x2060 ||
-      (c >= 0x2066 && c <= 0x2069) ||
-      c === 0x2028 || c === 0x2029 ||
-      c === 0xfeff;
-    return dangerous ? '\\u' + c.toString(16).padStart(4, '0') : ch;
-  });
 }
 
 // fetchJSON wraps fetch() with a hard timeout (default 10s) so spinners and
@@ -149,7 +114,7 @@ export function trapFocus(overlay) {
 
 // Single root namespace (RFC §2.5.4): window.nz.{util,render,core,views}.
 const nz = (window.nz = window.nz || {});
-nz.util = { esc, escAttr, escJs, fetchJSON, showToast, trapFocus };
+nz.util = { esc, escAttr, fetchJSON, showToast, trapFocus };
 
 // Cross-module utility formatters/predicates (moved verbatim from cron_view,
 // #2557 PR-E1 — both dashboard and cron consume them, and hosting them here
@@ -204,6 +169,20 @@ export function isCronSessionKey(key) {
 export const nzBus = new EventTarget();
 nz.bus = nzBus;
 
+// nz.views (#2557 PR-E3): view-module entry points. dashboard cannot import
+// the views (they import dashboard — an import back would create a cycle and
+// invert execution order), so each view registers its public surface here at
+// module init and dashboard reaches it at call time.
+export const nzViews = {};
+nz.views = nzViews;
+
+// nz.test (#2557 PR-E3): the Playwright instrumentation surface — dashboard
+// registers accessors for the bindings the e2e suite probes. Production code
+// must never read it; the mock server mirrors it onto window for the legacy
+// bare-identifier probes (see test/e2e/mock-server.js e2e-shim).
+export const nzTest = {};
+nz.test = nzTest;
+
 // data-action delegation (#1980, docs/rfc/csp-data-action.md): one registry,
 // one document-level dispatcher per event type, so generated HTML carries
 // `data-action="key"` attributes instead of inline on*="…" handlers (the
@@ -252,9 +231,3 @@ for (const type of DELEGATED) {
 // `state` objects.)
 export const nzState = {};
 nz.state = nzState;
-
-// Legacy top-level aliases — migration bridge for the classic-script call
-// sites (dashboard.js / cron_view.js / agent_view.js) that reference the bare
-// global names. This module runs before them (tag order), so the aliases
-// exist by the time they execute. Removed in D3 PR-E.
-Object.assign(window, { esc, escAttr, escJs, fetchJSON, showToast, trapFocus });

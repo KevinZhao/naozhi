@@ -1,4 +1,4 @@
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, registerActions, formatCostUSD, formatRunDuration } from './nz_util.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, nzViews, registerActions, formatCostUSD, formatRunDuration } from './nz_util.js';
 import {
   CRON_LIVE_AGENT_ONLY_HTML,
   CRON_LIVE_MAX_EVENTS,
@@ -52,6 +52,8 @@ import {
 /* ===== Cron Tab ===== */
 
 let cronJobs = [];
+// resize-fallback listener dedup flag (was a window property pre-#2557-E3).
+let cronLayoutWindowListener = null;
 // Configured default IM target for cron completion notifications, or null
 // when the server has no default configured. Used to render helpful copy
 // alongside the notify toggle in create/edit modals.
@@ -3795,12 +3797,12 @@ function setupCronLayoutObserver() {
   if (typeof ResizeObserver !== 'function') {
     // Fallback — listen on window resize. Less precise (won't catch
     // sidebar drags) but better than a static breakpoint.
-    if (!window._cronLayoutWindowListener) {
-      window._cronLayoutWindowListener = () => {
+    if (!cronLayoutWindowListener) {
+      cronLayoutWindowListener = () => {
         const el = document.querySelector('.cron-detail-body');
         if (el) apply(el.offsetWidth);
       };
-      window.addEventListener('resize', window._cronLayoutWindowListener);
+      window.addEventListener('resize', cronLayoutWindowListener);
     }
     return;
   }
@@ -4498,9 +4500,9 @@ async function doEditCronJob(id) {
 // Expose the Esc-close delegate so dashboard.js's Global Esc handler can route
 // the cron branch here without referencing cron-internal globals across the
 // script boundary (dashboard-cron-view-extraction RFC §2.6 B1). The optional
-// call (window.nzCronEscClose && window.nzCronEscClose()) degrades gracefully if cron_view.js fails
-// to load, instead of throwing `cronExpandedRunId is not defined`.
-window.nzCronEscClose = cronEscClose;
+// call (nz.views.cron && …escClose()) degrades gracefully if cron_view.js
+// fails to load, instead of throwing `cronExpandedRunId is not defined`.
+nzViews.cron = { escClose: cronEscClose };
 
 // §16 inline-expand 回归: ↑↓ 切上一条 / 下一条 run（仅当某行展开时）。
 // Moved here from dashboard.js (B1 fix): this handler reads cronExpandedRunId /
@@ -4632,50 +4634,6 @@ nzBus.addEventListener('cron:open-panel', () => openCronPanel());
 nzState.isCronLiveKey = isCronLiveKey;
 nzState.isCronSessionFrozen = isCronSessionFrozen;
 
-// ─── D3 ES-module bridge (RFC docs/rfc/dashboard-es-modules.md) ────────────
-// cron_view is a module now, so its top-level names are no longer globals.
-// This single batch restores the exact global surface the classic script had
-// for the two consumers that still need it: dashboard.js (classic) bare-name
-// call sites, and the inline on*="fn(…)" handler strings in cron-generated
-// HTML (inline handlers always resolve in the global scope). Shrinks at
-// PR-D/PR-E as consumers move to imports / nz.actions.
-Object.assign(window, {
-  clearCronSearch: clearCronSearch,
-  closeCronDetail: closeCronDetail,
-  createNewCronJob: createNewCronJob,
-  cronAttentionConfirm: cronAttentionConfirm,
-  cronAttentionReplay: cronAttentionReplay,
-  cronDelete: cronDelete,
-  cronDrawerSpecPromptToggle: cronDrawerSpecPromptToggle,
-  cronNotifyOnChange: cronNotifyOnChange,
-  cronNotifyOverrideToggle: cronNotifyOverrideToggle,
-  cronPause: cronPause,
-  cronPlacementBindHint: cronPlacementBindHint,
-  cronReplayRun: cronReplayRun,
-  cronResume: cronResume,
-  cronSelectWorkspace: cronSelectWorkspace,
-  cronTimelineLoadMore: cronTimelineLoadMore,
-  cronTimelineSelectRun: cronTimelineSelectRun,
-  cronTimelineToggleShowAll: cronTimelineToggleShowAll,
-  cronTimezoneSuffix: cronTimezoneSuffix,
-  cronTriggerNow: cronTriggerNow,
-  doCreateCronJob: doCreateCronJob,
-  doEditCronJob: doEditCronJob,
-  editCronJob: editCronJob,
-  fillCronPrompt: fillCronPrompt,
-  filterCronJobs: filterCronJobs,
-  freqMarkTouched: freqMarkTouched,
-  freqSelectMode: freqSelectMode,
-  freqUpdate: freqUpdate,
-  onCronSearchInput: onCronSearchInput,
-  openCronDetail: openCronDetail,
-  renderCronModalBody: renderCronModalBody,
-  setCronSortOrder: setCronSortOrder,
-  setCronStatusFilter: setCronStatusFilter,
-  toggleCronMenu: toggleCronMenu,
-  toggleCronWsCustom: toggleCronWsCustom,
-  toggleCronWsDropdown: toggleCronWsDropdown,
-});
 // cronJobs is reassigned on every fetch, so dashboard.js reads it through an
 // accessor (mirror of the dashboard-side nz.state getters, direction
 // reversed) — nz.state.cronJobs replaces its former bare references.

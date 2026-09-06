@@ -10,7 +10,7 @@
 // registers (its reassignable bindings) and via window.* dereference at the
 // call site for its stable globals. Never snapshot window values at top
 // level — dashboard reassigns the primitives.
-import { esc, escAttr, showToast, nzState } from './nz_util.js';
+import { esc, escAttr, showToast, nzState, nzViews } from './nz_util.js';
 import {
   eventHtml,
   fetchEvents,
@@ -709,15 +709,10 @@ import {
 
   // ─── Exports ───────────────────────────────────────────────────────
 
-  // Window globals so dashboard.js keeps its existing bare-name calls.
-  window.renderAgentRows = renderAgentRows;
-  window.agentRowHtml = agentRowHtml;
-  window.findAgentByToolUseId = findAgentByToolUseId;
-  window.findAgentByTaskId = findAgentByTaskId;
-  window.initAgentsFromSession = initAgentsFromSession;
-
-  // AgentView namespace — Phase 3 callers should use these.
-  window.AgentView = {
+  // nz.views.agent — the view's public surface (#2557 PR-E3). dashboard
+  // reaches it at call time; it cannot import this module (that would
+  // create an import cycle and invert execution order).
+  nzViews.agent = {
     renderAgentRows: renderAgentRows,
     agentRowHtml: agentRowHtml,
     findByToolUseId: findAgentByToolUseId,
