@@ -240,6 +240,13 @@ export default [
       'no-restricted-syntax': ['error', {
         selector: "Literal[value=/^\\u002Fapi\\u002F/]",
         message: 'use NZ_CONTRACT.API.* (generated contract.js) instead of a hardcoded /api/ path',
+      }, {
+        // D3 bridge rule: a top-level `const x = window.y` snapshots the
+        // value at load time — for primitives that dashboard.js reassigns
+        // (selectedKey et al.) the copy silently goes stale. Bridges must
+        // dereference at the call site (`window.fn(...)`, `window.x` inline).
+        selector: "Program > VariableDeclaration > VariableDeclarator[init.type='MemberExpression'][init.object.name='window']",
+        message: 'no top-level window.* snapshots — dereference window.<name> at the use site (D3 bridge rule)',
       }],
     },
   },
