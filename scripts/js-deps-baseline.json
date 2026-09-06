@@ -94,24 +94,6 @@
         "wsm"
       ]
     },
-    "agent_view.js": {
-      "nz_util.js": [
-        "esc",
-        "escAttr",
-        "showToast"
-      ],
-      "dashboard.js": [
-        "fmtDuration",
-        "refreshBanner",
-        "selectedKey",
-        "selectedNode",
-        "sessionScrollPos",
-        "sessionsData",
-        "sid",
-        "turnState",
-        "wsm"
-      ]
-    },
     "asset_browser.js": {
       "nz_util.js": [
         "esc",
@@ -143,7 +125,7 @@
   },
   "bridgeRefs": {
     "dashboard.js": 23,
-    "agent_view.js": 8,
+    "agent_view.js": 22,
     "files_view.js": 8
   }
 }

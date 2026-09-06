@@ -26,13 +26,13 @@ func TestDashboardHTML_ScriptsDeferred(t *testing.T) {
 	// Classic scripts still load with defer; files migrated to ES modules (D3,
 	// docs/rfc/dashboard-es-modules.md) load with type="module" — modules are
 	// deferred by definition and share the same in-tag-order execution queue.
-	for _, src := range []string{"/static/dashboard.js", "/static/cron_view.js", "/static/agent_view.js"} {
+	for _, src := range []string{"/static/dashboard.js", "/static/cron_view.js"} {
 		want := `<script defer src="` + src + `">`
 		if !strings.Contains(html, want) {
 			t.Errorf("dashboard.html: %q must be loaded with defer; missing %q", src, want)
 		}
 	}
-	for _, src := range []string{"/static/nz_util.js", "/static/asset_browser.js", "/static/files_view.js"} {
+	for _, src := range []string{"/static/nz_util.js", "/static/agent_view.js", "/static/asset_browser.js", "/static/files_view.js"} {
 		want := `<script type="module" src="` + src + `">`
 		if !strings.Contains(html, want) {
 			t.Errorf("dashboard.html: %q must be loaded as an ES module; missing %q", src, want)

@@ -151,6 +151,16 @@ export function trapFocus(overlay) {
 const nz = (window.nz = window.nz || {});
 nz.util = { esc, escAttr, escJs, fetchJSON, showToast, trapFocus };
 
+// Cross-file mutable state accessors (D3 RFC §3): dashboard.js — still a
+// classic script — registers getters onto this object for its reassignable
+// top-level bindings (a classic script's let/const never lands on window,
+// and a copied value would go stale on reassignment). Migrated modules
+// import { nzState } and read nzState.<name> live at the use site. (Named
+// nzState, not state, so it never collides with the view modules' local
+// `state` objects.)
+export const nzState = {};
+nz.state = nzState;
+
 // Legacy top-level aliases — migration bridge for the classic-script call
 // sites (dashboard.js / cron_view.js / agent_view.js) that reference the bare
 // global names. This module runs before them (tag order), so the aliases

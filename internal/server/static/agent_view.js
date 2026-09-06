@@ -4,11 +4,13 @@
 // Phase 3: click-to-drill-in + WS agent_subscribe + tool_result folding +
 //          auto-collapse + breadcrumb + HTTP poll fallback.
 //
-// Loaded AFTER dashboard.js via <script> tag ordering (dashboard.html).
-// Depends on globals already defined by dashboard.js: esc, escAttr,
-// fmtDuration, sessionsData, sid, selectedKey, selectedNode, turnState,
-// sessionScrollPos, wsm, showToast, eventsUrl, eventHtml,
-// renderEventsWithDividers, toolVerb.
+// ES module (RFC docs/rfc/dashboard-es-modules.md, D3 PR-B). Loaded AFTER
+// dashboard.js via tag ordering (dashboard.html — order frozen). Utilities
+// come in via import; dashboard.js state comes in via the nzState getters it
+// registers (its reassignable bindings) and via window.* dereference at the
+// call site for its stable globals. Never snapshot window values at top
+// level — dashboard reassigns the primitives.
+import { esc, escAttr, showToast, nzState } from './nz_util.js';
 
 (function () {
   'use strict';
@@ -16,7 +18,7 @@
   // ─── Phase 2.5 banner helpers ─────────────────────────────────────────
 
   function renderAgentRows() {
-    var agents = turnState.agents;
+    var agents = nzState.turnState.agents;
     if (agents.length === 0) return '';
 
     // Separate solo subagents from team members.
@@ -85,7 +87,7 @@
     // Stats.
     var stat = '';
     if (a.toolUses > 0) stat += a.toolUses + ' calls';
-    if (a.durationMs > 0) stat += (stat ? ' · ' : '') + fmtDuration(a.durationMs);
+    if (a.durationMs > 0) stat += (stat ? ' · ' : '') + window.fmtDuration(a.durationMs);
     if (isDone) stat += (stat ? ' · ' : '') + '✓';
     if (stat) parts += '<span class="sa-stat">· ' + stat + '</span>';
     parts += '</div>';
@@ -93,23 +95,23 @@
   }
 
   function findAgentByToolUseId(tuid) {
-    for (var i = 0; i < turnState.agents.length; i++) {
-      if (turnState.agents[i].toolUseId === tuid) return turnState.agents[i];
+    for (var i = 0; i < nzState.turnState.agents.length; i++) {
+      if (nzState.turnState.agents[i].toolUseId === tuid) return nzState.turnState.agents[i];
     }
     return null;
   }
 
   function findAgentByTaskId(tid) {
-    for (var i = 0; i < turnState.agents.length; i++) {
-      if (turnState.agents[i].taskId === tid) return turnState.agents[i];
+    for (var i = 0; i < nzState.turnState.agents.length; i++) {
+      if (nzState.turnState.agents[i].taskId === tid) return nzState.turnState.agents[i];
     }
     return null;
   }
 
   function initAgentsFromSession() {
-    var sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
+    var sd = nzState.sessionsData[window.sid(nzState.selectedKey, nzState.selectedNode || 'local')];
     if (sd && sd.subagents && sd.subagents.length > 0) {
-      turnState.agents = sd.subagents.map(function (sa) {
+      nzState.turnState.agents = sd.subagents.map(function (sa) {
         return {
           toolUseId: '', taskId: '', name: sa.name, teamName: '',
           description: sa.activity || '', background: !!sa.background,
@@ -121,7 +123,7 @@
 
   // ─── Phase 3: drill-in state ──────────────────────────────────────────
   //
-  // `state` is the agent-view specific state kept independent of turnState
+  // `state` is the agent-view specific state kept independent of nzState.turnState
   // so turn-boundary resets (result / user events) don't nuke an open
   // drill-in view. The activeTaskID persists across turns until the user
   // Esc's back or switches sessions.
@@ -178,17 +180,17 @@
     if (!taskID) {
       state.retries = 0;
     }
-    state.activeKey = selectedKey || '';
+    state.activeKey = nzState.selectedKey || '';
     state.activeTaskID = taskID || '';
     // Opening a drill-in cancels any auto-collapse-in-progress on the banner
     // so the user's explicit click isn't immediately undone.
-    if (turnState.collapsedByAuto !== undefined) {
-      turnState.collapsedByAuto = false;
+    if (nzState.turnState.collapsedByAuto !== undefined) {
+      nzState.turnState.collapsedByAuto = false;
     }
     stopHttpPoll();
     state.pollAfterMS = 0;
     state.pollSeenKeys = [];
-    refreshBanner();
+    window.refreshBanner();
 
     var el = document.getElementById('events-scroll');
     if (!el) return;
@@ -217,8 +219,8 @@
 
     // Fetch the initial event slice via HTTP; WS subscribe runs in parallel
     // and catches up afterwards. The HTTP path handles 202/404/tombstone.
-    var dispatchKey = selectedKey;
-    var node = selectedNode || 'local';
+    var dispatchKey = nzState.selectedKey;
+    var node = nzState.selectedNode || 'local';
     fetchAgentEventsInitial(taskID, dispatchKey, node, seq);
   }
 
@@ -230,7 +232,7 @@
     fetch(NZ_CONTRACT.API.sessions_agent_events + qs, { credentials: 'same-origin' })
       .then(function (r) {
         // Stale switch? Drop.
-        if (seq !== state.switchSeq || selectedKey !== dispatchKey) return;
+        if (seq !== state.switchSeq || nzState.selectedKey !== dispatchKey) return;
         if (r.status === 202) {
           state.retries++;
           if (state.retries >= MAX_SWITCH_RETRIES) {
@@ -333,9 +335,9 @@
     // Bound the live DOM before reading scroll geometry so a long agent task
     // can't grow #events-scroll without limit and OOM the tab (#398-sibling).
     trimAgentEventsScroll(el);
-    // Track scroll position for sessionScrollPos restore on next switch.
-    var k = sid(selectedKey, selectedNode || 'local') + '|' + state.activeTaskID;
-    var pos = sessionScrollPos[k];
+    // Track scroll position for window.sessionScrollPos restore on next switch.
+    var k = window.sid(nzState.selectedKey, nzState.selectedNode || 'local') + '|' + state.activeTaskID;
+    var pos = window.sessionScrollPos[k];
     if (pos && typeof pos.scrollTop === 'number') {
       el.scrollTop = pos.scrollTop;
     } else {
@@ -371,12 +373,12 @@
     if (!taskID) return;
     var msg = {
       type: 'agent_subscribe',
-      key: selectedKey,
-      node: selectedNode || 'local',
+      key: nzState.selectedKey,
+      node: nzState.selectedNode || 'local',
       task_id: taskID,
     };
-    if (wsm && typeof wsm.send === 'function') {
-      wsm.send(msg);
+    if (window.wsm && typeof window.wsm.send === 'function') {
+      window.wsm.send(msg);
     }
   }
 
@@ -385,12 +387,12 @@
     if (!taskID) return;
     var msg = {
       type: 'agent_unsubscribe',
-      key: state.activeKey || selectedKey,
-      node: selectedNode || 'local',
+      key: state.activeKey || nzState.selectedKey,
+      node: nzState.selectedNode || 'local',
       task_id: taskID,
     };
-    if (wsm && typeof wsm.send === 'function') {
-      wsm.send(msg);
+    if (window.wsm && typeof window.wsm.send === 'function') {
+      window.wsm.send(msg);
     }
   }
 
@@ -466,7 +468,7 @@
     if (!st) return;
     var pieces = [];
     if (patch && patch.tool_uses > 0) pieces.push(patch.tool_uses + ' calls');
-    if (patch && patch.duration_ms > 0) pieces.push(fmtDuration(patch.duration_ms));
+    if (patch && patch.duration_ms > 0) pieces.push(window.fmtDuration(patch.duration_ms));
     if (pieces.length > 0) st.textContent = pieces.join(' · ');
   }
 
@@ -489,7 +491,7 @@
       if (msg.meta.last_tool) row.lastTool = msg.meta.last_tool;
       if (msg.meta.tool_uses > 0) row.toolUses = msg.meta.tool_uses;
       if (msg.meta.duration_ms > 0) row.durationMs = msg.meta.duration_ms;
-      refreshBanner();
+      window.refreshBanner();
     }
     if (msg.task_id === state.activeTaskID) {
       refreshBreadcrumbStat(msg.meta);
@@ -501,7 +503,7 @@
     var row = findAgentByTaskId(msg.task_id);
     if (row) {
       row.status = msg.status || 'completed';
-      refreshBanner();
+      window.refreshBanner();
     }
     if (msg.task_id === state.activeTaskID) {
       state.activeStatus = msg.status || 'completed';
@@ -599,8 +601,8 @@
         stopHttpPoll();
         return;
       }
-      var qs = '?key=' + encodeURIComponent(selectedKey) +
-        '&node=' + encodeURIComponent(selectedNode || 'local') +
+      var qs = '?key=' + encodeURIComponent(nzState.selectedKey) +
+        '&node=' + encodeURIComponent(nzState.selectedNode || 'local') +
         '&task_id=' + encodeURIComponent(taskID) +
         '&after=' + state.pollAfterMS +
         '&limit=200';
@@ -672,7 +674,7 @@
   // previous session must close — otherwise agent_event messages for the
   // now-inactive taskID would leak into the new session's event list.
   //
-  // Called by dashboard.js's selectSession *before* it mutates selectedKey
+  // Called by dashboard.js's selectSession *before* it mutates nzState.selectedKey
   // (so saveScrollPos still keys off the old session). We therefore accept
   // the target key/node as arguments rather than comparing against the now-
   // stale global. When onSessionSwitch is called with no args (legacy call
@@ -683,7 +685,7 @@
     var tKey = targetKey == null ? null : targetKey;
     var tNode = targetNode == null ? null : targetNode;
     if (tKey !== null) {
-      var curNode = state.activeKey ? (selectedNode || 'local') : '';
+      var curNode = state.activeKey ? (nzState.selectedNode || 'local') : '';
       if (tKey === state.activeKey &&
           (tNode === null || tNode === (curNode || 'local'))) {
         // Same session re-click — keep drill-in alive.
