@@ -46,16 +46,19 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATIC_DIR = path.join(ROOT, 'internal', 'server', 'static');
 const DASH = path.join(STATIC_DIR, 'dashboard.js');
 
-// Mutable dashboard state exposed through nz.state accessors. A moved region
-// that reads one of these gets `nzState.<name>`; one that WRITES one needs a
-// setter on the accessor (the tool reports that — dashboard.js keeps the
-// binding, so the setter is a one-line dashboard change, not a move).
-const STATE = new Set([
-  'activeView', 'defaultWorkspace', 'eventTimer', 'lastEventTime', 'navUserEls',
-  'nodesData', 'pendingFiles', 'projectsData', 'selectedKey', 'selectedNode',
-  'sending', 'sessionDrafts', 'sessionLastSent', 'sessionPendingTuning',
-  'sessionScrollPos', 'sessionsData', 'turnState',
-]);
+// Mutable dashboard state exposed through nz.state accessors. Read from
+// dashboard.js itself rather than hard-coded: the set grows every time a batch
+// promotes another shared binding, and a stale copy here would silently
+// classify a state read as an injected dep (which then can't be written).
+function readStateNames(src) {
+  const block = /Object\.defineProperties\(nzState, \{\n([\s\S]*?)\n\}\);/.exec(src);
+  const out = new Map(); // name -> hasSetter
+  for (const line of (block?.[1] ?? '').split('\n')) {
+    const m = /^\s*([A-Za-z_$][\w$]*): \{(.*)\}/.exec(line);
+    if (m) out.set(m[1], m[2].includes('set:'));
+  }
+  return out;
+}
 
 // Names nz_util exports — a moved region referencing these imports them
 // directly instead of taking an injected dep.
@@ -150,6 +153,8 @@ const dryRun = argv.includes('--dry-run');
 if (!out || !regionArg) fail('usage: --out <module-name> --regions "<marker>,<marker>" [--dry-run]');
 
 const dashSrc = fs.readFileSync(DASH, 'utf8');
+const STATE_ACCESSORS = readStateNames(dashSrc);
+const STATE = new Set(STATE_ACCESSORS.keys());
 const lines = dashSrc.split('\n');
 const regs = regions(lines);
 const markers = regionArg.split(',').map((s) => s.trim()).filter(Boolean);
@@ -183,7 +188,9 @@ const exposed = [...movedDecls.keys()].filter((n) => restFree.has(n)).sort();
 // shows up as the surrounding feature quietly not working (the first attempt
 // at moving Message navigation broke session switching this way: 26 e2e specs
 // failed on navUserEls / navIdx / _lastAppliedMainState).
-const exposedWrittenByDash = exposed.filter((n) => restWrites.has(n));
+// nz.state-backed names are excluded: the module reads/writes them through
+// the accessor, so dashboard keeps the binding and both sides stay in sync.
+const exposedWrittenByDash = exposed.filter((n) => restWrites.has(n) && !STATE.has(n));
 // Writes that land on a dashboard binding.
 const writesToDash = needs.filter((n) => movedWrites.has(n));
 
@@ -222,12 +229,7 @@ if (otherWrites.length) console.log(`  ! writes a non-state dashboard binding (N
 // and the sidebar silently kept its skeleton, which only the 15 s e2e timeout
 // surfaced. Fail early instead.
 {
-  const accessors = /Object\.defineProperties\(nzState, \{([\s\S]*?)\n\}\);/.exec(restText);
-  const declared = new Map();
-  for (const line of (accessors?.[1] ?? '').split('\n')) {
-    const m = /^\s*([A-Za-z_$][\w$]*): \{(.*)\}/.exec(line);
-    if (m) declared.set(m[1], m[2].includes('set:'));
-  }
+  const declared = STATE_ACCESSORS;
   const missing = fromState.filter((n) => !declared.has(n));
   const needSetter = stateWrites.filter((n) => declared.get(n) === false);
   if (missing.length) console.log(`  ! nz.state GETTERS missing in dashboard.js: ${missing.join(', ')}`);
