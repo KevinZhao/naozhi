@@ -1,16 +1,18 @@
 import {
+  fetchCLIBackends,
+  renderBackendPicker,
+  showAuthModal,
+} from './auth_modal.js';
+import {
   authHeaders,
   eventHtml,
-  fetchCLIBackends,
   getToken,
   isInternalEvent,
   lastDividerTime,
   lsGet,
   lsSet,
-  renderBackendPicker,
   renderEventsWithDividers,
   setActivityView,
-  showAuthModal,
   wsm,
 } from './dashboard.js';
 import {

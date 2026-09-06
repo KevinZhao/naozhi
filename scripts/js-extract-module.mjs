@@ -261,20 +261,58 @@ if (otherWrites.length) fail('refusing to move: the region assigns a dashboard b
 
 // ── emit ───────────────────────────────────────────────────────────────────
 
+// rewriteRefs prefixes state/dep references — but only in CODE. A naive
+// global replace also rewrites string literals and comments: it turned the CSS
+// class name 'sending' into 'nzState.sending' and the .sending style stopped
+// applying (the send button lost its in-flight state; one e2e spec caught it).
+// Walk the source once, tracking string/template/comment state, and rewrite
+// identifiers only while in code.
 const rewriteRefs = (text) => {
-  // Prefix state reads and injected deps. Word-boundary replace with a
-  // property-access guard; the moved text is JS, so a preceding `.` or `$`
-  // means it is already a member access.
-  let t = text;
-  // The lookbehind rejects a preceding `.` so `obj.name` is left alone — but
-  // `...name` (spread) has a dot two chars back, so require that the dot is
-  // NOT part of an ellipsis. Missing this left one `[...collapsedProjects]`
-  // unprefixed in the first sidebar_project extraction.
-  const guard = (n) => new RegExp(`(?<!\\.\\.\\.)(?<![\\w$])(?<!\\.)${n}(?![\\w$])`, 'g');
-  const spread = (n) => new RegExp(`\\.\\.\\.${n}(?![\\w$])`, 'g');
-  for (const n of fromState) t = t.replace(guard(n), `nzState.${n}`).replace(spread(n), `...nzState.${n}`);
-  for (const n of asDeps) t = t.replace(guard(n), `deps.${n}`).replace(spread(n), `...deps.${n}`);
-  return t;
+  const prefixOf = new Map();
+  for (const n of fromState) prefixOf.set(n, 'nzState.');
+  for (const n of asDeps) prefixOf.set(n, 'deps.');
+  if (prefixOf.size === 0) return text;
+  let out = '';
+  let i = 0;
+  let mode = 'code'; // code | line | block | squote | dquote | template
+  const idStart = /[A-Za-z_$]/;
+  const idPart = /[\w$]/;
+  while (i < text.length) {
+    const c = text[i];
+    const nx = text[i + 1] ?? '';
+    if (mode === 'code') {
+      if (c === '/' && nx === '/') { mode = 'line'; out += c + nx; i += 2; continue; }
+      if (c === '/' && nx === '*') { mode = 'block'; out += c + nx; i += 2; continue; }
+      if (c === "'") { mode = 'squote'; out += c; i++; continue; }
+      if (c === '"') { mode = 'dquote'; out += c; i++; continue; }
+      if (c === '`') { mode = 'template'; out += c; i++; continue; }
+      if (idStart.test(c)) {
+        let j = i + 1;
+        while (j < text.length && idPart.test(text[j])) j++;
+        const word = text.slice(i, j);
+        // Skip a member access (`obj.word`) but NOT a spread (`...word`).
+        const before = text.slice(Math.max(0, i - 3), i);
+        const memberAccess = i > 0 && text[i - 1] === '.' && !before.endsWith('...');
+        // Skip an object-literal key / property definition (`word:`).
+        const after = text.slice(j).match(/^\s*:/) !== null;
+        const p = prefixOf.get(word);
+        out += (p && !memberAccess && !after) ? p + word : word;
+        i = j;
+        continue;
+      }
+      out += c; i++; continue;
+    }
+    if (mode === 'line') { if (c === '\n') mode = 'code'; out += c; i++; continue; }
+    if (mode === 'block') {
+      if (c === '*' && nx === '/') { mode = 'code'; out += c + nx; i += 2; continue; }
+      out += c; i++; continue;
+    }
+    // inside a string / template literal
+    if (c === '\\') { out += c + nx; i += 2; continue; }
+    if ((mode === 'squote' && c === "'") || (mode === 'dquote' && c === '"') || (mode === 'template' && c === '`')) mode = 'code';
+    out += c; i++;
+  }
+  return out;
 };
 
 const utilImports = new Set(fromUtil);

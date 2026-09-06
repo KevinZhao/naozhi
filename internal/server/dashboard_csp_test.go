@@ -354,7 +354,8 @@ func TestDashboardCSP_StaticHandlersWiredInJS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(jsBytes)
+	js := readDashboardJS(t)
+	_ = jsBytes
 
 	// cron extraction (PR-1): the btn-cron bind stays in dashboard.js but its
 	// handler openCronPanel moved to cron_view.js. The handler-definition check

@@ -247,7 +247,7 @@ func TestDashboardJS_PalettePathHighlight_UsesRenderedPath(t *testing.T) {
 		t.Error("renderPaletteList must route path matching through matchProjectPath")
 	}
 	row := extractJSFunction(t, js, "buildProjectRow")
-	if !strings.Contains(row, "highlight(shortPath(p.path), s.pathRanges)") {
+	if !strings.Contains(row, "highlight(deps.shortPath(p.path), s.pathRanges)") {
 		t.Fatal("buildProjectRow no longer highlights shortPath(p.path) with s.pathRanges; update this test's premise")
 	}
 
@@ -256,6 +256,9 @@ func TestDashboardJS_PalettePathHighlight_UsesRenderedPath(t *testing.T) {
 		extractJSFunction(t, js, "shortPath") +
 		extractJSFunction(t, js, "highlight") +
 		extractJSFunction(t, js, "matchProjectPath") + `
+// #2558 D4-7: the palette matchers moved to auth_modal.js and reach
+// shortPath as an injected dep.
+const deps = { shortPath };
 const cases = [
   ['work', '/home/ec2-user/workspace/naozhi'],
   ['naozhi', '/Users/kevin/dev/naozhi'],

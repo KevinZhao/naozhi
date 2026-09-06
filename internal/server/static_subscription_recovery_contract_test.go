@@ -33,11 +33,7 @@ func extractJSBlock(t *testing.T, js, marker string) string {
 // whole turn streamed to a subscription that no longer existed server-side.
 func TestDashboardJS_SubscriptionTimeoutClearsClientBookkeeping(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	body := extractJSBlock(t, js, "onSessionState(msg) {")
 
@@ -68,11 +64,7 @@ func TestDashboardJS_SubscriptionTimeoutClearsClientBookkeeping(t *testing.T) {
 // was dead code. The fix records the pre-flip state and judges on that.
 func TestDashboardJS_WasDeadNotMaskedByOptimisticRunning(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	// markSessionOptimisticRunning must stash the real state before overwriting
 	// it — nothing downstream can reconstruct it afterwards.
@@ -139,11 +131,7 @@ func TestDashboardJS_WasDeadNotMaskedByOptimisticRunning(t *testing.T) {
 //     so an ack gate does not even close the race it targets.
 func TestDashboardJS_OnHistoryKeysInitialRenderOnServerFlag(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	body := extractJSBlock(t, js, "onHistory(msg) {")
 
@@ -241,11 +229,7 @@ func TestServerMsg_InitialFlagOnlyOnOpeningFrames(t *testing.T) {
 // frame is empty — unconditionally, because the pane is now empty too.
 func TestDashboardJS_EmptyInitialFrameResetsRenderCursor(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	body := extractJSBlock(t, js, "onHistory(msg) {")
 	start := strings.Index(body, "if (isInitial) {")
@@ -281,11 +265,7 @@ func TestDashboardJS_EmptyInitialFrameResetsRenderCursor(t *testing.T) {
 // else 'local' — a remote key never collapses to 'local'.
 func TestDashboardJS_SubscribedAckKeepsNodeForNonPendingTab(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	idx := strings.Index(js, "case 'subscribed':")
 	if idx < 0 {
