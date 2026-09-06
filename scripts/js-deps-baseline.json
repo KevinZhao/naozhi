@@ -7,38 +7,16 @@
     },
     "dashboard.js": {
       "nz_util.js": [
-        "esc",
-        "escAttr",
-        "fetchJSON",
-        "nz",
-        "showToast",
-        "trapFocus"
+        "nz"
       ],
       "cron_view.js": [
-        "appendEventsToContainer",
         "authHeaders",
-        "cronApplyRunEnded",
-        "cronApplyRunStarted",
-        "cronTimelineRefreshHeadDebounced",
         "ensureCronLiveSubscription",
-        "fetchCronJobs",
         "formatCostUSD",
         "formatDurationShort",
         "formatRunDuration",
-        "isCronLiveKey",
         "isCronSessionFrozen",
-        "isCronSessionKey",
-        "openCronPanel",
-        "renderCronPanel",
-        "repaintCronLive",
-        "setCronLiveStatus",
-        "updateCronLiveTruncated"
-      ],
-      "agent_view.js": [
-        "findAgentByTaskId",
-        "findAgentByToolUseId",
-        "initAgentsFromSession",
-        "renderAgentRows"
+        "openCronPanel"
       ]
     },
     "cron_view.js": {
@@ -84,7 +62,7 @@
     "files_view.js": 0
   },
   "bridgeRefs": {
-    "dashboard.js": 23,
+    "dashboard.js": 59,
     "cron_view.js": 102,
     "agent_view.js": 22,
     "files_view.js": 8

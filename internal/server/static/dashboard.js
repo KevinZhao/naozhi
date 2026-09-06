@@ -1,3 +1,4 @@
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState } from './nz_util.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
@@ -470,7 +471,7 @@ function setActivityView(view) {
   // Enter the target view.
   if (view === 'assets') { if (window.nzAssetView) window.nzAssetView.show(); }
   else if (view === 'files') { if (window.nzFilesView) window.nzFilesView.show(); }
-  else if (view === 'cron') { openCronPanel(); }
+  else if (view === 'cron') { window.openCronPanel(); }
   else if (view === 'system') { openSystemPanel(); }
   else if (view === 'settings') { renderSettingsView(); }
 }
@@ -2973,7 +2974,7 @@ function sessionRunOutcomeMeta(outcome) {
 function sessionRunStatLabel(ms) {
   // Reuse the cron duration formatter (cron_view.js) for visual parity. It is
   // a top-level function in the shared script scope.
-  if (typeof formatRunDuration === 'function') return formatRunDuration(ms) || '0ms';
+  if (typeof formatRunDuration === 'function') return window.formatRunDuration(ms) || '0ms';
   return Math.round(ms) + 'ms';
 }
 
@@ -2984,7 +2985,7 @@ function sessionRunStatLabel(ms) {
 // tier and renders "3h 07m" instead of an unreadable "187m 3s". Per-run rows
 // keep sessionRunStatLabel so their second-level precision ("26.5s") is intact.
 function sessionRunTotalLabel(ms) {
-  if (typeof formatDurationShort === 'function') return formatDurationShort(ms);
+  if (typeof formatDurationShort === 'function') return window.formatDurationShort(ms);
   return sessionRunStatLabel(ms);
 }
 
@@ -3000,7 +3001,7 @@ function sessionRunsStatsHtml(stats) {
   // 总花费：仅当有成本数据时显示（本机 claude run 通常带 cost_usd；某些
   // backend / 旧记录可能为 0）。formatCostUSD 对 <$0.01 保留 4 位小数，返回 ''
   // 时整条不渲染，避免出现无意义的"花费 $0.00"。
-  const costStr = (typeof formatCostUSD === 'function') ? formatCostUSD(stats.total_cost_usd || 0) : '';
+  const costStr = (typeof formatCostUSD === 'function') ? window.formatCostUSD(stats.total_cost_usd || 0) : '';
   if (costStr) {
     parts.push('<span class="srp-stat" title="累计花费">花费 ' + esc(costStr) + '</span>');
   }
@@ -3023,7 +3024,7 @@ function sessionRunRowHtml(r) {
     sub.push('<span title="首字节延迟">首字节 ' + esc(sessionRunStatLabel(r.first_byte_ms)) + '</span>');
   }
   if (r.cost_usd && typeof formatCostUSD === 'function') {
-    sub.push('<span title="本次成本估算">' + esc(formatCostUSD(r.cost_usd)) + '</span>');
+    sub.push('<span title="本次成本估算">' + esc(window.formatCostUSD(r.cost_usd)) + '</span>');
   }
   const subRow = sub.length
     ? '<div class="srr-sub">' + sub.join('<span class="srr-sep">·</span>') + '</div>'
@@ -3642,7 +3643,7 @@ async function dismissSession(key, node, opts) {
   // filtered server-side so this branch should never run in production —
   // but if a future server bug ever leaks a cron key through, we must
   // NOT call DELETE /api/sessions (the scheduler still owns the stub).
-  if (isCronSessionKey(key)) {
+  if (window.isCronSessionKey(key)) {
     // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side
     // and should never appear in the sidebar at all — this branch only
     // executes if a future server bug leaks one through. Guard-rail behaviour:
@@ -6155,7 +6156,7 @@ function refreshBanner() {
 
   // Agent rows
   if (agEl) {
-    agEl.innerHTML = renderAgentRows();
+    agEl.innerHTML = window.renderAgentRows();
   }
 
   // Stats line (hidden when agents are shown)
@@ -6245,14 +6246,14 @@ function applyEventToTurnState(ev) {
       updateSidebarAgentBadge();
       break;
     case 'task_start':
-      var a1 = findAgentByToolUseId(ev.tool_use_id);
+      var a1 = window.findAgentByToolUseId(ev.tool_use_id);
       if (a1) {
         a1.taskId = ev.task_id;
         a1.status = 'running';
       }
       break;
     case 'task_progress':
-      var a2 = findAgentByTaskId(ev.task_id) || findAgentByToolUseId(ev.tool_use_id);
+      var a2 = window.findAgentByTaskId(ev.task_id) || window.findAgentByToolUseId(ev.tool_use_id);
       if (a2) {
         if (!a2.taskId) a2.taskId = ev.task_id;
         a2.status = 'running';
@@ -6264,7 +6265,7 @@ function applyEventToTurnState(ev) {
       }
       break;
     case 'task_done':
-      var a3 = findAgentByTaskId(ev.task_id) || findAgentByToolUseId(ev.tool_use_id);
+      var a3 = window.findAgentByTaskId(ev.task_id) || window.findAgentByToolUseId(ev.tool_use_id);
       if (a3) {
         if (!a3.taskId) a3.taskId = ev.task_id;
         a3.status = ev.status || 'completed';
@@ -6849,7 +6850,7 @@ function updateSendButton(state) {
     if (banner) banner.style.display = '';
     if (sendBtn) sendBtn.style.display = 'none';
     if (stopBtn) stopBtn.style.display = 'flex';
-    initAgentsFromSession();
+    window.initAgentsFromSession();
     refreshBanner();
     startTurnWatchdog();
   } else {
@@ -10340,7 +10341,7 @@ function loadMermaid() {
   s.integrity = 'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk';
   s.crossOrigin = 'anonymous';
   s.onload = () => {
-    mermaid.initialize(mermaidConfig());
+    window.mermaid.initialize(mermaidConfig());
     mermaidReady = true;
     mermaidLoading = false;
     runMermaid();
@@ -10364,8 +10365,8 @@ function runMermaid() {
   if (hasNew) {
     // Re-initialise per run so diagrams rendered after a theme switch pick
     // up the current theme (already-rendered SVGs are left as-is).
-    mermaid.initialize(mermaidConfig());
-    mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+    window.mermaid.initialize(mermaidConfig());
+    window.mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
   }
 }
 
@@ -10428,7 +10429,7 @@ function runKatex() {
     const el = document.getElementById(id);
     if (!el) { delete katexPending[id]; return; }
     try {
-      katex.render(info.tex, el, { displayMode: info.display, throwOnError: false });
+      window.katex.render(info.tex, el, { displayMode: info.display, throwOnError: false });
     } catch(_) {
       el.textContent = (info.display ? '$$' : '$') + info.tex + (info.display ? '$$' : '$');
     }
@@ -10483,7 +10484,7 @@ function isMathDisplay(tex) {
 
 function renderKatex(tex, displayMode) {
   if (katexReady) {
-    try { return katex.renderToString(tex, { displayMode: displayMode, throwOnError: false }); }
+    try { return window.katex.renderToString(tex, { displayMode: displayMode, throwOnError: false }); }
     catch(_) { return esc(tex); }
   }
   const id = 'ktx-' + (++katexCounter);
@@ -12502,7 +12503,7 @@ function systemStateMeta(state) {
 // once we're past sub-second, reusing the existing ms formatter.
 function systemTickLabel(ns) {
   if (!ns || ns <= 0) return '—';
-  return formatDurationShort(ns / 1e6);
+  return window.formatDurationShort(ns / 1e6);
 }
 
 // systemStatLabel maps a flattened TickReport stat key to a Chinese label.
@@ -12561,7 +12562,7 @@ function renderSystemView() {
         '<div class="sys-meta">' +
           '<span>最近一次 <b>' + esc(st.label) + '</b></span>' +
           '<span>触发 <b>' + esc(triggerTxt) + '</b></span>' +
-          '<span>用时 <b>' + esc(formatDurationShort(lr.duration_ms)) + '</b></span>' +
+          '<span>用时 <b>' + esc(window.formatDurationShort(lr.duration_ms)) + '</b></span>' +
           '<span><b title="' + esc(whenTitle) + '">' + esc(whenTxt) + '</b></span>' +
         '</div>';
       const stats = lr.stats || {};
@@ -12804,7 +12805,7 @@ const wsm = {
           this.cronLive.pendingJobId = null;
           this.cronLive.suspended = (msg.reason === 'suspended');
           this.cronLive.status = this.cronLive.suspended ? 'pending' : 'live';
-          setCronLiveStatus(this.cronLive.status);
+          window.setCronLiveStatus(this.cronLive.status);
           break;
         }
         // Server confirmed subscription — apply authoritative state
@@ -12842,7 +12843,7 @@ const wsm = {
           this.cronLive.pendingJobId = null;
           this.cronLive.subscribedKey = null;
           this.cronLive.status = 'stopped';
-          setCronLiveStatus('stopped');
+          window.setCronLiveStatus('stopped');
           break;
         }
         // PurgeNodeSubscriptions broadcast: error{node, "node disconnected"}
@@ -12891,11 +12892,11 @@ const wsm = {
         }
         break;
       case 'history':
-        if (isCronLiveKey(msg.key)) { this.onCronLiveHistory(msg); break; }
+        if (window.isCronLiveKey(msg.key)) { this.onCronLiveHistory(msg); break; }
         this.onHistory(msg);
         break;
       case 'event':
-        if (isCronLiveKey(msg.key)) { this.onCronLiveEvent(msg); break; }
+        if (window.isCronLiveKey(msg.key)) { this.onCronLiveEvent(msg); break; }
         this.onEvent(msg);
         break;
       case 'send_ack':
@@ -12908,7 +12909,7 @@ const wsm = {
         this.onInterruptAck(msg);
         break;
       case 'session_state':
-        if (isCronLiveKey(msg.key)) { this.onCronLiveSessionState(msg); break; }
+        if (window.isCronLiveKey(msg.key)) { this.onCronLiveSessionState(msg); break; }
         this.onSessionState(msg);
         break;
       case 'sessions_update': {
@@ -12945,7 +12946,7 @@ const wsm = {
         // drawer's "当前执行" section therefore appears the same frame
         // the WS event lands, gated only on cronDetailJobId — no
         // selectedKey check is needed any more.
-        cronApplyRunStarted(msg);
+        window.cronApplyRunStarted(msg);
         break;
       case 'cron_run_ended':
         // P0 — terminal frame. Refetch list so counters / last_error_class
@@ -12959,8 +12960,8 @@ const wsm = {
         // terminal state (succeeded / failed / skipped / timed_out /
         // canceled) — only succeeded should celebrate.
         if (msg && msg.state === 'succeeded') announce('定时任务已完成');
-        cronApplyRunEnded(msg);
-        fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
+        window.cronApplyRunEnded(msg);
+        window.fetchCronJobs().then(() => window.renderCronPanel()).catch(() => {});
         // P2 cron-run-history (RFC §8.2) — refresh the timeline head
         // (most-recent 10 runs) when the operator currently has the drawer
         // open for this job. cron-panel-consolidation RFC §4.6: the gate
@@ -12973,7 +12974,7 @@ const wsm = {
         // R243-PERF-7 / #812: route through the rAF-debounced wrapper so
         // bursty cron_run_ended events for the same job collapse to one
         // sort+innerHTML rebuild per paint frame instead of one per event.
-        if (msg && msg.job_id) cronTimelineRefreshHeadDebounced(msg.job_id);
+        if (msg && msg.job_id) window.cronTimelineRefreshHeadDebounced(msg.job_id);
         break;
       case 'daemon_run_started':
       case 'daemon_run_ended':
@@ -13075,7 +13076,7 @@ const wsm = {
     this.cronLive.pendingJobId = jobId;
     this.cronLive.runStartedAt = runStartedAtMs || 0;
     this.cronLive.status = 'pending';
-    setCronLiveStatus('pending');
+    window.setCronLiveStatus('pending');
     const msg = { type: 'subscribe', key: key };
     const after = this.cronLive.lastEventTimeMs || runStartedAtMs || 0;
     if (after > 0) msg.after = after;
@@ -13119,8 +13120,8 @@ const wsm = {
       const jobId = this.cronLive.jobId;
       // cron_view is an ES module (D3 PR-C1): its cronJobs binding is reached
       // through the nz.state accessor it registers, not a bare global.
-      const job = Array.isArray(nz.state.cronJobs)
-        ? nz.state.cronJobs.find(j => j && j.id === jobId)
+      const job = Array.isArray(nzState.cronJobs)
+        ? nzState.cronJobs.find(j => j && j.id === jobId)
         : null;
       const isRunning = !!(job && job.current_run && job.current_run.started_at);
       if (isRunning) {
@@ -13134,7 +13135,7 @@ const wsm = {
       }
       // 任务已结束：保持 events 数组供回看，status 已是 'stopped'
     } else if (typeof ensureCronLiveSubscription === 'function') {
-      ensureCronLiveSubscription();
+      window.ensureCronLiveSubscription();
     }
   },
 
@@ -13359,7 +13360,7 @@ const wsm = {
     // Cron timed_out / failed 终态后丢弃后续 ghost 事件（CLI 子进程
     // 在 deadline 命中后还会再吐 result，但 cron run 已记录为终态，
     // 继续追加只会让用户看到"超时但还在工作"的分裂视觉）。
-    if (isCronSessionFrozen(msg.key)) return;
+    if (window.isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
     if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
@@ -13744,14 +13745,14 @@ const wsm = {
     // 流不会再有事件 —— 切到 stopped，事件保留可回看。
     if (msg.state === 'dead' || msg.reason === 'subscription_timeout') {
       this.cronLive.status = 'stopped';
-      setCronLiveStatus('stopped');
+      window.setCronLiveStatus('stopped');
     }
   },
 
   // cron-live RFC §5: 首批 history 帧到达。EventEntriesSince(after) 后端无条数
   // 上限（After>0 时 Limit 被忽略），前端必须自己截尾到 CRON_LIVE_MAX_EVENTS。
   onCronLiveHistory(msg) {
-    if (typeof isCronSessionFrozen === 'function' && isCronSessionFrozen(msg.key)) return;
+    if (typeof isCronSessionFrozen === 'function' && window.isCronSessionFrozen(msg.key)) return;
     const incoming = msg.events || [];
     if (incoming.length === 0) return;
     const lastTime = this.cronLive.lastEventTimeMs;
@@ -13772,11 +13773,11 @@ const wsm = {
       if (last.time && last.time > this.cronLive.lastEventTimeMs) this.cronLive.lastEventTimeMs = last.time;
     }
     this.cronLive.status = 'live';
-    repaintCronLive();
+    window.repaintCronLive();
   },
 
   onCronLiveEvent(msg) {
-    if (typeof isCronSessionFrozen === 'function' && isCronSessionFrozen(msg.key)) return;
+    if (typeof isCronSessionFrozen === 'function' && window.isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
     if (ev.time && ev.time < this.cronLive.lastEventTimeMs) return;
@@ -13790,9 +13791,9 @@ const wsm = {
     }
     if (ev.time) this.cronLive.lastEventTimeMs = ev.time;
     this.cronLive.status = 'live';
-    appendEventsToContainer(document.getElementById('cron-live-events'), [ev]);
-    setCronLiveStatus('live');
-    updateCronLiveTruncated();
+    window.appendEventsToContainer(document.getElementById('cron-live-events'), [ev]);
+    window.setCronLiveStatus('live');
+    window.updateCronLiveTruncated();
   },
 
   setState(s) {
@@ -16095,7 +16096,7 @@ initSwipeBack();
     // hover" semantics).
     try {
       const data = await fetchJSON(NZ_CONTRACT.API.memory_slug.replace('{slug}', encodeURIComponent(slug)), {
-        headers: typeof authHeaders === 'function' ? authHeaders() : {},
+        headers: typeof authHeaders === 'function' ? window.authHeaders() : {},
       });
       if (!data || !data.found) {
         memCache.set(slug, NOT_FOUND);
@@ -16262,7 +16263,7 @@ initSwipeBack();
 // stale on reassignment. Setters exist only for the names cron_view
 // legitimately writes today (activeView / eventTimer / selectedKey); keep
 // the rest getter-only so a new cross-file write is a reviewed decision.
-Object.defineProperties(nz.state, {
+Object.defineProperties(nzState, {
   activeView: { get: function () { return activeView; }, set: function (v) { activeView = v; } },
   defaultWorkspace: { get: function () { return defaultWorkspace; } },
   eventTimer: { get: function () { return eventTimer; }, set: function (v) { eventTimer = v; } },
@@ -16274,13 +16275,250 @@ Object.defineProperties(nz.state, {
   sessionsData: { get: function () { return sessionsData; } },
   turnState: { get: function () { return turnState; } },
 });
-// Never-reassigned consts consumed by migrated modules — a one-time window
-// export is safe (the binding is never rebound, so the copy can't go stale).
+// Legacy global surface (window bridge). Everything below was a global
+// before dashboard.js became a module; the consumers that still resolve
+// through the global scope are (1) inline on*="…" handler strings in
+// generated HTML — they compile with the global scope chain, (2) the other
+// view modules' window.* call-site dereferences, and (3) the Playwright
+// suite's page.evaluate probes. Inline handlers move to data-action with
+// #1980 (D5) and the bridge shrinks at PR-E; until then this list may only
+// shrink — additions need the same scrutiny as a new API.
+//
+// Reassignable bindings get window accessor properties so an outside read
+// always sees the live value and an outside write (oncompositionend=
+// "lastCompositionEnd=Date.now()") lands back on the module binding —
+// a plain copy would silently fork the state.
+Object.defineProperties(window, {
+  _lastSidebarData: { get: function () { return _lastSidebarData; }, set: function (v) { _lastSidebarData = v; } },
+  _lastSidebarHtml: { get: function () { return _lastSidebarHtml; }, set: function (v) { _lastSidebarHtml = v; } },
+  activeView: { get: function () { return activeView; }, set: function (v) { activeView = v; } },
+  discoveredItems: { get: function () { return discoveredItems; }, set: function (v) { discoveredItems = v; } },
+  discoveredPollTimer: { get: function () { return discoveredPollTimer; }, set: function (v) { discoveredPollTimer = v; } },
+  katexReady: { get: function () { return katexReady; }, set: function (v) { katexReady = v; } },
+  lastCompositionEnd: { get: function () { return lastCompositionEnd; }, set: function (v) { lastCompositionEnd = v; } },
+  lastEventTime: { get: function () { return lastEventTime; }, set: function (v) { lastEventTime = v; } },
+  lastRenderedEventTime: { get: function () { return lastRenderedEventTime; }, set: function (v) { lastRenderedEventTime = v; } },
+  lastVersion: { get: function () { return lastVersion; }, set: function (v) { lastVersion = v; } },
+  navPopoverOpen: { get: function () { return navPopoverOpen; }, set: function (v) { navPopoverOpen = v; } },
+  pendingFiles: { get: function () { return pendingFiles; }, set: function (v) { pendingFiles = v; } },
+  projectsData: { get: function () { return projectsData; }, set: function (v) { projectsData = v; } },
+  selectedKey: { get: function () { return selectedKey; }, set: function (v) { selectedKey = v; } },
+  selectedNode: { get: function () { return selectedNode; }, set: function (v) { selectedNode = v; } },
+  sending: { get: function () { return sending; }, set: function (v) { sending = v; } },
+  sessionPollTimer: { get: function () { return sessionPollTimer; }, set: function (v) { sessionPollTimer = v; } },
+  sessionsData: { get: function () { return sessionsData; }, set: function (v) { sessionsData = v; } },
+  turnState: { get: function () { return turnState; }, set: function (v) { turnState = v; } },
+  voiceCancelled: { get: function () { return voiceCancelled; }, set: function (v) { voiceCancelled = v; } },
+  voiceRecStart: { get: function () { return voiceRecStart; }, set: function (v) { voiceRecStart = v; } },
+  voiceRecTimer: { get: function () { return voiceRecTimer; }, set: function (v) { voiceRecTimer = v; } },
+  voiceState: { get: function () { return voiceState; }, set: function (v) { voiceState = v; } },
+});
 Object.assign(window, {
-  wsm: wsm,
-  sessionScrollPos: sessionScrollPos,
+  renderEvents: renderEvents,
+  renderOptimisticUserMsg: renderOptimisticUserMsg,
+  splitPathLine: splitPathLine,
+  BLOCK_SPLIT_RE: BLOCK_SPLIT_RE,
   CRON_LIVE_AGENT_ONLY_HTML: CRON_LIVE_AGENT_ONLY_HTML,
   CRON_LIVE_MAX_EVENTS: CRON_LIVE_MAX_EVENTS,
   EVENT_DIVIDER_GAP_MS: EVENT_DIVIDER_GAP_MS,
-  INTERNAL_EVENT_TYPES: INTERNAL_EVENT_TYPES,
+  LIST_ITEM_RE: LIST_ITEM_RE,
+  LIST_SHAPE_RE: LIST_SHAPE_RE,
+  MAX_LIST_DEPTH: MAX_LIST_DEPTH,
+  MAX_LIVE_DOM_EVENTS: MAX_LIVE_DOM_EVENTS,
+  MAX_REC_SECS: MAX_REC_SECS,
+  ORIENT_MAX_WAIT_MS: ORIENT_MAX_WAIT_MS,
+  WS_STATES: WS_STATES,
+  _askAnswered: _askAnswered,
+  _mdCache: _mdCache,
+  katexPending: katexPending,
+  scrollSlackPx: scrollSlackPx,
+  sessionDrafts: sessionDrafts,
+  sessionNodes: sessionNodes,
+  sessionScrollPos: sessionScrollPos,
+  sessionWorkspaces: sessionWorkspaces,
+  wsm: wsm,
+  accessProfileDefaultModel: accessProfileDefaultModel,
+  announce: announce,
+  appendEvents: appendEvents,
+  applyFeatureGates: applyFeatureGates,
+  applyHistoryFilter: applyHistoryFilter,
+  awaitPendingOrients: awaitPendingOrients,
+  clearPendingFiles: clearPendingFiles,
+  closeContextMenu: closeContextMenu,
+  closeHistoryPopover: closeHistoryPopover,
+  confirmDialog: confirmDialog,
+  copyCodeBlock: copyCodeBlock,
+  copyEventContent: copyEventContent,
+  costCardTitle: costCardTitle,
+  createNewSession: createNewSession,
+  debouncedFetchSessions: debouncedFetchSessions,
+  decodeEscEntities: decodeEscEntities,
+  dismissAuthModal: dismissAuthModal,
+  dismissCheatsheet: dismissCheatsheet,
+  dismissOnboarding: dismissOnboarding,
+  dismissSession: dismissSession,
+  doCreateInProject: doCreateInProject,
+  doCreateSession: doCreateSession,
+  downloadSessionMarkdown: downloadSessionMarkdown,
+  enqueueUpload: enqueueUpload,
+  eventAlreadyRendered: eventAlreadyRendered,
+  eventHtml: eventHtml,
+  fallbackCopy: fallbackCopy,
+  fencedPathList: fencedPathList,
+  fetchCLIBackends: fetchCLIBackends,
+  fetchEvents: fetchEvents,
+  fetchSessions: fetchSessions,
+  fileApiUrl: fileApiUrl,
+  fileRefCode: fileRefCode,
+  fmtDuration: fmtDuration,
+  formatAbsTime: formatAbsTime,
+  formatFileSize: formatFileSize,
+  formatHomeCost: formatHomeCost,
+  formatTimeFull: formatTimeFull,
+  formatTimeShort: formatTimeShort,
+  getMsgValue: getMsgValue,
+  getNodeDisplayName: getNodeDisplayName,
+  getNodeStatus: getNodeStatus,
+  getSelectedNode: getSelectedNode,
+  getToken: getToken,
+  handleFiles: handleFiles,
+  handleKey: handleKey,
+  handlePaletteKey: handlePaletteKey,
+  highlight: highlight,
+  inlineMd: inlineMd,
+  interruptSession: interruptSession,
+  isFileRefCandidate: isFileRefCandidate,
+  isInternalEvent: isInternalEvent,
+  isMathDisplay: isMathDisplay,
+  isMathInline: isMathInline,
+  keyTailDisplay: keyTailDisplay,
+  lastDividerTime: lastDividerTime,
+  listItemHtml: listItemHtml,
+  localizeAPIError: localizeAPIError,
+  lsGet: lsGet,
+  lsSet: lsSet,
+  mainEmptyHtml: mainEmptyHtml,
+  markSessionOptimisticRunning: markSessionOptimisticRunning,
+  maybeAutoOrient: maybeAutoOrient,
+  maybeAutoPageBack: maybeAutoPageBack,
+  maybeShowOnboarding: maybeShowOnboarding,
+  mobileBack: mobileBack,
+  mobileEnterChat: mobileEnterChat,
+  mobileShowList: mobileShowList,
+  navDismissPopover: navDismissPopover,
+  navMsg: navMsg,
+  navShowList: navShowList,
+  nodeColor: nodeColor,
+  normalizeImage: normalizeImage,
+  onAskOptionToggle: onAskOptionToggle,
+  onAskSubmit: onAskSubmit,
+  onThumbDragEnd: onThumbDragEnd,
+  onThumbDragLeave: onThumbDragLeave,
+  onThumbDragOver: onThumbDragOver,
+  onThumbDragStart: onThumbDragStart,
+  onThumbDrop: onThumbDrop,
+  onThumbKeyDown: onThumbKeyDown,
+  openFilePicker: openFilePicker,
+  openProjectPalette: openProjectPalette,
+  openProjectSettings: openProjectSettings,
+  openSystemPanel: openSystemPanel,
+  parseListItem: parseListItem,
+  pickPaletteCustom: pickPaletteCustom,
+  pickPaletteProject: pickPaletteProject,
+  pickPaletteQuick: pickPaletteQuick,
+  processEventsForDisplay: processEventsForDisplay,
+  promptDialog: promptDialog,
+  reconcileSelectedNode: reconcileSelectedNode,
+  reconnectNow: reconnectNow,
+  refreshBackendPicker: refreshBackendPicker,
+  refreshBanner: refreshBanner,
+  regroupAvatars: regroupAvatars,
+  removeFile: removeFile,
+  removeSidebarCard: removeSidebarCard,
+  renameSession: renameSession,
+  renderAskQuestionCard: renderAskQuestionCard,
+  renderBackendPicker: renderBackendPicker,
+  renderCheatsheetHTML: renderCheatsheetHTML,
+  renderEventsWithDividers: renderEventsWithDividers,
+  renderFilePreviews: renderFilePreviews,
+  renderKatex: renderKatex,
+  renderMainShell: renderMainShell,
+  renderMd: renderMd,
+  renderNodePicker: renderNodePicker,
+  renderPaletteList: renderPaletteList,
+  renderRich: renderRich,
+  renderSandboxedBlob: renderSandboxedBlob,
+  renderSessionRunsPanel: renderSessionRunsPanel,
+  renderSettingsView: renderSettingsView,
+  renderSidebar: renderSidebar,
+  renderSystemView: renderSystemView,
+  renderTable: renderTable,
+  renderTexDoc: renderTexDoc,
+  restorePending: restorePending,
+  resumeRecentSession: resumeRecentSession,
+  retryUpload: retryUpload,
+  runKatex: runKatex,
+  runPendingAsync: runPendingAsync,
+  saveProjectSettings: saveProjectSettings,
+  saveToken: saveToken,
+  scanDiscovered: scanDiscovered,
+  selectSession: selectSession,
+  sendMessage: sendMessage,
+  sessionCardKey: sessionCardKey,
+  sessionRunStatLabel: sessionRunStatLabel,
+  sessionRunTotalLabel: sessionRunTotalLabel,
+  sessionTypeTag: sessionTypeTag,
+  setActiveSessionCard: setActiveSessionCard,
+  setActivityView: setActivityView,
+  setHeaderGitChip: setHeaderGitChip,
+  setHeaderRunStats: setHeaderRunStats,
+  setMsgValue: setMsgValue,
+  shortPath: shortPath,
+  showAPIError: showAPIError,
+  showAuthModal: showAuthModal,
+  showGitRemote: showGitRemote,
+  showNetworkError: showNetworkError,
+  sid: sid,
+  statusLabelForNode: statusLabelForNode,
+  stopSystemPoll: stopSystemPoll,
+  syncThemeColorMeta: syncThemeColorMeta,
+  systemStatLabel: systemStatLabel,
+  systemTickLabel: systemTickLabel,
+  timeAgo: timeAgo,
+  timeDividerHtml: timeDividerHtml,
+  toggleFavorite: toggleFavorite,
+  toggleHistory: toggleHistory,
+  toggleInputMode: toggleInputMode,
+  toggleProjectCollapsed: toggleProjectCollapsed,
+  toggleSidebarCollapsed: toggleSidebarCollapsed,
+  trimEventsScroll: trimEventsScroll,
+  updateHeaderCLI: updateHeaderCLI,
+  updateSendButton: updateSendButton,
+  updateStatusBar: updateStatusBar,
+  updateVoiceTimer: updateVoiceTimer,
+  wireNodePicker: wireNodePicker,
+  wireQuickAskInput: wireQuickAskInput,
+  workspaceFallbackName: workspaceFallbackName,
+});
+// Dead-or-unreferenced globals (no in-repo reader outside this file; kept
+// solely because they were part of the pre-module global surface —
+// deletion candidates, tracked on the D3 epic).
+Object.defineProperties(window, {
+  availableAgents: { get: function () { return availableAgents; }, set: function (v) { availableAgents = v; } },
+});
+Object.assign(window, {
+  LS_SCHEMA: LS_SCHEMA,
+  autoGrow: autoGrow,
+  backendChipHtml: backendChipHtml,
+  copyText: copyText,
+  downloadCodeBlock: downloadCodeBlock,
+  getNodeSessionCount: getNodeSessionCount,
+  handleDiscoveredClick: handleDiscoveredClick,
+  handleTakeoverClick: handleTakeoverClick,
+  majorMinor: majorMinor,
+  maybeStickBottom: maybeStickBottom,
+  previewCodeBlock: previewCodeBlock,
+  scrollEventsToBottom: scrollEventsToBottom,
+  sessionTimeHint: sessionTimeHint,
+  setToken: setToken,
 });

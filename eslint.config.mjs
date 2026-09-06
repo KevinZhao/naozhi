@@ -95,40 +95,7 @@ const browserGlobals = ro([
 // most dangerous edges; D3 aims to drive these to zero).
 const deps = {
   'nz_util.js': {},
-  'dashboard.js': {
-    ...ro([
-      'appendEventsToContainer',
-      'authHeaders',
-      'cronApplyRunEnded',
-      'cronApplyRunStarted',
-      'cronTimelineRefreshHeadDebounced',
-      'ensureCronLiveSubscription',
-      'esc',
-      'escAttr',
-      'fetchCronJobs',
-      'fetchJSON',
-      'findAgentByTaskId',
-      'findAgentByToolUseId',
-      'formatCostUSD',
-      'formatDurationShort',
-      'formatRunDuration',
-      'initAgentsFromSession',
-      'isCronLiveKey',
-      'isCronSessionFrozen',
-      'isCronSessionKey',
-      'nz',
-      'openCronPanel',
-      'renderAgentRows',
-      'renderCronPanel',
-      'repaintCronLive',
-      'setCronLiveStatus',
-      'showToast',
-      'trapFocus',
-      'updateCronLiveTruncated',
-    ]),
-    // Lazy-loaded vendor libraries (script tags injected at render time).
-    ...ro(['mermaid', 'katex']),
-  },
+  'dashboard.js': {},
   'cron_view.js': {},
   // ES module since D3 PR-B: utilities and nz.state come in via import;
   // dashboard globals are window.* dereferences.
@@ -141,7 +108,7 @@ const deps = {
 
 // Files migrated to ES modules (D3, docs/rfc/dashboard-es-modules.md).
 // sourceType 'module' makes no-undef a real scope check for them.
-const moduleFiles = new Set(['nz_util.js', 'agent_view.js', 'asset_browser.js', 'files_view.js', 'cron_view.js']);
+const moduleFiles = new Set(['nz_util.js', 'dashboard.js', 'agent_view.js', 'asset_browser.js', 'files_view.js', 'cron_view.js']);
 
 const perFile = Object.entries(deps).map(([file, globals]) => ({
   files: [`internal/server/static/${file}`],
