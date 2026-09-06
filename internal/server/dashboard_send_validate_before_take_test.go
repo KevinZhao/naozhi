@@ -45,7 +45,13 @@ func TestHandleSend_ValidatesBeforeTakingAttachments(t *testing.T) {
 		t.Fatalf("seed upload: %v", err)
 	}
 
-	h := &SendHandler{uploadStore: store}
+	// A real engine (not a zero value): #2551 made SendHandler.engine
+	// non-optional, and these assertions are about rejections that happen
+	// BEFORE the engine is reached, so it must be present without changing
+	// where the request stops.
+	hub, _ := newTestHub("")
+	t.Cleanup(hub.Shutdown)
+	h := &SendHandler{engine: hub.engine, uploadStore: store}
 
 	body, _ := json.Marshal(map[string]any{
 		"key":      "feishu:p2p:u1",

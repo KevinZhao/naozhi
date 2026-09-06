@@ -45,6 +45,11 @@ func TestScratchHandler_RouterFieldIsScratchRouter(t *testing.T) {
 // TestScratchHandler_RouterFieldIsScratchRouter. Same R215-ARCH-P1-4
 // (#566) Phase 2.5 cleanup contract: SendHandler.router replaces the
 // h.hub.router.* transits in resolveAttachmentWorkspace.
+//
+// That claim was aspirational until #2551: resolveAttachmentWorkspace took a
+// *Hub and read hub.router regardless of what this field held. It now takes a
+// SendRouter parameter and the HTTP caller passes h.router, so the sentence
+// above is finally describing the code.
 func TestSendHandler_RouterFieldIsSendRouter(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(&mockPlatform{})

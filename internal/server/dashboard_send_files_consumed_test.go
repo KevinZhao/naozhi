@@ -26,7 +26,13 @@ func TestHandleSend_PostTakeAllFailureFlagsFilesConsumed(t *testing.T) {
 		}
 		return fid
 	}
-	h := &SendHandler{uploadStore: store}
+	// A real engine (not a zero value): #2551 made SendHandler.engine
+	// non-optional, and these assertions are about rejections that happen
+	// BEFORE the engine is reached, so it must be present without changing
+	// where the request stops.
+	hub, _ := newTestHub("")
+	t.Cleanup(hub.Shutdown)
+	h := &SendHandler{engine: hub.engine, uploadStore: store}
 
 	// Pre-TakeAll rejection: text too long → file survives, no flag.
 	fid := seed()
