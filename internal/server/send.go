@@ -25,7 +25,7 @@ import (
 // sendWithBroadcast wraps sess.Send with dashboard state broadcasts ("running"
 // before, session snapshot after); Server.sendWithBroadcast delegates here.
 // sess must be non-nil; callers must check the error from GetOrCreate first.
-func (h *Hub) sendWithBroadcast(
+func (e *sendEngine) sendWithBroadcast(
 	ctx context.Context,
 	key string,
 	sess *session.ManagedSession,
@@ -33,7 +33,7 @@ func (h *Hub) sendWithBroadcast(
 	images []cli.Attachment,
 	onEvent cli.EventCallback,
 ) (*cli.SendResult, error) {
-	return h.sendWithBroadcastPriority(ctx, key, sess, text, images, onEvent, "")
+	return e.sendWithBroadcastPriority(ctx, key, sess, text, images, onEvent, "")
 }
 
 // sendWithBroadcastPriority is the passthrough-aware variant of
@@ -41,7 +41,7 @@ func (h *Hub) sendWithBroadcast(
 // supports it, the turn goes through SendPassthrough so concurrent sends on
 // one session can overlap; otherwise the serialized Send path is used. A ctx
 // carrying dispatch.WithUrgent upgrades an unset priority to "now".
-func (h *Hub) sendWithBroadcastPriority(
+func (e *sendEngine) sendWithBroadcastPriority(
 	ctx context.Context,
 	key string,
 	sess *session.ManagedSession,
@@ -52,7 +52,7 @@ func (h *Hub) sendWithBroadcastPriority(
 ) (*cli.SendResult, error) {
 	// Only the running-state transition here; the post-send (debounced)
 	// BroadcastSessionsUpdate covers the sessions snapshot.
-	h.BroadcastSessionReady(key)
+	e.notify.BroadcastSessionReady(key)
 
 	if priority == "" && dispatch.IsUrgent(ctx) {
 		priority = "now"
@@ -74,11 +74,11 @@ func (h *Hub) sendWithBroadcastPriority(
 		result, err = sess.Send(ctx, text, images, onEvent)
 	}
 
-	if rs := h.router.SessionFor(key); rs != nil {
+	if rs := e.router.SessionFor(key); rs != nil {
 		snap := rs.Snapshot()
-		h.broadcastState(key, snap.State, snap.DeathReason)
+		e.notify.broadcastState(key, snap.State, snap.DeathReason)
 	}
-	h.BroadcastSessionsUpdate()
+	e.notify.BroadcastSessionsUpdate()
 
 	return result, err
 }
@@ -109,7 +109,7 @@ func (s *Server) sendWithBroadcast(
 		return nil, fmt.Errorf("sendWithBroadcast: session is nil")
 	}
 	if s.hub != nil {
-		return s.hub.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
+		return s.hub.engine.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
 	}
 	if !s.headless {
 		// Wiring regression — fail loud instead of silently dropping broadcasts.
@@ -160,7 +160,7 @@ const interruptAcquireTimeout = 2 * time.Second
 // onAsyncError (may be nil) fires from the owner goroutine when the turn fails
 // after the ack, with the underlying error (nil at literal-message sites) +
 // localised label so fan-out callers can filter (Hub.httpSendErrorCallback).
-func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
+func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
 	key := p.Key
 	// ValidateSessionKey rejects C0/C1 controls, bidi overrides, non-UTF-8 and
 	// over-long keys: no log-injection primitive via slog / sessions.json.
@@ -173,25 +173,25 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 	// auto-capitalize ("/Clear") still reset (as dispatch.normalizeSlashCommand).
 	trimmed := strings.ToLower(strings.TrimSpace(p.Text))
 	if trimmed == "/clear" || trimmed == "/new" {
-		if h.queue != nil {
-			h.queue.Discard(key)
+		if e.queue != nil {
+			e.queue.Discard(key)
 		}
 		// queue.Discard 只清排队消息；in-flight 的 SendPassthrough goroutine
 		// 也要通知到，否则它们继续占着 sendSlot 直到超时，新消息被
 		// ErrTooManyPending 拒绝（与 IM 路径 dispatch.discardQueue 对齐）。
-		if sess := h.router.SessionFor(key); sess != nil {
+		if sess := e.router.SessionFor(key); sess != nil {
 			sess.DiscardPassthroughPending(cli.ErrSessionReset)
 		}
 		// Atomic Reset + workspaceOverride delete: a concurrent SetWorkspace
 		// must not survive and leak into the fresh session.
-		h.router.ResetAndDiscardOverride(key)
-		h.BroadcastSessionsUpdate()
+		e.router.ResetAndDiscardOverride(key)
+		e.notify.BroadcastSessionsUpdate()
 		return true, "", nil
 	}
 
 	var validatedWorkspace string
 	if p.Workspace != "" {
-		wsPath, err := validateWorkspace(p.Workspace, h.allowedRoot)
+		wsPath, err := validateWorkspace(p.Workspace, e.allowedRoot)
 		if err != nil {
 			// Generic client message: the error chain may embed the resolved
 			// path. Warn — rejects are traversal / symlink-escape events.
@@ -204,7 +204,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 		// Refuse an empty chat-key prefix (":agentID"): it would persist "" as
 		// the override for every GetWorkspace("") lookup.
 		if idx := strings.LastIndexByte(key, ':'); idx > 0 {
-			h.router.SetWorkspace(key[:idx], wsPath)
+			e.router.SetWorkspace(key[:idx], wsPath)
 		}
 	}
 
@@ -221,7 +221,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 		if !isValidBackendID(p.Backend) {
 			return false, "", fmt.Errorf("invalid backend identifier")
 		}
-		h.router.SetSessionBackend(key, p.Backend)
+		e.router.SetSessionBackend(key, p.Backend)
 	}
 
 	// Dashboard-picked access-profile override (RFC project-access-profile
@@ -231,7 +231,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 		if len(p.AccessProfile) > maxBackendIDLen || !isValidBackendID(p.AccessProfile) {
 			return false, "", fmt.Errorf("invalid access_profile identifier")
 		}
-		h.router.SetSessionAccessProfile(key, p.AccessProfile)
+		e.router.SetSessionAccessProfile(key, p.AccessProfile)
 	}
 
 	// Bound resume_id length before the regex scan (UUIDs are 36 chars; 64
@@ -242,23 +242,23 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 	if p.ResumeID != "" && discovery.IsValidSessionID(p.ResumeID) {
 		ws := validatedWorkspace
 		if ws == "" {
-			ws = h.router.DefaultWorkspace()
+			ws = e.router.DefaultWorkspace()
 		}
-		h.router.RegisterForResume(key, p.ResumeID, ws, "")
+		e.router.RegisterForResume(key, p.ResumeID, ws, "")
 	}
 
 	// Legacy guard path when no queue is configured (tests, headless);
 	// legacySendInvokes lets migrators observe remaining fixtures (#710).
-	if h.queue == nil {
-		h.legacySendInvokes.Add(1)
-		return h.sessionSendLegacy(p, onAsyncError)
+	if e.queue == nil {
+		e.legacyInvokes.Add(1)
+		return e.sessionSendLegacy(p, onAsyncError)
 	}
 
 	// Passthrough mode: every send gets its own goroutine; the CLI's
 	// commandQueue + sendSlot FIFO handle ordering. Protocols without replay
 	// fall back to serialized Send inside sendWithBroadcast (usePassthrough).
-	if h.queue.Mode() == dispatch.ModePassthrough {
-		release, shuttingDown := h.TrackSend()
+	if e.queue.Mode() == dispatch.ModePassthrough {
+		release, shuttingDown := e.TrackSend()
 		if shuttingDown {
 			return false, sendAckBusy, nil
 		}
@@ -272,7 +272,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 		}
 		go func() {
 			defer release()
-			h.runTurnPassthrough(p.Key, text, p.Images, priority, onAsyncError)
+			e.runTurnPassthrough(p.Key, text, p.Images, priority, onAsyncError)
 		}()
 		return false, sendAckAccepted, nil
 	}
@@ -282,12 +282,12 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 		Images:    p.Images,
 		EnqueueAt: time.Now(),
 	}
-	isOwner, enqueued, shouldInterrupt, gen, _ := h.queue.Enqueue(key, qm)
+	isOwner, enqueued, shouldInterrupt, gen, _ := e.queue.Enqueue(key, qm)
 	if !isOwner {
 		if shouldInterrupt {
 			// Interrupt mode: abort the in-flight turn so the queued follow-up
 			// runs promptly (mirrors dispatch.go). Non-Sent outcomes degrade to Collect.
-			switch outcome := h.router.InterruptSessionViaControl(key); outcome {
+			switch outcome := e.router.InterruptSessionViaControl(key); outcome {
 			case session.InterruptSent:
 				slog.Debug("send: aborted active turn to process follow-up", "key", key)
 			case session.InterruptNoTurn:
@@ -313,16 +313,16 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 
 	// Owner — spawn the drain loop. TrackSend declines a send arriving
 	// concurrently with Shutdown instead of escaping past sendWG.Wait.
-	release, shuttingDown := h.TrackSend()
+	release, shuttingDown := e.TrackSend()
 	if shuttingDown {
 		// Discard drops ownership (bumps gen, clears the owner flag) so a
 		// later Enqueue can re-own.
-		h.queue.Discard(key)
+		e.queue.Discard(key)
 		return false, sendAckBusy, nil
 	}
 	go func() {
 		defer release()
-		h.ownerLoop(key, gen, qm, onAsyncError)
+		e.ownerLoop(key, gen, qm, onAsyncError)
 	}()
 	return false, sendAckAccepted, nil
 }
@@ -333,20 +333,20 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 // The pool lookup touches the scratch's lastUsed — that "Touch on lookup" is
 // the only thing preventing the sweeper from evicting a scratch about to
 // receive its first send. Do not remove it.
-func (h *Hub) sessionOptsFor(key string) session.AgentOpts {
-	if h.scratchPool != nil && sessionkey.IsScratchKey(key) {
-		if opts, ok := h.scratchPool.OptsForKey(key); ok {
+func (e *sendEngine) sessionOptsFor(key string) session.AgentOpts {
+	if e.scratchPool != nil && sessionkey.IsScratchKey(key) {
+		if opts, ok := e.scratchPool.OptsForKey(key); ok {
 			return opts
 		}
 	}
-	return buildSessionOpts(key, h.resolver, h.agents, h.projectMgr)
+	return buildSessionOpts(key, e.resolver, e.agents, e.projectMgr)
 }
 
 // runTurn executes one send turn: GetOrCreate + sendWithBroadcast.
-func (h *Hub) runTurn(key, text string, images []cli.Attachment, onAsyncError asyncErrorFn) {
+func (e *sendEngine) runTurn(key, text string, images []cli.Attachment, onAsyncError asyncErrorFn) {
 	sendStart := time.Now()
-	opts := h.sessionOptsFor(key)
-	sess, status, err := h.router.GetOrCreate(h.ctx, key, opts)
+	opts := e.sessionOptsFor(key)
+	sess, status, err := e.router.GetOrCreate(e.ctx, key, opts)
 	if err != nil {
 		slog.Error("send: get session", "key", key, "err", err)
 		if onAsyncError != nil {
@@ -360,10 +360,10 @@ func (h *Hub) runTurn(key, text string, images []cli.Attachment, onAsyncError as
 		slog.Debug("send: session spawned", "key", key, "status", status, "elapsed_ms", time.Since(sendStart).Milliseconds())
 	}
 
-	if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
+	if _, err := e.sendWithBroadcast(e.ctx, key, sess, text, images, nil); err != nil {
 		slog.Error("send: send", "key", key, "err", err)
 	} else {
-		h.autoSaveCronPrompt("send", key, text)
+		e.autoSaveCronPrompt("send", key, text)
 	}
 	slog.Debug("send: turn complete", "key", key, "elapsed_ms", time.Since(sendStart).Milliseconds())
 }
@@ -371,10 +371,10 @@ func (h *Hub) runTurn(key, text string, images []cli.Attachment, onAsyncError as
 // runTurnPassthrough runs one passthrough-mode turn from a detached goroutine
 // so sends on the same session overlap; protocols without replay fall back to
 // serialized Send. priority is "" or "now" (/urgent preemption).
-func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, priority string, onAsyncError asyncErrorFn) {
+func (e *sendEngine) runTurnPassthrough(key, text string, images []cli.Attachment, priority string, onAsyncError asyncErrorFn) {
 	sendStart := time.Now()
-	opts := h.sessionOptsFor(key)
-	sess, _, err := h.router.GetOrCreate(h.ctx, key, opts)
+	opts := e.sessionOptsFor(key)
+	sess, _, err := e.router.GetOrCreate(e.ctx, key, opts)
 	if err != nil {
 		slog.Error("passthrough: get session", "key", key, "err", err)
 		if onAsyncError != nil {
@@ -382,8 +382,8 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, prio
 		}
 		return
 	}
-	ctx := dispatch.WithPassthrough(h.ctx)
-	if _, err := h.sendWithBroadcastPriority(ctx, key, sess, text, images, nil, priority); err != nil {
+	ctx := dispatch.WithPassthrough(e.ctx)
+	if _, err := e.sendWithBroadcastPriority(ctx, key, sess, text, images, nil, priority); err != nil {
 		// ErrAbortedByUrgent / ErrReconnectedUnknown / ErrSessionReset are
 		// informational; only surprising failures log at Warn.
 		if informationalSendErr(err) {
@@ -395,7 +395,7 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, prio
 			onAsyncError(err, asyncErrorMessage(err))
 		}
 	} else {
-		h.autoSaveCronPrompt("passthrough", key, text)
+		e.autoSaveCronPrompt("passthrough", key, text)
 	}
 	slog.Debug("passthrough: turn complete", "key", key, "elapsed_ms", time.Since(sendStart).Milliseconds())
 }
@@ -403,12 +403,12 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, prio
 // autoSaveCronPrompt persists the just-sent text as the cron job's prompt on
 // a successful turn; no-op for non-cron keys or without a scheduler.
 // ErrPromptAlreadySet (every turn after the first) is benign and not logged.
-func (h *Hub) autoSaveCronPrompt(phase, key, text string) {
-	if h.scheduler == nil || !sessionkey.IsCronKey(key) {
+func (e *sendEngine) autoSaveCronPrompt(phase, key, text string) {
+	if e.scheduler == nil || !sessionkey.IsCronKey(key) {
 		return
 	}
 	jobID := strings.TrimPrefix(key, sessionkey.CronKeyPrefix)
-	if err := h.scheduler.SetJobPrompt(jobID, text); err != nil && !errors.Is(err, cron.ErrPromptAlreadySet) {
+	if err := e.scheduler.SetJobPrompt(jobID, text); err != nil && !errors.Is(err, cron.ErrPromptAlreadySet) {
 		slog.Warn(phase+": set cron prompt", "key", key, "err", err)
 	}
 }
@@ -417,25 +417,25 @@ func (h *Hub) autoSaveCronPrompt(phase, key, text string) {
 // paths. sessionSendLegacy keeps the pre-queue guard/interrupt behaviour only
 // for tests that do not wire a MessageQueue. Removal tracked in docs/TODO.md
 // R-LEGACY-SEND: delete it with its sole caller branch once every test wires one.
-func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
+func (e *sendEngine) sessionSendLegacy(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
 	key := p.Key
 
-	acquired := h.guard.TryAcquire(key)
+	acquired := e.guard.TryAcquire(key)
 	needInterrupt := !acquired
 	if needInterrupt {
 		// InterruptSessionSafe (control_request → SIGINT fallback): raw SIGINT
 		// kills Claude `-p` outright, burning a shim slot and resume context.
-		h.router.InterruptSessionSafe(key)
+		e.router.InterruptSessionSafe(key)
 		slog.Debug("send: interrupted running session", "key", key)
 	}
 
 	text, images := p.Text, p.Images
-	release, shuttingDown := h.TrackSend()
+	release, shuttingDown := e.TrackSend()
 	if shuttingDown {
 		if !needInterrupt {
 			// Acquired but not spawning — release so a later enqueue can
 			// re-acquire (needInterrupt=true means we never acquired).
-			h.guard.Release(key)
+			e.guard.Release(key)
 		}
 		return false, sendAckBusy, nil
 	}
@@ -444,7 +444,7 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError asyncErrorFn) (bool, 
 		if needInterrupt {
 			// AcquireTimeout writes a Guard.lastWait entry cleared only by
 			// Release; the defer Release below covers this site.
-			if !h.guard.AcquireTimeout(h.ctx, key, interruptAcquireTimeout) {
+			if !e.guard.AcquireTimeout(e.ctx, key, interruptAcquireTimeout) {
 				slog.Error("send: interrupt timed out", "key", key)
 				if onAsyncError != nil {
 					onAsyncError(nil, "会话中断超时，请稍后重试。")
@@ -452,9 +452,9 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError asyncErrorFn) (bool, 
 				return
 			}
 		}
-		defer h.guard.Release(key)
-		defer h.router.NotifyIdle()
-		h.runTurn(key, text, images, onAsyncError)
+		defer e.guard.Release(key)
+		defer e.router.NotifyIdle()
+		e.runTurn(key, text, images, onAsyncError)
 	}()
 
 	return false, sendAckAccepted, nil

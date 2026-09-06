@@ -127,3 +127,63 @@ func TestHubShutdown_OrderingInSource(t *testing.T) {
 		t.Errorf("wshub.go: h.clientWG.Wait() (offset %d) must appear BEFORE h.wiredLinkers = nil (offset %d) — issue #371 regressed", waitIdx, nilIdx)
 	}
 }
+
+// TestHubShutdown_SendDrainPositionInSource pins where h.engine.drain() sits
+// inside Shutdown (#2551). The barrier used to be four inline statements
+// (sendTrackMu / sendClosed / sendWG.Wait); collapsing it into one call makes
+// it look movable, and it is not: the goroutines drain waits on re-enter
+// h.mu / authMu / debounceMu through sendNotifier (BroadcastSessionReady →
+// authMu.RLock, broadcastState → h.mu.RLock, BroadcastSessionsUpdate →
+// debounceMu.Lock). Tidying the call up into the debounceMu critical section —
+// which is where the "close the window" statements live and therefore the most
+// tempting home for it — deadlocks deterministically: the in-flight goroutine
+// is already past the debounceClosedFast fast path and blocked on
+// debounceMu.Lock while Shutdown holds it waiting for wg.
+//
+// -race cannot catch this (a lock-order inversion against a WaitGroup is not a
+// data race) and the behavioural tests cannot either — they would simply hang
+// until the suite's own timeout. Hence a source-order assertion:
+//
+//	h.cancel()  <  debounceMu.Unlock()  <  h.clientWG.Wait()  <  drain()  <  nodes Close
+func TestHubShutdown_SendDrainPositionInSource(t *testing.T) {
+	t.Parallel()
+
+	_, self, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(self), "wshub.go"))
+	if err != nil {
+		t.Fatalf("read wshub.go: %v", err)
+	}
+	body := string(raw)
+
+	shutdownIdx := strings.Index(body, "func (h *Hub) Shutdown() {")
+	if shutdownIdx < 0 {
+		t.Fatal("wshub.go: Hub.Shutdown not found")
+	}
+	// Scope every offset to Shutdown's body so an identical call elsewhere in
+	// the file cannot satisfy the ordering by accident.
+	sd := body[shutdownIdx:]
+
+	// Ordered low → high, each with the reason a violation breaks something.
+	steps := []struct{ marker, why string }{
+		{"h.cancel()", "without ctx cancelled first, drain blocks for the full remote-RPC timeout instead of returning promptly"},
+		{"h.debounceMu.Unlock()", "drain must not hold debounceMu — the drained goroutines take it via BroadcastSessionsUpdate"},
+		{"h.clientWG.Wait()", "client goroutines settle first; drain is the send-side barrier"},
+		{"h.engine.drain()", "the send barrier sits here; see sendEngine.drain's CALL-SITE PRECONDITIONS"},
+		{"h.nodes.Conns()", "nodes must close AFTER drain, or an in-flight remote RPC writes to a closed nc.conn"},
+	}
+	prev, prevMarker := -1, ""
+	for _, s := range steps {
+		idx := strings.Index(sd, s.marker)
+		if idx < 0 {
+			t.Fatalf("wshub.go Shutdown: %q not found — the send-drain ordering contract cannot be checked (#2551)", s.marker)
+		}
+		if idx <= prev {
+			t.Errorf("wshub.go Shutdown: %q (offset %d) must come after %q (offset %d) — %s",
+				s.marker, idx, prevMarker, prev, s.why)
+		}
+		prev, prevMarker = idx, s.marker
+	}
+}

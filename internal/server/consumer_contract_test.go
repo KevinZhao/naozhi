@@ -17,3 +17,11 @@ var _ HubRouter = (*session.Router)(nil)
 // one — a signature drift breaks the build here instead of leaving the
 // facet contract stale.
 var _ HubBroadcaster = (*Hub)(nil)
+
+// Compile-time assertions for the sendEngine seam (#2551, RFC
+// send-engine-extraction §2.6): *session.Router must satisfy the engine's
+// 12-method router subset, and *Hub must satisfy the 4-method broadcast exit
+// the engine reaches for. Both are the drift guards that keep the engine from
+// silently re-widening back onto HubRouter / the whole Hub.
+var _ sendEngineRouter = (*session.Router)(nil)
+var _ sendNotifier = (*Hub)(nil)

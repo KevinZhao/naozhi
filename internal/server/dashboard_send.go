@@ -457,7 +457,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// late arrival during shutdown gets 503 instead of a goroutine.
 		var release func()
 		if h.hub != nil {
-			r, shuttingDown := h.hub.TrackSend()
+			r, shuttingDown := h.hub.engine.TrackSend()
 			if shuttingDown {
 				writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "server shutting down"})
 				return
@@ -499,11 +499,11 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reset, status, err := h.hub.sessionSend(sendParams{
+	reset, status, err := h.hub.engine.sessionSend(sendParams{
 		Key: key, Text: text, Images: images,
 		Workspace: workspace, ResumeID: resumeID, Backend: backend,
 		AccessProfile: accessProfile,
-	}, h.hub.httpSendErrorCallback(key))
+	}, h.hub.engine.sendErrorCallback(key))
 	if err != nil {
 		cleanup()
 		// Forward only the localised label: the raw error may embed workspace
