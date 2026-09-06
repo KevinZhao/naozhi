@@ -23,19 +23,16 @@ test.describe('#1770 polling / keep-alive', () => {
     await page.waitForSelector('.session-card');
 
     const result = await page.evaluate(async () => {
-      // eslint-disable-next-line no-eval
-      const run = () => eval('scanDiscovered()');
+      const run = () => window.scanDiscovered();
       // Prime: first scan records the hash and (because the hash changed from
       // the initial '') sets lastVersion=0 once.
       await run();
       // Now set a sentinel lastVersion and scan again with the SAME data
       // (mock returns [] every time). The unchanged-hash guard must leave
       // lastVersion untouched.
-      // eslint-disable-next-line no-eval
-      eval('lastVersion = 12345');
+      window.lastVersion = 12345;
       await run();
-      // eslint-disable-next-line no-eval
-      const after = eval('lastVersion');
+      const after = window.lastVersion;
       return { after };
     });
 
@@ -51,8 +48,7 @@ test.describe('#1770 polling / keep-alive', () => {
     await page.waitForSelector('.session-card');
 
     const result = await page.evaluate(() => {
-      // eslint-disable-next-line no-eval
-      const w = eval('typeof wsm !== "undefined" ? wsm : null');
+      const w = window.wsm || null;
       if (!w) return { err: 'wsm missing' };
       // Simulate a live ping timer, then run the cleanup() that stopPollers
       // calls on visibilitychange→hidden.

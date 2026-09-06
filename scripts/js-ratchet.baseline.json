@@ -24,10 +24,10 @@
     "topLevelLetVar": 17
   },
   "dashboard.js": {
-    "lines": 16556,
+    "lines": 16445,
     "maxFunctionLines": 303,
-    "functionsOver100": 17,
-    "topLevelLetVar": 104
+    "functionsOver100": 16,
+    "topLevelLetVar": 102
   },
   "files_view.js": {
     "lines": 445,

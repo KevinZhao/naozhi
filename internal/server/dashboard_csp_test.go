@@ -231,16 +231,22 @@ func TestDashboardCSP_JsdelivrNpmPathScoped(t *testing.T) {
 		}
 	}
 
-	// Positive: the three directives that legitimately pull from the CDN must
-	// each carry the npm-scoped source.
+	// Positive (#1980 tightening): the CDN sources are pinned to the exact
+	// versioned files the lazy loaders inject — /npm/ alone is an
+	// anyone-can-publish namespace, i.e. an allowlist bypass for an attacker
+	// who can inject a <script src> tag.
 	for _, want := range []string{
-		"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/",
-		"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/",
-		"font-src 'self' https://cdn.jsdelivr.net/npm/",
+		cdnMermaidJS, cdnKatexJS, cdnKatexCSS, cdnKatexFonts,
 	} {
 		if !strings.Contains(csp, want) {
-			t.Errorf("R242-SEC-2 (#607): CSP must carry %q so KaTeX/mermaid still "+
-				"load from the npm-scoped CDN, got %q", want, csp)
+			t.Errorf("R242-SEC-2 (#607) / #1980: CSP must carry the exact pinned "+
+				"CDN source %q, got %q", want, csp)
+		}
+	}
+	// And the bare /npm/ prefix as its own source token must be gone.
+	for _, tok := range strings.Fields(csp) {
+		if tok == "https://cdn.jsdelivr.net/npm/" || tok == "https://cdn.jsdelivr.net/npm/;" {
+			t.Errorf("#1980: CSP still lists the bare /npm/ wildcard %q — pin exact files", tok)
 		}
 	}
 }
@@ -442,29 +448,27 @@ func TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate(t *testing.T) {
 		t.Fatalf("CSP missing script-src directive, got %q", csp)
 	}
 
-	// Invariant (1): current state ships 'unsafe-inline'.
-	if !strings.Contains(scriptSrc, "'unsafe-inline'") {
-		t.Errorf("R20260531A-SEC-10 (#1526): script-src dropped `'unsafe-inline'` while the "+
-			"dashboard still ships inline onclick= handlers — every header button breaks. "+
-			"Removing it must be bundled with migrating those handlers to addEventListener "+
-			"(#441 / #479 / #922). got script-src %q", scriptSrc)
+	// Invariant (1), flipped by #1980 PR-3: script-src must NOT ship
+	// 'unsafe-inline' anymore — the handler surface is data-action delegation
+	// and the only inline <script> (theme bootstrap) is hash-allowlisted.
+	if strings.Contains(scriptSrc, "'unsafe-inline'") {
+		t.Errorf("#1980: script-src re-introduced `'unsafe-inline'` — the inline handler "+
+			"surface is 0 (data-action delegation) and the theme bootstrap is hashed; "+
+			"widening back is a pure security regression. got script-src %q", scriptSrc)
 	}
-
-	// Invariant (2): nonce/strict-dynamic must NOT coexist with 'unsafe-inline'.
-	// Their presence here means a partial migration landed that silently
-	// disables the inline handlers (CSP3 ignores 'unsafe-inline' once a nonce
-	// or strict-dynamic appears). The migration must drop 'unsafe-inline' in
-	// the same change.
-	// 'sha256-…' has the same CSP3 semantics as a nonce: its presence makes
-	// the browser ignore 'unsafe-inline', so the theme-bootstrap hash (#1980
-	// PR-3) must land atomically with the 'unsafe-inline' removal.
-	for _, tok := range []string{"'nonce-", "'strict-dynamic'", "nonce-", "'sha256-"} {
+	// The theme-bootstrap hash must be present (computed at init in
+	// dashboard_csp.go, never hand-copied).
+	if !strings.Contains(scriptSrc, "'sha256-") {
+		t.Errorf("#1980: script-src must allowlist the theme bootstrap via 'sha256-…' "+
+			"(see buildDashboardCSP), got %q", scriptSrc)
+	}
+	// nonce/strict-dynamic still must not appear: they would make browsers
+	// ignore the hash-based allowlist model this page relies on being
+	// reviewable, and nothing generates nonces for the static page.
+	for _, tok := range []string{"'nonce-", "'strict-dynamic'"} {
 		if strings.Contains(scriptSrc, tok) {
-			t.Errorf("R20260531A-SEC-10 (#1526): script-src introduced %q while still listing "+
-				"`'unsafe-inline'` — per CSP3 the browser now ignores `'unsafe-inline'`, "+
-				"silently breaking the dashboard's inline onclick handlers. The nonce/"+
-				"hash/strict-dynamic migration MUST remove `'unsafe-inline'` (and migrate "+
-				"the inline handlers) in the same change. got script-src %q", tok, scriptSrc)
+			t.Errorf("script-src unexpectedly carries %q — the dashboard is a static "+
+				"page with a hash-allowlisted bootstrap, got %q", tok, scriptSrc)
 		}
 	}
 }

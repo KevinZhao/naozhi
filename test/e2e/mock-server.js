@@ -12,6 +12,12 @@ const STATIC_DIR = path.join(__dirname, '..', '..', 'internal', 'server', 'stati
 // that regenerates contract.js (#2539).
 const NZ_CONTRACT = require(path.join(STATIC_DIR, 'contract.js'));
 
+// The dashboard CSP exactly as production serves it (routes.go / #1980).
+// A Go drift test (TestDashboardCSP_MockServerHeaderInSync) compares this
+// literal against the runtime header, so edit both together.
+const MOCK_DASHBOARD_CSP =
+  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g=' https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css; font-src 'self' https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/fonts/; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
+
 function defaultSessions() {
   return {
     sessions: [
@@ -262,7 +268,14 @@ function startMockServer(overrides = {}) {
 
     // Static routes
     if (pathname === '/dashboard') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+      // Mirror the production CSP (routes.go handleDashboard) so the whole
+      // Playwright suite runs the dashboard under the real policy — inline
+      // handlers or scripts that production would block fail here too.
+      // Kept in lockstep by TestDashboardCSP_MockServerHeaderInSync.
+      res.writeHead(200, {
+        'Content-Type': 'text/html',
+        'Content-Security-Policy': MOCK_DASHBOARD_CSP,
+      });
       res.end(html);
       return;
     }

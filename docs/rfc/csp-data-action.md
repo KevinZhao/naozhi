@@ -113,16 +113,23 @@ for (const type of DELEGATED) {
 
 ### 4. workspace HTML 预览回归（PR-3 前置调查，评审最高危项）
 
-dashboard.js:11281-11350 文件预览：移动端 srcdoc **继承父页 CSP**（代码注释
-自认）；桌面 blob: 路径注释声称无继承，但按现行 HTML 规范 blob: 从 creator
-继承 policy container（Chromium 已实施），注释很可能过时。去 unsafe-inline
-后被预览 HTML 的内联脚本被拦（MathJax/Mermaid parity 失效）。PR-3 之前必须：
-1. 实测 Chrome/Safari 下 blob:/srcdoc 预览在无 unsafe-inline 父页下的行为；
-2. 若确认回归，方案候选：iframe `csp` 属性（Chrome only，不可放宽）不可行 →
-   预览改走**独立 endpoint**（服务端带宽松 CSP header 的专用响应，iframe
-   src 指向它，沙箱属性不变）；该 endpoint 本身 `sandbox` + 独立 origin 语义
-   已有（`GET /api/projects/file?mode=raw` 家族），实测其响应头现状后定案。
-3. 该调查结论写回本 RFC 后 PR-3 才可动工。
+dashboard.js:11281-11350 文件预览。**已实测（Playwright/Chromium，本 RFC
+gate 完成）**：父页 `script-src 'self'`（无 unsafe-inline）下，blob: 与
+srcdoc iframe 内联脚本**均被拦**（对照组带 unsafe-inline 均执行）——
+dashboard.js:11293 "blob 无继承" 注释对现行 Chromium 不成立，两条路径都会
+随 PR-3 翻转而回归。
+
+定案方案：预览改走服务端渲染响应，iframe src 直指端点，document 策略来自
+**自身响应头**（网络响应不继承父页 CSP）：
+- `serveRender` 已备有完整头组合（`CSP: default-src 'none'; sandbox
+  allow-scripts; script-src 'unsafe-inline' …`、CORP、no-store），只因
+  Firefox 直航忽略 CSP sandbox 而刻意 octet-stream+attachment。
+- 新增渲染变体：`Sec-Fetch-Dest: iframe` 请求头门禁（现代浏览器导航请求
+  必带；顶层直航是 `document` → 拒绝，fail-closed），通过后以 text/html +
+  上述 sandbox CSP 返回。iframe sandbox 属性保留（双保险）。
+- 前端 renderSandboxedBlob 的 blob/srcdoc 双路径统一替换为端点 src——顺带
+  修复 WebKit blob 空白帧 bug 与 srcdoc 的 UTF-8/SVG 局限（注释自认的
+  trade-off 全部消失）。
 
 ### 5. ratchet / 测试口径
 

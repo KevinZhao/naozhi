@@ -11179,147 +11179,43 @@ async function openFilePreview(wrapEl) {
   }
 }
 
-// _pendingSandboxBlobUrl holds the most recent blob URL fed into the preview
-// iframe so closeFilePreview can revoke it. Blob URLs pin their backing
-// bytes in memory until revoked, and a 50 MB coverage report left open
-// across many file clicks would leak hard. Single-slot is enough because
-// the drawer only ever shows one file at a time.
-let _pendingSandboxBlobUrl = null;
-
-// _sandboxRenderSeq is a monotonic token for renderSandboxedBlob invocations.
-// The function is async: a user who opens file A and then clicks file B
-// before A's fetch resolves would, under a naive implementation, see A's
-// bytes rendered into B's drawer AND leak A's blob URL (its own invocation
-// has already passed the revoke-prior step). Every call bumps the seq and
-// captures its own copy; when fetch resolves, callers whose token no longer
-// equals _sandboxRenderSeq revoke their own blob URL and abandon the render.
-let _sandboxRenderSeq = 0;
-
-// renderSandboxedBlob fetches workspace bytes via mode=render, wraps them in
-// a typed Blob, and points a sandboxed iframe at the resulting blob URL.
-// Used for HTML and SVG — both can carry active content (scripts, on*) and
-// must NEVER reach the dashboard origin. blobType controls how the iframe
-// parses the bytes ('text/html' for .html / .xhtml, 'image/svg+xml' for .svg).
+// renderSandboxedBlob points a sandboxed iframe at the server's inline
+// render endpoint (mode=render&inline=1). The iframe document's CSP comes
+// from that response — NOT inherited from the dashboard page — which is what
+// keeps workspace HTML (MathJax / KaTeX / Mermaid) rendering after #1980
+// dropped script-src 'unsafe-inline' from the dashboard CSP: blob: and inline-doc
+// documents inherit the parent policy in current engines (measured in
+// docs/rfc/csp-data-action.md §4), so the old fetch→Blob desktop path and
+// the mobile inline-doc fallback would both have gone dead. Pointing src at the
+// endpoint also retires the WebKit blob-frame bug workaround and the old
+// fallback UTF-8/SVG parsing trade-offs — one path for every platform.
 //
-// Three defense layers stack here:
-//   (1) Server returns application/octet-stream + attachment, so a direct
-//       URL hit downloads rather than renders (covers Firefox's CSP-sandbox
-//       top-level-nav gap).
-//   (2) Blob URL origin is opaque — even with allow-same-origin in the
-//       sandbox (we don't grant it), the document can't read dashboard
-//       cookies or same-origin fetch.
-//   (3) sandbox='' on the iframe grants zero capabilities — no scripts,
-//       no forms, no top-level navigation, no popups, no fetch.
-// Any one of these would be sufficient; stacking all three is belt-and-
-// braces so a future change to any single layer does not regress security.
-async function renderSandboxedBlob(project, node, path, body, blobType) {
-  body.innerHTML = '<div class="fv-loading">loading…</div>';
-  // Claim the invocation slot BEFORE awaiting anything. Every caller
-  // snapshots the seq here; when its fetch resolves later it compares
-  // against the live _sandboxRenderSeq to detect whether a newer render
-  // superseded it. This closes the "open A then open B before A resolves"
-  // race where A would otherwise overwrite B's tracked blob URL and leak.
-  const mySeq = ++_sandboxRenderSeq;
-  // Revoke any prior blob URL before overwriting. Missing this leaked a
-  // ~50 MB report across every re-open of the drawer in manual testing.
-  if (_pendingSandboxBlobUrl) {
-    try { URL.revokeObjectURL(_pendingSandboxBlobUrl); } catch (_) { /* ignore */ }
-    _pendingSandboxBlobUrl = null;
-  }
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch(fileApiUrl(project, node, path, 'render'), { headers });
-    // A newer invocation has already taken over the drawer — abandon.
-    // Check happens at every await boundary: after fetch (headers arrived)
-    // and after arrayBuffer (body fully drained).
-    if (mySeq !== _sandboxRenderSeq) return;
-    if (!r.ok) {
-      body.innerHTML = '<div class="fv-error">render failed (' + r.status + ')</div>';
-      return;
-    }
-    const bytes = await r.arrayBuffer();
-    if (mySeq !== _sandboxRenderSeq) return;
-
-    body.innerHTML = '';
-    const frame = document.createElement('iframe');
-    frame.title = path;
-    // sandbox='allow-scripts' grants script execution but withholds the
-    // same-origin token — the iframe stays in an opaque origin and cannot
-    // read dashboard cookies, localStorage, or DOM. This holds for BOTH
-    // delivery paths below (blob URL and srcdoc): a sandbox missing the
-    // same-origin token is always an opaque origin regardless of how the
-    // document bytes arrive. Scripts are required so workspace HTML using
-    // MathJax / KaTeX / Mermaid / chart libs renders. The contract test
-    // (TestDashboardJS_SandboxedBlobRender) substring-matches this helper
-    // body for forbidden tokens, so comments must NEVER spell them out.
-    frame.setAttribute('sandbox', 'allow-scripts');
-    frame.referrerPolicy = 'no-referrer';
-
-    // Desktop path: fetch → Blob({type:blobType}) → blob: URL. blob:
-    // documents carry no inherited CSP, so desktop workspace HTML renders
-    // with the widest capability. Force the Blob type from the caller (the
-    // server returns application/octet-stream so a direct URL hit downloads
-    // rather than renders); callers pass a server-whitelisted type
-    // (text/html, application/xhtml+xml, image/svg+xml). The mobile branch
-    // is checked AFTER setup so blob-path tokens stay early in the helper.
-    if (!isMobile()) {
-      const blob = new Blob([bytes], { type: blobType || 'text/html' });
-      const url = URL.createObjectURL(blob);
-      // Final stale check AFTER allocating the URL — a newer invocation in
-      // the window between arrayBuffer and now must revoke this URL instead
-      // of clobbering the tracked slot (which would leak the newer render).
-      if (mySeq !== _sandboxRenderSeq) {
-        try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
-        return;
-      }
-      _pendingSandboxBlobUrl = url;
-      frame.src = url;
-      body.appendChild(frame);
-      return;
-    }
-
-    // Mobile WebKit fallback (iOS Safari, every iOS browser, and the in-app
-    // webviews Feishu / WeChat use all run WebKit): pointing a sandboxed
-    // iframe at a parent-minted blob: URL is treated as a cross-origin
-    // navigation and silently blocked — blank frame, no console error
-    // (WebKit bug 170075; cf. bulwarkmail/webmail #253). srcdoc inlines the
-    // bytes, sidestepping the blob: scheme, and mobile WebKit renders it.
-    // Isolation is unchanged (opaque origin, see above). No blob URL is
-    // allocated, so there is nothing to track or revoke.
-    //
-    // R202606j-SEC-1 (#2341): srcdoc documents inherit the PARENT page CSP,
-    // unlike the desktop blob: path which carries no inherited policy. Left
-    // unguarded, workspace HTML would execute under the dashboard's own CSP
-    // — including its script-src allowlist and connect-src endpoints — so a
-    // hostile .html could fetch dashboard-allowlisted origins. Prepend a
-    // self-contained <meta> CSP that REPLACES the inherited dashboard policy
-    // with one scoped to the opaque-origin preview: inline scripts still run
-    // (parity with the desktop blob path: MathJax/KaTeX/Mermaid), but the
-    // document gets its own connect/img/style budget rather than borrowing
-    // the dashboard's. A <meta> http-equiv CSP can only further restrict the
-    // inherited policy, never widen it, so this is strictly safe. It is
-    // injected as the document's first child so the parser applies it before
-    // any subsequent inline <script> executes.
-    //
-    // Other accepted trade-offs vs. the desktop blob path (all strictly
-    // better than the blank frame mobile users get today):
-    //   - Encoding: srcdoc is parsed as UTF-8 per spec and an in-document
-    //     <meta charset> is ignored, so a non-UTF-8 file (e.g. GBK) renders
-    //     garbled here. TextDecoder defaults to fatal:false (U+FFFD on bad
-    //     bytes) so it never throws. naozhi workspace HTML is UTF-8 in
-    //     practice (Claude/tool generated); legacy encodings are out of scope.
-    //   - SVG: srcdoc is HTML-parsed, not XML-parsed. A single <svg> root
-    //     renders as foreign content; XML-only features (CDATA, xml:* attrs)
-    //     may parse differently than the desktop image/svg+xml blob path.
-    const sandboxCsp = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' https:; style-src 'unsafe-inline' https:; img-src data: blob: https:; font-src data: https:; connect-src 'none'\">";
-    frame.srcdoc = sandboxCsp + new TextDecoder('utf-8').decode(bytes);
-    body.appendChild(frame);
-  } catch (e) {
-    if (mySeq !== _sandboxRenderSeq) return;
-    body.innerHTML = '<div class="fv-error">' + esc(String(e && e.message || e)) + '</div>';
-  }
+// Defense layers (unchanged in spirit from the blob era):
+//   (1) The endpoint's inline form answers only requests stamped
+//       Sec-Fetch-Dest: iframe, so a direct URL hit gets 403 (covers
+//       Firefox's CSP-sandbox top-level-navigation gap); the legacy
+//       fetch form stays octet-stream + attachment.
+//   (2) The response carries `Content-Security-Policy: sandbox
+//       allow-scripts …` — an opaque origin regardless of embedding.
+//   (3) sandbox='allow-scripts' on the iframe withholds the same-origin
+//       token — the document cannot read dashboard cookies, storage, or
+//       DOM. Scripts are required so workspace HTML using MathJax / KaTeX /
+//       Mermaid / chart libs renders. The contract test
+//       (TestDashboardJS_SandboxedBlobRender) substring-matches this helper
+//       body for forbidden tokens, so comments must NEVER spell them out.
+// The name keeps its historic "Blob" for the window-bridge/API stability;
+// the body param is the container element, kept as-is; blobType is unused
+// since the server's detected MIME now drives parsing, kept for call-site
+// compatibility until #2557 PR-E trims the bridge.
+function renderSandboxedBlob(project, node, path, body, blobType) {
+  void blobType;
+  body.innerHTML = '';
+  const frame = document.createElement('iframe');
+  frame.title = path;
+  frame.setAttribute('sandbox', 'allow-scripts');
+  frame.referrerPolicy = 'no-referrer';
+  frame.src = fileApiUrl(project, node, path, 'render') + '&inline=1';
+  body.appendChild(frame);
 }
 
 function scrollToPreviewLine(body, line) {
@@ -11370,13 +11266,6 @@ function closeFilePreview() {
   delete drawer.dataset.snippetMode;
   delete drawer.dataset.snippetName;
   _pendingSnippet = null;
-  // Release the sandbox blob URL (HTML or SVG) so the browser can GC the
-  // underlying bytes. Without this a 50 MB coverage report held its memory
-  // until the whole tab reloaded.
-  if (_pendingSandboxBlobUrl) {
-    try { URL.revokeObjectURL(_pendingSandboxBlobUrl); } catch (_) { /* ignore */ }
-    _pendingSandboxBlobUrl = null;
-  }
   const body = document.getElementById('fv-body');
   if (body) body.innerHTML = '';
 }
