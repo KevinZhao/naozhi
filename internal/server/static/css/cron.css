@@ -1,0 +1,886 @@
+/* cron.css — extracted verbatim from dashboard.html's inline <style> block
+ * (#2559 D6). The split is sequential: each file is a contiguous slice of the
+ * original block and dashboard.html links them in the same order, so the
+ * cascade (later rule wins at equal specificity, @media position) is
+ * unchanged. Edit a view's rules here, next to the module that renders it.
+ */
+/* ===== Cron tab ===== */
+.cron-detail{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.cron-detail-body{padding:16px 20px;overflow-y:auto;flex:1;min-height:0}
+.cron-detail h3{font-size:var(--nz-fs-md);color:var(--nz-text-strong);margin-bottom:12px}
+/* cron-panel-consolidation RFC §4.7: legacy v2 .cron-detail .cd-field /
+ * .cd-label / .cd-value / .cd-result detail-table styles deleted; the new
+ * per-job drawer uses .cron-drawer-summary further below. */
+/* Cron list header */
+.cron-list-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px}
+.cron-list-head h3{margin:0;font-size:var(--nz-fs-md);color:var(--nz-text-strong)}
+.cron-list-head-title{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
+.cron-new-btn{padding:6px 14px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:var(--nz-fs-sm2);display:inline-flex;align-items:center;gap:4px;min-height:36px;font-family:inherit}
+.cron-new-btn:hover{background:var(--nz-border);color:var(--nz-text-strong)}
+.cron-new-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+/* Cron card outer (anchor) — v3 row uses .cj-row for the visual; the
+ * .cron-card class remains as an E2E selector anchor (e2e/dashboard.test.js,
+ * multibackend.round3/5.test.js) but is otherwise visually inert.
+ *
+ * cron-dashboard-redesign P0 (2026-05-22): the legacy v2 padding/border/
+ * margin/background made each row look like an individual card despite the
+ * cj-row grid layout sitting on top — defeating the entire v3 high-density
+ * design. cj-list now provides the outer chrome (border-radius, background)
+ * and cj-row provides the row separator + interactive hover state. */
+.cron-card{position:relative}
+/* Increment C: missed banner —— 整个 cron 面板顶部告警条，红色强调 +
+ * 可点切 filter。alert role 提示屏幕阅读器。 */
+.cron-missed-banner{display:flex;align-items:center;gap:8px;padding:10px 14px;margin:0 0 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:var(--nz-radius-md);color:var(--nz-red);font-size:var(--nz-fs-sm2);cursor:pointer;transition:background .15s}
+.cron-missed-banner:hover{background:rgba(239,68,68,.15)}
+.cron-missed-banner .cmb-icon{font-size:var(--nz-fs-md);line-height:1}
+.cron-missed-banner .cmb-text{flex:1;color:var(--nz-text)}
+.cron-empty{text-align:center;padding:40px 20px}
+.cron-empty-icon{font-size:var(--nz-fs-display);opacity:.35;margin-bottom:12px}
+.cron-empty-hint{color:var(--nz-text-mute);margin-bottom:6px}
+.cron-empty-sub{color:var(--nz-text-faint);font-size:var(--nz-fs-sm);margin-bottom:16px;max-width:320px;margin-left:auto;margin-right:auto;line-height:1.5}
+.cron-empty-cta{padding:10px 22px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-blue);background:rgba(31,111,235,.12);color:var(--nz-accent);cursor:pointer;font-size:var(--nz-fs-sm2);font-family:inherit;min-height:40px}
+.cron-empty-cta:hover{background:rgba(31,111,235,.2)}
+/* R110-P2 cron filter bar (Round 139). The search input lives inside the
+   cron-detail-body but *outside* #cron-list-items so paint-the-list updates
+   (keystroke-driven) don't clobber input value/focus. Chips mirror the
+   sidebar-search aesthetic for consistency. */
+.cron-filter-bar{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+.cron-search-row{display:flex;gap:6px;align-items:center}
+.cron-search-input{flex:1;padding:6px 10px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-sm2);font-family:inherit;outline:none;transition:border-color .1s}
+.cron-search-input:focus{border-color:var(--nz-rust)}
+.cron-search-input::placeholder{color:var(--nz-text-placeholder)}
+.cron-search-clear{background:transparent;border:1px solid transparent;color:var(--nz-text-mute);font-size:var(--nz-fs-md);line-height:1;padding:4px 8px;border-radius:var(--nz-radius-sm);cursor:pointer;transition:all .1s}
+.cron-search-clear:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-border)}
+.cron-status-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.cron-status-chip{padding:4px 10px;border-radius:var(--nz-radius-lg);border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-family:inherit;cursor:pointer;transition:all .15s}
+.cron-status-chip:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
+.cron-status-chip.active{background:rgba(31,111,235,.18);border-color:var(--nz-blue);color:var(--nz-accent)}
+/* Increment D: 排序 select —— 和 status chip 同一行末尾，风格对齐 */
+.cron-sort-select{margin-left:auto;padding:4px 22px 4px 10px;border-radius:var(--nz-radius-lg);border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-family:inherit;cursor:pointer;transition:all .15s;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='%23848d97'><path d='M6 8L0 0h12z'/></svg>");background-repeat:no-repeat;background-position:right 6px center;background-size:8px 6px}
+.cron-sort-select:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
+.cron-sort-select:focus{outline:none;border-color:var(--nz-rust);color:var(--nz-text)}
+.cron-filter-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-sm)}
+.cron-filter-empty .cfe-hint{display:block;margin-top:6px;color:var(--nz-text-faint);font-size:var(--nz-fs-xs)}
+.cron-preview-hint{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:4px;min-height:16px}
+.cron-preview-hint.ok{color:var(--nz-green)}
+.cron-preview-hint.err{color:var(--nz-red)}
+.cc-notify{font-size:var(--nz-fs-xs);padding:1px 6px;border-radius:var(--nz-radius-xs)}
+.cc-notify.on{background:rgba(46,160,67,.15);color:var(--nz-green)}
+.cc-notify.off{background:rgba(139,148,158,.15);color:var(--nz-text-mute)}
+
+/* ===== Cron list rows (v3 redesign) =====
+ * 高密度行式布局，取代 v2 的 .cron-card 大卡片。灵感：Claude Code Routines、
+ * Every Agent Tasks、shadcn cron-jobs block。一行 ~48px，异常态(error / missed)
+ * 左侧加色条 + inline 展开一行错误摘要；正常态安静不吵。操作收到 ghost Run +
+ * ⋯ 菜单，不再平铺四个实心按钮。点击行就地展开详情。*/
+.cj-list{display:flex;flex-direction:column;border:1px solid var(--nz-border);border-radius:10px;overflow:hidden;background:var(--nz-bg-1)}
+.cj-row{position:relative;display:grid;grid-template-columns:18px minmax(0,1fr) auto auto;align-items:center;gap:12px;padding:10px 12px 10px 14px;border-bottom:1px solid var(--nz-border);cursor:pointer;transition:background .12s,border-color .12s;min-height:48px}
+.cj-row:last-child{border-bottom:none}
+.cj-row:hover{background:var(--nz-hover-bg)}
+.cj-row.paused{opacity:.6}
+.cj-row.paused:hover{opacity:.85}
+/* 左侧 3px 色条：错误=红，missed=琥珀。正常态无色条。 */
+.cj-row.is-error{box-shadow:inset 3px 0 0 var(--nz-red)}
+.cj-row.is-missed{box-shadow:inset 3px 0 0 var(--nz-amber)}
+.cj-row.is-error.is-missed{box-shadow:inset 3px 0 0 var(--nz-red)}
+/* P0 cron-run-history — 行右侧"运行中 Xs"角标的脉动状态。优先级高于 paused
+ * 边色条（实测 paused job 无法被 TriggerNow，只剩 schedule 路径，
+ * 实际重叠极少；但为了视觉一致性预留 is-running 类）。 */
+.cj-row.is-running{box-shadow:inset 3px 0 0 var(--nz-accent)}
+.cj-when.running{color:var(--nz-accent);font-weight:600;animation:cjRunPulse var(--nz-dur-loop) ease-in-out infinite}
+@keyframes cjRunPulse{0%,100%{opacity:1}50%{opacity:.55}}
+/* 状态圆点：二态设计——●活跃 / ○暂停。错误/missed 用左侧色条表达，
+ * 避免同一信息三处重复编码(圆点+色条+错误条) */
+.cj-dot{width:8px;height:8px;border-radius:50%;background:var(--nz-green);flex-shrink:0;justify-self:center}
+.cj-row.paused .cj-dot{background:transparent;border:1px solid var(--nz-text-faint);width:9px;height:9px}
+.cj-row.is-running .cj-dot{background:var(--nz-accent);box-shadow:0 0 0 0 var(--nz-accent);animation:cjDotPulse var(--nz-dur-loop) ease-in-out infinite}
+@keyframes cjDotPulse{0%{box-shadow:0 0 0 0 rgba(99,179,237,.6)}70%{box-shadow:0 0 0 6px rgba(99,179,237,0)}100%{box-shadow:0 0 0 0 rgba(99,179,237,0)}}
+/* 主列：任务标题 + 节奏(副行) */
+.cj-main{min-width:0;display:flex;flex-direction:column;gap:2px}
+.cj-title{font-size:var(--nz-fs-base);color:var(--nz-text-strong);font-weight:500;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cj-title.placeholder{color:var(--nz-text-dim);font-style:italic;font-weight:400}
+.cj-sub{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);line-height:1.35;display:flex;gap:10px;align-items:center;flex-wrap:nowrap;overflow:hidden;min-width:0}
+.cj-sub > *{flex-shrink:0}
+.cj-sub .cj-schedule{white-space:nowrap}
+.cj-sub .cj-when-inline,.cj-sub .cj-ago{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.cj-sub .cj-schedule{color:var(--nz-text);cursor:pointer;text-decoration:underline dotted var(--nz-text-faint);text-underline-offset:2px;transition:text-decoration-color .12s,color .12s;outline:none;border-radius:var(--nz-radius-xs)}
+.cj-sub .cj-schedule:hover{color:var(--nz-text-strong);text-decoration-color:var(--nz-text-mute)}
+.cj-sub .cj-schedule:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px}
+.cj-sub .cj-icon{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);flex-shrink:0}
+.cj-sub .cj-icon.notify-off{color:var(--nz-text-faint)}
+/* ☁️ 云沙箱 placement 徽标三态（agentcore-cloud-sandbox RFC §7.2）：
+   默认绿调 pill；pl-failed 黄（failed-clean，可直接重试）；
+   pl-transport 红（断流，microVM 状态未知 — §6.2 双跑风险信号）。 */
+.cj-placement-sandbox{font-size:var(--nz-fs-xs);padding:0 6px;border-radius:var(--nz-radius-md);flex-shrink:0;white-space:nowrap;background:color-mix(in srgb, var(--nz-ok, #2e7d32) 18%, transparent);color:var(--nz-ok, #2e7d32);border:1px solid color-mix(in srgb, var(--nz-ok, #2e7d32) 35%, transparent)}
+.cj-placement-sandbox.pl-failed{background:color-mix(in srgb, var(--nz-warn, #b26a00) 18%, transparent);color:var(--nz-warn, #b26a00);border-color:color-mix(in srgb, var(--nz-warn, #b26a00) 35%, transparent)}
+.cj-placement-sandbox.pl-transport{background:color-mix(in srgb, var(--nz-err, #c62828) 18%, transparent);color:var(--nz-err, #c62828);border-color:color-mix(in srgb, var(--nz-err, #c62828) 35%, transparent);font-weight:600}
+.cj-sub .cj-icon.fresh{color:var(--nz-green)}
+.cj-sub .cj-icon.missed{color:var(--nz-amber);font-weight:600}
+/* 下次运行时间列 */
+.cj-when{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);white-space:nowrap;text-align:right;flex-shrink:0}
+.cj-when.imminent{color:var(--nz-accent);font-weight:600}
+.cj-when.paused{color:var(--nz-text-faint)}
+/* 操作区：ghost Run + ⋯ 菜单。默认 Run 不显示，hover 行或触屏时浮出 */
+.cj-actions{display:flex;gap:4px;align-items:center;flex-shrink:0}
+.cj-run{padding:4px 10px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:transparent;color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-family:inherit;cursor:pointer;min-height:28px;display:inline-flex;align-items:center;gap:4px;opacity:0;transition:opacity .12s,color .12s,border-color .12s,background .12s}
+.cj-row:hover .cj-run,.cj-run:focus-visible{opacity:1}
+.cj-run:hover{color:var(--nz-accent);border-color:var(--nz-accent);background:rgba(31,111,235,.08)}
+.cj-menu-btn{width:28px;height:28px;border-radius:var(--nz-radius-ms);border:1px solid transparent;background:transparent;color:var(--nz-text-mute);font-size:18px;line-height:1;cursor:pointer;padding:0;display:inline-flex;align-items:center;justify-content:center;font-family:inherit}
+.cj-menu-btn:hover{background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-border)}
+/* 错误摘要行：inline 展开在主行下方，独立一行，可读不挤 */
+.cj-error{grid-column:2 / -1;margin:-4px 12px 0 0;padding:6px 10px;background:rgba(218,54,51,.08);border:1px solid rgba(218,54,51,.25);border-radius:var(--nz-radius-ms);font-size:var(--nz-fs-sm);color:var(--nz-red);line-height:1.5;display:flex;gap:6px;align-items:flex-start;word-break:break-word;overflow-wrap:anywhere}
+.cj-error .cj-err-icon{flex-shrink:0}
+.cj-error .cj-err-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+/* ⋯ popover menu —— 用 position:fixed 加 JS 定位，避免 .cron-detail-body
+ * 的 overflow:auto 把行底部的菜单剪掉。JS 负责 top/left 计算 + 空间不够
+ * 时向上翻转。 */
+.cj-menu{position:fixed;z-index:var(--nz-z-drawer);min-width:180px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2);padding:4px;display:none}
+.cj-menu.open{display:block}
+.cj-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:transparent;border:none;border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-sm2);font-family:inherit;cursor:pointer;text-align:left;min-height:34px}
+.cj-menu-item:hover{background:var(--nz-bg-2)}
+.cj-menu-item.danger{color:var(--nz-red)}
+.cj-menu-item.danger:hover{background:rgba(218,54,51,.12)}
+.cj-menu-sep{height:1px;background:var(--nz-border);margin:4px 0}
+/* 状态摘要行（标题旁"3 运行中 · 1 需关注"）*/
+.cj-summary{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-left:10px;font-weight:400}
+.cj-summary .cj-summary-attn{color:var(--nz-red);font-weight:500}
+/* 触屏设备：ghost Run 始终可见（不能靠 hover）*/
+@media (hover:none){
+  .cj-row .cj-run{opacity:1}
+}
+/* 小屏适配：< 640 时隐藏 cj-when 列（避免三列挤），相对时间移入 cj-sub；
+ * 同时在 sub-row 里隐藏桌面端的 cj-ago（上次 …），避免 when/ago 两条
+ * 冗余信息挤到同一行 */
+.cj-sub .cj-when-inline{display:none}
+@media (max-width:640px){
+  .cj-row{grid-template-columns:18px minmax(0,1fr) auto;gap:8px;padding:10px 10px 10px 12px}
+  .cj-when{display:none}
+  .cj-sub .cj-when-inline{display:inline;color:var(--nz-text-mute)}
+  .cj-sub .cj-when-inline.imminent{color:var(--nz-accent);font-weight:600}
+  .cj-sub .cj-when-inline.paused{color:var(--nz-text-faint)}
+  .cj-sub .cj-ago{display:none}
+  .cj-row:hover .cj-run{opacity:1}
+}
+/* v3 hides the legacy .cc-actions wrapper (still emitted for contract
+ * test compatibility) since actions moved to .cj-actions + ⋯ menu */
+
+/* ===== P2 cron-run-history — 列表卡片成功率徽章 + hover tooltip =====
+ * RFC §8.1 / §8.4。徽章嵌在 .cj-row 第 4 列（when 列后、actions 前），
+ * 不改变 grid 列定义（用 grid auto-flow 自动追加）。tooltip 用绝对定位的
+ * .cj-stats-pop，:hover/:focus-within 触发显示。 */
+.cj-row{grid-template-columns:18px minmax(0,1fr) auto auto auto}
+/* 小屏 < 640px：复用上面已有的 mobile rule —— 隐藏 .cj-when、回到 3 列
+ * (dot / main / actions)。stats 徽章信息密度高，触屏不易精准 hover，直接
+ * 隐藏避免 grid 多出空列；用户进详情页看完整时间轴更合适。 */
+@media(max-width:640px){
+  .cj-row{grid-template-columns:18px minmax(0,1fr) auto}
+  .cj-stats{display:none}
+}
+/* 窄 list-pane 修复：narrow / single 模式 (list-pane ≤ 320) 下，三个 auto 列
+ * (cj-when 39 + cj-stats 52 + cj-actions 91) 总宽 ~180px 把 1fr 列 (cj-main)
+ * 挤到 ~0.4px，title/sub 被压成竖排单字。复用 mobile 644 媒体查询的策略：
+ * 隐藏 cj-when + cj-stats，回 3 列 (dot / main / actions)。时间靠 sub-row
+ * 的 cj-when-inline 兜住。stats 徽章在窄屏信息密度过高，进 detail 看完整
+ * 时间轴更合适，与 mobile 同款决策。
+ *
+ * data-cron-layout 由 setupCronLayoutObserver (dashboard.js) 写入 .cron-detail-body：
+ *   wide   ≥1100  list 380
+ *   medium ≥820   list 360
+ *   narrow ≥560   list 320  ← 此规则触发
+ *   single <560   list 全屏覆盖（cj-row 也走窄逻辑）
+ */
+.cron-detail-body[data-cron-layout="medium"] .cj-row,
+.cron-detail-body[data-cron-layout="narrow"] .cj-row,
+.cron-detail-body[data-cron-layout="single"] .cj-row{grid-template-columns:18px minmax(0,1fr) auto;gap:8px}
+.cron-detail-body[data-cron-layout="medium"] .cj-when,
+.cron-detail-body[data-cron-layout="narrow"] .cj-when,
+.cron-detail-body[data-cron-layout="single"] .cj-when,
+.cron-detail-body[data-cron-layout="medium"] .cj-stats,
+.cron-detail-body[data-cron-layout="narrow"] .cj-stats,
+.cron-detail-body[data-cron-layout="single"] .cj-stats{display:none}
+/* cron-dashboard-redesign P0 follow-up — list rows show only title +
+ * schedule. Everything else (icons / last-ago chip / when-inline /
+ * stats badge / when-column / next-time across all layout modes) is
+ * collapsed to keep row noise to a minimum; users see all this in
+ * the drawer detail anyway. The elements stay in the DOM so contract
+ * tests + e2e selectors keep working — we just hide them visually. */
+.cj-list .cj-row .cj-when,
+.cj-list .cj-row .cj-stats,
+.cj-list .cj-row .cj-sub .cj-icon,
+.cj-list .cj-row .cj-sub .cj-ago,
+.cj-list .cj-row .cj-sub .cj-when-inline{display:none !important}
+.cj-list .cj-row{grid-template-columns:18px minmax(0,1fr) auto !important;gap:8px}
+/* Hide ghost-Run on list rows; the drawer's primary action button
+ * provides the same affordance with more context. Keeps the row
+ * actions to a single ⋯ entrypoint. */
+.cj-list .cj-row .cj-actions .cj-run{display:none}
+.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-when-inline,
+.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline,
+.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline{display:inline;color:var(--nz-text-mute)}
+.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-when-inline.imminent,
+.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline.imminent,
+.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline.imminent{color:var(--nz-accent);font-weight:600}
+.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-when-inline.paused,
+.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline.paused,
+.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline.paused{color:var(--nz-text-faint)}
+.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-ago,
+.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-ago,
+.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-ago{display:none}
+.cj-stats{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:36px;height:22px;padding:0 8px;border-radius:11px;border:1px solid var(--nz-border);background:var(--nz-bg-2);font-size:var(--nz-fs-xs);line-height:1;color:var(--nz-text-mute);font-variant-numeric:tabular-nums;cursor:default;outline:none}
+.cj-stats:hover,.cj-stats:focus-visible{border-color:var(--nz-text-faint);color:var(--nz-text)}
+.cj-stats.ok{color:var(--nz-green);border-color:rgba(63,185,80,.35);background:rgba(63,185,80,.08)}
+.cj-stats.mid{color:var(--nz-text);border-color:var(--nz-border)}
+.cj-stats.bad{color:var(--nz-red);border-color:rgba(218,54,51,.4);background:rgba(218,54,51,.1);font-weight:600}
+.cj-stats-label{white-space:nowrap}
+.cj-stats-pop{position:absolute;bottom:calc(100% + 6px);right:0;display:none;min-width:180px;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2);z-index:50;cursor:default;white-space:normal}
+.cj-stats:hover .cj-stats-pop,.cj-stats:focus-within .cj-stats-pop{display:block}
+.cj-stats-pop-row{display:flex;gap:6px;margin-bottom:6px}
+.cj-stats-dot{width:8px;height:8px;border-radius:50%;background:var(--nz-text-faint);flex-shrink:0;display:inline-block}
+.cj-stats-dot.ok{background:var(--nz-green)}
+.cj-stats-dot.err{background:var(--nz-red)}
+.cj-stats-dot.skip{background:var(--nz-text-faint)}
+.cj-stats-dot.warn{background:var(--nz-amber)}
+.cj-stats-dot.cancel{background:var(--nz-purple)}
+.cj-stats-dot.run{background:var(--nz-accent)}
+.cj-stats-dot.unk,.cj-stats-dot.empty{background:var(--nz-bg-2);border:1px dashed var(--nz-border)}
+.cj-stats-pop-meta{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);line-height:1.45}
+
+/* ===== P2 cron-run-history — 详情视图"执行历史"时间轴 =====
+ * 在 cron session view 里 mount 在 .events 之上。RFC §8.2。
+ * 行：状态点 + state 文字 + 紧凑时间 + 耗时；点击展开 prompt/result/error。 */
+.cron-timeline-panel{padding:14px 18px 8px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1);max-height:42vh;overflow-y:auto;flex-shrink:0}
+.cron-timeline-panel:empty{display:none;padding:0;border:0}
+.cron-timeline-panel .ct-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.cron-timeline-panel .ct-head h3{margin:0;font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
+.cron-timeline-panel .ct-head-err{font-size:var(--nz-fs-xs);color:var(--nz-red);background:rgba(218,54,51,.1);border:1px solid rgba(218,54,51,.3);border-radius:var(--nz-radius-sm);padding:2px 8px}
+.cron-timeline-panel .ct-empty{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);padding:14px 4px;line-height:1.6}
+.cron-timeline-panel .ct-rows{display:flex;flex-direction:column;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);overflow:hidden;background:var(--nz-bg-0)}
+.cron-timeline-panel .ctr{padding:8px 12px;border-bottom:1px solid var(--nz-border);cursor:pointer;transition:background .12s}
+.cron-timeline-panel .ctr:last-child{border-bottom:none}
+.cron-timeline-panel .ctr:hover{background:var(--nz-hover-bg)}
+.cron-timeline-panel .ctr.open{background:var(--nz-hover-bg)}
+.cron-timeline-panel .ctr-main{display:flex;align-items:center;gap:10px;font-size:var(--nz-fs-sm2);color:var(--nz-text)}
+.cron-timeline-panel .ctr-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--nz-text-faint)}
+.cron-timeline-panel .ctr-dot.ok{background:var(--nz-green)}
+.cron-timeline-panel .ctr-dot.err{background:var(--nz-red)}
+.cron-timeline-panel .ctr-dot.skip{background:var(--nz-text-faint)}
+.cron-timeline-panel .ctr-dot.warn{background:var(--nz-amber)}
+.cron-timeline-panel .ctr-dot.cancel{background:var(--nz-purple)}
+.cron-timeline-panel .ctr-dot.run{background:var(--nz-accent);animation:cjDotPulse var(--nz-dur-loop) ease-in-out infinite}
+.cron-timeline-panel .ctr-dot.unk{background:var(--nz-bg-2);border:1px dashed var(--nz-border)}
+.cron-timeline-panel .ctr-state{color:var(--nz-text-strong);font-weight:500;min-width:48px}
+.cron-timeline-panel .ctr-time{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.cron-timeline-panel .ctr-dur{color:var(--nz-text-mute);font-variant-numeric:tabular-nums;margin-left:auto}
+.cron-timeline-panel .ctr-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:3px;padding-left:18px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.cron-timeline-panel .ctr-sub .ctr-sep{opacity:.5}
+.cron-timeline-panel .ctr-trigger{color:var(--nz-text-mute)}
+.cron-timeline-panel .ctr-session{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);border-radius:var(--nz-radius-xs);padding:0 5px;font-size:var(--nz-fs-2xs)}
+.cron-timeline-panel .ctr-errcls{color:var(--nz-red)}
+.cron-timeline-panel .ctr-loading{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);font-style:italic}
+.cron-timeline-panel .ctr-err-load{font-size:var(--nz-fs-sm);color:var(--nz-red)}
+.cron-timeline-panel .ctr-empty-detail{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);font-style:italic}
+.cron-timeline-panel .ctr-fresh-hint{font-size:var(--nz-fs-sm);color:var(--nz-text);background:rgba(31,111,235,.08);border:1px solid rgba(31,111,235,.25);border-radius:var(--nz-radius-ms);padding:6px 10px;margin-bottom:8px;line-height:1.5}
+.cron-timeline-panel .ctr-sid-chip{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-accent);background:transparent;border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:1px 6px;font-size:var(--nz-fs-xs);cursor:pointer;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.cron-timeline-panel .ctr-sid-chip:hover{background:rgba(31,111,235,.12);border-color:var(--nz-accent)}
+.cron-timeline-panel .ctr-block{margin-bottom:8px}
+.cron-timeline-panel .ctr-block:last-child{margin-bottom:0}
+.cron-timeline-panel .ctr-block-label{font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}
+.cron-timeline-panel .ctr-block.err .ctr-block-label{color:var(--nz-red)}
+.cron-timeline-panel .ctr-bytes{text-transform:none;font-size:var(--nz-fs-2xs);color:var(--nz-text-faint);margin-left:6px}
+.cron-timeline-panel .ctr-block-body{margin:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);color:var(--nz-text);background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:8px 10px;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;line-height:1.5}
+/* Markdown variant for result block: drop the monospace/pre-wrap so renderMd's
+   headings/lists/tables/code-blocks render natively; raise max-height a bit
+   because md output tends to be taller than equivalent <pre>. Inner .md-pre
+   keeps its own monospace styling. */
+.cron-timeline-panel .ctr-block-body.md{font-family:inherit;font-size:var(--nz-fs-sm2);white-space:normal;word-break:normal;overflow-wrap:anywhere;max-height:380px;line-height:1.55}
+.cron-timeline-panel .ctr-block-body.md p{margin:0 0 8px}
+.cron-timeline-panel .ctr-block-body.md p:last-child{margin-bottom:0}
+.cron-timeline-panel .ctr-block-body.md > :first-child{margin-top:0}
+.cron-timeline-panel .ctr-block-body.md > :last-child{margin-bottom:0}
+.cron-timeline-panel .ctr-md-toggle{margin-left:auto;float:right;background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-size:var(--nz-fs-2xs);font-family:inherit;padding:0 6px;border-radius:var(--nz-radius-xs);cursor:pointer;line-height:1.6;text-transform:none;letter-spacing:0}
+.cron-timeline-panel .ctr-md-toggle:hover{color:var(--nz-text);border-color:var(--nz-accent)}
+.cron-timeline-panel .ctr-block-label{display:flex;align-items:center;gap:4px}
+.cron-timeline-panel .ctr-block.err .ctr-block-body{color:var(--nz-red)}
+.cron-timeline-panel .ctr-meta-row{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:4px}
+.cron-timeline-panel .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:0 4px}
+.cron-timeline-panel .ct-more{display:flex;justify-content:center;margin-top:10px}
+.cron-timeline-panel .ct-more-btn{padding:6px 14px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:transparent;color:var(--nz-text);font-size:var(--nz-fs-sm);font-family:inherit;cursor:pointer;min-height:30px}
+.cron-timeline-panel .ct-more-btn:hover:not([disabled]){border-color:var(--nz-accent);color:var(--nz-accent);background:rgba(31,111,235,.08)}
+.cron-timeline-panel .ct-more-btn[disabled]{opacity:.5;cursor:not-allowed}
+@media(max-width:640px){
+  .cron-timeline-panel{max-height:50vh;padding:10px 12px 6px}
+  .cron-timeline-panel .ctr-main{font-size:var(--nz-fs-sm);gap:8px}
+  .cron-timeline-panel .ctr-dur{font-size:var(--nz-fs-xs)}
+}
+/* Session run-history panel (docs/rfc/session-run-metrics.md §8). Visual
+   language mirrors .cron-timeline-panel: status dot + state + time + right-
+   aligned duration. Implemented as a native <details> disclosure so the
+   collapse-to-summary behaviour needs zero JS and stays accessible. */
+.session-runs-panel{border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1);flex-shrink:0}
+.session-runs-panel[hidden]{display:none}
+.session-runs-panel .srp-summary{display:flex;align-items:center;gap:var(--nz-space-2);padding:var(--nz-space-2) var(--nz-space-4);cursor:pointer;list-style:none;min-height:36px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute);user-select:none}
+.session-runs-panel .srp-summary::-webkit-details-marker{display:none}
+.session-runs-panel .srp-summary::before{content:'\25B6';font-size:var(--nz-fs-2xs);color:var(--nz-text-faint);transition:transform var(--nz-dur) var(--nz-ease);flex-shrink:0}
+.session-runs-panel[open] .srp-summary::before{transform:rotate(90deg)}
+.session-runs-panel .srp-summary:hover{background:var(--nz-hover-bg)}
+.session-runs-panel .srp-title{color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
+.session-runs-panel .srp-body{padding:0 var(--nz-space-4) var(--nz-space-2);max-height:42vh;overflow-y:auto}
+.session-runs-panel .srp-rows{display:flex;flex-direction:column;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);overflow:hidden;background:var(--nz-bg-0)}
+.session-runs-panel .srr{padding:var(--nz-space-2) var(--nz-space-3);border-bottom:1px solid var(--nz-border)}
+.session-runs-panel .srr:last-child{border-bottom:none}
+.session-runs-panel .srr-main{display:flex;align-items:center;gap:var(--nz-space-2);font-size:var(--nz-fs-sm2);color:var(--nz-text)}
+.session-runs-panel .srr-dot{width:8px;height:8px;border-radius:var(--nz-radius-full);flex-shrink:0;background:var(--nz-text-faint)}
+.session-runs-panel .srr-dot.ok{background:var(--nz-green)}
+.session-runs-panel .srr-dot.err{background:var(--nz-red)}
+.session-runs-panel .srr-dot.timeout{background:var(--nz-red)}
+.session-runs-panel .srr-dot.cancel{background:var(--nz-purple)}
+.session-runs-panel .srr-state{color:var(--nz-text-strong);font-weight:500;min-width:48px}
+.session-runs-panel .srr-time{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.session-runs-panel .srr-dur{color:var(--nz-text-mute);font-variant-numeric:tabular-nums;margin-left:auto}
+.session-runs-panel .srr-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:3px;padding-left:18px;display:flex;gap:var(--nz-space-1);align-items:center;flex-wrap:wrap}
+.session-runs-panel .srr-sub .srr-sep{opacity:.5}
+.session-runs-panel .srp-empty{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);padding:var(--nz-space-3) var(--nz-space-1);line-height:1.6}
+@media(max-width:768px){
+  .session-runs-panel .srp-body{max-height:32vh}
+  .session-runs-panel .srp-summary{min-height:44px}
+  .session-runs-panel .srr-main{font-size:var(--nz-fs-sm);gap:var(--nz-space-2)}
+}
+/* cron-dashboard-redesign P2b §4.4.2 — run-detail sheet 4 tab + transcript timeline.
+ * Tab bar sits above the legacy "原始日志" body content; transcript turn
+ * cards live under .crs-transcript with avatar/role/text/tool styles. */
+.crs-tabs{display:flex;gap:18px;padding:0 4px;margin-bottom:14px;border-bottom:1px solid var(--nz-border);overflow-x:auto;scrollbar-width:none}
+.crs-tabs::-webkit-scrollbar{display:none}
+.crs-tab{padding:10px 0 10px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute);cursor:pointer;border:none;border-bottom:2px solid transparent;background:transparent;font-family:inherit;display:inline-flex;align-items:center;gap:6px;font-weight:500;flex-shrink:0;transition:color .12s,border-color .12s}
+.crs-tab:hover{color:var(--nz-text)}
+.crs-tab.active{color:var(--nz-accent);border-bottom-color:var(--nz-accent)}
+.crs-tab:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px;border-radius:var(--nz-radius-xs)}
+.crs-tab-count{font-size:var(--nz-fs-2xs);background:var(--nz-bg-2);color:var(--nz-text-mute);padding:1px 6px;border-radius:var(--nz-radius-md);font-weight:500}
+.crs-tab.active .crs-tab-count{background:rgba(31,111,235,.18);color:var(--nz-accent)}
+.crs-tab-body{display:flex;flex-direction:column;gap:8px}
+.crs-transcript{display:flex;flex-direction:column;gap:14px}
+.crs-turn{display:flex;gap:10px}
+.crs-turn.err .crs-text{color:var(--nz-red)}
+.crs-avatar{width:24px;height:24px;border-radius:var(--nz-radius-ms);font-size:var(--nz-fs-xs);font-weight:600;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:white;line-height:1}
+.crs-avatar.user{background:#444c56}
+.crs-avatar.assistant{background:linear-gradient(135deg,var(--nz-blue),#a371f7)}
+.crs-avatar.tool{background:var(--nz-bg-2);color:var(--nz-amber);border:1px solid var(--nz-border)}
+.crs-turn-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
+.crs-turn-head{display:flex;align-items:baseline;gap:8px;font-size:var(--nz-fs-xs);flex-wrap:wrap}
+.crs-role{color:var(--nz-text-strong);font-weight:600}
+.crs-time{color:var(--nz-text-faint);font-variant-numeric:tabular-nums}
+.crs-tokens{margin-left:auto;color:var(--nz-text-faint);font-variant-numeric:tabular-nums;font-size:var(--nz-fs-2xs)}
+.crs-text{font-size:var(--nz-fs-sm2);color:var(--nz-text);line-height:1.55;white-space:pre-wrap;word-break:break-word;background:transparent;border:none;padding:0;margin:0;font-family:inherit}
+.crs-text.md{white-space:normal}
+.crs-text.md p{margin-bottom:6px}
+.crs-text.md p:last-child{margin-bottom:0}
+.crs-text.md ul,.crs-text.md ol{margin:6px 0 6px 22px}
+.crs-text.md ul ul,.crs-text.md ul ol,.crs-text.md ol ul,.crs-text.md ol ol{margin:2px 0 2px 16px}
+.crs-text.md code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);background:var(--nz-bg-1);border:1px solid var(--nz-border);padding:0 5px;border-radius:var(--nz-radius-xs)}
+.crs-tool-card{border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-1);overflow:hidden}
+.crs-tool-card.err{border-color:rgba(248,81,73,.4)}
+.crs-tool-head{padding:7px 11px;display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;font-size:var(--nz-fs-sm);-webkit-tap-highlight-color:transparent}
+.crs-tool-head::-webkit-details-marker{display:none}
+.crs-tool-card[open] .crs-tool-head{border-bottom:1px solid var(--nz-border)}
+.crs-tool-head:hover{background:var(--nz-bg-2)}
+.crs-tool-name{color:var(--nz-text-strong);font-weight:500;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);flex-shrink:0}
+.crs-tool-summary{color:var(--nz-text-mute);font-size:var(--nz-fs-xs);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.crs-tool-card.err .crs-tool-name{color:var(--nz-red)}
+.crs-tool-body{margin:0;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-xs);color:var(--nz-text);background:var(--nz-bg-0);white-space:pre-wrap;word-break:break-word;line-height:1.55;max-height:280px;overflow-y:auto;border:none;border-radius:0}
+.crs-tool-card.err .crs-tool-body{color:var(--nz-text)}
+@media(max-width:540px){
+  .crs-tabs{gap:14px}
+  .crs-tool-head{flex-wrap:wrap;gap:5px}
+  .crs-tool-summary{flex-basis:100%;order:3}
+}
+
+/* timeline 行选中态 — sheet 打开后该行高亮，提示用户当前看的是哪一条 run */
+/* PR-1 followup #3: 选中态视觉加强。色条 3→4px (与 cj-row.is-active 同级)
+ * + 背景蓝调更明显 + 状态文字 strong + dot 描边 outline 标记被选中。 */
+.cron-timeline-panel .ctr.is-selected{background:var(--nz-selected-bg);box-shadow:inset 4px 0 0 var(--nz-selected-bar)}
+.cron-timeline-panel .ctr.is-selected .ctr-state{color:var(--nz-text-strong);font-weight:600}
+.cron-timeline-panel .ctr.is-selected .ctr-time{color:var(--nz-text-strong)}
+.cron-timeline-panel .ctr.is-selected .ctr-dot{box-shadow:0 0 0 2px var(--nz-bg-1),0 0 0 3px var(--nz-selected-bar)}
+
+/* ===== §16 inline-expand 回归: 行内展开详情块 =====
+ * 选中行下方就地嵌入 .ctr-detail（cronTimelineDetailHtml 渲染）。
+ * 取代 v3 sheet 浮层 — 无几何同步、无浮层 backdrop、无桌面/移动分支差异。
+ * 长 result 通过 max-height + overflow-y:auto 内部滚动而不撑爆列表。
+ * 视觉上以浅色背景 + 上下边框区分于普通 timeline 行。 */
+.ctr-detail{padding:14px 16px;background:var(--nz-bg-0);border-top:1px solid var(--nz-border);border-bottom:1px solid var(--nz-border);max-height:60vh;overflow-y:auto;cursor:default}
+.ctr-detail .ctr-block{margin-bottom:12px}
+.ctr-detail .ctr-block:last-child{margin-bottom:0}
+.ctr-detail .ctr-block-label{font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.ctr-detail .ctr-block.err .ctr-block-label{color:var(--nz-red)}
+.ctr-detail .ctr-bytes{text-transform:none;font-size:var(--nz-fs-2xs);color:var(--nz-text-faint)}
+.ctr-detail .ctr-block-body{margin:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:10px 12px;white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:none}
+.ctr-detail .ctr-block.err .ctr-block-body{color:var(--nz-red)}
+.ctr-detail .ctr-loading,.ctr-detail .ctr-err-load,.ctr-detail .ctr-empty-detail{font-size:var(--nz-fs-sm2);color:var(--nz-text-mute);font-style:italic;padding:14px 4px;text-align:center}
+.ctr-detail .ctr-err-load{color:var(--nz-red)}
+.ctr-detail .ctr-fresh-hint{font-size:var(--nz-fs-sm);color:var(--nz-text);background:rgba(31,111,235,.08);border:1px solid rgba(31,111,235,.25);border-radius:var(--nz-radius-ms);padding:8px 10px;margin-bottom:10px;line-height:1.5}
+.ctr-detail .ctr-sid-chip{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-accent);background:transparent;border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:1px 6px;font-size:var(--nz-fs-xs);cursor:pointer}
+.ctr-detail .ctr-sid-chip:hover{background:rgba(31,111,235,.12);border-color:var(--nz-accent)}
+.ctr-detail .ctr-meta-row{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:4px}
+.ctr-detail .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:0 4px}
+/* 最终输出单屏视图：error → result → 兜底 assistant 文本（cronTimelineDetailHtml 决策链）*/
+/* §7.3 run-detail meta bar (sandbox receipt) + §7.5 cost小字. */
+.ctr-detail .ctr-meta-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--nz-border)}
+.ctr-detail .ctr-meta-item{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:1px 7px;white-space:nowrap}
+.ctr-detail .ctr-meta-item.ctr-meta-cost{color:var(--nz-text);font-weight:600}
+.ctr-detail .ctr-meta-item.ctr-meta-exit{color:var(--nz-red);border-color:rgba(248,81,73,.35)}
+.cron-timeline-panel .ctr-sub .ctr-cost{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.cron-timeline-panel .ct-cost-sum{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-left:auto;font-variant-numeric:tabular-nums}
+.cron-timeline-panel .ct-cost-ledger{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-left:auto;font-variant-numeric:tabular-nums}
+.cron-timeline-panel .ct-cost-ledger + .ct-cost-sum{margin-left:var(--nz-space-3)}
+/* §7.3 input-snapshot collapsible (replay preview). */
+.ctr-detail .ctr-snapshot{margin-top:10px;border-top:1px solid var(--nz-border);padding-top:8px}
+.ctr-detail .ctr-snapshot>summary{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);cursor:pointer;user-select:none}
+.ctr-detail .ctr-snap-body{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.ctr-detail .ctr-snap-row{display:flex;gap:8px;font-size:var(--nz-fs-xs)}
+.ctr-detail .ctr-snap-k{color:var(--nz-text-mute);min-width:72px;flex-shrink:0}
+.ctr-detail .ctr-snap-v{color:var(--nz-text);word-break:break-word}
+.ctr-detail .ctr-snap-v.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.ctr-detail .ctr-snap-prompt{margin-top:4px}
+.ctr-detail .ctr-snap-pre{margin:4px 0 0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:8px 10px;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto}
+/* §7.3 replay action bar (PR-6): replay-of chain badge + replay button. */
+.ctr-detail .ctr-replay-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.ctr-detail .ctr-replay-of{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-pill);padding:2px 10px;cursor:pointer;font-family:inherit}
+.ctr-detail .ctr-replay-of:hover{color:var(--nz-text);border-color:var(--nz-accent)}
+.ctr-detail .ctr-replay-btn{font-size:var(--nz-fs-sm);color:var(--nz-text);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:3px 12px;cursor:pointer;font-family:inherit}
+.ctr-detail .ctr-replay-btn:hover:not(:disabled){border-color:var(--nz-accent);color:var(--nz-text-strong)}
+.ctr-detail .ctr-replay-btn:disabled{opacity:.5;cursor:not-allowed}
+.ctr-detail .ctr-replay-hint{font-size:var(--nz-fs-xs);color:var(--nz-red)}
+/* §7.4 confirmation queue (PR-6): banner + per-incident cards. */
+.cron-timeline-panel .ctr-queue{border:1px solid var(--nz-amber);border-radius:var(--nz-radius-md);background:rgba(210,153,34,.08);padding:10px 12px;margin-bottom:14px}
+.cron-timeline-panel .ctr-queue-head{display:flex;flex-direction:column;gap:2px;margin-bottom:8px}
+.cron-timeline-panel .ctr-queue-title{font-size:var(--nz-fs-sm);font-weight:600;color:var(--nz-amber)}
+.cron-timeline-panel .ctr-queue-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.cron-timeline-panel .ctr-queue-list{display:flex;flex-direction:column;gap:8px}
+.cron-timeline-panel .ctr-queue-card{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:8px 10px}
+.cron-timeline-panel .ctr-queue-card-main{display:flex;gap:10px;align-items:center;flex-wrap:wrap;min-width:0}
+.cron-timeline-panel .ctr-queue-job{font-size:var(--nz-fs-sm);color:var(--nz-text);font-weight:600;word-break:break-word}
+.cron-timeline-panel .ctr-queue-reason{font-size:var(--nz-fs-xs);color:var(--nz-amber)}
+.cron-timeline-panel .ctr-queue-when{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.cron-timeline-panel .ctr-queue-actions{display:flex;gap:8px;flex-shrink:0}
+.cron-timeline-panel .ctr-queue-confirm{font-size:var(--nz-fs-sm);color:var(--nz-text);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:3px 12px;cursor:pointer;font-family:inherit}
+.cron-timeline-panel .ctr-queue-confirm:hover{border-color:var(--nz-accent);color:var(--nz-text-strong)}
+.cron-timeline-panel .ctr-queue-replay{font-size:var(--nz-fs-sm);color:#fff;background:var(--nz-amber);border:1px solid var(--nz-amber);border-radius:var(--nz-radius-sm);padding:3px 12px;cursor:pointer;font-family:inherit}
+.cron-timeline-panel .ctr-queue-replay:hover{filter:brightness(1.08)}
+.ctr-detail .ctr-final{padding:2px 0}
+.ctr-detail .ctr-final-label{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.ctr-detail .ctr-final.err .ctr-final-label{color:var(--nz-red)}
+.ctr-detail .ctr-final-tag{text-transform:none;font-size:var(--nz-fs-2xs);color:var(--nz-red);background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.35);border-radius:var(--nz-radius-xs);padding:1px 6px}
+.ctr-detail .ctr-final-body{margin:0;font-size:var(--nz-fs-sm2);color:var(--nz-text);line-height:1.6;word-break:break-word;overflow-wrap:anywhere}
+.ctr-detail .ctr-final-body.md{font-family:inherit;white-space:normal}
+.ctr-detail .ctr-final-body:not(.md){font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:10px 12px;white-space:pre-wrap;line-height:1.55}
+.ctr-detail .ctr-final.err .ctr-final-body{color:var(--nz-red);background:rgba(248,81,73,.06);border-color:rgba(248,81,73,.3)}
+.ctr-detail .ctr-final-body.md p{margin:0 0 10px}
+.ctr-detail .ctr-final-body.md p:last-child{margin-bottom:0}
+.ctr-detail .ctr-final-body.md > :first-child{margin-top:0}
+.ctr-detail .ctr-final-body.md > :last-child{margin-bottom:0}
+.ctr-detail .ctr-final-body.md pre{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:10px 12px;overflow-x:auto}
+.ctr-detail .ctr-final-body.md code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm)}
+.ctr-detail .ctr-final-body.md p code,.ctr-detail .ctr-final-body.md li code{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:0 4px}
+
+/* 移动端：屏小，detail 高度收紧到 50vh 防止占满整屏 */
+@media(max-width:768px){
+  .ctr-detail{max-height:50vh;padding:10px 12px}
+}
+
+/* ===== cron-panel-consolidation RFC §4 — drawer + list-pane =====
+ * Two-column shell when cronDetailJobId is non-null; collapses to single
+ * column when no drawer is open. Toggled via .has-drawer on the body.
+ * Drawer hosts the existing #cron-timeline-panel inside its history
+ * section so the timeline renderer (cronTimelineHtml three-piece set) is
+ * reused unchanged — the only override is below to flatten the timeline's
+ * stand-alone padding / border / max-height inside the drawer context. */
+.cron-detail-body{padding:0;display:flex;flex-direction:row;align-items:stretch;min-height:0;gap:0}
+.cron-detail-body > .cron-list-pane{flex:1 1 auto;min-width:0;padding:16px 20px;overflow-y:auto;background:var(--nz-bg-0)}
+.cron-detail-body.has-drawer > .cron-list-pane{flex:0 0 380px}
+.cron-detail-pane{flex:1 1 auto;min-width:0;display:none;flex-direction:column;overflow-y:auto;background:var(--nz-bg-0);border-left:1px solid var(--nz-border)}
+.cron-detail-pane.is-open{display:flex}
+/* Drawer header */
+.cron-drawer-header{position:sticky;top:0;z-index:2;background:var(--nz-bg-0);padding:14px 20px 10px;border-bottom:1px solid var(--nz-border);display:flex;flex-direction:column;gap:6px}
+.cron-drawer-header .cdh-row1{display:flex;align-items:center;gap:8px}
+.cron-drawer-header .cdh-title{margin:0;font-size:18px;font-weight:600;color:var(--nz-text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.cron-drawer-header .cdh-title.placeholder{color:var(--nz-text-mute);font-style:italic}
+.cron-drawer-header .cdh-actions{display:flex;gap:4px;flex-shrink:0}
+.cron-drawer-header .cdh-btn-icon{width:32px;height:32px;border-radius:var(--nz-radius-ms);border:1px solid transparent;background:transparent;color:var(--nz-text-mute);cursor:pointer;font-size:var(--nz-fs-md);line-height:1;display:inline-flex;align-items:center;justify-content:center;font-family:inherit;-webkit-tap-highlight-color:transparent}
+.cron-drawer-header .cdh-btn-icon:hover{background:var(--nz-bg-1);color:var(--nz-text-strong);border-color:var(--nz-border)}
+.cron-drawer-header .cdh-row2{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
+.cron-drawer-header .cdh-row2 .cj-schedule{cursor:pointer}
+.cron-drawer-header .cdh-chip{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:1px 6px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cron-drawer-header .cdh-chip.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+/* cron-dashboard-redesign P1 §4.3 — KPI cockpit row at top of drawer.
+ * Four equal columns by default; collapses to 2x2 on narrow widths so the
+ * primary "下次运行" tile keeps its full numeric width. The .primary
+ * variant carries the accent gradient/border that anchors the eye. */
+.cron-drawer-cockpit{padding:14px 20px;border-bottom:1px solid var(--nz-border);display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:10px;background:linear-gradient(180deg,rgba(31,111,235,.04),transparent)}
+.cron-kpi{padding:10px 12px;border-radius:var(--nz-radius-md);border:1px solid var(--nz-border);background:var(--nz-bg-1);min-width:0}
+.cron-kpi.primary{background:linear-gradient(135deg,rgba(31,111,235,.12),rgba(31,111,235,.04));border-color:rgba(31,111,235,.4)}
+.cron-kpi .ck-label{font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cron-kpi .ck-value{font-size:var(--nz-fs-lg);color:var(--nz-text-strong);font-weight:600;font-variant-numeric:tabular-nums;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cron-kpi.primary .ck-value{color:var(--nz-accent)}
+.cron-kpi.ok .ck-value{color:var(--nz-green)}
+.cron-kpi.warn .ck-value{color:var(--nz-amber)}
+.cron-kpi.bad .ck-value{color:var(--nz-red)}
+.cron-kpi.run .ck-value{color:var(--nz-accent)}
+.cron-kpi .ck-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:720px){
+  .cron-drawer-cockpit{grid-template-columns:1fr 1fr}
+}
+
+/* cron-dashboard-redesign P1 §4.3 — running banner replaces the cockpit
+ * when the job is currently in flight. High-contrast accent treatment so
+ * the live elapsed clock + state are the focal point; old .cdc-* classes
+ * retained below for any test that greps the v2 surface. */
+.cron-drawer-running{padding:14px 20px;border-bottom:1px solid rgba(31,111,235,.4);background:linear-gradient(135deg,rgba(31,111,235,.18),rgba(31,111,235,.06));display:flex;align-items:center;gap:14px}
+.cron-drawer-running .cdr-clock{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums;font-size:26px;color:var(--nz-accent);font-weight:600;line-height:1;flex-shrink:0}
+.cron-drawer-running .cdr-info{flex:1;min-width:0}
+.cron-drawer-running .cdr-state{font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:600;display:flex;align-items:center;gap:8px;margin-bottom:3px}
+.cron-drawer-running .cdr-state::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--nz-accent);box-shadow:0 0 0 0 var(--nz-accent);animation:cjDotPulse var(--nz-dur-loop) ease-in-out infinite;flex-shrink:0}
+.cron-drawer-running .cdr-detail{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* cron-live RFC §6: 实时输出容器，紧贴 running banner 之下、历史时间线之上。
+ * 复用主面板 .event 卡片样式，本节只定义容器壳子 / status chip / 截尾提示。 */
+.cron-drawer-live{margin:14px 20px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);overflow:hidden}
+.cron-drawer-live .cdl-header{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-0)}
+.cron-drawer-live .cdl-title{font-size:var(--nz-fs-sm2);font-weight:600;margin:0;color:var(--nz-text-strong)}
+.cron-drawer-live .cdl-status{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.cron-drawer-live .cdl-status-live{color:var(--nz-accent)}
+.cron-drawer-live .cdl-status-live::before{content:"\25CF";margin-right:4px;animation:cjDotPulse var(--nz-dur-loop) ease-in-out infinite}
+.cron-drawer-live .cdl-status-stopped{color:var(--nz-text-mute)}
+.cron-drawer-live .cdl-truncated{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-align:center;padding:6px 14px;border-bottom:1px solid var(--nz-border);background:rgba(31,111,235,.04)}
+.cron-drawer-live .cdl-events{max-height:360px;overflow-y:auto;padding:10px 14px}
+.cron-drawer-live .cdl-events:empty::before{content:"暂无事件，任务起跑后会在此显示";color:var(--nz-text-mute);font-size:var(--nz-fs-sm);display:block;text-align:center;padding:18px 0}
+
+/* Drawer summary — cron-dashboard-redesign P1 §4.3 collapsed into <details>
+ * so prompt body + meta are now opt-in (default closed). The summary row
+ * (visible when closed) shows a one-line prompt preview so a glance still
+ * conveys what this job does. */
+.cron-drawer-summary{padding:0 20px;border-bottom:1px solid var(--nz-border)}
+.cron-drawer-summary .cds-summary-row{padding:12px 0;display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;font-size:var(--nz-fs-sm);outline:none;-webkit-tap-highlight-color:transparent}
+.cron-drawer-summary .cds-summary-row::-webkit-details-marker{display:none}
+.cron-drawer-summary .cds-summary-row:hover .cds-summary-toggle{color:var(--nz-text-strong)}
+.cron-drawer-summary .cds-summary-row:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px;border-radius:var(--nz-radius-sm)}
+.cron-drawer-summary .cds-summary-label{font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
+.cron-drawer-summary .cds-summary-preview{flex:1;min-width:0;color:var(--nz-text);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cron-drawer-summary .cds-summary-toggle{flex-shrink:0;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);transition:color .12s}
+.cron-drawer-summary[open] .cds-summary-toggle::before{content:"收起 "}
+.cron-drawer-summary:not([open]) .cds-summary-toggle::before{content:"展开 "}
+.cron-drawer-summary[open] .cds-summary-toggle{color:transparent}
+.cron-drawer-summary[open] .cds-summary-toggle::before{color:var(--nz-text-mute)}
+.cron-drawer-summary .cds-summary-body{padding-bottom:14px;display:flex;flex-direction:column;gap:10px}
+.cron-drawer-summary .cds-meta label{display:block;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px}
+.cron-drawer-summary .cds-prompt-body{font-size:var(--nz-fs-sm2);color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:10px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;margin:0}
+.cron-drawer-summary .cds-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px 16px}
+.cron-drawer-summary .cds-meta > div{font-size:var(--nz-fs-sm2)}
+.cron-drawer-summary .cds-meta span{color:var(--nz-text)}
+.cron-drawer-summary .cds-meta span.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm)}
+/* Drawer actions — cron-dashboard-redesign P1 §4.3 made sticky at bottom
+ * of the drawer scroll viewport (.is-sticky variant) so 立即执行 stays in
+ * reach when scrolling through long history. The base class without
+ * .is-sticky preserves the v2 layout for any test that asserts inline. */
+.cron-drawer-actions{display:flex;gap:8px;padding:12px 20px;border-bottom:1px solid var(--nz-border);flex-wrap:wrap;align-items:center}
+.cron-drawer-actions.is-sticky{position:sticky;bottom:0;z-index:3;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-bottom:none;padding-bottom:calc(12px + env(safe-area-inset-bottom))}
+.cron-drawer-actions .cda-btn{min-height:36px;padding:0 14px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:var(--nz-fs-sm2);font-family:inherit;display:inline-flex;align-items:center;gap:4px;-webkit-tap-highlight-color:transparent}
+.cron-drawer-actions .cda-btn:hover:not([disabled]){background:var(--nz-border);color:var(--nz-text-strong)}
+.cron-drawer-actions .cda-btn[disabled]{opacity:.55;cursor:not-allowed}
+.cron-drawer-actions .cda-btn.primary{border-color:var(--nz-accent);color:var(--nz-accent);background:transparent}
+.cron-drawer-actions .cda-btn.primary:hover:not([disabled]){background:rgba(31,111,235,.12)}
+.cron-drawer-actions .cda-btn.danger{margin-left:auto;color:var(--nz-red);border-color:rgba(218,54,51,.45);background:transparent}
+.cron-drawer-actions .cda-btn.danger:hover{background:rgba(218,54,51,.12)}
+/* Round 2 R-4 — trigger button visual feedback states (RFC §4.3.1).
+ * is-running: pulse the same accent ring as cdc-card so the disabled
+ *             button reads as "actively waiting", not just "greyed".
+ * is-sending: 1 s spinner orbiting the ▷ glyph; opacity stays full so
+ *             "I clicked, something happened" feels confirmed even
+ *             during the API round-trip.
+ * is-sent:    2 s solid green-ish accent + ✓ baked into the label;
+ *             after that the cooldown timer keeps the button quiet
+ *             until 10 s elapses or WS cron_run_started lands. */
+.cron-drawer-actions .cda-btn.primary.is-running{animation:cdaTriggerPulse var(--nz-dur-loop) ease-in-out infinite;opacity:.85}
+.cron-drawer-actions .cda-btn.primary.is-sending{opacity:.85;background:rgba(31,111,235,.06);border-color:var(--nz-accent);color:var(--nz-accent)}
+.cron-drawer-actions .cda-btn.primary.is-sending::before{content:"";display:inline-block;width:10px;height:10px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;margin-right:6px;animation:cdaSpinner .8s linear infinite}
+.cron-drawer-actions .cda-btn.primary.is-sent{opacity:1;background:rgba(63,185,80,.12);border-color:var(--nz-green);color:var(--nz-green)}
+@keyframes cdaTriggerPulse{0%,100%{box-shadow:0 0 0 0 rgba(88,166,255,.35)}50%{box-shadow:0 0 0 6px rgba(88,166,255,0)}}
+@keyframes cdaSpinner{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){
+  .cron-drawer-actions .cda-btn.primary.is-running,
+  .cron-drawer-actions .cda-btn.primary.is-sending::before{animation:none}
+}
+/* ===== cron-dashboard-redesign P3 §4 — history row mobile compact =====
+ * On narrow screens (≤480px), the timeline rows shed two pieces of detail:
+ *   1. Sub-row (.ctr-sub) — trigger / error_class. The state dot already
+ *      encodes failure visually; trigger is rarely useful day-to-day and
+ *      can be inspected via the run-detail sheet on tap.
+ *   2. Sub-row padding-left compensation.
+ * Main row stays: ● state · time · duration. Time format already short
+ * ("19:00" without "今天" prefix on same-day entries — see formatCronTimelineShort).
+ * Vertical density tightens slightly: 7px row padding → 7px instead of 8px
+ * so 5 rows still fit cleanly above the fold on a 360×640 phone. */
+@media(max-width:480px){
+  .cron-timeline-panel .ctr{padding:7px 12px}
+  .cron-timeline-panel .ctr-sub{display:none}
+  .cron-timeline-panel .ctr-main{font-size:var(--nz-fs-sm2);gap:8px}
+  .cron-timeline-panel .ctr-state{min-width:40px}
+}
+
+/* ===== cron-dashboard-redesign P3 §3 — task spec sections =====
+ * Three primary cards (做什么 / 什么时候 / 在哪里) + one compact "其他"
+ * row, stacked vertically below the drawer header. Each card is a
+ * read-mostly view with a "编辑" link in the top-right that opens the
+ * existing edit modal. Visual language reuses the same surface tokens
+ * as the rest of the drawer (--nz-bg-1 cards on --nz-bg-0 page, with
+ * --nz-border outlines), so the section feels native — no new gradients,
+ * no extra colour weight, no chrome that competes with the existing
+ * cockpit / running banner / actions row.
+ *
+ * Mobile responsiveness:
+ *   - Cards stack vertically by default (display:block on the section).
+ *   - Padding: 14px @ ≤540px (matches drawer-actions / drawer-history),
+ *     16px @ 541-720, 18px @ ≥720 (handled by the section padding rule
+ *     plus the existing 540 max-width media query at the bottom).
+ *   - The "做什么" prompt body line-clamps to 6 lines via
+ *     -webkit-line-clamp; the toggle button reveals the rest in place.
+ */
+.cron-drawer-spec{display:flex;flex-direction:column;gap:10px;padding:14px 20px;background:var(--nz-bg-0)}
+.cron-spec-section{padding:12px 14px;border-radius:var(--nz-radius-md);border:1px solid var(--nz-border);background:var(--nz-bg-1);cursor:pointer;transition:border-color .12s,background .12s;-webkit-tap-highlight-color:transparent}
+.cron-spec-section:hover{border-color:var(--nz-text-faint);background:var(--nz-hover-bg)}
+.cron-spec-section:focus-visible{outline:2px solid var(--nz-accent);outline-offset:2px}
+.cron-spec-section .css-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.cron-spec-section .css-label{margin:0;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+.cron-spec-section .css-edit{font-size:var(--nz-fs-sm);color:var(--nz-text-faint);font-weight:400;flex-shrink:0;transition:color .12s}
+.cron-spec-section:hover .css-edit{color:var(--nz-accent)}
+.cron-spec-section .css-body{font-size:var(--nz-fs-sm2);color:var(--nz-text);line-height:1.55}
+.cron-spec-section .css-empty{color:var(--nz-text-faint);font-style:italic;font-size:var(--nz-fs-sm)}
+/* 做什么 — prompt body. Line-clamps to 6 lines until the toggle expands. */
+.cron-spec-section .css-prompt{position:relative}
+.cron-spec-section .css-prompt-body{font-size:var(--nz-fs-sm2);color:var(--nz-text);background:transparent;border:none;padding:0;margin:0;line-height:1.6;white-space:pre-wrap;word-break:break-word;font-family:inherit}
+.cron-spec-section .css-prompt[data-clamped="true"] .css-prompt-body{display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
+.cron-spec-section .css-prompt[data-clamped="true"] .css-prompt-body::after{content:"";position:absolute;left:0;right:0;bottom:24px;height:32px;background:linear-gradient(180deg,transparent,var(--nz-bg-1));pointer-events:none}
+.cron-spec-section:hover .css-prompt[data-clamped="true"] .css-prompt-body::after{background:linear-gradient(180deg,transparent,var(--nz-hover-bg))}
+.cron-spec-section .css-prompt-toggle{margin-top:6px;background:transparent;border:none;color:var(--nz-accent);cursor:pointer;font-size:var(--nz-fs-sm);font-family:inherit;padding:2px 0;-webkit-tap-highlight-color:transparent}
+.cron-spec-section .css-prompt-toggle:hover{text-decoration:underline}
+/* 什么时候 — schedule + next-run lines. */
+.cron-spec-section .css-when-schedule{font-size:var(--nz-fs-base);color:var(--nz-text-strong);font-weight:500;margin-bottom:4px}
+.cron-spec-section .css-when-next{font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
+.cron-spec-section .css-when-rel{color:var(--nz-text)}
+.cron-spec-section .css-when-rel.imminent{color:var(--nz-accent);font-weight:600}
+.cron-spec-section .css-when-abs{color:var(--nz-text-faint)}
+.cron-spec-section .css-when-paused{color:var(--nz-text-faint)}
+/* 在哪里 — workdir, single-line truncated path. */
+.cron-spec-section .css-workdir{font-size:var(--nz-fs-sm2);color:var(--nz-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cron-spec-section .css-workdir.mono{font-family:var(--nz-font-mono)}
+/* 其他 — chips for notify + fresh-context. Compact, low-weight. */
+.cron-spec-section.css-other-section{padding:10px 14px}
+.cron-spec-section.css-other-section .css-body{display:flex;flex-wrap:wrap;gap:6px}
+.cron-spec-section .css-other-chip{display:inline-flex;align-items:center;font-size:var(--nz-fs-sm);color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);padding:2px 10px}
+@media(max-width:540px){
+  .cron-drawer-spec{padding:12px 14px;gap:8px}
+  .cron-spec-section{padding:11px 13px}
+  .cron-spec-section .css-prompt-body{font-size:var(--nz-fs-sm2)}
+}
+
+/* ===== cron-dashboard-redesign P3 §4 — history collapse =====
+ * .ct-rows[data-collapsed="true"] hides everything past the 5th .ctr row;
+ * the [查看全部 N 条] button toggles data-collapsed=false and is replaced
+ * with the existing [加载更多] / [已到结尾] affordance, so deeper paging
+ * keeps working untouched. */
+.cron-drawer-history .ct-rows[data-collapsed="true"] > .ctr:nth-child(n+6){display:none}
+.cron-drawer-history .ct-show-all{background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-family:inherit;font-size:var(--nz-fs-sm);padding:6px 14px;border-radius:var(--nz-radius-ms);cursor:pointer;-webkit-tap-highlight-color:transparent;transition:color .12s,border-color .12s,background .12s}
+.cron-drawer-history .ct-show-all:hover{color:var(--nz-accent);border-color:var(--nz-accent);background:rgba(31,111,235,.06)}
+
+/* Drawer current execution */
+.cron-drawer-current{padding:14px 20px;border-bottom:1px solid var(--nz-border)}
+.cron-drawer-current h3{margin:0 0 10px;font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
+.cron-drawer-current .cdc-card{background:rgba(31,111,235,.08);border:1px solid var(--nz-accent);border-radius:var(--nz-radius-md);padding:12px}
+.cron-drawer-current .cdc-row1{display:flex;align-items:center;gap:8px;font-size:var(--nz-fs-base);color:var(--nz-text-strong)}
+.cron-drawer-current .cdc-state{font-weight:600;color:var(--nz-accent)}
+.cron-drawer-current .cdc-clock{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums;color:var(--nz-text-strong);font-size:18px;margin-left:4px}
+.cron-drawer-current .cdc-trigger{margin-left:auto;font-size:var(--nz-fs-sm);color:var(--nz-text-mute);background:var(--nz-bg-1);border-radius:var(--nz-radius-sm);padding:2px 6px}
+.cron-drawer-current .cdc-row2{margin-top:8px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute)}
+.cron-drawer-current .cdc-row3{margin-top:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-faint);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+/* Drawer history (override timeline panel for in-drawer use) */
+.cron-drawer-history{padding:14px 20px;flex:1 1 auto}
+.cron-drawer-history .cron-timeline-panel{padding:0;background:transparent;border:none;max-height:none;overflow:visible}
+.cron-drawer-history .cron-timeline-panel .ct-head{position:sticky;top:var(--nz-cron-drawer-header-h,0);background:var(--nz-bg-0);padding:0 0 8px;border-bottom:1px solid var(--nz-border);z-index:1;margin-bottom:10px}
+/* Drawer empty state (jobId set but job not in cronJobs) */
+.cron-drawer-empty{padding:20px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);text-align:center;line-height:1.6}
+/* List row selection (cj-row.is-active) */
+.cj-row.is-active{background:var(--nz-bg-2);box-shadow:inset 4px 0 0 var(--nz-selected-bar)}
+.cj-row.is-active .cj-title{color:var(--nz-text-strong)}
+.cj-row.is-active.is-error{box-shadow:inset 4px 0 0 var(--nz-selected-bar),inset 0 0 0 1px rgba(218,54,51,.45)}
+.cj-row.is-active.is-missed{box-shadow:inset 4px 0 0 var(--nz-selected-bar),inset 0 0 0 1px rgba(210,153,34,.45)}
+.cj-row.is-active.is-running{background:var(--nz-row-active-running-bg);box-shadow:inset 4px 0 0 var(--nz-selected-bar)}
+/* cron-panel-consolidation-ui RFC §2 (Round 2 R-1) — responsive collapse
+ * gated on the *main column width* rather than the viewport width. The
+ * sidebar can occupy 200–60vw, so 1280px viewport with a 720px sidebar
+ * leaves only ~560px for main; a viewport @media query miscategorises
+ * those operators as "wide enough for two columns" and the drawer ends
+ * up at < 240px wide where prompt + timeline can't coexist.
+ *
+ * The data-cron-layout attribute is written by a ResizeObserver on the
+ * .main element (see dashboard.js setupCronLayoutObserver). Three modes:
+ *   wide     — main ≥ 1100   list 380, drawer ≥ 720
+ *   medium   — main ≥ 820    list 360, drawer ≥ 460
+ *   narrow   — main ≥ 560    list 320, drawer barely fits
+ *   single   — main <  560   drawer pushes over the list
+ *
+ * The legacy @media fallback below stays as a safety net for the
+ * pre-JS-init paint window so users never see a 250px-wide drawer flash.
+ */
+.cron-detail-body[data-cron-layout="wide"].has-drawer > .cron-list-pane{flex:0 0 380px}
+.cron-detail-body[data-cron-layout="medium"].has-drawer > .cron-list-pane{flex:0 0 360px}
+.cron-detail-body[data-cron-layout="narrow"].has-drawer > .cron-list-pane{flex:0 0 320px}
+.cron-detail-body[data-cron-layout="single"].has-drawer > .cron-list-pane{display:none}
+.cron-detail-body[data-cron-layout="single"] .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
+/* Pre-JS / no-ResizeObserver fallback. Kept conservative (720) so an
+ * older browser without ResizeObserver still gets a single-column safe
+ * layout under the threshold rather than a cramped two-column. */
+@media(max-width:720px){
+  .cron-detail-body:not([data-cron-layout]).has-drawer > .cron-list-pane{display:none}
+  .cron-detail-body:not([data-cron-layout]) .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
+}
+@media(max-width:540px){
+  .cron-drawer-header,.cron-drawer-summary,.cron-drawer-actions,.cron-drawer-current,.cron-drawer-history,.cron-drawer-spec{padding-left:14px;padding-right:14px}
+}
+
+/* ===== Frequency picker (Claude-style compact row) =====
+ * v2 polish: 单行横排 [Frequency ▾] [time] [weekday ▾ / day ▾]，
+ * 对齐 Claude Scheduled Tasks 的 Frequency 控件风格。原来的 tab 切换
+ * 器 / preset 按钮 / 多次运行预览 / raw cron 入口全部移除。 */
+.freq-row-inline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.freq-mode-select{min-width:140px;padding:8px 28px 8px 12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text-strong);font-size:var(--nz-fs-base);font-family:inherit;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%238b949e' stroke-width='1.5'><path d='M2 4 L5 7 L8 4'/></svg>");background-repeat:no-repeat;background-position:right 10px center;min-height:38px}
+.freq-mode-select:hover,.freq-extra:hover{border-color:var(--nz-text-faint)}
+.freq-mode-select:focus,.freq-extra:focus{border-color:var(--nz-rust)}
+.freq-extra{min-width:100px;padding:8px 28px 8px 12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text-strong);font-size:var(--nz-fs-base);font-family:inherit;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%238b949e' stroke-width='1.5'><path d='M2 4 L5 7 L8 4'/></svg>");background-repeat:no-repeat;background-position:right 10px center;min-height:38px}
+.freq-hint{margin-top:8px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute);line-height:1.5}
+/* v2 polish: 编辑老任务（v1 schedule 无法 round-trip 到新 picker）时
+ * 显示"当前频率：xxx"作为视觉参照，防止 UI 展示 Daily/09:00 默认值
+ * 与实际 schedule 不符造成的误导。 */
+.freq-legacy-hint{display:flex;flex-direction:column;gap:2px;margin-bottom:10px;padding:8px 12px;background:rgba(210,153,34,.08);border:1px solid rgba(210,153,34,.25);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-sm);line-height:1.5}
+.freq-legacy-hint b{color:var(--nz-text-strong);font-weight:600}
+.freq-legacy-hint .freq-legacy-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.freq-time{padding:8px 10px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text-strong);font-size:var(--nz-fs-base);font-family:inherit;outline:none;min-height:38px}
+.freq-time:hover{border-color:var(--nz-text-faint)}
+.freq-time:focus{border-color:var(--nz-rust)}
+/* ===== Cron editor — single-column modal (both PC and mobile) =====
+ * v2 polish: 从双列 grid 改成单列 flex，对齐 Claude Scheduled Tasks 的
+ * modal 布局。保留 cf-label 文案（做什么 / 什么时候 / 在哪里 / 其他设置）
+ * 不变——是 E2E + UX 契约的稳定锚点。
+ */
+.modal.cron-modal{width:min(560px,calc(100vw - 64px));padding:20px 24px;border-radius:var(--nz-radius-xl)}
+.modal.cron-modal .cm-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+.modal.cron-modal .cm-header h3{margin:0;font-size:15px;color:var(--nz-text-strong)}
+.modal.cron-modal .cm-close{background:none;border:none;color:var(--nz-text-mute);cursor:pointer;font-size:18px;line-height:1;padding:4px 8px;border-radius:var(--nz-radius-ms);font-family:inherit}
+.modal.cron-modal .cm-close:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.cron-modal-grid{display:flex;flex-direction:column;gap:18px}
+.cron-field .cf-label{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-bottom:6px;letter-spacing:.2px}
+
+/* v2 polish: 工作目录下拉按钮 + popover。样式对齐 Claude 的
+ * "Work in a project ▾" dropdown —— 默认只显示按钮，点击展开 popover；
+ * 选中后 popover 关闭、按钮文本更新为所选项目名。 */
+.ws-dropdown-wrap{position:relative}
+.ws-dropdown-btn{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text-strong);font-size:var(--nz-fs-base);font-family:inherit;cursor:pointer;min-height:38px;max-width:100%}
+.ws-dropdown-btn:hover{border-color:var(--nz-text-faint)}
+.ws-dropdown-btn[aria-expanded="true"]{border-color:var(--nz-accent)}
+.ws-dropdown-btn .ws-dropdown-icon{flex-shrink:0;opacity:.7}
+.ws-dropdown-btn .ws-dropdown-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+.ws-dropdown-btn .ws-dropdown-caret{flex-shrink:0;color:var(--nz-text-mute);font-size:var(--nz-fs-2xs)}
+.ws-dropdown-popover{display:none;position:absolute;top:calc(100% + 4px);left:0;min-width:320px;max-width:calc(100vw - 64px);z-index:10;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2)}
+.ws-dropdown-popover.open{display:block}
+.ws-dropdown-popover .proj-pick{border:none;border-radius:var(--nz-radius-md) 8px 0 0;max-height:260px}
+.cron-modal textarea#cron-prompt,.cron-modal textarea#edit-cron-prompt{min-height:120px;max-height:360px;resize:vertical}
+.cron-modal textarea#cron-prompt::placeholder,.cron-modal textarea#edit-cron-prompt::placeholder{color:var(--nz-text-placeholder)}
+.cron-more-stack{display:flex;flex-direction:column;gap:14px}
+.cron-toggle{display:flex;align-items:flex-start;gap:8px;font-size:var(--nz-fs-sm2);color:var(--nz-text);cursor:pointer;user-select:none}
+.cron-toggle input[type=checkbox]{width:auto;margin-top:3px;cursor:pointer;flex-shrink:0}
+.cron-toggle .ct-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;line-height:1.4}
+.cron-toggle .ct-hint{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);line-height:1.4;word-break:break-word}
+.cron-notify-target{margin-top:6px;margin-left:24px;display:none;gap:6px}
+.cron-notify-target.show{display:flex}
+.cron-notify-target input{flex:1;padding:6px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-sm);outline:none;min-width:0}
+.cron-notify-target input:focus{border-color:var(--nz-rust)}
+.cron-notify-target input:first-child{flex:0 0 90px}
+/* Tighten freq preview in the new grid */
+.cron-modal .freq-preview{margin-top:12px}
+
+/* Mobile: tighten padding, sheet + textarea grow-on-focus. 单列布局本身
+ * 已经对小屏友好，不用再重复覆盖 grid 规则。 */
+@media(max-width:720px){
+  .modal.cron-modal{width:100%;padding:18px;border-radius:var(--nz-radius-xl) 16px 0 0}
+  .cron-modal textarea#cron-prompt,.cron-modal textarea#edit-cron-prompt{min-height:96px;max-height:320px;transition:min-height .18s ease}
+  .cron-modal textarea#cron-prompt:focus,.cron-modal textarea#edit-cron-prompt:focus{min-height:180px}
+  .cron-modal .proj-pick{max-height:160px}
+  .modal.cron-modal .modal-btns{position:sticky;bottom:0;background:var(--nz-bg-1);margin:0 -18px -18px;padding:12px 18px max(12px,env(safe-area-inset-bottom));border-top:1px solid var(--nz-bg-2)}
+}
+
+/* Mobile polish for Cron cards + modal */
+@media(max-width:768px){
+  .cron-detail-body{padding:12px}
+  .cron-new-btn{min-height:40px}
+  /* Bottom-sheet modal: cap height so textarea/lists stay scrollable above keyboard.
+     overflow-y:auto is the fallback for modals WITHOUT a .modal-body (every
+     dashboard.js modal: 新建会话 / 项目设置 / API token / confirm / prompt /
+     onboarding / cheatsheet …): their content would otherwise spill past the
+     85dvh cap with no scroll container, leaving .modal-btns unreachable
+     (#2434). Cron modals keep a .modal-body scroller: it shrinks to fit (a
+     scroll container's min-height:auto resolves to 0), so the outer box never
+     overflows and no second scrollbar appears. */
+  .modal{max-height:85dvh;display:flex;flex-direction:column;overflow-y:auto}
+  .modal-body{overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch}
+  .modal .modal-btns{flex-shrink:0;background:var(--nz-bg-1);padding-top:8px;margin-top:8px;border-top:1px solid var(--nz-bg-2)}
+  /* Hit-area boost inside modal on mobile */
+  .proj-pick li{min-height:48px}
+  /* Keep trailing space above iOS home indicator while keyboard open */
+  body.kbd-open .modal{max-height:calc(100dvh - 16px)}
+}
+
+/* Onboarding modal — first-run introduction. Wider than auth/create modals
+   to fit the feature list; dismiss persists in localStorage so it only
+   appears once per browser profile. */
+.modal.onboarding{width:480px;max-width:calc(100vw - 32px)}
+.modal.onboarding h3{font-size:18px;margin-bottom:6px}
+.modal.onboarding .ob-sub{font-size:var(--nz-fs-sm2);color:var(--nz-text-mute);margin-bottom:16px}
+.modal.onboarding ul{list-style:none;margin:0 0 16px 0;padding:0;display:flex;flex-direction:column;gap:10px}
+.modal.onboarding li{display:flex;gap:10px;align-items:flex-start;font-size:var(--nz-fs-sm2);color:var(--nz-text);line-height:1.5}
+.modal.onboarding li .ob-icon{flex-shrink:0;width:22px;height:22px;border-radius:var(--nz-radius-ms);background:rgba(31,111,235,.15);color:var(--nz-accent);display:flex;align-items:center;justify-content:center;font-size:var(--nz-fs-sm2);margin-top:1px}
+.modal.onboarding li b{color:var(--nz-text-strong);font-weight:600}
+
+/* Keyboard cheatsheet — opened via "?" when no input is focused. Reuses
+   the standard .modal scaffold so trapFocus / Esc / backdrop-dismiss all
+   work without extra code. The ks- prefix namespaces internal classes so
+   a future refactor of .modal defaults won't silently break the layout. */
+.modal.cheatsheet{width:520px;max-width:calc(100vw - 32px)}
+.modal.cheatsheet h3{font-size:var(--nz-fs-md);margin-bottom:6px}
+.modal.cheatsheet .ks-sub{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-bottom:14px}
+.modal.cheatsheet .ks-grid{display:grid;grid-template-columns:max-content 1fr;row-gap:8px;column-gap:16px;align-items:center}
+.modal.cheatsheet .ks-keys{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap;justify-self:start}
+.modal.cheatsheet kbd{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:1px 6px;font-size:var(--nz-fs-sm);color:var(--nz-text);font-family:inherit;min-width:18px;text-align:center}
+.modal.cheatsheet .ks-desc{font-size:var(--nz-fs-sm2);color:var(--nz-text);line-height:1.45}
+.modal.cheatsheet .ks-sep{grid-column:1/-1;height:1px;background:var(--nz-bg-2);margin:6px 0}
+.modal.cheatsheet .ks-section{grid-column:1/-1;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-top:2px}
+/* Cheatsheet "好的" confirm is informational (dismiss), not a submit/save
+   action — align it with the global primary blue (--nz-blue) instead of
+   the green used for send/save across the rest of the app (R110-P2 report:
+   "green #22c55e clashes with blue #4a9eff everywhere else"). Other modals
+   keep green because their primary button semantically commits data. */
+.modal.cheatsheet .modal-btns button.primary{background:var(--nz-blue);border-color:var(--nz-blue)}
+
+/* Sidebar footer: version + help trigger. Keeps the info at the very
+   bottom, above the safe-area inset on iOS. Pointer-events isolation so
+   the line itself doesn't steal taps meant for scrollable content above. */
+.sidebar-footer{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:var(--nz-fs-xs);color:var(--nz-text-dim);display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-shrink:0;min-height:28px}
+.sidebar-footer .sf-help{background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);cursor:pointer;border-radius:50%;width:20px;height:20px;line-height:1;padding:0;font-size:var(--nz-fs-sm);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-family:inherit}
+.sidebar-footer .sf-help:hover{color:var(--nz-text-strong);border-color:var(--nz-accent)}
+@media (pointer: coarse){
+  .sidebar-footer .sf-help{width:32px;height:32px;font-size:var(--nz-fs-base)}
+}
+body.kbd-open .sidebar-footer{display:none}
+
+/* ==========================================================================
+   UX sweep — non-functional polish (2026-04-27)
+   Every rule below is additive: later declarations with equal specificity
+   override earlier ones, so structure/behavior is untouched.
+   ========================================================================== */
+

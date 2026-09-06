@@ -38,7 +38,7 @@ func readStaticAsset(t *testing.T, name string) string {
 	)
 	switch name {
 	case "dashboard.html":
-		data, err = dashboardHTML.ReadFile("static/dashboard.html")
+		data, err = []byte(readDashboardHTMLAndCSS(t)), error(nil)
 	case "dashboard.js":
 		data, err = dashboardJS.ReadFile("static/dashboard.js")
 	case "files_view.js":

@@ -136,11 +136,7 @@ func TestDashboardJS_EffortLabelsCoverKnownTiers(t *testing.T) {
 // competing with the primary cli/model label instead of sitting beside it.
 func TestDashboardHTML_EffortTagStyled(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
-	html := string(data)
+	html := readDashboardHTMLAndCSS(t)
 
 	for _, want := range []string{
 		`.main-header .detail-effort{`,

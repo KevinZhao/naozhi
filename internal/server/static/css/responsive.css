@@ -1,0 +1,186 @@
+/* responsive.css — extracted verbatim from dashboard.html's inline <style> block
+ * (#2559 D6). The split is sequential: each file is a contiguous slice of the
+ * original block and dashboard.html links them in the same order, so the
+ * cascade (later rule wins at equal specificity, @media position) is
+ * unchanged. Edit a view's rules here, next to the module that renders it.
+ */
+/* ===== Tablet / narrow desktop (≤1024px) ===== */
+@media(max-width:1024px) and (min-width:769px){
+  .sidebar{width:300px!important}
+  .event{padding:6px 16px}
+}
+
+/* ===== Mobile (≤768px) ===== */
+.btn-mobile-back{display:none}
+@media(max-width:768px){
+  /* Bottom tab bar (activity-bar) height: .ab-nav 46 + 4 top + bottom safe
+     area. Every panel the fixed tab bar overlays reserves this at the bottom
+     so chat input / asset list are never covered (the original遮挡 bug). */
+  :root{--nz-tabbar-h:calc(50px + max(4px,env(safe-area-inset-bottom)))}
+  /* Container: block so each panel stacks */
+  .container{display:block;height:100%;overflow:hidden}
+  /* Activity Bar -> fixed bottom tab bar; rail rows become horizontal nav.
+     .ab-top/.ab-bottom collapse via display:contents so all 5 .ab-nav buttons
+     become direct flex children of the horizontal bar (margin-top:auto is a
+     no-op once the wrapper is display:contents). */
+  .activity-bar{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;height:auto;flex-direction:row;border-right:none;border-top:1px solid var(--nz-border);padding:4px 0 max(4px,env(safe-area-inset-bottom));z-index:30;justify-content:space-around}
+  /* ui-polish-light-theme D9: 6 tabs over-crowd a 390px bar. 系统 is the
+     lowest-frequency, read-only view — its entry moves into 设置 (the
+     .settings-syslink row + mirrored attention badge on the 设置 tab). */
+  #abnav-system{display:none}
+  .settings-syslink{display:block}
+  /* :not([hidden]) keeps the JS-driven hidden attribute authoritative —
+     a bare display:block would override the UA's [hidden]{display:none}. */
+  #abnav-settings-badge:not([hidden]){display:block}
+  .ab-top,.ab-bottom{display:contents}
+  /* In an open conversation, hide the bottom tab bar and reclaim its space so
+     the chat history gets full height. The ← back button in the main header
+     returns to the session list, where the tab bar reappears. Cron/settings
+     views do NOT set mobile-chat-view, so the bar stays visible for nav. */
+  body.mobile-chat-view .activity-bar{display:none}
+  body.mobile-chat-view .main{padding-bottom:0}
+  .ab-nav{width:auto;flex:1;max-width:120px;height:46px}
+  /* "自动化" is 3 chars — keep the label on one line in a 4-tab bar. */
+  .ab-nav-label{white-space:nowrap}
+  .ab-nav.active::before{left:50%;top:auto;bottom:-4px;transform:translateX(-50%);width:24px;height:3px;border-radius:2px 2px 0 0}
+  /* Asset panels: full-screen drawers like the chat sidebar/main. The reader
+     (asset-main) slides over the list on open (body.asset-reading); back
+     button returns. Both reserve tab-bar height so nothing is covered. */
+  .asset-sidebar{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%!important;max-width:none;height:var(--vv-height,100%);z-index:10;padding-bottom:var(--nz-tabbar-h)}
+  .asset-main{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%;height:var(--vv-height,100%);z-index:11;transform:translateX(100%);transition:transform .25s ease}
+  body.asset-reading .asset-main{transform:translateX(0)}
+  .asset-main-head{padding-top:max(12px,env(safe-area-inset-top))}
+  #asset-main .btn-mobile-back{display:inline-flex}
+  .asset-main-body{padding-bottom:calc(var(--nz-tabbar-h) + 16px)}
+  /* Workspace files panels: same full-screen drawer + slide-over reader as
+     the asset view (body.files-reading drives the slide-in). */
+  .files-sidebar{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%!important;max-width:none;height:var(--vv-height,100%);z-index:10;padding-bottom:var(--nz-tabbar-h)}
+  .files-main{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%;height:var(--vv-height,100%);z-index:11;transform:translateX(100%);transition:transform .25s ease}
+  body.files-reading .files-main{transform:translateX(0)}
+  .files-main-head{padding-top:max(12px,env(safe-area-inset-top))}
+  #files-main .btn-mobile-back{display:inline-flex}
+  .files-main-body{padding-bottom:calc(var(--nz-tabbar-h) + 16px)}
+  /* Cron / settings views: full-screen fixed panels mirroring .asset-sidebar,
+     reserving tab-bar height so the bottom nav never overlaps content. The
+     cron two-pane→single-pane collapse is handled by setupCronLayoutObserver
+     + .cron-detail-body.has-drawer rules, so no extra work here. The cron
+     in-panel .btn-mobile-back (returns to session list) is stale in the
+     standalone view — hide it; the bottom tab bar is the nav surface now. */
+  body.nz-view-cron .cron-main,body.nz-view-settings .settings-main,body.nz-view-system .system-main{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%!important;height:var(--vv-height,100%);z-index:10;padding-bottom:var(--nz-tabbar-h)}
+  body.nz-view-cron .cron-list-head .btn-mobile-back{display:none}
+  .settings-head,.system-head{padding-top:max(14px,env(safe-area-inset-top))}
+  /* Sidebar: full-screen drawer. Default = visible (translateX(0)), slides
+     out only when body.mobile-chat-view is set. Rationale: the previous
+     default was translateX(-100%) relying on JS to add body.mobile-list-view
+     on init — any race / JS-load delay / stale class left the user staring
+     at an empty welcome page with no session list. Visible-by-default is
+     the safer invariant: "no JS class set" should show the list, not hide it. */
+  .sidebar{position:fixed;inset:0;width:100%!important;min-width:0;max-width:none;z-index:10;background:var(--nz-bg-0);transform:translateX(0);transition:transform .25s ease;border-right:none;overflow:hidden}
+  body.mobile-chat-view .sidebar{transform:translateX(-100%)}
+  body.mobile-list-view .sidebar{transform:translateX(0)}
+  .resizer{display:none}
+  /* Main: full-screen flex column, sits behind sidebar. Uses visualViewport vars so iOS keyboard doesn't push main-header off-screen. */
+  .main{position:fixed;top:var(--vv-top,0);left:0;right:0;height:var(--vv-height,100dvh);width:100%;display:flex;flex-direction:column;z-index:5;overflow:hidden;padding-bottom:var(--nz-tabbar-h)}
+  .sidebar{top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}
+  /* Back button: hidden on desktop, shown on mobile */
+  .btn-mobile-back{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:36px;height:36px;background:none;border:none;color:var(--nz-text-mute);font-size:var(--nz-fs-lg);cursor:pointer;padding:0;border-radius:var(--nz-radius-ms);-webkit-tap-highlight-color:transparent}
+  .btn-mobile-back:active{color:var(--nz-text)}
+  /* Main header: single-line flex, safe area top+sides */
+  .main-header{gap:0;padding:max(8px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 8px max(12px,env(safe-area-inset-left));overflow:hidden}
+  .main-header-content{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden}
+  /* Input area: safe area bottom+sides padding */
+  .input-area{flex-shrink:0;padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));padding-bottom:max(12px,env(safe-area-inset-bottom))}
+  /* Dismiss button always visible on touch screens */
+  .session-card .btn-dismiss{opacity:.6}
+  /* Modal never wider than screen */
+  .modal{width:min(360px,calc(100vw - 32px))}
+  /* Toast at top so keyboard doesn't cover it */
+  .toast{bottom:auto;top:max(16px,env(safe-area-inset-top));right:16px;left:16px;text-align:center}
+  /* Remove tap flash on interactive elements */
+  .session-card,.btn-icon,.btn-send{-webkit-tap-highlight-color:transparent}
+  .sidebar-header{display:flex;flex-wrap:wrap;align-items:center;padding-top:max(16px,env(safe-area-inset-top));padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
+  .sidebar-header .header-row{width:100%}
+  .input-hints{display:none}
+  /* Voice mode: larger hold button on mobile */
+  .btn-hold-talk{font-size:var(--nz-fs-md);min-height:42px}
+  .vo-card{padding:24px 32px}
+  .vo-timer{font-size:var(--nz-fs-display)}
+  /* Reserve the fixed bottom tab bar's height so the last session card is not
+     covered by the activity-bar tab bar. The old #sidebar-status bar used to
+     carry this reserve, but that element was deleted in the "底部让位给 session
+     列表" iteration, leaving the list flush against (and under) the tab bar.
+     The padding now lives on .session-list itself so the bottom card clears. */
+  .session-list{overflow-x:hidden;overflow-y:auto;padding-bottom:calc(var(--nz-tabbar-h,54px) + 4px)}
+  /* Compact session cards on mobile */
+  .session-card{padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));border-left-width:2px;gap:10px}
+  .session-card .sc-meta{font-size:var(--nz-fs-xs);gap:3px}
+  .session-card .sc-prompt{font-size:var(--nz-fs-base)}
+  /* Touch devices keep the dismiss × visible (no hover), absolutely
+     positioned over the header's right edge — reserve room so the
+     timestamp doesn't slide underneath it (ui-polish-light-theme D4). */
+  .session-card .sc-header{padding-right:30px}
+  .section-header{padding:5px 12px;font-size:var(--nz-fs-2xs)}
+  /* Compact "no sessions" on mobile */
+  .no-sessions{padding:4px 16px!important;font-size:var(--nz-fs-sm)}
+  .event{padding:4px max(12px,env(safe-area-inset-right)) 4px max(12px,env(safe-area-inset-left));max-width:100%}
+  .event.user .event-content{max-width:85%}
+  .event.text+.event.user{margin-top:16px}
+  /* Cron detail: tight mobile layout — sit flush against the screen edges
+     and reclaim vertical real estate. Outer .cron-detail keeps no padding;
+     list-pane uses safe-area-aware horizontal padding (4-8px) so cards span
+     edge-to-edge, plus a smaller vertical padding to bring content closer
+     to the header. cron-list-head / overview / filter margins also shrink. */
+  .cron-detail{padding:0}
+  .cron-detail-body > .cron-list-pane{padding:6px max(4px,env(safe-area-inset-right)) 8px max(4px,env(safe-area-inset-left))}
+  .cron-list-head{margin-bottom:6px;gap:8px}
+  .cron-list-head h3{font-size:15px}
+  .cron-filter-bar{margin-bottom:6px}
+  /* Mobile cron drawer: force single-column. ResizeObserver classifies
+     list-pane by width and may pick wide/medium/narrow when a drawer is
+     open, squeezing the drawer to <200px where labels render vertically.
+     On phone viewports we always want has-drawer = full-screen detail;
+     user closes it via the existing × to get back to the list. The
+     base rules at line ~1698 only set `flex` widths, so display:none
+     here wins regardless of [data-cron-layout] value. */
+  .cron-detail-body.has-drawer > .cron-list-pane{display:none}
+  .cron-detail-body .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
+  /* History popover: constrain to viewport */
+  .history-popover{min-width:0;max-width:calc(100vw - 32px);left:auto;right:0}
+  .session-card[data-key]{touch-action:pan-y}
+  .session-card.swiping{transition:none!important;user-select:none}
+  .modal-overlay{align-items:flex-end}
+  .modal{width:100%;border-radius:var(--nz-radius-xl) 16px 0 0;padding-bottom:max(20px,env(safe-area-inset-bottom));animation:sheet-in .25s ease}
+  .modal::before{content:'';display:block;width:36px;height:4px;background:var(--nz-text-faint);border-radius:2px;margin:0 auto 16px}
+}
+@keyframes sheet-in{from{transform:translateY(100%)}to{transform:translateY(0)}}
+
+/* ===== Small phones (≤480px) ===== */
+@media(max-width:480px){
+  .main-header h2{font-size:15px}
+  .main-header .detail{font-size:var(--nz-fs-xs)}
+  /* cli + model + git chip already fill a phone-width row; the run-history
+     overview stays reachable in the collapsed 运行记录 panel below. */
+  .main-header .detail-runstats{display:none}
+  .session-card .btn-dismiss{top:6px;right:8px;min-width:32px;min-height:32px;font-size:var(--nz-fs-lg);display:flex;align-items:center;justify-content:center;opacity:.75}
+  .btn-icon{width:40px;height:40px}
+  .input-row #msg-input{font-size:var(--nz-fs-md)} /* prevents iOS zoom on focus */
+  /* 480px override sets width/height, but the pointer:coarse rule uses
+     min-width/min-height (44). On touch phones the min-* wins so the
+     button ends up 44; on small desktop windows (mouse) this keeps the
+     compact 36 footprint. */
+  .hdr-btn{width:36px;height:36px}
+  .modal h3{font-size:var(--nz-fs-base)}
+  .cmd-palette{width:100vw;max-height:88vh;border-radius:14px 14px 0 0}
+  .cmd-palette-overlay{padding-top:0;align-items:flex-end}
+}
+
+/* Mobile history popover gets a drag handle + rounded top. */
+.history-sheet::before{content:'';display:block;width:36px;height:4px;background:var(--nz-text-faint);border-radius:2px;margin:8px auto}
+
+/* On-screen keyboard open: collapse optional chrome so the input stays
+   in the visible viewport (class toggled by initViewportTracking()). */
+body.kbd-open .running-banner{display:none!important}
+body.kbd-open .nav-pill{display:none!important}
+body.kbd-open .sidebar-status{display:none}
+body.kbd-open .input-hints{display:none}
+

@@ -16,6 +16,13 @@ import (
 //go:embed static/dashboard.html
 var dashboardHTML embed.FS
 
+// The dashboard's stylesheets, split out of the inline <style> block (#2559).
+// One embed for the directory: the asset table below registers each file, and
+// they are all served by handleDashboardCSS.
+//
+//go:embed static/css
+var dashboardCSS embed.FS
+
 //go:embed static/manifest.json
 var manifestJSON embed.FS
 
@@ -159,6 +166,12 @@ var staticAssets = func() map[string]staticAsset {
 		compress bool
 	}{
 		{"dashboard.html", dashboardHTML, "static/dashboard.html", true},
+		{"css/tokens.css", dashboardCSS, "static/css/tokens.css", true},
+		{"css/views.css", dashboardCSS, "static/css/views.css", true},
+		{"css/split_view.css", dashboardCSS, "static/css/split_view.css", true},
+		{"css/responsive.css", dashboardCSS, "static/css/responsive.css", true},
+		{"css/cron.css", dashboardCSS, "static/css/cron.css", true},
+		{"css/mobile_polish.css", dashboardCSS, "static/css/mobile_polish.css", true},
 		{"nz_util.js", nzUtilJS, "static/nz_util.js", true},
 		{"contract.js", contractJS, "static/contract.js", true},
 		{"dashboard.js", dashboardJS, "static/dashboard.js", true},

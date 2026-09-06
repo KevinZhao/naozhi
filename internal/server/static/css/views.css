@@ -1,0 +1,683 @@
+/* views.css — extracted verbatim from dashboard.html's inline <style> block
+ * (#2559 D6). The split is sequential: each file is a contiguous slice of the
+ * original block and dashboard.html links them in the same order, so the
+ * cascade (later rule wins at equal specificity, @media position) is
+ * unchanged. Edit a view's rules here, next to the module that renders it.
+ */
+/* ===== Activity Bar (cc-asset-browser) ===== */
+.activity-bar{flex-shrink:0;width:56px;background:var(--nz-bg-1);border-right:1px solid var(--nz-border);display:flex;flex-direction:column;align-items:center;padding:10px 0;gap:4px}
+/* Top nav group is the natural-flow column; .ab-bottom is pushed to the rail
+   foot with margin-top:auto so connection status + settings sit at the bottom
+   (codex-style). On mobile both groups collapse via display:contents (≤768px). */
+.ab-top{display:flex;flex-direction:column;align-items:center;gap:4px}
+.ab-bottom{margin-top:auto;display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:8px}
+.ab-nav{position:relative;width:44px;height:48px;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;cursor:pointer;color:var(--nz-text-mute);border:none;background:none;transition:background .15s,color .15s}
+.ab-nav svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.ab-nav-label{font-size:9px;line-height:1}
+.ab-nav:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.ab-nav.active{color:var(--nz-text-strong);background:var(--nz-bg-2)}
+.ab-nav.active::before{content:"";position:absolute;left:-10px;top:50%;transform:translateY(-50%);width:3px;height:24px;background:var(--nz-selected-bar);border-radius:0 2px 2px 0}
+/* Rail attention badge (e.g. cron jobs needing attention) — small red dot
+   pinned to the icon's top-right. */
+.ab-badge{position:absolute;top:6px;right:6px;min-width:8px;height:8px;border-radius:var(--nz-radius-sm);background:var(--nz-red)}
+/* Desktop keeps the 系统 rail tab, so its mirror badge on 设置 stays off
+   (the ≤768px block re-enables it when the 系统 tab is hidden). */
+#abnav-settings-badge{display:none}
+.ab-badge[hidden]{display:none}
+
+/* ===== Top-level views (asset / cron / settings) =====
+   Each is a full-screen peer of the chat sidebar+main. The chat panels hide
+   under the matching body.nz-view-* class; the target view's panels show.
+   Mutually exclusive — setActivityView() toggles exactly one body class. */
+.asset-sidebar,.asset-main,.files-sidebar,.files-main,.cron-main,.settings-main,.system-main{display:none}
+body.nz-view-assets .sidebar,body.nz-view-assets .resizer,body.nz-view-assets .main{display:none!important}
+body.nz-view-assets .asset-sidebar{display:flex}
+body.nz-view-assets .asset-main{display:flex}
+/* Workspace files view: master (list) + detail (preview) like the asset view. */
+body.nz-view-files .sidebar,body.nz-view-files .resizer,body.nz-view-files .main{display:none!important}
+body.nz-view-files .files-sidebar{display:flex}
+body.nz-view-files .files-main{display:flex}
+/* Cron view: single full-width container holding the existing .cron-detail
+   two-pane (list + drawer) layout. flex-direction:column lets .cron-detail{flex:1}
+   lay out unchanged. */
+body.nz-view-cron .sidebar,body.nz-view-cron .resizer,body.nz-view-cron .main{display:none!important}
+body.nz-view-cron .cron-main{display:flex;flex-direction:column;flex:1;min-width:0}
+/* Settings view */
+body.nz-view-settings .sidebar,body.nz-view-settings .resizer,body.nz-view-settings .main{display:none!important}
+body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;min-width:0}
+/* System view: single full-width read-only daemon list (mirrors settings). */
+body.nz-view-system .sidebar,body.nz-view-system .resizer,body.nz-view-system .main{display:none!important}
+body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-width:0}
+
+/* ===== Settings view ===== */
+.settings-head{flex-shrink:0;padding:14px 20px;border-bottom:1px solid var(--nz-border)}
+.settings-head h1{font-size:var(--nz-fs-lg);color:var(--nz-text-strong);font-weight:600}
+.settings-body{flex:1;overflow-y:auto;padding:20px;max-width:720px;width:100%;margin:0 auto}
+/* ui-polish-light-theme D8: sections render as grouped cards so the sparse
+   settings page has visible structure (and future settings have a home). */
+.settings-sec{margin-bottom:20px;padding:var(--nz-space-4);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1)}
+.settings-sec h2{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);font-weight:600;text-transform:none;letter-spacing:.3px;margin-bottom:10px}
+.settings-about-line{display:flex;gap:var(--nz-space-2);font-size:var(--nz-fs-sm2);color:var(--nz-text);line-height:1.9}
+.settings-about-key{color:var(--nz-text-mute);min-width:110px;flex-shrink:0}
+/* 系统任务 entry row — mobile replacement for the dropped rail tab
+   (ui-polish-light-theme D9); desktop keeps the rail tab so hide it there. */
+.settings-syslink{display:none}
+.settings-syslink-btn{background:none;border:none;padding:0;color:var(--nz-accent);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}
+/* Custom arrow for appearance:none selects (picker-select-wrap wraps every
+   <select> using PICKER_SELECT_ONLY_STYLE — see dashboard.js). */
+.picker-select-wrap{position:relative;display:block}
+.picker-select-wrap::after{content:"▾";position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--nz-text-mute);pointer-events:none;font-size:var(--nz-fs-xs)}
+.settings-theme{display:flex;gap:8px;flex-wrap:wrap}
+.settings-theme-opt{padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);cursor:pointer;border:1px solid var(--nz-border);background:var(--nz-bg-1);font-family:inherit;transition:background .15s,color .15s,border-color .15s}
+.settings-theme-opt:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.settings-theme-opt.active{background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-selected-bar)}
+
+/* ===== System view (sysession daemons) ===== */
+.system-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 20px;border-bottom:1px solid var(--nz-border)}
+.system-head h1{font-size:var(--nz-fs-lg);color:var(--nz-text-strong);font-weight:600;flex:1}
+.system-body{flex:1;overflow-y:auto;padding:20px;max-width:860px;width:100%;margin:0 auto}
+.system-intro{color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin-bottom:16px;line-height:1.5}
+.sys-card{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:14px 16px;margin-bottom:12px}
+.sys-card-top{display:flex;align-items:center;gap:10px}
+.sys-state-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;background:var(--nz-text-dim)}
+.sys-state-dot.ok{background:var(--nz-green,#3fb950)}
+.sys-state-dot.fail{background:var(--nz-red)}
+.sys-state-dot.off{background:var(--nz-text-dim)}
+.sys-state-dot.running{background:var(--nz-accent)}
+.sys-name{font-size:var(--nz-fs-md);color:var(--nz-text-strong);font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sys-pill{flex-shrink:0;font-size:var(--nz-fs-xs);padding:2px 9px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-border);color:var(--nz-text-mute);background:var(--nz-bg-2)}
+.sys-pill.on{color:var(--nz-green,#3fb950);border-color:var(--nz-green,#3fb950)}
+.sys-pill.off{color:var(--nz-text-dim)}
+.sys-desc{color:var(--nz-text-mute);font-size:var(--nz-fs-sm);margin:8px 0 0;line-height:1.5}
+.sys-meta{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:12px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.sys-meta b{color:var(--nz-text);font-weight:500;font-variant-numeric:tabular-nums}
+.sys-stats-label{margin-top:10px;font-size:var(--nz-fs-2xs);color:var(--nz-text-dim);text-transform:uppercase;letter-spacing:.4px}
+.sys-stats{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.sys-stat{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:2px 8px;font-variant-numeric:tabular-nums}
+.sys-stat b{color:var(--nz-text);font-weight:600}
+.sys-warn{color:var(--nz-red);font-size:var(--nz-fs-xs);margin-top:8px}
+.system-empty{color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center;padding:40px 20px}
+
+.asset-sidebar{width:340px;min-width:240px;max-width:60vw;flex-shrink:0;border-right:1px solid var(--nz-border);flex-direction:column;background:var(--nz-bg-0);min-height:0}
+.asset-sb-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 16px 8px}
+.asset-sb-head h1{font-size:19px;color:var(--nz-text-strong);font-weight:600;flex:1}
+.asset-scope{flex-shrink:0;margin:0 16px 8px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-pill);padding:2px 9px;align-self:flex-start}
+/* ui-polish-light-theme D7: tabs wrap to a second row instead of clipping —
+   the横向滚动 + edge-fade mask hid the last tab's count on narrow panes. */
+.asset-kindtabs{flex-shrink:0;display:flex;flex-wrap:wrap;gap:3px;padding:0 10px 8px;border-bottom:1px solid var(--nz-border)}
+.asset-kindtabs::-webkit-scrollbar{display:none}
+.asset-kt{flex-shrink:0;padding:5px 9px;border-radius:7px;font-size:var(--nz-fs-sm2);color:var(--nz-text-mute);cursor:pointer;border:1px solid transparent;white-space:nowrap;background:none;display:flex;align-items:center;gap:5px}
+.asset-kt:hover{background:var(--nz-bg-1);color:var(--nz-text)}
+.asset-kt.active{background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-border)}
+.asset-kt .kc{font-size:var(--nz-fs-2xs);color:var(--nz-text-dim);font-variant-numeric:tabular-nums}
+.asset-search{flex-shrink:0;display:flex;align-items:center;gap:7px;margin:8px 12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:7px;padding:6px 10px}
+.asset-search svg{width:14px;height:14px;stroke:var(--nz-text-dim);fill:none;stroke-width:2}
+.asset-search input{flex:1;background:none;border:none;color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);outline:none}
+.asset-search input::placeholder{color:var(--nz-text-placeholder)}
+.asset-list,.asset-cards{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent;min-height:0}
+.asset-cards{padding:12px}
+.asset-empty{padding:24px;text-align:center;color:var(--nz-text-faint);font-size:var(--nz-fs-sm2)}
+.asset-grp{display:flex;align-items:center;gap:8px;padding:8px 14px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute);background:var(--nz-bg-0);position:sticky;top:0;cursor:pointer;user-select:none;border-bottom:1px solid var(--nz-bg-2);z-index:1}
+.asset-grp .agchev{width:11px;height:11px;stroke:var(--nz-text-dim);fill:none;stroke-width:2.2;transition:transform .15s;flex-shrink:0}
+.asset-grp.collapsed .agchev{transform:rotate(-90deg)}
+.asset-grp .agl{font-weight:600;color:var(--nz-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.asset-srcchip{font-size:var(--nz-fs-2xs);padding:1px 7px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-border);flex-shrink:0}
+.asrc-user{color:var(--nz-green)}.asrc-project{color:var(--nz-accent)}.asrc-plugin{color:var(--nz-clawd-rust)}.asrc-memory_project{color:var(--nz-text-mute)}
+.asset-grp .agcount{margin-left:auto;font-size:var(--nz-fs-xs);color:var(--nz-text-dim);font-variant-numeric:tabular-nums;flex-shrink:0}
+.asset-grpitems.collapsed{display:none}
+.asset-row{padding:9px 14px 9px 24px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;border-left:3px solid transparent}
+.asset-row:hover{background:var(--nz-bg-1)}
+.asset-row.active{background:var(--nz-rust-subtle);border-left-color:var(--nz-rust)}
+/* Asset name/title use the UI sans stack, not mono: these are human-read
+   identifiers (e.g. "flutter-dart-code-review"), and mono made CJK-latin
+   mixes jump. Mono stays for code/paths/versions/hashes only. R20260606. */
+.asset-rname{font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:500;letter-spacing:-.01em;word-break:break-all}
+.asset-rdesc{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.asset-nodesc{color:var(--nz-text-faint);font-style:italic}
+.asset-card{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:9px;padding:14px;margin-bottom:12px}
+.asset-card h3{font-size:var(--nz-fs-base);color:var(--nz-text-strong);font-weight:600;letter-spacing:-.01em;margin:0;display:flex;align-items:center;gap:8px}
+.asset-card .acver{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-2);border-radius:var(--nz-radius-sm);padding:1px 6px}
+.asset-card .acrepo{font-size:var(--nz-fs-sm);color:var(--nz-accent);margin-top:6px;word-break:break-all}
+.asset-card .acmeta{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:6px}
+.asset-card .accounts{margin-top:10px;display:flex;gap:6px;flex-wrap:wrap}
+.asset-card .acc{font-size:var(--nz-fs-xs);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-pill);padding:2px 9px;color:var(--nz-text)}
+.asset-card .acc b{color:var(--nz-accent)}.asset-card .acc-dim{color:var(--nz-text-dim)}
+.asset-main{flex:1;flex-direction:column;min-width:0;background:var(--nz-bg-0)}
+.asset-main-head{flex-shrink:0;padding:12px 20px;border-bottom:1px solid var(--nz-border);display:flex;align-items:center;gap:10px}
+/* display:flex above beats the [hidden] UA default (display:none), so the
+   pre-selection "—" placeholder head leaked into the empty state
+   (ui-polish-light-theme D7). Same guard for the files twin below. */
+.asset-main-head[hidden],.files-main-head[hidden]{display:none}
+.asset-main-title-wrap{min-width:0;display:flex;flex-direction:column;gap:2px}
+.asset-main-title{font-size:var(--nz-fs-md);color:var(--nz-text-strong);font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.asset-main-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.asset-from{color:var(--nz-clawd-rust);background:rgba(217,119,87,.12);border:1px solid rgba(217,119,87,.35);border-radius:var(--nz-radius-pill);padding:1px 8px}
+.asset-rel{font-family:var(--nz-font-mono)}
+.asset-main-body{flex:1;overflow-y:auto;padding:20px;max-width:900px;width:100%;margin:0 auto}
+.asset-main-body .afm{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-left:3px solid var(--nz-accent);border-radius:var(--nz-radius-ms);padding:10px 12px;font-family:var(--nz-font-mono);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-bottom:14px;white-space:pre-wrap}
+.asset-main-body .afm .k{color:var(--nz-accent)}
+.asset-main-body .araw{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:14px;font-family:var(--nz-font-mono);font-size:var(--nz-fs-sm);color:var(--nz-text);overflow-x:auto;white-space:pre-wrap;word-break:break-word;line-height:1.6;margin:0}
+.asset-anchor-note{font-size:var(--nz-fs-xs);color:var(--nz-amber);background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);border-radius:var(--nz-radius-ms);padding:7px 10px;margin-bottom:12px}
+
+/* ===== Workspace files view ===== */
+.files-sidebar{width:340px;min-width:240px;max-width:60vw;flex-shrink:0;border-right:1px solid var(--nz-border);flex-direction:column;background:var(--nz-bg-0);min-height:0}
+.files-sb-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 16px 8px}
+.files-sb-head h1{font-size:var(--nz-fs-lg);color:var(--nz-text-strong);font-weight:600;flex:1}
+.files-quickjump{flex-shrink:0;display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 14px 8px}
+.files-qj-label{font-size:var(--nz-fs-2xs);color:var(--nz-text-faint);margin-right:2px}
+.files-qj{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-pill);color:var(--nz-text-mute);cursor:pointer;font-family:inherit;font-size:var(--nz-fs-2xs);padding:3px 9px;max-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.files-qj:hover{background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-accent)}
+.files-toolbar{flex-shrink:0;display:flex;gap:8px;margin:0 14px 8px}
+.files-upbtn{flex:1;padding:6px 10px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}
+.files-upbtn:hover{background:var(--nz-bg-2);color:var(--nz-text-strong)}
+.files-crumbs{flex-shrink:0;display:flex;align-items:center;gap:2px;flex-wrap:wrap;padding:0 14px 8px;font-size:var(--nz-fs-xs)}
+.files-crumb{background:none;border:none;color:var(--nz-accent);cursor:pointer;font-family:inherit;font-size:var(--nz-fs-xs);padding:1px 3px;border-radius:var(--nz-radius-sm)}
+.files-crumb:hover{background:var(--nz-bg-1);text-decoration:underline}
+.files-crumb-sep{color:var(--nz-text-faint)}
+.files-progress{flex-shrink:0;padding:0 14px}
+.files-prow{display:flex;align-items:center;gap:8px;font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);margin-bottom:4px}
+.files-pname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:50%}
+.files-pbar{flex:1;height:4px;background:var(--nz-bg-2);border-radius:var(--nz-radius-pill);overflow:hidden}
+.files-pbar>i{display:block;height:100%;width:0;background:var(--nz-accent);transition:width .2s}
+.files-droparea{flex:1;display:flex;flex-direction:column;min-height:0;border:2px dashed transparent;transition:border-color .15s,background .15s}
+.files-droparea.files-dragover{border-color:var(--nz-accent);background:var(--nz-rust-subtle)}
+.files-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent;min-height:0}
+.files-empty{padding:24px;text-align:center;color:var(--nz-text-faint);font-size:var(--nz-fs-sm2)}
+.files-row{display:flex;align-items:center;gap:9px;padding:8px 14px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;border-left:3px solid transparent}
+.files-row:hover{background:var(--nz-bg-1)}
+.files-row.files-link{cursor:default;opacity:.65}
+.files-ic{flex-shrink:0;width:18px;text-align:center}
+.files-name{flex:1;min-width:0;font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.files-meta{flex-shrink:0;font-size:var(--nz-fs-2xs);color:var(--nz-text-dim);font-variant-numeric:tabular-nums}
+.files-main{flex:1;flex-direction:column;min-width:0;background:var(--nz-bg-0)}
+.files-main-head{flex-shrink:0;padding:12px 20px;border-bottom:1px solid var(--nz-border);display:flex;align-items:center;gap:10px}
+.files-main-title-wrap{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.files-dl-btn{flex-shrink:0;display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}
+.files-dl-btn:hover{background:var(--nz-bg-2);color:var(--nz-text-strong)}
+.files-dl-btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.files-main-title{font-size:var(--nz-fs-md);color:var(--nz-text-strong);font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.files-main-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);font-family:var(--nz-font-mono)}
+.files-main-body{flex:1;overflow-y:auto;padding:20px;max-width:900px;width:100%;margin:0 auto}
+.files-main-body img{max-width:100%;height:auto}
+.files-main-body iframe{width:100%;height:80vh;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:#fff}
+.files-note{font-size:var(--nz-fs-xs);color:var(--nz-amber);background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);border-radius:var(--nz-radius-ms);padding:7px 10px;margin-bottom:12px}
+.files-raw{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:14px;font-family:var(--nz-font-mono);font-size:var(--nz-fs-sm);color:var(--nz-text);overflow-x:auto;white-space:pre-wrap;word-break:break-word;line-height:1.6;margin:0}
+
+.sidebar{width:360px;min-width:200px;max-width:60vw;border-right:none;display:flex;flex-direction:column}
+.resizer{position:relative;width:4px;cursor:col-resize;background:var(--nz-border);flex-shrink:0;transition:background .15s}
+.resizer:hover,.resizer.dragging{background:var(--nz-accent)}
+/* Mid-line collapse handle on the resizer (Notion / Cursor pattern). Vertically
+   centered, low-chrome by default — hover anywhere on the resizer (or the
+   handle itself) brings it to full opacity. Click toggles collapse; mousedown
+   stops propagation so the resizer drag never starts on the handle. */
+.resizer-handle{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:18px;height:44px;border-radius:9px;background:var(--nz-bg-1);border:1px solid var(--nz-border);color:var(--nz-text-mute);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;opacity:0;transition:opacity .15s,background .15s,color .15s,border-color .15s;z-index:5;-webkit-tap-highlight-color:transparent}
+.resizer:hover .resizer-handle,.resizer-handle:hover,.resizer-handle:focus-visible{opacity:1}
+.resizer-handle:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-accent)}
+.resizer-handle:focus-visible{outline:2px solid var(--nz-accent);outline-offset:2px;opacity:1}
+.resizer-handle svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s}
+/* Sidebar fully-collapsed state (PC ≥769px). body.sidebar-collapsed hides
+   the sidebar entirely so .main occupies the full viewport. The resizer
+   stays as a thin vertical strip with the same mid-line handle so collapse
+   and restore share one affordance. On mobile (≤768px) the sidebar is
+   already a fixed drawer overlay, so this state is a no-op there and the
+   existing mobile-list-view / mobile-chat-view rules keep winning. */
+@media(min-width:769px){
+  body.sidebar-collapsed .sidebar{display:none}
+  /* Flip the chevron when collapsed so the same DOM node serves both
+     directions. Restore = click handle = expand. */
+  body.sidebar-collapsed .resizer-handle svg{transform:rotate(180deg)}
+  /* When collapsed, surface the handle without requiring hover so users
+     can find the restore affordance immediately. */
+  body.sidebar-collapsed .resizer-handle{opacity:.55}
+  body.sidebar-collapsed .resizer-handle:hover{opacity:1}
+  /* The resizer doubles as the restore strip; widen its hit area slightly
+     and disable the col-resize cursor since there's nothing to resize. */
+  body.sidebar-collapsed .resizer{cursor:default;width:6px}
+}
+.sidebar-header{padding:16px;border-bottom:1px solid var(--nz-border)}
+.sidebar-header .header-row{display:flex;align-items:center;justify-content:space-between}
+/* Wordmark uses the brand mono stack (matching the login .ab-mark) and a
+   >_ terminal bracket-mark prefix — the "brain juice / stream-json gateway"
+   motif. Previously this was the one prominent spot that used the default UI
+   font, which read as a generic app header and clashed with the mono login
+   brand. R20260606. */
+.sidebar-header h1{font-size:var(--nz-fs-md);color:var(--nz-rust);font-weight:600;font-style:italic;font-family:var(--nz-font-mono);letter-spacing:-.01em}
+.sidebar-header h1::before{content:">_";color:var(--nz-rust);margin-right:6px;font-weight:700}
+.session-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
+
+.sidebar-status{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);flex-shrink:0;max-height:40%;overflow-y:auto}
+.sidebar-status .status-row{display:flex;align-items:center;gap:8px;padding:4px 0}
+.sidebar-status .status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.sidebar-status .status-dot.ok,.sidebar-status .status-dot.connected{background:var(--nz-green)}
+.sidebar-status .status-dot.connecting,.sidebar-status .status-dot.authenticating{background:var(--nz-amber);animation:pulse var(--nz-dur-loop) ease-in-out infinite}
+.sidebar-status .status-dot.disconnected,.sidebar-status .status-dot.error{background:var(--nz-red)}
+.sidebar-status .status-dot.offline,.sidebar-status .status-dot.off,.sidebar-status .status-dot.unreachable{background:var(--nz-text-faint)}
+.sidebar-status .status-info{flex:1;min-width:0;overflow:hidden}
+.sidebar-status .status-ws{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* R110-P1 WS outage duration hint — surfaced alongside the reconnect button
+   so users see "已断开 N 秒/分" instead of a static pulsing dot. Amber to
+   mirror the .connecting pulse color. */
+.sidebar-status .status-outage{color:var(--nz-amber);font-size:var(--nz-fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+/* Auth rate-limit countdown surfaced inline in the sidebar status row
+   instead of a top-of-screen toast. Amber mirrors .status-outage (this is
+   still a connection-health signal, not an operator-visible error). */
+.sidebar-status .status-authwait{color:var(--nz-amber);font-size:var(--nz-fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+/* Manual reconnect button surfaced after WS backoff > 8s — see
+   updateStatusBar gating. Small/dim by default so the status row stays
+   low-chrome; hover pops to accent blue to signal it's actionable. */
+.sidebar-status .status-reconnect{flex-shrink:0;background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-family:inherit;font-size:var(--nz-fs-xs);padding:2px 8px;border-radius:var(--nz-radius-sm);cursor:pointer;line-height:1.4;min-height:22px}
+.sidebar-status .status-reconnect:hover{color:var(--nz-accent);border-color:var(--nz-accent);background:rgba(31,111,235,.08)}
+
+.session-card{position:relative;display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;transition:background .15s;border-left:3px solid transparent}
+.session-card:hover{background:var(--nz-bg-1)}
+/* Selected session: rust-subtle weak fill (token, theme-adaptive — was the
+   hardcoded dark-blue #1f2937 that looked alien in light theme) + rust left
+   edge as the brand selection marker. R20260606. */
+.session-card.active{background:var(--nz-selected-bg);border-left-color:var(--nz-selected-bar)}
+.session-card.dead-card{opacity:.6}
+/* .btn-close — canonical close/dismiss affordance class (#2027). One marker
+   for every "close this surface" button so the family is greppable and shares
+   a baseline (transparent chrome, pointer, no inherited button box). Per-site
+   classes (.btn-dismiss positioning, .fv-close sizing) layer their specifics
+   on top; their fuller selectors keep equal-or-higher specificity so visuals
+   are unchanged. */
+.btn-close{background:none;border:none;cursor:pointer;line-height:1;color:var(--nz-text-faint)}
+.btn-close:hover{color:var(--nz-text)}
+.session-card .btn-dismiss{position:absolute;top:4px;right:6px;background:none;border:none;color:var(--nz-text-faint);font-size:17px;cursor:pointer;padding:0 4px;line-height:1;opacity:0;transition:opacity .15s}
+.session-card:hover .btn-dismiss{opacity:1}
+.session-card .btn-dismiss:hover{color:var(--nz-red)}
+
+.badge{display:inline-block;padding:2px 7px;border-radius:10px;font-size:var(--nz-fs-sm);font-weight:600}
+.badge.running{background:#238636;color:#fff}
+.badge.ready{background:var(--nz-blue);color:#fff}
+
+.badge.new{background:var(--nz-blue);color:#fff;border:1px dashed var(--nz-accent)}
+.badge.paused{background:var(--nz-text-faint);color:var(--nz-text)}
+.death-tag{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-2);padding:1px 4px;border-radius:var(--nz-radius-sm)}
+
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;position:relative}
+.main-header{padding:8px 20px;border-bottom:1px solid var(--nz-border);flex-shrink:0;display:flex;align-items:center;gap:8px}
+.main-header-content{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.main-header h2{font-size:var(--nz-fs-md);color:var(--nz-text-strong);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.main-header h2 .btn-rename{margin-left:6px;background:transparent;border:0;color:var(--nz-text-mute);cursor:pointer;font-size:var(--nz-fs-sm2);padding:2px 4px;border-radius:var(--nz-radius-xs);vertical-align:baseline;opacity:0;transition:opacity 120ms ease,color 120ms ease}
+.main-header:hover h2 .btn-rename,.main-header h2 .btn-rename:focus-visible{opacity:1}
+.main-header h2 .btn-rename:hover{color:var(--nz-text-strong);background:var(--nz-bg-2)}
+/* 触屏：rename 铅笔不能靠 hover 显现（同 .cj-run 兜底，#2434）*/
+@media (hover:none){
+  .main-header h2 .btn-rename{opacity:1}
+}
+.main-header .detail{font-size:var(--nz-fs-sm);color:var(--nz-text-dim);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.main-header .detail-left,.main-header .detail-right{display:flex;align-items:center;gap:6px;white-space:nowrap}
+/* The cli/model label is the row's only shrinkable text: without min-width:0 a
+   flex item refuses to go below its content width, so on a 390px phone the
+   label held its full size and pushed the git chip + runstats past the
+   viewport edge (git text painted over "N 轮"). Clip + ellipsis the children
+   instead; the raw model id stays in the label's title. */
+.main-header .detail-left{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.main-header .detail-left>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+/* #2437: #header-cli is always emitted so updateHeaderCLI has an in-place
+   target, but with no backend name yet it is empty — collapse it like
+   .detail-git / .detail-effort / .detail-runstats so the 6px flex gap
+   doesn't open a hole before the "· model" label. */
+.main-header .detail-left #header-cli:empty{display:none}
+/* session-run-metrics header overview: the run-history stats ("N 轮 · 均 X ·
+   最长 X") promoted from the panel summary into the header's right edge. Pushed
+   to the right with margin-left:auto; truncates rather than wrapping so it
+   never shoves the cli/model label off-screen on narrow viewports. Empty (no
+   recorded runs) → zero-width, collapses cleanly. */
+.main-header .detail-runstats{display:flex;align-items:center;gap:6px;margin-left:auto;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.main-header .detail-runstats:empty{display:none}
+.main-header .detail-runstats .srp-stat{white-space:nowrap}
+.main-header .detail-runstats .srp-stat.bad{color:var(--nz-red)}
+.main-header .detail-runstats .srp-stat-sep{opacity:.4}
+
+/* Multi-Backend RFC §8.4 — backend chip (D1 header / D2 sidebar). Color
+   comes inline from BackendInfo.chip_color; the rules below provide layout,
+   contrast (the chip uses dark text on light backgrounds via color-mix),
+   and the always-on outline so dark mode keeps it readable. */
+.sc-backend-chip,.sc-access-profile-chip{display:inline-flex;align-items:center;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;flex-shrink:0;color:var(--nz-backend-chip-fg);text-shadow:var(--nz-backend-chip-shadow);border:1px solid var(--nz-backend-chip-border);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* RFC §8.3 D6 — context usage bar. Three thresholds: <80% green
+   (--nz-text-mute fill), <95% amber (--nz-amber), >=95% red. Width
+   driven inline so the bar animates as kiro emits new metadata. */
+.main-header .ctx-bar{display:inline-flex;align-items:center;width:48px;height:6px;background:var(--nz-bg-2);border-radius:var(--nz-radius-xs);overflow:hidden;flex-shrink:0}
+.main-header .ctx-bar-fill{height:100%;background:var(--nz-text-mute);transition:width .3s ease-out}
+.main-header .ctx-bar.mid .ctx-bar-fill{background:var(--nz-amber)}
+.main-header .ctx-bar.high .ctx-bar-fill{background:#e85a4f}
+
+/* RFC §8.3 D7 — turn duration timer. Tabular nums so digits don't jitter
+   between turns. */
+.main-header .detail-turn-timer{color:var(--nz-text-mute);font-variant-numeric:tabular-nums;font-size:var(--nz-fs-xs)}
+
+/* RFC §8.3 D22 — backends doctor status panel. Folded under the home
+   page health strip; expanded on click. Single-backend deployments
+   never render this (renderBackendsDoctorPanel returns ''). */
+.doctor-panel{margin-top:12px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-1);overflow:hidden}
+.doctor-summary{display:block;padding:8px 12px;font-size:var(--nz-fs-sm);color:var(--nz-text-dim);cursor:pointer;user-select:none}
+.doctor-summary::-webkit-details-marker{display:none}
+.doctor-summary:hover{background:var(--nz-bg-2)}
+/* Native marker hidden — so we draw our own arrow that flips on open.
+   Closed → ▶, open → ▼ (matches the rest of the codebase's conventions
+   for foldable panels). */
+.doctor-summary::before{content:"\25B6";display:inline-block;margin-right:6px;font-size:var(--nz-fs-2xs);transition:transform .15s}
+.doctor-panel[open] > .doctor-summary::before{transform:rotate(90deg)}
+.doctor-panel[open] > .doctor-summary{color:var(--nz-text)}
+.doctor-body{padding:8px 12px;border-top:1px solid var(--nz-border);display:flex;flex-direction:column;gap:8px}
+.doctor-row{display:flex;flex-direction:column;gap:4px}
+.doctor-row-head{display:flex;align-items:center;gap:6px;font-size:var(--nz-fs-sm2)}
+.doctor-row-name{font-weight:500}
+.doctor-row-proto{font-size:var(--nz-fs-2xs);padding:1px 5px;border-radius:var(--nz-radius-xs);background:var(--nz-bg-2);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px}
+.doctor-row-feats{display:flex;flex-wrap:wrap;gap:4px;padding-left:18px}
+.doctor-feat{font-size:var(--nz-fs-2xs);padding:1px 5px;border-radius:var(--nz-radius-xs);background:var(--nz-bg-2)}
+.doctor-feat-on{color:var(--nz-green);background:rgba(46,160,67,.18)}
+.doctor-feat-off{color:var(--nz-text-mute);text-decoration:line-through;opacity:.6}
+.doctor-status{font-size:var(--nz-fs-2xs)}
+.doctor-status-ok{color:var(--nz-green)}
+.doctor-status-bad{color:var(--nz-text-mute)}
+
+/* RFC §8.3 D17 — ACP rich tool_call progress row. Folded summary + body
+   pattern mirrors .tr-wrap so users see one consistent affordance for
+   all tool output. Status pill colors follow the traffic-light convention
+   the dashboard already uses elsewhere (--nz-amber / --nz-text-mute). */
+.tc-wrap{display:block;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:0;background:var(--nz-bg-1);overflow:hidden}
+.tc-summary{display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:var(--nz-fs-sm2);color:var(--nz-text);user-select:none}
+.tc-summary::-webkit-details-marker{display:none}
+.tc-summary:hover{background:var(--nz-bg-2)}
+.tc-icon{font-size:var(--nz-fs-base);opacity:.85}
+.tc-title{font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tc-kind{font-size:var(--nz-fs-2xs);padding:1px 6px;border-radius:var(--nz-radius-xs);background:var(--nz-bg-2);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
+.tc-status{font-size:var(--nz-fs-2xs);padding:1px 6px;border-radius:var(--nz-radius-xs);font-weight:600;letter-spacing:.2px;flex-shrink:0}
+.tc-status-pending{background:var(--nz-bg-2);color:var(--nz-text-mute)}
+.tc-status-in_progress{background:rgba(56,139,253,.18);color:var(--nz-accent)}
+.tc-status-completed{background:rgba(46,160,67,.18);color:var(--nz-green)}
+.tc-status-failed{background:rgba(248,81,73,.20);color:var(--nz-red)}
+.tc-body{margin:0;padding:10px;background:var(--nz-bg-0);border-top:1px solid var(--nz-border);font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:var(--nz-fs-sm);line-height:1.5;color:var(--nz-text);white-space:pre-wrap;word-break:break-word;max-height:400px;overflow:auto}
+
+/* Leaked tool-call fold: the model wrote <invoke …> tool-call syntax into a
+   text turn instead of a structured tool_use block (stripLeakedToolCalls in
+   dashboard.js). The call was never executed, so it is noise — fold it away
+   behind an amber warning, collapsed by default, while keeping the raw XML
+   one click away for debugging. Mirrors the .tc-wrap fold affordance. */
+.leaked-toolcall{display:block;border:1px solid var(--nz-amber,#d29922);border-radius:var(--nz-radius-md);margin:6px 0 2px;background:rgba(210,153,34,.07);overflow:hidden}
+.leaked-toolcall-summary{padding:5px 10px;cursor:pointer;font-size:var(--nz-fs-sm);color:var(--nz-amber,#d29922);user-select:none}
+.leaked-toolcall-summary::-webkit-details-marker{display:none}
+.leaked-toolcall-summary:hover{background:rgba(210,153,34,.12)}
+.leaked-toolcall-body{margin:0;padding:10px;background:var(--nz-bg-0);border-top:1px solid var(--nz-amber,#d29922);font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:var(--nz-fs-sm);line-height:1.5;color:var(--nz-text-dim,var(--nz-text));white-space:pre-wrap;word-break:break-word;max-height:400px;overflow:auto}
+
+/* RFC §8.3 D9-D15 / §8.7 — feature-gated input controls. `feat-disabled`
+   is the hard gate (control is unusable on this backend); cursor +
+   diagonal stripe pattern + dimmer text communicate the state, and the
+   title attribute carries the operator-readable reason (the rule MUST be
+   set together — never silently disable). Earlier the gate used pure
+   opacity:.4 which made the emoji glyph almost invisible on dark
+   backgrounds; the WCAG AA-friendly stripe now signals "off" without
+   hiding the icon entirely.
+   `feat-degraded` is the soft gate (control still works but routes
+   through a fallback path, e.g. audio→transcribe→text); visual treatment
+   is gentler to convey "still works, just different". */
+.btn-icon.feat-disabled{
+  cursor:not-allowed;
+  color:var(--nz-text-dim);
+  background:repeating-linear-gradient(
+    135deg,
+    var(--nz-bg-1) 0 6px,
+    var(--nz-bg-2) 6px 12px
+  );
+  border-color:var(--nz-border);
+}
+.btn-icon.feat-disabled:hover{
+  /* Keep the stripe instead of clearing background — clearing would
+     make the emoji glyph fall through to body bg which has even lower
+     contrast on most themes. */
+  filter:brightness(1.05);
+}
+.btn-hold-talk.feat-degraded,.btn-icon.feat-degraded{
+  /* Soft gate: still operable, just hint at fallback path. opacity
+     dropped from .75 → .85 so the emoji stays legible on dark themes. */
+  opacity:.85;
+}
+
+/* RFC §8.3 D12 — AskUserQuestion fallback card on backends without the
+   askuser feature. Plain readable text, no interactive options, hint at top. */
+.ask-degraded .ask-degraded-hint{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-bottom:8px}
+.ask-degraded .ask-degraded-q{margin:6px 0;padding:6px 10px;border-left:2px solid var(--nz-border);background:var(--nz-bg-1);border-radius:0 6px 6px 0}
+.ask-degraded .ask-degraded-opts{margin-top:4px;color:var(--nz-text-dim);font-size:var(--nz-fs-sm2);line-height:1.5}
+
+.events{flex:1;overflow-y:auto;overflow-x:hidden;padding:16px 0;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent;min-width:0}
+/* Message navigation pill */
+.nav-pill{position:absolute;right:16px;bottom:100px;display:flex;flex-direction:column;align-items:center;gap:0;background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:20px;padding:4px;z-index:10;opacity:0;pointer-events:none;transition:opacity .2s;user-select:none}
+.nav-pill.visible{opacity:1;pointer-events:auto}
+.nav-pill button{width:32px;height:28px;background:none;border:none;color:var(--nz-text-mute);cursor:pointer;font-size:var(--nz-fs-base);display:flex;align-items:center;justify-content:center;border-radius:14px;transition:all .15s}
+.nav-pill button:hover{background:var(--nz-border);color:var(--nz-text)}
+.nav-pill .nav-counter{font-size:var(--nz-fs-2xs);color:var(--nz-text-dim);padding:0 4px;white-space:nowrap;cursor:pointer;transition:color .15s}
+.nav-pill .nav-counter:hover{color:var(--nz-text)}
+.event.nav-highlight .event-content{box-shadow:0 0 0 2px var(--nz-accent)}
+.event{display:flex;gap:10px;padding:6px 24px;max-width:clamp(760px,65vw,1200px);margin-left:auto;margin-right:auto;width:100%;box-sizing:border-box}
+.event-icon{width:36px;height:36px;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:var(--nz-fs-md)}
+.event-content{flex:1;font-size:15px;line-height:1.6;word-break:break-word;overflow-wrap:anywhere;min-width:0;white-space:normal;transition:box-shadow .3s ease}
+.md-blank{display:block;height:0.75em}
+/* User messages: right-aligned bubble */
+.event.user{flex-direction:row-reverse}
+/* User-message avatar: the brand ">_" terminal prompt mark in the logo's
+   rust color, replacing the old 👤 emoji. Mono font + subtle rust-tinted
+   background tie it to the `>_` sidebar logomark and quick-ask empty state.
+   font-weight:700 + slight negative letter-spacing keeps the two glyphs
+   reading as a compact bracket-mark inside the 36px round slot — the mark
+   steps up to --nz-fs-md so it stays proportionate in the enlarged avatar. */
+/* Neutral chrome for the user avatar: the rust mark sat right next to the
+   blue-tinted user bubble — the two saturated accents fought in every turn.
+   Brand rust lives in the logo / CTA / selection; the avatar goes quiet. */
+.event.user .event-icon{background:var(--nz-bg-2);color:var(--nz-text-mute);font-family:var(--nz-font-mono);font-size:var(--nz-fs-md);font-weight:700;letter-spacing:-.04em}
+.event.user .event-content{flex:0 1 auto;max-width:80%;color:var(--nz-event-user-fg);background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);padding:10px 14px;border-radius:18px 18px 4px 18px}
+/* Queued-send indicator: inline chip on the optimistic user bubble when
+   send_ack returns status=queued. Replaces the previous top-of-screen
+   toast so the signal stays bound to its message (and vanishes naturally
+   when the real "user" event replaces the optimistic bubble). */
+.event.user.optimistic-msg .msg-queued-chip{display:inline-block;margin-top:4px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);opacity:.85}
+/* AI text: left-aligned, clean markdown */
+.event.text .event-icon{background:rgba(163,118,255,.15);color:#a376ff;font-size:var(--nz-fs-md)}
+/* Clawd mascot for claude-backend assistant turns. Drop the .event-icon
+   circular background so the pixel robot reads as a free-standing avatar;
+   the SVG fills the full 36px icon-slot to give it visual presence next to
+   the assistant text and stay balanced against the user's >_ avatar.
+   Color flows from --nz-clawd-rust via currentColor on the SVG path. */
+.event.text .event-icon:has(.cc-clawd){background:transparent;padding:0;width:28px;height:28px;overflow:visible}
+.event.text .event-icon .cc-clawd{width:28px;height:28px;display:block;color:var(--nz-clawd-rust)}
+.event.text .event-content{color:var(--nz-text);max-width:clamp(720px,60vw,1100px)}
+/* Copy button: permanent for long AI messages; hover-revealed via
+   .hover-only for short bubbles so every text/user message stays
+   copyable without cluttering the default view. The .copied green
+   takes precedence on both variants via visibility:visible override. */
+.event-copy-btn{display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);color:var(--nz-text-faint);font-size:var(--nz-fs-xs);padding:1px 8px;cursor:pointer;transition:color .15s,border-color .15s,opacity .12s;line-height:1.6;margin-top:8px}
+.event-copy-btn:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
+.event-copy-btn.copied{color:var(--nz-green);border-color:var(--nz-green);opacity:1}
+/* hover-only: invisible by default, fades in when the bubble is hovered
+   or the button itself receives keyboard focus. Pointer-events stay on
+   so a full-speed hover-then-click still registers; focus-visible brings
+   keyboard users back into scope. */
+.event-copy-btn.hover-only{opacity:0}
+.event:hover .event-copy-btn.hover-only,.event-copy-btn.hover-only:focus-visible{opacity:1}
+@media (hover:none){
+  .event-copy-btn.hover-only{opacity:1}
+}
+/* System/init: centered label */
+.event.system,.event.init{justify-content:center;padding-top:12px;padding-bottom:12px}
+.event.system .event-icon,.event.init .event-icon{display:none}
+.event.system .event-content,.event.init .event-content{flex:none;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center}
+/* Hidden types (kept for safety) */
+.event.thinking .event-content{color:var(--nz-event-agent-fg);font-style:italic}
+.event.result{margin:2px 0}
+.event.result .event-content{color:var(--nz-green);background:rgba(126,231,135,.05);padding:4px 8px;border-radius:var(--nz-radius-sm);border-left:2px solid var(--nz-green)}
+.event.agent .event-content{color:var(--nz-event-agent-fg)}
+.event.agent{background:rgba(56,139,253,.05);border-left:2px solid #388bfd}
+/* Todo checklist bubble — neutral framing, keeps per-item legibility */
+.event.todo .event-icon{background:rgba(139,148,158,.12);color:var(--nz-text-mute);font-size:var(--nz-fs-sm)}
+.event.todo .event-content{color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:10px 14px;max-width:clamp(600px,55vw,900px)}
+.todo-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--nz-bg-2)}
+.todo-title{font-size:var(--nz-fs-sm2);font-weight:600;color:var(--nz-text-strong);letter-spacing:.02em}
+.todo-counts{display:flex;gap:6px;font-variant-numeric:tabular-nums}
+.todo-count{display:inline-flex;align-items:center;padding:1px 8px;border-radius:10px;background:var(--nz-bg-2);font-size:var(--nz-fs-xs);line-height:1.5;color:var(--nz-text-dim)}
+.todo-count.done{color:var(--nz-green);background:rgba(63,185,80,.08)}
+.todo-count.active{color:var(--nz-accent);background:rgba(88,166,255,.1)}
+.todo-list{list-style:none;margin:0;padding:0}
+.todo-item{display:flex;gap:8px;align-items:flex-start;padding:3px 0;font-size:var(--nz-fs-base);line-height:1.55}
+.todo-mark{flex-shrink:0;width:18px;text-align:center;font-size:var(--nz-fs-sm2);line-height:1.55;user-select:none}
+.todo-done .todo-mark{color:var(--nz-green)}
+.todo-active .todo-mark{color:var(--nz-accent)}
+.todo-pending .todo-mark{color:var(--nz-text-faint)}
+.todo-text{flex:1;word-break:break-word}
+.todo-done .todo-text{color:var(--nz-text-mute);text-decoration:line-through;text-decoration-color:var(--nz-text-faint)}
+.todo-active .todo-text{color:var(--nz-text-strong);font-weight:500}
+.todo-pending .todo-text{color:var(--nz-text)}
+/* Turn separation */
+.event.text+.event.user{margin-top:24px}
+.event.user+.event.text{margin-top:8px}
+.event.system+.event.user,.event.system+.event.text,.event.init+.event.user,.event.init+.event.text{margin-top:8px}
+.event.user+.event.user,.event.text+.event.text{margin-top:2px}
+/* WeChat-style avatar grouping: consecutive bubbles from the same sender
+   that arrive within AVATAR_GROUP_GAP_MS (30s) of the previous one hide the
+   repeated avatar — only the first bubble of each tight run shows it. The
+   .nz-grouped class is applied by regroupAvatars() post-render so the
+   threshold is INDEPENDENT of the 5-minute time-divider gap (a divider every
+   30s would spam the transcript). visibility:hidden (not display:none)
+   preserves the 36px icon slot so stacked bubbles stay edge-aligned. */
+.event.nz-grouped .event-icon{visibility:hidden}
+.event-time-divider{text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin:16px 0 6px;opacity:.55;user-select:none;letter-spacing:.02em}
+.empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:var(--nz-text-dim);font-size:15px}
+/* Brand ">_" prompt motif for the quick-ask empty state. The underscore
+   blinks like a terminal cursor — the one ambient brand signature, hit every
+   time the user lands on an empty session. Neutralised by the global
+   prefers-reduced-motion guard. R20260606. */
+.nz-prompt{font-family:var(--nz-font-mono);font-size:var(--nz-fs-display);opacity:.4;color:var(--nz-text-mute);user-select:none}
+.nz-prompt b{color:var(--nz-rust);font-weight:400;animation:nz-blink 1.1s steps(1) infinite}
+@keyframes nz-blink{0%,49%{opacity:.9}50%,100%{opacity:.12}}
+.no-sessions{padding:40px 16px;text-align:center;color:var(--nz-text-faint);font-size:var(--nz-fs-base)}
+.no-sessions-cta{margin-top:12px;padding:8px 16px;background:rgba(31,111,235,.12);border:1px solid var(--nz-blue);border-radius:var(--nz-radius-ms);color:var(--nz-accent);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer;min-height:36px}
+.no-sessions-cta:hover{background:rgba(31,111,235,.2)}
+/* Quick-ask 空态输入框：默认目录 + general agent 的"问一下"入口 */
+.quick-ask-form{display:flex;gap:8px;width:min(560px,92%);align-items:flex-end}
+.quick-ask-input{flex:1;min-height:44px;max-height:200px;padding:12px 14px;background:var(--nz-bg-1);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:10px;font:inherit;font-size:var(--nz-fs-base);line-height:1.5;resize:none;outline:none;transition:border-color .15s,box-shadow .15s;box-shadow:var(--nz-shadow-1)}
+.quick-ask-input:focus{border-color:var(--nz-rust);box-shadow:0 0 0 2px var(--nz-rust-subtle)}
+.quick-ask-input::placeholder{color:var(--nz-text-placeholder)}
+.quick-ask-send{flex:0 0 auto;width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:var(--nz-rust);color:#fff;border:none;border-radius:var(--nz-radius-lg);cursor:pointer;transition:filter var(--nz-dur) var(--nz-ease),opacity var(--nz-dur) var(--nz-ease)}
+.quick-ask-send:hover{filter:brightness(1.15)}
+.quick-ask-send:disabled{opacity:.45;cursor:default}
+.quick-ask-send svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+/* Message input area */
+.input-area{border-top:1px solid var(--nz-border);padding:12px 20px;flex-shrink:0;background:var(--nz-bg-0)}
+.input-area.disabled{opacity:.5;pointer-events:none}
+.file-preview{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.file-thumb{position:relative;width:60px;height:60px;border-radius:var(--nz-radius-ms);overflow:hidden;border:1px solid var(--nz-border);transition:opacity .12s,border-color .12s,transform .12s}
+.file-thumb[draggable="true"]{cursor:grab}
+.file-thumb[draggable="true"]:active{cursor:grabbing}
+.file-thumb[draggable="true"]:focus-visible{outline:2px solid var(--nz-accent);outline-offset:2px}
+.file-thumb.dragging{opacity:.4}
+.file-thumb.drop-target{border-color:var(--nz-accent);transform:scale(1.06)}
+.file-thumb img{width:100%;height:100%;object-fit:cover;image-orientation:from-image;pointer-events:none;user-select:none;-webkit-user-drag:none}
+.file-thumb.pdf{width:180px;height:60px;background:var(--nz-bg-1)}
+.pdf-chip{display:flex;align-items:center;gap:8px;width:100%;height:100%;padding:0 8px;box-sizing:border-box}
+.pdf-chip .pdf-icon{flex-shrink:0;width:36px;height:44px;border-radius:var(--nz-radius-sm);background:var(--nz-red);color:#fff;font-size:var(--nz-fs-2xs);font-weight:700;display:flex;align-items:center;justify-content:center;font-family:var(--nz-font-mono);letter-spacing:.5px}
+.pdf-chip .pdf-meta{min-width:0;flex:1;display:flex;flex-direction:column;justify-content:center;gap:2px}
+.pdf-chip .pdf-name{font-size:var(--nz-fs-sm);color:var(--nz-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pdf-chip .pdf-size{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);font-family:var(--nz-font-mono)}
+.file-thumb .remove{position:absolute;top:-4px;right:-4px;width:16px;height:16px;background:var(--nz-red);color:#fff;border:none;border-radius:50%;font-size:var(--nz-fs-xs);cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
+.upload-status{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:var(--nz-fs-md);font-weight:700}
+.upload-status.uploading{background:rgba(0,0,0,.45)}
+.upload-status.uploading::after{content:'';width:18px;height:18px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin var(--nz-dur-spin) linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.upload-status.error{background:rgba(218,54,51,.55);color:#fff}
+.event-images{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.event-images img{max-width:300px;max-height:240px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);cursor:pointer;transition:opacity .15s}
+.event-images img:hover{opacity:.85}
+.lightbox-overlay{display:none;position:fixed;inset:0;z-index:var(--nz-z-lightbox);background:rgba(0,0,0,.85);align-items:center;justify-content:center;cursor:zoom-in}
+.lightbox-overlay.active{display:flex}
+.lightbox-overlay.zoomed{cursor:grab}
+.lightbox-overlay.dragging{cursor:grabbing!important}
+.lightbox-overlay img{max-width:92vw;max-height:92vh;border-radius:var(--nz-radius-md);box-shadow:0 4px 24px rgba(0,0,0,.6);user-select:none;-webkit-user-drag:none}
+.lightbox-overlay img.lb-rotating{transition:transform .25s ease}
+.lb-zoom-hint{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.8);font-size:var(--nz-fs-sm2);background:rgba(0,0,0,.55);padding:4px 14px;border-radius:var(--nz-radius-lg);pointer-events:none;opacity:0;transition:opacity .3s}
+.lb-zoom-hint.visible{opacity:1}
+.lb-toolbar{position:absolute;top:18px;right:18px;display:flex;gap:8px;z-index:1}
+.lb-tool-btn{width:36px;height:36px;border-radius:50%;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.55);color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,border-color .15s;-webkit-tap-highlight-color:transparent;line-height:1}
+.lb-tool-btn:hover{background:rgba(0,0,0,.8);border-color:rgba(255,255,255,.45)}
+.lb-tool-btn:focus-visible{outline:2px solid #58a6ff;outline-offset:2px}
+.lb-nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.55);color:#fff;font-size:var(--nz-fs-xl);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:1;transition:background .15s,border-color .15s,opacity .15s;-webkit-tap-highlight-color:transparent;line-height:1;padding:0 0 3px}
+.lb-nav:hover{background:rgba(0,0,0,.8);border-color:rgba(255,255,255,.45)}
+.lb-nav:focus-visible{outline:2px solid #58a6ff;outline-offset:2px}
+.lb-nav[aria-disabled="true"]{opacity:.3;cursor:default;pointer-events:none}
+.lb-nav-prev{left:14px}
+.lb-nav-next{right:14px}
+.lb-counter{position:absolute;top:18px;left:18px;color:rgba(255,255,255,.85);font-size:var(--nz-fs-sm);background:rgba(0,0,0,.55);padding:6px 14px;border-radius:var(--nz-radius-lg);pointer-events:none;z-index:1}
+.lightbox-overlay.lb-single .lb-nav,.lightbox-overlay.lb-single .lb-counter{display:none}
+.input-row{display:flex;gap:8px;align-items:flex-end}
+.input-row #msg-input{flex:1;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text);padding:8px 12px;font-family:inherit;font-size:var(--nz-fs-md);min-height:38px;max-height:120px;outline:none;line-height:1.4;overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text}
+.input-row #msg-input:focus{border-color:var(--nz-rust)}
+.input-row #msg-input:empty::before{content:attr(data-placeholder);color:var(--nz-text-placeholder);pointer-events:none}
+.btn-icon{width:36px;height:36px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text-mute);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:17px;transition:all .15s}
+.btn-icon:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-text-faint)}
+.btn-icon.sending{opacity:.5;pointer-events:none}
+/* Primary send CTA in brand rust (was hardcoded green #238636, off-token).
+   Rust is the app's single primary-action colour; send and stop swap in the
+   same slot so they're never both visible. R20260606. */
+.btn-send{background:var(--nz-rust);border-color:var(--nz-rust);color:#fff}
+.btn-send:hover{background:var(--nz-rust-emphasis);border-color:var(--nz-rust-emphasis)}
+.btn-stop{background:var(--nz-red);border-color:var(--nz-red);color:#fff;display:none}
+.btn-stop:hover{background:#b62324}
+.btn-mic{font-size:var(--nz-fs-md);position:relative}
+.btn-mic.recording{background:var(--nz-red);border-color:var(--nz-red);color:#fff;animation:pulse var(--nz-dur-loop) ease-in-out infinite}
+.rec-badge{position:absolute;top:-6px;right:-6px;background:var(--nz-red);color:#fff;font-size:var(--nz-fs-2xs);min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-family:var(--nz-font-mono);pointer-events:none}
+.btn-mic.transcribing{opacity:.5;pointer-events:none}
+
+/* Voice input mode (WeChat-style hold-to-talk) */
+.btn-hold-talk{display:none;flex:1;background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text-mute);font-size:15px;padding:8px 12px;min-height:38px;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;text-align:center;transition:all .15s;font-family:inherit}
+.btn-hold-talk.active{background:#238636;border-color:#238636;color:#fff}
+.input-area.voice-mode .btn-hold-talk{display:block}
+.input-area.voice-mode #msg-input{display:none}
+.input-area.voice-mode .btn-send{display:none}
+.input-area.voice-mode .file-preview{display:none}
+.input-area.voice-mode .btn-mic{background:var(--nz-bg-2);border-color:var(--nz-accent);color:var(--nz-accent)}
+
+/* Inline file reference chips in event bubbles */
+.file-ref{display:inline-flex;align-items:center;gap:4px;vertical-align:baseline;flex-wrap:wrap}
+.file-ref code{cursor:default}
+.fr-slot{display:inline-flex;align-items:center;gap:3px}
+.fr-tag{font-size:var(--nz-fs-2xs);padding:1px 5px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);color:var(--nz-text-dim);background:var(--nz-bg-2);font-family:inherit}
+.file-ref .fr-btn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);background:var(--nz-bg-2);color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-family:inherit;cursor:pointer;line-height:1;transition:all .15s}
+.file-ref .fr-btn:hover{background:var(--nz-bg-1);color:var(--nz-accent);border-color:var(--nz-accent)}
+.fr-slot.fr-verified .fr-btn{border-color:rgba(88,166,255,.4)}
+.fr-slot.fr-candidate .fr-btn{border-style:dashed;opacity:.7}
+.fr-slot.fr-missing{display:none}
+
+/* File viewer drawer — side panel for previewing workspace files */
+.fv-drawer{position:fixed;top:0;right:0;bottom:0;width:min(720px,60vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:var(--nz-z-drawer);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:var(--nz-shadow-drawer)}
+.fv-drawer.fv-open{transform:translateX(0)}
+.fv-drawer.hidden{pointer-events:none;visibility:hidden}
+.fv-header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--nz-border);flex-shrink:0;min-height:48px}
+.fv-title-wrap{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.fv-title{font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'SF Mono',ui-monospace,monospace}
+.fv-meta{font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
+.fv-actions{display:flex;gap:6px;flex-shrink:0}
+.fv-btn{height:26px;padding:0 10px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-2);color:var(--nz-text);font-size:var(--nz-fs-sm);font-family:inherit;cursor:pointer;transition:all .15s}
+.fv-btn:hover{background:var(--nz-bg-0);border-color:var(--nz-accent);color:var(--nz-accent)}
+.fv-close{font-size:18px;line-height:1;padding:0 8px}
+.fv-body{flex:1;overflow:auto;padding:12px 16px;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
+.fv-body pre{font-size:var(--nz-fs-sm);line-height:1.5;color:var(--nz-text);white-space:pre;word-break:normal;font-family:'SF Mono',ui-monospace,monospace;margin:0}
+.fv-body pre code{font-family:inherit}
+.fv-body pre.fv-lined{display:grid;grid-template-columns:auto 1fr;gap:0 12px;white-space:normal}
+.fv-body pre.fv-lined .fv-gutter{text-align:right;color:var(--nz-text-faint);user-select:none;padding-right:8px;border-right:1px solid var(--nz-border);white-space:pre;font-variant-numeric:tabular-nums}
+.fv-body pre.fv-lined code{white-space:pre;display:block}
+.fv-body img{max-width:100%;max-height:calc(100vh - 120px);display:block;margin:0 auto;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms)}
+.fv-body iframe{width:100%;height:calc(100vh - 80px);border:none;background:#fff;border-radius:var(--nz-radius-ms)}
+.fv-body .fv-binary{padding:32px;text-align:center;color:var(--nz-text-mute)}
+.fv-body .fv-binary .fv-mime{display:block;margin-top:8px;font-family:'SF Mono',ui-monospace,monospace;font-size:var(--nz-fs-xs);color:var(--nz-text-dim)}
+.fv-body .fv-truncated{padding:8px 12px;background:rgba(210,153,34,.1);border-left:3px solid var(--nz-amber);color:var(--nz-amber);font-size:var(--nz-fs-sm);margin-bottom:10px;border-radius:var(--nz-radius-xs)}
+.fv-body .fv-loading,.fv-body .fv-error{padding:24px;text-align:center;color:var(--nz-text-mute);font-size:var(--nz-fs-sm2)}
+.fv-body .fv-error{color:var(--nz-red)}
+/* Phone: full-width, and follow the visualViewport vars like .main / .sidebar
+   do so the iOS soft keyboard shrinks the drawer instead of covering its
+   bottom (#2434). */
+@media(max-width:768px){.fv-drawer{width:100%;max-width:100vw;top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}.fv-body iframe{height:calc(100vh - 100px)}}
+

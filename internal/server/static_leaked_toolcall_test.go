@@ -137,10 +137,7 @@ func TestDashboardJS_LeakedToolCall_FunctionAndStylesPresent(t *testing.T) {
 		t.Error("eventHtml must emit leaked-toolcall-summary / leaked-toolcall-body fold markup")
 	}
 
-	html, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
+	html := []byte(readDashboardHTMLAndCSS(t))
 	hs := string(html)
 	for _, cls := range []string{".leaked-toolcall{", ".leaked-toolcall-summary", ".leaked-toolcall-body"} {
 		if !strings.Contains(hs, cls) {

@@ -416,6 +416,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/css/{file}",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/dashboard.js",
     "handler_type": "http.HandlerFunc"
   },

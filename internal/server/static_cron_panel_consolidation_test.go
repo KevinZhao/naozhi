@@ -260,11 +260,7 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 // cleanup" pass, the drawer will render but look broken.
 func TestDashboardHTML_CronPanelConsolidationStyles(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
-	html := string(data)
+	html := readDashboardHTMLAndCSS(t)
 
 	// Two-column shell.
 	for _, sel := range []string{
@@ -418,10 +414,7 @@ func TestDashboardJS_R2_R4_TriggerCooldown(t *testing.T) {
 	}
 
 	// 7. CSS rules for is-sending / is-sent / is-running must exist.
-	htmlData, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
+	htmlData := []byte(readDashboardHTMLAndCSS(t))
 	html := string(htmlData)
 	for _, rule := range []string{
 		".cron-drawer-actions .cda-btn.primary.is-running",
@@ -451,10 +444,7 @@ func TestDashboardJS_R2_R1_LayoutObserver(t *testing.T) {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
 	js := string(jsData)
-	htmlData, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
+	htmlData := []byte(readDashboardHTMLAndCSS(t))
 	html := string(htmlData)
 
 	// 1. setupCronLayoutObserver must exist and fire from renderCronPanel.
@@ -518,10 +508,7 @@ func TestDashboardJS_R2_R12_DeleteCopy(t *testing.T) {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
 	js := string(jsData)
-	htmlData, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
+	htmlData := []byte(readDashboardHTMLAndCSS(t))
 	html := string(htmlData)
 
 	// 1. confirmDialog must support countdownSecs option. Old call sites

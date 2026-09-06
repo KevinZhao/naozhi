@@ -273,6 +273,20 @@ function startMockServer(overrides = {}) {
     const url = new URL(req.url, 'http://localhost');
     const pathname = url.pathname;
 
+    // Dashboard stylesheets (#2559 split them out of the inline <style>).
+    // Served from disk so a layout-sensitive spec sees the same cascade as
+    // production; an unknown name 404s like the Go handler does.
+    if (pathname.startsWith('/static/css/')) {
+      const name = pathname.slice('/static/css/'.length);
+      if (!/^[\w.]+\.css$/.test(name)) { res.writeHead(404); res.end(); return; }
+      let body;
+      try { body = fs.readFileSync(path.join(STATIC_DIR, 'css', name)); }
+      catch { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8' });
+      res.end(body);
+      return;
+    }
+
     if (pathname === '/e2e-shim.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
       res.end(
