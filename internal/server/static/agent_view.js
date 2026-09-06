@@ -11,6 +11,16 @@
 // call site for its stable globals. Never snapshot window values at top
 // level — dashboard reassigns the primitives.
 import { esc, escAttr, showToast, nzState } from './nz_util.js';
+import {
+  eventHtml,
+  fetchEvents,
+  fmtDuration,
+  refreshBanner,
+  renderEventsWithDividers,
+  sessionScrollPos,
+  sid,
+  wsm,
+} from './dashboard.js';
 
 (function () {
   'use strict';
@@ -87,7 +97,7 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
     // Stats.
     var stat = '';
     if (a.toolUses > 0) stat += a.toolUses + ' calls';
-    if (a.durationMs > 0) stat += (stat ? ' · ' : '') + window.fmtDuration(a.durationMs);
+    if (a.durationMs > 0) stat += (stat ? ' · ' : '') + fmtDuration(a.durationMs);
     if (isDone) stat += (stat ? ' · ' : '') + '✓';
     if (stat) parts += '<span class="sa-stat">· ' + stat + '</span>';
     parts += '</div>';
@@ -109,7 +119,7 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
   }
 
   function initAgentsFromSession() {
-    var sd = nzState.sessionsData[window.sid(nzState.selectedKey, nzState.selectedNode || 'local')];
+    var sd = nzState.sessionsData[sid(nzState.selectedKey, nzState.selectedNode || 'local')];
     if (sd && sd.subagents && sd.subagents.length > 0) {
       nzState.turnState.agents = sd.subagents.map(function (sa) {
         return {
@@ -190,7 +200,7 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
     stopHttpPoll();
     state.pollAfterMS = 0;
     state.pollSeenKeys = [];
-    window.refreshBanner();
+    refreshBanner();
 
     var el = document.getElementById('events-scroll');
     if (!el) return;
@@ -200,10 +210,8 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
       // Back to parent view: re-render the ring-buffered parent events.
       unsubscribeCurrent();
       el.innerHTML = '';
-      if (typeof window.fetchEvents === 'function') {
-        window.lastEventTime = 0;
-        window.fetchEvents(true);
-      }
+      nzState.lastEventTime = 0;
+      fetchEvents(true);
       return;
     }
 
@@ -303,18 +311,16 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
     }
     // Delegate to dashboard.js's shared renderer so the sub-agent panel and
     // parent view stay visually identical (markdown, tool_result folding,
-    // image thumbnails, time dividers). window.renderEventsWithDividers /
-    // window.eventHtml are exported by dashboard.js right next to their
+    // image thumbnails, time dividers). renderEventsWithDividers /
+    // eventHtml are exported by dashboard.js right next to their
     // definitions; fall back to a plain-text stub only if both are somehow
     // missing (unexpected — contract is enforced by dashboard.html script
     // ordering).
     // includeInternal=true keeps tool_use / task_* bubbles that
     // the parent view hides — for a sub-agent panel those ARE the content.
     var renderOpts = { includeInternal: true };
-    var renderAll = typeof window.renderEventsWithDividers === 'function'
-      ? window.renderEventsWithDividers : null;
-    var renderOne = typeof window.eventHtml === 'function'
-      ? window.eventHtml : null;
+    var renderAll = renderEventsWithDividers;
+    var renderOne = eventHtml;
     if (renderAll) {
       el.insertAdjacentHTML('beforeend', renderAll(events, 0, renderOpts));
     } else if (renderOne) {
@@ -335,9 +341,9 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
     // Bound the live DOM before reading scroll geometry so a long agent task
     // can't grow #events-scroll without limit and OOM the tab (#398-sibling).
     trimAgentEventsScroll(el);
-    // Track scroll position for window.sessionScrollPos restore on next switch.
-    var k = window.sid(nzState.selectedKey, nzState.selectedNode || 'local') + '|' + state.activeTaskID;
-    var pos = window.sessionScrollPos[k];
+    // Track scroll position for sessionScrollPos restore on next switch.
+    var k = sid(nzState.selectedKey, nzState.selectedNode || 'local') + '|' + state.activeTaskID;
+    var pos = sessionScrollPos[k];
     if (pos && typeof pos.scrollTop === 'number') {
       el.scrollTop = pos.scrollTop;
     } else {
@@ -348,8 +354,7 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
   function appendAgentEvent(ev) {
     var el = document.getElementById('events-scroll');
     if (!el || !ev) return;
-    var renderOne = typeof window.eventHtml === 'function'
-      ? window.eventHtml : null;
+    var renderOne = eventHtml;
     if (renderOne) {
       var html = renderOne(ev, { includeInternal: true });
       if (!html) return;
@@ -377,8 +382,8 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
       node: nzState.selectedNode || 'local',
       task_id: taskID,
     };
-    if (window.wsm && typeof window.wsm.send === 'function') {
-      window.wsm.send(msg);
+    if (wsm && typeof wsm.send === 'function') {
+      wsm.send(msg);
     }
   }
 
@@ -391,8 +396,8 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
       node: nzState.selectedNode || 'local',
       task_id: taskID,
     };
-    if (window.wsm && typeof window.wsm.send === 'function') {
-      window.wsm.send(msg);
+    if (wsm && typeof wsm.send === 'function') {
+      wsm.send(msg);
     }
   }
 
@@ -468,7 +473,7 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
     if (!st) return;
     var pieces = [];
     if (patch && patch.tool_uses > 0) pieces.push(patch.tool_uses + ' calls');
-    if (patch && patch.duration_ms > 0) pieces.push(window.fmtDuration(patch.duration_ms));
+    if (patch && patch.duration_ms > 0) pieces.push(fmtDuration(patch.duration_ms));
     if (pieces.length > 0) st.textContent = pieces.join(' · ');
   }
 
@@ -491,7 +496,7 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
       if (msg.meta.last_tool) row.lastTool = msg.meta.last_tool;
       if (msg.meta.tool_uses > 0) row.toolUses = msg.meta.tool_uses;
       if (msg.meta.duration_ms > 0) row.durationMs = msg.meta.duration_ms;
-      window.refreshBanner();
+      refreshBanner();
     }
     if (msg.task_id === state.activeTaskID) {
       refreshBreadcrumbStat(msg.meta);
@@ -503,7 +508,7 @@ import { esc, escAttr, showToast, nzState } from './nz_util.js';
     var row = findAgentByTaskId(msg.task_id);
     if (row) {
       row.status = msg.status || 'completed';
-      window.refreshBanner();
+      refreshBanner();
     }
     if (msg.task_id === state.activeTaskID) {
       state.activeStatus = msg.status || 'completed';

@@ -18,9 +18,7 @@
         "nz"
       ],
       "dashboard.js": [
-        "regroupAvatars",
-        "sending",
-        "wsm"
+        "sending"
       ]
     },
     "asset_browser.js": {
@@ -40,16 +38,13 @@
   "typeofGuards": {
     "contract.js": 0,
     "nz_util.js": 1,
-    "dashboard.js": 28,
-    "cron_view.js": 13,
+    "dashboard.js": 4,
+    "cron_view.js": 6,
     "agent_view.js": 0,
     "asset_browser.js": 0,
     "files_view.js": 0
   },
   "bridgeRefs": {
-    "dashboard.js": 31,
-    "cron_view.js": 101,
-    "agent_view.js": 22,
-    "files_view.js": 8
+    "dashboard.js": 30
   }
 }

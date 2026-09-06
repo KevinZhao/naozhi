@@ -53,7 +53,7 @@ func TestDashboardJS_LiveEventDOMCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cron_view.js: %v", err)
 	}
-	if !strings.Contains(string(cronData), "bubbles > window.CRON_LIVE_MAX_EVENTS") {
+	if !strings.Contains(string(cronData), "bubbles > CRON_LIVE_MAX_EVENTS") {
 		t.Error("cron_view.js: appendEventsToContainer must trim oldest .event nodes " +
 			"against CRON_LIVE_MAX_EVENTS (#398): the data model already shifts at the " +
 			"cap, so the DOM must too or a long cron run OOMs the tab.")
