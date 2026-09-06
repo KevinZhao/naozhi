@@ -103,7 +103,7 @@ test.describe('Round 2 — kiro session UI', () => {
     // (b) titles contain the operator-readable hint.
     const probe = await page.evaluate(() => {
       const out = {};
-      const fp = document.querySelector('button[onclick="openFilePicker()"]');
+      const fp = document.querySelector('button[data-action="file-picker"]');
       if (fp) {
         const style = getComputedStyle(fp);
         out.filePicker = {

@@ -235,7 +235,7 @@ test.describe('Backend picker + chips', () => {
 test.describe('Per-session feature gates', () => {
   // Selectors mirror applyFeatureGates() in dashboard.js (lines ~1178-1248).
   // The implementation only wires gates for two D-table items today:
-  //   D14 (image_input)  →  button[onclick="openFilePicker()"]
+  //   D14 (image_input)  →  button[data-action="file-picker"]
   //   D15 (audio_input)  →  #btn-mic, #btn-hold-talk (uses .feat-degraded)
   // Other D-items (D9 /urgent, D11 queue indicator, D12 askuser, D13 @-mention)
   // appear in the RFC but are not implemented yet — we only assert the two
@@ -260,7 +260,7 @@ test.describe('Per-session feature gates', () => {
     await page.waitForTimeout(300);
 
     const probe = await page.evaluate(() => {
-      const fp = document.querySelector('button[onclick="openFilePicker()"]');
+      const fp = document.querySelector('button[data-action="file-picker"]');
       const mic = document.getElementById('btn-mic');
       const hold = document.getElementById('btn-hold-talk');
       return {

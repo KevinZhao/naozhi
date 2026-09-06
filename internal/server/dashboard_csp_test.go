@@ -506,15 +506,16 @@ var generatedOnclickBundle = []string{
 // must be rejected — add a data-action dispatch entry instead. (Pure file
 // splits that move handlers between bundle files leave the total unchanged.)
 //
-// 42 = dashboard.js 42; cron_view.js went 41 -> 0 in the #1980 PR-1
-// data-action migration; every other bundle file is at 0.
+// 2 = dashboard.js 2, both CSP-legal element-property assignments
+// (btn.onclick = …), not inline attributes — the attribute surface went to
+// 0 across the bundle in the #1980 PR-1/PR-2 data-action migration.
 // It was 86 while two comments (dashboard.js, nz_util.js) still spelled out the
 // counted token — the count is textual, so prose inflated it by 2 and made
 // nz_util.js look like it had a handler when it had none. Both were reworded,
 // and TestDashboardCSP_RatchetCountsNoCommentTokens now fails if prose
 // reintroduces one, which would otherwise let this cap drift upward while the
 // real handler surface stood still.
-const generatedOnclickCap = 42
+const generatedOnclickCap = 2
 
 // TestDashboardCSP_GeneratedHandlerSurfaceRatchet pins the JS-generated inline
 // `onclick=` surface across the whole dashboard JS bundle as a downward-only

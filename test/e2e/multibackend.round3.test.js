@@ -235,7 +235,7 @@ test.describe('Round 3 — Mixed-backend dashboard switching', () => {
     await page.click(`.session-card[data-key="${claude.key}"]`);
     await page.waitForTimeout(400);
     const claudeSnap = await page.evaluate(() => {
-      const fp = document.querySelector('button[onclick="openFilePicker()"]');
+      const fp = document.querySelector('button[data-action="file-picker"]');
       const headerCost = document.querySelector('.main-header')?.textContent || '';
       return {
         filePickerDisabled: fp ? fp.disabled : null,
@@ -248,7 +248,7 @@ test.describe('Round 3 — Mixed-backend dashboard switching', () => {
     await page.click(`.session-card[data-key="${kiro.key}"]`);
     await page.waitForTimeout(400);
     const kiroSnap = await page.evaluate(() => {
-      const fp = document.querySelector('button[onclick="openFilePicker()"]');
+      const fp = document.querySelector('button[data-action="file-picker"]');
       const headerCost = document.querySelector('.main-header')?.textContent || '';
       return {
         filePickerDisabled: fp ? fp.disabled : null,
