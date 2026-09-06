@@ -30,7 +30,12 @@ test.describe('#1772 mobile render hotspots', () => {
     expect(mobileJs).toContain('-dx / cardW * 0.6');
     expect(mobileJs).not.toContain('-dx / card.offsetWidth * 0.6');
     // scroll handler must gate the popover dismiss on the open flag.
-    expect(js).toContain('if (navPopoverOpen) navDismissPopover();');
+    // #2558 D4-6: the scroll gate moved with Message navigation.
+    const navJs = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'internal/server/static/msg_nav.js'),
+      'utf8'
+    );
+    expect(navJs).toContain('if (navPopoverOpen) navDismissPopover();');
   });
 
   test('source: asset_browser search input is debounced', async () => {

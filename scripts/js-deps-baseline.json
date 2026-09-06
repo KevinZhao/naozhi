@@ -30,7 +30,7 @@
   "typeofGuards": {
     "contract.js": 0,
     "nz_util.js": 1,
-    "dashboard.js": 4,
+    "dashboard.js": 3,
     "cron_view.js": 6,
     "agent_view.js": 0,
     "asset_browser.js": 0,

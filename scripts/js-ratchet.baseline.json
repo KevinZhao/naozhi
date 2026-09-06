@@ -30,10 +30,16 @@
     "topLevelLetVar": 18
   },
   "dashboard.js": {
-    "lines": 10492,
+    "lines": 8920,
     "maxFunctionLines": 249,
-    "functionsOver100": 12,
-    "topLevelLetVar": 65
+    "functionsOver100": 7,
+    "topLevelLetVar": 59
+  },
+  "discovery.js": {
+    "lines": 253,
+    "maxFunctionLines": 150,
+    "functionsOver100": 1,
+    "topLevelLetVar": 0
   },
   "file_refs.js": {
     "lines": 937,
@@ -52,6 +58,12 @@
     "maxFunctionLines": 118,
     "functionsOver100": 1,
     "topLevelLetVar": 3
+  },
+  "msg_nav.js": {
+    "lines": 460,
+    "maxFunctionLines": 46,
+    "functionsOver100": 0,
+    "topLevelLetVar": 5
   },
   "nz_util.js": {
     "lines": 233,
@@ -83,6 +95,12 @@
     "functionsOver100": 0,
     "topLevelLetVar": 0
   },
+  "sidebar_project.js": {
+    "lines": 596,
+    "maxFunctionLines": 102,
+    "functionsOver100": 2,
+    "topLevelLetVar": 0
+  },
   "split_view.js": {
     "lines": 222,
     "maxFunctionLines": 0,
@@ -94,6 +112,12 @@
     "maxFunctionLines": 73,
     "functionsOver100": 0,
     "topLevelLetVar": 2
+  },
+  "tuning.js": {
+    "lines": 530,
+    "maxFunctionLines": 132,
+    "functionsOver100": 2,
+    "topLevelLetVar": 1
   },
   "utilities.js": {
     "lines": 1094,

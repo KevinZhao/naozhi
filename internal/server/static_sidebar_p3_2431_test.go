@@ -130,11 +130,13 @@ func TestDashboard2431_DiscoveredKeyIncludesNode(t *testing.T) {
 		extractJSFunction(t, js, "parseDiscoveredPid") +
 		extractJSFunction(t, js, "findDiscovered") +
 		extractJSFunction(t, js, "dropDiscovered") + `
-let discoveredItems = [
+// #2558 D4-6: these helpers moved to discovery.js, where the discovered set
+// is read through the nz.state accessor — mirror that surface.
+const nzState = { discoveredItems: [
   { pid: 4242, node: 'local', session_id: 'a' },
   { pid: 4242, node: 'remote1', session_id: 'b' },
   { pid: 7, session_id: 'c' },
-];
+] };
 const out = {};
 out.keyLocal = discoveredKey(4242, 'local');
 out.keyRemote = discoveredKey(4242, 'remote1');
@@ -145,7 +147,7 @@ out.findLocal = (findDiscovered(4242, 'local') || {}).session_id || null;
 out.findDefault = (findDiscovered(7, undefined) || {}).session_id || null;
 out.findMissing = findDiscovered(4242, 'nope');
 dropDiscovered(4242, 'local');
-out.afterDrop = discoveredItems.map(d => d.session_id);
+out.afterDrop = nzState.discoveredItems.map(d => d.session_id);
 process.stdout.write(JSON.stringify(out));
 `
 	var got struct {

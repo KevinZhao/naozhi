@@ -215,20 +215,20 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 	if !strings.Contains(stopFn, "_previewGen++;") {
 		t.Error("stopPreviewPolling() must bump _previewGen so selectSession/createSession invalidate in-flight previews")
 	}
-	if !strings.Contains(fn, "stopPreviewPolling();\n  const gen = _previewGen;") {
+	if !strings.Contains(fn, "deps.stopPreviewPolling();\n  const gen = nzState._previewGen;") {
 		t.Error("previewDiscovered must call stopPreviewPolling() FIRST and then capture gen = _previewGen (capturing before the call would be invalidated by its own bump)")
 	}
-	if strings.Contains(fn, "++_previewGen") {
+	if strings.Contains(fn, "++nzState._previewGen") {
 		t.Error("previewDiscovered must not bump _previewGen itself — the bump belongs to stopPreviewPolling()")
 	}
-	if strings.Count(fn, "if (gen !== _previewGen) return;") < 3 {
+	if strings.Count(fn, "if (gen !== nzState._previewGen) return;") < 3 {
 		t.Error("previewDiscovered must check the generation after the awaited fetch (ok + error paths) AND inside the poll tick")
 	}
 	idxSet := strings.Index(fn, "previewTimer = setInterval(")
 	if idxSet < 0 {
 		t.Fatal("previewTimer = setInterval( not found")
 	}
-	idxGen := strings.Index(fn, "if (gen !== _previewGen) return;\n    const el = document.getElementById('events-scroll');")
+	idxGen := strings.Index(fn, "if (gen !== nzState._previewGen) return;\n    const el = document.getElementById('events-scroll');")
 	if idxGen < 0 || idxGen > idxSet {
 		t.Fatal("generation check must precede the #events-scroll lookup and previewTimer = setInterval(")
 	}
@@ -236,7 +236,7 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 	// must be NO stopPreviewPolling() call: it bumps _previewGen and would
 	// invalidate this very call (its tick would bail on the first fire). The
 	// prologue call already cleared any older generation's interval.
-	if strings.Contains(fn[idxGen:idxSet], "stopPreviewPolling();") {
+	if strings.Contains(fn[idxGen:idxSet], "deps.stopPreviewPolling();") {
 		t.Error("previewDiscovered must not call stopPreviewPolling() between the gen check and setInterval — it would invalidate its own generation")
 	}
 }

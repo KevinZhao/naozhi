@@ -206,6 +206,15 @@ const lateBound = writesToDash.filter((n) => !STATE.has(n)
 const fromUtil = needs.filter((n) => NZ_UTIL.has(n)).sort();
 const fromState = needs.filter((n) => STATE.has(n)).sort();
 const asDeps = needs.filter((n) => !NZ_UTIL.has(n) && !STATE.has(n) && !lateBound.includes(n)).sort();
+// A dep is captured ONCE, at configure time. If the name is a reassignable
+// dashboard `let`, the module would hold a snapshot forever — reads go stale
+// silently (the first D4-6 pass injected _lastSidebarData that way: it was
+// null at configure time, so the sidebar re-render path read null for the
+// rest of the page's life). Such names must go through nz.state instead.
+const restLets = new Set(
+  [...restDecls.entries()].filter(([, kind]) => kind === 'let').map(([n]) => n)
+);
+const snapshotTraps = asDeps.filter((n) => restLets.has(n));
 const stateWrites = writesToDash.filter((n) => STATE.has(n));
 const otherWrites = writesToDash.filter((n) => !STATE.has(n) && !lateBound.includes(n));
 
@@ -220,6 +229,10 @@ console.log(`  nz.state reads (${fromState.length}): ${fromState.join(', ') || '
 console.log(`  injected deps  (${asDeps.length}): ${asDeps.join(', ') || '-'}`);
 console.log(`  exports back   (${exposed.length}): ${exposed.join(', ') || '-'}`);
 if (lateBound.length) console.log(`  late-bound hooks moved with the region (${lateBound.length}): ${lateBound.join(', ')}`);
+if (snapshotTraps.length) {
+  console.log(`  ! reassignable dashboard lets cannot be injected deps (value would be snapshotted at configure time): ${snapshotTraps.join(', ')}`);
+  if (!dryRun) fail('refusing to move: promote those names to nz.state (get+set) first');
+}
 if (stateWrites.length) console.log(`  ! nz.state SETTERS required in dashboard.js: ${stateWrites.join(', ')}`);
 if (otherWrites.length) console.log(`  ! writes a non-state dashboard binding (NOT movable as-is): ${otherWrites.join(', ')}`);
 
@@ -253,8 +266,14 @@ const rewriteRefs = (text) => {
   // property-access guard; the moved text is JS, so a preceding `.` or `$`
   // means it is already a member access.
   let t = text;
-  for (const n of fromState) t = t.replace(new RegExp(`(?<![.\\w$])${n}(?![\\w$])`, 'g'), `nzState.${n}`);
-  for (const n of asDeps) t = t.replace(new RegExp(`(?<![.\\w$])${n}(?![\\w$])`, 'g'), `deps.${n}`);
+  // The lookbehind rejects a preceding `.` so `obj.name` is left alone — but
+  // `...name` (spread) has a dot two chars back, so require that the dot is
+  // NOT part of an ellipsis. Missing this left one `[...collapsedProjects]`
+  // unprefixed in the first sidebar_project extraction.
+  const guard = (n) => new RegExp(`(?<!\\.\\.\\.)(?<![\\w$])(?<!\\.)${n}(?![\\w$])`, 'g');
+  const spread = (n) => new RegExp(`\\.\\.\\.${n}(?![\\w$])`, 'g');
+  for (const n of fromState) t = t.replace(guard(n), `nzState.${n}`).replace(spread(n), `...nzState.${n}`);
+  for (const n of asDeps) t = t.replace(guard(n), `deps.${n}`).replace(spread(n), `...deps.${n}`);
   return t;
 };
 

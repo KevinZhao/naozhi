@@ -1,4 +1,4 @@
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, nzViews, nzTest, registerActions  , isCronSessionKey } from './nz_util.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, nzViews, nzTest, registerActions   } from './nz_util.js';
 import {
   BLOCK_SPLIT_RE,
   LIST_ITEM_RE,
@@ -144,6 +144,48 @@ import {
   timeAgo,
   timeDividerHtml,
 } from './utilities.js';
+import {
+  configureDiscovery,
+  discoveredKey,
+  dropDiscovered,
+  findDiscovered,
+  isDiscoveredKey,
+  parseDiscoveredPid,
+  previewDiscovered,
+  sameDiscovered,
+  scanDiscovered,
+} from './discovery.js';
+import {
+  configureTuning,
+  dismissSession,
+  fetchGitState,
+  invalidateGitState,
+  openTuningPopover,
+  removeSidebarCard,
+  renameSession,
+  repaintGitChip,
+} from './tuning.js';
+import {
+  configureMsgNav,
+  navDismissPopover,
+  navMsg,
+  navPopoverOpen,
+  navRebuild,
+  navShowList,
+  navUpdatePill,
+  updateSendButton,
+} from './msg_nav.js';
+import {
+  CLAWD_SVG,
+  ICONS,
+  configureSidebarProject,
+  openProjectSettings,
+  sectionHeaderFallbackHtml,
+  sectionHeaderHtml,
+  showGitRemote,
+  toggleFavorite,
+  toggleProjectCollapsed,
+} from './sidebar_project.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
@@ -1205,555 +1247,6 @@ function matchProject(workspace) {
   return best;
 }
 
-// --- Project section header (favorite + github icons) ---
-
-// The star glyph is identical in both states — CSS class `star-on` + `fill:currentColor`
-// controls the visual fill. A single constant avoids the misleading dead ternary
-// that previously implied a per-state SVG difference.
-const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>';
-// "Clawd" pixel mascot for claude-backend assistant turns. Sourced from
-// the Custom Brand Icons set, icon `cbi:claude-clawd`
-// (https://github.com/elax46/custom-brand-icons), licensed CC BY-NC-SA
-// 4.0. Naozhi ships under BSL 1.1 (non-commercial Additional Use Grant
-// through 2030-03-21), so the NC clause is compatible for the current
-// licensed term — see ATTRIBUTIONS.md. Fill flows from currentColor so
-// the rust hex lives once in dashboard.html as --nz-clawd-rust (CSS sets
-// .cc-clawd { color: var(--nz-clawd-rust) }) — no inline hex in JS.
-const CLAWD_SVG = '<svg class="cc-clawd" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" d="M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z"/></svg>';
-const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>';
-// Chevron: points down when expanded (`▾`-like), rotated 90deg via CSS
-// when collapsed so the same glyph serves both states.
-const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
-
-// ICONS — single source of truth for the non-SVG glyph set (#2027). Before
-// this map the dashboard carried four parallel icon notations (SVG consts,
-// `&#x..;` / `&#..;` HTML entities, bare Unicode glyphs like `✎ ⎘`, and raw
-// `\u{..}` escapes) with the same semantic icon spelled differently at each
-// call site. Centralising here means one icon → one definition → one notation.
-//
-// Notation rule: literal Unicode glyph characters (one form, no mixing decimal
-// `&#128277;` with hex `&#x2328;`, no mixing `\u{1f464}` lowercase with
-// `\u{1F916}` uppercase). Literal glyphs are the only notation that renders
-// correctly in BOTH consumption contexts used here: dropped raw into innerHTML
-// / template strings, and passed through esc() (which would HTML-escape an
-// entity's `&` into `&amp;` and show it verbatim). SVG-backed icons
-// (star/github/chevron/clawd) keep their dedicated *_SVG consts above.
-const ICONS = {
-  close:    '×', // dismiss / close affordance
-  back:     '←', // mobile back
-  navUp:    '▲', // previous user message
-  navDown:  '▼', // next user message
-  edit:     '✎', // rename / edit
-  copy:     '⎘', // copy key
-  trash:    '🗑', // delete
-  attach:   '📎', // attach file
-  mic:      '🎤', // voice input
-  keyboard: '⌨', // keyboard input
-  send:     '➤', // send message
-  stop:     '■', // interrupt turn
-  download: '⬇', // download
-  downArrow:'↓', // file-row download (thinner, paired with ↗)
-  preview:  '↗', // preview / ask-aside
-  gear:     '⚙', // init / system event
-  user:     '&gt;_', // user event — brand ">_" terminal prompt mark (rust mono, see .event.user .event-icon)
-  spark:    '✦', // assistant text event (non-claude backends)
-  todo:     '☰', // todo event
-  robot:    '🤖', // subagent badge / agent count
-  galleryPrev:  '‹', // lightbox previous image
-  galleryNext:  '›', // lightbox next image
-  zoomOut:      '−', // lightbox zoom out
-  zoomIn:       '+', // lightbox zoom in
-  rotateLeft:   '↺', // lightbox rotate left
-  rotateRight:  '↻', // lightbox rotate right
-};
-
-// sectionHeaderFallbackHtml renders the minimal header for ad-hoc workspace
-// groups (p.fallback === true). The group's "project name" is just the
-// workspace basename — it is NOT a registered ProjectManager project — so
-// favorite / GitHub / + buttons have no stable semantics and are omitted.
-// Split out of sectionHeaderHtml to preserve the R110-P2 invariant that
-// sectionHeaderHtml has a single unconditional `return '<div...` with
-// `newBtn` concatenated directly (locked by static_ux_contract_test).
-function sectionHeaderFallbackHtml(p) {
-  const node = p.node || 'local';
-  const workspace = p.workspace || '';
-  // Collapse key matches the group key used in renderSidebar (node:name:ws)
-  // so two folders with the same basename each own their own fold state.
-  const ck = node + ':' + p.name + ':' + workspace;
-  const collapsed = collapsedProjects.has(ck);
-  const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
-  const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
-  const cTitle = collapsed ? '展开' : '收起';
-  const collapseBtn = '<button type="button" class="' + cCls + '" data-action="project-collapse" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '">' + CHEVRON_SVG + '</button>';
-  const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
-  const nameTitle = workspace ? escAttr(p.name + ' — ' + workspace) : escAttr(p.name);
-  const collapsedCls = collapsed ? ' is-collapsed' : '';
-  return '<div class="section-header section-header-fallback' + collapsedCls + '" role="group" aria-label="' + escAttr(p.name) + '">' +
-    collapseBtn +
-    '<span class="sh-name" title="' + nameTitle + '">' + esc(p.name) + '</span>' +
-    countBadge +
-    '</div>';
-}
-
-function sectionHeaderHtml(p) {
-  const node = p.node || 'local';
-  const fav = !!p.favorite;
-  const starCls = fav ? 'sh-btn star-on' : 'sh-btn';
-  const starTitle = fav ? 'Unfavorite' : 'Favorite';
-  const ck = node + ':' + p.name;
-  const collapsed = collapsedProjects.has(ck);
-  const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
-  const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
-  const cTitle = collapsed ? '展开' : '收起';
-  const collapseBtn = '<button type="button" class="' + cCls + '" data-action="project-collapse" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '">' + CHEVRON_SVG + '</button>';
-  const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
-
-  // No longer pass `data-fav` — the handler derives current state from the
-  // authoritative `projectsData` at click time, avoiding a stale DOM attribute
-  // that could cause a fast second click (before re-render) to send a
-  // redundant or wrong-polarity toggle.
-  const starBtn = '<button type="button" class="' + starCls + '" data-action="project-favorite" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="' + starTitle + '" aria-label="' + starTitle + ' ' + escAttr(p.name) + '">' + STAR_SVG + '</button>';
-
-  // Project settings gear (RFC project-access-profile §8.1). Opens the
-  // right-side settings drawer for this project. Remote projects are edited on
-  // their own node's dashboard, so the gear is local-only (the PUT
-  // /api/projects/config remote proxy exists but the drawer's live pickers read
-  // the LOCAL backend/access-profile registries).
-  let gearBtn = '';
-  if (node === 'local') {
-    gearBtn = '<button type="button" class="sh-btn" data-action="project-settings" data-name="' + escAttr(p.name) + '" title="项目设置：' + escAttr(p.name) + '" aria-label="项目设置 ' + escAttr(p.name) + '">' + ICONS.gear + '</button>';
-  }
-
-  let ghBtn = '';
-  if (p.github) {
-    const url = p.git_remote_url || '';
-    // R110-P2 tooltip clarity: the old "GitHub: <url>" left the CTA implicit
-    // — click-to-open was only discoverable by trial. Lead with the verb
-    // "在 GitHub 打开仓库" so the affordance is explicit; append the URL so
-    // operators can still eyeball the remote for the common case where
-    // they're verifying the repo match before clicking.
-    ghBtn = '<button type="button" class="sh-btn github-on" data-action="project-github" data-url="' + escAttr(url) + '" title="在 GitHub 打开仓库：' + escAttr(url) + '" aria-label="在 GitHub 打开仓库 ' + escAttr(p.name) + '">' + GITHUB_SVG + '</button>';
-  }
-
-  const collapsedCls = collapsed ? ' is-collapsed' : '';
-  // R110-P2 / #448: prefix the display name with the configured emoji
-  // (if any) and use display_name when set; aria-label / title still
-  // carry p.name so screen-readers + tooltips disambiguate when the
-  // dirname differs from the human-friendly label.
-  const emojiPrefix = projectDisplayPrefix(p);
-  const displayName = projectDisplayLabel(p);
-  const labelTitle = (displayName && displayName !== p.name)
-    ? p.name + ' — ' + displayName
-    : p.name;
-  return '<div class="section-header' + collapsedCls + '" role="group" aria-label="' + escAttr(labelTitle) + '">' +
-    collapseBtn + starBtn +
-    '<span class="sh-name" title="' + escAttr(labelTitle) + '">' +
-      (emojiPrefix ? esc(emojiPrefix) : '') + esc(displayName) +
-    '</span>' +
-    countBadge +
-    ghBtn +
-    gearBtn +
-    '</div>';
-}
-
-// SIDEBAR_PROJECT_ACTIONS maps the `data-action` token on a project-header
-// control to the handler it invokes, reading arguments from the button's
-// own dataset. This is the data-action dispatch idiom already used by the
-// cron menu (CRON_MENU_ACTIONS / handleCronMenuClick) — it lets the section
-// header buttons drop their inline click attributes, shrinking the
-// script-src 'unsafe-inline' surface (#922 / #1734) without changing
-// behaviour. Keys must match the data-action values emitted in
-// sectionHeaderHtml / sectionHeaderFallbackHtml.
-// #1980 PR-2: the project-header buttons' scoped #session-list delegation
-// (SIDEBAR_PROJECT_ACTIONS / initSidebarProjectActions) merged into the
-// global nz.actions registry at the tail of this file — closest() single
-// dispatch subsumes the old stopPropagation, and the capture-phase
-// long-press swallow from initSwipeDelete still runs first (capture).
-
-// toggleProjectCollapsed flips a project section's fold state, persists
-// it, and re-renders from the last sidebar payload (no network round-trip).
-// Key format: "<node>:<name>" matching the grouping key in renderSidebar.
-function toggleProjectCollapsed(key) {
-  if (!key) return;
-  if (collapsedProjects.has(key)) collapsedProjects.delete(key);
-  else collapsedProjects.add(key);
-  try {
-    localStorage.setItem('nz_collapsedProjects', JSON.stringify([...collapsedProjects]));
-  } catch (_) {}
-  if (_lastSidebarData) {
-    renderSidebar(_lastSidebarData);
-  } else {
-    debouncedFetchSessions();
-  }
-}
-
-// In-flight guard against a double-click race: the star button's DOM state
-// lags behind projectsData until the next fetchSessions re-render. Without
-// this set, a second click inside that window would read a stale DOM hint and
-// potentially fire the same or opposite polarity. Keyed by (node, name).
-const _favInFlight = new Set();
-
-async function toggleFavorite(name, node) {
-  const nodeID = node || 'local';
-  const key = nodeID + ':' + name;
-  if (_favInFlight.has(key)) return; // drop re-entry
-  // Derive current state from the source of truth (projectsData), not the
-  // button's data-fav attribute which may not have been re-rendered yet.
-  const proj = projectsData.find(x => x.name === name && (x.node || 'local') === nodeID);
-  if (!proj) return;
-  const next = !proj.favorite;
-  _favInFlight.add(key);
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const qs = 'name=' + encodeURIComponent(name) + '&favorite=' + (next ? 'true' : 'false') +
-      (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
-    try {
-      await fetchJSON(NZ_CONTRACT.API.projects_favorite + '?' + qs, { timeoutMs: 10000, method: 'POST', headers });
-    } catch (err) {
-      if (err && err.status) {
-        showAPIError(next ? '收藏项目' : '取消收藏', err.status, '');
-      } else {
-        showNetworkError(next ? '收藏项目' : '取消收藏', err);
-      }
-      // Re-render from the server so the star's visual hover/click state
-      // snaps back to the authoritative `projectsData` value; otherwise the
-      // user sees a phantom success.
-      fetchSessions();
-      return;
-    }
-    // Optimistic update then refresh.
-    proj.favorite = next;
-    showToast(next ? '已收藏 ' + name : '已取消收藏 ' + name, 'success');
-    fetchSessions();
-  } finally {
-    _favInFlight.delete(key);
-  }
-}
-
-// openProjectSettings opens the per-project settings modal (RFC
-// project-access-profile §8.1). It reads GET /api/projects/config for the
-// current values, renders editable fields (display name / emoji / access
-// profile / backend / planner model + prompt), and writes back via PUT. The
-// access-profile + backend pickers reuse the same registries the new-session
-// modal consumes, so a project can be pinned to an auth chain / backend without
-// hand-editing project.yaml. Local projects only (see gear-button gating).
-async function openProjectSettings(name) {
-  if (!name) return;
-  // Load the three inputs in parallel: current config + the two registries the
-  // pickers render from. Config failure is fatal (nothing to edit); registry
-  // failures degrade to hidden pickers (same as new-session modal).
-  let cfg;
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const [c] = await Promise.all([
-      fetchJSON(NZ_CONTRACT.API.projects_config + '?name=' + encodeURIComponent(name), { timeoutMs: 10000, headers, credentials: 'same-origin' }),
-      fetchCLIBackends(),
-      fetchAccessProfiles(),
-    ]);
-    cfg = c || {};
-  } catch (err) {
-    if (err && err.status) showAPIError('加载项目设置', err.status, '');
-    else showNetworkError('加载项目设置', err);
-    return;
-  }
-
-  const accessProfilePicker = renderAccessProfilePicker(accessProfiles, { selectId: 'ps-access-profile', selectedId: cfg.access_profile || '' });
-  const backendPicker = renderBackendPicker(cliBackends, { selectId: 'ps-backend', selectedId: cfg.backend || '' });
-
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true" aria-label="项目设置：' + escAttr(name) + '">' +
-      '<h3>项目设置 · ' + esc(name) + '</h3>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-display-name">显示名称</label>' +
-        '<input id="ps-display-name" style="' + PICKER_SELECT_STYLE + '" maxlength="200" value="' + escAttr(cfg.display_name || '') + '" placeholder="' + escAttr(name) + '">' +
-      '</div>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-emoji">Emoji</label>' +
-        '<input id="ps-emoji" style="' + PICKER_SELECT_STYLE + '" maxlength="16" value="' + escAttr(cfg.emoji || '') + '" placeholder="🗂">' +
-      '</div>' +
-      accessProfilePicker +
-      '<div style="margin:-6px 0 12px"><button type="button" class="linklike" data-action="ps-new-profile" style="background:none;border:none;color:var(--nz-accent);font-size:12px;cursor:pointer;padding:0">+ 新建访问档…</button></div>' +
-      backendPicker +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-planner-model">Planner model（留空则继承）</label>' +
-        '<input id="ps-planner-model" style="' + PICKER_SELECT_STYLE + '" maxlength="256" value="' + escAttr(cfg.planner_model || '') + '" placeholder="' + escAttr(accessProfileDefaultModel(cfg.access_profile) || '（继承默认）') + '">' +
-      '</div>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-planner-prompt">Planner prompt（可选，单行）</label>' +
-        '<textarea id="ps-planner-prompt" rows="3" style="' + PICKER_SELECT_STYLE + ';resize:vertical" maxlength="8192" placeholder="附加系统提示…">' + esc(cfg.planner_prompt || '') + '</textarea>' +
-      '</div>' +
-      '<div id="ps-preview" style="font-size:12px;color:var(--nz-text-mute);margin-bottom:12px;padding:8px;background:var(--nz-bg-0);border-radius:4px"></div>' +
-      '<div id="ps-error" style="display:none;color:var(--nz-danger,#e5484d);font-size:12px;margin-bottom:8px"></div>' +
-      '<div class="modal-btns">' +
-        '<button type="button" data-action="modal-close">取消</button>' +
-        '<button type="button" class="primary" data-action="ps-save" data-name="' + escAttr(name) + '">保存</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-  trapFocus(overlay);
-
-  // Live "effective link" preview: shows how the next session under this
-  // project will resolve (profile → resolved model). Non-sensitive only — no
-  // base-URL/token, just the profile label + model (§8.1 联动预览 / §8.4).
-  const updatePreview = () => {
-    const apEl = document.getElementById('ps-access-profile');
-    const apID = apEl ? apEl.value : (cfg.access_profile || '');
-    const pmEl = document.getElementById('ps-planner-model');
-    const model = (pmEl && pmEl.value.trim()) || accessProfileDefaultModel(apID) || '（继承默认）';
-    const info = accessProfileChipInfo(apID);
-    const label = info ? info.label : '全局默认';
-    const box = document.getElementById('ps-preview');
-    if (box) box.textContent = '生效链路：' + label + ' → ' + model;
-  };
-  const apSel = document.getElementById('ps-access-profile');
-  if (apSel) apSel.addEventListener('change', updatePreview);
-  const pmInput = document.getElementById('ps-planner-model');
-  if (pmInput) pmInput.addEventListener('input', updatePreview);
-  updatePreview();
-
-  const saveBtn = overlay.querySelector('[data-action="ps-save"]');
-  if (saveBtn) saveBtn.addEventListener('click', () => saveProjectSettings(name, cfg, overlay));
-
-  // "+ 新建访问档" opens the create form; on success it refreshes the registry
-  // and re-selects the new profile in this drawer's picker.
-  const newBtn = overlay.querySelector('[data-action="ps-new-profile"]');
-  if (newBtn) newBtn.addEventListener('click', () => {
-    openCreateAccessProfile((newID) => {
-      const sel = document.getElementById('ps-access-profile');
-      if (sel) {
-        // The picker was rendered before the new profile existed; add + select
-        // it so the drawer immediately reflects the creation without a reopen.
-        if (![...sel.options].some(o => o.value === newID)) {
-          const opt = document.createElement('option');
-          opt.value = newID;
-          opt.textContent = accessProfileChipInfo(newID)?.label || newID;
-          sel.appendChild(opt);
-        }
-        sel.value = newID;
-        updatePreview();
-      }
-    });
-  });
-}
-
-// ACCESS_PROFILE_TEMPLATES pre-fill the create form for the two common cases so
-// the operator doesn't have to know env-var names (RFC P1-d). Values are the
-// literal overlay keys the server accepts; the token goes to a *_FILE.
-const ACCESS_PROFILE_TEMPLATES = {
-  '1p': {
-    label: '个人 Anthropic（1P 直连）',
-    display_name: '个人 Anthropic',
-    // Reference a design token rather than an inline hex literal (RNEW-UX-015
-    // ratchet). The operator can edit the colour later by hand-editing config.
-    chip_color: 'var(--nz-accent)',
-    env: { CLAUDE_CODE_USE_BEDROCK: '0', ANTHROPIC_BASE_URL: 'https://api.anthropic.com' },
-    token_env_key: 'ANTHROPIC_AUTH_TOKEN_FILE',
-    token_hint: '粘贴 1P Anthropic 的 auth token（写入 0600 文件，不进 config）',
-    default_model: 'claude-fable-5',
-  },
-  'bedrock': {
-    label: '公司 Bedrock（经本机 proxy）',
-    display_name: '公司 Bedrock',
-    chip_color: 'var(--nz-purple)',
-    env: { CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_SKIP_BEDROCK_AUTH: '1', ANTHROPIC_BEDROCK_BASE_URL: 'http://127.0.0.1:8889', AWS_REGION: 'us-west-2' },
-    token_env_key: '',
-    token_hint: '',
-    default_model: 'claude-opus-4-8',
-  },
-};
-
-// openCreateAccessProfile renders the guided create-profile form (RFC P1-d).
-// A template pre-fills env keys + colour so the operator only supplies an id,
-// a display name, and (for 1P) a token. On submit it POSTs /api/access-profiles;
-// on success it refreshes the cached registry and calls onCreated(id). The
-// token textarea value is sent once and never read back (write-only secret).
-function openCreateAccessProfile(onCreated) {
-  const tplOptions = Object.keys(ACCESS_PROFILE_TEMPLATES)
-    .map(k => '<option value="' + escAttr(k) + '">' + esc(ACCESS_PROFILE_TEMPLATES[k].label) + '</option>').join('');
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true" aria-label="新建访问档">' +
-      '<h3>新建访问档</h3>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-template">模板</label>' +
-        '<span class="picker-select-wrap"><select id="cap-template" style="' + PICKER_SELECT_ONLY_STYLE + '">' + tplOptions + '</select></span>' +
-      '</div>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-id">档 ID（英数字 . _ -，唯一）</label>' +
-        '<input id="cap-id" style="' + PICKER_SELECT_STYLE + '" maxlength="64" placeholder="1p-fable">' +
-      '</div>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-display">显示名称</label>' +
-        '<input id="cap-display" style="' + PICKER_SELECT_STYLE + '" maxlength="200">' +
-      '</div>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-model">默认 model（可选）</label>' +
-        '<input id="cap-model" style="' + PICKER_SELECT_STYLE + '" maxlength="256">' +
-      '</div>' +
-      '<div id="cap-token-wrap" style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-token">Token（写入 0600 文件，仅此一次可见）</label>' +
-        '<textarea id="cap-token" rows="2" style="' + PICKER_SELECT_STYLE + ';resize:vertical" placeholder="" autocomplete="off"></textarea>' +
-        '<div id="cap-token-hint" style="font-size:11px;color:var(--nz-text-mute);margin-top:4px"></div>' +
-      '</div>' +
-      '<div id="cap-error" style="display:none;color:var(--nz-danger,#e5484d);font-size:12px;margin-bottom:8px"></div>' +
-      '<div class="modal-btns">' +
-        '<button type="button" data-action="modal-close">取消</button>' +
-        '<button type="button" class="primary" data-action="cap-create">创建</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-  trapFocus(overlay);
-
-  const tplSel = overlay.querySelector('#cap-template');
-  const applyTemplate = () => {
-    const tpl = ACCESS_PROFILE_TEMPLATES[tplSel.value];
-    if (!tpl) return;
-    const dEl = overlay.querySelector('#cap-display');
-    if (dEl && !dEl.value) dEl.value = tpl.display_name || '';
-    const mEl = overlay.querySelector('#cap-model');
-    if (mEl && !mEl.value) mEl.value = tpl.default_model || '';
-    // Token field only relevant when the template references a *_FILE key.
-    const wrap = overlay.querySelector('#cap-token-wrap');
-    const hint = overlay.querySelector('#cap-token-hint');
-    if (wrap) wrap.style.display = tpl.token_env_key ? '' : 'none';
-    if (hint) hint.textContent = tpl.token_hint || '';
-  };
-  tplSel.addEventListener('change', applyTemplate);
-  applyTemplate();
-
-
-  overlay.querySelector('[data-action="cap-create"]').addEventListener('click', async () => {
-    const tpl = ACCESS_PROFILE_TEMPLATES[tplSel.value] || {};
-    const id = (overlay.querySelector('#cap-id').value || '').trim();
-    const errBox = overlay.querySelector('#cap-error');
-    const showErr = (m) => { if (errBox) { errBox.textContent = m; errBox.style.display = 'block'; } };
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) {
-      showErr('档 ID 无效（英数字 . _ -，1-64 位，不能以 - 开头）');
-      return;
-    }
-    const body = {
-      id: id,
-      display_name: (overlay.querySelector('#cap-display').value || '').trim(),
-      chip_color: tpl.chip_color || '',
-      default_model: (overlay.querySelector('#cap-model').value || '').trim(),
-      env: Object.assign({}, tpl.env || {}),
-    };
-    if (tpl.token_env_key) {
-      const tok = (overlay.querySelector('#cap-token').value || '').trim();
-      if (!tok) { showErr('该模板需要 token'); return; }
-      body.token_env_key = tpl.token_env_key;
-      body.token_content = tok;
-    }
-    try {
-      const headers = { 'Content-Type': 'application/json' };
-      const t = getToken();
-      if (t) headers['Authorization'] = 'Bearer ' + t;
-      await fetchJSON(NZ_CONTRACT.API.access_profiles, {
-        timeoutMs: 10000, method: 'POST', headers, credentials: 'same-origin',
-        body: JSON.stringify(body),
-      });
-    } catch (err) {
-      if (err && err.status === 409) showErr('该档 ID 已存在');
-      else if (err && err.status === 400) showErr('配置无效：请检查各字段');
-      else if (err && err.status) showAPIError('创建访问档', err.status, '');
-      else showNetworkError('创建访问档', err);
-      return;
-    }
-    overlay.remove();
-    showToast('访问档已创建 · ' + id, 'success');
-    // Force a registry refresh (bypass the 60s cache) so the new profile is
-    // visible immediately to pickers/chips.
-    accessProfilesFetchedAt = 0;
-    await fetchAccessProfiles();
-    if (typeof onCreated === 'function') onCreated(id);
-  });
-}
-
-// accessProfileDefaultModel resolves a profile id to its default_model from the
-// cached registry, or "" when unknown / global default. Used only for the
-// planner-model placeholder + preview — never a value the form submits.
-function accessProfileDefaultModel(profileID) {
-  if (!profileID || !accessProfiles || !Array.isArray(accessProfiles.profiles)) return '';
-  const e = accessProfiles.profiles.find(p => p && p.id === profileID);
-  return (e && e.default_model) ? e.default_model : '';
-}
-
-// saveProjectSettings collects the settings-modal fields, merges them onto the
-// loaded config (preserving fields the drawer doesn't edit — chat_bindings,
-// git_sync, created_at, …), and PUTs. On success it refreshes the sidebar +
-// the access-profile chip source; on validation failure it shows the server's
-// generic reason inline.
-async function saveProjectSettings(name, baseCfg, overlay) {
-  const val = (id) => { const el = document.getElementById(id); return el ? el.value : undefined; };
-  // Start from the loaded config so unedited fields (chat_bindings, git_sync,
-  // memory_file, created_at) round-trip untouched.
-  const cfg = Object.assign({}, baseCfg);
-  cfg.display_name = (val('ps-display-name') || '').trim();
-  cfg.emoji = (val('ps-emoji') || '').trim();
-  cfg.access_profile = val('ps-access-profile') || '';
-  cfg.backend = val('ps-backend') || '';
-  cfg.planner_model = (val('ps-planner-model') || '').trim();
-  cfg.planner_prompt = (val('ps-planner-prompt') || '').trim();
-
-  const errBox = overlay.querySelector('#ps-error');
-  const showErr = (msg) => { if (errBox) { errBox.textContent = msg; errBox.style.display = 'block'; } };
-
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    await fetchJSON(NZ_CONTRACT.API.projects_config + '?name=' + encodeURIComponent(name), {
-      timeoutMs: 10000, method: 'PUT', headers, credentials: 'same-origin',
-      body: JSON.stringify(cfg),
-    });
-  } catch (err) {
-    if (err && err.status === 400) showErr('配置无效：请检查各字段（未知 backend / 访问档、超长 prompt 等）');
-    else if (err && err.status) showAPIError('保存项目设置', err.status, '');
-    else showNetworkError('保存项目设置', err);
-    return;
-  }
-  overlay.remove();
-  showToast('项目设置已保存 · ' + name, 'success');
-  // Access-profile binding change affects the next session's chip; refresh both
-  // the profile registry and the sidebar so chips repaint.
-  fetchSessions();
-}
-
-function showGitRemote(url) {
-  if (!url) return;
-  // Only open http(s)/git URLs; refuse ssh:// or git@host:user/repo remotes
-  // because ssh URLs can include embedded credentials (user:pass@host) that
-  // a toast would leak to anyone peering at the screen, and window.open on
-  // ssh:// does nothing useful in a browser.
-  //
-  // R244-SEC-P3-4: explicit positive startsWith allowlist (lowercased) instead
-  // of a /^(https?|git):\/\// regex so a future copy-paste cannot accidentally
-  // drop the leading anchor and accept "javascript:foo http://" or similar
-  // mixed-scheme strings. The lowercased prefix check matches scheme parsing
-  // semantics (RFC 3986 §3.1: schemes are case-insensitive).
-  const lower = String(url).toLowerCase();
-  const allowed = ['https://', 'http://', 'git://'];
-  let safe = false;
-  for (const scheme of allowed) {
-    if (lower.startsWith(scheme)) { safe = true; break; }
-  }
-  if (safe) {
-    window.open(url, '_blank', 'noopener,noreferrer');
-    return;
-  }
-  // Fallback: surface the URL but truncated to keep credentials embedded in
-  // ssh URLs from being broadcast via the toast surface.
-  const shown = url.length > 80 ? url.slice(0, 77) + '…' : url;
-  showToast('GitHub remote: ' + shown);
-}
-
 // --- History Popover ---
 
 let activePopover = null;
@@ -2672,481 +2165,6 @@ function selectSession(key, node) {
     if (eventTimer) clearInterval(eventTimer);
     eventTimer = setInterval(() => fetchEvents(false), 1000);
   }
-}
-
-// ===== Session tuning popover =====
-// Per-session model/effort switching from the header chips.
-// docs/rfc/dashboard-model-effort-control.md §4.1. Control lives where the
-// state is displayed: clicking the model label / effort tag opens a picker;
-// the choice POSTs /api/sessions/override and the server decides the apply
-// path (rpc / respawn / deferred — F9 split is server-side, the frontend
-// only renders the returned applied_via).
-
-const TUNING_EFFORT_TIERS = ['low', 'medium', 'high', 'xhigh', 'max'];
-let tuningPopoverCloseHandler = null;
-
-// #1980 PR-2: the header tuning chips' document-level listener merged into
-// the global nz.actions registry (keys tuning-model / tuning-effort) — the
-// chips are rebuilt on repaint, so delegation stays the right shape.
-
-function dismissTuningPopover() {
-  const el = document.getElementById('tuning-popover');
-  if (el) el.remove();
-  if (tuningPopoverCloseHandler) {
-    document.removeEventListener('click', tuningPopoverCloseHandler);
-    tuningPopoverCloseHandler = null;
-  }
-}
-
-// tuningToast is a minimal self-dismissed notice — the dashboard has no
-// global toast helper, and the F7 rejection text (CLI-supplied, sanitized
-// server-side) needs a visible surface that outlives the popover.
-function tuningToast(msg, isError) {
-  let t = document.getElementById('tuning-toast');
-  if (t) t.remove();
-  t = document.createElement('div');
-  t.id = 'tuning-toast';
-  t.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);' +
-    'max-width:70%;padding:10px 16px;border-radius:10px;z-index:var(--nz-z-toast);font-size:13px;' +
-    'background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);' +
-    'border:1px solid ' + (isError ? 'var(--nz-danger, #d33)' : 'var(--nz-border)') + ';' +
-    'color:var(--nz-text)';
-  t.textContent = msg; // textContent — CLI-origin text must never hit innerHTML
-  document.body.appendChild(t);
-  setTimeout(() => t.remove(), isError ? 8000 : 4000);
-}
-
-// tuningModelsForSession resolves the popover's model choices from the
-// cached /api/cli/backends payload (BackendInfo.models: agent-reported for
-// kiro, cli.backends[].models fallback for claude). Empty list → the
-// popover shows its manual-input row only.
-function tuningModelsForSession(s) {
-  const backendID = (s && s.backend) || sessionBackends[selectedKey] ||
-    (cliBackends && cliBackends.default) || '';
-  if (!cliBackends || !Array.isArray(cliBackends.backends)) return { models: [], backendID };
-  const entry = cliBackends.backends.find(b => b && b.id === backendID) ||
-    cliBackends.backends.find(b => b && b.id === (cliBackends.default || ''));
-  return {
-    models: (entry && Array.isArray(entry.models)) ? entry.models : [],
-    backendID: entry ? entry.id : backendID,
-    // BackendInfo.protocol ("acp" | "stream-json") decides the empty-manifest
-    // hint: only ACP backends ever report a list after their first session.
-    protocol: entry ? (entry.protocol || '') : '',
-  };
-}
-
-function openTuningPopover(kind) {
-  dismissTuningPopover();
-  if (!selectedKey) return;
-  // NG4: override API is local-only in this slice; remote sessions get an
-  // explanation instead of a dead control (mirrors git chip's local-only).
-  if ((selectedNode || 'local') !== 'local') {
-    tuningToast('远程节点会话暂不支持切换模型/档位', false);
-    return;
-  }
-  const s = sessionsData[sid(selectedKey, selectedNode)] ||
-    // Not spawned yet: show the parked pick as current so a re-open marks it.
-    (sessionPendingTuning[selectedKey] || {});
-  const running = s.state === 'running';
-  const rows = [];
-  const current = kind === 'model' ? (s.model || '') : (s.effort || '');
-
-  if (kind === 'model') {
-    const { models, protocol } = tuningModelsForSession(s);
-    for (const m of models) {
-      const active = m.id === current || (current && current.indexOf(m.id) !== -1);
-      rows.push({ value: m.id, label: m.id, desc: m.description || '', active });
-    }
-    if (models.length === 0) {
-      // ACP backends (kiro) report their manifest on the first session;
-      // stream-json backends (claude) never do — telling a claude operator to
-      // wait would be a lie, so point at the config knob instead.
-      rows.push({ header: true, label: protocol === 'acp'
-        ? '清单在该 backend 首次会话后可用；可手动输入：'
-        : '该 backend 不上报模型清单；可在 config.yaml 的 cli.backends[].models 配置候选，或手动输入：' });
-    }
-    rows.push({ input: true });
-    rows.push({ value: '', label: '恢复默认（配置链）', reset: true });
-  } else {
-    for (const tier of TUNING_EFFORT_TIERS) {
-      rows.push({ value: tier, label: tier, active: tier === current });
-    }
-    rows.push({ value: '', label: '恢复默认（配置链）', reset: true });
-  }
-
-  const anchor = document.getElementById(kind === 'model' ? 'header-model' : 'header-effort');
-  if (!anchor) return;
-  const pop = document.createElement('div');
-  pop.id = 'tuning-popover';
-  pop.style.cssText = 'position:fixed;min-width:220px;max-width:320px;max-height:340px;' +
-    'overflow-y:auto;background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);' +
-    'border:1px solid var(--nz-border);border-radius:10px;padding:6px 0;z-index:120;' +
-    'font-size:13px;scrollbar-width:thin';
-  const rect = anchor.getBoundingClientRect();
-  pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 340)) + 'px';
-  pop.style.top = (rect.bottom + 6) + 'px';
-
-  const hint = kind === 'effort'
-    ? 'ⓘ 将重启 CLI 进程并恢复上下文' + (running ? '（会中断当前回合）' : '')
-    : 'ⓘ 生效时机以返回的应用路径为准';
-  let html = '<div style="padding:6px 12px;color:var(--nz-text-mute);font-size:12px;border-bottom:1px solid var(--nz-bg-2)">' +
-    (kind === 'model' ? '切换模型' : '切换 effort 档位') + '</div>';
-  for (const rowSpec of rows) {
-    if (rowSpec.header) {
-      html += '<div style="padding:6px 12px;color:var(--nz-text-faint);font-size:12px">' + esc(rowSpec.label) + '</div>';
-      continue;
-    }
-    if (rowSpec.input) {
-      html += '<div style="padding:6px 12px"><input id="tuning-manual-input" type="text" placeholder="model id…" ' +
-        'style="width:100%;box-sizing:border-box;background:var(--nz-bg-2);border:1px solid var(--nz-border);' +
-        'border-radius:6px;padding:5px 8px;color:var(--nz-text);font-size:12px"></div>';
-      continue;
-    }
-    const mark = rowSpec.active ? '● ' : (rowSpec.reset ? '↺ ' : '○ ');
-    html += '<div class="tuning-opt" data-value="' + escAttr(rowSpec.value) + '"' +
-      ' style="padding:7px 12px;cursor:pointer;color:var(--nz-text);' +
-      (rowSpec.active ? 'font-weight:600;color:var(--nz-accent);' : '') +
-      (rowSpec.reset ? 'border-top:1px solid var(--nz-bg-2);color:var(--nz-text-mute);' : '') + '"' +
-      (rowSpec.desc ? ' title="' + escAttr(rowSpec.desc) + '"' : '') + '>' +
-      mark + esc(rowSpec.label) + '</div>';
-  }
-  html += '<div style="padding:6px 12px;color:var(--nz-text-faint);font-size:11px;border-top:1px solid var(--nz-bg-2)">' + esc(hint) + '</div>';
-  pop.innerHTML = html;
-  document.body.appendChild(pop);
-
-  pop.querySelectorAll('.tuning-opt').forEach(item => {
-    item.onmouseenter = () => item.style.background = 'var(--nz-hover-bg)';
-    item.onmouseleave = () => item.style.background = '';
-    item.addEventListener('click', () => {
-      const v = item.dataset.value;
-      dismissTuningPopover();
-      // Respawn-family switches interrupt a running turn — confirm first
-      // (§4.1 运行中防护; the server decides the actual path, we only warn
-      // for the case that ALWAYS respawns: effort changes).
-      if (kind === 'effort' && running &&
-          !confirm('会话正在运行：切换档位将中断当前回合并重启 CLI 进程（上下文保留）。继续？')) {
-        return;
-      }
-      postTuningOverride(kind, v);
-    });
-  });
-  const manual = pop.querySelector('#tuning-manual-input');
-  if (manual) {
-    manual.addEventListener('click', (e) => e.stopPropagation());
-    manual.onkeydown = (e) => {
-      if (e.key === 'Enter') {
-        const v = manual.value.trim();
-        dismissTuningPopover();
-        if (v) postTuningOverride('model', v);
-      }
-    };
-  }
-  setTimeout(() => {
-    tuningPopoverCloseHandler = (e) => {
-      if (!pop.contains(e.target)) dismissTuningPopover();
-    };
-    document.addEventListener('click', tuningPopoverCloseHandler);
-  }, 0);
-}
-
-// postTuningOverride sends the switch and renders the outcome. Pending
-// visual: the source chip dims until the next sessions poll repaints it
-// with the server-confirmed value (no optimistic promotion — §4.1 三态;
-// a rollback is visible because the poll simply keeps the old value).
-async function postTuningOverride(kind, value) {
-  const key = selectedKey;
-  const chip = document.getElementById(kind === 'model' ? 'header-model' : 'header-effort');
-  if (chip) chip.style.opacity = '0.45';
-  const restore = () => { if (chip) chip.style.opacity = ''; };
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const body = { key };
-    body[kind] = value;
-    const resp = await fetch(NZ_CONTRACT.API.sessions_override, {
-      method: 'POST', headers, body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      const text = (await resp.text()).trim();
-      restore();
-      // 409 = CLI rejection (F7/F15): surface the CLI's own text verbatim.
-      tuningToast(resp.status === 409 ? ('切换被 CLI 拒绝：' + text) : ('切换失败：' + text), true);
-      return;
-    }
-    const data = await resp.json();
-    const via = data.applied_via || '';
-    const label = kind === 'model' ? '模型' : '档位';
-    // No server row for this key = the session has not spawned yet; the pick
-    // was parked server-side. Mirror it so the chips show it until promotion.
-    const isPending = !sessionsData[sid(key, selectedNode)];
-    if (isPending) {
-      const prev = sessionPendingTuning[key] || {};
-      const next = Object.assign({}, prev);
-      next[kind] = value;
-      sessionPendingTuning[key] = next;
-      tuningToast(label + (value ? '已记录，发送首条消息时生效' : '已恢复默认'), false);
-    } else if (via === 'rpc') {
-      tuningToast(label + '已切换（对下一轮生效）', false);
-    } else if (via === 'respawn') {
-      tuningToast(label + '已记录，CLI 进程将重启并恢复上下文（下条消息生效）', false);
-    } else {
-      tuningToast(label + '已记录，将于下次会话进程启动时生效', false);
-    }
-    // Pull fresh state now rather than waiting out the poll interval; the
-    // repaint clears the pending dim with the server-confirmed value.
-    setTimeout(() => { restore(); fetchSessions(); }, 800);
-  } catch (e) {
-    restore();
-    tuningToast('切换请求失败：网络错误', true);
-  }
-}
-
-// repaintGitChip re-renders the chip for the currently selected session from
-// cache. Called at the end of renderMainShell so a header rebuild triggered by
-// something unrelated (rename, model update) doesn't drop the chip.
-function repaintGitChip() {
-  if (!selectedKey) { setHeaderGitChip(''); return; }
-  setHeaderGitChip(gitChipHtml(gitStateCache[sid(selectedKey, selectedNode)]));
-}
-
-async function fetchGitState(key, node) {
-  node = node || 'local';
-  // Git state is a local-node concern: a remote session's workspace lives on
-  // that node's filesystem, so resolving it here would describe the wrong
-  // tree. Clear the chip so a remote session doesn't inherit the previously
-  // selected local session's branch.
-  if (!key || node !== 'local') { setHeaderGitChip(''); return; }
-  const cacheKey = sid(key, node);
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const resp = await fetch(NZ_CONTRACT.API.sessions_git + '?key=' + encodeURIComponent(key), { headers });
-    // The cache entry is per-session so dropping it is always right; the
-    // header chip is only cleared when this session is still the selected one.
-    if (!resp.ok) { delete gitStateCache[cacheKey]; if (selectedKey !== key || selectedNode !== node) return; setHeaderGitChip(''); return; }
-    const data = await resp.json();
-    gitStateCache[cacheKey] = data;
-    // Guard against a stale response landing after the user switched sessions.
-    if (selectedKey !== key || selectedNode !== node) return;
-    setHeaderGitChip(gitChipHtml(data));
-  } catch (_) {
-    delete gitStateCache[cacheKey];
-    if (selectedKey !== key || selectedNode !== node) return;
-    setHeaderGitChip('');
-  }
-}
-
-// invalidateGitState drops the cached payload for a session and re-resolves it.
-// Called after /cd (the session's workspace moved, so the branch may differ)
-// and on session dismissal so a recycled key cannot inherit a stale branch.
-function invalidateGitState(key, node) {
-  if (!key) return;
-  delete gitStateCache[sid(key, node || 'local')];
-  if (key === selectedKey) fetchGitState(key, node || 'local');
-}
-
-// removeSidebarCard drops a session card from the DOM without waiting for
-// the next renderSidebar. It MUST also reset _lastSidebarHtml: renderSidebar
-// skips `list.innerHTML = html` when the rebuilt string equals the cache, so
-// a DOM-only removal would leave the cache describing a card that is no
-// longer mounted and the next (identical) render would never bring it back
-// — e.g. after a failed DELETE whose .finally re-fetches the list.
-function removeSidebarCard(key) {
-  // Escape like setActiveSessionCard: discovered keys embed the node name, so
-  // a `"` or `\` would otherwise make querySelector throw mid-takeover/dismiss.
-  const card = document.querySelector('.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
-  if (card) card.remove();
-  _lastSidebarHtml = null;
-}
-
-// dismissSession removes a session from the sidebar. The × button deletes
-// immediately with no confirmation — per operator preference, the friction
-// isn't worth it. Accidental deletes are recoverable by re-entering the
-// prompt (pending) or reopening the CLI (remote/discovered).
-async function dismissSession(key, node, opts) {
-  node = node || 'local';
-  delete sessionDrafts[key];
-  delete sessionScrollPos[sid(key, node)];
-  // Drop the cached git state so a later key reuse can't inherit this
-  // session's branch chip before its own fetch resolves.
-  delete gitStateCache[sid(key, node)];
-  // sessionBackends is normally consumed on first sendMessage. A dismiss
-  // before any send leaves the entry behind; clear it defensively so a
-  // subsequent re-create with the same key (unlikely but possible if the
-  // ms timestamp collides on rapid double-create) doesn't inherit a
-  // stale backend pick.
-  delete sessionBackends[key];
-  delete sessionAccessProfiles[key];
-
-  // cron-panel-consolidation RFC §4.2: defensive guard. Cron stubs are
-  // filtered server-side so this branch should never run in production —
-  // but if a future server bug ever leaks a cron key through, we must
-  // NOT call DELETE /api/sessions (the scheduler still owns the stub).
-  if (isCronSessionKey(key)) {
-    // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side
-    // and should never appear in the sidebar at all — this branch only
-    // executes if a future server bug leaks one through. Guard-rail behaviour:
-    // remove the rogue card from the DOM but DO NOT call DELETE /api/sessions
-    // (the cron scheduler still owns the stub) and DO NOT mutate any cron
-    // panel state. Single source of truth for cron-job lifecycle remains
-    // the 定时任务 panel (cronDelete → DELETE /api/cron).
-    if (selectedKey === key) {
-      selectedKey = null;
-      if (wsm.subscribedKey === key) wsm.unsubscribe();
-      document.getElementById('main').innerHTML = mainEmptyHtml();
-      wireQuickAskInput();
-    }
-    removeSidebarCard(key);
-    lastVersion = 0;
-    debouncedFetchSessions();
-    return;
-  }
-
-  // If it's a pending (never-sent) session, just remove from localStorage
-  if (sessionWorkspaces[key] !== undefined) {
-    removePendingSession(key);
-    delete sessionsData[sid(key, node)];
-    if (selectedKey === key) {
-      selectedKey = null;
-      document.getElementById('main').innerHTML = mainEmptyHtml();
-      wireQuickAskInput();
-    }
-    lastVersion = 0;
-    debouncedFetchSessions();
-    return;
-  }
-
-  // Discovered session — kill external process via /api/discovered/close
-  if (isDiscoveredKey(key)) {
-    const d = findDiscovered(parseDiscoveredPid(key), node);
-    if (!d) { showToast('未找到该外部会话', 'warning'); return; }
-    try {
-      const headers = {'Content-Type': 'application/json'};
-      const token = getToken();
-      if (token) headers['Authorization'] = 'Bearer ' + token;
-      try {
-        await fetchJSON(NZ_CONTRACT.API.discovered_close, {
-          timeoutMs: 10000,
-          method: 'POST', headers,
-          body: JSON.stringify({pid: d.pid, session_id: d.session_id || '', cwd: d.cwd || '', proc_start_time: d.proc_start_time || 0, node: node || ''})
-        });
-      } catch (err) {
-        if (err && err.status) showAPIError('关闭外部会话', err.status, err.message || '');
-        else showNetworkError('关闭外部会话', err);
-        return;
-      }
-      dropDiscovered(d.pid, d.node);
-      if (pendingDiscovered && sameDiscovered(pendingDiscovered, d.pid, d.node)) {
-        pendingDiscovered = null;
-        stopPreviewPolling();
-        document.getElementById('main').innerHTML = mainEmptyHtml();
-        wireQuickAskInput();
-      }
-      removeSidebarCard(key);
-      lastVersion = 0;
-      debouncedFetchSessions();
-    } catch (e) { showNetworkError('关闭外部会话', e); }
-    return;
-  }
-
-  // Optimistic delete: the card vanishes immediately rather than freezing
-  // for the server's teardown round-trip. The backend's DELETE /api/sessions
-  // now unregisters the session synchronously and runs the slow teardown
-  // (proc.Close up to 8s + event-log/attachment cleanup) in a detached
-  // goroutine (RemoveAsync), so 200 means "gone from the list" and arrives
-  // fast — but we don't even wait for it to update the UI.
-  const skey = sid(key, node);
-  // Mark dismissed so an in-flight poll / sessions_update event can't
-  // resurrect the card before DELETE confirms (cleared in finally below).
-  _optimisticDeleteKeys.add(skey);
-  delete sessionsData[skey];
-  if (selectedKey === key) {
-    selectedKey = null;
-    if (wsm.subscribedKey === key) wsm.unsubscribe();
-    document.getElementById('main').innerHTML = mainEmptyHtml();
-    wireQuickAskInput();
-  }
-  removeSidebarCard(key);
-
-  const headers = {'Content-Type': 'application/json'};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  const body = {key: key};
-  if (node && node !== 'local') body.node = node;
-  // Fire-and-forget: do NOT await — the UI is already updated. On failure we
-  // re-sync from the server so a genuinely-undeleted session reappears.
-  fetchJSON(NZ_CONTRACT.API.sessions, {timeoutMs: 10000, method: 'DELETE', headers, body: JSON.stringify(body)})
-    .catch(err => {
-      // 404 means the session was already gone — that's the outcome we want,
-      // so swallow it. Any other error means the delete may not have landed:
-      // surface it and let the re-sync below pull the real list back.
-      if (err && err.status !== 404) {
-        if (err.status) showAPIError('删除会话', err.status, err.message || '');
-        else showNetworkError('删除会话', err);
-      }
-    })
-    .finally(() => {
-      // Stop suppressing this key so the next fetch reflects server truth:
-      // if the delete stuck, the session stays gone; if it failed, the card
-      // comes back (operator must re-select it — we intentionally don't
-      // restore the cleared main panel to avoid masking a failed delete).
-      _optimisticDeleteKeys.delete(skey);
-      lastVersion = 0;
-      debouncedFetchSessions();
-    });
-}
-
-// Operator-facing rename flow. Prompts for a new display label; empty input
-// clears any prior label and falls back to the summary/last_prompt display
-// chain. Uses PATCH /api/sessions/label so the mutation round-trips through
-// the server and persists across reloads.
-async function renameSession() {
-  if (!selectedKey) return;
-  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-  const current = s.user_label || '';
-  // RNEW-UX-013: replaced window.prompt with themed promptDialog so the
-  // rename flow matches the rest of the dashboard (dark theme, trapFocus,
-  // Esc/backdrop cancel) and doesn't block the event loop on mobile.
-  const input = await promptDialog({
-    title: '重命名会话',
-    message: '留空恢复默认标题，最多 128 字节',
-    defaultValue: current,
-    placeholder: '输入新标题',
-    confirmText: '保存',
-    maxLength: 128,
-  });
-  if (input === null) return; // user cancelled
-  const next = input.trim();
-  if (next === current) return;
-  const headers = {'Content-Type': 'application/json'};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  const body = {key: selectedKey, label: next};
-  if (selectedNode && selectedNode !== 'local') body.node = selectedNode;
-  try {
-    await fetchJSON(NZ_CONTRACT.API.sessions_label, {
-      timeoutMs: 10000,
-      method: 'PATCH', headers,
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    if (err && err.status) showAPIError('重命名', err.status, err.message || '');
-    else showNetworkError('重命名', err);
-    return;
-  }
-  // Patch local cache so the title refreshes before the next poll lands.
-  const cacheKey = sid(selectedKey, selectedNode);
-  if (sessionsData[cacheKey]) {
-    sessionsData[cacheKey].user_label = next;
-  }
-  lastVersion = 0;
-  debouncedFetchSessions();
-  // Header-only repaint: a full renderMainShell would rebuild #events-scroll
-  // empty with nothing refetching the conversation (see renderMainHeader).
-  renderMainHeader();
-  showToast(next ? '已重命名' : '已恢复默认标题');
 }
 
 // --- Markdown export (UX P2) ---
@@ -4104,9 +3122,9 @@ function appendEvents(events) {
   else if (wasBottom) el.scrollTop = el.scrollHeight;
   runPendingAsync();
   // Rebuild nav index but preserve current position
-  const oldIdx = navIdx;
-  navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-  navIdx = oldIdx >= 0 && oldIdx < navUserEls.length ? oldIdx : -1;
+  const oldIdx = nzState.navIdx;
+  nzState.navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
+  nzState.navIdx = oldIdx >= 0 && oldIdx < nzState.navUserEls.length ? oldIdx : -1;
   navUpdatePill();
 }
 
@@ -5239,7 +4257,7 @@ function renderOptimisticUserMsg(text, sendId) {
   // history. stickEventsBottom handles async layout changes from input-area
   // collapse and lazy images.
   stickEventsBottom();
-  navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
+  nzState.navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
   navUpdatePill();
 }
 
@@ -5339,416 +4357,6 @@ function rollbackOptimisticRunning(key, node) {
   // The flip may have been applied without a sessionsData entry (new session's
   // first send) — restore the button either way.
   if (key === selectedKey && (node || 'local') === selectedNode) updateSendButton('ready');
-}
-
-// --- Message navigation ---
-let navUserEls = [];
-let navPopoverCloseHandler = null;
-// #1772: synchronous "is the nav popover mounted" flag. Set true the moment the
-// popover is appended, false when dismissed. Lets the per-scroll-tick handler
-// skip a getElementById on the common (no-popover) path without the race of
-// reading navPopoverCloseHandler, which is only assigned in a deferred
-// setTimeout(0) after mount.
-let navPopoverOpen = false;
-let navIdx = -1; // -1 = not navigating
-
-function navRebuild() {
-  navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-  navIdx = -1;
-  navUpdatePill();
-}
-
-// Infer which user message is "at" the current scroll position. Returns the
-// index of the last user message whose top edge sits at or above the viewport
-// center; falls back to the first message below when the viewport is above
-// every user message, or -1 when there are none.
-function navCurrentIdxFromScroll() {
-  const scroller = document.getElementById('events-scroll');
-  if (!scroller || navUserEls.length === 0) return -1;
-  const anchor = scroller.getBoundingClientRect().top + scroller.clientHeight * 0.3;
-  let lastAbove = -1;
-  for (let i = 0; i < navUserEls.length; i++) {
-    const top = navUserEls[i].getBoundingClientRect().top;
-    if (top <= anchor) lastAbove = i;
-    else break;
-  }
-  return lastAbove;
-}
-
-function navMsg(dir) {
-  if (navUserEls.length === 0) return;
-  // Shell-history 语义：第一次按方向键只定位到「视图锚点」消息本身
-  // （prev → 最近一条用户消息；next → 视图内第一条用户消息），
-  // 不额外再走一步。只有已在导航中（navIdx >= 0）时才做 ±1 步进。
-  const firstPress = navIdx < 0;
-  if (firstPress) navIdx = navCurrentIdxFromScroll();
-  let target;
-  if (dir === 'prev') {
-    target = firstPress
-      ? (navIdx < 0 ? navUserEls.length - 1 : navIdx)
-      : Math.max(0, navIdx - 1);
-  } else {
-    target = firstPress
-      ? (navIdx < 0 ? 0 : navIdx)
-      : Math.min(navUserEls.length - 1, navIdx + 1);
-  }
-  if (!firstPress && target === navIdx) {
-    // Already at the edge — flash the current one so the user sees the no-op.
-    const cur = navUserEls[navIdx];
-    if (cur) {
-      cur.classList.add('nav-highlight');
-      setTimeout(() => cur.classList.remove('nav-highlight'), 600);
-    }
-    return;
-  }
-  navIdx = target;
-  const el = navUserEls[navIdx];
-  if (!el) return;
-  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  // highlight flash
-  document.querySelectorAll('.event.nav-highlight').forEach(e => e.classList.remove('nav-highlight'));
-  el.classList.add('nav-highlight');
-  setTimeout(() => el.classList.remove('nav-highlight'), 1200);
-  navUpdatePill();
-}
-
-function navUpdatePill() {
-  const pill = document.getElementById('nav-pill');
-  const counter = document.getElementById('nav-counter');
-  if (!pill) return;
-  if (navUserEls.length < 2) {
-    pill.classList.remove('visible');
-    return;
-  }
-  pill.classList.add('visible');
-  if (navIdx < 0) {
-    counter.textContent = navUserEls.length;
-  } else {
-    counter.textContent = (navIdx + 1) + '/' + navUserEls.length;
-  }
-}
-
-function navDismissPopover() {
-  const pop = document.getElementById('nav-list-popover');
-  if (pop) pop.remove();
-  navPopoverOpen = false;
-  if (navPopoverCloseHandler) {
-    document.removeEventListener('click', navPopoverCloseHandler);
-    navPopoverCloseHandler = null;
-  }
-}
-
-function navShowList() {
-  if (navUserEls.length === 0) return;
-  let existing = document.getElementById('nav-list-popover');
-  if (existing) { navDismissPopover(); return; } // toggle off
-  const items = navUserEls.map((el, i) => {
-    const txt = (el.querySelector('.event-content')?.textContent || '').trim();
-    const summary = txt.length > 50 ? txt.slice(0, 50) + '...' : txt;
-    const active = i === navIdx ? ' style="color:var(--nz-accent);font-weight:600"' : '';
-    return '<div class="nav-list-item" data-idx="' + i + '"' + active + '>' +
-      '<span style="color:var(--nz-text-faint);margin-right:6px">' + (i+1) + '.</span>' + esc(summary) + '</div>';
-  });
-  const pill = document.getElementById('nav-pill');
-  const popover = document.createElement('div');
-  popover.id = 'nav-list-popover';
-  const maxW = Math.min(280, (document.getElementById('main')?.offsetWidth || 280) - 70);
-  popover.style.cssText = 'position:absolute;right:44px;bottom:0;width:' + maxW + 'px;max-height:300px;overflow-y:auto;background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:10px;padding:6px 0;z-index:11;font-size:13px;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent';
-  popover.innerHTML = items.join('');
-  pill.appendChild(popover);
-  navPopoverOpen = true;
-  popover.querySelectorAll('.nav-list-item').forEach(item => {
-    item.style.cssText += 'padding:8px 12px;cursor:pointer;color:var(--nz-text);transition:background .1s;border-bottom:1px solid var(--nz-bg-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-    item.onmouseenter = () => item.style.background = 'var(--nz-hover-bg)';
-    item.onmouseleave = () => item.style.background = '';
-    item.onclick = () => {
-      navIdx = parseInt(item.dataset.idx);
-      const el = navUserEls[navIdx];
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        document.querySelectorAll('.event.nav-highlight').forEach(e => e.classList.remove('nav-highlight'));
-        el.classList.add('nav-highlight');
-        setTimeout(() => el.classList.remove('nav-highlight'), 1200);
-      }
-      navUpdatePill();
-      navDismissPopover();
-    };
-  });
-  // Close on outside click
-  setTimeout(() => {
-    navPopoverCloseHandler = (e) => {
-      if (!popover.contains(e.target) && e.target.id !== 'nav-counter') {
-        navDismissPopover();
-      }
-    };
-    document.addEventListener('click', navPopoverCloseHandler);
-  }, 0);
-}
-
-// Reset nav on scroll to bottom
-(function() {
-  let scrollListenerAttached = false;
-  function attachNavScroll() {
-    const el = document.getElementById('events-scroll');
-    if (!el || scrollListenerAttached) return;
-    scrollListenerAttached = true;
-    // Debounce after scrolling settles: if the tracked nav target is no
-    // longer near the viewport center (i.e. user scrolled manually), drop it
-    // so the next arrow-key press re-seeds from what the user actually sees.
-    let scrollResetTimer = null;
-    el.addEventListener('scroll', () => {
-      // #1772: only touch the DOM to dismiss the nav popover when one is
-      // actually open, skipping a per-scroll-tick getElementById on the
-      // overwhelmingly common path (no popover) during inertial scrolling.
-      if (navPopoverOpen) navDismissPopover();
-      if (scrollResetTimer) clearTimeout(scrollResetTimer);
-      scrollResetTimer = setTimeout(() => {
-        if (navIdx < 0 || !navUserEls[navIdx]) return;
-        const scrollerRect = el.getBoundingClientRect();
-        const targetRect = navUserEls[navIdx].getBoundingClientRect();
-        const targetCenter = targetRect.top + targetRect.height / 2;
-        const viewportCenter = scrollerRect.top + scrollerRect.height / 2;
-        if (Math.abs(targetCenter - viewportCenter) > scrollerRect.height / 2) {
-          navIdx = -1;
-          navUpdatePill();
-        }
-      }, 300);
-    }, { passive: true });
-  }
-  // Re-attach after renderMainShell rebuilds the DOM
-  const obs = new MutationObserver(() => {
-    scrollListenerAttached = false;
-    attachNavScroll();
-  });
-  obs.observe(document.getElementById('main') || document.body, { childList: true, subtree: false });
-  attachNavScroll();
-})();
-
-// Paste handler for #msg-input:
-//   1. Image files on the clipboard (screenshot Cmd/Ctrl+V, "copy image" from
-//      another app) are routed to handleFiles so they land in pendingFiles and
-//      ride the same upload / file_ids path as the paperclip button. Without
-//      this branch the browser's default paste embeds the image as
-//      `<img src="data:...">` inside the contenteditable — `innerText.trim()`
-//      drops it silently so the send ends up carrying neither text nor
-//      file_ids, and Claude never sees the image the user thought they sent.
-//   2. Plain text is forced in via execCommand('insertText') so rich
-//      formatting from Word / web pages doesn't leak into the contenteditable.
-document.addEventListener('paste', function(e) {
-  const t = e.target;
-  if (!t || !t.closest || !t.closest('#msg-input')) return;
-  const cd = e.clipboardData || window.clipboardData;
-  if (!cd) return;
-
-  // Image branch: walk clipboardData.files first (most reliable on Chromium
-  // + Safari), fall back to clipboardData.items for older paths. Any image
-  // file short-circuits the default paste so the browser doesn't also embed
-  // a stray `<img>` into the contenteditable.
-  const imageFiles = [];
-  if (cd.files && cd.files.length) {
-    for (const f of cd.files) {
-      if (f && f.type && f.type.startsWith('image/')) imageFiles.push(f);
-    }
-  }
-  if (imageFiles.length === 0 && cd.items) {
-    for (const it of cd.items) {
-      if (it && it.kind === 'file' && it.type && it.type.startsWith('image/')) {
-        const f = it.getAsFile();
-        if (f) imageFiles.push(f);
-      }
-    }
-  }
-  if (imageFiles.length > 0) {
-    e.preventDefault();
-    handleFiles(imageFiles);
-    return;
-  }
-
-  const text = cd.getData('text/plain');
-  if (!text) return;
-  e.preventDefault();
-  if (document.queryCommandSupported && document.queryCommandSupported('insertText')) {
-    document.execCommand('insertText', false, text);
-    return;
-  }
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) return;
-  const range = sel.getRangeAt(0);
-  range.deleteContents();
-  const node = document.createTextNode(text);
-  range.insertNode(node);
-  range.setStartAfter(node);
-  range.setEndAfter(node);
-  sel.removeAllRanges();
-  sel.addRange(range);
-});
-
-// Keyboard shortcut: Alt+Up/Down for message nav, Alt+N for new session.
-// Cmd/Ctrl+N is left alone so the browser's "new window" still works.
-document.addEventListener('keydown', function(e) {
-  if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); navMsg('prev'); }
-  if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); navMsg('next'); }
-  if (e.altKey && (e.key === 'n' || e.key === 'N')) {
-    const tag = (e.target.tagName || '').toLowerCase();
-    if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
-    e.preventDefault();
-    createNewSession();
-  }
-});
-
-// Global Esc: close open popovers (history / nav list) when no modal/input has focus.
-document.addEventListener('keydown', function(e) {
-  if (e.key !== 'Escape') return;
-  // Overlays with their own Esc trapFocus handling take precedence.
-  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
-  const tag = (e.target.tagName || '').toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
-  let closed = false;
-  // voice-overlay (R20260610-UI-3): the recording overlay had no Esc handler,
-  // so a stuck recording could only be dismissed by clicking it. Mirror the
-  // click escape-hatch (see #voice-overlay click listener) on Esc for parity
-  // with every other overlay.
-  if (escCloseVoiceOverlay()) closed = true;
-  if (activePopover) { closeHistoryPopover(); closed = true; }
-  if (document.getElementById('nav-list-popover')) { navDismissPopover(); closed = true; }
-  // §16 inline-expand 回归 + cron-panel-consolidation RFC §6.4: Esc 关 cron 的
-  // 行内展开 / drawer。优先级（行展开先于 drawer）与关闭逻辑都收在 cron_view.js
-  // 的 cronEscClose 里，dashboard.js 仅经委托——绝不跨脚本裸引用 cron 内部状态
-  // （cronExpandedRunId / cronDetailJobId），否则 cron_view.js 未加载时这里会抛
-  // `cronExpandedRunId is not defined`（dashboard-cron-view-extraction §2.6 B1）。
-  // nz.views.cron 缺席（cron_view.js 没加载）时优雅降级，不影响其它 Esc 分支。
-  // 独立 if（非 else if）：忠实保留迁移前语义——cron 分支独立于上方 popover 分支，
-  // 即便同一次 Esc 已关掉 history/nav-list popover，仍会继续关 cron 展开/drawer。
-  if (nzViews.cron && nzViews.cron.escClose()) { closed = true; }
-  if (closed) e.preventDefault();
-});
-
-// §16 inline-expand 回归: ↑↓ 切上一条 / 下一条 run 的全局快捷键已随 cron 状态一并
-// 迁入 cron_view.js（B1 修复）——handler 与它读的 cronExpandedRunId / navigateExpandedRun
-// 同处一个 <script>，绑定必然就绪；cron_view.js 缺席则该快捷键自然不注册，不再
-// 拖垮 dashboard.js。Cmd/Ctrl+Up/Down 的会话切换仍在下方（有 metaKey 守卫，错开）。
-
-// Keyboard shortcut: Cmd/Ctrl+1..9 — switch to Nth session in current project group
-// Cmd/Ctrl+Up/Down — prev/next session in group
-document.addEventListener('keydown', function(e) {
-  // Skip when typing in input fields
-  const tag = (e.target.tagName || '').toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
-
-  const isMeta = e.metaKey || e.ctrlKey;
-  if (!isMeta) return;
-
-  // Cmd+1..9: jump to Nth session in group
-  const digit = parseInt(e.key);
-  if (digit >= 1 && digit <= 9) {
-    e.preventDefault();
-    const group = currentProjectSessions();
-    if (digit <= group.length) {
-      const s = group[digit - 1];
-      selectSession(s.key, s.node || 'local');
-    }
-    return;
-  }
-
-  // Cmd+Up/Down: prev/next session in group
-  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-    e.preventDefault();
-    const group = currentProjectSessions();
-    if (group.length === 0) return;
-    const idx = group.findIndex(s => s.key === selectedKey && (s.node || 'local') === selectedNode);
-    let next;
-    if (idx < 0) {
-      next = 0;
-    } else {
-      next = e.key === 'ArrowUp' ? idx - 1 : idx + 1;
-      if (next < 0) next = group.length - 1;
-      if (next >= group.length) next = 0;
-    }
-    const s = group[next];
-    selectSession(s.key, s.node || 'local');
-    return;
-  }
-});
-
-// Get sessions in the same project group as the current selection (sidebar order).
-// Fallback groups are workspace-basename pseudo-projects, so two sessions
-// sharing the same project name but different workspaces belong to different
-// groups — include workspace in the match to mirror the sidebar's grouping.
-function currentProjectSessions() {
-  if (!allSessionsCache || allSessionsCache.length === 0) return [];
-  const cur = allSessionsCache.find(s => s.key === selectedKey && (s.node || 'local') === selectedNode);
-  if (!cur) return [];
-  const proj = cur.project || '';
-  const isFallback = !!cur.project_fallback;
-  const ws = cur.workspace || '';
-  return allSessionsCache.filter(s => {
-    if ((s.project || '') !== proj) return false;
-    if (isFallback || s.project_fallback) {
-      return !!s.project_fallback === isFallback && (s.workspace || '') === ws;
-    }
-    return true;
-  });
-}
-
-// Turn watchdog: while the selected session is "running", periodically pull
-// the authoritative REST snapshot so the banner self-heals if a terminal WS
-// signal (the 'result' event and/or the 'ready' session_state broadcast) is
-// dropped on a still-open connection. Without this the "处理中..." banner stays
-// stuck until the operator switches sessions or reconnects — the bug this fixes.
-// fetchSessions reconciles via updateMainState (see the relaxed gate in
-// fetchSessions); the watchdog just supplies the missing tick, since the
-// session poll is stopped while WS is connected.
-let _turnWatchdogTimer = null;
-const TURN_WATCHDOG_INTERVAL_MS = 15000;
-function startTurnWatchdog() {
-  if (_turnWatchdogTimer) return;
-  _turnWatchdogTimer = setInterval(() => {
-    // Self-heal: if the selected session was cleared without routing through
-    // updateSendButton (dismissSession nulls selectedKey + swaps to the empty
-    // shell in three branches), the fetchSessions reconcile is gated on
-    // `if (selectedKey)` and would never stop us — so retire the watchdog here
-    // instead of polling /api/sessions forever for the page lifetime.
-    if (!selectedKey) { stopTurnWatchdog(); return; }
-    debouncedFetchSessions();
-  }, TURN_WATCHDOG_INTERVAL_MS);
-}
-function stopTurnWatchdog() {
-  if (_turnWatchdogTimer) { clearInterval(_turnWatchdogTimer); _turnWatchdogTimer = null; }
-}
-
-function updateSendButton(state) {
-  if (selectedKey) _lastAppliedMainState = { key: sid(selectedKey, selectedNode), state: state };
-  const banner = document.getElementById('running-banner');
-  const sendBtn = document.getElementById('btn-send');
-  const stopBtn = document.getElementById('btn-stop');
-  const inVoiceMode = document.getElementById('input-area')?.classList.contains('voice-mode');
-  if (state === 'running') {
-    if (banner) banner.style.display = '';
-    if (sendBtn) sendBtn.style.display = 'none';
-    if (stopBtn) stopBtn.style.display = 'flex';
-    if (nzViews.agent) nzViews.agent.initFromSession();
-    refreshBanner();
-    startTurnWatchdog();
-  } else {
-    stopTurnWatchdog();
-    // resetTurnState → refreshBanner will hide the banner since the session
-    // is no longer "running". If background agents are still active (e.g.
-    // zero-downtime restart), refreshBanner keeps the banner visible.
-    if (sendBtn) sendBtn.style.display = inVoiceMode ? 'none' : 'flex';
-    if (stopBtn) stopBtn.style.display = 'none';
-    resetTurnState();
-    // Replace stale loading indicator if session stopped before events arrived.
-    const evEl2 = document.getElementById('events-scroll');
-    const loadingEl = evEl2 && evEl2.querySelector('.loading-indicator');
-    if (loadingEl) loadingEl.innerHTML = '暂无事件';
-  }
-  // Banner show/hide changes .events height — keep latest message visible.
-  // Only auto-scroll if the user is already near the bottom; otherwise
-  // respect their scroll position (e.g. reading history).
-  const evEl = document.getElementById('events-scroll');
-  if (evEl && evEl.scrollTop + evEl.clientHeight >= evEl.scrollHeight - 50) {
-    evEl.scrollTop = evEl.scrollHeight;
-  }
 }
 
 // --- Auth modal ---
@@ -8017,8 +6625,8 @@ const wsm = {
       if (sawUser) stickEventsBottom();
       else if (wasBottom) el.scrollTop = el.scrollHeight;
       runPendingAsync();
-      navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-      if (navIdx >= 0 && navIdx < navUserEls.length) { /* preserve */ } else navIdx = -1;
+      nzState.navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
+      if (nzState.navIdx >= 0 && nzState.navIdx < nzState.navUserEls.length) { /* preserve */ } else nzState.navIdx = -1;
       navUpdatePill();
     }
 
@@ -8196,7 +6804,7 @@ const wsm = {
     else if (wasBottom) el.scrollTop = el.scrollHeight;
     runPendingAsync();
     if (ev.type === 'user') {
-      navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
+      nzState.navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
       navUpdatePill();
     }
   },
@@ -8643,207 +7251,6 @@ function stopPreviewPolling() {
   _previewGen++;
 }
 
-/* ===== Discovery & Takeover ===== */
-
-// Discovered-card identity is (pid, node): pids repeat across nodes, so every
-// key/lookup/removal goes through these helpers (#2431). Key shape is
-// '_discovered:<pid>:<node>' — pid stays in slot 1 for parseDiscoveredPid.
-function discoveredKey(pid, node) {
-  return '_discovered:' + pid + ':' + (node || 'local');
-}
-function isDiscoveredKey(key) {
-  return typeof key === 'string' && key.startsWith('_discovered:');
-}
-function parseDiscoveredPid(key) {
-  return parseInt(key.split(':')[1], 10);
-}
-function sameDiscovered(d, pid, node) {
-  return d.pid === pid && (d.node || 'local') === (node || 'local');
-}
-function findDiscovered(pid, node) {
-  return discoveredItems.find(d => sameDiscovered(d, pid, node)) || null;
-}
-function dropDiscovered(pid, node) {
-  discoveredItems = discoveredItems.filter(d => !sameDiscovered(d, pid, node));
-}
-
-async function scanDiscovered() {
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    // RNEW-UX-003: 10s timeout — /api/discovered walks the filesystem, so a
-    // stalled disk shouldn't wedge the scan button forever.
-    const data = await fetchJSON(NZ_CONTRACT.API.discovered, { headers, timeoutMs: 10000 });
-    discoveredItems = data || [];
-    // #1770: only force a full sidebar re-render when the discovered set
-    // actually changed. Previously every 30s (connected) / 5s (disconnected)
-    // scan unconditionally set lastVersion=0, defeating fetchSessions' version
-    // short-circuit and rebuilding the whole sidebar DOM even when nothing
-    // changed — wasted CPU/layout on low-end phones. Mirror the
-    // nodesHash/historyHash pattern fetchSessions already uses.
-    const discoveredHash = JSON.stringify(discoveredItems);
-    if (discoveredHash === lastDiscoveredJSON) return;
-    lastDiscoveredJSON = discoveredHash;
-    // Trigger sidebar re-render to merge discovered into project groups
-    lastVersion = 0;
-    debouncedFetchSessions();
-  } catch (e) {
-    console.warn('scanDiscovered error:', e.message);
-  }
-}
-
-async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliName, entrypoint) {
-  // Generation guard: two rapid clicks on different discovered cards both
-  // pass the synchronous prologue, then the first call's awaited fetch used to
-  // resolve into the SECOND card's #events-scroll and arm a second
-  // setInterval without clearing the first (previewTimer was simply
-  // overwritten → leaked interval appending the wrong session's events).
-  // stopPreviewPolling() bumps _previewGen, so capture AFTER calling it.
-  stopPreviewPolling();
-  const gen = _previewGen;
-  // Deselect any managed session. We null `selectedKey` but deliberately
-  // leave `selectedNode` intact — it now doubles as the sidebar filter and
-  // nulling it would strand the user on an empty list until their next
-  // refresh. The "no managed session selected" state is fully represented
-  // by `selectedKey === null`; other call sites check it that way.
-  selectedKey = null;
-  if (wsm.subscribedKey) wsm.unsubscribe();
-  if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
-  mobileEnterChat();
-
-  // Highlight the discovered card
-  setActiveSessionCard(discoveredKey(pid, node), node || 'local');
-
-  const base = cwd.split('/').pop() || cwd;
-  const main = document.getElementById('main');
-  main.innerHTML =
-    '<div class="main-header">' +
-      '<button type="button" class="btn-mobile-back" data-action="mobile-back" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
-      '<div class="main-header-content">' +
-        '<h2>' + esc(base) + '</h2>' +
-        '<div class="detail">' +
-          sessionTypeTag(cliName || 'cli', entrypoint || '') +
-        '</div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="events" id="events-scroll"><div class="empty-state">加载中…</div></div>' +
-    '<div class="nav-pill" id="nav-pill">' +
-      '<button type="button" data-action="nav-msg" data-dir="prev" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
-      '<span class="nav-counter" id="nav-counter" data-action="nav-show-list" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
-      '<button type="button" data-action="nav-msg" data-dir="next" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
-    '</div>' +
-    '<div class="input-area" id="input-area">' +
-      '<div class="file-preview" id="file-preview"></div>' +
-      '<div class="input-row">' +
-        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message to take over..." data-action-keydown="msg-input-key" data-action-compositionend="msg-input-compend"></div>' +
-        '<button type="button" class="btn-icon btn-send" id="btn-send" data-action="msg-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
-      '</div>' +
-    '</div>';
-  navRebuild(); // clear stale nav state before async preview fetch
-  pendingDiscovered = {pid: pid, sessionId: sessionId, cwd: cwd, procStartTime: procStartTime, node: node};
-
-  try {
-    const nodeParam = node ? '&node=' + encodeURIComponent(node) : '';
-    // Pass cwd so the backend resolves the JSONL via an O(1) os.Stat on the
-    // CWD-derived path instead of the fallback scan + its 60s negative cache.
-    // Without this hint a single transient miss (card shown before the JSONL
-    // flushed, or while claude renamed it during compaction) poisons preview
-    // for the full TTL, leaving a blank splash that only "fixes itself" once
-    // the cache expires.
-    const cwdParam = cwd ? '&cwd=' + encodeURIComponent(cwd) : '';
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    // RNEW-UX-003: 10s timeout — discovered preview loads a ~200-event tail
-    // from a JSONL transcript; a hung read shouldn't trap the user on a
-    // "加载中..." splash indefinitely.
-    let events;
-    try {
-      events = await fetchJSON(NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam, { headers, timeoutMs: 10000 });
-    } catch (err) {
-      if (gen !== _previewGen) return;
-      const errText = err.message || '';
-      const el0 = document.getElementById('events-scroll');
-      if (el0) el0.innerHTML = '<div class="empty-state">' + esc(errText || '预览失败') + '</div>';
-      if (err.status) showAPIError('预览会话', err.status, errText);
-      return;
-    }
-    // A newer previewDiscovered(), selectSession() or createSession() (all of
-    // which run stopPreviewPolling → _previewGen++) may have superseded this
-    // call while the fetch was in flight. The managed-session panel reuses the
-    // #events-scroll id, so an element check alone is not enough — never
-    // paint into someone else's panel.
-    if (gen !== _previewGen) return;
-    const el = document.getElementById('events-scroll');
-    if (!el) return;
-    const display = processEventsForDisplay(events);
-    if (events.length === 0) {
-      el.innerHTML = '<div class="empty-state">暂无会话历史</div>';
-    } else {
-      el.innerHTML = renderEventsWithDividers(display, 0);
-      stickEventsBottom();
-    }
-    navRebuild();
-    // previewTimer is provably null here: it is only ever armed below, after
-    // this generation check, and any older generation's interval was cleared
-    // by the stopPreviewPolling() in our own prologue. Do NOT call
-    // stopPreviewPolling() at this point — it would bump _previewGen and
-    // invalidate this very call.
-    previewEventCount = events.length;
-    const capturedSid = sessionId;
-    // #1770: guard against overlapping ticks. Each tick re-fetches the full
-    // preview event list; on a slow link a fetch can outlast the 2s interval,
-    // so without this flag consecutive ticks pile up concurrent requests.
-    // Mirrors _fetchEventsInFlight on the main events poll.
-    let previewInFlight = false;
-    previewTimer = setInterval(async () => {
-      // A newer previewDiscovered() already cleared this interval in its
-      // prologue; the check is defence-in-depth against a tick that was
-      // queued before clearInterval landed.
-      if (gen !== _previewGen) return;
-      if (previewInFlight) return;
-      previewInFlight = true;
-      try {
-        const headers2 = {};
-        const t2 = getToken();
-        if (t2) headers2['Authorization'] = 'Bearer ' + t2;
-        const r2 = await fetch(NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(capturedSid) + nodeParam + cwdParam, { headers: headers2 });
-        if (!r2.ok) return;
-        const all = await r2.json();
-        if (gen !== _previewGen) return;
-        if (all.length <= previewEventCount) return;
-        const fresh = all.slice(previewEventCount);
-        previewEventCount = all.length;
-        const el2 = document.getElementById('events-scroll');
-        if (!el2) { stopPreviewPolling(); return; }
-        const empty = el2.querySelector('.empty-state');
-        if (empty) empty.remove();
-        const wasBottom = el2.scrollTop + el2.clientHeight >= el2.scrollHeight - 30;
-        let prevT2 = lastDividerTime(el2);
-        fresh.forEach(e => {
-          if (isInternalEvent(e)) return;
-          const h = eventHtml(e); if (!h) return;
-          const t = e.time || 0;
-          if (t && (prevT2 === 0 || t - prevT2 >= EVENT_DIVIDER_GAP_MS)) {
-            el2.insertAdjacentHTML('beforeend', timeDividerHtml(t));
-          }
-          el2.insertAdjacentHTML('beforeend', h);
-          if (t) prevT2 = t;
-        });
-        if (wasBottom) el2.scrollTop = el2.scrollHeight;
-        navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-        navUpdatePill();
-      } catch (_) {
-      } finally {
-        previewInFlight = false;
-      }
-    }, 2000);
-  } catch (e) {
-    showNetworkError('预览会话', e);
-  }
-}
-
 /* ===== Cron Tab =====
    The cron (定时任务) view was extracted to static/cron_view.js (PR-1,
    RFC dashboard-cron-view-extraction). It loads as a plain <script defer>
@@ -8973,6 +7380,44 @@ function showOnboarding() {
 // unit / context bar all have backend metadata available on the first
 // renderHeader call. Failure / single-backend deployments still work — the
 // chip-render helpers return '' when cliBackends is null.
+// Wire the extracted modules BEFORE the bootstrap sequence below. Some of
+// them run at load time (discovery's scanDiscovered, the pollers) and read
+// their injected deps immediately: with the configure block placed after the
+// bootstrap, deps.getToken was still undefined and the discovered-session
+// scan failed silently (#2558 D4-6 — six e2e specs, no console error beyond
+// one warn line).
+// ─── module exports (#2557 PR-E2) ───────────────────────────────────────────
+// The view modules import these instead of dereferencing the window bridge.
+// dashboard is the dependency root: it imports only nz_util, so the graph
+// stays acyclic and module execution order matches the historical tag order.
+// (let bindings like lastEventTime export as live views — reassignment here
+// is visible to importers, unlike a window-property copy.)
+// Wire the markdown renderers' dashboard-side helpers (#2558 D4). Runs in
+// dashboard's module body, before any render call.
+configureSidebarProject({ PICKER_SELECT_ONLY_STYLE, PICKER_SELECT_STYLE, accessProfileChipInfo, debouncedFetchSessions, fetchAccessProfiles, fetchCLIBackends, fetchSessions, getToken, projectDisplayLabel, projectDisplayPrefix, renderAccessProfilePicker, renderBackendPicker, renderSidebar, showAPIError, showNetworkError });
+configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions, escCloseVoiceOverlay, handleFiles, refreshBanner, resetTurnState, selectSession, sid });
+configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, sessionAccessProfiles, sessionBackends, sessionWorkspaces, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput, wsm });
+configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navUpdatePill, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml, wsm });
+configureUtilities({ allSessionsCache, cliBackends, getToken, lastStatsSnapshot, renderSystemView, wsm });
+configureFileRefs({ AVATAR_GROUP_GAP_MS, ICONS, collapseSidebarForDrawer, getToken, isInternalEvent, loadKatex, loadMermaid, matchProject, nzSplitBringToFront, nzSplitEnter, nzSplitExit, renderRich, restoreSidebarAfterDrawer, runPendingAsync });
+configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid, wsm });
+configureSystemView({ formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, setActivityView, timeAgo, wireQuickAskInput });
+configureSplitView({ lsGet, lsRemove, lsSet, stickEventsBottom });
+configureSelfUpdate({ confirmDialog, markSessionOptimisticRunning });
+configureSessionHeader({ fetchSessions, formatAbsTime, getToken, renderMainShell, sid });
+configureComposerFiles({ ICONS, featureForCurrent, formatFileSize, getToken, sendMessage, showAuthModal });
+configureMobileNav({ ICONS, confirmDialog, dismissSession, lsGet, lsSet, nzAnyDrawerOpen, nzSplitExit, renameSession, renderMainHeader, selectSession });
+configureVoice({ ICONS, getMsgValue, getToken, sendMessage, setMsgValue, sid, updateSendButton });
+configureRenderMd({
+  FILE_REF_HAS_EXT,
+  decodeEscEntities,
+  fencedPathList,
+  fileRefCode,
+  isFileRefCandidate,
+  safeUrl,
+  splitPathLine,
+});
+
 fetchCLIBackends();
 // RFC project-access-profile §8.3: fire at boot so the session-card chip has
 // profile metadata (label/colour) on the first renderSidebar. Failure /
@@ -10235,33 +8680,6 @@ initSwipeBack();
 
 
 
-// ─── module exports (#2557 PR-E2) ───────────────────────────────────────────
-// The view modules import these instead of dereferencing the window bridge.
-// dashboard is the dependency root: it imports only nz_util, so the graph
-// stays acyclic and module execution order matches the historical tag order.
-// (let bindings like lastEventTime export as live views — reassignment here
-// is visible to importers, unlike a window-property copy.)
-// Wire the markdown renderers' dashboard-side helpers (#2558 D4). Runs in
-// dashboard's module body, before any render call.
-configureUtilities({ allSessionsCache, cliBackends, getToken, lastStatsSnapshot, renderSystemView, wsm });
-configureFileRefs({ AVATAR_GROUP_GAP_MS, ICONS, collapseSidebarForDrawer, getToken, isInternalEvent, loadKatex, loadMermaid, matchProject, nzSplitBringToFront, nzSplitEnter, nzSplitExit, renderRich, restoreSidebarAfterDrawer, runPendingAsync });
-configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid, wsm });
-configureSystemView({ formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, setActivityView, timeAgo, wireQuickAskInput });
-configureSplitView({ lsGet, lsRemove, lsSet, stickEventsBottom });
-configureSelfUpdate({ confirmDialog, markSessionOptimisticRunning });
-configureSessionHeader({ fetchSessions, formatAbsTime, getToken, renderMainShell, sid });
-configureComposerFiles({ ICONS, featureForCurrent, formatFileSize, getToken, sendMessage, showAuthModal });
-configureMobileNav({ ICONS, confirmDialog, dismissSession, lsGet, lsSet, nzAnyDrawerOpen, nzSplitExit, renameSession, renderMainHeader, selectSession });
-configureVoice({ ICONS, getMsgValue, getToken, sendMessage, setMsgValue, sid, updateSendButton });
-configureRenderMd({
-  FILE_REF_HAS_EXT,
-  decodeEscEntities,
-  fencedPathList,
-  fileRefCode,
-  isFileRefCandidate,
-  safeUrl,
-  splitPathLine,
-});
 
 export {
   authHeaders,
@@ -10280,6 +8698,10 @@ export {
   setActivityView,
   showAuthModal,
   wsm,
+
+
+
+
 };
 
 // ─── data-action registry (#1980 PR-2, docs/rfc/csp-data-action.md) ────────
@@ -10359,9 +8781,11 @@ Object.defineProperties(nzState, {
   accessProfilesFetchedAt: { get: function () { return accessProfilesFetchedAt; }, set: function (v) { accessProfilesFetchedAt = v; } },
   activePopover: { get: function () { return activePopover; }, set: function (v) { activePopover = v; } },
   activeView: { get: function () { return activeView; }, set: function (v) { activeView = v; } },
+  allSessionsCache: { get: function () { return allSessionsCache; }, set: function (v) { allSessionsCache = v; } },
   _autoPageBackCount: { get: function () { return _autoPageBackCount; }, set: function (v) { _autoPageBackCount = v; } },
   cliBackends: { get: function () { return cliBackends; }, set: function (v) { cliBackends = v; } },
   cliBackendsFetchedAt: { get: function () { return cliBackendsFetchedAt; }, set: function (v) { cliBackendsFetchedAt = v; } },
+  collapsedProjects: { get: function () { return collapsedProjects; }, set: function (v) { collapsedProjects = v; } },
   defaultWorkspace: { get: function () { return defaultWorkspace; } },
   discoveredItems: { get: function () { return discoveredItems; }, set: function (v) { discoveredItems = v; } },
   _earlierGen: { get: function () { return _earlierGen; }, set: function (v) { _earlierGen = v; } },
@@ -10371,15 +8795,19 @@ Object.defineProperties(nzState, {
   lastDiscoveredJSON: { get: function () { return lastDiscoveredJSON; }, set: function (v) { lastDiscoveredJSON = v; } },
   lastEventTime: { get: function () { return lastEventTime; }, set: function (v) { lastEventTime = v; } },
   lastRenderedEventTime: { get: function () { return lastRenderedEventTime; }, set: function (v) { lastRenderedEventTime = v; } },
+  _lastSidebarData: { get: function () { return _lastSidebarData; }, set: function (v) { _lastSidebarData = v; } },
+  _lastSidebarHtml: { get: function () { return _lastSidebarHtml; }, set: function (v) { _lastSidebarHtml = v; } },
+  lastStatsSnapshot: { get: function () { return lastStatsSnapshot; }, set: function (v) { lastStatsSnapshot = v; } },
   lastVersion: { get: function () { return lastVersion; }, set: function (v) { lastVersion = v; } },
-  navIdx: { get: function () { return navIdx; }, set: function (v) { navIdx = v; } },
   navPopoverOpen: { get: function () { return navPopoverOpen; }, set: function (v) { navPopoverOpen = v; } },
-  navUserEls: { get: function () { return navUserEls; }, set: function (v) { navUserEls = v; } },
   nodesData: { get: function () { return nodesData; } },
   oldestFetchedEventTime: { get: function () { return oldestFetchedEventTime; }, set: function (v) { oldestFetchedEventTime = v; } },
+  _optimisticDeleteKeys: { get: function () { return _optimisticDeleteKeys; }, set: function (v) { _optimisticDeleteKeys = v; } },
   pendingDiscovered: { get: function () { return pendingDiscovered; }, set: function (v) { pendingDiscovered = v; } },
   pendingFiles: { get: function () { return pendingFiles; }, set: function (v) { pendingFiles = v; } },
   previewEventCount: { get: function () { return previewEventCount; }, set: function (v) { previewEventCount = v; } },
+  _previewGen: { get: function () { return _previewGen; }, set: function (v) { _previewGen = v; } },
+  previewTimer: { get: function () { return previewTimer; }, set: function (v) { previewTimer = v; } },
   projectsData: { get: function () { return projectsData; } },
   selectedKey: { get: function () { return selectedKey; }, set: function (v) { selectedKey = v; } },
   selectedNode: { get: function () { return selectedNode; }, set: function (v) { selectedNode = v; } },
