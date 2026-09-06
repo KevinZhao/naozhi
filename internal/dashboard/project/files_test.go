@@ -1853,3 +1853,62 @@ func TestIsClientPathRejection(t *testing.T) {
 		t.Errorf("isClientPathRejection(nil) = true, want false")
 	}
 }
+
+func TestHandleFileGet_RenderInlineIframeOnly(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	htmlBytes := []byte(`<!doctype html><html><body><script>document.title='ok'</script></body></html>`)
+	if err := os.WriteFile(filepath.Join(projDir, "report.html"), htmlBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without Sec-Fetch-Dest: iframe the inline form must refuse — a direct
+	// top-level navigation says "document" (or nothing on legacy agents),
+	// and Firefox ignores the CSP sandbox directive on top-level navs, so
+	// serving text/html there would be same-origin stored XSS (#1980).
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=report.html&mode=render&inline=1", nil)
+	w := httptest.NewRecorder()
+	h.HandleFileGet(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("inline render without Sec-Fetch-Dest = %d, want 403", w.Code)
+	}
+	req = httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=report.html&mode=render&inline=1", nil)
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	w = httptest.NewRecorder()
+	h.HandleFileGet(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("inline render with Sec-Fetch-Dest: document = %d, want 403", w.Code)
+	}
+
+	// The iframe-stamped request renders as real text/html: the response's
+	// OWN sandbox CSP (opaque origin) is what isolates it — the dashboard
+	// page CSP is not inherited by network-served iframe documents, which is
+	// exactly why the preview survived the unsafe-inline removal.
+	req = httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=report.html&mode=render&inline=1", nil)
+	req.Header.Set("Sec-Fetch-Dest", "iframe")
+	w = httptest.NewRecorder()
+	h.HandleFileGet(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("inline render with Sec-Fetch-Dest: iframe = %d, want 200 (body=%q)", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	if cd := w.Header().Get("Content-Disposition"); cd != "" {
+		t.Errorf("Content-Disposition = %q, want empty (inline form renders, not downloads)", cd)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "sandbox allow-scripts") || !strings.Contains(csp, "default-src 'none'") {
+		t.Errorf("inline render CSP must keep the sandbox + default-src 'none' isolation, got %q", csp)
+	}
+	for _, forbidden := range []string{"allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
+		if strings.Contains(csp, forbidden) {
+			t.Errorf("inline render CSP must never grant %s, got %q", forbidden, csp)
+		}
+	}
+	if !strings.Contains(w.Body.String(), "Coverage") && !strings.Contains(w.Body.String(), "document.title") {
+		t.Errorf("inline render body should be the file bytes, got %q", w.Body.String())
+	}
+}

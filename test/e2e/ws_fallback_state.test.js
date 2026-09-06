@@ -30,8 +30,7 @@ test.describe('#2431 WS fallback state', () => {
       await page.goto(mock.url + '/dashboard');
       await page.waitForSelector('.session-card');
       // Sanity: the mock rejects /ws, so we are genuinely in fallback mode.
-      // eslint-disable-next-line no-eval
-      expect(await page.evaluate(() => eval('wsm.state'))).not.toBe('connected');
+      expect(await page.evaluate(() => window.wsm.state)).not.toBe('connected');
       await expect(cardDot(page, KEY)).toHaveClass(/dot-ready/);
 
       // Settle the boot churn: the first scanDiscovered zeroes lastVersion once
@@ -39,11 +38,10 @@ test.describe('#2431 WS fallback state', () => {
       // Prime both so the version gate is genuinely armed (lastVersion === 1)
       // before the flip — otherwise the old code passes by accident.
       const primed = await page.evaluate(async () => {
-        /* eslint-disable no-eval */
-        await eval('scanDiscovered')();
-        await eval('fetchSessions')();
-        await eval('fetchSessions')();
-        return eval('lastVersion');
+        await window.scanDiscovered();
+        await window.fetchSessions();
+        await window.fetchSessions();
+        return window.lastVersion;
         /* eslint-enable no-eval */
       });
       expect(primed).toBe(1);
@@ -53,8 +51,7 @@ test.describe('#2431 WS fallback state', () => {
       mock.setSessionStateWithoutVersionBump(KEY, 'running');
 
       // Drive the very function the 5 s fallback interval calls.
-      // eslint-disable-next-line no-eval
-      await page.evaluate(async () => { await eval('fetchSessions')(); });
+      await page.evaluate(async () => { await window.fetchSessions(); });
       await expect(cardDot(page, KEY)).toHaveClass(/dot-running/);
 
       // ...and the 5 s interval itself keeps it fresh. Let the boot-time
@@ -86,12 +83,11 @@ test.describe('#2431 WS fallback state', () => {
         let hidden = false;
         Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
         const flip = (h) => { hidden = h; document.dispatchEvent(new Event('visibilitychange')); };
-        /* eslint-disable no-eval */
-        const getTimer = () => eval('sessionPollTimer');
-        const getDiscTimer = () => eval('discoveredPollTimer');
+        const getTimer = () => window.sessionPollTimer;
+        const getDiscTimer = () => window.discoveredPollTimer;
 
         // Case A: tab returns to foreground while WS is (faked) connected.
-        eval('wsm.state = WS_STATES.CONNECTED');
+        window.wsm.state = window.WS_STATES.CONNECTED;
         flip(true);  // stopPollers → clears everything
         const clearedWhileHidden = getTimer() == null;
         flip(false); // startPollers
@@ -99,15 +95,15 @@ test.describe('#2431 WS fallback state', () => {
 
         // Case B: WS drops while the tab is hidden — nothing may be armed.
         flip(true);
-        eval('wsm.setState(WS_STATES.DISCONNECTED)');
+        window.wsm.setState(window.WS_STATES.DISCONNECTED);
         const armedByHiddenDisconnect = getTimer() != null || getDiscTimer() != null;
 
         // Case C: WS comes back while hidden — no discovered scan either.
-        eval('wsm.setState(WS_STATES.CONNECTED)');
+        window.wsm.setState(window.WS_STATES.CONNECTED);
         const discArmedByHiddenConnect = getDiscTimer() != null;
 
         // Case D: returning to the foreground with WS down re-arms fallback.
-        eval('wsm.state = WS_STATES.DISCONNECTED');
+        window.wsm.state = window.WS_STATES.DISCONNECTED;
         flip(false);
         const rearmedOnVisibleWithWsDown = getTimer() != null;
         /* eslint-enable no-eval */
@@ -135,15 +131,14 @@ test.describe('#2431 WS fallback state', () => {
       await expect(cardDot(page, KEY)).toHaveClass(/dot-ready/);
 
       const result = await page.evaluate(async (key) => {
-        /* eslint-disable no-eval */
-        eval('markSessionOptimisticRunning')(key, 'local');
+        window.markSessionOptimisticRunning(key, 'local');
         // REST still says 'ready' (mock never changed) — the poll must keep the
         // optimistic flip in BOTH sessionsData and the payload it renders from.
-        await eval('fetchSessions')();
-        const cached = eval('_lastSidebarData');
+        await window.fetchSessions();
+        const cached = window._lastSidebarData;
         const inPayload = (cached.sessions || []).find(s => s.key === key);
         // Cached re-render path used by toggleProjectCollapsed / sidebar search.
-        eval('renderSidebar')(cached);
+        window.renderSidebar(cached);
         /* eslint-enable no-eval */
         return { payloadState: inPayload && inPayload.state };
       }, KEY);

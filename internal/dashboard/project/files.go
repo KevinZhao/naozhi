@@ -902,11 +902,31 @@ func (h *Handlers) serveRender(w http.ResponseWriter, r *http.Request, f *os.Fil
 		return
 	}
 
-	// Deliberately NOT text/html: octet-stream + attachment makes a direct
-	// navigation download (Firefox ignores CSP sandbox there), while the
-	// dashboard fetch() still gets the bytes for a client-side blob: URL.
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", contentDisposition("attachment", resolved))
+	// inline=1 (#1980): the dashboard preview iframe points its src directly
+	// here — an iframe document's CSP comes from THIS response, not the
+	// parent page, which is what keeps workspace HTML rendering after the
+	// dashboard dropped script-src 'unsafe-inline' (blob:/srcdoc documents
+	// inherit the parent policy in current engines; measured in the RFC).
+	// Serving real text/html re-opens the Firefox top-level-navigation gap
+	// that octet-stream+attachment closed (Firefox ignores `CSP: sandbox` on
+	// top-level navigations), so the inline form is gated on
+	// Sec-Fetch-Dest: iframe — every current browser stamps navigation
+	// requests, top-level navigation says "document", and absence fails
+	// closed. The sandbox CSP below plus the dashboard's iframe sandbox
+	// attribute keep the document in an opaque origin either way.
+	if r.URL.Query().Get("inline") == "1" {
+		if r.Header.Get("Sec-Fetch-Dest") != "iframe" {
+			httputil.WriteJSONStatus(w, http.StatusForbidden, map[string]string{"error": "inline render is iframe-only"})
+			return
+		}
+		w.Header().Set("Content-Type", mime)
+	} else {
+		// Legacy fetch path: octet-stream + attachment makes a direct
+		// navigation download, while a dashboard fetch() still gets the
+		// bytes for a client-side blob: URL.
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", contentDisposition("attachment", resolved))
+	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	// Belt-and-braces CSP in case Content-Type ever flips back to text/html.
 	// 'unsafe-inline' 'unsafe-eval' are intentional (MathJax / KaTeX / Mermaid

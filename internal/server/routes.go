@@ -311,12 +311,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	// CSP: connect-src 'self' already covers same-origin ws/wss (`ws: wss:` would admit any origin); frame-src blob: = sandboxed
-	// workspace .html/.svg previews; img-src data: = CSS background SVGs (no <img src="data:"> ships — TestDashboardCSP_DataImgAuditPinned);
-	// font-src jsdelivr = KaTeX @font-face (fonts cannot carry SRI; the KaTeX CSS is SRI-pinned and Permissions-Policy bounds a font-parser
-	// RCE), jsdelivr narrowed to /npm/ so user-content paths cannot load; object-src/base-uri 'none' + form-action 'self' close plugin,
-	// <base>-re-rooting and form-exfil vectors; require-sri-for is a fail-closed forward-compat hook. Dropping 'unsafe-inline' needs nonces (#441).
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/; font-src 'self' https://cdn.jsdelivr.net/npm/; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font")
+	// CSP: built at init in dashboard_csp.go (#1980) — script-src has no
+	// unsafe-inline (data-action delegation + hashed theme bootstrap), cdn
+	// pinned to exact versioned files; connect-src 'self' covers same-origin
+	// ws/wss; frame-src blob: = sandboxed previews; style-src unsafe-inline
+	// stays until D6 (#2559) migrates the generated style="" attributes.
+	w.Header().Set("Content-Security-Policy", dashboardCSP)
 	// HSTS only over TLS (RFC 6797 §7.2): on plain HTTP it would brick local
 	// loopback access for a year. Same gate as the auth cookie Secure flag.
 	if s.auth.IsSecure(r) {

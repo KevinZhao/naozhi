@@ -5,16 +5,18 @@ import (
 	"testing"
 )
 
-// TestDashboardJS_SrcdocCSP pins [R202606j-SEC-1] (#2341): the mobile/WebKit
-// srcdoc fallback in renderSandboxedBlob must prepend a self-contained
-// <meta http-equiv="Content-Security-Policy"> to the workspace HTML so the
-// preview document does NOT inherit the dashboard page CSP. Without it, the
-// srcdoc document runs under the dashboard's own script-src / connect-src
-// allowlist, letting hostile workspace HTML reach dashboard-allowlisted
-// origins. A <meta> CSP can only further-restrict the inherited policy, so
-// it is strictly safe; the assertion windows on the srcdoc assignment so an
-// unrelated iframe elsewhere can't satisfy it.
-func TestDashboardJS_SrcdocCSP(t *testing.T) {
+// TestDashboardJS_SandboxedPreviewViaEndpoint pins the #1980 preview
+// architecture that replaced the blob:/srcdoc delivery (and with it the
+// [R202606j-SEC-1] #2341 meta-CSP patch): blob: and srcdoc iframe documents
+// INHERIT the parent page CSP in current engines (measured in
+// docs/rfc/csp-data-action.md §4), so after script-src dropped
+// 'unsafe-inline' both paths would silently stop executing workspace HTML.
+// renderSandboxedBlob must instead point the sandboxed iframe's src at the
+// server's inline render form — the iframe document's policy then comes from
+// that response's own `Content-Security-Policy: sandbox allow-scripts …`
+// header (opaque origin, no connect budget), enforced server-side by
+// TestHandleFileGet_RenderInlineIframeOnly.
+func TestDashboardJS_SandboxedPreviewViaEndpoint(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
@@ -22,29 +24,30 @@ func TestDashboardJS_SrcdocCSP(t *testing.T) {
 	}
 	js := string(data)
 
-	idx := strings.Index(js, "frame.srcdoc")
+	idx := strings.Index(js, "function renderSandboxedBlob(")
 	if idx < 0 {
-		t.Fatal("srcdoc fallback assignment not found in dashboard.js")
+		t.Fatal("renderSandboxedBlob not found in dashboard.js")
 	}
-	// Window: from the srcdoc assignment back to the preceding CSP literal
-	// definition (must be within the same render branch, a few lines above).
-	start := idx - 1200
-	if start < 0 {
-		start = 0
+	end := strings.Index(js[idx:], "\n}")
+	if end < 0 {
+		t.Fatal("could not bound renderSandboxedBlob body")
 	}
-	block := js[start : idx+len("frame.srcdoc = sandboxCsp + new TextDecoder('utf-8').decode(bytes);")]
+	body := js[idx : idx+end]
 
-	if !strings.Contains(block, "http-equiv=\\\"Content-Security-Policy\\\"") {
-		t.Error("srcdoc fallback must prepend a <meta http-equiv=\"Content-Security-Policy\"> to override the inherited dashboard CSP ([R202606j-SEC-1], #2341)")
+	if !strings.Contains(body, "'render') + '&inline=1'") {
+		t.Error("renderSandboxedBlob must point the iframe at mode=render&inline=1 (its response carries its own sandbox CSP)")
 	}
-	// connect-src must be locked down so the preview cannot exfiltrate via
-	// fetch/XHR/WebSocket using the dashboard's connect-src budget.
-	if !strings.Contains(block, "connect-src 'none'") {
-		t.Error("srcdoc CSP must set connect-src 'none' to block exfiltration ([R202606j-SEC-1], #2341)")
+	if !strings.Contains(body, "sandbox', 'allow-scripts'") {
+		t.Error("renderSandboxedBlob must keep the allow-scripts-only iframe sandbox attribute (belt to the response CSP)")
 	}
-	// The srcdoc content must actually be prefixed with the CSP literal, not
-	// just decoded bytes (the bug was a bare decode with no CSP).
-	if !strings.Contains(block, "sandboxCsp +") {
-		t.Error("srcdoc must be prefixed with the sandboxCsp literal ([R202606j-SEC-1], #2341)")
+	// The CSP-inheriting delivery shapes must not come back: srcdoc anywhere
+	// in the file, and Blob/createObjectURL inside this helper.
+	if strings.Contains(js, "srcdoc") {
+		t.Error("dashboard.js reintroduced a srcdoc preview path — srcdoc documents inherit the page CSP, which has no script-src 'unsafe-inline' anymore")
+	}
+	for _, tok := range []string{"new Blob(", "createObjectURL"} {
+		if strings.Contains(body, tok) {
+			t.Errorf("renderSandboxedBlob reintroduced %q — blob: documents inherit the page CSP (docs/rfc/csp-data-action.md §4)", tok)
+		}
 	}
 }
