@@ -23,7 +23,7 @@
      .ab-top/.ab-bottom collapse via display:contents so all 5 .ab-nav buttons
      become direct flex children of the horizontal bar (margin-top:auto is a
      no-op once the wrapper is display:contents). */
-  .activity-bar{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;height:auto;flex-direction:row;border-right:none;border-top:1px solid var(--nz-border);padding:4px 0 max(4px,env(safe-area-inset-bottom));z-index:30;justify-content:space-around}
+  .activity-bar{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;height:auto;flex-direction:row;border-right:none;border-top:1px solid var(--nz-border);padding:4px 0 max(4px,env(safe-area-inset-bottom));z-index:var(--nz-z-rail);justify-content:space-around}
   /* ui-polish-light-theme D9: 6 tabs over-crowd a 390px bar. 系统 is the
      lowest-frequency, read-only view — its entry moves into 设置 (the
      .settings-syslink row + mirrored attention badge on the 设置 tab). */
