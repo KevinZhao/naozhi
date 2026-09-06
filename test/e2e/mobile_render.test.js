@@ -16,13 +16,19 @@ test.describe('#1772 mobile render hotspots', () => {
   test('source: swipe-delete caches offsetWidth and popover dismiss is gated', async () => {
     // These are hot-loop layout-read removals with no cheap DOM contract to
     // assert at runtime; pin them at the source level so they can't regress.
+    // #2558 D4-3: swipe-delete moved to mobile_nav.js; the popover-dismiss
+    // scroll gate stayed in dashboard.js.
+    const mobileJs = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'internal/server/static/mobile_nav.js'),
+      'utf8'
+    );
     const js = fs.readFileSync(
       path.join(__dirname, '..', '..', 'internal/server/static/dashboard.js'),
       'utf8'
     );
     // touchmove must use the cached cardW, not a per-frame card.offsetWidth read.
-    expect(js).toContain('-dx / cardW * 0.6');
-    expect(js).not.toContain('-dx / card.offsetWidth * 0.6');
+    expect(mobileJs).toContain('-dx / cardW * 0.6');
+    expect(mobileJs).not.toContain('-dx / card.offsetWidth * 0.6');
     // scroll handler must gate the popover dismiss on the open flag.
     expect(js).toContain('if (navPopoverOpen) navDismissPopover();');
   });

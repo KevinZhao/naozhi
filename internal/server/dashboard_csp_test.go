@@ -363,7 +363,8 @@ func TestDashboardCSP_StaticHandlersWiredInJS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cron_view.js: %v", err)
 	}
-	jsAll := js + "\n" + string(cronJSBytes)
+	// #2558 D4: handler functions may live in any bundle module now.
+	jsAll := readDashboardJS(t) + "\n" + string(cronJSBytes)
 
 	// Each migrated control: the element id that must exist in the HTML, and
 	// the handler function name that must still be defined in the dashboard JS.

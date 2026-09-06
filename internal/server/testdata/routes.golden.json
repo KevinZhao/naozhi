@@ -396,6 +396,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/composer_files.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/contract.js",
     "handler_type": "http.HandlerFunc"
   },
@@ -416,6 +421,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/mobile_nav.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/nz_util.js",
     "handler_type": "http.HandlerFunc"
   },
@@ -427,6 +437,11 @@
   {
     "method": "GET",
     "path": "/static/self_update.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/session_header.js",
     "handler_type": "http.HandlerFunc"
   },
   {

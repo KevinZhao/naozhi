@@ -272,19 +272,22 @@ func handlerTypeOf(e ast.Expr) string {
 // http.HandlerFunc. Listing them here pins their handler_type in the
 // golden snapshot.
 var packageFuncType = map[string]string{
-	"handleManifest":       "http.HandlerFunc",
-	"handleSW":             "http.HandlerFunc",
-	"handleContractJS":     "http.HandlerFunc",
-	"handleNzUtilJS":       "http.HandlerFunc",
-	"handleRenderMdJS":     "http.HandlerFunc",
-	"handleSelfUpdateJS":   "http.HandlerFunc",
-	"handleVoiceJS":        "http.HandlerFunc",
-	"handleDashboardJS":    "http.HandlerFunc",
-	"handleCronViewJS":     "http.HandlerFunc",
-	"handleAgentViewJS":    "http.HandlerFunc",
-	"handleAssetBrowserJS": "http.HandlerFunc",
-	"handleFilesViewJS":    "http.HandlerFunc",
-	"handleFavicon":        "http.HandlerFunc",
+	"handleManifest":        "http.HandlerFunc",
+	"handleSW":              "http.HandlerFunc",
+	"handleContractJS":      "http.HandlerFunc",
+	"handleNzUtilJS":        "http.HandlerFunc",
+	"handleRenderMdJS":      "http.HandlerFunc",
+	"handleSelfUpdateJS":    "http.HandlerFunc",
+	"handleVoiceJS":         "http.HandlerFunc",
+	"handleSessionHeaderJS": "http.HandlerFunc",
+	"handleComposerFilesJS": "http.HandlerFunc",
+	"handleMobileNavJS":     "http.HandlerFunc",
+	"handleDashboardJS":     "http.HandlerFunc",
+	"handleCronViewJS":      "http.HandlerFunc",
+	"handleAgentViewJS":     "http.HandlerFunc",
+	"handleAssetBrowserJS":  "http.HandlerFunc",
+	"handleFilesViewJS":     "http.HandlerFunc",
+	"handleFavicon":         "http.HandlerFunc",
 }
 
 var serverFieldType = map[string]string{

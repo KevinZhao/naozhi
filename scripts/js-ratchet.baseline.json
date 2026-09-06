@@ -11,6 +11,12 @@
     "functionsOver100": 0,
     "topLevelLetVar": 0
   },
+  "composer_files.js": {
+    "lines": 468,
+    "maxFunctionLines": 65,
+    "functionsOver100": 0,
+    "topLevelLetVar": 2
+  },
   "contract.js": {
     "lines": 202,
     "maxFunctionLines": 0,
@@ -24,16 +30,22 @@
     "topLevelLetVar": 18
   },
   "dashboard.js": {
-    "lines": 14440,
+    "lines": 13153,
     "maxFunctionLines": 249,
-    "functionsOver100": 14,
-    "topLevelLetVar": 87
+    "functionsOver100": 13,
+    "topLevelLetVar": 82
   },
   "files_view.js": {
     "lines": 440,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0
+  },
+  "mobile_nav.js": {
+    "lines": 574,
+    "maxFunctionLines": 118,
+    "functionsOver100": 1,
+    "topLevelLetVar": 3
   },
   "nz_util.js": {
     "lines": 233,
@@ -52,6 +64,12 @@
     "maxFunctionLines": 61,
     "functionsOver100": 0,
     "topLevelLetVar": 5
+  },
+  "session_header.js": {
+    "lines": 415,
+    "maxFunctionLines": 33,
+    "functionsOver100": 0,
+    "topLevelLetVar": 0
   },
   "voice.js": {
     "lines": 491,

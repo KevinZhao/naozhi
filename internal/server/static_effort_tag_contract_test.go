@@ -23,11 +23,7 @@ import (
 
 func TestDashboardJS_EffortTagWiring(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	for _, want := range []string{
 		// Builder + setter pair, mirroring gitChipHtml / setHeaderGitChip.
@@ -98,11 +94,7 @@ func TestDashboardJS_EffortTagWiring(t *testing.T) {
 // injection vector reachable by whatever that process reports.
 func TestDashboardJS_EffortTagEscapesTier(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	for _, want := range []string{
 		`esc(raw)`,     // visible tag text
@@ -121,11 +113,7 @@ func TestDashboardJS_EffortTagEscapesTier(t *testing.T) {
 // completeness, not correctness.
 func TestDashboardJS_EffortLabelsCoverKnownTiers(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	if !strings.Contains(js, "const EFFORT_LABELS = {") {
 		t.Fatal("dashboard.js missing EFFORT_LABELS table")

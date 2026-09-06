@@ -13,16 +13,12 @@ import (
 // regressing the behavior in the browser.
 func TestDashboardJS_SidebarAutoCollapseWired(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read embedded dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	// The shared helper must exist; all three drawers route through it so the
 	// mobile-skip + idempotency guard live in one place.
 	if !strings.Contains(js, "function collapseSidebarForDrawer(") {
-		t.Fatal("collapseSidebarForDrawer helper missing from dashboard.js — sidebar auto-collapse on drawer open is unwired")
+		t.Fatal("collapseSidebarForDrawer helper missing from the dashboard bundle — sidebar auto-collapse on drawer open is unwired")
 	}
 
 	// Exactly the three drawer entry points must invoke the helper. We count
@@ -57,14 +53,10 @@ func TestDashboardJS_SidebarAutoCollapseWired(t *testing.T) {
 // localStorage write) and conditional (never undo a user-chosen collapse).
 func TestDashboardJS_SidebarAutoRestoreWired(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read embedded dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	if !strings.Contains(js, "function restoreSidebarAfterDrawer(") {
-		t.Fatal("restoreSidebarAfterDrawer helper missing from dashboard.js — sidebar auto-restore on drawer close is unwired")
+		t.Fatal("restoreSidebarAfterDrawer helper missing from the dashboard bundle — sidebar auto-restore on drawer close is unwired")
 	}
 
 	// Exactly the two drawer close paths must invoke the helper
