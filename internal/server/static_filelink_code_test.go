@@ -20,9 +20,9 @@ import (
 // is exercised as an embedded asset; there is no JS test runner in CI).
 func TestDashboardJS_LocalFileLink_RendersAsCode(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := renderMdJS.ReadFile("static/render_md.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read render_md.js: %v", err)
 	}
 	js := string(data)
 
@@ -107,11 +107,18 @@ func TestDashboardJS_LocalFileLink_RendersAsCode(t *testing.T) {
 // non-escaping contract so a refactor cannot silently break button attachment.
 func TestDashboardJS_FileRefCode_Helper(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// #2558 D4: the markdown renderers moved to render_md.js while some
+	// helpers they call (safeUrl / fileRefCode) stay in dashboard.js — the
+	// contract spans both, so scan the concatenation.
+	rmd, err := renderMdJS.ReadFile("static/render_md.js")
+	if err != nil {
+		t.Fatalf("read render_md.js: %v", err)
+	}
+	dj, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	js := string(rmd) + "\n" + string(dj)
 
 	// 1. The helper must exist.
 	fnIdx := strings.Index(js, "function fileRefCode(inner, className)")

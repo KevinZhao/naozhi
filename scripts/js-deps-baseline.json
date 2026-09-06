@@ -3,9 +3,6 @@
     "dashboard.js": {
       "nz_util.js": [
         "nz"
-      ],
-      "cron_view.js": [
-        "openCronPanel"
       ]
     },
     "cron_view.js": {

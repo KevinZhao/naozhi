@@ -13,9 +13,9 @@ import (
 // 把 SRI 移除（任一行被注释 / 删除即触发回归）。
 func TestDashboardJS_CDNScriptsHaveSRI(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := renderMdJS.ReadFile("static/render_md.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read render_md.js: %v", err)
 	}
 	js := string(data)
 
