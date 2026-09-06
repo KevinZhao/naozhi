@@ -15,7 +15,7 @@
 // leaves quotes alone, so a file named `a"b` would truncate data-name="…" and
 // the click handler navigated to the wrong path.
 import { esc, escAttr, showToast, fetchJSON, nzViews } from './nz_util.js';
-import { fileApiUrl, formatFileSize, renderSandboxedBlob } from './dashboard.js';
+import { fileApiUrl, formatFileSize, renderSandboxedBlob } from './file_refs.js';
 
 (function () {
   'use strict';

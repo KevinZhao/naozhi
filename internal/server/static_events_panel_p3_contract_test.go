@@ -171,11 +171,13 @@ func TestDashboardJS_NodeDisconnectDeselectsStaleSession(t *testing.T) {
 		t.Error("node-disconnected branch must call deselectNodeSession")
 	}
 	fn := jsFuncBody(t, js, "deselectNodeSession")
+	// #2558 D4-4: deselectNodeSession moved to system_view.js, where dashboard
+	// state is read via nz.state and helpers are injected deps.
 	for _, want := range []string{
-		"if (draft) sessionDrafts[selectedKey] = draft;", // keep the operator's text
-		"selectedKey = null;",
-		"main.innerHTML = mainEmptyHtml();",
-		"wireQuickAskInput();",
+		"if (draft) nzState.sessionDrafts[nzState.selectedKey] = draft;", // keep the operator's text
+		"nzState.selectedKey = null;",
+		"main.innerHTML = deps.mainEmptyHtml();",
+		"deps.wireQuickAskInput();",
 		"已断开",
 	} {
 		if !strings.Contains(fn, want) {

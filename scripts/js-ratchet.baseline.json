@@ -1,6 +1,6 @@
 {
   "agent_view.js": {
-    "lines": 731,
+    "lines": 735,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0
@@ -24,16 +24,22 @@
     "topLevelLetVar": 0
   },
   "cron_view.js": {
-    "lines": 4642,
+    "lines": 4644,
     "maxFunctionLines": 137,
     "functionsOver100": 4,
     "topLevelLetVar": 18
   },
   "dashboard.js": {
-    "lines": 13153,
+    "lines": 11487,
     "maxFunctionLines": 249,
-    "functionsOver100": 13,
-    "topLevelLetVar": 82
+    "functionsOver100": 12,
+    "topLevelLetVar": 69
+  },
+  "file_refs.js": {
+    "lines": 937,
+    "maxFunctionLines": 152,
+    "functionsOver100": 1,
+    "topLevelLetVar": 6
   },
   "files_view.js": {
     "lines": 440,
@@ -59,6 +65,12 @@
     "functionsOver100": 2,
     "topLevelLetVar": 6
   },
+  "running_banner.js": {
+    "lines": 483,
+    "maxFunctionLines": 95,
+    "functionsOver100": 0,
+    "topLevelLetVar": 1
+  },
   "self_update.js": {
     "lines": 373,
     "maxFunctionLines": 61,
@@ -70,6 +82,18 @@
     "maxFunctionLines": 33,
     "functionsOver100": 0,
     "topLevelLetVar": 0
+  },
+  "split_view.js": {
+    "lines": 222,
+    "maxFunctionLines": 0,
+    "functionsOver100": 0,
+    "topLevelLetVar": 5
+  },
+  "system_view.js": {
+    "lines": 260,
+    "maxFunctionLines": 73,
+    "functionsOver100": 0,
+    "topLevelLetVar": 2
   },
   "voice.js": {
     "lines": 491,

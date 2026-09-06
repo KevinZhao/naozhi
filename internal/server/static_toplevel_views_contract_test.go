@@ -113,7 +113,7 @@ func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 	t.Parallel()
 	// cron extraction (PR-1): the view router (activeView/setActivityView) stayed
 	// in dashboard.js while renderCronPanel moved to cron_view.js. Union both.
-	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
+	dashData, err := []byte(readDashboardJS(t)), error(nil)
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -212,11 +212,7 @@ func TestDashboardJS_CronAttentionSingleFilter(t *testing.T) {
 // is corrected to 'chat' before the no-op check runs.
 func TestDashboardJS_SetActivityViewNoOpGuard(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	// The validity gate must come before the no-op guard.
 	validityGate := `if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';`
@@ -241,11 +237,7 @@ func TestDashboardJS_SetActivityViewNoOpGuard(t *testing.T) {
 // dashboard.html) instead of falling back to 'offline'.
 func TestDashboardJS_ValidDotClassesIncludesUnreachable(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	if !strings.Contains(js, `unreachable: 'unreachable'`) {
 		t.Error("VALID_DOT_CLASSES must include unreachable: 'unreachable' so the CSS rule is not a dead rule")
@@ -281,11 +273,7 @@ func TestDashboardHTML_RailA11yLabelsLocalized(t *testing.T) {
 // can't silently strand the new view's data path.
 func TestDashboardJS_SystemViewContract(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	wants := []string{
 		"function openSystemPanel(",      // view entry
