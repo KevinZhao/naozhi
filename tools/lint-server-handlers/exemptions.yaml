@@ -7,8 +7,13 @@
 # 规则：
 # - server 包文件硬上限 limit:500（不是 800）— 见 §9.2 file_size budget
 # - dashboard 子包文件硬上限 800（v0.6.1 暂无此条目）
-# - 每条 until_phase 标到具体 phase；该 phase merge 时 PR commit 必须含
-#   "Closes-exemption: <file>" trailer，否则 rule 5 (stale_exemption) fail
+# - 每条 until_phase 标到具体 phase 或 issue（**必须带引号** —— main.go 的
+#   UntilPhase 是 string 字段，裸数字会让 yaml.Unmarshal 失败 → os.Exit(2)，
+#   比 violation 更硬）。这是为什么 "5" 有引号而历史上的 3f/4b 没有
+# - 该 phase merge 时 PR commit 惯例带 "Closes-exemption: <file>" trailer。
+#   注意：rule 5 (stale_exemption) 只做 os.Stat 存在性判断，**不校验 commit
+#   trailer** —— 全仓没有任何 CI step 做这件事（design.md:757 声称"无对应行
+#   即 fail"是文档对代码的虚构，已在 #2551 E1-c 订正）。trailer 是人肉纪律
 # - 豁免清单原则上不新增条目；但 baseline `current` 必须随 master 漂移
 #   更新（preflight 必检 — 见 §6.2.0.4）
 #
@@ -18,12 +23,23 @@
 #   baseline 直接切 fail：baseline 冻结当前水位，再长一行即卡 PR。
 # - "不新增条目"规则的前提是 phase 会持续落地；4b 暂缓后，R243-ARCH-2
 #   从 wshub.go 拆出的 wshub_broadcast.go / wshub_subscribe.go 无豁免
-#   会让 fail 模式永久红。为两文件补录条目（见下），与 wshub.go 同挂
-#   until_phase 4b。
+#   会让 fail 模式永久红，故当日为两文件补录条目、与 wshub.go 同挂 4b。
+#
+# 2026-09-07（#2551 E1-c）重采说明：
+# - 那两条补录条目已在本次删除 —— 两个文件后来被别的重构改瘦到 365 / 433
+#   行，早已 ≤ 500 上限，条目自 2026-07-31 之后就是死账。send.go 同理
+#   （记 599 / 实测 461）。11 → 8 条。
+# - 上一条"baseline current 必须随 master 漂移更新"在实践中没被执行：
+#   wshub.go 记 1381 实测 742（差 639），dashboard_send.go 记 1089 实测 851。
+#   两条已重采。lint 只在 `lines > current` 时报警，所以 baseline 偏高会静默
+#   放过增长 —— 重采不是洁癖，是把闸门重新上膛。
 
 file_size:
-    # 8 个 > 800 行 + 3 个 500-800 行 = 11 个超限（2026-07-31 重采）
-    # ── 8 个 > 800 行 ──
+    # 2026-09-07（#2551 E1-c）重采：11 → 8 个条目。删掉 4 条死账（文件已 ≤ 500
+    # 上限，按 rule 5(b) 语义应删；lint 的 scanFileSize 在查豁免表之前就
+    # `if lines <= limit { return nil }`，所以它们早已惰性），新增 0 条。
+    # 缩水都发生在 #2551 之前的历次重构里，只是从没人重采 baseline。
+    # ── > 800 行（dashboard 子包）──
     # internal/server/dashboard_session.go: removed Phase 3e (PR #1441) — file
     # moved to internal/dashboard/session/handlers.go. Closes-exemption trailer
     # in commit message satisfies rule 5.
@@ -40,9 +56,9 @@ file_size:
       limit: 800
       until_phase: "5"        # Phase 5 内部拆分（每个 serve* / handle* 一个文件）
     - path: internal/server/dashboard_send.go
-      current: 1089                         # 2026-07-31 fail 切换重采（2026-05-28 send_persist.go 抽离后 997）
+      current: 851                          # 2026-09-07 重采（#2551 E1-c）：记 1089 实测 851，2026-07-31 之后的历次重构缩水从未回写
       limit: 500
-      until_phase: 3f
+      until_phase: "E6"       # #2561（Epic E 的 handler 文件机械拆分）。原挂 3f：ADR-001 后该 phase 不会到来，等于永久豁免
     # internal/server/dashboard_cron.go: removed Phase 1 (PR #1438) — file
     # moved to internal/dashboard/cron/handlers.go. Closes-exemption trailer
     # in commit message satisfies rule 5.
@@ -61,9 +77,9 @@ file_size:
       limit: 500
       until_phase: "5"
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线
-      current: 1381                         # 2026-07-31 fail 切换重采（2026-05-28 时 1107）
+      current: 742                          # 2026-09-07 重采（#2551 E1-c）：记 1381 实测 742，差 639 行 —— 期间 R243-ARCH-2 等拆分从未回写 baseline
       limit: 500
-      until_phase: 4b
+      until_phase: "K"        # Epic K #2549（Hub 拆 Subscriber/Broadcast 子对象）。原挂 4b：ADR-001 判定暂缓，该 phase 不会到来。带引号：until_phase 是 string，裸数字会让 yaml.Unmarshal 失败 → main.go os.Exit(2)
     - path: internal/server/routes.go         # v0.6.1 新增豁免：v0.4 时 731 不超线
       current: 553                          # 2026-09-07 +17（#2558 D4 的 14 条模块路由 + #2559 的 /static/css/{file} 路由；handler 体在 static_js_handlers.go）
       limit: 500
@@ -72,22 +88,18 @@ file_size:
     # 抽离 (Phase 4c-prep) 后降到 356 行，≤ 500 上限；按 rule 5(b) 语义
     # （文件存在但行数 ≤ limit → 条目应删除）清理豁免债。
     # Closes-exemption: internal/server/agent_tailer.go
-    # ── 3 个 500-800 行 ──
-    - path: internal/server/send.go
-      current: 599                          # 2026-07-31 fail 切换重采（2026-05-31 R248-ARCH-9 后 567）
-      limit: 500
-      until_phase: 3f
-    # 下两条为 2026-07-31 fail 切换补录：R243-ARCH-2 从 wshub.go 拆出的
-    # 方法文件，拆分时即超 500；4b 暂缓后无 phase 可等，无豁免则 fail
-    # 模式永久红。与 wshub.go 同挂 until_phase 4b。
-    - path: internal/server/wshub_broadcast.go
-      current: 653                          # 2026-07-31 实测
-      limit: 500
-      until_phase: 4b
-    - path: internal/server/wshub_subscribe.go
-      current: 543                          # 2026-07-31 实测
-      limit: 500
-      until_phase: 4b
+    # ── 2026-09-07（#2551 E1-c）删掉的三条死账 ──
+    # 三个文件都已 ≤ 500 上限，条目从此惰性；按 agent_tailer.go 的先例（rule
+    # 5(b)：文件存在但行数 ≤ limit → 条目应删除）清理。实测行数与条目记录：
+    #   internal/server/send.go             461（记 599，挂 3f）
+    #   internal/server/wshub_broadcast.go  365（记 653，挂 4b）
+    #   internal/server/wshub_subscribe.go  433（记 543，挂 4b）
+    # 后两条是 2026-07-31 为 R243-ARCH-2 从 wshub.go 拆出的方法文件补录的，
+    # 补录时确实超 500；之后被别的重构改瘦，没人回来删。
+    # 至此 until_phase: 4b 只剩 wshub.go 一条，且已改挂 Epic K。
+    # Closes-exemption: internal/server/send.go
+    # Closes-exemption: internal/server/wshub_broadcast.go
+    # Closes-exemption: internal/server/wshub_subscribe.go
     # internal/server/dashboard_auth.go: removed Phase 3a (PR #1436) — file
     # moved to internal/dashboard/auth/handlers.go. Closes-exemption trailer
     # in commit message satisfies rule 5.

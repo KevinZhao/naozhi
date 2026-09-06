@@ -40,8 +40,8 @@
 | 维度 | v0.6 实测值 | v0.4 写过 | v0.5 写过 | 备注 |
 |---|---|---|---|---|
 | Server struct 字段 | **47** | 47 | 47 | 一致 |
-| Hub struct 字段 | **49** | 37 | 43 | v0.6 47 / v0.6.1 47 / Phase 4b-hub-sync (2026-05-28) 校准到 49：master 新增 authClients (PR #1409) + enforceCaps (PR #1401) + userSendLimiters 类型 map → *sync.Map (PR #1357) |
-| Hub 字段块数 | **7** | 6 | 7 | 一致（Phase 4b-hub-sync 校准：lifecycle 3 / subscriber 12 / broadcast 6 / send 6 / shared 14 / tailer 3 / cache 5 = 49）|
+| Hub struct 字段 | **47** | 37 | 43 | 2026-09-07 实测（#2551 E1-c）。此前写 49，而当日 master 实测是 **52** —— 表自己漂了 3；#2551 把 6 个 send 块字段迁到 sendEngine、加 1 个 engine 后落到 47。历史：v0.6 47 / v0.6.1 47 / Phase 4b-hub-sync (2026-05-28) 校准到 49（authClients #1409 + enforceCaps #1401 + userSendLimiters map → *sync.Map #1357） |
+| Hub 字段块数 | **7** | 6 | 7 | 块数一致。**逐块计数已 stale，别拿来做加法** —— 见 §五 的 2026-09-07 说明；#2551 后 send 块 6→1（迁 sendEngine）、cache 5→6（droppedTotal 移入）|
 | server 包行数（不含测试）| **21313** | 17156 | 17156 | v0.6 同步 master：3 个月涨 24% |
 | server 包行数（含测试）| **53487** | 38836 | 38836 | v0.6 同步 master |
 | server 包文件数（不含测试）| **58** | 40 | 40 | v0.6 同步 master |
@@ -99,7 +99,7 @@ server 包行数:  含测试 53487 行 / 206 文件
   dashboard_auth.go            583
 
 Server struct: 47 字段（baseline 实测，13 个是 12 个 handler 引用）
-Hub struct:    49 字段（Phase 4b-hub-sync 校准；v0.4 baseline 37 / v0.6 47 / Phase 4b-hub-sync 49；按职责分 7 块见 §五）
+Hub struct:    **47** 字段（2026-09-07 实测，#2551 把 6 个 send 块字段迁到 sendEngine；v0.4 baseline 37 / v0.6 47 / Phase 4b-hub-sync 49 / #2551 前实测 52；按职责分 7 块见 §五）
 路由注册总数: 51 条（dashboard.go::registerDashboard 单点；v0.4 时 50 条）
 Hub.queue 字段：直接耦合 *dispatch.MessageQueue（R242-GO-10 拖了 5 轮）
 
@@ -120,7 +120,7 @@ handler-group 化第一轮（`auth/cronH/sessionH/projectH/discoveryH/transcribe
 |---|---|---|---|
 | 1 | server 包瘦身 | ≤ 5000 行（不含测试）/ ≤ 15 个非测试文件 | `wc -l $(ls internal/server/*.go \| grep -v _test.go)` |
 | 2 | Server struct 字段瘦身 | **47** → **≤ 12** 字段（减 74%） | `awk '/^type Server struct/,/^}$/' internal/server/server.go \| grep -E '^\s+[a-zA-Z_]+ ' \| wc -l` |
-| 3 | Hub 字段整理 | **49** 字段维持不变（Phase 4b-hub-sync 校准；v0.6 47 / Phase 4b-hub-sync 加 authClients/enforceCaps + userSendLimiters 类型 → *sync.Map；按 §五 7 块分组组织；本次不删字段，仅整理） | 同上脚本针对 wshub.go |
+| 3 | Hub 字段整理 | **49** 字段维持不变 <!-- lint:allow:historical-phase4b-时点值 --> （Phase 4b 当时的计划目标，保留时点值；v0.6 47 / Phase 4b-hub-sync 加 authClients/enforceCaps + userSendLimiters 类型 → *sync.Map；#2551 抽 sendEngine 后当前实测 **47**，见 §0；按 §五 7 块分组组织；该 phase 不删字段，仅整理） | 同上脚本针对 wshub.go |
 | 4 | 跨包依赖减耦合 | 每个 PR 减少 `s.X` 跨包字段引用数 ≥ 5 | `grep -c "deps.\|s\." per-PR diff 报告` |
 | 5 | Hub.queue 接口化 | 关闭 R242-GO-10；MessageEnqueuer 单接口（5 方法）+ var _ 编译期 gate | `var _ wshub.MessageEnqueuer = (*MessageQueue)(nil)` |
 | 6 | 零行为变更 | 51 路由路径不变；WS 协议字段不变 | `routes_snapshot_test.go` golden 对齐 |
@@ -424,13 +424,16 @@ type Hub struct {
     debounceClosedFast atomic.Bool                   // v0.6 补：debounce 快速关闭旗标
     debounceFire       func()                        // v0.5 补：debounce 触发回调
 
-    // ── send / queue (6, RW: hub_send.go) ──────────────
-    queue             MessageEnqueuer                // v0.5：原 sender/qctrl/qstats 三字段实测只有 queue
-    sendWG            sync.WaitGroup
-    sendTrackMu       sync.Mutex
-    sendClosed        bool
-    droppedTotal      atomic.Int64
-    legacySendInvokes atomic.Int64                   // v0.6 补：legacy send 路径调用计数
+    // ── send (1, RW: NewHub / Shutdown only) ───────────
+    engine *sendEngine   // #2551：queue / guard / sendWG / sendTrackMu /
+                         // sendClosed / legacySendInvokes 六个字段的所有权
+                         // 迁到 sendEngine（send_engine.go）。Hub 只在 NewHub
+                         // 构造、Shutdown 里 drain；WS handler 经 h.engine.*。
+                         // 由 lint rule 3b-send 机器校验（本表的 rule 3a 只查
+                         // marker 是否存在、从不校验内容）。
+                         // droppedTotal 没有跟着走：它是 SendRaw 发送通道满的
+                         // WS 传输计数（写在 wsclient.go、读在 wshub_broadcast.go），
+                         // 与 send 流水线无关 → 移入下方 rate-limit/cache 块。
 
     // ── shared dependencies (14, read-only after ctor) ─
     router       HubRouter
@@ -453,7 +456,8 @@ type Hub struct {
     wiredLinkersMu sync.Mutex
     wiredLinkers   map[agentlink.AgentLinker]struct{}
 
-    // ── rate-limit / cache (5, v0.5 起识别) ────────────
+    // ── rate-limit / cache / transport metrics (6) ─────
+    droppedTotal        atomic.Int64               // #2551 从 send 块移入：SendRaw 丢弃计数，WS 传输指标
     historyMarshalCache *historyMarshalCache       // 历史序列化缓存
     userSendLimitersMu  sync.Mutex
     userSendLimiters    map[string]*rate.Limiter   // 按 user 维度发送限流
@@ -464,7 +468,9 @@ type Hub struct {
 
 > **v0.6 修订**（同步 master 实测）：v0.5 写 43 字段（漏 4 个：auth/subscriberCount/legacySendInvokes/debounceClosedFast）；v0.6 实测 47 字段。
 >
-> 与 baseline §3 对齐：lifecycle 3 + subscriber 10 + broadcast 6 + send 6 + shared 14 + tailer 3 + rate-limit/cache 5 = **47**。本块表是 Phase 4 实施的字段归属契约——linter rule 3 据此对账，缺一字段都会让 Phase 4 PR 走 godoc 注释时分类不明。
+> **2026-09-07（#2551 E1-c）状态**：本块表是字段归属契约（linter rule 3 据此对账），但它的**逐块计数已 stale，不要拿来做加法**。上面的枚举按块相加是 3 + 10 + 6 + 1(send) + 14 + 3 + 6(cache) = 43，而当日 `awk '/^type Hub struct/,/^}$/' internal/server/wshub.go | grep -E '^\s+[a-zA-Z_]+ ' | wc -l` 实测 **47** —— 枚举漏了 4 个字段，且 v0.6 那句"= 47"在 2026-09-07 之前已经对不上（当日真值 52）。本次只重基线**本 RFC 真正改动的两块**（send 6→1、cache 5→6）与总数；其余逐块数字的重采归 Epic K #2549（Hub 拆 Subscriber/Broadcast 时必须逐块重数）。
+>
+> 教训（值得留在这里）：这张表和 wshub_send.go 的 `WRITES:` 头一样，从来没有机器校验内容，所以能一边绿着一边说错话。#2551 把其中 send 那一块变成了 AST 可查的（rule 3b-send）。
 >
 > Phase 5 字段瘦身验收 gate（§九.1）——Hub 字段验收目标从 v0.5 写的"≤ 35"调整为 **≤ 40**——cookieMAC ↔ dashTokenHash 合并、connCount ↔ subscriberCount ↔ connCountByOwner 三选一、debounceClosed ↔ debounceClosedFast 合并是潜在收敛路径，但保守地把 ctx/cancel/lifecycle 块 3 字段视作不可压。
 
@@ -605,7 +611,7 @@ v0.2 写"Phase 4 可与 1-3 并行" — 措辞误。Phase 1-3 引用 `*server.Hu
 
 #### 0.1 字段读写注解
 - `Server struct` **47 字段**加 `// 读写: <files>` 注释（v0.6 校准；v0.4 时仍沿用 v0.2 时代的"28+"粗估，v0.6 实测 47 替换；详 §0 速查表）
-- `Hub struct` **49 字段**加 `// 读写: <files>` 注释（按 §五 7 块字段分组组织；v0.4 37 / v0.6 47 / Phase 4b-hub-sync 49；详 §0 速查表）
+- `Hub struct` **49 字段** <!-- lint:allow:historical-phase4b-时点值 --> 加 `// 读写: <files>` 注释（按 §五 7 块字段分组组织；v0.4 37 / v0.6 47 / Phase 4b-hub-sync 49；当前实测 47，见 §0 速查表 —— 本行是 Phase 4b 当时的交付描述，保留时点值）
 
 #### 0.2 接口定义
 - `internal/wshub/types.go`：`MessageEnqueuer`（先放 server 包等 Phase 4a 一起搬）
@@ -754,9 +760,11 @@ $ make lint-server
 Closes-exemption: internal/server/<file>.go
 ```
 
-CI 校验：phase X PR 若 commit message 无对应 `Closes-exemption:` 行，且 exemptions.yaml 中 `until_phase: X` 条目未减少，**fail**。
+~~CI 校验：phase X PR 若 commit message 无对应 `Closes-exemption:` 行，且 exemptions.yaml 中 `until_phase: X` 条目未减少，**fail**。~~
 
-> 这把"豁免债清理"从"自觉行为"变为"机器约束"。豁免清单只能减不能增，且减必须留 audit trail。
+> **2026-09-07 订正（#2551 E1-c）：上面这条 CI 校验从未存在。** `rule_stale_exemption.go` 只做 `os.Stat` 存在性判断（条目指向的文件还在 → 无 violation）；全仓没有任何 CI step / Makefile 目标 / 脚本读取 commit message。`Closes-exemption:` trailer 是**人肉纪律**，写它是为了留 audit trail，不是为了过闸门。
+>
+> 这条虚构声明造成过实际误导：2026-09-07 复核豁免债时，它让人以为"删条目会被 CI 拦"，从而不敢清理 4 条早已惰性的死账（send.go / wshub_broadcast.go / wshub_subscribe.go 三条 + baseline 偏高的两条）。把"打算做的机器约束"写成"已有的机器约束"，比不写更糟。
 
 ##### Rule 5 阶段化交付
 
@@ -925,7 +933,7 @@ git commit -m "phase 1: dashboard/cron godoc + gofmt polish"
 #### 4a：Hub 骨架 + 字段块定型
 
 - 创建 `internal/wshub/` 包结构（hub.go / types.go）
-- Hub struct 按 §五 7 块字段顺序排好（**49 字段** — Phase 4b-hub-sync 校准）；ctor `NewHub(opts HubOptions)` 完成
+- Hub struct 按 §五 7 块字段顺序排好（**49 字段** <!-- lint:allow:historical-phase4b-时点值 --> — Phase 4b-hub-sync 校准的时点值；当前实测 47，见 §0）；ctor `NewHub(opts HubOptions)` 完成
 - 5 个方法分文件壳（hub_subscribe.go / hub_broadcast.go / hub_send.go / hub_agent.go / hub_eventpush.go）每个仅含 1-2 个 placeholder 方法 + godoc 头
 - Shutdown 骨架（lifecycle 块跨块写）+ `hub_concurrency_test.go` 骨架（仅 1 个测试 case）
 - linter **rule 3a** 启用 warn 模式校验 godoc 头存在性（v0.6 显式：用 3a 不是 3b）
@@ -1303,7 +1311,7 @@ baseline `go test -race -count=1 ./...` ≈ 300s。Phase 4 完成后预期：
 | 单文件 1000+ 行数量 | **6 个**（v0.6；v0.4 时 5 个） — dashboard_session/project_files/dashboard_send/dashboard_cron/dashboard_cron_transcript/server | 0 个 | 解 god file |
 | 单文件 800+ 行数量 | **9 个**（v0.6；v0.4 时 6 个） — 上述 6 + wshub.go(902) / dashboard.go(852) / agent_tailer.go(827) | 0 个 | 长效防膨胀 |
 | Server struct 字段 | 47 | ≤ 12 | -74% 跨包字段引用 |
-| Hub struct 字段 | **49**（Phase 4b-hub-sync） | ≤ 40 | -18% |
+| Hub struct 字段 | **47**（2026-09-07 实测，#2551 后） | ≤ 40 | -15% <!-- lint:allow:derived-percentage --> |
 | 跨包小接口数量 | ~3 个（HubRouter / cronHubOps / 等） | ~12 个（每 dashboard 子包 2-3 个） | 测试 mock 难度 -60% |
 | 并行开发上限 | 1（任意 dashboard PR 撞同一文件） | 6+（6 个独立子包 + wshub） | 并行度 6× |
 | dashboard 新功能 PR 平均冲突时间 | 30-90 min（实测过去 3 个月） | < 10 min | 月省 ~5-10 工程小时 |
@@ -1627,7 +1635,7 @@ server 包剩余的全部编译错误指向同一事实：**SendHandler 的 HTTP
 
 ### 真正的债：Hub god-struct 内部纠缠，不是包边界
 
-`Hub` 是 49 字段 god-struct，把 WS 连接管理 + send 引擎 + broadcast +
+`Hub` 是 49 字段 god-struct（时点值；#2551 抽出 sendEngine 后 47），把 WS 连接管理 + send 引擎 + broadcast +
 agent-tailer + upload + cron-revival 全揉一起。4b 只是把它**整体挪个地址**，
 挪完 wshub 里还是同一个纠缠的 god-struct。HTTP/WS send 共享引擎是 dashboard
 两个传输层共享 session 语义的**本质内聚**，不是意外耦合。
