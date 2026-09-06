@@ -129,9 +129,14 @@ func TestDashboardJS_TurnTimer_AnchoredAtSend(t *testing.T) {
 // gesture sequence itself is exercised in test/e2e/voice_cap_gesture.test.js.
 func TestDashboardJS_VoiceCap_StateMachine(t *testing.T) {
 	t.Parallel()
-	js := readDashboardJS(t)
+	// #2558 D4-2: the voice module moved to voice.js.
+	data, err := voiceJS.ReadFile("static/voice.js")
+	if err != nil {
+		t.Fatalf("read voice.js: %v", err)
+	}
+	js := string(data)
 	if !strings.Contains(js, "\nlet voiceState = 'idle';") {
-		t.Fatal("dashboard.js must declare the voiceState lifecycle (idle/recording/finalizing) (#2435)")
+		t.Fatal("voice.js must declare the voiceState lifecycle (idle/recording/finalizing) (#2435)")
 	}
 	stop := extractJSFunction(t, js, "stopVoiceRecording")
 	if !strings.Contains(stop, "if (voiceState === 'finalizing') return;") {
@@ -235,7 +240,12 @@ process.stdout.write(JSON.stringify(out));
 // and the cancel flag is cleared only when a recording really starts.
 func TestDashboardJS_VoiceFinalizing_HasEscapeHatches(t *testing.T) {
 	t.Parallel()
-	js := readDashboardJS(t)
+	// #2558 D4-2: the voice module moved to voice.js.
+	data, err := voiceJS.ReadFile("static/voice.js")
+	if err != nil {
+		t.Fatalf("read voice.js: %v", err)
+	}
+	js := string(data)
 	tr := extractJSFunction(t, js, "transcribeAudio")
 	for _, want := range []string{"new AbortController()", "ac.abort(), TRANSCRIBE_TIMEOUT_MS", "signal: ac.signal", "clearTimeout(timeoutId)"} {
 		if !strings.Contains(tr, want) {

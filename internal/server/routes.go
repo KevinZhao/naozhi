@@ -193,6 +193,8 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /static/contract.js", auth(handleContractJS))
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(handleNzUtilJS))
 	s.mux.HandleFunc("GET /static/render_md.js", auth(handleRenderMdJS))
+	s.mux.HandleFunc("GET /static/self_update.js", auth(handleSelfUpdateJS))
+	s.mux.HandleFunc("GET /static/voice.js", auth(handleVoiceJS))
 	s.mux.HandleFunc("GET /static/dashboard.js", auth(handleDashboardJS))
 	s.mux.HandleFunc("GET /static/cron_view.js", auth(handleCronViewJS))
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))
