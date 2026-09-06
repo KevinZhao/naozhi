@@ -23,16 +23,32 @@ func TestDashboardHTML_ScriptsDeferred(t *testing.T) {
 		t.Fatal("dashboard.html not embedded")
 	}
 	html := string(data)
-	for _, src := range []string{"/static/nz_util.js", "/static/dashboard.js", "/static/cron_view.js", "/static/agent_view.js", "/static/asset_browser.js"} {
+	// Classic scripts still load with defer; files migrated to ES modules (D3,
+	// docs/rfc/dashboard-es-modules.md) load with type="module" — modules are
+	// deferred by definition and share the same in-tag-order execution queue.
+	for _, src := range []string{"/static/dashboard.js", "/static/cron_view.js", "/static/agent_view.js"} {
 		want := `<script defer src="` + src + `">`
 		if !strings.Contains(html, want) {
 			t.Errorf("dashboard.html: %q must be loaded with defer; missing %q", src, want)
 		}
-		// Guard against a non-deferred tag regressing back in.
+	}
+	for _, src := range []string{"/static/nz_util.js", "/static/asset_browser.js", "/static/files_view.js"} {
+		want := `<script type="module" src="` + src + `">`
+		if !strings.Contains(html, want) {
+			t.Errorf("dashboard.html: %q must be loaded as an ES module; missing %q", src, want)
+		}
+	}
+	for _, src := range []string{"/static/nz_util.js", "/static/dashboard.js", "/static/cron_view.js", "/static/agent_view.js", "/static/asset_browser.js", "/static/files_view.js"} {
+		// Guard against a parser-blocking plain tag regressing back in.
 		bad := `<script src="` + src + `">`
 		if strings.Contains(html, bad) {
-			t.Errorf("dashboard.html: %q is loaded WITHOUT defer (%q) — blocks the parser", src, bad)
+			t.Errorf("dashboard.html: %q is loaded WITHOUT defer/module (%q) — blocks the parser", src, bad)
 		}
+	}
+	// D3 hard constraint: async would pull a script out of the shared ordered
+	// queue and break cross-file initialisation non-deterministically.
+	if strings.Contains(html, "<script async") || strings.Contains(html, `async src="/static/`) {
+		t.Errorf("dashboard.html: async script tags are forbidden during the D3 migration (order-frozen queue)")
 	}
 	// Load-order invariant (PR-0a): nz_util.js defines the shared util layer +
 	// the legacy top-level aliases (window.esc, window.fetchJSON, …) that

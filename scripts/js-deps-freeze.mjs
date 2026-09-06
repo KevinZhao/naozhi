@@ -154,6 +154,23 @@ function bareIdents(stripped) {
   return idents;
 }
 
+// Named imports of a migrated module (`import { a, b as c } from './x.js'`).
+// An imported name is an explicit, language-checked dependency — it is the
+// file's own binding, not an implicit cross-file reference, so analyze()
+// excludes it from the matrix.
+function importedNames(stripped) {
+  const names = new Set();
+  const re = /^import\s*\{([^}]*)\}\s*from/gm;
+  for (const m of stripped.matchAll(re)) {
+    for (const entry of m[1].split(',')) {
+      const parts = entry.trim().split(/\s+as\s+/);
+      const local = (parts[1] ?? parts[0]).trim();
+      if (/^[A-Za-z_$][\w$]*$/.test(local)) names.add(local);
+    }
+  }
+  return names;
+}
+
 // window.<name> property references, counted per name (reads, calls and
 // assignments alike). Cross-referenced against other files' declarations in
 // analyze() to count D3 bridge references — the PR-E goes-to-zero metric.
@@ -180,6 +197,7 @@ function analyze() {
       decls: topLevelDecls(stripped),
       exports: windowExports(stripped),
       idents: bareIdents(stripped),
+      imports: importedNames(stripped),
       typeofGuards: typeofGuardCount(stripped),
       windowRefs: windowRefs(stripped),
     };
@@ -193,7 +211,7 @@ function analyze() {
   for (const from of LOAD_ORDER) {
     let count = 0;
     for (const [name, c] of files[from].windowRefs) {
-      if (files[from].decls.has(name) || files[from].exports.has(name)) continue;
+      if (files[from].decls.has(name) || files[from].exports.has(name) || files[from].imports.has(name)) continue;
       const definedElsewhere = LOAD_ORDER.some(
         (to) => to !== from && (files[to].decls.has(name) || files[to].exports.has(name))
       );
@@ -213,7 +231,7 @@ function analyze() {
       // own binding — that is not a cross-file dependency.
       const hits = [...files[from].idents]
         .filter((id) => defined.has(id))
-        .filter((id) => !files[from].decls.has(id) && !files[from].exports.has(id))
+        .filter((id) => !files[from].decls.has(id) && !files[from].exports.has(id) && !files[from].imports.has(id))
         .sort();
       if (hits.length === 0) continue;
       (matrix[from] ??= {})[to] = hits;

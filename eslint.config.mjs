@@ -198,24 +198,22 @@ const deps = {
       'wsm',
     ]),
   },
-  'asset_browser.js': {
-    ...ro(['esc', 'fetchJSON', 'nz']),
-  },
-  'files_view.js': {
-    ...ro([
-      'esc',
-      'escAttr',
-      'fetchJSON',
-      'fileApiUrl',
-      'nz',
-      'renderSandboxedBlob',
-    ]),
-  },
+  // ES modules since D3 PR-A: cross-file consumption is explicit (import /
+  // window.* deref), so no bare-global whitelist.
+  'asset_browser.js': {},
+  'files_view.js': {},
 };
+
+// Files migrated to ES modules (D3, docs/rfc/dashboard-es-modules.md).
+// sourceType 'module' makes no-undef a real scope check for them.
+const moduleFiles = new Set(['nz_util.js', 'asset_browser.js', 'files_view.js']);
 
 const perFile = Object.entries(deps).map(([file, globals]) => ({
   files: [`internal/server/static/${file}`],
-  languageOptions: { globals },
+  languageOptions: {
+    globals,
+    ...(moduleFiles.has(file) ? { sourceType: 'module' } : {}),
+  },
 }));
 
 export default [

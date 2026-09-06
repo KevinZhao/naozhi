@@ -4,9 +4,9 @@
 // module renders into the #asset-sidebar-* and #asset-main-* panels defined in
 // dashboard.html and reads GET /api/cc/assets + /api/cc/assets/raw (read-only).
 //
-// Self-contained: served from /static/asset_browser.js, loaded via <script>.
-// The only dashboard.js touch is the activity-bar wiring (which calls the
-// exported window.nzAssetView.{show,hide,toggle}).
+// Self-contained ES module (D3 PR-A): no cross-file consumption, no imports;
+// its esc/fetchJSON are deliberately local. The only dashboard.js touch is
+// the activity-bar wiring (calls the exported window.nzAssetView.{show,hide}).
 (function () {
   'use strict';
 
