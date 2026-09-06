@@ -151,6 +151,59 @@ export function trapFocus(overlay) {
 const nz = (window.nz = window.nz || {});
 nz.util = { esc, escAttr, escJs, fetchJSON, showToast, trapFocus };
 
+// Cross-module utility formatters/predicates (moved verbatim from cron_view,
+// #2557 PR-E1 — both dashboard and cron consume them, and hosting them here
+// keeps the module graph acyclic: dashboard must never import a view).
+
+// formatCostUSD renders a per-run cost. Sub-cent runs show 4 decimals so a
+// $0.0044 run is not rounded to $0.00; larger runs show cents.
+export function formatCostUSD(usd) {
+  if (!usd || usd <= 0) return '';
+  if (usd < 0.01) return '$' + usd.toFixed(4);
+  return '$' + usd.toFixed(2);
+}
+// formatDurationShort renders a millisecond duration as a compact human
+// string suitable for KPI tiles: "850ms" / "12s" / "3m 15s" / "1h 02m".
+// Stays under ~8 chars so the .ck-value column doesn't overflow at narrow
+// drawer widths.
+export function formatDurationShort(ms) {
+  if (!ms || ms <= 0) return '—';
+  const s = ms / 1000;
+  if (s < 1) return Math.round(ms) + 'ms';
+  if (s < 60) return s.toFixed(s < 10 ? 1 : 0) + 's';
+  const m = Math.floor(s / 60);
+  const rs = Math.round(s - m * 60);
+  if (m < 60) return m + 'm ' + (rs < 10 ? '0' + rs : rs) + 's';
+  const h = Math.floor(m / 60);
+  const rm = m - h * 60;
+  return h + 'h ' + (rm < 10 ? '0' + rm : rm) + 'm';
+}
+// formatRunDuration —— 时间轴行 / 详情区"耗时"文案。>1000ms 用 "Xs"，否则 "Xms"。
+// 0 / 缺省返回 ''——running 状态没 duration_ms，调用方应传 0 跳过渲染。
+export function formatRunDuration(ms) {
+  if (!ms || ms <= 0) return '';
+  if (ms < 1000) return ms + 'ms';
+  const s = ms / 1000;
+  if (s < 60) return s.toFixed(1).replace(/\.0$/, '') + 's';
+  const m = Math.floor(s / 60);
+  const ss = Math.round(s - m * 60);
+  return m + 'm ' + ss + 's';
+}
+// isCronSessionKey — cron-scheduler session keys carry the cron: prefix;
+// dashboard's session-dismiss safety check and cron routing both test it.
+export function isCronSessionKey(key) {
+  return typeof key === 'string' && key.indexOf('cron:') === 0;
+}
+
+// nz.bus (#2557 PR-E1): the cross-module notification channel. dashboard's
+// WS core dispatches cron-view commands here instead of calling cron
+// functions through the window bridge — the reverse dashboard→view edge
+// must not become an import (a dashboard→cron import would invert module
+// execution order and break cron's load-time init). dispatchEvent is
+// synchronous, so ordering matches the old direct calls.
+export const nzBus = new EventTarget();
+nz.bus = nzBus;
+
 // data-action delegation (#1980, docs/rfc/csp-data-action.md): one registry,
 // one document-level dispatcher per event type, so generated HTML carries
 // `data-action="key"` attributes instead of inline on*="…" handlers (the

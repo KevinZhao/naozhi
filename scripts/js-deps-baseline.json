@@ -10,12 +10,6 @@
         "nz"
       ],
       "cron_view.js": [
-        "authHeaders",
-        "ensureCronLiveSubscription",
-        "formatCostUSD",
-        "formatDurationShort",
-        "formatRunDuration",
-        "isCronSessionFrozen",
         "openCronPanel"
       ]
     },
@@ -46,15 +40,15 @@
   "typeofGuards": {
     "contract.js": 0,
     "nz_util.js": 1,
-    "dashboard.js": 35,
+    "dashboard.js": 28,
     "cron_view.js": 13,
     "agent_view.js": 0,
     "asset_browser.js": 0,
     "files_view.js": 0
   },
   "bridgeRefs": {
-    "dashboard.js": 59,
-    "cron_view.js": 103,
+    "dashboard.js": 31,
+    "cron_view.js": 101,
     "agent_view.js": 22,
     "files_view.js": 8
   }

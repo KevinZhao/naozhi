@@ -1,4 +1,4 @@
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, registerActions } from './nz_util.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, registerActions, formatCostUSD, formatRunDuration } from './nz_util.js';
 // cron_view.js — Cron (定时任务) dashboard view.
 //
 // RFC docs/rfc/dashboard-cron-view-extraction.md (PR-1). Extracted verbatim
@@ -133,14 +133,10 @@ let _cronDrawerLastActiveRow = null;
 // were UI bandages on top of /api/sessions returning cron stubs; PR2 moves
 // that filter into the server (internal/server/dashboard_session.go), so
 // the dashboard can simply assume no cron rows ever arrive. The single
-// helper retained from the old block is `isCronSessionKey`, kept for the
-// dismissSession safety check (defence-in-depth: even if a future server
-// bug leaks a cron key, the × button must not delete the cron job, only
-// untrack the row). New cron-detail visibility lives in `cronDetailJobId`
+// helper retained from the old block was `isCronSessionKey`, kept for the
+// dismissSession safety check — moved to nz_util (#2557 PR-E1, imported
+// above). New cron-detail visibility lives in `cronDetailJobId`
 // (PR4 / cronDetailJobId state machine).
-function isCronSessionKey(key) {
-  return typeof key === 'string' && key.indexOf('cron:') === 0;
-}
 // R110-P2 cron filter state — module-level so renderCronList can read the
 // live values each paint without a closure. Mirrors the sidebar-search
 // approach (cronFilterQuery is the substring, cronFilterStatus is one of
@@ -450,15 +446,6 @@ function humanizeCronHourlyMinute(expr) {
   if (n < 1 || n > 59) return '';
   return '每小时 :' + pad2(n);
 }
-
-// DOW_LABELS mirrors robfig/cron DOW indexing (0=Sunday). The picker renders
-// Monday-first for CJK convention; indices remain cron-native so generated
-// expressions need no translation.
-const DOW_LABELS = [
-  { i: 1, label: '一' }, { i: 2, label: '二' }, { i: 3, label: '三' },
-  { i: 4, label: '四' }, { i: 5, label: '五' }, { i: 6, label: '六' },
-  { i: 0, label: '日' },
-];
 
 // buildFreqPickerHtml renders the Claude-style compact Frequency row:
 //
@@ -2017,18 +2004,6 @@ function cronPlacementBadgeHtml(placement, errorClass) {
   return '<span class="' + cls + '" title="' + escAttr('云沙箱运行（跑完即焚）' + (errorClass ? ' · ' + cronErrorClassLabel(errorClass) : '')) + '">' + label + '</span>';
 }
 
-// formatRunDuration —— 时间轴行 / 详情区"耗时"文案。>1000ms 用 "Xs"，否则 "Xms"。
-// 0 / 缺省返回 ''——running 状态没 duration_ms，调用方应传 0 跳过渲染。
-function formatRunDuration(ms) {
-  if (!ms || ms <= 0) return '';
-  if (ms < 1000) return ms + 'ms';
-  const s = ms / 1000;
-  if (s < 60) return s.toFixed(1).replace(/\.0$/, '') + 's';
-  const m = Math.floor(s / 60);
-  const ss = Math.round(s - m * 60);
-  return m + 'm ' + ss + 's';
-}
-
 // P2 cron-run-history (RFC §8.2) — 时间轴每个 job 的本地状态。
 // runs / nextBefore: 分页列表 + 游标；details: 已 fetch 的单条 run 详情缓存
 // （不持久化，session 切换即丢）。
@@ -2169,17 +2144,6 @@ function cronTimelineHtml(jobId, job, st) {
 // banner renders synchronously inside cronTimelineHtml; cronAttentionRefresh
 // repopulates it.
 let cronAttentionState = { items: [], loaded: false };
-
-// isAttentionRun is the tri-state predicate the queue + run rows share: a run
-// needs human attention iff its terminal class is the §6.2 unknown-fate state
-// (sandbox_transport) OR it was reconciled as an orphan. error_class is the
-// authoritative signal on the run record; the queue's `reason` is the
-// authoritative signal on a queue item. Both map to the same "needs a human".
-function isAttentionRun(errorClassOrReason) {
-  return errorClassOrReason === 'sandbox_transport' ||
-    errorClassOrReason === 'transport' ||
-    errorClassOrReason === 'orphaned';
-}
 
 // cronAttentionReasonLabel maps a queue item's reason to operator-facing text.
 function cronAttentionReasonLabel(reason) {
@@ -2626,120 +2590,6 @@ function formatBytes(n) {
   return n + ' B';
 }
 
-// formatCostUSD renders a per-run cost. Sub-cent runs show 4 decimals so a
-// $0.0044 run is not rounded to $0.00; larger runs show cents.
-function formatCostUSD(usd) {
-  if (!usd || usd <= 0) return '';
-  if (usd < 0.01) return '$' + usd.toFixed(4);
-  return '$' + usd.toFixed(2);
-}
-
-// cronRunTranscriptHtml renders a list of transcript turns as a vertical
-// timeline. cron-dashboard-redesign P2b §4.4.4.
-//
-// Security: assistant `text` runs through renderMd (already esc-safe).
-// Tool `output` and `error` strings go through esc + <pre> ONLY — never
-// renderMd — because those originate from arbitrary subprocess stdout
-// and may contain unescaped HTML/JS that markdown parsers can let slip
-// through. Tool input is JSON-stringified (unhelpful for raw HTML).
-function cronRunTranscriptHtml(transcript, opts) {
-  const onlyKind = opts && opts.only;
-  const turns = Array.isArray(transcript.turns) ? transcript.turns : [];
-  if (turns.length === 0) {
-    return '<div class="ctr-empty-detail">无内容。</div>';
-  }
-  const parts = [];
-  for (const t of turns) {
-    if (!t) continue;
-    if (onlyKind && t.kind !== onlyKind) continue;
-    parts.push(cronRunTurnHtml(t));
-  }
-  if (parts.length === 0) {
-    return '<div class="ctr-empty-detail">无匹配内容。</div>';
-  }
-  if (transcript.truncated) {
-    parts.push('<div class="ctr-empty-detail">…（已截断；超过显示上限，剩余内容请用 jq / less 查看 JSONL 原文）</div>');
-  }
-  return '<div class="crs-transcript">' + parts.join('') + '</div>';
-}
-
-// cronRunTurnHtml renders one turn. Switches on kind to produce the
-// appropriate avatar + body markup.
-function cronRunTurnHtml(t) {
-  const ts = t.ts ? formatCronTimelineShort(t.ts) : '';
-  if (t.kind === 'user') {
-    return '<div class="crs-turn user">' +
-      '<div class="crs-avatar user" aria-hidden="true">U</div>' +
-      '<div class="crs-turn-body">' +
-        '<div class="crs-turn-head"><span class="crs-role">用户</span><span class="crs-time">' + esc(ts) + '</span></div>' +
-        '<pre class="crs-text">' + esc(t.text || '') + '</pre>' +
-      '</div>' +
-    '</div>';
-  }
-  if (t.kind === 'assistant') {
-    const _tk = Number(t.tokens) | 0;
-    const tokens = _tk ? '<span class="crs-tokens">+' + (_tk >= 1000 ? (_tk / 1000).toFixed(1) + 'k' : _tk) + '</span>' : '';
-    return '<div class="crs-turn assistant">' +
-      '<div class="crs-avatar assistant" aria-hidden="true">C</div>' +
-      '<div class="crs-turn-body">' +
-        '<div class="crs-turn-head"><span class="crs-role">Claude</span><span class="crs-time">' + esc(ts) + '</span>' + tokens + '</div>' +
-        '<div class="crs-text md">' + window.renderMd(t.text || '') + '</div>' +
-      '</div>' +
-    '</div>';
-  }
-  if (t.kind === 'tool_use') {
-    const inputJson = t.input ? JSON.stringify(t.input, null, 2) : '';
-    const inputBlock = inputJson
-      ? '<pre class="crs-tool-body">' + esc(inputJson) + '</pre>'
-      : '';
-    return '<div class="crs-turn tool"><div class="crs-avatar tool" aria-hidden="true">⚙</div>' +
-      '<div class="crs-turn-body">' +
-        '<details class="crs-tool-card">' +
-          '<summary class="crs-tool-head">' +
-            '<span class="crs-tool-name">' + esc(t.tool || 'tool') + '</span>' +
-            '<span class="crs-tool-summary">' + esc(t.summary || '') + '</span>' +
-            '<span class="crs-time">' + esc(ts) + '</span>' +
-          '</summary>' +
-          inputBlock +
-        '</details>' +
-      '</div>' +
-    '</div>';
-  }
-  if (t.kind === 'tool_result') {
-    const isErr = t.status === 'error';
-    return '<div class="crs-turn tool-result' + (isErr ? ' err' : '') + '">' +
-      '<div class="crs-avatar tool" aria-hidden="true">' + (isErr ? '✖' : '↳') + '</div>' +
-      '<div class="crs-turn-body">' +
-        '<details class="crs-tool-card' + (isErr ? ' err' : '') + '">' +
-          '<summary class="crs-tool-head">' +
-            '<span class="crs-tool-name">输出' + (isErr ? '（失败）' : '') + '</span>' +
-            '<span class="crs-time">' + esc(ts) + '</span>' +
-          '</summary>' +
-          '<pre class="crs-tool-body">' + esc(t.output || '') + '</pre>' +
-        '</details>' +
-      '</div>' +
-    '</div>';
-  }
-  if (t.kind === 'error') {
-    return '<div class="crs-turn err">' +
-      '<div class="crs-avatar tool" aria-hidden="true">✖</div>' +
-      '<div class="crs-turn-body">' +
-        '<div class="crs-turn-head"><span class="crs-role" style="color:var(--nz-red)">系统错误</span><span class="crs-time">' + esc(ts) + '</span></div>' +
-        '<pre class="crs-text">' + esc(t.text || '') + '</pre>' +
-      '</div>' +
-    '</div>';
-  }
-  return '';
-}
-
-// cronRunSheetSelectTab — §16 inline-expand 回归后的 no-op shim。
-// 4-tab 已在 #307 收敛为单屏「最终输出」，本函数现已无实质行为；保留函数定义
-// + 上面 cronTimelineDetailHtml 注释中的 tabBtn('chat'/'tools'/'prompt'/'raw')
-// 字面量，仅维持契约测试 grep 兼容。形参标 void 防 lint。
-function cronRunSheetSelectTab(jobId, runId, tab) {
-  void jobId; void runId; void tab;
-}
-
 // cronTimelineSelectRun — 点击 timeline 行（§16 inline-expand 回归）。
 // 同一行二次点击 = collapse；不同行点击 = collapse 旧 + expand 新（同时只展开
 // 一行，避免长 result 把列表撑成多屏）。
@@ -2750,12 +2600,6 @@ function cronTimelineSelectRun(jobId, runId) {
     return;
   }
   cronTimelineExpand(jobId, runId);
-}
-
-// Compatibility shim — 旧 inline-expand API（v2）保留为别名，避免外部
-// onclick 字符串硬编码 / 旧 e2e 测试 grep。新代码用 cronTimelineSelectRun。
-function cronTimelineToggleRow(jobId, runId) {
-  cronTimelineSelectRun(jobId, runId);
 }
 
 // ===== §16 inline-expand 回归: 行内展开状态机 =====
@@ -3100,27 +2944,6 @@ function cronTimelineLoadMore(jobId, onDone) {
       }
     }
   })();
-}
-
-// cronTimelineJumpToSession — fresh=false hint chip 点击。直接打开
-// session: 前缀的会话面板（与已有 selectSession / selectedKey 路由对齐）。
-function cronTimelineJumpToSession(sessionId) {
-  if (!sessionId) return;
-  // sessionsData 的 key 是 sid(key, node) = `${key}\t${node}`（见 sid 定义）。
-  // 在缓存里查 session_id 字段命中的会话；命中 → 切到该 session 的 events 面板；
-  // 未命中 → toast 提示（cron 触发的下游会话可能 IM 异步 / 还没拉到 list）。
-  const all = nzState.sessionsData || {};
-  for (const sidKey in all) {
-    const s = all[sidKey];
-    if (s && s.session_id === sessionId) {
-      const parts = sidKey.split('\t');
-      const key = parts[0];
-      const node = parts[1] || 'local';
-      if (key) { window.selectSession(key, node); return; }
-    }
-  }
-  // 兜底：toast 提示，避免误导用户认为点击无效。
-  showToast('未找到对应 session（' + sessionId.slice(0, 8) + '…）', 'warning');
 }
 
 // R243-PERF-7 / #812: rAF-debounce coalescing for cronTimelineRefreshHead.
@@ -3688,23 +3511,6 @@ function cronDrawerSpecPromptToggle(btn) {
   btn.textContent = clamped ? '收起' : '展开';
 }
 
-// formatDurationShort renders a millisecond duration as a compact human
-// string suitable for KPI tiles: "850ms" / "12s" / "3m 15s" / "1h 02m".
-// Stays under ~8 chars so the .ck-value column doesn't overflow at narrow
-// drawer widths.
-function formatDurationShort(ms) {
-  if (!ms || ms <= 0) return '—';
-  const s = ms / 1000;
-  if (s < 1) return Math.round(ms) + 'ms';
-  if (s < 60) return s.toFixed(s < 10 ? 1 : 0) + 's';
-  const m = Math.floor(s / 60);
-  const rs = Math.round(s - m * 60);
-  if (m < 60) return m + 'm ' + (rs < 10 ? '0' + rs : rs) + 's';
-  const h = Math.floor(m / 60);
-  const rm = m - h * 60;
-  return h + 'h ' + (rm < 10 ? '0' + rm : rm) + 'm';
-}
-
 // cronPhaseLabel maps backend phase strings to operator-friendly Chinese.
 // Falls back to a neutral "执行中…" for unknown phases so the UI never
 // shows raw enum names. RFC UI §4.4.
@@ -4099,15 +3905,6 @@ function closeCronDetail() {
   };
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restoreFocus);
   else setTimeout(restoreFocus, 0);
-}
-
-// openCronSession is the legacy entry point retained as a thin alias so
-// any in-flight code path (cached HTML attributes, the old menu action,
-// future bookmarks) still routes into the drawer. cron-panel-consolidation
-// RFC §4.2 retired the selectSession-into-mainShell flow; new code should
-// call openCronDetail directly.
-function openCronSession(cronId) {
-  openCronDetail(cronId);
 }
 
 async function fetchCronJobs() {
@@ -4564,13 +4361,6 @@ function buildEditCronWorkspaceBody(currentDir) {
   });
 }
 
-function authHeaders() {
-  const headers = {};
-  const t = window.getToken();
-  if (t) headers['Authorization'] = 'Bearer ' + t;
-  return headers;
-}
-
 async function doEditCronJob(id) {
   const overlay = document.querySelector('.modal-overlay');
   if (!overlay) return;
@@ -4658,7 +4448,7 @@ async function doEditCronJob(id) {
   if (body.schedule === '') { showToast('频率不能为空', 'warning'); return; }
 
   try {
-    const headers = Object.assign({ 'Content-Type': 'application/json' }, authHeaders());
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, window.authHeaders());
     const r = await fetch(NZ_CONTRACT.API.cron + '?id=' + encodeURIComponent(id), {
       method: 'PATCH', headers, body: JSON.stringify(body),
     });
@@ -4781,6 +4571,37 @@ registerActions({
   'cron-mobile-back': () => window.mobileBack(),
 });
 
+// ─── nz.bus subscriptions (#2557 PR-E1) ────────────────────────────────────
+// dashboard's WS core drives the cron view through these events instead of
+// window-bridge calls (the reverse dashboard→view edge must not become an
+// import — it would invert module execution order). dispatchEvent is
+// synchronous, so handler ordering matches the old direct calls.
+nzBus.addEventListener('cron:live-status', (e) => setCronLiveStatus(e.detail));
+nzBus.addEventListener('cron:live-repaint', () => repaintCronLive());
+nzBus.addEventListener('cron:live-ensure-subscription', () => ensureCronLiveSubscription());
+nzBus.addEventListener('cron:live-event', (e) => {
+  appendEventsToContainer(document.getElementById('cron-live-events'), [e.detail]);
+  setCronLiveStatus('live');
+  updateCronLiveTruncated();
+});
+nzBus.addEventListener('cron:run-started', (e) => cronApplyRunStarted(e.detail));
+nzBus.addEventListener('cron:run-ended', (e) => {
+  cronApplyRunEnded(e.detail);
+  // Refetch so counters / last_error_class hydrate from the backend; the
+  // optimistic patch on the same row is overwritten cleanly (moved verbatim
+  // from the WS dispatch site).
+  fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
+});
+nzBus.addEventListener('cron:timeline-refresh-head', (e) => cronTimelineRefreshHeadDebounced(e.detail));
+nzBus.addEventListener('cron:open-panel', () => openCronPanel());
+
+// Stateful predicates dashboard consults (frozen-run set / cronLive
+// bookkeeping live here). Registered on nz.state like the cronJobs getter —
+// they are reads of cron-owned state, and dashboard's `nzState.x && …` call
+// shape keeps the old typeof-guard resilience if cron_view ever fails to load.
+nzState.isCronLiveKey = isCronLiveKey;
+nzState.isCronSessionFrozen = isCronSessionFrozen;
+
 // ─── D3 ES-module bridge (RFC docs/rfc/dashboard-es-modules.md) ────────────
 // cron_view is a module now, so its top-level names are no longer globals.
 // This single batch restores the exact global surface the classic script had
@@ -4789,13 +4610,9 @@ registerActions({
 // HTML (inline handlers always resolve in the global scope). Shrinks at
 // PR-D/PR-E as consumers move to imports / nz.actions.
 Object.assign(window, {
-  appendEventsToContainer: appendEventsToContainer,
-  authHeaders: authHeaders,
   clearCronSearch: clearCronSearch,
   closeCronDetail: closeCronDetail,
   createNewCronJob: createNewCronJob,
-  cronApplyRunEnded: cronApplyRunEnded,
-  cronApplyRunStarted: cronApplyRunStarted,
   cronAttentionConfirm: cronAttentionConfirm,
   cronAttentionReplay: cronAttentionReplay,
   cronDelete: cronDelete,
@@ -4808,7 +4625,6 @@ Object.assign(window, {
   cronResume: cronResume,
   cronSelectWorkspace: cronSelectWorkspace,
   cronTimelineLoadMore: cronTimelineLoadMore,
-  cronTimelineRefreshHeadDebounced: cronTimelineRefreshHeadDebounced,
   cronTimelineSelectRun: cronTimelineSelectRun,
   cronTimelineToggleShowAll: cronTimelineToggleShowAll,
   cronTimezoneSuffix: cronTimezoneSuffix,
@@ -4816,44 +4632,19 @@ Object.assign(window, {
   doCreateCronJob: doCreateCronJob,
   doEditCronJob: doEditCronJob,
   editCronJob: editCronJob,
-  ensureCronLiveSubscription: ensureCronLiveSubscription,
-  fetchCronJobs: fetchCronJobs,
   fillCronPrompt: fillCronPrompt,
   filterCronJobs: filterCronJobs,
-  formatCostUSD: formatCostUSD,
-  formatDurationShort: formatDurationShort,
-  formatRunDuration: formatRunDuration,
   freqMarkTouched: freqMarkTouched,
   freqSelectMode: freqSelectMode,
   freqUpdate: freqUpdate,
-  isCronLiveKey: isCronLiveKey,
-  isCronSessionFrozen: isCronSessionFrozen,
-  isCronSessionKey: isCronSessionKey,
   onCronSearchInput: onCronSearchInput,
   openCronDetail: openCronDetail,
-  openCronPanel: openCronPanel,
   renderCronModalBody: renderCronModalBody,
-  renderCronPanel: renderCronPanel,
-  repaintCronLive: repaintCronLive,
-  setCronLiveStatus: setCronLiveStatus,
   setCronSortOrder: setCronSortOrder,
   setCronStatusFilter: setCronStatusFilter,
   toggleCronMenu: toggleCronMenu,
   toggleCronWsCustom: toggleCronWsCustom,
   toggleCronWsDropdown: toggleCronWsDropdown,
-  updateCronLiveTruncated: updateCronLiveTruncated,
-});
-// Dead-or-compat globals (zero in-repo references; kept solely because they
-// were part of the pre-module global surface — candidates for deletion, see
-// the D3 epic). Split out so the live list above stays reviewable.
-Object.assign(window, {
-  DOW_LABELS: DOW_LABELS,
-  isAttentionRun: isAttentionRun,
-  cronRunTranscriptHtml: cronRunTranscriptHtml,
-  cronRunSheetSelectTab: cronRunSheetSelectTab,
-  cronTimelineToggleRow: cronTimelineToggleRow,
-  cronTimelineJumpToSession: cronTimelineJumpToSession,
-  openCronSession: openCronSession,
 });
 // cronJobs is reassigned on every fetch, so dashboard.js reads it through an
 // accessor (mirror of the dashboard-side nz.state getters, direction

@@ -51,6 +51,7 @@ const browserGlobals = ro([
   'structuredClone',
   'AbortController',
   'CustomEvent',
+  'EventTarget',
   'Event',
   'KeyboardEvent',
   'MouseEvent',
