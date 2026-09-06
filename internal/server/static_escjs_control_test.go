@@ -27,7 +27,9 @@ func TestNzUtilJS_EscJsControlChars(t *testing.T) {
 	if idx < 0 {
 		t.Fatal("nz_util.js missing escJs — structural anchor for control-char escape contract")
 	}
-	end := strings.Index(js[idx:], "\n  }")
+	// escJs is a top-level module export (D3 PR-A), so its body closes with a
+	// column-0 brace.
+	end := strings.Index(js[idx:], "\n}")
 	if end < 0 {
 		t.Fatal("could not bound escJs body")
 	}

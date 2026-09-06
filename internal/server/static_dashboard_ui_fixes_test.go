@@ -187,8 +187,10 @@ func TestFilesViewJS_AttributeContextsUseEscAttr(t *testing.T) {
 	t.Parallel()
 	js := readStaticAsset(t, "files_view.js")
 
-	if !strings.Contains(js, "function escAttr(") {
-		t.Fatal("files_view.js has no escAttr helper (should delegate to nz.util.escAttr)")
+	// D3 PR-A: the local delegating wrapper became a direct ES import of
+	// nz_util's escAttr — the single escaping source of truth.
+	if !strings.Contains(js, "escAttr") || !strings.Contains(js, "from './nz_util.js'") {
+		t.Fatal("files_view.js must import escAttr from nz_util.js (single escaping layer)")
 	}
 	// Any `attr="' + esc(` is an attribute value built with the non-quote
 	// escaping esc(); list the offenders so the fix is targeted.

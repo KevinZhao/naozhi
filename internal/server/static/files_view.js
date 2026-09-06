@@ -6,26 +6,20 @@
 // the existing GET /api/projects/file modes, and uploads via
 // POST /api/projects/files/upload.
 //
-// Self-contained: served from /static/files_view.js, loaded via <script>. The
-// only dashboard.js touch is the activity-bar wiring (window.nzFilesView).
+// ES module (RFC docs/rfc/dashboard-es-modules.md, D3 PR-A): utilities come
+// in via explicit import; dashboard.js globals (fileApiUrl,
+// renderSandboxedBlob — still a classic script) are dereferenced through
+// window.* at the call site, never snapshotted at top level. The only
+// dashboard.js touch is the activity-bar wiring (window.nzFilesView).
+// escAttr, not esc, for attribute-value context: nz_util's esc deliberately
+// leaves quotes alone, so a file named `a"b` would truncate data-name="…" and
+// the click handler navigated to the wrong path.
+import { esc, escAttr, showToast, fetchJSON } from './nz_util.js';
+
 (function () {
   'use strict';
 
-  var U = (window.nz && window.nz.util) || {};
-  function esc(s) {
-    if (U.esc) return U.esc(s);
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
-  }
-  // Attribute-value context: nz.util.esc deliberately leaves quotes alone, so
-  // a file named `a"b` would truncate data-name="…" and the click handler
-  // navigated to the wrong path. Use this for every attr="' + … + '" splice.
-  function escAttr(s) {
-    if (U.escAttr) return U.escAttr(s);
-    return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  }
-  function toast(m) { if (U.showToast) U.showToast(m); }
+  function toast(m) { showToast(m); }
   function $(id) { return document.getElementById(id); }
 
   // state.project: the current browse root's project name. Initialised to the
@@ -61,12 +55,6 @@
     var arr = loadRecent().filter(function (n) { return n !== name; });
     arr.unshift(name);
     saveRecent(arr);
-  }
-
-  function fetchJSON(url) {
-    if (U.fetchJSON) return U.fetchJSON(url);
-    return fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/json' } })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
   }
 
   // ---- roots (projects) ----
@@ -247,7 +235,7 @@
   function download(rel, name) {
     if (rel == null) { rel = state.previewRel; name = state.previewName; }
     if (!rel) return;
-    var url = fileApiUrl(state.project, 'local', rel, 'download');
+    var url = window.fileApiUrl(state.project, 'local', rel, 'download');
     var a = document.createElement('a');
     a.href = url; a.download = name || (rel.split('/').pop() || 'file'); a.rel = 'noopener';
     document.body.appendChild(a); a.click(); a.remove();
@@ -268,13 +256,13 @@
     var imgExt = { png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, bmp: 1, ico: 1 };
     if (ext === 'svg') {
       body.innerHTML = '';
-      renderSandboxedBlob(state.project, 'local', rel, body, 'image/svg+xml');
+      window.renderSandboxedBlob(state.project, 'local', rel, body, 'image/svg+xml');
       return;
     }
     if (imgExt[ext]) {
       body.innerHTML = '';
       var img = document.createElement('img');
-      img.src = fileApiUrl(state.project, 'local', rel, 'raw');
+      img.src = window.fileApiUrl(state.project, 'local', rel, 'raw');
       img.alt = name; img.loading = 'lazy';
       body.appendChild(img);
       return;
@@ -289,18 +277,18 @@
       // JS same-origin. sandbox="" grants zero capabilities — no scripts, no
       // plugins — while still allowing the browser's native PDF viewer.
       frame.setAttribute('sandbox', '');
-      frame.src = fileApiUrl(state.project, 'local', rel, 'raw');
+      frame.src = window.fileApiUrl(state.project, 'local', rel, 'raw');
       frame.title = name;
       body.appendChild(frame);
       return;
     }
     if (ext === 'html' || ext === 'htm' || ext === 'xhtml') {
       body.innerHTML = '';
-      renderSandboxedBlob(state.project, 'local', rel, body, 'text/html');
+      window.renderSandboxedBlob(state.project, 'local', rel, body, 'text/html');
       return;
     }
     // Text / unknown → preview JSON {content, truncated, size, mime}.
-    fetchJSON(fileApiUrl(state.project, 'local', rel, 'preview')).then(function (res) {
+    fetchJSON(window.fileApiUrl(state.project, 'local', rel, 'preview')).then(function (res) {
       // Server shape for non-text files is {content:"", binary:true}.
       if (res && res.binary) {
         body.innerHTML = '<div class="files-empty">该文件不可预览，请下载查看。</div>';

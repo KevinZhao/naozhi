@@ -121,14 +121,7 @@
     },
     "files_view.js": {
       "nz_util.js": [
-        "esc",
-        "escAttr",
-        "fetchJSON",
         "nz"
-      ],
-      "dashboard.js": [
-        "fileApiUrl",
-        "renderSandboxedBlob"
       ]
     }
   },
@@ -151,6 +144,6 @@
   "bridgeRefs": {
     "dashboard.js": 23,
     "agent_view.js": 8,
-    "files_view.js": 4
+    "files_view.js": 8
   }
 }
