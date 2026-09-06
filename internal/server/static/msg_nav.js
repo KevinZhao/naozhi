@@ -132,9 +132,9 @@ function navShowList() {
   const items = navUserEls.map((el, i) => {
     const txt = (el.querySelector('.event-content')?.textContent || '').trim();
     const summary = txt.length > 50 ? txt.slice(0, 50) + '...' : txt;
-    const active = i === navIdx ? ' style="color:var(--nz-accent);font-weight:600"' : '';
+    const active = i === navIdx ? ' class="nz-accent-strong"' : '';
     return '<div class="nav-list-item" data-idx="' + i + '"' + active + '>' +
-      '<span style="color:var(--nz-text-faint);margin-right:6px">' + (i+1) + '.</span>' + esc(summary) + '</div>';
+      '<span class="nz-faint-lead">' + (i+1) + '.</span>' + esc(summary) + '</div>';
   });
   const pill = document.getElementById('nav-pill');
   const popover = document.createElement('div');
@@ -410,7 +410,7 @@ function updateSendButton(state) {
   const stopBtn = document.getElementById('btn-stop');
   const inVoiceMode = document.getElementById('input-area')?.classList.contains('voice-mode');
   if (state === 'running') {
-    if (banner) banner.style.display = '';
+    if (banner) banner.classList.remove('nz-hidden');
     if (sendBtn) sendBtn.style.display = 'none';
     if (stopBtn) stopBtn.style.display = 'flex';
     if (nzViews.agent) nzViews.agent.initFromSession();

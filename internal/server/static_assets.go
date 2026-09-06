@@ -172,6 +172,7 @@ var staticAssets = func() map[string]staticAsset {
 		{"css/responsive.css", dashboardCSS, "static/css/responsive.css", true},
 		{"css/cron.css", dashboardCSS, "static/css/cron.css", true},
 		{"css/mobile_polish.css", dashboardCSS, "static/css/mobile_polish.css", true},
+		{"css/utilities.css", dashboardCSS, "static/css/utilities.css", true},
 		{"nz_util.js", nzUtilJS, "static/nz_util.js", true},
 		{"contract.js", contractJS, "static/contract.js", true},
 		{"dashboard.js", dashboardJS, "static/dashboard.js", true},

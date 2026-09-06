@@ -57,9 +57,10 @@ func buildDashboardCSP() string {
 		"default-src 'self'",
 		"script-src 'self' " + hash + " " + cdnMermaidJS + " " + cdnKatexJS,
 		"connect-src 'self'",
-		// style-src unsafe-inline stays until D6 (#2559) migrates the 88
-		// generated style="" attributes to classes.
-		"style-src 'self' 'unsafe-inline' " + cdnKatexCSS,
+		// #2559 D6-3 dropped the last generated style="" attribute, so inline
+		// styles are no longer needed. KaTeX's stylesheet is the one external
+		// source (SRI-pinned where it is injected).
+		"style-src 'self' " + cdnKatexCSS,
 		"font-src 'self' " + cdnKatexFonts,
 		"img-src 'self' data: blob:",
 		"frame-src 'self' blob:",

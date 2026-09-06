@@ -44,9 +44,9 @@ let costSummaryCache = null;
 // keydown / auto-grow handlers on the freshly-painted textarea (the cold
 // start HTML gets wired on DOMContentLoaded).
 function mainEmptyHtml() {
-  return '<div class="empty-state empty-cta empty-quick" style="flex-direction:column;gap:14px">' +
-    '<span style="font-size:40px;opacity:.35" aria-hidden="true">&gt;_</span>' +
-    '<div style="color:var(--nz-text);font-size:17px">问点什么？</div>' +
+  return '<div class="empty-state empty-cta empty-quick nz-stack">' +
+    '<span class="nz-empty-glyph" aria-hidden="true">&gt;_</span>' +
+    '<div class="nz-empty-title">问点什么？</div>' +
     '<form class="quick-ask-form" id="quick-ask-form">' +
       '<textarea id="quick-ask-input" class="quick-ask-input" rows="1" ' +
         'placeholder="Enter 发送 · Shift+Enter 换行" autocomplete="off" spellcheck="false" ' +
@@ -57,7 +57,7 @@ function mainEmptyHtml() {
           '<polygon points="22 2 15 22 11 13 2 9 22 2"/>' +
         '</svg></button>' +
     '</form>' +
-    '<div style="font-size:12px;color:var(--nz-text-dim)">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>' +
+    '<div class="nz-hint-dim">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>' +
     // R110-P1 空闲态 Home 仪表 MVP 占位：renderRecentSessionsPanel()
     // 按需注入"最近会话"缩略列表；零 session 时渲染为空字符串，保留冷启动
     // 简洁空态不退化。Helper 外部调用，不嵌在本 HTML 里以保持 pure 可读。

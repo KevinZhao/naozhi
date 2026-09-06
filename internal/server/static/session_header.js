@@ -291,8 +291,8 @@ function effortTagHtml(effort) {
   // be announced as "middle dot". Labelling the span supplies the context and
   // suppresses the decorative punctuation in one go.
   return '<span class="effort-tag' + (hot ? ' effort-hot' : '') +
-      '" title="' + escAttr(tip + ' — 点击切换档位') + '" aria-label="' + escAttr(tip) + '"' +
-      ' data-action="tuning-effort" style="cursor:pointer">' +
+      ' nz-clickable" title="' + escAttr(tip + ' — 点击切换档位') + '" aria-label="' + escAttr(tip) + '"' +
+      ' data-action="tuning-effort">' +
       esc(raw) + '</span>';
 }
 

@@ -169,9 +169,9 @@ function refreshBanner() {
   if (thinkEl) {
     if (turnState.isThinking && turnState.thinkingSummary) {
       thinkEl.textContent = turnState.thinkingSummary;
-      thinkEl.style.display = '';
+      thinkEl.classList.remove('nz-hidden');
     } else {
-      thinkEl.style.display = 'none';
+      thinkEl.classList.add('nz-hidden');
     }
   }
 
@@ -187,9 +187,9 @@ function refreshBanner() {
       statsEl.textContent = turnState.toolOrder.map(function(t) {
         return t + ' \u00d7' + turnState.toolCounts[t];
       }).join(' \u00b7 ');
-      statsEl.style.display = '';
+      statsEl.classList.remove('nz-hidden');
     } else {
-      statsEl.style.display = 'none';
+      statsEl.classList.add('nz-hidden');
     }
   }
 
@@ -206,10 +206,10 @@ function refreshBanner() {
     const sess = nzState.sessionsData[sKey];
     const isRunning = sess && sess.state === 'running';
     const hasActiveAgents = turnState.agents.some(function(a) { return a.status !== 'completed' && a.status !== 'error'; });
-    if (hasContent && (isRunning || hasActiveAgents) && banner.style.display === 'none') {
-      banner.style.display = '';
-    } else if (banner.style.display !== 'none' && !isRunning && !hasActiveAgents) {
-      banner.style.display = 'none';
+    if (hasContent && (isRunning || hasActiveAgents) && banner.classList.contains('nz-hidden')) {
+      banner.classList.remove('nz-hidden');
+    } else if (!banner.classList.contains('nz-hidden') && !isRunning && !hasActiveAgents) {
+      banner.classList.add('nz-hidden');
     }
   }
 }

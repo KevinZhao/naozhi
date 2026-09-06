@@ -298,27 +298,27 @@ async function openProjectSettings(name) {
   overlay.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="项目设置：' + escAttr(name) + '">' +
       '<h3>项目设置 · ' + esc(name) + '</h3>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-display-name">显示名称</label>' +
-        '<input id="ps-display-name" style="' + deps.PICKER_SELECT_STYLE + '" maxlength="200" value="' + escAttr(cfg.display_name || '') + '" placeholder="' + escAttr(name) + '">' +
+      '<div class="nz-field">' +
+        '<label class="nz-field-label" for="ps-display-name">显示名称</label>' +
+        '<input id="ps-display-name" class="nz-picker-select" maxlength="200" value="' + escAttr(cfg.display_name || '') + '" placeholder="' + escAttr(name) + '">' +
       '</div>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-emoji">Emoji</label>' +
-        '<input id="ps-emoji" style="' + deps.PICKER_SELECT_STYLE + '" maxlength="16" value="' + escAttr(cfg.emoji || '') + '" placeholder="🗂">' +
+      '<div class="nz-field">' +
+        '<label class="nz-field-label" for="ps-emoji">Emoji</label>' +
+        '<input id="ps-emoji" class="nz-picker-select" maxlength="16" value="' + escAttr(cfg.emoji || '') + '" placeholder="🗂">' +
       '</div>' +
       accessProfilePicker +
-      '<div style="margin:-6px 0 12px"><button type="button" class="linklike" data-action="ps-new-profile" style="background:none;border:none;color:var(--nz-accent);font-size:12px;cursor:pointer;padding:0">+ 新建访问档…</button></div>' +
+      '<div class="nz-field-tight"><button type="button" class="linklike nz-link-btn" data-action="ps-new-profile">+ 新建访问档…</button></div>' +
       backendPicker +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-planner-model">Planner model（留空则继承）</label>' +
-        '<input id="ps-planner-model" style="' + deps.PICKER_SELECT_STYLE + '" maxlength="256" value="' + escAttr(cfg.planner_model || '') + '" placeholder="' + escAttr(accessProfileDefaultModel(cfg.access_profile) || '（继承默认）') + '">' +
+      '<div class="nz-field">' +
+        '<label class="nz-field-label" for="ps-planner-model">Planner model（留空则继承）</label>' +
+        '<input id="ps-planner-model" class="nz-picker-select" maxlength="256" value="' + escAttr(cfg.planner_model || '') + '" placeholder="' + escAttr(accessProfileDefaultModel(cfg.access_profile) || '（继承默认）') + '">' +
       '</div>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-planner-prompt">Planner prompt（可选，单行）</label>' +
-        '<textarea id="ps-planner-prompt" rows="3" style="' + deps.PICKER_SELECT_STYLE + ';resize:vertical" maxlength="8192" placeholder="附加系统提示…">' + esc(cfg.planner_prompt || '') + '</textarea>' +
+      '<div class="nz-field">' +
+        '<label class="nz-field-label" for="ps-planner-prompt">Planner prompt（可选，单行）</label>' +
+        '<textarea id="ps-planner-prompt" rows="3" class="nz-picker-textarea" maxlength="8192" placeholder="附加系统提示…">' + esc(cfg.planner_prompt || '') + '</textarea>' +
       '</div>' +
-      '<div id="ps-preview" style="font-size:12px;color:var(--nz-text-mute);margin-bottom:12px;padding:8px;background:var(--nz-bg-0);border-radius:4px"></div>' +
-      '<div id="ps-error" style="display:none;color:var(--nz-danger,#e5484d);font-size:12px;margin-bottom:8px"></div>' +
+      '<div id="ps-preview" class="nz-note-box"></div>' +
+      '<div id="ps-error" class="nz-form-error"></div>' +
       '<div class="modal-btns">' +
         '<button type="button" data-action="modal-close">取消</button>' +
         '<button type="button" class="primary" data-action="ps-save" data-name="' + escAttr(name) + '">保存</button>' +
@@ -410,28 +410,28 @@ function openCreateAccessProfile(onCreated) {
   overlay.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="新建访问档">' +
       '<h3>新建访问档</h3>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-template">模板</label>' +
-        '<span class="picker-select-wrap"><select id="cap-template" style="' + deps.PICKER_SELECT_ONLY_STYLE + '">' + tplOptions + '</select></span>' +
+      '<div class="nz-field">' +
+        '<label class="nz-field-label" for="cap-template">模板</label>' +
+        '<span class="picker-select-wrap"><select id="cap-template" class="nz-picker-select nz-picker-select-only">' + tplOptions + '</select></span>' +
       '</div>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-id">档 ID（英数字 . _ -，唯一）</label>' +
-        '<input id="cap-id" style="' + deps.PICKER_SELECT_STYLE + '" maxlength="64" placeholder="1p-fable">' +
+      '<div class="nz-field">' +
+        '<label class="nz-field-label" for="cap-id">档 ID（英数字 . _ -，唯一）</label>' +
+        '<input id="cap-id" class="nz-picker-select" maxlength="64" placeholder="1p-fable">' +
       '</div>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-display">显示名称</label>' +
-        '<input id="cap-display" style="' + deps.PICKER_SELECT_STYLE + '" maxlength="200">' +
+      '<div class="nz-field">' +
+        '<label class="nz-field-label" for="cap-display">显示名称</label>' +
+        '<input id="cap-display" class="nz-picker-select" maxlength="200">' +
       '</div>' +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-model">默认 model（可选）</label>' +
-        '<input id="cap-model" style="' + deps.PICKER_SELECT_STYLE + '" maxlength="256">' +
+      '<div class="nz-field">' +
+        '<label class="nz-field-label" for="cap-model">默认 model（可选）</label>' +
+        '<input id="cap-model" class="nz-picker-select" maxlength="256">' +
       '</div>' +
-      '<div id="cap-token-wrap" style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-token">Token（写入 0600 文件，仅此一次可见）</label>' +
-        '<textarea id="cap-token" rows="2" style="' + deps.PICKER_SELECT_STYLE + ';resize:vertical" placeholder="" autocomplete="off"></textarea>' +
-        '<div id="cap-token-hint" style="font-size:11px;color:var(--nz-text-mute);margin-top:4px"></div>' +
+      '<div id="cap-token-wrap" class="nz-field">' +
+        '<label class="nz-field-label" for="cap-token">Token（写入 0600 文件，仅此一次可见）</label>' +
+        '<textarea id="cap-token" rows="2" class="nz-picker-textarea" placeholder="" autocomplete="off"></textarea>' +
+        '<div id="cap-token-hint" class="nz-hint-sm"></div>' +
       '</div>' +
-      '<div id="cap-error" style="display:none;color:var(--nz-danger,#e5484d);font-size:12px;margin-bottom:8px"></div>' +
+      '<div id="cap-error" class="nz-form-error"></div>' +
       '<div class="modal-btns">' +
         '<button type="button" data-action="modal-close">取消</button>' +
         '<button type="button" class="primary" data-action="cap-create">创建</button>' +
