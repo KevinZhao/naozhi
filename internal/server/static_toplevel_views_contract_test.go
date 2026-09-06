@@ -142,7 +142,7 @@ func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 	// the decoupling from selectedKey is the core of promoting cron to a
 	// top-level view. If either reverts, async cron repaints could clobber the
 	// chat DOM again.
-	if !strings.Contains(js, "if (activeView !== 'cron') return;") {
+	if !strings.Contains(js, "if (nzState.activeView !== 'cron') return;") {
 		t.Error("renderCronPanel must gate on activeView !== 'cron' (not selectedKey)")
 	}
 	if !strings.Contains(js, "const main = document.getElementById('cron-main');") {

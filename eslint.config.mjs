@@ -101,7 +101,6 @@ const deps = {
       'authHeaders',
       'cronApplyRunEnded',
       'cronApplyRunStarted',
-      'cronJobs',
       'cronTimelineRefreshHeadDebounced',
       'ensureCronLiveSubscription',
       'esc',
@@ -130,58 +129,7 @@ const deps = {
     // Lazy-loaded vendor libraries (script tags injected at render time).
     ...ro(['mermaid', 'katex']),
   },
-  'cron_view.js': {
-    ...ro([
-      'CRON_LIVE_AGENT_ONLY_HTML',
-      'CRON_LIVE_MAX_EVENTS',
-      'EVENT_DIVIDER_GAP_MS',
-      'INTERNAL_EVENT_TYPES',
-      'appendEvents',
-      'confirmDialog',
-      'defaultWorkspace',
-      'esc',
-      'escAttr',
-      'escJs',
-      'eventHtml',
-      'fetchCLIBackends',
-      'fetchJSON',
-      'formatAbsTime',
-      'getToken',
-      'isInternalEvent',
-      'lastDividerTime',
-      'lsGet',
-      'lsSet',
-      'mobileBack',
-      'navUserEls',
-      'nz',
-      'processEventsForDisplay',
-      'projectsData',
-      'regroupAvatars',
-      'renderBackendPicker',
-      'renderEventsWithDividers',
-      'renderMd',
-      'runPendingAsync',
-      'selectSession',
-      'sending',
-      'sessionsData',
-      'setActiveSessionCard',
-      'setActivityView',
-      'shortPath',
-      'showAPIError',
-      'showAuthModal',
-      'showNetworkError',
-      'showToast',
-      'timeDividerHtml',
-      'trapFocus',
-      'turnState',
-      'wsm',
-    ]),
-    // cron_view.js assigns these dashboard.js `let` bindings directly.
-    ...rw(['activeView', 'eventTimer', 'selectedKey']),
-    // Implicit window.event, used behind a typeof guard in inline-onclick
-    // handlers (cronDrawerSpecPromptToggle).
-    ...ro(['event']),
-  },
+  'cron_view.js': {},
   // ES module since D3 PR-B: utilities and nz.state come in via import;
   // dashboard globals are window.* dereferences.
   'agent_view.js': {},
@@ -193,7 +141,7 @@ const deps = {
 
 // Files migrated to ES modules (D3, docs/rfc/dashboard-es-modules.md).
 // sourceType 'module' makes no-undef a real scope check for them.
-const moduleFiles = new Set(['nz_util.js', 'agent_view.js', 'asset_browser.js', 'files_view.js']);
+const moduleFiles = new Set(['nz_util.js', 'agent_view.js', 'asset_browser.js', 'files_view.js', 'cron_view.js']);
 
 const perFile = Object.entries(deps).map(([file, globals]) => ({
   files: [`internal/server/static/${file}`],

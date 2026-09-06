@@ -19,7 +19,6 @@
         "authHeaders",
         "cronApplyRunEnded",
         "cronApplyRunStarted",
-        "cronJobs",
         "cronTimelineRefreshHeadDebounced",
         "ensureCronLiveSubscription",
         "fetchCronJobs",
@@ -44,52 +43,19 @@
     },
     "cron_view.js": {
       "nz_util.js": [
-        "esc",
-        "escAttr",
-        "escJs",
-        "fetchJSON",
-        "nz",
-        "showToast",
-        "trapFocus"
+        "nz"
       ],
       "dashboard.js": [
-        "CRON_LIVE_AGENT_ONLY_HTML",
         "CRON_LIVE_MAX_EVENTS",
-        "EVENT_DIVIDER_GAP_MS",
         "INTERNAL_EVENT_TYPES",
-        "activeView",
         "appendEvents",
-        "confirmDialog",
-        "defaultWorkspace",
-        "eventHtml",
-        "eventTimer",
-        "fetchCLIBackends",
-        "formatAbsTime",
-        "getToken",
-        "isInternalEvent",
         "lastDividerTime",
-        "lsGet",
-        "lsSet",
         "mobileBack",
         "navUserEls",
-        "processEventsForDisplay",
-        "projectsData",
         "regroupAvatars",
-        "renderBackendPicker",
-        "renderEventsWithDividers",
-        "renderMd",
-        "runPendingAsync",
         "selectSession",
         "selectedKey",
         "sending",
-        "sessionsData",
-        "setActiveSessionCard",
-        "setActivityView",
-        "shortPath",
-        "showAPIError",
-        "showAuthModal",
-        "showNetworkError",
-        "timeDividerHtml",
         "turnState",
         "wsm"
       ]
@@ -107,13 +73,7 @@
       ]
     }
   },
-  "tdz": {
-    "dashboard.js": {
-      "cron_view.js": [
-        "cronJobs"
-      ]
-    }
-  },
+  "tdz": {},
   "typeofGuards": {
     "contract.js": 0,
     "nz_util.js": 1,
@@ -125,6 +85,7 @@
   },
   "bridgeRefs": {
     "dashboard.js": 23,
+    "cron_view.js": 102,
     "agent_view.js": 22,
     "files_view.js": 8
   }

@@ -172,6 +172,9 @@ func TestCronViewJS_ArrowKeydownGuards(t *testing.T) {
 	casesJSON, _ := json.Marshal(cases)
 	script := `
 let activeView = 'chat';
+// D3 PR-C1: cron_view is an ES module and reads dashboard state through the
+// nz.state accessor object; mirror that surface here.
+const nzState = { get activeView() { return activeView; } };
 let modalOpen = false;
 let handler = null;
 const navs = [];
