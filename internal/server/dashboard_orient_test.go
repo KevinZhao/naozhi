@@ -62,6 +62,9 @@ func newOrientTestHandler(oc *orientConfig) *SendHandler {
 		uploadStore: newUploadStore(),
 		orient:      oc,
 		// auth nil + Bearer token in the request → deterministic owner.
+		// engine is deliberately absent: these tests drive handleUpload /
+		// handleOrient only, which never reach the send pipeline. A future
+		// edit that changes that fails loudly here rather than silently.
 	}
 }
 

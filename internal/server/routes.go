@@ -94,8 +94,8 @@ func (s *Server) registerDashboard() {
 	s.hub.SetUploadStore(uploads)
 	s.sendH = &SendHandler{
 		nodeAccess: s.nodes,
-		hub:        s.hub,
-		// SendRouter consumer view; the handler never goes via h.hub.router.*.
+		engine:     s.hub.engine,
+		// SendRouter consumer view; reads never go via the engine's HubRouter (#566).
 		router:        s.hub.router,
 		uploadStore:   uploads,
 		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.TrustedProxy), // 10 uploads/min per IP

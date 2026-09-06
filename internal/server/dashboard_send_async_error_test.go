@@ -45,7 +45,7 @@ func TestHandleSend_AsyncFailureReachesSubscribers(t *testing.T) {
 	other, otherOut := newCapturedClient(t, hub)
 	registerSub(hub, other, "test:d:u:elsewhere")
 
-	h := &SendHandler{hub: hub, uploadStore: newUploadStore()}
+	h := &SendHandler{engine: hub.engine, uploadStore: newUploadStore()}
 	w := postSendJSON(t, h, "tok", map[string]any{"key": key, "text": "hello"})
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body=%s, want 202 (failure is asynchronous)", w.Code, w.Body.String())

@@ -17,7 +17,7 @@ func TestHandleSend_RateLimit429BodiesAreDistinct(t *testing.T) {
 	hub, _ := newTestHub("")
 	t.Cleanup(hub.Shutdown)
 	h := &SendHandler{
-		hub:         hub,
+		engine:      hub.engine,
 		uploadStore: newUploadStore(),
 		sendLimiter: newIPLimiterWithProxy(rate.Every(time.Hour), 1, false),
 	}
