@@ -16254,17 +16254,31 @@ initSwipeBack();
 })();
 
 // ─── D3 ES-module bridge (RFC docs/rfc/dashboard-es-modules.md §3) ─────────
-// nz.state accessors: migrated modules (agent_view) read dashboard's
-// reassignable top-level bindings through these getters — a classic script's
-// let never lands on window, and a copied value would go stale on
-// reassignment. Getter-only: no migrated module writes dashboard state yet;
-// add a setter here the day one legitimately needs to.
+// nz.state accessors: migrated modules (agent_view, cron_view) reach
+// dashboard's reassignable top-level bindings through these accessors — a
+// classic script's let never lands on window, and a copied value would go
+// stale on reassignment. Setters exist only for the names cron_view
+// legitimately writes today (activeView / eventTimer / selectedKey); keep
+// the rest getter-only so a new cross-file write is a reviewed decision.
 Object.defineProperties(nz.state, {
-  selectedKey: { get: function () { return selectedKey; } },
+  activeView: { get: function () { return activeView; }, set: function (v) { activeView = v; } },
+  defaultWorkspace: { get: function () { return defaultWorkspace; } },
+  eventTimer: { get: function () { return eventTimer; }, set: function (v) { eventTimer = v; } },
+  navUserEls: { get: function () { return navUserEls; } },
+  projectsData: { get: function () { return projectsData; } },
+  selectedKey: { get: function () { return selectedKey; }, set: function (v) { selectedKey = v; } },
   selectedNode: { get: function () { return selectedNode; } },
+  sending: { get: function () { return sending; } },
   sessionsData: { get: function () { return sessionsData; } },
   turnState: { get: function () { return turnState; } },
 });
 // Never-reassigned consts consumed by migrated modules — a one-time window
-// export is safe (the object identity is stable for the page's lifetime).
-Object.assign(window, { wsm: wsm, sessionScrollPos: sessionScrollPos });
+// export is safe (the binding is never rebound, so the copy can't go stale).
+Object.assign(window, {
+  wsm: wsm,
+  sessionScrollPos: sessionScrollPos,
+  CRON_LIVE_AGENT_ONLY_HTML: CRON_LIVE_AGENT_ONLY_HTML,
+  CRON_LIVE_MAX_EVENTS: CRON_LIVE_MAX_EVENTS,
+  EVENT_DIVIDER_GAP_MS: EVENT_DIVIDER_GAP_MS,
+  INTERNAL_EVENT_TYPES: INTERNAL_EVENT_TYPES,
+});
