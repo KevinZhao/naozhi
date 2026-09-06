@@ -31,6 +31,9 @@ var contractJS embed.FS
 //go:embed static/dashboard.js
 var dashboardJS embed.FS
 
+//go:embed static/render_md.js
+var renderMdJS embed.FS
+
 //go:embed static/cron_view.js
 var cronViewJS embed.FS
 
@@ -111,6 +114,7 @@ var staticAssets = func() map[string]staticAsset {
 		{"nz_util.js", nzUtilJS, "static/nz_util.js", true},
 		{"contract.js", contractJS, "static/contract.js", true},
 		{"dashboard.js", dashboardJS, "static/dashboard.js", true},
+		{"render_md.js", renderMdJS, "static/render_md.js", true},
 		{"cron_view.js", cronViewJS, "static/cron_view.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
@@ -185,4 +189,20 @@ func serveStaticWithETag(w http.ResponseWriter, r *http.Request, assetKey string
 		}
 	}
 	return false
+}
+
+// handleRenderMdJS serves static/render_md.js (markdown / KaTeX / mermaid
+// rendering, imported by dashboard.js).
+func handleRenderMdJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("render_md.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "render_md.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "render_md.js")
 }

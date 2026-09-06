@@ -69,9 +69,15 @@ func TestDashboardBundle_NoInterpolatedDataAction(t *testing.T) {
 // lazy load (CSP behind) or leave a stale allowlisted URL (CSP ahead).
 func TestDashboardCSP_CDNURLsMatchBundle(t *testing.T) {
 	t.Parallel()
-	js := staticAssetBytes("dashboard.js")
-	if js == nil {
-		t.Fatal("dashboard.js not embedded")
+	// #2558 D4: the lazy CDN loaders live in render_md.js; keep scanning
+	// dashboard.js too so a future move back stays covered.
+	var js []byte
+	for _, name := range []string{"dashboard.js", "render_md.js"} {
+		b := staticAssetBytes(name)
+		if b == nil {
+			t.Fatalf("%s not embedded", name)
+		}
+		js = append(append(js, b...), '\n')
 	}
 	urlRe := regexp.MustCompile(`https://cdn\.jsdelivr\.net/npm/[^'"\s]+`)
 	seen := map[string]bool{}

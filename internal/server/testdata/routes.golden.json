@@ -421,6 +421,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/render_md.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/sw.js",
     "handler_type": "http.HandlerFunc"
   },

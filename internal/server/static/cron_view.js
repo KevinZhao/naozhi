@@ -18,8 +18,6 @@ import {
   regroupAvatars,
   renderBackendPicker,
   renderEventsWithDividers,
-  renderMd,
-  runPendingAsync,
   setActiveSessionCard,
   setActivityView,
   shortPath,
@@ -29,6 +27,10 @@ import {
   timeDividerHtml,
   wsm,
 } from './dashboard.js';
+import {
+  renderMd,
+  runPendingAsync,
+} from './render_md.js';
 // cron_view.js — Cron (定时任务) dashboard view.
 //
 // RFC docs/rfc/dashboard-cron-view-extraction.md (PR-1). Extracted verbatim

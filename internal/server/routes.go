@@ -188,11 +188,11 @@ func (s *Server) registerDashboard() {
 	// Favicon is unauthenticated so it resolves on the login page.
 	s.mux.HandleFunc("GET /favicon.ico", handleFavicon)
 	s.mux.HandleFunc("GET /favicon.svg", handleFavicon)
-	// Dashboard JS is auth-gated: it embeds the API endpoint list and client
-	// schema, a free recon surface for unauthenticated scanners. The login
-	// page loads no JS from /static/ so the bootstrap is unaffected (#1328).
+	// Dashboard JS is auth-gated: it embeds the API endpoint list + client
+	// schema (recon surface); the login page loads no /static/ JS (#1328).
 	s.mux.HandleFunc("GET /static/contract.js", auth(handleContractJS))
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(handleNzUtilJS))
+	s.mux.HandleFunc("GET /static/render_md.js", auth(handleRenderMdJS))
 	s.mux.HandleFunc("GET /static/dashboard.js", auth(handleDashboardJS))
 	s.mux.HandleFunc("GET /static/cron_view.js", auth(handleCronViewJS))
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))

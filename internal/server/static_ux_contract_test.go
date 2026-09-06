@@ -259,11 +259,18 @@ func TestDashboardJS_ShowGitRemoteSchemeAllowlist(t *testing.T) {
 // distinctive, and would be hard to refactor away by accident.
 func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// #2558 D4: the markdown renderers moved to render_md.js while some
+	// helpers they call (safeUrl / fileRefCode) stay in dashboard.js — the
+	// contract spans both, so scan the concatenation.
+	rmd, err := renderMdJS.ReadFile("static/render_md.js")
+	if err != nil {
+		t.Fatalf("read render_md.js: %v", err)
+	}
+	dj, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	js := string(rmd) + "\n" + string(dj)
 
 	// (1) safeUrl() must reject any URL whose scheme is not http(s) or
 	// a fragment-only `#...`. The current allowlist regex is the
@@ -297,7 +304,9 @@ func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
 	// We pin the exact substring shape used today; a refactor that keeps
 	// the safety properties but reshapes the call site can update both
 	// the source and the test in lockstep.
-	if !strings.Contains(js, "const safe = safeUrl(url);") {
+	// #2558 D4: safeUrl reaches render_md.js as an injected dep, so the call
+	// site reads deps.safeUrl(...) — the safety property is unchanged.
+	if !strings.Contains(js, "const safe = deps.safeUrl(url);") {
 		t.Error("inlineMd's [text](url) branch must call safeUrl(url) before emitting the anchor — without it, `[click](javascript:alert(1))` would render an executable href (R172-SEC-H1 / #436)")
 	}
 	if !strings.Contains(js, `'<a href="' + escAttr(safe)`) {

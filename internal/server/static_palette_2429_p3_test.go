@@ -206,7 +206,12 @@ async function fetchJSON() {
 // (data-theme + prefers-color-scheme for 'auto'), not a hard-coded 'dark'.
 func TestDashboardJS_MermaidTheme_FollowsDashboardTheme(t *testing.T) {
 	t.Parallel()
-	js := readDashboardJS(t)
+	// #2558 D4: the mermaid/KaTeX renderers moved to render_md.js.
+	data, err := renderMdJS.ReadFile("static/render_md.js")
+	if err != nil {
+		t.Fatalf("read render_md.js: %v", err)
+	}
+	js := string(data)
 	run := extractJSFunction(t, js, "runMermaid")
 	load := extractJSFunction(t, js, "loadMermaid")
 	if strings.Contains(load, "theme: 'dark'") || strings.Contains(run, "theme: 'dark'") {
