@@ -7,6 +7,9 @@
 //     (non-test); exemptions.yaml entries with `until_phase` may not grow.
 //   - field_block: wshub_*.go godoc 头必须含 Field-block contract / WRITES: /
 //     READS-ALSO: / LIFECYCLE-METHOD 标注（文本扫描）。
+//   - send_engine_ownership (rule 3b-send): send 块字段只能声明在 sendEngine
+//     上、不能回到 Hub；send.go / send_owner_loop.go / send_engine.go 内不得
+//     出现 *Hub 接收者（#2551）。
 //   - iface_match: godoc `satisfies:` 注释的接口必须出现在
 //     consumer-contracts.md。
 //   - stale_exemption: exemptions 条目必须指向存在的文件。
@@ -134,6 +137,11 @@ func main() {
 	// Rule 3a: field_block godoc 标注扫描
 	vs = append(vs, scanFieldBlockMarkers(*serverPkg)...)
 
+	// Rule 3b-send: send_engine_ownership — send 块字段必须在 sendEngine 上，
+	// 流水线文件不得出现 *Hub 方法（#2551；rule 3a 只查 marker 是否存在、从不
+	// 校验内容，所以这条改看声明本身）。
+	vs = append(vs, scanSendEngineOwnership(*serverPkg)...)
+
 	// Rule 4: iface_match — 扫整仓 internal/ + cmd/ 的 satisfies: 注释
 	vs = append(vs, scanIfaceMatch([]string{"internal", "cmd"})...)
 
@@ -149,7 +157,7 @@ func main() {
 	vs = append(vs, routeVs...)
 
 	if os.Getenv("LINT_VERBOSE") == "1" {
-		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b (AST field_block) due Phase 4b; rule 4 method-set 对账 + rule 5 git tag 对账 due Phase 1 (server-split-phase4-design.md v0.6.1 §六.2.0.4)")
+		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b partially landed — send-block slice is enforced (send_engine_ownership, #2551); the general AST field_block 对账 was owed to Phase 4b, which ADR-001 shelved. rule 4 method-set 对账 + rule 5 git tag 对账 due Phase 1 (server-split-phase4-design.md v0.6.1 §六.2.0.4)")
 	}
 
 	if *sarif {

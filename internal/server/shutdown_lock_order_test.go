@@ -77,7 +77,10 @@ func TestHubShutdown_LockOrderInvariant(t *testing.T) {
 	// a lexical test but would need a runtime -race reproducer
 	// instead.
 	subMuRe := regexp.MustCompile(`subMu\.(?:R?Lock)\(`)
-	hMuRe := regexp.MustCompile(`h\.mu\.(?:R?Lock)\(`)
+	// Any single-letter-ish receiver, not just `h`: #2551 introduced
+	// (e *sendEngine) methods, and a hard-coded `h.mu.` would make invariant A
+	// blind to every receiver named anything else — a silently-passing test.
+	hMuRe := regexp.MustCompile(`\b[a-z][a-zA-Z0-9]*\.mu\.(?:R?Lock)\(`)
 	for _, file := range wshubLockOrderFiles {
 		src, err := os.ReadFile(file)
 		if err != nil {

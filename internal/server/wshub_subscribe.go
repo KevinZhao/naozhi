@@ -4,8 +4,9 @@
 //	            clientWG / wsAuthLimiter / wsUpgradeLimiter / upgrader /
 //	            dashTokenHash / cookieMAC / trustedProxy)
 //	READS:      shared deps block (read-only after ctor)
-//	READS-ALSO: send block (sendClosed only — close client must drain
-//	            pending sends; lifecycle-coordinated)
+//	(No send-block entry: the "READS-ALSO: send block (sendClosed only)" line
+//	that used to be here had no matching code reference anywhere in this file,
+//	and sendClosed itself moved onto sendEngine in #2551.)
 package server
 
 import (

@@ -1,10 +1,18 @@
 // File-block contract (server-split-phase4-design v0.6.1 §五):
 //
-//	WRITES:     send block (queue / sendWG / sendTrackMu / sendClosed /
-//	            droppedTotal / legacySendInvokes) +
-//	            rate-limit/cache block (userSendLimitersMu / userSendLimiters)
-//	READS:      shared deps block (read-only after ctor)
+//	READS-ALSO: sendEngine, via h.engine only (TrackSend / sessionSend). The
+//	            send block moved onto sendEngine in #2551 — this file writes
+//	            none of it and must not reach past h.engine's method set.
+//	READS-ALSO: shared deps block (read-only after ctor)
 //	READS-ALSO: subscriber block (clients) for per-subscription routing
+//
+// Two claims in the pre-#2551 header were already false and are not carried
+// over: it listed WRITES on droppedTotal (written in wsclient.go, read in
+// wshub_broadcast.go — nothing here touches it) and on userSendLimitersMu, a
+// field that no longer exists (the limiter map is an atomic.Pointer now). Rule
+// 3a only checks that a marker is present and never validates its content,
+// which is how those survived; the send-block half is now machine-checked by
+// rule 3b-send (tools/lint-server-handlers/rule_send_engine.go).
 package server
 
 import (
