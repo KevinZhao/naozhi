@@ -304,7 +304,9 @@ func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
 	// We pin the exact substring shape used today; a refactor that keeps
 	// the safety properties but reshapes the call site can update both
 	// the source and the test in lockstep.
-	if !strings.Contains(js, "const safe = safeUrl(url);") {
+	// #2558 D4: safeUrl reaches render_md.js as an injected dep, so the call
+	// site reads deps.safeUrl(...) — the safety property is unchanged.
+	if !strings.Contains(js, "const safe = deps.safeUrl(url);") {
 		t.Error("inlineMd's [text](url) branch must call safeUrl(url) before emitting the anchor — without it, `[click](javascript:alert(1))` would render an executable href (R172-SEC-H1 / #436)")
 	}
 	if !strings.Contains(js, `'<a href="' + escAttr(safe)`) {

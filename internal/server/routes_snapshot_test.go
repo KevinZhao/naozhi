@@ -39,7 +39,7 @@ import (
 // then commit the new golden alongside the move, with the PR description
 // stating the diff is expected (route added/moved/typed).
 func TestRoutesSnapshot(t *testing.T) {
-	routes, err := scanRoutes("routes.go", "server.go", "debug_expvar.go", "debug_pprof.go", "dashboard_ccassets.go")
+	routes, err := scanRoutes("routes.go", "server.go", "debug_expvar.go", "debug_pprof.go", "dashboard_ccassets.go", "static_assets.go")
 	if err != nil {
 		t.Fatalf("scanRoutes: %v", err)
 	}

@@ -188,9 +188,8 @@ func (s *Server) registerDashboard() {
 	// Favicon is unauthenticated so it resolves on the login page.
 	s.mux.HandleFunc("GET /favicon.ico", handleFavicon)
 	s.mux.HandleFunc("GET /favicon.svg", handleFavicon)
-	// Dashboard JS is auth-gated: it embeds the API endpoint list and client
-	// schema, a free recon surface for unauthenticated scanners. The login
-	// page loads no JS from /static/ so the bootstrap is unaffected (#1328).
+	// Dashboard JS is auth-gated: it embeds the API endpoint list + client
+	// schema (recon surface); the login page loads no /static/ JS (#1328).
 	s.mux.HandleFunc("GET /static/contract.js", auth(handleContractJS))
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(handleNzUtilJS))
 	s.mux.HandleFunc("GET /static/render_md.js", auth(handleRenderMdJS))
@@ -434,22 +433,6 @@ func handleNzUtilJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "nz_util.js")
-}
-
-// handleRenderMdJS serves static/render_md.js (markdown / KaTeX / mermaid
-// rendering, imported by dashboard.js).
-func handleRenderMdJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("render_md.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "render_md.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "render_md.js")
 }
 
 // handleCronViewJS serves static/cron_view.js (cron view, loaded after dashboard.js).

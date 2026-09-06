@@ -190,3 +190,19 @@ func serveStaticWithETag(w http.ResponseWriter, r *http.Request, assetKey string
 	}
 	return false
 }
+
+// handleRenderMdJS serves static/render_md.js (markdown / KaTeX / mermaid
+// rendering, imported by dashboard.js).
+func handleRenderMdJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("render_md.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "render_md.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "render_md.js")
+}
