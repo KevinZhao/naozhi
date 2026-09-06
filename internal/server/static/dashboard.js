@@ -1,4 +1,4 @@
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, registerActions } from './nz_util.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, registerActions, formatCostUSD, formatDurationShort, formatRunDuration, isCronSessionKey } from './nz_util.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
@@ -420,6 +420,15 @@ document.addEventListener('DOMContentLoaded', function () {
 
 function getToken() { return ''; }
 function setToken(t) { /* token stored in HttpOnly cookie only */ }
+// authHeaders builds the Authorization header set for fetch calls. Moved
+// here from cron_view (#2557 PR-E1): it wraps getToken, which lives in this
+// file, and both views consume it.
+function authHeaders() {
+  const headers = {};
+  const t = getToken();
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  return headers;
+}
 
 // setActivityView is the root view-router. It is the single owner of the
 // mutually-exclusive body.nz-view-* classes and the rail button active state.
@@ -471,7 +480,7 @@ function setActivityView(view) {
   // Enter the target view.
   if (view === 'assets') { if (window.nzAssetView) window.nzAssetView.show(); }
   else if (view === 'files') { if (window.nzFilesView) window.nzFilesView.show(); }
-  else if (view === 'cron') { window.openCronPanel(); }
+  else if (view === 'cron') { emitCron('cron:open-panel'); }
   else if (view === 'system') { openSystemPanel(); }
   else if (view === 'settings') { renderSettingsView(); }
 }
@@ -2948,7 +2957,7 @@ function sessionRunOutcomeMeta(outcome) {
 function sessionRunStatLabel(ms) {
   // Reuse the cron duration formatter (cron_view.js) for visual parity. It is
   // a top-level function in the shared script scope.
-  if (typeof formatRunDuration === 'function') return window.formatRunDuration(ms) || '0ms';
+  return formatRunDuration(ms) || '0ms';
   return Math.round(ms) + 'ms';
 }
 
@@ -2959,7 +2968,7 @@ function sessionRunStatLabel(ms) {
 // tier and renders "3h 07m" instead of an unreadable "187m 3s". Per-run rows
 // keep sessionRunStatLabel so their second-level precision ("26.5s") is intact.
 function sessionRunTotalLabel(ms) {
-  if (typeof formatDurationShort === 'function') return window.formatDurationShort(ms);
+  return formatDurationShort(ms);
   return sessionRunStatLabel(ms);
 }
 
@@ -2975,7 +2984,7 @@ function sessionRunsStatsHtml(stats) {
   // 总花费：仅当有成本数据时显示（本机 claude run 通常带 cost_usd；某些
   // backend / 旧记录可能为 0）。formatCostUSD 对 <$0.01 保留 4 位小数，返回 ''
   // 时整条不渲染，避免出现无意义的"花费 $0.00"。
-  const costStr = (typeof formatCostUSD === 'function') ? window.formatCostUSD(stats.total_cost_usd || 0) : '';
+  const costStr = formatCostUSD(stats.total_cost_usd || 0);
   if (costStr) {
     parts.push('<span class="srp-stat" title="累计花费">花费 ' + esc(costStr) + '</span>');
   }
@@ -2998,7 +3007,7 @@ function sessionRunRowHtml(r) {
     sub.push('<span title="首字节延迟">首字节 ' + esc(sessionRunStatLabel(r.first_byte_ms)) + '</span>');
   }
   if (r.cost_usd && typeof formatCostUSD === 'function') {
-    sub.push('<span title="本次成本估算">' + esc(window.formatCostUSD(r.cost_usd)) + '</span>');
+    sub.push('<span title="本次成本估算">' + esc(formatCostUSD(r.cost_usd)) + '</span>');
   }
   const subRow = sub.length
     ? '<div class="srr-sub">' + sub.join('<span class="srr-sep">·</span>') + '</div>'
@@ -3610,7 +3619,7 @@ async function dismissSession(key, node, opts) {
   // filtered server-side so this branch should never run in production —
   // but if a future server bug ever leaks a cron key through, we must
   // NOT call DELETE /api/sessions (the scheduler still owns the stub).
-  if (window.isCronSessionKey(key)) {
+  if (isCronSessionKey(key)) {
     // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side
     // and should never appear in the sidebar at all — this branch only
     // executes if a future server bug leaks one through. Guard-rail behaviour:
@@ -12359,7 +12368,7 @@ function systemStateMeta(state) {
 // once we're past sub-second, reusing the existing ms formatter.
 function systemTickLabel(ns) {
   if (!ns || ns <= 0) return '—';
-  return window.formatDurationShort(ns / 1e6);
+  return formatDurationShort(ns / 1e6);
 }
 
 // systemStatLabel maps a flattened TickReport stat key to a Chinese label.
@@ -12418,7 +12427,7 @@ function renderSystemView() {
         '<div class="sys-meta">' +
           '<span>最近一次 <b>' + esc(st.label) + '</b></span>' +
           '<span>触发 <b>' + esc(triggerTxt) + '</b></span>' +
-          '<span>用时 <b>' + esc(window.formatDurationShort(lr.duration_ms)) + '</b></span>' +
+          '<span>用时 <b>' + esc(formatDurationShort(lr.duration_ms)) + '</b></span>' +
           '<span><b title="' + esc(whenTitle) + '">' + esc(whenTxt) + '</b></span>' +
         '</div>';
       const stats = lr.stats || {};
@@ -12496,6 +12505,14 @@ function reconcileSelectedNode() {
 /* ===== WebSocket Connection Manager ===== */
 
 const WS_STATES = { OFF: 'off', CONNECTING: 'connecting', AUTH: 'authenticating', CONNECTED: 'connected', DISCONNECTED: 'disconnected' };
+
+// emitCron dispatches a cron-view command over nz.bus (#2557 PR-E1):
+// dashboard's WS core no longer calls cron_view functions through the
+// window bridge — cron subscribes to these events at module init.
+// EventTarget dispatch is synchronous, so ordering semantics match the
+// old direct calls; if cron_view ever failed to load, dispatch is a no-op
+// (same resilience the old typeof guards bought).
+const emitCron = (type, detail) => nzBus.dispatchEvent(new CustomEvent(type, { detail }));
 
 const wsm = {
   conn: null,
@@ -12661,7 +12678,7 @@ const wsm = {
           this.cronLive.pendingJobId = null;
           this.cronLive.suspended = (msg.reason === 'suspended');
           this.cronLive.status = this.cronLive.suspended ? 'pending' : 'live';
-          window.setCronLiveStatus(this.cronLive.status);
+          emitCron('cron:live-status', this.cronLive.status);
           break;
         }
         // Server confirmed subscription — apply authoritative state
@@ -12699,7 +12716,7 @@ const wsm = {
           this.cronLive.pendingJobId = null;
           this.cronLive.subscribedKey = null;
           this.cronLive.status = 'stopped';
-          window.setCronLiveStatus('stopped');
+          emitCron('cron:live-status', 'stopped');
           break;
         }
         // PurgeNodeSubscriptions broadcast: error{node, "node disconnected"}
@@ -12748,11 +12765,11 @@ const wsm = {
         }
         break;
       case 'history':
-        if (window.isCronLiveKey(msg.key)) { this.onCronLiveHistory(msg); break; }
+        if (nzState.isCronLiveKey && nzState.isCronLiveKey(msg.key)) { this.onCronLiveHistory(msg); break; }
         this.onHistory(msg);
         break;
       case 'event':
-        if (window.isCronLiveKey(msg.key)) { this.onCronLiveEvent(msg); break; }
+        if (nzState.isCronLiveKey && nzState.isCronLiveKey(msg.key)) { this.onCronLiveEvent(msg); break; }
         this.onEvent(msg);
         break;
       case 'send_ack':
@@ -12765,7 +12782,7 @@ const wsm = {
         this.onInterruptAck(msg);
         break;
       case 'session_state':
-        if (window.isCronLiveKey(msg.key)) { this.onCronLiveSessionState(msg); break; }
+        if (nzState.isCronLiveKey && nzState.isCronLiveKey(msg.key)) { this.onCronLiveSessionState(msg); break; }
         this.onSessionState(msg);
         break;
       case 'sessions_update': {
@@ -12802,7 +12819,7 @@ const wsm = {
         // drawer's "当前执行" section therefore appears the same frame
         // the WS event lands, gated only on cronDetailJobId — no
         // selectedKey check is needed any more.
-        window.cronApplyRunStarted(msg);
+        emitCron('cron:run-started', msg);
         break;
       case 'cron_run_ended':
         // P0 — terminal frame. Refetch list so counters / last_error_class
@@ -12816,8 +12833,7 @@ const wsm = {
         // terminal state (succeeded / failed / skipped / timed_out /
         // canceled) — only succeeded should celebrate.
         if (msg && msg.state === 'succeeded') announce('定时任务已完成');
-        window.cronApplyRunEnded(msg);
-        window.fetchCronJobs().then(() => window.renderCronPanel()).catch(() => {});
+        emitCron('cron:run-ended', msg);
         // P2 cron-run-history (RFC §8.2) — refresh the timeline head
         // (most-recent 10 runs) when the operator currently has the drawer
         // open for this job. cron-panel-consolidation RFC §4.6: the gate
@@ -12830,7 +12846,7 @@ const wsm = {
         // R243-PERF-7 / #812: route through the rAF-debounced wrapper so
         // bursty cron_run_ended events for the same job collapse to one
         // sort+innerHTML rebuild per paint frame instead of one per event.
-        if (msg && msg.job_id) window.cronTimelineRefreshHeadDebounced(msg.job_id);
+        if (msg && msg.job_id) emitCron('cron:timeline-refresh-head', msg.job_id);
         break;
       case 'daemon_run_started':
       case 'daemon_run_ended':
@@ -12932,7 +12948,7 @@ const wsm = {
     this.cronLive.pendingJobId = jobId;
     this.cronLive.runStartedAt = runStartedAtMs || 0;
     this.cronLive.status = 'pending';
-    window.setCronLiveStatus('pending');
+    emitCron('cron:live-status', 'pending');
     const msg = { type: 'subscribe', key: key };
     const after = this.cronLive.lastEventTimeMs || runStartedAtMs || 0;
     if (after > 0) msg.after = after;
@@ -12990,8 +13006,8 @@ const wsm = {
         this.subscribeCronLive(jobId, runStartedAt);
       }
       // 任务已结束：保持 events 数组供回看，status 已是 'stopped'
-    } else if (typeof ensureCronLiveSubscription === 'function') {
-      window.ensureCronLiveSubscription();
+    } else {
+      emitCron('cron:live-ensure-subscription');
     }
   },
 
@@ -13216,7 +13232,7 @@ const wsm = {
     // Cron timed_out / failed 终态后丢弃后续 ghost 事件（CLI 子进程
     // 在 deadline 命中后还会再吐 result，但 cron run 已记录为终态，
     // 继续追加只会让用户看到"超时但还在工作"的分裂视觉）。
-    if (window.isCronSessionFrozen(msg.key)) return;
+    if (nzState.isCronSessionFrozen && nzState.isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
     if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
@@ -13601,14 +13617,14 @@ const wsm = {
     // 流不会再有事件 —— 切到 stopped，事件保留可回看。
     if (msg.state === 'dead' || msg.reason === 'subscription_timeout') {
       this.cronLive.status = 'stopped';
-      window.setCronLiveStatus('stopped');
+      emitCron('cron:live-status', 'stopped');
     }
   },
 
   // cron-live RFC §5: 首批 history 帧到达。EventEntriesSince(after) 后端无条数
   // 上限（After>0 时 Limit 被忽略），前端必须自己截尾到 CRON_LIVE_MAX_EVENTS。
   onCronLiveHistory(msg) {
-    if (typeof isCronSessionFrozen === 'function' && window.isCronSessionFrozen(msg.key)) return;
+    if (nzState.isCronSessionFrozen && nzState.isCronSessionFrozen(msg.key)) return;
     const incoming = msg.events || [];
     if (incoming.length === 0) return;
     const lastTime = this.cronLive.lastEventTimeMs;
@@ -13629,11 +13645,11 @@ const wsm = {
       if (last.time && last.time > this.cronLive.lastEventTimeMs) this.cronLive.lastEventTimeMs = last.time;
     }
     this.cronLive.status = 'live';
-    window.repaintCronLive();
+    emitCron('cron:live-repaint');
   },
 
   onCronLiveEvent(msg) {
-    if (typeof isCronSessionFrozen === 'function' && window.isCronSessionFrozen(msg.key)) return;
+    if (nzState.isCronSessionFrozen && nzState.isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
     if (ev.time && ev.time < this.cronLive.lastEventTimeMs) return;
@@ -13647,9 +13663,7 @@ const wsm = {
     }
     if (ev.time) this.cronLive.lastEventTimeMs = ev.time;
     this.cronLive.status = 'live';
-    window.appendEventsToContainer(document.getElementById('cron-live-events'), [ev]);
-    window.setCronLiveStatus('live');
-    window.updateCronLiveTruncated();
+    emitCron('cron:live-event', ev);
   },
 
   setState(s) {
@@ -15951,7 +15965,7 @@ initSwipeBack();
     // hover" semantics).
     try {
       const data = await fetchJSON(NZ_CONTRACT.API.memory_slug.replace('{slug}', encodeURIComponent(slug)), {
-        headers: typeof authHeaders === 'function' ? window.authHeaders() : {},
+        headers: authHeaders(),
       });
       if (!data || !data.found) {
         memCache.set(slug, NOT_FOUND);
@@ -16235,6 +16249,7 @@ Object.defineProperties(window, {
   voiceState: { get: function () { return voiceState; }, set: function (v) { voiceState = v; } },
 });
 Object.assign(window, {
+  authHeaders: authHeaders,
   renderEvents: renderEvents,
   renderOptimisticUserMsg: renderOptimisticUserMsg,
   splitPathLine: splitPathLine,
