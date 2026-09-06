@@ -107,6 +107,10 @@ const deps = {
   'running_banner.js': {},
   'file_refs.js': {},
   'utilities.js': {},
+  'discovery.js': {},
+  'tuning.js': {},
+  'msg_nav.js': {},
+  'sidebar_project.js': {},
   'dashboard.js': {},
   'cron_view.js': {},
   // ES module since D3 PR-B: utilities and nz.state come in via import;
@@ -120,7 +124,7 @@ const deps = {
 
 // Files migrated to ES modules (D3, docs/rfc/dashboard-es-modules.md).
 // sourceType 'module' makes no-undef a real scope check for them.
-const moduleFiles = new Set(['nz_util.js', 'utilities.js', 'file_refs.js', 'running_banner.js', 'system_view.js', 'split_view.js', 'render_md.js', 'self_update.js', 'voice.js', 'session_header.js', 'composer_files.js', 'mobile_nav.js', 'dashboard.js', 'agent_view.js', 'asset_browser.js', 'files_view.js', 'cron_view.js']);
+const moduleFiles = new Set(['nz_util.js', 'sidebar_project.js', 'msg_nav.js', 'tuning.js', 'discovery.js', 'utilities.js', 'file_refs.js', 'running_banner.js', 'system_view.js', 'split_view.js', 'render_md.js', 'self_update.js', 'voice.js', 'session_header.js', 'composer_files.js', 'mobile_nav.js', 'dashboard.js', 'agent_view.js', 'asset_browser.js', 'files_view.js', 'cron_view.js']);
 
 const perFile = Object.entries(deps).map(([file, globals]) => ({
   files: [`internal/server/static/${file}`],

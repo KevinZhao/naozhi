@@ -416,6 +416,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/discovery.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/file_refs.js",
     "handler_type": "http.HandlerFunc"
   },
@@ -427,6 +432,11 @@
   {
     "method": "GET",
     "path": "/static/mobile_nav.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/msg_nav.js",
     "handler_type": "http.HandlerFunc"
   },
   {
@@ -456,12 +466,22 @@
   },
   {
     "method": "GET",
+    "path": "/static/sidebar_project.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/split_view.js",
     "handler_type": "http.HandlerFunc"
   },
   {
     "method": "GET",
     "path": "/static/system_view.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/tuning.js",
     "handler_type": "http.HandlerFunc"
   },
   {

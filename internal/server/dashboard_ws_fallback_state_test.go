@@ -172,11 +172,7 @@ func TestDashboardJS_StartPollersSkipsSessionsPollWhenWSConnected(t *testing.T) 
 // and REST reconcile) and cleared on session switch.
 func TestDashboardJS_FallbackReconcileComparesLastAppliedState(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read embedded dashboard.js: %v", err)
-	}
-	js := string(data)
+	js := readDashboardJS(t)
 
 	fetch := jsBlockBody(t, js, "async function fetchSessions() {")
 	const apply = "updateMainState(sd.state, sd.death_reason);"
@@ -198,7 +194,7 @@ func TestDashboardJS_FallbackReconcileComparesLastAppliedState(t *testing.T) {
 	// session so a stale record from another session can never suppress the
 	// first reconcile after a switch.
 	usb := jsBlockBody(t, js, "function updateSendButton(state) {")
-	if !strings.Contains(usb, "_lastAppliedMainState = { key: sid(selectedKey, selectedNode), state: state };") {
+	if !strings.Contains(usb, "nzState._lastAppliedMainState = { key: deps.sid(nzState.selectedKey, nzState.selectedNode), state: state };") {
 		t.Fatal("updateSendButton must record _lastAppliedMainState = {key, state} for the selected session")
 	}
 

@@ -64,6 +64,18 @@ var fileRefsJS embed.FS
 //go:embed static/utilities.js
 var utilitiesJS embed.FS
 
+//go:embed static/discovery.js
+var discoveryJS embed.FS
+
+//go:embed static/tuning.js
+var tuningJS embed.FS
+
+//go:embed static/msg_nav.js
+var msgNavJS embed.FS
+
+//go:embed static/sidebar_project.js
+var sidebarProjectJS embed.FS
+
 //go:embed static/cron_view.js
 var cronViewJS embed.FS
 
@@ -155,6 +167,10 @@ var staticAssets = func() map[string]staticAsset {
 		{"running_banner.js", runningBannerJS, "static/running_banner.js", true},
 		{"file_refs.js", fileRefsJS, "static/file_refs.js", true},
 		{"utilities.js", utilitiesJS, "static/utilities.js", true},
+		{"discovery.js", discoveryJS, "static/discovery.js", true},
+		{"tuning.js", tuningJS, "static/tuning.js", true},
+		{"msg_nav.js", msgNavJS, "static/msg_nav.js", true},
+		{"sidebar_project.js", sidebarProjectJS, "static/sidebar_project.js", true},
 		{"cron_view.js", cronViewJS, "static/cron_view.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
@@ -398,4 +414,64 @@ func handleUtilitiesJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "utilities.js")
+}
+
+// handleDiscoveryJS serves static/discovery.js (discovered-session preview + takeover, imported by dashboard.js).
+func handleDiscoveryJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("discovery.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "discovery.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "discovery.js")
+}
+
+// handleTuningJS serves static/tuning.js (the per-session model/effort tuning popover, imported by dashboard.js).
+func handleTuningJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("tuning.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "tuning.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "tuning.js")
+}
+
+// handleMsgNavJS serves static/msg_nav.js (transcript message navigation, imported by dashboard.js).
+func handleMsgNavJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("msg_nav.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "msg_nav.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "msg_nav.js")
+}
+
+// handleSidebarProjectJS serves static/sidebar_project.js (sidebar project headers + project settings, imported by dashboard.js).
+func handleSidebarProjectJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("sidebar_project.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "sidebar_project.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "sidebar_project.js")
 }

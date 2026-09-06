@@ -29,9 +29,12 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	// <script> boundary (that caused `cronExpandedRunId is not defined` when
 	// cron_view.js failed to load — dashboard-cron-view-extraction §2.6 B1), so
 	// those two read dashJS / cronJS separately.
-	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
+	// #2558 D4-6: the global Esc handler moved to msg_nav.js with the rest of
+	// the message-navigation region. The B1 no-cross-boundary contract below
+	// still holds — it just applies to that file now.
+	dashData, err := msgNavJS.ReadFile("static/msg_nav.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read msg_nav.js: %v", err)
 	}
 	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {

@@ -176,10 +176,10 @@ func TestDashboardJS_HeaderFetchErrorPathsStaleChecked(t *testing.T) {
 	if git == "" {
 		t.Fatal("fetchGitState not found")
 	}
-	if !strings.Contains(git, "if (!resp.ok) { delete gitStateCache[cacheKey]; if (selectedKey !== key || selectedNode !== node) return; setHeaderGitChip(''); return; }") {
+	if !strings.Contains(git, "if (!resp.ok) { delete deps.gitStateCache[cacheKey]; if (nzState.selectedKey !== key || nzState.selectedNode !== node) return; deps.setHeaderGitChip(''); return; }") {
 		t.Error("fetchGitState !resp.ok branch must stale-check key+node before clearing #header-git (cache delete stays unconditional)")
 	}
-	if !strings.Contains(git, "} catch (_) {\n    delete gitStateCache[cacheKey];\n    if (selectedKey !== key || selectedNode !== node) return;\n    setHeaderGitChip('');") {
+	if !strings.Contains(git, "} catch (_) {\n    delete deps.gitStateCache[cacheKey];\n    if (nzState.selectedKey !== key || nzState.selectedNode !== node) return;\n    deps.setHeaderGitChip('');") {
 		t.Error("fetchGitState catch branch must stale-check key+node before clearing #header-git")
 	}
 }
@@ -205,6 +205,10 @@ func readDashboardJS(t *testing.T) string {
 		"running_banner.js",
 		"file_refs.js",
 		"utilities.js",
+		"discovery.js",
+		"tuning.js",
+		"msg_nav.js",
+		"sidebar_project.js",
 	} {
 		data := staticAssetBytes(name)
 		if data == nil {
