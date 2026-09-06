@@ -1,4 +1,4 @@
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState } from './nz_util.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, registerActions } from './nz_util.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
@@ -961,7 +961,7 @@ function renderSidebar(data) {
   // it via toContain) but add a visible call-to-action so first-time users
   // aren't left staring at a dead sidebar. createNewSession is the same handler
   // the header `+` button invokes.
-  if (!html) html = '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" onclick="createNewSession()">+ 开启你的第一个会话</button></div>';
+  if (!html) html = '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
   // R33-UX1: skip the innerHTML write (and its full sidebar reflow) when
   // the produced markup is byte-identical to what is already mounted.
   // 20 sessions × 1 Hz polling cycle rebuilds the same string every tick
@@ -1218,32 +1218,11 @@ function sectionHeaderHtml(p) {
 // script-src 'unsafe-inline' surface (#922 / #1734) without changing
 // behaviour. Keys must match the data-action values emitted in
 // sectionHeaderHtml / sectionHeaderFallbackHtml.
-const SIDEBAR_PROJECT_ACTIONS = {
-  'project-collapse': (btn) => toggleProjectCollapsed(btn.dataset.key),
-  'project-favorite': (btn) => toggleFavorite(btn.dataset.name, btn.dataset.node),
-  'project-github': (btn) => showGitRemote(btn.dataset.url),
-  'project-settings': (btn) => openProjectSettings(btn.dataset.name),
-};
-
-// initSidebarProjectActions attaches ONE delegated click listener to the
-// stable #session-list container (not document — scoped delegation, mirroring
-// the cron-menu listener). It dispatches project-header button clicks via
-// SIDEBAR_PROJECT_ACTIONS. stopPropagation preserves the prior inline
-// `event.stopPropagation()` so a click on a header control never bubbles to
-// an ancestor handler. The capture-phase long-press swallow installed by
-// initSwipeDelete is orthogonal (it only fires on _longPressFired).
-function initSidebarProjectActions() {
-  const list = document.getElementById('session-list');
-  if (!list) return;
-  list.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-action]');
-    if (!btn || !list.contains(btn)) return;
-    const fn = SIDEBAR_PROJECT_ACTIONS[btn.getAttribute('data-action')];
-    if (!fn) return;
-    e.stopPropagation();
-    fn(btn);
-  });
-}
+// #1980 PR-2: the project-header buttons' scoped #session-list delegation
+// (SIDEBAR_PROJECT_ACTIONS / initSidebarProjectActions) merged into the
+// global nz.actions registry at the tail of this file — closest() single
+// dispatch subsumes the old stopPropagation, and the capture-phase
+// long-press swallow from initSwipeDelete still runs first (capture).
 
 // toggleProjectCollapsed flips a project section's fold state, persists
 // it, and re-renders from the last sidebar payload (no network round-trip).
@@ -1392,8 +1371,6 @@ async function openProjectSettings(name) {
   if (pmInput) pmInput.addEventListener('input', updatePreview);
   updatePreview();
 
-  const psCancel = overlay.querySelector('[data-action="modal-close"]');
-  if (psCancel) psCancel.addEventListener('click', () => overlay.remove());
   const saveBtn = overlay.querySelector('[data-action="ps-save"]');
   if (saveBtn) saveBtn.addEventListener('click', () => saveProjectSettings(name, cfg, overlay));
 
@@ -1505,8 +1482,6 @@ function openCreateAccessProfile(onCreated) {
   tplSel.addEventListener('change', applyTemplate);
   applyTemplate();
 
-  const capCancel = overlay.querySelector('[data-action="modal-close"]');
-  if (capCancel) capCancel.addEventListener('click', () => overlay.remove());
 
   overlay.querySelector('[data-action="cap-create"]').addEventListener('click', async () => {
     const tpl = ACCESS_PROFILE_TEMPLATES[tplSel.value] || {};
@@ -2156,9 +2131,8 @@ function applyHistoryFilter(merged, query) {
     }
     const ago = s.last_active ? timeAgo(s.last_active) : '';
     const abs = s.last_active ? formatAbsTime(s.last_active) : '';
-    const onclick = 'resumeRecentSession(this.dataset.sid);closeHistoryPopover()';
     return dayHeader +
-      '<div class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" onclick="' + onclick + '">' +
+      '<div class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" data-action="history-resume">' +
       (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt" style="color:var(--nz-text-dim)">未命名</div>') +
       '<div class="hp-meta">' +
         (s.project ? '<span class="hp-project">' + esc(s.project) + '</span><span class="hp-dot">&middot;</span>' : '') +
@@ -2349,7 +2323,7 @@ function applyFeatureGates() {
   // deployments support image so this branch rarely hits in practice.
   // Audio is governed separately (D15) by the voice button.
   const imageOK = featureForBackend(backendID, 'image_input');
-  const filePickBtn = document.querySelector('button[onclick="openFilePicker()"]');
+  const filePickBtn = document.querySelector('button[data-action="file-picker"]');
   if (filePickBtn) {
     if (!imageOK) {
       filePickBtn.classList.add('feat-disabled');
@@ -2461,7 +2435,7 @@ function sessionCardHtml(s) {
     ? '<span class="sc-node" style="background:' + nodeColor(sNode) + '" title="' + escAttr(getNodeDisplayName(sNode)) + '">' + esc(getNodeDisplayName(sNode)) + '</span>'
     : '';
 
-  const dismissBtn = '<button type="button" class="btn-close btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="移除" aria-label="移除会话">' + ICONS.close + '</button>';
+  const dismissBtn = '<button type="button" class="btn-close btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" data-action="session-dismiss" title="移除" aria-label="移除会话">' + ICONS.close + '</button>';
 
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.cli_name, s.entrypoint) : '';
   const agentCount = s.subagents ? s.subagents.length : 0;
@@ -2508,7 +2482,7 @@ function sessionCardHtml(s) {
     ? '<div class="sc-response" title="' + escAttr(responseRaw) + '">' + esc(responseTrunc) + '</div>'
     : '';
 
-  return '<div class="' + cls + '" role="listitem" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" tabindex="0" aria-label="' + escAttr(prompt + ' · ' + displayState) + '" onclick="selectSession(this.dataset.key,this.dataset.node)" onkeydown="sessionCardKey(event)">' +
+  return '<div class="' + cls + '" role="listitem" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" tabindex="0" aria-label="' + escAttr(prompt + ' · ' + displayState) + '" data-action="session-select" data-action-keydown="session-card-key">' +
     dismissBtn +
     '<div class="sc-body">' +
       '<div class="sc-header">' +
@@ -2696,7 +2670,7 @@ function updateStatusBar() {
   // button-free because the next auto-retry is already imminent.
   const showReconnect = statusKey === 'disconnected';
   const reconnectBtn = showReconnect
-    ? '<button type="button" class="status-reconnect" onclick="reconnectNow()" title="立即重连" aria-label="立即重连">重连</button>'
+    ? '<button type="button" class="status-reconnect" data-action="ws-reconnect" title="立即重连" aria-label="立即重连">重连</button>'
     : '';
 
   // R110-P1 outage duration hint: only when we have a stamped disconnect
@@ -2823,7 +2797,7 @@ function showCheatsheet() {
       '<div class="ks-sub">按 <kbd>?</kbd> 可随时打开本面板，<kbd>Esc</kbd> 关闭。</div>' +
       '<div class="ks-grid">' + renderCheatsheetHTML() + '</div>' +
       '<div class="modal-btns">' +
-        '<button type="button" class="primary" onclick="dismissCheatsheet()">好的</button>' +
+        '<button type="button" class="primary" data-action="cheatsheet-dismiss">好的</button>' +
       '</div>' +
     '</div>';
   overlay.addEventListener('click', e => {
@@ -3337,16 +3311,9 @@ function setHeaderOverlayDriftChip(sessions) {
 const TUNING_EFFORT_TIERS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let tuningPopoverCloseHandler = null;
 
-// Delegated dispatch for the header chips (data-action idiom, same as
-// SIDEBAR_PROJECT_ACTIONS — keeps the generated-onclick CSP ratchet flat).
-// Attached once at load; the chips are rebuilt by renderMainShell /
-// setHeaderEffortChip, so per-element binding would leak or miss repaints.
-document.addEventListener('click', (e) => {
-  const el = e.target.closest && e.target.closest('[data-action="tuning-model"],[data-action="tuning-effort"]');
-  if (!el) return;
-  e.stopPropagation();
-  openTuningPopover(el.dataset.action === 'tuning-model' ? 'model' : 'effort');
-});
+// #1980 PR-2: the header tuning chips' document-level listener merged into
+// the global nz.actions registry (keys tuning-model / tuning-effort) — the
+// chips are rebuilt on repaint, so delegation stays the right shape.
 
 function dismissTuningPopover() {
   const el = document.getElementById('tuning-popover');
@@ -4117,7 +4084,7 @@ function mainHeaderHtml(s) {
   // with no backend label storage, and we intentionally hide the control there.
   const canRename = selectedKey && !isDiscoveredKey(selectedKey);
   const renameBtn = canRename
-    ? '<button type="button" class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
+    ? '<button type="button" class="btn-rename" data-action="session-rename" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
     : '';
   // UX P2 Markdown export: any session that has an addressable key can be
   // exported — no dependency on managed status because the /api/sessions/events
@@ -4125,11 +4092,11 @@ function mainHeaderHtml(s) {
   // shares the .btn-rename hover-reveal treatment so the header stays calm
   // by default.
   const downloadBtn = selectedKey
-    ? '<button type="button" class="btn-rename btn-download" onclick="downloadSessionMarkdown()" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
+    ? '<button type="button" class="btn-rename btn-download" data-action="session-download-md" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
     : '';
 
   return '<div class="main-header">' +
-      '<button type="button" class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
+      '<button type="button" class="btn-mobile-back" data-action="mobile-back" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
       '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
@@ -4212,9 +4179,9 @@ function renderMainShell() {
     '<details class="session-runs-panel" id="session-runs-panel" hidden></details>' +
     '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
-      '<button type="button" onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
-      '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
-      '<button type="button" onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
+      '<button type="button" data-action="nav-msg" data-dir="prev" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
+      '<span class="nav-counter" id="nav-counter" data-action="nav-show-list" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
+      '<button type="button" data-action="nav-msg" data-dir="next" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
     '</div>' +
     '<div class="running-banner" id="running-banner" style="display:none" role="status" aria-live="polite">' +
       '<div class="rb-tool-row">' +
@@ -4228,15 +4195,15 @@ function renderMainShell() {
     '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<button type="button" class="btn-icon" onclick="openFilePicker()" title="上传图片或 PDF" aria-label="上传图片或 PDF">' + ICONS.attach + '</button>' +
-        '<button type="button" class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (voiceInputMode ? ICONS.keyboard : ICONS.mic) + '</button>' +
-        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
+        '<button type="button" class="btn-icon" data-action="file-picker" title="上传图片或 PDF" aria-label="上传图片或 PDF">' + ICONS.attach + '</button>' +
+        '<button type="button" class="btn-icon btn-mic" id="btn-mic" data-action="input-mode-toggle" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (voiceInputMode ? ICONS.keyboard : ICONS.mic) + '</button>' +
+        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." data-action-keydown="msg-input-key" data-action-compositionend="msg-input-compend"></div>' +
         '<button type="button" class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
-        '<button type="button" class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
-        '<button type="button" class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="停止" aria-label="停止当前回合">' + ICONS.stop + '</button>' +
+        '<button type="button" class="btn-icon btn-send" id="btn-send" data-action="msg-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
+        '<button type="button" class="btn-icon btn-stop" id="btn-stop" data-action="session-interrupt" title="停止" aria-label="停止当前回合">' + ICONS.stop + '</button>' +
       '</div>' +
       '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
-      '<input type="file" id="file-input" accept="image/*,application/pdf" multiple style="display:none" onchange="handleFiles(this.files)">' +
+      '<input type="file" id="file-input" accept="image/*,application/pdf" multiple style="display:none" data-action-change="file-input-change">' +
     '</div>';
 
   // Enable drag-drop
@@ -4955,7 +4922,7 @@ function renderAskQuestionCard(e) {
         ' data-header="' + escAttr(item.header || '') + '"' +
         ' data-label="' + escAttr(opt.label || '') + '"' +
         (locked ? ' disabled' : '') +
-        ' onclick="onAskOptionToggle(this)">' +
+        ' data-action="ask-option-toggle">' +
         '<span class="ask-opt-label">' + esc(opt.label || '') + '</span>' +
         (opt.description ? '<span class="ask-opt-desc">' + esc(opt.description) + '</span>' : '') +
         '</button>';
@@ -4976,7 +4943,7 @@ function renderAskQuestionCard(e) {
     '<button class="ask-submit" type="button"' +
     ' data-tuid="' + escAttr(tuid) + '"' +
     ' disabled' +
-    ' onclick="onAskSubmit(this)">提交全部回答</button>';
+    ' data-action="ask-submit">提交全部回答</button>';
   const status = locked
     ? '<div class="ask-status">已回答</div>'
     : '';
@@ -5354,10 +5321,10 @@ function eventHtml(e, opts) {
   // the contract — don't let them diverge.
   const isLong = !!cleanRaw && cleanRaw.length > 500;
   const copyBtn = isLong && (e.type === 'text' || e.type === 'user')
-    ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" onclick="copyEventContent(this)" title="复制" aria-label="复制消息">复制</button>'
+    ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-action="event-copy" title="复制" aria-label="复制消息">复制</button>'
     : '';
   const askBtn = isLong && e.type === 'text'
-    ? '<button class="event-ask-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">' + ICONS.preview + ' 追问</button>'
+    ? '<button class="event-ask-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" data-action="ask-aside" title="基于此内容追问">' + ICONS.preview + ' 追问</button>'
     : '';
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
@@ -7263,7 +7230,7 @@ function renderFilePreviews() {
   el.innerHTML = pendingFiles.map((entry, i) => {
     const overlay =
       entry.status === 'uploading' ? '<div class="upload-status uploading"></div>' :
-      entry.status === 'error' ? '<div class="upload-status error" title="' + escAttr(entry.error || 'upload failed') + '" onclick="retryUpload(' + i + ')">\u21bb</div>' :
+      entry.status === 'error' ? '<div class="upload-status error" title="' + escAttr(entry.error || 'upload failed') + '" data-action="upload-retry">\u21bb</div>' :
       '';
     // Only 'ready' files are draggable so an in-flight upload's index stays
     // stable for the uploadEntry completion handler. tabindex=0 makes the
@@ -7287,16 +7254,16 @@ function renderFilePreviews() {
     return '<div class="file-thumb ' + entry.status + (isPDF ? ' pdf' : '') + '"' +
       ' data-idx="' + i + '"' +
       (draggable ? ' draggable="true" tabindex="0" role="button" aria-label="' + (isPDF ? 'PDF' : '\u56fe\u7247') + ' ' + (i + 1) + '\uff0c\u62d6\u52a8\u6216\u7528\u5de6\u53f3\u65b9\u5411\u952e\u6392\u5e8f"' : '') +
-      (draggable ? ' ondragstart="onThumbDragStart(event,' + i + ')"' : '') +
-      (draggable ? ' ondragover="onThumbDragOver(event)"' : '') +
-      (draggable ? ' ondragleave="onThumbDragLeave(event)"' : '') +
-      (draggable ? ' ondrop="onThumbDrop(event,' + i + ')"' : '') +
-      (draggable ? ' ondragend="onThumbDragEnd()"' : '') +
-      (draggable ? ' onkeydown="onThumbKeyDown(event,' + i + ')"' : '') +
+      (draggable ? ' data-action-dragstart="thumb-dragstart"' : '') +
+      (draggable ? ' data-action-dragover="thumb-dragover"' : '') +
+      (draggable ? ' data-action-dragleave="thumb-dragleave"' : '') +
+      (draggable ? ' data-action-drop="thumb-drop"' : '') +
+      (draggable ? ' data-action-dragend="thumb-dragend"' : '') +
+      (draggable ? ' data-action-keydown="thumb-key"' : '') +
       '>' +
       body +
       overlay +
-      '<button class="remove" type="button" onclick="removeFile(' + i + ')" title="\u79fb\u9664" aria-label="\u79fb\u9664">' + ICONS.close + '</button>' +
+      '<button class="remove" type="button" data-action="file-remove" title="\u79fb\u9664" aria-label="\u79fb\u9664">' + ICONS.close + '</button>' +
       '</div>';
   }).join('');
 }
@@ -7757,10 +7724,10 @@ function showAuthModal(opts) {
       // surface (dashboard_token in config.yaml). Kept concise; full docs live
       // in README.md and docs/ops/ so the modal stays task-focused.
       '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +
-      '<input id="token-input" type="password" placeholder="请输入 dashboard token…" onkeydown="if(event.key===\'Enter\'){saveToken()}">' +
+      '<input id="token-input" type="password" placeholder="请输入 dashboard token…" data-action-keydown="token-input-key">' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="dismissAuthModal()">取消</button>' +
-        '<button type="button" class="primary" onclick="saveToken()">保存</button>' +
+        '<button type="button" data-action="auth-dismiss">取消</button>' +
+        '<button type="button" class="primary" data-action="token-save">保存</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
@@ -8410,11 +8377,11 @@ function createNewSession() {
           renderNodePicker() +
           '<div style="margin-bottom:12px">' +
             '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录</label>' +
-            '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
+            '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" data-action-keydown="create-session-key">' +
           '</div>' +
           '<div class="modal-btns">' +
-            '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
-            '<button type="button" class="primary" onclick="doCreateSession()">创建</button>' +
+            '<button type="button" data-action="modal-close">取消</button>' +
+            '<button type="button" class="primary" data-action="session-create">创建</button>' +
           '</div>' +
         '</div>';
       document.body.appendChild(overlay);
@@ -8911,11 +8878,11 @@ function pickPaletteCustom(initialValue) {
       nodePicker +
       '<div style="margin-bottom:12px">' +
         '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录路径</label>' +
-        '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
+        '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" data-action-keydown="create-session-key">' +
       '</div>' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
-        '<button type="button" class="primary" onclick="doCreateSession()">创建</button>' +
+        '<button type="button" data-action="modal-close">取消</button>' +
+        '<button type="button" class="primary" data-action="session-create">创建</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(modal);
@@ -9412,7 +9379,7 @@ function renderRecentSessionsPanel() {
     const ago = s.last_active ? timeAgo(s.last_active) : '';
     return '<button type="button" class="recent-row" ' +
       'data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" ' +
-      'onclick="selectSession(this.dataset.key,this.dataset.node)">' +
+      'data-action="session-select">' +
       '<span class="recent-dot ' + dotCls + '" aria-hidden="true"></span>' +
       '<span class="recent-label" title="' + escAttr(label) + '">' + esc(label) + '</span>' +
       (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
@@ -11716,14 +11683,14 @@ function renderMdUncached(s) {
         }).join('');
         return '<div class="md-code-wrap md-pathlist">' + rows +
           '<div class="md-code-actions">' +
-            '<button type="button" class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy file paths">copy</button>' +
+            '<button type="button" class="md-code-btn md-copy-btn" data-action="code-copy" aria-label="Copy file paths">copy</button>' +
           '</div>' +
           '</div>';
       }
       const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
       return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +
         '<div class="md-code-actions">' +
-          '<button type="button" class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy code snippet">copy</button>' +
+          '<button type="button" class="md-code-btn md-copy-btn" data-action="code-copy" aria-label="Copy code snippet">copy</button>' +
         '</div>' +
         '</div>';
     }
@@ -13994,7 +13961,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
   const main = document.getElementById('main');
   main.innerHTML =
     '<div class="main-header">' +
-      '<button type="button" class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
+      '<button type="button" class="btn-mobile-back" data-action="mobile-back" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
         '<h2>' + esc(base) + '</h2>' +
         '<div class="detail">' +
@@ -14004,15 +13971,15 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     '</div>' +
     '<div class="events" id="events-scroll"><div class="empty-state">加载中…</div></div>' +
     '<div class="nav-pill" id="nav-pill">' +
-      '<button type="button" onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
-      '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
-      '<button type="button" onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
+      '<button type="button" data-action="nav-msg" data-dir="prev" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
+      '<span class="nav-counter" id="nav-counter" data-action="nav-show-list" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
+      '<button type="button" data-action="nav-msg" data-dir="next" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
     '</div>' +
     '<div class="input-area" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message to take over..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
-        '<button type="button" class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
+        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message to take over..." data-action-keydown="msg-input-key" data-action-compositionend="msg-input-compend"></div>' +
+        '<button type="button" class="btn-icon btn-send" id="btn-send" data-action="msg-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
       '</div>' +
     '</div>';
   navRebuild(); // clear stale nav state before async preview fetch
@@ -14966,8 +14933,8 @@ function showOnboarding() {
         '<li><span class="ob-icon">IM</span><div><b>IM 渠道</b> — 同一会话可在飞书等平台接入，发送 <b>/help</b> 查看命令</div></li>' +
       '</ul>' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="dismissOnboarding()">稍后再说</button>' +
-        '<button type="button" class="primary" onclick="dismissOnboarding();createNewSession()">立即创建会话</button>' +
+        '<button type="button" data-action="onboarding-dismiss">稍后再说</button>' +
+        '<button type="button" class="primary" data-action="onboarding-create">立即创建会话</button>' +
       '</div>' +
     '</div>';
   overlay.addEventListener('click', function(e) {
@@ -15127,7 +15094,6 @@ wsm.connect();
 initMobile();
 initViewportTracking();
 initSwipeDelete();
-initSidebarProjectActions();
 initSwipeBack();
 (function(){
   var ov=document.createElement('div');ov.className='lightbox-overlay';
@@ -16255,6 +16221,72 @@ initSwipeBack();
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('copy', onCopy);
 })();
+
+
+// ─── data-action registry (#1980 PR-2, docs/rfc/csp-data-action.md) ────────
+// Every handler the dashboard's generated HTML wires via data-action(-<type>)
+// attributes, plus the absorbed project-header / tuning-chip / modal-close
+// dispatch maps. Parameters ride data-* attributes; keys are code literals.
+function thumbIdxOf(el) {
+  const t = el.closest('[data-idx]');
+  return t ? parseInt(t.dataset.idx, 10) : -1;
+}
+const dashActivate = (fn) => (el, e) => {
+  if (e.type === 'keydown') {
+    if (e.key !== 'Enter') return;
+  }
+  fn(el, e);
+};
+registerActions({
+  'session-new': () => createNewSession(),
+  'history-resume': (el) => { resumeRecentSession(el.dataset.sid); closeHistoryPopover(); },
+  'session-dismiss': (el) => dismissSession(el.dataset.key, el.dataset.node),
+  'session-select': (el) => selectSession(el.dataset.key, el.dataset.node),
+  'session-card-key': (el, e) => sessionCardKey(e),
+  'ws-reconnect': () => reconnectNow(),
+  'cheatsheet-dismiss': () => dismissCheatsheet(),
+  'session-rename': () => renameSession(),
+  'session-download-md': () => downloadSessionMarkdown(),
+  'mobile-back': () => mobileBack(),
+  'nav-msg': (el) => navMsg(el.dataset.dir),
+  'nav-show-list': () => navShowList(),
+  'file-picker': () => openFilePicker(),
+  'input-mode-toggle': () => toggleInputMode(),
+  'msg-input-key': (el, e) => handleKey(e),
+  'msg-input-compend': () => { lastCompositionEnd = Date.now(); },
+  'msg-send': () => sendMessage(),
+  'session-interrupt': () => interruptSession(),
+  'file-input-change': (el) => handleFiles(el.files),
+  'ask-option-toggle': (el) => onAskOptionToggle(el),
+  'ask-submit': (el) => onAskSubmit(el),
+  'event-copy': (el) => copyEventContent(el),
+  'ask-aside': (el) => window.askAside(el),
+  'upload-retry': (el) => retryUpload(thumbIdxOf(el)),
+  'file-remove': (el) => removeFile(thumbIdxOf(el)),
+  'thumb-dragstart': (el, e) => onThumbDragStart(e, thumbIdxOf(el)),
+  'thumb-dragover': (el, e) => onThumbDragOver(e),
+  'thumb-dragleave': (el, e) => onThumbDragLeave(e),
+  'thumb-drop': (el, e) => onThumbDrop(e, thumbIdxOf(el)),
+  'thumb-dragend': () => onThumbDragEnd(),
+  'thumb-key': (el, e) => onThumbKeyDown(e, thumbIdxOf(el)),
+  'token-input-key': dashActivate(() => saveToken()),
+  'auth-dismiss': () => dismissAuthModal(),
+  'token-save': () => saveToken(),
+  'create-session-key': dashActivate(() => doCreateSession()),
+  'modal-close': (el) => { const o = el.closest('.modal-overlay'); if (o) o.remove(); },
+  'session-create': () => doCreateSession(),
+  'code-copy': (el) => copyCodeBlock(el),
+  'onboarding-dismiss': () => dismissOnboarding(),
+  'onboarding-create': () => { dismissOnboarding(); createNewSession(); },
+  // absorbed: project-header buttons (ex SIDEBAR_PROJECT_ACTIONS)
+  'project-collapse': (el) => toggleProjectCollapsed(el.dataset.key),
+  'project-favorite': (el) => toggleFavorite(el.dataset.name, el.dataset.node),
+  'project-github': (el) => showGitRemote(el.dataset.url),
+  'project-settings': (el) => openProjectSettings(el.dataset.name),
+  // absorbed: header tuning chips
+  'tuning-model': () => openTuningPopover('model'),
+  'tuning-effort': () => openTuningPopover('effort'),
+});
 
 // ─── D3 ES-module bridge (RFC docs/rfc/dashboard-es-modules.md §3) ─────────
 // nz.state accessors: migrated modules (agent_view, cron_view) reach

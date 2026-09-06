@@ -462,7 +462,7 @@ test.describe('Round 4 — corner cases', () => {
     await page.click(`.session-card[data-key="${kiro.key}"]`);
     await page.waitForTimeout(400);
     const kiroProbe = await page.evaluate(() => {
-      const fp = document.querySelector('button[onclick="openFilePicker()"]');
+      const fp = document.querySelector('button[data-action="file-picker"]');
       const mic = document.getElementById('btn-mic');
       return {
         fpDisabled: fp ? fp.disabled : null,
