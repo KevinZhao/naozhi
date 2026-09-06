@@ -18,30 +18,30 @@ import (
 // gen is the queue generation at enqueue time; if Discard (e.g. /new) bumps
 // it mid-flight, DoneOrDrain returns nil and the loop exits. Caller must
 // arrange sendWG accounting via TrackSend — ownerLoop never touches sendWG.
-func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyncError asyncErrorFn) {
+func (e *sendEngine) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyncError asyncErrorFn) {
 	defer func() {
 		if r := recover(); r != nil {
-			h.handleOwnerLoopPanic(key, onAsyncError, r)
+			e.handleOwnerLoopPanic(key, onAsyncError, r)
 		}
 	}()
-	defer h.router.NotifyIdle()
+	defer e.router.NotifyIdle()
 
-	h.runTurn(key, first.Text, first.Images, onAsyncError)
+	e.runTurn(key, first.Text, first.Images, onAsyncError)
 
 	// Drain loop: after each turn, wait collectDelay then drain.
-	collectTimer := time.NewTimer(h.queue.CollectDelay())
+	collectTimer := time.NewTimer(e.queue.CollectDelay())
 	defer collectTimer.Stop()
 	for {
 		select {
-		case <-h.ctx.Done():
+		case <-e.ctx.Done():
 			// Discard resets busy + bumps gen so the next Enqueue can spawn a
 			// fresh owner; otherwise the key stays "busy" forever.
-			h.queue.Discard(key)
+			e.queue.Discard(key)
 			return
 		case <-collectTimer.C:
 		}
 
-		queued := h.queue.DoneOrDrain(key, gen)
+		queued := e.queue.DoneOrDrain(key, gen)
 		if queued == nil {
 			return // empty or generation mismatch — stop.
 		}
@@ -50,7 +50,7 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 		slog.Debug("send: processing queued messages", "key", key, "count", len(queued), "merged_len", len(text))
 		// onAsyncError only applies to the first turn (one ack per request);
 		// subsequent coalesced turns log failures without a back-channel.
-		h.runTurn(key, text, images, nil)
+		e.runTurn(key, text, images, nil)
 		// Reset 前 Stop + drain（与 dispatch.ownerLoop 对齐）：残留 tick 会让
 		// DoneOrDrain 多调一次、刚入队的消息被静默丢弃。
 		if !collectTimer.Stop() {
@@ -59,7 +59,7 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 			default:
 			}
 		}
-		collectTimer.Reset(h.queue.CollectDelay())
+		collectTimer.Reset(e.queue.CollectDelay())
 	}
 }
 
@@ -67,10 +67,10 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 // (split out to be unit-testable): logs the stack, Discards the queue so a
 // stale owner does not hold the key, and notifies the client via onAsyncError.
 // A nested recover absorbs a cascading panic (e.g. a broken WS writer).
-func (h *Hub) handleOwnerLoopPanic(key string, onAsyncError asyncErrorFn, r any) {
+func (e *sendEngine) handleOwnerLoopPanic(key string, onAsyncError asyncErrorFn, r any) {
 	slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
-	if h.queue != nil {
-		h.queue.Discard(key)
+	if e.queue != nil {
+		e.queue.Discard(key)
 	}
 	if onAsyncError != nil {
 		func() {

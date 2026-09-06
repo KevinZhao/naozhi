@@ -110,6 +110,15 @@ func gateRemoteAccessProfile(resolver accessProfileResolver, targetNode, key str
 	return nil
 }
 
+// lookupNode resolves a node ID to its Conn via the shared node registry; it
+// is the Hub's only by-ID access to the node table. Callers MUST validate the
+// ID with isValidNodeID first. It lived in wshub_send.go until #2551 — it is a
+// node-table accessor, not part of the send pipeline, and the send chain's
+// method count was misleading while it sat there.
+func (h *Hub) lookupNode(id string) (node.Conn, bool) {
+	return h.nodes.NodeByID(id)
+}
+
 // hubNodeLookup adapts the Hub's shared *nodeRegistry to the nodeLookup
 // interface so handleRemoteSend can call selectNodeForBackend.
 type hubNodeLookup struct{ h *Hub }

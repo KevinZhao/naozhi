@@ -652,8 +652,8 @@ func TestWS_SendBusy(t *testing.T) {
 	key := "test:d:u:general"
 
 	// Pre-acquire the guard — new message will interrupt and wait
-	hub.guard.TryAcquire(key)
-	defer hub.guard.Release(key)
+	hub.engine.guard.TryAcquire(key)
+	defer hub.engine.guard.Release(key)
 
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()

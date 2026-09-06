@@ -16,7 +16,7 @@ import (
 
 func TestHandleOwnerLoopPanic_CallsOnAsyncError(t *testing.T) {
 	hub, _ := newTestHub("")
-	hub.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	hub.engine.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
 	t.Cleanup(hub.Shutdown)
 
 	var (
@@ -29,7 +29,7 @@ func TestHandleOwnerLoopPanic_CallsOnAsyncError(t *testing.T) {
 		gotMsgs = append(gotMsgs, msg)
 	}
 
-	hub.handleOwnerLoopPanic("key-a", onAsyncError, "synthetic test panic")
+	hub.engine.handleOwnerLoopPanic("key-a", onAsyncError, "synthetic test panic")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -45,7 +45,7 @@ func TestHandleOwnerLoopPanic_NilOnAsyncErrorNoCrash(t *testing.T) {
 	// HTTP path uses nil onAsyncError because the 202 ack has already
 	// been shipped; the recover path must tolerate that silently.
 	hub, _ := newTestHub("")
-	hub.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	hub.engine.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
 	t.Cleanup(hub.Shutdown)
 
 	defer func() {
@@ -53,13 +53,13 @@ func TestHandleOwnerLoopPanic_NilOnAsyncErrorNoCrash(t *testing.T) {
 			t.Fatalf("nil onAsyncError path panicked: %v", r)
 		}
 	}()
-	hub.handleOwnerLoopPanic("key-b", nil, "synthetic test panic")
+	hub.engine.handleOwnerLoopPanic("key-b", nil, "synthetic test panic")
 }
 
 func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
 	hub, _ := newTestHub("")
 	q := dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
-	hub.queue = q
+	hub.engine.queue = q
 	t.Cleanup(hub.Shutdown)
 
 	key := "key-c"
@@ -69,7 +69,7 @@ func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
 		t.Fatalf("setup: expected nonzero depth, got %d", depth)
 	}
 
-	hub.handleOwnerLoopPanic(key, nil, "synthetic test panic")
+	hub.engine.handleOwnerLoopPanic(key, nil, "synthetic test panic")
 
 	if depth := q.Depth(key); depth != 0 {
 		t.Errorf("queue depth after panic recover = %d, want 0", depth)
@@ -81,7 +81,7 @@ func TestHandleOwnerLoopPanic_OnAsyncErrorPanicAbsorbed(t *testing.T) {
 	// when the process is under duress. The nested recover inside
 	// handleOwnerLoopPanic must swallow it so the outer defer finishes.
 	hub, _ := newTestHub("")
-	hub.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	hub.engine.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
 	t.Cleanup(hub.Shutdown)
 
 	called := false
@@ -95,7 +95,7 @@ func TestHandleOwnerLoopPanic_OnAsyncErrorPanicAbsorbed(t *testing.T) {
 			t.Fatalf("nested panic escaped handleOwnerLoopPanic: %v", r)
 		}
 	}()
-	hub.handleOwnerLoopPanic("key-d", onAsyncError, "synthetic test panic")
+	hub.engine.handleOwnerLoopPanic("key-d", onAsyncError, "synthetic test panic")
 	if !called {
 		t.Errorf("onAsyncError was not invoked")
 	}

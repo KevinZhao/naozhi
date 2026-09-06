@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/sha256"
-	"log/slog"
 	"math"
 	"net/http"
 	"sync"
@@ -42,10 +41,7 @@ type Hub struct {
 	// via the auth-gated /health, and all authenticated users share one trust
 	// boundary. Multi-tenant auth would require moving it behind debug_mode (#1100).
 	droppedTotal atomic.Int64
-	// legacySendInvokes counts sessionSend falls-through to sessionSendLegacy
-	// (nil queue); production steady state must read zero (#710).
-	legacySendInvokes atomic.Int64
-	clients           map[*wsClient]struct{}
+	clients      map[*wsClient]struct{}
 	// authClients mirrors clients whose authenticated flag is true so
 	// broadcastToAuthenticated skips the handshake-pending majority.
 	// Guarded by authMu, nested INSIDE h.mu by the writers (register /
@@ -88,11 +84,13 @@ type Hub struct {
 	// WS upgrade comparison without a Hub rebuild, matching the HTTP path
 	// (#1398). NewHub wraps a static CookieMAC when no getter is supplied.
 	cookieMAC func() string
-	guard     *session.Guard
-	// queue is the MessageEnqueuer interface, not *dispatch.MessageQueue, so
-	// tests can swap it. NewHub keeps a nil concrete queue a nil interface:
-	// send.go's `h.queue == nil` legacy-fallback gate depends on it (#377).
-	queue MessageEnqueuer // per-key FIFO queue for dashboard sends
+	// engine owns the send pipeline: queue / guard / send-goroutine accounting
+	// used to live here as six Hub fields (#2551). Hub now only forwards to
+	// it (WS handlers) and drains it (Shutdown); SendHandler holds the same
+	// instance. Named engine, not send, because wsClient already has a `send`
+	// channel and h.send / c.send would read alike. nil on hand-rolled test
+	// hubs that skip NewHub.
+	engine *sendEngine
 	// nodes is the same registry instance as Server.nodes (pinned by
 	// hub_shared_state_test.go); the registry owns its mutex.
 	nodes      *nodeRegistry
@@ -110,20 +108,10 @@ type Hub struct {
 	allowedRoot string          // workspace paths must be under this root (empty = unrestricted)
 	ctx         context.Context // cancelled on Shutdown to stop in-flight sends
 	cancel      context.CancelFunc
-	// sendWG tracks background send goroutines so Shutdown can wait for them
-	// before tearing down router/session state.
-	sendWG sync.WaitGroup
-
-	// sendTrackMu + sendClosed serialise a late Add(1) with Shutdown's Wait.
-	// CONTRACT: every goroutine registered on sendWG MUST go through
-	// TrackSend() and honour its shuttingDown result; a direct sendWG.Add(1)
-	// can outlive Shutdown and dereference torn-down maps.
-	sendTrackMu sync.Mutex
-	sendClosed  bool
 
 	// clientWG tracks per-client pump/eventPushLoop goroutines plus the
 	// debounce callback; owned by the connection lifecycle (conn.Close),
-	// whereas sendWG is owned by the send path (ctx cancel).
+	// whereas the send goroutines are owned by sendEngine (ctx cancel + drain).
 	clientWG sync.WaitGroup
 
 	// wsAuthLimiter gates the inner `auth` WS message (credential test);
@@ -260,7 +248,6 @@ func NewHub(opts HubOptions) *Hub {
 		agentCmds:        opts.AgentCmds,
 		dashToken:        opts.DashToken,
 		cookieMAC:        cookieMACFn,
-		guard:            opts.Guard,
 		nodes:            nodes,
 		projectMgr:       opts.ProjectMgr,
 		resolver:         opts.Resolver,
@@ -306,16 +293,22 @@ func NewHub(opts HubOptions) *Hub {
 	// Reset. AfterFunc(MaxInt64) cannot fire before Stop, so no drain needed.
 	h.debounceTimer = time.AfterFunc(time.Duration(math.MaxInt64), h.debounceFire)
 	h.debounceTimer.Stop()
-	// A nil queue routes every WS send through sessionSendLegacy and loses
-	// the dispatch queue's rate-limit / collect-window / passthrough modes;
-	// Error level so a misconfigured production Hub is visible in journalctl.
-	if opts.Queue == nil {
-		slog.Error("server: Hub constructed without MessageQueue; falling back to legacy guard path (dispatch queue features disabled, R-LEGACY-SEND blocker)")
-	} else {
-		// Only a non-nil concrete queue is boxed, so send.go's `h.queue == nil`
-		// gate keeps its meaning (a typed nil would read non-nil).
-		h.queue = opts.Queue
-	}
+	// Built last: h is now usable as the engine's sendNotifier. The engine
+	// keeps its own reference to each shared dependency (see sendEngine's
+	// INVARIANT note) rather than a *Hub back-pointer.
+	h.engine = newSendEngine(sendEngineOpts{
+		Queue:       opts.Queue,
+		Guard:       opts.Guard,
+		Ctx:         ctx,
+		Router:      opts.Router,
+		Resolver:    opts.Resolver,
+		Agents:      opts.Agents,
+		ProjectMgr:  opts.ProjectMgr,
+		ScratchPool: opts.ScratchPool,
+		Scheduler:   opts.Scheduler,
+		AllowedRoot: opts.AllowedRoot,
+		Notify:      h,
+	})
 	return h
 }
 
@@ -618,19 +611,6 @@ func (h *Hub) releaseOwnerSlotForClient(c *wsClient) {
 	h.releaseOwnerSlotLocked(c.uploadOwnerKey())
 }
 
-// TrackSend reserves a sendWG slot for a background send goroutine and
-// returns a release function plus a shuttingDown flag. When shuttingDown is
-// true the caller MUST NOT spawn the goroutine.
-func (h *Hub) TrackSend() (release func(), shuttingDown bool) {
-	h.sendTrackMu.Lock()
-	defer h.sendTrackMu.Unlock()
-	if h.sendClosed {
-		return func() {}, true
-	}
-	h.sendWG.Add(1)
-	return h.sendWG.Done, false
-}
-
 // Shutdown closes all WebSocket client connections and relays
 // (LIFECYCLE-METHOD: writes every field block).
 //
@@ -745,15 +725,14 @@ func (h *Hub) Shutdown() {
 	h.connCountByOwner = nil
 	h.connCountByOwnerMu.Unlock()
 
-	// Barrier: a racing TrackSend completes on one side of this line; after
-	// sendClosed no caller Adds, so sendWG.Wait cannot be escaped.
-	h.sendTrackMu.Lock()
-	h.sendClosed = true
-	h.sendTrackMu.Unlock()
-
-	// After pumps are gone: readPump may call handleRemoteSend (sendWG.Add)
-	// on its way out.
-	h.sendWG.Wait()
+	// Send barrier. Position is load-bearing and drain's godoc spells out why:
+	// h.cancel() above, debounceClosed already published, none of h.mu /
+	// authMu / debounceMu held (the drained goroutines re-enter all three
+	// through sendNotifier), and before the node Close loop below.
+	// wshub_shutdown_order_test.go pins the source order.
+	if h.engine != nil {
+		h.engine.drain()
+	}
 
 	// Nodes close last so unregister → RemoveClient and in-flight RPCs
 	// cannot race a closed node.

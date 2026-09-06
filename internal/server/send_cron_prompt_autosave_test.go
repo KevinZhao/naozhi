@@ -57,10 +57,10 @@ func TestAutoSaveCronPrompt_SuppressesAlreadySet(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	saver := &fakeCronPromptSaver{err: cron.ErrPromptAlreadySet}
-	h := &Hub{scheduler: saver}
+	e := newSendEngine(sendEngineOpts{Scheduler: saver})
 
 	key := sessionkey.CronKey("job123")
-	h.autoSaveCronPrompt("send", key, "do the thing")
+	e.autoSaveCronPrompt("send", key, "do the thing")
 
 	if saver.calls != 1 {
 		t.Fatalf("SetJobPrompt calls = %d, want 1", saver.calls)
@@ -82,9 +82,9 @@ func TestAutoSaveCronPrompt_WarnsOnRealError(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	saver := &fakeCronPromptSaver{err: errors.New("disk full")}
-	h := &Hub{scheduler: saver}
+	e := newSendEngine(sendEngineOpts{Scheduler: saver})
 
-	h.autoSaveCronPrompt("passthrough", sessionkey.CronKey("jobX"), "txt")
+	e.autoSaveCronPrompt("passthrough", sessionkey.CronKey("jobX"), "txt")
 
 	out := lb.String()
 	if !strings.Contains(out, "passthrough: set cron prompt") {
@@ -96,11 +96,11 @@ func TestAutoSaveCronPrompt_WarnsOnRealError(t *testing.T) {
 // scheduler, or for a non-cron key, SetJobPrompt must never be called.
 func TestAutoSaveCronPrompt_NoSchedulerOrNonCron(t *testing.T) {
 	// nil scheduler.
-	(&Hub{}).autoSaveCronPrompt("send", sessionkey.CronKey("j"), "t")
+	newSendEngine(sendEngineOpts{}).autoSaveCronPrompt("send", sessionkey.CronKey("j"), "t")
 
 	saver := &fakeCronPromptSaver{}
-	h := &Hub{scheduler: saver}
-	h.autoSaveCronPrompt("send", "feishu:p2p:abc", "t") // non-cron key
+	e := newSendEngine(sendEngineOpts{Scheduler: saver})
+	e.autoSaveCronPrompt("send", "feishu:p2p:abc", "t") // non-cron key
 	if saver.calls != 0 {
 		t.Fatalf("SetJobPrompt called for non-cron key / nil scheduler: calls=%d", saver.calls)
 	}

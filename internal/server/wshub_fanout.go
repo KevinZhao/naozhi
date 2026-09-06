@@ -44,22 +44,6 @@ func informationalSendErr(err error) bool {
 		errors.Is(err, cli.ErrReconnectedUnknown)
 }
 
-// httpSendErrorCallback adapts broadcastSendError to the sessionSend
-// onAsyncError signature for the HTTP send path.
-//
-// Informational outcomes are dropped: this callback fans out to every
-// subscriber of the key, so if A's HTTP send is aborted by B's /urgent, B's
-// tab would otherwise tear down its own optimistic bubble. session_state
-// settles the UI instead; real failures still fan out.
-func (h *Hub) httpSendErrorCallback(key string) asyncErrorFn {
-	return func(err error, errMsg string) {
-		if informationalSendErr(err) {
-			return
-		}
-		h.broadcastSendError(key, errMsg)
-	}
-}
-
 // fanOutToSubscribers delivers one frame to every authenticated client
 // subscribed to key. `build` is invoked (and the frame marshalled) only when
 // at least one subscriber exists, so callers on hot failure paths pay nothing

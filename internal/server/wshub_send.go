@@ -29,13 +29,6 @@ const wsFileNotFoundMsg = "file not found or expired，请重新添加附件后�
 // owning peer node before the dashboard goroutine gives up.
 const remoteNodeProxyTimeout = 10 * time.Second
 
-// lookupNode resolves a node ID to its Conn via the shared node registry; it
-// is the Hub's only by-ID access to the node table. Callers MUST validate the
-// ID with isValidNodeID first.
-func (h *Hub) lookupNode(id string) (node.Conn, bool) {
-	return h.nodes.NodeByID(id)
-}
-
 func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	if msg.Node != "" && msg.Node != "local" {
 		h.handleRemoteSend(c, msg)
@@ -116,7 +109,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	}
 
 	capturedID, capturedKey := msg.ID, key
-	reset, status, err := h.sessionSend(sendParams{
+	reset, status, err := h.engine.sessionSend(sendParams{
 		Key:           key,
 		Text:          msg.Text,
 		Images:        images,
@@ -202,7 +195,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 	// node.NodeProxy role rather than the full Conn (#435).
 	var nc node.NodeProxy = conn
 
-	release, shuttingDown := h.TrackSend()
+	release, shuttingDown := h.engine.TrackSend()
 	if shuttingDown {
 		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: msg.ID, Status: "error", Key: msg.Key, Node: nodeID, Error: "server shutting down"}))
 		return
@@ -315,7 +308,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	// before the browser's follow-up subscribe arrives. TrackSend registers the
 	// goroutine with sendWG so Shutdown waits for the in-flight RPC+broadcast,
 	// and refuses a send that races Shutdown instead of slipping past clientWG.
-	release, shuttingDown := h.TrackSend()
+	release, shuttingDown := h.engine.TrackSend()
 	if shuttingDown {
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Node: nodeID, Error: "server shutting down"}))
 		return

@@ -131,7 +131,7 @@ func TestHTTPSendErrorCallback_SkipsInformationalErrors(t *testing.T) {
 	sub, subOut := newCapturedClient(t, hub)
 	registerSub(hub, sub, key)
 
-	cb := hub.httpSendErrorCallback(key)
+	cb := hub.engine.sendErrorCallback(key)
 	for _, e := range []error{
 		cli.ErrAbortedByUrgent,
 		fmt.Errorf("passthrough: %w", cli.ErrSessionReset), // wrapped — errors.Is, not ==

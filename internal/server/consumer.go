@@ -37,6 +37,42 @@ type HubRouter interface {
 	NotifyIdle()
 }
 
+// sendEngineRouter is the *sendEngine-only subset of *session.Router: the 12
+// methods the send pipeline actually calls. Deliberately not HubRouter — that
+// one is at 15 methods (the consumer-interfaces.md §7.2 rethink threshold) and
+// its godoc admits it carries the transits *SendHandler borrows, so handing it
+// to the engine would just move the borrowing debt to a new holder.
+// *session.Router satisfies it structurally; consumer_contract_test.go guards
+// the binding. Its method set is a superset of SendRouter's, so an engine
+// router can be passed where a SendRouter is expected.
+type sendEngineRouter interface {
+	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
+	SessionFor(key string) *session.ManagedSession
+	ResetAndDiscardOverride(key string)
+	Workspace(chatKey string) string
+	SetWorkspace(chatKey, path string)
+	SetSessionBackend(key, backend string)
+	SetSessionAccessProfile(key, profile string)
+	DefaultWorkspace() string
+	RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string)
+	InterruptSessionSafe(key string) session.InterruptOutcome
+	InterruptSessionViaControl(key string) session.InterruptOutcome
+	NotifyIdle()
+}
+
+// sendNotifier is *sendEngine's only way out to the dashboard, and the
+// hand-off point for Epic K (#2549): when the broadcast facet is carved onto
+// its own type, only the implementer changes and the engine stays put.
+// Deliberately not HubBroadcaster — 4 of its 6 methods are cron / daemon
+// run-lifecycle, and it lacks the two unexported methods needed here.
+// *Hub satisfies it; consumer_contract_test.go guards the binding.
+type sendNotifier interface {
+	BroadcastSessionReady(key string)
+	BroadcastSessionsUpdate()
+	broadcastState(key, state, deathReason string)
+	broadcastSendError(key, msg string)
+}
+
 // ScratchRouter is the *ScratchHandler-only subset of *session.Router
 // (#566). *session.Router satisfies it structurally; tests inject a fake
 // via ScratchHandler.router.

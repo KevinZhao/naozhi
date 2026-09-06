@@ -241,7 +241,11 @@ type SendHandler struct {
 | `router == nil` | `resolveAttachmentWorkspace` 的 fallback 分支（151/159）panic |
 | `notify == nil`（接口） | typed-nil 与 queue 完全对称：`Notify: (*Hub)(nil)` 会让 `!= nil` 读成 true → 首次广播 nil 解引用，且发生在 owner goroutine 里被 `ownerLoop` 的 recover 吞掉 → **消息静默消失** |
 
-`newSendEngine` 因此做三件兜底 + 一条硬失败：`Ctx == nil → context.Background()`（对齐 `wshub.go:236-239` 对 `ParentCtx` 的处理）；`Notify` 做与 queue 同款的具体类型判空后 nil → `nopNotifier{}`；queue 保留 `wshub.go:313-317` 的 typed-nil 装箱段（#377）；**`Router == nil` 直接 panic**（生产接线永远非 nil；早炸胜过在 `GetOrCreate` 深处炸）。
+`newSendEngine` 因此做三件兜底：`Ctx == nil → context.Background()`（对齐 `wshub.go` 对 `ParentCtx` 的处理）；`Notify` 做具体类型判空后 nil → `nopNotifier{}`；queue 保留 typed-nil 装箱段（#377）。
+
+**v2→实现的一处订正**：v2 原写"`Router == nil` 直接 panic"。实测 `wshub_cookie_mac_rotation_test.go:77` 有 `NewHub(HubOptions{})`（连 Router 都不传），panic 会直接打断它。改为**不拒绝 nil Router**：那种 Hub 的 send 路径在 `GetOrCreate` 处失败，与今天 `h.router == nil` 的行为逐字一致。
+
+**另一处实现期才暴露的坑（#377 在新边界重演）**：`sendEngineOpts.Queue` 必须是**具体类型** `*dispatch.MessageQueue`，不能是 `MessageEnqueuer`。写成接口时，`NewHub` 传 `opts.Queue`（具体 nil 指针）会在**进入 `newSendEngine` 之前**就被装箱成非 nil 接口，于是构造函数里的 `o.Queue == nil` 恒假、`e.queue` 拿到 typed nil、`send.go` 的 legacy fallback 门被静默关掉。这正是 #377 的原始故障，只是搬到了新的参数边界上。第一版实现就踩了，被 `TestNewHub_NilQueue_LeavesInterfaceFieldNil` 当场抓住——也是 consumer-interfaces.md §4.5"构造期保留具体类型"的一个具体理由。
 
 **`allowedRoot` 的语义不变**：`"" = 不限制` 是 `server_validate.go:72` 的既有策略（生产上由配置决定），本 RFC 不改。写在这里是为了让后来者不要把某个 nil 判断"简化"成零值。
 

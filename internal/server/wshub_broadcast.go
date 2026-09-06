@@ -297,10 +297,13 @@ func (h *Hub) DroppedMessages() int64 {
 // real MessageQueue and never increment this; once every test fixture does
 // too, sessionSendLegacy can be deleted (#710).
 func (h *Hub) LegacySendInvokes() int64 {
-	if h == nil {
+	// nil receiver / nil engine: package callers may probe a not-yet-built Hub
+	// through an interface, and hand-rolled test hubs skip NewHub. Both read 0
+	// rather than panicking — R-LEGACY-SEND tooling depends on it.
+	if h == nil || h.engine == nil {
 		return 0
 	}
-	return h.legacySendInvokes.Load()
+	return h.engine.legacyInvokes.Load()
 }
 
 // BroadcastDaemonRunStarted emits daemon_run_started. name / runID / trigger
