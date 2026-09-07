@@ -6,62 +6,45 @@ package wireup
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// Compile-time ordinal pins: if cron.* and session.* iota values diverge the
-// difference is non-zero and the uint conversion of a negative constant fails
-// to compile. The init() panic below is a second guard.
+// Compile-time ordinal pins. The adapters below cast between cron.* and
+// session.* by int without a value guard, so a diverging iota would silently
+// miscast (an interrupt reported as "no session", a resumed session reported as
+// new). Each pin subtracts one ordinal from the other and converts to uint: a
+// negative constant fails to compile.
+//
+// The pins are BIDIRECTIONAL (#2552). Previously only cron−session was pinned,
+// which catches cron < session but not the reverse, and an init() panic covered
+// the other direction at boot. Pinning both differences makes the pair an
+// equality assertion at compile time, so the init() is redundant — and a
+// compile error beats a panic in a customer's process. wireup must not carry
+// init() blocks at all: they make boot order implicit, which is what #2552 is
+// unwinding.
 const (
 	// InterruptOutcome (5 values)
-	_ = uint(int(cron.InterruptSent) - int(session.InterruptSent))               // compile-time pin: diverge → negative → uint overflow
-	_ = uint(int(cron.InterruptNoSession) - int(session.InterruptNoSession))     // compile-time pin
-	_ = uint(int(cron.InterruptNoTurn) - int(session.InterruptNoTurn))           // compile-time pin
-	_ = uint(int(cron.InterruptUnsupported) - int(session.InterruptUnsupported)) // compile-time pin
-	_ = uint(int(cron.InterruptError) - int(session.InterruptError))             // compile-time pin
+	_ = uint(int(cron.InterruptSent) - int(session.InterruptSent))
+	_ = uint(int(session.InterruptSent) - int(cron.InterruptSent))
+	_ = uint(int(cron.InterruptNoSession) - int(session.InterruptNoSession))
+	_ = uint(int(session.InterruptNoSession) - int(cron.InterruptNoSession))
+	_ = uint(int(cron.InterruptNoTurn) - int(session.InterruptNoTurn))
+	_ = uint(int(session.InterruptNoTurn) - int(cron.InterruptNoTurn))
+	_ = uint(int(cron.InterruptUnsupported) - int(session.InterruptUnsupported))
+	_ = uint(int(session.InterruptUnsupported) - int(cron.InterruptUnsupported))
+	_ = uint(int(cron.InterruptError) - int(session.InterruptError))
+	_ = uint(int(session.InterruptError) - int(cron.InterruptError))
 	// SessionStatus (3 values)
-	_ = uint(int(cron.SessionExisting) - int(session.SessionExisting)) // compile-time pin
-	_ = uint(int(cron.SessionResumed) - int(session.SessionResumed))   // compile-time pin
-	_ = uint(int(cron.SessionNew) - int(session.SessionNew))           // compile-time pin
+	_ = uint(int(cron.SessionExisting) - int(session.SessionExisting))
+	_ = uint(int(session.SessionExisting) - int(cron.SessionExisting))
+	_ = uint(int(cron.SessionResumed) - int(session.SessionResumed))
+	_ = uint(int(session.SessionResumed) - int(cron.SessionResumed))
+	_ = uint(int(cron.SessionNew) - int(session.SessionNew))
+	_ = uint(int(session.SessionNew) - int(cron.SessionNew))
 )
-
-// init pins cron.InterruptOutcome / cron.SessionStatus ordinals against their
-// session counterparts: the adapters below cast by int without a value guard,
-// so divergence would silently miscast. Panic at boot with the actual ordinals.
-func init() {
-	if int(cron.InterruptSent) != int(session.InterruptSent) ||
-		int(cron.InterruptNoSession) != int(session.InterruptNoSession) ||
-		int(cron.InterruptNoTurn) != int(session.InterruptNoTurn) ||
-		int(cron.InterruptUnsupported) != int(session.InterruptUnsupported) ||
-		int(cron.InterruptError) != int(session.InterruptError) {
-		panic(fmt.Sprintf(
-			"cron.InterruptOutcome ordinals diverged from session.InterruptOutcome: "+
-				"Sent(c=%d s=%d) NoSession(c=%d s=%d) NoTurn(c=%d s=%d) Unsupported(c=%d s=%d) Error(c=%d s=%d) — "+
-				"update wireup/cron_router_adapter.go",
-			cron.InterruptSent, session.InterruptSent,
-			cron.InterruptNoSession, session.InterruptNoSession,
-			cron.InterruptNoTurn, session.InterruptNoTurn,
-			cron.InterruptUnsupported, session.InterruptUnsupported,
-			cron.InterruptError, session.InterruptError,
-		))
-	}
-	if int(cron.SessionExisting) != int(session.SessionExisting) ||
-		int(cron.SessionResumed) != int(session.SessionResumed) ||
-		int(cron.SessionNew) != int(session.SessionNew) {
-		panic(fmt.Sprintf(
-			"cron.SessionStatus ordinals diverged from session.SessionStatus: "+
-				"Existing(c=%d s=%d) Resumed(c=%d s=%d) New(c=%d s=%d) — "+
-				"update wireup/cron_router_adapter.go",
-			cron.SessionExisting, session.SessionExisting,
-			cron.SessionResumed, session.SessionResumed,
-			cron.SessionNew, session.SessionNew,
-		))
-	}
-}
 
 // cronRouterAdapter implements cron.SessionRouter against *session.Router,
 // translating the cron-local types into session-side equivalents.
