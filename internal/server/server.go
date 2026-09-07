@@ -48,12 +48,22 @@ const defaultDedupCapacity = 10000
 // role-grouped dividers below are the cognitive map (#2197).
 type Server struct {
 	// ── HTTP entry ─────────────────────────────────────
-	addr      string          // 读写: server.go
-	mux       *http.ServeMux  // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
-	startedAt time.Time       // 读写: server.go
-	onReady   func()          // 读写: server.go (called after listener is bound)
-	appCtx    context.Context // 读写: server.go, dashboard.go (HubOptions.ParentCtx)
-	logger    *slog.Logger    // 读写: server.go (injected component logger; nil → slog.Default via s.log())
+	addr      string         // 读写: server.go
+	mux       *http.ServeMux // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
+	startedAt time.Time      // 读写: server.go
+	onReady   func()         // 读写: server.go (called after listener is bound)
+	// appCtx is the process-lifetime context every background loop, the Hub
+	// and the upload-store cleaner hang off. Created in buildServer (#2552) so
+	// construction no longer has to wait for Start: Start links its own ctx to
+	// appCancel instead of minting a second context.
+	appCtx    context.Context    // 读写: server.go, routes.go (HubOptions.ParentCtx)
+	appCancel context.CancelFunc // 读写: server.go (Start's linker + the Serve-error path)
+	logger    *slog.Logger       // 读写: server.go (injected component logger; nil → slog.Default via s.log())
+
+	// uploadStore holds pre-uploaded attachments until the matching send
+	// consumes them; shared by the Hub (WS file_ids) and SendHandler (HTTP).
+	// Built in buildDashboard, cleanup loop started in registerDashboard.
+	uploadStore *uploadStore // 读写: build_dashboard.go, routes.go
 
 	// ── core deps ──────────────────────────────────────
 	router     *session.Router  // 读写: server.go, dashboard.go, send.go, takeover.go, consumer.go
@@ -275,6 +285,23 @@ func buildServer(opts ServerOptions) *Server {
 		transcribeH: buildTranscribeHandler(opts),
 	}
 
+	// The process-lifetime context is created HERE, not in Start (#2552).
+	// Everything downstream (Hub, upload-store cleaner, background loops) hangs
+	// off it, so construction no longer has to wait for a Start-time context;
+	// Start links its own ctx into appCancel rather than minting a second one.
+	s.appCtx, s.appCancel = context.WithCancel(context.Background())
+
+	// Scratch pool ahead of the Hub: HubOptions.ScratchPool needs it and it
+	// only depends on the router. The "scratch:" prefix keeps entries off the
+	// sidebar and out of sessions.json; the sweeper goroutine starts in
+	// registerDashboard so an early failure does not leak the ticker.
+	s.scratchPool = session.NewScratchPool(router, session.DefaultScratchMax, session.DefaultScratchTTL)
+
+	// Hub + the handlers that depend on it (build_dashboard.go). After this
+	// line s.hub is non-nil for the Server's whole life, which is what lets the
+	// call sites below drop their `if s.hub != nil` guards.
+	s.buildDashboard()
+
 	// Retired-store load is best-effort (parse error ⇒ empty store); it is
 	// persisted only when StateDir is configured.
 	retiredStore, retiredErr := buildRetiredStoreWithErr(opts.StateDir)
@@ -282,24 +309,20 @@ func buildServer(opts ServerOptions) *Server {
 		slog.Warn("retired store load failed (degrades to last_active sort)", "err", retiredErr)
 	}
 
-	hubBroadcast := func() {
-		if s.hub != nil {
-			s.hub.BroadcastSessionsUpdate()
-		}
-	}
-
 	s.nodeCache = node.NewCacheManager(
 		func() map[string]node.Conn {
 			return s.nodes.NodesSnapshot()
 		},
-		hubBroadcast,
+		s.hub.BroadcastSessionsUpdate,
 	)
 
 	s.discoveryCache = newDiscoveryCache(claudeDir, s.router.ManagedExcludeSets, opts.ProjectManager)
 
-	s.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, hubBroadcast)
-	// ProjectHandlers' baseCtx is wired by registerDashboard once s.hub exists.
+	s.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, s.hub.BroadcastSessionsUpdate)
+	// appCtx exists from buildServer, so this is no longer a Start-time setter.
+	s.discoveryH.SetAppContext(s.appCtx)
 	s.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache)
+	s.projectH.SetBaseContext(s.hub.ctx)
 	agentIDs := agentIDList(agents)
 	s.costH = buildCostHandlers(opts, router)
 	s.sessionH = dashsession.New(dashsession.Deps{
@@ -327,6 +350,8 @@ func buildServer(opts ServerOptions) *Server {
 
 		ProjectStableKeyEnabled: opts.ProjectStableKeyEnabled,
 	})
+	// /api/sessions snapshot enrichment goes through the hub's tailer registry.
+	s.sessionH.SetSnapshotEnricher(s.hub.enrichSnapshot)
 	s.sessionH.InitStaticStats()
 	s.sessionH.WarmHistoryCache()
 	// Router.Reset/Remove hook (LRU eviction deliberately does not fire it),
@@ -351,11 +376,6 @@ func buildServer(opts ServerOptions) *Server {
 		NodeAccess: s.nodes,
 	})
 
-	// Scratch pool shares the router (standard spawn/send/event path); the
-	// "scratch:" prefix keeps entries off the sidebar and out of
-	// sessions.json. Sweeper starts in registerDashboard so an early
-	// failure does not leak the ticker goroutine.
-	s.scratchPool = session.NewScratchPool(router, session.DefaultScratchMax, session.DefaultScratchTTL)
 	// StartupCtx lets SIGTERM during startup abort the --version probe.
 	startupCtx := opts.StartupCtx
 	if startupCtx == nil {
@@ -384,14 +404,8 @@ func buildServer(opts ServerOptions) *Server {
 		configPath:         opts.ConfigPath,
 		platforms:          platNames,
 		platformsStatus:    platformStatusMap(platNames),
-		hubDropped: func() int64 {
-			if s.hub == nil {
-				return 0
-			}
-			return s.hub.DroppedMessages()
-		},
+		hubDropped:         s.hub.DroppedMessages,
 	}
-	// sendH is wired after registerDashboard creates hub
 
 	if opts.ReverseNodeServer != nil {
 		s.reverseNodeServer = opts.ReverseNodeServer
@@ -405,10 +419,8 @@ func buildServer(opts ServerOptions) *Server {
 		opts.ReverseNodeServer.OnDeregister = func(id string) {
 			s.nodes.Remove(id)
 			s.nodeCache.PurgeNode(id)
-			if s.hub != nil {
-				s.hub.PurgeNodeSubscriptions(id)
-				s.hub.BroadcastSessionsUpdate()
-			}
+			s.hub.PurgeNodeSubscriptions(id)
+			s.hub.BroadcastSessionsUpdate()
 		}
 	}
 
@@ -517,19 +529,27 @@ func (s *Server) Start(ctx context.Context) error {
 	// without the auth-only stats /health exposes (#609).
 	s.mux.HandleFunc("GET /livez", s.healthH.handleLivez)
 	s.mux.HandleFunc("GET /readyz", s.healthH.handleReadyz)
-	// serveCtx is the single cancel source for every background loop AND the
-	// shutdown goroutine: SIGTERM cancels it via the parent, a srv.Serve
-	// error cancels it directly. Otherwise the Serve-error path would leave
-	// loops alive and discoveryCache.Wait() blocked forever.
-	serveCtx, serveCancel := context.WithCancel(ctx)
-	defer serveCancel()
+	// s.appCtx (created in buildServer) is the single cancel source for every
+	// background loop AND the shutdown goroutine. Start does not mint a second
+	// context; it links the caller's ctx into appCancel so SIGTERM still
+	// cascades, while a srv.Serve error can cancel it directly. Without this
+	// the Serve-error path would leave loops alive and discoveryCache.Wait()
+	// blocked forever.
+	//
+	// The linker exits on either side, so it cannot outlive the Server.
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.appCancel()
+		case <-s.appCtx.Done():
+		}
+	}()
+	defer s.appCancel()
 
-	s.appCtx = serveCtx
-	s.discoveryH.SetAppContext(serveCtx)
 	s.registerDashboard()
-	s.nodeCache.StartLoop(serveCtx)
-	s.discoveryCache.startLoop(serveCtx)
-	s.startProjectScanLoop(serveCtx)
+	s.nodeCache.StartLoop(s.appCtx)
+	s.discoveryCache.startLoop(s.appCtx)
+	s.startProjectScanLoop(s.appCtx)
 	// Token-protected dashboard over plaintext with no trusted proxy: tokens
 	// and cookies are sniffable. trustedProxy=true asserts TLS terminates upstream.
 	if s.dashboardToken != "" && !s.auth.TrustedProxy && isPlaintextPublicAddr(s.addr) {
@@ -597,7 +617,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	if s.sessionH != nil && s.sessionH.RetiredStorePresent() {
-		go s.runRetiredStoreFlusher(serveCtx)
+		go s.runRetiredStoreFlusher(s.appCtx)
 	}
 
 	// Channel allocated at construction so ShutdownComplete() may be read
@@ -605,13 +625,11 @@ func (s *Server) Start(ctx context.Context) error {
 	shutdownComplete := s.shutdownComplete
 	shutdownClosed = true
 	go func() {
-		<-serveCtx.Done()
+		<-s.appCtx.Done()
 		slog.Info("shutting down server")
 
-		// Shutdown WebSocket hub
-		if s.hub != nil {
-			s.hub.Shutdown()
-		}
+		// Shutdown WebSocket hub (non-nil since buildServer, #2552)
+		s.hub.Shutdown()
 
 		if s.scratchPool != nil {
 			s.scratchPool.Stop()
@@ -653,16 +671,16 @@ func (s *Server) Start(ctx context.Context) error {
 
 	err = srv.Serve(ln)
 	// On a non-shutdown Serve error the parent ctx may never cancel; cancel
-	// serveCtx so the shutdown goroutine drains and closes shutdownComplete.
+	// appCtx so the shutdown goroutine drains and closes shutdownComplete.
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		serveCancel()
+		s.appCancel()
 		<-shutdownComplete
 		return err
 	}
 	// Wait for the shutdown goroutine to finish draining connections.
 	select {
 	case <-shutdownComplete:
-	case <-serveCtx.Done():
+	case <-s.appCtx.Done():
 		<-shutdownComplete
 	}
 	return err
