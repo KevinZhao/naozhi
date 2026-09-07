@@ -187,22 +187,16 @@ func (a *Handlers) IsAuthenticated(r *http.Request) bool {
 
 // RequireAuth is an HTTP middleware that rejects unauthenticated requests.
 //
-// State-changing methods additionally pass through a same-origin gate
-// (SameOriginOK) so a cross-origin attacker on a sibling subdomain cannot ride
-// a victim's auth cookie through a hidden `fetch(..., {credentials:'include'})`.
-// Safe methods (GET/HEAD/OPTIONS) skip the gate so bookmarks and preflight
-// still work; callers with no Origin / Referer (curl, server scripts) pass —
-// they can't carry a browser's session cookies.
+// It does NOT gate cross-origin writes any more; that moved to
+// RequireSameOrigin (csrf.go) in #2554 so the API chain names its two checks
+// separately. Every /api/ route gets both because the server composes them once
+// in apiChain and mountRoutes is the only thing that reaches the mux —
+// TestAPICrossOriginRejected verifies that on the live mux, per route.
+//
+// Anything wiring RequireAuth by itself is asking for auth WITHOUT the origin
+// gate, which for a mutating route is a CSRF hole. Use the composed chain.
 func (a *Handlers) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !IsSafeMethod(r.Method) && !SameOriginOK(r, a.TrustedProxy) {
-			slog.Warn("rejecting cross-origin mutating request",
-				"method", r.Method, "path", osutil.SanitizeForLog(r.URL.Path, 256),
-				"origin", osutil.SanitizeForLog(r.Header.Get("Origin"), 256),
-				"host", osutil.SanitizeForLog(r.Host, 256))
-			http.Error(w, "cross-origin request refused", http.StatusForbidden)
-			return
-		}
 		if !a.IsAuthenticated(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

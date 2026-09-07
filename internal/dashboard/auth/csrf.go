@@ -1,10 +1,42 @@
 package auth
 
 import (
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// RequireSameOrigin refuses cross-origin mutating requests: a sibling-subdomain
+// attacker must not be able to ride a victim's auth cookie through a hidden
+// fetch(..., {credentials:'include'}). Safe methods skip the gate so bookmarks
+// and CORS preflight keep working, and callers with no Origin / Referer (curl,
+// server scripts) pass — they carry no browser session.
+//
+// This was a branch inside RequireAuth until #2554. Splitting it makes the API
+// chain readable (auth and CSRF are two named links, not one function that
+// happens to do both), at the cost of making "auth without CSRF" expressible.
+// What rules that out is TestAPICrossOriginRejected, which drives every mutating
+// /api/ route in the routes golden through the real mux with a foreign Origin —
+// a behavioural check rather than a source-level "nobody calls RequireAuth
+// directly" pin.
+func RequireSameOrigin(trustedProxy bool) func(http.HandlerFunc) http.HandlerFunc {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !IsSafeMethod(r.Method) && !SameOriginOK(r, trustedProxy) {
+				slog.Warn("rejecting cross-origin mutating request",
+					"method", r.Method, "path", osutil.SanitizeForLog(r.URL.Path, 256),
+					"origin", osutil.SanitizeForLog(r.Header.Get("Origin"), 256),
+					"host", osutil.SanitizeForLog(r.Host, 256))
+				http.Error(w, "cross-origin request refused", http.StatusForbidden)
+				return
+			}
+			next(w, r)
+		}
+	}
+}
 
 // IsSafeMethod reports whether the HTTP method is safe per RFC 7231 §4.2.1.
 // The CSRF Origin gate applies only to mutating methods so GET prefetches,

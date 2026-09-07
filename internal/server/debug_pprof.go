@@ -86,9 +86,9 @@ func (s *Server) registerPprof() {
 		}
 	})
 
-	s.mux.HandleFunc("GET /api/debug/pprof/", s.auth.RequireAuth(handler))
+	s.mux.HandleFunc("GET /api/debug/pprof/", s.apiChain()(handler))
 	// Bare path too, so a forgotten slash gets a redirect rather than 404.
-	s.mux.HandleFunc("GET /api/debug/pprof", s.auth.RequireAuth(handler))
+	s.mux.HandleFunc("GET /api/debug/pprof", s.apiChain()(handler))
 }
 
 // isLoopbackRemote reports whether a net/http Request.RemoteAddr is a

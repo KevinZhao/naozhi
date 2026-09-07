@@ -315,11 +315,19 @@ func handlerTypeOf(e ast.Expr) string {
 				return t
 			}
 		}
-		// s.apiChain()(s.auth.HandleLogout) — the chain is a value now (#2554),
-		// so the wrapper is a call on a call. Resolve the wrapped handler.
+		// s.apiChain()(...) — the chain is a value now (#2554), so the wrapper is
+		// a call on a call. Resolve the wrapped handler when it names one
+		// (s.auth.HandleLogout → *AuthHandlers); fall back to *AuthHandlers when
+		// it does not, which keeps the pre-#2554 answer for debug_pprof /
+		// debug_expvar. Those two pass closure-typed `handler` vars this
+		// lightweight walker cannot type, and the old s.auth.requireAuth(handler)
+		// shape reported the wrapper for exactly that reason.
 		if wrapped, ok := call.Fun.(*ast.CallExpr); ok {
 			if sel, ok := wrapped.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "apiChain" {
-				return handlerTypeOf(call.Args[0])
+				if t := handlerTypeOf(call.Args[0]); !strings.HasPrefix(t, "<") {
+					return t
+				}
+				return "*AuthHandlers"
 			}
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -312,11 +313,20 @@ func (s *Server) mountRoutes(routes []httputil.Route) {
 	}
 }
 
-// apiChain is the middleware every authenticated /api/ route passes through.
-// Named and returned as one value so there is a single answer to "what guards
-// the API", rather than a RequireAuth reference threaded through six helpers.
+// apiChain is the middleware every authenticated /api/ route passes through:
+// the same-origin gate, then authentication. Two named links rather than one
+// RequireAuth that happened to do both (#2554), and one value so there is a
+// single answer to "what guards the API".
+//
+// Order matters. Origin first means a cross-origin write is refused without
+// consulting credentials, so an attacker learns nothing about whether the
+// victim's cookie is valid, and the sliding cookie renewal inside RequireAuth
+// never runs for a request that is about to be refused.
 func (s *Server) apiChain() httputil.Middleware {
-	return s.auth.RequireAuth
+	sameOrigin := auth.RequireSameOrigin(s.auth.TrustedProxy)
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return sameOrigin(s.auth.RequireAuth(next))
+	}
 }
 
 // Routes returns the send/upload/attachment surface. SendHandler lives in this
