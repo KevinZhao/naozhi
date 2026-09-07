@@ -109,30 +109,30 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	// Dashboard JS is auth-gated: it embeds the API endpoint list + client
 	// schema (recon surface); the login page loads no /static/ JS (#1328).
 	s.mux.HandleFunc("GET /static/css/{file}", auth(handleDashboardCSS))
-	s.mux.HandleFunc("GET /static/contract.js", auth(handleContractJS))
-	s.mux.HandleFunc("GET /static/nz_util.js", auth(handleNzUtilJS))
-	s.mux.HandleFunc("GET /static/render_md.js", auth(handleRenderMdJS))
-	s.mux.HandleFunc("GET /static/self_update.js", auth(handleSelfUpdateJS))
-	s.mux.HandleFunc("GET /static/voice.js", auth(handleVoiceJS))
-	s.mux.HandleFunc("GET /static/session_header.js", auth(handleSessionHeaderJS))
-	s.mux.HandleFunc("GET /static/composer_files.js", auth(handleComposerFilesJS))
-	s.mux.HandleFunc("GET /static/mobile_nav.js", auth(handleMobileNavJS))
-	s.mux.HandleFunc("GET /static/split_view.js", auth(handleSplitViewJS))
-	s.mux.HandleFunc("GET /static/system_view.js", auth(handleSystemViewJS))
-	s.mux.HandleFunc("GET /static/running_banner.js", auth(handleRunningBannerJS))
-	s.mux.HandleFunc("GET /static/file_refs.js", auth(handleFileRefsJS))
-	s.mux.HandleFunc("GET /static/utilities.js", auth(handleUtilitiesJS))
-	s.mux.HandleFunc("GET /static/discovery.js", auth(handleDiscoveryJS))
-	s.mux.HandleFunc("GET /static/tuning.js", auth(handleTuningJS))
-	s.mux.HandleFunc("GET /static/msg_nav.js", auth(handleMsgNavJS))
-	s.mux.HandleFunc("GET /static/sidebar_project.js", auth(handleSidebarProjectJS))
-	s.mux.HandleFunc("GET /static/auth_modal.js", auth(handleAuthModalJS))
-	s.mux.HandleFunc("GET /static/send_message.js", auth(handleSendMessageJS))
-	s.mux.HandleFunc("GET /static/dashboard.js", auth(handleDashboardJS))
-	s.mux.HandleFunc("GET /static/cron_view.js", auth(handleCronViewJS))
-	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))
-	s.mux.HandleFunc("GET /static/asset_browser.js", auth(handleAssetBrowserJS))
-	s.mux.HandleFunc("GET /static/files_view.js", auth(handleFilesViewJS))
+	s.mux.HandleFunc("GET /static/contract.js", auth(serveStaticJS("contract.js")))
+	s.mux.HandleFunc("GET /static/nz_util.js", auth(serveStaticJS("nz_util.js")))
+	s.mux.HandleFunc("GET /static/render_md.js", auth(serveStaticJS("render_md.js")))
+	s.mux.HandleFunc("GET /static/self_update.js", auth(serveStaticJS("self_update.js")))
+	s.mux.HandleFunc("GET /static/voice.js", auth(serveStaticJS("voice.js")))
+	s.mux.HandleFunc("GET /static/session_header.js", auth(serveStaticJS("session_header.js")))
+	s.mux.HandleFunc("GET /static/composer_files.js", auth(serveStaticJS("composer_files.js")))
+	s.mux.HandleFunc("GET /static/mobile_nav.js", auth(serveStaticJS("mobile_nav.js")))
+	s.mux.HandleFunc("GET /static/split_view.js", auth(serveStaticJS("split_view.js")))
+	s.mux.HandleFunc("GET /static/system_view.js", auth(serveStaticJS("system_view.js")))
+	s.mux.HandleFunc("GET /static/running_banner.js", auth(serveStaticJS("running_banner.js")))
+	s.mux.HandleFunc("GET /static/file_refs.js", auth(serveStaticJS("file_refs.js")))
+	s.mux.HandleFunc("GET /static/utilities.js", auth(serveStaticJS("utilities.js")))
+	s.mux.HandleFunc("GET /static/discovery.js", auth(serveStaticJS("discovery.js")))
+	s.mux.HandleFunc("GET /static/tuning.js", auth(serveStaticJS("tuning.js")))
+	s.mux.HandleFunc("GET /static/msg_nav.js", auth(serveStaticJS("msg_nav.js")))
+	s.mux.HandleFunc("GET /static/sidebar_project.js", auth(serveStaticJS("sidebar_project.js")))
+	s.mux.HandleFunc("GET /static/auth_modal.js", auth(serveStaticJS("auth_modal.js")))
+	s.mux.HandleFunc("GET /static/send_message.js", auth(serveStaticJS("send_message.js")))
+	s.mux.HandleFunc("GET /static/dashboard.js", auth(serveStaticJS("dashboard.js")))
+	s.mux.HandleFunc("GET /static/cron_view.js", auth(serveStaticJS("cron_view.js")))
+	s.mux.HandleFunc("GET /static/agent_view.js", auth(serveStaticJS("agent_view.js")))
+	s.mux.HandleFunc("GET /static/asset_browser.js", auth(serveStaticJS("asset_browser.js")))
+	s.mux.HandleFunc("GET /static/files_view.js", auth(serveStaticJS("files_view.js")))
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
@@ -252,111 +252,6 @@ func handleSW(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("sw write", "err", err)
 	}
-}
-
-func handleDashboardJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("dashboard.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "dashboard.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "dashboard.js")
-}
-
-// handleContractJS serves static/contract.js (generated backend contract,
-// loaded before every other script so NZ_CONTRACT exists at parse time).
-func handleContractJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("contract.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "contract.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "contract.js")
-}
-
-// handleNzUtilJS serves static/nz_util.js (shared utility layer loaded before dashboard.js).
-func handleNzUtilJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("nz_util.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "nz_util.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "nz_util.js")
-}
-
-// handleCronViewJS serves static/cron_view.js (cron view, loaded after dashboard.js).
-func handleCronViewJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("cron_view.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "cron_view.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "cron_view.js")
-}
-
-// handleAgentViewJS serves static/agent_view.js (agent-team view module).
-func handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("agent_view.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "agent_view.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "agent_view.js")
-}
-
-// handleAssetBrowserJS serves static/asset_browser.js (docs/rfc/cc-asset-browser.md).
-func handleAssetBrowserJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("asset_browser.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "asset_browser.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "asset_browser.js")
-}
-
-// handleFilesViewJS serves static/files_view.js (docs/rfc/workspace-file-browser.md).
-func handleFilesViewJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("files_view.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "files_view.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "files_view.js")
 }
 
 // buildSessionOpts resolves agent config and planner overrides for a session

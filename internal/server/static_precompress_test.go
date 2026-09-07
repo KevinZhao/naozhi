@@ -150,7 +150,9 @@ func TestStaticAsset_PrecompressedBeatsLevel1(t *testing.T) {
 // the middleware), and an identity client gets raw bytes.
 func TestHandleDashboardJS_ServesPrecompressedThroughMiddleware(t *testing.T) {
 	t.Parallel()
-	h := gzipMiddleware(http.HandlerFunc(handleDashboardJS))
+	// #2554 collapsed the 24 per-module handlers into serveStaticJS; the
+	// gzip interaction is identical for any of them.
+	h := gzipMiddleware(serveStaticJS("dashboard.js"))
 	a := staticAssets["dashboard.js"]
 
 	// gzip-capable client → precompressed level-9 body.
