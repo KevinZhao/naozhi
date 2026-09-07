@@ -1,7 +1,6 @@
 package server
 
 import (
-	"os"
 	"regexp"
 	"testing"
 )
@@ -27,10 +26,7 @@ import (
 func TestResubscribeEvents_OldUnsubReleasedOutsideMu(t *testing.T) {
 	// R243-ARCH-2 split: resubscribeEvents and the H8 anchor comment moved
 	// to wshub_eventpush.go alongside eventPushLoop. Read that file.
-	src, err := os.ReadFile("wshub_eventpush.go")
-	if err != nil {
-		t.Fatalf("read wshub_eventpush.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
 	text := string(src)
 
 	// Invariant 1: the swap arm MUST follow the documented

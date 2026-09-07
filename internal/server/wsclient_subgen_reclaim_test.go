@@ -1,7 +1,6 @@
 package server
 
 import (
-	"os"
 	"regexp"
 	"testing"
 	"time"
@@ -216,10 +215,7 @@ func TestSubGenReclaim_SourceAnchor(t *testing.T) {
 	t.Parallel()
 	// R243-ARCH-2 split: handleUnsubscribe and completeSubscribe moved to
 	// wshub_subscribe.go alongside the other subscribe handlers.
-	src, err := os.ReadFile("wshub_subscribe.go")
-	if err != nil {
-		t.Fatalf("read wshub_subscribe.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
 
 	// handleUnsubscribe body must contain markSubGenReleasable + sweep.
 	reHandle := regexp.MustCompile(`(?ms)^func \(h \*Hub\) handleUnsubscribe\(.*?\n\}\n`)

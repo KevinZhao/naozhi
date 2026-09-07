@@ -1,9 +1,6 @@
 package server
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -72,22 +69,13 @@ func dropMarshalCacheDecision(enforceCaps bool, count int) bool {
 // without enforceCaps would skip drops on hand-rolled fixtures.
 func TestDropMarshalCache_SourcePin(t *testing.T) {
 	t.Parallel()
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	dir := filepath.Dir(self)
-	src, err := os.ReadFile(filepath.Join(dir, "wshub_subscribe.go"))
-	if err != nil {
-		t.Fatalf("read wshub_subscribe.go: %v", err)
-	}
-	body := string(src)
+	body := packageGoSource(t)
 
 	// Anchor the exact production expression so the in-test mirror
 	// (dropMarshalCacheDecision) cannot drift away from production.
 	const want = "dropMarshalCache = !h.enforceCaps || h.subscriberCount[key] == 0"
 	if !strings.Contains(body, want) {
-		t.Errorf("wshub_subscribe.go no longer contains the dropMarshalCache predicate %q — "+
+		t.Errorf("the package no longer contains the dropMarshalCache predicate %q — "+
 			"if you intentionally changed the shape, update dropMarshalCacheDecision in this "+
 			"test file in lockstep so the decision-table assertions still pin the live behaviour.",
 			want)

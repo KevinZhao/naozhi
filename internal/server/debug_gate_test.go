@@ -1,7 +1,6 @@
 package server
 
 import (
-	"os"
 	"regexp"
 	"testing"
 )
@@ -24,10 +23,7 @@ import (
 func TestPprofExpvarGatedByDebugMode(t *testing.T) {
 	t.Parallel()
 
-	data, err := os.ReadFile("routes.go")
-	if err != nil {
-		t.Fatalf("read routes.go: %v", err)
-	}
+	data := []byte(packageGoSource(t))
 	src := string(data)
 
 	// Match `if s.debugMode {` followed by both registerPprof() and

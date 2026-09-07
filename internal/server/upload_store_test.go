@@ -2,7 +2,6 @@ package server
 
 import (
 	"errors"
-	"os"
 	"strings"
 	"testing"
 
@@ -310,10 +309,7 @@ func TestUploadStoreTakeAll_EmptySliceReturnsNilNoErr(t *testing.T) {
 // branch. Cheap insurance against a future refactor that re-introduces
 // the panic out of "this can't fail" thinking.
 func TestUploadStorePut_NoPanicOnRandFailure_SourceContract(t *testing.T) {
-	src, err := os.ReadFile("upload_store.go")
-	if err != nil {
-		t.Fatalf("read upload_store.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
 	body := string(src)
 	// Locate the Put function body.
 	startIdx := strings.Index(body, "func (s *uploadStore) Put(")
