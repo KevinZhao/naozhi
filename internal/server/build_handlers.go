@@ -133,8 +133,10 @@ func buildDiscoveryHandlers(
 	nodeAccess *nodeRegistry,
 	nodeCache *node.CacheManager,
 	broadcast func(),
+	appCtx context.Context,
 ) *dashdiscovery.Handlers {
 	return dashdiscovery.New(dashdiscovery.Deps{
+		AppCtx:        appCtx,
 		Cache:         cache,
 		NodeAccess:    nodeAccess,
 		NodeCache:     nodeCache,
@@ -164,14 +166,16 @@ func (a routerTakeoverAdapter) Takeover(ctx context.Context, key, sessionID, cwd
 // paths touch disk on every call: files/exists 10/min burst 10 (same DoS
 // class as upload); PUT config 5/s burst 5 (persists to disk + WS fan-out).
 // The Hub does not exist yet at this point; registerDashboard wires the
-// base context later via SetBaseContext (#650).
+// base context at construction via Deps.BaseCtx (#650, #2552).
 func buildProjectHandlers(
 	opts ServerOptions,
 	resolver *session.KeyResolver,
 	nodeAccess *nodeRegistry,
 	nodeCache *node.CacheManager,
+	baseCtx context.Context,
 ) *dashproject.Handlers {
 	return dashproject.New(dashproject.Deps{
+		BaseCtx:            baseCtx,
 		ProjectMgr:         opts.ProjectManager,
 		Router:             opts.Router,
 		Resolver:           resolver,

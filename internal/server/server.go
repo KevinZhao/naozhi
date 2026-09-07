@@ -318,40 +318,37 @@ func buildServer(opts ServerOptions) *Server {
 
 	s.discoveryCache = newDiscoveryCache(claudeDir, s.router.ManagedExcludeSets, opts.ProjectManager)
 
-	s.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, s.hub.BroadcastSessionsUpdate)
-	// appCtx exists from buildServer, so this is no longer a Start-time setter.
-	s.discoveryH.SetAppContext(s.appCtx)
-	s.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache)
-	s.projectH.SetBaseContext(s.hub.ctx)
+	s.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, s.hub.BroadcastSessionsUpdate, s.appCtx)
+	s.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache, s.hub.ctx)
 	agentIDs := agentIDList(agents)
 	s.costH = buildCostHandlers(opts, router)
 	s.sessionH = dashsession.New(dashsession.Deps{
-		Router:        router,
-		ProjectMgr:    opts.ProjectManager,
-		Scheduler:     scheduler,
-		CronSessions:  scheduler,
-		SysWorkDir:    opts.SysWorkDir,
-		ClaudeDir:     claudeDir,
-		AllowedRoot:   opts.AllowedRoot,
-		Agents:        agents,
-		AgentIDs:      agentIDs,
-		NodeAccess:    s.nodes,
-		NodeCache:     s.nodeCache,
-		StartedAt:     s.startedAt,
-		BackendTag:    tag,
-		WorkspaceID:   opts.WorkspaceID,
-		WorkspaceName: opts.WorkspaceName,
-		VersionTag:    opts.Version,
-		WatchdogNoOut: s.watchdog.noOutPtr(),
-		WatchdogTotal: s.watchdog.totalPtr(),
-		RetiredStore:  retiredStore,
-		ValidateWS:    validateWorkspace,
-		SystemInfoFn:  systemInfo,
+		// /api/sessions snapshot enrichment goes through the hub's tailer registry.
+		SnapshotEnricher: s.hub.enrichSnapshot,
+		Router:           router,
+		ProjectMgr:       opts.ProjectManager,
+		Scheduler:        scheduler,
+		CronSessions:     scheduler,
+		SysWorkDir:       opts.SysWorkDir,
+		ClaudeDir:        claudeDir,
+		AllowedRoot:      opts.AllowedRoot,
+		Agents:           agents,
+		AgentIDs:         agentIDs,
+		NodeAccess:       s.nodes,
+		NodeCache:        s.nodeCache,
+		StartedAt:        s.startedAt,
+		BackendTag:       tag,
+		WorkspaceID:      opts.WorkspaceID,
+		WorkspaceName:    opts.WorkspaceName,
+		VersionTag:       opts.Version,
+		WatchdogNoOut:    s.watchdog.noOutPtr(),
+		WatchdogTotal:    s.watchdog.totalPtr(),
+		RetiredStore:     retiredStore,
+		ValidateWS:       validateWorkspace,
+		SystemInfoFn:     systemInfo,
 
 		ProjectStableKeyEnabled: opts.ProjectStableKeyEnabled,
 	})
-	// /api/sessions snapshot enrichment goes through the hub's tailer registry.
-	s.sessionH.SetSnapshotEnricher(s.hub.enrichSnapshot)
 	s.sessionH.InitStaticStats()
 	s.sessionH.WarmHistoryCache()
 	// Router.Reset/Remove hook (LRU eviction deliberately does not fire it),
@@ -381,9 +378,8 @@ func buildServer(opts ServerOptions) *Server {
 	if startupCtx == nil {
 		startupCtx = context.Background()
 	}
-	s.cliH = cli.NewCLIBackendsHandlerCtx(startupCtx, router)
 	// /api/cli/backends?node=<id> proxies the manifest to a remote node.
-	s.cliH.SetNodeAccess(s.nodes)
+	s.cliH = cli.NewCLIBackendsHandlerCtx(startupCtx, router, s.nodes)
 	platNames := platformNameSet(platforms)
 	s.healthH = &HealthHandler{
 		router:             router,

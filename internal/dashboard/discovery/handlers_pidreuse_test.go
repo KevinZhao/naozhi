@@ -40,7 +40,7 @@ func TestHandleClose_PidReuseReturns409(t *testing.T) {
 		// -> simulates PID reuse -> SendTermVerified must refuse + 409.
 		ProcStartTime: func(int) (uint64, error) { return 999, nil },
 	})
-	h.SetAppContext(context.Background())
+	h.appCtx = context.Background()
 
 	body, _ := json.Marshal(map[string]any{
 		"pid":             pid,
@@ -85,7 +85,7 @@ func TestHandleClose_MatchingIdentitySucceeds(t *testing.T) {
 		ClaudeDir:     t.TempDir(),
 		ProcStartTime: func(int) (uint64, error) { return 100, nil }, // matches
 	})
-	h.SetAppContext(context.Background())
+	h.appCtx = context.Background()
 
 	body, _ := json.Marshal(map[string]any{
 		"pid":             pid,

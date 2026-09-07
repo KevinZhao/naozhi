@@ -37,13 +37,18 @@ func TestNewHub_SchedulerAndScratchPoolFromOptions(t *testing.T) {
 	}
 }
 
-// TestHub_NoSchedulerOrScratchPoolSetters is a source-level guardrail that the
-// SetScheduler / SetScratchPool setters stay deleted so a future change cannot
-// silently reintroduce the call-order-vs-Start race they caused (#431). The
-// upload-store setter is intentionally retained (its cleanup loop binds to the
-// app-lifecycle ctx created after the Hub) and is asserted present so the test
-// also documents why that one survives.
-func TestHub_NoSchedulerOrScratchPoolSetters(t *testing.T) {
+// TestHub_NoPostConstructionSetters is a source-level guardrail that the
+// SetScheduler / SetScratchPool / SetUploadStore setters stay deleted so a
+// future change cannot silently reintroduce the call-order-vs-Start race they
+// caused (#431).
+//
+// SetUploadStore used to be an intentional exception here: the store's cleanup
+// loop had to bind to an app-lifecycle ctx that only existed AFTER the Hub, so
+// the store could not be passed to NewHub. #2552 moved appCtx into buildServer,
+// which removed the reason for the exception — the store is now built one line
+// before the Hub and passed through HubOptions.UploadStore. So the exception
+// became a plain #431 violation and the setter is gone.
+func TestHub_NoPostConstructionSetters(t *testing.T) {
 	t.Parallel()
 
 	_, self, _, ok := runtime.Caller(0)
@@ -60,13 +65,16 @@ func TestHub_NoSchedulerOrScratchPoolSetters(t *testing.T) {
 	for _, banned := range []string{
 		"func (h *Hub) SetScheduler(",
 		"func (h *Hub) SetScratchPool(",
+		"func (h *Hub) SetUploadStore(",
 	} {
 		if strings.Contains(body, banned) {
 			t.Errorf("wshub.go reintroduced %q — these deps must be wired via HubOptions, not a post-construction setter (#431)", banned)
 		}
 	}
 
-	if !strings.Contains(body, "func (h *Hub) SetUploadStore(") {
-		t.Error("wshub.go: SetUploadStore must remain (its cleanup loop binds to the post-Hub app ctx, R215-ARCH-P2-3 #579)")
+	// The store must arrive through HubOptions instead.
+	if !strings.Contains(body, "UploadStore *uploadStore") {
+		t.Error("wshub.go: HubOptions must carry UploadStore — without it the only way to wire the store " +
+			"is a post-construction setter, i.e. the #431 race this test bans")
 	}
 }
