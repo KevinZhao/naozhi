@@ -73,17 +73,18 @@ file_size:
       limit: 800
       until_phase: "5"        # Phase 5 内部拆分
     - path: internal/server/server.go
-      current: 708                          # 2026-09-05 +3（#2538：config fingerprint 三行接线进 HealthHandler）
+      current: 726                          # 2026-09-07 +18（#2552 E2-a：appCtx/appCancel 字段 + uploadStore 字段 + 组合根前移的三段说明性注释）；2026-09-05 +3（#2538：config fingerprint 三行接线进 HealthHandler）
       limit: 500
-      until_phase: "5"
+      until_phase: "E3"       # #2553（Server 18 个 handler 指针收进 handlerSet + ServerOptions 拆 4 子 option）。原挂 "5"：ADR-001 后该 phase 不会到来
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线
-      current: 742                          # 2026-09-07 重采（#2551 E1-c）：记 1381 实测 742，差 639 行 —— 期间 R243-ARCH-2 等拆分从未回写 baseline
+      current: 748                          # 2026-09-07 +6（#2552 E2-a：HubOptions.UploadStore + 其理由注释，取代 SetUploadStore 后注入）；同日重采（#2551 E1-c）：记 1381 实测 742，差 639 行 —— 期间 R243-ARCH-2 等拆分从未回写 baseline
       limit: 500
       until_phase: "K"        # Epic K #2549（Hub 拆 Subscriber/Broadcast 子对象）。原挂 4b：ADR-001 判定暂缓，该 phase 不会到来。带引号：until_phase 是 string，裸数字会让 yaml.Unmarshal 失败 → main.go os.Exit(2)
-    - path: internal/server/routes.go         # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 553                          # 2026-09-07 +17（#2558 D4 的 14 条模块路由 + #2559 的 /static/css/{file} 路由；handler 体在 static_js_handlers.go）
-      limit: 500
-      until_phase: "5"
+    # internal/server/routes.go: entry removed 2026-09-07（#2552 E2-a）—— 构造段
+    # 移到 build_dashboard.go 后降到 472 行，≤ 500 上限；按 rule 5(b) 清理。
+    # 它此前一路涨到 553（#2558 的 14 条模块路由 + #2559 的 /static/css/{file}）。
+    # 删掉条目意味着再涨过 500 立刻卡 PR，这正是想要的效果。
+    # Closes-exemption: internal/server/routes.go
     # internal/server/agent_tailer.go: entry removed 2026-07-31 — tailerRegistry
     # 抽离 (Phase 4c-prep) 后降到 356 行，≤ 500 上限；按 rule 5(b) 语义
     # （文件存在但行数 ≤ limit → 条目应删除）清理豁免债。

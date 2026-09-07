@@ -214,6 +214,11 @@ type HubOptions struct {
 	// ParentCtx, when set, parents h.ctx so an application cancel tears down
 	// send/push goroutines even if Shutdown() is never called. Nil ⇒ Background.
 	ParentCtx context.Context
+	// UploadStore resolves WS-sent file_ids. Wired here rather than through a
+	// SetUploadStore call after Start (#2552): the store is built one line
+	// earlier in buildServer, so there is no window where a Hub is serving
+	// upgrades with an unwired store.
+	UploadStore *uploadStore
 }
 
 // NewHub creates a new WebSocket hub (LIFECYCLE-METHOD: writes every field
@@ -258,6 +263,7 @@ func NewHub(opts HubOptions) *Hub {
 		wsAuthLimiter:    opts.WSAuthLimiter,
 		wsUpgradeLimiter: opts.WSUpgradeLimiter,
 		auth:             opts.Auth,
+		uploadStore:      opts.UploadStore,
 		ctx:              ctx,
 		cancel:           cancel,
 	}

@@ -4,12 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
-	"golang.org/x/time/rate"
-
-	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -42,92 +37,19 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 // errEmptyJSONBody re-exports httputil.ErrEmptyJSONBody for errors.Is call sites.
 var errEmptyJSONBody = httputil.ErrEmptyJSONBody
 
+// registerDashboard starts the dashboard's background goroutines and registers
+// its routes. Construction moved to buildDashboard in #2552 — nothing here may
+// build a dependency, so `s.hub == nil` is no longer reachable and the
+// "#431 setter-vs-Start ordering window" it used to warn about is gone.
 func (s *Server) registerDashboard() {
-	s.hub = NewHub(HubOptions{
-		Router:    s.router,
-		Agents:    s.agents,
-		AgentCmds: s.agentCommands,
-		DashToken: s.dashboardToken,
-		// Live getter, not a snapshot: RotateCookieGen must invalidate WS
-		// upgrades on the next handshake (#1398).
-		CookieMACFn: s.auth.CookieMAC,
-		Guard:       s.sessionGuard,
-		Queue:       s.msgQueue,
-		Nodes:       s.nodes,
-		ProjectMgr:  s.projectMgr,
-		Resolver:    s.resolver,
-		// Wired at construction (both built in New) so there is no
-		// setter-vs-Start ordering window (#431).
-		Scheduler:        s.scheduler,
-		ScratchPool:      s.scratchPool,
-		AllowedRoot:      s.allowedRoot,
-		TrustedProxy:     s.auth.TrustedProxy,
-		WSAuthLimiter:    s.auth.LoginAllow,
-		WSUpgradeLimiter: s.auth.WSUpgradeAllow,
-		// HandleUpgrade mints nz_anon for uploadOwner and refuses the
-		// upgrade if minting fails; never falls back to clientIP (#1326).
-		Auth: s.auth,
-		// Parent cancel cascades to Hub goroutines even without Shutdown();
-		// nil (tests bypassing Start) falls back to Background in NewHub.
-		ParentCtx: s.appCtx,
-	})
-
-	// /api/sessions snapshot enrichment goes through the hub's tailer registry.
-	if s.sessionH != nil {
-		s.sessionH.SetSnapshotEnricher(s.hub.enrichSnapshot)
-	}
-
-	// projectH is constructed before the hub in New(); its base ctx is set here.
-	if s.projectH != nil {
-		s.projectH.SetBaseContext(s.hub.ctx)
-	}
-
 	// The upload-store cleanup loop is process-lifetime (appCtx), not
 	// Hub-lifetime: a Hub hot-reload must not cancel it and leak temp files.
-	// The hub.ctx fallback only covers tests that bypass Start (#579).
-	uploads := newUploadStore()
-	cleanupCtx := s.appCtx
-	if cleanupCtx == nil {
-		cleanupCtx = s.hub.ctx
-	}
-	uploads.StartCleanup(cleanupCtx)
-	s.hub.SetUploadStore(uploads)
-	s.sendH = &SendHandler{
-		nodeAccess: s.nodes,
-		engine:     s.hub.engine,
-		// SendRouter consumer view; reads never go via the engine's HubRouter (#566).
-		router:        s.hub.router,
-		uploadStore:   uploads,
-		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.TrustedProxy), // 10 uploads/min per IP
-		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.TrustedProxy), // 30 sends/min per IP (burst 30)
-		auth:          s.auth,
-		trustedProxy:  s.auth.TrustedProxy,
-		orient:        s.orient,
-	}
+	s.uploadStore.StartCleanup(s.appCtx)
 
-	// Scratch (ephemeral aside) API: pool built in New(); start sweeper + mount.
+	// Sweeper starts here rather than in buildDashboard so a construction
+	// failure cannot leak the ticker goroutine.
 	if s.scratchPool != nil {
 		s.scratchPool.StartSweeper()
-		s.scratchH = scratch.New(scratch.Deps{
-			Broadcaster: s.hub,
-			Router:      s.hub.router,
-			Pool:        s.scratchPool,
-			OpenLimit:   newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy),
-			Agents:      s.agents,
-		})
-	}
-
-	// Push session list changes to WS clients
-	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
-
-	// cron and sysession share one runtelemetry.Broadcaster; per-subsystem
-	// WS payload selection happens inside hubBroadcaster.
-	telemetry := newHubBroadcaster(s.hub)
-	if s.scheduler != nil {
-		s.scheduler.SetTelemetry(telemetry)
-	}
-	if s.sysessionMgr != nil {
-		s.sysessionMgr.SetTelemetry(telemetry)
 	}
 
 	// Authenticated API routes
@@ -167,9 +89,6 @@ func (s *Server) registerDashboard() {
 	s.registerScratchRoutes(auth)
 	// memory link preview (docs/rfc/memory-link-rendering.md): serves
 	// ~/.claude/projects/<scope>/memory/<slug>.md for [[slug]] hover cards.
-	if s.memoryH == nil {
-		s.memoryH = memory.New(resolveClaudeProjectsDir(), newIPLimiterWithProxy(memory.MemoryLimiterRate, memory.MemoryLimiterBurst, s.auth.TrustedProxy))
-	}
 	s.mux.HandleFunc("GET /api/memory/{slug}", auth(s.memoryH.HandleGet))
 
 	// Installed-asset browser (docs/rfc/cc-asset-browser.md).
