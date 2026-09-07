@@ -47,22 +47,24 @@ func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers 
 		Scheduler:   opts.Scheduler,
 		AllowedRoot: opts.AllowedRoot,
 		ClaudeDir:   claudeDir,
-		RunsLimiter: newIPLimiterWithCap(
-			rate.Every(time.Second), 60,
-			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-		),
-		ListLimiter: newIPLimiterWithCap(
-			rate.Every(500*time.Millisecond), 30,
-			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-		),
-		WriteLimiter: newIPLimiterWithCap(
-			rate.Every(2*time.Second), 6,
-			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-		),
-		TranscriptLimiter: newIPLimiterWithCap(
-			rate.Every(10*time.Second), 12,
-			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-		),
+		RateLimits: dashcron.RateLimits{
+			Runs: newIPLimiterWithCap(
+				rate.Every(time.Second), 60,
+				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
+			),
+			List: newIPLimiterWithCap(
+				rate.Every(500*time.Millisecond), 30,
+				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
+			),
+			Write: newIPLimiterWithCap(
+				rate.Every(2*time.Second), 6,
+				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
+			),
+			Transcript: newIPLimiterWithCap(
+				rate.Every(10*time.Second), 12,
+				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
+			),
+		},
 		TranscriptSemCap: cronTranscriptSemCap,
 		ValidateWS:       validateWorkspace,
 		ClassifyWSErr:    classifyWorkspaceErr,

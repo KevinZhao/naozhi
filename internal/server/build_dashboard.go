@@ -88,6 +88,11 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 		})
 	}
 
+	// Installed-asset browser (dashboard_ccassets.go).
+	if hs.ccAssetsH == nil {
+		hs.ccAssetsH = s.buildAssetBrowser()
+	}
+
 	// memory link preview (docs/rfc/memory-link-rendering.md).
 	if hs.memoryH == nil {
 		hs.memoryH = memory.New(resolveClaudeProjectsDir(), newIPLimiterWithProxy(memory.MemoryLimiterRate, memory.MemoryLimiterBurst, s.auth.TrustedProxy))

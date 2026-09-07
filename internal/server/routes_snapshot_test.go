@@ -39,12 +39,31 @@ import (
 // then commit the new golden alongside the move, with the PR description
 // stating the diff is expected (route added/moved/typed).
 func TestRoutesSnapshot(t *testing.T) {
-	routes, err := scanRoutes("routes.go", "server.go", "debug_expvar.go", "debug_pprof.go", "dashboard_ccassets.go", "static_assets.go", "static_js_handlers.go")
+	// Two sources since #2554. mux.Handle* call sites still cover the
+	// server-owned routes (dashboard shell, static assets, WS upgrade); the
+	// /api/* patterns moved into each dashboard sub-package's Routes() method
+	// and are read from the httputil.Route literals there.
+	//
+	// Scanning BOTH is the point: when the patterns moved out of routes.go this
+	// gate briefly saw only 36 of 95 routes, i.e. it would have gone quietly
+	// green while two thirds of the API left its field of view.
+	routes, err := scanRoutes("routes.go", "server.go", "debug_expvar.go", "debug_pprof.go", "static_assets.go", "static_js_handlers.go")
 	if err != nil {
 		t.Fatalf("scanRoutes: %v", err)
 	}
+	declared, err := scanRouteDecls()
+	if err != nil {
+		t.Fatalf("scanRouteDecls: %v", err)
+	}
+	routes = append(routes, declared...)
 	if len(routes) == 0 {
 		t.Fatal("no routes scanned — likely a regex/AST parse miss")
+	}
+	// A sub-package that loses its Routes() method (or gets renamed without
+	// updating routeDeclOwners) would silently shrink the snapshot; the golden
+	// diff would show it, but this makes the cause explicit.
+	if len(declared) == 0 {
+		t.Fatal("no httputil.Route literals found — routeDeclOwners is stale or Routes() moved (#2554)")
 	}
 
 	// M2 (PR #369 review): fallback strings ("<unmapped:..>", "<unknown>",
@@ -165,6 +184,81 @@ func scanRoutes(files ...string) ([]routeEntry, error) {
 	return out, nil
 }
 
+// routeDeclOwners maps a routes.go file that declares httputil.Route literals to
+// the stable type identifier of the handler that owns them (#2554). Paths are
+// relative to internal/server, which is the test binary's CWD.
+//
+// Adding a dashboard sub-package with routes means adding a row here. The
+// alternative — resolving the receiver type with go/types — would need the whole
+// dependency graph type-checked just to name a handler in a golden file.
+var routeDeclOwners = map[string]string{
+	"routes.go":                                "*SendHandler", // SendHandler lives in this package
+	"../dashboard/session/routes.go":           "*dashsession.Handlers",
+	"../dashboard/cost/routes.go":              "*dashcost.Handlers",
+	"../dashboard/project/routes.go":           "*dashproject.Handlers",
+	"../dashboard/discovery/routes.go":         "*discovery.Handlers",
+	"../dashboard/cron/routes.go":              "*dashcron.Handlers",
+	"../dashboard/ext/agentevents/routes.go":   "*agentevents.Handler",
+	"../dashboard/ext/scratch/routes.go":       "*scratch.Handler",
+	"../dashboard/ext/system/routes.go":        "*system.Handlers",
+	"../dashboard/ext/uisettings/routes.go":    "*uisettings.Handler",
+	"../dashboard/ext/accessprofile/routes.go": "*accessprofile.Handler",
+	"../dashboard/ext/planner/routes.go":       "*planner.Handlers",
+	"../dashboard/ext/memory/routes.go":        "*memory.Handler",
+	"../dashboard/ext/transcribe/routes.go":    "*transcribe.Handler",
+	"../dashboard/ext/cli/routes.go":           "*cli.Handler",
+	"../dashboard/ext/ccassets/routes.go":      "*extccassets.Handler",
+}
+
+// scanRouteDecls reads the `{Pattern: "METHOD /path", Handler: h.X}` composite
+// literals out of every file in routeDeclOwners. The pattern stays a string
+// literal in the source precisely so this works — see httputil/route.go's
+// header.
+func scanRouteDecls() ([]routeEntry, error) {
+	var out []routeEntry
+	fset := token.NewFileSet()
+	for file, owner := range routeDeclOwners {
+		f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			var pattern string
+			var hasHandler bool
+			for _, el := range cl.Elts {
+				kv, ok := el.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := kv.Key.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				switch key.Name {
+				case "Pattern":
+					if lit, ok := kv.Value.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						pattern = strings.Trim(lit.Value, `"`)
+					}
+				case "Handler":
+					hasHandler = true
+				}
+			}
+			// Both keys present ⇒ this is a Route literal, not some other struct.
+			if pattern == "" || !hasHandler {
+				return true
+			}
+			method, p := parsePattern(pattern)
+			out = append(out, routeEntry{Method: method, Path: p, HandlerType: owner})
+			return true
+		})
+	}
+	return out, nil
+}
+
 // parsePattern splits "GET /api/foo" into ("GET", "/api/foo");
 // "/raw" → ("", "/raw").
 func parsePattern(pat string) (method, path string) {
@@ -210,6 +304,13 @@ func handlerTypeOf(e ast.Expr) string {
 		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 			if inner, ok := sel.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "auth" {
 				return "*AuthHandlers"
+			}
+		}
+		// s.apiChain()(s.auth.HandleLogout) — the chain is a value now (#2554),
+		// so the wrapper is a call on a call. Resolve the wrapped handler.
+		if wrapped, ok := call.Fun.(*ast.CallExpr); ok {
+			if sel, ok := wrapped.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "apiChain" {
+				return handlerTypeOf(call.Args[0])
 			}
 		}
 	}
