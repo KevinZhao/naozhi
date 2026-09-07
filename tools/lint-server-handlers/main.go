@@ -10,11 +10,19 @@
 //   - send_engine_ownership (rule 3b-send): send 块字段只能声明在 sendEngine
 //     上、不能回到 Hub；send.go / send_owner_loop.go / send_engine.go 内不得
 //     出现 *Hub 接收者（#2551）。
-//   - iface_match: godoc `satisfies:` 注释的接口必须出现在
-//     consumer-contracts.md。
 //   - stale_exemption: exemptions 条目必须指向存在的文件。
-//   - api_route_owner: routes.go 中 pattern 含 /api/ 的 mux 注册不得指向
-//     Server 方法（拆开 auth(...) 等包装后判定）。
+//
+// Two rules were deleted in #2554:
+//   - iface_match scanned for godoc `satisfies:` comments and cross-checked them
+//     against consumer-contracts.md. It had ZERO live subjects — no file in
+//     internal/ or cmd/ carries that comment any more — so it was 77 lines
+//     answering a question nobody asks.
+//   - api_route_owner rejected /api/ mux registrations pointing at Server
+//     methods. Dashboard sub-packages now declare their own routes and hand the
+//     server data (internal/dashboard/httputil.Route), so a Server method cannot
+//     BE an /api/ route; the boundary it reconstructed from ASTs is a
+//     compile-time fact. 163 lines of tooling plus 139 of tests, replaced by a
+//     type.
 //
 // mode=warn (default) prints violations to stderr and exits 0; mode=fail
 // exits 1 on any violation. -sarif emits SARIF 2.1.0 on stdout.
@@ -142,19 +150,8 @@ func main() {
 	// 校验内容，所以这条改看声明本身）。
 	vs = append(vs, scanSendEngineOwnership(*serverPkg)...)
 
-	// Rule 4: iface_match — 扫整仓 internal/ + cmd/ 的 satisfies: 注释
-	vs = append(vs, scanIfaceMatch([]string{"internal", "cmd"})...)
-
 	// Rule 5: stale_exemption
 	vs = append(vs, scanStaleExemption(exempts)...)
-
-	// Rule 6: api_route_owner
-	routeVs, err := scanAPIRouteOwner(filepath.Join(*serverPkg, "routes.go"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "scan routes: %v\n", err)
-		os.Exit(2)
-	}
-	vs = append(vs, routeVs...)
 
 	if os.Getenv("LINT_VERBOSE") == "1" {
 		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b partially landed — send-block slice is enforced (send_engine_ownership, #2551); the general AST field_block 对账 was owed to Phase 4b, which ADR-001 shelved. rule 4 method-set 对账 + rule 5 git tag 对账 due Phase 1 (server-split-phase4-design.md v0.6.1 §六.2.0.4)")

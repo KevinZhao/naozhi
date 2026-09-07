@@ -132,9 +132,13 @@ func TestSameOriginOK(t *testing.T) {
 // cross-origin requests even when the session cookie is valid — closing
 // the same-registrable-domain CSRF gap that SameSite=Strict does not cover.
 // Safe methods (GET) must still pass so bookmarks and external links work.
-func TestRequireAuth_CSRFGate(t *testing.T) {
-	a := &Handlers{DashboardToken: ""} // empty token => IsAuthenticated=true, so we isolate the Origin gate
-	handler := a.RequireAuth(func(w http.ResponseWriter, _ *http.Request) {
+// TestRequireSameOrigin_CSRFGate covers the same-origin gate at the unit that
+// owns it. It used to drive RequireAuth, which needed an empty DashboardToken to
+// keep IsAuthenticated out of the way; #2554 split the gate into its own
+// middleware, so the test no longer has to neutralise authentication to reach
+// the behaviour it is about.
+func TestRequireSameOrigin_CSRFGate(t *testing.T) {
+	handler := RequireSameOrigin(false)(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
