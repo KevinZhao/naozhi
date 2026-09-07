@@ -418,35 +418,46 @@ func main() {
 		WorkspaceName: cfg.Workspace.Name,
 		AllowedRoot:   workspace,
 		StateDir:      filepath.Dir(storePath),
-		// ConfigPath enables the access-profile create endpoint; absolute so the
-		// write target survives cwd changes. Secrets dir holds *_FILE tokens (0600).
-		ConfigPath:              absConfigPath(*configPath),
-		ConfigSHA256:            cfg.Fingerprint.SHA256,
-		ConfigLoadedAt:          cfg.Fingerprint.LoadedAt,
-		AccessProfileSecretsDir: filepath.Join(filepath.Dir(storePath), "access-profile-secrets"),
-		NoOutputTimeout:         noOutputTimeout,
-		TotalTimeout:            totalTimeout,
-		QueueMaxDepth:           cfg.QueueMaxDepth(),
-		QueueCollectDelay:       cfg.ParseCollectDelay(),
-		QueueMode:               cfg.QueueMode(),
-		DashboardToken:          cfg.Server.DashboardToken,
-		TrustedProxy:            cfg.Server.TrustedProxy,
-		ProjectManager:          projectMgr,
-		Nodes:                   nodes,
-		ReverseNodeServer:       rns,
-		Transcriber:             stt,
-		StartupCtx:              ctx,
-		Version:                 version,
-		UpdateStatus:            updateStatus,
-		UpdateChecker:           updateChecker,
-		UpdateDashboardInstall:  &updateDashboardInstall,
-		SysessionManager:        sysMgr,
-		SysWorkDir:              sysWorkDir,
+		Config: server.ConfigOptions{
+			// Path enables the access-profile create endpoint; absolute so the
+			// write target survives cwd changes. Secrets dir holds *_FILE
+			// tokens (0600).
+			Path:                    absConfigPath(*configPath),
+			SHA256:                  cfg.Fingerprint.SHA256,
+			LoadedAt:                cfg.Fingerprint.LoadedAt,
+			AccessProfileSecretsDir: filepath.Join(filepath.Dir(storePath), "access-profile-secrets"),
+		},
+		NoOutputTimeout: noOutputTimeout,
+		TotalTimeout:    totalTimeout,
+		Queue: server.QueueOptions{
+			MaxDepth:     cfg.QueueMaxDepth(),
+			CollectDelay: cfg.ParseCollectDelay(),
+			Mode:         cfg.QueueMode(),
+		},
+		DashboardToken:    cfg.Server.DashboardToken,
+		TrustedProxy:      cfg.Server.TrustedProxy,
+		ProjectManager:    projectMgr,
+		Nodes:             nodes,
+		ReverseNodeServer: rns,
+		Transcriber:       stt,
+		StartupCtx:        ctx,
+		Version:           version,
+		Update: server.UpdateOptions{
+			Status:           updateStatus,
+			Checker:          updateChecker,
+			DashboardInstall: &updateDashboardInstall,
+		},
+		Sysession: server.SysessionOptions{
+			Manager: sysMgr,
+			WorkDir: sysWorkDir,
+		},
 		// Default-on; opt-out via session.project_stable_key.enabled: false.
 		ProjectStableKeyEnabled: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
-		ImageOrientEnabled:      orientEnabled,
-		ImageOrientModel:        cfg.ImageOrient.Model,
-		ImageOrientRunner:       orientRunner,
+		ImageOrient: server.ImageOrientOptions{
+			Enabled: orientEnabled,
+			Model:   cfg.ImageOrient.Model,
+			Runner:  orientRunner,
+		},
 		OnReady: func() {
 			if err := osutil.SdNotify("READY=1"); err != nil {
 				slog.Warn("sd_notify READY failed", "err", err)

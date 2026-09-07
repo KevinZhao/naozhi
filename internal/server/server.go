@@ -238,9 +238,9 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		dedup:            platform.NewDedup(defaultDedupCapacity),
 		sessionGuard:     session.NewGuard(),
 		msgQueue: dispatch.NewMessageQueueWithMode(
-			opts.QueueMaxDepth,
-			opts.QueueCollectDelay,
-			dispatch.ParseQueueMode(opts.QueueMode),
+			opts.Queue.MaxDepth,
+			opts.Queue.CollectDelay,
+			dispatch.ParseQueueMode(opts.Queue.Mode),
 		),
 		startedAt:       time.Now(),
 		logger:          opts.Logger,
@@ -258,7 +258,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		projectMgr:      opts.ProjectManager,
 		resolver:        resolver,
 		nodes:           nodes,
-		sysessionMgr:    opts.SysessionManager,
+		sysessionMgr:    opts.Sysession.Manager,
 		orient:          buildOrientConfig(opts),
 
 		// auth stays on Server: debug_expvar / debug_pprof / ccassets wrap
@@ -276,7 +276,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		// Empty StateDir yields an in-memory prefs store (no persistence).
 		uiSettingsH: uisettings.New(uiprefs.New(opts.StateDir)),
 		// Empty ConfigPath keeps the create endpoint disabled (400).
-		accessProfilesH: accessprofile.New(router, opts.ConfigPath, opts.AccessProfileSecretsDir),
+		accessProfilesH: accessprofile.New(router, opts.Config.Path, opts.Config.AccessProfileSecretsDir),
 		cronH:           buildCronHandlers(opts, claudeDir),
 		transcribeH:     buildTranscribeHandler(opts),
 	}
@@ -325,7 +325,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		ProjectMgr:       opts.ProjectManager,
 		Scheduler:        scheduler,
 		CronSessions:     scheduler,
-		SysWorkDir:       opts.SysWorkDir,
+		SysWorkDir:       opts.Sysession.WorkDir,
 		ClaudeDir:        claudeDir,
 		AllowedRoot:      opts.AllowedRoot,
 		Agents:           agents,
@@ -391,9 +391,9 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		watchdogNoOut:      s.watchdog.noOutPtr(),
 		watchdogTotal:      s.watchdog.totalPtr(),
 		nodeAccess:         s.nodes,
-		configSHA256:       opts.ConfigSHA256,
-		configLoadedAt:     opts.ConfigLoadedAt,
-		configPath:         opts.ConfigPath,
+		configSHA256:       opts.Config.SHA256,
+		configLoadedAt:     opts.Config.LoadedAt,
+		configPath:         opts.Config.Path,
 		platforms:          platNames,
 		platformsStatus:    platformStatusMap(platNames),
 		hubDropped:         s.hub.DroppedMessages,

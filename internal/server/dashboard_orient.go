@@ -35,13 +35,13 @@ const orientTimeoutDefault = 45 * time.Second
 // Returns nil when disabled or no runner was wired, so the handler's single
 // nil-check covers every "off" case.
 func buildOrientConfig(opts ServerOptions) *orientConfig {
-	if !opts.ImageOrientEnabled || opts.ImageOrientRunner == nil {
+	if !opts.ImageOrient.Enabled || opts.ImageOrient.Runner == nil {
 		return nil
 	}
 	return &orientConfig{
 		enabled: true,
-		model:   opts.ImageOrientModel,
-		runner:  opts.ImageOrientRunner,
+		model:   opts.ImageOrient.Model,
+		runner:  opts.ImageOrient.Runner,
 		timeout: orientTimeoutDefault,
 	}
 }
