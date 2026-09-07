@@ -73,7 +73,7 @@ file_size:
       limit: 800
       until_phase: "5"        # Phase 5 内部拆分
     - path: internal/server/server.go
-      current: 726                          # 2026-09-07 +18（#2552 E2-a：appCtx/appCancel 字段 + uploadStore 字段 + 组合根前移的三段说明性注释）；2026-09-05 +3（#2538：config fingerprint 三行接线进 HealthHandler）
+      current: 729                          # 2026-09-07 +3（#2561 E6-a：dashsession Deps 接口化前的 typed-nil 解包，理由注释在代码里）；同日 +18（#2552 E2-a：appCtx/appCancel 字段 + uploadStore 字段 + 组合根前移的三段说明性注释）；2026-09-05 +3（#2538：config fingerprint 三行接线进 HealthHandler）
       limit: 500
       until_phase: "E3"       # #2553（Server 18 个 handler 指针收进 handlerSet + ServerOptions 拆 4 子 option）。原挂 "5"：ADR-001 后该 phase 不会到来
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线
