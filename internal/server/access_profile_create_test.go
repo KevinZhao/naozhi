@@ -24,11 +24,13 @@ func newCreateProfileServer(t *testing.T) (*Server, *handlerSet, string, string)
 	secretsDir := filepath.Join(dir, "secrets")
 	router := session.NewRouter(session.RouterConfig{Workspace: dir})
 	srv, hs := buildServerWithHandlers(ServerOptions{
-		Addr:                    ":0",
-		Router:                  router,
-		Backend:                 "claude",
-		ConfigPath:              cfgPath,
-		AccessProfileSecretsDir: secretsDir,
+		Addr:    ":0",
+		Router:  router,
+		Backend: "claude",
+		Config: ConfigOptions{
+			Path:                    cfgPath,
+			AccessProfileSecretsDir: secretsDir,
+		},
 	})
 	return srv, hs, cfgPath, secretsDir
 }

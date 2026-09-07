@@ -33,12 +33,21 @@ type ServerOptions struct {
 	// dirs (~/.claude, workspace cwd, attachments, cron runs/shims) are owned
 	// elsewhere (#407). Empty is legal: cookie secret becomes in-memory and
 	// the retired-key store degrades to no-op.
-	StateDir          string
-	NoOutputTimeout   time.Duration
-	TotalTimeout      time.Duration
-	QueueMaxDepth     int
-	QueueCollectDelay time.Duration
-	QueueMode         string // "collect" (default) or "interrupt"; see dispatch.ParseQueueMode
+	StateDir        string
+	NoOutputTimeout time.Duration
+	TotalTimeout    time.Duration
+	// Queue groups the dispatch-queue knobs (#2553).
+	Queue QueueOptions
+	// Update groups the self-update surface (#2553).
+	Update UpdateOptions
+	// Sysession groups the system-daemon wiring (#2553).
+	Sysession SysessionOptions
+	// ImageOrient groups the image auto-orientation feature (#2553).
+	ImageOrient ImageOrientOptions
+	// Config groups the loaded-config identity and the paths derived from it
+	// (#2553).
+	Config ConfigOptions
+
 	DashboardToken    string // optional bearer token for dashboard API
 	TrustedProxy      bool   // trust X-Forwarded-For for client IP
 	ProjectManager    *project.Manager
@@ -54,21 +63,6 @@ type ServerOptions struct {
 	// Surfaced only on the authenticated part of /health and as `version_tag`
 	// in /api/sessions stats; empty means unknown and /health omits the field.
 	Version string
-
-	// UpdateStatus is the shared self-update state the background
-	// selfupdate.Checker writes into, surfaced by GET /api/system/update.
-	// Nil makes that endpoint report only the running version.
-	UpdateStatus *selfupdate.Status
-
-	// UpdateChecker is the Checker that owns UpdateStatus; held so
-	// GET /api/system/update can trigger an on-demand check during the
-	// cold-start window. Nil disables that fallback; Status is still served.
-	UpdateChecker *selfupdate.Checker
-
-	// UpdateDashboardInstall gates POST /api/system/update/apply.
-	// nil defaults to TRUE; an explicit false makes the endpoint 403 while
-	// the read-only GET keeps working.
-	UpdateDashboardInstall *bool
 
 	// DebugMode gates registration of /api/debug/pprof and /api/debug/vars.
 	// Default false: both are 404 even for loopback+auth callers, so a leaked
@@ -110,43 +104,75 @@ type ServerOptions struct {
 	AgentCommands map[string]string
 	Scheduler     *cron.Scheduler
 	Backend       string // "claude" | "kiro" | "" (empty → "claude")
-	// SysessionManager is the system-daemon Manager (docs/rfc/system-session.md).
-	// nil disables /api/system/* endpoints; the caller must Manager.Start it
-	// before the server serves.
-	SysessionManager *sysession.Manager
-	// SysWorkDir is the cwd sysession's Runner uses for transient `claude -p`
-	// subprocesses. Session JSONLs under it are hidden from the catch-all
-	// history panel (else AutoTitler prompts leak into "recent sessions").
-	// Empty disables the filter.
-	SysWorkDir string
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).
 	Logger *slog.Logger
+}
 
-	// === Image auto-orientation (docs: image_orient config) ===
-	//
-	// ImageOrientEnabled gates the feature. Effective only when
-	// ImageOrientRunner is also non-nil; otherwise POST /api/sessions/orient
-	// is a no-op returning rotated:false.
-	ImageOrientEnabled bool
-	// ImageOrientModel overrides --model on the side vision call. Empty uses
-	// the CLI default; validated by config.validateModelString upstream.
-	ImageOrientModel string
-	// ImageOrientRunner is the image-capable one-off runner. nil disables the
-	// feature regardless of ImageOrientEnabled.
-	ImageOrientRunner VisionOrienter
-	// ConfigSHA256 / ConfigLoadedAt are the loaded config's fingerprint
-	// (config.Fingerprint, #2538), surfaced auth-only on /health so doctor
-	// and the deploy playbook can detect "disk config changed after load —
-	// restart required". Empty/zero when the caller built the config
-	// programmatically.
-	ConfigSHA256   string
-	ConfigLoadedAt time.Time
-	// ConfigPath is the resolved path to config.yaml. Non-empty enables the
+// QueueOptions are the dispatch-queue knobs. Grouped out of the flat
+// ServerOptions in #2553: they are set together from one config block and read
+// only by the MessageQueue constructor.
+type QueueOptions struct {
+	MaxDepth     int
+	CollectDelay time.Duration
+	Mode         string // "collect" (default) or "interrupt"; see dispatch.ParseQueueMode
+}
+
+// UpdateOptions is the self-update surface behind /api/system/update.
+type UpdateOptions struct {
+	// Status is the shared self-update state the background selfupdate.Checker
+	// writes into, surfaced by GET /api/system/update. Nil makes that endpoint
+	// report only the running version.
+	Status *selfupdate.Status
+	// Checker owns Status; held so GET /api/system/update can trigger an
+	// on-demand check during the cold-start window. Nil disables that
+	// fallback; Status is still served.
+	Checker *selfupdate.Checker
+	// DashboardInstall gates POST /api/system/update/apply. nil defaults to
+	// TRUE; an explicit false makes the endpoint 403 while the read-only GET
+	// keeps working.
+	DashboardInstall *bool
+}
+
+// SysessionOptions is the system-daemon wiring (docs/rfc/system-session.md).
+type SysessionOptions struct {
+	// Manager nil disables /api/system/* endpoints; the caller must
+	// Manager.Start it before the server serves.
+	Manager *sysession.Manager
+	// WorkDir is the cwd sysession's Runner uses for transient `claude -p`
+	// subprocesses. Session JSONLs under it are hidden from the catch-all
+	// history panel (else AutoTitler prompts leak into "recent sessions").
+	// Empty disables the filter.
+	WorkDir string
+}
+
+// ImageOrientOptions is the image auto-orientation feature (docs: image_orient
+// config).
+type ImageOrientOptions struct {
+	// Enabled gates the feature. Effective only when Runner is also non-nil;
+	// otherwise POST /api/sessions/orient is a no-op returning rotated:false.
+	Enabled bool
+	// Model overrides --model on the side vision call. Empty uses the CLI
+	// default; validated by config.validateModelString upstream.
+	Model string
+	// Runner is the image-capable one-off runner. nil disables the feature
+	// regardless of Enabled.
+	Runner VisionOrienter
+}
+
+// ConfigOptions is the loaded config's identity plus the paths derived from it.
+type ConfigOptions struct {
+	// SHA256 / LoadedAt are the loaded config's fingerprint
+	// (config.Fingerprint, #2538), surfaced auth-only on /health so doctor and
+	// the deploy playbook can detect "disk config changed after load — restart
+	// required". Empty/zero when the caller built the config programmatically.
+	SHA256   string
+	LoadedAt time.Time
+	// Path is the resolved path to config.yaml. Non-empty enables the
 	// POST /api/access-profiles create endpoint (appends via yaml.Node
 	// surgery); empty makes it return 400.
-	ConfigPath string
+	Path string
 	// AccessProfileSecretsDir is the trusted directory where the create
 	// endpoint writes *_FILE token files (0600) as <dir>/<profileID>.token.
 	// The id is charset-validated so the path cannot escape this dir. Empty

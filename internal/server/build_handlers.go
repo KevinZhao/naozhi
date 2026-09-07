@@ -233,16 +233,16 @@ func platformStatusMap(names map[string]struct{}) map[string]string {
 // wrapping nil, or the daemons endpoint's disabled path never fires.
 func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Handlers {
 	var daemons system.DaemonInspector
-	if opts.SysessionManager != nil {
-		daemons = opts.SysessionManager
+	if opts.Sysession.Manager != nil {
+		daemons = opts.Sysession.Manager
 	}
 	return system.New(system.Deps{
 		Daemons:       daemons,
 		Router:        router,
-		UpdateStatus:  opts.UpdateStatus,
-		UpdateChecker: opts.UpdateChecker,
+		UpdateStatus:  opts.Update.Status,
+		UpdateChecker: opts.Update.Checker,
 		BuildVersion:  opts.Version,
 		// nil ⇒ enabled, matching config.UpdateDashboardInstall's default.
-		InstallEnabled: opts.UpdateDashboardInstall == nil || *opts.UpdateDashboardInstall,
+		InstallEnabled: opts.Update.DashboardInstall == nil || *opts.Update.DashboardInstall,
 	})
 }
