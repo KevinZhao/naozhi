@@ -91,7 +91,7 @@ func TestHandleTakeover_CleanupUsesCleanedCWD(t *testing.T) {
 		// the goroutine proceeds straight to cleanup + takeover.
 		ProcStartTime: func(int) (uint64, error) { return 1, nil },
 	})
-	h.SetAppContext(context.Background())
+	h.appCtx = context.Background()
 
 	body, _ := json.Marshal(map[string]any{
 		"pid":             deadPID,

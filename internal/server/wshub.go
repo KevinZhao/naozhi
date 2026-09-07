@@ -318,11 +318,6 @@ func NewHub(opts HubOptions) *Hub {
 	return h
 }
 
-// SetUploadStore wires the upload store WS sends use to resolve pre-uploaded
-// file_ids. A setter (not a HubOptions field) because the store's cleanup
-// loop is bound to the app ctx and is created after the Hub exists.
-func (h *Hub) SetUploadStore(s *uploadStore) { h.uploadStore = s }
-
 // allowSendForOwner is the per-user (uploadOwner-keyed) send ceiling that
 // stops N tabs multiplying the per-connection burst; the per-conn limiter
 // still gates first. The budget mirrors the per-conn shape (1/s, burst 5)

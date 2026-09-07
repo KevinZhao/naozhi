@@ -101,7 +101,7 @@ func TestHandle_NodeProxy_RelaysRemoteManifest(t *testing.T) {
 	r, _ := routerWithWrapper("2.1.100")
 	remoteBody := `{"backends":[{"id":"kiro","available":true}],"default":"kiro","detected":[]}`
 	h := &Handler{router: r}
-	h.SetNodeAccess(&fakeNodeAccess{wantID: "remote", conn: &fakeConn{raw: json.RawMessage(remoteBody)}})
+	h.nodeAccess = &fakeNodeAccess{wantID: "remote", conn: &fakeConn{raw: json.RawMessage(remoteBody)}}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/cli/backends?node=remote", nil)
@@ -134,7 +134,7 @@ func TestHandle_NodeProxy_LocalFallsThrough(t *testing.T) {
 	h := &Handler{router: r}
 	// nodeAccess deliberately resolves nothing — a local request must never
 	// consult it.
-	h.SetNodeAccess(&fakeNodeAccess{wantID: "never", conn: nil})
+	h.nodeAccess = &fakeNodeAccess{wantID: "never", conn: nil}
 
 	for _, target := range []string{"/api/cli/backends", "/api/cli/backends?node=local"} {
 		rec := httptest.NewRecorder()
@@ -158,7 +158,7 @@ func TestHandle_NodeProxy_LocalFallsThrough(t *testing.T) {
 func TestHandle_NodeProxy_UpstreamErrorIs502(t *testing.T) {
 	r, _ := routerWithWrapper("2.1.100")
 	h := &Handler{router: r}
-	h.SetNodeAccess(&fakeNodeAccess{wantID: "remote", conn: &fakeConn{err: errors.New("unknown method: fetch_backends")}})
+	h.nodeAccess = &fakeNodeAccess{wantID: "remote", conn: &fakeConn{err: errors.New("unknown method: fetch_backends")}}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/cli/backends?node=remote", nil)
@@ -191,7 +191,7 @@ func TestHandle_NodeProxy_NoAccessorIs502(t *testing.T) {
 func TestHandle_NodeProxy_UnknownNodePropagates(t *testing.T) {
 	r, _ := routerWithWrapper("2.1.100")
 	h := &Handler{router: r}
-	h.SetNodeAccess(&fakeNodeAccess{wantID: "known", conn: &fakeConn{raw: json.RawMessage(`{}`)}})
+	h.nodeAccess = &fakeNodeAccess{wantID: "known", conn: &fakeConn{raw: json.RawMessage(`{}`)}}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/cli/backends?node=ghost", nil)

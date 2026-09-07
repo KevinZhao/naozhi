@@ -1392,6 +1392,12 @@ func (h *Handlers) callSystemInfo() map[string]any {
 // Deps bundles all wiring for New so internal/server can construct a Handlers
 // without access to unexported fields.
 type Deps struct {
+	// SnapshotEnricher is Hub.enrichSnapshot: it folds live agent-tailer state
+	// into each /api/sessions snapshot. Optional (nil skips enrichment). Wired
+	// here rather than through SetSnapshotEnricher afterwards (#2552) — the Hub
+	// exists before these handlers do, so there is no ordering window to cover.
+	SnapshotEnricher func(*sessionpkg.SessionSnapshot)
+
 	Router        *sessionpkg.Router
 	ProjectMgr    *project.Manager
 	Scheduler     CronView
@@ -1421,6 +1427,8 @@ type Deps struct {
 // New constructs a Handlers from injected deps.
 func New(d Deps) *Handlers {
 	return &Handlers{
+		snapshotEnricher: d.SnapshotEnricher,
+
 		router:        d.Router,
 		projectMgr:    d.ProjectMgr,
 		scheduler:     d.Scheduler,
@@ -1445,13 +1453,6 @@ func New(d Deps) *Handlers {
 
 		projectStableKeyEnabled: d.ProjectStableKeyEnabled,
 	}
-}
-
-// SetSnapshotEnricher wires the optional Hub.enrichSnapshot callback
-// after the Hub is constructed (registerDashboard runs after server.New
-// so the hub field can't be passed in via Deps).
-func (h *Handlers) SetSnapshotEnricher(fn func(*sessionpkg.SessionSnapshot)) {
-	h.snapshotEnricher = fn
 }
 
 // RetiredStorePresent reports whether the RetiredStore is wired (server

@@ -6,7 +6,7 @@ import (
 )
 
 // TestProjectHandlers_RestartCtx_NilFallback pins the contract that
-// `restartCtx` falls back to context.Background() when SetBaseContext
+// `restartCtx` falls back to context.Background() when Deps.BaseCtx
 // has not been wired. R247-ARCH-15 (#650): the prior `ctxFunc` closure
 // returned Background when `s.hub` was nil; the new field-based design
 // must preserve that fallback so test paths that build Handlers
@@ -26,16 +26,17 @@ func TestProjectHandlers_RestartCtx_NilFallback(t *testing.T) {
 	}
 }
 
-// TestProjectHandlers_SetBaseContext pins the contract that
-// SetBaseContext stores the supplied context and restartCtx returns
+// TestProjectHandlers_BaseCtxWired pins the contract that
+// Deps.BaseCtx is stored and restartCtx returns
 // it verbatim. registerDashboard relies on this to thread `s.hub.ctx`
 // (the long-lived process context) into the planner-restart timeout
 // once the Hub finishes constructing.
-func TestProjectHandlers_SetBaseContext(t *testing.T) {
-	h := &Handlers{}
+func TestProjectHandlers_BaseCtxWired(t *testing.T) {
 	type ctxKey struct{}
 	want := context.WithValue(context.Background(), ctxKey{}, "marker")
-	h.SetBaseContext(want)
+	// Through the real constructor: #2552 replaced SetBaseContext with
+	// Deps.BaseCtx, so this now exercises the production wiring path.
+	h := New(Deps{BaseCtx: want})
 
 	got := h.restartCtx()
 	if got != want {
@@ -46,15 +47,14 @@ func TestProjectHandlers_SetBaseContext(t *testing.T) {
 	}
 }
 
-// TestProjectHandlers_SetBaseContext_CancelPropagates pins that
+// TestProjectHandlers_BaseCtxCancelPropagates pins that
 // cancellation on the wired baseCtx propagates through restartCtx. A
 // process shutdown cancels `s.hub.ctx`; the planner-restart timeout
 // must observe that so an in-flight ResetAndRecreate aborts instead
 // of running the full 30s deadline past process exit.
-func TestProjectHandlers_SetBaseContext_CancelPropagates(t *testing.T) {
-	h := &Handlers{}
+func TestProjectHandlers_BaseCtxCancelPropagates(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
-	h.SetBaseContext(parent)
+	h := New(Deps{BaseCtx: parent})
 
 	got := h.restartCtx()
 	select {

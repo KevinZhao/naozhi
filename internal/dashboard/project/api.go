@@ -65,7 +65,8 @@ type Handlers struct {
 	nodeAccess NodeAccessor
 	nodeCache  *node.CacheManager
 	// baseCtx is the long-lived context the planner-restart timeout derives
-	// from; production wires it via SetBaseContext, tests assign directly.
+	// from; wired at construction via Deps.BaseCtx (#2552), tests may assign
+	// directly.
 	// Nil falls back to Background in restartCtx (#650).
 	baseCtx context.Context
 	// filesExistsLimiter caps /api/projects/files/exists per caller: the
@@ -96,6 +97,10 @@ type Handlers struct {
 // Deps bundles all wiring for New so internal/server can construct Handlers
 // without access to unexported fields.
 type Deps struct {
+	// BaseCtx is the long-lived parent for the planner-restart timeout. Wired
+	// at construction (#2552); nil falls back to context.Background().
+	BaseCtx context.Context
+
 	ProjectMgr         *project.Manager
 	Router             *session.Router
 	Resolver           *session.KeyResolver
@@ -115,6 +120,7 @@ type Deps struct {
 // New constructs a Handlers from injected deps.
 func New(d Deps) *Handlers {
 	return &Handlers{
+		baseCtx:            d.BaseCtx,
 		projectMgr:         d.ProjectMgr,
 		router:             d.Router,
 		resolver:           d.Resolver,
@@ -127,12 +133,6 @@ func New(d Deps) *Handlers {
 
 		projectStableKeyEnabled: d.ProjectStableKeyEnabled,
 	}
-}
-
-// SetBaseContext wires the long-lived process context (typically Hub.ctx)
-// used by the planner-restart timeout; tests may assign h.baseCtx directly (#650).
-func (h *Handlers) SetBaseContext(ctx context.Context) {
-	h.baseCtx = ctx
 }
 
 // restartCtx returns the parent context for handleRestartPlanner's 30s
