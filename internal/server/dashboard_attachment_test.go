@@ -26,17 +26,16 @@ func writeAttachmentFixture(t *testing.T, ws string, subDir, filename string, bo
 	return ".naozhi/attachments/" + subDir + "/" + filename
 }
 
-func newAttachmentServer(t *testing.T, ws string) *Server {
+func newAttachmentServer(t *testing.T, ws string) (*Server, *handlerSet) {
 	t.Helper()
 	resolved, err := filepath.EvalSymlinks(ws)
 	if err != nil {
 		t.Fatalf("eval symlinks: %v", err)
 	}
 	router := session.NewRouter(session.RouterConfig{Workspace: resolved})
-	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
-	srv.registerDashboard()
+	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	router.SetWorkspace("dash:direct:alice", resolved)
-	return srv
+	return srv, hs
 }
 
 func TestHandleAttachment_ServesImage(t *testing.T) {
@@ -44,14 +43,14 @@ func TestHandleAttachment_ServesImage(t *testing.T) {
 	pngBytes := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13}
 	rel := writeAttachmentFixture(t, ws, "2026-05-07", "deadbeef.png", pngBytes)
 
-	srv := newAttachmentServer(t, ws)
+	_, hs := newAttachmentServer(t, ws)
 	key := "dash:direct:alice:general"
 
 	u := "/api/sessions/attachment?key=" + url.QueryEscape(key) +
 		"&path=" + url.QueryEscape(rel)
 	req := httptest.NewRequest(http.MethodGet, u, nil)
 	w := httptest.NewRecorder()
-	srv.sendH.handleAttachment(w, req)
+	hs.sendH.handleAttachment(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d want 200 (body=%s)", w.Code, w.Body.String())
@@ -79,7 +78,7 @@ func TestHandleAttachment_ServesImage(t *testing.T) {
 
 func TestHandleAttachment_MissingParams(t *testing.T) {
 	ws := t.TempDir()
-	srv := newAttachmentServer(t, ws)
+	_, hs := newAttachmentServer(t, ws)
 
 	cases := []struct {
 		name, url string
@@ -91,7 +90,7 @@ func TestHandleAttachment_MissingParams(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, c.url, nil)
 			w := httptest.NewRecorder()
-			srv.sendH.handleAttachment(w, req)
+			hs.sendH.handleAttachment(w, req)
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("status=%d want 400", w.Code)
 			}
@@ -110,7 +109,7 @@ func TestHandleAttachment_PathGuards(t *testing.T) {
 		t.Fatalf("write secret: %v", err)
 	}
 
-	srv := newAttachmentServer(t, ws)
+	_, hs := newAttachmentServer(t, ws)
 	key := "dash:direct:alice:general"
 
 	cases := []struct {
@@ -132,7 +131,7 @@ func TestHandleAttachment_PathGuards(t *testing.T) {
 				"&path=" + url.QueryEscape(c.path)
 			req := httptest.NewRequest(http.MethodGet, u, nil)
 			w := httptest.NewRecorder()
-			srv.sendH.handleAttachment(w, req)
+			hs.sendH.handleAttachment(w, req)
 			if w.Code != c.wantCode {
 				t.Errorf("status=%d want %d (body=%s)", w.Code, c.wantCode, w.Body.String())
 			}
@@ -147,13 +146,13 @@ func TestHandleAttachment_PathGuards(t *testing.T) {
 func TestHandleAttachment_InvalidKey(t *testing.T) {
 	ws := t.TempDir()
 	rel := writeAttachmentFixture(t, ws, "2026-05-07", "a.png", []byte("x"))
-	srv := newAttachmentServer(t, ws)
+	_, hs := newAttachmentServer(t, ws)
 
 	// Control char in key → ValidateSessionKey rejects with 400.
 	u := "/api/sessions/attachment?key=dash:direct:alice%0A:general&path=" + url.QueryEscape(rel)
 	req := httptest.NewRequest(http.MethodGet, u, nil)
 	w := httptest.NewRecorder()
-	srv.sendH.handleAttachment(w, req)
+	hs.sendH.handleAttachment(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status=%d want 400", w.Code)
 	}
@@ -169,13 +168,12 @@ func TestHandleAttachment_NoWorkspace(t *testing.T) {
 	// fallback path that newAttachmentServer exercises is specifically
 	// what we want to bypass here.
 	router := session.NewRouter(session.RouterConfig{})
-	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
-	srv.registerDashboard()
+	_, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 
 	u := "/api/sessions/attachment?key=dash:direct:bob:general&path=" + url.QueryEscape(rel)
 	req := httptest.NewRequest(http.MethodGet, u, nil)
 	w := httptest.NewRecorder()
-	srv.sendH.handleAttachment(w, req)
+	hs.sendH.handleAttachment(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status=%d want 404 (body=%s)", w.Code, w.Body.String())
 	}
@@ -196,14 +194,14 @@ func TestHandleAttachment_PathFilepathAgreement(t *testing.T) {
 	// Path that exercises path.Clean's ".." resolution and trailing-slash
 	// normalisation; must agree with filepath.Clean on Linux.
 	rel := writeAttachmentFixture(t, ws, "2026-05-25", "img.png", []byte{0x89, 'P', 'N', 'G'})
-	srv := newAttachmentServer(t, ws)
+	_, hs := newAttachmentServer(t, ws)
 	key := "dash:direct:alice:general"
 
 	u := "/api/sessions/attachment?key=" + url.QueryEscape(key) +
 		"&path=" + url.QueryEscape(rel)
 	req := httptest.NewRequest(http.MethodGet, u, nil)
 	w := httptest.NewRecorder()
-	srv.sendH.handleAttachment(w, req)
+	hs.sendH.handleAttachment(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("valid attachment path rejected by path/filepath agreement guard: "+
 			"status=%d want 200 (body=%s)", w.Code, w.Body.String())
@@ -218,7 +216,7 @@ func TestHandleAttachment_PathFilepathAgreement(t *testing.T) {
 		"&path=" + url.QueryEscape(rel2)
 	req2 := httptest.NewRequest(http.MethodGet, u2, nil)
 	w2 := httptest.NewRecorder()
-	srv.sendH.handleAttachment(w2, req2)
+	hs.sendH.handleAttachment(w2, req2)
 	if w2.Code != http.StatusOK {
 		t.Errorf("dot-segment path cleaned by both cleaners should resolve, got status=%d body=%s",
 			w2.Code, w2.Body.String())
@@ -269,14 +267,14 @@ func TestHandleAttachment_RejectsSymlinkAtFinalComponent(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	srv := newAttachmentServer(t, ws)
+	_, hs := newAttachmentServer(t, ws)
 	key := "dash:direct:alice:general"
 	rel := ".naozhi/attachments/2026-05-26/spoof.png"
 	u := "/api/sessions/attachment?key=" + url.QueryEscape(key) +
 		"&path=" + url.QueryEscape(rel)
 	req := httptest.NewRequest(http.MethodGet, u, nil)
 	w := httptest.NewRecorder()
-	srv.sendH.handleAttachment(w, req)
+	hs.sendH.handleAttachment(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("symlink at attachment path: status=%d want 404 (body=%s)", w.Code, w.Body.String())
 	}
@@ -285,14 +283,14 @@ func TestHandleAttachment_RejectsSymlinkAtFinalComponent(t *testing.T) {
 func TestHandleAttachment_NotModified(t *testing.T) {
 	ws := t.TempDir()
 	rel := writeAttachmentFixture(t, ws, "2026-05-07", "a.png", []byte{0x89, 'P', 'N', 'G'})
-	srv := newAttachmentServer(t, ws)
+	_, hs := newAttachmentServer(t, ws)
 	key := "dash:direct:alice:general"
 
 	// First request to grab ETag.
 	u := "/api/sessions/attachment?key=" + url.QueryEscape(key) + "&path=" + url.QueryEscape(rel)
 	req := httptest.NewRequest(http.MethodGet, u, nil)
 	w := httptest.NewRecorder()
-	srv.sendH.handleAttachment(w, req)
+	hs.sendH.handleAttachment(w, req)
 	etag := w.Header().Get("ETag")
 	if etag == "" {
 		t.Fatal("no ETag on first response")
@@ -302,7 +300,7 @@ func TestHandleAttachment_NotModified(t *testing.T) {
 	req2 := httptest.NewRequest(http.MethodGet, u, nil)
 	req2.Header.Set("If-None-Match", etag)
 	w2 := httptest.NewRecorder()
-	srv.sendH.handleAttachment(w2, req2)
+	hs.sendH.handleAttachment(w2, req2)
 	if w2.Code != http.StatusNotModified {
 		t.Errorf("status=%d want 304", w2.Code)
 	}

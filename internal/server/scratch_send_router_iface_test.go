@@ -26,11 +26,11 @@ import (
 // and this test compiles-fails or asserts-fails accordingly.
 func TestScratchHandler_RouterFieldIsScratchRouter(t *testing.T) {
 	t.Parallel()
-	srv := newTestServer(&mockPlatform{})
-	if srv.scratchH == nil {
+	_, hs := newTestServerHS(&mockPlatform{})
+	if hs.scratchH == nil {
 		t.Fatal("scratch handler not wired by registerDashboard")
 	}
-	if !srv.scratchH.RouterIsWired() {
+	if !hs.scratchH.RouterIsWired() {
 		t.Fatal("scratch handler router field is nil — wiring regression")
 	}
 	// Compile-time interface-satisfaction guard: *session.Router must
@@ -52,11 +52,11 @@ func TestScratchHandler_RouterFieldIsScratchRouter(t *testing.T) {
 // above is finally describing the code.
 func TestSendHandler_RouterFieldIsSendRouter(t *testing.T) {
 	t.Parallel()
-	srv := newTestServer(&mockPlatform{})
-	if srv.sendH == nil {
+	_, hs := newTestServerHS(&mockPlatform{})
+	if hs.sendH == nil {
 		t.Fatal("send handler not wired by registerDashboard")
 	}
-	if srv.sendH.router == nil {
+	if hs.sendH.router == nil {
 		t.Fatal("send handler router field is nil — wiring regression")
 	}
 	var _ SendRouter = (*session.Router)(nil)

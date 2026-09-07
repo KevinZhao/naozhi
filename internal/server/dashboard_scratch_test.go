@@ -17,28 +17,28 @@ import (
 // newScratchTestServer wires a newTestServer with a live ScratchPool + handler,
 // matching the production registerDashboard path but keeping the limiter
 // loose so burst tests don't spuriously trip.
-func newScratchTestServer(t *testing.T) *Server {
+func newScratchTestServer(t *testing.T) (*Server, *handlerSet) {
 	t.Helper()
-	srv := newTestServer(&mockPlatform{})
-	// registerDashboard already created the pool + handler; override the
-	// rate limiter with a permissive one so open/close/promote cycles in
-	// a single test don't hit the 5/min cap.
-	if srv.scratchH == nil {
-		t.Fatal("expected scratch handler to be wired by registerDashboard")
+	srv, hs := newTestServerHS(&mockPlatform{})
+	// Construction already created the pool + handler; override the rate
+	// limiter with a permissive one so open/close/promote cycles in a single
+	// test don't hit the 5/min cap.
+	if hs.scratchH == nil {
+		t.Fatal("expected scratch handler to be wired by buildServer")
 	}
-	srv.scratchH.SetOpenLimitForTest(nil)
-	return srv
+	hs.scratchH.SetOpenLimitForTest(nil)
+	return srv, hs
 }
 
 func TestScratchOpen_Happy(t *testing.T) {
-	srv := newScratchTestServer(t)
+	srv, hs := newScratchTestServer(t)
 	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 
 	body := `{"source_key":"feishu:direct:alice:general","quote":"what does the circuit breaker do?"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleOpen(w, req)
+	hs.scratchH.HandleOpen(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -64,32 +64,32 @@ func TestScratchOpen_Happy(t *testing.T) {
 }
 
 func TestScratchOpen_MissingQuote(t *testing.T) {
-	srv := newScratchTestServer(t)
+	srv, hs := newScratchTestServer(t)
 	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open",
 		strings.NewReader(`{"source_key":"feishu:direct:alice:general"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleOpen(w, req)
+	hs.scratchH.HandleOpen(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
 }
 
 func TestScratchOpen_UnknownSource(t *testing.T) {
-	srv := newScratchTestServer(t)
+	_, hs := newScratchTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open",
 		strings.NewReader(`{"source_key":"no:such:chat:general","quote":"hi"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleOpen(w, req)
+	hs.scratchH.HandleOpen(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
 
 func TestScratchOpen_SourceIsScratchRefused(t *testing.T) {
-	srv := newScratchTestServer(t)
+	srv, hs := newScratchTestServer(t)
 	// Simulate a live scratch source.
 	scratchKey := "scratch:aaaaaa:general:general"
 	srv.router.InjectSession(scratchKey, session.NewTestProcess())
@@ -98,31 +98,31 @@ func TestScratchOpen_SourceIsScratchRefused(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleOpen(w, req)
+	hs.scratchH.HandleOpen(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
 }
 
 func TestScratchOpen_InvalidSourceKey(t *testing.T) {
-	srv := newScratchTestServer(t)
+	_, hs := newScratchTestServer(t)
 	body := map[string]string{"source_key": "bad\x00key", "quote": "hi"}
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleOpen(w, req)
+	hs.scratchH.HandleOpen(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
 }
 
 func TestScratchDelete_InvalidID(t *testing.T) {
-	srv := newScratchTestServer(t)
+	_, hs := newScratchTestServer(t)
 	req := httptest.NewRequest(http.MethodDelete, "/api/scratch/short", nil)
 	req.SetPathValue("id", "short")
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleDelete(w, req)
+	hs.scratchH.HandleDelete(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
@@ -131,19 +131,19 @@ func TestScratchDelete_InvalidID(t *testing.T) {
 func TestScratchDelete_UnknownReturns204(t *testing.T) {
 	// Idempotent delete: unknown but well-formed ID returns 204 so a client
 	// retry after sweeper pruning does not surface as an error.
-	srv := newScratchTestServer(t)
+	_, hs := newScratchTestServer(t)
 	req := httptest.NewRequest(http.MethodDelete,
 		"/api/scratch/00000000000000000000000000000000", nil)
 	req.SetPathValue("id", "00000000000000000000000000000000")
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleDelete(w, req)
+	hs.scratchH.HandleDelete(w, req)
 	if w.Code != http.StatusNoContent {
 		t.Errorf("status = %d, want 204", w.Code)
 	}
 }
 
 func TestScratchDelete_Known(t *testing.T) {
-	srv := newScratchTestServer(t)
+	srv, hs := newScratchTestServer(t)
 	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 	sc, err := srv.scratchPool.Open(session.OpenOptions{
 		SourceKey: "feishu:direct:alice:general",
@@ -156,7 +156,7 @@ func TestScratchDelete_Known(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/api/scratch/"+sc.ID, nil)
 	req.SetPathValue("id", sc.ID)
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleDelete(w, req)
+	hs.scratchH.HandleDelete(w, req)
 	if w.Code != http.StatusNoContent {
 		t.Errorf("status = %d, want 204", w.Code)
 	}
@@ -166,7 +166,7 @@ func TestScratchDelete_Known(t *testing.T) {
 }
 
 func TestScratchPromote_RenamesSession(t *testing.T) {
-	srv := newScratchTestServer(t)
+	srv, hs := newScratchTestServer(t)
 	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 	sc, err := srv.scratchPool.Open(session.OpenOptions{
 		SourceKey: "feishu:direct:alice:general",
@@ -184,7 +184,7 @@ func TestScratchPromote_RenamesSession(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/"+sc.ID+"/promote", nil)
 	req.SetPathValue("id", sc.ID)
 	w := httptest.NewRecorder()
-	srv.scratchH.HandlePromote(w, req)
+	hs.scratchH.HandlePromote(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -210,12 +210,12 @@ func TestScratchPromote_RenamesSession(t *testing.T) {
 }
 
 func TestScratchPromote_UnknownID(t *testing.T) {
-	srv := newScratchTestServer(t)
+	_, hs := newScratchTestServer(t)
 	id := "00000000000000000000000000000000"
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/"+id+"/promote", nil)
 	req.SetPathValue("id", id)
 	w := httptest.NewRecorder()
-	srv.scratchH.HandlePromote(w, req)
+	hs.scratchH.HandlePromote(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
@@ -223,7 +223,7 @@ func TestScratchPromote_UnknownID(t *testing.T) {
 
 func TestScratchListFilteredFromSessions(t *testing.T) {
 	// handleList must hide scratch keys from the sidebar payload.
-	srv := newScratchTestServer(t)
+	srv, _ := newScratchTestServer(t)
 	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 	// 32-char scratch id (lowercase hex) matches the newScratchID shape.
 	scratchKey := "scratch:cccccccccccccccccccccccccccccccc:general:general"
@@ -246,7 +246,7 @@ func TestScratchListFilteredFromSessions(t *testing.T) {
 // context fields. Drives the end-to-end path rather than unit testing
 // the renderer in isolation.
 func TestScratchOpen_InjectsSurroundingContext(t *testing.T) {
-	srv := newScratchTestServer(t)
+	srv, hs := newScratchTestServer(t)
 	proc := session.NewTestProcess()
 	// Append 6 events; the 4th (t=4000) is the quoted user message.
 	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "user", Detail: "q1 before"})
@@ -261,7 +261,7 @@ func TestScratchOpen_InjectsSurroundingContext(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleOpen(w, req)
+	hs.scratchH.HandleOpen(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -315,7 +315,7 @@ func TestScratchOpen_InjectsSurroundingContext(t *testing.T) {
 // TestScratchOpen_TurnCountClamped prevents a client-supplied context_turns
 // above MaxScratchContextTurns from escaping the clamp.
 func TestScratchOpen_TurnCountClamped(t *testing.T) {
-	srv := newScratchTestServer(t)
+	srv, hs := newScratchTestServer(t)
 	proc := session.NewTestProcess()
 	srv.router.InjectSession("feishu:direct:alice:general", proc)
 
@@ -323,7 +323,7 @@ func TestScratchOpen_TurnCountClamped(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleOpen(w, req)
+	hs.scratchH.HandleOpen(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -346,7 +346,7 @@ func TestScratchOpen_TurnCountClamped(t *testing.T) {
 // Locks down that operators on stale client builds still get *some*
 // surrounding context rather than a bare <selected_quote>.
 func TestScratchOpen_NoTimestampFallback(t *testing.T) {
-	srv := newScratchTestServer(t)
+	srv, hs := newScratchTestServer(t)
 	proc := session.NewTestProcess()
 	// Six events across the log; no single one is marked as the quote
 	// because we are exercising the timestamp-less path.
@@ -362,7 +362,7 @@ func TestScratchOpen_NoTimestampFallback(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.HandleOpen(w, req)
+	hs.scratchH.HandleOpen(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -399,7 +399,7 @@ func TestScratchOpen_NoTimestampFallback(t *testing.T) {
 // and actually drops an idle scratch. Backdates lastUsed then triggers
 // sweep manually via exposed test seam.
 func TestScratchSweeperRegistered(t *testing.T) {
-	srv := newScratchTestServer(t)
+	srv, _ := newScratchTestServer(t)
 	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 	sc, _ := srv.scratchPool.Open(session.OpenOptions{
 		SourceKey: "feishu:direct:alice:general",

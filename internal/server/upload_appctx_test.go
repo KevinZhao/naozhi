@@ -25,7 +25,7 @@ func TestUploadCleanup_UsesAppCtxNotHubCtx(t *testing.T) {
 
 	// The store is owned by the Server from construction, so there is no
 	// window where a request could find it unwired.
-	srv := NewWithOptions(ServerOptions{
+	srv, hs := buildServerWithHandlers(ServerOptions{
 		Addr:   ":0",
 		Router: session.NewRouter(session.RouterConfig{}),
 	})
@@ -37,7 +37,7 @@ func TestUploadCleanup_UsesAppCtxNotHubCtx(t *testing.T) {
 		t.Error("the Hub must share the Server's upload store instance (HubOptions.UploadStore), " +
 			"otherwise a WS file_id and an HTTP upload resolve against different stores")
 	}
-	if srv.sendH == nil || srv.sendH.uploadStore != srv.uploadStore {
+	if hs.sendH == nil || hs.sendH.uploadStore != srv.uploadStore {
 		t.Error("SendHandler must share the same upload store instance")
 	}
 

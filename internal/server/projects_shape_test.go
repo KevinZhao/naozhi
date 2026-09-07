@@ -59,18 +59,17 @@ func TestDashboardJSON_Projects_ShapeContract(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
-	srv := NewWithOptions(ServerOptions{
+	_, hs := buildServerWithHandlers(ServerOptions{
 		Addr:           ":0",
 		Router:         router,
 		Platforms:      platforms,
 		Backend:        "claude",
 		ProjectManager: mgr,
 	})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/projects", nil)
 	w := httptest.NewRecorder()
-	srv.projectH.HandleList(w, req)
+	hs.projectH.HandleList(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
