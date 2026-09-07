@@ -2,12 +2,12 @@
   {
     "method": "GET",
     "path": "/api/access-profiles",
-    "handler_type": "*Server"
+    "handler_type": "*accessprofile.Handler"
   },
   {
     "method": "POST",
     "path": "/api/access-profiles",
-    "handler_type": "*Server"
+    "handler_type": "*accessprofile.Handler"
   },
   {
     "method": "POST",
@@ -42,12 +42,12 @@
   {
     "method": "GET",
     "path": "/api/cost/entries",
-    "handler_type": "*Server"
+    "handler_type": "*dashcost.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/cost/summary",
-    "handler_type": "*Server"
+    "handler_type": "*dashcost.Handlers"
   },
   {
     "method": "DELETE",
@@ -317,12 +317,12 @@
   {
     "method": "GET",
     "path": "/api/settings",
-    "handler_type": "*Server"
+    "handler_type": "*uisettings.Handler"
   },
   {
     "method": "PUT",
     "path": "/api/settings",
-    "handler_type": "*Server"
+    "handler_type": "*uisettings.Handler"
   },
   {
     "method": "GET",

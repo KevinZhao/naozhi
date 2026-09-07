@@ -12,20 +12,12 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
-	dashcost "github.com/naozhi/naozhi/internal/dashboard/cost"
-	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/accessprofile"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
-	extccassets "github.com/naozhi/naozhi/internal/dashboard/ext/ccassets"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/planner"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
-	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
@@ -49,16 +41,16 @@ const defaultDedupCapacity = 10000
 type Server struct {
 	// ── HTTP entry ─────────────────────────────────────
 	addr      string         // 读写: server.go
-	mux       *http.ServeMux // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
+	mux       *http.ServeMux // 读写: dashboard_ccassets.go, debug_expvar.go, debug_pprof.go, routes.go, server.go
 	startedAt time.Time      // 读写: server.go
 	onReady   func()         // 读写: server.go (called after listener is bound)
 	// appCtx is the process-lifetime context every background loop, the Hub
 	// and the upload-store cleaner hang off. Created in buildServer (#2552) so
 	// construction no longer has to wait for Start: Start links its own ctx to
 	// appCancel instead of minting a second context.
-	appCtx    context.Context    // 读写: server.go, routes.go (HubOptions.ParentCtx)
+	appCtx    context.Context    // 读写: build_dashboard.go, routes.go, server.go (HubOptions.ParentCtx)
 	appCancel context.CancelFunc // 读写: server.go (Start's linker + the Serve-error path)
-	logger    *slog.Logger       // 读写: server.go (injected component logger; nil → slog.Default via s.log())
+	logger    *slog.Logger       // 读写: server.go
 
 	// uploadStore holds pre-uploaded attachments until the matching send
 	// consumes them; shared by the Hub (WS file_ids) and SendHandler (HTTP).
@@ -66,60 +58,45 @@ type Server struct {
 	uploadStore *uploadStore // 读写: build_dashboard.go, routes.go
 
 	// ── core deps ──────────────────────────────────────
-	router     *session.Router  // 读写: server.go, dashboard.go, send.go, takeover.go, consumer.go
-	scheduler  cronScheduler    // 读写: server.go, dashboard.go, dashboard_cron.go, dashboard_cron_transcript.go, wshub.go (narrowed to the cronScheduler consumer view, #1648)
-	hub        *Hub             // 读写: server.go, dashboard.go, send.go (WebSocket hub)
-	projectMgr *project.Manager // 读写: server.go, dashboard.go, project_api.go, project_files.go
+	router     *session.Router  // 读写: build_dashboard.go, server.go, server_loops.go, takeover.go
+	scheduler  cronScheduler    // 读写: build_dashboard.go, server.go (narrowed to the cronScheduler consumer view, #1648)
+	hub        *Hub             // 读写: build_dashboard.go, dashboard_send.go, routes.go, send.go, server.go, server_loops.go, sessions_bus.go (WebSocket hub)
+	projectMgr *project.Manager // 读写: build_dashboard.go, server.go, server_loops.go
 
 	// ── multi-node ─────────────────────────────────────
-	nodes             *nodeRegistry       // 读写: server.go, routes.go (single owner of the node table; same instance as Hub.nodes)
-	reverseNodeServer *node.ReverseServer // 读写: server.go, dashboard.go
+	nodes             *nodeRegistry       // 读写: build_dashboard.go, server.go (single owner of the node table; same instance as Hub.nodes)
+	reverseNodeServer *node.ReverseServer // 读写: routes.go, server.go
 
 	// ── dashboard / API handler groups ─────────────────
-	auth         *auth.Handlers        // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
-	cronH        *dashcron.Handlers    // 读写: server.go, dashboard.go
-	transcribeH  *transcribe.Handler   // 读写: dashboard.go (ctor only in server.go)
-	discoveryH   *discovery.Handlers   // 读写: server.go, dashboard.go
-	projectH     *dashproject.Handlers // 读写: server.go, dashboard.go
-	sessionH     *dashsession.Handlers // 读写: server.go, dashboard.go
-	costH        *dashcost.Handlers    // 读写: server.go, routes.go
-	healthH      *HealthHandler        // 读写: server.go (ctor only)
-	sendH        *SendHandler          // 读写: dashboard.go (ctor only in server.go)
-	cliH         *cli.Handler          // 读写: server.go, dashboard.go
-	scratchH     *scratch.Handler      // 读写: dashboard.go (ctor only in server.go)
-	memoryH      *memory.Handler       // 读写: dashboard.go (ctor only in server.go)
-	ccAssetsH    *extccassets.Handler  // 读写: dashboard.go (ctor only in server.go)
-	agentEventsH *agentevents.Handler  // 读写: server.go, dashboard.go
+	auth       *auth.Handlers        // 读写: build_dashboard.go, dashboard_ccassets.go, debug_expvar.go, debug_pprof.go, routes.go, server.go
+	discoveryH *discovery.Handlers   // 读写: server.go
+	sessionH   *dashsession.Handlers // 读写: server.go, server_loops.go
+	healthH    *HealthHandler        // 读写: server.go (ctor only)
 
 	// ── send / dispatch wiring ─────────────────────────
 	dedup           *platform.Dedup              // 读写: server.go (ctor only)
-	sessionGuard    *session.Guard               // 读写: server.go, dashboard.go
-	msgQueue        *dispatch.MessageQueue       // 读写: server.go, dashboard.go
-	agents          map[string]session.AgentOpts // 读写: server.go, dashboard.go, dashboard_session.go
-	agentCommands   map[string]string            // 读写: server.go, dashboard.go
-	dashboardToken  string                       // 读写: server.go, dashboard.go, dashboard_auth.go
-	allowedRoot     string                       // 读写: server.go, dashboard.go (also Hub.allowedRoot)
+	sessionGuard    *session.Guard               // 读写: build_dashboard.go, server.go
+	msgQueue        *dispatch.MessageQueue       // 读写: build_dashboard.go, server.go
+	agents          map[string]session.AgentOpts // 读写: build_dashboard.go, server.go
+	agentCommands   map[string]string            // 读写: build_dashboard.go, server.go
+	dashboardToken  string                       // 读写: build_dashboard.go, debug_expvar.go, debug_pprof.go, routes.go, server.go
+	allowedRoot     string                       // 读写: build_dashboard.go, server.go (also Hub.allowedRoot)
 	noOutputTimeout time.Duration                // 读写: server.go (timeout error messages)
 	totalTimeout    time.Duration                // 读写: server.go
 
 	// ── on-disk paths / caches / sysession ─────────────
-	claudeDir      string               // 读写: server.go, takeover.go, discovery_cache.go, dashboard_cron_transcript.go, dashboard_discovered.go, dashboard_session.go
-	workspaceName  string               // 读写: server.go (ctor only; copied into SessionHandlers/HealthHandler)
+	claudeDir      string               // 读写: server.go, takeover.go
 	discoveryCache *discoveryCache      // 读写: server.go (background-cached local discovery results)
-	scratchPool    *session.ScratchPool // 读写: server.go, dashboard.go, wshub.go (ephemeral aside sessions for preview drawer)
-	sysessionMgr   *sysession.Manager   // 读写: dashboard.go (system-daemon Tick scheduling)
+	scratchPool    *session.ScratchPool // 读写: build_dashboard.go, routes.go, server.go (ephemeral aside sessions for preview drawer)
+	sysessionMgr   *sysession.Manager   // 读写: build_dashboard.go (system-daemon Tick scheduling)
 	orient         *orientConfig        // 读: routes.go (image auto-orientation; nil = feature off)
-	uiSettingsH    *uisettings.Handler  // 读: routes.go (GET/PUT /api/settings; dashboard/ext/uisettings)
 	// accessProfilesH serves GET+POST /api/access-profiles; empty ConfigPath
 	// keeps create disabled (400). 读: routes.go.
-	accessProfilesH *accessprofile.Handler
-	systemH         *system.Handlers  // 读: routes.go (/api/system/*; dashboard/ext/system)
-	plannerH        *planner.Handlers // 读: routes.go (GET /api/planner/stats; dashboard/ext/planner)
 
 	// ── modes / resolver / node cache ──────────────────
-	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars)
+	debugMode bool                 // 读写: routes.go (gates /api/debug/pprof and /api/debug/vars)
 	headless  bool                 // 读写: send.go (explicit no-hub mode; gates the nil-hub send fallback)
-	resolver  *session.KeyResolver // 读写: server.go, dashboard.go (session-key → opts derivation)
+	resolver  *session.KeyResolver // 读写: build_dashboard.go, server.go (session-key → opts derivation)
 	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data)
 
 	// ── watchdog counters ──────────────────────────────
@@ -193,6 +170,18 @@ func NewWithOptions(opts ServerOptions) *Server {
 // positional `func New(addr string, ...)` constructor (#614; pinned by
 // TestServerNew_NotReintroduced).
 func buildServer(opts ServerOptions) *Server {
+	s, _ := buildServerWithHandlers(opts)
+	return s
+}
+
+// buildServerWithHandlers is buildServer plus the handlerSet it built. #2553
+// made the set a construction local — production discards it after route
+// registration — but in-package tests that drive a handler method directly
+// (sendH.handleAttachment, scratchH.HandleOpen, …) need the instance the Server
+// was actually wired with, and rebuilding those dependencies per test would
+// test a different object. This is the seam for that, and the only reason it
+// returns two values.
+func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	addr := opts.Addr
 	router := opts.Router
 	platforms := opts.Platforms
@@ -259,7 +248,6 @@ func buildServer(opts ServerOptions) *Server {
 		agentCommands:   agentCommands,
 		scheduler:       scheduler,
 		claudeDir:       claudeDir,
-		workspaceName:   opts.WorkspaceName,
 		allowedRoot:     opts.AllowedRoot,
 		noOutputTimeout: opts.NoOutputTimeout,
 		totalTimeout:    opts.TotalTimeout,
@@ -272,17 +260,25 @@ func buildServer(opts ServerOptions) *Server {
 		nodes:           nodes,
 		sysessionMgr:    opts.SysessionManager,
 		orient:          buildOrientConfig(opts),
-		systemH:         buildSystemHandlers(opts, router),
-		plannerH:        planner.New(planner.Deps{Router: router}),
+
+		// auth stays on Server: debug_expvar / debug_pprof / ccassets wrap
+		// through it and RotateDashboardSessions reaches for it at runtime.
+		// Handler-group literals live in build_handlers.go (limiter rationale there).
+		auth: buildAuthHandlers(opts, cookieSecret, cookieGen),
+	}
+
+	// hs carries the mount-only handlers from here to route registration and
+	// then goes out of scope (#2553, handler_set.go). Only the four lifecycle
+	// participants get copied onto Server.
+	hs := &handlerSet{
+		systemH:  buildSystemHandlers(opts, router),
+		plannerH: planner.New(planner.Deps{Router: router}),
 		// Empty StateDir yields an in-memory prefs store (no persistence).
 		uiSettingsH: uisettings.New(uiprefs.New(opts.StateDir)),
 		// Empty ConfigPath keeps the create endpoint disabled (400).
 		accessProfilesH: accessprofile.New(router, opts.ConfigPath, opts.AccessProfileSecretsDir),
-
-		// Handler-group literals live in build_handlers.go (limiter rationale there).
-		auth:        buildAuthHandlers(opts, cookieSecret, cookieGen),
-		cronH:       buildCronHandlers(opts, claudeDir),
-		transcribeH: buildTranscribeHandler(opts),
+		cronH:           buildCronHandlers(opts, claudeDir),
+		transcribeH:     buildTranscribeHandler(opts),
 	}
 
 	// The process-lifetime context is created HERE, not in Start (#2552).
@@ -300,7 +296,7 @@ func buildServer(opts ServerOptions) *Server {
 	// Hub + the handlers that depend on it (build_dashboard.go). After this
 	// line s.hub is non-nil for the Server's whole life, which is what lets the
 	// call sites below drop their `if s.hub != nil` guards.
-	s.buildDashboard()
+	s.buildDashboard(hs)
 
 	// Retired-store load is best-effort (parse error ⇒ empty store); it is
 	// persisted only when StateDir is configured.
@@ -318,11 +314,11 @@ func buildServer(opts ServerOptions) *Server {
 
 	s.discoveryCache = newDiscoveryCache(claudeDir, s.router.ManagedExcludeSets, opts.ProjectManager)
 
-	s.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, s.hub.BroadcastSessionsUpdate, s.appCtx)
-	s.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache, s.hub.ctx)
+	hs.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, s.hub.BroadcastSessionsUpdate, s.appCtx)
+	hs.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache, s.hub.ctx)
 	agentIDs := agentIDList(agents)
-	s.costH = buildCostHandlers(opts, router)
-	s.sessionH = dashsession.New(dashsession.Deps{
+	hs.costH = buildCostHandlers(opts, router)
+	hs.sessionH = dashsession.New(dashsession.Deps{
 		// /api/sessions snapshot enrichment goes through the hub's tailer registry.
 		SnapshotEnricher: s.hub.enrichSnapshot,
 		Router:           router,
@@ -349,8 +345,8 @@ func buildServer(opts ServerOptions) *Server {
 
 		ProjectStableKeyEnabled: opts.ProjectStableKeyEnabled,
 	})
-	s.sessionH.InitStaticStats()
-	s.sessionH.WarmHistoryCache()
+	hs.sessionH.InitStaticStats()
+	hs.sessionH.WarmHistoryCache()
 	// Router.Reset/Remove hook (LRU eviction deliberately does not fire it),
 	// registered once AFTER sessionH exists so the fan-out is never
 	// half-wired while WarmHistoryCache runs: msgQueue.Cleanup frees the
@@ -358,7 +354,7 @@ func buildServer(opts ServerOptions) *Server {
 	// session visible to the history popover within one poll.
 	{
 		msgCleanup := s.msgQueue.Cleanup
-		sessionH := s.sessionH
+		sessionH := hs.sessionH
 		router.SetOnKeyRetired(func(key string) {
 			msgCleanup(key)
 			sessionH.InvalidateHistoryCache()
@@ -366,9 +362,9 @@ func buildServer(opts ServerOptions) *Server {
 	}
 
 	router.SetOnSessionRetired(func(_ string, sessionID string) {
-		s.sessionH.RecordRetired(sessionID)
+		hs.sessionH.RecordRetired(sessionID)
 	})
-	s.agentEventsH = agentevents.New(agentevents.Deps{
+	hs.agentEventsH = agentevents.New(agentevents.Deps{
 		Router:     router,
 		NodeAccess: s.nodes,
 	})
@@ -379,7 +375,7 @@ func buildServer(opts ServerOptions) *Server {
 		startupCtx = context.Background()
 	}
 	// /api/cli/backends?node=<id> proxies the manifest to a remote node.
-	s.cliH = cli.NewCLIBackendsHandlerCtx(startupCtx, router, s.nodes)
+	hs.cliH = cli.NewCLIBackendsHandlerCtx(startupCtx, router, s.nodes)
 	platNames := platformNameSet(platforms)
 	s.healthH = &HealthHandler{
 		router:             router,
@@ -420,28 +416,19 @@ func buildServer(opts ServerOptions) *Server {
 		}
 	}
 
-	// The cron handlers nil-guard their limiters (partial construction in
-	// tests), so a refactor that forgets to wire one would silently run
-	// unlimited. Fail fast at boot instead of under attack.
-	if s.costH != nil && !s.costH.HasLimiter() {
-		panic("server: cost limiter must be non-nil")
-	}
-	if s.scheduler != nil && s.cronH != nil {
-		if !s.cronH.HasRunsLimiter() {
-			panic("server: runsLimiter must be non-nil when scheduler is wired")
-		}
-		if !s.cronH.HasListLimiter() {
-			panic("server: listLimiter must be non-nil when scheduler is wired")
-		}
-		if !s.cronH.HasWriteLimiter() {
-			panic("server: writeLimiter must be non-nil when scheduler is wired")
-		}
-		if !s.cronH.HasTranscriptLimiter() {
-			panic("server: transcriptLimiter must be non-nil when scheduler is wired")
-		}
-	}
+	hs.checkLimiters(s.scheduler != nil)
 
-	return s
+	// Server keeps the four handlers that outlive registration (see
+	// handler_set.go for why each one does).
+	s.sessionH = hs.sessionH
+	s.discoveryH = hs.discoveryH
+
+	// Routes are registered HERE, not in Start (#2553): hs can only be a local
+	// if nothing after construction needs it. Start keeps the goroutine starts
+	// (startDashboardLoops) and the routes that need the dispatcher.
+	s.registerDashboard(hs)
+
+	return s, hs
 }
 
 // listenTCP is the listener factory Start binds with; a package var so tests
@@ -542,7 +529,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 	defer s.appCancel()
 
-	s.registerDashboard()
+	s.startDashboardLoops()
 	s.nodeCache.StartLoop(s.appCtx)
 	s.discoveryCache.startLoop(s.appCtx)
 	s.startProjectScanLoop(s.appCtx)

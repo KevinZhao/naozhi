@@ -37,47 +37,53 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 // errEmptyJSONBody re-exports httputil.ErrEmptyJSONBody for errors.Is call sites.
 var errEmptyJSONBody = httputil.ErrEmptyJSONBody
 
-// registerDashboard starts the dashboard's background goroutines and registers
-// its routes. Construction moved to buildDashboard in #2552 — nothing here may
-// build a dependency, so `s.hub == nil` is no longer reachable and the
-// "#431 setter-vs-Start ordering window" it used to warn about is gone.
-func (s *Server) registerDashboard() {
+// registerDashboard registers the dashboard's routes. Construction moved to
+// buildDashboard in #2552 and the goroutine starts moved to
+// startDashboardLoops in #2553, so this function is registration only —
+// nothing here may build a dependency or start a goroutine. That is what lets
+// buildServer call it with a local handlerSet that then goes out of scope.
+// startDashboardLoops starts the dashboard's background goroutines. Separate
+// from registerDashboard since #2553: registration runs at construction (so the
+// handlerSet can be a local), but a goroutine started at construction would
+// leak its ticker if a later construction step panicked, so the starts stay in
+// Start. Same rule buildDashboard already follows.
+func (s *Server) startDashboardLoops() {
 	// The upload-store cleanup loop is process-lifetime (appCtx), not
 	// Hub-lifetime: a Hub hot-reload must not cancel it and leak temp files.
 	s.uploadStore.StartCleanup(s.appCtx)
 
-	// Sweeper starts here rather than in buildDashboard so a construction
-	// failure cannot leak the ticker goroutine.
 	if s.scratchPool != nil {
 		s.scratchPool.StartSweeper()
 	}
+}
 
+func (s *Server) registerDashboard(hs *handlerSet) {
 	// Authenticated API routes
 	auth := s.auth.RequireAuth
-	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.Handle))
+	s.mux.HandleFunc("GET /api/cli/backends", auth(hs.cliH.Handle))
 	// Access profiles: list returns only non-sensitive fields (never env
 	// values or tokens); create is disabled (400) when ConfigPath is unset.
-	s.mux.HandleFunc("GET /api/access-profiles", auth(s.accessProfilesH.HandleList))
-	s.mux.HandleFunc("POST /api/access-profiles", auth(s.accessProfilesH.HandleCreate))
+	s.mux.HandleFunc("GET /api/access-profiles", auth(hs.accessProfilesH.HandleList))
+	s.mux.HandleFunc("POST /api/access-profiles", auth(hs.accessProfilesH.HandleCreate))
 	// Route groups live in same-file helpers so the routes_snapshot AST gate
 	// (which scans routes.go as a whole) stays stable.
-	s.registerSessionRoutes(auth)
-	s.registerDiscoveredRoutes(auth)
-	s.registerProjectRoutes(auth)
+	s.registerSessionRoutes(hs, auth)
+	s.registerDiscoveredRoutes(hs, auth)
+	s.registerProjectRoutes(hs, auth)
 	// Process-resource probe (RSS / goroutines / planner fan-out) that does not
 	// require the loopback-only expvar surface.
-	s.mux.HandleFunc("GET /api/planner/stats", auth(s.plannerH.HandleStats))
-	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.HandleTranscribe))
-	s.registerCronRoutes(auth)
+	s.mux.HandleFunc("GET /api/planner/stats", auth(hs.plannerH.HandleStats))
+	s.mux.HandleFunc("POST /api/transcribe", auth(hs.transcribeH.HandleTranscribe))
+	s.registerCronRoutes(hs, auth)
 	// system-session daemons (docs/rfc/system-session.md §9.2/§9.3)
-	s.mux.HandleFunc("GET /api/system/daemons", auth(s.systemH.HandleDaemons))
-	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.systemH.HandleClearLabelOrigin))
+	s.mux.HandleFunc("GET /api/system/daemons", auth(hs.systemH.HandleDaemons))
+	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(hs.systemH.HandleClearLabelOrigin))
 	// self-update (docs/rfc/dashboard-update-notice.md)
-	s.mux.HandleFunc("GET /api/system/update", auth(s.systemH.HandleUpdateStatus))
-	s.mux.HandleFunc("POST /api/system/update/apply", auth(s.systemH.HandleUpdateApply))
+	s.mux.HandleFunc("GET /api/system/update", auth(hs.systemH.HandleUpdateStatus))
+	s.mux.HandleFunc("POST /api/system/update/apply", auth(hs.systemH.HandleUpdateApply))
 	// instance-wide UI preferences, persisted server-side (dashboard/ext/uisettings)
-	s.mux.HandleFunc("GET /api/settings", auth(s.uiSettingsH.HandleGet))
-	s.mux.HandleFunc("PUT /api/settings", auth(s.uiSettingsH.HandlePut))
+	s.mux.HandleFunc("GET /api/settings", auth(hs.uiSettingsH.HandleGet))
+	s.mux.HandleFunc("PUT /api/settings", auth(hs.uiSettingsH.HandlePut))
 	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.HandleLogout))
 	// pprof / expvar are auth-gated + loopback-only AND require debug_mode so a
 	// leaked dashboard token cannot enumerate goroutine stacks or counters.
@@ -86,13 +92,13 @@ func (s *Server) registerDashboard() {
 		s.registerPprof()
 		s.registerExpvar()
 	}
-	s.registerScratchRoutes(auth)
+	s.registerScratchRoutes(hs, auth)
 	// memory link preview (docs/rfc/memory-link-rendering.md): serves
 	// ~/.claude/projects/<scope>/memory/<slug>.md for [[slug]] hover cards.
-	s.mux.HandleFunc("GET /api/memory/{slug}", auth(s.memoryH.HandleGet))
+	s.mux.HandleFunc("GET /api/memory/{slug}", auth(hs.memoryH.HandleGet))
 
 	// Installed-asset browser (docs/rfc/cc-asset-browser.md).
-	s.registerAssetBrowserRoutes(auth)
+	s.registerAssetBrowserRoutes(hs, auth)
 
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.HandleLogin)
@@ -142,89 +148,89 @@ func (s *Server) registerDashboard() {
 
 // registerSessionRoutes wires the session-CRUD route group. `auth` is the
 // caller's RequireAuth wrapper so every route here stays authenticated.
-func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
-	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.HandleList))
-	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.HandleEvents))
-	s.mux.HandleFunc("GET /api/sessions/runs", auth(s.sessionH.HandleRuns))
+func (s *Server) registerSessionRoutes(hs *handlerSet, auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/sessions", auth(hs.sessionH.HandleList))
+	s.mux.HandleFunc("GET /api/sessions/events", auth(hs.sessionH.HandleEvents))
+	s.mux.HandleFunc("GET /api/sessions/runs", auth(hs.sessionH.HandleRuns))
 	// Cost ledger read API (docs/rfc/cost-ledger.md §7); unit-bucketed, rate limited.
-	s.mux.HandleFunc("GET /api/cost/summary", auth(s.costH.HandleSummary))
-	s.mux.HandleFunc("GET /api/cost/entries", auth(s.costH.HandleEntries))
-	s.mux.HandleFunc("GET /api/sessions/git", auth(s.sessionH.HandleGit))
-	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
-	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
-	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
-	s.mux.HandleFunc("POST /api/sessions/bind", auth(s.sendH.handleBind))
-	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
-	s.mux.HandleFunc("POST /api/sessions/orient", auth(s.sendH.handleOrient))
-	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
-	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.HandleDelete))
-	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
-	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
-	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
+	s.mux.HandleFunc("GET /api/cost/summary", auth(hs.costH.HandleSummary))
+	s.mux.HandleFunc("GET /api/cost/entries", auth(hs.costH.HandleEntries))
+	s.mux.HandleFunc("GET /api/sessions/git", auth(hs.sessionH.HandleGit))
+	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(hs.agentEventsH.HandleAgentEvents))
+	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(hs.agentEventsH.HandleToolResult))
+	s.mux.HandleFunc("POST /api/sessions/send", auth(hs.sendH.handleSend))
+	s.mux.HandleFunc("POST /api/sessions/bind", auth(hs.sendH.handleBind))
+	s.mux.HandleFunc("POST /api/sessions/upload", auth(hs.sendH.handleUpload))
+	s.mux.HandleFunc("POST /api/sessions/orient", auth(hs.sendH.handleOrient))
+	s.mux.HandleFunc("GET /api/sessions/attachment", auth(hs.sendH.handleAttachment))
+	s.mux.HandleFunc("DELETE /api/sessions", auth(hs.sessionH.HandleDelete))
+	s.mux.HandleFunc("POST /api/sessions/resume", auth(hs.sessionH.HandleResume))
+	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(hs.sessionH.HandleInterrupt))
+	s.mux.HandleFunc("PATCH /api/sessions/label", auth(hs.sessionH.HandleSetLabel))
 	// Per-session model/effort override (docs/rfc/dashboard-model-effort-control.md).
-	s.mux.HandleFunc("POST /api/sessions/override", auth(s.sessionH.HandleOverride))
+	s.mux.HandleFunc("POST /api/sessions/override", auth(hs.sessionH.HandleOverride))
 }
 
 // registerScratchRoutes wires the scratch-drawer route group; deployments
 // without a scratch pool register no scratch routes.
-func (s *Server) registerScratchRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
-	if s.scratchH == nil {
+func (s *Server) registerScratchRoutes(hs *handlerSet, auth func(http.HandlerFunc) http.HandlerFunc) {
+	if hs.scratchH == nil {
 		return
 	}
-	s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.HandleOpen))
-	s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.HandlePromote))
-	s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.HandleDelete))
+	s.mux.HandleFunc("POST /api/scratch/open", auth(hs.scratchH.HandleOpen))
+	s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(hs.scratchH.HandlePromote))
+	s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(hs.scratchH.HandleDelete))
 }
 
 // registerProjectRoutes wires the project route group; all handlers are
 // *dashproject.Handlers methods (the *Server-owned /api/planner/stats stays
 // at the call site).
-func (s *Server) registerProjectRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
-	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.HandleList))
-	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.HandleConfigGet))
-	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.HandleConfigPut))
-	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.HandlePlannerRestart))
-	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.HandleFavoriteToggle))
-	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.HandleFilesExists))
-	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.HandleFileGet))
+func (s *Server) registerProjectRoutes(hs *handlerSet, auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/projects", auth(hs.projectH.HandleList))
+	s.mux.HandleFunc("GET /api/projects/config", auth(hs.projectH.HandleConfigGet))
+	s.mux.HandleFunc("PUT /api/projects/config", auth(hs.projectH.HandleConfigPut))
+	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(hs.projectH.HandlePlannerRestart))
+	s.mux.HandleFunc("POST /api/projects/favorite", auth(hs.projectH.HandleFavoriteToggle))
+	s.mux.HandleFunc("POST /api/projects/files/exists", auth(hs.projectH.HandleFilesExists))
+	s.mux.HandleFunc("GET /api/projects/file", auth(hs.projectH.HandleFileGet))
 	// Workspace file browser: listing reuses HandleFileGet's path-safety;
 	// upload is the only write in the file API (CSRF gated by RequireAuth on POST).
-	s.mux.HandleFunc("GET /api/projects/files/list", auth(s.projectH.HandleFilesList))
-	s.mux.HandleFunc("POST /api/projects/files/upload", auth(s.projectH.HandleFilesUpload))
+	s.mux.HandleFunc("GET /api/projects/files/list", auth(hs.projectH.HandleFilesList))
+	s.mux.HandleFunc("POST /api/projects/files/upload", auth(hs.projectH.HandleFilesUpload))
 }
 
 // registerDiscoveredRoutes wires the discovered-session route group
 // (list / preview / takeover / close).
-func (s *Server) registerDiscoveredRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
-	s.mux.HandleFunc("GET /api/discovered", auth(s.discoveryH.HandleList))
-	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.HandlePreview))
-	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.HandleTakeover))
-	s.mux.HandleFunc("POST /api/discovered/close", auth(s.discoveryH.HandleClose))
+func (s *Server) registerDiscoveredRoutes(hs *handlerSet, auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/discovered", auth(hs.discoveryH.HandleList))
+	s.mux.HandleFunc("GET /api/discovered/preview", auth(hs.discoveryH.HandlePreview))
+	s.mux.HandleFunc("POST /api/discovered/takeover", auth(hs.discoveryH.HandleTakeover))
+	s.mux.HandleFunc("POST /api/discovered/close", auth(hs.discoveryH.HandleClose))
 }
 
 // registerCronRoutes wires the cron route group (CRUD + pause/resume/trigger/
 // preview + run-history + transcript).
-func (s *Server) registerCronRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
-	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.HandleList))
-	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.HandleCreate))
-	s.mux.HandleFunc("PATCH /api/cron", auth(s.cronH.HandleUpdate))
-	s.mux.HandleFunc("DELETE /api/cron", auth(s.cronH.HandleDelete))
-	s.mux.HandleFunc("POST /api/cron/pause", auth(s.cronH.HandlePause))
-	s.mux.HandleFunc("POST /api/cron/resume", auth(s.cronH.HandleResume))
-	s.mux.HandleFunc("POST /api/cron/trigger", auth(s.cronH.HandleTrigger))
-	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.HandlePreview))
+func (s *Server) registerCronRoutes(hs *handlerSet, auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/cron", auth(hs.cronH.HandleList))
+	s.mux.HandleFunc("POST /api/cron", auth(hs.cronH.HandleCreate))
+	s.mux.HandleFunc("PATCH /api/cron", auth(hs.cronH.HandleUpdate))
+	s.mux.HandleFunc("DELETE /api/cron", auth(hs.cronH.HandleDelete))
+	s.mux.HandleFunc("POST /api/cron/pause", auth(hs.cronH.HandlePause))
+	s.mux.HandleFunc("POST /api/cron/resume", auth(hs.cronH.HandleResume))
+	s.mux.HandleFunc("POST /api/cron/trigger", auth(hs.cronH.HandleTrigger))
+	s.mux.HandleFunc("GET /api/cron/preview", auth(hs.cronH.HandlePreview))
 	// Run history / transcript / events / snapshot share the run_id path
 	// param and the same per-IP rate limit.
-	s.mux.HandleFunc("GET /api/cron/runs", auth(s.cronH.HandleRunsList))
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}", auth(s.cronH.HandleRunDetail))
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/transcript", auth(s.cronH.HandleRunTranscript))
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/events", auth(s.cronH.HandleRunEvents))
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/snapshot", auth(s.cronH.HandleRunSnapshot))
+	s.mux.HandleFunc("GET /api/cron/runs", auth(hs.cronH.HandleRunsList))
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}", auth(hs.cronH.HandleRunDetail))
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/transcript", auth(hs.cronH.HandleRunTranscript))
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/events", auth(hs.cronH.HandleRunEvents))
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/snapshot", auth(hs.cronH.HandleRunSnapshot))
 	// Human confirmation queue (docs/rfc/agentcore-cloud-sandbox.md §7.4);
 	// confirm/replay are POSTs and replay stops the live run first.
-	s.mux.HandleFunc("GET /api/cron/attention", auth(s.cronH.HandleAttentionList))
-	s.mux.HandleFunc("POST /api/cron/runs/{run_id}/confirm", auth(s.cronH.HandleRunConfirm))
-	s.mux.HandleFunc("POST /api/cron/runs/{run_id}/replay", auth(s.cronH.HandleRunReplay))
+	s.mux.HandleFunc("GET /api/cron/attention", auth(hs.cronH.HandleAttentionList))
+	s.mux.HandleFunc("POST /api/cron/runs/{run_id}/confirm", auth(hs.cronH.HandleRunConfirm))
+	s.mux.HandleFunc("POST /api/cron/runs/{run_id}/replay", auth(hs.cronH.HandleRunReplay))
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {

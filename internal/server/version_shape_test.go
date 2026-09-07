@@ -27,7 +27,6 @@ func TestHealth_VersionAbsentOnUnauthedProbe(t *testing.T) {
 		DashboardToken: "secret",
 		Version:        "v1.2.3-test",
 	})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -66,7 +65,6 @@ func TestHealth_VersionPresentOnAuthedProbe(t *testing.T) {
 		DashboardToken: "secret",
 		Version:        "v1.2.3-test",
 	})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
@@ -98,7 +96,6 @@ func TestStats_VersionTagPresent(t *testing.T) {
 		Backend: "claude",
 		Version: "v9.9.9-test",
 	})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
@@ -142,7 +139,6 @@ func TestStats_VersionTagOmittedWhenUnset(t *testing.T) {
 		Backend: "claude",
 		// Version empty
 	})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()

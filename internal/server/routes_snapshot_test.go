@@ -256,8 +256,11 @@ func handlerTypeOf(e ast.Expr) string {
 	return "<unmapped:" + field + ">"
 }
 
-// serverFieldType maps Server struct field names → stable type identifier
-// for routes_snapshot.go. Keep in sync with server.go's Server struct.
+// serverFieldType maps handler FIELD names → stable type identifier for
+// routes_snapshot.go. Since #2553 most of these live on handlerSet
+// (handler_set.go) rather than Server; the resolver keys on the field name
+// only, so `hs.cronH.x` and `s.cronH.x` map identically. Keep in sync with
+// both structs.
 //
 // Phase 4-5 will move these handler types into sub-packages; that PR's
 // snapshot diff will rewrite this map AND testdata/routes.golden.json
@@ -303,6 +306,15 @@ var packageFuncType = map[string]string{
 }
 
 var serverFieldType = map[string]string{
+	// Three entries missing before #2553: accessProfilesH / uiSettingsH / costH
+	// were reached as `s.<field>.<method>`, and when the map lookup failed the
+	// `receiver is s ⇒ *Server` fallback swallowed it, so the golden recorded
+	// six routes as *Server. Moving the handlers onto handlerSet (receiver hs)
+	// removed that fallback and surfaced the wrong entries — the point of the
+	// "<unmapped:...>" fail-loud. The golden is corrected in the same commit.
+	"accessProfilesH":   "*accessprofile.Handler",
+	"uiSettingsH":       "*uisettings.Handler",
+	"costH":             "*dashcost.Handlers",
 	"cliH":              "*cli.Handler",
 	"sessionH":          "*dashsession.Handlers",
 	"agentEventsH":      "*agentevents.Handler",

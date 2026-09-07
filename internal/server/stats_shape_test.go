@@ -38,7 +38,6 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 		Agents:  agents,
 		Backend: "claude",
 	})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
@@ -123,7 +122,6 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 func TestHandleAPISessions_StatsProjectsAlwaysArray(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
@@ -153,7 +151,6 @@ func TestHandleAPISessions_StatsProjectsAlwaysArray(t *testing.T) {
 func TestHandleAPISessions_StatsStaticStructEmbedsFlatJSON(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()

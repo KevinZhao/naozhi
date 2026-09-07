@@ -68,8 +68,11 @@ func TestNewWithOptions_FieldsRoundTrip(t *testing.T) {
 	if tag := replyTagForBackend("kiro"); tag != "kiro" {
 		t.Errorf("backendTag = %q, want kiro", tag)
 	}
-	if srv.workspaceName != "Alpha" {
-		t.Errorf("workspaceName = %q, want Alpha", srv.workspaceName)
+	// Same shape as backendTag above: Server.workspaceName was write-only and
+	// removed in #2553 (nothing ever read s.workspaceName — the value goes
+	// straight from opts into HealthHandler). Assert it reaches the consumer.
+	if srv.healthH == nil || srv.healthH.workspaceName != "Alpha" {
+		t.Errorf("healthH.workspaceName = %q, want Alpha", srv.healthH.workspaceName)
 	}
 	if srv.addr != ":0" {
 		t.Errorf("addr = %q, want :0", srv.addr)

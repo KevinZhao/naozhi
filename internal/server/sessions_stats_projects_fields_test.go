@@ -46,7 +46,6 @@ func TestSessionsStatsProjects_CarriesPaletteFields(t *testing.T) {
 		ProjectManager:          mgr,
 		ProjectStableKeyEnabled: true,
 	})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
@@ -108,7 +107,6 @@ func TestSessionsStatsProjects_EmptyListIsArrayNotOmitted(t *testing.T) {
 		Backend:        "claude",
 		ProjectManager: mgr,
 	})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()

@@ -228,7 +228,7 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 }
 
 // BroadcastCronRunStarted emits cron_run_started to authenticated clients.
-// Called from the cron scheduler's onRunStarted hook (set in dashboard.go).
+// Called from the cron scheduler's onRunStarted hook (set in build_dashboard.go).
 func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, trigger, sessionID string, fresh bool) {
 	// jobID / runID come from cron.generateHexID; sanitizeHexIDForBroadcast
 	// skips SanitizeForLog's allocating slow path when the hex shape holds.

@@ -23,7 +23,6 @@ func newTestServerTrustedProxy(p *mockPlatform, token string) *Server {
 		DashboardToken: token,
 		TrustedProxy:   true,
 	})
-	s.registerDashboard()
 	return s
 }
 
@@ -154,7 +153,6 @@ func TestHandleUpgrade_LimiterDeny_SetsRetryAfter(t *testing.T) {
 		DashboardToken: "secret",
 		TrustedProxy:   false,
 	})
-	srv.registerDashboard()
 	srv.hub.wsUpgradeLimiter = func(ip string) bool { return false }
 
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)

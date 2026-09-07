@@ -26,8 +26,9 @@ import (
 
 // buildDashboard constructs the WebSocket hub and the handlers that depend on
 // it. Called from buildServer after the Server literal and s.scratchPool exist;
-// every dependency it reads is set by then.
-func (s *Server) buildDashboard() {
+// every dependency it reads is set by then. The mount-only handlers land on hs
+// (#2553) rather than on Server.
+func (s *Server) buildDashboard(hs *handlerSet) {
 	// The upload store comes first so it can be passed into NewHub instead of
 	// being pushed in with SetUploadStore afterwards. Its cleanup loop is
 	// started (not created) in registerDashboard against appCtx.
@@ -62,7 +63,7 @@ func (s *Server) buildDashboard() {
 		ParentCtx: s.appCtx,
 	})
 
-	s.sendH = &SendHandler{
+	hs.sendH = &SendHandler{
 		nodeAccess: s.nodes,
 		engine:     s.hub.engine,
 		// SendRouter consumer view; reads never go via the engine's HubRouter (#566).
@@ -78,7 +79,7 @@ func (s *Server) buildDashboard() {
 	// Scratch (ephemeral aside) API: pool built in buildServer; the sweeper
 	// goroutine starts in registerDashboard.
 	if s.scratchPool != nil {
-		s.scratchH = scratch.New(scratch.Deps{
+		hs.scratchH = scratch.New(scratch.Deps{
 			Broadcaster: s.hub,
 			Router:      s.hub.router,
 			Pool:        s.scratchPool,
@@ -87,10 +88,9 @@ func (s *Server) buildDashboard() {
 		})
 	}
 
-	// memory link preview (docs/rfc/memory-link-rendering.md). The nil check
-	// keeps an injected test double.
-	if s.memoryH == nil {
-		s.memoryH = memory.New(resolveClaudeProjectsDir(), newIPLimiterWithProxy(memory.MemoryLimiterRate, memory.MemoryLimiterBurst, s.auth.TrustedProxy))
+	// memory link preview (docs/rfc/memory-link-rendering.md).
+	if hs.memoryH == nil {
+		hs.memoryH = memory.New(resolveClaudeProjectsDir(), newIPLimiterWithProxy(memory.MemoryLimiterRate, memory.MemoryLimiterBurst, s.auth.TrustedProxy))
 	}
 
 	// Push session list changes to WS clients. Still a setter because the
