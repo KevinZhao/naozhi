@@ -1,7 +1,6 @@
 package server
 
 import (
-	"os"
 	"regexp"
 	"testing"
 )
@@ -25,10 +24,7 @@ import (
 func TestResubscribeTimeout_MarksSubGenReleasable(t *testing.T) {
 	t.Parallel()
 
-	src, err := os.ReadFile("wshub_eventpush.go")
-	if err != nil {
-		t.Fatalf("read wshub_eventpush.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
 	text := string(src)
 
 	// Isolate the resubscribeEvents body so the anchor cannot be satisfied by

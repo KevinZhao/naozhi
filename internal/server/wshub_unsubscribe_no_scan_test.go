@@ -1,10 +1,7 @@
 package server
 
 import (
-	"os"
-	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -26,21 +23,11 @@ import (
 func TestHandleUnsubscribe_NoFullClientScan(t *testing.T) {
 	t.Parallel()
 
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	dir := filepath.Dir(self)
-
-	src, err := os.ReadFile(filepath.Join(dir, "wshub_subscribe.go"))
-	if err != nil {
-		t.Fatalf("read wshub_subscribe.go: %v", err)
-	}
-	body := string(src)
+	body := packageGoSource(t)
 
 	startIdx := strings.Index(body, "func (h *Hub) handleUnsubscribe(")
 	if startIdx < 0 {
-		t.Fatal("could not locate handleUnsubscribe in wshub_subscribe.go")
+		t.Fatal("could not locate handleUnsubscribe anywhere in the package")
 	}
 	rest := body[startIdx:]
 	endRe := regexp.MustCompile(`(?m)^\}\n`)

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -20,10 +19,7 @@ import (
 // of defence so a copy-edit that bypasses the router-level regression
 // test still trips on the server-level one.
 func TestSendSessionSpawned_IsDebug(t *testing.T) {
-	src, err := os.ReadFile("send.go")
-	if err != nil {
-		t.Fatalf("read send.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
 	content := string(src)
 
 	// Required: the Debug form must be present.
@@ -43,10 +39,7 @@ func TestSendSessionSpawned_IsDebug(t *testing.T) {
 // Info it would be the single loudest journal line on a busy deployment.
 // This was already Debug before R84 but we lock it to prevent drift.
 func TestSendTurnComplete_IsDebug(t *testing.T) {
-	src, err := os.ReadFile("send.go")
-	if err != nil {
-		t.Fatalf("read send.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
 	content := string(src)
 
 	if !strings.Contains(content, `slog.Debug("send: turn complete"`) {

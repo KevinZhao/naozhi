@@ -45,14 +45,8 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 	// but the debounce AfterFunc scheduler moved to wshub_broadcast.go alongside
 	// BroadcastSessionsUpdate. Read both and concatenate so the regex anchors
 	// can locate either side without caring which file owns each fragment.
-	src, err := os.ReadFile("wshub.go")
-	if err != nil {
-		t.Fatalf("read wshub.go: %v", err)
-	}
-	bcastSrc, err := os.ReadFile("wshub_broadcast.go")
-	if err != nil {
-		t.Fatalf("read wshub_broadcast.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
+	bcastSrc := []byte(packageGoSource(t))
 	body := string(src)
 	bcastBody := string(bcastSrc)
 
@@ -147,7 +141,18 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 	// the broadcast path) would silently undo the locality the split
 	// established and reintroduce the god-object. Pin the negative case so
 	// such a merge fails CI.
-	if regexp.MustCompile(`time\.AfterFunc\(debounceInterval`).Match(src) {
+	//
+	// This one reads ONE file on purpose, unlike the positive assertions above
+	// which #2560 switched to a whole-package scan. The whole point here is
+	// WHERE the call is, so widening the scan would make it pass for the wrong
+	// reason — as it did the moment the conversion was attempted: the AfterFunc
+	// in wshub_broadcast.go satisfied a package-wide match and the negative
+	// anchor went green while checking nothing.
+	hubOnly, err := os.ReadFile("wshub.go")
+	if err != nil {
+		t.Fatalf("read wshub.go: %v", err)
+	}
+	if regexp.MustCompile(`time\.AfterFunc\(debounceInterval`).Match(hubOnly) {
 		t.Error("AfterFunc 不应回到 wshub.go - 应保留在 wshub_broadcast.go (R248-TEST-8)")
 	}
 }
@@ -167,14 +172,8 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 //     timer.
 //  3. The armed/idle sentinel is debounceArmed, not timer==nil.
 func TestDebounceTimer_PreallocatedReuseContract(t *testing.T) {
-	src, err := os.ReadFile("wshub.go")
-	if err != nil {
-		t.Fatalf("read wshub.go: %v", err)
-	}
-	bcastSrc, err := os.ReadFile("wshub_broadcast.go")
-	if err != nil {
-		t.Fatalf("read wshub_broadcast.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
+	bcastSrc := []byte(packageGoSource(t))
 	body := string(src)
 	bcastBody := string(bcastSrc)
 
