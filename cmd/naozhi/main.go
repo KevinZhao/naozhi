@@ -95,13 +95,22 @@ func main() {
 	// Runner Bedrock auth (docs/rfc/direct-user-settings.md §7.1).
 	slog.Info("claude settings: loading user settings directly", "mode", "user")
 
+	// boot is the wireup composition root for this process: it performs the
+	// boot-time steps and records what ran. A value rather than package-level
+	// state (#2552), so the steps are visible here in order instead of being
+	// spread across init() blocks.
+	boot := wireup.NewBoot()
+
 	// Register built-in backend profiles before any consumer looks them up.
 	// Explicit rather than init()-driven so a missing import fails loudly (#1165).
-	wireup.EnsureCLIBackends()
+	boot.EnsureCLIBackends()
+	// The blank-imported history factories are linked in; this was an init()
+	// inside wireup until #2552 and is now stated at the call site.
+	boot.RecordHistoryBackends()
 
 	// A dropped blank-import or no-op'd helper aborts startup here instead of
 	// degrading silently to empty history / missing profiles.
-	if err := wireup.Validate(); err != nil {
+	if err := boot.Validate(); err != nil {
 		slog.Error("wireup validation failed", "err", err)
 		os.Exit(1)
 	}
@@ -309,7 +318,7 @@ func main() {
 			"platform", cfg.Cron.NotifyDefault.Platform,
 			"chat_id_suffix", chatIDSuffix(cfg.Cron.NotifyDefault.ChatID))
 	}
-	schedulers, err := wireup.WireSchedulers(wireup.SchedulersDeps{
+	schedulers, err := boot.WireSchedulers(wireup.SchedulersDeps{
 		Cfg:           cfg,
 		Router:        router,
 		Platforms:     platforms,
@@ -317,7 +326,7 @@ func main() {
 		Workspace:     workspace,
 		CronStorePath: osutil.ExpandHome(cfg.Cron.StorePath),
 		ParentCtx:     ctx,
-		Telemetry:     nil, // wired post-Hub via dashboard.go SetTelemetry
+		Telemetry:     nil, // wired at Server construction via build_dashboard.go SetTelemetry
 		BuildSysession: func() (*sysession.Manager, string, error) {
 			return buildSysessionManager(cfg, router, projectMgr, wrapper, storePath)
 		},
