@@ -306,6 +306,15 @@ func handlerTypeOf(e ast.Expr) string {
 				return "*AuthHandlers"
 			}
 		}
+		// serveStaticJS("render_md.js") — #2554 collapsed 24 byte-identical
+		// module handlers into one factory. The call resolves to the same
+		// http.HandlerFunc the individual handlers did, so the golden is
+		// unchanged; the pattern is still a literal at the call site.
+		if id, ok := call.Fun.(*ast.Ident); ok {
+			if t, ok := packageFuncType[id.Name]; ok {
+				return t
+			}
+		}
 		// s.apiChain()(s.auth.HandleLogout) — the chain is a value now (#2554),
 		// so the wrapper is a call on a call. Resolve the wrapped handler.
 		if wrapped, ok := call.Fun.(*ast.CallExpr); ok {
@@ -376,34 +385,13 @@ func handlerTypeOf(e ast.Expr) string {
 // http.HandlerFunc. Listing them here pins their handler_type in the
 // golden snapshot.
 var packageFuncType = map[string]string{
-	"handleManifest":         "http.HandlerFunc",
-	"handleSW":               "http.HandlerFunc",
-	"handleContractJS":       "http.HandlerFunc",
-	"handleDashboardCSS":     "http.HandlerFunc",
-	"handleNzUtilJS":         "http.HandlerFunc",
-	"handleRenderMdJS":       "http.HandlerFunc",
-	"handleSelfUpdateJS":     "http.HandlerFunc",
-	"handleVoiceJS":          "http.HandlerFunc",
-	"handleSessionHeaderJS":  "http.HandlerFunc",
-	"handleComposerFilesJS":  "http.HandlerFunc",
-	"handleMobileNavJS":      "http.HandlerFunc",
-	"handleSplitViewJS":      "http.HandlerFunc",
-	"handleSystemViewJS":     "http.HandlerFunc",
-	"handleRunningBannerJS":  "http.HandlerFunc",
-	"handleFileRefsJS":       "http.HandlerFunc",
-	"handleUtilitiesJS":      "http.HandlerFunc",
-	"handleDiscoveryJS":      "http.HandlerFunc",
-	"handleTuningJS":         "http.HandlerFunc",
-	"handleMsgNavJS":         "http.HandlerFunc",
-	"handleSidebarProjectJS": "http.HandlerFunc",
-	"handleAuthModalJS":      "http.HandlerFunc",
-	"handleSendMessageJS":    "http.HandlerFunc",
-	"handleDashboardJS":      "http.HandlerFunc",
-	"handleCronViewJS":       "http.HandlerFunc",
-	"handleAgentViewJS":      "http.HandlerFunc",
-	"handleAssetBrowserJS":   "http.HandlerFunc",
-	"handleFilesViewJS":      "http.HandlerFunc",
-	"handleFavicon":          "http.HandlerFunc",
+	// serveStaticJS replaced 24 per-module handlers in #2554; every /static/*.js
+	// route now goes through it, and the resolved type is unchanged.
+	"serveStaticJS":      "http.HandlerFunc",
+	"handleManifest":     "http.HandlerFunc",
+	"handleSW":           "http.HandlerFunc",
+	"handleDashboardCSS": "http.HandlerFunc",
+	"handleFavicon":      "http.HandlerFunc",
 }
 
 var serverFieldType = map[string]string{
