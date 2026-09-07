@@ -1,0 +1,45 @@
+// route.go — how a dashboard sub-package declares the routes it owns (#2554).
+//
+// Route registration used to live entirely in internal/server/routes.go: 68
+// /api/* patterns written out by hand, with the auth wrapper threaded into six
+// register*Routes helpers as a bare func(http.HandlerFunc) http.HandlerFunc.
+// Nothing in the type system said which package owned which path, so the
+// boundary was policed from outside by two lint rules (api_route_owner,
+// handle_decl) totalling a few hundred lines of AST tooling.
+//
+// Now each sub-package returns its own []Route and the server applies the
+// middleware chain. Two consequences worth stating, because they are the point:
+//
+//  1. A route cannot be mounted without the chain. The sub-package hands over
+//     data, not a registration; the server is the only thing holding a mux. So
+//     "someone forgot the auth wrapper on one route" stops being possible
+//     rather than being caught later by review.
+//  2. Path ownership becomes a compile-time fact — the patterns for /api/cron
+//     live in internal/dashboard/cron. The lint rules that reconstructed this
+//     by scanning ASTs no longer have a question to answer.
+//
+// Patterns stay STRING LITERALS inside each package's Routes() method on
+// purpose: routes_snapshot_test.go reads them from the AST, and a computed
+// pattern (fmt.Sprintf, a table built at init) would make the anti-drift gate
+// blind. Add a route by adding a literal, not by generating one.
+package httputil
+
+import "net/http"
+
+// Middleware wraps a handler. The server composes one chain and applies it to
+// every non-public Route, so a sub-package cannot mount a route with a
+// different chain — or none.
+type Middleware func(http.HandlerFunc) http.HandlerFunc
+
+// Route is one HTTP route a dashboard sub-package owns.
+type Route struct {
+	// Pattern is a Go 1.22 ServeMux pattern including the method, e.g.
+	// "GET /api/cron/runs/{run_id}". Must be a string literal (see file header).
+	Pattern string
+	// Handler is the sub-package method serving it.
+	Handler http.HandlerFunc
+	// Public opts a route OUT of the auth chain. Default false, so forgetting
+	// to think about auth leaves the route authenticated — the safe direction.
+	// Only the login/logout surface and unauthenticated assets set it.
+	Public bool
+}

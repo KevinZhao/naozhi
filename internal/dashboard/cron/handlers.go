@@ -1242,18 +1242,37 @@ func (h *Handlers) HasListLimiter() bool       { return h.listLimiter != nil }
 func (h *Handlers) HasWriteLimiter() bool      { return h.writeLimiter != nil }
 func (h *Handlers) HasTranscriptLimiter() bool { return h.transcriptLimiter != nil }
 
+// RateLimits are the four per-IP budgets the cron endpoints need. They stay
+// FOUR limiters, not one: each guards a different cost shape, and sharing a
+// bucket would let one endpoint starve another into 429 — the reason
+// transcriptLimiter was split out of runsLimiter in the first place. What #2554
+// collapses is the Deps SURFACE (4 flat fields → 1 named group), not the
+// budgets.
+//
+// A nil limiter disables that gate, which is how partially-constructed test
+// fixtures work; the server's handlerSet.checkLimiters panics at boot if a
+// production wiring leaves one nil.
+type RateLimits struct {
+	// Runs caps /api/cron/runs and /runs/{run_id}.
+	Runs IPLimiter
+	// List caps GET /api/cron, whose cost grows with the number of jobs.
+	List IPLimiter
+	// Transcript has its own budget so transcript reads and run reads cannot
+	// starve each other.
+	Transcript IPLimiter
+	// Write caps the cron write/control endpoints (trigger, pause, delete, …).
+	Write IPLimiter
+}
+
 // Deps bundles all wiring for New.
 type Deps struct {
-	Scheduler         *cronpkg.Scheduler
-	AllowedRoot       string
-	ClaudeDir         string
-	RunsLimiter       IPLimiter
-	ListLimiter       IPLimiter
-	TranscriptLimiter IPLimiter
-	WriteLimiter      IPLimiter
-	TranscriptSemCap  int
-	ValidateWS        func(ws, root string) (string, error)
-	ClassifyWSErr     func(err error) (int, string)
+	Scheduler        *cronpkg.Scheduler
+	AllowedRoot      string
+	ClaudeDir        string
+	RateLimits       RateLimits
+	TranscriptSemCap int
+	ValidateWS       func(ws, root string) (string, error)
+	ClassifyWSErr    func(err error) (int, string)
 }
 
 // New constructs a Handlers from injected deps.
@@ -1266,10 +1285,10 @@ func New(d Deps) *Handlers {
 		scheduler:         d.Scheduler,
 		allowedRoot:       d.AllowedRoot,
 		claudeDir:         d.ClaudeDir,
-		runsLimiter:       d.RunsLimiter,
-		listLimiter:       d.ListLimiter,
-		transcriptLimiter: d.TranscriptLimiter,
-		writeLimiter:      d.WriteLimiter,
+		runsLimiter:       d.RateLimits.Runs,
+		listLimiter:       d.RateLimits.List,
+		transcriptLimiter: d.RateLimits.Transcript,
+		writeLimiter:      d.RateLimits.Write,
 		transcriptSem:     sem,
 		validateWS:        d.ValidateWS,
 		classifyWSErr:     d.ClassifyWSErr,

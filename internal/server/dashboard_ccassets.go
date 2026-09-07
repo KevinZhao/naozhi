@@ -9,28 +9,29 @@ import (
 	extccassets "github.com/naozhi/naozhi/internal/dashboard/ext/ccassets"
 )
 
-// registerAssetBrowserRoutes wires the read-only installed-asset browser
-// (docs/rfc/cc-asset-browser.md). The claude provider is attached HERE
-// because server is the neutral layer importing both internal/cli/backend
-// and internal/ccassets — attaching inside backend would be an import cycle.
-// Project-level + memory sources are gated behind a repoRoot that is always
-// "" for now (RFC §9.3), so only user-level + plugin assets surface.
-func (s *Server) registerAssetBrowserRoutes(hs *handlerSet, auth func(http.HandlerFunc) http.HandlerFunc) {
-	if hs.ccAssetsH == nil {
-		backend.AttachAssetProvider("claude", ccassets.NewClaudeProvider())
-		providers := map[string]assets.Provider{}
-		for _, p := range backend.All() {
-			if p.AssetProvider != nil {
-				providers[p.ID] = p.AssetProvider
-			}
+// buildAssetBrowser constructs the read-only installed-asset browser
+// (docs/rfc/cc-asset-browser.md). The claude provider is attached HERE because
+// server is the neutral layer importing both internal/cli/backend and
+// internal/ccassets — attaching inside backend would be an import cycle.
+// Project-level + memory sources are gated behind a repoRoot that is always ""
+// for now (RFC §9.3), so only user-level + plugin assets surface.
+//
+// Was registerAssetBrowserRoutes, which constructed the handler lazily on its
+// way to registering two routes. #2554 moved the patterns into the ccassets
+// package's own Routes(), so what is left here is construction — and it belongs
+// with the rest of it in buildDashboard.
+func (s *Server) buildAssetBrowser() *extccassets.Handler {
+	backend.AttachAssetProvider("claude", ccassets.NewClaudeProvider())
+	providers := map[string]assets.Provider{}
+	for _, p := range backend.All() {
+		if p.AssetProvider != nil {
+			providers[p.ID] = p.AssetProvider
 		}
-		hs.ccAssetsH = extccassets.New(
-			providers,
-			resolveClaudeDir(),
-			func(*http.Request) string { return "" }, // project scope deferred (RFC §9.3)
-			newIPLimiterWithProxy(extccassets.AssetsLimiterRate, extccassets.AssetsLimiterBurst, s.auth.TrustedProxy),
-		)
 	}
-	s.mux.HandleFunc("GET /api/cc/assets", auth(hs.ccAssetsH.HandleList))
-	s.mux.HandleFunc("GET /api/cc/assets/raw", auth(hs.ccAssetsH.HandleRaw))
+	return extccassets.New(
+		providers,
+		resolveClaudeDir(),
+		func(*http.Request) string { return "" }, // project scope deferred (RFC §9.3)
+		newIPLimiterWithProxy(extccassets.AssetsLimiterRate, extccassets.AssetsLimiterBurst, s.auth.TrustedProxy),
+	)
 }
