@@ -62,10 +62,10 @@ func (h *Handlers) SetCachedHistoryForTest(slice []discovery.RecentSession, t ti
 
 // RetiredStoreForTest exposes the retiredStore field for tests that need
 // to assert RecordRetired/Prune behaviour.
-func (h *Handlers) RetiredStoreForTest() *discovery.RetiredStore { return h.retiredStore }
+func (h *Handlers) RetiredStoreForTest() RetiredReader { return h.retiredStore }
 
 // SetRetiredStoreForTest swaps the retiredStore.
-func (h *Handlers) SetRetiredStoreForTest(s *discovery.RetiredStore) {
+func (h *Handlers) SetRetiredStoreForTest(s RetiredReader) {
 	h.retiredStore = s
 }
 
@@ -93,3 +93,8 @@ func (h *Handlers) HistoryCacheTimeForTest() time.Time {
 	defer h.historyCacheMu.Unlock()
 	return h.historyCacheTime
 }
+
+// ProjectSourceForTest exposes projectMgr so the wiring side can assert that an
+// unconfigured project manager stays a NIL interface rather than an interface
+// wrapping a nil pointer (#2561; see TestSessionHandlers_NilDepsStayNilInterfaces).
+func (h *Handlers) ProjectSourceForTest() ProjectSource { return h.projectMgr }

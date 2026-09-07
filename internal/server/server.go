@@ -318,11 +318,31 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	hs.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache, s.hub.ctx)
 	agentIDs := agentIDList(agents)
 	hs.costH = buildCostHandlers(opts, router)
+	// Typed-nil unwrap before the interface boxing (#2561). dashsession's Deps
+	// fields became consumer-side interfaces, and dashsession nil-guards three
+	// of them (projectMgr ×3, retiredStore ×5, router ×1). Assigning a nil
+	// *project.Manager straight into an interface field makes `!= nil` read TRUE
+	// and the next call dereferences nil — which is exactly what happened when
+	// this conversion was first attempted, and it is the same class as the
+	// MessageEnqueuer hazard in #377. The concrete type is only visible here, so
+	// the unwrap has to live at the wiring site.
+	var projectSrc dashsession.ProjectSource
+	if opts.ProjectManager != nil {
+		projectSrc = opts.ProjectManager
+	}
+	var retiredReader dashsession.RetiredReader
+	if retiredStore != nil {
+		retiredReader = retiredStore
+	}
+	var routerView dashsession.RouterView
+	if router != nil {
+		routerView = router
+	}
 	hs.sessionH = dashsession.New(dashsession.Deps{
 		// /api/sessions snapshot enrichment goes through the hub's tailer registry.
 		SnapshotEnricher: s.hub.enrichSnapshot,
-		Router:           router,
-		ProjectMgr:       opts.ProjectManager,
+		Router:           routerView,
+		ProjectMgr:       projectSrc,
 		Scheduler:        scheduler,
 		CronSessions:     scheduler,
 		SysWorkDir:       opts.Sysession.WorkDir,
@@ -339,7 +359,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		VersionTag:       opts.Version,
 		WatchdogNoOut:    s.watchdog.noOutPtr(),
 		WatchdogTotal:    s.watchdog.totalPtr(),
-		RetiredStore:     retiredStore,
+		RetiredStore:     retiredReader,
 		ValidateWS:       validateWorkspace,
 		SystemInfoFn:     systemInfo,
 

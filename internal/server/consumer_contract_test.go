@@ -1,6 +1,13 @@
 package server
 
-import "github.com/naozhi/naozhi/internal/session"
+import (
+	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/session"
+
+	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
+)
 
 // Compile-time assertion that *session.Router satisfies HubRouter, the
 // *Hub-only consumer subset declared in consumer.go. *Hub embeds the
@@ -25,3 +32,15 @@ var _ HubBroadcaster = (*Hub)(nil)
 // silently re-widening back onto HubRouter / the whole Hub.
 var _ sendEngineRouter = (*session.Router)(nil)
 var _ sendNotifier = (*Hub)(nil)
+
+// Compile-time assertions for the dashsession consumer interfaces (#2561).
+// Declared HERE, at the wiring site, rather than in internal/dashboard/session:
+// that package must not import internal/session's concrete Router to assert it,
+// or the narrowing would be undone by the assertion itself. server already
+// imports both sides.
+var (
+	_ dashsession.RouterView      = (*session.Router)(nil)
+	_ dashsession.ProjectSource   = (*project.Manager)(nil)
+	_ dashsession.NodeCacheReader = (*node.CacheManager)(nil)
+	_ dashsession.RetiredReader   = (*discovery.RetiredStore)(nil)
+)

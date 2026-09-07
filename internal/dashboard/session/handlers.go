@@ -23,7 +23,6 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/cronview"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/discovery"
-	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
@@ -198,8 +197,8 @@ func (f historyFilter) SkipSessionID(sid string) bool {
 
 // Handlers groups the session list, events, delete, and resume API endpoints.
 type Handlers struct {
-	router     *sessionpkg.Router
-	projectMgr *project.Manager
+	router     RouterView
+	projectMgr ProjectSource
 	// projectStableKeyEnabled gates emitting projectListEntry.StableKey;
 	// mirrors dashproject.Handlers.projectStableKeyEnabled.
 	projectStableKeyEnabled bool
@@ -218,7 +217,7 @@ type Handlers struct {
 	// agentIDs is precomputed once (agents map is immutable after startup).
 	agentIDs   []string
 	nodeAccess NodeAccessor
-	nodeCache  *node.CacheManager
+	nodeCache  NodeCacheReader
 
 	// Static status fields (immutable after construction)
 	startedAt     time.Time
@@ -288,7 +287,7 @@ type Handlers struct {
 	// retiredStore stamps when a session left the live sidebar so history rows
 	// carry retired_at (dashboard sorts by retired_at || last_active). nil
 	// disables; ordering degrades to last_active only.
-	retiredStore *discovery.RetiredStore
+	retiredStore RetiredReader
 
 	// validateWS / systemInfoFn inject server-package helpers without a
 	// reverse import.
@@ -1398,8 +1397,8 @@ type Deps struct {
 	// exists before these handlers do, so there is no ordering window to cover.
 	SnapshotEnricher func(*sessionpkg.SessionSnapshot)
 
-	Router        *sessionpkg.Router
-	ProjectMgr    *project.Manager
+	Router        RouterView
+	ProjectMgr    ProjectSource
 	Scheduler     CronView
 	CronSessions  CronView
 	SysWorkDir    string
@@ -1408,7 +1407,7 @@ type Deps struct {
 	Agents        map[string]sessionpkg.AgentOpts
 	AgentIDs      []string
 	NodeAccess    NodeAccessor
-	NodeCache     *node.CacheManager
+	NodeCache     NodeCacheReader
 	StartedAt     time.Time
 	BackendTag    string
 	WorkspaceID   string
@@ -1416,7 +1415,7 @@ type Deps struct {
 	VersionTag    string
 	WatchdogNoOut *atomic.Int64
 	WatchdogTotal *atomic.Int64
-	RetiredStore  *discovery.RetiredStore
+	RetiredStore  RetiredReader
 	ValidateWS    func(ws, root string) (string, error)
 	SystemInfoFn  func() map[string]any
 	// ProjectStableKeyEnabled toggles the stableKey field in stats.projects
