@@ -420,7 +420,7 @@ func validateCronPrompt(prompt string) error {
 
 // Handlers groups the cron job management API endpoints.
 type Handlers struct {
-	scheduler   *cronpkg.Scheduler
+	scheduler   SchedulerView
 	allowedRoot string
 	// claudeDir is the absolute path to ~/.claude, used by HandleRunTranscript
 	// to locate a run's JSONL. Empty disables the endpoint (fallback:"missing").
@@ -1266,7 +1266,7 @@ type RateLimits struct {
 
 // Deps bundles all wiring for New.
 type Deps struct {
-	Scheduler        *cronpkg.Scheduler
+	Scheduler        SchedulerView
 	AllowedRoot      string
 	ClaudeDir        string
 	RateLimits       RateLimits

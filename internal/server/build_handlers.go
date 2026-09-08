@@ -43,8 +43,14 @@ func buildAuthHandlers(opts ServerOptions, cookieSecret []byte, cookieGen string
 // newIPLimiterWithCap so the LRU cap / idle TTL are pinned explicitly
 // (see cronLimiterMaxKeys).
 func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers {
+	// A nil Scheduler is the documented "cron disabled" state and dashcron
+	// nil-guards it in 16 places, so the typed nil must not be boxed (#2561).
+	var sched dashcron.SchedulerView
+	if opts.Scheduler != nil {
+		sched = opts.Scheduler
+	}
 	return dashcron.New(dashcron.Deps{
-		Scheduler:   opts.Scheduler,
+		Scheduler:   sched,
 		AllowedRoot: opts.AllowedRoot,
 		ClaudeDir:   claudeDir,
 		RateLimits: dashcron.RateLimits{
@@ -176,11 +182,29 @@ func buildProjectHandlers(
 	nodeCache *node.CacheManager,
 	baseCtx context.Context,
 ) *dashproject.Handlers {
+	// Typed-nil unwraps before the interface boxing (#2561). dashproject
+	// nil-guards projectMgr (×9), router (×2) and resolver (×1) because each is
+	// optional; handing an interface field a nil CONCRETE pointer makes every
+	// one of those guards read TRUE and the next call dereferences nil. The
+	// concrete types are only visible here. Checklist for the next conversion:
+	// grep the field's `!= nil` count BEFORE changing its type.
+	var projectStore dashproject.ProjectStore
+	if opts.ProjectManager != nil {
+		projectStore = opts.ProjectManager
+	}
+	var projectRouter dashproject.RouterView
+	if opts.Router != nil {
+		projectRouter = opts.Router
+	}
+	var plannerResolver dashproject.PlannerKeyResolver
+	if resolver != nil {
+		plannerResolver = resolver
+	}
 	return dashproject.New(dashproject.Deps{
 		BaseCtx:            baseCtx,
-		ProjectMgr:         opts.ProjectManager,
-		Router:             opts.Router,
-		Resolver:           resolver,
+		ProjectMgr:         projectStore,
+		Router:             projectRouter,
+		Resolver:           plannerResolver,
 		NodeAccess:         nodeAccess,
 		NodeCache:          nodeCache,
 		FilesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
