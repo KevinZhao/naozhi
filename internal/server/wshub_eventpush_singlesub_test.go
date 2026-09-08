@@ -105,7 +105,6 @@ func TestSubscriberCountFast_MirrorsWritePaths(t *testing.T) {
 	h := &Hub{
 		mu:              sync.RWMutex{},
 		subscriberCount: map[string]int{},
-		enforceCaps:     true,
 	}
 	fast := func(key string) (int32, bool) {
 		v, ok := h.subscriberCountFast.Load(key)

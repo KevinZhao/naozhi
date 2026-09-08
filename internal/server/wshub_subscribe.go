@@ -108,10 +108,10 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// Per-session-key cap across all connections via h.subscriberCount[key],
 	// maintained alongside c.subscriptions mutations under h.mu (#716).
 	_, alreadySub := c.subscriptions[key]
-	// Gate on the explicit h.enforceCaps bool, not `subscriberCount == nil`:
-	// NewHub sets both; hand-rolled test hubs leave both zero and skip caps,
-	// and eagerly initialising the map must not silently activate them (#1401).
-	if !alreadySub && h.enforceCaps && h.subscriberCount[key] >= maxSubscribersPerKey {
+	// A nil subscriberCount (a hand-rolled Hub exercising a pure helper) reads
+	// 0 for every key, so the comparison is false and the cap is skipped without
+	// needing a separate flag — see dropMarshalCacheForLocked's godoc (#2623).
+	if !alreadySub && h.subscriberCount[key] >= maxSubscribersPerKey {
 		h.mu.Unlock()
 		c.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Error: "too many subscribers for key"}))
 		return
@@ -128,7 +128,9 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// real unsub. If we return via the "session not found" path below, we
 	// clear the reservation before returning.
 	c.subscriptions[key] = func() {}
-	if !alreadySub && h.enforceCaps {
+	// The one place the flag was NOT redundant: writing to a nil map panics, so
+	// the allocation itself is the condition (#2623).
+	if !alreadySub && h.subscriberCount != nil {
 		h.subscriberCount[key]++
 		// Keep the lock-free mirror read by singleSubscriber in step (#1522).
 		h.setSubscriberCountFast(key, h.subscriberCount[key])
@@ -338,7 +340,7 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		c.sweepSubGenExpiredLocked(nowNanos)
 		// If we were the last subscriber (counter entry deleted → 0), drop the
 		// cached "history" marshal slot so its payload is GC'd (#513).
-		dropMarshalCache = !h.enforceCaps || h.subscriberCount[key] == 0
+		dropMarshalCache = h.dropMarshalCacheForLocked(key)
 	}
 	h.mu.Unlock()
 	if dropMarshalCache && h.historyMarshalCache != nil {
@@ -347,14 +349,27 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	c.SendJSON(wsproto.NewUnsubscribed(wsproto.Unsubscribed{Key: key}))
 }
 
+// dropMarshalCacheForLocked reports whether the historyMarshalCache slot for
+// key should be dropped now that one subscriber left: true when no subscriber
+// remains. Caller MUST hold h.mu.
+//
+// This replaced `!h.enforceCaps || h.subscriberCount[key] == 0` at three sites
+// (#2623). The enforceCaps half was redundant: a nil subscriberCount reads 0 for
+// every key, so the second term alone already answers true for exactly the hubs
+// the flag existed to describe — ones built without NewHub. Keeping it as a
+// method rather than an inline expression also removes the mirrored copy and the
+// source-shape pin that used to guard the two from drifting apart.
+func (h *Hub) dropMarshalCacheForLocked(key string) bool {
+	return h.subscriberCount[key] == 0
+}
+
 // decSubscriberCountLocked decrements h.subscriberCount[key] and removes the
 // entry once it hits zero, so the map size mirrors the number of distinct
 // keys that currently have at least one subscriber. Caller MUST hold h.mu.
 //
-// The nil check is retained alongside enforceCaps so a hand-rolled test
-// fixture that populated the map without flipping enforceCaps still mutates
-// it correctly — the gate decides whether to ENFORCE the cap, not whether
-// the map exists (#1401).
+// The nil check makes a hand-rolled Hub a no-op rather than a panic; since
+// #2623 the map's existence IS the "caps active" signal, so there is no separate
+// flag to keep in step with it.
 func (h *Hub) decSubscriberCountLocked(key string) {
 	if h.subscriberCount == nil {
 		return
