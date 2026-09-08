@@ -4,7 +4,7 @@
 //   - handle_decl: no `func (s *Server) handle*` method outside the
 //     exemptions.yaml handle_baseline (ownership rule: internal/server/doc.go).
 //   - file_size: internal/server/ ≤ 500 lines, internal/dashboard/*/ ≤ 800
-//     (non-test); exemptions.yaml entries with `until_phase` may not grow.
+//     (non-test); exemptions.yaml entries may not grow past their baseline.
 //   - field_block: wshub_*.go godoc 头必须含 Field-block contract / WRITES: /
 //     READS-ALSO: / LIFECYCLE-METHOD 标注（文本扫描）。
 //   - send_engine_ownership (rule 3b-send): send 块字段只能声明在 sendEngine
@@ -42,6 +42,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -61,10 +62,15 @@ type Violation struct {
 }
 
 type exemption struct {
-	Path       string `yaml:"path"`
-	Current    int    `yaml:"current"`
-	Limit      int    `yaml:"limit"`
-	UntilPhase string `yaml:"until_phase"`
+	Path    string `yaml:"path"`
+	Current int    `yaml:"current"`
+	Limit   int    `yaml:"limit"`
+	// Until is an absolute expiry date (YYYY-MM-DD). It replaced until_phase in
+	// #2561: every phase an exemption was pinned to had been shelved by ADR-001,
+	// so "until Phase 5" meant "forever" and the ratchet never tightened. A date
+	// cannot be shelved — rule 5 fails the entry once it passes, forcing a
+	// re-decision instead of silent permanence.
+	Until string `yaml:"until"`
 }
 
 type exemptions struct {
@@ -151,7 +157,7 @@ func main() {
 	vs = append(vs, scanSendEngineOwnership(*serverPkg)...)
 
 	// Rule 5: stale_exemption
-	vs = append(vs, scanStaleExemption(exempts)...)
+	vs = append(vs, scanStaleExemption(exempts, time.Now())...)
 
 	if os.Getenv("LINT_VERBOSE") == "1" {
 		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b partially landed — send-block slice is enforced (send_engine_ownership, #2551); the general AST field_block 对账 was owed to Phase 4b, which ADR-001 shelved. rule 4 method-set 对账 + rule 5 git tag 对账 due Phase 1 (server-split-phase4-design.md v0.6.1 §六.2.0.4)")
@@ -272,7 +278,7 @@ func scanFileSize(dir string, limit int, exempt map[string]exemption) []Violatio
 				out = append(out, Violation{
 					Rule:    "file_size",
 					File:    rel,
-					Message: fmt.Sprintf("%d lines (exemption baseline %d, limit %d, until_phase %s) — file grew, fix or update baseline", lines, e.Current, limit, e.UntilPhase),
+					Message: fmt.Sprintf("%d lines (exemption baseline %d, limit %d, until %s) — file grew, fix or update baseline", lines, e.Current, limit, e.Until),
 				})
 			}
 			return nil
