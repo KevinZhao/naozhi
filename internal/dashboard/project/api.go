@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
-	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -56,14 +55,14 @@ func validateProjectName(name string) error {
 
 // Handlers groups the project management API endpoints.
 type Handlers struct {
-	projectMgr *project.Manager
-	router     *session.Router
+	projectMgr ProjectStore
+	router     RouterView
 	// resolver centralises planner-view opts (docs/rfc/key-resolver.md §3.1
 	// ResolveForPlannerKey) so planner restart keeps the "no defaults
 	// inheritance" contract. Nil falls back to the legacy inlined merge.
-	resolver   *session.KeyResolver
+	resolver   PlannerKeyResolver
 	nodeAccess NodeAccessor
-	nodeCache  *node.CacheManager
+	nodeCache  NodeCacheReader
 	// baseCtx is the long-lived context the planner-restart timeout derives
 	// from; wired at construction via Deps.BaseCtx (#2552), tests may assign
 	// directly.
@@ -101,11 +100,11 @@ type Deps struct {
 	// at construction (#2552); nil falls back to context.Background().
 	BaseCtx context.Context
 
-	ProjectMgr         *project.Manager
-	Router             *session.Router
-	Resolver           *session.KeyResolver
+	ProjectMgr         ProjectStore
+	Router             RouterView
+	Resolver           PlannerKeyResolver
 	NodeAccess         NodeAccessor
-	NodeCache          *node.CacheManager
+	NodeCache          NodeCacheReader
 	FilesExistsLimiter IPLimiter
 	ConfigPutLimiter   IPLimiter
 	PublicTmpEnabled   bool
