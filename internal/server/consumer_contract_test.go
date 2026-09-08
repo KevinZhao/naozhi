@@ -6,6 +6,9 @@ import (
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 
+	"github.com/naozhi/naozhi/internal/cron"
+	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 )
 
@@ -43,4 +46,15 @@ var (
 	_ dashsession.ProjectSource   = (*project.Manager)(nil)
 	_ dashsession.NodeCacheReader = (*node.CacheManager)(nil)
 	_ dashsession.RetiredReader   = (*discovery.RetiredStore)(nil)
+)
+
+// Same for dashproject and dashcron (#2561 E6-b). The measured narrowing is in
+// each package's consumer.go: 3 of *session.Router's 77 methods for
+// dashproject, 23 of *cron.Scheduler's 48 for dashcron.
+var (
+	_ dashproject.ProjectStore       = (*project.Manager)(nil)
+	_ dashproject.RouterView         = (*session.Router)(nil)
+	_ dashproject.PlannerKeyResolver = (*session.KeyResolver)(nil)
+	_ dashproject.NodeCacheReader    = (*node.CacheManager)(nil)
+	_ dashcron.SchedulerView         = (*cron.Scheduler)(nil)
 )

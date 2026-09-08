@@ -1,8 +1,9 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/session"
@@ -25,7 +26,7 @@ import (
 //
 // A Server built with none of the three optional deps must therefore leave all
 // three interface fields nil, so the guards inside dashsession still work.
-func TestSessionHandlers_NilDepsStayNilInterfaces(t *testing.T) {
+func TestDashboardDeps_NilStayNilInterfaces(t *testing.T) {
 	t.Parallel()
 
 	// No ProjectManager, no StateDir (⇒ no RetiredStore) — the shape a minimal
@@ -48,18 +49,31 @@ func TestSessionHandlers_NilDepsStayNilInterfaces(t *testing.T) {
 	// precisely the comparison the hazard fools. Note RetiredStore is always
 	// present: NewRetiredStore("") returns a real store that degrades to a no-op,
 	// which is why the first version of this test asserted the wrong thing.
-	for name, dep := range map[string]any{
-		"ProjectMgr":   srv.sessionH.ProjectSourceForTest(),
-		"RetiredStore": srv.sessionH.RetiredStoreForTest(),
-	} {
+	deps := map[string]any{
+		"dashsession.ProjectMgr":   srv.sessionH.ProjectSourceForTest(),
+		"dashsession.RetiredStore": srv.sessionH.RetiredStoreForTest(),
+	}
+	// dashproject carries the largest guard count of the three (projectMgr ×9,
+	// router ×2, resolver ×1), so it is checked here too rather than trusted.
+	_, hs := buildServerWithHandlers(ServerOptions{
+		Addr:   ":0",
+		Router: session.NewRouter(session.RouterConfig{}),
+	})
+	if hs.projectH == nil {
+		t.Fatal("projectH not wired")
+	}
+	for k, v := range hs.projectH.DepsForTest() {
+		deps[k] = v
+	}
+
+	for name, dep := range deps {
 		if dep == nil {
 			continue // legitimately unwired
 		}
 		v := reflect.ValueOf(dep)
 		if v.Kind() == reflect.Ptr && v.IsNil() {
 			t.Errorf("%s is a non-nil interface (%T) wrapping a nil pointer — every "+
-				"`h.%s != nil` guard in dashsession now passes and dereferences nil",
-				name, dep, strings.ToLower(name[:1])+name[1:])
+				"`!= nil` guard on it now passes and dereferences nil", name, dep)
 		}
 	}
 
@@ -67,4 +81,41 @@ func TestSessionHandlers_NilDepsStayNilInterfaces(t *testing.T) {
 	// through projectMgr. It must be a no-op, not a nil deref.
 	srv.sessionH.WarmHistoryCache()
 	srv.sessionH.WaitWarmHistory()
+}
+
+// TestCronHandlers_NilSchedulerStaysNilInterface is the dashcron half. A nil
+// Scheduler is the documented "cron disabled" state — the /cron endpoints answer
+// 404/400 rather than panicking — and dashcron nil-guards h.scheduler in 16
+// places. Boxing a nil *cron.Scheduler into SchedulerView would defeat all 16 at
+// once, and the symptom would be a panic on the first /api/cron request of a
+// deployment that never configured cron.
+func TestCronHandlers_NilSchedulerStaysNilInterface(t *testing.T) {
+	t.Parallel()
+
+	// No Scheduler: the shape of any deployment with cron off.
+	srv, hs := buildServerWithHandlers(ServerOptions{
+		Addr:   ":0",
+		Router: session.NewRouter(session.RouterConfig{}),
+	})
+	t.Cleanup(srv.appCancel)
+
+	if hs.cronH == nil {
+		t.Fatal("cronH not wired")
+	}
+	if got := hs.cronH.SchedulerForTest(); got != nil {
+		v := reflect.ValueOf(got)
+		if v.Kind() == reflect.Ptr && v.IsNil() {
+			t.Fatalf("Scheduler is a non-nil interface (%T) wrapping a nil pointer — all 16 "+
+				"`h.scheduler != nil` guards in dashcron are defeated", got)
+		}
+	}
+
+	// The behavioural half: a cron read must answer, not panic.
+	req := httptest.NewRequest(http.MethodGet, "http://naozhi.example/api/cron", nil)
+	req.Host = "naozhi.example"
+	w := httptest.NewRecorder()
+	hs.cronH.HandleList(w, req)
+	if w.Code == 0 {
+		t.Error("HandleList wrote no status with cron disabled")
+	}
 }
