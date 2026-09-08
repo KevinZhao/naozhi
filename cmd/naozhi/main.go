@@ -436,6 +436,8 @@ func main() {
 		},
 		DashboardToken:    cfg.Server.DashboardToken,
 		TrustedProxy:      cfg.Server.TrustedProxy,
+		DebugMode:         cfg.Server.DebugMode,
+		PublicTmpEnabled:  cfg.Projects.PublicTmp,
 		ProjectManager:    projectMgr,
 		Nodes:             nodes,
 		ReverseNodeServer: rns,
@@ -573,6 +575,22 @@ func main() {
 		os.Exit(1)
 	} else if len(cfg.Server.DashboardToken) < 16 {
 		slog.Warn("dashboard_token is short — consider using 16+ random characters for stronger security")
+	}
+
+	// Both of these widen what an authenticated dashboard user can read, and
+	// both were unreachable until their config keys were wired, so an operator
+	// turning one on for the first time should see it in the log rather than
+	// discover it from an audit trail later. Logged next to the token warnings
+	// because the token IS the barrier for both.
+	if cfg.Server.DebugMode {
+		slog.Warn("server.debug_mode is ON — /api/debug/pprof and /api/debug/vars are registered; goroutine stacks carry file paths and queue contents",
+			"gates", "requireAuth + loopback-only + refused entirely when dashboard_token is empty",
+			"hint", "turn it off once the profile is captured")
+	}
+	if cfg.Projects.PublicTmp {
+		slog.Warn("projects.public_tmp is ON — every authenticated dashboard user can read non-credential files anywhere under /tmp via the __public_tmp__ pseudo-project",
+			"gates", "credential-name allowlist + foreign-private-UID + irregular-type + audit log",
+			"hint", "single-operator deployments only; leave it off wherever the dashboard token is shared")
 	}
 
 	serverErr := make(chan error, 1)
