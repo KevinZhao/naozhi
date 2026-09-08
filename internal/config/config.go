@@ -103,6 +103,22 @@ type ProjectsConfig struct {
 	// feature. The file endpoints treat it like the __public_tmp__ pseudo-project
 	// (UID / denied-name / irregular-type / credential-name gates, audit log).
 	IncludeRoot bool `yaml:"include_root,omitempty"`
+	// PublicTmp opts the __public_tmp__ pseudo-project in (#646). Default
+	// false: that pseudo-project is a plain "project not found".
+	//
+	// SECURITY: MUST stay false on any shared / multi-operator deployment, or
+	// anywhere the dashboard token is shared. Enabled, every authenticated
+	// dashboard user can read non-credential files anywhere under /tmp — the
+	// credential allowlist and the foreign-private-UID gate block secrets and
+	// sockets, not general content. Accesses are audit-logged at Info
+	// ("public_tmp file access"). Same single-operator caveat as IncludeRoot
+	// above, and the same file-endpoint gates.
+	//
+	// Three review items (R242-SEC-6, R244-SEC-P3-2, R245-SEC-7) all asked for
+	// exactly this: an operator opt-in flag defaulting to false. The
+	// ServerOptions field existed; the config key did not, so the feature was
+	// off unconditionally. Wired in #2553's follow-up.
+	PublicTmp bool `yaml:"public_tmp,omitempty"`
 }
 
 type PlannerDefaults struct {
@@ -202,6 +218,18 @@ type ServerConfig struct {
 	Addr           string `yaml:"addr"`
 	DashboardToken string `yaml:"dashboard_token,omitempty"`
 	TrustedProxy   bool   `yaml:"trusted_proxy,omitempty"` // trust X-Forwarded-For for client IP (enable behind ALB/CloudFront)
+	// DebugMode registers /api/debug/pprof and /api/debug/vars. Default false:
+	// both 404 even for loopback+auth callers, so a leaked dashboard token
+	// cannot enumerate goroutine stacks (which carry file paths and queue
+	// contents) or expvar counters. Turn it on only while capturing a profile.
+	//
+	// R244-SEC-P3-1 specified this key and the review record said it shipped,
+	// but only the ServerOptions field existed — nothing ever read a config
+	// value into it, so the endpoints were unreachable regardless of config.
+	// Wired for real in #2553's follow-up; the gates it feeds (requireAuth +
+	// loopback-only + a refusal when dashboard_token is empty) were already
+	// there.
+	DebugMode bool `yaml:"debug_mode,omitempty"`
 }
 
 // NaozhiSettingsConfig configures the naozhi-owned isolated Claude settings
