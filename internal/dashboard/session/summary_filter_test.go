@@ -1,7 +1,6 @@
 package session
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -27,10 +26,7 @@ import (
 func TestLookupSummariesCached_FiltersAlreadySummarized(t *testing.T) {
 	t.Parallel()
 
-	src, err := os.ReadFile("handlers.go")
-	if err != nil {
-		t.Fatalf("read handlers.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
 	body := string(src)
 
 	startMarker := "func (h *Handlers) lookupSummariesCached("

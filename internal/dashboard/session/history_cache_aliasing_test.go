@@ -1,7 +1,6 @@
 package session
 
 import (
-	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -35,16 +34,13 @@ import (
 // return copies. Either way the change must be reviewed through
 // this audit item.
 func TestHistoryCache_AliasingInvariant(t *testing.T) {
-	src, err := os.ReadFile("handlers.go")
-	if err != nil {
-		t.Fatalf("read handlers.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
 	body := string(src)
 
 	// 1) Look up loadHistorySessions body.
 	startIdx := strings.Index(body, "func (h *Handlers) loadHistorySessions()")
 	if startIdx < 0 {
-		t.Fatal("loadHistorySessions is no longer defined in handlers.go. " +
+		t.Fatal("loadHistorySessions is no longer defined anywhere in the package. " +
 			"If renamed, update this test; if removed, re-audit the cache refresh " +
 			"path for the R62-GO-5 aliasing invariant.")
 	}

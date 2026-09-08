@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -50,15 +51,49 @@ func TestHandleResume_WorkspaceLogGoesThroughSanitizeForLog(t *testing.T) {
 	}
 }
 
+// readDashboardSessionSource returns every non-test .go file in
+// internal/dashboard/session concatenated.
+//
+// It read that package's handlers.go by name until #2561 split the file: the
+// assertions here are about HandleResume's behaviour (sanitised workspace
+// logging, 128-bit key entropy), and HandleResume moved to mutations.go, so a
+// filename lookup broke a gate that had nothing to do with the move. Fourth
+// instance of this class in one epic — #2560 fixed it inside internal/server and
+// dashsession/dashcron, and this is the cross-package one: a server test reading
+// a dashboard package's file.
+//
+// Fails loudly on a thin read rather than letting a "must NOT contain" assertion
+// pass vacuously.
 func readDashboardSessionSource(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, _ := runtime.Caller(0)
-	p := filepath.Join(filepath.Dir(thisFile), "../../internal/dashboard/session/handlers.go")
-	data, err := os.ReadFile(p)
+	dir := filepath.Join(filepath.Dir(thisFile), "..", "dashboard", "session")
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("read handlers.go: %v", err)
+		t.Fatalf("read dashboard/session dir: %v", err)
 	}
-	return string(data)
+	var names []string
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, n := range names {
+		data, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			t.Fatalf("read %s: %v", n, err)
+		}
+		b.WriteString("\n// ===== " + n + " =====\n")
+		b.Write(data)
+	}
+	if len(names) < 4 || b.Len() < 5_000 {
+		t.Fatalf("dashboard/session scan looks wrong: %d files / %d bytes", len(names), b.Len())
+	}
+	return b.String()
 }
 
 // TestHandleResume_KeyEntropyIs128Bit pins R246-SEC-5 / R247-SEC-24 (#807):

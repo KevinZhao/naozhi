@@ -37,6 +37,17 @@
 #   放过增长 —— 重采不是洁癖，是把闸门重新上膛。
 
 file_size:
+    # 2026-09-08（#2561 E6-c）：以下四条删除 —— 文件已拆到 800 行上限之下，
+    # 按 rule 5(b) 清理。拆分是机械搬迁（scripts/go-split-file.py，逐字节守恒校验）：
+    #   internal/dashboard/session/handlers.go  1470 → 374（拆 5 文件）
+    #   internal/dashboard/project/files.go     1310 → 352（拆 5 文件）
+    #   internal/dashboard/cron/handlers.go     1296 → 131（拆 5 文件）
+    #   internal/dashboard/cron/transcript.go   1130 → 445（拆 4 文件）
+    # internal/dashboard 下已无 >800 行的非测试文件。
+    # Closes-exemption: internal/dashboard/session/handlers.go
+    # Closes-exemption: internal/dashboard/project/files.go
+    # Closes-exemption: internal/dashboard/cron/handlers.go
+    # Closes-exemption: internal/dashboard/cron/transcript.go
     # 2026-09-07（#2551 E1-c）重采：11 → 8 个条目。删掉 4 条死账（文件已 ≤ 500
     # 上限，按 rule 5(b) 语义应删；lint 的 scanFileSize 在查豁免表之前就
     # `if lines <= limit { return nil }`，所以它们早已惰性），新增 0 条。
@@ -45,18 +56,10 @@ file_size:
     # internal/server/dashboard_session.go: removed Phase 3e (PR #1441) — file
     # moved to internal/dashboard/session/handlers.go. Closes-exemption trailer
     # in commit message satisfies rule 5.
-    - path: internal/dashboard/session/handlers.go
-      current: 2055                         # 2026-07-31 fail 切换重采（Phase 3e 搬迁时 1873）
-      limit: 800
-      until: "2027-03-31"     # 退役者 #2561 E6-c（按 6 handler + history cache + retired store 分文件）。原 until_phase: "5" —— ADR-001 暂缓 Phase 5 后等于永久豁免
     # internal/server/project_files.go: removed Phase 2 (PR #1437) — file
     # moved to internal/dashboard/project/files.go. Closes-exemption trailer
     # in commit message satisfies rule 5. New dashboard/project/files.go
     # entry tracks the post-move size (1633) until Phase 5 internal split.
-    - path: internal/dashboard/project/files.go
-      current: 1769                         # 2026-09-02 +1：textMimeSet 加 application/typescript（PR #2439 .ts/.tsx 预览误判二进制）；2026-07-31 fail 切换重采（Phase 2 搬迁时 1633）；dashboard 子包硬上限 800
-      limit: 800
-      until: "2027-03-31"     # 退役者 #2561 E6-c（每个 serve* / handle* 一个文件）。原 until_phase: "5"
     - path: internal/server/dashboard_send.go
       current: 851                          # 2026-09-07 重采（#2551 E1-c）：记 1089 实测 851，2026-07-31 之后的历次重构缩水从未回写
       limit: 500
@@ -66,14 +69,6 @@ file_size:
     # in commit message satisfies rule 5.
     # internal/server/dashboard_cron_transcript.go: removed Phase 1 — file
     # moved to internal/dashboard/cron/transcript.go.
-    - path: internal/dashboard/cron/handlers.go
-      current: 1814                         # 2026-07-31 fail 切换重采（Phase 1 搬迁时 1628）
-      limit: 800
-      until: "2027-03-31"     # 退役者 #2561 E6-c（按 11 handler 分文件）。原 until_phase: "5"
-    - path: internal/dashboard/cron/transcript.go
-      current: 1438                         # Phase 1 搬迁后实际行数
-      limit: 800
-      until: "2027-03-31"     # 退役者 #2561 E6-c。原 until_phase: "5"
     - path: internal/server/server.go
       current: 729                          # 2026-09-07 +3（#2561 E6-a：dashsession Deps 接口化前的 typed-nil 解包，理由注释在代码里）；同日 +18（#2552 E2-a：appCtx/appCancel 字段 + uploadStore 字段 + 组合根前移的三段说明性注释）；2026-09-05 +3（#2538：config fingerprint 三行接线进 HealthHandler）
       limit: 500

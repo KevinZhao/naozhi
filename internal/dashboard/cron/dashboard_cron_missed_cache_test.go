@@ -1,7 +1,6 @@
 package cron
 
 import (
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -128,10 +127,7 @@ func TestMissedScheduleVerdict_NilJob(t *testing.T) {
 // alongside the source.
 func TestHandleList_RoutesThroughMissedScheduleVerdict(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("handlers.go")
-	if err != nil {
-		t.Fatalf("read handlers.go: %v", err)
-	}
+	src := []byte(packageGoSource(t))
 	source := string(src)
 
 	// Locate the HandleList function body. The function declaration is
@@ -139,7 +135,7 @@ func TestHandleList_RoutesThroughMissedScheduleVerdict(t *testing.T) {
 	// `func ` to avoid matching unrelated calls elsewhere in the file.
 	listIdx := strings.Index(source, "func (h *Handlers) HandleList(")
 	if listIdx < 0 {
-		t.Fatal("HandleList function not found in handlers.go — test anchor moved, update before relaxing the check")
+		t.Fatal("HandleList function not found anywhere in the package — test anchor moved, update before relaxing the check")
 	}
 	rest := source[listIdx:]
 	end := strings.Index(rest[1:], "\nfunc ")
