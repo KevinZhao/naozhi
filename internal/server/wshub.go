@@ -66,11 +66,6 @@ type Hub struct {
 	// Shutdown clear. A one-critical-section-stale read only affects the
 	// marshal-cache routing heuristic, never correctness (#1522).
 	subscriberCountFast sync.Map // key string -> *atomic.Int32
-	// enforceCaps gates the per-key subscriber cap and counter reads. NewHub
-	// sets it true; hand-rolled test hubs leave it false so the cap never
-	// fires against an uninitialised map. The per-client cap is
-	// unconditional and does not consult it. Read under h.mu (#1401).
-	enforceCaps bool
 	// router is the HubRouter consumer subset (consumer.go) so tests can
 	// inject a fake.
 	router    HubRouter
@@ -247,7 +242,6 @@ func NewHub(opts HubOptions) *Hub {
 		authClients:      make(map[*wsClient]struct{}),
 		authClientsIdx:   make(map[*wsClient]int),
 		subscriberCount:  make(map[string]int),
-		enforceCaps:      true,
 		router:           opts.Router,
 		agents:           opts.Agents,
 		agentCmds:        opts.AgentCmds,
@@ -430,7 +424,7 @@ func (h *Hub) unregister(c *wsClient) {
 			for key, unsub := range c.subscriptions {
 				unsubs = append(unsubs, unsub)
 				h.decSubscriberCountLocked(key)
-				if !h.enforceCaps || h.subscriberCount[key] == 0 {
+				if h.dropMarshalCacheForLocked(key) {
 					dropKeys = append(dropKeys, key)
 				}
 			}

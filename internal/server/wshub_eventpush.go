@@ -302,7 +302,7 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 			c.sweepSubGenExpiredLocked(nowNanos)
 			// Drop the marshal cache slot when this removed the last subscriber,
 			// matching handleUnsubscribe/unregister (#2010).
-			dropCache = !h.enforceCaps || h.subscriberCount[key] == 0
+			dropCache = h.dropMarshalCacheForLocked(key)
 		}
 	}
 	h.mu.Unlock()
