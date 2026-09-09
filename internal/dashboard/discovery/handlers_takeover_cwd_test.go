@@ -91,8 +91,8 @@ func TestHandleTakeover_CleanupUsesCleanedCWD(t *testing.T) {
 		// PID is not alive, so the identity check/SIGTERM short-circuit and
 		// the goroutine proceeds straight to cleanup + takeover.
 		ProcStartTime: func(int) (uint64, error) { return 1, nil },
+		AppCtx:        context.Background(),
 	})
-	h.appCtx = context.Background()
 
 	body, _ := json.Marshal(map[string]any{
 		"pid":             deadPID,

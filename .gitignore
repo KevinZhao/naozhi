@@ -61,3 +61,8 @@ __pycache__/
 
 # Local-only design notes (not for upstream)
 docs/design/competitor-distilled-2026-05.md
+# `go build ./tools/<cmd>/` drops the binary in the repo root
+/lint-server-handlers
+/check-router-fields
+/lint-fact-table
+/gen-contract

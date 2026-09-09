@@ -39,7 +39,7 @@
 
 file_size:
     # 2026-09-08（#2561 E6-c）：以下四条删除 —— 文件已拆到 800 行上限之下，
-    # 按 rule 5(b) 清理。拆分是机械搬迁（scripts/go-split-file.py，逐字节守恒校验）：
+    # 按 rule 5(b) 清理。拆分是机械搬迁（一次性脚本 go-split-file.py，逐字节守恒校验；脚本已随 #2637 删除，方法见 PR #2627 描述）：
     #   internal/dashboard/session/handlers.go  1470 → 374（拆 5 文件）
     #   internal/dashboard/project/files.go     1310 → 352（拆 5 文件）
     #   internal/dashboard/cron/handlers.go     1296 → 131（拆 5 文件）
