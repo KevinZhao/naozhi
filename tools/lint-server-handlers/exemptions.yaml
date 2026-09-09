@@ -33,8 +33,9 @@
 #   （记 599 / 实测 461）。11 → 8 条。
 # - 上一条"baseline current 必须随 master 漂移更新"在实践中没被执行：
 #   wshub.go 记 1381 实测 742（差 639），dashboard_send.go 记 1089 实测 851。
-#   两条已重采。lint 只在 `lines > current` 时报警，所以 baseline 偏高会静默
-#   放过增长 —— 重采不是洁癖，是把闸门重新上膛。
+#   两条已重采。lint 过去只在 `lines > current` 时报警，所以 baseline 偏高会静默
+#   放过增长 —— 重采不是洁癖，是把闸门重新上膛。2026-09-09（#2636）起 lint 在
+#   `current - lines > 30` 时也报 file_size 违规，偏高的 baseline 不再能过 CI。
 
 file_size:
     # 2026-09-08（#2561 E6-c）：以下四条删除 —— 文件已拆到 800 行上限之下，
@@ -63,7 +64,7 @@ file_size:
     - path: internal/server/dashboard_send.go
       current: 783                          # 2026-09-09 重采（#2632）：851 → 783，remote-send goroutine / workspace 解析收进 sendEngine 方法。上一次 2026-09-07（#2551 E1-c）1089 → 851
       limit: 500
-      until: "2027-03-31"     # 退役者 #2561 E6-c（Epic E 的 handler 文件机械拆分）。历史：3f → "E6" → 日期
+      until: "2027-03-31"     # 退役者 Epic K #2549（send 管线随 Hub 拆分收口）/ #2197（Server 余下部分）。#2561 E6-c 已合并且未拆此文件，2026-09-09（#2636）改挂。历史：3f → "E6" → "#2561" → 日期
     # internal/server/dashboard_cron.go: removed Phase 1 (PR #1438) — file
     # moved to internal/dashboard/cron/handlers.go. Closes-exemption trailer
     # in commit message satisfies rule 5.
@@ -74,7 +75,7 @@ file_size:
       limit: 500
       until: "2027-03-31"     # 退役者 #2197（Server god-struct 的余下部分；#2553 E3 已把 handler 字段 18→4）。历史："5" → "E3" → 日期
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线
-      current: 748                          # 2026-09-07 +6（#2552 E2-a：HubOptions.UploadStore + 其理由注释，取代 SetUploadStore 后注入）；同日重采（#2551 E1-c）：记 1381 实测 742，差 639 行 —— 期间 R243-ARCH-2 等拆分从未回写 baseline
+      current: 737                          # 2026-09-09 重采（#2636）：记 748 实测 737（#2629 删 enforceCaps）。lint 自此在 baseline 高出实测 >30 行时也报警，重采不再靠人记得。2026-09-07 +6（#2552 E2-a：HubOptions.UploadStore + 其理由注释）；同日重采（#2551 E1-c）：记 1381 实测 742
       limit: 500
       until: "2027-03-31"     # 退役者 Epic K #2549（Hub 拆 Subscriber/Broadcast 子对象）。历史：4b → "K" → 日期
     # internal/server/routes.go: entry removed 2026-09-07（#2552 E2-a）—— 构造段
