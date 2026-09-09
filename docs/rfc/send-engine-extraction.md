@@ -249,6 +249,24 @@ type SendHandler struct {
 
 **`allowedRoot` 的语义不变**：`"" = 不限制` 是 `server_validate.go:72` 的既有策略（生产上由配置决定），本 RFC 不改。写在这里是为了让后来者不要把某个 nil 判断"简化"成零值。
 
+### 2.7.1 落地后修订（#2632，2026-09-09）
+
+§2.7 的表把 8 处 `h.engine.<字段>` 直戳写成了处方，与本 RFC 自述"对外只有 `TrackSend` / `drain` / `sessionSend` / `resolveAttachmentWorkspace`"不自洽——Epic E 落地评审 MAJOR-3 指出这只是把 #2551 立案时的"SendHandler 同持 `hub` 与 `router` = 同一状态两个视图"换了个拼写（`router SendRouter` 读、`engine.router` 写）。#2632 按下表收口，**§2.7 的表自此只作历史记录，以本表为准**：
+
+| `dashboard_send.go` 原写法（#2551 后） | #2632 后 | 引擎方法 |
+| :--- | :--- | :--- |
+| `resolveAttachmentWorkspace(h.router, h.engine.allowedRoot, key, ws)` | `h.engine.resolveAttachmentWorkspace(key, ws)` | 自由函数改为引擎方法；WS 侧 `wshub_send.go` 同改 |
+| `gateRemoteAccessProfile(h.engine.resolver, node, key)` | `h.engine.gateRemoteAccess(node, key)` | 薄封装 |
+| `TrackSend()` + 裸 `go func` + `WithTimeout(h.engine.ctx, 60s)` + `h.engine.notify.*` ×2 | `h.engine.remoteSend(nc, node, key, text, ws)` → `accepted bool` | 吸收 L473-497 整段；`false` = draining → 503 |
+| `validateWorkspace(req.Workspace, h.engine.allowedRoot)` + `h.engine.router.SetWorkspace(chatKey, ws)` | `h.engine.bindWorkspace(chatKey, req.Workspace)` | 校验 + 写入一步 |
+| `handleAttachment` 内手写 live-session → router fallback + `validateWorkspace(ws, h.engine.allowedRoot)` | `h.engine.sessionWorkspace(key)` + `h.engine.validateWorkspace(ws)` | fallback 规则与 `resolveAttachmentWorkspace` 同源 |
+
+- `SendHandler.router` 字段与 `SendRouter` 接口（#566）**删除**：HTTP 路径对 `*session.Router` 只剩 `engine.router` 一个句柄。`TestSendHandler_RouterFieldIsSendRouter` 改为 `TestSendHandler_ReachesRouterOnlyThroughEngine`（断言 `sendH.engine == s.hub.engine`）。
+- §2.6 "不拓宽 `SendRouter`" 的理由（`handleBind` 写入口不得成为可被 stub 劫持的注入点）在删掉该接口后**自动成立**：写入口只剩 `bindWorkspace`，它和 `sessionSend` 走同一个 `e.router`。
+- lint `send_engine_ownership` 改为三条 AST 检查（`rule_send_engine.go` 头注释）：A `sendEngine` / `SendHandler` 不得有 `*Hub` 类型字段（取代可被改名绕过的 6 字段名单）；B 三个流水线文件无 `*Hub` 接收者（保留）；C `dashboard_send.go` 对 `engine.<x>` 只能是方法调用、不能是字段读取。
+- §6 测试 ③（drain 后 notify 路径不再 `clientWG.Add`）以 `TestSendEngine_NotifyAfterDrainDoesNotArmClientWG` 落地；④ 补 `engine.ctx == hub.ctx`——这是 drain 前置 1（`h.cancel()` 能缩短 `wg.Wait`）成立的唯一依据。
+- 与 §2.7 "两条订正" 一致，本次**无请求改判**：`remoteSend` 的 60s cap、错误 fan-out 语义、`bindWorkspace` 的校验规则与原内联代码逐字等价；`handleBind` 里 `invalid key`（`idx <= 0`）与 `invalid workspace` 两个 400 的判定顺序互换，二者均为 400 且互不重叠。
+
 ### 2.8 构造
 
 `NewHub` 在填完 Hub 字面量后建引擎（此时 `h` 已可作 notifier）：
