@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/limits"
@@ -59,7 +60,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		// Defense-in-depth at the RPC boundary (mirrors takeover /
 		// close_discovered) so a compromised primary cannot pass ".." /
 		// path-traversal session IDs even if the internal check is removed.
-		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
+		if p.SessionID != "" && !claudefs.IsValidSessionID(p.SessionID) {
 			return nil, fmt.Errorf("invalid session_id format")
 		}
 		if fn := c.loadPreviewFunc(); fn != nil {
@@ -175,7 +176,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if p.PID <= 0 || p.SessionID == "" {
 			return nil, fmt.Errorf("pid and session_id are required")
 		}
-		if !discovery.IsValidSessionID(p.SessionID) {
+		if !claudefs.IsValidSessionID(p.SessionID) {
 			return nil, fmt.Errorf("invalid session_id format")
 		}
 		if p.ProcStartTime == 0 {
@@ -261,7 +262,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if p.ProcStartTime == 0 {
 			return nil, fmt.Errorf("proc_start_time is required")
 		}
-		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
+		if p.SessionID != "" && !claudefs.IsValidSessionID(p.SessionID) {
 			return nil, fmt.Errorf("invalid session_id format")
 		}
 		// CWD feeds discovery.WaitAndCleanup, which derives a lockDir and

@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // TestLoadHistory_RejectsTraversalSessionID confirms the IsValidSessionID
@@ -15,7 +17,7 @@ func TestLoadHistory_RejectsTraversalSessionID(t *testing.T) {
 	dir := t.TempDir()
 	claudeDir := filepath.Join(dir, "claude")
 	cwd := "/home/ec2-user"
-	projectsDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
+	projectsDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
 	if err := os.MkdirAll(projectsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

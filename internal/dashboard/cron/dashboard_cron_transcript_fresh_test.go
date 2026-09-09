@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 )
 
 // fixtureRunWithJSONLFresh mirrors fixtureRunWithJSONL but exposes the
@@ -75,7 +75,7 @@ func fixtureRunWithJSONLFresh(t *testing.T, fresh bool, jsonlLines []string) (h 
 		t.Fatalf("write run json: %v", err)
 	}
 
-	projDir := filepath.Join(claudeDir, "projects", discovery.ClaudeProjectSlug(workDir))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(workDir))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestTranscript_FreshFalse_BoundaryEndExclusive(t *testing.T) {
 		`{"type":"assistant","timestamp":"` + boundary + `","message":{"role":"assistant","content":[{"type":"text","text":"BOUNDARY_EVENT"}]}}`,
 		`{"type":"assistant","timestamp":"` + pastEnd + `","message":{"role":"assistant","content":[{"type":"text","text":"PAST_END"}]}}`,
 	}
-	projDir := filepath.Join(claudeDir, "projects", discovery.ClaudeProjectSlug(workDir))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(workDir))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestTranscript_FreshTrue_BoundaryEndInclusive(t *testing.T) {
 	lines := []string{
 		`{"type":"assistant","timestamp":"` + boundary + `","message":{"role":"assistant","content":[{"type":"text","text":"BOUNDARY_FRESH_KEEPS"}]}}`,
 	}
-	projDir := filepath.Join(claudeDir, "projects", discovery.ClaudeProjectSlug(workDir))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(workDir))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}

@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -312,7 +312,7 @@ func mapJSONLLine(line []byte) []clievent.EventEntry {
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil
 	}
-	ts := parseTranscriptTime(raw.Timestamp)
+	ts := claudefs.TimestampMillis(raw.Timestamp)
 
 	switch raw.Type {
 	case "user":
@@ -552,15 +552,4 @@ func extractPersistedPath(s string) string {
 		return ""
 	}
 	return "tool-results/" + base
-}
-
-func parseTranscriptTime(ts string) int64 {
-	if ts == "" {
-		return 0
-	}
-	t, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		return 0
-	}
-	return t.UnixMilli()
 }

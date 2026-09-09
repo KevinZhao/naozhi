@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
@@ -64,7 +65,7 @@ func TestSource_LoadBefore_DecodesHistoryImages(t *testing.T) {
 
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cjsonl-img"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	sessID := "33333333-3333-3333-3333-333333333cc3"
 
 	// A source image larger than the 600px thumbnail cap so we can assert
@@ -104,7 +105,7 @@ func TestSource_LoadBefore_DecodesHistoryImages(t *testing.T) {
 func TestSource_LoadBefore_CorruptImageKeepsText(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cjsonl-img-bad"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	sessID := "44444444-4444-4444-4444-444444444dd4"
 
 	// Not valid base64-encoded image bytes: decode-as-image fails, image

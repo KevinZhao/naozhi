@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // TestScan_SessionIDNeverUpgradedToOtherSessionJSONL is the regression guard
@@ -42,7 +44,7 @@ func TestScan_SessionIDNeverUpgradedToOtherSessionJSONL(t *testing.T) {
 		Entrypoint: "cli",
 	})
 
-	projDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +111,7 @@ func TestScan_SessionIDStableWithNoOwnJSONLYet(t *testing.T) {
 		Entrypoint: "cli",
 	})
 
-	projDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -56,21 +56,6 @@ type transcriptTurn struct {
 	DurationMS int64           `json:"duration_ms,omitempty"` // tool_result duration if available
 }
 
-// claudeJSONLEvent is the partial schema we care about. Fields we don't
-// use are decoded into RawMessage so a future field addition by the CLI
-// doesn't break parsing.
-type claudeJSONLEvent struct {
-	Type      string          `json:"type"`
-	SessionID string          `json:"sessionId"`
-	Timestamp string          `json:"timestamp"`
-	UUID      string          `json:"uuid"`
-	Message   json.RawMessage `json:"message"`
-	// tool_result events sometimes appear at top level under
-	// "toolUseResult" instead of inside a content block (varies by
-	// CLI version). We tolerate both shapes.
-	ToolUseResult json.RawMessage `json:"toolUseResult"`
-}
-
 // claudeMessage is the inner "message" field. Only role + content +
 // usage matter to us.
 type claudeMessage struct {

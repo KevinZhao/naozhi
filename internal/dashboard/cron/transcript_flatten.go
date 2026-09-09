@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -20,7 +21,7 @@ var truncatedToolInputPlaceholder = json.RawMessage(`"[truncated]"`)
 // true when the event maps to at least one recognised turn shape — the
 // caller uses it to decide whether to set fallback:"raw". Per-type helpers
 // own their own (decode → walk → emit) sub-flow.
-func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
+func flattenJSONLEvent(ev *claudefs.Line, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
 	switch ev.Type {
 	case "user":
 		return flattenUserEvent(ev, ts, nextIdx)
@@ -37,7 +38,7 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 // content-block array — how Claude carries tool_result payloads back into the
 // conversation). Two-pass: count tool_result blocks first, pre-size out
 // exactly, and skip the allocation on lines that contribute no turns.
-func flattenUserEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
+func flattenUserEvent(ev *claudefs.Line, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
 	tok := transcriptTokens{}
 
 	var msg claudeMessage
@@ -105,7 +106,7 @@ func flattenUserEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcript
 // per-tool_use turns. Returns the token usage delta from msg.Usage. Two-pass:
 // aggregate text + count tool_use blocks, then emit at final indices — no
 // prepend, no reindex, O(1) slice allocation.
-func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
+func flattenAssistantEvent(ev *claudefs.Line, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
 	tok := transcriptTokens{}
 	toolCalls := 0
 
@@ -198,7 +199,7 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 // timeline value; only `subtype == "error"` becomes an "error" turn.
 // Unmarshal failures return early (consistent with sibling flatten helpers).
 // The out slice is allocated lazily — only when an error turn is emitted.
-func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
+func flattenSystemEvent(ev *claudefs.Line, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
 	tok := transcriptTokens{}
 
 	var sys struct {

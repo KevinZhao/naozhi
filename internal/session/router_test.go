@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -2064,59 +2064,6 @@ func TestInterruptSessionSafe_DeadProcess(t *testing.T) {
 // resolveResumeID — jsonl-existence pre-check
 // ---------------------------------------------------------------------------
 
-func TestClaudeProjectSlug(t *testing.T) {
-	cases := []struct {
-		name string
-		cwd  string
-		want string
-	}{
-		{"root", "/", "-"},
-		{"typical", "/home/user/workspace/proj", "-home-user-workspace-proj"},
-		{"trailing slash preserved", "/home/user/", "-home-user-"},
-		{"nested", "/home/user/workspace/naozhi", "-home-user-workspace-naozhi"},
-		{"empty", "", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := claudeProjectSlug(tc.cwd); got != tc.want {
-				t.Errorf("claudeProjectSlug(%q) = %q, want %q", tc.cwd, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestClaudeProjectSlug_MatchesDiscovery locks session.claudeProjectSlug and
-// discovery.ClaudeProjectSlug to the same output for every input, so a future
-// change to Claude CLI's project-directory naming scheme (which affects
-// ~/.claude/projects/ layout) cannot be applied to only one of the two call
-// sites. RNEW-002.
-func TestClaudeProjectSlug_MatchesDiscovery(t *testing.T) {
-	inputs := []string{
-		"",
-		"/",
-		"/home/user",
-		"/home/user/",
-		"/home/user/workspace/naozhi",
-		"/tmp/my-proj",
-		"relative/path",
-		"//double//slash//",
-		"/with spaces/in path",
-		"/unicode/目录/路径",
-	}
-	for _, cwd := range inputs {
-		// Subtest name must not contain "/", which go test treats as a
-		// hierarchy separator and silently rewrites to "_" — two inputs
-		// differing only in slashes would collide under -run.
-		t.Run(fmt.Sprintf("cwd=%q", cwd), func(t *testing.T) {
-			s := claudeProjectSlug(cwd)
-			d := discovery.ClaudeProjectSlug(cwd)
-			if s != d {
-				t.Errorf("session %q vs discovery %q for cwd %q — the two implementations have drifted; update both call sites in lock-step", s, d, cwd)
-			}
-		})
-	}
-}
-
 func TestResolveResumeID(t *testing.T) {
 	// Scratch claudeDir with a single jsonl under workspace slug "A" only.
 	claudeDir := t.TempDir()
@@ -2125,7 +2072,7 @@ func TestResolveResumeID(t *testing.T) {
 	okID := "sess-ok"
 	missingID := "sess-missing"
 
-	projA := filepath.Join(claudeDir, "projects", claudeProjectSlug(workspaceA))
+	projA := claudefs.ProjectDir(claudeDir, workspaceA)
 	if err := os.MkdirAll(projA, 0o700); err != nil {
 		t.Fatal(err)
 	}

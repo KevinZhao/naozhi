@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/contracts"
@@ -294,7 +295,7 @@ func claudeProjectsAllowedRoot() string {
 	if err != nil {
 		home = os.Getenv("HOME")
 	}
-	raw := filepath.Join(home, ".claude", "projects")
+	raw := claudefs.ProjectsRoot(filepath.Join(home, ".claude"))
 	if resolved, err := filepath.EvalSymlinks(raw); err == nil {
 		return resolved
 	}

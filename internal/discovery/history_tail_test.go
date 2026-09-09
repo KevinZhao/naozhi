@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
@@ -22,7 +23,7 @@ func TestLoadHistoryTail_LimitHonored(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-limit"
 	sessionID := "00000000-0000-0000-0000-000000001001"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	// 50 user lines numbered 0-49; tail(10) should give us indices 40-49.
 	lines := make([]string, 0, 50)
@@ -52,7 +53,7 @@ func TestLoadHistoryTail_LimitLargerThanFile(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-small"
 	sessionID := "00000000-0000-0000-0000-000000001002"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := []string{
 		userJSONLLine("user", "only-one"),
@@ -78,7 +79,7 @@ func TestLoadHistoryTail_SpanningChunks(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-span"
 	sessionID := "00000000-0000-0000-0000-000000001003"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	// Build a big line that is larger than the chunk size so the reverse
 	// reader must reassemble it across at least two chunks.
@@ -115,7 +116,7 @@ func TestLoadHistoryTail_LimitZeroFallsBack(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-fallback"
 	sessionID := "00000000-0000-0000-0000-000000001004"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := []string{
 		userJSONLLine("user", "a"),
@@ -150,7 +151,7 @@ func TestLoadHistoryTail_SkipsMalformed(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-malformed"
 	sessionID := "00000000-0000-0000-0000-000000001005"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := []string{
 		"not json at all",
@@ -201,7 +202,7 @@ func TestParseTail_ScanBudgetBoundsIterations(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-budget"
 	sessionID := "00000000-0000-0000-0000-000000001099"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	// Small real file so ReadAt past EOF yields io.EOF; only a handful of
 	// lines actually present. parseTail handles io.EOF silently.
@@ -263,7 +264,7 @@ func TestParseTail_HonestSizeReturnsAllEntries(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-honest"
 	sessionID := "00000000-0000-0000-0000-000000001098"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := []string{
 		userJSONLLine("user", "first"),
@@ -292,7 +293,7 @@ func TestLoadHistoryTail_CancelledCtx(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-cancel"
 	sessionID := "00000000-0000-0000-0000-000000001006"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := []string{userJSONLLine("user", "should-not-matter")}
 	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
@@ -314,7 +315,7 @@ func TestLoadHistoryChainTail_StopsAtBudget(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/chain"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	// Three sessions in the chain. Chain order stored is oldest → newest.
 	// Each session has 10 user entries. Session IDs must be UUID-shaped
@@ -353,7 +354,7 @@ func TestLoadHistoryChainTail_SpillsIntoPriorSessions(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/chain-spill"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	type entry struct{ id, tag string }
 	rows := []entry{
@@ -409,7 +410,7 @@ func TestLoadHistoryChainTail_SkipsMissing(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/chain-miss"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	realID := "dddddddd-dddd-dddd-dddd-dddddddddddd"
 	lines := []string{userJSONLLine("user", "real")}
@@ -437,7 +438,7 @@ func TestLoadHistoryChainTail_RespectsCtxCancel(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/chain-ctx"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := []string{userJSONLLine("user", "present")}
 	makeSessionJSONL(t, claudeDir, dirName, "ctx-id", lines)
@@ -462,7 +463,7 @@ func TestResolveJSONLPath_CWDHit(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/resolve"
 	sessionID := "00000000-0000-0000-0000-000000001010"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	_, jsonlPath := makeSessionJSONL(t, claudeDir, dirName, sessionID, []string{
 		userJSONLLine("user", "x"),
@@ -524,7 +525,7 @@ func TestLoadHistoryTailBeforeCtx_FiltersByTime(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-before-basic"
 	sessionID := "00000000-0000-0000-0000-0000000020a1"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	// 10 user lines with strictly increasing timestamps 1000s..1009s.
 	lines := make([]string, 0, 10)
@@ -564,7 +565,7 @@ func TestLoadHistoryTailBeforeCtx_StrictlyLess(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-before-strict"
 	sessionID := "00000000-0000-0000-0000-0000000020a2"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := []string{
 		userJSONLLineAt("at-boundary", 1000),
@@ -589,7 +590,7 @@ func TestLoadHistoryTailBeforeCtx_ZeroBeforeMatchesTail(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-before-zero"
 	sessionID := "00000000-0000-0000-0000-0000000020a3"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := make([]string, 0, 5)
 	for i := 0; i < 5; i++ {
@@ -616,7 +617,7 @@ func TestLoadHistoryTailBeforeCtx_LimitHonored(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-before-limit"
 	sessionID := "00000000-0000-0000-0000-0000000020a4"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := make([]string, 0, 20)
 	for i := 0; i < 20; i++ {
@@ -649,7 +650,7 @@ func TestLoadHistoryChainBeforeCtx_WalksOlderSessions(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/chain-before"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	oldID := "11111111-1111-1111-1111-11111111aaa1"
 	newID := "22222222-2222-2222-2222-22222222aaa2"
@@ -702,7 +703,7 @@ func TestLoadHistoryChainBeforeCtx_ZeroBeforeDelegates(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/chain-before-zero"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	id := "33333333-3333-3333-3333-33333333aaa3"
 	lines := make([]string, 0, 3)
@@ -739,7 +740,7 @@ func BenchmarkLoadHistoryTail_vs_LoadHistory(b *testing.B) {
 	claudeDir := b.TempDir()
 	cwd := "/tmp/bench"
 	sessionID := "bench-session"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	// 10,000 assistant lines; small but emulates realistic large sessions.
 	lines := make([]string, 0, 10000)

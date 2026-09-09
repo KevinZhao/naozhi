@@ -13,10 +13,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -160,7 +160,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, resp)
 		return
 	}
-	if !discovery.IsValidSessionID(run.SessionID) {
+	if !claudefs.IsValidSessionID(run.SessionID) {
 		// Defence in depth: the persisted SessionID *should* be a UUID
 		// because session.NewKey enforces it, but a hand-edited disk
 		// file could carry path traversal characters. Reject without
@@ -177,7 +177,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, resp)
 		return
 	}
-	// Defence in depth before ClaudeProjectSlug encodes WorkDir into a path
+	// Defence in depth before claudefs.ProjectSlug encodes WorkDir into a path
 	// component: the slug only maps '/'→'-' and does NOT scrub control runes
 	// or invalid UTF-8, so a hand-edited or legacy persisted run could tunnel
 	// a control rune into the projects/ directory name and steer EvalSymlinks
@@ -201,7 +201,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jsonlPath := filepath.Join(h.claudeDir, "projects", discovery.ClaudeProjectSlug(run.WorkDir), run.SessionID+".jsonl")
+	jsonlPath := claudefs.SessionJSONL(h.claudeDir, run.WorkDir, run.SessionID)
 
 	// Symlink + path-escape guard. EvalSymlinks resolves any symlink
 	// in the chain, then HasPrefix ensures the resolved path still lives
@@ -223,7 +223,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 	// before the prefix check: macOS maps /var→/private/var and symlinked
 	// claudeDir components (Docker bind-mounts) drift under EvalSymlinks, so an
 	// asymmetric resolve would reject every legitimate JSONL on those hosts.
-	allowedRoot := filepath.Join(h.claudeDir, "projects")
+	allowedRoot := claudefs.ProjectsRoot(h.claudeDir)
 	resolvedRoot, rrErr := filepath.EvalSymlinks(allowedRoot)
 	if rrErr != nil {
 		// Only fall back to the raw root on "dir not yet materialised". Any
@@ -348,7 +348,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		if len(line) == 0 {
 			continue
 		}
-		var ev claudeJSONLEvent
+		var ev claudefs.Line
 		if err := json.Unmarshal(line, &ev); err != nil {
 			// Skip unparseable line; do not fail the whole response.
 			continue
@@ -358,7 +358,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		// timestamp-less events ("queue-operation", untimestamped attachments)
 		// are dropped rather than leaked into an adjacent run's transcript
 		// (#1046). fresh=true runs own the JSONL, so they pass through there.
-		ts := parseISO8601MS(ev.Timestamp)
+		ts := claudefs.TimestampMillis(ev.Timestamp)
 		if ts > 0 {
 			// fresh=false shares the JSONL with adjacent runs, so a boundary
 			// event (run N ended at T, run N+1 started at T) must have a single

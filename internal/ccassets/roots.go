@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/assets"
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // errPathEscape wraps assets.ErrNotFound so the handler maps a traversal
@@ -114,7 +115,7 @@ func rootForRef(home, repoRoot string, ref assets.Ref) (root, rel string, err er
 		if home == "" || !projectDirRE.MatchString(ref.Source.Project) {
 			return "", "", errPathEscape
 		}
-		root = filepath.Join(home, "projects", ref.Source.Project, "memory")
+		root = filepath.Join(claudefs.ProjectsRoot(home), ref.Source.Project, "memory")
 		rel = ref.RelPath
 
 	default:

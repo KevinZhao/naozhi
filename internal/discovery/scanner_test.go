@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // newPromptEntry builds a *promptCacheEntry with gen initialised to v.
@@ -105,56 +107,9 @@ func makeSessionFile(t *testing.T, sessDir string, sf sessionFile) {
 // IsValidSessionID
 // ---------------------------------------------------------------------------
 
-func TestIsValidSessionID(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		input string
-		want  bool
-	}{
-		{"valid lowercase", "550e8400-e29b-41d4-a716-446655440000", true},
-		{"valid v4 style", "00000000-0000-4000-8000-000000000000", true},
-		{"empty", "", false},
-		{"no hyphens", "550e8400e29b41d4a716446655440000", false},
-		{"too short", "550e8400-e29b-41d4-a716-44665544000", false},
-		{"uppercase", "550E8400-E29B-41D4-A716-446655440000", false},
-		{"extra char", "550e8400-e29b-41d4-a716-4466554400001", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := IsValidSessionID(tc.input)
-			if got != tc.want {
-				t.Errorf("IsValidSessionID(%q) = %v, want %v", tc.input, got, tc.want)
-			}
-		})
-	}
-}
-
 // ---------------------------------------------------------------------------
 // projDirName
 // ---------------------------------------------------------------------------
-
-func TestProjDirName(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		cwd  string
-		want string
-	}{
-		{"/home/user/workspace/foo", "-home-user-workspace-foo"},
-		{"/tmp", "-tmp"},
-		{"", ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.cwd, func(t *testing.T) {
-			t.Parallel()
-			got := projDirName(tc.cwd)
-			if got != tc.want {
-				t.Errorf("projDirName(%q) = %q, want %q", tc.cwd, got, tc.want)
-			}
-		})
-	}
-}
 
 // ---------------------------------------------------------------------------
 // jsonlMtime
@@ -175,7 +130,7 @@ func TestJsonlMtime_ReadsFile(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/test-mtime"
 	sessionID := "00000000-0000-0000-0000-000000000002"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -217,7 +172,7 @@ func TestLookupSummaries_BasicLookup(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/lookup-project"
 	sid := "aaaabbbb-0000-0000-0000-000000000001"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -241,7 +196,7 @@ func TestLookupSummaries_NotInIndex(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/lookup-missing"
 	sid := "aaaabbbb-0000-0000-0000-000000000002"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -263,7 +218,7 @@ func TestLookupSummaries_CacheHit(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cache-test"
 	sid := "aaaabbbb-0000-0000-0000-000000000003"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -307,7 +262,7 @@ func TestLookupSummaries_MultipleSessionsSameProject(t *testing.T) {
 	cwd := "/tmp/multi"
 	sid1 := "aaaabbbb-0000-0000-0000-000000000005"
 	sid2 := "aaaabbbb-0000-0000-0000-000000000006"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -567,7 +522,7 @@ func TestExtractLastPrompt_CacheHit(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cache-hit"
 	sessionID := "ccccdddd-0000-0000-0000-000000000001"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -604,7 +559,7 @@ func TestExtractLastPrompt_CacheInvalidatedOnMtimeChange(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cache-invalidate"
 	sessionID := "ccccdddd-0000-0000-0000-000000000002"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -636,7 +591,7 @@ func TestFindJSONLPath(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/find-jsonl"
 	sessionID := "ddddeeee-0000-0000-0000-000000000001"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -755,7 +710,7 @@ func TestRefreshDynamic_LastActiveAndState(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/refresh-dynamic"
 	sessionID := "eeeeffff-0000-0000-0000-000000000001"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -811,7 +766,7 @@ func TestNewScanner_PromptSemReused(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/promptsem-reuse"
 	sessionID := "eeeeffff-0000-0000-0000-0000000000fe"
-	projDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -871,7 +826,7 @@ func TestExtractLastPromptWithMtime(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/extract-mtime"
 	sessionID := "eeeeffff-0000-0000-0000-0000000000cd"
-	projDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -906,7 +861,7 @@ func TestRefreshDynamic_SummaryUpdated(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/refresh-summary"
 	sessionID := "eeeeffff-0000-0000-0000-000000000002"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -945,7 +900,7 @@ func TestRefreshDynamic_NoChanges(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/no-change"
 	sessionID := "eeeeffff-0000-0000-0000-000000000003"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)

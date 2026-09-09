@@ -10,18 +10,16 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -357,7 +355,7 @@ func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs
 		// --resume child plus a sessionless wrapper, both with sessions/<pid>.json;
 		// the wrapper would duplicate the sidebar card). One Stat serves both the
 		// grace gate and lastActive, which falls back to the process start time.
-		jsonlPath := filepath.Join(claudeDir, "projects", projDirName(sf.CWD), sf.SessionID+".jsonl")
+		jsonlPath := claudefs.SessionJSONL(claudeDir, sf.CWD, sf.SessionID)
 		la := sf.StartedAt
 		if fi, err := os.Stat(jsonlPath); err != nil {
 			startedAt := time.UnixMilli(sf.StartedAt)
@@ -442,138 +440,10 @@ func processAlive(pid int) bool {
 	return osutil.PidAlive(pid)
 }
 
-// claudeSlugMaxLen mirrors the Claude CLI's cap on an encoded project directory
-// name: beyond it the CLI truncates and appends "-" + a base36 hash of the
-// original path (verified against CLI 2.1.219 with a 40-segment CWD).
-const claudeSlugMaxLen = 200
-
-// ClaudeProjectSlug converts a CWD path to the Claude project directory name,
-// e.g. "/home/user/workspace/foo" -> "-home-user-workspace-foo"; it is the
-// single source of truth for the scheme (internal/session wraps it). Every
-// character outside [A-Za-z0-9] becomes '-' per UTF-16 code unit (see
-// substituteNonAlnum). Control bytes (< 0x20) are stripped first so hand-edited
-// persisted state (cron_jobs.json, sessions-index.json) with embedded \t/\n
-// cannot steer the encoded path onto an attacker-prepared directory (#465).
-func ClaudeProjectSlug(cwd string) string {
-	if hasControlByte(cwd) {
-		cwd = stripControlBytes(cwd)
-	}
-	slug := substituteNonAlnum(cwd)
-	if len(slug) <= claudeSlugMaxLen {
-		return slug
-	}
-	return slug[:claudeSlugMaxLen] + "-" + claudeSlugHash(cwd)
-}
-
-// substituteNonAlnum replaces everything outside [A-Za-z0-9] with '-',
-// mirroring the CLI's `replace(/[^a-zA-Z0-9]/g, "-")` per UTF-16 code unit: a
-// BMP rune (CJK ideograph) yields ONE '-', a non-BMP rune (emoji) TWO. Verified
-// against CLI 2.1.219 ("/tmp/slugtest2/中文目录" → "-tmp-slugtest2-----").
-// Invalid UTF-8 bytes decode as RuneError size 1 and contribute one '-' each.
-func substituteNonAlnum(s string) string {
-	needs := false
-	for i := 0; i < len(s); i++ {
-		if !isASCIIAlnum(s[i]) {
-			needs = true
-			break
-		}
-	}
-	if !needs {
-		return s
-	}
-	// strings.Builder hands out its buffer without copying, keeping this at
-	// one allocation per call on the sidebar-fetch / cron URL hot paths.
-	var b strings.Builder
-	// The output is never longer than the input: every ASCII-alnum byte maps
-	// to itself, and any multi-byte rune shrinks to at most two dashes.
-	b.Grow(len(s))
-	for i := 0; i < len(s); {
-		if c := s[i]; c < utf8.RuneSelf {
-			if isASCIIAlnum(c) {
-				b.WriteByte(c)
-			} else {
-				b.WriteByte('-')
-			}
-			i++
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		if r > 0xFFFF {
-			b.WriteString("--")
-		} else {
-			b.WriteByte('-')
-		}
-		i += size
-	}
-	return b.String()
-}
-
-func isASCIIAlnum(c byte) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
-
-// claudeSlugHash reproduces the CLI's overflow suffix, a Java-style 32-bit
-// string hash of the original path rendered base36:
-//
-//	let t = 0; for (c of s) t = (t << 5) - t + c.charCodeAt(i) | 0
-//	Math.abs(t).toString(36)
-//
-// int32 arithmetic matches JS's `| 0` wraparound; non-BMP runes are folded
-// into surrogate pairs; Math.abs(-2^31) is 2^31 in JS, so that input is special-cased.
-func claudeSlugHash(s string) string {
-	var h int32
-	for _, r := range s {
-		if r > 0xFFFF {
-			r -= 0x10000
-			hi := int32(0xD800 + (r >> 10))
-			lo := int32(0xDC00 + (r & 0x3FF))
-			h = (h << 5) - h + hi
-			h = (h << 5) - h + lo
-			continue
-		}
-		h = (h << 5) - h + int32(r)
-	}
-	if h == math.MinInt32 {
-		// JS: Math.abs(-2147483648) === 2147483648.
-		return strconv.FormatUint(1<<31, 36)
-	}
-	if h < 0 {
-		h = -h
-	}
-	return strconv.FormatInt(int64(h), 36)
-}
-
-// hasControlByte reports whether s contains any byte < 0x20 (no allocation).
-func hasControlByte(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 {
-			return true
-		}
-	}
-	return false
-}
-
-// stripControlBytes returns s with every byte < 0x20 removed; hasControlByte
-// gates it so the typical cwd never pays the copy.
-func stripControlBytes(s string) string {
-	b := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x20 {
-			b = append(b, s[i])
-		}
-	}
-	return string(b)
-}
-
-// projDirName is the package-internal alias for ClaudeProjectSlug.
-func projDirName(cwd string) string {
-	return ClaudeProjectSlug(cwd)
-}
-
 // jsonlMtime returns the JSONL conversation file's mtime as unix ms.
 // Falls back to startedAt if the file is not found.
 func jsonlMtime(claudeDir, cwd, sessionID string, startedAt int64) int64 {
-	jsonlPath := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
+	jsonlPath := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
 	info, err := os.Stat(jsonlPath)
 	if err != nil {
 		return startedAt
@@ -605,7 +475,7 @@ func (s *Scanner) extractLastPrompt(claudeDir, cwd, sessionID string) string {
 // for lastActive instead of a second os.Stat via jsonlMtime.
 func (s *Scanner) extractLastPromptWithMtime(claudeDir, cwd, sessionID string) (string, int64, bool) {
 	// One Stat resolves both existence and mtime.
-	path := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
+	path := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
 	fi, err := os.Stat(path)
 	if err != nil {
 		return "", 0, false
@@ -836,7 +706,7 @@ func extractUserText(raw json.RawMessage) string {
 
 // findJSONLPath locates the JSONL for a session, trying the CWD-based path first.
 func findJSONLPath(claudeDir, cwd, sessionID string) string {
-	candidate := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
+	candidate := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
 	if _, err := os.Stat(candidate); err == nil {
 		return candidate
 	}
@@ -862,7 +732,7 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 		if workspace == "" {
 			continue
 		}
-		indexPath := filepath.Join(claudeDir, "projects", projDirName(workspace), "sessions-index.json")
+		indexPath := claudefs.SessionsIndexPath(claudeDir, workspace)
 		byProjDir[indexPath] = append(byProjDir[indexPath], sid)
 	}
 
@@ -1067,29 +937,6 @@ func (s *Scanner) RefreshDynamicContext(ctx context.Context, claudeDir string, s
 	return changed
 }
 
-// IsValidSessionID checks whether s is a UUID-format session ID (8-4-4-4-12
-// lowercase hex). Hand-rolled to avoid the regexp DFA cost paid on every
-// discovered session per Scan.
-func IsValidSessionID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i := 0; i < 36; i++ {
-		c := s[i]
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 // WaitAndCleanup waits for pid to exit (up to 5 s or until ctx is cancelled),
 // sends SIGKILL if still alive and PID identity matches, then removes stale
 // session metadata and lock files. Must be called after SIGTERM has already been sent.
@@ -1103,8 +950,8 @@ func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDi
 	if claudeDir != "" {
 		_ = os.Remove(filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid)))
 	}
-	if cwd != "" && sessionID != "" && IsValidSessionID(sessionID) {
-		encodedCWD := projDirName(cwd)
+	if cwd != "" && sessionID != "" && claudefs.IsValidSessionID(sessionID) {
+		encodedCWD := claudefs.ProjectSlug(cwd)
 		tmpBase := os.TempDir()
 		lockDir := filepath.Clean(filepath.Join(tmpBase, fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID))
 		// filepath.Rel verifies lockDir stays strictly beneath os.TempDir();

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -32,18 +33,6 @@ const historyThumbMaxDim = 600
 // dataURIPrefix gates ThumbnailFn output: only well-formed image data URIs
 // are surfaced to the dashboard, matching the live path's sanitisation.
 const dataURIPrefix = "data:image/"
-
-// historyLine is the minimal schema for a ~/.claude/projects/.../{sessionId}.jsonl line.
-//
-// UUID is Claude's own record identifier; naozhi adopts it as EventEntry.UUID
-// so MergedSource can dedup against the naozhi-native copy of the same turn.
-// When absent, DeriveLegacyUUID produces a stable fallback.
-type historyLine struct {
-	Type      string          `json:"type"`
-	Timestamp string          `json:"timestamp"` // RFC3339
-	UUID      string          `json:"uuid"`
-	Message   json.RawMessage `json:"message"`
-}
 
 type historyMessage struct {
 	Role    string          `json:"role"`
@@ -74,12 +63,12 @@ func LoadHistory(claudeDir, sessionID, cwd string) ([]clievent.EventEntry, error
 	// Path-traversal guard: reject non-UUID sessionIDs before joining into a
 	// filepath (mirrors resolveJSONLPath) so "../../etc/passwd" cannot
 	// escape claudeDir/projects.
-	if !IsValidSessionID(sessionID) {
+	if !claudefs.IsValidSessionID(sessionID) {
 		return nil, nil
 	}
 	var path string
 	if cwd != "" {
-		candidate := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
+		candidate := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
 		if _, err := os.Stat(candidate); err == nil {
 			path = candidate
 		}
@@ -119,7 +108,7 @@ func (s *Scanner) findSessionJSONL(claudeDir, sessionID string) (string, error) 
 		s.pathCacheInvalidate(key)
 	}
 
-	projectsDir := filepath.Join(claudeDir, "projects")
+	projectsDir := claudefs.ProjectsRoot(claudeDir)
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -325,7 +314,7 @@ func trimNewline(b []byte) []byte {
 // line: Claude's own uuid (dashes stripped to match cli.newEventUUID's 32
 // hex chars, which MergedSource compares verbatim), or DeriveLegacyUUID over
 // (time + type + summary + detail) when it is missing.
-func uuidFromClaudeLine(hl historyLine, ts int64, typ, summary, detail string) string {
+func uuidFromClaudeLine(hl claudefs.Line, ts int64, typ, summary, detail string) string {
 	if u := normalizeClaudeUUID(hl.UUID); u != "" {
 		return u
 	}
@@ -337,7 +326,7 @@ func uuidFromClaudeLine(hl historyLine, ts int64, typ, summary, detail string) s
 // UUID (the common single-block case); later blocks hash (line UUID + block
 // index) so two text blocks at the same timestamp stay distinct. A missing
 // uuid falls back to DeriveLegacyUUID over (ts + block index + summary).
-func uuidFromClaudeBlock(hl historyLine, blockIndex int, ts int64, typ, summary, detail string) string {
+func uuidFromClaudeBlock(hl claudefs.Line, blockIndex int, ts int64, typ, summary, detail string) string {
 	if u := normalizeClaudeUUID(hl.UUID); u != "" {
 		if blockIndex == 0 {
 			return u
@@ -456,18 +445,4 @@ func thumbnailFromBase64(b64 string) string {
 		return ""
 	}
 	return thumb
-}
-
-func parseTimestamp(ts string) int64 {
-	if ts == "" {
-		return 0
-	}
-	t, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		t, err = time.Parse(time.RFC3339, ts)
-		if err != nil {
-			return 0
-		}
-	}
-	return t.UnixMilli()
 }
