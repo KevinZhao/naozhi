@@ -3,6 +3,8 @@ package cli
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestStringToBytesUnsafe_Empty pins the empty-string contract: nil slice
@@ -35,7 +37,7 @@ func TestStringToBytesUnsafe_RoundTrip(t *testing.T) {
 }
 
 // TestClaudeReadEvent_UnsafeAliasParity pins that ReadEvent's unsafe
-// alias path produces the same parsed Event as the obvious []byte cast
+// alias path produces the same parsed clievent.Event as the obvious []byte cast
 // would have. Catches regressions if json.Unmarshal ever mutates input.
 // R222-PERF-3 (#700).
 func TestClaudeReadEvent_UnsafeAliasParity(t *testing.T) {
@@ -56,8 +58,8 @@ func TestClaudeReadEvent_UnsafeAliasParity(t *testing.T) {
 		t.Errorf("expected type assistant, got %q", events[0].Type)
 	}
 
-	// Parity check: the obvious-cast path must produce the same parsed Event.
-	var ref Event
+	// Parity check: the obvious-cast path must produce the same parsed clievent.Event.
+	var ref clievent.Event
 	if err := json.Unmarshal([]byte(line), &ref); err != nil {
 		t.Fatalf("ref Unmarshal err: %v", err)
 	}

@@ -690,7 +690,7 @@ func isMidTurn(replays []shim.ServerMsg, proto Protocol) bool {
 	return lastType != "" && lastType != "result"
 }
 
-// isTurnNeutralEventType reports whether an Event type carries no turn state
+// isTurnNeutralEventType reports whether an clievent.Event type carries no turn state
 // and must be skipped by isMidTurn's reverse walk. control_ack (receipt for a
 // naozhi-originated control RPC, see ModelSetter) is emitted with or without a
 // turn in flight — an idle session that switched models leaves it as the LAST

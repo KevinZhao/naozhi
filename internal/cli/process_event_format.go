@@ -1,6 +1,6 @@
 package cli
 
-// process_event_format.go — Event → EventEntry conversion and tool input
+// process_event_format.go — clievent.Event → EventEntry conversion and tool input
 // formatting; logEventAt is the only non-pure entry (AppendBatch + cost atomic).
 
 import (
@@ -13,11 +13,11 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// EventEntriesFromEventAt converts an Event to zero or more EventEntry values,
-// stamped with the caller-supplied wall-clock (shared with ev.recvAt). Each
+// EventEntriesFromEventAt converts an clievent.Event to zero or more EventEntry values,
+// stamped with the caller-supplied wall-clock (shared with ev.RecvAt). Each
 // known content block of an assistant message (thinking / tool_use / text)
 // yields its own entry so downstream consumers don't drop blocks after the first.
-func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
+func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEntry {
 	// Replay events are the CLI's ack for a message already shown via the
 	// optimistic bubble; logging them double-displays. readLoop skips them too.
 	if ev.Type == "user" && ev.IsReplay {
@@ -115,7 +115,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 			case "thinking":
 				entry.Type = "thinking"
 				// One UTF-8 scan derives both Summary and Detail.
-				entry.Summary, entry.Detail = textutil.TruncateRunesPair(block.Text, 120, EventDetailMaxRunes)
+				entry.Summary, entry.Detail = textutil.TruncateRunesPair(block.Text, 120, clievent.EventDetailMaxRunes)
 			case "tool_use":
 				entry.Type = "tool_use"
 				entry.Summary = block.Name
@@ -141,11 +141,11 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 					}
 				case "TodoWrite":
 					entry.Detail = formatToolDetail(block)
-					if todos, rawTodos, ok := ParseTodosWithRaw(block.Input); ok {
+					if todos, rawTodos, ok := clievent.ParseTodosWithRaw(block.Input); ok {
 						entry.Type = "todo"
 						entry.Tool = "TodoWrite"
-						entry.Summary = TodosSummary(todos)
-						// Dashboard renderTodoList expects a JSON array of TodoItem, not the
+						entry.Summary = clievent.TodosSummary(todos)
+						// Dashboard renderTodoList expects a JSON array of clievent.TodoItem, not the
 						// `{"todos":[...]}` envelope; reuse the parsed RawMessage (no re-Marshal).
 						entry.Detail = string(rawTodos)
 					}
@@ -200,9 +200,9 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 	return nil
 }
 
-// logEventAt converts an Event to one or more EventEntry values and appends them to the event log.
-// readLoop passes the same time.Now() value that stamps ev.recvAt so timestamps match.
-func (p *Process) logEventAt(ev Event, nowMS int64) {
+// logEventAt converts an clievent.Event to one or more EventEntry values and appends them to the event log.
+// readLoop passes the same time.Now() value that stamps ev.RecvAt so timestamps match.
+func (p *Process) logEventAt(ev clievent.Event, nowMS int64) {
 	p.trackShadowUsage(ev)
 	entries := EventEntriesFromEventAt(ev, nowMS)
 	if len(entries) == 0 {
@@ -218,7 +218,7 @@ func (p *Process) logEventAt(ev Event, nowMS int64) {
 
 // trackShadowUsage folds an assistant frame's usage into the shadow account
 // and clears it on the result frame, whose modelUsage supersedes it.
-func (p *Process) trackShadowUsage(ev Event) {
+func (p *Process) trackShadowUsage(ev clievent.Event) {
 	switch ev.Type {
 	case "assistant":
 		if ev.Message == nil || ev.Message.Usage == nil {
@@ -236,7 +236,7 @@ func (p *Process) trackShadowUsage(ev Event) {
 		p.shadowMu.Unlock()
 	case "result":
 		p.shadowMu.Lock()
-		p.shadow = ShadowUsage{}
+		p.shadow = clievent.ShadowUsage{}
 		p.shadowMu.Unlock()
 	}
 }
@@ -244,10 +244,10 @@ func (p *Process) trackShadowUsage(ev Event) {
 // TakeShadowUsage returns and clears the tokens consumed since the last
 // result frame. Callers use it when a turn ends without a result and the
 // process will not produce one (death / timeout kill).
-func (p *Process) TakeShadowUsage() ShadowUsage {
+func (p *Process) TakeShadowUsage() clievent.ShadowUsage {
 	p.shadowMu.Lock()
 	u := p.shadow
-	p.shadow = ShadowUsage{}
+	p.shadow = clievent.ShadowUsage{}
 	p.shadowMu.Unlock()
 	return u
 }
@@ -275,7 +275,7 @@ func parseAgentInput(input json.RawMessage) agentInput {
 	return inp
 }
 
-func formatToolDetail(block ContentBlock) string {
+func formatToolDetail(block clievent.ContentBlock) string {
 	if len(block.Input) == 0 {
 		return block.Name
 	}

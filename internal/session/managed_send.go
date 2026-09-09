@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"strconv"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -22,7 +22,7 @@ import (
 //
 // `priority` is one of "", "now", "next", "later"; empty lets the CLI default
 // ("next") win. "now" aborts the in-flight turn (docs/rfc/passthrough-mode.md §5.6).
-func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
+func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error) {
 	s.touchLastActive()
 
 	prompt := textutil.TruncateRunes(text, 120)
@@ -64,7 +64,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 	// the leaked turn — a racing user message cannot jump the FIFO. Recovery
 	// completes before this method returns, strictly upstream of any channel
 	// flush, so feishu/weixin never see the leaked XML.
-	result = s.recoverLeakedToolcall(ctx, proc, result, func(rctx context.Context, nudge string) (*cli.SendResult, error) {
+	result = s.recoverLeakedToolcall(ctx, proc, result, func(rctx context.Context, nudge string) (*clievent.SendResult, error) {
 		rrt, revCb := s.instrumentRun(onEvent)
 		rr, rerr := proc.SendPassthrough(rctx, nudge, nil, revCb, "next")
 		s.finishRun(rrt, proc, rr, rerr)
@@ -122,7 +122,7 @@ func (s *ManagedSession) mapSendError(proc processIface, err error) {
 
 // Send delivers a message to the claude process and returns the result.
 // Messages to the same session are serialized via sendMu.
-func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error) {
+func (s *ManagedSession) Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
@@ -177,7 +177,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Att
 	// unless enabled and the text actually leaks). Runs while sendMu is held,
 	// so the re-send is serial with any other turn; its <system-reminder>
 	// nudge lands in EventLog but is hidden by dashboard.js's filter.
-	result = s.recoverLeakedToolcall(ctx, proc, result, func(rctx context.Context, nudge string) (*cli.SendResult, error) {
+	result = s.recoverLeakedToolcall(ctx, proc, result, func(rctx context.Context, nudge string) (*clievent.SendResult, error) {
 		rrt, revCb := s.instrumentRun(onEvent)
 		rr, rerr := proc.Send(rctx, nudge, nil, revCb)
 		s.finishRun(rrt, proc, rr, rerr)

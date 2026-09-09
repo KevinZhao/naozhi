@@ -1,4 +1,8 @@
-package cli
+// image.go — image-path extraction and MIME sniffing for user text (#2649 G1-e).
+//
+// Moved out of internal/cli: 80 lines importing nothing but stdlib, consumed by
+// internal/dispatch, and about the shape of an Attachment — which lives here.
+package clievent
 
 import (
 	"os"

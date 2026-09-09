@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/leakguard"
 )
 
@@ -19,7 +19,7 @@ const leakSample = "先跑一下。\n\ncall\n<invoke name=\"Bash\">\n<parameter 
 // newLeakSession builds a bare ManagedSession bound to a TestProcess whose Send
 // is scripted by sendFunc. No run-history store, so finishRun is a no-op and
 // the tests isolate the recovery behaviour.
-func newLeakSession(sendFunc func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error)) (*ManagedSession, *TestProcess) {
+func newLeakSession(sendFunc func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error)) (*ManagedSession, *TestProcess) {
 	proc := &TestProcess{AliveVal: true, SendFunc: sendFunc}
 	s := &ManagedSession{key: "feishu:p2p:leak"}
 	s.storeProcess(proc)
@@ -28,12 +28,12 @@ func newLeakSession(sendFunc func(context.Context, string, []cli.Attachment, cli
 
 // resendOnce returns a resend closure that records how many times it fired and
 // what nudge text it was handed, replaying scripted results in order.
-func resendOnce(calls *int, gotNudge *string, results []*cli.SendResult, errs []error) func(context.Context, string) (*cli.SendResult, error) {
-	return func(_ context.Context, nudge string) (*cli.SendResult, error) {
+func resendOnce(calls *int, gotNudge *string, results []*clievent.SendResult, errs []error) func(context.Context, string) (*clievent.SendResult, error) {
+	return func(_ context.Context, nudge string) (*clievent.SendResult, error) {
 		i := *calls
 		*calls++
 		*gotNudge = nudge
-		var r *cli.SendResult
+		var r *clievent.SendResult
 		var e error
 		if i < len(results) {
 			r = results[i]
@@ -48,7 +48,7 @@ func resendOnce(calls *int, gotNudge *string, results []*cli.SendResult, errs []
 func TestRecover_LeakThenClean_FiresOnce(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)
-	orig := &cli.SendResult{Text: leakSample, SessionID: "sess-1", CostUSD: 0.10}
+	orig := &clievent.SendResult{Text: leakSample, SessionID: "sess-1", CostUSD: 0.10}
 
 	var calls int
 	var nudge string
@@ -58,7 +58,7 @@ func TestRecover_LeakThenClean_FiresOnce(t *testing.T) {
 	// a per-turn delta. recoverLeakedToolcall must return this cumulative value
 	// as-is, NOT sum it with orig again. (#2355 review MEDIUM)
 	resend := resendOnce(&calls, &nudge,
-		[]*cli.SendResult{{Text: "已执行完成。", SessionID: "sess-1", CostUSD: 0.15}}, nil)
+		[]*clievent.SendResult{{Text: "已执行完成。", SessionID: "sess-1", CostUSD: 0.15}}, nil)
 
 	got := s.recoverLeakedToolcall(context.Background(), proc, orig, resend)
 	if calls != 1 {
@@ -78,14 +78,14 @@ func TestRecover_LeakThenClean_FiresOnce(t *testing.T) {
 func TestRecover_LeakThenLeak_NoLoop(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)
-	orig := &cli.SendResult{Text: leakSample, CostUSD: 0.10}
+	orig := &clievent.SendResult{Text: leakSample, CostUSD: 0.10}
 
 	var calls int
 	var nudge string
 	// The retry ALSO leaks — cap=1 must stop, not retry again. Its CostUSD is
 	// the cumulative total after the recovery turn (0.15), same process.
 	resend := resendOnce(&calls, &nudge,
-		[]*cli.SendResult{{Text: leakSample, CostUSD: 0.15}}, nil)
+		[]*clievent.SendResult{{Text: leakSample, CostUSD: 0.15}}, nil)
 
 	got := s.recoverLeakedToolcall(context.Background(), proc, orig, resend)
 	if calls != 1 {
@@ -105,7 +105,7 @@ func TestRecover_LeakThenLeak_NoLoop(t *testing.T) {
 func TestRecover_CleanResult_NoResend(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)
-	orig := &cli.SendResult{Text: "完全正常的回复，没有工具调用。", CostUSD: 0.10}
+	orig := &clievent.SendResult{Text: "完全正常的回复，没有工具调用。", CostUSD: 0.10}
 
 	var calls int
 	var nudge string
@@ -122,7 +122,7 @@ func TestRecover_CleanResult_NoResend(t *testing.T) {
 func TestRecover_KillSwitchOff_NoResend(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "off")
 	s, proc := newLeakSession(nil)
-	orig := &cli.SendResult{Text: leakSample, CostUSD: 0.10}
+	orig := &clievent.SendResult{Text: leakSample, CostUSD: 0.10}
 
 	var calls int
 	var nudge string
@@ -141,7 +141,7 @@ func TestRecover_ProseQuotedInvoke_NoFalsePositive(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)
 	// Legitimate technical prose quoting invoke syntax in backticks.
-	orig := &cli.SendResult{Text: "语法是 `<invoke name=\"X\">` 配对 `</invoke>`，别当真执行。"}
+	orig := &clievent.SendResult{Text: "语法是 `<invoke name=\"X\">` 配对 `</invoke>`，别当真执行。"}
 
 	var calls int
 	var nudge string
@@ -157,7 +157,7 @@ func TestRecover_PassthroughFollower_MergedCount_NoResend(t *testing.T) {
 	s, proc := newLeakSession(nil)
 	// A follower slot: MergedCount>1 with empty Text. Even though a sibling's
 	// head text leaked, the follower must not run its own recovery.
-	orig := &cli.SendResult{Text: "", MergedCount: 2}
+	orig := &clievent.SendResult{Text: "", MergedCount: 2}
 
 	var calls int
 	var nudge string
@@ -171,7 +171,7 @@ func TestRecover_PassthroughFollower_MergedCount_NoResend(t *testing.T) {
 func TestRecover_ResendError_ReturnsStrippedOriginal(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)
-	orig := &cli.SendResult{Text: leakSample, CostUSD: 0.10}
+	orig := &clievent.SendResult{Text: leakSample, CostUSD: 0.10}
 
 	var calls int
 	var nudge string
@@ -189,7 +189,7 @@ func TestRecover_ResendError_ReturnsStrippedOriginal(t *testing.T) {
 func TestRecover_CtxCancelled_NoResend(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)
-	orig := &cli.SendResult{Text: leakSample}
+	orig := &clievent.SendResult{Text: leakSample}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -207,7 +207,7 @@ func TestRecover_ProcDead_NoResend(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)
 	proc.AliveVal = false
-	orig := &cli.SendResult{Text: leakSample}
+	orig := &clievent.SendResult{Text: leakSample}
 
 	var calls int
 	var nudge string
@@ -221,12 +221,12 @@ func TestRecover_ProcDead_NoResend(t *testing.T) {
 func TestRecover_PromptStringExact(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)
-	orig := &cli.SendResult{Text: leakSample}
+	orig := &clievent.SendResult{Text: leakSample}
 
 	var calls int
 	var nudge string
 	s.recoverLeakedToolcall(context.Background(), proc, orig,
-		resendOnce(&calls, &nudge, []*cli.SendResult{{Text: "done"}}, nil))
+		resendOnce(&calls, &nudge, []*clievent.SendResult{{Text: "done"}}, nil))
 	if nudge != leakContinuePrompt {
 		t.Errorf("nudge text drifted:\n got: %q\nwant: %q", nudge, leakContinuePrompt)
 	}
@@ -243,16 +243,16 @@ func TestRecover_PromptStringExact(t *testing.T) {
 func TestSend_LeakRecovery_EndToEnd(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	var turn int
-	s, _ := newLeakSession(func(_ context.Context, text string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
+	s, _ := newLeakSession(func(_ context.Context, text string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		turn++
 		if turn == 1 {
-			return &cli.SendResult{Text: leakSample, CostUSD: 0.10}, nil
+			return &clievent.SendResult{Text: leakSample, CostUSD: 0.10}, nil
 		}
 		if text != leakContinuePrompt {
 			t.Errorf("turn 2 got text %q, want the continue nudge", text)
 		}
 		// Cumulative total after turn 2 (same process): 0.10 + 0.05 = 0.15.
-		return &cli.SendResult{Text: "工具已执行，任务完成。", CostUSD: 0.15}, nil
+		return &clievent.SendResult{Text: "工具已执行，任务完成。", CostUSD: 0.15}, nil
 	})
 
 	got, err := s.Send(context.Background(), "do the thing", nil, nil)

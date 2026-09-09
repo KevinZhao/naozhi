@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -63,8 +64,8 @@ func (s *passthroughShim) recvLoop() {
 }
 
 // expectWrite waits for the next "write" frame from the process and returns
-// the parsed InputMessage. Fails if no write arrives within timeout.
-func (s *passthroughShim) expectWrite(t *testing.T, timeout time.Duration) InputMessage {
+// the parsed clievent.InputMessage. Fails if no write arrives within timeout.
+func (s *passthroughShim) expectWrite(t *testing.T, timeout time.Duration) clievent.InputMessage {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
@@ -74,7 +75,7 @@ func (s *passthroughShim) expectWrite(t *testing.T, timeout time.Duration) Input
 				// Skip non-write frames (ping, interrupt, shutdown, etc).
 				continue
 			}
-			var input InputMessage
+			var input clievent.InputMessage
 			if err := json.Unmarshal([]byte(msg.Line), &input); err != nil {
 				t.Fatalf("expectWrite: failed to unmarshal user message line: %v", err)
 			}
@@ -164,7 +165,7 @@ func TestPassthrough_Independent_OneMessageOneResult(t *testing.T) {
 	defer sh.close()
 	go sh.proc.readLoop()
 
-	resultCh := make(chan *SendResult, 1)
+	resultCh := make(chan *clievent.SendResult, 1)
 	errCh := make(chan error, 1)
 	go func() {
 		res, err := sh.proc.SendPassthrough(context.Background(), "hello", nil, nil, "")
@@ -216,7 +217,7 @@ func TestPassthrough_Merged_FanoutHeadFollower(t *testing.T) {
 	go sh.proc.readLoop()
 
 	type sendOut struct {
-		res *SendResult
+		res *clievent.SendResult
 		err error
 	}
 	outA := make(chan sendOut, 1)
@@ -292,7 +293,7 @@ func TestPassthrough_CtxCancel_TombstoneDoesNotBreakFIFO(t *testing.T) {
 	// Slot A — will be canceled
 	ctxA, cancelA := context.WithCancel(context.Background())
 	type sendOut struct {
-		res *SendResult
+		res *clievent.SendResult
 		err error
 	}
 	outA := make(chan sendOut, 1)
@@ -357,7 +358,7 @@ func TestPassthrough_CLIDeath_FansOutErrProcessExited(t *testing.T) {
 	go sh.proc.readLoop()
 
 	type sendOut struct {
-		res *SendResult
+		res *clievent.SendResult
 		err error
 	}
 	outA := make(chan sendOut, 1)
@@ -395,7 +396,7 @@ func TestPassthrough_Discard_FiresErrSessionReset(t *testing.T) {
 	go sh.proc.readLoop()
 
 	type sendOut struct {
-		res *SendResult
+		res *clievent.SendResult
 		err error
 	}
 	out := make(chan sendOut, 1)
@@ -519,7 +520,7 @@ func TestPassthrough_FIFOOrder_TwoIndependentSends(t *testing.T) {
 	go sh.proc.readLoop()
 
 	type sendOut struct {
-		res *SendResult
+		res *clievent.SendResult
 		err error
 	}
 	outA := make(chan sendOut, 1)
@@ -634,15 +635,15 @@ func TestPassthrough_AssistantEvent_DeliveredToOnEvent(t *testing.T) {
 
 	var (
 		mu             sync.Mutex
-		eventsReceived []Event
+		eventsReceived []clievent.Event
 	)
-	onEvent := func(ev Event) {
+	onEvent := func(ev clievent.Event) {
 		mu.Lock()
 		eventsReceived = append(eventsReceived, ev)
 		mu.Unlock()
 	}
 
-	resultCh := make(chan *SendResult, 1)
+	resultCh := make(chan *clievent.SendResult, 1)
 	errCh := make(chan error, 1)
 	go func() {
 		res, err := sh.proc.SendPassthrough(context.Background(), "hello", nil, onEvent, "")
@@ -671,7 +672,7 @@ func TestPassthrough_AssistantEvent_DeliveredToOnEvent(t *testing.T) {
 
 	// Verify that the onEvent callback received the assistant event.
 	mu.Lock()
-	received := make([]Event, len(eventsReceived))
+	received := make([]clievent.Event, len(eventsReceived))
 	copy(received, eventsReceived)
 	mu.Unlock()
 

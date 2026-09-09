@@ -5,13 +5,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // formatEventLine converts a CLI event to a short status line for IM display.
 // Returns empty string for events that don't warrant a status update.
-func formatEventLine(ev cli.Event) string {
+func formatEventLine(ev clievent.Event) string {
 	if ev.Message == nil {
 		return ""
 	}
@@ -36,7 +36,7 @@ func formatEventLine(ev cli.Event) string {
 // tool_use block, or ("", false) if the event carries no TodoWrite update.
 // Only the first TodoWrite block in the event is honoured — Claude never
 // emits multiple TodoWrite calls in a single assistant message.
-func extractTodoMessage(ev cli.Event) (string, bool) {
+func extractTodoMessage(ev clievent.Event) (string, bool) {
 	if ev.Message == nil {
 		return "", false
 	}
@@ -44,11 +44,11 @@ func extractTodoMessage(ev cli.Event) (string, bool) {
 		if block.Type != "tool_use" || block.Name != "TodoWrite" {
 			continue
 		}
-		todos, ok := cli.ParseTodos(block.Input)
+		todos, ok := clievent.ParseTodos(block.Input)
 		if !ok {
 			return "", false
 		}
-		return cli.TodosMarkdown(todos), true
+		return clievent.TodosMarkdown(todos), true
 	}
 	return "", false
 }

@@ -25,7 +25,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -118,7 +117,7 @@ func contentKey(e clievent.EventEntry) string {
 	b.WriteString("t")
 	b.WriteByte(0x1f)
 	// Normalise to the live tier's cap; TruncateRunes is a no-op within the cap.
-	b.WriteString(textutil.TruncateRunes(e.Detail, cli.EventDetailMaxRunes))
+	b.WriteString(textutil.TruncateRunes(e.Detail, clievent.EventDetailMaxRunes))
 	return b.String()
 }
 

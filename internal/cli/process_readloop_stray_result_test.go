@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
@@ -17,12 +18,12 @@ func TestDispatchProtocolEvent_StrayReplayResultLogged(t *testing.T) {
 	p := &Process{
 		eventLog: ring.NewEventLog(8),
 		caps:     Caps{Replay: true},
-		eventCh:  make(chan Event, 1),
+		eventCh:  make(chan clievent.Event, 1),
 		killCh:   make(chan struct{}),
 	}
 
 	// No slots claimed → onTurnResult returns empty owners → stray path.
-	ev := Event{Type: "result", SubType: "success", SessionID: "s1"}
+	ev := clievent.Event{Type: "result", SubType: "success", SessionID: "s1"}
 	p.dispatchProtocolEvent(ev, slog.New(slog.DiscardHandler))
 
 	entries := p.eventLog.Entries()

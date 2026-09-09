@@ -7,11 +7,11 @@
 //   - Process — process.go, process_*.go: spawn/respawn/Kill state machine,
 //     shim attach/detach, stdout/stdin pumps. Owns the exported Process
 //     struct; every other sub-domain hangs off a Process field.
-//     process_readloop.go is the stdout NDJSON reader (every ev.recvAt and
+//     process_readloop.go is the stdout NDJSON reader (every ev.RecvAt and
 //     ring.EventLog AppendBatch originates there); process_send.go is the
 //     Send/Interrupt write path; process_turn.go tracks turn boundaries;
 //     process_shim_io.go is pure shim framing; process_event_format.go
-//     converts Event → EventEntry and formats tool input;
+//     converts clievent.Event → EventEntry and formats tool input;
 //     process_event_query.go is the read-only ring.EventLog accessor surface.
 //   - Protocol — protocol.go + protocol_claude.go / protocol_acp.go /
 //     protocol_codex.go: per-backend ReadEvent / Write* framing behind the
@@ -39,7 +39,7 @@
 //
 // ProcessState moves StateSpawning → StateReady → StateRunning ⇄ StateReady
 // → StateDead. Send moves Ready→Running (a mid-turn shim reconnect may also
-// resume into Running); a Type=="result" (or codex turn-end) Event closes the
+// resume into Running); a Type=="result" (or codex turn-end) clievent.Event closes the
 // turn. Kill/Close/cli_exited move to StateDead and fire onTurnDone, which may
 // run more than once per turn and therefore must be idempotent.
 //
@@ -47,7 +47,7 @@
 //
 // ReadEvent turns one stdout line into zero or more Events; its done flag is
 // advisory and ignored by production callers — turn-end is detected from the
-// emitted events, so an implementation MUST emit a result/turn-end Event.
+// emitted events, so an implementation MUST emit a result/turn-end clievent.Event.
 // WriteUserMessageLocked requires the caller to hold Process.shimWMu so the
 // sendSlot append and the stdin write are atomic (FIFO slot matching).
 //

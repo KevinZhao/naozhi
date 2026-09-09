@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // panicOnReadProtocol embeds ClaudeProtocol (so it advertises Replay/Priority
@@ -20,7 +21,7 @@ type panicOnReadProtocol struct {
 	ClaudeProtocol
 }
 
-func (p *panicOnReadProtocol) ReadEvent(string) ([]Event, bool, error) {
+func (p *panicOnReadProtocol) ReadEvent(string) ([]clievent.Event, bool, error) {
 	panic("injected readLoop panic")
 }
 
@@ -28,7 +29,7 @@ func (p *panicOnReadProtocol) ReadEvent(string) ([]Event, bool, error) {
 // ReadEventInto via embedding, and readLoop prefers it through the
 // eventReaderInto assertion — so without this override the embedded
 // (non-panicking) implementation would run instead.
-func (p *panicOnReadProtocol) ReadEventInto(string, []Event) ([]Event, bool, error) {
+func (p *panicOnReadProtocol) ReadEventInto(string, []clievent.Event) ([]clievent.Event, bool, error) {
 	panic("injected readLoop panic")
 }
 

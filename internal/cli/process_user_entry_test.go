@@ -6,9 +6,11 @@ import (
 	"image/png"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// buildUserEntry populates EventEntry.ImagePaths from Attachment.WorkspacePath
+// buildUserEntry populates EventEntry.ImagePaths from clievent.Attachment.WorkspacePath
 // index-aligned with EventEntry.Images. This is the contract the
 // dashboard lightbox relies on: clicking the i-th thumbnail navigates to
 // /api/sessions/attachment?...&path=ImagePaths[i].
@@ -19,7 +21,7 @@ func TestBuildUserEntry_PopulatesImagePaths(t *testing.T) {
 		t.Fatalf("png encode: %v", err)
 	}
 	pngBytes := buf.Bytes()
-	imgs := []Attachment{
+	imgs := []clievent.Attachment{
 		{
 			Data:          pngBytes,
 			MimeType:      "image/png",
@@ -62,7 +64,7 @@ func TestBuildUserEntry_NoPathsWhenUnpersisted(t *testing.T) {
 	if err := png.Encode(&buf, newSolidImage(8, 8, color.RGBA{0, 255, 0, 255})); err != nil {
 		t.Fatalf("png encode: %v", err)
 	}
-	imgs := []Attachment{{Data: buf.Bytes(), MimeType: "image/png"}}
+	imgs := []clievent.Attachment{{Data: buf.Bytes(), MimeType: "image/png"}}
 	entry := buildUserEntry("hi", imgs)
 	if len(entry.Images) != 1 {
 		t.Fatalf("Images len=%d want 1", len(entry.Images))
@@ -81,7 +83,7 @@ func TestBuildUserEntry_AlignmentSurvivesDrop(t *testing.T) {
 	if err := png.Encode(&ok, newSolidImage(8, 8, color.RGBA{0, 0, 255, 255})); err != nil {
 		t.Fatalf("png encode: %v", err)
 	}
-	imgs := []Attachment{
+	imgs := []clievent.Attachment{
 		{Data: []byte("not-an-image"), MimeType: "image/png",
 			WorkspacePath: ".naozhi/attachments/x/undecodable.png"},
 		{Data: ok.Bytes(), MimeType: "image/png",

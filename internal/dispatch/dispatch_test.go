@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -117,10 +117,10 @@ func (g *fakeGuard) Release(key string) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func newTestDispatcher(fp *fakePlatform, sendFn func(context.Context, string, *session.ManagedSession, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error)) *Dispatcher {
+func newTestDispatcher(fp *fakePlatform, sendFn func(context.Context, string, *session.ManagedSession, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error)) *Dispatcher {
 	if sendFn == nil {
-		sendFn = func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
-			return &cli.SendResult{Text: "ok"}, nil
+		sendFn = func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+			return &clievent.SendResult{Text: "ok"}, nil
 		}
 	}
 	d, err := NewDispatcher(DispatcherConfig{
@@ -459,9 +459,9 @@ func TestBuildHandler_Help(t *testing.T) {
 func TestBuildHandler_EmptyText(t *testing.T) {
 	fp := &fakePlatform{}
 	called := false
-	d := newTestDispatcher(fp, func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
+	d := newTestDispatcher(fp, func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		called = true
-		return &cli.SendResult{Text: "ok"}, nil
+		return &clievent.SendResult{Text: "ok"}, nil
 	})
 	d.BuildHandler()(context.Background(), incomingMsg("  "))
 	if called {
@@ -583,9 +583,9 @@ func TestSendAndReply_GetOrCreateError_DefaultMessage(t *testing.T) {
 func TestSendAndReply_UnknownPlatform(t *testing.T) {
 	fp := &fakePlatform{}
 	called := false
-	d := newTestDispatcher(fp, func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
+	d := newTestDispatcher(fp, func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		called = true
-		return &cli.SendResult{Text: "ok"}, nil
+		return &clievent.SendResult{Text: "ok"}, nil
 	})
 	d.queue = nil
 	msg := platform.IncomingMessage{
@@ -647,9 +647,9 @@ func TestReplyTracker_NonInterim_WaitReadyInstant(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: false}
 	tracker := newIMEventTracker(context.Background(), fp, "c1", "direct", "")
 	defer tracker.stop()
-	tracker.onEvent(cli.Event{
+	tracker.onEvent(clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "thinking", Text: "t"}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "thinking", Text: "t"}}},
 	})
 	done := make(chan struct{})
 	go func() { tracker.waitReady(context.Background()); close(done) }()
@@ -669,9 +669,9 @@ func TestReplyTracker_Interim_InitialReply(t *testing.T) {
 	defer cancel()
 	tracker := newIMEventTracker(ctx, fp, "c1", "direct", "")
 	defer tracker.stop()
-	tracker.onEvent(cli.Event{
+	tracker.onEvent(clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "thinking", Text: "analyzing"}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "thinking", Text: "analyzing"}}},
 	})
 	tracker.waitReady(ctx)
 	if got := tracker.getThinkingMsgID(); got != "thinking-1" {
@@ -1275,7 +1275,7 @@ func TestBuildHandler_GroupChatGate(t *testing.T) {
 // dispatcher resolved without driving a full Send through router/platform.
 type stubCaps struct{ id string }
 
-func (s stubCaps) Send(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
+func (s stubCaps) Send(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 	return nil, fmt.Errorf("stubCaps:%s", s.id)
 }
 func (stubCaps) Takeover(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false }
@@ -1298,7 +1298,7 @@ func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
 	t.Parallel()
 
 	sendFnSentinel := errors.New("legacy-sendfn-fired")
-	legacySendFn := func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
+	legacySendFn := func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		return nil, sendFnSentinel
 	}
 

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestACPProtocol_WriteMessage_TypedParamsByteEqual locks the wire format
@@ -19,7 +21,7 @@ func TestACPProtocol_WriteMessage_TypedParamsByteEqual(t *testing.T) {
 	cases := []struct {
 		name   string
 		text   string
-		images []Attachment
+		images []clievent.Attachment
 		// expectPromptBlocks lists the EXACT content blocks the wire frame
 		// must carry, in order. Each block is the JSON that should land
 		// inside the "prompt" array.
@@ -47,7 +49,7 @@ func TestACPProtocol_WriteMessage_TypedParamsByteEqual(t *testing.T) {
 		{
 			name: "single_image_no_text",
 			text: "",
-			images: []Attachment{
+			images: []clievent.Attachment{
 				{MimeType: "image/png", Data: []byte{0x89, 0x50, 0x4e, 0x47}},
 			},
 			expectPromptBlocks: []string{
@@ -58,7 +60,7 @@ func TestACPProtocol_WriteMessage_TypedParamsByteEqual(t *testing.T) {
 		{
 			name: "single_image_with_text",
 			text: "describe",
-			images: []Attachment{
+			images: []clievent.Attachment{
 				{MimeType: "image/jpeg", Data: []byte("AB")},
 			},
 			expectPromptBlocks: []string{

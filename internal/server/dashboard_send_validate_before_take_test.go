@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // bearerOwner mirrors uploadOwner's Bearer branch: sha256(token)[:16] hex.
@@ -35,8 +35,8 @@ func TestHandleSend_ValidatesBeforeTakingAttachments(t *testing.T) {
 	owner := bearerOwner(token)
 
 	store := newUploadStore()
-	fid, err := store.Put(owner, cli.Attachment{
-		Kind:     cli.KindImageInline,
+	fid, err := store.Put(owner, clievent.Attachment{
+		Kind:     clievent.KindImageInline,
 		Data:     []byte("png-bytes"),
 		MimeType: "image/png",
 		OrigName: "shot.png",

@@ -1,6 +1,6 @@
 package session
 
-import "github.com/naozhi/naozhi/internal/cli"
+import "github.com/naozhi/naozhi/internal/cli/clievent"
 
 // meteringCache is the last MeteringUsage view Snapshot built for a live
 // process, keyed by (process identity, MeteringGen): the dashboard polls
@@ -10,7 +10,7 @@ import "github.com/naozhi/naozhi/internal/cli"
 type meteringCache struct {
 	proc    processIface
 	gen     uint64
-	usage   []cli.MeteringEntry
+	usage   []clievent.MeteringEntry
 	credits float64
 }
 
@@ -22,7 +22,7 @@ type meteringCache struct {
 // — never a fresh gen on stale rows. Keyed by process identity too: a respawned
 // process restarts its counter, so an equal gen on a different process must
 // miss. gen == 0 bypasses the cache so callers always see live data.
-func (s *ManagedSession) meteringView(proc processIface) ([]cli.MeteringEntry, float64) {
+func (s *ManagedSession) meteringView(proc processIface) ([]clievent.MeteringEntry, float64) {
 	gen := proc.MeteringGen()
 	if gen == 0 {
 		usage := proc.MeteringUsage()
@@ -39,7 +39,7 @@ func (s *ManagedSession) meteringView(proc processIface) ([]cli.MeteringEntry, f
 
 // sumMeteringCredits totals the credit-typed rows. Zero when no row carries a
 // credit unit, so callers can gate the TotalCost override on > 0.
-func sumMeteringCredits(usage []cli.MeteringEntry) float64 {
+func sumMeteringCredits(usage []clievent.MeteringEntry) float64 {
 	var credits float64
 	for _, m := range usage {
 		if m.Unit == "credit" || m.Unit == "credits" {

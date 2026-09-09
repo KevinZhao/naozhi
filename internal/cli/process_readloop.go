@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -317,15 +318,15 @@ func rpcErrorTurnEnd(err error) (tag string, ok bool) {
 func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOutcome {
 	p.lastSeq.Store(msg.Seq)
 	// Prefer ReadEventInto so the dominant single-event frame reuses
-	// p.readEventBuf instead of allocating a []Event per stdout line (#1676).
+	// p.readEventBuf instead of allocating a []clievent.Event per stdout line (#1676).
 	var (
-		events []Event
+		events []clievent.Event
 		err    error
 	)
 	// done is intentionally discarded (#2303): turn-end is driven only by a
-	// result Event in the dispatch loop below (or the rpcErrorTurnEnd synthesis
+	// result clievent.Event in the dispatch loop below (or the rpcErrorTurnEnd synthesis
 	// on err), never by this advisory bool. A protocol that needs a turn to
-	// close MUST emit a result Event — see ProtocolCore.ReadEvent.
+	// close MUST emit a result clievent.Event — see ProtocolCore.ReadEvent.
 	if ri, ok := p.protocol.(eventReaderInto); ok {
 		events, _, err = ri.ReadEventInto(msg.Line, p.readEventBuf[:0])
 	} else {
@@ -338,7 +339,7 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 		// Send() unblock — otherwise state stays "running" forever. New
 		// protocols must register their sentinel in rpcErrorTurnEnd.
 		if tag, ok := rpcErrorTurnEnd(err); ok {
-			events = []Event{{
+			events = []clievent.Event{{
 				Type:    "result",
 				SubType: "error",
 				Result:  tag + err.Error(),
@@ -481,7 +482,7 @@ func readShimLine(r *bufio.Reader, lineBuf []byte) (line []byte, capExceeded boo
 // block, or an AskQuestion payload, warrant fan-out; text-only assistant events
 // are excluded so replyTracker walks don't fire per streamed chunk. A nil
 // ev.Message is treated as not fan-out-worthy.
-func passthroughShouldFanOut(ev Event) bool {
+func passthroughShouldFanOut(ev clievent.Event) bool {
 	if ev.AskQuestion != nil {
 		return true
 	}
@@ -496,11 +497,11 @@ func passthroughShouldFanOut(ev Event) bool {
 	return false
 }
 
-// dispatchProtocolEvent runs the per-Event side of readLoop: passthrough hooks,
+// dispatchProtocolEvent runs the per-clievent.Event side of readLoop: passthrough hooks,
 // linker plumbing, ring.EventLog append, mid-turn reconnect bookkeeping, and the
 // non-blocking handoff to Send via eventCh. Returns true if a kill signal was
 // observed during dispatch and the caller should unwind the read loop.
-func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
+func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) bool {
 	// Type:"metadata" is a normalize-channel status frame (kiro _kiro.dev/
 	// metadata), not assistant output: apply to atomic state and skip
 	// eventCh / ring.EventLog. See docs/rfc/multi-backend.md §8.8.
@@ -509,7 +510,7 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 		return false
 	}
 
-	// One time.Now() shared between ev.recvAt (for drainStaleEvents) and the
+	// One time.Now() shared between ev.RecvAt (for drainStaleEvents) and the
 	// EventEntry.Time values from logEventAt; UnixMilli cached for the up-to-4
 	// uses below.
 	now := time.Now()
@@ -637,7 +638,7 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 // notifyLinker forwards system/init context and system/task_started events to
 // the SubagentLinker. Re-gates internally on `p.linker != nil` so the caller
 // can pass any event without a pre-check.
-func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
+func (p *Process) notifyLinker(ev clievent.Event, nowMS int64, isSystemInit bool) {
 	if p.linker == nil {
 		return
 	}
@@ -694,7 +695,7 @@ func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 // deliverEvent runs the post-ring.EventLog dispatch arm of dispatchProtocolEvent:
 // killCh probe followed by the non-blocking handoff to eventCh for Send()
 // consumption. Returns true when killCh fired and the read loop should unwind.
-func (p *Process) deliverEvent(ev Event, now time.Time, log *slog.Logger) bool {
+func (p *Process) deliverEvent(ev clievent.Event, now time.Time, log *slog.Logger) bool {
 	select {
 	case <-p.killCh:
 		p.setDeathReason(DeathReasonKilled)
@@ -716,10 +717,10 @@ func (p *Process) deliverEvent(ev Event, now time.Time, log *slog.Logger) bool {
 	}
 
 	// Non-blocking handoff to Send(): if the buffer is full (no active Send)
-	// the event is already in ring.EventLog for the dashboard. recvAt is set just
+	// the event is already in ring.EventLog for the dashboard. clievent.RecvAt is set just
 	// before handoff so drainStaleEvents can separate events queued before a
 	// new turn from events produced for it.
-	ev.recvAt = now
+	ev.RecvAt = now
 	select {
 	case p.eventCh <- ev:
 	default:

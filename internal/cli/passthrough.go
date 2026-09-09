@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // slotUUIDFallbackSeq is the monotonic counter newSlotUUID's crypto/rand
@@ -44,8 +45,8 @@ func newSlotUUID() string {
 // Protocol.SupportsReplay() (callers fall back to Send otherwise; without
 // replay events nothing would ever claim the slot).
 // priority: "" | "now" | "next" | "later"; "now" aborts the in-flight turn.
-func (p *Process) SendPassthrough(ctx context.Context, text string, images []Attachment,
-	onEvent EventCallback, priority string) (*SendResult, error) {
+func (p *Process) SendPassthrough(ctx context.Context, text string, images []clievent.Attachment,
+	onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error) {
 
 	if !p.caps.Replay {
 		return nil, fmt.Errorf("passthrough: protocol %s does not support replay", p.protocol.Name())
@@ -66,7 +67,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 		text:      text,
 		priority:  priority,
 		onEvent:   onEvent,
-		resultCh:  make(chan *SendResult, 1),
+		resultCh:  make(chan *clievent.SendResult, 1),
 		errCh:     make(chan error, 1),
 		enqueueAt: time.Now(),
 	}
@@ -144,7 +145,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 // to the shim via a pooled capture writer + shimSendLocked, bypassing
 // shimWriter's fast path that would re-acquire shimWMu. Caller MUST hold
 // shimWMu.
-func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []Attachment, priority string) error {
+func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []clievent.Attachment, priority string) error {
 	cw := captureWriterPool.Get().(*captureWriter)
 	cw.bytes = cw.bytes[:0]
 	// Don't return oversized buffers (multi-MB image messages) to the pool;
@@ -276,7 +277,7 @@ func (p *Process) findSlotByUUIDLocked(u string) *sendSlot {
 // splittable, so every not-yet-replayed pending slot is claimed: a merged
 // replay means the turn consumes all in-flight messages). Caller must hold
 // slotsMu; this is the only place currentTurnSlots grows for user replays.
-func (p *Process) handleReplayEventLocked(ev Event) {
+func (p *Process) handleReplayEventLocked(ev clievent.Event) {
 	if slot := p.findSlotByUUIDLocked(ev.UUID); slot != nil {
 		if slot.replayed {
 			slog.Debug("passthrough: replay uuid already claimed", "uuid", ev.UUID, "slot_id", slot.id)
@@ -305,10 +306,10 @@ func (p *Process) handleReplayEventLocked(ev Event) {
 }
 
 // fanoutTurnResult delivers one CLI result event to every slot the turn
-// claimed: the head slot gets the full SendResult, followers get
+// claimed: the head slot gets the full clievent.SendResult, followers get
 // MergedWithHead pointing at it. Called from readLoop after releasing slotsMu
 // so channel sends never happen under the lock.
-func fanoutTurnResult(owners []*sendSlot, ev Event) {
+func fanoutTurnResult(owners []*sendSlot, ev clievent.Event) {
 	slog.Debug("passthrough: fanout", "owners", len(owners),
 		"result_len", len(ev.Result), "session", ev.SessionID)
 	if len(owners) == 0 {
@@ -320,7 +321,7 @@ func fanoutTurnResult(owners []*sendSlot, ev Event) {
 	head := owners[0]
 	mergedCount := len(owners)
 
-	headRes := &SendResult{
+	headRes := &clievent.SendResult{
 		Text:        ev.Result,
 		SessionID:   ev.SessionID,
 		CostUSD:     ev.CostUSD,
@@ -333,7 +334,7 @@ func fanoutTurnResult(owners []*sendSlot, ev Event) {
 		return
 	}
 	for _, slot := range owners[1:] {
-		folRes := &SendResult{
+		folRes := &clievent.SendResult{
 			Text:           "",
 			SessionID:      ev.SessionID,
 			CostUSD:        0,
@@ -348,7 +349,7 @@ func fanoutTurnResult(owners []*sendSlot, ev Event) {
 // deliverSlotResult writes to slot.resultCh unless the slot was canceled. The
 // resultCh has cap 1 so non-blocking send is safe — a full channel would mean
 // fanout is running twice against the same slot, which should never happen.
-func deliverSlotResult(s *sendSlot, r *SendResult) {
+func deliverSlotResult(s *sendSlot, r *clievent.SendResult) {
 	if s.isCanceled() {
 		return
 	}

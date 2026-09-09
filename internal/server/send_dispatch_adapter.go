@@ -6,7 +6,7 @@ package server
 import (
 	"context"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -20,7 +20,7 @@ type serverCaps struct{ s *Server }
 // Send forwards to Server.sendWithBroadcast (Hub when registered; sess.Send
 // only for Headless Servers — a non-headless Server with no hub panics; see
 // send.go).
-func (c serverCaps) Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error) {
+func (c serverCaps) Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 	return c.s.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
 }
 

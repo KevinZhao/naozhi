@@ -294,7 +294,7 @@ func TestProcess_Send_ResultEvent(t *testing.T) {
 	startServerDrain(srv)
 	p.startReadLoop()
 
-	done := make(chan *SendResult, 1)
+	done := make(chan *clievent.SendResult, 1)
 	sendErr := make(chan error, 1)
 	go func() {
 		r, err := p.Send(context.Background(), "hello", nil, nil)
@@ -490,10 +490,10 @@ func TestProcess_Send_OnEventCallback(t *testing.T) {
 	p.startReadLoop()
 
 	var mu sync.Mutex
-	var events []Event
+	var events []clievent.Event
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.Send(context.Background(), "hello", nil, func(ev Event) {
+		_, err := p.Send(context.Background(), "hello", nil, func(ev clievent.Event) {
 			mu.Lock()
 			events = append(events, ev)
 			mu.Unlock()
@@ -533,7 +533,7 @@ func TestProcess_Send_WithImages(t *testing.T) {
 	startServerDrain(srv)
 	p.startReadLoop()
 
-	images := []Attachment{{Data: []byte("fake-png"), MimeType: "image/png"}}
+	images := []clievent.Attachment{{Data: []byte("fake-png"), MimeType: "image/png"}}
 	done := make(chan error, 1)
 	go func() {
 		_, err := p.Send(context.Background(), "describe", images, nil)
@@ -1240,7 +1240,7 @@ func TestProcess_FindResultSince(t *testing.T) {
 // test for R20260605B-CORR-1 (#1805). readLoop logs the assistant reply as a
 // "text" entry and the turn-boundary "result" entry with EMPTY Detail (only
 // Cost). When eventCh drops the result event under load, the legacy Send path
-// falls back to findResultSince; the old code returned SendResult{Text:
+// falls back to findResultSince; the old code returned clievent.SendResult{Text:
 // result.Detail} == "", silently blanking the reply on the ACP/cron path. The
 // fix recovers the text from the preceding "text" entry.
 func TestProcess_FindResultSince_RecoversTextFromAssistantEntry(t *testing.T) {
@@ -1405,56 +1405,56 @@ func TestEventEntryFromEvent(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		event    Event
+		event    clievent.Event
 		wantOK   bool
 		wantType string
 	}{
 		{
 			name:     "result",
-			event:    Event{Type: "result", Result: "ans", CostUSD: 0.01},
+			event:    clievent.Event{Type: "result", Result: "ans", CostUSD: 0.01},
 			wantOK:   true,
 			wantType: "result",
 		},
 		{
 			name:   "system init skipped",
-			event:  Event{Type: "system", SubType: "init"},
+			event:  clievent.Event{Type: "system", SubType: "init"},
 			wantOK: false,
 		},
 		{
 			name:     "system task_started",
-			event:    Event{Type: "system", SubType: "task_started", Description: "run tests"},
+			event:    clievent.Event{Type: "system", SubType: "task_started", Description: "run tests"},
 			wantOK:   true,
 			wantType: "task_start",
 		},
 		{
 			name:     "system task_progress",
-			event:    Event{Type: "system", SubType: "task_progress"},
+			event:    clievent.Event{Type: "system", SubType: "task_progress"},
 			wantOK:   true,
 			wantType: "task_progress",
 		},
 		{
 			name: "system task_progress with usage",
-			event: Event{
+			event: clievent.Event{
 				Type: "system", SubType: "task_progress",
-				Usage: &TaskUsage{TotalTokens: 100, ToolUses: 5, DurationMS: 1000},
+				Usage: &clievent.TaskUsage{TotalTokens: 100, ToolUses: 5, DurationMS: 1000},
 			},
 			wantOK:   true,
 			wantType: "task_progress",
 		},
 		{
 			name:     "system task_notification",
-			event:    Event{Type: "system", SubType: "task_notification", Status: "success"},
+			event:    clievent.Event{Type: "system", SubType: "task_notification", Status: "success"},
 			wantOK:   true,
 			wantType: "task_done",
 		},
 		{
 			name:   "system stop_hook_summary skipped",
-			event:  Event{Type: "system", SubType: "stop_hook_summary"},
+			event:  clievent.Event{Type: "system", SubType: "stop_hook_summary"},
 			wantOK: false,
 		},
 		{
 			name:   "system turn_duration skipped",
-			event:  Event{Type: "system", SubType: "turn_duration"},
+			event:  clievent.Event{Type: "system", SubType: "turn_duration"},
 			wantOK: false,
 		},
 		{
@@ -1462,54 +1462,54 @@ func TestEventEntryFromEvent(t *testing.T) {
 			// as a bare ⚙ transcript row. Regression guard for the
 			// dashboard thinking_tokens spam fix.
 			name:   "system thinking_tokens skipped",
-			event:  Event{Type: "system", SubType: "thinking_tokens"},
+			event:  clievent.Event{Type: "system", SubType: "thinking_tokens"},
 			wantOK: false,
 		},
 		{
 			name:   "system background_tasks_changed skipped",
-			event:  Event{Type: "system", SubType: "background_tasks_changed"},
+			event:  clievent.Event{Type: "system", SubType: "background_tasks_changed"},
 			wantOK: false,
 		},
 		{
 			name: "assistant thinking",
-			event: Event{Type: "assistant", Message: &AssistantMessage{
-				Content: []ContentBlock{{Type: "thinking", Text: "analyzing"}},
+			event: clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{
+				Content: []clievent.ContentBlock{{Type: "thinking", Text: "analyzing"}},
 			}},
 			wantOK:   true,
 			wantType: "thinking",
 		},
 		{
 			name: "assistant tool_use",
-			event: Event{Type: "assistant", Message: &AssistantMessage{
-				Content: []ContentBlock{{Type: "tool_use", Name: "Read", Input: toolInput}},
+			event: clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{
+				Content: []clievent.ContentBlock{{Type: "tool_use", Name: "Read", Input: toolInput}},
 			}},
 			wantOK:   true,
 			wantType: "tool_use",
 		},
 		{
 			name: "assistant agent tool_use",
-			event: Event{Type: "assistant", Message: &AssistantMessage{
-				Content: []ContentBlock{{Type: "tool_use", Name: "Agent", Input: agentInput, ID: "tu-1"}},
+			event: clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{
+				Content: []clievent.ContentBlock{{Type: "tool_use", Name: "Agent", Input: agentInput, ID: "tu-1"}},
 			}},
 			wantOK:   true,
 			wantType: "agent",
 		},
 		{
 			name: "assistant text",
-			event: Event{Type: "assistant", Message: &AssistantMessage{
-				Content: []ContentBlock{{Type: "text", Text: "hello"}},
+			event: clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{
+				Content: []clievent.ContentBlock{{Type: "text", Text: "hello"}},
 			}},
 			wantOK:   true,
 			wantType: "text",
 		},
 		{
 			name:   "assistant no message skipped",
-			event:  Event{Type: "assistant"},
+			event:  clievent.Event{Type: "assistant"},
 			wantOK: false,
 		},
 		{
 			name:   "unknown type skipped",
-			event:  Event{Type: "unknown"},
+			event:  clievent.Event{Type: "unknown"},
 			wantOK: false,
 		},
 	}
@@ -1531,10 +1531,10 @@ func TestEventEntryFromEvent(t *testing.T) {
 // TestEventEntriesFromEventAt_UsesExternalTime locks R67-PERF-9: the At
 // variant must stamp entries with the caller-supplied millisecond timestamp
 // rather than calling time.Now() internally. readLoop relies on this to
-// share a single wall-clock read between ev.recvAt and EventEntry.Time.
+// share a single wall-clock read between ev.RecvAt and EventEntry.Time.
 func TestEventEntriesFromEventAt_UsesExternalTime(t *testing.T) {
 	const fixedMS int64 = 1711111111111
-	ev := Event{Type: "result", Result: "x", CostUSD: 0.0}
+	ev := clievent.Event{Type: "result", Result: "x", CostUSD: 0.0}
 	entries := EventEntriesFromEventAt(ev, fixedMS)
 	if len(entries) != 1 {
 		t.Fatalf("want 1 result entry, got %d: %+v", len(entries), entries)
@@ -1557,7 +1557,7 @@ func TestEventEntriesFromEventAt_UsesExternalTime(t *testing.T) {
 // been logged from a preceding text content block) — see commit history for
 // the multi-event ReadEvent fix.
 func TestEventEntriesFromEvent_ResultDoesNotEmitVisibleText(t *testing.T) {
-	for _, ev := range []Event{
+	for _, ev := range []clievent.Event{
 		{Type: "result", Result: "", CostUSD: 0.0042},
 		{Type: "result", Result: "x", CostUSD: 0.0},
 	} {
@@ -1583,8 +1583,8 @@ func TestEventEntriesFromEvent_ResultDoesNotEmitVisibleText(t *testing.T) {
 // showing "1项·▶1" without the checklist body.
 func TestEventEntryFromEvent_TodoWriteDetailIsArray(t *testing.T) {
 	raw := json.RawMessage(`{"todos":[{"content":"改 Lane E 到同样口径","status":"in_progress","activeForm":"正在改 Lane E"}]}`)
-	ev := Event{Type: "assistant", Message: &AssistantMessage{
-		Content: []ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: raw}},
+	ev := clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{
+		Content: []clievent.ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: raw}},
 	}}
 	entries := EventEntriesFromEventAt(ev, time.Now().UnixMilli())
 	if len(entries) == 0 || entries[0].Type != "todo" {
@@ -1596,9 +1596,9 @@ func TestEventEntryFromEvent_TodoWriteDetailIsArray(t *testing.T) {
 		}())
 	}
 	entry := entries[0]
-	var parsed []TodoItem
+	var parsed []clievent.TodoItem
 	if err := json.Unmarshal([]byte(entry.Detail), &parsed); err != nil {
-		t.Fatalf("Detail must be a JSON array of TodoItem, got %q: %v", entry.Detail, err)
+		t.Fatalf("Detail must be a JSON array of clievent.TodoItem, got %q: %v", entry.Detail, err)
 	}
 	if len(parsed) != 1 || parsed[0].Status != "in_progress" {
 		t.Fatalf("unexpected parsed todos: %+v", parsed)
@@ -1694,7 +1694,7 @@ func TestShortPathRuneBoundary(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestFormatToolDetail(t *testing.T) {
-	block := ContentBlock{
+	block := clievent.ContentBlock{
 		Type: "tool_use", Name: "Read",
 		Input: json.RawMessage(`{"file_path":"/a/b/c.go"}`),
 	}
@@ -1703,7 +1703,7 @@ func TestFormatToolDetail(t *testing.T) {
 		t.Errorf("formatToolDetail = %q, expected Read", got)
 	}
 
-	emptyBlock := ContentBlock{Type: "tool_use", Name: "Read"}
+	emptyBlock := clievent.ContentBlock{Type: "tool_use", Name: "Read"}
 	if got2 := formatToolDetail(emptyBlock); got2 != "Read" {
 		t.Errorf("formatToolDetail (empty input) = %q, want Read", got2)
 	}

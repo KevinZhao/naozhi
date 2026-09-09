@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestEvent_StreamJSONParseContract_R217_ARCH_1 anchors #617: cli.Event is
@@ -25,7 +27,7 @@ func TestEvent_StreamJSONParseContract_R217_ARCH_1(t *testing.T) {
 	// A system/init frame: model + session_id are the load-bearing fields
 	// readLoop forwards to Process.setModel / SetContext.
 	const initLine = `{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-x"}`
-	var initEv Event
+	var initEv clievent.Event
 	if err := json.Unmarshal([]byte(initLine), &initEv); err != nil {
 		t.Fatalf("init unmarshal: %v", err)
 	}
@@ -41,7 +43,7 @@ func TestEvent_StreamJSONParseContract_R217_ARCH_1(t *testing.T) {
 		`"tool_use_id":"tu1","description":"d","task_type":"in_process_teammate",` +
 		`"status":"running","last_tool_name":"Bash",` +
 		`"usage":{"total_tokens":42,"tool_uses":3,"duration_ms":1500}}`
-	var taskEv Event
+	var taskEv clievent.Event
 	if err := json.Unmarshal([]byte(taskLine), &taskEv); err != nil {
 		t.Fatalf("task unmarshal: %v", err)
 	}
@@ -70,7 +72,7 @@ func TestEvent_StreamJSONParseContract_R217_ARCH_1(t *testing.T) {
 	const asstLine = `{"type":"assistant","message":{"role":"assistant",` +
 		`"content":[{"type":"tool_use","id":"b1","name":"Agent",` +
 		`"input":{"description":"go"}}]}}`
-	var asstEv Event
+	var asstEv clievent.Event
 	if err := json.Unmarshal([]byte(asstLine), &asstEv); err != nil {
 		t.Fatalf("assistant unmarshal: %v", err)
 	}
@@ -87,7 +89,7 @@ func TestEvent_StreamJSONParseContract_R217_ARCH_1(t *testing.T) {
 
 	// A result frame: total_cost_usd is the one field process tracks.
 	const resLine = `{"type":"result","result":"done","total_cost_usd":0.05}`
-	var resEv Event
+	var resEv clievent.Event
 	if err := json.Unmarshal([]byte(resLine), &resEv); err != nil {
 		t.Fatalf("result unmarshal: %v", err)
 	}
@@ -99,7 +101,7 @@ func TestEvent_StreamJSONParseContract_R217_ARCH_1(t *testing.T) {
 	// echoes. Both are pinned because the passthrough slot-matcher silently
 	// mis-routes if either tag drifts.
 	const replayLine = `{"type":"user","uuid":"u-9","isReplay":true}`
-	var rEv Event
+	var rEv clievent.Event
 	if err := json.Unmarshal([]byte(replayLine), &rEv); err != nil {
 		t.Fatalf("replay unmarshal: %v", err)
 	}

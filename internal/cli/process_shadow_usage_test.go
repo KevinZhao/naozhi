@@ -1,17 +1,21 @@
 package cli
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+)
 
 // TestShadowUsage_AccumulatesUntilResult pins the shadow account: assistant
 // frames' usage sums per turn, the result frame clears it, Take resets it.
 func TestShadowUsage_AccumulatesUntilResult(t *testing.T) {
 	p := &Process{}
-	asst := func(in, out int64, model string) Event {
-		return Event{Type: "assistant", Message: &AssistantMessage{Model: model,
-			Usage: &MessageUsage{InputTokens: in, OutputTokens: out, CacheCreationInputTokens: 10}}}
+	asst := func(in, out int64, model string) clievent.Event {
+		return clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{Model: model,
+			Usage: &clievent.MessageUsage{InputTokens: in, OutputTokens: out, CacheCreationInputTokens: 10}}}
 	}
 	p.trackShadowUsage(asst(5, 7, "us.anthropic.claude-fable-5-1[1m]"))
-	p.trackShadowUsage(Event{Type: "assistant", Message: &AssistantMessage{}}) // no usage: ignored
+	p.trackShadowUsage(clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{}}) // no usage: ignored
 	p.trackShadowUsage(asst(1, 2, ""))
 	u := p.TakeShadowUsage()
 	if u.Input != 6 || u.Output != 9 || u.CacheWrite != 20 || u.Model != "us.anthropic.claude-fable-5-1[1m]" || u.IsZero() {
@@ -21,7 +25,7 @@ func TestShadowUsage_AccumulatesUntilResult(t *testing.T) {
 		t.Fatal("Take must clear the account")
 	}
 	p.trackShadowUsage(asst(3, 3, "m"))
-	p.trackShadowUsage(Event{Type: "result", CostUSD: 1})
+	p.trackShadowUsage(clievent.Event{Type: "result", CostUSD: 1})
 	if !p.TakeShadowUsage().IsZero() {
 		t.Fatal("result frame must clear the account (its modelUsage supersedes it)")
 	}

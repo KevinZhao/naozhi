@@ -31,7 +31,7 @@ const interruptedSettleWindow = 500 * time.Millisecond
 // fallback when eventCh may have dropped events. The "result" entry carries
 // only cost + turn metadata (its Detail is empty to avoid a duplicate dashboard
 // bubble), so the reply text is recovered from the preceding "text" entry (#1805).
-func (p *Process) findResultSince(afterMS int64) *SendResult {
+func (p *Process) findResultSince(afterMS int64) *clievent.SendResult {
 	entries := p.eventLog.EntriesSince(afterMS)
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entries[i].Type != "result" {
@@ -42,7 +42,7 @@ func (p *Process) findResultSince(afterMS int64) *SendResult {
 			// Detail holds the full text; Summary is only the truncated preview.
 			text = lastTextEntryBefore(entries, i)
 		}
-		return &SendResult{
+		return &clievent.SendResult{
 			Text:      text,
 			SessionID: p.SessionID(),
 			CostUSD:   entries[i].Cost,
@@ -77,9 +77,9 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 	wasRunning := p.interruptedRun.Swap(false)
 	p.mu.Unlock()
 
-	// Stack-allocated [4]Event backing: post-cutoff events during an interrupt
+	// Stack-allocated [4]clievent.Event backing: post-cutoff events during an interrupt
 	// are rare (0-3), so the common case appends without heap allocation.
-	var holdbackArr [4]Event
+	var holdbackArr [4]clievent.Event
 	holdback := holdbackArr[:0]
 
 	if wasInterrupted {
@@ -95,7 +95,7 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 					if !ok || ev.Type == "result" {
 						goto drain
 					}
-					if ev.recvAt.After(cutoff) {
+					if ev.RecvAt.After(cutoff) {
 						// Post-cutoff event belongs to the *new* turn: hold it aside
 						// (re-enqueued at the end of drain) and KEEP waiting for the
 						// interrupted result — bailing now would let that result
@@ -138,7 +138,7 @@ drain:
 				// recovers via findResultSince(); dropping them is safe.
 				return nil
 			}
-			if ev.recvAt.After(cutoff) {
+			if ev.RecvAt.After(cutoff) {
 				holdback = append(holdback, ev)
 			}
 			// pre-cutoff events are dropped (drained)
@@ -160,7 +160,7 @@ drain:
 // atomic — readLoop may close `done` then `eventCh` in between (#1779) and a
 // send on a closed channel panics even with `default` — so the send is wrapped
 // in recover; the event is already in ring.EventLog, so nothing is lost.
-func (p *Process) safeReenqueue(ev Event) {
+func (p *Process) safeReenqueue(ev clievent.Event) {
 	defer func() {
 		if r := recover(); r != nil {
 			// eventCh closed between the isChanAlive guard and this send.

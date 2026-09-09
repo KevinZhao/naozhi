@@ -8,7 +8,7 @@ import (
 // TestShimMsg_LineCarriesInnerStdoutPayload pins the shim wire contract for
 // the `line` field of a stdout frame: the inner stream-json event the CLI
 // emitted must survive the shim envelope round-trip verbatim and parse
-// through Protocol.ReadEvent into the expected Event.
+// through Protocol.ReadEvent into the expected clievent.Event.
 //
 // This invariant is load-bearing for #429 (R176-PERF-N2), which proposes
 // changing shimMsg.Line from string to json.RawMessage to drop one alloc
@@ -17,7 +17,7 @@ import (
 //  1. The envelope's `line` field carries the inner event bytes unchanged
 //     (no escaping/encoding drift — JSON string vs RawMessage encode the
 //     same value on the wire but the Go-side decode differs).
-//  2. ReadEvent(msg.Line) parses the carried payload into the same Event.
+//  2. ReadEvent(msg.Line) parses the carried payload into the same clievent.Event.
 //
 // Locking both now means a string→RawMessage swap that accidentally
 // double-encodes or mangles the payload fails CI immediately.
