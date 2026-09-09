@@ -71,12 +71,6 @@ type ServerOptions struct {
 	// capturing a profile.
 	DebugMode bool
 
-	// Headless declares that this Server is wired without a dashboard Hub on
-	// purpose. With Headless=false (production default) sendWithBroadcast
-	// fails loud when the hub is missing instead of silently taking the
-	// no-broadcast fallback (#379).
-	Headless bool
-
 	// PublicTmpEnabled opts the __public_tmp__ pseudo-project in (#646). When
 	// false (default) that pseudo-project is a regular "project not found".
 	//

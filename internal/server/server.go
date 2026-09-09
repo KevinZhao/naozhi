@@ -96,7 +96,6 @@ type Server struct {
 
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: routes.go (gates /api/debug/pprof and /api/debug/vars)
-	headless  bool                 // 读写: send.go (explicit no-hub mode; gates the nil-hub send fallback)
 	resolver  *session.KeyResolver // 读写: build_dashboard.go, server.go (session-key → opts derivation)
 	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data)
 
@@ -254,7 +253,6 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
 		debugMode:       opts.DebugMode,
-		headless:        opts.Headless,
 		onReady:         opts.OnReady,
 		projectMgr:      opts.ProjectManager,
 		resolver:        resolver,
