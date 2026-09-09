@@ -60,11 +60,11 @@ func (h *Handlers) SetCachedHistoryForTest(slice []discovery.RecentSession, t ti
 	h.historyCacheTimeUnixNano.Store(t.UnixNano())
 }
 
-// RetiredStoreForTest exposes the retiredStore field for tests that need
+// RetiredStoreForTest exposes deps.RetiredStore for tests that need
 // to assert RecordRetired/Prune behaviour.
 func (h *Handlers) RetiredStoreForTest() RetiredReader { return h.deps.RetiredStore }
 
-// SetRetiredStoreForTest swaps the retiredStore.
+// SetRetiredStoreForTest swaps deps.RetiredStore.
 func (h *Handlers) SetRetiredStoreForTest(s RetiredReader) {
 	h.deps.RetiredStore = s
 }

@@ -59,7 +59,7 @@ func (h *Handlers) HandleGit(w http.ResponseWriter, r *http.Request) {
 	// Re-validate against allowedRoot before touching the filesystem: the value
 	// was validated at SetWorkspace time, but a tightened allowedRoot can leave
 	// a stale entry, and this handler must not read outside the declared tree.
-	// A nil validateWS (hand-built Handlers in tests) fails closed.
+	// A nil deps.ValidateWS (hand-built Handlers in tests) fails closed.
 	if h.deps.ValidateWS == nil {
 		httputil.WriteJSON(w, gitStateView{})
 		return
@@ -76,7 +76,7 @@ func (h *Handlers) HandleGit(w http.ResponseWriter, r *http.Request) {
 	// otherwise Detect could walk past the boundary and disclose a parent repo's
 	// path + branch (e.g. allowed_root=<repo>/docs). Empty means no containment
 	// policy, which gitinfo mirrors as unbounded. The bound must be
-	// symlink-resolved like wsPath, with the same raw-path fallback validateWS uses.
+	// symlink-resolved like wsPath, with the same raw-path fallback deps.ValidateWS uses.
 	st, ok := gitinfo.Detect(wsPath, resolveRootForBound(h.deps.AllowedRoot))
 	if !ok {
 		// Not a git checkout — common and legitimate; echo the workspace.
