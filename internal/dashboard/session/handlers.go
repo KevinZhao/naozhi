@@ -242,7 +242,6 @@ type Handlers struct {
 	// summaryFlight collapses concurrent misses at the TTL boundary into one
 	// LookupSummaries (N×os.Stat) invocation; mirrors historyFlight.
 	summaryFlight singleflight.Group
-
 }
 
 // workspacesPool recycles the []string scratch that fillProjectAndSummary and
