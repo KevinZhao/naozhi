@@ -28,7 +28,7 @@ func TestHandleList_RecentRunsCapEchoed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 
 	for _, query := range []string{"", "?compact=1"} {
 		req := httptest.NewRequest(http.MethodGet, "/api/cron"+query, nil)

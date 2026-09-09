@@ -31,7 +31,7 @@ func TestHandleUpdate_NotifyTrueUsesExistingPerJobTarget(t *testing.T) {
 	if err := sched.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 
 	patch := func(body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPatch, "/api/cron?id="+job.ID, strings.NewReader(body))

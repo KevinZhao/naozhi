@@ -201,8 +201,8 @@ func TestHandleGit_WorkspaceOutsideAllowedRootIsNotRead(t *testing.T) {
 
 	h := newGitHandler(t, repo)
 	// Tighten allowedRoot after the override was stored — the stale-entry case.
-	h.allowedRoot = filepath.Join(base, "allowed")
-	if err := os.MkdirAll(h.allowedRoot, 0o755); err != nil {
+	h.deps.AllowedRoot = filepath.Join(base, "allowed")
+	if err := os.MkdirAll(h.deps.AllowedRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -221,7 +221,7 @@ func TestHandleGit_NilValidateWSFailsClosed(t *testing.T) {
 	makeRepo(t, repo, "master")
 
 	h := newGitHandler(t, repo)
-	h.validateWS = nil // hand-built Handlers / un-wired deps
+	h.deps.ValidateWS = nil // hand-built Handlers / un-wired deps
 
 	res, body := doGit(t, h, "key="+gitTestKey)
 	if res.StatusCode != http.StatusOK {

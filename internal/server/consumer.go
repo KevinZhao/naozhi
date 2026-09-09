@@ -43,8 +43,10 @@ type HubRouter interface {
 // its godoc admits it carries the transits *SendHandler borrows, so handing it
 // to the engine would just move the borrowing debt to a new holder.
 // *session.Router satisfies it structurally; consumer_contract_test.go guards
-// the binding. Its method set is a superset of SendRouter's, so an engine
-// router can be passed where a SendRouter is expected.
+// the binding. It is also the ONLY router handle on the HTTP send path:
+// *SendHandler used to carry its own two-method SendRouter view for
+// resolveAttachmentWorkspace (#566), which #2632 folded into engine methods so
+// one *session.Router is reached through one handle.
 type sendEngineRouter interface {
 	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
 	SessionFor(key string) *session.ManagedSession
@@ -80,13 +82,6 @@ type ScratchRouter interface {
 	SessionFor(key string) *session.ManagedSession
 	Remove(key string) bool
 	RenameSession(oldKey, newKey string) bool
-}
-
-// SendRouter is the *SendHandler-only subset of *session.Router, used by
-// resolveAttachmentWorkspace (#566).
-type SendRouter interface {
-	SessionFor(key string) *session.ManagedSession
-	Workspace(chatKey string) string
 }
 
 // HubBroadcaster names the broadcast / fan-out facet of *Hub — the "push a

@@ -90,9 +90,9 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 	// LimitReader + 256 KB scanner + per-line Unmarshal), so one shared bucket
 	// would let either endpoint starve the other (#1096). runsLimiter is the
 	// fallback for hand-rolled fixtures without a transcriptLimiter.
-	limiter := h.transcriptLimiter
+	limiter := h.deps.RateLimits.Transcript
 	if limiter == nil {
-		limiter = h.runsLimiter
+		limiter = h.deps.RateLimits.Runs
 	}
 	if limiter != nil && !limiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron transcript rate limit exceeded"})
@@ -115,7 +115,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
 	}
@@ -125,7 +125,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := h.scheduler.Run(jobID, runID)
+	run, err := h.deps.Scheduler.Run(jobID, runID)
 	if err != nil {
 		if errors.Is(err, cronpkg.ErrCorruptRun) {
 			slog.Warn("cron transcript: run record corrupt", "job_id", jobID, "run_id", runID, "err", err)
@@ -155,7 +155,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bail early into "missing" downgrade for the common no-session case.
-	if run.SessionID == "" || h.claudeDir == "" || run.WorkDir == "" {
+	if run.SessionID == "" || h.deps.ClaudeDir == "" || run.WorkDir == "" {
 		resp.Fallback = "missing"
 		httputil.WriteJSON(w, resp)
 		return
@@ -201,7 +201,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jsonlPath := claudefs.SessionJSONL(h.claudeDir, run.WorkDir, run.SessionID)
+	jsonlPath := claudefs.SessionJSONL(h.deps.ClaudeDir, run.WorkDir, run.SessionID)
 
 	// Symlink + path-escape guard. EvalSymlinks resolves any symlink
 	// in the chain, then HasPrefix ensures the resolved path still lives
@@ -223,7 +223,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 	// before the prefix check: macOS maps /var→/private/var and symlinked
 	// claudeDir components (Docker bind-mounts) drift under EvalSymlinks, so an
 	// asymmetric resolve would reject every legitimate JSONL on those hosts.
-	allowedRoot := claudefs.ProjectsRoot(h.claudeDir)
+	allowedRoot := claudefs.ProjectsRoot(h.deps.ClaudeDir)
 	resolvedRoot, rrErr := filepath.EvalSymlinks(allowedRoot)
 	if rrErr != nil {
 		// Only fall back to the raw root on "dir not yet materialised". Any
@@ -246,7 +246,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 	// (macOS APFS, NTFS) where EvalSymlinks preserves user-typed case. Both
 	// args are EvalSymlinks-resolved above (the helper's input contract).
 	if !osutil.PathContainedInRoot(resolved, resolvedRoot) {
-		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.claudeDir, "allowedRoot", resolvedRoot)
+		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.deps.ClaudeDir, "allowedRoot", resolvedRoot)
 		resp.Fallback = "missing"
 		httputil.WriteJSON(w, resp)
 		return

@@ -8,7 +8,7 @@ import (
 )
 
 // TestSanitisePlannerPromptForSpawn_ServerCanReachIt pins R215-SEC-P1-2
-// (#535): HandlePlannerRestart's legacy fallback (h.resolver==nil) used
+// (#535): HandlePlannerRestart's legacy fallback (h.deps.Resolver==nil) used
 // to feed EffectivePlannerPrompt straight into AgentOpts.ExtraArgs,
 // bypassing the spawn-boundary sanitiser the resolver path enforces.
 //

@@ -79,7 +79,7 @@ func TestHandleRunDetail_SessionID_Sanitized(t *testing.T) {
 		t.Fatalf("write run json: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/cron/runs/"+runID+"?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
@@ -159,7 +159,7 @@ func TestHandleRunDetail_SessionID_Clean(t *testing.T) {
 		t.Fatalf("write run json: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/cron/runs/"+runID+"?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
@@ -229,7 +229,7 @@ func TestHandleRunDetail_CrossOwnership404(t *testing.T) {
 		t.Fatalf("write run json: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"?job_id="+urlJobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()

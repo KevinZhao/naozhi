@@ -18,7 +18,7 @@ import (
 // bytes (ANSI escapes, NUL, newline) cannot inject into the log stream.
 func TestHandleFileGet_PublicTmpAuditLogSanitised(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.publicTmpEnabled = true
+	h.deps.PublicTmpEnabled = true
 
 	dir, err := os.MkdirTemp("/tmp", "naozhi-logsanitise-*")
 	if err != nil {

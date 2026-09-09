@@ -101,7 +101,7 @@ func TestTranscript_RejectsWorkDirWithC0(t *testing.T) {
 				t.Fatalf("write run json: %v", err)
 			}
 
-			h := &Handlers{scheduler: sched, claudeDir: claudeDir}
+			h := &Handlers{deps: Deps{Scheduler: sched, ClaudeDir: claudeDir}}
 			w := callTranscript(h, jobID, runID)
 
 			if w.Code != http.StatusOK {

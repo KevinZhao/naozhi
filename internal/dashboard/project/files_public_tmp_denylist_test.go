@@ -104,7 +104,7 @@ func (f fakeModeInfo) Mode() os.FileMode { return f.mode }
 // HandleFilesExists batch probe must hide it.
 func TestHandleFileGet_PublicTmpDeniesUnixSocket(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.publicTmpEnabled = true
+	h.deps.PublicTmpEnabled = true
 
 	// Benign name so the name deny-list does NOT trip (no .sock / ssh / etc).
 	dir, err := os.MkdirTemp("/tmp", "naozhi-sockgate-*")
@@ -173,7 +173,7 @@ func TestHandleFileGet_PublicTmpDeniesUnixSocket(t *testing.T) {
 // foreign-private gate would let it through; the name gate must still 404.
 func TestHandleFileGet_PublicTmpDeniesSensitiveNames(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.publicTmpEnabled = true
+	h.deps.PublicTmpEnabled = true
 
 	cases := []struct {
 		name    string

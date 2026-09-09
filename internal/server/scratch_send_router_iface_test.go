@@ -41,23 +41,25 @@ func TestScratchHandler_RouterFieldIsScratchRouter(t *testing.T) {
 	var _ ScratchRouter = (*session.Router)(nil)
 }
 
-// TestSendHandler_RouterFieldIsSendRouter is the SendHandler twin of
-// TestScratchHandler_RouterFieldIsScratchRouter. Same R215-ARCH-P1-4
-// (#566) Phase 2.5 cleanup contract: SendHandler.router replaces the
-// h.hub.router.* transits in resolveAttachmentWorkspace.
-//
-// That claim was aspirational until #2551: resolveAttachmentWorkspace took a
-// *Hub and read hub.router regardless of what this field held. It now takes a
-// SendRouter parameter and the HTTP caller passes h.router, so the sentence
-// above is finally describing the code.
-func TestSendHandler_RouterFieldIsSendRouter(t *testing.T) {
+// TestSendHandler_ReachesRouterOnlyThroughEngine replaces the former
+// TestSendHandler_RouterFieldIsSendRouter. #566 gave SendHandler its own
+// SendRouter view; #2551 then made the handler ALSO write through
+// engine.router, so one *session.Router was held twice — the shape #2551 was
+// filed against. #2632 removed the field: the handler's only path to the
+// router is the engine, and production wiring must hand it the Hub's engine so
+// the HTTP and WS send paths observe the same router / workspace table.
+func TestSendHandler_ReachesRouterOnlyThroughEngine(t *testing.T) {
 	t.Parallel()
-	_, hs := newTestServerHS(&mockPlatform{})
+	s, hs := newTestServerHS(&mockPlatform{})
 	if hs.sendH == nil {
 		t.Fatal("send handler not wired by registerDashboard")
 	}
-	if hs.sendH.router == nil {
-		t.Fatal("send handler router field is nil — wiring regression")
+	if hs.sendH.engine == nil {
+		t.Fatal("send handler engine is nil — wiring regression")
 	}
-	var _ SendRouter = (*session.Router)(nil)
+	if hs.sendH.engine != s.hub.engine {
+		t.Fatal("send handler engine is not the Hub's engine — HTTP and WS sends would see different state")
+	}
+	// The engine's router view is what the HTTP path now reads through.
+	var _ sendEngineRouter = (*session.Router)(nil)
 }

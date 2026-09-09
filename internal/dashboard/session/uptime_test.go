@@ -10,7 +10,7 @@ import (
 // underlying snapshot pointer (no re-format).
 func TestUptimeString_CachesWithinSecondBucket(t *testing.T) {
 	// Start 5 seconds ago so rounding lands on a stable integer bucket.
-	h := &Handlers{startedAt: time.Now().Add(-5 * time.Second)}
+	h := &Handlers{deps: Deps{StartedAt: time.Now().Add(-5 * time.Second)}}
 
 	first := h.uptimeStringAt(time.Now())
 	snap1 := h.uptimeCache.Load()
@@ -35,10 +35,10 @@ func TestUptimeString_CachesWithinSecondBucket(t *testing.T) {
 // the integer-second bucket advances (startedAt pushed backwards simulates
 // the passage of time).
 func TestUptimeString_RotatesAcrossBuckets(t *testing.T) {
-	h := &Handlers{startedAt: time.Now().Add(-1 * time.Second)}
+	h := &Handlers{deps: Deps{StartedAt: time.Now().Add(-1 * time.Second)}}
 	first := h.uptimeStringAt(time.Now())
 	// Shift startedAt back so the bucket id increases by at least one second.
-	h.startedAt = h.startedAt.Add(-2 * time.Second)
+	h.deps.StartedAt = h.deps.StartedAt.Add(-2 * time.Second)
 	second := h.uptimeStringAt(time.Now())
 	if first == second {
 		t.Errorf("expected uptime to advance after bucket rotation, both = %q", first)

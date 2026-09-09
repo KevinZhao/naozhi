@@ -52,7 +52,7 @@ type projectListSnapshot struct {
 
 // projectListLocalAt returns the local projectListEntry slice with 1-second
 // cache resolution. The result is shared READ-ONLY across callers in the same
-// bucket; anyone appending must copy first (buildProjectList does). h.projectMgr
+// bucket; anyone appending must copy first (buildProjectList does). h.deps.ProjectMgr
 // MUST be non-nil. Cache races are benign: rebuilds across a bucket boundary
 // produce identical content (Manager.All returns sorted snapshots under a read
 // lock) and last-writer-wins.
@@ -61,11 +61,11 @@ func (h *Handlers) projectListLocalAt(now time.Time) []projectListEntry {
 	if cur := h.projectListCache.Load(); cur != nil && cur.Bucket == bucket {
 		return cur.Entries
 	}
-	projects := h.projectMgr.All()
+	projects := h.deps.ProjectMgr.All()
 	entries := make([]projectListEntry, 0, len(projects))
 	for _, p := range projects {
 		var stableKey string
-		if h.projectStableKeyEnabled {
+		if h.deps.ProjectStableKeyEnabled {
 			stableKey = sessionpkg.ProjectStableKey(p.Path, "general")
 		}
 		entries = append(entries, projectListEntry{
@@ -94,19 +94,19 @@ func (h *Handlers) projectListLocalAt(now time.Time) []projectListEntry {
 // projectListSnapshot for the alias contract.
 func (h *Handlers) buildProjectList(now time.Time) []projectListEntry {
 	var projectList []projectListEntry
-	if h.projectMgr != nil {
+	if h.deps.ProjectMgr != nil {
 		projectList = h.projectListLocalAt(now)
 	}
 	// Appending remote rows MUST NOT touch the cached local slice:
 	// projectListLocalAt returns the cached header, so an in-capacity append
 	// would silently mutate every other reader's view. Build the merge fresh.
-	if !h.nodeAccess.HasNodes() {
+	if !h.deps.NodeAccess.HasNodes() {
 		if projectList == nil {
 			projectList = []projectListEntry{}
 		}
 		return projectList
 	}
-	cachedProjects := h.nodeCache.Projects()
+	cachedProjects := h.deps.NodeCache.Projects()
 	var remoteCount int
 	for _, items := range cachedProjects {
 		remoteCount += len(items)

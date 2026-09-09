@@ -56,7 +56,7 @@ func TestHandleCreate_NotifyHalfSetRejected(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			h := &Handlers{scheduler: sched}
+			h := &Handlers{deps: Deps{Scheduler: sched}}
 			body := `{"schedule":"* * * * *","prompt":"hi","notify_platform":` +
 				jsonStr(c.platform) + `,"notify_chat_id":` + jsonStr(c.chatID) + `}`
 			req := httptest.NewRequest(http.MethodPost, "/api/cron",
