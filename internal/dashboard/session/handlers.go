@@ -182,44 +182,17 @@ func (f historyFilter) SkipSessionID(sid string) bool {
 }
 
 // Handlers groups the session list, events, delete, and resume API endpoints.
+//
+// It holds its wiring as one Deps value rather than a field per dependency
+// (#2635). Until then New copied 23 Deps fields into 23 same-named private
+// fields — the same state twice, with a second set of comments to drift and a
+// struct literal in tests that had to name unexported fields. Everything below
+// deps is runtime state the handlers OWN (caches, single-flight groups,
+// waitgroups); nothing there is injected.
 type Handlers struct {
-	router     RouterView
-	projectMgr ProjectSource
-	// projectStableKeyEnabled gates emitting projectListEntry.StableKey;
-	// mirrors dashproject.Handlers.projectStableKeyEnabled.
-	projectStableKeyEnabled bool
-	scheduler               CronView // optional; used by HandleEvents to revive dismissed cron stubs (EnsureStub)
-	// cronSessions feeds KnownSessionIDs() to the history panel; nil disables
-	// filtering cron-spawned JSONLs. Kept separate from scheduler so server.go
-	// can nil either independently (#754).
-	cronSessions CronView
-	// sysWorkDir is sysession's transient Runner workspace; when non-empty its
-	// JSONLs are hidden from the history panel (AutoTitler otherwise leaks
-	// prompt fragments into "recent sessions").
-	sysWorkDir  string
-	claudeDir   string
-	allowedRoot string
-	agents      map[string]sessionpkg.AgentOpts
-	// agentIDs is precomputed once (agents map is immutable after startup).
-	agentIDs   []string
-	nodeAccess NodeAccessor
-	nodeCache  NodeCacheReader
-
-	// Static status fields (immutable after construction)
-	startedAt     time.Time
-	backendTag    string
-	workspaceID   string
-	workspaceName string
-	// versionTag is the build tag surfaced as sessionStats.VersionTag; empty
-	// means unknown and is omitted from JSON.
-	versionTag    string
-	watchdogNoOut *atomic.Int64
-	watchdogTotal *atomic.Int64
-
-	// snapshotEnricher is wired from server.go to Hub.enrichSnapshot so
-	// SubagentInfo rows carry tailer-side LastTool / ToolUses / DurationMS.
-	// nil in tests that don't build a Hub.
-	snapshotEnricher func(*sessionpkg.SessionSnapshot)
+	// deps is read-only after New. The few test-only mutators live in
+	// test_setters.go and are the only writers.
+	deps Deps
 
 	// uptimeCache memoises the formatted uptime string per 1-second bucket so
 	// N tabs polling at 1 Hz share one alloc. Races are benign: concurrent
@@ -269,16 +242,6 @@ type Handlers struct {
 	// summaryFlight collapses concurrent misses at the TTL boundary into one
 	// LookupSummaries (N×os.Stat) invocation; mirrors historyFlight.
 	summaryFlight singleflight.Group
-
-	// retiredStore stamps when a session left the live sidebar so history rows
-	// carry retired_at (dashboard sorts by retired_at || last_active). nil
-	// disables; ordering degrades to last_active only.
-	retiredStore RetiredReader
-
-	// validateWS / systemInfoFn inject server-package helpers without a
-	// reverse import.
-	validateWS   func(ws, root string) (string, error)
-	systemInfoFn func() map[string]any
 }
 
 // workspacesPool recycles the []string scratch that fillProjectAndSummary and
@@ -312,61 +275,56 @@ type Deps struct {
 	// exists before these handlers do, so there is no ordering window to cover.
 	SnapshotEnricher func(*sessionpkg.SessionSnapshot)
 
-	Router        RouterView
-	ProjectMgr    ProjectSource
-	Scheduler     CronView
-	CronSessions  CronView
-	SysWorkDir    string
-	ClaudeDir     string
-	AllowedRoot   string
-	Agents        map[string]sessionpkg.AgentOpts
-	AgentIDs      []string
-	NodeAccess    NodeAccessor
-	NodeCache     NodeCacheReader
+	Router     RouterView
+	ProjectMgr ProjectSource
+	// Scheduler is optional; HandleEvents uses it to revive dismissed cron
+	// stubs (EnsureStub).
+	Scheduler CronView
+	// CronSessions feeds KnownSessionIDs() to the history panel; nil disables
+	// filtering cron-spawned JSONLs. Kept separate from Scheduler so server.go
+	// can nil either independently (#754).
+	CronSessions CronView
+	// SysWorkDir is sysession's transient Runner workspace; when non-empty its
+	// JSONLs are hidden from the history panel (AutoTitler otherwise leaks
+	// prompt fragments into "recent sessions").
+	SysWorkDir  string
+	ClaudeDir   string
+	AllowedRoot string
+	Agents      map[string]sessionpkg.AgentOpts
+	// AgentIDs is precomputed once by the wiring side (Agents is immutable
+	// after startup).
+	AgentIDs   []string
+	NodeAccess NodeAccessor
+	NodeCache  NodeCacheReader
+
+	// Static status fields (immutable after construction).
 	StartedAt     time.Time
 	BackendTag    string
 	WorkspaceID   string
 	WorkspaceName string
+	// VersionTag is the build tag surfaced as sessionStats.VersionTag; empty
+	// means unknown and is omitted from JSON.
 	VersionTag    string
 	WatchdogNoOut *atomic.Int64
 	WatchdogTotal *atomic.Int64
-	RetiredStore  RetiredReader
-	ValidateWS    func(ws, root string) (string, error)
-	SystemInfoFn  func() map[string]any
+	// RetiredStore stamps when a session left the live sidebar so history rows
+	// carry retired_at (dashboard sorts by retired_at || last_active). nil
+	// disables; ordering degrades to last_active only.
+	RetiredStore RetiredReader
+	// ValidateWS / SystemInfoFn inject server-package helpers without a
+	// reverse import.
+	ValidateWS   func(ws, root string) (string, error)
+	SystemInfoFn func() map[string]any
 	// ProjectStableKeyEnabled toggles the stableKey field in stats.projects
 	// (same switch as the /api/projects list).
 	ProjectStableKeyEnabled bool
 }
 
-// New constructs a Handlers from injected deps.
+// New constructs a Handlers from injected deps. Deps is stored as-is; the
+// documentation for each dependency lives on the Deps field, not on a
+// duplicate here.
 func New(d Deps) *Handlers {
-	return &Handlers{
-		snapshotEnricher: d.SnapshotEnricher,
-
-		router:        d.Router,
-		projectMgr:    d.ProjectMgr,
-		scheduler:     d.Scheduler,
-		cronSessions:  d.CronSessions,
-		sysWorkDir:    d.SysWorkDir,
-		claudeDir:     d.ClaudeDir,
-		allowedRoot:   d.AllowedRoot,
-		agents:        d.Agents,
-		agentIDs:      d.AgentIDs,
-		nodeAccess:    d.NodeAccess,
-		nodeCache:     d.NodeCache,
-		startedAt:     d.StartedAt,
-		backendTag:    d.BackendTag,
-		workspaceID:   d.WorkspaceID,
-		workspaceName: d.WorkspaceName,
-		versionTag:    d.VersionTag,
-		watchdogNoOut: d.WatchdogNoOut,
-		watchdogTotal: d.WatchdogTotal,
-		retiredStore:  d.RetiredStore,
-		validateWS:    d.ValidateWS,
-		systemInfoFn:  d.SystemInfoFn,
-
-		projectStableKeyEnabled: d.ProjectStableKeyEnabled,
-	}
+	return &Handlers{deps: d}
 }
 
 // ContractStats exposes the /api/sessions "stats" wire struct to the

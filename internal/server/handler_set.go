@@ -13,7 +13,10 @@
 //
 //	auth        — debug_expvar / debug_pprof / ccassets wrappers, RotateDashboardSessions
 //	sessionH    — retired-store flusher loop, WarmHistory + Flush on shutdown
-//	healthH     — dispatcherMetrics is bound in Start, after the dispatcher exists
+//	healthH     — /health, /livez, /readyz are server-owned routes (routes.go)
+//	              and the tests drive the handler directly; since #2633 it
+//	              takes dispatcherMetrics at construction, so nothing binds
+//	              into it after buildServer
 //	discoveryH  — Wait() drains takeover goroutines during shutdown
 //
 // Those four are lifecycle participants, not views, so they stay. Everything

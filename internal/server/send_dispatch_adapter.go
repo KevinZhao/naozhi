@@ -17,9 +17,8 @@ import (
 // tests can still swap in a fake Capabilities.
 type serverCaps struct{ s *Server }
 
-// Send forwards to Server.sendWithBroadcast (Hub when registered; sess.Send
-// only for Headless Servers — a non-headless Server with no hub panics; see
-// send.go).
+// Send forwards to Server.sendWithBroadcast, which delegates to the Hub's
+// send engine (see send.go).
 func (c serverCaps) Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error) {
 	return c.s.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
 }

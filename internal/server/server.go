@@ -71,9 +71,10 @@ type Server struct {
 	auth       *auth.Handlers        // 读写: build_dashboard.go, dashboard_ccassets.go, debug_expvar.go, debug_pprof.go, routes.go, server.go
 	discoveryH *discovery.Handlers   // 读写: server.go
 	sessionH   *dashsession.Handlers // 读写: server.go, server_loops.go
-	healthH    *HealthHandler        // 读写: server.go (ctor only)
+	healthH    *HealthHandler        // 读写: routes.go, server.go
 
 	// ── send / dispatch wiring ─────────────────────────
+	dispatcher      *dispatch.Dispatcher         // 读写: server.go (ctor builds; Start only calls BuildHandler)
 	dedup           *platform.Dedup              // 读写: server.go (ctor only)
 	sessionGuard    *session.Guard               // 读写: build_dashboard.go, server.go
 	msgQueue        *dispatch.MessageQueue       // 读写: build_dashboard.go, server.go
@@ -95,7 +96,6 @@ type Server struct {
 
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: routes.go (gates /api/debug/pprof and /api/debug/vars)
-	headless  bool                 // 读写: send.go (explicit no-hub mode; gates the nil-hub send fallback)
 	resolver  *session.KeyResolver // 读写: build_dashboard.go, server.go (session-key → opts derivation)
 	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data)
 
@@ -253,7 +253,6 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
 		debugMode:       opts.DebugMode,
-		headless:        opts.Headless,
 		onReady:         opts.OnReady,
 		projectMgr:      opts.ProjectManager,
 		resolver:        resolver,
@@ -396,8 +395,15 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	}
 	// /api/cli/backends?node=<id> proxies the manifest to a remote node.
 	hs.cliH = cli.NewCLIBackendsHandlerCtx(startupCtx, router, s.nodes)
+
+	// Dispatcher is built HERE, not in Start (#2633); see build_dispatch.go.
+	// Building it before healthH lets the metrics closure be a constructor
+	// argument rather than a field back-filled from Start.
+	s.dispatcher = s.buildDispatcher()
+
 	platNames := platformNameSet(platforms)
 	s.healthH = &HealthHandler{
+		dispatcherMetrics:  s.dispatcher.Metrics,
 		router:             router,
 		auth:               s.auth,
 		startedAt:          s.startedAt,
@@ -467,44 +473,15 @@ func (s *Server) Start(ctx context.Context) error {
 			close(s.shutdownComplete)
 		}
 	}()
-	// The nil guard must stay OUTSIDE the adapter: wrapping a nil scheduler
-	// in a struct value yields a non-nil interface and breaks the
-	// "nil disables /cron" contract (#1164).
-	var cronCommands dispatch.CronCommands
-	if s.scheduler != nil {
-		cronCommands = cronDispatchAdapter{s: s.scheduler}
-	}
-	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
-		Router:                s.router,
-		Platforms:             s.platforms,
-		Agents:                s.agents,
-		AgentCommands:         s.agentCommands,
-		Scheduler:             cronCommands,
-		ProjectMgr:            s.projectMgr,
-		Resolver:              s.resolver,
-		Guard:                 s.sessionGuard,
-		Queue:                 s.msgQueue,
-		Dedup:                 s.dedup,
-		AllowedRoot:           s.allowedRoot,
-		ClaudeDir:             s.claudeDir,
-		Capabilities:          serverCaps{s: s},
-		NoOutputTimeout:       s.noOutputTimeout,
-		TotalTimeout:          s.totalTimeout,
-		WatchdogNoOutputKills: s.watchdog.noOutPtr(),
-		WatchdogTotalKills:    s.watchdog.totalPtr(),
-		// Service ctx so the passthrough send goroutine observes SIGTERM
-		// instead of waiting out its internal totalTimeout (#1320).
-		StopCtx: ctx,
-	})
-	if err != nil {
-		// Boot-time configuration fault: fail fast rather than on first message.
-		return fmt.Errorf("dispatch wireup: %w", err)
-	}
-	// healthH predates the dispatcher; wire its metrics closure now.
-	if s.healthH != nil {
-		s.healthH.dispatcherMetrics = d.Metrics
-	}
-	handler := d.BuildHandler()
+	// appCancel is deferred FIRST (#2633) so every return path — including
+	// the platform-start error below, which used to return before this defer
+	// existed — tears down the appCtx tree (Hub, dispatcher StopCtx, loops).
+	// Idempotent, so the Serve-error path's explicit call below is harmless.
+	defer s.appCancel()
+
+	// The dispatcher exists since buildServerWithHandlers; Start only turns
+	// it into the platform-facing handler.
+	handler := s.dispatcher.BuildHandler()
 
 	var startedPlatforms []platform.RunnablePlatform
 	for _, p := range s.platforms {
@@ -527,11 +504,6 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	s.mux.HandleFunc("GET /health", s.healthH.handleHealth)
-	// /livez is a no-deps liveness probe; /readyz gates on minimal wiring
-	// without the auth-only stats /health exposes (#609).
-	s.mux.HandleFunc("GET /livez", s.healthH.handleLivez)
-	s.mux.HandleFunc("GET /readyz", s.healthH.handleReadyz)
 	// s.appCtx (created in buildServer) is the single cancel source for every
 	// background loop AND the shutdown goroutine. Start does not mint a second
 	// context; it links the caller's ctx into appCancel so SIGTERM still
@@ -547,7 +519,6 @@ func (s *Server) Start(ctx context.Context) error {
 		case <-s.appCtx.Done():
 		}
 	}()
-	defer s.appCancel()
 
 	s.startDashboardLoops()
 	s.nodeCache.StartLoop(s.appCtx)

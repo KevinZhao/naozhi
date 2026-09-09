@@ -156,7 +156,7 @@ func resolveProjectFileWithRoot(rootResolved, rel string) (string, error) {
 //
 // ETag is sha256(size||mtime||FileETagSalt)[:12] in all modes; 304 on If-None-Match.
 func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
-	if h.projectMgr == nil {
+	if h.deps.ProjectMgr == nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return
 	}
@@ -184,7 +184,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	// gates and the audit log below; a registered subdirectory project is
 	// readable by definition.
 	restrictedRoot := false
-	if project == publicTmpProject && h.publicTmpEnabled {
+	if project == publicTmpProject && h.deps.PublicTmpEnabled {
 		rootPath = publicTmpRoot
 		restrictedRoot = true
 	} else {
@@ -194,7 +194,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		p := h.projectMgr.Get(project)
+		p := h.deps.ProjectMgr.Get(project)
 		if p == nil {
 			httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
 			return

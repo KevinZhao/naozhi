@@ -33,11 +33,11 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 	// Rate-limit before any work: the endpoint fans out up to maxExistsPaths
 	// stats within fileStatTimeout, so a post-auth attacker targeting slow NFS
 	// mounts or symlink loops could tie up workers. Nil-guarded for tests.
-	if h.filesExistsLimiter != nil && !h.filesExistsLimiter.AllowRequest(r) {
+	if h.deps.FilesExistsLimiter != nil && !h.deps.FilesExistsLimiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "files/exists rate limit exceeded"})
 		return
 	}
-	if h.projectMgr == nil {
+	if h.deps.ProjectMgr == nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return
 	}
@@ -62,7 +62,7 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 	// projects get the foreign-private / denied-name / irregular-type gates and
 	// the credential-name filter so batch-exists cannot enumerate what GET refuses.
 	restrictedRoot := false
-	if req.Project == publicTmpProject && h.publicTmpEnabled {
+	if req.Project == publicTmpProject && h.deps.PublicTmpEnabled {
 		rootPath = publicTmpRoot
 		restrictedRoot = true
 	} else {
@@ -84,7 +84,7 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if rootPath == "" {
-		p := h.projectMgr.Get(req.Project)
+		p := h.deps.ProjectMgr.Get(req.Project)
 		if p == nil {
 			httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
 			return

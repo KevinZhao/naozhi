@@ -100,7 +100,7 @@ func TestHandleRunEvents_RedactionKeepsEveryLineValidJSON(t *testing.T) {
 		t.Fatalf("write events: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/events?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()

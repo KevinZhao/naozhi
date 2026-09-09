@@ -37,7 +37,7 @@ func TestHandleUpdate_NotifyClear_R103901_GO_1(t *testing.T) {
 		if err := sched.AddJob(job); err != nil {
 			t.Fatalf("AddJob: %v", err)
 		}
-		return &Handlers{scheduler: sched}, job.ID
+		return &Handlers{deps: Deps{Scheduler: sched}}, job.ID
 	}
 
 	patch := func(t *testing.T, h *Handlers, jobID, body string) int {
@@ -51,7 +51,7 @@ func TestHandleUpdate_NotifyClear_R103901_GO_1(t *testing.T) {
 
 	jobNotify := func(t *testing.T, h *Handlers) *bool {
 		t.Helper()
-		jobs := h.scheduler.ListJobs(platform, chatID)
+		jobs := h.deps.Scheduler.ListJobs(platform, chatID)
 		if len(jobs) != 1 {
 			t.Fatalf("ListJobs: want 1 job, got %d", len(jobs))
 		}

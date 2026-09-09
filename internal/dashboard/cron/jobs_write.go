@@ -34,11 +34,11 @@ func writeCronErr(w http.ResponseWriter, status int, msg string) {
 func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// Per-IP rate limit: mutations write cron_jobs.json and mutate the scheduler
 	// map, so a stolen token must not amplify IO damage. Nil-guarded for tests.
-	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
 	}
@@ -103,13 +103,13 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if h.validateWS == nil {
+		if h.deps.ValidateWS == nil {
 			writeCronErr(w, http.StatusInternalServerError, "cron work_dir validation not wired")
 			return
 		}
-		validated, err := h.validateWS(req.WorkDir, h.allowedRoot)
+		validated, err := h.deps.ValidateWS(req.WorkDir, h.deps.AllowedRoot)
 		if err != nil {
-			status, msg := h.classifyWSErr(err)
+			status, msg := h.deps.ClassifyWSErr(err)
 			slog.Debug("cron work_dir validation failed", "err", err)
 			writeCronErr(w, status, msg)
 			return
@@ -128,7 +128,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Notify != nil && *req.Notify {
 		perJobSet := req.NotifyPlatform != "" && req.NotifyChatID != ""
-		if !perJobSet && !h.scheduler.NotifyDefault().IsSet() {
+		if !perJobSet && !h.deps.Scheduler.NotifyDefault().IsSet() {
 			writeCronErr(w, http.StatusBadRequest, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id")
 			return
 		}
@@ -156,7 +156,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		SideEffects:    req.SideEffects,
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
-	if err := h.scheduler.AddJob(job); err != nil {
+	if err := h.deps.Scheduler.AddJob(job); err != nil {
 		// ErrPersistFailed: in-memory insert succeeded but the store write
 		// failed; surface 500 rather than a 2xx that won't survive a restart.
 		if errors.Is(err, cronpkg.ErrPersistFailed) {
@@ -178,11 +178,11 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 // DELETE /api/cron?id=xxx — delete a cron job by exact ID.
 func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	// Per-IP write rate limit (see HandleCreate). Nil-guarded for tests.
-	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
@@ -204,7 +204,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	j, err := h.scheduler.DeleteJobByID(id)
+	j, err := h.deps.Scheduler.DeleteJobByID(id)
 	if err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
@@ -228,11 +228,11 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 // POST /api/cron/pause — pause a cron job by exact ID.
 func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 	// Per-IP write rate limit (see HandleCreate). Nil-guarded for tests.
-	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
@@ -256,7 +256,7 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.scheduler.PauseJobByID(req.ID); err != nil {
+	if _, err := h.deps.Scheduler.PauseJobByID(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
 			writeCronErr(w, http.StatusNotFound, "job not found")
@@ -280,11 +280,11 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 // POST /api/cron/resume — resume a paused cron job by exact ID.
 func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 	// Per-IP write rate limit (see HandleCreate). Nil-guarded for tests.
-	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
@@ -307,7 +307,7 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.scheduler.ResumeJobByID(req.ID); err != nil {
+	if _, err := h.deps.Scheduler.ResumeJobByID(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
 			writeCronErr(w, http.StatusNotFound, "job not found")
@@ -332,11 +332,11 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 	// Per-IP rate limit: each call spawns the job's claude CLI subprocess and
 	// may emit IM notifications — a loop-trigger amplification vector.
-	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
@@ -363,7 +363,7 @@ func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.scheduler.TriggerNow(req.ID); err != nil {
+	if err := h.deps.Scheduler.TriggerNow(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
 			writeCronErr(w, http.StatusNotFound, "job not found")
