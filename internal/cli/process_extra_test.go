@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -130,7 +131,7 @@ func TestShimWriter_FastPath_SingleLine(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// shimWriter.Write — fast path: ErrMessageTooLarge (line too big)
+// shimWriter.Write — fast path: clierr.ErrMessageTooLarge (line too big)
 // ---------------------------------------------------------------------------
 
 func TestShimWriter_FastPath_TooLarge(t *testing.T) {
@@ -145,8 +146,8 @@ func TestShimWriter_FastPath_TooLarge(t *testing.T) {
 	bigLine := make([]byte, maxStdinLineBytes+2)
 	bigLine[len(bigLine)-1] = '\n'
 	_, err := w.Write(bigLine)
-	if !errors.Is(err, ErrMessageTooLarge) {
-		t.Errorf("Write() error = %v, want ErrMessageTooLarge", err)
+	if !errors.Is(err, clierr.ErrMessageTooLarge) {
+		t.Errorf("Write() error = %v, want clierr.ErrMessageTooLarge", err)
 	}
 }
 
@@ -196,7 +197,7 @@ func TestShimWriter_SlowPath_MultiLine(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// shimWriter.Write — slow path: ErrMessageTooLarge
+// shimWriter.Write — slow path: clierr.ErrMessageTooLarge
 // ---------------------------------------------------------------------------
 
 func TestShimWriter_SlowPath_TooLarge(t *testing.T) {
@@ -217,11 +218,11 @@ func TestShimWriter_SlowPath_TooLarge(t *testing.T) {
 	huge[len(huge)-1] = '\n'
 	_, err := w.Write(huge)
 	if err == nil {
-		t.Error("expected ErrMessageTooLarge from slow path")
+		t.Error("expected clierr.ErrMessageTooLarge from slow path")
 		return
 	}
-	if !errors.Is(err, ErrMessageTooLarge) {
-		t.Errorf("error = %v, want ErrMessageTooLarge", err)
+	if !errors.Is(err, clierr.ErrMessageTooLarge) {
+		t.Errorf("error = %v, want clierr.ErrMessageTooLarge", err)
 	}
 }
 
@@ -266,8 +267,8 @@ func TestShimWriter_SlowPath_OversizedLineDoesNotPartialSend(t *testing.T) {
 	payload.WriteByte('\n')
 
 	n, err := w.Write(payload.Bytes())
-	if !errors.Is(err, ErrMessageTooLarge) {
-		t.Fatalf("Write() error = %v, want ErrMessageTooLarge", err)
+	if !errors.Is(err, clierr.ErrMessageTooLarge) {
+		t.Fatalf("Write() error = %v, want clierr.ErrMessageTooLarge", err)
 	}
 	if n != 0 {
 		t.Errorf("Write() n = %d, want 0 (nothing accepted: rejection is atomic)", n)
@@ -629,8 +630,8 @@ func TestProcess_InterruptViaControl_NoActiveTurn(t *testing.T) {
 
 	// State == Ready: no turn in flight.
 	err := p.InterruptViaControl()
-	if !errors.Is(err, ErrNoActiveTurn) {
-		t.Fatalf("InterruptViaControl on idle = %v, want ErrNoActiveTurn", err)
+	if !errors.Is(err, clierr.ErrNoActiveTurn) {
+		t.Fatalf("InterruptViaControl on idle = %v, want clierr.ErrNoActiveTurn", err)
 	}
 	if p.interrupted.Load() || p.interruptedRun.Load() {
 		t.Error("idle InterruptViaControl must not set settle flags")
@@ -742,8 +743,8 @@ func TestProcess_InterruptViaControl_DeadProcess(t *testing.T) {
 	}
 
 	err := p.InterruptViaControl()
-	if !errors.Is(err, ErrNoActiveTurn) {
-		t.Errorf("dead InterruptViaControl = %v, want ErrNoActiveTurn", err)
+	if !errors.Is(err, clierr.ErrNoActiveTurn) {
+		t.Errorf("dead InterruptViaControl = %v, want clierr.ErrNoActiveTurn", err)
 	}
 }
 
@@ -1166,16 +1167,16 @@ func TestProcess_InjectHistory(t *testing.T) {
 
 	// Inline backward scan: production never needed lastEntryOfType, the
 	// helpers were retired in DEADCODE-8. The test still needs the same
-	// "find the most recent entry of type X" semantic to validate the
-	// EventLog ring buffer's user-turn bookkeeping.
+	// "find the most recent entry of type X" semantic to validate the ring's
+	// user-turn bookkeeping. Walks the ring's PUBLIC Entries() snapshot — the
+	// previous version reached into l.mu/l.head/l.entries, which stopped being
+	// possible when the ring moved to internal/eventlog/ring (#2545 G1). The
+	// assertion is unchanged; only the way it reads the ring is.
 	last := func() clievent.EventEntry {
-		l := p.eventLog
-		l.mu.RLock()
-		defer l.mu.RUnlock()
-		for i := l.count - 1; i >= 0; i-- {
-			idx := (l.head - l.count + i + l.maxSize) % l.maxSize
-			if l.entries[idx].Type == "user" {
-				return l.entries[idx]
+		all := p.eventLog.Entries()
+		for i := len(all) - 1; i >= 0; i-- {
+			if all[i].Type == "user" {
+				return all[i]
 			}
 		}
 		return clievent.EventEntry{}

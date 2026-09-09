@@ -10,7 +10,7 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
@@ -39,9 +39,9 @@ type asyncErrorFn func(err error, msg string)
 // already knows about: their own /urgent preemption, a /clear-/new reset, or a
 // reconnect with unknown state. session_state corrects the UI for all three.
 func informationalSendErr(err error) bool {
-	return errors.Is(err, cli.ErrAbortedByUrgent) ||
-		errors.Is(err, cli.ErrSessionReset) ||
-		errors.Is(err, cli.ErrReconnectedUnknown)
+	return errors.Is(err, clierr.ErrAbortedByUrgent) ||
+		errors.Is(err, clierr.ErrSessionReset) ||
+		errors.Is(err, clierr.ErrReconnectedUnknown)
 }
 
 // fanOutToSubscribers delivers one frame to every authenticated client

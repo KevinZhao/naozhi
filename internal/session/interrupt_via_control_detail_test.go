@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 )
 
 // TestInterruptViaControlDetail_Outcomes pins the (outcome, error) contract
@@ -46,17 +46,17 @@ func TestInterruptViaControlDetail_Outcomes(t *testing.T) {
 		},
 		{
 			name:        "no_turn_propagates_sentinel",
-			procErr:     cli.ErrNoActiveTurn,
+			procErr:     clierr.ErrNoActiveTurn,
 			alive:       true,
 			wantOutcome: InterruptNoTurn,
-			wantErrIs:   cli.ErrNoActiveTurn,
+			wantErrIs:   clierr.ErrNoActiveTurn,
 		},
 		{
 			name:        "unsupported_propagates_sentinel",
-			procErr:     cli.ErrInterruptUnsupported,
+			procErr:     clierr.ErrInterruptUnsupported,
 			alive:       true,
 			wantOutcome: InterruptUnsupported,
-			wantErrIs:   cli.ErrInterruptUnsupported,
+			wantErrIs:   clierr.ErrInterruptUnsupported,
 		},
 		{
 			name:        "transport_err_surfaced_for_errors_is",

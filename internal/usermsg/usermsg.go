@@ -60,8 +60,8 @@ func ForSendError(err error, key string) string {
 }
 
 // UserMessage maps err to a user-facing Chinese label, rendering the
-// configured no-output / total timeout budgets for cli.ErrNoOutputTimeout /
-// cli.ErrTotalTimeout instead of the generic "处理超时" line. Returns plain
+// configured no-output / total timeout budgets for clierr.ErrNoOutputTimeout /
+// clierr.ErrTotalTimeout instead of the generic "处理超时" line. Returns plain
 // text without emoji so each surface owns its own presentation; callers
 // without per-session timeouts (dashboard WS send_ack) use ForSendError.
 // A zero/negative duration renders as "未知".

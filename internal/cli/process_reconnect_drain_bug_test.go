@@ -213,7 +213,7 @@ func TestIsMidTurn_IgnoresAdvisoryDone(t *testing.T) {
 // buffered in the shim) → naozhi restarts → replay ends with the ack. Reading
 // that as "last event != result" arms reconnectedMidTurn, the session sits in
 // StateRunning forever (no result will ever come) and every Send fails with
-// ErrProcessBusy.
+// clierr.ErrProcessBusy.
 func TestIsMidTurn_SkipsControlAck(t *testing.T) {
 	proto := &ClaudeProtocol{}
 	const ack = `{"type":"control_response","response":{"subtype":"success","request_id":"naozhi-setmodel-1"}}`

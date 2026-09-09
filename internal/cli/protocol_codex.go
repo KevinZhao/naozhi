@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -211,11 +212,11 @@ func (p *CodexProtocol) WriteMessage(w io.Writer, text string, images []Attachme
 // WriteInterrupt sends a turn/interrupt request (unlike ACP's notification) to
 // abort the in-flight turn. Fire-and-forget under the caller-held write lock;
 // readLoop observes the resulting turn/completed. Returns
-// ErrInterruptUnsupported before a thread exists (callers fall back to SIGINT).
+// clierr.ErrInterruptUnsupported before a thread exists (callers fall back to SIGINT).
 func (p *CodexProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	tid := p.loadThreadID()
 	if tid == "" {
-		return ErrInterruptUnsupported
+		return clierr.ErrInterruptUnsupported
 	}
 	req := RPCRequest{
 		JSONRPC: "2.0", ID: p.allocID(), Method: "turn/interrupt",

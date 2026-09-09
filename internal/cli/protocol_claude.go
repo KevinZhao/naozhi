@@ -73,7 +73,7 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 		"--verbose",
 		// Passthrough matching depends on the CLI echoing every stdin user message
 		// as an isReplay:true event with round-tripped uuid (passthrough-mode.md
-		// §5.3). Safe to always enable: replay events are filtered out of EventLog.
+		// §5.3). Safe to always enable: replay events are filtered out of ring.EventLog.
 		"--replay-user-messages",
 	}
 	// Settings source: default `--setting-sources user` loads the operator's
@@ -506,7 +506,7 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool,
 	}
 	// Cap total content bytes to bound per-event CPU / memory amplification: a
 	// tampered CLI could emit a 10 MiB nested event (within the shim-line cap)
-	// that every downstream consumer (EventLog ring, JSONL persist, dashboard
+	// that every downstream consumer (ring.EventLog ring, JSONL persist, dashboard
 	// fan-out) then pays O(N) for. Drop rather than truncate so the dashboard
 	// never renders half a turn.
 	if ev.Message != nil {

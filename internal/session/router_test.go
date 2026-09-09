@@ -14,7 +14,9 @@ import (
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -146,7 +148,7 @@ func (f *fakeProcess) EventLastNVisible(visibleTarget, maxTotal int) []clievent.
 	start := n
 	for i := n - 1; i >= 0 && (n-i) <= limit; i-- {
 		start = i
-		if cli.IsVisibleEntry(f.entries[i]) {
+		if clievent.IsVisibleEntry(f.entries[i]) {
 			visible++
 			if visibleTarget > 0 && visible >= visibleTarget {
 				break
@@ -234,14 +236,14 @@ func (f *fakeProcess) InterruptViaControl() error {
 	// (which has other side-effects across the test suite).
 	err := f.viaControlErr
 	if f.viaControlRunning && !f.isRunning {
-		err = cli.ErrNoActiveTurn
+		err = clierr.ErrNoActiveTurn
 	}
 	f.mu.Unlock()
 	return err
 }
 func (f *fakeProcess) PID() int                              { return 0 }
 func (f *fakeProcess) InjectHistory(_ []clievent.EventEntry) {}
-func (f *fakeProcess) TurnAgents() []cli.SubagentInfo        { return nil }
+func (f *fakeProcess) TurnAgents() []ring.SubagentInfo       { return nil }
 
 // Normalize-layer stubs (multi-backend §8.8) — fakeProcess is used by router
 // tests that pre-date multi-backend, so all three return zero values to
@@ -1970,7 +1972,7 @@ func TestInterruptSessionSafe_PrefersControlRequest(t *testing.T) {
 func TestInterruptSessionSafe_FallsBackOnUnsupported(t *testing.T) {
 	r := newTestRouter(3)
 	proc := newRunningProc()
-	proc.viaControlErr = cli.ErrInterruptUnsupported // ACP-like protocol
+	proc.viaControlErr = clierr.ErrInterruptUnsupported // ACP-like protocol
 	injectSession(r, "k1", proc)
 
 	outcome := r.InterruptSessionSafe("k1")
@@ -2016,7 +2018,7 @@ func TestInterruptSessionSafe_TransportErrorDoesNotFallBack(t *testing.T) {
 	// Surface the error so F6's reconcile path cleans up the zombie.
 	r := newTestRouter(3)
 	proc := newRunningProc()
-	proc.viaControlErr = cli.ErrMessageTooLarge // any non-sentinel write-ish error
+	proc.viaControlErr = clierr.ErrMessageTooLarge // any non-sentinel write-ish error
 	injectSession(r, "k1", proc)
 
 	outcome := r.InterruptSessionSafe("k1")

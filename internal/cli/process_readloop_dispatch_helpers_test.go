@@ -76,7 +76,7 @@ func TestDeliverEvent_HandsOffToEventCh(t *testing.T) {
 
 // TestDeliverEvent_FullBufferDropsResult covers the eventCh-saturated arm
 // with a result event: the helper must NOT block, must return false, and
-// the result must be silently dropped (caller's EventLog already retained
+// the result must be silently dropped (caller's ring.EventLog already retained
 // it). This pins the non-blocking guarantee that prevents readLoop from
 // stalling when no Send() is consuming.
 func TestDeliverEvent_FullBufferDropsResult(t *testing.T) {

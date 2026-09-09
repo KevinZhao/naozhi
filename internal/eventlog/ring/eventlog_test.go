@@ -1,0 +1,624 @@
+package ring
+
+import (
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+)
+
+func TestNewEventLog_DefaultSize(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(0)
+	if l.maxSize != defaultEventLogSize {
+		t.Errorf("maxSize = %d, want %d", l.maxSize, defaultEventLogSize)
+	}
+}
+
+func TestNewEventLog_CustomSize(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(50)
+	if l.maxSize != 50 {
+		t.Errorf("maxSize = %d, want 50", l.maxSize)
+	}
+}
+
+func TestEventLog_Append_And_Entries(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(10)
+	l.Append(clievent.EventEntry{Time: 1000, Type: "thinking", Summary: "hello"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "tool_use", Summary: "Read"})
+
+	entries := l.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	if entries[0].Type != "thinking" || entries[1].Type != "tool_use" {
+		t.Errorf("entries = %+v", entries)
+	}
+}
+
+func TestEventLog_Append_AutoTimestamp(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(10)
+	l.Append(clievent.EventEntry{Type: "system"})
+	entries := l.Entries()
+	if entries[0].Time == 0 {
+		t.Error("expected auto-assigned timestamp")
+	}
+}
+
+func TestEventLog_Append_Overflow(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(10)
+	for i := 0; i < 20; i++ {
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: "test"})
+	}
+	entries := l.Entries()
+	if len(entries) > 10 {
+		t.Errorf("len = %d, should be <= 10", len(entries))
+	}
+	// Earliest surviving entry must be > 0 (entry 0 was dropped)
+	if entries[0].Time <= 1 {
+		t.Errorf("oldest entry Time = %d, expected > 1 (old entries should be dropped)", entries[0].Time)
+	}
+}
+
+func TestEventLog_EntriesSince(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "b"})
+	l.Append(clievent.EventEntry{Time: 3000, Type: "c"})
+
+	entries := l.EntriesSince(1500)
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	if entries[0].Type != "b" || entries[1].Type != "c" {
+		t.Errorf("entries = %+v", entries)
+	}
+}
+
+func TestEventLog_EntriesSince_NoMatch(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
+	entries := l.EntriesSince(2000)
+	if len(entries) != 0 {
+		t.Errorf("len = %d, want 0", len(entries))
+	}
+}
+
+func TestEventLog_EntriesBefore_Pagination(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "b"})
+	l.Append(clievent.EventEntry{Time: 3000, Type: "c"})
+	l.Append(clievent.EventEntry{Time: 4000, Type: "d"})
+
+	// before=3000 → entries with Time < 3000 → {a, b}
+	// limit=10 (generous) → all matches returned.
+	entries := l.EntriesBefore(3000, 10)
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	if entries[0].Type != "a" || entries[1].Type != "b" {
+		t.Errorf("entries = %+v", entries)
+	}
+}
+
+func TestEventLog_EntriesBefore_LimitHonored(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	for i := 0; i < 10; i++ {
+		l.Append(clievent.EventEntry{Time: int64((i + 1) * 1000), Type: "x"})
+	}
+
+	// before=11000 (after every entry) + limit=3 → newest 3 entries in
+	// chronological order: times 8000, 9000, 10000.
+	entries := l.EntriesBefore(11000, 3)
+	if len(entries) != 3 {
+		t.Fatalf("len = %d, want 3", len(entries))
+	}
+	if entries[0].Time != 8000 || entries[2].Time != 10000 {
+		t.Errorf("entries times = [%d, %d, %d], want [8000, 9000, 10000]",
+			entries[0].Time, entries[1].Time, entries[2].Time)
+	}
+}
+
+func TestEventLog_EntriesBefore_ZeroLimitReturnsNil(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	l.Append(clievent.EventEntry{Time: 1000, Type: "x"})
+	if got := l.EntriesBefore(2000, 0); got != nil {
+		t.Errorf("expected nil for limit=0, got %v", got)
+	}
+	if got := l.EntriesBefore(2000, -5); got != nil {
+		t.Errorf("expected nil for negative limit, got %v", got)
+	}
+}
+
+func TestEventLog_EntriesBefore_ZeroBeforeIsUnbounded(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "b"})
+
+	// before=0 is interpreted as "no upper bound" so it must return the
+	// newest `limit` entries, like LastN.
+	entries := l.EntriesBefore(0, 5)
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	if entries[0].Type != "a" || entries[1].Type != "b" {
+		t.Errorf("entries = %+v", entries)
+	}
+}
+
+func TestEventLog_EntriesBefore_EmptyLog(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	if got := l.EntriesBefore(9999, 10); got != nil {
+		t.Errorf("expected nil from empty log, got %v", got)
+	}
+}
+
+func TestEventLog_Entries_IsCopy(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(10)
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
+	entries := l.Entries()
+	entries[0].Type = "modified"
+
+	original := l.Entries()
+	if original[0].Type != "a" {
+		t.Error("Entries() should return a copy, not a reference")
+	}
+}
+
+// ─── Subscribe tests ─────────────────────────────────────────────────────────
+
+func TestEventLog_Subscribe_Notified(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	ch, unsub := l.Subscribe()
+	defer unsub()
+
+	l.Append(clievent.EventEntry{Time: 1000, Type: "test"})
+
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Error("subscriber should be notified on Append")
+	}
+}
+
+func TestEventLog_Subscribe_NonBlockingWhenFull(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	ch, unsub := l.Subscribe()
+	defer unsub()
+
+	// Fill the buffered(1) channel
+	l.Append(clievent.EventEntry{Time: 1000, Type: "a"})
+	<-ch
+
+	// Fill the channel again
+	l.Append(clievent.EventEntry{Time: 2000, Type: "b"})
+
+	// Append again without draining: must not block
+	done := make(chan struct{})
+	go func() {
+		l.Append(clievent.EventEntry{Time: 3000, Type: "c"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("Append should not block when subscriber channel is full")
+	}
+}
+
+func TestEventLog_Subscribe_MultipleSubscribers(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	ch1, unsub1 := l.Subscribe()
+	defer unsub1()
+	ch2, unsub2 := l.Subscribe()
+	defer unsub2()
+
+	l.Append(clievent.EventEntry{Time: 1000, Type: "test"})
+
+	for i, ch := range []<-chan struct{}{ch1, ch2} {
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Errorf("subscriber %d should be notified", i)
+		}
+	}
+}
+
+func TestEventLog_Unsubscribe_Cleanup(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	_, unsub := l.Subscribe()
+
+	l.subMu.Lock()
+	count := len(l.subscribers)
+	l.subMu.Unlock()
+	if count != 1 {
+		t.Fatalf("subscribers = %d, want 1", count)
+	}
+
+	unsub()
+
+	l.subMu.Lock()
+	count = len(l.subscribers)
+	l.subMu.Unlock()
+	if count != 0 {
+		t.Errorf("subscribers after unsub = %d, want 0", count)
+	}
+}
+
+func TestEventLog_Unsubscribe_Idempotent(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	_, unsub := l.Subscribe()
+	unsub()
+	unsub() // should not panic
+}
+
+func TestEventLog_Subscribe_ConcurrentSafe(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ch, unsub := l.Subscribe()
+			l.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "concurrent"})
+			select {
+			case <-ch:
+			case <-time.After(time.Second):
+			}
+			unsub()
+		}()
+	}
+	wg.Wait()
+}
+
+// TestEventLog_Unsubscribe_SwapToEnd_PreservesOthers pins R239-PERF-9: the
+// migration from `map[*subscriber]struct{}` to `[]*subscriber` swaps the
+// leaving subscriber with the slice tail before truncating. The test
+// unsubscribes a middle entry from a 4-subscriber set and then drives an
+// Append, asserting (a) every surviving channel still fires once,
+// (b) subCount + len(subscribers) shrink by exactly one, and (c) the
+// trailing slot is nil-cleared so the leaving subscriber is not retained
+// by the backing array. A buggy swap that lost a survivor's slot would
+// manifest as a missing notify on chD (the slot promoted into chB's old
+// index); a buggy nil-clear would leak the closed *subscriber, which we
+// observe via the slice's last element after a second unsubscribe.
+func TestEventLog_Unsubscribe_SwapToEnd_PreservesOthers(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+
+	chA, _ := l.Subscribe()
+	_, unsubB := l.Subscribe()
+	chC, _ := l.Subscribe()
+	chD, _ := l.Subscribe()
+
+	// Drain any pre-existing buffered notifies so the per-channel select
+	// below observes only the post-Append signal.
+	drain := func(ch <-chan struct{}) {
+		for {
+			select {
+			case <-ch:
+			default:
+				return
+			}
+		}
+	}
+	drain(chA)
+	drain(chC)
+	drain(chD)
+
+	// Unsubscribe the MIDDLE subscriber. Linear scan + swap-to-end will
+	// move the tail slot (chD's *subscriber) into chB's old index.
+	unsubB()
+
+	if got, want := l.subCount.Load(), int32(3); got != want {
+		t.Fatalf("subCount = %d, want %d", got, want)
+	}
+	l.subMu.RLock()
+	gotLen := len(l.subscribers)
+	// Inspect the slot just past the new length to confirm the
+	// nil-clear ran (R239-PERF-9 retention guard). Reading past
+	// len() into the underlying array is normally undefined for
+	// callers but is well-defined when we hold subMu and the
+	// backing capacity is preserved.
+	var trailingSlotNil bool
+	if cap(l.subscribers) > gotLen {
+		trailingSlotNil = l.subscribers[:gotLen+1][gotLen] == nil
+	} else {
+		// Cap shrunk to length: nothing to verify, treat as pass.
+		trailingSlotNil = true
+	}
+	l.subMu.RUnlock()
+	if gotLen != 3 {
+		t.Fatalf("len(subscribers) = %d, want 3", gotLen)
+	}
+	if !trailingSlotNil {
+		t.Fatalf("trailing slot not nil-cleared after unsubscribe — leaking *subscriber")
+	}
+
+	// Drive a notify and confirm every survivor — including chD,
+	// whose backing-array slot was swapped into chB's vacated index —
+	// receives the signal.
+	l.Append(clievent.EventEntry{Time: time.Now().UnixMilli(), Type: "swap_test"})
+
+	check := func(name string, ch <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("%s: missed notify after swap-to-end unsubscribe", name)
+		}
+	}
+	check("chA", chA)
+	check("chC", chC)
+	check("chD (promoted from tail)", chD)
+}
+
+func TestEventLog_DetailAndToolFields(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(10)
+	l.Append(clievent.EventEntry{
+		Time:   1000,
+		Type:   "tool_use",
+		Tool:   "Read",
+		Detail: "Read: /path/to/file",
+	})
+	entries := l.Entries()
+	if entries[0].Tool != "Read" {
+		t.Errorf("Tool = %q, want Read", entries[0].Tool)
+	}
+	if entries[0].Detail != "Read: /path/to/file" {
+		t.Errorf("Detail = %q, want Read: /path/to/file", entries[0].Detail)
+	}
+}
+
+func TestEventLog_BackgroundAgents(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+
+	// Background agent IS cleared by result or user events (same as foreground).
+	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "team1", Background: true})
+
+	agents := l.TurnAgents()
+	if len(agents) != 1 || agents[0].Name != "team1" || !agents[0].Background {
+		t.Errorf("before result TurnAgents = %v, want [team1 (bg)]", agents)
+	}
+
+	l.Append(clievent.EventEntry{Time: 2000, Type: "result", Summary: "done"})
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("after result TurnAgents = %v, want nil", agents)
+	}
+
+	// Background agent added again, cleared by user event.
+	l.Append(clievent.EventEntry{Time: 3000, Type: "agent", Subagent: "team1", Background: true})
+	l.Append(clievent.EventEntry{Time: 4000, Type: "user", Summary: "next"})
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("after user TurnAgents = %v, want nil", agents)
+	}
+
+	// Foreground + background coexist in the same turn, both cleared on result.
+	l.Append(clievent.EventEntry{Time: 5000, Type: "agent", Subagent: "team1", Background: true})
+	l.Append(clievent.EventEntry{Time: 6000, Type: "agent", Subagent: "Explore"})
+	agents = l.TurnAgents()
+	if len(agents) != 2 {
+		t.Fatalf("TurnAgents len = %d, want 2 (foreground+background)", len(agents))
+	}
+
+	l.Append(clievent.EventEntry{Time: 7000, Type: "result", Summary: "done"})
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("after second result TurnAgents = %v, want nil", agents)
+	}
+}
+
+func TestEventLog_TurnAgents(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+
+	// Initially empty.
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("initial TurnAgents = %v, want nil", agents)
+	}
+
+	// Spawn two agents in a turn.
+	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+	l.Append(clievent.EventEntry{Time: 2000, Type: "agent", Subagent: "go-reviewer"})
+
+	agents := l.TurnAgents()
+	if len(agents) != 2 {
+		t.Fatalf("TurnAgents len = %d, want 2", len(agents))
+	}
+	if agents[0].Name != "Explore" || agents[1].Name != "go-reviewer" {
+		t.Errorf("TurnAgents names = %v, want [Explore go-reviewer]", agents)
+	}
+
+	// Result event resets the turn.
+	l.Append(clievent.EventEntry{Time: 3000, Type: "result", Summary: "done"})
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("after result TurnAgents = %v, want nil", agents)
+	}
+
+	// New turn with one agent.
+	l.Append(clievent.EventEntry{Time: 4000, Type: "agent", Subagent: "planner"})
+	agents = l.TurnAgents()
+	if len(agents) != 1 || agents[0].Name != "planner" {
+		t.Errorf("new turn TurnAgents = %v, want [planner]", agents)
+	}
+
+	// User event also resets.
+	l.Append(clievent.EventEntry{Time: 5000, Type: "user", Summary: "hello"})
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("after user TurnAgents = %v, want nil", agents)
+	}
+}
+
+func TestEventLog_TurnAgents_EmptySubagent(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: ""})
+
+	agents := l.TurnAgents()
+	if len(agents) != 1 || agents[0].Name != "agent" {
+		t.Errorf("TurnAgents = %v, want [agent]", agents)
+	}
+}
+
+func TestEventLog_TurnAgents_IsCopy(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+
+	agents := l.TurnAgents()
+	agents[0].Name = "modified"
+
+	original := l.TurnAgents()
+	if original[0].Name != "Explore" {
+		t.Error("TurnAgents should return a copy")
+	}
+}
+
+// TestEventLog_TurnAgents_SingleSide verifies the R20260603000023-PERF-6 fast
+// paths: when only foreground OR only background agents are active, TurnAgents
+// must return a copy without a second make+copy allocation.
+func TestEventLog_TurnAgents_SingleSide(t *testing.T) {
+	t.Parallel()
+
+	t.Run("turn_only", func(t *testing.T) {
+		t.Parallel()
+		l := NewEventLog(100)
+		l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+		l.Append(clievent.EventEntry{Time: 2000, Type: "agent", Subagent: "Review"})
+
+		got := l.TurnAgents()
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2", len(got))
+		}
+		if got[0].Name != "Explore" || got[1].Name != "Review" {
+			t.Errorf("names = %v", got)
+		}
+		// Must be an independent copy.
+		got[0].Name = "mutated"
+		if l.TurnAgents()[0].Name == "mutated" {
+			t.Error("TurnAgents did not return a copy")
+		}
+	})
+
+	t.Run("bg_only", func(t *testing.T) {
+		t.Parallel()
+		l := NewEventLog(100)
+		l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "bg-task", Background: true})
+
+		got := l.TurnAgents()
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1", len(got))
+		}
+		if got[0].Name != "bg-task" {
+			t.Errorf("name = %q, want bg-task", got[0].Name)
+		}
+		// Must be an independent copy.
+		got[0].Name = "mutated"
+		if l.TurnAgents()[0].Name == "mutated" {
+			t.Error("TurnAgents did not return a copy")
+		}
+	})
+}
+
+// TestEventLog_TurnAgentCount mirrors len(turnAgents)+len(bgAgents) for the
+// Snapshot fast-path. R220-PERF-6.
+func TestEventLog_TurnAgentCount(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+
+	if got := l.turnAgentCount.Load(); got != 0 {
+		t.Errorf("initial count = %d, want 0", got)
+	}
+
+	l.Append(clievent.EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+	if got := l.turnAgentCount.Load(); got != 1 {
+		t.Errorf("after foreground spawn count = %d, want 1", got)
+	}
+
+	l.Append(clievent.EventEntry{Time: 2000, Type: "agent", Subagent: "bg-task", Background: true})
+	if got := l.turnAgentCount.Load(); got != 2 {
+		t.Errorf("after bg spawn count = %d, want 2 (1 fg + 1 bg)", got)
+	}
+
+	// result resets both slices and the counter.
+	l.Append(clievent.EventEntry{Time: 3000, Type: "result", Summary: "done"})
+	if got := l.turnAgentCount.Load(); got != 0 {
+		t.Errorf("after result count = %d, want 0", got)
+	}
+
+	// user also resets.
+	l.Append(clievent.EventEntry{Time: 4000, Type: "agent", Subagent: "planner"})
+	l.Append(clievent.EventEntry{Time: 5000, Type: "user", Summary: "hello"})
+	if got := l.turnAgentCount.Load(); got != 0 {
+		t.Errorf("after user count = %d, want 0", got)
+	}
+}
+
+// TestEventLog_LastEventAt verifies live Appends update lastEventAt
+// (used by Router.Cleanup as a long-turn activity heartbeat), and that
+// AppendBatch (history replay) does NOT overwrite it with historical
+// event data — only live events prove the process is making progress.
+func TestEventLog_LastEventAt(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(10)
+
+	if got := l.LastEventAt(); !got.IsZero() {
+		t.Errorf("fresh EventLog LastEventAt = %v, want zero", got)
+	}
+
+	before := time.Now()
+	l.Append(clievent.EventEntry{Type: "thinking", Summary: "working"})
+	after := time.Now()
+
+	got := l.LastEventAt()
+	if got.Before(before) || got.After(after) {
+		t.Errorf("LastEventAt = %v; want in [%v, %v]", got, before, after)
+	}
+
+	// AppendBatch is used by InjectHistory on shim reconnect. Replayed
+	// entries have historical Time fields and must not advance the live
+	// activity clock — doing so would make Router.Cleanup think a
+	// reconnected-but-idle session is actively streaming.
+	prevLive := got
+	// TRUE-time-delay (not migrated to testhelper.Eventually): guarantees
+	// monotonic-clock separation between prevLive and the subsequent live
+	// Append at line 476 so got.After(prevLive) is never a same-tick tie.
+	// No condition to poll — we are waiting for wall-clock to advance.
+	time.Sleep(10 * time.Millisecond)
+	l.AppendBatch([]clievent.EventEntry{
+		{Type: "user", Time: 1000, Summary: "ancient"},
+		{Type: "assistant", Time: 2000, Summary: "older"},
+	})
+	if got := l.LastEventAt(); !got.Equal(prevLive) {
+		t.Errorf("AppendBatch advanced LastEventAt from %v to %v; replay should not count as live activity", prevLive, got)
+	}
+
+	// A subsequent live Append must advance it again.
+	l.Append(clievent.EventEntry{Type: "tool_use", Summary: "Read"})
+	if got := l.LastEventAt(); !got.After(prevLive) {
+		t.Errorf("live Append after batch did not advance LastEventAt: %v vs prev %v", got, prevLive)
+	}
+}

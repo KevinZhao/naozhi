@@ -34,7 +34,7 @@ type ProcessTurnIO interface {
 	// Interrupt requests cancellation of the active turn (SIGINT path).
 	Interrupt()
 	// InterruptViaControl requests cancellation via stream-json control_request;
-	// returns ErrInterruptUnsupported for protocols without it.
+	// returns clierr.ErrInterruptUnsupported for protocols without it.
 	InterruptViaControl() error
 }
 

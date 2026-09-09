@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // internalSetRe extracts the element list from
@@ -13,7 +13,7 @@ import (
 //	const INTERNAL_EVENT_TYPES = new Set(['tool_use','result',...]);
 //
 // in dashboard.js so the test can compare it element-by-element against the
-// server-side cli.IsInternalEventType predicate.
+// server-side clievent.IsInternalEventType predicate.
 var internalSetRe = regexp.MustCompile(`INTERNAL_EVENT_TYPES\s*=\s*new Set\(\[([^\]]*)\]\)`)
 
 // parseJSStringList turns `'a','b' , 'c'` into []string{"a","b","c"}.
@@ -31,7 +31,7 @@ func parseJSStringList(s string) []string {
 
 // TestInternalEventTypes_JSGoParity is the load-bearing guard for the
 // visible-aware history fix. The server's EventLastNVisibleCtx counts entries
-// cli.IsInternalEventType reports false for; the dashboard hides exactly the
+// clievent.IsInternalEventType reports false for; the dashboard hides exactly the
 // types in its INTERNAL_EVENT_TYPES Set. If the two sets drift, the server
 // would either over-walk (counting a hidden type as visible) or hand back a
 // page the dashboard renders blank — re-opening the "parallel agent team ate
@@ -55,8 +55,8 @@ func TestInternalEventTypes_JSGoParity(t *testing.T) {
 	jsSet := map[string]bool{}
 	for _, ty := range jsTypes {
 		jsSet[ty] = true
-		if !cli.IsInternalEventType(ty) {
-			t.Errorf("dashboard.js hides %q but cli.IsInternalEventType(%q)=false — the server would count it as a visible bubble and mis-size the initial page", ty, ty)
+		if !clievent.IsInternalEventType(ty) {
+			t.Errorf("dashboard.js hides %q but clievent.IsInternalEventType(%q)=false — the server would count it as a visible bubble and mis-size the initial page", ty, ty)
 		}
 	}
 
@@ -65,8 +65,8 @@ func TestInternalEventTypes_JSGoParity(t *testing.T) {
 	// universe of types the dashboard renders plus the internal ones; any
 	// type the Go side calls internal but JS doesn't hide is a drift.
 	for _, ty := range allKnownEventTypes {
-		if cli.IsInternalEventType(ty) && !jsSet[ty] {
-			t.Errorf("cli.IsInternalEventType(%q)=true but dashboard.js INTERNAL_EVENT_TYPES does not hide it — the server would skip past it while the UI still renders it", ty)
+		if clievent.IsInternalEventType(ty) && !jsSet[ty] {
+			t.Errorf("clievent.IsInternalEventType(%q)=true but dashboard.js INTERNAL_EVENT_TYPES does not hide it — the server would skip past it while the UI still renders it", ty)
 		}
 	}
 }

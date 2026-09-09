@@ -9,7 +9,7 @@ import (
 // events whose AssistantMessage.Content total byte size exceeds
 // maxAssistantMessageContentBytes so a tampered or buggy CLI cannot
 // amplify a single event into multi-MiB downstream work across every
-// EventLog ring / dashboard fan-out / JSONL persist consumer.
+// ring.EventLog ring / dashboard fan-out / JSONL persist consumer.
 func TestClaudeReadEvent_ContentByteCap(t *testing.T) {
 	// Build a single oversized text block (cap + 1 byte) embedded in a
 	// well-formed assistant event. JSON encoding adds a few bytes but the

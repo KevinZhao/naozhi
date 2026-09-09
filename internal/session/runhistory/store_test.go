@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -290,8 +290,8 @@ func TestClassify(t *testing.T) {
 		wantCls runtelemetry.ErrorClass
 	}{
 		{"nil", nil, OutcomeCompleted, runtelemetry.ErrClassNone},
-		{"total-timeout", cli.ErrTotalTimeout, OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded},
-		{"no-output-timeout", cli.ErrNoOutputTimeout, OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded},
+		{"total-timeout", clierr.ErrTotalTimeout, OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded},
+		{"no-output-timeout", clierr.ErrNoOutputTimeout, OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded},
 		{"ctx-deadline", context.DeadlineExceeded, OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded},
 		{"ctx-canceled", context.Canceled, OutcomeCanceled, runtelemetry.ErrClassCanceled},
 		{"other", os.ErrPermission, OutcomeError, runtelemetry.ErrClassNone},

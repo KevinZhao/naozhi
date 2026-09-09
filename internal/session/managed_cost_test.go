@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/costledger"
 )
 
@@ -275,7 +276,7 @@ func TestCopyCostBaseline_RenameKeepsDeltaBaseline(t *testing.T) {
 func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 	dead := &TestProcess{AliveVal: true, ShadowVal: cli.ShadowUsage{Model: "m[1m]", Input: 40, Output: 8}}
 	dead.SendFunc = func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error) {
-		return nil, cli.ErrProcessExited
+		return nil, clierr.ErrProcessExited
 	}
 	s, ledger := newLedgerSession(t, "feishu:p2p:dead", dead)
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err == nil {

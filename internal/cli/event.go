@@ -513,7 +513,7 @@ type SendResult struct {
 	SessionID string
 	CostUSD   float64
 	// ModelUsage is the result frame's per-model cumulative snapshot (nil when
-	// the frame carried none, e.g. ACP backends or an EventLog fallback).
+	// the frame carried none, e.g. ACP backends or an ring.EventLog fallback).
 	// Cumulative like CostUSD: consumers difference it, never sum it.
 	ModelUsage map[string]ModelUsage
 

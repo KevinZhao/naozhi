@@ -19,7 +19,7 @@ func LoadAtomicString(v *atomic.Pointer[string]) string {
 // The load → compare → store pair is not atomic, but a concurrent writer
 // slipping in between is the same last-writer-wins race two direct .Store
 // calls already have; skipping an equal value cannot change the visible
-// outcome. cli.EventLog additionally serialises all writers under l.mu.
+// outcome. ring.EventLog additionally serialises all writers under l.mu.
 func StoreAtomicString(v *atomic.Pointer[string], s string) {
 	if cur := v.Load(); cur != nil && *cur == s {
 		return

@@ -72,7 +72,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 		case "stop_hook_summary", "turn_duration", "hook_started", "hook_response",
 			// 1p auth (e.g. fable-5) streams these telemetry events many times per
 			// turn; un-skipped they render as bare ⚙ rows. Drop at the source so they
-			// never enter EventLog.
+			// never enter ring.EventLog.
 			"thinking_tokens", "background_tasks_changed":
 			return nil
 		}
@@ -344,7 +344,7 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 	case "Glob":
 		var s toolInputPattern
 		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
-			// Cap so an adversarial LLM response cannot inflate EventLog entries.
+			// Cap so an adversarial LLM response cannot inflate ring.EventLog entries.
 			return toolName + " " + textutil.TruncateRunes(s.Pattern, 300)
 		}
 	case "Grep":
