@@ -3,6 +3,8 @@ package cli
 import (
 	"io"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // stubProto is a minimal Protocol implementation without Capabilities().
@@ -17,17 +19,17 @@ func (s *stubProto) Name() string                                 { return s.nam
 func (s *stubProto) Clone() Protocol                              { return s }
 func (s *stubProto) BuildArgs(SpawnOptions) []string              { return nil }
 func (s *stubProto) Init(*JSONRW, string, string) (string, error) { return "", nil }
-func (s *stubProto) WriteMessage(io.Writer, string, []Attachment) error {
+func (s *stubProto) WriteMessage(io.Writer, string, []clievent.Attachment) error {
 	return nil
 }
-func (s *stubProto) WriteUserMessageLocked(io.Writer, string, string, []Attachment, string) error {
+func (s *stubProto) WriteUserMessageLocked(io.Writer, string, string, []clievent.Attachment, string) error {
 	return nil
 }
-func (s *stubProto) SupportsPriority() bool                  { return s.priority }
-func (s *stubProto) SupportsReplay() bool                    { return s.replay }
-func (s *stubProto) WriteInterrupt(io.Writer, string) error  { return nil }
-func (s *stubProto) ReadEvent(string) ([]Event, bool, error) { return nil, false, nil }
-func (s *stubProto) HandleEvent(io.Writer, Event) bool       { return false }
+func (s *stubProto) SupportsPriority() bool                           { return s.priority }
+func (s *stubProto) SupportsReplay() bool                             { return s.replay }
+func (s *stubProto) WriteInterrupt(io.Writer, string) error           { return nil }
+func (s *stubProto) ReadEvent(string) ([]clievent.Event, bool, error) { return nil, false, nil }
+func (s *stubProto) HandleEvent(io.Writer, clievent.Event) bool       { return false }
 
 // stubProtoWithCaps embeds stubProto and overrides with a direct Capabilities().
 // When present, ProtocolCaps must prefer it over the SupportsX() fallback.

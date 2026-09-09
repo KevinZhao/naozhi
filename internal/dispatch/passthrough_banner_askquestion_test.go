@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
@@ -71,7 +70,7 @@ func TestReplyTracker_ResultEvent_NoBanner(t *testing.T) {
 	defer tracker.stop()
 
 	// Deliver a result event — the type passthrough fan-out sends to follower slots.
-	tracker.onEvent(cli.Event{Type: "result", Result: ""})
+	tracker.onEvent(clievent.Event{Type: "result", Result: ""})
 
 	// Give any async Reply goroutine time to run if the fix is absent.
 	time.Sleep(60 * time.Millisecond)
@@ -93,10 +92,10 @@ func TestReplyTracker_AssistantEvent_FiresBanner(t *testing.T) {
 	tracker := newIMEventTracker(ctx, fp, "chat1", "direct", "")
 	defer tracker.stop()
 
-	tracker.onEvent(cli.Event{
+	tracker.onEvent(clievent.Event{
 		Type: "assistant",
-		Message: &cli.AssistantMessage{
-			Content: []cli.ContentBlock{{Type: "thinking", Text: "reasoning…"}},
+		Message: &clievent.AssistantMessage{
+			Content: []clievent.ContentBlock{{Type: "thinking", Text: "reasoning…"}},
 		},
 	})
 
@@ -138,7 +137,7 @@ func TestReplyTracker_AskQuestion_SetsFlag(t *testing.T) {
 	}
 
 	// Deliver an assistant event carrying AskQuestion.
-	tracker.onEvent(cli.Event{
+	tracker.onEvent(clievent.Event{
 		Type: "assistant",
 		AskQuestion: &clievent.AskQuestion{
 			ToolUseID: "tu-1",
@@ -195,13 +194,13 @@ func TestDispatcher_AskQuestionFired_SuppressesImages(t *testing.T) {
 		_ string,
 		_ *session.ManagedSession,
 		_ string,
-		_ []cli.Attachment,
-		onEvent cli.EventCallback,
-	) (*cli.SendResult, error) {
+		_ []clievent.Attachment,
+		onEvent clievent.EventCallback,
+	) (*clievent.SendResult, error) {
 		// Fire AskQuestion via onEvent so askQuestionFired is set before
 		// sendAndReply inspects the tracker.
 		if onEvent != nil {
-			onEvent(cli.Event{
+			onEvent(clievent.Event{
 				Type: "assistant",
 				AskQuestion: &clievent.AskQuestion{
 					ToolUseID: "tu-99",
@@ -212,7 +211,7 @@ func TestDispatcher_AskQuestionFired_SuppressesImages(t *testing.T) {
 				},
 			})
 		}
-		return &cli.SendResult{Text: "see " + imgFile}, nil
+		return &clievent.SendResult{Text: "see " + imgFile}, nil
 	}
 
 	// newTestDispatcher wires a Router and Guard; override the platform map

@@ -5,14 +5,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestFormatEventLine_Thinking(t *testing.T) {
 	t.Parallel()
-	ev := cli.Event{
+	ev := clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "thinking", Text: "Let me analyze the code structure"}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "thinking", Text: "Let me analyze the code structure"}}},
 	}
 	got := formatEventLine(ev)
 	if !strings.HasPrefix(got, "💭") {
@@ -25,9 +25,9 @@ func TestFormatEventLine_Thinking(t *testing.T) {
 
 func TestFormatEventLine_ThinkingEmpty(t *testing.T) {
 	t.Parallel()
-	ev := cli.Event{
+	ev := clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "thinking", Text: ""}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "thinking", Text: ""}}},
 	}
 	got := formatEventLine(ev)
 	if got != "" {
@@ -38,9 +38,9 @@ func TestFormatEventLine_ThinkingEmpty(t *testing.T) {
 func TestFormatEventLine_ToolUse_Read(t *testing.T) {
 	t.Parallel()
 	input, _ := json.Marshal(map[string]string{"file_path": "/home/user/project/src/main.go"})
-	ev := cli.Event{
+	ev := clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "Read", Input: input}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "Read", Input: input}}},
 	}
 	got := formatEventLine(ev)
 	if got != "📖 src/main.go" {
@@ -51,9 +51,9 @@ func TestFormatEventLine_ToolUse_Read(t *testing.T) {
 func TestFormatEventLine_ToolUse_Bash(t *testing.T) {
 	t.Parallel()
 	input, _ := json.Marshal(map[string]string{"command": "go test ./..."})
-	ev := cli.Event{
+	ev := clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "Bash", Input: input}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "Bash", Input: input}}},
 	}
 	got := formatEventLine(ev)
 	if got != "⚡ go test ./..." {
@@ -64,9 +64,9 @@ func TestFormatEventLine_ToolUse_Bash(t *testing.T) {
 func TestFormatEventLine_ToolUse_Agent(t *testing.T) {
 	t.Parallel()
 	input, _ := json.Marshal(map[string]string{"description": "review code changes"})
-	ev := cli.Event{
+	ev := clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "Agent", Input: input}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "Agent", Input: input}}},
 	}
 	got := formatEventLine(ev)
 	if got != "🤖 review code changes" {
@@ -76,9 +76,9 @@ func TestFormatEventLine_ToolUse_Agent(t *testing.T) {
 
 func TestFormatEventLine_ToolUse_Unknown(t *testing.T) {
 	t.Parallel()
-	ev := cli.Event{
+	ev := clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "CustomTool"}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "CustomTool"}}},
 	}
 	got := formatEventLine(ev)
 	if got != "🔧 CustomTool" {
@@ -88,7 +88,7 @@ func TestFormatEventLine_ToolUse_Unknown(t *testing.T) {
 
 func TestFormatEventLine_NoMessage(t *testing.T) {
 	t.Parallel()
-	ev := cli.Event{Type: "assistant"}
+	ev := clievent.Event{Type: "assistant"}
 	if got := formatEventLine(ev); got != "" {
 		t.Errorf("expected empty, got %q", got)
 	}
@@ -147,9 +147,9 @@ func TestExtractTodoMessage(t *testing.T) {
 			{"content": "跑测试", "status": "in_progress", "activeForm": "正在跑测试"},
 		},
 	})
-	ev := cli.Event{
+	ev := clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: input}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: input}}},
 	}
 	text, ok := extractTodoMessage(ev)
 	if !ok {
@@ -159,23 +159,23 @@ func TestExtractTodoMessage(t *testing.T) {
 		t.Errorf("rendered text missing expected items: %q", text)
 	}
 
-	other := cli.Event{
+	other := clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "Bash", Input: json.RawMessage(`{"command":"ls"}`)}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "Bash", Input: json.RawMessage(`{"command":"ls"}`)}}},
 	}
 	if _, ok := extractTodoMessage(other); ok {
 		t.Error("non-TodoWrite tool should not match")
 	}
 
-	empty := cli.Event{
+	empty := clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: json.RawMessage(`{}`)}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: json.RawMessage(`{}`)}}},
 	}
 	if _, ok := extractTodoMessage(empty); ok {
 		t.Error("empty todos should not match")
 	}
 
-	if _, ok := extractTodoMessage(cli.Event{Type: "assistant"}); ok {
+	if _, ok := extractTodoMessage(clievent.Event{Type: "assistant"}); ok {
 		t.Error("nil message should not match")
 	}
 }

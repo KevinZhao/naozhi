@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
 )
 
@@ -26,8 +26,8 @@ func newRunsHandler(t *testing.T, n int) *Handlers {
 
 	sess := r.InjectSession(runsTestKey, &sessionpkg.TestProcess{
 		AliveVal: true,
-		SendFunc: func(ctx context.Context, text string, imgs []cli.Attachment, on cli.EventCallback) (*cli.SendResult, error) {
-			return &cli.SendResult{Text: "ok", CostUSD: 0.01}, nil
+		SendFunc: func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
+			return &clievent.SendResult{Text: "ok", CostUSD: 0.01}, nil
 		},
 	})
 	for i := 0; i < n; i++ {

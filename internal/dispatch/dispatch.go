@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -181,7 +181,7 @@ type DispatcherConfig struct {
 	// queue gating has succeeded.
 	//
 	// Deprecated: prefer DispatcherConfig.Capabilities (#374).
-	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
+	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 	// TakeoverFn is the optional auto-takeover hook invoked on the first
 	// message of every chat. nil is treated as "return false".
 	//
@@ -360,7 +360,7 @@ type preparedInbound struct {
 	cleanText string
 	key       string
 	opts      session.AgentOpts
-	images    []cli.Attachment
+	images    []clievent.Attachment
 }
 
 // prepareInbound runs the front-matter common to every dispatch strategy
@@ -450,11 +450,11 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	// precedence and ExtraArgs merge (docs/rfc/key-resolver.md §3.1).
 	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 
-	var images []cli.Attachment
+	var images []clievent.Attachment
 	if len(msg.Images) > 0 {
-		images = make([]cli.Attachment, 0, len(msg.Images))
+		images = make([]clievent.Attachment, 0, len(msg.Images))
 		for _, img := range msg.Images {
-			images = append(images, cli.Attachment{Data: img.Data, MimeType: img.MimeType})
+			images = append(images, clievent.Attachment{Data: img.Data, MimeType: img.MimeType})
 		}
 	}
 
@@ -706,7 +706,7 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 func (d *Dispatcher) goSendAndReply(
 	ctx context.Context,
 	key, text string,
-	images []cli.Attachment,
+	images []clievent.Attachment,
 	agentID string,
 	opts session.AgentOpts,
 	msg platform.IncomingMessage,
@@ -820,7 +820,7 @@ func (d *Dispatcher) handleSendError(
 func (d *Dispatcher) sendAndReply(
 	ctx context.Context,
 	key, text string,
-	images []cli.Attachment,
+	images []clievent.Attachment,
 	agentID string,
 	opts session.AgentOpts,
 	msg platform.IncomingMessage,
@@ -967,7 +967,7 @@ const maxTurnImageBytes = 20 * 1024 * 1024
 // the maxTurnImageBytes budget are skipped but their paths are STILL rewritten
 // so the visible text is identical regardless of attachment outcome.
 func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string) {
-	imagePaths := cli.ExtractImagePaths(replyText)
+	imagePaths := clievent.ExtractImagePaths(replyText)
 	if len(imagePaths) == 0 {
 		return nil, replyText
 	}
@@ -980,7 +980,7 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 		data, err := d.imageReader.ReadFile(path)
 		if err == nil {
 			if turnImageBytes+len(data) <= maxTurnImageBytes {
-				outImages = append(outImages, platform.Image{Data: data, MimeType: cli.MimeFromPath(path)})
+				outImages = append(outImages, platform.Image{Data: data, MimeType: clievent.MimeFromPath(path)})
 				turnImageBytes += len(data)
 			}
 			// Over budget: skip the attachment but still rewrite the path.
@@ -993,7 +993,7 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 // decorateReplyText post-processes the raw CLI result text for IM delivery:
 // redacts secrets, localises API errors, appends the merge-group chip and the
 // per-session ReplyFooter. Returns "" when nothing should be sent (#656).
-func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.ManagedSession) string {
+func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess *session.ManagedSession) string {
 	// Redact credential shapes (sk-ant-, ghp_, AKIA, …) BEFORE localising so
 	// an echoed plaintext token never reaches the IM channel (#1571).
 	replyText := localizeAPIError(textutil.RedactSecrets(result.Text))

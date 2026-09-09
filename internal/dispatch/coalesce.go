@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -31,7 +31,7 @@ const maxCoalescedTextBytes = limits.MaxCoalescedText
 // maxCoalescedTextBytes, later messages are dropped with a visible truncation
 // marker — their images are still preserved so attached screenshots are not
 // silently lost. Images from all messages are concatenated in order.
-func CoalesceMessages(msgs []QueuedMsg) (string, []cli.Attachment) {
+func CoalesceMessages(msgs []QueuedMsg) (string, []clievent.Attachment) {
 	if len(msgs) == 0 {
 		return "", nil
 	}
@@ -61,7 +61,7 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.Attachment) {
 	b.Grow(estimate)
 	b.WriteString(coalescePrefix)
 
-	var allImages []cli.Attachment
+	var allImages []clievent.Attachment
 
 	truncated := 0
 	for _, m := range msgs {

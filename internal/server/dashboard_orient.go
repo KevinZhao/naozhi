@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // VisionOrienter is the minimal capability the orient handler needs from a
@@ -92,7 +93,7 @@ func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Only inline images are orientable. PDFs / file refs are never rotated.
-	if img.Kind == cli.KindFileRef || len(img.Data) == 0 {
+	if img.Kind == clievent.KindFileRef || len(img.Data) == 0 {
 		writeJSON(w, map[string]any{"rotated": false, "degrees": 0})
 		return
 	}
@@ -112,7 +113,7 @@ func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
 // applied clockwise degrees and the rotated JPEG bytes on success; on every
 // failure/no-op path it returns (0, nil) and the original stored bytes stay
 // put.
-func (h *SendHandler) orientImage(parent context.Context, id, owner string, img cli.Attachment) (int, []byte) {
+func (h *SendHandler) orientImage(parent context.Context, id, owner string, img clievent.Attachment) (int, []byte) {
 	line, err := cli.BuildOrientMessage(img.Data, img.MimeType)
 	if err != nil {
 		slog.Warn("orient: build message failed", "err", err)
@@ -146,7 +147,7 @@ func (h *SendHandler) orientImage(parent context.Context, id, owner string, img 
 
 	// Re-encode always produces JPEG; reflect that in the stored mime so a
 	// PNG-in/JPEG-out doesn't desync the content type sent to Claude.
-	rotImg := cli.Attachment{Kind: cli.KindImageInline, Data: out, MimeType: "image/jpeg"}
+	rotImg := clievent.Attachment{Kind: clievent.KindImageInline, Data: out, MimeType: "image/jpeg"}
 	if !h.uploadStore.Replace(id, owner, rotImg) {
 		// Expired/consumed between Peek and Replace, or over quota; the
 		// original stays stored and sendable.

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -71,11 +71,11 @@ func TestNoopCapabilities_DefaultsForTakeoverAndReplyFooter(t *testing.T) {
 	// Compile-time check (also documents intent): NoopCapabilities satisfies
 	// the Capabilities interface.
 	var _ Capabilities = NoopCapabilities{}
-	// Reference cli.Attachment / session.ManagedSession through the interface
+	// Reference clievent.Attachment / session.ManagedSession through the interface
 	// signature so this file's import of cli stays load-bearing if the
 	// signature drifts.
 	_ = func(c Capabilities) {
-		_, _ = c.Send(context.Background(), "", (*session.ManagedSession)(nil), "", []cli.Attachment(nil), nil)
+		_, _ = c.Send(context.Background(), "", (*session.ManagedSession)(nil), "", []clievent.Attachment(nil), nil)
 	}
 }
 

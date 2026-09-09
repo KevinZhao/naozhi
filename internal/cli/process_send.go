@@ -1,7 +1,7 @@
 package cli
 
 // process_send.go — user-message outbound path and CLI-level interrupts.
-// EventCallback is consumed cross-package (session, dispatch, server); changing
+// clievent.EventCallback is consumed cross-package (session, dispatch, server); changing
 // its signature is breaking. findResultSince / drainStaleEvents: process_turn.go.
 
 import (
@@ -19,18 +19,15 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// EventCallback is called for each intermediate event during Send.
-type EventCallback func(ev Event)
-
 // buildUserEntry renders the ring.EventLog entry for a single user message. Shared
 // by Send and SendPassthrough: readLoop filters the CLI's replay echo out of
 // ring.EventLog, so both paths must append the bubble explicitly.
-func buildUserEntry(text string, images []Attachment) clievent.EventEntry {
+func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEntry {
 	entry := clievent.EventEntry{
 		Time:    time.Now().UnixMilli(),
 		Type:    "user",
 		Summary: textutil.TruncateRunes(text, 120),
-		Detail:  textutil.TruncateRunes(text, EventDetailMaxRunes),
+		Detail:  textutil.TruncateRunes(text, clievent.EventDetailMaxRunes),
 	}
 	if len(images) > 0 {
 		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"
@@ -97,7 +94,7 @@ func buildUserEntry(text string, images []Attachment) clievent.EventEntry {
 // block — not text deltas or ACP tool_call_update progress — so treat it as a
 // tool-activity heartbeat, not "new content". Full-stream consumers use
 // ring.EventLog.Subscribe; Send logs every event under the same lock, nothing is lost.
-func (p *Process) Send(ctx context.Context, text string, images []Attachment, onEvent EventCallback) (*SendResult, error) {
+func (p *Process) Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 	p.mu.Lock()
 	if p.state == StateRunning {
 		p.mu.Unlock()
@@ -228,7 +225,7 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 					p.sessionID = ev.SessionID
 				}
 				p.mu.Unlock()
-				return &SendResult{
+				return &clievent.SendResult{
 					Text:       ev.Result,
 					SessionID:  ev.SessionID,
 					CostUSD:    ev.CostUSD,
@@ -267,7 +264,7 @@ func (p *Process) handleWatchdogTick(
 	now, lastOutput, turnStart time.Time,
 	turnStartMS int64,
 	noOutputDur, totalDur time.Duration,
-) (*SendResult, error) {
+) (*clievent.SendResult, error) {
 	if now.Sub(lastOutput) >= noOutputDur {
 		if sr := p.findResultSince(turnStartMS); sr != nil {
 			return sr, nil
@@ -394,10 +391,10 @@ func (p *Process) unregisterControlAck(reqID string) {
 	p.controlAckMu.Unlock()
 }
 
-// deliverControlAck routes a control_ack Event from readLoop to its waiter.
+// deliverControlAck routes a control_ack clievent.Event from readLoop to its waiter.
 // Unmatched acks (waiter timed out, or an interrupt's control_response —
 // those never register) are dropped: fire-and-forget, no turn state.
-func (p *Process) deliverControlAck(ev Event) {
+func (p *Process) deliverControlAck(ev clievent.Event) {
 	p.controlAckMu.Lock()
 	ch, ok := p.controlAcks[ev.RPCRequestID]
 	if ok {

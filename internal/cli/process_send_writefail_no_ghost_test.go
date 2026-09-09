@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
@@ -25,11 +26,11 @@ func (writeMessageFailingProtocol) Init(_ *JSONRW, _, _ string) (string, error) 
 
 var errFakeWriteMessage = errors.New("fake protocol: write rejected")
 
-func (writeMessageFailingProtocol) WriteMessage(_ io.Writer, _ string, _ []Attachment) error {
+func (writeMessageFailingProtocol) WriteMessage(_ io.Writer, _ string, _ []clievent.Attachment) error {
 	return errFakeWriteMessage
 }
 
-func (writeMessageFailingProtocol) WriteUserMessageLocked(_ io.Writer, _, _ string, _ []Attachment, _ string) error {
+func (writeMessageFailingProtocol) WriteUserMessageLocked(_ io.Writer, _, _ string, _ []clievent.Attachment, _ string) error {
 	return errFakeWriteMessage
 }
 
@@ -40,11 +41,11 @@ func (writeMessageFailingProtocol) WriteInterrupt(_ io.Writer, _ string) error {
 	return clierr.ErrInterruptUnsupported
 }
 
-func (writeMessageFailingProtocol) ReadEvent(_ string) ([]Event, bool, error) {
+func (writeMessageFailingProtocol) ReadEvent(_ string) ([]clievent.Event, bool, error) {
 	return nil, false, nil
 }
 
-func (writeMessageFailingProtocol) HandleEvent(_ io.Writer, _ Event) bool {
+func (writeMessageFailingProtocol) HandleEvent(_ io.Writer, _ clievent.Event) bool {
 	return false
 }
 
@@ -65,7 +66,7 @@ func TestProcess_Send_WriteMessageFail_NoGhostUserEntry(t *testing.T) {
 		protocol:    proto,
 		caps:        ProtocolCaps(proto),
 		state:       StateReady,
-		eventCh:     make(chan Event, 8),
+		eventCh:     make(chan clievent.Event, 8),
 		done:        make(chan struct{}),
 		eventLog:    ring.NewEventLog(0),
 		stdinWriter: nil, // unused: WriteMessage returns before touching the writer

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -26,8 +26,8 @@ func newAgentRouteDispatcher(t *testing.T) *Dispatcher {
 		AgentCommands: map[string]string{"review": "code-reviewer"},
 		Guard:         newFakeGuard(),
 		Dedup:         platform.NewDedup(100),
-		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
-			return &cli.SendResult{Text: "ok"}, nil
+		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+			return &clievent.SendResult{Text: "ok"}, nil
 		},
 		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
 		WatchdogNoOutputKills: new(atomic.Int64),
@@ -79,8 +79,8 @@ func TestIsKnownAgent_MultipleCommands(t *testing.T) {
 		},
 		Guard: newFakeGuard(),
 		Dedup: platform.NewDedup(100),
-		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
-			return &cli.SendResult{Text: "ok"}, nil
+		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+			return &clievent.SendResult{Text: "ok"}, nil
 		},
 		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
 		WatchdogNoOutputKills: new(atomic.Int64),

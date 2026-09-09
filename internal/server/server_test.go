@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -134,7 +134,7 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 			// resolve the tag the same way production does.
 			return replyTagForBackend(backendID)
 		},
-		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error) {
+		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 			return sess.Send(ctx, text, images, onEvent)
 		},
 		TakeoverFn: func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {

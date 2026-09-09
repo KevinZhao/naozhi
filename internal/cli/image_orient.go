@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // Auto-orientation for images with NO EXIF orientation flag: a small vision
@@ -58,9 +60,9 @@ func BuildOrientMessage(jpeg []byte, mimeType string) ([]byte, error) {
 		mimeType = "image/jpeg"
 	}
 	content := []any{
-		inputImageBlock{
+		clievent.InputImageBlock{
 			Type: "image",
-			Source: imageSource{
+			Source: clievent.ImageSource{
 				Type:      "base64",
 				MediaType: mimeType,
 				Data:      base64.StdEncoding.EncodeToString(jpeg),

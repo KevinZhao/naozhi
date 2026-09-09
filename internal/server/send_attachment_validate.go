@@ -1,4 +1,4 @@
-// "上传字节 → cli.Attachment" 验证流水线：parseAttachmentFile（magic-byte
+// "上传字节 → clievent.Attachment" 验证流水线：parseAttachmentFile（magic-byte
 // sniff + size gate）、pdfNestedInImage（防 JFIF+PDF 嵌套）、
 // hasPersistableAttachment、imageExtForMime、sanitizeClientFilename。
 // maxImageBytes / maxPDFBytes / uploadBodyBytes 定义在 dashboard_send.go。
@@ -15,12 +15,12 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // parseAttachmentFile reads a multipart file header and returns the
-// classified cli.Attachment. Only JPEG/PNG/GIF/WebP raster images and PDFs
+// classified clievent.Attachment. Only JPEG/PNG/GIF/WebP raster images and PDFs
 // are accepted, classified by magic-byte sniff (never the client
 // Content-Type); anything else is rejected before persistence (#886).
 // Images become KindImageInline; PDFs become KindFileRef with bytes still in
@@ -28,24 +28,24 @@ import (
 //
 // allowPDF is false on the inline-multipart /api/sessions/send path, whose
 // body cap fits images only; the upload-only endpoint passes true.
-func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachment, error) {
+func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (clievent.Attachment, error) {
 	declared := fh.Header.Get("Content-Type")
 	// declared is client-controlled and only picks the size gate; the
 	// magic-byte sniff below is the authority on type.
 	isPDF := declared == "application/pdf"
 	if isPDF && !allowPDF {
-		return cli.Attachment{}, fmt.Errorf("PDF attachments must be sent via /api/sessions/upload")
+		return clievent.Attachment{}, fmt.Errorf("PDF attachments must be sent via /api/sessions/upload")
 	}
 
 	// Refuse oversize on metadata alone before pulling the body into memory.
 	switch {
 	case isPDF:
 		if fh.Size > maxPDFBytes {
-			return cli.Attachment{}, fmt.Errorf("PDF too large (max %d MB)", maxPDFBytes>>20)
+			return clievent.Attachment{}, fmt.Errorf("PDF too large (max %d MB)", maxPDFBytes>>20)
 		}
 	default:
 		if fh.Size > maxImageBytes {
-			return cli.Attachment{}, fmt.Errorf("file too large (max %d MB)", maxImageBytes>>20)
+			return clievent.Attachment{}, fmt.Errorf("file too large (max %d MB)", maxImageBytes>>20)
 		}
 	}
 
@@ -53,7 +53,7 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 	if err != nil {
 		// Generic client message: os.PathError could leak the temp-file path.
 		slog.Debug("upload: open multipart file failed", "err", err)
-		return cli.Attachment{}, errors.New("failed to read uploaded file")
+		return clievent.Attachment{}, errors.New("failed to read uploaded file")
 	}
 	defer f.Close()
 
@@ -69,7 +69,7 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 		head = head[:n]
 	default:
 		slog.Debug("upload: head read failed", "err", err)
-		return cli.Attachment{}, errors.New("failed to read uploaded file")
+		return clievent.Attachment{}, errors.New("failed to read uploaded file")
 	}
 
 	// fh.Size is client-controlled and may be understated, so the LimitReader
@@ -82,7 +82,7 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 	case isPDF && !headLooksPDF:
 		// A declared PDF without the magic header cannot be legitimate;
 		// reject before allocating up to maxPDFBytes.
-		return cli.Attachment{}, fmt.Errorf("file does not look like a PDF")
+		return clievent.Attachment{}, fmt.Errorf("file does not look like a PDF")
 	default:
 		sizeLimit = maxImageBytes
 	}
@@ -90,25 +90,25 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 	data, err := io.ReadAll(io.LimitReader(body, sizeLimit+1))
 	if err != nil {
 		slog.Debug("upload: read multipart file failed", "err", err)
-		return cli.Attachment{}, errors.New("failed to read uploaded file")
+		return clievent.Attachment{}, errors.New("failed to read uploaded file")
 	}
 	if int64(len(data)) > sizeLimit {
-		return cli.Attachment{}, fmt.Errorf("file too large (max %d MB)", sizeLimit>>20)
+		return clievent.Attachment{}, fmt.Errorf("file too large (max %d MB)", sizeLimit>>20)
 	}
 
 	// Reject gzip magic explicitly so no downstream component can ever
 	// accept a compressed container (bomb) for an attachment.
 	if len(data) >= 2 && data[0] == 0x1F && data[1] == 0x8B {
-		return cli.Attachment{}, fmt.Errorf("compressed files are not accepted")
+		return clievent.Attachment{}, fmt.Errorf("compressed files are not accepted")
 	}
 	detected := http.DetectContentType(data)
 	if isPDF {
 		// Declared PDF that does not sniff as PDF is spoofed or corrupt.
 		if detected != "application/pdf" {
-			return cli.Attachment{}, fmt.Errorf("file does not look like a PDF")
+			return clievent.Attachment{}, fmt.Errorf("file does not look like a PDF")
 		}
-		return cli.Attachment{
-			Kind:     cli.KindFileRef,
+		return clievent.Attachment{
+			Kind:     clievent.KindFileRef,
 			Data:     data,
 			MimeType: "application/pdf",
 			OrigName: sanitizeClientFilename(fh.Filename),
@@ -123,15 +123,15 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 	case "image/jpeg", "image/png", "image/gif", "image/webp":
 		// ok
 	default:
-		return cli.Attachment{}, fmt.Errorf("only image/* or application/pdf files are accepted")
+		return clievent.Attachment{}, fmt.Errorf("only image/* or application/pdf files are accepted")
 	}
 	// DetectContentType only inspects leading bytes; an image header followed
 	// by an embedded PDF body must not be persisted as KindImageInline (#1002).
 	if pdfNestedInImage(data) {
-		return cli.Attachment{}, fmt.Errorf("file appears to be a PDF disguised as an image")
+		return clievent.Attachment{}, fmt.Errorf("file appears to be a PDF disguised as an image")
 	}
-	return cli.Attachment{
-		Kind:     cli.KindImageInline,
+	return clievent.Attachment{
+		Kind:     clievent.KindImageInline,
 		Data:     data,
 		MimeType: detected,
 	}, nil
@@ -154,9 +154,9 @@ var pdfMagicSignature = []byte("%PDF-")
 // persistFileRefs (file_ref must land on disk; inline images are persisted
 // best-effort for the lightbox). Otherwise the caller skips workspace
 // resolution + persist entirely.
-func hasPersistableAttachment(atts []cli.Attachment) bool {
+func hasPersistableAttachment(atts []clievent.Attachment) bool {
 	for _, a := range atts {
-		if a.Kind == cli.KindFileRef {
+		if a.Kind == clievent.KindFileRef {
 			return true
 		}
 		if imageExtForMime(a.MimeType) != "" && len(a.Data) > 0 {

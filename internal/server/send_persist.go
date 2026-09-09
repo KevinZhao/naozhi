@@ -8,7 +8,7 @@ import (
 	"net/http"
 
 	"github.com/naozhi/naozhi/internal/attachment"
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // persistErr is the (status, msg) pair returned from persistFileRefs.
@@ -27,12 +27,12 @@ type persistErr struct {
 // rollback removes every file Persist wrote; callers must invoke it on any
 // failure path before sessionSend accepts the request, or the files leak
 // until the GC sweep. An empty workspace is refused with a readable 400.
-func persistFileRefs(workspace string, atts []cli.Attachment, sessionKey, owner string) ([]cli.Attachment, func(), *persistErr) {
+func persistFileRefs(workspace string, atts []clievent.Attachment, sessionKey, owner string) ([]clievent.Attachment, func(), *persistErr) {
 	if workspace == "" {
 		return nil, nil, &persistErr{status: http.StatusBadRequest, msg: "workspace is required for file attachments"}
 	}
 
-	out := make([]cli.Attachment, len(atts))
+	out := make([]clievent.Attachment, len(atts))
 	// written tracks absPaths across the batch so rollback can remove
 	// every file if a later element fails.
 	written := make([]string, 0, len(atts))
@@ -43,7 +43,7 @@ func persistFileRefs(workspace string, atts []cli.Attachment, sessionKey, owner 
 	}
 
 	for i, a := range atts {
-		if a.Kind != cli.KindFileRef {
+		if a.Kind != clievent.KindFileRef {
 			out[i] = a
 			// Inline images: best-effort persist for the lightbox "view
 			// original" URL. out[i].Data is deliberately retained — the
@@ -97,8 +97,8 @@ func persistFileRefs(workspace string, atts []cli.Attachment, sessionKey, owner 
 			}
 		}
 		written = append(written, p.AbsPath)
-		out[i] = cli.Attachment{
-			Kind:          cli.KindFileRef,
+		out[i] = clievent.Attachment{
+			Kind:          clievent.KindFileRef,
 			MimeType:      a.MimeType,
 			WorkspacePath: p.RelPath,
 			OrigName:      a.OrigName,

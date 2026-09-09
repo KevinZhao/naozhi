@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestDeliverEvent_KillChClosed pins the kill arm of deliverEvent: a closed
@@ -19,14 +21,14 @@ func TestDeliverEvent_KillChClosed(t *testing.T) {
 	close(killCh)
 	cbFired := false
 	p := &Process{
-		eventCh: make(chan Event, 1),
+		eventCh: make(chan clievent.Event, 1),
 		killCh:  killCh,
 		// onTurnDone is mu-protected; we install it directly because no
 		// concurrent goroutine has access to this Process instance.
 		onTurnDone: func() { cbFired = true },
 	}
 
-	ret := p.deliverEvent(Event{Type: "result"}, time.Now(), slog.New(slog.DiscardHandler))
+	ret := p.deliverEvent(clievent.Event{Type: "result"}, time.Now(), slog.New(slog.DiscardHandler))
 	if !ret {
 		t.Fatal("deliverEvent on closed killCh: want true (unwind), got false")
 	}
@@ -45,16 +47,16 @@ func TestDeliverEvent_KillChClosed(t *testing.T) {
 }
 
 // TestDeliverEvent_HandsOffToEventCh pins the steady-state arm: with an
-// open killCh and capacity in eventCh, the event is enqueued and recvAt
+// open killCh and capacity in eventCh, the event is enqueued and clievent.RecvAt
 // is set. Returns false so the read loop continues.
 func TestDeliverEvent_HandsOffToEventCh(t *testing.T) {
 	t.Parallel()
 	p := &Process{
-		eventCh: make(chan Event, 1),
+		eventCh: make(chan clievent.Event, 1),
 		killCh:  make(chan struct{}), // open: kill arm must not fire
 	}
 	now := time.Now()
-	ret := p.deliverEvent(Event{Type: "assistant"}, now, slog.New(slog.DiscardHandler))
+	ret := p.deliverEvent(clievent.Event{Type: "assistant"}, now, slog.New(slog.DiscardHandler))
 	if ret {
 		t.Error("deliverEvent: want false (continue) on open killCh + capacity")
 	}
@@ -63,11 +65,11 @@ func TestDeliverEvent_HandsOffToEventCh(t *testing.T) {
 		if ev.Type != "assistant" {
 			t.Errorf("delivered ev.Type = %q, want %q", ev.Type, "assistant")
 		}
-		// recvAt is private; we cannot read it across packages but the
+		// clievent.RecvAt is private; we cannot read it across packages but the
 		// in-package test covers the assignment branch by selecting the
 		// non-default arm of the inner select.
-		if ev.recvAt != now {
-			t.Errorf("ev.recvAt = %v, want %v", ev.recvAt, now)
+		if ev.RecvAt != now {
+			t.Errorf("ev.RecvAt = %v, want %v", ev.RecvAt, now)
 		}
 	default:
 		t.Fatal("no event delivered to eventCh")
@@ -82,10 +84,10 @@ func TestDeliverEvent_HandsOffToEventCh(t *testing.T) {
 func TestDeliverEvent_FullBufferDropsResult(t *testing.T) {
 	t.Parallel()
 	p := &Process{
-		eventCh: make(chan Event), // unbuffered + no reader → forces default arm
+		eventCh: make(chan clievent.Event), // unbuffered + no reader → forces default arm
 		killCh:  make(chan struct{}),
 	}
-	ret := p.deliverEvent(Event{Type: "result", SubType: "success"}, time.Now(), slog.New(slog.DiscardHandler))
+	ret := p.deliverEvent(clievent.Event{Type: "result", SubType: "success"}, time.Now(), slog.New(slog.DiscardHandler))
 	if ret {
 		t.Error("deliverEvent should return false on full-buffer drop, not unwind")
 	}
@@ -101,7 +103,7 @@ func TestNotifyLinker_NilLinkerNoOp(t *testing.T) {
 	t.Parallel()
 	p := &Process{} // linker zero-value is nil
 	// task_started shape that would otherwise trigger a Resolve goroutine.
-	p.notifyLinker(Event{
+	p.notifyLinker(clievent.Event{
 		Type:      "system",
 		SubType:   "task_started",
 		TaskID:    "abc",
@@ -125,13 +127,13 @@ func TestNotifyLinker_GatesByTaskFields(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		ev   Event
+		ev   clievent.Event
 	}{
-		{name: "wrong_type", ev: Event{Type: "user", SubType: "task_started", TaskID: "x", ToolUseID: "y"}},
-		{name: "wrong_subtype", ev: Event{Type: "system", SubType: "init", TaskID: "x", ToolUseID: "y"}},
-		{name: "local_bash_excluded", ev: Event{Type: "system", SubType: "task_started", TaskType: "local_bash", TaskID: "x", ToolUseID: "y"}},
-		{name: "missing_task_id", ev: Event{Type: "system", SubType: "task_started", ToolUseID: "y"}},
-		{name: "missing_tool_use_id", ev: Event{Type: "system", SubType: "task_started", TaskID: "x"}},
+		{name: "wrong_type", ev: clievent.Event{Type: "user", SubType: "task_started", TaskID: "x", ToolUseID: "y"}},
+		{name: "wrong_subtype", ev: clievent.Event{Type: "system", SubType: "init", TaskID: "x", ToolUseID: "y"}},
+		{name: "local_bash_excluded", ev: clievent.Event{Type: "system", SubType: "task_started", TaskType: "local_bash", TaskID: "x", ToolUseID: "y"}},
+		{name: "missing_task_id", ev: clievent.Event{Type: "system", SubType: "task_started", ToolUseID: "y"}},
+		{name: "missing_tool_use_id", ev: clievent.Event{Type: "system", SubType: "task_started", TaskID: "x"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

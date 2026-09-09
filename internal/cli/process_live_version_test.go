@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
@@ -15,7 +16,7 @@ import (
 func TestDispatchProtocolEvent_InitCapturesLiveVersion(t *testing.T) {
 	p := &Process{
 		eventLog: ring.NewEventLog(8),
-		eventCh:  make(chan Event, 4),
+		eventCh:  make(chan clievent.Event, 4),
 		killCh:   make(chan struct{}),
 	}
 
@@ -23,7 +24,7 @@ func TestDispatchProtocolEvent_InitCapturesLiveVersion(t *testing.T) {
 		t.Fatalf("LiveVersion before init = %q, want empty", got)
 	}
 
-	ev := Event{Type: "system", SubType: "init", SessionID: "s1", ClaudeCodeVersion: "2.1.174"}
+	ev := clievent.Event{Type: "system", SubType: "init", SessionID: "s1", ClaudeCodeVersion: "2.1.174"}
 	p.dispatchProtocolEvent(ev, slog.New(slog.DiscardHandler))
 
 	if got := p.LiveVersion(); got != "2.1.174" {
@@ -38,11 +39,11 @@ func TestDispatchProtocolEvent_InitCapturesLiveVersion(t *testing.T) {
 func TestDispatchProtocolEvent_InitWithoutVersionKeepsEmpty(t *testing.T) {
 	p := &Process{
 		eventLog: ring.NewEventLog(8),
-		eventCh:  make(chan Event, 4),
+		eventCh:  make(chan clievent.Event, 4),
 		killCh:   make(chan struct{}),
 	}
 
-	ev := Event{Type: "system", SubType: "init", SessionID: "s1"}
+	ev := clievent.Event{Type: "system", SubType: "init", SessionID: "s1"}
 	p.dispatchProtocolEvent(ev, slog.New(slog.DiscardHandler))
 
 	if got := p.LiveVersion(); got != "" {
@@ -66,7 +67,7 @@ func TestSetLiveVersion_IgnoresEmpty(t *testing.T) {
 // change to the field name is caught by CI rather than silently disabling the
 // live-version capture.
 func TestEvent_ClaudeCodeVersionWireDecode(t *testing.T) {
-	var ev Event
+	var ev clievent.Event
 	if err := json.Unmarshal([]byte(`{"type":"system","subtype":"init","claude_code_version":"2.1.174"}`), &ev); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

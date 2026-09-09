@@ -10,22 +10,23 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// readOne is a test helper that flattens Protocol.ReadEvent's []Event return
-// into a single Event for tests that expect exactly one semantic event per
-// wire frame. Returns a zero Event when ReadEvent skipped the line (length 0
+// readOne is a test helper that flattens Protocol.ReadEvent's []clievent.Event return
+// into a single clievent.Event for tests that expect exactly one semantic event per
+// wire frame. Returns a zero clievent.Event when ReadEvent skipped the line (length 0
 // slice). Multi-event frames (only ACP turn-end today) have their own tests
 // that consume the slice directly — using readOne there would silently hide
 // the second event.
-func readOne(t *testing.T, p Protocol, line string) (Event, bool, error) {
+func readOne(t *testing.T, p Protocol, line string) (clievent.Event, bool, error) {
 	t.Helper()
 	events, done, err := p.ReadEvent(line)
 	if err != nil {
-		return Event{}, done, err
+		return clievent.Event{}, done, err
 	}
 	if len(events) == 0 {
-		return Event{}, done, nil
+		return clievent.Event{}, done, nil
 	}
 	if len(events) > 1 {
 		t.Fatalf("readOne: expected ≤1 event, got %d (use ReadEvent directly for multi-event frames)", len(events))
@@ -309,7 +310,7 @@ func TestClaudeProtocol_WriteMessage(t *testing.T) {
 	if err := p.WriteMessage(&buf, "hello", nil); err != nil {
 		t.Fatal(err)
 	}
-	var msg InputMessage
+	var msg clievent.InputMessage
 	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &msg); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +367,7 @@ func TestClaudeProtocol_ReadEvent_SkipsHooks(t *testing.T) {
 			t.Error("hook events should not be done")
 		}
 		if ev.Type != "" {
-			t.Errorf("hook event should be skipped (zero Event), got Type=%q", ev.Type)
+			t.Errorf("hook event should be skipped (zero clievent.Event), got Type=%q", ev.Type)
 		}
 	}
 }
@@ -390,7 +391,7 @@ func TestClaudeProtocol_ReadEvent_SystemInit(t *testing.T) {
 func TestClaudeProtocol_HandleEvent(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
-	if p.HandleEvent(nil, Event{Type: "result"}) {
+	if p.HandleEvent(nil, clievent.Event{Type: "result"}) {
 		t.Error("Claude protocol should never handle events internally")
 	}
 }
@@ -437,7 +438,7 @@ func TestClaudeProtocol_ReadEvent_ControlResponseBecomesAck(t *testing.T) {
 	p := &ClaudeProtocol{}
 	// Contract change (docs/rfc/dashboard-model-effort-control.md §4.4):
 	// control_response frames with a request_id are no longer silently
-	// skipped — they surface as a control_ack Event so Process.SetModel can
+	// skipped — they surface as a control_ack clievent.Event so Process.SetModel can
 	// correlate its pending acknowledgement. The load-bearing invariant is
 	// unchanged: a control_response must NEVER complete a turn (done stays
 	// false, and handleShimStdout consumes control_ack before dispatch so
@@ -553,7 +554,7 @@ func TestACPProtocol_WriteInterrupt_SendsCancelNotification(t *testing.T) {
 }
 
 // TestACPProtocol_ReadEvent_CancelledStopReason ensures the cancelled stopReason
-// is surfaced as Event.SubType so dispatch can distinguish it from end_turn.
+// is surfaced as clievent.Event.SubType so dispatch can distinguish it from end_turn.
 func TestACPProtocol_ReadEvent_CancelledStopReason(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
@@ -590,7 +591,7 @@ func TestACPProtocol_ReadEvent_CancelledStopReason(t *testing.T) {
 		t.Errorf("events[1].SubType = %q, want cancelled (so dispatch can label the turn)", events[1].SubType)
 	}
 	if events[1].Result != "partial" {
-		t.Errorf("partial buffered text should still ride on result.Result for SendResult.Text, got %q", events[1].Result)
+		t.Errorf("partial buffered text should still ride on result.Result for clievent.SendResult.Text, got %q", events[1].Result)
 	}
 }
 
@@ -983,7 +984,7 @@ func TestACPProtocol_ReadEvent_ToolCallUpdate_Completed(t *testing.T) {
 }
 
 // TestACPProtocol_ReadEvent_ToolCall_TruncatesLargePayload pins the
-// 16K-rune cap on Event.ToolCall.InputJSON / OutputJSON wired up by
+// 16K-rune cap on clievent.Event.ToolCall.InputJSON / OutputJSON wired up by
 // truncateToolJSON. Without this guard a runaway shell tool dumping
 // MB-scale stdout would balloon WS frames and slog attrs. Asserts both
 // (a) the cap is honoured (output is shorter than the raw payload) and
@@ -1050,7 +1051,7 @@ func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 		t.Errorf("events[1].Type = %q, want result", result.Type)
 	}
 	if result.Result != "final answer" {
-		t.Errorf("result.Result = %q, want 'final answer' (still rides on the wire for SendResult.Text)", result.Result)
+		t.Errorf("result.Result = %q, want 'final answer' (still rides on the wire for clievent.SendResult.Text)", result.Result)
 	}
 	if result.SessionID != "sess_1" {
 		t.Errorf("result.SessionID = %q, want sess_1", result.SessionID)
@@ -1107,7 +1108,7 @@ func TestACPProtocol_HandleEvent_Permission(t *testing.T) {
 	p := &ACPProtocol{}
 	var buf bytes.Buffer
 	rawParams := json.RawMessage(`{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"x"},"options":[{"optionId":"allow_once","name":"Yes","kind":"allow_once"},{"optionId":"reject_once","name":"No","kind":"reject_once"}]}`)
-	ev := Event{Type: "permission_request", RPCRequestID: "42", RawParams: rawParams}
+	ev := clievent.Event{Type: "permission_request", RPCRequestID: "42", RawParams: rawParams}
 	handled := p.HandleEvent(&buf, ev)
 	if !handled {
 		t.Error("permission_request should be handled")
@@ -1140,7 +1141,7 @@ func TestACPProtocol_HandleEvent_Permission_KiroUUID(t *testing.T) {
 	p := &ACPProtocol{}
 	var buf bytes.Buffer
 	rawParams := json.RawMessage(`{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"x"},"options":[{"optionId":"allow_once","name":"Yes","kind":"allow_once"},{"optionId":"allow_always","name":"Always","kind":"allow_always"},{"optionId":"reject_once","name":"No","kind":"reject_once"}]}`)
-	ev := Event{
+	ev := clievent.Event{
 		Type:         "permission_request",
 		RPCRequestID: "82017692-c404-42d1-9334-ae28dfda0cee",
 		RawParams:    rawParams,
@@ -1169,7 +1170,7 @@ func TestACPProtocol_HandleEvent_Permission_FallbackOnUnknownOptions(t *testing.
 	p := &ACPProtocol{}
 	var buf bytes.Buffer
 	rawParams := json.RawMessage(`{"sessionId":"s1","options":[{"optionId":"reject_once","name":"No","kind":"reject_once"}]}`)
-	ev := Event{Type: "permission_request", RPCRequestID: "1", RawParams: rawParams}
+	ev := clievent.Event{Type: "permission_request", RPCRequestID: "1", RawParams: rawParams}
 	if !p.HandleEvent(&buf, ev) {
 		t.Fatal("must always handle permission_request, even on unknown options")
 	}
@@ -1181,7 +1182,7 @@ func TestACPProtocol_HandleEvent_Permission_FallbackOnUnknownOptions(t *testing.
 func TestACPProtocol_HandleEvent_NonPermission(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
-	if p.HandleEvent(nil, Event{Type: "assistant"}) {
+	if p.HandleEvent(nil, clievent.Event{Type: "assistant"}) {
 		t.Error("non-permission events should not be handled")
 	}
 }
@@ -1309,7 +1310,7 @@ func TestRPCMessage_NoUnmarshalErrorOnStringID(t *testing.T) {
 // --- ACP _kiro.dev/metadata normalize tests (Sprint 4) ---
 
 // TestACPProtocol_ReadEvent_KiroMetadata_FullPayload ensures the synthetic
-// Type:"metadata" Event carries normalized fields from the kiro 2.3.0
+// Type:"metadata" clievent.Event carries normalized fields from the kiro 2.3.0
 // _kiro.dev/metadata notification (V10 sample).
 func TestACPProtocol_ReadEvent_KiroMetadata_FullPayload(t *testing.T) {
 	t.Parallel()
@@ -1344,7 +1345,7 @@ func TestACPProtocol_ReadEvent_KiroMetadata_FullPayload(t *testing.T) {
 	}
 	m := ev.Metadata.MeteringUsage[0]
 	if m.Value != 0.024 || m.Unit != "credit" || m.UnitPlural != "credits" {
-		t.Errorf("MeteringEntry = %+v, want value=0.024 unit=credit", m)
+		t.Errorf("clievent.MeteringEntry = %+v, want value=0.024 unit=credit", m)
 	}
 }
 
@@ -1495,7 +1496,7 @@ func TestACPProtocol_KiroMetadata_EffortLengthBounded(t *testing.T) {
 }
 
 // TestProcess_DispatchMetadataEvent_AppliesEffort closes the seam between
-// parseKiroMetadata (wire → EventMetadata) and applyMetadata (EventMetadata →
+// parseKiroMetadata (wire → clievent.EventMetadata) and applyMetadata (clievent.EventMetadata →
 // Process state): both halves are tested individually, but readLoop's dispatch
 // is what actually connects them.
 func TestProcess_DispatchMetadataEvent_AppliesEffort(t *testing.T) {
@@ -1504,9 +1505,9 @@ func TestProcess_DispatchMetadataEvent_AppliesEffort(t *testing.T) {
 	// dispatchProtocolEvent returns false for metadata frames: they are status
 	// updates applied to Process state, not assistant output, so they stop
 	// here rather than flowing on to eventCh / ring.EventLog.
-	if forwarded := p.dispatchProtocolEvent(Event{
+	if forwarded := p.dispatchProtocolEvent(clievent.Event{
 		Type:     "metadata",
-		Metadata: &EventMetadata{Effort: "max", TurnDurationMs: 1200},
+		Metadata: &clievent.EventMetadata{Effort: "max", TurnDurationMs: 1200},
 	}, slog.New(slog.DiscardHandler)); forwarded {
 		t.Error("metadata events must not be forwarded downstream")
 	}
@@ -1555,7 +1556,7 @@ func TestNormalizeContextUsage(t *testing.T) {
 
 // TestACPProtocol_ReadEvent_KiroMetadata_SchemaDriftSwallowed locks the
 // schema-drift contract: a malformed _kiro.dev/metadata frame returns the
-// "skip this line" zero-Event without aborting readLoop.
+// "skip this line" zero-clievent.Event without aborting readLoop.
 func TestACPProtocol_ReadEvent_KiroMetadata_SchemaDriftSwallowed(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
@@ -1569,7 +1570,7 @@ func TestACPProtocol_ReadEvent_KiroMetadata_SchemaDriftSwallowed(t *testing.T) {
 		t.Error("schema drift should not mark turn complete")
 	}
 	if ev.Type != "" {
-		t.Errorf("schema drift should return zero Event, got Type=%q", ev.Type)
+		t.Errorf("schema drift should return zero clievent.Event, got Type=%q", ev.Type)
 	}
 }
 
@@ -1594,11 +1595,11 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 	// UI Round 5 R5-4: per-unit accumulation. Two entries with the same
 	// Unit ("credit") within ONE applyMetadata call collapse into a single
 	// summed entry (0.01 + 0.02 = 0.03). Different units stay separate.
-	p.applyMetadata(&EventMetadata{
+	p.applyMetadata(&clievent.EventMetadata{
 		ContextUsagePercent: 42.5,
 		TurnDurationMs:      1500,
 		Effort:              "xhigh",
-		MeteringUsage: []MeteringEntry{
+		MeteringUsage: []clievent.MeteringEntry{
 			{Value: 0.01, Unit: "credit", UnitPlural: "credits"},
 			{Value: 0.02, Unit: "credit", UnitPlural: "credits"},
 		},
@@ -1630,8 +1631,8 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 
 	// Second applyMetadata call adds another turn's metering. Session-
 	// level total must accumulate: 0.03 (turn 1) + 0.05 (turn 2) = 0.08.
-	p.applyMetadata(&EventMetadata{
-		MeteringUsage: []MeteringEntry{
+	p.applyMetadata(&clievent.EventMetadata{
+		MeteringUsage: []clievent.MeteringEntry{
 			{Value: 0.05, Unit: "credit", UnitPlural: "credits"},
 		},
 	})
@@ -1650,7 +1651,7 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 	}
 
 	// Zero-fields applyMetadata must not regress prior values.
-	p.applyMetadata(&EventMetadata{})
+	p.applyMetadata(&clievent.EventMetadata{})
 	if p.ContextUsagePercent() != 42.5 {
 		t.Error("zero-field applyMetadata should not overwrite existing percent")
 	}
@@ -1668,9 +1669,9 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 	// metering+duration but no effort (kiro sends two frames per turn; a
 	// future version could drop the tier from the closing one). The other
 	// fields must still advance while the tier holds.
-	p.applyMetadata(&EventMetadata{
+	p.applyMetadata(&clievent.EventMetadata{
 		TurnDurationMs: 2000,
-		MeteringUsage:  []MeteringEntry{{Value: 0.1, Unit: "credit", UnitPlural: "credits"}},
+		MeteringUsage:  []clievent.MeteringEntry{{Value: 0.1, Unit: "credit", UnitPlural: "credits"}},
 	})
 	if got := p.Effort(); got != "xhigh" {
 		t.Errorf("second frame without effort regressed tier to %q, want xhigh", got)
@@ -1688,16 +1689,16 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 func TestProcess_ApplyMetadata_EffortOverwrites(t *testing.T) {
 	t.Parallel()
 	p := &Process{}
-	p.applyMetadata(&EventMetadata{Effort: "xhigh"})
+	p.applyMetadata(&clievent.EventMetadata{Effort: "xhigh"})
 	if got := p.Effort(); got != "xhigh" {
 		t.Fatalf("Effort = %q, want xhigh", got)
 	}
-	p.applyMetadata(&EventMetadata{Effort: "max"})
+	p.applyMetadata(&clievent.EventMetadata{Effort: "max"})
 	if got := p.Effort(); got != "max" {
 		t.Errorf("Effort = %q after tier change, want max (overwrite, not merge)", got)
 	}
 	// Downgrade must work symmetrically — nothing about the ordering is special.
-	p.applyMetadata(&EventMetadata{Effort: "low"})
+	p.applyMetadata(&clievent.EventMetadata{Effort: "low"})
 	if got := p.Effort(); got != "low" {
 		t.Errorf("Effort = %q after downgrade, want low", got)
 	}
@@ -1721,8 +1722,8 @@ func TestProcess_MeteringUsage_FastPath(t *testing.T) {
 
 	// After the first applyMetadata, meteringLen must mirror the slice
 	// length so the fast-path no longer short-circuits.
-	p.applyMetadata(&EventMetadata{
-		MeteringUsage: []MeteringEntry{
+	p.applyMetadata(&clievent.EventMetadata{
+		MeteringUsage: []clievent.MeteringEntry{
 			{Value: 0.01, Unit: "credit", UnitPlural: "credits"},
 		},
 	})
@@ -1735,8 +1736,8 @@ func TestProcess_MeteringUsage_FastPath(t *testing.T) {
 
 	// Second call adds a different unit — meteringLen must reflect the
 	// post-merge slice length (not the input batch length).
-	p.applyMetadata(&EventMetadata{
-		MeteringUsage: []MeteringEntry{
+	p.applyMetadata(&clievent.EventMetadata{
+		MeteringUsage: []clievent.MeteringEntry{
 			{Value: 100, Unit: "token", UnitPlural: "tokens"},
 		},
 	})
@@ -1748,8 +1749,8 @@ func TestProcess_MeteringUsage_FastPath(t *testing.T) {
 	}
 
 	// Same-unit merge keeps slice length stable; meteringLen stays 2.
-	p.applyMetadata(&EventMetadata{
-		MeteringUsage: []MeteringEntry{
+	p.applyMetadata(&clievent.EventMetadata{
+		MeteringUsage: []clievent.MeteringEntry{
 			{Value: 0.02, Unit: "credit", UnitPlural: "credits"},
 		},
 	})
@@ -1932,7 +1933,7 @@ func TestProcessStateString(t *testing.T) {
 
 func TestNewUserMessage(t *testing.T) {
 	t.Parallel()
-	msg := NewUserMessageWithMeta("hello world", nil, "", "")
+	msg := clievent.NewUserMessageWithMeta("hello world", nil, "", "")
 	if msg.Type != "user" {
 		t.Errorf("Type = %q, want %q", msg.Type, "user")
 	}
@@ -1946,11 +1947,11 @@ func TestNewUserMessage(t *testing.T) {
 
 func TestNewUserMessage_WithImages(t *testing.T) {
 	t.Parallel()
-	images := []Attachment{
+	images := []clievent.Attachment{
 		{Data: []byte("fake-png-data"), MimeType: "image/png"},
 		{Data: []byte("fake-jpeg-data"), MimeType: "image/jpeg"},
 	}
-	msg := NewUserMessageWithMeta("describe this", images, "", "")
+	msg := clievent.NewUserMessageWithMeta("describe this", images, "", "")
 
 	if msg.Type != "user" || msg.Message.Role != "user" {
 		t.Fatalf("unexpected type/role: %q / %q", msg.Type, msg.Message.Role)
@@ -2016,8 +2017,8 @@ func TestNewUserMessage_WithImages(t *testing.T) {
 
 func TestNewUserMessage_WithImages_EmptyText(t *testing.T) {
 	t.Parallel()
-	images := []Attachment{{Data: []byte("img"), MimeType: "image/png"}}
-	msg := NewUserMessageWithMeta("", images, "", "")
+	images := []clievent.Attachment{{Data: []byte("img"), MimeType: "image/png"}}
+	msg := clievent.NewUserMessageWithMeta("", images, "", "")
 
 	blocks, ok := msg.Message.Content.([]any)
 	if !ok {
@@ -2030,19 +2031,19 @@ func TestNewUserMessage_WithImages_EmptyText(t *testing.T) {
 }
 
 // TestNewUserMessage_WithFileRef_PrependsHint verifies the core of the PDF
-// support: a KindFileRef attachment must NOT produce a content block, but
+// support: a clievent.KindFileRef attachment must NOT produce a content block, but
 // it MUST prepend a Read-tool instruction to the text so Claude opens the
 // workspace file on its own.
 func TestNewUserMessage_WithFileRef_PrependsHint(t *testing.T) {
 	t.Parallel()
-	atts := []Attachment{{
-		Kind:          KindFileRef,
+	atts := []clievent.Attachment{{
+		Kind:          clievent.KindFileRef,
 		MimeType:      "application/pdf",
 		WorkspacePath: ".naozhi/attachments/2026-05-06/deadbeef.pdf",
 		OrigName:      "report.pdf",
 		Size:          1024 * 1024,
 	}}
-	msg := NewUserMessageWithMeta("summarize key points", atts, "", "")
+	msg := clievent.NewUserMessageWithMeta("summarize key points", atts, "", "")
 
 	// Text-only message: the Content field must be a plain string (no
 	// multimodal block array) because we have no inline bytes. This keeps
@@ -2077,12 +2078,12 @@ func TestNewUserMessage_WithFileRef_PrependsHint(t *testing.T) {
 // produce image blocks; file_refs still go into the text prefix.
 func TestNewUserMessage_WithImageAndFileRef_Mixed(t *testing.T) {
 	t.Parallel()
-	atts := []Attachment{
-		{Kind: KindImageInline, Data: []byte("png"), MimeType: "image/png"},
-		{Kind: KindFileRef, MimeType: "application/pdf",
+	atts := []clievent.Attachment{
+		{Kind: clievent.KindImageInline, Data: []byte("png"), MimeType: "image/png"},
+		{Kind: clievent.KindFileRef, MimeType: "application/pdf",
 			WorkspacePath: ".naozhi/attachments/x/y.pdf", OrigName: "y.pdf"},
 	}
-	msg := NewUserMessageWithMeta("compare these", atts, "", "")
+	msg := clievent.NewUserMessageWithMeta("compare these", atts, "", "")
 
 	blocks, ok := msg.Message.Content.([]any)
 	if !ok {
@@ -2115,46 +2116,19 @@ func TestNewUserMessage_WithImageAndFileRef_Mixed(t *testing.T) {
 	}
 }
 
-// TestNewUserMessage_NoFileRef_ByteIdentical pins the no-regression
-// invariant: when no file_ref is present, the wire form must be bit-for-bit
-// identical to the pre-PDF code path. Otherwise every image-only send in
-// production would subtly change behaviour on rollout.
-func TestNewUserMessage_NoFileRef_ByteIdentical(t *testing.T) {
-	t.Parallel()
-	// Text-only
-	text := NewUserMessageWithMeta("just text", nil, "", "")
-	s, ok := text.Message.Content.(string)
-	if !ok || s != "just text" {
-		t.Errorf("text-only content changed: got %T %v", text.Message.Content, text.Message.Content)
-	}
-
-	// Image-only
-	imgs := []Attachment{{Kind: KindImageInline, Data: []byte("x"), MimeType: "image/png"}}
-	m := NewUserMessageWithMeta("look", imgs, "", "")
-	blocks, _ := m.Message.Content.([]any)
-	if len(blocks) != 2 {
-		t.Fatalf("image+text expected 2 blocks, got %d", len(blocks))
-	}
-	// The text block must carry the user text verbatim, no hint prefix.
-	last, _ := blocks[len(blocks)-1].(inputTextBlock)
-	if last.Text != "look" {
-		t.Errorf("image-only text block leaked hint prefix: %q", last.Text)
-	}
-}
-
 // TestNewUserMessage_FileRefWithoutPath_Skipped covers a caller bug:
-// WorkspacePath must be populated before calling NewUserMessageWithMeta.
+// WorkspacePath must be populated before calling clievent.NewUserMessageWithMeta.
 // A missing path means the persistence layer didn't run; we silently drop
 // the bullet rather than confuse the model with an empty "- \n" line.
 func TestNewUserMessage_FileRefWithoutPath_Skipped(t *testing.T) {
 	t.Parallel()
-	atts := []Attachment{{
-		Kind:     KindFileRef,
+	atts := []clievent.Attachment{{
+		Kind:     clievent.KindFileRef,
 		MimeType: "application/pdf",
 		// WorkspacePath intentionally empty
 		OrigName: "orphan.pdf",
 	}}
-	msg := NewUserMessageWithMeta("hello", atts, "", "")
+	msg := clievent.NewUserMessageWithMeta("hello", atts, "", "")
 	s, _ := msg.Message.Content.(string)
 	if strings.Contains(s, "  - \n") {
 		t.Errorf("empty path should be skipped, got hint: %q", s)
@@ -2165,7 +2139,7 @@ func TestClaudeProtocol_WriteMessage_WithImages(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
 	var buf bytes.Buffer
-	images := []Attachment{
+	images := []clievent.Attachment{
 		{Data: []byte("png-bytes"), MimeType: "image/png"},
 	}
 	if err := p.WriteMessage(&buf, "what is this?", images); err != nil {
@@ -2201,7 +2175,7 @@ func TestACPProtocol_WriteMessage_WithImages(t *testing.T) {
 	p := &ACPProtocol{}
 	p.storeSessionID("sess_img")
 	var buf bytes.Buffer
-	images := []Attachment{
+	images := []clievent.Attachment{
 		{Data: []byte("jpeg-bytes"), MimeType: "image/jpeg"},
 	}
 	if err := p.WriteMessage(&buf, "analyze", images); err != nil {

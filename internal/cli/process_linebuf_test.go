@@ -52,7 +52,7 @@ func TestLineBufShrinkThreshold_ConstantValue(t *testing.T) {
 // event handling outright (e.g. a lineBuf = nil typo, a scanner buffer
 // misconfig), this shows up here instead of in production.
 //
-// Event size: 150 KiB of JSON-escaped filler inside an assistant
+// clievent.Event size: 150 KiB of JSON-escaped filler inside an assistant
 // message's text field. That puts the total line payload around
 // 150 KiB + ~100 bytes of envelope — comfortably into the "retain
 // capacity" band under the new 256 KiB threshold, and comfortably

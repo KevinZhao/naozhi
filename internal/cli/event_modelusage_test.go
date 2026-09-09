@@ -39,7 +39,7 @@ func TestReadEvent_NonResultFrameHasNilModelUsage(t *testing.T) {
 		t.Fatalf("ReadEvent err=%v n=%d", err, len(evs))
 	}
 	if evs[0].ModelUsage != nil {
-		t.Fatalf("assistant frame must not allocate ModelUsage, got %v", evs[0].ModelUsage)
+		t.Fatalf("assistant frame must not allocate clievent.ModelUsage, got %v", evs[0].ModelUsage)
 	}
 }
 
