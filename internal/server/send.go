@@ -15,6 +15,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -180,7 +181,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 		// 也要通知到，否则它们继续占着 sendSlot 直到超时，新消息被
 		// ErrTooManyPending 拒绝（与 IM 路径 dispatch.discardQueue 对齐）。
 		if sess := e.router.SessionFor(key); sess != nil {
-			sess.DiscardPassthroughPending(cli.ErrSessionReset)
+			sess.DiscardPassthroughPending(clierr.ErrSessionReset)
 		}
 		// Atomic Reset + workspaceOverride delete: a concurrent SetWorkspace
 		// must not survive and leak into the fresh session.

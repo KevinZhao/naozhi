@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -69,52 +69,52 @@ func TestForSendError_ContractTable(t *testing.T) {
 		},
 		{
 			name:     "ErrNoOutputTimeout",
-			err:      cli.ErrNoOutputTimeout,
+			err:      clierr.ErrNoOutputTimeout,
 			wantSubs: []string{"处理超时"},
 		},
 		{
 			name:     "ErrTotalTimeout",
-			err:      cli.ErrTotalTimeout,
+			err:      clierr.ErrTotalTimeout,
 			wantSubs: []string{"处理超时"},
 		},
 		{
 			name:     "ErrProcessExited",
-			err:      cli.ErrProcessExited,
+			err:      clierr.ErrProcessExited,
 			wantSubs: []string{"进程意外退出"},
 		},
 		{
 			name:     "ErrAbortedByUrgent",
-			err:      cli.ErrAbortedByUrgent,
+			err:      clierr.ErrAbortedByUrgent,
 			wantSubs: []string{"/urgent", "打断"},
 		},
 		{
 			name:     "ErrReconnectedUnknown",
-			err:      cli.ErrReconnectedUnknown,
+			err:      clierr.ErrReconnectedUnknown,
 			wantSubs: []string{"系统已重启", "状态未知"},
 		},
 		{
 			name:     "ErrSessionReset",
-			err:      cli.ErrSessionReset,
+			err:      clierr.ErrSessionReset,
 			wantSubs: []string{"会话已重置"},
 		},
 		{
 			name:     "ErrTooManyPending",
-			err:      cli.ErrTooManyPending,
+			err:      clierr.ErrTooManyPending,
 			wantSubs: []string{"排队已满", "/stop"},
 		},
 		{
 			name:     "ErrProcessBusy",
-			err:      cli.ErrProcessBusy,
+			err:      clierr.ErrProcessBusy,
 			wantSubs: []string{"正在处理上一条消息"},
 		},
 		{
 			name:     "ErrMessageTooLarge",
-			err:      cli.ErrMessageTooLarge,
+			err:      clierr.ErrMessageTooLarge,
 			wantSubs: []string{"消息内容过大"},
 		},
 		{
 			name:     "ErrOrphanedSlot",
-			err:      cli.ErrOrphanedSlot,
+			err:      clierr.ErrOrphanedSlot,
 			wantSubs: []string{"处理超时"},
 		},
 		{

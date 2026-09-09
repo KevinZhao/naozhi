@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -106,11 +107,11 @@ func (s *ManagedSession) PassthroughDepth() int {
 // deathReason bookkeeping. Shared between Send and SendPassthrough.
 func (s *ManagedSession) mapSendError(proc processIface, err error) {
 	switch {
-	case errors.Is(err, cli.ErrNoOutputTimeout):
+	case errors.Is(err, clierr.ErrNoOutputTimeout):
 		storeAtomicString(&s.deathReason, "no_output_timeout")
-	case errors.Is(err, cli.ErrTotalTimeout):
+	case errors.Is(err, clierr.ErrTotalTimeout):
 		storeAtomicString(&s.deathReason, "total_timeout")
-	case errors.Is(err, cli.ErrProcessExited):
+	case errors.Is(err, clierr.ErrProcessExited):
 		reason := "process_exited"
 		if dr := proc.DeathReason(); dr != "" {
 			reason = dr
@@ -282,8 +283,8 @@ func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 //
 //   - InterruptSent       → nil
 //   - InterruptNoSession  → nil (no live process to fail against)
-//   - InterruptNoTurn     → cli.ErrNoActiveTurn
-//   - InterruptUnsupported → cli.ErrInterruptUnsupported
+//   - InterruptNoTurn     → clierr.ErrNoActiveTurn
+//   - InterruptUnsupported → clierr.ErrInterruptUnsupported
 //   - InterruptError      → the wrapped transport error (non-nil)
 func (s *ManagedSession) InterruptViaControlDetail() (InterruptOutcome, error) {
 	proc := s.loadProcess()
@@ -295,9 +296,9 @@ func (s *ManagedSession) InterruptViaControlDetail() (InterruptOutcome, error) {
 		return InterruptSent, nil
 	}
 	switch {
-	case errors.Is(err, cli.ErrNoActiveTurn):
+	case errors.Is(err, clierr.ErrNoActiveTurn):
 		return InterruptNoTurn, err
-	case errors.Is(err, cli.ErrInterruptUnsupported):
+	case errors.Is(err, clierr.ErrInterruptUnsupported):
 		// Caller decides whether to fall back; escalating to SIGINT silently
 		// would couple two different semantics.
 		return InterruptUnsupported, err

@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // TestProcess_cachedProjectDir pins [R112714-PERF-2]: InitLinker must
@@ -12,7 +14,7 @@ import (
 func TestProcess_cachedProjectDir(t *testing.T) {
 	t.Parallel()
 	cwd := "/home/ec2-user/workspace/naozhi"
-	p := &Process{eventLog: NewEventLog(0)}
+	p := &Process{eventLog: ring.NewEventLog(0)}
 	p.InitLinker(cwd)
 
 	wantSuffix := "-home-ec2-user-workspace-naozhi"
@@ -30,7 +32,7 @@ func TestProcess_cachedProjectDir(t *testing.T) {
 // (Resolve bails on empty projectDir — no regression).
 func TestProcess_cachedProjectDir_empty(t *testing.T) {
 	t.Parallel()
-	p := &Process{eventLog: NewEventLog(0)}
+	p := &Process{eventLog: ring.NewEventLog(0)}
 	p.InitLinker("")
 	if p.cachedProjectDir != "" {
 		t.Errorf("cachedProjectDir should be empty for empty cwd, got %q", p.cachedProjectDir)

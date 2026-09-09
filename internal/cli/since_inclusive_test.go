@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 func TestSinceInclusive(t *testing.T) {
@@ -26,7 +27,7 @@ func TestSinceInclusive(t *testing.T) {
 // as well as newer ones, so a same-ms sibling is never dropped by a catch-up.
 func TestSinceInclusive_EntriesSinceReadmitsWatermark(t *testing.T) {
 	t.Parallel()
-	log := NewEventLog(0)
+	log := ring.NewEventLog(0)
 	log.Append(clievent.EventEntry{Time: 1000, UUID: "old", Type: "user"})
 	log.Append(clievent.EventEntry{Time: 2000, UUID: "a", Type: "thinking"})
 	log.Append(clievent.EventEntry{Time: 2000, UUID: "b", Type: "text"})

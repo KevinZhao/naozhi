@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -335,10 +336,10 @@ func (s *ManagedSession) SubagentLinker() *cli.SubagentLinker {
 	return nil
 }
 
-// AgentEventLog exposes the live *cli.EventLog so the server-side tailer
+// AgentEventLog exposes the live *ring.EventLog so the server-side tailer
 // registry can install its task_done hook. nil for fake processes / dead
 // sessions, same policy as SubagentLinker above.
-func (s *ManagedSession) AgentEventLog() *cli.EventLog {
+func (s *ManagedSession) AgentEventLog() *ring.EventLog {
 	if real := s.loadCliProcess(); real != nil {
 		return real.EventLog()
 	}
@@ -396,7 +397,7 @@ func sortEntriesByTimeStable(entries []clievent.EventEntry) {
 // EventEntriesSince returns the event log entries with Time > afterMS in
 // chronological order.
 //
-// Live branch: cli.EventLog's ring is weakly Time-monotonic by construction
+// Live branch: ring.EventLog's ring is weakly Time-monotonic by construction
 // (Append stamps zero-Time entries with now; AppendBatch uses one now), so
 // no re-sort on this WS push hot path. Dead branch: persistedHistory is
 // sorted lazily under historyMu if the sorted flag is unset.
@@ -564,7 +565,7 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 func countVisibleEntries(entries []clievent.EventEntry) int {
 	n := 0
 	for i := range entries {
-		if cli.IsVisibleEntry(entries[i]) {
+		if clievent.IsVisibleEntry(entries[i]) {
 			n++
 		}
 	}
@@ -702,7 +703,7 @@ func (s *ManagedSession) persistedHistoryTailVisible(visibleTarget, maxTotal int
 	start := n // exclusive lower bound of the tail we keep
 	for i := n - 1; i >= 0 && (n-i) <= limit; i-- {
 		start = i
-		if cli.IsVisibleEntry(s.persistedHistory[i]) {
+		if clievent.IsVisibleEntry(s.persistedHistory[i]) {
 			visible++
 			if visibleTarget > 0 && visible >= visibleTarget {
 				break
@@ -785,7 +786,7 @@ func scanLastSummaries(entries []clievent.EventEntry) (prompt, activity, respons
 		if prompt == "" && e.Type == "user" {
 			prompt = e.Summary
 		}
-		if activity == "" && cli.IsActivityType(e.Type) {
+		if activity == "" && clievent.IsActivityType(e.Type) {
 			activity = e.Summary
 		}
 		if response == "" && e.Type == "text" {

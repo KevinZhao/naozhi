@@ -4,14 +4,13 @@ import (
 	"context"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func visibleCount(entries []clievent.EventEntry) int {
 	n := 0
 	for i := range entries {
-		if cli.IsVisibleEntry(entries[i]) {
+		if clievent.IsVisibleEntry(entries[i]) {
 			n++
 		}
 	}

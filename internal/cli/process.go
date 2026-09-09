@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"math"
@@ -13,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -38,7 +38,7 @@ const (
 
 	// maxStdinLineBytes is the largest single NDJSON line forwarded to the shim
 	// (which enforces 16 MB per line); headroom is for the shimClientMsg envelope.
-	// Exceeding it fails fast with ErrMessageTooLarge so the dashboard can surface it.
+	// Exceeding it fails fast with clierr.ErrMessageTooLarge so the dashboard can surface it.
 	maxStdinLineBytes = 12 * 1024 * 1024
 
 	// lineBufShrinkThreshold caps the capacity readLoop's lineBuf may retain
@@ -49,56 +49,9 @@ const (
 	lineBufShrinkThreshold = 256 * 1024
 )
 
-// ErrMessageTooLarge is returned when a user message (after JSON encoding) would
-// exceed the shim's per-line limit; callers should shrink the payload first.
-var ErrMessageTooLarge = errors.New("message too large for stream-json line")
-
-// Sentinel errors for watchdog timeouts.
-var (
-	ErrNoOutputTimeout = errors.New("no output timeout")
-	ErrTotalTimeout    = errors.New("total timeout")
-)
-
-// ErrProcessExited is returned by Send when the CLI subprocess exits before
-// producing a result; callers react by spawning a new process next turn.
-var ErrProcessExited = errors.New("process exited during send")
-
-// ErrProcessBusy is returned by Send when the legacy (non-passthrough) state
-// machine is already StateRunning; dispatch maps it to "正在处理中".
-var ErrProcessBusy = errors.New("process busy")
-
-// Passthrough-mode sentinels (separate block for targeted errors.Is switches).
-var (
-	// ErrSessionReset fires when a user slash-command (/new, /clear) or a forced
-	// wrapper reset cancels all pending sends; not surfaced to IM (user-triggered).
-	ErrSessionReset = errors.New("session reset")
-
-	// ErrReconnectedUnknown fires when naozhi re-attaches to a shim+CLI that
-	// survived a restart with messages in flight: naozhi cannot tell which were
-	// consumed, so every pending slot gets it (dispatcher: 状态未知，请查看历史或重发).
-	ErrReconnectedUnknown = errors.New("reconnected: processing state unknown")
-
-	// ErrTooManyPending fires when Send is called with maxPendingSlots already
-	// pending; the message is rejected up front (dispatcher: sendAckBusy).
-	ErrTooManyPending = errors.New("too many pending messages")
-
-	// ErrOrphanedSlot is a defensive fallback: Send's totalTimeout+30s tripwire in
-	// case watchdog and readLoop both miss delivering a result. Fires only on bugs.
-	ErrOrphanedSlot = errors.New("slot orphaned: no result or error received")
-)
-
 // maxPendingSlots caps the per-Process passthrough pending queue; a goroutine-
 // leak / memory backstop, not a business limit. Tunable via SetMaxPendingSlots.
 const maxPendingSlots = 16
-
-// ErrAbortedByUrgent fires when a priority:"now" message makes the CLI drop the
-// in-flight turn: older pending slots not yet replayed get this error — their
-// text never reached the model, so the user must decide whether to resend.
-var ErrAbortedByUrgent = errors.New("aborted by priority:now preemption")
-
-// ErrNoActiveTurn is returned by InterruptViaControl when no turn is running;
-// nothing was interrupted, so logs must not claim "aborted active turn".
-var ErrNoActiveTurn = errors.New("no active turn to interrupt")
 
 // processCloseTimeout bounds Close() while the shim tears down its listener +
 // socket (closeStdin + waitOrKill(5s) + listener.Close + os.Remove, so 8s is
@@ -174,7 +127,7 @@ type Process struct {
 	controlAckMu sync.Mutex
 	controlAcks  map[string]chan error
 
-	eventLog  *EventLog
+	eventLog  *ring.EventLog
 	totalCost atomic.Uint64 // math.Float64bits(lastResultCostUSD); atomic so Snapshot is lock-free.
 
 	// Normalized metadata from backend metadata events (ACP _kiro.dev/metadata).
@@ -409,7 +362,7 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,
 		totalTimeout:    totalTimeout,
-		eventLog:        NewEventLog(0),
+		eventLog:        ring.NewEventLog(0),
 		// maxMisses+1 so a heartbeatLoop scheduler stall cannot drop pongs
 		// (readLoop's pong arm is non-blocking) and miscount a healthy shim.
 		pongRecv: make(chan struct{}, 4),

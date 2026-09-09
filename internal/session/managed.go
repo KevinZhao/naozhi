@@ -9,6 +9,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
@@ -61,7 +62,7 @@ type ProcessSender interface {
 	Interrupt()
 	// InterruptViaControl aborts the active turn via an in-band stream-json
 	// control_request (no SIGINT, no kill). Returns
-	// cli.ErrInterruptUnsupported for protocols without this primitive.
+	// clierr.ErrInterruptUnsupported for protocols without this primitive.
 	InterruptViaControl() error
 }
 
@@ -118,7 +119,7 @@ type HistoryInjector interface {
 	InjectHistory(entries []clievent.EventEntry)
 	// TurnAgents returns the subagent roster observed this turn; empty for
 	// backends without a subagent concept.
-	TurnAgents() []cli.SubagentInfo
+	TurnAgents() []ring.SubagentInfo
 }
 
 // processIface abstracts the CLI process methods used by session-aware code
@@ -457,11 +458,11 @@ type SessionSnapshot struct {
 	// LabelOrigin records who set UserLabel: "" / "user" (human) or "auto"
 	// (sysession daemon); drives the bot icon and "restore auto naming"
 	// action (docs/rfc/system-session.md §7.3 / §9.3).
-	LabelOrigin     string             `json:"label_origin,omitempty"`
-	Project         string             `json:"project,omitempty"`          // project name (filled by server)
-	ProjectFallback bool               `json:"project_fallback,omitempty"` // true when Project is a workspace-basename fallback, not a registered project
-	IsPlanner       bool               `json:"is_planner,omitempty"`       // true for project planner sessions
-	Subagents       []cli.SubagentInfo `json:"subagents,omitempty"`        // active sub-agent types in current turn
+	LabelOrigin     string              `json:"label_origin,omitempty"`
+	Project         string              `json:"project,omitempty"`          // project name (filled by server)
+	ProjectFallback bool                `json:"project_fallback,omitempty"` // true when Project is a workspace-basename fallback, not a registered project
+	IsPlanner       bool                `json:"is_planner,omitempty"`       // true for project planner sessions
+	Subagents       []ring.SubagentInfo `json:"subagents,omitempty"`        // active sub-agent types in current turn
 	// MessageCount is the cumulative "user" turn count: from the live Process
 	// event log since spawn, else the persistedHistory count. Not persisted;
 	// InjectHistory → EventLog.AppendBatch rebuilds it on reconnect.

@@ -14,11 +14,12 @@ package api
 import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // Appender is the write side. Append enqueues one event; AppendBatch
 // enqueues several, ordered atomically. Implementations MUST NOT block the
-// caller on durable I/O (the cli.EventLog.Append "never stall" contract).
+// caller on durable I/O (the ring.EventLog.Append "never stall" contract).
 type Appender interface {
 	Append(e clievent.EventEntry)
 	AppendBatch(entries []clievent.EventEntry)
@@ -32,9 +33,9 @@ type Reader = cli.HistorySource
 // EventSubscription bundling the notify channel with its cancel func; the
 // channel fires (non-blocking) on every Append and is closed by Cancel or
 // store teardown — callers MUST NOT close it. The name matches
-// cli.EventLog.SubscribeNew so the ring backend satisfies it without a shim.
+// ring.EventLog.SubscribeNew so the ring backend satisfies it without a shim.
 type Subscriber interface {
-	SubscribeNew() cli.EventSubscription
+	SubscribeNew() ring.EventSubscription
 }
 
 // EventStore is the unified backend contract (#1570): a registry can hand a

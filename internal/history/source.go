@@ -12,7 +12,7 @@ import "github.com/naozhi/naozhi/internal/cli"
 //
 // Implementations must be safe for concurrent use. LoadBefore returns up to
 // `limit` entries with Time strictly less than `beforeMS`, oldest → newest,
-// mirroring cli.EventLog.EntriesBefore. beforeMS <= 0 means no upper bound;
+// mirroring ring.EventLog.EntriesBefore. beforeMS <= 0 means no upper bound;
 // limit <= 0 returns nil. Errors are informational: callers log and treat
 // them as end-of-history. ctx cancellation must propagate into file I/O.
 type Source = cli.HistorySource

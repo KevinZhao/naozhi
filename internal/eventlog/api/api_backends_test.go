@@ -1,6 +1,6 @@
 // Package api_test holds the compile-time shadow-regrowth gate for #737
 // (RFC eventlog-subsystem-unify Phase 1). The existing in-package
-// api_test.go anchors the contract against *cli.EventLog plus a hand-written
+// api_test.go anchors the contract against *ring.EventLog plus a hand-written
 // stubReader; this external test pins the assertions to the REAL durable
 // backends so a future signature drift in any tier breaks the build instead
 // of silently re-growing the three-tier shadow (#1369).
@@ -12,7 +12,7 @@
 //
 // Why only three of the four tiers appear here:
 //
-//   - cli.EventLog (in-memory ring)  -> Appender + Subscriber  [asserted]
+//   - ring.EventLog (in-memory ring)  -> Appender + Subscriber  [asserted]
 //   - naozhilog.Source (replay)      -> Reader                 [asserted]
 //   - merged.Source (composed read)  -> Reader                 [asserted]
 //   - persist.Persister (durable spool) -> NONE of the api interfaces.
@@ -29,8 +29,8 @@
 package api_test
 
 import (
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/api"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/history/merged"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 )
@@ -38,8 +38,8 @@ import (
 // Compile-time gate: the canonical in-memory ring backend satisfies the
 // write + subscribe halves of the unified contract with no shim.
 var (
-	_ api.Appender   = (*cli.EventLog)(nil)
-	_ api.Subscriber = (*cli.EventLog)(nil)
+	_ api.Appender   = (*ring.EventLog)(nil)
+	_ api.Subscriber = (*ring.EventLog)(nil)
 )
 
 // Compile-time gate: the durable replay reader satisfies api.Reader
