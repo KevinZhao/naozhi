@@ -60,8 +60,8 @@ func TestHandleCloseDrainsViaWait(t *testing.T) {
 		Cache:      fc,
 		NodeAccess: fakeNodeAccess{},
 		ClaudeDir:  t.TempDir(),
+		AppCtx:     context.Background(),
 	})
-	h.appCtx = context.Background()
 
 	body, _ := json.Marshal(map[string]any{
 		"pid":             deadPID,

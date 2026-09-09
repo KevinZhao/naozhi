@@ -43,12 +43,11 @@ import (
 func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 	// R243-ARCH-2 split: Hub.Shutdown stays in wshub.go (lifecycle owner),
 	// but the debounce AfterFunc scheduler moved to wshub_broadcast.go alongside
-	// BroadcastSessionsUpdate. Read both and concatenate so the regex anchors
-	// can locate either side without caring which file owns each fragment.
-	src := []byte(packageGoSource(t))
-	bcastSrc := []byte(packageGoSource(t))
-	body := string(src)
-	bcastBody := string(bcastSrc)
+	// BroadcastSessionsUpdate. The whole-package source covers both, so the
+	// regex anchors below locate either side without caring which file owns
+	// each fragment. (#2560 switched this to packageGoSource; the second
+	// identical read it left behind was removed in #2637.)
+	body := packageGoSource(t)
 
 	// Locate the Shutdown function body. We match from `func (h *Hub) Shutdown()`
 	// up to the next top-level `^func `. Using a simple anchor search keeps
@@ -107,7 +106,7 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 	// either site is acceptable as long as the deferred Done remains the
 	// first statement of the AfterFunc callback body.
 	deferShape := regexp.MustCompile(`func\(\)\s*\{\s*defer\s+h\.clientWG\.Done\(\)`)
-	if !deferShape.MatchString(string(src)) && !deferShape.MatchString(bcastBody) {
+	if !deferShape.MatchString(body) {
 		t.Error("debounce AfterFunc callback no longer opens with " +
 			"`defer h.clientWG.Done()`. Without this defer, a callback that " +
 			"fires between Stop() returning false and Shutdown draining " +
@@ -118,7 +117,7 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 	// every call falls back to the inline literal and R239-PERF-6 regresses
 	// silently). Pin the field assignment so future refactors that drop the
 	// pre-bind step trip CI.
-	if !regexp.MustCompile(`h\.debounceFire\s*=\s*func\(\)`).Match(src) {
+	if !regexp.MustCompile(`h\.debounceFire\s*=\s*func\(\)`).MatchString(body) {
 		t.Error("Hub.NewHub no longer pre-binds h.debounceFire — " +
 			"BroadcastSessionsUpdate would fall back to the per-call inline " +
 			"closure literal, regressing R239-PERF-6.")
@@ -127,7 +126,7 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 	// hot-path BroadcastSessionsUpdate calls reuse the Hub-lifetime func
 	// value rather than allocating a fresh one each refresh.
 	if !regexp.MustCompile(`time\.AfterFunc\(debounceInterval,\s*fire\)`).
-		MatchString(bcastBody) {
+		MatchString(body) {
 		t.Error("BroadcastSessionsUpdate no longer hands the pre-bound " +
 			"`fire` callback to time.AfterFunc — the per-call closure " +
 			"allocation is back. R239-PERF-6.")
@@ -177,10 +176,9 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 //     timer.
 //  3. The armed/idle sentinel is debounceArmed, not timer==nil.
 func TestDebounceTimer_PreallocatedReuseContract(t *testing.T) {
-	src := []byte(packageGoSource(t))
-	bcastSrc := []byte(packageGoSource(t))
-	body := string(src)
-	bcastBody := string(bcastSrc)
+	// Whole-package source: NewHub (wshub.go) and the broadcast arm path
+	// (wshub_broadcast.go) are both in it, so one read serves every anchor.
+	body := packageGoSource(t)
 
 	// 1) NewHub pre-allocates the timer (AfterFunc bound to debounceFire) and
 	// Stops it. We accept any duration arg in the AfterFunc so a future tweak
@@ -198,7 +196,7 @@ func TestDebounceTimer_PreallocatedReuseContract(t *testing.T) {
 
 	// 2) The production arm path re-uses the timer via Reset, not reassignment.
 	if !regexp.MustCompile(`h\.debounceTimer\.Reset\(debounceInterval\)`).
-		MatchString(bcastBody) {
+		MatchString(body) {
 		t.Error("BroadcastSessionsUpdate no longer re-arms the pre-allocated " +
 			"timer via Reset(debounceInterval) — per-call timer allocation is " +
 			"back. R200109-PERF-14 (#1624).")
@@ -206,7 +204,7 @@ func TestDebounceTimer_PreallocatedReuseContract(t *testing.T) {
 
 	// 3) The armed/idle sentinel must be debounceArmed (the timer object is now
 	// Hub-lifetime so timer==nil can no longer mean "idle").
-	if !regexp.MustCompile(`h\.debounceArmed`).MatchString(bcastBody) {
+	if !regexp.MustCompile(`h\.debounceArmed`).MatchString(body) {
 		t.Error("BroadcastSessionsUpdate no longer tracks armed state via " +
 			"debounceArmed. The pre-allocated timer is never nil so the old " +
 			"timer==nil idle sentinel is unsafe. R200109-PERF-14 (#1624).")

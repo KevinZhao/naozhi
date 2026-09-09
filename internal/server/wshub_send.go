@@ -314,7 +314,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 
 	// send_ack is deferred until nc.Send returns so the remote session exists
 	// before the browser's follow-up subscribe arrives. TrackSend registers the
-	// goroutine with sendWG so Shutdown waits for the in-flight RPC+broadcast,
+	// goroutine with the engine wg so Shutdown waits for the in-flight RPC+broadcast,
 	// and refuses a send that races Shutdown instead of slipping past clientWG.
 	release, shuttingDown := h.engine.TrackSend()
 	if shuttingDown {

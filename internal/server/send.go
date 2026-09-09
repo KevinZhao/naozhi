@@ -150,7 +150,7 @@ const interruptAcquireTimeout = 2 * time.Second
 // the message was enqueued for the owner's drain loop to coalesce.
 // onAsyncError (may be nil) fires from the owner goroutine when the turn fails
 // after the ack, with the underlying error (nil at literal-message sites) +
-// localised label so fan-out callers can filter (Hub.httpSendErrorCallback).
+// localised label so fan-out callers can filter (sendEngine.sendErrorCallback).
 func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
 	key := p.Key
 	// ValidateSessionKey rejects C0/C1 controls, bidi overrides, non-UTF-8 and
@@ -303,7 +303,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 	}
 
 	// Owner — spawn the drain loop. TrackSend declines a send arriving
-	// concurrently with Shutdown instead of escaping past sendWG.Wait.
+	// concurrently with Shutdown instead of escaping past drain's wg.Wait.
 	release, shuttingDown := e.TrackSend()
 	if shuttingDown {
 		// Discard drops ownership (bumps gen, clears the owner flag) so a

@@ -1,16 +1,7 @@
-// build_dashboard.go — the dashboard half of the composition root (#2552).
-//
-// These objects (Hub, upload store, SendHandler, scratch handlers, memory
-// handler, the run-telemetry broadcaster) used to be constructed inside
-// registerDashboard, which Start calls. That made `s.hub == nil` a legal state
-// for the whole pre-Start lifetime, so five unrelated call sites carried
-// `if s.hub != nil` guards, three handlers were completed by Set* calls after
-// the fact, and the ordering was held together by comments ("sendH is wired
-// after registerDashboard creates hub", "#431 setter-vs-Start ordering
-// window"). Constructing them in buildServer removes the state rather than the
-// guards.
-//
-// Split of responsibility: this file CONSTRUCTS, registerDashboard REGISTERS
+// build_dashboard.go — the dashboard half of the composition root (#2552):
+// Hub, upload store, SendHandler, scratch / memory handlers and the
+// run-telemetry broadcaster are constructed here, so s.hub is non-nil for the
+// Server's whole life. This file CONSTRUCTS; registerDashboard REGISTERS
 // routes and STARTS goroutines. Nothing here may start a goroutine or bind a
 // listener — a construction failure must not leak a ticker.
 package server

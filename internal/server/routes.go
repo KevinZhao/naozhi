@@ -148,22 +148,6 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	}
 }
 
-// registerSessionRoutes wires the session-CRUD route group. `auth` is the
-// caller's RequireAuth wrapper so every route here stays authenticated.
-
-// registerScratchRoutes wires the scratch-drawer route group; deployments
-// without a scratch pool register no scratch routes.
-
-// registerProjectRoutes wires the project route group; all handlers are
-// *dashproject.Handlers methods (the *Server-owned /api/planner/stats stays
-// at the call site).
-
-// registerDiscoveredRoutes wires the discovered-session route group
-// (list / preview / takeover / close).
-
-// registerCronRoutes wires the cron route group (CRUD + pause/resume/trigger/
-// preview + run-history + transcript).
-
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if s.dashboardToken != "" && !s.auth.IsAuthenticated(r) {
 		// Rate-limit unauthenticated GETs so scanners cannot hammer the login

@@ -41,14 +41,14 @@ const defaultDedupCapacity = 10000
 type Server struct {
 	// ── HTTP entry ─────────────────────────────────────
 	addr      string         // 读写: server.go
-	mux       *http.ServeMux // 读写: dashboard_ccassets.go, debug_expvar.go, debug_pprof.go, routes.go, server.go
+	mux       *http.ServeMux // 读写: debug_expvar.go, debug_pprof.go, routes.go, server.go
 	startedAt time.Time      // 读写: server.go
 	onReady   func()         // 读写: server.go (called after listener is bound)
 	// appCtx is the process-lifetime context every background loop, the Hub
 	// and the upload-store cleaner hang off. Created in buildServer (#2552) so
 	// construction no longer has to wait for Start: Start links its own ctx to
 	// appCancel instead of minting a second context.
-	appCtx    context.Context    // 读写: build_dashboard.go, routes.go, server.go (HubOptions.ParentCtx)
+	appCtx    context.Context    // 读写: build_dashboard.go, build_dispatch.go, routes.go, server.go (HubOptions.ParentCtx)
 	appCancel context.CancelFunc // 读写: server.go (Start's linker + the Serve-error path)
 	logger    *slog.Logger       // 读写: server.go
 
@@ -58,10 +58,10 @@ type Server struct {
 	uploadStore *uploadStore // 读写: build_dashboard.go, routes.go
 
 	// ── core deps ──────────────────────────────────────
-	router     *session.Router  // 读写: build_dashboard.go, server.go, server_loops.go, takeover.go
-	scheduler  cronScheduler    // 读写: build_dashboard.go, server.go (narrowed to the cronScheduler consumer view, #1648)
-	hub        *Hub             // 读写: build_dashboard.go, dashboard_send.go, routes.go, send.go, server.go, server_loops.go, sessions_bus.go (WebSocket hub)
-	projectMgr *project.Manager // 读写: build_dashboard.go, server.go, server_loops.go
+	router     *session.Router  // 读写: build_dashboard.go, build_dispatch.go, send_dispatch_adapter.go, server.go, server_loops.go, takeover.go
+	scheduler  cronScheduler    // 读写: build_dashboard.go, build_dispatch.go, server.go (narrowed to the cronScheduler consumer view, #1648)
+	hub        *Hub             // 读写: build_dashboard.go, routes.go, send.go, server.go, server_loops.go (WebSocket hub)
+	projectMgr *project.Manager // 读写: build_dashboard.go, build_dispatch.go, server.go, server_loops.go
 
 	// ── multi-node ─────────────────────────────────────
 	nodes             *nodeRegistry       // 读写: build_dashboard.go, server.go (single owner of the node table; same instance as Hub.nodes)
@@ -75,33 +75,32 @@ type Server struct {
 
 	// ── send / dispatch wiring ─────────────────────────
 	dispatcher      *dispatch.Dispatcher         // 读写: server.go (ctor builds; Start only calls BuildHandler)
-	dedup           *platform.Dedup              // 读写: server.go (ctor only)
-	sessionGuard    *session.Guard               // 读写: build_dashboard.go, server.go
-	msgQueue        *dispatch.MessageQueue       // 读写: build_dashboard.go, server.go
-	agents          map[string]session.AgentOpts // 读写: build_dashboard.go, server.go
-	agentCommands   map[string]string            // 读写: build_dashboard.go, server.go
+	dedup           *platform.Dedup              // 读写: build_dispatch.go, server.go (ctor only)
+	sessionGuard    *session.Guard               // 读写: build_dashboard.go, build_dispatch.go, server.go
+	msgQueue        *dispatch.MessageQueue       // 读写: build_dashboard.go, build_dispatch.go, server.go
+	agents          map[string]session.AgentOpts // 读写: build_dashboard.go, build_dispatch.go, server.go
+	agentCommands   map[string]string            // 读写: build_dashboard.go, build_dispatch.go, server.go
 	dashboardToken  string                       // 读写: build_dashboard.go, debug_expvar.go, debug_pprof.go, routes.go, server.go
-	allowedRoot     string                       // 读写: build_dashboard.go, server.go (also Hub.allowedRoot)
-	noOutputTimeout time.Duration                // 读写: server.go (timeout error messages)
-	totalTimeout    time.Duration                // 读写: server.go
+	allowedRoot     string                       // 读写: build_dashboard.go, build_dispatch.go, server.go (also Hub.allowedRoot)
+	noOutputTimeout time.Duration                // 读写: build_dispatch.go, server.go (timeout error messages)
+	totalTimeout    time.Duration                // 读写: build_dispatch.go, server.go
 
 	// ── on-disk paths / caches / sysession ─────────────
-	claudeDir      string               // 读写: server.go, takeover.go
+	claudeDir      string               // 读写: build_dispatch.go, server.go, takeover.go
 	discoveryCache *discoveryCache      // 读写: server.go (background-cached local discovery results)
 	scratchPool    *session.ScratchPool // 读写: build_dashboard.go, routes.go, server.go (ephemeral aside sessions for preview drawer)
-	sysessionMgr   *sysession.Manager   // 读写: build_dashboard.go (system-daemon Tick scheduling)
-	orient         *orientConfig        // 读: routes.go (image auto-orientation; nil = feature off)
-	// accessProfilesH serves GET+POST /api/access-profiles; empty ConfigPath
-	// keeps create disabled (400). 读: routes.go.
+	sysessionMgr   *sysession.Manager   // 读写: build_dashboard.go, server.go (system-daemon Tick scheduling)
+	orient         *orientConfig        // 读: build_dashboard.go, server.go (image auto-orientation; nil = feature off)
 
 	// ── modes / resolver / node cache ──────────────────
-	debugMode bool                 // 读写: routes.go (gates /api/debug/pprof and /api/debug/vars)
-	resolver  *session.KeyResolver // 读写: build_dashboard.go, server.go (session-key → opts derivation)
+	debugMode bool                 // 读写: routes.go, server.go (gates /api/debug/pprof and /api/debug/vars)
+	resolver  *session.KeyResolver // 读写: build_dashboard.go, build_dispatch.go, server.go (session-key → opts derivation)
 	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data)
 
 	// ── watchdog counters ──────────────────────────────
 	// watchdog holds the no-output / total watchdog-kill counters exposed via
 	// /health and /api/sessions; dispatch increments them via noOutPtr()/totalPtr().
+	// 读写: build_dispatch.go, server.go
 	watchdog watchdogCounters
 
 	// shutdownComplete closes once Start's shutdown goroutine has drained
@@ -110,7 +109,7 @@ type Server struct {
 	shutdownComplete chan struct{}
 
 	// platforms wires each IM channel's webhook + outbound sender at
-	// routes-registration time. 读写: server.go
+	// routes-registration time. 读写: build_dispatch.go, server.go
 	platforms map[string]platform.Platform
 }
 
