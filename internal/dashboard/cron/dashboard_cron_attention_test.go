@@ -27,7 +27,7 @@ func TestHandleAttentionList_ReturnsQueue(t *testing.T) {
 	sched := attentionTestScheduler(t, storePath)
 	sched.WriteSandboxAttentionForTest(strings.Repeat("a", 16), strings.Repeat("b", 16), "transport", "nightly PR job")
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/attention", nil)
 	w := httptest.NewRecorder()
 	h.HandleAttentionList(w, req)
@@ -59,7 +59,7 @@ func TestHandleAttentionList_ReturnsQueue(t *testing.T) {
 func TestHandleAttentionList_EmptyArray(t *testing.T) {
 	t.Parallel()
 	sched := attentionTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/attention", nil)
 	w := httptest.NewRecorder()
 	h.HandleAttentionList(w, req)
@@ -78,7 +78,7 @@ func TestHandleRunConfirm_Resolves(t *testing.T) {
 	runID := strings.Repeat("b", 16)
 	sched.WriteSandboxAttentionForTest(strings.Repeat("a", 16), runID, "transport", "job")
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodPost, "/api/cron/runs/"+runID+"/confirm", nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
@@ -96,7 +96,7 @@ func TestHandleRunConfirm_Resolves(t *testing.T) {
 func TestHandleRunConfirm_RejectsBadID(t *testing.T) {
 	t.Parallel()
 	sched := attentionTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodPost, "/api/cron/runs/x/confirm", nil)
 	req.SetPathValue("run_id", "../../etc")
 	w := httptest.NewRecorder()
@@ -110,7 +110,7 @@ func TestHandleRunConfirm_RejectsBadID(t *testing.T) {
 func TestHandleRunReplay_RequiresJobID(t *testing.T) {
 	t.Parallel()
 	sched := attentionTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	runID := strings.Repeat("b", 16)
 	req := httptest.NewRequest(http.MethodPost, "/api/cron/runs/"+runID+"/replay", strings.NewReader(`{}`))
 	req.SetPathValue("run_id", runID)
@@ -125,7 +125,7 @@ func TestHandleRunReplay_RequiresJobID(t *testing.T) {
 func TestHandleRunReplay_JobNotFound(t *testing.T) {
 	t.Parallel()
 	sched := attentionTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	runID, jobID := strings.Repeat("b", 16), strings.Repeat("a", 16)
 	req := httptest.NewRequest(http.MethodPost, "/api/cron/runs/"+runID+"/replay",
 		strings.NewReader(`{"job_id":"`+jobID+`"}`))
@@ -149,7 +149,7 @@ func TestHandleAttentionList_SanitizesReason(t *testing.T) {
 	dirtyReason := "transport\n<script>alert(1)</script>"
 	sched.WriteSandboxAttentionForTest(strings.Repeat("a", 16), strings.Repeat("b", 16), dirtyReason, "job")
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/attention", nil)
 	w := httptest.NewRecorder()
 	h.HandleAttentionList(w, req)

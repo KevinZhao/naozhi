@@ -14,11 +14,11 @@ import (
 func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	// Per-IP rate limit: every call writes cron_jobs.json and mutates the
 	// scheduler map (loop-PATCH disk IO amplification). Nil-guarded for tests.
-	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
@@ -113,13 +113,13 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if h.validateWS == nil {
+		if h.deps.ValidateWS == nil {
 			writeCronErr(w, http.StatusInternalServerError, "cron work_dir validation not wired")
 			return
 		}
-		validated, err := h.validateWS(*req.WorkDir, h.allowedRoot)
+		validated, err := h.deps.ValidateWS(*req.WorkDir, h.deps.AllowedRoot)
 		if err != nil {
-			status, msg := h.classifyWSErr(err)
+			status, msg := h.deps.ClassifyWSErr(err)
 			slog.Debug("cron work_dir validation failed", "err", err)
 			writeCronErr(w, status, msg)
 			return
@@ -132,7 +132,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	// current value, present fields (including explicit "") override it.
 	if req.Notify != nil && *req.Notify {
 		effPlatform, effChatID := "", ""
-		if cur, ok := h.scheduler.GetJob(id); ok {
+		if cur, ok := h.deps.Scheduler.GetJob(id); ok {
 			effPlatform, effChatID = cur.NotifyPlatform, cur.NotifyChatID
 		}
 		if req.NotifyPlatform != nil {
@@ -142,7 +142,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 			effChatID = *req.NotifyChatID
 		}
 		perJobSet := effPlatform != "" && effChatID != ""
-		if !perJobSet && !h.scheduler.NotifyDefault().IsSet() {
+		if !perJobSet && !h.deps.Scheduler.NotifyDefault().IsSet() {
 			writeCronErr(w, http.StatusBadRequest, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id")
 			return
 		}
@@ -179,7 +179,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	j, err := h.scheduler.UpdateJob(id, cronpkg.JobUpdate{
+	j, err := h.deps.Scheduler.UpdateJob(id, cronpkg.JobUpdate{
 		Schedule:       req.Schedule,
 		Prompt:         req.Prompt,
 		Title:          req.Title,

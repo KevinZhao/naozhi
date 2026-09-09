@@ -82,7 +82,7 @@ func TestHandleRunsList_SummarySessionID_Sanitized(t *testing.T) {
 		t.Fatalf("chtimes: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/cron/runs?job_id="+jobID, nil)
 	w := httptest.NewRecorder()
@@ -171,7 +171,7 @@ func TestHandleRunsList_SummarySessionID_Clean(t *testing.T) {
 		t.Fatalf("chtimes: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/cron/runs?job_id="+jobID, nil)
 	w := httptest.NewRecorder()

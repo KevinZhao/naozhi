@@ -36,7 +36,7 @@ func TestHandleRunEvents_ServesPersistedLog(t *testing.T) {
 		t.Fatalf("write events: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/events?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
@@ -75,7 +75,7 @@ func TestHandleRunEvents_MissingLogEmptyArray(t *testing.T) {
 
 	jobID := strings.Repeat("a", 16)
 	runID := strings.Repeat("b", 16)
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/events?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
@@ -102,7 +102,7 @@ func TestHandleRunEvents_RejectsBadIDs(t *testing.T) {
 		StorePath:      filepath.Join(t.TempDir(), "cron_jobs.json"),
 		AllowNilRouter: true,
 	}, cronpkg.SchedulerDeps{})
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 
 	// non-hex run_id
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/x/events?job_id="+strings.Repeat("a", 16), nil)
@@ -151,7 +151,7 @@ func TestHandleRunEvents_RedactsSecrets(t *testing.T) {
 		t.Fatalf("write events: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/events?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
@@ -218,7 +218,7 @@ func TestHandleRunEvents_RedactsAbsolutePaths(t *testing.T) {
 		t.Fatalf("write events: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/events?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
@@ -289,7 +289,7 @@ func TestHandleRunEvents_ErrorPathsUseJSONStatus(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := &Handlers{scheduler: sched}
+			h := &Handlers{deps: Deps{Scheduler: sched}}
 			url := "/api/cron/runs/" + tc.runID + "/events"
 			if tc.jobID != "" {
 				url += "?job_id=" + tc.jobID
@@ -350,7 +350,7 @@ func TestHandleRunDetail_SurfacesSandboxMeta(t *testing.T) {
 		t.Fatalf("write run: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()

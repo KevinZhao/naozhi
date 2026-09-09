@@ -115,7 +115,7 @@ const batchRecentRunsWorkers = 8
 // batchRecentRunsWorkers goroutines and returns one result per job in input
 // order (nil entries for jobs with no history). Nil-safe on empty input (#525).
 func (h *Handlers) batchRecentRuns(jobs []cronpkg.JobWithNextRun, n int) [][]cronpkg.CronRunSummary {
-	if len(jobs) == 0 || h.scheduler == nil {
+	if len(jobs) == 0 || h.deps.Scheduler == nil {
 		return nil
 	}
 	out := make([][]cronpkg.CronRunSummary, len(jobs))
@@ -136,7 +136,7 @@ func (h *Handlers) batchRecentRuns(jobs []cronpkg.JobWithNextRun, n int) [][]cro
 				if idx >= len(jobs) {
 					break
 				}
-				out[idx] = h.scheduler.RecentRuns(jobs[idx].Job.ID, n)
+				out[idx] = h.deps.Scheduler.RecentRuns(jobs[idx].Job.ID, n)
 			}
 		}()
 	}

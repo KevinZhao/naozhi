@@ -153,7 +153,7 @@ func TestHandleList_CompactMode(t *testing.T) {
 		t.Fatalf("AddJob: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 
 	hit := func(query string) cronListResp {
 		req := httptest.NewRequest(http.MethodGet, "/api/cron"+query, nil)
@@ -233,7 +233,7 @@ func TestHandleList_CompactBandwidthBound(t *testing.T) {
 		}
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron?compact=1", nil)
 	w := httptest.NewRecorder()
 	h.HandleList(w, req)

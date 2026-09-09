@@ -90,12 +90,12 @@ func (h *Handlers) HandleRuns(w http.ResponseWriter, r *http.Request) {
 		before = time.UnixMilli(ms)
 	}
 
-	runs := h.router.SessionRuns(key, limit, before)
+	runs := h.deps.Router.SessionRuns(key, limit, before)
 	views := make([]runSummaryView, 0, len(runs))
 	for _, run := range runs {
 		views = append(views, toRunView(run))
 	}
 	// Stats always reflect the full recent window (not the paginated slice),
 	// so the summary bar is stable across "load earlier" paging.
-	httputil.WriteJSON(w, runsListResp{Runs: views, Stats: h.router.SessionRunStats(key)})
+	httputil.WriteJSON(w, runsListResp{Runs: views, Stats: h.deps.Router.SessionRunStats(key)})
 }

@@ -86,7 +86,7 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	// `limit` pagination is emulated locally; older peers keep working.
 	nodeID := q.Get("node")
 	if nodeID != "" && nodeID != "local" {
-		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
+		nc, ok := h.deps.NodeAccess.LookupNode(w, nodeID)
 		if !ok {
 			return
 		}
@@ -126,11 +126,11 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Local
-	sess := h.router.SessionFor(key)
-	if sess == nil && h.scheduler != nil && h.scheduler.EnsureStub(key) {
+	sess := h.deps.Router.SessionFor(key)
+	if sess == nil && h.deps.Scheduler != nil && h.deps.Scheduler.EnsureStub(key) {
 		// Cron stubs torn down by sidebar "×" are lazily rebuilt on next click so
 		// polling (WS-down) clients don't get a permanent 404 until the next tick.
-		sess = h.router.SessionFor(key)
+		sess = h.deps.Router.SessionFor(key)
 	}
 	if sess == nil {
 		http.Error(w, "session not found", http.StatusNotFound)

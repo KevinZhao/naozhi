@@ -23,11 +23,11 @@ const runIDLenLimit = cronpkg.MaxIDLen
 // before is a unix-ms paging cursor. next_before is omitted on the last page.
 func (h *Handlers) HandleRunsList(w http.ResponseWriter, r *http.Request) {
 	// Gate per-IP before any scheduler / FS work (stolen-token enumeration).
-	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.Runs != nil && !h.deps.RateLimits.Runs.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		// Explicit empty slice so json.Marshal emits `[]`, not null.
 		httputil.WriteJSON(w, cronRunsListResp{Runs: []cronRunSummaryView{}})
 		return
@@ -75,7 +75,7 @@ func (h *Handlers) HandleRunsList(w http.ResponseWriter, r *http.Request) {
 		before = time.UnixMilli(ms)
 	}
 
-	rows := h.scheduler.ListRuns(jobID, limit, before)
+	rows := h.deps.Scheduler.ListRuns(jobID, limit, before)
 	out := make([]cronRunSummaryView, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, cronSummaryToView(r))
@@ -93,11 +93,11 @@ func (h *Handlers) HandleRunsList(w http.ResponseWriter, r *http.Request) {
 // Result + ErrorMsg): 404 when missing, 500 when the record is corrupt.
 func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 	// Same per-IP bucket as HandleRunsList so the alternate URL cannot bypass it.
-	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.Runs != nil && !h.deps.RateLimits.Runs.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
 	}
@@ -127,7 +127,7 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
 		return
 	}
-	run, err := h.scheduler.Run(jobID, runID)
+	run, err := h.deps.Scheduler.Run(jobID, runID)
 	if err != nil {
 		if errors.Is(err, cronpkg.ErrCorruptRun) {
 			slog.Warn("cron run record corrupt", "job_id", jobID, "run_id", runID, "err", err)
@@ -202,15 +202,15 @@ func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
 	// The events path is I/O-heavy like the transcript endpoint, so it uses
 	// transcriptLimiter (sharing runsLimiter lets either starve the other);
 	// falls back to runsLimiter for fixtures without a transcriptLimiter.
-	limiter := h.transcriptLimiter
+	limiter := h.deps.RateLimits.Transcript
 	if limiter == nil {
-		limiter = h.runsLimiter
+		limiter = h.deps.RateLimits.Runs
 	}
 	if limiter != nil && !limiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron run events rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		httputil.WriteJSONStatus(w, http.StatusNotImplemented, map[string]string{"error": "cron not configured"})
 		return
 	}
@@ -225,7 +225,7 @@ func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lines, truncated, err := h.scheduler.SandboxRunEvents(jobID, runID, sandboxEventsMaxResponse)
+	lines, truncated, err := h.deps.Scheduler.SandboxRunEvents(jobID, runID, sandboxEventsMaxResponse)
 	if errors.Is(err, cronpkg.ErrSandboxEventsBusy) {
 		// Semaphore saturated: fail fast (503) rather than serve a partial stream.
 		httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "cron run events busy"})
@@ -267,11 +267,11 @@ type cronRunSnapshotResp struct {
 // Returns {available:false} (not 404) for a run with no snapshot so the panel
 // renders a deterministic "unavailable" state.
 func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
-	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.Runs != nil && !h.deps.RateLimits.Runs.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
 	}
@@ -286,7 +286,7 @@ func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	man, ok, err := h.scheduler.SandboxRunSnapshotManifest(jobID, runID)
+	man, ok, err := h.deps.Scheduler.SandboxRunSnapshotManifest(jobID, runID)
 	if err != nil {
 		slog.Warn("cron sandbox: snapshot manifest read error", "job_id", jobID, "run_id", runID, "err", err)
 		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
@@ -304,7 +304,7 @@ func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
 		return
 	}
-	prompt, perr := h.scheduler.SandboxRunSnapshotPrompt(man.PromptHash)
+	prompt, perr := h.deps.Scheduler.SandboxRunSnapshotPrompt(man.PromptHash)
 	if perr != nil {
 		slog.Warn("cron sandbox: snapshot prompt read error", "job_id", jobID, "run_id", runID, "err", perr)
 		// Still return the manifest metadata; prompt blob may have been GC'd.

@@ -11,7 +11,7 @@ import (
 // historySessions returns all filesystem sessions from the last 7 days.
 // Results are cached for 120 seconds (see cacheTTL below).
 func (h *Handlers) historySessions() []discovery.RecentSession {
-	if h.claudeDir == "" {
+	if h.deps.ClaudeDir == "" {
 		return nil
 	}
 
@@ -66,7 +66,7 @@ type uptimeSnapshot struct {
 // memoised per 1-second bucket. Concurrent misses may format the same value;
 // last-writer-wins via unconditional Store is intentional.
 func (h *Handlers) uptimeStringAt(now time.Time) string {
-	d := now.Sub(h.startedAt).Round(time.Second)
+	d := now.Sub(h.deps.StartedAt).Round(time.Second)
 	bucket := int64(d / time.Second)
 	if cur := h.uptimeCache.Load(); cur != nil && cur.Bucket == bucket {
 		return cur.Str
@@ -94,16 +94,16 @@ func (h *Handlers) doInitStaticStats() {
 	}
 	// Copy agentIDs for the same read-only contract; guards against a future
 	// mutable element type introducing a cross-goroutine race.
-	agentsCopy := make([]string, len(h.agentIDs))
-	copy(agentsCopy, h.agentIDs)
+	agentsCopy := make([]string, len(h.deps.AgentIDs))
+	copy(agentsCopy, h.deps.AgentIDs)
 	h.staticStats = sessionStatsStatic{
-		Backend:          h.backendTag,
-		CLIName:          h.router.CLIName(),
-		CLIVersion:       h.router.CLIVersion(),
-		MaxProcs:         h.router.MaxProcs(),
-		DefaultWorkspace: h.router.DefaultWorkspace(),
-		WorkspaceID:      h.workspaceID,
-		WorkspaceName:    h.workspaceName,
+		Backend:          h.deps.BackendTag,
+		CLIName:          h.deps.Router.CLIName(),
+		CLIVersion:       h.deps.Router.CLIVersion(),
+		MaxProcs:         h.deps.Router.MaxProcs(),
+		DefaultWorkspace: h.deps.Router.DefaultWorkspace(),
+		WorkspaceID:      h.deps.WorkspaceID,
+		WorkspaceName:    h.deps.WorkspaceName,
 		System:           sysCopy,
 		Agents:           agentsCopy,
 	}
@@ -114,7 +114,7 @@ func (h *Handlers) doInitStaticStats() {
 // tracked by warmHistoryWg so WaitWarmHistory can block shutdown until the
 // scan finishes.
 func (h *Handlers) WarmHistoryCache() {
-	if h.claudeDir == "" {
+	if h.deps.ClaudeDir == "" {
 		return
 	}
 	h.warmHistoryWg.Add(1)
@@ -191,7 +191,7 @@ func (h *Handlers) lookupSummariesCached(snapshots []sessionpkg.SessionSnapshot)
 			}
 			sessionWorkspaces[snap.SessionID] = snap.Workspace
 		}
-		fresh := discovery.LookupSummaries(h.claudeDir, sessionWorkspaces)
+		fresh := discovery.LookupSummaries(h.deps.ClaudeDir, sessionWorkspaces)
 
 		h.summaryCacheMu.Lock()
 		h.summaryCache = fresh
@@ -205,29 +205,29 @@ func (h *Handlers) lookupSummariesCached(snapshots []sessionpkg.SessionSnapshot)
 	return nil
 }
 func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
-	excludeIDs := h.router.DiscoveryExcludeIDs()
+	excludeIDs := h.deps.Router.DiscoveryExcludeIDs()
 
 	// Hide cron-spawned and sys-session JSONLs (both have their own UI; the sys
 	// workdir lives under ~/.claude/projects and would leak AutoTitler prompts).
 	// KnownSessionIDs is O(jobs × 200), so snapshot it once per scan.
-	filter := historyFilter{skipWorkspace: h.sysWorkDir}
-	if h.cronSessions != nil {
-		filter.skipSessions = h.cronSessions.KnownSessionIDs()
+	filter := historyFilter{skipWorkspace: h.deps.SysWorkDir}
+	if h.deps.CronSessions != nil {
+		filter.skipSessions = h.deps.CronSessions.KnownSessionIDs()
 	}
 	// Cap the walk so a slow/hung home (NFS, FUSE) can't pin the flight leader (#2134).
 	ctx, cancel := context.WithTimeout(context.Background(), historyScanTimeout)
 	defer cancel()
-	all := discovery.RecentSessionsCtx(ctx, h.claudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
+	all := discovery.RecentSessionsCtx(ctx, h.deps.ClaudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
 
 	// Resolve project names in batch using the pooled scratch slice (#616).
-	if h.projectMgr != nil && len(all) > 0 {
+	if h.deps.ProjectMgr != nil && len(all) > 0 {
 		wsPtr := borrowWorkspaces(len(all))
 		workspaces := *wsPtr
 		for _, rs := range all {
 			workspaces = append(workspaces, rs.Workspace)
 		}
 		*wsPtr = workspaces
-		wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
+		wsMap := h.deps.ProjectMgr.ResolveWorkspaces(workspaces)
 		returnWorkspaces(wsPtr)
 		for i := range all {
 			all[i].Project = wsMap[all[i].Workspace]
@@ -236,8 +236,8 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 
 	// Stamp retired_at from one Snapshot() so the loop is O(N) without N mutex
 	// acquires.
-	if h.retiredStore != nil && len(all) > 0 {
-		retiredMap := h.retiredStore.Snapshot()
+	if h.deps.RetiredStore != nil && len(all) > 0 {
+		retiredMap := h.deps.RetiredStore.Snapshot()
 		if len(retiredMap) > 0 {
 			for i := range all {
 				if ts := retiredMap[all[i].SessionID]; ts > 0 {
@@ -262,8 +262,8 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 // callSystemInfo invokes the injected systemInfoFn. nil falls through to
 // an empty map (test paths without system-probe wiring).
 func (h *Handlers) callSystemInfo() map[string]any {
-	if h.systemInfoFn == nil {
+	if h.deps.SystemInfoFn == nil {
 		return map[string]any{}
 	}
-	return h.systemInfoFn()
+	return h.deps.SystemInfoFn()
 }

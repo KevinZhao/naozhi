@@ -141,11 +141,11 @@ func validUploadLeaf(raw string) (string, bool) {
 // O_NOFOLLOW applies in both modes. Remote nodes are unsupported → 400.
 func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 	// Rate-limit first — before parsing the (potentially 256 MiB) body.
-	if h.filesExistsLimiter != nil && !h.filesExistsLimiter.AllowRequest(r) {
+	if h.deps.FilesExistsLimiter != nil && !h.deps.FilesExistsLimiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "files/upload rate limit exceeded"})
 		return
 	}
-	if h.projectMgr == nil {
+	if h.deps.ProjectMgr == nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return
 	}
@@ -239,7 +239,7 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p := h.projectMgr.Get(project)
+	p := h.deps.ProjectMgr.Get(project)
 	if p == nil {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
 		return

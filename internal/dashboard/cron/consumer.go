@@ -3,7 +3,7 @@
 //
 // Deps named *cron.Scheduler, whose 48 exported methods cover scheduling,
 // persistence, the sandbox runner and the notify plumbing. SchedulerView is the
-// MEASURED call surface — grep h.scheduler.<Method> across the package — at 23.
+// MEASURED call surface — grep h.deps.Scheduler.<Method> across the package — at 23.
 //
 // 23 of 48 is a narrower cut than dashproject's 3 of 77, and that is honest
 // rather than disappointing: this package IS the cron UI, so it reads jobs, runs,
@@ -17,7 +17,7 @@
 // shapes several sub-packages share, and only this package consumes a Scheduler
 // at this width (dashsession takes CronView, 1 method).
 //
-// CAUTION: h.scheduler is nil-guarded in 16 places — a nil Scheduler is the
+// CAUTION: h.deps.Scheduler is nil-guarded in 16 places — a nil Scheduler is the
 // documented "cron disabled" state. An interface field handed a nil CONCRETE
 // pointer makes every one of those guards read true. The wiring site unwraps
 // typed nils; TestCronHandlers_NilSchedulerStaysNilInterface pins it. Same class
@@ -67,4 +67,4 @@ type SchedulerView interface {
 // SchedulerForTest exposes the scheduler so the wiring side can assert that a
 // disabled cron leaves a NIL interface rather than an interface wrapping a nil
 // pointer (#2561; see TestCronHandlers_NilSchedulerStaysNilInterface).
-func (h *Handlers) SchedulerForTest() SchedulerView { return h.scheduler }
+func (h *Handlers) SchedulerForTest() SchedulerView { return h.deps.Scheduler }

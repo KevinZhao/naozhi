@@ -56,9 +56,7 @@ func TestHandleTrigger_PerIPRateLimit(t *testing.T) {
 	// recharge during the test loop), the third is forced to 429. We
 	// pick rate.Every(time.Hour) so the sustained refill is irrelevant
 	// over the test's microsecond-scale duration; only burst matters.
-	h := &Handlers{
-		writeLimiter: newPerIPBurstNLimiter(2),
-	}
+	h := &Handlers{deps: Deps{RateLimits: RateLimits{Write: newPerIPBurstNLimiter(2)}}}
 
 	body := `{"id":"deadbeefdeadbeef"}`
 	doReq := func() int {
@@ -115,9 +113,7 @@ func TestHandleTrigger_NilLimiter_PassThrough(t *testing.T) {
 // the limiter to reject the third request before reaching that path.
 func TestHandleList_PerIPRateLimit(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{
-		listLimiter: newPerIPBurstNLimiter(2),
-	}
+	h := &Handlers{deps: Deps{RateLimits: RateLimits{List: newPerIPBurstNLimiter(2)}}}
 
 	doReq := func() int {
 		req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)

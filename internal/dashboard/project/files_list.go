@@ -42,11 +42,11 @@ type listEntry struct {
 func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 	// Rate-limit before any filesystem work; shares HandleFilesExists' limiter
 	// since per-child Info() fan-out is the same DoS class.
-	if h.filesExistsLimiter != nil && !h.filesExistsLimiter.AllowRequest(r) {
+	if h.deps.FilesExistsLimiter != nil && !h.deps.FilesExistsLimiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "files/list rate limit exceeded"})
 		return
 	}
-	if h.projectMgr == nil {
+	if h.deps.ProjectMgr == nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return
 	}
@@ -79,7 +79,7 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p := h.projectMgr.Get(project)
+	p := h.deps.ProjectMgr.Get(project)
 	if p == nil {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
 		return

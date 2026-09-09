@@ -9,10 +9,10 @@ import (
 // the history cache so the new ordering shows on the next poll. No-op when
 // the store is unconfigured or sessionID is empty (CLI never returned a UUID).
 func (h *Handlers) RecordRetired(sessionID string) {
-	if h.retiredStore == nil || sessionID == "" {
+	if h.deps.RetiredStore == nil || sessionID == "" {
 		return
 	}
-	h.retiredStore.MarkRetired(sessionID, time.Now())
+	h.deps.RetiredStore.MarkRetired(sessionID, time.Now())
 	h.InvalidateHistoryCache()
 }
 
@@ -20,21 +20,21 @@ func (h *Handlers) RecordRetired(sessionID string) {
 // shutdown. No-op without a store; errors are logged, not returned, so
 // shutdown doesn't fail.
 func (h *Handlers) FlushRetiredStore() {
-	if h.retiredStore == nil {
+	if h.deps.RetiredStore == nil {
 		return
 	}
-	if err := h.retiredStore.Save(); err != nil {
+	if err := h.deps.RetiredStore.Save(); err != nil {
 		slog.Warn("flush retired store failed", "err", err)
 	}
 }
 
 // RetiredStorePresent reports whether the RetiredStore is wired (server
 // shutdown Prune gate).
-func (h *Handlers) RetiredStorePresent() bool { return h.retiredStore != nil }
+func (h *Handlers) RetiredStorePresent() bool { return h.deps.RetiredStore != nil }
 
 // PruneRetiredStore prunes entries older than cutoffMs; no-op when unwired.
 func (h *Handlers) PruneRetiredStore(cutoffMs int64) {
-	if h.retiredStore != nil {
-		h.retiredStore.Prune(cutoffMs)
+	if h.deps.RetiredStore != nil {
+		h.deps.RetiredStore.Prune(cutoffMs)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// TestEvent_StreamJSONParseContract_R217_ARCH_1 anchors #617: cli.Event is
+// TestEvent_StreamJSONParseContract_R217_ARCH_1 anchors #617: clievent.Event is
 // simultaneously the stream-json parse target AND the field set every
 // downstream consumer (server / discovery / dispatch / session / eventlog)
 // reads. The issue's root symptom is "any cli internal field tweak ripples

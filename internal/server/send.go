@@ -92,10 +92,11 @@ func usePassthrough(ctx context.Context, sess *session.ManagedSession) bool {
 	return dispatch.IsPassthrough(ctx)
 }
 
-// sendWithBroadcast delegates to Hub.sendWithBroadcast when a dashboard Hub is
-// wired. Without a hub it falls back to a direct, broadcast-free sess.Send
-// only for Headless Servers; a non-headless Server with a nil hub is a wiring
-// regression and panics rather than silently dropping every broadcast (#379).
+// sendWithBroadcast is the IM / cron entry into the send engine: the Hub is
+// non-nil for the Server's whole life (buildDashboard, #2552), so this is a
+// plain delegate. It used to branch on a Headless flag for hub-less Servers
+// (#379); no constructor path has been able to produce one since #2552, so the
+// flag, the nil-hub fallback and its fail-loud panic were removed (#2634).
 //
 // sess must be non-nil; callers must check the error from GetOrCreate first.
 func (s *Server) sendWithBroadcast(
@@ -109,18 +110,7 @@ func (s *Server) sendWithBroadcast(
 	if sess == nil {
 		return nil, fmt.Errorf("sendWithBroadcast: session is nil")
 	}
-	if s.hub != nil {
-		return s.hub.engine.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
-	}
-	if !s.headless {
-		// Wiring regression — fail loud instead of silently dropping broadcasts.
-		panic("server: sendWithBroadcast called with nil hub on a non-headless Server (set ServerOptions.Headless for hub-less wiring)")
-	}
-	// Headless (no hub): still honour passthrough when requested and supported.
-	if usePassthrough(ctx, sess) {
-		return sess.SendPassthrough(ctx, text, images, onEvent, "")
-	}
-	return sess.Send(ctx, text, images, onEvent)
+	return s.hub.engine.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
 }
 
 // sendParams holds parsed input for a session send request (HTTP and WebSocket).
@@ -248,7 +238,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 		e.router.RegisterForResume(key, p.ResumeID, ws, "")
 	}
 
-	// Legacy guard path when no queue is configured (tests, headless);
+	// Legacy guard path when no queue is configured (tests);
 	// legacySendInvokes lets migrators observe remaining fixtures (#710).
 	if e.queue == nil {
 		e.legacyInvokes.Add(1)
