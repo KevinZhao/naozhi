@@ -296,7 +296,9 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 }
 
 // mountRoutes registers a sub-package's declared routes, applying the API
-// middleware chain to every non-public one (#2554).
+// middleware chain to every one of them (#2554). There is no opt-out: the
+// Route type has no "public" field (#2631), so a sub-package cannot declare an
+// unauthenticated /api/ route even by mistake.
 //
 // This is the ONLY place a dashboard sub-package route reaches the mux. A
 // sub-package hands over data (httputil.Route) and never touches s.mux, so
@@ -304,12 +306,9 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 // here — which is why the api_route_owner / handle_decl lint rules that used to
 // reconstruct this boundary from ASTs can go.
 func (s *Server) mountRoutes(routes []httputil.Route) {
+	chain := s.apiChain()
 	for _, rt := range routes {
-		h := rt.Handler
-		if !rt.Public {
-			h = s.apiChain()(h)
-		}
-		s.mux.HandleFunc(rt.Pattern, h)
+		s.mux.HandleFunc(rt.Pattern, chain(rt.Handler))
 	}
 }
 

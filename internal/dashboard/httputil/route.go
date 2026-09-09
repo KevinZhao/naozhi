@@ -12,8 +12,10 @@
 //
 //  1. A route cannot be mounted without the chain. The sub-package hands over
 //     data, not a registration; the server is the only thing holding a mux. So
-//     "someone forgot the auth wrapper on one route" stops being possible
-//     rather than being caught later by review.
+//     "someone forgot the auth wrapper on one route" stops being possible for
+//     sub-package routes. Server-owned routes in routes.go still wrap by hand,
+//     which is why TestAPIUnauthenticatedRejected drives every /api/ route in
+//     the golden through the mux with no credentials and expects 401.
 //  2. Path ownership becomes a compile-time fact — the patterns for /api/cron
 //     live in internal/dashboard/cron. The lint rules that reconstructed this
 //     by scanning ASTs no longer have a question to answer.
@@ -27,19 +29,21 @@ package httputil
 import "net/http"
 
 // Middleware wraps a handler. The server composes one chain and applies it to
-// every non-public Route, so a sub-package cannot mount a route with a
-// different chain — or none.
+// every Route, so a sub-package cannot mount a route with a different chain —
+// or none.
 type Middleware func(http.HandlerFunc) http.HandlerFunc
 
-// Route is one HTTP route a dashboard sub-package owns.
+// Route is one HTTP route a dashboard sub-package owns. Every Route is
+// authenticated: there is deliberately no opt-out field. Unauthenticated
+// surfaces (login, noscript form target, favicon, dashboard shell) are
+// server-owned and registered directly in internal/server/routes.go, where the
+// routes golden + TestAPIUnauthenticatedRejected keep the list honest. A
+// `Public bool` used to live here (#2619); it had zero users and was an
+// unguarded escape hatch the golden did not record, so it was removed (#2631).
 type Route struct {
 	// Pattern is a Go 1.22 ServeMux pattern including the method, e.g.
 	// "GET /api/cron/runs/{run_id}". Must be a string literal (see file header).
 	Pattern string
 	// Handler is the sub-package method serving it.
 	Handler http.HandlerFunc
-	// Public opts a route OUT of the auth chain. Default false, so forgetting
-	// to think about auth leaves the route authenticated — the safe direction.
-	// Only the login/logout surface and unauthenticated assets set it.
-	Public bool
 }
