@@ -40,7 +40,11 @@ func newNamedProjectHandlersForTest(t *testing.T, projName string, files map[str
 	if err := mgr.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	return &Handlers{projectMgr: mgr}, projDir
+	return &Handlers{
+		deps: Deps{
+			ProjectMgr: mgr,
+		},
+	}, projDir
 }
 
 func TestWorkspaceScanPath(t *testing.T) {

@@ -23,12 +23,16 @@ func TestHandleRunTranscript_UsesTranscriptLimiterNotRunsLimiter(t *testing.T) {
 	t.Parallel()
 
 	h := &Handlers{
-		// runsLimiter: huge budget so we know any 429 below MUST come
-		// from the transcriptLimiter, not from a shared-bucket spillover.
-		runsLimiter: alwaysAllowLimiter{},
-		// transcriptLimiter: burst=1 so the second call is guaranteed
-		// to 429.
-		transcriptLimiter: newPerIPBurstNLimiter(1),
+		deps: Deps{
+			RateLimits: RateLimits{
+				// runsLimiter: huge budget so we know any 429 below MUST come
+				// from the transcriptLimiter, not from a shared-bucket spillover.
+				Runs: alwaysAllowLimiter{},
+				// transcriptLimiter: burst=1 so the second call is guaranteed
+				// to 429.
+				Transcript: newPerIPBurstNLimiter(1),
+			},
+		},
 	}
 
 	doReq := func() *httptest.ResponseRecorder {
@@ -72,8 +76,12 @@ func TestHandleRunTranscript_NilTranscriptLimiterFallsBackToRunsLimiter(t *testi
 	t.Parallel()
 
 	h := &Handlers{
-		// transcriptLimiter intentionally nil — fallback path.
-		runsLimiter: newPerIPBurstNLimiter(1),
+		deps: Deps{
+			RateLimits: RateLimits{
+				// transcriptLimiter intentionally nil — fallback path.
+				Runs: newPerIPBurstNLimiter(1),
+			},
+		},
 	}
 
 	doReq := func() *httptest.ResponseRecorder {

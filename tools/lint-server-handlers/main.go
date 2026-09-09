@@ -3,8 +3,19 @@
 //
 //   - handle_decl: no `func (s *Server) handle*` method outside the
 //     exemptions.yaml handle_baseline (ownership rule: internal/server/doc.go).
+//     Kept after #2554 deleted api_route_owner on purpose: that rule asked
+//     "is this /api/ route owned by a sub-package?", which httputil.Route made
+//     a compile-time fact. This one asks "does *Server grow HTTP handlers of
+//     ANY kind?" — a Server method can still be mounted on a non-/api/ path
+//     (s.mux.HandleFunc in routes.go), and the answer the type system gives
+//     there is nothing. Its one live subject is handleDashboard (the static
+//     shell); a second name in the baseline is the review conversation this
+//     rule exists to force (#2636).
 //   - file_size: internal/server/ ≤ 500 lines, internal/dashboard/*/ ≤ 800
-//     (non-test); exemptions.yaml entries may not grow past their baseline.
+//     (non-test); exemptions.yaml entries may not grow past their baseline,
+//     and a baseline more than baselineSlack lines ABOVE the file is itself a
+//     violation (#2636) — an inflated baseline silently admits that much
+//     growth, so shrinking a file means re-sampling its entry.
 //   - field_block: wshub_*.go godoc 头必须含 Field-block contract / WRITES: /
 //     READS-ALSO: / LIFECYCLE-METHOD 标注（文本扫描）。
 //   - send_engine_ownership (rule 3b-send): send 块字段只能声明在 sendEngine
@@ -54,8 +65,22 @@ const (
 	modeFail
 )
 
+// ruleIDs is the single source of truth for the rule names this tool emits:
+// the SARIF driver.rules[] is generated from it, and
+// TestRuleIDs_MatchEmittedViolations pins that every `Rule: "..."` literal in
+// this directory is listed here. The list used to be hand-written inside the
+// SARIF header and drifted to name two rules #2554 deleted while missing the
+// one #2551 added (#2636).
+var ruleIDs = []string{
+	"handle_decl",
+	"file_size",
+	"field_block",
+	"send_engine_ownership",
+	"stale_exemption",
+}
+
 type Violation struct {
-	Rule    string // handle_decl / file_size / field_block / iface_match / stale_exemption / api_route_owner
+	Rule    string // one of ruleIDs
 	File    string
 	Line    int
 	Message string
@@ -228,6 +253,12 @@ func recvTypeName(e ast.Expr) string {
 	return ""
 }
 
+// baselineSlack is how far an exemption's `current:` may sit above the file's
+// real line count before file_size complains. Wide enough that a comment
+// rewrite does not force a yaml edit, narrow enough that a split or an
+// extraction does.
+const baselineSlack = 30
+
 func scanFileSize(dir string, limit int, exempt map[string]exemption) []Violation {
 	var out []Violation
 	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -279,6 +310,17 @@ func scanFileSize(dir string, limit int, exempt map[string]exemption) []Violatio
 					Rule:    "file_size",
 					File:    rel,
 					Message: fmt.Sprintf("%d lines (exemption baseline %d, limit %d, until %s) — file grew, fix or update baseline", lines, e.Current, limit, e.Until),
+				})
+			}
+			// A baseline well above the file is not slack, it is a gate that
+			// admits that much growth without anyone noticing (#2636: wshub.go
+			// was recorded at 1381 while measuring 742). Shrinking a file
+			// therefore comes with re-sampling its entry.
+			if e.Current-lines > baselineSlack {
+				out = append(out, Violation{
+					Rule:    "file_size",
+					File:    rel,
+					Message: fmt.Sprintf("%d lines but exemption baseline is %d (%d above; slack is %d) — re-sample `current:` so the ratchet stays tight", lines, e.Current, e.Current-lines, baselineSlack),
 				})
 			}
 			return nil
@@ -337,10 +379,21 @@ func emitText(vs []Violation) {
 // emitSARIF prints a minimal SARIF 2.1.0 report on stdout (consumed by
 // codeql/upload-sarif). Inline producer avoids a sarif-go dependency.
 func emitSARIF(vs []Violation) {
-	const head = `{"$schema":"https://docs.oasis-open.org/sarif/sarif/v2.1.0/cos02/schemas/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint-server-handlers","informationUri":"https://github.com/naozhi/naozhi/blob/master/docs/design/server-split-phase4-design.md","rules":[{"id":"handle_decl"},{"id":"file_size"},{"id":"field_block"},{"id":"iface_match"},{"id":"stale_exemption"},{"id":"api_route_owner"}]}},"results":[`
-	const tail = `]}]}`
+	fmt.Println(sarifReport(vs))
+}
+
+// sarifReport renders the SARIF document; split from emitSARIF so tests can
+// assert on the rules[] block without capturing stdout.
+func sarifReport(vs []Violation) string {
 	var sb strings.Builder
-	sb.WriteString(head)
+	sb.WriteString(`{"$schema":"https://docs.oasis-open.org/sarif/sarif/v2.1.0/cos02/schemas/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint-server-handlers","informationUri":"https://github.com/naozhi/naozhi/blob/master/docs/design/server-split-phase4-design.md","rules":[`)
+	for i, id := range ruleIDs {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, `{"id":%q}`, id)
+	}
+	sb.WriteString(`]}},"results":[`)
 	for i, v := range vs {
 		if i > 0 {
 			sb.WriteByte(',')
@@ -349,8 +402,8 @@ func emitSARIF(vs []Violation) {
 			`{"ruleId":%q,"level":"warning","message":{"text":%q},"locations":[{"physicalLocation":{"artifactLocation":{"uri":%q},"region":{"startLine":%d}}}]}`,
 			v.Rule, v.Message, v.File, max1(v.Line))
 	}
-	sb.WriteString(tail)
-	fmt.Println(sb.String())
+	sb.WriteString(`]}]}`)
+	return sb.String()
 }
 
 func max1(n int) int {

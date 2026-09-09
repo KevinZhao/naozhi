@@ -48,7 +48,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 
 	// Remote node proxy
 	if req.Node != "" && req.Node != "local" {
-		nc, ok := h.nodeAccess.LookupNode(w, req.Node)
+		nc, ok := h.deps.NodeAccess.LookupNode(w, req.Node)
 		if !ok {
 			return
 		}
@@ -76,7 +76,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	// RemoveAsync: the session leaves the router synchronously (200 truthfully
 	// means "gone from the list, accepts no more messages") while the slow
 	// teardown (proc.Close up to 8s + socket wait + cleanup) runs detached.
-	if !h.router.RemoveAsync(req.Key) {
+	if !h.deps.Router.RemoveAsync(req.Key) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
@@ -112,7 +112,7 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 
 	// Remote node proxy — forward to the node that owns the session.
 	if req.Node != "" && req.Node != "local" {
-		nc, ok := h.nodeAccess.LookupNode(w, req.Node)
+		nc, ok := h.deps.NodeAccess.LookupNode(w, req.Node)
 		if !ok {
 			return
 		}
@@ -151,7 +151,7 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.router.SetUserLabel(req.Key, label) {
+	if !h.deps.Router.SetUserLabel(req.Key, label) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
@@ -204,8 +204,8 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 	if workspace != "" {
 		var wsPath string
 		var err error
-		if h.validateWS != nil {
-			wsPath, err = h.validateWS(workspace, h.allowedRoot)
+		if h.deps.ValidateWS != nil {
+			wsPath, err = h.deps.ValidateWS(workspace, h.deps.AllowedRoot)
 		}
 		if err != nil {
 			// Keep the client-facing message decoupled from the error chain so a
@@ -220,7 +220,7 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		workspace = wsPath
 	}
 	if workspace == "" {
-		workspace = h.router.DefaultWorkspace()
+		workspace = h.deps.Router.DefaultWorkspace()
 	}
 
 	// 16 random bytes (128 bits) so the resume key tail matches anonCookie /
@@ -234,7 +234,7 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := "dashboard:direct:r" + hex.EncodeToString(rb[:]) + ":general"
-	effectiveKey := h.router.RegisterForResume(key, req.SessionID, workspace, req.LastPrompt)
+	effectiveKey := h.deps.Router.RegisterForResume(key, req.SessionID, workspace, req.LastPrompt)
 
 	httputil.WriteJSON(w, map[string]string{"status": "ok", "key": effectiveKey})
 }
@@ -259,7 +259,7 @@ func (h *Handlers) HandleInterrupt(w http.ResponseWriter, r *http.Request) {
 
 	// Remote node proxy
 	if req.Node != "" && req.Node != "local" {
-		nc, ok := h.nodeAccess.LookupNode(w, req.Node)
+		nc, ok := h.deps.NodeAccess.LookupNode(w, req.Node)
 		if !ok {
 			return
 		}
@@ -284,7 +284,7 @@ func (h *Handlers) HandleInterrupt(w http.ResponseWriter, r *http.Request) {
 
 	// Prefer control_request over SIGINT — see Router.InterruptSessionSafe
 	// for why raw SIGINT on `-p` mode is destructive.
-	switch h.router.InterruptSessionSafe(req.Key) {
+	switch h.deps.Router.InterruptSessionSafe(req.Key) {
 	case sessionpkg.InterruptSent:
 		slog.Info("session interrupted via HTTP", "key", req.Key)
 		httputil.WriteOK(w)

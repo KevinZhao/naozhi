@@ -23,7 +23,7 @@ func TestBatchRecentRuns_OrderingAndEmpty(t *testing.T) {
 	t.Parallel()
 
 	// Empty input — must return nil without touching scheduler.
-	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}
+	h := &Handlers{deps: Deps{Scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}}
 	if got := h.batchRecentRuns(nil, recentRunsPerJob); got != nil {
 		t.Fatalf("batchRecentRuns(nil): expected nil, got %v", got)
 	}
@@ -34,7 +34,7 @@ func TestBatchRecentRuns_OrderingAndEmpty(t *testing.T) {
 	// Nil scheduler — must return nil without panic. Mirrors the handler
 	// contract for the empty-list fast path so the per-job loop's
 	// recentByIdx[idx] read does not deref a nil scheduler indirectly.
-	hNil := &Handlers{scheduler: nil}
+	hNil := &Handlers{deps: Deps{Scheduler: nil}}
 	if got := hNil.batchRecentRuns([]cronpkg.JobWithNextRun{
 		{Job: cronpkg.Job{ID: "aa00000000000001"}},
 	}, recentRunsPerJob); got != nil {
@@ -117,7 +117,7 @@ func TestBatchRecentRuns_CompletenessMapping(t *testing.T) {
 		wantLen[i] = count
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	out := h.batchRecentRuns(jobs, recentRunsPerJob)
 
 	if len(out) != nJobs {
