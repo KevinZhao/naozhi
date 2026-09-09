@@ -242,16 +242,6 @@ type Handlers struct {
 	// summaryFlight collapses concurrent misses at the TTL boundary into one
 	// LookupSummaries (N×os.Stat) invocation; mirrors historyFlight.
 	summaryFlight singleflight.Group
-
-	// retiredStore stamps when a session left the live sidebar so history rows
-	// carry retired_at (dashboard sorts by retired_at || last_active). nil
-	// disables; ordering degrades to last_active only.
-	retiredStore RetiredReader
-
-	// validateWS / systemInfoFn inject server-package helpers without a
-	// reverse import.
-	validateWS   func(ws, root string) (string, error)
-	systemInfoFn func() map[string]any
 }
 
 // workspacesPool recycles the []string scratch that fillProjectAndSummary and
