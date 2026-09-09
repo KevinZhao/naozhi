@@ -9,7 +9,7 @@ import (
 
 // TestDrainStaleEvents_MonotonicInvariant is R43-CONCUR-C1's source-level
 // contract guard. The concern raised in the TODO is that NTP wall-clock
-// jumps could invert ev.recvAt vs. cutoff ordering and cause drainStaleEvents
+// jumps could invert ev.RecvAt vs. cutoff ordering and cause drainStaleEvents
 // to either swallow fresh events or keep stale ones.
 //
 // The concern is only valid when either timestamp has been stripped of its
@@ -19,21 +19,21 @@ import (
 // t.UTC() / t.Round() / t.Truncate() etc. strips it, after which subtraction
 // falls back to wall clock and the NTP-jump scenario becomes reachable.
 //
-// Today both cutoff (in drainStaleEvents) and ev.recvAt (set in readLoop) are
+// Today both cutoff (in drainStaleEvents) and ev.RecvAt (set in readLoop) are
 // assigned directly from time.Now(), so the monotonic-driven comparison path
 // is exercised. This test reads process.go and asserts:
 //
 //  1. `cutoff := time.Now()` still appears in drainStaleEvents
-//  2. `ev.recvAt = now` (or `= time.Now()`) still appears in readLoop
-//  3. No `cutoff = time.Unix(` / `recvAt = time.Unix(` line exists
+//  2. `ev.RecvAt = now` (or `= time.Now()`) still appears in readLoop
+//  3. No `cutoff = time.Unix(` / `clievent.RecvAt = time.Unix(` line exists
 //
 // A future refactor that accidentally breaks the invariant (e.g., normalising
-// ev.recvAt through UnixMilli to match EventEntry.Time ordering) will fail
+// ev.RecvAt through UnixMilli to match EventEntry.Time ordering) will fail
 // this test and force the author to re-examine the NTP-safety argument.
 func TestDrainStaleEvents_MonotonicInvariant(t *testing.T) {
 	t.Parallel()
 	// Concatenate all process*.go sources that host the two timestamps
-	// this test pins. readLoop (owner of `ev.recvAt = now`) moved to
+	// this test pins. readLoop (owner of `ev.RecvAt = now`) moved to
 	// process_readloop.go in Phase 2; drainStaleEvents (owner of
 	// `cutoff := time.Now()`) moved to process_turn.go in Phase 4
 	// (see docs/rfc/process-split.md).
@@ -51,30 +51,30 @@ func TestDrainStaleEvents_MonotonicInvariant(t *testing.T) {
 	if !regexp.MustCompile(`cutoff\s*:=\s*time\.Now\(\)`).Match(src) {
 		t.Error("drainStaleEvents no longer initialises `cutoff := time.Now()`; " +
 			"if the cutoff is derived from a Unix-round-tripped time, NTP wall-clock " +
-			"jumps can invert ev.recvAt.After(cutoff) and re-open R43-CONCUR-C1")
+			"jumps can invert ev.RecvAt.After(cutoff) and re-open R43-CONCUR-C1")
 	}
 
-	// 2) ev.recvAt must receive a direct time.Now() (or a local variable that
+	// 2) ev.RecvAt must receive a direct time.Now() (or a local variable that
 	// was itself assigned time.Now()) — we accept either shape by matching
-	// `ev.recvAt = now` (current) or `ev.recvAt = time.Now()` (possible
+	// `ev.RecvAt = now` (current) or `ev.RecvAt = time.Now()` (possible
 	// future simplification). Both preserve the monotonic reading.
-	recvNow := regexp.MustCompile(`ev\.recvAt\s*=\s*now\b`).Match(src)
-	recvDirect := regexp.MustCompile(`ev\.recvAt\s*=\s*time\.Now\(\)`).Match(src)
+	recvNow := regexp.MustCompile(`ev\.RecvAt\s*=\s*now\b`).Match(src)
+	recvDirect := regexp.MustCompile(`ev\.RecvAt\s*=\s*time\.Now\(\)`).Match(src)
 	if !recvNow && !recvDirect {
-		t.Error("readLoop no longer assigns ev.recvAt from a live time.Now() " +
+		t.Error("readLoop no longer assigns ev.RecvAt from a live time.Now() " +
 			"snapshot; any Unix round-trip strips the monotonic clock and re-opens " +
 			"R43-CONCUR-C1 (NTP jumps invert ordering). Acceptable forms: " +
-			"`ev.recvAt = now` (paired with `now := time.Now()`) or " +
-			"`ev.recvAt = time.Now()`")
+			"`ev.RecvAt = now` (paired with `now := time.Now()`) or " +
+			"`ev.RecvAt = time.Now()`")
 	}
 
 	// 3) Negative check: neither side should go through time.Unix family.
 	// time.Unix strips the monotonic reading. If anyone wires it into the
-	// cutoff / recvAt path, the NTP-safety argument no longer holds.
+	// cutoff / clievent.RecvAt path, the NTP-safety argument no longer holds.
 	banned := regexp.MustCompile(
-		`(?:cutoff|ev\.recvAt)\s*[:=]+\s*time\.(?:Unix|UnixMilli|UnixMicro)\(`)
+		`(?:cutoff|ev\.RecvAt)\s*[:=]+\s*time\.(?:Unix|UnixMilli|UnixMicro)\(`)
 	if banned.Match(src) {
-		t.Error("cutoff or ev.recvAt is now derived via time.Unix*; this strips " +
+		t.Error("cutoff or ev.RecvAt is now derived via time.Unix*; this strips " +
 			"the monotonic clock and re-opens R43-CONCUR-C1. Keep both assigned " +
 			"from the live `time.Now()` snapshot so Before/After use monotonic " +
 			"subtraction and ignore NTP wall-clock jumps.")

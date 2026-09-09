@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestCoalesceMessages_TruncationTail_ZeroAlloc pins R20260603-PERF-5:
@@ -39,7 +39,7 @@ func TestCoalesceMessages_TruncationTail_ZeroAlloc(t *testing.T) {
 		msgs[i] = QueuedMsg{
 			Text:      big,
 			EnqueueAt: time.Date(2026, 6, 3, 12, 0, i, 0, time.UTC),
-			Images:    []cli.Attachment{},
+			Images:    []clievent.Attachment{},
 		}
 	}
 

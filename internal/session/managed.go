@@ -42,12 +42,12 @@ type ProcessSender interface {
 	// Send delivers a user turn and streams events through onEvent until
 	// the result entry arrives. Single-shot; serialised by the caller-side
 	// sendMu in ManagedSession.
-	Send(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
+	Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 	// SendPassthrough is the passthrough-mode Send; errors unless the
 	// protocol reports SupportsReplay()==true. Unlike Send, multiple
 	// goroutines may call it concurrently — ordering is handled by the
 	// CLI's commandQueue plus a naozhi-side sendSlot FIFO.
-	SendPassthrough(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback, priority string) (*cli.SendResult, error)
+	SendPassthrough(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error)
 	// SupportsPassthrough reports whether the protocol can operate in
 	// passthrough mode (Protocol.SupportsReplay()); dispatch falls back to
 	// Send otherwise.
@@ -175,7 +175,7 @@ type processIface interface {
 	// SpawnDiags returns the spawn gates' drop/ignore decisions for this
 	// process (#2532); nil when everything took effect.
 	SpawnDiags() []cli.SpawnDiag
-	MeteringUsage() []cli.MeteringEntry
+	MeteringUsage() []clievent.MeteringEntry
 	// MeteringGen versions MeteringUsage so Snapshot can cache its copy per
 	// (process, gen) (#2345). Implementations that do not version their rows
 	// must return 0, which disables the cache.
@@ -482,7 +482,7 @@ type SessionSnapshot struct {
 	// READ-ONLY, shared across snapshots: while MeteringGen is unchanged
 	// every Snapshot returns the same backing array (#2345). Consumers,
 	// SnapshotEnricher hooks included, must copy before mutating.
-	MeteringUsage []cli.MeteringEntry `json:"metering_usage,omitempty"`
+	MeteringUsage []clievent.MeteringEntry `json:"metering_usage,omitempty"`
 	// Effort is the backend's thinking-effort tier for the latest turn
 	// (low/medium/high/xhigh/max on kiro). Empty for backends that report
 	// none, evicted sessions, and before the first metadata frame; the

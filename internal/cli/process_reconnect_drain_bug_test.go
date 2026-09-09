@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -23,7 +24,7 @@ func TestSafeReenqueue_SendOnClosedDoesNotPanic(t *testing.T) {
 	t.Parallel()
 
 	p := &Process{
-		eventCh: make(chan Event, 1),
+		eventCh: make(chan clievent.Event, 1),
 		done:    make(chan struct{}),
 	}
 	close(p.eventCh)
@@ -34,7 +35,7 @@ func TestSafeReenqueue_SendOnClosedDoesNotPanic(t *testing.T) {
 		}
 	}()
 
-	p.safeReenqueue(Event{Type: "result", SessionID: "race"})
+	p.safeReenqueue(clievent.Event{Type: "result", SessionID: "race"})
 }
 
 // TestDrainStaleEvents_CtxDoneReenqueueOnClosedChan pins #1779 at the
@@ -49,7 +50,7 @@ func TestDrainStaleEvents_CtxDoneReenqueueOnClosedChan(t *testing.T) {
 	t.Parallel()
 
 	p := &Process{
-		eventCh: make(chan Event, 4),
+		eventCh: make(chan clievent.Event, 4),
 		done:    make(chan struct{}), // OPEN: isChanAlive reports alive
 	}
 	p.interrupted.Store(true)
@@ -59,7 +60,7 @@ func TestDrainStaleEvents_CtxDoneReenqueueOnClosedChan(t *testing.T) {
 	// re-enqueue, then close the channel so the settle-window read observes
 	// ok==false and jumps to drain, and any re-enqueue targets a dead channel.
 	future := time.Now().Add(time.Hour)
-	p.eventCh <- Event{Type: "assistant", SessionID: "fresh", recvAt: future}
+	p.eventCh <- clievent.Event{Type: "assistant", SessionID: "fresh", RecvAt: future}
 	close(p.eventCh)
 
 	// Pre-cancel so the drain loop's ctx.Done arm fires and exercises the
@@ -178,21 +179,21 @@ func TestIsMidTurn(t *testing.T) {
 // doneIgnoringProtocol embeds *ClaudeProtocol (inheriting the full Protocol
 // surface) and overrides only ReadEvent to return done=true alongside a NON
 // result event. It pins the R202606f-ARCH-5 (#2303) contract: turn-end is
-// driven by a result Event, never by the advisory `done` bool. Clone returns
+// driven by a result clievent.Event, never by the advisory `done` bool. Clone returns
 // the same wrapped behaviour so isMidTurn's call path is exercised faithfully.
 type doneIgnoringProtocol struct{ *ClaudeProtocol }
 
-func (d doneIgnoringProtocol) ReadEvent(line string) ([]Event, bool, error) {
+func (d doneIgnoringProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 	// Always claim the turn is done, but only ever emit an assistant event.
 	// A caller that honoured `done` would treat this as turn-complete; the
-	// documented contract says it must NOT, because there is no result Event.
-	return []Event{{Type: "assistant"}}, true, nil
+	// documented contract says it must NOT, because there is no result clievent.Event.
+	return []clievent.Event{{Type: "assistant"}}, true, nil
 }
 
 func (d doneIgnoringProtocol) Clone() Protocol { return d }
 
 // TestIsMidTurn_IgnoresAdvisoryDone verifies isMidTurn does not let a
-// protocol's done=true short-circuit the result-Event-based turn-end
+// protocol's done=true short-circuit the result-clievent.Event-based turn-end
 // detection. The last (and only) emitted event is an assistant frame, so the
 // turn is still in progress regardless of done=true (#2303).
 func TestIsMidTurn_IgnoresAdvisoryDone(t *testing.T) {
@@ -201,13 +202,13 @@ func TestIsMidTurn_IgnoresAdvisoryDone(t *testing.T) {
 		{Type: "replay", Line: `{"ignored":"the stub ignores the line"}`},
 	}
 	if got := isMidTurn(replays, proto); !got {
-		t.Errorf("isMidTurn = false; want true — done=true must NOT settle a turn that emitted no result Event (#2303)")
+		t.Errorf("isMidTurn = false; want true — done=true must NOT settle a turn that emitted no result clievent.Event (#2303)")
 	}
 }
 
 // TestIsMidTurn_SkipsControlAck pins the reconnect regression introduced by
 // the set_model control channel: a claude control_response carrying a
-// request_id parses into a Type:"control_ack" Event. It is an RPC receipt,
+// request_id parses into a Type:"control_ack" clievent.Event. It is an RPC receipt,
 // not turn content, so it must not be the frame that decides mid-turn-ness.
 // Scenario: idle claude session → operator switches model (control_response
 // buffered in the shim) → naozhi restarts → replay ends with the ack. Reading

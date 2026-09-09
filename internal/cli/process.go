@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -100,7 +101,7 @@ type Process struct {
 	// atomic. totalCost is a separate atomic so readers never nest p.mu under r.mu.
 	mu sync.RWMutex
 
-	eventCh  chan Event
+	eventCh  chan clievent.Event
 	done     chan struct{}
 	killCh   chan struct{} // closed by Kill() to unblock readLoop
 	killOnce sync.Once
@@ -143,14 +144,14 @@ type Process struct {
 	// persisted (same lifecycle as effort). nil = none.
 	spawnDiags atomic.Pointer[[]SpawnDiag]
 	// shadowMu guards shadow, the token usage of assistant frames since the
-	// last result frame (see ShadowUsage).
+	// last result frame (see clievent.ShadowUsage).
 	shadowMu sync.Mutex
-	shadow   ShadowUsage
+	shadow   clievent.ShadowUsage
 	// meteringMu guards meteringUsage (read-mostly: 1 Hz × N-tab polls, ≤1
 	// write/turn). meteringLen mirrors len(meteringUsage) under meteringMu so
 	// MeteringUsage() can skip the RLock when empty (claude-class backends).
 	meteringMu    sync.RWMutex
-	meteringUsage []MeteringEntry
+	meteringUsage []clievent.MeteringEntry
 	// meteringIdx maps Unit → index into meteringUsage (O(1) merge); lazily built
 	// on first applyMetadata so zero-metering sessions stay allocation-free.
 	meteringIdx map[string]int
@@ -177,7 +178,7 @@ type Process struct {
 	// readEventBuf is a reusable backing array for ReadEventInto (#1676), owned
 	// exclusively by handleShimStdout on the readLoop goroutine and consumed within
 	// the same frame; cap 2 covers ACP's two-event turn-end split.
-	readEventBuf [2]Event
+	readEventBuf [2]clievent.Event
 
 	// onTurnDone is called by readLoop when a result event transitions the
 	// process from Running to Ready without an active Send() (e.g. after a shim
@@ -239,8 +240,8 @@ type sendSlot struct {
 	uuid     string
 	text     string
 	priority string // "" | "now" | "next" | "later"
-	onEvent  EventCallback
-	resultCh chan *SendResult
+	onEvent  clievent.EventCallback
+	resultCh chan *clievent.SendResult
 	errCh    chan error
 
 	// Only mutated under Process.slotsMu (atomic.Bool to allow lock-free
@@ -357,7 +358,7 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		state:    StateSpawning,
 		// 1024 so a TeamCreate fan-out (8 subagents × ~5 events/s) cannot fill the
 		// buffer before Send() drains it; drops force the findResultSince fallback (#1355).
-		eventCh:         make(chan Event, 1024),
+		eventCh:         make(chan clievent.Event, 1024),
 		done:            make(chan struct{}),
 		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,
@@ -579,7 +580,7 @@ func (p *Process) Effort() string {
 // MeteringUsage returns a defensive copy of the most recent backend-reported
 // billing rows; nil for backends that report cost only via TotalCost (claude).
 // An atomic length probe lets that dominant polled case skip the RLock.
-func (p *Process) MeteringUsage() []MeteringEntry {
+func (p *Process) MeteringUsage() []clievent.MeteringEntry {
 	if p.meteringLen.Load() == 0 {
 		return nil
 	}
@@ -588,7 +589,7 @@ func (p *Process) MeteringUsage() []MeteringEntry {
 	if len(p.meteringUsage) == 0 {
 		return nil
 	}
-	out := make([]MeteringEntry, len(p.meteringUsage))
+	out := make([]clievent.MeteringEntry, len(p.meteringUsage))
 	copy(out, p.meteringUsage)
 	return out
 }
@@ -604,7 +605,7 @@ func (p *Process) MeteringGen() uint64 {
 // from readLoop): scalars atomically, MeteringUsage merged under meteringMu.
 // Every field is guarded on being non-zero so a frame that omits a field never
 // regresses an earlier value (pinned by TestProcess_ApplyMetadata_AndAccessors).
-func (p *Process) applyMetadata(m *EventMetadata) {
+func (p *Process) applyMetadata(m *clievent.EventMetadata) {
 	if m == nil {
 		return
 	}

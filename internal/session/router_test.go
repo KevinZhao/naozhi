@@ -89,8 +89,8 @@ func (f *fakeProcess) Kill() {
 	f.mu.Unlock()
 }
 
-func (f *fakeProcess) Send(_ context.Context, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
-	return &cli.SendResult{Text: "fake"}, nil
+func (f *fakeProcess) Send(_ context.Context, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+	return &clievent.SendResult{Text: "fake"}, nil
 }
 
 func (f *fakeProcess) State() cli.ProcessState {
@@ -248,14 +248,14 @@ func (f *fakeProcess) TurnAgents() []ring.SubagentInfo       { return nil }
 // Normalize-layer stubs (multi-backend §8.8) — fakeProcess is used by router
 // tests that pre-date multi-backend, so all three return zero values to
 // preserve historical SessionSnapshot output.
-func (f *fakeProcess) ContextUsagePercent() float64       { return 0 }
-func (f *fakeProcess) TurnDurationMs() int64              { return 0 }
-func (f *fakeProcess) SpawnDiags() []cli.SpawnDiag        { return f.spawnDiags }
-func (f *fakeProcess) MeteringUsage() []cli.MeteringEntry { return nil }
-func (f *fakeProcess) MeteringGen() uint64                { return 0 }
-func (f *fakeProcess) Model() string                      { return "" }
-func (f *fakeProcess) LiveVersion() string                { return "" }
-func (f *fakeProcess) Effort() string                     { return "" }
+func (f *fakeProcess) ContextUsagePercent() float64            { return 0 }
+func (f *fakeProcess) TurnDurationMs() int64                   { return 0 }
+func (f *fakeProcess) SpawnDiags() []cli.SpawnDiag             { return f.spawnDiags }
+func (f *fakeProcess) MeteringUsage() []clievent.MeteringEntry { return nil }
+func (f *fakeProcess) MeteringGen() uint64                     { return 0 }
+func (f *fakeProcess) Model() string                           { return "" }
+func (f *fakeProcess) LiveVersion() string                     { return "" }
+func (f *fakeProcess) Effort() string                          { return "" }
 func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 	ch := make(chan struct{})
 	return ch, func() {}
@@ -263,7 +263,7 @@ func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 
 // Passthrough mocks — default to "not supported" so legacy-path tests are
 // unchanged. Passthrough-specific tests inject a real *cli.Process.
-func (f *fakeProcess) SendPassthrough(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
+func (f *fakeProcess) SendPassthrough(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error) {
 	return f.Send(ctx, text, images, onEvent)
 }
 func (f *fakeProcess) DiscardPassthroughPending(_ error) {}

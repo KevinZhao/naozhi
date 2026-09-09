@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
@@ -25,12 +25,12 @@ type runTimer struct {
 // callback to pass to the underlying process. When runStore is nil (tests /
 // no-persist) it returns the original callback unwrapped, preserving the
 // zero-allocation nil-callback fast path.
-func (s *ManagedSession) instrumentRun(onEvent cli.EventCallback) (*runTimer, cli.EventCallback) {
+func (s *ManagedSession) instrumentRun(onEvent clievent.EventCallback) (*runTimer, clievent.EventCallback) {
 	if s.runStore == nil {
 		return nil, onEvent
 	}
 	rt := &runTimer{started: time.Now()}
-	wrapped := func(ev cli.Event) {
+	wrapped := func(ev clievent.Event) {
 		if rt.firstByteNano.Load() == 0 {
 			rt.firstByteNano.CompareAndSwap(0, time.Now().UnixNano())
 		}
@@ -45,7 +45,7 @@ func (s *ManagedSession) instrumentRun(onEvent cli.EventCallback) (*runTimer, cl
 // instrumented (non-nil timer / store), enqueues the run record for async
 // persistence. Its work is cheap and the enqueue is NON-BLOCKING, so calling
 // it while sendMu is still held (the Send path) does not extend the lock window.
-func (s *ManagedSession) finishRun(rt *runTimer, proc processIface, result *cli.SendResult, err error) {
+func (s *ManagedSession) finishRun(rt *runTimer, proc processIface, result *clievent.SendResult, err error) {
 	runID := newRunID()
 	delta := s.accountTurnCost(result, runID)
 	if result == nil && err != nil {

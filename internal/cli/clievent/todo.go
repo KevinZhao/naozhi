@@ -1,4 +1,8 @@
-package cli
+// todo.go — the CLI's TodoWrite tool payload (#2649 G1-e).
+//
+// Moved out of internal/cli: wire-format parsing over stdlib only, consumed by
+// internal/dispatch for the todo summary it renders.
+package clievent
 
 import (
 	"encoding/json"

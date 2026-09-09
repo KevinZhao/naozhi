@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestRecover_CopiesModelUsage pins docs/rfc/cost-ledger.md §5.1: the
@@ -13,15 +13,15 @@ import (
 func TestRecover_CopiesModelUsage(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)
-	recovered := &cli.SendResult{
+	recovered := &clievent.SendResult{
 		Text:    "clean",
 		CostUSD: 0.5,
-		ModelUsage: map[string]cli.ModelUsage{
+		ModelUsage: map[string]clievent.ModelUsage{
 			"m[1m]": {InputTokens: 10, CostUSD: 0.5, CostBasis: "list"},
 		},
 	}
-	resend := func(context.Context, string) (*cli.SendResult, error) { return recovered, nil }
-	out := s.recoverLeakedToolcall(context.Background(), proc, &cli.SendResult{Text: leakSample, CostUSD: 0.3}, resend)
+	resend := func(context.Context, string) (*clievent.SendResult, error) { return recovered, nil }
+	out := s.recoverLeakedToolcall(context.Background(), proc, &clievent.SendResult{Text: leakSample, CostUSD: 0.3}, resend)
 	if out == nil || out.Text != "clean" {
 		t.Fatalf("recovery did not fire: %+v", out)
 	}

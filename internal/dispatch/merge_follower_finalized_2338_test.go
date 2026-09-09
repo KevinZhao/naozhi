@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -109,11 +109,11 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 	// replayed later through the very same path the interim fan-out uses.
 	var (
 		cbMu    sync.Mutex
-		onEvent cli.EventCallback
+		onEvent clievent.EventCallback
 	)
-	interim := cli.Event{
+	interim := clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "text", Text: "working"}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "text", Text: "working"}}},
 	}
 
 	sendFn := func(
@@ -121,9 +121,9 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 		_ string,
 		_ *session.ManagedSession,
 		_ string,
-		_ []cli.Attachment,
-		cb cli.EventCallback,
-	) (*cli.SendResult, error) {
+		_ []clievent.Attachment,
+		cb clievent.EventCallback,
+	) (*clievent.SendResult, error) {
 		cbMu.Lock()
 		onEvent = cb
 		cbMu.Unlock()
@@ -150,7 +150,7 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 
 		// The merge then collapses the turn: the follower result carries
 		// MergedCount>1 with an empty Text — the early-return branch under test.
-		return &cli.SendResult{Text: "", MergedCount: 2}, nil
+		return &clievent.SendResult{Text: "", MergedCount: 2}, nil
 	}
 
 	probe.onCue = func() {
@@ -249,9 +249,9 @@ func TestMergeFollower_FinalizedBlocksResidualRepaint(t *testing.T) {
 
 	tracker := newIMEventTracker(ctx, fp, "chat1", "direct", "general")
 
-	tracker.onEvent(cli.Event{
+	tracker.onEvent(clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "text", Text: "working"}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "text", Text: "working"}}},
 	})
 
 	tracker.waitReady(ctx)

@@ -6,15 +6,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
 // newInstrumentedSession builds a ManagedSession bound to a TestProcess and a
 // real (temp-dir) run-history store, so finishRun's async write actually
 // lands on disk for assertion.
-func newInstrumentedSession(t *testing.T, sendFunc func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error)) (*ManagedSession, *runhistory.Store) {
+func newInstrumentedSession(t *testing.T, sendFunc func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error)) (*ManagedSession, *runhistory.Store) {
 	t.Helper()
 	store := runhistory.NewStore(t.TempDir(), 0, 0)
 	t.Cleanup(store.Close)
@@ -24,11 +24,11 @@ func newInstrumentedSession(t *testing.T, sendFunc func(context.Context, string,
 }
 
 func TestSend_RecordsCompletedRun(t *testing.T) {
-	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []cli.Attachment, on cli.EventCallback) (*cli.SendResult, error) {
+	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
 		if on != nil {
-			on(cli.Event{}) // emit a first byte
+			on(clievent.Event{}) // emit a first byte
 		}
-		return &cli.SendResult{Text: "ok", CostUSD: 0.05}, nil
+		return &clievent.SendResult{Text: "ok", CostUSD: 0.05}, nil
 	})
 
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
@@ -65,8 +65,8 @@ func TestSend_PerTurnCostDelta(t *testing.T) {
 	raws := []float64{2.0, 5.0, 6.0, 9.0}
 	wantDeltas := []float64{2.0, 3.0, 1.0, 3.0} // 2, (5-2), (6-5), (9-6)
 	var idx int
-	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []cli.Attachment, on cli.EventCallback) (*cli.SendResult, error) {
-		r := &cli.SendResult{Text: "ok", CostUSD: raws[idx]}
+	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
+		r := &clievent.SendResult{Text: "ok", CostUSD: raws[idx]}
 		idx++
 		return r, nil
 	})
@@ -114,8 +114,8 @@ func TestFinishRun_ConcurrentOutOfOrderNoOverCount(t *testing.T) {
 	rt1 := &runTimer{started: time.Now()}
 	rt2 := &runTimer{started: time.Now()}
 	done := make(chan struct{}, 2)
-	go func() { s.finishRun(rt1, nil, &cli.SendResult{CostUSD: 5.0}, nil); done <- struct{}{} }()
-	go func() { s.finishRun(rt2, nil, &cli.SendResult{CostUSD: 2.0}, nil); done <- struct{}{} }()
+	go func() { s.finishRun(rt1, nil, &clievent.SendResult{CostUSD: 5.0}, nil); done <- struct{}{} }()
+	go func() { s.finishRun(rt2, nil, &clievent.SendResult{CostUSD: 2.0}, nil); done <- struct{}{} }()
 	<-done
 	<-done
 
@@ -135,8 +135,8 @@ func TestFinishRun_ConcurrentOutOfOrderNoOverCount(t *testing.T) {
 func TestSend_NoiseTurnDoesNotAdvanceCost(t *testing.T) {
 	raws := []float64{2.0, 0.0, 3.0} // middle turn is noise
 	var idx int
-	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []cli.Attachment, on cli.EventCallback) (*cli.SendResult, error) {
-		r := &cli.SendResult{Text: "ok", CostUSD: raws[idx]}
+	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
+		r := &clievent.SendResult{Text: "ok", CostUSD: raws[idx]}
 		idx++
 		return r, nil
 	})
@@ -165,7 +165,7 @@ func TestSend_OutcomeClassification(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []cli.Attachment, on cli.EventCallback) (*cli.SendResult, error) {
+			s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
 				return nil, tt.err
 			})
 			_, _ = s.Send(context.Background(), "x", nil, nil)
@@ -183,17 +183,17 @@ func TestSend_OutcomeClassification(t *testing.T) {
 
 func TestSend_FirstByteRecordedOnce(t *testing.T) {
 	var firstByteCalls int
-	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []cli.Attachment, on cli.EventCallback) (*cli.SendResult, error) {
+	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
 		// emit several events; FirstByteMS must reflect only the first
 		for i := 0; i < 3; i++ {
 			if on != nil {
-				on(cli.Event{})
+				on(clievent.Event{})
 			}
 		}
-		return &cli.SendResult{Text: "ok"}, nil
+		return &clievent.SendResult{Text: "ok"}, nil
 	})
 	// wrap an inner callback to count user-callback passthrough
-	userCb := func(ev cli.Event) { firstByteCalls++ }
+	userCb := func(ev clievent.Event) { firstByteCalls++ }
 	if _, err := s.Send(context.Background(), "hi", nil, userCb); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -212,8 +212,8 @@ func TestSend_FirstByteRecordedOnce(t *testing.T) {
 }
 
 func TestSendPassthrough_AlsoRecorded(t *testing.T) {
-	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []cli.Attachment, on cli.EventCallback) (*cli.SendResult, error) {
-		return &cli.SendResult{Text: "ok"}, nil
+	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
+		return &clievent.SendResult{Text: "ok"}, nil
 	})
 	if _, err := s.SendPassthrough(context.Background(), "hi", nil, nil, ""); err != nil {
 		t.Fatalf("SendPassthrough: %v", err)
@@ -241,18 +241,18 @@ func TestSend_NilStoreNoRecord(t *testing.T) {
 func TestSend_FirstByteConcurrentWithFinish(t *testing.T) {
 	releaseEvent := make(chan struct{})
 	eventDone := make(chan struct{})
-	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []cli.Attachment, on cli.EventCallback) (*cli.SendResult, error) {
+	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
 		// Fire onEvent from a separate goroutine that overlaps the return,
 		// mimicking readLoop fan-out racing the caller's finishRun.
 		go func() {
 			<-releaseEvent
 			if on != nil {
-				on(cli.Event{})
+				on(clievent.Event{})
 			}
 			close(eventDone)
 		}()
 		close(releaseEvent) // let the event goroutine run concurrently with return
-		return &cli.SendResult{Text: "ok"}, nil
+		return &clievent.SendResult{Text: "ok"}, nil
 	})
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -265,9 +265,9 @@ func TestSend_FirstByteConcurrentWithFinish(t *testing.T) {
 }
 
 func TestSend_DurationMonotonic(t *testing.T) {
-	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []cli.Attachment, on cli.EventCallback) (*cli.SendResult, error) {
+	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
 		time.Sleep(5 * time.Millisecond)
-		return &cli.SendResult{Text: "ok"}, nil
+		return &clievent.SendResult{Text: "ok"}, nil
 	})
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)

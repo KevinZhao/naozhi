@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"golang.org/x/image/draw"
 
 	_ "golang.org/x/image/bmp"
@@ -43,16 +44,16 @@ const (
 // input; best-effort — undecodable images, file_ref attachments and re-encode
 // failures pass through byte-for-byte. Applied at the CLI write boundary so
 // every transcript replay reuses the smaller bytes.
-func downscaleImagesForVision(images []Attachment) []Attachment {
+func downscaleImagesForVision(images []clievent.Attachment) []clievent.Attachment {
 	if len(images) == 0 {
 		return images
 	}
-	out := make([]Attachment, len(images))
+	out := make([]clievent.Attachment, len(images))
 	copy(out, images)
 	for i := range out {
 		img := out[i]
 		// Only inline raster bytes are eligible. file_ref carries no Data.
-		if img.Kind == KindFileRef || len(img.Data) == 0 {
+		if img.Kind == clievent.KindFileRef || len(img.Data) == 0 {
 			continue
 		}
 		data, mime, changed := downscaleForVision(img.Data)

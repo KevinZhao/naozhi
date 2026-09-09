@@ -1,4 +1,12 @@
-package cli
+// event.go — the Claude CLI's stream-json wire data model (#2649 G1-e).
+//
+// Moved verbatim out of internal/cli. Every type here is a shape read off or
+// written to the CLI's stdio; the file imported nothing but stdlib and this
+// package, yet living in internal/cli meant internal/dispatch (34 uses of
+// Attachment, 27 of Event, 18 each of ContentBlock and AssistantMessage) and
+// internal/server (89 uses of Attachment) had to link the subprocess spawner to
+// name a struct.
+package clievent
 
 import (
 	"encoding/base64"
@@ -6,8 +14,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // Event represents a parsed stream-json event from claude CLI stdout.
@@ -72,18 +78,22 @@ type Event struct {
 	// from an AskUserQuestion tool_use. Headless -p auto-rejects the tool, so
 	// this is observational: dispatch renders an interactive card and the
 	// answer returns as a normal user message. See docs/rfc/askuser-question.md.
-	AskQuestion *clievent.AskQuestion `json:"ask_question,omitempty"`
+	AskQuestion *AskQuestion `json:"ask_question,omitempty"`
 
 	// ToolCall is populated for ACP tool_call / tool_call_update events
 	// (dashboard progress row with collapsible rawOutput). nil on stream-json,
 	// where tool use flows through Message.Content[].Type=="tool_use".
-	ToolCall *clievent.ToolCall `json:"tool_call,omitempty"`
+	ToolCall *ToolCall `json:"tool_call,omitempty"`
 
-	// recvAt is the wall-clock moment readLoop pushed the event to eventCh.
+	// RecvAt is the wall-clock moment readLoop pushed the event to eventCh.
+	// Exported (it was recvAt) because the reader that stamps it now lives in a
+	// different package from the type: internal/cli's readLoop sets it and
+	// process_turn reads it for staleness. Not a wire field — the CLI never
+	// sends it.
 	// Used by drainStaleEvents to distinguish events belonging to a previous
 	// (possibly interrupted) turn from events produced for the current turn
 	// after drain entered. Not serialized.
-	recvAt time.Time
+	RecvAt time.Time
 }
 
 // EventMetadata mirrors the cross-backend "what just happened on this turn"
@@ -187,12 +197,12 @@ type ContentBlock struct {
 	Input json.RawMessage `json:"input,omitempty"` // tool_use input
 }
 
-// maxAssistantMessageContentBytes caps the total content-block bytes of an
+// MaxAssistantMessageContentBytes caps the total content-block bytes of an
 // AssistantMessage accepted by ReadEvent, so a tampered or buggy CLI/shim
 // cannot amplify one huge event through every downstream consumer (ring,
 // dashboard fan-out, persist). 4 MiB is well above the largest real payload
 // seen (~1.5 MiB) and below the 10 MiB shim line cap.
-const maxAssistantMessageContentBytes = 4 * 1024 * 1024
+const MaxAssistantMessageContentBytes = 4 * 1024 * 1024
 
 // EventDetailMaxRunes is the rune cap applied to EventEntry.Detail (and to
 // SubagentLinker.Resolve description args, which land in the same field).
@@ -204,11 +214,11 @@ const maxAssistantMessageContentBytes = 4 * 1024 * 1024
 // a prompt longer than this bound.
 const EventDetailMaxRunes = 2000
 
-// contentBytes sums the user-visible byte size of an AssistantMessage's
+// ContentBytes sums the user-visible byte size of an AssistantMessage's
 // content blocks. Only fields that grow with model output are counted; the
 // fixed-size discriminators (Type/ID/Name) are excluded so a message of
 // many tiny tool_use blocks does not falsely trip the cap.
-func contentBytes(m *AssistantMessage) int {
+func ContentBytes(m *AssistantMessage) int {
 	if m == nil {
 		return 0
 	}
@@ -368,13 +378,13 @@ type inputTextBlock struct {
 	Text string `json:"text"`
 }
 
-// inputImageBlock is an image content block for multimodal messages.
-type inputImageBlock struct {
+// InputImageBlock is an image content block for multimodal messages.
+type InputImageBlock struct {
 	Type   string      `json:"type"`
-	Source imageSource `json:"source"`
+	Source ImageSource `json:"source"`
 }
 
-type imageSource struct {
+type ImageSource struct {
 	Type      string `json:"type"`       // "base64"
 	MediaType string `json:"media_type"` // e.g., "image/png"
 	Data      string `json:"data"`       // base64-encoded
@@ -477,9 +487,9 @@ func NewUserMessageWithMeta(text string, atts []Attachment, uuid, priority strin
 	} else {
 		blocks := make([]any, 0, 1+len(inline))
 		for _, img := range inline {
-			blocks = append(blocks, inputImageBlock{
+			blocks = append(blocks, InputImageBlock{
 				Type: "image",
-				Source: imageSource{
+				Source: ImageSource{
 					Type:      "base64",
 					MediaType: img.MimeType,
 					Data:      base64.StdEncoding.EncodeToString(img.Data),
@@ -522,3 +532,6 @@ type SendResult struct {
 	MergedWithHead uint64 // 0 for head; for follower the id of the head sendSlot
 	HeadText       string // follower mirror of Text (optional, for UI association)
 }
+
+// EventCallback is called for each intermediate event during Send.
+type EventCallback func(ev Event)

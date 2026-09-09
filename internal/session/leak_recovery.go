@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/leakguard"
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -50,9 +50,9 @@ func leakRecoveryEnabled() bool {
 func (s *ManagedSession) recoverLeakedToolcall(
 	ctx context.Context,
 	proc processIface,
-	result *cli.SendResult,
-	resend func(context.Context, string) (*cli.SendResult, error),
-) *cli.SendResult {
+	result *clievent.SendResult,
+	resend func(context.Context, string) (*clievent.SendResult, error),
+) *clievent.SendResult {
 	// MergedCount > 1 is a passthrough follower slot sharing a head's result —
 	// it must never trigger its own recovery.
 	if result == nil || result.Text == "" || result.MergedCount > 1 {
@@ -101,7 +101,7 @@ func (s *ManagedSession) recoverLeakedToolcall(
 
 	metrics.ToolCallLeakRecoveredTotal.Add(1)
 	slog.Info("leak-recovery: recovered", "key", s.key)
-	return &cli.SendResult{
+	return &clievent.SendResult{
 		Text:      rec.Text,
 		SessionID: firstNonEmpty(rec.SessionID, result.SessionID),
 		// Cumulative total already includes the leaked turn; never sum (#2355).
@@ -117,7 +117,7 @@ func (s *ManagedSession) recoverLeakedToolcall(
 
 // strippedResult returns a copy of r with the leaked tool-call XML removed from
 // Text, preserving all other fields.
-func strippedResult(r *cli.SendResult) *cli.SendResult {
+func strippedResult(r *clievent.SendResult) *clievent.SendResult {
 	if r == nil {
 		return nil
 	}

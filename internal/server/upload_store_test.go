@@ -5,12 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestUploadStoreOwnership(t *testing.T) {
 	s := newUploadStore()
-	img := cli.Attachment{Data: []byte("fake"), MimeType: "image/png"}
+	img := clievent.Attachment{Data: []byte("fake"), MimeType: "image/png"}
 
 	id, err := s.Put("alice", img)
 	if err != nil {
@@ -49,8 +49,8 @@ func TestUploadStoreNotFound(t *testing.T) {
 // the first N-1 fids before hitting the bad fid, losing those images.
 func TestUploadStoreTakeAll_AllOrNothingOnMissingID(t *testing.T) {
 	s := newUploadStore()
-	img1 := cli.Attachment{Data: []byte("one"), MimeType: "image/png"}
-	img2 := cli.Attachment{Data: []byte("two"), MimeType: "image/jpeg"}
+	img1 := clievent.Attachment{Data: []byte("one"), MimeType: "image/png"}
+	img2 := clievent.Attachment{Data: []byte("two"), MimeType: "image/jpeg"}
 
 	id1, err := s.Put("alice", img1)
 	if err != nil {
@@ -86,9 +86,9 @@ func TestUploadStoreTakeAll_AllOrNothingOnMissingID(t *testing.T) {
 // silently consume the caller's valid entries before the check fires.
 func TestUploadStoreTakeAll_AllOrNothingOnOwnerMismatch(t *testing.T) {
 	s := newUploadStore()
-	alice1, _ := s.Put("alice", cli.Attachment{Data: []byte("a1"), MimeType: "image/png"})
-	bob, _ := s.Put("bob", cli.Attachment{Data: []byte("b"), MimeType: "image/png"})
-	alice2, _ := s.Put("alice", cli.Attachment{Data: []byte("a2"), MimeType: "image/png"})
+	alice1, _ := s.Put("alice", clievent.Attachment{Data: []byte("a1"), MimeType: "image/png"})
+	bob, _ := s.Put("bob", clievent.Attachment{Data: []byte("b"), MimeType: "image/png"})
+	alice2, _ := s.Put("alice", clievent.Attachment{Data: []byte("a2"), MimeType: "image/png"})
 
 	taken, err := s.TakeAll([]string{alice1, bob, alice2}, "alice")
 	if err == nil {
@@ -114,9 +114,9 @@ func TestUploadStoreTakeAll_AllOrNothingOnOwnerMismatch(t *testing.T) {
 // and every entry is removed.
 func TestUploadStoreTakeAll_HappyPathConsumesAllInOrder(t *testing.T) {
 	s := newUploadStore()
-	img1 := cli.Attachment{Data: []byte("one"), MimeType: "image/png"}
-	img2 := cli.Attachment{Data: []byte("two"), MimeType: "image/jpeg"}
-	img3 := cli.Attachment{Data: []byte("three"), MimeType: "image/gif"}
+	img1 := clievent.Attachment{Data: []byte("one"), MimeType: "image/png"}
+	img2 := clievent.Attachment{Data: []byte("two"), MimeType: "image/jpeg"}
+	img3 := clievent.Attachment{Data: []byte("three"), MimeType: "image/gif"}
 
 	id1, _ := s.Put("alice", img1)
 	id2, _ := s.Put("alice", img2)
@@ -148,7 +148,7 @@ func TestUploadStorePerOwnerByteCap(t *testing.T) {
 	// Synthesize just above the per-owner byte budget across two entries
 	// while staying well under the 40-entry count cap.
 	half := maxUploadBytesPerOwner/2 + 1
-	big := cli.Attachment{Data: make([]byte, half), MimeType: "application/pdf"}
+	big := clievent.Attachment{Data: make([]byte, half), MimeType: "application/pdf"}
 
 	if _, err := s.Put("alice", big); err != nil {
 		t.Fatalf("first Put should succeed: %v", err)
@@ -172,7 +172,7 @@ func TestUploadStoreGlobalByteCap(t *testing.T) {
 	// Fill near the global byte cap using different owners so the
 	// per-owner byte cap does not trigger first. 6 owners * 90 MB = 540 MB
 	// attempted, cap is 512 MB.
-	big := cli.Attachment{Data: make([]byte, 90*1024*1024), MimeType: "application/pdf"}
+	big := clievent.Attachment{Data: make([]byte, 90*1024*1024), MimeType: "application/pdf"}
 	succeeded := 0
 	for i, o := range []string{"a", "b", "c", "d", "e", "f"} {
 		_, err := s.Put(o, big)
@@ -197,7 +197,7 @@ func TestUploadStoreGlobalByteCap(t *testing.T) {
 // this, the per-owner cap would wedge the user after a single large send.
 func TestUploadStoreBytesReleasedOnTake(t *testing.T) {
 	s := newUploadStore()
-	big := cli.Attachment{
+	big := clievent.Attachment{
 		Data:     make([]byte, maxUploadBytesPerOwner-1024),
 		MimeType: "application/pdf",
 	}
@@ -230,9 +230,9 @@ func TestUploadStoreBytesReleasedOnTake(t *testing.T) {
 func TestUploadStoreTakeAll_DuplicateIDQuotaDoubleDeduct(t *testing.T) {
 	s := newUploadStore()
 	// alice keeps extra live entries so the ≤0 clamp cannot mask drift.
-	keepA, _ := s.Put("alice", cli.Attachment{Data: []byte("keepA"), MimeType: "image/png"})
-	keepB, _ := s.Put("alice", cli.Attachment{Data: []byte("keepB"), MimeType: "image/png"})
-	dup, _ := s.Put("alice", cli.Attachment{Data: []byte("dup"), MimeType: "image/png"})
+	keepA, _ := s.Put("alice", clievent.Attachment{Data: []byte("keepA"), MimeType: "image/png"})
+	keepB, _ := s.Put("alice", clievent.Attachment{Data: []byte("keepB"), MimeType: "image/png"})
+	dup, _ := s.Put("alice", clievent.Attachment{Data: []byte("dup"), MimeType: "image/png"})
 	if keepA == "" || keepB == "" || dup == "" {
 		t.Fatal("Put returned empty id")
 	}

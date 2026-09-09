@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestHandleSend_PostTakeAllFailureFlagsFilesConsumed pins F3: once TakeAll
@@ -20,7 +20,7 @@ func TestHandleSend_PostTakeAllFailureFlagsFilesConsumed(t *testing.T) {
 	owner := bearerOwner(token)
 	store := newUploadStore()
 	seed := func() string {
-		fid, err := store.Put(owner, cli.Attachment{Kind: cli.KindImageInline, Data: []byte("png"), MimeType: "image/png", OrigName: "a.png"})
+		fid, err := store.Put(owner, clievent.Attachment{Kind: clievent.KindImageInline, Data: []byte("png"), MimeType: "image/png", OrigName: "a.png"})
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}

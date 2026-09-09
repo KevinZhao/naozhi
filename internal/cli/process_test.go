@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // shimTestPair creates a Process connected to a fake shim via net.Pipe.
@@ -124,7 +126,7 @@ func TestProcess_ReadLoop_ForwardsEventsToChannel(t *testing.T) {
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"s1","total_cost_usd":0.01}`)
 	srv.SendCLIExited(0)
 
-	var got []Event
+	var got []clievent.Event
 	for ev := range p.eventCh {
 		got = append(got, ev)
 	}
@@ -190,7 +192,7 @@ func TestProcess_ReadLoop_SkipsInvalidJSON(t *testing.T) {
 	srv.SendStdout(`{"type":"result","result":"ok","session_id":"s1"}`)
 	srv.SendCLIExited(0)
 
-	var got []Event
+	var got []clievent.Event
 	for ev := range p.eventCh {
 		got = append(got, ev)
 	}
@@ -210,7 +212,7 @@ func TestProcess_ReadLoop_SkipsHookEvents(t *testing.T) {
 	srv.SendStdout(`{"type":"result","result":"ok"}`)
 	srv.SendCLIExited(0)
 
-	var got []Event
+	var got []clievent.Event
 	for ev := range p.eventCh {
 		got = append(got, ev)
 	}
@@ -225,7 +227,7 @@ func TestProcess_ReadLoop_ExitsOnKillCh(t *testing.T) {
 	p, _ := shimTestPair(&ClaudeProtocol{})
 
 	// Use zero-buffer eventCh to force block
-	p.eventCh = make(chan Event)
+	p.eventCh = make(chan clievent.Event)
 	go p.readLoop()
 
 	// The readLoop is blocked waiting on shimR.ReadBytes. Close killCh won't
@@ -384,7 +386,7 @@ func TestParseAgentInput(t *testing.T) {
 	})
 }
 
-func eventTypes(evs []Event) []string {
+func eventTypes(evs []clievent.Event) []string {
 	out := make([]string, len(evs))
 	for i, e := range evs {
 		out[i] = e.Type

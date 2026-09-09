@@ -96,7 +96,7 @@ func TestClaudeProtocol_ReadEvent_FastPathSkipsParseForBashToolUse(t *testing.T)
 func TestExtractAskQuestion_ReturnsNilOnMalformed(t *testing.T) {
 	t.Parallel()
 	// tool_use with name=AskUserQuestion but malformed input (not JSON object)
-	blocks := []ContentBlock{{
+	blocks := []clievent.ContentBlock{{
 		Type: "tool_use", Name: "AskUserQuestion", ID: "toolu_xxx",
 		Input: json.RawMessage(`"not-an-object"`),
 	}}
@@ -104,7 +104,7 @@ func TestExtractAskQuestion_ReturnsNilOnMalformed(t *testing.T) {
 		t.Errorf("expected nil on malformed input, got %+v", aq)
 	}
 	// Empty questions array is also a no-op — nothing to render.
-	blocks = []ContentBlock{{
+	blocks = []clievent.ContentBlock{{
 		Type: "tool_use", Name: "AskUserQuestion", ID: "toolu_xxx",
 		Input: json.RawMessage(`{"questions":[]}`),
 	}}
@@ -115,7 +115,7 @@ func TestExtractAskQuestion_ReturnsNilOnMalformed(t *testing.T) {
 
 func TestExtractAskQuestion_IgnoresNonAskToolUse(t *testing.T) {
 	t.Parallel()
-	blocks := []ContentBlock{
+	blocks := []clievent.ContentBlock{
 		{Type: "tool_use", Name: "Bash", ID: "t1", Input: json.RawMessage(`{"command":"ls"}`)},
 		{Type: "text", Text: "hello"},
 	}

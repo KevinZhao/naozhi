@@ -92,7 +92,7 @@ func encodeImageBase64(img []byte) string {
 	return out
 }
 
-// toolJSONMaxRunes caps tool_call input/output payloads in Event.ToolCall
+// toolJSONMaxRunes caps tool_call input/output payloads in clievent.Event.ToolCall
 // before dashboard / IM rendering. 16 KiB holds a typical Read / Bash / Edit
 // invocation in full while keeping a runaway tool from blowing up WS frames
 // and slog attrs; aligned with process_event_format.go's full-content cap.
@@ -164,7 +164,7 @@ type ACPProtocol struct {
 	// pendingControl maps an in-flight control RPC id (today only
 	// session/set_model) to the caller's requestID. ReadEvent's IsResponse
 	// branch consults it FIRST and surfaces a match as a Type:"control_ack"
-	// Event — otherwise a mid-turn set_model response would falsely close the
+	// clievent.Event — otherwise a mid-turn set_model response would falsely close the
 	// active turn. Entries are removed on match (a lost response leaks one entry
 	// until teardown). docs/rfc/dashboard-model-effort-control.md §4.4.
 	pendingControl map[int]string
@@ -374,7 +374,7 @@ type acpPromptParams struct {
 	Prompt    []acpPromptBlock `json:"prompt"`
 }
 
-func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []Attachment) error {
+func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []clievent.Attachment) error {
 	sid := p.loadSessionID()
 	p.mu.Lock()
 	p.textBuf.Reset()
@@ -455,7 +455,7 @@ func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
 
 // WriteUserMessageLocked ignores uuid and priority — ACP has neither concept,
 // so such sessions fall back to Collect mode regardless of queue.mode.
-func (p *ACPProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []Attachment, _ string) error {
+func (p *ACPProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []clievent.Attachment, _ string) error {
 	return p.WriteMessage(w, text, images)
 }
 
@@ -545,7 +545,7 @@ func (p *ACPProtocol) Capabilities() Caps {
 // ReadEventInto is the allocation-aware variant of ReadEvent (#1676). ACP's
 // per-frame shapes vary (zero/one/two events), so the parsed events are copied
 // into buf when they fit; only a >cap result falls back to ReadEvent's slice.
-func (p *ACPProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool, error) {
+func (p *ACPProtocol) ReadEventInto(line string, buf []clievent.Event) ([]clievent.Event, bool, error) {
 	events, done, err := p.ReadEvent(line)
 	if err != nil || len(events) == 0 || cap(buf) < len(events) {
 		return events, done, err
@@ -553,7 +553,7 @@ func (p *ACPProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool, er
 	return append(buf[:0], events...), done, nil
 }
 
-func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
+func (p *ACPProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 	var msg RPCMessage
 	// Aliased bytes: json.Unmarshal only reads its input (#700).
 	if err := json.Unmarshal(stringToBytesUnsafe(line), &msg); err != nil {
@@ -568,34 +568,34 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		// Cap total content bytes to bound downstream CPU / memory amplification
 		// (ring.EventLog ring, JSONL persist, dashboard fan-out); mirrors ClaudeProtocol.
 		if ev.Message != nil {
-			if n := contentBytes(ev.Message); n > maxAssistantMessageContentBytes {
+			if n := clievent.ContentBytes(ev.Message); n > clievent.MaxAssistantMessageContentBytes {
 				return nil, done, fmt.Errorf("acp: event content exceeds %d bytes (got %d), dropping",
-					maxAssistantMessageContentBytes, n)
+					clievent.MaxAssistantMessageContentBytes, n)
 			}
 		}
-		return []Event{ev}, done, nil
+		return []clievent.Event{ev}, done, nil
 	}
 
 	// _kiro.dev/metadata is kiro's per-turn status frame (contextUsagePercentage,
 	// turnDurationMs, meteringUsage), surfaced as a synthetic Type:"metadata"
-	// Event so Process can update SessionView. docs/rfc/multi-backend.md §8.8.
+	// clievent.Event so Process can update SessionView. docs/rfc/multi-backend.md §8.8.
 	if msg.IsNotification() && msg.Method == "_kiro.dev/metadata" {
 		ev, done, err := parseKiroMetadata(msg.Params)
 		if err != nil || ev.Type == "" {
 			return nil, done, err
 		}
-		return []Event{ev}, done, nil
+		return []clievent.Event{ev}, done, nil
 	}
 
 	// session/request_permission: IDAsString tolerates kiro's UUID strings as
 	// well as numeric ids (HandleEvent echoes the id verbatim); RawParams carries
 	// options[] so HandleEvent can pick the optionId by kind, not by vendor name.
 	if msg.IsRequest() && msg.Method == "session/request_permission" {
-		ev := Event{Type: "permission_request", RawParams: msg.Params}
+		ev := clievent.Event{Type: "permission_request", RawParams: msg.Params}
 		if id, ok := msg.IDAsString(); ok {
 			ev.RPCRequestID = id
 		}
-		return []Event{ev}, false, nil
+		return []clievent.Event{ev}, false, nil
 	}
 
 	if msg.IsResponse() {
@@ -606,12 +606,12 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		// truncate the reply. Checked for both success and error shapes.
 		if id, ok := msg.IDAsInt(); ok {
 			if reqID, pending := p.takePendingControl(id); pending {
-				ev := Event{Type: "control_ack", SubType: "success", RPCRequestID: reqID}
+				ev := clievent.Event{Type: "control_ack", SubType: "success", RPCRequestID: reqID}
 				if msg.Error != nil {
 					ev.SubType = "error"
 					ev.Result = osutil.SanitizeForLog(msg.Error.Message, 256)
 				}
-				return []Event{ev}, false, nil
+				return []clievent.Event{ev}, false, nil
 			}
 		}
 		if msg.Error != nil {
@@ -650,27 +650,27 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		// (thoughtBuf; per-chunk rows would flood ring.EventLog), an assistant "text"
 		// frame — the ONLY place the visible reply materialises, since chunks only
 		// feed textBuf — and a pure result event. Result still carries the text
-		// for SendResult.Text, but ring.EventLog treats result as turn metadata only.
-		var events []Event
+		// for clievent.SendResult.Text, but ring.EventLog treats result as turn metadata only.
+		var events []clievent.Event
 		if thought != "" {
-			events = append(events, Event{
+			events = append(events, clievent.Event{
 				Type:      "assistant",
 				SessionID: sid,
-				Message: &AssistantMessage{
-					Content: []ContentBlock{{Type: "thinking", Text: thought}},
+				Message: &clievent.AssistantMessage{
+					Content: []clievent.ContentBlock{{Type: "thinking", Text: thought}},
 				},
 			})
 		}
 		if text != "" {
-			events = append(events, Event{
+			events = append(events, clievent.Event{
 				Type:      "assistant",
 				SessionID: sid,
-				Message: &AssistantMessage{
-					Content: []ContentBlock{{Type: "text", Text: text}},
+				Message: &clievent.AssistantMessage{
+					Content: []clievent.ContentBlock{{Type: "text", Text: text}},
 				},
 			})
 		}
-		events = append(events, Event{
+		events = append(events, clievent.Event{
 			Type:      "result",
 			SubType:   stop.StopReason,
 			Result:    text,
@@ -726,7 +726,7 @@ func pickAllowOptionID(opts []ACPPermissionOption) string {
 	return ""
 }
 
-func (p *ACPProtocol) HandleEvent(w io.Writer, ev Event) bool {
+func (p *ACPProtocol) HandleEvent(w io.Writer, ev clievent.Event) bool {
 	if ev.Type != "permission_request" {
 		return false
 	}
@@ -784,10 +784,10 @@ func (p *ACPProtocol) HandleEvent(w io.Writer, ev Event) bool {
 	return true
 }
 
-func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, error) {
+func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (clievent.Event, bool, error) {
 	var update ACPSessionUpdate
 	if err := json.Unmarshal(params, &update); err != nil {
-		return Event{}, false, err
+		return clievent.Event{}, false, err
 	}
 
 	switch update.Update.SessionUpdate {
@@ -803,9 +803,9 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 			p.mu.Lock()
 			// Cap the streaming buffer at the finalised-message ceiling: without it
 			// a runaway ACP peer can stream chunks indefinitely before the turn-end
-			// contentBytes check runs and OOM the process. Truncate silently; the
+			// clievent.ContentBytes check runs and OOM the process. Truncate silently; the
 			// downstream guard surfaces the size to logs.
-			if room := maxAssistantMessageContentBytes - p.textBuf.Len(); room > 0 {
+			if room := clievent.MaxAssistantMessageContentBytes - p.textBuf.Len(); room > 0 {
 				if len(content.Text) <= room {
 					p.textBuf.WriteString(content.Text)
 				} else {
@@ -817,7 +817,7 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 			}
 			p.mu.Unlock()
 		}
-		return Event{Type: "assistant", SessionID: update.SessionID}, false, nil
+		return clievent.Event{Type: "assistant", SessionID: update.SessionID}, false, nil
 
 	case "agent_thought_chunk":
 		// Reasoning stream: accumulate into thoughtBuf and flush one "thinking"
@@ -829,7 +829,7 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 				"raw_len", len(update.Update.Content))
 		} else if content.Text != "" {
 			p.mu.Lock()
-			if room := maxAssistantMessageContentBytes - p.thoughtBuf.Len(); room > 0 {
+			if room := clievent.MaxAssistantMessageContentBytes - p.thoughtBuf.Len(); room > 0 {
 				if len(content.Text) <= room {
 					p.thoughtBuf.WriteString(content.Text)
 				} else {
@@ -839,7 +839,7 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 			}
 			p.mu.Unlock()
 		}
-		return Event{Type: "assistant", SessionID: update.SessionID}, false, nil
+		return clievent.Event{Type: "assistant", SessionID: update.SessionID}, false, nil
 
 	case "tool_call":
 		// Initial invocation. Status defaults to "" ("pending" on the dashboard);
@@ -847,7 +847,7 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 		// Label fields are sanitized: kiro is across the trust boundary and they
 		// render directly into chip text/colour.
 		sanitizedTitle := sanitizeToolCallLabel(update.Update.Title)
-		return Event{
+		return clievent.Event{
 			Type:      "assistant",
 			SubType:   "tool_use",
 			SessionID: update.SessionID,
@@ -859,13 +859,13 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 				Status:    sanitizeToolCallLabel(update.Update.Status),
 				InputJSON: truncateToolJSON(update.Update.RawInput),
 			},
-			Message: &AssistantMessage{
-				Content: []ContentBlock{{Type: "tool_use", Name: sanitizedTitle}},
+			Message: &clievent.AssistantMessage{
+				Content: []clievent.ContentBlock{{Type: "tool_use", Name: sanitizedTitle}},
 			},
 		}, false, nil
 
 	case "tool_call_update":
-		return Event{
+		return clievent.Event{
 			Type:      "assistant",
 			SubType:   "tool_result",
 			SessionID: update.SessionID,
@@ -881,7 +881,7 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 		}, false, nil
 
 	default:
-		return Event{Type: "system", SubType: update.Update.SessionUpdate}, false, nil
+		return clievent.Event{Type: "system", SubType: update.Update.SessionUpdate}, false, nil
 	}
 }
 
@@ -939,12 +939,12 @@ func normalizeContextUsage(v float64) float64 {
 }
 
 // parseKiroMetadata (below) decodes a _kiro.dev/metadata notification into a
-// Type:"metadata" Event (contextUsagePercentage, turnDurationMs, meteringUsage,
+// Type:"metadata" clievent.Event (contextUsagePercentage, turnDurationMs, meteringUsage,
 // effort). kiro emits TWO frames per turn (verified on 2.16.0): an early one
 // with contextUsagePercentage + effort, then one at turn end adding
 // meteringUsage + turnDurationMs. contextUsagePercentage arrives both as a 0-1
 // fraction and as a percentage that may exceed 100 (see normalizeContextUsage).
-// Schema drift is log-and-skip (zero Event) so a reshaped payload never breaks readLoop.
+// Schema drift is log-and-skip (zero clievent.Event) so a reshaped payload never breaks readLoop.
 
 // kiroMeteringEntry mirrors one entry of kiro's `meteringUsage` array. Named so
 // the encoding/json type-descriptor cache is shared across calls (anonymous
@@ -993,25 +993,25 @@ func effortFromRaw(raw json.RawMessage) string {
 // tier name without letting an anomalous process pin an unbounded string.
 const maxEffortRunes = 32
 
-func parseKiroMetadata(params json.RawMessage) (Event, bool, error) {
+func parseKiroMetadata(params json.RawMessage) (clievent.Event, bool, error) {
 	var raw kiroMetadataParams
 	if err := json.Unmarshal(params, &raw); err != nil {
 		slog.Warn("acp: _kiro.dev/metadata unmarshal failed",
 			"err", err, "raw_len", len(params))
-		return Event{}, false, nil
+		return clievent.Event{}, false, nil
 	}
-	meta := &EventMetadata{
+	meta := &clievent.EventMetadata{
 		ContextUsagePercent: normalizeContextUsage(raw.ContextUsagePercentage),
 		TurnDurationMs:      raw.TurnDurationMs,
 		Effort:              effortFromRaw(raw.Effort),
 	}
 	if len(raw.MeteringUsage) > 0 {
-		meta.MeteringUsage = make([]MeteringEntry, 0, len(raw.MeteringUsage))
+		meta.MeteringUsage = make([]clievent.MeteringEntry, 0, len(raw.MeteringUsage))
 		for _, m := range raw.MeteringUsage {
-			meta.MeteringUsage = append(meta.MeteringUsage, MeteringEntry(m))
+			meta.MeteringUsage = append(meta.MeteringUsage, clievent.MeteringEntry(m))
 		}
 	}
-	return Event{
+	return clievent.Event{
 		Type:      "metadata",
 		SessionID: raw.SessionID,
 		Metadata:  meta,

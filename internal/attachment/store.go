@@ -129,7 +129,7 @@ func (m *Meta) HasReference(keyhash string) bool {
 	return false
 }
 
-// Persisted is what Persist returns: enough to build a cli.Attachment with
+// Persisted is what Persist returns: enough to build a clievent.Attachment with
 // Kind=KindFileRef without the caller having to re-stat the file.
 type Persisted struct {
 	// RelPath is workspace-relative with forward slashes (for the CLI Read tool).

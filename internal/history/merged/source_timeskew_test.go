@@ -13,7 +13,7 @@ import (
 // Symptom: every message in the dashboard rendered twice. Root cause: the
 // cross-source dedup key embedded EventEntry.Time, but the two tiers stamp
 // the same turn at different points in the pipeline — the local tier from
-// cli.Event.recvAt (when readLoop pushed the frame onto eventCh), the Claude
+// clievent.Event.RecvAt (when readLoop pushed the frame onto eventCh), the Claude
 // JSONL fallback from the CLI's own `timestamp` field. Measured within one
 // live session that gap is 0-19 ms for assistant text and up to ~1.4 s for a
 // user message on a cold CLI spawn. Since the two tiers' UUIDs also never

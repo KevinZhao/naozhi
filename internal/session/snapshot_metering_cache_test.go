@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // meteringGenTestProcess is a TestProcess wrapper whose metering rows are
@@ -17,15 +17,15 @@ type meteringGenTestProcess struct {
 	*TestProcess
 	mu       sync.Mutex
 	gen      uint64
-	metering []cli.MeteringEntry
+	metering []clievent.MeteringEntry
 	calls    atomic.Int64
 }
 
-func newMeteringGenTestProcess(gen uint64, metering []cli.MeteringEntry) *meteringGenTestProcess {
+func newMeteringGenTestProcess(gen uint64, metering []clievent.MeteringEntry) *meteringGenTestProcess {
 	return &meteringGenTestProcess{TestProcess: NewTestProcess(), gen: gen, metering: metering}
 }
 
-func (m *meteringGenTestProcess) set(gen uint64, metering []cli.MeteringEntry) {
+func (m *meteringGenTestProcess) set(gen uint64, metering []clievent.MeteringEntry) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.gen = gen
@@ -38,20 +38,20 @@ func (m *meteringGenTestProcess) MeteringGen() uint64 {
 	return m.gen
 }
 
-func (m *meteringGenTestProcess) MeteringUsage() []cli.MeteringEntry {
+func (m *meteringGenTestProcess) MeteringUsage() []clievent.MeteringEntry {
 	m.calls.Add(1)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.metering) == 0 {
 		return nil
 	}
-	out := make([]cli.MeteringEntry, len(m.metering))
+	out := make([]clievent.MeteringEntry, len(m.metering))
 	copy(out, m.metering)
 	return out
 }
 
-func credit(v float64) []cli.MeteringEntry {
-	return []cli.MeteringEntry{{Value: v, Unit: "credit", UnitPlural: "credits"}}
+func credit(v float64) []clievent.MeteringEntry {
+	return []clievent.MeteringEntry{{Value: v, Unit: "credit", UnitPlural: "credits"}}
 }
 
 func newKiroSessionWith(proc processIface) *ManagedSession {
@@ -209,7 +209,7 @@ func TestSnapshot_MeteringCache_ConcurrentReadersAndWriter(t *testing.T) {
 // a metering-bearing (kiro-class) session whose metering has not changed —
 // the dominant 1 Hz × N tabs × M sessions poll case #2345 targets.
 func BenchmarkSnapshot_WithMetering(b *testing.B) {
-	proc := newMeteringGenTestProcess(1, []cli.MeteringEntry{
+	proc := newMeteringGenTestProcess(1, []clievent.MeteringEntry{
 		{Value: 1.5, Unit: "credit", UnitPlural: "credits"},
 		{Value: 1200, Unit: "token", UnitPlural: "tokens"},
 		{Value: 0.02, Unit: "USD"},

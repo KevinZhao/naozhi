@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestCostUnitForBackend pins the dashboard-facing unit selection for each
@@ -39,7 +39,7 @@ func TestSnapshot_NormalizeFields_LiveProcess(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "test:direct:alice:general"}
 	s.SetBackend("kiro")
-	proc := newMetadataTestProcess(42.5, 1234, []cli.MeteringEntry{
+	proc := newMetadataTestProcess(42.5, 1234, []clievent.MeteringEntry{
 		{Value: 0.05, Unit: "credit", UnitPlural: "credits"},
 	})
 	proc.EffortVal = "xhigh"
@@ -139,10 +139,10 @@ type metadataTestProcess struct {
 	*TestProcess
 	contextPct float64
 	turnMs     int64
-	metering   []cli.MeteringEntry
+	metering   []clievent.MeteringEntry
 }
 
-func newMetadataTestProcess(pct float64, ms int64, metering []cli.MeteringEntry) *metadataTestProcess {
+func newMetadataTestProcess(pct float64, ms int64, metering []clievent.MeteringEntry) *metadataTestProcess {
 	return &metadataTestProcess{
 		TestProcess: NewTestProcess(),
 		contextPct:  pct,
@@ -153,11 +153,11 @@ func newMetadataTestProcess(pct float64, ms int64, metering []cli.MeteringEntry)
 
 func (m *metadataTestProcess) ContextUsagePercent() float64 { return m.contextPct }
 func (m *metadataTestProcess) TurnDurationMs() int64        { return m.turnMs }
-func (m *metadataTestProcess) MeteringUsage() []cli.MeteringEntry {
+func (m *metadataTestProcess) MeteringUsage() []clievent.MeteringEntry {
 	if m.metering == nil {
 		return nil
 	}
-	out := make([]cli.MeteringEntry, len(m.metering))
+	out := make([]clievent.MeteringEntry, len(m.metering))
 	copy(out, m.metering)
 	return out
 }

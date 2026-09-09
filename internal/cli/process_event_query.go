@@ -52,7 +52,7 @@ func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 			return
 		}
 		// Cap so the Resolve goroutine doesn't pin multi-KB strings while queued.
-		desc = textutil.TruncateRunes(desc, EventDetailMaxRunes)
+		desc = textutil.TruncateRunes(desc, clievent.EventDetailMaxRunes)
 		// Bounded pool: replay can fan in dozens of task_started on reconnect (#415).
 		linker.DispatchResolve(p.lifecycleContext(), taskID, toolUseID, name, desc, wallclock)
 	}

@@ -9,7 +9,11 @@ package cli
 // takes no tier flag, so nothing is seeded there.
 // docs/rfc/dashboard-model-effort-control.md §4.1 (effort chip 入口).
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+)
 
 func TestProcess_SeedEffort(t *testing.T) {
 	t.Parallel()
@@ -48,7 +52,7 @@ func TestProcess_SeedEffort_ReportWins(t *testing.T) {
 		p, srv := shimTestPair(&ACPProtocol{BackendID: "kiro"})
 		defer srv.conn.Close()
 		p.seedEffort("high")
-		p.applyMetadata(&EventMetadata{Effort: "max"})
+		p.applyMetadata(&clievent.EventMetadata{Effort: "max"})
 		if got := p.Effort(); got != "max" {
 			t.Errorf("Effort() = %q, want max (report overwrites seed)", got)
 		}
@@ -57,7 +61,7 @@ func TestProcess_SeedEffort_ReportWins(t *testing.T) {
 		t.Parallel()
 		p, srv := shimTestPair(&ACPProtocol{BackendID: "kiro"})
 		defer srv.conn.Close()
-		p.applyMetadata(&EventMetadata{Effort: "max"})
+		p.applyMetadata(&clievent.EventMetadata{Effort: "max"})
 		p.seedEffort("high")
 		if got := p.Effort(); got != "max" {
 			t.Errorf("Effort() = %q, want max (seed must not clobber report)", got)

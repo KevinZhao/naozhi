@@ -55,7 +55,7 @@ type Session interface {
 	InterruptViaControl() InterruptOutcome
 }
 
-// SendResult is the cron-local subset of cli.SendResult: Text (IM notify +
+// SendResult is the cron-local subset of clievent.SendResult: Text (IM notify +
 // run history) and SessionID (stub chain refresh). Cost is NOT carried here:
 // the CLI figure is a process-cumulative total, so cron reads the session's
 // monotonic CostTotals before and after the turn instead (docs/rfc/cost-ledger.md §5.3).

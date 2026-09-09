@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -31,9 +31,9 @@ func (e *sendEngine) sendWithBroadcast(
 	key string,
 	sess *session.ManagedSession,
 	text string,
-	images []cli.Attachment,
-	onEvent cli.EventCallback,
-) (*cli.SendResult, error) {
+	images []clievent.Attachment,
+	onEvent clievent.EventCallback,
+) (*clievent.SendResult, error) {
 	return e.sendWithBroadcastPriority(ctx, key, sess, text, images, onEvent, "")
 }
 
@@ -47,10 +47,10 @@ func (e *sendEngine) sendWithBroadcastPriority(
 	key string,
 	sess *session.ManagedSession,
 	text string,
-	images []cli.Attachment,
-	onEvent cli.EventCallback,
+	images []clievent.Attachment,
+	onEvent clievent.EventCallback,
 	priority string,
-) (*cli.SendResult, error) {
+) (*clievent.SendResult, error) {
 	// Only the running-state transition here; the post-send (debounced)
 	// BroadcastSessionsUpdate covers the sessions snapshot.
 	e.notify.BroadcastSessionReady(key)
@@ -60,7 +60,7 @@ func (e *sendEngine) sendWithBroadcastPriority(
 	}
 
 	var (
-		result *cli.SendResult
+		result *clievent.SendResult
 		err    error
 	)
 	switch {
@@ -104,9 +104,9 @@ func (s *Server) sendWithBroadcast(
 	key string,
 	sess *session.ManagedSession,
 	text string,
-	images []cli.Attachment,
-	onEvent cli.EventCallback,
-) (*cli.SendResult, error) {
+	images []clievent.Attachment,
+	onEvent clievent.EventCallback,
+) (*clievent.SendResult, error) {
 	if sess == nil {
 		return nil, fmt.Errorf("sendWithBroadcast: session is nil")
 	}
@@ -117,7 +117,7 @@ func (s *Server) sendWithBroadcast(
 type sendParams struct {
 	Key       string
 	Text      string
-	Images    []cli.Attachment
+	Images    []clievent.Attachment
 	Workspace string
 	ResumeID  string
 	Backend   string // optional backend ID picked by the dashboard ("" = router default)
@@ -334,7 +334,7 @@ func (e *sendEngine) sessionOptsFor(key string) session.AgentOpts {
 }
 
 // runTurn executes one send turn: GetOrCreate + sendWithBroadcast.
-func (e *sendEngine) runTurn(key, text string, images []cli.Attachment, onAsyncError asyncErrorFn) {
+func (e *sendEngine) runTurn(key, text string, images []clievent.Attachment, onAsyncError asyncErrorFn) {
 	sendStart := time.Now()
 	opts := e.sessionOptsFor(key)
 	sess, status, err := e.router.GetOrCreate(e.ctx, key, opts)
@@ -362,7 +362,7 @@ func (e *sendEngine) runTurn(key, text string, images []cli.Attachment, onAsyncE
 // runTurnPassthrough runs one passthrough-mode turn from a detached goroutine
 // so sends on the same session overlap; protocols without replay fall back to
 // serialized Send. priority is "" or "now" (/urgent preemption).
-func (e *sendEngine) runTurnPassthrough(key, text string, images []cli.Attachment, priority string, onAsyncError asyncErrorFn) {
+func (e *sendEngine) runTurnPassthrough(key, text string, images []clievent.Attachment, priority string, onAsyncError asyncErrorFn) {
 	sendStart := time.Now()
 	opts := e.sessionOptsFor(key)
 	sess, _, err := e.router.GetOrCreate(e.ctx, key, opts)

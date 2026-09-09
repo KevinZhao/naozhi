@@ -4,14 +4,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // legacyMarshalUserMessage reproduces the exact bytes the pre-#1826
 // WriteUserMessageLocked produced: json.Marshal(msg) + a manual trailing '\n'.
 // The pooled-encoder implementation must stay byte-for-byte identical to this.
-func legacyMarshalUserMessage(t *testing.T, uuid, text string, images []Attachment, priority string) []byte {
+func legacyMarshalUserMessage(t *testing.T, uuid, text string, images []clievent.Attachment, priority string) []byte {
 	t.Helper()
-	msg := NewUserMessageWithMeta(text, images, uuid, priority)
+	msg := clievent.NewUserMessageWithMeta(text, images, uuid, priority)
 	data, err := json.Marshal(msg)
 	if err != nil {
 		t.Fatalf("legacy json.Marshal: %v", err)
@@ -27,7 +29,7 @@ func TestWriteUserMessageLocked_ByteIdenticalToMarshal(t *testing.T) {
 		name     string
 		uuid     string
 		text     string
-		images   []Attachment
+		images   []clievent.Attachment
 		priority string
 	}{
 		{name: "text only", text: "hello world"},
@@ -43,25 +45,25 @@ func TestWriteUserMessageLocked_ByteIdenticalToMarshal(t *testing.T) {
 		{
 			name:   "single image plus text",
 			text:   "describe <this>",
-			images: []Attachment{{Data: pngBytes, MimeType: "image/png"}},
+			images: []clievent.Attachment{{Data: pngBytes, MimeType: "image/png"}},
 		},
 		{
 			name: "multi image",
 			text: "compare",
-			images: []Attachment{
+			images: []clievent.Attachment{
 				{Data: []byte("img-a"), MimeType: "image/png"},
 				{Data: []byte("img-b"), MimeType: "image/jpeg"},
 			},
 		},
 		{
 			name:   "image only no text",
-			images: []Attachment{{Data: pngBytes, MimeType: "image/png"}},
+			images: []clievent.Attachment{{Data: pngBytes, MimeType: "image/png"}},
 		},
 		{
 			name: "image with uuid and priority and html",
 			uuid: "deadbeef",
 			text: "look at <img> & report",
-			images: []Attachment{
+			images: []clievent.Attachment{
 				{Data: []byte("zzz"), MimeType: "image/gif"},
 			},
 			priority: "later",
@@ -69,8 +71,8 @@ func TestWriteUserMessageLocked_ByteIdenticalToMarshal(t *testing.T) {
 		{
 			name: "file ref attachment",
 			text: "read it",
-			images: []Attachment{
-				{Kind: KindFileRef, WorkspacePath: "docs/spec.pdf", OrigName: "spec.pdf", MimeType: "application/pdf", Size: 2048},
+			images: []clievent.Attachment{
+				{Kind: clievent.KindFileRef, WorkspacePath: "docs/spec.pdf", OrigName: "spec.pdf", MimeType: "application/pdf", Size: 2048},
 			},
 		},
 	}
@@ -117,7 +119,7 @@ func TestWriteUserMessageLocked_TrailingNewline(t *testing.T) {
 func TestWriteUserMessageLocked_WriteMessageDelegation(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
-	imgs := []Attachment{{Data: []byte("x"), MimeType: "image/png"}}
+	imgs := []clievent.Attachment{{Data: []byte("x"), MimeType: "image/png"}}
 
 	var a, b bytes.Buffer
 	if err := p.WriteMessage(&a, "hello & <world>", imgs); err != nil {

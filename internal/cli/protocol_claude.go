@@ -16,19 +16,19 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// readEventPool recycles the scratch *Event that ReadEvent unmarshals each
+// readEventPool recycles the scratch *clievent.Event that ReadEvent unmarshals each
 // shim stdout frame into (#1637): json.Unmarshal forces `&ev` to escape, so a
-// plain local heap-allocated the ~300-byte Event header on every frame. The
-// returned []Event{*ev} is a value COPY, so the pooled struct is safe to reuse
+// plain local heap-allocated the ~300-byte clievent.Event header on every frame. The
+// returned []clievent.Event{*ev} is a value COPY, so the pooled struct is safe to reuse
 // the instant ReadEvent returns; its nested pointer fields are owned by the
 // copy and must be cleared on Put so the pool does not pin a turn's content.
-var readEventPool = sync.Pool{New: func() any { return new(Event) }}
+var readEventPool = sync.Pool{New: func() any { return new(clievent.Event) }}
 
-// resetEvent zeroes a pooled Event before it re-enters the pool so no stale
+// resetEvent zeroes a pooled clievent.Event before it re-enters the pool so no stale
 // pointer keeps a prior frame's Message / Metadata / RawParams graph alive.
 // Whole-struct assignment is the cheapest correct reset and survives new fields.
-func resetEvent(ev *Event) {
-	*ev = Event{}
+func resetEvent(ev *clievent.Event) {
+	*ev = clievent.Event{}
 }
 
 // stringToBytesUnsafe aliases s's backing storage as a []byte without
@@ -305,7 +305,7 @@ func (p *ClaudeProtocol) Init(_ *JSONRW, _, _ string) (string, error) {
 	return "", nil
 }
 
-func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []Attachment) error {
+func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []clievent.Attachment) error {
 	return p.WriteUserMessageLocked(w, "", text, images, "")
 }
 
@@ -347,8 +347,8 @@ func putUserMsgEnc(e *userMsgEnc) {
 // Caller must already hold Process.shimWMu (see protocol.go interface doc).
 // Empty uuid / priority are omitted (omitempty), so the payload is identical to
 // the plain WriteMessage path when both are empty.
-func (p *ClaudeProtocol) WriteUserMessageLocked(w io.Writer, uuid, text string, images []Attachment, priority string) error {
-	msg := NewUserMessageWithMeta(text, images, uuid, priority)
+func (p *ClaudeProtocol) WriteUserMessageLocked(w io.Writer, uuid, text string, images []clievent.Attachment, priority string) error {
+	msg := clievent.NewUserMessageWithMeta(text, images, uuid, priority)
 	// Pooled json.Encoder + bytes.Buffer instead of json.Marshal (#1826).
 	// Encode appends the trailing '\n' itself, so the NDJSON framing is intact.
 	em := userMsgEncPool.Get().(*userMsgEnc)
@@ -428,21 +428,21 @@ type controlResponseFrame struct {
 	} `json:"response"`
 }
 
-// parseControlAck converts a control_response line into a control_ack Event.
+// parseControlAck converts a control_response line into a control_ack clievent.Event.
 // Returns ok=false for frames without a request_id (nothing to correlate, e.g.
 // the bare `{"type":"control_response"}` shape) or that fail to parse; both
 // degrade to a skip so a malformed control frame can never kill the readLoop.
 // Error text is sanitized: it originates from the CLI (separate trust
 // boundary) and flows into slog attrs + the dashboard toast.
-func parseControlAck(line string) (Event, bool) {
+func parseControlAck(line string) (clievent.Event, bool) {
 	var frame controlResponseFrame
 	if err := json.Unmarshal(stringToBytesUnsafe(line), &frame); err != nil {
-		return Event{}, false
+		return clievent.Event{}, false
 	}
 	if frame.Response.RequestID == "" {
-		return Event{}, false
+		return clievent.Event{}, false
 	}
-	ev := Event{
+	ev := clievent.Event{
 		Type:         "control_ack",
 		SubType:      frame.Response.Subtype,
 		RPCRequestID: frame.Response.RequestID,
@@ -458,18 +458,18 @@ func parseControlAck(line string) (Event, bool) {
 // shim envelope's `shimClientMsg.Line string` (internal/shim/protocol.go); a
 // []byte signature only pays off once that wire field becomes json.RawMessage
 // too. stringToBytesUnsafe removes the copy in the meantime.
-func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
+func (p *ClaudeProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 	return p.ReadEventInto(line, nil)
 }
 
 // ReadEventInto is the allocation-aware variant of ReadEvent (#1676). When buf
-// has spare capacity the (single) parsed Event is appended into it, so the
+// has spare capacity the (single) parsed clievent.Event is appended into it, so the
 // readLoop can hand in a reused array instead of forcing a fresh 1-element
-// backing slice per frame; claude stream-json yields at most one Event per
+// backing slice per frame; claude stream-json yields at most one clievent.Event per
 // line, so a buf of cap ≥1 is never re-grown. buf=nil allocates as before.
 // The returned slice uses buf[:0] as its base, so callers must not retain it
 // beyond the next ReadEventInto call sharing the same buf.
-func (p *ClaudeProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool, error) {
+func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]clievent.Event, bool, error) {
 	// Fast-path skip for the dominant hook_started / hook_response frames before
 	// the full reflect-unmarshal (#1334). The `:"` anchor pins the match to a
 	// JSON key so user text containing the word cannot trigger a false skip.
@@ -484,10 +484,10 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool,
 		}
 		return nil, false, nil
 	}
-	// Pooled *Event so the header is not heap-allocated per frame (#1637). It is
+	// Pooled *clievent.Event so the header is not heap-allocated per frame (#1637). It is
 	// returned to the pool on EVERY exit path and reset so it pins no prior
 	// frame's pointer graph; the success path copies the value out first.
-	ev := readEventPool.Get().(*Event)
+	ev := readEventPool.Get().(*clievent.Event)
 	defer func() {
 		resetEvent(ev)
 		readEventPool.Put(ev)
@@ -510,9 +510,9 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool,
 	// fan-out) then pays O(N) for. Drop rather than truncate so the dashboard
 	// never renders half a turn.
 	if ev.Message != nil {
-		if n := contentBytes(ev.Message); n > maxAssistantMessageContentBytes {
+		if n := clievent.ContentBytes(ev.Message); n > clievent.MaxAssistantMessageContentBytes {
 			return nil, false, fmt.Errorf("event content exceeds %d bytes (got %d), dropping",
-				maxAssistantMessageContentBytes, n)
+				clievent.MaxAssistantMessageContentBytes, n)
 		}
 	}
 	// AskUserQuestion surfacing: in `claude -p` the CLI auto-injects an
@@ -526,7 +526,7 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool,
 			ev.AskQuestion = aq
 		}
 	}
-	// Copy the value out so the caller owns an independent Event; the deferred
+	// Copy the value out so the caller owns an independent clievent.Event; the deferred
 	// Put resets only the pooled struct's view, not the freshly-unmarshalled
 	// graph (Message, AskQuestion, ...) the copy points at.
 	return append(buf[:0], *ev), ev.Type == "result", nil
@@ -551,7 +551,7 @@ type askUserQuestionInput struct {
 // card to render". Callers should pre-filter via strings.Contains(rawLine,
 // "AskUserQuestion") — the substring scan is ~1000× cheaper than the
 // structural walk when no AQ tool_use is present (#1008).
-func extractAskQuestion(blocks []ContentBlock) *clievent.AskQuestion {
+func extractAskQuestion(blocks []clievent.ContentBlock) *clievent.AskQuestion {
 	for _, b := range blocks {
 		if b.Type != "tool_use" || b.Name != "AskUserQuestion" || len(b.Input) == 0 {
 			continue
@@ -586,6 +586,6 @@ func extractAskQuestion(blocks []ContentBlock) *clievent.AskQuestion {
 	return nil
 }
 
-func (p *ClaudeProtocol) HandleEvent(_ io.Writer, _ Event) bool {
+func (p *ClaudeProtocol) HandleEvent(_ io.Writer, _ clievent.Event) bool {
 	return false
 }

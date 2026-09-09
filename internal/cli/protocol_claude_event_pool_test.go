@@ -3,10 +3,12 @@ package cli
 import (
 	"sync"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestReadEvent_PoolNoCrossFrameBleed is the regression test for
-// R220123-PERF-13 (#1637). ReadEvent now unmarshals into a pooled *Event;
+// R220123-PERF-13 (#1637). ReadEvent now unmarshals into a pooled *clievent.Event;
 // the pooled struct MUST be reset before re-entering the pool so a later
 // frame's parse never inherits a prior frame's pointer fields. A result
 // event parsed right after an assistant event must carry a nil Message —
@@ -58,7 +60,7 @@ func TestReadEvent_PoolNoCrossFrameBleed(t *testing.T) {
 func TestReadEvent_ReturnedEventIndependentOfPool(t *testing.T) {
 	p := &ClaudeProtocol{}
 	const n = 50
-	got := make([][]Event, 0, n)
+	got := make([][]clievent.Event, 0, n)
 	for i := 0; i < n; i++ {
 		line := `{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"text","text":"frame"}]}}`
 		ev, _, err := p.ReadEvent(line)
@@ -134,8 +136,8 @@ func TestReadEvent_SkipPathRecyclesPool(t *testing.T) {
 }
 
 // BenchmarkReadEvent measures the per-frame allocation cost of the hot
-// shim-stdout ingest path. R220123-PERF-13 (#1637): the pooled *Event
-// removes the per-frame Event-header heap allocation; this benchmark is the
+// shim-stdout ingest path. R220123-PERF-13 (#1637): the pooled *clievent.Event
+// removes the per-frame clievent.Event-header heap allocation; this benchmark is the
 // alloc-count guard the ticket asked for. Run with `-benchmem`; the
 // header allocation should no longer appear in allocs/op.
 func BenchmarkReadEvent(b *testing.B) {
@@ -152,7 +154,7 @@ func BenchmarkReadEvent(b *testing.B) {
 }
 
 // TestReadEventInto_ParityAndBufReuse pins R20260603-PERF-10 (#1676):
-// ReadEventInto must (a) return the same Event/done/err as ReadEvent, and
+// ReadEventInto must (a) return the same clievent.Event/done/err as ReadEvent, and
 // (b) back the returned slice with the caller-supplied buf so the single-event
 // hot path reuses the array instead of allocating a fresh one per frame.
 func TestReadEventInto_ParityAndBufReuse(t *testing.T) {
@@ -164,7 +166,7 @@ func TestReadEventInto_ParityAndBufReuse(t *testing.T) {
 		t.Fatalf("ReadEvent baseline err=%v len=%d", wantErr, len(want))
 	}
 
-	var arr [2]Event
+	var arr [2]clievent.Event
 	buf := arr[:0]
 	got, done, err := p.ReadEventInto(line, buf)
 	if err != nil {
@@ -195,7 +197,7 @@ func TestReadEventInto_ParityAndBufReuse(t *testing.T) {
 func BenchmarkReadEventInto(b *testing.B) {
 	p := &ClaudeProtocol{}
 	line := `{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"text","text":"hello world"}]}}`
-	var arr [2]Event
+	var arr [2]clievent.Event
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
