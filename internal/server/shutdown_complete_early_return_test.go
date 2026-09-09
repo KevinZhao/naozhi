@@ -64,4 +64,19 @@ func TestShutdownComplete_ClosesOnEarlyStartError(t *testing.T) {
 			"error — runShutdown's unconditional receive would deadlock " +
 			"(R030056-GO-002 regression)")
 	}
+
+	// #2633: the early return must also tear down the appCtx tree. Before the
+	// `defer s.appCancel()` moved to the top of Start, this path returned with
+	// the Hub, the dispatcher's StopCtx and every loop parent still live.
+	if srv.appCtx.Err() == nil {
+		t.Fatal("appCtx still live after Start early-returned — defer s.appCancel() must precede every return path")
+	}
+	// Hub.Shutdown must not hang on a Hub whose ctx is already cancelled.
+	done := make(chan struct{})
+	go func() { srv.hub.Shutdown(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hub.Shutdown() hung after early-return appCancel")
+	}
 }

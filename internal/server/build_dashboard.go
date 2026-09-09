@@ -64,10 +64,8 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	})
 
 	hs.sendH = &SendHandler{
-		nodeAccess: s.nodes,
-		engine:     s.hub.engine,
-		// SendRouter consumer view; reads never go via the engine's HubRouter (#566).
-		router:        s.hub.router,
+		nodeAccess:    s.nodes,
+		engine:        s.hub.engine,
 		uploadStore:   s.uploadStore,
 		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.TrustedProxy), // 10 uploads/min per IP
 		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.TrustedProxy), // 30 sends/min per IP (burst 30)
