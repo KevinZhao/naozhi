@@ -5,12 +5,15 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // writeMessageFailingProtocol is a minimal Protocol whose WriteMessage
 // always fails. Used by TestProcess_Send_WriteMessageFail_NoGhostUserEntry
 // to drive the failure branch in Process.Send so we can assert the
-// EventLog was NOT mutated.
+// ring.EventLog was NOT mutated.
 type writeMessageFailingProtocol struct{}
 
 func (writeMessageFailingProtocol) Name() string                      { return "fake-fail" }
@@ -34,7 +37,7 @@ func (writeMessageFailingProtocol) SupportsPriority() bool { return false }
 func (writeMessageFailingProtocol) SupportsReplay() bool   { return false }
 
 func (writeMessageFailingProtocol) WriteInterrupt(_ io.Writer, _ string) error {
-	return ErrInterruptUnsupported
+	return clierr.ErrInterruptUnsupported
 }
 
 func (writeMessageFailingProtocol) ReadEvent(_ string) ([]Event, bool, error) {
@@ -47,12 +50,12 @@ func (writeMessageFailingProtocol) HandleEvent(_ io.Writer, _ Event) bool {
 
 // TestProcess_Send_WriteMessageFail_NoGhostUserEntry locks in
 // R20260527122801-GO-002 (#?): when Protocol.WriteMessage fails, the
-// EventLog must not contain a user entry for the rejected message.
+// ring.EventLog must not contain a user entry for the rejected message.
 //
 // Pre-fix the user entry was appended BEFORE WriteMessage, so a rejected
 // stdin write left a permanent ghost user bubble in history (Send
 // returned an error to the caller, but the dashboard transcript and any
-// PersistSink already saw an entry that the CLI never received).
+// ring.PersistSink already saw an entry that the CLI never received).
 //
 // Mirrors the passthrough.go fix at line ~132 — both outbound paths must
 // commit the user bubble only after the CLI accepts the bytes.
@@ -64,7 +67,7 @@ func TestProcess_Send_WriteMessageFail_NoGhostUserEntry(t *testing.T) {
 		state:       StateReady,
 		eventCh:     make(chan Event, 8),
 		done:        make(chan struct{}),
-		eventLog:    NewEventLog(0),
+		eventLog:    ring.NewEventLog(0),
 		stdinWriter: nil, // unused: WriteMessage returns before touching the writer
 	}
 
@@ -80,7 +83,7 @@ func TestProcess_Send_WriteMessageFail_NoGhostUserEntry(t *testing.T) {
 	entries := p.eventLog.Entries()
 	for _, e := range entries {
 		if e.Type == "user" {
-			t.Errorf("ghost user entry leaked into EventLog: %+v", e)
+			t.Errorf("ghost user entry leaked into ring.EventLog: %+v", e)
 		}
 	}
 	if len(entries) > 0 {

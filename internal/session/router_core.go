@@ -595,7 +595,7 @@ type RouterConfig struct {
 	CodexSessionsDir string
 	// EventLogDir is where per-session event log files live. Empty DISABLES
 	// event log persistence (Claude CLI JSONL becomes the sole history source);
-	// non-empty spins up a persist.Persister, wires every session's cli.EventLog
+	// non-empty spins up a persist.Persister, wires every session's ring.EventLog
 	// to it and installs a merged.Source (naozhilog + claudejsonl) as history
 	// fallback. Usually next to StorePath. docs/rfc/event-log-persistence.md §4.
 	EventLogDir string

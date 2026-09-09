@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -157,7 +158,7 @@ func (p *Process) readLoop() {
 			// they don't consume eventCh, so the deferred close(eventCh) alone
 			// would leave them blocked until the totalTimeout+30s tripwire.
 			// discardAllPending is idempotent.
-			p.discardAllPending(ErrProcessExited)
+			p.discardAllPending(clierr.ErrProcessExited)
 		}
 	}()
 
@@ -358,7 +359,7 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 			continue
 		}
 		// control_ack resolves a pending SetModel waiter and must never reach
-		// HandleEvent / EventLog / the dashboard — it is an RPC ack, not
+		// HandleEvent / ring.EventLog / the dashboard — it is an RPC ack, not
 		// conversation content (docs/rfc/dashboard-model-effort-control.md §4.4).
 		if ev.Type == "control_ack" {
 			p.deliverControlAck(ev)
@@ -403,7 +404,7 @@ func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 // transitionToDead performs the closing handshake when readLoop concludes a
 // process has stopped producing events: flips State to Dead, fires onTurnDone
 // once, and unblocks SendPassthrough callers parked on pendingSlots with
-// ErrProcessExited. Called from the cli_exited frame (caller stamps deathReason
+// clierr.ErrProcessExited. Called from the cli_exited frame (caller stamps deathReason
 // and then closeShimConn) and from the fall-out exit (Kill / shim EOF / read
 // error; classifyEOF already stamped the reason, and Kill's shimConn.Close is
 // what unblocked us). Deliberately does NOT call setDeathReason or
@@ -417,9 +418,9 @@ func (p *Process) transitionToDead() {
 		cb()
 	}
 	// Passthrough slot cleanup: every pending slot's caller is blocked inside
-	// SendPassthrough waiting on resultCh/errCh. Fire ErrProcessExited so they
+	// SendPassthrough waiting on resultCh/errCh. Fire clierr.ErrProcessExited so they
 	// unblock with a clear error.
-	p.discardAllPending(ErrProcessExited)
+	p.discardAllPending(clierr.ErrProcessExited)
 }
 
 // readShimLine reads one complete shim message line from r, accumulating
@@ -496,13 +497,13 @@ func passthroughShouldFanOut(ev Event) bool {
 }
 
 // dispatchProtocolEvent runs the per-Event side of readLoop: passthrough hooks,
-// linker plumbing, EventLog append, mid-turn reconnect bookkeeping, and the
+// linker plumbing, ring.EventLog append, mid-turn reconnect bookkeeping, and the
 // non-blocking handoff to Send via eventCh. Returns true if a kill signal was
 // observed during dispatch and the caller should unwind the read loop.
 func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	// Type:"metadata" is a normalize-channel status frame (kiro _kiro.dev/
 	// metadata), not assistant output: apply to atomic state and skip
-	// eventCh / EventLog. See docs/rfc/multi-backend.md §8.8.
+	// eventCh / ring.EventLog. See docs/rfc/multi-backend.md §8.8.
 	if ev.Type == "metadata" {
 		p.applyMetadata(ev.Metadata)
 		return false
@@ -515,7 +516,7 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	nowMS := now.UnixMilli()
 
 	// ---- Passthrough mode hooks ----
-	// These run before the legacy eventCh / EventLog delivery paths.
+	// These run before the legacy eventCh / ring.EventLog delivery paths.
 	// They are cheap no-ops when passthrough is not in use (zero
 	// pending slots, inTurn=false, protocol doesn't support replay).
 
@@ -529,7 +530,7 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	}
 
 	// user replay: claim slots into currentTurnSlots. Filter out of
-	// EventLog + eventCh so replay events don't pollute the dashboard
+	// ring.EventLog + eventCh so replay events don't pollute the dashboard
 	// transcript or trigger legacy result detection.
 	if ev.Type == "user" && ev.IsReplay {
 		p.slotsMu.Lock()
@@ -556,13 +557,13 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	}
 
 	// result under passthrough: fan-out to claimed slots and skip
-	// legacy eventCh delivery. We still log to EventLog so dashboard
+	// legacy eventCh delivery. We still log to ring.EventLog so dashboard
 	// sees the turn-complete event.
 	if ev.Type == "result" && p.caps.Replay {
 		// error_during_execution signals the CLI aborted the turn —
 		// e.g. a priority:"now" preempted it. Any older pending slot
 		// written before `now` that was never replayed was dropped
-		// by the CLI; fire ErrAbortedByUrgent for those.
+		// by the CLI; fire clierr.ErrAbortedByUrgent for those.
 		if ev.SubType == "error_during_execution" {
 			victims := p.reapAbortedPreempted()
 			fireAbortErrors(victims)
@@ -605,7 +606,7 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	}
 	p.notifyLinker(ev, nowMS, isSystemInit)
 
-	// Always log to EventLog so dashboard subscribers see events
+	// Always log to ring.EventLog so dashboard subscribers see events
 	// even when no Send() is active (e.g., after service restart
 	// reconnects to a shim that's mid-turn).
 	p.logEventAt(ev, nowMS)
@@ -690,7 +691,7 @@ func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 	linker.DispatchResolve(p.lifecycleContext(), taskID, toolUseID, name, desc, nowMS)
 }
 
-// deliverEvent runs the post-EventLog dispatch arm of dispatchProtocolEvent:
+// deliverEvent runs the post-ring.EventLog dispatch arm of dispatchProtocolEvent:
 // killCh probe followed by the non-blocking handoff to eventCh for Send()
 // consumption. Returns true when killCh fired and the read loop should unwind.
 func (p *Process) deliverEvent(ev Event, now time.Time, log *slog.Logger) bool {
@@ -709,20 +710,20 @@ func (p *Process) deliverEvent(ev Event, now time.Time, log *slog.Logger) bool {
 		// that runs after we drain any remaining stdin frames — a kill
 		// race with active slots would otherwise wait for the outer
 		// loop to fully unwind (tens of ms under load).
-		p.discardAllPending(ErrProcessExited)
+		p.discardAllPending(clierr.ErrProcessExited)
 		return true
 	default:
 	}
 
 	// Non-blocking handoff to Send(): if the buffer is full (no active Send)
-	// the event is already in EventLog for the dashboard. recvAt is set just
+	// the event is already in ring.EventLog for the dashboard. recvAt is set just
 	// before handoff so drainStaleEvents can separate events queued before a
 	// new turn from events produced for it.
 	ev.recvAt = now
 	select {
 	case p.eventCh <- ev:
 	default:
-		// Drop is safe (EventLog kept the entry), but a dropped `result` forces
+		// Drop is safe (ring.EventLog kept the entry), but a dropped `result` forces
 		// a non-Replay Send() into the findResultSince fallback — Warn. Under
 		// Replay backends a result lands here only when no slot owns it (an
 		// expected pathway), so Debug to avoid masking the real drop case.

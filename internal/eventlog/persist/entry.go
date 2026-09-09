@@ -17,7 +17,7 @@ type Entry struct {
 	TimeMS int64
 }
 
-// PersistSink is the callback cli.EventLog invokes after Append /
+// PersistSink is the callback ring.EventLog invokes after Append /
 // AppendBatch (RFC §3.2.1). Contract:
 //   - MUST be non-blocking: on a full channel it drops the batch and
 //     increments droppedCnt ("never stall Append").

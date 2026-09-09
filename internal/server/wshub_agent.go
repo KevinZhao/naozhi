@@ -16,7 +16,7 @@ import (
 // agentTaskDoneSetter is the server-side view of the parent-stream EventLog
 // surface maybeWireLinkerTailer needs: one callback fired when a parent-stream
 // `task_done` arrives so the matching agent tailer closes promptly. Declared
-// here so the call site never names *cli.EventLog (which satisfies it
+// here so the call site never names *ring.EventLog (which satisfies it
 // implicitly); another backend can pass its own implementation through
 // ManagedSession.AgentEventLog (#625).
 type agentTaskDoneSetter interface {
@@ -111,7 +111,7 @@ func (h *Hub) maybeWireLinkerTailer(key string, sess *session.ManagedSession) {
 	// Parent stream task_done → close tailer (fires agent_done to remaining
 	// subscribers + flushes final meta). Same typed-nil guard on the concrete
 	// return as above; after it, route through agentTaskDoneSetter so the call
-	// site does not name *cli.EventLog (#625).
+	// site does not name *ring.EventLog (#625).
 	if rawLog := sess.AgentEventLog(); rawLog != nil {
 		var hook agentTaskDoneSetter = rawLog
 		hook.SetOnAgentTaskDone(func(taskID, status string) {

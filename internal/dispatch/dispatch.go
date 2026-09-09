@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -591,7 +592,7 @@ func (d *Dispatcher) discardQueue(ctx context.Context, msg platform.IncomingMess
 		d.clearQueuedReactions(ctx, msg.Platform, dropped, nil)
 	}
 	if d.router != nil {
-		d.router.DiscardPassthroughPending(key, cli.ErrSessionReset)
+		d.router.DiscardPassthroughPending(key, clierr.ErrSessionReset)
 	}
 }
 
@@ -779,7 +780,7 @@ func (d *Dispatcher) handleSendError(
 ) {
 	// ErrSessionReset is a user control-flow signal (/new, /clear), not an
 	// error: no extra reply and no /health error-counter bump.
-	if errors.Is(err, cli.ErrSessionReset) {
+	if errors.Is(err, clierr.ErrSessionReset) {
 		return
 	}
 	d.replyErrorCount.Add(1)
@@ -789,15 +790,15 @@ func (d *Dispatcher) handleSendError(
 	// Chinese (dashboard uses the generic ForSendError). Watchdog counters
 	// stay here because the IM side owns that configuration.
 	switch {
-	case errors.Is(err, cli.ErrNoOutputTimeout):
+	case errors.Is(err, clierr.ErrNoOutputTimeout):
 		d.watchdogNoOutputKills.Add(1)
-	case errors.Is(err, cli.ErrTotalTimeout):
+	case errors.Is(err, clierr.ErrTotalTimeout):
 		d.watchdogTotalKills.Add(1)
 	}
 	errMsg := usermsg.UserMessage(err, key, d.noOutputTimeout, d.totalTimeout)
 	// IM-only emoji decoration for the timeout cases. Other surfaces
 	// (dashboard send_ack) deliberately stay emoji-free.
-	if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
+	if errors.Is(err, clierr.ErrNoOutputTimeout) || errors.Is(err, clierr.ErrTotalTimeout) {
 		errMsg = "⏱️ " + errMsg
 	}
 	// On shutdown the inbound ctx is already Done; swap so the error reply

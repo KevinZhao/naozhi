@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // TestDispatchProtocolEvent_InitCapturesLiveVersion pins R20260612-live-version:
@@ -12,7 +14,7 @@ import (
 // than the spawn-time Wrapper.CLIVersion (stale after a host claude upgrade).
 func TestDispatchProtocolEvent_InitCapturesLiveVersion(t *testing.T) {
 	p := &Process{
-		eventLog: NewEventLog(8),
+		eventLog: ring.NewEventLog(8),
 		eventCh:  make(chan Event, 4),
 		killCh:   make(chan struct{}),
 	}
@@ -35,7 +37,7 @@ func TestDispatchProtocolEvent_InitCapturesLiveVersion(t *testing.T) {
 // it stays empty so the session layer falls back to the spawn-time version.
 func TestDispatchProtocolEvent_InitWithoutVersionKeepsEmpty(t *testing.T) {
 	p := &Process{
-		eventLog: NewEventLog(8),
+		eventLog: ring.NewEventLog(8),
 		eventCh:  make(chan Event, 4),
 		killCh:   make(chan struct{}),
 	}

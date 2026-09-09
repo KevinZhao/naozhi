@@ -1,6 +1,6 @@
 // Package session — eventlog_bridge.go
 //
-// Eventlog tiers: cli.EventLog.ring (in-memory, lossy), persist.Persister
+// Eventlog tiers: ring.EventLog.ring (in-memory, lossy), persist.Persister
 // spool (durable, authoritative on restart, fed via this bridge's PersistSink),
 // naozhilog.Source (replay from the spool) and history/merged.Source (composed
 // read over the Claude-JSONL fallback). persist.Persister deliberately does not
@@ -17,9 +17,9 @@ import (
 	"sync"
 
 	"github.com/naozhi/naozhi/internal/attachment/tracker"
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/history/merged"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
@@ -99,23 +99,23 @@ var batchScratchPool = sync.Pool{
 const batchScratchMaxCap = 4096
 
 // newEventLogSink translates a per-key persist.PersistSink (persist.Entry
-// batches) into the cli.PersistSink contract (clievent.EventEntry batches);
+// batches) into the ring.PersistSink contract (clievent.EventEntry batches);
 // neither cli nor persist imports the other, so the conversion lives only here.
 //
 // Ordering contract (RFC §3.2.2 / attachment-refcount §3.2): this sink MUST be
-// installed on cli.EventLog.SetPersistSink AFTER any pre-hook InjectHistory
+// installed on ring.EventLog.SetPersistSink AFTER any pre-hook InjectHistory
 // calls complete; spawnSession is the sole production caller responsible.
 // attachTracker is optional: non-replay entries with ImagePaths bump the
 // attachment refcount. A marshal failure on one EventEntry does NOT abort the
 // batch — the entry is logged and skipped (best-effort persist, never block).
-func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string) cli.PersistSink {
+func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string) ring.PersistSink {
 	return func(entries []clievent.EventEntry, replayPhase bool) {
 		if len(entries) == 0 {
 			return
 		}
 
 		// Single-entry fast path shares persistOneEntry with the
-		// cli.PersistSinkOne path so marshal / refcount logic lives in one
+		// ring.PersistSinkOne path so marshal / refcount logic lives in one
 		// place (#410). The bytes and slice header DO escape because
 		// persisterSink retains entries; a byte-slice pool would need a
 		// copy-on-take re-contract of every sink, so none is attempted.
@@ -228,11 +228,11 @@ func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.T
 	}
 }
 
-// newEventLogSinkOne is the cli.PersistSinkOne counterpart to newEventLogSink,
+// newEventLogSinkOne is the ring.PersistSinkOne counterpart to newEventLogSink,
 // wiring Append's single-entry fast path to the per-key persister without a
 // `[]EventEntry{e}` slice literal. Both paths share persistOneEntry so the wire
 // format and attachment-tracker behaviour are identical (#410).
-func newEventLogSinkOne(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string) cli.PersistSinkOne {
+func newEventLogSinkOne(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string) ring.PersistSinkOne {
 	return func(e clievent.EventEntry, replayPhase bool) {
 		persistOneEntry(persisterSink, attachTracker, keyhash, e, replayPhase)
 	}

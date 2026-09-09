@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
@@ -165,7 +166,7 @@ type shadowUsageTaker interface {
 // the turn's result (it exited or is being killed), so the tokens its
 // assistant frames reported would otherwise be lost.
 func isProcessDeathErr(err error) bool {
-	return errors.Is(err, cli.ErrProcessExited) || errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout)
+	return errors.Is(err, clierr.ErrProcessExited) || errors.Is(err, clierr.ErrNoOutputTimeout) || errors.Is(err, clierr.ErrTotalTimeout)
 }
 
 // bookPartialTurn records a Kind=partial entry (tokens only, no amount) for

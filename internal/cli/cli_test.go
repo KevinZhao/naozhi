@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 )
 
 // readOne is a test helper that flattens Protocol.ReadEvent's []Event return
@@ -439,7 +441,7 @@ func TestClaudeProtocol_ReadEvent_ControlResponseBecomesAck(t *testing.T) {
 	// correlate its pending acknowledgement. The load-bearing invariant is
 	// unchanged: a control_response must NEVER complete a turn (done stays
 	// false, and handleShimStdout consumes control_ack before dispatch so
-	// it never reaches EventLog either).
+	// it never reaches ring.EventLog either).
 	line := `{"type":"control_response","response":{"subtype":"success","request_id":"req-1"}}`
 	ev, done, err := readOne(t, p, line)
 	if err != nil {
@@ -501,8 +503,8 @@ func TestACPProtocol_WriteInterrupt_NoSession(t *testing.T) {
 	if err == nil {
 		t.Fatal("WriteInterrupt without session must return an error")
 	}
-	if !errors.Is(err, ErrInterruptUnsupported) {
-		t.Errorf("err = %v, want ErrInterruptUnsupported", err)
+	if !errors.Is(err, clierr.ErrInterruptUnsupported) {
+		t.Errorf("err = %v, want clierr.ErrInterruptUnsupported", err)
 	}
 	if buf.Len() != 0 {
 		t.Errorf("must not write anything before handshake, got %q", buf.Bytes())
@@ -571,7 +573,7 @@ func TestACPProtocol_ReadEvent_CancelledStopReason(t *testing.T) {
 	// ACP turn-end with buffered text emits two events: the synthesised
 	// assistant frame carrying the visible reply, then the result carrying
 	// the stopReason + Result for process_send. Both must be present so
-	// EventLog renders the bubble (assistant) and Send returns text (result).
+	// ring.EventLog renders the bubble (assistant) and Send returns text (result).
 	if len(events) != 2 {
 		t.Fatalf("want 2 events (assistant text, result), got %d: %+v", len(events), events)
 	}
@@ -1501,7 +1503,7 @@ func TestProcess_DispatchMetadataEvent_AppliesEffort(t *testing.T) {
 	p := &Process{}
 	// dispatchProtocolEvent returns false for metadata frames: they are status
 	// updates applied to Process state, not assistant output, so they stop
-	// here rather than flowing on to eventCh / EventLog.
+	// here rather than flowing on to eventCh / ring.EventLog.
 	if forwarded := p.dispatchProtocolEvent(Event{
 		Type:     "metadata",
 		Metadata: &EventMetadata{Effort: "max", TurnDurationMs: 1200},

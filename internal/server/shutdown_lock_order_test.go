@@ -2,7 +2,6 @@ package server
 
 import (
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -122,37 +121,14 @@ func TestHubShutdown_LockOrderInvariant(t *testing.T) {
 		}
 	}
 
-	// B) the eventlog*.go files in internal/cli must not import
-	// internal/server. A circular-ish import would also fail to compile,
-	// but a thin bridge via an interface would slip through compile and
-	// still break the invariant. We check the import list explicitly.
+	// B) the no-import invariant that used to live here moved to
+	// internal/eventlog/ring/leaf_test.go (#2545 G1). It grepped
+	// ../cli/eventlog*.go for the string "internal/server"; the ring is now its
+	// own package, so that path went stale — the scan fataled instead of passing
+	// vacuously, which is exactly why it was written to fatal on an empty glob.
 	//
-	// ARCH-EVENTLOG-SPLIT moved PersistSink + the rest of EventLog out of
-	// the single eventlog.go into sibling files (eventlog_persist.go,
-	// eventlog_subscribe.go, …); like part A's PR #327 widening, the scan
-	// now globs every eventlog*.go so the no-import invariant still holds
-	// if a subMu-holding callback is added in any of them.
-	serverImportRe := regexp.MustCompile(`"github\.com/naozhi/naozhi/internal/server"`)
-	eventlogFiles, globErr := filepath.Glob("../cli/eventlog*.go")
-	if globErr != nil {
-		t.Fatalf("glob ../cli/eventlog*.go: %v", globErr)
-	}
-	if len(eventlogFiles) == 0 {
-		t.Fatal("no ../cli/eventlog*.go files found; R35-REL2 import guard would " +
-			"silently pass — verify the path before trusting this test")
-	}
-	for _, path := range eventlogFiles {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		if serverImportRe.Match(src) {
-			t.Errorf("%s imports internal/server. R35-REL2: "+
-				"EventLog must never reach into Hub state, or a subMu-holding "+
-				"callback could trigger h.mu acquisition and deadlock Shutdown.", path)
-		}
-	}
+	// The replacement is stronger: it pins the ring's whole ALLOWED internal-import
+	// set rather than one forbidden entry, so internal/session and internal/dispatch
+	// are caught too, and it lives in the package it constrains. `ring` importing
+	// `server` is additionally a compile-time cycle now (server → cli → ring).
 }
