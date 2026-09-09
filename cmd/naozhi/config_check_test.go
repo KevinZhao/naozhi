@@ -70,6 +70,37 @@ cli:
 	})
 }
 
+// TestConfigCheck_UnknownKeyExit1: a misspelled key exits 1 and names the
+// dotted path and line (#2639). This is the case the command could not see
+// before — yaml.Unmarshal dropped unknown keys silently, so `config check`
+// reported OK on a config whose keys did nothing. The two spellings here are
+// the keys from #2553, the bug that made the gap visible.
+func TestConfigCheck_UnknownKeyExit1(t *testing.T) {
+	cfg := cleanCheckConfig + `
+server:
+  debug_moed: true
+projects:
+  publc_tmp: true
+`
+	var out bytes.Buffer
+	code := configCheck([]string{"-config", writeCheckConfig(t, cfg)}, &out)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; output:\n%s", code, out.String())
+	}
+	s := out.String()
+	for _, want := range []string{"config-unknown", "server.debug_moed", "projects.publc_tmp", "ignored"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output must contain %q:\n%s", want, s)
+		}
+	}
+	// The correctly spelled keys must NOT be reported, or the report is noise.
+	for _, unwanted := range []string{"server.debug_mode ", "projects.public_tmp "} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("real key %q reported as unknown:\n%s", unwanted, s)
+		}
+	}
+}
+
 // TestConfigCheck_EffortCapsGate: an effort tier on a backend without
 // EffortTier (codex) exits 1 and says why.
 func TestConfigCheck_EffortCapsGate(t *testing.T) {

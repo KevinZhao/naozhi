@@ -19,7 +19,8 @@ import (
 
 // SpawnDiag is one gate decision that altered or ignored configured input.
 type SpawnDiag struct {
-	// Layer names the gate: "argv-denylist" | "caps" | "config-deprecated".
+	// Layer names the gate: "argv-denylist" | "caps" | "config-deprecated" |
+	// "config-unknown".
 	Layer string `json:"layer"`
 	// Key is the configured thing that did not take effect ("--effort",
 	// "session.workspace", "effort").
