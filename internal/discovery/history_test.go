@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -189,7 +190,7 @@ func TestLoadHistory_WithCWD(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/myproject"
 	sessionID := "00000000-0000-0000-0000-000000000042"
-	dirName := projDirName(cwd) // "-tmp-myproject"
+	dirName := claudefs.ProjectSlug(cwd) // "-tmp-myproject"
 
 	lines := []string{
 		userJSONLLine("user", "hello from user"),
@@ -243,7 +244,7 @@ func TestLoadHistory_IgnoresMalformedLines(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/malformed"
 	sessionID := "00000000-0000-0000-0000-000000000099"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := []string{
 		"not json at all",
@@ -269,7 +270,7 @@ func TestLoadHistory_AssistantBlocks(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/assistant"
 	sessionID := "00000000-0000-0000-0000-000000000044"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	lines := []string{
 		assistantJSONLLine("assistant reply text"),
@@ -293,7 +294,7 @@ func TestLoadHistory_Truncation(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/trunc"
 	sessionID := "00000000-0000-0000-0000-000000000045"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	// Build a string longer than 120 runes
 	longText := ""
@@ -341,7 +342,7 @@ func TestLoadHistory_UserBlockContent(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/blockuser"
 	sessionID := "00000000-0000-0000-0000-000000000046"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	// User message with block content instead of plain string
 	blocks, _ := json.Marshal([]struct {

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 )
 
 // fixtureRunWithJSONL writes a CronRun JSON record + matching JSONL into
@@ -82,7 +82,7 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *Handlers, jobID,
 	}
 
 	// Layout the JSONL.
-	projDir := filepath.Join(claudeDir, "projects", discovery.ClaudeProjectSlug(workDir))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(workDir))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
@@ -525,7 +525,7 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 	}
 
 	// Write the JSONL under realDir so the link resolves there.
-	projDir := filepath.Join(realDir, "projects", discovery.ClaudeProjectSlug(workDir))
+	projDir := filepath.Join(realDir, "projects", claudefs.ProjectSlug(workDir))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatalf("mkdir projects: %v", err)
 	}

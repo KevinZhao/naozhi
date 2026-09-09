@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/assets"
-	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // scanMarkdownDir scans the direct *.md files in dir for agents/commands. A
@@ -135,7 +135,7 @@ func encodeProjectDir(repoRoot string) string {
 	if repoRoot == "" {
 		return ""
 	}
-	return discovery.ClaudeProjectSlug(repoRoot)
+	return claudefs.ProjectSlug(repoRoot)
 }
 
 // scanMemory scans ONLY the current repoRoot's ~/.claude/projects/<encoded>/memory/*.md.
@@ -143,8 +143,11 @@ func scanMemory(home, repoRoot string) []assets.Asset {
 	if repoRoot == "" || home == "" {
 		return nil
 	}
+	// home is the .claude dir here (see callers); ProjectDir applies the same
+	// slug encoding encodeProjectDir used. The encoded segment is also the
+	// Source.Project the asset ref carries back.
 	encoded := encodeProjectDir(repoRoot)
-	dir := filepath.Join(home, "projects", encoded, "memory")
+	dir := filepath.Join(claudefs.ProjectsRoot(home), encoded, "memory")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil

@@ -255,7 +255,7 @@ func TestScan_PluginInstallPathOutsideHomeSkipped(t *testing.T) {
 // TestEncodeProjectDir_EquivalentToClaudeProjectSlug verifies that
 // encodeProjectDir produces the same result as discovery.ClaudeProjectSlug
 // for representative paths. R20260603-CODE-2.
-func TestEncodeProjectDir_EquivalentToClaudeProjectSlug(t *testing.T) {
+func TestEncodeProjectDir_EquivalentToClaudefsProjectSlug(t *testing.T) {
 	cases := []string{
 		"/home/user/workspace/naozhi",
 		"/home/u/work/myproj",

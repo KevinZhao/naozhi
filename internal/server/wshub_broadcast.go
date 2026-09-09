@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/wsproto"
@@ -358,7 +358,7 @@ func sanitizeTriggerForBroadcast(trigger string) string {
 // (the form every cron run records); non-UUID shapes still go through the
 // sanitiser (#2232).
 func sanitizeSessionIDForBroadcast(sessionID string) string {
-	if discovery.IsValidSessionID(sessionID) {
+	if claudefs.IsValidSessionID(sessionID) {
 		return sessionID
 	}
 	return osutil.SanitizeForLog(sessionID, 128)

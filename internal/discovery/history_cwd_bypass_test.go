@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // TestLoadHistory_CWDBypassesNegativeCache is the regression guard for the
@@ -24,7 +26,7 @@ func TestLoadHistory_CWDBypassesNegativeCache(t *testing.T) {
 	// The real cwd whose slug names the project dir. ClaudeProjectSlug maps
 	// "/home/u/proj" → "-home-u-proj"; makeSessionJSONL needs the slug form.
 	cwd := "/home/u/preview-proj"
-	dirName := ClaudeProjectSlug(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	makeSessionJSONL(t, claudeDir, dirName, sessionID, []string{
 		userJSONLLine("user", "hello from preview"),
 	})
@@ -93,7 +95,7 @@ func TestLoadHistory_StaleCWDFallsBackToScan(t *testing.T) {
 	sessionID := "00000000-0000-0000-0000-0000efefefef"
 
 	realCWD := "/home/u/real-proj"
-	dirName := ClaudeProjectSlug(realCWD)
+	dirName := claudefs.ProjectSlug(realCWD)
 	makeSessionJSONL(t, claudeDir, dirName, sessionID, []string{
 		userJSONLLine("user", "stale-cwd prompt"),
 	})

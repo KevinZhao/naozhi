@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -74,12 +75,12 @@ func LoadHistory(claudeDir, sessionID, cwd string) ([]clievent.EventEntry, error
 	// Path-traversal guard: reject non-UUID sessionIDs before joining into a
 	// filepath (mirrors resolveJSONLPath) so "../../etc/passwd" cannot
 	// escape claudeDir/projects.
-	if !IsValidSessionID(sessionID) {
+	if !claudefs.IsValidSessionID(sessionID) {
 		return nil, nil
 	}
 	var path string
 	if cwd != "" {
-		candidate := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
+		candidate := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
 		if _, err := os.Stat(candidate); err == nil {
 			path = candidate
 		}
@@ -119,7 +120,7 @@ func (s *Scanner) findSessionJSONL(claudeDir, sessionID string) (string, error) 
 		s.pathCacheInvalidate(key)
 	}
 
-	projectsDir := filepath.Join(claudeDir, "projects")
+	projectsDir := claudefs.ProjectsRoot(claudeDir)
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

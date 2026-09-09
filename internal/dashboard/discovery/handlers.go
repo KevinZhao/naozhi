@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -166,7 +167,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("session_id")
 	nodeID := r.URL.Query().Get("node")
-	if sessionID == "" || !discovery.IsValidSessionID(sessionID) {
+	if sessionID == "" || !claudefs.IsValidSessionID(sessionID) {
 		httputil.WriteJSON(w, []any{})
 		return
 	}
@@ -236,7 +237,7 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if req.PID <= 0 || req.SessionID == "" || !discovery.IsValidSessionID(req.SessionID) {
+	if req.PID <= 0 || req.SessionID == "" || !claudefs.IsValidSessionID(req.SessionID) {
 		http.Error(w, "pid and session_id are required", http.StatusBadRequest)
 		return
 	}

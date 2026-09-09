@@ -1,4 +1,4 @@
-package discovery
+package claudefs
 
 import "testing"
 
@@ -45,9 +45,9 @@ func TestClaudeProjectSlug_ControlByteFilter(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ClaudeProjectSlug(tc.in)
+			got := ProjectSlug(tc.in)
 			if got != tc.want {
-				t.Errorf("ClaudeProjectSlug(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("ProjectSlug(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -61,7 +61,7 @@ func TestClaudeProjectSlug_ControlByteFilter(t *testing.T) {
 func TestClaudeProjectSlug_NoAllocOnCleanPath(t *testing.T) {
 	const clean = "/home/ec2-user/workspace/naozhi"
 	allocs := testing.AllocsPerRun(100, func() {
-		_ = ClaudeProjectSlug(clean)
+		_ = ProjectSlug(clean)
 	})
 	// One alloc is unavoidable: substituteNonAlnum must build a fresh string
 	// when at least one substitution happens (every '/' is replaced). What we

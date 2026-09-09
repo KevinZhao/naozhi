@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
@@ -239,7 +239,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 	if len(p.ResumeID) > 64 {
 		return false, "", fmt.Errorf("invalid resume_id length")
 	}
-	if p.ResumeID != "" && discovery.IsValidSessionID(p.ResumeID) {
+	if p.ResumeID != "" && claudefs.IsValidSessionID(p.ResumeID) {
 		ws := validatedWorkspace
 		if ws == "" {
 			ws = e.router.DefaultWorkspace()

@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
 
 	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -177,7 +177,7 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session_id is required", http.StatusBadRequest)
 		return
 	}
-	if !discovery.IsValidSessionID(req.SessionID) {
+	if !claudefs.IsValidSessionID(req.SessionID) {
 		http.Error(w, "invalid session_id", http.StatusBadRequest)
 		return
 	}

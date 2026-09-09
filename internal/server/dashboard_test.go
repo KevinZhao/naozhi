@@ -14,9 +14,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -1321,7 +1321,7 @@ func TestHandlePreview_RejectsInvalidNodeID(t *testing.T) {
 func writePreviewJSONL(t *testing.T, claudeDir, cwd, content string) string {
 	t.Helper()
 	sessionID := "12345678-1234-1234-1234-123456789abc"
-	projDir := filepath.Join(claudeDir, "projects", discovery.ClaudeProjectSlug(cwd))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

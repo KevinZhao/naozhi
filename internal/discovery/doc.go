@@ -5,7 +5,7 @@
 //
 // Three loosely-coupled sub-domains share the package (#741 tracks a split):
 //
-//   - Path utilities — scanner.go (ClaudeProjectSlug, projDirName): pure
+//   - Path utilities — internal/claudefs (ProjectSlug, SessionJSONL): pure
 //     functions over Claude's CWD-derived directory naming.
 //   - Process inspection — proc_*.go: platform-specific, read-only /proc and
 //     ps(1) helpers that identify live Claude CLI processes by PID so the
