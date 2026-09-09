@@ -303,8 +303,11 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 // This is the ONLY place a dashboard sub-package route reaches the mux. A
 // sub-package hands over data (httputil.Route) and never touches s.mux, so
 // "this one route missed the auth wrapper" is not a mistake that can be made
-// here — which is why the api_route_owner / handle_decl lint rules that used to
-// reconstruct this boundary from ASTs can go.
+// here — which is why the api_route_owner lint rule that used to reconstruct
+// this boundary from ASTs could go (#2554). handle_decl stays: it guards a
+// different edge — that *Server itself grows no handlers beyond the static
+// shell — which the server-owned s.mux.HandleFunc calls in registerDashboard
+// can still violate (#2636).
 func (s *Server) mountRoutes(routes []httputil.Route) {
 	chain := s.apiChain()
 	for _, rt := range routes {
