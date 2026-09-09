@@ -172,10 +172,61 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	if hub.engine.notify != sendNotifier(hub) {
 		t.Error("engine.notify is not the Hub that built it")
 	}
+	// drain's precondition 1 ("h.cancel() has been called") only shortens
+	// wg.Wait if the goroutines it waits for were started under the SAME ctx
+	// the Hub cancels. A fresh context here would make remoteSend's 60s cap
+	// the effective shutdown bound (#2632).
+	if hub.engine.ctx != hub.ctx {
+		t.Error("engine.ctx is not the Hub's ctx — Hub.Shutdown's cancel would not reach in-flight remote sends")
+	}
 	// The send-block fields must be gone from Hub: the whole point of #2551.
 	// Enforced structurally by the build (they no longer exist), so this only
 	// documents the intent for the next reader.
 	if got := hub.LegacySendInvokes(); got != 0 {
 		t.Errorf("fresh Hub LegacySendInvokes = %d, want 0", got)
+	}
+}
+
+// TestSendEngine_NotifyAfterDrainDoesNotArmClientWG is RFC send-engine-extraction
+// §6 test ③: once Shutdown has drained the engine, no notify path may
+// clientWG.Add — the debounce arm in BroadcastSessionsUpdate is the one that
+// can, and it must take the debounceClosed fast path instead. A late
+// remoteSend goroutine that slipped past drain would otherwise arm a
+// broadcast callback that runs after Shutdown emptied the client set.
+//
+// Observed behaviourally: after Shutdown, every sendNotifier method is called
+// through the engine's own handle; the debounce timer must stay disarmed and
+// clientWG.Wait must return immediately (a stuck Wait means an Add with no
+// matching Done was registered post-drain).
+func TestSendEngine_NotifyAfterDrainDoesNotArmClientWG(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(HubOptions{Router: session.NewRouter(session.RouterConfig{})})
+	hub.Shutdown()
+
+	if _, shuttingDown := hub.engine.TrackSend(); !shuttingDown {
+		t.Fatal("TrackSend after Shutdown reported shuttingDown=false")
+	}
+	n := hub.engine.notify
+	n.BroadcastSessionsUpdate()
+	n.BroadcastSessionReady("k")
+	n.broadcastState("k", "running", "")
+	n.broadcastSendError("k", "boom")
+
+	hub.debounceMu.Lock()
+	armed := hub.debounceArmed
+	hub.debounceMu.Unlock()
+	if armed {
+		t.Error("BroadcastSessionsUpdate armed the debounce timer after Shutdown — clientWG.Add happened past drain")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		hub.clientWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("clientWG.Wait did not return after post-Shutdown notify calls — a post-drain Add leaked")
 	}
 }

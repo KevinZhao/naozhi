@@ -100,7 +100,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	if hasPersistableAttachment(images) {
 		// resolveAttachmentWorkspace falls back to the session's saved workspace:
 		// the dashboard does not re-send workspace for a running session.
-		validatedWS, err := resolveAttachmentWorkspace(h.router, h.allowedRoot, key, msg.Workspace)
+		validatedWS, err := h.engine.resolveAttachmentWorkspace(key, msg.Workspace)
 		if err != nil {
 			slog.Warn("ws attachment workspace validation failed",
 				"key", key, "err", err)
