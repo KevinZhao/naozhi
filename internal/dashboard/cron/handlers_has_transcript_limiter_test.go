@@ -18,9 +18,7 @@ func TestHandlers_HasTranscriptLimiter_NilReturnsFalse(t *testing.T) {
 
 func TestHandlers_HasTranscriptLimiter_WiredReturnsTrue(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{
-		transcriptLimiter: newPerIPBurstNLimiter(1),
-	}
+	h := &Handlers{deps: Deps{RateLimits: RateLimits{Transcript: newPerIPBurstNLimiter(1)}}}
 	if !h.HasTranscriptLimiter() {
 		t.Fatal("HasTranscriptLimiter() = false for wired transcriptLimiter; want true")
 	}

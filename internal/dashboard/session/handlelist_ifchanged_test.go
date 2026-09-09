@@ -99,7 +99,7 @@ func TestHandleList_ChangedRebuilds(t *testing.T) {
 	}
 
 	// Advance storeGen the same way a render-affecting mutation would.
-	h.router.BumpVersion()
+	h.deps.Router.BumpVersion()
 
 	rec2 := doList(h, etag1)
 	if rec2.Code != http.StatusOK {

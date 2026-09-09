@@ -22,7 +22,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	// SINGLE-NODE body. Multi-node responses also depend on live node status
 	// with no version hook, so they always rebuild. Clients that omit
 	// If-None-Match always get a full 200 with the ETag set.
-	knownNodes := h.nodeAccess.KnownNodes()
+	knownNodes := h.deps.NodeAccess.KnownNodes()
 	singleNode := len(knownNodes) == 0
 
 	// sinceVersion is the storeGen the client last rendered; 0 (absent or
@@ -30,7 +30,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	clientETag := r.Header.Get("If-None-Match")
 	sinceVersion := parseETagVersion(clientETag)
 
-	snapshots, version, changed := h.router.ListSessionsIfChanged(sinceVersion)
+	snapshots, version, changed := h.deps.Router.ListSessionsIfChanged(sinceVersion)
 
 	var etag string
 	if singleNode {
@@ -53,7 +53,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	// while storeGen held) still needs a body. ListSessionsWithVersion keeps
 	// (snapshots, version) in one r.mu.RLock epoch (#726).
 	if !changed {
-		snapshots, version = h.router.ListSessionsWithVersion()
+		snapshots, version = h.deps.Router.ListSessionsWithVersion()
 		if singleNode {
 			etag = h.sessionsListETag(version)
 		}
@@ -65,9 +65,9 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	snapshots, running, ready := filterAndCountSnapshots(snapshots, now)
 
 	// Overlay tailer-side agent metrics; no-op when no Hub is wired (tests).
-	if h.snapshotEnricher != nil {
+	if h.deps.SnapshotEnricher != nil {
 		for i := range snapshots {
-			h.snapshotEnricher(&snapshots[i])
+			h.deps.SnapshotEnricher(&snapshots[i])
 		}
 	}
 
@@ -197,7 +197,7 @@ func returnWorkspaces(p *[]string) {
 // ProjectManager + planner-key fallback) and any persisted Summary from
 // sessions-index.json. Mutates snapshots in place.
 func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot) {
-	if h.projectMgr != nil {
+	if h.deps.ProjectMgr != nil {
 		// Pooled scratch buffer (#616); ResolveWorkspaces never retains it.
 		wsPtr := borrowWorkspaces(len(snapshots))
 		defer returnWorkspaces(wsPtr)
@@ -208,7 +208,7 @@ func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot)
 			}
 		}
 		*wsPtr = workspaces
-		wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
+		wsMap := h.deps.ProjectMgr.ResolveWorkspaces(workspaces)
 
 		for i := range snapshots {
 			if project.IsPlannerKey(snapshots[i].Key) {
@@ -237,7 +237,7 @@ func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot)
 	}
 
 	// Fill summary from sessions-index.json for managed sessions
-	if h.claudeDir != "" {
+	if h.deps.ClaudeDir != "" {
 		summaryMap := h.lookupSummariesCached(snapshots)
 		for i := range snapshots {
 			if summary := summaryMap[snapshots[i].SessionID]; summary != "" {
@@ -250,7 +250,7 @@ func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot)
 // buildSessionStats assembles the typed sessionStats payload for GET
 // /api/sessions.
 func (h *Handlers) buildSessionStats(now time.Time, version uint64, running, ready int) sessionStats {
-	active, total := h.router.Stats()
+	active, total := h.deps.Router.Stats()
 	stats := sessionStats{
 		sessionStatsStatic: h.staticStats,
 		Active:             active,
@@ -258,18 +258,18 @@ func (h *Handlers) buildSessionStats(now time.Time, version uint64, running, rea
 		Ready:              ready,
 		Total:              total,
 		Version:            version,
-		VersionTag:         h.versionTag,
+		VersionTag:         h.deps.VersionTag,
 		Uptime:             h.uptimeStringAt(now),
 		Watchdog: watchdogStats{
-			NoOutputKills: h.watchdogNoOut.Load(),
-			TotalKills:    h.watchdogTotal.Load(),
+			NoOutputKills: h.deps.WatchdogNoOut.Load(),
+			TotalKills:    h.deps.WatchdogTotal.Load(),
 		},
 	}
 	// cli_version in staticStats is the spawn-time value and goes stale after
 	// a host claude upgrade; re-resolve from the live init-frame version each
 	// poll (lock-free atomic read). Only overwrite when non-empty so an
 	// unwired router can't blank the startup value.
-	if live := h.router.CLIVersion(); live != "" {
+	if live := h.deps.Router.CLIVersion(); live != "" {
 		stats.CLIVersion = live
 	}
 	stats.Projects = h.buildProjectList(now)
@@ -293,7 +293,7 @@ func (h *Handlers) buildLocalResp(snapshots []sessionpkg.SessionSnapshot, stats 
 // connection status from the node cache + live nodesSnapshot.
 func (h *Handlers) buildMultiNodeResp(snapshots []sessionpkg.SessionSnapshot, stats sessionStats, knownNodes map[string]string) sessionListMultiResp {
 	// Only the multi-node path needs the live snapshot (takes the nodeAccess lock).
-	nodesSnapshot := h.nodeAccess.NodesSnapshot()
+	nodesSnapshot := h.deps.NodeAccess.NodesSnapshot()
 
 	// Box *SessionSnapshot rather than the 280 B value: pointer payloads sit
 	// inline in the iface, and json.Marshal output is identical (#1402).
@@ -303,14 +303,14 @@ func (h *Handlers) buildMultiNodeResp(snapshots []sessionpkg.SessionSnapshot, st
 		allSessions = append(allSessions, &snapshots[i])
 	}
 
-	localName := h.workspaceName
+	localName := h.deps.WorkspaceName
 	if localName == "" {
 		localName = "Local"
 	}
 	nodeStatus := make(map[string]nodeStatusEntry, 1+len(nodesSnapshot)+len(knownNodes))
 	nodeStatus["local"] = nodeStatusEntry{DisplayName: localName, Status: "ok"}
 
-	cachedSessions, cachedStatus := h.nodeCache.Sessions()
+	cachedSessions, cachedStatus := h.deps.NodeCache.Sessions()
 	for id, nc := range nodesSnapshot {
 		status := cachedStatus[id]
 		if status == "" {

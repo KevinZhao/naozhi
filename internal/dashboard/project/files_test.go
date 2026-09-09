@@ -46,7 +46,11 @@ func newProjectHandlersForTest(t *testing.T, files map[string]string) (*Handlers
 	if err := mgr.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	return &Handlers{projectMgr: mgr}, "demo", projDir
+	return &Handlers{
+		deps: Deps{
+			ProjectMgr: mgr,
+		},
+	}, "demo", projDir
 }
 
 // ─── resolveProjectFile ───────────────────────────────────────────────────────
@@ -573,7 +577,7 @@ func TestHandlePublicTmp_DisabledByDefault(t *testing.T) {
 // guards from resolveProjectFileWithRoot must still apply.
 func TestHandleFilesExists_PublicTmp(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.publicTmpEnabled = true
+	h.deps.PublicTmpEnabled = true
 
 	// Drop a unique-named file directly under /tmp. Pin the dir explicitly
 	// because os.TempDir() on macOS returns /var/folders/..., which
@@ -631,7 +635,7 @@ func TestHandleFilesExists_PublicTmp(t *testing.T) {
 // previews as text via the __public_tmp__ pseudo-project.
 func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.publicTmpEnabled = true
+	h.deps.PublicTmpEnabled = true
 
 	// Pin /tmp explicitly: see TestHandleFilesExists_PublicTmp for the
 	// macOS os.TempDir() rationale.
@@ -677,7 +681,7 @@ func TestHandleFileGet_PublicTmpAuditLog(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.publicTmpEnabled = true
+	h.deps.PublicTmpEnabled = true
 
 	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-audit-*.log")
 	if err != nil {
@@ -739,7 +743,7 @@ func TestHandleFileGet_NonPublicTmpNoAudit(t *testing.T) {
 // guards under the pseudo-project.
 func TestHandleFileGet_PublicTmpRejectsTraversal(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.publicTmpEnabled = true
+	h.deps.PublicTmpEnabled = true
 
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+publicTmpProject+"&path=../etc/passwd&mode=preview", nil)
@@ -755,7 +759,7 @@ func TestHandleFileGet_PublicTmpRejectsTraversal(t *testing.T) {
 // must not be downloadable.
 func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.publicTmpEnabled = true
+	h.deps.PublicTmpEnabled = true
 
 	credPath := filepath.Join("/tmp", ".env.naozhi-test")
 	if err := os.WriteFile(credPath, []byte("SECRET=1\n"), 0o600); err != nil {
@@ -805,7 +809,7 @@ func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
 // of our own UID.
 func TestHandleFileGet_PublicTmpRejectsForeignPrivate(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.publicTmpEnabled = true
+	h.deps.PublicTmpEnabled = true
 
 	// Override processEUID to a value guaranteed to differ from any real
 	// UID so files we just created (owned by the real UID) are foreign.
@@ -893,7 +897,7 @@ func TestHandleFileGet_PublicTmpRejectsForeignPrivate(t *testing.T) {
 func TestHandleFilesExists_RateLimit(t *testing.T) {
 	t.Parallel()
 	h, proj, _ := newProjectHandlersForTest(t, map[string]string{"a.txt": "hi"})
-	h.filesExistsLimiter = newPerIPBurst1Limiter()
+	h.deps.FilesExistsLimiter = newPerIPBurst1Limiter()
 
 	body, _ := json.Marshal(existsReq{Project: proj, Paths: []string{"a.txt"}})
 	mkReq := func() *http.Request {
@@ -948,7 +952,7 @@ func TestHandleFilesExists_RateLimit(t *testing.T) {
 func TestHandleFilesExists_NilLimiterBypasses(t *testing.T) {
 	t.Parallel()
 	h, proj, _ := newProjectHandlersForTest(t, map[string]string{"a.txt": "hi"})
-	if h.filesExistsLimiter != nil {
+	if h.deps.FilesExistsLimiter != nil {
 		t.Fatal("newProjectHandlersForTest must leave filesExistsLimiter nil")
 	}
 

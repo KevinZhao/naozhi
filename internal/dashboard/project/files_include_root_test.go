@@ -43,7 +43,11 @@ func newIncludeRootHandlersForTest(t *testing.T, rootFiles map[string]string) (*
 	if err := mgr.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	return &Handlers{projectMgr: mgr}, filepath.Base(root), root
+	return &Handlers{
+		deps: Deps{
+			ProjectMgr: mgr,
+		},
+	}, filepath.Base(root), root
 }
 
 // A plain file living directly under the workspace root is previewable through
@@ -187,7 +191,11 @@ func TestIncludeRoot_DisabledRootName404(t *testing.T) {
 	if err := mgr.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	h := &Handlers{projectMgr: mgr}
+	h := &Handlers{
+		deps: Deps{
+			ProjectMgr: mgr,
+		},
+	}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+filepath.Base(root)+"&path=notes.md&mode=preview", nil)
 	w := httptest.NewRecorder()
