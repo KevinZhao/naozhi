@@ -125,7 +125,9 @@ func storeMetaPath(storePath string) string {
 	base := filepath.Base(storePath)
 	ext := filepath.Ext(base)
 	stem := base[:len(base)-len(ext)]
-	return filepath.Join(filepath.Dir(storePath), stem+".meta"+ext)
+	// The NAME follows the configured file (mystore.json → mystore.meta.json);
+	// only the directory comes from the layout.
+	return datadir.ForStore(storePath).Join(stem + ".meta" + ext)
 }
 
 // sessionToStoreEntry converts a ManagedSession to its on-disk storeEntry,
@@ -496,7 +498,7 @@ func knownIDsPath(storePath string) string {
 	if storePath == "" {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(storePath), "session-ids.json")
+	return datadir.ForStore(storePath).SessionIDsPath()
 }
 
 // loadKnownIDs reads the persistent set of all session IDs ever used by naozhi.
@@ -607,7 +609,7 @@ func workspaceOverridesPath(storePath string) string {
 	if storePath == "" {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(storePath), "workspace-overrides.json")
+	return datadir.ForStore(storePath).WorkspaceOverridesPath()
 }
 
 // loadWorkspaceOverrides reads persisted per-chat workspace overrides.

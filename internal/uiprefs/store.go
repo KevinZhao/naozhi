@@ -59,7 +59,7 @@ type Store struct {
 // rewrites the file. An empty dataDir yields an in-memory-only store.
 func New(dataDir string) *Store {
 	s := &Store{
-		path: datadir.UISettingsPath(dataDir),
+		path: datadir.FromRoot(dataDir).UISettingsPath(),
 		cur:  Settings{Theme: defaultTheme},
 	}
 	s.load()

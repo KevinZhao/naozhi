@@ -28,12 +28,12 @@ const (
 // Store persists SessionRun records to disk and memoises the newest-N per
 // session in an in-memory ring. Layout:
 //
-//	session-runs/<sha256(sessionKey)[:16]>/<run_id>.json
+//	<runsRoot>/<sha256(sessionKey)[:16]>/<run_id>.json
 //
 // No index.json: List/Recent serve from the ring, warmed lazily from disk.
 // A nil or disabled Store is a no-op, so callers never nil-check.
 type Store struct {
-	root       string // <...>/session-runs ; "" disables persistence
+	root       string // the runs root as given by the caller; "" disables persistence
 	keepCount  int
 	keepWindow time.Duration
 	disabled   bool
@@ -60,10 +60,13 @@ type sessionEntry struct {
 	warmed bool
 }
 
-// NewStore returns a Store rooted at <storeDir>/session-runs. Empty storeDir
-// disables persistence; keepCount/keepWindow <= 0 use the package defaults.
-func NewStore(storeDir string, keepCount int, keepWindow time.Duration) *Store {
-	if storeDir == "" {
+// NewStore returns a Store rooted at runsRoot, which the caller names via
+// datadir.Layout.SessionRunsRoot() — this package no longer appends the
+// "session-runs" segment itself, so the store and the cost reporter that reads
+// the same directory cannot disagree about it (#2641). Empty runsRoot disables
+// persistence; keepCount/keepWindow <= 0 use the package defaults.
+func NewStore(runsRoot string, keepCount int, keepWindow time.Duration) *Store {
+	if runsRoot == "" {
 		return &Store{disabled: true}
 	}
 	if keepCount <= 0 {
@@ -73,7 +76,7 @@ func NewStore(storeDir string, keepCount int, keepWindow time.Duration) *Store {
 		keepWindow = DefaultKeepWindow
 	}
 	s := &Store{
-		root:       filepath.Join(storeDir, "session-runs"),
+		root:       runsRoot,
 		keepCount:  keepCount,
 		keepWindow: keepWindow,
 		entries:    make(map[string]*sessionEntry),

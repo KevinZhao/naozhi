@@ -29,7 +29,7 @@ func TestSet_PersistsAcrossStores(t *testing.T) {
 	}
 
 	// File exists at the documented path.
-	if _, err := os.Stat(datadir.UISettingsPath(dir)); err != nil {
+	if _, err := os.Stat(datadir.FromRoot(dir).UISettingsPath()); err != nil {
 		t.Fatalf("ui-settings.json not written: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestEmptyStateDir_InMemoryOnly(t *testing.T) {
 // rather than failing construction.
 func TestNew_ToleratesCorruptFile(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(datadir.UISettingsPath(dir), []byte("{not json"), 0600); err != nil {
+	if err := os.WriteFile(datadir.FromRoot(dir).UISettingsPath(), []byte("{not json"), 0600); err != nil {
 		t.Fatalf("seed corrupt file: %v", err)
 	}
 	s := New(dir)
@@ -130,7 +130,7 @@ func TestNew_IgnoresOversizeFile(t *testing.T) {
 	for i := range big {
 		big[i] = ' '
 	}
-	if err := os.WriteFile(datadir.UISettingsPath(dir), big, 0600); err != nil {
+	if err := os.WriteFile(datadir.FromRoot(dir).UISettingsPath(), big, 0600); err != nil {
 		t.Fatalf("seed oversize file: %v", err)
 	}
 	if got := New(dir).Get().Theme; got != defaultTheme {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	discordplatform "github.com/naozhi/naozhi/internal/platform/discord"
@@ -228,12 +229,12 @@ func sysSessionsWorkDir(cfg *config.Config, storePath string) string {
 	if wd := osutil.ExpandHome(cfg.Sysession.Runner.WorkDir); wd != "" {
 		return wd
 	}
-	base := filepath.Dir(storePath)
-	if base == "" || base == "." {
+	lay := datadir.ForStore(storePath)
+	if root := lay.Root(); root == "" || root == "." {
 		home, _ := os.UserHomeDir()
-		base = filepath.Join(home, ".naozhi")
+		lay = datadir.FromRoot(filepath.Join(home, ".naozhi"))
 	}
-	return filepath.Join(base, "sys-sessions")
+	return lay.SysSessionsRoot()
 }
 
 // buildSysessionManager wires sysession.Manager from cfg.Sysession. Returns

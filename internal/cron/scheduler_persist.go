@@ -8,10 +8,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"slices"
 	"sync"
 
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -267,7 +267,7 @@ func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 	// sync.Once keeps MkdirAll off the per-mutation hot path; Chmod follows because
 	// MkdirAll skips perm changes on an existing dir (#830).
 	s.storeDirOnce.Do(func() {
-		if dir := filepath.Dir(s.storePath); dir != "" && dir != "." {
+		if dir := datadir.ForStore(s.storePath).Root(); dir != "" && dir != "." {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				slog.Warn("cron store parent dir mkdir failed", "err", err, "dir", dir)
 			}

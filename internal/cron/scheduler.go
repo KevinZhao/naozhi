@@ -8,13 +8,13 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	robfigcron "github.com/robfig/cron/v3"
 
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -175,7 +175,7 @@ type Scheduler struct {
 	// saveMarshaledSeq; snapshot construction stays on s.mu.
 	storeMu sync.Mutex
 
-	// storeDirOnce gates the one-time MkdirAll(filepath.Dir(storePath), 0700)
+	// storeDirOnce gates the one-time MkdirAll of the store's layout root (0700)
 	// that hardens the cron_jobs.json parent dir against group-readable XDG
 	// defaults, so the saveMarshaledSeq hot path clamps once per process.
 	storeDirOnce sync.Once
@@ -344,7 +344,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 	// covers a pre-existing dir (#830). Failures are logged and non-fatal.
 	if cfg.StorePath != "" {
 		s.storeDirOnce.Do(func() {
-			if dir := filepath.Dir(cfg.StorePath); dir != "" && dir != "." {
+			if dir := datadir.ForStore(cfg.StorePath).Root(); dir != "" && dir != "." {
 				// MkdirAll failure is Error (not Warn): NewScheduler cannot return
 				// an error, and a failed MkdirAll guarantees the first save will
 				// ENOENT — better a boot-time signal than a runtime one (#1395).
