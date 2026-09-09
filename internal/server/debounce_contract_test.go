@@ -152,6 +152,11 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read wshub.go: %v", err)
 	}
+	// Positive anchor (#2630): a negative-only assertion needs proof that the
+	// file it reads is still the one the claim is about.
+	if !regexp.MustCompile(`(?m)^type Hub struct \{`).Match(hubOnly) {
+		t.Fatal("wshub.go no longer declares `type Hub struct` — re-point this negative pin at the Hub's file")
+	}
 	if regexp.MustCompile(`time\.AfterFunc\(debounceInterval`).Match(hubOnly) {
 		t.Error("AfterFunc 不应回到 wshub.go - 应保留在 wshub_broadcast.go (R248-TEST-8)")
 	}

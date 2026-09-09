@@ -296,6 +296,12 @@ func TestOBS2_WSAuthFailNotInMainHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read wshub.go: %v", err)
 	}
+	// Positive anchor (#2630): the file we read must still be the Hub's home,
+	// otherwise this negative-only assertion passes against the wrong file.
+	if !regexp.MustCompile(`(?m)^type Hub struct \{`).Match(src) {
+		t.Fatal("wshub.go no longer declares `type Hub struct` — the negative " +
+			"assertion below would check nothing; re-point this test at the Hub's file")
+	}
 	// R237-ARCH-5 (#582): the seam call (serverMetrics.WSAuthFail()) must stay
 	// in wshub_upgrade.go; the underlying global forward lives in
 	// metrics_observer.go. Neither belongs in wshub.go.
