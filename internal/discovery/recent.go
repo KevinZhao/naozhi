@@ -311,7 +311,7 @@ func extractFirstPrompt(path string) string {
 		// Cheap pre-filter before json.Unmarshal; the Unmarshal below is the
 		// authoritative check. Oversized lines carry no first-prompt text.
 		if len(line) > 0 && !oversized && bytes.Contains(line, []byte(`"type"`)) {
-			var hl historyLine
+			var hl claudefs.Line
 			if json.Unmarshal(line, &hl) == nil && hl.Type == "user" {
 				if text := extractUserText(hl.Message); text != "" {
 					return SanitizePromptForTransport(textutil.TruncateRunes(text, 120))

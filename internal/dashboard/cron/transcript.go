@@ -348,7 +348,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		if len(line) == 0 {
 			continue
 		}
-		var ev claudeJSONLEvent
+		var ev claudefs.Line
 		if err := json.Unmarshal(line, &ev); err != nil {
 			// Skip unparseable line; do not fail the whole response.
 			continue
@@ -358,7 +358,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		// timestamp-less events ("queue-operation", untimestamped attachments)
 		// are dropped rather than leaked into an adjacent run's transcript
 		// (#1046). fresh=true runs own the JSONL, so they pass through there.
-		ts := parseISO8601MS(ev.Timestamp)
+		ts := claudefs.TimestampMillis(ev.Timestamp)
 		if ts > 0 {
 			// fresh=false shares the JSONL with adjacent runs, so a boundary
 			// event (run N ended at T, run N+1 started at T) must have a single

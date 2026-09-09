@@ -248,12 +248,12 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 		return nil, false
 	}
 
-	var hl historyLine
+	var hl claudefs.Line
 	if err := json.Unmarshal(line, &hl); err != nil {
 		slog.Debug("skip malformed tail history line", "err", err)
 		return nil, false
 	}
-	ts := parseTimestamp(hl.Timestamp)
+	ts := claudefs.TimestampMillis(hl.Timestamp)
 	// Drop records with a missing/unparseable timestamp: a Time=0 entry
 	// survives the strict-< pagination filter and pins the LoadBefore cursor
 	// at before=0, which degrades to a newest-tail read repeating seen

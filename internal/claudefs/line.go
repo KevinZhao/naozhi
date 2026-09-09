@@ -1,6 +1,67 @@
-package cron
+// line.go — the transcript line schema and its timestamp (#2643).
+package claudefs
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
+
+// Line is the part of a Claude transcript line naozhi reads, keeping the
+// message body deferred. Two packages decoded a subset of this independently
+// (discovery's historyLine was a strict subset of dashboard/cron's
+// claudeJSONLEvent), so a field the CLI added — `toolUseResult`, whose placement
+// "varies by CLI version" — was visible to one and invisible to the other.
+//
+// internal/cli's subagent reader deliberately does NOT use this type: it decodes
+// `message` eagerly into a typed struct because it needs the content blocks on
+// every line, while these two consumers pass the raw bytes on. Collapsing all
+// three would force one side to change decode strategy to make a count smaller,
+// which is a worse trade than having two shapes for two access patterns.
+type Line struct {
+	Type      string          `json:"type"`
+	SubType   string          `json:"subtype"`
+	SessionID string          `json:"sessionId"`
+	Timestamp string          `json:"timestamp"` // RFC3339 / RFC3339Nano
+	UUID      string          `json:"uuid"`
+	Message   json.RawMessage `json:"message"`
+
+	// ToolUseResult: tool_result events sometimes appear at top level here
+	// instead of inside a content block (varies by CLI version). Both shapes
+	// are tolerated by consumers.
+	ToolUseResult json.RawMessage `json:"toolUseResult"`
+}
+
+// ParseTimestamp parses a transcript line's timestamp. RFC3339Nano's layout
+// accepts an absent fractional second, so it covers plain RFC3339 too; one of
+// the four call sites this replaced carried a redundant second attempt with
+// time.RFC3339 for that reason.
+func ParseTimestamp(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// TimestampMillis converts a transcript timestamp into unix ms, returning 0 when
+// the input is empty or unparseable so callers can use it as a "skip filter"
+// sentinel.
+//
+// Four packages had their own copy of this. Three used time.Parse; the fourth
+// (dashboard/cron) had grown the byte-level fast path below. That is the one
+// that moved here, so the other three inherit it rather than the reverse.
+//
+// Its original justification ("~30ns vs ~300ns for time.Parse", #1012) no longer
+// reproduces: measured 2026-09-09 on darwin/arm64 (Apple M4 Pro, Go 1.26) the
+// fast path is 19.1-19.5 ns/op against 24.0-24.7 for time.Parse — 1.26x, not
+// 10x. Go's time.Parse got faster. Kept as-is here because this commit is a
+// move, not a re-decision, but 105 lines of hand-rolled calendar arithmetic
+// (leap-year daysInMonth, a fractional-second padder — both places a bug can
+// hide) now buy ~5ns per transcript line, i.e. ~2.5us on a 500-line transcript.
+// Whether that trade still holds is worth asking on its own.
 
 // parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.
 // Returns 0 when the input is empty or unparseable so callers can use it as a
@@ -12,11 +73,11 @@ import "time"
 // across 500-line transcripts under bulk polling (#1012). Anything
 // non-canonical (offsets, exotic layouts) falls back to time.Parse, so
 // results are bit-identical to the slow path.
-func parseISO8601MS(s string) int64 {
+func TimestampMillis(s string) int64 {
 	if s == "" {
 		return 0
 	}
-	if ms, ok := parseISO8601MSFast(s); ok {
+	if ms, ok := timestampMillisFast(s); ok {
 		return ms
 	}
 	t, err := time.Parse(time.RFC3339Nano, s)
@@ -36,7 +97,7 @@ func parseISO8601MS(s string) int64 {
 // field is range-checked before time.Date because time.Date *normalises*
 // out-of-range values (month 13 → next January) whereas time.Parse rejects
 // them; seconds cap at 59 since time.Parse does not honour leap seconds.
-func parseISO8601MSFast(s string) (int64, bool) {
+func timestampMillisFast(s string) (int64, bool) {
 	// Minimum canonical length is "YYYY-MM-DDTHH:MM:SSZ" = 20 bytes.
 	if len(s) < 20 {
 		return 0, false

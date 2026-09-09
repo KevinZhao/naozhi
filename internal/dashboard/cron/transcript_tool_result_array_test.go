@@ -3,6 +3,8 @@ package cron
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // #2433 P2: the CLI frequently persists tool_result content as an array of
@@ -19,7 +21,7 @@ func TestFlattenUserEvent_ToolResultArrayContent(t *testing.T) {
 		`{"type":"tool_reference","tool_use_id":"x"},` +
 		`{"type":"text","text":"line two"}]},` +
 		`{"type":"tool_result","tool_use_id":"b","is_error":true,"content":"plain string"}]}`)
-	out, _, _, parsed := flattenUserEvent(&claudeJSONLEvent{Type: "user", Message: msg}, 0, 0)
+	out, _, _, parsed := flattenUserEvent(&claudefs.Line{Type: "user", Message: msg}, 0, 0)
 	if !parsed || len(out) != 2 {
 		t.Fatalf("parsed=%v len(out)=%d (want true / 2)", parsed, len(out))
 	}
@@ -44,7 +46,7 @@ func TestFlattenUserEvent_ToolResultArrayOnlyReferences(t *testing.T) {
 	t.Parallel()
 	msg := json.RawMessage(`{"role":"user","content":[` +
 		`{"type":"tool_result","tool_use_id":"a","content":[{"type":"tool_reference","tool_use_id":"x"}]}]}`)
-	out, _, _, parsed := flattenUserEvent(&claudeJSONLEvent{Type: "user", Message: msg}, 0, 0)
+	out, _, _, parsed := flattenUserEvent(&claudefs.Line{Type: "user", Message: msg}, 0, 0)
 	if !parsed || len(out) != 1 {
 		t.Fatalf("parsed=%v len(out)=%d (want true / 1)", parsed, len(out))
 	}

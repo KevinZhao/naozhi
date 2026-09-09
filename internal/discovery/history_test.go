@@ -95,12 +95,12 @@ func TestParseTimestamp(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseTimestamp(tc.input)
+			got := claudefs.TimestampMillis(tc.input)
 			if tc.wantZ && got == 0 {
-				t.Errorf("parseTimestamp(%q) = 0, want non-zero", tc.input)
+				t.Errorf("TimestampMillis(%q) = 0, want non-zero", tc.input)
 			}
 			if !tc.wantZ && got != 0 {
-				t.Errorf("parseTimestamp(%q) = %d, want 0", tc.input, got)
+				t.Errorf("TimestampMillis(%q) = %d, want 0", tc.input, got)
 			}
 		})
 	}

@@ -1,4 +1,4 @@
-package cron
+package claudefs
 
 import (
 	"testing"
@@ -28,17 +28,17 @@ func TestParseISO8601MS_FastPathMatchesParse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reference Parse(%q) errored: %v", in, err)
 		}
-		got := parseISO8601MS(in)
+		got := TimestampMillis(in)
 		if got != want.UnixMilli() {
-			t.Errorf("parseISO8601MS(%q) = %d, want %d", in, got, want.UnixMilli())
+			t.Errorf("TimestampMillis(%q) = %d, want %d", in, got, want.UnixMilli())
 		}
 		// Also exercise the fast path directly to confirm `ok=true`.
-		gotFast, ok := parseISO8601MSFast(in)
+		gotFast, ok := timestampMillisFast(in)
 		if !ok {
-			t.Errorf("parseISO8601MSFast(%q) ok=false; expected canonical shape to match", in)
+			t.Errorf("timestampMillisFast(%q) ok=false; expected canonical shape to match", in)
 		}
 		if gotFast != want.UnixMilli() {
-			t.Errorf("parseISO8601MSFast(%q) = %d, want %d", in, gotFast, want.UnixMilli())
+			t.Errorf("timestampMillisFast(%q) = %d, want %d", in, gotFast, want.UnixMilli())
 		}
 	}
 }
@@ -78,8 +78,8 @@ func TestParseISO8601MS_FastPathRejectsNonCanonical(t *testing.T) {
 		"2026-05-26T12:00:61Z", // second 61
 	}
 	for _, in := range rejects {
-		if _, ok := parseISO8601MSFast(in); ok {
-			t.Errorf("parseISO8601MSFast(%q) ok=true; expected fast path to decline", in)
+		if _, ok := timestampMillisFast(in); ok {
+			t.Errorf("timestampMillisFast(%q) ok=true; expected fast path to decline", in)
 		}
 	}
 }
@@ -99,9 +99,9 @@ func TestParseISO8601MS_NonCanonicalFallback(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reference Parse(%q) errored: %v", in, err)
 		}
-		got := parseISO8601MS(in)
+		got := TimestampMillis(in)
 		if got != want.UnixMilli() {
-			t.Errorf("parseISO8601MS(%q) = %d, want %d (fallback path)", in, got, want.UnixMilli())
+			t.Errorf("TimestampMillis(%q) = %d, want %d (fallback path)", in, got, want.UnixMilli())
 		}
 	}
 }
@@ -121,8 +121,8 @@ func TestParseISO8601MS_InvalidReturnsZero(t *testing.T) {
 	for _, in := range cases {
 		// Every input here is rejected by both the fast path's range check
 		// and time.Parse, so parseISO8601MS must yield the 0 sentinel.
-		if got := parseISO8601MS(in); got != 0 {
-			t.Errorf("parseISO8601MS(%q) = %d, want 0", in, got)
+		if got := TimestampMillis(in); got != 0 {
+			t.Errorf("TimestampMillis(%q) = %d, want 0", in, got)
 		}
 	}
 }
@@ -153,11 +153,11 @@ func TestParseISO8601MS_OutOfRangeParityWithParse(t *testing.T) {
 		if _, err := time.Parse(time.RFC3339Nano, in); err == nil {
 			t.Fatalf("reference Parse(%q) unexpectedly succeeded; test premise broken", in)
 		}
-		if _, ok := parseISO8601MSFast(in); ok {
-			t.Errorf("parseISO8601MSFast(%q) ok=true; fast path must decline out-of-range fields", in)
+		if _, ok := timestampMillisFast(in); ok {
+			t.Errorf("timestampMillisFast(%q) ok=true; fast path must decline out-of-range fields", in)
 		}
-		if got := parseISO8601MS(in); got != 0 {
-			t.Errorf("parseISO8601MS(%q) = %d, want 0 (both paths reject)", in, got)
+		if got := TimestampMillis(in); got != 0 {
+			t.Errorf("TimestampMillis(%q) = %d, want 0 (both paths reject)", in, got)
 		}
 	}
 }
@@ -176,12 +176,12 @@ func TestParseISO8601MS_LeapDayAccepted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reference Parse(%q) errored: %v", in, err)
 		}
-		got, ok := parseISO8601MSFast(in)
+		got, ok := timestampMillisFast(in)
 		if !ok {
-			t.Errorf("parseISO8601MSFast(%q) ok=false; valid date should be accepted", in)
+			t.Errorf("timestampMillisFast(%q) ok=false; valid date should be accepted", in)
 		}
 		if got != want.UnixMilli() {
-			t.Errorf("parseISO8601MSFast(%q) = %d, want %d", in, got, want.UnixMilli())
+			t.Errorf("timestampMillisFast(%q) = %d, want %d", in, got, want.UnixMilli())
 		}
 	}
 }
