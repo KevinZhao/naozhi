@@ -416,7 +416,7 @@ func (p *Persister) Accept() bool {
 }
 
 // SinkFor builds a PersistSink closure for a session key. Callers must
-// install it via cli.EventLog.SetPersistSink AFTER any InjectHistory
+// install it via ring.EventLog.SetPersistSink AFTER any InjectHistory
 // completes (RFC §3.2.2). After Stop the sink silently drops.
 func (p *Persister) SinkFor(key string) PersistSink {
 	// A method value on a small struct captures one pointer instead of a

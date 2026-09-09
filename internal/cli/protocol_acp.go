@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -151,7 +152,7 @@ type ACPProtocol struct {
 	textBuf strings.Builder
 	// thoughtBuf accumulates agent_thought_chunk text during a turn. kiro streams
 	// reasoning in ~2-char chunks (100s per turn); flushing one "thinking" block
-	// at turn boundary avoids flooding EventLog. Guarded by mu like textBuf.
+	// at turn boundary avoids flooding ring.EventLog. Guarded by mu like textBuf.
 	thoughtBuf strings.Builder
 	// BackendID labels metric increments so protocol code stays independent of
 	// the cli/backend registry; empty falls back to LabelEmpty (unwired tests).
@@ -426,11 +427,11 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []Attachment
 // request kiro answers "Method not found"; the prompt RPC then completes with
 // stopReason "cancelled" within ms, which readLoop treats as a normal
 // turn-end; a few in-flight chunks may still arrive harmlessly. Returns
-// ErrInterruptUnsupported before a session exists (callers fall back to SIGINT).
+// clierr.ErrInterruptUnsupported before a session exists (callers fall back to SIGINT).
 func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	sid := p.loadSessionID()
 	if sid == "" {
-		return ErrInterruptUnsupported
+		return clierr.ErrInterruptUnsupported
 	}
 	// Static envelope + json.Marshal of sid only: the plain-string fast path
 	// yields a properly escaped, quoted JSON string with no struct reflection.
@@ -496,11 +497,11 @@ func (p *ACPProtocol) dropPendingControl(id int) {
 // so callers validate against availableModels first; the switch is
 // process-bound, so callers re-apply --model on respawn. ReadEvent intercepts
 // the response via pendingControl (see ModelSetter). Returns
-// ErrSetModelUnsupported before the handshake.
+// clierr.ErrSetModelUnsupported before the handshake.
 func (p *ACPProtocol) WriteSetModel(w io.Writer, requestID, model string) error {
 	sid := p.loadSessionID()
 	if sid == "" {
-		return ErrSetModelUnsupported
+		return clierr.ErrSetModelUnsupported
 	}
 	id := p.allocID()
 	req := RPCRequest{
@@ -534,7 +535,7 @@ func (p *ACPProtocol) SupportsReplay() bool   { return false }
 
 // Capabilities returns the hard-coded Caps for ACP JSON-RPC. SoftInterrupt=true:
 // session/cancel is a safe soft cancel once the handshake completed (before
-// that WriteInterrupt returns ErrInterruptUnsupported → SIGINT fallback).
+// that WriteInterrupt returns clierr.ErrInterruptUnsupported → SIGINT fallback).
 // EffortTier=true: BuildArgs forwards SpawnOptions.Effort as `--effort`.
 func (p *ACPProtocol) Capabilities() Caps {
 	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false,
@@ -565,7 +566,7 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 			return nil, done, err
 		}
 		// Cap total content bytes to bound downstream CPU / memory amplification
-		// (EventLog ring, JSONL persist, dashboard fan-out); mirrors ClaudeProtocol.
+		// (ring.EventLog ring, JSONL persist, dashboard fan-out); mirrors ClaudeProtocol.
 		if ev.Message != nil {
 			if n := contentBytes(ev.Message); n > maxAssistantMessageContentBytes {
 				return nil, done, fmt.Errorf("acp: event content exceeds %d bytes (got %d), dropping",
@@ -646,10 +647,10 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		sid := p.loadSessionID()
 
 		// Turn boundary emits up to THREE events: an optional "thinking" frame
-		// (thoughtBuf; per-chunk rows would flood EventLog), an assistant "text"
+		// (thoughtBuf; per-chunk rows would flood ring.EventLog), an assistant "text"
 		// frame — the ONLY place the visible reply materialises, since chunks only
 		// feed textBuf — and a pure result event. Result still carries the text
-		// for SendResult.Text, but EventLog treats result as turn metadata only.
+		// for SendResult.Text, but ring.EventLog treats result as turn metadata only.
 		var events []Event
 		if thought != "" {
 			events = append(events, Event{

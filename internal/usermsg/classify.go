@@ -9,7 +9,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
@@ -53,23 +53,23 @@ func classify(err error, key string) Code {
 			return CodeCronAsleep
 		}
 		return CodeSessionAsleep
-	case errors.Is(err, cli.ErrNoOutputTimeout), errors.Is(err, cli.ErrTotalTimeout):
+	case errors.Is(err, clierr.ErrNoOutputTimeout), errors.Is(err, clierr.ErrTotalTimeout):
 		return CodeTimeout
-	case errors.Is(err, cli.ErrProcessExited):
+	case errors.Is(err, clierr.ErrProcessExited):
 		return CodeProcessExited
-	case errors.Is(err, cli.ErrAbortedByUrgent):
+	case errors.Is(err, clierr.ErrAbortedByUrgent):
 		return CodeAbortedByUrgent
-	case errors.Is(err, cli.ErrReconnectedUnknown):
+	case errors.Is(err, clierr.ErrReconnectedUnknown):
 		return CodeReconnectedUnknown
-	case errors.Is(err, cli.ErrSessionReset):
+	case errors.Is(err, clierr.ErrSessionReset):
 		return CodeSessionReset
-	case errors.Is(err, cli.ErrTooManyPending):
+	case errors.Is(err, clierr.ErrTooManyPending):
 		return CodeTooManyPending
-	case errors.Is(err, cli.ErrProcessBusy):
+	case errors.Is(err, clierr.ErrProcessBusy):
 		return CodeProcessBusy
-	case errors.Is(err, cli.ErrMessageTooLarge):
+	case errors.Is(err, clierr.ErrMessageTooLarge):
 		return CodeMessageTooLarge
-	case errors.Is(err, cli.ErrOrphanedSlot):
+	case errors.Is(err, clierr.ErrOrphanedSlot):
 		// Orphaned slot surfaces to the user as a plain timeout retry hint.
 		return CodeTimeout
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -85,5 +85,5 @@ func classify(err error, key string) Code {
 
 // isNoOutputTimeout / isTotalTimeout are the timeout sentinels UserMessage
 // specialises with a concrete duration; kept here next to classify.
-func isNoOutputTimeout(err error) bool { return errors.Is(err, cli.ErrNoOutputTimeout) }
-func isTotalTimeout(err error) bool    { return errors.Is(err, cli.ErrTotalTimeout) }
+func isNoOutputTimeout(err error) bool { return errors.Is(err, clierr.ErrNoOutputTimeout) }
+func isTotalTimeout(err error) bool    { return errors.Is(err, clierr.ErrTotalTimeout) }

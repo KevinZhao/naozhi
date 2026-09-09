@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -31,13 +31,13 @@ func TestUserMessage_TimeoutSpecialisation(t *testing.T) {
 	}{
 		{
 			name:        "no-output timeout renders configured duration",
-			err:         cli.ErrNoOutputTimeout,
+			err:         clierr.ErrNoOutputTimeout,
 			wantSubstrs: []string{"无输出", "1 分钟 30 秒"},
 			notSubstrs:  []string{"⏱️"}, // emoji is caller-decorated, not in helper.
 		},
 		{
 			name:        "total timeout renders configured duration",
-			err:         cli.ErrTotalTimeout,
+			err:         clierr.ErrTotalTimeout,
 			wantSubstrs: []string{"总耗时超过", "5 分钟"},
 			notSubstrs:  []string{"⏱️"},
 		},
@@ -88,7 +88,7 @@ func TestUserMessage_ZeroTimeoutDoesNotPanic(t *testing.T) {
 			t.Fatalf("UserMessage panicked on zero timeouts: %v", r)
 		}
 	}()
-	got := UserMessage(cli.ErrNoOutputTimeout, "", 0, 0)
+	got := UserMessage(clierr.ErrNoOutputTimeout, "", 0, 0)
 	if got == "" {
 		t.Errorf("UserMessage with zero timeouts returned empty string")
 	}

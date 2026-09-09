@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -15,7 +15,7 @@ func Classify(err error) (Outcome, runtelemetry.ErrorClass) {
 	switch {
 	case err == nil:
 		return OutcomeCompleted, runtelemetry.ErrClassNone
-	case errors.Is(err, cli.ErrTotalTimeout), errors.Is(err, cli.ErrNoOutputTimeout):
+	case errors.Is(err, clierr.ErrTotalTimeout), errors.Is(err, clierr.ErrNoOutputTimeout):
 		return OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded
 	case errors.Is(err, context.DeadlineExceeded):
 		return OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded

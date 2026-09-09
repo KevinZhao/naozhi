@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 )
 
 // shimWriter wraps shim protocol write commands as an io.Writer. Thread-safe:
@@ -34,7 +36,7 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 	if w.buf.Len() == 0 && len(data) > 0 && data[len(data)-1] == '\n' &&
 		bytes.IndexByte(data[:len(data)-1], '\n') == -1 {
 		if len(data)-1 > maxStdinLineBytes {
-			return 0, fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(data)-1, maxStdinLineBytes)
+			return 0, fmt.Errorf("%w: %d bytes > %d", clierr.ErrMessageTooLarge, len(data)-1, maxStdinLineBytes)
 		}
 		// shimSendLine quotes the bytes directly into a pooled buffer (no string alloc).
 		if err := w.p.shimSendLine(data[:len(data)-1]); err != nil {
@@ -61,7 +63,7 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 				// Discard the whole buffer: the oversized line and trailing partial cannot
 				// form a valid frame, and the next Write would stitch onto a broken prefix.
 				w.buf.Reset()
-				return 0, fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, lineLen, maxStdinLineBytes)
+				return 0, fmt.Errorf("%w: %d bytes > %d", clierr.ErrMessageTooLarge, lineLen, maxStdinLineBytes)
 			}
 			off += nl + 1
 		}

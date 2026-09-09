@@ -9,19 +9,28 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 )
+
+// slotUUIDFallbackSeq is the monotonic counter newSlotUUID's crypto/rand
+// fallback reads. It used to be shared with the event-log ring's minting path;
+// that sharing was incidental (the two hash prefixes already keep the outputs
+// disjoint) and the ring now lives in internal/eventlog/ring, so each side keeps
+// its own counter. Uniqueness is only ever needed within one fallback path.
+var slotUUIDFallbackSeq atomic.Int64
 
 // newSlotUUID returns a 128-bit random hex string for the Claude CLI's uuid
 // field (an opaque round-tripped blob; RFC4122 formatting is not needed). On
-// a crypto/rand failure it falls back to a hashed counter (uuidFallbackSeq,
-// shared with newEventUUID) rather than an all-zero UUID, which would break
-// slot FIFO matching.
+// a crypto/rand failure it falls back to a hashed counter rather than an
+// all-zero UUID, which would break slot FIFO matching.
 func newSlotUUID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		slog.Warn("crypto/rand.Read failed for slot UUID; using fallback identity", "err", err)
-		sum := sha256.Sum256([]byte("naozhi-slot-uuid-fallback-" + strconv.FormatInt(int64(uuidFallbackSeq.Add(1)), 10)))
+		sum := sha256.Sum256([]byte("naozhi-slot-uuid-fallback-" + strconv.FormatInt(int64(slotUUIDFallbackSeq.Add(1)), 10)))
 		copy(b[:], sum[:])
 	}
 	return hex.EncodeToString(b[:])
@@ -44,7 +53,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 
 	// Fast reject: dead process won't produce a result.
 	if !p.Alive() {
-		return nil, ErrProcessExited
+		return nil, clierr.ErrProcessExited
 	}
 
 	// Shrink oversized inline images once before the write (mirrors Send) so
@@ -72,7 +81,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 	if len(p.pendingSlots) >= maxPendingSlots {
 		p.slotsMu.Unlock()
 		p.shimWMu.Unlock()
-		return nil, ErrTooManyPending
+		return nil, clierr.ErrTooManyPending
 	}
 	p.pendingSlots = append(p.pendingSlots, slot)
 	p.slotsMu.Unlock()
@@ -85,17 +94,17 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 
 	if writeErr != nil {
 		// CLI never saw this message; FIFO is intact because nothing was
-		// written. Surface the canonical ErrProcessExited if the process died
+		// written. Surface the canonical clierr.ErrProcessExited if the process died
 		// between the Alive() check and the write.
 		p.removeSlotByID(slot.id)
 		if !p.Alive() {
-			return nil, ErrProcessExited
+			return nil, clierr.ErrProcessExited
 		}
 		return nil, fmt.Errorf("passthrough write: %w", writeErr)
 	}
 
 	// Mirror Send's user-entry Append so a later subscribe can re-render the
-	// bubble (readLoop filters the CLI's replay echo out of EventLog). After
+	// bubble (readLoop filters the CLI's replay echo out of ring.EventLog). After
 	// the successful write so a rejected write leaves no ghost entry.
 	p.eventLog.Append(buildUserEntry(text, images))
 
@@ -127,7 +136,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 		slot.canceled.Store(true)
 		p.slotsMu.Unlock()
 		slog.Warn("passthrough: slot orphaned", "slot_id", slot.id, "elapsed", time.Since(slot.enqueueAt))
-		return nil, ErrOrphanedSlot
+		return nil, clierr.ErrOrphanedSlot
 	}
 }
 
@@ -155,7 +164,7 @@ func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []A
 		line = line[:n-1]
 	}
 	if len(line) > maxStdinLineBytes {
-		return fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(line), maxStdinLineBytes)
+		return fmt.Errorf("%w: %d bytes > %d", clierr.ErrMessageTooLarge, len(line), maxStdinLineBytes)
 	}
 	// string(line) copies, so the pooled buffer is free to reuse after Put.
 	return p.shimSendLocked(shimClientMsg{Type: "write", Line: string(line)})
@@ -451,7 +460,7 @@ func (p *Process) reapAbortedPreempted() []*sendSlot {
 	return victims
 }
 
-// fireAbortErrors delivers ErrAbortedByUrgent to each aborted slot's caller.
+// fireAbortErrors delivers clierr.ErrAbortedByUrgent to each aborted slot's caller.
 // isCanceled() (atomic) is required: slotsMu is already released here.
 func fireAbortErrors(victims []*sendSlot) {
 	for _, s := range victims {
@@ -459,7 +468,7 @@ func fireAbortErrors(victims []*sendSlot) {
 			continue
 		}
 		select {
-		case s.errCh <- ErrAbortedByUrgent:
+		case s.errCh <- clierr.ErrAbortedByUrgent:
 		default:
 		}
 	}
