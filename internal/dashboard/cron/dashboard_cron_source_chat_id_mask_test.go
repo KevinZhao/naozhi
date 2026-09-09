@@ -38,7 +38,7 @@ func TestHandleList_SourceChatIDMasked(t *testing.T) {
 		t.Fatalf("AddJob: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
 	w := httptest.NewRecorder()
 	h.HandleList(w, req)

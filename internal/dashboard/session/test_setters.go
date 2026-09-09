@@ -12,18 +12,18 @@ import (
 )
 
 // SetClaudeDirForTest swaps the runtime claudeDir.
-func (h *Handlers) SetClaudeDirForTest(dir string) { h.claudeDir = dir }
+func (h *Handlers) SetClaudeDirForTest(dir string) { h.deps.ClaudeDir = dir }
 
 // SetSysWorkDirForTest swaps the sysWorkDir.
-func (h *Handlers) SetSysWorkDirForTest(dir string) { h.sysWorkDir = dir }
+func (h *Handlers) SetSysWorkDirForTest(dir string) { h.deps.SysWorkDir = dir }
 
 // SetAllowedRootForTest swaps the allowedRoot the workspace validator gates
 // against. internal/server's route-level tests point it at a temp dir so
 // validateWorkspace admits a fixture workspace.
-func (h *Handlers) SetAllowedRootForTest(root string) { h.allowedRoot = root }
+func (h *Handlers) SetAllowedRootForTest(root string) { h.deps.AllowedRoot = root }
 
 // SetCronSessionsForTest swaps the cronSessions view.
-func (h *Handlers) SetCronSessionsForTest(c CronView) { h.cronSessions = c }
+func (h *Handlers) SetCronSessionsForTest(c CronView) { h.deps.CronSessions = c }
 
 // ResetHistoryCacheForTest clears the in-memory history cache so the next
 // call to loadHistorySessions / historySessions goes back to disk.
@@ -62,11 +62,11 @@ func (h *Handlers) SetCachedHistoryForTest(slice []discovery.RecentSession, t ti
 
 // RetiredStoreForTest exposes the retiredStore field for tests that need
 // to assert RecordRetired/Prune behaviour.
-func (h *Handlers) RetiredStoreForTest() RetiredReader { return h.retiredStore }
+func (h *Handlers) RetiredStoreForTest() RetiredReader { return h.deps.RetiredStore }
 
 // SetRetiredStoreForTest swaps the retiredStore.
 func (h *Handlers) SetRetiredStoreForTest(s RetiredReader) {
-	h.retiredStore = s
+	h.deps.RetiredStore = s
 }
 
 // SetHistoryCacheTimeForTest assigns historyCacheTime under the cache mutex
@@ -97,4 +97,4 @@ func (h *Handlers) HistoryCacheTimeForTest() time.Time {
 // ProjectSourceForTest exposes projectMgr so the wiring side can assert that an
 // unconfigured project manager stays a NIL interface rather than an interface
 // wrapping a nil pointer (#2561; see TestSessionHandlers_NilDepsStayNilInterfaces).
-func (h *Handlers) ProjectSourceForTest() ProjectSource { return h.projectMgr }
+func (h *Handlers) ProjectSourceForTest() ProjectSource { return h.deps.ProjectMgr }

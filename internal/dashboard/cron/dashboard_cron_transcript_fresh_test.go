@@ -84,10 +84,7 @@ func fixtureRunWithJSONLFresh(t *testing.T, fresh bool, jsonlLines []string) (h 
 		t.Fatalf("write jsonl: %v", err)
 	}
 
-	h = &Handlers{
-		scheduler: sched,
-		claudeDir: claudeDir,
-	}
+	h = &Handlers{deps: Deps{Scheduler: sched, ClaudeDir: claudeDir}}
 	return h, jobID, runID, claudeDir
 }
 
@@ -228,7 +225,7 @@ func TestTranscript_FreshFalse_BoundaryEndExclusive(t *testing.T) {
 		t.Fatalf("write jsonl: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched, claudeDir: claudeDir}
+	h := &Handlers{deps: Deps{Scheduler: sched, ClaudeDir: claudeDir}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/transcript?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
@@ -327,7 +324,7 @@ func TestTranscript_FreshTrue_BoundaryEndInclusive(t *testing.T) {
 		t.Fatalf("write jsonl: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched, claudeDir: claudeDir}
+	h := &Handlers{deps: Deps{Scheduler: sched, ClaudeDir: claudeDir}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/transcript?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()

@@ -21,9 +21,7 @@ func TestHandleList_429ResponseShape(t *testing.T) {
 	t.Parallel()
 
 	// Burst=1 so the second call is guaranteed to 429.
-	h := &Handlers{
-		listLimiter: newPerIPBurstNLimiter(1),
-	}
+	h := &Handlers{deps: Deps{RateLimits: RateLimits{List: newPerIPBurstNLimiter(1)}}}
 
 	doReq := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)

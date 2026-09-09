@@ -15,11 +15,11 @@ import (
 // keeps the full prompt for out-of-tree consumers (#494).
 func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	// Gate per-IP before scheduler/FS work (stolen-token enumeration).
-	if h.listLimiter != nil && !h.listLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.List != nil && !h.deps.RateLimits.List.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron list rate limit exceeded"})
 		return
 	}
-	if h.scheduler == nil {
+	if h.deps.Scheduler == nil {
 		// Explicit empty slice (not nil) so json.Marshal emits `{"jobs":[]}`.
 		httputil.WriteJSON(w, cronListResp{Jobs: []cronJobView{}})
 		return
@@ -27,10 +27,10 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 
 	compact := r.URL.Query().Get("compact") == "1"
 
-	jobs := h.scheduler.ListAllJobsWithNextRun()
+	jobs := h.deps.Scheduler.ListAllJobsWithNextRun()
 	// Capture once; each job would otherwise pay time.Now() + an atomic load.
 	now := time.Now()
-	startedAt := h.scheduler.StartedAt()
+	startedAt := h.deps.Scheduler.StartedAt()
 
 	// Pre-fetch RecentRuns with bounded parallelism so the 1 Hz poll does not
 	// serialise on the per-job recentCacheEntry.mu chain (#525).
@@ -96,7 +96,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// CurrentRun 只在 job 正在执行时返回；空 stats 也省略以减少线上 noise。
-		if cur, ok := h.scheduler.CurrentRun(j.ID); ok {
+		if cur, ok := h.deps.Scheduler.CurrentRun(j.ID); ok {
 			v.CurrentRun = &cronCurrentRunView{
 				RunID:     cur.RunID,
 				StartedAt: cur.StartedAt.UnixMilli(),
@@ -131,7 +131,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 		views = append(views, v)
 	}
 
-	loc := h.scheduler.Location()
+	loc := h.deps.Scheduler.Location()
 	// Reuse `now` so the tz label and missed-schedule check share one instant.
 	name, offset := now.In(loc).Zone()
 	locName := loc.String()
@@ -144,7 +144,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 		RecentRunsCap: recentRunsPerJob,
 		TimezoneAbbr:  name,
 	}
-	if def := h.scheduler.NotifyDefault(); def.IsSet() {
+	if def := h.deps.Scheduler.NotifyDefault(); def.IsSet() {
 		// The chat_id is masked: in a multi-operator deployment it is a private
 		// notification target and must not leak verbatim to every user (#789).
 		resp.NotifyDefault = &cronNotifyDefaultView{
@@ -159,7 +159,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 // next N run times. count defaults to 1 and is clamped to [1, 10].
 func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 	// Per-IP rate limit: parser + up to 10 next-run computations per call.
-	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
@@ -197,8 +197,8 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// PreviewScheduleN / Location are nil-receiver-safe (UTC before wiring).
-	runs, err := h.scheduler.PreviewScheduleN(schedule, count)
-	loc := h.scheduler.Location()
+	runs, err := h.deps.Scheduler.PreviewScheduleN(schedule, count)
+	loc := h.deps.Scheduler.Location()
 	tzName := loc.String()
 	tzLabel := ""
 	if n, offset := time.Now().In(loc).Zone(); n != "" {

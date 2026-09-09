@@ -31,7 +31,7 @@ func TestHandleRunSnapshot_ServesManifest(t *testing.T) {
 	jobID, runID := strings.Repeat("a", 16), strings.Repeat("b", 16)
 	sched.WriteSandboxSnapshotForTest(jobID, runID, "the cloud prompt", "haiku", "phase2", []string{"github_token"})
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/snapshot?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
@@ -69,7 +69,7 @@ func TestHandleRunSnapshot_MissingUnavailable(t *testing.T) {
 	tmp := t.TempDir()
 	sched := snapshotTestScheduler(t, filepath.Join(tmp, "cron_jobs.json"))
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/cron/runs/"+strings.Repeat("b", 16)+"/snapshot?job_id="+strings.Repeat("a", 16), nil)
 	req.SetPathValue("run_id", strings.Repeat("b", 16))
@@ -98,7 +98,7 @@ func TestHandleRunSnapshot_SecretRefs_Sanitized(t *testing.T) {
 	taintedRef := "github\u202etoken"
 	sched.WriteSandboxSnapshotForTest(jobID, runID, "p", "haiku", "phase2", []string{taintedRef})
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/snapshot?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
@@ -128,7 +128,7 @@ func TestHandleRunSnapshot_SecretRefs_Sanitized(t *testing.T) {
 func TestHandleRunSnapshot_RejectsBadIDs(t *testing.T) {
 	t.Parallel()
 	sched := snapshotTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/x/snapshot?job_id="+strings.Repeat("a", 16), nil)
 	req.SetPathValue("run_id", "../../etc")
@@ -172,7 +172,7 @@ func TestHandleRunSnapshot_CrossOwnershipRejected(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/cron/runs/"+runID+"/snapshot?job_id="+queryJobID, nil)
 	req.SetPathValue("run_id", runID)
@@ -226,7 +226,7 @@ func TestHandleRunSnapshot_PromptHashSanitized(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	h := &Handlers{scheduler: sched}
+	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/cron/runs/"+runID+"/snapshot?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)

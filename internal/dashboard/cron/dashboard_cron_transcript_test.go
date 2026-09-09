@@ -91,10 +91,7 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *Handlers, jobID,
 		t.Fatalf("write jsonl: %v", err)
 	}
 
-	h = &Handlers{
-		scheduler: sched,
-		claudeDir: claudeDir,
-	}
+	h = &Handlers{deps: Deps{Scheduler: sched, ClaudeDir: claudeDir}}
 	return h, jobID, runID, claudeDir
 }
 
@@ -253,7 +250,7 @@ func TestTranscript_RejectsCrossJobID(t *testing.T) {
 
 func TestTranscript_RejectsNonHexIDs(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}
+	h := &Handlers{deps: Deps{Scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}}
 	cases := []struct{ runID, jobID string }{
 		{"GGGG", "aaaaaaaaaaaaaaaa"},                   // invalid run_id
 		{"aaaaaaaaaaaaaaaa", "GGGG"},                   // invalid job_id
@@ -275,7 +272,7 @@ func TestTranscript_RejectsNonHexIDs(t *testing.T) {
 // envelope.
 func TestParseRunPathParams_JSONErrorContentType(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}
+	h := &Handlers{deps: Deps{Scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}}
 	cases := []struct {
 		name  string
 		runID string
@@ -537,7 +534,7 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 
 	// Handler points at the symlinked claudeDir — the prefix check must
 	// resolve both sides identically before comparing.
-	h := &Handlers{scheduler: sched, claudeDir: link}
+	h := &Handlers{deps: Deps{Scheduler: sched, ClaudeDir: link}}
 	w := callTranscript(h, jobID, runID)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())

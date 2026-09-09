@@ -66,8 +66,8 @@ type NodeCacheReader interface {
 // can say which one.
 func (h *Handlers) DepsForTest() map[string]any {
 	return map[string]any{
-		"dashproject.ProjectMgr": h.projectMgr,
-		"dashproject.Router":     h.router,
-		"dashproject.Resolver":   h.resolver,
+		"dashproject.ProjectMgr": h.deps.ProjectMgr,
+		"dashproject.Router":     h.deps.Router,
+		"dashproject.Resolver":   h.deps.Resolver,
 	}
 }
