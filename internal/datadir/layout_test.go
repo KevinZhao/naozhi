@@ -7,18 +7,26 @@ import (
 	"testing"
 )
 
-func TestPathConstructors(t *testing.T) {
-	root := "/data/naozhi"
+func TestLayoutSiblings(t *testing.T) {
+	lay := ForStore("/data/naozhi/sessions.json")
 	cases := []struct {
 		name string
 		got  string
 		want string
 	}{
-		{"sessions", SessionsPath(root), "/data/naozhi/sessions.json"},
-		{"events", EventsRoot(root), "/data/naozhi/events"},
-		{"cron_jobs", CronJobsPath(root), "/data/naozhi/cron_jobs.json"},
-		{"cron_runs", CronRunsRoot(root), "/data/naozhi/runs"},
-		{"cli_debug", CLIDebugRoot(root), "/data/naozhi/cli-debug"},
+		{"root", lay.Root(), "/data/naozhi"},
+		{"events", lay.EventsRoot(), "/data/naozhi/events"},
+		{"cost", lay.CostRoot(), "/data/naozhi/cost"},
+		{"session_runs", lay.SessionRunsRoot(), "/data/naozhi/session-runs"},
+		{"session_ids", lay.SessionIDsPath(), "/data/naozhi/session-ids.json"},
+		{"workspace_overrides", lay.WorkspaceOverridesPath(), "/data/naozhi/workspace-overrides.json"},
+		{"cli_debug", lay.CLIDebugRoot(), "/data/naozhi/cli-debug"},
+		{"access_profile_secrets", lay.AccessProfileSecretsRoot(), "/data/naozhi/access-profile-secrets"},
+		{"sys_sessions", lay.SysSessionsRoot(), "/data/naozhi/sys-sessions"},
+		{"naozhi_settings", lay.NaozhiSettingsPath(), "/data/naozhi/naozhi-settings.json"},
+		{"ui_settings", lay.UISettingsPath(), "/data/naozhi/ui-settings.json"},
+		{"cron_runs", lay.RunsRoot(), "/data/naozhi/runs"},
+		{"join", lay.Join("a", "b"), "/data/naozhi/a/b"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -27,9 +35,41 @@ func TestPathConstructors(t *testing.T) {
 	}
 }
 
-func TestPathConstructors_EmptyRoot(t *testing.T) {
-	if SessionsPath("") != "" || EventsRoot("") != "" || CronJobsPath("") != "" || CronRunsRoot("") != "" || CLIDebugRoot("") != "" {
-		t.Error("empty data root must yield empty paths")
+// TestLayoutNeverRebuildsTheStorePath is why the previous API had zero callers:
+// SessionsPath(root) rebuilt "<root>/sessions.json", so an operator who
+// configured any other filename would have had that configuration silently
+// discarded. Layout derives siblings only — there is no method returning the
+// store file, because the caller already has it.
+func TestLayoutNeverRebuildsTheStorePath(t *testing.T) {
+	lay := ForStore("/data/naozhi/mystore.json")
+	if got := lay.Root(); got != "/data/naozhi" {
+		t.Fatalf("Root() = %q, want /data/naozhi", got)
+	}
+	for _, p := range []string{
+		lay.EventsRoot(), lay.CostRoot(), lay.SessionIDsPath(), lay.RunsRoot(),
+		lay.SessionRunsRoot(), lay.UISettingsPath(), lay.NaozhiSettingsPath(),
+	} {
+		if base := filepath.Base(p); base == "sessions.json" || base == "cron_jobs.json" {
+			t.Errorf("Layout produced a configured store filename (%q); it must only name siblings", p)
+		}
+	}
+}
+
+// TestZeroLayoutYieldsEmptyPaths: a Layout built from an unset store path must
+// not turn into writes at the filesystem root. Every open-coded site it replaced
+// degraded quietly the same way.
+func TestZeroLayoutYieldsEmptyPaths(t *testing.T) {
+	for name, lay := range map[string]Layout{"zero": {}, "for_empty_store": ForStore(""), "from_empty_root": FromRoot("")} {
+		for _, p := range []string{
+			lay.Root(), lay.Join("x"), lay.EventsRoot(), lay.CostRoot(), lay.RunsRoot(),
+			lay.SessionIDsPath(), lay.WorkspaceOverridesPath(), lay.SessionRunsRoot(),
+			lay.CLIDebugRoot(), lay.AccessProfileSecretsRoot(), lay.SysSessionsRoot(),
+			lay.NaozhiSettingsPath(), lay.UISettingsPath(),
+		} {
+			if p != "" {
+				t.Errorf("%s: got %q, want empty", name, p)
+			}
+		}
 	}
 }
 

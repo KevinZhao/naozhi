@@ -11,6 +11,7 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -72,7 +73,7 @@ func backfillLedger(p backfillPaths, dryRun bool, out io.Writer) (backfillReport
 	if !p.Cost.IsEnabled() {
 		return rep, fmt.Errorf("cost.enabled is false")
 	}
-	ledgerDir := filepath.Join(filepath.Dir(p.SessionStorePath), "cost")
+	ledgerDir := datadir.ForStore(p.SessionStorePath).CostRoot()
 	store := costledger.NewStore(ledgerDir, costledger.Options{RetentionDays: p.Cost.RetentionDays, RollupDays: p.Cost.RollupDays})
 	if !store.Enabled() {
 		return rep, fmt.Errorf("open ledger at %s", ledgerDir)
@@ -112,7 +113,7 @@ func backfillLedger(p backfillPaths, dryRun bool, out io.Writer) (backfillReport
 		}
 	}
 
-	sessionRunsDir := filepath.Join(filepath.Dir(p.SessionStorePath), "session-runs")
+	sessionRunsDir := datadir.ForStore(p.SessionStorePath).SessionRunsRoot()
 	walkJSON(sessionRunsDir, &rep, func(raw []byte) {
 		var r runhistory.SessionRun
 		if json.Unmarshal(raw, &r) != nil || r.RunID == "" {
@@ -130,7 +131,9 @@ func backfillLedger(p backfillPaths, dryRun bool, out io.Writer) (backfillReport
 	})
 
 	if p.CronStorePath != "" {
-		cronRunsDir := filepath.Join(filepath.Dir(p.CronStorePath), "runs")
+		// The CRON store's layout, not the session's — the two store paths are
+		// configured independently (#2641).
+		cronRunsDir := datadir.ForStore(p.CronStorePath).RunsRoot()
 		walkJSON(cronRunsDir, &rep, func(raw []byte) {
 			var r cron.CronRun
 			if json.Unmarshal(raw, &r) != nil || r.RunID == "" {

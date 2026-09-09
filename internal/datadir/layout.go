@@ -1,8 +1,40 @@
-// Package datadir centralises the on-disk layout policy for naozhi's data
-// root: path constructors name where each subsystem's state lives under
-// <dataDir>, and EnsureDir is the shared create-and-lock-down primitive
-// (0o700, symlink/non-directory guard, perm tightening) so every adopter
-// inherits the same hardening (#1175).
+// Package datadir owns the on-disk layout policy for naozhi's state: given the
+// directory a store file lives in, it is the only place that knows what the
+// siblings are called. R250-ARCH-13 (#1175), F1 (#2641).
+//
+// # Why the first version was never adopted
+//
+// This package shipped as six free functions of the shape `f(dataDir) string`,
+// four of which had zero callers — production AND test — while ~18 sites
+// open-coded `filepath.Dir(storePath) + "/xxx"` instead. The reason was not
+// neglect: the API asked a question the configuration cannot answer.
+//
+// There is no data root in the config. There are TWO independently configurable
+// store files with no same-directory constraint: `session.store_path` and
+// `cron.store_path`. So three of those functions were not merely unused, they
+// were unusable:
+//
+//   - SessionsPath(root) rebuilt `<root>/sessions.json`, discarding the operator's
+//     configured filename. Adopting it would have pointed the loader at a file
+//     that does not exist.
+//   - CronJobsPath(root) did the same for cron.
+//   - CronRunsRoot(root) assumed cron state sits under the SESSION root, while
+//     cron derives it from its own store path. Adopting it would have relocated
+//     run history for anyone who split the two.
+//
+// EnsureDir, UISettingsPath and CLIDebugRoot were adopted precisely because
+// they do not invert that relationship.
+//
+// # The shape that works
+//
+// Layout wraps ONE store directory, constructed either from a store file path
+// (ForStore) or from a root that the caller already holds (FromRoot). A single
+// Layout carrying both store paths was rejected: it would put RunsRoot() one
+// method call away from reading the session root, which is the exact miswiring
+// above. One Layout per store file makes that unrepresentable.
+//
+// A configured path is never rebuilt from a root — Layout only ever derives
+// SIBLINGS. The store file path itself stays whatever the operator wrote.
 package datadir
 
 import (
@@ -13,70 +45,127 @@ import (
 	"path/filepath"
 )
 
-// DirMode is the mode for every naozhi-owned data directory: 0o700 keeps
-// session state, event logs and cron JSON (script source, env values, output)
-// unreadable by other OS users on a shared host.
+// DirMode is the contractual mode for every naozhi-owned data directory.
+// 0o700 keeps session state, event logs, and cron job/run JSON (which embed
+// script source, env values, and output summaries) unreadable by other OS
+// users on a shared host.
 const DirMode fs.FileMode = 0o700
 
-// SessionsPath returns the session store file (<dataDir>/sessions.json);
-// sidecars live in the same directory.
-func SessionsPath(dataDir string) string {
-	if dataDir == "" {
-		return ""
-	}
-	return filepath.Join(dataDir, "sessions.json")
+// Layout is the directory one store file lives in, plus the names of its
+// siblings. Value type with one field: there is no nil Layout, no constructor
+// that can fail, and nothing to nil-guard at an injection site (the typed-nil
+// hazard of #377 / #2551 / #2561 cannot arise).
+//
+// The zero Layout has an empty root and every method returns "" — the same
+// degrade-quietly behaviour the open-coded sites had when the store path was
+// unset, and what EnsureDir already treats as a no-op.
+type Layout struct {
+	root string
 }
 
-// EventsRoot returns the per-session event-log directory (<dataDir>/events).
-func EventsRoot(dataDir string) string {
-	if dataDir == "" {
-		return ""
+// ForStore returns the Layout of the directory holding storePath. This is the
+// constructor for the two configured store files; the file's own name is the
+// caller's to keep.
+func ForStore(storePath string) Layout {
+	if storePath == "" {
+		return Layout{}
 	}
-	return filepath.Join(dataDir, "events")
+	return Layout{root: filepath.Dir(storePath)}
 }
 
-// UISettingsPath returns the dashboard UI-preferences file
-// (<dataDir>/ui-settings.json); one file for the whole single-user instance.
-func UISettingsPath(dataDir string) string {
-	if dataDir == "" {
-		return ""
-	}
-	return filepath.Join(dataDir, "ui-settings.json")
+// FromRoot returns the Layout of an already-known state root, for callers that
+// are handed the directory rather than a store file (ServerOptions.StateDir).
+func FromRoot(root string) Layout {
+	return Layout{root: root}
 }
 
-// CronJobsPath returns the cron job definitions file (<dataDir>/cron_jobs.json).
-func CronJobsPath(dataDir string) string {
-	if dataDir == "" {
+// Root is the directory itself.
+func (l Layout) Root() string { return l.root }
+
+// Join names a path inside the layout. Empty root yields "" rather than a
+// root-relative path, so an unset store path cannot turn into a write at the
+// filesystem root.
+func (l Layout) Join(parts ...string) string {
+	if l.root == "" {
 		return ""
 	}
-	return filepath.Join(dataDir, "cron_jobs.json")
+	return filepath.Join(append([]string{l.root}, parts...)...)
 }
 
-// CronRunsRoot returns the cron run-record root (<dataDir>/runs). Per-job
-// subdirectories live beneath it.
-func CronRunsRoot(dataDir string) string {
-	if dataDir == "" {
-		return ""
-	}
-	return filepath.Join(dataDir, "runs")
-}
+// Session-store siblings.
 
-// CLIDebugRoot returns the per-session CLI debug-log directory
-// (<dataDir>/cli-debug), populated only under NAOZHI_CLI_DEBUG. It holds raw
-// `claude --debug-file` output (prompt/tool internals), hence 0o700 EnsureDir.
-func CLIDebugRoot(dataDir string) string {
-	if dataDir == "" {
-		return ""
-	}
-	return filepath.Join(dataDir, "cli-debug")
-}
+// SessionIDsPath is the known-session-ID ledger (<root>/session-ids.json).
+func (l Layout) SessionIDsPath() string { return l.Join("session-ids.json") }
 
-// EnsureDir creates path (and parents) at DirMode and tightens it: Lstat
-// rejects a symlink or non-directory leaf (a planted <dataDir>/X → /etc
-// symlink would redirect every write outside the data root; MkdirAll does not
-// error on a symlink-to-dir) — this guard is the security boundary. A looser
-// pre-existing mode is chmod'ed to 0o700; chmod failure is logged and
-// tolerated (read-only / non-owned bind mounts). Empty path is a no-op.
+// WorkspaceOverridesPath is the per-session workspace override file.
+func (l Layout) WorkspaceOverridesPath() string { return l.Join("workspace-overrides.json") }
+
+// EventsRoot is the per-session event-log directory (<root>/events).
+func (l Layout) EventsRoot() string { return l.Join("events") }
+
+// CostRoot is the cost-ledger directory (<root>/cost).
+func (l Layout) CostRoot() string { return l.Join("cost") }
+
+// SessionRunsRoot is the per-session run-record directory
+// (<root>/session-runs). Sole definition of that name: runhistory.NewStore
+// takes this path rather than appending the segment itself, so the cost
+// reporter and the store cannot disagree about where records live.
+func (l Layout) SessionRunsRoot() string { return l.Join("session-runs") }
+
+// CLIDebugRoot is the per-session CLI debug-log directory (<root>/cli-debug).
+// Populated only when the operator opts in via NAOZHI_CLI_DEBUG; it holds raw
+// `claude --debug-file` output (HTTP request/response + retry status codes),
+// so a leaked file would expose prompt/tool internals — hence the same 0o700
+// EnsureDir hardening as the other state roots.
+func (l Layout) CLIDebugRoot() string { return l.Join("cli-debug") }
+
+// AccessProfileSecretsRoot holds per-profile secret material.
+func (l Layout) AccessProfileSecretsRoot() string { return l.Join("access-profile-secrets") }
+
+// SysSessionsRoot is the sysession runner's working directory
+// (<root>/sys-sessions). Every sysession consumer MUST agree on it: it is the
+// history panel's SkipWorkspace filter target, so a JSONL landing anywhere else
+// leaks into the history list.
+func (l Layout) SysSessionsRoot() string { return l.Join("sys-sessions") }
+
+// NaozhiSettingsPath is the generated Claude settings file naozhi passes via
+// --settings (<root>/naozhi-settings.json).
+func (l Layout) NaozhiSettingsPath() string { return l.Join("naozhi-settings.json") }
+
+// UISettingsPath is the dashboard UI-preferences file (<root>/ui-settings.json).
+// Operator-chosen presentation state (today: theme) that used to live only in
+// browser localStorage; persisting it server-side lets the choice survive a
+// browser/device change or a cache clear. Single-user model: one file per
+// instance (docs note in internal/uiprefs).
+func (l Layout) UISettingsPath() string { return l.Join("ui-settings.json") }
+
+// Cron-store siblings.
+
+// RunsRoot is the cron run-record root (<root>/runs), with per-job
+// subdirectories beneath it. Derived from the CRON store's layout — callers
+// must build this Layout from cron.store_path, never from the session's.
+func (l Layout) RunsRoot() string { return l.Join("runs") }
+
+// EnsureDir creates path (and parents) at DirMode and tightens it down to a
+// safe state, returning an error only when path cannot be made usable as a
+// private directory.
+//
+// Steps:
+//  1. MkdirAll(path, 0o700) — fails hard if the directory can't be created.
+//  2. Lstat the leaf: reject a symlink or non-directory (a planted
+//     <dataDir>/X → /etc symlink would otherwise silently redirect every
+//     subsequent write outside the data root; MkdirAll does not error on a
+//     symlink-to-dir). This is the authoritative redirect guard.
+//  3. Chmod the leaf to 0o700 when it carries looser perms. MkdirAll only
+//     applies perm to directories it actually creates, so a pre-existing
+//     0o755 tree keeps its mode without this step. Chmod failure is logged
+//     and tolerated (containers with read-only / non-owned bind mounts can't
+//     chmod) — the Lstat redirect guard, not the mode, is the security
+//     boundary.
+//
+// Empty path is a no-op (nil) so callers that derive the path from an
+// unset data root degrade quietly, matching the prior os.MkdirAll-guarded
+// call sites.
 func EnsureDir(path string) error {
 	if path == "" {
 		return nil

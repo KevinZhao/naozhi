@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -161,7 +162,10 @@ func main() {
 		slog.Error("create workspace dir", "path", workspace, "err", err)
 		os.Exit(1)
 	}
-	warnIfStateDirLarge(filepath.Dir(storePath))
+	// One Layout for the session store's directory; every sibling path below
+	// comes from it instead of being re-derived (#2641).
+	sessionLayout := datadir.ForStore(storePath)
+	warnIfStateDirLarge(sessionLayout.Root())
 
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
@@ -169,10 +173,7 @@ func main() {
 	}
 	// Event log sits next to sessions.json; empty StorePath (test harnesses)
 	// disables the persister via the same empty-string guard in NewRouter.
-	eventLogDir := ""
-	if storePath != "" {
-		eventLogDir = filepath.Join(filepath.Dir(storePath), "events")
-	}
+	eventLogDir := sessionLayout.EventsRoot()
 	// Session-layer view of config.AccessProfiles (session must not import
 	// config). Nil when none configured — sessions run on the global baseline.
 	accessProfiles := buildAccessProfiles(cfg.AccessProfiles)
@@ -417,7 +418,7 @@ func main() {
 		WorkspaceID:   cfg.Workspace.ID,
 		WorkspaceName: cfg.Workspace.Name,
 		AllowedRoot:   workspace,
-		StateDir:      filepath.Dir(storePath),
+		StateDir:      sessionLayout.Root(),
 		Config: server.ConfigOptions{
 			// Path enables the access-profile create endpoint; absolute so the
 			// write target survives cwd changes. Secrets dir holds *_FILE
@@ -425,7 +426,7 @@ func main() {
 			Path:                    absConfigPath(*configPath),
 			SHA256:                  cfg.Fingerprint.SHA256,
 			LoadedAt:                cfg.Fingerprint.LoadedAt,
-			AccessProfileSecretsDir: filepath.Join(filepath.Dir(storePath), "access-profile-secrets"),
+			AccessProfileSecretsDir: sessionLayout.AccessProfileSecretsRoot(),
 		},
 		NoOutputTimeout: noOutputTimeout,
 		TotalTimeout:    totalTimeout,

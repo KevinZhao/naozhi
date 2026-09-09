@@ -38,6 +38,11 @@ func resolveCLIDebugDirWith(eventLogDir string, getenv func(string) string) stri
 			"env", cliDebugEnvVar)
 		return ""
 	}
+	// The root is the PARENT of the configured event-log dir, not the session
+	// store's directory: cli-debug is gated on the event log being enabled and
+	// has always anchored to it, so an operator who moved event_log_dir keeps
+	// both together. That coupling is worth revisiting (#2544) but changing it
+	// here would relocate an existing operator's debug logs.
 	dataDir := filepath.Dir(eventLogDir)
 	// A relative --debug-file resolves against the subprocess CWD — the session
 	// workspace — so a relatively-configured EventLogDir would land the debug
@@ -52,7 +57,7 @@ func resolveCLIDebugDirWith(eventLogDir string, getenv func(string) string) stri
 			return ""
 		}
 	}
-	dir := datadir.CLIDebugRoot(dataDir)
+	dir := datadir.FromRoot(dataDir).CLIDebugRoot()
 	if err := datadir.EnsureDir(dir); err != nil {
 		slog.Warn("cli debug dir unusable; debug capture disabled for this run",
 			"dir", dir, "err", err)
