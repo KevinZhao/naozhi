@@ -82,6 +82,14 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 		s.mountRoutes(hs.scratchH.Routes())
 	}
 	s.mux.HandleFunc("POST /api/auth/logout", s.apiChain()(s.auth.HandleLogout))
+	// Health probes are server-owned (no sub-package) and unauthenticated at
+	// the route level: /health gates its stats section on auth internally,
+	// /livez is a no-deps liveness probe, /readyz gates on minimal wiring
+	// (#609). Registered here rather than in Start since #2633 — nothing
+	// they read is Start-time state any more.
+	s.mux.HandleFunc("GET /health", s.healthH.handleHealth)
+	s.mux.HandleFunc("GET /livez", s.healthH.handleLivez)
+	s.mux.HandleFunc("GET /readyz", s.healthH.handleReadyz)
 	// pprof / expvar are auth-gated + loopback-only AND require debug_mode so a
 	// leaked dashboard token cannot enumerate goroutine stacks or counters.
 	// Runbook: docs/ops/pprof.md.

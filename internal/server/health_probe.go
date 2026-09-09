@@ -69,11 +69,14 @@ func wsDroppedHealthProbe(hubDropped func() int64) HealthProbe {
 }
 
 // dispatchHealthProbe returns a HealthProbe that populates the dispatch
-// sub-object from the injected dispatcherMetrics closure. Last-reply fields
-// are emitted only once a reply has succeeded; nil closure omits the object.
+// sub-object from the dispatcherMetrics closure. Last-reply fields are
+// emitted only once a reply has succeeded. The closure is a constructor
+// argument since #2633 (the dispatcher is built before HealthHandler), so
+// there is no "not wired yet" state to guard — a nil closure is a broken
+// fixture and panics here rather than silently omitting the object.
 func dispatchHealthProbe(metrics func() (int64, int64, int64, time.Time)) HealthProbe {
 	return func(auth *healthAuthSection) {
-		if auth == nil || metrics == nil {
+		if auth == nil {
 			return
 		}
 		msgs, replyErrs, sendFails, lastReply := metrics()

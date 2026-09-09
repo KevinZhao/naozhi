@@ -61,7 +61,11 @@ func TestHealthProbe_TypeIsClosure(t *testing.T) {
 // non-nil pointer unconditionally would flip the omitempty section into
 // the JSON output and break the byte-identical wire contract.
 func TestSubsystemProbes_FanOutNilRouterIsNoOp(t *testing.T) {
-	h := &HealthHandler{} // router nil
+	// router nil. dispatcherMetrics is a constructor argument since #2633 and
+	// carries no nil guard, so the fixture supplies a zero-value closure.
+	h := &HealthHandler{
+		dispatcherMetrics: func() (int64, int64, int64, time.Time) { return 0, 0, 0, time.Time{} },
+	}
 	probes := h.subsystemProbes()
 	if len(probes) == 0 {
 		t.Fatal("subsystemProbes must register at least one probe")
@@ -76,14 +80,16 @@ func TestSubsystemProbes_FanOutNilRouterIsNoOp(t *testing.T) {
 	if auth.AttachmentTracker != nil {
 		t.Errorf("AttachmentTracker must stay nil under nil router, got %+v", auth.AttachmentTracker)
 	}
-	// WSDropped / Dispatch are injected-closure probes — a HealthHandler
-	// without a wired hub / dispatcher must leave both nil so omitempty
-	// keeps them out of the JSON (the prior inline `if h.x != nil` guard).
+	// WSDropped is an injected-closure probe — a HealthHandler without a
+	// wired hub must leave it nil so omitempty keeps it out of the JSON (the
+	// prior inline `if h.x != nil` guard).
 	if auth.WSDropped != nil {
 		t.Errorf("WSDropped must stay nil with no hubDropped closure, got %+v", auth.WSDropped)
 	}
-	if auth.Dispatch != nil {
-		t.Errorf("Dispatch must stay nil with no dispatcherMetrics closure, got %+v", auth.Dispatch)
+	// Dispatch is always present: the dispatcher exists before HealthHandler
+	// (#2633), so the probe has no "not wired yet" branch to take.
+	if auth.Dispatch == nil {
+		t.Error("Dispatch must be populated — dispatcherMetrics is a constructor argument, not a Start-time binding")
 	}
 }
 
