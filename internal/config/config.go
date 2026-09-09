@@ -703,6 +703,11 @@ func Load(path string) (*Config, error) {
 		slog.Debug("config yaml parse failed", "err", err)
 		return nil, fmt.Errorf("parse config: yaml syntax error (check naozhi logs for details)")
 	}
+	// The decode above ignores unknown keys, so report them before defaults are
+	// applied — a misspelled key is operator input that had no effect, same as a
+	// deprecated field or a denied flag (unknown_keys.go, #2639). Diagnostic
+	// only: cfg is already fully decoded and is not touched here.
+	reportUnknownKeys(expanded)
 
 	applyDefaults(&cfg)
 	if err := parseDurations(&cfg); err != nil {
