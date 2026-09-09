@@ -17,11 +17,12 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // TestProcess is a mock processIface for use in tests outside the session package.
 type TestProcess struct {
-	EventLog       *cli.EventLog
+	EventLog       *ring.EventLog
 	StateVal       cli.ProcessState
 	AliveVal       bool
 	DeathReasonVal string
@@ -44,7 +45,7 @@ type TestProcess struct {
 // NewTestProcess creates a TestProcess with an event log and ready state.
 func NewTestProcess() *TestProcess {
 	return &TestProcess{
-		EventLog: cli.NewEventLog(0),
+		EventLog: ring.NewEventLog(0),
 		StateVal: cli.StateReady,
 		AliveVal: true,
 	}
@@ -111,7 +112,7 @@ func (p *TestProcess) InjectHistory(entries []clievent.EventEntry) {
 		p.EventLog.Append(e)
 	}
 }
-func (p *TestProcess) TurnAgents() []cli.SubagentInfo { return p.EventLog.TurnAgents() }
+func (p *TestProcess) TurnAgents() []ring.SubagentInfo { return p.EventLog.TurnAgents() }
 
 // Normalize-layer stubs (docs/rfc/multi-backend.md §8.8); zero values keep
 // SessionSnapshot assertions stable.

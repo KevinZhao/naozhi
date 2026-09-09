@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
@@ -157,8 +158,8 @@ func TestSend_OutcomeClassification(t *testing.T) {
 		err  error
 		want runhistory.Outcome
 	}{
-		{"timeout", cli.ErrTotalTimeout, runhistory.OutcomeTimeout},
-		{"no-output", cli.ErrNoOutputTimeout, runhistory.OutcomeTimeout},
+		{"timeout", clierr.ErrTotalTimeout, runhistory.OutcomeTimeout},
+		{"no-output", clierr.ErrNoOutputTimeout, runhistory.OutcomeTimeout},
 		{"canceled", context.Canceled, runhistory.OutcomeCanceled},
 		{"error", errors.New("boom"), runhistory.OutcomeError},
 	}

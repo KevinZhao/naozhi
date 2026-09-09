@@ -1,20 +1,8 @@
 package cli
 
 import (
-	"errors"
 	"io"
 )
-
-// ErrInterruptUnsupported is returned by Protocol.WriteInterrupt for protocols
-// that do not support mid-turn interrupt messages over stdin (e.g. ACP).
-// Callers should fall back to SIGINT-based Interrupt() or to Collect mode.
-var ErrInterruptUnsupported = errors.New("protocol does not support stdin interrupt")
-
-// ErrSetModelUnsupported is returned by Process.SetModel when the protocol does
-// not implement ModelSetter (codex). Router.SetSessionTuning treats it as "record
-// the override; it applies on the next spawn via --model", not a hard failure.
-// docs/rfc/dashboard-model-effort-control.md §4.4.
-var ErrSetModelUnsupported = errors.New("protocol does not support runtime model change")
 
 // ModelSetter is the OPTIONAL Protocol facet for runtime model switching,
 // surfaced via type assertion so the Protocol interface stays unchanged.
@@ -82,7 +70,7 @@ type Protocol interface {
 	// WriteInterrupt writes an in-band interrupt request to stdin. For
 	// stream-json this is the `control_request` that ends the active turn
 	// (killing in-flight tools) with a normal `result`; requestID is echoed in
-	// the control_response. Protocols without one return ErrInterruptUnsupported.
+	// the control_response. Protocols without one return clierr.ErrInterruptUnsupported.
 	WriteInterrupt(w io.Writer, requestID string) error
 
 	// ReadEvent parses a single NDJSON line from stdout into zero or more
@@ -142,7 +130,7 @@ type ProtocolCore interface {
 }
 
 // ProtocolPassthroughExt is the stream-json-specific surface of Protocol
-// (#668); ACP / codex degrade these to noop / fallback / ErrInterruptUnsupported.
+// (#668); ACP / codex degrade these to noop / fallback / clierr.ErrInterruptUnsupported.
 // The complement of ProtocolCore; a future refactor may shrink Protocol to
 // ProtocolCore and reach this facet via type assertion.
 type ProtocolPassthroughExt interface {
@@ -159,7 +147,7 @@ type ProtocolPassthroughExt interface {
 	SupportsReplay() bool
 
 	// WriteInterrupt writes an in-band interrupt request to stdin.
-	// Protocols without stdin-level interrupt return ErrInterruptUnsupported.
+	// Protocols without stdin-level interrupt return clierr.ErrInterruptUnsupported.
 	WriteInterrupt(w io.Writer, requestID string) error
 }
 
@@ -185,7 +173,7 @@ type Caps struct {
 	Priority bool
 	// SoftInterrupt is reserved. true if WriteInterrupt is a safe soft cancel
 	// once a session is established (ACP session/cancel); pre-handshake calls
-	// may still return ErrInterruptUnsupported (see ACPProtocol.WriteInterrupt).
+	// may still return clierr.ErrInterruptUnsupported (see ACPProtocol.WriteInterrupt).
 	SoftInterrupt bool
 	// StreamJSON is reserved. true if the wire format is stream-json (Claude);
 	// anticipates a backend whose Name() does not encode the wire shape.

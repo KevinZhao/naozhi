@@ -12,9 +12,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/api"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/history/merged"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 )
@@ -22,10 +22,10 @@ import (
 // ring：三分面全满足 → EventStore。LoadBefore 缺口由
 // cli/eventlog_loadbefore.go 的 thin adapter 补齐（Phase 1 预案）。
 var (
-	_ api.Appender   = (*cli.EventLog)(nil)
-	_ api.Subscriber = (*cli.EventLog)(nil)
-	_ api.Reader     = (*cli.EventLog)(nil)
-	_ api.EventStore = (*cli.EventLog)(nil)
+	_ api.Appender   = (*ring.EventLog)(nil)
+	_ api.Subscriber = (*ring.EventLog)(nil)
+	_ api.Reader     = (*ring.EventLog)(nil)
+	_ api.EventStore = (*ring.EventLog)(nil)
 )
 
 // durable / replay tier：只读分面。写侧走 persist.Entry（bridge 转换），
@@ -36,11 +36,11 @@ var (
 )
 
 // TestRingRoundTripViaEventStore 通过 api.EventStore 接口（而非具体
-// *cli.EventLog）验证 §4.1 的顺序契约：Append → SubscribeNew 收到通知 →
+// *ring.EventLog）验证 §4.1 的顺序契约：Append → SubscribeNew 收到通知 →
 // Reader.LoadBefore 读回 oldest→newest。覆盖空 / 单条 / 批量 / ring
 // 溢出四态。
 func TestRingRoundTripViaEventStore(t *testing.T) {
-	var store api.EventStore = cli.NewEventLog(4)
+	var store api.EventStore = ring.NewEventLog(4)
 
 	sub := store.SubscribeNew()
 	defer sub.Cancel()

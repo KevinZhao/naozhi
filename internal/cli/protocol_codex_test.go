@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 )
 
 // All wire shapes here were captured against codex-cli 0.141.0 on 2026-06-21;
@@ -200,10 +202,10 @@ func TestCodexProtocol_WriteInterrupt(t *testing.T) {
 	t.Parallel()
 	p := &CodexProtocol{}
 
-	// Pre-handshake: no thread → ErrInterruptUnsupported.
+	// Pre-handshake: no thread → clierr.ErrInterruptUnsupported.
 	var w0 bytes.Buffer
-	if err := p.WriteInterrupt(&w0, "req-1"); err != ErrInterruptUnsupported {
-		t.Errorf("pre-handshake WriteInterrupt err = %v; want ErrInterruptUnsupported", err)
+	if err := p.WriteInterrupt(&w0, "req-1"); err != clierr.ErrInterruptUnsupported {
+		t.Errorf("pre-handshake WriteInterrupt err = %v; want clierr.ErrInterruptUnsupported", err)
 	}
 
 	// Post-handshake: emits turn/interrupt request with threadId.

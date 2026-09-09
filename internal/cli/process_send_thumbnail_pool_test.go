@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // makeTestPNG renders a tiny solid-colour PNG so MakeThumbnail has real
@@ -107,7 +109,7 @@ func TestBuildUserEntry_SingleImageSerialPath(t *testing.T) {
 	if len(entry.Images) != 1 {
 		t.Fatalf("expected 1 thumbnail, got %d", len(entry.Images))
 	}
-	if !strings.HasPrefix(entry.Images[0], imageDataURIPrefix) {
+	if !strings.HasPrefix(entry.Images[0], ring.ImageDataURIPrefix) {
 		t.Errorf("thumbnail prefix unexpected: %q", entry.Images[0][:min(40, len(entry.Images[0]))])
 	}
 }

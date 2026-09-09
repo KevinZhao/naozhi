@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -349,7 +350,7 @@ func TestPassthrough_CtxCancel_TombstoneDoesNotBreakFIFO(t *testing.T) {
 }
 
 // TestPassthrough_CLIDeath_FansOutErrProcessExited verifies that when the
-// CLI exits, all pending slots get ErrProcessExited.
+// CLI exits, all pending slots get clierr.ErrProcessExited.
 func TestPassthrough_CLIDeath_FansOutErrProcessExited(t *testing.T) {
 	sh := newPassthroughShim(t)
 	defer sh.close()
@@ -378,8 +379,8 @@ func TestPassthrough_CLIDeath_FansOutErrProcessExited(t *testing.T) {
 	for i, ch := range []chan sendOut{outA, outB} {
 		select {
 		case o := <-ch:
-			if !errors.Is(o.err, ErrProcessExited) {
-				t.Errorf("slot %d err = %v, want ErrProcessExited", i, o.err)
+			if !errors.Is(o.err, clierr.ErrProcessExited) {
+				t.Errorf("slot %d err = %v, want clierr.ErrProcessExited", i, o.err)
 			}
 		case <-time.After(3 * time.Second):
 			t.Fatalf("slot %d did not return after CLI exit", i)
@@ -404,12 +405,12 @@ func TestPassthrough_Discard_FiresErrSessionReset(t *testing.T) {
 	}()
 	_ = sh.expectWrite(t, 2*time.Second)
 
-	sh.proc.DiscardPassthroughPending(ErrSessionReset)
+	sh.proc.DiscardPassthroughPending(clierr.ErrSessionReset)
 
 	select {
 	case o := <-out:
-		if !errors.Is(o.err, ErrSessionReset) {
-			t.Errorf("err = %v, want ErrSessionReset", o.err)
+		if !errors.Is(o.err, clierr.ErrSessionReset) {
+			t.Errorf("err = %v, want clierr.ErrSessionReset", o.err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("slot did not return after Discard")
@@ -433,10 +434,10 @@ func TestPassthrough_MaxPending_RejectsWhenFull(t *testing.T) {
 		_ = sh.expectWrite(t, 2*time.Second)
 	}
 
-	// One more — should fail immediately with ErrTooManyPending.
+	// One more — should fail immediately with clierr.ErrTooManyPending.
 	_, err := sh.proc.SendPassthrough(context.Background(), "overflow", nil, nil, "")
-	if !errors.Is(err, ErrTooManyPending) {
-		t.Errorf("overflow err = %v, want ErrTooManyPending", err)
+	if !errors.Is(err, clierr.ErrTooManyPending) {
+		t.Errorf("overflow err = %v, want clierr.ErrTooManyPending", err)
 	}
 
 	// Tear down: CLI death unblocks the filler sends.
@@ -464,7 +465,7 @@ func TestPassthrough_PriorityNowForwarded(t *testing.T) {
 }
 
 // TestPassthrough_ReplayEventNotLoggedAsUserTurn verifies that the CLI's
-// replay echo does NOT produce a *second* user entry in EventLog. The first
+// replay echo does NOT produce a *second* user entry in ring.EventLog. The first
 // entry is the one SendPassthrough writes itself (so session-switch reloads
 // can re-render the bubble — mirrors legacy Send); readLoop's replay filter
 // must drop the echo so the dashboard doesn't render the same message twice.
@@ -485,7 +486,7 @@ func TestPassthrough_ReplayEventNotLoggedAsUserTurn(t *testing.T) {
 	sh.emitResult("s1", "reply")
 	<-out
 
-	// EventLog should contain exactly one user entry (from SendPassthrough's
+	// ring.EventLog should contain exactly one user entry (from SendPassthrough's
 	// own Append) — the replay echo must not add a duplicate.
 	entries := sh.proc.EventEntries()
 	userCount := 0
@@ -505,7 +506,7 @@ func TestPassthrough_ReplayEventNotLoggedAsUserTurn(t *testing.T) {
 		}
 	}
 	if !foundResult {
-		t.Error("EventLog does not contain result entry")
+		t.Error("ring.EventLog does not contain result entry")
 	}
 }
 
@@ -579,7 +580,7 @@ func TestPassthrough_ACPProtocol_Rejected(t *testing.T) {
 }
 
 // TestPassthrough_DeadProcess_FastReject verifies that SendPassthrough on a
-// dead Process returns ErrProcessExited without blocking.
+// dead Process returns clierr.ErrProcessExited without blocking.
 func TestPassthrough_DeadProcess_FastReject(t *testing.T) {
 	proto := &ClaudeProtocol{}
 	p := &Process{
@@ -589,8 +590,8 @@ func TestPassthrough_DeadProcess_FastReject(t *testing.T) {
 	}
 	close(p.done)
 	_, err := p.SendPassthrough(context.Background(), "msg", nil, nil, "")
-	if !errors.Is(err, ErrProcessExited) {
-		t.Errorf("err = %v, want ErrProcessExited", err)
+	if !errors.Is(err, clierr.ErrProcessExited) {
+		t.Errorf("err = %v, want clierr.ErrProcessExited", err)
 	}
 }
 

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 )
 
 // TestACPProtocol_WriteSetModel_Wire pins the session/set_model request
@@ -60,14 +62,14 @@ func TestACPProtocol_WriteSetModel_Wire(t *testing.T) {
 }
 
 // TestACPProtocol_WriteSetModel_NoSession mirrors WriteInterrupt's
-// pre-handshake contract: no session id yet → ErrSetModelUnsupported so the
+// pre-handshake contract: no session id yet → clierr.ErrSetModelUnsupported so the
 // caller records the override for the next spawn instead.
 func TestACPProtocol_WriteSetModel_NoSession(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	var buf bytes.Buffer
-	if err := p.WriteSetModel(&buf, "req-1", "m"); err != ErrSetModelUnsupported {
-		t.Fatalf("err = %v, want ErrSetModelUnsupported", err)
+	if err := p.WriteSetModel(&buf, "req-1", "m"); err != clierr.ErrSetModelUnsupported {
+		t.Fatalf("err = %v, want clierr.ErrSetModelUnsupported", err)
 	}
 	if buf.Len() != 0 {
 		t.Error("nothing must be written pre-handshake")
@@ -226,7 +228,7 @@ func TestClaudeProtocol_WriteSetModel_EscapesModel(t *testing.T) {
 }
 
 // TestCodexProtocol_NoModelSetter pins codex's non-support (NG6): the facet
-// assertion must fail so Process.SetModel returns ErrSetModelUnsupported.
+// assertion must fail so Process.SetModel returns clierr.ErrSetModelUnsupported.
 func TestCodexProtocol_NoModelSetter(t *testing.T) {
 	t.Parallel()
 	var p Protocol = &CodexProtocol{}

@@ -25,6 +25,7 @@ import (
 	"log/slog"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
@@ -72,7 +73,7 @@ var ErrTuningEffortUnsupported = errors.New("backend does not support effort tie
 // model/effort override. nil = leave unchanged; pointer to "" = clear (config
 // chain reapplies on next spawn); pointer to a value = set. Returns the apply
 // mode taken (TuningApplied*), or an error when nothing was recorded —
-// validation failures, or cli.ErrSetModelRejected, where the override is NOT
+// validation failures, or clierr.ErrSetModelRejected, where the override is NOT
 // recorded (§6 R8 ack-before-persist) and the CLI's rejection text is in the error.
 //
 // Concurrency: r.mu is held for the decide+record phase only. The RPC wait
@@ -187,7 +188,7 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 			r.notifyChange()
 			slog.Info("session tuning applied via rpc", "key", logKey, "model", *model)
 			return TuningAppliedRPC, nil
-		case errors.Is(err, cli.ErrSetModelRejected):
+		case errors.Is(err, clierr.ErrSetModelRejected):
 			// CLI refused. Nothing was recorded; surface verbatim (text
 			// already sanitized at the protocol layer).
 			slog.Warn("session tuning rejected by CLI", "key", logKey, "err", err)
@@ -248,7 +249,7 @@ func procSetModel(ctx context.Context, proc processIface, model string) error {
 		SetModel(ctx context.Context, model string) error
 	})
 	if !ok {
-		return cli.ErrSetModelUnsupported
+		return clierr.ErrSetModelUnsupported
 	}
 	return ms.SetModel(ctx, model)
 }

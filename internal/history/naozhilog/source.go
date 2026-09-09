@@ -293,7 +293,7 @@ func decodeRecords(ctx context.Context, br *bufio.Reader, path string, out *[]cl
 				"path", path, "seq", rec.Seq, "err", err)
 			continue
 		}
-		// stampUUID runs in cli.EventLog.Append before a record reaches disk, so a
+		// stampUUID runs in ring.EventLog.Append before a record reaches disk, so a
 		// missing UUID flags a producer bug or a hand-edited file. Still emit it
 		// (dropping would lose history) but warn: merged dedup cannot anchor it.
 		if entry.UUID == "" {
