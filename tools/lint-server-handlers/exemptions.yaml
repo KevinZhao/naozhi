@@ -61,7 +61,7 @@ file_size:
     # in commit message satisfies rule 5. New dashboard/project/files.go
     # entry tracks the post-move size (1633) until Phase 5 internal split.
     - path: internal/server/dashboard_send.go
-      current: 851                          # 2026-09-07 重采（#2551 E1-c）：记 1089 实测 851，2026-07-31 之后的历次重构缩水从未回写
+      current: 783                          # 2026-09-09 重采（#2632）：851 → 783，remote-send goroutine / workspace 解析收进 sendEngine 方法。上一次 2026-09-07（#2551 E1-c）1089 → 851
       limit: 500
       until: "2027-03-31"     # 退役者 #2561 E6-c（Epic E 的 handler 文件机械拆分）。历史：3f → "E6" → 日期
     # internal/server/dashboard_cron.go: removed Phase 1 (PR #1438) — file
