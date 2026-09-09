@@ -259,7 +259,7 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 	return all
 }
 
-// callSystemInfo invokes the injected systemInfoFn. nil falls through to
+// callSystemInfo invokes the injected deps.SystemInfoFn. nil falls through to
 // an empty map (test paths without system-probe wiring).
 func (h *Handlers) callSystemInfo() map[string]any {
 	if h.deps.SystemInfoFn == nil {
