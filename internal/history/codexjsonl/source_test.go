@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 // writeRollout creates a date-bucketed rollout file for sid under root and
@@ -29,7 +29,7 @@ func writeRollout(t *testing.T, root, sid string, lines []string) {
 
 func TestSource_ImplementsInterface(t *testing.T) {
 	t.Parallel()
-	var _ cli.HistorySource = (*Source)(nil)
+	var _ history.Source = (*Source)(nil)
 }
 
 func TestSource_LoadBefore_FullRoundTrip(t *testing.T) {
@@ -180,11 +180,11 @@ func TestSource_LoadBefore_MalformedLinesSkipped(t *testing.T) {
 
 func TestFactory_DegradesWithoutDir(t *testing.T) {
 	t.Parallel()
-	got := factory(stubView{sid: "x"}, cli.HistoryWiring{}) // no CodexSessionsDir
-	if _, ok := got.(cli.NoopHistorySource); !ok {
+	got := factory(stubView{sid: "x"}, history.Wiring{}) // no CodexSessionsDir
+	if _, ok := got.(history.Noop); !ok {
 		t.Errorf("factory without CodexSessionsDir = %T; want NoopHistorySource", got)
 	}
-	got2 := factory(stubView{sid: "x"}, cli.HistoryWiring{CodexSessionsDir: "/tmp"})
+	got2 := factory(stubView{sid: "x"}, history.Wiring{CodexSessionsDir: "/tmp"})
 	if _, ok := got2.(*Source); !ok {
 		t.Errorf("factory with CodexSessionsDir = %T; want *Source", got2)
 	}
@@ -346,7 +346,7 @@ func TestSource_findRollout_CachesPerSid(t *testing.T) {
 	}
 }
 
-// stubView is a minimal cli.HistorySessionView for factory tests.
+// stubView is a minimal history.SessionView for factory tests.
 type stubView struct{ sid string }
 
 func (s stubView) SessionKey() string         { return "k" }

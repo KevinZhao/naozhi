@@ -10,9 +10,9 @@ package claudejsonl
 import (
 	"context"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 // ChainIDsFunc returns the Claude session ID chain, oldest → newest.
@@ -32,19 +32,19 @@ func New(claudeDir, cwd string, chainIDs ChainIDsFunc) *Source {
 	return &Source{claudeDir: claudeDir, cwd: cwd, chainIDs: chainIDs}
 }
 
-// init registers the claude history factory with cli and wires
-// discovery.ThumbnailFn (the sole injection point). Without ThumbnailFn image
-// blocks in rehydrated JSONL history are silently dropped — no build error.
+// init registers the claude history factory. discovery.ThumbnailFn is wired by
+// internal/wireup instead (#2649 G1-d): assigning cli.MakeThumbnail here was
+// this package's last reason to import the process manager, and a cross-package
+// hook assignment belongs at the wiring site, not in a format reader.
 func init() {
-	cli.RegisterHistoryFactory("claude", factory)
-	discovery.ThumbnailFn = cli.MakeThumbnail
+	history.RegisterFactory("claude", factory)
 }
 
-// factory returns cli.NoopHistorySource when the wiring lacks a ClaudeDir so
+// factory returns history.Noop when the wiring lacks a ClaudeDir so
 // a router-level misconfig still yields a non-nil source.
-func factory(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource {
+func factory(s history.SessionView, deps history.Wiring) history.Source {
 	if deps.ClaudeDir == "" {
-		return cli.NoopHistorySource{}
+		return history.Noop{}
 	}
 	return New(deps.ClaudeDir, s.Workspace(), s.SnapshotChainIDs)
 }

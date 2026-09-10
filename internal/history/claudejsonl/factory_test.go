@@ -4,9 +4,10 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
-// stubSession is a cli.HistorySessionView for the factory tests.
+// stubSession is a history.SessionView for the factory tests.
 type stubSession struct {
 	key, ws, sid string
 	chain        []string
@@ -19,13 +20,13 @@ func (s *stubSession) SnapshotChainIDs() []string { return s.chain }
 
 // TestFactory_ClaudeWithEmptyDirReturnsNoop pins the factory's
 // degradation rule: an empty ClaudeDir means "no on-disk source
-// available", so the factory must yield cli.NoopHistorySource — never
+// available", so the factory must yield history.Noop — never
 // a *Source wrapping an empty path.
 func TestFactory_ClaudeWithEmptyDirReturnsNoop(t *testing.T) {
 	t.Parallel()
-	got := factory(&stubSession{}, cli.HistoryWiring{ClaudeDir: ""})
-	if _, ok := got.(cli.NoopHistorySource); !ok {
-		t.Errorf("empty ClaudeDir factory returned %T; want cli.NoopHistorySource", got)
+	got := factory(&stubSession{}, history.Wiring{ClaudeDir: ""})
+	if _, ok := got.(history.Noop); !ok {
+		t.Errorf("empty ClaudeDir factory returned %T; want history.Noop", got)
 	}
 }
 
@@ -43,7 +44,7 @@ func TestFactory_ClaudeReturnsClaudejsonlSource(t *testing.T) {
 		sid:   "sess-1",
 		chain: []string{"sess-old", "sess-1"},
 	}
-	got := factory(sess, cli.HistoryWiring{ClaudeDir: "/claude/dir"})
+	got := factory(sess, history.Wiring{ClaudeDir: "/claude/dir"})
 	src, ok := got.(*Source)
 	if !ok {
 		t.Fatalf("factory(claude, claudeDir set) = %T; want *Source", got)
@@ -65,14 +66,14 @@ func TestFactory_ClaudeReturnsClaudejsonlSource(t *testing.T) {
 }
 
 // TestInit_RegistersClaudeBackend confirms the package-level init()
-// registered "claude" with cli.RegisterHistoryFactory. Without this
+// registered "claude" with history.RegisterFactory. Without this
 // registration, NewWrapper(... "claude" ...) would never wire a
 // history.Source and the dashboard would silently lose Claude JSONL
 // fallback after upgrade.
 func TestInit_RegistersClaudeBackend(t *testing.T) {
 	t.Parallel()
 	w := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude")
-	src := w.NewHistorySource(&stubSession{ws: "/tmp"}, cli.HistoryWiring{ClaudeDir: "/claude/dir"})
+	src := w.NewHistorySource(&stubSession{ws: "/tmp"}, history.Wiring{ClaudeDir: "/claude/dir"})
 	if _, ok := src.(*Source); !ok {
 		t.Errorf("wrapper(claude).NewHistorySource = %T; want *Source — init() registration regressed", src)
 	}

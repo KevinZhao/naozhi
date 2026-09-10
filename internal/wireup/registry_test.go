@@ -44,7 +44,7 @@ func TestRegistry_Names_Sorted(t *testing.T) {
 }
 
 // TestRegistry_DuplicatePanics pins the fail-loud-at-boot contract: a
-// duplicate registration must panic (matching cli.RegisterHistoryFactory /
+// duplicate registration must panic (matching history.RegisterFactory /
 // backend.Register), not silently shadow the earlier entry.
 func TestRegistry_DuplicatePanics(t *testing.T) {
 	t.Parallel()

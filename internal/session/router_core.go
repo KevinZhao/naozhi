@@ -190,12 +190,12 @@ type Router struct {
 	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via RegisterForResume / RegisterCronStubWithChain / Takeover), shim (reconnect)
 	claudeDir string // ~/.claude dir for loading session history
 	// kiroSessionsDir is the kiro session-state root, plumbed into
-	// cli.HistoryWiring at attachHistorySource time for the kirojsonl factory.
+	// history.Wiring at attachHistorySource time for the kirojsonl factory.
 	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via Register* / Takeover)
 	kiroSessionsDir string
 
 	// codexSessionsDir is the codex session-state root (~/.codex/sessions),
-	// plumbed into cli.HistoryWiring for the codexjsonl factory.
+	// plumbed into history.Wiring for the codexjsonl factory.
 	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via Register* / Takeover)
 	codexSessionsDir string
 

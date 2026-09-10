@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 // countingHandler counts slog records whose message contains a substring.
@@ -43,7 +45,7 @@ func TestNewHistorySource_MissingFactoryWarnsOncePerBackend(t *testing.T) {
 	w := &Wrapper{BackendID: backendID}
 
 	for i := 0; i < 5; i++ {
-		src := w.NewHistorySource(&fakeHistorySession{}, HistoryWiring{})
+		src := w.NewHistorySource(&fakeHistorySession{}, history.Wiring{})
 		if src == nil {
 			t.Fatal("NewHistorySource must never return nil")
 		}
@@ -67,7 +69,7 @@ func TestNewHistorySource_EmptyBackendNeverWarns(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	w := &Wrapper{BackendID: ""}
-	_ = w.NewHistorySource(&fakeHistorySession{}, HistoryWiring{})
+	_ = w.NewHistorySource(&fakeHistorySession{}, history.Wiring{})
 
 	h.mu.Lock()
 	got := h.count

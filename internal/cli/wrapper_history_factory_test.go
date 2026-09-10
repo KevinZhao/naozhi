@@ -3,9 +3,11 @@ package cli
 import (
 	"context"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/history"
 )
 
-// fakeHistorySession is a HistorySessionView stub for the factory tests.
+// fakeHistorySession is a history.SessionView stub for the factory tests.
 // Returns whatever the test set up and counts how often each accessor is
 // invoked so DepsRoundTrip can pin the contract that the factory pulls
 // every field at least once.
@@ -35,7 +37,7 @@ func (f *fakeHistorySession) SnapshotChainIDs() []string { return f.chain }
 func TestNewHistorySource_NilWrapperReturnsNoop(t *testing.T) {
 	t.Parallel()
 	var w *Wrapper // nil
-	src := w.NewHistorySource(&fakeHistorySession{}, HistoryWiring{})
+	src := w.NewHistorySource(&fakeHistorySession{}, history.Wiring{})
 	if src == nil {
 		t.Fatal("NewHistorySource on nil wrapper must not return nil")
 	}
@@ -49,18 +51,18 @@ func TestNewHistorySource_NilWrapperReturnsNoop(t *testing.T) {
 }
 
 // TestNewHistorySource_NilFactoryReturnsNoop covers the unknown-backend
-// case where pickHistoryFactory found no registration. Constructing a
+// case where history.PickFactory found no registration. Constructing a
 // Wrapper with an unregistered BackendID must still produce a usable
 // source; the dashboard should see "no fallback history" rather than
 // a nil-pointer crash.
 //
 // R240-ARCH-28: factory is now looked up at NewHistorySource call time
-// from pickHistoryFactory(BackendID), so this test only needs to choose
+// from history.PickFactory(BackendID), so this test only needs to choose
 // an id that no other test registers.
 func TestNewHistorySource_NilFactoryReturnsNoop(t *testing.T) {
 	t.Parallel()
 	w := &Wrapper{BackendID: "no-such-backend-cli-test-arch28"}
-	src := w.NewHistorySource(&fakeHistorySession{}, HistoryWiring{})
+	src := w.NewHistorySource(&fakeHistorySession{}, history.Wiring{})
 	if src == nil {
 		t.Fatal("nil factory must yield a non-nil noop source")
 	}
@@ -77,24 +79,24 @@ func TestNewHistorySource_NilFactoryReturnsNoop(t *testing.T) {
 // boundary contract: a registered factory that returns nil (e.g.
 // claude factory with empty ClaudeDir) must not propagate the nil to
 // the caller. Wrapper.NewHistorySource is responsible for upgrading
-// the nil to NoopHistorySource so attachHistorySource never has to
+// the nil to history.Noop so attachHistorySource never has to
 // nil-check.
 //
 // R240-ARCH-28: register the test factory first, then Wrapper picks it
-// up via pickHistoryFactory at NewHistorySource time.
+// up via history.PickFactory at NewHistorySource time.
 func TestNewHistorySource_FactoryReturningNilUpgradesToNoop(t *testing.T) {
 	t.Parallel()
 	const id = "cli-test-arch28-nil-factory"
-	RegisterHistoryFactory(id, func(s HistorySessionView, deps HistoryWiring) HistorySource {
+	history.RegisterFactory(id, func(s history.SessionView, deps history.Wiring) history.Source {
 		return nil
 	})
 	w := &Wrapper{BackendID: id}
-	src := w.NewHistorySource(&fakeHistorySession{}, HistoryWiring{})
+	src := w.NewHistorySource(&fakeHistorySession{}, history.Wiring{})
 	if src == nil {
 		t.Fatal("factory-returns-nil must be upgraded to non-nil noop")
 	}
-	if _, ok := src.(NoopHistorySource); !ok {
-		t.Errorf("factory-returns-nil yielded %T; want NoopHistorySource", src)
+	if _, ok := src.(history.Noop); !ok {
+		t.Errorf("factory-returns-nil yielded %T; want history.Noop", src)
 	}
 }
 
@@ -110,9 +112,9 @@ func TestNewHistorySource_FactoryReturningNilUpgradesToNoop(t *testing.T) {
 func TestNewHistorySource_ClaudeWithEmptyDirReturnsNoop(t *testing.T) {
 	t.Parallel()
 	// Mimic the claudejsonl factory's first-line branch.
-	RegisterHistoryFactory("cli-test-claude-empty", func(s HistorySessionView, deps HistoryWiring) HistorySource {
+	history.RegisterFactory("cli-test-claude-empty", func(s history.SessionView, deps history.Wiring) history.Source {
 		if deps.ClaudeDir == "" {
-			return NoopHistorySource{}
+			return history.Noop{}
 		}
 		return nil
 	})
@@ -120,25 +122,25 @@ func TestNewHistorySource_ClaudeWithEmptyDirReturnsNoop(t *testing.T) {
 	// Sanity: factory was registered before NewWrapper.
 	// R240-ARCH-28: lookup happens at NewHistorySource call time, so we
 	// confirm the registry side rather than a Wrapper field.
-	if pickHistoryFactory(w.BackendID) == nil {
+	if history.PickFactory(w.BackendID) == nil {
 		t.Fatal("registry did not bind cli-test-claude-empty factory")
 	}
 
 	src := w.NewHistorySource(&fakeHistorySession{
 		key: "k", workspace: "/tmp", sessionID: "sid",
 		chain: []string{"sid"},
-	}, HistoryWiring{ClaudeDir: ""})
+	}, history.Wiring{ClaudeDir: ""})
 	if src == nil {
 		t.Fatal("empty ClaudeDir must yield non-nil noop")
 	}
-	if _, ok := src.(NoopHistorySource); !ok {
-		t.Errorf("empty ClaudeDir factory result = %T; want NoopHistorySource", src)
+	if _, ok := src.(history.Noop); !ok {
+		t.Errorf("empty ClaudeDir factory result = %T; want history.Noop", src)
 	}
 }
 
 // TestNewHistorySource_DepsRoundTrip verifies that all fields of
-// HistoryWiring are passed through to the factory unchanged and that
-// the HistorySessionView accessors are reachable. The factory is the
+// history.Wiring are passed through to the factory unchanged and that
+// the history.SessionView accessors are reachable. The factory is the
 // only place a backend can read directory configuration, so a typo
 // here would silently disable a backend's fallback.
 //
@@ -149,27 +151,27 @@ func TestNewHistorySource_ClaudeWithEmptyDirReturnsNoop(t *testing.T) {
 // synchronisation primitives are needed beyond the natural happens-before
 // edge from registration → NewWrapper → NewHistorySource → assertion.
 func TestNewHistorySource_DepsRoundTrip(t *testing.T) {
-	var sawDeps HistoryWiring
+	var sawDeps history.Wiring
 	var sawWS, sawSID, sawKey string
 	var sawChain []string
 
-	RegisterHistoryFactory("cli-test-deps-rt", func(s HistorySessionView, deps HistoryWiring) HistorySource {
+	history.RegisterFactory("cli-test-deps-rt", func(s history.SessionView, deps history.Wiring) history.Source {
 		sawDeps = deps
 		sawWS = s.Workspace()
 		sawSID = s.SessionID()
 		sawKey = s.SessionKey()
 		sawChain = s.SnapshotChainIDs()
-		return NoopHistorySource{}
+		return history.Noop{}
 	})
 
 	w := NewWrapper("/bin/false", &ClaudeProtocol{}, "cli-test-deps-rt")
 	// R240-ARCH-28: registry lookup at NewHistorySource time replaces
 	// the previous w.historyFactory cache. Confirm the registry binding.
-	if pickHistoryFactory(w.BackendID) == nil {
+	if history.PickFactory(w.BackendID) == nil {
 		t.Fatal("factory not registered for cli-test-deps-rt")
 	}
 
-	want := HistoryWiring{
+	want := history.Wiring{
 		ClaudeDir:       "/claude/dir",
 		KiroSessionsDir: "/kiro/dir",
 		EventLogDir:     "/event/log",
@@ -203,31 +205,6 @@ func TestNewHistorySource_DepsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRegisterHistoryFactory_RejectsEmptyOrNil pins the registration
-// guard so a buggy backend's init() that passes "" or nil cannot
-// silently overwrite a real factory or seed an empty-key entry.
-func TestRegisterHistoryFactory_RejectsEmptyOrNil(t *testing.T) {
-	t.Parallel()
-	// Empty backend ID must be ignored.
-	RegisterHistoryFactory("", func(s HistorySessionView, deps HistoryWiring) HistorySource { return nil })
-	historyFactoryMu.RLock()
-	_, ok := historyFactoryRegistry[""]
-	historyFactoryMu.RUnlock()
-	if ok {
-		t.Errorf("empty backend ID accepted; registry now has empty-key entry")
-	}
-
-	// Nil function must be ignored. Use a unique key so an earlier
-	// (or concurrent) test cannot pollute the assertion.
-	RegisterHistoryFactory("cli-test-nilfn-guard", nil)
-	historyFactoryMu.RLock()
-	_, ok = historyFactoryRegistry["cli-test-nilfn-guard"]
-	historyFactoryMu.RUnlock()
-	if ok {
-		t.Errorf("nil factory accepted; registry now has cli-test-nilfn-guard entry")
-	}
-}
-
 // TestPickHistoryFactory_UnknownBackendReturnsNil ensures the lookup
 // path returns nil (not a panic, not a placeholder) for unregistered
 // backends. NewWrapper relies on this nil to leave w.historyFactory
@@ -235,8 +212,8 @@ func TestRegisterHistoryFactory_RejectsEmptyOrNil(t *testing.T) {
 func TestPickHistoryFactory_UnknownBackendReturnsNil(t *testing.T) {
 	t.Parallel()
 	// Random-enough id that no registered factory matches.
-	got := pickHistoryFactory("cli-test-totally-unknown-x9q7")
+	got := history.PickFactory("cli-test-totally-unknown-x9q7")
 	if got != nil {
-		t.Errorf("pickHistoryFactory(unknown) = %v; want nil", got)
+		t.Errorf("history.PickFactory(unknown) = %v; want nil", got)
 	}
 }

@@ -20,7 +20,7 @@ func TestEventLogSatisfiesAppenderAndSubscriber_R20260602_091302_ARCH_2(t *testi
 }
 
 // stubReader is the minimal durable-tier shape: it implements the read side
-// (cli.HistorySource) the way naozhilog.Source / merged do.
+// (history.Source) the way naozhilog.Source / merged do.
 type stubReader struct{}
 
 func (stubReader) LoadBefore(context.Context, int64, int) ([]clievent.EventEntry, error) {

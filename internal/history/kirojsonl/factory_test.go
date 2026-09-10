@@ -4,9 +4,10 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
-// stubKiroSession is a cli.HistorySessionView for the factory tests.
+// stubKiroSession is a history.SessionView for the factory tests.
 // Mirrors claudejsonl/factory_test.go's stubSession but only the
 // SessionID() method matters for kiro — kirojsonl never reads
 // SnapshotChainIDs / Workspace.
@@ -33,7 +34,7 @@ func TestFactory_KiroReturnsKirojsonlSource(t *testing.T) {
 		ws:  "/tmp/ws",
 		sid: "kiro-sess-1",
 	}
-	got := factory(sess, cli.HistoryWiring{KiroSessionsDir: "/kiro/dir"})
+	got := factory(sess, history.Wiring{KiroSessionsDir: "/kiro/dir"})
 	src, ok := got.(*Source)
 	if !ok {
 		t.Fatalf("factory(kiro, dir set) = %T; want *Source", got)
@@ -51,7 +52,7 @@ func TestFactory_KiroReturnsKirojsonlSource(t *testing.T) {
 }
 
 // TestInit_RegistersKiroBackend confirms the package-level init()
-// registered "kiro" with cli.RegisterHistoryFactory. Without this
+// registered "kiro" with history.RegisterFactory. Without this
 // registration, NewWrapper(... "kiro" ...) would never wire a
 // history.Source and the dashboard would silently lose kiro JSONL
 // fallback after upgrade. Same role as
@@ -62,7 +63,7 @@ func TestInit_RegistersKiroBackend(t *testing.T) {
 	w := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro")
 	src := w.NewHistorySource(
 		&stubKiroSession{sid: "x"},
-		cli.HistoryWiring{KiroSessionsDir: "/kiro/dir"},
+		history.Wiring{KiroSessionsDir: "/kiro/dir"},
 	)
 	if _, ok := src.(*Source); !ok {
 		t.Errorf("wrapper(kiro).NewHistorySource = %T; want *Source — init() registration regressed", src)
