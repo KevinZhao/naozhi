@@ -5,18 +5,19 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 // TestRegisterHistoryFactory_LastWriteWins pins the documented
-// re-registration contract on RegisterHistoryFactory: re-registering an
+// re-registration contract on history.RegisterFactory: re-registering an
 // already-known backend ID overwrites the previous factory and the last
-// registration wins. The doc comment on RegisterHistoryFactory states
+// registration wins. The doc comment on history.RegisterFactory states
 // "Re-registering a backend ID overwrites the previous factory; the last
 // registration wins. Tests rely on this to inject failing factories." —
 // but no test asserted it directly until now.
 //
 // This invariant is load-bearing for #1033 (R240-ARCH-17): the proposed
-// refactor moves HistoryFactoryFn registration out of internal/cli into a
+// refactor moves history.FactoryFn registration out of internal/cli into a
 // dedicated internal/history package. Whatever shape the registry takes
 // after that move, last-write-wins must survive or every test that injects
 // a replacement factory (and the live re-wireup path) breaks silently.
@@ -29,18 +30,18 @@ func TestRegisterHistoryFactory_LastWriteWins(t *testing.T) {
 	first := &recordingHistorySource{tag: "first"}
 	second := &recordingHistorySource{tag: "second"}
 
-	RegisterHistoryFactory(id, func(HistorySessionView, HistoryWiring) HistorySource {
+	history.RegisterFactory(id, func(history.SessionView, history.Wiring) history.Source {
 		return first
 	})
-	RegisterHistoryFactory(id, func(HistorySessionView, HistoryWiring) HistorySource {
+	history.RegisterFactory(id, func(history.SessionView, history.Wiring) history.Source {
 		return second
 	})
 
-	got := pickHistoryFactory(id)
+	got := history.PickFactory(id)
 	if got == nil {
-		t.Fatal("pickHistoryFactory returned nil after registration")
+		t.Fatal("history.PickFactory returned nil after registration")
 	}
-	src := got(&fakeHistorySession{}, HistoryWiring{})
+	src := got(&fakeHistorySession{}, history.Wiring{})
 	rec, ok := src.(*recordingHistorySource)
 	if !ok {
 		t.Fatalf("factory returned %T; want *recordingHistorySource", src)
@@ -50,7 +51,7 @@ func TestRegisterHistoryFactory_LastWriteWins(t *testing.T) {
 	}
 }
 
-// recordingHistorySource is a HistorySource stub whose only purpose is to
+// recordingHistorySource is a history.Source stub whose only purpose is to
 // carry a tag so the test can tell which factory produced it.
 type recordingHistorySource struct {
 	tag string

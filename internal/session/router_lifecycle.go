@@ -72,7 +72,7 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 		wrapper = r.bkStore.wrapper
 	}
 
-	deps := cli.HistoryWiring{
+	deps := history.Wiring{
 		ClaudeDir:        r.claudeDir,
 		KiroSessionsDir:  r.kiroSessionsDir,
 		CodexSessionsDir: r.codexSessionsDir,

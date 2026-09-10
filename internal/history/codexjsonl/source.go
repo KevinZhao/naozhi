@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
 )
@@ -74,14 +73,14 @@ func New(rootDir string, sessionIDFn SessionIDFunc) *Source {
 
 // init registers the codex history factory with cli.
 func init() {
-	cli.RegisterHistoryFactory("codex", factory)
+	history.RegisterFactory("codex", factory)
 }
 
-// factory returns cli.NoopHistorySource when the wiring lacks a
+// factory returns history.Noop when the wiring lacks a
 // CodexSessionsDir so a router-level misconfig still yields a non-nil source.
-func factory(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource {
+func factory(s history.SessionView, deps history.Wiring) history.Source {
 	if deps.CodexSessionsDir == "" {
-		return cli.NoopHistorySource{}
+		return history.Noop{}
 	}
 	return New(deps.CodexSessionsDir, s.SessionID)
 }

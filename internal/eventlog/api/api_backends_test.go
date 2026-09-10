@@ -43,7 +43,7 @@ var (
 )
 
 // Compile-time gate: the durable replay reader satisfies api.Reader
-// (= cli.HistorySource) exactly, so its results concatenate with the
+// (= history.Source) exactly, so its results concatenate with the
 // ring's without an ordering adapter.
 var _ api.Reader = (*naozhilog.Source)(nil)
 

@@ -28,7 +28,7 @@ func (s *ManagedSession) getSessionID() string {
 }
 
 // SessionID returns the current CLI session ID, lock-free. Public alias for
-// getSessionID satisfying cli.HistorySessionView and cross-package callers
+// getSessionID satisfying history.SessionView and cross-package callers
 // that need the ID without taking r.mu.
 func (s *ManagedSession) SessionID() string { return s.getSessionID() }
 

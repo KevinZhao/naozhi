@@ -656,14 +656,14 @@ func TestSource_LoadBefore_AssistantEmptyTextDropped(t *testing.T) {
 }
 
 // TestKirojsonlFactory_RegistrationOnInit confirms the package-level
-// init() registered "kiro" with cli.RegisterHistoryFactory. Without
+// init() registered "kiro" with history.RegisterFactory. Without
 // this, NewWrapper(... "kiro" ...) would never wire a history.Source
 // and the dashboard would silently lose kiro JSONL fallback after
 // upgrade.
 func TestKirojsonlFactory_RegistrationOnInit(t *testing.T) {
 	t.Parallel()
 	w := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro")
-	src := w.NewHistorySource(&stubKiroSession{sid: "x"}, cli.HistoryWiring{KiroSessionsDir: "/kiro/dir"})
+	src := w.NewHistorySource(&stubKiroSession{sid: "x"}, history.Wiring{KiroSessionsDir: "/kiro/dir"})
 	if _, ok := src.(*Source); !ok {
 		t.Errorf("wrapper(kiro).NewHistorySource = %T; want *kirojsonl.Source — init() registration regressed", src)
 	}
@@ -671,12 +671,12 @@ func TestKirojsonlFactory_RegistrationOnInit(t *testing.T) {
 
 // TestKirojsonlFactory_EmptyDirReturnsNoop pins the factory's
 // degradation rule: an empty KiroSessionsDir means "no on-disk
-// source available", so the factory must yield cli.NoopHistorySource —
+// source available", so the factory must yield history.Noop —
 // never a *Source wrapping an empty path.
 func TestKirojsonlFactory_EmptyDirReturnsNoop(t *testing.T) {
 	t.Parallel()
-	got := factory(&stubKiroSession{sid: "x"}, cli.HistoryWiring{KiroSessionsDir: ""})
-	if _, ok := got.(cli.NoopHistorySource); !ok {
-		t.Errorf("empty KiroSessionsDir factory returned %T; want cli.NoopHistorySource", got)
+	got := factory(&stubKiroSession{sid: "x"}, history.Wiring{KiroSessionsDir: ""})
+	if _, ok := got.(history.Noop); !ok {
+		t.Errorf("empty KiroSessionsDir factory returned %T; want history.Noop", got)
 	}
 }

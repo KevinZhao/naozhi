@@ -12,7 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/history/merged"
 )
 
-// instrumentedSource is a history.Source / cli.HistorySource stub used to
+// instrumentedSource is a history.Source / history.Source stub used to
 // verify that attachHistorySource picks the right wrapper's factory.
 // Each instance is tagged with a backend ID so a session that ends up
 // pointing at the wrong backend's source produces an obvious assertion
@@ -49,10 +49,10 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 	claudeSrc = &instrumentedSource{tag: "claude"}
 	kiroSrc = &instrumentedSource{tag: "kiro"}
 
-	cli.RegisterHistoryFactory("claude-routed", func(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource {
+	history.RegisterFactory("claude-routed", func(s history.SessionView, deps history.Wiring) history.Source {
 		return claudeSrc
 	})
-	cli.RegisterHistoryFactory("kiro-routed", func(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource {
+	history.RegisterFactory("kiro-routed", func(s history.SessionView, deps history.Wiring) history.Source {
 		return kiroSrc
 	})
 
@@ -242,9 +242,9 @@ func TestAttachHistorySource_NilSession(t *testing.T) {
 func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 	t.Parallel()
 	saw := ""
-	cli.RegisterHistoryFactory("kiro-rt-probe", func(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource {
+	history.RegisterFactory("kiro-rt-probe", func(s history.SessionView, deps history.Wiring) history.Source {
 		saw = deps.KiroSessionsDir
-		return cli.NoopHistorySource{}
+		return history.Noop{}
 	})
 	r := &Router{
 		ss:              sessionStore{sessions: make(map[string]*ManagedSession)},
@@ -310,14 +310,14 @@ func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 // HistorySessionView interface. If a future refactor renames a method
 // (e.g. SessionKey → Key) the build fails here long before the
 // dashboard pagination breaks at runtime.
-var _ cli.HistorySessionView = (*ManagedSession)(nil)
+var _ history.SessionView = (*ManagedSession)(nil)
 
-// Compile-time guard: history.Source and cli.HistorySource are
+// Compile-time guard: history.Source and history.Source are
 // structurally identical, so any history.Source value also satisfies
-// cli.HistorySource. attachHistorySource relies on this when assigning
+// history.Source. attachHistorySource relies on this when assigning
 // the factory result back into history.Source for the merged.Source
 // composition.
 var (
-	_ history.Source    = cli.NoopHistorySource{}
-	_ cli.HistorySource = history.Noop{}
+	_ history.Source = history.Noop{}
+	_ history.Source = history.Noop{}
 )

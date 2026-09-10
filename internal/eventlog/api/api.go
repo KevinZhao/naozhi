@@ -7,14 +7,14 @@
 // pooling hot paths are not regressed.
 //
 // The contract is expressed in clievent.EventEntry and reuses
-// cli.HistorySource for the read side so the two cannot drift. Importing
+// history.Source for the read side so the two cannot drift. Importing
 // cli here is cycle-free: cli does not import this package.
 package api
 
 import (
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 // Appender is the write side. Append enqueues one event; AppendBatch
@@ -25,9 +25,9 @@ type Appender interface {
 	AppendBatch(entries []clievent.EventEntry)
 }
 
-// Reader is the historical read side: exactly cli.HistorySource, so results
+// Reader is the historical read side: exactly history.Source, so results
 // from the ring and the durable tiers concatenate without an adapter.
-type Reader = cli.HistorySource
+type Reader = history.Source
 
 // Subscriber is the change-notification side. SubscribeNew returns an
 // EventSubscription bundling the notify channel with its cancel func; the

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
@@ -54,14 +55,21 @@ func userImageLineAt(t *testing.T, text, imgB64 string, unixSec int64) string {
 	return fmt.Sprintf(`{"type":"user","timestamp":%q,"uuid":"img-%d","message":%s}`, ts, unixSec, string(msg))
 }
 
-// TestSource_LoadBefore_DecodesHistoryImages is the end-to-end check that the
-// package init wired discovery.ThumbnailFn to cli.MakeThumbnail: a Claude
-// JSONL line carrying an inline image is rehydrated with a downsampled
+// TestSource_LoadBefore_DecodesHistoryImages is the end-to-end check that a
+// Claude JSONL line carrying an inline image is rehydrated with a downsampled
 // thumbnail data URI, not dropped to text-only.
+//
+// It installs discovery.ThumbnailFn itself. The hook used to be assigned by this
+// package's init(), and this test asserted it was non-nil; the assignment moved
+// to internal/wireup (#2649 G1-d) because it was this package's last reason to
+// import the process manager. "Is the hook wired in production" is now
+// wireup.TestThumbnailHookIsWired; what remains here is the decode path, which
+// needs A thumbnailer, not that particular wiring. cli is imported test-only, so
+// the production inversion still holds.
 func TestSource_LoadBefore_DecodesHistoryImages(t *testing.T) {
-	if discovery.ThumbnailFn == nil {
-		t.Fatal("discovery.ThumbnailFn is nil — claudejsonl.init must wire cli.MakeThumbnail")
-	}
+	prev := discovery.ThumbnailFn
+	discovery.ThumbnailFn = cli.MakeThumbnail
+	t.Cleanup(func() { discovery.ThumbnailFn = prev })
 
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cjsonl-img"
