@@ -66,11 +66,6 @@ type Hub struct {
 	// Shutdown clear. A one-critical-section-stale read only affects the
 	// marshal-cache routing heuristic, never correctness (#1522).
 	subscriberCountFast sync.Map // key string -> *atomic.Int32
-	// enforceCaps gates the per-key subscriber cap and counter reads. NewHub
-	// sets it true; hand-rolled test hubs leave it false so the cap never
-	// fires against an uninitialised map. The per-client cap is
-	// unconditional and does not consult it. Read under h.mu (#1401).
-	enforceCaps bool
 	// router is the HubRouter consumer subset (consumer.go) so tests can
 	// inject a fake.
 	router    HubRouter
@@ -214,6 +209,11 @@ type HubOptions struct {
 	// ParentCtx, when set, parents h.ctx so an application cancel tears down
 	// send/push goroutines even if Shutdown() is never called. Nil ⇒ Background.
 	ParentCtx context.Context
+	// UploadStore resolves WS-sent file_ids. Wired here rather than through a
+	// SetUploadStore call after Start (#2552): the store is built one line
+	// earlier in buildServer, so there is no window where a Hub is serving
+	// upgrades with an unwired store.
+	UploadStore *uploadStore
 }
 
 // NewHub creates a new WebSocket hub (LIFECYCLE-METHOD: writes every field
@@ -242,7 +242,6 @@ func NewHub(opts HubOptions) *Hub {
 		authClients:      make(map[*wsClient]struct{}),
 		authClientsIdx:   make(map[*wsClient]int),
 		subscriberCount:  make(map[string]int),
-		enforceCaps:      true,
 		router:           opts.Router,
 		agents:           opts.Agents,
 		agentCmds:        opts.AgentCmds,
@@ -258,6 +257,7 @@ func NewHub(opts HubOptions) *Hub {
 		wsAuthLimiter:    opts.WSAuthLimiter,
 		wsUpgradeLimiter: opts.WSUpgradeLimiter,
 		auth:             opts.Auth,
+		uploadStore:      opts.UploadStore,
 		ctx:              ctx,
 		cancel:           cancel,
 	}
@@ -311,11 +311,6 @@ func NewHub(opts HubOptions) *Hub {
 	})
 	return h
 }
-
-// SetUploadStore wires the upload store WS sends use to resolve pre-uploaded
-// file_ids. A setter (not a HubOptions field) because the store's cleanup
-// loop is bound to the app ctx and is created after the Hub exists.
-func (h *Hub) SetUploadStore(s *uploadStore) { h.uploadStore = s }
 
 // allowSendForOwner is the per-user (uploadOwner-keyed) send ceiling that
 // stops N tabs multiplying the per-connection burst; the per-conn limiter
@@ -429,7 +424,7 @@ func (h *Hub) unregister(c *wsClient) {
 			for key, unsub := range c.subscriptions {
 				unsubs = append(unsubs, unsub)
 				h.decSubscriberCountLocked(key)
-				if !h.enforceCaps || h.subscriberCount[key] == 0 {
+				if h.dropMarshalCacheForLocked(key) {
 					dropKeys = append(dropKeys, key)
 				}
 			}

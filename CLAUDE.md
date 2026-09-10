@@ -66,6 +66,7 @@ cmd/naozhi/main.go
   -> history      后端无关历史加载接口；claudejsonl/kirojsonl/codexjsonl/naozhilog/merged 子包
   -> attachment   附件持久化 + refcount tracker 子包
   -> discovery    扫描 Claude CLI 磁盘工件（外部进程发现 / takeover）
+  -> claudefs     Claude CLI 磁盘布局单一真相源（projects slug 编码 / transcript 路径 / session id 校验）
 
   辅助域
   -> agentcore    AgentCore 云沙箱 control-plane 客户端
@@ -87,7 +88,7 @@ cmd/naozhi/main.go
   -> envpolicy    共享 env 过滤原语
   -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame + schema）
   -> contractjs   生成 static/contract.js 的构建器（WS/API/字段名三段）
-  -> datadir      数据根目录磁盘布局策略
+  -> datadir      store 文件所在目录的布局策略（Layout 值类型，只派生 sibling）
 
   叶子工具
   -> osutil       Home/路径展开、进程 helpers、sd_notify、PID 复用防护

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestMergeFollower_CollapsesInterimBanner verifies the #2290 fix at the
@@ -28,9 +28,9 @@ func TestMergeFollower_CollapsesInterimBanner(t *testing.T) {
 
 	// Interim assistant event posts the "💭思考中…" banner on this follower
 	// slot (process_readloop interim fan-out claims all currentTurnSlots).
-	tracker.onEvent(cli.Event{
+	tracker.onEvent(clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "text", Text: "working"}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "text", Text: "working"}}},
 	})
 
 	// The merge then collapses the turn: follower carries no final text.

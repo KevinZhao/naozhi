@@ -1,0 +1,159 @@
+// todo.go — the CLI's TodoWrite tool payload (#2649 G1-e).
+//
+// Moved out of internal/cli: wire-format parsing over stdlib only, consumed by
+// internal/dispatch for the todo summary it renders.
+package clievent
+
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+)
+
+// TodoItem mirrors one entry in Claude Code's TodoWrite tool input.
+type TodoItem struct {
+	Content    string `json:"content"`
+	Status     string `json:"status"` // pending | in_progress | completed
+	ActiveForm string `json:"activeForm,omitempty"`
+}
+
+// todoWriteInputRaw mirrors a TodoWrite tool input but keeps the todos array
+// as raw JSON so callers needing both the parsed slice and the on-wire array
+// avoid a re-Marshal.
+type todoWriteInputRaw struct {
+	Todos json.RawMessage `json:"todos"`
+}
+
+// ParseTodos extracts the todos array from a TodoWrite tool_use input.
+// Returns (nil, false) when input is malformed or todos is missing/empty.
+func ParseTodos(input json.RawMessage) ([]TodoItem, bool) {
+	todos, _, ok := ParseTodosWithRaw(input)
+	return todos, ok
+}
+
+// ParseTodosWithRaw extracts the todos array from a TodoWrite tool_use input
+// and also returns the original JSON bytes of the todos field for dashboard
+// rendering. Returns (nil, nil, false) when input is malformed or todos is
+// missing/empty. rawTodos is borrowed from input — copy it if retained.
+func ParseTodosWithRaw(input json.RawMessage) (todos []TodoItem, rawTodos json.RawMessage, ok bool) {
+	if len(input) == 0 {
+		return nil, nil, false
+	}
+	var rawW todoWriteInputRaw
+	if err := json.Unmarshal(input, &rawW); err != nil {
+		return nil, nil, false
+	}
+	if len(rawW.Todos) == 0 || string(rawW.Todos) == "null" {
+		return nil, nil, false
+	}
+	if err := json.Unmarshal(rawW.Todos, &todos); err != nil {
+		return nil, nil, false
+	}
+	if len(todos) == 0 {
+		return nil, nil, false
+	}
+	return todos, rawW.Todos, true
+}
+
+// Status glyphs used by TodosSummary / TodosMarkdown. All are multi-byte
+// UTF-8, so consumers that truncate MUST cut on a rune boundary
+// (textutil.TruncateRunes), never s[:N].
+const (
+	todoStatusEmojiSummary = "📋" // overall list header
+	todoStatusEmojiDone    = "✅" // completed
+	todoStatusEmojiActive  = "▶" // in_progress
+	todoStatusEmojiPending = "☐" // pending / unknown-empty status
+	todoStatusEmojiUnknown = "?" // future status values not yet recognised
+	todoStatusFieldSep     = " · "
+)
+
+// TodosSummary returns a compact one-line overview suitable for the event
+// summary field, e.g. "📋 5项 · ✅2 ▶1 ☐2". Unknown statuses are surfaced as
+// "?N" so a new Claude Code status is not silently miscategorised. Truncate
+// on rune boundaries only (see the glyph constants).
+func TodosSummary(todos []TodoItem) string {
+	var done, active, pending, unknown int
+	for _, t := range todos {
+		switch t.Status {
+		case "completed":
+			done++
+		case "in_progress":
+			active++
+		case "pending", "":
+			pending++
+		default:
+			unknown++
+		}
+	}
+	var b strings.Builder
+	b.Grow(40)
+	b.WriteString(todoStatusEmojiSummary)
+	b.WriteByte(' ')
+	b.WriteString(strconv.Itoa(len(todos)))
+	b.WriteString("项")
+	if done > 0 {
+		b.WriteString(todoStatusFieldSep)
+		b.WriteString(todoStatusEmojiDone)
+		b.WriteString(strconv.Itoa(done))
+	}
+	if active > 0 {
+		b.WriteString(todoStatusFieldSep)
+		b.WriteString(todoStatusEmojiActive)
+		b.WriteString(strconv.Itoa(active))
+	}
+	if pending > 0 {
+		b.WriteString(todoStatusFieldSep)
+		b.WriteString(todoStatusEmojiPending)
+		b.WriteString(strconv.Itoa(pending))
+	}
+	if unknown > 0 {
+		b.WriteString(todoStatusFieldSep)
+		b.WriteString(todoStatusEmojiUnknown)
+		b.WriteString(strconv.Itoa(unknown))
+	}
+	return b.String()
+}
+
+// TodosMarkdown renders the list for IM display, using activeForm for
+// in-progress items ("正在执行X" instead of "X"). The size estimate uses byte
+// lengths so the Builder grows once.
+func TodosMarkdown(todos []TodoItem) string {
+	if len(todos) == 0 {
+		return ""
+	}
+	est := 16
+	for _, t := range todos {
+		est += 8 + len(t.Content)
+		if t.ActiveForm != "" && t.Status == "in_progress" {
+			est += len(t.ActiveForm)
+		}
+	}
+	var b strings.Builder
+	b.Grow(est)
+	b.WriteString("📋 任务清单\n")
+	for i, t := range todos {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		switch t.Status {
+		case "completed":
+			b.WriteString("✅ ")
+			b.WriteString(t.Content)
+		case "in_progress":
+			b.WriteString("▶ ")
+			if t.ActiveForm != "" {
+				b.WriteString(t.ActiveForm)
+			} else {
+				b.WriteString(t.Content)
+			}
+		case "pending", "":
+			b.WriteString("☐ ")
+			b.WriteString(t.Content)
+		default:
+			// Unknown status rendered distinctly so a new value is noticed.
+			b.WriteString("? ")
+			b.WriteString(t.Content)
+		}
+	}
+	return b.String()
+}

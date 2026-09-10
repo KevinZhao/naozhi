@@ -25,7 +25,7 @@ func TestRequireAuth_RejectLogSanitized(t *testing.T) {
 	const warn = `"rejecting cross-origin mutating request"`
 	idx := strings.Index(body, warn)
 	if idx < 0 {
-		t.Fatalf(`handlers.go no longer contains %s slog.Warn; update this test.`, warn)
+		t.Fatalf(`neither handlers.go nor csrf.go contains %s slog.Warn; update this test.`, warn)
 	}
 	window := body[idx:]
 	if len(window) > 512 {
@@ -50,7 +50,7 @@ func TestRequireAuth_RejectLogSanitized(t *testing.T) {
 		`"host", r.Host)`,
 	} {
 		if strings.Contains(window, bad) {
-			t.Errorf(`handlers.go reintroduces unsanitized attr %q in RequireAuth rejection warn (R200109-SEC-2a).`, bad)
+			t.Errorf(`the cross-origin rejection warn reintroduces unsanitized attr %q (R200109-SEC-2a).`, bad)
 		}
 	}
 }
@@ -98,12 +98,23 @@ func TestHandleLogin_RejectLogSanitized(t *testing.T) {
 	}
 }
 
+// readHandlersSrc returns handlers.go AND csrf.go concatenated. #2554 moved the
+// cross-origin rejection (and its sanitised warn) out of RequireAuth in
+// handlers.go into RequireSameOrigin in csrf.go; reading only handlers.go made
+// this gate fail with "update this test", which is the right failure but the
+// wrong fix — the contract is about the log line, not the file it lives in.
 func readHandlersSrc(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, _ := runtime.Caller(0)
-	src, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "handlers.go"))
-	if err != nil {
-		t.Fatalf("read handlers.go: %v", err)
+	dir := filepath.Dir(thisFile)
+	var b strings.Builder
+	for _, name := range []string{"handlers.go", "csrf.go"} {
+		src, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		b.Write(src)
+		b.WriteString("\n")
 	}
-	return string(src)
+	return b.String()
 }

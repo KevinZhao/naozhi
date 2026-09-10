@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -58,6 +58,20 @@ func (m *mockPlatform) allReplies() []platform.OutgoingMessage {
 
 // ─── test helpers ─────────────────────────────────────────────────────────────
 
+// newTestServerHS is newTestServer plus the handlerSet. #2553 made the set a
+// construction local, so a test that drives a handler method directly has to
+// receive it from the constructor rather than reach through the Server.
+func newTestServerHS(p *mockPlatform) (*Server, *handlerSet) {
+	router := session.NewRouter(session.RouterConfig{})
+	platforms := map[string]platform.Platform{"test": p}
+	return buildServerWithHandlers(ServerOptions{
+		Addr:      ":0",
+		Router:    router,
+		Platforms: platforms,
+		Backend:   "claude",
+	})
+}
+
 func newTestServer(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
@@ -67,7 +81,6 @@ func newTestServer(p *mockPlatform) *Server {
 		Platforms: platforms,
 		Backend:   "claude",
 	})
-	s.registerDashboard()
 	return s
 }
 
@@ -82,7 +95,6 @@ func newTestServerWithScheduler(p *mockPlatform) *Server {
 		Scheduler: sched,
 		Backend:   "claude",
 	})
-	s.registerDashboard()
 	return s
 }
 
@@ -96,7 +108,6 @@ func newTestServerWithToken(p *mockPlatform, token string) *Server {
 		Backend:        "claude",
 		DashboardToken: token,
 	})
-	s.registerDashboard()
 	return s
 }
 
@@ -123,7 +134,7 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 			// resolve the tag the same way production does.
 			return replyTagForBackend(backendID)
 		},
-		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error) {
+		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 			return sess.Send(ctx, text, images, onEvent)
 		},
 		TakeoverFn: func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {

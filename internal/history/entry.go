@@ -7,7 +7,7 @@ import (
 
 // Truncation caps for entries derived from external-CLI transcripts. Summary
 // is the one-line preview; Detail is the quoted text. The live tier caps some
-// branches tighter (cli.EventDetailMaxRunes); merged.contentKey normalises to
+// branches tighter (clievent.EventDetailMaxRunes); merged.contentKey normalises to
 // the tightest cap when pairing across tiers.
 const (
 	SummaryMaxRunes = 120

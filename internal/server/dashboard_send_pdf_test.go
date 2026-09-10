@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/attachment"
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // makeMultipartFile builds a *multipart.FileHeader in-memory so tests can
@@ -64,8 +64,8 @@ func TestParseAttachmentFile_PDF_Accepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseAttachmentFile: %v", err)
 	}
-	if att.Kind != cli.KindFileRef {
-		t.Errorf("Kind=%q want %q", att.Kind, cli.KindFileRef)
+	if att.Kind != clievent.KindFileRef {
+		t.Errorf("Kind=%q want %q", att.Kind, clievent.KindFileRef)
 	}
 	if att.MimeType != "application/pdf" {
 		t.Errorf("MimeType=%q", att.MimeType)
@@ -172,8 +172,8 @@ func TestParseAttachmentFile_Image_StillWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseAttachmentFile image: %v", err)
 	}
-	if att.Kind != cli.KindImageInline {
-		t.Errorf("Kind=%q want %q", att.Kind, cli.KindImageInline)
+	if att.Kind != clievent.KindImageInline {
+		t.Errorf("Kind=%q want %q", att.Kind, clievent.KindImageInline)
 	}
 	if att.MimeType != "image/png" {
 		t.Errorf("MimeType=%q", att.MimeType)
@@ -206,8 +206,8 @@ func TestSanitizeClientFilename(t *testing.T) {
 
 func TestPersistFileRefs_WritesToWorkspace(t *testing.T) {
 	ws := t.TempDir()
-	atts := []cli.Attachment{{
-		Kind:     cli.KindFileRef,
+	atts := []clievent.Attachment{{
+		Kind:     clievent.KindFileRef,
 		Data:     pdfMagic(),
 		MimeType: "application/pdf",
 		OrigName: "report.pdf",
@@ -248,8 +248,8 @@ func TestPersistFileRefs_WritesToWorkspace(t *testing.T) {
 // the bytes in the user message content block.
 func TestPersistFileRefs_InlineImage_PersistsCopy(t *testing.T) {
 	ws := t.TempDir()
-	atts := []cli.Attachment{{
-		Kind:     cli.KindImageInline,
+	atts := []clievent.Attachment{{
+		Kind:     clievent.KindImageInline,
 		Data:     []byte("PNG-bytes"),
 		MimeType: "image/png",
 		OrigName: "photo.png",
@@ -263,8 +263,8 @@ func TestPersistFileRefs_InlineImage_PersistsCopy(t *testing.T) {
 		t.Fatalf("resolved len=%d", len(resolved))
 	}
 	got := resolved[0]
-	if got.Kind != cli.KindImageInline {
-		t.Errorf("Kind=%q want %q", got.Kind, cli.KindImageInline)
+	if got.Kind != clievent.KindImageInline {
+		t.Errorf("Kind=%q want %q", got.Kind, clievent.KindImageInline)
 	}
 	// Data MUST survive the persist — the CLI user-message content block
 	// carries inline bytes. Unlike file_ref we do not clear it after write.
@@ -294,8 +294,8 @@ func TestPersistFileRefs_InlineImage_PersistsCopy(t *testing.T) {
 // cosmetic lightbox degradation).
 func TestPersistFileRefs_InlineImage_UnknownMimeSkipsPersist(t *testing.T) {
 	ws := t.TempDir()
-	atts := []cli.Attachment{{
-		Kind:     cli.KindImageInline,
+	atts := []clievent.Attachment{{
+		Kind:     clievent.KindImageInline,
 		Data:     []byte("garbage"),
 		MimeType: "image/tiff", // not in allowlist
 	}}
@@ -320,22 +320,22 @@ func TestPersistFileRefs_InlineImage_UnknownMimeSkipsPersist(t *testing.T) {
 func TestHasPersistableAttachment(t *testing.T) {
 	cases := []struct {
 		name string
-		atts []cli.Attachment
+		atts []clievent.Attachment
 		want bool
 	}{
 		{"empty", nil, false},
-		{"text-only", []cli.Attachment{}, false},
-		{"image-png", []cli.Attachment{{
-			Kind: cli.KindImageInline, Data: []byte("x"), MimeType: "image/png",
+		{"text-only", []clievent.Attachment{}, false},
+		{"image-png", []clievent.Attachment{{
+			Kind: clievent.KindImageInline, Data: []byte("x"), MimeType: "image/png",
 		}}, true},
-		{"image-jpeg", []cli.Attachment{{
-			Kind: cli.KindImageInline, Data: []byte("x"), MimeType: "image/jpeg",
+		{"image-jpeg", []clievent.Attachment{{
+			Kind: clievent.KindImageInline, Data: []byte("x"), MimeType: "image/jpeg",
 		}}, true},
-		{"image-unknown-mime", []cli.Attachment{{
-			Kind: cli.KindImageInline, Data: []byte("x"), MimeType: "image/tiff",
+		{"image-unknown-mime", []clievent.Attachment{{
+			Kind: clievent.KindImageInline, Data: []byte("x"), MimeType: "image/tiff",
 		}}, false},
-		{"file_ref", []cli.Attachment{{
-			Kind: cli.KindFileRef, MimeType: "application/pdf",
+		{"file_ref", []clievent.Attachment{{
+			Kind: clievent.KindFileRef, MimeType: "application/pdf",
 		}}, true},
 	}
 	for _, c := range cases {
@@ -347,9 +347,9 @@ func TestHasPersistableAttachment(t *testing.T) {
 
 func TestPersistFileRefs_MixedImageAndPDF(t *testing.T) {
 	ws := t.TempDir()
-	atts := []cli.Attachment{
-		{Kind: cli.KindImageInline, Data: []byte("png"), MimeType: "image/png"},
-		{Kind: cli.KindFileRef, Data: pdfMagic(), MimeType: "application/pdf", OrigName: "x.pdf"},
+	atts := []clievent.Attachment{
+		{Kind: clievent.KindImageInline, Data: []byte("png"), MimeType: "image/png"},
+		{Kind: clievent.KindFileRef, Data: pdfMagic(), MimeType: "application/pdf", OrigName: "x.pdf"},
 	}
 	resolved, rb, perr := persistFileRefs(ws, atts, "k", "o")
 	if perr != nil {
@@ -357,16 +357,16 @@ func TestPersistFileRefs_MixedImageAndPDF(t *testing.T) {
 	}
 	defer rb()
 
-	if resolved[0].Kind != cli.KindImageInline || !bytes.Equal(resolved[0].Data, []byte("png")) {
+	if resolved[0].Kind != clievent.KindImageInline || !bytes.Equal(resolved[0].Data, []byte("png")) {
 		t.Error("image passthrough corrupted")
 	}
-	if resolved[1].Kind != cli.KindFileRef || resolved[1].WorkspacePath == "" {
+	if resolved[1].Kind != clievent.KindFileRef || resolved[1].WorkspacePath == "" {
 		t.Error("PDF not persisted")
 	}
 }
 
 func TestPersistFileRefs_EmptyWorkspace(t *testing.T) {
-	atts := []cli.Attachment{{Kind: cli.KindFileRef, Data: pdfMagic(), MimeType: "application/pdf"}}
+	atts := []clievent.Attachment{{Kind: clievent.KindFileRef, Data: pdfMagic(), MimeType: "application/pdf"}}
 	_, _, perr := persistFileRefs("", atts, "k", "o")
 	if perr == nil {
 		t.Fatal("expected error for empty workspace")
@@ -378,8 +378,8 @@ func TestPersistFileRefs_EmptyWorkspace(t *testing.T) {
 
 func TestPersistFileRefs_UnsupportedMime(t *testing.T) {
 	ws := t.TempDir()
-	atts := []cli.Attachment{{
-		Kind: cli.KindFileRef, Data: []byte("x"),
+	atts := []clievent.Attachment{{
+		Kind: clievent.KindFileRef, Data: []byte("x"),
 		MimeType: "application/msword",
 	}}
 	_, _, perr := persistFileRefs(ws, atts, "k", "o")

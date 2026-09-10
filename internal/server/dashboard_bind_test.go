@@ -29,7 +29,7 @@ func mkProjDir(t *testing.T, root string) string {
 // router.Workspace. AllowedRoot is set explicitly: leaving it empty makes
 // validateWorkspace accept any absolute path, which would hide the
 // path-traversal rejection assertions.
-func newBindServer(t *testing.T) (*Server, *session.Router, string) {
+func newBindServer(t *testing.T) (*Server, *handlerSet, *session.Router, string) {
 	t.Helper()
 	root := t.TempDir()
 	resolved, err := filepath.EvalSymlinks(root)
@@ -37,22 +37,21 @@ func newBindServer(t *testing.T) (*Server, *session.Router, string) {
 		t.Fatalf("eval symlinks: %v", err)
 	}
 	router := session.NewRouter(session.RouterConfig{Workspace: resolved})
-	srv := NewWithOptions(ServerOptions{
+	srv, hs := buildServerWithHandlers(ServerOptions{
 		Addr:        ":0",
 		Router:      router,
 		Backend:     "claude",
 		AllowedRoot: resolved,
 	})
-	srv.registerDashboard()
-	return srv, router, resolved
+	return srv, hs, router, resolved
 }
 
-func postBind(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
+func postBind(t *testing.T, hs *handlerSet, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/bind", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleBind(w, req)
+	hs.sendH.handleBind(w, req)
 	return w
 }
 
@@ -60,13 +59,13 @@ func postBind(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder
 // created dashboard:pj session writes a per-chat workspace override so a later
 // spawn resolves the project dir instead of falling through to defaultCWD.
 func TestHandleBind_PersistsOverride(t *testing.T) {
-	srv, router, root := newBindServer(t)
+	_, hs, router, root := newBindServer(t)
 	projDir := mkProjDir(t, root)
 
 	key := "dashboard:pj:abc0123456789012:general"
 	chatKey := "dashboard:pj:abc0123456789012"
 
-	w := postBind(t, srv, `{"key":"`+key+`","node":"local","workspace":"`+projDir+`"}`)
+	w := postBind(t, hs, `{"key":"`+key+`","node":"local","workspace":"`+projDir+`"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d want 200 (body=%s)", w.Code, w.Body.String())
 	}
@@ -79,11 +78,11 @@ func TestHandleBind_PersistsOverride(t *testing.T) {
 // refused with 400 AND that NO override is written (the chat resolves to the
 // default workspace, not the attacker path).
 func TestHandleBind_InvalidWorkspaceRejected(t *testing.T) {
-	srv, router, root := newBindServer(t)
+	_, hs, router, root := newBindServer(t)
 	chatKey := "dashboard:pj:abc0123456789012"
 	key := chatKey + ":general"
 
-	w := postBind(t, srv, `{"key":"`+key+`","node":"local","workspace":"/etc"}`)
+	w := postBind(t, hs, `{"key":"`+key+`","node":"local","workspace":"/etc"}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d want 400 for out-of-root workspace (body=%s)", w.Code, w.Body.String())
 	}
@@ -95,11 +94,11 @@ func TestHandleBind_InvalidWorkspaceRejected(t *testing.T) {
 // TestHandleBind_InvalidKeyRejected: a key carrying a C1/bidi control byte is
 // refused by ValidateSessionKey before any override is written.
 func TestHandleBind_InvalidKeyRejected(t *testing.T) {
-	srv, _, root := newBindServer(t)
+	_, hs, _, root := newBindServer(t)
 	projDir := mkProjDir(t, root)
 	// U+202E (RIGHT-TO-LEFT OVERRIDE) embedded in the key.
 	key := "dashboard:pj:abc\u202e0123:general"
-	w := postBind(t, srv, `{"key":"`+key+`","node":"local","workspace":"`+projDir+`"}`)
+	w := postBind(t, hs, `{"key":"`+key+`","node":"local","workspace":"`+projDir+`"}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d want 400 for control-char key (body=%s)", w.Code, w.Body.String())
 	}
@@ -108,8 +107,8 @@ func TestHandleBind_InvalidKeyRejected(t *testing.T) {
 // TestHandleBind_EmptyWorkspace: a missing workspace is a 400, not a silent
 // no-op that could mask a frontend wiring bug.
 func TestHandleBind_EmptyWorkspace(t *testing.T) {
-	srv, _, _ := newBindServer(t)
-	w := postBind(t, srv, `{"key":"dashboard:pj:abc0123456789012:general","node":"local","workspace":""}`)
+	_, hs, _, _ := newBindServer(t)
+	w := postBind(t, hs, `{"key":"dashboard:pj:abc0123456789012:general","node":"local","workspace":""}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d want 400 for empty workspace (body=%s)", w.Code, w.Body.String())
 	}
@@ -118,12 +117,12 @@ func TestHandleBind_EmptyWorkspace(t *testing.T) {
 // TestHandleBind_RemoteNodeNoop: a remote-node bind is acked (200) but writes
 // NO override on the local router — remote sessions resolve cwd on their node.
 func TestHandleBind_RemoteNodeNoop(t *testing.T) {
-	srv, router, root := newBindServer(t)
+	_, hs, router, root := newBindServer(t)
 	chatKey := "dashboard:pj:abc0123456789012"
 	key := chatKey + ":general"
 	// Even with a valid-looking workspace, a remote node must not persist locally.
 	projDir := mkProjDir(t, root)
-	w := postBind(t, srv, `{"key":"`+key+`","node":"remote1","workspace":"`+projDir+`"}`)
+	w := postBind(t, hs, `{"key":"`+key+`","node":"remote1","workspace":"`+projDir+`"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d want 200 (remote no-op ack) (body=%s)", w.Code, w.Body.String())
 	}
@@ -135,13 +134,13 @@ func TestHandleBind_RemoteNodeNoop(t *testing.T) {
 // TestHandleBind_ChatKeyDerivation: the override is stored under the 3-segment
 // chat-key prefix (last ":agentID" stripped), matching the handleSend contract.
 func TestHandleBind_ChatKeyDerivation(t *testing.T) {
-	srv, router, root := newBindServer(t)
+	_, hs, router, root := newBindServer(t)
 	projDir := mkProjDir(t, root)
 	// 4-segment legacy direct key — chat key is everything before the last ':'.
 	key := "dashboard:direct:2026-06-06-120228-1-gaokao:general"
 	chatKey := "dashboard:direct:2026-06-06-120228-1-gaokao"
 
-	if w := postBind(t, srv, `{"key":"`+key+`","node":"local","workspace":"`+projDir+`"}`); w.Code != http.StatusOK {
+	if w := postBind(t, hs, `{"key":"`+key+`","node":"local","workspace":"`+projDir+`"}`); w.Code != http.StatusOK {
 		t.Fatalf("status=%d want 200 (body=%s)", w.Code, w.Body.String())
 	}
 	if got := router.Workspace(chatKey); got != projDir {
@@ -157,9 +156,9 @@ func TestHandleBind_ChatKeyDerivation(t *testing.T) {
 // (":agent") must be rejected so the empty-string chat key can never carry an
 // override (which would poison every default Workspace lookup).
 func TestHandleBind_EmptyChatKeyPrefix(t *testing.T) {
-	srv, router, root := newBindServer(t)
+	_, hs, router, root := newBindServer(t)
 	projDir := mkProjDir(t, root)
-	w := postBind(t, srv, `{"key":":general","node":"local","workspace":"`+projDir+`"}`)
+	w := postBind(t, hs, `{"key":":general","node":"local","workspace":"`+projDir+`"}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d want 400 for empty chat-key prefix (body=%s)", w.Code, w.Body.String())
 	}
@@ -170,8 +169,8 @@ func TestHandleBind_EmptyChatKeyPrefix(t *testing.T) {
 
 // TestHandleBind_BadJSON: a malformed body is a 400, no panic.
 func TestHandleBind_BadJSON(t *testing.T) {
-	srv, _, _ := newBindServer(t)
-	w := postBind(t, srv, `{not json`)
+	_, hs, _, _ := newBindServer(t)
+	w := postBind(t, hs, `{not json`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d want 400 for malformed JSON (body=%s)", w.Code, w.Body.String())
 	}
@@ -181,7 +180,7 @@ func TestHandleBind_BadJSON(t *testing.T) {
 // behind auth on the mux (a regression that dropped the route would make the
 // frontend eager-bind silently 404).
 func TestHandleBind_RouteRegistered(t *testing.T) {
-	srv, _, root := newBindServer(t)
+	srv, _, _, root := newBindServer(t)
 	projDir := mkProjDir(t, root)
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/bind",
 		strings.NewReader(`{"key":"dashboard:pj:abc0123456789012:general","node":"local","workspace":"`+projDir+`"}`))
@@ -201,11 +200,11 @@ func TestHandleBind_RouteRegistered(t *testing.T) {
 // second bind from the same IP is rejected with 429 AND that a /send from the
 // same IP is then also throttled (proving a shared budget, not two pools).
 func TestHandleBind_SharesSendRateLimiter(t *testing.T) {
-	srv, router, root := newBindServer(t)
+	_, hs, router, root := newBindServer(t)
 	projDir := mkProjDir(t, root)
 	// burst 1, refill ~0 over the test window: the first request consumes the
 	// only token, every subsequent one (bind OR send) is throttled.
-	srv.sendH.sendLimiter = newIPLimiterWithProxy(rate.Limit(0.001), 1, false)
+	hs.sendH.sendLimiter = newIPLimiterWithProxy(rate.Limit(0.001), 1, false)
 
 	body := `{"key":"dashboard:pj:abc0123456789012:general","node":"local","workspace":"` + projDir + `"}`
 	bind := func() int {
@@ -213,7 +212,7 @@ func TestHandleBind_SharesSendRateLimiter(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "203.0.113.9:5000"
 		w := httptest.NewRecorder()
-		srv.sendH.handleBind(w, req)
+		hs.sendH.handleBind(w, req)
 		return w.Code
 	}
 
@@ -230,7 +229,7 @@ func TestHandleBind_SharesSendRateLimiter(t *testing.T) {
 	sreq.Header.Set("Content-Type", "application/json")
 	sreq.RemoteAddr = "203.0.113.9:5000"
 	sw := httptest.NewRecorder()
-	srv.sendH.handleSend(sw, sreq)
+	hs.sendH.handleSend(sw, sreq)
 	if sw.Code != http.StatusTooManyRequests {
 		t.Fatalf("send after bind exhausted the shared limiter: status=%d want 429", sw.Code)
 	}

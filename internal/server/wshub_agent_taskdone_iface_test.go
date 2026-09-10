@@ -3,11 +3,11 @@ package server
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // TestAgentTaskDoneSetter_SatisfiedByCLIEventLog pins R217-ARCH-2 / #625:
-// wshub_agent.go's `maybeWireLinkerTailer` no longer names *cli.EventLog
+// wshub_agent.go's `maybeWireLinkerTailer` no longer names *ring.EventLog
 // at the SetOnAgentTaskDone call site. The hook flows through the local
 // agentTaskDoneSetter interface, so any backend whose event-log type
 // exposes the matching method satisfies the surface implicitly via Go
@@ -16,11 +16,11 @@ import (
 // The test compiles-fails (or fails at runtime here) if either:
 //
 //  1. The agentTaskDoneSetter method set drifts (rename / signature
-//     change) such that *cli.EventLog no longer satisfies it. That
+//     change) such that *ring.EventLog no longer satisfies it. That
 //     would break the production wiring without a build-time signal
-//     because *cli.EventLog is only assigned to the interface variable
+//     because *ring.EventLog is only assigned to the interface variable
 //     inside a conditional branch in maybeWireLinkerTailer.
-//  2. A future refactor reverts the call site to type *cli.EventLog
+//  2. A future refactor reverts the call site to type *ring.EventLog
 //     directly — the assertion that the interface is the contract
 //     surface (not the concrete type) lives explicitly here.
 //
@@ -31,7 +31,7 @@ import (
 func TestAgentTaskDoneSetter_SatisfiedByCLIEventLog(t *testing.T) {
 	t.Parallel()
 	// Compile-time guard.
-	var _ agentTaskDoneSetter = (*cli.EventLog)(nil)
+	var _ agentTaskDoneSetter = (*ring.EventLog)(nil)
 
 	// Runtime guard with a stub: the call site must dispatch through
 	// the interface. We verify the method exists by exercising it on
@@ -54,7 +54,7 @@ func (f *fakeTaskDoneSetter) SetOnAgentTaskDone(func(taskID, status string)) {
 
 // TestMaybeWireLinkerTailer_NoOpWhenAgentEventLogNil exercises the
 // guard added alongside R217-ARCH-2 / #625: when sess.AgentEventLog()
-// returns a typed-nil *cli.EventLog (legitimate for fake test
+// returns a typed-nil *ring.EventLog (legitimate for fake test
 // processes / dead sessions), the rawLog != nil branch must be
 // rejected so we never call SetOnAgentTaskDone on a nil receiver.
 //
@@ -70,7 +70,7 @@ func (f *fakeTaskDoneSetter) SetOnAgentTaskDone(func(taskID, status string)) {
 // downgrade with a stand-alone helper that mirrors the exact shape.
 func TestMaybeWireLinkerTailer_NoOpWhenAgentEventLogNil(t *testing.T) {
 	t.Parallel()
-	var rawLog *cli.EventLog // typed-nil, mirrors AgentEventLog()'s zero return.
+	var rawLog *ring.EventLog // typed-nil, mirrors AgentEventLog()'s zero return.
 	if rawLog != nil {
 		// Promotion to interface only happens AFTER the typed-nil
 		// guard — that's the contract we are pinning.

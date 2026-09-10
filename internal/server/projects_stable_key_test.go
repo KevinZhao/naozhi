@@ -35,7 +35,7 @@ func newProjectsListForStableKeyTest(t *testing.T, enabled bool) (rows []map[str
 	}
 
 	router := session.NewRouter(session.RouterConfig{})
-	srv := NewWithOptions(ServerOptions{
+	_, hs := buildServerWithHandlers(ServerOptions{
 		Addr:                    ":0",
 		Router:                  router,
 		Platforms:               map[string]platform.Platform{"test": &mockPlatform{}},
@@ -43,11 +43,10 @@ func newProjectsListForStableKeyTest(t *testing.T, enabled bool) (rows []map[str
 		ProjectManager:          mgr,
 		ProjectStableKeyEnabled: enabled,
 	})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/projects", nil)
 	w := httptest.NewRecorder()
-	srv.projectH.HandleList(w, req)
+	hs.projectH.HandleList(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}

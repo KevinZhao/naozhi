@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -312,7 +312,7 @@ func mapJSONLLine(line []byte) []clievent.EventEntry {
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil
 	}
-	ts := parseTranscriptTime(raw.Timestamp)
+	ts := claudefs.TimestampMillis(raw.Timestamp)
 
 	switch raw.Type {
 	case "user":
@@ -371,7 +371,7 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 			Time:    ts,
 			Type:    "text",
 			Summary: textutil.TruncateRunes(s, 120),
-			Detail:  textutil.TruncateRunes(s, EventDetailMaxRunes),
+			Detail:  textutil.TruncateRunes(s, clievent.EventDetailMaxRunes),
 		}}
 	}
 
@@ -393,7 +393,7 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 				Time:    ts,
 				Type:    "text",
 				Summary: textutil.TruncateRunes(block.Text, 120),
-				Detail:  textutil.TruncateRunes(block.Text, EventDetailMaxRunes),
+				Detail:  textutil.TruncateRunes(block.Text, clievent.EventDetailMaxRunes),
 			})
 		case "tool_result":
 			summary, detail, persistedPath, skip := flattenToolResultRaw(block.Content)
@@ -442,14 +442,14 @@ func mapAssistantLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 				Time:    ts,
 				Type:    "thinking",
 				Summary: textutil.TruncateRunes(block.Text, 120),
-				Detail:  textutil.TruncateRunes(block.Text, EventDetailMaxRunes),
+				Detail:  textutil.TruncateRunes(block.Text, clievent.EventDetailMaxRunes),
 			})
 		case "text":
 			out = append(out, clievent.EventEntry{
 				Time:    ts,
 				Type:    "text",
 				Summary: textutil.TruncateRunes(block.Text, 120),
-				Detail:  textutil.TruncateRunes(block.Text, EventDetailMaxRunes),
+				Detail:  textutil.TruncateRunes(block.Text, clievent.EventDetailMaxRunes),
 			})
 		case "tool_use":
 			entry := clievent.EventEntry{
@@ -552,15 +552,4 @@ func extractPersistedPath(s string) string {
 		return ""
 	}
 	return "tool-results/" + base
-}
-
-func parseTranscriptTime(ts string) int64 {
-	if ts == "" {
-		return 0
-	}
-	t, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		return 0
-	}
-	return t.UnixMilli()
 }

@@ -8,7 +8,7 @@
 //   - Maintain a sparse <keyhash>.idx sidecar that drives O(1) rotate
 //     tail-cut and startup recovery.
 //   - Rotate oversized log files by keeping only the newest N records.
-//   - Provide a non-blocking PersistSink so cli.EventLog Append/AppendBatch
+//   - Provide a non-blocking PersistSink so ring.EventLog Append/AppendBatch
 //     never stall on disk I/O.
 //
 // Out of scope: reading history back (internal/history/naozhilog),
@@ -28,16 +28,16 @@
 //
 // # Three "eventlog" packages
 //
-//   - cli.EventLog (internal/cli/eventlog.go) — in-memory ring buffer and
+//   - ring.EventLog (internal/cli/eventlog.go) — in-memory ring buffer and
 //     producer of every event.
 //   - internal/eventlog/persist (this package) — on-disk writer fed by
-//     cli.EventLog through the PersistSink closure.
+//     ring.EventLog through the PersistSink closure.
 //   - internal/eventlog/schema — wire format shared by persist and replay
 //     readers; strictly upstream of cli.
 //   - internal/history/naozhilog — replay reader for the files persist wrote.
 //
 // persist.PersistSink (entry.go) takes persist.Entry (post-marshal);
-// cli.PersistSink takes []clievent.EventEntry (pre-marshal). Only
+// ring.PersistSink takes []clievent.EventEntry (pre-marshal). Only
 // internal/session/eventlog_bridge.go translates between them.
 //
 // Persister implements none of the internal/eventlog/api interfaces

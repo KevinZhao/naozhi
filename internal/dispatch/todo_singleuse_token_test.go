@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
@@ -44,7 +44,7 @@ func (f *fakeSingleUsePlatform) replyCount() int {
 	return len(f.replies)
 }
 
-func todoWriteEvent(t *testing.T) cli.Event {
+func todoWriteEvent(t *testing.T) clievent.Event {
 	t.Helper()
 	input, err := json.Marshal(map[string]any{
 		"todos": []map[string]any{
@@ -55,9 +55,9 @@ func todoWriteEvent(t *testing.T) cli.Event {
 	if err != nil {
 		t.Fatalf("marshal todos: %v", err)
 	}
-	return cli.Event{
+	return clievent.Event{
 		Type:    "assistant",
-		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: input}}},
+		Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: input}}},
 	}
 }
 

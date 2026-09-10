@@ -143,53 +143,104 @@ func TestNewHub_DerivesCtxFromOptsParentCtx(t *testing.T) {
 	}
 }
 
-// TestServer_AppCtxWiredToHub locks the Server-side half of the CTX1
-// contract: Start must stash the app ctx on s.appCtx before calling
-// registerDashboard, and registerDashboard must forward it as
-// HubOptions.ParentCtx. Checked at the source level so a refactor that
-// drops either line triggers a clear failure.
+// TestServer_AppCtxWiredToHub locks the Server-side half of the CTX1 contract:
+// the app context must be live when NewHub reads it, and cancelling it must
+// tear the Hub down even if Shutdown is never called.
+//
+// This was a source-level pin on the old shape (`s.appCtx = serveCtx` inside
+// Start, `serveCtx, serveCancel := context.WithCancel(ctx)`). #2552 moved both
+// the context and the Hub into buildServer, which makes the invariant
+// structurally unbreakable rather than merely asserted: there is no longer a
+// point in the Server's life where appCtx is nil while a Hub exists. So the
+// test now drives the real constructor and observes the cascade — a stronger
+// check that cannot rot when the wiring is rearranged again.
 func TestServer_AppCtxWiredToHub(t *testing.T) {
+	t.Parallel()
+
+	srv := NewWithOptions(ServerOptions{
+		Addr:   ":0",
+		Router: session.NewRouter(session.RouterConfig{}),
+	})
+
+	// The pre-Start window is gone: both exist straight out of the constructor.
+	if srv.appCtx == nil {
+		t.Fatal("appCtx is nil after NewWithOptions — construction must not wait for Start (#2552)")
+	}
+	if srv.appCancel == nil {
+		t.Fatal("appCancel is nil after NewWithOptions — nothing could cancel the app context")
+	}
+	if srv.hub == nil {
+		t.Fatal("hub is nil after NewWithOptions — the whole point of #2552 is that this state does not exist")
+	}
+
+	select {
+	case <-srv.hub.ctx.Done():
+		t.Fatal("hub.ctx already Done straight after construction")
+	default:
+	}
+
+	// CTX1: an app-level cancel must reach the Hub without Shutdown().
+	srv.appCancel()
+	select {
+	case <-srv.hub.ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("hub.ctx not Done within 2s of appCancel — HubOptions.ParentCtx is not wired to appCtx (CTX1)")
+	}
+
+	// Idempotent teardown must still work after the parent cancel.
+	done := make(chan struct{})
+	go func() {
+		srv.hub.Shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hub.Shutdown() hung after appCancel")
+	}
+}
+
+// TestServerStart_LinksCallerCtxWithoutSecondContext keeps the one thing the
+// behavioural test above cannot observe: Start must NOT mint its own
+// cancellable context any more. Two contexts is how the old ordering window
+// existed in the first place — construction read one while Start installed
+// another — and a refactor that reintroduces `context.WithCancel(ctx)` inside
+// Start would give the Hub a parent that nothing cancels.
+//
+// R20260531-GO-001 is preserved through appCancel: a srv.Serve error cancels
+// the app context directly, so the shutdown goroutine's discoveryCache.Wait()
+// still wakes instead of deadlocking.
+func TestServerStart_LinksCallerCtxWithoutSecondContext(t *testing.T) {
 	t.Parallel()
 
 	_, self, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(self)
-
-	serverSrc, err := os.ReadFile(filepath.Join(dir, "server.go"))
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(self), "server.go"))
 	if err != nil {
 		t.Fatalf("read server.go: %v", err)
 	}
-	// R20260531-GO-001: appCtx is now the serveCtx — a context.WithCancel
-	// child of the caller ctx — so a srv.Serve error (not just SIGTERM)
-	// cancels the hub's sessions and the background loops, letting the
-	// shutdown goroutine's discoveryCache.Wait() return instead of
-	// deadlocking. The CTX1 invariant (appCtx set before registerDashboard,
-	// a cancelable child of the caller ctx) is preserved; only the source
-	// it derives from changed from ctx to serveCtx.
-	if !strings.Contains(string(serverSrc), "s.appCtx = serveCtx") {
-		t.Error("server.go: Start must assign s.appCtx = serveCtx before registerDashboard " +
-			"(CTX1 requires appCtx to be set when NewHub reads it)")
-	}
-	if !regexp.MustCompile(`serveCtx,\s*serveCancel\s*:=\s*context\.WithCancel\(ctx\)`).Match(serverSrc) {
-		t.Error("server.go: serveCtx must derive from the caller ctx via context.WithCancel(ctx) " +
-			"(R20260531-GO-001: Serve-error path needs a cancelable child to wake the shutdown goroutine)")
-	}
-	// Match `appCtx ... context.Context` allowing arbitrary whitespace
-	// between the name and the type. gofmt aligns struct fields when
-	// adjacent fields have longer names, so a strict single-space match
-	// would break the moment a sibling field is renamed.
-	if !regexp.MustCompile(`\bappCtx\s+context\.Context\b`).Match(serverSrc) {
-		t.Error("server.go: Server struct must declare appCtx context.Context field")
-	}
+	body := string(raw)
 
-	dashSrc, err := os.ReadFile(filepath.Join(dir, "routes.go"))
-	if err != nil {
-		t.Fatalf("read routes.go: %v", err)
+	startIdx := strings.Index(body, "func (s *Server) Start(ctx context.Context) error {")
+	if startIdx < 0 {
+		t.Fatal("server.go: Server.Start not found")
 	}
-	if !strings.Contains(string(dashSrc), "ParentCtx: s.appCtx") {
-		t.Error("routes.go: registerDashboard must forward s.appCtx into " +
-			"HubOptions.ParentCtx (CTX1 wiring)")
+	start := body[startIdx:]
+	if strings.Contains(start, "context.WithCancel(ctx)") {
+		t.Error("server.go Start: mints its own cancellable context again — appCtx is created in buildServer, " +
+			"and a second context reopens the pre-Start ordering window #2552 closed")
+	}
+	if !strings.Contains(start, "s.appCancel()") {
+		t.Error("server.go Start: must call s.appCancel() (the caller-ctx linker, the deferred teardown and " +
+			"the srv.Serve error path all go through it — R20260531-GO-001)")
+	}
+	// The app context itself must be a cancellable child created at construction.
+	if !regexp.MustCompile(`s\.appCtx,\s*s\.appCancel\s*=\s*context\.WithCancel\(`).MatchString(body) {
+		t.Error("server.go: buildServer must create appCtx/appCancel with context.WithCancel (#2552)")
+	}
+	if !regexp.MustCompile(`\bappCtx\s+context\.Context\b`).MatchString(body) {
+		t.Error("server.go: Server struct must declare appCtx context.Context field")
 	}
 }

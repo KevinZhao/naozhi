@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -51,10 +51,10 @@ func (h *Handlers) HandleOverride(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appliedVia, err := h.router.SetSessionTuning(r.Context(), req.Key, req.Model, req.Effort)
+	appliedVia, err := h.deps.Router.SetSessionTuning(r.Context(), req.Key, req.Model, req.Effort)
 	if err != nil {
 		switch {
-		case errors.Is(err, cli.ErrSetModelRejected):
+		case errors.Is(err, clierr.ErrSetModelRejected):
 			// CLI text is safe: sanitized at the protocol layer
 			// (parseControlAck / ACP interception) before it entered the
 			// error chain.

@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -87,8 +89,8 @@ func (f *fakeProcess) Kill() {
 	f.mu.Unlock()
 }
 
-func (f *fakeProcess) Send(_ context.Context, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
-	return &cli.SendResult{Text: "fake"}, nil
+func (f *fakeProcess) Send(_ context.Context, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+	return &clievent.SendResult{Text: "fake"}, nil
 }
 
 func (f *fakeProcess) State() cli.ProcessState {
@@ -146,7 +148,7 @@ func (f *fakeProcess) EventLastNVisible(visibleTarget, maxTotal int) []clievent.
 	start := n
 	for i := n - 1; i >= 0 && (n-i) <= limit; i-- {
 		start = i
-		if cli.IsVisibleEntry(f.entries[i]) {
+		if clievent.IsVisibleEntry(f.entries[i]) {
 			visible++
 			if visibleTarget > 0 && visible >= visibleTarget {
 				break
@@ -234,26 +236,26 @@ func (f *fakeProcess) InterruptViaControl() error {
 	// (which has other side-effects across the test suite).
 	err := f.viaControlErr
 	if f.viaControlRunning && !f.isRunning {
-		err = cli.ErrNoActiveTurn
+		err = clierr.ErrNoActiveTurn
 	}
 	f.mu.Unlock()
 	return err
 }
 func (f *fakeProcess) PID() int                              { return 0 }
 func (f *fakeProcess) InjectHistory(_ []clievent.EventEntry) {}
-func (f *fakeProcess) TurnAgents() []cli.SubagentInfo        { return nil }
+func (f *fakeProcess) TurnAgents() []ring.SubagentInfo       { return nil }
 
 // Normalize-layer stubs (multi-backend §8.8) — fakeProcess is used by router
 // tests that pre-date multi-backend, so all three return zero values to
 // preserve historical SessionSnapshot output.
-func (f *fakeProcess) ContextUsagePercent() float64       { return 0 }
-func (f *fakeProcess) TurnDurationMs() int64              { return 0 }
-func (f *fakeProcess) SpawnDiags() []cli.SpawnDiag        { return f.spawnDiags }
-func (f *fakeProcess) MeteringUsage() []cli.MeteringEntry { return nil }
-func (f *fakeProcess) MeteringGen() uint64                { return 0 }
-func (f *fakeProcess) Model() string                      { return "" }
-func (f *fakeProcess) LiveVersion() string                { return "" }
-func (f *fakeProcess) Effort() string                     { return "" }
+func (f *fakeProcess) ContextUsagePercent() float64            { return 0 }
+func (f *fakeProcess) TurnDurationMs() int64                   { return 0 }
+func (f *fakeProcess) SpawnDiags() []cli.SpawnDiag             { return f.spawnDiags }
+func (f *fakeProcess) MeteringUsage() []clievent.MeteringEntry { return nil }
+func (f *fakeProcess) MeteringGen() uint64                     { return 0 }
+func (f *fakeProcess) Model() string                           { return "" }
+func (f *fakeProcess) LiveVersion() string                     { return "" }
+func (f *fakeProcess) Effort() string                          { return "" }
 func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 	ch := make(chan struct{})
 	return ch, func() {}
@@ -261,7 +263,7 @@ func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 
 // Passthrough mocks — default to "not supported" so legacy-path tests are
 // unchanged. Passthrough-specific tests inject a real *cli.Process.
-func (f *fakeProcess) SendPassthrough(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
+func (f *fakeProcess) SendPassthrough(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error) {
 	return f.Send(ctx, text, images, onEvent)
 }
 func (f *fakeProcess) DiscardPassthroughPending(_ error) {}
@@ -1970,7 +1972,7 @@ func TestInterruptSessionSafe_PrefersControlRequest(t *testing.T) {
 func TestInterruptSessionSafe_FallsBackOnUnsupported(t *testing.T) {
 	r := newTestRouter(3)
 	proc := newRunningProc()
-	proc.viaControlErr = cli.ErrInterruptUnsupported // ACP-like protocol
+	proc.viaControlErr = clierr.ErrInterruptUnsupported // ACP-like protocol
 	injectSession(r, "k1", proc)
 
 	outcome := r.InterruptSessionSafe("k1")
@@ -2016,7 +2018,7 @@ func TestInterruptSessionSafe_TransportErrorDoesNotFallBack(t *testing.T) {
 	// Surface the error so F6's reconcile path cleans up the zombie.
 	r := newTestRouter(3)
 	proc := newRunningProc()
-	proc.viaControlErr = cli.ErrMessageTooLarge // any non-sentinel write-ish error
+	proc.viaControlErr = clierr.ErrMessageTooLarge // any non-sentinel write-ish error
 	injectSession(r, "k1", proc)
 
 	outcome := r.InterruptSessionSafe("k1")
@@ -2064,59 +2066,6 @@ func TestInterruptSessionSafe_DeadProcess(t *testing.T) {
 // resolveResumeID — jsonl-existence pre-check
 // ---------------------------------------------------------------------------
 
-func TestClaudeProjectSlug(t *testing.T) {
-	cases := []struct {
-		name string
-		cwd  string
-		want string
-	}{
-		{"root", "/", "-"},
-		{"typical", "/home/user/workspace/proj", "-home-user-workspace-proj"},
-		{"trailing slash preserved", "/home/user/", "-home-user-"},
-		{"nested", "/home/user/workspace/naozhi", "-home-user-workspace-naozhi"},
-		{"empty", "", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := claudeProjectSlug(tc.cwd); got != tc.want {
-				t.Errorf("claudeProjectSlug(%q) = %q, want %q", tc.cwd, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestClaudeProjectSlug_MatchesDiscovery locks session.claudeProjectSlug and
-// discovery.ClaudeProjectSlug to the same output for every input, so a future
-// change to Claude CLI's project-directory naming scheme (which affects
-// ~/.claude/projects/ layout) cannot be applied to only one of the two call
-// sites. RNEW-002.
-func TestClaudeProjectSlug_MatchesDiscovery(t *testing.T) {
-	inputs := []string{
-		"",
-		"/",
-		"/home/user",
-		"/home/user/",
-		"/home/user/workspace/naozhi",
-		"/tmp/my-proj",
-		"relative/path",
-		"//double//slash//",
-		"/with spaces/in path",
-		"/unicode/目录/路径",
-	}
-	for _, cwd := range inputs {
-		// Subtest name must not contain "/", which go test treats as a
-		// hierarchy separator and silently rewrites to "_" — two inputs
-		// differing only in slashes would collide under -run.
-		t.Run(fmt.Sprintf("cwd=%q", cwd), func(t *testing.T) {
-			s := claudeProjectSlug(cwd)
-			d := discovery.ClaudeProjectSlug(cwd)
-			if s != d {
-				t.Errorf("session %q vs discovery %q for cwd %q — the two implementations have drifted; update both call sites in lock-step", s, d, cwd)
-			}
-		})
-	}
-}
-
 func TestResolveResumeID(t *testing.T) {
 	// Scratch claudeDir with a single jsonl under workspace slug "A" only.
 	claudeDir := t.TempDir()
@@ -2125,7 +2074,7 @@ func TestResolveResumeID(t *testing.T) {
 	okID := "sess-ok"
 	missingID := "sess-missing"
 
-	projA := filepath.Join(claudeDir, "projects", claudeProjectSlug(workspaceA))
+	projA := claudefs.ProjectDir(claudeDir, workspaceA)
 	if err := os.MkdirAll(projA, 0o700); err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // ---------------------------------------------------------------------------
@@ -366,7 +368,7 @@ func TestScan_IncludesCLISession(t *testing.T) {
 	makeSessionFile(t, sessDir, sf)
 
 	// Create matching project dir and JSONL file
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -424,7 +426,7 @@ func TestScan_SkipsIdleVSCodeWrapper(t *testing.T) {
 		Kind:       "interactive",
 		Entrypoint: "claude-vscode",
 	})
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 	projDir := filepath.Join(claudeDir, "projects", dirName)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)

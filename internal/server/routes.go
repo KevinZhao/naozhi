@@ -4,12 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
-	"golang.org/x/time/rate"
-
-	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -42,121 +38,58 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 // errEmptyJSONBody re-exports httputil.ErrEmptyJSONBody for errors.Is call sites.
 var errEmptyJSONBody = httputil.ErrEmptyJSONBody
 
-func (s *Server) registerDashboard() {
-	s.hub = NewHub(HubOptions{
-		Router:    s.router,
-		Agents:    s.agents,
-		AgentCmds: s.agentCommands,
-		DashToken: s.dashboardToken,
-		// Live getter, not a snapshot: RotateCookieGen must invalidate WS
-		// upgrades on the next handshake (#1398).
-		CookieMACFn: s.auth.CookieMAC,
-		Guard:       s.sessionGuard,
-		Queue:       s.msgQueue,
-		Nodes:       s.nodes,
-		ProjectMgr:  s.projectMgr,
-		Resolver:    s.resolver,
-		// Wired at construction (both built in New) so there is no
-		// setter-vs-Start ordering window (#431).
-		Scheduler:        s.scheduler,
-		ScratchPool:      s.scratchPool,
-		AllowedRoot:      s.allowedRoot,
-		TrustedProxy:     s.auth.TrustedProxy,
-		WSAuthLimiter:    s.auth.LoginAllow,
-		WSUpgradeLimiter: s.auth.WSUpgradeAllow,
-		// HandleUpgrade mints nz_anon for uploadOwner and refuses the
-		// upgrade if minting fails; never falls back to clientIP (#1326).
-		Auth: s.auth,
-		// Parent cancel cascades to Hub goroutines even without Shutdown();
-		// nil (tests bypassing Start) falls back to Background in NewHub.
-		ParentCtx: s.appCtx,
-	})
-
-	// /api/sessions snapshot enrichment goes through the hub's tailer registry.
-	if s.sessionH != nil {
-		s.sessionH.SetSnapshotEnricher(s.hub.enrichSnapshot)
-	}
-
-	// projectH is constructed before the hub in New(); its base ctx is set here.
-	if s.projectH != nil {
-		s.projectH.SetBaseContext(s.hub.ctx)
-	}
-
+// registerDashboard registers the dashboard's routes. Construction moved to
+// buildDashboard in #2552 and the goroutine starts moved to
+// startDashboardLoops in #2553, so this function is registration only —
+// nothing here may build a dependency or start a goroutine. That is what lets
+// buildServer call it with a local handlerSet that then goes out of scope.
+// startDashboardLoops starts the dashboard's background goroutines. Separate
+// from registerDashboard since #2553: registration runs at construction (so the
+// handlerSet can be a local), but a goroutine started at construction would
+// leak its ticker if a later construction step panicked, so the starts stay in
+// Start. Same rule buildDashboard already follows.
+func (s *Server) startDashboardLoops() {
 	// The upload-store cleanup loop is process-lifetime (appCtx), not
 	// Hub-lifetime: a Hub hot-reload must not cancel it and leak temp files.
-	// The hub.ctx fallback only covers tests that bypass Start (#579).
-	uploads := newUploadStore()
-	cleanupCtx := s.appCtx
-	if cleanupCtx == nil {
-		cleanupCtx = s.hub.ctx
-	}
-	uploads.StartCleanup(cleanupCtx)
-	s.hub.SetUploadStore(uploads)
-	s.sendH = &SendHandler{
-		nodeAccess: s.nodes,
-		engine:     s.hub.engine,
-		// SendRouter consumer view; reads never go via the engine's HubRouter (#566).
-		router:        s.hub.router,
-		uploadStore:   uploads,
-		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.TrustedProxy), // 10 uploads/min per IP
-		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.TrustedProxy), // 30 sends/min per IP (burst 30)
-		auth:          s.auth,
-		trustedProxy:  s.auth.TrustedProxy,
-		orient:        s.orient,
-	}
+	s.uploadStore.StartCleanup(s.appCtx)
 
-	// Scratch (ephemeral aside) API: pool built in New(); start sweeper + mount.
 	if s.scratchPool != nil {
 		s.scratchPool.StartSweeper()
-		s.scratchH = scratch.New(scratch.Deps{
-			Broadcaster: s.hub,
-			Router:      s.hub.router,
-			Pool:        s.scratchPool,
-			OpenLimit:   newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy),
-			Agents:      s.agents,
-		})
 	}
+}
 
-	// Push session list changes to WS clients
-	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
-
-	// cron and sysession share one runtelemetry.Broadcaster; per-subsystem
-	// WS payload selection happens inside hubBroadcaster.
-	telemetry := newHubBroadcaster(s.hub)
-	if s.scheduler != nil {
-		s.scheduler.SetTelemetry(telemetry)
+func (s *Server) registerDashboard(hs *handlerSet) {
+	// Authenticated API routes. Every dashboard sub-package declares its own
+	// patterns (its routes.go) and mountRoutes applies the API chain, so this
+	// function no longer decides any feature's URL space (#2554).
+	s.mountRoutes(hs.cliH.Routes())
+	s.mountRoutes(hs.accessProfilesH.Routes())
+	s.mountRoutes(hs.sessionH.Routes())
+	s.mountRoutes(hs.costH.Routes())
+	s.mountRoutes(hs.agentEventsH.Routes())
+	s.mountRoutes(hs.sendH.Routes())
+	s.mountRoutes(hs.discoveryH.Routes())
+	s.mountRoutes(hs.projectH.Routes())
+	s.mountRoutes(hs.plannerH.Routes())
+	s.mountRoutes(hs.transcribeH.Routes())
+	s.mountRoutes(hs.cronH.Routes())
+	s.mountRoutes(hs.systemH.Routes())
+	s.mountRoutes(hs.uiSettingsH.Routes())
+	s.mountRoutes(hs.memoryH.Routes())
+	s.mountRoutes(hs.ccAssetsH.Routes())
+	// scratchH is nil when the ephemeral-aside feature is off.
+	if hs.scratchH != nil {
+		s.mountRoutes(hs.scratchH.Routes())
 	}
-	if s.sysessionMgr != nil {
-		s.sysessionMgr.SetTelemetry(telemetry)
-	}
-
-	// Authenticated API routes
-	auth := s.auth.RequireAuth
-	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.Handle))
-	// Access profiles: list returns only non-sensitive fields (never env
-	// values or tokens); create is disabled (400) when ConfigPath is unset.
-	s.mux.HandleFunc("GET /api/access-profiles", auth(s.accessProfilesH.HandleList))
-	s.mux.HandleFunc("POST /api/access-profiles", auth(s.accessProfilesH.HandleCreate))
-	// Route groups live in same-file helpers so the routes_snapshot AST gate
-	// (which scans routes.go as a whole) stays stable.
-	s.registerSessionRoutes(auth)
-	s.registerDiscoveredRoutes(auth)
-	s.registerProjectRoutes(auth)
-	// Process-resource probe (RSS / goroutines / planner fan-out) that does not
-	// require the loopback-only expvar surface.
-	s.mux.HandleFunc("GET /api/planner/stats", auth(s.plannerH.HandleStats))
-	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.HandleTranscribe))
-	s.registerCronRoutes(auth)
-	// system-session daemons (docs/rfc/system-session.md §9.2/§9.3)
-	s.mux.HandleFunc("GET /api/system/daemons", auth(s.systemH.HandleDaemons))
-	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.systemH.HandleClearLabelOrigin))
-	// self-update (docs/rfc/dashboard-update-notice.md)
-	s.mux.HandleFunc("GET /api/system/update", auth(s.systemH.HandleUpdateStatus))
-	s.mux.HandleFunc("POST /api/system/update/apply", auth(s.systemH.HandleUpdateApply))
-	// instance-wide UI preferences, persisted server-side (dashboard/ext/uisettings)
-	s.mux.HandleFunc("GET /api/settings", auth(s.uiSettingsH.HandleGet))
-	s.mux.HandleFunc("PUT /api/settings", auth(s.uiSettingsH.HandlePut))
-	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.HandleLogout))
+	s.mux.HandleFunc("POST /api/auth/logout", s.apiChain()(s.auth.HandleLogout))
+	// Health probes are server-owned (no sub-package) and unauthenticated at
+	// the route level: /health gates its stats section on auth internally,
+	// /livez is a no-deps liveness probe, /readyz gates on minimal wiring
+	// (#609). Registered here rather than in Start since #2633 — nothing
+	// they read is Start-time state any more.
+	s.mux.HandleFunc("GET /health", s.healthH.handleHealth)
+	s.mux.HandleFunc("GET /livez", s.healthH.handleLivez)
+	s.mux.HandleFunc("GET /readyz", s.healthH.handleReadyz)
 	// pprof / expvar are auth-gated + loopback-only AND require debug_mode so a
 	// leaked dashboard token cannot enumerate goroutine stacks or counters.
 	// Runbook: docs/ops/pprof.md.
@@ -164,17 +97,11 @@ func (s *Server) registerDashboard() {
 		s.registerPprof()
 		s.registerExpvar()
 	}
-	s.registerScratchRoutes(auth)
-	// memory link preview (docs/rfc/memory-link-rendering.md): serves
-	// ~/.claude/projects/<scope>/memory/<slug>.md for [[slug]] hover cards.
-	if s.memoryH == nil {
-		s.memoryH = memory.New(resolveClaudeProjectsDir(), newIPLimiterWithProxy(memory.MemoryLimiterRate, memory.MemoryLimiterBurst, s.auth.TrustedProxy))
-	}
-	s.mux.HandleFunc("GET /api/memory/{slug}", auth(s.memoryH.HandleGet))
 
-	// Installed-asset browser (docs/rfc/cc-asset-browser.md).
-	s.registerAssetBrowserRoutes(auth)
-
+	// Server-owned routes: the dashboard shell, static assets and the WS
+	// upgrade. These stay here because they are not a feature's API surface —
+	// no dashboard sub-package owns /dashboard or /static/*.
+	auth := s.apiChain()
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.HandleLogin)
 	// No-JS form-action target: a JS-disabled login submit lands in a
@@ -191,121 +118,34 @@ func (s *Server) registerDashboard() {
 	// Dashboard JS is auth-gated: it embeds the API endpoint list + client
 	// schema (recon surface); the login page loads no /static/ JS (#1328).
 	s.mux.HandleFunc("GET /static/css/{file}", auth(handleDashboardCSS))
-	s.mux.HandleFunc("GET /static/contract.js", auth(handleContractJS))
-	s.mux.HandleFunc("GET /static/nz_util.js", auth(handleNzUtilJS))
-	s.mux.HandleFunc("GET /static/render_md.js", auth(handleRenderMdJS))
-	s.mux.HandleFunc("GET /static/self_update.js", auth(handleSelfUpdateJS))
-	s.mux.HandleFunc("GET /static/voice.js", auth(handleVoiceJS))
-	s.mux.HandleFunc("GET /static/session_header.js", auth(handleSessionHeaderJS))
-	s.mux.HandleFunc("GET /static/composer_files.js", auth(handleComposerFilesJS))
-	s.mux.HandleFunc("GET /static/mobile_nav.js", auth(handleMobileNavJS))
-	s.mux.HandleFunc("GET /static/split_view.js", auth(handleSplitViewJS))
-	s.mux.HandleFunc("GET /static/system_view.js", auth(handleSystemViewJS))
-	s.mux.HandleFunc("GET /static/running_banner.js", auth(handleRunningBannerJS))
-	s.mux.HandleFunc("GET /static/file_refs.js", auth(handleFileRefsJS))
-	s.mux.HandleFunc("GET /static/utilities.js", auth(handleUtilitiesJS))
-	s.mux.HandleFunc("GET /static/discovery.js", auth(handleDiscoveryJS))
-	s.mux.HandleFunc("GET /static/tuning.js", auth(handleTuningJS))
-	s.mux.HandleFunc("GET /static/msg_nav.js", auth(handleMsgNavJS))
-	s.mux.HandleFunc("GET /static/sidebar_project.js", auth(handleSidebarProjectJS))
-	s.mux.HandleFunc("GET /static/auth_modal.js", auth(handleAuthModalJS))
-	s.mux.HandleFunc("GET /static/send_message.js", auth(handleSendMessageJS))
-	s.mux.HandleFunc("GET /static/dashboard.js", auth(handleDashboardJS))
-	s.mux.HandleFunc("GET /static/cron_view.js", auth(handleCronViewJS))
-	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))
-	s.mux.HandleFunc("GET /static/asset_browser.js", auth(handleAssetBrowserJS))
-	s.mux.HandleFunc("GET /static/files_view.js", auth(handleFilesViewJS))
+	s.mux.HandleFunc("GET /static/contract.js", auth(serveStaticJS("contract.js")))
+	s.mux.HandleFunc("GET /static/nz_util.js", auth(serveStaticJS("nz_util.js")))
+	s.mux.HandleFunc("GET /static/render_md.js", auth(serveStaticJS("render_md.js")))
+	s.mux.HandleFunc("GET /static/self_update.js", auth(serveStaticJS("self_update.js")))
+	s.mux.HandleFunc("GET /static/voice.js", auth(serveStaticJS("voice.js")))
+	s.mux.HandleFunc("GET /static/session_header.js", auth(serveStaticJS("session_header.js")))
+	s.mux.HandleFunc("GET /static/composer_files.js", auth(serveStaticJS("composer_files.js")))
+	s.mux.HandleFunc("GET /static/mobile_nav.js", auth(serveStaticJS("mobile_nav.js")))
+	s.mux.HandleFunc("GET /static/split_view.js", auth(serveStaticJS("split_view.js")))
+	s.mux.HandleFunc("GET /static/system_view.js", auth(serveStaticJS("system_view.js")))
+	s.mux.HandleFunc("GET /static/running_banner.js", auth(serveStaticJS("running_banner.js")))
+	s.mux.HandleFunc("GET /static/file_refs.js", auth(serveStaticJS("file_refs.js")))
+	s.mux.HandleFunc("GET /static/utilities.js", auth(serveStaticJS("utilities.js")))
+	s.mux.HandleFunc("GET /static/discovery.js", auth(serveStaticJS("discovery.js")))
+	s.mux.HandleFunc("GET /static/tuning.js", auth(serveStaticJS("tuning.js")))
+	s.mux.HandleFunc("GET /static/msg_nav.js", auth(serveStaticJS("msg_nav.js")))
+	s.mux.HandleFunc("GET /static/sidebar_project.js", auth(serveStaticJS("sidebar_project.js")))
+	s.mux.HandleFunc("GET /static/auth_modal.js", auth(serveStaticJS("auth_modal.js")))
+	s.mux.HandleFunc("GET /static/send_message.js", auth(serveStaticJS("send_message.js")))
+	s.mux.HandleFunc("GET /static/dashboard.js", auth(serveStaticJS("dashboard.js")))
+	s.mux.HandleFunc("GET /static/cron_view.js", auth(serveStaticJS("cron_view.js")))
+	s.mux.HandleFunc("GET /static/agent_view.js", auth(serveStaticJS("agent_view.js")))
+	s.mux.HandleFunc("GET /static/asset_browser.js", auth(serveStaticJS("asset_browser.js")))
+	s.mux.HandleFunc("GET /static/files_view.js", auth(serveStaticJS("files_view.js")))
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
 	}
-}
-
-// registerSessionRoutes wires the session-CRUD route group. `auth` is the
-// caller's RequireAuth wrapper so every route here stays authenticated.
-func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
-	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.HandleList))
-	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.HandleEvents))
-	s.mux.HandleFunc("GET /api/sessions/runs", auth(s.sessionH.HandleRuns))
-	// Cost ledger read API (docs/rfc/cost-ledger.md §7); unit-bucketed, rate limited.
-	s.mux.HandleFunc("GET /api/cost/summary", auth(s.costH.HandleSummary))
-	s.mux.HandleFunc("GET /api/cost/entries", auth(s.costH.HandleEntries))
-	s.mux.HandleFunc("GET /api/sessions/git", auth(s.sessionH.HandleGit))
-	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
-	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
-	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
-	s.mux.HandleFunc("POST /api/sessions/bind", auth(s.sendH.handleBind))
-	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
-	s.mux.HandleFunc("POST /api/sessions/orient", auth(s.sendH.handleOrient))
-	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
-	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.HandleDelete))
-	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
-	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
-	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
-	// Per-session model/effort override (docs/rfc/dashboard-model-effort-control.md).
-	s.mux.HandleFunc("POST /api/sessions/override", auth(s.sessionH.HandleOverride))
-}
-
-// registerScratchRoutes wires the scratch-drawer route group; deployments
-// without a scratch pool register no scratch routes.
-func (s *Server) registerScratchRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
-	if s.scratchH == nil {
-		return
-	}
-	s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.HandleOpen))
-	s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.HandlePromote))
-	s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.HandleDelete))
-}
-
-// registerProjectRoutes wires the project route group; all handlers are
-// *dashproject.Handlers methods (the *Server-owned /api/planner/stats stays
-// at the call site).
-func (s *Server) registerProjectRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
-	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.HandleList))
-	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.HandleConfigGet))
-	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.HandleConfigPut))
-	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.HandlePlannerRestart))
-	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.HandleFavoriteToggle))
-	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.HandleFilesExists))
-	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.HandleFileGet))
-	// Workspace file browser: listing reuses HandleFileGet's path-safety;
-	// upload is the only write in the file API (CSRF gated by RequireAuth on POST).
-	s.mux.HandleFunc("GET /api/projects/files/list", auth(s.projectH.HandleFilesList))
-	s.mux.HandleFunc("POST /api/projects/files/upload", auth(s.projectH.HandleFilesUpload))
-}
-
-// registerDiscoveredRoutes wires the discovered-session route group
-// (list / preview / takeover / close).
-func (s *Server) registerDiscoveredRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
-	s.mux.HandleFunc("GET /api/discovered", auth(s.discoveryH.HandleList))
-	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.HandlePreview))
-	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.HandleTakeover))
-	s.mux.HandleFunc("POST /api/discovered/close", auth(s.discoveryH.HandleClose))
-}
-
-// registerCronRoutes wires the cron route group (CRUD + pause/resume/trigger/
-// preview + run-history + transcript).
-func (s *Server) registerCronRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
-	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.HandleList))
-	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.HandleCreate))
-	s.mux.HandleFunc("PATCH /api/cron", auth(s.cronH.HandleUpdate))
-	s.mux.HandleFunc("DELETE /api/cron", auth(s.cronH.HandleDelete))
-	s.mux.HandleFunc("POST /api/cron/pause", auth(s.cronH.HandlePause))
-	s.mux.HandleFunc("POST /api/cron/resume", auth(s.cronH.HandleResume))
-	s.mux.HandleFunc("POST /api/cron/trigger", auth(s.cronH.HandleTrigger))
-	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.HandlePreview))
-	// Run history / transcript / events / snapshot share the run_id path
-	// param and the same per-IP rate limit.
-	s.mux.HandleFunc("GET /api/cron/runs", auth(s.cronH.HandleRunsList))
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}", auth(s.cronH.HandleRunDetail))
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/transcript", auth(s.cronH.HandleRunTranscript))
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/events", auth(s.cronH.HandleRunEvents))
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/snapshot", auth(s.cronH.HandleRunSnapshot))
-	// Human confirmation queue (docs/rfc/agentcore-cloud-sandbox.md §7.4);
-	// confirm/replay are POSTs and replay stops the live run first.
-	s.mux.HandleFunc("GET /api/cron/attention", auth(s.cronH.HandleAttentionList))
-	s.mux.HandleFunc("POST /api/cron/runs/{run_id}/confirm", auth(s.cronH.HandleRunConfirm))
-	s.mux.HandleFunc("POST /api/cron/runs/{run_id}/replay", auth(s.cronH.HandleRunReplay))
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -407,111 +247,6 @@ func handleSW(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleDashboardJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("dashboard.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "dashboard.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "dashboard.js")
-}
-
-// handleContractJS serves static/contract.js (generated backend contract,
-// loaded before every other script so NZ_CONTRACT exists at parse time).
-func handleContractJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("contract.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "contract.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "contract.js")
-}
-
-// handleNzUtilJS serves static/nz_util.js (shared utility layer loaded before dashboard.js).
-func handleNzUtilJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("nz_util.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "nz_util.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "nz_util.js")
-}
-
-// handleCronViewJS serves static/cron_view.js (cron view, loaded after dashboard.js).
-func handleCronViewJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("cron_view.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "cron_view.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "cron_view.js")
-}
-
-// handleAgentViewJS serves static/agent_view.js (agent-team view module).
-func handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("agent_view.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "agent_view.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "agent_view.js")
-}
-
-// handleAssetBrowserJS serves static/asset_browser.js (docs/rfc/cc-asset-browser.md).
-func handleAssetBrowserJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("asset_browser.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "asset_browser.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "asset_browser.js")
-}
-
-// handleFilesViewJS serves static/files_view.js (docs/rfc/workspace-file-browser.md).
-func handleFilesViewJS(w http.ResponseWriter, r *http.Request) {
-	if staticAssetBytes("files_view.js") == nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	if serveStaticWithETag(w, r, "files_view.js") {
-		return
-	}
-	writeStaticAssetBody(w, r, "files_view.js")
-}
-
 // buildSessionOpts resolves agent config and planner overrides for a session
 // key. With a resolver it delegates to ResolveForKey; otherwise (or when the
 // resolver reports ok=false, e.g. planner key whose project is gone) it falls
@@ -550,4 +285,54 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 		}
 	}
 	return opts
+}
+
+// mountRoutes registers a sub-package's declared routes, applying the API
+// middleware chain to every one of them (#2554). There is no opt-out: the
+// Route type has no "public" field (#2631), so a sub-package cannot declare an
+// unauthenticated /api/ route even by mistake.
+//
+// This is the ONLY place a dashboard sub-package route reaches the mux. A
+// sub-package hands over data (httputil.Route) and never touches s.mux, so
+// "this one route missed the auth wrapper" is not a mistake that can be made
+// here — which is why the api_route_owner lint rule that used to reconstruct
+// this boundary from ASTs could go (#2554). handle_decl stays: it guards a
+// different edge — that *Server itself grows no handlers beyond the static
+// shell — which the server-owned s.mux.HandleFunc calls in registerDashboard
+// can still violate (#2636).
+func (s *Server) mountRoutes(routes []httputil.Route) {
+	chain := s.apiChain()
+	for _, rt := range routes {
+		s.mux.HandleFunc(rt.Pattern, chain(rt.Handler))
+	}
+}
+
+// apiChain is the middleware every authenticated /api/ route passes through:
+// the same-origin gate, then authentication. Two named links rather than one
+// RequireAuth that happened to do both (#2554), and one value so there is a
+// single answer to "what guards the API".
+//
+// Order matters. Origin first means a cross-origin write is refused without
+// consulting credentials, so an attacker learns nothing about whether the
+// victim's cookie is valid, and the sliding cookie renewal inside RequireAuth
+// never runs for a request that is about to be refused.
+func (s *Server) apiChain() httputil.Middleware {
+	sameOrigin := auth.RequireSameOrigin(s.auth.TrustedProxy)
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return sameOrigin(s.auth.RequireAuth(next))
+	}
+}
+
+// Routes returns the send/upload/attachment surface. SendHandler lives in this
+// package (it reaches sendEngine internals), so its routes are declared here
+// rather than in a dashboard sub-package — but they go through the same
+// mountRoutes chain as everything else (#2554).
+func (h *SendHandler) Routes() []httputil.Route {
+	return []httputil.Route{
+		{Pattern: "POST /api/sessions/send", Handler: h.handleSend},
+		{Pattern: "POST /api/sessions/bind", Handler: h.handleBind},
+		{Pattern: "POST /api/sessions/upload", Handler: h.handleUpload},
+		{Pattern: "POST /api/sessions/orient", Handler: h.handleOrient},
+		{Pattern: "GET /api/sessions/attachment", Handler: h.handleAttachment},
+	}
 }

@@ -15,22 +15,22 @@ func TestPassthroughShouldFanOut(t *testing.T) {
 
 	tests := []struct {
 		name string
-		ev   Event
+		ev   clievent.Event
 		want bool
 	}{
 		{
 			name: "plain text-only assistant event — no fan-out",
-			ev: Event{
+			ev: clievent.Event{
 				Type: "assistant",
-				Message: &AssistantMessage{
-					Content: []ContentBlock{{Type: "text", Text: "hello"}},
+				Message: &clievent.AssistantMessage{
+					Content: []clievent.ContentBlock{{Type: "text", Text: "hello"}},
 				},
 			},
 			want: false,
 		},
 		{
 			name: "nil Message — no fan-out",
-			ev: Event{
+			ev: clievent.Event{
 				Type:    "assistant",
 				Message: nil,
 			},
@@ -38,44 +38,44 @@ func TestPassthroughShouldFanOut(t *testing.T) {
 		},
 		{
 			name: "empty content blocks — no fan-out",
-			ev: Event{
+			ev: clievent.Event{
 				Type:    "assistant",
-				Message: &AssistantMessage{Content: []ContentBlock{}},
+				Message: &clievent.AssistantMessage{Content: []clievent.ContentBlock{}},
 			},
 			want: false,
 		},
 		{
 			name: "tool_use block — fan-out",
-			ev: Event{
+			ev: clievent.Event{
 				Type: "assistant",
-				Message: &AssistantMessage{
-					Content: []ContentBlock{{Type: "tool_use", Name: "Bash"}},
+				Message: &clievent.AssistantMessage{
+					Content: []clievent.ContentBlock{{Type: "tool_use", Name: "Bash"}},
 				},
 			},
 			want: true,
 		},
 		{
 			name: "thinking block — fan-out",
-			ev: Event{
+			ev: clievent.Event{
 				Type: "assistant",
-				Message: &AssistantMessage{
-					Content: []ContentBlock{{Type: "thinking", Text: "reasoning..."}},
+				Message: &clievent.AssistantMessage{
+					Content: []clievent.ContentBlock{{Type: "thinking", Text: "reasoning..."}},
 				},
 			},
 			want: true,
 		},
 		{
 			name: "AskQuestion payload present — fan-out regardless of blocks",
-			ev: Event{
+			ev: clievent.Event{
 				Type:        "assistant",
-				Message:     &AssistantMessage{Content: []ContentBlock{{Type: "text", Text: "choose"}}},
+				Message:     &clievent.AssistantMessage{Content: []clievent.ContentBlock{{Type: "text", Text: "choose"}}},
 				AskQuestion: &clievent.AskQuestion{ToolUseID: "toolu_1"},
 			},
 			want: true,
 		},
 		{
 			name: "AskQuestion with nil Message — fan-out",
-			ev: Event{
+			ev: clievent.Event{
 				Type:        "assistant",
 				AskQuestion: &clievent.AskQuestion{ToolUseID: "toolu_2"},
 			},
@@ -83,10 +83,10 @@ func TestPassthroughShouldFanOut(t *testing.T) {
 		},
 		{
 			name: "mixed text + tool_use blocks — fan-out because tool_use present",
-			ev: Event{
+			ev: clievent.Event{
 				Type: "assistant",
-				Message: &AssistantMessage{
-					Content: []ContentBlock{
+				Message: &clievent.AssistantMessage{
+					Content: []clievent.ContentBlock{
 						{Type: "text", Text: "calling tool"},
 						{Type: "tool_use", Name: "Read"},
 					},

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/naozhisettings"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -172,11 +173,11 @@ func resolveNaozhiSettingsFile(cfg *config.Config, storePath, claudeDir string) 
 	path := osutil.ExpandHome(cfg.NaozhiSettings.Path)
 	if path == "" {
 		// Default next to the session store; CWD only when storePath is unset.
-		base := "."
-		if storePath != "" {
-			base = filepath.Dir(storePath)
+		lay := datadir.ForStore(storePath)
+		if lay.Root() == "" {
+			lay = datadir.FromRoot(".")
 		}
-		path = filepath.Join(base, "naozhi-settings.json")
+		path = lay.NaozhiSettingsPath()
 	}
 	// MUST be absolute: BuildArgs silently falls back to `--setting-sources
 	// user` for a relative --settings, re-reading the file the operator opted

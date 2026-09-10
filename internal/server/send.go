@@ -13,9 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/claudefs"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
@@ -30,9 +31,9 @@ func (e *sendEngine) sendWithBroadcast(
 	key string,
 	sess *session.ManagedSession,
 	text string,
-	images []cli.Attachment,
-	onEvent cli.EventCallback,
-) (*cli.SendResult, error) {
+	images []clievent.Attachment,
+	onEvent clievent.EventCallback,
+) (*clievent.SendResult, error) {
 	return e.sendWithBroadcastPriority(ctx, key, sess, text, images, onEvent, "")
 }
 
@@ -46,10 +47,10 @@ func (e *sendEngine) sendWithBroadcastPriority(
 	key string,
 	sess *session.ManagedSession,
 	text string,
-	images []cli.Attachment,
-	onEvent cli.EventCallback,
+	images []clievent.Attachment,
+	onEvent clievent.EventCallback,
 	priority string,
-) (*cli.SendResult, error) {
+) (*clievent.SendResult, error) {
 	// Only the running-state transition here; the post-send (debounced)
 	// BroadcastSessionsUpdate covers the sessions snapshot.
 	e.notify.BroadcastSessionReady(key)
@@ -59,7 +60,7 @@ func (e *sendEngine) sendWithBroadcastPriority(
 	}
 
 	var (
-		result *cli.SendResult
+		result *clievent.SendResult
 		err    error
 	)
 	switch {
@@ -91,10 +92,11 @@ func usePassthrough(ctx context.Context, sess *session.ManagedSession) bool {
 	return dispatch.IsPassthrough(ctx)
 }
 
-// sendWithBroadcast delegates to Hub.sendWithBroadcast when a dashboard Hub is
-// wired. Without a hub it falls back to a direct, broadcast-free sess.Send
-// only for Headless Servers; a non-headless Server with a nil hub is a wiring
-// regression and panics rather than silently dropping every broadcast (#379).
+// sendWithBroadcast is the IM / cron entry into the send engine: the Hub is
+// non-nil for the Server's whole life (buildDashboard, #2552), so this is a
+// plain delegate. It used to branch on a Headless flag for hub-less Servers
+// (#379); no constructor path has been able to produce one since #2552, so the
+// flag, the nil-hub fallback and its fail-loud panic were removed (#2634).
 //
 // sess must be non-nil; callers must check the error from GetOrCreate first.
 func (s *Server) sendWithBroadcast(
@@ -102,31 +104,20 @@ func (s *Server) sendWithBroadcast(
 	key string,
 	sess *session.ManagedSession,
 	text string,
-	images []cli.Attachment,
-	onEvent cli.EventCallback,
-) (*cli.SendResult, error) {
+	images []clievent.Attachment,
+	onEvent clievent.EventCallback,
+) (*clievent.SendResult, error) {
 	if sess == nil {
 		return nil, fmt.Errorf("sendWithBroadcast: session is nil")
 	}
-	if s.hub != nil {
-		return s.hub.engine.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
-	}
-	if !s.headless {
-		// Wiring regression — fail loud instead of silently dropping broadcasts.
-		panic("server: sendWithBroadcast called with nil hub on a non-headless Server (set ServerOptions.Headless for hub-less wiring)")
-	}
-	// Headless (no hub): still honour passthrough when requested and supported.
-	if usePassthrough(ctx, sess) {
-		return sess.SendPassthrough(ctx, text, images, onEvent, "")
-	}
-	return sess.Send(ctx, text, images, onEvent)
+	return s.hub.engine.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
 }
 
 // sendParams holds parsed input for a session send request (HTTP and WebSocket).
 type sendParams struct {
 	Key       string
 	Text      string
-	Images    []cli.Attachment
+	Images    []clievent.Attachment
 	Workspace string
 	ResumeID  string
 	Backend   string // optional backend ID picked by the dashboard ("" = router default)
@@ -159,7 +150,7 @@ const interruptAcquireTimeout = 2 * time.Second
 // the message was enqueued for the owner's drain loop to coalesce.
 // onAsyncError (may be nil) fires from the owner goroutine when the turn fails
 // after the ack, with the underlying error (nil at literal-message sites) +
-// localised label so fan-out callers can filter (Hub.httpSendErrorCallback).
+// localised label so fan-out callers can filter (sendEngine.sendErrorCallback).
 func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
 	key := p.Key
 	// ValidateSessionKey rejects C0/C1 controls, bidi overrides, non-UTF-8 and
@@ -180,7 +171,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 		// 也要通知到，否则它们继续占着 sendSlot 直到超时，新消息被
 		// ErrTooManyPending 拒绝（与 IM 路径 dispatch.discardQueue 对齐）。
 		if sess := e.router.SessionFor(key); sess != nil {
-			sess.DiscardPassthroughPending(cli.ErrSessionReset)
+			sess.DiscardPassthroughPending(clierr.ErrSessionReset)
 		}
 		// Atomic Reset + workspaceOverride delete: a concurrent SetWorkspace
 		// must not survive and leak into the fresh session.
@@ -239,7 +230,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 	if len(p.ResumeID) > 64 {
 		return false, "", fmt.Errorf("invalid resume_id length")
 	}
-	if p.ResumeID != "" && discovery.IsValidSessionID(p.ResumeID) {
+	if p.ResumeID != "" && claudefs.IsValidSessionID(p.ResumeID) {
 		ws := validatedWorkspace
 		if ws == "" {
 			ws = e.router.DefaultWorkspace()
@@ -247,7 +238,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 		e.router.RegisterForResume(key, p.ResumeID, ws, "")
 	}
 
-	// Legacy guard path when no queue is configured (tests, headless);
+	// Legacy guard path when no queue is configured (tests);
 	// legacySendInvokes lets migrators observe remaining fixtures (#710).
 	if e.queue == nil {
 		e.legacyInvokes.Add(1)
@@ -312,7 +303,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 	}
 
 	// Owner — spawn the drain loop. TrackSend declines a send arriving
-	// concurrently with Shutdown instead of escaping past sendWG.Wait.
+	// concurrently with Shutdown instead of escaping past drain's wg.Wait.
 	release, shuttingDown := e.TrackSend()
 	if shuttingDown {
 		// Discard drops ownership (bumps gen, clears the owner flag) so a
@@ -343,7 +334,7 @@ func (e *sendEngine) sessionOptsFor(key string) session.AgentOpts {
 }
 
 // runTurn executes one send turn: GetOrCreate + sendWithBroadcast.
-func (e *sendEngine) runTurn(key, text string, images []cli.Attachment, onAsyncError asyncErrorFn) {
+func (e *sendEngine) runTurn(key, text string, images []clievent.Attachment, onAsyncError asyncErrorFn) {
 	sendStart := time.Now()
 	opts := e.sessionOptsFor(key)
 	sess, status, err := e.router.GetOrCreate(e.ctx, key, opts)
@@ -371,7 +362,7 @@ func (e *sendEngine) runTurn(key, text string, images []cli.Attachment, onAsyncE
 // runTurnPassthrough runs one passthrough-mode turn from a detached goroutine
 // so sends on the same session overlap; protocols without replay fall back to
 // serialized Send. priority is "" or "now" (/urgent preemption).
-func (e *sendEngine) runTurnPassthrough(key, text string, images []cli.Attachment, priority string, onAsyncError asyncErrorFn) {
+func (e *sendEngine) runTurnPassthrough(key, text string, images []clievent.Attachment, priority string, onAsyncError asyncErrorFn) {
 	sendStart := time.Now()
 	opts := e.sessionOptsFor(key)
 	sess, _, err := e.router.GetOrCreate(e.ctx, key, opts)

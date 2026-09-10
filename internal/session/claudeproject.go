@@ -8,7 +8,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // Stateless resume-target validation + Claude-CLI project-directory helpers.
@@ -19,13 +19,6 @@ import (
 // locale-dependent (LANG=zh_CN.UTF-8 yields a Chinese translation).
 func isENOENTErr(err error) bool {
 	return err != nil && errors.Is(err, syscall.ENOENT)
-}
-
-// claudeProjectSlug maps a CWD to the directory name Claude CLI uses under
-// ~/.claude/projects/. Delegates to discovery.ClaudeProjectSlug so the two
-// call sites cannot drift; TestClaudeProjectSlug_MatchesDiscovery pins it.
-func claudeProjectSlug(cwd string) string {
-	return discovery.ClaudeProjectSlug(cwd)
 }
 
 // resolveResumeID validates that resumeID's on-disk session state still
@@ -71,8 +64,7 @@ func resolveClaudeResumeID(claudeDir, workspace, key, resumeID string) string {
 	if claudeDir == "" || workspace == "" {
 		return resumeID
 	}
-	jsonlPath := filepath.Join(claudeDir, "projects",
-		claudeProjectSlug(workspace), resumeID+".jsonl")
+	jsonlPath := claudefs.SessionJSONL(claudeDir, workspace, resumeID)
 	if _, err := os.Stat(jsonlPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			slog.Warn("resume target missing, starting fresh session",

@@ -67,7 +67,7 @@ func writeAttachmentPair(t *testing.T, ws, date, stem string, uploaded time.Time
 // happy-path exercise: emit an EventEntry with ImagePaths via the
 // event-log sink bridge → tracker bump lands → .meta contains the
 // keyhash. Mirrors the production path from
-// cli.EventLog.Append → bridge → tracker.
+// ring.EventLog.Append → bridge → tracker.
 func TestTrackerIntegration_BumpsMetaThroughSink(t *testing.T) {
 	ws := t.TempDir()
 	key := "dashboard:direct:alice:general"

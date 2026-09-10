@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -66,7 +66,7 @@ func TestStore_NoIndexJSON(t *testing.T) {
 	st := NewStore(dir, 0, 0)
 	st.Append(mkRun(t, key, 50, time.Now(), OutcomeCompleted))
 
-	root := filepath.Join(dir, "session-runs")
+	root := dir
 	if _, err := os.Stat(filepath.Join(root, "index.json")); !os.IsNotExist(err) {
 		t.Errorf("index.json must not be written (cron-parity), stat err=%v", err)
 	}
@@ -91,7 +91,7 @@ func TestStore_KeepCountTrim_EvictsDisk(t *testing.T) {
 		t.Fatalf("ring not trimmed to 3, got %d", len(got))
 	}
 	// on-disk files also trimmed to 3
-	ents, _ := os.ReadDir(filepath.Join(dir, "session-runs", dirHashFor(key)))
+	ents, _ := os.ReadDir(filepath.Join(dir, dirHashFor(key)))
 	if len(ents) != 3 {
 		t.Errorf("disk not trimmed to 3, got %d files", len(ents))
 	}
@@ -129,7 +129,7 @@ func TestStore_KeepWindow_DeletesExpiredFilesOnWarm(t *testing.T) {
 	st1.Append(mkRun(t, key, 11, time.Now().Add(-2*time.Hour), OutcomeCompleted))
 	st1.Append(mkRun(t, key, 20, time.Now(), OutcomeCompleted))
 
-	hashDir := filepath.Join(dir, "session-runs", dirHashFor(key))
+	hashDir := filepath.Join(dir, dirHashFor(key))
 	if ents, _ := os.ReadDir(hashDir); len(ents) != 3 {
 		t.Fatalf("precondition: want 3 files on disk, got %d", len(ents))
 	}
@@ -163,8 +163,8 @@ func TestStore_PathTraversalKeyContained(t *testing.T) {
 	key := "../../../etc/passwd:p2p:x"
 	st := NewStore(dir, 0, 0)
 	st.Append(mkRun(t, key, 1, time.Now(), OutcomeCompleted))
-	// everything must land under session-runs/<hash>/, never escape root
-	root := filepath.Join(dir, "session-runs")
+	// everything must land under <root>/<hash>/, never escape root
+	root := dir
 	hash := dirHashFor(key)
 	if _, err := os.Stat(filepath.Join(root, hash)); err != nil {
 		t.Fatalf("hashed dir missing: %v", err)
@@ -290,8 +290,8 @@ func TestClassify(t *testing.T) {
 		wantCls runtelemetry.ErrorClass
 	}{
 		{"nil", nil, OutcomeCompleted, runtelemetry.ErrClassNone},
-		{"total-timeout", cli.ErrTotalTimeout, OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded},
-		{"no-output-timeout", cli.ErrNoOutputTimeout, OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded},
+		{"total-timeout", clierr.ErrTotalTimeout, OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded},
+		{"no-output-timeout", clierr.ErrNoOutputTimeout, OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded},
 		{"ctx-deadline", context.DeadlineExceeded, OutcomeTimeout, runtelemetry.ErrClassDeadlineExceeded},
 		{"ctx-canceled", context.Canceled, OutcomeCanceled, runtelemetry.ErrClassCanceled},
 		{"other", os.ErrPermission, OutcomeError, runtelemetry.ErrClassNone},

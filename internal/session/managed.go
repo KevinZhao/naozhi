@@ -9,6 +9,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
@@ -41,12 +42,12 @@ type ProcessSender interface {
 	// Send delivers a user turn and streams events through onEvent until
 	// the result entry arrives. Single-shot; serialised by the caller-side
 	// sendMu in ManagedSession.
-	Send(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
+	Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 	// SendPassthrough is the passthrough-mode Send; errors unless the
 	// protocol reports SupportsReplay()==true. Unlike Send, multiple
 	// goroutines may call it concurrently — ordering is handled by the
 	// CLI's commandQueue plus a naozhi-side sendSlot FIFO.
-	SendPassthrough(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback, priority string) (*cli.SendResult, error)
+	SendPassthrough(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error)
 	// SupportsPassthrough reports whether the protocol can operate in
 	// passthrough mode (Protocol.SupportsReplay()); dispatch falls back to
 	// Send otherwise.
@@ -61,7 +62,7 @@ type ProcessSender interface {
 	Interrupt()
 	// InterruptViaControl aborts the active turn via an in-band stream-json
 	// control_request (no SIGINT, no kill). Returns
-	// cli.ErrInterruptUnsupported for protocols without this primitive.
+	// clierr.ErrInterruptUnsupported for protocols without this primitive.
 	InterruptViaControl() error
 }
 
@@ -118,7 +119,7 @@ type HistoryInjector interface {
 	InjectHistory(entries []clievent.EventEntry)
 	// TurnAgents returns the subagent roster observed this turn; empty for
 	// backends without a subagent concept.
-	TurnAgents() []cli.SubagentInfo
+	TurnAgents() []ring.SubagentInfo
 }
 
 // processIface abstracts the CLI process methods used by session-aware code
@@ -174,7 +175,7 @@ type processIface interface {
 	// SpawnDiags returns the spawn gates' drop/ignore decisions for this
 	// process (#2532); nil when everything took effect.
 	SpawnDiags() []cli.SpawnDiag
-	MeteringUsage() []cli.MeteringEntry
+	MeteringUsage() []clievent.MeteringEntry
 	// MeteringGen versions MeteringUsage so Snapshot can cache its copy per
 	// (process, gen) (#2345). Implementations that do not version their rows
 	// must return 0, which disables the cache.
@@ -457,11 +458,11 @@ type SessionSnapshot struct {
 	// LabelOrigin records who set UserLabel: "" / "user" (human) or "auto"
 	// (sysession daemon); drives the bot icon and "restore auto naming"
 	// action (docs/rfc/system-session.md §7.3 / §9.3).
-	LabelOrigin     string             `json:"label_origin,omitempty"`
-	Project         string             `json:"project,omitempty"`          // project name (filled by server)
-	ProjectFallback bool               `json:"project_fallback,omitempty"` // true when Project is a workspace-basename fallback, not a registered project
-	IsPlanner       bool               `json:"is_planner,omitempty"`       // true for project planner sessions
-	Subagents       []cli.SubagentInfo `json:"subagents,omitempty"`        // active sub-agent types in current turn
+	LabelOrigin     string              `json:"label_origin,omitempty"`
+	Project         string              `json:"project,omitempty"`          // project name (filled by server)
+	ProjectFallback bool                `json:"project_fallback,omitempty"` // true when Project is a workspace-basename fallback, not a registered project
+	IsPlanner       bool                `json:"is_planner,omitempty"`       // true for project planner sessions
+	Subagents       []ring.SubagentInfo `json:"subagents,omitempty"`        // active sub-agent types in current turn
 	// MessageCount is the cumulative "user" turn count: from the live Process
 	// event log since spawn, else the persistedHistory count. Not persisted;
 	// InjectHistory → EventLog.AppendBatch rebuilds it on reconnect.
@@ -481,7 +482,7 @@ type SessionSnapshot struct {
 	// READ-ONLY, shared across snapshots: while MeteringGen is unchanged
 	// every Snapshot returns the same backing array (#2345). Consumers,
 	// SnapshotEnricher hooks included, must copy before mutating.
-	MeteringUsage []cli.MeteringEntry `json:"metering_usage,omitempty"`
+	MeteringUsage []clievent.MeteringEntry `json:"metering_usage,omitempty"`
 	// Effort is the backend's thinking-effort tier for the latest turn
 	// (low/medium/high/xhigh/max on kiro). Empty for backends that report
 	// none, evicted sessions, and before the first metadata frame; the

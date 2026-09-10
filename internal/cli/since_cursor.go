@@ -1,5 +1,5 @@
 // since_cursor.go — SinceCursor, the shared streaming watermark used by every
-// consumer that tails an EventLog via the (EntriesSince, notify) pair.
+// consumer that tails an ring.EventLog via the (EntriesSince, notify) pair.
 //
 // EntriesSince(t) returns entries with Time strictly > t, so a live Append in
 // the SAME millisecond as an already-delivered batch that arrives in a LATER
@@ -12,7 +12,7 @@ package cli
 
 import "github.com/naozhi/naozhi/internal/cli/clievent"
 
-// SinceCursor tracks a streaming watermark over EventLog entries with
+// SinceCursor tracks a streaming watermark over ring.EventLog entries with
 // same-millisecond UUID dedup. See the file header for the rationale.
 type SinceCursor struct {
 	watermark int64

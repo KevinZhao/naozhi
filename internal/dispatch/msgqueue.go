@@ -7,13 +7,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // QueuedMsg holds a single message waiting to be processed.
 type QueuedMsg struct {
 	Text   string
-	Images []cli.Attachment
+	Images []clievent.Attachment
 	// MessageID is the platform-native inbound message ID (optional); used to
 	// add/remove the "queued" reaction on the user's original message.
 	MessageID string

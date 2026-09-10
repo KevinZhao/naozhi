@@ -13,11 +13,16 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -203,6 +208,115 @@ func (e *sendEngine) sendErrorCallback(key string) asyncErrorFn {
 		}
 		e.notify.broadcastSendError(key, errMsg)
 	}
+}
+
+// ── method surface for SendHandler (#2632) ──
+//
+// Everything below exists so dashboard_send.go never reaches into an engine
+// field. Until #2632 the HTTP handler read h.engine.allowedRoot / .resolver /
+// .ctx / .notify / .router directly (8 sites) — the same "two views of one
+// state" shape #2551 set out to remove, just spelled differently. The
+// send_engine_ownership lint rule now fails on any `engine.<lowercase>` in
+// dashboard_send.go, so a new dependency has to arrive as a method here.
+
+// remoteSendTimeout caps one HTTP-initiated remote-node Send RPC. Longer than
+// the WS path's remoteNodeProxyTimeout because the HTTP caller has already
+// received 202 and nothing is waiting on the result except drain.
+const remoteSendTimeout = 60 * time.Second
+
+// remoteSend forwards an HTTP send to a remote node in a tracked goroutine and
+// returns false — without spawning anything — when the engine is draining.
+//
+// The goroutine inherits e.ctx so Hub.Shutdown cancels an in-flight RPC, and
+// caps it at remoteSendTimeout so a hung node cannot hold a drain slot for the
+// process lifetime. There is no ack channel on the HTTP path, so a transport
+// error fans out to the key's subscribers via broadcastSendError (F1);
+// remote transport errors are never informational, so unlike
+// sendErrorCallback nothing is filtered.
+func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace string) (accepted bool) {
+	release, shuttingDown := e.TrackSend()
+	if shuttingDown {
+		return false
+	}
+	go func() {
+		defer release()
+		ctx, cancel := context.WithTimeout(e.ctx, remoteSendTimeout)
+		defer cancel()
+		if err := nc.Send(ctx, key, text, workspace); err != nil {
+			slog.Error("remote send",
+				"node", osutil.SanitizeForLog(nodeID, 128),
+				"key", session.SanitizeLogAttr(key), "err", err)
+			e.notify.broadcastSendError(key, asyncErrorMessage(err))
+		} else {
+			nc.RefreshSubscription(key)
+		}
+		e.notify.BroadcastSessionsUpdate()
+	}()
+	return true
+}
+
+// gateRemoteAccess refuses remote dispatch for a key whose session resolves to
+// a non-default access profile; the env overlay is host-local and never
+// crosses the wire (RFC project-access-profile P1-a). Thin over
+// gateRemoteAccessProfile so the handler does not need the resolver.
+func (e *sendEngine) gateRemoteAccess(targetNode, key string) error {
+	return gateRemoteAccessProfile(e.resolver, targetNode, key)
+}
+
+// validateWorkspace resolves p and checks it against the engine's allowedRoot
+// (server_validate.go semantics: "" root means unrestricted).
+func (e *sendEngine) validateWorkspace(p string) (string, error) {
+	return validateWorkspace(p, e.allowedRoot)
+}
+
+// bindWorkspace validates workspace and persists it as the chat-level
+// override for chatKey, so later sends on any agent under that chat resume
+// there. Returns validateWorkspace's generic client-facing error on rejection
+// and writes nothing in that case.
+func (e *sendEngine) bindWorkspace(chatKey, workspace string) error {
+	wsPath, err := e.validateWorkspace(workspace)
+	if err != nil {
+		return err
+	}
+	e.router.SetWorkspace(chatKey, wsPath)
+	return nil
+}
+
+// sessionWorkspace is the key's effective workspace without a request
+// override: the live session's Workspace() (the CLI's actual cwd) if it is
+// running, else the router's saved chat-key override. Empty when neither is
+// known. The router lookup takes the chat-key prefix — the ":<agent>" suffix
+// is not part of the workspace override key.
+func (e *sendEngine) sessionWorkspace(key string) string {
+	if sess := e.router.SessionFor(key); sess != nil {
+		if ws := sess.Workspace(); ws != "" {
+			return ws
+		}
+	}
+	chatKey := key
+	if idx := strings.LastIndexByte(key, ':'); idx > 0 {
+		chatKey = key[:idx]
+	}
+	return e.router.Workspace(chatKey)
+}
+
+// resolveAttachmentWorkspace picks the validated absolute path to write
+// file_ref attachments under for the given session key: an explicit
+// reqWorkspace if the request carries one, else sessionWorkspace (the
+// dashboard does not re-announce the workspace on every send). Returns
+// validateWorkspace's generic client-facing error on rejection.
+//
+// A saved workspace is revalidated against allowedRoot on every call: it may
+// predate a tightened root.
+func (e *sendEngine) resolveAttachmentWorkspace(key, reqWorkspace string) (string, error) {
+	if reqWorkspace != "" {
+		return e.validateWorkspace(reqWorkspace)
+	}
+	ws := e.sessionWorkspace(key)
+	if ws == "" {
+		return "", fmt.Errorf("workspace is not a valid directory")
+	}
+	return e.validateWorkspace(ws)
 }
 
 // nopNotifier absorbs broadcasts for an engine built without a Hub, so the

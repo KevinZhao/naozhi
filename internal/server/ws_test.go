@@ -41,6 +41,23 @@ func newTestHub(token string) (*Hub, *session.Router) {
 	return hub, router
 }
 
+// newTestHubWithUploads is newTestHub plus a live upload store. Separate helper
+// because HubOptions.UploadStore replaced Hub.SetUploadStore in #2552, and a
+// hub without a store takes the "uploads not configured" branch — which is a
+// different assertion than the ones about resolving file_ids.
+func newTestHubWithUploads(token string) (*Hub, *session.Router) {
+	router := session.NewRouter(session.RouterConfig{})
+	guard := session.NewGuard()
+	hub := NewHub(HubOptions{
+		Router:      router,
+		DashToken:   token,
+		CookieMAC:   testCookieMAC(token),
+		Guard:       guard,
+		UploadStore: newUploadStore(),
+	})
+	return hub, router
+}
+
 func newTestHubWithAgents(token string, agents map[string]session.AgentOpts) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()

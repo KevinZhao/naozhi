@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"math"
@@ -13,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -38,7 +39,7 @@ const (
 
 	// maxStdinLineBytes is the largest single NDJSON line forwarded to the shim
 	// (which enforces 16 MB per line); headroom is for the shimClientMsg envelope.
-	// Exceeding it fails fast with ErrMessageTooLarge so the dashboard can surface it.
+	// Exceeding it fails fast with clierr.ErrMessageTooLarge so the dashboard can surface it.
 	maxStdinLineBytes = 12 * 1024 * 1024
 
 	// lineBufShrinkThreshold caps the capacity readLoop's lineBuf may retain
@@ -49,56 +50,9 @@ const (
 	lineBufShrinkThreshold = 256 * 1024
 )
 
-// ErrMessageTooLarge is returned when a user message (after JSON encoding) would
-// exceed the shim's per-line limit; callers should shrink the payload first.
-var ErrMessageTooLarge = errors.New("message too large for stream-json line")
-
-// Sentinel errors for watchdog timeouts.
-var (
-	ErrNoOutputTimeout = errors.New("no output timeout")
-	ErrTotalTimeout    = errors.New("total timeout")
-)
-
-// ErrProcessExited is returned by Send when the CLI subprocess exits before
-// producing a result; callers react by spawning a new process next turn.
-var ErrProcessExited = errors.New("process exited during send")
-
-// ErrProcessBusy is returned by Send when the legacy (non-passthrough) state
-// machine is already StateRunning; dispatch maps it to "正在处理中".
-var ErrProcessBusy = errors.New("process busy")
-
-// Passthrough-mode sentinels (separate block for targeted errors.Is switches).
-var (
-	// ErrSessionReset fires when a user slash-command (/new, /clear) or a forced
-	// wrapper reset cancels all pending sends; not surfaced to IM (user-triggered).
-	ErrSessionReset = errors.New("session reset")
-
-	// ErrReconnectedUnknown fires when naozhi re-attaches to a shim+CLI that
-	// survived a restart with messages in flight: naozhi cannot tell which were
-	// consumed, so every pending slot gets it (dispatcher: 状态未知，请查看历史或重发).
-	ErrReconnectedUnknown = errors.New("reconnected: processing state unknown")
-
-	// ErrTooManyPending fires when Send is called with maxPendingSlots already
-	// pending; the message is rejected up front (dispatcher: sendAckBusy).
-	ErrTooManyPending = errors.New("too many pending messages")
-
-	// ErrOrphanedSlot is a defensive fallback: Send's totalTimeout+30s tripwire in
-	// case watchdog and readLoop both miss delivering a result. Fires only on bugs.
-	ErrOrphanedSlot = errors.New("slot orphaned: no result or error received")
-)
-
 // maxPendingSlots caps the per-Process passthrough pending queue; a goroutine-
 // leak / memory backstop, not a business limit. Tunable via SetMaxPendingSlots.
 const maxPendingSlots = 16
-
-// ErrAbortedByUrgent fires when a priority:"now" message makes the CLI drop the
-// in-flight turn: older pending slots not yet replayed get this error — their
-// text never reached the model, so the user must decide whether to resend.
-var ErrAbortedByUrgent = errors.New("aborted by priority:now preemption")
-
-// ErrNoActiveTurn is returned by InterruptViaControl when no turn is running;
-// nothing was interrupted, so logs must not claim "aborted active turn".
-var ErrNoActiveTurn = errors.New("no active turn to interrupt")
 
 // processCloseTimeout bounds Close() while the shim tears down its listener +
 // socket (closeStdin + waitOrKill(5s) + listener.Close + os.Remove, so 8s is
@@ -147,7 +101,7 @@ type Process struct {
 	// atomic. totalCost is a separate atomic so readers never nest p.mu under r.mu.
 	mu sync.RWMutex
 
-	eventCh  chan Event
+	eventCh  chan clievent.Event
 	done     chan struct{}
 	killCh   chan struct{} // closed by Kill() to unblock readLoop
 	killOnce sync.Once
@@ -174,7 +128,7 @@ type Process struct {
 	controlAckMu sync.Mutex
 	controlAcks  map[string]chan error
 
-	eventLog  *EventLog
+	eventLog  *ring.EventLog
 	totalCost atomic.Uint64 // math.Float64bits(lastResultCostUSD); atomic so Snapshot is lock-free.
 
 	// Normalized metadata from backend metadata events (ACP _kiro.dev/metadata).
@@ -190,14 +144,14 @@ type Process struct {
 	// persisted (same lifecycle as effort). nil = none.
 	spawnDiags atomic.Pointer[[]SpawnDiag]
 	// shadowMu guards shadow, the token usage of assistant frames since the
-	// last result frame (see ShadowUsage).
+	// last result frame (see clievent.ShadowUsage).
 	shadowMu sync.Mutex
-	shadow   ShadowUsage
+	shadow   clievent.ShadowUsage
 	// meteringMu guards meteringUsage (read-mostly: 1 Hz × N-tab polls, ≤1
 	// write/turn). meteringLen mirrors len(meteringUsage) under meteringMu so
 	// MeteringUsage() can skip the RLock when empty (claude-class backends).
 	meteringMu    sync.RWMutex
-	meteringUsage []MeteringEntry
+	meteringUsage []clievent.MeteringEntry
 	// meteringIdx maps Unit → index into meteringUsage (O(1) merge); lazily built
 	// on first applyMetadata so zero-metering sessions stay allocation-free.
 	meteringIdx map[string]int
@@ -224,7 +178,7 @@ type Process struct {
 	// readEventBuf is a reusable backing array for ReadEventInto (#1676), owned
 	// exclusively by handleShimStdout on the readLoop goroutine and consumed within
 	// the same frame; cap 2 covers ACP's two-event turn-end split.
-	readEventBuf [2]Event
+	readEventBuf [2]clievent.Event
 
 	// onTurnDone is called by readLoop when a result event transitions the
 	// process from Running to Ready without an active Send() (e.g. after a shim
@@ -286,8 +240,8 @@ type sendSlot struct {
 	uuid     string
 	text     string
 	priority string // "" | "now" | "next" | "later"
-	onEvent  EventCallback
-	resultCh chan *SendResult
+	onEvent  clievent.EventCallback
+	resultCh chan *clievent.SendResult
 	errCh    chan error
 
 	// Only mutated under Process.slotsMu (atomic.Bool to allow lock-free
@@ -404,12 +358,12 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		state:    StateSpawning,
 		// 1024 so a TeamCreate fan-out (8 subagents × ~5 events/s) cannot fill the
 		// buffer before Send() drains it; drops force the findResultSince fallback (#1355).
-		eventCh:         make(chan Event, 1024),
+		eventCh:         make(chan clievent.Event, 1024),
 		done:            make(chan struct{}),
 		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,
 		totalTimeout:    totalTimeout,
-		eventLog:        NewEventLog(0),
+		eventLog:        ring.NewEventLog(0),
 		// maxMisses+1 so a heartbeatLoop scheduler stall cannot drop pongs
 		// (readLoop's pong arm is non-blocking) and miscount a healthy shim.
 		pongRecv: make(chan struct{}, 4),
@@ -626,7 +580,7 @@ func (p *Process) Effort() string {
 // MeteringUsage returns a defensive copy of the most recent backend-reported
 // billing rows; nil for backends that report cost only via TotalCost (claude).
 // An atomic length probe lets that dominant polled case skip the RLock.
-func (p *Process) MeteringUsage() []MeteringEntry {
+func (p *Process) MeteringUsage() []clievent.MeteringEntry {
 	if p.meteringLen.Load() == 0 {
 		return nil
 	}
@@ -635,7 +589,7 @@ func (p *Process) MeteringUsage() []MeteringEntry {
 	if len(p.meteringUsage) == 0 {
 		return nil
 	}
-	out := make([]MeteringEntry, len(p.meteringUsage))
+	out := make([]clievent.MeteringEntry, len(p.meteringUsage))
 	copy(out, p.meteringUsage)
 	return out
 }
@@ -651,7 +605,7 @@ func (p *Process) MeteringGen() uint64 {
 // from readLoop): scalars atomically, MeteringUsage merged under meteringMu.
 // Every field is guarded on being non-zero so a frame that omits a field never
 // regresses an earlier value (pinned by TestProcess_ApplyMetadata_AndAccessors).
-func (p *Process) applyMetadata(m *EventMetadata) {
+func (p *Process) applyMetadata(m *clievent.EventMetadata) {
 	if m == nil {
 		return
 	}

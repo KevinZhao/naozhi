@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/wsproto"
@@ -228,7 +228,7 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 }
 
 // BroadcastCronRunStarted emits cron_run_started to authenticated clients.
-// Called from the cron scheduler's onRunStarted hook (set in dashboard.go).
+// Called from the cron scheduler's onRunStarted hook (set in build_dashboard.go).
 func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, trigger, sessionID string, fresh bool) {
 	// jobID / runID come from cron.generateHexID; sanitizeHexIDForBroadcast
 	// skips SanitizeForLog's allocating slow path when the hex shape holds.
@@ -358,7 +358,7 @@ func sanitizeTriggerForBroadcast(trigger string) string {
 // (the form every cron run records); non-UUID shapes still go through the
 // sanitiser (#2232).
 func sanitizeSessionIDForBroadcast(sessionID string) string {
-	if discovery.IsValidSessionID(sessionID) {
+	if claudefs.IsValidSessionID(sessionID) {
 		return sessionID
 	}
 	return osutil.SanitizeForLog(sessionID, 128)

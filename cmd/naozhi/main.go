@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -95,13 +96,22 @@ func main() {
 	// Runner Bedrock auth (docs/rfc/direct-user-settings.md §7.1).
 	slog.Info("claude settings: loading user settings directly", "mode", "user")
 
+	// boot is the wireup composition root for this process: it performs the
+	// boot-time steps and records what ran. A value rather than package-level
+	// state (#2552), so the steps are visible here in order instead of being
+	// spread across init() blocks.
+	boot := wireup.NewBoot()
+
 	// Register built-in backend profiles before any consumer looks them up.
 	// Explicit rather than init()-driven so a missing import fails loudly (#1165).
-	wireup.EnsureCLIBackends()
+	boot.EnsureCLIBackends()
+	// The blank-imported history factories are linked in; this was an init()
+	// inside wireup until #2552 and is now stated at the call site.
+	boot.RecordHistoryBackends()
 
 	// A dropped blank-import or no-op'd helper aborts startup here instead of
 	// degrading silently to empty history / missing profiles.
-	if err := wireup.Validate(); err != nil {
+	if err := boot.Validate(); err != nil {
 		slog.Error("wireup validation failed", "err", err)
 		os.Exit(1)
 	}
@@ -152,7 +162,10 @@ func main() {
 		slog.Error("create workspace dir", "path", workspace, "err", err)
 		os.Exit(1)
 	}
-	warnIfStateDirLarge(filepath.Dir(storePath))
+	// One Layout for the session store's directory; every sibling path below
+	// comes from it instead of being re-derived (#2641).
+	sessionLayout := datadir.ForStore(storePath)
+	warnIfStateDirLarge(sessionLayout.Root())
 
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
@@ -160,10 +173,7 @@ func main() {
 	}
 	// Event log sits next to sessions.json; empty StorePath (test harnesses)
 	// disables the persister via the same empty-string guard in NewRouter.
-	eventLogDir := ""
-	if storePath != "" {
-		eventLogDir = filepath.Join(filepath.Dir(storePath), "events")
-	}
+	eventLogDir := sessionLayout.EventsRoot()
 	// Session-layer view of config.AccessProfiles (session must not import
 	// config). Nil when none configured — sessions run on the global baseline.
 	accessProfiles := buildAccessProfiles(cfg.AccessProfiles)
@@ -309,7 +319,7 @@ func main() {
 			"platform", cfg.Cron.NotifyDefault.Platform,
 			"chat_id_suffix", chatIDSuffix(cfg.Cron.NotifyDefault.ChatID))
 	}
-	schedulers, err := wireup.WireSchedulers(wireup.SchedulersDeps{
+	schedulers, err := boot.WireSchedulers(wireup.SchedulersDeps{
 		Cfg:           cfg,
 		Router:        router,
 		Platforms:     platforms,
@@ -317,7 +327,7 @@ func main() {
 		Workspace:     workspace,
 		CronStorePath: osutil.ExpandHome(cfg.Cron.StorePath),
 		ParentCtx:     ctx,
-		Telemetry:     nil, // wired post-Hub via dashboard.go SetTelemetry
+		Telemetry:     nil, // wired at Server construction via build_dashboard.go SetTelemetry
 		BuildSysession: func() (*sysession.Manager, string, error) {
 			return buildSysessionManager(cfg, router, projectMgr, wrapper, storePath)
 		},
@@ -408,36 +418,49 @@ func main() {
 		WorkspaceID:   cfg.Workspace.ID,
 		WorkspaceName: cfg.Workspace.Name,
 		AllowedRoot:   workspace,
-		StateDir:      filepath.Dir(storePath),
-		// ConfigPath enables the access-profile create endpoint; absolute so the
-		// write target survives cwd changes. Secrets dir holds *_FILE tokens (0600).
-		ConfigPath:              absConfigPath(*configPath),
-		ConfigSHA256:            cfg.Fingerprint.SHA256,
-		ConfigLoadedAt:          cfg.Fingerprint.LoadedAt,
-		AccessProfileSecretsDir: filepath.Join(filepath.Dir(storePath), "access-profile-secrets"),
-		NoOutputTimeout:         noOutputTimeout,
-		TotalTimeout:            totalTimeout,
-		QueueMaxDepth:           cfg.QueueMaxDepth(),
-		QueueCollectDelay:       cfg.ParseCollectDelay(),
-		QueueMode:               cfg.QueueMode(),
-		DashboardToken:          cfg.Server.DashboardToken,
-		TrustedProxy:            cfg.Server.TrustedProxy,
-		ProjectManager:          projectMgr,
-		Nodes:                   nodes,
-		ReverseNodeServer:       rns,
-		Transcriber:             stt,
-		StartupCtx:              ctx,
-		Version:                 version,
-		UpdateStatus:            updateStatus,
-		UpdateChecker:           updateChecker,
-		UpdateDashboardInstall:  &updateDashboardInstall,
-		SysessionManager:        sysMgr,
-		SysWorkDir:              sysWorkDir,
+		StateDir:      sessionLayout.Root(),
+		Config: server.ConfigOptions{
+			// Path enables the access-profile create endpoint; absolute so the
+			// write target survives cwd changes. Secrets dir holds *_FILE
+			// tokens (0600).
+			Path:                    absConfigPath(*configPath),
+			SHA256:                  cfg.Fingerprint.SHA256,
+			LoadedAt:                cfg.Fingerprint.LoadedAt,
+			AccessProfileSecretsDir: sessionLayout.AccessProfileSecretsRoot(),
+		},
+		NoOutputTimeout: noOutputTimeout,
+		TotalTimeout:    totalTimeout,
+		Queue: server.QueueOptions{
+			MaxDepth:     cfg.QueueMaxDepth(),
+			CollectDelay: cfg.ParseCollectDelay(),
+			Mode:         cfg.QueueMode(),
+		},
+		DashboardToken:    cfg.Server.DashboardToken,
+		TrustedProxy:      cfg.Server.TrustedProxy,
+		DebugMode:         cfg.Server.DebugMode,
+		PublicTmpEnabled:  cfg.Projects.PublicTmp,
+		ProjectManager:    projectMgr,
+		Nodes:             nodes,
+		ReverseNodeServer: rns,
+		Transcriber:       stt,
+		StartupCtx:        ctx,
+		Version:           version,
+		Update: server.UpdateOptions{
+			Status:           updateStatus,
+			Checker:          updateChecker,
+			DashboardInstall: &updateDashboardInstall,
+		},
+		Sysession: server.SysessionOptions{
+			Manager: sysMgr,
+			WorkDir: sysWorkDir,
+		},
 		// Default-on; opt-out via session.project_stable_key.enabled: false.
 		ProjectStableKeyEnabled: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
-		ImageOrientEnabled:      orientEnabled,
-		ImageOrientModel:        cfg.ImageOrient.Model,
-		ImageOrientRunner:       orientRunner,
+		ImageOrient: server.ImageOrientOptions{
+			Enabled: orientEnabled,
+			Model:   cfg.ImageOrient.Model,
+			Runner:  orientRunner,
+		},
 		OnReady: func() {
 			if err := osutil.SdNotify("READY=1"); err != nil {
 				slog.Warn("sd_notify READY failed", "err", err)
@@ -553,6 +576,22 @@ func main() {
 		os.Exit(1)
 	} else if len(cfg.Server.DashboardToken) < 16 {
 		slog.Warn("dashboard_token is short — consider using 16+ random characters for stronger security")
+	}
+
+	// Both of these widen what an authenticated dashboard user can read, and
+	// both were unreachable until their config keys were wired, so an operator
+	// turning one on for the first time should see it in the log rather than
+	// discover it from an audit trail later. Logged next to the token warnings
+	// because the token IS the barrier for both.
+	if cfg.Server.DebugMode {
+		slog.Warn("server.debug_mode is ON — /api/debug/pprof and /api/debug/vars are registered; goroutine stacks carry file paths and queue contents",
+			"gates", "requireAuth + loopback-only + refused entirely when dashboard_token is empty",
+			"hint", "turn it off once the profile is captured")
+	}
+	if cfg.Projects.PublicTmp {
+		slog.Warn("projects.public_tmp is ON — every authenticated dashboard user can read non-credential files anywhere under /tmp via the __public_tmp__ pseudo-project",
+			"gates", "credential-name allowlist + foreign-private-UID + irregular-type + audit log",
+			"hint", "single-operator deployments only; leave it off wherever the dashboard token is shared")
 	}
 
 	serverErr := make(chan error, 1)

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -79,7 +80,7 @@ func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge 
 	if filter == nil {
 		filter = noopRecentFilter{}
 	}
-	projectsDir := filepath.Join(claudeDir, "projects")
+	projectsDir := claudefs.ProjectsRoot(claudeDir)
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		return nil
@@ -274,7 +275,7 @@ func recentFromJSONLFiles(projDir, workspace string, exclude map[string]bool) []
 	files := cachedJSONLFileInfo(projDir)
 	var out []RecentSession
 	for _, f := range files {
-		if !IsValidSessionID(f.sessionID) || exclude[f.sessionID] {
+		if !claudefs.IsValidSessionID(f.sessionID) || exclude[f.sessionID] {
 			continue
 		}
 		out = append(out, RecentSession{
@@ -310,7 +311,7 @@ func extractFirstPrompt(path string) string {
 		// Cheap pre-filter before json.Unmarshal; the Unmarshal below is the
 		// authoritative check. Oversized lines carry no first-prompt text.
 		if len(line) > 0 && !oversized && bytes.Contains(line, []byte(`"type"`)) {
-			var hl historyLine
+			var hl claudefs.Line
 			if json.Unmarshal(line, &hl) == nil && hl.Type == "user" {
 				if text := extractUserText(hl.Message); text != "" {
 					return SanitizePromptForTransport(textutil.TruncateRunes(text, 120))
@@ -438,7 +439,7 @@ var dfsPathCache sync.Map // encoded dirName → resolved workspace path
 
 // resolveWorkspaceByParts reconstructs a workspace path from an encoded
 // project directory name, where every non-[A-Za-z0-9] character became "-"
-// (see ClaudeProjectSlug). Pass 1, tryResolveParts, splits on "-" and
+// (see claudefs.ProjectSlug). Pass 1, tryResolveParts, splits on "-" and
 // DFS-joins parts with os.Stat, resolving any ordinary workspace; pass 2,
 // resolveByDirScan, re-encodes real child names per level for segments that
 // held ".", "_" or spaces — what makes ".claude/worktrees" sessions visible (#2370).
@@ -507,7 +508,7 @@ func resolveByDirScan(remainder, base string, budget *int) string {
 		if name == "." || name == ".." {
 			continue
 		}
-		enc := substituteNonAlnum(name)
+		enc := claudefs.EncodeSegment(name)
 		if enc == "" {
 			continue
 		}

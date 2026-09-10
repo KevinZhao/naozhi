@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -63,8 +64,8 @@ func TestHandleTakeover_CleanupUsesCleanedCWD(t *testing.T) {
 	// Pre-create the lock dir that WaitAndCleanup must remove, keyed by the
 	// CLEANED cwd's slug (the path the session actually runs under).
 	tmpBase := os.TempDir()
-	cleanedSlug := discovery.ClaudeProjectSlug(filepath.Clean(reqCWD))
-	rawSlug := discovery.ClaudeProjectSlug(reqCWD)
+	cleanedSlug := claudefs.ProjectSlug(filepath.Clean(reqCWD))
+	rawSlug := claudefs.ProjectSlug(reqCWD)
 	if cleanedSlug == rawSlug {
 		t.Fatalf("test setup invalid: cleaned and raw slugs match (%q); trailing slash should differ", cleanedSlug)
 	}
@@ -90,8 +91,8 @@ func TestHandleTakeover_CleanupUsesCleanedCWD(t *testing.T) {
 		// PID is not alive, so the identity check/SIGTERM short-circuit and
 		// the goroutine proceeds straight to cleanup + takeover.
 		ProcStartTime: func(int) (uint64, error) { return 1, nil },
+		AppCtx:        context.Background(),
 	})
-	h.SetAppContext(context.Background())
 
 	body, _ := json.Marshal(map[string]any{
 		"pid":             deadPID,

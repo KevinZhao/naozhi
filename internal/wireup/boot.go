@@ -1,13 +1,17 @@
-// boot.go is the inspectable owner of the boot-time registration set: each
-// wireup step records a BootStep in a Registry, and Validate() turns a
-// dropped registration into a loud boot error instead of a silent runtime
-// degrade (#1165, #1579).
+// boot.go owns the boot-time registration set: each wireup step records a
+// BootStep, and Validate turns a dropped registration into a loud boot error
+// instead of a silent runtime degrade (#1165, #1579).
+//
+// The record used to live in a swappable package-level var, and the
+// history-backends step was recorded from an init(). Both are gone (#2552): a
+// Boot value is created by the caller and threaded, so boot order is explicit
+// and tests get their own instance instead of saving, swapping and restoring
+// process-global state under a mutex.
 package wireup
 
 import (
 	"fmt"
 	"sort"
-	"sync"
 )
 
 // BootStep describes one boot-time wireup step that ran in this process.
@@ -18,60 +22,57 @@ type BootStep struct {
 	Detail string
 }
 
-// bootRegistry is the "what got wired" surface. The Registry is internally
-// concurrency-safe, but tests swap the pointer itself, so bootRegistryMu guards
-// it and all access goes through getBootRegistry / setBootRegistry (#1611).
-var (
-	bootRegistryMu sync.RWMutex
-	bootRegistry   = NewRegistry[BootStep]("boot-step")
-)
-
-// getBootRegistry returns the current boot registry under a read lock.
-func getBootRegistry() *Registry[BootStep] {
-	bootRegistryMu.RLock()
-	defer bootRegistryMu.RUnlock()
-	return bootRegistry
+// Boot is the wireup composition root: it performs the boot-time wireup steps
+// and records what ran so Validate can refuse to serve on a half-wired process.
+// cmd/naozhi creates exactly one; tests create their own.
+//
+// Note that some of what it records is unavoidably process-global —
+// backend.RegisterDefaults panics on duplicate IDs and the history factories
+// register from blank-import init() blocks in other packages. Boot does not
+// pretend otherwise; it makes the OBSERVATION of those facts explicit and
+// per-instance, which is what the old swappable global got wrong.
+type Boot struct {
+	steps *Registry[BootStep]
 }
 
-// setBootRegistry swaps the boot registry pointer (tests inject a fixture).
-func setBootRegistry(r *Registry[BootStep]) {
-	bootRegistryMu.Lock()
-	defer bootRegistryMu.Unlock()
-	bootRegistry = r
+// NewBoot returns an empty Boot. Call the Record*/Ensure* steps, then Validate.
+func NewBoot() *Boot {
+	return &Boot{steps: NewRegistry[BootStep]("boot-step")}
 }
 
-// init records the history-backends step: importing wireup guarantees the
-// blank-imported history factories' init() blocks ran.
-func init() {
-	recordBootStep("history-backends", BootStep{
+// RecordHistoryBackends records that the blank-imported history factories are
+// linked in. This was an init() until #2552: importing wireup "proved" the
+// factories' own init() blocks had run, which made the guarantee invisible at
+// the call site and impossible to assert against. Now main calls it, and a
+// caller that forgets fails loudly in Validate — the same fail-loud outcome
+// #1165 wanted from EnsureCLIBackends.
+func (b *Boot) RecordHistoryBackends() {
+	b.recordStep("history-backends", BootStep{
 		Kind:   "history-backends",
 		Detail: "claudejsonl + kirojsonl history factories",
 	})
 }
 
-// recordBootStep adds a step to the boot registry; an already-recorded name
-// is a no-op.
-func recordBootStep(name string, step BootStep) {
-	reg := getBootRegistry()
-	if _, already := reg.Get(name); already {
+// recordStep adds a step; an already-recorded name is a no-op.
+func (b *Boot) recordStep(name string, step BootStep) {
+	if _, already := b.steps.Get(name); already {
 		return
 	}
-	reg.Register(name, step)
+	b.steps.Register(name, step)
 }
 
-// BootSteps returns the names of every boot step recorded so far, sorted.
-func BootSteps() []string { return getBootRegistry().Names() }
+// Steps returns the names of every boot step recorded so far, sorted.
+func (b *Boot) Steps() []string { return b.steps.Names() }
 
 // requiredBootSteps MUST have run before naozhi serves traffic.
 var requiredBootSteps = []string{"cli-backends", "history-backends"}
 
 // Validate reports an error if any required boot step did not run; cmd/naozhi
 // calls it after wireup so a missing import aborts startup with a clear message.
-func Validate() error {
-	reg := getBootRegistry()
+func (b *Boot) Validate() error {
 	var missing []string
 	for _, req := range requiredBootSteps {
-		if _, ok := reg.Get(req); !ok {
+		if _, ok := b.steps.Get(req); !ok {
 			missing = append(missing, req)
 		}
 	}

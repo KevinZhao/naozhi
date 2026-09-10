@@ -163,8 +163,14 @@ func TestHubShutdown_SendDrainPositionInSource(t *testing.T) {
 		t.Fatal("wshub.go: Hub.Shutdown not found")
 	}
 	// Scope every offset to Shutdown's body so an identical call elsewhere in
-	// the file cannot satisfy the ordering by accident.
+	// the file cannot satisfy the ordering by accident. Cut at the next
+	// top-level func, not at EOF: Shutdown happens to be the last function in
+	// wshub.go today, and a helper appended below it would otherwise widen the
+	// window silently (#2637).
 	sd := body[shutdownIdx:]
+	if next := strings.Index(sd[1:], "\nfunc "); next >= 0 {
+		sd = sd[:next+1]
+	}
 
 	// Ordered low → high, each with the reason a violation breaks something.
 	steps := []struct{ marker, why string }{

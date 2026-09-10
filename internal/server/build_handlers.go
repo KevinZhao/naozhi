@@ -43,26 +43,34 @@ func buildAuthHandlers(opts ServerOptions, cookieSecret []byte, cookieGen string
 // newIPLimiterWithCap so the LRU cap / idle TTL are pinned explicitly
 // (see cronLimiterMaxKeys).
 func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers {
+	// A nil Scheduler is the documented "cron disabled" state and dashcron
+	// nil-guards it in 16 places, so the typed nil must not be boxed (#2561).
+	var sched dashcron.SchedulerView
+	if opts.Scheduler != nil {
+		sched = opts.Scheduler
+	}
 	return dashcron.New(dashcron.Deps{
-		Scheduler:   opts.Scheduler,
+		Scheduler:   sched,
 		AllowedRoot: opts.AllowedRoot,
 		ClaudeDir:   claudeDir,
-		RunsLimiter: newIPLimiterWithCap(
-			rate.Every(time.Second), 60,
-			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-		),
-		ListLimiter: newIPLimiterWithCap(
-			rate.Every(500*time.Millisecond), 30,
-			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-		),
-		WriteLimiter: newIPLimiterWithCap(
-			rate.Every(2*time.Second), 6,
-			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-		),
-		TranscriptLimiter: newIPLimiterWithCap(
-			rate.Every(10*time.Second), 12,
-			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-		),
+		RateLimits: dashcron.RateLimits{
+			Runs: newIPLimiterWithCap(
+				rate.Every(time.Second), 60,
+				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
+			),
+			List: newIPLimiterWithCap(
+				rate.Every(500*time.Millisecond), 30,
+				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
+			),
+			Write: newIPLimiterWithCap(
+				rate.Every(2*time.Second), 6,
+				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
+			),
+			Transcript: newIPLimiterWithCap(
+				rate.Every(10*time.Second), 12,
+				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
+			),
+		},
 		TranscriptSemCap: cronTranscriptSemCap,
 		ValidateWS:       validateWorkspace,
 		ClassifyWSErr:    classifyWorkspaceErr,
@@ -133,8 +141,10 @@ func buildDiscoveryHandlers(
 	nodeAccess *nodeRegistry,
 	nodeCache *node.CacheManager,
 	broadcast func(),
+	appCtx context.Context,
 ) *dashdiscovery.Handlers {
 	return dashdiscovery.New(dashdiscovery.Deps{
+		AppCtx:        appCtx,
 		Cache:         cache,
 		NodeAccess:    nodeAccess,
 		NodeCache:     nodeCache,
@@ -164,17 +174,37 @@ func (a routerTakeoverAdapter) Takeover(ctx context.Context, key, sessionID, cwd
 // paths touch disk on every call: files/exists 10/min burst 10 (same DoS
 // class as upload); PUT config 5/s burst 5 (persists to disk + WS fan-out).
 // The Hub does not exist yet at this point; registerDashboard wires the
-// base context later via SetBaseContext (#650).
+// base context at construction via Deps.BaseCtx (#650, #2552).
 func buildProjectHandlers(
 	opts ServerOptions,
 	resolver *session.KeyResolver,
 	nodeAccess *nodeRegistry,
 	nodeCache *node.CacheManager,
+	baseCtx context.Context,
 ) *dashproject.Handlers {
+	// Typed-nil unwraps before the interface boxing (#2561). dashproject
+	// nil-guards projectMgr (×9), router (×2) and resolver (×1) because each is
+	// optional; handing an interface field a nil CONCRETE pointer makes every
+	// one of those guards read TRUE and the next call dereferences nil. The
+	// concrete types are only visible here. Checklist for the next conversion:
+	// grep the field's `!= nil` count BEFORE changing its type.
+	var projectStore dashproject.ProjectStore
+	if opts.ProjectManager != nil {
+		projectStore = opts.ProjectManager
+	}
+	var projectRouter dashproject.RouterView
+	if opts.Router != nil {
+		projectRouter = opts.Router
+	}
+	var plannerResolver dashproject.PlannerKeyResolver
+	if resolver != nil {
+		plannerResolver = resolver
+	}
 	return dashproject.New(dashproject.Deps{
-		ProjectMgr:         opts.ProjectManager,
-		Router:             opts.Router,
-		Resolver:           resolver,
+		BaseCtx:            baseCtx,
+		ProjectMgr:         projectStore,
+		Router:             projectRouter,
+		Resolver:           plannerResolver,
 		NodeAccess:         nodeAccess,
 		NodeCache:          nodeCache,
 		FilesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
@@ -229,16 +259,16 @@ func platformStatusMap(names map[string]struct{}) map[string]string {
 // wrapping nil, or the daemons endpoint's disabled path never fires.
 func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Handlers {
 	var daemons system.DaemonInspector
-	if opts.SysessionManager != nil {
-		daemons = opts.SysessionManager
+	if opts.Sysession.Manager != nil {
+		daemons = opts.Sysession.Manager
 	}
 	return system.New(system.Deps{
 		Daemons:       daemons,
 		Router:        router,
-		UpdateStatus:  opts.UpdateStatus,
-		UpdateChecker: opts.UpdateChecker,
+		UpdateStatus:  opts.Update.Status,
+		UpdateChecker: opts.Update.Checker,
 		BuildVersion:  opts.Version,
 		// nil ⇒ enabled, matching config.UpdateDashboardInstall's default.
-		InstallEnabled: opts.UpdateDashboardInstall == nil || *opts.UpdateDashboardInstall,
+		InstallEnabled: opts.Update.DashboardInstall == nil || *opts.Update.DashboardInstall,
 	})
 }

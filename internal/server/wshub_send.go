@@ -22,7 +22,7 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
@@ -77,7 +77,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	// the user can retry with a fresh batch. The owner is the one frozen at WS
 	// upgrade (never refreshed in no-token mode) and can diverge from the one
 	// /api/sessions/upload used; the bundled dashboard sends files over HTTP (#2418).
-	var images []cli.Attachment
+	var images []clievent.Attachment
 	if len(msg.FileIDs) > 0 {
 		if h.uploadStore == nil {
 			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "uploads not configured"}))
@@ -100,7 +100,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	if hasPersistableAttachment(images) {
 		// resolveAttachmentWorkspace falls back to the session's saved workspace:
 		// the dashboard does not re-send workspace for a running session.
-		validatedWS, err := resolveAttachmentWorkspace(h.router, h.allowedRoot, key, msg.Workspace)
+		validatedWS, err := h.engine.resolveAttachmentWorkspace(key, msg.Workspace)
 		if err != nil {
 			slog.Warn("ws attachment workspace validation failed",
 				"key", key, "err", err)
@@ -314,7 +314,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 
 	// send_ack is deferred until nc.Send returns so the remote session exists
 	// before the browser's follow-up subscribe arrives. TrackSend registers the
-	// goroutine with sendWG so Shutdown waits for the in-flight RPC+broadcast,
+	// goroutine with the engine wg so Shutdown waits for the in-flight RPC+broadcast,
 	// and refuses a send that races Shutdown instead of slipping past clientWG.
 	release, shuttingDown := h.engine.TrackSend()
 	if shuttingDown {

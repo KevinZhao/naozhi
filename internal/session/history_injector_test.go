@@ -14,7 +14,7 @@ package session
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 func TestHistoryInjector_SubsetOfProcessIface(t *testing.T) {
@@ -28,5 +28,5 @@ func TestHistoryInjector_SubsetOfProcessIface(t *testing.T) {
 	if agents := hi.TurnAgents(); len(agents) != 0 {
 		t.Errorf("fresh TestProcess should report no turn agents, got %d", len(agents))
 	}
-	_ = []cli.SubagentInfo(nil) // anchor the cli import for forward-compat
+	_ = []ring.SubagentInfo(nil) // anchor the cli import for forward-compat
 }

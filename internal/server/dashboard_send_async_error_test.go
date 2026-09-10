@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 )
 
 // postSendJSON issues an authenticated JSON POST to handleSend and returns the
@@ -133,9 +133,9 @@ func TestHTTPSendErrorCallback_SkipsInformationalErrors(t *testing.T) {
 
 	cb := hub.engine.sendErrorCallback(key)
 	for _, e := range []error{
-		cli.ErrAbortedByUrgent,
-		fmt.Errorf("passthrough: %w", cli.ErrSessionReset), // wrapped — errors.Is, not ==
-		cli.ErrReconnectedUnknown,
+		clierr.ErrAbortedByUrgent,
+		fmt.Errorf("passthrough: %w", clierr.ErrSessionReset), // wrapped — errors.Is, not ==
+		clierr.ErrReconnectedUnknown,
 	} {
 		cb(e, asyncErrorMessage(e))
 	}

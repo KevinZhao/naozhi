@@ -1,12 +1,13 @@
 package cli
 
-// process_event_query.go — read-only EventLog accessors, Linker lifecycle and
+// process_event_query.go — read-only ring.EventLog accessors, Linker lifecycle and
 // InjectHistory seeding (so dashboard drill-in survives a naozhi restart).
 
 import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -51,7 +52,7 @@ func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 			return
 		}
 		// Cap so the Resolve goroutine doesn't pin multi-KB strings while queued.
-		desc = textutil.TruncateRunes(desc, EventDetailMaxRunes)
+		desc = textutil.TruncateRunes(desc, clievent.EventDetailMaxRunes)
 		// Bounded pool: replay can fan in dozens of task_started on reconnect (#415).
 		linker.DispatchResolve(p.lifecycleContext(), taskID, toolUseID, name, desc, wallclock)
 	}
@@ -108,9 +109,9 @@ func (p *Process) Linker() *SubagentLinker {
 	return p.linker
 }
 
-// EventLog returns the underlying *EventLog so the server-side tailer registry
+// EventLog returns the underlying *ring.EventLog so the server-side tailer registry
 // can register SetOnAgentTaskDone — an escape hatch symmetric with Linker().
-func (p *Process) EventLog() *EventLog {
+func (p *Process) EventLog() *ring.EventLog {
 	return p.eventLog
 }
 
@@ -148,7 +149,7 @@ func (p *Process) EventLastN(n int) []clievent.EventEntry {
 }
 
 // EventLastNVisible returns a contiguous tail carrying at least visibleTarget
-// visible entries (or up to maxTotal); see EventLog.LastNVisible for the contract.
+// visible entries (or up to maxTotal); see ring.EventLog.LastNVisible for the contract.
 func (p *Process) EventLastNVisible(visibleTarget, maxTotal int) []clievent.EventEntry {
 	return p.eventLog.LastNVisible(visibleTarget, maxTotal)
 }
@@ -171,12 +172,12 @@ func (p *Process) EventEntriesBefore(beforeMS int64, limit int) []clievent.Event
 }
 
 // TurnAgents returns the sub-agent types spawned in the current turn.
-func (p *Process) TurnAgents() []SubagentInfo {
+func (p *Process) TurnAgents() []ring.SubagentInfo {
 	return p.eventLog.TurnAgents()
 }
 
 // LastActivitySummary returns the summary of the most recent tool_use/thinking
-// entry, as maintained atomically by EventLog.Append.
+// entry, as maintained atomically by ring.EventLog.Append.
 func (p *Process) LastActivitySummary() string {
 	return p.eventLog.LastActivitySummary()
 }
@@ -209,8 +210,8 @@ func (p *Process) SubscribeEvents() (<-chan struct{}, func()) {
 }
 
 // SubscribeEventsTyped is the typed form of SubscribeEvents (#792): the
-// EventSubscription owns both the notify channel and the cancel callback, so
+// ring.EventSubscription owns both the notify channel and the cancel callback, so
 // callers need not know who closes the channel — they just call Cancel().
-func (p *Process) SubscribeEventsTyped() EventSubscription {
+func (p *Process) SubscribeEventsTyped() ring.EventSubscription {
 	return p.eventLog.SubscribeNew()
 }

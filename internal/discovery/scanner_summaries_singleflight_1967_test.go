@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // TestLookupSummaries_ConcurrentSameWorkspace verifies that many goroutines
@@ -18,7 +20,7 @@ func TestLookupSummaries_ConcurrentSameWorkspace(t *testing.T) {
 	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/sf-same-workspace"
-	projDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -36,12 +36,12 @@ type Handler struct {
 //
 // Deprecated: prefer NewCLIBackendsHandlerCtx.
 func NewCLIBackendsHandler(router *session.Router) *Handler {
-	return NewCLIBackendsHandlerCtx(context.Background(), router)
+	return NewCLIBackendsHandlerCtx(context.Background(), router, nil)
 }
 
 // NewCLIBackendsHandlerCtx threads ctx into DetectBackendsCtx so SIGTERM
 // during startup aborts the --version probe instead of waiting 5s×N.
-func NewCLIBackendsHandlerCtx(ctx context.Context, router *session.Router) *Handler {
+func NewCLIBackendsHandlerCtx(ctx context.Context, router *session.Router, nodeAccess NodeAccessor) *Handler {
 	detected := clipkg.DetectBackendsCtx(ctx)
 	clipkg.SortBackendsAvailableFirst(detected)
 	// Redact Path and Version: binary paths leak host filesystem layout and
@@ -51,12 +51,11 @@ func NewCLIBackendsHandlerCtx(ctx context.Context, router *session.Router) *Hand
 		detected[i].Path = ""
 		detected[i].Version = ""
 	}
-	return &Handler{router: router, detected: detected}
+	// nodeAccess is taken here rather than through SetNodeAccess afterwards
+	// (#2552): /api/cli/backends?node=<id> needs it, and a handler that is
+	// reachable before the setter runs would 500 on the proxy path.
+	return &Handler{router: router, detected: detected, nodeAccess: nodeAccess}
 }
-
-// SetNodeAccess wires the node accessor for ?node=<id> proxying. Called once
-// at wiring time before any Handle is in flight; nil leaves the handler local-only.
-func (h *Handler) SetNodeAccess(na NodeAccessor) { h.nodeAccess = na }
 
 // Handle responds {"backends": [...], "default": "claude", "detected": [...]}:
 // enabled Router entries with CLI metadata, plus every backend naozhi can

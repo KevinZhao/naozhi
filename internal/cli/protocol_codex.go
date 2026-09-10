@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -177,7 +178,7 @@ func (p *CodexProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, e
 	return result.Thread.ID, nil
 }
 
-func (p *CodexProtocol) WriteMessage(w io.Writer, text string, images []Attachment) error {
+func (p *CodexProtocol) WriteMessage(w io.Writer, text string, images []clievent.Attachment) error {
 	tid := p.loadThreadID()
 	p.mu.Lock()
 	p.textBuf.Reset()
@@ -211,11 +212,11 @@ func (p *CodexProtocol) WriteMessage(w io.Writer, text string, images []Attachme
 // WriteInterrupt sends a turn/interrupt request (unlike ACP's notification) to
 // abort the in-flight turn. Fire-and-forget under the caller-held write lock;
 // readLoop observes the resulting turn/completed. Returns
-// ErrInterruptUnsupported before a thread exists (callers fall back to SIGINT).
+// clierr.ErrInterruptUnsupported before a thread exists (callers fall back to SIGINT).
 func (p *CodexProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	tid := p.loadThreadID()
 	if tid == "" {
-		return ErrInterruptUnsupported
+		return clierr.ErrInterruptUnsupported
 	}
 	req := RPCRequest{
 		JSONRPC: "2.0", ID: p.allocID(), Method: "turn/interrupt",
@@ -234,7 +235,7 @@ func (p *CodexProtocol) WriteInterrupt(w io.Writer, _ string) error {
 }
 
 // WriteUserMessageLocked ignores uuid/priority — codex has no replay/priority concept (RFC §3).
-func (p *CodexProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []Attachment, _ string) error {
+func (p *CodexProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []clievent.Attachment, _ string) error {
 	return p.WriteMessage(w, text, images)
 }
 
@@ -292,7 +293,7 @@ type codexTokenUsageNotif struct {
 	} `json:"tokenUsage"`
 }
 
-func (p *CodexProtocol) ReadEvent(line string) ([]Event, bool, error) {
+func (p *CodexProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 	var msg RPCMessage
 	if err := json.Unmarshal(stringToBytesUnsafe(line), &msg); err != nil {
 		return nil, false, err
@@ -307,7 +308,7 @@ func (p *CodexProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	if msg.IsRequest() {
 		if strings.HasSuffix(msg.Method, "/requestApproval") {
 			rid, _ := msg.IDAsString()
-			return []Event{{
+			return []clievent.Event{{
 				Type:         "permission_request",
 				SubType:      msg.Method,
 				RPCRequestID: rid,
@@ -335,7 +336,7 @@ func (p *CodexProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	return nil, false, nil
 }
 
-func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error) {
+func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]clievent.Event, bool, error) {
 	switch msg.Method {
 	case "item/agentMessage/delta":
 		var d codexAgentMessageDelta
@@ -345,7 +346,7 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 		}
 		if d.Delta != "" {
 			p.mu.Lock()
-			if room := maxAssistantMessageContentBytes - p.textBuf.Len(); room > 0 {
+			if room := clievent.MaxAssistantMessageContentBytes - p.textBuf.Len(); room > 0 {
 				if len(d.Delta) <= room {
 					p.textBuf.WriteString(d.Delta)
 				} else {
@@ -355,7 +356,7 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 			}
 			p.mu.Unlock()
 		}
-		return []Event{{Type: "assistant", SessionID: d.ThreadID}}, false, nil
+		return []clievent.Event{{Type: "assistant", SessionID: d.ThreadID}}, false, nil
 
 	case "item/started", "item/completed":
 		var n codexItemNotif
@@ -368,7 +369,7 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 			if msg.Method == "item/completed" {
 				subType = "tool_result"
 			}
-			return []Event{{
+			return []clievent.Event{{
 				Type:      "assistant",
 				SubType:   subType,
 				SessionID: n.ThreadID,
@@ -379,8 +380,8 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 					Kind:   sanitizeToolCallLabel(n.Item.Type),
 					Status: sanitizeToolCallLabel(n.Item.Status),
 				},
-				Message: &AssistantMessage{
-					Content: []ContentBlock{{Type: "tool_use", Name: sanitizeToolCallLabel(n.Item.Type)}},
+				Message: &clievent.AssistantMessage{
+					Content: []clievent.ContentBlock{{Type: "tool_use", Name: sanitizeToolCallLabel(n.Item.Type)}},
 				},
 			}}, false, nil
 		default:
@@ -394,9 +395,9 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 		if err := json.Unmarshal(msg.Params, &u); err != nil {
 			return nil, false, nil
 		}
-		meta := &EventMetadata{}
+		meta := &clievent.EventMetadata{}
 		if u.TokenUsage.Last.TotalTokens > 0 {
-			meta.MeteringUsage = []MeteringEntry{{
+			meta.MeteringUsage = []clievent.MeteringEntry{{
 				Value:      float64(u.TokenUsage.Last.TotalTokens),
 				Unit:       "token",
 				UnitPlural: "tokens",
@@ -406,7 +407,7 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 			meta.ContextUsagePercent = normalizeContextUsage(
 				float64(u.TokenUsage.Last.TotalTokens) / float64(*u.TokenUsage.ModelContextWindow))
 		}
-		return []Event{{Type: "metadata", SessionID: u.ThreadID, Metadata: meta}}, false, nil
+		return []clievent.Event{{Type: "metadata", SessionID: u.ThreadID, Metadata: meta}}, false, nil
 
 	case "turn/completed":
 		var c codexTurnCompleted
@@ -418,18 +419,18 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 
 		// Turn boundary emits up to TWO events (mirrors ACP): an assistant frame
 		// with the accumulated text — the ONLY place the visible reply materialises
-		// — and a result event whose Result feeds SendResult.Text only.
-		var events []Event
+		// — and a result event whose Result feeds clievent.SendResult.Text only.
+		var events []clievent.Event
 		if text != "" {
-			events = append(events, Event{
+			events = append(events, clievent.Event{
 				Type:      "assistant",
 				SessionID: c.ThreadID,
-				Message: &AssistantMessage{
-					Content: []ContentBlock{{Type: "text", Text: text}},
+				Message: &clievent.AssistantMessage{
+					Content: []clievent.ContentBlock{{Type: "text", Text: text}},
 				},
 			})
 		}
-		result := Event{Type: "result", SessionID: c.ThreadID, Result: text}
+		result := clievent.Event{Type: "result", SessionID: c.ThreadID, Result: text}
 		if c.Turn.Status == "failed" && c.Turn.Error != nil {
 			// Failure reason goes in the result; the assistant frame keeps partial text.
 			result.SubType = "error"
@@ -462,7 +463,7 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 	}
 }
 
-func (p *CodexProtocol) HandleEvent(w io.Writer, ev Event) bool {
+func (p *CodexProtocol) HandleEvent(w io.Writer, ev clievent.Event) bool {
 	if ev.Type != "permission_request" {
 		return false
 	}

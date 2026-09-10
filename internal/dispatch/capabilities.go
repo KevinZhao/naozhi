@@ -3,7 +3,7 @@ package dispatch
 import (
 	"context"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -18,7 +18,7 @@ type Capabilities interface {
 	// Send forwards a turn payload to the session router after guard /
 	// queue gating has succeeded. Implementations must NOT silently drop —
 	// a missing send path is a constructor bug (see NoopCapabilities.Send).
-	Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
+	Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 
 	// Takeover is invoked on the first message of every chat to let the host
 	// adopt an external Claude session. Returns true on adoption; the
@@ -40,7 +40,7 @@ type NoopCapabilities struct{}
 // Send panics: NewDispatcher's boot-panic gate catches missing Send wireup at
 // startup, so reaching this at runtime means a test opted out via
 // DispatcherConfig.AllowMissingSender and still called Send.
-func (NoopCapabilities) Send(context.Context, string, *session.ManagedSession, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error) {
+func (NoopCapabilities) Send(context.Context, string, *session.ManagedSession, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
 	panic("dispatch: Capabilities.Send not wired (set DispatcherConfig.Capabilities or DispatcherConfig.SendFn)")
 }
 
@@ -56,7 +56,7 @@ func (NoopCapabilities) ReplyFooter(string) string { return "" }
 // consumers / tests can depend on the smallest seam they need. Every
 // Capabilities also satisfies MessageSender (#373).
 type MessageSender interface {
-	Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
+	Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 }
 
 // TakeoverHook isolates the optional first-message takeover probe.
@@ -100,12 +100,12 @@ var _ SessionView = (*session.ManagedSession)(nil)
 // ReplyFooterFn closures into a Capabilities; nil closures fall back to
 // NoopCapabilities behaviour.
 type closureCapabilities struct {
-	send        func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
+	send        func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 	takeover    func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 	replyFooter func(backendID string) string
 }
 
-func (c closureCapabilities) Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error) {
+func (c closureCapabilities) Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 	if c.send == nil {
 		return NoopCapabilities{}.Send(ctx, key, sess, text, images, onEvent)
 	}

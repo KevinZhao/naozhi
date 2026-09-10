@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -48,7 +49,7 @@ type SessionRouter interface {
 // SetAppContext(ctx) is called afterwards so background takeover/close
 // goroutines outlive the request but die at process shutdown.
 type Handlers struct {
-	appCtx          context.Context // server lifecycle context, set via SetAppContext
+	appCtx          context.Context // server lifecycle context, wired via Deps.AppCtx (#2552)
 	bg              sync.WaitGroup  // tracks background takeover/close goroutines for graceful drain
 	cache           CacheView
 	nodeAccess      NodeAccessor
@@ -67,6 +68,12 @@ type Handlers struct {
 
 // Deps bundles all wiring for New.
 type Deps struct {
+	// AppCtx is the server-lifecycle context takeover/cleanup goroutines run
+	// under, so they outlive the HTTP request that started them. Wired at
+	// construction (#2552) — it used to arrive via SetAppContext from Start,
+	// which meant a request served before that call ran under a nil ctx.
+	AppCtx context.Context
+
 	Cache        CacheView
 	NodeAccess   NodeAccessor
 	NodeCache    *node.CacheManager
@@ -84,6 +91,7 @@ type Deps struct {
 // New constructs a Handlers from injected deps.
 func New(d Deps) *Handlers {
 	return &Handlers{
+		appCtx:          d.AppCtx,
 		cache:           d.Cache,
 		nodeAccess:      d.NodeAccess,
 		nodeCache:       d.NodeCache,
@@ -115,12 +123,6 @@ func (h *Handlers) sendTermVerified(pid int, expectedStartTime uint64) error {
 		}
 	}
 	return osutil.SendTermVerified(pid, expectedStartTime, stFn)
-}
-
-// SetAppContext is called once after the server context exists; background
-// takeover/close goroutines use it to outlive the request until shutdown.
-func (h *Handlers) SetAppContext(ctx context.Context) {
-	h.appCtx = ctx
 }
 
 // Wait blocks until all background takeover/close goroutines have exited.
@@ -165,7 +167,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("session_id")
 	nodeID := r.URL.Query().Get("node")
-	if sessionID == "" || !discovery.IsValidSessionID(sessionID) {
+	if sessionID == "" || !claudefs.IsValidSessionID(sessionID) {
 		httputil.WriteJSON(w, []any{})
 		return
 	}
@@ -235,7 +237,7 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if req.PID <= 0 || req.SessionID == "" || !discovery.IsValidSessionID(req.SessionID) {
+	if req.PID <= 0 || req.SessionID == "" || !claudefs.IsValidSessionID(req.SessionID) {
 		http.Error(w, "pid and session_id are required", http.StatusBadRequest)
 		return
 	}

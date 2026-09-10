@@ -3,7 +3,7 @@ package cli
 import "testing"
 
 // TestACPProtocol_ThoughtChunk_AccumulatesAndFlushes verifies agent_thought_chunk
-// notifications accumulate into thoughtBuf (producing no per-chunk EventLog
+// notifications accumulate into thoughtBuf (producing no per-chunk ring.EventLog
 // entry) and flush as a single "thinking" block at the turn boundary, ahead of
 // the assistant text frame. Regression guard for the bug where thought chunks
 // fell through to the default branch and rendered as empty "agent_thought_chunk"

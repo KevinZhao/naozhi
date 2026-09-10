@@ -3,6 +3,8 @@ package cli
 import (
 	"sync"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestProcess_MeteringGen_TracksMeteringWrites pins the MeteringGen contract
@@ -15,17 +17,17 @@ func TestProcess_MeteringGen_TracksMeteringWrites(t *testing.T) {
 	if got := p.MeteringGen(); got != 0 {
 		t.Fatalf("zero-value MeteringGen = %d, want 0", got)
 	}
-	p.applyMetadata(&EventMetadata{ContextUsagePercent: 10})
+	p.applyMetadata(&clievent.EventMetadata{ContextUsagePercent: 10})
 	if got := p.MeteringGen(); got != 0 {
 		t.Errorf("metadata frame without metering bumped MeteringGen to %d, want 0", got)
 	}
-	p.applyMetadata(&EventMetadata{MeteringUsage: []MeteringEntry{{Value: 0.01, Unit: "credit"}}})
+	p.applyMetadata(&clievent.EventMetadata{MeteringUsage: []clievent.MeteringEntry{{Value: 0.01, Unit: "credit"}}})
 	if got := p.MeteringGen(); got != 1 {
 		t.Errorf("after first metering frame MeteringGen = %d, want 1", got)
 	}
 	// Same unit merges into the existing row (no new entry) but is still a
 	// value change the cache must observe.
-	p.applyMetadata(&EventMetadata{MeteringUsage: []MeteringEntry{{Value: 0.02, Unit: "credit"}}})
+	p.applyMetadata(&clievent.EventMetadata{MeteringUsage: []clievent.MeteringEntry{{Value: 0.02, Unit: "credit"}}})
 	if got := p.MeteringGen(); got != 2 {
 		t.Errorf("after second metering frame MeteringGen = %d, want 2", got)
 	}
@@ -49,7 +51,7 @@ func TestProcess_MeteringGen_ConcurrentReadersAndWriter(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < writes; i++ {
-			p.applyMetadata(&EventMetadata{MeteringUsage: []MeteringEntry{{Value: 1, Unit: "credit"}}})
+			p.applyMetadata(&clievent.EventMetadata{MeteringUsage: []clievent.MeteringEntry{{Value: 1, Unit: "credit"}}})
 		}
 	}()
 	errs := make(chan string, readers)

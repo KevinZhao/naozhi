@@ -14,9 +14,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -573,14 +573,14 @@ func TestHandleAPISessionEvents_LimitClampedAtMax(t *testing.T) {
 // ─── handleAPISend ────────────────────────────────────────────────────────────
 
 func TestHandleAPISend_MissingKeyJSON(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
+	_, hs := newTestServerHS(&mockPlatform{})
 
 	body := `{"text":"hello"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleSend(w, req)
+	hs.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -595,14 +595,14 @@ func TestHandleAPISend_MissingKeyJSON(t *testing.T) {
 // oversized text payload could pass the body-level MaxBytesReader and
 // drive a multi-MB CLI stdin write once CoalesceMessages ran. R60-SEC-2.
 func TestHandleAPISend_TextTooLong_JSON(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
+	_, hs := newTestServerHS(&mockPlatform{})
 	big := strings.Repeat("x", maxWSSendTextBytes+1)
 	body := `{"key":"p:t:u:general","text":"` + big + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleSend(w, req)
+	hs.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -618,13 +618,13 @@ func TestHandleAPISend_TextTooLong_JSON(t *testing.T) {
 // cannot fragment log lines through the "workspace validation failed" path
 // using an ANSI-padded key. R60-SEC-8.
 func TestHandleAPISend_RejectControlInKey(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
+	_, hs := newTestServerHS(&mockPlatform{})
 	body := `{"key":"p:t:u\nadmin:general","text":"hi"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleSend(w, req)
+	hs.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -637,14 +637,14 @@ func TestHandleAPISend_RejectControlInKey(t *testing.T) {
 }
 
 func TestHandleAPISend_MissingTextAndFiles(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
+	_, hs := newTestServerHS(&mockPlatform{})
 
 	body := `{"key":"p:t:u:general"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleSend(w, req)
+	hs.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -655,13 +655,13 @@ func TestHandleAPISend_MissingTextAndFiles(t *testing.T) {
 }
 
 func TestHandleAPISend_InvalidJSON(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
+	_, hs := newTestServerHS(&mockPlatform{})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
 		strings.NewReader("{bad json"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleSend(w, req)
+	hs.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -726,14 +726,14 @@ func TestHandleAPISend_AcceptedWithValidToken(t *testing.T) {
 }
 
 func TestHandleAPISend_AcceptedNoAuth(t *testing.T) {
-	srv := newTestServer(&mockPlatform{}) // no dashboardToken
+	_, hs := newTestServerHS(&mockPlatform{}) // no dashboardToken
 
 	body := `{"key":"p:t:u:general","text":"hello world"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleSend(w, req)
+	hs.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
@@ -741,7 +741,7 @@ func TestHandleAPISend_AcceptedNoAuth(t *testing.T) {
 }
 
 func TestHandleAPISend_InterruptWhenBusy(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
+	srv, hs := newTestServerHS(&mockPlatform{})
 	key := "p:t:u:general"
 
 	// Manually acquire the session guard to simulate a busy session.
@@ -753,7 +753,7 @@ func TestHandleAPISend_InterruptWhenBusy(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleSend(w, req)
+	hs.sendH.handleSend(w, req)
 
 	// With interrupt-on-busy, the API accepts immediately and interrupts
 	// the running session; the goroutine will timeout waiting for the guard.
@@ -770,13 +770,13 @@ func TestHandleAPISend_InterruptWhenBusy(t *testing.T) {
 }
 
 func TestHandleAPISend_ResponseIsJSON(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
+	_, hs := newTestServerHS(&mockPlatform{})
 
 	body := bytes.NewBufferString(`{"key":"x:y:z:general","text":"test"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleSend(w, req)
+	hs.sendH.handleSend(w, req)
 
 	ct := w.Header().Get("Content-Type")
 	if !strings.HasPrefix(ct, "application/json") {
@@ -795,8 +795,7 @@ func TestHandleAPISessions_StatsIncludeAgentsAndWorkspace(t *testing.T) {
 		MaxProcs:  5,
 		Workspace: "/test/workspace",
 	})
-	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Agents: agents, Backend: "claude"})
-	srv.registerDashboard()
+	srv, _ := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Agents: agents, Backend: "claude"})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
@@ -853,8 +852,7 @@ func TestHandleAPISend_WorkspaceOverride(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{
 		Workspace: "/default/workspace",
 	})
-	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
-	srv.registerDashboard()
+	_, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 
 	key := "dashboard:direct:test-session:general"
 	body := `{"key":"` + key + `","text":"hi","workspace":"` + tmpDir + `"}`
@@ -862,7 +860,7 @@ func TestHandleAPISend_WorkspaceOverride(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleSend(w, req)
+	hs.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", w.Code)
@@ -887,8 +885,7 @@ func TestHandleAPISend_WorkspaceInvalidDir(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{
 		Workspace: "/default/workspace",
 	})
-	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
-	srv.registerDashboard()
+	_, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 
 	key := "dashboard:direct:test-session:general"
 	body := `{"key":"` + key + `","text":"hi","workspace":"/nonexistent/path/xyz"}`
@@ -896,7 +893,7 @@ func TestHandleAPISend_WorkspaceInvalidDir(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.sendH.handleSend(w, req)
+	hs.sendH.handleSend(w, req)
 
 	// Invalid workspace should be rejected with 403
 	if w.Code != http.StatusForbidden {
@@ -1324,7 +1321,7 @@ func TestHandlePreview_RejectsInvalidNodeID(t *testing.T) {
 func writePreviewJSONL(t *testing.T, claudeDir, cwd, content string) string {
 	t.Helper()
 	sessionID := "12345678-1234-1234-1234-123456789abc"
-	projDir := filepath.Join(claudeDir, "projects", discovery.ClaudeProjectSlug(cwd))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1496,8 +1493,7 @@ func TestHistorySessions_EmptyHistoryCached(t *testing.T) {
 func TestHandleDelete_AcceptsQueryAndBody(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 5})
-	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
-	srv.registerDashboard()
+	srv, _ := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 
 	cases := []struct {
 		name       string

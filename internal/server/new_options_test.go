@@ -68,8 +68,11 @@ func TestNewWithOptions_FieldsRoundTrip(t *testing.T) {
 	if tag := replyTagForBackend("kiro"); tag != "kiro" {
 		t.Errorf("backendTag = %q, want kiro", tag)
 	}
-	if srv.workspaceName != "Alpha" {
-		t.Errorf("workspaceName = %q, want Alpha", srv.workspaceName)
+	// Same shape as backendTag above: Server.workspaceName was write-only and
+	// removed in #2553 (nothing ever read s.workspaceName — the value goes
+	// straight from opts into HealthHandler). Assert it reaches the consumer.
+	if srv.healthH == nil || srv.healthH.workspaceName != "Alpha" {
+		t.Errorf("healthH.workspaceName = %q, want Alpha", srv.healthH.workspaceName)
 	}
 	if srv.addr != ":0" {
 		t.Errorf("addr = %q, want :0", srv.addr)
@@ -104,6 +107,11 @@ func TestServerNew_NotReintroduced(t *testing.T) {
 	// prose) does not generate a false positive — Go function defs
 	// always start at column 0, so a `^func New(addr string` anchor
 	// distinguishes definitions from references.
+	// Positive anchor (#2630): server.go must still be where the constructor
+	// lives, otherwise the negative check below passes against the wrong file.
+	if !strings.Contains(string(data), "\nfunc NewWithOptions(opts ServerOptions) *Server {") {
+		t.Fatal("server.go no longer declares NewWithOptions — re-point this test at the constructor's file")
+	}
 	const defNeedle = "\nfunc New(addr string"
 	if strings.Contains("\n"+string(data), defNeedle) {
 		t.Error("server.go must not redefine `func New(addr string ...)` — use NewWithOptions(ServerOptions{...}) per R237-ARCH-14 (#614)")

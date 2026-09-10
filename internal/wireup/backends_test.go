@@ -18,7 +18,7 @@ func TestRegisterCLIBackends(t *testing.T) {
 	// the wireup-level sync.Once is a belt-and-braces guard, so a
 	// second call inside the same process — including from another
 	// test that already imported wireup transitively — is a no-op.
-	EnsureCLIBackends()
+	NewBoot().EnsureCLIBackends()
 
 	if _, ok := backend.Get("claude"); !ok {
 		t.Fatal("RegisterCLIBackends did not register the claude profile")
@@ -34,11 +34,14 @@ func TestRegisterCLIBackends(t *testing.T) {
 // net — if the helper is called from main.go AND a test setup, the
 // process must still boot.
 func TestRegisterCLIBackendsIdempotent(t *testing.T) {
-	// Three calls; if the once-guard is broken the second would
-	// panic via backend.Register's duplicate-ID check.
-	EnsureCLIBackends()
-	EnsureCLIBackends()
-	if !RegisterCLIBackends() {
+	// Three calls across two Boot values; if the once-guard is broken the
+	// second would panic via backend.Register's duplicate-ID check. Two Boots
+	// on purpose: registration is process-global (#2552), so a fresh Boot must
+	// still observe it rather than re-running it.
+	NewBoot().EnsureCLIBackends()
+	b := NewBoot()
+	b.EnsureCLIBackends()
+	if !b.RegisterCLIBackends() {
 		t.Fatal("RegisterCLIBackends should report registered=true after first call")
 	}
 }
@@ -48,22 +51,30 @@ func TestRegisterCLIBackendsIdempotent(t *testing.T) {
 // driving the CLI-backend registration through wireup must now leave an
 // audit trail in the boot registry, and Validate must treat the cli-backends
 // step as satisfied. This is what lets cmd/naozhi route through
-// wireup.EnsureCLIBackends + wireup.Validate instead of calling
+// boot.EnsureCLIBackends + boot.Validate instead of calling
 // backend.RegisterDefaults directly and hoping it ran.
 func TestRegisterCLIBackends_RecordsBootStep(t *testing.T) {
-	EnsureCLIBackends()
+	b := NewBoot()
+	b.EnsureCLIBackends()
 
 	var seen bool
-	for _, s := range BootSteps() {
+	for _, s := range b.Steps() {
 		if s == "cli-backends" {
 			seen = true
 			break
 		}
 	}
 	if !seen {
-		t.Fatalf("EnsureCLIBackends did not record the cli-backends boot step; got %v", BootSteps())
+		t.Fatalf("EnsureCLIBackends did not record the cli-backends boot step; got %v", b.Steps())
 	}
-	if err := Validate(); err != nil {
-		t.Fatalf("Validate() = %v, want nil after cli-backends recorded", err)
+	// history-backends is recorded explicitly since #2552, so a Boot that only
+	// ran the CLI step must NOT validate — that is the fail-loud property the
+	// old init() hid by always recording it on import.
+	if err := b.Validate(); err == nil {
+		t.Error("Validate() = nil with only cli-backends recorded; history-backends must still be required")
+	}
+	b.RecordHistoryBackends()
+	if err := b.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil after both required steps recorded", err)
 	}
 }

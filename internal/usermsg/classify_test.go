@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -25,16 +25,16 @@ func TestClassify_SentinelToCode(t *testing.T) {
 		{"NoCLIWrapper", session.ErrNoCLIWrapper, "", CodeNoCLIWrapper},
 		{"Asleep regular key", session.ErrNoActiveProcess, "feishu:p2p:u_x:agent", CodeSessionAsleep},
 		{"Asleep cron key", session.ErrNoActiveProcess, "cron:slug", CodeCronAsleep},
-		{"NoOutputTimeout", cli.ErrNoOutputTimeout, "", CodeTimeout},
-		{"TotalTimeout", cli.ErrTotalTimeout, "", CodeTimeout},
-		{"OrphanedSlot maps to timeout", cli.ErrOrphanedSlot, "", CodeTimeout},
-		{"ProcessExited", cli.ErrProcessExited, "", CodeProcessExited},
-		{"AbortedByUrgent", cli.ErrAbortedByUrgent, "", CodeAbortedByUrgent},
-		{"ReconnectedUnknown", cli.ErrReconnectedUnknown, "", CodeReconnectedUnknown},
-		{"SessionReset", cli.ErrSessionReset, "", CodeSessionReset},
-		{"TooManyPending", cli.ErrTooManyPending, "", CodeTooManyPending},
-		{"ProcessBusy", cli.ErrProcessBusy, "", CodeProcessBusy},
-		{"MessageTooLarge", cli.ErrMessageTooLarge, "", CodeMessageTooLarge},
+		{"NoOutputTimeout", clierr.ErrNoOutputTimeout, "", CodeTimeout},
+		{"TotalTimeout", clierr.ErrTotalTimeout, "", CodeTimeout},
+		{"OrphanedSlot maps to timeout", clierr.ErrOrphanedSlot, "", CodeTimeout},
+		{"ProcessExited", clierr.ErrProcessExited, "", CodeProcessExited},
+		{"AbortedByUrgent", clierr.ErrAbortedByUrgent, "", CodeAbortedByUrgent},
+		{"ReconnectedUnknown", clierr.ErrReconnectedUnknown, "", CodeReconnectedUnknown},
+		{"SessionReset", clierr.ErrSessionReset, "", CodeSessionReset},
+		{"TooManyPending", clierr.ErrTooManyPending, "", CodeTooManyPending},
+		{"ProcessBusy", clierr.ErrProcessBusy, "", CodeProcessBusy},
+		{"MessageTooLarge", clierr.ErrMessageTooLarge, "", CodeMessageTooLarge},
 		{"Canceled", context.Canceled, "", CodeRestarting},
 		{"DeadlineExceeded", context.DeadlineExceeded, "", CodeRestarting},
 		{"RouterStopped", session.ErrRouterStopped, "", CodeRestarting},

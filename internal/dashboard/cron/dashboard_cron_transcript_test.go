@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 )
 
 // fixtureRunWithJSONL writes a CronRun JSON record + matching JSONL into
@@ -82,7 +82,7 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *Handlers, jobID,
 	}
 
 	// Layout the JSONL.
-	projDir := filepath.Join(claudeDir, "projects", discovery.ClaudeProjectSlug(workDir))
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(workDir))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
@@ -91,10 +91,7 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *Handlers, jobID,
 		t.Fatalf("write jsonl: %v", err)
 	}
 
-	h = &Handlers{
-		scheduler: sched,
-		claudeDir: claudeDir,
-	}
+	h = &Handlers{deps: Deps{Scheduler: sched, ClaudeDir: claudeDir}}
 	return h, jobID, runID, claudeDir
 }
 
@@ -253,7 +250,7 @@ func TestTranscript_RejectsCrossJobID(t *testing.T) {
 
 func TestTranscript_RejectsNonHexIDs(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}
+	h := &Handlers{deps: Deps{Scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}}
 	cases := []struct{ runID, jobID string }{
 		{"GGGG", "aaaaaaaaaaaaaaaa"},                   // invalid run_id
 		{"aaaaaaaaaaaaaaaa", "GGGG"},                   // invalid job_id
@@ -275,7 +272,7 @@ func TestTranscript_RejectsNonHexIDs(t *testing.T) {
 // envelope.
 func TestParseRunPathParams_JSONErrorContentType(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}
+	h := &Handlers{deps: Deps{Scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}}
 	cases := []struct {
 		name  string
 		runID string
@@ -525,7 +522,7 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 	}
 
 	// Write the JSONL under realDir so the link resolves there.
-	projDir := filepath.Join(realDir, "projects", discovery.ClaudeProjectSlug(workDir))
+	projDir := filepath.Join(realDir, "projects", claudefs.ProjectSlug(workDir))
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatalf("mkdir projects: %v", err)
 	}
@@ -537,7 +534,7 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 
 	// Handler points at the symlinked claudeDir — the prefix check must
 	// resolve both sides identically before comparing.
-	h := &Handlers{scheduler: sched, claudeDir: link}
+	h := &Handlers{deps: Deps{Scheduler: sched, ClaudeDir: link}}
 	w := callTranscript(h, jobID, runID)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
@@ -573,7 +570,7 @@ func TestFlattenUserEvent_PreallocCapacity(t *testing.T) {
 	t.Parallel()
 
 	// Case 1: text-only.
-	textEv := &claudeJSONLEvent{
+	textEv := &claudefs.Line{
 		Type:    "user",
 		Message: json.RawMessage(`{"role":"user","content":"hello world"}`),
 	}
@@ -591,7 +588,7 @@ func TestFlattenUserEvent_PreallocCapacity(t *testing.T) {
 	// Case 2: empty content-block array → no turns at all. Previous code
 	// returned a 2-cap empty slice from the `out := make(... 0, 2)` line;
 	// we now return nil so the per-line allocation is skipped entirely.
-	emptyEv := &claudeJSONLEvent{
+	emptyEv := &claudefs.Line{
 		Type:    "user",
 		Message: json.RawMessage(`{"role":"user","content":[]}`),
 	}
@@ -609,7 +606,7 @@ func TestFlattenUserEvent_PreallocCapacity(t *testing.T) {
 		`{"type":"tool_result","tool_use_id":"a","content":"o1","is_error":false},` +
 		`{"type":"tool_result","tool_use_id":"b","content":"o2","is_error":false},` +
 		`{"type":"tool_result","tool_use_id":"c","content":"o3","is_error":false}]}`)
-	out3, _, _, parsed3 := flattenUserEvent(&claudeJSONLEvent{Type: "user", Message: threeRes}, 0, 0)
+	out3, _, _, parsed3 := flattenUserEvent(&claudefs.Line{Type: "user", Message: threeRes}, 0, 0)
 	if !parsed3 || len(out3) != 3 {
 		t.Fatalf("3-tool_result: parsed=%v len(out)=%d (want true / 3)", parsed3, len(out3))
 	}
@@ -696,7 +693,7 @@ func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
 
 	// Small Input — passes through unchanged.
 	smallInput := `{"command":"echo hi"}`
-	smallEv := &claudeJSONLEvent{
+	smallEv := &claudefs.Line{
 		Type: "assistant",
 		Message: json.RawMessage(`{"role":"assistant","content":[` +
 			`{"type":"tool_use","id":"tu_a","name":"Bash","input":` + smallInput + `}` +
@@ -717,7 +714,7 @@ func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
 	// command field to push raw Input bytes past maxToolInputBytes.
 	pad := strings.Repeat("x", maxToolInputBytes+8*1024)
 	bigInput := `{"command":"` + pad + `"}`
-	bigEv := &claudeJSONLEvent{
+	bigEv := &claudefs.Line{
 		Type: "assistant",
 		Message: json.RawMessage(`{"role":"assistant","content":[` +
 			`{"type":"tool_use","id":"tu_b","name":"Bash","input":` + bigInput + `}` +
@@ -748,7 +745,7 @@ func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
 	if maxToolInputBytes > summariseInputCap {
 		midPad := strings.Repeat("z", maxToolInputBytes/2)
 		midInput := `{"command":"` + midPad + `"}`
-		midEv := &claudeJSONLEvent{
+		midEv := &claudefs.Line{
 			Type: "assistant",
 			Message: json.RawMessage(`{"role":"assistant","content":[` +
 				`{"type":"tool_use","id":"tu_c","name":"Bash","input":` + midInput + `}` +
@@ -888,13 +885,13 @@ func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		ev        *claudeJSONLEvent
+		ev        *claudefs.Line
 		wantKinds []string // ordered kinds expected in output
 		wantParse bool
 	}{
 		{
 			name: "user_text",
-			ev: &claudeJSONLEvent{
+			ev: &claudefs.Line{
 				Type:    "user",
 				Message: json.RawMessage(`{"role":"user","content":"hello"}`),
 			},
@@ -903,7 +900,7 @@ func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
 		},
 		{
 			name: "assistant_text",
-			ev: &claudeJSONLEvent{
+			ev: &claudefs.Line{
 				Type:    "assistant",
 				Message: json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"hi"}]}`),
 			},
@@ -912,7 +909,7 @@ func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
 		},
 		{
 			name: "system_error",
-			ev: &claudeJSONLEvent{
+			ev: &claudefs.Line{
 				Type:    "system",
 				Message: json.RawMessage(`{"subtype":"error","message":"boom"}`),
 			},
@@ -921,7 +918,7 @@ func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
 		},
 		{
 			name: "system_init_skipped",
-			ev: &claudeJSONLEvent{
+			ev: &claudefs.Line{
 				Type:    "system",
 				Message: json.RawMessage(`{"subtype":"init"}`),
 			},
@@ -930,7 +927,7 @@ func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
 		},
 		{
 			name:      "unknown_type_default",
-			ev:        &claudeJSONLEvent{Type: "queue-operation", Message: json.RawMessage(`{}`)},
+			ev:        &claudefs.Line{Type: "queue-operation", Message: json.RawMessage(`{}`)},
 			wantKinds: nil,
 			wantParse: false,
 		},
@@ -993,7 +990,7 @@ func TestFlattenSystemEvent_EarlyReturn(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ev := &claudeJSONLEvent{
+			ev := &claudefs.Line{
 				Type:    "system",
 				Message: json.RawMessage(tc.msg),
 			}
@@ -1110,7 +1107,7 @@ func TestFlattenAssistantEvent_ToolInputSizeCap_MultiBlock(t *testing.T) {
 
 	// Mix small + big + small + big in one assistant event so the loop
 	// must independently classify each block.
-	ev := &claudeJSONLEvent{
+	ev := &claudefs.Line{
 		Type: "assistant",
 		Message: json.RawMessage(`{"role":"assistant","content":[` +
 			`{"type":"tool_use","id":"tu_1","name":"Bash","input":` + smallInput + `},` +
@@ -1173,7 +1170,7 @@ func TestFlattenAssistantEvent_AssistantFirstThenSequentialIndices(t *testing.T)
 
 	// Mixed: text + 2 tool_use + text (text blocks merge, so we expect
 	// 1 assistant turn + 2 tool_use turns = 3 turns total).
-	ev := &claudeJSONLEvent{
+	ev := &claudefs.Line{
 		Type: "assistant",
 		Message: json.RawMessage(`{"role":"assistant","content":[` +
 			`{"type":"text","text":"first"},` +
@@ -1213,7 +1210,7 @@ func TestFlattenAssistantEvent_AssistantFirstThenSequentialIndices(t *testing.T)
 	// turn must NOT be emitted at all (text empty), and tool_use turns
 	// must start at nextIdx without a phantom slot reserved for the
 	// missing assistant turn.
-	toolOnly := &claudeJSONLEvent{
+	toolOnly := &claudefs.Line{
 		Type: "assistant",
 		Message: json.RawMessage(`{"role":"assistant","content":[` +
 			`{"type":"tool_use","id":"tu_a","name":"Bash","input":{"command":"a"}},` +

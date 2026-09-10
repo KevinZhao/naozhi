@@ -21,7 +21,7 @@ func TestSessionHandlers_RecordRetired_StampsHistory(t *testing.T) {
 	srv.sessionH.WaitWarmHistory()
 
 	// Seed the FS with one minimal claude project + JSONL so RecentSessions
-	// has a candidate to stamp. The session UUID must be IsValidSessionID().
+	// has a candidate to stamp. The session UUID must be claudefs.IsValidSessionID().
 	tmp := t.TempDir()
 	wsRoot := filepath.Join(tmp, "ws")
 	if err := os.MkdirAll(wsRoot, 0o700); err != nil {

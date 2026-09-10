@@ -28,12 +28,11 @@ func TestHandleAccessProfiles_ShapeAndNoLeak(t *testing.T) {
 			},
 		},
 	})
-	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
-	srv.registerDashboard()
+	_, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/access-profiles", nil)
 	w := httptest.NewRecorder()
-	srv.accessProfilesH.HandleList(w, req)
+	hs.accessProfilesH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -88,12 +87,11 @@ func TestHandleAccessProfiles_DefaultSurfaced(t *testing.T) {
 			},
 		},
 	})
-	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
-	srv.registerDashboard()
+	_, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/access-profiles", nil)
 	w := httptest.NewRecorder()
-	srv.accessProfilesH.HandleList(w, req)
+	hs.accessProfilesH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -119,12 +117,11 @@ func TestHandleAccessProfiles_DefaultSurfaced(t *testing.T) {
 // passes and the picker/chip simply stay hidden.
 func TestHandleAccessProfiles_EmptyRegistry(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{Workspace: t.TempDir()})
-	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
-	srv.registerDashboard()
+	_, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/access-profiles", nil)
 	w := httptest.NewRecorder()
-	srv.accessProfilesH.HandleList(w, req)
+	hs.accessProfilesH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)

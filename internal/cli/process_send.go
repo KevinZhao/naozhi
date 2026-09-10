@@ -1,12 +1,11 @@
 package cli
 
 // process_send.go — user-message outbound path and CLI-level interrupts.
-// EventCallback is consumed cross-package (session, dispatch, server); changing
+// clievent.EventCallback is consumed cross-package (session, dispatch, server); changing
 // its signature is breaking. findResultSince / drainStaleEvents: process_turn.go.
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -14,22 +13,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// EventCallback is called for each intermediate event during Send.
-type EventCallback func(ev Event)
-
-// buildUserEntry renders the EventLog entry for a single user message. Shared
+// buildUserEntry renders the ring.EventLog entry for a single user message. Shared
 // by Send and SendPassthrough: readLoop filters the CLI's replay echo out of
-// EventLog, so both paths must append the bubble explicitly.
-func buildUserEntry(text string, images []Attachment) clievent.EventEntry {
+// ring.EventLog, so both paths must append the bubble explicitly.
+func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEntry {
 	entry := clievent.EventEntry{
 		Time:    time.Now().UnixMilli(),
 		Type:    "user",
 		Summary: textutil.TruncateRunes(text, 120),
-		Detail:  textutil.TruncateRunes(text, EventDetailMaxRunes),
+		Detail:  textutil.TruncateRunes(text, clievent.EventDetailMaxRunes),
 	}
 	if len(images) > 0 {
 		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"
@@ -67,7 +65,7 @@ func buildUserEntry(text string, images []Attachment) clievent.EventEntry {
 		sanitizedPaths := make([]string, 0, len(images))
 		anyPath := false
 		for i, t := range thumbs {
-			if t == "" || !strings.HasPrefix(t, imageDataURIPrefix) {
+			if t == "" || !strings.HasPrefix(t, ring.ImageDataURIPrefix) {
 				continue
 			}
 			sanitizedThumbs = append(sanitizedThumbs, t)
@@ -95,12 +93,12 @@ func buildUserEntry(text string, images []Attachment) clievent.EventEntry {
 // onEvent fires only for assistant events carrying a "thinking" or "tool_use"
 // block — not text deltas or ACP tool_call_update progress — so treat it as a
 // tool-activity heartbeat, not "new content". Full-stream consumers use
-// EventLog.Subscribe; Send logs every event under the same lock, nothing is lost.
-func (p *Process) Send(ctx context.Context, text string, images []Attachment, onEvent EventCallback) (*SendResult, error) {
+// ring.EventLog.Subscribe; Send logs every event under the same lock, nothing is lost.
+func (p *Process) Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 	p.mu.Lock()
 	if p.state == StateRunning {
 		p.mu.Unlock()
-		return nil, fmt.Errorf("process busy (state=%s): %w", p.state, ErrProcessBusy)
+		return nil, fmt.Errorf("process busy (state=%s): %w", p.state, clierr.ErrProcessBusy)
 	}
 	p.state = StateRunning
 	p.mu.Unlock()
@@ -125,7 +123,7 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 	// undecodable or already-small images pass through unchanged.
 	images = downscaleImagesForVision(images)
 
-	// Turn start for the EventLog fallback when eventCh drops events.
+	// Turn start for the ring.EventLog fallback when eventCh drops events.
 	turnStartMS := time.Now().UnixMilli()
 
 	if err := p.protocol.WriteMessage(p.shimStdinWriter(), text, images); err != nil {
@@ -177,12 +175,12 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 			return nil, ctx.Err()
 		case ev, ok := <-p.eventCh:
 			if !ok {
-				// eventCh closed — process exited. Fall back to EventLog for a result
+				// eventCh closed — process exited. Fall back to ring.EventLog for a result
 				// readLoop logged but eventCh dropped or delivered too late.
 				if sr := p.findResultSince(turnStartMS); sr != nil {
 					return sr, nil
 				}
-				return nil, ErrProcessExited
+				return nil, clierr.ErrProcessExited
 			}
 
 			lastOutput = time.Now()
@@ -209,7 +207,7 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 				continue
 			}
 
-			// Already logged to EventLog by readLoop; only fan out here.
+			// Already logged to ring.EventLog by readLoop; only fan out here.
 			if onEvent != nil && ev.Type == "assistant" && ev.Message != nil {
 				for _, block := range ev.Message.Content {
 					if block.Type == "thinking" || block.Type == "tool_use" {
@@ -227,7 +225,7 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 					p.sessionID = ev.SessionID
 				}
 				p.mu.Unlock()
-				return &SendResult{
+				return &clievent.SendResult{
 					Text:       ev.Result,
 					SessionID:  ev.SessionID,
 					CostUSD:    ev.CostUSD,
@@ -259,14 +257,14 @@ func (p *Process) clearInflightFlags() {
 
 // handleWatchdogTick evaluates the no-output and total-turn deadlines for one
 // watchdog wakeup. Returns (sr, nil) when a deadline elapsed but a result
-// already landed in EventLog (eventCh dropped it); (nil, err) when it elapsed
+// already landed in ring.EventLog (eventCh dropped it); (nil, err) when it elapsed
 // with no fallback (Kill() already issued); (nil, nil) when neither fired and
 // the caller should re-arm.
 func (p *Process) handleWatchdogTick(
 	now, lastOutput, turnStart time.Time,
 	turnStartMS int64,
 	noOutputDur, totalDur time.Duration,
-) (*SendResult, error) {
+) (*clievent.SendResult, error) {
 	if now.Sub(lastOutput) >= noOutputDur {
 		if sr := p.findResultSince(turnStartMS); sr != nil {
 			return sr, nil
@@ -280,7 +278,7 @@ func (p *Process) handleWatchdogTick(
 		// Clear inflight settle flags so drainStaleEvents' 500ms wait cannot
 		// fire against a watchdog-killed process (#770; see clearInflightFlags).
 		p.clearInflightFlags()
-		return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
+		return nil, fmt.Errorf("%w (%s)", clierr.ErrNoOutputTimeout, noOutputDur)
 	}
 	if now.Sub(turnStart) >= totalDur {
 		if sr := p.findResultSince(turnStartMS); sr != nil {
@@ -290,7 +288,7 @@ func (p *Process) handleWatchdogTick(
 		p.slogger().Error("watchdog: total timeout", "timeout", totalDur)
 		p.Kill()
 		p.clearInflightFlags()
-		return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)
+		return nil, fmt.Errorf("%w (%s)", clierr.ErrTotalTimeout, totalDur)
 	}
 	return nil, nil
 }
@@ -325,12 +323,12 @@ func (p *Process) Interrupt() {
 // on stdin (stream-json only) — no SIGINT, no shim interrupt command. The CLI
 // (verified on 2.1.119) kills in-flight tools within ~300ms, emits a `result`,
 // and the session stays usable. Returns nil (written; next Send drains the
-// result), ErrNoActiveTurn (idle; nothing written, no flags set),
-// ErrInterruptUnsupported (fall back to Interrupt()), or a wrapped transport
+// result), clierr.ErrNoActiveTurn (idle; nothing written, no flags set),
+// clierr.ErrInterruptUnsupported (fall back to Interrupt()), or a wrapped transport
 // error (flags rolled back so the next Send does not burn the settle budget).
 func (p *Process) InterruptViaControl() error {
 	if !p.Alive() {
-		return ErrNoActiveTurn
+		return clierr.ErrNoActiveTurn
 	}
 	// Snapshot state and pre-commit the atomics under p.mu so a concurrent Send()
 	// flipping State to Running cannot race us into "wrote control_request but
@@ -348,7 +346,7 @@ func (p *Process) InterruptViaControl() error {
 	// the next turn and produce a spurious control_response against a turn the
 	// caller never intended to cancel.
 	if state != StateRunning {
-		return ErrNoActiveTurn
+		return clierr.ErrNoActiveTurn
 	}
 	reqID := "naozhi-int-" + strconv.FormatInt(p.interruptSeq.Add(1), 10)
 	if err := p.protocol.WriteInterrupt(p.shimStdinWriter(), reqID); err != nil {
@@ -393,10 +391,10 @@ func (p *Process) unregisterControlAck(reqID string) {
 	p.controlAckMu.Unlock()
 }
 
-// deliverControlAck routes a control_ack Event from readLoop to its waiter.
+// deliverControlAck routes a control_ack clievent.Event from readLoop to its waiter.
 // Unmatched acks (waiter timed out, or an interrupt's control_response —
 // those never register) are dropped: fire-and-forget, no turn state.
-func (p *Process) deliverControlAck(ev Event) {
+func (p *Process) deliverControlAck(ev clievent.Event) {
 	p.controlAckMu.Lock()
 	ch, ok := p.controlAcks[ev.RPCRequestID]
 	if ok {
@@ -409,29 +407,24 @@ func (p *Process) deliverControlAck(ev Event) {
 	if ev.SubType == "error" {
 		// ev.Result was sanitized at the protocol layer (parseControlAck /
 		// ACP interception) — safe for slog + dashboard toast.
-		ch <- fmt.Errorf("%w: %s", ErrSetModelRejected, ev.Result)
+		ch <- fmt.Errorf("%w: %s", clierr.ErrSetModelRejected, ev.Result)
 		return
 	}
 	ch <- nil
 }
 
-// ErrSetModelRejected wraps a CLI-side rejection of set_model (org policy or
-// unknown model). The wrapped text is the CLI's own message; callers surface it
-// verbatim and MUST NOT record the override (RFC §6 R8: ack-before-persist).
-var ErrSetModelRejected = errors.New("set_model rejected by CLI")
-
 // SetModel switches the live session's model in place without restarting the
 // CLI (protocol mapping: ModelSetter godoc). It registers an ack waiter under a
 // fresh request_id, writes the request, and blocks until ack / process death /
 // ctx / timeout. Safe mid-turn. Returns nil on ack (kiro's RPC {} carries no
-// model echo, so ack == confirmation), ErrSetModelRejected-wrapped when the CLI
-// refused (caller must not persist), ErrSetModelUnsupported when the protocol
+// model echo, so ack == confirmation), clierr.ErrSetModelRejected-wrapped when the CLI
+// refused (caller must not persist), clierr.ErrSetModelUnsupported when the protocol
 // has no runtime channel (record-only), or a transport/death/timeout error.
 // Policy-free: kiro's set_model resets the effort tier; the Router handles that.
 func (p *Process) SetModel(ctx context.Context, model string) error {
 	ms, ok := p.protocol.(ModelSetter)
 	if !ok {
-		return ErrSetModelUnsupported
+		return clierr.ErrSetModelUnsupported
 	}
 	if !p.Alive() {
 		return fmt.Errorf("set_model: process not alive")

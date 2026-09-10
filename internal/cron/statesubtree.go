@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/datadir"
 )
 
 // stateSubtree resolves a sibling subtree of the cron store file
@@ -16,7 +18,7 @@ func (s *Scheduler) stateSubtree(parts ...string) string {
 	if s.storePath == "" {
 		return ""
 	}
-	return filepath.Join(append([]string{filepath.Dir(s.storePath)}, parts...)...)
+	return datadir.ForStore(s.storePath).Join(parts...)
 }
 
 // mkdirStateSubtree creates a state subtree (0700) under the cron store
@@ -27,7 +29,7 @@ func (s *Scheduler) stateSubtree(parts ...string) string {
 // Mkdir-then-Lstat (not Lstat-then-Mkdir) closes the TOCTOU window. The store
 // dir itself is trusted (config-supplied), mirroring runstore's root guard.
 func (s *Scheduler) mkdirStateSubtree(dir string) error {
-	base := filepath.Dir(s.storePath)
+	base := datadir.ForStore(s.storePath).Root()
 	rel, err := filepath.Rel(base, dir)
 	if err != nil || rel == ".." || rel == "." || filepath.IsAbs(rel) ||
 		rel == "" || hasParentTraversal(rel) {

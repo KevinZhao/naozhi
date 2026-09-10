@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -222,7 +222,7 @@ func TestDispatcher_DiscardQueueRoutesThroughSeam(t *testing.T) {
 	if gotKey != "im:direct:u1:general" {
 		t.Errorf("key not forwarded through seam: got %q", gotKey)
 	}
-	if !errors.Is(gotReason, cli.ErrSessionReset) {
+	if !errors.Is(gotReason, clierr.ErrSessionReset) {
 		t.Errorf("reason not forwarded through seam: got %v, want ErrSessionReset", gotReason)
 	}
 }

@@ -9,6 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // makeTestPNG renders a tiny solid-colour PNG so MakeThumbnail has real
@@ -41,9 +44,9 @@ func makeTestPNG(t *testing.T) []byte {
 func TestBuildUserEntry_ManyImagesCapsGoroutineCount(t *testing.T) {
 	pngData := makeTestPNG(t)
 	const N = 16
-	images := make([]Attachment, N)
+	images := make([]clievent.Attachment, N)
 	for i := range images {
-		images[i] = Attachment{Data: pngData}
+		images[i] = clievent.Attachment{Data: pngData}
 	}
 
 	beforeGo := runtime.NumGoroutine()
@@ -75,9 +78,9 @@ func TestBuildUserEntry_ManyImagesCapsGoroutineCount(t *testing.T) {
 func TestBuildUserEntry_OrderPreserved(t *testing.T) {
 	pngData := makeTestPNG(t)
 	const N = thumbnailWorkerCap*2 + 1 // cross the cap boundary
-	images := make([]Attachment, N)
+	images := make([]clievent.Attachment, N)
 	for i := range images {
-		images[i] = Attachment{
+		images[i] = clievent.Attachment{
 			Data:          pngData,
 			WorkspacePath: "/path/" + strconv.Itoa(i),
 		}
@@ -103,11 +106,11 @@ func TestBuildUserEntry_OrderPreserved(t *testing.T) {
 // to produce a thumbnail without going through the worker pool.
 func TestBuildUserEntry_SingleImageSerialPath(t *testing.T) {
 	pngData := makeTestPNG(t)
-	entry := buildUserEntry("hello", []Attachment{{Data: pngData}})
+	entry := buildUserEntry("hello", []clievent.Attachment{{Data: pngData}})
 	if len(entry.Images) != 1 {
 		t.Fatalf("expected 1 thumbnail, got %d", len(entry.Images))
 	}
-	if !strings.HasPrefix(entry.Images[0], imageDataURIPrefix) {
+	if !strings.HasPrefix(entry.Images[0], ring.ImageDataURIPrefix) {
 		t.Errorf("thumbnail prefix unexpected: %q", entry.Images[0][:min(40, len(entry.Images[0]))])
 	}
 }
@@ -118,9 +121,9 @@ func TestBuildUserEntry_SingleImageSerialPath(t *testing.T) {
 // than catch a regression.
 func TestBuildUserEntry_ExactlyCapImages(t *testing.T) {
 	pngData := makeTestPNG(t)
-	images := make([]Attachment, thumbnailWorkerCap)
+	images := make([]clievent.Attachment, thumbnailWorkerCap)
 	for i := range images {
-		images[i] = Attachment{Data: pngData}
+		images[i] = clievent.Attachment{Data: pngData}
 	}
 	entry := buildUserEntry("", images)
 	if len(entry.Images) != thumbnailWorkerCap {

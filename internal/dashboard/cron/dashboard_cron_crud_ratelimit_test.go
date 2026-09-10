@@ -18,9 +18,7 @@ import (
 // request: an inverted gate would 501 before 429.
 func TestHandleCreate_PerIPRateLimit(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{
-		writeLimiter: newPerIPBurstNLimiter(2),
-	}
+	h := &Handlers{deps: Deps{RateLimits: RateLimits{Write: newPerIPBurstNLimiter(2)}}}
 	body := `{"schedule":"@hourly","prompt":"hi"}`
 	doReq := func() int {
 		req := httptest.NewRequest(http.MethodPost, "/api/cron", strings.NewReader(body))
@@ -58,9 +56,7 @@ func TestHandleCreate_NilLimiter_PassThrough(t *testing.T) {
 // TestHandleDelete_PerIPRateLimit pins R053116-SEC-3 for DELETE /api/cron.
 func TestHandleDelete_PerIPRateLimit(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{
-		writeLimiter: newPerIPBurstNLimiter(2),
-	}
+	h := &Handlers{deps: Deps{RateLimits: RateLimits{Write: newPerIPBurstNLimiter(2)}}}
 	doReq := func() int {
 		req := httptest.NewRequest(http.MethodDelete, "/api/cron?id=deadbeefdeadbeef", nil)
 		req.RemoteAddr = "10.0.0.2:5678"
@@ -93,9 +89,7 @@ func TestHandleDelete_NilLimiter_PassThrough(t *testing.T) {
 // TestHandlePause_PerIPRateLimit pins R053116-SEC-3 for POST /api/cron/pause.
 func TestHandlePause_PerIPRateLimit(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{
-		writeLimiter: newPerIPBurstNLimiter(2),
-	}
+	h := &Handlers{deps: Deps{RateLimits: RateLimits{Write: newPerIPBurstNLimiter(2)}}}
 	body := `{"id":"deadbeefdeadbeef"}`
 	doReq := func() int {
 		req := httptest.NewRequest(http.MethodPost, "/api/cron/pause", strings.NewReader(body))
@@ -131,9 +125,7 @@ func TestHandlePause_NilLimiter_PassThrough(t *testing.T) {
 // TestHandleResume_PerIPRateLimit pins R053116-SEC-3 for POST /api/cron/resume.
 func TestHandleResume_PerIPRateLimit(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{
-		writeLimiter: newPerIPBurstNLimiter(2),
-	}
+	h := &Handlers{deps: Deps{RateLimits: RateLimits{Write: newPerIPBurstNLimiter(2)}}}
 	body := `{"id":"deadbeefdeadbeef"}`
 	doReq := func() int {
 		req := httptest.NewRequest(http.MethodPost, "/api/cron/resume", strings.NewReader(body))
@@ -176,9 +168,7 @@ func TestHandleResume_NilLimiter_PassThrough(t *testing.T) {
 // inverted or missing gate would emit 501 before 429.
 func TestHandleUpdate_PerIPRateLimit(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{
-		writeLimiter: newPerIPBurstNLimiter(2),
-	}
+	h := &Handlers{deps: Deps{RateLimits: RateLimits{Write: newPerIPBurstNLimiter(2)}}}
 	body := `{"title":"updated"}`
 	doReq := func() int {
 		req := httptest.NewRequest(http.MethodPatch, "/api/cron?id=deadbeefdeadbeef", strings.NewReader(body))

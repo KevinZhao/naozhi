@@ -7,6 +7,9 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // panicOnReadProtocol embeds ClaudeProtocol (so it advertises Replay/Priority
@@ -18,7 +21,7 @@ type panicOnReadProtocol struct {
 	ClaudeProtocol
 }
 
-func (p *panicOnReadProtocol) ReadEvent(string) ([]Event, bool, error) {
+func (p *panicOnReadProtocol) ReadEvent(string) ([]clievent.Event, bool, error) {
 	panic("injected readLoop panic")
 }
 
@@ -26,14 +29,14 @@ func (p *panicOnReadProtocol) ReadEvent(string) ([]Event, bool, error) {
 // ReadEventInto via embedding, and readLoop prefers it through the
 // eventReaderInto assertion — so without this override the embedded
 // (non-panicking) implementation would run instead.
-func (p *panicOnReadProtocol) ReadEventInto(string, []Event) ([]Event, bool, error) {
+func (p *panicOnReadProtocol) ReadEventInto(string, []clievent.Event) ([]clievent.Event, bool, error) {
 	panic("injected readLoop panic")
 }
 
 // TestReadLoopPanic_DiscardsPendingSlots locks R202606f-GO-008: when readLoop
 // panics mid-frame, its recover defer must call discardAllPending so any
 // SendPassthrough caller parked on slot.resultCh/errCh unblocks immediately
-// with ErrProcessExited instead of waiting out the totalTimeout+30s bail timer.
+// with clierr.ErrProcessExited instead of waiting out the totalTimeout+30s bail timer.
 func TestReadLoopPanic_DiscardsPendingSlots(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	defer serverConn.Close()
@@ -83,8 +86,8 @@ func TestReadLoopPanic_DiscardsPendingSlots(t *testing.T) {
 
 	select {
 	case err := <-sendErr:
-		if !errors.Is(err, ErrProcessExited) {
-			t.Fatalf("SendPassthrough err = %v, want ErrProcessExited", err)
+		if !errors.Is(err, clierr.ErrProcessExited) {
+			t.Fatalf("SendPassthrough err = %v, want clierr.ErrProcessExited", err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("SendPassthrough did not unblock after readLoop panic; " +

@@ -9,19 +9,29 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
+
+// slotUUIDFallbackSeq is the monotonic counter newSlotUUID's crypto/rand
+// fallback reads. It used to be shared with the event-log ring's minting path;
+// that sharing was incidental (the two hash prefixes already keep the outputs
+// disjoint) and the ring now lives in internal/eventlog/ring, so each side keeps
+// its own counter. Uniqueness is only ever needed within one fallback path.
+var slotUUIDFallbackSeq atomic.Int64
 
 // newSlotUUID returns a 128-bit random hex string for the Claude CLI's uuid
 // field (an opaque round-tripped blob; RFC4122 formatting is not needed). On
-// a crypto/rand failure it falls back to a hashed counter (uuidFallbackSeq,
-// shared with newEventUUID) rather than an all-zero UUID, which would break
-// slot FIFO matching.
+// a crypto/rand failure it falls back to a hashed counter rather than an
+// all-zero UUID, which would break slot FIFO matching.
 func newSlotUUID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		slog.Warn("crypto/rand.Read failed for slot UUID; using fallback identity", "err", err)
-		sum := sha256.Sum256([]byte("naozhi-slot-uuid-fallback-" + strconv.FormatInt(int64(uuidFallbackSeq.Add(1)), 10)))
+		sum := sha256.Sum256([]byte("naozhi-slot-uuid-fallback-" + strconv.FormatInt(int64(slotUUIDFallbackSeq.Add(1)), 10)))
 		copy(b[:], sum[:])
 	}
 	return hex.EncodeToString(b[:])
@@ -35,8 +45,8 @@ func newSlotUUID() string {
 // Protocol.SupportsReplay() (callers fall back to Send otherwise; without
 // replay events nothing would ever claim the slot).
 // priority: "" | "now" | "next" | "later"; "now" aborts the in-flight turn.
-func (p *Process) SendPassthrough(ctx context.Context, text string, images []Attachment,
-	onEvent EventCallback, priority string) (*SendResult, error) {
+func (p *Process) SendPassthrough(ctx context.Context, text string, images []clievent.Attachment,
+	onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error) {
 
 	if !p.caps.Replay {
 		return nil, fmt.Errorf("passthrough: protocol %s does not support replay", p.protocol.Name())
@@ -44,7 +54,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 
 	// Fast reject: dead process won't produce a result.
 	if !p.Alive() {
-		return nil, ErrProcessExited
+		return nil, clierr.ErrProcessExited
 	}
 
 	// Shrink oversized inline images once before the write (mirrors Send) so
@@ -57,7 +67,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 		text:      text,
 		priority:  priority,
 		onEvent:   onEvent,
-		resultCh:  make(chan *SendResult, 1),
+		resultCh:  make(chan *clievent.SendResult, 1),
 		errCh:     make(chan error, 1),
 		enqueueAt: time.Now(),
 	}
@@ -72,7 +82,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 	if len(p.pendingSlots) >= maxPendingSlots {
 		p.slotsMu.Unlock()
 		p.shimWMu.Unlock()
-		return nil, ErrTooManyPending
+		return nil, clierr.ErrTooManyPending
 	}
 	p.pendingSlots = append(p.pendingSlots, slot)
 	p.slotsMu.Unlock()
@@ -85,17 +95,17 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 
 	if writeErr != nil {
 		// CLI never saw this message; FIFO is intact because nothing was
-		// written. Surface the canonical ErrProcessExited if the process died
+		// written. Surface the canonical clierr.ErrProcessExited if the process died
 		// between the Alive() check and the write.
 		p.removeSlotByID(slot.id)
 		if !p.Alive() {
-			return nil, ErrProcessExited
+			return nil, clierr.ErrProcessExited
 		}
 		return nil, fmt.Errorf("passthrough write: %w", writeErr)
 	}
 
 	// Mirror Send's user-entry Append so a later subscribe can re-render the
-	// bubble (readLoop filters the CLI's replay echo out of EventLog). After
+	// bubble (readLoop filters the CLI's replay echo out of ring.EventLog). After
 	// the successful write so a rejected write leaves no ghost entry.
 	p.eventLog.Append(buildUserEntry(text, images))
 
@@ -127,7 +137,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 		slot.canceled.Store(true)
 		p.slotsMu.Unlock()
 		slog.Warn("passthrough: slot orphaned", "slot_id", slot.id, "elapsed", time.Since(slot.enqueueAt))
-		return nil, ErrOrphanedSlot
+		return nil, clierr.ErrOrphanedSlot
 	}
 }
 
@@ -135,7 +145,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 // to the shim via a pooled capture writer + shimSendLocked, bypassing
 // shimWriter's fast path that would re-acquire shimWMu. Caller MUST hold
 // shimWMu.
-func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []Attachment, priority string) error {
+func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []clievent.Attachment, priority string) error {
 	cw := captureWriterPool.Get().(*captureWriter)
 	cw.bytes = cw.bytes[:0]
 	// Don't return oversized buffers (multi-MB image messages) to the pool;
@@ -155,7 +165,7 @@ func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []A
 		line = line[:n-1]
 	}
 	if len(line) > maxStdinLineBytes {
-		return fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(line), maxStdinLineBytes)
+		return fmt.Errorf("%w: %d bytes > %d", clierr.ErrMessageTooLarge, len(line), maxStdinLineBytes)
 	}
 	// string(line) copies, so the pooled buffer is free to reuse after Put.
 	return p.shimSendLocked(shimClientMsg{Type: "write", Line: string(line)})
@@ -267,7 +277,7 @@ func (p *Process) findSlotByUUIDLocked(u string) *sendSlot {
 // splittable, so every not-yet-replayed pending slot is claimed: a merged
 // replay means the turn consumes all in-flight messages). Caller must hold
 // slotsMu; this is the only place currentTurnSlots grows for user replays.
-func (p *Process) handleReplayEventLocked(ev Event) {
+func (p *Process) handleReplayEventLocked(ev clievent.Event) {
 	if slot := p.findSlotByUUIDLocked(ev.UUID); slot != nil {
 		if slot.replayed {
 			slog.Debug("passthrough: replay uuid already claimed", "uuid", ev.UUID, "slot_id", slot.id)
@@ -296,10 +306,10 @@ func (p *Process) handleReplayEventLocked(ev Event) {
 }
 
 // fanoutTurnResult delivers one CLI result event to every slot the turn
-// claimed: the head slot gets the full SendResult, followers get
+// claimed: the head slot gets the full clievent.SendResult, followers get
 // MergedWithHead pointing at it. Called from readLoop after releasing slotsMu
 // so channel sends never happen under the lock.
-func fanoutTurnResult(owners []*sendSlot, ev Event) {
+func fanoutTurnResult(owners []*sendSlot, ev clievent.Event) {
 	slog.Debug("passthrough: fanout", "owners", len(owners),
 		"result_len", len(ev.Result), "session", ev.SessionID)
 	if len(owners) == 0 {
@@ -311,7 +321,7 @@ func fanoutTurnResult(owners []*sendSlot, ev Event) {
 	head := owners[0]
 	mergedCount := len(owners)
 
-	headRes := &SendResult{
+	headRes := &clievent.SendResult{
 		Text:        ev.Result,
 		SessionID:   ev.SessionID,
 		CostUSD:     ev.CostUSD,
@@ -324,7 +334,7 @@ func fanoutTurnResult(owners []*sendSlot, ev Event) {
 		return
 	}
 	for _, slot := range owners[1:] {
-		folRes := &SendResult{
+		folRes := &clievent.SendResult{
 			Text:           "",
 			SessionID:      ev.SessionID,
 			CostUSD:        0,
@@ -339,7 +349,7 @@ func fanoutTurnResult(owners []*sendSlot, ev Event) {
 // deliverSlotResult writes to slot.resultCh unless the slot was canceled. The
 // resultCh has cap 1 so non-blocking send is safe — a full channel would mean
 // fanout is running twice against the same slot, which should never happen.
-func deliverSlotResult(s *sendSlot, r *SendResult) {
+func deliverSlotResult(s *sendSlot, r *clievent.SendResult) {
 	if s.isCanceled() {
 		return
 	}
@@ -451,7 +461,7 @@ func (p *Process) reapAbortedPreempted() []*sendSlot {
 	return victims
 }
 
-// fireAbortErrors delivers ErrAbortedByUrgent to each aborted slot's caller.
+// fireAbortErrors delivers clierr.ErrAbortedByUrgent to each aborted slot's caller.
 // isCanceled() (atomic) is required: slotsMu is already released here.
 func fireAbortErrors(victims []*sendSlot) {
 	for _, s := range victims {
@@ -459,7 +469,7 @@ func fireAbortErrors(victims []*sendSlot) {
 			continue
 		}
 		select {
-		case s.errCh <- ErrAbortedByUrgent:
+		case s.errCh <- clierr.ErrAbortedByUrgent:
 		default:
 		}
 	}

@@ -1,6 +1,10 @@
 package cli
 
-import "context"
+import (
+	"context"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+)
 
 // Facet interfaces over cli.Process (#902) so consumers depend on the narrow
 // seam they use; the compile-time pins below catch method drift at build time.
@@ -28,13 +32,13 @@ type ProcessLifecycle interface {
 // message (Collect or Passthrough mode) and interrupt an in-flight turn.
 type ProcessTurnIO interface {
 	// Send writes a user message and collects the resulting turn.
-	Send(ctx context.Context, text string, images []Attachment, onEvent EventCallback) (*SendResult, error)
+	Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 	// SendPassthrough writes a user message in passthrough mode with an optional priority.
-	SendPassthrough(ctx context.Context, text string, images []Attachment, onEvent EventCallback, priority string) (*SendResult, error)
+	SendPassthrough(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error)
 	// Interrupt requests cancellation of the active turn (SIGINT path).
 	Interrupt()
 	// InterruptViaControl requests cancellation via stream-json control_request;
-	// returns ErrInterruptUnsupported for protocols without it.
+	// returns clierr.ErrInterruptUnsupported for protocols without it.
 	InterruptViaControl() error
 }
 

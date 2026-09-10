@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 
@@ -221,7 +221,7 @@ type Router struct {
 	storePath string
 
 	// sessionRuns persists per-run wall-clock timing. Constructed in NewRouter
-	// from filepath.Dir(storePath), injected into every ManagedSession; nil when
+	// from the store's datadir.Layout, injected into every ManagedSession; nil when
 	// StorePath is empty. Closed in Shutdown to flush the async write worker.
 	// 读写: core (init/spawn-config injection), lifecycle (spawn-config injection), discovery (takeover/register injection), cleanup (Invalidate/Close), runhistory (List/Stats read)
 	sessionRuns *runhistory.Store
@@ -595,7 +595,7 @@ type RouterConfig struct {
 	CodexSessionsDir string
 	// EventLogDir is where per-session event log files live. Empty DISABLES
 	// event log persistence (Claude CLI JSONL becomes the sole history source);
-	// non-empty spins up a persist.Persister, wires every session's cli.EventLog
+	// non-empty spins up a persist.Persister, wires every session's ring.EventLog
 	// to it and installs a merged.Source (naozhilog + claudejsonl) as history
 	// fallback. Usually next to StorePath. docs/rfc/event-log-persistence.md §4.
 	EventLogDir string
@@ -715,13 +715,13 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Run-history store is rooted next to the session store (its own config,
 	// NOT cron's). Empty StorePath disables persistence (no-op store).
 	if cfg.StorePath != "" {
-		r.sessionRuns = runhistory.NewStore(filepath.Dir(cfg.StorePath), 0, 0)
+		r.sessionRuns = runhistory.NewStore(datadir.ForStore(cfg.StorePath).SessionRunsRoot(), 0, 0)
 	}
 	// Cost ledger lives beside the session store; disabled by config or when
 	// nothing persists. costAcct is always non-nil so sessions never nil-check.
 	var ledger *costledger.Store
 	if cfg.StorePath != "" && !cfg.CostLedger.Disabled {
-		ledger = costledger.NewStore(filepath.Join(filepath.Dir(cfg.StorePath), "cost"), costledger.Options{
+		ledger = costledger.NewStore(datadir.ForStore(cfg.StorePath).CostRoot(), costledger.Options{
 			RetentionDays: cfg.CostLedger.RetentionDays,
 			RollupDays:    cfg.CostLedger.RollupDays,
 		})

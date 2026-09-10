@@ -1,6 +1,16 @@
 package server
 
-import "github.com/naozhi/naozhi/internal/session"
+import (
+	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/session"
+
+	"github.com/naozhi/naozhi/internal/cron"
+	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
+	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
+)
 
 // Compile-time assertion that *session.Router satisfies HubRouter, the
 // *Hub-only consumer subset declared in consumer.go. *Hub embeds the
@@ -25,3 +35,26 @@ var _ HubBroadcaster = (*Hub)(nil)
 // silently re-widening back onto HubRouter / the whole Hub.
 var _ sendEngineRouter = (*session.Router)(nil)
 var _ sendNotifier = (*Hub)(nil)
+
+// Compile-time assertions for the dashsession consumer interfaces (#2561).
+// Declared HERE, at the wiring site, rather than in internal/dashboard/session:
+// that package must not import internal/session's concrete Router to assert it,
+// or the narrowing would be undone by the assertion itself. server already
+// imports both sides.
+var (
+	_ dashsession.RouterView      = (*session.Router)(nil)
+	_ dashsession.ProjectSource   = (*project.Manager)(nil)
+	_ dashsession.NodeCacheReader = (*node.CacheManager)(nil)
+	_ dashsession.RetiredReader   = (*discovery.RetiredStore)(nil)
+)
+
+// Same for dashproject and dashcron (#2561 E6-b). The measured narrowing is in
+// each package's consumer.go: 3 of *session.Router's 77 methods for
+// dashproject, 23 of *cron.Scheduler's 48 for dashcron.
+var (
+	_ dashproject.ProjectStore       = (*project.Manager)(nil)
+	_ dashproject.RouterView         = (*session.Router)(nil)
+	_ dashproject.PlannerKeyResolver = (*session.KeyResolver)(nil)
+	_ dashproject.NodeCacheReader    = (*node.CacheManager)(nil)
+	_ dashcron.SchedulerView         = (*cron.Scheduler)(nil)
+)

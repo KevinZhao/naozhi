@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
@@ -74,7 +75,7 @@ func (c *costAccounting) warnUnknownBasis(key string, models []costledger.ModelD
 // cumulativeFromResult builds the process incarnation's running total from a
 // result frame plus the backend metering view (kiro credits / codex tokens,
 // both already summed per process by cli.Process).
-func cumulativeFromResult(result *cli.SendResult, metering []cli.MeteringEntry) costledger.Cumulative {
+func cumulativeFromResult(result *clievent.SendResult, metering []clievent.MeteringEntry) costledger.Cumulative {
 	raw := costledger.Cumulative{USD: result.CostUSD}
 	if len(result.ModelUsage) > 0 {
 		raw.Models = make(map[string]costledger.ModelUsage, len(result.ModelUsage))
@@ -121,11 +122,11 @@ func meteringUnit(u string) (costledger.Unit, bool) {
 // a cron run owns the turn, appends the ledger entries. It runs on every
 // completed turn regardless of run-history persistence. costMu is a leaf
 // lock: nothing inside it calls out. Returns the turn's USD increment.
-func (s *ManagedSession) accountTurnCost(result *cli.SendResult, runID string) float64 {
+func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID string) float64 {
 	if result == nil {
 		return 0
 	}
-	var metering []cli.MeteringEntry
+	var metering []clievent.MeteringEntry
 	if p := s.loadProcess(); p != nil {
 		metering = p.MeteringUsage()
 	}
@@ -158,14 +159,14 @@ func (s *ManagedSession) accountTurnCost(result *cli.SendResult, runID string) f
 // shadowUsageTaker is the optional process capability behind partial-turn
 // accounting; *cli.Process implements it, test stubs may not.
 type shadowUsageTaker interface {
-	TakeShadowUsage() cli.ShadowUsage
+	TakeShadowUsage() clievent.ShadowUsage
 }
 
 // isProcessDeathErr reports whether err means the process will not deliver
 // the turn's result (it exited or is being killed), so the tokens its
 // assistant frames reported would otherwise be lost.
 func isProcessDeathErr(err error) bool {
-	return errors.Is(err, cli.ErrProcessExited) || errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout)
+	return errors.Is(err, clierr.ErrProcessExited) || errors.Is(err, clierr.ErrNoOutputTimeout) || errors.Is(err, clierr.ErrTotalTimeout)
 }
 
 // bookPartialTurn records a Kind=partial entry (tokens only, no amount) for

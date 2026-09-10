@@ -3,13 +3,15 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestACPProtocol_ReadEvent_ChunkFastPath_TextEqualsSlow pins R226-PERF-4 /
 // R231-PERF-2: the agent_message_chunk fast path collapses the prior
 // 2-step Unmarshal (params → ACPSessionUpdate; Content → ACPTextContent)
 // into a single typed Unmarshal into acpChunkParams. The textBuf state and
-// the returned Event must be byte-identical to what the slow path produced
+// the returned clievent.Event must be byte-identical to what the slow path produced
 // — otherwise streaming replies regress visibly on the dashboard.
 func TestACPProtocol_ReadEvent_ChunkFastPath_TextEqualsSlow(t *testing.T) {
 	t.Parallel()
@@ -92,14 +94,14 @@ func TestACPProtocol_ReadEvent_ChunkFastPath_FalsePositive(t *testing.T) {
 
 // TestACPProtocol_ReadEvent_ChunkFastPath_OverflowTruncation pins the
 // existing buffer-cap behaviour: a chunk whose text would exceed
-// maxAssistantMessageContentBytes is truncated at a rune boundary. The
+// clievent.MaxAssistantMessageContentBytes is truncated at a rune boundary. The
 // fast path must preserve this — otherwise a malicious peer streaming
 // huge chunks could OOM the process before the turn-complete check fires.
 func TestACPProtocol_ReadEvent_ChunkFastPath_OverflowTruncation(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	// Pre-fill textBuf so the next chunk's room is small but non-zero.
-	p.textBuf.WriteString(strings.Repeat("a", maxAssistantMessageContentBytes-3))
+	p.textBuf.WriteString(strings.Repeat("a", clievent.MaxAssistantMessageContentBytes-3))
 	// Send a chunk whose text exceeds the remaining 3 bytes. Need to make
 	// sure JSON encoding is valid — use a plain ASCII payload longer than 3.
 	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1",` +
@@ -110,8 +112,8 @@ func TestACPProtocol_ReadEvent_ChunkFastPath_OverflowTruncation(t *testing.T) {
 	p.mu.Lock()
 	got := p.textBuf.Len()
 	p.mu.Unlock()
-	if got > maxAssistantMessageContentBytes {
+	if got > clievent.MaxAssistantMessageContentBytes {
 		t.Errorf("textBuf len = %d, want ≤ %d (cap not enforced on fast path)",
-			got, maxAssistantMessageContentBytes)
+			got, clievent.MaxAssistantMessageContentBytes)
 	}
 }

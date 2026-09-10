@@ -17,7 +17,7 @@ import (
 //
 // gen is the queue generation at enqueue time; if Discard (e.g. /new) bumps
 // it mid-flight, DoneOrDrain returns nil and the loop exits. Caller must
-// arrange sendWG accounting via TrackSend — ownerLoop never touches sendWG.
+// arrange engine.wg accounting via TrackSend — ownerLoop never touches wg.
 func (e *sendEngine) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyncError asyncErrorFn) {
 	defer func() {
 		if r := recover(); r != nil {

@@ -1,12 +1,10 @@
 package server
 
 import (
-	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -63,8 +61,7 @@ func rejectIfTooManyFields(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // SendHandler serves the HTTP send API, delegating to sendEngine for local
-// sends. router is the SendRouter view of *session.Router (consumer.go);
-// wiring passes hub.router, tests may inject a stub.
+// sends and for every router / workspace / notify need it has.
 //
 // engine replaced a `hub *Hub` field in #2551. The handler used to branch on
 // `h.hub != nil` in five places — the HTTP layer asking whether the WebSocket
@@ -72,10 +69,16 @@ func rejectIfTooManyFields(w http.ResponseWriter, r *http.Request) bool {
 // It is NOT optional: build it with newSendEngine (production wiring passes
 // s.hub.engine), never as a zero value. See sendEngine's godoc for what each
 // zero field breaks.
+//
+// There is deliberately no router field (#2632). Until then the handler held
+// a SendRouter view AND reached engine.router for writes — two handles on one
+// *session.Router, which is the exact "two views of one state" shape #2551
+// filed against the old hub+router pair. Reads and writes both go through
+// engine methods now; the handler touches no engine field directly, and the
+// send_engine_ownership lint rule keeps it that way.
 type SendHandler struct {
 	nodeAccess    NodeAccessor
 	engine        *sendEngine
-	router        SendRouter
 	uploadStore   *uploadStore
 	uploadLimiter *ipLimiter     // per-IP upload rate limiter (10/min)
 	sendLimiter   *ipLimiter     // per-IP send rate limiter (30/min)
@@ -138,46 +141,6 @@ func uploadOwnerOrFail(w http.ResponseWriter, r *http.Request, ah *auth.Handlers
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "could not derive upload owner; please retry"})
 	}
 	return owner, ok
-}
-
-// resolveAttachmentWorkspace picks the validated absolute path to write
-// file_ref attachments under for the given session key: an explicit
-// reqWorkspace if the request carries one, else the live session's
-// Workspace(), else the router's saved workspace for the chat key (the
-// dashboard does not re-announce the workspace on every send). Returns
-// validateWorkspace's generic client-facing error on rejection.
-//
-// Takes the router and root explicitly rather than a *Hub (#2551). That
-// finally makes #566's contract true: scratch_send_router_iface_test.go has
-// claimed since Phase 2.5 that "SendHandler.router replaces the h.hub.router.*
-// transits in resolveAttachmentWorkspace", but this function read hub.router
-// the whole time. The HTTP caller now passes its own SendRouter view; the WS
-// caller passes the Hub's (HubRouter's method set is a superset).
-func resolveAttachmentWorkspace(r SendRouter, allowedRoot, sessionKey, reqWorkspace string) (string, error) {
-	// Hot path: client announced a workspace — trust but validate it.
-	if reqWorkspace != "" {
-		return validateWorkspace(reqWorkspace, allowedRoot)
-	}
-	// Prefer the live session's Workspace() (the CLI's actual cwd). The
-	// router lookup takes the chat-key prefix — the ":<agent>" suffix is not
-	// part of the workspace override key.
-	var ws string
-	if sess := r.SessionFor(sessionKey); sess != nil {
-		ws = sess.Workspace()
-	}
-	if ws == "" {
-		chatKey := sessionKey
-		if idx := strings.LastIndexByte(sessionKey, ':'); idx > 0 {
-			chatKey = sessionKey[:idx]
-		}
-		ws = r.Workspace(chatKey)
-	}
-	if ws == "" {
-		return "", fmt.Errorf("workspace is not a valid directory")
-	}
-	// Revalidate against allowedRoot: a saved workspace may predate a
-	// tightened allowedRoot.
-	return validateWorkspace(ws, allowedRoot)
 }
 
 // handleUpload accepts a single image OR PDF file and stores it for later
@@ -248,7 +211,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var key, text, node, workspace, resumeID, backend, accessProfile string
-	var images []cli.Attachment
+	var images []clievent.Attachment
 	var fileIDs []string
 
 	ct := r.Header.Get("Content-Type")
@@ -402,7 +365,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// only after we would already have persisted bytes.
 		// resolveAttachmentWorkspace falls back to the router's saved
 		// workspace because the dashboard does not re-send it every message.
-		validatedWS, err := resolveAttachmentWorkspace(h.router, h.engine.allowedRoot, key, workspace)
+		validatedWS, err := h.engine.resolveAttachmentWorkspace(key, workspace)
 		if err != nil {
 			slog.Warn("attachment workspace validation failed",
 				"key", session.SanitizeLogAttr(key), "err", err)
@@ -447,7 +410,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// guard produced for test harnesses.
 		// selectNodeForBackend below is the single node + cap authority (one
 		// GetNode; no TOCTOU between lookup and cap check).
-		if err := gateRemoteAccessProfile(h.engine.resolver, node, key); err != nil {
+		if err := h.engine.gateRemoteAccess(node, key); err != nil {
 			cleanup()
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -466,35 +429,15 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			// selectNodeForBackend's documented nil-return contract.
 			return
 		}
-		capturedKey, capturedText, capturedWorkspace := key, text, workspace
-		// TrackSend so drain waits for the in-flight RPC before closing node
-		// connections (else the goroutine could write to a closed nc.conn); a
-		// late arrival during shutdown gets 503 instead of a goroutine.
-		release, shuttingDown := h.engine.TrackSend()
-		if shuttingDown {
+		// remoteSend tracks the goroutine so drain waits for the in-flight
+		// RPC before closing node connections (else it could write to a
+		// closed nc.conn); a late arrival during shutdown gets 503 instead of
+		// a goroutine. Error fan-out to the key's subscribers is the
+		// engine's job — there is no ack channel on HTTP.
+		if !h.engine.remoteSend(nc, node, key, text, workspace) {
 			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "server shutting down"})
 			return
 		}
-		go func() {
-			defer release()
-			// Inherit the engine ctx so shutdown cancels in-flight remote
-			// sends, but cap the RPC at 60s so a hung node cannot leak a
-			// goroutine + a drain slot for the process lifetime.
-			ctx, cancel := context.WithTimeout(h.engine.ctx, 60*time.Second)
-			defer cancel()
-			if err := nc.Send(ctx, capturedKey, capturedText, capturedWorkspace); err != nil {
-				slog.Error("remote send",
-					"node", osutil.SanitizeForLog(node, 128),
-					"key", session.SanitizeLogAttr(capturedKey), "err", err)
-				// No ack channel left on HTTP — notify the key's subscribers
-				// (F1). Remote transport errors are never informational, so
-				// this goes out unfiltered (unlike sendErrorCallback).
-				h.engine.notify.broadcastSendError(capturedKey, asyncErrorMessage(err))
-			} else {
-				nc.RefreshSubscription(capturedKey)
-			}
-			h.engine.notify.BroadcastSessionsUpdate()
-		}()
 		writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key})
 		return
 	}
@@ -561,14 +504,6 @@ func (h *SendHandler) handleBind(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "workspace required"})
 		return
 	}
-	wsPath, err := validateWorkspace(req.Workspace, h.engine.allowedRoot)
-	if err != nil {
-		// Mirror handleSend: scrub the attacker-influenced path before logging
-		// and never echo the resolved filesystem path back to the client.
-		slog.Warn("bind: workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(req.Workspace, 200))
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid workspace"})
-		return
-	}
 	// Persist under the 3-segment chat-key prefix (strip the trailing
 	// ":agentID"), matching the SetWorkspace contract used by handleSend. A
 	// key whose only colon is at index 0 (":agent") would persist the empty
@@ -578,7 +513,13 @@ func (h *SendHandler) handleBind(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid key"})
 		return
 	}
-	h.engine.router.SetWorkspace(req.Key[:idx], wsPath)
+	if err := h.engine.bindWorkspace(req.Key[:idx], req.Workspace); err != nil {
+		// Mirror handleSend: scrub the attacker-influenced path before logging
+		// and never echo the resolved filesystem path back to the client.
+		slog.Warn("bind: workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(req.Workspace, 200))
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid workspace"})
+		return
+	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -667,24 +608,15 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve the workspace from the key only (live session, else router
-	// fallback, as in resolveAttachmentWorkspace). A `workspace` query
-	// parameter is deliberately NOT accepted.
-	var ws string
-	if sess := h.router.SessionFor(key); sess != nil {
-		ws = sess.Workspace()
-	}
-	if ws == "" {
-		chatKey := key
-		if idx := strings.LastIndexByte(key, ':'); idx > 0 {
-			chatKey = key[:idx]
-		}
-		ws = h.router.Workspace(chatKey)
-	}
+	// fallback — the same rule resolveAttachmentWorkspace applies on the
+	// write side). A `workspace` query parameter is deliberately NOT
+	// accepted.
+	ws := h.engine.sessionWorkspace(key)
 	if ws == "" {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
-	validatedWS, err := validateWorkspace(ws, h.engine.allowedRoot)
+	validatedWS, err := h.engine.validateWorkspace(ws)
 	if err != nil {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return

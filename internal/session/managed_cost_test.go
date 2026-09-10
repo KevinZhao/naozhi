@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 )
 
@@ -23,9 +24,9 @@ func newLedgerSession(t *testing.T, key string, proc *TestProcess) (*ManagedSess
 	return s, ledger
 }
 
-func scripted(results ...*cli.SendResult) func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error) {
+func scripted(results ...*clievent.SendResult) func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
 	i := 0
-	return func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error) {
+	return func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
 		r := results[i]
 		i++
 		return r, nil
@@ -46,7 +47,7 @@ func allEntries(t *testing.T, l *costledger.Store) []costledger.Entry {
 // On the pre-RFC code finishRun returned before the delta and this failed.
 func TestAccountTurnCost_AccruesWithoutRunStore(t *testing.T) {
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
-		&cli.SendResult{Text: "a", CostUSD: 0.3}, &cli.SendResult{Text: "b", CostUSD: 0.5})}
+		&clievent.SendResult{Text: "a", CostUSD: 0.3}, &clievent.SendResult{Text: "b", CostUSD: 0.5})}
 	s := &ManagedSession{key: "feishu:p2p:nostore"}
 	s.storeProcess(proc)
 	for i := 0; i < 2; i++ {
@@ -63,13 +64,13 @@ func TestAccountTurnCost_AccruesWithoutRunStore(t *testing.T) {
 }
 
 func TestAccountTurnCost_WritesOneEntryPerTurnWithModels(t *testing.T) {
-	mu := func(cost float64, in int64, basis string) map[string]cli.ModelUsage {
-		return map[string]cli.ModelUsage{"us.anthropic.claude-fable-5-1[1m]": {
+	mu := func(cost float64, in int64, basis string) map[string]clievent.ModelUsage {
+		return map[string]clievent.ModelUsage{"us.anthropic.claude-fable-5-1[1m]": {
 			InputTokens: in, CostUSD: cost, CanonicalModel: "claude-fable-5-1", Provider: "bedrock", CostBasis: basis}}
 	}
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
-		&cli.SendResult{Text: "a", CostUSD: 0.3, ModelUsage: mu(0.3, 100, "list")},
-		&cli.SendResult{Text: "b", CostUSD: 0.5, ModelUsage: mu(0.5, 160, "managed")})}
+		&clievent.SendResult{Text: "a", CostUSD: 0.3, ModelUsage: mu(0.3, 100, "list")},
+		&clievent.SendResult{Text: "b", CostUSD: 0.5, ModelUsage: mu(0.5, 160, "managed")})}
 	s, ledger := newLedgerSession(t, "feishu:p2p:u1", proc)
 	for i := 0; i < 2; i++ {
 		if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
@@ -102,7 +103,7 @@ func TestAccountTurnCost_WritesOneEntryPerTurnWithModels(t *testing.T) {
 }
 
 func TestAccountTurnCost_CronOwnedTurnSkipsLedgerButAccrues(t *testing.T) {
-	proc := &TestProcess{AliveVal: true, SendFunc: scripted(&cli.SendResult{Text: "a", CostUSD: 0.4})}
+	proc := &TestProcess{AliveVal: true, SendFunc: scripted(&clievent.SendResult{Text: "a", CostUSD: 0.4})}
 	s, ledger := newLedgerSession(t, "cron:job1", proc)
 	s.costAcct.setRunOwnership(func(key string) bool { return key == "cron:job1" })
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
@@ -117,7 +118,7 @@ func TestAccountTurnCost_CronOwnedTurnSkipsLedgerButAccrues(t *testing.T) {
 }
 
 func TestAccountTurnCost_CronKeyWithoutGateWritesAsSession(t *testing.T) {
-	proc := &TestProcess{AliveVal: true, SendFunc: scripted(&cli.SendResult{Text: "a", CostUSD: 0.4})}
+	proc := &TestProcess{AliveVal: true, SendFunc: scripted(&clievent.SendResult{Text: "a", CostUSD: 0.4})}
 	s, ledger := newLedgerSession(t, "cron:job1", proc)
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
 		t.Fatal(err)
@@ -132,13 +133,13 @@ func TestAccountTurnCost_CronKeyWithoutGateWritesAsSession(t *testing.T) {
 // re-charge (the P2 class of bug on another backend).
 func TestAccountTurnCost_MeteringIsDifferenced(t *testing.T) {
 	proc := &TestProcess{AliveVal: true}
-	proc.SendFunc = func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error) {
-		return &cli.SendResult{Text: "ok"}, nil
+	proc.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+		return &clievent.SendResult{Text: "ok"}, nil
 	}
 	s, ledger := newLedgerSession(t, "feishu:p2p:kiro", proc)
 	s.SetBackend("kiro")
 	for _, cum := range []float64{2, 4, 4} {
-		proc.MeteringVal = []cli.MeteringEntry{{Value: cum, Unit: "credit"}}
+		proc.MeteringVal = []clievent.MeteringEntry{{Value: cum, Unit: "credit"}}
 		if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -160,12 +161,12 @@ func TestAccountTurnCost_MeteringIsDifferenced(t *testing.T) {
 // A store-restored session knows only its USD baseline: the first turn's
 // model rows would be the whole incarnation, so they are withheld once.
 func TestAccountTurnCost_RestoredBaselineWithholdsModelsOnce(t *testing.T) {
-	mu := func(cost float64, in int64) map[string]cli.ModelUsage {
-		return map[string]cli.ModelUsage{"m": {InputTokens: in, CostUSD: cost, CostBasis: "list"}}
+	mu := func(cost float64, in int64) map[string]clievent.ModelUsage {
+		return map[string]clievent.ModelUsage{"m": {InputTokens: in, CostUSD: cost, CostBasis: "list"}}
 	}
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
-		&cli.SendResult{Text: "a", CostUSD: 1.2, ModelUsage: mu(1.2, 500)},
-		&cli.SendResult{Text: "b", CostUSD: 1.5, ModelUsage: mu(1.5, 600)})}
+		&clievent.SendResult{Text: "a", CostUSD: 1.2, ModelUsage: mu(1.2, 500)},
+		&clievent.SendResult{Text: "b", CostUSD: 1.5, ModelUsage: mu(1.5, 600)})}
 	s, ledger := newLedgerSession(t, "feishu:p2p:restored", proc)
 	storeTotalCost(&s.lastCumulativeCost, 1.0)
 	s.lastCumulative = costledger.Cumulative{USD: 1.0}
@@ -190,7 +191,7 @@ func TestAccountTurnCost_RestoredBaselineWithholdsModelsOnce(t *testing.T) {
 
 func TestCostTotals_SubAttributesRunWindow(t *testing.T) {
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
-		&cli.SendResult{Text: "a", CostUSD: 0.3}, &cli.SendResult{Text: "b", CostUSD: 0.5})}
+		&clievent.SendResult{Text: "a", CostUSD: 0.3}, &clievent.SendResult{Text: "b", CostUSD: 0.5})}
 	s, _ := newLedgerSession(t, "cron:job1", proc)
 	s.Send(context.Background(), "warm", nil, nil)
 	before := s.CostTotals()
@@ -209,8 +210,8 @@ func TestAccountTurnCost_ConcurrentTurnsNoLostOrDoubleUpdate(t *testing.T) {
 	done := make(chan struct{})
 	for _, c := range []float64{1, 3, 2, 4} {
 		go func(c float64) {
-			s.finishRun(nil, nil, &cli.SendResult{Text: "x", CostUSD: c,
-				ModelUsage: map[string]cli.ModelUsage{"m": {CostUSD: c, InputTokens: int64(c * 10)}}}, nil)
+			s.finishRun(nil, nil, &clievent.SendResult{Text: "x", CostUSD: c,
+				ModelUsage: map[string]clievent.ModelUsage{"m": {CostUSD: c, InputTokens: int64(c * 10)}}}, nil)
 			done <- struct{}{}
 		}(c)
 	}
@@ -237,8 +238,8 @@ func TestAccountTurnCost_ConcurrentTurnsNoLostOrDoubleUpdate(t *testing.T) {
 func TestAccountTurnCost_LeakRecoveryBothRoundsRecorded(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
-		&cli.SendResult{Text: leakSample, CostUSD: 0.10},
-		&cli.SendResult{Text: "已执行完成。", CostUSD: 0.15})}
+		&clievent.SendResult{Text: leakSample, CostUSD: 0.10},
+		&clievent.SendResult{Text: "已执行完成。", CostUSD: 0.15})}
 	s, ledger := newLedgerSession(t, "feishu:p2p:leak", proc)
 	res, err := s.Send(context.Background(), "go", nil, nil)
 	if err != nil || res.Text != "已执行完成。" {
@@ -273,9 +274,9 @@ func TestCopyCostBaseline_RenameKeepsDeltaBaseline(t *testing.T) {
 // entry (no amount); a failure with the process alive books nothing, since
 // the next result's cumulative modelUsage will carry those tokens.
 func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
-	dead := &TestProcess{AliveVal: true, ShadowVal: cli.ShadowUsage{Model: "m[1m]", Input: 40, Output: 8}}
-	dead.SendFunc = func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error) {
-		return nil, cli.ErrProcessExited
+	dead := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Model: "m[1m]", Input: 40, Output: 8}}
+	dead.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+		return nil, clierr.ErrProcessExited
 	}
 	s, ledger := newLedgerSession(t, "feishu:p2p:dead", dead)
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err == nil {
@@ -287,8 +288,8 @@ func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 		t.Fatalf("partial entry = %+v", ents)
 	}
 
-	alive := &TestProcess{AliveVal: true, ShadowVal: cli.ShadowUsage{Input: 40}}
-	alive.SendFunc = func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error) {
+	alive := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Input: 40}}
+	alive.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
 		return nil, errors.New("transient")
 	}
 	s2, ledger2 := newLedgerSession(t, "feishu:p2p:alive", alive)

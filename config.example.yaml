@@ -36,6 +36,13 @@ server:
   addr: ":8180"
   dashboard_token: "${NAOZHI_DASHBOARD_TOKEN}"
   trusted_proxy: true
+  # debug_mode registers /api/debug/pprof and /api/debug/vars (default false:
+  # both 404 even for loopback+auth callers, so a leaked dashboard token cannot
+  # enumerate goroutine stacks or expvar counters). Turn it on only while
+  # capturing a profile; the endpoints stay auth-gated + loopback-only and
+  # refuse to serve at all when dashboard_token is empty. Runbook:
+  # docs/ops/pprof.md. Startup logs a WARN while this is on.
+  # debug_mode: false
 
 workspace:
   id: "your-node-id"
@@ -346,6 +353,21 @@ projects:
   root: "/path/to/your/workspace"
   planner_defaults:
     model: "sonnet"
+  # Two SINGLE-OPERATOR opt-ins, both default false. Leave them off on any
+  # shared / multi-operator deployment or wherever the dashboard token is
+  # shared: the token is the only barrier, and both widen what an
+  # authenticated dashboard user can read. File endpoints apply the same gates
+  # either way (UID / denied-name / irregular-type / credential-name, audit
+  # log at Info); startup logs a WARN while public_tmp is on.
+  #   include_root — also register the projects root itself as a project so
+  #                  files directly under root get preview/download buttons.
+  #                  The root project spans the whole tree, sibling projects
+  #                  included.
+  #   public_tmp   — enable the __public_tmp__ pseudo-project (#646): every
+  #                  authenticated dashboard user can read non-credential
+  #                  files anywhere under /tmp.
+  # include_root: false
+  # public_tmp: false
 
 # Auto-update: a background goroutine polls GitHub Releases and reuses the
 # same verified flow as `naozhi upgrade` (download → SHA-256 → atomic swap).

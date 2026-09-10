@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestStripANSI_AllClasses exercises every escape class the regex is
@@ -67,9 +67,9 @@ func TestStripANSI_NoEscFastPath(t *testing.T) {
 // echoes terminal output (e.g. the model relays Bash stdout containing
 // hyperlink escapes), the IM banner gets only the visible characters.
 func TestFormatEventLine_StripsANSIInThinking(t *testing.T) {
-	ev := cli.Event{
-		Message: &cli.AssistantMessage{
-			Content: []cli.ContentBlock{
+	ev := clievent.Event{
+		Message: &clievent.AssistantMessage{
+			Content: []clievent.ContentBlock{
 				{Type: "thinking", Text: "checking \x1b]8;;https://x\x07docs\x1b]8;;\x07 now"},
 			},
 		},
@@ -98,9 +98,9 @@ func TestFormatEventLine_StripsANSIInBashCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	ev := cli.Event{
-		Message: &cli.AssistantMessage{
-			Content: []cli.ContentBlock{
+	ev := clievent.Event{
+		Message: &clievent.AssistantMessage{
+			Content: []clievent.ContentBlock{
 				{Type: "tool_use", Name: "Bash", Input: input},
 			},
 		},

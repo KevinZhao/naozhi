@@ -36,7 +36,6 @@ func TestProjectScanTick_BumpsRouterVersionOnChange(t *testing.T) {
 		Backend:        "claude",
 		ProjectManager: mgr,
 	})
-	srv.registerDashboard()
 
 	// No change → no bump.
 	before := router.Version()

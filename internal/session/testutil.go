@@ -17,11 +17,12 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // TestProcess is a mock processIface for use in tests outside the session package.
 type TestProcess struct {
-	EventLog       *cli.EventLog
+	EventLog       *ring.EventLog
 	StateVal       cli.ProcessState
 	AliveVal       bool
 	DeathReasonVal string
@@ -35,16 +36,16 @@ type TestProcess struct {
 	EffortVal string
 	// MeteringVal lets cost tests drive proc.MeteringUsage() (the process-level
 	// running sum kiro/codex report).
-	MeteringVal []cli.MeteringEntry
+	MeteringVal []clievent.MeteringEntry
 	// ShadowVal is returned once by TakeShadowUsage (partial-turn accounting).
-	ShadowVal cli.ShadowUsage
-	SendFunc  func(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
+	ShadowVal clievent.ShadowUsage
+	SendFunc  func(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
 func NewTestProcess() *TestProcess {
 	return &TestProcess{
-		EventLog: cli.NewEventLog(0),
+		EventLog: ring.NewEventLog(0),
 		StateVal: cli.StateReady,
 		AliveVal: true,
 	}
@@ -57,16 +58,16 @@ func (p *TestProcess) Kill()                      { p.AliveVal = false; p.StateV
 func (p *TestProcess) Interrupt()                 {}
 func (p *TestProcess) InterruptViaControl() error { return nil }
 
-func (p *TestProcess) Send(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error) {
+func (p *TestProcess) Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 	if p.SendFunc != nil {
 		return p.SendFunc(ctx, text, images, onEvent)
 	}
-	return &cli.SendResult{Text: "mock response"}, nil
+	return &clievent.SendResult{Text: "mock response"}, nil
 }
 
 // SendPassthrough mirrors Send for tests that don't care about passthrough
 // semantics. Ignores priority; returns the same mock result as Send.
-func (p *TestProcess) SendPassthrough(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
+func (p *TestProcess) SendPassthrough(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error) {
 	return p.Send(ctx, text, images, onEvent)
 }
 
@@ -111,17 +112,17 @@ func (p *TestProcess) InjectHistory(entries []clievent.EventEntry) {
 		p.EventLog.Append(e)
 	}
 }
-func (p *TestProcess) TurnAgents() []cli.SubagentInfo { return p.EventLog.TurnAgents() }
+func (p *TestProcess) TurnAgents() []ring.SubagentInfo { return p.EventLog.TurnAgents() }
 
 // Normalize-layer stubs (docs/rfc/multi-backend.md §8.8); zero values keep
 // SessionSnapshot assertions stable.
-func (p *TestProcess) ContextUsagePercent() float64       { return 0 }
-func (p *TestProcess) TurnDurationMs() int64              { return 0 }
-func (p *TestProcess) SpawnDiags() []cli.SpawnDiag        { return nil }
-func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return p.MeteringVal }
-func (p *TestProcess) TakeShadowUsage() cli.ShadowUsage {
+func (p *TestProcess) ContextUsagePercent() float64            { return 0 }
+func (p *TestProcess) TurnDurationMs() int64                   { return 0 }
+func (p *TestProcess) SpawnDiags() []cli.SpawnDiag             { return nil }
+func (p *TestProcess) MeteringUsage() []clievent.MeteringEntry { return p.MeteringVal }
+func (p *TestProcess) TakeShadowUsage() clievent.ShadowUsage {
 	u := p.ShadowVal
-	p.ShadowVal = cli.ShadowUsage{}
+	p.ShadowVal = clievent.ShadowUsage{}
 	return u
 }
 func (p *TestProcess) MeteringGen() uint64 { return 0 }

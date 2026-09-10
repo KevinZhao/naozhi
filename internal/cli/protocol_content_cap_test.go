@@ -3,18 +3,20 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestClaudeReadEvent_ContentByteCap pins R229-SEC-10: ReadEvent must drop
-// events whose AssistantMessage.Content total byte size exceeds
-// maxAssistantMessageContentBytes so a tampered or buggy CLI cannot
+// events whose clievent.AssistantMessage.Content total byte size exceeds
+// clievent.MaxAssistantMessageContentBytes so a tampered or buggy CLI cannot
 // amplify a single event into multi-MiB downstream work across every
-// EventLog ring / dashboard fan-out / JSONL persist consumer.
+// ring.EventLog ring / dashboard fan-out / JSONL persist consumer.
 func TestClaudeReadEvent_ContentByteCap(t *testing.T) {
 	// Build a single oversized text block (cap + 1 byte) embedded in a
 	// well-formed assistant event. JSON encoding adds a few bytes but the
 	// content cap looks at the parsed Text length, not the wire size.
-	bigText := strings.Repeat("A", maxAssistantMessageContentBytes+1)
+	bigText := strings.Repeat("A", clievent.MaxAssistantMessageContentBytes+1)
 	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + bigText + `"}]}}`
 
 	p := &ClaudeProtocol{}
@@ -31,7 +33,7 @@ func TestClaudeReadEvent_ContentByteCap(t *testing.T) {
 // is still accepted — the boundary is "exceeds", not "equals".
 func TestClaudeReadEvent_AtCapAccepted(t *testing.T) {
 	// Cap minus envelope overhead so the parsed Text matches the cap exactly.
-	bigText := strings.Repeat("B", maxAssistantMessageContentBytes)
+	bigText := strings.Repeat("B", clievent.MaxAssistantMessageContentBytes)
 	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + bigText + `"}]}}`
 
 	p := &ClaudeProtocol{}

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
@@ -708,7 +709,7 @@ func claudeProjectsRoot() string {
 	if err != nil {
 		home = os.Getenv("HOME")
 	}
-	return filepath.Join(home, ".claude", "projects")
+	return claudefs.ProjectsRoot(filepath.Join(home, ".claude"))
 }
 
 // fireCallbacksDropLock runs every registered callback with l.mu RELEASED
@@ -854,7 +855,7 @@ func readFirstLineMeta(path string) (firstLineMeta, error) {
 	}
 	out := firstLineMeta{SessionID: raw.SessionID, PromptID: raw.PromptID}
 	if raw.Timestamp != "" {
-		if ts, err := time.Parse(time.RFC3339Nano, raw.Timestamp); err == nil {
+		if ts, ok := claudefs.ParseTimestamp(raw.Timestamp); ok {
 			out.Timestamp = ts
 		}
 	}

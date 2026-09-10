@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 )
@@ -294,7 +293,7 @@ func (t *replyTracker) stop() {
 	t.pendingTodo.Store(nil)
 }
 
-func (t *replyTracker) onEvent(ev cli.Event) {
+func (t *replyTracker) onEvent(ev clievent.Event) {
 	// The CLI auto-rejects AskUserQuestion in -p mode (is_error tool_result
 	// within ~3ms); surface it as a card (or text fallback) so the next user
 	// turn carries the selected option(s).

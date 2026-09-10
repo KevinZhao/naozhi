@@ -11,14 +11,17 @@ import (
 )
 
 // installPlaceholderSub mirrors what handleSubscribe does just before it calls
-// completeSubscribe: it installs the no-op placeholder unsub and (when caps are
-// enforced) bumps the per-key subscriber counter + its lock-free mirror. Tests
+// completeSubscribe: it installs the no-op placeholder unsub and (when the
+// counter is allocated) bumps the per-key subscriber counter + its lock-free
+// mirror. Tests
 // use it to drive completeSubscribe directly with the exact pre-state the real
 // path produces.
 func installPlaceholderSub(h *Hub, c *wsClient, key string) {
 	h.mu.Lock()
 	c.subscriptions[key] = func() {}
-	if h.enforceCaps {
+	// Mirrors handleSubscribe's guard: the map's existence is what activates the
+	// counter since #2623, and writing to a nil map would panic.
+	if h.subscriberCount != nil {
 		h.subscriberCount[key]++
 		h.setSubscriberCountFast(key, h.subscriberCount[key])
 	}
@@ -60,10 +63,11 @@ func ownerSubState(h *Hub, c *wsClient, key string) (subCount int, hasSub bool, 
 func TestCompleteSubscribe_CtxCancelledInReCheckNoLeak(t *testing.T) {
 	hub, router := newTestHub("")
 	defer hub.Shutdown()
-	// newTestHub goes through NewHub, so enforceCaps is true and the counter
-	// map is allocated — the caps this bug inflates are actually live.
-	if !hub.enforceCaps {
-		t.Fatal("expected enforceCaps=true via NewHub so the leak counters are active")
+	// newTestHub goes through NewHub, so the counter map is allocated — the caps
+	// this bug inflates are actually live. (Before #2623 this asserted an
+	// enforceCaps bool that said the same thing twice.)
+	if hub.subscriberCount == nil {
+		t.Fatal("expected NewHub to allocate subscriberCount so the leak counters are active")
 	}
 
 	key := "test:d:u:general"

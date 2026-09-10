@@ -9,9 +9,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -86,11 +86,11 @@ func LoadHistoryTailBeforeCtx(ctx context.Context, claudeDir, sessionID, cwd str
 // Non-UUID sessionIDs are rejected up front so an attacker-controlled
 // prev-session-id cannot produce a `filepath.Join(..., "../etc/passwd.jsonl")` escape.
 func resolveJSONLPath(claudeDir, sessionID, cwd string) (string, error) {
-	if !IsValidSessionID(sessionID) {
+	if !claudefs.IsValidSessionID(sessionID) {
 		return "", nil
 	}
 	if cwd != "" {
-		candidate := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
+		candidate := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, nil
 		}
@@ -248,12 +248,12 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 		return nil, false
 	}
 
-	var hl historyLine
+	var hl claudefs.Line
 	if err := json.Unmarshal(line, &hl); err != nil {
 		slog.Debug("skip malformed tail history line", "err", err)
 		return nil, false
 	}
-	ts := parseTimestamp(hl.Timestamp)
+	ts := claudefs.TimestampMillis(hl.Timestamp)
 	// Drop records with a missing/unparseable timestamp: a Time=0 entry
 	// survives the strict-< pagination filter and pins the LoadBefore cursor
 	// at before=0, which degrades to a newest-tail read repeating seen
@@ -350,7 +350,7 @@ func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string
 		}
 		// Reject non-UUID IDs here too (resolveJSONLPath also does) to skip
 		// the file-open path and keep the attack surface narrow.
-		if !IsValidSessionID(id) {
+		if !claudefs.IsValidSessionID(id) {
 			continue
 		}
 		entries, err := LoadHistoryTailCtx(ctx, claudeDir, id, cwd, remaining)
@@ -410,7 +410,7 @@ func LoadHistoryChainBeforeCtx(ctx context.Context, claudeDir string, ids []stri
 		if id == "" {
 			continue
 		}
-		if !IsValidSessionID(id) {
+		if !claudefs.IsValidSessionID(id) {
 			continue
 		}
 		entries, err := LoadHistoryTailBeforeCtx(ctx, claudeDir, id, cwd, beforeMS, remaining)

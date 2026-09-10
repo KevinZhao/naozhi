@@ -9,28 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/history"
 )
-
-// projDirName mirrors discovery.projDirName for test setup. Kept as a
-// local test helper so this package doesn't import test-only code from
-// another package.
-func projDirName(cwd string) string {
-	// The real projDirName replaces os.PathSeparator with '-'. We only
-	// feed it absolute paths under /tmp/... which contain no slashes
-	// that need escaping beyond the leading one, so a simple replace
-	// is equivalent for test inputs.
-	out := make([]byte, 0, len(cwd))
-	for i := 0; i < len(cwd); i++ {
-		c := cwd[i]
-		if c == '/' || c == os.PathSeparator {
-			out = append(out, '-')
-			continue
-		}
-		out = append(out, c)
-	}
-	return string(out)
-}
 
 func makeClaudeDir(t *testing.T) string {
 	t.Helper()
@@ -76,7 +57,7 @@ func TestSource_LoadBefore_WalksChain(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cjsonl-walk"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	oldID := "11111111-1111-1111-1111-111111111bb1"
 	newID := "22222222-2222-2222-2222-222222222bb2"
@@ -124,7 +105,7 @@ func TestSource_LoadBefore_ChainCallbackReevaluated(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cjsonl-refresh"
-	dirName := projDirName(cwd)
+	dirName := claudefs.ProjectSlug(cwd)
 
 	id := "33333333-3333-3333-3333-333333333bb3"
 	lines := []string{userLineAt("only", 1500)}

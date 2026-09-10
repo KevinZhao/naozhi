@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 )
 
 // tuningFakeProc extends TestProcess with a controllable SetModel so tests
@@ -148,11 +149,11 @@ func TestSetSessionTuning_RPCPath(t *testing.T) {
 	t.Run("rejection records nothing and surfaces CLI text", func(t *testing.T) {
 		r := mkTuningTestRouter(t)
 		proc := &tuningFakeProc{TestProcess: NewTestProcess()}
-		proc.setModelErr = cli.ErrSetModelRejected
+		proc.setModelErr = clierr.ErrSetModelRejected
 		s := addTuningSession(r, "k1", "claude", proc)
 
 		_, err := r.SetSessionTuning(ctx, "k1", strp("haiku"), nil)
-		if !errors.Is(err, cli.ErrSetModelRejected) {
+		if !errors.Is(err, clierr.ErrSetModelRejected) {
 			t.Fatalf("err = %v, want ErrSetModelRejected", err)
 		}
 		if s.TuningModel() != "" {
@@ -325,7 +326,7 @@ func TestSetSessionTuning_ErrorTextIsSanitizedUpstream(t *testing.T) {
 	proc := &tuningFakeProc{TestProcess: NewTestProcess()}
 	proc.setModelErr = errors.New("set_model rejected by CLI: policy says no")
 	// Wrap so errors.Is matches the sentinel like the real path does.
-	proc.setModelErr = errors.Join(cli.ErrSetModelRejected, proc.setModelErr)
+	proc.setModelErr = errors.Join(clierr.ErrSetModelRejected, proc.setModelErr)
 	addTuningSession(r, "k1", "claude", proc)
 
 	_, err := r.SetSessionTuning(context.Background(), "k1", strp("haiku"), nil)

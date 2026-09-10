@@ -48,7 +48,6 @@ func TestDashboardJSON_Sessions_ShapeContract(t *testing.T) {
 		Platforms: platforms,
 		Backend:   "claude",
 	})
-	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()

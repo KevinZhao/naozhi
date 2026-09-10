@@ -3,6 +3,8 @@ package server
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // resolveClaudeDir returns the absolute path to the Claude config directory
@@ -29,5 +31,5 @@ func resolveClaudeProjectsDir() string {
 	if dir == "" {
 		return ""
 	}
-	return filepath.Join(dir, "projects")
+	return claudefs.ProjectsRoot(dir)
 }

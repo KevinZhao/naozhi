@@ -17,17 +17,17 @@ import (
 func TestProjectHandlers_FilesExistsLimiter_Wired(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
-	srv := NewWithOptions(ServerOptions{
+	srv, hs := buildServerWithHandlers(ServerOptions{
 		Addr:   ":0",
 		Router: router,
 	})
 	if srv == nil {
 		t.Fatal("NewWithOptions returned nil")
 	}
-	if srv.projectH == nil {
+	if hs.projectH == nil {
 		t.Fatal("projectH must be constructed even with nil ProjectManager")
 	}
-	if !srv.projectH.HasFilesExistsLimiter() {
+	if !hs.projectH.HasFilesExistsLimiter() {
 		t.Error("server.New must wire FilesExistsLimiter (S13); " +
 			"a nil limiter leaves /api/projects/files/exists unprotected against DoS")
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
@@ -42,6 +43,45 @@ func seedHistory(t *testing.T) backfillPaths {
 	return backfillPaths{
 		SessionStorePath: filepath.Join(dir, "sessions.json"),
 		CronStorePath:    filepath.Join(dir, "cron", "cron_jobs.json"),
+	}
+}
+
+// TestBackfill_CronRunsFollowTheCronStoreNotTheSessionStore pins the split that
+// made three of datadir's original constructors unusable (#2641):
+// `session.store_path` and `cron.store_path` are configured independently with
+// no same-directory constraint, so cron's run records live beside CRON's store.
+// A layout helper that rooted cron state under the session directory would find
+// nothing here — and an operator's run history would quietly vanish.
+//
+// seedHistory already places the two stores in different directories, so this
+// asserts the property directly rather than relying on the import count to
+// notice.
+func TestBackfill_CronRunsFollowTheCronStoreNotTheSessionStore(t *testing.T) {
+	p := seedHistory(t)
+	sessionRoot := datadir.ForStore(p.SessionStorePath)
+	cronRoot := datadir.ForStore(p.CronStorePath)
+	if sessionRoot.Root() == cronRoot.Root() {
+		t.Fatal("fixture no longer splits the two store directories; this test would prove nothing")
+	}
+	if _, err := os.Stat(cronRoot.RunsRoot()); err != nil {
+		t.Fatalf("cron runs must live under the cron store dir (%s): %v", cronRoot.RunsRoot(), err)
+	}
+	if _, err := os.Stat(sessionRoot.RunsRoot()); err == nil {
+		t.Errorf("found a runs/ tree under the SESSION store dir (%s); cron state must not be rooted there", sessionRoot.RunsRoot())
+	}
+
+	var out bytes.Buffer
+	rep, err := backfillLedger(p, true, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both roots were read: the cron records only exist under the cron root, and
+	// the session-runs records only under the session root.
+	if rep.CronLocal == 0 || rep.CronSandbox == 0 {
+		t.Errorf("cron records not found under %s: %+v\n%s", cronRoot.RunsRoot(), rep, out.String())
+	}
+	if rep.SessionRuns == 0 {
+		t.Errorf("session-runs records not found under %s: %+v", sessionRoot.SessionRunsRoot(), rep)
 	}
 }
 

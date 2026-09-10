@@ -3,13 +3,15 @@ package cli
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestAssistantMessageUnmarshalPartialArray verifies that a content array
 // containing one malformed block no longer discards the entire message
 // (#1484). The good text/tool_use blocks must survive.
 func TestAssistantMessageUnmarshalPartialArray(t *testing.T) {
-	// Second block has a non-string "text" — strict []ContentBlock decode
+	// Second block has a non-string "text" — strict []clievent.ContentBlock decode
 	// fails on it, but the surrounding good blocks should be preserved.
 	raw := `{"role":"assistant","content":[
 		{"type":"text","text":"hello"},
@@ -17,7 +19,7 @@ func TestAssistantMessageUnmarshalPartialArray(t *testing.T) {
 		{"type":"tool_use","id":"t1","name":"Read"}
 	]}`
 
-	var m AssistantMessage
+	var m clievent.AssistantMessage
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatalf("unmarshal returned error: %v", err)
 	}
@@ -36,7 +38,7 @@ func TestAssistantMessageUnmarshalPartialArray(t *testing.T) {
 // element is unparseable still degrades to empty content (no panic / error).
 func TestAssistantMessageUnmarshalAllBadArray(t *testing.T) {
 	raw := `{"role":"assistant","content":[123,456]}`
-	var m AssistantMessage
+	var m clievent.AssistantMessage
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatalf("unmarshal returned error: %v", err)
 	}
@@ -49,7 +51,7 @@ func TestAssistantMessageUnmarshalAllBadArray(t *testing.T) {
 // array must still take the fast strict-decode path unchanged.
 func TestAssistantMessageUnmarshalCleanArray(t *testing.T) {
 	raw := `{"role":"assistant","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}`
-	var m AssistantMessage
+	var m clievent.AssistantMessage
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatalf("unmarshal returned error: %v", err)
 	}

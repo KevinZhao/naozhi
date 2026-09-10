@@ -14,10 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// runStore persists CronRun records under runsRoot (filepath.Dir(StorePath)+"/runs"):
+// runStore persists CronRun records under runsRoot (the cron store's own
+// datadir.Layout.RunsRoot(), NEVER the session store's):
 //
 //	runs/<jobID>/<run_id>.json    # one record per run; ~2KB typical
 //
@@ -151,7 +153,7 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration, maxB
 		slog.Warn("cron run: storePath Abs failed; falling back to Clean", "path", storePath, "err", err)
 		storeAbs = filepath.Clean(storePath)
 	}
-	root := filepath.Join(filepath.Dir(storeAbs), "runs")
+	root := datadir.ForStore(storeAbs).RunsRoot()
 	// runs/ 根目录主动建为 0o700：否则继承父目录权限（通常 0o755），同机其他
 	// OS 用户可枚举 jobID。失败仅 Warn，后续 Append 仍会 MkdirAll 子目录。
 	if err := os.MkdirAll(root, 0o700); err != nil {

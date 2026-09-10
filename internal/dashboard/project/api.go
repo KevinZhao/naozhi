@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
-	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -55,55 +54,47 @@ func validateProjectName(name string) error {
 }
 
 // Handlers groups the project management API endpoints.
+//
+// Injected wiring lives in deps (one Deps value, #2635) rather than a private
+// copy per field; uploadQuota is derived state the handlers own.
 type Handlers struct {
-	projectMgr *project.Manager
-	router     *session.Router
-	// resolver centralises planner-view opts (docs/rfc/key-resolver.md §3.1
-	// ResolveForPlannerKey) so planner restart keeps the "no defaults
-	// inheritance" contract. Nil falls back to the legacy inlined merge.
-	resolver   *session.KeyResolver
-	nodeAccess NodeAccessor
-	nodeCache  *node.CacheManager
-	// baseCtx is the long-lived context the planner-restart timeout derives
-	// from; production wires it via SetBaseContext, tests assign directly.
-	// Nil falls back to Background in restartCtx (#650).
-	baseCtx context.Context
-	// filesExistsLimiter caps /api/projects/files/exists per caller: the
-	// endpoint fans out up to maxExistsPaths stats within fileStatTimeout, so
-	// unmetered calls let a post-auth attacker tie up workers on slow trees.
-	// Mirrors the uploadLimiter policy (≈10/min). Nil in hand-built test
-	// Handlers; HandleFilesExists nil-guards.
-	filesExistsLimiter IPLimiter
-	// configPutLimiter caps PUT /api/projects/config per IP: each write hits
-	// disk and fans out a WS update to every dashboard client. 5/sec burst 5
-	// is far above interactive saves but below abuse rates. Nil-safe in tests.
-	configPutLimiter IPLimiter
+	// deps is read-only after New; tests may assign fields before first use.
+	deps Deps
 	// uploadQuota bounds cumulative upload bytes per project within this
 	// process (#2311). Nil disables enforcement (single-operator model / tests).
 	uploadQuota *uploadQuota
-	// publicTmpEnabled gates the __public_tmp__ pseudo-project (#646). When
-	// false (default) it is rejected as "project not found" like any missing
-	// project, so multi-user deployments cannot enumerate / preview arbitrary
-	// /tmp paths merely because the naozhi process has DAC read access.
-	// Single-operator setups flip it via server.public_tmp_enabled.
-	publicTmpEnabled bool
-	// projectStableKeyEnabled gates emitting StableKey in the list response
-	// (docs/rfc/project-stable-session-key.md §4.2); when false the frontend
-	// falls back to the legacy timestamp-key path for "continue". Default true.
-	projectStableKeyEnabled bool
 }
 
 // Deps bundles all wiring for New so internal/server can construct Handlers
 // without access to unexported fields.
 type Deps struct {
-	ProjectMgr         *project.Manager
-	Router             *session.Router
-	Resolver           *session.KeyResolver
-	NodeAccess         NodeAccessor
-	NodeCache          *node.CacheManager
+	// BaseCtx is the long-lived parent for the planner-restart timeout. Wired
+	// at construction (#2552); nil falls back to context.Background().
+	BaseCtx context.Context
+
+	ProjectMgr ProjectStore
+	Router     RouterView
+	// Resolver centralises planner-view opts (docs/rfc/key-resolver.md §3.1
+	// ResolveForPlannerKey) so planner restart keeps the "no defaults
+	// inheritance" contract. Nil falls back to the legacy inlined merge.
+	Resolver   PlannerKeyResolver
+	NodeAccess NodeAccessor
+	NodeCache  NodeCacheReader
+	// FilesExistsLimiter caps /api/projects/files/exists per caller: the
+	// endpoint fans out up to maxExistsPaths stats within fileStatTimeout, so
+	// unmetered calls let a post-auth attacker tie up workers on slow trees.
+	// Mirrors the uploadLimiter policy (≈10/min). Nil in hand-built test
+	// Handlers; HandleFilesExists nil-guards.
 	FilesExistsLimiter IPLimiter
-	ConfigPutLimiter   IPLimiter
-	PublicTmpEnabled   bool
+	// ConfigPutLimiter caps PUT /api/projects/config per IP: each write hits
+	// disk and fans out a WS update to every dashboard client. 5/sec burst 5
+	// is far above interactive saves but below abuse rates. Nil-safe in tests.
+	ConfigPutLimiter IPLimiter
+	// PublicTmpEnabled gates the __public_tmp__ pseudo-project (#646). When
+	// false (default) it is rejected as "project not found" like any missing
+	// project, so multi-user deployments cannot enumerate / preview arbitrary
+	// /tmp paths merely because the naozhi process has DAC read access.
+	PublicTmpEnabled bool
 	// UploadQuotaBytes caps cumulative per-project upload bytes within a
 	// process (#2311). <=0 disables enforcement.
 	UploadQuotaBytes int64
@@ -114,32 +105,14 @@ type Deps struct {
 
 // New constructs a Handlers from injected deps.
 func New(d Deps) *Handlers {
-	return &Handlers{
-		projectMgr:         d.ProjectMgr,
-		router:             d.Router,
-		resolver:           d.Resolver,
-		nodeAccess:         d.NodeAccess,
-		nodeCache:          d.NodeCache,
-		filesExistsLimiter: d.FilesExistsLimiter,
-		configPutLimiter:   d.ConfigPutLimiter,
-		uploadQuota:        newUploadQuota(d.UploadQuotaBytes),
-		publicTmpEnabled:   d.PublicTmpEnabled,
-
-		projectStableKeyEnabled: d.ProjectStableKeyEnabled,
-	}
-}
-
-// SetBaseContext wires the long-lived process context (typically Hub.ctx)
-// used by the planner-restart timeout; tests may assign h.baseCtx directly (#650).
-func (h *Handlers) SetBaseContext(ctx context.Context) {
-	h.baseCtx = ctx
+	return &Handlers{deps: d, uploadQuota: newUploadQuota(d.UploadQuotaBytes)}
 }
 
 // restartCtx returns the parent context for handleRestartPlanner's 30s
-// timeout, falling back to context.Background() when baseCtx is unwired.
+// timeout, falling back to context.Background() when BaseCtx is unwired.
 func (h *Handlers) restartCtx() context.Context {
-	if h.baseCtx != nil {
-		return h.baseCtx
+	if h.deps.BaseCtx != nil {
+		return h.deps.BaseCtx
 	}
 	return context.Background()
 }
@@ -183,23 +156,23 @@ func ProjectsListEntryType() reflect.Type { return reflect.TypeOf(projectsListEn
 
 // HandleList serves GET /api/projects — list all projects (local + remote).
 func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
-	if h.projectMgr == nil {
+	if h.deps.ProjectMgr == nil {
 		httputil.WriteJSON(w, []any{})
 		return
 	}
 
-	projects := h.projectMgr.All()
+	projects := h.deps.ProjectMgr.All()
 	result := make([]projectsListEntry, 0, len(projects))
 	for _, p := range projects {
 		plannerKey := p.PlannerSessionKey()
 		plannerState := "none"
-		if sess := h.router.SessionFor(plannerKey); sess != nil {
+		if sess := h.deps.Router.SessionFor(plannerKey); sess != nil {
 			snap := sess.Snapshot()
 			plannerState = snap.State
 		}
 
 		var stableKey string
-		if h.projectStableKeyEnabled {
+		if h.deps.ProjectStableKeyEnabled {
 			stableKey = session.ProjectStableKey(p.Path, "general")
 		}
 
@@ -207,7 +180,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Name:         p.Name,
 			Path:         p.Path,
 			PlannerState: plannerState,
-			PlannerModel: h.projectMgr.EffectivePlannerModel(p),
+			PlannerModel: h.deps.ProjectMgr.EffectivePlannerModel(p),
 			Config:       p.Config,
 			Favorite:     p.Config.Favorite,
 			GitRemoteURL: RedactGitRemoteURL(p.GitRemoteURL),
@@ -219,13 +192,13 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Merge remote projects
-	if h.nodeAccess.HasNodes() {
+	if h.deps.NodeAccess.HasNodes() {
 		allProjects := make([]any, 0, len(result))
 		for i := range result {
 			result[i].Node = "local"
 			allProjects = append(allProjects, result[i])
 		}
-		cachedProjects := h.nodeCache.Projects()
+		cachedProjects := h.deps.NodeCache.Projects()
 		for _, items := range cachedProjects {
 			for _, item := range items {
 				allProjects = append(allProjects, item)
@@ -245,12 +218,12 @@ func (h *Handlers) HandleConfigGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if h.projectMgr == nil {
+	if h.deps.ProjectMgr == nil {
 		http.Error(w, "projects not configured", http.StatusBadRequest)
 		return
 	}
 
-	p := h.projectMgr.Get(name)
+	p := h.deps.ProjectMgr.Get(name)
 	if p == nil {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
@@ -263,7 +236,7 @@ func (h *Handlers) HandleConfigGet(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 	// Rate-limit before any work: disk write + dashboard-wide WS fan-out is
 	// otherwise unmetered for any authenticated caller. Nil-guarded for tests.
-	if h.configPutLimiter != nil && !h.configPutLimiter.AllowRequest(r) {
+	if h.deps.ConfigPutLimiter != nil && !h.deps.ConfigPutLimiter.AllowRequest(r) {
 		w.Header().Set("Retry-After", "1")
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "config update rate limit exceeded"})
 		return
@@ -282,7 +255,7 @@ func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 	// Remote node proxy
 	nodeID := r.URL.Query().Get("node")
 	if nodeID != "" && nodeID != "local" {
-		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
+		nc, ok := h.deps.NodeAccess.LookupNode(w, nodeID)
 		if !ok {
 			return
 		}
@@ -300,7 +273,7 @@ func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.projectMgr == nil {
+	if h.deps.ProjectMgr == nil {
 		http.Error(w, "projects not configured", http.StatusBadRequest)
 		return
 	}
@@ -322,7 +295,7 @@ func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.projectMgr.UpdateConfig(name, cfg); err != nil {
+	if err := h.deps.ProjectMgr.UpdateConfig(name, cfg); err != nil {
 		if errors.Is(err, project.ErrNotFound) {
 			http.Error(w, "project not found", http.StatusNotFound)
 		} else {
@@ -352,7 +325,7 @@ func (h *Handlers) HandleFavoriteToggle(w http.ResponseWriter, r *http.Request) 
 	// Remote node proxy
 	nodeID := r.URL.Query().Get("node")
 	if nodeID != "" && nodeID != "local" {
-		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
+		nc, ok := h.deps.NodeAccess.LookupNode(w, nodeID)
 		if !ok {
 			return
 		}
@@ -364,18 +337,18 @@ func (h *Handlers) HandleFavoriteToggle(w http.ResponseWriter, r *http.Request) 
 		// Bump local version so the dashboard's version gate doesn't skip the
 		// next /api/sessions poll while the remote's favorite change is still
 		// propagating into our nodeCache.
-		if h.router != nil {
-			h.router.BumpVersion()
+		if h.deps.Router != nil {
+			h.deps.Router.BumpVersion()
 		}
 		httputil.WriteJSON(w, map[string]any{"status": "ok", "favorite": favorite})
 		return
 	}
 
-	if h.projectMgr == nil {
+	if h.deps.ProjectMgr == nil {
 		http.Error(w, "projects not configured", http.StatusBadRequest)
 		return
 	}
-	if err := h.projectMgr.SetFavorite(name, favorite); err != nil {
+	if err := h.deps.ProjectMgr.SetFavorite(name, favorite); err != nil {
 		if errors.Is(err, project.ErrNotFound) {
 			http.Error(w, "project not found", http.StatusNotFound)
 		} else {
@@ -386,8 +359,8 @@ func (h *Handlers) HandleFavoriteToggle(w http.ResponseWriter, r *http.Request) 
 	}
 	// Bump the router version so the dashboard's version-gated fetchSessions()
 	// notices the favorite flip instead of waiting for the next session event.
-	if h.router != nil {
-		h.router.BumpVersion()
+	if h.deps.Router != nil {
+		h.deps.Router.BumpVersion()
 	}
 	httputil.WriteJSON(w, map[string]any{"status": "ok", "favorite": favorite})
 }
@@ -403,7 +376,7 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 	// Remote node proxy
 	nodeID := r.URL.Query().Get("node")
 	if nodeID != "" && nodeID != "local" {
-		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
+		nc, ok := h.deps.NodeAccess.LookupNode(w, nodeID)
 		if !ok {
 			return
 		}
@@ -416,7 +389,7 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if h.projectMgr == nil {
+	if h.deps.ProjectMgr == nil {
 		http.Error(w, "projects not configured", http.StatusBadRequest)
 		return
 	}
@@ -426,8 +399,8 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 	// §2.2 #6). Legacy fallback serves headless test paths without a resolver.
 	var plannerKey string
 	var opts session.AgentOpts
-	if h.resolver != nil {
-		key, plannerOpts, ok := h.resolver.ResolveForPlannerKey(name)
+	if h.deps.Resolver != nil {
+		key, plannerOpts, ok := h.deps.Resolver.ResolveForPlannerKey(name)
 		if !ok {
 			http.Error(w, "project not found", http.StatusNotFound)
 			return
@@ -435,14 +408,14 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 		plannerKey = key
 		opts = plannerOpts
 	} else {
-		p := h.projectMgr.Get(name)
+		p := h.deps.ProjectMgr.Get(name)
 		if p == nil {
 			http.Error(w, "project not found", http.StatusNotFound)
 			return
 		}
 		plannerKey = p.PlannerSessionKey()
 		opts = session.AgentOpts{
-			Model:     h.projectMgr.EffectivePlannerModel(p),
+			Model:     h.deps.ProjectMgr.EffectivePlannerModel(p),
 			Workspace: p.Path,
 			Exempt:    true,
 		}
@@ -450,14 +423,14 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 		// cached project.yaml / CLAUDE.md, which Claude's Write tool can mutate
 		// past ValidateConfig. Drop the prompt entirely when sanitisation fails
 		// rather than feeding control bytes / oversize argv to the CLI.
-		if pp := session.SanitisePlannerPromptForSpawn(h.projectMgr.EffectivePlannerPrompt(p), p.Name); pp != "" {
+		if pp := session.SanitisePlannerPromptForSpawn(h.deps.ProjectMgr.EffectivePlannerPrompt(p), p.Name); pp != "" {
 			opts.SystemPrompt = pp // #2493: dedicated field, not ExtraArgs
 		}
 	}
 
 	ctx, cancel := context.WithTimeout(h.restartCtx(), 30*time.Second)
 	defer cancel()
-	if _, err := h.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
+	if _, err := h.deps.Router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
 		slog.Error("planner restart failed", "project", name, "err", err)
 		http.Error(w, "restart failed", http.StatusInternalServerError)
 		return
@@ -470,7 +443,7 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 // HasFilesExistsLimiter reports whether FilesExistsLimiter has been wired;
 // exposed for the server-package test pinning that server.New wires it.
 func (h *Handlers) HasFilesExistsLimiter() bool {
-	return h.filesExistsLimiter != nil
+	return h.deps.FilesExistsLimiter != nil
 }
 
 // ContractProjectsEntry exposes the /api/projects entry wire struct to the

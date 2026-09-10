@@ -59,12 +59,12 @@ func (h *Handlers) HandleGit(w http.ResponseWriter, r *http.Request) {
 	// Re-validate against allowedRoot before touching the filesystem: the value
 	// was validated at SetWorkspace time, but a tightened allowedRoot can leave
 	// a stale entry, and this handler must not read outside the declared tree.
-	// A nil validateWS (hand-built Handlers in tests) fails closed.
-	if h.validateWS == nil {
+	// A nil deps.ValidateWS (hand-built Handlers in tests) fails closed.
+	if h.deps.ValidateWS == nil {
 		httputil.WriteJSON(w, gitStateView{})
 		return
 	}
-	wsPath, err := h.validateWS(ws, h.allowedRoot)
+	wsPath, err := h.deps.ValidateWS(ws, h.deps.AllowedRoot)
 	if err != nil {
 		slog.Debug("git state: workspace validation failed",
 			"err", err, "workspace", osutil.SanitizeForLog(ws, 256))
@@ -76,8 +76,8 @@ func (h *Handlers) HandleGit(w http.ResponseWriter, r *http.Request) {
 	// otherwise Detect could walk past the boundary and disclose a parent repo's
 	// path + branch (e.g. allowed_root=<repo>/docs). Empty means no containment
 	// policy, which gitinfo mirrors as unbounded. The bound must be
-	// symlink-resolved like wsPath, with the same raw-path fallback validateWS uses.
-	st, ok := gitinfo.Detect(wsPath, resolveRootForBound(h.allowedRoot))
+	// symlink-resolved like wsPath, with the same raw-path fallback deps.ValidateWS uses.
+	st, ok := gitinfo.Detect(wsPath, resolveRootForBound(h.deps.AllowedRoot))
 	if !ok {
 		// Not a git checkout — common and legitimate; echo the workspace.
 		httputil.WriteJSON(w, gitStateView{Workspace: wsPath})
@@ -115,10 +115,10 @@ func resolveRootForBound(allowedRoot string) string {
 // workspace, then chat-level override, then router default. Duplicated rather
 // than imported because this package must not reverse-import internal/server.
 func (h *Handlers) resolveSessionWorkspace(key string) string {
-	if h.router == nil {
+	if h.deps.Router == nil {
 		return ""
 	}
-	if sess := h.router.SessionFor(key); sess != nil {
+	if sess := h.deps.Router.SessionFor(key); sess != nil {
 		if ws := sess.Workspace(); ws != "" {
 			return ws
 		}
@@ -129,5 +129,5 @@ func (h *Handlers) resolveSessionWorkspace(key string) string {
 	if idx := strings.LastIndexByte(key, ':'); idx > 0 {
 		chatKey = key[:idx]
 	}
-	return h.router.Workspace(chatKey)
+	return h.deps.Router.Workspace(chatKey)
 }

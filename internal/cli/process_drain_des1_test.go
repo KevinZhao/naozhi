@@ -4,11 +4,13 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestDrainStaleEvents_DES1_HoldFreshWaitForResult pins R29-DES1 (#773).
 //
-// Event ordering inside the interrupted-settle window: a fresh (post-cutoff,
+// clievent.Event ordering inside the interrupted-settle window: a fresh (post-cutoff,
 // new-turn) event arrives BEFORE the interrupted turn's result event. The
 // pre-fix code re-enqueued the fresh event and `goto drain` immediately,
 // abandoning the settle wait — so an interrupted result still in flight could
@@ -24,7 +26,7 @@ func TestDrainStaleEvents_DES1_HoldFreshWaitForResult(t *testing.T) {
 	t.Parallel()
 
 	p := &Process{
-		eventCh: make(chan Event, 8),
+		eventCh: make(chan clievent.Event, 8),
 		done:    make(chan struct{}), // open: isChanAlive must report true
 	}
 	p.interrupted.Store(true)
@@ -35,8 +37,8 @@ func TestDrainStaleEvents_DES1_HoldFreshWaitForResult(t *testing.T) {
 	// Ordering [fresh, result] is what the old push-back path mishandled:
 	// reading `fresh` used to short-circuit out of the settle window.
 	future := time.Now().Add(time.Hour)
-	freshEv := Event{Type: "assistant", SessionID: "new-turn", recvAt: future}
-	resultEv := Event{Type: "result", SessionID: "interrupted", recvAt: future}
+	freshEv := clievent.Event{Type: "assistant", SessionID: "new-turn", RecvAt: future}
+	resultEv := clievent.Event{Type: "result", SessionID: "interrupted", RecvAt: future}
 	p.eventCh <- freshEv
 	p.eventCh <- resultEv
 
@@ -46,7 +48,7 @@ func TestDrainStaleEvents_DES1_HoldFreshWaitForResult(t *testing.T) {
 
 	// The interrupted result must have been consumed by the settle window;
 	// only the fresh new-turn event should remain for the live consumer.
-	var remaining []Event
+	var remaining []clievent.Event
 	for {
 		select {
 		case ev := <-p.eventCh:

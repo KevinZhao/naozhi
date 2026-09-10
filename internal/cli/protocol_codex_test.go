@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // All wire shapes here were captured against codex-cli 0.141.0 on 2026-06-21;
@@ -200,10 +203,10 @@ func TestCodexProtocol_WriteInterrupt(t *testing.T) {
 	t.Parallel()
 	p := &CodexProtocol{}
 
-	// Pre-handshake: no thread → ErrInterruptUnsupported.
+	// Pre-handshake: no thread → clierr.ErrInterruptUnsupported.
 	var w0 bytes.Buffer
-	if err := p.WriteInterrupt(&w0, "req-1"); err != ErrInterruptUnsupported {
-		t.Errorf("pre-handshake WriteInterrupt err = %v; want ErrInterruptUnsupported", err)
+	if err := p.WriteInterrupt(&w0, "req-1"); err != clierr.ErrInterruptUnsupported {
+		t.Errorf("pre-handshake WriteInterrupt err = %v; want clierr.ErrInterruptUnsupported", err)
 	}
 
 	// Post-handshake: emits turn/interrupt request with threadId.
@@ -446,7 +449,7 @@ func TestCodexProtocol_HandleEvent_NonPermissionPassThrough(t *testing.T) {
 	t.Parallel()
 	p := &CodexProtocol{}
 	var w bytes.Buffer
-	if p.HandleEvent(&w, Event{Type: "assistant"}) {
+	if p.HandleEvent(&w, clievent.Event{Type: "assistant"}) {
 		t.Error("HandleEvent should not handle non-permission events")
 	}
 	if w.Len() != 0 {
@@ -473,7 +476,7 @@ func TestCodexProtocol_HandleEvent_StringID(t *testing.T) {
 	t.Parallel()
 	p := &CodexProtocol{}
 	// UUID-style ids must be quoted in the response.
-	ev := Event{Type: "permission_request", RPCRequestID: "abc-123-uuid"}
+	ev := clievent.Event{Type: "permission_request", RPCRequestID: "abc-123-uuid"}
 	var w bytes.Buffer
 	if !p.HandleEvent(&w, ev) {
 		t.Fatal("HandleEvent should handle permission_request")
