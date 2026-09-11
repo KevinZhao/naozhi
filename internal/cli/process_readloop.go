@@ -636,7 +636,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 }
 
 // notifyLinker forwards system/init context and system/task_started events to
-// the SubagentLinker. Re-gates internally on `p.linker != nil` so the caller
+// the subagent.Linker. Re-gates internally on `p.linker != nil` so the caller
 // can pass any event without a pre-check.
 func (p *Process) notifyLinker(ev clievent.Event, nowMS int64, isSystemInit bool) {
 	if p.linker == nil {

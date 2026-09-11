@@ -1,4 +1,4 @@
-package cli
+package subagent
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// These tests pin RFC v4 agent-team-ui §3.3 SubagentLinker behaviour:
+// These tests pin RFC v4 agent-team-ui §3.3 Linker behaviour:
 //   1. ResolveProjectDir encoding (R7, §3.3.2) — "[^A-Za-z0-9]→'-'" no collapse.
 //   2. Resolve 7-step algorithm (§3.3.1) — guard, scan, filter by agentType,
 //      retry on empty, mtime-desc selector, sessionId cross-check, cache write.
@@ -42,11 +42,11 @@ func TestResolveProjectDir(t *testing.T) {
 	}
 	// NOTE: the "chinese chars → 3 dashes each" case is byte-level because the
 	// CLI in practice walks runes (range). The actual claude CLI walks runes,
-	// so our resolveProjectDir does too. Expected output below reflects
+	// so our ProjectDir does too. Expected output below reflects
 	// "one rune → one dash" (not one byte).
 	cases["/tmp/中文"] = "-tmp---"
 	for cwd, want := range cases {
-		got := resolveProjectDir(cwd)
+		got := ProjectDir(cwd)
 		if cwd == "" {
 			if got != "" {
 				t.Errorf("cwd=%q got %q, want empty", cwd, got)
@@ -94,10 +94,10 @@ func writeAgentFiles(t *testing.T, dir, hex, agentType, sessionID, promptID stri
 	}
 }
 
-func newLinkerForTest(t *testing.T, sessionID string) (*SubagentLinker, string) {
+func newLinkerForTest(t *testing.T, sessionID string) (*Linker, string) {
 	t.Helper()
 	root := t.TempDir()
-	l := NewSubagentLinker()
+	l := NewLinker()
 	projectDir := filepath.Join(root, "-project")
 	subagentDir := filepath.Join(projectDir, sessionID, "subagents")
 	if err := os.MkdirAll(subagentDir, 0o755); err != nil {
@@ -292,7 +292,7 @@ func TestLinker_SeedFromHistory_Bypasses_Scan(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	l := NewSubagentLinker()
+	l := NewLinker()
 	var scans atomic.Int32
 	l.scanHook = func() { scans.Add(1) }
 
@@ -393,7 +393,7 @@ func TestLinker_OnResolve_Fires(t *testing.T) {
 
 func TestLinker_PreContext_Resolve_NoOp(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 	// SetContext not called — Resolve must bail out, not scan.
 	info, resolved := l.Resolve(context.Background(), "t", "u", "x", "", time.Now().UnixMilli())
 	if resolved || info.InternalAgentID != "" {
@@ -403,7 +403,7 @@ func TestLinker_PreContext_Resolve_NoOp(t *testing.T) {
 
 func TestLinker_Query_DefaultEmpty(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 	info, ok := l.Query("unknown")
 	if ok {
 		t.Errorf("unknown task_id: info=%+v ok=true", info)
@@ -437,7 +437,7 @@ func TestReadFirstLineMeta_OversizedFirstLine(t *testing.T) {
 // respawn detection still sees the newest distinct FirstPromptIDs.
 func TestAppendNamedLink_CapsHistory(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 	const name = "orchestrator"
 	total := maxNamedLinkHistory*4 + 7
 	l.mu.Lock()
@@ -481,7 +481,7 @@ func TestAppendNamedLink_CapsHistory(t *testing.T) {
 // re-allocates a tightly-sized array so the oversized store can be GC'd.
 func TestAppendNamedLink_HardCapsBackingArray(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 	const name = "orchestrator"
 
 	// Seed byName[name] with a slice whose backing array capacity is large
@@ -516,7 +516,7 @@ func TestAppendNamedLink_HardCapsBackingArray(t *testing.T) {
 // the cap) retains every entry untouched.
 func TestAppendNamedLink_BelowCapKeepsAll(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 	l.mu.Lock()
 	for i := 0; i < 5; i++ {
 		l.appendNamedLink("worker", LinkInfo{FirstPromptID: "p" + strconv.Itoa(i)})

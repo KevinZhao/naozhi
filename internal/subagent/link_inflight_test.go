@@ -1,4 +1,4 @@
-package cli
+package subagent
 
 import (
 	"testing"
@@ -16,7 +16,7 @@ import (
 // schedule + closure-allocation cost for nothing.
 func TestSubagentLinker_TryMarkResolveInflight_R260528_PERF_7(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 
 	// (a) first claim wins.
 	if !l.TryMarkResolveInflight("task-A") {
@@ -63,7 +63,7 @@ func TestSubagentLinker_TryMarkResolveInflight_R260528_PERF_7(t *testing.T) {
 // lifetime.
 func TestSubagentLinker_ResolveClearsInflight_R260528_PERF_7(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 
 	// Path 1: missing-context return (projectDir/sessionID empty).
 	// Pre-claim so we can observe the deferred clear releases it.

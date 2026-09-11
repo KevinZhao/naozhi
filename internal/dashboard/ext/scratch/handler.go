@@ -10,7 +10,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -224,7 +223,7 @@ func collectScratchContext(ctx context.Context, sess *session.ManagedSession, so
 		before = sess.EventEntriesBeforeCtx(ctx, sourceMessageTime, fetch)
 		// SinceInclusive yields Time >= sourceMessageTime; the loop skips the
 		// exact match so the quoted message is not echoed into the context.
-		raw := sess.EventEntriesSince(cli.SinceInclusive(sourceMessageTime))
+		raw := sess.EventEntriesSince(clievent.SinceInclusive(sourceMessageTime))
 		// Cap pre-allocation at `fetch`; the result is fetch-bounded anyway.
 		afterCap := len(raw)
 		if afterCap > fetch {

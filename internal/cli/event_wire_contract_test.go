@@ -68,7 +68,7 @@ func TestEvent_StreamJSONParseContract_R217_ARCH_1(t *testing.T) {
 
 	// An assistant frame with a tool_use content block: the Message →
 	// Content[].{type,id,name,input} shape that EventEntriesFromEventAt
-	// and SubagentLinker depend on.
+	// and subagent.Linker depend on.
 	const asstLine = `{"type":"assistant","message":{"role":"assistant",` +
 		`"content":[{"type":"tool_use","id":"b1","name":"Agent",` +
 		`"input":{"description":"go"}}]}}`

@@ -1,4 +1,15 @@
-package cli
+// Package subagent links a Claude subagent (Task tool) invocation to the JSONL
+// transcript the CLI writes for it, and reads that transcript into EventEntry
+// pages. #2649 G1-f.
+//
+// Moved out of internal/cli, which it never needed: 1,440 non-test lines whose
+// imports are stdlib plus claudefs (the transcript path layout), clievent (the
+// entry shape) and textutil. internal/dashboard and internal/server pulled in the
+// subprocess spawner to name a Linker or a LinkInfo.
+//
+// Two renames dropped the stutter that a package boundary made visible:
+// SubagentLinker → Linker and NewSubagentLinker → NewLinker.
+package subagent
 
 import (
 	"bufio"
@@ -23,7 +34,7 @@ import (
 // against cross-platform traversal corner cases.
 var agentHexRe = regexp.MustCompile(`^[A-Za-z0-9]{8,64}$`)
 
-// maxConcurrentResolves caps concurrent Resolve calls per SubagentLinker.
+// maxConcurrentResolves caps concurrent Resolve calls per Linker.
 // Each Resolve may sleep up to retryLimit*retryInterval (3 s) waiting for the
 // CLI to flush its jsonl, and a multi-agent turn emits 10+ task_started in a
 // burst.
@@ -67,7 +78,7 @@ const maxNamedLinkHistory = 32
 
 // appendNamedLink appends info to byName[name], keeping at most the newest
 // maxNamedLinkHistory entries. Caller must hold l.mu as a write lock.
-func (l *SubagentLinker) appendNamedLink(name string, info LinkInfo) {
+func (l *Linker) appendNamedLink(name string, info LinkInfo) {
 	cur := l.byName[name]
 	cur = append(cur, info)
 	if len(cur) > maxNamedLinkHistory {
@@ -85,7 +96,7 @@ func (l *SubagentLinker) appendNamedLink(name string, info LinkInfo) {
 	l.byName[name] = cur
 }
 
-// SubagentLinker maps agent task_ids (and their originating Agent
+// Linker maps agent task_ids (and their originating Agent
 // tool_use_ids) to the transcript jsonl Claude CLI writes under
 // <projectDir>/<sessionID>/subagents/agent-<hex>.jsonl, so the dashboard can
 // render each agent's internal event stream. Resolve is async: the CLI emits
@@ -93,7 +104,7 @@ func (l *SubagentLinker) appendNamedLink(name string, info LinkInfo) {
 // later, so Resolve retries within a bounded grace window (default 3 s) and
 // the OnResolve callbacks then start the tailer and backfill
 // EventEntry.InternalAgentID for persistence.
-type SubagentLinker struct {
+type Linker struct {
 	mu              sync.RWMutex
 	byTaskID        map[string]LinkInfo
 	byToolUseID     map[string]LinkInfo
@@ -164,10 +175,10 @@ type metaEntry struct {
 	agentType string
 }
 
-// NewSubagentLinker returns an empty, context-free linker. Call SetContext
+// NewLinker returns an empty, context-free linker. Call SetContext
 // after the parent process emits its first system.init event.
-func NewSubagentLinker() *SubagentLinker {
-	return &SubagentLinker{
+func NewLinker() *Linker {
+	return &Linker{
 		byTaskID:      make(map[string]LinkInfo),
 		byToolUseID:   make(map[string]LinkInfo),
 		byName:        make(map[string][]LinkInfo),
@@ -182,7 +193,7 @@ func NewSubagentLinker() *SubagentLinker {
 // context (Process.lifecycleContext()) so a short-lived per-request ctx can
 // never cancel the workers (#1661). Call once before the first
 // DispatchResolve; later calls are ignored. nil is treated as unset.
-func (l *SubagentLinker) SetPoolContext(ctx context.Context) {
+func (l *Linker) SetPoolContext(ctx context.Context) {
 	l.mu.Lock()
 	if l.poolCtx == nil {
 		l.poolCtx = ctx
@@ -191,9 +202,20 @@ func (l *SubagentLinker) SetPoolContext(ctx context.Context) {
 }
 
 // SetContext installs the on-disk lookup root. Must be called before Resolve
-// can succeed. Project dir is derived from the process cwd (resolveProjectDir);
+// can succeed. Project dir is derived from the process cwd (ProjectDir);
 // sessionID comes from the first system.init event.
-func (l *SubagentLinker) SetContext(projectDir, parentSessionID string) {
+// ParentSessionID returns the session ID Resolve matches transcripts against,
+// or "" before SetContext has supplied one. Read under the Linker's own lock:
+// the caller (cli.Process.SetCwdForLinker, deciding whether to seed it from the
+// shim handshake) used to reach into l.parentSessionID directly, which stopped
+// being possible when this package moved out of internal/cli (#2649 G1-f).
+func (l *Linker) ParentSessionID() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.parentSessionID
+}
+
+func (l *Linker) SetContext(projectDir, parentSessionID string) {
 	l.mu.Lock()
 	prev := l.projectDir != "" && l.parentSessionID != ""
 	l.projectDir = projectDir
@@ -208,7 +230,7 @@ func (l *SubagentLinker) SetContext(projectDir, parentSessionID string) {
 // OnResolve appends a callback fired after every Resolve (success or
 // tombstone, the latter with internalAgentID="" so tailers are not started).
 // Callbacks run in append order, outside l.mu, serialised by onResolveMu.
-func (l *SubagentLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {
+func (l *Linker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {
 	if fn == nil {
 		return
 	}
@@ -220,7 +242,7 @@ func (l *SubagentLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID st
 // Query returns the cached mapping for taskID without scanning disk:
 // ok=false for unknown task_ids, ok=true with empty InternalAgentID for
 // tombstones, so HTTP handlers can distinguish 202 from 404.
-func (l *SubagentLinker) Query(taskID string) (LinkInfo, bool) {
+func (l *Linker) Query(taskID string) (LinkInfo, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	info, ok := l.byTaskID[taskID]
@@ -232,7 +254,7 @@ func (l *SubagentLinker) Query(taskID string) (LinkInfo, bool) {
 // task_started never reached the Linker (pre-restart) still resolves from
 // disk in <1 ms. Returns (LinkInfo{}, false) when the Linker has no context
 // yet or the stat missed.
-func (l *SubagentLinker) QueryOrResolveFast(taskID string) (LinkInfo, bool) {
+func (l *Linker) QueryOrResolveFast(taskID string) (LinkInfo, bool) {
 	l.mu.RLock()
 	if info, ok := l.byTaskID[taskID]; ok {
 		l.mu.RUnlock()
@@ -253,7 +275,7 @@ func (l *SubagentLinker) QueryOrResolveFast(taskID string) (LinkInfo, bool) {
 // ok=true on first claim; later callers get ok=false and SHOULD skip spawning
 // a Resolve. Resolve's defer clears the claim, so a duplicate arriving after
 // completion may re-claim. Empty taskID returns ok=false (#1354).
-func (l *SubagentLinker) TryMarkResolveInflight(taskID string) bool {
+func (l *Linker) TryMarkResolveInflight(taskID string) bool {
 	if taskID == "" {
 		return false
 	}
@@ -266,7 +288,7 @@ func (l *SubagentLinker) TryMarkResolveInflight(taskID string) bool {
 // caller's ctx (#1661); each job still carries its own ctx for the Resolve
 // itself. A full queue falls back to an inline goroutine with a warning so
 // no task_started is dropped. Empty taskID is a no-op.
-func (l *SubagentLinker) DispatchResolve(ctx context.Context, taskID, toolUseID, name, description string, agentToolUseMS int64) {
+func (l *Linker) DispatchResolve(ctx context.Context, taskID, toolUseID, name, description string, agentToolUseMS int64) {
 	if taskID == "" {
 		return
 	}
@@ -310,7 +332,7 @@ func (l *SubagentLinker) DispatchResolve(ctx context.Context, taskID, toolUseID,
 
 // resolveWorker is the long-lived consumer for the dispatch queue; exits when
 // ctx is canceled. No panic-recover on purpose: a panic should surface loudly.
-func (l *SubagentLinker) resolveWorker(ctx context.Context) {
+func (l *Linker) resolveWorker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -326,7 +348,7 @@ func (l *SubagentLinker) resolveWorker(ctx context.Context) {
 
 // clearResolveInflight releases the TryMarkResolveInflight claim; Resolve
 // defers it so a later task_started for the same taskID can re-claim.
-func (l *SubagentLinker) clearResolveInflight(taskID string) {
+func (l *Linker) clearResolveInflight(taskID string) {
 	if taskID == "" {
 		return
 	}
@@ -335,7 +357,7 @@ func (l *SubagentLinker) clearResolveInflight(taskID string) {
 
 // ConfigureForTest overrides the grace/poll/cache timings so cross-package
 // tests reach terminal verdicts in milliseconds. Not for production callers.
-func (l *SubagentLinker) ConfigureForTest(retryIntervalNS int64, retryLimit int, cacheTTLNS int64) {
+func (l *Linker) ConfigureForTest(retryIntervalNS int64, retryLimit int, cacheTTLNS int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.retryInterval = time.Duration(retryIntervalNS)
@@ -345,7 +367,7 @@ func (l *SubagentLinker) ConfigureForTest(retryIntervalNS int64, retryLimit int,
 
 // ProjectSessionDir returns <projectDir>/<parentSessionID>, or "" before
 // SetContext. Anchors the /api/sessions/tool_result path-traversal defence.
-func (l *SubagentLinker) ProjectSessionDir() string {
+func (l *Linker) ProjectSessionDir() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if l.projectDir == "" || l.parentSessionID == "" {
@@ -376,7 +398,7 @@ func sleepOrCancel(ctx context.Context, d time.Duration) bool {
 // older CLIs. ctx should be Process-scoped: cancellation is observed at every
 // retry sleep and the semaphore acquire, returning (LinkInfo{}, false) with no
 // cache write (#644).
-func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, description string, agentToolUseMS int64) (LinkInfo, bool) {
+func (l *Linker) Resolve(ctx context.Context, taskID, toolUseID, name, description string, agentToolUseMS int64) (LinkInfo, bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -593,7 +615,7 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 // convention with a single stat, robust to an empty `name`. ok=true only on a
 // positive stat with a matching first-line sessionId; ok=false falls through
 // to the agentType scan for CLIs whose filename scheme differs.
-func (l *SubagentLinker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, sessionID string) (LinkInfo, bool) {
+func (l *Linker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, sessionID string) (LinkInfo, bool) {
 	if !agentHexRe.MatchString(taskID) {
 		slog.Debug("agent_link: fast-path skip, bad hex", "task_id", taskID)
 		return LinkInfo{}, false
@@ -659,7 +681,7 @@ func (l *SubagentLinker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, ses
 // skipped. Paths outside ~/.claude/projects are refused: a mutated
 // sessions/*.jsonl must not redirect agent_events streaming to an arbitrary
 // readable file.
-func (l *SubagentLinker) SeedFromHistory(entries []clievent.EventEntry) {
+func (l *Linker) SeedFromHistory(entries []clievent.EventEntry) {
 	if len(entries) == 0 {
 		return
 	}
@@ -702,14 +724,10 @@ func (l *SubagentLinker) SeedFromHistory(entries []clievent.EventEntry) {
 	}
 }
 
-// claudeProjectsRoot returns ~/.claude/projects; shared by resolveProjectDir
+// claudeProjectsRoot returns ~/.claude/projects; shared by ProjectDir
 // and SeedFromHistory's prefix check so the two cannot drift.
 func claudeProjectsRoot() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = os.Getenv("HOME")
-	}
-	return claudefs.ProjectsRoot(filepath.Join(home, ".claude"))
+	return claudefs.ProjectsRoot(claudefs.DefaultDir())
 }
 
 // fireCallbacksDropLock runs every registered callback with l.mu RELEASED
@@ -717,7 +735,7 @@ func claudeProjectsRoot() string {
 // Caller MUST hold l.mu as a write lock; the function drops it around dispatch
 // and re-acquires it before returning so the caller's deferred Unlock is
 // balanced — hence "DropLock", not "Locked".
-func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentID string) {
+func (l *Linker) fireCallbacksDropLock(taskID, toolUseID, internalAgentID string) {
 	l.onResolveMu.Lock()
 	if len(l.onResolveFns) == 0 {
 		l.onResolveMu.Unlock()
@@ -739,7 +757,7 @@ func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentI
 // (hex, agentType) pairs, TTL-cached (default 200ms) so concurrent Resolves
 // in one turn share a scan. Cache hits return the cached slice by reference
 // (callers must not mutate) under RLock so they run concurrently.
-func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
+func (l *Linker) scanMetaFiles(dir string) []metaEntry {
 	now := time.Now()
 	l.mu.RLock()
 	if !l.dirCache.at.IsZero() && now.Sub(l.dirCache.at) < l.cacheTTL {
@@ -862,24 +880,21 @@ func readFirstLineMeta(path string) (firstLineMeta, error) {
 	return out, nil
 }
 
-// resolveProjectDir mirrors Claude CLI's encoded-cwd convention for
-// ~/.claude/projects/<encoded>: every non-[A-Za-z0-9] rune becomes '-'
-// (consecutive dashes are NOT collapsed). Empty input → "" (Resolve bails).
-// The encoding is lossy ("/tmp/a.b" and "/tmp/a_b" collide), which the
-// first-line sessionId cross-check in Resolve defends against.
-func resolveProjectDir(cwd string) string {
+// ProjectDir is the ~/.claude/projects/<encoded-cwd> directory for cwd. Empty
+// input → "" (Resolve bails). The encoding is lossy ("/tmp/a.b" and "/tmp/a_b"
+// collide), which the first-line sessionId cross-check in Resolve defends
+// against.
+//
+// This used to hand-roll the encoding — a SEVENTH copy of the slug rule, and a
+// wrong one: it wrote one '-' per RUNE, while the CLI substitutes per UTF-16 code
+// unit, so a non-BMP rune (an emoji in the workspace path) produced one dash here
+// and two in the real directory name. The transcript was then looked for in a
+// directory the CLI never wrote to, and subagent linking silently found nothing.
+// claudefs.ProjectSlug is the copy that was verified against CLI 2.1.219,
+// including that case (#2649 G1-f).
+func ProjectDir(cwd string) string {
 	if cwd == "" {
 		return ""
 	}
-	var b strings.Builder
-	b.Grow(len(cwd))
-	for _, r := range cwd {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	return filepath.Join(claudeProjectsRoot(), b.String())
+	return claudefs.ProjectDir(claudefs.DefaultDir(), cwd)
 }

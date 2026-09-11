@@ -67,6 +67,7 @@ cmd/naozhi/main.go
   -> attachment   附件持久化 + refcount tracker 子包
   -> discovery    扫描 Claude CLI 磁盘工件（外部进程发现 / takeover）
   -> claudefs     Claude CLI 磁盘布局单一真相源（projects slug 编码 / transcript 路径 / session id 校验）
+  -> subagent     Task 工具子代理 ↔ JSONL transcript 的关联与读取（linker + reader）
 
   辅助域
   -> agentcore    AgentCore 云沙箱 control-plane 客户端

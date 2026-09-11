@@ -108,7 +108,7 @@ func TestEventPush_SameMillisecondAcrossNotifyWaves(t *testing.T) {
 			"nothing until the user re-subscribes (switch session away/back). " +
 			"EntriesSince is strictly greater-than; the pusher must query " +
 			"inclusively of the watermark millisecond and dedup by UUID " +
-			"(cli.SinceCursor).")
+			"(clievent.SinceCursor).")
 	}
 	if summary != "the reply" {
 		t.Fatalf("delivered summary = %q, want %q", summary, "the reply")

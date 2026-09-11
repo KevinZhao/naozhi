@@ -1,12 +1,10 @@
-package cli
+package clievent
 
 import (
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-func cursorSummaries(es []clievent.EventEntry) []string {
+func cursorSummaries(es []EventEntry) []string {
 	out := make([]string, len(es))
 	for i, e := range es {
 		out[i] = e.Summary
@@ -23,11 +21,11 @@ func TestSinceCursor_SameMillisecondAcrossWaves(t *testing.T) {
 	csr := NewSinceCursor()
 
 	// Wave 1: two entries at t=100.
-	wave1 := []clievent.EventEntry{
+	wave1 := []EventEntry{
 		{Time: 100, UUID: "a", Summary: "a"},
 		{Time: 100, UUID: "b", Summary: "b"},
 	}
-	got1 := csr.Filter(append([]clievent.EventEntry(nil), wave1...))
+	got1 := csr.Filter(append([]EventEntry(nil), wave1...))
 	if g := cursorSummaries(got1); len(g) != 2 || g[0] != "a" || g[1] != "b" {
 		t.Fatalf("wave1 delivered = %v, want [a b]", cursorSummaries(got1))
 	}
@@ -38,7 +36,7 @@ func TestSinceCursor_SameMillisecondAcrossWaves(t *testing.T) {
 
 	// Wave 2: the store now also contains a NEW entry "c" at the same t=100.
 	// EntriesSince(queryAfter == 99) re-returns the whole t=100 millisecond.
-	store := []clievent.EventEntry{
+	store := []EventEntry{
 		{Time: 100, UUID: "a", Summary: "a"},
 		{Time: 100, UUID: "b", Summary: "b"},
 		{Time: 100, UUID: "c", Summary: "c"},
@@ -46,7 +44,7 @@ func TestSinceCursor_SameMillisecondAcrossWaves(t *testing.T) {
 	if csr.QueryAfter() != 99 {
 		t.Fatalf("QueryAfter = %d, want 99", csr.QueryAfter())
 	}
-	got2 := csr.Filter(append([]clievent.EventEntry(nil), store...))
+	got2 := csr.Filter(append([]EventEntry(nil), store...))
 	if g := cursorSummaries(got2); len(g) != 1 || g[0] != "c" {
 		t.Fatalf("wave2 delivered = %v, want [c] (a,b already sent)", cursorSummaries(got2))
 	}
@@ -56,7 +54,7 @@ func TestSinceCursor_SameMillisecondAcrossWaves(t *testing.T) {
 	}
 
 	// Wave 3: nothing new at t=100 → empty delivery, no duplicates.
-	got3 := csr.Filter(append([]clievent.EventEntry(nil), store...))
+	got3 := csr.Filter(append([]EventEntry(nil), store...))
 	if len(got3) != 0 {
 		t.Fatalf("wave3 delivered = %v, want []", cursorSummaries(got3))
 	}
@@ -68,15 +66,15 @@ func TestSinceCursor_SameMillisecondAcrossWaves(t *testing.T) {
 func TestSinceCursor_WatermarkAdvances(t *testing.T) {
 	csr := NewSinceCursor()
 
-	w1 := []clievent.EventEntry{{Time: 100, UUID: "a", Summary: "a"}}
+	w1 := []EventEntry{{Time: 100, UUID: "a", Summary: "a"}}
 	csr.Advance(csr.Filter(w1))
 
 	// New entry at t=200.
-	store := []clievent.EventEntry{
+	store := []EventEntry{
 		{Time: 100, UUID: "a", Summary: "a"},
 		{Time: 200, UUID: "d", Summary: "d"},
 	}
-	got := csr.Filter(append([]clievent.EventEntry(nil), store...))
+	got := csr.Filter(append([]EventEntry(nil), store...))
 	if g := cursorSummaries(got); len(g) != 1 || g[0] != "d" {
 		t.Fatalf("delivered = %v, want [d]", cursorSummaries(got))
 	}
@@ -98,7 +96,7 @@ func TestSinceCursor_WatermarkAdvances(t *testing.T) {
 // slice version must keep the same invariant via containsWM).
 func TestSinceCursor_NoDuplicateAccumulation(t *testing.T) {
 	csr := NewSinceCursor()
-	e := []clievent.EventEntry{{Time: 300, UUID: "z", Summary: "z"}}
+	e := []EventEntry{{Time: 300, UUID: "z", Summary: "z"}}
 	csr.Advance(e)
 	csr.Advance(e)
 	csr.Advance(e)
@@ -113,7 +111,7 @@ func TestSinceCursor_NoDuplicateAccumulation(t *testing.T) {
 // TestSinceCursor_Reset clears the watermark and dedup set on session swap.
 func TestSinceCursor_Reset(t *testing.T) {
 	csr := NewSinceCursor()
-	csr.Advance(csr.Filter([]clievent.EventEntry{{Time: 500, UUID: "x", Summary: "x"}}))
+	csr.Advance(csr.Filter([]EventEntry{{Time: 500, UUID: "x", Summary: "x"}}))
 	csr.Reset()
 	if csr.Watermark() != 0 {
 		t.Fatalf("watermark after reset = %d, want 0", csr.Watermark())

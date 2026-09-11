@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
+	"github.com/naozhi/naozhi/internal/subagent"
 )
 
 // stubAgentLinker is the minimal AgentLinker used by the dedup contract
@@ -16,9 +16,11 @@ type stubAgentLinker struct {
 
 func (s *stubAgentLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {
 }
-func (s *stubAgentLinker) Query(taskID string) (cli.LinkInfo, bool) { return cli.LinkInfo{}, false }
-func (s *stubAgentLinker) QueryOrResolveFast(taskID string) (cli.LinkInfo, bool) {
-	return cli.LinkInfo{}, false
+func (s *stubAgentLinker) Query(taskID string) (subagent.LinkInfo, bool) {
+	return subagent.LinkInfo{}, false
+}
+func (s *stubAgentLinker) QueryOrResolveFast(taskID string) (subagent.LinkInfo, bool) {
+	return subagent.LinkInfo{}, false
 }
 func (s *stubAgentLinker) ProjectSessionDir() string { return "" }
 
@@ -32,11 +34,11 @@ type secondStubAgentLinker struct {
 
 func (s *secondStubAgentLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {
 }
-func (s *secondStubAgentLinker) Query(taskID string) (cli.LinkInfo, bool) {
-	return cli.LinkInfo{}, false
+func (s *secondStubAgentLinker) Query(taskID string) (subagent.LinkInfo, bool) {
+	return subagent.LinkInfo{}, false
 }
-func (s *secondStubAgentLinker) QueryOrResolveFast(taskID string) (cli.LinkInfo, bool) {
-	return cli.LinkInfo{}, false
+func (s *secondStubAgentLinker) QueryOrResolveFast(taskID string) (subagent.LinkInfo, bool) {
+	return subagent.LinkInfo{}, false
 }
 func (s *secondStubAgentLinker) ProjectSessionDir() string { return "" }
 

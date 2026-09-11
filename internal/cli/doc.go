@@ -26,7 +26,7 @@
 //     subagent tracking: eventlog_agents.go; persistence fan-out:
 //     eventlog_persist.go; subscribers (subMu, independent of l.mu):
 //     eventlog_subscribe.go; read path: eventlog_query.go.
-//   - SubagentLinker — subagent_link.go + subagent_transcript.go: resolves
+//   - subagent.Linker — subagent_link.go + subagent_transcript.go: resolves
 //     internal_agent_id for Task tool calls by tailing ~/.claude project
 //     JSONLs; resolveSem bounds concurrent disk scans.
 //   - Wrapper / Runner — wrapper.go, runner.go: backend-aware spawn helper

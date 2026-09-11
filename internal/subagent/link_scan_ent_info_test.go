@@ -1,4 +1,4 @@
-package cli
+package subagent
 
 import (
 	"encoding/json"
