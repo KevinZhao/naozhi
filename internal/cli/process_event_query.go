@@ -8,11 +8,12 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
+	"github.com/naozhi/naozhi/internal/subagent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // InjectHistory pre-populates the event log with historical entries and seeds
-// the SubagentLinker so dashboard team-agent rows resume the task_id → jsonl
+// the subagent.Linker so dashboard team-agent rows resume the task_id → jsonl
 // mapping from a previous process lifetime (RFC v4 agent-team-ui §3.3.7).
 func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 	// Replay path skips applyEntryStateLocked; SetPersistSink and the task-done
@@ -83,14 +84,14 @@ func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 	}
 }
 
-// InitLinker wires a SubagentLinker into the process (called by Wrapper.Spawn
+// InitLinker wires a subagent.Linker into the process (called by Wrapper.Spawn
 // once cwd is known; the Linker is context-free until readLoop's init handler
 // calls SetContext). OnResolve writes the resolved (internal_agent_id,
 // jsonl_path, first_prompt_id) back onto the matching EventEntry for persistHistory.
 func (p *Process) InitLinker(cwd string) {
 	p.cwd = cwd
-	p.cachedProjectDir = resolveProjectDir(cwd)
-	p.linker = NewSubagentLinker()
+	p.cachedProjectDir = subagent.ProjectDir(cwd)
+	p.linker = subagent.NewLinker()
 	// Bind the resolve pool lifetime to the process-scoped ctx up front so it
 	// never captures a DispatchResolve caller's per-request ctx (#1661).
 	p.linker.SetPoolContext(p.lifecycleContext())
@@ -104,8 +105,8 @@ func (p *Process) InitLinker(cwd string) {
 	})
 }
 
-// Linker returns the SubagentLinker, or nil when none is installed (test fakes).
-func (p *Process) Linker() *SubagentLinker {
+// Linker returns the subagent.Linker, or nil when none is installed (test fakes).
+func (p *Process) Linker() *subagent.Linker {
 	return p.linker
 }
 
@@ -124,11 +125,9 @@ func (p *Process) SetCwdForLinker(cwd string) {
 		return
 	}
 	p.cwd = cwd
-	projectDir := resolveProjectDir(cwd)
+	projectDir := subagent.ProjectDir(cwd)
 	p.cachedProjectDir = projectDir
-	p.linker.mu.RLock()
-	session := p.linker.parentSessionID
-	p.linker.mu.RUnlock()
+	session := p.linker.ParentSessionID()
 	// The wrapper sets proc.sessionID from Hello BEFORE any live init; mirror it so
 	// Resolve works immediately on replayed tasks (a later init updates it via
 	// SetContext). SessionID() reads under p.mu, pairing with wrapper.go's store.

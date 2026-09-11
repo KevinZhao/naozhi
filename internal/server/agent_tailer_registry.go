@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/subagent"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
@@ -132,7 +132,7 @@ func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) 
 		key:        key,
 		taskID:     taskID,
 		toolUseID:  toolUseID,
-		reader:     cli.NewTranscriptReader(jsonlPath),
+		reader:     subagent.NewTranscriptReader(jsonlPath),
 		reg:        r,
 		hub:        r.hub,
 		stopCh:     make(chan struct{}),

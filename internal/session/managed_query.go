@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
+	"github.com/naozhi/naozhi/internal/subagent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -329,7 +330,7 @@ func (s *ManagedSession) EventEntriesAppend(dst []clievent.EventEntry) []clieven
 // processes need not implement the Linker surface; the agentlink.AgentLinker
 // interface widens only at the server boundary. TODO: AgentIntrospector
 // interface when a second backend needs agent-view support (docs/TODO.md).
-func (s *ManagedSession) SubagentLinker() *cli.SubagentLinker {
+func (s *ManagedSession) SubagentLinker() *subagent.Linker {
 	if real := s.loadCliProcess(); real != nil {
 		return real.Linker()
 	}

@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -19,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
+	"github.com/naozhi/naozhi/internal/subagent"
 )
 
 // Agent-team dashboard endpoints (RFC v4 agent-team-ui §3.5), behind the same
@@ -169,12 +169,12 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reader := cli.NewTranscriptReader(info.JSONLPath)
+	reader := subagent.NewTranscriptReader(info.JSONLPath)
 	defer reader.Close()
 	// Re-admit the `after` millisecond (as /api/sessions/events): consecutive
 	// transcript lines can share a timestamp, so a strict `>` cursor lost
 	// siblings cut off by the previous limit; agent_view.js dedups (#2432).
-	entries, err := reader.Read(cli.SinceInclusive(after), limit)
+	entries, err := reader.Read(clievent.SinceInclusive(after), limit)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// CLI may have pruned the jsonl (e.g. /new on the parent): 404 → "no record" toast.

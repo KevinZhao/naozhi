@@ -8,12 +8,12 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
 // Same-millisecond dedup is shared with the local dashboard pusher via
-// cli.SinceCursor (#2402); see internal/cli/since_cursor.go.
+// clievent.SinceCursor (#2402); see internal/cli/since_cursor.go.
 
 func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error, key string, notify <-chan struct{}) {
 	sess := c.router.SessionFor(key)
@@ -21,7 +21,7 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 		return
 	}
 	var lastState string
-	csr := cli.NewSinceCursor()
+	csr := clievent.NewSinceCursor()
 	for {
 		select {
 		case _, ok := <-notify:

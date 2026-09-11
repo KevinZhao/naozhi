@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
@@ -283,7 +282,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	slog.Debug("completeSubscribe: sending history", "key", key, "entries", len(entries), "state", snap.State, "has_more", hasMore)
 	c.SendJSON(wsproto.NewSubscribed(wsproto.Subscribed{Key: key, State: snap.State}))
 
-	csr := cli.NewSinceCursor() // #2402: Advance below seeds the pushLoop watermark
+	csr := clievent.NewSinceCursor() // #2402: Advance below seeds the pushLoop watermark
 	if len(entries) > 0 {
 		// Pooled marshal: initial history payloads can be hundreds of KB.
 		hm := initialHasMorePtr(msg, hasMore)

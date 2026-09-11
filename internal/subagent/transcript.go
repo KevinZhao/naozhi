@@ -1,4 +1,4 @@
-package cli
+package subagent
 
 import (
 	"bytes"
@@ -459,7 +459,7 @@ func mapAssistantLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 				Summary: block.Name,
 			}
 			if len(block.Input) > 0 {
-				entry.Detail = FormatToolInput(block.Name, block.Input)
+				entry.Detail = clievent.FormatToolInput(block.Name, block.Input)
 			} else {
 				entry.Detail = block.Name
 			}

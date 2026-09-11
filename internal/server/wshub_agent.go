@@ -70,9 +70,9 @@ func (h *Hub) enrichSnapshot(snap *session.SessionSnapshot) {
 // immediately, even before any client subscribes.
 //
 // The linker is consumed via agentlink.AgentLinker so server stays decoupled
-// from the *cli.SubagentLinker concrete type.
+// from the *subagent.Linker concrete type.
 func (h *Hub) maybeWireLinkerTailer(key string, sess *session.ManagedSession) {
-	// Nil-check the concrete return first: a typed-nil *cli.SubagentLinker
+	// Nil-check the concrete return first: a typed-nil *subagent.Linker
 	// promoted to an interface value is non-nil at the interface layer.
 	concrete := sess.SubagentLinker()
 	if concrete == nil || h.tailers == nil {

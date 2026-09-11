@@ -13,7 +13,7 @@ import (
 // R246-ARCH-8 / R234-ARCH-18 / R239-ARCH-O resolution: the constraint is
 // what gates testutil.go out of `go build -tags release` — without it,
 // production binaries link the test stub and any plugin-loaded code
-// reaching `cli.SubagentLinker == nil` paths could cast through it. The
+// reaching `subagent.Linker == nil` paths could cast through it. The
 // constraint is invisible to grep (no string occurrence in production
 // code) so a contract test is the natural place to lock it.
 //

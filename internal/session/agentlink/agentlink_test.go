@@ -3,16 +3,16 @@ package agentlink_test
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
+	"github.com/naozhi/naozhi/internal/subagent"
 )
 
 // TestSubagentLinkerSatisfiesAgentLinker pins that the production producer
-// *cli.SubagentLinker still satisfies the composite AgentLinker after the
+// *subagent.Linker still satisfies the composite AgentLinker after the
 // facet split (R248-ARCH-4 #402 part c). A compile-time assignment is the
 // strongest guard against signature drift.
 func TestSubagentLinkerSatisfiesAgentLinker(t *testing.T) {
-	var _ agentlink.AgentLinker = cli.NewSubagentLinker()
+	var _ agentlink.AgentLinker = subagent.NewLinker()
 }
 
 // TestFacetsComposeIntoAgentLinker pins that the three single-responsibility
@@ -21,7 +21,7 @@ func TestSubagentLinkerSatisfiesAgentLinker(t *testing.T) {
 // embedding contract so a future method added to AgentLinker is forced into
 // one of the facets rather than silently widening the composite.
 func TestFacetsComposeIntoAgentLinker(t *testing.T) {
-	var l agentlink.AgentLinker = cli.NewSubagentLinker()
+	var l agentlink.AgentLinker = subagent.NewLinker()
 
 	// Each facet is independently satisfiable from the composite value.
 	var _ agentlink.Notifier = l
@@ -34,6 +34,6 @@ func TestFacetsComposeIntoAgentLinker(t *testing.T) {
 		agentlink.Resolver
 		agentlink.PathProvider
 	}
-	var af allFacets = cli.NewSubagentLinker()
+	var af allFacets = subagent.NewLinker()
 	var _ agentlink.AgentLinker = af
 }

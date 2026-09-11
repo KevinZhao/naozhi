@@ -1,3 +1,8 @@
+// since_cursor.go — event-pagination streaming cursor (#2649 G1-f).
+//
+// Moved out of internal/cli: pure cursor arithmetic over event timestamps,
+// used by internal/server, internal/dashboard and internal/upstream. Nothing
+// about it needs the process manager.
 // since_cursor.go — SinceCursor, the shared streaming watermark used by every
 // consumer that tails an ring.EventLog via the (EntriesSince, notify) pair.
 //
@@ -8,9 +13,7 @@
 // watermark-1) and dedups by the unique UUID stampUUID puts on every entry;
 // sentAtWM holds the UUIDs delivered at Time == watermark. Not goroutine-safe:
 // each streaming loop owns one cursor. One-shot readers use SinceInclusive.
-package cli
-
-import "github.com/naozhi/naozhi/internal/cli/clievent"
+package clievent
 
 // SinceCursor tracks a streaming watermark over ring.EventLog entries with
 // same-millisecond UUID dedup. See the file header for the rationale.
@@ -49,7 +52,7 @@ func (s *SinceCursor) QueryAfter() int64 {
 // Filter drops entries at the watermark millisecond that were already
 // delivered. The input's backing array is reused in place (the write index
 // never overtakes the read index), so the hot path does not allocate.
-func (s *SinceCursor) Filter(cand []clievent.EventEntry) []clievent.EventEntry {
+func (s *SinceCursor) Filter(cand []EventEntry) []EventEntry {
 	out := cand[:0]
 	for _, e := range cand {
 		if e.Time == s.watermark && s.containsWM(e.UUID) {
@@ -74,7 +77,7 @@ func (s *SinceCursor) containsWM(uuid string) bool {
 // Advance records that the given (chronological) entries were delivered.
 // When the watermark moves forward the dedup set is rebuilt for the new
 // trailing millisecond; same-millisecond redeliveries accumulate into it.
-func (s *SinceCursor) Advance(delivered []clievent.EventEntry) {
+func (s *SinceCursor) Advance(delivered []EventEntry) {
 	if len(delivered) == 0 {
 		return
 	}

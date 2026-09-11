@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
+	"github.com/naozhi/naozhi/internal/subagent"
 )
 
 // TestAgentEvents_AfterReadmitsWatermarkMillisecond (#2432 item 5): the HTTP
@@ -30,7 +30,7 @@ func TestAgentEvents_AfterReadmitsWatermarkMillisecond(t *testing.T) {
 	}
 	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", lines)
 
-	linker := cli.NewSubagentLinker()
+	linker := subagent.NewLinker()
 	linker.SeedFromHistory([]clievent.EventEntry{{
 		Type:            "task_start",
 		ToolUseID:       "toolu_T",

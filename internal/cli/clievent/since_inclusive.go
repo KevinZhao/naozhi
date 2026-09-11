@@ -1,4 +1,9 @@
-package cli
+// since_inclusive.go — event-pagination one-shot cursor conversion (#2649 G1-f).
+//
+// Moved out of internal/cli: pure cursor arithmetic over event timestamps,
+// used by internal/server, internal/dashboard and internal/upstream. Nothing
+// about it needs the process manager.
+package clievent
 
 // SinceInclusive converts a dashboard `after` cursor (unix ms of the last
 // entry the client rendered) into the EntriesSince argument that reads

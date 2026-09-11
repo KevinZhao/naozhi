@@ -5,18 +5,17 @@
 package server
 
 import (
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
 // entriesSinceReconnect is the `subscribe{after}` catch-up read. It re-admits
-// the after-millisecond itself (#2432) via cli.SinceInclusive — shared with
+// the after-millisecond itself (#2432) via clievent.SinceInclusive — shared with
 // the HTTP poll fallback and the relay fetch_events RPC (#2456) so the three
 // catch-up reads cannot drift apart again.
 func entriesSinceReconnect(sess *session.ManagedSession, after int64) []clievent.EventEntry {
-	return sess.EventEntriesSince(cli.SinceInclusive(after))
+	return sess.EventEntriesSince(clievent.SinceInclusive(after))
 }
 
 // emptyInitialHistoryWanted reports whether a subscribe that found no entries

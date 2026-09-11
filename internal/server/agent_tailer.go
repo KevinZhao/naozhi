@@ -6,15 +6,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/subagent"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // Agent tailer layer — streams each team agent's on-disk transcript to the
 // dashboard via WebSocket. Lives here because it fans out to wsClient
-// connections; parsing (cli.TranscriptReader) stays backend-agnostic.
+// connections; parsing (subagent.TranscriptReader) stays backend-agnostic.
 //
 // Lifecycle: ensureTailer (silent, buffers events) → attach (replay +
 // live push) → closeTask (agent_done). detach to refCount==0 keeps the
@@ -40,7 +40,7 @@ type agentTailer struct {
 	key       string
 	taskID    string
 	toolUseID string
-	reader    *cli.TranscriptReader
+	reader    *subagent.TranscriptReader
 	reg       *tailerRegistry
 	hub       *Hub
 

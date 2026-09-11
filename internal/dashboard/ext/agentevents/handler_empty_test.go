@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
+	"github.com/naozhi/naozhi/internal/subagent"
 )
 
 // TestAgentEvents_EmptyTranscriptReturnsEmptyArray: a resolved task whose
@@ -19,7 +19,7 @@ func TestAgentEvents_EmptyTranscriptReturnsEmptyArray(t *testing.T) {
 	dir := claudeProjectsTestRoot(t)
 	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", nil)
 
-	linker := cli.NewSubagentLinker()
+	linker := subagent.NewLinker()
 	linker.SeedFromHistory([]clievent.EventEntry{{
 		Type:            "task_start",
 		ToolUseID:       "toolu_T",

@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/wsproto"
@@ -97,7 +96,7 @@ func (h *Hub) singleSubscriber(key string) bool {
 // the new unsub into c.subscriptions[key] under h.mu so Shutdown sees it.
 // Anyone splitting the resubscribe path into a new goroutine MUST Add(1) for it
 // and Done from its own defer, or Shutdown's clientWG.Wait hangs / panics.
-func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, csr *cli.SinceCursor) {
+func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, csr *clievent.SinceCursor) {
 	defer func() {
 		if r := recover(); r != nil {
 			// Mirror readPump: counter first, cause at Error, stack at Debug (avoid
@@ -161,12 +160,12 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 // and writes it to c. Returns (alive, buf) — the caller must exit when alive
 // is false (the client closed mid-drain) and retain buf for the next wave.
 //
-// cli.SinceCursor (inclusive watermark query + UUID dedup at the trailing
+// clievent.SinceCursor (inclusive watermark query + UUID dedup at the trailing
 // millisecond) is what keeps same-millisecond entries landing in a LATER
 // notify wave from being dropped (#2402); redeliveries that reach the client
 // are absorbed by the dashboard's UUID dedup. On marshal error the cursor is
 // not advanced, so the same entries are retried on the next notify.
-func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, csr *cli.SinceCursor, buf []clievent.EventEntry) (bool, []clievent.EventEntry) {
+func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, csr *clievent.SinceCursor, buf []clievent.EventEntry) (bool, []clievent.EventEntry) {
 	// buf[:0] lets both the dead-session and live-process paths reuse capacity
 	// across notify waves (#1740); entries are consumed synchronously below and
 	// never retained. QueryAfter re-admits the watermark millisecond; Filter

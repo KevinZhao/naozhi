@@ -12,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
+	"github.com/naozhi/naozhi/internal/subagent"
 )
 
 // These tests exercise the four response shapes RFC v4 §3.5.1 specifies:
@@ -75,7 +75,7 @@ func TestAgentEvents_Happy(t *testing.T) {
 	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
 	path := writeTranscript(t, dir, "aaaaaaaaaaaaaaaaa", []string{line})
 
-	linker := cli.NewSubagentLinker()
+	linker := subagent.NewLinker()
 	linker.SeedFromHistory([]clievent.EventEntry{{
 		Type:            "task_start",
 		ToolUseID:       "toolu_T",
@@ -110,7 +110,7 @@ func TestAgentEvents_Happy(t *testing.T) {
 
 func TestAgentEvents_Pending_WhenLinkerUnaware(t *testing.T) {
 	t.Parallel()
-	linker := cli.NewSubagentLinker()
+	linker := subagent.NewLinker()
 	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
@@ -128,7 +128,7 @@ func TestAgentEvents_Pending_WhenLinkerUnaware(t *testing.T) {
 
 func TestAgentEvents_Tombstone_404(t *testing.T) {
 	t.Parallel()
-	linker := cli.NewSubagentLinker()
+	linker := subagent.NewLinker()
 	// Seed a tombstone-ish record — Resolved but empty InternalAgentID is how
 	// a real tombstone from Resolve step 4 timeout looks. SeedFromHistory
 	// requires InternalAgentID+JSONLPath non-empty, so simulate by letting
@@ -154,7 +154,7 @@ func TestAgentEvents_Tombstone_404(t *testing.T) {
 func TestAgentEvents_InvalidKey_400(t *testing.T) {
 	t.Parallel()
 	h := &Handler{
-		linkerFor: func(k string) agentlink.AgentLinker { return cli.NewSubagentLinker() },
+		linkerFor: func(k string) agentlink.AgentLinker { return subagent.NewLinker() },
 	}
 	w := httptest.NewRecorder()
 	h.HandleAgentEvents(w, agentEventsReq("", "t1", "", ""))
@@ -166,7 +166,7 @@ func TestAgentEvents_InvalidKey_400(t *testing.T) {
 func TestAgentEvents_InvalidTaskID_400(t *testing.T) {
 	t.Parallel()
 	h := &Handler{
-		linkerFor: func(k string) agentlink.AgentLinker { return cli.NewSubagentLinker() },
+		linkerFor: func(k string) agentlink.AgentLinker { return subagent.NewLinker() },
 	}
 	w := httptest.NewRecorder()
 	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t/../escape", "", ""))
@@ -182,7 +182,7 @@ func TestAgentEvents_AfterFilter(t *testing.T) {
 	line2 := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"new"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:05Z"}`
 	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", []string{line1, line2})
 
-	linker := cli.NewSubagentLinker()
+	linker := subagent.NewLinker()
 	linker.SeedFromHistory([]clievent.EventEntry{{
 		Type:            "task_start",
 		ToolUseID:       "toolu_A",
@@ -221,7 +221,7 @@ func TestToolResult_Happy(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	linker := cli.NewSubagentLinker()
+	linker := subagent.NewLinker()
 	// Split the tempdir into (projectDir, sessionID) so ProjectSessionDir returns projectSession.
 	linker.SetContext(filepath.Dir(projectSession), filepath.Base(projectSession))
 
@@ -244,7 +244,7 @@ func TestToolResult_Happy(t *testing.T) {
 func TestToolResult_PathTraversal_400(t *testing.T) {
 	t.Parallel()
 	h := &Handler{
-		linkerFor: func(k string) agentlink.AgentLinker { return cli.NewSubagentLinker() },
+		linkerFor: func(k string) agentlink.AgentLinker { return subagent.NewLinker() },
 	}
 	for _, p := range []string{
 		"../../etc/passwd",
@@ -298,7 +298,7 @@ func TestToolResult_Oversize_413(t *testing.T) {
 	}
 	f.Close()
 
-	linker := cli.NewSubagentLinker()
+	linker := subagent.NewLinker()
 	linker.SetContext(filepath.Dir(projectSession), filepath.Base(projectSession))
 	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return linker },
@@ -318,7 +318,7 @@ func TestToolResult_Oversize_413(t *testing.T) {
 
 // TestLinkerForSession_TypedNilGuard pins the typed-nil interface guard at
 // dashboard_agent_events.go:linkerForSession's `if concrete == nil` line.
-// ManagedSession.SubagentLinker() returns *cli.SubagentLinker — a concrete
+// ManagedSession.SubagentLinker() returns *subagent.Linker — a concrete
 // pointer type — and a nil concrete return becomes a NON-nil agentlink.AgentLinker
 // interface value when promoted directly (Go's classic typed-nil hazard).
 // Without the explicit guard, callers checking `if linker == nil` would see
@@ -340,7 +340,7 @@ func TestLinkerForSession_TypedNilGuard(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 3})
 	// TestProcess satisfies processIface but is NOT a *cli.Process, so
 	// ManagedSession.loadCliProcess returns untyped nil and SubagentLinker
-	// returns a typed-nil *cli.SubagentLinker. That is exactly the input
+	// returns a typed-nil *subagent.Linker. That is exactly the input
 	// the linkerForSession guard is designed for.
 	router.InjectSession(testAgentEventsKey, session.NewTestProcess())
 
@@ -374,15 +374,15 @@ func TestLinkerForSession_TypedNilGuard(t *testing.T) {
 // LinkInfo returned from QueryOrResolveFast without going through
 // SeedFromHistory (which has its own path-validation gate).
 type stubLinker struct {
-	info     cli.LinkInfo
+	info     subagent.LinkInfo
 	resolved bool
 }
 
 func (s *stubLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {}
-func (s *stubLinker) Query(taskID string) (cli.LinkInfo, bool) {
+func (s *stubLinker) Query(taskID string) (subagent.LinkInfo, bool) {
 	return s.info, s.resolved
 }
-func (s *stubLinker) QueryOrResolveFast(taskID string) (cli.LinkInfo, bool) {
+func (s *stubLinker) QueryOrResolveFast(taskID string) (subagent.LinkInfo, bool) {
 	return s.info, s.resolved
 }
 func (s *stubLinker) ProjectSessionDir() string { return "" }
@@ -406,7 +406,7 @@ func TestAgentEvents_JSONLPathOutsideAllowedRoot(t *testing.T) {
 
 	// Stub linker returns the outside-root path directly.
 	linker := &stubLinker{
-		info: cli.LinkInfo{
+		info: subagent.LinkInfo{
 			InternalAgentID: "agent-sec3aaaaaaaaaaaa",
 			JSONLPath:       secretPath,
 			Resolved:        true,
@@ -449,7 +449,7 @@ func TestAgentEvents_JSONLPathUnderAllowedRoot_Accepted(t *testing.T) {
 	}
 
 	linker := &stubLinker{
-		info: cli.LinkInfo{
+		info: subagent.LinkInfo{
 			InternalAgentID: "agent-ccccccccccccccccc",
 			JSONLPath:       jsonlPath,
 			Resolved:        true,

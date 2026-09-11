@@ -5,11 +5,13 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
+	"github.com/naozhi/naozhi/internal/subagent"
 )
 
 // TestProcess_cachedProjectDir pins [R112714-PERF-2]: InitLinker must
-// populate cachedProjectDir so notifyLinker never recomputes resolveProjectDir
+// populate cachedProjectDir so notifyLinker never recomputes subagent.ProjectDir
 // on every system/init event.
 func TestProcess_cachedProjectDir(t *testing.T) {
 	t.Parallel()
@@ -22,9 +24,9 @@ func TestProcess_cachedProjectDir(t *testing.T) {
 	if p.cachedProjectDir != wantFull {
 		t.Errorf("cachedProjectDir = %q, want %q", p.cachedProjectDir, wantFull)
 	}
-	// Verify it matches resolveProjectDir(cwd) exactly.
-	if got := resolveProjectDir(cwd); got != p.cachedProjectDir {
-		t.Errorf("cachedProjectDir %q != resolveProjectDir %q", p.cachedProjectDir, got)
+	// Verify it matches subagent.ProjectDir(cwd) exactly.
+	if got := subagent.ProjectDir(cwd); got != p.cachedProjectDir {
+		t.Errorf("cachedProjectDir %q != subagent.ProjectDir %q", p.cachedProjectDir, got)
 	}
 }
 
@@ -43,14 +45,14 @@ func TestProcess_cachedProjectDir_empty(t *testing.T) {
 // from os.UserHomeDir correctly and is consistent across calls.
 func TestClaudeProjectsRoot_consistency(t *testing.T) {
 	t.Parallel()
-	got := claudeProjectsRoot()
+	got := claudefs.ProjectsRoot(claudefs.DefaultDir())
 	home := os.Getenv("HOME")
 	want := filepath.Join(home, ".claude", "projects")
 	if got != want {
-		t.Errorf("claudeProjectsRoot() = %q, want %q", got, want)
+		t.Errorf("claudefs.ProjectsRoot(claudefs.DefaultDir()) = %q, want %q", got, want)
 	}
 	// Two consecutive calls with the same HOME must agree.
-	if got2 := claudeProjectsRoot(); got2 != got {
-		t.Errorf("claudeProjectsRoot() inconsistent: %q vs %q", got, got2)
+	if got2 := claudefs.ProjectsRoot(claudefs.DefaultDir()); got2 != got {
+		t.Errorf("claudefs.ProjectsRoot(claudefs.DefaultDir()) inconsistent: %q vs %q", got, got2)
 	}
 }

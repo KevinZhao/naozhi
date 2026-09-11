@@ -1,4 +1,4 @@
-package cli
+package subagent
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 // channel handle persists).
 func TestDispatchResolve_PoolReused_R214_PERF_6(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 
 	// Before first dispatch, pool is not yet started.
 	if l.resolveJobs != nil {
@@ -48,7 +48,7 @@ func TestDispatchResolve_PoolReused_R214_PERF_6(t *testing.T) {
 // pass empty values don't allocate a queue or workers for nothing.
 func TestDispatchResolve_EmptyTaskIDNoOp_R214_PERF_6(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 	l.DispatchResolve(context.Background(), "", "tu", "name", "desc", 0)
 	if l.resolveJobs != nil {
 		t.Fatal("empty taskID must not lazy-start the pool")
@@ -68,7 +68,7 @@ func TestDispatchResolve_EmptyTaskIDNoOp_R214_PERF_6(t *testing.T) {
 // back, this test would time out.
 func TestDispatchResolve_QueueFullFallback_R214_PERF_6(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 
 	// Use a context the workers will block on indefinitely so the queue
 	// stays full. The first dispatch starts workers under this ctx; they
@@ -114,7 +114,7 @@ func TestDispatchResolve_QueueFullFallback_R214_PERF_6(t *testing.T) {
 // context.Background() rather than panicking on the worker's select.
 func TestDispatchResolve_NilCtxSafe(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 	// Should not panic.
 	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
 	l.DispatchResolve(nil, "task-A", "tu", "name", "desc", 0)
@@ -132,7 +132,7 @@ func TestDispatchResolve_NilCtxSafe(t *testing.T) {
 // would exit and a follow-up job would never be consumed.
 func TestDispatchResolve_PoolCtxOutlivesFirstCaller_R20260603030037_GO_2(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 
 	// Long-lived pool ctx, never canceled during the test.
 	poolCtx, poolCancel := context.WithCancel(context.Background())
@@ -175,7 +175,7 @@ func TestDispatchResolve_PoolCtxOutlivesFirstCaller_R20260603030037_GO_2(t *test
 // is idempotent: the first non-nil ctx sticks, later calls are no-ops.
 func TestSetPoolContext_FirstWins_R20260603030037_GO_2(t *testing.T) {
 	t.Parallel()
-	l := NewSubagentLinker()
+	l := NewLinker()
 	first, c1 := context.WithCancel(context.Background())
 	defer c1()
 	second, c2 := context.WithCancel(context.Background())

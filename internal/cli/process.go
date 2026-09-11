@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/subagent"
 )
 
 // ProcessState represents the lifecycle state of a CLI process.
@@ -220,11 +221,11 @@ type Process struct {
 
 	// linker maps parallel-agent task_ids to transcript jsonl paths for the
 	// dashboard's agent_events endpoint. Set by InitLinker; nil in test fakes.
-	linker *SubagentLinker
+	linker *subagent.Linker
 	// cwd is the Spawn working directory, kept so the linker projectDir can be
 	// re-derived on shim reconnect.
 	cwd string
-	// cachedProjectDir is resolveProjectDir(cwd), computed once (cwd is immutable)
+	// cachedProjectDir is subagent.ProjectDir(cwd), computed once (cwd is immutable)
 	// to avoid a rune scan + os.UserHomeDir syscall per system/init event.
 	cachedProjectDir string
 }

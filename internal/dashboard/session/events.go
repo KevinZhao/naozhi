@@ -7,7 +7,6 @@ import (
 
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 )
@@ -140,7 +139,7 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	var entries []clievent.EventEntry
 	switch {
 	case afterStr != "":
-		entries = sess.EventEntriesSince(cli.SinceInclusive(after))
+		entries = sess.EventEntriesSince(clievent.SinceInclusive(after))
 		if limit > 0 && len(entries) > limit {
 			// Preserve the newest on a full catch-up so the client doesn't
 			// miss events it just streamed through.

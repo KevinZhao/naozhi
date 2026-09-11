@@ -27,6 +27,7 @@ package claudefs
 
 import (
 	"math"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -40,6 +41,24 @@ const projectsDirName = "projects"
 // sessionsIndexName is the per-project sidecar the CLI writes alongside the
 // transcripts.
 const sessionsIndexName = "sessions-index.json"
+
+// DefaultDir is ~/.claude, the CLI's own default. Falls back to $HOME when
+// os.UserHomeDir fails (a container with no passwd entry), and returns "" when
+// neither is available so callers degrade to "no Claude dir" rather than
+// resolving paths against the filesystem root.
+//
+// Callers that have a configured claudeDir must pass THAT; this is only for the
+// paths the CLI hard-codes relative to the home directory.
+func DefaultDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.Getenv("HOME")
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
+}
 
 // ProjectsRoot is <claudeDir>/projects. Empty claudeDir yields "" so callers
 // that run without a resolvable ~/.claude degrade quietly.
