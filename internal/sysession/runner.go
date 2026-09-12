@@ -49,6 +49,17 @@ type RunnerConfig struct {
 	// uses its own default.
 	Model string
 
+	// BackendID names the backend BinPath belongs to ("claude" | "kiro" | …).
+	// runnerImplBaseArgs is Claude's one-shot argv, so NewRunner refuses any
+	// other backend rather than spawning a binary that cannot parse it: kiro
+	// speaks ACP (`acp` as argv[0]) and rejects `-p --output-format json`
+	// outright, which without this check made every daemon tick fail with a
+	// message about argv rather than about configuration.
+	//
+	// Empty means "assume claude", preserving the behaviour of callers that
+	// predate this field.
+	BackendID string
+
 	// EnvAllowlist names the env vars passed to the subprocess (PATH and
 	// HOME always pass). Everything else is stripped: daemons must NOT
 	// inherit IM tokens, dashboard secrets or AWS creds.
@@ -76,6 +87,14 @@ func NewRunner(cfg RunnerConfig) (Runner, error) {
 		return nil, fmt.Errorf("sysession: resolve WorkDir: %w", err)
 	}
 	cfg.WorkDir = abs
+	// Refuse a backend whose CLI cannot parse runnerImplBaseArgs. This is a
+	// startup error rather than a per-tick failure so the operator sees the
+	// cause (a backend choice) instead of the symptom (argv rejection, once per
+	// tick, forever).
+	if id := cfg.BackendID; id != "" && id != BackendClaude {
+		return nil, fmt.Errorf("sysession: backend %q cannot run the daemon one-shot argv (%v); daemons require the %q backend",
+			id, runnerImplBaseArgs, BackendClaude)
+	}
 	// Allowlist + parent env are stable post-construction; filter once.
 	env := filterEnv(cfg.EnvAllowlist)
 	// Pin BinPath to an absolute path using the PATH snapshot inside env.
@@ -304,4 +323,19 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 			"written", lw.n, "err", osutil.SanitizeForLog(err.Error(), 256))
 	}
 	return len(p), nil
+}
+
+// BackendClaude is the only backend whose CLI accepts runnerImplBaseArgs. Named
+// rather than inlined so NewRunner's guard and the cost attribution below cannot
+// drift from each other.
+const BackendClaude = "claude"
+
+// backendID is the backend the ledger entry is attributed to. Empty config means
+// claude, matching NewRunner's guard: anything else was refused at construction,
+// so a running Runner is always the backend this returns.
+func (r *runnerImpl) backendID() string {
+	if r.cfg.BackendID == "" {
+		return BackendClaude
+	}
+	return r.cfg.BackendID
 }
