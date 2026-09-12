@@ -421,6 +421,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		configPath:         opts.Config.Path,
 		platforms:          platNames,
 		platformsStatus:    platformStatusMap(platNames),
+		platformCaps:       platform.CapabilityMatrix(platforms),
 		hubDropped:         s.hub.DroppedMessages,
 	}
 

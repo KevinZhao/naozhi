@@ -24,7 +24,7 @@
     "topLevelLetVar": 2
   },
   "contract.js": {
-    "lines": 202,
+    "lines": 203,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0
