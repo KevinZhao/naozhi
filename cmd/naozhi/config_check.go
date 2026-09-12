@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/envpolicy"
+	"github.com/naozhi/naozhi/internal/sysession"
 )
 
 func runConfig(args []string) {
@@ -84,6 +85,8 @@ func configCheck(args []string, stdout io.Writer) int {
 	if *effective {
 		result.Effective = map[string]effectiveSpawn{}
 	}
+	result.Diags = append(result.Diags, sysessionBackendDiags(cfg)...)
+
 	filteredEnv := envpolicy.FilterShimEnv(os.Environ())
 	for _, b := range cfg.EnabledBackends() {
 		id := b.ID
@@ -204,4 +207,40 @@ func emitCheckResult(w io.Writer, r checkResult, asJSON bool) {
 			fmt.Fprintf(w, "  %s\n", kv)
 		}
 	}
+}
+
+// sysessionBackendDiags reports a default backend the sysession runner cannot
+// use. Both the daemon framework and image auto-orient shell out with Claude's
+// one-shot argv (`-p --output-format json --setting-sources ""`), so a non-claude
+// default leaves them spawning a binary that cannot parse it — kiro speaks ACP
+// and rejects that argv outright. Before this check the operator learned about it
+// from a per-tick failure mentioning argv, never from anything naming the cause,
+// and the daemon's cost was still booked to "claude".
+//
+// Static: it reads only cfg, so `naozhi config check` catches it without
+// starting a server. sysession.NewRunner refuses the same combination at
+// construction as defence in depth.
+func sysessionBackendDiags(cfg *config.Config) []backendDiag {
+	id := cfg.CLI.Backend
+	if id == "" {
+		id = sysession.BackendClaude
+	}
+	if id == sysession.BackendClaude {
+		return nil
+	}
+	var out []backendDiag
+	add := func(key, what string) {
+		out = append(out, backendDiag{Backend: id, SpawnDiag: cli.SpawnDiag{
+			Layer: "caps", Key: key, Action: "ignored",
+			Reason: fmt.Sprintf("%s needs the %q backend's one-shot argv; %q cannot parse it, so %s never runs",
+				what, sysession.BackendClaude, id, what),
+		}})
+	}
+	if cfg.Sysession.Enabled {
+		add("sysession.enabled", "the sysession daemon framework")
+	}
+	if cfg.ImageOrientEnabled() {
+		add("image_orient.enabled", "image auto-orient")
+	}
+	return out
 }

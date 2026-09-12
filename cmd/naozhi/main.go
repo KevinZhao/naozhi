@@ -367,18 +367,20 @@ func main() {
 	orientEnabled := cfg.ImageOrientEnabled()
 	var orientRunner server.VisionOrienter
 	if orientEnabled {
-		binPath := ""
+		binPath, orientBackendID := "", ""
 		if wrapper != nil {
 			binPath = wrapper.CLIPath
+			orientBackendID = wrapper.BackendID
 		}
 		orientWorkDir, wdErr := sysession.EnsureWorkDir(sysWorkDir)
 		if wdErr != nil {
 			slog.Warn("image auto-orient disabled: sys-sessions workdir unusable", "err", wdErr, "dir", sysWorkDir)
 			orientEnabled = false
 		} else if vr, err := sysession.NewVisionRunner(sysession.RunnerConfig{
-			BinPath: binPath,
-			WorkDir: orientWorkDir,
-			Model:   cfg.ImageOrient.Model,
+			BinPath:   binPath,
+			BackendID: orientBackendID,
+			WorkDir:   orientWorkDir,
+			Model:     cfg.ImageOrient.Model,
 			EnvAllowlist: []string{
 				"ANTHROPIC_",
 				"CLAUDE_",

@@ -71,7 +71,7 @@ func (r *runnerImpl) bookRunCost(env resultEnvelope, ri RunInfo) {
 		SessionKey: "sys:" + ri.Daemon,
 		RunID:      ri.RunID,
 		Workspace:  filepath.Base(r.cfg.WorkDir),
-		Backend:    "claude",
+		Backend:    r.backendID(),
 		Unit:       costledger.UnitUSD,
 		Amount:     inc.USD,
 		Basis:      basis,
