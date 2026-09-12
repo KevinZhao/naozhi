@@ -32,70 +32,72 @@ const defaultDedupCapacity = 10000
 
 // Server is the HTTP entry point for Naozhi.
 //
-// Each field carries `// 读写: <files>` naming the non-test files in this
-// package that access it via the `s.X` receiver path (method definitions on
-// the field's type are out of scope). New fields MUST add the annotation.
+// Fields used to carry a `// 读写: <files>` trailer listing every file that
+// touched them, kept honest by a 215-line AST test. Both are gone (Epic I
+// #2547): the trailers encoded no invariant, and `grep -rn 's.router'` answers
+// the same question without going stale on every file move.
+//
 // The struct is intentionally flat: routes.go and the routes_snapshot_test.go
 // AST contract match the `s.<handlerField>.<method>` selector shape, so the
 // role-grouped dividers below are the cognitive map (#2197).
 type Server struct {
 	// ── HTTP entry ─────────────────────────────────────
-	addr      string         // 读写: server.go
-	mux       *http.ServeMux // 读写: debug_expvar.go, debug_pprof.go, routes.go, server.go
-	startedAt time.Time      // 读写: server.go
-	onReady   func()         // 读写: server.go (called after listener is bound)
+	addr      string
+	mux       *http.ServeMux
+	startedAt time.Time
+	onReady   func() // called after listener is bound
 	// appCtx is the process-lifetime context every background loop, the Hub
 	// and the upload-store cleaner hang off. Created in buildServer (#2552) so
 	// construction no longer has to wait for Start: Start links its own ctx to
 	// appCancel instead of minting a second context.
-	appCtx    context.Context    // 读写: build_dashboard.go, build_dispatch.go, routes.go, server.go (HubOptions.ParentCtx)
-	appCancel context.CancelFunc // 读写: server.go (Start's linker + the Serve-error path)
-	logger    *slog.Logger       // 读写: server.go
+	appCtx    context.Context    // HubOptions.ParentCtx
+	appCancel context.CancelFunc // Start's linker + the Serve-error path
+	logger    *slog.Logger
 
 	// uploadStore holds pre-uploaded attachments until the matching send
 	// consumes them; shared by the Hub (WS file_ids) and SendHandler (HTTP).
 	// Built in buildDashboard, cleanup loop started in registerDashboard.
-	uploadStore *uploadStore // 读写: build_dashboard.go, routes.go
+	uploadStore *uploadStore
 
 	// ── core deps ──────────────────────────────────────
-	router     *session.Router  // 读写: build_dashboard.go, build_dispatch.go, send_dispatch_adapter.go, server.go, server_loops.go, takeover.go
-	scheduler  cronScheduler    // 读写: build_dashboard.go, build_dispatch.go, server.go (narrowed to the cronScheduler consumer view, #1648)
-	hub        *Hub             // 读写: build_dashboard.go, routes.go, send.go, server.go, server_loops.go (WebSocket hub)
-	projectMgr *project.Manager // 读写: build_dashboard.go, build_dispatch.go, server.go, server_loops.go
+	router     *session.Router
+	scheduler  cronScheduler // narrowed to the cronScheduler consumer view, #1648
+	hub        *Hub          // WebSocket hub
+	projectMgr *project.Manager
 
 	// ── multi-node ─────────────────────────────────────
-	nodes             *nodeRegistry       // 读写: build_dashboard.go, server.go (single owner of the node table; same instance as Hub.nodes)
-	reverseNodeServer *node.ReverseServer // 读写: routes.go, server.go
+	nodes             *nodeRegistry // single owner of the node table; same instance as Hub.nodes
+	reverseNodeServer *node.ReverseServer
 
 	// ── dashboard / API handler groups ─────────────────
-	auth       *auth.Handlers        // 读写: build_dashboard.go, dashboard_ccassets.go, debug_expvar.go, debug_pprof.go, routes.go, server.go
-	discoveryH *discovery.Handlers   // 读写: server.go
-	sessionH   *dashsession.Handlers // 读写: server.go, server_loops.go
-	healthH    *HealthHandler        // 读写: routes.go, server.go
+	auth       *auth.Handlers
+	discoveryH *discovery.Handlers
+	sessionH   *dashsession.Handlers
+	healthH    *HealthHandler
 
 	// ── send / dispatch wiring ─────────────────────────
-	dispatcher      *dispatch.Dispatcher         // 读写: server.go (ctor builds; Start only calls BuildHandler)
-	dedup           *platform.Dedup              // 读写: build_dispatch.go, server.go (ctor only)
-	sessionGuard    *session.Guard               // 读写: build_dashboard.go, build_dispatch.go, server.go
-	msgQueue        *dispatch.MessageQueue       // 读写: build_dashboard.go, build_dispatch.go, server.go
-	agents          map[string]session.AgentOpts // 读写: build_dashboard.go, build_dispatch.go, server.go
-	agentCommands   map[string]string            // 读写: build_dashboard.go, build_dispatch.go, server.go
-	dashboardToken  string                       // 读写: build_dashboard.go, debug_expvar.go, debug_pprof.go, routes.go, server.go
-	allowedRoot     string                       // 读写: build_dashboard.go, build_dispatch.go, server.go (also Hub.allowedRoot)
-	noOutputTimeout time.Duration                // 读写: build_dispatch.go, server.go (timeout error messages)
-	totalTimeout    time.Duration                // 读写: build_dispatch.go, server.go
+	dispatcher      *dispatch.Dispatcher // ctor builds; Start only calls BuildHandler
+	dedup           *platform.Dedup      // ctor only
+	sessionGuard    *session.Guard
+	msgQueue        *dispatch.MessageQueue
+	agents          map[string]session.AgentOpts
+	agentCommands   map[string]string
+	dashboardToken  string
+	allowedRoot     string        // also Hub.allowedRoot
+	noOutputTimeout time.Duration // timeout error messages
+	totalTimeout    time.Duration
 
 	// ── on-disk paths / caches / sysession ─────────────
-	claudeDir      string               // 读写: build_dispatch.go, server.go, takeover.go
-	discoveryCache *discoveryCache      // 读写: server.go (background-cached local discovery results)
-	scratchPool    *session.ScratchPool // 读写: build_dashboard.go, routes.go, server.go (ephemeral aside sessions for preview drawer)
-	sysessionMgr   *sysession.Manager   // 读写: build_dashboard.go, server.go (system-daemon Tick scheduling)
-	orient         *orientConfig        // 读: build_dashboard.go, server.go (image auto-orientation; nil = feature off)
+	claudeDir      string
+	discoveryCache *discoveryCache      // background-cached local discovery results
+	scratchPool    *session.ScratchPool // ephemeral aside sessions for preview drawer
+	sysessionMgr   *sysession.Manager   // system-daemon Tick scheduling
+	orient         *orientConfig        // image auto-orientation; nil = feature off
 
 	// ── modes / resolver / node cache ──────────────────
-	debugMode bool                 // 读写: routes.go, server.go (gates /api/debug/pprof and /api/debug/vars)
-	resolver  *session.KeyResolver // 读写: build_dashboard.go, build_dispatch.go, server.go (session-key → opts derivation)
-	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data)
+	debugMode bool                 // gates /api/debug/pprof and /api/debug/vars
+	resolver  *session.KeyResolver // session-key → opts derivation
+	nodeCache *node.CacheManager   // background-cached remote node data
 
 	// ── watchdog counters ──────────────────────────────
 	// watchdog holds the no-output / total watchdog-kill counters exposed via
