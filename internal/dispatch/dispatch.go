@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/replyfmt"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/usermsg"
@@ -1016,52 +1017,6 @@ func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess *sessio
 	return replyText
 }
 
-// pageSuffixRuneWidth returns the rune width of the worst-case page suffix
-// "\n— [i/total]": 6 fixed runes ('\n' '—' ' ' '[' '/' ']') plus two numbers
-// with total's digit count (#2008).
-func pageSuffixRuneWidth(total int) int {
-	if total < 1 {
-		total = 1
-	}
-	digits := len(strconv.Itoa(total))
-	return 6 + 2*digits
-}
-
-// upperBoundChunks returns a ceiling on how many chunks SplitText produces for
-// runeCount runes at splitWidth; it must never under-estimate because the
-// caller reserves the page-suffix budget from it. SplitText may break early at
-// a newline past the chunk midpoint, so the shortest chunk is ~ceil(splitWidth/2)
-// — a naive ceil(runeCount/splitWidth) can under-estimate by 2x (#2056).
-func upperBoundChunks(runeCount, splitWidth int) int {
-	if splitWidth <= 0 {
-		return runeCount + 1
-	}
-	minChunk := (splitWidth + 1) / 2 // ceil(splitWidth/2), worst-case shortest chunk
-	if minChunk < 1 {
-		minChunk = 1
-	}
-	return (runeCount + minChunk - 1) / minChunk
-}
-
-// singleReplyTruncMarker is appended (within the rune budget) when a reply to
-// a single-use-token platform must be truncated to fit one message. #2136.
-const singleReplyTruncMarker = "\n…(truncated)"
-
-// singleReplyTruncMarkerRunes is the rune width of singleReplyTruncMarker.
-var singleReplyTruncMarkerRunes = utf8.RuneCountInString(singleReplyTruncMarker)
-
-// truncateForSingleReply trims text to at most maxRunes runes, reserving room
-// for a visible truncation marker; when maxRunes cannot fit the marker it
-// falls back to bare rune-safe truncation.
-func truncateForSingleReply(text string, maxRunes int) string {
-	keep := maxRunes - singleReplyTruncMarkerRunes
-	if keep <= 0 {
-		// No room for the marker — keep as much content as fits.
-		return textutil.TruncateRunesNoEllipsis(text, maxRunes)
-	}
-	return textutil.TruncateRunesNoEllipsis(text, keep) + singleReplyTruncMarker
-}
-
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
 func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
 	maxLen := p.MaxReplyLength()
@@ -1074,7 +1029,7 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	// to one truncated message with a visible marker (#2136).
 	if platform.UsesSingleUseReplyToken(p) {
 		if utf8.RuneCountInString(text) > maxLen {
-			text = truncateForSingleReply(text, maxLen)
+			text = replyfmt.TruncateForSingleReply(text, maxLen)
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: text}, limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
@@ -1104,31 +1059,17 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	// rejected outright, and ReplyWithRetry re-sends the same payload). Reserve
 	// the worst-case suffix using an upper-bound chunk count computed at the
 	// reduced width — over-reserving is safe, under-reserving is not (#2008).
-	splitLen := maxLen
-	// maxLen smaller than the suffix itself (config only clamps <=0) makes the
-	// reservation non-positive; suppress the suffix instead of emitting
-	// guaranteed-oversized chunks (#2057).
-	suppressSuffix := false
 	// Count runes once for both the reservation and SplitTextWithCount (#2283).
 	runeCount := utf8.RuneCountInString(text)
-	if runeCount > maxLen {
-		// First-pass reservation assuming a 1-digit count, then widen the
-		// reservation to the worst-case suffix for the resulting chunk count.
-		reserved := maxLen - pageSuffixRuneWidth(upperBoundChunks(runeCount, maxLen-pageSuffixRuneWidth(1)))
-		if reserved > 0 {
-			splitLen = reserved
-		} else {
-			// No room for any suffix at this maxLen — split at the raw
-			// limit and skip the "[i/N]" marker so chunks stay <= maxLen.
-			suppressSuffix = true
-		}
-	}
+	// The reservation and the "no room for any suffix" fallback live in
+	// replyfmt so the cron notify path gets the same page numbers (J2 #2548).
+	splitLen, suppressSuffix := replyfmt.ReserveForPageSuffix(maxLen, runeCount)
 
 	chunks := platform.SplitTextWithCount(text, splitLen, runeCount)
 	total := len(chunks)
 	for i, chunk := range chunks {
 		if total > 1 && !suppressSuffix {
-			chunk += "\n— [" + strconv.Itoa(i+1) + "/" + strconv.Itoa(total) + "]"
+			chunk += replyfmt.PageSuffix(i+1, total)
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)

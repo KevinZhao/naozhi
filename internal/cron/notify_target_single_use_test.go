@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/replyfmt"
 )
 
 // fakeSingleUseNotifyPlatform models a WeChat-iLink-style platform: the first
@@ -88,8 +89,8 @@ func TestR2181_NotifyTargetSingleUseCollapsesToOneTruncatedMessage(t *testing.T)
 	if n := utf8.RuneCountInString(got); n > maxLen {
 		t.Errorf("#2181: collapsed reply has %d runes, exceeds maxLen %d", n, maxLen)
 	}
-	if !strings.HasSuffix(got, singleReplyTruncMarker) {
-		t.Errorf("#2181: over-length collapsed reply must carry the truncation marker %q; got %q", singleReplyTruncMarker, got)
+	if !strings.HasSuffix(got, replyfmt.SingleReplyTruncMarker) {
+		t.Errorf("#2181: over-length collapsed reply must carry the truncation marker %q; got %q", replyfmt.SingleReplyTruncMarker, got)
 	}
 }
 
