@@ -471,7 +471,7 @@ func sysessionJSONLMaxAge(cfg *config.Config) time.Duration {
 //     period — a shim that just died keeps its log for a day, which is when it
 //     is worth reading.
 //   - sys-sessions/*.jsonl keeps its configured window (jsonl_max_age).
-func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimStateDir, sysWorkDir string) *datadir.Sweeper {
+func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.Manager, sysWorkDir string) *datadir.Sweeper {
 	idle := parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour)
 	cliDebugMaxAge := 7 * 24 * time.Hour
 	if two := 2 * idle; two > cliDebugMaxAge {
@@ -485,19 +485,30 @@ func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimStateDir, 
 		Ext:    ".log",
 		MaxAge: cliDebugMaxAge,
 	})
-	s.Add(datadir.Pass{
-		Name:   "shim-logs",
-		Dir:    shimStateDir,
-		Ext:    ".log",
-		MaxAge: 24 * time.Hour,
-		Keep:   shim.LogFileIsLive,
-	})
-	s.Add(datadir.Pass{
-		Name:   "sys-sessions",
-		Dir:    sysWorkDir,
-		Ext:    ".jsonl",
-		MaxAge: sysessionJSONLMaxAge(cfg),
-	})
+	// shimMgr.StateDir(), never cfg.Session.Shim.StateDir: NewManager applies the
+	// ~/.naozhi/shims default to its own copy, so the raw config value is empty in
+	// the common case and this pass silently swept nothing. Taking the Manager
+	// rather than a string makes that mistake unrepresentable.
+	if shimMgr != nil {
+		s.Add(datadir.Pass{
+			Name:   "shim-logs",
+			Dir:    shimMgr.StateDir(),
+			Ext:    ".log",
+			MaxAge: 24 * time.Hour,
+			Keep:   shim.LogFileIsLive,
+		})
+	}
+	// sys-sessions is the one tree that legitimately has no directory: it does
+	// not exist when sysession is disabled. Registering it anyway would make an
+	// empty Dir look normal for every pass.
+	if sysWorkDir != "" {
+		s.Add(datadir.Pass{
+			Name:   "sys-sessions",
+			Dir:    sysWorkDir,
+			Ext:    ".jsonl",
+			MaxAge: sysessionJSONLMaxAge(cfg),
+		})
+	}
 	return s
 }
 
