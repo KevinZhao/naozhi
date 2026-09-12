@@ -46,7 +46,7 @@ func mkClaudeDriftRouter(t *testing.T, debugDir string) *Router {
 		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 	}
 	r.bkStore.defaultBackend = "claude"
-	r.bkStore.backendOverrides = make(map[string]string)
+	r.picks.backend = make(map[string]string)
 	r.bkStore.backendEfforts = make(map[string]string)
 	r.bkStore.model = "claude-sonnet-5"
 	r.claudeDir = t.TempDir()

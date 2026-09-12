@@ -28,7 +28,7 @@ import (
 // (wsStore and pp are zero-value usable and need no init).
 func newTakeoverTestRouter(maxProcs int) *Router {
 	r := newTestRouter(maxProcs)
-	r.bkStore.backendOverrides = map[string]string{}
+	r.picks.backend = map[string]string{}
 	r.ss.idToKey = map[string]string{}
 	return r
 }

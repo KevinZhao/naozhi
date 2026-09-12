@@ -83,7 +83,7 @@ func TestCleanup_KeepsConversedSessionForever(t *testing.T) {
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
 	}
-	r.bkStore.backendOverrides = map[string]string{}
+	r.picks.backend = map[string]string{}
 
 	aged := time.Now().Add(-100 * time.Hour).UnixNano()
 
