@@ -214,6 +214,21 @@ const MaxAssistantMessageContentBytes = 4 * 1024 * 1024
 // a prompt longer than this bound.
 const EventDetailMaxRunes = 2000
 
+// ThumbMaxDim is the long-edge cap both tiers pass to MakeThumbnail when
+// deriving an EventEntry.Images data URI.
+//
+// It has to be ONE constant, not a value each side happens to agree on.
+// merged.contentKey identifies an image-only message by a SHA-256 over its
+// thumbnail list, which only works because both tiers derive thumbnails from the
+// identical original bytes through the identical pipeline — a different maxDim on
+// either side yields different bytes, contentKey stops matching, and every
+// image-only message renders twice. That was #09ca3c3e in production.
+//
+// Before this constant the value was three separate 600s: two bare literals in
+// cli/process_send.go and one named constant in discovery whose doc CLAIMED it
+// "matches the live-message path" with nothing enforcing it (F4 #2663).
+const ThumbMaxDim = 600
+
 // ContentBytes sums the user-visible byte size of an AssistantMessage's
 // content blocks. Only fields that grow with model output are counted; the
 // fixed-size discriminators (Type/ID/Name) are excluded so a message of

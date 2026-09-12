@@ -26,10 +26,6 @@ import (
 // history are silently skipped.
 var ThumbnailFn func(data []byte, maxDim int) string
 
-// historyThumbMaxDim matches the live-message path (process_send.go's
-// buildUserEntry) so rehydrated history thumbnails render identically.
-const historyThumbMaxDim = 600
-
 // dataURIPrefix gates ThumbnailFn output: only well-formed image data URIs
 // are surfaced to the dashboard, matching the live path's sanitisation.
 const dataURIPrefix = "data:image/"
@@ -440,7 +436,7 @@ func thumbnailFromBase64(b64 string) string {
 	if err != nil || len(data) == 0 {
 		return ""
 	}
-	thumb := ThumbnailFn(data, historyThumbMaxDim)
+	thumb := ThumbnailFn(data, clievent.ThumbMaxDim)
 	if thumb == "" || !strings.HasPrefix(thumb, dataURIPrefix) {
 		return ""
 	}
