@@ -20,27 +20,20 @@ import (
 // lock. The lint recurses one level so each inner field carries its own
 // per-domain annotation.
 type backendStore struct {
-	// 读写: backend (wrapperFor/CLIName/CLIVersion/CLIPath), core (init), lifecycle (spawn), shim (shimManagers)
 	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
 	// runtimes holds one BackendRuntime per backend ID — the row that replaced
 	// six parallel map[backendID]→property tables (G2 #2666). See
 	// backend_runtime.go.
-	// 读写: backend (runtime/runtimeMut/wrapperFor/BackendIDs/BackendWrapper/backendDefaultsFor/BackendModelManifest), core (initRuntimes), lifecycle (spawn), shim (shimManagers)
 	runtimes map[string]*BackendRuntime
 	// perBackendWrappers records whether the composition root supplied
 	// per-backend wrappers. Distinct from len(runtimes), which config alone can
 	// make non-empty — wrapperFor's legacy branch needs the former.
-	// 读写: backend (wrapperFor), core (initRuntimes)
 	perBackendWrappers bool
-	// 读写: backend (DefaultBackend/wrapperFor/BackendWrapper/BackendIDs), core (init), lifecycle (resolveSpawnParams)
-	defaultBackend string // backend ID used when AgentOpts.Backend is empty
+	defaultBackend     string // backend ID used when AgentOpts.Backend is empty
 	// backendIDs caches BackendIDs' ordering; computed once in NewRouter.
-	// 读写: backend (BackendIDs), core (init)
 	backendIDs []string
-	// 读写: backend (backendDefaultsFor base), core (init)
-	model string
-	// 读写: backend (backendDefaultsFor base), core (init)
-	extraArgs []string
+	model      string
+	extraArgs  []string
 }
 
 // maxModelBytes caps model identifiers, which flow into the CLI child's

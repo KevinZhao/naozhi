@@ -141,12 +141,13 @@ const (
 // s.historyMu protects persistedHistory independently; never held with sendMu or r.mu.
 // Read-only operations (ListSessions, SessionFor, Stats, Version) use RLock.
 //
-// Every field carries a 读写 (access-set) annotation listing the router_*.go
-// files touching it (tools/check-router-fields); block PRs adding a field without one.
+// Fields used to carry a `// 读写:` annotation naming every router_*.go file that
+// touches them, enforced by tools/check-router-fields. Both are gone (G3 #2667):
+// what they approximated is whether the sessionStore indices stay consistent, and
+// index_invariants_test.go asserts that directly. A comment saying "lifecycle
+// writes this" cannot catch a lifecycle path that writes it WRONG.
 type Router struct {
-	// 读写: core (lock primitive itself), all router_*.go (acquired by methods)
-	mu sync.RWMutex
-	// 读写: core, lifecycle, cleanup, capacity (waitForCapacity broadcast/wait), tuning (respawn broadcast)
+	mu           sync.RWMutex
 	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu (write lock)
 	// ss is the session-table facet (#383): sessions + byChat/keyhash/idToKey
 	// indices, activeCount, dirty, gen (sessionStore, store.go). No lock of its
@@ -155,7 +156,6 @@ type Router struct {
 	// indexAdd/indexDel are the keyhash+byChat funnel. activeCount / gen are
 	// atomic for lock-free readers. The annotation below is the UNION of all
 	// domains; the lint recurses one level into sessionStore's own annotations.
-	// 读写: core (init/Stats/Version/indexAdd/Del/resolver), lifecycle (spawn/reset/rename/install/unregister/countActive/evict/BumpVersion), shim (reconnect), cleanup (remove/cleanup/saveIfDirty/reconcile/BumpVersion), discovery (takeover/register/RegisterForResume/BumpVersion), capacity (reconcile active-gauge scan/evictOldest), workspace (evictWorkspaceOverrideLocked byChat live-session check), backend (BackendModelManifest live-proc manifest scan), tuning (SetSessionTuning lookup/record)
 	ss sessionStore
 	// picks holds the dashboard's per-session-key choices (backend /
 	// access-profile / tuning) for keys that may not have a ManagedSession yet.
@@ -163,48 +163,37 @@ type Router struct {
 	// Unlike the other facets it has methods: renameLocked / dropAllLocked /
 	// dropBackendLocked, so the maintenance is one call per path instead of
 	// three open-coded map operations that must agree.
-	// 读写: core (initLocked), backend (Set/GetSessionBackend, Set/GetSessionAccessProfile), lifecycle (resolveSpawnParams read+consume / resetSessionLocked dropBackend / terminal removal dropAll / RenameSession rename), tuning (SetSessionTuning record)
 	picks pendingPicks
 	// bkStore is the backend/policy facet (#383): read-only-after-NewRouter
 	// config fields plus the mutable backendOverrides map (router_backend.go).
 	// No lock of its own — mutations ONLY under r.mu write lock, reads under
 	// RLock. The annotation below is the UNION of all domains; the lint
 	// recurses one level into backendStore's own annotations.
-	// 读写: core (init), backend (wrapperFor/managerFor/BackendIDs/BackendWrapper/DefaultBackend/CLIName/CLIVersion/CLIPath/backendDefaultsFor/Set/GetSessionBackend), lifecycle (spawn/resolveSpawnParams/unregisterSessionLocked/RenameSession), shim (shimManagers), tuning (SetSessionTuning pending pick)
 	bkStore backendStore
 	// accessProfiles is the named auth/upstream overlay registry (RFC
 	// project-access-profile). Nil/empty ⇒ every session runs on the global
 	// baseline. Copy-on-write: AddAccessProfile swaps the whole map under the
 	// write lock, so readers outside r.mu snapshot the pointer under RLock (#2494).
-	// 读写: core (init), access_profile (AddAccessProfile swap), lifecycle (resolveSpawnParamsLocked read-only), spawn_layers (accessProfileDefaultModel RLock)
 	accessProfiles map[string]AccessProfile
 	// defaultAccessProfile is applied when a session resolves to no explicit
 	// profile (lowest precedence); "" = global-baseline fallthrough. Read-only after NewRouter.
-	// 读写: core (init), lifecycle (resolveSpawnParamsLocked read-only)
 	defaultAccessProfile string
-	// 读写: core (init), lifecycle (countActive/evictOldest)
-	maxProcs int
-	// 读写: core (init), cleanup (shouldPrune)
-	ttl time.Duration
-	// 读写: core (init), cleanup (shouldPrune)
-	pruneTTL time.Duration
-	// 读写: core (init/DefaultWorkspace), lifecycle (GetWorkspace fallback), workspace (resolveWorkspaceLocked/WorkspaceRoots fallback)
+	maxProcs             int
+	ttl                  time.Duration
+	pruneTTL             time.Duration
 	//
 	// Named defaultCWD (not "workspace") to disambiguate from node identity
 	// (Config.Workspace), remote nodes (Config.Workspaces) and per-chat
 	// overrides (wsStore.overrides): this is purely the fallback cwd handed
 	// to CLI processes when a session has no per-chat override (#732).
 	defaultCWD string // default cwd for CLI processes
-	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via RegisterForResume / RegisterCronStubWithChain / Takeover), shim (reconnect)
-	claudeDir string // ~/.claude dir for loading session history
+	claudeDir  string // ~/.claude dir for loading session history
 	// kiroSessionsDir is the kiro session-state root, plumbed into
 	// history.Wiring at attachHistorySource time for the kirojsonl factory.
-	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via Register* / Takeover)
 	kiroSessionsDir string
 
 	// codexSessionsDir is the codex session-state root (~/.codex/sessions),
 	// plumbed into history.Wiring for the codexjsonl factory.
-	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via Register* / Takeover)
 	codexSessionsDir string
 
 	// wsStore is the per-chat workspace-override facet (#383, #2495): overrides
@@ -212,7 +201,6 @@ type Router struct {
 	// No lock of its own — every method is called under r.mu because override
 	// mutations must be atomic with session mutations (#2342) and eviction
 	// reads r.ss.byChat. Zero value is usable.
-	// 读写: core (init/load), lifecycle (ResetChat/RenameSession/spawn-resolver), cleanup (save), discovery (Takeover), workspace (SetWorkspace/resolve/Roots)
 	wsStore workspacestore.Store
 
 	// pp is the spawn-concurrency facet (#805, #2495): pending-spawn count,
@@ -222,19 +210,15 @@ type Router struct {
 	// the pending count joins the live count in the capacity check and in-flight
 	// keys are checked against the live session index. Embeds a sync.WaitGroup:
 	// never copy Router or take it by value (go vet copylocks). Zero value is usable.
-	// 读写: core (acquire-release RAII helpers), lifecycle (spawnSession/GetOrCreate/Reset/ResetAndRecreate), shim (reconnect read), cleanup (RemoveAsync/finishRemoveCleanup), test helpers (WaitRemoves)
 	pp spawnpool.Store
 
-	// 读写: core (init), cleanup (saveIfDirty)
 	storePath string
 
 	// sessionRuns persists per-run wall-clock timing. Constructed in NewRouter
 	// from the store's datadir.Layout, injected into every ManagedSession; nil when
 	// StorePath is empty. Closed in Shutdown to flush the async write worker.
-	// 读写: core (init/spawn-config injection), lifecycle (spawn-config injection), discovery (takeover/register injection), cleanup (Invalidate/Close), runhistory (List/Stats read)
 	sessionRuns *runhistory.Store
 	// costAcct is the shared ledger sink handed to every ManagedSession.
-	// 读写: core (init/spawn-config injection), lifecycle (spawn-config injection), discovery (takeover/register injection), cleanup (Close), runhistory (CostLedger/SetCostRunOwnership)
 	costAcct *costAccounting
 
 	// kid is the known-session-IDs facet: IDs set, FIFO order, dirty flag,
@@ -242,33 +226,26 @@ type Router struct {
 	// Owns its own mutex and is never guarded by r.mu; Track runs with r.mu
 	// held at the publish sites, fixing the lock order r.mu → kid.mu (the
 	// store never calls back into Router). Zero value is usable.
-	// 读写: core (init/load/restore), lifecycle (spawn/reset publish), shim (reconnect), discovery (RegisterForResume), cleanup (Cleanup/saveIfDirty/Shutdown save)
 	kid knownids.Store
 
-	// 读写: core (init), lifecycle (spawn config), shim (reconnect spawn config)
 	noOutputTimeout time.Duration
-	// 读写: core (init), lifecycle (spawn config), shim (reconnect spawn config), cleanup (Cleanup grace)
-	totalTimeout time.Duration
+	totalTimeout    time.Duration
 
 	// onChange is an atomic.Pointer so notifyChange can load it lock-free on
 	// the stream-event hot path (after every result event); set once at startup.
 	// onChangeHolder makes the "function value through atomic pointer" idiom
 	// explicit instead of `&fn` on a parameter copy.
-	// 读写: core (SetOnChange/notifyChange)
 	onChange atomic.Pointer[onChangeHolder]
 
 	// onKeyRetired fires after Reset/Remove finish; lets side-indices keyed
 	// on the session key (e.g. dispatch.MessageQueue) drop their entries.
-	// 读写: core (SetOnKeyRetired/notifyKeyRetired), lifecycle (Reset), cleanup (Remove)
 	onKeyRetired atomic.Pointer[onKeyRetiredHolder]
 
 	// onSessionRetired mirrors onKeyRetired but exposes the session UUID
 	// captured before teardown cleared r.ss.sessions[key]; see SetOnSessionRetired.
-	// 读写: core (SetOnSessionRetired/notifyKeyRetired), lifecycle (Reset), cleanup (Remove)
 	onSessionRetired atomic.Pointer[onSessionRetiredHolder]
 
 	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
-	// 读写: core (init Add/Done), cleanup (Shutdown Wait), lifecycle (loadResumeHistoryOnSpawn Add/Done)
 	historyWg sync.WaitGroup
 	// historyWgMu serialises the "check historyCtx.Err() then historyWg.Add(1)"
 	// pair against Shutdown's historyCancel() (#2186): a cancel landing between
@@ -277,26 +254,21 @@ type Router struct {
 	// returned"). Shutdown takes this lock around historyCancel() (NOT around
 	// Wait), so a producer that passed the check completes its Add before the
 	// cancel is observable, and any later producer sees Err()!=nil and bails.
-	// 读写: core (runHistoryTask), lifecycle (loadResumeHistoryOnSpawn), cleanup (Shutdown cancel)
 	historyWgMu sync.Mutex
 
 	// historyCtx is cancelled on Shutdown so in-flight LoadHistory*Ctx calls
 	// abort promptly instead of blocking the drain on slow filesystems.
 	// Paired with historyCancel (set by NewRouter, called from Shutdown).
-	// 读写: core (init), lifecycle (attachHistorySource), cleanup (Shutdown cancel), shim (ReconnectShims parent ctx)
-	historyCtx context.Context
-	// 读写: core (init), cleanup (Shutdown cancel)
+	historyCtx    context.Context
 	historyCancel context.CancelFunc
 
 	// shutdownOnce guards Shutdown against re-entry: a double call would race
 	// the broadcast timer, re-cancel historyCtx and double-detach shim processes.
-	// 读写: cleanup (Shutdown)
 	shutdownOnce sync.Once
 
 	// startOnce guards startBackgroundLifecycle against re-entry (NewRouter and
 	// Start() both call it): a second run would overwrite r.attachmentTracker
 	// (leaking the first tracker's goroutine) and schedule a redundant orphan sweep.
-	// 读写: core (startBackgroundLifecycle)
 	startOnce sync.Once
 
 	// stopped is set true under r.mu inside Shutdown immediately before the
@@ -306,50 +278,41 @@ type Router struct {
 	// SAME r.mu hold as the snapshot makes gate and snapshot mutually
 	// exclusive (no TOCTOU). Set once, never cleared — a Router is not reusable
 	// after Shutdown. atomic.Bool so readers need only the r.mu they already hold (#1822).
-	// 读写: cleanup (Shutdown Store under r.mu), lifecycle (spawnSession Load under r.mu)
 	stopped atomic.Bool
 
 	// eventLogDir is where per-session event log files live. Empty disables
 	// event log persistence (tests / opt-out); non-empty wires eventLogPersister
 	// for writes and naozhilog.Source for reads.
-	// 读写: core (init), lifecycle (attachHistorySource), cleanup (dropEventLog)
-	eventLogDir string
-	// 读写: core (init), lifecycle (installPersistSink), cleanup (Shutdown)
+	eventLogDir       string
 	eventLogPersister *persist.Persister
 
 	// cliDebugDir, when non-empty, is where each spawned Claude CLI writes its
 	// `--debug-file` log. Set only when NAOZHI_CLI_DEBUG opts in at construction;
 	// empty keeps every spawn bit-identical. spawn() derives a per-session path.
-	// 读写: core (init only — immutable after NewRouter), lifecycle (spawn read)
 	cliDebugDir string
 
 	// naozhiSettingsFile mirrors RouterConfig.NaozhiSettingsFile ("" = legacy
 	// `--setting-sources user`). Immutable after NewRouter; the router_shim
 	// arg-drift check must pass the SAME value or --settings sessions look drifted.
-	// 读写: core (init only), lifecycle (spawn read), router_shim (drift read)
 	naozhiSettingsFile string
 	// mcpConfigFile mirrors RouterConfig.MCPConfigFile ("" omits `--mcp-config`).
 	// Immutable after NewRouter; the shim arg-drift comparison must mirror the spawn argv exactly.
-	// 读写: core (init only), lifecycle (spawn read), router_shim (drift read)
 	mcpConfigFile string
 
 	// attachmentTracker is the refcount tracker that bridges event-log persist
 	// events to .meta sidecar updates. nil when eventLogDir is unset (no event
 	// source). See docs/rfc/attachment-refcount.md.
-	// 读写: core (init/stopAttachmentTracker), lifecycle (installPersistSink), cleanup (clearAttachmentTrackerRefs / Shutdown stop)
 	attachmentTracker *attachmentTracker
 
 	// historyLoader loads a session's persisted JSONL history tail across a
 	// prev_session_ids chain; tests inject a fixture (#458). Never nil and
 	// read-only after NewRouter.
-	// 读写: core (init default), lifecycle (LoadHistoryChainTail reader), shim (reconnect LoadHistoryChainTail reader)
 	historyLoader HistoryLoader
 
 	// resolver is the shared KeyResolver exposed via Resolver() so Dispatcher /
 	// Hub / upstream wiring read one instance instead of drifting copies (#604).
 	// nil when the caller did not opt in. Read-only after NewRouter; KeyResolver
 	// is immutable post-construction so concurrent readers are safe.
-	// 读写: core (init), Resolver() (read-only accessor)
 	resolver *KeyResolver
 }
 
