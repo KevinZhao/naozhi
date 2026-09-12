@@ -60,7 +60,7 @@ type Config struct {
 func Run(cfg Config) error {
 	var shimLogFilePtr atomic.Pointer[os.File]
 	// Redirect slog to a persistent log file so shim logs survive parent restart.
-	logPath := filepath.Join(filepath.Dir(cfg.StateFile), fmt.Sprintf("shim-%d.log", os.Getpid()))
+	logPath := filepath.Join(filepath.Dir(cfg.StateFile), fmt.Sprintf(LogFilePrefix+"%d.log", os.Getpid()))
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
 		shimLogFilePtr.Store(f)
 		slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug})))
