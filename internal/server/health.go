@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
+	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -33,7 +34,12 @@ type HealthHandler struct {
 	// platformsStatus is the pre-built {name: "registered"} map served as the
 	// /health `platforms` sub-object. Read-only after init; never mutated.
 	platformsStatus map[string]string
-	hubDropped      func() int64 // hub.DroppedMessages
+	// platformCaps is the pre-built capability matrix served as the /health
+	// `platform_capabilities` sub-object (J10 of #2548). Read-only after init.
+	// Without it, "AskUserQuestion renders as a card on Feishu and a text list
+	// everywhere else" was only discoverable by reading four adapters.
+	platformCaps map[string]platform.Capabilities
+	hubDropped   func() int64 // hub.DroppedMessages
 	// dispatcherMetrics returns (message_count, reply_error_count, send_fail_count, last_reply_success).
 	// Injected after Start() wires the Dispatcher; nil-safe. last_reply_success
 	// is zero-valued until the first successful user-visible reply.
@@ -87,13 +93,17 @@ type healthAuthSection struct {
 	// ConfigSHA256 / ConfigLoadedAt / ConfigPath fingerprint the config the
 	// process loaded (#2538). Auth-only by construction (this struct is the
 	// authenticated section), so a public probe cannot read the hash or path.
-	ConfigSHA256      string                  `json:"config_sha256,omitempty"`
-	ConfigLoadedAt    string                  `json:"config_loaded_at,omitempty"`
-	ConfigPath        string                  `json:"config_path,omitempty"`
-	Nodes             map[string]string       `json:"nodes,omitempty"`
-	Platforms         map[string]string       `json:"platforms"`
-	EventLog          *healthEventLogStats    `json:"eventlog,omitempty"`
-	AttachmentTracker *healthAttachTrackStats `json:"attachment_tracker,omitempty"`
+	ConfigSHA256   string            `json:"config_sha256,omitempty"`
+	ConfigLoadedAt string            `json:"config_loaded_at,omitempty"`
+	ConfigPath     string            `json:"config_path,omitempty"`
+	Nodes          map[string]string `json:"nodes,omitempty"`
+	Platforms      map[string]string `json:"platforms"`
+	// PlatformCapabilities is which optional capability each registered platform
+	// actually has, so a feature degrading silently on one platform is visible
+	// without reading its adapter. Auth-only, like the rest of this struct.
+	PlatformCapabilities map[string]platform.Capabilities `json:"platform_capabilities,omitempty"`
+	EventLog             *healthEventLogStats             `json:"eventlog,omitempty"`
+	AttachmentTracker    *healthAttachTrackStats          `json:"attachment_tracker,omitempty"`
 }
 
 // healthEventLogStats mirrors session.EventLogHealth over the wire; kept
@@ -225,6 +235,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		auth.Nodes = nodeStatus
 	}
 	auth.Platforms = h.platformsStatus
+	auth.PlatformCapabilities = h.platformCaps
 
 	// Per-subsystem fields (ws_dropped, dispatch, eventlog, attachment_tracker)
 	// come from the HealthProbe factories in health_probe.go.

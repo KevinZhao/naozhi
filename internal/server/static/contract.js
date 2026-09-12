@@ -183,6 +183,7 @@
         eventlog: 'eventlog',
         goroutines: 'goroutines',
         nodes: 'nodes',
+        platform_capabilities: 'platform_capabilities',
         platforms: 'platforms',
         sessions: 'sessions',
         system: 'system',
