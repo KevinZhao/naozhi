@@ -33,7 +33,7 @@ func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEnt
 		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"
 		thumbs := make([]string, len(images))
 		if len(images) == 1 {
-			thumbs[0] = MakeThumbnail(images[0].Data, 600)
+			thumbs[0] = MakeThumbnail(images[0].Data, clievent.ThumbMaxDim)
 		} else {
 			// Bounded pool: MakeThumbnail's thumbSem already serialises the work, so
 			// more than thumbnailWorkerCap goroutines would just block on it (#569).
@@ -48,7 +48,7 @@ func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEnt
 				go func() {
 					defer wg.Done()
 					for i := range jobs {
-						thumbs[i] = MakeThumbnail(images[i].Data, 600)
+						thumbs[i] = MakeThumbnail(images[i].Data, clievent.ThumbMaxDim)
 					}
 				}()
 			}
