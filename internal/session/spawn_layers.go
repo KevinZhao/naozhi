@@ -24,7 +24,7 @@ type argvLayers struct {
 //	model:  bd.Model ← profileDefaultModel ← ov.Model ← tuningModel  (low → high)
 //	effort: bd.Effort ← ov.Effort ← tuningEffort  (no profile tier: docs/rfc/kiro-effort-control.md §4.2)
 //	args:   bd.Args ++ ov.ExtraArgs  (append, never replace)
-func mergeArgvLayers(bd backendDefaults, profileDefaultModel string, ov shim.SpawnOverlay, tuningModel, tuningEffort string) argvLayers {
+func mergeArgvLayers(bd BackendDefaults, profileDefaultModel string, ov shim.SpawnOverlay, tuningModel, tuningEffort string) argvLayers {
 	model := bd.Model
 	if profileDefaultModel != "" {
 		model = profileDefaultModel

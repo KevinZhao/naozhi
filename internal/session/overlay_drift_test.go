@@ -125,7 +125,7 @@ func TestGoldenStateMergeArgvLayers(t *testing.T) {
 			ov = *st.SpawnOverlay
 		}
 		merged := mergeArgvLayers(
-			backendDefaults{Model: "cfg-model", Effort: "low", Args: []string{"--debug"}},
+			BackendDefaults{Model: "cfg-model", Effort: "low", Args: []string{"--debug"}},
 			"profile-model", ov, "", "")
 		if merged.Model == "" {
 			t.Errorf("%s: merged model empty", st.Key)
@@ -146,7 +146,7 @@ func TestShimListDrift(t *testing.T) {
 		},
 		SpawnOverlay: &shim.SpawnOverlay{AppendSystemPrompt: "新提示"},
 	}
-	advisory, drift := ShimListDrift("new-model", "", []string{"--debug"}, "", st)
+	advisory, drift := ShimListDrift(BackendDefaults{Model: "new-model", Args: []string{"--debug"}}, "", st)
 
 	if len(advisory) != 1 || advisory[0].Field != "model" ||
 		advisory[0].Stored != "old-model" || advisory[0].Current != "new-model" {
@@ -166,7 +166,7 @@ func TestShimListDrift(t *testing.T) {
 		}
 	}
 
-	if a, d := ShimListDrift("m", "", nil, "", shim.State{CLIArgs: []string{"-p"}}); a != nil || d != nil {
+	if a, d := ShimListDrift(BackendDefaults{Model: "m"}, "", shim.State{CLIArgs: []string{"-p"}}); a != nil || d != nil {
 		t.Errorf("nil overlay must stay silent, got %v / %v", a, d)
 	}
 }

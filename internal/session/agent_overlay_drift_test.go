@@ -382,7 +382,7 @@ func TestAgentOverlayDrift_CompareHasNoSpawnSideEffects(t *testing.T) {
 // that the returned Args never alias the backend's configured slice.
 func TestMergeArgvLayers(t *testing.T) {
 	t.Parallel()
-	bd := backendDefaults{Model: "base", Effort: "high", Args: []string{"--a"}}
+	bd := BackendDefaults{Model: "base", Effort: "high", Args: []string{"--a"}}
 
 	cases := []struct {
 		name          string
