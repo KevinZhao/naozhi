@@ -55,20 +55,20 @@ func TestStateDirSize_SumsFiles(t *testing.T) {
 }
 
 func TestStateDirSize_TruncatesOverBudget(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow: skipped in -short")
-	}
 	t.Parallel()
 	dir := t.TempDir()
-	// Create just over the budget worth of tiny files.
-	total := stateDirWalkFileBudget + 50
-	for i := 0; i < total; i++ {
+	// A small injected budget instead of the production 50,000: this exercises the
+	// same truncation branch, and materialising 50,050 files took 18s — the second
+	// largest test in the repo against Epic A #2524's 150s target for the CI `test`
+	// job. The -short skip went with the cost.
+	const budget = 100
+	for i := 0; i < budget+50; i++ {
 		// Single-byte files keep the test fast.
 		if err := os.WriteFile(filepath.Join(dir, name(i)), []byte{'x'}, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	size, err := StateDirSize(dir)
+	size, err := stateDirSizeWithBudget(dir, budget)
 	if !errors.Is(err, ErrStateDirScanTruncated) {
 		t.Fatalf("expected ErrStateDirScanTruncated, got %v", err)
 	}

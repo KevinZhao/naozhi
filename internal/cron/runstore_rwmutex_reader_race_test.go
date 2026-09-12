@@ -34,7 +34,19 @@ func TestRunStore_RWMutexReaders_NoRaceUnderConcurrentAppend(t *testing.T) {
 	// than the cold warmCache exclusive-Lock fall-through.
 	store.warmCache(jobID)
 
-	const iters = 4000
+	// iters is the WRITER's count; each Append also writes a run file, so the test
+	// is disk-bound and its wall time is linear in this number. Measured under
+	// -race (what CI runs): 4000 → 52.8s, 1000 → 15.2s, 400 → 7.2s. It was 4000
+	// with no recorded rationale, and at 52.8s it was the single largest test in
+	// the repo — 55 of the ~200s CI `test` job, whose Epic A #2524 target is 150s.
+	//
+	// 1000 keeps the detection power. TSan is not statistical: it reports a race
+	// the first time it observes two conflicting accesses without a happens-before
+	// edge, so what matters is that the paths run concurrently at all, not how many
+	// times. And the readers below spin FREELY rather than once per write — their
+	// coverage is bounded by wall time, and 15s of six concurrent readers against
+	// cacheHeadPush + appendTrimBatch exercises every RLock site many times over.
+	const iters = 1000
 	const readers = 6
 
 	var wg sync.WaitGroup
