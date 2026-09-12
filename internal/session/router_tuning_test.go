@@ -44,7 +44,7 @@ func mkTuningTestRouter(t *testing.T) *Router {
 		"codex":  cli.NewWrapper("/bin/false", &cli.CodexProtocol{}, "codex"),
 	}
 	r.bkStore.defaultBackend = "claude"
-	r.bkStore.backendOverrides = make(map[string]string)
+	r.picks.backend = make(map[string]string)
 	r.bkStore.backendEfforts = map[string]string{}
 	return r
 }
@@ -539,7 +539,7 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 	if _, ok := r.ss.sessions[key]; ok {
 		t.Fatal("recording a pending pick must not create a ManagedSession")
 	}
-	if got := r.bkStore.tuningOverrides[key]; got != (pendingTuning{Model: "us.anthropic.claude-opus-5[1m]", Effort: "high"}) {
+	if got := r.picks.tuning[key]; got != (pendingTuning{Model: "us.anthropic.claude-opus-5[1m]", Effort: "high"}) {
 		t.Fatalf("pending record = %+v", got)
 	}
 
@@ -559,14 +559,14 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 		t.Errorf("first spawn params: model=%q effort=%q, want the parked pick", sp.Model, sp.Effort)
 	}
 	// resolve is a read: a failed Spawn() must leave the pick for the retry.
-	if _, ok := r.bkStore.tuningOverrides[key]; !ok {
+	if _, ok := r.picks.tuning[key]; !ok {
 		t.Error("resolveSpawnParamsLocked must not consume the pending pick")
 	}
 
 	// spawnSession's consume step moves it onto the fresh entry and drops it.
 	r.mu.Lock()
 	ov := r.consumePendingTuningLocked(key, sessionOverrides{userLabel: "keep"})
-	_, stillThere := r.bkStore.tuningOverrides[key]
+	_, stillThere := r.picks.tuning[key]
 	r.mu.Unlock()
 	if ov.tuningModel != "us.anthropic.claude-opus-5[1m]" || ov.tuningEffort != "high" || ov.userLabel != "keep" {
 		t.Errorf("consumed overrides = %+v", ov)
@@ -587,7 +587,7 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 	if _, err := r.SetSessionTuning(ctx, key, strp(""), strp("")); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := r.bkStore.tuningOverrides[key]; ok {
+	if _, ok := r.picks.tuning[key]; ok {
 		t.Error("clearing both fields must delete the pending record")
 	}
 }
@@ -598,22 +598,22 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 func TestSetSessionTuning_PendingCapacity(t *testing.T) {
 	r := mkTuningTestRouter(t)
 	ctx := context.Background()
-	r.bkStore.tuningOverrides = make(map[string]pendingTuning, maxTuningOverrides)
+	r.picks.tuning = make(map[string]pendingTuning, maxTuningOverrides)
 	for i := 0; i < maxTuningOverrides; i++ {
-		r.bkStore.tuningOverrides["k:"+strings.Repeat("x", 3)+string(rune('a'+i%26))+strconv.Itoa(i)] = pendingTuning{Model: "m"}
+		r.picks.tuning["k:"+strings.Repeat("x", 3)+string(rune('a'+i%26))+strconv.Itoa(i)] = pendingTuning{Model: "m"}
 	}
 	if _, err := r.SetSessionTuning(ctx, "dashboard:direct:new:general", strp("opus"), nil); !errors.Is(err, ErrTuningCapacity) {
 		t.Errorf("new key at cap: err = %v, want ErrTuningCapacity", err)
 	}
 	var existing string
-	for k := range r.bkStore.tuningOverrides {
+	for k := range r.picks.tuning {
 		existing = k
 		break
 	}
 	if _, err := r.SetSessionTuning(ctx, existing, strp("opus"), nil); err != nil {
 		t.Errorf("updating an existing key at cap must succeed: %v", err)
 	}
-	if got := r.bkStore.tuningOverrides[existing].Model; got != "opus" {
+	if got := r.picks.tuning[existing].Model; got != "opus" {
 		t.Errorf("existing key model = %q, want opus", got)
 	}
 }

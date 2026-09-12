@@ -16,13 +16,13 @@ func TestCleanup_PruneSnapshot_RemovesCandidatesKeepsAlive(t *testing.T) {
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
 	}
-	r.bkStore.backendOverrides = map[string]string{}
+	r.picks.backend = map[string]string{}
 
 	// nil-process stub past pruneTTL → prune candidate.
 	stub := &ManagedSession{key: "stub"}
 	stub.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
 	r.ss.sessions["stub"] = stub
-	r.bkStore.backendOverrides["stub"] = "kiro"
+	r.picks.backend["stub"] = "kiro"
 
 	// dead process past pruneTTL with no session ID → prune candidate.
 	deadSession := injectSession(r, "dead", newDeadProc())
@@ -39,7 +39,7 @@ func TestCleanup_PruneSnapshot_RemovesCandidatesKeepsAlive(t *testing.T) {
 	if _, ok := r.ss.sessions["stub"]; ok {
 		t.Error("nil-process stub past pruneTTL should be pruned")
 	}
-	if _, ok := r.bkStore.backendOverrides["stub"]; ok {
+	if _, ok := r.picks.backend["stub"]; ok {
 		t.Error("pruned stub's backendOverride should be freed")
 	}
 	if _, ok := r.ss.sessions["dead"]; ok {

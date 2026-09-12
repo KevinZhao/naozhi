@@ -157,6 +157,14 @@ type Router struct {
 	// domains; the lint recurses one level into sessionStore's own annotations.
 	// 读写: core (init/Stats/Version/indexAdd/Del/resolver), lifecycle (spawn/reset/rename/install/unregister/countActive/evict/BumpVersion), shim (reconnect), cleanup (remove/cleanup/saveIfDirty/reconcile/BumpVersion), discovery (takeover/register/RegisterForResume/BumpVersion), capacity (reconcile active-gauge scan/evictOldest), workspace (evictWorkspaceOverrideLocked byChat live-session check), backend (BackendModelManifest live-proc manifest scan), tuning (SetSessionTuning lookup/record)
 	ss sessionStore
+	// picks holds the dashboard's per-session-key choices (backend /
+	// access-profile / tuning) for keys that may not have a ManagedSession yet.
+	// Keyed by session key, so it is NOT part of backendStore (G2 #2666).
+	// Unlike the other facets it has methods: renameLocked / dropAllLocked /
+	// dropBackendLocked, so the maintenance is one call per path instead of
+	// three open-coded map operations that must agree.
+	// 读写: core (initLocked), backend (Set/GetSessionBackend, Set/GetSessionAccessProfile), lifecycle (resolveSpawnParams read+consume / resetSessionLocked dropBackend / terminal removal dropAll / RenameSession rename), tuning (SetSessionTuning record)
+	picks pendingPicks
 	// bkStore is the backend/policy facet (#383): read-only-after-NewRouter
 	// config fields plus the mutable backendOverrides map (router_backend.go).
 	// No lock of its own — mutations ONLY under r.mu write lock, reads under
@@ -702,14 +710,12 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.bkStore.defaultBackend = defaultBackend
 	r.bkStore.model = cfg.Model
 	r.bkStore.extraArgs = cfg.ExtraArgs
+	r.picks.initLocked()
 	r.bkStore.backendModels = cfg.BackendModels
 	r.bkStore.backendExtraArgs = cfg.BackendExtraArgs
 	r.bkStore.backendEfforts = cfg.BackendEfforts
 	r.bkStore.configuredModelLists = cfg.BackendModelLists
 	r.bkStore.modelManifests = make(map[string][]cli.ModelInfo)
-	r.bkStore.backendOverrides = make(map[string]string)
-	r.bkStore.accessProfileOverrides = make(map[string]string)
-	r.bkStore.tuningOverrides = make(map[string]pendingTuning)
 	r.accessProfiles = cfg.AccessProfiles
 	r.defaultAccessProfile = cfg.DefaultAccessProfile
 	// Run-history store is rooted next to the session store (its own config,

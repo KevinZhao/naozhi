@@ -66,7 +66,7 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 		"kiro-routed":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-routed"),
 	}
 	r.bkStore.defaultBackend = defaultBackend
-	r.bkStore.backendOverrides = make(map[string]string)
+	r.picks.backend = make(map[string]string)
 	r.bkStore.wrapper = r.bkStore.wrappers[defaultBackend]
 	return
 }
@@ -146,7 +146,7 @@ func TestAttachHistorySource_NilWrapperUsesNoop(t *testing.T) {
 	}
 	r.bkStore.wrappers = map[string]*cli.Wrapper{}
 	r.bkStore.defaultBackend = ""
-	r.bkStore.backendOverrides = make(map[string]string)
+	r.picks.backend = make(map[string]string)
 	// r.bkStore.wrapper intentionally nil.
 
 	s := &ManagedSession{key: "feishu:direct:dave:general"}
@@ -254,7 +254,7 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 		"kiro-rt-probe": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-rt-probe"),
 	}
 	r.bkStore.defaultBackend = "kiro-rt-probe"
-	r.bkStore.backendOverrides = make(map[string]string)
+	r.picks.backend = make(map[string]string)
 	r.bkStore.wrapper = r.bkStore.wrappers["kiro-rt-probe"]
 
 	s := &ManagedSession{key: "feishu:direct:greta:general"}
@@ -287,7 +287,7 @@ func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 	}
 	r.bkStore.defaultBackend = "claude"
-	r.bkStore.backendOverrides = make(map[string]string)
+	r.picks.backend = make(map[string]string)
 	r.bkStore.wrapper = r.bkStore.wrappers["claude"]
 
 	s := &ManagedSession{key: "feishu:direct:harry:general"}

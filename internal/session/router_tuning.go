@@ -45,7 +45,7 @@ const (
 )
 
 // pendingTuning is a model/effort pick recorded for a key that has no
-// ManagedSession yet (bkStore.tuningOverrides). A freshly created dashboard
+// ManagedSession yet (picks.tuning). A freshly created dashboard
 // session exists only client-side until its first message spawns the CLI,
 // yet its header chips are already clickable — so the pick is parked here
 // and spawnSession moves it onto the new entry. Empty field = no override.
@@ -54,13 +54,13 @@ type pendingTuning struct {
 	Effort string
 }
 
-// maxTuningOverrides caps bkStore.tuningOverrides for the same reason as
+// maxTuningOverrides caps picks.tuning for the same reason as
 // maxBackendOverrides: an authenticated caller can POST unique keys and an
 // abandoned pick is only cleared on spawn / Reset / Remove.
 const maxTuningOverrides = 1024
 
 // ErrTuningCapacity is returned when a pre-spawn pick cannot be recorded
-// because bkStore.tuningOverrides is at maxTuningOverrides.
+// because picks.tuning is at maxTuningOverrides.
 var ErrTuningCapacity = errors.New("too many pending tuning overrides")
 
 // ErrTuningEffortUnsupported is returned when an effort tier is set for a
@@ -259,7 +259,7 @@ func procSetModel(ctx context.Context, proc processIface, model string) error {
 // deleted so a "恢复默认" on a never-spawned session leaves no residue.
 // Caller holds r.mu.
 func (r *Router) setPendingTuningLocked(key string, model, effort *string) error {
-	cur, exists := r.bkStore.tuningOverrides[key]
+	cur, exists := r.picks.tuning[key]
 	if model != nil {
 		cur.Model = *model
 	}
@@ -267,15 +267,15 @@ func (r *Router) setPendingTuningLocked(key string, model, effort *string) error
 		cur.Effort = *effort
 	}
 	if cur.Model == "" && cur.Effort == "" {
-		delete(r.bkStore.tuningOverrides, key)
+		delete(r.picks.tuning, key)
 		return nil
 	}
-	if !exists && len(r.bkStore.tuningOverrides) >= maxTuningOverrides {
+	if !exists && len(r.picks.tuning) >= maxTuningOverrides {
 		return ErrTuningCapacity
 	}
-	if r.bkStore.tuningOverrides == nil {
-		r.bkStore.tuningOverrides = make(map[string]pendingTuning)
+	if r.picks.tuning == nil {
+		r.picks.tuning = make(map[string]pendingTuning)
 	}
-	r.bkStore.tuningOverrides[key] = cur
+	r.picks.tuning[key] = cur
 	return nil
 }

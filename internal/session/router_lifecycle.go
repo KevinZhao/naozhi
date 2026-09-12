@@ -199,9 +199,10 @@ func (r *Router) resetSessionLocked(key string, toClose *[]processIface, closedA
 			delete(r.ss.keyhash, kh)
 		}
 	}
-	// Drop any one-shot backend pick so an abandoned dashboard choice does
-	// not leak into backendOverrides.
-	delete(r.bkStore.backendOverrides, key)
+	// Backend pick only: /new returns to the default backend, while the two
+	// consumed-on-spawn picks still apply to this key. dropBackendLocked's doc
+	// records that the omission is deliberate.
+	r.picks.dropBackendLocked(key)
 }
 
 // AgentOpts provides per-agent overrides for session creation.
@@ -369,11 +370,11 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// would respawn on the default backend, fail the resume probe, and
 	// silently downgrade to a fresh claude session.
 	reqBackend := opts.Backend
-	if len(r.bkStore.backendOverrides) > 0 {
+	if len(r.picks.backend) > 0 {
 		if reqBackend == "" {
-			reqBackend = r.bkStore.backendOverrides[key]
+			reqBackend = r.picks.backend[key]
 		}
-		delete(r.bkStore.backendOverrides, key)
+		delete(r.picks.backend, key)
 	}
 	if reqBackend == "" {
 		if old := r.ss.sessions[key]; old != nil {
@@ -390,10 +391,10 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// dashboard override (consumed here) > opts.AccessProfile > "". An unknown
 	// ID resolves to "" with a warning: the SAFE default, never a wrong account.
 	accessProfileID := opts.AccessProfile
-	if len(r.bkStore.accessProfileOverrides) > 0 {
-		if ov, ok := r.bkStore.accessProfileOverrides[key]; ok {
+	if len(r.picks.accessProfile) > 0 {
+		if ov, ok := r.picks.accessProfile[key]; ok {
 			accessProfileID = ov
-			delete(r.bkStore.accessProfileOverrides, key)
+			delete(r.picks.accessProfile, key)
 		}
 	}
 	if old := r.ss.sessions[key]; old != nil {
@@ -436,11 +437,11 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// tuningspec-validated at write and at store load). Effort deliberately has
 	// NO access-profile tier (docs/rfc/kiro-effort-control.md §4.2).
 	// A key with no session yet may carry a pre-spawn pick
-	// (bkStore.tuningOverrides); spawnSession consumes it onto the fresh entry.
+	// (picks.tuning); spawnSession consumes it onto the fresh entry.
 	var tuningModel, tuningEffort string
 	if old := r.ss.sessions[key]; old != nil {
 		tuningModel, tuningEffort = old.TuningModel(), old.TuningEffort()
-	} else if pt, ok := r.bkStore.tuningOverrides[key]; ok {
+	} else if pt, ok := r.picks.tuning[key]; ok {
 		tuningModel, tuningEffort = pt.Model, pt.Effort
 	}
 	merged := mergeArgvLayers(
@@ -516,16 +517,16 @@ type sessionOverrides struct {
 }
 
 // consumePendingTuningLocked moves a pre-spawn tuning pick
-// (bkStore.tuningOverrides, recorded by SetSessionTuning for a key with no
+// (picks.tuning, recorded by SetSessionTuning for a key with no
 // session) onto the overrides installFreshSessionLocked will stamp on the
 // new entry, and drops the one-shot record. Returns ov unchanged when there
 // is none. Caller holds r.mu.
 func (r *Router) consumePendingTuningLocked(key string, ov sessionOverrides) sessionOverrides {
-	pt, ok := r.bkStore.tuningOverrides[key]
+	pt, ok := r.picks.tuning[key]
 	if !ok {
 		return ov
 	}
-	delete(r.bkStore.tuningOverrides, key)
+	delete(r.picks.tuning, key)
 	out := ov
 	out.tuningModel = pt.Model
 	out.tuningEffort = pt.Effort
@@ -1086,11 +1087,11 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 	r.indexDel(key)
 	delete(r.ss.sessions, key)
 	if !keepBackendOverride {
-		delete(r.bkStore.backendOverrides, key)
-		// One-shot dashboard pick with the same lifecycle as backendOverrides;
-		// terminal removal must clear it so an abandoned pick does not leak.
-		delete(r.bkStore.accessProfileOverrides, key)
-		delete(r.bkStore.tuningOverrides, key)
+		// Every pick, so an abandoned choice cannot be consumed by a future
+		// session that reuses this key. See pendingPicks for the per-map
+		// lifecycles — the comment here used to claim accessProfile shared
+		// backendOverrides' lifecycle, which was backwards.
+		r.picks.dropAllLocked(key)
 		// The shim-stuck flag is only consumed by GetOrCreate, so terminal
 		// removals must clear it or the entry lives for the process lifetime.
 		r.pp.ClearShimStuck(key)
@@ -1397,18 +1398,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	if id := fresh.getSessionID(); id != "" {
 		r.ss.idToKey[id] = newKey
 	}
-	if b, ok := r.bkStore.backendOverrides[oldKey]; ok {
-		r.bkStore.backendOverrides[newKey] = b
-		delete(r.bkStore.backendOverrides, oldKey)
-	}
-	if ap, ok := r.bkStore.accessProfileOverrides[oldKey]; ok {
-		r.bkStore.accessProfileOverrides[newKey] = ap
-		delete(r.bkStore.accessProfileOverrides, oldKey)
-	}
-	if pt, ok := r.bkStore.tuningOverrides[oldKey]; ok {
-		r.bkStore.tuningOverrides[newKey] = pt
-		delete(r.bkStore.tuningOverrides, oldKey)
-	}
+	r.picks.renameLocked(oldKey, newKey)
 	r.ss.dirty = true
 	r.ss.gen.Add(1)
 	r.mu.Unlock()

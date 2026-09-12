@@ -63,7 +63,7 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 			idToKey:  make(map[string]string),
 		},
 	}
-	r.bkStore.backendOverrides = make(map[string]string)
+	r.picks.backend = make(map[string]string)
 	const key = "stuck:key:test"
 	r.pp.MarkShimStuck(key)
 
@@ -100,7 +100,7 @@ func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 			idToKey:  make(map[string]string),
 		},
 	}
-	r.bkStore.backendOverrides = make(map[string]string)
+	r.picks.backend = make(map[string]string)
 	const stuckKey = "key:A"
 	const cleanKey = "key:B"
 	r.pp.MarkShimStuck(stuckKey)
@@ -130,7 +130,7 @@ func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
 			idToKey:  make(map[string]string),
 		},
 	}
-	r.bkStore.backendOverrides = make(map[string]string)
+	r.picks.backend = make(map[string]string)
 	s := &ManagedSession{key: key}
 	r.ss.sessions[key] = s
 	r.pp.MarkShimStuck(key)
@@ -195,7 +195,7 @@ func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
 			idToKey:  make(map[string]string),
 		},
 	}
-	r.bkStore.backendOverrides = make(map[string]string)
+	r.picks.backend = make(map[string]string)
 	s := &ManagedSession{key: key}
 	r.ss.sessions[key] = s
 	r.pp.MarkShimStuck(key)

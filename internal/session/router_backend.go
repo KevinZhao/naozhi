@@ -44,23 +44,6 @@ type backendStore struct {
 	// above it unfiltered (harmless). docs/rfc/kiro-effort-control.md
 	// 读写: backend (backendDefaultsFor), core (init)
 	backendEfforts map[string]string
-	// backendOverrides: per-session backend picks keyed by full session key
-	// (with agent suffix) so two sessions on one chat can run different backends.
-	// 读写: backend (Set/GetSessionBackend), core (init), lifecycle (unregisterSessionLocked / resolveSpawnParams consume / RenameSession)
-	backendOverrides map[string]string
-	// accessProfileOverrides: per-session access-profile picks (RFC
-	// project-access-profile §8.2), one-shot like backendOverrides. Empty
-	// value = global default.
-	// 读写: backend (Set/GetSessionAccessProfile), core (init), lifecycle (unregisterSessionLocked / resolveSpawnParams consume)
-	accessProfileOverrides map[string]string
-	// tuningOverrides: model/effort picked for a session that has no
-	// ManagedSession yet (dashboard header chip before the first message).
-	// One-shot like backendOverrides: resolveSpawnParamsLocked reads it for
-	// the first argv and spawnSession moves it onto the fresh ManagedSession's
-	// tuning fields, after which the entry is gone. Values are
-	// tuningspec-validated at write. docs/rfc/dashboard-model-effort-control.md §4.3.
-	// 读写: tuning (SetSessionTuning record), core (init), lifecycle (resolveSpawnParams read / spawnSession consume / unregisterSessionLocked / RenameSession)
-	tuningOverrides map[string]pendingTuning
 	// configuredModelLists: operator-declared manifest per backend ID
 	// (cli.backends[].models). docs/rfc/dashboard-model-effort-control.md §4.2.
 	// 读写: backend (BackendModelManifest), core (init)
@@ -268,23 +251,23 @@ func (r *Router) SetSessionBackend(key, backend string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if backend == "" {
-		delete(r.bkStore.backendOverrides, key)
+		delete(r.picks.backend, key)
 		return
 	}
 	// Updating an existing key never hits the cap; only brand-new inserts do.
-	if _, existing := r.bkStore.backendOverrides[key]; !existing && len(r.bkStore.backendOverrides) >= maxBackendOverrides {
+	if _, existing := r.picks.backend[key]; !existing && len(r.picks.backend) >= maxBackendOverrides {
 		slog.Warn("backendOverrides at capacity; dropping override",
 			"key", key, "cap", maxBackendOverrides)
 		return
 	}
-	r.bkStore.backendOverrides[key] = backend
+	r.picks.backend[key] = backend
 }
 
 // SessionBackend returns the backend override for key, or "" if none.
 func (r *Router) SessionBackend(key string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.bkStore.backendOverrides[key]
+	return r.picks.backend[key]
 }
 
 // SetSessionAccessProfile remembers the access profile picked for a new
@@ -293,26 +276,26 @@ func (r *Router) SessionBackend(key string) string {
 func (r *Router) SetSessionAccessProfile(key, profile string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.bkStore.accessProfileOverrides == nil {
-		r.bkStore.accessProfileOverrides = make(map[string]string)
+	if r.picks.accessProfile == nil {
+		r.picks.accessProfile = make(map[string]string)
 	}
 	if profile == "" {
-		delete(r.bkStore.accessProfileOverrides, key)
+		delete(r.picks.accessProfile, key)
 		return
 	}
-	if _, existing := r.bkStore.accessProfileOverrides[key]; !existing && len(r.bkStore.accessProfileOverrides) >= maxBackendOverrides {
+	if _, existing := r.picks.accessProfile[key]; !existing && len(r.picks.accessProfile) >= maxBackendOverrides {
 		slog.Warn("accessProfileOverrides at capacity; dropping override",
 			"key", key, "cap", maxBackendOverrides)
 		return
 	}
-	r.bkStore.accessProfileOverrides[key] = profile
+	r.picks.accessProfile[key] = profile
 }
 
 // SessionAccessProfile returns the access-profile override for key, or "".
 func (r *Router) SessionAccessProfile(key string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.bkStore.accessProfileOverrides[key]
+	return r.picks.accessProfile[key]
 }
 
 // CLIPath returns the CLI binary path for health checks.

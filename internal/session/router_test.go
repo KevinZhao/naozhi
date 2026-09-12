@@ -930,7 +930,7 @@ func TestCleanupSkipsDeadProcess(t *testing.T) {
 
 // TestCleanup_PrunesBackendOverride verifies R70-ARCH-MED: a nil-process
 // session that ages past pruneTTL is removed from r.ss.sessions AND its entry
-// in r.bkStore.backendOverrides is freed. A previous version of shouldPrune-branch
+// in r.picks.backend is freed. A previous version of shouldPrune-branch
 // only touched r.ss.sessions, so a session that was SetSessionBackend'd and
 // then never spawned (e.g. config error at spawn time) would leave a
 // backendOverride live forever. R71-TEST-M1.
@@ -941,23 +941,23 @@ func TestCleanup_PrunesBackendOverride(t *testing.T) {
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
 	}
-	r.bkStore.backendOverrides = map[string]string{}
+	r.picks.backend = map[string]string{}
 	// nil-process session past pruneTTL — shouldPrune returns true.
 	s := &ManagedSession{key: "k1"}
 	s.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
 	r.ss.sessions["k1"] = s
-	r.bkStore.backendOverrides["k1"] = "kiro"
-	r.bkStore.backendOverrides["other"] = "claude" // unrelated, must survive
+	r.picks.backend["k1"] = "kiro"
+	r.picks.backend["other"] = "claude" // unrelated, must survive
 
 	r.Cleanup()
 
 	if _, ok := r.ss.sessions["k1"]; ok {
 		t.Error("pruned session should be gone from r.ss.sessions")
 	}
-	if _, ok := r.bkStore.backendOverrides["k1"]; ok {
+	if _, ok := r.picks.backend["k1"]; ok {
 		t.Error("pruned session's backendOverride should be freed")
 	}
-	if got := r.bkStore.backendOverrides["other"]; got != "claude" {
+	if got := r.picks.backend["other"]; got != "claude" {
 		t.Errorf("unrelated backendOverride should survive, got %q", got)
 	}
 }
@@ -987,7 +987,7 @@ func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
 			r := &Router{
 				ss: sessionStore{sessions: make(map[string]*ManagedSession)},
 			}
-			r.bkStore.backendOverrides = map[string]string{"k1": "kiro"}
+			r.picks.backend = map[string]string{"k1": "kiro"}
 			s := &ManagedSession{key: "k1"}
 			s.setSessionID("sess-1")
 			r.ss.sessions["k1"] = s
@@ -999,7 +999,7 @@ func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
 			if _, ok := r.ss.sessions["k1"]; ok {
 				t.Error("session must be removed from r.ss.sessions regardless of keepBackendOverride")
 			}
-			got, ok := r.bkStore.backendOverrides["k1"]
+			got, ok := r.picks.backend["k1"]
 			if tc.wantOverride == "" {
 				if ok {
 					t.Errorf("backendOverride must be freed, got %q", got)
@@ -2158,7 +2158,7 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 		}
 		r.bkStore.defaultBackend = "claude"
-		r.bkStore.backendOverrides = make(map[string]string)
+		r.picks.backend = make(map[string]string)
 		r.claudeDir = t.TempDir() // empty: no claude jsonl exists anywhere
 		kiroDir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(kiroDir, kiroSID+".json"), []byte("{}"), 0o600); err != nil {
@@ -2246,13 +2246,13 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		r.bkStore.extraArgs = []string{"--flag-a"}
 		r.bkStore.backendModels = map[string]string{"kiro": "kiro-model"}
 		r.bkStore.backendExtraArgs = map[string][]string{"kiro": {"--kiro-arg"}}
-		r.bkStore.backendOverrides = make(map[string]string)
+		r.picks.backend = make(map[string]string)
 		return r
 	}
 
 	t.Run("backendOverride wins when opts.Backend empty", func(t *testing.T) {
 		r := mkRouter()
-		r.bkStore.backendOverrides["feishu:user:bob:agent1"] = "kiro"
+		r.picks.backend["feishu:user:bob:agent1"] = "kiro"
 		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.BackendID != "kiro" {
 			t.Errorf("BackendID = %q, want kiro", sp.BackendID)
@@ -2264,14 +2264,14 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 			t.Errorf("Args = %v, want [--kiro-arg]", sp.Args)
 		}
 		// Override is consumed (one-shot).
-		if _, still := r.bkStore.backendOverrides["feishu:user:bob:agent1"]; still {
+		if _, still := r.picks.backend["feishu:user:bob:agent1"]; still {
 			t.Error("backendOverride was not consumed")
 		}
 	})
 
 	t.Run("opts.Backend beats backendOverride", func(t *testing.T) {
 		r := mkRouter()
-		r.bkStore.backendOverrides["feishu:user:bob:agent1"] = "kiro"
+		r.picks.backend["feishu:user:bob:agent1"] = "kiro"
 		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
 			AgentOpts{Backend: "claude"})
 		if sp.BackendID != "claude" {
@@ -2395,7 +2395,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		old := &ManagedSession{key: key}
 		old.SetBackend("kiro")
 		r.ss.sessions[key] = old
-		r.bkStore.backendOverrides[key] = "claude"
+		r.picks.backend[key] = "claude"
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
 		if sp.BackendID != "claude" {
 			t.Errorf("BackendID = %q, want claude (override wins over session)", sp.BackendID)
@@ -2418,8 +2418,8 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		}
 		r.bkStore.defaultBackend = "claude"
 		r.bkStore.model = "sonnet-default"
-		r.bkStore.backendOverrides = make(map[string]string)
-		r.bkStore.accessProfileOverrides = make(map[string]string)
+		r.picks.backend = make(map[string]string)
+		r.picks.accessProfile = make(map[string]string)
 		r.accessProfiles = map[string]AccessProfile{
 			"1p-fable": {
 				Env:          map[string]string{"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
@@ -2499,12 +2499,12 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 	t.Run("one-shot dashboard override beats opts and is consumed", func(t *testing.T) {
 		r := mkRouter()
 		key := "feishu:user:bob:agent1"
-		r.bkStore.accessProfileOverrides[key] = "bedrock-opus"
+		r.picks.accessProfile[key] = "bedrock-opus"
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{AccessProfile: "1p-fable"})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (override wins over opts)", sp.AccessProfileID)
 		}
-		if _, still := r.bkStore.accessProfileOverrides[key]; still {
+		if _, still := r.picks.accessProfile[key]; still {
 			t.Error("one-shot override was not consumed")
 		}
 	})
@@ -2515,7 +2515,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		old := &ManagedSession{key: key}
 		old.SetAccessProfile("bedrock-opus")
 		r.ss.sessions[key] = old
-		r.bkStore.accessProfileOverrides[key] = "1p-fable"
+		r.picks.accessProfile[key] = "1p-fable"
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock wins)", sp.AccessProfileID)
