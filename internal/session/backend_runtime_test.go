@@ -48,7 +48,7 @@ func TestBackendRuntime_UnknownIDYieldsZero(t *testing.T) {
 		t.Errorf("runtime(unknown) = %+v, want the zero value", got)
 	}
 
-	bs.initRuntimes(map[string]*cli.Wrapper{"claude": {}}, nil, nil, nil, nil)
+	bs.initRuntimes(map[string]BackendRuntime{"claude": {Wrapper: &cli.Wrapper{}}})
 	if got := bs.runtime("kiro"); !reflect.DeepEqual(got, BackendRuntime{}) {
 		t.Errorf("runtime(unconfigured) = %+v, want the zero value", got)
 	}
@@ -62,7 +62,7 @@ func TestBackendRuntime_UnknownIDYieldsZero(t *testing.T) {
 // one path that legitimately mutates goes through runtimeMut under the write lock.
 func TestBackendRuntime_ValueCopyDoesNotAliasTheStore(t *testing.T) {
 	var bs backendStore
-	bs.initRuntimes(nil, map[string]string{"claude": "opus"}, nil, nil, nil)
+	bs.initRuntimes(map[string]BackendRuntime{"claude": {Model: "opus"}})
 
 	snap := bs.runtime("claude")
 	snap.Model = "mutated"
@@ -83,7 +83,7 @@ func TestBackendRuntime_ValueCopyDoesNotAliasTheStore(t *testing.T) {
 func TestBackendRuntime_PerBackendWrappersIsNotLenRuntimes(t *testing.T) {
 	var bs backendStore
 	// Config for a backend, no wrappers at all — the legacy shape.
-	bs.initRuntimes(nil, map[string]string{"claude": "opus"}, nil, nil, nil)
+	bs.initRuntimes(map[string]BackendRuntime{"claude": {Model: "opus"}})
 	if len(bs.runtimes) == 0 {
 		t.Fatal("fixture is wrong: config alone should have created a row")
 	}
@@ -92,7 +92,7 @@ func TestBackendRuntime_PerBackendWrappersIsNotLenRuntimes(t *testing.T) {
 			"its legacy single-wrapper branch and return a nil wrapper for the default backend")
 	}
 
-	bs.initRuntimes(map[string]*cli.Wrapper{"claude": {}}, nil, nil, nil, nil)
+	bs.initRuntimes(map[string]BackendRuntime{"claude": {Wrapper: &cli.Wrapper{}}})
 	if !bs.perBackendWrappers {
 		t.Error("perBackendWrappers is false after wrappers were supplied")
 	}
@@ -103,11 +103,10 @@ func TestBackendRuntime_PerBackendWrappersIsNotLenRuntimes(t *testing.T) {
 // config-only backend as spawnable.
 func TestBackendRuntime_BackendWrappersSkipsRowsWithoutOne(t *testing.T) {
 	var bs backendStore
-	bs.initRuntimes(
-		map[string]*cli.Wrapper{"claude": {}},
-		map[string]string{"kiro": "kiro-model"}, // config only, no wrapper
-		nil, nil, nil,
-	)
+	bs.initRuntimes(map[string]BackendRuntime{
+		"claude": {Wrapper: &cli.Wrapper{}},
+		"kiro":   {Model: "kiro-model"}, // config only, no wrapper
+	})
 	got := bs.backendWrappers()
 	if _, ok := got["kiro"]; ok {
 		t.Error("backendWrappers included a backend with no wrapper; it is not spawnable")
@@ -137,7 +136,7 @@ func TestWrapperFor_LegacyBranchSurvivesConfigOnlyRows(t *testing.T) {
 	r := &Router{}
 	r.bkStore.wrapper = legacy
 	// Config for a backend, no wrappers map — exactly the legacy shape.
-	r.bkStore.initRuntimes(nil, map[string]string{"claude": "opus"}, nil, nil, nil)
+	r.bkStore.initRuntimes(map[string]BackendRuntime{"claude": {Model: "opus"}})
 
 	cases := []struct{ req, wantID string }{
 		{"", "claude"}, // empty → the wrapper's own id

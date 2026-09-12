@@ -359,8 +359,8 @@ func TestRouterBackendIDsAndWrapperFor(t *testing.T) {
 	kiroW := &cli.Wrapper{BackendID: "kiro", CLIName: "kiro"}
 
 	r := NewRouter(RouterConfig{
-		Wrappers:       map[string]*cli.Wrapper{"claude": claudeW, "kiro": kiroW},
-		DefaultBackend: "kiro",
+		BackendRuntimes: map[string]BackendRuntime{"claude": {Wrapper: claudeW}, "kiro": {Wrapper: kiroW}},
+		DefaultBackend:  "kiro",
 	})
 
 	ids := r.BackendIDs()

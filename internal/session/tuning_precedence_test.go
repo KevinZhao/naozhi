@@ -11,9 +11,9 @@ func TestResolveSpawnParams_TuningPrecedence(t *testing.T) {
 	newRouterWith := func(t *testing.T) *Router {
 		t.Helper()
 		r := NewRouter(RouterConfig{
-			MaxProcs:       3,
-			Model:          "cfg-default",
-			BackendEfforts: map[string]string{"": ""},
+			MaxProcs:        3,
+			Model:           "cfg-default",
+			BackendRuntimes: map[string]BackendRuntime{"": {}},
 		})
 		t.Cleanup(func() { r.Shutdown() })
 		return r

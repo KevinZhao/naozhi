@@ -172,17 +172,27 @@ func logConfigValidationDiagnostics(cfg *config.Config) {
 
 // backendWrappers holds the result of initBackendWrappers.
 type backendWrappers struct {
-	Wrappers  map[string]*cli.Wrapper
-	Models    map[string]string
-	ExtraArgs map[string][]string
-	// Efforts holds the per-backend thinking-effort tier, populated only for
-	// backends whose Protocol accepts one; others are warned and dropped.
-	Efforts map[string]string
-	// ModelLists holds operator-declared per-backend model manifests
-	// (cli.backends[].models); agent-reported manifests win at request time.
-	ModelLists map[string][]string
-	Default    *cli.Wrapper
-	DefaultID  string
+	// Runtimes is one row per backend — wrapper plus the per-backend config the
+	// router needs — instead of the five parallel map[backendID]→property tables
+	// this used to carry (G2 #2666). Effort is populated only for backends whose
+	// Protocol accepts one; others are warned and dropped. ConfiguredModels is
+	// the operator-declared manifest (cli.backends[].models); agent-reported
+	// manifests win at request time.
+	Runtimes  map[string]session.BackendRuntime
+	Default   *cli.Wrapper
+	DefaultID string
+}
+
+// wrapperMap projects Runtimes back to id→wrapper for the health-sibling check,
+// which is about wrappers specifically.
+func (b backendWrappers) wrapperMap() map[string]*cli.Wrapper {
+	out := make(map[string]*cli.Wrapper, len(b.Runtimes))
+	for id, rt := range b.Runtimes {
+		if rt.Wrapper != nil {
+			out[id] = rt.Wrapper
+		}
+	}
+	return out
 }
 
 // initBackendWrappers constructs cli.Wrapper instances for every enabled
@@ -198,12 +208,8 @@ func initBackendWrappers(
 	defaultBackend := cfg.DefaultBackendID()
 
 	out := backendWrappers{
-		Wrappers:   make(map[string]*cli.Wrapper, len(backendsCfg)),
-		Models:     make(map[string]string, len(backendsCfg)),
-		ExtraArgs:  make(map[string][]string, len(backendsCfg)),
-		Efforts:    make(map[string]string, len(backendsCfg)),
-		ModelLists: make(map[string][]string, len(backendsCfg)),
-		DefaultID:  defaultBackend,
+		Runtimes:  make(map[string]session.BackendRuntime, len(backendsCfg)),
+		DefaultID: defaultBackend,
 	}
 
 	for _, b := range backendsCfg {
@@ -223,15 +229,15 @@ func initBackendWrappers(
 		// startup for the full 5s when SIGTERM arrives mid-init.
 		w := cli.NewWrapperLazy(b.Path, proto, b.ID).WithManager(shimMgr)
 		w.Probe(ctx)
-		out.Wrappers[w.BackendID] = w
+		rt := session.BackendRuntime{Wrapper: w}
 		if b.Model != "" {
-			out.Models[w.BackendID] = b.Model
+			rt.Model = b.Model
 		}
 		if len(b.Args) > 0 {
-			out.ExtraArgs[w.BackendID] = b.Args
+			rt.ExtraArgs = b.Args
 		}
 		if len(b.Models) > 0 {
-			out.ModelLists[w.BackendID] = b.Models
+			rt.ConfiguredModels = b.Models
 		}
 		// Capability check lives here (where the Protocol is built), not in
 		// config validation. Warn rather than refuse to start: EnabledBackends()
@@ -239,7 +245,7 @@ func initBackendWrappers(
 		// the top-level default would otherwise be unbootable.
 		if b.Effort != "" {
 			if cli.ProtocolCaps(proto).EffortTier {
-				out.Efforts[w.BackendID] = b.Effort
+				rt.Effort = b.Effort
 			} else {
 				cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
 					Layer:  "caps",
@@ -266,6 +272,9 @@ func initBackendWrappers(
 				"id", w.BackendID, "name", w.CLIName,
 				"path", w.CLIPath, "version", w.CLIVersion)
 		}
+		// Store the completed row LAST: the effort capability check above may
+		// still be adding to it, and BackendRuntime is a value.
+		out.Runtimes[w.BackendID] = rt
 	}
 
 	if out.Default == nil {
@@ -275,7 +284,7 @@ func initBackendWrappers(
 	// explicit-backend sessions (e.g. sysession) stay usable; fast-fail only
 	// when EVERY backend is unreachable (#903).
 	if out.Default.CLIVersion == "" {
-		if !backendsHaveHealthySibling(out.Wrappers, out.DefaultID) {
+		if !backendsHaveHealthySibling(out.wrapperMap(), out.DefaultID) {
 			return out, false
 		}
 		slog.Warn("default cli backend probe failed; healthy sibling(s) available — continuing startup",
