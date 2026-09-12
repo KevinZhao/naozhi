@@ -12,7 +12,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/textutil"
+	"github.com/naozhi/naozhi/internal/replyfmt"
 )
 
 // NotifyTarget identifies an IM channel for cron completion notifications.
@@ -248,7 +248,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	// marker and return before the chunk loop (#2181).
 	if r.UsesSingleUseReplyToken() {
 		if utf8.RuneCountInString(text) > maxLen {
-			text = truncateForSingleReply(text, maxLen)
+			text = replyfmt.TruncateForSingleReply(text, maxLen)
 		}
 		if _, err := r.Reply(replyCtx, chatID, text); err != nil {
 			metrics.CronNotifyPartialTotal.Add(1)
@@ -257,7 +257,14 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		}
 		return
 	}
-	chunks := r.Split(text, maxLen)
+	// Reserve room for the "\n— [i/N]" page suffix BEFORE splitting, the same way
+	// the IM reply path does. cron used to split at the raw limit and append
+	// nothing: a notification spread over four messages arrived with no "[2/4]",
+	// so a recipient could not tell whether they had the whole thing (J2 #2548).
+	// Reserving after the split would push full chunks past hard API ceilings
+	// (#2008), which is why replyfmt computes the width in two passes.
+	splitLen, suppressSuffix := replyfmt.ReserveForPageSuffix(maxLen, utf8.RuneCountInString(text))
+	chunks := r.Split(text, splitLen)
 	// Cap the chunk count before the loop (#568) and surface the truncation in
 	// slog so operators see the dropped tail.
 	totalChunks := len(chunks)
@@ -285,6 +292,12 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 				"sent", delivered, "remaining", len(chunks)-i+dropped)
 			return
 		}
+		// Page suffix on the ORIGINAL chunk count, so a cap-truncated notify still
+		// says "[2/9]" rather than renumbering to the delivered subset — the
+		// recipient needs to know a tail is missing.
+		if totalChunks > 1 && !suppressSuffix {
+			chunk += replyfmt.PageSuffix(i+1, totalChunks)
+		}
 		// r.Reply passes replyCtx through unchanged (#725), so the #799 stopCtx
 		// chain still short-circuits a hung webhook on Stop.
 		if _, err := r.Reply(replyCtx, chatID, chunk); err != nil {
@@ -302,29 +315,4 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		}
 		delivered++
 	}
-}
-
-// singleReplyTruncMarker is appended (within the rune budget) when a cron
-// notify to a single-use-token platform must be truncated to fit one message.
-// Duplicated from internal/dispatch because cron cannot import dispatch or
-// platform (no_platform_import_test.go) (#2181).
-const singleReplyTruncMarker = "\n…(truncated)"
-
-// singleReplyTruncMarkerRunes is the rune width of singleReplyTruncMarker,
-// computed once rather than on every truncateForSingleReply call.
-var singleReplyTruncMarkerRunes = utf8.RuneCountInString(singleReplyTruncMarker)
-
-// truncateForSingleReply trims text to at most maxRunes runes, reserving room
-// for a visible truncation marker so the recipient knows the reply was cut.
-// When maxRunes is too small to fit the marker, it falls back to a bare
-// rune-safe truncation (content kept maximal, marker dropped). Mirrors
-// internal/dispatch.truncateForSingleReply (#2181). TruncateRunesNoEllipsis
-// sub-slices the original string without materialising a []rune.
-func truncateForSingleReply(text string, maxRunes int) string {
-	keep := maxRunes - singleReplyTruncMarkerRunes
-	if keep <= 0 {
-		// No room for the marker — keep as much content as fits.
-		return textutil.TruncateRunesNoEllipsis(text, maxRunes)
-	}
-	return textutil.TruncateRunesNoEllipsis(text, keep) + singleReplyTruncMarker
 }

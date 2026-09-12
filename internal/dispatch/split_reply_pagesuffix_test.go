@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/replyfmt"
 )
 
 var errHardLimitExceeded = errors.New("hardlimit: BASE_TYPE_MAX_LENGTH")
@@ -129,7 +130,7 @@ func TestSendSplitReply_NewlineDenseRespectsHardLimit(t *testing.T) {
 // still appended the suffix, so every chunk exceeded maxLen. The fix
 // suppresses the suffix in that regime; chunks must stay <= maxLen.
 func TestSendSplitReply_TinyMaxLenSuppressesSuffix(t *testing.T) {
-	const limit = 5 // < pageSuffixRuneWidth(1) == 8
+	const limit = 5 // < replyfmt page-suffix width for 1 digit (8)
 	hp := &hardLimitPlatform{limit: limit}
 	d := &Dispatcher{}
 
@@ -219,7 +220,7 @@ func TestSendSplitReply_SingleUseTokenCollapsesToOneMessage(t *testing.T) {
 	if n := utf8.RuneCountInString(sp.accepted[0]); n > limit {
 		t.Errorf("collapsed message has %d runes, exceeds limit %d", n, limit)
 	}
-	if !strings.HasSuffix(sp.accepted[0], singleReplyTruncMarker) {
+	if !strings.HasSuffix(sp.accepted[0], replyfmt.SingleReplyTruncMarker) {
 		t.Errorf("collapsed message missing truncation marker: %q", sp.accepted[0])
 	}
 }

@@ -51,6 +51,10 @@ type fakePartialPlatform struct {
 	sendCount atomic.Int32 // total Reply invocations including retries
 	mu        sync.Mutex
 	seenTexts map[string]struct{} // unique chunk Texts handed to Reply
+	// sentOrder records each chunk Text the FIRST time Reply sees it, in order.
+	// seenTexts is a map, so it cannot answer "was chunk 2 numbered [2/N]" —
+	// the page-suffix tests (J2 #2548) need the sequence.
+	sentOrder []string
 }
 
 func (f *fakePartialPlatform) Name() string { return "fake-notify" }
@@ -61,6 +65,9 @@ func (f *fakePartialPlatform) Reply(_ context.Context, msg platform.OutgoingMess
 	f.mu.Lock()
 	if f.seenTexts == nil {
 		f.seenTexts = map[string]struct{}{}
+	}
+	if _, dup := f.seenTexts[msg.Text]; !dup {
+		f.sentOrder = append(f.sentOrder, msg.Text)
 	}
 	f.seenTexts[msg.Text] = struct{}{}
 	uniq := len(f.seenTexts)
@@ -78,6 +85,13 @@ func (f *fakePartialPlatform) uniqueChunks() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.seenTexts)
+}
+
+// sentChunks returns the chunk Texts in the order Reply first saw them.
+func (f *fakePartialPlatform) sentChunks() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sentOrder...)
 }
 
 // TestR250CR18_NotifyTargetAbortsOnFirstChunkFailure pins the #1151 contract:
