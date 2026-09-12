@@ -61,13 +61,13 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 		claudeDir:       "/claude/dir",
 		kiroSessionsDir: "/kiro/dir",
 	}
-	r.bkStore.wrappers = map[string]*cli.Wrapper{
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude-routed": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude-routed"),
 		"kiro-routed":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-routed"),
-	}
+	})
 	r.bkStore.defaultBackend = defaultBackend
 	r.picks.backend = make(map[string]string)
-	r.bkStore.wrapper = r.bkStore.wrappers[defaultBackend]
+	r.bkStore.wrapper = r.bkStore.runtime(defaultBackend).Wrapper
 	return
 }
 
@@ -144,7 +144,7 @@ func TestAttachHistorySource_NilWrapperUsesNoop(t *testing.T) {
 	r := &Router{
 		ss: sessionStore{sessions: make(map[string]*ManagedSession)},
 	}
-	r.bkStore.wrappers = map[string]*cli.Wrapper{}
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{})
 	r.bkStore.defaultBackend = ""
 	r.picks.backend = make(map[string]string)
 	// r.bkStore.wrapper intentionally nil.
@@ -250,12 +250,12 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 		ss:              sessionStore{sessions: make(map[string]*ManagedSession)},
 		kiroSessionsDir: "/the/kiro/dir",
 	}
-	r.bkStore.wrappers = map[string]*cli.Wrapper{
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"kiro-rt-probe": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-rt-probe"),
-	}
+	})
 	r.bkStore.defaultBackend = "kiro-rt-probe"
 	r.picks.backend = make(map[string]string)
-	r.bkStore.wrapper = r.bkStore.wrappers["kiro-rt-probe"]
+	r.bkStore.wrapper = r.bkStore.runtime("kiro-rt-probe").Wrapper
 
 	s := &ManagedSession{key: "feishu:direct:greta:general"}
 	s.SetBackend("kiro-rt-probe")
@@ -282,13 +282,13 @@ func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 		claudeDir:       "/claude/dir",
 		kiroSessionsDir: "/kiro/sessions/cli",
 	}
-	r.bkStore.wrappers = map[string]*cli.Wrapper{
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
-	}
+	})
 	r.bkStore.defaultBackend = "claude"
 	r.picks.backend = make(map[string]string)
-	r.bkStore.wrapper = r.bkStore.wrappers["claude"]
+	r.bkStore.wrapper = r.bkStore.runtime("claude").Wrapper
 
 	s := &ManagedSession{key: "feishu:direct:harry:general"}
 	s.SetBackend("kiro")

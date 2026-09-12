@@ -22,8 +22,16 @@ import (
 type backendStore struct {
 	// 读写: backend (wrapperFor/CLIName/CLIVersion/CLIPath), core (init), lifecycle (spawn), shim (shimManagers)
 	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
-	// 读写: backend (wrapperFor/managerFor/BackendIDs/BackendWrapper), core (init), lifecycle (spawn), shim (shimManagers)
-	wrappers map[string]*cli.Wrapper // backend ID → wrapper (nil in legacy mode)
+	// runtimes holds one BackendRuntime per backend ID — the row that replaced
+	// six parallel map[backendID]→property tables (G2 #2666). See
+	// backend_runtime.go.
+	// 读写: backend (runtime/runtimeMut/wrapperFor/BackendIDs/BackendWrapper/backendDefaultsFor/BackendModelManifest), core (initRuntimes), lifecycle (spawn), shim (shimManagers)
+	runtimes map[string]*BackendRuntime
+	// perBackendWrappers records whether the composition root supplied
+	// per-backend wrappers. Distinct from len(runtimes), which config alone can
+	// make non-empty — wrapperFor's legacy branch needs the former.
+	// 读写: backend (wrapperFor), core (initRuntimes)
+	perBackendWrappers bool
 	// 读写: backend (DefaultBackend/wrapperFor/BackendWrapper/BackendIDs), core (init), lifecycle (resolveSpawnParams)
 	defaultBackend string // backend ID used when AgentOpts.Backend is empty
 	// backendIDs caches BackendIDs' ordering; computed once in NewRouter.
@@ -33,25 +41,6 @@ type backendStore struct {
 	model string
 	// 读写: backend (backendDefaultsFor base), core (init)
 	extraArgs []string
-	// backendModels / backendExtraArgs override model and args per backend ID.
-	// 读写: backend (backendDefaultsFor override), core (init)
-	backendModels map[string]string
-	// 读写: backend (backendDefaultsFor override), core (init)
-	backendExtraArgs map[string][]string
-	// backendEfforts holds the thinking-effort tier per backend ID. No
-	// router-wide base on purpose: the composition root already folded
-	// cli.effort in and dropped tier-less backends. AgentOpts.Effort layers
-	// above it unfiltered (harmless). docs/rfc/kiro-effort-control.md
-	// 读写: backend (backendDefaultsFor), core (init)
-	backendEfforts map[string]string
-	// configuredModelLists: operator-declared manifest per backend ID
-	// (cli.backends[].models). docs/rfc/dashboard-model-effort-control.md §4.2.
-	// 读写: backend (BackendModelManifest), core (init)
-	configuredModelLists map[string][]string
-	// modelManifests caches the agent-reported model list per backend ID;
-	// survives process death. Mutated under r.mu write lock.
-	// 读写: backend (BackendModelManifest), core (init)
-	modelManifests map[string][]cli.ModelInfo
 }
 
 // maxModelBytes caps model identifiers, which flow into the CLI child's
@@ -135,7 +124,7 @@ func (r *Router) CLIVersion() string {
 // default) and returns (wrapper, effectiveID). Callers must treat a nil
 // wrapper as "no backend available" and fail fast.
 func (r *Router) wrapperFor(backend string) (*cli.Wrapper, string) {
-	if len(r.bkStore.wrappers) == 0 {
+	if !r.bkStore.perBackendWrappers {
 		id := backend
 		if id == "" && r.bkStore.wrapper != nil {
 			id = r.bkStore.wrapper.BackendID
@@ -143,12 +132,12 @@ func (r *Router) wrapperFor(backend string) (*cli.Wrapper, string) {
 		return r.bkStore.wrapper, id
 	}
 	if backend != "" {
-		if w, ok := r.bkStore.wrappers[backend]; ok {
+		if w := r.bkStore.runtime(backend).Wrapper; w != nil {
 			return w, backend
 		}
 	}
 	if r.bkStore.defaultBackend != "" {
-		if w, ok := r.bkStore.wrappers[r.bkStore.defaultBackend]; ok {
+		if w := r.bkStore.runtime(r.bkStore.defaultBackend).Wrapper; w != nil {
 			return w, r.bkStore.defaultBackend
 		}
 	}
@@ -178,7 +167,7 @@ func (r *Router) BackendIDs() []string {
 		copy(out, r.bkStore.backendIDs)
 		return out
 	}
-	return computeBackendIDs(r.bkStore.wrapper, r.bkStore.wrappers, r.bkStore.defaultBackend)
+	return computeBackendIDs(r.bkStore.wrapper, r.bkStore.backendWrappers(), r.bkStore.defaultBackend)
 }
 
 // DefaultBackend returns the backend ID used when no explicit backend is
@@ -196,7 +185,7 @@ func (r *Router) DefaultBackend() string {
 // BackendWrapper returns the wrapper registered for the given backend ID, or
 // nil if none matches. For read-only metadata (CLIName, CLIVersion, CLIPath).
 func (r *Router) BackendWrapper(id string) *cli.Wrapper {
-	if len(r.bkStore.wrappers) == 0 {
+	if !r.bkStore.perBackendWrappers {
 		if id == "" || r.bkStore.wrapper == nil || r.bkStore.wrapper.BackendID == id || (id == "claude" && r.bkStore.wrapper.BackendID == "") {
 			return r.bkStore.wrapper
 		}
@@ -205,7 +194,7 @@ func (r *Router) BackendWrapper(id string) *cli.Wrapper {
 	if id == "" {
 		id = r.bkStore.defaultBackend
 	}
-	return r.bkStore.wrappers[id]
+	return r.bkStore.runtime(id).Wrapper
 }
 
 // computeBackendIDs builds the dashboard-stable ordering used by BackendIDs:
@@ -352,10 +341,10 @@ func MergeBackendDefaults(routerModel string, routerArgs []string, backendModel 
 // the same values, which is why the precedence lives in MergeBackendDefaults
 // rather than here (#739, #2668).
 func (r *Router) backendDefaultsFor(backendID string) BackendDefaults {
+	rt := r.bkStore.runtime(backendID)
 	return MergeBackendDefaults(
 		r.bkStore.model, r.bkStore.extraArgs,
-		r.bkStore.backendModels[backendID], r.bkStore.backendExtraArgs[backendID],
-		r.bkStore.backendEfforts[backendID],
+		rt.Model, rt.ExtraArgs, rt.Effort,
 	)
 }
 
@@ -388,14 +377,14 @@ func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
 			continue
 		}
 		if models := am.AvailableModels(); len(models) > 0 {
-			r.bkStore.modelManifests[backendID] = models
+			r.bkStore.runtimeMut(backendID).Manifest = models
 			break
 		}
 	}
-	if m := r.bkStore.modelManifests[backendID]; len(m) > 0 {
+	if m := r.bkStore.runtime(backendID).Manifest; len(m) > 0 {
 		return m
 	}
-	if lst := r.bkStore.configuredModelLists[backendID]; len(lst) > 0 {
+	if lst := r.bkStore.runtime(backendID).ConfiguredModels; len(lst) > 0 {
 		out := make([]cli.ModelInfo, 0, len(lst))
 		for _, id := range lst {
 			out = append(out, cli.ModelInfo{ID: id})

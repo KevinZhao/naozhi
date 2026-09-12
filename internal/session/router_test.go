@@ -2153,10 +2153,10 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 			ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
 			defaultCWD: "/default/ws",
 		}
-		r.bkStore.wrappers = map[string]*cli.Wrapper{
+		r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
-		}
+		})
 		r.bkStore.defaultBackend = "claude"
 		r.picks.backend = make(map[string]string)
 		r.claudeDir = t.TempDir() // empty: no claude jsonl exists anywhere
@@ -2237,15 +2237,15 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 			ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
 			defaultCWD: "/default/ws",
 		}
-		r.bkStore.wrappers = map[string]*cli.Wrapper{
+		r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
-		}
+		})
 		r.bkStore.defaultBackend = "claude"
 		r.bkStore.model = "sonnet-default"
 		r.bkStore.extraArgs = []string{"--flag-a"}
-		r.bkStore.backendModels = map[string]string{"kiro": "kiro-model"}
-		r.bkStore.backendExtraArgs = map[string][]string{"kiro": {"--kiro-arg"}}
+		r.bkStore.setBackendModelsForTest(map[string]string{"kiro": "kiro-model"})
+		r.bkStore.setBackendExtraArgsForTest(map[string][]string{"kiro": {"--kiro-arg"}})
 		r.picks.backend = make(map[string]string)
 		return r
 	}
@@ -2413,9 +2413,9 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 			ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
 			defaultCWD: "/default/ws",
 		}
-		r.bkStore.wrappers = map[string]*cli.Wrapper{
+		r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-		}
+		})
 		r.bkStore.defaultBackend = "claude"
 		r.bkStore.model = "sonnet-default"
 		r.picks.backend = make(map[string]string)

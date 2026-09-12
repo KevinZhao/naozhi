@@ -20,12 +20,12 @@ func mkTuningRouter(t *testing.T) *Router {
 		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
 		defaultCWD: "/default/ws",
 	}
-	r.bkStore.wrappers = map[string]*cli.Wrapper{
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"kiro": cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
-	}
+	})
 	r.bkStore.defaultBackend = "kiro"
 	r.picks.backend = make(map[string]string)
-	r.bkStore.backendEfforts = map[string]string{"kiro": "high"}
+	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 	r.bkStore.model = "claude-fable-5"
 	r.claudeDir = t.TempDir()
 	r.kiroSessionsDir = t.TempDir()

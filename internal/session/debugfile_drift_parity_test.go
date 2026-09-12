@@ -42,12 +42,12 @@ func mkClaudeDriftRouter(t *testing.T, debugDir string) *Router {
 		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
 		defaultCWD: "/default/ws",
 	}
-	r.bkStore.wrappers = map[string]*cli.Wrapper{
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-	}
+	})
 	r.bkStore.defaultBackend = "claude"
 	r.picks.backend = make(map[string]string)
-	r.bkStore.backendEfforts = make(map[string]string)
+	r.bkStore.setBackendEffortsForTest(make(map[string]string))
 	r.bkStore.model = "claude-sonnet-5"
 	r.claudeDir = t.TempDir()
 	r.cliDebugDir = debugDir

@@ -58,7 +58,7 @@ func (r *Router) shimManagers() []*shim.Manager {
 		seen[w.ShimManager] = true
 		out = append(out, w.ShimManager)
 	}
-	for _, w := range r.bkStore.wrappers {
+	for _, w := range r.bkStore.backendWrappers() {
 		add(w)
 	}
 	add(r.bkStore.wrapper)
