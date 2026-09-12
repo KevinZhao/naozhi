@@ -76,7 +76,16 @@ type Result struct {
 // undeletable file must not stop the rest of the sweep.
 func (p Pass) Run() (Result, error) {
 	var res Result
-	if p.Dir == "" || p.MaxAge <= 0 || p.Ext == "" {
+	if p.MaxAge <= 0 || p.Ext == "" {
+		return res, nil
+	}
+	// A registered pass with no directory swept nothing and said nothing — that
+	// is how the shim-logs pass shipped inert (it read the raw config value, and
+	// shim.NewManager applies its ~/.naozhi/shims default internally). Callers
+	// that legitimately have no directory must not register the pass at all.
+	if p.Dir == "" {
+		slog.Warn("sweep pass registered with an empty directory; it will never run",
+			"pass", p.Name, "hint", "resolve the directory before registering, or do not register the pass")
 		return res, nil
 	}
 	entries, err := os.ReadDir(p.Dir)

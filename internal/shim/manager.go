@@ -66,6 +66,14 @@ func validateKeyForShim(k string) error {
 // session.ErrMaxProcs: transient (clears as sessions exit), not a config error.
 var ErrMaxShims = errors.New("max shims reached")
 
+// StateDir is the resolved shim state directory — the ManagerConfig value with
+// NewManager's ~/.naozhi/shims default already applied. Callers that need to
+// operate on that directory (the datadir.Sweeper retention pass) MUST read it
+// here rather than re-deriving it from config: an empty cfg.Session.Shim.StateDir
+// is the common case, and a second copy of the default silently disagrees with
+// this one the moment either changes.
+func (m *Manager) StateDir() string { return m.stateDir }
+
 // ErrStateDirQuotaExceeded is returned by StartShim when spawning another shim
 // would exceed the state-dir quota. Operator-actionable (clean ~/.naozhi/shims
 // or raise the quota), unlike the transient ErrMaxShims (#456).
