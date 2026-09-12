@@ -263,11 +263,16 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 	if defaultWrapper != nil {
 		binPath = defaultWrapper.CLIPath
 	}
+	backendID := ""
+	if defaultWrapper != nil {
+		backendID = defaultWrapper.BackendID
+	}
 	runner, err := sysession.NewRunner(sysession.RunnerConfig{
-		BinPath: binPath,
-		WorkDir: resolvedWorkDir,
-		Model:   cfg.Sysession.Runner.Model,
-		Ledger:  router.CostLedger(),
+		BinPath:   binPath,
+		BackendID: backendID,
+		WorkDir:   resolvedWorkDir,
+		Model:     cfg.Sysession.Runner.Model,
+		Ledger:    router.CostLedger(),
 		// Same Bedrock/Anthropic/proxy plumbing as session spawns. Trailing
 		// underscore = prefix match. AWS_ auth-source vars never reach naozhi's
 		// env in the first place (filterClaudeEnv denylist).
