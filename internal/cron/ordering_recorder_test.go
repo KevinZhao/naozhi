@@ -48,16 +48,6 @@ func (o *orderRecorder) events() []string {
 	return out
 }
 
-// firstIndex returns the position of the first event equal to name, or -1.
-func (o *orderRecorder) firstIndex(name string) int {
-	for i, e := range o.events() {
-		if e == name {
-			return i
-		}
-	}
-	return -1
-}
-
 // assertCountBefore fails unless at least `want` occurrences of `before` precede
 // the FIRST occurrence of `after`.
 //

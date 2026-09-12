@@ -3,8 +3,6 @@ package cron
 import (
 	"context"
 	"errors"
-	"os"
-	"regexp"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -42,70 +40,6 @@ func (r *errSendRouter) GetOrCreate(_ context.Context, _ string, _ AgentOpts) (S
 	return r.sess, SessionExisting, nil
 }
 
-// TestFreshReapErrorPath_SourceAnchor_ResetBeforeFinishRun is the
-// R20260608-CORR-1 (#1956) source anchor: the send-error branch of executeOpt
-// MUST call `if snap.fresh { s.router.Reset(key) }` BEFORE the finishRun that
-// releases the inflight CAS gate. The ordering mirrors the success-path
-// R050103A-COUPLING-1 (#1911) contract. A regression that moves Reset back
-// after finishRun re-opens the race where a concurrent TriggerNow wins the CAS
-// and run-A's late Reset blindly tears down run-B's fresh session.
-//
-// We pin this with a source-order check rather than a race detector test
-// because the window is too narrow to reliably reproduce at runtime — the
-// structural guard is the right tool for an ordering invariant.
-func TestFreshReapErrorPath_SourceAnchor_ResetBeforeFinishRun(t *testing.T) {
-	t.Parallel()
-
-	src, err := os.ReadFile("scheduler_run.go")
-	if err != nil {
-		t.Fatalf("read scheduler_run.go: %v", err)
-	}
-	body := string(src)
-
-	// For each patched branch the if-snap.fresh-Reset block must appear
-	// BEFORE the immediately following finishRun call. We walk the source
-	// positions of all `if snap.fresh {` guarded Reset calls and all
-	// `s.finishRun(finishArgs{` calls and verify that every guarded-Reset
-	// position is followed by at least one finishRun that is closer than the
-	// NEXT guarded-Reset.
-	resetBlockRe := regexp.MustCompile(`if snap\.fresh \{\s*\n\s*s\.router\.Reset\(key\)`)
-	finishRunRe := regexp.MustCompile(`s\.finishRun\(finishArgs\{`)
-
-	resetMatches := resetBlockRe.FindAllStringIndex(body, -1)
-	finishMatches := finishRunRe.FindAllStringIndex(body, -1)
-
-	if len(resetMatches) == 0 {
-		t.Fatal("scheduler_run.go: no `if snap.fresh { s.router.Reset(key) }` blocks found; " +
-			"the error/cancel-path reap guard must be present (#1956)")
-	}
-	if len(finishMatches) == 0 {
-		t.Fatal("scheduler_run.go: no finishRun(finishArgs{) calls found")
-	}
-
-	// Each snap.fresh Reset block must be followed by a finishRun before the
-	// next snap.fresh Reset block (or end of file).
-	for i, rm := range resetMatches {
-		// upper bound: next reset block start, or EOF
-		upperBound := len(body)
-		if i+1 < len(resetMatches) {
-			upperBound = resetMatches[i+1][0]
-		}
-		found := false
-		for _, fm := range finishMatches {
-			if fm[0] > rm[1] && fm[0] < upperBound {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("scheduler_run.go: `if snap.fresh { s.router.Reset(key) }` block at offset %d is NOT "+
-				"immediately followed by a finishRun(finishArgs{) call before the next Reset block (or EOF); "+
-				"Reset must precede finishRun so the CAS gate is still held during Reset (#1956)",
-				rm[0])
-		}
-	}
-}
-
 // TestFreshContextResetsOnSendError pins the behavioral half of #1956:
 // a fresh-context cron job where Send returns an error MUST call
 // router.Reset(cronKey) — so the exempt CLI session (~1.6 GB) is reclaimed
@@ -115,9 +49,10 @@ func TestFreshReapErrorPath_SourceAnchor_ResetBeforeFinishRun(t *testing.T) {
 func TestFreshContextResetsOnSendError(t *testing.T) {
 	t.Parallel()
 
-	rec := &recordingBroadcaster{}
+	ord := &orderRecorder{}
+	rec := &recordingBroadcaster{order: ord}
 	router := &errSendRouter{
-		reapRouter: reapRouter{},
+		reapRouter: reapRouter{order: ord},
 		sess:       errSendSession{sendErr: errors.New("send failed: connection reset")},
 	}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
@@ -151,6 +86,12 @@ func TestFreshContextResetsOnSendError(t *testing.T) {
 			"resets=%v — error path must Reset the exempt session before releasing the CAS gate (#1956)",
 			wantKey, resetCount, resets)
 	}
+	// The ordering itself, which used to be a regexp over scheduler_run.go.
+	// >=2: preflight AND reap must both land inside the gate — asserting only
+	// "some reset precedes run-ended" is satisfied by the preflight alone, which
+	// lets a deferred reap slip through.
+	ord.assertCountBefore(t, "reset", 2, "run-ended",
+		"error path must Reset the exempt session while the CAS gate is held (#1956)")
 }
 
 // TestFreshContextResetsOnCancel pins the behavioral half of #1956 for the
@@ -159,9 +100,10 @@ func TestFreshContextResetsOnSendError(t *testing.T) {
 func TestFreshContextResetsOnCancel(t *testing.T) {
 	t.Parallel()
 
-	rec := &recordingBroadcaster{}
+	ord := &orderRecorder{}
+	rec := &recordingBroadcaster{order: ord}
 	router := &errSendRouter{
-		reapRouter: reapRouter{},
+		reapRouter: reapRouter{order: ord},
 		sess:       cancelSendSession{},
 	}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
@@ -195,4 +137,10 @@ func TestFreshContextResetsOnCancel(t *testing.T) {
 			"resets=%v — cancel path must Reset the exempt session before releasing the CAS gate (#1956)",
 			wantKey, resetCount, resets)
 	}
+	// The ordering itself, which used to be a regexp over scheduler_run.go.
+	// >=2: preflight AND reap must both land inside the gate — asserting only
+	// "some reset precedes run-ended" is satisfied by the preflight alone, which
+	// lets a deferred reap slip through.
+	ord.assertCountBefore(t, "reset", 2, "run-ended",
+		"cancel path must Reset the exempt session while the CAS gate is held (#1956)")
 }
