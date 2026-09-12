@@ -3,8 +3,6 @@ package cron
 import (
 	"context"
 	"errors"
-	"os"
-	"regexp"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -31,59 +29,6 @@ func (r *cancelGetSessionRouter) GetOrCreate(_ context.Context, _ string, _ Agen
 	return nil, SessionExisting, context.Canceled
 }
 
-// TestFreshGetSession_SourceAnchor_ResetBeforeFinishRun is the
-// R20260608133928-GO-7 source anchor: executeGetSession's cancel and
-// session-error branches MUST call `if a.snap.fresh { s.router.Reset(a.key) }`
-// BEFORE the finishRun that releases the inflight CAS gate.
-// Matches the executeOpt ordering contract established by R20260608-CORR-1
-// (#1956).
-func TestFreshGetSession_SourceAnchor_ResetBeforeFinishRun(t *testing.T) {
-	t.Parallel()
-
-	src, err := os.ReadFile("scheduler_run.go")
-	if err != nil {
-		t.Fatalf("read scheduler_run.go: %v", err)
-	}
-	body := string(src)
-
-	// Every `if a.snap.fresh {` Reset block must be followed by a finishRun
-	// before the next such block (or EOF) — ordering invariant for
-	// executeGetSession's a.snap / a.key variant.
-	resetBlockRe := regexp.MustCompile(`if a\.snap\.fresh \{\s*\n\s*s\.router\.Reset\(a\.key\)`)
-	finishRunRe := regexp.MustCompile(`s\.finishRun\(finishArgs\{`)
-
-	resetMatches := resetBlockRe.FindAllStringIndex(body, -1)
-	finishMatches := finishRunRe.FindAllStringIndex(body, -1)
-
-	if len(resetMatches) == 0 {
-		t.Fatal("scheduler_run.go: no `if a.snap.fresh { s.router.Reset(a.key) }` blocks found; " +
-			"executeGetSession error/cancel-path reap guard must be present (R20260608133928-GO-7)")
-	}
-	if len(finishMatches) == 0 {
-		t.Fatal("scheduler_run.go: no finishRun(finishArgs{) calls found")
-	}
-
-	for i, rm := range resetMatches {
-		upperBound := len(body)
-		if i+1 < len(resetMatches) {
-			upperBound = resetMatches[i+1][0]
-		}
-		found := false
-		for _, fm := range finishMatches {
-			if fm[0] > rm[1] && fm[0] < upperBound {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("scheduler_run.go: `if a.snap.fresh { s.router.Reset(a.key) }` block at offset %d "+
-				"is NOT immediately followed by a finishRun(finishArgs{) call before the next Reset block (or EOF); "+
-				"Reset must precede finishRun so the CAS gate is still held during Reset (R20260608133928-GO-7)",
-				rm[0])
-		}
-	}
-}
-
 // TestFreshGetSession_SessionError_ResetsBeforeFinishRun verifies that when
 // fresh-mode GetOrCreate returns a non-cancel error, Reset(cronKey) is called
 // (at least once for the preflight, and once for the error-path reap) before
@@ -92,9 +37,10 @@ func TestFreshGetSession_SourceAnchor_ResetBeforeFinishRun(t *testing.T) {
 func TestFreshGetSession_SessionError_ResetsBeforeFinishRun(t *testing.T) {
 	t.Parallel()
 
-	rec := &recordingBroadcaster{}
+	ord := &orderRecorder{}
+	rec := &recordingBroadcaster{order: ord}
 	router := &errGetSessionRouter{
-		reapRouter: reapRouter{},
+		reapRouter: reapRouter{order: ord},
 		getErr:     errors.New("session backend unavailable"),
 	}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
@@ -128,6 +74,19 @@ func TestFreshGetSession_SessionError_ResetsBeforeFinishRun(t *testing.T) {
 			"resets=%v — session-error path must Reset the fresh session before releasing the CAS gate (R20260608133928-GO-7)",
 			wantKey, resetCount, resets)
 	}
+	// The ordering itself, which used to be a regexp over scheduler_run.go:
+	// finishRun emits run-ended AND releases the CAS gate, so a Reset landing
+	// after it ran outside the gate.
+	// >=2: the preflight Reset AND the error-path reap must both land inside the
+	// gate. Asserting only "some reset precedes run-ended" is satisfied by the
+	// preflight, which lets a deferred reap slip through.
+	ord.assertCountBefore(t, "reset", 2, "run-ended",
+		"session-error path must Reset the fresh session while the CAS gate is held (R20260608133928-GO-7)")
+	// The stub re-register on this branch must also precede the gate release:
+	// executeGetSession non-cancel branch (R202606h-GO-009/GO-009b/GO-010). This replaces the
+	// ">=5 stub-refresh call sites" count in the deleted source anchor.
+	ord.assertCountBefore(t, "register-stub", 1, "run-ended",
+		"executeGetSession non-cancel branch must re-register the stub while the CAS gate is held (R202606h-GO-009)")
 }
 
 // TestFreshGetSession_CancelError_ResetsBeforeFinishRun verifies that when
@@ -136,8 +95,9 @@ func TestFreshGetSession_SessionError_ResetsBeforeFinishRun(t *testing.T) {
 func TestFreshGetSession_CancelError_ResetsBeforeFinishRun(t *testing.T) {
 	t.Parallel()
 
-	rec := &recordingBroadcaster{}
-	router := &cancelGetSessionRouter{reapRouter: reapRouter{}}
+	ord := &orderRecorder{}
+	rec := &recordingBroadcaster{order: ord}
+	router := &cancelGetSessionRouter{reapRouter: reapRouter{order: ord}}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-getsess-cancel", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
@@ -169,6 +129,19 @@ func TestFreshGetSession_CancelError_ResetsBeforeFinishRun(t *testing.T) {
 			"resets=%v — GetOrCreate cancel path must Reset the fresh session before releasing the CAS gate (R20260608133928-GO-7)",
 			wantKey, resetCount, resets)
 	}
+	// The ordering itself, which used to be a regexp over scheduler_run.go:
+	// finishRun emits run-ended AND releases the CAS gate, so a Reset landing
+	// after it ran outside the gate.
+	// >=2: the preflight Reset AND the error-path reap must both land inside the
+	// gate. Asserting only "some reset precedes run-ended" is satisfied by the
+	// preflight, which lets a deferred reap slip through.
+	ord.assertCountBefore(t, "reset", 2, "run-ended",
+		"GetOrCreate cancel path must Reset the fresh session while the CAS gate is held (R20260608133928-GO-7)")
+	// The stub re-register on this branch must also precede the gate release:
+	// executeGetSession cancel branch (R202606h-GO-009/GO-009b/GO-010). This replaces the
+	// ">=5 stub-refresh call sites" count in the deleted source anchor.
+	ord.assertCountBefore(t, "register-stub", 1, "run-ended",
+		"executeGetSession cancel branch must re-register the stub while the CAS gate is held (R202606h-GO-009)")
 }
 
 // TestPersistentGetSession_SessionError_NoReset verifies that persistent-mode

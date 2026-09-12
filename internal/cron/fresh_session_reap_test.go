@@ -16,15 +16,20 @@ type reapRouter struct {
 	sid           string
 	resetCalls    []string
 	registerCalls []stubCall
+	// order, when set, receives "reset" / "register-stub" in the shared sequence
+	// so a test can assert ordering against run-ended events. nil = not recording.
+	order *orderRecorder
 }
 
 func (r *reapRouter) RegisterCronStubWithChain(key, workspace, prompt string, chainIDs []string) {
+	r.order.record("register-stub")
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.registerCalls = append(r.registerCalls, stubCall{key, workspace, prompt, chainIDs})
 }
 
 func (r *reapRouter) Reset(key string) {
+	r.order.record("reset")
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.resetCalls = append(r.resetCalls, key)
@@ -45,9 +50,13 @@ func (r *reapRouter) snapshot() (resets []string, regs []stubCall) {
 // reproducing a DeleteJobByID landing in the Reset→register window.
 type deleteOnResetRouter struct {
 	reapRouter
-	s        *Scheduler
-	jobID    string
-	resetSeq int
+	s     *Scheduler
+	jobID string
+	// deleteAtReset is which Reset call triggers the delete: 2 (the default when
+	// zero) is the reap window of a fresh SUCCESS run, 1 is the preflight window
+	// that freshContextPreflightP0's delete-mid-execute branch exists for (#2318).
+	deleteAtReset int
+	resetSeq      int
 }
 
 func (r *deleteOnResetRouter) Reset(key string) {
@@ -56,7 +65,11 @@ func (r *deleteOnResetRouter) Reset(key string) {
 	r.resetSeq++
 	seq := r.resetSeq
 	r.mu.Unlock()
-	if seq == 2 { // reap Reset — simulate concurrent Delete winning the race
+	at := r.deleteAtReset
+	if at == 0 {
+		at = 2
+	}
+	if seq == at { // simulate a concurrent Delete winning the race
 		r.s.mu.Lock()
 		delete(r.s.jobs, r.jobID)
 		r.s.mu.Unlock()
@@ -73,8 +86,9 @@ func (r *deleteOnResetRouter) Reset(key string) {
 func TestFreshContextReapsSessionAfterSuccess(t *testing.T) {
 	t.Parallel()
 
-	rec := &recordingBroadcaster{}
-	router := &reapRouter{sid: "sess-fresh-1"}
+	ord := &orderRecorder{}
+	rec := &recordingBroadcaster{order: ord}
+	router := &reapRouter{sid: "sess-fresh-1", order: ord}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-reap", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
@@ -107,6 +121,22 @@ func TestFreshContextReapsSessionAfterSuccess(t *testing.T) {
 		t.Errorf("Reset(%q) count = %d, want >=2 (preflight + post-success reap); resets=%v",
 			wantKey, resetCount, resets)
 	}
+	// Ordering, which used to live in a regexp over scheduler_run.go
+	// (TestExecuteOpt_FreshReap_SourceAnchor, R050103A-COUPLING-1 #1911): the reap
+	// must run BEFORE the finishRun that releases the CAS gate, or a concurrent
+	// TriggerNow can win the gate and have its fresh session torn down by this
+	// run's late Reset. run-ended is emitted by that same finishRun.
+	//
+	// >=2 rather than "some reset first": the preflight Reset alone satisfies the
+	// weaker form, so a reap moved into a deferred closure would pass it while
+	// running after the gate drops.
+	ord.assertCountBefore(t, "reset", 2, "run-ended",
+		"success path must reap the fresh session while the CAS gate is held (R050103A-COUPLING-1 #1911)")
+	// The stub re-register is part of the same reap unit and must also precede
+	// the gate release — a stub refreshed afterwards reopens the phantom-stub
+	// race (R202606h-GO-009).
+	ord.assertCountBefore(t, "register-stub", 1, "run-ended",
+		"the reap's stub re-register must happen while the CAS gate is held (R202606h-GO-009)")
 
 	// The reap must re-register a suspended stub chained to the run's
 	// session ID so the sidebar row + JSONL history survive the idle gap.
