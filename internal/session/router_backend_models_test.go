@@ -23,15 +23,15 @@ func mkManifestRouter(t *testing.T) *Router {
 	r := &Router{
 		ss: sessionStore{sessions: make(map[string]*ManagedSession)},
 	}
-	r.bkStore.wrappers = map[string]*cli.Wrapper{
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-	}
+	})
 	r.bkStore.defaultBackend = "claude"
-	r.bkStore.modelManifests = make(map[string][]cli.ModelInfo)
-	r.bkStore.configuredModelLists = map[string][]string{
+	r.bkStore.setModelManifestsForTest(make(map[string][]cli.ModelInfo))
+	r.bkStore.setConfiguredModelListsForTest(map[string][]string{
 		"claude": {"sonnet", "opus", "haiku"},
-	}
+	})
 	return r
 }
 
@@ -98,7 +98,7 @@ func TestBackendModelManifest_ObservedTier(t *testing.T) {
 
 	t.Run("observed models when no runtime and no config", func(t *testing.T) {
 		r := mkManifestRouter(t)
-		r.bkStore.configuredModelLists = map[string][]string{}
+		r.bkStore.setConfiguredModelListsForTest(map[string][]string{})
 		r.bkStore.model = "us.anthropic.default"
 		addSess(r, "k1", "claude", "sonnet", "")
 		addSess(r, "k2", "claude", "sonnet", "opus") // dup model + tuning
@@ -119,7 +119,7 @@ func TestBackendModelManifest_ObservedTier(t *testing.T) {
 
 	t.Run("observed tier is stable across calls", func(t *testing.T) {
 		r := mkManifestRouter(t)
-		r.bkStore.configuredModelLists = map[string][]string{}
+		r.bkStore.setConfiguredModelListsForTest(map[string][]string{})
 		for _, m := range []string{"c", "a", "b", "d", "e"} {
 			addSess(r, "k-"+m, "claude", m, "")
 		}
@@ -150,7 +150,7 @@ func TestBackendModelManifest_ObservedTier(t *testing.T) {
 
 	t.Run("nothing observed yields nil", func(t *testing.T) {
 		r := mkManifestRouter(t)
-		r.bkStore.configuredModelLists = map[string][]string{}
+		r.bkStore.setConfiguredModelListsForTest(map[string][]string{})
 		addSess(r, "k1", "claude", "", "")
 		if got := r.BackendModelManifest("claude"); got != nil {
 			t.Errorf("manifest = %v, want nil", got)

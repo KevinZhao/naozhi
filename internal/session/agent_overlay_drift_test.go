@@ -40,14 +40,14 @@ func mkOverlayRouter(t *testing.T) *Router {
 		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
 		defaultCWD: "/default/ws",
 	}
-	r.bkStore.wrappers = map[string]*cli.Wrapper{
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
-	}
+	})
 	r.bkStore.defaultBackend = "claude"
 	r.picks.backend = make(map[string]string)
 	r.picks.accessProfile = make(map[string]string)
-	r.bkStore.backendEfforts = map[string]string{"kiro": "high"}
+	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 	r.bkStore.model = "opusplan"
 	r.claudeDir = t.TempDir()
 	r.kiroSessionsDir = t.TempDir()
@@ -157,7 +157,7 @@ func TestAgentOverlayDrift_BackendConfigChangeIsStillDrift(t *testing.T) {
 		r.ss.sessions[key] = s
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 
-		r.bkStore.backendExtraArgs = map[string][]string{"claude": {"--max-turns", "50"}}
+		r.bkStore.setBackendExtraArgsForTest(map[string][]string{"claude": {"--max-turns", "50"}})
 
 		wrapper, backendID := r.wrapperFor(state.Backend)
 		drift, _, current := r.shimArgsDrift(wrapper, backendID, state, s)

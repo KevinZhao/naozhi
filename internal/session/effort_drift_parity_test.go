@@ -114,13 +114,13 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 			ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
 			defaultCWD: "/default/ws",
 		}
-		r.bkStore.wrappers = map[string]*cli.Wrapper{
+		r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 			"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-		}
+		})
 		r.bkStore.defaultBackend = "kiro"
 		r.picks.backend = make(map[string]string)
-		r.bkStore.backendEfforts = backendEfforts
+		r.bkStore.setBackendEffortsForTest(backendEfforts)
 		r.claudeDir = t.TempDir()
 		r.kiroSessionsDir = t.TempDir()
 		return r
@@ -252,7 +252,7 @@ func TestBackendEffortsFeedDriftCheck(t *testing.T) {
 	t.Parallel()
 	r := &Router{}
 	r.bkStore.model = "claude-fable-5"
-	r.bkStore.backendEfforts = map[string]string{"kiro": "xhigh"}
+	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "xhigh"})
 
 	bd := r.backendDefaultsFor("kiro")
 	if bd.Effort != "xhigh" {

@@ -36,7 +36,7 @@ func minimalRouter(t *testing.T) *Router {
 	}
 	r.bkStore.wrapper = w
 	r.bkStore.defaultBackend = "claude"
-	r.bkStore.wrappers = map[string]*cli.Wrapper{"claude": w}
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{"claude": w})
 	return r
 }
 

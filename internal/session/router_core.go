@@ -706,16 +706,13 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.ss.keyhash = make(map[string]string)
 	r.ss.idToKey = make(map[string]string)
 	r.bkStore.wrapper = defaultWrapper
-	r.bkStore.wrappers = wrappers
 	r.bkStore.defaultBackend = defaultBackend
 	r.bkStore.model = cfg.Model
 	r.bkStore.extraArgs = cfg.ExtraArgs
 	r.picks.initLocked()
-	r.bkStore.backendModels = cfg.BackendModels
-	r.bkStore.backendExtraArgs = cfg.BackendExtraArgs
-	r.bkStore.backendEfforts = cfg.BackendEfforts
-	r.bkStore.configuredModelLists = cfg.BackendModelLists
-	r.bkStore.modelManifests = make(map[string][]cli.ModelInfo)
+	// One row per backend instead of six parallel columns (G2 #2666).
+	r.bkStore.initRuntimes(wrappers, cfg.BackendModels, cfg.BackendExtraArgs,
+		cfg.BackendEfforts, cfg.BackendModelLists)
 	r.accessProfiles = cfg.AccessProfiles
 	r.defaultAccessProfile = cfg.DefaultAccessProfile
 	// Run-history store is rooted next to the session store (its own config,
@@ -814,7 +811,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	// through startBackgroundLifecycle (startOnce-guarded; Start() shares it).
 	r.startBackgroundLifecycle()
 
-	r.bkStore.backendIDs = computeBackendIDs(r.bkStore.wrapper, r.bkStore.wrappers, r.bkStore.defaultBackend)
+	r.bkStore.backendIDs = computeBackendIDs(r.bkStore.wrapper, r.bkStore.backendWrappers(), r.bkStore.defaultBackend)
 
 	return r
 }

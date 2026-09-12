@@ -36,10 +36,10 @@ func mkSystemPromptRouter(t *testing.T) *Router {
 		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
 		defaultCWD: "/default/ws",
 	}
-	r.bkStore.wrappers = map[string]*cli.Wrapper{
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
-	}
+	})
 	r.bkStore.defaultBackend = "claude"
 	r.picks.backend = make(map[string]string)
 	r.claudeDir = t.TempDir()

@@ -110,17 +110,14 @@ func TestBackendDefaultsFor_MatchesMergeBackendDefaults(t *testing.T) {
 			r := &Router{}
 			r.bkStore.model = c.routerModel
 			r.bkStore.extraArgs = c.routerArgs
-			r.bkStore.backendModels = map[string]string{}
-			r.bkStore.backendExtraArgs = map[string][]string{}
-			r.bkStore.backendEfforts = map[string]string{}
 			if c.backendModel != "" {
-				r.bkStore.backendModels[backendID] = c.backendModel
+				r.bkStore.setBackendModelsForTest(map[string]string{backendID: c.backendModel})
 			}
 			if len(c.backendArgs) > 0 {
-				r.bkStore.backendExtraArgs[backendID] = c.backendArgs
+				r.bkStore.setBackendExtraArgsForTest(map[string][]string{backendID: c.backendArgs})
 			}
 			if c.effort != "" {
-				r.bkStore.backendEfforts[backendID] = c.effort
+				r.bkStore.setBackendEffortsForTest(map[string]string{backendID: c.effort})
 			}
 
 			viaRouter := r.backendDefaultsFor(backendID)

@@ -38,14 +38,14 @@ func mkTuningTestRouter(t *testing.T) *Router {
 		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
 		defaultCWD: "/default/ws",
 	}
-	r.bkStore.wrappers = map[string]*cli.Wrapper{
+	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		"codex":  cli.NewWrapper("/bin/false", &cli.CodexProtocol{}, "codex"),
-	}
+	})
 	r.bkStore.defaultBackend = "claude"
 	r.picks.backend = make(map[string]string)
-	r.bkStore.backendEfforts = map[string]string{}
+	r.bkStore.setBackendEffortsForTest(map[string]string{})
 	return r
 }
 
@@ -235,7 +235,7 @@ func TestSetSessionTuning_F9PathSelection(t *testing.T) {
 
 	t.Run("kiro with backend-level effort: model switch respawns", func(t *testing.T) {
 		r := mkTuningTestRouter(t)
-		r.bkStore.backendEfforts = map[string]string{"kiro": "high"}
+		r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 		proc := &tuningFakeProc{TestProcess: NewTestProcess()}
 		addTuningSession(r, "k1", "kiro", proc)
 
