@@ -82,6 +82,11 @@ func TestFreshGetSession_SessionError_ResetsBeforeFinishRun(t *testing.T) {
 	// preflight, which lets a deferred reap slip through.
 	ord.assertCountBefore(t, "reset", 2, "run-ended",
 		"session-error path must Reset the fresh session while the CAS gate is held (R20260608133928-GO-7)")
+	// The stub re-register on this branch must also precede the gate release:
+	// executeGetSession non-cancel branch (R202606h-GO-009/GO-009b/GO-010). This replaces the
+	// ">=5 stub-refresh call sites" count in the deleted source anchor.
+	ord.assertCountBefore(t, "register-stub", 1, "run-ended",
+		"executeGetSession non-cancel branch must re-register the stub while the CAS gate is held (R202606h-GO-009)")
 }
 
 // TestFreshGetSession_CancelError_ResetsBeforeFinishRun verifies that when
@@ -132,6 +137,11 @@ func TestFreshGetSession_CancelError_ResetsBeforeFinishRun(t *testing.T) {
 	// preflight, which lets a deferred reap slip through.
 	ord.assertCountBefore(t, "reset", 2, "run-ended",
 		"GetOrCreate cancel path must Reset the fresh session while the CAS gate is held (R20260608133928-GO-7)")
+	// The stub re-register on this branch must also precede the gate release:
+	// executeGetSession cancel branch (R202606h-GO-009/GO-009b/GO-010). This replaces the
+	// ">=5 stub-refresh call sites" count in the deleted source anchor.
+	ord.assertCountBefore(t, "register-stub", 1, "run-ended",
+		"executeGetSession cancel branch must re-register the stub while the CAS gate is held (R202606h-GO-009)")
 }
 
 // TestPersistentGetSession_SessionError_NoReset verifies that persistent-mode

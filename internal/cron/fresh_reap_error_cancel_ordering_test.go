@@ -92,6 +92,11 @@ func TestFreshContextResetsOnSendError(t *testing.T) {
 	// lets a deferred reap slip through.
 	ord.assertCountBefore(t, "reset", 2, "run-ended",
 		"error path must Reset the exempt session while the CAS gate is held (#1956)")
+	// The stub re-register on this branch must also precede the gate release:
+	// execSendError non-cancel branch (R202606h-GO-009/GO-009b/GO-010). This replaces the
+	// ">=5 stub-refresh call sites" count in the deleted source anchor.
+	ord.assertCountBefore(t, "register-stub", 1, "run-ended",
+		"execSendError non-cancel branch must re-register the stub while the CAS gate is held (R202606h-GO-009)")
 }
 
 // TestFreshContextResetsOnCancel pins the behavioral half of #1956 for the
@@ -143,4 +148,9 @@ func TestFreshContextResetsOnCancel(t *testing.T) {
 	// lets a deferred reap slip through.
 	ord.assertCountBefore(t, "reset", 2, "run-ended",
 		"cancel path must Reset the exempt session while the CAS gate is held (#1956)")
+	// The stub re-register on this branch must also precede the gate release:
+	// execSendError cancel branch (R202606h-GO-009/GO-009b/GO-010). This replaces the
+	// ">=5 stub-refresh call sites" count in the deleted source anchor.
+	ord.assertCountBefore(t, "register-stub", 1, "run-ended",
+		"execSendError cancel branch must re-register the stub while the CAS gate is held (R202606h-GO-009)")
 }

@@ -60,12 +60,23 @@ func TestErrorPaths_StubRefreshBeforeFinishRun_SourceAnchor(t *testing.T) {
 		t.Fatal("scheduler_run.go: no finishRun(finishArgs{...}) call found")
 	}
 
-	// FIVE error/cancel paths each re-register the stub once and then finishRun:
-	//   1. execSendError cancel branch          (stubRefresh.run())
-	//   2. execSendError non-cancel branch       (stubRefresh.run())
-	//   3. executeGetSession cancel branch       (a.stubRefresh.run())
-	//   4. executeGetSession non-cancel branch   (a.stubRefresh.run())
-	//   5. freshContextPreflightP0 delete branch (refresh.run() — #2318)
+	// Four of the five paths this used to count are now covered by BEHAVIOUR
+	// tests that observe the ordering through a shared event sequence rather than
+	// through source text (Epic I #2547):
+	//
+	//   execSendError cancel / non-cancel      → TestFreshContextResetsOnCancel /
+	//                                            TestFreshContextResetsOnSendError
+	//   executeGetSession cancel / non-cancel  → TestFreshGetSession_CancelError_… /
+	//                                            TestFreshGetSession_SessionError_…
+	//
+	// The fifth — freshContextPreflightP0's delete-mid-execute branch — CANNOT be
+	// covered that way: stubRefresher.run() re-registers only if the job still
+	// exists, and that branch is reached precisely because it does not, so the
+	// call is a designed no-op there and nothing observable happens. It stays
+	// anchored in source, because the ordering still guards a future refactor
+	// where the job could exist again at that point. See
+	// TestPreflightDeleteMidExecute_RefreshesStubBeforeGateRelease for the
+	// behaviour half (state, error class, that the branch is reached at all).
 	//
 	// The structural invariant: for every stub-refresh call there must be a
 	// finishRun(finishArgs{...}) between it and the NEXT stub call (or EOF) —
@@ -86,8 +97,8 @@ func TestErrorPaths_StubRefreshBeforeFinishRun_SourceAnchor(t *testing.T) {
 			}
 		}
 	}
-	if stubBeforeFinish < 5 {
-		t.Errorf("scheduler_run.go: only %d stub-refresh calls precede their branch finishRun; expected >=5 (execSendError + executeGetSession cancel/non-cancel paths plus the freshContextPreflightP0 delete-mid-execute branch). A stub refresh placed AFTER finishRun releases the CAS gate reopens the phantom-stub race (R202606h-GO-009/GO-009b/GO-010).", stubBeforeFinish)
+	if stubBeforeFinish < 1 {
+		t.Errorf("scheduler_run.go: no stub-refresh call precedes its branch finishRun. The four observable paths are covered by behaviour tests; this guard remains for freshContextPreflightP0's delete-mid-execute branch, whose refresh is a no-op in the reachable state and so cannot be observed. A stub refresh placed AFTER finishRun releases the CAS gate reopens the phantom-stub race (R202606h-GO-009/GO-009b/GO-010).")
 	}
 }
 

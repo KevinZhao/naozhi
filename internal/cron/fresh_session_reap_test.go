@@ -50,9 +50,13 @@ func (r *reapRouter) snapshot() (resets []string, regs []stubCall) {
 // reproducing a DeleteJobByID landing in the Reset→register window.
 type deleteOnResetRouter struct {
 	reapRouter
-	s        *Scheduler
-	jobID    string
-	resetSeq int
+	s     *Scheduler
+	jobID string
+	// deleteAtReset is which Reset call triggers the delete: 2 (the default when
+	// zero) is the reap window of a fresh SUCCESS run, 1 is the preflight window
+	// that freshContextPreflightP0's delete-mid-execute branch exists for (#2318).
+	deleteAtReset int
+	resetSeq      int
 }
 
 func (r *deleteOnResetRouter) Reset(key string) {
@@ -61,7 +65,11 @@ func (r *deleteOnResetRouter) Reset(key string) {
 	r.resetSeq++
 	seq := r.resetSeq
 	r.mu.Unlock()
-	if seq == 2 { // reap Reset — simulate concurrent Delete winning the race
+	at := r.deleteAtReset
+	if at == 0 {
+		at = 2
+	}
+	if seq == at { // simulate a concurrent Delete winning the race
 		r.s.mu.Lock()
 		delete(r.s.jobs, r.jobID)
 		r.s.mu.Unlock()
