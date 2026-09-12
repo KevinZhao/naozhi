@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -422,4 +423,23 @@ func buildAccessProfiles(in map[string]config.AccessProfile) map[string]session.
 		}
 	}
 	return out
+}
+
+// backendHistoryDir returns the expanded transcript directory a backend keeps its
+// sessions in, from backend.Profile.HistoryDir — the same value `naozhi doctor`
+// reports (doctor.go's backendHistoryPath).
+//
+// Wired here rather than repeating the CLI's documented path as a literal: the
+// history factories and doctor would otherwise derive one fact two ways, which is
+// the shape of #2668 (two derivations of a backend's spawn defaults, one wrong,
+// producing a spurious DRIFT on healthy sessions).
+//
+// "" for an unregistered backend or one with no HistoryDir, which the factories
+// already treat as "no fallback history for this backend".
+func backendHistoryDir(id string) string {
+	p, ok := backend.Get(id)
+	if !ok || p.HistoryDir == "" {
+		return ""
+	}
+	return osutil.ExpandHome(p.HistoryDir)
 }

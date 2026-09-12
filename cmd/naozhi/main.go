@@ -218,10 +218,13 @@ func main() {
 		TotalTimeout:    totalTimeout,
 		ClaudeDir:       claudeDir,
 		// KiroSessionsDir / CodexSessionsDir feed the jsonl history factories so
-		// "load earlier" survives a naozhi restart (the CLIs' documented paths).
-		KiroSessionsDir: osutil.ExpandHome("~/.kiro/sessions/cli"),
-		// Codex rollout transcripts are date-bucketed under this root.
-		CodexSessionsDir:  osutil.ExpandHome("~/.codex/sessions"),
+		// "load earlier" survives a naozhi restart. Read from the backend
+		// profiles rather than repeated as literals here: `naozhi doctor` already
+		// reports backend.Profile.HistoryDir as where a backend keeps its
+		// transcripts, and two independent derivations of one fact drift (G2 #2666,
+		// and #2668 for what that costs). backendHistoryDir is the shared reader.
+		KiroSessionsDir:   backendHistoryDir("kiro"),
+		CodexSessionsDir:  backendHistoryDir("codex"),
 		EventLogDir:       eventLogDir,
 		EventLogGenerator: "naozhi",
 	})
