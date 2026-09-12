@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -16,48 +15,12 @@ import (
 
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
 // maxStoreFileBytes caps how much Load reads from any session-store file so a
 // corrupt or maliciously extended file cannot OOM the process during startup.
 const maxStoreFileBytes = 4 * 1024 * 1024
-
-// readCappedFile reads up to maxStoreFileBytes from path. Returns nil, nil for
-// a missing file ("empty" store); a file over the cap is rejected outright.
-func readCappedFile(path string, label string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxStoreFileBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	if len(data) > maxStoreFileBytes {
-		slog.Warn(label+" exceeds size cap; refusing to load",
-			"path", path, "cap_bytes", maxStoreFileBytes, "observed_bytes", len(data))
-		return nil, fmt.Errorf("%s %s exceeds %d-byte cap", label, path, maxStoreFileBytes)
-	}
-	return data, nil
-}
-
-// preserveCorruptFile renames a file that failed to JSON-parse to a
-// ".corrupt.<ts>" sibling so the next atomic save does not silently overwrite
-// it. Used by every loader in this package for a consistent breadcrumb (#673).
-func preserveCorruptFile(path, label string, parseErr error) {
-	corruptPath := path + ".corrupt." + time.Now().Format("20060102-150405")
-	if renameErr := os.Rename(path, corruptPath); renameErr != nil {
-		slog.Warn("parse "+label+" failed; could not rename corrupt file",
-			"err", parseErr, "rename_err", renameErr, "path", path)
-		return
-	}
-	slog.Warn("parse "+label+" failed; corrupt file preserved",
-		"err", parseErr, "corrupt_path", corruptPath)
-}
 
 type storeEntry struct {
 	Key            string   `json:"key"`
@@ -438,20 +401,15 @@ func readStoreMeta(storePath string) (storeMeta, bool) {
 	if metaPath == "" {
 		return storeMeta{}, false
 	}
-	data, err := readCappedFile(metaPath, "session store meta")
+	m, out, err := jsonfile.Load[storeMeta](metaPath, jsonfile.Options{
+		MaxBytes: maxStoreFileBytes,
+		Label:    "session store meta",
+	})
 	if err != nil {
 		slog.Warn("read session store meta failed", "path", metaPath, "err", err)
 		return storeMeta{}, false
 	}
-	if data == nil {
-		return storeMeta{}, false
-	}
-	var m storeMeta
-	if err := json.Unmarshal(data, &m); err != nil {
-		slog.Warn("parse session store meta failed", "path", metaPath, "err", err)
-		return storeMeta{}, false
-	}
-	return m, true
+	return m, out == jsonfile.Parsed
 }
 
 func loadStore(path string) map[string]*storeEntry {
@@ -468,18 +426,15 @@ func loadStore(path string) map[string]*storeEntry {
 			"supported_version", storeFormatVersion,
 			"written_at_ns", meta.WrittenAt)
 	}
-	data, err := readCappedFile(path, "session store")
+	entries, out, err := jsonfile.Load[[]storeEntry](path, jsonfile.Options{
+		MaxBytes: maxStoreFileBytes,
+		Label:    "session store",
+	})
 	if err != nil {
 		slog.Warn("load session store failed", "path", path, "err", err)
 		return nil
 	}
-	if data == nil {
-		return nil
-	}
-
-	var entries []storeEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		preserveCorruptFile(path, "session store", err)
+	if out != jsonfile.Parsed {
 		return nil
 	}
 
@@ -507,18 +462,17 @@ func loadKnownIDs(storePath string) map[string]bool {
 	if path == "" {
 		return nil
 	}
-	data, err := readCappedFile(path, "known session IDs")
+	// #673: jsonfile.Load preserves a corrupt file as .corrupt.<ts> before
+	// returning !ok, so the next save does not overwrite the evidence.
+	ids, out, err := jsonfile.Load[[]string](path, jsonfile.Options{
+		MaxBytes: maxStoreFileBytes,
+		Label:    "known session IDs",
+	})
 	if err != nil {
 		slog.Warn("load known session IDs failed", "path", path, "err", err)
 		return nil
 	}
-	if data == nil {
-		return nil
-	}
-	var ids []string
-	if err := json.Unmarshal(data, &ids); err != nil {
-		// #673: preserve the corrupt file (see loadStore / loadWorkspaceOverrides).
-		preserveCorruptFile(path, "known session IDs", err)
+	if out != jsonfile.Parsed {
 		return nil
 	}
 	m := make(map[string]bool, len(ids))
@@ -615,19 +569,17 @@ func loadWorkspaceOverrides(storePath string) map[string]string {
 	if path == "" {
 		return nil
 	}
-	data, err := readCappedFile(path, "workspace overrides")
+	// A corrupt file is preserved as .corrupt.<ts> by jsonfile.Load, so the next
+	// save does not overwrite the evidence of a partial write (#673).
+	m, out, err := jsonfile.Load[map[string]string](path, jsonfile.Options{
+		MaxBytes: maxStoreFileBytes,
+		Label:    "workspace overrides",
+	})
 	if err != nil {
 		slog.Warn("load workspace overrides failed", "path", path, "err", err)
 		return nil
 	}
-	if data == nil {
-		return nil
-	}
-	var m map[string]string
-	if err := json.Unmarshal(data, &m); err != nil {
-		// Preserve the corrupt file: the next save would otherwise overwrite
-		// the evidence of a partial write (#673).
-		preserveCorruptFile(path, "workspace overrides", err)
+	if out != jsonfile.Parsed {
 		return nil
 	}
 	if len(m) > 0 {

@@ -2,9 +2,7 @@ package discovery
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +10,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
 // RetiredStore tracks the wall-clock instant a session left the live sidebar
@@ -52,6 +51,12 @@ const retiredStoreVersion = 1
 // via NewRetiredStoreWithCap.
 const DefaultRetiredStoreMaxEntries = 4096
 
+// maxRetiredStoreBytes caps the on-disk read. DefaultRetiredStoreMaxEntries
+// entries of a session ID plus a millisecond timestamp is well under 512 KiB;
+// 4 MiB leaves room for a store built with a raised cap while bounding what a
+// tampered file can allocate.
+const maxRetiredStoreBytes = 4 * 1024 * 1024
+
 // NewRetiredStore constructs a store backed by `path` (empty = in-memory only);
 // the first Save() creates the file. Load errors are returned but do not block
 // construction, since RetiredAt is purely a UX sort hint.
@@ -81,19 +86,22 @@ func NewRetiredStoreWithCap(path string, cap int) (*RetiredStore, error) {
 }
 
 func (rs *RetiredStore) load() error {
-	data, err := os.ReadFile(rs.path)
+	// The returned parse error is a diagnostic channel, not a construction
+	// failure: buildRetiredStoreWithErr logs it and keeps the (empty but usable)
+	// store, per TestRetiredStore_LoadCorruptIsTolerated. So CorruptPreserved is
+	// reported as an error even though jsonfile already moved the file aside.
+	file, out, err := jsonfile.Load[retiredStoreFileV1](rs.path, jsonfile.Options{
+		MaxBytes: maxRetiredStoreBytes,
+		Label:    "retired store",
+	})
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read retired store: %w", err)
+		return err
 	}
-	if len(data) == 0 {
+	if out == jsonfile.CorruptPreserved {
+		return fmt.Errorf("parse retired store: file preserved as a .corrupt sibling")
+	}
+	if out != jsonfile.Parsed {
 		return nil
-	}
-	var file retiredStoreFileV1
-	if err := json.Unmarshal(data, &file); err != nil {
-		return fmt.Errorf("parse retired store: %w", err)
 	}
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
