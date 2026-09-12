@@ -1,7 +1,6 @@
 package feishu
 
 import (
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -77,11 +76,7 @@ func TestCleanupNoncesTick_DropsMalformedEntry(t *testing.T) {
 // the recover back into cleanupNonces proper will fail this test.
 func TestCleanupNonces_RecoverAtTickLevel(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("feishu.go")
-	if err != nil {
-		t.Fatalf("read feishu.go: %v", err)
-	}
-	src := string(data)
+	src := packageSource(t)
 
 	// 1) cleanupNonces itself must NOT have a function-scope defer recover.
 	idx := strings.Index(src, "func (f *Feishu) cleanupNonces(ctx context.Context) {")
