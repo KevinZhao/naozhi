@@ -1,17 +1,11 @@
 package cron
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"log/slog"
-	"os"
-	"time"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
 // maxCronStoreBytes caps the size of cron_jobs.json during Load: worst case is
@@ -29,73 +23,28 @@ const maxCronStoreBytes = 16 * 1024 * 1024
 //   - (nil, error): the original file is still on disk (size cap, I/O error,
 //     or the corrupt-rename failed). Callers MUST abort: continuing with empty
 //     state would make the next persist clobber the real jobs with `[]`.
+//
+// loadJobs reads and parses the on-disk cron job store. The read itself (size
+// cap, O_NOFOLLOW, corrupt-file preservation) is jsonfile.Load's; what stays
+// here is cron's own field validation. Outcomes:
+//
+//   - (map, nil): normal read; a missing file yields a nil map (= empty).
+//   - (nil, nil): the file was absent, empty, or failed to parse and was renamed
+//     to <path>.corrupt.<ts> — starting empty destroys no evidence.
+//   - (nil, error): the original file is still on disk (size cap, I/O error,
+//     symlink, or the corrupt-rename failed). Callers MUST abort: continuing
+//     with empty state would make the next persist clobber the real jobs (#469).
 func loadJobs(path string) (map[string]*Job, error) {
-	if path == "" {
+	entries, out, err := jsonfile.Load[[]*Job](path, jsonfile.Options{
+		MaxBytes: maxCronStoreBytes,
+		Label:    "cron store",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out != jsonfile.Parsed {
 		return nil, nil
 	}
-	// OpenFile(O_NOFOLLOW|O_CLOEXEC) refuses a symlinked cron_jobs.json atomically
-	// (no Lstat→Open TOCTOU, #829); Fstat below validates the open inode is a
-	// regular file so a fifo/socket never reaches json.Unmarshal + os.Rename.
-	f, err := openCronStoreFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		if isSymlinkLoopErr(err) {
-			slog.Warn("cron store path is a symlink; refusing to follow", "path", path)
-			return nil, fmt.Errorf("cron store path is a symlink, refusing to follow")
-		}
-		// Any non-NotExist open failure aborts the load: continuing could read
-		// attacker-substituted bytes or succeed with an empty []*Job that the next
-		// persist writes back over the real jobs (#469).
-		slog.Warn("open cron store failed", "path", path, "err", err)
-		return nil, fmt.Errorf("open cron store: %w", err)
-	}
-	defer f.Close()
-	// Fstat on the open fd: O_NOFOLLOW filtered symlinks, but a fifo/socket/device
-	// only fails here.
-	fi, err := f.Stat()
-	if err != nil {
-		slog.Warn("cron: fstat store path failed; refusing to load",
-			"path", path, "err", err)
-		return nil, fmt.Errorf("cron: fstat %s: %w", path, err)
-	}
-	if !fi.Mode().IsRegular() {
-		slog.Warn("cron store path is not a regular file; refusing to load",
-			"path", path, "mode", fi.Mode().String())
-		return nil, fmt.Errorf("cron store path is not a regular file, refusing to load")
-	}
-	data, err := io.ReadAll(io.LimitReader(f, maxCronStoreBytes+1))
-	if err != nil {
-		slog.Warn("read cron store failed", "path", path, "err", err)
-		return nil, fmt.Errorf("read cron store: %w", err)
-	}
-	if int64(len(data)) > maxCronStoreBytes {
-		// LimitReader read cap+1, so only "at least" is known. Leave the original in
-		// place and return an error so Start aborts. The absolute path is kept out of
-		// the user-facing error (may propagate to dashboard); it goes to the log.
-		slog.Warn("cron store exceeds size cap",
-			"path", path, "size", len(data), "cap", maxCronStoreBytes)
-		return nil, fmt.Errorf("cron store exceeds size cap (at least %d bytes, cap=%d bytes); refusing to load — inspect the file or move it aside before restarting",
-			len(data), maxCronStoreBytes)
-	}
-
-	var entries []*Job
-	if err := json.Unmarshal(data, &entries); err != nil {
-		// Preserve the corrupt file so the next save does not overwrite evidence; if
-		// the rename fails return an error (an empty save would destroy the original).
-		// The random nonce keeps two instances sharing one data dir from colliding on
-		// the same corruptPath within a second.
-		corruptPath := path + ".corrupt." + time.Now().UTC().Format("20060102-150405") + "." + randomNonce()
-		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
-			return nil, fmt.Errorf("parse cron store failed (%v); could not rename: %w",
-				err, renameErr)
-		}
-		slog.Warn("parse cron store failed; corrupt file preserved",
-			"err", err, "path", path, "corrupt_path", corruptPath)
-		return nil, nil
-	}
-
 	// Defensive cap: an array of hundreds of thousands of stub entries fits under
 	// maxCronStoreBytes; refuse rather than allocate the map and let the
 	// scheduler silently truncate at maxJobsHardCap.
@@ -248,15 +197,4 @@ func containsCronUnsafe(s string) bool {
 		}
 	}
 	return false
-}
-
-// randomNonce returns a short hex-encoded random string for distinguishing
-// otherwise-identical timestamped paths. Falls back to a time-derived
-// suffix if crypto/rand is unavailable (never expected on Linux).
-func randomNonce() string {
-	var rb [4]byte
-	if _, err := rand.Read(rb[:]); err != nil {
-		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
-	}
-	return hex.EncodeToString(rb[:])
 }

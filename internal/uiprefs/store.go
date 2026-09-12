@@ -7,16 +7,14 @@ package uiprefs
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
 // maxFileBytes caps the on-disk read; 64 KiB is far above any legitimate
@@ -71,22 +69,22 @@ func (s *Store) load() {
 	if s.path == "" {
 		return
 	}
-	data, err := os.ReadFile(s.path)
+	// LeaveCorrupt keeps the pre-existing decision: UI prefs carry no
+	// irreplaceable state, so a .corrupt sibling per bad parse would be litter —
+	// the next Set overwrites the file atomically. What jsonfile adds here is a
+	// cap that actually bounds memory: os.ReadFile slurped the whole file and only
+	// then compared against maxFileBytes, so the cap did not stop a huge file
+	// being read.
+	loaded, out, err := jsonfile.Load[Settings](s.path, jsonfile.Options{
+		MaxBytes: maxFileBytes,
+		Label:    "uiprefs",
+		Corrupt:  jsonfile.LeaveCorrupt,
+	})
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("uiprefs: load failed; using defaults", "path", s.path, "err", err)
-		}
+		slog.Warn("uiprefs: load failed; using defaults", "path", s.path, "err", err)
 		return
 	}
-	if len(data) > maxFileBytes {
-		slog.Warn("uiprefs: file exceeds cap; using defaults", "path", s.path, "bytes", len(data))
-		return
-	}
-	var loaded Settings
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		// Keep defaults; the corrupt file is not renamed because UI prefs carry
-		// no irreplaceable state — the next Set overwrites it atomically.
-		slog.Warn("uiprefs: parse failed; using defaults", "path", s.path, "err", err)
+	if out != jsonfile.Parsed {
 		return
 	}
 	s.mu.Lock()

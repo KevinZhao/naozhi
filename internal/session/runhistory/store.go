@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
 // Defaults mirror cron's retention intent with a smaller ring: session keys
@@ -251,13 +253,33 @@ func (s *Store) warmLocked(e *sessionEntry, dirHash string) {
 	e.ring = runs
 }
 
+// maxRunFileBytes caps one run record. A SessionRun is a handful of scalars
+// plus a truncated result string, so 1 MiB is far above any legitimate payload
+// and bounds what a tampered or half-written file can allocate.
+const maxRunFileBytes = 1 << 20
+
+// readRunFile reads one run record. A file that fails to parse is moved aside as
+// .corrupt.<ts> rather than being skipped in place: warmLocked answered the old
+// error with `continue`, so an unparseable record was re-read on every warm and
+// never removed — the retention GC below the skip could not reach it either.
 func readRunFile(path string, dst *SessionRun) error {
-	data, err := os.ReadFile(path)
+	run, out, err := jsonfile.Load[SessionRun](path, jsonfile.Options{
+		MaxBytes: maxRunFileBytes,
+		Label:    "session run record",
+	})
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, dst)
+	if out != jsonfile.Parsed {
+		return errRunFileUnusable
+	}
+	*dst = run
+	return nil
 }
+
+// errRunFileUnusable reports a record that is absent, empty, or was moved aside
+// as corrupt — in every case there is nothing to load and nothing left to clean.
+var errRunFileUnusable = errors.New("runhistory: run record unusable")
 
 // Recent returns up to n newest-first runs (n <= 0: all cached) as a fresh copy.
 func (s *Store) Recent(sessionKey string, n int) []SessionRun {
