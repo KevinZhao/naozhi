@@ -323,8 +323,15 @@ func (r *Router) CLIPath() string {
 	return r.bkStore.wrapper.CLIPath
 }
 
-// backendDefaults is the merged per-backend spawn configuration.
-type backendDefaults struct {
+// BackendDefaults is the merged per-backend spawn configuration — one backend's
+// row, assembled from the per-property maps.
+//
+// Exported so the shim drift path can be handed a VALUE instead of three loose
+// strings. It used to be unexported and ShimListDrift took
+// (defaultModel, defaultEffort, defaultArgs); cmd/naozhi then assembled those
+// itself with the wrong precedence and reported healthy sessions as drifted
+// (#2668). A typed seam makes the mismatch unrepresentable.
+type BackendDefaults struct {
 	Model string
 	// Args is returned WITHOUT copying — callers that mutate must copy first.
 	Args []string
@@ -332,25 +339,41 @@ type backendDefaults struct {
 	Effort string
 }
 
-// backendDefaultsFor returns the merged spawn configuration for backendID:
-// router-level model / extraArgs as base, replaced by the per-backend
-// backendModels / backendExtraArgs entry when non-empty. Effort has no base
-// (see backendEfforts). Both resolveSpawnParamsLocked and the shim drift
-// detector must use this helper, or every restart would read surviving kiro
-// shims as arg-drift and needlessly restart them (#739).
-func (r *Router) backendDefaultsFor(backendID string) backendDefaults {
-	model := r.bkStore.model
-	if bm, ok := r.bkStore.backendModels[backendID]; ok && bm != "" {
-		model = bm
+// MergeBackendDefaults is the precedence rule for a backend's spawn defaults:
+// the router-level cli.model / cli.args are the base, replaced by the
+// per-backend cli.backends[].model / .args when those are non-empty
+// (config.go documents that relationship as "overrides cli.model for this
+// backend"). Effort has no base tier.
+//
+// Pure and exported because TWO paths must agree: the live spawn (via
+// Router.backendDefaultsFor, reading the router's maps) and the offline drift
+// view (cmd/naozhi's `naozhi shim`, reading config directly). They did not —
+// the CLI took the per-backend value with no fallback, so a backend inheriting
+// the global cli.args produced a spurious DRIFT telling the operator to restart
+// a healthy session (#2668). That is the same failure mode #739 and #2427 were,
+// on a third code path; the fix is for both to call one function.
+func MergeBackendDefaults(routerModel string, routerArgs []string, backendModel string, backendArgs []string, backendEffort string) BackendDefaults {
+	model := routerModel
+	if backendModel != "" {
+		model = backendModel
 	}
-	args := r.bkStore.extraArgs
-	if ba, ok := r.bkStore.backendExtraArgs[backendID]; ok && len(ba) > 0 {
-		args = ba
+	args := routerArgs
+	if len(backendArgs) > 0 {
+		args = backendArgs
 	}
-	return backendDefaults{
-		Model: model, Args: args,
-		Effort: r.bkStore.backendEfforts[backendID],
-	}
+	return BackendDefaults{Model: model, Args: args, Effort: backendEffort}
+}
+
+// backendDefaultsFor returns the merged spawn configuration for backendID.
+// Both resolveSpawnParamsLocked and the shim drift detector must end up with
+// the same values, which is why the precedence lives in MergeBackendDefaults
+// rather than here (#739, #2668).
+func (r *Router) backendDefaultsFor(backendID string) BackendDefaults {
+	return MergeBackendDefaults(
+		r.bkStore.model, r.bkStore.extraArgs,
+		r.bkStore.backendModels[backendID], r.bkStore.backendExtraArgs[backendID],
+		r.bkStore.backendEfforts[backendID],
+	)
 }
 
 // BackendModelManifest returns the model list the dashboard popover offers for

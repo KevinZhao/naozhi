@@ -209,15 +209,19 @@ func runShimList(args []string) {
 // healthy session as broken (the authoritative per-field signal is
 // /api/sessions overlay_drift).
 func printShimDrift(cfg *config.Config, st shim.State) {
-	var defModel, defEffort string
-	var defArgs []string
+	// The router-level cli.model / cli.args are the BASE; the per-backend entry
+	// only overrides them when non-empty. Reading b.Model/b.Args directly (what
+	// this did before #2668) dropped the base, so a backend inheriting the global
+	// cli.args produced a spurious DRIFT extra_args on a healthy session.
+	// MergeBackendDefaults is the same function the live spawn path goes through.
+	var bd session.BackendDefaults
 	for _, b := range cfg.EnabledBackends() {
 		id := b.ID
 		if id == "" {
 			id = "claude"
 		}
 		if id == st.Backend || (st.Backend == "" && id == "claude") {
-			defModel, defEffort, defArgs = b.Model, b.Effort, b.Args
+			bd = session.MergeBackendDefaults(cfg.CLI.Model, cfg.CLI.Args, b.Model, b.Args, b.Effort)
 			break
 		}
 	}
@@ -227,7 +231,7 @@ func printShimDrift(cfg *config.Config, st shim.State) {
 			profileModel = p.DefaultModel
 		}
 	}
-	advisory, drift := session.ShimListDrift(defModel, defEffort, defArgs, profileModel, st)
+	advisory, drift := session.ShimListDrift(bd, profileModel, st)
 	for _, d := range drift {
 		fmt.Printf("       DRIFT %s: %q -> %q — 重启会话以应用新配置\n", d.Field, d.Stored, d.Current)
 	}

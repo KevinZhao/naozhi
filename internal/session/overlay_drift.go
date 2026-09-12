@@ -94,13 +94,15 @@ func equalArgv(a, b []string) bool {
 // /api/sessions' overlay_drift is the authoritative per-field signal.
 // append_system_prompt and extra args are tuning-independent and come back
 // in drift.
-func ShimListDrift(defaultModel, defaultEffort string, defaultArgs []string, profileDefaultModel string, st shim.State) (advisory, drift []OverlayFieldDrift) {
+// bd MUST come from MergeBackendDefaults, not from reading one config layer:
+// the caller used to be handed three loose strings and assembled them with the
+// per-backend value only, so a backend inheriting the global cli.args reported a
+// spurious DRIFT and told the operator to restart a healthy session (#2668).
+func ShimListDrift(bd BackendDefaults, profileDefaultModel string, st shim.State) (advisory, drift []OverlayFieldDrift) {
 	if st.SpawnOverlay == nil || len(st.CLIArgs) == 0 {
 		return nil, nil
 	}
-	merged := mergeArgvLayers(
-		backendDefaults{Model: defaultModel, Effort: defaultEffort, Args: defaultArgs},
-		profileDefaultModel, *st.SpawnOverlay, "", "")
+	merged := mergeArgvLayers(bd, profileDefaultModel, *st.SpawnOverlay, "", "")
 	stored := stripResumeArgs(st.CLIArgs)
 
 	if s := argvFlagValue(stored, "--model"); s != merged.Model {
