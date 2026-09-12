@@ -147,11 +147,7 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	wrappers := bws.Wrappers
-	backendModels := bws.Models
-	backendModelLists := bws.ModelLists
-	backendExtraArgs := bws.ExtraArgs
-	backendEfforts := bws.Efforts
+	backendRuntimes := bws.Runtimes
 	defaultBackend := bws.DefaultID
 	wrapper := bws.Default
 
@@ -188,21 +184,18 @@ func main() {
 	mcpConfigFile := resolveMCPConfigFile(cfg)
 
 	router := session.NewRouter(session.RouterConfig{
-		Wrapper:          wrapper,
-		Wrappers:         wrappers,
-		DefaultBackend:   defaultBackend,
-		MaxProcs:         cfg.Session.MaxProcs,
-		TTL:              cfg.ParseTTL(),
-		PruneTTL:         cfg.ParsePruneTTL(),
-		Model:            cfg.CLI.Model,
-		ExtraArgs:        cfg.CLI.Args,
-		BackendModels:    backendModels,
-		BackendExtraArgs: backendExtraArgs,
+		Wrapper:        wrapper,
+		DefaultBackend: defaultBackend,
+		MaxProcs:       cfg.Session.MaxProcs,
+		TTL:            cfg.ParseTTL(),
+		PruneTTL:       cfg.ParsePruneTTL(),
+		Model:          cfg.CLI.Model,
+		ExtraArgs:      cfg.CLI.Args,
 		// No router-wide Effort: initBackendWrappers already dropped the tier for
 		// backends that cannot accept one; a router default would re-add it and
 		// make the arg-drift comparison disagree with the real spawn.
-		BackendEfforts:       backendEfforts,
-		BackendModelLists:    backendModelLists,
+		// One row per backend instead of five parallel columns (G2 #2666).
+		BackendRuntimes:      backendRuntimes,
 		AccessProfiles:       accessProfiles,
 		DefaultAccessProfile: cfg.DefaultAccessProfile,
 		NaozhiSettingsFile:   naozhiSettingsFile,

@@ -534,10 +534,6 @@ type RouterConfig struct {
 	// Wrapper is the legacy single-backend field. If Wrappers is nil/empty
 	// this wrapper is used for every session.
 	Wrapper *cli.Wrapper
-	// Wrappers maps backend ID → wrapper. When set, new sessions are
-	// routed to the wrapper matching AgentOpts.Backend, with DefaultBackend
-	// (or Wrapper) as a fallback.
-	Wrappers map[string]*cli.Wrapper
 	// DefaultBackend names the backend ID used when AgentOpts.Backend is
 	// empty. Ignored when Wrappers is empty.
 	DefaultBackend string
@@ -546,24 +542,6 @@ type RouterConfig struct {
 	PruneTTL       time.Duration
 	Model          string
 	ExtraArgs      []string
-	// BackendModels / BackendExtraArgs override Model / ExtraArgs per backend.
-	// BackendExtraArgs REPLACES (does not append to) the router-level ExtraArgs
-	// for that backend; per-session AgentOpts.ExtraArgs is appended on top. An
-	// operator wanting to keep a router-wide flag like `--setting-sources ""`
-	// must re-specify it in every override — additive semantics would make it
-	// impossible to drop a default flag for one backend.
-	BackendModels    map[string]string
-	BackendExtraArgs map[string][]string
-	// BackendEfforts is the resolved thinking-effort tier per backend ID. There
-	// is deliberately no router-wide counterpart: the composition root folds
-	// cli.effort in AND drops it for backends whose protocol cannot accept a
-	// tier; a router-level default would resurrect it and desync arg-drift
-	// detection from the real spawn. docs/rfc/kiro-effort-control.md
-	BackendEfforts map[string]string
-	// BackendModelLists is the operator-declared model manifest per backend ID
-	// (cli.backends[].models), the fallback tier below agent-reported manifests
-	// in BackendModelManifest. Entries were validateModelString-gated at config load.
-	BackendModelLists map[string][]string
 	// AccessProfiles is the named auth/upstream overlay registry keyed by
 	// profile ID (RFC project-access-profile). Nil/empty ⇒ every session runs
 	// on the global settings.json baseline.
@@ -632,6 +610,11 @@ type RouterConfig struct {
 	// their own from cfg.Agents, which drifted across construction sites (#604).
 	// nil leaves Router.Resolver() returning nil.
 	Resolver *KeyResolver
+	// BackendRuntimes is one row per backend ID: wrapper plus the per-backend
+	// config. Replaced five parallel map[backendID]→property fields (G2 #2666) —
+	// the shape that let #2668 happen, where a second consumer read a subset of
+	// the columns with different precedence.
+	BackendRuntimes map[string]BackendRuntime
 }
 
 // NewRouter creates a session router.
@@ -646,39 +629,44 @@ func NewRouter(cfg RouterConfig) *Router {
 		cfg.PruneTTL = DefaultPruneTTL
 	}
 
-	// Normalize wrappers. Accept either a Wrappers map or a single Wrapper;
-	// when both are set, Wrappers wins and Wrapper is kept as a compat alias
-	// for code that still reads r.bkStore.wrapper directly (mostly tests).
-	wrappers := cfg.Wrappers
+	// Normalize the per-backend rows. Accept either a BackendRuntimes map or a
+	// single Wrapper; when both are set, BackendRuntimes wins and Wrapper is kept
+	// as a compat alias for code that still reads r.bkStore.wrapper directly
+	// (mostly tests).
+	runtimes := cfg.BackendRuntimes
 	defaultBackend := cfg.DefaultBackend
-	if len(wrappers) == 0 && cfg.Wrapper != nil {
+	if len(runtimes) == 0 && cfg.Wrapper != nil {
 		id := cfg.Wrapper.BackendID
 		if id == "" {
 			id = "claude"
 		}
-		wrappers = map[string]*cli.Wrapper{id: cfg.Wrapper}
+		runtimes = map[string]BackendRuntime{id: {Wrapper: cfg.Wrapper}}
 		if defaultBackend == "" {
 			defaultBackend = id
 		}
 	}
 	defaultWrapper := cfg.Wrapper
 	if defaultWrapper == nil && defaultBackend != "" {
-		defaultWrapper = wrappers[defaultBackend]
+		defaultWrapper = runtimes[defaultBackend].Wrapper
 	}
 	if defaultWrapper == nil {
 		// Pick deterministically: Go map iteration is randomised, so without
 		// sorting a multi-backend deployment with no explicit DefaultBackend
 		// would flip its default on every process start.
-		ids := make([]string, 0, len(wrappers))
-		for id := range wrappers {
+		ids := make([]string, 0, len(runtimes))
+		for id := range runtimes {
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
-		if len(ids) > 0 {
-			id := ids[0]
-			defaultWrapper = wrappers[id]
-			if defaultBackend == "" {
-				defaultBackend = id
+		// Skip rows without a wrapper: unlike the old wrappers map, a row can
+		// exist from config alone and such a backend is not spawnable.
+		for _, id := range ids {
+			if w := runtimes[id].Wrapper; w != nil {
+				defaultWrapper = w
+				if defaultBackend == "" {
+					defaultBackend = id
+				}
+				break
 			}
 		}
 	}
@@ -711,8 +699,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.bkStore.extraArgs = cfg.ExtraArgs
 	r.picks.initLocked()
 	// One row per backend instead of six parallel columns (G2 #2666).
-	r.bkStore.initRuntimes(wrappers, cfg.BackendModels, cfg.BackendExtraArgs,
-		cfg.BackendEfforts, cfg.BackendModelLists)
+	r.bkStore.initRuntimes(runtimes)
 	r.accessProfiles = cfg.AccessProfiles
 	r.defaultAccessProfile = cfg.DefaultAccessProfile
 	// Run-history store is rooted next to the session store (its own config,

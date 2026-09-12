@@ -111,14 +111,14 @@ func TestInitBackendWrappers_EffortCapabilityFilter(t *testing.T) {
 	}
 	bws, _ := initBackendWrappers(context.Background(), cfg, nil)
 
-	if got := bws.Efforts["kiro"]; got != "high" {
+	if got := bws.Runtimes["kiro"].Effort; got != "high" {
 		t.Errorf("Efforts[kiro] = %q, want high (ACP accepts --effort)", got)
 	}
-	if got := bws.Efforts["claude"]; got != "high" {
+	if got := bws.Runtimes["claude"].Effort; got != "high" {
 		t.Errorf("Efforts[claude] = %q, want high (claude CLI accepts --effort "+
 			"as of 2.1.226)", got)
 	}
-	if got, ok := bws.Efforts["codex"]; ok {
+	if got := bws.Runtimes["codex"].Effort; got != "" {
 		t.Errorf("Efforts[codex] = %q, want absent — codex has no tier flag, "+
 			"so recording one would put an unusable value in the router map", got)
 	}
@@ -151,8 +151,8 @@ func TestInitBackendWrappers_NoUsableBackend(t *testing.T) {
 	if bws.Default != nil {
 		t.Errorf("expected Default=nil on no-usable-backend path; got %+v", bws.Default)
 	}
-	if len(bws.Wrappers) != 0 {
-		t.Errorf("expected empty Wrappers map on no-usable-backend path; got %d entries", len(bws.Wrappers))
+	if len(bws.Runtimes) != 0 {
+		t.Errorf("expected empty Runtimes map on no-usable-backend path; got %d entries", len(bws.Runtimes))
 	}
 }
 

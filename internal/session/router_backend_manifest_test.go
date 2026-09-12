@@ -15,8 +15,8 @@ func TestBackendsManifest_ShapeAndDefault(t *testing.T) {
 	claudeW := &cli.Wrapper{BackendID: "claude", CLIName: "claude-code", CLIVersion: "2.1.100"}
 	kiroW := &cli.Wrapper{BackendID: "kiro", CLIName: "kiro", CLIVersion: "2.12.0"}
 	r := NewRouter(RouterConfig{
-		Wrappers:       map[string]*cli.Wrapper{"claude": claudeW, "kiro": kiroW},
-		DefaultBackend: "kiro",
+		BackendRuntimes: map[string]BackendRuntime{"claude": {Wrapper: claudeW}, "kiro": {Wrapper: kiroW}},
+		DefaultBackend:  "kiro",
 	})
 
 	m := r.BackendsManifest(nil)

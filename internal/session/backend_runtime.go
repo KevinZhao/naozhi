@@ -81,29 +81,18 @@ func (b *backendStore) runtimeMut(id string) *BackendRuntime {
 // len(runtimes). wrapperFor's legacy single-wrapper branch keys on "were there
 // per-backend wrappers", and runtimes can be non-empty from config alone — so
 // deriving that from len(runtimes) would silently take the wrong branch.
-func (b *backendStore) initRuntimes(
-	wrappers map[string]*cli.Wrapper,
-	models map[string]string,
-	extraArgs map[string][]string,
-	efforts map[string]string,
-	modelLists map[string][]string,
-) {
-	b.perBackendWrappers = len(wrappers) > 0
-	b.runtimes = make(map[string]*BackendRuntime, len(wrappers))
-	for id, w := range wrappers {
-		b.runtimeMut(id).Wrapper = w
-	}
-	for id, m := range models {
-		b.runtimeMut(id).Model = m
-	}
-	for id, a := range extraArgs {
-		b.runtimeMut(id).ExtraArgs = a
-	}
-	for id, e := range efforts {
-		b.runtimeMut(id).Effort = e
-	}
-	for id, l := range modelLists {
-		b.runtimeMut(id).ConfiguredModels = l
+func (b *backendStore) initRuntimes(rows map[string]BackendRuntime) {
+	b.runtimes = make(map[string]*BackendRuntime, len(rows))
+	b.perBackendWrappers = false
+	for id, rt := range rows {
+		row := rt
+		b.runtimes[id] = &row
+		if row.Wrapper != nil {
+			// Equivalent to the old len(wrappers) > 0: rows can come from config
+			// alone, and wrapperFor's legacy branch asks whether any backend
+			// actually brought a wrapper.
+			b.perBackendWrappers = true
+		}
 	}
 }
 
