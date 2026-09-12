@@ -163,6 +163,17 @@ func TestFreshContextReapsSessionAfterSuccess(t *testing.T) {
 // for the now-deleted job. Simulated by removing the job from s.jobs before
 // executeOpt reaches its success-tail re-check — the existence re-check then
 // observes the job gone and skips registerStubByValue.
+//
+// This also retired fresh_session_reap_lockpair_test.go (R090135-ARCH-2, Epic I
+// #2547), which pinned the same guard by regexp over reapFreshSessionLocked's
+// body: that Reset precedes the RLock re-read, that a `stillExists` identifier
+// appears, and that `if stillExists {` precedes registerStubByValue. Its comment
+// argued a source anchor was "the appropriate pin" because "the window is
+// sub-instruction" and could not be reached with a race detector — but the window
+// does not need to be raced INTO: deleteOnResetRouter deletes the job exactly
+// when the reap Reset fires, which places the delete inside the window
+// deterministically. Verified by replacing `if stillExists` with `if true`, which
+// fails this test.
 func TestFreshReapSkipsStubReregisterWhenJobDeleted(t *testing.T) {
 	t.Parallel()
 
