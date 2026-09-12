@@ -1,7 +1,7 @@
 package persist
 
-// R20260603-PERF-2 regression-lock: flushAllLocked reuses p.flushAllKeys /
-// p.flushAllWs scratch slices across calls instead of allocating fresh slices
+// R20260603-PERF-2 regression-lock: flushAllLocked reuses p.scratch.allKeys /
+// p.scratch.allWs scratch slices across calls instead of allocating fresh slices
 // on every opFlushAll. These tests verify:
 //  1. flushAllLocked still persists all dirty writers correctly.
 //  2. The scratch slices are grown and reused across successive Flush calls
@@ -16,7 +16,7 @@ import (
 	"testing"
 )
 
-// TestFlushAll_ScratchSliceReused verifies that p.flushAllKeys / p.flushAllWs
+// TestFlushAll_ScratchSliceReused verifies that p.scratch.allKeys / p.scratch.allWs
 // are populated and retained after an explicit Flush so the capacity is
 // available on the next call without re-allocation.
 func TestFlushAll_ScratchSliceReused(t *testing.T) {
