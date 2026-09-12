@@ -1,7 +1,6 @@
 package feishu
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -85,11 +84,7 @@ func TestReactionCacheTTL_ExceedsSessionTTL(t *testing.T) {
 // is triggered at runtime.
 func TestReactionCache_CleanupContract(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("feishu.go")
-	if err != nil {
-		t.Fatalf("read feishu.go: %v", err)
-	}
-	src := string(data)
+	src := packageSource(t)
 
 	tickIdx := strings.Index(src, "func (f *Feishu) cleanupNoncesTick()")
 	if tickIdx < 0 {
