@@ -16,15 +16,20 @@ type reapRouter struct {
 	sid           string
 	resetCalls    []string
 	registerCalls []stubCall
+	// order, when set, receives "reset" / "register-stub" in the shared sequence
+	// so a test can assert ordering against run-ended events. nil = not recording.
+	order *orderRecorder
 }
 
 func (r *reapRouter) RegisterCronStubWithChain(key, workspace, prompt string, chainIDs []string) {
+	r.order.record("register-stub")
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.registerCalls = append(r.registerCalls, stubCall{key, workspace, prompt, chainIDs})
 }
 
 func (r *reapRouter) Reset(key string) {
+	r.order.record("reset")
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.resetCalls = append(r.resetCalls, key)

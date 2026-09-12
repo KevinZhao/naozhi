@@ -29,15 +29,22 @@ type recordingBroadcaster struct {
 	mu      sync.Mutex
 	started []runtelemetry.RunStartedEvent
 	ended   []runtelemetry.RunEndedEvent
+	// order, when set, receives "run-started" / "run-ended" in the shared
+	// sequence. A run-ended event is emitted by finishRun, which is also what
+	// releases the CAS gate, so "reset before run-ended" IS the CAS-gate
+	// invariant the source anchors were approximating. nil = not recording.
+	order *orderRecorder
 }
 
 func (r *recordingBroadcaster) BroadcastRunStarted(ev runtelemetry.RunStartedEvent) {
+	r.order.record("run-started")
 	r.mu.Lock()
 	r.started = append(r.started, ev)
 	r.mu.Unlock()
 }
 
 func (r *recordingBroadcaster) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
+	r.order.record("run-ended")
 	r.mu.Lock()
 	r.ended = append(r.ended, ev)
 	r.mu.Unlock()
