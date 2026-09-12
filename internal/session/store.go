@@ -571,36 +571,33 @@ func saveKnownIDsBytes(storePath string, data []byte) error {
 // ONE r.mu write critical section (indexAdd/indexDel paired with each
 // r.ss.sessions set/delete and the idToKey helpers) or a reader observes a torn
 // index. activeCount/gen are read lock-free by Stats()/Version() and MUST stay
-// atomic; dirty is a plain bool. The annotation on the Router embed line covers
-// the UNION of all accessing domains; the lint recurses so each field carries
-// its own per-domain `// 读写:` annotation, copied verbatim from the original
-// router_core.go field docs.
+// atomic; dirty is a plain bool.
+//
+// That invariant is asserted, not just stated: index_invariants_test.go drives
+// every mutation path — two writes and three deletes across the whole package —
+// through a checker that verifies the three indices agree with sessions. It
+// replaced the `// 读写:` annotations and the linter that policed them (G3 #2667),
+// which named which files touch a field but could not tell whether one of them
+// touched it wrongly.
 type sessionStore struct {
-	// 读写: core (init), lifecycle (spawn/reset/rename), shim (reconnect), cleanup (remove/cleanup), discovery (takeover/register), capacity (reconcile active-gauge scan)
 	sessions map[string]*ManagedSession
 	// byChat: chat key → set of session keys, for O(k) ResetChat with O(1)
 	// dedupe/removal. Nil in test-created routers; all helpers are nil-safe.
-	// 读写: core (indexAdd/Del helpers), lifecycle (ResetChat/install/unregister), cleanup, discovery
 	byChat map[string]map[string]struct{}
 	// keyhash: persist.KeyHash(sessionKey) → sessionKey, an O(1) lookup for the
 	// attachment tracker's workspace resolver (#1646). Maintained at the publish
 	// funnel + indexDel; the resolver self-heals on a miss by re-verifying
 	// against r.ss.sessions and re-populating via a one-off scan. Nil in tests.
-	// 读写: core (indexAdd/Del helpers + resolver), lifecycle (install/unregister)
 	keyhash map[string]string
 	// idToKey: session ID → session key, for O(1) RegisterForResume dedupe.
 	// Maintained under r.mu by setSessionIDIndex/clearSessionIDIndex.
-	// 读写: core (init), lifecycle (install/unregister), discovery (RegisterForResume), shim (reconnectShims index write)
 	idToKey map[string]string
 	// activeCount counts alive non-exempt processes. Writes happen under r.mu;
 	// atomic so Stats() reads lock-free on the dashboard /api/sessions hot path.
-	// 读写: core (Stats lock-free read), lifecycle (countActive/evict/install), capacity (reconcile Store), cleanup (remove/reconcile Add/Store), discovery (Takeover orphan Add), shim (reconnect Add)
 	activeCount atomic.Int64
-	// 读写: lifecycle (spawn/Reset/Rename mutations), shim (reconnect post-attach), discovery (label/register/takeover), cleanup (saveIfDirty consume), capacity (evictOldest mutation)
-	dirty bool // true when sessions changed since last save
+	dirty       bool // true when sessions changed since last save
 	// gen increments on each mutation under r.mu; atomic so Version() reads
 	// lock-free on the dashboard poll path.
-	// 读写: core (Version lock-free), lifecycle (BumpVersion), cleanup (BumpVersion), discovery (BumpVersion), capacity (evictOldest BumpVersion), shim (reconnect BumpVersion)
 	gen atomic.Uint64
 }
 

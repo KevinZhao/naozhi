@@ -5,8 +5,7 @@ import "log/slog"
 // The per-chat workspace-override facet (#383) lives in
 // internal/session/workspacestore (#2495): its fields are private to that
 // package, so every access from Router goes through the Store method
-// surface and the compiler — not the `// 读写:` inner-field annotations —
-// enforces the boundary. The store owns NO lock; every call below happens
+// surface and the compiler enforces the boundary. The store owns NO lock; every call below happens
 // under r.mu (see the workspacestore package doc for the cross-facet
 // atomicity requirements of #2342 that keep it there).
 

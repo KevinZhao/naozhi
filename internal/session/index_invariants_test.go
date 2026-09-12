@@ -19,12 +19,13 @@ import (
 //	keyhash  map[KeyHash(key)]key      derived from the KEY
 //	idToKey  map[sessionID]key         derived from the session ID, learned later
 //
-// Nothing enforced their agreement. What existed instead was 56 `// 读写:`
-// comments naming which files touch which field and a 763-line linter
-// (tools/check-router-fields) checking that those comments match the code — a
+// Nothing enforced their agreement. What stood in for enforcement were 54
+// `// 读写:` comments naming which files touch which field plus a 763-line linter
+// (tools/check-router-fields) checking that those comments matched the code — a
 // mechanism #2497 measured as more expensive than what it compensates for:
-// `git log -G'// 读写:' -- internal/session` shows 40 commits whose only content
-// was keeping the comments current.
+// `git log -G'// 读写:' -- internal/session` showed 40 commits whose only content
+// was keeping the comments current. Both are gone; this file is what replaced
+// them.
 //
 // A comment saying "lifecycle writes this" cannot catch a lifecycle path that
 // writes it WRONG. checkIndexInvariants can, and the test below drives every

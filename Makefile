@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 BINARY  := naozhi
 MAIN    := ./cmd/naozhi/
 
-.PHONY: build vet test lint lint-gofmt vuln deploy release clean lint-server lint-server-fail lint-fact-table lint-fact-table-fail lint-router lint-router-fail release-gate release-gate-live
+.PHONY: build vet test lint lint-gofmt vuln deploy release clean lint-server lint-server-fail lint-fact-table lint-fact-table-fail release-gate release-gate-live
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags='$(LDFLAGS)' -o bin/$(BINARY) $(MAIN)
@@ -77,13 +77,6 @@ lint-fact-table-fail:
 # Router 字段 `// 读写:` 注释漂移检测（router-split P0 安全网，RFC
 # router-god-object-split）。AST 解析 Router 结构每个字段的声明访问域，再扫
 # 所有 router_*.go 实际 r.<field> 访问对账，漂移即报。
-# CI 跑 lint-router-fail（P0 安全网已上膛，漂移即 exit 1 卡 PR）；
-# lint-router（warn 模式）保留供本地快速扫描，不卡本地构建。
-lint-router:
-	go run ./tools/check-router-fields -mode warn
-
-lint-router-fail:
-	go run ./tools/check-router-fields -mode fail
 
 # Cross-compile all supported platforms. Windows omitted: internal/shim
 # depends on POSIX-only syscalls (Kill, Setsid) not present on windows/*.
