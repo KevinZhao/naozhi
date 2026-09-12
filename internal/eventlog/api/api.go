@@ -2,9 +2,13 @@
 // event-storage layers (cli ring, eventlog/persist spool, history/naozhilog
 // replay, history/merged): Appender / Reader / Subscriber, composed into
 // EventStore, so a backend can be registry-injected instead of hard-coded
-// in internal/session/eventlog_bridge.go (#1570). Nothing imports this
-// package yet; adoption is staged behind bench evals so the per-tier
-// pooling hot paths are not regressed.
+// in internal/session/eventlog_bridge.go (#1570). No PRODUCTION code imports
+// this package yet — adoption is staged behind bench evals so the per-tier
+// pooling hot paths are not regressed — but the package is not idle: its
+// external test asserts the real backends (ring.EventLog, naozhilog.Source,
+// merged.Source) against these interfaces, so a signature drift in any tier
+// fails the build rather than letting the three-tier shadow re-grow (#1369,
+// #737). Read "unused" here as "not yet injected", not "deletable".
 //
 // The contract is expressed in clievent.EventEntry and reuses
 // history.Source for the read side so the two cannot drift. Importing

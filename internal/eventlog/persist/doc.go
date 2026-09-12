@@ -40,6 +40,21 @@
 // ring.PersistSink takes []clievent.EventEntry (pre-marshal). Only
 // internal/session/eventlog_bridge.go translates between them.
 //
+// Files in this package (persister.go was 1,509 lines until J9 of #2548):
+//
+//   - persister.go — Options, the Persister struct, construction, and the
+//     public surface (FS/Pressure/Accept/SinkFor/DropKey/Flush/Stop/Stats).
+//   - sink.go      — the ingest path: sessionSink.accept hands a batch to the
+//     run goroutine, handleBatch turns it into records on disk.
+//   - loop.go      — the run goroutine: its select loop, the op protocol it
+//     serves, and shutdown. Everything here is single-goroutine, which is what
+//     lets flushScratch be reused without synchronisation.
+//   - flush.go     — when writers are flushed and closed, plus flushScratch.
+//   - writer.go    — the per-key writer: open, flush, close, remove its files.
+//   - pools.go     — the buffer/arena pools the write path reuses.
+//   - rotate.go / recovery.go / idx.go / framing.go / keyhash.go / entry.go /
+//     fstype*.go — already separate before J9.
+//
 // Persister implements none of the internal/eventlog/api interfaces
 // (EventStore = Appender + Reader + Subscriber): it is driven by the per-key
 // PersistSink (SinkFor) and read back via Recover. The adapter is deferred
