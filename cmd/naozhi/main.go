@@ -121,8 +121,9 @@ func main() {
 
 	// One shim manager for all backends — each shim records its Backend in
 	// state, so reconnect routing needs no per-backend state directories.
+	shimStateDir := osutil.ExpandHome(cfg.Session.Shim.StateDir)
 	shimMgr, err := shim.NewManager(shim.ManagerConfig{
-		StateDir:        osutil.ExpandHome(cfg.Session.Shim.StateDir),
+		StateDir:        shimStateDir,
 		IdleTimeout:     parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour),
 		WatchdogTimeout: parseDurationOrDefault(cfg.Session.Shim.WatchdogTimeout, 30*time.Minute),
 		BufferSize:      cfg.Session.Shim.BufferSize,
@@ -594,6 +595,11 @@ func main() {
 	go func() {
 		serverErr <- srv.Start(ctx)
 	}()
+
+	// Retention for the data-dir trees no writer prunes for itself (J6 of #2548):
+	// one ticker, three passes. Everything else that trims does so as a side
+	// effect of writing, and stays where it is.
+	go newDataDirSweeper(cfg, sessionLayout, shimStateDir, sysWorkDir).Run(ctx)
 
 	startWatchdogLoop(ctx, router.HealthCheck)
 

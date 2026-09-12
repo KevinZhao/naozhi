@@ -24,6 +24,7 @@ import (
 	weixinplatform "github.com/naozhi/naozhi/internal/platform/weixin"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/shim"
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/transcribe"
 )
@@ -254,19 +255,9 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		return nil, "", fmt.Errorf("ensure sys-sessions dir: %w", err)
 	}
 
-	// Startup sweep is non-fatal. Default 7 days when unset; "0" disables.
-	jsonlMaxAge := 7 * 24 * time.Hour
-	if v := cfg.Sysession.Runner.JSONLMaxAge; v != "" {
-		parsed, err := time.ParseDuration(v)
-		if err != nil {
-			slog.Warn("sysession: bad jsonl_max_age; using default 7d", "err", err, "value", v)
-		} else {
-			jsonlMaxAge = parsed
-		}
-	}
-	if _, err := sysession.SweepOldJSONL(resolvedWorkDir, jsonlMaxAge); err != nil {
-		slog.Warn("sysession: startup sweep failed", "err", err, "dir", resolvedWorkDir)
-	}
+	// Retention for this tree is registered on the shared datadir.Sweeper in
+	// main.go (J6). It used to be a single sweep right here, which meant an
+	// instance up for weeks never swept again.
 
 	binPath := ""
 	if defaultWrapper != nil {
@@ -443,3 +434,70 @@ func backendHistoryDir(id string) string {
 	}
 	return osutil.ExpandHome(p.HistoryDir)
 }
+
+// sysessionJSONLMaxAge is the retention window for dataDir/sys-sessions/*.jsonl.
+// Default 7 days when unset; "0" disables the sweep (datadir.Pass treats a
+// non-positive MaxAge as "do nothing").
+func sysessionJSONLMaxAge(cfg *config.Config) time.Duration {
+	const def = 7 * 24 * time.Hour
+	v := cfg.Sysession.Runner.JSONLMaxAge
+	if v == "" {
+		return def
+	}
+	parsed, err := time.ParseDuration(v)
+	if err != nil {
+		slog.Warn("sysession: bad jsonl_max_age; using default 7d", "err", err, "value", v)
+		return def
+	}
+	return parsed
+}
+
+// newDataDirSweeper registers the retention passes for the trees that only
+// accumulate. Ages are chosen so a pass can never remove a file a live process
+// is still appending to:
+//
+//   - cli-debug/<keyhash>.log is appended for a session's whole life, so the
+//     window is derived from the shim idle timeout rather than fixed: no CLI
+//     survives two idle timeouts, so a file untouched that long belongs to a
+//     session whose process is gone. Floored at 7 days so a short configured
+//     idle timeout cannot make the sweep aggressive.
+//   - shims/shim-<pid>.log is decided by liveness, not age: shim.LogFileIsLive
+//     keeps anything whose pid still resolves. The 24h age is a diagnosis grace
+//     period — a shim that just died keeps its log for a day, which is when it
+//     is worth reading.
+//   - sys-sessions/*.jsonl keeps its configured window (jsonl_max_age).
+func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimStateDir, sysWorkDir string) *datadir.Sweeper {
+	idle := parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour)
+	cliDebugMaxAge := 7 * 24 * time.Hour
+	if two := 2 * idle; two > cliDebugMaxAge {
+		cliDebugMaxAge = two
+	}
+
+	s := datadir.NewSweeper(dataDirSweepInterval)
+	s.Add(datadir.Pass{
+		Name:   "cli-debug",
+		Dir:    layout.CLIDebugRoot(),
+		Ext:    ".log",
+		MaxAge: cliDebugMaxAge,
+	})
+	s.Add(datadir.Pass{
+		Name:   "shim-logs",
+		Dir:    shimStateDir,
+		Ext:    ".log",
+		MaxAge: 24 * time.Hour,
+		Keep:   shim.LogFileIsLive,
+	})
+	s.Add(datadir.Pass{
+		Name:   "sys-sessions",
+		Dir:    sysWorkDir,
+		Ext:    ".jsonl",
+		MaxAge: sysessionJSONLMaxAge(cfg),
+	})
+	return s
+}
+
+// dataDirSweepInterval is how often the shared sweeper runs. Hourly: the trees
+// it gardens grow at a few files per hour at most, and Sweeper.Run does one pass
+// immediately at startup so a long-lived instance is not the only thing that
+// gets swept.
+const dataDirSweepInterval = time.Hour
