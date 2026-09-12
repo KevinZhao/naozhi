@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 func writeAged(t *testing.T, dir, name string, body string, age time.Duration) string {
@@ -255,15 +257,8 @@ func TestSweeperRunSweepsImmediately(t *testing.T) {
 	done := make(chan struct{})
 	go func() { s.Run(ctx); close(done) }()
 
-	deadline := time.After(5 * time.Second)
-	for exists(t, old) {
-		select {
-		case <-deadline:
-			t.Fatal("Run did not sweep before its first tick")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	testhelper.Eventually(t, func() bool { return !exists(t, old) }, 5*time.Second,
+		"Run did not sweep before its first tick")
 	cancel()
 	select {
 	case <-done:
