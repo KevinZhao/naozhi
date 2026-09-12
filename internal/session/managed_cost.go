@@ -9,6 +9,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/costledger/cliusage"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
@@ -76,23 +77,7 @@ func (c *costAccounting) warnUnknownBasis(key string, models []costledger.ModelD
 // result frame plus the backend metering view (kiro credits / codex tokens,
 // both already summed per process by cli.Process).
 func cumulativeFromResult(result *clievent.SendResult, metering []clievent.MeteringEntry) costledger.Cumulative {
-	raw := costledger.Cumulative{USD: result.CostUSD}
-	if len(result.ModelUsage) > 0 {
-		raw.Models = make(map[string]costledger.ModelUsage, len(result.ModelUsage))
-		for k, v := range result.ModelUsage {
-			raw.Models[k] = costledger.ModelUsage{
-				Tokens: costledger.Tokens{
-					Input: v.InputTokens, Output: v.OutputTokens,
-					CacheRead: v.CacheReadInputTokens, CacheWrite: v.CacheCreationInputTokens,
-					Thinking: v.ThinkingTokens, WebSearch: v.WebSearchRequests,
-				},
-				CostUSD:   v.CostUSD,
-				Canonical: v.CanonicalModel,
-				Provider:  v.Provider,
-				Basis:     costledger.Basis(v.CostBasis),
-			}
-		}
-	}
+	raw := cliusage.Cumulative(result.CostUSD, result.ModelUsage)
 	for _, m := range metering {
 		u, ok := meteringUnit(m.Unit)
 		if !ok {
