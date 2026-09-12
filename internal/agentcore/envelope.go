@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/costledger/cliusage"
 	"github.com/naozhi/naozhi/internal/limits"
 )
 
@@ -50,28 +52,13 @@ type Envelope struct {
 // needs (classification, final text, cost/duration receipt), decoded once via
 // ParseResultLine (#2321). Full event parsing belongs to cli.Protocol.
 type resultProbe struct {
-	Type       string                   `json:"type"`
-	Subtype    string                   `json:"subtype"`
-	IsError    bool                     `json:"is_error"`
-	Result     string                   `json:"result"`
-	CostUSD    float64                  `json:"total_cost_usd"`
-	DurationMS int64                    `json:"duration_ms"`
-	ModelUsage map[string]modelUsageRow `json:"modelUsage"`
-}
-
-// modelUsageRow mirrors one CLI modelUsage entry (per-model cumulative usage
-// of the sandbox's one-shot process, so it is also the run's increment).
-type modelUsageRow struct {
-	InputTokens              int64   `json:"inputTokens"`
-	OutputTokens             int64   `json:"outputTokens"`
-	CacheReadInputTokens     int64   `json:"cacheReadInputTokens"`
-	CacheCreationInputTokens int64   `json:"cacheCreationInputTokens"`
-	ThinkingTokens           int64   `json:"thinkingTokens"`
-	WebSearchRequests        int64   `json:"webSearchRequests"`
-	CostUSD                  float64 `json:"costUSD"`
-	CanonicalModel           string  `json:"canonicalModel"`
-	Provider                 string  `json:"provider"`
-	CostBasis                string  `json:"costBasis"`
+	Type       string                         `json:"type"`
+	Subtype    string                         `json:"subtype"`
+	IsError    bool                           `json:"is_error"`
+	Result     string                         `json:"result"`
+	CostUSD    float64                        `json:"total_cost_usd"`
+	DurationMS int64                          `json:"duration_ms"`
+	ModelUsage map[string]clievent.ModelUsage `json:"modelUsage"`
 }
 
 // modelDeltas converts the probe's modelUsage into ledger rows plus the worst
@@ -80,18 +67,9 @@ func (p resultProbe) modelDeltas() ([]costledger.ModelDelta, costledger.Basis) {
 	if len(p.ModelUsage) == 0 {
 		return nil, costledger.BasisNone
 	}
-	raw := costledger.Cumulative{Models: make(map[string]costledger.ModelUsage, len(p.ModelUsage))}
-	for k, v := range p.ModelUsage {
-		raw.Models[k] = costledger.ModelUsage{
-			Tokens: costledger.Tokens{
-				Input: v.InputTokens, Output: v.OutputTokens,
-				CacheRead: v.CacheReadInputTokens, CacheWrite: v.CacheCreationInputTokens,
-				Thinking: v.ThinkingTokens, WebSearch: v.WebSearchRequests,
-			},
-			CostUSD: v.CostUSD, Canonical: v.CanonicalModel, Provider: v.Provider,
-			Basis: costledger.Basis(v.CostBasis),
-		}
-	}
+	// USD 0: only Models and Basis are read below, and this caller's total is
+	// booked elsewhere.
+	raw := cliusage.Cumulative(0, p.ModelUsage)
 	inc, _ := costledger.Delta(raw, costledger.Cumulative{})
 	return inc.Models, inc.Basis
 }
