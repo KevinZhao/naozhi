@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/costledger/cliusage"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -22,25 +24,12 @@ type CostLedger interface {
 // resultEnvelope is the subset of `claude -p --output-format json` this
 // package reads: the reply text plus the cost receipt.
 type resultEnvelope struct {
-	Type       string                      `json:"type"`
-	Subtype    string                      `json:"subtype"`
-	IsError    bool                        `json:"is_error"`
-	Result     string                      `json:"result"`
-	CostUSD    float64                     `json:"total_cost_usd"`
-	ModelUsage map[string]resultModelUsage `json:"modelUsage"`
-}
-
-type resultModelUsage struct {
-	InputTokens              int64   `json:"inputTokens"`
-	OutputTokens             int64   `json:"outputTokens"`
-	CacheReadInputTokens     int64   `json:"cacheReadInputTokens"`
-	CacheCreationInputTokens int64   `json:"cacheCreationInputTokens"`
-	ThinkingTokens           int64   `json:"thinkingTokens"`
-	WebSearchRequests        int64   `json:"webSearchRequests"`
-	CostUSD                  float64 `json:"costUSD"`
-	CanonicalModel           string  `json:"canonicalModel"`
-	Provider                 string  `json:"provider"`
-	CostBasis                string  `json:"costBasis"`
+	Type       string                         `json:"type"`
+	Subtype    string                         `json:"subtype"`
+	IsError    bool                           `json:"is_error"`
+	Result     string                         `json:"result"`
+	CostUSD    float64                        `json:"total_cost_usd"`
+	ModelUsage map[string]clievent.ModelUsage `json:"modelUsage"`
 }
 
 // parseResultEnvelope decodes the one-shot CLI's stdout. Truncated or
@@ -67,21 +56,7 @@ func (r *runnerImpl) bookRunCost(env resultEnvelope, ri RunInfo) {
 	if r.cfg.Ledger == nil || !r.cfg.Ledger.Enabled() {
 		return
 	}
-	raw := costledger.Cumulative{USD: env.CostUSD}
-	if len(env.ModelUsage) > 0 {
-		raw.Models = make(map[string]costledger.ModelUsage, len(env.ModelUsage))
-		for k, v := range env.ModelUsage {
-			raw.Models[k] = costledger.ModelUsage{
-				Tokens: costledger.Tokens{
-					Input: v.InputTokens, Output: v.OutputTokens,
-					CacheRead: v.CacheReadInputTokens, CacheWrite: v.CacheCreationInputTokens,
-					Thinking: v.ThinkingTokens, WebSearch: v.WebSearchRequests,
-				},
-				CostUSD: v.CostUSD, Canonical: v.CanonicalModel, Provider: v.Provider,
-				Basis: costledger.Basis(v.CostBasis),
-			}
-		}
-	}
+	raw := cliusage.Cumulative(env.CostUSD, env.ModelUsage)
 	inc, _ := costledger.Delta(raw, costledger.Cumulative{})
 	if inc.USD <= 0 && len(inc.Models) == 0 {
 		return
