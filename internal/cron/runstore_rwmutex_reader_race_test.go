@@ -36,17 +36,22 @@ func TestRunStore_RWMutexReaders_NoRaceUnderConcurrentAppend(t *testing.T) {
 
 	// iters is the WRITER's count; each Append also writes a run file, so the test
 	// is disk-bound and its wall time is linear in this number. Measured under
-	// -race (what CI runs): 4000 → 52.8s, 1000 → 15.2s, 400 → 7.2s. It was 4000
-	// with no recorded rationale, and at 52.8s it was the single largest test in
-	// the repo — 55 of the ~200s CI `test` job, whose Epic A #2524 target is 150s.
+	// -race (what CI runs): 4000 → 52.8s, 1000 → 13.9s, 400 → 6.2-6.8s. It was
+	// 4000 with no recorded rationale, and at 52.8s it was the single largest test
+	// in the repo.
 	//
-	// 1000 keeps the detection power. TSan is not statistical: it reports a race
-	// the first time it observes two conflicting accesses without a happens-before
-	// edge, so what matters is that the paths run concurrently at all, not how many
-	// times. And the readers below spin FREELY rather than once per write — their
-	// coverage is bounded by wall time, and 15s of six concurrent readers against
-	// cacheHeadPush + appendTrimBatch exercises every RLock site many times over.
-	const iters = 1000
+	// TSan is not statistical: it reports a race the first time it observes two
+	// conflicting accesses without a happens-before edge, so what matters is that
+	// the paths run concurrently at all, not how many times. The readers below spin
+	// FREELY rather than once per write, so their coverage is bounded by wall time
+	// rather than by this constant.
+	//
+	// 400 was VERIFIED to keep the detection power rather than assumed: removing
+	// cacheGet's `entry.mu.RLock()` / `RUnlock()` pair makes this test report DATA
+	// RACE at 400 iterations. 400 is also 12.5x keep (32), so the periodic
+	// cacheTrimAfterDisk path — the other side of the race — still runs a dozen
+	// times. Package wall time under -race: 44.0s → 34.3s.
+	const iters = 400
 	const readers = 6
 
 	var wg sync.WaitGroup

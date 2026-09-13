@@ -114,11 +114,14 @@ func TestWaitGCDrain_DoesNotBlockWhenGCEmpty(t *testing.T) {
 // helper past gcWaitBudget. Confirms the timer arm fires when the
 // drain channel doesn't.
 func TestWaitGCDrain_BoundedByBudget(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow: skipped in -short")
-	}
+	t.Parallel()
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5}, SchedulerDeps{})
+	// The invariant is "waitGCDrain gives up after ITS budget", not "the budget is
+	// 5 seconds". Injecting a short one tests the same give-up path in 200ms
+	// instead of 5s, which is what this test spent in every CI run.
+	const budget = 200 * time.Millisecond
+	t.Cleanup(WithGCBudgetField(s, budget))
 
 	hold := make(chan struct{})
 	t.Cleanup(func() { close(hold) })
@@ -128,22 +131,19 @@ func TestWaitGCDrain_BoundedByBudget(t *testing.T) {
 		<-hold
 	}()
 
-	if testing.Short() {
-		t.Skip("waitGCDrain budget test waits up to gcWaitBudget=5s; skip in -short")
-	}
-
 	start := time.Now()
 	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
 	s.waitGCDrain(nil)
 	elapsed := time.Since(start)
 
-	// Allow a wide upper bound — gcWaitBudget is currently 5s; if a future
-	// change shortens it the test still passes. Lower bound proves we
-	// actually waited (close to gcWaitBudget) and didn't return early.
-	if elapsed > gcWaitBudget+2*time.Second {
-		t.Errorf("waitGCDrain took %v, want ≤ gcWaitBudget+2s", elapsed)
+	// Both bounds are relative to the INJECTED budget, so the test asserts the
+	// give-up behaviour rather than a particular duration. The generous upper slack
+	// absorbs CI scheduling jitter; the lower bound is the load-bearing half — it
+	// proves the timer armed at all instead of waitGCDrain returning immediately.
+	if elapsed > budget+2*time.Second {
+		t.Errorf("waitGCDrain took %v, want <= injected budget %v + 2s", elapsed, budget)
 	}
-	if elapsed < 100*time.Millisecond {
-		t.Errorf("waitGCDrain returned too quickly (%v); did the timer arm?", elapsed)
+	if elapsed < budget/2 {
+		t.Errorf("waitGCDrain returned in %v, well under the %v budget; did the timer arm?", elapsed, budget)
 	}
 }

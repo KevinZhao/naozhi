@@ -26,3 +26,17 @@ func WithStopBudgetField(s *Scheduler, d time.Duration) func() {
 	s.stopBudget = d
 	return func() { s.stopBudget = orig }
 }
+
+// WithGCBudgetField overrides the per-instance Scheduler.gcBudget, mirroring
+// WithStopBudgetField. Same isolation contract: call it after the *Scheduler is
+// constructed, keep the swap local to one instance so t.Parallel tests cannot
+// race each other.
+//
+// Its reason for existing is wall time: waitGCDrain's default budget is 5s, and
+// a test that asserts the give-up path must wait it out. gcWaitBudget was
+// flagged for exactly this treatment in WithStopBudgetField's own note above.
+func WithGCBudgetField(s *Scheduler, d time.Duration) func() {
+	orig := s.gcBudget
+	s.gcBudget = d
+	return func() { s.gcBudget = orig }
+}

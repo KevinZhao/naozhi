@@ -136,11 +136,21 @@ func TestResolveWorkspaces_ConcurrentWithWriters(t *testing.T) {
 
 	// Writers: Scan replaces m.projects (and clears the cache) while UpdateConfig
 	// mutates Config under the write lock.
+	//
+	// 60 rather than the original 200: each Scan is a filesystem walk, so the loop
+	// count IS this test's wall time (200 → 7.98s under -race). Detection does not
+	// come from the count — TSan reports a race the first time it observes two
+	// conflicting accesses with no happens-before edge, and the readers above spin
+	// FREELY until the writers finish, so their coverage is bounded by wall time.
+	//
+	// VERIFIED rather than assumed: moving the projRef snapshot back outside the
+	// RLock (the #2228 bug) makes this test report DATA RACE at 60, three runs out
+	// of three.
 	for w := 0; w < 2; w++ {
 		writers.Add(1)
 		go func() {
 			defer writers.Done()
-			for i := 0; i < 200; i++ {
+			for i := 0; i < 60; i++ {
 				if i%2 == 0 {
 					_ = m.Scan()
 				} else {
