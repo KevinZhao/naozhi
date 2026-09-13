@@ -270,6 +270,12 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// 必须同步可见或同步缺失）。SECURITY: 落盘与 WS 广播只能用 persistedResult /
 	// persistedErrMsg（已 redact + sanitise），绝不用原始 a.result / a.errMsg——
 	// 错误串里的绝对路径会把工作区布局泄漏给所有 dashboard 客户端。
+	// Clear the restart marker for EVERY terminal state, skipPersist included:
+	// the marker's claim is "this run never finished", so any finish invalidates
+	// it. Doing this before the persistence branches means a marshal failure below
+	// cannot leave a marker that resurrects the run as interrupted next boot.
+	s.removeRunInflightMarker(a.runID)
+
 	persistedResult := a.result
 	persistedErrMsg := a.errMsg
 	jobPersistOK := false

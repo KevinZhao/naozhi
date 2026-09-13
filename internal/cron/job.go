@@ -244,6 +244,12 @@ const (
 	ErrClassSandboxFailed      ErrorClass = "sandbox_failed"
 	ErrClassSandboxTransport   ErrorClass = "sandbox_transport"
 	ErrClassSandboxUnavailable ErrorClass = "sandbox_unavailable"
+	// ErrClassInterrupted marks a run still executing when the process went away
+	// — a graceful shutdown that outran the drain budget, or a hard kill. The
+	// RunState stays canceled; this class is what distinguishes it from an
+	// operator cancel. Wire value mirrors runtelemetry.ErrClassCronInterrupted
+	// (Epic H #2546). Written only by reconcileRunInflight, at startup.
+	ErrClassInterrupted ErrorClass = "interrupted"
 )
 
 // hexIDEntropyBytes 是所有 cron 内部 ID（jobID / runID）的熵字节数（不是

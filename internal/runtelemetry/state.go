@@ -50,6 +50,18 @@ const (
 	ErrClassCronWorkDirUnreachable ErrorClass = "workdir_unreachable"
 	ErrClassCronWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassCronOverlapSkipped     ErrorClass = "overlap_skipped"
+	// ErrClassCronInterrupted marks a run that was still executing when the
+	// process went away — a graceful shutdown that outran the drain budget, or a
+	// hard kill. RunState stays "canceled" (it did not complete) and the class
+	// carries WHY, following the same split as the sandbox classes below: a new
+	// RunState would need a coordinated dashboard.js change, while an error class
+	// renders through the existing canceled badge with the detail attached.
+	//
+	// Before this existed such a run left NO history record at all: finishRun's
+	// shutdown-cancel path sets skipPersist, which gates both the Job-field update
+	// (correct — a cancel must not move LastRunAt) and the runs/ history append
+	// (wrong — the run did execute, sometimes for minutes). See Epic H #2546.
+	ErrClassCronInterrupted ErrorClass = "interrupted"
 
 	// cron sandbox placement (agentcore-cloud-sandbox RFC §6.1): distinct
 	// because they differ in replay safety — "sandbox_failed" is the CLI's
