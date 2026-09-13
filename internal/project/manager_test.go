@@ -2,6 +2,7 @@ package project
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1071,20 +1072,28 @@ func TestBindChat_ConcurrentScan_DoesNotDropBinding(t *testing.T) {
 		t.Skip("slow: skipped in -short")
 	}
 	t.Parallel()
+	// iters is how many times the BindChat||Scan interleaving is attempted. The
+	// SETUP is hoisted out of the loop and each iteration binds a DISTINCT chat
+	// id: the original rebuilt a TempDir, a project dir, a Manager and an initial
+	// Scan on every iteration, plus a second Manager for the durability check —
+	// five filesystem-heavy operations per attempt, which was the whole cost
+	// (9.7s under -race). A fresh state per iteration is not what makes the test
+	// work; a not-yet-bound chat id is, and that is one string.
 	const iters = 200
-	for i := 0; i < iters; i++ {
-		root := t.TempDir()
-		makeProjectDir(t, root, "racy", nil)
-		m, _ := NewManager(root, PlannerDefaults{})
-		if err := m.Scan(); err != nil {
-			t.Fatalf("initial Scan: %v", err)
-		}
+	root := t.TempDir()
+	makeProjectDir(t, root, "racy", nil)
+	m, _ := NewManager(root, PlannerDefaults{})
+	if err := m.Scan(); err != nil {
+		t.Fatalf("initial Scan: %v", err)
+	}
 
+	for i := 0; i < iters; i++ {
+		chatID := fmt.Sprintf("chatX-%d", i)
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			if err := m.BindChat("racy", "feishu", "group", "chatX"); err != nil {
+			if err := m.BindChat("racy", "feishu", "group", chatID); err != nil {
 				t.Errorf("BindChat: %v", err)
 			}
 		}()
@@ -1098,22 +1107,29 @@ func TestBindChat_ConcurrentScan_DoesNotDropBinding(t *testing.T) {
 		wg.Wait()
 
 		// After both complete, the binding must be present. If Scan ran first,
-		// it reloaded the empty config but BindChat's later save+append wins; if
-		// BindChat ran first, Scan reloads the persisted binding. Either way the
-		// binding both lives in memory and is on disk. A torn ordering (save
-		// after unlock) would intermittently leave the binding only in a stale
-		// in-memory copy that Scan then overwrote — i.e. lost.
-		if p := m.ProjectForChat("feishu", "group", "chatX"); p == nil {
-			t.Fatalf("iter %d: binding lost from in-memory index after concurrent Scan", i)
+		// it reloaded the config without this chat id but BindChat's later
+		// save+append wins; if BindChat ran first, Scan reloads the persisted
+		// binding. Either way the binding both lives in memory and is on disk. A
+		// torn ordering (save after unlock) would intermittently leave the binding
+		// only in a stale in-memory copy that Scan then overwrote — i.e. lost.
+		if p := m.ProjectForChat("feishu", "group", chatID); p == nil {
+			t.Fatalf("iter %d: binding %q lost from in-memory index after concurrent Scan", i, chatID)
 		}
+	}
 
-		// And it must be durable: a fresh manager reading purely from disk sees it.
-		m2, _ := NewManager(root, PlannerDefaults{})
-		if err := m2.Scan(); err != nil {
-			t.Fatalf("reload Scan: %v", err)
-		}
-		if p := m2.Get("racy"); p == nil || len(p.Config.ChatBindings) != 1 {
-			t.Fatalf("iter %d: binding not durably persisted; p = %+v", i, p)
-		}
+	// Durability, once at the end rather than per iteration: a fresh manager
+	// reading purely from disk must see EVERY binding. Checking the full set is
+	// strictly stronger than the old per-iteration `len(...) != 1` — a single lost
+	// write anywhere in the run shows up here.
+	m2, _ := NewManager(root, PlannerDefaults{})
+	if err := m2.Scan(); err != nil {
+		t.Fatalf("reload Scan: %v", err)
+	}
+	p := m2.Get("racy")
+	if p == nil {
+		t.Fatal("project missing after reload")
+	}
+	if got := len(p.Config.ChatBindings); got != iters {
+		t.Fatalf("durable bindings = %d, want %d — a concurrent Scan clobbered at least one save", got, iters)
 	}
 }
