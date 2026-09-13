@@ -79,7 +79,13 @@ func (s *Scheduler) waitGCDrain(ctx context.Context) {
 		s.gcWG.Wait()
 		close(gcDone)
 	}()
-	gcTimer := time.NewTimer(gcWaitBudget)
+	// Zero-value field = hand-constructed *Scheduler (tests); fall back to the
+	// const, never a package var — same contract as stopBudget (#947, #1712).
+	budget := s.gcBudget
+	if budget <= 0 {
+		budget = gcWaitBudget
+	}
+	gcTimer := time.NewTimer(budget)
 	defer gcTimer.Stop()
 	select {
 	case <-gcDone:
@@ -87,12 +93,12 @@ func (s *Scheduler) waitGCDrain(ctx context.Context) {
 		// The caller's shutdown ctx pre-empts the internal budget; account it
 		// as a budget breach so dashboards alert identically (#1168).
 		metrics.CronStopBudgetExceededGCTotal.Add(1)
-		slog.Warn("cron: gc goroutine wait cancelled by stop ctx", "budget", gcWaitBudget)
+		slog.Warn("cron: gc goroutine wait cancelled by stop ctx", "budget", budget)
 	case <-gcTimer.C:
 		// Counter pairs the Warn so dashboards can alert on shutdown-budget
 		// breaches without grepping journalctl (#1083).
 		metrics.CronStopBudgetExceededGCTotal.Add(1)
-		slog.Warn("cron: gc goroutine wait timeout", "budget", gcWaitBudget)
+		slog.Warn("cron: gc goroutine wait timeout", "budget", budget)
 	}
 }
 

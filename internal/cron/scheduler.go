@@ -80,6 +80,12 @@ type Scheduler struct {
 	// on the Stop() goroutine after construction, so no atomic; the test seam
 	// WithStopBudgetField must run before the Scheduler is shared.
 	stopBudget time.Duration
+	// gcWaitBudget is the per-instance cold-start-GC wait in Stop(), seeded from
+	// the gcWaitBudget const. Per-instance for the same reason stopBudget is
+	// (#947): a t.Parallel test shortening it must not clobber another
+	// *Scheduler. The 5s default is what TestWaitGCDrain_BoundedByBudget was
+	// paying in wall time before this seam existed.
+	gcBudget time.Duration
 	// watchdogInterruptTimeoutNanos bounds sess.InterruptViaControl inside
 	// runDeadlineWatchdog. Per-instance so parallel timeout tests stay
 	// isolated (#1904); atomic because the AfterFunc watchdog goroutine reads
@@ -303,6 +309,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		// Seeded from the const; tests override per-instance via
 		// WithStopBudgetField so t.Parallel Stops cannot race a global (#947).
 		stopBudget:          defaultStopBudget,
+		gcBudget:            gcWaitBudget,
 		location:            loc,
 		notifyDefault:       cfg.NotifyDefault,
 		allowedRoot:         cfg.AllowedRoot,
