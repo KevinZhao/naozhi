@@ -556,6 +556,15 @@ func (s *Scheduler) Start() error {
 		defer s.gcWG.Done()
 		s.reconcileSandboxPending()
 	}()
+	// Epic H #2546: local runs left in flight by the previous process. Unlike a
+	// sandbox orphan there is nothing to stop — the process is gone — so this only
+	// writes the history rows that were missing. Async + gcWG-tracked for the same
+	// reason as the pass above: it touches the run store and must not block Start.
+	s.gcWG.Add(1)
+	go func() {
+		defer s.gcWG.Done()
+		s.reconcileRunInflight()
+	}()
 	slog.Info("cron scheduler started", "jobs", jobCount)
 	return nil
 }

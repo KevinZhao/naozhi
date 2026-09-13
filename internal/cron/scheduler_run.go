@@ -375,6 +375,21 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 		return
 	}
 
+	// Restart fate for this run (Epic H #2546): the marker says "still in flight".
+	// finishRun removes it on every terminal state; anything left at the next boot
+	// becomes a canceled record with ErrClassInterrupted. Written AFTER the
+	// snapshot so it carries the prompt/workDir the history row needs, and after
+	// the started event so a marker never outlives a run the dashboard never saw.
+	s.writeRunInflightMarker(runInflightMarker{
+		JobID:       j.ID,
+		RunID:       runID,
+		Trigger:     trigger,
+		StartedAtMS: startedAt.UnixMilli(),
+		Prompt:      snap.prompt,
+		WorkDir:     snap.workDir,
+		Fresh:       snap.fresh,
+	}, lg)
+
 	// Per-job timeout is always s.execTimeout: robfig/cron's SkipIfStillRunning
 	// chain wrapper drops a colliding tick instead of killing a long-running job,
 	// so the deadline does not need to anticipate the next tick.

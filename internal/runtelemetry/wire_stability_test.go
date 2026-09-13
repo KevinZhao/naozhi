@@ -33,6 +33,7 @@ func TestRunState_WireStable(t *testing.T) {
 func TestErrorClass_WireStable(t *testing.T) {
 	t.Parallel()
 	want := map[ErrorClass]string{
+		ErrClassCronInterrupted:  "interrupted",
 		ErrClassNone:             "",
 		ErrClassDeadlineExceeded: "deadline_exceeded",
 		ErrClassCanceled:         "canceled",
