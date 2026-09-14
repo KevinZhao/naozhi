@@ -132,20 +132,13 @@ type SandboxRunner interface {
 // cannot outlive a cut stream. Effective budget is min(execTimeout, this).
 const sandboxMaxRunDuration = 60 * time.Minute
 
-// sandboxExecArgs carries the executeOpt-owned state into the sandbox
-// branch. Mirrors the getSessionArgs/finishArgs bundling style.
+// sandboxExecArgs carries the executeOpt-owned state into the sandbox branch.
+// The run's identity comes from the embedded runCtx (Epic H #2546); what stays
+// here is what only this branch needs.
 type sandboxExecArgs struct {
-	job       *Job
-	snap      jobSnapshot
-	runID     string
-	startedAt time.Time
-	trigger   TriggerKind
-	prompt    string // agent-command-stripped prompt (cleanText)
-	model     string // resolved agent model ("" = image default)
-	notifyTo  NotifyTarget
-	inflight  *runInflight
-	finalizer *runFinalizer
-	lg        *slog.Logger
+	runCtx
+	prompt string // agent-command-stripped prompt (cleanText)
+	model  string // resolved agent model ("" = image default)
 	// replayOf links this run to the original it re-executes; "" for a normal
 	// run. Set by ReplaySandboxRun, threaded to CronRun.ReplayOf.
 	replayOf string
@@ -363,12 +356,9 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 	// No metrics here: finishRun → bumpRunStateMetrics(state, sandbox=true) is the
 	// single owner of every per-state counter, and the state already encodes the
 	// TimedOut-vs-Failed split so a timed-out run is never counted twice (#2173).
-	s.finishRun(finishArgs{
-		job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
+	s.finishRunFor(a.runCtx, runOutcome{
 		state: state, errClass: errClass, errMsg: errMsg, result: result,
 		skipPersist: skipPersist,
-		prompt:      a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
-		finalizer:   a.finalizer,
 		sandboxMeta: meta,
 		replayOf:    a.replayOf,
 		sandbox:     true,

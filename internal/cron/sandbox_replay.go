@@ -228,10 +228,9 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 			},
 		}.run(func() {
 			s.executeSandbox(sandboxExecArgs{
-				job: j, snap: replaySnap, runID: runID, startedAt: startedAt,
-				trigger: TriggerManual, prompt: prompt, model: model,
-				notifyTo: notifyTo, inflight: inflight, finalizer: finalizer,
-				lg:       lg,
+				runCtx:   runCtx{job: j, snap: replaySnap, runID: runID, startedAt: startedAt, trigger: TriggerManual, notifyTo: notifyTo, inflight: inflight, finalizer: finalizer, lg: lg},
+				prompt:   prompt,
+				model:    model,
 				replayOf: origRunID,
 			})
 		})

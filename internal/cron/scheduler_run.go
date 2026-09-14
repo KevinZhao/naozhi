@@ -591,10 +591,9 @@ func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) 
 		// budget, and keeping this ctx alive would hand later code a misleading one.
 		spawnCancel()
 		s.executeSandbox(sandboxExecArgs{
-			job: j, snap: snap, runID: runID, startedAt: startedAt,
-			trigger: trigger, prompt: cleanText, model: opts.Model,
-			notifyTo: notifyTo, inflight: inflight, finalizer: finalizer,
-			lg: lg,
+			runCtx: runCtx{job: j, snap: snap, runID: runID, startedAt: startedAt, trigger: trigger, notifyTo: notifyTo, inflight: inflight, finalizer: finalizer, lg: lg},
+			prompt: cleanText,
+			model:  opts.Model,
 		})
 		return AgentOpts{}, "", "", stubRefresher{}, false
 	}
