@@ -1,37 +1,22 @@
 package session
 
 import (
-	"os"
 	"path/filepath"
-	"regexp"
 	"testing"
 	"time"
 )
 
-// TestShutdown_UsesSliceStoreContract pins R20260603-PERF-1: shutdown() must
-// allocate a []*ManagedSession slice (not a map[string]*ManagedSession) and
-// call saveStoreSlice, not saveStore. This avoids hashmap bucket allocation on
-// every shutdown. A source-level check catches a silent revert that would
-// still compile but waste allocations.
-func TestShutdown_UsesSliceStoreContract(t *testing.T) {
-	t.Parallel()
-	src, err := os.ReadFile("router_cleanup.go")
-	if err != nil {
-		t.Fatalf("read router_cleanup.go: %v", err)
-	}
-
-	// The slice allocation pattern must be present inside shutdown().
-	if !regexp.MustCompile(`\[\]\*ManagedSession`).Match(src) {
-		t.Error("shutdown(): []*ManagedSession slice allocation not found. " +
-			"R20260603-PERF-1 requires a value slice instead of a map copy to " +
-			"avoid hashmap bucket allocation on every shutdown.")
-	}
-	// saveStoreSlice must be called (not the map-based saveStore).
-	if !regexp.MustCompile(`saveStoreSlice\(`).Match(src) {
-		t.Error("shutdown(): saveStoreSlice call not found. " +
-			"R20260603-PERF-1 replaced saveStore(map) with saveStoreSlice(slice).")
-	}
-}
+// TestShutdown_UsesSliceStoreContract used to live here, scanning
+// router_cleanup.go for `[]*ManagedSession` and `saveStoreSlice(` to pin
+// R20260603-PERF-1 (a value slice instead of a map copy, avoiding hashmap bucket
+// allocation). It is gone (Epic I #2547).
+//
+// The functional half — that shutdown still persists every session through the
+// slice path — is the round-trip test below, which a revert to the map form would
+// not fail but which is what actually matters. The perf half is one map allocation
+// per SHUTDOWN, and Shutdown runs once per process (pinned by
+// TestShutdown_RunsItsBodyOnce). Guarding one allocation per process lifetime with
+// a source-scanning test that every rename breaks is the shape #2497 is about.
 
 // TestShutdown_SliceStore_MultiSessionRoundTrip verifies that after the
 // PERF-1 change shutdown still persists multiple sessions correctly via the
