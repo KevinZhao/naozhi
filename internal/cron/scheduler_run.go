@@ -413,7 +413,7 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 		return
 	}
 
-	s.execFinishSuccess(j, snap, key, result, costInc, runID, startedAt, trigger, lg, notifyTo, finalizer)
+	s.execFinishSuccess(rc, result, costInc)
 }
 
 // execAcquireSlot is the CAS admission gate of a cron run.
@@ -710,9 +710,10 @@ func costTotalsOf(sess Session) costledger.Totals {
 // fresh session while the CAS gate is held, finishRun, notify, and refresh
 // the sidebar stub.
 func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, costInc costledger.Increment) {
-	j, snap, key := a.job, a.snap, a.key
-	runID, startedAt, trigger := a.runID, a.startedAt, a.trigger
-	lg, notifyTo, finalizer, stubRefresh := a.lg, a.notifyTo, a.finalizer, a.stubRefresh
+	// Only what this function still reads directly; the identity fields it used to
+	// unpack are now spelled once inside finishRunFor(a.runCtx, ...).
+	snap, key := a.snap, a.key
+	lg, notifyTo, stubRefresh := a.lg, a.notifyTo, a.stubRefresh
 	if errors.Is(err, context.Canceled) {
 		// Suppress the operator-facing notice so shutdown races don't look like
 		// real failures. As on the deadline path, a watchdog that fired without
@@ -741,13 +742,9 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 		// gate; a late refresh could clobber run-B's live stub with run-A's
 		// stale chain (phantom sidebar pointing at the prior session's JSONL).
 		stubRefresh.run()
-		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+		s.finishRunFor(a.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
-			skipPersist: true,
-			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: finalizer,
-			costInc:   costInc,
+			skipPersist: true, costInc: costInc,
 		})
 		return
 	}
@@ -783,12 +780,10 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 	// Stub re-register BEFORE finishRun releases the gate (see the cancel
 	// branch); deliverNotice (IM, stub-independent) stays after finishRun.
 	stubRefresh.run()
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-		state: state, errClass: errClass, errMsg: "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
-		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-		finalizer: finalizer,
-		costInc:   costInc,
+	s.finishRunFor(a.runCtx, runOutcome{
+		state: state, errClass: errClass,
+		errMsg:  "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
+		costInc: costInc,
 	})
 	s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
 }
@@ -796,12 +791,14 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 // execFinishSuccess records a successful run: latency observability, the
 // fresh-session reap (while the CAS gate is held), the success finishRun, and
 // the sanitised IM notice.
-func (s *Scheduler) execFinishSuccess(j *Job, snap jobSnapshot, key string, result SendResult, costInc costledger.Increment, runID string, startedAt time.Time, trigger TriggerKind, lg *slog.Logger, notifyTo NotifyTarget, finalizer *runFinalizer) {
+func (s *Scheduler) execFinishSuccess(rc runCtx, result SendResult, costInc costledger.Increment) {
+	// The eight identity parameters this used to take are rc (Epic H #2546).
+	snap, key, lg, notifyTo := rc.snap, rc.key, rc.lg, rc.notifyTo
 	// successEndedAt is read once from the injectable clock and shared by
 	// observeSuccessLatency and finishRun so elapsed and DurationMS come from
 	// the same reading (step-based test clocks stay deterministic).
 	successEndedAt := s.now()
-	s.observeSuccessLatency(successEndedAt.Sub(startedAt), result, snap, lg)
+	s.observeSuccessLatency(successEndedAt.Sub(rc.startedAt), result, snap, lg)
 	// Release the fresh-context session now that the run succeeded (#1829):
 	// cron sessions are Exempt from TTL cleanup, so without this the finished
 	// CLI (+ MCP subprocesses, ~1.6 GB) would idle until the next tick's Reset.
@@ -815,12 +812,9 @@ func (s *Scheduler) execFinishSuccess(j *Job, snap jobSnapshot, key string, resu
 	// dashboard 点击 cron 侧边栏就看不到上一次的 JSONL 历史。
 	// Send 路径的 result 帧总会带 SessionID（process.go 成功分支会填），
 	// 传空只会出现在错误路径，finishRun 的 "" 分支自行短路。
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: startedAt, endedAt: successEndedAt, trigger: trigger,
+	s.finishRunFor(rc, runOutcome{
 		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
-		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-		costInc:   costInc,
-		finalizer: finalizer,
+		endedAt: successEndedAt, costInc: costInc,
 	})
 
 	// deliverNotice 必须用经过 sanitise 的文本，否则未截断/未脱敏的 claude 输出会
