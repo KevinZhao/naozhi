@@ -56,18 +56,20 @@ func TestR20260607GO002_SpawnStartUsesInjectedClock(t *testing.T) {
 	_, spawnStart, abort := sched.executeGetSession(getSessionArgs{
 		ctx:         ctx,
 		spawnCancel: cancel,
-		key:         "feishu:private:u-spawn-clock",
 		opts:        AgentOpts{},
-		job:         j,
-		snap:        jobSnapshot{jobID: j.ID},
-		runID:       "r-spawn-clock",
-		startedAt:   fixed,
-		trigger:     TriggerScheduled,
-		lg:          slog.Default(),
-		notifyTo:    NotifyTarget{},
-		finalizer:   finalizer,
 		stubRefresh: stubRefresher{}, // active=false → run() is a no-op
-		inflight:    inflight,
+		runCtx: runCtx{
+			key:       "feishu:private:u-spawn-clock",
+			job:       j,
+			snap:      jobSnapshot{jobID: j.ID},
+			runID:     "r-spawn-clock",
+			startedAt: fixed,
+			trigger:   TriggerScheduled,
+			lg:        slog.Default(),
+			notifyTo:  NotifyTarget{},
+			finalizer: finalizer,
+			inflight:  inflight,
+		},
 	})
 
 	if !abort {
