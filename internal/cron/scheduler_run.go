@@ -20,34 +20,12 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// preflightArgs bundles the inputs to freshContextPreflightP0; named fields
-// keep the eight inputs from silently swapping positions. Field order is size
-// DESC so the value type packs without intra-struct padding.
+// preflightArgs bundles the inputs to freshContextPreflightP0. Every field it
+// needs is part of the run's identity, so it is runCtx and nothing else — the
+// nine hand-listed fields it used to carry were that block spelled a second
+// time (Epic H #2546).
 type preflightArgs struct {
-	// snap 是 snapshotJob 拷贝出的快照；preflight 优先读 snap 而非 *job，
-	// 避免与并发 DeleteJob/PauseJob 起读写竞争。
-	snap jobSnapshot
-	// startedAt 是 caller 进入 executeOpt 时记录的 wall-clock 起点；
-	// preflight 失败也保留这个起点而非重新 time.Now()，让 dashboard 看到
-	// 真实的"从触发到放弃"时长。
-	startedAt time.Time
-	// notifyTo 是工作目录不可达分支回写中文提示的目标；其它失败分支不通知，
-	// 因为「shutdown / Reset 失败」对终端用户没有可操作信号。
-	notifyTo NotifyTarget
-	// key 是 router GetOrCreate / Reset 用到的 session key（`cron:<jobID>`）。
-	key string
-	// runID 转给失败分支的 finishRun，使 cron_run_ended 与 cron_run_started 配对。
-	runID string
-	// trigger 区分 TriggerScheduled / TriggerManual，决定 notice 与 timeline 的渲染。
-	trigger TriggerKind
-	// job 只在失败分支通过 finishArgs.job 转交给 finishRun；preflight 不修改 *Job。
-	job *Job
-	// lg 是带 jobID/runID 标签的 slog.Logger，preflight 自身只输出
-	// info/warn 不输出 error（error 由 finishRun 的 errMsg 落盘统一处理）。
-	lg *slog.Logger
-	// finalizer 转交给失败分支的 finishRun，让 cron_run_ended broadcast 之前
-	// finalize 元数据，CurrentRun(jobID) 与 broadcast 同步可见 ok=false。
-	finalizer *runFinalizer
+	runCtx
 }
 
 // stubRefresher carries the snap-time chain anchor (jobID + workDir + prompt
@@ -106,24 +84,18 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		// preserves prior recordResult semantics where ctx-cancel did not
 		// touch LastRunAt. The broadcast still emits so the dashboard sees
 		// the run's terminal frame.
-		s.finishRun(finishArgs{
-			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
+		s.finishRunFor(args.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 			skipPersist: true,
-			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: args.finalizer,
 		})
 		return noopRefresh, false
 	}
 	if !s.workDirReachableCached(snap.workDir) {
 		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
 			"work_dir", snap.workDir)
-		s.finishRun(finishArgs{
-			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
+		s.finishRunFor(args.runCtx, runOutcome{
 			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
 			errMsg: "work_dir unreachable",
-			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: args.finalizer,
 		})
 		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录不可达，本次执行已跳过。"))
 		return noopRefresh, false
@@ -137,12 +109,9 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		!workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
 		lg.Warn("cron fresh spawn aborted: work_dir outside allowed root",
 			"work_dir", snap.workDir)
-		s.finishRun(finishArgs{
-			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
+		s.finishRunFor(args.runCtx, runOutcome{
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
-			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: args.finalizer,
 		})
 		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录超出允许根目录，本次执行已跳过。"))
 		return noopRefresh, false
@@ -180,12 +149,9 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		refresh.run()
 		// Job deleted mid-execute: treat as canceled; no recordResult but
 		// broadcast for visibility.
-		s.finishRun(finishArgs{
-			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
+		s.finishRunFor(args.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled,
 			errMsg: "job deleted mid-execute", skipPersist: true,
-			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: args.finalizer,
 		})
 		return noopRefresh, false
 	}
@@ -265,25 +231,27 @@ func (s *Scheduler) applyJitterAndRecheck(j *Job, runID string, inflight *runInf
 // refusing to run when sandbox is off by operator choice (#638).
 //
 // abort=true (after finishRun for the outside-root class) → caller MUST return.
-func (s *Scheduler) resolveCronWorkspace(
-	j *Job, snap jobSnapshot, runID string, startedAt time.Time,
-	trigger TriggerKind, lg *slog.Logger, finalizer *runFinalizer,
-) (workDirForCLI string, abort bool) {
+func (s *Scheduler) resolveCronWorkspace(rc runCtx) (workDirForCLI string, abort bool) {
+	// The seven identity parameters this used to take are rc (Epic H #2546).
+	snap, lg := rc.snap, rc.lg
+	// Both containment failures below fail the run identically — same state, same
+	// class, same message — differing only in which gate caught it, which is a log
+	// detail. One helper so the two cannot drift apart.
+	failOutsideRoot := func(why string) (string, bool) {
+		lg.Warn("cron job work_dir outside allowed root"+why+"; aborting run",
+			"work_dir", snap.workDir)
+		s.finishRunFor(rc, runOutcome{
+			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
+			errMsg: "work_dir outside allowed root",
+		})
+		return "", true
+	}
 	if s.allowedRoot != "" {
 		// Cached EvalSymlinks (TTL workDirResolveCacheTTL) so fast-firing jobs
 		// don't repeat the resolve; a retarget surfaces within one TTL.
 		resolved, ok := s.workDirResolveUnderRootCached(snap.workDir)
 		if !ok {
-			lg.Warn("cron job work_dir outside allowed root; aborting run",
-				"work_dir", snap.workDir)
-			s.finishRun(finishArgs{
-				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-				state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
-				errMsg: "work_dir outside allowed root",
-				prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-				finalizer: finalizer,
-			})
-			return "", true
+			return failOutsideRoot("")
 		}
 		// The cached gate can pass on a stale-positive within the TTL (symlink
 		// retargeted outside allowedRoot after the cache warmed); re-run the
@@ -291,16 +259,7 @@ func (s *Scheduler) resolveCronWorkspace(
 		// On success keep the cached-resolved path to avoid double-EvalSymlinks
 		// semantic divergence.
 		if !workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
-			lg.Warn("cron job work_dir outside allowed root (uncached recheck); aborting run",
-				"work_dir", snap.workDir)
-			s.finishRun(finishArgs{
-				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-				state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
-				errMsg: "work_dir outside allowed root",
-				prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-				finalizer: finalizer,
-			})
-			return "", true
+			return failOutsideRoot(" (uncached recheck)")
 		}
 		return resolved, false
 	}
@@ -390,6 +349,15 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 		Fresh:       snap.fresh,
 	}, lg)
 
+	// The run's identity, built once. Every phase below and every terminal branch
+	// reads it from here instead of re-listing the same ten values (Epic H #2546).
+	// key is filled in after execPrepareSpawn derives it.
+	rc := runCtx{
+		snap: snap, startedAt: startedAt, notifyTo: notifyTo,
+		runID: runID, trigger: trigger, job: j, lg: lg,
+		finalizer: finalizer, inflight: inflight,
+	}
+
 	// Per-job timeout is always s.execTimeout: robfig/cron's SkipIfStillRunning
 	// chain wrapper drops a colliding tick instead of killing a long-running job,
 	// so the deadline does not need to anticipate the next tick.
@@ -404,16 +372,15 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 	// self-terminates via finishRun inside the helper and returns
 	// okSpawnPrep=false, so the same return covers it. inflight + spawnCancel
 	// let the helper release the spawn timer before the long sandbox invoke.
-	opts, key, cleanText, stubRefresh, okSpawnPrep := s.execPrepareSpawn(j, snap, runID, startedAt, trigger, lg, notifyTo, finalizer, inflight, spawnCancel)
+	opts, key, cleanText, stubRefresh, okSpawnPrep := s.execPrepareSpawn(rc, spawnCancel)
 	if !okSpawnPrep {
 		return
 	}
+	rc.key = key
 
 	sess, spawnStart, abortSpawn := s.executeGetSession(getSessionArgs{
-		ctx: ctx, spawnCancel: spawnCancel, key: key, opts: opts,
-		job: j, snap: snap, runID: runID, startedAt: startedAt, trigger: trigger,
-		lg: lg, notifyTo: notifyTo, finalizer: finalizer,
-		stubRefresh: stubRefresh, inflight: inflight,
+		runCtx: rc, ctx: ctx, spawnCancel: spawnCancel, opts: opts,
+		stubRefresh: stubRefresh,
 	})
 	if abortSpawn {
 		return
@@ -431,17 +398,15 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 	}
 
 	result, costInc, ok := s.execSend(execSendArgs{
-		job: j, sess: sess, snap: snap, cleanText: cleanText,
+		runCtx: rc, sess: sess, cleanText: cleanText,
 		sendBudget: sendBudget, spawnElapsed: spawnElapsed, jobTimeout: jobTimeout,
-		key: key, runID: runID, startedAt: startedAt, trigger: trigger,
-		lg: lg, notifyTo: notifyTo, finalizer: finalizer,
-		stubRefresh: stubRefresh, inflight: inflight,
+		stubRefresh: stubRefresh,
 	})
 	if !ok {
 		return
 	}
 
-	s.execFinishSuccess(j, snap, key, result, costInc, runID, startedAt, trigger, lg, notifyTo, finalizer)
+	s.execFinishSuccess(rc, result, costInc)
 }
 
 // execAcquireSlot is the CAS admission gate of a cron run.
@@ -596,7 +561,12 @@ func (s *Scheduler) execSnapshotAndEmit(j *Job, viaTriggerNow bool, runID string
 // inflight + spawnCancel are threaded in for the sandbox fork only: a sandbox
 // job releases the spawn-phase timer up front and hands the in-flight handle to
 // the run-once microVM path, which never touches the session router.
-func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, startedAt time.Time, trigger TriggerKind, lg *slog.Logger, notifyTo NotifyTarget, finalizer *runFinalizer, inflight *runInflight, spawnCancel context.CancelFunc) (opts AgentOpts, key, cleanText string, stubRefresh stubRefresher, ok bool) {
+func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) (opts AgentOpts, key, cleanText string, stubRefresh stubRefresher, ok bool) {
+	// The ten values this used to take positionally are the run's identity block;
+	// rc is that block, built once by executeAcquired (Epic H #2546). Locals keep
+	// the body below unchanged.
+	j, snap, runID, startedAt, trigger := rc.job, rc.snap, rc.runID, rc.startedAt, rc.trigger
+	lg, notifyTo, finalizer, inflight := rc.lg, rc.notifyTo, rc.finalizer, rc.inflight
 	// agentCommands/agents are published once at construction and read
 	// lock-free via configMaps(); a future hot-reload Store()s a fresh
 	// *cronConfigMaps. Load once so both reads see the same generation.
@@ -630,7 +600,7 @@ func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, sta
 	}
 
 	if snap.workDir != "" {
-		workDirForCLI, abort := s.resolveCronWorkspace(j, snap, runID, startedAt, trigger, lg, finalizer)
+		workDirForCLI, abort := s.resolveCronWorkspace(rc)
 		if abort {
 			return AgentOpts{}, "", "", stubRefresher{}, false
 		}
@@ -641,11 +611,10 @@ func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, sta
 	// Fresh mode: drop any existing session (process + history) so GetOrCreate
 	// spawns a brand-new CLI. On error paths the returned stubRefresh
 	// re-registers the sidebar row; on success the live session carries its own.
-	stubRefresh, okPreflight := s.freshContextPreflightP0(preflightArgs{
-		job: j, snap: snap, key: key, lg: lg, notifyTo: notifyTo,
-		runID: runID, startedAt: startedAt, trigger: trigger,
-		finalizer: finalizer,
-	})
+	// rc carries everything preflight needs except the session key, derived here.
+	prc := rc
+	prc.key = key
+	stubRefresh, okPreflight := s.freshContextPreflightP0(preflightArgs{runCtx: prc})
 	if !okPreflight {
 		// Do NOT call stubRefresh.run() here: the preflight already re-registered
 		// the stub BEFORE its own finishRun released the CAS gate (#2318).
@@ -654,12 +623,11 @@ func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, sta
 	return opts, key, cleanText, stubRefresh, true
 }
 
-// execSendArgs bundles the inputs to execSend (the send phase of executeOpt);
-// mirrors getSessionArgs.
+// execSendArgs bundles the inputs to execSend (the send phase). Identity comes
+// from the embedded runCtx (Epic H #2546).
 type execSendArgs struct {
-	job  *Job
+	runCtx
 	sess Session
-	snap jobSnapshot
 	// cleanText is the prompt with the agent-command prefix stripped.
 	cleanText string
 	// sendBudget is the remaining jobTimeout after spawn, floored at
@@ -667,19 +635,8 @@ type execSendArgs struct {
 	sendBudget   time.Duration
 	spawnElapsed time.Duration
 	jobTimeout   time.Duration
-	// key is the cron session key; fresh error/cancel branches Reset it while
-	// the CAS gate is still held (#1956).
-	key       string
-	runID     string
-	startedAt time.Time
-	trigger   TriggerKind
-	lg        *slog.Logger
-	notifyTo  NotifyTarget
-	finalizer *runFinalizer
-	// stubRefresh re-registers the sidebar row on failure paths; inflight
-	// receives the PhaseSending switch and the SessionID capture.
+	// stubRefresh re-registers the sidebar row on failure paths.
 	stubRefresh stubRefresher
-	inflight    *runInflight
 }
 
 // execSend runs the send phase of a cron execution: create the send-budget
@@ -746,9 +703,10 @@ func costTotalsOf(sess Session) costledger.Totals {
 // fresh session while the CAS gate is held, finishRun, notify, and refresh
 // the sidebar stub.
 func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, costInc costledger.Increment) {
-	j, snap, key := a.job, a.snap, a.key
-	runID, startedAt, trigger := a.runID, a.startedAt, a.trigger
-	lg, notifyTo, finalizer, stubRefresh := a.lg, a.notifyTo, a.finalizer, a.stubRefresh
+	// Only what this function still reads directly; the identity fields it used to
+	// unpack are now spelled once inside finishRunFor(a.runCtx, ...).
+	snap, key := a.snap, a.key
+	lg, notifyTo, stubRefresh := a.lg, a.notifyTo, a.stubRefresh
 	if errors.Is(err, context.Canceled) {
 		// Suppress the operator-facing notice so shutdown races don't look like
 		// real failures. As on the deadline path, a watchdog that fired without
@@ -777,13 +735,9 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 		// gate; a late refresh could clobber run-B's live stub with run-A's
 		// stale chain (phantom sidebar pointing at the prior session's JSONL).
 		stubRefresh.run()
-		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+		s.finishRunFor(a.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
-			skipPersist: true,
-			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: finalizer,
-			costInc:   costInc,
+			skipPersist: true, costInc: costInc,
 		})
 		return
 	}
@@ -819,12 +773,10 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 	// Stub re-register BEFORE finishRun releases the gate (see the cancel
 	// branch); deliverNotice (IM, stub-independent) stays after finishRun.
 	stubRefresh.run()
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-		state: state, errClass: errClass, errMsg: "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
-		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-		finalizer: finalizer,
-		costInc:   costInc,
+	s.finishRunFor(a.runCtx, runOutcome{
+		state: state, errClass: errClass,
+		errMsg:  "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
+		costInc: costInc,
 	})
 	s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
 }
@@ -832,12 +784,14 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 // execFinishSuccess records a successful run: latency observability, the
 // fresh-session reap (while the CAS gate is held), the success finishRun, and
 // the sanitised IM notice.
-func (s *Scheduler) execFinishSuccess(j *Job, snap jobSnapshot, key string, result SendResult, costInc costledger.Increment, runID string, startedAt time.Time, trigger TriggerKind, lg *slog.Logger, notifyTo NotifyTarget, finalizer *runFinalizer) {
+func (s *Scheduler) execFinishSuccess(rc runCtx, result SendResult, costInc costledger.Increment) {
+	// The eight identity parameters this used to take are rc (Epic H #2546).
+	snap, key, lg, notifyTo := rc.snap, rc.key, rc.lg, rc.notifyTo
 	// successEndedAt is read once from the injectable clock and shared by
 	// observeSuccessLatency and finishRun so elapsed and DurationMS come from
 	// the same reading (step-based test clocks stay deterministic).
 	successEndedAt := s.now()
-	s.observeSuccessLatency(successEndedAt.Sub(startedAt), result, snap, lg)
+	s.observeSuccessLatency(successEndedAt.Sub(rc.startedAt), result, snap, lg)
 	// Release the fresh-context session now that the run succeeded (#1829):
 	// cron sessions are Exempt from TTL cleanup, so without this the finished
 	// CLI (+ MCP subprocesses, ~1.6 GB) would idle until the next tick's Reset.
@@ -851,12 +805,9 @@ func (s *Scheduler) execFinishSuccess(j *Job, snap jobSnapshot, key string, resu
 	// dashboard 点击 cron 侧边栏就看不到上一次的 JSONL 历史。
 	// Send 路径的 result 帧总会带 SessionID（process.go 成功分支会填），
 	// 传空只会出现在错误路径，finishRun 的 "" 分支自行短路。
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: startedAt, endedAt: successEndedAt, trigger: trigger,
+	s.finishRunFor(rc, runOutcome{
 		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
-		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-		costInc:   costInc,
-		finalizer: finalizer,
+		endedAt: successEndedAt, costInc: costInc,
 	})
 
 	// deliverNotice 必须用经过 sanitise 的文本，否则未截断/未脱敏的 claude 输出会
@@ -931,38 +882,21 @@ func (s *Scheduler) observeSuccessLatency(elapsed time.Duration, result SendResu
 	}
 }
 
-// getSessionArgs bundles the inputs to executeGetSession (the spawn phase of
-// executeOpt); mirrors preflightArgs.
+// getSessionArgs bundles the inputs to executeGetSession (the spawn phase).
+// The run's identity comes from the embedded runCtx (Epic H #2546); what stays
+// here is what only this phase needs.
 type getSessionArgs struct {
-	// ctx is the spawn-only timeout context (s.stopCtx + jobTimeout). It owns
-	// the GetOrCreate call exclusively; executeGetSession cancels it via
-	// spawnCancel on the success path so its *time.Timer frees before Send.
+	runCtx
+	// ctx is the spawn-only timeout context (s.stopCtx + jobTimeout). It owns the
+	// GetOrCreate call exclusively; executeGetSession cancels it via spawnCancel on
+	// the success path so its *time.Timer frees before Send.
 	ctx         context.Context
 	spawnCancel context.CancelFunc
-	// key / opts feed router.GetOrCreate. opts is the per-run cloned AgentOpts
-	// (Exempt + backend/workspace overrides already applied by executeOpt).
-	key  string
+	// opts is the per-run cloned AgentOpts (Exempt + backend/workspace overrides
+	// already applied by executeOpt).
 	opts AgentOpts
-	// job / snap carry the run's identity. Failure branches route job into
-	// finishRun and read snap.prompt/workDir/fresh + labelOrID for the notice.
-	job  *Job
-	snap jobSnapshot
-	// runID / startedAt / trigger pair the synthetic finishRun with the
-	// emitRunStarted frame already broadcast by executeOpt.
-	runID     string
-	startedAt time.Time
-	trigger   TriggerKind
-	// lg is the per-run logger; notifyTo is the resolved IM target for the
-	// session-error notice (canceled path stays silent — shutdown races
-	// should not spam IM).
-	lg       *slog.Logger
-	notifyTo NotifyTarget
-	// finalizer is the per-run cleanup hook threaded into finishRun on the
-	// failure branches; stubRefresh re-registers the sidebar row when a fresh
-	// spawn aborted. inflight receives the early SessionID capture on success.
-	finalizer   *runFinalizer
+	// stubRefresh re-registers the sidebar row when a fresh spawn aborted.
 	stubRefresh stubRefresher
-	inflight    *runInflight
 }
 
 // executeGetSession runs the spawn phase of a cron execution: GetOrCreate
@@ -998,12 +932,9 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			// Stub re-register BEFORE finishRun releases the gate — see
 			// execSendError for the rationale.
 			a.stubRefresh.run()
-			s.finishRun(finishArgs{
-				job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
+			s.finishRunFor(a.runCtx, runOutcome{
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 				skipPersist: true, // cancel never touches LastRunAt
-				prompt:      a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
-				finalizer: a.finalizer,
 			})
 			return nil, spawnStart, true
 		}
@@ -1024,11 +955,9 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 		// Stub re-register BEFORE finishRun releases the gate — see execSendError;
 		// deliverNotice (IM, stub-independent) stays after finishRun.
 		a.stubRefresh.run()
-		s.finishRun(finishArgs{
-			job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
-			state: state, errClass: errClass, errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // mirrors send-error path
-			prompt: a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
-			finalizer: a.finalizer,
+		s.finishRunFor(a.runCtx, runOutcome{
+			state: state, errClass: errClass,
+			errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // mirrors send-error path
 		})
 		s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), "执行跳过，请稍后重试。"))
 		return nil, spawnStart, true

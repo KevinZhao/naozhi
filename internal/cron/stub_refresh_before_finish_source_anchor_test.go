@@ -3,6 +3,7 @@ package cron
 import (
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -35,70 +36,50 @@ func TestErrorPaths_StubRefreshBeforeFinishRun_SourceAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read scheduler_run.go: %v", err)
 	}
-	// Strip Go line comments (// ...) before matching. scheduler_run.go has
-	// comment prose that mentions `stubRefresh.run()` as documentation (e.g.
-	// the GO-009b note around line 1008 and the preflight rationale near line
-	// 162); those would inflate stubMatches and let the >=5 guard pass even if
-	// a real call site were deleted or misplaced (R202606i-GO-002 / #2333).
-	// We only want to anchor against actual code, so blank out the comment tail
-	// of each line while preserving offsets (replace with spaces) so the
-	// before/finish ordering arithmetic below stays valid.
+	// Comments are blanked (offsets preserved) so prose mentioning refresh.run()
+	// cannot satisfy the check (R202606i-GO-002 / #2333).
 	body := stripLineComments(string(src))
 
-	// Collect the source offsets of every error/cancel-path stub refresh call
-	// (the value receiver `stubRefresh.run()` in execSendError, the struct-field
-	// `a.stubRefresh.run()` in executeGetSession, and the local `refresh.run()`
-	// the preflight helper now fires on its delete-mid-execute failure branch —
-	// R202606h-GO-009b / #2318) and every finishRun(finishArgs{...}) call.
-	reStub := regexp.MustCompile(`(?:a\.stubRefresh|stubRefresh|\brefresh)\.run\(\)`)
-	stubMatches := reStub.FindAllStringIndex(body, -1)
-	if len(stubMatches) == 0 {
-		t.Fatal("scheduler_run.go: no stubRefresh.run() call found — refactor removed the error-path stub re-register?")
+	// Scope to freshContextPreflightP0's body. Its cousin in internal/node had an
+	// unbounded `.*?` and matched past its own function into the next one, so it
+	// silently guarded nothing (Epic I #2547) — the window is cut explicitly here,
+	// from the func header to the next top-level func.
+	start := strings.Index(body, "func (s *Scheduler) freshContextPreflightP0(")
+	if start < 0 {
+		t.Fatal("freshContextPreflightP0 not found in scheduler_run.go — retarget this test")
 	}
-	finishMatches := regexp.MustCompile(`s\.finishRun\(finishArgs\{`).FindAllStringIndex(body, -1)
-	if len(finishMatches) == 0 {
-		t.Fatal("scheduler_run.go: no finishRun(finishArgs{...}) call found")
+	rest := body[start:]
+	if end := strings.Index(rest[1:], "\nfunc "); end >= 0 {
+		rest = rest[:end+1]
 	}
 
-	// Four of the five paths this used to count are now covered by BEHAVIOUR
-	// tests that observe the ordering through a shared event sequence rather than
-	// through source text (Epic I #2547):
+	// The delete-mid-execute branch: refresh.run() must precede the terminal call
+	// that releases the CAS gate. A stub refreshed afterwards can clobber a
+	// concurrent TriggerNow's live stub (R202606h-GO-009b / #2318).
 	//
-	//   execSendError cancel / non-cancel      → TestFreshContextResetsOnCancel /
-	//                                            TestFreshContextResetsOnSendError
-	//   executeGetSession cancel / non-cancel  → TestFreshGetSession_CancelError_… /
-	//                                            TestFreshGetSession_SessionError_…
+	// This is the ONE path of the original five that behaviour cannot cover:
+	// stubRefresher.run() re-registers only if the job still exists, and this
+	// branch is reached precisely because it does not, so the call is a designed
+	// no-op there and nothing observable happens. The other four are covered by
+	// TestFreshContextResetsOnCancel / TestFreshContextResetsOnSendError /
+	// TestFreshGetSession_CancelError_… / TestFreshGetSession_SessionError_…,
+	// each verified by breaking it.
 	//
-	// The fifth — freshContextPreflightP0's delete-mid-execute branch — CANNOT be
-	// covered that way: stubRefresher.run() re-registers only if the job still
-	// exists, and that branch is reached precisely because it does not, so the
-	// call is a designed no-op there and nothing observable happens. It stays
-	// anchored in source, because the ordering still guards a future refactor
-	// where the job could exist again at that point. See
-	// TestPreflightDeleteMidExecute_RefreshesStubBeforeGateRelease for the
-	// behaviour half (state, error class, that the branch is reached at all).
-	//
-	// The structural invariant: for every stub-refresh call there must be a
-	// finishRun(finishArgs{...}) between it and the NEXT stub call (or EOF) —
-	// i.e. the stub re-register precedes the finishRun that releases the CAS
-	// gate. Pre-fix, each of these had finishRun BEFORE the stub (the region
-	// after the stub up to the next stub had no finishRun), so the count was
-	// lower. We now require >=5 to also pin the preflight-helper fix (#2318).
-	stubBeforeFinish := 0
-	for i, sm := range stubMatches {
-		regionEnd := len(body)
-		if i+1 < len(stubMatches) {
-			regionEnd = stubMatches[i+1][0]
-		}
-		for _, fm := range finishMatches {
-			if fm[0] > sm[0] && fm[0] < regionEnd {
-				stubBeforeFinish++
-				break
-			}
-		}
+	// Checked by POSITION, not by counting call sites. An earlier version required
+	// ">= 1 stub refresh precedes its finish" across the whole file, which a single
+	// misplacement could not fail: the other three sites still satisfied the count.
+	refreshIdx := strings.Index(rest, "refresh.run()")
+	if refreshIdx < 0 {
+		t.Fatal("freshContextPreflightP0: no refresh.run() found — the delete-mid-execute stub re-register was removed (#2318)")
 	}
-	if stubBeforeFinish < 1 {
-		t.Errorf("scheduler_run.go: no stub-refresh call precedes its branch finishRun. The four observable paths are covered by behaviour tests; this guard remains for freshContextPreflightP0's delete-mid-execute branch, whose refresh is a no-op in the reachable state and so cannot be observed. A stub refresh placed AFTER finishRun releases the CAS gate reopens the phantom-stub race (R202606h-GO-009/GO-009b/GO-010).")
+	// The terminal call is s.finishRunFor(...) since Epic H #2546 folded the
+	// identity block out of the finishArgs literals; both spellings are accepted so
+	// this does not break again when the funnel moves.
+	reFinish := regexp.MustCompile(`s\.finishRun(?:For)?\(`)
+	if reFinish.FindStringIndex(rest[refreshIdx:]) == nil {
+		t.Errorf("freshContextPreflightP0: refresh.run() at offset %d is not followed by a terminal finishRun/finishRunFor call. "+
+			"The stub re-register MUST happen before the CAS gate is released, or a concurrent TriggerNow's live stub gets clobbered (#2318).",
+			refreshIdx)
 	}
 }
 
