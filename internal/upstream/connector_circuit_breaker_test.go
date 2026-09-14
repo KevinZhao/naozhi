@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -230,6 +231,32 @@ func TestConnector_CircuitBreakerResetsOnSuccess(t *testing.T) {
 	resetCount := strings.Count(out, "connector circuit breaker reset")
 	if resetCount < 1 {
 		t.Errorf("expected 'circuit breaker reset' after successful connection, got %d. Log:\n%s", resetCount, out)
+	}
+
+	// The counter reset itself, not just its log line. Both assertions above read
+	// the LOG, and the log is emitted by a different statement than the reset:
+	//
+	//	if connected {
+	//	    consecutiveFailures = 0                        <- the effect
+	//	    if circuitTripped {
+	//	        slog.Info("...breaker reset...")           <- what we asserted
+	//	        circuitTripped = false
+	//	    }
+	//	}
+	//
+	// So replacing `consecutiveFailures = 0` with a no-op left every assertion
+	// above passing — verified, and the reason TestRun_BreakerSourceContract's
+	// text scan is still load-bearing for this branch (Epic I #2547).
+	//
+	// The observable consequence of the reset is the SECOND trip's failure count:
+	// with the counter reset, tripping again needs `threshold` fresh failures, so
+	// the tripped WARN reports exactly that. Without the reset the count keeps
+	// climbing past it.
+	if trippedCount >= 2 {
+		if strings.Count(out, "consecutive_failures="+strconv.Itoa(circuitBreakerThreshold)) < 2 {
+			t.Errorf("the second trip did not report consecutive_failures=%d; the failure counter was not reset by the successful connection. Log:\n%s",
+				circuitBreakerThreshold, out)
+		}
 	}
 }
 
