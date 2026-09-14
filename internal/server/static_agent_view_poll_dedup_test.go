@@ -23,6 +23,14 @@ func extractContractBlock(t *testing.T, src, name string) string {
 	return src[i+len(begin) : j]
 }
 
+// This file executes the real dedupAgentPollBatch under node against a table of
+// pages. It reads agent_view.js to get at the function — which is module-scoped
+// inside an IIFE and has no export — but it asserts on the function's OUTPUT,
+// never on the file's text. The browser-side half of the contract (the two call
+// sites, and the rendered-bubble consequences) lives in
+// test/e2e/agent_poll_dedup.test.js; the two are complementary, and the probes
+// recorded on #2547 show each catching mutations the other misses.
+//
 // TestAgentViewJS_DedupAgentPollBatch_SameMsReplay (#2432 item 5): the
 // agent_events HTTP poll fallback now receives `Time >= after`, so the page
 // after a poll boundary replays the entries already rendered at the
@@ -39,16 +47,12 @@ func TestAgentViewJS_DedupAgentPollBatch_SameMsReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read agent_view.js: %v", err)
 	}
+	// The two call sites this used to grep for — fetchAgentEventsInitial seeding
+	// the watermark from the rendered page, and startHttpPoll not resetting it —
+	// are now driven end to end by test/e2e/agent_poll_dedup.test.js, which
+	// starts the real poll loop through onAgentSubscribeRejected('capacity') and
+	// counts the rendered bubbles. Both mutations fail there (#2547).
 	block := extractContractBlock(t, string(av), "dedupAgentPollBatch")
-	avStr := string(av)
-	if !strings.Contains(avStr, "var seed = dedupAgentPollBatch(events, 0, []);") {
-		t.Fatal("fetchAgentEventsInitial must seed state.pollAfterMS/pollSeenKeys from the rendered page (review P2)")
-	}
-	sp := avStr[strings.Index(avStr, "function startHttpPoll("):]
-	sp = sp[:strings.Index(sp, "function stopHttpPoll(")]
-	if strings.Contains(sp, "state.pollAfterMS = 0") {
-		t.Fatal("startHttpPoll must not reset the seeded watermark (would replay the initial page on the first tick)")
-	}
 
 	script := block + `
 function eq(a, b, msg) {
