@@ -191,9 +191,22 @@ func launchdServiceLabel() string {
 // when unconfirmed. XPC_SERVICE_NAME is inherited, so a naozhi started from
 // Terminal.app sees com.apple.Terminal; acting on it would kickstart the
 // operator's terminal. Hence confirm the job runs our own executable.
+// execCommand is exec.Command behind one name so tests can observe the argv the
+// launchd restart path builds. The default is exec.Command itself, so production
+// behaviour is byte-for-byte unchanged.
+//
+// It exists because this path's failure mode is SILENCE: a label that does not
+// match the running job makes `launchctl list` fail, verifiedLaunchdLabel return
+// "", and every restart decide there is nothing to restart — no error, no
+// warning, just a staged binary that never applies. The text-scanning tests that
+// used to guard it could confirm the strings "kickstart", "-k" and "gui/" were
+// present but not that they were assembled into the right argv with the right
+// label (Epic I #2547).
+var execCommand = exec.Command
+
 func verifiedLaunchdLabel() string {
 	label := launchdServiceLabel()
-	out, err := exec.Command(resolveTrustedBin("launchctl"), "list", label).Output()
+	out, err := execCommand(resolveTrustedBin("launchctl"), "list", label).Output()
 	if err != nil || len(out) == 0 {
 		return ""
 	}
@@ -302,7 +315,7 @@ func restartLaunchd() error {
 	// gui/<uid> is the LaunchAgent domain `naozhi install` writes to; a
 	// LaunchDaemon would need `system/`.
 	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), label)
-	if out, err := exec.Command(resolveTrustedBin("launchctl"), "kickstart", "-k", target).CombinedOutput(); err != nil {
+	if out, err := execCommand(resolveTrustedBin("launchctl"), "kickstart", "-k", target).CombinedOutput(); err != nil {
 		return fmt.Errorf("launchctl kickstart -k %s: %w\n%s", target, err, out)
 	}
 	return nil
