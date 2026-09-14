@@ -92,13 +92,7 @@ func assertCounterDeltas(t *testing.T, got []int64, want counterDeltas) {
 // a fake runner).
 func sandboxDirectArgs(j *Job, runID string) sandboxExecArgs {
 	return sandboxExecArgs{
-		job:       j,
-		snap:      jobSnapshot{jobID: j.ID, prompt: j.Prompt, label: jobTitleOrFallback(j)},
-		runID:     runID,
-		startedAt: time.Now().Add(-time.Minute),
-		trigger:   TriggerScheduled,
-		finalizer: &runFinalizer{},
-		lg:        slog.Default(),
+		runCtx: runCtx{job: j, snap: jobSnapshot{jobID: j.ID, prompt: j.Prompt, label: jobTitleOrFallback(j)}, runID: runID, startedAt: time.Now().Add(-time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}, lg: slog.Default()},
 	}
 }
 

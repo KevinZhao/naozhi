@@ -76,13 +76,7 @@ func TestFinishSandboxRunWith_TimedOutDoesNotIncrementFailedMetric(t *testing.T)
 		label:  jobTitleOrFallback(j),
 	}
 	a := sandboxExecArgs{
-		job:       j,
-		snap:      snap,
-		runID:     "deadbeef00000001",
-		startedAt: time.Now().Add(-5 * time.Minute),
-		trigger:   TriggerScheduled,
-		finalizer: &runFinalizer{},
-		lg:        slog.Default(),
+		runCtx: runCtx{job: j, snap: snap, runID: "deadbeef00000001", startedAt: time.Now().Add(-5 * time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}, lg: slog.Default()},
 	}
 
 	before := metrics.CronSandboxRunFailedTotal.Value()
@@ -116,13 +110,7 @@ func TestFinishSandboxRunWith_FailedIncrementsFailedMetric(t *testing.T) {
 		label:  jobTitleOrFallback(j),
 	}
 	a := sandboxExecArgs{
-		job:       j,
-		snap:      snap,
-		runID:     "deadbeef00000002",
-		startedAt: time.Now().Add(-5 * time.Minute),
-		trigger:   TriggerScheduled,
-		finalizer: &runFinalizer{},
-		lg:        slog.Default(),
+		runCtx: runCtx{job: j, snap: snap, runID: "deadbeef00000002", startedAt: time.Now().Add(-5 * time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}, lg: slog.Default()},
 	}
 
 	before := metrics.CronSandboxRunFailedTotal.Value()
@@ -404,14 +392,11 @@ func TestEnqueueSandboxTransportAttention_SkipsDeletedJob(t *testing.T) {
 	// DeleteJobByID that completed while this run's goroutine was blocked on
 	// the now-severed stream).
 	a := sandboxExecArgs{
-		snap: jobSnapshot{
+		runCtx: runCtx{snap: jobSnapshot{
 			jobID:       "0123456789abcdef",
 			label:       "ghost",
 			sideEffects: true,
-		},
-		runID:     "deadbeefdeadbe01",
-		startedAt: time.Now(),
-		lg:        slog.Default(),
+		}, runID: "deadbeefdeadbe01", startedAt: time.Now(), lg: slog.Default()},
 	}
 
 	s.enqueueSandboxTransportAttention(a, "run-deadbeefdeadbe01-1234567890123456789")
@@ -428,14 +413,11 @@ func TestEnqueueSandboxTransportAttention_WritesForLiveJob(t *testing.T) {
 	j := sideEffectsJob(t, s) // job exists
 
 	a := sandboxExecArgs{
-		snap: jobSnapshot{
+		runCtx: runCtx{snap: jobSnapshot{
 			jobID:       j.ID,
 			label:       jobTitleOrFallback(j),
 			sideEffects: true,
-		},
-		runID:     "deadbeefdeadbe02",
-		startedAt: time.Now(),
-		lg:        slog.Default(),
+		}, runID: "deadbeefdeadbe02", startedAt: time.Now(), lg: slog.Default()},
 	}
 
 	s.enqueueSandboxTransportAttention(a, "run-deadbeefdeadbe02-1234567890123456789")
