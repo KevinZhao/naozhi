@@ -40,7 +40,15 @@ type runStore struct {
 	// sync.Map 原子读写；MkdirAll 幂等，失败时删掉 cache 项让下次重试。
 	jobDirEnsured sync.Map // jobID -> struct{}
 	disabled      bool     // true when StorePath is empty (tests / no-persist)
-	enableTrimGC  bool     // true in production; tests can disable for determinism
+	// clock is the time source Append reads. nil = time.Now(), so production and
+	// every existing construction path are unchanged. It exists so a test can
+	// prove Append reads the clock ONCE and shares that instant between
+	// skipAppendTrim and trimJobLocked (R20260603-PERF-11) — with a stepping
+	// clock, two reads produce two different cutoffs and the trim decision
+	// diverges observably. Before this, that property was pinned by a regexp over
+	// this file (Epic I #2547).
+	clock        cronClock
+	enableTrimGC bool // true in production; tests can disable for determinism
 
 	// recentCache memoises the newest-N summaries per job so the dashboard list
 	// poll does not hit disk. Populated by Append, trimmed by trimJobLocked.
@@ -409,8 +417,8 @@ func (s *runStore) Append(run *CronRun) {
 	defer lock.Unlock()
 	s.cacheHeadPush(run.JobID, summarySrc.summary())
 	if s.enableTrimGC {
-		// One time.Now() shared by skipAppendTrim and trimJobLocked.
-		now := time.Now()
+		// One clock read shared by skipAppendTrim and trimJobLocked.
+		now := s.now()
 		if !s.skipAppendTrim(run.JobID, now) {
 			s.trimJobLocked(run.JobID, now)
 		}
@@ -647,4 +655,13 @@ func (s *runStore) dropOrphanRun(jobID, runID string) {
 // failure (ENOTEMPTY on Linux/macOS; some platforms report EEXIST).
 func isDirNotEmpty(err error) bool {
 	return errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST)
+}
+
+// now is the runStore's time source: the injected clock, or wall-clock time when
+// none was wired (every production construction path). Mirrors Scheduler.now().
+func (s *runStore) now() time.Time {
+	if s == nil || s.clock == nil {
+		return time.Now()
+	}
+	return s.clock.Now()
 }
