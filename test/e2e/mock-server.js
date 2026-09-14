@@ -249,6 +249,21 @@ function startMockServer(overrides = {}) {
   // every poll page — the behaviour dedupAgentPollBatch exists to absorb. The
   // mock reproduces that inclusivity deliberately; a `>` here would hide the bug.
   const agentEvents = overrides.agentEvents || {};
+  // compactPromptLimit: when set, GET /api/cron?compact=1 clips each prompt to
+  // this many characters and marks the row prompt_truncated, like the real
+  // R236-SEC-08 (#494) wire shape. Without it the poll returns full prompts and
+  // the whole lazy-refetch path is unreachable from e2e.
+  const compactPromptLimit = overrides.compactPromptLimit || 0;
+  // fullCronListStatus lets a test fail the NON-compact list fetch — the one
+  // cronRefetchFullJob uses — so the editor's refuse-to-open path is reachable.
+  const fullCronListStatus = overrides.fullCronListStatus || 200;
+  // fullCronListCalls records every non-compact list GET so a test can prove a
+  // refetch really happened rather than inferring it from the DOM.
+  const fullCronListCalls = [];
+  // compactCronListDelayMs delays the COMPACT list response only. It exists so a
+  // test can open a drawer and then the editor with no background refresh landing
+  // in between — the window where a spliced cache row would otherwise be trusted.
+  const compactCronListDelayMs = overrides.compactCronListDelayMs || 0;
   const discoveredData = overrides.discovered || [];
   let discoveredCloseCalls = [];
   const requireAuth = overrides.requireAuth || false;
@@ -584,9 +599,34 @@ function startMockServer(overrides = {}) {
     // Cron routes
     if (pathname === NZ_CONTRACT.API.cron && req.method === 'GET') {
       if (!checkAuth()) return;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      // Dashboard expects { jobs: [...] } format (+ recent_runs_cap / timezone meta)
-      res.end(JSON.stringify(Object.assign({ jobs: cronJobsData }, cronListMeta)));
+      const compact = url.searchParams.get('compact') === '1';
+      if (!compact) {
+        fullCronListCalls.push(url.search);
+        if (fullCronListStatus !== 200) {
+          res.writeHead(fullCronListStatus, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'forced failure' }));
+          return;
+        }
+      }
+      let jobs = cronJobsData;
+      if (compact && compactPromptLimit > 0) {
+        jobs = cronJobsData.map(j => {
+          const full = j.prompt || '';
+          if (full.length <= compactPromptLimit) return j;
+          return Object.assign({}, j, {
+            prompt: full.slice(0, compactPromptLimit),
+            prompt_truncated: true,
+          });
+        });
+      }
+      const body = JSON.stringify(Object.assign({ jobs }, cronListMeta));
+      const send = () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        // Dashboard expects { jobs: [...] } format (+ recent_runs_cap / timezone meta)
+        res.end(body);
+      };
+      if (compact && compactCronListDelayMs > 0) setTimeout(send, compactCronListDelayMs);
+      else send();
       return;
     }
 
@@ -851,6 +891,7 @@ function startMockServer(overrides = {}) {
         get favoriteCalls() { return favoriteCalls; },
         get labelCalls() { return labelCalls; },
         get discoveredCloseCalls() { return discoveredCloseCalls; },
+        get fullCronListCalls() { return fullCronListCalls; },
         get wsConnections() { return wsConnections; },
         // Mutators for tests that need the snapshot to CHANGE mid-run (e.g. a
         // /cd that moves a session's workspace). Bumping stats.version is what
@@ -861,6 +902,13 @@ function startMockServer(overrides = {}) {
           if (sessionsData.stats && typeof sessionsData.stats.version === 'number') {
             sessionsData.stats.version++;
           }
+        },
+        // Rewrites a job's prompt so the next compact poll clips the NEW body:
+        // the prefix guard in keepRefetchedPrompts must then drop the cached
+        // full copy instead of resurrecting it.
+        setCronPrompt(id, prompt) {
+          const j = cronJobsData.find(x => x.id === id);
+          if (j) j.prompt = prompt;
         },
         setGitState(key, state) { gitStates[key] = state; },
         // Deliberately does NOT bump stats.version — that is exactly what the

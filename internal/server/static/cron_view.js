@@ -3965,6 +3965,37 @@ function closeCronDetail() {
   else setTimeout(restoreFocus, 0);
 }
 
+// keepRefetchedPrompts carries a re-fetched full prompt across a compact poll.
+//
+// The 1 Hz poll replaces the whole cache, so the non-truncated row
+// cronRefetchFullJob splices in on drawer/editor open used to survive about one
+// millisecond — measured 726 ms -> 727 ms in a MutationObserver trace, i.e. the
+// drawer's 做什么 section never actually showed the prompt it re-fetched (#494
+// case 4). The retired source anchor could only see that the call existed.
+//
+// The prefix guard makes it safe: a clipped body is by construction a prefix of
+// what it was clipped from, so an edit landing between refreshes changes the
+// clipped text and the stale full copy is dropped instead of resurrected.
+//
+// prompt_truncated deliberately STAYS true on a merged row. It means "the wire
+// row was clipped", and cronRefetchFullJob early-returns { ok: true, job: cached }
+// when it is false — so clearing it would let the editor open from cache and Save
+// a prompt that changed since the merge, which is the data loss #494's follow-up
+// exists to prevent. Carrying a full body for display costs nothing; skipping the
+// editor's re-fetch costs the user their prompt.
+function keepRefetchedPrompts(prev, fresh) {
+  const full = new Map();
+  for (const p of prev || []) {
+    if (p && p.id && typeof p.prompt === 'string' && p.prompt.length > 0) full.set(p.id, p.prompt);
+  }
+  if (full.size === 0) return fresh;
+  return fresh.map(j => {
+    const had = (j && j.prompt_truncated && typeof j.prompt === 'string') ? full.get(j.id) : undefined;
+    if (typeof had !== 'string' || had.length <= j.prompt.length || !had.startsWith(j.prompt)) return j;
+    return Object.assign({}, j, { prompt: had });
+  });
+}
+
 async function fetchCronJobs() {
   try {
     const headers = {};
@@ -3987,7 +4018,7 @@ async function fetchCronJobs() {
       if (err.status) return;
       throw err;
     }
-    cronJobs = data.jobs || [];
+    cronJobs = keepRefetchedPrompts(cronJobs, data.jobs || []);
     cronNotifyDefault = data.notify_default || null;
     cronRecentRunsCap = (data.recent_runs_cap | 0) > 0 ? (data.recent_runs_cap | 0) : 0;
     cronTimezone = data.timezone || '';
@@ -4254,7 +4285,13 @@ async function cronDelete(id) {
 async function cronRefetchFullJob(id) {
   const cached = cronJobs.find(j => j.id === id);
   if (!cached) return { ok: false, reason: 'missing' };
-  if (!cached.prompt_truncated) return { ok: true, job: cached };
+  // Skip the round trip only for a row that was never clipped AND never spliced
+  // by an earlier refetch. A spliced row carries a full body but says nothing
+  // about whether the prompt has changed since, so trusting it let the editor
+  // open — and Save — a stale prompt: open a drawer, have the prompt rewritten
+  // elsewhere, open the editor, and the old body goes back to disk. Measured in
+  // test/e2e/cron_compact_prompt.test.js before this guard existed.
+  if (!cached.prompt_truncated && !cached.prompt_refetched) return { ok: true, job: cached };
   try {
     const headers = {};
     const t = getToken();
@@ -4272,8 +4309,9 @@ async function cronRefetchFullJob(id) {
       // editor opens / drawer renders see the full body without another
       // network round trip.
       const idx = cronJobs.findIndex(j => j.id === id);
-      if (idx >= 0) cronJobs[idx] = fresh;
-      return { ok: true, job: fresh };
+      const spliced = Object.assign({}, fresh, { prompt_refetched: true });
+      if (idx >= 0) cronJobs[idx] = spliced;
+      return { ok: true, job: spliced };
     }
   } catch (e) { /* fall through to fetch-failure */ }
   return { ok: false, reason: 'fetch' };
