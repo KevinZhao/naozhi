@@ -535,9 +535,15 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	// All cron channel operations happen after s.mu is released: Remove the
-	// old entry, then registerJob (AddFunc + Entry). The entryID write-back
-	// re-acquires s.mu briefly.
+	// Remove runs with s.mu released; registerJob then runs under it, because
+	// the entryID / cachedPeriod write-back and the rollback both need the live
+	// *Job. That is deliberate and safe: robfig/cron's Remove and Schedule
+	// rendezvous with the run loop while holding c.runningMu, but nothing ever
+	// reaches s.mu with c.runningMu held (run() does not take it, startJob
+	// hands the callback to a fresh goroutine), so s.mu → c.runningMu cannot
+	// close a cycle. Keeping Remove outside is about reader latency, not
+	// deadlock: it is the one call here that can block on a run-loop round
+	// trip without needing s.mu at all.
 	if schedNeedsRereg {
 		if schedRemoveEntryID != 0 {
 			s.cron.Remove(schedRemoveEntryID)
