@@ -2917,11 +2917,19 @@ function prependEvents(events) {
 
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
-  // Drop a placeholder the first time a chat is entered through a
-  // fully-internal page; leaving it in place would push the prepended
-  // real messages below the placeholder, so clean it out before insert.
-  const placeholder = el.querySelector('.empty-state');
-  if (placeholder) placeholder.remove();
+  // Drop the placeholder only when this page actually brings a visible bubble:
+  // leaving it in place would push the prepended real messages below it.
+  //
+  // When the page is still fully internal (html === '') the placeholder is the
+  // only explanation the operator has for an empty transcript. Removing it
+  // unconditionally left a blank pane with nothing but a "load earlier" button
+  // once maybeAutoPageBack exhausted its AUTO_PAGEBACK_MAX budget — measured in
+  // test/e2e/auto_pageback.test.js, and the exact case the retired source
+  // anchor claimed to protect by grepping for the placeholder's text (#2547).
+  if (html) {
+    const placeholder = el.querySelector('.empty-state');
+    if (placeholder) placeholder.remove();
+  }
 
   // Preserve visual stability: capture distance-from-bottom before mutation,
   // then restore after. scrollTop alone breaks because inserted content above

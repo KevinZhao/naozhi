@@ -29,6 +29,17 @@ func parseJSStringList(s string) []string {
 	return out
 }
 
+// This file reads dashboard.js, and deliberately keeps doing so: a JS Set has no
+// enumerator reachable from Go, and #2547 lists exactly this kind of cheap
+// cross-language reconciliation among the tests worth keeping. What it does NOT
+// do is assert on the file's prose or on how the code is spelled — it parses out
+// the Set's elements and compares them, member by member, against a Go
+// predicate.
+//
+// The auto-page-back half of this file moved to test/e2e/auto_pageback.test.js:
+// it pinned six substrings, one of which was a comment, and two of which the
+// probes recorded there show it cannot distinguish (#2547).
+//
 // TestInternalEventTypes_JSGoParity is the load-bearing guard for the
 // visible-aware history fix. The server's EventLastNVisibleCtx counts entries
 // clievent.IsInternalEventType reports false for; the dashboard hides exactly the
@@ -79,43 +90,4 @@ var allKnownEventTypes = []string{
 	"init", "thinking", "tool_use", "text", "result", "system", "agent",
 	"todo", "task_start", "task_progress", "task_done", "user",
 	"ask_question",
-}
-
-// TestDashboardJS_AutoPageBackSafetyNet pins the frontend safety net (plan A)
-// that complements the server-side visible-aware read. When the initial page
-// rendered blank (every event internal-filtered) the dashboard must page back
-// transparently, bounded by AUTO_PAGEBACK_MAX, instead of stranding the
-// operator on the "该会话最近仅有 agent 活动" placeholder.
-func TestDashboardJS_AutoPageBackSafetyNet(t *testing.T) {
-	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
-
-	wants := []struct {
-		label    string
-		fragment string
-	}{
-		{"bounded counter", "let _autoPageBackCount = 0;"},
-		{"cap constant", "const AUTO_PAGEBACK_MAX = 3;"},
-		{"helper fn", "function maybeAutoPageBack("},
-		{"cap guard", "if (_autoPageBackCount >= AUTO_PAGEBACK_MAX) return;"},
-		{"counter reset on session switch", "_autoPageBackCount = 0; // reset the blank-page recovery budget per session"},
-		{"renderEvents wiring", "if (!html && events.length > 0) maybeAutoPageBack();"},
-	}
-	for _, w := range wants {
-		if !strings.Contains(js, w.fragment) {
-			t.Errorf("dashboard.js missing auto-page-back %s: %q", w.label, w.fragment)
-		}
-	}
-
-	// The all-internal placeholder must STILL exist — the safety net layers on
-	// top of it (shown briefly while paging back), it does not remove it.
-	// Match either raw UTF-8 or the \u-escaped form prettier may produce.
-	if !strings.Contains(js, "该会话最近仅有 agent 活动") &&
-		!strings.Contains(js, `该会话最近仅有 agent`) {
-		t.Error("all-internal placeholder must remain — maybeAutoPageBack augments it, not replaces it")
-	}
 }
