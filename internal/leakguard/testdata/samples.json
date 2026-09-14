@@ -1,0 +1,52 @@
+[
+  {
+    "name": "call marker then invoke with parameters",
+    "text": "先读取它的完整范围。\n\ncall\n<invoke name=\"Read\">\n<parameter name=\"file_path\">/tmp/x.go</parameter>\n</invoke>",
+    "leak": true
+  },
+  {
+    "name": "self-closing invoke no parameters (ExitPlanMode shape)",
+    "text": "让我先退出计划模式。\n\ncall\n<invoke name=\"ExitPlanMode\">\n</invoke>",
+    "leak": true
+  },
+  {
+    "name": "function_calls wrapper marker",
+    "text": "running now.\n<function_calls>\n<invoke name=\"Bash\">\n<parameter name=\"command\">ls</parameter>\n</invoke>\n</function_calls>",
+    "leak": true
+  },
+  {
+    "name": "leak at very start of message",
+    "text": "call\n<invoke name=\"Bash\">\n<parameter name=\"command\">echo hi</parameter>\n</invoke>",
+    "leak": true
+  },
+  {
+    "name": "backtick-quoted invoke in a bug report",
+    "text": "截图里显示的是 `<invoke name=\"Bash\">` 这种 XML 字面量,夹在文本气泡里。",
+    "leak": false
+  },
+  {
+    "name": "invoke discussed inline without call-line anchor and no close tag",
+    "text": "那段字面 `\\ncall\\n<invoke name=\"Read\">\\n<parameter ...` 整个嵌在 text 字段里。",
+    "leak": false
+  },
+  {
+    "name": "the word call in prose followed later by quoted invoke",
+    "text": "I will call the tool. The syntax is `<invoke name=\"X\">` which closes with `</invoke>`.",
+    "leak": false
+  },
+  {
+    "name": "plain prose no tool syntax",
+    "text": "这是一条完全正常的回复,讨论了 transcript 渲染与边界问题。",
+    "leak": false
+  },
+  {
+    "name": "empty",
+    "text": "",
+    "leak": false
+  },
+  {
+    "name": "close tag present but no call-line anchor (bare invoke quoted)",
+    "text": "compare `<invoke name=\"a\">x</invoke>` against the structured form.",
+    "leak": false
+  }
+]
