@@ -23,15 +23,17 @@ func newGetSessionArgs(t *testing.T, s *Scheduler, j *Job) getSessionArgs {
 	return getSessionArgs{
 		ctx:         ctx,
 		spawnCancel: cancel,
-		key:         "cron:" + j.ID,
-		job:         j,
-		snap:        jobSnapshot{jobID: j.ID, prompt: "ping"},
-		runID:       "r-getsession",
-		startedAt:   time.Now(),
-		trigger:     TriggerScheduled,
-		lg:          slog.New(slog.NewTextHandler(io.Discard, nil)),
-		finalizer:   &runFinalizer{inflight: inflight},
-		inflight:    inflight,
+		runCtx: runCtx{
+			key:       "cron:" + j.ID,
+			job:       j,
+			snap:      jobSnapshot{jobID: j.ID, prompt: "ping"},
+			runID:     "r-getsession",
+			startedAt: time.Now(),
+			trigger:   TriggerScheduled,
+			lg:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+			finalizer: &runFinalizer{inflight: inflight},
+			inflight:  inflight,
+		},
 	}
 }
 

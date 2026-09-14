@@ -386,10 +386,8 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 	rc.key = key
 
 	sess, spawnStart, abortSpawn := s.executeGetSession(getSessionArgs{
-		ctx: ctx, spawnCancel: spawnCancel, key: key, opts: opts,
-		job: j, snap: snap, runID: runID, startedAt: startedAt, trigger: trigger,
-		lg: lg, notifyTo: notifyTo, finalizer: finalizer,
-		stubRefresh: stubRefresh, inflight: inflight,
+		runCtx: rc, ctx: ctx, spawnCancel: spawnCancel, opts: opts,
+		stubRefresh: stubRefresh,
 	})
 	if abortSpawn {
 		return
@@ -407,11 +405,9 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 	}
 
 	result, costInc, ok := s.execSend(execSendArgs{
-		job: j, sess: sess, snap: snap, cleanText: cleanText,
+		runCtx: rc, sess: sess, cleanText: cleanText,
 		sendBudget: sendBudget, spawnElapsed: spawnElapsed, jobTimeout: jobTimeout,
-		key: key, runID: runID, startedAt: startedAt, trigger: trigger,
-		lg: lg, notifyTo: notifyTo, finalizer: finalizer,
-		stubRefresh: stubRefresh, inflight: inflight,
+		stubRefresh: stubRefresh,
 	})
 	if !ok {
 		return
@@ -634,12 +630,11 @@ func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) 
 	return opts, key, cleanText, stubRefresh, true
 }
 
-// execSendArgs bundles the inputs to execSend (the send phase of executeOpt);
-// mirrors getSessionArgs.
+// execSendArgs bundles the inputs to execSend (the send phase). Identity comes
+// from the embedded runCtx (Epic H #2546).
 type execSendArgs struct {
-	job  *Job
+	runCtx
 	sess Session
-	snap jobSnapshot
 	// cleanText is the prompt with the agent-command prefix stripped.
 	cleanText string
 	// sendBudget is the remaining jobTimeout after spawn, floored at
@@ -647,19 +642,8 @@ type execSendArgs struct {
 	sendBudget   time.Duration
 	spawnElapsed time.Duration
 	jobTimeout   time.Duration
-	// key is the cron session key; fresh error/cancel branches Reset it while
-	// the CAS gate is still held (#1956).
-	key       string
-	runID     string
-	startedAt time.Time
-	trigger   TriggerKind
-	lg        *slog.Logger
-	notifyTo  NotifyTarget
-	finalizer *runFinalizer
-	// stubRefresh re-registers the sidebar row on failure paths; inflight
-	// receives the PhaseSending switch and the SessionID capture.
+	// stubRefresh re-registers the sidebar row on failure paths.
 	stubRefresh stubRefresher
-	inflight    *runInflight
 }
 
 // execSend runs the send phase of a cron execution: create the send-budget
@@ -911,38 +895,21 @@ func (s *Scheduler) observeSuccessLatency(elapsed time.Duration, result SendResu
 	}
 }
 
-// getSessionArgs bundles the inputs to executeGetSession (the spawn phase of
-// executeOpt); mirrors preflightArgs.
+// getSessionArgs bundles the inputs to executeGetSession (the spawn phase).
+// The run's identity comes from the embedded runCtx (Epic H #2546); what stays
+// here is what only this phase needs.
 type getSessionArgs struct {
-	// ctx is the spawn-only timeout context (s.stopCtx + jobTimeout). It owns
-	// the GetOrCreate call exclusively; executeGetSession cancels it via
-	// spawnCancel on the success path so its *time.Timer frees before Send.
+	runCtx
+	// ctx is the spawn-only timeout context (s.stopCtx + jobTimeout). It owns the
+	// GetOrCreate call exclusively; executeGetSession cancels it via spawnCancel on
+	// the success path so its *time.Timer frees before Send.
 	ctx         context.Context
 	spawnCancel context.CancelFunc
-	// key / opts feed router.GetOrCreate. opts is the per-run cloned AgentOpts
-	// (Exempt + backend/workspace overrides already applied by executeOpt).
-	key  string
+	// opts is the per-run cloned AgentOpts (Exempt + backend/workspace overrides
+	// already applied by executeOpt).
 	opts AgentOpts
-	// job / snap carry the run's identity. Failure branches route job into
-	// finishRun and read snap.prompt/workDir/fresh + labelOrID for the notice.
-	job  *Job
-	snap jobSnapshot
-	// runID / startedAt / trigger pair the synthetic finishRun with the
-	// emitRunStarted frame already broadcast by executeOpt.
-	runID     string
-	startedAt time.Time
-	trigger   TriggerKind
-	// lg is the per-run logger; notifyTo is the resolved IM target for the
-	// session-error notice (canceled path stays silent — shutdown races
-	// should not spam IM).
-	lg       *slog.Logger
-	notifyTo NotifyTarget
-	// finalizer is the per-run cleanup hook threaded into finishRun on the
-	// failure branches; stubRefresh re-registers the sidebar row when a fresh
-	// spawn aborted. inflight receives the early SessionID capture on success.
-	finalizer   *runFinalizer
+	// stubRefresh re-registers the sidebar row when a fresh spawn aborted.
 	stubRefresh stubRefresher
-	inflight    *runInflight
 }
 
 // executeGetSession runs the spawn phase of a cron execution: GetOrCreate
@@ -978,12 +945,9 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			// Stub re-register BEFORE finishRun releases the gate — see
 			// execSendError for the rationale.
 			a.stubRefresh.run()
-			s.finishRun(finishArgs{
-				job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
+			s.finishRunFor(a.runCtx, runOutcome{
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 				skipPersist: true, // cancel never touches LastRunAt
-				prompt:      a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
-				finalizer: a.finalizer,
 			})
 			return nil, spawnStart, true
 		}
@@ -1004,11 +968,9 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 		// Stub re-register BEFORE finishRun releases the gate — see execSendError;
 		// deliverNotice (IM, stub-independent) stays after finishRun.
 		a.stubRefresh.run()
-		s.finishRun(finishArgs{
-			job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
-			state: state, errClass: errClass, errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // mirrors send-error path
-			prompt: a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
-			finalizer: a.finalizer,
+		s.finishRunFor(a.runCtx, runOutcome{
+			state: state, errClass: errClass,
+			errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // mirrors send-error path
 		})
 		s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), "执行跳过，请稍后重试。"))
 		return nil, spawnStart, true
