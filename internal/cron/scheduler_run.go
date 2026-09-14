@@ -20,34 +20,12 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// preflightArgs bundles the inputs to freshContextPreflightP0; named fields
-// keep the eight inputs from silently swapping positions. Field order is size
-// DESC so the value type packs without intra-struct padding.
+// preflightArgs bundles the inputs to freshContextPreflightP0. Every field it
+// needs is part of the run's identity, so it is runCtx and nothing else — the
+// nine hand-listed fields it used to carry were that block spelled a second
+// time (Epic H #2546).
 type preflightArgs struct {
-	// snap 是 snapshotJob 拷贝出的快照；preflight 优先读 snap 而非 *job，
-	// 避免与并发 DeleteJob/PauseJob 起读写竞争。
-	snap jobSnapshot
-	// startedAt 是 caller 进入 executeOpt 时记录的 wall-clock 起点；
-	// preflight 失败也保留这个起点而非重新 time.Now()，让 dashboard 看到
-	// 真实的"从触发到放弃"时长。
-	startedAt time.Time
-	// notifyTo 是工作目录不可达分支回写中文提示的目标；其它失败分支不通知，
-	// 因为「shutdown / Reset 失败」对终端用户没有可操作信号。
-	notifyTo NotifyTarget
-	// key 是 router GetOrCreate / Reset 用到的 session key（`cron:<jobID>`）。
-	key string
-	// runID 转给失败分支的 finishRun，使 cron_run_ended 与 cron_run_started 配对。
-	runID string
-	// trigger 区分 TriggerScheduled / TriggerManual，决定 notice 与 timeline 的渲染。
-	trigger TriggerKind
-	// job 只在失败分支通过 finishArgs.job 转交给 finishRun；preflight 不修改 *Job。
-	job *Job
-	// lg 是带 jobID/runID 标签的 slog.Logger，preflight 自身只输出
-	// info/warn 不输出 error（error 由 finishRun 的 errMsg 落盘统一处理）。
-	lg *slog.Logger
-	// finalizer 转交给失败分支的 finishRun，让 cron_run_ended broadcast 之前
-	// finalize 元数据，CurrentRun(jobID) 与 broadcast 同步可见 ok=false。
-	finalizer *runFinalizer
+	runCtx
 }
 
 // stubRefresher carries the snap-time chain anchor (jobID + workDir + prompt
@@ -106,24 +84,18 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		// preserves prior recordResult semantics where ctx-cancel did not
 		// touch LastRunAt. The broadcast still emits so the dashboard sees
 		// the run's terminal frame.
-		s.finishRun(finishArgs{
-			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
+		s.finishRunFor(args.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 			skipPersist: true,
-			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: args.finalizer,
 		})
 		return noopRefresh, false
 	}
 	if !s.workDirReachableCached(snap.workDir) {
 		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
 			"work_dir", snap.workDir)
-		s.finishRun(finishArgs{
-			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
+		s.finishRunFor(args.runCtx, runOutcome{
 			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
 			errMsg: "work_dir unreachable",
-			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: args.finalizer,
 		})
 		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录不可达，本次执行已跳过。"))
 		return noopRefresh, false
@@ -137,12 +109,9 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		!workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
 		lg.Warn("cron fresh spawn aborted: work_dir outside allowed root",
 			"work_dir", snap.workDir)
-		s.finishRun(finishArgs{
-			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
+		s.finishRunFor(args.runCtx, runOutcome{
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
-			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: args.finalizer,
 		})
 		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录超出允许根目录，本次执行已跳过。"))
 		return noopRefresh, false
@@ -180,12 +149,9 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		refresh.run()
 		// Job deleted mid-execute: treat as canceled; no recordResult but
 		// broadcast for visibility.
-		s.finishRun(finishArgs{
-			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
+		s.finishRunFor(args.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled,
 			errMsg: "job deleted mid-execute", skipPersist: true,
-			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: args.finalizer,
 		})
 		return noopRefresh, false
 	}
@@ -390,6 +356,15 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 		Fresh:       snap.fresh,
 	}, lg)
 
+	// The run's identity, built once. Every phase below and every terminal branch
+	// reads it from here instead of re-listing the same ten values (Epic H #2546).
+	// key is filled in after execPrepareSpawn derives it.
+	rc := runCtx{
+		snap: snap, startedAt: startedAt, notifyTo: notifyTo,
+		runID: runID, trigger: trigger, job: j, lg: lg,
+		finalizer: finalizer, inflight: inflight,
+	}
+
 	// Per-job timeout is always s.execTimeout: robfig/cron's SkipIfStillRunning
 	// chain wrapper drops a colliding tick instead of killing a long-running job,
 	// so the deadline does not need to anticipate the next tick.
@@ -404,10 +379,11 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 	// self-terminates via finishRun inside the helper and returns
 	// okSpawnPrep=false, so the same return covers it. inflight + spawnCancel
 	// let the helper release the spawn timer before the long sandbox invoke.
-	opts, key, cleanText, stubRefresh, okSpawnPrep := s.execPrepareSpawn(j, snap, runID, startedAt, trigger, lg, notifyTo, finalizer, inflight, spawnCancel)
+	opts, key, cleanText, stubRefresh, okSpawnPrep := s.execPrepareSpawn(rc, spawnCancel)
 	if !okSpawnPrep {
 		return
 	}
+	rc.key = key
 
 	sess, spawnStart, abortSpawn := s.executeGetSession(getSessionArgs{
 		ctx: ctx, spawnCancel: spawnCancel, key: key, opts: opts,
@@ -596,7 +572,12 @@ func (s *Scheduler) execSnapshotAndEmit(j *Job, viaTriggerNow bool, runID string
 // inflight + spawnCancel are threaded in for the sandbox fork only: a sandbox
 // job releases the spawn-phase timer up front and hands the in-flight handle to
 // the run-once microVM path, which never touches the session router.
-func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, startedAt time.Time, trigger TriggerKind, lg *slog.Logger, notifyTo NotifyTarget, finalizer *runFinalizer, inflight *runInflight, spawnCancel context.CancelFunc) (opts AgentOpts, key, cleanText string, stubRefresh stubRefresher, ok bool) {
+func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) (opts AgentOpts, key, cleanText string, stubRefresh stubRefresher, ok bool) {
+	// The ten values this used to take positionally are the run's identity block;
+	// rc is that block, built once by executeAcquired (Epic H #2546). Locals keep
+	// the body below unchanged.
+	j, snap, runID, startedAt, trigger := rc.job, rc.snap, rc.runID, rc.startedAt, rc.trigger
+	lg, notifyTo, finalizer, inflight := rc.lg, rc.notifyTo, rc.finalizer, rc.inflight
 	// agentCommands/agents are published once at construction and read
 	// lock-free via configMaps(); a future hot-reload Store()s a fresh
 	// *cronConfigMaps. Load once so both reads see the same generation.
@@ -641,11 +622,10 @@ func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, sta
 	// Fresh mode: drop any existing session (process + history) so GetOrCreate
 	// spawns a brand-new CLI. On error paths the returned stubRefresh
 	// re-registers the sidebar row; on success the live session carries its own.
-	stubRefresh, okPreflight := s.freshContextPreflightP0(preflightArgs{
-		job: j, snap: snap, key: key, lg: lg, notifyTo: notifyTo,
-		runID: runID, startedAt: startedAt, trigger: trigger,
-		finalizer: finalizer,
-	})
+	// rc carries everything preflight needs except the session key, derived here.
+	prc := rc
+	prc.key = key
+	stubRefresh, okPreflight := s.freshContextPreflightP0(preflightArgs{runCtx: prc})
 	if !okPreflight {
 		// Do NOT call stubRefresh.run() here: the preflight already re-registered
 		// the stub BEFORE its own finishRun released the CAS gate (#2318).

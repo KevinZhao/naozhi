@@ -49,7 +49,7 @@ func runFreshPreflight(s *Scheduler, j *Job, workDir string) (stubRefresher, boo
 		jobID:   j.ID,
 		prompt:  j.Prompt,
 	}
-	return s.freshContextPreflightP0(preflightArgs{
+	return s.freshContextPreflightP0(preflightArgs{runCtx: runCtx{
 		job:       j,
 		snap:      snap,
 		key:       key,
@@ -58,7 +58,7 @@ func runFreshPreflight(s *Scheduler, j *Job, workDir string) (stubRefresher, boo
 		startedAt: time.Now(),
 		trigger:   TriggerScheduled,
 		finalizer: finalizer,
-	})
+	}})
 }
 
 // TestCRON3_FreshPreflightSkipsWhenWorkDirOutsideRoot is the core regression:
