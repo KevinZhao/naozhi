@@ -241,6 +241,9 @@ function startMockServer(overrides = {}) {
   const cronListMeta = Object.assign({ recent_runs_cap: 5 }, overrides.cronListMeta || {});
   const gitStates = overrides.gitStates || defaultGitStates();
   const sessionRuns = overrides.sessionRuns || {};
+  // runSnapshots: run_id -> §7.3 input-snapshot payload. Absent ids answer
+  // {available:false}, which is what a local (non-sandbox) run really returns.
+  const runSnapshots = overrides.runSnapshots || {};
   const discoveredData = overrides.discovered || [];
   let discoveredCloseCalls = [];
   const requireAuth = overrides.requireAuth || false;
@@ -629,6 +632,18 @@ function startMockServer(overrides = {}) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ valid: false, error: 'empty schedule' }));
       }
+      return;
+    }
+
+    // /api/cron/runs/<run_id>/snapshot?job_id=… — §7.3 输入快照面板。
+    // 必须排在下面那条通配 /api/cron/runs/<id> 之前，否则 run_id 会被解析成
+    // "<id>/snapshot" 而 404。
+    if (pathname.startsWith('/api/cron/runs/') && pathname.endsWith('/snapshot') && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const runId = decodeURIComponent(
+        pathname.slice('/api/cron/runs/'.length, -'/snapshot'.length));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(runSnapshots[runId] || { available: false }));
       return;
     }
 
