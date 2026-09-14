@@ -3,7 +3,6 @@ package upstream
 import (
 	"log/slog"
 	"os"
-	"regexp"
 	"sync"
 	"testing"
 	"time"
@@ -15,25 +14,15 @@ import (
 // waits, and a positive duration big enough to cover normal drain but
 // small enough that systemd TimeoutStopSec does not fire.
 func TestHandleConnDrainBudget_PackageLevelVar(t *testing.T) {
-	// Read the connector source so a future refactor that converts the
-	// var to const (and therefore blocks test injection) is caught.
-	src, err := os.ReadFile("connector.go")
-	if err != nil {
-		t.Fatalf("read connector.go: %v", err)
-	}
-	// The declaration line must still be a `var`. A `const` form would
-	// prevent tests from shortening the budget to millisecond values —
-	// they'd either wait the full 15 s (slow CI) or skip this regression
-	// altogether.
-	varRe := regexp.MustCompile(`var\s+handleConnDrainBudget\s*=\s*`)
-	if !varRe.Match(src) {
-		t.Error("handleConnDrainBudget is no longer a package-level var. " +
-			"R51-REL-005: tests shorten this to milliseconds to exercise the " +
-			"stuck-goroutine budget without 15-second wall-clock waits. If " +
-			"you need it to be const, add a testing seam (e.g. an unexported " +
-			"drainBudget accessor overridable from *_test.go) before making " +
-			"the change.")
-	}
+	// The assignability half used to be a regexp over connector.go looking for
+	// `var handleConnDrainBudget =`. The compiler enforces it for free, and more
+	// strongly: TestHandleConnDrain_StuckGoroutineDoesNotPin below assigns this
+	// variable, which does not compile against a const ("cannot assign to ...
+	// (neither addressable nor a variable)" — verified). Seven assignments across
+	// this package's tests already made the scan redundant (Epic I #2547).
+	//
+	// What remains is what a source scan could never check: that the VALUE sits
+	// inside the systemd TimeoutStopSec envelope.
 
 	// Sanity: default must be positive and within the systemd TimeoutStopSec
 	// envelope (production default 30 s; keep a comfortable margin).

@@ -112,9 +112,23 @@ func TestServerNew_NotReintroduced(t *testing.T) {
 	if !strings.Contains(string(data), "\nfunc NewWithOptions(opts ServerOptions) *Server {") {
 		t.Fatal("server.go no longer declares NewWithOptions — re-point this test at the constructor's file")
 	}
+	// The definition scan covers EVERY non-test file in the package, not just
+	// server.go: a `func New(addr string` added to any file of package server
+	// resurrects the wrapper just as effectively. This absorbed the reach of
+	// legacy_new_crosspkg_guard_test.go, which walked the WHOLE REPO for the same
+	// thing (2.15s, Epic I #2547). Its other half — "no server.New( callers
+	// exist anywhere" — needed no test at all: calling a function that does not
+	// exist is a build error, verified by adding `server.New("127.0.0.1:0")` to
+	// internal/wireup and getting `undefined: server.New`.
 	const defNeedle = "\nfunc New(addr string"
-	if strings.Contains("\n"+string(data), defNeedle) {
-		t.Error("server.go must not redefine `func New(addr string ...)` — use NewWithOptions(ServerOptions{...}) per R237-ARCH-14 (#614)")
+	for _, name := range packageGoFiles(t) {
+		fileData, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if strings.Contains("\n"+string(fileData), defNeedle) {
+			t.Errorf("%s must not define `func New(addr string ...)` — use NewWithOptions(ServerOptions{...}) per R237-ARCH-14 (#614)", name)
+		}
 	}
 
 	// (2) Scan every *.go file in the server package directory for the
@@ -151,4 +165,26 @@ func TestServerNew_NotReintroduced(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Errorf("legacy `New(\":0\", ...)` call sites present in: %v — the legacy positional-args wrapper was deleted in R237-ARCH-14 (#614); use NewWithOptions(ServerOptions{...})", offenders)
 	}
+}
+
+// packageGoFiles lists the package directory's non-test .go files. Fails when it
+// finds none, so a source-level scan can never pass vacuously.
+func packageGoFiles(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	var out []string
+	for _, ent := range entries {
+		name := ent.Name()
+		if ent.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		t.Fatal("no non-test .go files found; this scan would pass vacuously")
+	}
+	return out
 }
