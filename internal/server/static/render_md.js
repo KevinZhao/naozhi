@@ -807,8 +807,9 @@ function loadKatex() {
   if (katexReady || katexLoading) return;
   katexLoading = true;
   // Inject stylesheet on demand (moved out of <head> to unblock first paint).
-  // R219-SEC-4: KaTeX CDN link + script must carry SRI integrity hashes;
-  // contract pinned by TestDashboardJS_CDNScriptsHaveSRI.
+  // R219-SEC-4: KaTeX CDN link + script must carry SRI integrity hashes, and
+  // the two hashes must differ; contract pinned by test/e2e/cdn_sri.test.js,
+  // which reads the injected elements out of the DOM.
   if (!document.querySelector('link[data-nz-katex]')) {
     const link = document.createElement('link');
     link.rel = 'stylesheet';
