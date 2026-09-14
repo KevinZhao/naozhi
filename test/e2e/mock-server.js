@@ -241,6 +241,14 @@ function startMockServer(overrides = {}) {
   const cronListMeta = Object.assign({ recent_runs_cap: 5 }, overrides.cronListMeta || {});
   const gitStates = overrides.gitStates || defaultGitStates();
   const sessionRuns = overrides.sessionRuns || {};
+  // runSnapshots: run_id -> §7.3 input-snapshot payload. Absent ids answer
+  // {available:false}, which is what a local (non-sandbox) run really returns.
+  const runSnapshots = overrides.runSnapshots || {};
+  // agentEvents: task_id -> ordered transcript entries. The real handler filters
+  // `Time >= after` (INCLUSIVE), which is what makes the watermark ms replay on
+  // every poll page — the behaviour dedupAgentPollBatch exists to absorb. The
+  // mock reproduces that inclusivity deliberately; a `>` here would hide the bug.
+  const agentEvents = overrides.agentEvents || {};
   const discoveredData = overrides.discovered || [];
   let discoveredCloseCalls = [];
   const requireAuth = overrides.requireAuth || false;
@@ -629,6 +637,32 @@ function startMockServer(overrides = {}) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ valid: false, error: 'empty schedule' }));
       }
+      return;
+    }
+
+    // /api/sessions/agent_events?key=&node=&task_id=&after=&limit=
+    if (pathname === NZ_CONTRACT.API.sessions_agent_events && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const taskId = url.searchParams.get('task_id') || '';
+      const after = Number(url.searchParams.get('after') || 0);
+      const limit = Number(url.searchParams.get('limit') || 200);
+      const all = agentEvents[taskId] || [];
+      // Inclusive, like the server: entries AT the watermark come back again.
+      const page = all.filter(e => (e.time || 0) >= after).slice(0, limit);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(page));
+      return;
+    }
+
+    // /api/cron/runs/<run_id>/snapshot?job_id=… — §7.3 输入快照面板。
+    // 必须排在下面那条通配 /api/cron/runs/<id> 之前，否则 run_id 会被解析成
+    // "<id>/snapshot" 而 404。
+    if (pathname.startsWith('/api/cron/runs/') && pathname.endsWith('/snapshot') && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const runId = decodeURIComponent(
+        pathname.slice('/api/cron/runs/'.length, -'/snapshot'.length));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(runSnapshots[runId] || { available: false }));
       return;
     }
 
