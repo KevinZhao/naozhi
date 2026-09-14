@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"regexp"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -235,38 +233,37 @@ func TestWSRelay_MultipleSecondSubscribers_AllTracked(t *testing.T) {
 	}
 }
 
-// TestWSRelay_Source_WaitGroupInvariants is a regression guard: R184-CONC-M1
-// requires four source-level anchors that must stay together. Any refactor
-// dropping one will fail and force a conscious decision.
-func TestWSRelay_Source_WaitGroupInvariants(t *testing.T) {
-	data, err := os.ReadFile("relay.go")
-	if err != nil {
-		t.Fatalf("read relay.go: %v", err)
-	}
-	src := string(data)
-
-	// 1. wg field declared on wsRelay.
-	if !regexp.MustCompile(`(?m)^\s*wg\s+sync\.WaitGroup`).MatchString(src) {
-		t.Error("wsRelay must declare wg sync.WaitGroup")
-	}
-
-	// 2. Subscribe path does wg.Add(1) for the alreadySubscribed branch.
-	if !regexp.MustCompile(`r\.wg\.Add\(1\)`).MatchString(src) {
-		t.Error("Subscribe must call r.wg.Add(1) for second-subscriber path")
-	}
-
-	// 3. sendHistoryToClient owns the matching Done via defer.
-	if !regexp.MustCompile(`(?s)func \(r \*wsRelay\) sendHistoryToClient[^{]*\{\s*defer r\.wg\.Done\(\)`).MatchString(src) {
-		t.Error("sendHistoryToClient must defer r.wg.Done() as its first statement")
-	}
-
-	// 4. Close waits on wg (multi-line body scan).
-	if !regexp.MustCompile(`(?s)func \(r \*wsRelay\) Close\(\)[^{]*\{.*?r\.wg\.Wait\(\)`).MatchString(src) {
-		t.Error("Close must call r.wg.Wait()")
-	}
-
-	// 5. Subscribe must check r.closed under r.mu to prevent Add-after-Close.
-	if !regexp.MustCompile(`(?s)func \(r \*wsRelay\) Subscribe[^{]*\{.*?r\.mu\.Lock\(\).*?if r\.closed`).MatchString(src) {
-		t.Error("Subscribe must check r.closed under r.mu before wg.Add")
-	}
-}
+// R184-CONC-M1's five source anchors (TestWSRelay_Source_WaitGroupInvariants)
+// used to live here. All five are gone (Epic I #2547); each was probed:
+//
+//	wg field declared        }
+//	r.wg.Add(1) in Subscribe } removing any of these three fails
+//	defer r.wg.Done()        } TestWSRelay_Close_WaitsForSendHistoryGoroutine
+//	r.wg.Wait() in Close     -> the same test fails
+//
+// The fifth — "Subscribe must check r.closed under r.mu to prevent
+// Add-after-Close" — went for two independent reasons.
+//
+// Its regex never checked it. The pattern left `.*?` unbounded between
+// `func (r *wsRelay) Subscribe...{` and `if r.closed`, so with Subscribe's own
+// check deleted it still matched — walking past the end of Subscribe's body into
+// Close(), which also opens with r.mu.Lock() then `if r.closed`. Verified twice:
+// deleting the check leaves the test green, and the regex's match end lands
+// beyond Subscribe's closing brace.
+//
+// And its stated failure is unreachable anyway. Close clears r.subs, so
+// afterwards `alreadySubscribed` is false, `historyOnly` is false, and the wg.Add
+// branch cannot be taken — there is no Add-after-Close to provoke. What the check
+// really prevents is narrower: ensureConnected already rejects a closed relay, so
+// the only window is between ensureConnected returning nil and Subscribe taking
+// r.mu, where a Close would let Subscribe append to the subs map Close just
+// cleared.
+//
+// That narrow window has no reliable guard in either form. A race test
+// (subscribe-vs-Close on a live relay, asserting r.subs is empty afterwards)
+// caught the neutered check 2/5 runs at 60 rounds and 4/5 at 300 — a guard that
+// passes one CI run in five while broken is worse than none, because it also
+// creates confidence. Making it observable needs a test hook between
+// ensureConnected and the Lock, i.e. a production seam added for one test. That
+// is a deliberate decision to take on its own, not something a vacuous regex
+// should keep standing in for.
