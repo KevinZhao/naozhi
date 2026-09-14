@@ -1,7 +1,6 @@
 package selfupdate
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -125,58 +124,6 @@ func TestLaunchdJobRunsPath(t *testing.T) {
 	})
 }
 
-// TestRestartLaunchdUsesKickstart is a source-level regression gate.
-//
-// restartLaunchd cannot be executed in a test — it would restart the developer's
-// own naozhi. What CAN be locked down is that it never returns to the
-// unload/load shape, which is broken by construction for a self-restart:
-// `launchctl unload` removes the job whose process is making the call, so the
-// following `load` runs in a race against our own SIGTERM (or never runs),
-// leaving the service stopped rather than restarted.
-//
-// Reading our own source is unusual, but the alternative is no coverage at all
-// on a fix whose failure mode is "the service silently stays down".
-func TestRestartLaunchdUsesKickstart(t *testing.T) {
-	src, err := os.ReadFile("service.go")
-	if err != nil {
-		t.Fatalf("read service.go: %v", err)
-	}
-	body := restartLaunchdBody(t, string(src))
-
-	if !strings.Contains(body, `"kickstart", "-k"`) {
-		t.Error("restartLaunchd must restart via `launchctl kickstart -k` so launchd, not this dying process, owns the restart")
-	}
-	if strings.Contains(body, `"unload"`) || strings.Contains(body, `"load"`) {
-		t.Error("restartLaunchd must not use launchctl unload/load: unload removes the job whose own process is making the call, so the service ends up stopped instead of restarted")
-	}
-	if !strings.Contains(body, "verifiedLaunchdLabel()") {
-		t.Error("restartLaunchd must use verifiedLaunchdLabel(): an unverified inherited XPC_SERVICE_NAME can name a completely different launchd job")
-	}
-	if !strings.Contains(body, "gui/") {
-		t.Error("restartLaunchd must target the gui/<uid> domain, which is where naozhi install writes its LaunchAgent")
-	}
-}
-
-// TestServiceRunningUsesResolvedLabel guards the other half of the same fix.
-// Correcting restartLaunchd alone would not help: ServiceRunning() gates it,
-// so a stale constant there keeps every restart a silent no-op.
-func TestServiceRunningUsesResolvedLabel(t *testing.T) {
-	src, err := os.ReadFile("service.go")
-	if err != nil {
-		t.Fatalf("read service.go: %v", err)
-	}
-	body := funcBody(t, string(src), "func ServiceRunning()")
-	if !strings.Contains(body, "verifiedLaunchdLabel()") {
-		t.Error("ServiceRunning must resolve the launchd label via verifiedLaunchdLabel(); the install-time constant makes restarts a silent no-op wherever the plist label differs, and an unverified label can report a foreign job as ours")
-	}
-}
-
-// restartLaunchdBody extracts restartLaunchd's body from the source.
-func restartLaunchdBody(t *testing.T, src string) string {
-	t.Helper()
-	return funcBody(t, src, "func restartLaunchd()")
-}
-
 // funcBody returns the text from `decl` up to the next top-level closing brace.
 func funcBody(t *testing.T, src, decl string) string {
 	t.Helper()
@@ -192,3 +139,14 @@ func funcBody(t *testing.T, src, decl string) string {
 	}
 	return rest
 }
+
+// TestRestartLaunchdUsesKickstart and TestServiceRunningUsesResolvedLabel used to
+// live here, scanning service.go for the strings "kickstart", "-k", "gui/" and
+// "verifiedLaunchdLabel()". They are replaced by restart_launchd_argv_test.go,
+// which asserts the argv the path actually builds (Epic I #2547).
+//
+// The strings could confirm the tokens were present but not that they were
+// assembled correctly. Verified: rewriting the domain as system/<label> instead of
+// gui/<uid>/<label> keeps every one of the four strings satisfied — including
+// "gui/", which still appears in the surrounding comment — while producing an argv
+// that restarts nothing. The argv test catches it at argv[3].
