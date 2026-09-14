@@ -290,86 +290,71 @@ func (s *runStore) Append(run *CronRun) {
 	}
 
 	// Marshal + over-cap shrink are pure CPU on the caller-owned *run, so they
-	// run outside jobLock (#549). summarySrc is rebound to &shrunk on the
-	// over-cap path so the cache row matches the truncated on-disk record (#1079).
+	// run outside jobLock (#549).
 	// Preflight: when Result+Prompt+ErrorMsg alone overshoot the cap minus a fixed
 	// headroom, skip the doomed first marshal; the post-marshal gate stays authoritative (#1111).
 	const fixedFieldsHeadroom = 1024
 	preflightOverCap := s.maxRunBytes > fixedFieldsHeadroom &&
 		int64(len(run.Result)+len(run.Prompt)+len(run.ErrorMsg)) >
 			s.maxRunBytes-fixedFieldsHeadroom
-	var data []byte
 	var err error
-	summarySrc := run
+	// rec starts as the untruncated record paired with its own summary; the
+	// over-cap branches replace it wholesale. Payload and summary only travel
+	// together inside one runRecord, and both over-cap branches go through the
+	// same applyShrink, so the specific mistake #1079 fixed — a branch that
+	// updates the payload and forgets the cache source — has nowhere left to
+	// happen. Producing the summary from the wrong record inside
+	// shrinkAndMarshal is still writable; that one line is the whole surface.
+	rec := runRecord{summary: run.summary()}
+	// applyShrink returns false when even the truncated record does not fit, in
+	// which case the run is dropped and the caller must return.
+	applyShrink := func() bool {
+		shrunk, fits, err2 := s.shrinkAndMarshal(run)
+		if !fits {
+			// err2 may be nil when the truncated payload still exceeds
+			// maxRunBytes (metadata alone over cap), so log both err2 and the
+			// post-truncate size.
+			retryBytes := -1
+			if err2 == nil {
+				retryBytes = len(shrunk.payload)
+			}
+			s.historyDropTotal.Add(1)
+			slog.Warn("cron run: retry marshal also exceeded cap; run record dropped",
+				"job_id", run.JobID,
+				"run_id", run.RunID,
+				"retry_err", err2,
+				"retry_bytes", retryBytes,
+				"cap", s.maxRunBytes)
+			return false
+		}
+		rec = shrunk
+		return true
+	}
 	if preflightOverCap {
 		// Distinct message so preflight over-cap is distinguishable from the post-marshal retry.
 		slog.Warn("cron run: preflight over-cap: truncating result/prompt directly (skipping full marshal)",
 			"job_id", run.JobID, "run_id", run.RunID,
 			"preflight_bytes", len(run.Result)+len(run.Prompt)+len(run.ErrorMsg),
 			"cap", s.maxRunBytes)
-		shrunk := *run
-		shrunk.Result = truncateWithSuffix(shrunk.Result, maxRetryFieldRunes)
-		shrunk.Prompt = truncateWithSuffix(shrunk.Prompt, maxRetryFieldRunes)
-		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
-		// ResultBytes is the STORED byte count and must match the truncated Result on disk (#2016).
-		shrunk.ResultBytes = len(shrunk.Result)
-		data2, err2 := marshalRunPooled(&shrunk)
-		if err2 != nil || int64(len(data2)) > s.maxRunBytes {
-			retryBytes := -1
-			if err2 == nil {
-				retryBytes = len(data2)
-			}
-			s.historyDropTotal.Add(1)
-			slog.Warn("cron run: retry marshal also exceeded cap; run record dropped",
-				"job_id", run.JobID,
-				"run_id", run.RunID,
-				"retry_err", err2,
-				"retry_bytes", retryBytes,
-				"cap", s.maxRunBytes)
+		if !applyShrink() {
 			return
 		}
-		data = data2
-		summarySrc = &shrunk
 	} else {
-		data, err = marshalRunPooled(run)
+		rec.payload, err = marshalRunPooled(run)
 		if err != nil {
 			slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
 			return
 		}
 	}
-	if int64(len(data)) > s.maxRunBytes {
+	if int64(len(rec.payload)) > s.maxRunBytes {
 		slog.Warn("cron run: payload exceeds size cap; truncating result/prompt and retrying",
-			"job_id", run.JobID, "run_id", run.RunID, "bytes", len(data), "cap", s.maxRunBytes)
+			"job_id", run.JobID, "run_id", run.RunID, "bytes", len(rec.payload), "cap", s.maxRunBytes)
 		// 退化路径：把 Result 砍到极短，重新 marshal。Prompt 亦同。
 		// 这里不返回 — 一定要落盘一条记录，UI 才能看到 "曾有这么一条 run"。
-		shrunk := *run
-		shrunk.Result = truncateWithSuffix(shrunk.Result, maxRetryFieldRunes)
-		shrunk.Prompt = truncateWithSuffix(shrunk.Prompt, maxRetryFieldRunes)
-		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
-		// Recompute ResultBytes to match the truncated Result written to disk (#2016).
-		shrunk.ResultBytes = len(shrunk.Result)
-		if data2, err2 := marshalRunPooled(&shrunk); err2 == nil && int64(len(data2)) <= s.maxRunBytes {
-			data = data2
-			// Cache row must match the truncated record that landed on disk (#1079).
-			summarySrc = &shrunk
-		} else {
-			// err2 may be nil when the truncated payload still exceeds maxRunBytes
-			// (metadata alone over cap), so log both err2 and the post-truncate size.
-			retryBytes := -1
-			if err2 == nil {
-				retryBytes = len(data2)
-			}
-			s.historyDropTotal.Add(1)
-			slog.Warn("cron run: retry marshal also exceeded cap; run record dropped",
-				"job_id", run.JobID,
-				"run_id", run.RunID,
-				"retry_err", err2,
-				"retry_bytes", retryBytes,
-				"cap", s.maxRunBytes)
+		if !applyShrink() {
 			return
 		}
 	}
-
 	// The disk write runs OUTSIDE jobLock: each Append writes a unique
 	// <runID>.json (rename-atomic), so concurrent Appends do not collide, and
 	// holding the lock across fsync+rename serialised every Append behind a slow
@@ -394,7 +379,7 @@ func (s *runStore) Append(run *CronRun) {
 		return
 	}
 	path := filepath.Join(dir, run.RunID+".json")
-	if err := osutil.WriteFileAtomic(path, data, 0o600); err != nil {
+	if err := osutil.WriteFileAtomic(path, rec.payload, 0o600); err != nil {
 		// Append cannot return an error (history is best-effort), so the counter
 		// plus Error-level log is the only operator-visible signal (#1338).
 		diskFull := osutil.IsDiskFull(err)
@@ -415,7 +400,7 @@ func (s *runStore) Append(run *CronRun) {
 	lock := s.jobLock(run.JobID)
 	lock.Lock()
 	defer lock.Unlock()
-	s.cacheHeadPush(run.JobID, summarySrc.summary())
+	s.cacheHeadPush(run.JobID, rec.summary)
 	if s.enableTrimGC {
 		// One clock read shared by skipAppendTrim and trimJobLocked.
 		now := s.now()
@@ -649,6 +634,52 @@ func (s *runStore) dropOrphanRun(jobID, runID string) {
 	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) && !isDirNotEmpty(err) {
 		slog.Warn("cron run: drop orphan runs dir failed", "dir", dir, "err", err)
 	}
+}
+
+// runRecord pairs a marshalled payload with the summary of the very record it
+// was marshalled from. Append carries the two together so the bytes written to
+// disk and the row pushed into the read cache cannot describe different records.
+//
+// This replaced a source-anchor test that pinned Append's `summarySrc = &shrunk`
+// rebinding by regex (#1079, #2547). The rebinding was needed because the
+// truncate-and-retry block appeared twice — once for the preflight over-cap path
+// and once post-marshal — so each copy had to remember to update both the
+// payload and the cache source. One runRecord and one shrinkAndMarshal leaves a
+// single line where the pairing is established.
+//
+// No test in this package can currently see the pairing go wrong: CronRunSummary
+// carries RunID, JobID, State, Trigger, StartedAt, EndedAt, DurationMS,
+// SessionID, ErrorClass, ReplayOf and CostUSD, none of which truncation changes.
+// TestAppend_OversizeRetry_DiskAndCacheAgree compares the whole cached summary
+// against the on-disk record's, so it arms itself the day a truncated field is
+// added — which is the future the regex anchor was aimed at and could not have
+// caught.
+type runRecord struct {
+	payload []byte
+	summary CronRunSummary
+}
+
+// shrinkAndMarshal truncates the three unbounded string fields of a copy of run
+// and marshals that copy, returning the payload and that copy's summary as one
+// runRecord.
+//
+// fits is false when the truncated record still exceeds the cap; the payload is
+// returned anyway so the caller can log its post-truncate size.
+func (s *runStore) shrinkAndMarshal(run *CronRun) (rec runRecord, fits bool, err error) {
+	shrunk := *run
+	shrunk.Result = truncateWithSuffix(shrunk.Result, maxRetryFieldRunes)
+	shrunk.Prompt = truncateWithSuffix(shrunk.Prompt, maxRetryFieldRunes)
+	shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
+	// ResultBytes is the STORED byte count and must match the truncated Result on disk (#2016).
+	shrunk.ResultBytes = len(shrunk.Result)
+	data, err := marshalRunPooled(&shrunk)
+	if err != nil {
+		return runRecord{}, false, err
+	}
+	if int64(len(data)) > s.maxRunBytes {
+		return runRecord{payload: data}, false, nil
+	}
+	return runRecord{payload: data, summary: shrunk.summary()}, true, nil
 }
 
 // isDirNotEmpty reports whether err is the rmdir-on-non-empty-directory
