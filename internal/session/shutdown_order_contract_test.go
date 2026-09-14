@@ -2,8 +2,6 @@ package session
 
 import (
 	"context"
-	"os"
-	"regexp"
 	"testing"
 	"time"
 )
@@ -75,58 +73,49 @@ func TestShutdown_HistoryCtxCancelledFirst(t *testing.T) {
 	}
 }
 
-// TestShutdown_HistoryCtxCancelPreceedsHistoryWgWait is a source-level pin
-// on the instruction order within shutdown(). A behaviour test (above)
-// catches a regression that actually hangs; this one catches the more
-// subtle case where a reorder happens to still "work" because there are no
-// in-flight history loads to observe. The two are complementary.
+// TestShutdown_CancelBeforeWait_KeepsShutdownFast is the behavioural replacement
+// for TestShutdown_HistoryCtxCancelPreceedsHistoryWgWait, whose regexp asserted
+// that r.historyCancel() appears before r.historyWg.Wait() in shutdown()'s source
+// (Epic I #2547).
 //
-// Contract: the first mutating statement inside shutdown() must be the
-// `r.historyCancel()` call, followed (eventually) by the
-// `r.historyWg.Wait()` call inside a goroutine. Reordering these two is
-// the failure mode R172-ARCH-D11 calls out explicitly.
-func TestShutdown_HistoryCtxCancelPreceedsHistoryWgWait(t *testing.T) {
+// That anchor's own comment said the sibling test above "catches a regression that
+// actually hangs" while it caught "the more subtle case where a reorder happens to
+// still work because there are no in-flight history loads to observe". Correct —
+// and the fix is to give it one to observe: a task that HOLDS historyWg and only
+// releases when historyCtx fires.
+//
+// With the documented order, cancel releases the task and the bounded Wait returns
+// at once. Reversed, Wait blocks on a task that nothing has told to stop, so
+// Shutdown pays the full 5s ceiling. The duration is the assertion.
+func TestShutdown_CancelBeforeWait_KeepsShutdownFast(t *testing.T) {
 	t.Parallel()
-	// router-split (Phase 4): shutdown() helper moved to router_cleanup.go.
-	src, err := os.ReadFile("router_cleanup.go")
-	if err != nil {
-		t.Fatalf("read router_cleanup.go: %v", err)
+	r := newTestRouter(3)
+	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
+
+	// An in-flight history load: holds historyWg, parks on historyCtx.
+	started := make(chan struct{})
+	r.historyWg.Add(1)
+	go func() {
+		defer r.historyWg.Done()
+		close(started)
+		<-r.historyCtx.Done()
+	}()
+	<-started
+
+	start := time.Now()
+	r.Shutdown()
+	elapsed := time.Since(start)
+
+	// The 5s ceiling is shutdown()'s bounded wait. Anything approaching it means
+	// Wait ran before the cancel that releases the task.
+	if elapsed > 2*time.Second {
+		t.Errorf("Shutdown took %v with one in-flight history load; historyCancel() must run BEFORE historyWg.Wait(), or the bounded wait parks on a task nothing has cancelled and every Shutdown on that path pays the 5s ceiling (R172-ARCH-D11)", elapsed)
 	}
-
-	// Locate the shutdown() function body. We tolerate any leading
-	// godoc and any amount of interior whitespace — the only invariant
-	// we care about is "historyCancel() appears before historyWg.Wait()".
-	reShutdown := regexp.MustCompile(`(?ms)^func \(r \*Router\) shutdown\(\) \{(.*?)\n\}\n`)
-	m := reShutdown.FindSubmatch(src)
-	if m == nil {
-		t.Fatal("could not locate `func (r *Router) shutdown()` body in router_cleanup.go — " +
-			"did the signature change? Update this test to find the new anchor.")
-	}
-	body := m[1]
-
-	reCancel := regexp.MustCompile(`r\.historyCancel\(\)`)
-	reWait := regexp.MustCompile(`r\.historyWg\.Wait\(\)`)
-
-	cancelIdx := reCancel.FindIndex(body)
-	waitIdx := reWait.FindIndex(body)
-
-	if cancelIdx == nil {
-		t.Fatal("shutdown() body no longer contains `r.historyCancel()`. " +
-			"If you moved history-ctx cancellation out of Shutdown, audit callers " +
-			"of r.historyCtx (LoadHistory*Ctx, deferred JSONL backfill) — they " +
-			"will now only abort at process-teardown, not on normal Shutdown.")
-	}
-	if waitIdx == nil {
-		t.Fatal("shutdown() body no longer contains `r.historyWg.Wait()`. " +
-			"The bounded history-wait is the second half of R44-REL-HIST-GOROUTINE; " +
-			"removing it exposes history-loader goroutines to SIGTERM reaping.")
-	}
-
-	if cancelIdx[0] >= waitIdx[0] {
-		t.Errorf("R172-ARCH-D11 contract broken: `r.historyCancel()` must appear " +
-			"BEFORE `r.historyWg.Wait()` inside shutdown(). Without this order, " +
-			"in-flight LoadHistory*Ctx calls park on hung filesystem I/O until " +
-			"the 5s bounded wait expires, adding 5s to every Shutdown that " +
-			"hits that path.")
+	// Premise: the task must actually have been released, or a fast Shutdown would
+	// mean the wait was skipped rather than satisfied.
+	select {
+	case <-r.historyCtx.Done():
+	default:
+		t.Error("historyCtx was never cancelled; Shutdown returned without releasing the in-flight load")
 	}
 }
