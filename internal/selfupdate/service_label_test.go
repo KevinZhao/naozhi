@@ -124,12 +124,6 @@ func TestLaunchdJobRunsPath(t *testing.T) {
 	})
 }
 
-// restartLaunchdBody extracts restartLaunchd's body from the source.
-func restartLaunchdBody(t *testing.T, src string) string {
-	t.Helper()
-	return funcBody(t, src, "func restartLaunchd()")
-}
-
 // funcBody returns the text from `decl` up to the next top-level closing brace.
 func funcBody(t *testing.T, src, decl string) string {
 	t.Helper()
