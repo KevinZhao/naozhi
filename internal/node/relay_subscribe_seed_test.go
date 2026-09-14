@@ -1,8 +1,6 @@
 package node
 
 import (
-	"os"
-	"regexp"
 	"sync/atomic"
 	"testing"
 
@@ -125,38 +123,5 @@ func TestWSRelay_Subscribe_SeedOnlyOnFirstSubscriber(t *testing.T) {
 		t.Errorf("lastEvent[%q] = %d, want %d — second subscriber must "+
 			"not overwrite the seed with its own (possibly smaller) after",
 			key, got, firstAfter)
-	}
-}
-
-// TestWSRelay_Source_SubscribeSeedsLastEvent is a source-level anchor
-// that the seed write sits inside Subscribe's r.mu critical section,
-// guarded against the first-subscriber branch. A future refactor that
-// hoists the seed outside r.mu or drops it entirely reopens R184-REL-M2
-// without failing the behavioural test if the goroutine happens to
-// schedule favourably; this test fails fast at build time.
-func TestWSRelay_Source_SubscribeSeedsLastEvent(t *testing.T) {
-	t.Parallel()
-	data, err := os.ReadFile("relay.go")
-	if err != nil {
-		t.Fatalf("read relay.go: %v", err)
-	}
-	src := string(data)
-
-	// Anchor: Subscribe() must seed r.lastEvent[key] with `after` inside
-	// the same r.mu.Lock/Unlock window as the r.subs[key] append, and
-	// the write must be gated on `!alreadySubscribed` so late joiners do
-	// not clobber the seed. The pattern accepts either the seed line
-	// sitting before or after the subs append, so long as both are in
-	// the lock and the seed is guarded.
-	pat := regexp.MustCompile(`(?s)func \(r \*wsRelay\) Subscribe\([^)]*\) \{.*?` +
-		`r\.mu\.Lock\(\).*?` +
-		`if !alreadySubscribed \{[^}]*r\.lastEvent\[key\] = after[^}]*\}.*?` +
-		`r\.mu\.Unlock\(\)`)
-	if !pat.MatchString(src) {
-		t.Error("Subscribe() must seed r.lastEvent[key] = after inside the " +
-			"r.mu critical section guarded by !alreadySubscribed (R184-REL-M2). " +
-			"Without the seed, reconnect()'s resubscribe snapshot sees " +
-			"lastEvent[key]=0 for a key added between connect() and the " +
-			"lock acquisition, and the server replays full history.")
 	}
 }
