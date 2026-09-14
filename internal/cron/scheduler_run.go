@@ -231,25 +231,27 @@ func (s *Scheduler) applyJitterAndRecheck(j *Job, runID string, inflight *runInf
 // refusing to run when sandbox is off by operator choice (#638).
 //
 // abort=true (after finishRun for the outside-root class) → caller MUST return.
-func (s *Scheduler) resolveCronWorkspace(
-	j *Job, snap jobSnapshot, runID string, startedAt time.Time,
-	trigger TriggerKind, lg *slog.Logger, finalizer *runFinalizer,
-) (workDirForCLI string, abort bool) {
+func (s *Scheduler) resolveCronWorkspace(rc runCtx) (workDirForCLI string, abort bool) {
+	// The seven identity parameters this used to take are rc (Epic H #2546).
+	snap, lg := rc.snap, rc.lg
+	// Both containment failures below fail the run identically — same state, same
+	// class, same message — differing only in which gate caught it, which is a log
+	// detail. One helper so the two cannot drift apart.
+	failOutsideRoot := func(why string) (string, bool) {
+		lg.Warn("cron job work_dir outside allowed root"+why+"; aborting run",
+			"work_dir", snap.workDir)
+		s.finishRunFor(rc, runOutcome{
+			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
+			errMsg: "work_dir outside allowed root",
+		})
+		return "", true
+	}
 	if s.allowedRoot != "" {
 		// Cached EvalSymlinks (TTL workDirResolveCacheTTL) so fast-firing jobs
 		// don't repeat the resolve; a retarget surfaces within one TTL.
 		resolved, ok := s.workDirResolveUnderRootCached(snap.workDir)
 		if !ok {
-			lg.Warn("cron job work_dir outside allowed root; aborting run",
-				"work_dir", snap.workDir)
-			s.finishRun(finishArgs{
-				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-				state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
-				errMsg: "work_dir outside allowed root",
-				prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-				finalizer: finalizer,
-			})
-			return "", true
+			return failOutsideRoot("")
 		}
 		// The cached gate can pass on a stale-positive within the TTL (symlink
 		// retargeted outside allowedRoot after the cache warmed); re-run the
@@ -257,16 +259,7 @@ func (s *Scheduler) resolveCronWorkspace(
 		// On success keep the cached-resolved path to avoid double-EvalSymlinks
 		// semantic divergence.
 		if !workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
-			lg.Warn("cron job work_dir outside allowed root (uncached recheck); aborting run",
-				"work_dir", snap.workDir)
-			s.finishRun(finishArgs{
-				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-				state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
-				errMsg: "work_dir outside allowed root",
-				prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-				finalizer: finalizer,
-			})
-			return "", true
+			return failOutsideRoot(" (uncached recheck)")
 		}
 		return resolved, false
 	}
@@ -607,7 +600,7 @@ func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) 
 	}
 
 	if snap.workDir != "" {
-		workDirForCLI, abort := s.resolveCronWorkspace(j, snap, runID, startedAt, trigger, lg, finalizer)
+		workDirForCLI, abort := s.resolveCronWorkspace(rc)
 		if abort {
 			return AgentOpts{}, "", "", stubRefresher{}, false
 		}

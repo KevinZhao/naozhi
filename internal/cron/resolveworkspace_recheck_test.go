@@ -62,8 +62,10 @@ func runResolveWorkspace(s *Scheduler, j *Job, workDir string) (string, bool) {
 		jobID:   j.ID,
 		prompt:  j.Prompt,
 	}
-	return s.resolveCronWorkspace(
-		j, snap, "runid0000000001", time.Now(), TriggerScheduled, slog.Default(), finalizer)
+	return s.resolveCronWorkspace(runCtx{
+		job: j, snap: snap, runID: "runid0000000001", startedAt: time.Now(),
+		trigger: TriggerScheduled, lg: slog.Default(), finalizer: finalizer,
+	})
 }
 
 func registerResolveJob(t *testing.T, s *Scheduler, j *Job) {
