@@ -30,13 +30,40 @@ func resolveCLIDebugDir(eventLogDir string) string {
 }
 
 func resolveCLIDebugDirWith(eventLogDir string, getenv func(string) string) string {
-	if !envpolicy.EnvTruthy(getenv(cliDebugEnvVar)) {
+	dir, why := cliDebugDirWith(eventLogDir, getenv)
+	if dir == "" {
+		if why != "" {
+			slog.Info(why, "env", cliDebugEnvVar, "event_log_dir", eventLogDir)
+		}
 		return ""
 	}
-	if eventLogDir == "" {
-		slog.Info("cli debug capture requested but event log is disabled; no data root to anchor under — debug capture stays off",
-			"env", cliDebugEnvVar)
+	if err := datadir.EnsureDir(dir); err != nil {
+		slog.Warn("cli debug dir unusable; debug capture disabled for this run",
+			"dir", dir, "err", err)
 		return ""
+	}
+	slog.Info("cli debug capture enabled; spawned CLIs will write --debug-file logs",
+		"dir", dir)
+	return dir
+}
+
+// CLIDebugDir is the debug-log root for eventLogDir, or "" when capture is off
+// (env opt-in unset, no data root to anchor under, or an unresolvable relative
+// path). Pure: no directory creation, no logging — `naozhi config check` uses it
+// to report the --debug-file a spawn would pass without creating anything.
+func CLIDebugDir(eventLogDir string) string {
+	dir, _ := cliDebugDirWith(eventLogDir, os.Getenv)
+	return dir
+}
+
+// cliDebugDirWith computes the root; why explains an empty result for the
+// caller that logs (empty why = capture simply not requested).
+func cliDebugDirWith(eventLogDir string, getenv func(string) string) (dir, why string) {
+	if !envpolicy.EnvTruthy(getenv(cliDebugEnvVar)) {
+		return "", ""
+	}
+	if eventLogDir == "" {
+		return "", "cli debug capture requested but event log is disabled; no data root to anchor under — debug capture stays off"
 	}
 	// The root is the PARENT of the configured event-log dir, not the session
 	// store's directory: cli-debug is gated on the event log being enabled and
@@ -52,20 +79,10 @@ func resolveCLIDebugDirWith(eventLogDir string, getenv func(string) string) stri
 		if abs, err := filepath.Abs(dataDir); err == nil {
 			dataDir = abs
 		} else {
-			slog.Warn("cli debug dir could not be made absolute; debug capture disabled for this run",
-				"dataDir", dataDir, "err", err)
-			return ""
+			return "", "cli debug dir could not be made absolute; debug capture disabled for this run"
 		}
 	}
-	dir := datadir.FromRoot(dataDir).CLIDebugRoot()
-	if err := datadir.EnsureDir(dir); err != nil {
-		slog.Warn("cli debug dir unusable; debug capture disabled for this run",
-			"dir", dir, "err", err)
-		return ""
-	}
-	slog.Info("cli debug capture enabled; spawned CLIs will write --debug-file logs",
-		"dir", dir)
-	return dir
+	return datadir.FromRoot(dataDir).CLIDebugRoot(), ""
 }
 
 // cliDebugPathFor returns the per-session debug-file path WITHOUT touching the
@@ -74,10 +91,18 @@ func resolveCLIDebugDirWith(eventLogDir string, getenv func(string) string) stri
 // event file. driftCompareArgs uses this (not cliDebugFileFor) so the startup
 // drift pass never conjures debug logs for sessions that will not respawn.
 func (r *Router) cliDebugPathFor(key string) string {
-	if r.cliDebugDir == "" {
+	return CLIDebugPath(r.cliDebugDir, key)
+}
+
+// CLIDebugPath returns the debug-log path a session key gets under dir, or ""
+// when debug capture is off (dir empty). Exported so `naozhi config check
+// --effective` reports the same `--debug-file` value a spawn would pass instead
+// of re-deriving the name.
+func CLIDebugPath(dir, key string) string {
+	if dir == "" {
 		return ""
 	}
-	return filepath.Join(r.cliDebugDir, persist.KeyHash(key)+".log")
+	return filepath.Join(dir, persist.KeyHash(key)+".log")
 }
 
 // cliDebugFileFor returns cliDebugPathFor's path after pre-creating and
