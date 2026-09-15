@@ -16,7 +16,10 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/envpolicy"
+	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
 
@@ -35,11 +38,24 @@ type backendDiag struct {
 	cli.SpawnDiag
 }
 
-// effectiveSpawn is one backend's final spawn inputs.
+// effectiveSpawn is one backend's final spawn inputs, as the runtime would
+// build them for a session with no agent and the default access profile.
 type effectiveSpawn struct {
 	Argv []string `json:"argv"`
 	Env  []string `json:"env"`
+	// Agents holds the argv for each configured agent, whose system_prompt and
+	// args are session-scoped and therefore absent from Argv above.
+	Agents map[string][]string `json:"agents,omitempty"`
+	// Profiles holds the masked env each access profile's overlay produces on
+	// top of Env. Overlay values face the same allowlist + guards, so a
+	// refused entry shows up as an env-filter diag, not here.
+	Profiles map[string][]string `json:"profiles,omitempty"`
 }
+
+// effectiveSessionKey is the placeholder the report resolves session-scoped
+// values against. `--debug-file` is a per-session path (a key hash), so a
+// report for "this config" has to name the session it is describing.
+const effectiveSessionKey = "config-check:placeholder-session"
 
 // checkResult is the -json document; the human output prints the same data.
 type checkResult struct {
@@ -97,6 +113,19 @@ func configCheck(args []string, stdout io.Writer) int {
 			Layer: "env-filter", Key: d.Key, Action: "dropped", Reason: d.Reason,
 		}})
 	}
+	// The three argv-bearing paths the runtime resolves at startup. Reporting
+	// them means `--effective` shows the --settings / --mcp-config / --debug-file
+	// the real spawn passes; omitting them (as this did) described an argv that
+	// never happens.
+	storePath := osutil.ExpandHome(cfg.Session.StorePath)
+	settingsFile := resolveNaozhiSettingsFile(cfg, storePath, "")
+	mcpConfigFile := resolveMCPConfigFile(cfg)
+	// Same two-step main() takes: the debug root hangs off the event-log dir,
+	// and the file name is the session key hash. CLIDebugDir is the read-only
+	// half, so a check never creates a debug directory.
+	debugFile := session.CLIDebugPath(
+		session.CLIDebugDir(datadir.ForStore(storePath).EventsRoot()), effectiveSessionKey)
+
 	for _, b := range cfg.EnabledBackends() {
 		id := b.ID
 		profile, ok := backend.Get(id)
@@ -112,15 +141,58 @@ func configCheck(args []string, stdout io.Writer) int {
 			continue
 		}
 		proto := profile.NewProtocol(backend.ProtocolDeps{})
-		opts := cli.SpawnOptions{Model: b.Model, Effort: b.Effort, ExtraArgs: b.Args}
-		for _, d := range cli.SpawnDiagsFor(opts, cli.ProtocolCaps(proto)) {
+		caps := cli.ProtocolCaps(proto)
+		// The startup path drops a tier the backend cannot accept
+		// (initBackendWrappers), so reporting b.Effort verbatim would print an
+		// --effort the real spawn never passes. The drop is already reported as
+		// a caps diag by SpawnDiagsFor below.
+		effort := b.Effort
+		if !caps.EffortTier {
+			effort = ""
+		}
+		opts := session.ArgvSpawnOptions(b.Model, effort, debugFile, "", b.Args, settingsFile, mcpConfigFile)
+		for _, d := range cli.SpawnDiagsFor(
+			session.ArgvSpawnOptions(b.Model, b.Effort, debugFile, "", b.Args, settingsFile, mcpConfigFile),
+			caps,
+		) {
 			result.Diags = append(result.Diags, backendDiag{Backend: id, SpawnDiag: d})
 		}
 		if *effective {
-			result.Effective[id] = effectiveSpawn{
+			eff := effectiveSpawn{
 				Argv: proto.BuildArgs(opts),
 				Env:  maskEnvValues(filteredEnv),
 			}
+			for agentID, ac := range cfg.Agents {
+				agentEffort := ac.Effort
+				if agentEffort == "" {
+					agentEffort = effort
+				} else if !caps.EffortTier {
+					agentEffort = ""
+				}
+				agentModel := ac.Model
+				if agentModel == "" {
+					agentModel = b.Model
+				}
+				agentArgs := b.Args
+				if len(ac.Args) > 0 {
+					agentArgs = ac.Args
+				}
+				if eff.Agents == nil {
+					eff.Agents = map[string][]string{}
+				}
+				eff.Agents[agentID] = proto.BuildArgs(session.ArgvSpawnOptions(
+					agentModel, agentEffort, debugFile, ac.SystemPrompt, agentArgs, settingsFile, mcpConfigFile))
+			}
+			for apID, ap := range cfg.AccessProfiles {
+				if len(ap.Env) == 0 {
+					continue
+				}
+				if eff.Profiles == nil {
+					eff.Profiles = map[string][]string{}
+				}
+				eff.Profiles[apID] = maskEnvValues(envpolicy.MergeShimEnv(filteredEnv, ap.Env))
+			}
+			result.Effective[id] = eff
 		}
 	}
 	result.Diags = dedupBackendDiags(result.Diags)
