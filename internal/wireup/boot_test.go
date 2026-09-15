@@ -10,11 +10,13 @@ import (
 // package init() that fired on import, which meant no test could observe the
 // missing-step path for it (#2552). This pins the #1165 extension-point
 // contract: the health hook reports green only when the wire path is wired.
+// Not parallel: WireHistoryThumbnails assigns the process-global
+// discovery.ThumbnailFn, so a test that runs it must not race one that reads it.
 func TestValidate_RequiredStepsRecorded(t *testing.T) {
-	t.Parallel()
 	b := NewBoot()
 	b.EnsureCLIBackends()
 	b.RecordHistoryBackends()
+	b.WireHistoryThumbnails()
 	if err := b.Validate(); err != nil {
 		t.Fatalf("Validate() after both steps = %v, want nil", err)
 	}
@@ -25,11 +27,12 @@ func TestValidate_RequiredStepsRecorded(t *testing.T) {
 // required steps and exposes them via the Registry audit surface
 // (Names()). This is the "migrate a real subsystem to prove its value"
 // resolution: a real, non-test instantiation drives Registry[BootStep].
+// Not parallel: see TestValidate_RequiredStepsRecorded.
 func TestBootSteps_IncludesRequired(t *testing.T) {
-	t.Parallel()
 	b := NewBoot()
 	b.EnsureCLIBackends()
 	b.RecordHistoryBackends()
+	b.WireHistoryThumbnails()
 	steps := b.Steps()
 	want := map[string]bool{"cli-backends": false, "history-backends": false}
 	for _, s := range steps {
@@ -54,6 +57,9 @@ func TestRecordBootStep_Idempotent(t *testing.T) {
 	b.recordStep("cli-backends", BootStep{Kind: "cli-backends", Detail: "dup"})
 	b.recordStep("cli-backends", BootStep{Kind: "cli-backends", Detail: "dup2"})
 	b.RecordHistoryBackends()
+	// The record, not the assignment: this test is about duplicate names, and
+	// recording it here keeps the process-global hook out of a parallel test.
+	b.recordStep("history-thumbnail", BootStep{Kind: "history-thumbnail"})
 	if err := b.Validate(); err != nil {
 		t.Fatalf("Validate() after duplicate record = %v, want nil", err)
 	}

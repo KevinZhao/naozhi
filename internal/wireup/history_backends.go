@@ -17,19 +17,22 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
-// discovery.ThumbnailFn turns raw image bytes from a rehydrated JSONL transcript
-// into a small JPEG data URI. It is a process-global hook with no build-time
-// enforcement: leave it nil and image blocks in history are silently dropped, no
-// compile error, no warning.
+// WireHistoryThumbnails installs discovery.ThumbnailFn, which turns raw image
+// bytes from a rehydrated JSONL transcript into a small JPEG data URI. The hook
+// is a process-global with no build-time enforcement: leave it nil and image
+// blocks in history are silently dropped — no compile error, no warning, just
+// missing pictures.
 //
-// The assignment used to sit in internal/history/claudejsonl's init(), which was
-// that package's last reason to import internal/cli (#2649 G1-d) — a JSONL format
-// reader pulling in the subprocess manager for one function pointer. A
-// cross-package hook belongs at the wiring site, and this file is already the
-// place a backend becomes available by being linked.
-//
-// history_thumbnail_test.go asserts the hook is non-nil after this package's
-// init, since nothing else would notice.
-func init() {
+// The assignment lived in internal/history/claudejsonl's init() (its last reason
+// to import internal/cli — a JSONL reader pulling in the subprocess manager for
+// one function pointer), then in this package's init(). An init() here made the
+// guarantee invisible at the call site and re-broke the "wireup has no init()"
+// property #2552 established, so it is a Boot step: main states it, Validate
+// refuses to serve without it.
+func (b *Boot) WireHistoryThumbnails() {
 	discovery.ThumbnailFn = cli.MakeThumbnail
+	b.recordStep("history-thumbnail", BootStep{
+		Kind:   "history-thumbnail",
+		Detail: "discovery.ThumbnailFn = cli.MakeThumbnail",
+	})
 }
