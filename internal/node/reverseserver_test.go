@@ -249,8 +249,13 @@ func TestReverseServer_AllNodes_includesDisconnected(t *testing.T) {
 func TestReverseServer_Reconnect_closesOldConn(t *testing.T) {
 	rs := newTestReverseServer("node-1", "tok", false)
 
-	registered := make(chan struct{}, 4)
-	rs.OnRegister = func(id string, conn *ReverseConn) { registered <- struct{}{} }
+	// The registered ack is written before the server re-checks who owns the
+	// node id, so a conn that gets displaced in that window has its OnRegister
+	// suppressed by design. Carrying the *ReverseConn and waiting for conn1's
+	// own registration before dialing conn2 keeps the sequence a fact of the
+	// test rather than of the scheduler.
+	registered := make(chan *ReverseConn, 4)
+	rs.OnRegister = func(id string, conn *ReverseConn) { registered <- conn }
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws-node", rs)
@@ -261,6 +266,12 @@ func TestReverseServer_Reconnect_closesOldConn(t *testing.T) {
 	resp1 := reverseAuth(t, conn1, "node-1", "tok", "host")
 	if resp1.Type != "registered" {
 		t.Fatalf("conn1: expected registered, got %q", resp1.Type)
+	}
+	var rc1 *ReverseConn
+	select {
+	case rc1 = <-registered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("conn1: OnRegister never fired while it was the only conn for node-1")
 	}
 
 	conn2 := dialReverseNode(t, srv)
@@ -286,18 +297,20 @@ func TestReverseServer_Reconnect_closesOldConn(t *testing.T) {
 		break
 	}
 
-	// OnRegister fires on the server goroutine after each registered ack;
-	// join both deterministically instead of sleeping.
-	for i := 0; i < 2; i++ {
-		select {
-		case <-registered:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("OnRegister fired %d time(s), want 2", i)
+	// The reconnecting conn takes over the id, so its OnRegister must fire and
+	// must carry a different *ReverseConn than the one it displaced — that is
+	// what keeps downstream maps pointing at the live socket.
+	select {
+	case rc2 := <-registered:
+		if rc2 == rc1 {
+			t.Error("conn2's OnRegister carried the displaced conn; downstream maps would keep writing to the closed socket")
 		}
+	case <-time.After(2 * time.Second):
+		t.Error("conn2 took over node-1 but its OnRegister never fired")
 	}
 	select {
 	case <-registered:
-		t.Error("OnRegister fired more than twice")
+		t.Error("OnRegister fired a third time for two connections")
 	default:
 	}
 }
