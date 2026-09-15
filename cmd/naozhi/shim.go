@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -36,7 +35,7 @@ func runShim(args []string) {
 }
 
 func runShimRun(args []string) {
-	fs := flag.NewFlagSet("naozhi shim run", flag.ExitOnError)
+	fs := newFlagSet("naozhi shim run")
 	key := fs.String("key", "", "session key")
 	socket := fs.String("socket", "", "unix socket path")
 	stateFile := fs.String("state-file", "", "state file path")
@@ -97,7 +96,7 @@ func runShimRun(args []string) {
 }
 
 func runShimStop(args []string) {
-	fs := flag.NewFlagSet("naozhi shim stop", flag.ExitOnError)
+	fs := newFlagSet("naozhi shim stop")
 	key := fs.String("key", "", "session key to stop")
 	all := fs.Bool("all", false, "stop all shims")
 	stateDir := fs.String("state-dir", "", "shim state directory")

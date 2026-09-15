@@ -55,11 +55,19 @@ func printUsage(w io.Writer) {
 // resolves ~/.naozhi/config.yaml itself when the flag stays unset (setup /
 // install); serving and reading commands default to ./config.yaml.
 func newSubFlagSet(name, defaultPath string) (*flag.FlagSet, *string) {
-	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	fs := newFlagSet(name)
 	usage := "path to config file"
 	if defaultPath == "" {
 		usage = "config file path (default ~/.naozhi/config.yaml)"
 	}
 	configPath := fs.String("config", defaultPath, usage)
 	return fs, configPath
+}
+
+// newFlagSet is the flag-handling half of newSubFlagSet, for the subcommands
+// that take no -config (upgrade, shim run, shim stop). One place decides
+// ExitOnError so a new subcommand cannot pick a different error mode and turn a
+// flag typo into a silent no-op instead of a usage message.
+func newFlagSet(name string) *flag.FlagSet {
+	return flag.NewFlagSet(name, flag.ExitOnError)
 }

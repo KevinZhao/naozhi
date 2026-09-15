@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -11,7 +10,7 @@ import (
 )
 
 func runUpgrade(args []string) {
-	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
+	fs := newFlagSet("upgrade")
 	checkOnly := fs.Bool("check-only", false, "check for a newer version without downloading")
 	noRestart := fs.Bool("no-restart", false, "skip service restart after upgrade")
 	force := fs.Bool("force", false, "allow upgrading from a dev build to a release")
