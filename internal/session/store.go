@@ -348,6 +348,9 @@ var storeMetaWritten sync.Map // map[string]struct{}
 // writeStoreData ensures the store directory exists, atomically writes the
 // pre-marshalled bytes, then writes the advisory version sidecar.
 func writeStoreData(path string, data []byte) error {
+	if err := blockedIfUnreadable(path); err != nil {
+		return err
+	}
 	if dir := filepath.Dir(path); dir != "" {
 		if _, done := storeDirEnsured.Load(dir); !done {
 			// Shared dir policy (MkdirAll 0700 + symlink/non-dir guard + chmod)
@@ -406,9 +409,14 @@ func readStoreMeta(storePath string) (storeMeta, bool) {
 		Label:    "session store meta",
 	})
 	if err != nil {
-		slog.Warn("read session store meta failed", "path", metaPath, "err", err)
+		// The sidecar is machine-written, so losing it costs nothing — a missing
+		// meta reads as legacy. Report it so it is not silent (#2680), but do not
+		// block writes: blocking would freeze the sidecar while sessions.json
+		// advances, and a stale version number is worse than a rewritten one.
+		markStoreReadUnreadableReportOnly(metaPath, "session store meta", err)
 		return storeMeta{}, false
 	}
+	clearStoreReadUnreadable(metaPath)
 	return m, out == jsonfile.Parsed
 }
 
@@ -431,9 +439,10 @@ func loadStore(path string) map[string]*storeEntry {
 		Label:    "session store",
 	})
 	if err != nil {
-		slog.Warn("load session store failed", "path", path, "err", err)
+		markStoreReadUnreadable(path, "session store", err)
 		return nil
 	}
+	clearStoreReadUnreadable(path)
 	if out != jsonfile.Parsed {
 		return nil
 	}
@@ -469,9 +478,10 @@ func loadKnownIDs(storePath string) map[string]bool {
 		Label:    "known session IDs",
 	})
 	if err != nil {
-		slog.Warn("load known session IDs failed", "path", path, "err", err)
+		markStoreReadUnreadable(path, "known session IDs", err)
 		return nil
 	}
+	clearStoreReadUnreadable(path)
 	if out != jsonfile.Parsed {
 		return nil
 	}
@@ -502,6 +512,9 @@ func saveKnownIDsBytes(storePath string, data []byte) error {
 	path := knownIDsPath(storePath)
 	if path == "" {
 		return nil
+	}
+	if err := blockedIfUnreadable(path); err != nil {
+		return err
 	}
 	if dir := filepath.Dir(path); dir != "" {
 		// Shares storeDirEnsured with writeStoreData (same directory). A failed
@@ -576,9 +589,10 @@ func loadWorkspaceOverrides(storePath string) map[string]string {
 		Label:    "workspace overrides",
 	})
 	if err != nil {
-		slog.Warn("load workspace overrides failed", "path", path, "err", err)
+		markStoreReadUnreadable(path, "workspace overrides", err)
 		return nil
 	}
+	clearStoreReadUnreadable(path)
 	if out != jsonfile.Parsed {
 		return nil
 	}
@@ -594,6 +608,9 @@ func saveWorkspaceOverrides(storePath string, overrides map[string]string) error
 	path := workspaceOverridesPath(storePath)
 	if path == "" {
 		return nil
+	}
+	if err := blockedIfUnreadable(path); err != nil {
+		return err
 	}
 	if len(overrides) == 0 {
 		if err := os.Remove(path); err != nil {
