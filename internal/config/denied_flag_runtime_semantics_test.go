@@ -30,7 +30,7 @@ func writeConfigFile(t *testing.T, body string) string {
 }
 
 // loadWithDiags loads path while collecting the diags Load emits.
-func loadWithDiags(t *testing.T, path string) (*Config, error, []cli.SpawnDiag) {
+func loadWithDiags(t *testing.T, path string) (*Config, []cli.SpawnDiag, error) {
 	t.Helper()
 	var mu sync.Mutex
 	var diags []cli.SpawnDiag
@@ -43,7 +43,7 @@ func loadWithDiags(t *testing.T, path string) (*Config, error, []cli.SpawnDiag) 
 	restore()
 	mu.Lock()
 	defer mu.Unlock()
-	return cfg, err, diags
+	return cfg, diags, err
 }
 
 func diagFor(diags []cli.SpawnDiag, key string) (cli.SpawnDiag, bool) {
@@ -99,7 +99,7 @@ agents:
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err, diags := loadWithDiags(t, writeConfigFile(t, tc.body))
+			cfg, diags, err := loadWithDiags(t, writeConfigFile(t, tc.body))
 			// Half one: it loads. A denied flag is an ineffective config, not a
 			// broken one; naozhi must still start.
 			if err != nil {
@@ -150,7 +150,7 @@ cli:
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err, _ := loadWithDiags(t, writeConfigFile(t, tc.body))
+			_, _, err := loadWithDiags(t, writeConfigFile(t, tc.body))
 			if err == nil {
 				t.Fatalf("Load must refuse %s", tc.name)
 			}
