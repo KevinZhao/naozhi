@@ -1,84 +1,42 @@
 package sysession
 
 import (
-	"log/slog"
 	"os"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/envpolicy"
-	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
-// envBaseURLKeys are always-passthrough keys whose value is an API endpoint
-// URL. Values are validated by validateBaseURLValue so a tampered parent env
-// cannot point the CLI at an internal/IMDS address over plain http and tunnel
-// an SSRF past the settings.json-side guard (#1687).
-var envBaseURLKeys = map[string]struct{}{
-	"ANTHROPIC_BASE_URL":         {},
-	"ANTHROPIC_BEDROCK_BASE_URL": {},
-	"ANTHROPIC_VERTEX_BASE_URL":  {},
+// A var the Runner env gate refuses is configured input that never reaches the
+// daemon's `claude -p`.
+const (
+	sysessionEnvScope = "sysession-env"
+	layerEnvFilter    = "env-filter"
+)
+
+// envAllowed reports whether the sysession column of the envpolicy Table passes
+// key through to a Runner's `claude -p`. The three lists this used to keep —
+// always-passthrough, profile-name keys, base-URL keys — are Table rows with the
+// SourceSysession bit; table_sysession_test.go pins every one of them against a
+// copy of the retired maps.
+func envAllowed(key string) bool {
+	_, ok := envpolicy.Allowed(key, envpolicy.SourceSysession)
+	return ok
 }
 
-// validateBaseURLValue delegates to envpolicy.ValidateBaseURLValue, shared
-// with cmd/naozhi's settings.json guard (#891).
-func validateBaseURLValue(v string) error {
-	return envpolicy.ValidateBaseURLValue(v)
-}
-
-// envProfileKeys are always-passthrough keys carrying an AWS profile *name*
-// (not credentials); values are validated by isSafeProfileValue (#1617).
-var envProfileKeys = map[string]struct{}{
-	"AWS_PROFILE":         {},
-	"AWS_DEFAULT_PROFILE": {},
-}
-
-// isSafeProfileValue delegates to envpolicy.IsSafeProfileValue (#891).
-func isSafeProfileValue(v string) bool {
-	return envpolicy.IsSafeProfileValue(v)
-}
-
-// envAlwaysPassthrough is the small set of NON-SECRET variables every Runner
-// subprocess gets; anything else MUST be opted in via RunnerConfig.EnvAllowlist.
-// sysession Runners build their own cmd.Env and never inherit access-profile
-// overlays. Backend selectors (USE_BEDROCK/USE_VERTEX, base URLs, regions,
-// model pins) must pass because Runner uses `--setting-sources ""` (skips
-// settings.json) — without them the CLI falls back to direct-Anthropic OAuth
-// and dies "Not logged in" every Tick, tripping the breaker. Raw credentials
-// (ANTHROPIC_API_KEY, AWS_SECRET_ACCESS_KEY, GOOGLE_APPLICATION_CREDENTIALS,
-// …) are deliberately NOT here: envCredsForBackend gates them per detected
-// backend so a sibling backend's secret never reaches prompt-driven Bash (#1400).
-var envAlwaysPassthrough = map[string]struct{}{
-	"PATH": {},
-	"HOME": {},
-
-	// Backend selection — which provider the CLI talks to.
-	"CLAUDE_CODE_USE_BEDROCK":       {},
-	"CLAUDE_CODE_USE_VERTEX":        {},
-	"CLAUDE_CODE_SKIP_BEDROCK_AUTH": {},
-
-	// Non-secret endpoint/region/profile-name plumbing.
-	"ANTHROPIC_BASE_URL":         {},
-	"ANTHROPIC_BEDROCK_BASE_URL": {},
-	"ANTHROPIC_VERTEX_BASE_URL":  {},
-	"AWS_REGION":                 {},
-	"AWS_DEFAULT_REGION":         {},
-	"AWS_PROFILE":                {},
-	"AWS_DEFAULT_PROFILE":        {},
-
-	// Vertex non-secret plumbing (GOOGLE_APPLICATION_CREDENTIALS is gated separately).
-	"ANTHROPIC_VERTEX_PROJECT_ID": {},
-	"CLOUD_ML_REGION":             {},
-
-	// Model overrides — the daemon's transient claude -p must match the parent's pinning.
-	"ANTHROPIC_MODEL":                {},
-	"ANTHROPIC_SMALL_FAST_MODEL":     {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL":  {},
-	"ANTHROPIC_DEFAULT_SONNET_MODEL": {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL":   {},
+// envGuardFor returns the value check the Table attaches to key for this
+// column, or nil. AWS profile names get the charset guard (a crafted name can
+// point credential_process at an attacker binary, #1617); base URLs get
+// ValidateBaseURLValue, so a tampered parent env cannot aim the CLI at an
+// IMDS/internal http endpoint and tunnel an SSRF past the settings.json-side
+// guard (#1687).
+func envGuardFor(key string) func(string) error {
+	return envpolicy.GuardFor(key, envpolicy.SourceSysession)
 }
 
 // backendMode aliases envpolicy.BackendMode (#891). Only the credential set of
-// the detected backend is layered onto envAlwaysPassthrough; every other
+// the detected backend is layered onto the sysession column; every other
 // backend's secrets are stripped even if present in the parent env (#1400).
 type backendMode = envpolicy.BackendMode
 
@@ -92,8 +50,8 @@ func envCredsForBackend(mode backendMode) []string {
 	return envpolicy.EnvCredsForBackend(mode)
 }
 
-// filterEnv returns the exec.Cmd.Env slice for a Runner: the always-passthrough
-// keys, the raw-credential keys of the *detected* backend only, allowlist
+// filterEnv returns the exec.Cmd.Env slice for a Runner: the keys the Table's
+// sysession column passes, the raw-credential keys of the *detected* backend only, allowlist
 // exact matches, and prefix matches for allowlist entries ending in "_"
 // ("ANTHROPIC_" matches every ANTHROPIC_* var; "ANTHROPIC" only the bare key).
 // Credentials of NON-active backends are stripped unconditionally — even when
@@ -146,24 +104,16 @@ func filterEnv(allowlist []string) []string {
 			out = append(out, kv)
 			continue
 		}
-		if _, ok := envAlwaysPassthrough[key]; ok {
-			// An unsafe profile name could redirect credential_process to a
-			// malicious profile (#1617).
-			if _, isProfile := envProfileKeys[key]; isProfile {
-				val := kv[idx+1:]
-				if !isSafeProfileValue(val) {
-					slog.Warn("sysession: AWS profile env var rejected (unsafe value)",
-						"key", key, "value", osutil.SanitizeForLog(val, 128))
-					continue
-				}
-			}
-			// A tampered base URL could point the CLI at an IMDS/internal http
-			// endpoint and tunnel an SSRF past the settings.json guard (#1687).
-			if _, isBaseURL := envBaseURLKeys[key]; isBaseURL {
-				val := kv[idx+1:]
-				if err := validateBaseURLValue(val); err != nil {
-					slog.Warn("sysession: base-URL env var rejected (unsafe value)",
-						"key", key, "value", osutil.SanitizeForLog(val, 128), "err", err)
+		if envAllowed(key) {
+			// The value guard is a gate: an operator exported this var for the
+			// daemon and it will not arrive, so report it rather than log it.
+			if check := envGuardFor(key); check != nil {
+				if err := check(kv[idx+1:]); err != nil {
+					// The value itself is never reported — it may be
+					// credential-adjacent — and GuardErrorReason collapses the
+					// copy of it that url.Parse errors carry.
+					spawndiag.One(sysessionEnvScope, layerEnvFilter, key, "dropped",
+						"value fails its guard: "+envpolicy.GuardErrorReason(err))
 					continue
 				}
 			}

@@ -1,14 +1,12 @@
 package sysession
 
 import (
-	"bytes"
-	"log/slog"
 	"slices"
-	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // envContains returns true iff the "KEY=value" slice has key=want.
@@ -170,10 +168,14 @@ func TestFilterEnv_PassesBackendSelectors(t *testing.T) {
 	// through with a valid https:// (or loopback http) value, so use one
 	// for those instead of a bare marker.
 	markerFor := func(k string) string {
-		if _, isURL := envBaseURLKeys[k]; isURL {
+		// Ask the guard the Table actually wired for this key instead of
+		// re-listing the URL keys here: a bare marker that fails its check
+		// means the key wants a URL.
+		v := "marker-" + k
+		if check := envGuardFor(k); check != nil && check(v) != nil {
 			return "https://marker-" + k
 		}
-		return "marker-" + k
+		return v
 	}
 	for _, k := range keys {
 		t.Setenv(k, markerFor(k))
@@ -287,9 +289,13 @@ func TestIsSafeProfileValue(t *testing.T) {
 		"a",
 		"abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE", // 44 chars
 	}
+	profileGuard := envGuardFor("AWS_PROFILE")
+	if profileGuard == nil {
+		t.Fatal("AWS_PROFILE carries no sysession value guard; the credential_process injection gate is unwired")
+	}
 	for _, v := range valid {
-		if !isSafeProfileValue(v) {
-			t.Errorf("isSafeProfileValue(%q) = false, want true", v)
+		if err := profileGuard(v); err != nil {
+			t.Errorf("profile guard(%q) = %v, want nil", v, err)
 		}
 	}
 
@@ -305,8 +311,8 @@ func TestIsSafeProfileValue(t *testing.T) {
 		strings.Repeat("a", 65), // too long
 	}
 	for _, v := range invalid {
-		if isSafeProfileValue(v) {
-			t.Errorf("isSafeProfileValue(%q) = true, want false", v)
+		if err := profileGuard(v); err == nil {
+			t.Errorf("profile guard(%q) = nil, want an error", v)
 		}
 	}
 }
@@ -386,8 +392,8 @@ func TestFilterEnv_DropsSecretsByDefault(t *testing.T) {
 
 // TestFilterEnv_AWSDefaultProfileValidation verifies that AWS_DEFAULT_PROFILE
 // obeys the same profile-name validation as AWS_PROFILE — the fix for
-// R20260603040203-CODE-001 which added it to envAlwaysPassthrough so the
-// envProfileKeys gate can actually fire for it.
+// R20260603040203-CODE-001 which added it to the sysession passthrough set so
+// the profile-name gate can actually fire for it.
 func TestFilterEnv_AWSDefaultProfileValidation(t *testing.T) {
 	t.Run("safe AWS_DEFAULT_PROFILE passes", func(t *testing.T) {
 		t.Setenv("AWS_DEFAULT_PROFILE", "my-bedrock-profile")
@@ -421,7 +427,7 @@ func TestFilterEnv_PassesAWSDefaultProfile(t *testing.T) {
 	t.Setenv("AWS_DEFAULT_PROFILE", "default")
 	got := filterEnv(nil)
 	if !envContains(got, "AWS_DEFAULT_PROFILE", "default") {
-		t.Errorf("AWS_DEFAULT_PROFILE=default must pass through envAlwaysPassthrough")
+		t.Errorf("AWS_DEFAULT_PROFILE=default must pass the sysession env gate")
 	}
 }
 
@@ -436,9 +442,13 @@ func TestValidateBaseURLValue(t *testing.T) {
 		"http://127.0.0.1:9000",
 		"http://[::1]:8080",
 	}
+	baseURLGuard := envGuardFor("ANTHROPIC_BASE_URL")
+	if baseURLGuard == nil {
+		t.Fatal("ANTHROPIC_BASE_URL carries no sysession value guard; the SSRF gate is unwired")
+	}
 	for _, v := range ok {
-		if err := validateBaseURLValue(v); err != nil {
-			t.Errorf("validateBaseURLValue(%q) = %v, want nil", v, err)
+		if err := baseURLGuard(v); err != nil {
+			t.Errorf("base-URL guard(%q) = %v, want nil", v, err)
 		}
 	}
 	bad := []string{
@@ -449,8 +459,8 @@ func TestValidateBaseURLValue(t *testing.T) {
 		"file:///etc/passwd",                       // disallowed scheme
 	}
 	for _, v := range bad {
-		if err := validateBaseURLValue(v); err == nil {
-			t.Errorf("validateBaseURLValue(%q) = nil, want error", v)
+		if err := baseURLGuard(v); err == nil {
+			t.Errorf("base-URL guard(%q) = nil, want an error", v)
 		}
 	}
 }
@@ -458,7 +468,7 @@ func TestValidateBaseURLValue(t *testing.T) {
 // TestFilterEnv_BaseURLSSRFGuard is the R090031-SEC-1 (#1687) gate: a base-URL
 // env var inherited from a tampered parent process must NOT pass through to the
 // Runner subprocess when it points at a plaintext-http non-loopback host (e.g.
-// IMDS), even though the key is in envAlwaysPassthrough. A safe https value for
+// IMDS), even though the key passes the sysession env gate. A safe https value for
 // the same key still flows through.
 func TestFilterEnv_BaseURLSSRFGuard(t *testing.T) {
 	for _, key := range []string{
@@ -492,7 +502,7 @@ func TestFilterEnv_BaseURLSSRFGuard(t *testing.T) {
 
 // TestFilterEnv_BaseURLGuardNotBypassedByPrefixAllowlist ensures a broad
 // "ANTHROPIC_" prefix allowlist cannot re-admit a tampered base-URL value:
-// envAlwaysPassthrough is consulted (and the guard applied) before the prefix
+// the sysession column is consulted (and the guard applied) before the prefix
 // branch. R090031-SEC-1 (#1687).
 func TestFilterEnv_BaseURLGuardNotBypassedByPrefixAllowlist(t *testing.T) {
 	t.Setenv("ANTHROPIC_BASE_URL", "http://169.254.169.254/")
@@ -502,45 +512,56 @@ func TestFilterEnv_BaseURLGuardNotBypassedByPrefixAllowlist(t *testing.T) {
 	}
 }
 
-// TestFilterEnv_BaseURLRejectionLogSanitized pins R202606d-SEC-7: when a
-// base-URL env var is rejected the warning log MUST sanitize the offending
-// value (via osutil.SanitizeForLog) before recording it, matching the AWS
-// profile rejection branch. A raw value could embed credentials, control
-// characters (log injection), or be arbitrarily long — none of which may
-// reach the log sink verbatim.
-func TestFilterEnv_BaseURLRejectionLogSanitized(t *testing.T) {
+// TestFilterEnv_BaseURLRejectionIsReportedWithoutTheValue carries R202606d-SEC-7
+// forward. The rule then was "if the rejection log records the offending value,
+// it MUST go through osutil.SanitizeForLog first" — a raw value can embed
+// credentials, control characters (log injection) or be arbitrarily long. The
+// rejection is now a spawn diag and the value is not recorded at all, which is
+// the same rule at its limit. What still needs pinning is the guard ERROR:
+// url.Parse quotes its whole input, so an unsanitized error text would smuggle
+// the value back in.
+func TestFilterEnv_BaseURLRejectionIsReportedWithoutTheValue(t *testing.T) {
 	// Control characters + an over-long tail. Use an http (plaintext) scheme
-	// pointed at a non-loopback host so validateBaseURLValue rejects it and we
-	// hit the warning branch.
+	// pointed at a non-loopback host so the base-URL guard rejects it.
 	injected := "http://internal-host\r\nFORGED=evil/" + strings.Repeat("x", 400)
 	t.Setenv("ANTHROPIC_BASE_URL", injected)
 
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	defer slog.SetDefault(prev)
+	var mu sync.Mutex
+	var got []spawndiag.Diag
+	restore := spawndiag.Observe(func(_ string, d spawndiag.Diag) {
+		mu.Lock()
+		got = append(got, d)
+		mu.Unlock()
+	})
+	defer restore()
 
-	got := filterEnv(nil)
-	if envHasKey(got, "ANTHROPIC_BASE_URL") {
+	if envHasKey(filterEnv(nil), "ANTHROPIC_BASE_URL") {
 		t.Fatal("rejected base-URL value must not pass through")
 	}
 
-	logged := buf.String()
-	if !strings.Contains(logged, "base-URL env var rejected") {
-		t.Fatalf("expected rejection warning, got: %q", logged)
+	mu.Lock()
+	defer mu.Unlock()
+	var d spawndiag.Diag
+	for _, c := range got {
+		if c.Key == "ANTHROPIC_BASE_URL" {
+			d = c
+		}
 	}
-	// Isolate the value= attribute (the field the fix sanitizes). The err=
-	// attribute legitimately echoes the parse error and is out of scope here.
-	wantVal := osutil.SanitizeForLog(injected, 128)
-	if !strings.Contains(logged, "value="+strconv.Quote(wantVal)) {
-		t.Errorf("value attr not sanitized via SanitizeForLog(_, 128); got log: %q\nwant value=%q", logged, wantVal)
+	if d.Key == "" {
+		t.Fatalf("rejection was not reported; diags seen: %+v", got)
 	}
-	// Defense-in-depth: the sanitized value must carry no raw CR/LF (the
-	// log-injection vector) and must be clipped to the 128-byte cap.
-	if strings.ContainsAny(wantVal, "\r\n") {
-		t.Errorf("sanitized value still contains raw CR/LF: %q", wantVal)
+	if d.Layer != "env-filter" || d.Action != "dropped" {
+		t.Errorf("diag = layer %q action %q, want env-filter/dropped", d.Layer, d.Action)
 	}
-	if len(wantVal) > 128 {
-		t.Errorf("sanitized value exceeds 128-byte cap: len=%d", len(wantVal))
+	// The value must not ride in, whole or in a long tail.
+	if strings.Contains(d.Reason, "FORGED") || strings.Contains(d.Reason, strings.Repeat("x", 40)) {
+		t.Errorf("reason echoes the offending value: %q", d.Reason)
+	}
+	// No raw CR/LF (the log-injection vector) and bounded length.
+	if strings.ContainsAny(d.Reason, "\r\n") {
+		t.Errorf("reason carries raw CR/LF: %q", d.Reason)
+	}
+	if len(d.Reason) > 200 {
+		t.Errorf("reason is %d bytes; a guard error must be capped", len(d.Reason))
 	}
 }

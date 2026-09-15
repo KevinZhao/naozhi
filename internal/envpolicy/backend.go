@@ -2,27 +2,37 @@ package envpolicy
 
 import "strings"
 
-// Per-backend raw-credential key sets. Only the detected backend's set passes
+// Per-backend raw-credential key sets, derived from the Table's Cred marks so
+// "which key is which backend's credential" is stated once, on the row that also
+// carries that key's per-source verdicts. Only the detected backend's set passes
 // through; every other backend's secrets are stripped even if present in the
 // parent env, shrinking the blast radius of an inherited runner env (#1400).
 var (
 	// envCredsAnthropic — direct-Anthropic API auth.
-	envCredsAnthropic = []string{
-		"ANTHROPIC_API_KEY",
-		"ANTHROPIC_AUTH_TOKEN",
-	}
+	envCredsAnthropic = credKeys(credAnthropic)
 	// envCredsAWS — Bedrock static creds (empty on EC2 instance-role
 	// deployments where IMDS supplies creds inside the SDK).
-	envCredsAWS = []string{
-		"AWS_ACCESS_KEY_ID",
-		"AWS_SECRET_ACCESS_KEY",
-		"AWS_SESSION_TOKEN",
-	}
+	envCredsAWS = credKeys(credAWS)
 	// envCredsVertex — GCP service-account credential file path.
-	envCredsVertex = []string{
-		"GOOGLE_APPLICATION_CREDENTIALS",
-	}
+	envCredsVertex = credKeys(credVertex)
 )
+
+// credKeys collects the exact-match Table patterns marked with class, in Table
+// order. A wildcard pattern would make "the key set" unenumerable, so it is a
+// programming error here rather than a silently skipped row.
+func credKeys(class credClass) []string {
+	var out []string
+	for _, r := range Table {
+		if r.Cred != class {
+			continue
+		}
+		if strings.ContainsRune(r.Pattern, '*') {
+			panic("envpolicy: credential rule " + r.Pattern + " must be an exact key")
+		}
+		out = append(out, r.Pattern)
+	}
+	return out
+}
 
 // BackendMode is the credential-gating dimension derived from CLAUDE_CODE_USE_*.
 type BackendMode int

@@ -138,8 +138,10 @@ func filterClaudeEnv(in map[string]string) map[string]string {
 		// (#1576, #1660).
 		if guard := envpolicy.GuardFor(k, envpolicy.SourceSettings); guard != nil {
 			if err := guard(v); err != nil {
+				// GuardErrorReason drops the copy of the value that url.Parse
+				// errors quote, and bounds the result.
 				spawndiag.One(claudeSettingsScope, layerEnvFilter, k, "dropped",
-					fmt.Sprintf("value fails its guard: %v", err))
+					"value fails its guard: "+envpolicy.GuardErrorReason(err))
 				continue
 			}
 		}

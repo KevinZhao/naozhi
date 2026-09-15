@@ -38,6 +38,15 @@ const (
 	// SourceExpansion — ${VAR} interpolation in config.yaml
 	// (internal/config expandEnvVars). Matching is case-insensitive.
 	SourceExpansion
+	// SourceSysession — env a sysession Runner's transient `claude -p` gets
+	// (internal/sysession filterEnv). Its own trust domain: Runner passes
+	// `--setting-sources ""`, so settings.json never loads and the backend
+	// selectors / endpoints / model pins have to arrive through this env or the
+	// CLI falls back to direct-Anthropic OAuth and dies every Tick. Raw
+	// credentials are deliberately NOT allowed here — EnvCredsForBackend gates
+	// them per detected backend so a sibling backend's secret never reaches
+	// prompt-driven Bash.
+	SourceSysession
 )
 
 // guardKind labels the value-validation family a per-source guard belongs to,
@@ -67,6 +76,21 @@ type guard struct {
 	check func(value string) error
 }
 
+// credClass marks a row as one backend's RAW credential. It is a different
+// dimension from the Source columns: a credential's verdict depends on which
+// backend the parent env selected, not on which pipeline is asking, so
+// EnvCredsForBackend answers that and derives its sets from these marks. The
+// key-level columns still decide separately — every cred key is denied for
+// SourceSysession, because the per-backend gate is the only way in.
+type credClass uint8
+
+const (
+	credNone credClass = iota
+	credAnthropic
+	credAWS
+	credVertex
+)
+
 // Rule is one row of the policy table.
 //
 // Pattern is an exact key, "PREFIX_*" (name prefix) or "*_SUFFIX" (name
@@ -74,12 +98,14 @@ type guard struct {
 // subset of those that may set/expand the key (Allowed ⊆ Specified — a
 // matching rule with the bit in Specified but not in Allowed is an explicit
 // deny). Guards holds optional per-source value checks applied after the
-// key-level allow.
+// key-level allow. Cred, when set, marks the key as that backend's raw
+// credential (see credClass).
 type Rule struct {
 	Pattern   string
 	Specified Source
 	Allowed   Source
 	Guards    map[Source]guard
+	Cred      credClass
 }
 
 // Guard bundles for reuse across rules.
@@ -102,10 +128,10 @@ var (
 // in table_test.go pin every cell against copies of the retired lists.
 var Table = []Rule{
 	// ── system essentials (shim-forwarded plumbing) ────────────────────────
-	{Pattern: "HOME", Specified: SourceShim, Allowed: SourceShim},
+	{Pattern: "HOME", Specified: SourceShim | SourceSysession, Allowed: SourceShim | SourceSysession},
 	{Pattern: "USER", Specified: SourceShim, Allowed: SourceShim},
 	{Pattern: "LOGNAME", Specified: SourceShim, Allowed: SourceShim},
-	{Pattern: "PATH", Specified: SourceShim, Allowed: SourceShim},
+	{Pattern: "PATH", Specified: SourceShim | SourceSysession, Allowed: SourceShim | SourceSysession},
 	{Pattern: "SHELL", Specified: SourceShim, Allowed: SourceShim},
 	{Pattern: "TERM", Specified: SourceShim, Allowed: SourceShim},
 	{Pattern: "TMPDIR", Specified: SourceShim, Allowed: SourceShim},
@@ -123,38 +149,43 @@ var Table = []Rule{
 	// naozhi parent process, not CLI children).
 	{Pattern: "ANTHROPIC_*", Specified: SourceSettings | SourceExpansion, Allowed: SourceSettings},
 	{Pattern: "CLAUDE_*", Specified: SourceSettings | SourceExpansion, Allowed: SourceSettings},
-	{Pattern: "ANTHROPIC_API_KEY", Specified: SourceShim | SourceOverlay, Allowed: SourceShim | SourceOverlay},
-	{Pattern: "ANTHROPIC_AUTH_TOKEN", Specified: SourceShim | SourceOverlay, Allowed: SourceShim | SourceOverlay},
+	{Pattern: "ANTHROPIC_API_KEY", Specified: SourceShim | SourceOverlay | SourceSysession, Allowed: SourceShim | SourceOverlay, Cred: credAnthropic},
+	{Pattern: "ANTHROPIC_AUTH_TOKEN", Specified: SourceShim | SourceOverlay | SourceSysession, Allowed: SourceShim | SourceOverlay, Cred: credAnthropic},
 	{Pattern: "CLAUDE_CODE_OAUTH_TOKEN", Specified: SourceShim | SourceOverlay, Allowed: SourceShim | SourceOverlay},
-	{Pattern: "ANTHROPIC_MODEL", Specified: SourceShim | SourceOverlay, Allowed: SourceShim | SourceOverlay},
+	{Pattern: "ANTHROPIC_MODEL", Specified: SourceShim | SourceOverlay | SourceSysession, Allowed: SourceShim | SourceOverlay | SourceSysession},
 	{
 		Pattern:   "ANTHROPIC_BASE_URL",
-		Specified: SourceShim | SourceOverlay | SourceSettings,
-		Allowed:   SourceShim | SourceOverlay | SourceSettings,
+		Specified: SourceShim | SourceOverlay | SourceSettings | SourceSysession,
+		Allowed:   SourceShim | SourceOverlay | SourceSettings | SourceSysession,
 		Guards: map[Source]guard{
-			SourceShim:     shimEndpointGuard,
-			SourceOverlay:  baseURLGuard,
-			SourceSettings: baseURLGuard,
+			SourceShim:      shimEndpointGuard,
+			SourceOverlay:   baseURLGuard,
+			SourceSettings:  baseURLGuard,
+			SourceSysession: baseURLGuard,
 		},
 	},
 	{
 		Pattern:   "ANTHROPIC_BEDROCK_BASE_URL",
-		Specified: SourceShim | SourceOverlay | SourceSettings,
-		Allowed:   SourceShim | SourceOverlay | SourceSettings,
+		Specified: SourceShim | SourceOverlay | SourceSettings | SourceSysession,
+		Allowed:   SourceShim | SourceOverlay | SourceSettings | SourceSysession,
 		Guards: map[Source]guard{
-			SourceShim:     shimEndpointGuard,
-			SourceOverlay:  baseURLGuard,
-			SourceSettings: baseURLGuard,
+			SourceShim:      shimEndpointGuard,
+			SourceOverlay:   baseURLGuard,
+			SourceSettings:  baseURLGuard,
+			SourceSysession: baseURLGuard,
 		},
 	},
 	{
 		Pattern:   "ANTHROPIC_VERTEX_BASE_URL",
-		Specified: SourceSettings,
-		Allowed:   SourceSettings,
-		Guards:    map[Source]guard{SourceSettings: baseURLGuard},
+		Specified: SourceSettings | SourceSysession,
+		Allowed:   SourceSettings | SourceSysession,
+		Guards: map[Source]guard{
+			SourceSettings:  baseURLGuard,
+			SourceSysession: baseURLGuard,
+		},
 	},
-	{Pattern: "CLAUDE_CODE_USE_BEDROCK", Specified: SourceShim | SourceOverlay, Allowed: SourceShim | SourceOverlay},
-	{Pattern: "CLAUDE_CODE_SKIP_BEDROCK_AUTH", Specified: SourceShim | SourceOverlay, Allowed: SourceShim | SourceOverlay},
+	{Pattern: "CLAUDE_CODE_USE_BEDROCK", Specified: SourceShim | SourceOverlay | SourceSysession, Allowed: SourceShim | SourceOverlay | SourceSysession},
+	{Pattern: "CLAUDE_CODE_SKIP_BEDROCK_AUTH", Specified: SourceShim | SourceOverlay | SourceSysession, Allowed: SourceShim | SourceOverlay | SourceSysession},
 	{Pattern: "CLAUDE_BIN", Specified: SourceShim, Allowed: SourceShim},
 	{Pattern: "CLAUDE_MODEL", Specified: SourceShim, Allowed: SourceShim},
 	// CLI kill-switch / mock-mode keys inside the settings-allowed CLAUDE_
@@ -183,6 +214,25 @@ var Table = []Rule{
 		Guards:    map[Source]guard{SourceOverlay: credPathGuard},
 	},
 
+	// GOOGLE_APPLICATION_CREDENTIALS is Vertex's raw credential: denied at the
+	// key level for sysession (the per-backend gate is the only way in) and
+	// never expanded (the GOOGLE_* deny below covers config.yaml).
+	{Pattern: "GOOGLE_APPLICATION_CREDENTIALS", Specified: SourceSysession, Allowed: 0, Cred: credVertex},
+
+	// ── sysession Runner plumbing (Vertex selectors + model pins) ──────────
+	// Runner spawns `claude -p` with `--setting-sources ""`, so these have to
+	// arrive through the inherited env; no other pipeline forwards them.
+	// CLAUDE_CODE_USE_VERTEX sits inside the settings-allowed CLAUDE_ namespace
+	// and this exact rule does not claim SourceSettings, so that namespace
+	// verdict is untouched.
+	{Pattern: "CLAUDE_CODE_USE_VERTEX", Specified: SourceSysession, Allowed: SourceSysession},
+	{Pattern: "ANTHROPIC_VERTEX_PROJECT_ID", Specified: SourceSysession, Allowed: SourceSysession},
+	{Pattern: "CLOUD_ML_REGION", Specified: SourceSysession, Allowed: SourceSysession},
+	{Pattern: "ANTHROPIC_SMALL_FAST_MODEL", Specified: SourceSysession, Allowed: SourceSysession},
+	{Pattern: "ANTHROPIC_DEFAULT_HAIKU_MODEL", Specified: SourceSysession, Allowed: SourceSysession},
+	{Pattern: "ANTHROPIC_DEFAULT_SONNET_MODEL", Specified: SourceSysession, Allowed: SourceSysession},
+	{Pattern: "ANTHROPIC_DEFAULT_OPUS_MODEL", Specified: SourceSysession, Allowed: SourceSysession},
+
 	// ── AWS (Bedrock auth) ─────────────────────────────────────────────────
 	// settings.json gets the namespace minus the keys that would change
 	// naozhi's own AWS auth source (role switching, credential-file
@@ -191,37 +241,43 @@ var Table = []Rule{
 	{Pattern: "AWS_*", Specified: SourceSettings | SourceExpansion, Allowed: SourceSettings},
 	{
 		Pattern:   "AWS_REGION",
-		Specified: SourceShim | SourceOverlay,
-		Allowed:   SourceShim | SourceOverlay,
+		Specified: SourceShim | SourceOverlay | SourceSysession,
+		Allowed:   SourceShim | SourceOverlay | SourceSysession,
 		Guards:    map[Source]guard{SourceOverlay: regionGuard},
 	},
 	{
 		Pattern:   "AWS_DEFAULT_REGION",
-		Specified: SourceShim | SourceOverlay,
-		Allowed:   SourceShim | SourceOverlay,
+		Specified: SourceShim | SourceOverlay | SourceSysession,
+		Allowed:   SourceShim | SourceOverlay | SourceSysession,
 		Guards:    map[Source]guard{SourceOverlay: regionGuard},
 	},
-	{Pattern: "AWS_ACCESS_KEY_ID", Specified: SourceShim, Allowed: SourceShim},
-	{Pattern: "AWS_SECRET_ACCESS_KEY", Specified: SourceShim, Allowed: SourceShim},
-	{Pattern: "AWS_SESSION_TOKEN", Specified: SourceShim, Allowed: SourceShim},
+	{Pattern: "AWS_ACCESS_KEY_ID", Specified: SourceShim | SourceSysession, Allowed: SourceShim, Cred: credAWS},
+	{Pattern: "AWS_SECRET_ACCESS_KEY", Specified: SourceShim | SourceSysession, Allowed: SourceShim, Cred: credAWS},
+	{Pattern: "AWS_SESSION_TOKEN", Specified: SourceShim | SourceSysession, Allowed: SourceShim, Cred: credAWS},
 	// AWS_PROFILE: the one key with three different answers by design. The
 	// shim forwards it (profile-name charset guard) because Bedrock auth may
 	// need a named profile; settings.json and overlays must not repoint
 	// naozhi's credential source (2026-07-19 incident).
 	{
 		Pattern:   "AWS_PROFILE",
-		Specified: SourceShim | SourceSettings,
-		Allowed:   SourceShim,
-		Guards:    map[Source]guard{SourceShim: profileGuard},
+		Specified: SourceShim | SourceSettings | SourceSysession,
+		Allowed:   SourceShim | SourceSysession,
+		Guards: map[Source]guard{
+			SourceShim:      profileGuard,
+			SourceSysession: profileGuard,
+		},
 	},
 	// AWS_DEFAULT_PROFILE is not forwarded by the shim (it never made the
-	// allowlist); the profile guard is still attached so the defensive
-	// validator keeps covering it.
+	// allowlist) but IS passed to sysession Runners; the shim-side profile
+	// guard stays attached so the defensive validator keeps covering it.
 	{
 		Pattern:   "AWS_DEFAULT_PROFILE",
-		Specified: SourceShim | SourceSettings,
-		Allowed:   0,
-		Guards:    map[Source]guard{SourceShim: profileGuard},
+		Specified: SourceShim | SourceSettings | SourceSysession,
+		Allowed:   SourceSysession,
+		Guards: map[Source]guard{
+			SourceShim:      profileGuard,
+			SourceSysession: profileGuard,
+		},
 	},
 	{
 		Pattern:   "AWS_SHARED_CREDENTIALS_FILE",
