@@ -97,41 +97,54 @@ test.describe('leaked tool-call fold', () => {
   test('折叠出来的是收起的 details，prose 在外、XML 在内', async ({ browser }) => {
     const { page, cleanup } = await openSession(browser);
     try {
-    const leak = SAMPLES.find(s => s.leak && s.text.includes('先读取它的完整范围'));
-    expect(leak, 'the prose+leak sample must exist in samples.json').toBeTruthy();
+      const leak = SAMPLES.find(s => s.leak && s.text.includes('先读取它的完整范围'));
+      expect(leak, 'the prose+leak sample must exist in samples.json').toBeTruthy();
 
-    await page.evaluate((detail) => {
-      (/** @type {any} */ (window)).appendEvents([{
-        type: 'text', detail, time: Date.now() + 99000, uuid: 'leak-shape',
-      }]);
-    }, leak.text);
+      // Everything is read inside the same evaluate as the append, on purpose.
+      // A client-only bubble lives until the next 1 s poll repaints
+      // #events-scroll from the server, and asserting through Playwright
+      // locators afterwards leaves a window for exactly that: this test passed
+      // locally and failed in CI on `data-uuid="leak-shape"` resolving to 0
+      // elements, because the repaint landed between the append and the check.
+      const seen = await page.evaluate((detail) => {
+        const w = /** @type {any} */ (window);
+        w.appendEvents([{ type: 'text', detail, time: Date.now() + 99000, uuid: 'leak-shape' }]);
+        const bubbles = document.querySelectorAll('#events-scroll .event');
+        const el = bubbles[bubbles.length - 1];
+        if (!el) return { found: false };
+        const details = el.querySelectorAll('details');
+        const body = el.querySelector('.leaked-toolcall-body');
+        const summary = el.querySelector('.leaked-toolcall-summary');
+        return {
+          found: true,
+          text: el.textContent || '',
+          detailsCount: details.length,
+          open: details.length === 1 ? details[0].open : null,
+          summaryCount: summary ? 1 : 0,
+          bodyCount: body ? 1 : 0,
+          bodyText: body ? (body.textContent || '') : '',
+          liveElements: body ? body.querySelectorAll('invoke, script, img').length : -1,
+          summaryDisplay: summary ? getComputedStyle(summary).display : '',
+          xss: w.__snapXSS,
+        };
+      }, leak.text);
 
-    const bubble = page.locator('#events-scroll .event[data-uuid="leak-shape"]');
-    await expect(bubble).toHaveCount(1);
-
-    // The prose survives outside the fold — that is the point of folding rather
-    // than dropping.
-    await expect(bubble).toContainText('先读取它的完整范围');
-
-    const details = bubble.locator('details');
-    await expect(details).toHaveCount(1);
-    // Collapsed: the XML must not be on screen until the user asks for it.
-    expect(await details.evaluate(el => /** @type {HTMLDetailsElement} */ (el).open)).toBe(false);
-    await expect(bubble.locator('.leaked-toolcall-summary')).toHaveCount(1);
-
-    const body = bubble.locator('.leaked-toolcall-body');
-    await expect(body).toHaveCount(1);
-    // The payload is inside the fold, and it is text — not a live element.
-    await expect(body).toContainText('invoke name="Read"');
-    await expect(body.locator('invoke')).toHaveCount(0);
-
-    // The fold is styled: an unstyled <details> would be a wall of XML with a
-    // triangle, which is the regression the CSS classes existed to prevent.
-    const styled = await bubble.locator('.leaked-toolcall-summary').evaluate(el => {
-      const cs = getComputedStyle(el);
-      return { cursor: cs.cursor, display: cs.display };
-    });
-    expect(styled.display).not.toBe('inline');
+      expect(seen.found, 'the appended bubble did not render at all').toBe(true);
+      // The prose survives outside the fold — that is the point of folding
+      // rather than dropping.
+      expect(seen.text).toContain('先读取它的完整范围');
+      expect(seen.detailsCount, 'the leak must be folded into exactly one <details>').toBe(1);
+      // Collapsed: the XML must not be on screen until the user asks for it.
+      expect(seen.open).toBe(false);
+      expect(seen.summaryCount).toBe(1);
+      expect(seen.bodyCount).toBe(1);
+      // The payload is inside the fold, and it is text — not live elements.
+      expect(seen.bodyText).toContain('invoke name="Read"');
+      expect(seen.liveElements, 'the folded payload built DOM instead of staying text').toBe(0);
+      expect(seen.xss, 'the folded payload executed').toBeUndefined();
+      // The fold is styled: an unstyled <details> would be a wall of XML with a
+      // triangle, which is the regression the CSS classes existed to prevent.
+      expect(seen.summaryDisplay).not.toBe('inline');
     } finally {
       await cleanup();
     }
