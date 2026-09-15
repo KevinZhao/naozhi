@@ -21,6 +21,14 @@ import (
 	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/naozhisettings"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/spawndiag"
+)
+
+// A settings.json env key the table refuses is configured input that did not
+// take effect: the operator wrote it expecting the CLI to see it.
+const (
+	claudeSettingsScope = "claude-settings"
+	layerEnvFilter      = "env-filter"
 )
 
 // settingsErrSeverity classifies applyClaudeEnvSettings failures for main():
@@ -96,8 +104,9 @@ func readJSONWithRetryFn(ctx context.Context, path string, attempts int, sleep t
 // allows for SourceSettings (Claude/AWS/proxy plumbing minus the
 // auth-source-changing and kill-switch keys) and whose value passes both the
 // generic checks (no NUL/newline, ≤4096 bytes) and the key's per-source guard
-// (https-for-non-loopback for base URLs and proxies). Rejected keys are
-// logged at WARN; keys outside the allowed namespaces are skipped silently.
+// (https-for-non-loopback for base URLs and proxies). Rejected keys are reported
+// as env-filter spawn diags; keys outside the allowed namespaces are skipped
+// silently.
 // cc children do not go through this path (they read settings.json directly),
 // so the parent-env view may intentionally differ from cc's (RFC §7.1).
 func filterClaudeEnv(in map[string]string) map[string]string {
@@ -109,18 +118,19 @@ func filterClaudeEnv(in map[string]string) map[string]string {
 			// warning — the operator put it in settings.json expecting effect;
 			// a key outside the allowed namespaces is everyday noise.
 			if rule.Pattern != "" {
+				reason := "CLAUDE_ kill-switch var is not propagated to the parent env"
 				if strings.HasPrefix(k, "AWS_") {
-					slog.Warn("claude settings env: refusing to propagate auth-source AWS var", "key", k)
-				} else {
-					slog.Warn("claude settings env: refusing to propagate CLAUDE_ kill-switch var", "key", k)
+					reason = "auth-source AWS var is not propagated to the parent env"
 				}
+				spawndiag.One(claudeSettingsScope, layerEnvFilter, k, "dropped", reason)
 			}
 			continue
 		}
 		// Children inherit the env via execve; NUL/newline or huge values must
 		// not reach it.
 		if strings.ContainsAny(v, "\x00\n\r") || len(v) > 4096 {
-			slog.Warn("claude settings env: rejecting unsafe value", "key", k, "len", len(v))
+			spawndiag.One(claudeSettingsScope, layerEnvFilter, k, "dropped",
+				fmt.Sprintf("value is unsafe for execve (len %d, or contains NUL/newline)", len(v)))
 			continue
 		}
 		// Base URLs and proxies steer API / outbound traffic; a tampered file
@@ -128,7 +138,8 @@ func filterClaudeEnv(in map[string]string) map[string]string {
 		// (#1576, #1660).
 		if guard := envpolicy.GuardFor(k, envpolicy.SourceSettings); guard != nil {
 			if err := guard(v); err != nil {
-				slog.Warn("claude settings env: rejecting unsafe base_url", "key", k, "err", err)
+				spawndiag.One(claudeSettingsScope, layerEnvFilter, k, "dropped",
+					fmt.Sprintf("value fails its guard: %v", err))
 				continue
 			}
 		}

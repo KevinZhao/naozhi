@@ -66,8 +66,8 @@ func TestShimCredPathEnvDropped(t *testing.T) {
 		{"HOME=/home/user", false},
 	}
 	for _, tc := range cases {
-		if got := shimCredPathEnvDropped(tc.entry); got != tc.wantDropped {
-			t.Errorf("shimCredPathEnvDropped(%q) = %v, want %v", tc.entry, got, tc.wantDropped)
+		if got := shimCredPathEnvDropped(tc.entry); (got != "") != tc.wantDropped {
+			t.Errorf("shimCredPathEnvDropped(%q) = %q, want dropped=%v", tc.entry, got, tc.wantDropped)
 		}
 	}
 }

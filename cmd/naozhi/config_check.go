@@ -87,7 +87,16 @@ func configCheck(args []string, stdout io.Writer) int {
 	}
 	result.Diags = append(result.Diags, sysessionBackendDiags(cfg)...)
 
-	filteredEnv := envpolicy.FilterShimEnv(os.Environ())
+	// The shim env gate is a spawn gate like the argv one: a var the operator
+	// exported that will not reach the CLI belongs in this report, not only in
+	// the server's log at spawn time.
+	environ := os.Environ()
+	filteredEnv := envpolicy.FilterShimEnv(environ)
+	for _, d := range envpolicy.ShimEnvDrops(environ) {
+		result.Diags = append(result.Diags, backendDiag{SpawnDiag: cli.SpawnDiag{
+			Layer: "env-filter", Key: d.Key, Action: "dropped", Reason: d.Reason,
+		}})
+	}
 	for _, b := range cfg.EnabledBackends() {
 		id := b.ID
 		profile, ok := backend.Get(id)

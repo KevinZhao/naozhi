@@ -12,7 +12,6 @@ package envpolicy
 
 import (
 	"fmt"
-	"log/slog"
 	"net/url"
 	"path/filepath"
 	"sort"
@@ -20,65 +19,102 @@ import (
 	"sync/atomic"
 )
 
+// Drop is one entry the shim filter refused for a GATE reason: the operator set
+// it and it will not reach the child. A key the Table simply does not forward is
+// not a Drop — that is everyday noise, not a rejection of configured input.
+// Callers report Drops through internal/spawndiag; this package stays a leaf
+// (TestPackageIsLeaf) so the classifier has no side channel of its own.
+type Drop struct {
+	// Key is the variable name, or a 64-byte key prefix when the entry was too
+	// large to trust. The value is never included: it may be a secret.
+	Key string
+	// Reason is one human-readable sentence, safe to log.
+	Reason string
+}
+
 // maxShimEnvEntryBytes caps a single forwarded env entry. Legitimate allowlisted
 // values are well under 4 KiB; a pathological one only inflates the child env
 // and slog attrs, so reject and log instead.
 const maxShimEnvEntryBytes = 4 * 1024
 
-// maxShimEnvOversizeWarnings caps oversized-entry warnings per process
-// lifetime. A counter (not sync.Once) so one benign oversized entry cannot
-// mask a later attacker-injected one while log volume stays bounded.
-const maxShimEnvOversizeWarnings = 5
+// maxShimEnvOversizeReports caps oversized-entry reports per process lifetime.
+// A counter (not sync.Once) so one benign oversized entry cannot mask a later
+// attacker-injected one while log volume stays bounded.
+const maxShimEnvOversizeReports = 5
 
-// filterShimEnvOversizeWarnings counts emitted oversized-entry warnings;
-// entries are always rejected, only the logging is capped.
-var filterShimEnvOversizeWarnings atomic.Int64
+// shimEnvOversizeReports counts reported oversized entries; entries are always
+// rejected, only the reporting is capped.
+var shimEnvOversizeReports atomic.Int64
 
 // FilterShimEnv returns a copy of environ keeping only variables whose key
 // the Table allows for SourceShim (defense-in-depth against `env` via the
-// Bash tool). Oversized entries are rejected and logged by key prefix only.
+// Bash tool) and whose value passes the key's guard. Pure: what it refused is
+// reported by ShimEnvDrops, which walks the same verdict.
 func FilterShimEnv(environ []string) []string {
 	filtered := make([]string, 0, len(environ)/2)
 	for _, kv := range environ {
-		if len(kv) > maxShimEnvEntryBytes {
-			// Key prefix only — never the value (may be a secret). Logging is
-			// capped at maxShimEnvOversizeWarnings; rejection is not.
-			if n := filterShimEnvOversizeWarnings.Add(1); n <= maxShimEnvOversizeWarnings {
-				msg := "shim env: oversized entry rejected"
-				if n == maxShimEnvOversizeWarnings {
-					msg = "shim env: oversized entry rejected (further oversized warnings suppressed)"
-				}
-				slog.Warn(msg,
-					"key_prefix", kvKeyPrefix(kv),
-					"len", len(kv),
-					"max", maxShimEnvEntryBytes)
-			}
-			continue
+		if keep, _ := shimEnvVerdict(kv); keep {
+			filtered = append(filtered, kv)
 		}
-		if !shimKeyAllowed(kv) {
-			continue
-		}
-		// Endpoint vars steer where the CLI (Bash + raw network) sends API
-		// traffic; a poisoned rc pointing one at an attacker host or IMDS over
-		// plain http would silently redirect/harvest. https for non-loopback (#1576).
-		if shimEndpointEnvDropped(kv) {
-			continue
-		}
-		// AWS_PROFILE / AWS_DEFAULT_PROFILE select a profile that may declare a
-		// credential_process the SDK executes; restrict to ^[A-Za-z0-9_-]{1,64}$
-		// (mirrors sysession/env.go isSafeProfileValue). Key logged, never value.
-		if shimProfileEnvDropped(kv) {
-			continue
-		}
-		// AWS_*_FILE vars name files the SDK opens in the CLI subprocess; a
-		// value like /proc/self/environ or ../ traversal would ship arbitrary
-		// host files to STS. Require an absolute, traversal-free, null-free path.
-		if shimCredPathEnvDropped(kv) {
-			continue
-		}
-		filtered = append(filtered, kv)
 	}
 	return filtered
+}
+
+// ShimEnvDrops reports the gate rejections FilterShimEnv makes for environ.
+// Oversized entries are reported at most maxShimEnvOversizeReports times per
+// process: an env carrying many distinct oversized keys would otherwise be a
+// log-flooding amplifier. Rejection itself is never capped.
+func ShimEnvDrops(environ []string) []Drop {
+	var drops []Drop
+	for _, kv := range environ {
+		keep, reason := shimEnvVerdict(kv)
+		if keep || reason == "" {
+			continue
+		}
+		if len(kv) > maxShimEnvEntryBytes {
+			n := shimEnvOversizeReports.Add(1)
+			if n > maxShimEnvOversizeReports {
+				continue
+			}
+			if n == maxShimEnvOversizeReports {
+				reason += " (further oversized reports suppressed)"
+			}
+		}
+		drops = append(drops, Drop{Key: kvKeyPrefix(kv), Reason: reason})
+	}
+	return drops
+}
+
+// shimEnvVerdict classifies one "KEY=value" entry: the single place the shim
+// env decision is made, so the filter and its diagnostics cannot disagree (the
+// rule extraArgsOverCap follows on the argv side). keep=false with an empty
+// reason is the silent case — a key the shim column does not carry.
+func shimEnvVerdict(kv string) (keep bool, reason string) {
+	if len(kv) > maxShimEnvEntryBytes {
+		return false, fmt.Sprintf("entry is %d bytes, over the %d-byte shim env cap", len(kv), maxShimEnvEntryBytes)
+	}
+	if !shimKeyAllowed(kv) {
+		return false, ""
+	}
+	// Endpoint vars steer where the CLI (Bash + raw network) sends API
+	// traffic; a poisoned rc pointing one at an attacker host or IMDS over
+	// plain http would silently redirect/harvest. https for non-loopback (#1576).
+	if reason := shimEndpointEnvDropped(kv); reason != "" {
+		return false, reason
+	}
+	// AWS_PROFILE / AWS_DEFAULT_PROFILE select a profile that may declare a
+	// credential_process the SDK executes; restrict to ^[A-Za-z0-9_-]{1,64}$
+	// (mirrors sysession/env.go isSafeProfileValue).
+	if reason := shimProfileEnvDropped(kv); reason != "" {
+		return false, reason
+	}
+	// AWS_*_FILE vars name files the SDK opens in the CLI subprocess; a
+	// value like /proc/self/environ or ../ traversal would ship arbitrary
+	// host files to STS. Require an absolute, traversal-free, null-free path.
+	if reason := shimCredPathEnvDropped(kv); reason != "" {
+		return false, reason
+	}
+	return true, ""
 }
 
 // shimKeyAllowed reports whether the Table's shim column forwards kv. An
@@ -116,6 +152,24 @@ func MergeShimEnv(baseline []string, overlay map[string]string) []string {
 	if len(overlay) == 0 {
 		return baseline
 	}
+	// Re-gate: overlay values face the identical allowlist + guards. Zero bypass.
+	return FilterShimEnv(mergeShimEnvRaw(baseline, overlay))
+}
+
+// MergeShimEnvDrops reports the gate rejections MergeShimEnv makes — in
+// practice the overlay entries, since the baseline was already filtered. Same
+// merge, same verdict; the two cannot disagree.
+func MergeShimEnvDrops(baseline []string, overlay map[string]string) []Drop {
+	if len(overlay) == 0 {
+		return nil
+	}
+	return ShimEnvDrops(mergeShimEnvRaw(baseline, overlay))
+}
+
+// mergeShimEnvRaw layers overlay onto baseline WITHOUT the re-gate: the shared
+// half of MergeShimEnv and MergeShimEnvDrops. Never returned to a caller
+// directly — an unfiltered env must not reach a subprocess.
+func mergeShimEnvRaw(baseline []string, overlay map[string]string) []string {
 	merged := make([]string, 0, len(baseline)+len(overlay))
 	usedOverlay := make(map[string]bool, len(overlay))
 	for _, kv := range baseline {
@@ -142,47 +196,44 @@ func MergeShimEnv(baseline []string, overlay map[string]string) []string {
 	for _, k := range extra {
 		merged = append(merged, k+"="+overlay[k])
 	}
-	// Re-gate: overlay values face the identical allowlist + guards. Zero bypass.
-	return FilterShimEnv(merged)
+	return merged
 }
 
-// shimProfileEnvDropped reports whether kv ("KEY=value") is an AWS profile-name
-// var whose value falls outside ^[A-Za-z0-9_-]{1,64}$ and must be dropped.
-// Non-profile keys return false. The value is never logged.
-func shimProfileEnvDropped(kv string) bool {
+// shimProfileEnvDropped returns why kv ("KEY=value") must be dropped when it is
+// an AWS profile-name var whose value falls outside ^[A-Za-z0-9_-]{1,64}$.
+// Non-profile keys and safe values return "". The value is never echoed.
+func shimProfileEnvDropped(kv string) (reason string) {
 	i := strings.IndexByte(kv, '=')
 	if i < 0 {
-		return false
+		return ""
 	}
 	key, val := kv[:i], kv[i+1:]
 	if guardKindFor(key, SourceShim) != guardProfile {
-		return false
+		return ""
 	}
 	if !IsSafeProfileValue(val) {
-		slog.Warn("shim env: rejecting unsafe AWS profile value (credential_process injection guard)", "key", key)
-		return true
+		return "AWS profile value is unsafe (credential_process injection guard)"
 	}
-	return false
+	return ""
 }
 
-// shimCredPathEnvDropped reports whether kv ("KEY=value") is an AWS
-// credential-file path var whose value is not absolute, traversal-free and
-// null-free, and must be dropped. Non-path keys and safe values return false.
-// The value is never logged.
-func shimCredPathEnvDropped(kv string) bool {
+// shimCredPathEnvDropped returns why kv ("KEY=value") must be dropped when it
+// is an AWS credential-file path var whose value is not absolute, traversal-free
+// and null-free. Non-path keys and safe values return "". The value is never
+// echoed.
+func shimCredPathEnvDropped(kv string) (reason string) {
 	i := strings.IndexByte(kv, '=')
 	if i < 0 {
-		return false
+		return ""
 	}
 	key, val := kv[:i], kv[i+1:]
 	if guardKindFor(key, SourceShim) != guardCredPath {
-		return false
+		return ""
 	}
 	if !isSafeCredFilePath(val) {
-		slog.Warn("shim env: rejecting unsafe AWS credential file path (path traversal guard)", "key", key)
-		return true
+		return "AWS credential file path is not absolute and traversal-free (path traversal guard)"
 	}
-	return false
+	return ""
 }
 
 // isSafeCredFilePath reports whether v is a safe absolute credential file
@@ -209,27 +260,27 @@ func isSafeCredFilePath(v string) bool {
 	return true
 }
 
-// shimEndpointEnvDropped reports whether kv ("KEY=value") is an endpoint URL
+// shimEndpointEnvDropped returns why kv ("KEY=value") must be dropped when it
+// is an endpoint URL
 // var whose value targets a plain-http non-loopback host (or an internal IP)
-// and must be dropped. Non-endpoint keys and safe URLs return false. The value
-// is never logged (#1576).
-func shimEndpointEnvDropped(kv string) bool {
+// and must be dropped. Non-endpoint keys and safe URLs return "". The value is
+// never echoed (#1576).
+func shimEndpointEnvDropped(kv string) (reason string) {
 	i := strings.IndexByte(kv, '=')
 	if i < 0 {
-		return false
+		return ""
 	}
 	key, val := kv[:i], kv[i+1:]
 	if guardKindFor(key, SourceShim) != guardShimEndpoint {
-		return false
+		return ""
 	}
 	if val == "" {
-		return false
+		return ""
 	}
 	if err := validateShimEndpointURL(val); err != nil {
-		slog.Warn("shim env: rejecting unsafe endpoint base_url", "key", key, "err", err)
-		return true
+		return fmt.Sprintf("endpoint base_url is unsafe: %v", err)
 	}
-	return false
+	return ""
 }
 
 // validateShimEndpointURL enforces https:// unless the host is loopback

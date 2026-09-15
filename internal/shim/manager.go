@@ -25,6 +25,7 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // shimReadyMsg carries the result of the shim's ready-line scan back to
@@ -206,10 +207,38 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		maxShims:           cfg.MaxShims,
 		stateDirQuotaBytes: cfg.StateDirQuotaBytes,
 		naozhiBin:          naozhiBin,
-		shimEnv:            envpolicy.FilterShimEnv(os.Environ()),
+		shimEnv:            baselineShimEnv(),
 		shims:              make(map[string]*ShimHandle),
 		reconnectKM:        make(map[string]*sync.Mutex),
 	}, nil
+}
+
+// baselineShimEnv is the process env as the shim column allows it, reporting
+// what the gate refused. Entries an operator exported expecting effect (an
+// unsafe AWS_PROFILE, an http endpoint, an oversized value) reach metrics and
+// `naozhi config check` this way instead of a bare log line.
+func baselineShimEnv() []string {
+	env := os.Environ()
+	emitEnvDrops(shimEnvScope, envpolicy.ShimEnvDrops(env))
+	return envpolicy.FilterShimEnv(env)
+}
+
+// shimEnvScope groups the process-baseline env drops for dedup. Per-spawn
+// overlay drops use the session key instead.
+const shimEnvScope = "shim-env"
+
+// emitEnvDrops reports env-filter rejections as spawn diags.
+func emitEnvDrops(scope string, drops []envpolicy.Drop) {
+	if len(drops) == 0 {
+		return
+	}
+	diags := make([]spawndiag.Diag, 0, len(drops))
+	for _, d := range drops {
+		diags = append(diags, spawndiag.Diag{
+			Layer: "env-filter", Key: d.Key, Action: "dropped", Reason: d.Reason,
+		})
+	}
+	spawndiag.Emit(scope, diags)
 }
 
 // checkStateDirQuota returns ErrStateDirQuotaExceeded when StateDirSize(stateDir)
@@ -396,7 +425,11 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	cmd := exec.Command(m.naozhiBin, args...)
 	setSetsid(cmd)
 	// Per-spawn overlay re-gated by envpolicy.FilterShimEnv (see MergeShimEnv).
+	// An overlay entry the gate refuses is an access profile that did not take
+	// effect, so it is reported under this session's scope alongside the argv
+	// gate's diags rather than dropped in silence.
 	cmd.Env = envpolicy.MergeShimEnv(m.shimEnv, envOverlay)
+	emitEnvDrops(key, envpolicy.MergeShimEnvDrops(m.shimEnv, envOverlay))
 
 	// Remove a stale socket left by a previous shim — but only after verifying
 	// nothing is listening: unlinking a live socket turns the peer shim into an

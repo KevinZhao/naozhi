@@ -50,9 +50,11 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 		},
 		{
 			// #2532: every spawn-gate rejection goes through the single
-			// emitter; RecordSpawnDiag must only fire there (dedup-gated).
-			name:    "RecordSpawnDiag fires only in the EmitSpawnDiags emitter",
-			path:    "../cli/spawn_diag.go",
+			// emitter; RecordSpawnDiag must only fire there (dedup-gated). The
+			// emitter lives in internal/spawndiag so envpolicy — a dependency
+			// of cli — can report through it too.
+			name:    "RecordSpawnDiag fires only in the spawndiag emitter",
+			path:    "../spawndiag/spawndiag.go",
 			pattern: `metrics\.RecordSpawnDiag\(`,
 		},
 		{
