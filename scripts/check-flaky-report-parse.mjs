@@ -35,15 +35,17 @@ const pwRe = literal(/clean\.matchAll\((\/✘.+?\/g)\)/, "Playwright's ✘ match
 // broken original and this check would pass on it.
 const durTrim = literal(/m\[2\]\.replace\((\/.+?\/)/, "Playwright's trailing-duration trim");
 
-// names() drives the workflow's own two loops over one job log.
+// names() drives the workflow's own two loops over one job log, deduping by
+// name exactly as the reporter's Map does — a name that appears twice must file
+// one issue, not two.
 function names(log) {
   const clean = log.replace(ansi, '');
-  const out = [];
-  for (const m of clean.matchAll(goRe)) out.push(m[1]);
+  const out = new Set();
+  for (const m of clean.matchAll(goRe)) out.add(m[1]);
   for (const m of clean.matchAll(pwRe)) {
-    out.push(m[1] + ' › ' + m[2].replace(durTrim, '').trim());
+    out.add(m[1] + ' › ' + m[2].replace(durTrim, '').trim());
   }
-  return out;
+  return [...out];
 }
 
 const ESC = '\u001b';
@@ -80,6 +82,18 @@ const cases = [
     what: 'a passing run files nothing',
     log: '  ✓  44 [desktop-chrome] › dashboard.test.js:667:3 › a spec (1.0s)\n  314 passed (41.9s)\n',
     want: [],
+  },
+  {
+    // Run 34957007026: the runner logs the step's script before running it, so
+    // both shapes appear twice — once quoted as source, once as output. Each
+    // pair has to normalise to one name or the reporter files two issues for
+    // one test (it filed the spurious #2723 before the quote was handled).
+    what: 'the runner echoing the step script must not double-file',
+    log: `${ESC}[36;1mecho "  ✘  1 [desktop-chrome] › probe_synthetic.test.js:1:1 › flaky probe synthetic spec (0.1s)"${ESC}[0m\n`
+      + '  ✘  1 [desktop-chrome] › probe_synthetic.test.js:1:1 › flaky probe synthetic spec (0.1s)\n'
+      + `${ESC}[36;1mecho "--- FAIL: TestFlakyProbeSynthetic (0.00s)"${ESC}[0m\n`
+      + '--- FAIL: TestFlakyProbeSynthetic (0.00s)\n',
+    want: ['TestFlakyProbeSynthetic', 'probe_synthetic.test.js › flaky probe synthetic spec'],
   },
   {
     what: 'the probe-fail job (both shapes in one dispatch)',
