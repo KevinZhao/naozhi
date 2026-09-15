@@ -585,7 +585,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		}
 		if state.SessionID != "" {
 			r.kid.Track(state.SessionID)
-			r.ss.idToKey[state.SessionID] = state.Key
+			r.setSessionIDIndex(state.SessionID, state.Key)
 		}
 		if !sess.exempt {
 			r.ss.activeCount.Add(1)

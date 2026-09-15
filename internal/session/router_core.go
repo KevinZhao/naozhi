@@ -444,6 +444,40 @@ func (r *Router) indexAdd(key string) {
 	set[key] = struct{}{}
 }
 
+// setSessionIDIndex points sessionID at key. The session ID arrives from the CLI
+// after the spawn, so this is the "learned later" index and every path that hears
+// an ID — first report, resume registration, discovery, shim state after a
+// restart, rename — funnels through here. No-op when the index is nil (test
+// routers). Must be called under r.mu.
+func (r *Router) setSessionIDIndex(sessionID, key string) {
+	if r.ss.idToKey == nil || sessionID == "" {
+		return
+	}
+	r.ss.idToKey[sessionID] = key
+}
+
+// clearSessionIDIndex drops sessionID's mapping. Must be called under r.mu.
+func (r *Router) clearSessionIDIndex(sessionID string) {
+	if r.ss.idToKey == nil {
+		return
+	}
+	delete(r.ss.idToKey, sessionID)
+}
+
+// clearSessionIDIndexIfOwnedBy drops sessionID's mapping only when it still
+// points at key. An ID rotation re-points the index at the same key, but a key
+// that was reused by an unrelated session must not have its mapping deleted by
+// the previous owner's cleanup (#2093 is the same hazard read from the other
+// side). Must be called under r.mu.
+func (r *Router) clearSessionIDIndexIfOwnedBy(sessionID, key string) {
+	if r.ss.idToKey == nil {
+		return
+	}
+	if mapped, ok := r.ss.idToKey[sessionID]; ok && mapped == key {
+		delete(r.ss.idToKey, sessionID)
+	}
+}
+
 // indexDel removes key from the chat→sessions index. No-op when index is nil.
 // Must be called under r.mu.
 func (r *Router) indexDel(key string) {
@@ -863,9 +897,7 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 	// update so the triple-index invariant is a property of the publish step.
 	r.publishSessionLocked(key, s, false)
 	r.kid.Track(entry.SessionID)
-	if entry.SessionID != "" {
-		r.ss.idToKey[entry.SessionID] = key
-	}
+	r.setSessionIDIndex(entry.SessionID, key)
 }
 
 // startBackgroundLifecycle launches the background side effects of

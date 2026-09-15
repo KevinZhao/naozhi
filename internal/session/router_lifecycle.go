@@ -188,7 +188,7 @@ func (r *Router) resetSessionLocked(key string, toClose *[]processIface, closedA
 		}
 	}
 	if id := s.getSessionID(); id != "" {
-		delete(r.ss.idToKey, id)
+		r.clearSessionIDIndex(id)
 	}
 	delete(r.ss.sessions, key)
 	// Drop the keyhash → key fast-path entry; equality-guarded so a rename
@@ -895,9 +895,7 @@ func (r *Router) installFreshSessionLocked(
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.kid.Track(id)
-			if id != "" {
-				r.ss.idToKey[id] = key
-			}
+			r.setSessionIDIndex(id, key)
 			r.mu.Unlock()
 		},
 	}
@@ -957,13 +955,11 @@ func (r *Router) installFreshSessionLocked(
 	// the "still maps to key" guard avoids clobbering another live session's
 	// entry (#2093).
 	if oldSID != "" && oldSID != effectiveSID {
-		if mapped, ok := r.ss.idToKey[oldSID]; ok && mapped == key {
-			delete(r.ss.idToKey, oldSID)
-		}
+		r.clearSessionIDIndexIfOwnedBy(oldSID, key)
 	}
 	if effectiveSID != "" {
 		r.kid.Track(effectiveSID)
-		r.ss.idToKey[effectiveSID] = key
+		r.setSessionIDIndex(effectiveSID, key)
 	}
 	s.touchLastActive()
 	r.publishSessionLocked(key, s, false)
@@ -1082,7 +1078,7 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 		return
 	}
 	if id := s.getSessionID(); id != "" {
-		delete(r.ss.idToKey, id)
+		r.clearSessionIDIndex(id)
 	}
 	r.indexDel(key)
 	delete(r.ss.sessions, key)
@@ -1331,9 +1327,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.kid.Track(id)
-			if id != "" {
-				r.ss.idToKey[id] = newKey
-			}
+			r.setSessionIDIndex(id, newKey)
 			r.mu.Unlock()
 		},
 	}
@@ -1395,9 +1389,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	r.publishSessionLocked(newKey, fresh, false)
 	delete(r.ss.sessions, oldKey)
 	r.indexDel(oldKey)
-	if id := fresh.getSessionID(); id != "" {
-		r.ss.idToKey[id] = newKey
-	}
+	r.setSessionIDIndex(fresh.getSessionID(), newKey)
 	r.picks.renameLocked(oldKey, newKey)
 	r.ss.dirty = true
 	r.ss.gen.Add(1)

@@ -254,7 +254,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 			}
 		}
 		// Stale or leaked index entry; clean up and continue.
-		delete(r.ss.idToKey, sessionID)
+		r.clearSessionIDIndex(sessionID)
 	}
 	s := &ManagedSession{
 		key:      key,
@@ -270,9 +270,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		storeAtomicString(&s.lastPrompt, lastPrompt)
 	}
 	r.kid.Track(sessionID)
-	if sessionID != "" {
-		r.ss.idToKey[sessionID] = key
-	}
+	r.setSessionIDIndex(sessionID, key)
 	s.lastActive.Store(time.Now().UnixNano())
 	s.initCreatedAtIfUnset()
 	r.publishSessionLocked(key, s, false)

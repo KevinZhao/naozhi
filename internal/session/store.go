@@ -557,7 +557,9 @@ type sessionStore struct {
 	// against r.ss.sessions and re-populating via a one-off scan. Nil in tests.
 	keyhash map[string]string
 	// idToKey: session ID → session key, for O(1) RegisterForResume dedupe.
-	// Maintained under r.mu by setSessionIDIndex/clearSessionIDIndex.
+	// Maintained under r.mu by setSessionIDIndex / clearSessionIDIndex /
+	// clearSessionIDIndexIfOwnedBy — the funnel this comment named for a while
+	// before it existed. index_invariants_test.go checks both directions.
 	idToKey map[string]string
 	// activeCount counts alive non-exempt processes. Writes happen under r.mu;
 	// atomic so Stats() reads lock-free on the dashboard /api/sessions hot path.
