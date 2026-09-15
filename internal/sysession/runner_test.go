@@ -79,21 +79,6 @@ func TestNewRunner_BinPathValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("unresolved_relative_passes", func(t *testing.T) {
-		t.Parallel()
-		// Stub osStat so resolveBinPathFromEnv finds nothing in PATH and
-		// cfg.BinPath stays as a relative literal — the IsAbs guard then
-		// skips the validation block, matching the documented "degrade
-		// gracefully" path.
-		prev := osStat
-		osStat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
-		t.Cleanup(func() { osStat = prev })
-
-		_, err := NewRunner(RunnerConfig{BinPath: "claude-not-installed", WorkDir: work})
-		if err != nil {
-			t.Fatalf("relative BinPath should still construct (lazy resolve), got %v", err)
-		}
-	})
 }
 
 // failingWriter returns errors on every Write call. Models a strings.Builder
@@ -101,6 +86,33 @@ func TestNewRunner_BinPathValidation(t *testing.T) {
 // other inner sink that has fully failed.
 type failingWriter struct {
 	calls int
+}
+
+// TestNewRunner_UnresolvedRelativeBinPassesLazily is the fifth case of
+// TestNewRunner_BinPathValidation, extracted because it swaps the package-level
+// osStat: with t.Parallel() it raced every concurrent NewRunner in the package
+// (resolveBinPathFromEnv reads osStat), which reddened a dozen unrelated tests
+// with "race detected during execution of test" about one run in five.
+// Sequential on purpose — see the note on osStat.
+func TestNewRunner_UnresolvedRelativeBinPassesLazily(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatalf("mkdir work: %v", err)
+	}
+
+	// Stub osStat so resolveBinPathFromEnv finds nothing in PATH and
+	// cfg.BinPath stays as a relative literal — the IsAbs guard then
+	// skips the validation block, matching the documented "degrade
+	// gracefully" path.
+	prev := osStat
+	osStat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	t.Cleanup(func() { osStat = prev })
+
+	_, err := NewRunner(RunnerConfig{BinPath: "claude-not-installed", WorkDir: work})
+	if err != nil {
+		t.Fatalf("relative BinPath should still construct (lazy resolve), got %v", err)
+	}
 }
 
 func (f *failingWriter) Write(p []byte) (int, error) {
