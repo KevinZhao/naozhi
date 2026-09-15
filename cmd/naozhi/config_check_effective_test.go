@@ -178,3 +178,65 @@ access_profiles:
 		t.Errorf("the fatal must name the refused key and the allowlist:\n%s", out.String())
 	}
 }
+
+// The summary line is the only place a reader learns what a diag COSTS. Every
+// one of them is a runtime warning, not a refusal: naozhi boots and the gate
+// drops the value. Saying only "would not take effect" left the reader to guess
+// whether the config was broken or merely ineffective.
+func TestConfigCheck_SummaryNamesTheRuntimeSemantics(t *testing.T) {
+	cfg := cleanCheckConfig + `
+cli:
+  backends:
+    - id: claude
+      path: /usr/bin/true
+      args: ["--effort", "high"]
+`
+	var out bytes.Buffer
+	code := configCheck([]string{"-config", writeCheckConfig(t, cfg)}, &out)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; output:\n%s", code, out.String())
+	}
+	s := out.String()
+	for _, want := range []string{"would still start", "warns once", "drops the value"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("summary must say %q so a reader knows this is a warning, not a refusal:\n%s", want, s)
+		}
+	}
+	// A fatal config must NOT get that sentence — it really does stop the boot.
+	var out2 bytes.Buffer
+	configCheck([]string{"-config", writeCheckConfig(t, "cli:\n  args: [\"--model\", \"\"]\n")}, &out2)
+	if strings.Contains(out2.String(), "would still start") {
+		t.Errorf("a fatal must not claim naozhi would start:\n%s", out2.String())
+	}
+}
+
+// Human output has to carry the two dimensions the JSON gained, or `--effective`
+// without -json still hides the agent argv and the profile env.
+func TestConfigCheckEffective_HumanOutputShowsAgentsAndProfiles(t *testing.T) {
+	cfg := cleanCheckConfig + `
+cli:
+  path: /usr/bin/true
+agents:
+  reviewer:
+    system_prompt: "You review code."
+access_profiles:
+  prod:
+    env:
+      AWS_REGION: "us-west-2"
+`
+	var out bytes.Buffer
+	configCheck([]string{"-config", writeCheckConfig(t, cfg), "-effective"}, &out)
+	s := out.String()
+	if !strings.Contains(s, "argv for agent reviewer") {
+		t.Errorf("human output must show the agent argv block:\n%s", s)
+	}
+	if !strings.Contains(s, "--append-system-prompt") {
+		t.Errorf("agent block must carry the prompt flag:\n%s", s)
+	}
+	if !strings.Contains(s, "env with access profile prod") {
+		t.Errorf("human output must show the profile env block:\n%s", s)
+	}
+	if !strings.Contains(s, "AWS_REGION=us-west-2") {
+		t.Errorf("profile block must show the overlay value:\n%s", s)
+	}
+}

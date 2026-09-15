@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -274,7 +275,12 @@ func emitCheckResult(w io.Writer, r checkResult, asJSON bool) {
 	case len(r.Fatal) > 0:
 		fmt.Fprintln(w, "config check: FATAL — naozhi would refuse to start")
 	case len(r.Diags) > 0:
-		fmt.Fprintf(w, "config check: %d configured input(s) would not take effect\n", len(r.Diags))
+		// The distinction matters: none of these stop a boot. At runtime the
+		// gates warn once and drop the value, which is how a stripped --effort
+		// survived three months (#2412) — the exit code and this line are the
+		// only things that make it loud.
+		fmt.Fprintf(w, "config check: %d configured input(s) would not take effect "+
+			"(naozhi would still start; each gate warns once at runtime and drops the value)\n", len(r.Diags))
 	default:
 		fmt.Fprintln(w, "config check: OK")
 	}
@@ -283,11 +289,34 @@ func emitCheckResult(w io.Writer, r checkResult, asJSON bool) {
 		for _, a := range eff.Argv {
 			fmt.Fprintf(w, "  %s\n", a)
 		}
+		for _, agentID := range sortedKeys(eff.Agents) {
+			fmt.Fprintf(w, "backend %s argv for agent %s:\n", id, agentID)
+			for _, a := range eff.Agents[agentID] {
+				fmt.Fprintf(w, "  %s\n", a)
+			}
+		}
 		fmt.Fprintf(w, "backend %s env (shim-filtered, masked):\n", id)
 		for _, kv := range eff.Env {
 			fmt.Fprintf(w, "  %s\n", kv)
 		}
+		for _, apID := range sortedKeys(eff.Profiles) {
+			fmt.Fprintf(w, "backend %s env with access profile %s (masked):\n", id, apID)
+			for _, kv := range eff.Profiles[apID] {
+				fmt.Fprintf(w, "  %s\n", kv)
+			}
+		}
 	}
+}
+
+// sortedKeys keeps the human output stable across runs; map iteration order
+// would otherwise reshuffle the agent and profile blocks on every invocation.
+func sortedKeys(m map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // sysessionBackendDiags reports a default backend the sysession runner cannot
