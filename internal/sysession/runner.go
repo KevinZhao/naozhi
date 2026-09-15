@@ -14,7 +14,9 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// osStat lets unit tests stub the PATH walk in resolveBinPathFromEnv.
+// osStat lets unit tests stub the PATH walk in resolveBinPathFromEnv. Mutable
+// package state with no lock: a test that swaps or reads it MUST NOT call
+// t.Parallel(), or it races every concurrent NewRunner in the package.
 var osStat = os.Stat
 
 // Runner is the LLM-call abstraction used by all daemons. Each Run execs
