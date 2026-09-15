@@ -1,40 +1,22 @@
 package envpolicy
 
 import (
-	"context"
-	"log/slog"
 	"strings"
-	"sync/atomic"
 	"testing"
 )
 
-// countingHandler is a minimal slog.Handler that counts emitted records.
-type countingHandler struct {
-	n atomic.Int64
-}
-
-func (h *countingHandler) Enabled(context.Context, slog.Level) bool  { return true }
-func (h *countingHandler) Handle(context.Context, slog.Record) error { h.n.Add(1); return nil }
-func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler        { return h }
-func (h *countingHandler) WithGroup(string) slog.Handler             { return h }
-
-// TestFilterShimEnv_OversizeWarningCap pins [R20260603-SEC-5]: when many
-// oversized env entries are present, the warning log is capped at
-// maxShimEnvOversizeWarnings (5) rather than emitting exactly one (the old
-// sync.Once behavior that let a benign oversized entry mask later
-// attacker-injected ones). All oversized entries are still dropped.
+// TestShimEnvDrops_OversizeReportCap pins [R20260603-SEC-5]: when many oversized
+// env entries are present, the REPORT is capped at maxShimEnvOversizeReports (5)
+// rather than emitting exactly one (the old sync.Once behavior that let a benign
+// oversized entry mask later attacker-injected ones). Every oversized entry is
+// still dropped — the cap is on reporting, never on rejection.
 //
-// Not parallel: it swaps the process-global slog default and resets the
-// process-global oversize counter, both shared with other tests.
-func TestFilterShimEnv_OversizeWarningCap(t *testing.T) {
+// Not parallel: it resets the process-global oversize counter, shared with other
+// tests.
+func TestShimEnvDrops_OversizeReportCap(t *testing.T) {
 	// Reset the shared counter so this test sees a clean budget regardless of
 	// other tests that may have incremented it earlier in the run.
-	filterShimEnvOversizeWarnings.Store(0)
-
-	prev := slog.Default()
-	h := &countingHandler{}
-	slog.SetDefault(slog.New(h))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	shimEnvOversizeReports.Store(0)
 
 	big := strings.Repeat("x", maxShimEnvEntryBytes+1)
 	const oversizedCount = 12
@@ -44,14 +26,24 @@ func TestFilterShimEnv_OversizeWarningCap(t *testing.T) {
 		input = append(input, "BIG_VAR="+big) // oversized — must be dropped
 	}
 
-	got := FilterShimEnv(input)
-
 	// Only the benign HOME entry survives; every oversized entry is dropped.
-	if len(got) != 1 || got[0] != "HOME=/home/user" {
+	if got := FilterShimEnv(input); len(got) != 1 || got[0] != "HOME=/home/user" {
 		t.Fatalf("expected only HOME to survive, got %v", got)
 	}
 
-	if n := h.n.Load(); n != maxShimEnvOversizeWarnings {
-		t.Fatalf("expected %d oversize warnings (capped), got %d", maxShimEnvOversizeWarnings, n)
+	drops := ShimEnvDrops(input)
+	if len(drops) != maxShimEnvOversizeReports {
+		t.Fatalf("expected %d oversize reports (capped), got %d", maxShimEnvOversizeReports, len(drops))
+	}
+	// The last one inside the budget says so, so an operator reading the log
+	// knows more were dropped than reported.
+	if last := drops[len(drops)-1].Reason; !strings.Contains(last, "further oversized reports suppressed") {
+		t.Errorf("the report at the cap must announce the suppression, got %q", last)
+	}
+	// Key prefix only: the value may be a secret.
+	for _, d := range drops {
+		if strings.Contains(d.Reason, "xxxx") || strings.Contains(d.Key, "xxxx") {
+			t.Errorf("oversize report leaked the value: %+v", d)
+		}
 	}
 }

@@ -2,9 +2,9 @@ package config
 
 import (
 	"fmt"
-	"log/slog"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -61,14 +61,19 @@ func liftLegacySystemPromptArgs(cfg *Config) error {
 		field := fmt.Sprintf("agents[%s]", id)
 		if lifted == "" {
 			// Bare trailing flag: nothing to lift, but drop the dangling token.
-			slog.Warn("config: dropped bare "+legacySystemPromptFlag+" with no value",
-				"field", field+".args")
+			cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
+				Layer: "config-deprecated", Key: field + ".args", Action: "dropped",
+				Reason: "bare " + legacySystemPromptFlag + " with no value; the dangling token is removed",
+			}})
 		} else if ac.SystemPrompt != "" {
 			return fmt.Errorf("%s: both system_prompt and %s in args are set; remove the args entry (system_prompt is the supported field)",
 				field, legacySystemPromptFlag)
 		} else {
-			slog.Warn("config: "+legacySystemPromptFlag+" under args is not applied at spawn (denied flag); lifted into system_prompt — please move it in config.yaml",
-				"field", field+".args", "target", field+".system_prompt", "bytes", len(lifted))
+			cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
+				Layer: "config-deprecated", Key: field + ".args", Action: "rewritten",
+				Reason: fmt.Sprintf("%s under args is denied at spawn; its %d bytes were lifted into %s.system_prompt — move it in config.yaml",
+					legacySystemPromptFlag, len(lifted), field),
+			}})
 		}
 		next := ac // copy; never mutate the map value in place
 		next.Args = kept

@@ -67,8 +67,8 @@ func TestShimProfileEnvDropped(t *testing.T) {
 		{"HOME=/home/user", false},
 	}
 	for _, tc := range cases {
-		if got := shimProfileEnvDropped(tc.entry); got != tc.wantDropped {
-			t.Errorf("shimProfileEnvDropped(%q) = %v, want %v", tc.entry, got, tc.wantDropped)
+		if got := shimProfileEnvDropped(tc.entry); (got != "") != tc.wantDropped {
+			t.Errorf("shimProfileEnvDropped(%q) = %q, want dropped=%v", tc.entry, got, tc.wantDropped)
 		}
 	}
 }

@@ -1,10 +1,6 @@
 package envpolicy
 
 import (
-	"context"
-	"log/slog"
-	"sync"
-	"sync/atomic"
 	"testing"
 )
 
@@ -81,77 +77,43 @@ func TestValidateShimEndpointURL(t *testing.T) {
 	}
 }
 
-// TestShimEndpointEnvDropped_EachRejectionLogged verifies R164029-GO-1: every
-// unsafe endpoint variable is logged individually. Previously a sync.Once
-// caused the second (and further) rejections to be silently swallowed, leaving
-// operators unable to discover that multiple env vars were contaminated.
-func TestShimEndpointEnvDropped_EachRejectionLogged(t *testing.T) {
-	// Install a temporary slog handler that counts Warn records keyed by the
-	// "key" attribute value. We replace the default logger for the duration
-	// of this test and restore it after.
-	var warnCount atomic.Int64
-	keys := make(map[string]int)
-	var mu sync.Mutex // protect keys map
+// TestShimEndpointEnvDropped_EachRejectionReported verifies R164029-GO-1: every
+// unsafe endpoint variable is reported individually. A sync.Once once caused the
+// second (and further) rejections to be silently swallowed, leaving operators
+// unable to discover that multiple env vars were contaminated. The report is now
+// a Drop the caller emits, so this asserts the drops rather than log records.
+func TestShimEndpointEnvDropped_EachRejectionReported(t *testing.T) {
+	t.Parallel()
 
-	handler := &countingWarnHandler{
-		onWarn: func(key string) {
-			mu.Lock()
-			keys[key]++
-			mu.Unlock()
-			warnCount.Add(1)
-		},
-	}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(handler))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	// Two unsafe entries; both must be dropped and each must emit its own Warn.
+	// Two unsafe entries; both must be dropped and each must be reported.
 	unsafe := []string{
 		"ANTHROPIC_BASE_URL=http://169.254.169.254",
 		"ANTHROPIC_BEDROCK_BASE_URL=http://evil.test",
 	}
 	for _, kv := range unsafe {
-		if !shimEndpointEnvDropped(kv) {
-			t.Errorf("shimEndpointEnvDropped(%q) = false, want true", kv)
+		if shimEndpointEnvDropped(kv) == "" {
+			t.Errorf("shimEndpointEnvDropped(%q) = %q, want a drop reason", kv, "")
 		}
 	}
 
-	if got := warnCount.Load(); got != 2 {
-		t.Errorf("expected 2 Warn log calls (one per rejection), got %d", got)
+	if kept := FilterShimEnv(unsafe); len(kept) != 0 {
+		t.Errorf("FilterShimEnv kept %v; every unsafe endpoint must be dropped", kept)
 	}
-	mu.Lock()
-	defer mu.Unlock()
+
+	drops := ShimEnvDrops(unsafe)
+	if len(drops) != len(unsafe) {
+		t.Fatalf("ShimEnvDrops reported %d drops, want one per contaminated var: %+v", len(drops), drops)
+	}
+	seen := map[string]int{}
+	for _, d := range drops {
+		seen[d.Key]++
+		if d.Reason == "" {
+			t.Errorf("drop for %q carries no reason", d.Key)
+		}
+	}
 	for _, k := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL"} {
-		if keys[k] != 1 {
-			t.Errorf("expected exactly 1 Warn for key %q, got %d", k, keys[k])
+		if seen[k] != 1 {
+			t.Errorf("expected exactly 1 drop for key %q, got %d", k, seen[k])
 		}
 	}
 }
-
-// countingWarnHandler is a minimal slog.Handler that invokes onWarn for every
-// Warn-level record, passing the value of the "key" attribute.
-type countingWarnHandler struct {
-	onWarn func(key string)
-}
-
-func (h *countingWarnHandler) Enabled(_ context.Context, level slog.Level) bool {
-	return level >= slog.LevelWarn
-}
-
-func (h *countingWarnHandler) Handle(_ context.Context, r slog.Record) error {
-	if r.Level == slog.LevelWarn {
-		var k string
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "key" {
-				k = a.Value.String()
-				return false
-			}
-			return true
-		})
-		h.onWarn(k)
-	}
-	return nil
-}
-
-func (h *countingWarnHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
-func (h *countingWarnHandler) WithGroup(_ string) slog.Handler      { return h }

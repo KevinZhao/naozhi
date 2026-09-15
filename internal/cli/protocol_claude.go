@@ -45,10 +45,32 @@ func stringToBytesUnsafe(s string) []byte {
 }
 
 // resumeIDRe accepts only characters that can legally appear in a Claude
-// session UUID (hex + hyphen). Defence-in-depth at the CLI argv boundary:
-// without it, a crafted resume_id beginning with `-` could be re-interpreted
-// by the Claude CLI as a flag.
+// session UUID (hex + hyphen) and bounds the length. Defence-in-depth at the
+// CLI argv boundary, not the first line of it: a hyphen is legal anywhere in
+// the pattern, so a value the CLI's parser could read as a flag is refused
+// upstream instead — the send path requires claudefs.IsValidSessionID (a
+// 36-char UUID) and resolveResumeID requires the session file to exist.
 var resumeIDRe = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
+
+// validResumeID, renderablePathValue and resumeIDPreview are shared by
+// ClaudeProtocol.BuildArgs and argvValidatorDiags so a drop and its diagnostic cannot
+// disagree — the same rule extraArgsOverCap follows.
+func validResumeID(id string) bool { return resumeIDRe.MatchString(id) }
+
+// renderablePathValue reports whether p may be rendered as a flag value: the
+// CLI runs with cmd.Dir = workspace, so a relative path writes into the
+// operator's project (#2133), and a leading '-' is an argv-injection vector.
+func renderablePathValue(p string) bool {
+	return !strings.HasPrefix(p, "-") && filepath.IsAbs(p)
+}
+
+// resumeIDPreview caps the echoed prefix of a rejected id at 16 bytes.
+func resumeIDPreview(id string) string {
+	if len(id) > 16 {
+		return id[:16]
+	}
+	return id
+}
 
 // ClaudeProtocol implements Protocol for Claude CLI's stream-json format.
 //
@@ -105,30 +127,19 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	if opts.Effort != "" {
 		args = append(args, "--effort", opts.Effort)
 	}
-	if opts.ResumeID != "" {
-		if resumeIDRe.MatchString(opts.ResumeID) {
-			args = append(args, "--resume", opts.ResumeID)
-		} else {
-			// Drop malformed IDs rather than erroring so a user-facing label
-			// still yields a fresh session, but Warn so argv-injection probes
-			// (ResumeID starting with `-`) leave an audit trail. Log only the
-			// length + a 16-rune prefix so the warning cannot be turned into
-			// a log-flooding amplifier.
-			preview := opts.ResumeID
-			if len(preview) > 16 {
-				preview = preview[:16]
-			}
-			slog.Warn("cli: --resume rejected by argv validator, spawning fresh session",
-				"len", len(opts.ResumeID),
-				"prefix", preview)
-		}
+	// A malformed id is dropped rather than erroring, so a user-facing label
+	// still yields a fresh session. The drop is reported by argvValidatorDiags —
+	// argv-injection probes (a ResumeID starting with `-`) still leave an audit
+	// trail, now one that also reaches metrics and the session snapshot.
+	if opts.ResumeID != "" && validResumeID(opts.ResumeID) {
+		args = append(args, "--resume", opts.ResumeID)
 	}
 	// Operator-opt-in CLI debug capture: the raw API request/response log is
 	// the only place Bedrock retry status codes (429 vs 5xx) are observable. No
 	// category filter is passed — it only scopes stderr, never the file. Reject
 	// a leading '-' (argv-injection guard) and require an ABSOLUTE path: the CLI
 	// runs with cmd.Dir = workspace, so a relative path leaks API keys there (#2133).
-	if opts.DebugFile != "" && !strings.HasPrefix(opts.DebugFile, "-") && filepath.IsAbs(opts.DebugFile) {
+	if opts.DebugFile != "" && renderablePathValue(opts.DebugFile) {
 		args = append(args, "--debug-file", opts.DebugFile)
 	}
 	// Operator-opt-in MCP server set (RFC cli-mcp-config). `--setting-sources ""`
@@ -136,7 +147,7 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	// injection point for such a spawn; independent of which settings branch ran
 	// so the two knobs compose. The flag stays in deniedExtraFlags — this field
 	// is the escape hatch. Same absolute-path + no-leading-dash guard as above.
-	if opts.MCPConfigFile != "" && !strings.HasPrefix(opts.MCPConfigFile, "-") && filepath.IsAbs(opts.MCPConfigFile) {
+	if opts.MCPConfigFile != "" && renderablePathValue(opts.MCPConfigFile) {
 		args = append(args, "--mcp-config", opts.MCPConfigFile)
 	}
 	// naozhi-owned system prompt (#2493). `--append-system-prompt` stays in
@@ -144,13 +155,10 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	// filter so the planner / scratch / agents[].system_prompt channels reach
 	// the CLI. Leading-dash, NUL and byte-cap checks (invalidAppendSystemPrompt);
 	// an invalid value is dropped whole and logged, never truncated.
-	if opts.AppendSystemPrompt != "" {
-		if reason := invalidAppendSystemPrompt(opts.AppendSystemPrompt); reason == "" {
-			args = append(args, "--append-system-prompt", opts.AppendSystemPrompt)
-		} else {
-			slog.Warn("cli: AppendSystemPrompt rejected by argv validator, spawning without it",
-				"reason", reason, "len", len(opts.AppendSystemPrompt))
-		}
+	// An invalid value is dropped whole, never truncated; argvValidatorDiags
+	// reports it with the reason.
+	if opts.AppendSystemPrompt != "" && invalidAppendSystemPrompt(opts.AppendSystemPrompt) == "" {
+		args = append(args, "--append-system-prompt", opts.AppendSystemPrompt)
 	}
 	args = append(args, capExtraArgsBytes(opts.ExtraArgs)...)
 	return args

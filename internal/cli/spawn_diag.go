@@ -1,88 +1,35 @@
 package cli
 
-// SpawnDiag makes gate rejections on the spawn pipeline observable. Every
-// layer that silently strips or ignores operator configuration (argv
-// denylist, capability gate, deprecated config fields) reports what it did as
-// a SpawnDiag instead of a one-off slog.Warn, so the rejection reaches
-// metrics, the session snapshot (/api/sessions spawn_diags) and the
-// dashboard — a flag being stripped for months with only a log line as
-// evidence (#2412, #2493) is the failure mode this exists to end.
+// The Diag type and the emit/observe machinery live in internal/spawndiag,
+// below this package, so internal/envpolicy — a dependency of cli — can report
+// its own drops. The names here are the historical ones every caller uses.
 
 import (
-	"log/slog"
+	"fmt"
 	"strings"
-	"sync"
-	"sync/atomic"
 
-	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // SpawnDiag is one gate decision that altered or ignored configured input.
-type SpawnDiag struct {
-	// Layer names the gate: "argv-denylist" | "caps" | "config-deprecated" |
-	// "config-unknown".
-	Layer string `json:"layer"`
-	// Key is the configured thing that did not take effect ("--effort",
-	// "session.workspace", "effort").
-	Key string `json:"key"`
-	// Action is what the gate did: "dropped" | "ignored".
-	Action string `json:"action"`
-	// Reason is one human-readable sentence.
-	Reason string `json:"reason"`
-}
+type SpawnDiag = spawndiag.Diag
 
-// spawnDiagSeen dedups emissions per scope+layer+key for the process
-// lifetime: the first occurrence logs at Warn, repeats (the 30s shim
-// reconcile heartbeat re-deriving argv, respawns of the same session) log at
-// Debug so the signal is not drowned by its own repetition. Metrics count
-// first occurrences only, so the counter reads "distinct ineffective configs
-// observed", not "heartbeat ticks".
-var spawnDiagSeen sync.Map
+// EmitSpawnDiags logs and counts diags under scope (the session key on spawn
+// paths, "config" for load-time diags).
+func EmitSpawnDiags(scope string, diags []SpawnDiag) { spawndiag.Emit(scope, diags) }
 
-// spawnDiagObserver, when non-nil, receives every emitted diag before the
-// dedup/log step (so an observer sees repeats too). `naozhi config check`
-// installs one to collect the diags config.Load emits.
-var spawnDiagObserver atomic.Pointer[func(scope string, d SpawnDiag)]
-
-// ObserveSpawnDiags installs fn as the process-wide diag observer and returns
-// a restore func. Single observer by design — the only consumer is the
-// one-shot config check command.
+// ObserveSpawnDiags installs fn as the process-wide diag observer and returns a
+// restore func.
 func ObserveSpawnDiags(fn func(scope string, d SpawnDiag)) (restore func()) {
-	spawnDiagObserver.Store(&fn)
-	return func() { spawnDiagObserver.Store(nil) }
+	return spawndiag.Observe(fn)
 }
 
-// EmitSpawnDiags logs and counts diags. scope groups the dedup — the session
-// key on spawn paths, "config" for load-time diags. The "config" scope skips
-// dedup entirely: config loading is one-shot per process, and every finding
-// there deserves its Warn (repeats only happen when a test re-runs the
-// loader).
-func EmitSpawnDiags(scope string, diags []SpawnDiag) {
-	for _, d := range diags {
-		if obs := spawnDiagObserver.Load(); obs != nil {
-			(*obs)(scope, d)
-		}
-		repeat := false
-		if scope != "config" {
-			dedupKey := scope + "\x00" + d.Layer + "\x00" + d.Key
-			_, repeat = spawnDiagSeen.LoadOrStore(dedupKey, struct{}{})
-		}
-		if !repeat {
-			metrics.RecordSpawnDiag(d.Layer, d.Action)
-			slog.Warn("spawn gate: configured input had no effect",
-				"layer", d.Layer, "key", d.Key, "action", d.Action, "reason", d.Reason, "scope", scope)
-			continue
-		}
-		slog.Debug("spawn gate: configured input had no effect (repeat)",
-			"layer", d.Layer, "key", d.Key, "action", d.Action, "scope", scope)
-	}
-}
-
-// SpawnDiagsFor derives the gate decisions BuildArgs will make for opts —
-// the argv-denylist strips (same predicate filterDeniedFlags applies) and
-// the capability gate ignoring an effort tier the backend cannot honour.
-// Pure: no logging, no metrics; callers pass the result to EmitSpawnDiags on
-// real spawn paths and to the session snapshot.
+// SpawnDiagsFor derives the gate decisions BuildArgs will make for opts — the
+// argv-denylist strips (same predicate filterDeniedFlags applies), the argv
+// validator refusing a malformed dedicated-field value, and the capability gate
+// ignoring an effort tier the backend cannot honour. Pure: no logging, no
+// metrics; callers pass the result to EmitSpawnDiags on real spawn paths and to
+// the session snapshot.
 func SpawnDiagsFor(opts SpawnOptions, caps Caps) []SpawnDiag {
 	var diags []SpawnDiag
 	if _, over := extraArgsOverCap(opts.ExtraArgs); over {
@@ -115,6 +62,7 @@ func SpawnDiagsFor(opts SpawnOptions, caps Caps) []SpawnDiag {
 			Reason: "flag is denied in ExtraArgs; wire it through its dedicated config field",
 		})
 	}
+	diags = append(diags, argvValidatorDiags(opts)...)
 	if opts.Effort != "" && !caps.EffortTier {
 		diags = append(diags, SpawnDiag{
 			Layer:  "caps",
@@ -122,6 +70,53 @@ func SpawnDiagsFor(opts SpawnOptions, caps Caps) []SpawnDiag {
 			Action: "ignored",
 			Reason: "backend does not support a thinking-effort tier",
 		})
+	}
+	return diags
+}
+
+// argvValidatorDiags reports the dedicated SpawnOptions fields
+// ClaudeProtocol.BuildArgs will refuse to render. Each case calls the same
+// predicate the builder does, so the drop and its diagnostic cannot disagree.
+// Values are never echoed: a
+// ResumeID is attacker-influenced, an AppendSystemPrompt can be long, and both
+// would turn a Reason into a log-flooding amplifier — the reasons carry a
+// length and a short prefix instead.
+func argvValidatorDiags(opts SpawnOptions) []SpawnDiag {
+	var diags []SpawnDiag
+	if opts.ResumeID != "" && !validResumeID(opts.ResumeID) {
+		diags = append(diags, SpawnDiag{
+			Layer:  "argv-validator",
+			Key:    "--resume",
+			Action: "dropped",
+			Reason: fmt.Sprintf("resume id is malformed (len %d, prefix %q); spawning a fresh session instead",
+				len(opts.ResumeID), resumeIDPreview(opts.ResumeID)),
+		})
+	}
+	if opts.DebugFile != "" && !renderablePathValue(opts.DebugFile) {
+		diags = append(diags, SpawnDiag{
+			Layer:  "argv-validator",
+			Key:    "--debug-file",
+			Action: "dropped",
+			Reason: "debug file path must be absolute and must not start with '-'; spawning without CLI debug capture",
+		})
+	}
+	if opts.MCPConfigFile != "" && !renderablePathValue(opts.MCPConfigFile) {
+		diags = append(diags, SpawnDiag{
+			Layer:  "argv-validator",
+			Key:    "--mcp-config",
+			Action: "dropped",
+			Reason: "mcp config path must be absolute and must not start with '-'; spawning without the configured MCP servers",
+		})
+	}
+	if opts.AppendSystemPrompt != "" {
+		if reason := invalidAppendSystemPrompt(opts.AppendSystemPrompt); reason != "" {
+			diags = append(diags, SpawnDiag{
+				Layer:  "argv-validator",
+				Key:    "--append-system-prompt",
+				Action: "dropped",
+				Reason: fmt.Sprintf("system prompt rejected (%s, len %d); spawning without it", reason, len(opts.AppendSystemPrompt)),
+			})
+		}
 	}
 	return diags
 }

@@ -106,6 +106,7 @@ cmd/naozhi/main.go
   -> apierr       Claude API 错误检测与本地化
   -> ctxutil      context.Context helpers
   -> leakguard    "leaked tool" 检测的单一真相源
+  -> spawndiag    spawn 门禁拒绝的上报（metrics + 日志 + observer）；位于 cli 之下，envpolicy 才能上报
   -> leakcheck    测试用泄漏断言 helper
   -> testhelper   共享测试工具
 ```
