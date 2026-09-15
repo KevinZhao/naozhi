@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"strings"
 	"testing"
 )
@@ -63,5 +64,38 @@ func TestNewSubFlagSet_SharedConfigFlag(t *testing.T) {
 	}
 	if *configPath2 != "" {
 		t.Errorf("empty-default configPath = %q, want \"\" (command resolves ~/.naozhi later)", *configPath2)
+	}
+}
+
+// Every subcommand's FlagSet has to come from one place, or a new one picks its
+// own error mode: with flag.ContinueOnError (the zero value) an unknown flag
+// returns an error that a `_ = fs.Parse(args)` call site throws away, so
+// `naozhi upgrade --no-restrat` would run a full upgrade WITH a restart instead
+// of printing usage. The three hand-rolled FlagSets that predated the registry
+// (upgrade, shim run, shim stop) went through this too.
+func TestSubcommandFlagSets_ExitOnError(t *testing.T) {
+	for _, name := range []string{"upgrade", "naozhi shim run", "naozhi shim stop"} {
+		if got := newFlagSet(name).ErrorHandling(); got != flag.ExitOnError {
+			t.Errorf("newFlagSet(%q) error handling = %v, want ExitOnError", name, got)
+		}
+	}
+	// newSubFlagSet is the same half plus -config, so it must agree.
+	fs, path := newSubFlagSet("config check", "config.yaml")
+	if got := fs.ErrorHandling(); got != flag.ExitOnError {
+		t.Errorf("newSubFlagSet error handling = %v, want ExitOnError", got)
+	}
+	if path == nil || *path != "config.yaml" {
+		t.Errorf("newSubFlagSet must keep its -config default, got %v", path)
+	}
+}
+
+// The consolidation must not have given the config-less subcommands a -config
+// flag they ignore: accepting a flag that does nothing is worse than not having
+// it, since an operator would believe it was honoured.
+func TestConfiglessSubcommands_HaveNoConfigFlag(t *testing.T) {
+	for _, name := range []string{"upgrade", "naozhi shim run", "naozhi shim stop"} {
+		if f := newFlagSet(name).Lookup("config"); f != nil {
+			t.Errorf("newFlagSet(%q) must not define -config", name)
+		}
 	}
 }

@@ -29,9 +29,11 @@ import (
 // without closing (leaking handle), or moves the Close inside the lock
 // (regressing mutation throughput) fails CI.
 func TestReconnect_SwapClosesOldHandleContract(t *testing.T) {
-	src, err := os.ReadFile("manager.go")
+	// Reconnect lives in manager_reconnect.go since manager.go was split by
+	// concern; the invariant below is about that function, not about the file.
+	src, err := os.ReadFile("manager_reconnect.go")
 	if err != nil {
-		t.Fatalf("read manager.go: %v", err)
+		t.Fatalf("read manager_reconnect.go: %v", err)
 	}
 	body := string(src)
 
