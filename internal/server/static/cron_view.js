@@ -2035,6 +2035,10 @@ function cronErrorClassLabel(cls) {
     case 'paused_concurrent': return '暂停时被抢';
     case 'deleted_concurrent': return '运行中被删除';
     case 'panic': return '内部异常';
+    // interrupted 与 canceled 同为 RunState=canceled，区别是谁中止的：进程
+    // 自己没了（drain 超预算或被硬杀）。措辞必须与"已取消"分开，否则操作员
+    // 会把一次被杀的运行读成自己点过取消。
+    case 'interrupted': return '进程中断（未跑完）';
     // 云沙箱三态（agentcore-cloud-sandbox RFC §6.1/§7.2）。transport 是
     // §6.2 双跑风险态：流断了但 microVM 状态未知，徽标走红色 + ⚠。
     case 'sandbox_failed': return '云沙箱任务失败';
