@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -30,57 +29,12 @@ func wsOnMessageBody(t *testing.T, js string) string {
 	return js[start : start+end]
 }
 
-// backendWSFrameTypes returns every frame type the backend declares, read
-// from the wsproto schema — the single source of truth the constructors,
-// the Go contract tests and test/e2e/check-ws-contract.mjs all share (#2535).
-func backendWSFrameTypes(t *testing.T) []string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join("..", "wsproto", "wsproto.schema.json"))
-	if err != nil {
-		t.Fatalf("read wsproto schema: %v", err)
-	}
-	var doc struct {
-		Types []string `json:"types"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		t.Fatalf("parse wsproto schema: %v", err)
-	}
-	if len(doc.Types) == 0 {
-		t.Fatal("wsproto schema lists no types — regenerate with `go generate ./internal/wsproto`")
-	}
-	return doc.Types
-}
-
-// TestDashboardJS_WSSwitchCoversBackendFrameTypes pins that every frame type
-// the hub can emit has a `case` in wsm.onMessage. daemon_run_started /
-// daemon_run_ended were broadcast by wshub_broadcast.go but silently dropped
-// by the dispatch switch, so the 系统 rail badge never refreshed on a daemon
-// run boundary. Types the dashboard deliberately ignores go in the allowlist
-// below — adding a new backend frame without a frontend case (or an explicit
-// allowlist entry) fails this test.
-func TestDashboardJS_WSSwitchCoversBackendFrameTypes(t *testing.T) {
-	t.Parallel()
-	body := wsOnMessageBody(t, readDashboardJS(t))
-	// Every frame type the hub emits currently has a case (`unsubscribed`
-	// became an explicit documented no-op, #2432). Add a type here only when
-	// the dashboard deliberately ignores it AND a `case` would be misleading.
-	ignored := map[string]string{}
-	for _, typ := range backendWSFrameTypes(t) {
-		if _, ok := ignored[typ]; ok {
-			continue
-		}
-		if !strings.Contains(body, "case '"+typ+"':") {
-			t.Errorf("wsm.onMessage has no `case '%s':` but the hub emits that frame type", typ)
-		}
-	}
-	// Explicit pins for the two frames this fix adds, so the failure message
-	// names the regression directly.
-	for _, typ := range []string{"daemon_run_started", "daemon_run_ended"} {
-		if !strings.Contains(body, "case '"+typ+"':") {
-			t.Errorf("wsm.onMessage must handle %s (refresh 系统 rail badge)", typ)
-		}
-	}
-}
+// TestDashboardJS_WSSwitchCoversBackendFrameTypes was here. It required every
+// type in internal/wsproto/wsproto.schema.json to have a `case '<type>':` in
+// wsm.onMessage. test/e2e/check-ws-contract.mjs does the same thing and more —
+// it checks BOTH directions, so a frontend case for a type the backend does not
+// declare also fails — and it runs in the lint-js CI job. Probed: renaming
+// `case 'daemon_run_started':` failed both, so the Go copy added nothing (#2547).
 
 // TestDashboardJS_DaemonRunFramesRefreshSystemDaemons pins that the new
 // daemon_run_* cases actually re-fetch daemon state (the only path that
