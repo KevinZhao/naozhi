@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -124,11 +125,32 @@ func TestRestartLaunchd_UnverifiedLabelIssuesNoCommand(t *testing.T) {
 // TestServiceRunning_UsesTheVerifiedLabel replaces
 // TestServiceRunningUsesResolvedLabel's text check: with the label unverifiable,
 // ServiceRunning must report false, because that is what gates every restart.
+// darwin-only: elsewhere ServiceRunning never consults the label, so faking
+// launchctl would pass for a reason that says nothing about this path.
 func TestServiceRunning_UsesTheVerifiedLabel(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skipf("ServiceRunning consults the launchd label only on darwin, not %s", runtime.GOOS)
+	}
 	t.Setenv(xpcServiceNameEnv, "com.naozhi.agent")
 	f := &fakeExec{t: t, listFail: true}
 	withFakeExec(t, f)
 	if ServiceRunning() {
 		t.Error("ServiceRunning() = true while `launchctl list` fails; a restart gated on this would act on an unverified label")
+	}
+}
+
+// TestServiceRunning_LinuxAsksSystemd covers the other branch through the
+// injection point instead of the host's real unit: without it the test reports
+// whatever `systemctl is-active naozhi` says, so it fails on any machine that
+// actually runs naozhi and passes on CI only because no service is there.
+func TestServiceRunning_LinuxAsksSystemd(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("ServiceRunning consults systemd only on linux, not %s", runtime.GOOS)
+	}
+	for _, active := range []bool{true, false} {
+		withStubbedUnitActive(t, func() bool { return active })
+		if got := ServiceRunning(); got != active {
+			t.Errorf("ServiceRunning() = %v with the unit active=%v", got, active)
+		}
 	}
 }
