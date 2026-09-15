@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // wsTestServer spins up an httptest.Server with a gorilla WebSocket upgrader.
@@ -314,20 +315,9 @@ func TestWSRelay_ReadLoop_deliversEvents(t *testing.T) {
 
 	relay.Subscribe(sink, "feishu:group:123", 0)
 
-	// Wait for event delivery.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if sink.RawMsgCount() > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected at least one event delivered to sink")
 
 	msgs := sink.RawMsgs()
-
-	if len(msgs) == 0 {
-		t.Fatal("expected at least one event delivered to sink")
-	}
 
 	var parsed map[string]json.RawMessage
 	if err := json.Unmarshal(msgs[0], &parsed); err != nil {
