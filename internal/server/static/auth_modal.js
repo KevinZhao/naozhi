@@ -95,7 +95,9 @@ function showAuthModal(opts) {
     '</div>';
   document.body.appendChild(overlay);
   trapFocus(overlay);
-  setTimeout(() => document.getElementById('token-input').focus(), 100);
+  // Guarded: a quick-ask session unmounts every overlay, so the input can be
+  // gone by the time this fires — bare .focus() throws from the timer.
+  setTimeout(() => { const i = document.getElementById('token-input'); if (i) i.focus(); }, 100);
 }
 
 // dismissAuthModal closes the auth prompt and starts the background-reprompt
@@ -1525,9 +1527,13 @@ function wireQuickAskInput(autofocus) {
   // device. On mobile we skip it — iOS Safari pops the keyboard and shifts
   // layout, which is worse UX than "tap to type". On dismiss-path repaints
   // we skip it to avoid intercepting a follow-up click/keystroke the user
-  // already aimed at something else.
+  // already aimed at something else. The overlay check inside the timer is
+  // that same rule for a mount that lands within the 50ms: an open modal owns
+  // the keyboard, and taking it back drops the operator's next keystrokes —
+  // the dashboard token, when the auth modal is what opened — into this
+  // textarea, where Enter submits them as a session prompt.
   if (autofocus && window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
-    setTimeout(() => ta.focus(), 50);
+    setTimeout(() => { if (!document.querySelector('.modal-overlay, .cmd-palette-overlay')) ta.focus(); }, 50);
   }
 }
 // Wire on first paint (cold start HTML is already in the DOM). Cold start is

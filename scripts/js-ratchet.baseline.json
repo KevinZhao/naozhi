@@ -12,7 +12,7 @@
     "topLevelLetVar": 0
   },
   "auth_modal.js": {
-    "lines": 1570,
+    "lines": 1576,
     "maxFunctionLines": 101,
     "functionsOver100": 1,
     "topLevelLetVar": 2
