@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
+	"github.com/naozhi/naozhi/internal/shim"
 )
 
 // index_invariants_test.go — the consistency of sessionStore's indices, asserted
@@ -78,6 +79,24 @@ func checkIndexInvariants(t *testing.T, r *Router, after string) {
 	for id, key := range r.ss.idToKey {
 		if _, ok := r.ss.sessions[key]; !ok {
 			problems = append(problems, fmt.Sprintf("idToKey[%q] holds dead session %q", id, key))
+		}
+	}
+	// The reverse direction: a live session that HAS an ID must be reachable by
+	// it. Only "no dangling entries" was checked, so a path that learned an ID
+	// and forgot to index it — the shape a missing setSessionIDIndex call takes —
+	// looked perfectly consistent while RegisterForResume's dedupe silently
+	// stopped finding the session.
+	if r.ss.idToKey != nil {
+		for key, s := range r.ss.sessions {
+			id := s.getSessionID()
+			if id == "" {
+				continue
+			}
+			if got, ok := r.ss.idToKey[id]; !ok {
+				problems = append(problems, fmt.Sprintf("live session %q reports id %q with no idToKey entry", key, id))
+			} else if got != key {
+				problems = append(problems, fmt.Sprintf("idToKey[%q] = %q, but that id belongs to live session %q", id, got, key))
+			}
 		}
 	}
 
@@ -203,4 +222,106 @@ func TestIndexInvariants_RenameToOccupiedKeyLeavesIndicesConsistent(t *testing.T
 
 	r.RenameSession(from, to)
 	checkIndexInvariants(t, r, "RenameSession onto an occupied key")
+}
+
+// TestIndexInvariants_DiscoveryAndShimAdoption covers the two paths the original
+// probe missed. They are the ones that learn a session ID from OUTSIDE the spawn
+// — a resume registration from the send path, and a live shim's state file after
+// a naozhi restart — and both write idToKey, so a mistake there mis-routes a
+// resume to another session (#2093) or loses the dedupe that keeps one CLI
+// session from being adopted twice.
+//
+// The socket-dialing half of the shim reconnect is out of unit-test reach (the
+// package deliberately spawns no real shims); what it does to the indices is the
+// same setSessionIDIndex call adoption makes, exercised here.
+func TestIndexInvariants_DiscoveryAndShimAdoption(t *testing.T) {
+	r := newIndexTestRouter()
+
+	// --- discovery: RegisterForResume publishes and indexes the ID ---
+	const resumeID = "sess-id-resume"
+	keyD := "dashboard:direct:2026-01-01-000000-1:proj"
+	got := r.RegisterForResume(keyD, resumeID, "/tmp/ws", "prompt")
+	if got != keyD {
+		t.Fatalf("RegisterForResume returned %q, want %q", got, keyD)
+	}
+	checkIndexInvariants(t, r, "RegisterForResume")
+	if mapped := r.ss.idToKey[resumeID]; mapped != keyD {
+		t.Errorf("idToKey[%q] = %q, want %q — the resume dedupe reads this", resumeID, mapped, keyD)
+	}
+
+	// A second registration for the same ID must dedupe onto the first session
+	// rather than publish a rival that owns the same CLI session.
+	other := r.RegisterForResume("dashboard:direct:2026-01-01-000000-2:proj", resumeID, "/tmp/ws", "prompt")
+	if other != keyD {
+		t.Errorf("second RegisterForResume for the same id returned %q, want the existing %q", other, keyD)
+	}
+	checkIndexInvariants(t, r, "RegisterForResume dedupe")
+
+	// --- shim adoption: a live shim missing from sessions.json ---
+	const shimID = "sess-id-shim"
+	keyS := "dashboard:direct:2026-01-01-000000-3:proj"
+	r.mu.Lock()
+	sess := r.adoptLiveShimLocked(shim.State{
+		Key:       keyS,
+		SessionID: shimID,
+		Workspace: "/tmp/ws",
+		Backend:   "claude",
+		ShimPID:   4242,
+	}, "claude", nil)
+	r.mu.Unlock()
+	if sess == nil {
+		t.Fatal("adoptLiveShimLocked published no session")
+	}
+	checkIndexInvariants(t, r, "adoptLiveShimLocked")
+	if mapped := r.ss.idToKey[shimID]; mapped != keyS {
+		t.Errorf("idToKey[%q] = %q, want %q — an adopted shim must be resumable by its id", shimID, mapped, keyS)
+	}
+
+	// --- and the indices stay consistent when those sessions go away ---
+	r.mu.Lock()
+	r.unregisterSessionLocked(keyD, r.ss.sessions[keyD], false)
+	r.unregisterSessionLocked(keyS, r.ss.sessions[keyS], false)
+	r.mu.Unlock()
+	checkIndexInvariants(t, r, "unregister after discovery + adoption")
+	if len(r.ss.idToKey) != 0 {
+		t.Errorf("idToKey still holds %v after both sessions were unregistered", r.ss.idToKey)
+	}
+}
+
+// clearSessionIDIndexIfOwnedBy exists for one scenario: a respawn rotates a
+// session's ID, and the cleanup of the OLD id must not delete an entry that now
+// belongs to a different live session. #2093 is the same hazard from the other
+// side — idToKey is not cleaned for rotated ids, so idToKey[id]=K can dangle
+// while sessions[K] holds an unrelated session. An unconditional delete here
+// would silently un-resume whichever session currently owns that id.
+func TestClearSessionIDIndexIfOwnedBy_OnlyDeletesItsOwnEntry(t *testing.T) {
+	r := newIndexTestRouter()
+	const id = "sess-id-shared"
+	const owner = "dashboard:direct:2026-01-01-000000-1:proj"
+	const other = "dashboard:direct:2026-01-01-000000-2:proj"
+
+	r.setSessionIDIndex(id, owner)
+
+	// A different key's cleanup must leave the owner's mapping alone.
+	r.clearSessionIDIndexIfOwnedBy(id, other)
+	if got := r.ss.idToKey[id]; got != owner {
+		t.Errorf("idToKey[%q] = %q after another key's cleanup, want %q untouched", id, got, owner)
+	}
+
+	// The owner's own cleanup drops it.
+	r.clearSessionIDIndexIfOwnedBy(id, owner)
+	if _, ok := r.ss.idToKey[id]; ok {
+		t.Errorf("idToKey[%q] survived its owner's cleanup", id)
+	}
+
+	// And the funnel is nil-safe / empty-safe, since test routers and sessions
+	// without an id both reach it.
+	empty := &Router{}
+	empty.setSessionIDIndex("x", "k")
+	empty.clearSessionIDIndex("x")
+	empty.clearSessionIDIndexIfOwnedBy("x", "k")
+	r.setSessionIDIndex("", owner)
+	if _, ok := r.ss.idToKey[""]; ok {
+		t.Error("an empty session id must not be indexed")
+	}
 }
