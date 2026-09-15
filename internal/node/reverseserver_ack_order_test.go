@@ -1,6 +1,7 @@
 package node
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // currentConn returns the conn registered for id, or nil.
@@ -21,14 +23,7 @@ func (s *ReverseServer) currentConn(id string) *ReverseConn {
 // waitConnGone polls until no conn is registered for id.
 func waitConnGone(t *testing.T, rs *ReverseServer, id string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if rs.currentConn(id) == nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("conn for %q still registered after rollback", id)
+	testhelper.Eventually(t, func() bool { return rs.currentConn(id) == nil }, 3*time.Second, fmt.Sprintf("conn for %q still registered after rollback", id))
 }
 
 // expectClosedByServer reads one frame and requires a non-timeout error,

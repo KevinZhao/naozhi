@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // H7 (Round 163): ReverseConn.baseCtx unifies cancellation of in-flight
@@ -119,16 +121,7 @@ func TestReverseConn_SubscribeHistoryAbortsOnClose(t *testing.T) {
 	// The fetch goroutine should unwind quickly now that baseCtx is cancelled
 	// and rpc()'s `<-c.done` branch triggers. We allow a generous slack but
 	// must not approach the 5s RPC timeout.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if rc.baseCtx.Err() != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if rc.baseCtx.Err() == nil {
-		t.Fatal("baseCtx should be cancelled after Close")
-	}
+	testhelper.Eventually(t, func() bool { return rc.baseCtx.Err() != nil }, 2*time.Second, "baseCtx should be cancelled after Close")
 
 	elapsed := time.Since(start)
 	if elapsed > 3*time.Second {

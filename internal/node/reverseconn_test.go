@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // setupReverseConnPair creates a ReverseServer + test HTTP server and dials in
@@ -230,7 +231,7 @@ func TestReverseConn_RPC_closedConnection(t *testing.T) {
 
 	// Close the remote end.
 	wsConn.Close()
-	time.Sleep(50 * time.Millisecond) // let readLoop detect disconnect
+	testhelper.Eventually(t, func() bool { return rc.Status() == "error" }, 2*time.Second, "readLoop never observed the closed conn")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -255,19 +256,9 @@ func TestReverseConn_ReadLoop_event(t *testing.T) {
 	event := &clievent.EventEntry{Time: 1234, Type: "text", Summary: "hello"}
 	wsConn.WriteJSON(ReverseMsg{Type: "event", Key: "mykey", Event: event})
 
-	// Wait for delivery.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if sink.RawMsgCount() > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected event delivered to subscriber")
 
 	rawMsgs := sink.RawMsgs()
-	if len(rawMsgs) == 0 {
-		t.Fatal("expected event delivered to subscriber")
-	}
 	var parsed map[string]json.RawMessage
 	if err := json.Unmarshal(rawMsgs[0], &parsed); err != nil {
 		t.Fatalf("invalid JSON delivered: %v", err)
@@ -287,16 +278,7 @@ func TestReverseConn_ReadLoop_subscribed(t *testing.T) {
 
 	wsConn.WriteJSON(ReverseMsg{Type: "subscribed", Key: "mykey"})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if sink.RawMsgCount() > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if sink.RawMsgCount() == 0 {
-		t.Fatal("expected subscribed message delivered")
-	}
+	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected subscribed message delivered")
 }
 
 // ---- Subscribe sends subscribe message on wire ----
@@ -823,16 +805,7 @@ func TestReverseConn_MarkDisconnected_setsStatus(t *testing.T) {
 	// Trigger disconnect by closing the ws connection.
 	wsConn.Close()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if rc.Status() == "error" {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if rc.Status() != "error" {
-		t.Errorf("expected status 'error' after disconnect, got %q", rc.Status())
-	}
+	testhelper.Eventually(t, func() bool { return rc.Status() == "error" }, 3*time.Second, "expected status \"error\" after disconnect")
 }
 
 // ---- subscribe_error removes key from subs ----
@@ -853,17 +826,7 @@ func TestReverseConn_ReadLoop_subscribeError(t *testing.T) {
 	// "key gone" is observable while RawMsgCount() is still 0 — polling the
 	// key raced the assertion below and made this test flaky. Delivery is the
 	// strictly later signal, so waiting for it settles both observations.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if sink.RawMsgCount() > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	if sink.RawMsgCount() == 0 {
-		t.Error("expected error event delivered to sink")
-	}
+	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected error event delivered to sink")
 
 	rc.subMu.Lock()
 	_, exists := rc.subs["badkey"]
@@ -940,16 +903,7 @@ func TestReverseConn_SubscribeError_KeyRemovalPrecedesDelivery(t *testing.T) {
 
 	close(sink.gate)
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if sink.RawMsgCount() > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if sink.RawMsgCount() == 0 {
-		t.Error("expected error event delivered to sink after gate release")
-	}
+	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected error event delivered to sink after gate release")
 }
 
 // TestReverseConn_EventsCappedOnPush locks down R67-SEC-3: a compromised
@@ -974,19 +928,9 @@ func TestReverseConn_EventsCappedOnPush(t *testing.T) {
 	}
 	wsConn.WriteJSON(ReverseMsg{Type: "events", Key: "mykey", Events: events})
 
-	// Wait for delivery.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if sink.RawMsgCount() > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected history message delivered to subscriber")
 
 	msgs := sink.RawMsgs()
-	if len(msgs) == 0 {
-		t.Fatal("expected history message delivered to subscriber")
-	}
 	var parsed struct {
 		Type   string                `json:"type"`
 		Events []clievent.EventEntry `json:"events"`
@@ -1029,18 +973,9 @@ func TestReverseConn_EventsUnderCapPassesThrough(t *testing.T) {
 	}
 	wsConn.WriteJSON(ReverseMsg{Type: "events", Key: "mykey", Events: events})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if sink.RawMsgCount() > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected history message delivered to subscriber")
 
 	msgs := sink.RawMsgs()
-	if len(msgs) == 0 {
-		t.Fatal("expected history message delivered to subscriber")
-	}
 	var parsed struct {
 		Events []clievent.EventEntry `json:"events"`
 	}
