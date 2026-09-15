@@ -102,9 +102,13 @@ func Main(m interface{ Run() int }, warnOnly bool) int {
 		current = runtime.NumGoroutine()
 	}
 	if current > baseline+grace {
+		verdict := "failing the package"
+		if warnOnly {
+			verdict = "WARN mode, not failing"
+		}
 		fmt.Fprintf(os.Stderr,
-			"leakcheck(package): goroutine count grew from %d to %d (grace %d, settle %s) — WARN mode, not failing (#2537)\n%s\n",
-			baseline, current, grace, settle, dumpStacks())
+			"leakcheck(package): goroutine count grew from %d to %d (grace %d, settle %s) — %s\n%s\n",
+			baseline, current, grace, settle, verdict, dumpStacks())
 		if !warnOnly && code == 0 {
 			code = 1
 		}

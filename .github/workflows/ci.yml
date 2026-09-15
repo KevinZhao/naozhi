@@ -271,6 +271,12 @@ jobs:
       - name: Check WS contract (wsproto schema vs dashboard dispatch)
         run: node test/e2e/check-ws-contract.mjs
 
+      # The flaky-report regexes fail open — a pattern that stops matching files
+      # nothing and the job still goes green, which is indistinguishable from a
+      # quiet week. This replays real log lines through them.
+      - name: Check flaky-report log parsing
+        run: node scripts/check-flaky-report-parse.mjs
+
   # RNEW-TEST-432: Windows build-only job. Not a supported runtime — the
   # gate exists to surface regressions in packages that must compile on
   # all platforms. Shim/discovery syscall isolation was completed 2026-05-15
@@ -311,7 +317,9 @@ jobs:
           go test -race -timeout 300s -run "$run" ./...
 
   # Synthetic failure for exercising flaky-report end-to-end (#2537); only
-  # runs on a manual dispatch with flaky_probe=true, skipped otherwise.
+  # runs on a manual dispatch with flaky_probe=true, skipped otherwise. Emits
+  # one line of each shape the reporter parses — `go test`'s and Playwright's —
+  # so a single dispatch proves both extractors, not just the Go one.
   probe-fail:
     if: github.event_name == 'workflow_dispatch' && inputs.flaky_probe
     runs-on: ubuntu-latest
@@ -320,13 +328,14 @@ jobs:
       - name: Synthetic failure
         run: |
           echo "--- FAIL: TestFlakyProbeSynthetic (0.00s)"
+          echo "  ✘  1 [desktop-chrome] › probe_synthetic.test.js:1:1 › flaky probe synthetic spec (0.1s)"
           exit 1
 
   # master red → auto-file a [flaky] issue per failing test (#2537): the last
   # 40 master runs had 4 reds, all flaky, none registered. Reads the failed
   # jobs' logs and dedupes by issue title.
   flaky-report:
-    needs: [test, test-macos, probe-fail]
+    needs: [test, test-macos, e2e, probe-fail]
     if: always() && contains(join(needs.*.result, ','), 'failure') && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -359,12 +368,23 @@ jobs:
                 core.warning(`fetch logs for ${job.name}: ${e}`);
                 continue;
               }
-              for (const m of log.matchAll(/--- FAIL: (Test[\w/]+)/g)) {
+              // Runner logs carry ANSI colour, which Playwright emits around
+              // the ✘ marker.
+              const clean = log.replace(/\u001b\[[0-9;]*m/g, '');
+              for (const m of clean.matchAll(/--- FAIL: (Test[\w/]+)/g)) {
                 if (!failures.has(m[1])) failures.set(m[1], job.name);
+              }
+              // The e2e job produces no `--- FAIL:` lines: Playwright's list
+              // reporter marks each failed spec with ✘. The line:column is
+              // dropped from the name so editing anything above a test does
+              // not file a second issue for the same test.
+              for (const m of clean.matchAll(/✘\s+\d+\s+(?:\[[^\]\n]+\]\s+›\s+)?(\S+?):\d+:\d+\s+›\s+([^\n]+)/g)) {
+                const name = m[1] + ' › ' + m[2].replace(/\s*\(\d+(?:\.\d+)?\s*m?s\)\s*$/, '').trim();
+                if (!failures.has(name)) failures.set(name, job.name);
               }
             }
             if (failures.size === 0) {
-              core.info('no --- FAIL lines found in failed job logs');
+              core.info('no test-failure lines found in failed job logs');
               return;
             }
             const runURL = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
