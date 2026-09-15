@@ -108,6 +108,9 @@ func main() {
 	// The blank-imported history factories are linked in; this was an init()
 	// inside wireup until #2552 and is now stated at the call site.
 	boot.RecordHistoryBackends()
+	// Image blocks in rehydrated JSONL history need discovery.ThumbnailFn; nil
+	// drops them with no other symptom, so the assignment is a stated step too.
+	boot.WireHistoryThumbnails()
 
 	// A dropped blank-import or no-op'd helper aborts startup here instead of
 	// degrading silently to empty history / missing profiles.

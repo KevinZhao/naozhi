@@ -65,7 +65,7 @@ func (b *Boot) recordStep(name string, step BootStep) {
 func (b *Boot) Steps() []string { return b.steps.Names() }
 
 // requiredBootSteps MUST have run before naozhi serves traffic.
-var requiredBootSteps = []string{"cli-backends", "history-backends"}
+var requiredBootSteps = []string{"cli-backends", "history-backends", "history-thumbnail"}
 
 // Validate reports an error if any required boot step did not run; cmd/naozhi
 // calls it after wireup so a missing import aborts startup with a clear message.

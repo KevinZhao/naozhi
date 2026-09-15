@@ -74,7 +74,11 @@ func TestRegisterCLIBackends_RecordsBootStep(t *testing.T) {
 		t.Error("Validate() = nil with only cli-backends recorded; history-backends must still be required")
 	}
 	b.RecordHistoryBackends()
+	if err := b.Validate(); err == nil {
+		t.Error("Validate() = nil without the thumbnail step; a nil ThumbnailFn drops history images silently")
+	}
+	b.recordStep("history-thumbnail", BootStep{Kind: "history-thumbnail"})
 	if err := b.Validate(); err != nil {
-		t.Fatalf("Validate() = %v, want nil after both required steps recorded", err)
+		t.Fatalf("Validate() = %v, want nil after every required step recorded", err)
 	}
 }
