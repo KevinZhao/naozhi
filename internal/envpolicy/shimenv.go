@@ -278,7 +278,7 @@ func shimEndpointEnvDropped(kv string) (reason string) {
 		return ""
 	}
 	if err := validateShimEndpointURL(val); err != nil {
-		return fmt.Sprintf("endpoint base_url is unsafe: %v", err)
+		return "endpoint base_url is unsafe: " + GuardErrorReason(err)
 	}
 	return ""
 }
@@ -319,6 +319,42 @@ func validateShimEndpointURL(v string) error {
 		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
 	}
 	return fmt.Errorf("scheme %q not allowed; use https://", u.Scheme)
+}
+
+// GuardErrorReason renders a guard error as a reportable sentence. Guard errors
+// quote the offending value — url.Parse's does, verbatim and in full — so the
+// quoted spans are collapsed: the classification is what an operator needs, and
+// the value may be credential-adjacent, carry control bytes (log injection) or
+// run to the 4 KiB cap. Control bytes are neutralised and the result is bounded.
+//
+// Exported so every reporter of a guard rejection (shim, sysession, the
+// settings.json filter) renders it the same way; envpolicy owns it because
+// envpolicy owns the guards that produce these errors.
+func GuardErrorReason(err error) string {
+	const limit = 160
+	var b strings.Builder
+	inQuote := false
+	for _, r := range err.Error() {
+		switch {
+		case r == '"':
+			b.WriteRune(r)
+			if !inQuote {
+				b.WriteRune('…')
+			}
+			inQuote = !inQuote
+		case inQuote:
+			// The quoted span is the value; already replaced by the ellipsis.
+		case r < 0x20 || r == 0x7f:
+			b.WriteByte(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if len(out) > limit {
+		return out[:limit] + "…"
+	}
+	return out
 }
 
 // kvKeyPrefix returns the key part (before '=') of a KEY=value env string,
