@@ -379,7 +379,10 @@ jobs:
               // dropped from the name so editing anything above a test does
               // not file a second issue for the same test.
               for (const m of clean.matchAll(/✘\s+\d+\s+(?:\[[^\]\n]+\]\s+›\s+)?(\S+?):\d+:\d+\s+›\s+([^\n]+)/g)) {
-                const name = m[1] + ' › ' + m[2].replace(/\s*\(\d+(?:\.\d+)?\s*m?s\)\s*$/, '').trim();
+                // The trailing quote is the runner echoing the step's own script:
+                // that line matches too, and without dropping the quote it
+                // normalises to a second name for the same test.
+                const name = m[1] + ' › ' + m[2].replace(/\s*\(\d+(?:\.\d+)?\s*m?s\)"?\s*$/, '').trim();
                 if (!failures.has(name)) failures.set(name, job.name);
               }
             }
