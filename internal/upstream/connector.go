@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -301,6 +302,17 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		// %q so primary-controlled Error string can't inject key=val pairs or
 		// newlines into slog output downstream.
 		return false, fmt.Errorf("register failed: %q", ack.Error)
+	}
+	// Mirror of the hub's gate (node/reverseserver.go). The hub refuses a node on
+	// a foreign EventEntry version, so reaching this line normally means the two
+	// agree — but a hub predating the gate accepts anything, and this is where
+	// that link gets stopped. An ack with no caps is such a hub: compatible by
+	// construction, see clievent.SchemaCapMismatch.
+	//
+	// %q: the tag comes off the wire.
+	if hubTag := clievent.SchemaCapMismatch(ack.Capabilities); hubTag != "" {
+		return false, fmt.Errorf("register failed: primary speaks event schema %q, this node speaks %q — upgrade whichever is older",
+			hubTag, clievent.SchemaCap)
 	}
 	slog.Info("connected to primary", "url", c.cfg.URL, "node_id", c.cfg.NodeID)
 
