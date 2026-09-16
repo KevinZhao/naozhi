@@ -321,14 +321,9 @@ func fanoutTurnResult(owners []*sendSlot, ev clievent.Event) {
 	head := owners[0]
 	mergedCount := len(owners)
 
-	headRes := &clievent.SendResult{
-		Text:        ev.Result,
-		SessionID:   ev.SessionID,
-		CostUSD:     ev.CostUSD,
-		ModelUsage:  ev.ModelUsage,
-		MergedCount: mergedCount,
-	}
-	deliverSlotResult(head, headRes)
+	headRes := resultFromEvent(ev)
+	headRes.MergedCount = mergedCount
+	deliverSlotResult(head, &headRes)
 
 	if mergedCount == 1 {
 		return

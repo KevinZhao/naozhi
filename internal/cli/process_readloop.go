@@ -135,6 +135,14 @@ func (p *Process) readLoop() {
 	// eventCh so a producer guarded by "is done open?" never sends on a closed
 	// eventCh (see drainStaleEvents / isChanAlive in process_turn.go). If you
 	// reorder these defers, re-verify that invariant.
+	//
+	// resolveExit is declared first so it runs LAST: an adopted-turn waiter woken
+	// by it then observes a fully torn-down process (State==Dead, done closed).
+	// It is a no-op unless the latch was armed and is still empty, and it is what
+	// keeps a waiter from sitting out its whole context after the CLI is gone —
+	// readLoop's unwind is the one point every exit passes through, including the
+	// panic recover below.
+	defer p.adopted.resolveExit()
 	defer close(p.eventCh)
 	defer close(p.done)
 	defer p.eventLog.CloseSubscribers()
@@ -612,12 +620,19 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// reconnects to a shim that's mid-turn).
 	p.logEventAt(ev, nowMS)
 
-	// A result with no active Send() (reconnect set Running via isMidTurn but
-	// the CLI finished first) transitions back to Ready. Gated on
+	// A result with no active Send() (reconnect set Running via reconnectVerdict
+	// but the CLI finished first) transitions back to Ready. Gated on
 	// reconnectedMidTurn: otherwise State=Running means Send() owns the
 	// State→Ready transition via its defer, and racing it would let a second
 	// Send() start before that defer runs. The flag is one-shot.
 	if ev.Type == "result" && p.reconnectedMidTurn.CompareAndSwap(true, false) {
+		// Keep the outcome for a caller that did not issue the Send: past this
+		// point the frame's text survives nowhere (the ring.EventLog entry logged
+		// above is turn-boundary metadata only). This belongs HERE and not in
+		// deliverEvent — the passthrough fan-out already returned if a live Send
+		// claimed the result. See resolveResult for why that placement is what
+		// keeps Send and the latch from both owning one result.
+		p.adopted.resolveResult(ev)
 		p.mu.Lock()
 		wasRunning := p.state == StateRunning
 		if wasRunning {

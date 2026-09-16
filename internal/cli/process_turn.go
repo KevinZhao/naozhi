@@ -27,6 +27,21 @@ var stderrSanitizeBuilderPool = sync.Pool{
 // short enough that the new prompt isn't perceptibly delayed.
 const interruptedSettleWindow = 500 * time.Millisecond
 
+// resultFromEvent maps a result frame to the value every result owner hands back.
+// Three owners derive it — Send (process_send.go), the passthrough slot fan-out
+// (passthrough.go) and the adopted-turn latch (adopted_turn.go) — so a field the
+// result frame gains must be added here once instead of in three places, and an
+// owner that forgets it cannot silently return less than the others.
+// Merge metadata is left zero: it describes slot ownership, not the frame.
+func resultFromEvent(ev clievent.Event) clievent.SendResult {
+	return clievent.SendResult{
+		Text:       ev.Result,
+		SessionID:  ev.SessionID,
+		CostUSD:    ev.CostUSD,
+		ModelUsage: ev.ModelUsage,
+	}
+}
+
 // findResultSince checks ring.EventLog for a result entry logged after afterMS; the
 // fallback when eventCh may have dropped events. The "result" entry carries
 // only cost + turn metadata (its Detail is empty to avoid a duplicate dashboard

@@ -199,6 +199,12 @@ type Process struct {
 	// readLoop must not race it. Atomic: cleared without taking p.mu.
 	reconnectedMidTurn atomic.Bool
 
+	// adopted latches the outcome of the turn reconnectedMidTurn describes, so a
+	// caller that did not issue the Send can still learn how it ended. The flag
+	// above answers "may readLoop move this session to Ready?" and is consumed;
+	// the latch answers "how did that turn end?" and is kept. See adopted_turn.go.
+	adopted adoptedTurn
+
 	// deathReason records why the process died; written once (first-writer-wins
 	// CAS) by the path that transitions State→Dead. nil until stored.
 	deathReason atomic.Pointer[string]

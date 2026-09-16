@@ -169,8 +169,8 @@ func TestIsMidTurn(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isMidTurn(tt.replays, proto); got != tt.want {
-				t.Errorf("isMidTurn() = %v, want %v", got, tt.want)
+			if got, _ := reconnectVerdict(tt.replays, proto); got != tt.want {
+				t.Errorf("reconnectVerdict() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -180,7 +180,7 @@ func TestIsMidTurn(t *testing.T) {
 // surface) and overrides only ReadEvent to return done=true alongside a NON
 // result event. It pins the R202606f-ARCH-5 (#2303) contract: turn-end is
 // driven by a result clievent.Event, never by the advisory `done` bool. Clone returns
-// the same wrapped behaviour so isMidTurn's call path is exercised faithfully.
+// the same wrapped behaviour so reconnectVerdict's call path is exercised faithfully.
 type doneIgnoringProtocol struct{ *ClaudeProtocol }
 
 func (d doneIgnoringProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
@@ -192,7 +192,7 @@ func (d doneIgnoringProtocol) ReadEvent(line string) ([]clievent.Event, bool, er
 
 func (d doneIgnoringProtocol) Clone() Protocol { return d }
 
-// TestIsMidTurn_IgnoresAdvisoryDone verifies isMidTurn does not let a
+// TestIsMidTurn_IgnoresAdvisoryDone verifies reconnectVerdict does not let a
 // protocol's done=true short-circuit the result-clievent.Event-based turn-end
 // detection. The last (and only) emitted event is an assistant frame, so the
 // turn is still in progress regardless of done=true (#2303).
@@ -201,8 +201,8 @@ func TestIsMidTurn_IgnoresAdvisoryDone(t *testing.T) {
 	replays := []shim.ServerMsg{
 		{Type: "replay", Line: `{"ignored":"the stub ignores the line"}`},
 	}
-	if got := isMidTurn(replays, proto); !got {
-		t.Errorf("isMidTurn = false; want true — done=true must NOT settle a turn that emitted no result clievent.Event (#2303)")
+	if got, _ := reconnectVerdict(replays, proto); !got {
+		t.Errorf("reconnectVerdict = false; want true — done=true must NOT settle a turn that emitted no result clievent.Event (#2303)")
 	}
 }
 
@@ -258,8 +258,8 @@ func TestIsMidTurn_SkipsControlAck(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isMidTurn(tt.replays, proto); got != tt.want {
-				t.Errorf("isMidTurn() = %v, want %v", got, tt.want)
+			if got, _ := reconnectVerdict(tt.replays, proto); got != tt.want {
+				t.Errorf("reconnectVerdict() = %v, want %v", got, tt.want)
 			}
 		})
 	}
