@@ -72,7 +72,7 @@
     "topLevelLetVar": 5
   },
   "nz_util.js": {
-    "lines": 260,
+    "lines": 259,
     "maxFunctionLines": 7,
     "functionsOver100": 0,
     "topLevelLetVar": 0

@@ -1495,7 +1495,7 @@ function cronApplyRunStarted(msg) {
   // 即使 ensureCronLiveSubscription 短路（jobId 已订）也要清。runStartedAt
   // 更新成新 run 的 started_at，让 onConnected / onCronLiveSessionState 的
   // re-sub 路径用正确的 after= 阈值。
-  if (typeof wsm !== 'undefined' && wsm.cronLive && wsm.cronLive.jobId === msg.job_id) {
+  if (wsm.cronLive && wsm.cronLive.jobId === msg.job_id) {
     wsm.cronLive.events = [];
     wsm.cronLive.lastEventTimeMs = 0;
     wsm.cronLive.truncatedCount = 0;
@@ -1549,7 +1549,7 @@ function cronApplyRunEnded(msg) {
   // cron-live RFC §3 / §6: 任务进入终态（任意 state），cron live 订阅保留供
   // 操作员回看，但 status 切到 'stopped' 让用户清楚区分"直播中"vs"已结束"。
   // unsub 仅在 closeCronDetail / 切换 jobId 时发生。
-  if (typeof wsm !== 'undefined' && wsm.cronLive && wsm.cronLive.jobId === msg.job_id) {
+  if (wsm.cronLive && wsm.cronLive.jobId === msg.job_id) {
     wsm.cronLive.status = 'stopped';
     setCronLiveStatus('stopped');
   }
@@ -3375,7 +3375,7 @@ function cronDrawerHtml(j) {
   // cron-live RFC §4.1: 实时输出容器。任务跑中或本轮已积累事件时显示，
   // 让 run 结束后操作员还能回看本轮事件流。container 元素由 wsm.cronLive
   // 状态驱动，repaintCronLive / appendEventsToContainer 写入。
-  const liveJobId = (typeof wsm !== 'undefined' && wsm.cronLive) ? wsm.cronLive.jobId : null;
+  const liveJobId = wsm.cronLive ? wsm.cronLive.jobId : null;
   const hasLiveEvents = liveJobId === id && wsm.cronLive.events && wsm.cronLive.events.length > 0;
   let liveHtml = '';
   if (isRunning || hasLiveEvents) {
@@ -3940,7 +3940,7 @@ function closeCronDetail() {
   }
   // cron-live RFC §3: drawer 关闭即撤销 cron live 订阅；事件数组随 unsub 清空，
   // 下次再开任意 drawer 不会带过来旧 job 的事件。
-  if (typeof wsm !== 'undefined' && wsm.cronLive && wsm.cronLive.jobId) {
+  if (wsm.cronLive && wsm.cronLive.jobId) {
     wsm.unsubscribeCronLive();
   }
   cronDetailJobId = null;

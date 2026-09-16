@@ -183,12 +183,11 @@ nz.views = nzViews;
 export const nzTest = {};
 nz.test = nzTest;
 
-// data-nz-bg (#2559 D6-3): the only styling JS still computes per element is
-// a node / access-profile colour, which no class can express. Rather than
-// emitting style="" (the last thing keeping style-src 'unsafe-inline' alive),
-// the renderers put the value in a data attribute and this observer applies it
-// via CSSOM — a property assignment, not an inline attribute, so the CSP does
-// not have to allow inline styles.
+// data-nz-bg: the only styling JS computes per element is a node /
+// access-profile colour, which no class can express. The renderers put the value
+// in a data attribute and this observer applies it via CSSOM — a property
+// assignment, not an inline attribute — so style-src needs no 'unsafe-inline'.
+// Emitting style="" here would put it back.
 function applyDataBg(root) {
   const els = root.querySelectorAll ? root.querySelectorAll('[data-nz-bg]') : [];
   for (const el of els) {

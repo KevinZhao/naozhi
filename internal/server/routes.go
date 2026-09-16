@@ -168,11 +168,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	// CSP: built at init in dashboard_csp.go (#1980) — script-src has no
-	// unsafe-inline (data-action delegation + hashed theme bootstrap), cdn
-	// pinned to exact versioned files; connect-src 'self' covers same-origin
-	// ws/wss; frame-src blob: = sandboxed previews; style-src unsafe-inline
-	// stays until D6 (#2559) migrates the generated style="" attributes.
+	// CSP: built once at init in dashboard_csp.go. Neither script-src nor
+	// style-src admits unsafe-inline — events are wired through data-action
+	// delegation plus a hash for the theme bootstrap, and the per-element colours
+	// JS still computes go through data attributes applied via CSSOM (nz_util.js
+	// applyDataBg) rather than style="" attributes. CDN entries pin exact
+	// versioned files; connect-src 'self' covers the same-origin ws/wss upgrade;
+	// frame-src blob: is for sandboxed previews.
 	w.Header().Set("Content-Security-Policy", dashboardCSP)
 	// HSTS only over TLS (RFC 6797 §7.2): on plain HTTP it would brick local
 	// loopback access for a year. Same gate as the auth cookie Secure flag.
