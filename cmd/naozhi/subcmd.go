@@ -25,7 +25,7 @@ var subcmds = []subcmd{
 	{"doctor", "run health checks against a naozhi instance", runDoctor},
 	{"upgrade", "self-update to the latest release", runUpgrade},
 	{"cost", "cost ledger maintenance (backfill)", runCost},
-	{"config", "validate config.yaml and show effective spawn inputs (check)", runConfig},
+	{"config", "validate config.yaml (check) or upgrade its schema (migrate)", runConfig},
 }
 
 // findSubcmd returns the registry entry for name, or nil.

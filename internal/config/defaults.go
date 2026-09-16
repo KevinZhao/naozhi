@@ -8,8 +8,13 @@ import "time"
 
 // CurrentSchemaVersion is the config schema this binary understands; absent
 // (0) is treated as current, higher is rejected at load. Bump on incompatible
-// YAML shape changes.
-const CurrentSchemaVersion = 1
+// YAML shape changes — and add the matching entry to migrations (migrations.go),
+// or `naozhi config migrate` will refuse the older file it cannot upgrade.
+//
+// v2 (#2710): the four deprecated aliases the load path had been rewriting in
+// memory since forever — nodes, session.workspace, session.auto_chain and
+// --append-system-prompt inside agents[].args — can now leave the file.
+const CurrentSchemaVersion = 2
 
 const (
 	defaultServerAddr    = ":8080"

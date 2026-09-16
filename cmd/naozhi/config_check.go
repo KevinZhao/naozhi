@@ -25,12 +25,23 @@ import (
 )
 
 func runConfig(args []string) {
-	if len(args) == 0 || args[0] != "check" {
-		fmt.Fprintln(os.Stderr, "usage: naozhi config check [-config config.yaml] [-effective] [-json]")
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, configUsage)
 		os.Exit(2)
 	}
-	os.Exit(configCheck(args[1:], os.Stdout))
+	switch args[0] {
+	case "check":
+		os.Exit(configCheck(args[1:], os.Stdout))
+	case "migrate":
+		os.Exit(configMigrate(args[1:], os.Stdout))
+	default:
+		fmt.Fprintln(os.Stderr, configUsage)
+		os.Exit(2)
+	}
 }
+
+const configUsage = "usage: naozhi config check [-config config.yaml] [-effective] [-json]\n" +
+	"       naozhi config migrate [-config config.yaml] [-write]"
 
 // backendDiag is one gate decision attributed to the backend whose spawn
 // inputs produced it ("" for config-load diags with no backend context).
