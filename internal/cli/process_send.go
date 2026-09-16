@@ -225,12 +225,8 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 					p.sessionID = ev.SessionID
 				}
 				p.mu.Unlock()
-				return &clievent.SendResult{
-					Text:       ev.Result,
-					SessionID:  ev.SessionID,
-					CostUSD:    ev.CostUSD,
-					ModelUsage: ev.ModelUsage,
-				}, nil
+				sr := resultFromEvent(ev)
+				return &sr, nil
 			}
 		case <-watchdog.C:
 			sr, err := p.handleWatchdogTick(time.Now(), lastOutput, turnStart, turnStartMS, noOutputDur, totalDur)

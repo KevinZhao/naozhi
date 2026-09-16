@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
@@ -631,12 +632,10 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	// is still processing → StateRunning, with reconnectedMidTurn letting readLoop's
 	// stray-result handler flip back to Ready. Arm BEFORE startReadLoop, else the
 	// result could be consumed first and park the session in StateRunning (#1778).
-	if isMidTurn(replays, proto) {
-		proc.mu.Lock()
-		proc.state = StateRunning
-		proc.mu.Unlock()
-		proc.reconnectedMidTurn.Store(true)
-	}
+	// The adopted-turn latch is armed on the same decision and for the same
+	// reason: startReadLoop can deliver the late result before this function even
+	// returns, so nothing may be attached to that turn after this point.
+	proc.applyReconnectVerdict(reconnectVerdict(replays, proto))
 
 	proc.startReadLoop()
 
@@ -658,10 +657,19 @@ func WaitSocketGoneForKey(key string, maxWait time.Duration) bool {
 	return shim.WaitSocketGone(socketPath, maxWait)
 }
 
-// isMidTurn reports whether the CLI was mid-turn at reconnection time: the
-// last meaningful replayed event is not a turn-complete result.
-func isMidTurn(replays []shim.ServerMsg, proto Protocol) bool {
-	lastType := ""
+// reconnectVerdict classifies what the replayed backlog says about the turn that
+// was in flight when this process reconnected:
+//
+//	midTurn true             the CLI is still working; the result has not arrived
+//	finished != nil          the turn ended while naozhi was down; that is the result
+//	both zero                no meaningful backlog — nothing was in flight
+//
+// midTurn and finished are mutually exclusive by construction. Both come out of
+// one reverse walk because they are one fact: the walk that decides "the last
+// meaningful event is a result" is holding that result when it decides, and the
+// caller needs it (adopted_turn.go — the backlog is drained once per Reconnect,
+// so a second pass to recover it later is not available).
+func reconnectVerdict(replays []shim.ServerMsg, proto Protocol) (midTurn bool, finished *clievent.Event) {
 	for i := len(replays) - 1; i >= 0; i-- {
 		if replays[i].Type != "replay" {
 			continue
@@ -674,24 +682,22 @@ func isMidTurn(replays []shim.ServerMsg, proto Protocol) bool {
 		}
 		// Reverse walk so the last semantic event in the frame wins (ACP turn-end
 		// emits assistant+result; only the result settles the question).
-		picked := ""
 		for j := len(events) - 1; j >= 0; j-- {
-			if events[j].Type != "" && !isTurnNeutralEventType(events[j].Type) {
-				picked = events[j].Type
-				break
+			ev := events[j]
+			if ev.Type == "" || isTurnNeutralEventType(ev.Type) {
+				continue
 			}
+			if ev.Type == "result" {
+				return false, &ev
+			}
+			return true, nil
 		}
-		if picked == "" {
-			continue
-		}
-		lastType = picked
-		break
 	}
-	return lastType != "" && lastType != "result"
+	return false, nil
 }
 
 // isTurnNeutralEventType reports whether an clievent.Event type carries no turn state
-// and must be skipped by isMidTurn's reverse walk. control_ack (receipt for a
+// and must be skipped by reconnectVerdict's reverse walk. control_ack (receipt for a
 // naozhi-originated control RPC, see ModelSetter) is emitted with or without a
 // turn in flight — an idle session that switched models leaves it as the LAST
 // buffered shim line — so counting it would arm reconnectedMidTurn with no
