@@ -4,6 +4,8 @@
 // here only when they are pure data shapes consumed by ≥2 packages above cli.
 package clievent
 
+import "strings"
+
 // EventEntry is the event record shared by the CLI wrapper, EventLog ring
 // buffer, JSONL persistence and the dashboard renderer; persisted JSON in
 // `<dataDir>/sessions/*.jsonl` round-trips through this struct.
@@ -108,8 +110,49 @@ type AskQuestionOpt struct {
 //     go red until every pairing is updated deliberately).
 const SchemaVersion = 1
 
-// SchemaCap is the capability tag remote nodes advertise on the register
-// handshake for this EventEntry schema. It must never appear in any
-// backend.Profile.RequiredNodeCaps — it describes what the peer speaks,
-// not what a backend needs.
+// SchemaCap is the capability tag both sides of the reverse-node link advertise
+// for this EventEntry schema — the node on its register frame, the hub on the
+// registered ack. It must never appear in any backend.Profile.RequiredNodeCaps:
+// it describes what the peer speaks, not what a backend needs, so it is gated by
+// SchemaCapMismatch rather than by the RequiredNodeCaps loop.
 const SchemaCap = "evententry.v1"
+
+// schemaCapPrefix is the family SchemaCap belongs to. A peer advertising a
+// different member of the family speaks a different EventEntry shape.
+const schemaCapPrefix = "evententry.v"
+
+// SchemaCapMismatch reports the peer's EventEntry schema tag when it names a
+// version this binary cannot read, and "" when the link is safe to use.
+//
+// Two cases are deliberately NOT a mismatch:
+//
+//   - no evententry tag at all — a peer predating capability negotiation. It is
+//     speaking v1 by construction (the tag was introduced alongside v1), and
+//     refusing it would break the very upgrade path the tag exists to smooth.
+//   - our own tag, however many other unknown caps accompany it. Unknown caps
+//     stay a WARN: they describe features, and a feature this binary does not
+//     know is one it will not ask for.
+//
+// A mismatch is different in kind: EventEntry is the payload of the `event` and
+// `events` frames themselves, so a peer on another version does not lack a
+// feature — every event it sends decodes into the wrong shape, silently. That is
+// why this is the one cap whose disagreement ends the connection instead of
+// logging.
+// A peer advertising several members of the family (a transitional build that
+// reads both) is compatible as long as ours is among them, so the whole slice is
+// scanned before any of it is rejected.
+func SchemaCapMismatch(peerCaps []string) string {
+	foreign := ""
+	for _, c := range peerCaps {
+		if !strings.HasPrefix(c, schemaCapPrefix) {
+			continue
+		}
+		if c == SchemaCap {
+			return ""
+		}
+		if foreign == "" {
+			foreign = c
+		}
+	}
+	return foreign
+}

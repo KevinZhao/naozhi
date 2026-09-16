@@ -20,6 +20,17 @@ var knownServerCaps = map[string]struct{}{
 	"scratch":          {},
 }
 
+// HubCaps is what the hub advertises about itself on the registered ack.
+//
+// Only the EventEntry schema tag: the other entries in knownServerCaps name
+// backends a NODE can run, which is the node's side of the negotiation, not the
+// hub's. Adding one here would tell a node the hub can run gemini, which is not
+// a thing a node ever needs to know — whereas the schema tag is exactly the fact
+// the node cannot discover any other way.
+func HubCaps() []string {
+	return []string{clievent.SchemaCap}
+}
+
 // logUnknownCaps WARNs when advertised contains caps outside knownServerCaps.
 func logUnknownCaps(nodeID string, advertised []string) {
 	if len(advertised) == 0 {

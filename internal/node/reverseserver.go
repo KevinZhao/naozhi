@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/netutil"
@@ -296,6 +297,27 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// EventEntry schema gate. Every `event` / `events` frame on this link carries
+	// EventEntry, so a peer on another version of that shape is not missing a
+	// feature — its events decode into the wrong struct and the damage is silent.
+	// Refuse instead, naming both tags so the operator knows which side to
+	// upgrade. Absence of the tag is compatible by construction; see
+	// clievent.SchemaCapMismatch.
+	if peerTag := clievent.SchemaCapMismatch(msg.Capabilities); peerTag != "" {
+		slog.Warn("reverse node rejected: EventEntry schema mismatch",
+			"node_id", osutil.SanitizeForLog(msg.NodeID, 64),
+			"ip", ip,
+			"node_schema", osutil.SanitizeForLog(peerTag, 32),
+			"hub_schema", clievent.SchemaCap,
+			"hint", "upgrade whichever side is older; the two speak different event payloads")
+		conn.WriteJSON(ReverseMsg{ //nolint:errcheck // closing either way
+			Type:  "register_fail",
+			Error: "event schema mismatch: node speaks " + peerTag + ", hub speaks " + clievent.SchemaCap,
+		})
+		conn.Close()
+		return
+	}
+
 	// Authenticated: one RPC frame carries at most one stream-json line (#2084).
 	conn.SetReadLimit(limits.MaxStreamJSONLine)
 
@@ -358,7 +380,12 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		abortAck()
 		return
 	}
-	if err := conn.WriteJSON(ReverseMsg{Type: "registered"}); err != nil {
+	// The ack carries the hub's own caps so the check is symmetric: the node
+	// gates on this exactly as the hub gated on its register frame. Without it
+	// only one side can tell the two disagree, and which side notices decides
+	// whether the operator sees a clear refusal or a stream of wrong events.
+	// Additive field — a node predating this ignores it.
+	if err := conn.WriteJSON(ReverseMsg{Type: "registered", Capabilities: HubCaps()}); err != nil {
 		abortAck()
 		return
 	}
