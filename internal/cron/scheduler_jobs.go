@@ -468,11 +468,17 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		}
 	}
 
-	// Critical section is an IIFE with deferred unlock. robfig/cron Remove and
-	// AddFunc send on unbuffered channels drained by the cron run goroutine,
-	// whose tick callbacks take s.mu.RLock — calling them under s.mu risks a
-	// lock-order inversion. So the IIFE only applies fields, snapshots the old
-	// entryID (zeroing j.entryID), and persists; cron ops run post-unlock.
+	// Critical section is an IIFE with deferred unlock. robfig/cron's Remove and
+	// Schedule rendezvous with the run loop over unbuffered channels, and Remove
+	// is a full round trip. That is a LATENCY problem, not a deadlock one: run()
+	// never takes runningMu and startJob hands each tick to a fresh goroutine, so
+	// nothing reaches s.mu holding runningMu and s.mu → runningMu cannot close a
+	// cycle (the same reasoning as the schedNeedsRereg block below, which is the
+	// one place that spells it out). Holding s.mu across the rendezvous would make
+	// every registry reader — the dashboard's 1 Hz list, each tick's own jobs[id]
+	// lookup — queue behind the run loop. So the IIFE only applies fields,
+	// snapshots the old entryID (zeroing j.entryID), and persists; cron ops run
+	// post-unlock.
 	var (
 		schedRemoveEntryID cronEntryID
 		schedOldSchedule   string
@@ -810,27 +816,24 @@ func (s *Scheduler) TriggerNow(id string) error {
 // shared with TriggerNow (a Pause landing while robfig is mid-dispatch is
 // honoured there).
 func (s *Scheduler) registerJob(j *Job) error {
-	jobID := j.ID
-	// Closure built by newCronTickCallback so the dispatch-boundary contract
-	// (jobID-only capture, single executeJobIDIfLive call site) lives in one
-	// place (#785).
-	entryID, err := s.cron.AddFunc(j.Schedule, s.newCronTickCallback(jobID))
+	// Parse + derive first (pure), then hand the parsed schedule to robfig. The
+	// old shape called AddFunc and then read the schedule back with
+	// s.cron.Entry(entryID) purely to fill the cache — a blocking round trip with
+	// the run loop, performed with s.mu held. The value was already in hand.
+	//
+	// The cache exists so per-tick applyJitterSched need not run sched.Next twice,
+	// and so handleList's 1 Hz HasMissedSchedule fanout avoids re-parsing (#664,
+	// #477). It is now always populated: a parse failure returns before anything
+	// is registered, so the "entry vanished, cache it as zero" branch the
+	// read-back needed has no remaining case.
+	//
+	// Every caller still holds s.mu across commitCronEntry; see cron_entry.go for
+	// why that is latency rather than deadlock, and what removing it costs.
+	p, err := planCronEntry(j.ID, j.Schedule, time.Now())
 	if err != nil {
-		return fmt.Errorf("register cron: %w", err)
+		return err
 	}
-	j.entryID = entryID
-	// Cache the period so per-tick applyJitterSched need not run sched.Next
-	// twice; UpdateJob's Schedule branch re-runs registerJob so the cache
-	// tracks the live entry. Zero leaves callers on the jitterMax fallback (#664).
-	if sched := s.cron.Entry(entryID).Schedule; sched != nil {
-		j.cachedPeriod = schedulePeriodFromSched(sched, time.Now())
-		// Parsed schedule cached alongside so handleList's 1Hz HasMissedSchedule
-		// fanout avoids cronParser.Parse (#477).
-		j.cachedSched = sched
-	} else {
-		j.cachedPeriod = 0
-		j.cachedSched = nil
-	}
+	applyCronEntry(j, p, s.commitCronEntry(p))
 	return nil
 }
 

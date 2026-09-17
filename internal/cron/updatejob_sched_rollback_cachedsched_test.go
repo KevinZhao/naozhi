@@ -51,7 +51,7 @@ func TestUpdateJob_ScheduleChangeRollback_RestoresCachedSched(t *testing.T) {
 		t.Fatal("precondition: cachedSched must be non-nil for a registered active job")
 	}
 
-	// Attempt UpdateJob with an invalid schedule string. robfig/cron.AddFunc
+	// Attempt UpdateJob with an invalid schedule string. planCronEntry
 	// will reject it, triggering schedRegErr != nil → rollback path.
 	invalidSched := "NOT_A_VALID_CRON_SPEC"
 	_, err := s.UpdateJob(j.ID, JobUpdate{Schedule: &invalidSched})

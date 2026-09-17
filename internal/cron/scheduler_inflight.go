@@ -38,7 +38,7 @@ func recordTriggerNowPanic(jobID string, r any) {
 }
 
 // executeJobIDIfLive is the shared lookup-and-dispatch primitive for TriggerNow
-// (executeIfNotDeletedOrPaused) and the registerJob AddFunc closure; only the
+// (executeIfNotDeletedOrPaused) and the registered tick closure; only the
 // viaTriggerNow flag and the skip-log subject ("TriggerNow:" vs "cron:") differ.
 func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubject string) {
 	s.mu.RLock()
