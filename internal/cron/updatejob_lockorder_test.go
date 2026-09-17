@@ -8,7 +8,7 @@ import (
 
 // TestUpdateJob_ScheduleChange_SurvivesConcurrentReaders drives UpdateJob's
 // schedule-change branch — the one that calls s.cron.Remove and then
-// registerJob (AddFunc + Entry) — against concurrent s.mu readers, and checks
+// registerJob (the robfig Schedule rendezvous) — against concurrent s.mu readers, and checks
 // that the job survives with a live record.
 //
 // This file used to also carry TestUpdateJob_CronOpsOutsideMu_Structural, a

@@ -10,7 +10,7 @@ import (
 //
 // TestRegisterJob_UsesNewCronTickCallbackFactory pinned three things by text:
 // that a newCronTickCallback factory exists with a given signature, that
-// registerJob calls it at the AddFunc site instead of an inline closure, and that
+// registerJob calls it at the registration site instead of an inline closure, and that
 // the factory passes executeJobIDIfLive(jobID, false, "cron").
 //
 // The first two are code organisation: an inline closure doing the same three
@@ -38,10 +38,10 @@ func TestRegisterJob_TickReportsScheduledTrigger(t *testing.T) {
 		t.Fatalf("registerJob: %v", err)
 	}
 
-	// Whatever registerJob handed AddFunc — factory or closure — this is it.
+	// Whatever registerJob handed robfig — factory or closure — this is it.
 	entry := s.cron.Entry(j.entryID)
 	if entry.Job == nil {
-		t.Fatalf("no cron entry registered for job %s; registerJob did not reach AddFunc", jobID)
+		t.Fatalf("no cron entry registered for job %s; registerJob did not reach commitCronEntry", jobID)
 	}
 	entry.Job.Run()
 

@@ -10,7 +10,7 @@ import (
 // TestSetJobPrompt_UsesIIFEWithDeferUnlock_Structural pins R112714-LOGIC-2:
 // SetJobPrompt must wrap its critical section in an IIFE with
 // defer s.mu.Unlock() so that a panic inside resumeJobLocked (→ registerJob
-// → AddFunc) does not permanently lock the mutex. The previous code used
+// → the robfig registration) does not permanently lock the mutex. The previous code used
 // s.mu.Lock() without defer and relied on 5 explicit Unlock() calls across
 // all return paths — a panic skipped all of them.
 //

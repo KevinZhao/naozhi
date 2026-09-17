@@ -94,7 +94,7 @@ func TestScheduler_RunJobPropagatesBackendToAgentOpts(t *testing.T) {
 			}
 			// Register manually so we don't have to wait for the cron
 			// scheduler to tick. executeOpt is the path real ticks land
-			// in via cron.AddFunc — calling it directly with viaTriggerNow=true
+			// in via the registered tick — calling it directly with viaTriggerNow=true
 			// skips jitter so the test stays fast and deterministic.
 			s.mu.Lock()
 			s.jobs[j.ID] = j
