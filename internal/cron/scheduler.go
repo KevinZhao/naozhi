@@ -545,33 +545,23 @@ func (s *Scheduler) Start() error {
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
 	if s.runStoreEnabled() {
-		s.gcWG.Add(1)
-		go func() {
-			defer s.gcWG.Done()
+		s.goStartupPass("run-history-gc", func() {
 			slog.Info("cron run history: cold-start GC starting")
 			// 传 stopCtx 进 trimAll，Stop 可在 job 入口之间中断长时间的 GC 扫描 (#1019)。
 			s.trimAllRuns(s.stopCtx, time.Now())
 			slog.Info("cron run history: cold-start GC done")
-		}()
+		})
 	}
 	// agentcore-cloud-sandbox §6.5: reconcile sandbox runs orphaned by the
 	// previous process (pending files whose streams died with it). Async
 	// like the GC pass above — each orphan costs a StopRuntimeSession
 	// network call and must not block Start. gcWG-tracked so Stop() waits.
-	s.gcWG.Add(1)
-	go func() {
-		defer s.gcWG.Done()
-		s.reconcileSandboxPending()
-	}()
+	s.goStartupPass("sandbox-pending-reconcile", s.reconcileSandboxPending)
 	// Epic H #2546: local runs left in flight by the previous process. Unlike a
 	// sandbox orphan there is nothing to stop — the process is gone — so this only
 	// writes the history rows that were missing. Async + gcWG-tracked for the same
 	// reason as the pass above: it touches the run store and must not block Start.
-	s.gcWG.Add(1)
-	go func() {
-		defer s.gcWG.Done()
-		s.reconcileRunInflight()
-	}()
+	s.goStartupPass("run-inflight-reconcile", s.reconcileRunInflight)
 	slog.Info("cron scheduler started", "jobs", jobCount)
 	return nil
 }
