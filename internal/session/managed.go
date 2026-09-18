@@ -337,6 +337,19 @@ type ManagedSession struct {
 	lastCumulative        costledger.Cumulative
 	spent                 costledger.Totals
 	modelsBaselineUnknown bool
+	// costBaselineUnknown marks a session whose CLI had already spent an unknown
+	// amount before this process could observe any of it: an adopted live shim
+	// with no store entry (adoptLiveShimLocked). The first cumulative report then
+	// ESTABLISHES the baseline instead of being attributed as one turn's
+	// increment — otherwise whichever run happens to be first after the restart
+	// is charged for the entire CLI session's history.
+	//
+	// Distinct from modelsBaselineUnknown, which withholds only the per-model
+	// drill-down for a session whose USD baseline WAS persisted. And distinct
+	// from a genuinely new session, whose first cumulative report really is its
+	// increment — which is why this cannot be derived from a zero baseline and
+	// has to be set by the adopt path.
+	costBaselineUnknown bool
 	// costAcct is the router-wide ledger sink; nil in tests that don't wire one.
 	costAcct *costAccounting
 

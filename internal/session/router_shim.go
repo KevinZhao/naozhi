@@ -257,7 +257,15 @@ func (r *Router) adoptLiveShimLocked(state shim.State, backendID string, _ *cli.
 		Backend:   backendID,
 	}
 	r.restoreSessionFromEntry(state.Key, entry)
-	return r.ss.sessions[state.Key]
+	s := r.ss.sessions[state.Key]
+	if s != nil {
+		// The entry above carries no LastCumulativeCost because there is no store
+		// entry to carry it from. Without this the first post-reconnect result —
+		// a CUMULATIVE figure covering turns this process never saw — would be
+		// differenced against zero and billed to whichever run arrives first.
+		s.markCostBaselineUnknown()
+	}
+	return s
 }
 
 func (r *Router) reconnectShims(parentCtx context.Context) {

@@ -140,3 +140,69 @@ func TestAdoptLiveShimLocked_EmptySessionID(t *testing.T) {
 		t.Errorf("idToKey should stay empty when session_id is empty, got %d entries", idxLen)
 	}
 }
+
+// TestAdoptLiveShim_MarksCostBaselineUnknown pins the wiring, not the mechanism:
+// the mechanism is covered by TestAccountTurnCost_AdoptedBaselineChargesNothing‑
+// ForHistory, which sets the flag by hand. Without this test, deleting the
+// markCostBaselineUnknown call from the adopt path turns nothing red — and the
+// symptom would be a cost figure that looks plausible while attributing a whole
+// CLI session's history to whichever run arrived first after a restart.
+//
+// The storeEntry adoptLiveShimLocked builds carries no LastCumulativeCost
+// because there is no store entry to carry it from; that is precisely why the
+// flag has to be set here rather than derived in restoreSessionFromEntry.
+func TestAdoptLiveShim_MarksCostBaselineUnknown(t *testing.T) {
+	r := newTestRouter(3)
+	const key = "cron:09a61c45ad4c76ba"
+
+	r.mu.Lock()
+	sess := r.adoptLiveShimLocked(shim.State{
+		Key:       key,
+		SessionID: "sess-adopted-1",
+		Workspace: "/tmp/ws",
+		Backend:   "claude",
+		ShimPID:   4242,
+	}, "claude", nil)
+	r.mu.Unlock()
+	if sess == nil {
+		t.Fatal("adoptLiveShimLocked published no session")
+	}
+
+	sess.costMu.Lock()
+	marked := sess.costBaselineUnknown
+	sess.costMu.Unlock()
+	if !marked {
+		t.Error("adopted session is not marked costBaselineUnknown: its first cumulative " +
+			"report would be differenced against zero and billed to one run")
+	}
+}
+
+// TestRestoreSessionFromEntry_DoesNotMarkCostBaselineUnknown is the control. A
+// session restored from a real store entry HAS a baseline, so the flag must stay
+// off there or every restart would silently drop one turn's cost.
+func TestRestoreSessionFromEntry_DoesNotMarkCostBaselineUnknown(t *testing.T) {
+	r := newTestRouter(3)
+	const key = "feishu:p2p:restored"
+
+	r.mu.Lock()
+	r.restoreSessionFromEntry(key, &storeEntry{
+		Key:                key,
+		SessionID:          "sess-restored-1",
+		Workspace:          "/tmp/ws",
+		Backend:            "claude",
+		LastCumulativeCost: 1.25,
+	})
+	sess := r.ss.sessions[key]
+	r.mu.Unlock()
+	if sess == nil {
+		t.Fatal("restoreSessionFromEntry published no session")
+	}
+
+	sess.costMu.Lock()
+	marked := sess.costBaselineUnknown
+	sess.costMu.Unlock()
+	if marked {
+		t.Error("store-restored session marked costBaselineUnknown; its baseline was persisted, " +
+			"so the next turn's delta is real and must not be zeroed")
+	}
+}
