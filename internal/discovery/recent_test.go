@@ -707,23 +707,45 @@ func TestRecentSessions_ExcludeByID(t *testing.T) {
 	}
 }
 
-func TestRecentSessions_SkipsHiddenProjectDirs(t *testing.T) {
+// TestRecentSessions_SkipsUnresolvableProjectDirs pins the `workspace == ""`
+// gate: a project dir whose encoded name decodes to no real path yields no
+// session at all, rather than one with an empty workspace that the sidebar
+// would render without a label.
+//
+// It used to be called SkipsHiddenProjectDirs and used "-home--hidden-project",
+// which was wrong twice over. It never exercised the hidden-path logic — the
+// name is unresolvable on any host, so the session was dropped one layer
+// earlier, and the test still passed with isHiddenToolWorkspace neutered (that
+// behaviour is covered by StillSkipsToolHiddenDirs,
+// RelativeHiddenWorkspaceStillSkipped and TestIsHiddenToolWorkspace). And the
+// "home" segment matched the real /home, which on macOS is an autofs trigger:
+// resolveByDirScan descended into it and paid ~2s per ReadDir, in a unit test.
+//
+// So the first segment below must not be the encoding of any real top-level
+// directory. The fallback scan then re-encodes the children of "/" , matches
+// none, and returns without descending anywhere.
+func TestRecentSessions_SkipsUnresolvableProjectDirs(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
-	// A dir name containing "--" should be skipped (hidden path pattern)
-	hiddenDir := filepath.Join(claudeDir, "projects", "-home--hidden-project")
-	if err := os.MkdirAll(hiddenDir, 0o755); err != nil {
+	const encodedDir = "-zzz-naozhi-no-such-workspace-project"
+	unresolvable := filepath.Join(claudeDir, "projects", encodedDir)
+	if err := os.MkdirAll(unresolvable, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Guard the premise: if a real /zzz ever exists this test would be resolving
+	// a live path and asserting the wrong thing.
+	if _, err := os.Stat("/zzz"); err == nil {
+		t.Skip("/zzz exists on this host; the fixture name is no longer unresolvable")
+	}
 	sid := "11111111-0001-0001-0001-000000000001"
-	if err := os.WriteFile(filepath.Join(hiddenDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(unresolvable, sid+".jsonl"), []byte("data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
 	for _, s := range got {
 		if s.SessionID == sid {
-			t.Errorf("session from hidden dir should have been skipped, but appeared: %+v", s)
+			t.Errorf("session from an unresolvable project dir should have been skipped, but appeared: %+v", s)
 		}
 	}
 }
