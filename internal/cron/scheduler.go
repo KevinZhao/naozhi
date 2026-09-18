@@ -30,30 +30,11 @@ import (
 // (runningJobs, telemetry, store*, *Once, sandboxPending*) with own primitives.
 type Scheduler struct {
 	cron *robfigcron.Cron
-	// mu guards the jobs / chatJobCount / jobsByChat trio (RLock reads,
-	// Lock writes). It does NOT cover the immutable-config fields (read
-	// lock-free) nor the independently-synchronised fields (runningJobs /
-	// telemetry / store* / *Once), each of which carries its own primitive.
-	mu sync.RWMutex
-	// 读写: 全部读写持 s.mu（读 RLock / 写 Lock）。jobs / chatJobCount /
-	// jobsByChat 三者在同一把锁下同步变更，不会相互漂移。
-	jobs map[string]*Job
-	// chatJobCount tracks jobs per (Platform, ChatID). Maintained with s.jobs
-	// writes under s.mu so the per-chat capacity check is O(1); entries are
-	// deleted at zero so the working set tracks live chats (#661).
-	chatJobCount map[chatJobKey]int
-	// jobsByChat indexes *Job by (Platform, ChatID) so findByPrefixLocked
-	// scans only the caller's chat (~O(5)) instead of all of s.jobs (O(500)).
-	// Maintained with s.jobs writes under s.mu; entries deleted when the
-	// slice empties. (Platform, ChatID) is immutable post-AddJob, so an entry
-	// never moves across keys — add appends, delete swaps-and-shrinks (#558).
-	jobsByChat map[chatJobKey][]*Job
-	// sortedJobIDs mirrors the keys of s.jobs in ascending ID order,
-	// maintained incrementally at the two s.mu seams that mutate s.jobs
-	// (addToChatIndexLocked / deleteJobLocked) so persist avoids an
-	// O(N log N) sort under s.mu (#1598). s.jobs stays the source of truth:
-	// marshalJobsLocked validates this hint and rebuilds from the map on drift.
-	sortedJobIDs []string
+	// jobTable owns the registry (jobs + its three derived indices), the lock
+	// that keeps them in step, and the snapshot sequence that has to be assigned
+	// under that same lock. See jobtable.go — including why it is embedded rather
+	// than a named field, which is temporary.
+	jobTable
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
 	// configMapsPtr publishes notifySender / agents / agentCommands as one
@@ -186,12 +167,10 @@ type Scheduler struct {
 	// defaults, so the saveMarshaledSeq hot path clamps once per process.
 	storeDirOnce sync.Once
 
-	// saveSeq tags every marshaled snapshot at capture time (under s.mu);
-	// saveMarshaled skips the write under storeMu if lastSavedSeq is already
-	// newer. sync.Mutex is not FIFO, so an older snapshot could otherwise
-	// reach storeMu after a newer one and overwrite it on disk; the seq gate
-	// makes saveMarshaled idempotent w.r.t. stale payloads.
-	saveSeq      atomic.Uint64 // assigned while holding s.mu
+	// lastSavedSeq gates stale writes against jobTable.saveSeq: saveMarshaled
+	// skips the write if what already landed is newer. The counter itself lives
+	// in jobTable because it must be assigned under the same lock that takes the
+	// snapshot it tags — see jobtable.go.
 	lastSavedSeq atomic.Uint64 // read/CAS'd while holding storeMu
 
 	// runStore persists a CronRun record per terminal execution (P1
@@ -296,10 +275,8 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 				robfigcron.SkipIfStillRunning(cronLogger),
 			),
 		),
-		jobs:         make(map[string]*Job),
-		chatJobCount: make(map[chatJobKey]int),
-		jobsByChat:   make(map[chatJobKey][]*Job),
-		router:       deps.Router,
+		jobTable: newJobTable(),
+		router:   deps.Router,
 		// notifySender / agents / agentCommands are published via configMapsPtr below.
 		storePath:      cfg.StorePath,
 		maxJobs:        cfg.MaxJobs,

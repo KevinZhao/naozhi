@@ -198,3 +198,27 @@ func (t *jobTable) apply(id string, m jobMutation) (jobsSnapshot, bool)
 2. `sandbox_replay.go` 那个已经是幻觉的复合 RLock 保证：修还是删注释？（**阻塞步 2**）
 3. §8.5 的 analyzer 要不要写？不写就接受"gate 不与表同时持有"在步 4 后没有机器保障。
 4. `sandboxEventsSem` 的进程级语义在子包化后如何保留（移进子包 = 每个 Scheduler 各一份，是行为变化）。
+
+## 10. v2 → v3：步 2 开工时的实测修正
+
+v2 之后 owner 定了两件事：#2740（`s.mu` 持锁跨 robfig）**不是外部阻塞而是步 2 的子步**，先移出再提表；#2741 判为**删注释即可**。开工时逐条核实 v2 的前提，有五处需要改：
+
+| v2 的说法 | 实测 | 处理 |
+|---|---|---|
+| §3.2「`saveSeq` 留在 `Scheduler`：它是 marshal 与状态的全序，不属于表」 | **反了**。正因为它是"snapshot 与它代表的状态的全序"，`saveSeq.Add(1)` 必须与快照在**同一次临界区**内（`scheduler_persist.go:146`、`:215` 两处都是）。锁进了表而计数器留在 Scheduler，两个快照就可能在一把不再序列化它们的锁下各取一个 seq —— 全序静默断掉 | `saveSeq` **随锁一起进 jobTable** |
+| §4.1「`s.mu` 持锁跨 robfig 是既有违规，靠 robfig 内部实现才没炸」 | 更精确：`run()`（cron.go:263-279）**从不取 `runningMu`**，`startJob`（:308-314）把回调交给新 goroutine，所以 `s.mu → runningMu` **不可能成环**。代价是 **reader latency**，不是死锁。仓库 `scheduler_jobs.go:540` 已推出此结论，而同文件 :471 写了相反的话 —— 已在 #2756 修正 | 问题陈述改写；`s.cron.Entry()` 的**往返**会合已在 #2756 消除 |
+| §4.1 列 `registerJob` 的违规站点含 `Start()` | `Start()` 内那处**不违规**：`s.cron.Start()` 在其后，`!c.running` 时 `Schedule` 走 `c.entries = append(...)`，**没有 channel 会合**（cron.go:168-172） | 违规站点是 **5 处**（`AddJob` 1 + `resumeJobLocked` 的三个调用者 + `UpdateJob` 2），不是 6 处 |
+| §4.1「`sandbox_replay` 那个复合 RLock 保证已是幻觉，步 2 前要么修要么删注释」 | 核实确认：`stopWithCtx` 全函数体内 `s.mu.` 出现 **0 次**；且 `stopped` 是 `atomic.Bool`，在 RLock 下读它本就多余；同一文件 :119 自己写着"the earlier stopped check is stale by now"并二次检查 —— **在同一文件里自我否证** | 那把锁**移除**（它什么都不守，只让 registry 读者排队），注释改成陈述真实残留风险：`Add` 与 `Wait` 不原子，落在 `Stop` 契约已声明的"intentional orphans"桶里 |
+| §5.2「步 2 的主要成本是 415 处测试引用」 | 成立，但可以**不在同一个 PR 里付**：把 `jobTable` **嵌入** `Scheduler`（而非命名字段），`s.jobs` / `s.mu` 因字段提升照常解析，560 行测试**零改动**编译通过。真正需要改的只有**结构体字面量**（Go 不允许对提升字段用字面量键）—— 实测全仓仅 **2 个文件 5 处** | 步 2 拆成 2a/2b（下） |
+
+### 10.1 步 2 拆成 2a / 2b / 2c
+
+- **2a（本次）**：四个字段 + 锁 + `saveSeq` 收进 `jobTable`，**嵌入** `Scheduler`；定义值语义读 API（`exists` / `count` / `countForChat` / `ids` / `liveness` / `lastSessionID`）；把**自己取锁只为一次读**的生产站点转过去；#2741 落地。零测试语义改动。
+- **2b**：74 个测试文件迁到 `export_test.go` 的测试专用口，然后**去掉嵌入**（`jobTable` 变命名字段 `tbl`）—— 封闭性只在这一步才真正被强制，而不是仅被"提供"。两个外部夹逼测试按 §8.2 的口径重新表达。
+- **2c**：写路径 + `entryState`（none / pending / live）+ 把 robfig 的单向发送移出锁（#2740 剩余的 5 处）。`entryState` 从一开始就是 `jobTable` API 的一部分，而不是先在现结构上加一个第三态、再随表重做一遍。
+
+**为什么把 #2740 的剩余部分放到 2c 而不是 2a 之前**（owner 已采纳）：那 5 处每处都嵌在自己的 persist/rollback 顺序里（`AddJob` 的 `rollbackEntryID`、`SetJobPrompt` 的 `pauseRollbackCleanup`、`UpdateJob` 的"恢复 `prevCachedSched` 而非置 nil"）。`AddJob` 尤其危险：job 已进 `s.jobs` 而 `entryID` 仍为 0 时，并发的 `UpdateJob` 会看到 0 → 跳过 `Remove` → 注册第二个 entry → **同一 job 双触发**。关掉它需要"注册中"这个第三态，而那本就该是 `jobTable` 的 API。
+
+### 10.2 2a 之后剩下的唯一生产逃逸口
+
+`executeJobIDIfLive`（`scheduler_inflight.go`）必须让**活的 `*Job` 指针**逃出临界区，因为 `executeOpt` 收的是 `*Job`。这是 2a 之后生产代码里唯一一处，已在原地写明。关掉它 = 给 `executeOpt` 一个快照，属 run 管线的改动而非 registry 的，留给步 5 或独立处理。

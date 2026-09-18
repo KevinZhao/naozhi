@@ -53,10 +53,7 @@ func (r stubRefresher) run() {
 	if !r.active {
 		return
 	}
-	r.s.mu.RLock()
-	_, exists := r.s.jobs[r.jobID]
-	r.s.mu.RUnlock()
-	if exists {
+	if r.s.exists(r.jobID) {
 		r.s.registerStubByValue(r.jobID, r.workDir, r.prompt, r.lastSessionID)
 	}
 }
@@ -137,10 +134,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		active:        true,
 	}
 	// (b) post-Reset 存在性检查 — 见上文 lock-pair contract。
-	s.mu.RLock()
-	_, stillExists := s.jobs[snap.jobID]
-	s.mu.RUnlock()
-	if !stillExists {
+	if !s.exists(snap.jobID) {
 		lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
 		// Re-register the sidebar stub BEFORE the finishRun below releases the
 		// inflight CAS gate (#2318): after release a concurrent TriggerNow could
@@ -449,10 +443,7 @@ func (s *Scheduler) execPopulateInflight(j *Job, viaTriggerNow bool, inflight *r
 	// Pause/Delete can land; the jitter-window recheck does not cover TriggerNow
 	// or jitter==0 ticks. Recheck once here before any heavy work; the caller's
 	// finalizer defer releases the CAS on this early return.
-	s.mu.RLock()
-	curCAS, stillRegisteredCAS := s.jobs[j.ID]
-	pausedCAS := stillRegisteredCAS && curCAS.Paused
-	s.mu.RUnlock()
+	stillRegisteredCAS, pausedCAS := s.liveness(j.ID)
 	if !stillRegisteredCAS || pausedCAS {
 		casLg := slog.With("job_id", j.ID, "trigger_now", viaTriggerNow)
 		if !stillRegisteredCAS {
@@ -829,10 +820,7 @@ func (s *Scheduler) execFinishSuccess(rc runCtx, result SendResult, costInc cost
 // the CAS gate, so an unconditional register could resurrect a zombie sidebar row.
 func (s *Scheduler) reapFreshSessionLocked(key string, snap jobSnapshot, sessionID string, lg *slog.Logger) {
 	s.router.Reset(key)
-	s.mu.RLock()
-	_, stillExists := s.jobs[snap.jobID]
-	s.mu.RUnlock()
-	if stillExists {
+	if s.exists(snap.jobID) {
 		s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, sessionID)
 		if sessionID == "" {
 			// registerStubByValue chains the stub only when the session ID is

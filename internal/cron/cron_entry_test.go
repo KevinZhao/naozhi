@@ -42,7 +42,7 @@ func TestRegisterJob_KeepsTheSchedulerChain(t *testing.T) {
 			if tc.chained {
 				opts = append(opts, robfigcron.WithChain(robfigcron.Recover(robfigcron.DiscardLogger)))
 			}
-			s := &Scheduler{jobs: make(map[string]*Job), cron: robfigcron.New(opts...)}
+			s := &Scheduler{jobTable: newJobTable(), cron: robfigcron.New(opts...)}
 
 			j := &Job{ID: "0123456789abcdef", Schedule: "@every 1h"}
 			if err := s.registerJob(j); err != nil {
@@ -77,7 +77,7 @@ func TestRegisterJob_KeepsTheSchedulerChain(t *testing.T) {
 // property rather than ours — worth pinning now that we own it.
 func TestRegisterJob_ParseFailureRegistersNothing(t *testing.T) {
 	t.Parallel()
-	s := &Scheduler{jobs: make(map[string]*Job), cron: robfigcron.New(robfigcron.WithParser(cronParser))}
+	s := &Scheduler{jobTable: newJobTable(), cron: robfigcron.New(robfigcron.WithParser(cronParser))}
 
 	before := len(s.cron.Entries())
 	j := &Job{ID: "0123456789abcdef", Schedule: "not a schedule"}
@@ -121,7 +121,7 @@ func TestPlanCronEntry_IsPureAndMatchesTheCache(t *testing.T) {
 		t.Errorf("period = %v, want 5m", p.period)
 	}
 
-	s := &Scheduler{jobs: make(map[string]*Job), cron: robfigcron.New(robfigcron.WithParser(cronParser))}
+	s := &Scheduler{jobTable: newJobTable(), cron: robfigcron.New(robfigcron.WithParser(cronParser))}
 	j := &Job{ID: p.jobID, Schedule: "*/5 * * * *"}
 	if err := s.registerJob(j); err != nil {
 		t.Fatalf("registerJob: %v", err)

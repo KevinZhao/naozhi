@@ -41,6 +41,10 @@ func recordTriggerNowPanic(jobID string, r any) {
 // (executeIfNotDeletedOrPaused) and the registered tick closure; only the
 // viaTriggerNow flag and the skip-log subject ("TriggerNow:" vs "cron:") differ.
 func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubject string) {
+	// NOT s.liveness(jobID): executeOpt takes the live *Job, so the pointer has to
+	// escape this critical section. That is the one registry escape hatch left in
+	// production, and closing it means giving executeOpt a snapshot instead — a
+	// change to the run pipeline, not to the registry.
 	s.mu.RLock()
 	cur, ok := s.jobs[jobID]
 	paused := ok && cur.Paused
