@@ -301,3 +301,63 @@ func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 		t.Fatal("shadow account must be left for the next result to supersede")
 	}
 }
+
+// TestAccountTurnCost_AdoptedBaselineChargesNothingForHistory covers the shim
+// adopted with no store entry (adoptLiveShimLocked): its CLI has already spent
+// an unknown amount, and the first result it reports is a CUMULATIVE figure
+// covering turns this process never saw. Without the flag that figure is
+// differenced against zero, so whichever run arrives first after the restart is
+// billed for the whole session's history.
+//
+// The contrast with RestoredBaselineWithholdsModelsOnce is the point: there the
+// USD baseline was persisted, so only the per-model rows are withheld and the
+// USD delta is real. Here nothing was persisted, so the first report becomes the
+// baseline and the increment is zero.
+func TestAccountTurnCost_AdoptedBaselineChargesNothingForHistory(t *testing.T) {
+	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
+		&clievent.SendResult{Text: "a", CostUSD: 12.5},
+		&clievent.SendResult{Text: "b", CostUSD: 12.9})}
+	s, ledger := newLedgerSession(t, "cron:adopted", proc)
+	s.markCostBaselineUnknown()
+
+	for i := 0; i < 2; i++ {
+		if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 12.5 was already spent before adoption; only the 0.4 this process observed
+	// is ours.
+	if got := loadTotalCost(&s.costSpent); !approxEq(got, 0.4) {
+		t.Fatalf("costSpent = %v, want 0.4 — the pre-adoption 12.5 must not be attributed", got)
+	}
+	// The baseline-establishing turn writes no ledger row, because ledgerEntries
+	// already skips zero increments — the same treatment any other zero-cost turn
+	// gets. So the ledger holds exactly the 0.4 this process actually observed,
+	// and never a 12.5 row attributing someone else's history to this run.
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 {
+		t.Fatalf("entries = %d, want 1 (the baseline turn is a zero increment)", len(ents))
+	}
+	if !approxEq(ents[0].Amount, 0.4) {
+		t.Errorf("ledger amount = %v, want 0.4", ents[0].Amount)
+	}
+}
+
+// TestAccountTurnCost_NewSessionStillChargesItsFirstTurn is the control: the
+// flag must not leak into the ordinary path, where a first cumulative report
+// genuinely IS the increment. Without this, "charge nothing for the first turn"
+// would look correct in the test above while silently zeroing every new
+// session's opening turn.
+func TestAccountTurnCost_NewSessionStillChargesItsFirstTurn(t *testing.T) {
+	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
+		&clievent.SendResult{Text: "a", CostUSD: 0.7})}
+	s := &ManagedSession{key: "feishu:p2p:brandnew"}
+	s.storeProcess(proc)
+	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadTotalCost(&s.costSpent); !approxEq(got, 0.7) {
+		t.Fatalf("costSpent = %v, want 0.7 — a new session's first report is its increment", got)
+	}
+}
