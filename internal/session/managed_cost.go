@@ -118,6 +118,15 @@ func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID stri
 	raw := cumulativeFromResult(result, metering)
 
 	s.costMu.Lock()
+	if s.costBaselineUnknown {
+		// Adopt whatever the CLI has counted so far as the baseline, so this turn
+		// reports a zero increment and every later turn differences correctly
+		// against it. The pre-adoption spend stays unattributed on purpose: this
+		// process never saw the turns that produced it, and guessing would put a
+		// whole session's history on one run's bill.
+		s.costBaselineUnknown = false
+		s.lastCumulative = raw
+	}
 	inc, next := costledger.Delta(raw, s.lastCumulative)
 	s.lastCumulative = next
 	storeTotalCost(&s.lastCumulativeCost, next.USD)
@@ -251,6 +260,7 @@ func copyCostBaseline(fresh, old *ManagedSession) {
 	fresh.lastCumulative = cloneCumulative(old.lastCumulative)
 	fresh.spent = old.spent.Accumulate(costledger.Increment{})
 	fresh.modelsBaselineUnknown = old.modelsBaselineUnknown
+	fresh.costBaselineUnknown = old.costBaselineUnknown
 	old.costMu.Unlock()
 	storeTotalCost(&fresh.costSpent, loadTotalCost(&old.costSpent))
 	storeTotalCost(&fresh.lastCumulativeCost, loadTotalCost(&old.lastCumulativeCost))
@@ -281,4 +291,13 @@ func newRunID() string {
 		return ""
 	}
 	return id
+}
+
+// markCostBaselineUnknown declares that this session's CLI has already spent an
+// unknown amount that no baseline records. Set by the adopt path only; the next
+// accountTurnCost consumes it. See the field comment in managed.go.
+func (s *ManagedSession) markCostBaselineUnknown() {
+	s.costMu.Lock()
+	s.costBaselineUnknown = true
+	s.costMu.Unlock()
 }
