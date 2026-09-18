@@ -39,13 +39,13 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 		return "", errInvalidAttentionID
 	}
 
-	// Read s.stopped under the same RLock that snapshots the job so the triggerWG
-	// registration cannot race Stop's drain.
-	s.mu.RLock()
+	// stopped is an atomic and stopWithCtx never takes s.mu, so reading it inside
+	// this lock hold would order it against nothing. Check it first, then take the
+	// lock for the registry read that actually needs it.
 	if s.stopped.Load() {
-		s.mu.RUnlock()
 		return "", ErrSchedulerStopped
 	}
+	s.mu.RLock()
 	j, ok := s.jobs[jobID]
 	if !ok {
 		s.mu.RUnlock()
@@ -113,18 +113,21 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 		slog.Info("cron sandbox: pre-replay Stop confirmed (§6.2 rule 1)", "job_id", jobID, "orig_run_id", origRunID)
 	}
 
-	// triggerWG.Add MUST happen under the s.stopped RLock: Stop() sets s.stopped
-	// before Wait(), so an Add outside the lock could land on a zero counter
-	// concurrently with the drain and let the goroutine escape (#2012). The
-	// earlier stopped check is stale by now — re-check. Do NOT hold the lock
-	// across dispatchReplay: it re-acquires s.mu.RLock via snapshotJob.
-	s.mu.RLock()
+	// Re-check stopped: the one above is stale by now, and this is the last point
+	// before a goroutine joins triggerWG.
+	//
+	// This check and the Add are NOT atomic against Stop, and no lock here can
+	// make them so: stopWithCtx takes no scheduler lock at all, so it can set
+	// stopped and enter triggerWG.Wait between these two lines. The RLock this
+	// code used to hold was ordering the pair against nothing — it only made
+	// every registry reader wait. The residual exposure is a replay goroutine
+	// joining the WaitGroup as the drain begins, which lands in the same bucket
+	// Stop's contract already names: intentional orphans that may outlive the
+	// shutdown budget.
 	if s.stopped.Load() {
-		s.mu.RUnlock()
 		return "", ErrSchedulerStopped
 	}
 	s.triggerWG.Add(1)
-	s.mu.RUnlock()
 	newRunID, derr := s.dispatchReplay(jobCopy, prompt, man.Model, origRunID)
 	if derr != nil {
 		// Pre-spawn failure (CAS lost / generate failed): undo the registration; once

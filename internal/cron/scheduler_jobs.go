@@ -602,11 +602,9 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	// registerJob ran and a concurrent recordTerminalResult may have written
 	// a newer session id, which would anchor the sidebar stub on a stale one.
 	if schedNeedsRereg {
-		s.mu.RLock()
-		if lj := s.jobs[id]; lj != nil {
-			result.LastSessionID = lj.LastSessionID
+		if live, ok := s.lastSessionID(id); ok {
+			result.LastSessionID = live
 		}
-		s.mu.RUnlock()
 	}
 	save()
 	// Pass the snapshotted value (via result) to registerStub so a concurrent

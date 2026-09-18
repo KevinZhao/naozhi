@@ -113,10 +113,7 @@ func (s *Scheduler) runStoreEnabled() bool {
 // so a concurrent DeleteJobByID does not get its runs subtree resurrected by
 // appendRun's ensureJobDir (#2058).
 func (s *Scheduler) jobStillExists(jobID string) bool {
-	s.mu.RLock()
-	_, exists := s.jobs[jobID]
-	s.mu.RUnlock()
-	return exists
+	return s.exists(jobID)
 }
 
 // appendRun persists one CronRun via the runStore. No-op when persistence is
