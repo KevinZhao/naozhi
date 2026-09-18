@@ -402,6 +402,18 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		if err := validateSchedule(*upd.Schedule, s.previewLocation()); err != nil {
 			return nil, fmt.Errorf("invalid schedule %q: %w", *upd.Schedule, err)
 		}
+		// A schedule change swaps this job's robfig entry, and that swap spans the
+		// window where the IIFE below releases s.mu on purpose. entryMu is what
+		// keeps two such swaps from each registering an entry and leaving the job
+		// firing on the union of two schedules — see entry_registration.go.
+		//
+		// Taken only when a schedule change is REQUESTED, so prompt/workdir edits
+		// never touch it, and taken before s.mu to honour the lock order. Held to
+		// function exit rather than to the end of the re-register block: the
+		// rollback paths in between also write the entry id, and a schedule change
+		// is a dashboard edit, not a hot path.
+		s.entryMu.Lock()
+		defer s.entryMu.Unlock()
 	}
 	// Lock-free WorkDir check so dashboard edits fail fast instead of
 	// persisting a path execute() will refuse at runtime.

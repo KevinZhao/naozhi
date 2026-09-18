@@ -35,6 +35,10 @@ type Scheduler struct {
 	// under that same lock. See jobtable.go — including why it is embedded rather
 	// than a named field, which is temporary.
 	jobTable
+	// entryMu serialises the writers that swap a job's robfig entry across the
+	// window where s.mu is deliberately released. See entry_registration.go for
+	// the interleaving it prevents and the lock order it imposes.
+	entryMu sync.Mutex
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
 	// configMapsPtr publishes notifySender / agents / agentCommands as one
