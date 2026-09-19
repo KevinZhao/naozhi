@@ -3,7 +3,9 @@ package persist
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
@@ -18,7 +20,31 @@ type sessionSink struct {
 	p    *Persister
 	key  string
 	stem string
+	// pendingGap counts entries this sink dropped since its last successful
+	// hand-off. The drop site cannot leave a durable mark itself — the channel
+	// is full, and pushing a marker into the same channel would drop with the
+	// batch — so the NEXT batch that does get through carries a gap record in
+	// front (#2664). Reading events/<key> then distinguishes "no messages in
+	// this span" from "a batch was dropped here", which droppedCnt (process
+	// memory, reset on restart) and one Warn line (log retention) never could.
+	pendingGap atomic.Int64
 }
+
+// gapEntryJSON is the persisted gap record's body: EventEntry-shaped JSON built
+// by hand because persist deliberately does not import clievent. Field names
+// must match clievent.EventEntry's json tags — the linkage is pinned by
+// TestGapEntryShape_MatchesEventEntry.
+type gapEntryJSON struct {
+	Time    int64  `json:"time"`
+	Type    string `json:"type"`
+	Summary string `json:"summary,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// gapEntryType is the EventEntry.Type of a persistence-gap record. Additive:
+// consumers that predate it render the summary text through their default
+// branch (dashboard.js eventHtml), which is exactly the visibility wanted.
+const gapEntryType = "persist_gap"
 
 func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	p := s.p
@@ -43,8 +69,27 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	// arena and materialise our own headers (#1524). Two passes: append all
 	// bytes first (the buffer may grow and move), then resolve sub-slices.
 	// owned/spans come from the same arena rather than make() (#1630).
+	// A pending gap from earlier drops rides in front of this batch: its
+	// timestamp is this batch's first entry, so the gap reads as "between the
+	// previous persisted record and this one" — the granularity a reader needs.
+	// Swap-and-restore: if THIS batch also drops, the count goes back (plus the
+	// batch) rather than vanishing.
+	gapN := s.pendingGap.Swap(0)
+	var gapJSON []byte
+	if gapN > 0 {
+		gapJSON, _ = json.Marshal(gapEntryJSON{
+			Time:    entries[0].TimeMS,
+			Type:    gapEntryType,
+			Summary: fmt.Sprintf("事件缺口：持久化过载，此前丢弃 %d 条事件", gapN),
+			Detail:  fmt.Sprintf("dropped=%d reason=persist_channel_full", gapN),
+		})
+	}
+
 	arena := entryArenaPool.Get().(*batchArena)
 	n := len(entries)
+	if gapJSON != nil {
+		n++
+	}
 	owned := arena.owned
 	if cap(owned) >= n {
 		owned = owned[:n]
@@ -59,11 +104,18 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	}
 	arena.owned = owned
 	arena.spans = spans
+	off := 0
+	if gapJSON != nil {
+		arena.buf.Write(gapJSON)
+		spans[0] = arenaSpan{start: 0, end: arena.buf.Len()}
+		owned[0] = Entry{TimeMS: entries[0].TimeMS}
+		off = 1
+	}
 	for i, e := range entries {
 		start := arena.buf.Len()
 		arena.buf.Write(e.JSON)
-		spans[i] = arenaSpan{start: start, end: arena.buf.Len()}
-		owned[i] = Entry{TimeMS: e.TimeMS}
+		spans[i+off] = arenaSpan{start: start, end: arena.buf.Len()}
+		owned[i+off] = Entry{TimeMS: e.TimeMS}
 	}
 	all := arena.buf.Bytes()
 	for i := range owned {
@@ -75,6 +127,10 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	default:
 		putEntryArena(arena)
 		p.droppedCnt.Add(int64(len(entries)))
+		// The swapped-out gap count rides back in plus this batch: the drop
+		// tally survives until a batch finally gets through and materialises
+		// the gap record on disk.
+		s.pendingGap.Add(gapN + int64(len(entries)))
 		p.opts.Observer.OnDrop(len(entries))
 		// channel_used distinguishes a wedged writer from an instantaneous
 		// burst overrun (#1184).
