@@ -77,6 +77,14 @@ type runOutcome struct {
 	// mid-execute) out of Job state and runs/ history. Metrics and the WS
 	// broadcast still fire.
 	skipPersist bool
+	// keepInflightMarker survives this finish: set ONLY by the shutdown-cancel
+	// paths, where the Send's ctx died because the PROCESS is going away while
+	// the CLI keeps running behind its shim. The marker's claim — "this run
+	// never finished" — is still true then, and deleting it would disinherit
+	// the next process's adoption pass (#2712 PR B): the run would vanish
+	// instead of completing across the restart. Every other terminal state
+	// still clears the marker.
+	keepInflightMarker bool
 	// costInc is a local run's spend; sandbox runs carry cost via sandboxMeta.
 	costInc costledger.Increment
 	// endedAt, when non-zero, overrides finishRun's own clock read so a caller
@@ -97,24 +105,25 @@ type runOutcome struct {
 // pre-snapshot" contract finishArgs already documents.
 func (s *Scheduler) finishRunFor(rc runCtx, out runOutcome) {
 	s.finishRun(finishArgs{
-		job:         rc.job,
-		runID:       rc.runID,
-		startedAt:   rc.startedAt,
-		trigger:     rc.trigger,
-		finalizer:   rc.finalizer,
-		prompt:      rc.snap.prompt,
-		workDir:     rc.snap.workDir,
-		fresh:       rc.snap.fresh,
-		state:       out.state,
-		errClass:    out.errClass,
-		errMsg:      out.errMsg,
-		result:      out.result,
-		sessionID:   out.sessionID,
-		skipPersist: out.skipPersist,
-		costInc:     out.costInc,
-		endedAt:     out.endedAt,
-		sandboxMeta: out.sandboxMeta,
-		sandbox:     out.sandbox,
-		replayOf:    out.replayOf,
+		job:                rc.job,
+		runID:              rc.runID,
+		startedAt:          rc.startedAt,
+		trigger:            rc.trigger,
+		finalizer:          rc.finalizer,
+		prompt:             rc.snap.prompt,
+		workDir:            rc.snap.workDir,
+		fresh:              rc.snap.fresh,
+		state:              out.state,
+		errClass:           out.errClass,
+		errMsg:             out.errMsg,
+		result:             out.result,
+		sessionID:          out.sessionID,
+		skipPersist:        out.skipPersist,
+		keepInflightMarker: out.keepInflightMarker,
+		costInc:            out.costInc,
+		endedAt:            out.endedAt,
+		sandboxMeta:        out.sandboxMeta,
+		sandbox:            out.sandbox,
+		replayOf:           out.replayOf,
 	})
 }

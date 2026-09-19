@@ -232,3 +232,45 @@ func TestAdoption_ShutdownResolvesWait(t *testing.T) {
 		t.Errorf("ErrorClass = %s, want interrupted after shutdown cut the wait", got.ErrorClass)
 	}
 }
+
+// TestShutdownCancelKeepsMarker pins the discovery from the first real-machine
+// end-to-end (#2712): a GRACEFUL shutdown — the way every actual upgrade
+// restarts naozhi — cancels the in-flight Send via stopCtx, and that finish
+// used to delete the restart marker. The CLI keeps running behind its shim,
+// so the marker's claim is still true, and without it the adoption pass in
+// the next process has nothing to adopt: the whole feature was reachable only
+// after a hard kill. Shutdown-cancel must leave the marker; an operator
+// interrupt must not.
+func TestShutdownCancelKeepsMarker(t *testing.T) {
+	t.Parallel()
+	s, jobID, runID, _ := seedMarkedRun(t, &fakeRouter{}, 0)
+	markerPath := filepath.Join(s.runInflightDir(), runID+".json")
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("seed marker missing: %v", err)
+	}
+
+	j, _ := func() (*Job, bool) { s.mu.RLock(); defer s.mu.RUnlock(); jj, ok := s.jobs[jobID]; return jj, ok }()
+	rc := runCtx{
+		snap:      jobSnapshot{jobID: jobID, prompt: "p", workDir: "/tmp/wd"},
+		startedAt: time.Now().Add(-30 * time.Second),
+		runID:     runID, trigger: TriggerScheduled, job: j, lg: slog.Default(),
+	}
+
+	// Shutdown-cancel: marker survives.
+	s.finishRunFor(rc, runOutcome{
+		state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: "context canceled",
+		skipPersist: true, keepInflightMarker: true,
+	})
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("shutdown-cancel deleted the marker; the next process cannot adopt this run: %v", err)
+	}
+
+	// Operator cancel (same skipPersist shape, keep flag off): marker cleared.
+	s.finishRunFor(rc, runOutcome{
+		state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: "interrupted by operator",
+		skipPersist: true,
+	})
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("operator cancel left the marker (stat err=%v); next boot would fabricate an interrupted record for a run the operator ended", err)
+	}
+}

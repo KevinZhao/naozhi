@@ -84,6 +84,10 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		s.finishRunFor(args.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 			skipPersist: true,
+			// Shutdown is the one canceller here (this branch IS the stopCtx
+			// check); the run never even spawned, but a marker already written
+			// must survive for the next process to reconcile.
+			keepInflightMarker: true,
 		})
 		return noopRefresh, false
 	}
@@ -724,6 +728,12 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 		s.finishRunFor(a.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 			skipPersist: true, costInc: costInc,
+			// Keep the restart marker only when the cancel came from the process
+			// shutting down (stopCtx) and no operator interrupt landed: the CLI
+			// is still mid-turn behind its shim, and the next process's adoption
+			// pass (#2712) is what turns that into a finished run. An operator
+			// cancel (abort fired) is a genuine finish — marker cleared.
+			keepInflightMarker: s.stopCtx.Err() != nil && !abort.fired,
 		})
 		return
 	}
