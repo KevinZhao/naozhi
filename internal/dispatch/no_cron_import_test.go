@@ -1,3 +1,4 @@
+// anchor-keep: import ban (dispatch must not import cron); the dependency direction is the fact under test and lives only in the import block.
 package dispatch
 
 import (

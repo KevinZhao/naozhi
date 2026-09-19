@@ -1,3 +1,4 @@
+// anchor-keep: leaf-package import ban; sessionkey must stay dependency-free so every layer can name keys.
 package sessionkey_test
 
 import (

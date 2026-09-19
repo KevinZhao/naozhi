@@ -1,3 +1,4 @@
+// anchor-keep: pins that no file in this package reaches a forbidden dependency; package-level structural fact, not a behaviour.
 package cron
 
 import (

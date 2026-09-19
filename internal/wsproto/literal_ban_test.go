@@ -1,3 +1,4 @@
+// anchor-keep: bans message-type string literals outside the const block; the whole package exists so construction sites cannot spell a type by hand, and only source can show a literal.
 package wsproto_test
 
 import (
