@@ -95,14 +95,19 @@ func TestGapRecord_DropDuringCarryRestoresCount(t *testing.T) {
 	const key = "feishu:p2p:gap-refill"
 	s := &sessionSink{p: p, key: key, stem: KeyHash(key)}
 
-	// Stop the persister's drain by stuffing the channel from outside.
-	// (Racing the run loop is unreliable; owning the channel state is not.)
-	blocker := batchJob{Key: "other", Stem: KeyHash("other")}
-	select {
-	case p.in <- blocker:
-	default:
-		t.Skip("drain won the race before the blocker landed; channel-state ownership not available")
+	// Own the channel state outright: Stop() makes the drain goroutine exit
+	// (wg.Wait guarantees it is gone), then the closed latch is flipped back so
+	// accept still runs. A stuffed channel alone is not enough — the drain can
+	// dequeue the blocker between the stuff and the accept, the non-blocking
+	// send then wins, and the assertion reads a consumed counter.
+	if err := p.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
+	p.closed.Store(false)
+	// Restore the latch before the constructor's cleanup calls Stop again —
+	// its CompareAndSwap must lose, or closeCh gets closed twice.
+	defer p.closed.Store(true)
+	p.in <- batchJob{Key: "other", Stem: KeyHash("other")} // fills the cap-1 channel; nothing drains it now
 
 	s.pendingGap.Add(5)
 	s.accept([]Entry{{TimeMS: 1, JSON: []byte(`{"time":1,"type":"text"}`)}}, false)
