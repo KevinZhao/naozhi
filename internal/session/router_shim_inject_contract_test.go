@@ -1,3 +1,4 @@
+// anchor-keep: pins that shim-reconnect routes history through the dedupe seam rather than proc.InjectHistory; the double-inject reproduces only under the tier1/tier2 startup race.
 package session
 
 import (

@@ -1,3 +1,4 @@
+// anchor-keep: the SAFETY CONSTRAINT is call-site discipline (only legal where Send() cannot be mid-flight); the misuse deadlocks only under production interleavings.
 package session
 
 import (

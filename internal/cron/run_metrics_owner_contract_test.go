@@ -1,3 +1,4 @@
+// anchor-keep: metric-ownership is a declaration-placement rule; a per-run gauge declared on the wrong owner compiles and counts identically until restart semantics diverge.
 package cron
 
 import (

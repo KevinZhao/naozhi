@@ -1,3 +1,4 @@
+// anchor-keep: pins the canonical increment sites per OBS2 counter; the spawn/evict/auth-fail paths need a full hub+shim rig to drive, and a missing increment is silent undercounting.
 package metrics_test
 
 import (

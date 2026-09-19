@@ -1,3 +1,4 @@
+// anchor-keep: bans atomic.Value-for-string declarations; the wrong-type Store it prevents compiles and only panics on the first mismatched write in production.
 package session
 
 import (

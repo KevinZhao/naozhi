@@ -1,3 +1,4 @@
+// anchor-keep: map-alloc placement relative to the RLock is behaviourally invisible (either order returns the same set); only source shows the lock-window cost.
 // known_sessions_map_hint_test.go: structural and behavioural pins for
 // buildKnownSessionsSet map allocation. Originally R20260603-PERF-3 sized the
 // map from len(s.tbl.jobs) under the RLock; R202606-PERF-003 reverses that

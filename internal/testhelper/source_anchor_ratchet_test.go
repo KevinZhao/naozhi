@@ -37,7 +37,7 @@ const anchorFileBaseline = 53
 
 // unjustifiedAnchorBaseline counts anchor files lacking an `// anchor-keep:`
 // justification line. The triage pass drives this to zero file by file.
-const unjustifiedAnchorBaseline = 32
+const unjustifiedAnchorBaseline = 1
 
 // Patterns assembled at runtime so this file does not count itself (the same
 // trick sleep_ratchet_test.go uses for its token).

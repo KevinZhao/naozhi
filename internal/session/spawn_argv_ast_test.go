@@ -1,3 +1,4 @@
+// anchor-keep: a dropped SpawnOptions field still compiles and passes every behavioural test that does not exercise that exact flag; the AST diff is the enumeration.
 package session
 
 // spawn_argv_ast_test.go — shared AST helpers for the argv-parity guards.

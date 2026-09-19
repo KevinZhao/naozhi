@@ -1,3 +1,4 @@
+// anchor-keep: enumerates every slog attribute carrying a user-supplied job ID and pins its SanitizeForLog wrapper; log-injection coverage is a call-site enumeration, not one behaviour.
 package cron
 
 // TestCronSlogIDSanitize_Contract locks R171023-SEC-2: every slog call that

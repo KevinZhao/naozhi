@@ -1,3 +1,4 @@
+// anchor-keep: freezes the exported Get*/Fetch* accessor surface (#463); naming sprawl is a declaration fact with no behaviour.
 package session_test
 
 import (

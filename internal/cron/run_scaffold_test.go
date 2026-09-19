@@ -1,3 +1,4 @@
+// anchor-keep: pins that inflight-gauge Add(±1) sites live only in the scaffold/finalizer pair; a stray Add elsewhere compiles and only shows as gauge drift in production.
 package cron
 
 import (

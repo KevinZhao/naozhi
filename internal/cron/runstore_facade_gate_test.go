@@ -1,3 +1,4 @@
+// anchor-keep: allowlist gate: only the facade file may touch s.runStore directly; a bypassing call compiles fine and silently skips the lock discipline the facade encodes.
 package cron
 
 import (
