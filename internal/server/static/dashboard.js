@@ -4293,63 +4293,43 @@ const wsm = {
       // announce("定时任务已完成") moved to the cron_run_ended succeeded
       // branch below; the list refetch was a strict subset of what the
       // cron_run_ended branch already does.
-      case 'cron_run_started':
-        // P0 cron-run-history (RFC §7.2) — drive the "运行中 Xs" inline
-        // badge without waiting for a list refetch. Optimistically patch
-        // local cronJobs entry so the UI flips to running immediately;
-        // a fetchCronJobs would also work but adds latency.
-        // cron-panel-consolidation RFC §4.6: cronApplyRunStarted internally
-        // calls renderCronPanel, whose shell-preserving branch repaints
-        // both the list AND the per-job drawer (renderCronDrawer). The
-        // drawer's "当前执行" section therefore appears the same frame
-        // the WS event lands, gated only on cronDetailJobId — no
-        // selectedKey check is needed any more.
-        emitCron('cron:run-started', msg);
+      case 'run_started':
+      case 'run_ended': {
+        // Unified run-lifecycle frames (#2540): one wire shape for every run
+        // producer, discriminated by subsystem. The per-subsystem handling
+        // below predates the merge and is unchanged — cron's optimistic
+        // patches ride nz.bus with the field names cron_view has always
+        // consumed (job_id), so the projection happens here, once, at the
+        // wire boundary, instead of every consumer learning owner_id.
+        if (msg.subsystem === 'cron') {
+          const cronMsg = Object.assign({}, msg, { job_id: msg.owner_id });
+          if (msg.type === 'run_started') {
+            // P0 cron-run-history (RFC §7.2) — drive the "运行中 Xs" inline
+            // badge without waiting for a list refetch; cronApplyRunStarted
+            // repaints both the list and the per-job drawer.
+            emitCron('cron:run-started', cronMsg);
+          } else {
+            // P0 — terminal frame, fires for every terminal state (succeeded /
+            // failed / skipped / timed_out / canceled); only succeeded should
+            // celebrate (Phase D absorbed the legacy cron_result frame).
+            if (cronMsg.state === 'succeeded') announce('定时任务已完成');
+            emitCron('cron:run-ended', cronMsg);
+            // P2 — refresh the timeline head through the rAF-debounced wrapper
+            // so bursty terminal frames for one job collapse per paint frame.
+            if (cronMsg.job_id) emitCron('cron:timeline-refresh-head', cronMsg.job_id);
+          }
+        } else if (msg.subsystem === 'sysession') {
+          // System-daemon run boundary. fetchSystemDaemons is the only path
+          // that updates the 系统 rail attention badge; without this a daemon
+          // failing in the background never lit the badge until the operator
+          // opened the view. Honour the RNEW-UX-014 hidden-tab suspension.
+          if (document.hidden) break;
+          fetchSystemDaemons().then(() => {
+            if (activeView === 'system') renderSystemView();
+          }).catch(() => {});
+        }
         break;
-      case 'cron_run_ended':
-        // P0 — terminal frame. Refetch list so counters / last_error_class
-        // hydrate from backend; the optimistic patch on the same row is
-        // overwritten cleanly. fresh=false / fresh=true behave identically
-        // here since the change set is JobID-scoped.
-        //
-        // Phase D (RFC §3.5) absorbed the legacy cron_result frame:
-        // gate the AT-user announce on the succeeded state so failed
-        // runs do not mis-speak success. cron_run_ended fires for every
-        // terminal state (succeeded / failed / skipped / timed_out /
-        // canceled) — only succeeded should celebrate.
-        if (msg && msg.state === 'succeeded') announce('定时任务已完成');
-        emitCron('cron:run-ended', msg);
-        // P2 cron-run-history (RFC §8.2) — refresh the timeline head
-        // (most-recent 10 runs) when the operator currently has the drawer
-        // open for this job. cron-panel-consolidation RFC §4.6: the gate
-        // moved from selectedKey === 'cron:<id>' to cronDetailJobId ===
-        // job_id (selectedKey is null in cron-panel mode). msg.job_id is
-        // backend-mandatory; the guard against falsy job_id stays for
-        // defence-in-depth.
-        // R221-FIX-P1-4: cronTimelineRefreshHead is async; swallow its
-        // rejection at the dispatch boundary.
-        // R243-PERF-7 / #812: route through the rAF-debounced wrapper so
-        // bursty cron_run_ended events for the same job collapse to one
-        // sort+innerHTML rebuild per paint frame instead of one per event.
-        if (msg && msg.job_id) emitCron('cron:timeline-refresh-head', msg.job_id);
-        break;
-      case 'daemon_run_started':
-      case 'daemon_run_ended':
-        // System-daemon (sysession) run boundary. fetchSystemDaemons is the
-        // only path that updates the 系统 rail attention badge; without this
-        // case it ran solely at boot / on panel open / on the 5s poll while
-        // the system view is active, so a daemon failing in the background
-        // never lit the badge until the operator happened to open the view.
-        //
-        // This is a hub-wide broadcast (sysession ticks ~every 30s → a few
-        // frames per minute per tab). Honour the RNEW-UX-014 hidden-tab
-        // suspension: skip the fetch while hidden; startPollers re-fetches
-        // once on the visibilitychange back to visible so the badge catches up.
-        if (document.hidden) break;
-        fetchSystemDaemons().then(() => {
-          if (activeView === 'system') renderSystemView();
-        }).catch(() => {});
-        break;
+      }
       case 'pong':
         break;
       // RFC v4 agent-team-ui §3.5.2 — drill-in flow. All four handlers

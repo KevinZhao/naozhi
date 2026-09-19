@@ -8,7 +8,7 @@ package server
 
 import (
 	"context"
-	"time"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -93,8 +93,6 @@ type ScratchRouter interface {
 type HubBroadcaster interface {
 	BroadcastSessionReady(key string)
 	BroadcastSessionsUpdate()
-	BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, trigger, sessionID string, fresh bool)
-	BroadcastCronRunEnded(jobID, runID, state string, startedAt, endedAt time.Time, durationMS int64, sessionID, errClass, errMsg, trigger string)
-	BroadcastDaemonRunStarted(name, runID, trigger string, startedAt time.Time)
-	BroadcastDaemonRunEnded(name, runID, state, errClass, trigger string, durationMS int64)
+	BroadcastRunStarted(ev runtelemetry.RunStartedEvent)
+	BroadcastRunEnded(ev runtelemetry.RunEndedEvent)
 }

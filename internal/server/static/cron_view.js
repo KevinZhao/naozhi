@@ -154,7 +154,7 @@ function cronTimezoneNote() {
 // Lifecycle:
 //   - openCronDetail(jobId) sets it and re-renders the cron panel.
 //   - closeCronDetail() resets to null and removes drawer DOM.
-//   - WS cron_run_started / cron_run_ended consult this gate (PR5)
+//   - WS run_started / run_ended (subsystem cron) consult this gate (PR5)
 //     instead of selectedKey.
 //   - F5 / reload does NOT persist (RFC §4.5 Q5).
 let cronDetailJobId = null;
@@ -1513,7 +1513,7 @@ function cronApplyRunStarted(msg) {
 // 冻结事件流的 jobID 集合。命中后，wsm.onEvent 对该 cron session
 // 的实时事件直接丢弃，避免 dashboard 在 cron 历史卡显示"超时"
 // 的同时事件流仍在追加（CLI 子进程没立刻停，会再吐几个 ghost
-// 事件）。下一次 cron_run_started 同 job 时清空。
+// 事件）。下一次 run_started（cron）同 job 时清空。
 //
 // 后端 cron deadline 已经主动 InterruptViaControl 让 CLI 收尾，
 // 但 control_request 到 result 事件之间还有 ~几百 ms ~ 几秒延迟；
@@ -1536,7 +1536,7 @@ function cronApplyRunEnded(msg) {
   if (msg.state && msg.state !== 'succeeded' && msg.state !== 'skipped') {
     j.last_error_class = msg.error_class || '';
     // 任何非 succeeded/skipped 终态都冻结：timed_out / failed / canceled。
-    // 新的 cron_run_started 会清除冻结。
+    // 新的 run_started（cron）会清除冻结。
     cronFrozenRuns.add(msg.job_id);
   } else if (msg.state === 'succeeded') {
     j.last_error_class = '';
@@ -1746,7 +1746,7 @@ let cronRunningTickTimer = null;
 // catches that case and clears the interval, so the no-op is correct.
 //
 // Job churn (a row finishes / a new row starts running) is handled by
-// the WS cron_run_started / cron_run_ended fan-out which calls
+// the WS run_started / run_ended (cron) fan-out which calls
 // cronApplyRunStarted / cronApplyRunEnded → renderCronPanel; that path
 // already updates row classes (`is-running` on/off) and is the right
 // place to add/remove rows. The 1Hz tick is therefore *only* responsible
@@ -2089,7 +2089,7 @@ const CRON_TIMELINE_MAX_ENTRIES = 20;
 
 // R20260610-CR-007 (#1998): cap st.runs after the refreshHead merge.
 // Without a cap, deep loadMore paging (50/page) followed by repeated WS
-// cron_run_ended refreshes grows the merged array without bound, and every
+// run_ended refreshes grows the merged array without bound, and every
 // WS event pays an O(n log n) sort + full re-render over it. When the cap
 // truncates the tail, pagination is re-armed (done=false, nextBefore=
 // new oldest started_at) so loadMore can still page past the cut.
@@ -3009,7 +3009,7 @@ function cronTimelineLoadMore(jobId, onDone) {
 }
 
 // R243-PERF-7 / #812: rAF-debounce coalescing for cronTimelineRefreshHead.
-// Bursty cron_run_ended events (multiple jobs ending in the same tick, or
+// Bursty run_ended events (multiple jobs ending in the same tick, or
 // a manual TriggerNow loop) used to fire a full fetch + sort + innerHTML
 // rebuild per event; the WS handler now routes through
 // cronTimelineRefreshHeadDebounced which collapses N events to a single
@@ -3034,7 +3034,7 @@ function cronTimelineRefreshHeadDebounced(jobId) {
   });
 }
 
-// cronTimelineRefreshHead — WS cron_run_ended 触发。如果当前 drawer 打开
+// cronTimelineRefreshHead — WS run_ended（cron）触发。如果当前 drawer 打开
 // 的就是该 job（cronDetailJobId === jobId），fetch /api/cron/runs?limit=10
 // 替换头 10 条；否则只刷新列表 stats（已有逻辑：fetchCronJobs +
 // renderCronPanel）。
@@ -3044,12 +3044,12 @@ function cronTimelineRefreshHeadDebounced(jobId) {
 // 清空），不再适合做"当前看的是哪条 cron"判定。
 //
 // 调用方应优先走 cronTimelineRefreshHeadDebounced（rAF-debounced wrapper）以
-// 在 bursty cron_run_ended 序列下避免 N 次 sort+innerHTML 重建（R243-PERF-7
+// 在 bursty run_ended 序列下避免 N 次 sort+innerHTML 重建（R243-PERF-7
 // / #812）。直接调用本函数仍合法（手动 trigger / 测试路径）。
 async function cronTimelineRefreshHead(jobId) {
   if (cronDetailJobId !== jobId) return;
   const st = getCronTimelineState(jobId);
-  // R220-FE-4: in-flight guard。用户快速触发多次 TriggerNow 时 cron_run_ended
+  // R220-FE-4: in-flight guard。用户快速触发多次 TriggerNow 时 run_ended
   // 会连续到达，每次都启动 fetch；后返回的请求覆盖先返回的 → 顺序取决于
   // 网络。用 token 保证只有最新一次请求的结果会被写回 st.runs。
   const token = (st._refreshToken || 0) + 1;
@@ -3655,7 +3655,7 @@ function renderCronTimelineForJob(jobId) {
 
 function renderCronPanel() {
   // Guard against an async race: fetchCronJobs().then(renderCronPanel) and the
-  // WS cron_run_ended handler fire after the user may have switched away from
+  // WS run_ended handler fire after the user may have switched away from
   // the cron view. Painting then would be wasted (the container is hidden) or
   // could fight the active view. Only paint when cron is the active view.
   // (Was `if (selectedKey) return` when cron borrowed #main; now cron has its
