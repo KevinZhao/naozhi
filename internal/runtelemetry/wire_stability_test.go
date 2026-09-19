@@ -85,6 +85,7 @@ func TestSubsystem_WireStable(t *testing.T) {
 	want := map[Subsystem]string{
 		SubsystemCron:      "cron",
 		SubsystemSysession: "sysession",
+		SubsystemSession:   "session",
 	}
 	for c, w := range want {
 		if string(c) != w {

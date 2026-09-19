@@ -43,7 +43,7 @@ func TestTriggerKindCount(t *testing.T) {
 }
 
 func TestSubsystemCount(t *testing.T) {
-	const want = 2 // Cron / Sysession
+	const want = 3 // Cron / Sysession / Session
 	got := len(allSubsystems())
 	if got != want {
 		t.Errorf("Subsystem count = %d, want %d (update wire_stability_test.go and this test together)", got, want)
@@ -97,5 +97,6 @@ func allSubsystems() []Subsystem {
 	return []Subsystem{
 		SubsystemCron,
 		SubsystemSysession,
+		SubsystemSession,
 	}
 }

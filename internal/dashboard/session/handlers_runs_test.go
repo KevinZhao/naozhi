@@ -74,8 +74,13 @@ func TestHandleRuns_ReturnsRunsAndStats(t *testing.T) {
 	if body.Runs[0].StartedAt == 0 {
 		t.Error("started_at should be unix-ms, got 0")
 	}
-	if body.Runs[0].Outcome != "completed" {
-		t.Errorf("outcome = %s", body.Runs[0].Outcome)
+	// The wire speaks the common run vocabulary (#2540): the store's
+	// "completed" surfaces as runtelemetry's "succeeded".
+	if body.Runs[0].State != "succeeded" {
+		t.Errorf("state = %s, want succeeded", body.Runs[0].State)
+	}
+	if body.Runs[0].Subsystem != "session" {
+		t.Errorf("subsystem = %s, want session", body.Runs[0].Subsystem)
 	}
 }
 

@@ -5,29 +5,23 @@ import (
 	"unicode/utf8"
 
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/runview"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// cronRunSummaryView is the JSON shape for one cron run summary, shared by
-// HandleList (recent-run preview) and HandleRunsList (paginated history).
-type cronRunSummaryView struct {
-	RunID      string `json:"run_id"`
-	State      string `json:"state"`
-	Trigger    string `json:"trigger,omitempty"`
-	StartedAt  int64  `json:"started_at"`
-	EndedAt    int64  `json:"ended_at,omitempty"`
-	DurationMS int64  `json:"duration_ms,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
-	ErrorClass string `json:"error_class,omitempty"`
-	// ReplayOf links a replay run to its origin (agentcore §7.3 chain badge).
-	ReplayOf string `json:"replay_of,omitempty"`
-	// CostUSD: per-run sandbox cost (§7.5); the front end sums it across recent_runs.
-	CostUSD float64 `json:"cost_usd,omitempty"`
-}
+// cronRunSummaryView is the run-row shape shared by HandleList (recent-run
+// preview) and HandleRunsList (paginated history). It IS the dashboard-wide
+// row (#2540): cron's fields were already the common shape's fields, so the
+// merge is an alias here and a vocabulary change on the session side.
+type cronRunSummaryView = runview.Summary
 
-// cronSummaryToView projects a cronpkg.CronRunSummary into cronRunSummaryView.
+// cronSummaryToView projects a cronpkg.CronRunSummary into the common row.
+// Kept as cron's own projection (rather than routing through a runview
+// constructor) because the SessionID sanitisation belongs to this boundary.
 func cronSummaryToView(r cronpkg.CronRunSummary) cronRunSummaryView {
 	row := cronRunSummaryView{
+		Subsystem:  string(runtelemetry.SubsystemCron),
 		RunID:      r.RunID,
 		State:      string(r.State),
 		Trigger:    string(r.Trigger),
@@ -39,7 +33,7 @@ func cronSummaryToView(r cronpkg.CronRunSummary) cronRunSummaryView {
 		CostUSD:    r.CostUSD,
 	}
 	if !r.EndedAt.IsZero() {
-		row.EndedAt = r.EndedAt.UnixMilli()
+		row.EndedAt = runview.MSTime(r.EndedAt)
 	}
 	return row
 }
