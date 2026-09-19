@@ -152,13 +152,10 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 // triggerWG.Add. The spawned goroutine owns the triggerWG.Done.
 func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (string, error) {
 	// Per-job CAS gate: a replay must not overlap a tick / manual trigger / another
-	// replay. Taken directly (not via execAcquireSlot) so an operator-initiated
-	// replay gets a clean 409 instead of a phantom overlap-skip frame.
-	gate := s.jobGateLock(j.ID)
-	gate.Lock()
-	inflight := s.jobInflight(j.ID)
-	won := inflight.running.CompareAndSwap(false, true)
-	gate.Unlock()
+	// replay. acquire is called directly (not via execAcquireSlot) so an
+	// operator-initiated replay gets a clean 409 instead of a phantom
+	// overlap-skip frame.
+	inflight, won := s.acquire(j.ID)
 	if !won {
 		return "", ErrReplayInFlight
 	}
