@@ -1,3 +1,4 @@
+// anchor-keep: import-ban on a leaf package IS a structural fact — go/parser over the import block is the direct tool, a behavioural test cannot express it.
 package costledger_test
 
 import (

@@ -1,3 +1,4 @@
+// anchor-keep: leaf-package import ban; the cron↔sysession merge RFC depends on this package pulling in neither producer.
 package runtelemetry_test
 
 import (

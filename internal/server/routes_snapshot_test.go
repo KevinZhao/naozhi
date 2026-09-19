@@ -1,3 +1,4 @@
+// anchor-keep: the route table snapshot feeds contract.js generation (routes.golden.json); the set of registered routes is a structural fact the generator must see.
 package server
 
 import (

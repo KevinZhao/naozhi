@@ -1,3 +1,4 @@
+// anchor-keep: TestPackageIsLeaf forbids any internal/* import; the security review (#2713) relies on this package staying a leaf, and only the import block can say so.
 package envpolicy_test
 
 import (
