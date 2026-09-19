@@ -36,10 +36,8 @@ const (
 	TypeInterruptAck           MsgType = "interrupt_ack"
 	TypeSessionState           MsgType = "session_state"
 	TypeSessionsUpdate         MsgType = "sessions_update"
-	TypeCronRunStarted         MsgType = "cron_run_started"
-	TypeCronRunEnded           MsgType = "cron_run_ended"
-	TypeDaemonRunStarted       MsgType = "daemon_run_started"
-	TypeDaemonRunEnded         MsgType = "daemon_run_ended"
+	TypeRunStarted             MsgType = "run_started"
+	TypeRunEnded               MsgType = "run_ended"
 	TypeAgentEvent             MsgType = "agent_event"
 	TypeAgentMeta              MsgType = "agent_meta"
 	TypeAgentDone              MsgType = "agent_done"
@@ -195,12 +193,17 @@ type SessionsUpdate struct {
 
 func NewSessionsUpdate() SessionsUpdate { return SessionsUpdate{Type: TypeSessionsUpdate} }
 
-// CronRunStarted / CronRunEnded / DaemonRunStarted / DaemonRunEnded moved
-// verbatim from internal/server/wshub_broadcast.go's private structs.
+// RunStarted / RunEnded are the subsystem-neutral run-lifecycle frames
+// (#2540): the wire projection of runtelemetry.RunRecord, with Subsystem
+// discriminating the producer. They replaced four per-subsystem frames
+// (cron_run_started/ended, daemon_run_started/ended) that spelled the same
+// facts in two field vocabularies — job_id vs name, and a dashboard that had
+// to know every producer to render "a run happened".
 
-type CronRunStarted struct {
+type RunStarted struct {
 	Type      MsgType `json:"type"`
-	JobID     string  `json:"job_id"`
+	Subsystem string  `json:"subsystem"`
+	OwnerID   string  `json:"owner_id"`
 	RunID     string  `json:"run_id"`
 	StartedAt int64   `json:"started_at"`
 	Trigger   string  `json:"trigger,omitempty"`
@@ -208,15 +211,21 @@ type CronRunStarted struct {
 	Fresh     bool    `json:"fresh,omitempty"`
 }
 
-func NewCronRunStarted(f CronRunStarted) CronRunStarted { f.Type = TypeCronRunStarted; return f }
+func NewRunStarted(f RunStarted) RunStarted { f.Type = TypeRunStarted; return f }
 
-type CronRunEnded struct {
+// RunEnded fires for every terminal state (succeeded / failed / skipped /
+// timed_out / canceled). ErrorMsg is present only when the producing
+// subsystem's policy allows it on the wire — cron passes it through
+// post-redaction, sysession never does (system-session.md §9.4); that policy
+// lives at the broadcast boundary, not here.
+type RunEnded struct {
 	Type       MsgType `json:"type"`
-	JobID      string  `json:"job_id"`
+	Subsystem  string  `json:"subsystem"`
+	OwnerID    string  `json:"owner_id"`
 	RunID      string  `json:"run_id"`
 	State      string  `json:"state"`
-	StartedAt  int64   `json:"started_at"`
-	EndedAt    int64   `json:"ended_at"`
+	StartedAt  int64   `json:"started_at,omitempty"`
+	EndedAt    int64   `json:"ended_at,omitempty"`
 	DurationMS int64   `json:"duration_ms,omitempty"`
 	SessionID  string  `json:"session_id,omitempty"`
 	ErrorClass string  `json:"error_class,omitempty"`
@@ -224,34 +233,7 @@ type CronRunEnded struct {
 	Trigger    string  `json:"trigger,omitempty"`
 }
 
-func NewCronRunEnded(f CronRunEnded) CronRunEnded { f.Type = TypeCronRunEnded; return f }
-
-type DaemonRunStarted struct {
-	Type      MsgType `json:"type"`
-	Name      string  `json:"name"`
-	RunID     string  `json:"run_id"`
-	Trigger   string  `json:"trigger,omitempty"`
-	StartedAt int64   `json:"started_at"`
-}
-
-func NewDaemonRunStarted(f DaemonRunStarted) DaemonRunStarted {
-	f.Type = TypeDaemonRunStarted
-	return f
-}
-
-// DaemonRunEnded deliberately has no ErrorMsg: daemon error text can carry
-// cross-tenant detail; the class is enough for the dashboard's badge.
-type DaemonRunEnded struct {
-	Type       MsgType `json:"type"`
-	Name       string  `json:"name"`
-	RunID      string  `json:"run_id"`
-	State      string  `json:"state"`
-	DurationMS int64   `json:"duration_ms,omitempty"`
-	ErrorClass string  `json:"error_class,omitempty"`
-	Trigger    string  `json:"trigger,omitempty"`
-}
-
-func NewDaemonRunEnded(f DaemonRunEnded) DaemonRunEnded { f.Type = TypeDaemonRunEnded; return f }
+func NewRunEnded(f RunEnded) RunEnded { f.Type = TypeRunEnded; return f }
 
 type AgentEvent struct {
 	Type   MsgType              `json:"type"`

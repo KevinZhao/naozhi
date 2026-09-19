@@ -23,6 +23,29 @@ const (
 	OutcomeCanceled  Outcome = "canceled"  // user interrupt / context canceled
 )
 
+// RunState maps the session-run outcome onto the subsystem-neutral vocabulary
+// every other run producer already speaks (runtelemetry.RunState). Outcome
+// itself stays: it is the on-disk word in every persisted SessionRun, so
+// deleting it would orphan existing history files — but no NEW surface should
+// speak it. A boundary exporting a session run uses this mapping, and the
+// exhaustive switch means a new Outcome value fails compilation review here
+// instead of silently leaving a run stateless on the common wire.
+func (o Outcome) RunState() runtelemetry.RunState {
+	switch o {
+	case OutcomeCompleted:
+		return runtelemetry.RunStateSucceeded
+	case OutcomeError:
+		return runtelemetry.RunStateFailed
+	case OutcomeTimeout:
+		return runtelemetry.RunStateTimedOut
+	case OutcomeCanceled:
+		return runtelemetry.RunStateCanceled
+	}
+	// Unknown historical value (hand-edited file, future rollback): failed is
+	// the honest default — the run certainly did not succeed.
+	return runtelemetry.RunStateFailed
+}
+
 // SessionRun is one round-trip through a session, from handing the user
 // message to the CLI until the turn's terminal result; wall-clock measured
 // by naozhi itself. Prompt and response text are omitted so history cannot

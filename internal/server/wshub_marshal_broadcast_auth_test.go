@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"sync"
 	"testing"
 	"time"
@@ -35,19 +36,19 @@ func TestMarshalBroadcastAuth_FansOutToAllAuthenticated(t *testing.T) {
 	registerSub(hub, c1, "")
 	registerSub(hub, c2, "")
 
-	hub.marshalBroadcastAuth(wsproto.NewCronRunStarted(wsproto.CronRunStarted{JobID: "abc", RunID: "def"}))
+	hub.marshalBroadcastAuth(wsproto.NewRunStarted(wsproto.RunStarted{Subsystem: "cron", OwnerID: "abc", RunID: "def"}))
 
 	for i, c := range []*wsClient{c1, c2} {
 		data, ok := recvRaw(t, c)
 		if !ok {
 			t.Fatalf("client %d received no frame", i)
 		}
-		var msg wsproto.CronRunStarted
+		var msg wsproto.RunStarted
 		if err := json.Unmarshal(data, &msg); err != nil {
 			t.Fatalf("client %d unmarshal: %v", i, err)
 		}
-		if msg.Type != "cron_run_started" {
-			t.Errorf("client %d Type = %q, want cron_run_started", i, msg.Type)
+		if msg.Type != "run_started" {
+			t.Errorf("client %d Type = %q, want run_started", i, msg.Type)
 		}
 	}
 }
@@ -78,7 +79,7 @@ func TestBroadcastSessionReady_ViaMarshalHelper(t *testing.T) {
 }
 
 // TestMarshalBroadcastAuth_ZeroAuthClients_NoPanic verifies R20260608133928-PERF-1:
-// when NewHub has no authenticated clients, BroadcastCronRunStarted must not
+// when NewHub has no authenticated clients, BroadcastRunStarted must not
 // panic and must not deliver any frame. Uses a production hub (authClients != nil)
 // so the fast-path is exercised.
 func TestMarshalBroadcastAuth_ZeroAuthClients_NoPanic(t *testing.T) {
@@ -87,11 +88,11 @@ func TestMarshalBroadcastAuth_ZeroAuthClients_NoPanic(t *testing.T) {
 
 	// No clients registered — authClients exists but is empty.
 	// Must not panic.
-	hub.BroadcastCronRunStarted("aaaa", "bbbb", time.Now(), "manual", "", false)
+	hub.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "aaaa", RunID: "bbbb", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
 }
 
 // TestMarshalBroadcastAuth_ZeroAuthClients_NoSendRaw confirms that with zero
-// authenticated clients BroadcastCronRunStarted does not attempt to deliver
+// authenticated clients BroadcastRunStarted does not attempt to deliver
 // any frame (the SendRaw path is never reached).
 func TestMarshalBroadcastAuth_ZeroAuthClients_NoSendRaw(t *testing.T) {
 	hub, _ := newTestHub("tok")
@@ -103,7 +104,7 @@ func TestMarshalBroadcastAuth_ZeroAuthClients_NoSendRaw(t *testing.T) {
 	hub.clients[c] = struct{}{}
 	hub.mu.Unlock()
 
-	hub.BroadcastCronRunStarted("cccc", "dddd", time.Now(), "manual", "", false)
+	hub.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "cccc", RunID: "dddd", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
 
 	select {
 	case <-c.send:
@@ -124,18 +125,18 @@ func TestMarshalBroadcastAuth_WithAuthClient_Delivers(t *testing.T) {
 	c.authenticated.Store(true)
 	registerSub(hub, c, "")
 
-	hub.BroadcastCronRunStarted("eeee", "ffff", time.Now(), "manual", "", false)
+	hub.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "eeee", RunID: "ffff", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
 
 	data, ok := recvRaw(t, c)
 	if !ok {
 		t.Fatal("authenticated client received no frame")
 	}
-	var msg wsproto.CronRunStarted
+	var msg wsproto.RunStarted
 	if err := json.Unmarshal(data, &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if msg.Type != "cron_run_started" {
-		t.Errorf("Type = %q, want cron_run_started", msg.Type)
+	if msg.Type != "run_started" {
+		t.Errorf("Type = %q, want run_started", msg.Type)
 	}
 }
 
@@ -199,7 +200,7 @@ func TestMarshalBroadcastAuth_ConcurrentRegisterAndBroadcast(t *testing.T) {
 					return
 				default:
 				}
-				hub.BroadcastCronRunStarted("j", "r", time.Now(), "manual", "", false)
+				hub.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "j", RunID: "r", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
 			}
 		}()
 	}

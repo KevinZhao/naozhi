@@ -227,40 +227,47 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 	h.broadcastToAuthenticated(data)
 }
 
-// BroadcastCronRunStarted emits cron_run_started to authenticated clients.
-// Called from the cron scheduler's onRunStarted hook (set in build_dashboard.go).
-func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, trigger, sessionID string, fresh bool) {
-	// jobID / runID come from cron.generateHexID; sanitizeHexIDForBroadcast
-	// skips SanitizeForLog's allocating slow path when the hex shape holds.
-	h.marshalBroadcastAuth(wsproto.NewCronRunStarted(wsproto.CronRunStarted{
-		JobID:     sanitizeHexIDForBroadcast(jobID, 64),
-		RunID:     sanitizeHexIDForBroadcast(runID, 64),
-		StartedAt: startedAt.UnixMilli(),
-		Trigger:   sanitizeTriggerForBroadcast(trigger),
-		SessionID: sanitizeSessionIDForBroadcast(sessionID),
-		Fresh:     fresh,
+// BroadcastRunStarted emits the subsystem-neutral run_started frame (#2540).
+// Called through hubBroadcaster from every run producer's lifecycle hook.
+// Sanitisation is uniform: sanitizeHexIDForBroadcast fast-paths the hex IDs
+// cron produces and falls back to SanitizeForLog for anything else — which is
+// exactly the treatment daemon names (compiled-in, but defence-in-depth
+// against a future config-derived producer) got from their dedicated frame.
+func (h *Hub) BroadcastRunStarted(ev runtelemetry.RunStartedEvent) {
+	rec := ev.Record()
+	h.marshalBroadcastAuth(wsproto.NewRunStarted(wsproto.RunStarted{
+		Subsystem: string(rec.Subsystem),
+		OwnerID:   sanitizeHexIDForBroadcast(rec.OwnerID, 64),
+		RunID:     sanitizeHexIDForBroadcast(rec.RunID, 64),
+		StartedAt: rec.StartedAt.UnixMilli(),
+		Trigger:   sanitizeTriggerForBroadcast(string(rec.Trigger)),
+		SessionID: sanitizeSessionIDForBroadcast(rec.SessionID),
+		Fresh:     rec.Fresh,
 	}))
 }
 
-// BroadcastCronRunEnded emits cron_run_ended for every terminal state
-// (succeeded / failed / skipped / timed_out / canceled). The dashboard
-// uses State to decide colour and whether to refetch the list (counters
-// updated). errorMsg is already path-redacted + sanitised by the cron
-// package's recordResultP0 → SanitizeForLog pipeline.
-func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, endedAt time.Time, durationMS int64, sessionID, errClass, errMsg, trigger string) {
-	// errClass/trigger are typed enums today; sanitising anyway shields a future
-	// path that derives them from external config from payload injection.
-	h.marshalBroadcastAuth(wsproto.NewCronRunEnded(wsproto.CronRunEnded{
-		JobID:      sanitizeHexIDForBroadcast(jobID, 64),
-		RunID:      sanitizeHexIDForBroadcast(runID, 64),
-		State:      state,
-		StartedAt:  startedAt.UnixMilli(),
-		EndedAt:    endedAt.UnixMilli(),
-		DurationMS: durationMS,
-		SessionID:  sanitizeSessionIDForBroadcast(sessionID),
-		ErrorClass: osutil.SanitizeForLog(errClass, 64),
-		ErrorMsg:   errMsg,
-		Trigger:    sanitizeTriggerForBroadcast(trigger),
+// BroadcastRunEnded emits run_ended for every terminal state (succeeded /
+// failed / skipped / timed_out / canceled). The dashboard uses State to decide
+// colour and whether to refetch the producing subsystem's list.
+//
+// SECURITY: ErrorMsg goes on the wire only for subsystems whose policy allows
+// it. cron passes it through (already path-redacted + SanitizeForLog'd by
+// recordResultP0); sysession's is dropped before this method is reached — see
+// hubBroadcaster.BroadcastRunEnded, which owns that policy.
+func (h *Hub) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
+	rec := ev.Record()
+	h.marshalBroadcastAuth(wsproto.NewRunEnded(wsproto.RunEnded{
+		Subsystem:  string(rec.Subsystem),
+		OwnerID:    sanitizeHexIDForBroadcast(rec.OwnerID, 64),
+		RunID:      sanitizeHexIDForBroadcast(rec.RunID, 64),
+		State:      osutil.SanitizeForLog(string(rec.State), 32),
+		StartedAt:  rec.StartedAt.UnixMilli(),
+		EndedAt:    rec.EndedAt.UnixMilli(),
+		DurationMS: rec.DurationMS,
+		SessionID:  sanitizeSessionIDForBroadcast(rec.SessionID),
+		ErrorClass: osutil.SanitizeForLog(string(rec.ErrorClass), 64),
+		ErrorMsg:   osutil.SanitizeForLog(rec.ErrorMsg, 512),
+		Trigger:    sanitizeTriggerForBroadcast(string(rec.Trigger)),
 	}))
 }
 
@@ -304,31 +311,6 @@ func (h *Hub) LegacySendInvokes() int64 {
 		return 0
 	}
 	return h.engine.legacyInvokes.Load()
-}
-
-// BroadcastDaemonRunStarted emits daemon_run_started. name / runID / trigger
-// are compiled-in enums today; sanitising at the broadcast boundary is
-// defence-in-depth against a future config-derived caller.
-func (h *Hub) BroadcastDaemonRunStarted(name, runID, trigger string, startedAt time.Time) {
-	h.marshalBroadcastAuth(wsproto.NewDaemonRunStarted(wsproto.DaemonRunStarted{
-		Name:      osutil.SanitizeForLog(name, 64),
-		RunID:     sanitizeHexIDForBroadcast(runID, 64),
-		Trigger:   osutil.SanitizeForLog(trigger, 32),
-		StartedAt: startedAt.UnixMilli(),
-	}))
-}
-
-// BroadcastDaemonRunEnded emits daemon_run_ended.  ErrorMsg is
-// intentionally absent — see daemonRunEndedMsg above.
-func (h *Hub) BroadcastDaemonRunEnded(name, runID, state, errClass, trigger string, durationMS int64) {
-	h.marshalBroadcastAuth(wsproto.NewDaemonRunEnded(wsproto.DaemonRunEnded{
-		Name:       osutil.SanitizeForLog(name, 64),
-		RunID:      sanitizeHexIDForBroadcast(runID, 64),
-		State:      osutil.SanitizeForLog(state, 32),
-		DurationMS: durationMS,
-		ErrorClass: osutil.SanitizeForLog(errClass, 64),
-		Trigger:    osutil.SanitizeForLog(trigger, 32),
-	}))
 }
 
 // sanitizeHexIDForBroadcast returns id unchanged when it matches the

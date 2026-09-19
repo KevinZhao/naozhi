@@ -36,29 +36,32 @@ func wsOnMessageBody(t *testing.T, js string) string {
 // declare also fails — and it runs in the lint-js CI job. Probed: renaming
 // `case 'daemon_run_started':` failed both, so the Go copy added nothing (#2547).
 
-// TestDashboardJS_DaemonRunFramesRefreshSystemDaemons pins that the new
-// daemon_run_* cases actually re-fetch daemon state (the only path that
-// updates the rail badge) rather than being empty no-ops.
+// TestDashboardJS_DaemonRunFramesRefreshSystemDaemons pins that the sysession
+// branch of the unified run_started/run_ended dispatch (#2540) actually
+// re-fetches daemon state (the only path that updates the rail badge) rather
+// than being an empty no-op. The fetch itself is behaviour-tested in
+// test/e2e/run_frames_unified.test.js; what only this anchor pins is the
+// hidden-tab suspension below, which the e2e suite does not drive.
 func TestDashboardJS_DaemonRunFramesRefreshSystemDaemons(t *testing.T) {
 	t.Parallel()
 	body := wsOnMessageBody(t, readDashboardJS(t))
-	idx := strings.Index(body, "case 'daemon_run_ended':")
+	idx := strings.Index(body, "msg.subsystem === 'sysession'")
 	if idx < 0 {
-		t.Fatal("case 'daemon_run_ended' missing")
+		t.Fatal("sysession branch missing from the run_started/run_ended dispatch")
 	}
 	tail := body[idx:]
 	end := strings.Index(tail, "case 'pong':")
 	if end < 0 {
-		t.Fatal("case 'pong' must follow daemon_run_ended")
+		t.Fatal("case 'pong' must follow the unified run dispatch")
 	}
 	daemonCase := tail[:end]
 	if !strings.Contains(daemonCase, "fetchSystemDaemons()") {
-		t.Error("daemon_run_* case must call fetchSystemDaemons() so updateSystemBadge runs")
+		t.Error("sysession run frames must call fetchSystemDaemons() so updateSystemBadge runs")
 	}
 	// Hub-wide broadcast, ~4 frames/min/tab: must honour the RNEW-UX-014
 	// hidden-tab suspension instead of fetching in the background.
 	if !strings.Contains(daemonCase, "if (document.hidden) break;") {
-		t.Error("daemon_run_* case must skip the fetch while document.hidden")
+		t.Error("the sysession branch must skip the fetch while document.hidden")
 	}
 	// ...and startPollers must re-sync the badge once the tab is visible again.
 	js := readDashboardJS(t)

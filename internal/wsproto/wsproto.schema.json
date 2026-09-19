@@ -6,15 +6,13 @@
     "agent_subscribe_rejected",
     "auth_fail",
     "auth_ok",
-    "cron_run_ended",
-    "cron_run_started",
-    "daemon_run_ended",
-    "daemon_run_started",
     "error",
     "event",
     "history",
     "interrupt_ack",
     "pong",
+    "run_ended",
+    "run_started",
     "send_ack",
     "send_error",
     "session_state",
@@ -127,138 +125,6 @@
         "type"
       ]
     },
-    "cron_run_ended": {
-      "properties": {
-        "duration_ms": {
-          "type": "integer"
-        },
-        "ended_at": {
-          "type": "integer"
-        },
-        "error_class": {
-          "type": "string"
-        },
-        "error_msg": {
-          "type": "string"
-        },
-        "job_id": {
-          "type": "string"
-        },
-        "run_id": {
-          "type": "string"
-        },
-        "session_id": {
-          "type": "string"
-        },
-        "started_at": {
-          "type": "integer"
-        },
-        "state": {
-          "type": "string"
-        },
-        "trigger": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "ended_at",
-        "job_id",
-        "run_id",
-        "started_at",
-        "state",
-        "type"
-      ]
-    },
-    "cron_run_started": {
-      "properties": {
-        "fresh": {
-          "type": "boolean"
-        },
-        "job_id": {
-          "type": "string"
-        },
-        "run_id": {
-          "type": "string"
-        },
-        "session_id": {
-          "type": "string"
-        },
-        "started_at": {
-          "type": "integer"
-        },
-        "trigger": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "job_id",
-        "run_id",
-        "started_at",
-        "type"
-      ]
-    },
-    "daemon_run_ended": {
-      "properties": {
-        "duration_ms": {
-          "type": "integer"
-        },
-        "error_class": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "run_id": {
-          "type": "string"
-        },
-        "state": {
-          "type": "string"
-        },
-        "trigger": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "run_id",
-        "state",
-        "type"
-      ]
-    },
-    "daemon_run_started": {
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "run_id": {
-          "type": "string"
-        },
-        "started_at": {
-          "type": "integer"
-        },
-        "trigger": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "run_id",
-        "started_at",
-        "type"
-      ]
-    },
     "error": {
       "properties": {
         "error": {
@@ -359,6 +225,88 @@
         }
       },
       "required": [
+        "type"
+      ]
+    },
+    "run_ended": {
+      "properties": {
+        "duration_ms": {
+          "type": "integer"
+        },
+        "ended_at": {
+          "type": "integer"
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "error_msg": {
+          "type": "string"
+        },
+        "owner_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "subsystem": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner_id",
+        "run_id",
+        "state",
+        "subsystem",
+        "type"
+      ]
+    },
+    "run_started": {
+      "properties": {
+        "fresh": {
+          "type": "boolean"
+        },
+        "owner_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "subsystem": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner_id",
+        "run_id",
+        "started_at",
+        "subsystem",
         "type"
       ]
     },

@@ -24,7 +24,7 @@
     "topLevelLetVar": 2
   },
   "contract.js": {
-    "lines": 203,
+    "lines": 201,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0
@@ -36,7 +36,7 @@
     "topLevelLetVar": 18
   },
   "dashboard.js": {
-    "lines": 6944,
+    "lines": 6924,
     "maxFunctionLines": 249,
     "functionsOver100": 4,
     "topLevelLetVar": 56
