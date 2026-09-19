@@ -47,11 +47,17 @@
     "functionsOver100": 0,
     "topLevelLetVar": 0
   },
+  "cron_trigger.js": {
+    "lines": 178,
+    "maxFunctionLines": 38,
+    "functionsOver100": 0,
+    "topLevelLetVar": 1
+  },
   "cron_view.js": {
-    "lines": 2889,
+    "lines": 2756,
     "maxFunctionLines": 127,
     "functionsOver100": 3,
-    "topLevelLetVar": 13
+    "topLevelLetVar": 12
   },
   "dashboard.js": {
     "lines": 6924,
