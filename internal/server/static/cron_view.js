@@ -2033,6 +2033,10 @@ function cronErrorClassLabel(cls) {
     // 自己没了（drain 超预算或被硬杀）。措辞必须与"已取消"分开，否则操作员
     // 会把一次被杀的运行读成自己点过取消。
     case 'interrupted': return '进程中断（未跑完）';
+    // 重启存活的 CLI 被启动时的 argv 漂移检查关掉：是操作员自己的配置修改
+    // 结束了这次 run，不是重启本身 —— 与 interrupted 分开命名，操作员才
+    // 知道该看的是自己改了什么，而不是找一个不存在的崩溃（#2749 语义）。
+    case 'config_drift': return '配置变更中止（升级时改了模型/参数）';
     // 云沙箱三态（agentcore-cloud-sandbox RFC §6.1/§7.2）。transport 是
     // §6.2 双跑风险态：流断了但 microVM 状态未知，徽标走红色 + ⚠。
     case 'sandbox_failed': return '云沙箱任务失败';

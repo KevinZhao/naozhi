@@ -250,6 +250,12 @@ const (
 	// operator cancel. Wire value mirrors runtelemetry.ErrClassCronInterrupted
 	// (Epic H #2546). Written only by reconcileRunInflight, at startup.
 	ErrClassInterrupted ErrorClass = "interrupted"
+	// ErrClassConfigDrift marks a run whose surviving shim was shut down at
+	// startup because its argv no longer matched config (a model/effort/
+	// extra_args change rode the upgrade). The run was healthy; the operator's
+	// own edit ended it — a different fact from "the process went away", and
+	// the dashboard label says so (#2749).
+	ErrClassConfigDrift ErrorClass = "config_drift"
 )
 
 // hexIDEntropyBytes 是所有 cron 内部 ID（jobID / runID）的熵字节数（不是

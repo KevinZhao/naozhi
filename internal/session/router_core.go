@@ -149,6 +149,9 @@ const (
 type Router struct {
 	mu           sync.RWMutex
 	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu (write lock)
+	// drift records keys whose shims were shut down for argv drift at startup,
+	// for cron's adoption verdict (router_adopt.go). Own lock, startup-only writes.
+	drift driftShutdowns
 	// ss is the session-table facet (#383): sessions + byChat/keyhash/idToKey
 	// indices, activeCount, dirty, gen (sessionStore, store.go). No lock of its
 	// own — read/written ONLY under r.mu. INVARIANT: sessions + byChat +
