@@ -1,3 +1,4 @@
+// anchor-keep: pins registry mutation sites to the funnel functions; a bypassing write compiles fine and only corrupts the index under concurrency.
 package server
 
 import (

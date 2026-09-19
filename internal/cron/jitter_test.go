@@ -1,3 +1,4 @@
+// anchor-keep: the source anchor here pins the jitter call sites; the behavioural half of this file tests the jitter maths directly.
 package cron
 
 import (

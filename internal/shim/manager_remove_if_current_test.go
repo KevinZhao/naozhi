@@ -1,3 +1,4 @@
+// anchor-keep: the identity-checked delete (remove only if current) is a source-level sequence; the behavioural symptom is the "max shims reached (50)" leak that takes 50 dead shims to surface.
 package shim
 
 import (

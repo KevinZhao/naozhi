@@ -1,3 +1,4 @@
+// anchor-keep: pins that a racing Reconnect swap closes the OLD handle in-source; behaviourally the leak only shows as an fd count drift long after the race, so the source sequence is the testable fact.
 package shim
 
 import (

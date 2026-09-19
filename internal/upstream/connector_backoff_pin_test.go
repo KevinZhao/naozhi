@@ -1,3 +1,4 @@
+// anchor-keep: freezes the reconnect backoff schedule constants against silent edits; the schedule IS the contract (#870) and only the source spells it.
 package upstream
 
 import (

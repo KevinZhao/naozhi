@@ -1,3 +1,4 @@
+// anchor-keep: pins that the stub re-register happens BEFORE finishRun releases the CAS gate — a statement ordering whose violation is a race with TriggerNow, not a deterministic behaviour.
 package cron
 
 import (
