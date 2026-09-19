@@ -531,6 +531,10 @@ func (s *Scheduler) Start() error {
 	// like the GC pass above — each orphan costs a StopRuntimeSession
 	// network call and must not block Start. gcWG-tracked so Stop() waits.
 	s.goStartupPass("sandbox-pending-reconcile", s.reconcileSandboxPending)
+	// Blob GC for the snapshot store (#2682): manifest retention strands
+	// blobs, and nothing else ever deletes them. Not gated on the run store —
+	// snapshots are written by sandbox runs regardless of run-history state.
+	s.goStartupPass("sandbox-blob-gc", s.gcSandboxBlobs)
 	// Epic H #2546: local runs left in flight by the previous process. Unlike a
 	// sandbox orphan there is nothing to stop — the process is gone — so this only
 	// writes the history rows that were missing. Async + gcWG-tracked for the same

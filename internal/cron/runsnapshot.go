@@ -159,7 +159,13 @@ func (s *Scheduler) SandboxRunSnapshotManifest(jobID, runID string) (*SandboxRun
 	if !IsValidID(jobID) || !IsValidID(runID) {
 		return nil, false, fmt.Errorf("cron sandbox: invalid jobID/runID")
 	}
-	path := filepath.Join(s.sandboxSnapshotDir(), jobID, runID+".json")
+	return readSandboxSnapshotManifest(filepath.Join(s.sandboxSnapshotDir(), jobID, runID+".json"))
+}
+
+// readSandboxSnapshotManifest loads one manifest by path; (nil, false, nil)
+// when absent. Shared by the reader API above and the blob GC's mark phase so
+// the two cannot disagree about what counts as a live manifest.
+func readSandboxSnapshotManifest(path string) (*SandboxRunSnapshot, bool, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
