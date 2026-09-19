@@ -1,3 +1,4 @@
+// anchor-keep: pins the completed SessionID()/State() rename across interface + implementations; a re-introduced Get* twin compiles and re-opens the sprawl #463 closed.
 package session
 
 import (

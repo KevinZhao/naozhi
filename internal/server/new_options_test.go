@@ -1,3 +1,4 @@
+// anchor-keep: bans the deleted legacy `func New(addr string` shape from returning; a re-added wrapper compiles and behaves, re-opening the positional-dependency sprawl #614 closed.
 package server
 
 import (

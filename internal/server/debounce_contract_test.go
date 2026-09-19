@@ -1,3 +1,4 @@
+// anchor-keep: clientWG Add/Done pairing around the debounce AfterFunc is goroutine-lifetime bookkeeping; a missing Add compiles and only loses a late broadcast during Shutdown.
 package server
 
 import (

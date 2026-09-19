@@ -1,3 +1,4 @@
+// anchor-keep: defer-vs-explicit Unlock is panic-safety, observable only by injecting a panic mid-critical-section; no production seam exists for that.
 package cron
 
 import (

@@ -1,3 +1,4 @@
+// anchor-keep: the closed-recheck-under-mu after resubscribe is a race-window fact; the Close-vs-reconnect interleaving has no deterministic seam to drive.
 package node
 
 import (

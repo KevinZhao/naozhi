@@ -1,3 +1,4 @@
+// anchor-keep: lock coverage across the Remove syscall batch is a queueing fact (Append behind 200 removes on a slow mount); source order is the only deterministic witness.
 package cron
 
 import (

@@ -1,3 +1,4 @@
+// anchor-keep: adapter allowlist: every platform adapter must consume BoundedDispatch instead of hand-rolling the inbound skeleton; a hand-rolled copy behaves identically until it drifts.
 package platform_test
 
 import (

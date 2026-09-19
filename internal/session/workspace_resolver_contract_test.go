@@ -1,3 +1,4 @@
+// anchor-keep: single-decision-site rule for workspace resolution; a second copy behaves identically until the priority order drifts between the copies.
 package session
 
 import (

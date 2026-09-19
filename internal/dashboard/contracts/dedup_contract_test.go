@@ -1,3 +1,4 @@
+// anchor-keep: interface-subset allowlist across sub-packages; a widened local NodeAccessor compiles and only surfaces later as contract drift between the copies.
 package contracts
 
 import (

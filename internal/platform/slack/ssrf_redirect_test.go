@@ -1,3 +1,4 @@
+// anchor-keep: the behavioural twin passes for any ErrUseLastResponse stub; this additionally pins the package-level client + the named SSRF comment so the defence is not refactored into a permissive shape.
 package slack
 
 import (

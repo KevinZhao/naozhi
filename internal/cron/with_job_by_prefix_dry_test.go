@@ -1,3 +1,4 @@
+// anchor-keep: DRY routing (three IM entry points through one helper) is a call-graph fact; an open-coded copy behaves identically until the copies drift.
 package cron
 
 import (

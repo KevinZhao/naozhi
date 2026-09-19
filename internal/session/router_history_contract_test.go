@@ -1,3 +1,4 @@
+// anchor-keep: runHistoryTask is the canonical late-Add(1)-safe spawner; a bare `go` bypass compiles and only loses WaitGroup accounting during Stop.
 package session
 
 import (

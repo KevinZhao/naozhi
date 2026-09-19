@@ -1,3 +1,4 @@
+// anchor-keep: totalCost's atomic.Uint64 packing is the fact; a reverted plain float64 behaves identically until a torn read appears under a future post-publication writer.
 package session
 
 import (

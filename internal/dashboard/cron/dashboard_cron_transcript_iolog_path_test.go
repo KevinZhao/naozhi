@@ -1,3 +1,4 @@
+// anchor-keep: pins filepath.Base on the two IO-error log sites; the path disclosure lives in the log argument expression, enumerable only at source.
 package cron
 
 // TestTranscriptIOLogUsesBasename is a static-analysis contract test for

@@ -1,3 +1,4 @@
+// anchor-keep: the stopCtx guard's position INSIDE the scan loop is the fact (bounds N x 30s StopSession at shutdown); observing it behaviourally means wall-clocking a budget exhaustion.
 package cron
 
 import (

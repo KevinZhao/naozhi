@@ -1,3 +1,4 @@
+// anchor-keep: restartSystemdNoWait's gate protects the one behaviour a test must never exercise for real (restarting the host's live service); the source guard is the only safe witness.
 package selfupdate
 
 import (

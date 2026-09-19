@@ -1,3 +1,4 @@
+// anchor-keep: asserts the per-RPC cancelOnClose watcher goroutine pattern stays gone; the leak it caused is a goroutine-lifetime fact behaviour cannot see while behaviour still passes.
 package node
 
 import (

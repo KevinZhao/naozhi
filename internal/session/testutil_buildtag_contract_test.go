@@ -1,3 +1,4 @@
+// anchor-keep: whether test seams link into the production binary is a build-graph fact; the tag constraint on testutil.go is only visible at source.
 package session
 
 import (

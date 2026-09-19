@@ -1,3 +1,4 @@
+// anchor-keep: close-then-delete order inside EndSpawn is a race-window fact (waiter must see a closed channel, not a vanished entry); no seam drives that interleaving deterministically.
 package spawnpool
 
 import (

@@ -1,3 +1,4 @@
+// anchor-keep: enumerates every slog site that logs a user-supplied chatID and pins the SanitizeForLog wrapper on each; a log capture proves one site, not the enumeration.
 package cron
 
 import (
