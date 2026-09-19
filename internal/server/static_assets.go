@@ -95,6 +95,9 @@ var cronViewJS embed.FS
 //go:embed static/cron_schedule.js
 var cronScheduleJS embed.FS
 
+//go:embed static/cron_timeline.js
+var cronTimelineJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -198,6 +201,7 @@ var staticAssets = func() map[string]staticAsset {
 		{"send_message.js", sendMessageJS, "static/send_message.js", true},
 		{"cron_view.js", cronViewJS, "static/cron_view.js", true},
 		{"cron_schedule.js", cronScheduleJS, "static/cron_schedule.js", true},
+		{"cron_timeline.js", cronTimelineJS, "static/cron_timeline.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},

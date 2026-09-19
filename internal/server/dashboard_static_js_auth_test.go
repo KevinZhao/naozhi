@@ -207,6 +207,27 @@ func TestCronScheduleJS_RequiresAuth_TokenMode(t *testing.T) {
 	}
 }
 
+// TestCronTimelineJS_RequiresAuth_TokenMode: same SEC-4 gate for the
+// timeline region split out of cron_view.js (#2715 D4 follow-up).
+func TestCronTimelineJS_RequiresAuth_TokenMode(t *testing.T) {
+	t.Parallel()
+	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/static/cron_timeline.js", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("/static/cron_timeline.js unauth GET = %d, want 401 (SEC-4 #1328)", w.Code)
+	}
+	body := w.Body.String()
+	for _, leak := range []string{"function ", "cronTimelineExpand", "cronExpandedRunId"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("#923 regression: 401 body leaks cron_timeline.js source token %q", leak)
+		}
+	}
+}
+
 // TestCronViewJS_NoTokenModeStillServes locks the no-token escape valve.
 func TestCronViewJS_NoTokenModeStillServes(t *testing.T) {
 	t.Parallel()

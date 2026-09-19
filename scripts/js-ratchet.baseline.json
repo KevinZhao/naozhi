@@ -35,8 +35,14 @@
     "functionsOver100": 0,
     "topLevelLetVar": 3
   },
+  "cron_timeline.js": {
+    "lines": 937,
+    "maxFunctionLines": 70,
+    "functionsOver100": 0,
+    "topLevelLetVar": 0
+  },
   "cron_view.js": {
-    "lines": 4253,
+    "lines": 3393,
     "maxFunctionLines": 137,
     "functionsOver100": 4,
     "topLevelLetVar": 15
