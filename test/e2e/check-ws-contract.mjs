@@ -59,8 +59,44 @@ for (const t of backendTypes) {
     failures++;
   }
 }
+// ── Third direction: the SEND side (#2715). The receive switch above has
+// always had this two-way check; a frame the dashboard SENDS had nothing —
+// a typo'd type went over the wire and the backend silently ignored it.
+// Send sites now write `type: NZ_CONTRACT.WS.<key>` (the constant is what
+// makes "this is a WS frame" machine-recognisable; a bare `type: 'x'` could
+// be a Blob MIME or a list-item tag), and every key referenced must be one
+// of the inbound types the generator embedded in contract.js.
+const contractPath = path.join(ROOT, 'internal', 'server', 'static', 'contract.js');
+const contractSrc = fs.readFileSync(contractPath, 'utf8');
+const contractKeys = new Set();
+for (const m of contractSrc.matchAll(/^\s{6}([a-z_]+): '[a-z_]+',$/gm)) {
+  contractKeys.add(m[1]);
+}
+// Inbound = the contract's WS keys that are not outbound schema types.
+const inboundTypes = new Set([...contractKeys].filter((k) => !backendTypes.has(k)));
+
+const staticDir = path.join(ROOT, 'internal', 'server', 'static');
+const sendSites = [];
+for (const f of fs.readdirSync(staticDir)) {
+  if (!f.endsWith('.js') || f === 'contract.js') continue;
+  const js = fs.readFileSync(path.join(staticDir, f), 'utf8');
+  for (const m of js.matchAll(/type:\s*NZ_CONTRACT\.WS\.([a-zA-Z_$][\w$]*)/g)) {
+    sendSites.push({ file: f, key: m[1] });
+  }
+}
+if (sendSites.length === 0) {
+  console.error('check-ws-contract: no NZ_CONTRACT.WS send sites found — the send-side check has gone blind (were the constants renamed?)');
+  failures++;
+}
+for (const { file, key } of sendSites) {
+  if (!inboundTypes.has(key)) {
+    console.error(`${file} sends NZ_CONTRACT.WS.${key} but ${JSON.stringify(key)} is not an inbound type the backend accepts`);
+    failures++;
+  }
+}
+
 if (failures) {
   console.error(`check-ws-contract: ${failures} mismatch(es) between wsproto.schema.json and dashboard.js`);
   process.exit(1);
 }
-console.log(`check-ws-contract: OK (${backendTypes.size} types, front and back agree)`);
+console.log(`check-ws-contract: OK (${backendTypes.size} types + ${sendSites.length} send sites over ${inboundTypes.size} inbound types)`);

@@ -445,7 +445,3 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 func (h *Handlers) HasFilesExistsLimiter() bool {
 	return h.deps.FilesExistsLimiter != nil
 }
-
-// ContractProjectsEntry exposes the /api/projects entry wire struct to the
-// contract.js generator (#2539) — reflect-only; the type stays unexported.
-var ContractProjectsEntry any = projectsListEntry{}

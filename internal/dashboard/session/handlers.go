@@ -326,7 +326,3 @@ type Deps struct {
 func New(d Deps) *Handlers {
 	return &Handlers{deps: d}
 }
-
-// ContractStats exposes the /api/sessions "stats" wire struct to the
-// contract.js generator (#2539) — reflect-only; the type stays unexported.
-var ContractStats any = sessionStats{}

@@ -4070,7 +4070,7 @@ const wsm = {
     this.conn.onopen = () => {
       this.setState(WS_STATES.AUTH);
       const token = getToken();
-      this.conn.send(JSON.stringify({ type: 'auth', token: token }));
+      this.conn.send(JSON.stringify({ type: NZ_CONTRACT.WS.auth, token: token }));
     };
 
     this.conn.onmessage = (evt) => {
@@ -4354,7 +4354,7 @@ const wsm = {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => {
       if (this.conn && this.conn.readyState === WebSocket.OPEN) {
-        this.conn.send(JSON.stringify({ type: 'ping' }));
+        this.conn.send(JSON.stringify({ type: NZ_CONTRACT.WS.ping }));
       }
     }, 30000);
   },
@@ -4371,7 +4371,7 @@ const wsm = {
     node = node || 'local';
     this._pendingSubscribeKey = key;
     this._pendingSubscribeNode = node;
-    const msg = { type: 'subscribe', key: key };
+    const msg = { type: NZ_CONTRACT.WS.subscribe, key: key };
     if (node && node !== 'local') msg.node = node;
     this._initialSubscribe = (this.lastEventTimeWs === 0);
     if (this.lastEventTimeWs > 0) {
@@ -4388,7 +4388,7 @@ const wsm = {
 
   unsubscribe() {
     if (this.subscribedKey) {
-      const msg = { type: 'unsubscribe', key: this.subscribedKey };
+      const msg = { type: NZ_CONTRACT.WS.unsubscribe, key: this.subscribedKey };
       if (this.subscribedNode && this.subscribedNode !== 'local') msg.node = this.subscribedNode;
       this.send(msg);
     }
@@ -4414,7 +4414,7 @@ const wsm = {
     this.cronLive.runStartedAt = runStartedAtMs || 0;
     this.cronLive.status = 'pending';
     emitCron('cron:live-status', 'pending');
-    const msg = { type: 'subscribe', key: key };
+    const msg = { type: NZ_CONTRACT.WS.subscribe, key: key };
     const after = this.cronLive.lastEventTimeMs || runStartedAtMs || 0;
     if (after > 0) msg.after = after;
     this.send(msg);
@@ -4422,7 +4422,7 @@ const wsm = {
 
   unsubscribeCronLive() {
     if (this.cronLive.subscribedKey) {
-      this.send({ type: 'unsubscribe', key: this.cronLive.subscribedKey });
+      this.send({ type: NZ_CONTRACT.WS.unsubscribe, key: this.cronLive.subscribedKey });
     }
     this.cronLive.jobId = null;
     this.cronLive.pendingJobId = null;
@@ -5071,7 +5071,7 @@ const wsm = {
         this.cronLive.pendingJobId = jobId;
         const key = 'cron:' + jobId;
         const after = this.cronLive.lastEventTimeMs || this.cronLive.runStartedAt || 0;
-        const subMsg = { type: 'subscribe', key: key };
+        const subMsg = { type: NZ_CONTRACT.WS.subscribe, key: key };
         if (after > 0) subMsg.after = after;
         this.send(subMsg);
       }
