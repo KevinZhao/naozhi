@@ -15,14 +15,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"reflect"
 	"sort"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/dashboard/project"
-	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
-	"github.com/naozhi/naozhi/internal/server"
-	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
@@ -64,25 +59,6 @@ func Build(routesGoldenPath string) (string, error) {
 	b.WriteString("    API: {\n")
 	for _, p := range paths {
 		fmt.Fprintf(&b, "      %s: '%s',\n", apiKey(p), p)
-	}
-	b.WriteString("    },\n")
-
-	// F: json field names of the dashboard export structs.
-	b.WriteString("    F: {\n")
-	for _, sec := range []struct {
-		name string
-		v    any
-	}{
-		{"sessions", session.SessionSnapshot{}},
-		{"stats", dashsession.ContractStats},
-		{"projects", project.ContractProjectsEntry},
-		{"health", server.ContractHealthAuth},
-	} {
-		fmt.Fprintf(&b, "      %s: {\n", sec.name)
-		for _, f := range jsonFields(reflect.TypeOf(sec.v)) {
-			fmt.Fprintf(&b, "        %s: '%s',\n", f, f)
-		}
-		b.WriteString("      },\n")
 	}
 	b.WriteString("    },\n")
 
@@ -131,33 +107,4 @@ func apiKey(path string) string {
 	k := strings.TrimPrefix(path, "/api/")
 	k = strings.NewReplacer("/", "_", "{", "", "}", "", "-", "_", ".", "_").Replace(k)
 	return k
-}
-
-// jsonFields returns the sorted json field names of t, inlining anonymous
-// embedded structs the way encoding/json flattens them.
-func jsonFields(t reflect.Type) []string {
-	seen := map[string]bool{}
-	var walk func(reflect.Type)
-	walk = func(t reflect.Type) {
-		for i := 0; i < t.NumField(); i++ {
-			f := t.Field(i)
-			if f.Anonymous && f.Type.Kind() == reflect.Struct {
-				walk(f.Type)
-				continue
-			}
-			tag := f.Tag.Get("json")
-			if tag == "" || tag == "-" {
-				continue
-			}
-			name, _, _ := strings.Cut(tag, ",")
-			seen[name] = true
-		}
-	}
-	walk(t)
-	out := make([]string, 0, len(seen))
-	for n := range seen {
-		out = append(out, n)
-	}
-	sort.Strings(out)
-	return out
 }

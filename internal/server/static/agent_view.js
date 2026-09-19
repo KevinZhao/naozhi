@@ -381,7 +381,7 @@ import {
   function subscribeCurrent(taskID) {
     if (!taskID) return;
     var msg = {
-      type: 'agent_subscribe',
+      type: NZ_CONTRACT.WS.agent_subscribe,
       key: nzState.selectedKey,
       node: nzState.selectedNode || 'local',
       task_id: taskID,
@@ -395,7 +395,7 @@ import {
     var taskID = state.activeTaskID;
     if (!taskID) return;
     var msg = {
-      type: 'agent_unsubscribe',
+      type: NZ_CONTRACT.WS.agent_unsubscribe,
       key: state.activeKey || nzState.selectedKey,
       node: nzState.selectedNode || 'local',
       task_id: taskID,

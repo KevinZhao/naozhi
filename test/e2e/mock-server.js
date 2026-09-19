@@ -869,7 +869,7 @@ function startMockServer(overrides = {}) {
           let msg;
           try { msg = JSON.parse(payload.toString('utf8')); } catch { continue; }
           conn.messages.push(msg);
-          if (msg.type === 'auth') conn.send({ type: 'auth_ok' });
+          if (msg.type === NZ_CONTRACT.WS.auth) conn.send({ type: NZ_CONTRACT.WS.auth_ok });
         }
       });
       socket.on('error', () => {});
