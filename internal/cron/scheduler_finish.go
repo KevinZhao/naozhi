@@ -48,14 +48,8 @@ var _ RunHistoryReader = (*Scheduler)(nil)
 // the job is not currently executing. Used by the dashboard list API to
 // show "running 12s" badges.
 func (s *Scheduler) CurrentRun(jobID string) (RunInflightView, bool) {
-	v, ok := s.runningJobs.Load(jobID)
+	inf, ok := s.peek(jobID)
 	if !ok {
-		return runInflightView{}, false
-	}
-	// Defensive: the type-erased Load would otherwise panic if a refactor
-	// stores a different type or a nil value; degrade to "no inflight".
-	inf, ok := v.(*runInflight)
-	if !ok || inf == nil {
 		return runInflightView{}, false
 	}
 	return inf.snapshot()

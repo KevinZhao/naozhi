@@ -414,13 +414,9 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 //
 // ok=false → the overlap skip pair was emitted; caller returns without cleanup.
 func (s *Scheduler) execAcquireSlot(j *Job, viaTriggerNow bool) (inflight *runInflight, ok bool) {
-	// TriggerNow bypasses the cron chain's SkipIfStillRunning, so the per-job
-	// *runInflight CAS is the uniform overlap guard for both paths.
-	gate := s.jobGateLock(j.ID)
-	gate.Lock()
-	inflight = s.jobInflight(j.ID)
-	won := inflight.running.CompareAndSwap(false, true)
-	gate.Unlock()
+	// TriggerNow bypasses the cron chain's SkipIfStillRunning, so the runGate
+	// CAS is the uniform overlap guard for both paths.
+	inflight, won := s.acquire(j.ID)
 	if !won {
 		slog.Info("cron: job already running, skipping overlap", "job_id", j.ID)
 		// Overlap is a skipped state (no LastRunAt update). Counters /

@@ -146,18 +146,11 @@ type Scheduler struct {
 	// paths race trimAll's filesystem mutations on the runs/ tree.
 	gcWG sync.WaitGroup
 
-	// runningJobs serializes execute(j) per job ID so a manual TriggerNow
-	// cannot overlap a scheduled tick (SkipIfStillRunning only covers the
-	// scheduled path). Entries are deliberately NOT cleared on job delete: a
-	// concurrent execute() may still hold the *runInflight CAS gate, and a
-	// reused ID would split the gate and allow double execution (leak ≤ maxJobsHardCap).
-	runningJobs sync.Map // map[jobID]*runInflight
-
-	// jobGates shards a fixed pool of mutexes (hashed jobID) that serialise
-	// executeOpt's jobInflight load→CAS against cleanupRunningJobIfIdle's
-	// load→CompareAndDelete for the same job, closing the TOCTOU window where
-	// DeleteJob racing TriggerNow orphans the CAS gate (#1706). See job_gate.go.
-	jobGates [jobGateShards]sync.Mutex
+	// runGate owns the per-job execution slot: the runningJobs inflight map and
+	// the sharded mutexes that make its multi-step sequences atomic. Embedded
+	// (temporarily, like jobTable) so tests reaching runningJobs / jobGates
+	// directly keep compiling; see run_gate.go.
+	runGate
 
 	// storeMu serialises saveSnapshot writes so last-writer-wins order matches
 	// the order snapshots were marshaled under s.mu. WriteFileAtomic uses a
