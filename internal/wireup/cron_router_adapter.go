@@ -6,6 +6,7 @@ package wireup
 
 import (
 	"context"
+	"github.com/naozhi/naozhi/internal/cli"
 
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
@@ -120,4 +121,45 @@ func (c cronSessionAdapter) SessionID() string {
 
 func (c cronSessionAdapter) InterruptViaControl() cron.InterruptOutcome {
 	return cron.InterruptOutcome(int(c.s.InterruptViaControl()))
+}
+
+// ── run adoption (#2712 PR B) ───────────────────────────────────────────────
+
+// Ordinal guards for AdoptVerdict ↔ AdoptState, same discipline as the
+// InterruptOutcome pair above: the cast below is numeric, so divergence must
+// fail compilation here rather than mis-map a verdict at runtime.
+var (
+	_ = uint(int(cron.AdoptDriftShutdown) - int(session.AdoptDriftShutdown))
+	_ = uint(int(session.AdoptDriftShutdown) - int(cron.AdoptDriftShutdown))
+)
+
+// Compile-time guard: the production router adapter carries the adoption
+// capability cron asserts for (cron test fakes deliberately do not).
+var _ cron.InFlightAdopter = cronRouterAdapter{}
+
+// AdoptInFlight bridges the capability: the router answers with the live
+// *cli.Process (or a verdict explaining why not), and the adapter wraps it in
+// cron's narrow InFlightRun so cron keeps importing neither session nor cli.
+func (a cronRouterAdapter) AdoptInFlight(key string) (cron.InFlightRun, cron.AdoptVerdict) {
+	proc, state := a.r.AdoptInFlight(key)
+	if state != session.AdoptLive || proc == nil {
+		return nil, cron.AdoptVerdict(int(state))
+	}
+	return adoptedRunAdapter{p: proc}, cron.AdoptLive
+}
+
+// adoptedRunAdapter narrows *cli.Process to the one question an adoption asks.
+type adoptedRunAdapter struct{ p *cli.Process }
+
+func (ar adoptedRunAdapter) AwaitAdopted(ctx context.Context) (cron.AdoptedRunOutcome, error) {
+	out, err := ar.p.AdoptedOutcome(ctx)
+	if err != nil {
+		return cron.AdoptedRunOutcome{}, err
+	}
+	return cron.AdoptedRunOutcome{
+		Completed: out.End == cli.AdoptedEndResult && out.SubType != "error_during_execution",
+		Text:      out.Result.Text,
+		SubType:   out.SubType,
+		SessionID: out.Result.SessionID,
+	}, nil
 }

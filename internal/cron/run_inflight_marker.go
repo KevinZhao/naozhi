@@ -3,6 +3,7 @@ package cron
 import (
 	"encoding/json"
 	"errors"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -48,6 +49,13 @@ type runInflightMarker struct {
 	Prompt      string      `json:"prompt,omitempty"`
 	WorkDir     string      `json:"work_dir,omitempty"`
 	Fresh       bool        `json:"fresh,omitempty"`
+	// Attempts counts boots that already tried to ADOPT this marker (#2712 PR
+	// B). Zero (and absent, so pre-adoption markers need no migration) means
+	// never tried; at maxAdoptAttempts the reconciler stops adopting and
+	// records interrupted, so a marker that somehow crashes its adoption can
+	// cost at most one extra boot — never the unbounded crash loop Phase 0's
+	// remove-before-record was protecting against (#2751).
+	Attempts int `json:"attempts,omitempty"`
 }
 
 // runInflightDir resolves the marker directory ("" when persistence is disabled,
@@ -101,6 +109,22 @@ func (s *Scheduler) removeRunInflightMarker(runID string) {
 	}
 }
 
+// rewriteRunInflightMarker persists an updated marker in place (adoption bumps
+// Attempts before it starts waiting). Reports success; a failure means the
+// retry bound cannot be recorded, and the caller must not adopt.
+func (s *Scheduler) rewriteRunInflightMarker(path string, m runInflightMarker) bool {
+	data, err := json.Marshal(m)
+	if err != nil {
+		slog.Warn("cron: run-inflight marker re-marshal failed", "path", path, "err", err)
+		return false
+	}
+	if err := osutil.WriteFileAtomic(path, data, 0o600); err != nil {
+		slog.Warn("cron: run-inflight marker rewrite failed", "path", path, "err", err)
+		return false
+	}
+	return true
+}
+
 // reconcileRunInflight is the startup pass: every marker left on disk is a run
 // whose process died mid-flight. Each becomes a canceled record with
 // ErrClassInterrupted so the dashboard shows what happened, and the marker
@@ -122,7 +146,12 @@ func (s *Scheduler) reconcileRunInflight() {
 		return
 	}
 	now := time.Now()
+	// The adoption capability is asserted, never part of SessionRouter: the one
+	// production router gains it, every test fake degrades to "nothing to
+	// adopt" — the pre-adoption behaviour, and therefore the right default.
+	adopter, _ := s.router.(InFlightAdopter)
 	recovered := 0
+	adopted := 0
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".json") {
@@ -130,18 +159,68 @@ func (s *Scheduler) reconcileRunInflight() {
 		}
 		path := filepath.Join(dir, name)
 		m, ok := s.readRunInflightMarker(path)
-		// Remove first either way: a corrupt marker carries nothing to record and
-		// would otherwise be re-read on every boot.
+		if !ok {
+			// Corrupt marker: nothing to record, nothing to adopt, and it must
+			// not be re-read every boot — the original self-healing rule.
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("cron: corrupt run-inflight marker remove failed", "path", path, "err", err)
+			}
+			continue
+		}
+		// The adoption verdict, before anything is deleted: a live mid-turn CLI
+		// behind this job's shim means the run may still complete (#2712).
+		verdict := AdoptNone
+		var run InFlightRun
+		if adopter != nil && s.jobStillExists(m.JobID) && m.Attempts < maxAdoptAttempts {
+			run, verdict = adopter.AdoptInFlight(sessionkey.CronKey(m.JobID))
+		}
+		if verdict == AdoptLive {
+			// The marker survives into the attempt — it is the only durable
+			// record that this run exists — but with its attempt counted, so a
+			// crashing adoption costs one extra boot, not a loop.
+			m.Attempts++
+			if !s.rewriteRunInflightMarker(path, m) {
+				// Cannot bound the retries without the counter on disk; fall
+				// back to the safe branch rather than risk the loop.
+				verdict = AdoptNone
+			}
+		}
+		if verdict == AdoptLive {
+			// Claim the job's run slot exactly like a live run would: losing the
+			// CAS means a new tick beat us to the job, and two runs at once is
+			// worse than recording this one interrupted.
+			inflight, won := s.acquire(m.JobID)
+			if won {
+				inflight.populate(runInflightView{
+					RunID:     m.RunID,
+					StartedAt: time.UnixMilli(m.StartedAtMS),
+					Phase:     PhaseSending,
+					Trigger:   m.Trigger,
+				})
+				mCopy := m
+				s.goStartupPass("run-adoption-"+m.RunID, func() {
+					s.adoptRun(mCopy, run, inflight)
+				})
+				adopted++
+				continue
+			}
+			slog.Info("cron: adoption lost the run slot to a fresh tick; recording interrupted",
+				"job_id", m.JobID, "run_id", m.RunID)
+		}
+		// Terminal branches: the marker's story ends here, remove it first
+		// (self-healing, as before adoption existed).
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			slog.Warn("cron: run-inflight marker remove failed during reconcile", "path", path, "err", err)
 		}
-		if !ok {
-			continue
-		}
-		// A job deleted while naozhi was down has no history to attach to;
-		// appendRun's own orphan guard would drop the record anyway.
 		if !s.jobStillExists(m.JobID) {
 			continue
+		}
+		errClass, errMsg := ErrClassInterrupted, "naozhi restarted while this run was in flight"
+		if verdict == AdoptDriftShutdown {
+			// The shim survived the restart but startup shut it down because its
+			// argv no longer matched config: the operator's own edit ended this
+			// run, and the record says so instead of blaming the restart (#2749).
+			errClass, errMsg = ErrClassConfigDrift, "config changed across the restart; the old run's CLI was shut down"
 		}
 		startedAt := time.UnixMilli(m.StartedAtMS)
 		s.appendRun(&CronRun{
@@ -155,14 +234,14 @@ func (s *Scheduler) reconcileRunInflight() {
 			Prompt:     osutil.SanitizeForLog(m.Prompt, MaxPromptBytes),
 			WorkDir:    m.WorkDir,
 			Fresh:      m.Fresh,
-			ErrorClass: ErrClassInterrupted,
-			ErrorMsg:   "naozhi restarted while this run was in flight",
+			ErrorClass: errClass,
+			ErrorMsg:   errMsg,
 		})
 		recovered++
 	}
-	if recovered > 0 {
-		slog.Info("cron: recorded interrupted runs from the previous process",
-			"count", recovered, "dir", dir)
+	if recovered > 0 || adopted > 0 {
+		slog.Info("cron: reconciled runs from the previous process",
+			"interrupted", recovered, "adopted", adopted, "dir", dir)
 	}
 }
 

@@ -403,6 +403,11 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			// classify guarantees recWrapper is non-nil, so no SIGUSR2
 			// fallback; if Reconnect fails, the next tick revisits.
 			shutdownShimViaReconnect(parentCtx, recWrapper, state, shimReconnectTimeout, false)
+			// A cron run that was mid-turn in that shim just lost its answer to
+			// the operator's own config edit — record the why, so the adoption
+			// verdict (router_adopt.go) can say config_drift instead of the
+			// generic interrupted (#2749).
+			r.drift.mark(state.Key)
 			// The session is now suspended until the next user message. NewRouter's
 			// async JSONL load skipped this key (shimManagedKeys claimed it), so
 			// backfill persistedHistory here (InjectHistory is proc-nil safe) or
