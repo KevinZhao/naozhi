@@ -7,9 +7,6 @@ package cron
 
 import (
 	"fmt"
-	"time"
-
-	robfigcron "github.com/robfig/cron/v3"
 )
 
 // lockedJobOp / jobSideEffect name the two closure roles withJobByID(Opt) and
@@ -132,6 +129,11 @@ func (s *Scheduler) withJobByIDOpt(id string, opts withJobByIDOpts) (*Job, error
 
 // DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
+	// Entry-lifecycle writer: entryMu keeps a delete out of another writer's
+	// plan → commit window, which is what lets commitAndApplyCronEntry write
+	// the id back without re-checking that the job still exists.
+	s.entryMu.Lock()
+	defer s.entryMu.Unlock()
 	// deleteJobLocked snapshots the cron entryID under s.mu; the cron Remove
 	// runs in postCleanup after unlock so the unbuffered c.remove send stays
 	// off the write hold (#1810).
@@ -158,6 +160,12 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 // job keeps firing; otherwise a restart would replay the unpaused job from
 // disk (#1272).
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
+	// Entry-lifecycle writer (it removes the entry): hold entryMu so a pause
+	// cannot land inside another writer's plan → commit window — where its
+	// Remove would see entryID=0, no-op, and leave the freshly committed entry
+	// alive on a job that reads as paused.
+	s.entryMu.Lock()
+	defer s.entryMu.Unlock()
 	var pauseCleanup func()
 	var prevEntryID cronEntryID
 	var prevPaused bool
@@ -197,53 +205,39 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 
 // ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
 //
-// registerJob mutates entryID/cachedPeriod/cachedSched before resumeJobLocked
-// flips Paused, so a persist failure would leave a live cron entry +
-// Paused=false in memory while disk says Paused=true — a restart would then
-// re-register on top of the surviving entry and double-fire. The rollback
-// restores the pre-op state and the orphaned entry is removed after unlock
-// (#1226).
+// The cron entry is committed in postCleanup, AFTER persist succeeded and s.mu
+// is released. This inverts the order that made #1226 dangerous: registration
+// used to happen before persist, so a persist failure left a live entry that
+// the rollback had to snapshot, restore around, and remove from outside the
+// lock. With the commit deferred, a persist failure happens before any entry
+// exists — the rollback is one field write — and the Paused=false/entryID=0
+// window in between is fenced by entryMu against every other entry writer.
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
-	var prevEntryID cronEntryID
-	var prevCachedPeriod time.Duration
-	var prevCachedSched robfigcron.Schedule
-	var prevPaused bool
-	var captured bool
-	// entryID to remove AFTER withJobByIDOpt returns: rollback runs under s.mu
-	// and robfig's Remove sends on the unbuffered c.remove channel drained only
-	// by the cron-tick goroutine, which takes s.mu.RLock → deadlock (#537).
-	var removeEntryID cronEntryID
+	s.entryMu.Lock()
+	defer s.entryMu.Unlock()
+	var resumePlan *cronEntryPlan
 	op := func(j *Job) error {
-		// Snapshot under s.mu before resumeJobLocked → registerJob mutates
-		// entryID/cachedPeriod/cachedSched so rollback restores the exact view.
-		prevEntryID = j.entryID
-		prevCachedPeriod = j.cachedPeriod
-		prevCachedSched = j.cachedSched
-		prevPaused = j.Paused
-		captured = true
-		return s.resumeJobLocked(j)
+		p, err := s.resumePlanLocked(j)
+		if err != nil {
+			return err
+		}
+		resumePlan = &p
+		return nil
 	}
 	rollback := func(j *Job) {
-		// Only restore if op actually ran and captured the pre-op view.
-		if !captured {
-			return
+		// No entry was committed, so restoring the flag IS the whole rollback.
+		if resumePlan != nil {
+			j.Paused = true
+			resumePlan = nil
 		}
-		// Capture the freshly-registered entryID for removal OUTSIDE s.mu; a
-		// cron Remove here would deadlock (see removeEntryID above).
-		removeEntryID = j.entryID
-		j.entryID = prevEntryID
-		j.cachedPeriod = prevCachedPeriod
-		j.cachedSched = prevCachedSched
-		j.Paused = prevPaused
 	}
-	snap, err := s.withJobByIDOpt(id, withJobByIDOpts{
+	return s.withJobByIDOpt(id, withJobByIDOpts{
 		op:                   op,
 		rollbackOnPersistErr: rollback,
+		postCleanup: func(_ *Job) {
+			if resumePlan != nil {
+				s.commitAndApplyCronEntry(*resumePlan)
+			}
+		},
 	})
-	// Remove the orphaned cron entry now that s.mu is released. Non-zero only
-	// when rollback fired; Remove(0) would be a no-op anyway.
-	if removeEntryID != 0 {
-		s.cron.Remove(removeEntryID)
-	}
-	return snap, err
 }

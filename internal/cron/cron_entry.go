@@ -17,14 +17,16 @@ package cron
 // own jobs[id] lookup — because they queue behind s.mu while it waits on a
 // goroutine that may be busy dispatching other jobs.
 //
-// The round trip is now gone: the parsed schedule the cache wanted is the value
-// we already hand in, so there is nothing to read back. What remains is the
-// one-way send, still performed under s.mu by all six callers of registerJob.
-// Removing that is the other half of the work and is NOT a call-site rename: each
-// of the six sits inside a transaction with its own persist-and-roll-back
-// ordering (AddJob's rollbackEntryID, SetJobPrompt's pauseRollbackCleanup,
-// UpdateJob's re-register-the-old-schedule path). The plan/commit/apply split
-// below is the shape those transactions will use, one site at a time.
+// The round trip is gone (the parsed schedule is handed in, nothing to read
+// back), and so is the one-way send under s.mu: every post-start writer now
+// plans under the lock, commits off it, and applies the id back under a short
+// re-acquire — with entryMu held around the whole span so no other entry
+// writer can slip into the entryID=0 window (entry_registration.go). Deferring
+// the commit until after persist also dissolved the rollback machinery those
+// transactions used to need: a persist failure now happens before any entry
+// exists, so there is nothing to un-register. registerJob survives only for
+// Start's load loop, where robfig is not yet running and Schedule is an
+// append, not a rendezvous.
 
 import (
 	"fmt"
@@ -59,9 +61,21 @@ func planCronEntry(jobID, spec string, now time.Time) (cronEntryPlan, error) {
 	return cronEntryPlan{jobID: jobID, sched: sched, period: schedulePeriodFromSched(sched, now)}, nil
 }
 
+// cronCommitHook runs immediately before the one robfig call that rendezvous
+// with the run loop. Test-only seam: the lock-discipline test installs a hook
+// that proves s.mu is not held by the committing goroutine — the rule this file
+// exists to make structural, checked by a machine instead of a comment.
+var cronCommitHook func()
+
 // commitCronEntry hands the plan to robfig and returns the entry id. This is the
 // one call that rendezvous with the run loop.
+//
+// MUST NOT run under s.mu. Every production caller holds entryMu instead (see
+// entry_registration.go), which is what makes the pattern below safe.
 func (s *Scheduler) commitCronEntry(p cronEntryPlan) cronEntryID {
+	if cronCommitHook != nil {
+		cronCommitHook()
+	}
 	// FuncJob so the chain installed in NewScheduler (Recover +
 	// SkipIfStillRunning) wraps this exactly as AddFunc did: Schedule applies
 	// c.chain.Then(cmd) for both entry points.
@@ -74,4 +88,27 @@ func applyCronEntry(j *Job, p cronEntryPlan, id cronEntryID) {
 	j.entryID = id
 	j.cachedSched = p.sched
 	j.cachedPeriod = p.period
+}
+
+// commitAndApplyCronEntry is the out-of-lock half of a registration: commit the
+// plan to robfig, then take s.mu just long enough to write the id back onto the
+// live job.
+//
+// The caller holds entryMu across the whole plan → commit → apply span, and
+// that is what makes the blind write-back safe: every writer that could delete
+// the job, change its schedule, or pause it also holds entryMu, so between the
+// plan and this apply the job's entry-relevant state is frozen. The lookup can
+// still miss in exactly one case — Stop tore the table down — and then the
+// freshly committed entry must be removed or it ticks for a job nobody can see.
+func (s *Scheduler) commitAndApplyCronEntry(p cronEntryPlan) {
+	id := s.commitCronEntry(p)
+	s.mu.Lock()
+	j, ok := s.jobs[p.jobID]
+	if ok {
+		applyCronEntry(j, p, id)
+	}
+	s.mu.Unlock()
+	if !ok {
+		s.cron.Remove(id)
+	}
 }

@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-// TestResumeJob_RollbackOnPersistFailure pins R20260531070014-CR-2:
-// resumeJobLocked → registerJob mutates j.entryID + j.cachedPeriod +
-// j.cachedSched and flips j.Paused=false BEFORE persistJobsLocked runs.
-// A persist failure after op-success would leave in-memory Paused=false with
-// a live cron entry while disk still shows Paused=true — on restart the
-// scheduler re-registers the schedule on top of the surviving entry, producing
-// a double-fire. After the rollback fix, in-memory state matches disk.
+// TestResumeJob_RollbackOnPersistFailure pins R20260531070014-CR-2: resume
+// flips j.Paused=false BEFORE persistJobsLocked runs, so a persist failure
+// must leave memory agreeing with the un-persisted disk (still paused, no
+// entry) or a restart re-registers the schedule on top of surviving state and
+// double-fires. The assertions are order-independent — under the current
+// plan/commit/apply order they hold because the entry is never committed when
+// persist fails, rather than committed and then rolled back.
 func TestResumeJob_RollbackOnPersistFailure(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 	// Seed is Paused=true with no cron entry.
