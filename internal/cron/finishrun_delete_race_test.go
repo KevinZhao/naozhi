@@ -11,12 +11,12 @@ import (
 
 // TestFinishRun_DeleteRaceNoOrphanRunsDir pins #2058: finishRun's terminal
 // write is two-step and non-atomic. recordTerminalResult confirms the job
-// exists, bumps RunCounters, persists cron_jobs.json, then RELEASES s.mu and
+// exists, bumps RunCounters, persists cron_jobs.json, then RELEASES s.tbl.mu and
 // returns jobPersistOK=true. appendRun then writes the physically-separate
-// runs/<jobID>/ store, which never takes s.mu.
+// runs/<jobID>/ store, which never takes s.tbl.mu.
 //
-// A DeleteJobByID landing in that window drops the job from s.jobs AND runs
-// runStore.DeleteJob → RemoveAll(runs/<jobID>). Without the s.jobs re-check
+// A DeleteJobByID landing in that window drops the job from s.tbl.jobs AND runs
+// runStore.DeleteJob → RemoveAll(runs/<jobID>). Without the s.tbl.jobs re-check
 // added before appendRun (#2058), the stale snapshot's appendRun →
 // ensureJobDir would MkdirAll the directory back, resurrecting an orphaned
 // runs/<jobID>/ subtree for a job that no longer exists in cron_jobs.json (a
@@ -54,7 +54,7 @@ func TestFinishRun_DeleteRaceNoOrphanRunsDir(t *testing.T) {
 	jobRunDir := filepath.Join(dir, "runs", jobID)
 
 	// The hook fires after recordTerminalResult has persisted the Job and
-	// released s.mu, immediately before the runs/<jobID>/ existence re-check.
+	// released s.tbl.mu, immediately before the runs/<jobID>/ existence re-check.
 	// Deleting synchronously here is the interleaving #2058 closes. Set before
 	// finishRun runs; nothing else touches s concurrently in this test.
 	hookCalls := 0
@@ -67,7 +67,7 @@ func TestFinishRun_DeleteRaceNoOrphanRunsDir(t *testing.T) {
 		_, deleteErr = s.DeleteJobByID(jobID)
 	}
 
-	inflight := s.jobInflight(jobID)
+	inflight := s.gateForTest().jobInflight(jobID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}
@@ -89,7 +89,7 @@ func TestFinishRun_DeleteRaceNoOrphanRunsDir(t *testing.T) {
 		t.Fatalf("DeleteJobByID inside the window: %v", deleteErr)
 	}
 	if s.jobStillExists(jobID) {
-		t.Fatal("job must be gone from s.jobs after DeleteJobByID")
+		t.Fatal("job must be gone from s.tbl.jobs after DeleteJobByID")
 	}
 	// The delete removed runs/<jobID>/ and nothing may bring it back: not
 	// the directory, and certainly not a run record for a deleted job.

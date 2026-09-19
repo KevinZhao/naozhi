@@ -200,13 +200,13 @@ func (s *Scheduler) drainTriggerWG(ctx context.Context, stopStart time.Time) {
 // the seq we queued; a newer save racing ahead also advances it, which is
 // correctly treated as success (#1301).
 func (s *Scheduler) persistOnShutdown() {
-	s.mu.Lock()
+	s.tbl.mu.Lock()
 	save, err := s.persistJobsLocked()
 	// Read the seq we just queued so the post-save check below is
 	// deterministic (saveSeq.Add was the last mutation persistJobsLocked
 	// performed before returning).
-	queuedSeq := s.saveSeq.Load()
-	s.mu.Unlock()
+	queuedSeq := s.tbl.saveSeq.Load()
+	s.tbl.mu.Unlock()
 	if err != nil {
 		slog.Error("marshal cron store on shutdown",
 			"err", err,

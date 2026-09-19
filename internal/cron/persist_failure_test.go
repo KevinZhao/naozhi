@@ -195,7 +195,7 @@ func TestPersistFailure_SetJobPrompt(t *testing.T) {
 
 	// SetJobPrompt is only meaningful on a job with empty prompt + paused=true
 	// (the dashboard-created placeholder). AddJob rejects empty prompts up
-	// front, so we inject the job directly into s.jobs mirroring the flow
+	// front, so we inject the job directly into s.tbl.jobs mirroring the flow
 	// used by the dashboard placeholder path.
 	j := &Job{
 		ID:       "abcd1234",
@@ -205,9 +205,9 @@ func TestPersistFailure_SetJobPrompt(t *testing.T) {
 		ChatType: "direct",
 		Paused:   true,
 	}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	withFailingMarshal(t, s)
 
@@ -218,8 +218,8 @@ func TestPersistFailure_SetJobPrompt(t *testing.T) {
 
 	// Rollback assertions: in-memory state must revert to the pre-call values
 	// so that a process restart does not see a partially-applied mutation.
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	defer s.tblForTest().mu.RUnlock()
 	if j.Prompt != "" {
 		t.Errorf("rollback: j.Prompt = %q, want empty string", j.Prompt)
 	}
@@ -265,9 +265,9 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 		LastError:     "",
 		LastSessionID: "prior-sess",
 	}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	withFailingMarshal(t, s)
 
@@ -278,8 +278,8 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 	// LastRunAt/LastResult/LastError/LastSessionID fields.
 	_, _, _ = s.recordTerminalResult(j, "new-result", "new-error", "new-sess", ErrClassSessionError, RunStateFailed, time.Now())
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	defer s.tblForTest().mu.Unlock()
 
 	if !j.LastRunAt.Equal(time.Unix(1000, 0)) {
 		t.Errorf("LastRunAt not reverted: got %v, want %v", j.LastRunAt, time.Unix(1000, 0))
@@ -324,9 +324,9 @@ func TestPersistFailure_RecordResultHappyPathApplies(t *testing.T) {
 		Paused:     true,
 		LastResult: "prior",
 	}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	// Real marshaler — persist succeeds. R230C-CR-1 / R247-CR-14 (#586):
 	// exercises the production path directly (recordTerminalResult, formerly
@@ -334,8 +334,8 @@ func TestPersistFailure_RecordResultHappyPathApplies(t *testing.T) {
 	// happy-path test that exercises a separate helper.
 	_, _, _ = s.recordTerminalResult(j, "fresh-result", "", "sess-1", ErrClassNone, RunStateSucceeded, time.Now())
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	defer s.tblForTest().mu.Unlock()
 
 	if j.LastResult != "fresh-result" {
 		t.Errorf("LastResult not applied: got %q, want %q", j.LastResult, "fresh-result")
@@ -358,9 +358,9 @@ func TestPersistFailure_PersistJobsLockedReturnsErrAndNilFunc(t *testing.T) {
 
 	withFailingMarshal(t, s)
 
-	s.mu.Lock()
+	s.tblForTest().mu.Lock()
 	save, err := s.persistJobsLocked()
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	if save != nil {
 		t.Fatal("save func should be nil on marshal failure")

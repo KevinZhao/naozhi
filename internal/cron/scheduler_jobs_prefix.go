@@ -32,11 +32,11 @@ type withJobByPrefixResult struct {
 }
 
 // lockedJobPrefixOp runs find-by-prefix + op + persist + optional rollback for
-// withJobByPrefix entirely under s.mu, mirroring lockedJobOp on the by-ID path.
+// withJobByPrefix entirely under s.tbl.mu, mirroring lockedJobOp on the by-ID path.
 func (s *Scheduler) lockedJobPrefixOp(idPrefix, plat, chatID string, op func(j *Job) error, rollback func(j *Job)) withJobByPrefixResult {
 	var r withJobByPrefixResult
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tbl.mu.Lock()
+	defer s.tbl.mu.Unlock()
 	j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
 	if err != nil {
 		r.findErr = err
@@ -49,13 +49,13 @@ func (s *Scheduler) lockedJobPrefixOp(idPrefix, plat, chatID string, op func(j *
 		}
 	}
 	r.save, r.perr = s.persistJobsLocked()
-	// Persist failed after op mutated *j: undo under s.mu so disk and memory
+	// Persist failed after op mutated *j: undo under s.tbl.mu so disk and memory
 	// stay aligned (mirrors withJobByIDOpt).
 	if r.perr != nil && rollback != nil {
 		rollback(j)
 		r.rolledBack = true
 	}
-	// Value-copy under s.mu so postCleanup and the caller read a stable Job
+	// Value-copy under s.tbl.mu so postCleanup and the caller read a stable Job
 	// even if a concurrent UpdateJob / SetJobPrompt mutates *j after unlock.
 	r.snapshot = *j
 	return r
@@ -63,7 +63,7 @@ func (s *Scheduler) lockedJobPrefixOp(idPrefix, plat, chatID string, op func(j *
 
 // withJobByPrefix is the IM-prefix counterpart to withJobByID, shared by
 // DeleteJob / PauseJob / ResumeJob: lock → findByPrefixLocked → op → persist
-// → unlock → postCleanup → save. postCleanup must NOT run under s.mu (router
+// → unlock → postCleanup → save. postCleanup must NOT run under s.tbl.mu (router
 // callbacks may re-take it); save() runs after postCleanup so a persist
 // failure still leaves the side effects committed (runStore.DeleteJob fires
 // even when persist fails). Error precedence: find miss → op error → persist
@@ -104,7 +104,7 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	// Entry-lifecycle writer; see DeleteJobByID for why delete holds entryMu.
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
-	// deleteJobLocked snapshots the cron entryID under s.mu; postCleanup runs
+	// deleteJobLocked snapshots the cron entryID under s.tbl.mu; postCleanup runs
 	// the cron Remove after unlock (#1810).
 	var removeEntryID cronEntryID
 	return s.withJobByPrefix(
@@ -121,7 +121,7 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 }
 
 // PauseJob pauses a job by ID prefix. Same contract as PauseJobByID: the cron
-// Remove from pauseJobLocked runs in postCleanup after s.mu is released
+// Remove from pauseJobLocked runs in postCleanup after s.tbl.mu is released
 // (#537), and a persist failure rolls back (entryID, Paused) and skips
 // postCleanup so the cron entry stays alive and the still-active job keeps
 // firing instead of becoming a ghost-paused job on restart (#1272).
@@ -134,7 +134,7 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	var prevPaused bool
 	var captured bool
 	op := func(j *Job) error {
-		// Snapshot under s.mu before pauseJobLocked mutates entryID/Paused so
+		// Snapshot under s.tbl.mu before pauseJobLocked mutates entryID/Paused so
 		// rollback restores the exact pre-op view.
 		prevEntryID = j.entryID
 		prevPaused = j.Paused
@@ -165,7 +165,7 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 }
 
 // ResumeJob resumes a paused job by ID prefix. Same contract as ResumeJobByID:
-// the cron entry is committed in postCleanup, after persist succeeded and s.mu
+// the cron entry is committed in postCleanup, after persist succeeded and s.tbl.mu
 // is released, so a persist failure happens before any entry exists and the
 // rollback is one field write. entryMu fences the Paused=false/entryID=0
 // window against every other entry writer.
@@ -205,12 +205,12 @@ func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 // ErrAmbiguousPrefix) — a short prefix matches ≥2 jobs; the message lists the
 // colliding IDs so the operator can disambiguate (#950).
 //
-// LOCK: caller MUST hold s.mu (read or write). A full-length hex ID takes the
-// O(1) s.jobs fast path (#705); a partial prefix scans only
-// s.jobsByChat[chat], bounded by maxJobsPerChat rather than all jobs (#558).
+// LOCK: caller MUST hold s.tbl.mu (read or write). A full-length hex ID takes the
+// O(1) s.tbl.jobs fast path (#705); a partial prefix scans only
+// s.tbl.jobsByChat[chat], bounded by maxJobsPerChat rather than all jobs (#558).
 func (s *Scheduler) findByPrefixLocked(idPrefix, plat, chatID string) (*Job, error) {
 	if len(idPrefix) == 2*hexIDEntropyBytes {
-		if j, ok := s.jobs[idPrefix]; ok {
+		if j, ok := s.tbl.jobs[idPrefix]; ok {
 			if j.Platform == plat && j.ChatID == chatID {
 				return j, nil
 			}
@@ -224,7 +224,7 @@ func (s *Scheduler) findByPrefixLocked(idPrefix, plat, chatID string) (*Job, err
 		// that is not a full ID, so the scan tail is the safety net.
 	}
 	var matches []*Job
-	for _, j := range s.jobsByChat[chatKeyFor(plat, chatID)] {
+	for _, j := range s.tbl.jobsByChat[chatKeyFor(plat, chatID)] {
 		if strings.HasPrefix(j.ID, idPrefix) {
 			matches = append(matches, j)
 		}

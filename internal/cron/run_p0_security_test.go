@@ -18,9 +18,9 @@ func TestSkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	rawErr := "session error: open /home/ops/private-secret/file.go: " + context.Canceled.Error()
 	s.finishRun(finishArgs{
@@ -55,9 +55,9 @@ func TestSuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: tmp + "/cron_jobs.json"}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	rawErr := "send error: dial tcp 10.0.0.1:443: connect: connection refused"
 	s.finishRun(finishArgs{
@@ -78,8 +78,8 @@ func TestSuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 		t.Errorf("expected [redacted-addr] sentinel in broadcast ErrorMsg: %q", got.ErrorMsg)
 	}
 	// Consistency invariant: broadcast must equal on-disk Job.LastError.
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	defer s.tblForTest().mu.RUnlock()
 	if got.ErrorMsg != j.LastError {
 		t.Errorf("broadcast ErrorMsg %q diverges from Job.LastError %q", got.ErrorMsg, j.LastError)
 	}
@@ -97,11 +97,11 @@ func TestPersistFailureSkipsCronRun(t *testing.T) {
 	tmp := t.TempDir()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: tmp + "/cron_jobs.json"}, SchedulerDeps{Router: &fakeRouter{}})
 
-	// Construct a job that's NOT registered in s.jobs — recordResultP0
-	// will hit the "_, ok := s.jobs[j.ID]; !ok" early-return path and
+	// Construct a job that's NOT registered in s.tbl.jobs — recordResultP0
+	// will hit the "_, ok := s.tbl.jobs[j.ID]; !ok" early-return path and
 	// return ok=false without touching disk.
 	j := &Job{ID: mustGenerateID(), Schedule: "@every 5m"}
-	// Note: deliberately not adding to s.jobs.
+	// Note: deliberately not adding to s.tbl.jobs.
 
 	runID := mustGenerateRunID()
 	s.finishRun(finishArgs{

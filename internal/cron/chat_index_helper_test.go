@@ -15,14 +15,14 @@ func TestAddToChatIndexLocked_SyncsBothIndexes(t *testing.T) {
 		{ID: "b", Platform: "feishu", ChatID: "c1"},
 	}
 
-	s.mu.Lock()
+	s.tblForTest().mu.Lock()
 	for _, j := range jobs {
-		s.jobs[j.ID] = j
+		s.tblForTest().jobs[j.ID] = j
 		s.addToChatIndexLocked(j)
 	}
-	gotCount := s.chatJobCount[key]
-	gotLen := len(s.jobsByChat[key])
-	s.mu.Unlock()
+	gotCount := s.tblForTest().chatJobCount[key]
+	gotLen := len(s.tblForTest().jobsByChat[key])
+	s.tblForTest().mu.Unlock()
 
 	if gotCount != 2 {
 		t.Fatalf("chatJobCount = %d, want 2", gotCount)
@@ -32,11 +32,11 @@ func TestAddToChatIndexLocked_SyncsBothIndexes(t *testing.T) {
 	}
 
 	// deleteJobLocked must unwind both indexes in lockstep.
-	s.mu.Lock()
+	s.tblForTest().mu.Lock()
 	s.deleteJobLocked(jobs[0])
-	afterCount := s.chatJobCount[key]
-	afterLen := len(s.jobsByChat[key])
-	s.mu.Unlock()
+	afterCount := s.tblForTest().chatJobCount[key]
+	afterLen := len(s.tblForTest().jobsByChat[key])
+	s.tblForTest().mu.Unlock()
 
 	if afterCount != 1 {
 		t.Fatalf("chatJobCount after delete = %d, want 1", afterCount)
@@ -47,11 +47,11 @@ func TestAddToChatIndexLocked_SyncsBothIndexes(t *testing.T) {
 
 	// Removing the last job drops both map entries so the working set
 	// tracks only live chats.
-	s.mu.Lock()
+	s.tblForTest().mu.Lock()
 	s.deleteJobLocked(jobs[1])
-	_, countPresent := s.chatJobCount[key]
-	_, listPresent := s.jobsByChat[key]
-	s.mu.Unlock()
+	_, countPresent := s.tblForTest().chatJobCount[key]
+	_, listPresent := s.tblForTest().jobsByChat[key]
+	s.tblForTest().mu.Unlock()
 
 	if countPresent {
 		t.Fatal("chatJobCount entry should be deleted when count hits zero")

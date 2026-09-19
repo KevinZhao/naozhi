@@ -45,7 +45,7 @@ type stubRefresher struct {
 // run re-registers the sidebar stub for the snapshotted job iff it still
 // exists. The zero value (active=false) is an intentional no-op so callers
 // invoke run() uniformly after both success-short-circuit and failure
-// branches. stillExists is re-checked under s.mu because the failure callback
+// branches. stillExists is re-checked under s.tbl.mu because the failure callback
 // may fire seconds after preflight returned, by which point DeleteJob could
 // have removed the job — re-registering a stub for a deleted job would leak a
 // phantom sidebar row. See the lock-pair contract at freshContextPreflightP0.
@@ -53,7 +53,7 @@ func (r stubRefresher) run() {
 	if !r.active {
 		return
 	}
-	if r.s.exists(r.jobID) {
+	if r.s.tbl.exists(r.jobID) {
 		r.s.registerStubByValue(r.jobID, r.workDir, r.prompt, r.lastSessionID)
 	}
 }
@@ -124,8 +124,8 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 	// ever send into a cron:<jobID> session, migrate to router ResetAndRecreate.
 	s.router.Reset(args.key)
 	lg.Info("cron fresh context: session reset before run")
-	// refresh uses snap-time values (no s.jobs re-read) as the chain anchor
-	// for failure paths. Two independent RLock reads of s.jobs[snap.jobID] are
+	// refresh uses snap-time values (no s.tbl.jobs re-read) as the chain anchor
+	// for failure paths. Two independent RLock reads of s.tbl.jobs[snap.jobID] are
 	// intentional (#1298): (a) inside run(), which may fire seconds later and
 	// must re-check existence; (b) right after Reset, to refuse GetOrCreate for
 	// a job deleted mid-execute. Do not merge them.
@@ -138,7 +138,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		active:        true,
 	}
 	// (b) post-Reset 存在性检查 — 见上文 lock-pair contract。
-	if !s.exists(snap.jobID) {
+	if !s.tbl.exists(snap.jobID) {
 		lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
 		// Re-register the sidebar stub BEFORE the finishRun below releases the
 		// inflight CAS gate (#2318): after release a concurrent TriggerNow could
@@ -167,12 +167,12 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 // is populated (so setPhase(PhaseJittering) is the correct transition).
 func (s *Scheduler) applyJitterAndRecheck(j *Job, runID string, inflight *runInflight) (snap jobSnapshot, snapTaken bool, abort bool) {
 	inflight.setPhase(PhaseJittering)
-	// Snapshot Schedule / entryID / cachedPeriod under s.mu.RLock so a concurrent
+	// Snapshot Schedule / entryID / cachedPeriod under s.tbl.mu.RLock so a concurrent
 	// UpdateJob cannot race the reads. The pre-parsed robfigcron.Schedule comes
 	// from s.cron.Entry(entryID) instead of re-parsing the schedule string;
 	// entryID==0 (not yet registered, e.g. tests) or a concurrently removed
 	// entry falls back to the string-parse path.
-	s.mu.RLock()
+	s.tbl.mu.RLock()
 	schedStr := j.Schedule
 	entryID := j.entryID
 	cachedPeriod := j.cachedPeriod
@@ -182,7 +182,7 @@ func (s *Scheduler) applyJitterAndRecheck(j *Job, runID string, inflight *runInf
 		// registerJob populates cachedPeriod alongside entryID.
 		parsedSched = s.cron.Entry(entryID).Schedule
 	}
-	s.mu.RUnlock()
+	s.tbl.mu.RUnlock()
 	switch {
 	case cachedPeriod > 0:
 		// hot path — period was cached at registerJob time.
@@ -198,14 +198,14 @@ func (s *Scheduler) applyJitterAndRecheck(j *Job, runID string, inflight *runInf
 	// check ran BEFORE the sleep. The snapshot is taken under the SAME RLock
 	// when the recheck passes so it reflects the instant the recheck verified
 	// (#1351). jitter_test.go pins this recheck against silent removal.
-	s.mu.RLock()
-	cur, stillRegistered := s.jobs[j.ID]
+	s.tbl.mu.RLock()
+	cur, stillRegistered := s.tbl.jobs[j.ID]
 	paused := stillRegistered && cur.Paused
 	if stillRegistered && !paused {
 		snap = snapshotJobLocked(j)
 		snapTaken = true
 	}
-	s.mu.RUnlock()
+	s.tbl.mu.RUnlock()
 	if !stillRegistered {
 		slog.Debug("cron: job deleted during jitter window, aborting run",
 			"job_id", j.ID, "run_id", runID)
@@ -420,7 +420,7 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 func (s *Scheduler) execAcquireSlot(j *Job, viaTriggerNow bool) (inflight *runInflight, ok bool) {
 	// TriggerNow bypasses the cron chain's SkipIfStillRunning, so the runGate
 	// CAS is the uniform overlap guard for both paths.
-	inflight, won := s.acquire(j.ID)
+	inflight, won := s.gate.acquire(j.ID)
 	if !won {
 		slog.Info("cron: job already running, skipping overlap", "job_id", j.ID)
 		// Overlap is a skipped state (no LastRunAt update). Counters /
@@ -439,11 +439,11 @@ func (s *Scheduler) execAcquireSlot(j *Job, viaTriggerNow bool) (inflight *runIn
 // the CAS release + gauge decrement, so no cleanup happens here.
 func (s *Scheduler) execPopulateInflight(j *Job, viaTriggerNow bool, inflight *runInflight) (runID string, startedAt time.Time, trigger TriggerKind, ok bool) {
 	// Post-CAS paused/deleted recheck (#1322): the dispatch callers check under
-	// s.mu.RLock and release it BEFORE executeOpt, leaving a µs window where
+	// s.tbl.mu.RLock and release it BEFORE executeOpt, leaving a µs window where
 	// Pause/Delete can land; the jitter-window recheck does not cover TriggerNow
 	// or jitter==0 ticks. Recheck once here before any heavy work; the caller's
 	// finalizer defer releases the CAS on this early return.
-	stillRegisteredCAS, pausedCAS := s.liveness(j.ID)
+	stillRegisteredCAS, pausedCAS := s.tbl.liveness(j.ID)
 	if !stillRegisteredCAS || pausedCAS {
 		casLg := slog.With("job_id", j.ID, "trigger_now", viaTriggerNow)
 		if !stillRegisteredCAS {
@@ -511,7 +511,7 @@ func (s *Scheduler) execSnapshotAndEmit(j *Job, viaTriggerNow bool, runID string
 		}
 	}
 
-	// Snapshot mutable Job fields once under s.mu so the rest of the run is
+	// Snapshot mutable Job fields once under s.tbl.mu so the rest of the run is
 	// lock-free; concurrent SetJobPrompt/UpdateJob land for the next tick.
 	if !snapTaken {
 		snap = s.snapshotJob(j)
@@ -525,7 +525,7 @@ func (s *Scheduler) execSnapshotAndEmit(j *Job, viaTriggerNow bool, runID string
 
 	// Broadcast started — placed after snapshot so the event carries the
 	// effective fresh flag and after notifyTo resolution so server-side
-	// hub locks aren't held while we read s.mu.
+	// hub locks aren't held while we read s.tbl.mu.
 	s.emitRunStarted(RunStartedEvent{
 		JobID:     snap.jobID,
 		RunID:     runID,
@@ -826,7 +826,7 @@ func (s *Scheduler) execFinishSuccess(rc runCtx, result SendResult, costInc cost
 // the CAS gate, so an unconditional register could resurrect a zombie sidebar row.
 func (s *Scheduler) reapFreshSessionLocked(key string, snap jobSnapshot, sessionID string, lg *slog.Logger) {
 	s.router.Reset(key)
-	if s.exists(snap.jobID) {
+	if s.tbl.exists(snap.jobID) {
 		s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, sessionID)
 		if sessionID == "" {
 			// registerStubByValue chains the stub only when the session ID is

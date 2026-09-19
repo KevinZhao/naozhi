@@ -22,12 +22,12 @@ func TestRangeRunningSessionIDs(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 10, AllowNilRouter: true}, SchedulerDeps{})
 
 	// running + session id -> visited
-	s.runningJobs.Store("a", newRunningInflight("sess-a"))
-	s.runningJobs.Store("b", newRunningInflight("sess-b"))
+	s.gateForTest().runningJobs.Store("a", newRunningInflight("sess-a"))
+	s.gateForTest().runningJobs.Store("b", newRunningInflight("sess-b"))
 	// running but no session id yet -> skipped
-	s.runningJobs.Store("c", newRunningInflight(""))
+	s.gateForTest().runningJobs.Store("c", newRunningInflight(""))
 	// not running (bare guard) -> skipped
-	s.runningJobs.Store("d", &runInflight{})
+	s.gateForTest().runningJobs.Store("d", &runInflight{})
 
 	var got []string
 	s.rangeRunningSessionIDs(func(sid string) bool {

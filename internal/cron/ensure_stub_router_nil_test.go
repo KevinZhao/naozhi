@@ -20,18 +20,18 @@ func TestEnsureStub_NilRouterReturnsFalse(t *testing.T) {
 		AllowNilRouter: true,
 	}, SchedulerDeps{})
 
-	// Inject a job directly so EnsureStub finds it under s.mu.RLock and
+	// Inject a job directly so EnsureStub finds it under s.tbl.mu.RLock and
 	// proceeds to the registerStubByValue call. AddJob would also call
 	// registerStubFromJob (now also returning bool) but ignoring the
 	// result there is fine — we only assert EnsureStub's bool.
-	s.mu.Lock()
-	s.jobs["jX"] = &Job{
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs["jX"] = &Job{
 		ID:       "jX",
 		WorkDir:  "/tmp",
 		Prompt:   "p",
 		Schedule: "0 * * * *",
 	}
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	if got := s.EnsureStub("cron:jX"); got {
 		t.Error("EnsureStub returned true with router=nil (regression of #491)")

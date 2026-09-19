@@ -183,9 +183,9 @@ type SchedulerConfig struct {
 
 // chatJobKey identifies a (Platform, ChatID) pair for the per-chat job
 // counter, making the maxJobsPerChat check one map lookup instead of an O(N)
-// scan over s.jobs under s.mu (#661). Updates piggy-back on the already-locked
-// s.mu sections (addJobAcquiringLock / deleteJobLocked / Start) so the counter
-// never drifts from len-by-chat(s.jobs).
+// scan over s.tbl.jobs under s.tbl.mu (#661). Updates piggy-back on the already-locked
+// s.tbl.mu sections (addJobAcquiringLock / deleteJobLocked / Start) so the counter
+// never drifts from len-by-chat(s.tbl.jobs).
 type chatJobKey struct {
 	Platform string
 	ChatID   string
@@ -276,7 +276,7 @@ func (cfg *SchedulerConfig) resolveAllowedRoot() string {
 // *cronConfigMaps (copy-on-write) and Store() it, so no reader sees a torn state.
 type cronConfigMaps struct {
 	// notifySender shares this atomic snapshot with agents/agentCommands
-	// because notifyTarget reads it via s.configMaps() without s.mu; a
+	// because notifyTarget reads it via s.configMaps() without s.tbl.mu; a
 	// separate field could yield a torn cross-field read. Interface value,
 	// write-once, so unlike the maps it is not cloned (#725).
 	notifySender  NotifySender

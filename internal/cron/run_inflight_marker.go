@@ -189,7 +189,7 @@ func (s *Scheduler) reconcileRunInflight() {
 			// Claim the job's run slot exactly like a live run would: losing the
 			// CAS means a new tick beat us to the job, and two runs at once is
 			// worse than recording this one interrupted.
-			inflight, won := s.acquire(m.JobID)
+			inflight, won := s.gate.acquire(m.JobID)
 			if won {
 				inflight.populate(runInflightView{
 					RunID:     m.RunID,

@@ -8,7 +8,7 @@ import (
 // TestJobSnapshotCoversExecuteFields is a contract test for R236-ARCH-19.
 //
 // jobSnapshot mirrors the subset of *Job that executeOpt / deliverNotice
-// read after the s.mu read-side critical section ends. The shape is
+// read after the s.tbl.mu read-side critical section ends. The shape is
 // maintained by hand: when a new Job field is added, snapshotJob must be
 // updated in lockstep, otherwise executeOpt either silently misses the
 // new value or — worse — falls back to dereferencing *j outside the lock
@@ -18,7 +18,7 @@ import (
 // field set to a distinguishable non-zero value and asserts each one
 // landed in the corresponding snapshot field. It does NOT cover purely
 // persistent fields (RunCounters / LastResult / LastSessionID etc.) —
-// those are intentionally read directly from *Job under s.mu by
+// those are intentionally read directly from *Job under s.tbl.mu by
 // recordResult / persist paths and never copied into jobSnapshot.
 //
 // Adding a new Job field that executeOpt should observe lock-free?
@@ -33,7 +33,7 @@ func TestJobSnapshotCoversExecuteFields(t *testing.T) {
 	// snapshot's notify aliasing path is exercised. R090135-PERF-003
 	// (#1931): the snapshot now aliases j.Notify directly (alloc-free)
 	// rather than deep-copying — safe because UpdateJob reassigns the
-	// whole pointer under s.mu and never mutates *j.Notify in place, so
+	// whole pointer under s.tbl.mu and never mutates *j.Notify in place, so
 	// the pointed-to bool is immutable once published.
 	tru := true
 	j := &Job{
@@ -93,7 +93,7 @@ func TestJobSnapshotCoversExecuteFields(t *testing.T) {
 	// R090135-PERF-003 (#1931): notify now aliases j.Notify directly to
 	// avoid a per-tick *bool heap alloc. This is tear-free because
 	// UpdateJob (scheduler_jobs.go) reassigns j.Notify to a fresh &v / nil
-	// under s.mu.Lock and never mutates *j.Notify in place — the snapshot's
+	// under s.tbl.mu.Lock and never mutates *j.Notify in place — the snapshot's
 	// RLock read therefore captures a stable pointer to an immutable bool.
 	if snap.notify == nil {
 		t.Fatalf("notify: got nil, want pointer to true")
@@ -139,11 +139,11 @@ func TestSnapshotJobLockedMirrorsSnapshotJob(t *testing.T) {
 	s := &Scheduler{}
 	viaPublic := s.snapshotJob(j)
 
-	// snapshotJobLocked requires the caller to hold s.mu — emulate
+	// snapshotJobLocked requires the caller to hold s.tbl.mu — emulate
 	// executeOpt's jitter block by RLock straddling the call.
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	viaLocked := snapshotJobLocked(j)
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 
 	if viaPublic.jobID != viaLocked.jobID ||
 		viaPublic.prompt != viaLocked.prompt ||

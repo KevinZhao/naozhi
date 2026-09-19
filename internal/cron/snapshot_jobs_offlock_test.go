@@ -10,10 +10,10 @@ import (
 )
 
 // R20260607-PERF-005 (#1923): recordTerminalResult no longer runs json.Marshal
-// inside the s.mu write critical section. These tests pin (1) the snapshot
+// inside the s.tbl.mu write critical section. These tests pin (1) the snapshot
 // helper produces the same byte output as the in-lock marshal path, (2) the
 // snapshot is a detached value copy immune to post-unlock mutation, and (3) the
-// finish path's marshal runs while s.mu is free (not serialised behind the
+// finish path's marshal runs while s.tbl.mu is free (not serialised behind the
 // write lock).
 
 // marshalJobsSnapshotForTest encodes a detached snapshot through the same
@@ -53,14 +53,14 @@ func TestSnapshotJobsForSaveLocked_MatchesMarshalLocked(t *testing.T) {
 		}
 	}
 
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	wantBytes, err := s.marshalJobsLocked()
 	if err != nil {
-		s.mu.RUnlock()
+		s.tblForTest().mu.RUnlock()
 		t.Fatalf("marshalJobsLocked: %v", err)
 	}
 	snap := s.snapshotJobsForSaveLocked()
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 
 	gotBytes, err := s.marshalJobsSnapshotForTest(snap)
 	if err != nil {
@@ -94,9 +94,9 @@ func TestSnapshotJobsForSaveLocked_PoolReuse(t *testing.T) {
 	}
 
 	// Cycle 1: snapshot under lock, marshal+Put off lock via persistSnapshot.
-	s.mu.Lock()
+	s.tblForTest().mu.Lock()
 	snap1 := s.snapshotJobsForSaveLocked()
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 	if snap1.pooled == nil {
 		t.Fatal("snapshot should carry a pooled handle (#1975)")
 	}
@@ -115,9 +115,9 @@ func TestSnapshotJobsForSaveLocked_PoolReuse(t *testing.T) {
 	if err := s.AddJob(j2); err != nil {
 		t.Fatalf("AddJob j2: %v", err)
 	}
-	s.mu.Lock()
+	s.tblForTest().mu.Lock()
 	snap2 := s.snapshotJobsForSaveLocked()
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 	bytes2, err := s.marshalJobsSnapshotForTest(snap2)
 	if err != nil {
 		t.Fatalf("marshal snap2: %v", err)
@@ -142,7 +142,7 @@ func TestSnapshotJobsForSaveLocked_PoolReuse(t *testing.T) {
 }
 
 // TestSnapshotJobsForSaveLocked_Detached verifies the snapshot is a value copy
-// that does NOT observe a mutation applied after s.mu is released. This is the
+// that does NOT observe a mutation applied after s.tbl.mu is released. This is the
 // correctness guarantee that lets json.Marshal run off the lock without racing
 // a concurrent mutator.
 func TestSnapshotJobsForSaveLocked_Detached(t *testing.T) {
@@ -158,16 +158,16 @@ func TestSnapshotJobsForSaveLocked_Detached(t *testing.T) {
 	defer s.Stop()
 
 	j := &Job{ID: "abcd1234", Schedule: "@every 1h", Prompt: "original", Platform: "feishu", ChatID: "c1", ChatType: "direct", Paused: true}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.sortedJobIDs = append(s.sortedJobIDs, j.ID)
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().sortedJobIDs = append(s.tblForTest().sortedJobIDs, j.ID)
 	snap := s.snapshotJobsForSaveLocked()
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	// Mutate the live job AFTER the snapshot was taken and the lock dropped.
-	s.mu.Lock()
+	s.tblForTest().mu.Lock()
 	j.Prompt = "MUTATED"
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	data, err := s.marshalJobsSnapshotForTest(snap)
 	if err != nil {
@@ -186,8 +186,8 @@ func TestSnapshotJobsForSaveLocked_Detached(t *testing.T) {
 }
 
 // TestRecordTerminalResult_MarshalRunsOffLock proves json.Marshal no longer
-// runs inside the s.mu write critical section: while a deliberately slow
-// marshaler is encoding, another goroutine must be able to acquire s.mu. Before
+// runs inside the s.tbl.mu write critical section: while a deliberately slow
+// marshaler is encoding, another goroutine must be able to acquire s.tbl.mu. Before
 // #1923 the marshal ran under the write lock and this probe would block for the
 // full encode duration.
 func TestRecordTerminalResult_MarshalRunsOffLock(t *testing.T) {
@@ -238,12 +238,12 @@ func TestRecordTerminalResult_MarshalRunsOffLock(t *testing.T) {
 		t.Fatal("slow marshaler never entered — recordTerminalResult did not reach marshal")
 	}
 
-	// s.mu must be free while marshal is in-flight (it runs off the lock now).
+	// s.tbl.mu must be free while marshal is in-flight (it runs off the lock now).
 	lockAcquired := make(chan struct{})
 	go func() {
-		s.mu.Lock()
+		s.tblForTest().mu.Lock()
 		//lint:ignore SA2001 intentional empty critical section: probes that the lock is acquirable
-		s.mu.Unlock()
+		s.tblForTest().mu.Unlock()
 		close(lockAcquired)
 	}()
 	select {
@@ -252,7 +252,7 @@ func TestRecordTerminalResult_MarshalRunsOffLock(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		close(releaseMarshal)
 		wg.Wait()
-		t.Fatal("s.mu held during marshal — json.Marshal still in the write critical section (#1923 regression)")
+		t.Fatal("s.tbl.mu held during marshal — json.Marshal still in the write critical section (#1923 regression)")
 	}
 
 	close(releaseMarshal)
@@ -282,11 +282,11 @@ func TestSnapshotJobsForSaveLocked_NotifyDeepCopy(t *testing.T) {
 		Platform: "feishu", ChatID: "c1", ChatType: "direct", Paused: true,
 		Notify: &trueVal,
 	}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.sortedJobIDs = append(s.sortedJobIDs, j.ID)
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().sortedJobIDs = append(s.tblForTest().sortedJobIDs, j.ID)
 	snap := s.snapshotJobsForSaveLocked()
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	// The snapshot entry's Notify pointer must be a distinct allocation.
 	if len(snap.entries) != 1 {
@@ -302,9 +302,9 @@ func TestSnapshotJobsForSaveLocked_NotifyDeepCopy(t *testing.T) {
 
 	// Reassign the live job's Notify to a different value after the snapshot.
 	falseVal := false
-	s.mu.Lock()
+	s.tblForTest().mu.Lock()
 	j.Notify = &falseVal
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	// The snapshot's Notify must still reflect the original true value.
 	if !*snapNotify {
@@ -350,11 +350,11 @@ func TestSnapshotJobsForSaveLocked_NotifyNilSafe(t *testing.T) {
 		Platform: "feishu", ChatID: "c1", ChatType: "direct", Paused: true,
 		Notify: nil,
 	}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.sortedJobIDs = append(s.sortedJobIDs, j.ID)
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().sortedJobIDs = append(s.tblForTest().sortedJobIDs, j.ID)
 	snap := s.snapshotJobsForSaveLocked()
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	if len(snap.entries) != 1 {
 		t.Fatalf("want 1 snapshot entry, got %d", len(snap.entries))

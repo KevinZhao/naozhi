@@ -19,15 +19,15 @@ func TestPauseJob_RollbackOnPersistFailure(t *testing.T) {
 		t.Fatalf("ResumeJobByID seed: %v", err)
 	}
 
-	s.mu.RLock()
-	j := s.jobs[id]
+	s.tblForTest().mu.RLock()
+	j := s.tblForTest().jobs[id]
 	if j == nil {
-		s.mu.RUnlock()
-		t.Fatalf("job %q missing from s.jobs after Resume", id)
+		s.tblForTest().mu.RUnlock()
+		t.Fatalf("job %q missing from s.tbl.jobs after Resume", id)
 	}
 	preEntryID := j.entryID
 	prePaused := j.Paused
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 
 	if prePaused {
 		t.Fatalf("seed precondition violated: Paused=true after ResumeJobByID")
@@ -44,9 +44,9 @@ func TestPauseJob_RollbackOnPersistFailure(t *testing.T) {
 	}
 
 	// In-memory state must be rolled back to the pre-op view.
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	got := s.jobs[id]
+	s.tblForTest().mu.RLock()
+	defer s.tblForTest().mu.RUnlock()
+	got := s.tblForTest().jobs[id]
 	if got == nil {
 		t.Fatalf("job %q vanished after rolled-back PauseJob", id)
 	}
@@ -69,9 +69,9 @@ func TestPauseJob_RollbackKeepsCronEntryAlive(t *testing.T) {
 		t.Fatalf("ResumeJobByID seed: %v", err)
 	}
 
-	s.mu.RLock()
-	preEntryID := s.jobs[id].entryID
-	s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	preEntryID := s.tblForTest().jobs[id].entryID
+	s.tblForTest().mu.RUnlock()
 	if preEntryID == 0 {
 		t.Fatalf("seed precondition violated: entryID=0 after Resume")
 	}

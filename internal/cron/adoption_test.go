@@ -52,9 +52,9 @@ func seedMarkedRun(t *testing.T, router SessionRouter, attempts int) (s *Schedul
 	s = NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: router})
 	jobID = mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing", WorkDir: "/tmp/wd"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 	runID = mustGenerateRunID()
 	if path := s.writeRunInflightMarker(runInflightMarker{
 		JobID: jobID, RunID: runID, Trigger: TriggerScheduled,
@@ -100,7 +100,7 @@ func TestAdoption_LiveRunCompletesAcrossRestart(t *testing.T) {
 
 	// While the adoption waits, the job's run slot must be held: a tick that
 	// fires now must lose the CAS instead of double-running the job.
-	if _, won := s.acquire(jobID); won {
+	if _, won := s.gateForTest().acquire(jobID); won {
 		t.Fatal("run slot free during adoption; a fresh tick would double-run the job")
 	}
 	// ...and the marker must still exist (it is the only durable record).
@@ -127,7 +127,7 @@ func TestAdoption_LiveRunCompletesAcrossRestart(t *testing.T) {
 	}
 	// Slot released, marker gone.
 	testhelper.Eventually(t, func() bool {
-		inf, won := s.acquire(jobID)
+		inf, won := s.gateForTest().acquire(jobID)
 		if won {
 			inf.running.Store(false)
 		}
@@ -249,7 +249,12 @@ func TestShutdownCancelKeepsMarker(t *testing.T) {
 		t.Fatalf("seed marker missing: %v", err)
 	}
 
-	j, _ := func() (*Job, bool) { s.mu.RLock(); defer s.mu.RUnlock(); jj, ok := s.jobs[jobID]; return jj, ok }()
+	j, _ := func() (*Job, bool) {
+		s.tblForTest().mu.RLock()
+		defer s.tblForTest().mu.RUnlock()
+		jj, ok := s.tblForTest().jobs[jobID]
+		return jj, ok
+	}()
 	rc := runCtx{
 		snap:      jobSnapshot{jobID: jobID, prompt: "p", workDir: "/tmp/wd"},
 		startedAt: time.Now().Add(-30 * time.Second),

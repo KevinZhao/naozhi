@@ -27,7 +27,7 @@ func (b observingBroadcaster) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
 // list handler reading j.LastResult / j.LastSessionID MUST observe the
 // freshly-recorded values, not the previous run's stale snapshot.
 //
-// recordResultP0WithSanitised mutates the Job under s.mu, releases the
+// recordResultP0WithSanitised mutates the Job under s.tbl.mu, releases the
 // lock, then synchronously runs the persist save() — emitRunEnded
 // fires only after both. This test asserts the contract by checking the
 // in-memory Job state from inside the broadcaster callback. A regression
@@ -51,9 +51,9 @@ func TestFinishRunUpdatesJobBeforeEmit(t *testing.T) {
 	deps := SchedulerDeps{
 		Router: &fakeRouter{},
 		Telemetry: observingBroadcaster{onEnded: func() {
-			sched.mu.RLock()
-			defer sched.mu.RUnlock()
-			if jj, ok := sched.jobs["job-finish-order"]; ok {
+			sched.tblForTest().mu.RLock()
+			defer sched.tblForTest().mu.RUnlock()
+			if jj, ok := sched.tblForTest().jobs["job-finish-order"]; ok {
 				observedMu.Lock()
 				observedResult = jj.LastResult
 				observedSession = jj.LastSessionID
@@ -70,14 +70,14 @@ func TestFinishRunUpdatesJobBeforeEmit(t *testing.T) {
 		LastResult:    "OLD-RESULT",
 		LastSessionID: "OLD-SESSION",
 	}
-	sched.mu.Lock()
-	sched.jobs[j.ID] = j
-	sched.mu.Unlock()
+	sched.tblForTest().mu.Lock()
+	sched.tblForTest().jobs[j.ID] = j
+	sched.tblForTest().mu.Unlock()
 
 	// Drive finishRun directly — bypassing executeOpt — so the test isolates
 	// the recordResultP0WithSanitised → emitRunEnded ordering contract from
 	// the spawn / send pipeline.
-	inflight := sched.jobInflight(j.ID)
+	inflight := sched.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}
@@ -137,11 +137,11 @@ func TestFinishRunPersistsBeforeEmit(t *testing.T) {
 		Prompt:     "ping",
 		LastResult: "OLD",
 	}
-	sched.mu.Lock()
-	sched.jobs[j.ID] = j
-	sched.mu.Unlock()
+	sched.tblForTest().mu.Lock()
+	sched.tblForTest().jobs[j.ID] = j
+	sched.tblForTest().mu.Unlock()
 
-	inflight := sched.jobInflight(j.ID)
+	inflight := sched.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}

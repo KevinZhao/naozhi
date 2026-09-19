@@ -46,9 +46,9 @@ func TestFreshGetSession_SessionError_ResetsBeforeFinishRun(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-getsess-err", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
 
@@ -101,9 +101,9 @@ func TestFreshGetSession_CancelError_ResetsBeforeFinishRun(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-getsess-cancel", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
 
@@ -158,9 +158,9 @@ func TestPersistentGetSession_SessionError_NoReset(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-persist-getsess-err", Schedule: "@every 5m", Prompt: "ping", FreshContext: false}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true)
 

@@ -32,18 +32,17 @@ type Scheduler struct {
 	cron *robfigcron.Cron
 	// jobTable owns the registry (jobs + its three derived indices), the lock
 	// that keeps them in step, and the snapshot sequence that has to be assigned
-	// under that same lock. See jobtable.go — including why it is embedded rather
-	// than a named field, which is temporary.
-	jobTable
+	// under that same lock. See jobtable.go.
+	tbl jobTable
 	// entryMu serialises the writers that swap a job's robfig entry across the
-	// window where s.mu is deliberately released. See entry_registration.go for
+	// window where s.tbl.mu is deliberately released. See entry_registration.go for
 	// the interleaving it prevents and the lock order it imposes.
 	entryMu sync.Mutex
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
 	// configMapsPtr publishes notifySender / agents / agentCommands as one
 	// immutable *cronConfigMaps snapshot: notifyTarget and executeOpt read
-	// them lock-free without s.mu, so a hot-reload writer must Store() a
+	// them lock-free without s.tbl.mu, so a hot-reload writer must Store() a
 	// freshly built struct (copy-on-write), never mutate the maps in place
 	// (#991). Set once in NewScheduler and never swapped today.
 	configMapsPtr atomic.Pointer[cronConfigMaps]
@@ -147,16 +146,15 @@ type Scheduler struct {
 	gcWG sync.WaitGroup
 
 	// runGate owns the per-job execution slot: the runningJobs inflight map and
-	// the sharded mutexes that make its multi-step sequences atomic. Embedded
-	// (temporarily, like jobTable) so tests reaching runningJobs / jobGates
-	// directly keep compiling; see run_gate.go.
-	runGate
+	// the sharded mutexes that make its multi-step sequences atomic. See
+	// run_gate.go for the lock order against tbl.mu.
+	gate runGate
 
 	// storeMu serialises saveSnapshot writes so last-writer-wins order matches
-	// the order snapshots were marshaled under s.mu. WriteFileAtomic uses a
+	// the order snapshots were marshaled under s.tbl.mu. WriteFileAtomic uses a
 	// unique temp file per call, so this is only a logical barrier against an
 	// older snapshot rename-winning. Held only around WriteFileAtomic in
-	// saveMarshaledSeq; snapshot construction stays on s.mu.
+	// saveMarshaledSeq; snapshot construction stays on s.tbl.mu.
 	storeMu sync.Mutex
 
 	// storeDirOnce gates the one-time MkdirAll of the store's layout root (0700)
@@ -178,7 +176,7 @@ type Scheduler struct {
 	// ledger is the cost ledger every terminal run writes one entry to; nil-safe.
 	ledger CostLedger
 
-	// sandboxPendingMu guards sandboxPendingIndex, independent of s.mu so the
+	// sandboxPendingMu guards sandboxPendingIndex, independent of s.tbl.mu so the
 	// hot delete path never contends with job CRUD. RWMutex so the pure-read
 	// lookup (lookupSandboxPendingIndex) does not serialize against reads.
 	sandboxPendingMu sync.RWMutex
@@ -221,7 +219,7 @@ type Scheduler struct {
 	clock cronClock
 
 	// finishRunPreAppendHook is a test-only seam invoked by finishRun after
-	// recordTerminalResult releases s.mu and before the jobStillExists
+	// recordTerminalResult releases s.tbl.mu and before the jobStillExists
 	// re-check gating the runs/<jobID>/ write (#2058), so a test can land a
 	// DeleteJobByID deterministically inside that window (#2473). Always nil
 	// in production; set only before the scheduler is shared across goroutines.
@@ -272,8 +270,8 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 				robfigcron.SkipIfStillRunning(cronLogger),
 			),
 		),
-		jobTable: newJobTable(),
-		router:   deps.Router,
+		tbl:    newJobTable(),
+		router: deps.Router,
 		// notifySender / agents / agentCommands are published via configMapsPtr below.
 		storePath:      cfg.StorePath,
 		maxJobs:        cfg.MaxJobs,
@@ -440,9 +438,9 @@ func (s *Scheduler) Start() error {
 		return fmt.Errorf("load cron store: %w", err)
 	}
 
-	s.mu.Lock()
+	s.tbl.mu.Lock()
 	// Snapshot the fields passed to registerStub under lock so no *Job is
-	// dereferenced after s.mu is released (a later UpdateJob could race).
+	// dereferenced after s.tbl.mu is released (a later UpdateJob could race).
 	// lastSessionID 一起快照，重启后恢复的 cron stub 才能带上上次成功执行的
 	// session_id，historySource 才能从 JSONL 把历史读回来给 dashboard 显示。
 	type stubRow struct{ id, workDir, prompt, lastSessionID string }
@@ -465,7 +463,7 @@ func (s *Scheduler) Start() error {
 		}
 		// Cap check fires AFTER the workDir filter so a sandbox-rejected
 		// entry does not consume a cap slot.
-		if len(s.jobs) >= s.maxJobs {
+		if len(s.tbl.jobs) >= s.maxJobs {
 			slog.Warn("cron job over maxJobs cap; skipping (raise cron.MaxJobs to restore)",
 				"job_id", j.ID, "schedule", j.Schedule, "cap", s.maxJobs)
 			skippedOverCap++
@@ -476,14 +474,14 @@ func (s *Scheduler) Start() error {
 		// chatJobCount above the cap and make AddJob report "limit reached"
 		// while the operator believes there is headroom (#2060). Over-cap
 		// entries stay on disk like the maxJobs skip above.
-		if s.chatJobCount[chatKeyFor(j.Platform, j.ChatID)] >= s.maxJobsPerChat {
+		if s.tbl.chatJobCount[chatKeyFor(j.Platform, j.ChatID)] >= s.maxJobsPerChat {
 			slog.Warn("cron job over per-chat cap; skipping (raise cron.MaxJobsPerChat to restore)",
 				"job_id", j.ID, "platform", j.Platform, "chat_id", j.ChatID, "cap", s.maxJobsPerChat)
 			skippedOverPerChat++
 			continue
 		}
 		if j.Paused {
-			s.jobs[j.ID] = j
+			s.tbl.jobs[j.ID] = j
 			s.addToChatIndexLocked(j)
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
@@ -492,12 +490,12 @@ func (s *Scheduler) Start() error {
 			slog.Warn("skip invalid cron job", "job_id", j.ID, "schedule", j.Schedule, "err", err)
 			continue
 		}
-		s.jobs[j.ID] = j
+		s.tbl.jobs[j.ID] = j
 		s.addToChatIndexLocked(j)
 		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
-	jobCount := len(s.jobs)
-	s.mu.Unlock()
+	jobCount := len(s.tbl.jobs)
+	s.tbl.mu.Unlock()
 	if skippedOverCap > 0 {
 		slog.Warn("cron Start: jobs skipped due to maxJobs cap; remaining entries are still on disk",
 			"skipped", skippedOverCap, "loaded", jobCount, "cap", s.maxJobs)

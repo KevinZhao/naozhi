@@ -241,9 +241,9 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 					StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
 				}
 				path := writePendingFixture(t, storePath, p)
-				s.mu.Lock()
-				delete(s.jobs, j.ID)
-				s.mu.Unlock()
+				s.tblForTest().mu.Lock()
+				delete(s.tblForTest().jobs, j.ID)
+				s.tblForTest().mu.Unlock()
 				s.reconcileOneSandboxOrphan(p, path)
 			},
 			want:         orphanClosed,

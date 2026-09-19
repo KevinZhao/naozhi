@@ -32,9 +32,8 @@ package cron
 // gate is therefore the documented order; the reverse is structurally
 // impossible while the gate stays a leaf.
 //
-// MIGRATION, TEMPORARY: embedded in Scheduler (like jobTable) so the ~68 test
-// lines that reach runningJobs / jobGates / jobInflight directly keep
-// compiling via field and method promotion. Un-embedding rides with step 2d.
+// Scheduler holds this as the named field gate. Tests that inspect the slot
+// directly go through the gateForTest port in export_test.go.
 
 import (
 	"fmt"

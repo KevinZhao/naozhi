@@ -19,7 +19,7 @@ type phaseSampler struct {
 }
 
 func (p *phaseSampler) sample() {
-	view, ok := p.s.jobInflight(p.jobID).snapshot()
+	view, ok := p.s.gateForTest().jobInflight(p.jobID).snapshot()
 	if !ok {
 		return
 	}
@@ -80,9 +80,9 @@ func TestExecuteOpt_PhaseSequence(t *testing.T) {
 	sampler.s = s
 
 	j := &Job{ID: "job-phase-seq", Schedule: "@every 5m", Prompt: "ping"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	// Sample once before the heavy phases: executeOpt has populated the view
 	// with PhaseQueued by the time the run reaches GetOrCreate, but to also
@@ -123,11 +123,11 @@ func TestExecPopulateInflight_SeedsPhaseQueued(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: okRouter{sid: "sess-q"}, Telemetry: rec})
 
 	j := &Job{ID: "job-phase-queued", Schedule: "@every 5m", Prompt: "ping"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
-	inflight := s.jobInflight(j.ID)
+	inflight := s.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("could not win the CAS for the test run")
 	}

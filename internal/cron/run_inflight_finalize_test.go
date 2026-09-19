@@ -35,13 +35,13 @@ func TestFinishRunFinalizesInflightBeforeBroadcast(t *testing.T) {
 	s := sched
 
 	j := &Job{ID: "job-finalize", Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	// Simulate executeOpt's CAS-true window so we can drive finishRun in
 	// isolation against a real *runInflight + per-run *runFinalizer.
-	inflight := s.jobInflight(j.ID)
+	inflight := s.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}
@@ -90,11 +90,11 @@ func TestOverlapSkippedDoesNotReleaseOwnerGate(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
 
 	j := &Job{ID: "job-overlap-noop", Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
-	inflight := s.jobInflight(j.ID)
+	inflight := s.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}

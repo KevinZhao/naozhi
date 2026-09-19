@@ -26,8 +26,8 @@ func TestMarshalJobsLocked_SkipSortEmpty(t *testing.T) {
 	}
 	defer s.Stop()
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	defer s.tblForTest().mu.RUnlock()
 	got, err := s.marshalJobsLocked()
 	if err != nil {
 		t.Fatalf("marshalJobsLocked: %v", err)
@@ -65,13 +65,13 @@ func TestMarshalJobsLocked_SkipSortSingle(t *testing.T) {
 	defer s.Stop()
 
 	jobID := mustGenerateID()
-	s.mu.Lock()
-	s.jobs[jobID] = &Job{ID: jobID, Schedule: "@every 1m", Prompt: "p"}
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = &Job{ID: jobID, Schedule: "@every 1m", Prompt: "p"}
+	s.tblForTest().mu.Unlock()
 
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	got, err := s.marshalJobsLocked()
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 	if err != nil {
 		t.Fatalf("marshalJobsLocked: %v", err)
 	}

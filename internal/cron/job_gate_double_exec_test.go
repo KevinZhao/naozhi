@@ -51,8 +51,8 @@ func (r concurrencyRouter) GetOrCreate(ctx context.Context, key string, opts Age
 func TestJobGateLock_SameJobIDSharesMutex(t *testing.T) {
 	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
-	a := s.jobGateLock("job-x")
-	b := s.jobGateLock("job-x")
+	a := s.gateForTest().jobGateLock("job-x")
+	b := s.gateForTest().jobGateLock("job-x")
 	if a != b {
 		t.Fatalf("jobGateLock returned distinct mutexes for the same jobID: %p vs %p", a, b)
 	}
@@ -85,13 +85,13 @@ func TestJobGate_CleanupSerialisedAgainstGate(t *testing.T) {
 	const jobID = "job-serialise"
 	// Seed an idle inflight entry so cleanup has something to delete once it
 	// acquires the gate (running=false → deletable).
-	_ = s.jobInflight(jobID)
+	_ = s.gateForTest().jobInflight(jobID)
 
-	gate := s.jobGateLock(jobID)
+	gate := s.gateForTest().jobGateLock(jobID)
 	gate.Lock()
 
 	done := make(chan bool, 1)
-	go func() { done <- s.cleanupRunningJobIfIdle(jobID) }()
+	go func() { done <- s.gateForTest().cleanupRunningJobIfIdle(jobID) }()
 
 	// Cleanup must be blocked on the gate — it should NOT complete while held.
 	select {
@@ -113,7 +113,7 @@ func TestJobGate_CleanupSerialisedAgainstGate(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("cleanup never completed after gate release")
 	}
-	if _, present := s.runningJobs.Load(jobID); present {
+	if _, present := s.gateForTest().runningJobs.Load(jobID); present {
 		t.Fatal("runningJobs entry should be gone after cleanup of an idle job")
 	}
 }
@@ -134,16 +134,16 @@ func TestJobGate_NoDoubleExecutionUnderDeleteTriggerRace(t *testing.T) {
 
 	const jobID = "job-race"
 	j := &Job{ID: jobID, Schedule: "@every 5m", Prompt: "ping", Platform: "feishu", ChatID: "X"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	const rounds = 500
 	var wg sync.WaitGroup
 	for i := 0; i < rounds; i++ {
 		wg.Add(2)
 		go func() { defer wg.Done(); s.executeOpt(j, true) }()
-		go func() { defer wg.Done(); s.cleanupRunningJobIfIdle(jobID) }()
+		go func() { defer wg.Done(); s.gateForTest().cleanupRunningJobIfIdle(jobID) }()
 	}
 	wg.Wait()
 

@@ -70,9 +70,9 @@ func (r *deleteOnResetRouter) Reset(key string) {
 		at = 2
 	}
 	if seq == at { // simulate a concurrent Delete winning the race
-		r.s.mu.Lock()
-		delete(r.s.jobs, r.jobID)
-		r.s.mu.Unlock()
+		r.s.tblForTest().mu.Lock()
+		delete(r.s.tblForTest().jobs, r.jobID)
+		r.s.tblForTest().mu.Unlock()
 	}
 }
 
@@ -92,9 +92,9 @@ func TestFreshContextReapsSessionAfterSuccess(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-reap", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
 
@@ -160,7 +160,7 @@ func TestFreshContextReapsSessionAfterSuccess(t *testing.T) {
 // in #1829: if the job is deleted between the post-success Reset and the stub
 // re-register (DeleteJobByID's teardown does NOT take the inflight CAS gate,
 // so it races the success tail), the reap must NOT resurrect a sidebar stub
-// for the now-deleted job. Simulated by removing the job from s.jobs before
+// for the now-deleted job. Simulated by removing the job from s.tbl.jobs before
 // executeOpt reaches its success-tail re-check — the existence re-check then
 // observes the job gone and skips registerStubByValue.
 //
@@ -187,9 +187,9 @@ func TestFreshReapSkipsStubReregisterWhenJobDeleted(t *testing.T) {
 
 	j := &Job{ID: "job-deleted-mid", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
 	router.jobID = j.ID
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true)
 
@@ -225,9 +225,9 @@ func TestFreshReapEmptySessionIDRegistersChainlessStub(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-empty-sid", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
 
@@ -272,9 +272,9 @@ func TestPersistentContextNotReapedAfterSuccess(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-persist", Schedule: "@every 5m", Prompt: "ping", FreshContext: false}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true)
 

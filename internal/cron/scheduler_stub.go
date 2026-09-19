@@ -9,7 +9,7 @@ import (
 // registerStubByValue creates (or refreshes) a router stub for the job so it
 // appears in the dashboard workspace list. Returns false when no router is
 // wired (the bool flows back into EnsureStub so a no-op stays visible, #491).
-// Callers must not hold s.mu — RegisterCronStubWithChain re-enters router
+// Callers must not hold s.tbl.mu — RegisterCronStubWithChain re-enters router
 // state. Takes values, not *Job, so a locked caller cannot leak a pointer that
 // a concurrent UpdateJob mutates; snapshot fields first.
 //
@@ -61,17 +61,17 @@ func (s *Scheduler) EnsureStub(key string) bool {
 	}
 	// Snapshot workDir/prompt under RLock, release before reaching into
 	// router: RegisterCronStubWithChain calls notifyChange which fans out to
-	// hub broadcasters, and holding s.mu across that path risks lock-order
+	// hub broadcasters, and holding s.tbl.mu across that path risks lock-order
 	// inversion with the cron dispatcher (see ListAllJobsWithNextRun).
-	s.mu.RLock()
-	j, ok := s.jobs[id]
+	s.tbl.mu.RLock()
+	j, ok := s.tbl.jobs[id]
 	var workDir, prompt, lastSessionID string
 	if ok {
 		workDir = j.WorkDir
 		prompt = j.Prompt
 		lastSessionID = j.LastSessionID
 	}
-	s.mu.RUnlock()
+	s.tbl.mu.RUnlock()
 	if !ok {
 		return false
 	}
@@ -79,8 +79,8 @@ func (s *Scheduler) EnsureStub(key string) bool {
 }
 
 // resetRouterStub is the deferred router-side cleanup that pairs with
-// deleteJobLocked. Caller MUST NOT hold s.mu — router.Reset re-enters router
-// state and its notifyChange callback may take s.mu. Safe on a nil router and
+// deleteJobLocked. Caller MUST NOT hold s.tbl.mu — router.Reset re-enters router
+// state and its notifyChange callback may take s.tbl.mu. Safe on a nil router and
 // on a nil receiver (partial test fixtures drive deletion paths).
 func (s *Scheduler) resetRouterStub(jobID string) {
 	if s == nil {

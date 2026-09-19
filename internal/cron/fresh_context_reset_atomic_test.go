@@ -34,13 +34,13 @@ func TestCRON1_FreshResetSerializedByInflightCAS(t *testing.T) {
 		WorkDir:      "/tmp",
 		Prompt:       "x",
 	}
-	s.mu.Lock()
-	s.jobs[id] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[id] = j
+	s.tblForTest().mu.Unlock()
 
 	// Hold the inflight gate as if run #1 is mid-flight (between its own
 	// Reset and GetOrCreate, say). Do NOT release until the assertion.
-	inf := s.jobInflight(id)
+	inf := s.gateForTest().jobInflight(id)
 	if !inf.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}

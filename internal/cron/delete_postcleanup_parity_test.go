@@ -53,7 +53,7 @@ func addParityJob(t *testing.T, s *Scheduler, title string) *Job {
 // step to one entry point but not the other).
 //
 // The observable post-delete invariants checked for BOTH paths:
-//   - the job is gone from s.jobs;
+//   - the job is gone from s.tbl.jobs;
 //   - the per-chat job count for the chat is reclaimed to 0;
 //   - the per-chat job index slice for the chat is dropped;
 //   - the runningJobs guard for the deleted ID is reclaimed (idle path).
@@ -69,15 +69,15 @@ func TestDeletePostCleanup_ParityBetweenEntryPoints(t *testing.T) {
 
 	capture := func(s *Scheduler, jobID string, key chatJobKey) postState {
 		// runningJobs is a sync.Map accessed lock-free; everything else is
-		// guarded by s.mu.
-		_, runningGuard := s.runningJobs.Load(jobID)
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		_, jobPresent := s.jobs[jobID]
+		// guarded by s.tbl.mu.
+		_, runningGuard := s.gateForTest().runningJobs.Load(jobID)
+		s.tblForTest().mu.RLock()
+		defer s.tblForTest().mu.RUnlock()
+		_, jobPresent := s.tblForTest().jobs[jobID]
 		return postState{
 			jobPresent:   jobPresent,
-			chatCount:    s.chatJobCount[key],
-			chatIndexLen: len(s.jobsByChat[key]),
+			chatCount:    s.tblForTest().chatJobCount[key],
+			chatIndexLen: len(s.tblForTest().jobsByChat[key]),
 			runningGuard: runningGuard,
 		}
 	}

@@ -42,7 +42,7 @@ func newFreshPreflightFixture(t *testing.T, allowedRoot string) (*Scheduler, *fa
 
 func runFreshPreflight(s *Scheduler, j *Job, workDir string) (stubRefresher, bool) {
 	key := sessionkey.CronKey(j.ID)
-	finalizer := &runFinalizer{inflight: s.jobInflight(j.ID)}
+	finalizer := &runFinalizer{inflight: s.gateForTest().jobInflight(j.ID)}
 	snap := jobSnapshot{
 		fresh:   true,
 		workDir: workDir,
@@ -80,9 +80,9 @@ func TestCRON3_FreshPreflightSkipsWhenWorkDirOutsideRoot(t *testing.T) {
 		WorkDir:      outside,
 		FreshContext: true,
 	}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	_, ok := runFreshPreflight(s, j, outside)
 	if ok {
@@ -98,10 +98,10 @@ func TestCRON3_FreshPreflightSkipsWhenWorkDirOutsideRoot(t *testing.T) {
 	}
 	fake.mu.Unlock()
 
-	s.mu.RLock()
-	gotErr := s.jobs[j.ID].LastError
-	gotClass := s.jobs[j.ID].LastErrorClass
-	s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	gotErr := s.tblForTest().jobs[j.ID].LastError
+	gotClass := s.tblForTest().jobs[j.ID].LastErrorClass
+	s.tblForTest().mu.RUnlock()
 	if !strings.Contains(gotErr, "outside allowed root") {
 		t.Errorf("LastError = %q, want contains %q", gotErr, "outside allowed root")
 	}
@@ -127,9 +127,9 @@ func TestCRON3_FreshPreflightProceedsWhenWorkDirUnderRoot(t *testing.T) {
 		WorkDir:      root,
 		FreshContext: true,
 	}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	_, ok := runFreshPreflight(s, j, root)
 	if !ok {
@@ -168,9 +168,9 @@ func TestCRON3_FreshPreflightNoAllowedRootSkipsCheck(t *testing.T) {
 		WorkDir:      workDir,
 		FreshContext: true,
 	}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	_, ok := runFreshPreflight(s, j, workDir)
 	if !ok {

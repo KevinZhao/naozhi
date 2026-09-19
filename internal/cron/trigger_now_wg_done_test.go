@@ -22,7 +22,7 @@ import (
 // goroutine of the other branches.
 //
 // R247-CR-29 (#596): the three sibling spawn sites were collapsed into one.
-// The entry-gone check is now resolved to a single bool UNDER s.mu.RLock
+// The entry-gone check is now resolved to a single bool UNDER s.tbl.mu.RLock
 // (preserving the single-consistent-instant race guard against a concurrent
 // DeleteJob) and the function spawns exactly ONE `go func()` with one
 // `defer s.triggerWG.Done()`. The contract is unchanged in spirit — every
@@ -148,14 +148,14 @@ func TestTriggerNow_EntryGoneReleasesWG(t *testing.T) {
 	// Instead inject directly into the jobs map with a synthetic entryID
 	// that s.cron has never seen — s.cron.Entry(entryID) returns a zero
 	// Entry with nil WrappedJob, exactly the race we want to exercise.
-	s.mu.Lock()
-	s.jobs["orphan-job"] = &Job{
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs["orphan-job"] = &Job{
 		ID:       "orphan-job",
 		Schedule: "@every 1h",
 		Prompt:   "stub",
 		entryID:  99999, // entry that cron engine does not know about
 	}
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	if err := s.TriggerNow("orphan-job"); err != nil {
 		t.Fatalf("TriggerNow: %v", err)

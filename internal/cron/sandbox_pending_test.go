@@ -275,9 +275,9 @@ func TestSandboxReconcile_NoDoubleFinishForInProcessTerminal(t *testing.T) {
 
 	startedAfterRun := rec.startedCount()
 	endedAfterRun := rec.endedCount()
-	s.mu.RLock()
-	countersAfterRun := s.jobs[j.ID].RunCounters
-	s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	countersAfterRun := s.tblForTest().jobs[j.ID].RunCounters
+	s.tblForTest().mu.RUnlock()
 	if countersAfterRun.Total != 1 {
 		t.Fatalf("RunCounters.Total after run = %d, want 1", countersAfterRun.Total)
 	}
@@ -305,9 +305,9 @@ func TestSandboxReconcile_NoDoubleFinishForInProcessTerminal(t *testing.T) {
 	if got := rec.endedCount(); got != endedAfterRun {
 		t.Fatalf("RunEnded count grew %d→%d across reconcile — duplicate finish (#2054)", endedAfterRun, got)
 	}
-	s.mu.RLock()
-	countersAfterReconcile := s.jobs[j.ID].RunCounters
-	s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	countersAfterReconcile := s.tblForTest().jobs[j.ID].RunCounters
+	s.tblForTest().mu.RUnlock()
 	if countersAfterReconcile.Total != 1 {
 		t.Fatalf("RunCounters.Total after reconcile = %d, want 1 (durable counter must not double-count #2054)", countersAfterReconcile.Total)
 	}
@@ -344,9 +344,9 @@ func TestSandboxReconcile_TransientReadKeepsPendingNoDoubleFinish(t *testing.T) 
 
 	startedAfterRun := rec.startedCount()
 	endedAfterRun := rec.endedCount()
-	s.mu.RLock()
-	countersAfterRun := s.jobs[j.ID].RunCounters
-	s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	countersAfterRun := s.tblForTest().jobs[j.ID].RunCounters
+	s.tblForTest().mu.RUnlock()
 	if countersAfterRun.Total != 1 {
 		t.Fatalf("RunCounters.Total after run = %d, want 1", countersAfterRun.Total)
 	}
@@ -393,9 +393,9 @@ func TestSandboxReconcile_TransientReadKeepsPendingNoDoubleFinish(t *testing.T) 
 	if got := rec.endedCount(); got != endedAfterRun {
 		t.Fatalf("RunEnded count grew %d→%d across reconcile — duplicate finish (#2149)", endedAfterRun, got)
 	}
-	s.mu.RLock()
-	countersAfterReconcile := s.jobs[j.ID].RunCounters
-	s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	countersAfterReconcile := s.tblForTest().jobs[j.ID].RunCounters
+	s.tblForTest().mu.RUnlock()
 	if countersAfterReconcile != countersAfterRun {
 		t.Fatalf("RunCounters changed across reconcile under transient read: %+v → %+v (#2149)", countersAfterRun, countersAfterReconcile)
 	}

@@ -385,7 +385,7 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	}
 
 	// orphanRemoveAfterFinish. The job may have been deleted while we were
-	// down — finishRun's recordTerminalResult re-checks s.jobs[id] and no-ops
+	// down — finishRun's recordTerminalResult re-checks s.tbl.jobs[id] and no-ops
 	// the persist; the broadcast pair still closes subscriber timelines.
 	js, j := s.snapshotOrphanJob(p.JobID)
 	// Re-check job existence under RLock ONCE before any subscriber-visible write:
@@ -402,7 +402,7 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 }
 
 // orphanJobSnapshot is the subset of *Job the orphan finish needs, copied
-// under s.mu.RLock (UpdateJob mutates *Job in place under s.mu.Lock, so any
+// under s.tbl.mu.RLock (UpdateJob mutates *Job in place under s.tbl.mu.Lock, so any
 // lock-free read is a data race).
 type orphanJobSnapshot struct {
 	sideEffects  bool
@@ -414,12 +414,12 @@ type orphanJobSnapshot struct {
 
 // snapshotOrphanJob returns the lock-safe field snapshot plus the *Job
 // pointer (nil when the job no longer exists). Passing j on to finishRun is
-// safe: finishRun re-locks (recordTerminalResult re-checks s.jobs[id]) —
+// safe: finishRun re-locks (recordTerminalResult re-checks s.tbl.jobs[id]) —
 // only THIS file's lock-free reads need to be snapshots.
 func (s *Scheduler) snapshotOrphanJob(jobID string) (orphanJobSnapshot, *Job) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	j := s.jobs[jobID]
+	s.tbl.mu.RLock()
+	defer s.tbl.mu.RUnlock()
+	j := s.tbl.jobs[jobID]
 	if j == nil {
 		return orphanJobSnapshot{}, nil
 	}
@@ -432,11 +432,11 @@ func (s *Scheduler) snapshotOrphanJob(jobID string) (orphanJobSnapshot, *Job) {
 	}, j
 }
 
-// jobExists re-checks s.jobs[jobID] under RLock (the COR-001 TOCTOU guard).
+// jobExists re-checks s.tbl.jobs[jobID] under RLock (the COR-001 TOCTOU guard).
 func (s *Scheduler) jobExists(jobID string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.jobs[jobID] != nil
+	s.tbl.mu.RLock()
+	defer s.tbl.mu.RUnlock()
+	return s.tbl.jobs[jobID] != nil
 }
 
 // maybeEnqueueOrphanAttention enqueues a live side-effecting job's orphan for

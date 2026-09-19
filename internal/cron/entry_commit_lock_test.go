@@ -36,13 +36,13 @@ func newEntryLockScheduler(t *testing.T) (s *Scheduler, activeID, pausedID strin
 
 // TestEntryCommitNeverUnderRegistryLock is the machine form of the rule the
 // plan/commit/apply split exists for: no production writer commits a robfig
-// entry while holding s.mu. It is the runtime stand-in for the go/analysis
+// entry while holding s.tbl.mu. It is the runtime stand-in for the go/analysis
 // pass the RFC left as an open decision (§8.5) — cheaper, and it fails the
 // moment a code path regresses instead of waiting for a linter to be written.
 //
 // Mechanism: cronCommitHook fires inside commitCronEntry, immediately before
 // the robfig rendezvous. The test runs every write path SERIALLY, so at hook
-// time the only goroutine that could hold s.mu is the one committing —
+// time the only goroutine that could hold s.tbl.mu is the one committing —
 // TryLock failing therefore means self-deadlock-shaped code: a commit under
 // the registry lock.
 //
@@ -54,11 +54,11 @@ func TestEntryCommitNeverUnderRegistryLock(t *testing.T) {
 	commits := 0
 	cronCommitHook = func() {
 		commits++
-		if !s.mu.TryLock() {
-			t.Error("commitCronEntry reached with s.mu held: a robfig rendezvous under the registry lock")
+		if !s.tblForTest().mu.TryLock() {
+			t.Error("commitCronEntry reached with s.tbl.mu held: a robfig rendezvous under the registry lock")
 			return
 		}
-		s.mu.Unlock()
+		s.tblForTest().mu.Unlock()
 	}
 	t.Cleanup(func() { cronCommitHook = nil })
 
@@ -113,7 +113,7 @@ func TestResumePersistFailure_LeavesNoEntry(t *testing.T) {
 	if n := len(s.cron.Entries()); n != entriesBefore {
 		t.Errorf("robfig entries %d → %d after failed resume: an entry was committed before persist and leaked", entriesBefore, n)
 	}
-	if reg, paused := s.liveness(pausedID); !reg || !paused {
+	if reg, paused := s.tblForTest().liveness(pausedID); !reg || !paused {
 		t.Errorf("liveness = (%v, %v), want (true, true) — the rollback must restore Paused", reg, paused)
 	}
 }
@@ -135,10 +135,10 @@ func TestResume_RegistersEntryAndCache(t *testing.T) {
 	if n := len(s.cron.Entries()); n != entriesBefore+1 {
 		t.Errorf("robfig entries %d → %d, want exactly one new entry", entriesBefore, n)
 	}
-	s.mu.RLock()
-	j := s.jobs[pausedID]
+	s.tblForTest().mu.RLock()
+	j := s.tblForTest().jobs[pausedID]
 	entryID, period, sched := j.entryID, j.cachedPeriod, j.cachedSched
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 	if entryID == 0 {
 		t.Error("entryID = 0 after resume: the commit never applied back")
 	}
@@ -176,9 +176,9 @@ func TestEntryLifecycle_ConcurrentWritersInvariant(t *testing.T) {
 		<-done
 		<-done
 
-		s.mu.RLock()
-		paused := s.jobs[activeID].Paused
-		s.mu.RUnlock()
+		s.tblForTest().mu.RLock()
+		paused := s.tblForTest().jobs[activeID].Paused
+		s.tblForTest().mu.RUnlock()
 		// The other seeded job is paused throughout, so it contributes 0.
 		want := 1
 		if paused {

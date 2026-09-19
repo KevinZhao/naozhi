@@ -55,7 +55,7 @@ func TestPersistOrdering_RunsNeverDivergeAheadOfJob(t *testing.T) {
 	// failure isolates the finishRun persist step under test.
 	withFailingMarshal(t, s)
 
-	inflight := s.jobInflight(j.ID)
+	inflight := s.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}

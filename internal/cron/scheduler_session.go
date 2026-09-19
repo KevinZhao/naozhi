@@ -14,7 +14,7 @@ import "sync"
 const knownSessionIDsRecentCap = 200
 
 // jobIDsScratchPool reuses the []string scratch slice buildKnownSessionsSet
-// fills under s.mu RLock and walks after RUnlock; cold rebuilds can be frequent
+// fills under s.tbl.mu RLock and walks after RUnlock; cold rebuilds can be frequent
 // in busy deployments, so pooling removes the per-rebuild backing-array alloc.
 var jobIDsScratchPool = sync.Pool{
 	New: func() any {
@@ -61,14 +61,14 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 	// spawn-time probes target the just-written LastSessionID of an active or
 	// recently-finished job, reachable without touching runStore.Recent.
 	fastHit := false
-	s.mu.RLock()
-	for _, j := range s.jobs {
+	s.tbl.mu.RLock()
+	for _, j := range s.tbl.jobs {
 		if j.LastSessionID == sessionID {
 			fastHit = true
 			break
 		}
 	}
-	s.mu.RUnlock()
+	s.tbl.mu.RUnlock()
 
 	if !fastHit {
 		s.rangeRunningSessionIDs(func(sid string) bool {
@@ -135,14 +135,14 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 	// the lock window; a fixed initial capacity trades a few rehashes for a
 	// shorter lock hold.
 	out := make(map[string]struct{}, 32)
-	s.mu.RLock()
-	for id, j := range s.jobs {
+	s.tbl.mu.RLock()
+	for id, j := range s.tbl.jobs {
 		jobIDs = append(jobIDs, id)
 		if j.LastSessionID != "" {
 			out[j.LastSessionID] = struct{}{}
 		}
 	}
-	s.mu.RUnlock()
+	s.tbl.mu.RUnlock()
 
 	// In-flight runs may have a SessionID set even before the run
 	// terminates (set by setSessionID after GetOrCreate returns).

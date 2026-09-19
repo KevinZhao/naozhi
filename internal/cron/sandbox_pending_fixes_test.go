@@ -137,7 +137,7 @@ func TestReconcileOrphan_DeletedJobBumpsMetrics(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	runner := &fakeSandboxRunner{}
-	// No job added → s.jobs["nonexistentjobid"] == nil.
+	// No job added → s.tbl.jobs["nonexistentjobid"] == nil.
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 
 	writePendingFixture(t, storePath, sandboxPending{
@@ -172,7 +172,7 @@ func TestReconcileOrphan_DeletedJobBumpsStartedTotal(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	runner := &fakeSandboxRunner{}
-	// No job registered → s.jobs[jobID] == nil.
+	// No job registered → s.tbl.jobs[jobID] == nil.
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 
 	writePendingFixture(t, storePath, sandboxPending{
@@ -388,7 +388,7 @@ func TestEnqueueSandboxTransportAttention_SkipsDeletedJob(t *testing.T) {
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
-	// snap.jobID points at a job that does NOT exist in s.jobs (simulating a
+	// snap.jobID points at a job that does NOT exist in s.tbl.jobs (simulating a
 	// DeleteJobByID that completed while this run's goroutine was blocked on
 	// the now-severed stream).
 	a := sandboxExecArgs{
@@ -564,9 +564,9 @@ func TestReconcileSandboxPending_EmptyRuntimeSessionIDDroppedAsCorrupt(t *testin
 // ---------------------------------------------------------------------------
 
 // TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck verifies
-// the re-check: if the job is gone from s.jobs at the time of the attention
+// the re-check: if the job is gone from s.tbl.jobs at the time of the attention
 // write guard, no attention card is written.
-// We simulate the TOCTOU window by directly removing the job from s.jobs
+// We simulate the TOCTOU window by directly removing the job from s.tbl.jobs
 // (package-internal test — avoids the panicRouter.Reset path that DeleteJobByID
 // would trigger) so the initial RLock snapshot sees nil (deleted-job branch)
 // and the re-check also sees nil. The key invariant: no ghost attention card.
@@ -586,12 +586,12 @@ func TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck(t *testing.
 	}
 	path := writePendingFixture(t, storePath, p)
 
-	// Simulate the TOCTOU race: remove the job from s.jobs directly so neither
+	// Simulate the TOCTOU race: remove the job from s.tbl.jobs directly so neither
 	// the initial snapshot NOR the re-check can find it. The deleted-job branch
 	// must not write an attention card regardless.
-	s.mu.Lock()
-	delete(s.jobs, j.ID)
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	delete(s.tblForTest().jobs, j.ID)
+	s.tblForTest().mu.Unlock()
 
 	startedBefore := rec.startedCount()
 	s.reconcileOneSandboxOrphan(p, path)
@@ -662,7 +662,7 @@ func TestReconcileSandboxPending_ShutdownBeforeReconcileSkipsStop(t *testing.T) 
 // so the in-flight gauge (started−ended) stays balanced.
 //
 // We make the snapshot see j!=nil but the re-check see nil by deleting the job
-// from s.jobs from a concurrent goroutine. To make the assertion deterministic
+// from s.tbl.jobs from a concurrent goroutine. To make the assertion deterministic
 // regardless of which side of the race we land on, we assert the invariant that
 // holds in BOTH outcomes: started broadcasts == ended broadcasts (no phantom
 // half-lifecycle), and the four counters advance together.
@@ -685,9 +685,9 @@ func TestReconcileOrphan_JobDeletedInGap_NoBroadcastBalancedMetrics(t *testing.T
 	// Delete the job out from under the snapshot. Done before the call so the
 	// re-check deterministically sees nil even if the snapshot raced and saw
 	// the job — the routing into the metrics-only path is the contract.
-	s.mu.Lock()
-	delete(s.jobs, j.ID)
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	delete(s.tblForTest().jobs, j.ID)
+	s.tblForTest().mu.Unlock()
 
 	startedBefore := rec.startedCount()
 	endedBefore := rec.endedCount()
@@ -754,13 +754,13 @@ func TestReconcileOrphan_AttentionRecheck_RaceWithDelete(t *testing.T) {
 		for i := 0; i < 50; i++ {
 			// Toggle: delete the job so some reconcile iterations hit
 			// the re-check with nil, others with non-nil.
-			s.mu.Lock()
-			if _, ok := s.jobs[j.ID]; ok {
-				delete(s.jobs, j.ID)
+			s.tblForTest().mu.Lock()
+			if _, ok := s.tblForTest().jobs[j.ID]; ok {
+				delete(s.tblForTest().jobs, j.ID)
 			} else {
-				s.jobs[j.ID] = j
+				s.tblForTest().jobs[j.ID] = j
 			}
-			s.mu.Unlock()
+			s.tblForTest().mu.Unlock()
 			time.Sleep(time.Microsecond)
 		}
 	}()

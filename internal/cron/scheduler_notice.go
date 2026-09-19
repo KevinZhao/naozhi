@@ -12,7 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// jobSnapshot captures the mutable Job fields executeOpt reads under s.mu so
+// jobSnapshot captures the mutable Job fields executeOpt reads under s.tbl.mu so
 // the long-running send/notify pipeline can run without holding the lock.
 // Snapshot is taken once after the rate-limit/jitter gate and reused for the
 // rest of the execution; concurrent SetJobPrompt/UpdateJob therefore land
@@ -24,7 +24,7 @@ type jobSnapshot struct {
 	workDir string
 	jobID   string
 	// label is the human-readable title for IM notice prefixes, computed via
-	// jobTitleOrFallback under s.mu so a concurrent SetJobPrompt cannot tear
+	// jobTitleOrFallback under s.tbl.mu so a concurrent SetJobPrompt cannot tear
 	// Title vs Prompt-derived fallback. Empty when both are blank — labelOrID
 	// then falls back to jobID so the prefix never collapses to "[Cron ]".
 	label      string
@@ -35,7 +35,7 @@ type jobSnapshot struct {
 	schedule   string
 	backend    string // "" = router default
 	// lastSessionID 是 snapshot 时刻 Job.LastSessionID 的拷贝，供 fresh-preflight
-	// 的 stub-refresh 闭包直接调 registerStubByValue，不再回头加 s.mu 读。失败
+	// 的 stub-refresh 闭包直接调 registerStubByValue，不再回头加 s.tbl.mu 读。失败
 	// 路径用 snap-time chain anchor，后续新成功 run 由其 finishRun 路径再覆写。
 	lastSessionID string
 	notify        *bool // nil = unset
@@ -116,20 +116,20 @@ func (s jobSnapshot) labelOrID() string {
 	return s.jobID
 }
 
-// snapshotJob reads j under s.mu.RLock so a concurrent SetJobPrompt /
+// snapshotJob reads j under s.tbl.mu.RLock so a concurrent SetJobPrompt /
 // UpdateJob cannot tear the read across fields. Always returns a value; j is
 // dereferenced inside the lock.
 //
-// LOCK: Must NOT be called while s.mu is already held — acquires s.mu.RLock
-// internally. robfig/cron callbacks must never hold s.mu when invoking it.
+// LOCK: Must NOT be called while s.tbl.mu is already held — acquires s.tbl.mu.RLock
+// internally. robfig/cron callbacks must never hold s.tbl.mu when invoking it.
 func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.tbl.mu.RLock()
+	defer s.tbl.mu.RUnlock()
 	return snapshotJobLocked(j)
 }
 
 // snapshotJobLocked is the lock-held variant of snapshotJob: callers MUST hold
-// s.mu (read or write). executeOpt's jitter-window block uses it to fold the
+// s.tbl.mu (read or write). executeOpt's jitter-window block uses it to fold the
 // post-jitter `cur.Paused` recheck and the snapshot copy into a single RLock
 // window (#1351). A free function rather than a method so the dependency on
 // the caller's lock is explicit and the helper cannot re-acquire it.
@@ -151,7 +151,7 @@ func snapshotJobLocked(j *Job) jobSnapshot {
 		lastSessionID: j.LastSessionID,
 	}
 	// Alias j.Notify instead of deep-copying (#1931): UpdateJob only ever
-	// *reassigns* j.Notify to a fresh pointer under s.mu.Lock, never mutates
+	// *reassigns* j.Notify to a fresh pointer under s.tbl.mu.Lock, never mutates
 	// *j.Notify in place, so the pointed-to bool is immutable once published
 	// and the sole reader (resolveNotifyDecision) only nil-checks and derefs.
 	// Aliasing is therefore alloc-free and tear-free.

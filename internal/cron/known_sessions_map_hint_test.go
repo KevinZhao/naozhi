@@ -1,6 +1,6 @@
 // known_sessions_map_hint_test.go: structural and behavioural pins for
 // buildKnownSessionsSet map allocation. Originally R20260603-PERF-3 sized the
-// map from len(s.jobs) under the RLock; R202606-PERF-003 reverses that
+// map from len(s.tbl.jobs) under the RLock; R202606-PERF-003 reverses that
 // placement — the map is now allocated BEFORE the RLock to shorten the lock
 // window, at the cost of a fixed initial capacity hint. The lock-hold
 // reduction is the higher-value tradeoff for write-contended schedulers.
@@ -16,9 +16,9 @@ import (
 
 // TestBuildKnownSessionsSet_MapAllocBeforeLock is a structural
 // pin that verifies buildKnownSessionsSet allocates the output map BEFORE
-// taking s.mu.RLock(), so the make() does not run inside the lock window and
+// taking s.tbl.mu.RLock(), so the make() does not run inside the lock window and
 // block writers. This supersedes the earlier R20260603-PERF-3 pin that
-// required the make to read len(s.jobs) under the lock.
+// required the make to read len(s.tbl.jobs) under the lock.
 func TestBuildKnownSessionsSet_MapAllocBeforeLock(t *testing.T) {
 	src, err := os.ReadFile("scheduler_session.go")
 	if err != nil {
@@ -36,29 +36,29 @@ func TestBuildKnownSessionsSet_MapAllocBeforeLock(t *testing.T) {
 		rest = rest[:len(fnMarker)+next]
 	}
 
-	// The map make must appear BEFORE s.mu.RLock() so the allocation is not
+	// The map make must appear BEFORE s.tbl.mu.RLock() so the allocation is not
 	// performed while holding the read lock. R202606-PERF-003.
-	idxRLock := strings.Index(rest, "s.mu.RLock()")
+	idxRLock := strings.Index(rest, "s.tbl.mu.RLock()")
 	idxMake := strings.Index(rest, "make(map[string]struct{}")
 	if idxRLock < 0 {
-		t.Fatal("buildKnownSessionsSet: s.mu.RLock() not found")
+		t.Fatal("buildKnownSessionsSet: s.tbl.mu.RLock() not found")
 	}
 	if idxMake < 0 {
 		t.Fatal("buildKnownSessionsSet: make(map[string]struct{}) not found")
 	}
 	if idxMake >= idxRLock {
-		t.Error("buildKnownSessionsSet: map make must appear before s.mu.RLock() " +
+		t.Error("buildKnownSessionsSet: map make must appear before s.tbl.mu.RLock() " +
 			"so the allocation does not extend the lock window (R202606-PERF-003)")
 	}
 
-	// The map alloc must not depend on len(s.jobs): that read needs the lock,
+	// The map alloc must not depend on len(s.tbl.jobs): that read needs the lock,
 	// which is exactly what we moved the alloc out of.
 	makeStmt := rest[idxMake:]
 	if end := strings.Index(makeStmt, ")"); end >= 0 {
 		makeStmt = makeStmt[:end+1]
 	}
-	if strings.Contains(makeStmt, "len(s.jobs)") {
-		t.Error("buildKnownSessionsSet: map make must not size from len(s.jobs) " +
+	if strings.Contains(makeStmt, "len(s.tbl.jobs)") {
+		t.Error("buildKnownSessionsSet: map make must not size from len(s.tbl.jobs) " +
 			"now that it runs before the RLock (R202606-PERF-003)")
 	}
 }
@@ -67,7 +67,7 @@ func TestBuildKnownSessionsSet_MapAllocBeforeLock(t *testing.T) {
 // verifying that buildKnownSessionsSet returns all LastSessionIDs even for
 // a scheduler seeded with more than 32 jobs (the former fixed hint),
 // exercising the rehash path that the hint was meant to eliminate.
-// Jobs are injected directly into s.jobs to bypass scheduler AddJob limits.
+// Jobs are injected directly into s.tbl.jobs to bypass scheduler AddJob limits.
 func TestBuildKnownSessionsSet_MapHint_ScalesWithJobs(t *testing.T) {
 	t.Parallel()
 
@@ -75,14 +75,14 @@ func TestBuildKnownSessionsSet_MapHint_ScalesWithJobs(t *testing.T) {
 	s := schedulerForJobsR241GO2Test(t)
 
 	wantSessions := make(map[string]bool, nJobs)
-	s.mu.Lock()
+	s.tblForTest().mu.Lock()
 	for i := 0; i < nJobs; i++ {
 		id := fmt.Sprintf("job%04d", i)
 		sid := "sid-" + id
-		s.jobs[id] = &Job{ID: id, LastSessionID: sid}
+		s.tblForTest().jobs[id] = &Job{ID: id, LastSessionID: sid}
 		wantSessions[sid] = true
 	}
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	got := s.buildKnownSessionsSet()
 	for sid := range wantSessions {
