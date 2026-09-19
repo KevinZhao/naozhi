@@ -26,9 +26,9 @@ test.beforeAll(async () => {
     sessionRuns: {
       [KEY]: {
         runs: [
-          { run_id: 'r1', started_at: Date.now() - 600000, duration_ms: 123456, outcome: 'ok', cost_usd: 0.42 },
-          { run_id: 'r2', started_at: Date.now() - 300000, duration_ms: 65432, outcome: 'ok', cost_usd: 0.31 },
-          { run_id: 'r3', started_at: Date.now() - 100000, duration_ms: 9876, outcome: 'timeout', cost_usd: 0.05 },
+          { run_id: 'r1', subsystem: 'session', started_at: Date.now() - 600000, duration_ms: 123456, state: 'succeeded', cost_usd: 0.42 },
+          { run_id: 'r2', subsystem: 'session', started_at: Date.now() - 300000, duration_ms: 65432, state: 'succeeded', cost_usd: 0.31 },
+          { run_id: 'r3', subsystem: 'session', started_at: Date.now() - 100000, duration_ms: 9876, state: 'timed_out', cost_usd: 0.05 },
         ],
         stats: { count: 3, total_ms: 198764, total_cost_usd: 0.78, timeout_count: 1 },
       },

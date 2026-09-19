@@ -35,6 +35,8 @@ import {
   registerActions,
   showToast,
   trapFocus,
+  runStateDot,
+  runStateLabel,
 } from './nz_util.js';
 import {
   renderMd,
@@ -1997,28 +1999,10 @@ function cronStatsBadgeHtml(j) {
 // cronStateDotClass / cronStateLabel —— 单一状态色 / 文案表，详情页时间轴 +
 // 列表 tooltip 共用，避免两处不一致。RFC §8.2 配色：
 //   succeeded 绿 / failed 红 / skipped 灰 / timed_out 橙 / canceled 紫 / running 蓝脉动
-function cronStateDotClass(state) {
-  switch (state) {
-    case 'succeeded': return 'ok';
-    case 'failed': return 'err';
-    case 'skipped': return 'skip';
-    case 'timed_out': return 'warn';
-    case 'canceled': return 'cancel';
-    case 'running': return 'run';
-    default: return 'unk';
-  }
-}
-function cronStateLabel(state) {
-  switch (state) {
-    case 'succeeded': return '成功';
-    case 'failed': return '失败';
-    case 'skipped': return '跳过';
-    case 'timed_out': return '超时';
-    case 'canceled': return '已取消';
-    case 'running': return '运行中';
-    default: return state || '未知';
-  }
-}
+// 词表本体在 nz_util.runStateDot / runStateLabel（#2540 统一 run 词表）；
+// 这两个名字保留为薄委托，60+ 调用点与既有锚点不用动。
+function cronStateDotClass(state) { return runStateDot(state); }
+function cronStateLabel(state) { return runStateLabel(state); }
 
 // cronErrorClassLabel —— 后端 ErrorClass 枚举的中文友好名。RFC §9 错误分类映射。
 // 未知值原样返回，方便排查（不应发生但容错）。

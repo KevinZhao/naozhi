@@ -332,7 +332,7 @@
 .session-runs-panel .srr-dot{width:8px;height:8px;border-radius:var(--nz-radius-full);flex-shrink:0;background:var(--nz-text-faint)}
 .session-runs-panel .srr-dot.ok{background:var(--nz-green)}
 .session-runs-panel .srr-dot.err{background:var(--nz-red)}
-.session-runs-panel .srr-dot.timeout{background:var(--nz-red)}
+.session-runs-panel .srr-dot.warn{background:var(--nz-amber)}
 .session-runs-panel .srr-dot.cancel{background:var(--nz-purple)}
 .session-runs-panel .srr-state{color:var(--nz-text-strong);font-weight:500;min-width:48px}
 .session-runs-panel .srr-time{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}

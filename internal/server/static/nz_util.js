@@ -183,6 +183,34 @@ nz.views = nzViews;
 export const nzTest = {};
 nz.test = nzTest;
 
+// runStateDot / runStateLabel —— 统一 run 词表（runtelemetry.RunState）的
+// 单一状态色 / 中文文案表（#2540）。cron 时间轴、session 运行记录面板共用：
+// 三种 run 历史在 wire 上说同一种 state 之后，渲染侧若各自维护词表，新增
+// 一个 state 就要改多处且必然漂移。RFC §8.2 配色：
+//   succeeded 绿 / failed 红 / skipped 灰 / timed_out 橙 / canceled 紫 / running 蓝脉动
+export function runStateDot(state) {
+  switch (state) {
+    case 'succeeded': return 'ok';
+    case 'failed': return 'err';
+    case 'skipped': return 'skip';
+    case 'timed_out': return 'warn';
+    case 'canceled': return 'cancel';
+    case 'running': return 'run';
+    default: return 'unk';
+  }
+}
+export function runStateLabel(state) {
+  switch (state) {
+    case 'succeeded': return '成功';
+    case 'failed': return '失败';
+    case 'skipped': return '跳过';
+    case 'timed_out': return '超时';
+    case 'canceled': return '已取消';
+    case 'running': return '运行中';
+    default: return state || '未知';
+  }
+}
+
 // data-nz-bg: the only styling JS computes per element is a node /
 // access-profile colour, which no class can express. The renderers put the value
 // in a data attribute and this observer applies it via CSSOM — a property

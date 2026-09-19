@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/dashboard/runview"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
@@ -14,39 +15,14 @@ import (
 // keepCount ceiling — asking for more than the ring holds is pointless).
 const maxRunsPageLimit = runhistory.DefaultKeepCount
 
-// runSummaryView is the wire shape for one run row. Timestamps are unix-ms
-// for parity with the cron timeline (cron_view.js consumes ms), avoiding a
-// second time format on the client.
-type runSummaryView struct {
-	RunID       string  `json:"run_id"`
-	Outcome     string  `json:"outcome"`
-	StartedAt   int64   `json:"started_at"`
-	EndedAt     int64   `json:"ended_at,omitempty"`
-	DurationMS  int64   `json:"duration_ms"`
-	FirstByteMS int64   `json:"first_byte_ms,omitempty"`
-	CostUSD     float64 `json:"cost_usd,omitempty"`
-	ErrorClass  string  `json:"error_class,omitempty"`
-}
-
+// The run rows speak runview.Summary — the same shape every dashboard run
+// list serves (#2540). The outcome vocabulary this endpoint used to expose
+// (completed/error/timeout/canceled — four words nothing else spoke) maps
+// into runtelemetry.RunState inside runview.FromSessionRun; the on-disk
+// records keep their word, the wire stops here.
 type runsListResp struct {
-	Runs  []runSummaryView           `json:"runs"`
+	Runs  []runview.Summary          `json:"runs"`
 	Stats runhistory.SessionRunStats `json:"stats"`
-}
-
-func toRunView(r runhistory.SessionRun) runSummaryView {
-	v := runSummaryView{
-		RunID:       r.RunID,
-		Outcome:     string(r.Outcome),
-		StartedAt:   r.StartedAt.UnixMilli(),
-		DurationMS:  r.DurationMS,
-		FirstByteMS: r.FirstByteMS,
-		CostUSD:     r.CostUSD,
-		ErrorClass:  string(r.ErrorClass),
-	}
-	if !r.EndedAt.IsZero() {
-		v.EndedAt = r.EndedAt.UnixMilli()
-	}
-	return v
 }
 
 // HandleRuns serves GET /api/sessions/runs?key=&limit=&before= — the session
@@ -91,9 +67,9 @@ func (h *Handlers) HandleRuns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runs := h.deps.Router.SessionRuns(key, limit, before)
-	views := make([]runSummaryView, 0, len(runs))
+	views := make([]runview.Summary, 0, len(runs))
 	for _, run := range runs {
-		views = append(views, toRunView(run))
+		views = append(views, runview.FromSessionRun(run))
 	}
 	// Stats always reflect the full recent window (not the paginated slice),
 	// so the summary bar is stable across "load earlier" paging.
