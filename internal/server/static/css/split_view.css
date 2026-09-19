@@ -390,6 +390,10 @@
 
 /* Header buttons */
 .hdr-btns{display:flex;gap:4px;align-items:center}
+/* The JS-driven hidden attribute must stay authoritative: display:flex below
+   would otherwise override the UA's [hidden]{display:none} and paint the
+   self-update chip on every cold start before /api/system/update answers. */
+.hdr-btn[hidden]{display:none}
 .hdr-btn{background:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text-mute);cursor:pointer;padding:0;position:relative;transition:all .15s;line-height:1;white-space:nowrap;width:32px;height:32px;display:flex;align-items:center;justify-content:center}
 .hdr-btn:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-text-faint)}
 .hdr-btn.active{background:var(--nz-bg-2);color:var(--nz-accent);border-color:var(--nz-accent)}
