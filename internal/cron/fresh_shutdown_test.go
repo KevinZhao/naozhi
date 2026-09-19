@@ -60,7 +60,7 @@ func TestCRON3_FreshExecuteSkippedAfterStopCtxCancel(t *testing.T) {
 	s.Stop()
 
 	// s.execute is unexported; we re-enter through the stored Job pointer
-	// that AddJob pinned into s.jobs. execute() is safe to call on a
+	// that AddJob pinned into s.tbl.jobs. execute() is safe to call on a
 	// stopped scheduler — the guard is exactly what we're testing.
 	s.executeOpt(job, false)
 

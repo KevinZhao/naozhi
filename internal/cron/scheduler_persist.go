@@ -76,8 +76,8 @@ type marshalJobsFn func(any) ([]byte, error)
 var defaultMarshalJobs = marshalJobsFn(json.Marshal)
 
 // marshalJobsLocked serialises the current jobs map to JSON while the caller
-// still holds s.mu. Safe because json.Marshal only reads Job fields and the
-// output []byte is independent of s.jobs, so the caller can drop s.mu
+// still holds s.tbl.mu. Safe because json.Marshal only reads Job fields and the
+// output []byte is independent of s.tbl.jobs, so the caller can drop s.tbl.mu
 // immediately. The unexported entryID never leaks into cron_jobs.json.
 // The entries slice comes from marshalEntriesPool; the output bytes are fresh
 // each call because saveMarshaledSeq holds them across the async storeMu write.
@@ -86,17 +86,17 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	defer putMarshalEntries(entriesPtr)
 	entries := *entriesPtr
 	// Grow when the pooled cap is below the job count; the grown slice circulates back.
-	if cap(entries) < len(s.jobs) {
-		entries = make([]*Job, 0, len(s.jobs))
+	if cap(entries) < len(s.tbl.jobs) {
+		entries = make([]*Job, 0, len(s.tbl.jobs))
 	}
-	// Emit in s.sortedJobIDs order so on-disk JSON stays deterministic without an
-	// O(N log N) sort inside the s.mu critical section (#1598). s.jobs remains the
-	// source of truth: if the hint drifted (a test helper poking s.jobs directly)
+	// Emit in s.tbl.sortedJobIDs order so on-disk JSON stays deterministic without an
+	// O(N log N) sort inside the s.tbl.mu critical section (#1598). s.tbl.jobs remains the
+	// source of truth: if the hint drifted (a test helper poking s.tbl.jobs directly)
 	// fall back to building + sorting from the map so no job is silently dropped.
-	useHint := len(s.sortedJobIDs) == len(s.jobs)
+	useHint := len(s.tbl.sortedJobIDs) == len(s.tbl.jobs)
 	if useHint {
-		for _, id := range s.sortedJobIDs {
-			j, ok := s.jobs[id]
+		for _, id := range s.tbl.sortedJobIDs {
+			j, ok := s.tbl.jobs[id]
 			if !ok {
 				useHint = false
 				break
@@ -107,7 +107,7 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	if !useHint {
 		// Drift fallback: rebuild from the map (authoritative) and sort. Cold in production.
 		entries = entries[:0]
-		for _, j := range s.jobs {
+		for _, j := range s.tbl.jobs {
 			entries = append(entries, j)
 		}
 		if len(entries) > 1 {
@@ -124,12 +124,12 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	return (*fn)(entries)
 }
 
-// persistJobsLocked marshals under the caller's s.mu and writes asynchronously:
+// persistJobsLocked marshals under the caller's s.tbl.mu and writes asynchronously:
 // the caller produces the payload + save func here, unlocks, then calls save().
 // Marshal latency stays in the critical section (snapshot consistency); disk
 // I/O + storeMu contention move outside.
 //
-// On success returns a non-nil save func; caller must unlock s.mu before
+// On success returns a non-nil save func; caller must unlock s.tbl.mu before
 // invoking it. On marshal failure returns (nil, ErrPersistFailed) wrapped with
 // the cause via multi-%w so callers can errors.Is either. The caller MUST
 // surface it (e.g. HTTP 500): the in-memory mutation already happened and is
@@ -140,16 +140,16 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 		slog.Error("marshal cron store", "err", err)
 		return nil, fmt.Errorf("%w: %w", ErrPersistFailed, err)
 	}
-	// Monotonic seq captured under s.mu total-orders marshals with the state they
+	// Monotonic seq captured under s.tbl.mu total-orders marshals with the state they
 	// represent; saveMarshaledSeq skips writes older than what already landed
 	// (sync.Mutex is not FIFO, so a later marshal can reach storeMu first).
-	seq := s.saveSeq.Add(1)
+	seq := s.tbl.saveSeq.Add(1)
 	return func() { s.saveMarshaledSeq(data, seq) }, nil
 }
 
 // jobsSnapshot is a marshal-ready capture of the persisted job set taken under
-// s.mu: value copies of *Job in sortedJobIDs order, detached from s.jobs so
-// json.Marshal can run AFTER the caller drops s.mu (#1923). seq is taken in the
+// s.tbl.mu: value copies of *Job in sortedJobIDs order, detached from s.tbl.jobs so
+// json.Marshal can run AFTER the caller drops s.tbl.mu (#1923). seq is taken in the
 // same critical section so saveMarshaledSeq's staleness gate still applies.
 type jobsSnapshot struct {
 	entries []*Job
@@ -160,8 +160,8 @@ type jobsSnapshot struct {
 }
 
 // snapshotJobsForSaveLocked captures the current job set into a detached
-// marshal-ready snapshot under the caller's s.mu, plus the persist seq.
-// Entries are value copies so the caller can release s.mu and marshal off the
+// marshal-ready snapshot under the caller's s.tbl.mu, plus the persist seq.
+// Entries are value copies so the caller can release s.tbl.mu and marshal off the
 // hot lock. Job is a flat value type — the only pointer field is Notify *bool,
 // which is deep-copied so the off-lock marshal cannot race a mutator; entryID /
 // cachedPeriod / cachedSched are runtime-only and excluded from JSON. The
@@ -172,15 +172,15 @@ func (s *Scheduler) snapshotJobsForSaveLocked() jobsSnapshot {
 	// persistSnapshot after marshal (#1975).
 	entriesPtr := marshalEntriesPool.Get().(*[]*Job)
 	entries := *entriesPtr
-	if cap(entries) < len(s.jobs) {
-		entries = make([]*Job, 0, len(s.jobs))
+	if cap(entries) < len(s.tbl.jobs) {
+		entries = make([]*Job, 0, len(s.tbl.jobs))
 	} else {
 		entries = entries[:0]
 	}
-	useHint := len(s.sortedJobIDs) == len(s.jobs)
+	useHint := len(s.tbl.sortedJobIDs) == len(s.tbl.jobs)
 	if useHint {
-		for _, id := range s.sortedJobIDs {
-			j, ok := s.jobs[id]
+		for _, id := range s.tbl.sortedJobIDs {
+			j, ok := s.tbl.jobs[id]
 			if !ok {
 				useHint = false
 				break
@@ -196,7 +196,7 @@ func (s *Scheduler) snapshotJobsForSaveLocked() jobsSnapshot {
 	}
 	if !useHint {
 		entries = entries[:0]
-		for _, j := range s.jobs {
+		for _, j := range s.tbl.jobs {
 			cp := *j
 			// Deep-copy Notify so the off-lock marshal never aliases the live job.
 			if j.Notify != nil {
@@ -212,11 +212,11 @@ func (s *Scheduler) snapshotJobsForSaveLocked() jobsSnapshot {
 	// Write the (possibly grown) slice back into the pooled handle so a grow
 	// circulates through the pool.
 	*entriesPtr = entries
-	return jobsSnapshot{entries: entries, seq: s.saveSeq.Add(1), pooled: entriesPtr}
+	return jobsSnapshot{entries: entries, seq: s.tbl.saveSeq.Add(1), pooled: entriesPtr}
 }
 
 // persistSnapshot marshals a detached snapshot taken by
-// snapshotJobsForSaveLocked and returns the save func without holding s.mu
+// snapshotJobsForSaveLocked and returns the save func without holding s.tbl.mu
 // (#1923). On marshal failure returns (nil, ErrPersistFailed) so the caller can
 // roll back, preserving persistJobsLocked's contract; the seq captured under
 // the lock is reused so saveMarshaledSeq's ordering gate is unaffected.

@@ -29,9 +29,9 @@ func TestPreflightDeleteMidExecute_RefreshesStubBeforeGateRelease(t *testing.T) 
 
 	j := &Job{ID: "job-deleted-midexec", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
 	router.jobID = j.ID
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
 

@@ -33,9 +33,9 @@ func TestSetJobPrompt_FirstSetSucceedsThenAlreadySet(t *testing.T) {
 		ChatType: "direct",
 		Paused:   true,
 	}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	// First set: fills the prompt and unpauses.
 	if err := s.SetJobPrompt(j.ID, "first prompt"); err != nil {
@@ -49,9 +49,9 @@ func TestSetJobPrompt_FirstSetSucceedsThenAlreadySet(t *testing.T) {
 		t.Fatalf("second SetJobPrompt err = %v, want ErrPromptAlreadySet", err)
 	}
 
-	s.mu.Lock()
-	got := s.jobs[j.ID].Prompt
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	got := s.tblForTest().jobs[j.ID].Prompt
+	s.tblForTest().mu.Unlock()
 	if got != "first prompt" {
 		t.Fatalf("prompt mutated by no-op call: got %q, want %q", got, "first prompt")
 	}

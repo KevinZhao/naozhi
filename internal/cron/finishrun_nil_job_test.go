@@ -71,7 +71,7 @@ func TestFinishRun_NilJobFinalizesInflight(t *testing.T) {
 	jobID := "job-nil-job-finalize"
 	inf := &runInflight{}
 	inf.running.Store(true)
-	s.runningJobs.Store(jobID, inf)
+	s.gateForTest().runningJobs.Store(jobID, inf)
 	fin := &runFinalizer{inflight: inf}
 
 	runID, err := generateRunID()

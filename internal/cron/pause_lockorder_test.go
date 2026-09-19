@@ -7,7 +7,7 @@ import (
 // TestPauseJobLocked_ReturnsCronRemoveClosure pins R236-QA-03 (#537):
 // pauseJobLocked must split its responsibilities into "in-memory mutation
 // under lock" (j.Paused=true, j.entryID=0) and "cron.Remove outside lock"
-// (returned closure). Without this split, callers that hold s.mu when
+// (returned closure). Without this split, callers that hold s.tbl.mu when
 // invoking pauseJobLocked block on the unbuffered robfig/cron c.remove
 // channel send while the scheduler mutex is still held — exactly the
 // lock-order anti-pattern ListAllJobsWithNextRun's godoc warns against.
@@ -45,14 +45,14 @@ func TestPauseJobLocked_ReturnsCronRemoveClosure(t *testing.T) {
 
 	// Active job has entryID != 0 — pauseJobLocked must capture and
 	// hand back a non-nil closure.
-	s.mu.Lock()
-	j := s.jobs[job.ID]
+	s.tblForTest().mu.Lock()
+	j := s.tblForTest().jobs[job.ID]
 	if j.entryID == 0 {
-		s.mu.Unlock()
+		s.tblForTest().mu.Unlock()
 		t.Fatalf("expected non-zero entryID after AddJob; got 0")
 	}
 	cleanup, err := s.pauseJobLocked(j)
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 	if err != nil {
 		t.Fatalf("pauseJobLocked: unexpected err: %v", err)
 	}
@@ -66,15 +66,15 @@ func TestPauseJobLocked_ReturnsCronRemoveClosure(t *testing.T) {
 		t.Errorf("j.entryID = %d; want 0 after pauseJobLocked (cron.Remove deferred to cleanup, but j.entryID must be cleared under lock)", j.entryID)
 	}
 
-	// cleanup runs OUTSIDE s.mu — this is the whole point of the
+	// cleanup runs OUTSIDE s.tbl.mu — this is the whole point of the
 	// refactor. It must not panic, must not block.
 	cleanup()
 
 	// Already-paused: cleanup must still be non-nil (defensive
 	// default) so a defer call at the call site stays safe.
-	s.mu.Lock()
+	s.tblForTest().mu.Lock()
 	cleanup2, err2 := s.pauseJobLocked(j)
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 	if err2 == nil {
 		t.Errorf("pauseJobLocked on already-paused job: expected ErrJobAlreadyPaused, got nil")
 	}
@@ -85,10 +85,10 @@ func TestPauseJobLocked_ReturnsCronRemoveClosure(t *testing.T) {
 
 // TestPauseJobByID_DoesNotHoldMuDuringCronRemove pins the post-Unlock
 // invariant: PauseJobByID drives pauseJobLocked → withJobByID, with the
-// cron.Remove closure scheduled into postCleanup so it fires AFTER s.mu
+// cron.Remove closure scheduled into postCleanup so it fires AFTER s.tbl.mu
 // is released. The test exercises the happy path end-to-end and asserts
 // the visible after-state (Paused=true, NextRun=0) so a regression that
-// pulls cron.Remove back inside s.mu fails here even before any
+// pulls cron.Remove back inside s.tbl.mu fails here even before any
 // timing-based test catches it.
 func TestPauseJobByID_DoesNotHoldMuDuringCronRemove(t *testing.T) {
 	t.Parallel()

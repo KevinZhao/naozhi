@@ -451,11 +451,11 @@ func TestJobRunningGuardReentry(t *testing.T) {
 	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
 
-	g := s.jobInflight("job-x")
+	g := s.gateForTest().jobInflight("job-x")
 	if !g.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS should succeed")
 	}
-	if g2 := s.jobInflight("job-x"); g2 != g {
+	if g2 := s.gateForTest().jobInflight("job-x"); g2 != g {
 		t.Fatal("jobInflight should return the same *runInflight for the same id")
 	}
 	if g.running.CompareAndSwap(false, true) {
@@ -467,8 +467,8 @@ func TestJobRunningGuardReentry(t *testing.T) {
 	}
 	g.running.Store(false)
 
-	s.runningJobs.Delete("job-x")
-	if g3 := s.jobInflight("job-x"); g3 == g {
+	s.gateForTest().runningJobs.Delete("job-x")
+	if g3 := s.gateForTest().jobInflight("job-x"); g3 == g {
 		t.Fatal("guard should be freshly allocated after delete")
 	}
 }
@@ -901,10 +901,10 @@ func TestKnownSessionIDs_AggregatesFromJobs(t *testing.T) {
 	// Inject LastSessionID directly through the Scheduler's internal map —
 	// the public surface to set this is via execute() side-effect, which
 	// requires an actual running router.
-	s.mu.Lock()
-	s.jobs[job1.ID].LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001"
-	s.jobs[job2.ID].LastSessionID = "" // empty must NOT show up
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[job1.ID].LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001"
+	s.tblForTest().jobs[job2.ID].LastSessionID = "" // empty must NOT show up
+	s.tblForTest().mu.Unlock()
 
 	got := s.KnownSessionIDs()
 	if _, ok := got["11111111-aaaa-bbbb-cccc-000000000001"]; !ok {
@@ -993,9 +993,9 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	if err := s.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	s.mu.Lock()
-	s.jobs[job.ID].LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001"
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[job.ID].LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001"
+	s.tblForTest().mu.Unlock()
 
 	// First call populates cache.
 	first := s.KnownSessionIDs()
@@ -1012,9 +1012,9 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 
 	// Mutate LastSessionID *without* invalidating — the cache should
 	// still serve the old snapshot until it expires or is invalidated.
-	s.mu.Lock()
-	s.jobs[job.ID].LastSessionID = "22222222-aaaa-bbbb-cccc-000000000002"
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[job.ID].LastSessionID = "22222222-aaaa-bbbb-cccc-000000000002"
+	s.tblForTest().mu.Unlock()
 
 	cached := s.KnownSessionIDs()
 	if _, ok := cached["11111111-aaaa-bbbb-cccc-000000000001"]; !ok {
@@ -1061,9 +1061,9 @@ func TestLookupKnownSessionID_FastPathWarmsCache(t *testing.T) {
 	if err := s.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	s.mu.Lock()
-	s.jobs[job.ID].LastSessionID = "fastpath-aaaa-bbbb-cccc-000000000001"
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[job.ID].LastSessionID = "fastpath-aaaa-bbbb-cccc-000000000001"
+	s.tblForTest().mu.Unlock()
 
 	// Cold cache assertion guard — invalidate ensures we start from cold
 	// regardless of any AddJob-side cache touches.
@@ -1144,9 +1144,9 @@ func TestLookupKnownSessionID(t *testing.T) {
 		if err := s.AddJob(job); err != nil {
 			t.Fatalf("AddJob: %v", err)
 		}
-		s.mu.Lock()
-		s.jobs[job.ID].LastSessionID = "lookup-aaaa-bbbb-cccc-000000000001"
-		s.mu.Unlock()
+		s.tblForTest().mu.Lock()
+		s.tblForTest().jobs[job.ID].LastSessionID = "lookup-aaaa-bbbb-cccc-000000000001"
+		s.tblForTest().mu.Unlock()
 		s.invalidateKnownSessionsCache()
 
 		if !s.LookupKnownSessionID("lookup-aaaa-bbbb-cccc-000000000001") {
@@ -1194,9 +1194,9 @@ func TestLookupKnownSessionID(t *testing.T) {
 		if err := s.AddJob(job); err != nil {
 			t.Fatalf("AddJob: %v", err)
 		}
-		s.mu.Lock()
-		s.jobs[job.ID].LastSessionID = "agree-aaaa-bbbb-cccc-000000000003"
-		s.mu.Unlock()
+		s.tblForTest().mu.Lock()
+		s.tblForTest().jobs[job.ID].LastSessionID = "agree-aaaa-bbbb-cccc-000000000003"
+		s.tblForTest().mu.Unlock()
 
 		probes := []string{
 			"agree-aaaa-bbbb-cccc-000000000003",   // hit

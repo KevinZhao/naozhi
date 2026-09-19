@@ -23,12 +23,10 @@ package cron
 // under the write lock, a live pointer surviving past RUnlock — is a way for the
 // invariant to be broken from outside the one file that maintains it.
 //
-// MIGRATION, TEMPORARY: jobTable is embedded in Scheduler rather than held as a
-// named field, so s.jobs / s.mu still resolve for the ~560 test lines that reach
-// straight into the registry. That promotion is a scaffold, not the design: the
-// step that migrates those tests onto export_test.go ports also un-embeds this,
-// and only then is the encapsulation above actually enforced rather than merely
-// offered.
+// Scheduler holds this as the named field tbl, not an embedded type: every
+// access reads s.tbl.X, so a writer reaching past the data-only API is visible
+// at the call site and greppable. Tests that need direct registry access go
+// through the tblForTest port in export_test.go — the one explicit back door.
 
 import (
 	"sync"

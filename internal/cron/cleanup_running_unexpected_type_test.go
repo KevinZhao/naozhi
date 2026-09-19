@@ -27,12 +27,12 @@ func TestCleanupRunningJobIfIdle_SweepsUnexpectedType(t *testing.T) {
 	// only production caller is jobInflight which always stores a
 	// *runInflight; a Store of any other shape is the "future
 	// regression" the slog.Error guards against.
-	s.runningJobs.Store(jobID, "not-a-runInflight")
+	s.gateForTest().runningJobs.Store(jobID, "not-a-runInflight")
 
-	if got := s.cleanupRunningJobIfIdle(jobID); !got {
+	if got := s.gateForTest().cleanupRunningJobIfIdle(jobID); !got {
 		t.Fatalf("cleanupRunningJobIfIdle returned false on unexpected-type entry; want true (sweep)")
 	}
-	if _, ok := s.runningJobs.Load(jobID); ok {
+	if _, ok := s.gateForTest().runningJobs.Load(jobID); ok {
 		t.Fatalf("entry remained in map after sweep")
 	}
 }
@@ -51,12 +51,12 @@ func TestCleanupRunningJobIfIdle_SweepsNilInflight(t *testing.T) {
 
 	jobID := mustGenerateID()
 	var nilInf *runInflight
-	s.runningJobs.Store(jobID, nilInf)
+	s.gateForTest().runningJobs.Store(jobID, nilInf)
 
-	if got := s.cleanupRunningJobIfIdle(jobID); !got {
+	if got := s.gateForTest().cleanupRunningJobIfIdle(jobID); !got {
 		t.Fatalf("cleanupRunningJobIfIdle returned false on nil *runInflight entry; want true")
 	}
-	if _, ok := s.runningJobs.Load(jobID); ok {
+	if _, ok := s.gateForTest().runningJobs.Load(jobID); ok {
 		t.Fatalf("entry remained in map after sweep")
 	}
 }

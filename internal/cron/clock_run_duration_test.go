@@ -64,9 +64,9 @@ func TestRunDurationDeterministicUnderClock(t *testing.T) {
 	s.clock = clk
 
 	j := &Job{ID: "job-clock-run", Schedule: "@every 5m", Prompt: "ping"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true /* viaTriggerNow: skip jitter for determinism */)
 

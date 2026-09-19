@@ -13,7 +13,7 @@ import (
 func TestWithJobOpTypes(t *testing.T) {
 	t.Parallel()
 
-	// lockedJobOp returns an error and runs under s.mu; jobSideEffect returns
+	// lockedJobOp returns an error and runs under s.tbl.mu; jobSideEffect returns
 	// nothing and runs lock-free. Assignability from plain closures must hold
 	// (this is how every call site passes its op / cleanup).
 	var op lockedJobOp = func(_ *Job) error { return nil }

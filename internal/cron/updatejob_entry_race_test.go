@@ -10,7 +10,7 @@ import (
 // job has exactly one live robfig entry, across concurrent schedule edits.
 //
 // It failed on 02b33b69 at round 43 of 200: UpdateJob clears j.entryID under
-// s.mu, releases the lock so the robfig Remove/Schedule rendezvous does not park
+// s.tbl.mu, releases the lock so the robfig Remove/Schedule rendezvous does not park
 // registry readers, and re-registers in a second critical section. Two of those
 // interleaved leave the loser's Remove looking at the zero id — a no-op — while
 // both register, so both entries stay live. The job then fires on the union of

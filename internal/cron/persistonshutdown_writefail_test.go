@@ -64,9 +64,9 @@ func TestPersistOnShutdown_DetectsWriteFailure(t *testing.T) {
 		t.Fatalf("second AddJob: %v", err)
 	}
 
-	queuedBefore := s.saveSeq.Load()
+	queuedBefore := s.tblForTest().saveSeq.Load()
 	s.persistOnShutdown()
-	queuedAfter := s.saveSeq.Load()
+	queuedAfter := s.tblForTest().saveSeq.Load()
 	if queuedAfter <= queuedBefore {
 		t.Fatalf("saveSeq did not advance: before=%d after=%d", queuedBefore, queuedAfter)
 	}

@@ -64,9 +64,9 @@ func TestSpawnCtxCancelsWhenStopCtxCancels(t *testing.T) {
 	s.stopCtx = stopCtx
 
 	j := &Job{ID: "job-spawnctx-stop", Schedule: "@every 5m", Prompt: "ping"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	done := make(chan struct{})
 	go func() { s.executeOpt(j, true); close(done) }()
@@ -102,9 +102,9 @@ func TestSpawnCtxCancelledBeforeSend(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-spawncancel-eager", Schedule: "@every 5m", Prompt: "ping"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true)
 

@@ -89,7 +89,7 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 	succ0 := metrics.CronRunSucceededTotal.Value()
 	df0, ot0 := s.runStore.WriteFailedTotals()
 
-	inflight := s.jobInflight(j.ID)
+	inflight := s.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}

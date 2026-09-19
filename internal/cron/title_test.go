@@ -159,7 +159,7 @@ func TestUpdateJob_PromptLengthGuard(t *testing.T) {
 		t.Fatalf("AddJob seed: %v", err)
 	}
 	var seedID string
-	for id := range s.jobs {
+	for id := range s.tblForTest().jobs {
 		seedID = id
 		break
 	}

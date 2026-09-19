@@ -14,11 +14,11 @@ import (
 // instead of silently running a mutation lock-free (#985).
 type (
 	// lockedJobOp is the in-lock mutation withJobByID(Opt) / withJobByPrefix
-	// run while holding s.mu. It MUST be all-or-nothing: on a non-nil error
+	// run while holding s.tbl.mu. It MUST be all-or-nothing: on a non-nil error
 	// return it must leave *j unmutated (see withJobByIDOpts).
 	lockedJobOp func(j *Job) error
 	// jobSideEffect is an out-of-lock hook (postCleanup / rollbackOnPersistErr).
-	// It runs after s.mu is released (postCleanup) or as the in-lock undo of a
+	// It runs after s.tbl.mu is released (postCleanup) or as the in-lock undo of a
 	// failed persist (rollbackOnPersistErr), and returns nothing.
 	jobSideEffect func(j *Job)
 )
@@ -40,11 +40,11 @@ type withJobByIDOpts struct {
 }
 
 // withJobByID 是 DeleteJobByID / PauseJobByID / ResumeJobByID 的共用执行框架：
-//  1. 持 s.mu.Lock 查 id，缺失返回 ErrJobNotFound 包装错误；
+//  1. 持 s.tbl.mu.Lock 查 id，缺失返回 ErrJobNotFound 包装错误；
 //  2. 锁内调 op(j)，成功后 persistJobsLocked 拿 save 闭包；
-//  3. 释放 s.mu，调 postCleanup（router.Reset 等锁外副作用），再 save() 落盘。
+//  3. 释放 s.tbl.mu，调 postCleanup（router.Reset 等锁外副作用），再 save() 落盘。
 //
-// 返回的 *Job 是锁内 value-copy 的地址而非 s.jobs[id] 活指针，避免调用方在
+// 返回的 *Job 是锁内 value-copy 的地址而非 s.tbl.jobs[id] 活指针，避免调用方在
 // 锁外读到并发 UpdateJob/SetJobPrompt 的 tear (#548)。返回：找不到 →
 // (nil, ErrJobNotFound)；op 失败 → (nil, err)；persist 失败 → (nil, perr)。
 func (s *Scheduler) withJobByID(
@@ -67,12 +67,12 @@ type withJobByIDResult struct {
 }
 
 // lockedJobOp runs lookup + op + persist + optional rollback for withJobByIDOpt
-// entirely under s.mu; withJobByIDOpt is then pure post-unlock control flow.
+// entirely under s.tbl.mu; withJobByIDOpt is then pure post-unlock control flow.
 func (s *Scheduler) lockedJobOp(id string, opts withJobByIDOpts) withJobByIDResult {
 	var r withJobByIDResult
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	j, ok := s.jobs[id]
+	s.tbl.mu.Lock()
+	defer s.tbl.mu.Unlock()
+	j, ok := s.tbl.jobs[id]
 	if !ok {
 		r.perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 		return r
@@ -85,14 +85,14 @@ func (s *Scheduler) lockedJobOp(id string, opts withJobByIDOpts) withJobByIDResu
 	}
 	r.found = true
 	r.save, r.perr = s.persistJobsLocked()
-	// Persist failed after op mutated *j: undo under s.mu before snapshotting
+	// Persist failed after op mutated *j: undo under s.tbl.mu before snapshotting
 	// so disk and memory stay aligned and the caller observes "no change
 	// applied" (#1272).
 	if r.perr != nil && opts.rollbackOnPersistErr != nil {
 		opts.rollbackOnPersistErr(j)
 		r.rolledBack = true
 	}
-	// Value-copy under s.mu so caller and postCleanup read a stable Job even
+	// Value-copy under s.tbl.mu so caller and postCleanup read a stable Job even
 	// if a concurrent UpdateJob / SetJobPrompt mutates *j after unlock (#548).
 	r.snapshot = *j
 	return r
@@ -115,7 +115,7 @@ func (s *Scheduler) withJobByIDOpt(id string, opts withJobByIDOpts) (*Job, error
 	}
 	// postCleanup runs UNCONDITIONALLY — even when persist failed without a
 	// rollback hook. Intentional for DeleteJobByID: deleteJobLocked already
-	// dropped the *Job from s.jobs, so runStore.DeleteJob MUST still run or
+	// dropped the *Job from s.tbl.jobs, so runStore.DeleteJob MUST still run or
 	// runs/<jobID>/ leaks for a job nobody can address again (#1149).
 	if opts.postCleanup != nil {
 		opts.postCleanup(&snapshot)
@@ -134,7 +134,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	// the id back without re-checking that the job still exists.
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
-	// deleteJobLocked snapshots the cron entryID under s.mu; the cron Remove
+	// deleteJobLocked snapshots the cron entryID under s.tbl.mu; the cron Remove
 	// runs in postCleanup after unlock so the unbuffered c.remove send stays
 	// off the write hold (#1810).
 	var removeEntryID cronEntryID
@@ -153,7 +153,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 
 // PauseJobByID pauses a job by exact ID (unscoped, for dashboard use).
 //
-// The cron Remove returned by pauseJobLocked runs in postCleanup, after s.mu
+// The cron Remove returned by pauseJobLocked runs in postCleanup, after s.tbl.mu
 // is released (#537). If persist fails after pauseJobLocked mutated
 // (entryID=0, Paused=true), rollback restores the pre-op tuple and
 // postCleanup is skipped so the cron entry stays alive and the still-active
@@ -171,7 +171,7 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	var prevPaused bool
 	var captured bool
 	op := func(j *Job) error {
-		// Snapshot under s.mu before pauseJobLocked mutates entryID/Paused so
+		// Snapshot under s.tbl.mu before pauseJobLocked mutates entryID/Paused so
 		// rollback restores the exact pre-op view.
 		prevEntryID = j.entryID
 		prevPaused = j.Paused
@@ -205,7 +205,7 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 
 // ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
 //
-// The cron entry is committed in postCleanup, AFTER persist succeeded and s.mu
+// The cron entry is committed in postCleanup, AFTER persist succeeded and s.tbl.mu
 // is released. This inverts the order that made #1226 dangerous: registration
 // used to happen before persist, so a persist failure left a live entry that
 // the rollback had to snapshot, restore around, and remove from outside the

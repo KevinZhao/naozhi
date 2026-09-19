@@ -73,7 +73,7 @@ func TestWithJobByPrefix_CollapsesDeletePauseResume(t *testing.T) {
 		}
 		if !strings.Contains(rest, "lockedJobPrefixOp(") {
 			t.Error("withJobByPrefix must delegate to lockedJobPrefixOp — " +
-				"R249-CR-7 / #951 moved the s.mu critical section into that " +
+				"R249-CR-7 / #951 moved the s.tbl.mu critical section into that " +
 				"named helper; inlining it back undoes the IIFE cleanup.")
 		}
 
@@ -89,7 +89,7 @@ func TestWithJobByPrefix_CollapsesDeletePauseResume(t *testing.T) {
 		}
 		if !strings.Contains(opRest, "findByPrefixLocked(") {
 			t.Error("lockedJobPrefixOp must call findByPrefixLocked under " +
-				"s.mu — moving the lookup back into callers undoes the DRY " +
+				"s.tbl.mu — moving the lookup back into callers undoes the DRY " +
 				"collapse R247-CR-2 / #583 chases.")
 		}
 		if !strings.Contains(opRest, "persistJobsLocked()") {

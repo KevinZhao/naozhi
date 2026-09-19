@@ -50,40 +50,40 @@ func TestUpdateJob_DoubleReregFail_JobMarkedPaused(t *testing.T) {
 	// Simulate the double-failure state: the job has entryID=0 (first
 	// registerJob already failed and cleared it) and Schedule has been
 	// rolled back to an invalid spec (the old schedule was somehow corrupt).
-	// We bypass validateSchedule by writing directly into s.jobs.
-	s.mu.Lock()
-	lj := s.jobs[j.ID]
+	// We bypass validateSchedule by writing directly into s.tbl.jobs.
+	s.tblForTest().mu.Lock()
+	lj := s.tblForTest().jobs[j.ID]
 	if lj == nil {
-		s.mu.Unlock()
+		s.tblForTest().mu.Unlock()
 		t.Fatal("job not found after AddJob")
 	}
 	lj.entryID = 0
 	lj.Paused = false
 	lj.Schedule = "INVALID_FOR_REREG"
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	// Call registerJob directly — this is what the rollback block does.
 	// Expect an error (invalid schedule).
-	s.mu.Lock()
-	j2 := s.jobs[j.ID]
+	s.tblForTest().mu.Lock()
+	j2 := s.tblForTest().jobs[j.ID]
 	if j2 == nil {
-		s.mu.Unlock()
+		s.tblForTest().mu.Unlock()
 		t.Fatal("job vanished")
 	}
 	reErr := s.registerJob(j2)
 	if reErr == nil {
-		s.mu.Unlock()
+		s.tblForTest().mu.Unlock()
 		t.Fatal("registerJob must fail for invalid schedule; precondition for fix is not met")
 	}
 	// R20260607-LOGIC-1: apply the fix under lock, mirroring the production code.
 	j2.Paused = true
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
-	// Verify the job is now Paused in s.jobs.
-	s.mu.RLock()
-	live := s.jobs[j.ID]
+	// Verify the job is now Paused in s.tbl.jobs.
+	s.tblForTest().mu.RLock()
+	live := s.tblForTest().jobs[j.ID]
 	paused := live != nil && live.Paused
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 
 	if !paused {
 		t.Error("R20260607-LOGIC-1: job must be Paused=true after double re-register failure")

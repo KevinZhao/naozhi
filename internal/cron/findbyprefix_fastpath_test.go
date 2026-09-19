@@ -7,7 +7,7 @@ import (
 
 // TestFindByPrefixLocked_FullIDFastPath pins the R246-GO-16 (#705) full-
 // ID fast-path: when the caller supplies a complete 16-char hex job ID,
-// findByPrefixLocked must hit s.jobs directly (O(1) map lookup) instead
+// findByPrefixLocked must hit s.tbl.jobs directly (O(1) map lookup) instead
 // of scanning every entry. The test uses a Scheduler with N>1 jobs in
 // the same chat and asserts the full-ID lookup returns exactly the
 // matching job — equivalent to the scan path's behaviour but observable
@@ -48,9 +48,9 @@ func TestFindByPrefixLocked_FullIDFastPath(t *testing.T) {
 	}
 
 	// Case 1: full ID hit in correct chat scope.
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	got, err := s.findByPrefixLocked(jobA.ID, "p", "c1")
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 	if err != nil {
 		t.Fatalf("full-ID hit: err=%v", err)
 	}
@@ -60,9 +60,9 @@ func TestFindByPrefixLocked_FullIDFastPath(t *testing.T) {
 
 	// Case 2: full ID in WRONG chat scope must return ErrJobNotFound —
 	// regression guard for "fast path leaks foreign job ptr".
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	_, err = s.findByPrefixLocked(jobC.ID, "p", "c1")
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 	if !errors.Is(err, ErrJobNotFound) {
 		t.Fatalf("cross-chat probe: err=%v, want wraps ErrJobNotFound", err)
 	}
@@ -77,9 +77,9 @@ func TestFindByPrefixLocked_FullIDFastPath(t *testing.T) {
 	if short == "" {
 		t.Skip("16-char hex IDs collided in their first 8 chars; skip partial-prefix probe")
 	}
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	got, err = s.findByPrefixLocked(short, "p", "c1")
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 	if err != nil {
 		t.Fatalf("partial-prefix hit: err=%v", err)
 	}
@@ -92,9 +92,9 @@ func TestFindByPrefixLocked_FullIDFastPath(t *testing.T) {
 	// ErrAmbiguousPrefix from the scan path. The fast path's
 	// `len(idPrefix) == 16` gate keeps short prefixes on the scan
 	// side, so this case pins that the tail is unchanged.
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	_, err = s.findByPrefixLocked("", "p", "c1")
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 	if !errors.Is(err, ErrAmbiguousPrefix) {
 		t.Fatalf("empty prefix in 2-job chat: err=%v, want wraps ErrAmbiguousPrefix", err)
 	}
@@ -104,9 +104,9 @@ func TestFindByPrefixLocked_FullIDFastPath(t *testing.T) {
 	// which then returns NotFound). Use a valid-shaped 16-hex string
 	// that is not in the store.
 	const ghostID = "ffffffffffffffff"
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	_, err = s.findByPrefixLocked(ghostID, "p", "c1")
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 	if !errors.Is(err, ErrJobNotFound) {
 		t.Fatalf("ghost full-ID: err=%v, want wraps ErrJobNotFound", err)
 	}

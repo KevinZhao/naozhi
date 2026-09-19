@@ -31,9 +31,9 @@ func TestRegisterJob_TickReportsScheduledTrigger(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 1h", Prompt: "ping"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 	if err := s.registerJob(j); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
@@ -64,17 +64,17 @@ func TestRegisterJob_TickSkipsAPausedJob(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 1h", Prompt: "ping"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 	if err := s.registerJob(j); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	// Pause AFTER registration, the way an operator does: the callback captured
 	// jobID by value and must re-read the live job to see this.
-	s.mu.Lock()
-	s.jobs[jobID].Paused = true
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID].Paused = true
+	s.tblForTest().mu.Unlock()
 
 	s.cron.Entry(j.entryID).Job.Run()
 
@@ -92,17 +92,17 @@ func TestRegisterJob_TickSkipsADeletedJob(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 1h", Prompt: "ping"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 	if err := s.registerJob(j); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	entry := s.cron.Entry(j.entryID)
 
-	s.mu.Lock()
-	delete(s.jobs, jobID)
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	delete(s.tblForTest().jobs, jobID)
+	s.tblForTest().mu.Unlock()
 
 	entry.Job.Run()
 

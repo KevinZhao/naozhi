@@ -9,15 +9,15 @@ import (
 
 // TestRecordTerminalResult_PanicReleasesLock pins R20260604-GO-001: when the
 // in-lock persist path panics (here via an injected marshalJobs stub that
-// panics), recordTerminalResult must NOT leave s.mu held. robfig's Recover
+// panics), recordTerminalResult must NOT leave s.tbl.mu held. robfig's Recover
 // wrapper only catches the panic above this frame, so a hand-written Unlock
 // that the panic skips would deadlock every subsequent tick. The single
-// `defer s.mu.Unlock()` guarantees release on the panic path.
+// `defer s.tbl.mu.Unlock()` guarantees release on the panic path.
 //
 // Test plan:
 //   - Add a job (real marshaler), then install a marshalJobs stub that panics.
 //   - Call recordTerminalResult and recover the propagated panic.
-//   - Assert s.mu is immediately re-acquirable from another goroutine within a
+//   - Assert s.tbl.mu is immediately re-acquirable from another goroutine within a
 //     short deadline; a held lock would block forever and fail the deadline.
 func TestRecordTerminalResult_PanicReleasesLock(t *testing.T) {
 	t.Parallel()
@@ -57,14 +57,14 @@ func TestRecordTerminalResult_PanicReleasesLock(t *testing.T) {
 	}()
 
 	// Restore a sane marshaler so the lock-acquisition probe's own persist (if
-	// any) does not re-panic; the probe below only needs s.mu, not persist.
+	// any) does not re-panic; the probe below only needs s.tbl.mu, not persist.
 	s.marshalJobs.Store(&defaultMarshalJobs)
 
 	locked := make(chan struct{})
 	go func() {
-		s.mu.Lock()
+		s.tblForTest().mu.Lock()
 		//lint:ignore SA2001 intentional empty critical section: probes that the lock is acquirable
-		s.mu.Unlock()
+		s.tblForTest().mu.Unlock()
 		close(locked)
 	}()
 
@@ -72,7 +72,7 @@ func TestRecordTerminalResult_PanicReleasesLock(t *testing.T) {
 	case <-locked:
 		// Lock was free — the defer released it across the panic.
 	case <-time.After(2 * time.Second):
-		t.Fatal("s.mu still held after recordTerminalResult panic — deadlock (R20260604-GO-001 regression)")
+		t.Fatal("s.tbl.mu still held after recordTerminalResult panic — deadlock (R20260604-GO-001 regression)")
 	}
 
 	// Sanity: scheduler still functions after recovery.

@@ -68,11 +68,11 @@ func TestFinishRunResultBytesIsStoredNotRaw(t *testing.T) {
 				Schedule: "@every 5m",
 				Prompt:   "ping",
 			}
-			sched.mu.Lock()
-			sched.jobs[j.ID] = j
-			sched.mu.Unlock()
+			sched.tblForTest().mu.Lock()
+			sched.tblForTest().jobs[j.ID] = j
+			sched.tblForTest().mu.Unlock()
 
-			inflight := sched.jobInflight(j.ID)
+			inflight := sched.gateForTest().jobInflight(j.ID)
 			if !inflight.running.CompareAndSwap(false, true) {
 				t.Fatal("initial CAS must succeed")
 			}

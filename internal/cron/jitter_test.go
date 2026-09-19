@@ -169,12 +169,12 @@ func TestExecuteOpt_TriggerNowSkipsJitter(t *testing.T) {
 		Prompt:   "hello",
 	}
 	// R20260527122801-CR-8 (#1322): executeOpt now post-CAS rechecks
-	// s.jobs[j.ID] to close the dispatch→CAS race window. Insert the job
+	// s.tbl.jobs[j.ID] to close the dispatch→CAS race window. Insert the job
 	// into the map so the recheck sees it as live; this test focuses on
 	// jitter-skip behaviour, not the registry lifecycle.
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
@@ -254,7 +254,7 @@ func TestExecuteOpt_JitterPausedReCheck_SourceAnchor(t *testing.T) {
 	// 分支，整段 jitter 等待无论走哪条路径都在 else 的 `}` 之前结束。
 	// `[^}]*?` 限定不能再跨越任何 `}`——如果将 paused check 挪到外层
 	// scope 之外（额外 `}`），本断言立即失败。
-	rePausedRead := regexp.MustCompile(`(?s)applyJitter\([^)]*\)\s*\}[^}]*?cur,\s*stillRegistered\s*:=\s*s\.jobs\[[^]]+\][^}]*?paused\s*:=\s*stillRegistered\s*&&\s*cur\.Paused`)
+	rePausedRead := regexp.MustCompile(`(?s)applyJitter\([^)]*\)\s*\}[^}]*?cur,\s*stillRegistered\s*:=\s*s\.tbl\.jobs\[[^]]+\][^}]*?paused\s*:=\s*stillRegistered\s*&&\s*cur\.Paused`)
 	if !rePausedRead.MatchString(body) {
 		t.Error("scheduler_run.go jitter block 不再 re-check cur.Paused (R246-GO-7 防退化失守)")
 	}

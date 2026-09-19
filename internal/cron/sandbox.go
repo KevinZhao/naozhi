@@ -291,8 +291,8 @@ func (s *Scheduler) enqueueSandboxTransportAttention(a sandboxExecArgs, runtimeS
 	// A concurrent DeleteJobByID may already have cleared this job's attention
 	// queue while this goroutine was blocked on the severed stream; writing now
 	// would leave a phantom queue card whose replay ErrJobNotFound's. Re-check
-	// s.jobs[id] (mirrors recordTerminalResult) and skip if the job is gone.
-	if !s.exists(a.snap.jobID) {
+	// s.tbl.jobs[id] (mirrors recordTerminalResult) and skip if the job is gone.
+	if !s.tbl.exists(a.snap.jobID) {
 		a.lg.Info("cron sandbox: transport-attention skipped — job deleted mid-flight (R20260614-ARCH-1)",
 			"job_id", a.snap.jobID, "run_id", a.runID)
 		return

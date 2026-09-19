@@ -23,9 +23,9 @@ func TestP1_FinishRunPersistsCronRun(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	runID := mustGenerateRunID()
 	startedAt := time.Now().Add(-5 * time.Second)
@@ -68,9 +68,9 @@ func TestP1_FinishRunSkipPersistDoesNotWriteHistory(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	runID := mustGenerateRunID()
 	s.finishRun(finishArgs{
@@ -99,9 +99,9 @@ func TestP1_FinishRunSanitisationConsistency(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	// Errors with absolute paths trigger redactPathsInCronError.
 	rawErr := "session error: open /etc/secret-config: permission denied"
@@ -116,9 +116,9 @@ func TestP1_FinishRunSanitisationConsistency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRun: %v", err)
 	}
-	s.mu.RLock()
-	jobLastErr := s.jobs[jobID].LastError
-	s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	jobLastErr := s.tblForTest().jobs[jobID].LastError
+	s.tblForTest().mu.RUnlock()
 
 	if got.ErrorMsg != jobLastErr {
 		t.Errorf("CronRun.ErrorMsg %q diverges from Job.LastError %q", got.ErrorMsg, jobLastErr)
@@ -140,9 +140,9 @@ func TestP1_DeleteJobByIDRemovesRunsSubtree(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	// Append one run so the subtree exists.
 	s.finishRun(finishArgs{
@@ -173,9 +173,9 @@ func TestP1_StartTrimAllReclaimsStaleRuns(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	// Append 3 runs, then push their mtimes to 60 days ago.
 	old := time.Now().Add(-60 * 24 * time.Hour)
@@ -217,9 +217,9 @@ func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	// Disable auto-trim so all 5 entries persist regardless of clock skew.
 	s.runStore.enableTrimGC = false
@@ -270,9 +270,9 @@ func TestP1_DisabledStoreNoOps(t *testing.T) {
 	}
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	// Should not panic.
 	s.finishRun(finishArgs{
@@ -303,9 +303,9 @@ func TestP1_ConcurrentFinishRunSerialised(t *testing.T) {
 	s.runStore.enableTrimGC = false
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[jobID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID] = j
+	s.tblForTest().mu.Unlock()
 
 	const N = 30
 	var wg sync.WaitGroup

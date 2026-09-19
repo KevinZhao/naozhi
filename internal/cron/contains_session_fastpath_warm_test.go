@@ -31,9 +31,9 @@ func TestContainsSessionID_FastPathWarmsCache(t *testing.T) {
 	}
 
 	const lastSessionID = "fastpath-warm-aaaa-bbbb-cccc-000000000001"
-	s.mu.Lock()
-	s.jobs[job.ID].LastSessionID = lastSessionID
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[job.ID].LastSessionID = lastSessionID
+	s.tblForTest().mu.Unlock()
 
 	// Cold the cache so the probe takes the fast path (not a warm lookupFresh).
 	s.invalidateKnownSessionsCache()

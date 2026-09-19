@@ -7,10 +7,10 @@ import (
 
 // TestDeleteJobLocked_ReturnsCronEntryID pins R20260605B-CORR-6 (#1810):
 // deleteJobLocked must split its responsibilities into "in-memory mutation
-// under lock" (drop from s.jobs, zero j.entryID) and "cron.Remove outside
-// lock" (the returned entryID, removed by the caller after s.mu is released).
+// under lock" (drop from s.tbl.jobs, zero j.entryID) and "cron.Remove outside
+// lock" (the returned entryID, removed by the caller after s.tbl.mu is released).
 // Before this split deleteJobLocked called s.cron.Remove while the caller
-// held s.mu — sending on robfig/cron's unbuffered c.remove channel under the
+// held s.tbl.mu — sending on robfig/cron's unbuffered c.remove channel under the
 // write lock, the exact anti-pattern pauseJobLocked / UpdateJob already
 // hoist their Remove for (and resume now defers its whole commit past the
 // lock via commitAndApplyCronEntry).
@@ -38,16 +38,16 @@ func TestDeleteJobLocked_ReturnsCronEntryID(t *testing.T) {
 		t.Fatalf("AddJob: %v", err)
 	}
 
-	s.mu.Lock()
-	j := s.jobs[job.ID]
+	s.tblForTest().mu.Lock()
+	j := s.tblForTest().jobs[job.ID]
 	if j == nil || j.entryID == 0 {
-		s.mu.Unlock()
+		s.tblForTest().mu.Unlock()
 		t.Fatalf("expected a registered job with non-zero entryID after AddJob")
 	}
 	want := j.entryID
 	removeEntryID := s.deleteJobLocked(j)
 	zeroed := j.entryID
-	s.mu.Unlock()
+	s.tblForTest().mu.Unlock()
 
 	if removeEntryID != want {
 		t.Errorf("deleteJobLocked returned entryID %d; want the captured %d", removeEntryID, want)
@@ -62,8 +62,8 @@ func TestDeleteJobLocked_ReturnsCronEntryID(t *testing.T) {
 
 // TestDeleteJobByID_DoesNotHoldMuDuringCronRemove pins the post-Unlock
 // invariant end-to-end: DeleteJobByID routes deleteJobLocked's captured
-// entryID through deleteJobPostCleanup, which runs s.cron.Remove AFTER s.mu
-// is released. A regression that pulls cron.Remove back under s.mu (or drops
+// entryID through deleteJobPostCleanup, which runs s.cron.Remove AFTER s.tbl.mu
+// is released. A regression that pulls cron.Remove back under s.tbl.mu (or drops
 // it entirely) fails here: the job must be gone from the list and its cron
 // entry must no longer tick.
 func TestDeleteJobByID_DoesNotHoldMuDuringCronRemove(t *testing.T) {
@@ -83,9 +83,9 @@ func TestDeleteJobByID_DoesNotHoldMuDuringCronRemove(t *testing.T) {
 	}
 
 	// Capture the entryID before delete so we can assert it left cron.
-	s.mu.RLock()
-	entryID := s.jobs[job.ID].entryID
-	s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	entryID := s.tblForTest().jobs[job.ID].entryID
+	s.tblForTest().mu.RUnlock()
 	if entryID == 0 {
 		t.Fatalf("expected non-zero entryID after AddJob")
 	}
@@ -122,10 +122,10 @@ func TestDeleteJobByID_DoesNotHoldMuDuringCronRemove(t *testing.T) {
 		t.Fatalf("cron entry %d still present after DeleteJobByID; cron.Remove never fired", entryID)
 	}
 	// And the job must be gone from the scheduler.
-	s.mu.RLock()
-	_, present := s.jobs[job.ID]
-	s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	_, present := s.tblForTest().jobs[job.ID]
+	s.tblForTest().mu.RUnlock()
 	if present {
-		t.Errorf("job %s still in s.jobs after DeleteJobByID", job.ID)
+		t.Errorf("job %s still in s.tbl.jobs after DeleteJobByID", job.ID)
 	}
 }

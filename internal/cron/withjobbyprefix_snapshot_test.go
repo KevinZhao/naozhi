@@ -9,11 +9,11 @@ import (
 // TestWithJobByPrefix_ReturnsSnapshot pins R250531-CR-2: withJobByPrefix must
 // return a value-copy snapshot of the Job (like withJobByIDOpt's "snapshot =
 // *j" pattern from R242-GO-3/#548) rather than the live *Job pointer from
-// s.jobs. Without the copy, a concurrent UpdateJob or SetJobPrompt can race
+// s.tbl.jobs. Without the copy, a concurrent UpdateJob or SetJobPrompt can race
 // on the string fields of the returned *Job while the caller reads them.
 //
 // This test verifies the structural invariant: the address of the returned Job
-// must not equal the address of the live entry in s.jobs, proving the caller
+// must not equal the address of the live entry in s.tbl.jobs, proving the caller
 // holds a stable copy, not a shared pointer.
 func TestWithJobByPrefix_ReturnsSnapshot(t *testing.T) {
 	t.Parallel()
@@ -51,12 +51,12 @@ func TestWithJobByPrefix_ReturnsSnapshot(t *testing.T) {
 	}
 
 	// Key invariant: caller gets a copy, not the live pointer.
-	s.mu.RLock()
-	live := s.jobs[j.ID]
-	s.mu.RUnlock()
+	s.tblForTest().mu.RLock()
+	live := s.tblForTest().jobs[j.ID]
+	s.tblForTest().mu.RUnlock()
 
 	if live == nil {
-		t.Fatalf("live job gone from s.jobs after ResumeJob")
+		t.Fatalf("live job gone from s.tbl.jobs after ResumeJob")
 	}
 	if got == live {
 		t.Errorf("withJobByPrefix returned live *Job pointer; want a stable snapshot copy")

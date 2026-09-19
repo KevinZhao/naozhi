@@ -234,7 +234,7 @@ const (
 	// synthetic started→ended pair keeps subscriber timelines gap-free (#1410).
 	ErrClassPausedConcurrent ErrorClass = "paused_concurrent"
 	// ErrClassDeletedConcurrent fires when the post-CAS recheck sees the job
-	// removed from s.jobs in the same cross-lock window (#1410).
+	// removed from s.tbl.jobs in the same cross-lock window (#1410).
 	ErrClassDeletedConcurrent ErrorClass = "deleted_concurrent"
 	// ErrClassPanic is reserved for the future panic-recovery path
 	// (P3, not yet implemented); finishRun does not emit it today.
@@ -325,7 +325,7 @@ type JobRunCounters struct {
 	Canceled  int64 `json:"canceled,omitempty"`
 }
 
-// addRun 把一次终态 run 累加到 counters。调用方持 s.mu.Lock。
+// addRun 把一次终态 run 累加到 counters。调用方持 s.tbl.mu.Lock。
 func (c *JobRunCounters) addRun(state RunState) {
 	c.Total++
 	switch state {

@@ -7,7 +7,7 @@
 //     the first.
 //   - R242-GO-3 (#548): withJobByID returns a value-copy *Job. A caller
 //     that mutates the returned pointer's fields must NOT influence the
-//     scheduler's in-memory state (the live *Job in s.jobs).
+//     scheduler's in-memory state (the live *Job in s.tbl.jobs).
 //
 // Both checks are race-free under -race because they exercise the same
 // public surface the dashboard does: NewScheduler → AddJob → public read
@@ -195,11 +195,11 @@ func TestListAllJobsWithNextRun_NextRunByEntryID(t *testing.T) {
 }
 
 // TestNextRun_LockOrderAndResult guards the #1117 lock-order fix: NextRun
-// resolves entryID under s.mu.RLock, releases s.mu, then calls
+// resolves entryID under s.tbl.mu.RLock, releases s.tbl.mu, then calls
 // s.cron.Entry() lock-free. The test asserts the observable result is
 // unchanged (registered job → future NextRun; unregistered/zero-entry job
 // → zero time) and that concurrent NextRun + CRUD is race-clean under -race
-// (a regression that re-took s.mu across cron.Entry would still pass the
+// (a regression that re-took s.tbl.mu across cron.Entry would still pass the
 // value checks but the -race build pins the lock discipline against a
 // future cron.Entry that calls back into scheduler state).
 func TestNextRun_LockOrderAndResult(t *testing.T) {
@@ -238,8 +238,8 @@ func TestNextRun_LockOrderAndResult(t *testing.T) {
 	}
 
 	// Concurrent NextRun while CRUD mutates the scheduler — must not deadlock
-	// or race. AddJob/DeleteJob take s.mu.Lock + cron mutations; NextRun now
-	// reads cron.Entry outside s.mu, so the two no longer contend in an
+	// or race. AddJob/DeleteJob take s.tbl.mu.Lock + cron mutations; NextRun now
+	// reads cron.Entry outside s.tbl.mu, so the two no longer contend in an
 	// inverted order.
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
@@ -316,10 +316,10 @@ func TestLocationMatchesPreviewLocation(t *testing.T) {
 
 // TestWithJobByID_ReturnsValueCopy guards R242-GO-3 (#548). The pointer
 // returned from DeleteJobByID/PauseJobByID/ResumeJobByID must NOT share
-// memory with the live *Job in s.jobs — caller mutations on the returned
+// memory with the live *Job in s.tbl.jobs — caller mutations on the returned
 // pointer must not surface inside the scheduler's locked state.
 //
-// Pause/Resume keep the entry in s.jobs after the call, so we exercise
+// Pause/Resume keep the entry in s.tbl.jobs after the call, so we exercise
 // PauseJobByID and verify a caller-side write to the returned pointer's
 // Title doesn't propagate to a subsequent ListJobs read.
 func TestWithJobByID_ReturnsValueCopy(t *testing.T) {
@@ -350,7 +350,7 @@ func TestWithJobByID_ReturnsValueCopy(t *testing.T) {
 		t.Fatalf("PauseJobByID: %v", err)
 	}
 	// Mutate the returned pointer — value-copy semantics mean the live
-	// *Job in s.jobs must still report the original Title.
+	// *Job in s.tbl.jobs must still report the original Title.
 	got.Title = "tampered-by-caller"
 
 	live := s.ListJobs("feishu", "chat")

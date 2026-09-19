@@ -9,12 +9,12 @@ import (
 )
 
 // executeIfNotDeletedOrPaused is the TriggerNow dispatch entry: snapshot the
-// freshest *Job under s.mu.RLock, then — only if still present and not
+// freshest *Job under s.tbl.mu.RLock, then — only if still present and not
 // paused — release the lock and call executeOpt(cur, true). Deleted or paused
 // jobs surface as a Debug-log skip with no run record.
 //
-// LOCK: caller MUST NOT hold s.mu; the snapshot → release → executeOpt split
-// keeps executeOpt's long-running send/notify pipeline off s.mu. TriggerNow's
+// LOCK: caller MUST NOT hold s.tbl.mu; the snapshot → release → executeOpt split
+// keeps executeOpt's long-running send/notify pipeline off s.tbl.mu. TriggerNow's
 // goroutine bypasses robfig/cron's Recover wrapper, so recover here (#801);
 // the scheduled tick routes through executeJobIDIfLive directly to avoid
 // double-recovering.
@@ -44,10 +44,10 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 	// escape this critical section. That is the one registry escape hatch left in
 	// production, and closing it means giving executeOpt a snapshot instead — a
 	// change to the run pipeline, not to the registry.
-	s.mu.RLock()
-	cur, ok := s.jobs[jobID]
+	s.tbl.mu.RLock()
+	cur, ok := s.tbl.jobs[jobID]
 	paused := ok && cur.Paused
-	s.mu.RUnlock()
+	s.tbl.mu.RUnlock()
 	// slog.With is built lazily (skip path only) to avoid ~500 wasted
 	// allocs/sec on the hot live-job path.
 	if !ok || paused {
@@ -69,7 +69,7 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 // the first hit. Empty SessionIDs (run started but session not yet minted)
 // and non-running snapshots are skipped before fn sees them.
 func (s *Scheduler) rangeRunningSessionIDs(fn func(sessionID string) bool) {
-	s.rangeInflight(func(inf *runInflight) bool {
+	s.gate.rangeInflight(func(inf *runInflight) bool {
 		view, running := inf.snapshot()
 		if !running || view.SessionID == "" {
 			return true

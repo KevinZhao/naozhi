@@ -57,9 +57,9 @@ func TestCronEntryGone_LiveEntryIsPresent(t *testing.T) {
 		t.Fatalf("AddJob: %v", err)
 	}
 
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	entryID := j.entryID
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 	if entryID == 0 {
 		t.Fatalf("AddJob did not assign a non-zero entryID")
 	}

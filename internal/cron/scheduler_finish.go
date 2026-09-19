@@ -1,8 +1,8 @@
 // scheduler_finish.go: terminal hooks for every cron execution path
 // (write side) plus run-history queries the dashboard reads (read side).
 // Keeping readers and writers together means a CronRun schema change moves
-// both at once. Methods stay on *Scheduler so the s.mu / s.jobs / s.runStore /
-// s.runningJobs fields remain accessible without exporting.
+// both at once. Methods stay on *Scheduler so the s.tbl.mu / s.tbl.jobs / s.runStore /
+// s.gate.runningJobs fields remain accessible without exporting.
 
 package cron
 
@@ -48,7 +48,7 @@ var _ RunHistoryReader = (*Scheduler)(nil)
 // the job is not currently executing. Used by the dashboard list API to
 // show "running 12s" badges.
 func (s *Scheduler) CurrentRun(jobID string) (RunInflightView, bool) {
-	inf, ok := s.peek(jobID)
+	inf, ok := s.gate.peek(jobID)
 	if !ok {
 		return runInflightView{}, false
 	}
@@ -90,7 +90,7 @@ func (s *Scheduler) Run(jobID, runID string) (*CronRun, error) {
 // Every package-internal access to the runStore goes through a *Scheduler
 // method in this file, so the storage type's surface is reachable from exactly
 // one file. Each wrapper applies the nil/enabled guard and forwards verbatim,
-// leaving the runStore's own lock discipline (s.mu > jobLock > entry.mu)
+// leaving the runStore's own lock discipline (s.tbl.mu > jobLock > entry.mu)
 // untouched. TestNoDirectRunStoreAccess pins the invariant.
 
 // runStoreEnabled reports whether run-history persistence is live: a non-nil
@@ -101,13 +101,13 @@ func (s *Scheduler) runStoreEnabled() bool {
 	return s != nil && s.runStore.enabled()
 }
 
-// jobStillExists reports whether jobID is still present in s.jobs under a
-// short s.mu read lock. finishRun uses it to re-check job existence between
-// recordTerminalResult (which released s.mu) and the runs/<jobID>/ disk write,
+// jobStillExists reports whether jobID is still present in s.tbl.jobs under a
+// short s.tbl.mu read lock. finishRun uses it to re-check job existence between
+// recordTerminalResult (which released s.tbl.mu) and the runs/<jobID>/ disk write,
 // so a concurrent DeleteJobByID does not get its runs subtree resurrected by
 // appendRun's ensureJobDir (#2058).
 func (s *Scheduler) jobStillExists(jobID string) bool {
-	return s.exists(jobID)
+	return s.tbl.exists(jobID)
 }
 
 // appendRun persists one CronRun via the runStore. No-op when persistence is
@@ -142,7 +142,7 @@ func (s *Scheduler) trimAllRuns(ctx context.Context, now time.Time) {
 
 // deleteJobRuns removes jobID's entire runs/ subtree and reclaims its jobLock.
 // No-op when persistence is disabled. Called from deleteJobPostCleanup outside
-// s.mu; runStore.DeleteJob acquires the per-job jobLock internally.
+// s.tbl.mu; runStore.DeleteJob acquires the per-job jobLock internally.
 func (s *Scheduler) deleteJobRuns(jobID string) {
 	if !s.runStoreEnabled() {
 		return
@@ -231,7 +231,7 @@ type finishArgs struct {
 //   - per-state metrics increment (CronRun*Total)
 //   - persistent state write via recordTerminalResult (success / non-canceled error)
 //   - cron_run_ended WS broadcast
-//   - JobRunCounters bump (under s.mu, alongside recordTerminalResult)
+//   - JobRunCounters bump (under s.tbl.mu, alongside recordTerminalResult)
 //
 // Adding a new error class is one mapping plus one finishArgs literal at the
 // call site.
@@ -299,7 +299,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// 反方向结构上不可能。a.prompt 在此再过一次 SanitizeForLog（#1094）：旧
 	// cron_jobs.json 可能带 C0/C1/bidi 的 legacy Prompt。
 	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
-	// #2058 / #2479: recordTerminalResult released s.mu before returning, and
+	// #2058 / #2479: recordTerminalResult released s.tbl.mu before returning, and
 	// Append's dir create + write run outside jobLock, so a concurrent
 	// DeleteJobByID could resurrect an orphaned runs/<jobID>/. Double check:
 	// (1) pre-write jobStillExists skips the write; (2) post-write re-check
@@ -353,7 +353,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// concurrently with cron_run_ended observes CurrentRun(jobID) == ok:false.
 	// The finalizer is per-run stack-local: the executeOpt defer fires second as
 	// a no-op and can never reset a racing run-B's freshly-installed metadata.
-	// Broadcast last so hub locks aren't held while we hold s.mu.
+	// Broadcast last so hub locks aren't held while we hold s.tbl.mu.
 	a.finalizer.finalize()
 
 	s.emitRunEnded(RunEndedEvent{
@@ -374,7 +374,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 // sanitiseRunResult applies the same rune truncation + secret redaction +
 // SanitizeForLog pipeline that recordTerminalResult uses, factored out so the
 // skipPersist path of finishRun reaches byte-identical output without touching
-// s.mu. SanitizeForLog's byte cap is extended by len(truncatedSuffix) so a
+// s.tbl.mu. SanitizeForLog's byte cap is extended by len(truncatedSuffix) so a
 // just-appended "…[truncated]" suffix is not byte-clipped.
 func sanitiseRunResult(s string) string {
 	s = truncateWithSuffix(s, maxStoredResultRunes)
@@ -455,7 +455,7 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 // exactly one place; capture (Job.snapshotResultState) and rollback (restore)
 // both route through it without changing the on-disk JSON shape (#764).
 //
-// restore re-applies the captured values to j; caller MUST hold s.mu.
+// restore re-applies the captured values to j; caller MUST hold s.tbl.mu.
 type JobState struct {
 	LastRunAt      time.Time
 	LastResult     string
@@ -475,7 +475,7 @@ func (p JobState) restore(j *Job) {
 }
 
 // snapshotResultState captures the runtime-mutable terminal-result state into
-// a JobState. Caller must hold s.mu. Paired with restore so adding a
+// a JobState. Caller must hold s.tbl.mu. Paired with restore so adding a
 // runtime-state field is a two-site edit rather than a hunt across mutation
 // paths.
 func (j *Job) snapshotResultState() JobState {
@@ -516,7 +516,7 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
 
 	// The critical section runs under a single deferred Unlock inside an IIFE
-	// so any exit path (incl. panic) releases s.mu. Only the Job field mutation
+	// so any exit path (incl. panic) releases s.tbl.mu. Only the Job field mutation
 	// and a detached value-copy snapshot happen under the lock; json.Marshal
 	// runs in persistSnapshot OFF the lock so a large encode does not serialise
 	// the dashboard read path on every tick (#1923).
@@ -528,9 +528,9 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		prev           JobState
 	)
 	func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if _, exists := s.jobs[j.ID]; !exists {
+		s.tbl.mu.Lock()
+		defer s.tbl.mu.Unlock()
+		if _, exists := s.tbl.jobs[j.ID]; !exists {
 			return
 		}
 		prev = j.snapshotResultState()
@@ -555,17 +555,17 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		return result, errMsg, false
 	}
 
-	// Marshal OFF the lock (#1923). On failure re-acquire s.mu and roll back the
+	// Marshal OFF the lock (#1923). On failure re-acquire s.tbl.mu and roll back the
 	// in-memory mutation so live reads and the on-disk snapshot stay in sync.
 	// The brief window where the unpersisted mutation is visible is acceptable:
 	// finishRun gates cron_run_ended on this function's ok return.
 	saveFn, perr := s.persistSnapshot(snap)
 	if perr != nil {
-		s.mu.Lock()
-		if _, exists := s.jobs[j.ID]; exists {
+		s.tbl.mu.Lock()
+		if _, exists := s.tbl.jobs[j.ID]; exists {
 			prev.restore(j)
 		}
-		s.mu.Unlock()
+		s.tbl.mu.Unlock()
 		slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
 			"job_id", j.ID, "err", perr)
 		return result, errMsg, false

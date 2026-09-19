@@ -39,24 +39,24 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 		return "", errInvalidAttentionID
 	}
 
-	// stopped is an atomic and stopWithCtx never takes s.mu, so reading it inside
+	// stopped is an atomic and stopWithCtx never takes s.tbl.mu, so reading it inside
 	// this lock hold would order it against nothing. Check it first, then take the
 	// lock for the registry read that actually needs it.
 	if s.stopped.Load() {
 		return "", ErrSchedulerStopped
 	}
-	s.mu.RLock()
-	j, ok := s.jobs[jobID]
+	s.tbl.mu.RLock()
+	j, ok := s.tbl.jobs[jobID]
 	if !ok {
-		s.mu.RUnlock()
+		s.tbl.mu.RUnlock()
 		return "", ErrJobNotFound
 	}
 	if !placementIsSandbox(j.Placement) {
-		s.mu.RUnlock()
+		s.tbl.mu.RUnlock()
 		return "", ErrJobNotSandbox
 	}
 	jobCopy := j // pointer is stable; snapshotJob re-reads under lock below
-	s.mu.RUnlock()
+	s.tbl.mu.RUnlock()
 
 	if s.sandbox == nil {
 		return "", ErrSandboxUnavailable
@@ -155,7 +155,7 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 	// replay. acquire is called directly (not via execAcquireSlot) so an
 	// operator-initiated replay gets a clean 409 instead of a phantom
 	// overlap-skip frame.
-	inflight, won := s.acquire(j.ID)
+	inflight, won := s.gate.acquire(j.ID)
 	if !won {
 		return "", ErrReplayInFlight
 	}

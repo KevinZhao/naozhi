@@ -30,16 +30,16 @@ func TestRunningJobsCleanup_DeleteJobByIDClearsIdle(t *testing.T) {
 	if err := s.AddJob(j); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	// Touch jobInflight so the entry exists in s.runningJobs.
-	_ = s.jobInflight(j.ID)
-	if _, present := s.runningJobs.Load(j.ID); !present {
+	// Touch jobInflight so the entry exists in s.gate.runningJobs.
+	_ = s.gateForTest().jobInflight(j.ID)
+	if _, present := s.gateForTest().runningJobs.Load(j.ID); !present {
 		t.Fatalf("precondition: runningJobs entry should exist after jobInflight touch")
 	}
 
 	if _, err := s.DeleteJobByID(j.ID); err != nil {
 		t.Fatalf("DeleteJobByID: %v", err)
 	}
-	if _, present := s.runningJobs.Load(j.ID); present {
+	if _, present := s.gateForTest().runningJobs.Load(j.ID); present {
 		t.Errorf("runningJobs entry should be cleaned up after DeleteJobByID on idle job")
 	}
 }
@@ -63,15 +63,15 @@ func TestRunningJobsCleanup_DeleteJobPrefixClearsIdle(t *testing.T) {
 	if err := s.AddJob(j); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	_ = s.jobInflight(j.ID)
-	if _, present := s.runningJobs.Load(j.ID); !present {
+	_ = s.gateForTest().jobInflight(j.ID)
+	if _, present := s.gateForTest().runningJobs.Load(j.ID); !present {
 		t.Fatalf("precondition: runningJobs entry should exist")
 	}
 	// DeleteJob takes a prefix — feed the full ID.
 	if _, err := s.DeleteJob(j.ID, "feishu", "Y"); err != nil {
 		t.Fatalf("DeleteJob: %v", err)
 	}
-	if _, present := s.runningJobs.Load(j.ID); present {
+	if _, present := s.gateForTest().runningJobs.Load(j.ID); present {
 		t.Errorf("runningJobs entry should be cleaned up after prefix DeleteJob")
 	}
 }
@@ -96,27 +96,27 @@ func TestRunningJobsCleanup_RetainsBusyEntry(t *testing.T) {
 	if err := s.AddJob(j); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	guard := s.jobInflight(j.ID)
+	guard := s.gateForTest().jobInflight(j.ID)
 	// Simulate "execute() in flight" by holding the CAS gate.
 	if !guard.running.CompareAndSwap(false, true) {
 		t.Fatalf("precondition: guard CAS should succeed on a fresh runInflight")
 	}
 	t.Cleanup(func() { guard.running.Store(false) })
 
-	deleted := s.cleanupRunningJobIfIdle(j.ID)
+	deleted := s.gateForTest().cleanupRunningJobIfIdle(j.ID)
 	if deleted {
 		t.Errorf("cleanupRunningJobIfIdle should NOT delete a busy entry")
 	}
-	if _, present := s.runningJobs.Load(j.ID); !present {
+	if _, present := s.gateForTest().runningJobs.Load(j.ID); !present {
 		t.Errorf("runningJobs entry should remain while busy")
 	}
 
 	// Releasing the gate makes the entry eligible; the next cleanup call wins.
 	guard.running.Store(false)
-	if !s.cleanupRunningJobIfIdle(j.ID) {
+	if !s.gateForTest().cleanupRunningJobIfIdle(j.ID) {
 		t.Errorf("cleanupRunningJobIfIdle should delete after gate is released")
 	}
-	if _, present := s.runningJobs.Load(j.ID); present {
+	if _, present := s.gateForTest().runningJobs.Load(j.ID); present {
 		t.Errorf("runningJobs entry should be deleted after release")
 	}
 }
@@ -133,7 +133,7 @@ func TestRunningJobsCleanup_NoEntryNoOp(t *testing.T) {
 	}
 	defer s.Stop()
 
-	if s.cleanupRunningJobIfIdle("nonexistent-id") {
+	if s.gateForTest().cleanupRunningJobIfIdle("nonexistent-id") {
 		t.Errorf("cleanupRunningJobIfIdle on missing id should return false")
 	}
 }

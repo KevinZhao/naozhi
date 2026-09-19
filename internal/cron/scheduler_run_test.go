@@ -101,7 +101,7 @@ func (r *stubRefreshCountingRouter) GetOrCreate(context.Context, string, AgentOp
 // freshContextPreflightP0's bare closure (#989):
 //   - the zero value (active=false) is a safe no-op — never touches the router;
 //   - an active refresher re-registers the sidebar stub iff the job still
-//     exists in s.jobs at run() time;
+//     exists in s.tbl.jobs at run() time;
 //   - an active refresher for a job deleted between preflight and run() does
 //     NOT re-register (prevents a phantom sidebar row for a gone job).
 func TestStubRefresher(t *testing.T) {
@@ -118,9 +118,9 @@ func TestStubRefresher(t *testing.T) {
 	}
 
 	// Active + job present: re-registers via the router.
-	s.mu.Lock()
-	s.jobs["job-a"] = &Job{ID: "job-a", Schedule: "@every 5m"}
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs["job-a"] = &Job{ID: "job-a", Schedule: "@every 5m"}
+	s.tblForTest().mu.Unlock()
 	active := stubRefresher{s: s, jobID: "job-a", workDir: "/tmp", prompt: "p", active: true}
 	active.run()
 	if router.registers != 1 {
@@ -153,12 +153,12 @@ func TestExecuteJobIDIfLive_SkipLogLabels(t *testing.T) {
 	router := &stubRefreshCountingRouter{}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router})
 
-	// Deleted job: not in s.jobs at all.
+	// Deleted job: not in s.tbl.jobs at all.
 	s.executeJobIDIfLive("missing-job", false, "cron")
 	// Paused job.
-	s.mu.Lock()
-	s.jobs["paused-job"] = &Job{ID: "paused-job", Schedule: "@every 5m", Paused: true}
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs["paused-job"] = &Job{ID: "paused-job", Schedule: "@every 5m", Paused: true}
+	s.tblForTest().mu.Unlock()
 	s.executeJobIDIfLive("paused-job", false, "cron")
 
 	out := buf.String()

@@ -5,7 +5,7 @@ package cron
 // A schedule change cannot be done in one critical section. It has to clear the
 // old entry id, hand the old id to robfig's Remove and the new schedule to its
 // Schedule — both of which rendezvous with the run loop — and only then write
-// the new id back. Holding s.mu across those calls would park every registry
+// the new id back. Holding s.tbl.mu across those calls would park every registry
 // reader (the dashboard's 1 Hz list, each tick's own jobs[id] lookup) behind the
 // run loop, so UpdateJob deliberately releases it in the middle.
 //
@@ -29,12 +29,12 @@ package cron
 // pause, resume, schedule update, delete. That widening is what lets the
 // plan → commit → apply pattern skip re-validation: with all writers excluded
 // for the span, a job cannot be deleted, re-scheduled or paused between the
-// plan taken under s.mu and the apply that writes the entry id back, so the
+// plan taken under s.tbl.mu and the apply that writes the entry id back, so the
 // apply is a blind assignment instead of a re-check-and-rollback dance. The
 // writers are all dashboard/IM edits — a few per hour, nothing to contend for.
 //
-// LOCK ORDER: entryMu → s.mu. Never the reverse. A path that holds s.mu and then
-// wants entryMu has to release s.mu first — and if that feels awkward it is a
+// LOCK ORDER: entryMu → s.tbl.mu. Never the reverse. A path that holds s.tbl.mu and then
+// wants entryMu has to release s.tbl.mu first — and if that feels awkward it is a
 // sign the transaction wants to start here instead.
 //
 // One mutex for all jobs rather than a shard array: schedule changes come from

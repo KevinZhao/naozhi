@@ -34,7 +34,7 @@ func TestStart_MaxJobsCapEnforced(t *testing.T) {
 	s1.Stop()
 
 	// Phase 2: restart with MaxJobs=2. The third persisted entry must be
-	// skipped (logged as over-cap) and len(s.jobs) must clamp at 2.
+	// skipped (logged as over-cap) and len(s.tbl.jobs) must clamp at 2.
 	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 2}, SchedulerDeps{})
 	if err := s2.Start(); err != nil {
 		t.Fatalf("phase 2 Start: %v", err)
@@ -50,7 +50,7 @@ func TestStart_MaxJobsCapEnforced(t *testing.T) {
 // TestStart_MaxJobsCapAllowsExactlyAtCap pins the boundary: when the
 // on-disk count equals the cap, every job loads. The cap is "no MORE
 // than maxJobs", not "strictly less than". Mirrors addJobAcquiringLock's
-// `len(s.jobs) >= s.maxJobs` rejection condition.
+// `len(s.tbl.jobs) >= s.maxJobs` rejection condition.
 func TestStart_MaxJobsCapAllowsExactlyAtCap(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

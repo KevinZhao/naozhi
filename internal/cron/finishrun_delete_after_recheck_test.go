@@ -64,7 +64,7 @@ func TestFinishRun_DeleteAfterRecheckNoOrphanRunsDir(t *testing.T) {
 		_, deleteErr = s.DeleteJobByID(jobID)
 	}
 
-	inflight := s.jobInflight(jobID)
+	inflight := s.gateForTest().jobInflight(jobID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}
@@ -86,7 +86,7 @@ func TestFinishRun_DeleteAfterRecheckNoOrphanRunsDir(t *testing.T) {
 		t.Fatalf("DeleteJobByID inside the window: %v", deleteErr)
 	}
 	if s.jobStillExists(jobID) {
-		t.Fatal("job must be gone from s.jobs after DeleteJobByID")
+		t.Fatal("job must be gone from s.tbl.jobs after DeleteJobByID")
 	}
 	// The delete removed runs/<jobID>/; the write that raced it must have
 	// been undone by the post-write re-check, leaving neither the run record

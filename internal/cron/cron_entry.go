@@ -1,6 +1,6 @@
 package cron
 
-// cron_entry.go — the boundary between the job registry (guarded by s.mu) and
+// cron_entry.go — the boundary between the job registry (guarded by s.tbl.mu) and
 // robfig/cron's run loop.
 //
 // Two robfig calls rendezvous with that run loop:
@@ -11,14 +11,14 @@ package cron
 //     waiting for the answer (cron.go:180-183). A full round trip.
 //
 // Neither can deadlock. run() never takes runningMu, and startJob hands the
-// callback to a fresh goroutine, so nothing reaches s.mu while holding runningMu
-// and s.mu → runningMu cannot close a cycle. The cost is latency, and it lands
+// callback to a fresh goroutine, so nothing reaches s.tbl.mu while holding runningMu
+// and s.tbl.mu → runningMu cannot close a cycle. The cost is latency, and it lands
 // on every reader of the job registry — the dashboard's 1 Hz list, every tick's
-// own jobs[id] lookup — because they queue behind s.mu while it waits on a
+// own jobs[id] lookup — because they queue behind s.tbl.mu while it waits on a
 // goroutine that may be busy dispatching other jobs.
 //
 // The round trip is gone (the parsed schedule is handed in, nothing to read
-// back), and so is the one-way send under s.mu: every post-start writer now
+// back), and so is the one-way send under s.tbl.mu: every post-start writer now
 // plans under the lock, commits off it, and applies the id back under a short
 // re-acquire — with entryMu held around the whole span so no other entry
 // writer can slip into the entryID=0 window (entry_registration.go). Deferring
@@ -45,7 +45,7 @@ type cronEntryPlan struct {
 }
 
 // planCronEntry parses spec and derives the cached period. Pure — no robfig, no
-// locks — so a caller holding s.mu may call it.
+// locks — so a caller holding s.tbl.mu may call it.
 //
 // cronParser is the same grammar robfig would have used: the Cron is built
 // without WithParser, so its parser is robfig's standardParser, which is
@@ -63,14 +63,14 @@ func planCronEntry(jobID, spec string, now time.Time) (cronEntryPlan, error) {
 
 // cronCommitHook runs immediately before the one robfig call that rendezvous
 // with the run loop. Test-only seam: the lock-discipline test installs a hook
-// that proves s.mu is not held by the committing goroutine — the rule this file
+// that proves s.tbl.mu is not held by the committing goroutine — the rule this file
 // exists to make structural, checked by a machine instead of a comment.
 var cronCommitHook func()
 
 // commitCronEntry hands the plan to robfig and returns the entry id. This is the
 // one call that rendezvous with the run loop.
 //
-// MUST NOT run under s.mu. Every production caller holds entryMu instead (see
+// MUST NOT run under s.tbl.mu. Every production caller holds entryMu instead (see
 // entry_registration.go), which is what makes the pattern below safe.
 func (s *Scheduler) commitCronEntry(p cronEntryPlan) cronEntryID {
 	if cronCommitHook != nil {
@@ -83,7 +83,7 @@ func (s *Scheduler) commitCronEntry(p cronEntryPlan) cronEntryID {
 }
 
 // applyCronEntry writes a committed registration onto the job. Pure assignment;
-// the caller holds s.mu.
+// the caller holds s.tbl.mu.
 func applyCronEntry(j *Job, p cronEntryPlan, id cronEntryID) {
 	j.entryID = id
 	j.cachedSched = p.sched
@@ -91,7 +91,7 @@ func applyCronEntry(j *Job, p cronEntryPlan, id cronEntryID) {
 }
 
 // commitAndApplyCronEntry is the out-of-lock half of a registration: commit the
-// plan to robfig, then take s.mu just long enough to write the id back onto the
+// plan to robfig, then take s.tbl.mu just long enough to write the id back onto the
 // live job.
 //
 // The caller holds entryMu across the whole plan → commit → apply span, and
@@ -102,12 +102,12 @@ func applyCronEntry(j *Job, p cronEntryPlan, id cronEntryID) {
 // freshly committed entry must be removed or it ticks for a job nobody can see.
 func (s *Scheduler) commitAndApplyCronEntry(p cronEntryPlan) {
 	id := s.commitCronEntry(p)
-	s.mu.Lock()
-	j, ok := s.jobs[p.jobID]
+	s.tbl.mu.Lock()
+	j, ok := s.tbl.jobs[p.jobID]
 	if ok {
 		applyCronEntry(j, p, id)
 	}
-	s.mu.Unlock()
+	s.tbl.mu.Unlock()
 	if !ok {
 		s.cron.Remove(id)
 	}

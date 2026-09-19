@@ -10,9 +10,9 @@ import (
 // runtime rather than by the test.
 func newTestTable(t *testing.T, jobs ...*Job) *Scheduler {
 	t.Helper()
-	s := &Scheduler{jobTable: newJobTable()}
+	s := &Scheduler{tbl: newJobTable()}
 	for _, j := range jobs {
-		s.jobs[j.ID] = j
+		s.tblForTest().jobs[j.ID] = j
 		s.addToChatIndexLocked(j)
 	}
 	return s
@@ -34,21 +34,21 @@ func TestJobTable_ReadsAgreeWithTheMap(t *testing.T) {
 		job("ccc", "wecom", "chat-2"),
 	)
 
-	if got := s.count(); got != 3 {
+	if got := s.tblForTest().count(); got != 3 {
 		t.Errorf("count = %d, want 3", got)
 	}
-	if got := s.countForChat(chatKeyFor("wecom", "chat-1")); got != 2 {
+	if got := s.tblForTest().countForChat(chatKeyFor("wecom", "chat-1")); got != 2 {
 		t.Errorf("countForChat(chat-1) = %d, want 2 — the cap check would let a third job in", got)
 	}
-	if got := s.countForChat(chatKeyFor("wecom", "chat-2")); got != 1 {
+	if got := s.tblForTest().countForChat(chatKeyFor("wecom", "chat-2")); got != 1 {
 		t.Errorf("countForChat(chat-2) = %d, want 1", got)
 	}
-	if got := s.countForChat(chatKeyFor("wecom", "chat-none")); got != 0 {
+	if got := s.tblForTest().countForChat(chatKeyFor("wecom", "chat-none")); got != 0 {
 		t.Errorf("countForChat(unknown) = %d, want 0", got)
 	}
 
 	// ids must be the map's keys, in order, and must not alias the table.
-	ids := s.ids()
+	ids := s.tblForTest().ids()
 	want := []string{"aaa", "bbb", "ccc"}
 	if len(ids) != len(want) {
 		t.Fatalf("ids = %v, want %v", ids, want)
@@ -59,7 +59,7 @@ func TestJobTable_ReadsAgreeWithTheMap(t *testing.T) {
 		}
 	}
 	ids[0] = "mutated-by-caller"
-	if s.ids()[0] != "aaa" {
+	if s.tblForTest().ids()[0] != "aaa" {
 		t.Error("ids() aliases sortedJobIDs: a caller mutating the result corrupted the table")
 	}
 }
@@ -73,22 +73,22 @@ func TestJobTable_ExistsAndLiveness(t *testing.T) {
 	paused.Paused = true
 	s := newTestTable(t, job("aaa", "wecom", "c"), paused)
 
-	if !s.exists("aaa") || !s.exists("bbb") {
+	if !s.tblForTest().exists("aaa") || !s.tblForTest().exists("bbb") {
 		t.Error("exists false for a registered job")
 	}
-	if s.exists("zzz") {
+	if s.tblForTest().exists("zzz") {
 		t.Error("exists true for an unregistered job")
 	}
 
-	if reg, p := s.liveness("aaa"); !reg || p {
+	if reg, p := s.tblForTest().liveness("aaa"); !reg || p {
 		t.Errorf("liveness(aaa) = (%v, %v), want (true, false)", reg, p)
 	}
-	if reg, p := s.liveness("bbb"); !reg || !p {
+	if reg, p := s.tblForTest().liveness("bbb"); !reg || !p {
 		t.Errorf("liveness(bbb) = (%v, %v), want (true, true)", reg, p)
 	}
 	// Unregistered must not report paused: a caller branching on paused first
 	// would log "paused, skipping" for a job that was deleted.
-	if reg, p := s.liveness("zzz"); reg || p {
+	if reg, p := s.tblForTest().liveness("zzz"); reg || p {
 		t.Errorf("liveness(zzz) = (%v, %v), want (false, false)", reg, p)
 	}
 }
@@ -98,10 +98,10 @@ func TestJobTable_LastSessionID(t *testing.T) {
 	j.LastSessionID = "sess-1"
 	s := newTestTable(t, j)
 
-	if got, ok := s.lastSessionID("aaa"); !ok || got != "sess-1" {
+	if got, ok := s.tblForTest().lastSessionID("aaa"); !ok || got != "sess-1" {
 		t.Errorf("lastSessionID = (%q, %v), want (sess-1, true)", got, ok)
 	}
-	if _, ok := s.lastSessionID("zzz"); ok {
+	if _, ok := s.tblForTest().lastSessionID("zzz"); ok {
 		t.Error("lastSessionID reported ok for an unregistered job")
 	}
 }
@@ -112,7 +112,7 @@ func TestJobTable_LastSessionID(t *testing.T) {
 // Scheduler — a seq assigned under a lock that no longer serialises it against
 // the snapshot it tags would order nothing.
 func TestJobTable_SaveSeqIsMonotonicUnderConcurrency(t *testing.T) {
-	s := &Scheduler{jobTable: newJobTable()}
+	s := &Scheduler{tbl: newJobTable()}
 	const n = 200
 	seen := make([]uint64, n)
 	var wg sync.WaitGroup
@@ -120,7 +120,7 @@ func TestJobTable_SaveSeqIsMonotonicUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			seen[i] = s.nextSaveSeq()
+			seen[i] = s.tblForTest().nextSaveSeq()
 		}(i)
 	}
 	wg.Wait()

@@ -113,18 +113,18 @@ func TestMarshalJobsLocked_OutputUnchangedAcrossCalls(t *testing.T) {
 		}
 	}
 
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	first, err := s.marshalJobsLocked()
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 	if err != nil {
 		t.Fatalf("marshalJobsLocked first: %v", err)
 	}
 	// Run several more marshals; output must be byte-identical because
 	// jobs map is unchanged.
 	for i := 0; i < 4; i++ {
-		s.mu.RLock()
+		s.tblForTest().mu.RLock()
 		got, err := s.marshalJobsLocked()
-		s.mu.RUnlock()
+		s.tblForTest().mu.RUnlock()
 		if err != nil {
 			t.Fatalf("marshalJobsLocked iter %d: %v", i, err)
 		}

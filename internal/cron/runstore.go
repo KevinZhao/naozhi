@@ -27,7 +27,7 @@ import (
 // WriteFileAtomic relies on rename uniqueness. Scheduler.storeMu is NOT shared.
 //
 // Lock hierarchy: Scheduler.s.mu > runStore.jobLock(jobID) > recentCacheEntry.mu.
-// 已持 entry.mu 时禁止再获取 jobLock 或 s.mu（cacheGet 走"释放-重取"模式）。
+// 已持 entry.mu 时禁止再获取 jobLock 或 s.tbl.mu（cacheGet 走"释放-重取"模式）。
 // Errors are surfaced via slog, never returned: cron must not block on history failure.
 type runStore struct {
 	root string

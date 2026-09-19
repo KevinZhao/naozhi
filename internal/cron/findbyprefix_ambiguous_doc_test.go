@@ -31,9 +31,9 @@ func TestFindByPrefixLocked_AmbiguousListsCollidingIDs(t *testing.T) {
 	}
 
 	// Empty prefix matches every job in the chat scope (here: 2) → ambiguous.
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	_, err := s.findByPrefixLocked("", "p", "c1")
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 
 	if !errors.Is(err, ErrAmbiguousPrefix) {
 		t.Fatalf("err=%v, want wraps ErrAmbiguousPrefix", err)

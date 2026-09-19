@@ -25,13 +25,13 @@ func TestOverlapSkip_EmitsPairedStartedEnded(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 
 	j := &Job{ID: "job-overlap", Schedule: "@every 5m", Prompt: "ping", Platform: "feishu", ChatID: "X"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	// Pre-take the inflight gate so executeOpt's CompareAndSwap(false, true)
 	// loses — exactly the state a concurrent in-flight run would leave.
-	inflight := s.jobInflight(j.ID)
+	inflight := s.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("precondition: initial CAS on a fresh inflight gate must succeed")
 	}
@@ -102,18 +102,18 @@ func TestPerJobIDGate_RejectsConcurrentSameJob(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 
 	j := &Job{ID: "job-gate", Schedule: "@every 5m", Prompt: "ping", Platform: "feishu", ChatID: "X"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	// jobGateLock must return the SAME mutex for the same jobID — the gate is
 	// what serialises the load→CAS against cleanup (#1706 precondition).
-	if a, b := s.jobGateLock(j.ID), s.jobGateLock(j.ID); a != b {
+	if a, b := s.gateForTest().jobGateLock(j.ID), s.gateForTest().jobGateLock(j.ID); a != b {
 		t.Fatalf("jobGateLock returned distinct mutexes for the same jobID: %p vs %p", a, b)
 	}
 
 	// Simulate an in-flight run holding the gate.
-	inflight := s.jobInflight(j.ID)
+	inflight := s.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("precondition CAS must succeed")
 	}

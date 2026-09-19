@@ -15,16 +15,16 @@ import (
 func TestResumeJob_RollbackOnPersistFailure(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 	// Seed is Paused=true with no cron entry.
-	s.mu.RLock()
-	j := s.jobs[id]
+	s.tblForTest().mu.RLock()
+	j := s.tblForTest().jobs[id]
 	if j == nil {
-		s.mu.RUnlock()
-		t.Fatalf("job %q missing from s.jobs", id)
+		s.tblForTest().mu.RUnlock()
+		t.Fatalf("job %q missing from s.tbl.jobs", id)
 	}
 	preEntryID := j.entryID
 	preCachedPeriod := j.cachedPeriod
 	prePaused := j.Paused
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 
 	if !prePaused {
 		t.Fatalf("seed precondition violated: Paused=false")
@@ -42,9 +42,9 @@ func TestResumeJob_RollbackOnPersistFailure(t *testing.T) {
 
 	// In-memory state must be rolled back: still paused, entryID cleared,
 	// cachedPeriod restored.
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	got := s.jobs[id]
+	s.tblForTest().mu.RLock()
+	defer s.tblForTest().mu.RUnlock()
+	got := s.tblForTest().jobs[id]
 	if got == nil {
 		t.Fatalf("job %q vanished after rolled-back ResumeJob", id)
 	}
@@ -62,23 +62,23 @@ func TestResumeJob_RollbackOnPersistFailure(t *testing.T) {
 // TestResumeJob_RollbackRemovesCronEntry pins the lock-order safety of
 // R20260531070014-CR-2: the rollback closure captures the freshly-registered
 // entryID and the actual s.cron.Remove is deferred until AFTER
-// withJobByPrefix returns (s.mu released). This test verifies that after
+// withJobByPrefix returns (s.tbl.mu released). This test verifies that after
 // a rolled-back ResumeJob the orphaned cron entry is gone and NextRun returns
 // zero — the scheduler is not left with a live entry for a still-paused job.
 func TestResumeJob_RollbackRemovesCronEntry(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 	// Seed is Paused=true with no cron entry.
-	s.mu.RLock()
-	j := s.jobs[id]
+	s.tblForTest().mu.RLock()
+	j := s.tblForTest().jobs[id]
 	if j == nil {
-		s.mu.RUnlock()
-		t.Fatalf("job %q missing from s.jobs", id)
+		s.tblForTest().mu.RUnlock()
+		t.Fatalf("job %q missing from s.tbl.jobs", id)
 	}
 	if j.entryID != 0 {
-		s.mu.RUnlock()
+		s.tblForTest().mu.RUnlock()
 		t.Fatalf("seed precondition: entryID=%v want 0 (paused job)", j.entryID)
 	}
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 
 	withFailingMarshal(t, s)
 
@@ -89,9 +89,9 @@ func TestResumeJob_RollbackRemovesCronEntry(t *testing.T) {
 
 	// After rollback the in-memory entryID must be cleared back to 0 and
 	// NextRun must return zero (no live cron entry for this job).
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	got := s.jobs[id]
+	s.tblForTest().mu.RLock()
+	defer s.tblForTest().mu.RUnlock()
+	got := s.tblForTest().jobs[id]
 	if got == nil {
 		t.Fatalf("job %q vanished after rolled-back ResumeJob", id)
 	}
@@ -113,14 +113,14 @@ func TestResumeJob_RollbackRemovesCronEntry(t *testing.T) {
 func TestResumeJob_RollbackRestoresCachedSched(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 	// Seed is Paused=true; paused jobs have cachedSched=nil.
-	s.mu.RLock()
-	j := s.jobs[id]
+	s.tblForTest().mu.RLock()
+	j := s.tblForTest().jobs[id]
 	if j == nil {
-		s.mu.RUnlock()
+		s.tblForTest().mu.RUnlock()
 		t.Fatalf("job %q missing", id)
 	}
 	preSched := j.cachedSched // nil for a freshly-seeded paused job
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 
 	withFailingMarshal(t, s)
 
@@ -129,9 +129,9 @@ func TestResumeJob_RollbackRestoresCachedSched(t *testing.T) {
 		t.Fatalf("ResumeJob err = %v, want ErrPersistFailed", err)
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	got := s.jobs[id]
+	s.tblForTest().mu.RLock()
+	defer s.tblForTest().mu.RUnlock()
+	got := s.tblForTest().jobs[id]
 	if got == nil {
 		t.Fatalf("job %q vanished after rolled-back ResumeJob", id)
 	}

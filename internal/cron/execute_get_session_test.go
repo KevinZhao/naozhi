@@ -14,7 +14,7 @@ import (
 // supplied via the scheduler's fakeRouter.getErr.
 func newGetSessionArgs(t *testing.T, s *Scheduler, j *Job) getSessionArgs {
 	t.Helper()
-	inflight := s.jobInflight(j.ID)
+	inflight := s.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}
@@ -50,9 +50,9 @@ func TestExecuteGetSession_CanceledAbortsSkipPersist(t *testing.T) {
 		Telemetry: rec,
 	})
 	j := &Job{ID: "job-getsession-cancel", Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	sess, _, abort := s.executeGetSession(newGetSessionArgs(t, s, j))
 	if !abort {
@@ -88,9 +88,9 @@ func TestExecuteGetSession_SessionErrorAborts(t *testing.T) {
 		Telemetry: rec,
 	})
 	j := &Job{ID: "job-getsession-err", Schedule: "@every 5m"}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	sess, _, abort := s.executeGetSession(newGetSessionArgs(t, s, j))
 	if !abort {

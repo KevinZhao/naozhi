@@ -41,20 +41,20 @@ func TestGateNeverUnderTableLock(t *testing.T) {
 	gateOps := 0
 	gateHook = func() {
 		gateOps++
-		if !s.mu.TryLock() {
+		if !s.tblForTest().mu.TryLock() {
 			t.Error("gate entered with the registry lock held: jobTable.mu and runGate nested")
 			return
 		}
-		s.mu.Unlock()
+		s.tblForTest().mu.Unlock()
 	}
 	t.Cleanup(func() { gateHook = nil })
 
 	// The three production paths that enter the gate, serially.
-	inflight, won := s.acquire(j.ID) // execAcquireSlot / dispatchReplay shape
+	inflight, won := s.gateForTest().acquire(j.ID) // execAcquireSlot / dispatchReplay shape
 	if !won {
 		t.Fatal("acquire lost on an idle job")
 	}
-	if _, again := s.acquire(j.ID); again {
+	if _, again := s.gateForTest().acquire(j.ID); again {
 		t.Fatal("second acquire won while the first still holds the slot")
 	}
 	inflight.running.Store(false)

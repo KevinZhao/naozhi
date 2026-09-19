@@ -200,9 +200,9 @@ func TestRecordTerminalResult_ErrMsgSecretRedacted(t *testing.T) {
 		ChatType: "direct",
 		Paused:   true,
 	}
-	s.mu.Lock()
-	s.jobs[j.ID] = j
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID] = j
+	s.tblForTest().mu.Unlock()
 
 	const rawToken = "sk-ant-api03-abcdef0123456789abcdef"
 	errInput := "session error: header " + rawToken + " rejected"
@@ -215,9 +215,9 @@ func TestRecordTerminalResult_ErrMsgSecretRedacted(t *testing.T) {
 		t.Errorf("recordTerminalResult returned errMsg missing [REDACTED]: %q", gotErrMsg)
 	}
 	// Also assert the persisted Job field is clean.
-	s.mu.RLock()
+	s.tblForTest().mu.RLock()
 	lastErr := j.LastError
-	s.mu.RUnlock()
+	s.tblForTest().mu.RUnlock()
 	if strings.Contains(lastErr, rawToken) {
 		t.Errorf("Job.LastError still contains token after recordTerminalResult: %q", lastErr)
 	}

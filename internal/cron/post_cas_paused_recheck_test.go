@@ -41,9 +41,9 @@ func TestExecuteOpt_PostCASPausedRecheck_EmitsSyntheticSkipped(t *testing.T) {
 	jobID := j.ID
 
 	// Cross-lock race: by the time executeOpt runs, the job is paused.
-	s.mu.Lock()
-	s.jobs[jobID].Paused = true
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[jobID].Paused = true
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true /* viaTriggerNow */)
 
@@ -95,12 +95,12 @@ func TestExecuteOpt_PostCASDeletedRecheck_EmitsSyntheticSkipped(t *testing.T) {
 		t.Fatalf("AddJob: %v", err)
 	}
 
-	// Cross-lock race: caller resolved cur from s.jobs, released RLock,
-	// and a Delete landed before CAS. Emulate by removing the s.jobs
+	// Cross-lock race: caller resolved cur from s.tbl.jobs, released RLock,
+	// and a Delete landed before CAS. Emulate by removing the s.tbl.jobs
 	// entry directly.
-	s.mu.Lock()
-	delete(s.jobs, j.ID)
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	delete(s.tblForTest().jobs, j.ID)
+	s.tblForTest().mu.Unlock()
 
 	s.executeOpt(j, true /* viaTriggerNow */)
 
@@ -121,11 +121,11 @@ func TestExecuteOpt_PostCASDeletedRecheck_EmitsSyntheticSkipped(t *testing.T) {
 
 // TestExecuteOpt_PostCASPausedRecheck_TriggerNow exercises the
 // R20260527122801-CR-8 (#1322) fix: a Pause that lands AFTER the dispatch
-// helper releases s.mu but BEFORE executeOpt's CAS gate must abort the
+// helper releases s.tbl.mu but BEFORE executeOpt's CAS gate must abort the
 // run. Without the post-CAS recheck the TriggerNow path would reach the
 // router.GetOrCreate call and burn a real run on a paused job.
 //
-// Strategy: register a job, then mark it Paused under s.mu (simulating
+// Strategy: register a job, then mark it Paused under s.tbl.mu (simulating
 // the post-RLock-release / pre-CAS race window) before calling executeOpt
 // directly with viaTriggerNow=true. The router stub increments a counter
 // on GetOrCreate; the test asserts the counter stays at zero.
@@ -154,12 +154,12 @@ func TestExecuteOpt_PostCASPausedRecheck_TriggerNow(t *testing.T) {
 	}
 
 	// Simulate the cross-lock race: by the time executeOpt runs, the job
-	// has been paused. Mutate Paused directly under s.mu so we don't
+	// has been paused. Mutate Paused directly under s.tbl.mu so we don't
 	// require a full PauseJobByID dance (which would also tear down the
 	// cron entry and is orthogonal to this test).
-	s.mu.Lock()
-	s.jobs[j.ID].Paused = true
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs[j.ID].Paused = true
+	s.tblForTest().mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
@@ -207,14 +207,14 @@ func TestExecuteOpt_PostCASDeletedRecheck_TriggerNow(t *testing.T) {
 	}
 
 	// Simulate the dispatch-vs-delete race: caller resolved cur from
-	// s.jobs, released RLock, and a Delete landed before CAS. We can't
+	// s.tbl.jobs, released RLock, and a Delete landed before CAS. We can't
 	// call DeleteJobByID because it also runs router.Reset / postCleanup
 	// in ways that aren't on the hot path of this test; mutating the map
 	// directly is the smallest reproduction of the executeOpt-visible
 	// state.
-	s.mu.Lock()
-	delete(s.jobs, j.ID)
-	s.mu.Unlock()
+	s.tblForTest().mu.Lock()
+	delete(s.tblForTest().jobs, j.ID)
+	s.tblForTest().mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
