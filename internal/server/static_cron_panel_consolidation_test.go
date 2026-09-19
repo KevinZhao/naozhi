@@ -73,13 +73,18 @@ func TestDashboardJS_R2_R4_TriggerCooldown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cron_view.js: %v", err)
 	}
-	// The drawer renderer moved to cron_drawer.js (#2715 region 3); the
-	// cooldown pins span both files, so assert on the union.
+	// The drawer renderer moved to cron_drawer.js (#2715 region 3) and the
+	// trigger family to cron_trigger.js (region 4); the cooldown pins span
+	// the three files, so assert on the union.
 	drawerData, err := cronDrawerJS.ReadFile("static/cron_drawer.js")
 	if err != nil {
 		t.Fatalf("read cron_drawer.js: %v", err)
 	}
-	js := string(data) + "\n" + string(drawerData)
+	trigData, err := cronTriggerJS.ReadFile("static/cron_trigger.js")
+	if err != nil {
+		t.Fatalf("read cron_trigger.js: %v", err)
+	}
+	js := string(data) + "\n" + string(drawerData) + "\n" + string(trigData)
 
 	// 1. cronJustTriggered tracker must exist as a module-scoped map.
 	if !strings.Contains(js, "const cronJustTriggered = Object.create(null)") {

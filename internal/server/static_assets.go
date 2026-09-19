@@ -101,6 +101,9 @@ var cronTimelineJS embed.FS
 //go:embed static/cron_drawer.js
 var cronDrawerJS embed.FS
 
+//go:embed static/cron_trigger.js
+var cronTriggerJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -206,6 +209,7 @@ var staticAssets = func() map[string]staticAsset {
 		{"cron_schedule.js", cronScheduleJS, "static/cron_schedule.js", true},
 		{"cron_timeline.js", cronTimelineJS, "static/cron_timeline.js", true},
 		{"cron_drawer.js", cronDrawerJS, "static/cron_drawer.js", true},
+		{"cron_trigger.js", cronTriggerJS, "static/cron_trigger.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},
