@@ -196,9 +196,11 @@ type finishArgs struct {
 	// 污染 Job 快照或 runs/<jobID>/。Metrics + WS broadcast 不受影响——
 	// dashboard 必须能看到 skipped/canceled 帧。
 	skipPersist bool
-	prompt      string
-	workDir     string
-	fresh       bool
+	// keepInflightMarker: see runOutcome.keepInflightMarker (run_ctx.go).
+	keepInflightMarker bool
+	prompt             string
+	workDir            string
+	fresh              bool
 	// endedAt, when non-zero, overrides the s.now() read inside finishRun so
 	// observeSuccessLatency and finishRun share one clock read (step-based
 	// test clocks would otherwise advance an extra tick).
@@ -261,11 +263,16 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// 必须同步可见或同步缺失）。SECURITY: 落盘与 WS 广播只能用 persistedResult /
 	// persistedErrMsg（已 redact + sanitise），绝不用原始 a.result / a.errMsg——
 	// 错误串里的绝对路径会把工作区布局泄漏给所有 dashboard 客户端。
-	// Clear the restart marker for EVERY terminal state, skipPersist included:
-	// the marker's claim is "this run never finished", so any finish invalidates
-	// it. Doing this before the persistence branches means a marshal failure below
-	// cannot leave a marker that resurrects the run as interrupted next boot.
-	s.removeRunInflightMarker(a.runID)
+	// Clear the restart marker for every terminal state, skipPersist included —
+	// EXCEPT the shutdown-cancel finish, whose Send died because this process is
+	// going away while the CLI keeps running behind its shim. There the marker's
+	// claim ("this run never finished") is still true, and it is the next
+	// process's only way to adopt the run instead of losing it (#2712 PR B).
+	// Clearing before the persistence branches means a marshal failure below
+	// cannot leave a marker that resurrects a genuinely finished run next boot.
+	if !a.keepInflightMarker {
+		s.removeRunInflightMarker(a.runID)
+	}
 
 	persistedResult := a.result
 	persistedErrMsg := a.errMsg
