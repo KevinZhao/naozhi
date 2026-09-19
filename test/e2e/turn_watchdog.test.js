@@ -27,7 +27,10 @@ test.beforeEach(({ }, testInfo) => {
 test.describe('掉了终态信号的 turn 自愈', () => {
   /** @type {Awaited<ReturnType<typeof startMockServer>>} */
   let mock;
-  test.beforeAll(async () => { mock = await startMockServer({ ws: true }); });
+  // 首次加载之后的 sessions 响应扣住 3s：自愈（REST reconcile）最快也要
+  // 等到那次响应落地，running 态的断言窗口不再和它赛跑——修 #2777 上线后
+  // 约 1/4 概率的抖动（自愈近乎瞬时，btn-stop 在断言前就被收回了）。
+  test.beforeAll(async () => { mock = await startMockServer({ ws: true, sessionsDelayMs: 3000, sessionsDelayAfterCalls: 1 }); });
   test.afterAll(() => mock.server.close());
 
   test('WS 推 running 后终态丢失，REST reconcile 在一个 poll 周期内收回横幅', async ({ browser }) => {
