@@ -1,3 +1,4 @@
+// anchor-keep: the breaker threshold/backoff constants are the operational contract; behavioural verification would need minutes of wall-clock per case.
 package upstream
 
 import (

@@ -1,3 +1,4 @@
+// anchor-keep: pins the per-RPC ctx choice (appCtx vs connCtx) as a source matrix; each wrong choice is a subtle lifetime bug that only reproduces on reconnect races.
 package upstream
 
 import (

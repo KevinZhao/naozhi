@@ -1,3 +1,4 @@
+// anchor-keep: pins the reaper goroutine wiring (wg.Add before spawn, Done on every exit) — an ordering fact between statements that no black-box test can observe until the leak has already happened.
 package shim
 
 import (

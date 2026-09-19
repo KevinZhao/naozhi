@@ -1,3 +1,4 @@
+// anchor-keep: pins "no return between cgroup move and map insert" — a statement-ordering invariant whose violation leaks a process, observable behaviourally only via host process tables.
 package shim
 
 import (

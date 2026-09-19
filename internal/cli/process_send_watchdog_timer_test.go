@@ -1,3 +1,4 @@
+// anchor-keep: NewTimer-vs-NewTicker is invisible behaviourally (no portable way to count runtime timer-heap entries); the source grep is the only practical check for the per-turn goroutine regression.
 package cli
 
 import (
