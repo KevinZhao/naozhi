@@ -213,6 +213,17 @@ function defaultGitStates() {
  * @param {number} [overrides.sendStatus] - Status code for POST /api/sessions/send.
  * @param {object} [overrides.sessionRuns] - session key → GET /api/sessions/runs payload ({runs, stats}); unknown keys 404 (header runstats stay empty).
  * @param {object[]} [overrides.discovered] - GET /api/discovered payload (default: none).
+ * POST /api/scratch/open always succeeds with a fixed scratch session (the
+ * 追问 drawer's open path); its event polling rides the sessions_events route.
+ * @param {number} [overrides.sessionsDelayMs] - Hold GET /api/sessions responses
+ *   this long. Lets a spec prove an optimistic DOM patch happened locally, by pushing
+ *   the list-refetch repaint (which would mask it) out of the assertion window.
+ * @param {number} [overrides.sessionsDelayAfterCalls] - Apply sessionsDelayMs only
+ *   after this many GET /api/sessions calls have been answered (so the initial page
+ *   load stays fast and only the poll/refetch traffic is held).
+ * @param {object} [overrides.systemUpdate] - GET /api/system/update payload (the
+ *   self-update chip's poll). Default: no route, the endpoint 404s and the chip
+ *   keeps its hidden cold-start default.
  * @param {boolean} [overrides.ws] - If true, accept /ws upgrades with a minimal
  *   WebSocket server (auth → auth_ok, everything else recorded). Default keeps
  *   the historical behavior: no upgrade listener, so the dashboard falls back
@@ -231,6 +242,7 @@ function startMockServer(overrides = {}) {
   const manifest = fs.readFileSync(path.join(STATIC_DIR, 'manifest.json'), 'utf8');
 
   const sessionsData = overrides.sessions || defaultSessions();
+  let sessionsGetCalls = 0;
   const eventsData = overrides.events || defaultEvents();
   const eventsByKey = overrides.eventsByKey || {};
   const eventsTailDelayMs = overrides.eventsTailDelayMs || 0;
@@ -400,8 +412,38 @@ function startMockServer(overrides = {}) {
     }
 
     // Session routes
+    if (pathname === NZ_CONTRACT.API.scratch_open && req.method === 'POST') {
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          scratch_id: 'scr-0001',
+          key: 'dashboard:scratch:2026-01-01-130000-9:myproject',
+          agent_id: 'general',
+          context_turns: 0,
+          context_truncated: false,
+        }));
+      });
+      return;
+    }
+
+    if (pathname === NZ_CONTRACT.API.system_update && req.method === 'GET' && overrides.systemUpdate) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(overrides.systemUpdate));
+      return;
+    }
+
     if (pathname === NZ_CONTRACT.API.sessions && req.method === 'GET') {
       if (!checkAuth()) return;
+      sessionsGetCalls++;
+      if (overrides.sessionsDelayMs && sessionsGetCalls > (overrides.sessionsDelayAfterCalls || 0)) {
+        setTimeout(() => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(sessionsData));
+        }, overrides.sessionsDelayMs);
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(sessionsData));
       return;
