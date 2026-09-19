@@ -220,21 +220,28 @@ jobs:
   # don't touch the dashboard, blocking the merge.
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Playwright + chromium
+      - name: Install Playwright + chromium + webkit
         working-directory: test/e2e
         # npm install (not ci): repo policy gitignores package-lock.json
         # (.gitignore:18), and the suite has a single pinned dep.
         run: |
           npm install
-          npx playwright install --with-deps chromium
+          npx playwright install --with-deps chromium webkit
 
       - name: Run mock-server suite (desktop-chrome)
         working-directory: test/e2e
         run: npx playwright test --project=desktop-chrome
+
+      # #2715 task 7: the iPhone-13 project ran only on developer machines,
+      # so phone-only regressions (visual viewport drawers, voice gestures,
+      # mobile nav) shipped blind. Local baseline: 178 passed / 1.7 min.
+      - name: Run mock-server suite (mobile-safari)
+        working-directory: test/e2e
+        run: npx playwright test --project=mobile-safari
 
       - name: Upload traces on failure
         if: failure()
