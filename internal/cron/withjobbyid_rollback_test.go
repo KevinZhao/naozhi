@@ -67,14 +67,14 @@ func TestPauseJobByID_RollbackOnPersistFailure(t *testing.T) {
 }
 
 // TestResumeJobByID_RollbackOnPersistFailure pins R20260526-GO-001 (#1226):
-// resumeJobLocked → registerJob mutates j.entryID + j.cachedPeriod and then
-// flips j.Paused=false BEFORE persistJobsLocked runs. A persist failure
-// after that op-success path used to leave in-memory state with a live
-// cron entry + Paused=false while disk still showed Paused=true — the
-// next process restart would replay the paused-on-disk view onto the
-// live entry, double-firing the schedule. After the rollback fix,
-// in-memory state matches the un-persisted disk view on every persist
-// failure.
+// resume flips j.Paused=false BEFORE persistJobsLocked runs, so a persist
+// failure must restore the pre-op view or memory and disk disagree — a
+// restart would then replay the paused-on-disk view onto live state and
+// double-fire the schedule. The assertions below (still paused, no entry,
+// cache untouched) are order-independent: they held under the old
+// register-then-persist order via an explicit rollback + out-of-lock Remove,
+// and hold under the current plan/commit/apply order because the entry is
+// simply never committed when persist fails.
 func TestResumeJobByID_RollbackOnPersistFailure(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 	// The seed creates Paused=true with no cron entry, so a persist-fail

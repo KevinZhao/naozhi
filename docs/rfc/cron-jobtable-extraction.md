@@ -214,8 +214,8 @@ v2 之后 owner 定了两件事：#2740（`s.mu` 持锁跨 robfig）**不是外�
 ### 10.1 步 2 拆成 2a / 2b / 2c
 
 - **2a（本次）**：四个字段 + 锁 + `saveSeq` 收进 `jobTable`，**嵌入** `Scheduler`；定义值语义读 API（`exists` / `count` / `countForChat` / `ids` / `liveness` / `lastSessionID`）；把**自己取锁只为一次读**的生产站点转过去；#2741 落地。零测试语义改动。
-- **2b**：74 个测试文件迁到 `export_test.go` 的测试专用口，然后**去掉嵌入**（`jobTable` 变命名字段 `tbl`）—— 封闭性只在这一步才真正被强制，而不是仅被"提供"。两个外部夹逼测试按 §8.2 的口径重新表达。
-- **2c**：写路径 + `entryState`（none / pending / live）+ 把 robfig 的单向发送移出锁（#2740 剩余的 5 处）。`entryState` 从一开始就是 `jobTable` API 的一部分，而不是先在现结构上加一个第三态、再随表重做一遍。
+- **2b → 改序为 2d（在 2c 之后）**：74 个测试文件迁到 `export_test.go` 的测试专用口，然后**去掉嵌入**（`jobTable` 变命名字段 `tbl`）—— 封闭性只在这一步才真正被强制，而不是仅被"提供"。两个外部夹逼测试按 §8.2 的口径重新表达。改序理由：它买的是封闭性强制（hygiene），而 2c 需要的只是行为正确；预迁 63 处插入点是凭猜测付费，让 2c 自己的编译/测试失败精确指出哪些测试建了不可能的状态更便宜。
+- **2c（已完成）**：robfig 单向发送已全部移出 `s.mu` —— 每个 post-start 写者走 plan（锁内，纯）→ commit（锁外）→ apply（短锁）三段，`entryMu` 覆盖**所有** entry 生命周期写者（add / pause / resume / update / delete），把窗口对并发写者互斥掉。`registerJob` 只剩 `Start()` 一个调用者（robfig 未 running，`Schedule` 是 append 不是会合），契约写进其 doc。`entryState` 三态最终**没有做成显式字段**：#2760 证明了中间态必须被处理，但互斥（entryMu）比三态枚举更小且可立即验证 —— "pending" 由"持有 entryMu 的那个写者"这一事实表示，而不是由数据表示。锁纪律的机器断言是 `TestEntryCommitNeverUnderRegistryLock`（`cronCommitHook` + `TryLock`），它是 §8.5 那个 go/analysis 提案的运行时替代。副产品：把 commit 推迟到 persist 之后，让 #1226/#1810 的整套"注册后回滚"机制（entryID 快照、出锁 Remove、rollbackEntryID 交接）失去存在理由并被删除 —— persist 失败时 entry 根本还没注册。
 
 **为什么把 #2740 的剩余部分放到 2c 而不是 2a 之前**（owner 已采纳）：那 5 处每处都嵌在自己的 persist/rollback 顺序里（`AddJob` 的 `rollbackEntryID`、`SetJobPrompt` 的 `pauseRollbackCleanup`、`UpdateJob` 的"恢复 `prevCachedSched` 而非置 nil"）。`AddJob` 尤其危险：job 已进 `s.jobs` 而 `entryID` 仍为 0 时，并发的 `UpdateJob` 会看到 0 → 跳过 `Remove` → 注册第二个 entry → **同一 job 双触发**。关掉它需要"注册中"这个第三态，而那本就该是 `jobTable` 的 API。
 

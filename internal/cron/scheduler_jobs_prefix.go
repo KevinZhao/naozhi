@@ -8,9 +8,6 @@ package cron
 import (
 	"fmt"
 	"strings"
-	"time"
-
-	robfigcron "github.com/robfig/cron/v3"
 )
 
 // withJobByPrefixOpts bundles the optional knobs withJobByPrefix accepts,
@@ -104,6 +101,9 @@ func (s *Scheduler) withJobByPrefix(
 
 // DeleteJob removes a job by ID prefix (scoped to the given chat).
 func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
+	// Entry-lifecycle writer; see DeleteJobByID for why delete holds entryMu.
+	s.entryMu.Lock()
+	defer s.entryMu.Unlock()
 	// deleteJobLocked snapshots the cron entryID under s.mu; postCleanup runs
 	// the cron Remove after unlock (#1810).
 	var removeEntryID cronEntryID
@@ -126,6 +126,9 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 // postCleanup so the cron entry stays alive and the still-active job keeps
 // firing instead of becoming a ghost-paused job on restart (#1272).
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
+	// Entry-lifecycle writer; see PauseJobByID for why pause holds entryMu.
+	s.entryMu.Lock()
+	defer s.entryMu.Unlock()
 	var pauseCleanup func()
 	var prevEntryID cronEntryID
 	var prevPaused bool
@@ -161,53 +164,38 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	})
 }
 
-// ResumeJob resumes a paused job by ID prefix. Same contract as ResumeJobByID
-// (#1226): resumeJobLocked → registerJob mutates entryID/cachedPeriod/
-// cachedSched and flips Paused before persist, so a persist failure rolls the
-// pre-op state back and the orphaned entry is removed AFTER withJobByPrefix
-// returns — a cron Remove under s.mu would deadlock against the cron-tick
-// goroutine that drains c.remove and takes s.mu.RLock.
+// ResumeJob resumes a paused job by ID prefix. Same contract as ResumeJobByID:
+// the cron entry is committed in postCleanup, after persist succeeded and s.mu
+// is released, so a persist failure happens before any entry exists and the
+// rollback is one field write. entryMu fences the Paused=false/entryID=0
+// window against every other entry writer.
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
-	var prevEntryID cronEntryID
-	var prevCachedPeriod time.Duration
-	var prevCachedSched robfigcron.Schedule
-	var prevPaused bool
-	var captured bool
-	// Non-zero only when rollback fired; the cron Remove must happen after
-	// s.mu is released (see godoc).
-	var removeEntryID cronEntryID
+	s.entryMu.Lock()
+	defer s.entryMu.Unlock()
+	var resumePlan *cronEntryPlan
 	op := func(j *Job) error {
-		// Snapshot under s.mu before resumeJobLocked → registerJob mutates
-		// entryID/cachedPeriod/cachedSched so rollback restores the exact view.
-		prevEntryID = j.entryID
-		prevCachedPeriod = j.cachedPeriod
-		prevCachedSched = j.cachedSched
-		prevPaused = j.Paused
-		captured = true
-		return s.resumeJobLocked(j)
+		p, err := s.resumePlanLocked(j)
+		if err != nil {
+			return err
+		}
+		resumePlan = &p
+		return nil
 	}
 	rollback := func(j *Job) {
-		// Only restore if op actually ran and captured the pre-op view.
-		if !captured {
-			return
+		// No entry was committed, so restoring the flag IS the whole rollback.
+		if resumePlan != nil {
+			j.Paused = true
+			resumePlan = nil
 		}
-		// Capture the freshly-registered entryID for removal OUTSIDE s.mu; a
-		// cron Remove here would deadlock.
-		removeEntryID = j.entryID
-		j.entryID = prevEntryID
-		j.cachedPeriod = prevCachedPeriod
-		j.cachedSched = prevCachedSched
-		j.Paused = prevPaused
 	}
-	snap, err := s.withJobByPrefix(idPrefix, plat, chatID, op, nil, withJobByPrefixOpts{
-		rollbackOnPersistErr: rollback,
-	})
-	// Remove the orphaned cron entry now that s.mu is released. Non-zero only
-	// when rollback fired; Remove(0) would be a no-op anyway.
-	if removeEntryID != 0 {
-		s.cron.Remove(removeEntryID)
-	}
-	return snap, err
+	return s.withJobByPrefix(idPrefix, plat, chatID, op,
+		func(_ *Job) {
+			if resumePlan != nil {
+				s.commitAndApplyCronEntry(*resumePlan)
+			}
+		},
+		withJobByPrefixOpts{rollbackOnPersistErr: rollback},
+	)
 }
 
 // findByPrefixLocked finds a job by ID prefix scoped to a specific chat.

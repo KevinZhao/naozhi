@@ -11,8 +11,9 @@ import (
 // lock" (the returned entryID, removed by the caller after s.mu is released).
 // Before this split deleteJobLocked called s.cron.Remove while the caller
 // held s.mu — sending on robfig/cron's unbuffered c.remove channel under the
-// write lock, the exact lock-order anti-pattern pauseJobLocked / resumeJobLocked
-// / UpdateJob already hoist their Remove for.
+// write lock, the exact anti-pattern pauseJobLocked / UpdateJob already
+// hoist their Remove for (and resume now defers its whole commit past the
+// lock via commitAndApplyCronEntry).
 //
 // Contract:
 //

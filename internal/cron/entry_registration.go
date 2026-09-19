@@ -25,6 +25,14 @@ package cron
 // the whole clear → Remove → register → assign span. Readers never touch it, so
 // the latency the release bought is kept.
 //
+// It has since grown from UpdateJob-only to EVERY entry-lifecycle writer — add,
+// pause, resume, schedule update, delete. That widening is what lets the
+// plan → commit → apply pattern skip re-validation: with all writers excluded
+// for the span, a job cannot be deleted, re-scheduled or paused between the
+// plan taken under s.mu and the apply that writes the entry id back, so the
+// apply is a blind assignment instead of a re-check-and-rollback dance. The
+// writers are all dashboard/IM edits — a few per hour, nothing to contend for.
+//
 // LOCK ORDER: entryMu → s.mu. Never the reverse. A path that holds s.mu and then
 // wants entryMu has to release s.mu first — and if that feels awkward it is a
 // sign the transaction wants to start here instead.
