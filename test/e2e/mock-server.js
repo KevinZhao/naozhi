@@ -210,6 +210,9 @@ function defaultGitStates() {
  * @param {string} [overrides.authToken] - Expected token value.
  * @param {Function} [overrides.onSend] - Callback when POST /api/sessions/send is called.
  * @param {Function} [overrides.onCronCreate] - Callback when POST /api/cron is called.
+ * @param {boolean} [overrides.cronCreateAppends] - If true, POST /api/cron also appends
+ *   the created job (fixed id cron-new-001) to the served list, so the dashboard's
+ *   post-create refetch sees it - the drawer-opens-on-created-job flow needs that.
  * @param {number} [overrides.sendStatus] - Status code for POST /api/sessions/send.
  * @param {object} [overrides.sessionRuns] - session key → GET /api/sessions/runs payload ({runs, stats}); unknown keys 404 (header runstats stay empty).
  * @param {object[]} [overrides.discovered] - GET /api/discovered payload (default: none).
@@ -272,6 +275,8 @@ function startMockServer(overrides = {}) {
   // fullCronListCalls records every non-compact list GET so a test can prove a
   // refetch really happened rather than inferring it from the DOM.
   const fullCronListCalls = [];
+  // Every GET /api/cron, compact or not - for specs that watch for runaway refetch loops.
+  let cronListGetCount = 0;
   // compactCronListDelayMs delays the COMPACT list response only. It exists so a
   // test can open a drawer and then the editor with no background refresh landing
   // in between — the window where a spliced cache row would otherwise be trusted.
@@ -641,6 +646,7 @@ function startMockServer(overrides = {}) {
     // Cron routes
     if (pathname === NZ_CONTRACT.API.cron && req.method === 'GET') {
       if (!checkAuth()) return;
+      cronListGetCount++;
       const compact = url.searchParams.get('compact') === '1';
       if (!compact) {
         fullCronListCalls.push(url.search);
@@ -679,6 +685,21 @@ function startMockServer(overrides = {}) {
       req.on('end', () => {
         cronCreateCalls.push(body);
         if (overrides.onCronCreate) overrides.onCronCreate(body);
+        if (overrides.cronCreateAppends) {
+          let parsed = {};
+          try { parsed = JSON.parse(body); } catch { /* keep {} */ }
+          cronJobsData.push({
+            id: 'cron-new-001',
+            schedule: parsed.schedule || '0 9 * * *',
+            prompt: parsed.prompt || '',
+            work_dir: parsed.work_dir || '/home/user/workspace/myproject',
+            paused: false,
+            created_at: Date.now(),
+            next_run: Date.now() + 3600000,
+            recent_runs: [],
+            stats: { total: 0, succeeded: 0 },
+          });
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ id: 'cron-new-001', ok: true }));
       });
@@ -929,6 +950,10 @@ function startMockServer(overrides = {}) {
         get eventsCalls() { return eventsCalls; },
         get bindCalls() { return bindCalls; },
         get cronCreateCalls() { return cronCreateCalls; },
+        get fullCronListCalls() { return fullCronListCalls; },
+        get cronListGetCount() { return cronListGetCount; },
+        // Replace the served cron jobs mid-test (in place - GET closes over the array).
+        setCronJobs(next) { cronJobsData.length = 0; cronJobsData.push(...next); },
         get loginCalls() { return loginCalls; },
         get favoriteCalls() { return favoriteCalls; },
         get labelCalls() { return labelCalls; },
