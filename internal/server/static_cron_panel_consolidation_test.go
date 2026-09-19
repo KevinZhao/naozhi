@@ -71,9 +71,15 @@ func TestDashboardJS_R2_R4_TriggerCooldown(t *testing.T) {
 	t.Parallel()
 	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read cron_view.js: %v", err)
 	}
-	js := string(data)
+	// The drawer renderer moved to cron_drawer.js (#2715 region 3); the
+	// cooldown pins span both files, so assert on the union.
+	drawerData, err := cronDrawerJS.ReadFile("static/cron_drawer.js")
+	if err != nil {
+		t.Fatalf("read cron_drawer.js: %v", err)
+	}
+	js := string(data) + "\n" + string(drawerData)
 
 	// 1. cronJustTriggered tracker must exist as a module-scoped map.
 	if !strings.Contains(js, "const cronJustTriggered = Object.create(null)") {
@@ -147,20 +153,20 @@ func TestDashboardJS_R2_R4_TriggerCooldown(t *testing.T) {
 	if drawerIdx < 0 {
 		t.Fatal("dashboard.js: cronDrawerHtml / renderCronDrawer not found")
 	}
-	// The cooldown read should land near the action row; search a wider
-	// window so the test stays robust to renderCronDrawer being split into
-	// helper functions.
-	const drawerLookahead = 12000
-	drawerEnd := drawerIdx + drawerLookahead
-	if drawerEnd > len(js) {
-		drawerEnd = len(js)
+	// #2715 region 3 split the drawer renderer into cron_drawer.js while the
+	// trigger-cooldown pair stayed with the view, so "near the action row" is
+	// no longer one window. Pin the two halves of the seam instead: the state
+	// function computes label/class from cronTriggerCooldownState and emits
+	// the sending/sent classes, and the drawer consumes it via the injected
+	// dep rather than growing a second copy.
+	if !strings.Contains(js, "cronTriggerCooldownState(id)") {
+		t.Error("cronTriggerButtonState must consult cronTriggerCooldownState(id) when computing trigger button label/class")
 	}
-	drawerBody := js[drawerIdx:drawerEnd]
-	if !strings.Contains(drawerBody, "cronTriggerCooldownState(id)") {
-		t.Error("cron drawer: action row must consult cronTriggerCooldownState(id) when computing trigger button label/class")
+	if !strings.Contains(js, "is-sending") || !strings.Contains(js, "is-sent") {
+		t.Error("cooldown sending/sent classes must drive the spinner + ✓ visual feedback")
 	}
-	if !strings.Contains(drawerBody, "is-sending") || !strings.Contains(drawerBody, "is-sent") {
-		t.Error("cron drawer: cooldown sending/sent classes must drive the spinner + ✓ visual feedback")
+	if !strings.Contains(js, "deps.cronTriggerButtonState(") {
+		t.Error("cron drawer: the action row must consume the injected cronTriggerButtonState seam, not an inlined copy")
 	}
 
 	// 7. CSS rules for is-sending / is-sent / is-running must exist.
