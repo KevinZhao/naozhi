@@ -29,7 +29,7 @@ func (p *panickingRouter) GetOrCreate(context.Context, string, AgentOpts) (Sessi
 	panic(errors.New("simulated GetOrCreate panic"))
 }
 
-// TestR238GO9_TriggerNowRecoversExecuteOptPanic pins #801: a panic in
+// TestTriggerNowRecoversExecuteOptPanic pins #801: a panic in
 // executeOpt (here forced via a panicking router.GetOrCreate stub) must
 // not propagate up to the TriggerNow goroutine. Pre-fix: the panic
 // killed the goroutine and the deferred triggerWG.Done in the
@@ -44,7 +44,7 @@ func (p *panickingRouter) GetOrCreate(context.Context, string, AgentOpts) (Sessi
 // the runScaffold defer must release the gauge before the panic reaches
 // executeIfNotDeletedOrPaused's recover. Not t.Parallel: the gauge is
 // process-global and the delta assertion needs the sequential window.
-func TestR238GO9_TriggerNowRecoversExecuteOptPanic(t *testing.T) {
+func TestTriggerNowRecoversExecuteOptPanic(t *testing.T) {
 	inflightBase := metrics.CronRunInflight.Value()
 	r := &panickingRouter{}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: r})
@@ -105,13 +105,13 @@ func TestR238GO9_TriggerNowRecoversExecuteOptPanic(t *testing.T) {
 	}
 }
 
-// TestR238GO9_TriggerNowPanicValueRecorded covers the Error-log path:
+// TestTriggerNowPanicValueRecorded covers the Error-log path:
 // recordTriggerNowPanic must accept arbitrary panic values (string,
 // error, nil-with-panic-is-impossible) without re-panicking on the
 // formatted slog.Error call. We invoke it directly to exercise the
 // formatter without spinning up a full scheduler; the slog destination
 // is the default writer.
-func TestR238GO9_TriggerNowPanicValueRecorded(t *testing.T) {
+func TestTriggerNowPanicValueRecorded(t *testing.T) {
 	t.Parallel()
 	// Three panic-value shapes: string (most common from `panic("…")`),
 	// error (from `panic(errors.New(…))`), and a custom struct (from

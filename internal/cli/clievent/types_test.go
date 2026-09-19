@@ -64,7 +64,7 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
-// TestEventEntry_LeafFields_R247_ARCH_16 anchors R247-ARCH-16 (#659):
+// TestEventEntry_LeafFields anchors R247-ARCH-16 (#659):
 // the proposed `eventcore` types-only sub-package landed as
 // `internal/cli/clievent` (cluster anchor R246-ARCH-13) so that
 // internal/history/* — which reads/writes EventEntry off persisted JSONL
@@ -83,7 +83,7 @@ func indexOf(s, sub string) int {
 // to clievent.EventEntry and have to weaken this check, that's the signal
 // the leaf has outgrown its types-only charter — split a new `eventcore`
 // (or similar) leaf rather than relaxing the contract.
-func TestEventEntry_LeafFields_R247_ARCH_16(t *testing.T) {
+func TestEventEntry_LeafFields(t *testing.T) {
 	e := clievent.EventEntry{
 		UUID:            "u1",
 		Time:            1700000000000,

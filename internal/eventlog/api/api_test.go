@@ -8,11 +8,11 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
-// TestEventLogSatisfiesAppenderAndSubscriber_R20260602_091302_ARCH_2 anchors
+// TestEventLogSatisfiesAppenderAndSubscriber anchors
 // #1570: the canonical in-memory ring backend (*ring.EventLog) must already
 // satisfy the write + subscribe halves of the unified contract, so adopting
 // the api package is a no-cost convergence rather than a rewrite.
-func TestEventLogSatisfiesAppenderAndSubscriber_R20260602_091302_ARCH_2(t *testing.T) {
+func TestEventLogSatisfiesAppenderAndSubscriber(t *testing.T) {
 	t.Parallel()
 	var l *ring.EventLog
 	var _ Appender = l
@@ -45,10 +45,10 @@ func (f fullStore) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([
 	return f.stubReader.LoadBefore(ctx, beforeMS, limit)
 }
 
-// TestEventStoreComposable_R20260602_091302_ARCH_2 anchors that EventStore is
+// TestEventStoreComposable anchors that EventStore is
 // a real, satisfiable contract (Appender + Reader + Subscriber) — a backend
 // can be handed to the session layer behind this single interface.
-func TestEventStoreComposable_R20260602_091302_ARCH_2(t *testing.T) {
+func TestEventStoreComposable(t *testing.T) {
 	t.Parallel()
 	var _ EventStore = fullStore{}
 	var _ Reader = stubReader{}

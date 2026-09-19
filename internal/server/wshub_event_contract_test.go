@@ -1,6 +1,6 @@
 package server
 
-// wshub_event_contract_2432_test.go — #2432 backend→frontend event contract
+// wshub_event_contract_test.go — backend→frontend event contract
 // regressions:
 //
 //  1. historyMarshalCache fingerprint must include entry identity (UUID), not

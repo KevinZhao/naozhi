@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// TestSubagentLinker_TryMarkResolveInflight_R260528_PERF_7 anchors #1354:
+// TestSubagentLinker_TryMarkResolveInflight anchors #1354:
 // the in-flight gate must (a) admit the first claim per taskID, (b) reject
 // duplicates while the claim is held, (c) accept again after the slot is
 // cleared, and (d) reject empty taskIDs unconditionally so the production
@@ -14,7 +14,7 @@ import (
 // same task_id during the up-to-3s Resolve grace window escapes into a
 // fresh goroutine that promptly re-bails inside Resolve, paying the
 // schedule + closure-allocation cost for nothing.
-func TestSubagentLinker_TryMarkResolveInflight_R260528_PERF_7(t *testing.T) {
+func TestSubagentLinker_TryMarkResolveInflight(t *testing.T) {
 	t.Parallel()
 	l := NewLinker()
 
@@ -54,14 +54,14 @@ func TestSubagentLinker_TryMarkResolveInflight_R260528_PERF_7(t *testing.T) {
 	l.clearResolveInflight("task-never-claimed")
 }
 
-// TestSubagentLinker_ResolveClearsInflight_R260528_PERF_7 anchors that
+// TestSubagentLinker_ResolveClearsInflight anchors that
 // Resolve's deferred clearResolveInflight runs even on the early-return
 // paths (already-resolved cache hit, missing context). The deferred
 // clear is the only thing that lets a follow-up duplicate task_started
 // re-claim — if it ever drops off one of those return paths, callers
 // would silently lock out the taskID for the rest of the linker's
 // lifetime.
-func TestSubagentLinker_ResolveClearsInflight_R260528_PERF_7(t *testing.T) {
+func TestSubagentLinker_ResolveClearsInflight(t *testing.T) {
 	t.Parallel()
 	l := NewLinker()
 

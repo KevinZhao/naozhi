@@ -38,7 +38,7 @@ func extractJSFunctionOpt(js, name string) string {
 	return rest[:end+2] + "\n"
 }
 
-func TestDashboard2431_PendingCardWorkspaceFallback(t *testing.T) {
+func TestDashboard_PendingCardWorkspaceFallback(t *testing.T) {
 	js := readDashboardJS(t)
 
 	// Contract: the pending-card push must stamp project + project_fallback
@@ -79,7 +79,7 @@ process.stdout.write(JSON.stringify(cases.map(c => [c[0], c[1], workspaceFallbac
 	}
 }
 
-func TestDashboard2431_HistoryCountIgnoresWhitespaceQuery(t *testing.T) {
+func TestDashboard_HistoryCountIgnoresWhitespaceQuery(t *testing.T) {
 	js := readDashboardJS(t)
 	script := extractJSFunction(t, js, "filterHistoryEntries") +
 		extractJSFunction(t, js, "applyHistoryFilter") + `
@@ -104,7 +104,7 @@ process.stdout.write(JSON.stringify(out));
 	}
 }
 
-func TestDashboard2431_DiscoveredKeyIncludesNode(t *testing.T) {
+func TestDashboard_DiscoveredKeyIncludesNode(t *testing.T) {
 	js := readDashboardJS(t)
 
 	// Static contract: every discovered lookup/removal goes through the
@@ -185,7 +185,7 @@ func discoveredKeyWant(pid int, node string) string {
 	return "_discovered:" + strconv.Itoa(pid) + ":" + node
 }
 
-func TestDashboard2431_MobileChatHistoryStack(t *testing.T) {
+func TestDashboard_MobileChatHistoryStack(t *testing.T) {
 	js := readDashboardJS(t)
 	script := extractJSFunction(t, js, "mobileEnterChat") +
 		extractJSFunction(t, js, "mobileBack") +
@@ -243,7 +243,7 @@ process.stdout.write(JSON.stringify(out));
 	}
 }
 
-func TestDashboard2431_SelectDiscoveredReturnsToChatView(t *testing.T) {
+func TestDashboard_SelectDiscoveredReturnsToChatView(t *testing.T) {
 	js := readDashboardJS(t)
 	fn := extractJSFunction(t, js, "selectSession")
 	branch := strings.Index(fn, "previewDiscovered(")

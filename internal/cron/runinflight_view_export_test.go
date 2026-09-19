@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-// TestRunInflightView_ExportedReturnType_R249_ARCH_16 pins the #982 fix:
+// TestRunInflightView_ExportedReturnType pins the #982 fix:
 // the canonical inflight-view type is the EXPORTED RunInflightView, and the
 // internal runInflightView is a transparent alias to it. CurrentRun's first
 // return value must therefore be the exported, non-empty-package-path type so
 // the public API does not leak an unexported struct (golint unexported-return).
-func TestRunInflightView_ExportedReturnType_R249_ARCH_16(t *testing.T) {
+func TestRunInflightView_ExportedReturnType(t *testing.T) {
 	t.Parallel()
 
 	// The alias and the exported type must be identical at the type level —

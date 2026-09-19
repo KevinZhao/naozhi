@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// TestLinker_Query_R241PERF5_CacheFastPath pins the contract relied on by
+// TestLinker_Query_CacheFastPath pins the contract relied on by
 // process_readloop.notifyLinker / process_event_query.kick after R241-PERF-5
 // (#478): once Resolve has terminally cached an entry, Query returns it
 // O(1) so the dispatcher can skip the goroutine spawn for repeated
@@ -17,7 +17,7 @@ import (
 // ok=true once a separate "consumed" flag flips), which would silently
 // disable the readloop's fast-path skip and reintroduce the per-event
 // goroutine churn the issue describes.
-func TestLinker_Query_R241PERF5_CacheFastPath(t *testing.T) {
+func TestLinker_Query_CacheFastPath(t *testing.T) {
 	t.Parallel()
 	const sessionID = "r241-perf5-cache-uuid-cccccccccc"
 	l, subagentDir := newLinkerForTest(t, sessionID)

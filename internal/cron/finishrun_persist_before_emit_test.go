@@ -22,7 +22,7 @@ func (b observingBroadcaster) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
 	}
 }
 
-// TestR242ARCH10_FinishRunUpdatesJobBeforeEmit pins #731 / R242-ARCH-10:
+// TestFinishRunUpdatesJobBeforeEmit pins #731 / R242-ARCH-10:
 // when finishRun fires the cron_run_ended event, a concurrent /api/cron
 // list handler reading j.LastResult / j.LastSessionID MUST observe the
 // freshly-recorded values, not the previous run's stale snapshot.
@@ -34,7 +34,7 @@ func (b observingBroadcaster) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
 // that re-orders emitRunEnded ahead of the in-memory mutation (or makes
 // the persist save() async without blocking the broadcast) would flip
 // the observed values to the prior run's data.
-func TestR242ARCH10_FinishRunUpdatesJobBeforeEmit(t *testing.T) {
+func TestFinishRunUpdatesJobBeforeEmit(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -106,14 +106,14 @@ func TestR242ARCH10_FinishRunUpdatesJobBeforeEmit(t *testing.T) {
 	}
 }
 
-// TestR242ARCH10_FinishRunPersistsBeforeEmit complements the in-memory
+// TestFinishRunPersistsBeforeEmit complements the in-memory
 // contract above with the disk side: by the time RunEnded broadcasts,
 // the persist save() has already executed (and either landed on disk
 // or short-circuited via the seq gate). Without the synchronous save()
 // call inside recordResultP0WithSanitised, a subscriber reacting to
 // the event by re-reading cron_jobs.json could see the prior run's
 // payload.
-func TestR242ARCH10_FinishRunPersistsBeforeEmit(t *testing.T) {
+func TestFinishRunPersistsBeforeEmit(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()

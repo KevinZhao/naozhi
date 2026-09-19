@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-// TestUpdateJob_NotifyChatID_Validation_R171023_SEC_10 verifies that
+// TestUpdateJob_NotifyChatID_Validation verifies that
 // UpdateJob rejects oversized and control-byte NotifyChatID/NotifyPlatform
 // values, mirroring the validateJobFields policy applied by AddJob.
 // R171023-SEC-10: non-dashboard callers must not be able to persist
 // arbitrary bytes for these fields by bypassing the HTTP edge validators.
-func TestUpdateJob_NotifyChatID_Validation_R171023_SEC_10(t *testing.T) {
+func TestUpdateJob_NotifyChatID_Validation(t *testing.T) {
 	t.Parallel()
 
 	strPtr := func(s string) *string { return &s }

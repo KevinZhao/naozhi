@@ -30,11 +30,11 @@ func (r *eofAfterNReader) Read(_ []byte) (int, error) {
 	return 0, io.EOF
 }
 
-// TestReadAllIntoReader_ZeroProgress_R171023_CR_007 verifies that
+// TestReadAllIntoReader_ZeroProgress verifies that
 // readAllIntoReader does not hang when the reader repeatedly returns (0, nil).
 // The guard must fire within zeroProgressLimit iterations and return
 // io.ErrNoProgress.
-func TestReadAllIntoReader_ZeroProgress_R171023_CR_007(t *testing.T) {
+func TestReadAllIntoReader_ZeroProgress(t *testing.T) {
 	t.Parallel()
 
 	_, err := readAllIntoReader(zeroProgressReader{}, nil)
@@ -43,10 +43,10 @@ func TestReadAllIntoReader_ZeroProgress_R171023_CR_007(t *testing.T) {
 	}
 }
 
-// TestReadAllIntoReader_BelowGuard_EOF_R171023_CR_007 verifies that a single
+// TestReadAllIntoReader_BelowGuard_EOF verifies that a single
 // (0, nil) followed by (0, io.EOF) still succeeds — i.e. the guard only fires
 // at the threshold, not on the first zero read.
-func TestReadAllIntoReader_BelowGuard_EOF_R171023_CR_007(t *testing.T) {
+func TestReadAllIntoReader_BelowGuard_EOF(t *testing.T) {
 	t.Parallel()
 
 	// One stall is below zeroProgressLimit (2), so EOF must succeed.

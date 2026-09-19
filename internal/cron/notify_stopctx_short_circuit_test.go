@@ -7,7 +7,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
-// TestR20260527122801GO014_NotifyTargetShortCircuitsOnCancelledStopCtx
+// TestNotifyTargetShortCircuitsOnCancelledStopCtx
 // pins the cheap pre-SplitText guard added in scheduler_notify.go's
 // notifyTarget. When deliverNotice's goroutine is scheduled after Stop
 // has already cancelled stopCtx, the existing replyCtx.Err() check at
@@ -21,7 +21,7 @@ import (
 // at the function head before any NotifySender.Lookup or text
 // processing. The platform's Reply MUST NOT fire when stopCtx is
 // already cancelled at entry.
-func TestR20260527122801GO014_NotifyTargetShortCircuitsOnCancelledStopCtx(t *testing.T) {
+func TestNotifyTargetShortCircuitsOnCancelledStopCtx(t *testing.T) {
 	t.Parallel()
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}
 	stopCtx, stopCancel := context.WithCancel(context.Background())
@@ -44,12 +44,12 @@ func TestR20260527122801GO014_NotifyTargetShortCircuitsOnCancelledStopCtx(t *tes
 	}
 }
 
-// TestR20260527122801GO014_NotifyTargetNilStopCtxDoesNotShortCircuit
+// TestNotifyTargetNilStopCtxDoesNotShortCircuit
 // guards the defensive nil-stopCtx fallback path. A hand-constructed
 // *Scheduler (e.g. test fake) without stopCtx wired must keep working
 // — the new short-circuit only triggers when stopCtx is non-nil AND
 // already errored.
-func TestR20260527122801GO014_NotifyTargetNilStopCtxDoesNotShortCircuit(t *testing.T) {
+func TestNotifyTargetNilStopCtxDoesNotShortCircuit(t *testing.T) {
 	t.Parallel()
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}
 	s := &Scheduler{

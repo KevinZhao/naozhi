@@ -25,7 +25,7 @@ func schedulerForJobsR241GO2Test(t *testing.T) *Scheduler {
 	return s
 }
 
-// TestDeleteJobByID_NotFoundReturnsErrJobNotFound_R241_GO_2 is the
+// TestDeleteJobByID_NotFoundReturnsErrJobNotFound is the
 // regression test for R241-GO-2 (#488). The original IIFE pattern
 // signalled "not found" by returning a nil *Job, which conflicted with
 // the latent callsite contract "j is *Job, may be nil for valid Jobs"
@@ -33,7 +33,7 @@ func schedulerForJobsR241GO2Test(t *testing.T) *Scheduler {
 // through withJobByIDOpt with an explicit `found bool`, so a missing
 // id surfaces as (nil, ErrJobNotFound) — this test pins that contract
 // so a future refactor cannot reintroduce the nil-sentinel ambiguity.
-func TestDeleteJobByID_NotFoundReturnsErrJobNotFound_R241_GO_2(t *testing.T) {
+func TestDeleteJobByID_NotFoundReturnsErrJobNotFound(t *testing.T) {
 	t.Parallel()
 	s := schedulerForJobsR241GO2Test(t)
 
@@ -46,12 +46,12 @@ func TestDeleteJobByID_NotFoundReturnsErrJobNotFound_R241_GO_2(t *testing.T) {
 	}
 }
 
-// TestPauseJobByID_NotFoundReturnsErrJobNotFound_R241_GO_3 is the
+// TestPauseJobByID_NotFoundReturnsErrJobNotFound is the
 // regression test for R241-GO-3 (#488 — same pattern). PauseJobByID
 // uses withJobByIDOpt's rollback path so the test also implicitly
 // exercises that the rollback shim does not mask not-found as a
 // success-with-nil-Job — the explicit found bool dominates.
-func TestPauseJobByID_NotFoundReturnsErrJobNotFound_R241_GO_3(t *testing.T) {
+func TestPauseJobByID_NotFoundReturnsErrJobNotFound(t *testing.T) {
 	t.Parallel()
 	s := schedulerForJobsR241GO2Test(t)
 
@@ -64,12 +64,12 @@ func TestPauseJobByID_NotFoundReturnsErrJobNotFound_R241_GO_3(t *testing.T) {
 	}
 }
 
-// TestDeleteJobByID_FoundReturnsSnapshot_R241_GO_2 pins the success
+// TestDeleteJobByID_FoundReturnsSnapshot pins the success
 // path: the returned *Job must be a non-nil snapshot of the deleted
 // job — proving the explicit found bool routes the success case
 // correctly even though `*Job` is the nil-able half of the
 // historically-ambiguous contract.
-func TestDeleteJobByID_FoundReturnsSnapshot_R241_GO_2(t *testing.T) {
+func TestDeleteJobByID_FoundReturnsSnapshot(t *testing.T) {
 	t.Parallel()
 	s := schedulerForJobsR241GO2Test(t)
 

@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-// TestUpdateJob_Backend_Validation_R20260603CR2 verifies that UpdateJob rejects
+// TestUpdateJob_Backend_Validation verifies that UpdateJob rejects
 // oversized and invalid-character Backend values, mirroring the validateJobFields
 // policy applied on the AddJob path (limits.go:170-173).
 // R20260603-CR-2: non-dashboard callers must not be able to persist arbitrary
 // bytes for Backend by reaching UpdateJob directly.
-func TestUpdateJob_Backend_Validation_R20260603CR2(t *testing.T) {
+func TestUpdateJob_Backend_Validation(t *testing.T) {
 	t.Parallel()
 
 	strPtr := func(s string) *string { return &s }

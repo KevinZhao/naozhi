@@ -14,12 +14,12 @@ import (
 	"testing"
 )
 
-// TestBuildKnownSessionsSet_MapAllocBeforeLock_R202606PERF003 is a structural
+// TestBuildKnownSessionsSet_MapAllocBeforeLock is a structural
 // pin that verifies buildKnownSessionsSet allocates the output map BEFORE
 // taking s.mu.RLock(), so the make() does not run inside the lock window and
 // block writers. This supersedes the earlier R20260603-PERF-3 pin that
 // required the make to read len(s.jobs) under the lock.
-func TestBuildKnownSessionsSet_MapAllocBeforeLock_R202606PERF003(t *testing.T) {
+func TestBuildKnownSessionsSet_MapAllocBeforeLock(t *testing.T) {
 	src, err := os.ReadFile("scheduler_session.go")
 	if err != nil {
 		t.Fatalf("read scheduler_session.go: %v", err)

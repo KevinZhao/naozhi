@@ -94,13 +94,13 @@ func (f *fakePartialPlatform) sentChunks() []string {
 	return append([]string(nil), f.sentOrder...)
 }
 
-// TestR250CR18_NotifyTargetAbortsOnFirstChunkFailure pins the #1151 contract:
+// TestNotifyTargetAbortsOnFirstChunkFailure pins the #1151 contract:
 // once any chunk fails the loop must stop pushing subsequent chunks. Pre-fix
 // behaviour was "log WARN, continue" which left the user reading a sliced
 // message interleaved with foreign chat traffic; post-fix is "log one
 // aggregated WARN with delivered/total, abort". We assert sendCount stops
 // climbing once Reply returns its first error.
-func TestR250CR18_NotifyTargetAbortsOnFirstChunkFailure(t *testing.T) {
+func TestNotifyTargetAbortsOnFirstChunkFailure(t *testing.T) {
 	t.Parallel()
 	// Force SplitText to chop the input into many chunks by setting maxLen to
 	// 8 chars and supplying ~80 chars of distinct ASCII so chunks > 1.
@@ -123,14 +123,14 @@ func TestR250CR18_NotifyTargetAbortsOnFirstChunkFailure(t *testing.T) {
 	}
 }
 
-// TestR249CR26_NotifyTargetPartialMetric pins #966: the send-failure abort
+// TestNotifyTargetPartialMetric pins #966: the send-failure abort
 // path bumps metrics.CronNotifyPartialTotal exactly once so operators can
 // alert on a rising delta. expvar counters are process-global and other
 // parallel tests in this package also drive partial deliveries, so we assert
 // the counter advanced by at least one rather than an exact delta (the
 // per-call increment is exercised exactly once below; concurrent tests can
 // only push the observed delta higher, never below 1).
-func TestR249CR26_NotifyTargetPartialMetric(t *testing.T) {
+func TestNotifyTargetPartialMetric(t *testing.T) {
 	before := metrics.CronNotifyPartialTotal.Value()
 	fp := &fakePartialPlatform{failAt: 2, maxLen: 8}
 	s := &Scheduler{}
@@ -142,14 +142,14 @@ func TestR249CR26_NotifyTargetPartialMetric(t *testing.T) {
 	}
 }
 
-// TestR250CR18_NotifyTargetAllSucceedSendsAll verifies the happy path is
+// TestNotifyTargetAllSucceedSendsAll verifies the happy path is
 // untouched: when every Reply succeeds, every chunk is delivered.
 //
 // R236-SEC-15 (#568) introduced cronNotifyMaxChunks; this test uses an
 // input that produces fewer chunks than the cap so the assertion still
 // reads as "every chunk SplitText emits is delivered". The dedicated
 // cap-truncation regression lives in notify_target_chunk_cap_test.go.
-func TestR250CR18_NotifyTargetAllSucceedSendsAll(t *testing.T) {
+func TestNotifyTargetAllSucceedSendsAll(t *testing.T) {
 	t.Parallel()
 	// failAt larger than chunk count -> never fails.
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}

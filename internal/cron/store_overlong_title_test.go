@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestR250GO12_LoadJobsDropsOverlongTitle pins #1075 / R250-GO-12: a
+// TestLoadJobsDropsOverlongTitle pins #1075 / R250-GO-12: a
 // cron_jobs.json hand-edit (or a file persisted before MaxCronTitleLen
 // existed) carrying a Title whose rune count exceeds MaxCronTitleLen
 // must be dropped at load time. Without this defence-in-depth gate
@@ -17,7 +17,7 @@ import (
 //
 // The write path (addJobAcquiringLock + UpdateJob) already enforces
 // the same cap; this test asserts loadJobs mirrors it.
-func TestR250GO12_LoadJobsDropsOverlongTitle(t *testing.T) {
+func TestLoadJobsDropsOverlongTitle(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
@@ -67,11 +67,11 @@ func TestR250GO12_LoadJobsDropsOverlongTitle(t *testing.T) {
 	}
 }
 
-// TestR250GO12_LoadJobsAcceptsExactlyAtCap asserts the rune-count gate is
+// TestLoadJobsAcceptsExactlyAtCap asserts the rune-count gate is
 // inclusive of MaxCronTitleLen — exactly cap runes is allowed, only
 // strictly greater than cap is rejected. Mirrors AddJob's check
 // (`> MaxCronTitleLen`).
-func TestR250GO12_LoadJobsAcceptsExactlyAtCap(t *testing.T) {
+func TestLoadJobsAcceptsExactlyAtCap(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()

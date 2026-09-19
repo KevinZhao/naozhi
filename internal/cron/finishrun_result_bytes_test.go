@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// TestR050103C_FinishRunResultBytesIsStoredNotRaw pins #1910: CronRun.ResultBytes
+// TestFinishRunResultBytesIsStoredNotRaw pins #1910: CronRun.ResultBytes
 // is the STORED (post-truncation/redaction/sanitise) byte count, never the raw
 // Claude output size. A regression that wires ResultBytes to the raw a.result
 // length (or that drops the truncate pipeline) would let an operator using
@@ -20,7 +20,7 @@ import (
 // far-over-cap (truncated). In every case the persisted ResultBytes must equal
 // len(stored Result) and must be <= the truncation ceiling — proving it tracks
 // on-disk footprint, decoupled from the raw input length.
-func TestR050103C_FinishRunResultBytesIsStoredNotRaw(t *testing.T) {
+func TestFinishRunResultBytesIsStoredNotRaw(t *testing.T) {
 	t.Parallel()
 
 	// Ceiling for the stored result: maxStoredResultRunes runes plus the

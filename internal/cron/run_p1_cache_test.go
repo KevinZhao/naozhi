@@ -8,11 +8,11 @@ import (
 	"time"
 )
 
-// TestR220Perf1_RecentCacheHitsAvoidDiskIO: after a single Append warms
+// TestRecentCacheHitsAvoidDiskIO: after a single Append warms
 // the cache, subsequent Recent calls should not re-stat the runs/<jobID>/
 // directory. Verified by deleting the on-disk file post-warm and confirming
 // Recent still returns the run (cache served).
-func TestR220Perf1_RecentCacheHitsAvoidDiskIO(t *testing.T) {
+func TestRecentCacheHitsAvoidDiskIO(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	s := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 0, 0)
@@ -43,9 +43,9 @@ func TestR220Perf1_RecentCacheHitsAvoidDiskIO(t *testing.T) {
 	}
 }
 
-// TestR220Perf1_AppendPushesCacheHeadInOrder: a 2nd Append should appear
+// TestAppendPushesCacheHeadInOrder: a 2nd Append should appear
 // at index 0 of the Recent slice (newest first), not 1.
-func TestR220Perf1_AppendPushesCacheHeadInOrder(t *testing.T) {
+func TestAppendPushesCacheHeadInOrder(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	s := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 0, 0)
@@ -71,9 +71,9 @@ func TestR220Perf1_AppendPushesCacheHeadInOrder(t *testing.T) {
 	}
 }
 
-// TestR220Perf1_DeleteJobInvalidatesCache: after DeleteJob, Recent
+// TestDeleteJobInvalidatesCache: after DeleteJob, Recent
 // returns nil even though the entry was previously cached.
-func TestR220Perf1_DeleteJobInvalidatesCache(t *testing.T) {
+func TestDeleteJobInvalidatesCache(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	s := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 0, 0)
@@ -90,11 +90,11 @@ func TestR220Perf1_DeleteJobInvalidatesCache(t *testing.T) {
 	}
 }
 
-// TestR220Perf1_BeforeCutoffBypassesCache: List with non-zero before falls
+// TestBeforeCutoffBypassesCache: List with non-zero before falls
 // through to disk so paginated queries beyond cache-cap can still scan
 // older entries. Verified by populating > keepCount entries (forcing some
 // off cache) and querying with before-cutoff.
-func TestR220Perf1_BeforeCutoffBypassesCache(t *testing.T) {
+func TestBeforeCutoffBypassesCache(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	s := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 5, time.Hour) // keepCount=5

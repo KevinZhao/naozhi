@@ -8,7 +8,7 @@ import (
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
-// TestDispatch_R215_CR_P2_1_ContextErrorMapping locks in the parity between
+// TestDispatch_ContextErrorMapping locks in the parity between
 // dispatch.go and the dashboard send path for context.Canceled /
 // context.DeadlineExceeded — both surfaces must yield the "系统正在重启"
 // hint instead of the generic /new reset prompt.
@@ -21,7 +21,7 @@ import (
 // internal/usermsg.ForSendError. Both surfaces now exercise the helper
 // and so this contract test asserts the helper behaviour directly
 // instead of grepping dispatch.go's source.
-func TestDispatch_R215_CR_P2_1_ContextErrorMapping(t *testing.T) {
+func TestDispatch_ContextErrorMapping(t *testing.T) {
 	const want = "系统正在重启"
 	for _, err := range []error{context.Canceled, context.DeadlineExceeded} {
 		got := usermsg.ForSendError(err, "")

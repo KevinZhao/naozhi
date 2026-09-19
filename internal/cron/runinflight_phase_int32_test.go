@@ -186,7 +186,7 @@ func TestPhaseStringRoundTrip(t *testing.T) {
 	}
 }
 
-// TestR20260607GO003_PhasePopulatingRemoved pins R20260607-GO-003: the
+// TestPhasePopulatingRemoved pins R20260607-GO-003: the
 // dead constant phasePopulating (formerly = phaseUnset = 0) has been
 // deleted. Its value was identical to phaseUnset so the switch in
 // String() could never distinguish it; keeping it around was a
@@ -194,7 +194,7 @@ func TestPhaseStringRoundTrip(t *testing.T) {
 //   - runPhase(0) (phaseUnset) renders as "" — unchanged.
 //   - Every integer in [0, 4] that is not a canonical phase renders as "".
 //   - The four live phases (1-4) still round-trip correctly.
-func TestR20260607GO003_PhasePopulatingRemoved(t *testing.T) {
+func TestPhasePopulatingRemoved(t *testing.T) {
 	t.Parallel()
 
 	// phaseUnset (0) must render as "" — it is the sentinel for "no phase yet".

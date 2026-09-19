@@ -9,13 +9,13 @@ import (
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
-// TestHandleUpdate_NotifyClear_R103901_GO_1 pins R103901-GO-1: the scheduler
+// TestHandleUpdate_NotifyClear pins R103901-GO-1: the scheduler
 // has supported resetting Job.Notify back to legacy-default via
 // JobUpdate.NotifyClear (R249-CR-15 #958), but the dashboard PATCH /api/cron
 // handler never exposed a notify_clear field, so the reset path was
 // unreachable over HTTP (dead line). After wiring it, a PATCH with
 // {"notify_clear":true} must reset a previously-set Notify back to nil.
-func TestHandleUpdate_NotifyClear_R103901_GO_1(t *testing.T) {
+func TestHandleUpdate_NotifyClear(t *testing.T) {
 	t.Parallel()
 
 	const (

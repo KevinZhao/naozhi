@@ -2,11 +2,11 @@ package memory
 
 import "testing"
 
-// TestSanitizeWireText_R103901_SEC_4 pins R103901-SEC-4: memory field text is
+// TestSanitizeWireText pins R103901-SEC-4: memory field text is
 // scrubbed of control / bidi runes before it reaches the dashboard wire, while
 // legitimate ASCII / multibyte text and the three preserved whitespace runes
 // survive unchanged.
-func TestSanitizeWireText_R103901_SEC_4(t *testing.T) {
+func TestSanitizeWireText(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
