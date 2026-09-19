@@ -275,6 +275,10 @@ function startMockServer(overrides = {}) {
   // fullCronListCalls records every non-compact list GET so a test can prove a
   // refetch really happened rather than inferring it from the DOM.
   const fullCronListCalls = [];
+  // PATCH /api/cron?id=... capture: {id, body} per call, so an edit spec can
+  // assert which fields the dashboard actually sent (schedule/work_dir must be
+  // ABSENT when untouched - the diff-only contract).
+  const cronPatchCalls = [];
   // Every GET /api/cron, compact or not - for specs that watch for runaway refetch loops.
   let cronListGetCount = 0;
   // compactCronListDelayMs delays the COMPACT list response only. It exists so a
@@ -706,6 +710,18 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    if (pathname === NZ_CONTRACT.API.cron && req.method === 'PATCH') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        cronPatchCalls.push({ id: url.searchParams.get('id') || '', body });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
+
     if (pathname === NZ_CONTRACT.API.cron && req.method === 'DELETE') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -950,6 +966,7 @@ function startMockServer(overrides = {}) {
         get eventsCalls() { return eventsCalls; },
         get bindCalls() { return bindCalls; },
         get cronCreateCalls() { return cronCreateCalls; },
+        get cronPatchCalls() { return cronPatchCalls; },
         get fullCronListCalls() { return fullCronListCalls; },
         get cronListGetCount() { return cronListGetCount; },
         // Replace the served cron jobs mid-test (in place - GET closes over the array).
