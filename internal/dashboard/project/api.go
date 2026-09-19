@@ -445,3 +445,10 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 func (h *Handlers) HasFilesExistsLimiter() bool {
 	return h.deps.FilesExistsLimiter != nil
 }
+
+// ContractProjectsEntry exposes the /api/projects entry wire struct for
+// cross-package shape tests (internal/server/projects_shape_test.go derives
+// the required-keys set from it). Reflect-only; the type stays unexported.
+// It used to also feed contract.js's F table, which is gone (#2715) — the
+// shape test is what keeps this export alive.
+var ContractProjectsEntry any = projectsListEntry{}

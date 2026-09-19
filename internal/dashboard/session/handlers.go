@@ -326,3 +326,9 @@ type Deps struct {
 func New(d Deps) *Handlers {
 	return &Handlers{deps: d}
 }
+
+// ContractStats exposes the /api/sessions "stats" wire struct for
+// cross-package shape tests (internal/server/stats_shape_test.go derives the
+// required-keys set from it). Reflect-only; the type stays unexported. Its
+// other consumer, contract.js's F table, is gone (#2715).
+var ContractStats any = sessionStats{}
