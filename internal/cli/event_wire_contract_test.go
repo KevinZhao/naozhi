@@ -8,7 +8,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// TestEvent_StreamJSONParseContract_R217_ARCH_1 anchors #617: clievent.Event is
+// TestEvent_StreamJSONParseContract anchors #617: clievent.Event is
 // simultaneously the stream-json parse target AND the field set every
 // downstream consumer (server / discovery / dispatch / session / eventlog)
 // reads. The issue's root symptom is "any cli internal field tweak ripples
@@ -21,7 +21,7 @@ import (
 // representative claude stream-json line and asserts each tagged field lands
 // where consumers expect. Adding a field is fine; renaming/removing a pinned
 // tag is the regression we catch.
-func TestEvent_StreamJSONParseContract_R217_ARCH_1(t *testing.T) {
+func TestEvent_StreamJSONParseContract(t *testing.T) {
 	t.Parallel()
 
 	// A system/init frame: model + session_id are the load-bearing fields

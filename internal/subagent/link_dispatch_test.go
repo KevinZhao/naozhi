@@ -7,13 +7,13 @@ import (
 	"time"
 )
 
-// TestDispatchResolve_PoolReused_R214_PERF_6 anchors #415: DispatchResolve
+// TestDispatchResolve_PoolReused anchors #415: DispatchResolve
 // must hand off to a long-lived worker pool rather than spawning a fresh
 // goroutine per call. We can't observe goroutines directly without runtime
 // internals, but we can verify the pool is created lazily on first call
 // (resolveJobs becomes non-nil) and reused on subsequent calls (the same
 // channel handle persists).
-func TestDispatchResolve_PoolReused_R214_PERF_6(t *testing.T) {
+func TestDispatchResolve_PoolReused(t *testing.T) {
 	t.Parallel()
 	l := NewLinker()
 
@@ -43,10 +43,10 @@ func TestDispatchResolve_PoolReused_R214_PERF_6(t *testing.T) {
 	}
 }
 
-// TestDispatchResolve_EmptyTaskIDNoOp_R214_PERF_6 anchors #415: empty taskID
+// TestDispatchResolve_EmptyTaskIDNoOp anchors #415: empty taskID
 // must short-circuit before the pool starts, so callers that accidentally
 // pass empty values don't allocate a queue or workers for nothing.
-func TestDispatchResolve_EmptyTaskIDNoOp_R214_PERF_6(t *testing.T) {
+func TestDispatchResolve_EmptyTaskIDNoOp(t *testing.T) {
 	t.Parallel()
 	l := NewLinker()
 	l.DispatchResolve(context.Background(), "", "tu", "name", "desc", 0)
@@ -55,7 +55,7 @@ func TestDispatchResolve_EmptyTaskIDNoOp_R214_PERF_6(t *testing.T) {
 	}
 }
 
-// TestDispatchResolve_QueueFullFallback_R214_PERF_6 anchors the "queue full
+// TestDispatchResolve_QueueFullFallback anchors the "queue full
 // → inline goroutine fallback" branch from the issue's proposal. We force
 // the queue to fill by pre-injecting jobs while workers are blocked on a
 // sync barrier, then verify the (resolveQueueDepth+1)th call still
@@ -66,7 +66,7 @@ func TestDispatchResolve_EmptyTaskIDNoOp_R214_PERF_6(t *testing.T) {
 // projectDir). We assert non-blocking completion within a tight deadline —
 // if DispatchResolve ever blocked on the channel send instead of falling
 // back, this test would time out.
-func TestDispatchResolve_QueueFullFallback_R214_PERF_6(t *testing.T) {
+func TestDispatchResolve_QueueFullFallback(t *testing.T) {
 	t.Parallel()
 	l := NewLinker()
 
@@ -124,13 +124,13 @@ func TestDispatchResolve_NilCtxSafe(t *testing.T) {
 	}
 }
 
-// TestDispatchResolve_PoolCtxOutlivesFirstCaller_R20260603030037_GO_2 anchors
+// TestDispatchResolve_PoolCtxOutlivesFirstCaller anchors
 // #1661: the worker pool must bind its lifetime to the ctx set via
 // SetPoolContext, NOT the per-request ctx of the first DispatchResolve caller.
 // We set a long-lived pool ctx, then dispatch first with an already-canceled
 // per-request ctx. If the pool wrongly captured the caller's ctx, the workers
 // would exit and a follow-up job would never be consumed.
-func TestDispatchResolve_PoolCtxOutlivesFirstCaller_R20260603030037_GO_2(t *testing.T) {
+func TestDispatchResolve_PoolCtxOutlivesFirstCaller(t *testing.T) {
 	t.Parallel()
 	l := NewLinker()
 
@@ -171,9 +171,9 @@ func TestDispatchResolve_PoolCtxOutlivesFirstCaller_R20260603030037_GO_2(t *test
 	}
 }
 
-// TestSetPoolContext_FirstWins_R20260603030037_GO_2 anchors that SetPoolContext
+// TestSetPoolContext_FirstWins anchors that SetPoolContext
 // is idempotent: the first non-nil ctx sticks, later calls are no-ops.
-func TestSetPoolContext_FirstWins_R20260603030037_GO_2(t *testing.T) {
+func TestSetPoolContext_FirstWins(t *testing.T) {
 	t.Parallel()
 	l := NewLinker()
 	first, c1 := context.WithCancel(context.Background())

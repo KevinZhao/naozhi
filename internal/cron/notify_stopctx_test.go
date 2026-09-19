@@ -45,13 +45,13 @@ func (f *fakeBlockingPlatform) cancelObserved() error {
 	return f.seenCancel
 }
 
-// TestR243SEC14_NotifyTargetCancelsOnStopCtx pins #799: notifyTarget's
+// TestNotifyTargetCancelsOnStopCtx pins #799: notifyTarget's
 // replyCtx must chain to s.stopCtx so a hung webhook unblocks the moment
 // Stop fires, instead of waiting for the per-target cronNotifyTimeout
 // (30s). Pre-fix the parent was context.Background, which meant
 // triggerWG.Wait stayed parked at the full stopBudget even after stopCtx
 // had cancelled.
-func TestR243SEC14_NotifyTargetCancelsOnStopCtx(t *testing.T) {
+func TestNotifyTargetCancelsOnStopCtx(t *testing.T) {
 	t.Parallel()
 	fp := newFakeBlockingPlatform(64)
 	stopCtx, stopCancel := context.WithCancel(context.Background())
@@ -85,7 +85,7 @@ func TestR243SEC14_NotifyTargetCancelsOnStopCtx(t *testing.T) {
 	}
 }
 
-// TestR243SEC14_NotifyTargetNilStopCtxFallback covers the defensive
+// TestNotifyTargetNilStopCtxFallback covers the defensive
 // fallback: a hand-constructed *Scheduler (e.g. test fake) without
 // stopCtx wired must still have its per-target timeout enforced. The
 // fallback parent is context.Background; the cronNotifyTimeout ceiling
@@ -93,7 +93,7 @@ func TestR243SEC14_NotifyTargetCancelsOnStopCtx(t *testing.T) {
 // override of the real timer would take 30s — instead we just confirm
 // the call returns at all when no parent cancel is wired (i.e. doesn't
 // nil-dereference s.stopCtx).
-func TestR243SEC14_NotifyTargetNilStopCtxFallback(t *testing.T) {
+func TestNotifyTargetNilStopCtxFallback(t *testing.T) {
 	t.Parallel()
 	// fakePartialPlatform's failAt=1000 makes every Reply succeed —
 	// notifyTarget runs the full chunk loop and returns. The point of

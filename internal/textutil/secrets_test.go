@@ -171,12 +171,12 @@ func TestRedactSecrets_GCP(t *testing.T) {
 	}
 }
 
-// TestRedactSecrets_R20260602SEC4 verifies the prefixes added in
+// TestRedactSecrets verifies the prefixes added in
 // R20260602-SEC-4 / R164029-SEC-5: Databricks (dapi), HCP Vault (hvs.),
 // Stripe secret (sk_live_/sk_test_) and Stripe restricted (rk_live_/rk_test_)
 // keys are redacted, while short tails below minTail and bare-prefix prose
 // stay intact.
-func TestRedactSecrets_R20260602SEC4(t *testing.T) {
+func TestRedactSecrets(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string

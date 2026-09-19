@@ -12,12 +12,12 @@ import (
 // integration coverage: the scheduler sanitise paths must scrub secrets
 // before persistence / WS broadcast / log-injection passes.
 
-// TestRedactSecretsInResult_R20260602SEC4 verifies the four prefixes added in
+// TestRedactSecretsInResult verifies the four prefixes added in
 // R20260602-SEC-4: Databricks (dapi), HCP Vault (hvs.), Stripe live
 // (sk_live_), and Stripe test (sk_test_). Also confirms short tails below
 // minTail are left intact, and that the fast-path mayContainSecretPrefix
 // recognises the new 'd' first byte.
-func TestRedactSecretsInResult_R20260602SEC4(t *testing.T) {
+func TestRedactSecretsInResult(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string

@@ -6,7 +6,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
-// TestR236SEC15_NotifyTargetCapsChunkCount pins the #568 contract:
+// TestNotifyTargetCapsChunkCount pins the #568 contract:
 // when SplitText would yield more than cronNotifyMaxChunks chunks,
 // notifyTarget delivers only the cap and slog-Warns the dropped tail
 // rather than running the chunks × retries × per-attempt loop until
@@ -19,7 +19,7 @@ import (
 //
 // Post-fix: chunks beyond the cap are dropped before the loop with a
 // single aggregated WARN; the surviving chunks are sent in order.
-func TestR236SEC15_NotifyTargetCapsChunkCount(t *testing.T) {
+func TestNotifyTargetCapsChunkCount(t *testing.T) {
 	t.Parallel()
 	// failAt larger than the cap so every uncapped chunk that reaches
 	// Reply succeeds — we want to assert the cap, not a partial-failure
@@ -43,10 +43,10 @@ func TestR236SEC15_NotifyTargetCapsChunkCount(t *testing.T) {
 	}
 }
 
-// TestR236SEC15_NotifyTargetUnderCapSendsAll verifies the cap is a
+// TestNotifyTargetUnderCapSendsAll verifies the cap is a
 // ceiling, not a floor: when SplitText yields fewer chunks than the
 // cap, every chunk is delivered.
-func TestR236SEC15_NotifyTargetUnderCapSendsAll(t *testing.T) {
+func TestNotifyTargetUnderCapSendsAll(t *testing.T) {
 	t.Parallel()
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}
 	s := &Scheduler{}

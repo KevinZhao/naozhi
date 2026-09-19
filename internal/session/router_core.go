@@ -1232,7 +1232,7 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	if cap(refs) < len(r.ss.sessions) {
 		// Grow once to the new max instead of the append growth path; the
 		// grown array is written back to the pool before Put below
-		// (regression guard: listrefspool_grow_2309_test.go).
+		// (regression guard: listrefspool_grow_test.go).
 		refs = make([]*ManagedSession, 0, len(r.ss.sessions))
 	}
 	for _, s := range r.ss.sessions {

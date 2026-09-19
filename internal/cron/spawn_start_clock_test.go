@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// TestR20260607GO002_SpawnStartUsesInjectedClock pins R20260607-GO-002:
+// TestSpawnStartUsesInjectedClock pins R20260607-GO-002:
 // executeGetSession must capture spawnStart via s.now() (not time.Now()) so
 // tests can inject a fake clock and observe a deterministic spawnStart without
 // real sleeps.
@@ -16,7 +16,7 @@ import (
 // context.Canceled immediately. executeGetSession returns abort=true with the
 // spawnStart it computed. We assert that value equals the fake clock's fixed
 // instant.
-func TestR20260607GO002_SpawnStartUsesInjectedClock(t *testing.T) {
+func TestSpawnStartUsesInjectedClock(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()

@@ -9,11 +9,11 @@ import (
 	"testing"
 )
 
-// TestVerifyPinnedChecksumsFile_Unset_R238_SEC_4 anchors #815: with the
+// TestVerifyPinnedChecksumsFile_Unset anchors #815: with the
 // pin env var unset, behaviour must be identical to the pre-pin code path
 // (no error, no read of checksums.txt). This is the load-bearing default
 // for every existing operator who hasn't opted in.
-func TestVerifyPinnedChecksumsFile_Unset_R238_SEC_4(t *testing.T) {
+func TestVerifyPinnedChecksumsFile_Unset(t *testing.T) {
 	// Cannot t.Parallel() because we mutate process env. Use t.Setenv so
 	// the env edit is scoped to this test (cleared on completion).
 	t.Setenv(pinSha256EnvVar, "")
@@ -23,9 +23,9 @@ func TestVerifyPinnedChecksumsFile_Unset_R238_SEC_4(t *testing.T) {
 	}
 }
 
-// TestVerifyPinnedChecksumsFile_Match_R238_SEC_4 anchors the happy path:
+// TestVerifyPinnedChecksumsFile_Match anchors the happy path:
 // a correct pin matches the file's SHA-256 and the function returns nil.
-func TestVerifyPinnedChecksumsFile_Match_R238_SEC_4(t *testing.T) {
+func TestVerifyPinnedChecksumsFile_Match(t *testing.T) {
 	dir := t.TempDir()
 	body := []byte("abcdef0123456789  naozhi-linux-amd64\n")
 	sumPath := filepath.Join(dir, "checksums.txt")
@@ -39,13 +39,13 @@ func TestVerifyPinnedChecksumsFile_Match_R238_SEC_4(t *testing.T) {
 	}
 }
 
-// TestVerifyPinnedChecksumsFile_MismatchRefused_R238_SEC_4 anchors the
+// TestVerifyPinnedChecksumsFile_MismatchRefused anchors the
 // security-critical branch: a wrong pin must reject. This is what closes
 // the leaked-token scenario the issue calls out — even if the attacker
 // swaps both binary and checksums.txt with valid hashes that chain to
 // each other, the pinned hash on checksums.txt itself does not match,
 // so the upgrade aborts.
-func TestVerifyPinnedChecksumsFile_MismatchRefused_R238_SEC_4(t *testing.T) {
+func TestVerifyPinnedChecksumsFile_MismatchRefused(t *testing.T) {
 	dir := t.TempDir()
 	body := []byte("real checksums file content\n")
 	sumPath := filepath.Join(dir, "checksums.txt")
@@ -64,11 +64,11 @@ func TestVerifyPinnedChecksumsFile_MismatchRefused_R238_SEC_4(t *testing.T) {
 	}
 }
 
-// TestVerifyPinnedChecksumsFile_MalformedPinErrors_R238_SEC_4 anchors that
+// TestVerifyPinnedChecksumsFile_MalformedPinErrors anchors that
 // a typo'd pin fails loud rather than silently downgrading to no-pin.
 // "abc" is shorter than 64 hex chars and must be rejected; "z" * 64 is
 // the right length but contains non-hex characters and must also reject.
-func TestVerifyPinnedChecksumsFile_MalformedPinErrors_R238_SEC_4(t *testing.T) {
+func TestVerifyPinnedChecksumsFile_MalformedPinErrors(t *testing.T) {
 	dir := t.TempDir()
 	sumPath := filepath.Join(dir, "checksums.txt")
 	if err := os.WriteFile(sumPath, []byte("ignored"), 0o644); err != nil {

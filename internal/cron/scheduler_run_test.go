@@ -12,7 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// TestRunDeadlineWatchdog_NoIdleGoroutine_R247_GO_12 is the regression test
+// TestRunDeadlineWatchdog_NoIdleGoroutine is the regression test
 // for R247-GO-12 (#492). Pre-fix, runDeadlineWatchdog spawned a long-lived
 // goroutine waiting on `<-ctx.Done()` for every cron tick — at 50 jobs @ 1Hz
 // this held ~50 watchdog goroutines concurrently for the entire Send window.
@@ -25,7 +25,7 @@ import (
 // of the baseline — proving no per-watchdog goroutine is alive while ctx is
 // still live. After cancelling all contexts and draining, the count returns
 // to baseline (the AfterFunc callbacks have run and exited).
-func TestRunDeadlineWatchdog_NoIdleGoroutine_R247_GO_12(t *testing.T) {
+func TestRunDeadlineWatchdog_NoIdleGoroutine(t *testing.T) {
 	// NOT t.Parallel() — sensitive to background goroutine churn from
 	// other parallel tests in the package.
 
@@ -97,14 +97,14 @@ func (r *stubRefreshCountingRouter) GetOrCreate(context.Context, string, AgentOp
 	return nil, SessionExisting, nil
 }
 
-// TestStubRefresher_R249_ARCH_25 pins the typed stubRefresher that replaced
+// TestStubRefresher pins the typed stubRefresher that replaced
 // freshContextPreflightP0's bare closure (#989):
 //   - the zero value (active=false) is a safe no-op — never touches the router;
 //   - an active refresher re-registers the sidebar stub iff the job still
 //     exists in s.jobs at run() time;
 //   - an active refresher for a job deleted between preflight and run() does
 //     NOT re-register (prevents a phantom sidebar row for a gone job).
-func TestStubRefresher_R249_ARCH_25(t *testing.T) {
+func TestStubRefresher(t *testing.T) {
 	t.Parallel()
 
 	router := &stubRefreshCountingRouter{}
@@ -138,11 +138,11 @@ func TestStubRefresher_R249_ARCH_25(t *testing.T) {
 	}
 }
 
-// TestExecuteJobIDIfLive_SkipLogLabels_R243_ARCH_13 pins that the dispatch
+// TestExecuteJobIDIfLive_SkipLogLabels pins that the dispatch
 // gate's skip Debug logs still carry both the {subject, job_id} labels after
 // the slog.With consolidation (#841) — the label set must not drift between
 // the deleted-job and paused-job branches.
-func TestExecuteJobIDIfLive_SkipLogLabels_R243_ARCH_13(t *testing.T) {
+func TestExecuteJobIDIfLive_SkipLogLabels(t *testing.T) {
 	// NOT t.Parallel(): mutates the process-wide default slog logger.
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })

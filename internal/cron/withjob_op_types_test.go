@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-// TestWithJobOpTypes_R249_ARCH_20 pins the #985 fix: the in-lock mutation and
+// TestWithJobOpTypes pins the #985 fix: the in-lock mutation and
 // the out-of-lock side-effect hooks are now distinct NAMED types (lockedJobOp
 // vs jobSideEffect) rather than two bare func(*Job)/func(*Job) error literals,
 // so a swapped op-vs-cleanup argument is a compile error and the roles are
 // self-documenting. This test guards the field types on both opts structs.
-func TestWithJobOpTypes_R249_ARCH_20(t *testing.T) {
+func TestWithJobOpTypes(t *testing.T) {
 	t.Parallel()
 
 	// lockedJobOp returns an error and runs under s.mu; jobSideEffect returns

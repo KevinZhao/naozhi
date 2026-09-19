@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// TestR220Sec1_SkipPersistBroadcastErrorMsgIsRedacted: WS broadcast on a
+// TestSkipPersistBroadcastErrorMsgIsRedacted: WS broadcast on a
 // ctx-canceled (skipPersist=true) path must not leak absolute paths in
 // ErrorMsg. The pre-fix code passed a.errMsg directly into RunEndedEvent
 // which carried unredacted err.Error() output to all dashboard clients.
-func TestR220Sec1_SkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
+func TestSkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 	t.Parallel()
 	rec := &recordingBroadcaster{}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
@@ -45,10 +45,10 @@ func TestR220Sec1_SkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 	}
 }
 
-// TestR220Sec1_SuccessPathBroadcastUsesPersistedErrMsg: even on the success
+// TestSuccessPathBroadcastUsesPersistedErrMsg: even on the success
 // branch (errMsg empty), the broadcast must use persistedErrMsg, not
 // a.errMsg. A regression here would re-introduce the leak.
-func TestR220Sec1_SuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
+func TestSuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	rec := &recordingBroadcaster{}
@@ -85,14 +85,14 @@ func TestR220Sec1_SuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 	}
 }
 
-// TestR220Arch2_PersistFailureSkipsCronRun: when recordResultP0WithSanitised
+// TestPersistFailureSkipsCronRun: when recordResultP0WithSanitised
 // reports !ok (Job marshal failed, fields rolled back), the CronRun history
 // must NOT be appended — otherwise dashboard list and timeline diverge.
 //
 // We can't easily inject marshal failure in a unit test (it would require
 // poisoning the json package), so we exercise the "Job concurrently
 // deleted" branch which also sets ok=false.
-func TestR220Arch2_PersistFailureSkipsCronRun(t *testing.T) {
+func TestPersistFailureSkipsCronRun(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: tmp + "/cron_jobs.json"}, SchedulerDeps{Router: &fakeRouter{}})

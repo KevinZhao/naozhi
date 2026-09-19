@@ -7,13 +7,13 @@ import (
 	"time"
 )
 
-// TestR218BGO3_ResolveRespectsCtxCancelDuringRetrySleep pins the issue
+// TestResolveRespectsCtxCancelDuringRetrySleep pins the issue
 // #644 contract: when ctx is canceled while Resolve is sleeping in the
 // retry loop, Resolve must return promptly (~retryInterval) instead of
 // running the full retryLimit*retryInterval budget. Otherwise process
 // shutdown (which closes p.done → cancels the lifecycle ctx) is delayed
 // up to 3s for every parked Resolve goroutine.
-func TestR218BGO3_ResolveRespectsCtxCancelDuringRetrySleep(t *testing.T) {
+func TestResolveRespectsCtxCancelDuringRetrySleep(t *testing.T) {
 	t.Parallel()
 	const sessionID = "ctx-cancel-test-uuid-aaaaaaaaaaa"
 	l, _ := newLinkerForTest(t, sessionID)
@@ -57,12 +57,12 @@ func TestR218BGO3_ResolveRespectsCtxCancelDuringRetrySleep(t *testing.T) {
 	}
 }
 
-// TestR218BGO3_ResolveRespectsCtxCancelOnSemaphoreAcquire pins the
+// TestResolveRespectsCtxCancelOnSemaphoreAcquire pins the
 // resolveSem half of the contract: when the semaphore is full and ctx
 // cancels before a slot frees, Resolve must return promptly. Without
 // the ctx.Done() arm in the sem select, a shutdown would wait the full
 // (retryLimit+1)*retryInterval timer budget before unblocking.
-func TestR218BGO3_ResolveRespectsCtxCancelOnSemaphoreAcquire(t *testing.T) {
+func TestResolveRespectsCtxCancelOnSemaphoreAcquire(t *testing.T) {
 	t.Parallel()
 	const sessionID = "sem-cancel-test-uuid-bbbbbbbbbbb"
 	l, _ := newLinkerForTest(t, sessionID)

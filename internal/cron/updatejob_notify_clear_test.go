@@ -2,13 +2,13 @@ package cron
 
 import "testing"
 
-// TestUpdateJob_NotifyClear_R249_CR_15 verifies the additive reset-to-nil
+// TestUpdateJob_NotifyClear verifies the additive reset-to-nil
 // API (#958): setting JobUpdate.NotifyClear to pointer-to-true resets a
 // previously-set Job.Notify back to nil (legacy-default / inherit policy),
 // while nil or pointer-to-false leaves it untouched. Closes R249-CR-15:
 // there was previously no way to reset Notify without editing the store
 // file off-line.
-func TestUpdateJob_NotifyClear_R249_CR_15(t *testing.T) {
+func TestUpdateJob_NotifyClear(t *testing.T) {
 	t.Parallel()
 
 	boolPtr := func(b bool) *bool { return &b }

@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-// TestUpdateJob_WorkDir_Validation_R20260603GO1 verifies that UpdateJob rejects
+// TestUpdateJob_WorkDir_Validation verifies that UpdateJob rejects
 // oversized, non-UTF-8, and control-byte WorkDir values, mirroring the
 // validateJobFields policy applied on the AddJob path (limits.go:164-168).
 // R20260603-GO-1: non-dashboard callers must not be able to persist arbitrary
 // bytes for WorkDir by reaching UpdateJob directly.
-func TestUpdateJob_WorkDir_Validation_R20260603GO1(t *testing.T) {
+func TestUpdateJob_WorkDir_Validation(t *testing.T) {
 	t.Parallel()
 
 	strPtr := func(s string) *string { return &s }

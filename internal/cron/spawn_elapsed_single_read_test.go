@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// TestR20260607GO001_SpawnElapsedSingleCapture pins R20260607-GO-001:
+// TestSpawnElapsedSingleCapture pins R20260607-GO-001:
 // spawnElapsed is captured exactly once before computing sendBudget, so
 // spawn_elapsed_ms + send_budget_ms == job_timeout_ms in the log line
 // (modulo the minSendBudget floor). Prior to the fix, two separate
@@ -17,7 +17,7 @@ import (
 //
 //	spawnElapsed + sendBudget == jobTimeout  (when no floor is applied)
 //	sendBudget == minSendBudget              (when floor is applied)
-func TestR20260607GO001_SpawnElapsedSingleCapture(t *testing.T) {
+func TestSpawnElapsedSingleCapture(t *testing.T) {
 	t.Parallel()
 
 	jobTimeout := 5 * time.Minute
@@ -84,11 +84,11 @@ func TestR20260607GO001_SpawnElapsedSingleCapture(t *testing.T) {
 	}
 }
 
-// TestR20260607GO001_TwoCallsDrift demonstrates why two separate time.Since
+// TestTwoCallsDrift demonstrates why two separate time.Since
 // calls (the pre-fix pattern) produce inconsistent log fields. This is a
 // documentation test, not a regression test — it asserts that the single-
 // capture pattern avoids the drift that two-call pattern would introduce.
-func TestR20260607GO001_TwoCallsDrift(t *testing.T) {
+func TestTwoCallsDrift(t *testing.T) {
 	t.Parallel()
 
 	jobTimeout := 5 * time.Minute

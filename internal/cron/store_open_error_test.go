@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// TestR241SEC9_LoadJobsHardAbortsOnNonNotExistOpenError pins the #469
+// TestLoadJobsHardAbortsOnNonNotExistOpenError pins the #469
 // contract: any non-ErrNotExist open failure aborts loadJobs with an
 // error rather than continuing to a (nil, nil) "empty jobs" result.
 //
@@ -28,7 +28,7 @@ import (
 // must propagate the error; the previous implementation's "warn and
 // continue" shape would have eaten it and returned (nil, nil) so the
 // next persist would clobber the real cron_jobs.json with `[]`.
-func TestR241SEC9_LoadJobsHardAbortsOnNonNotExistOpenError(t *testing.T) {
+func TestLoadJobsHardAbortsOnNonNotExistOpenError(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: directory mode 0 does not yield EACCES")
 	}

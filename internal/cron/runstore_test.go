@@ -1110,12 +1110,12 @@ func TestRunStore_ReadRunNoLstat_OverCap(t *testing.T) {
 	}
 }
 
-// TestR245Sec1_NewRunStoreRejectsSymlinkRunsDir — regression for #825.
+// TestNewRunStoreRejectsSymlinkRunsDir — regression for #825.
 // If a malicious operator (or post-compromise attacker) pre-creates
 // `<dataDir>/runs` as a symlink to /etc, every Append would write a
 // CronRun JSON outside the data dir. newRunStore must Lstat runs/ and
 // disable the store when it's not a plain directory.
-func TestR245Sec1_NewRunStoreRejectsSymlinkRunsDir(t *testing.T) {
+func TestNewRunStoreRejectsSymlinkRunsDir(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	// Pre-create runs/ as a symlink to a sibling tempdir. MkdirAll on a
@@ -1145,10 +1145,10 @@ func TestR245Sec1_NewRunStoreRejectsSymlinkRunsDir(t *testing.T) {
 	}
 }
 
-// TestR245Sec1_NewRunStoreNormalisesDotDot — regression for #825. A
+// TestNewRunStoreNormalisesDotDot — regression for #825. A
 // storePath with `..` segments must be cleaned by filepath.Abs so the
 // derived runs/ root cannot escape the intended data dir.
-func TestR245Sec1_NewRunStoreNormalisesDotDot(t *testing.T) {
+func TestNewRunStoreNormalisesDotDot(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	// Construct a path with traversal: <tmp>/x/../cron.json should land
@@ -1166,7 +1166,7 @@ func TestR245Sec1_NewRunStoreNormalisesDotDot(t *testing.T) {
 	}
 }
 
-// TestR238Sec7_ReadRunRefusesSymlink — regression for #827. readRun
+// TestReadRunRefusesSymlink — regression for #827. readRun
 // (Get's entry path) must reject a symlink final component without
 // dereferencing it. Pre-fix used Lstat + ReadFile which left a TOCTOU
 // window — Lstat could see a regular file, then an attacker swaps the
@@ -1174,7 +1174,7 @@ func TestR245Sec1_NewRunStoreNormalisesDotDot(t *testing.T) {
 // (or any sensitive file) leaks into the run record. Post-fix uses
 // OpenFile(O_NOFOLLOW) + Fstat so the bytes we parse come from exactly
 // the inode whose mode we validated.
-func TestR238Sec7_ReadRunRefusesSymlink(t *testing.T) {
+func TestReadRunRefusesSymlink(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	jobID := mustGenerateID()

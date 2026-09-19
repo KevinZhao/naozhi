@@ -44,13 +44,13 @@ func (r okRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (
 	return okSession{id: r.sid}, SessionExisting, nil
 }
 
-// TestR247ARCH11_RunDurationDeterministicUnderClock pins #643: a full
+// TestRunDurationDeterministicUnderClock pins #643: a full
 // executeOpt run computes DurationMS purely from the injected clock, so a
 // step clock yields a stable, sleep-free duration. A regression reverting
 // either startedAt or endedAt to a raw time.Now() would make DurationMS
 // real-wall-clock-dependent (≈0ms for this instant run) instead of the fixed
 // 250ms the step clock dictates (endedAt = startedAt + one 250ms step).
-func TestR247ARCH11_RunDurationDeterministicUnderClock(t *testing.T) {
+func TestRunDurationDeterministicUnderClock(t *testing.T) {
 	t.Parallel()
 
 	rec := &recordingBroadcaster{}

@@ -47,13 +47,13 @@ func (b *durationCapturingBroadcaster) BroadcastRunEnded(ev runtelemetry.RunEnde
 	b.sawEnded = true
 }
 
-// TestR247ARCH11_FinishRunUsesInjectedClock pins #643: finishRun reads
+// TestFinishRunUsesInjectedClock pins #643: finishRun reads
 // endedAt from the scheduler's injected clock, so DurationMS is deterministic
 // and a fake clock can drive a fixed duration without sleeping. A regression
 // that reverted finishRun to a raw time.Now() would compute DurationMS from
 // real wall-clock (≈0ms for an instantly-completing test) instead of the
 // 1500ms the fake clock dictates.
-func TestR247ARCH11_FinishRunUsesInjectedClock(t *testing.T) {
+func TestFinishRunUsesInjectedClock(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -111,13 +111,13 @@ func TestR247ARCH11_FinishRunUsesInjectedClock(t *testing.T) {
 	}
 }
 
-// TestR247ARCH11_SyntheticSkippedUsesInjectedClock pins that the
+// TestSyntheticSkippedUsesInjectedClock pins that the
 // synthetic started→ended pair (emitSyntheticSkipped, used by overlap-skipped
 // and router-missing guards) also stamps its startedAt from the injected
 // clock. Skipped runs report DurationMS=0 (started==ended under a fixed
 // clock), and EndedAt equals the clock's now — proving both timestamps flow
 // through s.now() rather than the real wall clock.
-func TestR247ARCH11_SyntheticSkippedUsesInjectedClock(t *testing.T) {
+func TestSyntheticSkippedUsesInjectedClock(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()

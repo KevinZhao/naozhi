@@ -6,13 +6,13 @@ import (
 	"time"
 )
 
-// TestR246GO3_FinishRunFinalizesInflightBeforeBroadcast pins the issue #689
+// TestFinishRunFinalizesInflightBeforeBroadcast pins the issue #689
 // regression contract: when finishRun fires the cron_run_ended event, a
 // concurrent CurrentRun(jobID) call MUST observe ok=false. Previously the
 // defer's reset()+running.Store(false) ran after emitRunEnded, leaving a
 // window where dashboard list requests saw runInflightView{Phase:Spawning}
 // alongside the run-ended broadcast.
-func TestR246GO3_FinishRunFinalizesInflightBeforeBroadcast(t *testing.T) {
+func TestFinishRunFinalizesInflightBeforeBroadcast(t *testing.T) {
 	t.Parallel()
 
 	// Capture CurrentRun visibility from inside the broadcaster callback —
@@ -80,12 +80,12 @@ func TestR246GO3_FinishRunFinalizesInflightBeforeBroadcast(t *testing.T) {
 	inflight.running.Store(false)
 }
 
-// TestR246GO3_OverlapSkippedDoesNotReleaseOwnerGate guards the contract that
+// TestOverlapSkippedDoesNotReleaseOwnerGate guards the contract that
 // emitOverlapSkipped's finishRun call must NOT release the inflight gate
 // held by the actually-running concurrent execution. A regression here
 // would let two executeOpt invocations claim the gate in sequence and
 // corrupt the in-flight metadata mid-run.
-func TestR246GO3_OverlapSkippedDoesNotReleaseOwnerGate(t *testing.T) {
+func TestOverlapSkippedDoesNotReleaseOwnerGate(t *testing.T) {
 	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
 
@@ -122,7 +122,7 @@ func TestR246GO3_OverlapSkippedDoesNotReleaseOwnerGate(t *testing.T) {
 	(&runFinalizer{inflight: inflight}).finalize()
 }
 
-// TestR246GO3_RunADeferDoesNotClobberRunBMetadata is the reviewer-found
+// TestRunADeferDoesNotClobberRunBMetadata is the reviewer-found
 // regression case: in production the executeOpt defer is gated behind
 // deliverNotice (and other post-finishRun work), so a racing run-B that
 // wins the next inflight CAS lands BEFORE run-A's defer fires. The
@@ -138,7 +138,7 @@ func TestR246GO3_OverlapSkippedDoesNotReleaseOwnerGate(t *testing.T) {
 //     create its own finalizer-B.
 //  3. run-A's late defer fires finalizer-A.finalize() — must be a no-op.
 //  4. Verify run-B's RunID and running gate survive.
-func TestR246GO3_RunADeferDoesNotClobberRunBMetadata(t *testing.T) {
+func TestRunADeferDoesNotClobberRunBMetadata(t *testing.T) {
 	t.Parallel()
 	inflight := &runInflight{}
 

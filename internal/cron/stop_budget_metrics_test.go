@@ -9,7 +9,7 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
-// TestR250GO20_StopBudgetTriggerCounterBumps pins #1083 / R250-GO-20: when
+// TestStopBudgetTriggerCounterBumps pins #1083 / R250-GO-20: when
 // Stop()'s triggerWG.Wait phase exceeds its remaining-budget slice, the
 // CronStopBudgetExceededTriggerTotal counter must bump alongside the
 // existing slog.Warn. Without this counter, operators tracking systemd
@@ -24,7 +24,7 @@ import (
 // per-counter symbol existence is verified by build (the test file
 // imports metrics and references each counter via the structural test
 // below).
-func TestR250GO20_StopBudgetTriggerCounterBumps(t *testing.T) {
+func TestStopBudgetTriggerCounterBumps(t *testing.T) {
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
@@ -60,11 +60,11 @@ func TestR250GO20_StopBudgetTriggerCounterBumps(t *testing.T) {
 	}
 }
 
-// TestR250GO20_StopBudgetCountersExist is the build-time existence guard.
+// TestStopBudgetCountersExist is the build-time existence guard.
 // Adding a per-phase counter to the metrics package without wiring the
 // bump in scheduler.Stop() (or vice versa) would be a silent half-fix;
 // referencing each counter's Value() here forces both halves to compile.
-func TestR250GO20_StopBudgetCountersExist(t *testing.T) {
+func TestStopBudgetCountersExist(t *testing.T) {
 	t.Parallel()
 	// All three counters are read-once to catch a future rename / removal
 	// at build time. Counters are monotonic so a Value() call is safe to

@@ -57,12 +57,12 @@ func (f *fakeSingleUseNotifyPlatform) sentReplies() []string {
 	return out
 }
 
-// TestR2181_NotifyTargetSingleUseCollapsesToOneTruncatedMessage verifies that a
+// TestNotifyTargetSingleUseCollapsesToOneTruncatedMessage verifies that a
 // long result destined for a single-use-token platform is delivered as exactly
 // one message, rune-safe-truncated with the visible marker when it exceeds
 // maxLen, and that no second Reply is attempted (which would fail and burn the
 // already-consumed token).
-func TestR2181_NotifyTargetSingleUseCollapsesToOneTruncatedMessage(t *testing.T) {
+func TestNotifyTargetSingleUseCollapsesToOneTruncatedMessage(t *testing.T) {
 	t.Parallel()
 	const maxLen = 20
 	fp := &fakeSingleUseNotifyPlatform{maxLen: maxLen}
@@ -94,10 +94,10 @@ func TestR2181_NotifyTargetSingleUseCollapsesToOneTruncatedMessage(t *testing.T)
 	}
 }
 
-// TestR2181_NotifyTargetSingleUseShortResultNotTruncated pins that the collapse
+// TestNotifyTargetSingleUseShortResultNotTruncated pins that the collapse
 // only truncates when the rune length exceeds maxLen: a short result is sent
 // verbatim as one message with no marker.
-func TestR2181_NotifyTargetSingleUseShortResultNotTruncated(t *testing.T) {
+func TestNotifyTargetSingleUseShortResultNotTruncated(t *testing.T) {
 	t.Parallel()
 	const maxLen = 50
 	fp := &fakeSingleUseNotifyPlatform{maxLen: maxLen}
@@ -116,11 +116,11 @@ func TestR2181_NotifyTargetSingleUseShortResultNotTruncated(t *testing.T) {
 	}
 }
 
-// TestR2181_NotifyTargetMultiSendStillFansIntoChunks is the negative case: a
+// TestNotifyTargetMultiSendStillFansIntoChunks is the negative case: a
 // platform that does NOT use a single-use token (UsesSingleUseReplyToken==false
 // via the default platform capability) must still fan a long result into the
 // normal N chunks — the collapse path is single-use-only.
-func TestR2181_NotifyTargetMultiSendStillFansIntoChunks(t *testing.T) {
+func TestNotifyTargetMultiSendStillFansIntoChunks(t *testing.T) {
 	t.Parallel()
 	// fakePartialPlatform (notify_target_partial_test.go) does NOT implement
 	// SingleUseReplyTokenCapable, so platform.UsesSingleUseReplyToken returns

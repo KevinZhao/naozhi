@@ -75,12 +75,12 @@ func registerResolveJob(t *testing.T, s *Scheduler, j *Job) {
 	s.mu.Unlock()
 }
 
-// TestResolveWorkspace1730_RetargetAfterCacheWarmAborts is the core regression:
+// TestResolveWorkspace_RetargetAfterCacheWarmAborts is the core regression:
 // the symlink resolves inside allowedRoot on the first call (warming the TTL
 // cache as a positive), is then retargeted outside allowedRoot, and the next
 // fresh=false call must abort (uncached re-check) rather than return a launch
 // path — even though the cached gate would still say "ok".
-func TestResolveWorkspace1730_RetargetAfterCacheWarmAborts(t *testing.T) {
+func TestResolveWorkspace_RetargetAfterCacheWarmAborts(t *testing.T) {
 	t.Parallel()
 	root := evalTempDir(t)
 	inside := filepath.Join(root, "inside")
@@ -138,10 +138,10 @@ func TestResolveWorkspace1730_RetargetAfterCacheWarmAborts(t *testing.T) {
 	}
 }
 
-// TestResolveWorkspace1730_OutsideRootAborts covers the simpler shape: a
+// TestResolveWorkspace_OutsideRootAborts covers the simpler shape: a
 // workDir that is outside allowedRoot from the start must abort (cached gate
 // itself rejects), no subprocess path returned.
-func TestResolveWorkspace1730_OutsideRootAborts(t *testing.T) {
+func TestResolveWorkspace_OutsideRootAborts(t *testing.T) {
 	t.Parallel()
 	root := evalTempDir(t)
 	outside := evalTempDir(t)
@@ -166,10 +166,10 @@ func TestResolveWorkspace1730_OutsideRootAborts(t *testing.T) {
 	}
 }
 
-// TestResolveWorkspace1730_UnderRootResolves is the happy path: an in-root
+// TestResolveWorkspace_UnderRootResolves is the happy path: an in-root
 // workDir must NOT abort and must return a launch path under root, so the
 // uncached re-check does not over-fire and suppress legitimate runs.
-func TestResolveWorkspace1730_UnderRootResolves(t *testing.T) {
+func TestResolveWorkspace_UnderRootResolves(t *testing.T) {
 	t.Parallel()
 	root := evalTempDir(t)
 	inside := filepath.Join(root, "inside")
@@ -190,11 +190,11 @@ func TestResolveWorkspace1730_UnderRootResolves(t *testing.T) {
 	}
 }
 
-// TestResolveWorkspace1730_NoAllowedRootSkipsCheck verifies the re-check is
+// TestResolveWorkspace_NoAllowedRootSkipsCheck verifies the re-check is
 // gated on allowedRoot being set: with sandbox disabled (allowedRoot==""),
 // resolveCronWorkspace takes the best-effort EvalSymlinks path and never
 // aborts, so no regression for the unconstrained case.
-func TestResolveWorkspace1730_NoAllowedRootSkipsCheck(t *testing.T) {
+func TestResolveWorkspace_NoAllowedRootSkipsCheck(t *testing.T) {
 	t.Parallel()
 	s := newResolveWorkspaceFixture(t, "") // sandbox disabled
 	workDir := t.TempDir()

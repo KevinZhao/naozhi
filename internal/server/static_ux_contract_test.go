@@ -16,14 +16,14 @@ import (
 	"testing"
 )
 
-// TestServiceWorker_R20260602190132_SEC2_NoServiceWorkerAllowed pins the
+// TestServiceWorker_NoServiceWorkerAllowed pins the
 // R20260602190132-SEC-2 (#1603) fix: handleSW must NOT emit a
 // `Service-Worker-Allowed` header. The header only broadens the max SW
 // scope above the script's own directory; /sw.js already lives at root so
 // its default scope is "/" regardless, making the header a redundant
 // explicit root-scope grant that an unauthenticated scanner could read as
 // a registration hint. Removing it does not change the effective scope.
-func TestServiceWorker_R20260602190132_SEC2_NoServiceWorkerAllowed(t *testing.T) {
+func TestServiceWorker_NoServiceWorkerAllowed(t *testing.T) {
 	t.Parallel()
 	req := httptest.NewRequest(http.MethodGet, "/sw.js", nil)
 	rec := httptest.NewRecorder()
