@@ -1477,6 +1477,9 @@ function cronApplyRunStarted(msg) {
     phase: 'queued',
     trigger: msg.trigger || '',
     session_id: msg.session_id || '',
+    // applied_at_local 只在本地存在（不来自 wire）：fetchCronJobs 用它判断
+    // 一个 list 响应是否比这个乐观补丁更旧 —— 见那里的 stale-clobber 注释。
+    applied_at_local: Date.now(),
   };
   // 一个新的 run 起步意味着上一次 timed_out 的"冻结"窗口已过去，
   // 清掉 frozen 标记让用户能再次看到实时事件。否则 hourly 任务下一次
@@ -1524,12 +1527,19 @@ const cronFrozenRuns = new Set();
 // fetchCronJobs lands. We clear current_run so the running-badge stops
 // flashing immediately; the subsequent refetch fills in last_error_class
 // / counters / last_run_at.
+// cronRunClearedAtLocal: jobId → 本地清除 current_run 的时刻。与
+// current_run.applied_at_local 互为镜像，挡住反方向的同一竞态：一个生成于
+// run_ended 帧之前、落地于其后的 list 响应仍带 current_run，会让刚熄灭的
+// 运行中徽章复活一拍。
+const cronRunClearedAtLocal = new Map();
+
 function cronApplyRunEnded(msg) {
   if (!msg || !msg.job_id) return;
   const list = Array.isArray(cronJobs) ? cronJobs : [];
   const j = list.find(x => x && x.id === msg.job_id);
   if (!j) return;
   j.current_run = null;
+  cronRunClearedAtLocal.set(msg.job_id, Date.now());
   // Provisional last_error_class / last_run_at so the row repaints with
   // the new state before fetchCronJobs returns. Backend remains source
   // of truth for the persisted snapshot.
@@ -4001,6 +4011,10 @@ function keepRefetchedPrompts(prev, fresh) {
 }
 
 async function fetchCronJobs() {
+  // 响应新旧的判据：比这个时刻更新的本地乐观补丁不被本响应覆盖（下方
+  // stale-clobber 保护）。取在请求发出前，宁可偏早（多保留补丁一拍）也
+  // 不偏晚（把新补丁误判为旧）。
+  const fetchStartedAt = Date.now();
   try {
     const headers = {};
     const t = getToken();
@@ -4022,7 +4036,26 @@ async function fetchCronJobs() {
       if (err.status) return;
       throw err;
     }
-    cronJobs = keepRefetchedPrompts(cronJobs, data.jobs || []);
+    const freshJobs = keepRefetchedPrompts(cronJobs, data.jobs || []);
+    // Stale-clobber 保护：这个响应可能生成于一个 WS run_started / run_ended
+    // 帧之前、却落地于其后（本地 e2e 用 compactCronListDelayMs 稳定复现；
+    // 真实后端在 list 事务较长时同样可能）。整体替换 cronJobs 会让旧响应
+    // 冲掉更新的乐观补丁 —— 运行中徽章闪没，或反向复活一拍。规则：只信
+    // 比本次 fetch 发起时刻更新的本地补丁，其余以服务端为准。
+    for (const nj of freshJobs) {
+      if (!nj || !nj.id) continue;
+      const prev = (Array.isArray(cronJobs) ? cronJobs : []).find(o => o && o.id === nj.id);
+      if (!prev) continue;
+      const appliedAt = prev.current_run && prev.current_run.applied_at_local;
+      if (prev.current_run && !nj.current_run && appliedAt && appliedAt > fetchStartedAt) {
+        nj.current_run = prev.current_run;
+      }
+      const clearedAt = cronRunClearedAtLocal.get(nj.id);
+      if (nj.current_run && !prev.current_run && clearedAt && clearedAt > fetchStartedAt) {
+        nj.current_run = null;
+      }
+    }
+    cronJobs = freshJobs;
     cronNotifyDefault = data.notify_default || null;
     cronRecentRunsCap = (data.recent_runs_cap | 0) > 0 ? (data.recent_runs_cap | 0) : 0;
     cronTimezone = data.timezone || '';
