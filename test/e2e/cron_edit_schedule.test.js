@@ -67,8 +67,11 @@ async function openCron(browser, mock) {
 test.describe('cron 编辑与 legacy schedule 显示', () => {
   /** @type {Awaited<ReturnType<typeof startMockServer>>} */
   let mock;
+  // 项目 skip 的用例会在 mock 创建前中止 beforeEach 链（文件级 skip 钩子
+  // 先跑），afterEach 仍执行——不带守卫时在 mobile-safari 下关一个
+  // undefined 的 mock 直接把 skipped 变 failed（#2786 里的 3 个假失败）。
   test.beforeEach(async () => { mock = await startMockServer({ cronJobs: jobs() }); });
-  test.afterEach(() => mock.server.close());
+  test.afterEach(() => { if (mock) { mock.server.close(); mock = undefined; } });
 
   test('legacy schedule 在卡片与编辑模态显示中文标签而非裸表达式', async ({ browser }) => {
     const { ctx, page } = await openCron(browser, mock);
