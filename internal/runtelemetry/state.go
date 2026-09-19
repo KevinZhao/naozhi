@@ -16,6 +16,11 @@ type Subsystem string
 const (
 	SubsystemCron      Subsystem = "cron"
 	SubsystemSysession Subsystem = "sysession"
+	// SubsystemSession names ordinary user-session runs. It appears on the
+	// dashboard's run-history rows (dashboard/runview); no session run emits
+	// WS run frames yet — a frame with no consumer is wire noise, so that
+	// waits for a consumer (#2540 PR 2 discussion).
+	SubsystemSession Subsystem = "session"
 	// Reserved, not yet emitted: SubsystemPlanner, SubsystemSystem.
 )
 

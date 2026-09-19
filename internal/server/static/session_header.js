@@ -9,7 +9,7 @@
 // Layering (D4-1 rule): never import dashboard back — its mutable state is
 // read via nz.state, its helpers are injected once via
 // configureSessionHeader().
-import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, nzState, nzTest } from './nz_util.js';
+import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, nzState, nzTest, runStateDot, runStateLabel } from './nz_util.js';
 
 const deps = {
   fetchSessions: null,
@@ -30,16 +30,13 @@ export function configureSessionHeader(impl) {
 // Best-effort: a fetch failure or empty history just leaves the panel hidden;
 // the conversation surface is never blocked on it.
 
-// sessionRunOutcomeMeta maps an outcome to its dot class + Chinese label,
-// reusing the green/red/purple status vocabulary the cron timeline established.
-function sessionRunOutcomeMeta(outcome) {
-  switch (outcome) {
-    case 'completed': return { dot: 'ok', label: '完成' };
-    case 'timeout': return { dot: 'timeout', label: '超时' };
-    case 'canceled': return { dot: 'cancel', label: '已取消' };
-    case 'error': return { dot: 'err', label: '出错' };
-    default: return { dot: '', label: outcome || '—' };
-  }
+// sessionRunStateMeta maps the common run state (#2540) to its dot class +
+// Chinese label via the shared vocabulary in nz_util. The runs API used to
+// speak a private outcome enum (completed/error/timeout/canceled) and this
+// file kept its own copy of the colour table; both are gone — the wire says
+// state, and the table lives once.
+function sessionRunStateMeta(state) {
+  return { dot: runStateDot(state), label: runStateLabel(state) };
 }
 
 function sessionRunStatLabel(ms) {
@@ -83,7 +80,7 @@ function sessionRunsStatsHtml(stats) {
 }
 
 function sessionRunRowHtml(r) {
-  const meta = sessionRunOutcomeMeta(r.outcome);
+  const meta = sessionRunStateMeta(r.state);
   // deps.formatAbsTime is the dashboard's single timestamp formatter; use it for
   // both the visible label and the hover title (ux-contract: timestamps carry
   // a deps.formatAbsTime title). A relative/colloquial label could be layered later.
