@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
 // SandboxRunSnapshot is the content-addressed record of a sandbox run's INPUT
@@ -166,19 +167,37 @@ func (s *Scheduler) SandboxRunSnapshotManifest(jobID, runID string) (*SandboxRun
 // when absent. Shared by the reader API above and the blob GC's mark phase so
 // the two cannot disagree about what counts as a live manifest.
 func readSandboxSnapshotManifest(path string) (*SandboxRunSnapshot, bool, error) {
-	b, err := os.ReadFile(path)
+	// jsonfile bounds the read, refuses a symlink, and moves an unparseable
+	// manifest aside as .corrupt.<ts> instead of leaving it to be re-read and
+	// re-failed on every reader call and every GC pass (#2709). A corrupt
+	// manifest marks no blobs either way — it cannot name one — so the blob GC's
+	// view is unchanged.
+	man, outcome, err := jsonfile.Load[SandboxRunSnapshot](path, jsonfile.Options{
+		MaxBytes: maxSnapshotManifestBytes,
+		Label:    "cron sandbox snapshot manifest",
+	})
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
 		return nil, false, fmt.Errorf("cron sandbox: read snapshot manifest: %w", err)
 	}
-	var man SandboxRunSnapshot
-	if err := json.Unmarshal(b, &man); err != nil {
-		return nil, false, fmt.Errorf("cron sandbox: parse snapshot manifest: %w", err)
+	switch outcome {
+	case jsonfile.Absent:
+		return nil, false, nil
+	case jsonfile.Parsed:
+		return &man, true, nil
+	default:
+		// Corrupt stays an error rather than collapsing into "no snapshot": the
+		// dashboard should say the manifest is unreadable, not imply the run
+		// never had one. The blob GC's mark phase skips errors already, so a
+		// corrupt manifest marks no blobs either way.
+		return nil, false, fmt.Errorf("cron sandbox: unreadable snapshot manifest")
 	}
-	return &man, true, nil
 }
+
+// maxSnapshotManifestBytes caps one manifest. It carries a model name, an image
+// tag, a prompt hash and a handful of secret REF names — never the prompt
+// itself, which lives in the content-addressed blob — so 64 KiB is orders above
+// any legitimate payload and bounds what a tampered file can allocate.
+const maxSnapshotManifestBytes = 64 << 10
 
 // SandboxRunSnapshotPrompt reads the prompt blob a manifest references. The
 // hash is content-addressed, so this is the exact prompt the run used — even
