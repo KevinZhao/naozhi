@@ -3,6 +3,7 @@ package cron
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
 // sandboxAttention is the confirmation-queue record: a sandbox run that ends
@@ -52,6 +54,15 @@ const (
 
 // sandboxAttentionDir resolves the queue directory ("" when persistence is
 // disabled — store-less test fixtures skip the queue entirely).
+// errCorruptAttentionRecord reports a record that exists but cannot be parsed.
+// Distinct from "absent" on purpose: see the switch in the reader.
+var errCorruptAttentionRecord = errors.New("cron sandbox: corrupt attention record")
+
+// maxAttentionRecordBytes caps one attention record: a run id, a job id, a
+// reason and a label — never free-form output — so 32 KiB is far above any
+// legitimate payload and bounds what a tampered file can allocate.
+const maxAttentionRecordBytes = 32 << 10
+
 func (s *Scheduler) sandboxAttentionDir() string {
 	return s.stateSubtree("sandboxattention")
 }
@@ -113,16 +124,28 @@ func (s *Scheduler) getSandboxAttention(runID string) (*sandboxAttention, bool, 
 	if !IsValidID(runID) {
 		return nil, false, errInvalidAttentionID
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, runID+".json"))
+	// Bounded + symlink-refusing, and an unparseable record is moved aside
+	// rather than re-failed on every poll (#2709).
+	rec, outcome, err := jsonfile.Load[sandboxAttention](filepath.Join(dir, runID+".json"), jsonfile.Options{
+		MaxBytes: maxAttentionRecordBytes,
+		Label:    "cron sandbox attention record",
+	})
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
 		return nil, false, err
 	}
-	var rec sandboxAttention
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return nil, false, err
+	switch outcome {
+	case jsonfile.Absent:
+		// No record: the caller decides what that means (replay treats it as
+		// "nothing to confirm", the poll as "nothing pending").
+		return nil, false, nil
+	case jsonfile.Parsed:
+		// fall through to the validation below
+	default:
+		// Corrupt is NOT absent. This record is what proves the original
+		// sandbox run was stopped, so an unreadable one must fail closed —
+		// mapping it to "absent" would let a replay dispatch against a run
+		// that may still be live.
+		return nil, false, errCorruptAttentionRecord
 	}
 	return &rec, true, nil
 }
