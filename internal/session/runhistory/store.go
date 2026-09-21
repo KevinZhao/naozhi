@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
+	"github.com/naozhi/naozhi/internal/runlog"
 )
 
 // Defaults mirror cron's retention intent with a smaller ring: session keys
@@ -22,9 +22,6 @@ import (
 const (
 	DefaultKeepCount  = 50
 	DefaultKeepWindow = 30 * 24 * time.Hour
-
-	runFilePerm = 0o600
-	dirPerm     = 0o700
 )
 
 // Store persists SessionRun records to disk and memoises the newest-N per
@@ -34,8 +31,13 @@ const (
 //
 // No index.json: List/Recent serve from the ring, warmed lazily from disk.
 // A nil or disabled Store is a no-op, so callers never nil-check.
+//
+// The tree itself — root validation, the per-session directory, the atomic
+// record write and the per-session lock — belongs to internal/runlog, shared
+// with cron's run store (#2709). What stays here is what actually differs: the
+// record type, the ring, and the warm-time retention pass.
 type Store struct {
-	root       string // the runs root as given by the caller; "" disables persistence
+	layout     *runlog.Layout
 	keepCount  int
 	keepWindow time.Duration
 	disabled   bool
@@ -55,9 +57,10 @@ type Store struct {
 // asyncQueueDepth absorbs bursts of many sessions finishing in the same tick.
 const asyncQueueDepth = 256
 
-// sessionEntry owns one session's recent ring plus the lock for its disk subtree.
+// sessionEntry owns one session's recent ring. The mutex that guards it (and
+// the session's disk subtree, which trim mutates) is runlog's per-owner lock,
+// so both run stores key that lock through one API.
 type sessionEntry struct {
-	mu     sync.Mutex
 	ring   []SessionRun // newest-first, len <= keepCount
 	warmed bool
 }
@@ -77,8 +80,18 @@ func NewStore(runsRoot string, keepCount int, keepWindow time.Duration) *Store {
 	if keepWindow <= 0 {
 		keepWindow = DefaultKeepWindow
 	}
+	layout := runlog.New(runlog.Options{
+		Root:         runsRoot,
+		Label:        "session run",
+		OwnerDirName: dirHashFor,
+	})
+	if !layout.Enabled() {
+		// A symlinked or non-directory root disables persistence rather than
+		// writing through it; runlog logged the reason.
+		return &Store{disabled: true}
+	}
 	s := &Store{
-		root:       runsRoot,
+		layout:     layout,
 		keepCount:  keepCount,
 		keepWindow: keepWindow,
 		entries:    make(map[string]*sessionEntry),
@@ -170,34 +183,48 @@ func (s *Store) Append(run SessionRun) {
 	dirHash := dirHashFor(run.SessionKey)
 	e := s.entryFor(dirHash)
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	lock := s.layout.Lock(run.SessionKey)
+	lock.Lock()
+	defer lock.Unlock()
 
 	if !e.warmed {
 		s.warmLocked(e, dirHash)
 	}
 
-	dir := filepath.Join(s.root, dirHash)
-	if err := os.MkdirAll(dir, dirPerm); err != nil {
-		slog.Warn("session run: mkdir failed", "dir", dir, "err", err)
-		return
-	}
 	data, err := json.Marshal(run)
 	if err != nil {
 		slog.Warn("session run: marshal failed", "run_id", run.RunID, "err", err)
 		return
 	}
-	path := filepath.Join(dir, run.RunID+".json")
-	if err := osutil.WriteFileAtomic(path, data, runFilePerm); err != nil {
-		slog.Warn("session run: write failed", "path", path, "err", err)
+	// runlog re-validates the per-session directory on every write (a symlink
+	// swapped in after the first append is still caught) and splits the
+	// write-failure counters so ENOSPC is distinguishable from EACCES.
+	if err := s.layout.WriteRecord(run.SessionKey, run.RunID, data); err != nil {
+		slog.Warn("session run: write failed", "run_id", run.RunID, "err", err)
 		return
 	}
 
 	e.ring = append([]SessionRun{run}, e.ring...)
-	s.trimLocked(e, dir)
+	s.trimLocked(e, s.dirPath(dirHash))
 }
 
-// trimLocked enforces keepCount on the ring and disk. Caller holds e.mu.
+// dirPath names a session's subtree. The layout owns the mapping; this is the
+// spelling the trim/warm passes need for their ReadDir + Remove calls.
+func (s *Store) dirPath(dirHash string) string {
+	return filepath.Join(s.layout.Root(), dirHash)
+}
+
+// WriteFailedTotals returns the split record-write failure counters. Append
+// cannot fail the caller's turn, so these plus the Warn log are the only
+// operator-visible signal that history is being lost.
+func (s *Store) WriteFailedTotals() (diskFull, other int64) {
+	if s == nil || s.disabled {
+		return 0, 0
+	}
+	return s.layout.WriteFailedTotals()
+}
+
+// trimLocked enforces keepCount on the ring and disk. Caller holds the session lock.
 func (s *Store) trimLocked(e *sessionEntry, dir string) {
 	if len(e.ring) <= s.keepCount {
 		return
@@ -209,12 +236,12 @@ func (s *Store) trimLocked(e *sessionEntry, dir string) {
 }
 
 // warmLocked scans the session's on-disk directory into the ring, applying
-// keepWindow and keepCount. Caller holds e.mu. Expired files are deleted as
+// keepWindow and keepCount. Caller holds the session lock. Expired files are deleted as
 // they are skipped: warm is the only path touching a subtree after the
 // session stops appending, so otherwise they accumulate unbounded (#2225).
 func (s *Store) warmLocked(e *sessionEntry, dirHash string) {
 	e.warmed = true
-	dir := filepath.Join(s.root, dirHash)
+	dir := s.dirPath(dirHash)
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -288,8 +315,9 @@ func (s *Store) Recent(sessionKey string, n int) []SessionRun {
 	}
 	dirHash := dirHashFor(sessionKey)
 	e := s.entryFor(dirHash)
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	lock := s.layout.Lock(sessionKey)
+	lock.Lock()
+	defer lock.Unlock()
 	if !e.warmed {
 		s.warmLocked(e, dirHash)
 	}
@@ -339,4 +367,8 @@ func (s *Store) Invalidate(sessionKey string) {
 	s.mu.Lock()
 	delete(s.entries, dirHash)
 	s.mu.Unlock()
+	// The ring is gone, so the lock that guarded it has nothing left to
+	// serialise: drop it too rather than leaking one mutex per session for the
+	// process lifetime.
+	s.layout.ForgetOwner(sessionKey)
 }
