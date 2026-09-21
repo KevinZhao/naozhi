@@ -65,6 +65,7 @@ cmd/naozhi/main.go
   -> eventlog     Event log 子系统（persist/schema/api 子包；append-only + crash recovery）
   -> history      后端无关历史加载接口；claudejsonl/kirojsonl/codexjsonl/naozhilog/merged 子包
   -> attachment   附件持久化 + refcount tracker 子包
+  -> runlog       per-owner run 记录的磁盘布局层（根校验/目录守卫/原子写/owner 锁），cron 与 session/runhistory 共用
   -> discovery    扫描 Claude CLI 磁盘工件（外部进程发现 / takeover）
   -> claudefs     Claude CLI 磁盘布局单一真相源（projects slug 编码 / transcript 路径 / session id 校验）
   -> subagent     Task 工具子代理 ↔ JSONL transcript 的关联与读取（linker + reader）
