@@ -34,7 +34,7 @@ func TestCacheGetBefore_LimitTruncation(t *testing.T) {
 	}
 
 	// Remove the on-disk directory so any disk fallback would return empty.
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("RemoveAll: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestCacheGetBefore_LimitEqualsAvailable(t *testing.T) {
 		t.Fatalf("warm List len=%d want 5", len(got))
 	}
 
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("RemoveAll: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestCacheGetBefore_SomeBeyondCutoff(t *testing.T) {
 		t.Fatalf("warm List len=%d want 9", len(got))
 	}
 
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("RemoveAll: %v", err)
 	}

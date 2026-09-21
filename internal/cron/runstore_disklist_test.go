@@ -29,7 +29,7 @@ func TestDecodeRunsParallel_PooledSlotNoStaleLeak(t *testing.T) {
 			// Stagger mtime so newest-first == highest index; scanSortedRunDir
 			// sorts on file mtime, so set it explicitly rather than relying on
 			// write-time wall-clock granularity.
-			path := filepath.Join(s.root, jobID, run.RunID+".json")
+			path := filepath.Join(s.rootDir(), jobID, run.RunID+".json")
 			mt := base.Add(time.Duration(i) * time.Minute)
 			if err := os.Chtimes(path, mt, mt); err != nil {
 				t.Fatalf("Chtimes: %v", err)
@@ -79,7 +79,7 @@ func TestDecodeRunsParallel_PooledSlotReusePreservesCorrectness(t *testing.T) {
 	for i := 0; i < count; i++ {
 		run := makeRun(jobID, base.Add(time.Duration(i)*time.Second))
 		s.Append(run)
-		path := filepath.Join(s.root, jobID, run.RunID+".json")
+		path := filepath.Join(s.rootDir(), jobID, run.RunID+".json")
 		mt := base.Add(time.Duration(i) * time.Minute)
 		if err := os.Chtimes(path, mt, mt); err != nil {
 			t.Fatalf("Chtimes: %v", err)

@@ -25,7 +25,7 @@ func TestRunStore_WriteFailedTotalsBumpsOnPermDenied(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	store := newRunStore(storePath, 10, 24*time.Hour)
-	if store.disabled {
+	if !store.layout.Enabled() {
 		t.Fatal("expected enabled store")
 	}
 
@@ -35,14 +35,16 @@ func TestRunStore_WriteFailedTotalsBumpsOnPermDenied(t *testing.T) {
 	// Pre-create the per-job dir and chmod 0o500 so WriteFileAtomic's
 	// rename inside it fails (POSIX: rename needs write+execute on the
 	// containing dir).
-	jobDir := filepath.Join(store.root, jobID)
+	jobDir := filepath.Join(store.rootDir(), jobID)
 	if err := os.MkdirAll(jobDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	// Mark the dir as already-ensured so Append's ensureJobDir hot-path
-	// doesn't try to MkdirAll on the read-only dir (which would be the
-	// path that errors first; we want the WriteFileAtomic path).
-	store.jobDirEnsured.Store(jobID, struct{}{})
+	// Prime the layout's ensured marker with one real EnsureOwnerDir so
+	// Append's hot path does not try to MkdirAll the read-only dir (that would
+	// error first; the path under test is the record write).
+	if _, err := store.layout.EnsureOwnerDir(jobID); err != nil {
+		t.Fatalf("prime ensured marker: %v", err)
+	}
 	if err := os.Chmod(jobDir, 0o500); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}

@@ -168,7 +168,16 @@ func (l *Layout) OwnerDir(owner string) (string, error) {
 	if owner == "" {
 		return "", fmt.Errorf("%s: empty owner id", l.label)
 	}
-	dir := filepath.Join(l.root, l.dirFor(owner))
+	// One owner is one directory COMPONENT. A mapped name carrying a separator
+	// would be joined into a nested path — contained, but silently not the
+	// directory the caller named, and the same sloppiness RecordPath refuses for
+	// record IDs. cron validates its hex IDs upstream and runhistory hashes,
+	// so this only ever fires on a caller that forgot.
+	name := l.dirFor(owner)
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("%s: owner dir name must be a single path component", l.label)
+	}
+	dir := filepath.Join(l.root, name)
 	rel, err := filepath.Rel(l.root, dir)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("%s: owner dir escapes root", l.label)
@@ -263,6 +272,12 @@ func (l *Layout) WriteFailedTotals() (diskFull, other int64) {
 // Lock returns the mutex unique to owner, serialising that owner's ring and
 // disk-subtree mutations. Leaf lock: never take a second owner's lock while
 // holding one.
+//
+// Unlike every other method here, this one requires a non-nil Layout and will
+// panic without one. That is deliberate: handing a throwaway mutex back to a
+// caller that asked for serialisation would silently serialise nothing, and a
+// store is always constructed with a layout (a disabled one for "no
+// persistence", which still owns real locks).
 func (l *Layout) Lock(owner string) *sync.Mutex {
 	if v, ok := l.locks.Load(owner); ok {
 		return v.(*sync.Mutex)
@@ -287,6 +302,19 @@ func (l *Layout) AssertLockHeld(owner string) {
 		slog.Warn(l.label+": owner lock not held by caller; *Locked-suffix contract violated",
 			"owner", osutil.SanitizeForLog(owner, 128))
 	}
+}
+
+// OwnerLockCount reports how many owner locks are currently live. The bound
+// that #971 is about ("the map must not grow across create/delete churn") is
+// otherwise unobservable from outside the package, which is how it regressed
+// unnoticed in the first place.
+func (l *Layout) OwnerLockCount() int {
+	if l == nil {
+		return 0
+	}
+	n := 0
+	l.locks.Range(func(_, _ any) bool { n++; return true })
+	return n
 }
 
 // ForgetOwner drops the owner's lock and ensured-marker. Called when the owner

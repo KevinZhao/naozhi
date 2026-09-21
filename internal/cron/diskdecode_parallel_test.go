@@ -31,7 +31,7 @@ func TestDiskListNewestFirst_ParallelDecodePreservesOrder(t *testing.T) {
 		// Stagger mtime so newest-first == highest index. scanSortedRunDir
 		// sorts on file mtime, so set it explicitly rather than relying on
 		// write-time wall-clock granularity.
-		path := filepath.Join(s.root, jobID, run.RunID+".json")
+		path := filepath.Join(s.rootDir(), jobID, run.RunID+".json")
 		mt := base.Add(time.Duration(i) * time.Minute)
 		if err := os.Chtimes(path, mt, mt); err != nil {
 			t.Fatalf("Chtimes: %v", err)
@@ -73,7 +73,7 @@ func TestDiskListNewestFirst_ParallelDecodeSkipsCorrupt(t *testing.T) {
 	for i := 0; i < good; i++ {
 		run := makeRun(jobID, base.Add(time.Duration(i)*time.Second))
 		s.Append(run)
-		path := filepath.Join(s.root, jobID, run.RunID+".json")
+		path := filepath.Join(s.rootDir(), jobID, run.RunID+".json")
 		mt := base.Add(time.Duration(i) * time.Minute)
 		_ = os.Chtimes(path, mt, mt)
 	}
@@ -83,7 +83,7 @@ func TestDiskListNewestFirst_ParallelDecodeSkipsCorrupt(t *testing.T) {
 	// accounting is exercised on the pooled path.
 	for i := 0; i < 2; i++ {
 		corruptID := mustGenerateRunID()
-		path := filepath.Join(s.root, jobID, corruptID+".json")
+		path := filepath.Join(s.rootDir(), jobID, corruptID+".json")
 		if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
 			t.Fatalf("WriteFile corrupt: %v", err)
 		}
@@ -120,7 +120,7 @@ func TestDiskListNewestFirst_ParallelLimitTrimsToNewest(t *testing.T) {
 	for i := 0; i < count; i++ {
 		run := makeRun(jobID, base.Add(time.Duration(i)*time.Second))
 		s.Append(run)
-		path := filepath.Join(s.root, jobID, run.RunID+".json")
+		path := filepath.Join(s.rootDir(), jobID, run.RunID+".json")
 		mt := base.Add(time.Duration(i) * time.Minute)
 		_ = os.Chtimes(path, mt, mt)
 		runIDsByMtime[count-1-i] = run.RunID
@@ -162,7 +162,7 @@ func TestDiskListNewestFirst_ParallelBackfillsOverCorruptInOverCapWindow(t *test
 	const corruptInWindow = 3                     // corrupt files inside the newest `limit`
 
 	base := time.Now().Add(-time.Hour)
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}

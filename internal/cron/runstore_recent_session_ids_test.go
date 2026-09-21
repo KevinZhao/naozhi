@@ -102,7 +102,7 @@ func TestRunStore_RecentSessionIDs_DedupColdPath(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	writer := newRunStore(storePath, 200, 30*24*time.Hour)
-	if writer == nil || writer.disabled {
+	if writer == nil || !writer.layout.Enabled() {
 		t.Fatalf("newRunStore writer disabled/nil")
 	}
 	jobID := mustGenerateID()
@@ -115,7 +115,7 @@ func TestRunStore_RecentSessionIDs_DedupColdPath(t *testing.T) {
 
 	// Fresh store over the same dir: empty recentCache forces the cold path.
 	reader := newRunStore(storePath, 200, 30*24*time.Hour)
-	if reader == nil || reader.disabled {
+	if reader == nil || !reader.layout.Enabled() {
 		t.Fatalf("newRunStore reader disabled/nil")
 	}
 	if _, ok := reader.recentCache.Load(jobID); ok {
@@ -146,7 +146,7 @@ func TestRunStore_RecentSessionIDs_ColdPathNoRuns(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	store := newRunStore(storePath, 200, 30*24*time.Hour)
-	if store == nil || store.disabled {
+	if store == nil || !store.layout.Enabled() {
 		t.Fatalf("newRunStore disabled/nil")
 	}
 	jobID := mustGenerateID()

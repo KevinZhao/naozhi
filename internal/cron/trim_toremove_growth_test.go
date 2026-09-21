@@ -31,7 +31,7 @@ func TestTrimBulkRemoveExceedsInitialCap(t *testing.T) {
 	if len(rows) > keepCount {
 		t.Fatalf("bulk trim under-removed: got %d rows, want <= %d", len(rows), keepCount)
 	}
-	if got := countJSONFiles(t, s.root); got > keepCount {
+	if got := countJSONFiles(t, s.rootDir()); got > keepCount {
 		t.Fatalf("bulk trim left %d run files on disk, want <= %d", got, keepCount)
 	}
 }

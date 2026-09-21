@@ -35,7 +35,9 @@ func (h *warnCaptureHandler) sawJobLockWarn() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, m := range h.msgs {
-		if strings.Contains(m, "jobLock not held by caller") {
+		// The check (and its wording) moved to internal/runlog when both run
+		// stores adopted one layout (#2709); the label still names cron.
+		if strings.Contains(m, "owner lock not held by caller") {
 			return true
 		}
 	}
@@ -68,7 +70,7 @@ func TestRunStore_LockHierarchy_RuntimeChecked(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := newRunStore(storePath, 10, time.Hour)
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		t.Fatalf("newRunStore must succeed; got disabled")
 	}
 	jobID := mustGenerateID()

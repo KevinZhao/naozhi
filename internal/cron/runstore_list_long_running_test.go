@@ -43,7 +43,7 @@ func TestRunStore_List_LongRunningJobInPaginatedPage(t *testing.T) {
 	longStart := now.Add(-2 * time.Hour)
 	long := makeRun(jobID, longStart)
 	s.Append(long)
-	longPath := filepath.Join(s.root, jobID, long.RunID+".json")
+	longPath := filepath.Join(s.rootDir(), jobID, long.RunID+".json")
 	if err := os.Chtimes(longPath, now, now); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestRunStore_List_LongRunningJobInPaginatedPage_DiskFallback(t *testing.T) 
 	longStart := now.Add(-2 * time.Hour)
 	long := makeRun(jobID, longStart)
 	s.Append(long)
-	longPath := filepath.Join(s.root, jobID, long.RunID+".json")
+	longPath := filepath.Join(s.rootDir(), jobID, long.RunID+".json")
 	if err := os.Chtimes(longPath, now, now); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}

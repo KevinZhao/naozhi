@@ -2,20 +2,18 @@ package cron
 
 import (
 	"errors"
-	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
-	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/runlog"
 )
 
 // runStore persists CronRun records under runsRoot (the cron store's own
@@ -30,16 +28,15 @@ import (
 // 已持 entry.mu 时禁止再获取 jobLock 或 s.tbl.mu（cacheGet 走"释放-重取"模式）。
 // Errors are surfaced via slog, never returned: cron must not block on history failure.
 type runStore struct {
-	root string
+	// layout owns the runs/ tree: root validation, the per-job directory, the
+	// atomic record write, the per-job lock and the write-failure counters,
+	// shared with session/runhistory (internal/runlog, #2709). A disabled
+	// layout is how StorePath="" spells "no persistence".
+	layout *runlog.Layout
 	// keepCount / keepWindow / maxRunBytes 在 newRunStore 之后不可变，读取无需锁。
 	keepCount   int
 	keepWindow  time.Duration
 	maxRunBytes int64
-	jobLocks    sync.Map // jobID -> *sync.Mutex
-	// jobDirEnsured 记录 Append 已为该 jobID 跑过 MkdirAll，省掉每次 Append 的 lstat+mkdir。
-	// sync.Map 原子读写；MkdirAll 幂等，失败时删掉 cache 项让下次重试。
-	jobDirEnsured sync.Map // jobID -> struct{}
-	disabled      bool     // true when StorePath is empty (tests / no-persist)
 	// clock is the time source Append reads. nil = time.Now(), so production and
 	// every existing construction path are unchanged. It exists so a test can
 	// prove Append reads the clock ONCE and shares that instant between
@@ -65,12 +62,6 @@ type runStore struct {
 	// the window that the post-write re-check + dropOrphanRun closes (#2479).
 	// Always nil in production.
 	appendPreWriteHook func(jobID string)
-
-	// writeFailedTotal counts CronRun WriteFileAtomic failures, split so operators
-	// can distinguish ENOSPC from EACCES / IO errors. Append cannot return errors,
-	// so this counter plus the Error log is the only operator-visible signal (#1338).
-	writeFailedDiskFullTotal atomic.Int64
-	writeFailedOtherTotal    atomic.Int64
 
 	// historyDropTotal counts CronRun records Append dropped because even the
 	// truncated retry payload exceeded maxRunBytes; reconciles
@@ -104,22 +95,32 @@ func (s *runStore) CacheStaleEvictionTotal() int64 {
 	return s.cacheStaleEvictionTotal.Load()
 }
 
-// WriteFailedTotals returns the cumulative count of CronRun WriteFileAtomic
-// failures since process start, split by failure class (monotonic counters).
-// diskFull is osutil.IsDiskFull (ENOSPC + EDQUOT); other is every other write
-// failure. Returns (0, 0) when s is nil or disabled.
+// WriteFailedTotals returns the cumulative count of CronRun record-write
+// failures, split so operators can distinguish ENOSPC from EACCES / IO errors.
+// Append cannot return errors, so this counter plus the Error log is the only
+// signal a lost record leaves behind (#1338). Owned by the shared layout.
 func (s *runStore) WriteFailedTotals() (diskFull, other int64) {
 	if s == nil {
 		return 0, 0
 	}
-	return s.writeFailedDiskFullTotal.Load(), s.writeFailedOtherTotal.Load()
+	return s.layout.WriteFailedTotals()
 }
 
 // enabled reports whether this runStore will persist / serve run history,
 // folding the nil receiver and the disabled flag (StorePath empty) into one
 // predicate so callers do not hand-roll `s.runStore != nil` (#993).
 func (s *runStore) enabled() bool {
-	return s != nil && !s.disabled
+	return s != nil && s.layout.Enabled()
+}
+
+// rootDir is the validated runs/ root, or "" when the store is disabled. The
+// layout is the single source of it; this accessor keeps the path-composing
+// call sites (disk list, trim, readRun) reading one field.
+func (s *runStore) rootDir() string {
+	if s == nil {
+		return ""
+	}
+	return s.layout.Root()
 }
 
 // Defaults (DefaultRunsKeepCount / DefaultRunsKeepWindow) and hard caps
@@ -142,7 +143,7 @@ var ErrCorruptRun = errors.New("cron run: corrupt or oversize record")
 // or absent falls back to the default (#512).
 func newRunStore(storePath string, keepCount int, keepWindow time.Duration, maxBytesOpt ...int64) *runStore {
 	if storePath == "" {
-		return &runStore{disabled: true}
+		return &runStore{layout: runlog.New(runlog.Options{})}
 	}
 	if keepCount <= 0 {
 		keepCount = DefaultRunsKeepCount
@@ -154,48 +155,15 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration, maxB
 	if len(maxBytesOpt) > 0 && maxBytesOpt[0] > 0 {
 		maxBytes = maxBytesOpt[0]
 	}
-	// Abs also cleans `..` / `.` segments; if it fails (CWD gone) Clean still
-	// strips traversal.
-	storeAbs, err := filepath.Abs(storePath)
-	if err != nil {
-		slog.Warn("cron run: storePath Abs failed; falling back to Clean", "path", storePath, "err", err)
-		storeAbs = filepath.Clean(storePath)
-	}
-	root := datadir.ForStore(storeAbs).RunsRoot()
-	// runs/ 根目录主动建为 0o700：否则继承父目录权限（通常 0o755），同机其他
-	// OS 用户可枚举 jobID。失败仅 Warn，后续 Append 仍会 MkdirAll 子目录。
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		slog.Warn("cron run: mkdir root failed", "root", root, "err", err)
-	}
-	// MkdirAll honours perm only on directories it creates, so a pre-existing
-	// 0o755/0o777 runs/ keeps its mode and leaks job existence + content to other
-	// OS users. Chmod the leaf to 0o700; log + continue because bind-mounted
-	// container roots may not be chmod-able. The Lstat below is the
-	// authoritative symlink guard; this is only perm-tightening (#504).
-	if fi, err := os.Lstat(root); err == nil && fi.Mode()&fs.ModeSymlink == 0 && fi.IsDir() {
-		if perm := fi.Mode().Perm(); perm != 0o700 {
-			if cerr := os.Chmod(root, 0o700); cerr != nil {
-				slog.Warn("cron run: chmod runs root to 0700 failed",
-					"root", root, "had_mode", perm.String(), "err", cerr)
-			} else {
-				slog.Info("cron run: corrected runs root mode to 0700",
-					"root", root, "had_mode", perm.String())
-			}
-		}
-	}
-	// MkdirAll does not error when the path already exists as a symlink to a
-	// directory, so a pre-created `<dataDir>/runs -> /etc` would land every
-	// CronRun JSON outside the data dir. Reject anything that is not a plain
-	// directory and disable the store (#825).
-	if fi, err := os.Lstat(root); err == nil {
-		if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
-			slog.Error("cron run: runs/ is a symlink or non-directory; disabling store",
-				"root", root, "mode", fi.Mode().String())
-			return &runStore{disabled: true}
-		}
-	}
+	// datadir names the tree; runlog validates it (Abs + Clean, refuse a
+	// symlinked or non-directory root, tighten a loose mode) and owns every
+	// guard that used to live inline here.
+	layout := runlog.New(runlog.Options{
+		Root:  datadir.ForStore(storePath).RunsRoot(),
+		Label: "cron run",
+	})
 	return &runStore{
-		root:         root,
+		layout:       layout,
 		keepCount:    keepCount,
 		keepWindow:   keepWindow,
 		maxRunBytes:  maxBytes,
@@ -208,12 +176,7 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration, maxB
 // deleted job racing a concurrent Append on the same ID is the same edge
 // handled by the runningJobs sync.Map.
 func (s *runStore) jobLock(jobID string) *sync.Mutex {
-	if v, ok := s.jobLocks.Load(jobID); ok {
-		return v.(*sync.Mutex)
-	}
-	m := &sync.Mutex{}
-	actual, _ := s.jobLocks.LoadOrStore(jobID, m)
-	return actual.(*sync.Mutex)
+	return s.layout.Lock(jobID)
 }
 
 // assertJobLockHeld logs a warning when jobLock(jobID) is currently free —
@@ -223,60 +186,13 @@ func (s *runStore) jobLock(jobID string) *sync.Mutex {
 // accepted, and the TryLock probe only runs under `go test` since it sits on
 // the Append hot path (#961).
 func (s *runStore) assertJobLockHeld(jobID string) {
-	if !testing.Testing() {
-		return
-	}
-	lock := s.jobLock(jobID)
-	if lock.TryLock() {
-		lock.Unlock()
-		slog.Warn("cron runstore: jobLock not held by caller; *Locked-suffix contract violated",
-			"job_id", jobID)
-	}
-}
-
-// ensureJobDir 确保 dir 已存在；jobDirEnsured 命中后跳过 MkdirAll + root fsync
-// 的 syscall（长寿 job 每次 Append 的 lstat+mkdir 是纯浪费）。缓存只是省
-// syscall，不是正确性保证：MkdirAll 幂等，失败时删掉 cache 项让下次重试。
-func (s *runStore) ensureJobDir(jobID, dir string) error {
-	// Symlink guard mirrors newRunStore's root Lstat: MkdirAll does not error on
-	// a symlink-to-directory, and the filepath.Rel check at the call site never
-	// follows on-disk symlinks (#1504). It MUST run on every Append, not just the
-	// cache-miss path, or a swap to a symlink after the first Append would
-	// bypass it; the cache only skips the idempotent MkdirAll + root fsync (#1968).
-	if fi, err := os.Lstat(dir); err == nil {
-		if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
-			slog.Error("cron run: per-job runs dir is a symlink or non-directory; refusing append",
-				"dir", dir, "mode", fi.Mode().String(), "job_id", jobID)
-			// Drop the stale "ensured" marker so a later restore of the dir is re-validated.
-			s.jobDirEnsured.Delete(jobID)
-			return fmt.Errorf("cron run: per-job dir %q is not a plain directory", dir)
-		}
-	}
-	if _, ok := s.jobDirEnsured.Load(jobID); ok {
-		return nil
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		// 不写入 cache：让下次 Append 重试。
-		return err
-	}
-	// The new runs/<jobID>/ entry lives in runs/ and is not durable until the
-	// root is fsynced; WriteFileAtomic only fsyncs the file's immediate parent,
-	// so a crash could orphan the record. Fsync the root once per fresh subdir
-	// (cache-miss path only). SyncDir swallows soft errors (#976).
-	if s.root != "" {
-		if err := osutil.SyncDir(s.root); err != nil {
-			// Non-fatal: only crash-durability of the directory entry is degraded.
-			slog.Debug("cron run: runs root fsync skipped", "root", s.root, "err", err)
-		}
-	}
-	s.jobDirEnsured.Store(jobID, struct{}{})
-	return nil
+	s.layout.AssertLockHeld(jobID)
 }
 
 // Append writes one run record to disk and trims the per-job ring.
 // Errors are logged, never returned: cron must not block history failure.
 func (s *runStore) Append(run *CronRun) {
-	if s == nil || s.disabled || run == nil || run.JobID == "" || run.RunID == "" {
+	if !s.enabled() || run == nil || run.JobID == "" || run.RunID == "" {
 		return
 	}
 	if !IsValidID(run.RunID) {
@@ -360,36 +276,18 @@ func (s *runStore) Append(run *CronRun) {
 	// holding the lock across fsync+rename serialised every Append behind a slow
 	// disk (#1335). The warmCache-reads-new-file-before-cacheHeadPush interleave
 	// is neutralised by the RunID dedup inside cacheHeadPush.
-	dir := filepath.Join(s.root, run.JobID)
-	// Defense-in-depth containment check mirroring readRun's root guard:
-	// IsValidID already rejects non-hex, but a future caller bypassing it must
-	// not be able to escape s.root via the join (#484).
-	if rel, relErr := filepath.Rel(s.root, dir); relErr != nil ||
-		rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		slog.Error("cron run: refusing append outside runs root",
-			"root", s.root, "dir", dir, "rel", rel, "err", relErr,
-			"job_id", run.JobID, "run_id", run.RunID)
-		return
-	}
 	if s.appendPreWriteHook != nil {
 		s.appendPreWriteHook(run.JobID)
 	}
-	if err := s.ensureJobDir(run.JobID, dir); err != nil {
-		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
-		return
-	}
-	path := filepath.Join(dir, run.RunID+".json")
-	if err := osutil.WriteFileAtomic(path, rec.payload, 0o600); err != nil {
-		// Append cannot return an error (history is best-effort), so the counter
-		// plus Error-level log is the only operator-visible signal (#1338).
-		diskFull := osutil.IsDiskFull(err)
-		if diskFull {
-			s.writeFailedDiskFullTotal.Add(1)
-		} else {
-			s.writeFailedOtherTotal.Add(1)
-		}
+	// WriteRecord does the containment check (#484), re-validates the per-job
+	// directory against a symlink swap (#1968), fsyncs the root for a fresh
+	// subdir (#976) and counts the failure split by ENOSPC (#1338) — all of
+	// which used to live inline here and now live once, in internal/runlog.
+	if err := s.layout.WriteRecord(run.JobID, run.RunID, rec.payload); err != nil {
+		// Append cannot return an error (history is best-effort), so this log
+		// plus the layout's counter is all a lost record leaves behind.
 		slog.Error("cron run: write failed; run record dropped",
-			"path", path, "err", err, "disk_full", diskFull,
+			"err", err, "disk_full", osutil.IsDiskFull(err),
 			"job_id", run.JobID, "run_id", run.RunID)
 		return
 	}
@@ -419,7 +317,7 @@ const maxRetryFieldRunes = 256
 // Zero before = no cutoff. Errors during read are logged and the entry
 // skipped; callers always receive a (possibly partial) list.
 func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSummary {
-	if s == nil || s.disabled || jobID == "" {
+	if !s.enabled() || jobID == "" {
 		return nil
 	}
 	if !IsValidID(jobID) {
@@ -472,7 +370,7 @@ func (s *runStore) Recent(jobID string, n int) []CronRunSummary {
 // Returns a fresh slice; empty when the job never ran or no run has a
 // SessionID. Limit clamping mirrors List.
 func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
-	if s == nil || s.disabled || jobID == "" {
+	if !s.enabled() || jobID == "" {
 		return nil
 	}
 	if !IsValidID(jobID) {
@@ -544,13 +442,13 @@ func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
 // unusable" so the caller can render a "this run's record is broken"
 // placeholder instead of a 404.
 func (s *runStore) Get(jobID, runID string) (*CronRun, error) {
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		return nil, fs.ErrNotExist
 	}
 	if !IsValidID(jobID) || !IsValidID(runID) {
 		return nil, fs.ErrNotExist
 	}
-	path := filepath.Join(s.root, jobID, runID+".json")
+	path := filepath.Join(s.rootDir(), jobID, runID+".json")
 	return s.readRun(path)
 }
 
@@ -583,7 +481,7 @@ func readAllInto(f *os.File, buf []byte) ([]byte, error) {
 // jobs only) never reclaims, so "remove runs/ first" is deliberate; it also
 // means a failed persist does not leak runs/ (#762).
 func (s *runStore) DeleteJob(jobID string) {
-	if s == nil || s.disabled || jobID == "" {
+	if !s.enabled() || jobID == "" {
 		return
 	}
 	if !IsValidID(jobID) {
@@ -592,18 +490,18 @@ func (s *runStore) DeleteJob(jobID string) {
 	lock := s.jobLock(jobID)
 	lock.Lock()
 	defer lock.Unlock()
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.RemoveAll(dir); err != nil {
 		slog.Warn("cron run: delete job runs subtree failed", "dir", dir, "err", err)
 	}
-	// Drop the MkdirAll cache so a subsequent Append recreates the dir.
-	s.jobDirEnsured.Delete(jobID)
 	s.cacheInvalidate(jobID)
-	// Reclaim the per-job mutex too, or the map grows without bound across
-	// create/delete churn (#971). Safe under the held lock: a caller that already
-	// loaded THIS mutex still serialises on it; one loading after Delete gets a
-	// fresh mutex — the benign "deleted job races Append" edge from jobLock's godoc.
-	s.jobLocks.Delete(jobID)
+	// Drop the layout's MkdirAll marker AND the per-job mutex: the marker so a
+	// subsequent Append recreates the dir, the mutex so the map does not grow
+	// without bound across create/delete churn (#971). Safe under the held
+	// lock: a caller that already loaded THIS mutex still serialises on it; one
+	// loading after the drop gets a fresh mutex — the benign "deleted job races
+	// Append" edge from jobLock's godoc.
+	s.layout.ForgetOwner(jobID)
 }
 
 // dropOrphanRun undoes ONE run-record write that lost the race against
@@ -612,23 +510,23 @@ func (s *runStore) DeleteJob(jobID string) {
 //
 // Safe without a generation / tombstone: it removes exactly <runID>.json,
 // then rmdir non-recursively (ENOTEMPTY = someone else owns the dir now, and
-// is ignored), drops jobDirEnsured so a later Append re-runs MkdirAll, and
+// is ignored), drops the layout marker so a later Append re-runs MkdirAll, and
 // runs under jobLock(jobID) so it serialises with concurrent Appends. Job IDs
 // are 8 crypto/rand bytes, so a same-ID rebuild is not a practical concern.
 // Errors are logged, never returned.
 func (s *runStore) dropOrphanRun(jobID, runID string) {
-	if s == nil || s.disabled || !IsValidID(jobID) || !IsValidID(runID) {
+	if !s.enabled() || !IsValidID(jobID) || !IsValidID(runID) {
 		return
 	}
 	lock := s.jobLock(jobID)
 	lock.Lock()
 	defer lock.Unlock()
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	path := filepath.Join(dir, runID+".json")
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		slog.Warn("cron run: drop orphan run record failed", "path", path, "err", err)
 	}
-	s.jobDirEnsured.Delete(jobID)
+	s.layout.ForgetOwner(jobID)
 	s.cacheInvalidate(jobID)
 	// Non-recursive on purpose: ENOTEMPTY means another writer owns the dir.
 	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) && !isDirNotEmpty(err) {

@@ -32,7 +32,7 @@ func TestRunStore_Append_PreflightSkipsFirstMarshal(t *testing.T) {
 	// first marshal because Result+Prompt alone exceed maxBytes - 1024.
 	const tightCap = int64(8 * 1024)
 	s := newRunStore(storePath, 10, time.Hour, tightCap)
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		t.Fatalf("newRunStore must succeed; got disabled")
 	}
 
@@ -76,7 +76,7 @@ func TestRunStore_Append_PreflightLetsSmallRunsThrough(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := newRunStore(storePath, 10, time.Hour)
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		t.Fatalf("newRunStore must succeed; got disabled")
 	}
 

@@ -22,7 +22,7 @@ func TestRunStore_SkipAppendTrim_RLockDoesNotBlockReaders(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	store := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 32, 24*time.Hour)
-	if store.disabled {
+	if !store.layout.Enabled() {
 		t.Fatal("store disabled")
 	}
 
@@ -80,7 +80,7 @@ func TestRunStore_SkipAppendTrim_RaceWithCacheGet(t *testing.T) {
 	tmp := t.TempDir()
 	const keep = 32
 	store := newRunStore(filepath.Join(tmp, "cron_jobs.json"), keep, 24*time.Hour)
-	if store.disabled {
+	if !store.layout.Enabled() {
 		t.Fatal("store disabled")
 	}
 

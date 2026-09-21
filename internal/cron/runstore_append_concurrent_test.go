@@ -20,7 +20,7 @@ func TestRunStore_AppendConcurrentSameJob_NoRingDup(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	store := newRunStore(storePath, 100, 24*time.Hour)
-	if store.disabled {
+	if !store.layout.Enabled() {
 		t.Fatal("store disabled")
 	}
 
