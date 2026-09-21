@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/runlog"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
@@ -170,32 +171,13 @@ func backfillLedger(p backfillPaths, dryRun bool, out io.Writer) (backfillReport
 	return rep, nil
 }
 
-// walkJSON feeds every *.json file two levels below root to fn; a missing
-// root is not an error (nothing to import).
+// walkJSON feeds every run record two levels below root to fn, counting
+// unreadable entries into the report. The walk itself belongs to
+// internal/runlog, which owns what a run record file is (#2709); this is a
+// read-only pass, so it deliberately does not go through runlog.Layout — a
+// dry-run backfill must not create or chmod anything.
 func walkJSON(root string, rep *backfillReport, fn func([]byte)) {
-	dirs, err := os.ReadDir(root)
-	if err != nil {
-		return
-	}
-	for _, d := range dirs {
-		if !d.IsDir() {
-			continue
-		}
-		files, err := os.ReadDir(filepath.Join(root, d.Name()))
-		if err != nil {
-			rep.Unreadable++
-			continue
-		}
-		for _, f := range files {
-			if f.IsDir() || filepath.Ext(f.Name()) != ".json" {
-				continue
-			}
-			raw, err := os.ReadFile(filepath.Join(root, d.Name(), f.Name()))
-			if err != nil {
-				rep.Unreadable++
-				continue
-			}
-			fn(raw)
-		}
-	}
+	runlog.WalkRecords(root,
+		func(_ string, _ error) { rep.Unreadable++ },
+		func(rec runlog.Record) { fn(rec.Raw) })
 }
