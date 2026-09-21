@@ -29,7 +29,7 @@ func TestRunStore_Append_PostMarshalShrinkRecomputesResultBytes(t *testing.T) {
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	const tightCap = int64(8 * 1024)
 	s := newRunStore(storePath, 10, time.Hour, tightCap)
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		t.Fatalf("newRunStore must succeed; got disabled")
 	}
 

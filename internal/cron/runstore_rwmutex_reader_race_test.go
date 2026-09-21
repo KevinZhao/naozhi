@@ -25,7 +25,7 @@ func TestRunStore_RWMutexReaders_NoRaceUnderConcurrentAppend(t *testing.T) {
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	const keep = 32
 	store := newRunStore(storePath, keep, 24*time.Hour)
-	if store.disabled {
+	if !store.layout.Enabled() {
 		t.Fatal("store disabled")
 	}
 

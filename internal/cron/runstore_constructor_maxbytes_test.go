@@ -24,7 +24,7 @@ func TestRunStore_NewRunStore_MaxBytesParity(t *testing.T) {
 
 	// Default: no override → uses MaxRunRecordBytes.
 	sDefault := newRunStore(storePath, 10, time.Hour)
-	if sDefault == nil || sDefault.disabled {
+	if sDefault == nil || !sDefault.layout.Enabled() {
 		t.Fatalf("default newRunStore must succeed; got disabled")
 	}
 	if sDefault.maxRunBytes != int64(MaxRunRecordBytes) {
@@ -37,7 +37,7 @@ func TestRunStore_NewRunStore_MaxBytesParity(t *testing.T) {
 	tmp2 := t.TempDir()
 	storePath2 := filepath.Join(tmp2, "cron_jobs.json")
 	sCustom := newRunStore(storePath2, 10, time.Hour, tinyCap)
-	if sCustom == nil || sCustom.disabled {
+	if sCustom == nil || !sCustom.layout.Enabled() {
 		t.Fatalf("custom newRunStore must succeed; got disabled")
 	}
 	if sCustom.maxRunBytes != tinyCap {
@@ -75,7 +75,7 @@ func TestRunStore_NewRunStore_MaxBytesEnforced(t *testing.T) {
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	const tinyCap = int64(512)
 	s := newRunStore(storePath, 10, time.Hour, tinyCap)
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		t.Fatalf("newRunStore must succeed; got disabled")
 	}
 

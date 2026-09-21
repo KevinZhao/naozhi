@@ -41,7 +41,7 @@ func TestExclusionSourceConsistency(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { s.Stop() })
-	if s.runStore == nil || s.runStore.disabled {
+	if s.runStore == nil || !s.runStore.layout.Enabled() {
 		t.Fatal("test precondition: runStore must be enabled to exercise the slow-path source")
 	}
 

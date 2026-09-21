@@ -32,7 +32,7 @@ import (
 func TestDeleteJobByID_PersistFailureCleansRunsDir(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 
-	if s.runStore == nil || s.runStore.disabled {
+	if s.runStore == nil || !s.runStore.layout.Enabled() {
 		t.Fatal("test setup precondition: runStore must be enabled")
 	}
 
@@ -47,7 +47,7 @@ func TestDeleteJobByID_PersistFailureCleansRunsDir(t *testing.T) {
 		State:     RunStateSucceeded,
 	})
 
-	jobDir := filepath.Join(s.runStore.root, id)
+	jobDir := filepath.Join(s.runStore.rootDir(), id)
 	if _, err := os.Stat(jobDir); err != nil {
 		t.Fatalf("setup: runs/<jobID>/ should exist after Append: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestDeleteJobByID_PersistFailureCleansRunsDir(t *testing.T) {
 func TestDeleteJobByPrefix_PersistFailureCleansRunsDir(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 
-	if s.runStore == nil || s.runStore.disabled {
+	if s.runStore == nil || !s.runStore.layout.Enabled() {
 		t.Fatal("test setup precondition: runStore must be enabled")
 	}
 
@@ -88,7 +88,7 @@ func TestDeleteJobByPrefix_PersistFailureCleansRunsDir(t *testing.T) {
 		State:     RunStateSucceeded,
 	})
 
-	jobDir := filepath.Join(s.runStore.root, id)
+	jobDir := filepath.Join(s.runStore.rootDir(), id)
 	if _, err := os.Stat(jobDir); err != nil {
 		t.Fatalf("setup: runs/<jobID>/ should exist after Append: %v", err)
 	}

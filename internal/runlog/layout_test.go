@@ -164,17 +164,48 @@ func TestEnsureOwnerDir_RevalidatesAfterSwap(t *testing.T) {
 // TestOwnerDir_RefusesEscape: containment is defence in depth behind the
 // caller's ID validation — a caller that forgets to validate must still not be
 // able to walk out of the root (#484).
+//
+// The table came from internal/cron's TestRunStore_Append_RootGuardLogic, which
+// asserted the same cases against a copy of the predicate re-typed inside the
+// test rather than against the production path. That made it a test of
+// filepath.Rel arithmetic: the guard could be deleted from the store and the
+// test would still pass. Here the same cases drive the real function.
 func TestOwnerDir_RefusesEscape(t *testing.T) {
 	t.Parallel()
-	l := newLayout(t, filepath.Join(t.TempDir(), "runs"))
+	root := filepath.Join(t.TempDir(), "runs")
+	l := newLayout(t, root)
 
-	for _, owner := range []string{"..", "../..", "../sibling", "a/../.."} {
-		if _, err := l.OwnerDir(owner); err == nil {
-			t.Errorf("OwnerDir(%q) must be refused", owner)
-		}
-	}
-	if _, err := l.OwnerDir(""); err == nil {
-		t.Error("an empty owner id must be refused")
+	for _, tc := range []struct {
+		name   string
+		owner  string
+		reject bool
+	}{
+		{"normal-hex-id", "0123456789abcdef", false},
+		{"escape-via-dotdot", "..", true},
+		{"escape-deeper", "../..", true},
+		{"escape-into-sibling", "../other-runs", true},
+		{"escape-mid-path", "a/../..", true},
+		// An owner id carrying a separator is refused rather than silently
+		// joined into a nested path: one owner is one directory component.
+		{"absolute-path", string(filepath.Separator) + "etc", true},
+		{"nested-path", "a" + string(filepath.Separator) + "b", true},
+		{"empty-id", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, err := l.OwnerDir(tc.owner)
+			if tc.reject {
+				if err == nil {
+					t.Fatalf("OwnerDir(%q) = %q, want refused", tc.owner, dir)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("OwnerDir(%q) = %v, want accepted", tc.owner, err)
+			}
+			if filepath.Dir(dir) != root {
+				t.Errorf("OwnerDir(%q) = %q, want a direct child of %q", tc.owner, dir, root)
+			}
+		})
 	}
 }
 
@@ -303,6 +334,10 @@ func TestForgetOwner_DropsLockAndMarker(t *testing.T) {
 
 	if after := l.Lock("owner1"); after == before {
 		t.Error("ForgetOwner must drop the mutex so the live set tracks live owners")
+	}
+	l.ForgetOwner("owner1")
+	if n := l.OwnerLockCount(); n != 0 {
+		t.Errorf("OwnerLockCount = %d after forgetting the only owner, want 0", n)
 	}
 	if _, err := l.EnsureOwnerDir("owner1"); err != nil {
 		t.Fatalf("re-ensure after ForgetOwner: %v", err)

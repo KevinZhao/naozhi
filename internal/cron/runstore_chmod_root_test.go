@@ -37,7 +37,7 @@ func TestRunStore_ChmodsExistingRunsRootTo0700(t *testing.T) {
 	}
 
 	s := newRunStore(storePath, 10, time.Hour)
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		t.Fatalf("newRunStore returned nil/disabled despite valid root")
 	}
 	fi, err := os.Stat(root)
@@ -71,7 +71,7 @@ func TestRunStore_PreservesAlready0700RunsRoot(t *testing.T) {
 		t.Fatalf("chmod runs root: %v", err)
 	}
 	s := newRunStore(storePath, 10, time.Hour)
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		t.Fatalf("newRunStore returned nil/disabled despite valid root")
 	}
 	fi, err := os.Stat(root)

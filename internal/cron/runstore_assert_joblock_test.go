@@ -28,7 +28,7 @@ func TestRunStore_AssertJobLockHeld_NoOpInProduction(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := newRunStore(storePath, 10, time.Hour)
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		t.Fatalf("newRunStore must succeed; got disabled")
 	}
 	// Lock NOT held — under test we expect a slog.Warn but no panic.

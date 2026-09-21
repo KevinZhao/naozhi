@@ -30,14 +30,14 @@ func TestWarmCache_UnreadableCountDistinctFromCorrupt(t *testing.T) {
 
 	// Add one corrupt file (bad JSON).
 	corruptID := mustGenerateRunID()
-	corruptPath := filepath.Join(s.root, jobID, corruptID+".json")
+	corruptPath := filepath.Join(s.rootDir(), jobID, corruptID+".json")
 	if err := os.WriteFile(corruptPath, []byte("{bad json"), 0o600); err != nil {
 		t.Fatalf("write corrupt: %v", err)
 	}
 
 	// Add one unreadable file (EACCES via chmod 0000).
 	unreadableID := mustGenerateRunID()
-	unreadablePath := filepath.Join(s.root, jobID, unreadableID+".json")
+	unreadablePath := filepath.Join(s.rootDir(), jobID, unreadableID+".json")
 	if err := os.WriteFile(unreadablePath, []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write unreadable: %v", err)
 	}

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/runlog"
 )
 
 // TestScanSortedRunDir_CapBoundedByKeepCount pins the R249-PERF-25 (#940)
@@ -36,7 +38,7 @@ func TestScanSortedRunDir_CapBoundedByKeepCount(t *testing.T) {
 
 	s := newTestStore(t, keepCount, 30*24*time.Hour)
 	jobID := mustGenerateID()
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -106,7 +108,11 @@ func TestScanSortedRunDir_CapKeepCountZeroFallsBackToLen(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	s := &runStore{root: root, keepCount: 0, maxRunBytes: MaxRunRecordBytes}
+	s := &runStore{
+		layout:      runlog.New(runlog.Options{Root: root, Label: "cron run"}),
+		keepCount:   0,
+		maxRunBytes: MaxRunRecordBytes,
+	}
 	jobID := mustGenerateID()
 	dir := filepath.Join(root, jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

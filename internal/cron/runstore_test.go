@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/runlog"
 )
 
 // runstore_test.go covers internal/cron/runstore.go (RFC: docs/rfc/cron-run-history.md).
@@ -30,7 +32,7 @@ func newTestStore(t *testing.T, keepCount int, keepWindow time.Duration) *runSto
 	if s == nil {
 		t.Fatalf("newRunStore returned nil")
 	}
-	if s.disabled {
+	if !s.layout.Enabled() {
 		t.Fatalf("newRunStore unexpectedly disabled")
 	}
 	return s
@@ -114,7 +116,7 @@ func TestRunStore_RejectInvalidIDs(t *testing.T) {
 	// Non-hex jobID → rejected.
 	run := makeRun("not-hex-id", time.Now())
 	s.Append(run)
-	if n := countJSONFiles(t, s.root); n != 0 {
+	if n := countJSONFiles(t, s.rootDir()); n != 0 {
 		t.Fatalf("non-hex jobID produced %d files; want 0", n)
 	}
 
@@ -123,7 +125,7 @@ func TestRunStore_RejectInvalidIDs(t *testing.T) {
 	run = makeRun(jobID, time.Now())
 	run.RunID = "ZZZZZZZZZZZZZZZZ"
 	s.Append(run)
-	if n := countJSONFiles(t, s.root); n != 0 {
+	if n := countJSONFiles(t, s.rootDir()); n != 0 {
 		t.Fatalf("non-hex runID produced %d files; want 0", n)
 	}
 
@@ -145,7 +147,7 @@ func TestRunStore_RejectInvalidIDs(t *testing.T) {
 func TestRunStore_Disabled(t *testing.T) {
 	t.Parallel()
 	s := newRunStore("", 0, 0)
-	if s == nil || !s.disabled {
+	if s == nil || s.layout.Enabled() {
 		t.Fatalf("expected disabled store; got %+v", s)
 	}
 
@@ -248,7 +250,7 @@ func TestRunStore_RetentionByCount(t *testing.T) {
 		runIDs[i] = run.RunID
 		s.Append(run)
 		// Pin mtime so the trim's mtime-desc rank order is deterministic.
-		path := filepath.Join(s.root, jobID, run.RunID+".json")
+		path := filepath.Join(s.rootDir(), jobID, run.RunID+".json")
 		ts := now.Add(time.Duration(i) * time.Minute)
 		if err := os.Chtimes(path, ts, ts); err != nil {
 			t.Fatalf("Chtimes: %v", err)
@@ -262,7 +264,7 @@ func TestRunStore_RetentionByCount(t *testing.T) {
 	s.trimJobLocked(jobID, now.Add(time.Hour))
 	lock.Unlock()
 
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if n := countJSONFiles(t, dir); n != 3 {
 		t.Fatalf("after retention got %d files; want 3", n)
 	}
@@ -296,7 +298,7 @@ func TestRunStore_RetentionByWindow(t *testing.T) {
 	}
 	// Push runs[0] mtime back 48 hours.
 	old := now.Add(-48 * time.Hour)
-	oldPath := filepath.Join(s.root, jobID, runs[0].RunID+".json")
+	oldPath := filepath.Join(s.rootDir(), jobID, runs[0].RunID+".json")
 	if err := os.Chtimes(oldPath, old, old); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
@@ -333,7 +335,7 @@ func TestRunStore_RetentionAndConjunction(t *testing.T) {
 	// Age runs[0] and runs[1] to 48h ago.
 	old := now.Add(-48 * time.Hour)
 	for _, idx := range []int{0, 1} {
-		p := filepath.Join(s.root, jobID, runs[idx].RunID+".json")
+		p := filepath.Join(s.rootDir(), jobID, runs[idx].RunID+".json")
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatalf("Chtimes: %v", err)
 		}
@@ -344,7 +346,7 @@ func TestRunStore_RetentionAndConjunction(t *testing.T) {
 	s.trimJobLocked(jobID, now)
 	lock.Unlock()
 
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if n := countJSONFiles(t, dir); n != 3 {
 		t.Fatalf("after AND trim got %d; want 3", n)
 	}
@@ -371,7 +373,7 @@ func TestRunStore_DeleteJobRemovesSubtree(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		s.Append(makeRun(jobID, time.Now()))
 	}
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("expected dir to exist; err=%v", err)
 	}
@@ -383,9 +385,9 @@ func TestRunStore_DeleteJobRemovesSubtree(t *testing.T) {
 }
 
 // TestRunStore_DeleteJobReclaimsJobLock pins R249-ARCH-3 (#971): DeleteJob
-// must drop the per-job *sync.Mutex from jobLocks so a long-lived deployment
+// must drop the per-job *sync.Mutex from the layout so a long-lived deployment
 // that creates and deletes many jobs does not grow the map without bound.
-// Before the fix jobLocks entries were "never reclaimed", contradicting the
+// Before the fix those entries were "never reclaimed", contradicting the
 // claimed maxJobsHardCap bound.
 func TestRunStore_DeleteJobReclaimsJobLock(t *testing.T) {
 	t.Parallel()
@@ -393,21 +395,22 @@ func TestRunStore_DeleteJobReclaimsJobLock(t *testing.T) {
 	jobID := mustGenerateID()
 
 	s.Append(makeRun(jobID, time.Now()))
-	// Appending takes jobLock, so the entry must exist now.
-	if _, ok := s.jobLocks.Load(jobID); !ok {
-		t.Fatalf("expected jobLocks entry after Append")
+	// Appending takes jobLock, so the mutex must be live now.
+	before := s.jobLock(jobID)
+	if n := s.layout.OwnerLockCount(); n != 1 {
+		t.Fatalf("owner lock count after Append = %d, want 1", n)
 	}
 
 	s.DeleteJob(jobID)
-	if _, ok := s.jobLocks.Load(jobID); ok {
-		t.Fatalf("jobLocks entry still present after DeleteJob; per-job mutex leaked")
-	}
 
-	// Also confirm no entries linger in aggregate.
-	count := 0
-	s.jobLocks.Range(func(_, _ any) bool { count++; return true })
-	if count != 0 {
-		t.Fatalf("jobLocks has %d residual entries after deleting the only job; want 0", count)
+	// A fresh mutex for the same ID is what "reclaimed" looks like from
+	// outside: the old one is no longer in the map.
+	if after := s.jobLock(jobID); after == before {
+		t.Fatal("per-job mutex survived DeleteJob; the lock map leaks across create/delete churn")
+	}
+	s.layout.ForgetOwner(jobID) // drop the one the assertion above just created
+	if n := s.layout.OwnerLockCount(); n != 0 {
+		t.Fatalf("owner lock count = %d after deleting the only job; want 0", n)
 	}
 }
 
@@ -441,7 +444,7 @@ func TestRunStore_GetCorruptReturnsErrCorruptRun(t *testing.T) {
 	jobID := mustGenerateID()
 	runID := mustGenerateRunID()
 
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -479,7 +482,7 @@ func TestRunStore_GetOversizeReturnsErrCorruptRun(t *testing.T) {
 	if int64(len(data)) <= MaxRunRecordBytes {
 		t.Fatalf("test fixture too small: %d <= %d", len(data), MaxRunRecordBytes)
 	}
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -504,7 +507,7 @@ func TestRunStore_ListSkipsCorruptEntries(t *testing.T) {
 	s.Append(good)
 
 	// Plant a sibling corrupt file.
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	bad := filepath.Join(dir, mustGenerateRunID()+".json")
 	if err := os.WriteFile(bad, []byte("not json"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -551,7 +554,7 @@ func TestRunStore_DecodeParallel_UnreadableCountedSeparately(t *testing.T) {
 	}
 
 	// Make the last (newest) run unreadable — permission error, not corruption.
-	unreadablePath := filepath.Join(s.root, jobID, runIDs[total-1]+".json")
+	unreadablePath := filepath.Join(s.rootDir(), jobID, runIDs[total-1]+".json")
 	if err := os.Chmod(unreadablePath, 0o000); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
@@ -594,7 +597,7 @@ func TestRunStore_ListBeforeCutoff(t *testing.T) {
 		// Pin mtime ≈ StartedAt to match production semantics. Required
 		// after R238-GO-8 (#796) added a coarse mtime gate before
 		// readRun.
-		path := filepath.Join(s.root, jobID, run.RunID+".json")
+		path := filepath.Join(s.rootDir(), jobID, run.RunID+".json")
 		if err := os.Chtimes(path, startedAt, startedAt); err != nil {
 			t.Fatalf("Chtimes: %v", err)
 		}
@@ -636,7 +639,7 @@ func TestRunStore_ConcurrentAppendsSameJobAreSerialised(t *testing.T) {
 	}
 	wg.Wait()
 
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if n := countJSONFiles(t, dir); n != N {
 		t.Fatalf("concurrent appends produced %d files; want %d", n, N)
 	}
@@ -669,7 +672,7 @@ func TestRunStore_TrimAllScansAllJobs(t *testing.T) {
 	old := now.Add(-48 * time.Hour)
 	target := jobIDs[1]
 	for _, idx := range []int{0, 1} {
-		p := filepath.Join(s.root, target, allRuns[target][idx].RunID+".json")
+		p := filepath.Join(s.rootDir(), target, allRuns[target][idx].RunID+".json")
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatalf("Chtimes: %v", err)
 		}
@@ -679,13 +682,13 @@ func TestRunStore_TrimAllScansAllJobs(t *testing.T) {
 
 	// jobIDs[0] and jobIDs[2] untouched (5 each).
 	for _, jid := range []string{jobIDs[0], jobIDs[2]} {
-		dir := filepath.Join(s.root, jid)
+		dir := filepath.Join(s.rootDir(), jid)
 		if n := countJSONFiles(t, dir); n != 5 {
 			t.Fatalf("trimAll modified untouched job %s: %d files", jid, n)
 		}
 	}
 	// jobIDs[1] shrunk to 3.
-	dir := filepath.Join(s.root, target)
+	dir := filepath.Join(s.rootDir(), target)
 	if n := countJSONFiles(t, dir); n != 3 {
 		t.Fatalf("trimAll on aged job: %d files want 3", n)
 	}
@@ -764,7 +767,7 @@ func TestRunStore_TrimAllCtxCancelled(t *testing.T) {
 			r := makeRun(jid, now)
 			s.Append(r)
 			if j < 2 {
-				p := filepath.Join(s.root, jid, r.RunID+".json")
+				p := filepath.Join(s.rootDir(), jid, r.RunID+".json")
 				if err := os.Chtimes(p, old, old); err != nil {
 					t.Fatalf("Chtimes: %v", err)
 				}
@@ -780,7 +783,7 @@ func TestRunStore_TrimAllCtxCancelled(t *testing.T) {
 	// before any trimJobUnderLock runs, so every job retains its 3 files.
 	untouched := 0
 	for _, jid := range jobIDs {
-		dir := filepath.Join(s.root, jid)
+		dir := filepath.Join(s.rootDir(), jid)
 		if countJSONFiles(t, dir) == 3 {
 			untouched++
 		}
@@ -793,7 +796,7 @@ func TestRunStore_TrimAllCtxCancelled(t *testing.T) {
 	// Sanity: same store with fresh ctx does perform the trim.
 	s.trimAllCtx(context.Background(), now)
 	for _, jid := range jobIDs {
-		dir := filepath.Join(s.root, jid)
+		dir := filepath.Join(s.rootDir(), jid)
 		if n := countJSONFiles(t, dir); n != 1 {
 			t.Fatalf("trimAllCtx with bg ctx: job %s has %d files, want 1", jid, n)
 		}
@@ -814,7 +817,7 @@ func TestRunStore_RecentReturnsNewestFirst(t *testing.T) {
 		runs[i] = makeRun(jobID, now.Add(time.Duration(i)*time.Minute))
 		s.Append(runs[i])
 		// Pin mtime so List's mtime-desc sort is deterministic.
-		p := filepath.Join(s.root, jobID, runs[i].RunID+".json")
+		p := filepath.Join(s.rootDir(), jobID, runs[i].RunID+".json")
 		ts := now.Add(time.Duration(i) * time.Minute)
 		if err := os.Chtimes(p, ts, ts); err != nil {
 			t.Fatalf("Chtimes: %v", err)
@@ -1027,6 +1030,10 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &runStore{
+				// A disabled layout still owns real per-job locks, which is
+				// what this cache-only test needs; a nil layout would be a
+				// state production never constructs.
+				layout:     runlog.New(runlog.Options{}),
 				keepCount:  tc.keepCount,
 				keepWindow: tc.keepWindow,
 			}
@@ -1049,7 +1056,7 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 // when the cache has no entry for the given job, skipAppendTrim must return
 // false (forcing a full trim) and not panic on the nil load.
 func TestRunStore_SkipAppendTrim_MissingEntry(t *testing.T) {
-	s := &runStore{keepCount: 100, keepWindow: 24 * time.Hour}
+	s := &runStore{layout: runlog.New(runlog.Options{}), keepCount: 100, keepWindow: 24 * time.Hour}
 	// R239-GO-5: skipAppendTrim contract requires caller hold jobLock.
 	lock := s.jobLock("never-seen")
 	lock.Lock()
@@ -1071,7 +1078,7 @@ func TestRunStore_ReadRunNoLstat_MatchesReadRun(t *testing.T) {
 	run := makeRun(jobID, time.Now())
 	s.Append(run)
 
-	path := filepath.Join(s.root, jobID, run.RunID+".json")
+	path := filepath.Join(s.rootDir(), jobID, run.RunID+".json")
 	withLstat, err := s.readRun(path)
 	if err != nil {
 		t.Fatalf("readRun: %v", err)
@@ -1095,11 +1102,11 @@ func TestRunStore_ReadRunNoLstat_OverCap(t *testing.T) {
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	s.maxRunBytes = 64 // tight cap; valid CronRun JSON is well over 64 bytes.
 	jobID := mustGenerateID()
-	if err := os.MkdirAll(filepath.Join(s.root, jobID), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(s.rootDir(), jobID), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	runID := mustGenerateRunID()
-	path := filepath.Join(s.root, jobID, runID+".json")
+	path := filepath.Join(s.rootDir(), jobID, runID+".json")
 	payload := []byte(`{"run_id":"` + runID + `","job_id":"` + jobID + `","state":"succeeded","prompt":"this prompt is intentionally long enough to bust the tight cap"}`)
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -1127,8 +1134,8 @@ func TestNewRunStoreRejectsSymlinkRunsDir(t *testing.T) {
 	}
 	storePath := filepath.Join(dataDir, "cron.json")
 	s := newRunStore(storePath, 0, 0)
-	if !s.disabled {
-		t.Fatalf("newRunStore must disable when runs/ is a symlink; got enabled root=%q", s.root)
+	if s.layout.Enabled() {
+		t.Fatalf("newRunStore must disable when runs/ is a symlink; got enabled root=%q", s.rootDir())
 	}
 	// Ensure subsequent Append is a safe no-op rather than writing into
 	// the symlink target.
@@ -1157,12 +1164,12 @@ func TestNewRunStoreNormalisesDotDot(t *testing.T) {
 	// the stored root is canonicalised).
 	dirty := filepath.Join(tmp, "x", "..", "cron.json")
 	s := newRunStore(dirty, 0, 0)
-	if s.disabled {
+	if !s.layout.Enabled() {
 		t.Fatalf("newRunStore must succeed with cleanable path; got disabled")
 	}
 	wantRoot := filepath.Join(tmp, "runs")
-	if s.root != wantRoot {
-		t.Errorf("root = %q, want %q (filepath.Abs must normalise `..`)", s.root, wantRoot)
+	if s.rootDir() != wantRoot {
+		t.Errorf("root = %q, want %q (filepath.Abs must normalise `..`)", s.rootDir(), wantRoot)
 	}
 }
 
@@ -1180,7 +1187,7 @@ func TestReadRunRefusesSymlink(t *testing.T) {
 	jobID := mustGenerateID()
 	runID := mustGenerateRunID()
 
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -1232,7 +1239,7 @@ func TestRunStore_DiskList_BeforeStartedAtFilter(t *testing.T) {
 		runIDs[i] = run.RunID
 		s.Append(run)
 		// Pin mtime ≈ StartedAt to mirror the production invariant.
-		path := filepath.Join(s.root, jobID, run.RunID+".json")
+		path := filepath.Join(s.rootDir(), jobID, run.RunID+".json")
 		if err := os.Chtimes(path, sa, sa); err != nil {
 			t.Fatalf("Chtimes: %v", err)
 		}
@@ -1243,7 +1250,7 @@ func TestRunStore_DiskList_BeforeStartedAtFilter(t *testing.T) {
 	// corruptCount. Test asserts the list payload remains unchanged
 	// (operator-visible contract preserved).
 	for i := 0; i < 2; i++ {
-		path := filepath.Join(s.root, jobID, runIDs[i]+".json")
+		path := filepath.Join(s.rootDir(), jobID, runIDs[i]+".json")
 		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 			t.Fatalf("corrupt write: %v", err)
 		}
@@ -1291,7 +1298,7 @@ func TestRunStore_DiskList_BeforeStartedAtMtimeDivergence(t *testing.T) {
 	// Bump mtime to NOW (post-`before`) to simulate a late finishRun
 	// rename / process-restart re-touch. StartedAt in the JSON is
 	// untouched — the bug surface.
-	path := filepath.Join(s.root, jobID, run.RunID+".json")
+	path := filepath.Join(s.rootDir(), jobID, run.RunID+".json")
 	if err := os.Chtimes(path, now, now); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
