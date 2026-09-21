@@ -163,7 +163,7 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 // extend the jobLock + entry.mu hold (#527).
 func (s *runStore) warmCache(jobID string) {
 	corruptCount, unreadableCount := s.warmCacheLocked(jobID)
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if corruptCount > 0 {
 		slog.Warn("cron runstore warmCache skipped corrupt files",
 			"count", corruptCount, "dir", dir)

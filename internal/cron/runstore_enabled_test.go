@@ -3,13 +3,15 @@ package cron
 import (
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/runlog"
 )
 
 // TestRunStoreEnabled_FoldsNilAndDisabled pins R249-ARCH-29 (#993): the
 // enabled() predicate must collapse the two historically-separate "off"
 // signals — a nil *runStore receiver and the disabled flag — into one
 // gate so external callers stop mixing `s.runStore != nil` with the
-// method-internal `s.disabled` guard.
+// method-internal enabled() guard (now the shared layout's predicate).
 func TestRunStoreEnabled_FoldsNilAndDisabled(t *testing.T) {
 	t.Parallel()
 
@@ -18,12 +20,12 @@ func TestRunStoreEnabled_FoldsNilAndDisabled(t *testing.T) {
 		t.Fatal("nil *runStore must report enabled()==false")
 	}
 
-	disabled := &runStore{disabled: true}
+	disabled := &runStore{layout: runlog.New(runlog.Options{})}
 	if disabled.enabled() {
 		t.Fatal("disabled runStore must report enabled()==false")
 	}
 
-	live := &runStore{disabled: false}
+	live := &runStore{layout: runlog.New(runlog.Options{Root: t.TempDir(), Label: "cron run"})}
 	if !live.enabled() {
 		t.Fatal("non-nil, non-disabled runStore must report enabled()==true")
 	}
@@ -36,7 +38,7 @@ func TestRunStoreEnabled_FoldsNilAndDisabled(t *testing.T) {
 func TestScheduler_DisabledRunStore_AccessorsReturnEmpty(t *testing.T) {
 	t.Parallel()
 
-	s := &Scheduler{runStore: &runStore{disabled: true}}
+	s := &Scheduler{runStore: &runStore{layout: runlog.New(runlog.Options{})}}
 
 	if got := s.ListRuns("abc", 10, time.Time{}); got != nil {
 		t.Errorf("ListRuns on disabled store = %v, want nil", got)

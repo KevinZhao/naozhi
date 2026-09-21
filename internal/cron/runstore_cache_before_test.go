@@ -35,7 +35,7 @@ func TestRunStore_ListBeforeCutoffServedFromCache(t *testing.T) {
 	// Now nuke the on-disk runs/<jobID>/ directory. If the
 	// before-cutoff path goes to disk we'll observe an empty result;
 	// the cache fast-path must return the in-memory filter answer.
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := removeRunsDir(t, dir); err != nil {
 		t.Fatalf("removeRunsDir: %v", err)
 	}

@@ -214,18 +214,18 @@ func (s *runStore) trimAll(now time.Time) {
 // ReadDir+Remove window is short and needs the per-job lock held. nil ctx is
 // tolerated for trimAll().
 func (s *runStore) trimAllCtx(ctx context.Context, now time.Time) {
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		return
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	entries, err := os.ReadDir(s.root)
+	entries, err := os.ReadDir(s.rootDir())
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			// 非 NotExist 一般指向配置错误（路径指向非目录、权限不足
 			// 等），用 Warn 让运维定位；冷启动 GC 失败不致命，记录后继续。
-			slog.Warn("cron run: trimAll readdir failed", "root", s.root, "err", err)
+			slog.Warn("cron run: trimAll readdir failed", "root", s.rootDir(), "err", err)
 		}
 		return
 	}
@@ -306,7 +306,7 @@ func (s *runStore) warmJobsParallel(ctx context.Context, jobIDs []string) {
 				jobID := jobIDs[i]
 				warmCorrupt, warmUnreadable := s.warmCacheLocked(jobID)
 				if warmCorrupt > 0 || warmUnreadable > 0 {
-					dir := filepath.Join(s.root, jobID)
+					dir := filepath.Join(s.rootDir(), jobID)
 					if warmCorrupt > 0 {
 						slog.Warn("cron runstore: cold-start warm skipped corrupt files",
 							"count", warmCorrupt, "dir", dir)

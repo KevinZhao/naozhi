@@ -30,7 +30,7 @@ func TestRunStore_WarmCacheLocked_ReturnsCorruptCount(t *testing.T) {
 	// Drop a corrupt JSON file alongside it so diskListNewestFirst's
 	// scan picks it up and parseRunBytes rejects it as ErrCorruptRun.
 	corruptID := mustGenerateID()
-	corruptPath := filepath.Join(s.root, jobID, corruptID+".json")
+	corruptPath := filepath.Join(s.rootDir(), jobID, corruptID+".json")
 	if err := os.WriteFile(corruptPath, []byte("{not json"), 0o600); err != nil {
 		t.Fatalf("write corrupt run: %v", err)
 	}

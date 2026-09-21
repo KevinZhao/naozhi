@@ -20,7 +20,7 @@ func TestScanSortedRunDir_SkipSortTrivial(t *testing.T) {
 
 	// Empty dir (mkdir but no files) → zero items, no panic from the skip.
 	emptyJob := mustGenerateID()
-	if err := os.MkdirAll(filepath.Join(s.root, emptyJob), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(s.rootDir(), emptyJob), 0o700); err != nil {
 		t.Fatalf("mkdir empty: %v", err)
 	}
 	items, _, err := s.scanSortedRunDir(emptyJob)
@@ -33,7 +33,7 @@ func TestScanSortedRunDir_SkipSortTrivial(t *testing.T) {
 
 	// Single run → exactly one item, returned intact despite the skipped sort.
 	oneJob := mustGenerateID()
-	dir := filepath.Join(s.root, oneJob)
+	dir := filepath.Join(s.rootDir(), oneJob)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir one: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestScanSortedRunDir_SkipSortTrivial(t *testing.T) {
 
 	// Multi run → still fully sorted newest-first (sort path not skipped).
 	multiJob := mustGenerateID()
-	mdir := filepath.Join(s.root, multiJob)
+	mdir := filepath.Join(s.rootDir(), multiJob)
 	if err := os.MkdirAll(mdir, 0o700); err != nil {
 		t.Fatalf("mkdir multi: %v", err)
 	}

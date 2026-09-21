@@ -21,7 +21,7 @@ func BenchmarkRunStore_AssertJobLockHeld(b *testing.B) {
 	tmp := b.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := newRunStore(storePath, 10, time.Hour)
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		b.Fatalf("newRunStore must succeed; got disabled")
 	}
 	jobID := "0123456789abcdef"

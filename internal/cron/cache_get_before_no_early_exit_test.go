@@ -57,7 +57,7 @@ func TestCacheGetBefore_NoEarlyExitOnFirstMatch(t *testing.T) {
 
 	// Nuke disk so any fallback would surface as an empty / short result and
 	// we are strictly asserting the cache scan.
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("RemoveAll: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestCacheGetBefore_OutOfOrderRingNoBreak(t *testing.T) {
 		t.Fatalf("warm List len=%d want 4", len(got))
 	}
 
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("RemoveAll: %v", err)
 	}

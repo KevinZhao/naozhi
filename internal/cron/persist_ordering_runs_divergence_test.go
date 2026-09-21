@@ -33,7 +33,7 @@ func TestPersistOrdering_RunsNeverDivergeAheadOfJob(t *testing.T) {
 	}
 	t.Cleanup(s.Stop)
 
-	if s.runStore == nil || s.runStore.disabled {
+	if s.runStore == nil || !s.runStore.layout.Enabled() {
 		t.Fatal("runStore must be enabled for this test (StorePath set)")
 	}
 

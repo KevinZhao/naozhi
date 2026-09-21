@@ -17,7 +17,7 @@ func TestP1_FinishRunPersistsCronRun(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
-	if s.runStore == nil || s.runStore.disabled {
+	if s.runStore == nil || !s.runStore.layout.Enabled() {
 		t.Fatal("runStore should be enabled when StorePath is set")
 	}
 
@@ -265,7 +265,7 @@ func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
 func TestP1_DisabledStoreNoOps(t *testing.T) {
 	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
-	if s.runStore == nil || !s.runStore.disabled {
+	if s.runStore == nil || s.runStore.layout.Enabled() {
 		t.Fatal("runStore should be disabled when StorePath is empty")
 	}
 	jobID := mustGenerateID()

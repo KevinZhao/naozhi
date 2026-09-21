@@ -51,7 +51,7 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 	}
 	t.Cleanup(s.Stop)
 
-	if s.runStore == nil || s.runStore.disabled {
+	if s.runStore == nil || !s.runStore.layout.Enabled() {
 		t.Fatal("runStore must be enabled for this test (StorePath set)")
 	}
 
@@ -73,11 +73,16 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 	// jobDirEnsured first so Append takes the hot path and errors on the write,
 	// not on an ensureJobDir MkdirAll. Harness mirrors
 	// runstore_write_failed_counter_test.go:38-49.
-	jobDir := filepath.Join(s.runStore.root, j.ID)
+	jobDir := filepath.Join(s.runStore.rootDir(), j.ID)
 	if err := os.MkdirAll(jobDir, 0o700); err != nil {
 		t.Fatalf("mkdir job runs dir: %v", err)
 	}
-	s.runStore.jobDirEnsured.Store(j.ID, struct{}{})
+	// Prime the layout's ensured marker the way production does — one real
+	// EnsureOwnerDir — so the failure under test is the record write, not a
+	// MkdirAll into a dir we just chmodded away.
+	if _, err := s.runStore.layout.EnsureOwnerDir(j.ID); err != nil {
+		t.Fatalf("prime ensured marker: %v", err)
+	}
 	if err := os.Chmod(jobDir, 0o500); err != nil {
 		t.Fatalf("chmod job runs dir: %v", err)
 	}

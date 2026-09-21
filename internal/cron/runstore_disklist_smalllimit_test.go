@@ -24,7 +24,7 @@ func TestDiskListNewestFirst_SmallLimitOverLargeDir(t *testing.T) {
 	// keepCount large enough that List won't clamp our small limit.
 	s := newTestStore(t, 500, 30*24*time.Hour)
 	jobID := mustGenerateID()
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

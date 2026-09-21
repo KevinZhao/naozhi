@@ -35,7 +35,7 @@ type runDirItem struct {
 // trim cutoff (i < keepCount) would otherwise disagree about which one to
 // drop. Time.Compare (not UnixNano) keeps wall-clock jumps from desyncing them.
 func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) {
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, dir, err

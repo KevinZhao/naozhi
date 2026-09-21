@@ -20,7 +20,7 @@ import (
 func TestRunStore_ScanSortedRunDir_SkipsSymlinkViaInfoMode(t *testing.T) {
 	s := newTestStore(t, 5, time.Hour)
 	jobID := mustGenerateID()
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir job dir: %v", err)
 	}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/runlog"
 )
 
 // newDropOrphanStore returns an enabled runStore rooted under a fresh
@@ -15,7 +17,7 @@ func newDropOrphanStore(t *testing.T) (*runStore, func(jobID, runID string)) {
 	t.Helper()
 	tmp := t.TempDir()
 	s := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 10, time.Hour)
-	if s == nil || s.disabled {
+	if s == nil || !s.layout.Enabled() {
 		t.Fatalf("newRunStore must succeed; got disabled")
 	}
 	s.enableTrimGC = false
@@ -29,7 +31,7 @@ func newDropOrphanStore(t *testing.T) (*runStore, func(jobID, runID string)) {
 			StartedAt: time.Now(),
 			EndedAt:   time.Now(),
 		})
-		if _, err := os.Stat(filepath.Join(s.root, jobID, runID+".json")); err != nil {
+		if _, err := os.Stat(filepath.Join(s.rootDir(), jobID, runID+".json")); err != nil {
 			t.Fatalf("Append did not land %s/%s: %v", jobID, runID, err)
 		}
 	}
@@ -58,7 +60,7 @@ func TestRunStore_DropOrphanRun_OnlyOwnFileWhenSiblingsExist(t *testing.T) {
 
 	s.dropOrphanRun(jobID, mine)
 
-	dir := filepath.Join(s.root, jobID)
+	dir := filepath.Join(s.rootDir(), jobID)
 	mustNotExist(t, filepath.Join(dir, mine+".json"))
 	if _, err := os.Stat(filepath.Join(dir, other+".json")); err != nil {
 		t.Fatalf("sibling record must survive: %v", err)
@@ -80,9 +82,9 @@ func TestRunStore_DropOrphanRun_RemovesDirWhenEmpty(t *testing.T) {
 
 	s.dropOrphanRun(jobID, runID)
 
-	mustNotExist(t, filepath.Join(s.root, jobID))
+	mustNotExist(t, filepath.Join(s.rootDir(), jobID))
 	// runs/ root itself is untouched.
-	if fi, err := os.Stat(s.root); err != nil || !fi.IsDir() {
+	if fi, err := os.Stat(s.rootDir()); err != nil || !fi.IsDir() {
 		t.Fatalf("runs root must survive: fi=%v err=%v", fi, err)
 	}
 }
@@ -92,14 +94,15 @@ func TestRunStore_DropOrphanRun_RemovesDirWhenEmpty(t *testing.T) {
 // otherwise the next Append would skip MkdirAll and fail its write. A
 // follow-up Append must therefore land on disk again, and the recent cache
 // must not serve the dropped run.
-func TestRunStore_DropOrphanRun_ClearsDirEnsuredCache(t *testing.T) {
+func TestRunStore_DropOrphanRun_ClearsDirMarkerAndCache(t *testing.T) {
 	t.Parallel()
 	s, appendRun := newDropOrphanStore(t)
 	jobID := mustGenerateID()
 	first, second := mustGenerateRunID(), mustGenerateRunID()
 	appendRun(jobID, first)
-	if _, ok := s.jobDirEnsured.Load(jobID); !ok {
-		t.Fatal("precondition: Append must populate jobDirEnsured")
+	jobDir := filepath.Join(s.rootDir(), jobID)
+	if fi, err := os.Stat(jobDir); err != nil || !fi.IsDir() {
+		t.Fatalf("precondition: Append must create the job runs dir: %v", err)
 	}
 	// Warm the recent cache so we can prove dropOrphanRun invalidates it.
 	if got := s.Recent(jobID, 5); len(got) != 1 || got[0].RunID != first {
@@ -108,8 +111,11 @@ func TestRunStore_DropOrphanRun_ClearsDirEnsuredCache(t *testing.T) {
 
 	s.dropOrphanRun(jobID, first)
 
-	if _, ok := s.jobDirEnsured.Load(jobID); ok {
-		t.Fatal("dropOrphanRun must clear jobDirEnsured for the removed dir")
+	// dropOrphanRun rmdir'd the emptied job dir, so the layout's ensured marker
+	// must have been dropped with it — asserted at the tail, where a later
+	// Append has to MkdirAll the dir back.
+	if _, err := os.Stat(jobDir); !os.IsNotExist(err) {
+		t.Fatalf("dropOrphanRun must rmdir the emptied job dir: %v", err)
 	}
 	if _, ok := s.recentCache.Load(jobID); ok {
 		t.Fatal("dropOrphanRun must invalidate the recent cache entry")
@@ -119,7 +125,12 @@ func TestRunStore_DropOrphanRun_ClearsDirEnsuredCache(t *testing.T) {
 	}
 
 	// The directory is gone; a fresh Append must MkdirAll it back and succeed.
+	// This is the observable form of "the ensured marker was cleared": a stale
+	// marker would skip the MkdirAll and the record would be lost.
 	appendRun(jobID, second)
+	if fi, err := os.Stat(jobDir); err != nil || !fi.IsDir() {
+		t.Fatalf("a later Append must recreate the job dir (stale ensured marker?): %v", err)
+	}
 	if got := s.Recent(jobID, 5); len(got) != 1 || got[0].RunID != second {
 		t.Fatalf("Recent after re-append = %+v, want [%s]", got, second)
 	}
@@ -133,13 +144,13 @@ func TestRunStore_DropOrphanRun_NoopOnMissingAndInvalid(t *testing.T) {
 	jobID := mustGenerateID()
 
 	s.dropOrphanRun(jobID, mustGenerateRunID()) // nothing on disk
-	mustNotExist(t, filepath.Join(s.root, jobID))
+	mustNotExist(t, filepath.Join(s.rootDir(), jobID))
 
 	s.dropOrphanRun("../escape", "0123456789abcdef")
 	s.dropOrphanRun(jobID, "../escape")
-	mustNotExist(t, filepath.Join(s.root, "../escape"))
+	mustNotExist(t, filepath.Join(s.rootDir(), "../escape"))
 
 	var nilStore *runStore
 	nilStore.dropOrphanRun(jobID, "0123456789abcdef")
-	(&runStore{disabled: true}).dropOrphanRun(jobID, "0123456789abcdef")
+	(&runStore{layout: runlog.New(runlog.Options{})}).dropOrphanRun(jobID, "0123456789abcdef")
 }
