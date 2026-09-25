@@ -18,16 +18,19 @@ type fakeBlockingPlatform struct {
 	mu         sync.Mutex
 	seenCancel error // ctx.Err observed at unblock
 	released   chan struct{}
+	entered    chan struct{} // closed once Reply is waiting on its ctx
+	enterOnce  sync.Once
 }
 
 func newFakeBlockingPlatform(maxLen int) *fakeBlockingPlatform {
-	return &fakeBlockingPlatform{maxLen: maxLen, released: make(chan struct{})}
+	return &fakeBlockingPlatform{maxLen: maxLen, released: make(chan struct{}), entered: make(chan struct{})}
 }
 
 func (f *fakeBlockingPlatform) Name() string { return "fake-block" }
 func (f *fakeBlockingPlatform) RegisterRoutes(*http.ServeMux, platform.MessageHandler) {
 }
 func (f *fakeBlockingPlatform) Reply(ctx context.Context, _ platform.OutgoingMessage) (string, error) {
+	f.enterOnce.Do(func() { close(f.entered) })
 	<-ctx.Done()
 	f.mu.Lock()
 	if f.seenCancel == nil {
@@ -67,10 +70,15 @@ func TestNotifyTargetCancelsOnStopCtx(t *testing.T) {
 		close(done)
 	}()
 
-	// Give Reply a moment to enter its <-ctx.Done() wait, then cancel
-	// stopCtx. notifyTarget must return promptly — well under the 30s
-	// per-target ceiling.
-	time.Sleep(20 * time.Millisecond)
+	// Cancel only once Reply is waiting. Cancelled any earlier, notifyTarget
+	// takes its stopCtx early return and never calls Reply at all, which is
+	// correct behaviour but not the one under test. notifyTarget must then
+	// return promptly — well under the 30s per-target ceiling.
+	select {
+	case <-fp.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("notifyTarget never reached Reply")
+	}
 	stopCancel()
 
 	select {

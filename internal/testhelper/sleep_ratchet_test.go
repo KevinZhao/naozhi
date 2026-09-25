@@ -20,7 +20,7 @@ import (
 // it when you remove sleeps; raising it is not an option — poll with Eventually
 // or annotate the line with `// sleep-ok: <reason>` if the sleep is genuinely
 // about elapsed time (producing a measurable duration, not awaiting an effect).
-const bareSleepBaseline = 139
+const bareSleepBaseline = 138
 
 // exemptSleepBaseline counts the `// sleep-ok:` annotated sleeps; also
 // ratcheted so exemptions cannot become the new default.
