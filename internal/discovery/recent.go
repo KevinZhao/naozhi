@@ -71,6 +71,21 @@ func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSe
 // trimmed) partial result once cancelled, so a hung NFS/FUSE home cannot
 // block every poll waiting on the singleflight leader (#2134).
 func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge time.Duration, excludeSessionIDs map[string]bool, filter RecentSessionsFilter) []RecentSession {
+	return recentSessionsUnder(ctx, fsRoot, claudeDir, limit, maxAge, excludeSessionIDs, filter)
+}
+
+// fsRoot is where workspace resolution starts in production: a project
+// directory name encodes an absolute path, so decoding it walks the real
+// filesystem from "/".
+const fsRoot = "/"
+
+// recentSessionsUnder is RecentSessionsCtx with the resolution root made
+// explicit. Tests pass a t.TempDir(): the second resolution pass DFS-walks the
+// tree below root to decode segments that held ".", "_" or spaces, and from
+// "/" that walk can open whatever the host has mounted — `/home` is an autofs
+// trigger on macOS and one ReadDir of it measured 2.0s (#2744). A parameter
+// rather than a package variable, so parallel tests cannot race on it.
+func recentSessionsUnder(ctx context.Context, root, claudeDir string, limit int, maxAge time.Duration, excludeSessionIDs map[string]bool, filter RecentSessionsFilter) []RecentSession {
 	if claudeDir == "" {
 		return nil
 	}
@@ -105,7 +120,7 @@ func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge 
 		dirName := e.Name()
 
 		projDir := filepath.Join(projectsDir, dirName)
-		workspace, idx := resolveWorkspaceWithIndex(projDir, dirName)
+		workspace, idx := resolveWorkspaceWithIndex(projDir, dirName, root)
 
 		if workspace == "" {
 			continue
@@ -381,7 +396,7 @@ func cutWorktreesMarker(p string) (prefix, rest string, ok bool) {
 // resolveWorkspaceWithIndex determines the real filesystem path for a Claude
 // project directory and returns the parsed sessions index if present, reading
 // the index once for both purposes.
-func resolveWorkspaceWithIndex(projDir, dirName string) (string, *sessionsIndex) {
+func resolveWorkspaceWithIndex(projDir, dirName, root string) (string, *sessionsIndex) {
 	data, err := os.ReadFile(filepath.Join(projDir, "sessions-index.json"))
 	if err == nil {
 		var idx sessionsIndex
@@ -392,13 +407,13 @@ func resolveWorkspaceWithIndex(projDir, dirName string) (string, *sessionsIndex)
 				}
 			}
 			// Index exists but originalPath missing or stale — keep entries, DFS for workspace.
-			if ws := resolveWorkspaceByParts(dirName); ws != "" {
+			if ws := resolveWorkspaceUnder(root, dirName); ws != "" {
 				return ws, &idx
 			}
 			return "", &idx
 		}
 	}
-	return resolveWorkspaceByParts(dirName), nil
+	return resolveWorkspaceUnder(root, dirName), nil
 }
 
 // recentFromParsedIndex extracts sessions from an already-parsed sessions
@@ -435,7 +450,13 @@ func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclud
 // Negative results ("") are NOT cached: a workspace may be temporarily absent
 // (unmounted drive, worktree mid-rebuild) and caching "" would hide the
 // project until restart (#1994). Re-running the bounded passes is cheap.
-var dfsPathCache sync.Map // encoded dirName → resolved workspace path
+var dfsPathCache sync.Map // dfsCacheKey(root, dirName) → resolved workspace path
+
+// dfsCacheKey scopes a cached resolution to the root it was resolved under: the
+// same encoded name decodes to a different path below a different root, and a
+// test resolving under its own t.TempDir() must not see — or poison — the
+// production "/" entry.
+func dfsCacheKey(root, dirName string) string { return root + "\x00" + dirName }
 
 // resolveWorkspaceByParts reconstructs a workspace path from an encoded
 // project directory name, where every non-[A-Za-z0-9] character became "-"
@@ -444,7 +465,15 @@ var dfsPathCache sync.Map // encoded dirName → resolved workspace path
 // resolveByDirScan, re-encodes real child names per level for segments that
 // held ".", "_" or spaces — what makes ".claude/worktrees" sessions visible (#2370).
 func resolveWorkspaceByParts(dirName string) string {
-	if v, ok := dfsPathCache.Load(dirName); ok {
+	return resolveWorkspaceUnder(fsRoot, dirName)
+}
+
+// resolveWorkspaceUnder is resolveWorkspaceByParts with the walk rooted at
+// root instead of "/". Every path it returns lies inside root: both passes only
+// ever join real child names onto root.
+func resolveWorkspaceUnder(root, dirName string) string {
+	key := dfsCacheKey(root, dirName)
+	if v, ok := dfsPathCache.Load(key); ok {
 		return v.(string)
 	}
 	if dirName == "" || dirName[0] != '-' {
@@ -455,13 +484,13 @@ func resolveWorkspaceByParts(dirName string) string {
 		return ""
 	}
 	statCount := 0
-	result := tryResolveParts(parts, "/", &statCount)
+	result := tryResolveParts(parts, root, &statCount)
 	if result == "" {
 		budget := dirScanBudget
-		result = resolveByDirScan(dirName[1:], "/", &budget)
+		result = resolveByDirScan(dirName[1:], root, &budget)
 	}
 	if result != "" {
-		dfsPathCache.Store(dirName, result)
+		dfsPathCache.Store(key, result)
 	}
 	return result
 }
