@@ -431,6 +431,7 @@ func (p *Process) Kill() {
 		// Best-effort kill with a short deadline (the shim's disconnect watchdog
 		// is the fallback). Hold shimWMu across deadline + send + Close: bufio.Writer
 		// is not safe against a concurrent Close()+Flush from heartbeat/interrupt.
+		p.preemptPinnedWriter(time.Second)
 		p.shimWMu.Lock()
 		// Skip the write if the deadline can't be set: without one shimSendLocked
 		// can block until TCP keepalive expires (minutes), starving shimWMu.
@@ -466,6 +467,7 @@ func (p *Process) Close() {
 	// Short write deadline under shimWMu: a live shim with a full TCP buffer
 	// would otherwise pin shimWMu until OS keepalive (minutes), stalling
 	// heartbeat/interrupt and Router shutdown past SIGTERM grace.
+	p.preemptPinnedWriter(2 * time.Second)
 	p.shimWMu.Lock()
 	if err := p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		p.shimWMu.Unlock()
@@ -498,6 +500,7 @@ func (p *Process) Close() {
 // shutdown). A short write deadline keeps Router.Shutdown's wg.Wait() from
 // being pinned for minutes by a dead/slow socket during SIGTERM handling.
 func (p *Process) Detach() {
+	p.preemptPinnedWriter(2 * time.Second)
 	p.shimWMu.Lock()
 	// Skip the send if the deadline can't be set: without one shimSendLocked
 	// can block until TCP keepalive expires. Same pattern as Kill().
@@ -513,6 +516,18 @@ func (p *Process) Detach() {
 	_ = p.shimConn.SetWriteDeadline(time.Time{})
 	p.closeShimConn()
 	p.shimWMu.Unlock()
+}
+
+// preemptPinnedWriter bounds how long a teardown path waits for shimWMu.
+// shimSend and shimSendLine set no write deadline, because the shim copies
+// each frame into the CLI's stdin synchronously and a busy CLI backpressures
+// them legitimately. So a writer can sit on shimWMu for as long as the shim
+// has stopped reading. A write deadline on the conn also applies to a write
+// already blocked in it, so setting one before Lock makes that writer fail
+// within d and release the lock. Only teardown paths call this: the writer's
+// frame is cut short, which is harmless on a connection about to close.
+func (p *Process) preemptPinnedWriter(d time.Duration) {
+	_ = p.shimConn.SetWriteDeadline(time.Now().Add(d))
 }
 
 // closeShimConn closes p.shimConn at most once across all teardown paths so a
