@@ -6,12 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
 // State represents the persistent state of a running shim, stored as JSON.
@@ -129,6 +131,11 @@ func WriteStateFile(path string, state State) error {
 	return nil
 }
 
+// maxStateFileBytes caps a state file. Its bulk is the CLI argv, which the
+// kernel already bounds (ARG_MAX: 1 MiB on macOS, a few MiB on Linux), so a
+// larger file was never written by a shim.
+const maxStateFileBytes = 4 << 20
+
 // ReadStateFile reads a shim state from the given path.
 // Refuses to read if the file is group- or world-accessible — the JSON
 // embeds a base64 auth token that grants direct socket attachment, so a
@@ -146,13 +153,26 @@ func ReadStateFile(path string) (State, error) {
 		// Reconnect; the slog above already has it.
 		return State{}, fmt.Errorf("shim state has insecure permissions %#o", perm)
 	}
-	data, err := os.ReadFile(path)
+	// Bounded and symlink-refusing: the file carries the socket's auth token,
+	// so a link swapped in after the permission check must not be followed.
+	// Every unusable outcome is an error here — callers drop the state file
+	// on one — so a corrupt file is left for them rather than moved aside.
+	state, outcome, err := jsonfile.Load[State](path, jsonfile.Options{
+		MaxBytes: maxStateFileBytes,
+		Label:    "shim state",
+		Corrupt:  jsonfile.LeaveCorrupt,
+	})
 	if err != nil {
 		return State{}, err
 	}
-	var state State
-	if err := json.Unmarshal(data, &state); err != nil {
-		return State{}, fmt.Errorf("parse state %s: %w", path, err)
+	switch outcome {
+	case jsonfile.Parsed:
+	case jsonfile.Absent:
+		// Stat just found it, so this is an empty file (or it was removed
+		// in between); neither is state to reconnect with.
+		return State{}, errors.New("shim state file is empty")
+	default:
+		return State{}, errors.New("shim state file is unparseable")
 	}
 	if state.Version != stateVersion {
 		return State{}, fmt.Errorf("unsupported state version %d (want %d) in %s", state.Version, stateVersion, path)

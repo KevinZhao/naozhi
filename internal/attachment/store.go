@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
 // Dir is the subtree under the session workspace where attachments live.
@@ -483,19 +484,45 @@ func shouldKeepAttachment(metaPath string, dayTime time.Time, uploadCutoff time.
 // loadMetaFile reads + parses a single .meta sidecar. Missing files return
 // (nil, nil) — legacy attachments. Corrupt JSON returns an error so the
 // caller retains the file.
+// maxMetaFileBytes caps one .meta sidecar. Its only unbounded field is one
+// key hash per referencing session, so 4 MiB is some 200k sessions: far past
+// any real workspace, and far short of what a planted file could make the GC
+// allocate.
+const maxMetaFileBytes = 4 << 20
+
+// errUnreadableMeta reports a sidecar that exists but cannot be used. It is
+// deliberately not (nil, nil): "no meta" means "assume no references", which
+// lets the GC reap the payload.
+var errUnreadableMeta = errors.New("attachment: meta sidecar unreadable")
+
+// loadMetaFile reads a .meta sidecar; (nil, nil) only when there is none. The
+// read is bounded and refuses a symlink, since the sidecar sits in a
+// workspace other users may share. Every other failure is an error, which the
+// GC answers by keeping the payload. That includes a corrupt sidecar, which
+// stays in place: moving it aside would make the next sweep see "no meta".
 func loadMetaFile(path string) (*Meta, error) {
-	data, err := os.ReadFile(path)
+	m, outcome, err := jsonfile.Load[Meta](path, jsonfile.Options{
+		MaxBytes: maxMetaFileBytes,
+		Label:    "attachment meta",
+		Corrupt:  jsonfile.LeaveCorrupt,
+	})
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	switch outcome {
+	case jsonfile.Parsed:
+		return &m, nil
+	case jsonfile.Absent:
+		// jsonfile reports an empty file as absent too. An empty sidecar
+		// still tells us nothing about references, so only a missing one
+		// may take the no-meta path.
+		if _, serr := os.Lstat(path); errors.Is(serr, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read meta %s: %w", path, err)
+		return nil, errUnreadableMeta
+	default:
+		return nil, errUnreadableMeta
 	}
-	var m Meta
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("parse meta %s: %w", path, err)
-	}
-	return &m, nil
 }
 
 // MetaPathFor returns the sibling .meta path for an attachment payload file,
