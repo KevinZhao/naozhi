@@ -18,6 +18,43 @@ import (
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
+// startServerWriteTap is startServerDrain that also reports each "write"
+// frame the client sends: the user message Send writes to the CLI's stdin.
+// A test that emits the CLI's reply only after that frame arrives orders it
+// the way a real CLI does, since nothing comes back before the input goes
+// in. Emitting as soon as the state reads StateRunning races Send's stale-
+// event drain, which discards whatever was received before it took its
+// cutoff.
+func startServerWriteTap(srv *shimTestServer) <-chan string {
+	writes := make(chan string, 16)
+	go func() {
+		sc := bufio.NewScanner(srv.conn)
+		sc.Buffer(make([]byte, 0, 64<<10), 16<<20)
+		for sc.Scan() {
+			var f struct{ Type, Line string }
+			if json.Unmarshal(sc.Bytes(), &f) == nil && f.Type == "write" {
+				select {
+				case writes <- f.Line:
+				default:
+				}
+			}
+		}
+	}()
+	return writes
+}
+
+// awaitWrite waits for the next user message Send writes to the shim.
+func awaitWrite(t *testing.T, writes <-chan string) string {
+	t.Helper()
+	select {
+	case w := <-writes:
+		return w
+	case <-time.After(5 * time.Second):
+		t.Fatal("Send never wrote the user message to the shim")
+		return ""
+	}
+}
+
 // startServerDrain starts a goroutine that reads and discards all data the
 // client sends to the server side of the shim connection. This is required
 // for shimWriter tests because net.Pipe blocks writes until the peer reads.
@@ -215,7 +252,7 @@ func TestShimWriter_SlowPath_OversizedLineDoesNotPartialSend(t *testing.T) {
 
 func TestProcess_Send_ResultEvent(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
+	writes := startServerWriteTap(srv)
 	p.startReadLoop()
 
 	done := make(chan *clievent.SendResult, 1)
@@ -229,7 +266,7 @@ func TestProcess_Send_ResultEvent(t *testing.T) {
 	// Wait for Send goroutine to flip State→Running before injecting the
 	// result; otherwise the stdout arrives while Send is still logging the
 	// user entry / draining stale events and can be mis-sequenced.
-	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second, "Send did not reach StateRunning")
+	awaitWrite(t, writes)
 	srv.SendStdout(`{"type":"result","result":"answer","session_id":"sess1","total_cost_usd":0.01}`)
 
 	select {
@@ -291,7 +328,7 @@ func TestProcess_Send_Busy(t *testing.T) {
 
 func TestProcess_Send_ProcessExits(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
+	writes := startServerWriteTap(srv)
 	p.startReadLoop()
 
 	errCh := make(chan error, 1)
@@ -301,7 +338,7 @@ func TestProcess_Send_ProcessExits(t *testing.T) {
 	}()
 
 	// Wait for Send goroutine to start (State→Running) before faking exit.
-	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second, "Send did not reach StateRunning")
+	awaitWrite(t, writes)
 	srv.SendCLIExited(1) // exit without result
 
 	select {
@@ -320,7 +357,7 @@ func TestProcess_Send_ProcessExits(t *testing.T) {
 
 func TestProcess_Send_CapturesSessionID(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
+	writes := startServerWriteTap(srv)
 	p.startReadLoop()
 
 	done := make(chan error, 1)
@@ -330,7 +367,7 @@ func TestProcess_Send_CapturesSessionID(t *testing.T) {
 	}()
 
 	// Wait for Send goroutine to start before feeding init/result events.
-	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second, "Send did not reach StateRunning")
+	awaitWrite(t, writes)
 	srv.SendStdout(`{"type":"system","subtype":"init","session_id":"session-abc"}`)
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"session-abc"}`)
 
@@ -355,7 +392,7 @@ func TestProcess_Send_CapturesSessionID(t *testing.T) {
 // first Send recorded and let it go stale relative to the CLI's view.
 func TestProcess_Send_UpdatesSessionIDAfterResume(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
+	writes := startServerWriteTap(srv)
 	p.startReadLoop()
 
 	// First Send establishes the original session_id.
@@ -364,8 +401,7 @@ func TestProcess_Send_UpdatesSessionIDAfterResume(t *testing.T) {
 		_, err := p.Send(context.Background(), "hello", nil, nil)
 		done1 <- err
 	}()
-	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second,
-		"first Send did not reach StateRunning")
+	awaitWrite(t, writes)
 	srv.SendStdout(`{"type":"system","subtype":"init","session_id":"sess-original"}`)
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"sess-original"}`)
 	select {
@@ -387,8 +423,7 @@ func TestProcess_Send_UpdatesSessionIDAfterResume(t *testing.T) {
 		_, err := p.Send(context.Background(), "follow-up", nil, nil)
 		done2 <- err
 	}()
-	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second,
-		"second Send did not reach StateRunning")
+	awaitWrite(t, writes)
 	srv.SendStdout(`{"type":"system","subtype":"init","session_id":"sess-resumed"}`)
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"sess-resumed"}`)
 	select {
@@ -410,7 +445,7 @@ func TestProcess_Send_UpdatesSessionIDAfterResume(t *testing.T) {
 
 func TestProcess_Send_OnEventCallback(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
+	writes := startServerWriteTap(srv)
 	p.startReadLoop()
 
 	var mu sync.Mutex
@@ -427,7 +462,7 @@ func TestProcess_Send_OnEventCallback(t *testing.T) {
 
 	// Wait for Send goroutine to enter the running state before delivering
 	// the thinking/result pair to onEvent.
-	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second, "Send did not reach StateRunning")
+	awaitWrite(t, writes)
 	srv.SendStdout(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","text":"analyzing"}]}}`)
 	srv.SendStdout(`{"type":"result","result":"done"}`)
 
@@ -454,7 +489,7 @@ func TestProcess_Send_OnEventCallback(t *testing.T) {
 
 func TestProcess_Send_WithImages(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
+	writes := startServerWriteTap(srv)
 	p.startReadLoop()
 
 	images := []clievent.Attachment{{Data: []byte("fake-png"), MimeType: "image/png"}}
@@ -465,7 +500,7 @@ func TestProcess_Send_WithImages(t *testing.T) {
 	}()
 
 	// Wait for Send to reach StateRunning before answering.
-	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second, "Send did not reach StateRunning")
+	awaitWrite(t, writes)
 	srv.SendStdout(`{"type":"result","result":"it is an image"}`)
 
 	select {
