@@ -10,6 +10,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // fakeRouter satisfies SystemSessionRouter for tests without dragging
@@ -109,6 +110,40 @@ func pulseTicker() (chan time.Time, tickerFactory) {
 		return pulse, func() {}
 	}
 	return pulse, factory
+}
+
+// readyPulseTicker is pulseTicker plus a channel closed when the daemon loop
+// asks for its ticker. The loop does that only after its startup jitter (and
+// after any RunOnStart tick), immediately before it starts selecting on
+// pulses, so a closed ready means "the loop is running and has not ticked on
+// its own".
+func readyPulseTicker() (chan time.Time, tickerFactory, <-chan struct{}) {
+	pulse, inner := pulseTicker()
+	ready := make(chan struct{})
+	var once sync.Once
+	factory := func(d time.Duration) (<-chan time.Time, func()) {
+		once.Do(func() { close(ready) })
+		return inner(d)
+	}
+	return pulse, factory, ready
+}
+
+func waitLoopReady(t *testing.T, ready <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon loop never reached its ticker")
+	}
+}
+
+// drainPulses waits until the loop has taken every queued pulse. Because the
+// loop runs each tick synchronously before it reads the next pulse, an empty
+// channel after two sends means the first was handled completely.
+func drainPulses(t *testing.T, pulse chan time.Time) {
+	t.Helper()
+	testhelper.Eventually(t, func() bool { return len(pulse) == 0 }, 2*time.Second,
+		"daemon loop stopped reading pulses")
 }
 
 // All Manager_* tests share the package-level builtinDaemons slice via
@@ -264,26 +299,15 @@ func TestManager_TickRunsAndRecords(t *testing.T) {
 	// With Tick=50ms, jitter is in [0, 50ms).
 	pulse <- time.Now()
 
-	// Wait for tickFn to record a call.
-	deadline := time.Now().Add(2 * time.Second)
-	for d.calls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if d.calls.Load() == 0 {
-		t.Fatal("daemon Tick was never invoked")
-	}
+	testhelper.Eventually(t, func() bool { return d.calls.Load() > 0 }, 2*time.Second,
+		"daemon Tick was never invoked")
 
-	// Inspector should report at least one run after a brief wait
-	// (recordRun runs in defer of runOnce).
-	deadline = time.Now().Add(time.Second)
+	// Inspector reports the run once recordRun (in runOnce's defer) lands.
 	var statuses []DaemonStatus
-	for time.Now().Before(deadline) {
+	testhelper.Eventually(t, func() bool {
 		statuses = m.Inspector()
-		if len(statuses) > 0 && statuses[0].LastRun != nil {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		return len(statuses) > 0 && statuses[0].LastRun != nil
+	}, time.Second, "LastRun was nil after first tick")
 	if len(statuses) != 1 {
 		t.Fatalf("Inspector returned %d statuses, want 1", len(statuses))
 	}
@@ -330,20 +354,15 @@ func TestManager_RunOnStartFiresWithoutPulse(t *testing.T) {
 	m.Start(ctx)
 	defer m.Stop(context.Background())
 
-	deadline := time.Now().Add(2 * time.Second)
-	for d.calls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := d.calls.Load(); got == 0 {
-		t.Fatal("RunOnStart daemon never ticked at startup")
-	}
+	testhelper.Eventually(t, func() bool { return d.calls.Load() > 0 }, 2*time.Second,
+		"RunOnStart daemon never ticked at startup")
 }
 
 // TestManager_NoRunOnStartWaitsForPulse is the negative control: with
 // RunOnStart=false (default) and a long tick, no Tick happens until a
 // pulse arrives.
 func TestManager_NoRunOnStartWaitsForPulse(t *testing.T) {
-	pulse, tickFn := pulseTicker()
+	pulse, tickFn, ready := readyPulseTicker()
 
 	d := &signalDaemon{name: "auto-titler"}
 	withRegistry(t, []builtinDaemonFactory{
@@ -373,94 +392,64 @@ func TestManager_NoRunOnStartWaitsForPulse(t *testing.T) {
 	m.Start(ctx)
 	defer m.Stop(context.Background())
 
-	// Give the loop time to clear jitter ([0,20ms)) and reach the ticker
-	// select. No pulse, no RunOnStart ⇒ no tick.
-	time.Sleep(200 * time.Millisecond)
+	// The loop has cleared jitter and is about to select on pulses; a
+	// RunOnStart tick would already have run on this same goroutine.
+	waitLoopReady(t, ready)
 	if got := d.calls.Load(); got != 0 {
 		t.Fatalf("daemon ticked %d times without pulse or RunOnStart", got)
 	}
 
-	// A pulse now should produce exactly one tick.
 	pulse <- time.Now()
-	deadline := time.Now().Add(2 * time.Second)
-	for d.calls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := d.calls.Load(); got == 0 {
-		t.Fatal("daemon never ticked after pulse")
-	}
+	testhelper.Eventually(t, func() bool { return d.calls.Load() > 0 }, 2*time.Second,
+		"daemon never ticked after pulse")
 }
 
-func TestManager_OverlappingTicksAreSkipped(t *testing.T) {
-	pulse, tickFn := pulseTicker()
-
-	// Daemon Tick blocks until released so we can stack a second tick
-	// before the first finishes.  Counts how often it actually entered.
-	release := make(chan struct{})
-	d := &signalDaemon{
-		name: "auto-titler",
-		tickFn: func(ctx context.Context, _ int32) (TickReport, error) {
-			select {
-			case <-release:
-			case <-ctx.Done():
-				return TickReport{}, ctx.Err()
-			}
-			return TickReport{}, nil
-		},
-	}
+// TestRunOnce_InflightGateSkipsOverlap drives the CAS gate directly. The
+// daemon loop calls runOnce synchronously, so no pulse can reach it while a
+// tick is in flight and a loop-level test cannot tell a working gate from a
+// missing one; the gate is what keeps a second concurrent caller out.
+func TestRunOnce_InflightGateSkipsOverlap(t *testing.T) {
+	d := &signalDaemon{name: "auto-titler"}
 	withRegistry(t, []builtinDaemonFactory{
 		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
 	})
-
-	router := newFakeRouter()
-	m, _ := NewManager(Config{
+	m, err := NewManager(Config{
 		Enabled:     true,
 		TickTimeout: time.Second,
-		Router:      router,
+		Router:      newFakeRouter(),
 		Daemons: map[string]DaemonRuntimeConfig{
-			"auto-titler": {Enabled: true, Tick: 1 * time.Millisecond},
+			"auto-titler": {Enabled: true, Tick: time.Hour},
 		},
-		NewTicker: tickFn,
 	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
-
-	// Wait past the initial jitter so the first pulse is consumed.
-	time.Sleep(20 * time.Millisecond)
-
-	// First tick: starts running, blocks on release.
-	pulse <- time.Now()
-	// Wait for it to enter Tick.
-	deadline := time.Now().Add(time.Second)
-	for d.calls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
 	}
-	if d.calls.Load() != 1 {
-		t.Fatalf("first tick should have entered, calls = %d", d.calls.Load())
+	rec := m.daemons[0]
+
+	rec.inflight.Store(true) // another run holds the gate
+	m.runOnce(context.Background(), rec, DaemonTriggerScheduled)
+	if got := d.calls.Load(); got != 0 {
+		t.Fatalf("Tick entered %d times while another run held the gate", got)
+	}
+	if !rec.inflight.Load() {
+		t.Fatal("the skipped run released a gate it never took")
+	}
+	if st := m.Inspector(); st[0].LastRun != nil {
+		t.Errorf("the skipped run was recorded: %+v", st[0].LastRun)
 	}
 
-	// Second tick while first is still in flight: must be skipped by
-	// the CAS gate.
-	pulse <- time.Now()
-	time.Sleep(50 * time.Millisecond)
+	rec.inflight.Store(false)
+	m.runOnce(context.Background(), rec, DaemonTriggerScheduled)
 	if got := d.calls.Load(); got != 1 {
-		t.Errorf("after overlapping pulse, calls = %d, want 1 (CAS gate must skip)", got)
+		t.Fatalf("Tick entered %d times once the gate was free, want 1", got)
 	}
-
-	close(release)
-
-	// Drain runs cleanly so Stop doesn't hit timeout.
-	deadline = time.Now().Add(time.Second)
-	for m.daemons[0].inflight.Load() && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
+	if rec.inflight.Load() {
+		t.Error("runOnce left the gate held after its tick returned")
 	}
 }
 
 func TestManager_PanicRecoveredAndInflightReset(t *testing.T) {
-	pulse, tickFn := pulseTicker()
+	pulse, tickFn, ready := readyPulseTicker()
 
 	d := &signalDaemon{
 		name: "auto-titler",
@@ -491,35 +480,22 @@ func TestManager_PanicRecoveredAndInflightReset(t *testing.T) {
 	m.Start(ctx)
 	defer m.Stop(context.Background())
 
-	time.Sleep(20 * time.Millisecond) // past jitter
+	waitLoopReady(t, ready)
 	pulse <- time.Now()
-	// Wait for the panicking tick to complete.
-	deadline := time.Now().Add(time.Second)
-	for d.calls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
-	// Wait for inflight to reset (defer chain in runOnce).
-	deadline = time.Now().Add(time.Second)
-	for m.daemons[0].inflight.Load() && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
-	if m.daemons[0].inflight.Load() {
-		t.Fatal("inflight stuck true after panic — defer ordering bug")
-	}
+	testhelper.Eventually(t, func() bool { return d.calls.Load() >= 1 }, time.Second,
+		"the panicking tick never ran")
+	// inflight resets in runOnce's defer chain.
+	testhelper.Eventually(t, func() bool { return !m.daemons[0].inflight.Load() }, time.Second,
+		"inflight stuck true after panic — defer ordering bug")
 
 	// Subsequent tick must succeed (proves the CAS gate is unblocked).
 	pulse <- time.Now()
-	deadline = time.Now().Add(time.Second)
-	for d.calls.Load() < 2 && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
-	if d.calls.Load() < 2 {
-		t.Errorf("second tick never ran, calls = %d", d.calls.Load())
-	}
+	testhelper.Eventually(t, func() bool { return d.calls.Load() >= 2 }, time.Second,
+		"second tick never ran after the panic")
 }
 
 func TestManager_CircuitBreakerTripsOnConsecutiveCLIErrors(t *testing.T) {
-	pulse, tickFn := pulseTicker()
+	pulse, tickFn, ready := readyPulseTicker()
 
 	upstreamErr := errors.New("upstream went away")
 	d := &signalDaemon{
@@ -548,40 +524,33 @@ func TestManager_CircuitBreakerTripsOnConsecutiveCLIErrors(t *testing.T) {
 	m.Start(ctx)
 	defer m.Stop(context.Background())
 
-	time.Sleep(20 * time.Millisecond) // past jitter
+	waitLoopReady(t, ready)
 
 	// Fire enough pulses to trip the breaker.
 	for i := 0; i < consecutiveCLIFailureLimit; i++ {
 		pulse <- time.Now()
-		// Each tick is fast (just returns the error); allow it to
-		// settle before the next pulse so they're truly sequential.
-		deadline := time.Now().Add(500 * time.Millisecond)
 		want := int32(i + 1)
-		for d.calls.Load() < want && time.Now().Before(deadline) {
-			time.Sleep(2 * time.Millisecond)
-		}
+		testhelper.Eventually(t, func() bool { return d.calls.Load() >= want }, 2*time.Second,
+			"a failing tick never ran")
 	}
-	// Wait for breaker to trip (recordRun does the trip after tick returns).
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for !m.daemons[0].disabled.Load() && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
-	if !m.daemons[0].disabled.Load() {
-		t.Errorf("breaker should have tripped after %d failures",
-			consecutiveCLIFailureLimit)
-	}
+	// recordRun trips the breaker after the tick returns.
+	testhelper.Eventually(t, func() bool { return m.daemons[0].disabled.Load() }, 2*time.Second,
+		"breaker did not trip after consecutiveCLIFailureLimit failures")
 
-	// One more pulse — the breaker should make this a no-op.
+	// One more pulse — the breaker should make this a no-op. The second
+	// pulse is the barrier: the loop reads it only after it has finished
+	// with the first.
 	beforeCalls := d.calls.Load()
 	pulse <- time.Now()
-	time.Sleep(50 * time.Millisecond)
+	pulse <- time.Now()
+	drainPulses(t, pulse)
 	if got := d.calls.Load(); got != beforeCalls {
 		t.Errorf("disabled daemon called Tick again: before=%d after=%d", beforeCalls, got)
 	}
 }
 
 func TestManager_ValidationDoesNotTripBreaker(t *testing.T) {
-	pulse, tickFn := pulseTicker()
+	pulse, tickFn, ready := readyPulseTicker()
 
 	d := &signalDaemon{
 		name: "auto-titler",
@@ -609,17 +578,20 @@ func TestManager_ValidationDoesNotTripBreaker(t *testing.T) {
 	m.Start(ctx)
 	defer m.Stop(context.Background())
 
-	time.Sleep(20 * time.Millisecond)
+	waitLoopReady(t, ready)
 
 	// Fire 2x the breaker limit; validation errors must NOT trip it.
 	for i := 0; i < 2*consecutiveCLIFailureLimit; i++ {
 		pulse <- time.Now()
-		deadline := time.Now().Add(500 * time.Millisecond)
 		want := int32(i + 1)
-		for d.calls.Load() < want && time.Now().Before(deadline) {
-			time.Sleep(2 * time.Millisecond)
-		}
+		testhelper.Eventually(t, func() bool { return d.calls.Load() >= want }, 2*time.Second,
+			"a validation-failing tick never ran")
 	}
+	// The last tick's recordRun may still be landing; a barrier pulse
+	// guarantees it has.
+	pulse <- time.Now()
+	pulse <- time.Now()
+	drainPulses(t, pulse)
 	if m.daemons[0].disabled.Load() {
 		t.Error("validation errors should NOT trip breaker")
 	}
@@ -675,13 +647,8 @@ func TestManager_StopPreStart_DoesNotBurnStopOnce(t *testing.T) {
 
 	// Drive one tick to confirm the daemon is alive (sanity).
 	pulse <- time.Now()
-	deadline := time.Now().Add(2 * time.Second)
-	for d.calls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if d.calls.Load() == 0 {
-		t.Fatal("daemon Tick was never invoked after Start")
-	}
+	testhelper.Eventually(t, func() bool { return d.calls.Load() > 0 }, 2*time.Second,
+		"daemon Tick was never invoked after Start")
 
 	// 3) Stop: must cancel daemon ctx and drain m.wg. We bound the
 	// Stop call with a stopCtx; if the bug were present, Stop would
