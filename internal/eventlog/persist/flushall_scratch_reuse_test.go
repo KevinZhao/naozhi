@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
 )
@@ -22,7 +21,7 @@ func TestPersister_FlushAll_ScratchReuse(t *testing.T) {
 	key := func(i int) string { return fmt.Sprintf("dashboard:direct:u%d:general", i) }
 
 	flush := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 		defer cancel()
 		if err := p.Flush(ctx); err != nil {
 			t.Fatalf("Flush: %v", err)
