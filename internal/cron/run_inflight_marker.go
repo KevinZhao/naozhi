@@ -141,10 +141,18 @@ func (s *Scheduler) reconcileRunInflight() {
 // half: the interrupted records to write (run-store IO) and the adoptions to
 // await (bounded by adoptionWaitBudget, far too long for Start).
 type inflightSettlement struct {
-	interrupted []*CronRun
+	interrupted []interruptedRun
 	adoptions   []inflightAdoption
 	adopted     int
 	dir         string
+}
+
+// interruptedRun is a marker whose run cannot be adopted: it ends as canceled
+// with the class that says why (the restart, or the operator's config edit).
+type interruptedRun struct {
+	m        runInflightMarker
+	errClass ErrorClass
+	errMsg   string
 }
 
 // inflightAdoption is one claimed adoption: the gate is already held, and await
@@ -179,7 +187,6 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 		return inflightSettlement{}
 	}
 	out := inflightSettlement{dir: dir}
-	now := time.Now()
 	// The adoption capability is asserted, never part of SessionRouter: the one
 	// production router gains it, every test fake degrades to "nothing to
 	// adopt" — the pre-adoption behaviour, and therefore the right default.
@@ -255,21 +262,7 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 			// run, and the record says so instead of blaming the restart (#2749).
 			errClass, errMsg = ErrClassConfigDrift, "config changed across the restart; the old run's CLI was shut down"
 		}
-		startedAt := time.UnixMilli(m.StartedAtMS)
-		out.interrupted = append(out.interrupted, &CronRun{
-			RunID:      m.RunID,
-			JobID:      m.JobID,
-			State:      RunStateCanceled,
-			Trigger:    m.Trigger,
-			StartedAt:  startedAt,
-			EndedAt:    now,
-			DurationMS: now.Sub(startedAt).Milliseconds(),
-			Prompt:     osutil.SanitizeForLog(m.Prompt, MaxPromptBytes),
-			WorkDir:    m.WorkDir,
-			Fresh:      m.Fresh,
-			ErrorClass: errClass,
-			ErrorMsg:   errMsg,
-		})
+		out.interrupted = append(out.interrupted, interruptedRun{m: m, errClass: errClass, errMsg: errMsg})
 	}
 	return out
 }
@@ -277,8 +270,10 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 // settleRunInflight is the async half: it writes the interrupted records and
 // starts each claimed adoption's wait, each in its own isolated startup pass.
 func (s *Scheduler) settleRunInflight(out inflightSettlement) {
-	for _, rec := range out.interrupted {
-		s.appendRun(rec)
+	for _, ir := range out.interrupted {
+		s.finishRestartedRun(ir.m, nil, runOutcome{
+			state: RunStateCanceled, errClass: ir.errClass, errMsg: ir.errMsg,
+		})
 	}
 	for _, a := range out.adoptions {
 		s.goStartupPass("run-adoption-"+a.runID, a.await)
@@ -307,4 +302,28 @@ func (s *Scheduler) readRunInflightMarker(path string) (runInflightMarker, bool)
 		return runInflightMarker{}, false
 	}
 	return m, true
+}
+
+// finishRestartedRun ends a run the previous process started, through the same
+// finishRun every live run ends in: Job.LastRunAt / LastResult / counters,
+// the run_ended frame, the per-state metrics, the sanitised history record and
+// the marker removal all happen exactly as for a local finish (#2799). Before
+// this, both restart paths appended a CronRun directly, so the job card kept
+// showing the run from before the restart while the history already had a
+// newer one.
+//
+// The run has no execution context in this process, so rc carries only its
+// identity: finishRun reads rc.job.ID and nothing else from the Job, and
+// recordTerminalResult resolves the table's own object by that ID.
+// finalizer is the adoption's gate holder, or nil for an interrupted run,
+// which never claimed one.
+func (s *Scheduler) finishRestartedRun(m runInflightMarker, finalizer *runFinalizer, out runOutcome) {
+	s.finishRun(runCtx{
+		job:       &Job{ID: m.JobID},
+		runID:     m.RunID,
+		startedAt: time.UnixMilli(m.StartedAtMS),
+		trigger:   m.Trigger,
+		finalizer: finalizer,
+		snap:      jobSnapshot{prompt: m.Prompt, workDir: m.WorkDir, fresh: m.Fresh},
+	}, out)
 }

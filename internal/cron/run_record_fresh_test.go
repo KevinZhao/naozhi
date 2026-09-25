@@ -2,12 +2,10 @@ package cron
 
 import "testing"
 
-// TestLocalRun_RecordsFreshSnapshotThroughFinishRun closes #2742's second hole:
-// CronRun.Fresh was only ever asserted on the inflight-marker reconcile path,
-// never on the normal execute -> finishRun path, so dropping it from the
-// finishArgs composition left the whole package green. #2711 step 5 rewrites
-// exactly that composition, and a field that can vanish silently is the one a
-// refactor loses.
+// TestLocalRun_RecordsFreshSnapshotThroughFinishRun pins CronRun.Fresh on the
+// normal execute -> finishRun path, where nothing else checks it: the field
+// travels in runCtx.snap, and hard-wiring it to false in that composition
+// otherwise leaves the whole package green (#2742).
 //
 // Both polarities: a record that always says true (or always false) passes a
 // single-sided check.

@@ -18,8 +18,6 @@ import (
 	"context"
 	"log/slog"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // AdoptVerdict mirrors session.AdoptState value-for-value and
@@ -65,56 +63,39 @@ const maxAdoptAttempts = 1
 // adoptionWaitBudget caps how long an adoption waits for the late result.
 // The generous default covers a long turn that was near its own deadline when
 // the restart hit; the run's own JobTimeout no longer applies (the timer died
-// with the old process), so this is thestand-in  upper bound.
+// with the old process), so this is the stand-in upper bound.
 var adoptionWaitBudget = 30 * time.Minute
 
-// adoptRun waits out one adopted turn and writes its terminal record. Runs in
-// its own goroutine under goStartupPass (recover + gcWG). The gate slot was
-// claimed by the caller; finishing releases it via the same finalizer every
-// run body uses, so CurrentRun/overlap/gauge behave as if the run were local.
+// adoptRun waits out one adopted turn and ends it through finishRun, like any
+// local run (#2799). Runs in its own goroutine under goStartupPass (recover +
+// gcWG). The gate slot was claimed by claimRunInflight before the first tick;
+// finishRun releases it through the same finalizer every run body uses, so
+// CurrentRun / overlap / gauge behave as if the run were local.
 func (s *Scheduler) adoptRun(m runInflightMarker, run InFlightRun, inflight *runInflight) {
-	startedAt := time.UnixMilli(m.StartedAtMS)
 	finalizer := &runFinalizer{inflight: inflight}
 	sc := runScaffold{finalizer: finalizer, jobID: m.JobID}
 	sc.run(func() {
 		ctx, cancel := context.WithTimeout(s.stopCtx, adoptionWaitBudget)
 		defer cancel()
-		out, err := run.AwaitAdopted(ctx)
-		now := time.Now()
-		rec := &CronRun{
-			RunID:      m.RunID,
-			JobID:      m.JobID,
-			Trigger:    m.Trigger,
-			StartedAt:  startedAt,
-			EndedAt:    now,
-			DurationMS: now.Sub(startedAt).Milliseconds(),
-			Prompt:     osutil.SanitizeForLog(m.Prompt, MaxPromptBytes),
-			WorkDir:    m.WorkDir,
-			Fresh:      m.Fresh,
-			SessionID:  out.SessionID,
-			// CostUSD deliberately zero: the adopted session's baseline covers
-			// turns this process never saw, and a wrong number in the ledger is
-			// worse than none (#2750).
-		}
+		adopted, err := run.AwaitAdopted(ctx)
+		// costInc deliberately zero: the adopted session's baseline covers turns
+		// this process never saw, and a wrong number in the ledger is worse than
+		// none (#2750).
+		out := runOutcome{sessionID: adopted.SessionID}
 		switch {
-		case err == nil && out.Completed:
-			rec.State = RunStateSucceeded
-			rec.Result = out.Text
-			rec.ResultBytes = len(out.Text)
+		case err == nil && adopted.Completed:
+			out.state = RunStateSucceeded
+			out.result = adopted.Text
 		default:
 			// Timeout, shutdown, or the CLI died without a result: the run is
-			// interrupted after all — Phase 0's record, with a duration that now
-			// spans the restart.
-			rec.State = RunStateCanceled
-			rec.ErrorClass = ErrClassInterrupted
-			rec.ErrorMsg = "naozhi restarted mid-run; the adopted CLI turn did not complete"
+			// interrupted after all, with a duration that now spans the restart.
+			out.state = RunStateCanceled
+			out.errClass = ErrClassInterrupted
+			out.errMsg = "naozhi restarted mid-run; the adopted CLI turn did not complete"
 		}
-		if s.jobStillExists(m.JobID) {
-			s.appendRun(rec)
-		}
-		s.removeRunInflightMarker(m.RunID)
+		s.finishRestartedRun(m, finalizer, out)
 		slog.Info("cron: adopted run settled",
-			"job_id", m.JobID, "run_id", m.RunID, "state", rec.State,
+			"job_id", m.JobID, "run_id", m.RunID, "state", out.state,
 			"spanned_restart", true)
 	})
 }
