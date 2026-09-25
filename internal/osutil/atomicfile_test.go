@@ -152,3 +152,30 @@ func TestWriteFileAtomic_ConcurrentSameDest(t *testing.T) {
 		}
 	}
 }
+
+// TestIsAtomicTempName_MatchesWriteFileAtomicTemps ties the predicate to the
+// pattern WriteFileAtomic really creates. Cleanup code elsewhere keys on it,
+// and a pattern change that the predicate did not follow would leave crash
+// leftovers that nothing recognises.
+func TestIsAtomicTempName_MatchesWriteFileAtomicTemps(t *testing.T) {
+	dir := t.TempDir()
+	for _, base := range []string{"4db4f4decf31404c2ecdd38b99a08325.json", "store.json", "noext"} {
+		f, err := os.CreateTemp(dir, atomicTempPattern(base))
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := filepath.Base(f.Name())
+		f.Close()
+		if !IsAtomicTempName(name) {
+			t.Errorf("IsAtomicTempName(%q) = false for a temp file WriteFileAtomic would create", name)
+		}
+		if IsAtomicTempName(base) {
+			t.Errorf("IsAtomicTempName(%q) = true for the destination itself", base)
+		}
+	}
+	for _, name := range []string{"shim-10681.log", "state.json", "x.tmp", ".hidden"} {
+		if IsAtomicTempName(name) {
+			t.Errorf("IsAtomicTempName(%q) = true, want false", name)
+		}
+	}
+}

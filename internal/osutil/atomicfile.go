@@ -7,10 +7,23 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
 // IsDiskFull is implemented per-platform (atomicfile_unix.go / atomicfile_nonunix.go).
+
+// atomicTempPattern is the os.CreateTemp pattern WriteFileAtomic uses.
+// ".<base>.*.tmp" keeps the temp file on the destination's filesystem (so the
+// rename is atomic) and hidden from a default `ls`.
+func atomicTempPattern(base string) string { return "." + base + ".*.tmp" }
+
+// IsAtomicTempName reports whether a directory entry is a WriteFileAtomic temp
+// file. A successful write renames its temp file into place and a failed one
+// removes it, so one that outlives its write was stranded by a crash.
+func IsAtomicTempName(name string) bool {
+	return strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp")
+}
 
 // WriteFileAtomic writes data to path via write-tmp → fsync → close → rename.
 // The temp file is created in path's directory with mode perm and removed on
@@ -27,9 +40,7 @@ var syncDirFn = SyncDir
 func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
-	// `.base.*.tmp` keeps temp files on the same filesystem (rename is atomic)
-	// and hidden from default `ls`.
-	f, err := os.CreateTemp(dir, "."+base+".*.tmp")
+	f, err := os.CreateTemp(dir, atomicTempPattern(base))
 	if err != nil {
 		return fmt.Errorf("create temp in %s: %w", dir, err)
 	}
