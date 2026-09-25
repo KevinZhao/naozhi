@@ -13,8 +13,7 @@
 // Method (matches the arch-review-20260905 audit): a file's top-level names
 // are its column-0 function/let/const/var/class declarations plus its
 // `window.X =` exports; a bare reference is that name appearing in ANOTHER
-// file without a leading `.` — string contents count (onclick="fn()" wiring),
-// comments do not.
+// file without a leading `.`, outside comments and string text.
 //
 // --check fails on: any new bare reference (matrix growth), any new
 // reverse-order let/const reference (TDZ hazard, the PR#1954 shape), and any
@@ -46,11 +45,11 @@ const LOAD_ORDER = [
 
 // ── source scanning ────────────────────────────────────────────────────────
 
-// Strip // and /* */ comments while preserving string and template-literal
-// contents (inline onclick="fn()" handlers live inside strings and must keep
-// counting as references). Regex literals are not tracked; a `//` inside one
-// drops the rest of that line, which at worst under-counts — never a false
-// growth failure.
+// Strip // and /* */ comments, keeping string and template-literal contents:
+// the declaration, export, import and typeof-guard scans read strings (import
+// specifiers, the 'function' in a typeof guard). Regex literals are not
+// tracked; a `//` inside one drops the rest of that line, which at worst
+// under-counts — never a false growth failure.
 function stripComments(src) {
   let out = '';
   let i = 0;
@@ -104,6 +103,135 @@ function stripComments(src) {
         mode = 'code';
       }
       out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
+// stripCommentsAndStrings is stripComments that also blanks string and
+// template-literal text, keeping each template's ${...} expressions as code.
+// It feeds the bare-reference scan only. No handler lives
+// in a string any more (the dashboard CSP forbids inline handlers), so a name
+// inside a string is text, not a reference: counting it is how a phase label
+// like 'sending' became a "dependency". Newlines are kept so line numbers stay
+// stable. Regex literals are copied through as code: a quote inside one
+// (`/['"]/`) must not open a string that would blank the code after it.
+// A `/` starts a regex unless it follows an operand (an identifier, a number,
+// `)` or `]`); after `return` / `typeof` and friends it is a regex too.
+const REGEX_AFTER_WORD = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+
+function regexCanStartAfter(out) {
+  let k = out.length - 1;
+  while (k >= 0 && /\s/.test(out[k])) k--;
+  if (k < 0) return true;
+  const ch = out[k];
+  if (/[\w$]/.test(ch)) {
+    let j = k;
+    while (j >= 0 && /[\w$]/.test(out[j])) j--;
+    return REGEX_AFTER_WORD.has(out.slice(j + 1, k + 1));
+  }
+  return ch !== ')' && ch !== ']';
+}
+
+function stripCommentsAndStrings(src) {
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  // code | line | block | squote | dquote | template | expr
+  let mode = 'code';
+  // Brace depth of each open template ${...}, innermost last.
+  const exprDepth = [];
+  const blank = (ch) => (ch === '\n' ? '\n' : ' ');
+  while (i < n) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (mode === 'code' || mode === 'expr') {
+      if (c === '/' && next === '/') {
+        mode = mode === 'expr' ? 'expr-line' : 'line';
+        i += 2;
+        continue;
+      }
+      if (c === '/' && next === '*') {
+        mode = mode === 'expr' ? 'expr-block' : 'block';
+        i += 2;
+        continue;
+      }
+      if (mode === 'expr') {
+        if (c === '{') exprDepth[exprDepth.length - 1]++;
+        else if (c === '}') {
+          if (exprDepth[exprDepth.length - 1] === 0) {
+            exprDepth.pop();
+            mode = 'template';
+            out += ' ';
+            i++;
+            continue;
+          }
+          exprDepth[exprDepth.length - 1]--;
+        }
+      }
+      if (c === '/' && regexCanStartAfter(out)) {
+        // Copy the regex literal verbatim, honouring escapes and [...] classes.
+        let j = i + 1;
+        let inClass = false;
+        while (j < n && src[j] !== '\n') {
+          const r = src[j];
+          if (r === '\\') { j += 2; continue; }
+          if (r === '[') inClass = true;
+          else if (r === ']') inClass = false;
+          else if (r === '/' && !inClass) break;
+          j++;
+        }
+        if (j < n && src[j] === '/') {
+          out += src.slice(i, j + 1);
+          i = j + 1;
+          continue;
+        }
+      }
+      if (c === "'") mode = 'squote';
+      else if (c === '"') mode = 'dquote';
+      else if (c === '`') mode = 'template';
+      out += c;
+      i++;
+    } else if (mode === 'line' || mode === 'expr-line') {
+      if (c === '\n') {
+        mode = mode === 'expr-line' ? 'expr' : 'code';
+        out += c;
+      }
+      i++;
+    } else if (mode === 'block' || mode === 'expr-block') {
+      if (c === '*' && next === '/') {
+        mode = mode === 'expr-block' ? 'expr' : 'code';
+        i += 2;
+        continue;
+      }
+      if (c === '\n') out += c;
+      i++;
+    } else {
+      // Inside a string or template text: blank it, honour escapes.
+      if (c === '\\') {
+        out += ' ' + blank(next ?? ' ');
+        i += 2;
+        continue;
+      }
+      if (mode === 'template' && c === '$' && next === '{') {
+        exprDepth.push(0);
+        mode = 'expr';
+        out += '  ';
+        i += 2;
+        continue;
+      }
+      if (
+        (mode === 'squote' && c === "'") ||
+        (mode === 'dquote' && c === '"') ||
+        (mode === 'template' && c === '`')
+      ) {
+        mode = exprDepth.length ? 'expr' : 'code';
+        out += c;
+        i++;
+        continue;
+      }
+      out += blank(c);
       i++;
     }
   }
@@ -190,13 +318,12 @@ function typeofGuardCount(stripped) {
 function analyze() {
   const files = {};
   for (const name of LOAD_ORDER) {
-    const stripped = stripComments(
-      fs.readFileSync(path.join(STATIC_DIR, name), 'utf8')
-    );
+    const src = fs.readFileSync(path.join(STATIC_DIR, name), 'utf8');
+    const stripped = stripComments(src);
     files[name] = {
       decls: topLevelDecls(stripped),
       exports: windowExports(stripped),
-      idents: bareIdents(stripped),
+      idents: bareIdents(stripCommentsAndStrings(src)),
       imports: importedNames(stripped),
       typeofGuards: typeofGuardCount(stripped),
       windowRefs: windowRefs(stripped),
