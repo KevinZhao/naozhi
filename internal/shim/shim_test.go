@@ -4,8 +4,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 func TestRingBuffer_PushAndLinesSince(t *testing.T) {
@@ -85,109 +83,95 @@ func TestRingBuffer_Empty(t *testing.T) {
 
 func TestWatchdog_FiresOnTimeout(t *testing.T) {
 	fired := make(chan struct{})
-	w := NewWatchdog(50*time.Millisecond, func() {
+	w, c := newManualWatchdog(50*time.Millisecond, func() {
 		close(fired)
 	})
 	w.Start()
 
-	select {
-	case <-fired:
-	case <-time.After(time.Second):
-		t.Fatal("watchdog did not fire within 1s")
+	c.advance(50 * time.Millisecond)
+	if !isClosed(fired) {
+		t.Fatal("watchdog did not fire at its deadline")
 	}
 }
 
 func TestWatchdog_ResetPrevents(t *testing.T) {
 	fired := make(chan struct{})
-	w := NewWatchdog(100*time.Millisecond, func() {
+	w, c := newManualWatchdog(100*time.Millisecond, func() {
 		close(fired)
 	})
 	w.Start()
+	defer w.Stop()
 
 	// Reset before timeout
-	time.Sleep(50 * time.Millisecond)
+	c.advance(50 * time.Millisecond)
 	w.Reset()
-	time.Sleep(50 * time.Millisecond)
+	c.advance(50 * time.Millisecond)
 	w.Reset()
 
-	// Should not have fired yet
-	select {
-	case <-fired:
+	// The deadline now sits 100ms after the second Reset.
+	c.advance(100*time.Millisecond - time.Nanosecond)
+	if isClosed(fired) {
 		t.Fatal("watchdog fired despite resets")
-	case <-time.After(50 * time.Millisecond):
-		// good
 	}
-
-	w.Stop()
+	c.advance(time.Nanosecond)
+	if !isClosed(fired) {
+		t.Fatal("watchdog did not fire 100ms after the last Reset")
+	}
 }
 
 func TestWatchdog_StopPrevents(t *testing.T) {
 	fired := make(chan struct{})
-	w := NewWatchdog(50*time.Millisecond, func() {
+	w, c := newManualWatchdog(50*time.Millisecond, func() {
 		close(fired)
 	})
 	w.Start()
 	w.Stop()
 
-	select {
-	case <-fired:
+	c.advance(time.Hour)
+	if isClosed(fired) {
 		t.Fatal("watchdog fired after Stop()")
-	case <-time.After(150 * time.Millisecond):
-		// good
 	}
 }
 
-// TestWatchdog_ResetStaleCallbackNoOp verifies the generation-counter fix:
-// a callback that was already scheduled at the time of Reset must not fire.
-// We use a very short timeout and call Reset just before expiry, then confirm
-// the watchdog eventually fires exactly once (the fresh generation), not twice.
+// TestWatchdog_ResetStaleCallbackNoOp pins the generation counter: a callback
+// whose timer was already dispatched when Reset ran (so Reset's Stop could not
+// cancel it) must be a no-op, and only the fresh generation fires.
 func TestWatchdog_ResetStaleCallbackNoOp(t *testing.T) {
 	var fireCount atomic.Int32
-	w := NewWatchdog(30*time.Millisecond, func() {
+	w, c := newManualWatchdog(30*time.Millisecond, func() {
 		fireCount.Add(1)
 	})
 	w.Start()
 
-	// Reset just before the first timer would fire; this invalidates the first
-	// callback (generation 0 → 1) and schedules a new one.
-	// Wall-clock wait is intentional here: we must hit Reset BEFORE the 30ms
-	// timer fires, so Eventually polling would defeat the race this test pins.
-	time.Sleep(20 * time.Millisecond)
+	c.advance(20 * time.Millisecond)
+	stale := c.armed()[0]
 	w.Reset()
+	// Run the superseded callback as the AfterFunc goroutine would if it had
+	// already been dispatched when Reset stopped the timer.
+	stale.f()
+	if got := fireCount.Load(); got != 0 {
+		t.Fatalf("the superseded callback fired (%d), generation counter did not block it", got)
+	}
 
-	// Sync wait for the fresh callback to fire. Stale callback (gen 0) runs
-	// as a no-op due to generation mismatch, so count can only reach 1 via
-	// the fresh generation. Eventually replaces a 100ms wall-clock wait.
-	testhelper.Eventually(t, func() bool {
-		return fireCount.Load() >= 1
-	}, 1*time.Second, "fresh watchdog callback did not fire after Reset")
-
+	c.advance(30 * time.Millisecond)
 	if got := fireCount.Load(); got != 1 {
 		t.Errorf("expected watchdog to fire exactly once, got %d", got)
 	}
 }
 
-// TestWatchdog_StopInvalidatesCallback verifies that Stop increments the
-// generation so a racing callback that fires after Stop is a no-op.
+// TestWatchdog_StopInvalidatesCallback: the same race against Stop — a
+// callback already dispatched when Stop ran must not fire.
 func TestWatchdog_StopInvalidatesCallback(t *testing.T) {
 	var fireCount atomic.Int32
-	w := NewWatchdog(20*time.Millisecond, func() {
+	w, c := newManualWatchdog(20*time.Millisecond, func() {
 		fireCount.Add(1)
 	})
 	w.Start()
 
-	// Stop just before the timer fires. Wall-clock wait is intentional: we
-	// must race Stop() against a 20ms timer, which Eventually cannot express
-	// (there is no positive condition to poll — the whole point is the
-	// timing window where the timer is already scheduled).
-	time.Sleep(10 * time.Millisecond)
+	c.advance(10 * time.Millisecond)
+	stale := c.armed()[0]
 	w.Stop()
-
-	// Negative-assertion window: give any in-flight AfterFunc callback room
-	// to execute so we can prove the generation counter blocks it. This is
-	// fundamentally a "wait and verify nothing happened" test — not
-	// migratable to Eventually.
-	time.Sleep(50 * time.Millisecond)
+	stale.f()
 
 	if got := fireCount.Load(); got != 0 {
 		t.Errorf("expected watchdog not to fire after Stop, got %d fires", got)

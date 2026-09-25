@@ -21,8 +21,22 @@ type Watchdog struct {
 	onFire  func()
 	fired   chan struct{}
 	running bool
-	gen     int64       // incremented on every Reset/Stop to invalidate old callbacks
-	timer   *time.Timer // current AfterFunc; stopped on Reset/Stop so timers do not leak
+	gen     int64         // incremented on every Reset/Stop to invalidate old callbacks
+	timer   watchdogTimer // current AfterFunc; stopped on Reset/Stop so timers do not leak
+
+	// afterFunc arms the no-output timer. It is time.AfterFunc outside tests;
+	// tests substitute a manual clock so deadlines are crossed by advancing
+	// it rather than by sleeping past them.
+	afterFunc func(d time.Duration, f func()) watchdogTimer
+}
+
+// watchdogTimer is the part of *time.Timer the watchdog uses.
+type watchdogTimer interface {
+	Stop() bool
+}
+
+func realAfterFunc(d time.Duration, f func()) watchdogTimer {
+	return time.AfterFunc(d, f)
 }
 
 // NewWatchdog creates a watchdog with the given no-output timeout.
@@ -32,9 +46,10 @@ func NewWatchdog(timeout time.Duration, onFire func()) *Watchdog {
 		timeout = 30 * time.Minute
 	}
 	return &Watchdog{
-		timeout: timeout,
-		onFire:  onFire,
-		fired:   make(chan struct{}),
+		timeout:   timeout,
+		onFire:    onFire,
+		fired:     make(chan struct{}),
+		afterFunc: realAfterFunc,
 	}
 }
 
@@ -46,7 +61,7 @@ func (w *Watchdog) scheduleTimer() {
 		w.timer.Stop()
 	}
 	currentGen := w.gen
-	w.timer = time.AfterFunc(w.timeout, func() {
+	w.timer = w.afterFunc(w.timeout, func() {
 		w.fireIfCurrent(currentGen)
 	})
 }
