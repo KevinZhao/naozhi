@@ -79,15 +79,7 @@ func TestFinishRunResultBytesIsStoredNotRaw(t *testing.T) {
 			finalizer := &runFinalizer{inflight: inflight}
 
 			runID := "0123456789abcdef"
-			sched.finishRun(finishArgs{
-				job:       j,
-				runID:     runID,
-				startedAt: time.Now(),
-				trigger:   TriggerScheduled,
-				state:     RunStateSucceeded,
-				result:    tc.rawResult,
-				finalizer: finalizer,
-			})
+			sched.finishRun(runCtx{job: j, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded, result: tc.rawResult})
 
 			// Read the persisted CronRun back off disk so we assert the durable
 			// record, not an in-memory shortcut.

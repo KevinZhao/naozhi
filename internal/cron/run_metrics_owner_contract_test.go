@@ -40,7 +40,7 @@ func TestRunMetricsOwnerContract(t *testing.T) {
 		"CronRunTimedOutTotal":  {"scheduler_callbacks.go:bumpRunStateMetrics"},
 		"CronRunCanceledTotal":  {"scheduler_callbacks.go:bumpRunStateMetrics"},
 		// Sandbox-specific per-state buckets: same owner, gated by the
-		// finishArgs.sandbox bool. No caller may bump these directly.
+		// runOutcome.sandbox bool. No caller may bump these directly.
 		"CronSandboxRunFailedTotal":   {"scheduler_callbacks.go:bumpRunStateMetrics", "sandbox_replay.go:dispatchReplay"},
 		"CronSandboxRunTimedOutTotal": {"scheduler_callbacks.go:bumpRunStateMetrics"},
 		// Lifecycle pair. emitRunStarted / finishRun own the live paths;

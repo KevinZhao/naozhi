@@ -142,11 +142,7 @@ func TestP0_FinishRunCanceledSkipsPersist(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.finishRun(finishArgs{
-		job: j, runID: "r1", startedAt: time.Now(), trigger: TriggerScheduled,
-		state: RunStateCanceled, errClass: ErrClassCanceled,
-		errMsg: context.Canceled.Error(), skipPersist: true,
-	})
+	s.finishRun(runCtx{job: j, runID: "r1", startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: context.Canceled.Error(), skipPersist: true})
 
 	s.tblForTest().mu.RLock()
 	if !j.LastRunAt.Equal(prevRun) {

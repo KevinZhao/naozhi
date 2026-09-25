@@ -103,15 +103,17 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 	// Drive the full terminal saga with a successful Job persist. Test
 	// completing without panic is itself part of the assertion (finishRun must
 	// not panic when Append fails after the Job side landed).
-	s.finishRun(finishArgs{
-		job:       j,
-		runID:     "0123456789abcdef", // valid 16-hex so Append reaches the write
+	s.finishRun(runCtx{
+		job:   j,
+		runID: "0123456789abcdef",
+		// valid 16-hex so Append reaches the write
 		startedAt: time.Now(),
 		trigger:   TriggerScheduled,
+		finalizer: finalizer,
+	}, runOutcome{
 		state:     RunStateSucceeded,
 		sessionID: "sess-1",
 		result:    "ok",
-		finalizer: finalizer,
 	})
 
 	// (a) Job side landed in-memory: recordTerminalResult mutated j directly.

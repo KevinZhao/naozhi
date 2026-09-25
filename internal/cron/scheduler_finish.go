@@ -15,8 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/costledger"
-
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -161,71 +159,6 @@ func (s *Scheduler) deleteJobRuns(jobID string) {
 	s.deleteJobAttention(jobID)
 }
 
-// finishArgs bundles the parameters of finishRun so each call site reads as a
-// struct literal — many fields are optional and a positional signature would
-// be brittle. Snapshot fields (prompt/workDir/fresh) are zero on paths that
-// never took snapshotJob() (overlapSkipped / pre-snapshot preflight failures);
-// the dashboard falls back to Job.Prompt for display.
-type finishArgs struct {
-	// job 是终结的目标 Job。state==Skipped 的 overlap 路径仍要传 *Job，
-	// 因为 emitRunEnded 需要 Job.ID 作为事件 key；DeleteJob 中途的竞态由
-	// recordTerminalResult 内 jobs[id] 二次校验。
-	job *Job
-	// runID / startedAt 与上游 emitRunStarted 的 RunStartedEvent 一一对应；
-	// 订阅方 (dashboard hub) 用 RunID 配对 started→ended 帧。
-	runID     string
-	startedAt time.Time
-	// trigger 与 RunStartedEvent.Trigger 必须一致。
-	trigger TriggerKind
-	// state 决定 metrics 计数桶；Skipped 不计入 Failed。
-	state RunState
-	// sessionID 是 GetOrCreate 分配的 CLI session_id（fresh=true 路径必为
-	// 空字符串）。空值 dashboard 隐藏「打开会话」按钮。
-	sessionID string
-	// result 是 CLI 末轮文本输出（已经 sanitiseRunResult：4K rune 截断 +
-	// …[truncated] 后缀 + SanitizeForLog 控制字符过滤）。
-	result string
-	// errClass 是机器可读的错误分类；dashboard 用它选图标 + i18n 文案，
-	// errMsg 仅作展开详情。
-	errClass ErrorClass
-	// errMsg 是人类可读错误（控制符已 escape，绝对路径已 redact），
-	// ≤ maxCronErrMsgRunes。
-	errMsg string
-	// skipPersist 同时跳过 Job 字段更新和 CronRun 磁盘历史：canceled /
-	// overlap_skipped / job-deleted-mid-execute 三种 transient 终态都不应
-	// 污染 Job 快照或 runs/<jobID>/。Metrics + WS broadcast 不受影响——
-	// dashboard 必须能看到 skipped/canceled 帧。
-	skipPersist bool
-	// keepInflightMarker: see runOutcome.keepInflightMarker (run_ctx.go).
-	keepInflightMarker bool
-	prompt             string
-	workDir            string
-	fresh              bool
-	// endedAt, when non-zero, overrides the s.now() read inside finishRun so
-	// observeSuccessLatency and finishRun share one clock read (step-based
-	// test clocks would otherwise advance an extra tick).
-	endedAt time.Time
-	// finalizer 是 caller 栈上的 *runFinalizer。finishRun 在 emitRunEnded 之前
-	// 调 finalizer.finalize() 让 CurrentRun(jobID) 与 broadcast 同步 ok=false；
-	// caller 的 defer 再调一次作兜底，done bool 保证只清理一次且只动本 run 的
-	// gate。emitOverlapSkipped 必须传 nil（其 inflight gate 归并发 run 拥有）。
-	finalizer *runFinalizer
-	// replayOf links this run to the original it replayed (agentcore §7.3);
-	// "" for normal runs.
-	replayOf string
-	// sandboxMeta is the cloud-execution receipt for placement=sandbox runs
-	// (RFC §7.3); nil for local runs, whose record then carries no sandbox_meta.
-	sandboxMeta *SandboxRunMeta
-	// costInc is the LOCAL run's spend (session CostTotals after − before);
-	// sandbox runs leave it zero and carry cost via sandboxMeta.
-	costInc costledger.Increment
-	// sandbox marks a placement=sandbox run so bumpRunStateMetrics also
-	// advances the CronSandboxRun{Failed,TimedOut}Total buckets (#2173).
-	// Deliberately separate from sandboxMeta != nil: pre-invoke failures
-	// carry no receipt yet are still sandbox runs.
-	sandbox bool
-}
-
 // finishRun is the single terminal hook for every cron execution path.
 // It centralises:
 //   - per-state metrics increment (CronRun*Total)
@@ -233,27 +166,28 @@ type finishArgs struct {
 //   - cron_run_ended WS broadcast
 //   - JobRunCounters bump (under s.tbl.mu, alongside recordTerminalResult)
 //
-// Adding a new error class is one mapping plus one finishArgs literal at the
-// call site.
-func (s *Scheduler) finishRun(a finishArgs) {
+// It takes the run's identity (rc) and how it ended (out) separately, so a
+// terminal branch spells only its outcome. Adding a new error class is one
+// mapping plus one runOutcome literal at the call site.
+func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 	// Defensive nil-job guard (#837): a panic here would be swallowed by
 	// robfig's Recover ABOVE this frame, skipping finalize() + emitRunEnded and
 	// leaving an orphaned "running" badge forever. Finalize this run's gate
 	// and bail loudly instead.
-	if a.job == nil {
+	if rc.job == nil {
 		slog.Error("cron: finishRun called with nil job; finalizing inflight gate and skipping terminal protocol",
-			"run_id", a.runID, "state", string(a.state), "err_class", string(a.errClass))
-		a.finalizer.finalize()
+			"run_id", rc.runID, "state", string(out.state), "err_class", string(out.errClass))
+		rc.finalizer.finalize()
 		return
 	}
 	// endedAt via the injected clock (#643) so DurationMS is deterministic
 	// under a fake clock; reuse the caller's pre-computed value when set so
 	// step-based clocks are not advanced twice.
-	endedAt := a.endedAt
+	endedAt := out.endedAt
 	if endedAt.IsZero() {
 		endedAt = s.now()
 	}
-	durationMS := endedAt.Sub(a.startedAt).Milliseconds()
+	durationMS := endedAt.Sub(rc.startedAt).Milliseconds()
 	if durationMS < 0 {
 		durationMS = 0 // monotonic clock skew safety
 	}
@@ -261,7 +195,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// jobPersistOK=false → Job 字段回滚（marshal 失败）或 Job 已被并发删除，
 	// 此时不得再写 CronRun history（list 读 Job 字段、timeline 读 CronRun，
 	// 必须同步可见或同步缺失）。SECURITY: 落盘与 WS 广播只能用 persistedResult /
-	// persistedErrMsg（已 redact + sanitise），绝不用原始 a.result / a.errMsg——
+	// persistedErrMsg（已 redact + sanitise），绝不用原始 out.result / out.errMsg——
 	// 错误串里的绝对路径会把工作区布局泄漏给所有 dashboard 客户端。
 	// Clear the restart marker for every terminal state, skipPersist included —
 	// EXCEPT the shutdown-cancel finish, whose Send died because this process is
@@ -270,15 +204,15 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// process's only way to adopt the run instead of losing it (#2712 PR B).
 	// Clearing before the persistence branches means a marshal failure below
 	// cannot leave a marker that resurrects a genuinely finished run next boot.
-	if !a.keepInflightMarker {
-		s.removeRunInflightMarker(a.runID)
+	if !out.keepInflightMarker {
+		s.removeRunInflightMarker(rc.runID)
 	}
 
-	persistedResult := a.result
-	persistedErrMsg := a.errMsg
+	persistedResult := out.result
+	persistedErrMsg := out.errMsg
 	jobPersistOK := false
-	if !a.skipPersist {
-		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state, endedAt)
+	if !out.skipPersist {
+		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(rc.job, out.result, out.errMsg, out.sessionID, out.errClass, out.state, endedAt)
 	} else {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
@@ -289,55 +223,55 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// skipPersist paths bump unconditionally (no Job rollback is possible; the
 	// metric is their only durable record). The sandbox buckets sit behind the
 	// SAME gate (#2173) so they remain a strict subset of the generic ones.
-	if a.skipPersist || jobPersistOK {
-		s.bumpRunStateMetrics(a.state, a.sandbox)
+	if out.skipPersist || jobPersistOK {
+		s.bumpRunStateMetrics(out.state, out.sandbox)
 	}
 
 	// CronRun history 写盘条件：skipPersist=false、jobPersistOK=true、runStore
 	// 启用。两步写盘非事务（#992）：先 cron_jobs.json 成功才 Append runs/；崩溃
 	// 只可能让 Job 计数领先一条而 runs/ 缺最新一条（over-report，下次 run 自愈），
-	// 反方向结构上不可能。a.prompt 在此再过一次 SanitizeForLog（#1094）：旧
+	// 反方向结构上不可能。rc.snap.prompt 在此再过一次 SanitizeForLog（#1094）：旧
 	// cron_jobs.json 可能带 C0/C1/bidi 的 legacy Prompt。
-	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
+	persistedPrompt := osutil.SanitizeForLog(rc.snap.prompt, MaxPromptBytes)
 	// #2058 / #2479: recordTerminalResult released s.tbl.mu before returning, and
 	// Append's dir create + write run outside jobLock, so a concurrent
 	// DeleteJobByID could resurrect an orphaned runs/<jobID>/. Double check:
 	// (1) pre-write jobStillExists skips the write; (2) post-write re-check
 	// drops exactly the record we wrote (dropOrphanRun). Both pinned by tests.
 	if s.finishRunPreAppendHook != nil {
-		s.finishRunPreAppendHook(a.job.ID)
+		s.finishRunPreAppendHook(rc.job.ID)
 	}
-	if !a.skipPersist && jobPersistOK && s.runStoreEnabled() && s.jobStillExists(a.job.ID) {
+	if !out.skipPersist && jobPersistOK && s.runStoreEnabled() && s.jobStillExists(rc.job.ID) {
 		s.appendRun(&CronRun{
-			RunID:      a.runID,
-			JobID:      a.job.ID,
-			State:      a.state,
-			Trigger:    a.trigger,
-			StartedAt:  a.startedAt,
+			RunID:      rc.runID,
+			JobID:      rc.job.ID,
+			State:      out.state,
+			Trigger:    rc.trigger,
+			StartedAt:  rc.startedAt,
 			EndedAt:    endedAt,
 			DurationMS: durationMS,
-			SessionID:  a.sessionID,
+			SessionID:  out.sessionID,
 			Prompt:     persistedPrompt,
-			WorkDir:    a.workDir,
-			Fresh:      a.fresh,
+			WorkDir:    rc.snap.workDir,
+			Fresh:      rc.snap.fresh,
 			Result:     persistedResult,
 			// ResultBytes is the STORED byte count (post-truncate/redact/sanitise),
 			// not the raw Claude output size — on-disk footprint only, matching
 			// what the dashboard renders (#1910).
 			ResultBytes: len(persistedResult),
-			ErrorClass:  a.errClass,
+			ErrorClass:  out.errClass,
 			ErrorMsg:    persistedErrMsg,
-			ReplayOf:    a.replayOf,
+			ReplayOf:    out.replayOf,
 			// nil for local runs, so their record carries no sandbox_meta key.
-			SandboxMeta: a.sandboxMeta,
+			SandboxMeta: out.sandboxMeta,
 			// local-run cost increment; 0 for sandbox runs, which report via SandboxMeta.
-			CostUSD: a.costInc.USD,
+			CostUSD: out.costInc.USD,
 		})
 		// #2479 (2): post-write re-check; see above.
-		if !s.jobStillExists(a.job.ID) {
-			s.runStore.dropOrphanRun(a.job.ID, a.runID)
+		if !s.jobStillExists(rc.job.ID) {
+			s.runStore.dropOrphanRun(rc.job.ID, rc.runID)
 			slog.Info("cron run: job deleted during history write; dropped orphan run record",
-				"job_id", a.job.ID, "run_id", a.runID)
+				"job_id", rc.job.ID, "run_id", rc.runID)
 		}
 		// A new run record may introduce a SessionID the cache does not know
 		// about; drop the snapshot so the next KnownSessionIDs() call rebuilds.
@@ -347,26 +281,26 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// The ledger is independent of run-record persistence: money was spent
 	// even when the record is skipped (cancel / skipPersist paths included),
 	// dropped as orphan, or has no store.
-	s.appendLedger(a)
+	s.appendLedger(rc, out)
 
 	// Finalize before the broadcast (#689) so a dashboard list arriving
 	// concurrently with cron_run_ended observes CurrentRun(jobID) == ok:false.
 	// The finalizer is per-run stack-local: the executeOpt defer fires second as
 	// a no-op and can never reset a racing run-B's freshly-installed metadata.
 	// Broadcast last so hub locks aren't held while we hold s.tbl.mu.
-	a.finalizer.finalize()
+	rc.finalizer.finalize()
 
 	s.emitRunEnded(RunEndedEvent{
-		JobID:      a.job.ID,
-		RunID:      a.runID,
-		State:      a.state,
-		StartedAt:  a.startedAt,
+		JobID:      rc.job.ID,
+		RunID:      rc.runID,
+		State:      out.state,
+		StartedAt:  rc.startedAt,
 		EndedAt:    endedAt,
 		DurationMS: durationMS,
-		SessionID:  a.sessionID,
-		ErrorClass: a.errClass,
+		SessionID:  out.sessionID,
+		ErrorClass: out.errClass,
 		ErrorMsg:   persistedErrMsg,
-		Trigger:    a.trigger,
+		Trigger:    rc.trigger,
 	})
 	metrics.CronRunEndedTotal.Add(1)
 }
@@ -441,11 +375,11 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 		StartedAt: startedAt,
 		Trigger:   trigger,
 	})
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-		state: RunStateSkipped, errClass: errClass,
-		errMsg: errMsg, skipPersist: true,
-	})
+	// nil finalizer: the gate belongs to the run this tick was skipped for.
+	s.finishRun(
+		runCtx{job: j, runID: runID, startedAt: startedAt, trigger: trigger},
+		runOutcome{state: RunStateSkipped, errClass: errClass, errMsg: errMsg, skipPersist: true},
+	)
 }
 
 // JobState is the runtime-mutable terminal-result half of the Job struct: the

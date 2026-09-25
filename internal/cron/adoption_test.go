@@ -262,7 +262,7 @@ func TestShutdownCancelKeepsMarker(t *testing.T) {
 	}
 
 	// Shutdown-cancel: marker survives.
-	s.finishRunFor(rc, runOutcome{
+	s.finishRun(rc, runOutcome{
 		state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: "context canceled",
 		skipPersist: true, keepInflightMarker: true,
 	})
@@ -271,7 +271,7 @@ func TestShutdownCancelKeepsMarker(t *testing.T) {
 	}
 
 	// Operator cancel (same skipPersist shape, keep flag off): marker cleared.
-	s.finishRunFor(rc, runOutcome{
+	s.finishRun(rc, runOutcome{
 		state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: "interrupted by operator",
 		skipPersist: true,
 	})

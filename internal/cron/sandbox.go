@@ -353,7 +353,7 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 	// No metrics here: finishRun → bumpRunStateMetrics(state, sandbox=true) is the
 	// single owner of every per-state counter, and the state already encodes the
 	// TimedOut-vs-Failed split so a timed-out run is never counted twice (#2173).
-	s.finishRunFor(a.runCtx, runOutcome{
+	s.finishRun(a.runCtx, runOutcome{
 		state: state, errClass: errClass, errMsg: errMsg, result: result,
 		skipPersist: skipPersist,
 		sandboxMeta: meta,

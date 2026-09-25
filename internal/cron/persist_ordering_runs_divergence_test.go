@@ -61,15 +61,17 @@ func TestPersistOrdering_RunsNeverDivergeAheadOfJob(t *testing.T) {
 	}
 	finalizer := &runFinalizer{inflight: inflight}
 
-	s.finishRun(finishArgs{
-		job:       j,
-		runID:     "0123456789abcdef", // valid 16-hex so Append would NOT bail on id check
+	s.finishRun(runCtx{
+		job:   j,
+		runID: "0123456789abcdef",
+		// valid 16-hex so Append would NOT bail on id check
 		startedAt: time.Now(),
 		trigger:   TriggerScheduled,
+		finalizer: finalizer,
+	}, runOutcome{
 		state:     RunStateSucceeded,
 		sessionID: "sess-1",
 		result:    "ok",
-		finalizer: finalizer,
 	})
 
 	// jobPersistOK was false (marshal injected an error), so runStore.Append

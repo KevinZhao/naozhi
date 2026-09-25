@@ -23,11 +23,7 @@ func TestSkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 	s.tblForTest().mu.Unlock()
 
 	rawErr := "session error: open /home/ops/private-secret/file.go: " + context.Canceled.Error()
-	s.finishRun(finishArgs{
-		job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
-		trigger: TriggerScheduled, state: RunStateCanceled,
-		errClass: ErrClassCanceled, errMsg: rawErr, skipPersist: true,
-	})
+	s.finishRun(runCtx{job: j, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: rawErr, skipPersist: true})
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
@@ -60,11 +56,7 @@ func TestSuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 	s.tblForTest().mu.Unlock()
 
 	rawErr := "send error: dial tcp 10.0.0.1:443: connect: connection refused"
-	s.finishRun(finishArgs{
-		job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
-		trigger: TriggerScheduled, state: RunStateFailed,
-		errClass: ErrClassSendError, errMsg: rawErr,
-	})
+	s.finishRun(runCtx{job: j, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateFailed, errClass: ErrClassSendError, errMsg: rawErr})
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
 	}
@@ -104,10 +96,7 @@ func TestPersistFailureSkipsCronRun(t *testing.T) {
 	// Note: deliberately not adding to s.tbl.jobs.
 
 	runID := mustGenerateRunID()
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: time.Now(),
-		trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
-	})
+	s.finishRun(runCtx{job: j, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
 
 	if rows := s.ListRuns(j.ID, 10, time.Time{}); len(rows) != 0 {
 		t.Errorf("CronRun must not be persisted when Job persist failed; got %d rows", len(rows))

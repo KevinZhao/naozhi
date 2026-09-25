@@ -34,7 +34,7 @@ func TestFinishRun_NilFinalizerNoPanic(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	// Direct finishRun call mirroring emitOverlapSkipped's finishArgs
+	// Direct finishRun call mirroring emitOverlapSkipped's finishRun call
 	// literal (scheduler_finish.go's emitSyntheticSkipped) — finalizer
 	// field is omitted (zero value = typed nil pointer).
 	startedAt := time.Now()
@@ -47,11 +47,17 @@ func TestFinishRun_NilFinalizerNoPanic(t *testing.T) {
 			t.Fatalf("finishRun panicked on nil finalizer: %v", r)
 		}
 	}()
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: startedAt, trigger: TriggerScheduled,
-		state: RunStateSkipped, errClass: ErrClassOverlapSkipped,
-		errMsg: "previous run still in flight", skipPersist: true,
+	s.finishRun(runCtx{
+		job:       j,
+		runID:     runID,
+		startedAt: startedAt,
+		trigger:   TriggerScheduled,
 		// finalizer: nil — the contract under test.
+	}, runOutcome{
+		state:       RunStateSkipped,
+		errClass:    ErrClassOverlapSkipped,
+		errMsg:      "previous run still in flight",
+		skipPersist: true,
 	})
 
 	// And one ended event must still have landed on the broadcaster.

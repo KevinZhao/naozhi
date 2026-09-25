@@ -15,7 +15,7 @@ import (
 // appended Resets to its own slice and recordingBroadcaster appended run-ended
 // events to another, and nothing related the two. So each invariant was pinned
 // by a source-anchor test instead — a regexp over scheduler_run.go asserting
-// that a `Reset(...)` match is followed by a `finishRun(finishArgs{` match
+// that a `Reset(...)` match is followed by a `finishRun(` match
 // before the next one.
 //
 // Those anchors fail on a rename, a reflow, or a helper extraction that changes
