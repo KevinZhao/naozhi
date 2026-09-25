@@ -3,6 +3,7 @@ package server
 import (
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -52,6 +53,42 @@ func (h *HealthHandler) subsystemProbes() []HealthProbe {
 		dispatchHealthProbe(h.dispatcherMetrics),
 		EventLogHealthProbe(h.router),
 		AttachmentTrackerHealthProbe(h.router),
+		runStoresHealthProbe(h.cronRunStore, h.router),
+	}
+}
+
+// runStoresHealthProbe populates run_stores from the cron and session
+// run-history stores. A store that does not persist contributes no
+// sub-object, and with neither persisting the section is omitted.
+func runStoresHealthProbe(cronRunStore func() cron.RunStoreHealth, router *session.Router) HealthProbe {
+	return func(auth *healthAuthSection) {
+		if auth == nil {
+			return
+		}
+		var rs healthRunStores
+		if cronRunStore != nil {
+			if c := cronRunStore(); c.Enabled {
+				rs.Cron = &healthCronRunStore{
+					WriteFailedDiskFull: c.WriteFailedDiskFull,
+					WriteFailedOther:    c.WriteFailedOther,
+					HistoryDropped:      c.HistoryDropped,
+					CacheStaleEvictions: c.CacheStaleEvictions,
+				}
+			}
+		}
+		if router != nil {
+			if sr := router.SessionRunsHealth(); sr.Enabled {
+				rs.Session = &healthSessionRunStore{
+					WriteFailedDiskFull: sr.WriteFailedDiskFull,
+					WriteFailedOther:    sr.WriteFailedOther,
+					AsyncDropped:        sr.AsyncDropped,
+				}
+			}
+		}
+		if rs.Cron == nil && rs.Session == nil {
+			return
+		}
+		auth.RunStores = &rs
 	}
 }
 

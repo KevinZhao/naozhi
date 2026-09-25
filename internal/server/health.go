@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
@@ -49,6 +50,9 @@ type HealthHandler struct {
 	configSHA256   string
 	configLoadedAt time.Time
 	configPath     string
+	// cronRunStore snapshots the cron run store's loss counters; nil when the
+	// server runs without a scheduler.
+	cronRunStore func() cron.RunStoreHealth
 }
 
 // healthWatchdogStats is the /health "watchdog" sub-object.
@@ -104,6 +108,31 @@ type healthAuthSection struct {
 	PlatformCapabilities map[string]platform.Capabilities `json:"platform_capabilities,omitempty"`
 	EventLog             *healthEventLogStats             `json:"eventlog,omitempty"`
 	AttachmentTracker    *healthAttachTrackStats          `json:"attachment_tracker,omitempty"`
+	// RunStores carries the run-history stores' loss counters (#2792). Both
+	// stores are best-effort — a write failure never fails the run it records —
+	// so these counters are the only operator-visible trace of lost history.
+	RunStores *healthRunStores `json:"run_stores,omitempty"`
+}
+
+// healthRunStores groups the two run-history stores. Each sub-object is nil
+// when that store does not persist, and the whole section is omitted when
+// neither does.
+type healthRunStores struct {
+	Cron    *healthCronRunStore    `json:"cron,omitempty"`
+	Session *healthSessionRunStore `json:"session,omitempty"`
+}
+
+type healthCronRunStore struct {
+	WriteFailedDiskFull int64 `json:"write_failed_disk_full_total"`
+	WriteFailedOther    int64 `json:"write_failed_other_total"`
+	HistoryDropped      int64 `json:"history_dropped_total"`
+	CacheStaleEvictions int64 `json:"cache_stale_evictions_total"`
+}
+
+type healthSessionRunStore struct {
+	WriteFailedDiskFull int64 `json:"write_failed_disk_full_total"`
+	WriteFailedOther    int64 `json:"write_failed_other_total"`
+	AsyncDropped        int64 `json:"async_dropped_total"`
 }
 
 // healthEventLogStats mirrors session.EventLogHealth over the wire; kept
