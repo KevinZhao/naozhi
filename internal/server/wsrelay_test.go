@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // wsUpgrader is used by tests that don't need origin checks.
@@ -120,6 +121,13 @@ func (m *mockRemoteWS) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (m *mockRemoteWS) subscribed(key string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.subKeys[key]
+	return ok
+}
+
 func (m *mockRemoteWS) broadcast(msg node.ServerMsg) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -163,10 +171,9 @@ func TestWSRelay_EventForwarding(t *testing.T) {
 
 	client := newTestWSClient()
 	nc.Subscribe(client, "test:d:u:general", 0)
+	// The remote's `subscribed` reached the client through the relay's
+	// readLoop, so the loop is already running.
 	_ = readClientMsg(t, client, 2*time.Second) // subscribed
-
-	// Wait for readLoop to start
-	time.Sleep(100 * time.Millisecond)
 
 	// Send event from remote
 	mock.broadcast(node.ServerMsg{
@@ -214,9 +221,6 @@ func TestWSRelay_MultipleClients(t *testing.T) {
 		t.Errorf("client2 history: type = %q, want history", hist.Type)
 	}
 
-	// Wait for readLoop
-	time.Sleep(100 * time.Millisecond)
-
 	// Send event from remote, both should receive
 	mock.broadcast(node.ServerMsg{
 		Type:  "event",
@@ -252,14 +256,8 @@ func TestWSRelay_Unsubscribe(t *testing.T) {
 		t.Errorf("type = %q, want unsubscribed", msg.Type)
 	}
 
-	// Verify remote got unsubscribe
-	time.Sleep(200 * time.Millisecond)
-	mock.mu.Lock()
-	_, subbed := mock.subKeys["test:d:u:general"]
-	mock.mu.Unlock()
-	if subbed {
-		t.Error("remote should have been unsubscribed")
-	}
+	testhelper.Eventually(t, func() bool { return !mock.subscribed("test:d:u:general") }, 2*time.Second,
+		"remote should have been unsubscribed")
 }
 
 func TestWSRelay_Close(t *testing.T) {
@@ -302,16 +300,12 @@ func TestWSRelay_Reconnect(t *testing.T) {
 	mock.conns = nil
 	mock.mu.Unlock()
 
-	// Wait for reconnect (1s initial backoff)
-	time.Sleep(3 * time.Second)
-
-	// Verify reconnect by checking the mock received new connections
-	mock.mu.Lock()
-	reconnected := len(mock.conns) > 0
-	mock.mu.Unlock()
-	if !reconnected {
-		t.Error("relay should have reconnected")
-	}
+	// The relay redials after a 1s initial backoff.
+	testhelper.Eventually(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return len(mock.conns) > 0
+	}, 5*time.Second, "relay should have reconnected")
 }
 
 func TestWSRelay_AuthFailed(t *testing.T) {
@@ -342,11 +336,16 @@ func TestWSRelay_RemoveClient(t *testing.T) {
 	client := newTestWSClient()
 	nc.Subscribe(client, "test:d:u:general", 0)
 	_ = readClientMsg(t, client, 2*time.Second)
+	if !mock.subscribed("test:d:u:general") {
+		t.Fatal("premise: the remote should hold the subscription before RemoveClient")
+	}
 
 	nc.RemoveClient(client)
 
-	// Allow time for the unsubscribe to propagate to the remote mock
-	time.Sleep(200 * time.Millisecond)
+	// The key lost its last local client, so the relay must drop the
+	// remote subscription too.
+	testhelper.Eventually(t, func() bool { return !mock.subscribed("test:d:u:general") }, 2*time.Second,
+		"RemoveClient did not unsubscribe the remote")
 }
 
 // ─── Hub remote subscribe integration ────────────────────────────────────────

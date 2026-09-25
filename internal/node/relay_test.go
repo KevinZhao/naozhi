@@ -152,10 +152,7 @@ func TestWSRelay_Unsubscribe_sendsUnsubscribed(t *testing.T) {
 	relay := newWSRelay(node)
 
 	sink := &mockSink{id: 1}
-	relay.Subscribe(sink, "key1", 0)
-	// Give WS connection time to establish.
-	time.Sleep(50 * time.Millisecond)
-
+	relay.Subscribe(sink, "key1", 0) // dials and subscribes before returning
 	relay.Unsubscribe(sink, "key1")
 
 	found := false
@@ -182,14 +179,18 @@ func TestWSRelay_Close_idempotent(t *testing.T) {
 // ---- Close during concurrent dial does not leak goroutine ----
 
 func TestWSRelay_Close_duringDial_noLeak(t *testing.T) {
-	// Use a server that delays upgrade so Close() races with connect.
+	// The server holds the auth reply until the test has called Close, so
+	// Close lands while connect() is parked on the handshake.
 	var upgradedOnce sync.Once
-	ready := make(chan struct{})
+	upgraded := make(chan struct{})
+	release := make(chan struct{})
 
 	srv := wsTestServer(t, func(conn *websocket.Conn) {
-		upgradedOnce.Do(func() { close(ready) })
-		// Slow auth - gives time for Close() to race.
-		time.Sleep(50 * time.Millisecond)
+		upgradedOnce.Do(func() { close(upgraded) })
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
 		if !authHandshake(t, conn) {
 			conn.Close()
 			return
@@ -217,10 +218,23 @@ func TestWSRelay_Close_duringDial_noLeak(t *testing.T) {
 		}()
 	}
 
-	// Close races with the dial.
+	select {
+	case <-upgraded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no subscriber ever dialed")
+	}
 	relay.Close()
+	close(release)
 	wg.Wait()
 
+	// The dial that finished after Close must not have published its conn
+	// (and started readLoop/pingLoop on it).
+	relay.mu.Lock()
+	leaked := relay.conn != nil
+	relay.mu.Unlock()
+	if leaked {
+		t.Error("a dial that completed after Close() installed its conn on the closed relay")
+	}
 	// After Close, ensureConnected must return "relay closed".
 	if err := relay.ensureConnected(); err == nil || err.Error() != "relay closed" {
 		t.Errorf("expected 'relay closed' error after Close(), got %v", err)
@@ -250,27 +264,28 @@ func TestWSRelay_RemoveClient(t *testing.T) {
 	sink1 := &mockSink{id: 1}
 	sink2 := &mockSink{id: 2}
 
+	// Subscribe registers the sink before it returns; no wait is needed.
 	relay.Subscribe(sink1, "key1", 0)
-	time.Sleep(30 * time.Millisecond) // let first sub connect
 	relay.Subscribe(sink2, "key1", 0)
 	relay.Subscribe(sink1, "key2", 0)
-
-	time.Sleep(30 * time.Millisecond)
 
 	relay.RemoveClient(sink1)
 
 	relay.mu.Lock()
-	key1HasSink1 := false
-	for _, s := range relay.subs["key1"] {
-		if s == sink1 {
-			key1HasSink1 = true
-			break
-		}
-	}
+	key1 := append([]EventSink(nil), relay.subs["key1"]...)
+	_, key2Left := relay.subs["key2"]
 	relay.mu.Unlock()
 
-	if key1HasSink1 {
-		t.Error("sink1 should have been removed from key1")
+	for _, s := range key1 {
+		if s == sink1 {
+			t.Error("sink1 should have been removed from key1")
+		}
+	}
+	if len(key1) != 1 || key1[0] != sink2 {
+		t.Errorf("key1 subscribers = %v, want only sink2", key1)
+	}
+	if key2Left {
+		t.Error("key2 lost its only subscriber but its entry is still there")
 	}
 
 	relay.Close()
@@ -302,8 +317,12 @@ func TestWSRelay_ReadLoop_deliversEvents(t *testing.T) {
 			},
 		}
 		conn.WriteJSON(event)
-		// Keep connection alive briefly.
-		time.Sleep(100 * time.Millisecond)
+		// Hold the connection until the relay closes it.
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
 	})
 	defer srv.Close()
 
@@ -336,6 +355,7 @@ func TestWSRelay_ReadLoop_deliversEvents(t *testing.T) {
 func TestWSRelay_SecondSubscriberGetsHistory(t *testing.T) {
 	historyRequested := make(chan struct{}, 1)
 	subscribeMsgCount := atomic.Int32{}
+	sawBarrier := atomic.Bool{}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/ws" {
@@ -352,7 +372,9 @@ func TestWSRelay_SecondSubscriberGetsHistory(t *testing.T) {
 				if err := conn.ReadJSON(&msg); err != nil {
 					return
 				}
-				if msg.Type == "subscribe" {
+				if msg.Type == "subscribe" && msg.Key == "barrier" {
+					sawBarrier.Store(true)
+				} else if msg.Type == "subscribe" {
 					subscribeMsgCount.Add(1)
 				}
 			}
@@ -370,8 +392,7 @@ func TestWSRelay_SecondSubscriberGetsHistory(t *testing.T) {
 	sink1 := &mockSink{id: 1}
 	sink2 := &mockSink{id: 2}
 
-	relay.Subscribe(sink1, "key1", 0)
-	time.Sleep(80 * time.Millisecond) // wait for connection and first subscribe
+	relay.Subscribe(sink1, "key1", 0) // dials and writes the subscribe before returning
 	relay.Subscribe(sink2, "key1", 0) // second subscriber — should NOT send subscribe to remote
 
 	// Wait for history HTTP call.
@@ -381,7 +402,10 @@ func TestWSRelay_SecondSubscriberGetsHistory(t *testing.T) {
 		t.Fatal("expected history HTTP request for second subscriber")
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	// A first subscribe on another key travels the same ordered connection,
+	// so once the server has read it, it has read anything sink2 sent.
+	relay.Subscribe(&mockSink{id: 3}, "barrier", 0)
+	testhelper.Eventually(t, sawBarrier.Load, 2*time.Second, "server never read the barrier subscribe")
 	if n := subscribeMsgCount.Load(); n != 1 {
 		t.Errorf("expected exactly 1 subscribe message to remote, got %d", n)
 	}
