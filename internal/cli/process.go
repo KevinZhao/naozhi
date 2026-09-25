@@ -527,7 +527,11 @@ func (p *Process) Detach() {
 // within d and release the lock. Only teardown paths call this: the writer's
 // frame is cut short, which is harmless on a connection about to close.
 func (p *Process) preemptPinnedWriter(d time.Duration) {
-	_ = p.shimConn.SetWriteDeadline(time.Now().Add(d))
+	if err := p.shimConn.SetWriteDeadline(time.Now().Add(d)); err != nil {
+		// A conn that refuses a deadline is already closed or broken, so any
+		// write blocked in it has failed already; there is nothing to preempt.
+		slog.Debug("teardown: write-deadline preempt failed", "err", err)
+	}
 }
 
 // closeShimConn closes p.shimConn at most once across all teardown paths so a
