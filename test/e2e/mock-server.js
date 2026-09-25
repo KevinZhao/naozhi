@@ -206,6 +206,9 @@ function defaultGitStates() {
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
+ * @param {object[]} [overrides.cronAttention] - §7.4 queue items for GET /api/cron/attention.
+ *   POST /api/cron/runs/<id>/confirm records the id in `cronConfirmCalls` and drops the item.
+ *   Without it the route is absent (404), as for a scheduler with no queue.
  * @param {boolean} [overrides.requireAuth] - If true, require bearer token.
  * @param {string} [overrides.authToken] - Expected token value.
  * @param {Function} [overrides.onSend] - Callback when POST /api/sessions/send is called.
@@ -259,6 +262,8 @@ function startMockServer(overrides = {}) {
   // runSnapshots: run_id -> §7.3 input-snapshot payload. Absent ids answer
   // {available:false}, which is what a local (non-sandbox) run really returns.
   const runSnapshots = overrides.runSnapshots || {};
+  const cronAttention = overrides.cronAttention ? overrides.cronAttention.slice() : null;
+  const cronConfirmCalls = [];
   // agentEvents: task_id -> ordered transcript entries. The real handler filters
   // `Time >= after` (INCLUSIVE), which is what makes the watermark ms replay on
   // every poll page — the behaviour dedupAgentPollBatch exists to absorb. The
@@ -773,6 +778,24 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // §7.4 人工确认队列：opt-in，未配置时走到末尾的 404。
+    if (cronAttention && pathname === '/api/cron/attention' && req.method === 'GET') {
+      if (!checkAuth()) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ items: cronAttention }));
+      return;
+    }
+    if (cronAttention && pathname.startsWith('/api/cron/runs/') && pathname.endsWith('/confirm') && req.method === 'POST') {
+      if (!checkAuth()) return;
+      const runId = decodeURIComponent(pathname.slice('/api/cron/runs/'.length, -'/confirm'.length));
+      cronConfirmCalls.push(runId);
+      const i = cronAttention.findIndex(it => it.run_id === runId);
+      if (i >= 0) cronAttention.splice(i, 1);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok' }));
+      return;
+    }
+
     // /api/cron/runs/<run_id>/snapshot?job_id=… — §7.3 输入快照面板。
     // 必须排在下面那条通配 /api/cron/runs/<id> 之前，否则 run_id 会被解析成
     // "<id>/snapshot" 而 404。
@@ -967,6 +990,7 @@ function startMockServer(overrides = {}) {
         get bindCalls() { return bindCalls; },
         get cronCreateCalls() { return cronCreateCalls; },
         get cronPatchCalls() { return cronPatchCalls; },
+        get cronConfirmCalls() { return cronConfirmCalls; },
         get fullCronListCalls() { return fullCronListCalls; },
         get cronListGetCount() { return cronListGetCount; },
         // Replace the served cron jobs mid-test (in place - GET closes over the array).

@@ -50,6 +50,10 @@ const (
 	// (RFC §6.5); the orphan reconcile Stopped the microVM but a side effect
 	// may already have landed.
 	attentionReasonOrphaned = "orphaned"
+	// attentionReasonUnreadable: the record exists but cannot be parsed or
+	// validated, so neither the job nor the microVM it names is known. Only
+	// ListSandboxAttention produces it; nothing writes it to disk.
+	attentionReasonUnreadable = "unreadable"
 )
 
 // sandboxAttentionDir resolves the queue directory ("" when persistence is
@@ -164,13 +168,19 @@ type SandboxAttentionItem struct {
 	JobLabel    string `json:"job_label,omitempty"`
 	StartedAtMS int64  `json:"started_at_ms,omitempty"`
 	CreatedAtMS int64  `json:"created_at_ms,omitempty"`
+	// Unreadable marks a record that could not be parsed or validated. Only
+	// RunID (from the file name) and CreatedAtMS (the file's mtime) are set.
+	// Which job and microVM it names is unknown, so it can be confirmed away
+	// but is never offered for replay.
+	Unreadable bool `json:"unreadable,omitempty"`
 }
 
 // ListSandboxAttention returns every unresolved §7.4 queue record, newest
-// first (by CreatedAtMS). Corrupt records are skipped (logged once) rather
-// than failing the whole list — one bad file must not hide the rest of the
-// queue. Returns an empty slice (never nil) so the dashboard renders an empty
-// queue consistently.
+// first (by CreatedAtMS). A record that cannot be read is listed as
+// Unreadable rather than skipped: it still blocks replay of its run, so the
+// operator has to see it to clear it, and one bad file must not hide the rest
+// of the queue either. Returns an empty slice (never nil) so the dashboard
+// renders an empty queue consistently.
 func (s *Scheduler) ListSandboxAttention() []SandboxAttentionItem {
 	out := []SandboxAttentionItem{}
 	dir := s.sandboxAttentionDir()
@@ -194,7 +204,21 @@ func (s *Scheduler) ListSandboxAttention() []SandboxAttentionItem {
 		}
 		var rec sandboxAttention
 		if err := json.Unmarshal(raw, &rec); err != nil || !IsValidID(rec.RunID) || !IsValidID(rec.JobID) {
-			slog.Warn("cron sandbox: corrupt attention record skipped", "file", e.Name())
+			// The file name is the run id getSandboxAttention and
+			// ConfirmSandboxRun key on, so it is the handle to list. A name
+			// that is not a valid id could not be confirmed through the API
+			// either; skip it.
+			runID := strings.TrimSuffix(e.Name(), ".json")
+			if !IsValidID(runID) {
+				slog.Warn("cron sandbox: corrupt attention record with an invalid name skipped", "file", osutil.SanitizeForLog(e.Name(), 256))
+				continue
+			}
+			slog.Warn("cron sandbox: corrupt attention record listed as unreadable", "run_id", runID)
+			item := SandboxAttentionItem{RunID: runID, Reason: attentionReasonUnreadable, Unreadable: true}
+			if info, ierr := e.Info(); ierr == nil {
+				item.CreatedAtMS = info.ModTime().UnixMilli()
+			}
+			out = append(out, item)
 			continue
 		}
 		out = append(out, SandboxAttentionItem{
@@ -213,8 +237,9 @@ func (s *Scheduler) ListSandboxAttention() []SandboxAttentionItem {
 	return out
 }
 
-// SandboxAttentionCount returns the number of unresolved queue records (the
-// header cron-badge counter). Cheap dir-entry count; skips non-.json noise.
+// SandboxAttentionCount returns the number of queue records on disk, readable
+// or not: a cheap dir-entry count that skips non-.json noise. Tests use it to
+// observe the queue; the dashboard reads ListSandboxAttention.
 func (s *Scheduler) SandboxAttentionCount() int {
 	dir := s.sandboxAttentionDir()
 	if dir == "" {

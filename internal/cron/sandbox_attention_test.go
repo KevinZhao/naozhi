@@ -191,9 +191,12 @@ func TestListSandboxAttention_NewestFirst(t *testing.T) {
 	}
 }
 
-// TestListSandboxAttention_SkipsCorrupt: a corrupt queue file does not hide the
-// rest of the queue.
-func TestListSandboxAttention_SkipsCorrupt(t *testing.T) {
+// TestListSandboxAttention_SkipsCorruptWithInvalidName: a corrupt file whose
+// name is not a run id is left out (it could not be confirmed through the API)
+// and does not hide the rest of the queue. A corrupt record under a valid run
+// id is listed as unreadable instead; see
+// TestListSandboxAttention_ListsUnreadableRecords.
+func TestListSandboxAttention_SkipsCorruptWithInvalidName(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
