@@ -3,6 +3,7 @@ package weixin
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 func TestNew_Defaults(t *testing.T) {
@@ -111,6 +113,20 @@ func TestStartStop(t *testing.T) {
 	}
 }
 
+// holdLongPoll parks a fake getupdates request the way the real long-poll
+// endpoint does: until the client gives up on it. A fixed sleep before an
+// empty reply made every test pay that sleep per poll, and let a Stop that
+// never cancelled its in-flight request look correct.
+//
+// The body is drained first on purpose: an HTTP/1.x server only starts the
+// background read that notices a client disconnect once the request body has
+// been consumed, so without it the client's cancel never reaches r.Context()
+// and httptest.Server.Close waits on the parked handler forever.
+func holdLongPoll(r *http.Request) {
+	_, _ = io.Copy(io.Discard, r.Body)
+	<-r.Context().Done()
+}
+
 // TestStartStop_JoinsPollLoop regresses R202606j-CR-001+CR-004: Start must
 // publish the lifecycle handles (cancel/handler) under startMu so a racing
 // Stop snapshots a non-nil cancel, and Stop must join the pollLoop goroutine
@@ -123,9 +139,9 @@ func TestStartStop_JoinsPollLoop(t *testing.T) {
 	var polls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		polls.Add(1)
-		// Short long-poll so Stop's cancel is observed promptly.
-		time.Sleep(20 * time.Millisecond)
-		json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0})
+		// Park the request like the real long-poll endpoint: Stop has to
+		// cancel an in-flight poll to return, not just wait for one to end.
+		holdLongPoll(r)
 	}))
 	defer srv.Close()
 
@@ -137,15 +153,7 @@ func TestStartStop_JoinsPollLoop(t *testing.T) {
 	}
 
 	// Let the loop poll at least once so it is genuinely in-flight.
-	deadline := time.After(2 * time.Second)
-	for polls.Load() == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for first poll")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	testhelper.Eventually(t, func() bool { return polls.Load() != 0 }, 2*time.Second, "timeout waiting for first poll")
 
 	// Stop must not panic and must block until pollLoop has joined.
 	if err := w.Stop(); err != nil {
@@ -247,9 +255,8 @@ func TestPollLoop_ReceivesMessages(t *testing.T) {
 				GetUpdatesBuf: "cursor-1",
 			})
 		} else {
-			// Subsequent polls: empty, slow to simulate long-poll
-			time.Sleep(100 * time.Millisecond)
-			json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0, GetUpdatesBuf: "cursor-1"})
+			// Subsequent polls: nothing new, held open like the real long-poll.
+			holdLongPoll(r)
 		}
 	}))
 	defer srv.Close()
@@ -273,15 +280,7 @@ func TestPollLoop_ReceivesMessages(t *testing.T) {
 	defer w.Stop()
 
 	// Wait for message to be received
-	deadline := time.After(3 * time.Second)
-	for received.Load() == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for message")
-		default:
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
+	testhelper.Eventually(t, func() bool { return received.Load() != 0 }, 3*time.Second, "timeout waiting for message")
 
 	mu.Lock()
 	msg := receivedMsg
@@ -351,8 +350,7 @@ func TestPollLoop_OversizedContextTokenObservable(t *testing.T) {
 			})
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
-		json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0, GetUpdatesBuf: "c1"})
+		holdLongPoll(r)
 	}))
 	defer srv.Close()
 
@@ -363,15 +361,7 @@ func TestPollLoop_OversizedContextTokenObservable(t *testing.T) {
 	}
 	defer w.Stop()
 
-	deadline := time.After(3 * time.Second)
-	for received.Load() == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for message")
-		default:
-			time.Sleep(20 * time.Millisecond)
-		}
-	}
+	testhelper.Eventually(t, func() bool { return received.Load() != 0 }, 3*time.Second, "timeout waiting for message")
 
 	// Oversized token must NOT be cached.
 	if _, ok := w.contextTokens.Load("bob"); ok {
@@ -429,13 +419,12 @@ func TestPollLoop_SemaphoreFullDropSanitizesUser(t *testing.T) {
 	})
 
 	pollCount := atomic.Int32{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if pollCount.Add(1) == 1 {
 			json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0, Msgs: msgs, GetUpdatesBuf: "c1"})
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
-		json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0, GetUpdatesBuf: "c1"})
+		holdLongPoll(r)
 	}))
 	defer srv.Close()
 
@@ -454,32 +443,15 @@ func TestPollLoop_SemaphoreFullDropSanitizesUser(t *testing.T) {
 
 	// Wait until all 20 slots are occupied so the 21st is forced onto the drop
 	// path and its WARN is emitted.
-	deadline := time.After(3 * time.Second)
-	for startedHandlers.Load() < int32(weixinHookConcurrency) {
-		select {
-		case <-deadline:
-			t.Fatalf("timeout: only %d/%d handlers started", startedHandlers.Load(), weixinHookConcurrency)
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	testhelper.Eventually(t, func() bool { return startedHandlers.Load() >= int32(weixinHookConcurrency) }, 3*time.Second,
+		"timeout: not every handler slot started")
 
 	// Give the drop-path WARN a moment to flush.
-	dropDeadline := time.After(2 * time.Second)
-	for {
+	testhelper.Eventually(t, func() bool {
 		logMu.Lock()
-		out := logBuf.String()
-		logMu.Unlock()
-		if strings.Contains(out, "semaphore full") {
-			break
-		}
-		select {
-		case <-dropDeadline:
-			t.Fatalf("timeout waiting for semaphore-full WARN; log: %q", out)
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+		defer logMu.Unlock()
+		return strings.Contains(logBuf.String(), "semaphore full")
+	}, 2*time.Second, "timeout waiting for semaphore-full WARN")
 
 	logMu.Lock()
 	out := logBuf.String()
@@ -572,8 +544,7 @@ func TestPollLoop_FallbackMessageID(t *testing.T) {
 					})
 					return
 				}
-				time.Sleep(100 * time.Millisecond)
-				json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0, GetUpdatesBuf: "cursor-1"})
+				holdLongPoll(r)
 			}))
 			defer srv.Close()
 
@@ -592,15 +563,7 @@ func TestPollLoop_FallbackMessageID(t *testing.T) {
 			}
 			defer w.Stop()
 
-			deadline := time.After(3 * time.Second)
-			for received.Load() == 0 {
-				select {
-				case <-deadline:
-					t.Fatal("timeout waiting for message")
-				default:
-					time.Sleep(20 * time.Millisecond)
-				}
-			}
+			testhelper.Eventually(t, func() bool { return received.Load() != 0 }, 3*time.Second, "timeout waiting for message")
 			mu.Lock()
 			msg := receivedMsg
 			mu.Unlock()
@@ -635,8 +598,7 @@ func TestPollLoop_SkipsBotMessages(t *testing.T) {
 				},
 			})
 		} else {
-			time.Sleep(100 * time.Millisecond)
-			json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0})
+			holdLongPoll(r)
 		}
 	}))
 	defer srv.Close()
@@ -650,10 +612,18 @@ func TestPollLoop_SkipsBotMessages(t *testing.T) {
 	if err := w.Start(handler); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
-	defer w.Stop()
 
-	// Wait a bit — no message should be received
-	time.Sleep(500 * time.Millisecond)
+	// A second poll means the loop has finished with the first batch — the one
+	// holding the bot message. Stop then drains every handler that batch
+	// dispatched (Stop waits on the dispatch group), so a bot message that
+	// slipped past the filter has certainly been handled by the time we look.
+	// No fixed wait: the old 500ms sleep both slowed the suite and could pass
+	// before a regressed dispatch goroutine had run.
+	testhelper.Eventually(t, func() bool { return pollCount.Load() >= 2 }, 3*time.Second,
+		"second poll never arrived: the first batch was not processed")
+	if err := w.Stop(); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
 	if received.Load() != 0 {
 		t.Errorf("received %d messages, expected 0 (bot messages should be skipped)", received.Load())
 	}
