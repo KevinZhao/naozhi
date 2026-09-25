@@ -209,6 +209,13 @@ function defaultGitStates() {
  * @param {object[]} [overrides.cronAttention] - §7.4 queue items for GET /api/cron/attention.
  *   POST /api/cron/runs/<id>/confirm records the id in `cronConfirmCalls` and drops the item.
  *   Without it the route is absent (404), as for a scheduler with no queue.
+ * @param {object} [overrides.projectFiles] - Workspace file browser data, keyed by project name:
+ *   { [project]: { dirs: { [dir]: entries[] }, previews: { [relPath]: previewJSON },
+ *                  exists: { [relPath]: {exists, size, mime, is_dir} } } }.
+ *   `dir` is '' for the project root. GET /api/projects/files/list answers from `dirs`
+ *   (an unknown dir answers 404 with `listErrors[dir]` as the error text when given);
+ *   GET /api/projects/file?mode=preview answers from `previews`. Requests land in
+ *   `fileRequests` as {mode, project, path, dir}.
  * @param {boolean} [overrides.requireAuth] - If true, require bearer token.
  * @param {string} [overrides.authToken] - Expected token value.
  * @param {Function} [overrides.onSend] - Callback when POST /api/sessions/send is called.
@@ -264,6 +271,8 @@ function startMockServer(overrides = {}) {
   const runSnapshots = overrides.runSnapshots || {};
   const cronAttention = overrides.cronAttention ? overrides.cronAttention.slice() : null;
   const cronConfirmCalls = [];
+  const projectFiles = overrides.projectFiles || null;
+  const fileRequests = [];
   // agentEvents: task_id -> ordered transcript entries. The real handler filters
   // `Time >= after` (INCLUSIVE), which is what makes the watermark ms replay on
   // every poll page — the behaviour dedupAgentPollBatch exists to absorb. The
@@ -779,7 +788,7 @@ function startMockServer(overrides = {}) {
     }
 
     // §7.4 人工确认队列：opt-in，未配置时走到末尾的 404。
-    if (cronAttention && pathname === '/api/cron/attention' && req.method === 'GET') {
+    if (cronAttention && pathname === NZ_CONTRACT.API.cron_attention && req.method === 'GET') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ items: cronAttention }));
@@ -867,6 +876,59 @@ function startMockServer(overrides = {}) {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(defaultProjects()));
+      return;
+    }
+    // Workspace file browser: opt-in via overrides.projectFiles.
+    if (projectFiles && pathname === NZ_CONTRACT.API.projects_files_list && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const project = url.searchParams.get('project') || '';
+      const dir = url.searchParams.get('dir') || '';
+      fileRequests.push({ mode: 'list', project, dir, path: '' });
+      const tree = projectFiles[project] || {};
+      const entries = tree.dirs && tree.dirs[dir];
+      if (!entries) {
+        const msg = (tree.listErrors && tree.listErrors[dir]) || 'not found';
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: msg }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ entries }));
+      return;
+    }
+    if (projectFiles && pathname === NZ_CONTRACT.API.projects_files_exists && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        let body = {};
+        try { body = JSON.parse(raw || '{}'); } catch (_) { /* answer empty */ }
+        const tree = projectFiles[body.project] || {};
+        const results = {};
+        for (const p of (Array.isArray(body.paths) ? body.paths : [])) {
+          results[p] = (tree.exists && tree.exists[p]) || { exists: false };
+        }
+        fileRequests.push({ mode: 'exists', project: body.project || '', path: '', dir: '' });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results }));
+      });
+      return;
+    }
+    if (projectFiles && pathname === NZ_CONTRACT.API.projects_file && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const project = url.searchParams.get('project') || '';
+      const path = url.searchParams.get('path') || '';
+      const mode = url.searchParams.get('mode') || '';
+      fileRequests.push({ mode, project, path, dir: '' });
+      const tree = projectFiles[project] || {};
+      const prev = mode === 'preview' && tree.previews && tree.previews[path];
+      if (!prev) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'not found' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(prev));
       return;
     }
     if (pathname === NZ_CONTRACT.API.projects_favorite && req.method === 'POST') {
@@ -991,6 +1053,7 @@ function startMockServer(overrides = {}) {
         get cronCreateCalls() { return cronCreateCalls; },
         get cronPatchCalls() { return cronPatchCalls; },
         get cronConfirmCalls() { return cronConfirmCalls; },
+        get fileRequests() { return fileRequests; },
         get fullCronListCalls() { return fullCronListCalls; },
         get cronListGetCount() { return cronListGetCount; },
         // Replace the served cron jobs mid-test (in place - GET closes over the array).
