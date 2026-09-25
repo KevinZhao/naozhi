@@ -306,6 +306,8 @@ function startMockServer(overrides = {}) {
   // assert which fields the dashboard actually sent (schedule/work_dir must be
   // ABSENT when untouched - the diff-only contract).
   const cronPatchCalls = [];
+  // DELETE /api/cron?id=... capture, in call order.
+  const cronDeleteCalls = [];
   // Every GET /api/cron, compact or not - for specs that watch for runaway refetch loops.
   let cronListGetCount = 0;
   // compactCronListDelayMs delays the COMPACT list response only. It exists so a
@@ -751,6 +753,7 @@ function startMockServer(overrides = {}) {
 
     if (pathname === NZ_CONTRACT.API.cron && req.method === 'DELETE') {
       if (!checkAuth()) return;
+      cronDeleteCalls.push(url.searchParams.get('id') || '');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -1100,6 +1103,7 @@ function startMockServer(overrides = {}) {
         get bindCalls() { return bindCalls; },
         get cronCreateCalls() { return cronCreateCalls; },
         get cronPatchCalls() { return cronPatchCalls; },
+        get cronDeleteCalls() { return cronDeleteCalls; },
         get cronConfirmCalls() { return cronConfirmCalls; },
         get fileRequests() { return fileRequests; },
         get fullCronListCalls() { return fullCronListCalls; },
