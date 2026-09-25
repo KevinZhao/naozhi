@@ -78,13 +78,13 @@
     "topLevelLetVar": 0
   },
   "file_refs.js": {
-    "lines": 937,
-    "maxFunctionLines": 152,
+    "lines": 924,
+    "maxFunctionLines": 144,
     "functionsOver100": 1,
     "topLevelLetVar": 6
   },
   "files_view.js": {
-    "lines": 440,
+    "lines": 439,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0

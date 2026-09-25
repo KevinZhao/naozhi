@@ -6,11 +6,10 @@
 // the existing GET /api/projects/file modes, and uploads via
 // POST /api/projects/files/upload.
 //
-// ES module (RFC docs/rfc/dashboard-es-modules.md, D3 PR-A): utilities come
-// in via explicit import; dashboard.js globals (fileApiUrl,
-// renderSandboxedBlob — still a classic script) are dereferenced through
-// window.* at the call site, never snapshotted at top level. The only
-// dashboard.js touch is the activity-bar wiring (window.nzFilesView).
+// ES module (RFC docs/rfc/dashboard-es-modules.md): utilities and the
+// file-ref helpers (fileApiUrl, renderSandboxedBlob) come in via explicit
+// import. The view registers { show, hide } on nzViews.files, which the
+// activity bar in dashboard.js calls.
 // escAttr, not esc, for attribute-value context: nz_util's esc deliberately
 // leaves quotes alone, so a file named `a"b` would truncate data-name="…" and
 // the click handler navigated to the wrong path.
