@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -83,5 +84,31 @@ func TestResolve_SemaphoreTimeout_ContextWithTimeout(t *testing.T) {
 	}
 	if res.info.InternalAgentID != "" {
 		t.Errorf("Resolve must return empty LinkInfo on semaphore timeout, got %+v", res.info)
+	}
+}
+
+// TestResolve_FreeSlotIsTakenEvenWhenTheBudgetIsSpent: with a slot free,
+// Resolve must take it. The wait for a slot is a select between the send and
+// the budget's timer, and select picks at random among ready cases, so a
+// budget that had already run out by the time select ran (a zero budget
+// here; a goroutine preempted past a short one on a loaded machine) dropped
+// the call about half the time despite the idle semaphore. That made
+// TestAgentEvents_Tombstone_404 flaky (#2746).
+func TestResolve_FreeSlotIsTakenEvenWhenTheBudgetIsSpent(t *testing.T) {
+	t.Parallel()
+	const sessionID = "sem-free-slot-test-uuid-dddddddd"
+	l, _ := newLinkerForTest(t, sessionID)
+	l.retryInterval = 0 // budget (0+1)*0: spent before select runs
+	l.retryLimit = 0
+
+	for i := 0; i < 200; i++ {
+		taskID := fmt.Sprintf("t_free_%03d", i)
+		info, resolved := l.Resolve(context.Background(), taskID, "toolu_F", "missing", "", time.Now().UnixMilli())
+		if !resolved || !info.Resolved {
+			t.Fatalf("call %d: Resolve dropped with the semaphore idle (resolved=%v info=%+v)", i, resolved, info)
+		}
+	}
+	if n := len(l.resolveSem); n != 0 {
+		t.Errorf("%d slots still held after every call returned", n)
 	}
 }

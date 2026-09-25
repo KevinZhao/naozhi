@@ -184,25 +184,32 @@ func (l *Linker) Resolve(ctx context.Context, taskID, toolUseID, name, descripti
 		return info, true
 	}
 
-	// Acquire a slot before the retry loop (nil in bare test fixtures). The
-	// wait is bounded by the retry budget so a busy pool drops rather than
-	// extends the grace window.
+	// Acquire a slot before the retry loop (nil in bare test fixtures). A free
+	// slot is taken outright; only a full pool waits, and that wait is bounded
+	// by the retry budget so a busy pool drops rather than extends the grace
+	// window. The two steps are separate because select picks at random among
+	// ready cases: one select over "slot free" and "budget spent" could drop a
+	// call with the pool idle.
 	if l.resolveSem != nil {
-		semTimeout := time.Duration(l.retryLimit+1) * l.retryInterval
-		semCtx, cancelSem := context.WithTimeout(ctx, semTimeout)
 		select {
 		case l.resolveSem <- struct{}{}:
-			cancelSem()
-			defer func() { <-l.resolveSem }()
-		case <-semCtx.Done():
-			cancelSem()
-			if ctx.Err() != nil {
-				slog.Debug("agent_link: resolve canceled while waiting for semaphore", "task_id", taskID, "err", ctx.Err())
-			} else {
-				slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
+		default:
+			semTimeout := time.Duration(l.retryLimit+1) * l.retryInterval
+			semCtx, cancelSem := context.WithTimeout(ctx, semTimeout)
+			select {
+			case l.resolveSem <- struct{}{}:
+				cancelSem()
+			case <-semCtx.Done():
+				cancelSem()
+				if ctx.Err() != nil {
+					slog.Debug("agent_link: resolve canceled while waiting for semaphore", "task_id", taskID, "err", ctx.Err())
+				} else {
+					slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
+				}
+				return LinkInfo{}, false
 			}
-			return LinkInfo{}, false
 		}
+		defer func() { <-l.resolveSem }()
 	}
 
 	var picked metaEntry
