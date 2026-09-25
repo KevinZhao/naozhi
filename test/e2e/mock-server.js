@@ -206,6 +206,9 @@ function defaultGitStates() {
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
+ * @param {Function} [overrides.costSummary] - (searchParams) => GET /api/cost/summary payload,
+ *   or null for a 404. Without it the route is absent (404). Calls land in `costSummaryCalls`
+ *   as {group_by, job_id}.
  * @param {object[]} [overrides.cronAttention] - §7.4 queue items for GET /api/cron/attention.
  *   POST /api/cron/runs/<id>/confirm records the id in `cronConfirmCalls` and drops the item.
  *   Without it the route is absent (404), as for a scheduler with no queue.
@@ -269,6 +272,8 @@ function startMockServer(overrides = {}) {
   // runSnapshots: run_id -> §7.3 input-snapshot payload. Absent ids answer
   // {available:false}, which is what a local (non-sandbox) run really returns.
   const runSnapshots = overrides.runSnapshots || {};
+  const costSummary = overrides.costSummary || null;
+  const costSummaryCalls = [];
   const cronAttention = overrides.cronAttention ? overrides.cronAttention.slice() : null;
   const cronConfirmCalls = [];
   const projectFiles = overrides.projectFiles || null;
@@ -951,6 +956,16 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // Cost ledger summary: opt-in via overrides.costSummary.
+    if (costSummary && pathname === NZ_CONTRACT.API.cost_summary && req.method === 'GET') {
+      if (!checkAuth()) return;
+      costSummaryCalls.push({ group_by: url.searchParams.get('group_by') || '', job_id: url.searchParams.get('job_id') || '' });
+      const payload = costSummary(url.searchParams);
+      res.writeHead(payload ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(payload || { error: 'not found' }));
+      return;
+    }
+
     // Transcribe route
     if (pathname === NZ_CONTRACT.API.transcribe && req.method === 'POST') {
       if (!checkAuth()) return;
@@ -1056,6 +1071,7 @@ function startMockServer(overrides = {}) {
         get fileRequests() { return fileRequests; },
         get fullCronListCalls() { return fullCronListCalls; },
         get cronListGetCount() { return cronListGetCount; },
+        get costSummaryCalls() { return costSummaryCalls; },
         // Replace the served cron jobs mid-test (in place - GET closes over the array).
         setCronJobs(next) { cronJobsData.length = 0; cronJobsData.push(...next); },
         get loginCalls() { return loginCalls; },
