@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // ---------------------------------------------------------------------------
@@ -16,57 +19,92 @@ import (
 
 func TestResolveWorkspaceByParts_RealDir(t *testing.T) {
 	t.Parallel()
-	// Use t.TempDir() so the path definitely exists.
-	base := t.TempDir()
-	// encoded: replace "/" with "-"
-	encoded := "-" + base[1:] // strip leading "/" and prepend "-"
-	// Replace all "/" in the remainder with "-"
-	for i := 0; i < len(encoded); i++ {
-		if encoded[i] == '/' {
-			encoded = encoded[:i] + "-" + encoded[i+1:]
+	root := t.TempDir()
+	base := filepath.Join(root, "work", "proj")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	encoded := slugUnder(t, root, base)
+
+	if got := resolveWorkspaceUnder(root, encoded); got != base {
+		t.Errorf("resolveWorkspaceUnder(%q) = %q, want %q", encoded, got, base)
+	}
+}
+
+// TestResolveWorkspaceUnder_StaysInsideRoot is #2744's containment property:
+// whatever a rooted resolution returns lies inside the root, so a test that
+// injects t.TempDir() cannot be resolving — or walking — the host's real tree.
+func TestResolveWorkspaceUnder_StaysInsideRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for _, rel := range []string{
+		"a",
+		filepath.Join("a", "b"),
+		filepath.Join("repo", ".claude", "worktrees", "wt"), // pass 2 (dot segment)
+		filepath.Join("with_under", "x"),                    // pass 2 ("_" segment)
+	} {
+		want := filepath.Join(root, rel)
+		if err := os.MkdirAll(want, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		got := resolveWorkspaceUnder(root, slugUnder(t, root, want))
+		if got != want {
+			t.Errorf("rel %q resolved to %q, want %q", rel, got, want)
+			continue
+		}
+		if r, err := filepath.Rel(root, got); err != nil || strings.HasPrefix(r, "..") {
+			t.Errorf("rel %q resolved outside the root: %q", rel, got)
 		}
 	}
-
-	// Clear dfsPathCache for this key so we always do a fresh resolution.
-	dfsPathCache.Delete(encoded)
-	t.Cleanup(func() { dfsPathCache.Delete(encoded) })
-
-	got := resolveWorkspaceByParts(encoded)
-	if got != base {
-		t.Errorf("resolveWorkspaceByParts(%q) = %q, want %q", encoded, got, base)
+	// A name that only exists on the HOST (e.g. "/usr" is on every Unix box)
+	// must not resolve under an injected root: the walk never leaves it.
+	if got := resolveWorkspaceUnder(root, "-usr"); got != "" {
+		t.Errorf(`"-usr" resolved to %q under an empty root; the resolver walked the host tree`, got)
 	}
 }
 
 func TestResolveWorkspaceByParts_Cache(t *testing.T) {
 	t.Parallel()
-	base := t.TempDir()
-	encoded := "-" + base[1:]
-	for i := 0; i < len(encoded); i++ {
-		if encoded[i] == '/' {
-			encoded = encoded[:i] + "-" + encoded[i+1:]
+	root := t.TempDir()
+	base := filepath.Join(root, "cached")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	encoded := slugUnder(t, root, base)
+
+	got1 := resolveWorkspaceUnder(root, encoded)
+	// Remove the dir: only a cached answer can still return the path.
+	if err := os.RemoveAll(base); err != nil {
+		t.Fatal(err)
+	}
+	if got2 := resolveWorkspaceUnder(root, encoded); got1 != base || got2 != base {
+		t.Errorf("cache not served: first=%q second=%q, want %q both times", got1, got2, base)
+	}
+}
+
+// TestResolveWorkspaceUnder_CacheIsScopedToRoot: the same encoded name under
+// two roots must decode to two paths. An unscoped cache would hand the second
+// root the first root's answer — and a test under t.TempDir() could poison the
+// production "/" entry.
+func TestResolveWorkspaceUnder_CacheIsScopedToRoot(t *testing.T) {
+	t.Parallel()
+	rootA, rootB := t.TempDir(), t.TempDir()
+	for _, r := range []string{rootA, rootB} {
+		if err := os.MkdirAll(filepath.Join(r, "same"), 0o755); err != nil {
+			t.Fatal(err)
 		}
 	}
-	dfsPathCache.Delete(encoded)
-	t.Cleanup(func() { dfsPathCache.Delete(encoded) })
-
-	// First call populates cache.
-	got1 := resolveWorkspaceByParts(encoded)
-	// Second call returns from cache.
-	got2 := resolveWorkspaceByParts(encoded)
-	if got1 != got2 {
-		t.Errorf("cache inconsistency: %q vs %q", got1, got2)
+	if got := resolveWorkspaceUnder(rootA, "-same"); got != filepath.Join(rootA, "same") {
+		t.Fatalf("rootA: %q", got)
+	}
+	if got := resolveWorkspaceUnder(rootB, "-same"); got != filepath.Join(rootB, "same") {
+		t.Errorf("rootB got %q — the cache leaked rootA's answer across roots", got)
 	}
 }
 
 func TestResolveWorkspaceByParts_NonexistentPath(t *testing.T) {
 	t.Parallel()
-	// Encode a path that doesn't exist on disk.
-	encoded := "-nonexistent-path-that-cannot-exist-xyz987"
-	dfsPathCache.Delete(encoded)
-	t.Cleanup(func() { dfsPathCache.Delete(encoded) })
-
-	got := resolveWorkspaceByParts(encoded)
-	if got != "" {
+	if got := resolveWorkspaceUnder(t.TempDir(), "-nonexistent-path-that-cannot-exist-xyz987"); got != "" {
 		t.Errorf("expected empty for nonexistent path, got %q", got)
 	}
 }
@@ -76,23 +114,17 @@ func TestResolveWorkspaceByParts_NonexistentPath(t *testing.T) {
 // mid-rebuild) must still resolve once it reappears, rather than being
 // permanently cached as unresolvable for the process lifetime.
 func TestResolveWorkspaceByParts_NegativeResultNotCached(t *testing.T) {
-	// Not parallel: creates a real dir whose encoded name we control.
-	parent := t.TempDir()
-	dir := filepath.Join(parent, "reappearing-project")
-	encoded := "-" + parent[1:] + "-reappearing-project"
-	for i := 0; i < len(encoded); i++ {
-		if encoded[i] == '/' {
-			encoded = encoded[:i] + "-" + encoded[i+1:]
-		}
-	}
-	dfsPathCache.Delete(encoded)
-	t.Cleanup(func() { dfsPathCache.Delete(encoded) })
+	t.Parallel()
+	root := t.TempDir()
+	dir := filepath.Join(root, "reappearing-project")
+	encoded := slugUnder(t, root, dir)
+	key := dfsCacheKey(root, encoded)
 
 	// Dir absent: resolves to "" and must NOT be cached.
-	if got := resolveWorkspaceByParts(encoded); got != "" {
+	if got := resolveWorkspaceUnder(root, encoded); got != "" {
 		t.Fatalf("expected empty for absent dir, got %q", got)
 	}
-	if _, ok := dfsPathCache.Load(encoded); ok {
+	if _, ok := dfsPathCache.Load(key); ok {
 		t.Fatal("negative result must not be cached (#1994)")
 	}
 
@@ -100,12 +132,25 @@ func TestResolveWorkspaceByParts_NegativeResultNotCached(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := resolveWorkspaceByParts(encoded); got != dir {
-		t.Errorf("after dir reappeared, resolveWorkspaceByParts(%q) = %q, want %q", encoded, got, dir)
+	if got := resolveWorkspaceUnder(root, encoded); got != dir {
+		t.Errorf("after dir reappeared, resolveWorkspaceUnder(%q) = %q, want %q", encoded, got, dir)
 	}
-	// Positive result IS cached.
-	if _, ok := dfsPathCache.Load(encoded); !ok {
+	if _, ok := dfsPathCache.Load(key); !ok {
 		t.Error("positive result should be cached")
+	}
+}
+
+// TestResolveWorkspaceByParts_ProductionRootIsSlash pins the one thing every
+// other test here now bypasses: the production entry point resolves from "/".
+// "/usr" exists on every Unix host and "-usr" resolves on pass 1 with a single
+// Stat — no ReadDir, so no walk into anything the host has mounted.
+func TestResolveWorkspaceByParts_ProductionRootIsSlash(t *testing.T) {
+	t.Parallel()
+	if fi, err := os.Stat("/usr"); err != nil || !fi.IsDir() {
+		t.Skip("no /usr on this host")
+	}
+	if got := resolveWorkspaceByParts("-usr"); got != "/usr" {
+		t.Errorf(`resolveWorkspaceByParts("-usr") = %q, want "/usr" — production must resolve from the real root`, got)
 	}
 }
 
@@ -120,11 +165,8 @@ func TestResolveWorkspaceByParts_EmptyAndNoLeadingDash(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			dfsPathCache.Delete(tc.input)
-			t.Cleanup(func() { dfsPathCache.Delete(tc.input) })
-			got := resolveWorkspaceByParts(tc.input)
-			if got != "" {
-				t.Errorf("resolveWorkspaceByParts(%q) = %q, want empty", tc.input, got)
+			if got := resolveWorkspaceUnder(t.TempDir(), tc.input); got != "" {
+				t.Errorf("resolveWorkspaceUnder(%q) = %q, want empty", tc.input, got)
 			}
 		})
 	}
@@ -512,34 +554,38 @@ func TestExtractFirstPrompt_SkipsNonUserLines(t *testing.T) {
 // RecentSessions
 // ---------------------------------------------------------------------------
 
-// makeWorkspace creates a real directory that resolveWorkspaceByParts can find,
-// and the matching encoded project dir inside claudeDir.
-func makeWorkspace(t *testing.T) (claudeDir, workspace, encodedDir string) {
+// makeWorkspace creates a real workspace directory below a fresh resolution
+// root and returns the root, a ~/.claude dir, the workspace, and the project
+// dir name that encodes it relative to root. Resolving under root instead of
+// "/" keeps the walk inside t.TempDir(): from "/" the second pass can descend
+// into whatever the host has mounted (#2744).
+func makeWorkspace(t *testing.T) (root, claudeDir, workspace, encodedDir string) {
 	t.Helper()
 	claudeDir = makeClaudeDir(t)
-	// Create the "workspace" as a subdirectory of TempDir so the path exists.
-	workspace = filepath.Join(t.TempDir(), "myproject")
+	root = t.TempDir()
+	workspace = filepath.Join(root, "myproject")
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Encode: replace "/" with "-"
-	encoded := workspace
-	for i := 0; i < len(encoded); i++ {
-		if encoded[i] == '/' {
-			encoded = encoded[:i] + "-" + encoded[i+1:]
-		}
-	}
-	encodedDir = encoded // Already has leading "-" because path starts with "/"
-	// Clear DFS cache for this key
-	dfsPathCache.Delete(encodedDir)
-	t.Cleanup(func() { dfsPathCache.Delete(encodedDir) })
+	encodedDir = slugUnder(t, root, workspace)
 	return
+}
+
+// slugUnder encodes path the way Claude names its project directory, as if root
+// were "/": the name a resolver rooted at root decodes back to path.
+func slugUnder(t *testing.T, root, path string) string {
+	t.Helper()
+	rel, err := filepath.Rel(root, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		t.Fatalf("slugUnder: %q is not below %q", path, root)
+	}
+	return claudefs.ProjectSlug("/" + filepath.ToSlash(rel))
 }
 
 func TestRecentSessions_EmptyDir(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
-	got := RecentSessions(claudeDir, 10, 7*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(context.Background(), t.TempDir(), claudeDir, 10, 7*24*time.Hour, nil, nil)
 	if len(got) != 0 {
 		t.Errorf("expected empty sessions from empty dir, got %d", len(got))
 	}
@@ -555,7 +601,7 @@ func TestRecentSessions_EmptyClaudeDir(t *testing.T) {
 
 func TestRecentSessions_FallbackFromJSONL(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -574,7 +620,7 @@ func TestRecentSessions_FallbackFromJSONL(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
 	if len(got) == 0 {
 		t.Fatal("expected at least one session")
 	}
@@ -597,7 +643,7 @@ func TestRecentSessions_FallbackFromJSONL(t *testing.T) {
 
 func TestRecentSessions_WithSessionsIndex(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -619,7 +665,7 @@ func TestRecentSessions_WithSessionsIndex(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
 	if len(got) == 0 {
 		t.Fatal("expected at least one session")
 	}
@@ -642,7 +688,7 @@ func TestRecentSessions_WithSessionsIndex(t *testing.T) {
 
 func TestRecentSessions_Limit(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -672,7 +718,7 @@ func TestRecentSessions_Limit(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 2, 365*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 2, 365*24*time.Hour, nil, nil)
 	if len(got) != 2 {
 		t.Errorf("expected 2 sessions (limit=2), got %d", len(got))
 	}
@@ -680,7 +726,7 @@ func TestRecentSessions_Limit(t *testing.T) {
 
 func TestRecentSessions_ExcludeByID(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -699,7 +745,7 @@ func TestRecentSessions_ExcludeByID(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, map[string]bool{sid: true}, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, map[string]bool{sid: true}, nil)
 	for _, s := range got {
 		if s.SessionID == sid {
 			t.Errorf("excluded session %q appeared in results", sid)
@@ -727,22 +773,21 @@ func TestRecentSessions_ExcludeByID(t *testing.T) {
 func TestRecentSessions_SkipsUnresolvableProjectDirs(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
+	// An empty resolution root makes the name unresolvable by construction.
+	// Resolving from "/" instead needed a host-side premise guard (skip if a
+	// real /zzz ever existed) — exactly the host dependency #2744 removes.
+	root := t.TempDir()
 	const encodedDir = "-zzz-naozhi-no-such-workspace-project"
 	unresolvable := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(unresolvable, 0o755); err != nil {
 		t.Fatal(err)
-	}
-	// Guard the premise: if a real /zzz ever exists this test would be resolving
-	// a live path and asserting the wrong thing.
-	if _, err := os.Stat("/zzz"); err == nil {
-		t.Skip("/zzz exists on this host; the fixture name is no longer unresolvable")
 	}
 	sid := "11111111-0001-0001-0001-000000000001"
 	if err := os.WriteFile(filepath.Join(unresolvable, sid+".jsonl"), []byte("data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
 	for _, s := range got {
 		if s.SessionID == sid {
 			t.Errorf("session from an unresolvable project dir should have been skipped, but appeared: %+v", s)
@@ -752,7 +797,7 @@ func TestRecentSessions_SkipsUnresolvableProjectDirs(t *testing.T) {
 
 func TestRecentSessions_MaxAge(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -783,7 +828,7 @@ func TestRecentSessions_MaxAge(t *testing.T) {
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
 	// maxAge = 1 minute; the file is 1 hour old so it must be filtered out.
-	got := RecentSessions(claudeDir, 10, time.Minute, nil, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, time.Minute, nil, nil)
 	for _, s := range got {
 		if s.SessionID == sid {
 			t.Errorf("session should be filtered by maxAge, but appeared: %+v", s)
@@ -793,7 +838,7 @@ func TestRecentSessions_MaxAge(t *testing.T) {
 
 func TestRecentSessions_SortedByLastActive(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -822,7 +867,7 @@ func TestRecentSessions_SortedByLastActive(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
 	if len(got) < 2 {
 		t.Fatalf("expected at least 2 sessions, got %d", len(got))
 	}
@@ -837,7 +882,7 @@ func TestRecentSessions_SortedByLastActive(t *testing.T) {
 
 func TestRecentSessions_ZeroLimit(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -862,7 +907,7 @@ func TestRecentSessions_ZeroLimit(t *testing.T) {
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
 	// limit=0 means "return all"
-	got := RecentSessions(claudeDir, 0, 365*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 0, 365*24*time.Hour, nil, nil)
 	if len(got) < 3 {
 		t.Errorf("limit=0 should return all sessions, got %d", len(got))
 	}
@@ -883,7 +928,7 @@ func (s stubFilter) SkipSessionID(sid string) bool { return s.skipSessionIDs[sid
 
 func TestRecentSessions_FilterSkipsWorkspace(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -901,7 +946,7 @@ func TestRecentSessions_FilterSkipsWorkspace(t *testing.T) {
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
 	filter := stubFilter{skipWorkspaces: map[string]bool{workspace: true}}
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, filter)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, filter)
 	for _, s := range got {
 		if s.SessionID == sid {
 			t.Errorf("workspace-blacklisted session leaked into result: %+v", s)
@@ -911,7 +956,7 @@ func TestRecentSessions_FilterSkipsWorkspace(t *testing.T) {
 
 func TestRecentSessions_FilterSkipsSessionID(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -935,7 +980,7 @@ func TestRecentSessions_FilterSkipsSessionID(t *testing.T) {
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
 	filter := stubFilter{skipSessionIDs: map[string]bool{hiddenSID: true}}
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, filter)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, filter)
 
 	var sawVisible, sawHidden bool
 	for _, s := range got {
@@ -958,7 +1003,7 @@ func TestRecentSessions_FilterSkipsSessionID(t *testing.T) {
 // { return nil }" defensive code that would silently empty the history list.
 func TestRecentSessions_NilFilterIsNoop(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -975,7 +1020,7 @@ func TestRecentSessions_NilFilterIsNoop(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
 	var saw bool
 	for _, s := range got {
 		if s.SessionID == sid {
@@ -993,7 +1038,7 @@ func TestRecentSessions_NilFilterIsNoop(t *testing.T) {
 // (empty here because the very first iteration sees ctx.Err()).
 func TestRecentSessionsCtx_CancelledReturnsEarly(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -1013,7 +1058,7 @@ func TestRecentSessionsCtx_CancelledReturnsEarly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before the walk starts
 
-	got := RecentSessionsCtx(ctx, claudeDir, 10, 365*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(ctx, root, claudeDir, 10, 365*24*time.Hour, nil, nil)
 	if len(got) != 0 {
 		t.Errorf("cancelled context must yield empty (early-return) result, got %d sessions", len(got))
 	}
@@ -1023,7 +1068,7 @@ func TestRecentSessionsCtx_CancelledReturnsEarly(t *testing.T) {
 // leaves behaviour identical to the legacy RecentSessions path.
 func TestRecentSessionsCtx_BackgroundCtxEquivalent(t *testing.T) {
 	t.Parallel()
-	claudeDir, workspace, encodedDir := makeWorkspace(t)
+	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -1040,7 +1085,7 @@ func TestRecentSessionsCtx_BackgroundCtxEquivalent(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessionsCtx(context.Background(), claudeDir, 10, 365*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
 	var saw bool
 	for _, s := range got {
 		if s.SessionID == sid {

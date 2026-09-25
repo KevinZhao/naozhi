@@ -1,12 +1,11 @@
 package discovery
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // #2370: a session run inside a Claude-created git worktree
@@ -30,20 +29,19 @@ import (
 // These tests pin both halves plus the property that genuinely tool-owned
 // hidden dirs stay filtered.
 
-// makeWorktreeWorkspace builds <tmp>/repo/.claude/worktrees/<name> and returns
-// it alongside a fresh ~/.claude dir and the encoded project-dir name.
-func makeWorktreeWorkspace(t *testing.T, name string) (claudeDir, workspace, encodedDir string) {
+// makeWorktreeWorkspace builds <root>/repo/.claude/worktrees/<name> and returns
+// the resolution root, a fresh ~/.claude dir, the worktree and the project-dir
+// name that encodes it relative to root.
+func makeWorktreeWorkspace(t *testing.T, name string) (root, claudeDir, workspace, encodedDir string) {
 	t.Helper()
 	claudeDir = makeClaudeDir(t)
-	repo := filepath.Join(t.TempDir(), "repo")
-	workspace = filepath.Join(repo, ".claude", "worktrees", name)
+	root = t.TempDir()
+	workspace = filepath.Join(root, "repo", ".claude", "worktrees", name)
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	encodedDir = claudefs.ProjectSlug(workspace)
-	dfsPathCache.Delete(encodedDir)
-	t.Cleanup(func() { dfsPathCache.Delete(encodedDir) })
-	return claudeDir, workspace, encodedDir
+	encodedDir = slugUnder(t, root, workspace)
+	return root, claudeDir, workspace, encodedDir
 }
 
 // TestResolveWorkspaceByParts_WorktreeDotClaude is the unit-level half: the
@@ -51,11 +49,11 @@ func makeWorktreeWorkspace(t *testing.T, name string) (claudeDir, workspace, enc
 // returned "" because tryResolveParts can only rejoin hyphen-split segments
 // and never produces the "." of ".claude".
 func TestResolveWorkspaceByParts_WorktreeDotClaude(t *testing.T) {
-	_, workspace, encodedDir := makeWorktreeWorkspace(t, "dashboard-pw-replay")
+	root, _, workspace, encodedDir := makeWorktreeWorkspace(t, "dashboard-pw-replay")
 
-	got := resolveWorkspaceByParts(encodedDir)
+	got := resolveWorkspaceUnder(root, encodedDir)
 	if got != workspace {
-		t.Errorf("resolveWorkspaceByParts(%q) = %q, want %q", encodedDir, got, workspace)
+		t.Errorf("resolveWorkspaceUnder(%q) = %q, want %q", encodedDir, got, workspace)
 	}
 }
 
@@ -63,12 +61,12 @@ func TestResolveWorkspaceByParts_WorktreeDotClaude(t *testing.T) {
 // pass populates the same positive cache as the first, so the expensive walk
 // is paid once per encoded name rather than on every 1Hz sidebar poll.
 func TestResolveWorkspaceByParts_DirScanCaches(t *testing.T) {
-	_, workspace, encodedDir := makeWorktreeWorkspace(t, "cached-wt")
+	root, _, workspace, encodedDir := makeWorktreeWorkspace(t, "cached-wt")
 
-	if got := resolveWorkspaceByParts(encodedDir); got != workspace {
+	if got := resolveWorkspaceUnder(root, encodedDir); got != workspace {
 		t.Fatalf("first resolve = %q, want %q", got, workspace)
 	}
-	v, ok := dfsPathCache.Load(encodedDir)
+	v, ok := dfsPathCache.Load(dfsCacheKey(root, encodedDir))
 	if !ok {
 		t.Fatalf("dir-scan result was not cached for %q", encodedDir)
 	}
@@ -80,7 +78,7 @@ func TestResolveWorkspaceByParts_DirScanCaches(t *testing.T) {
 	if err := os.RemoveAll(workspace); err != nil {
 		t.Fatal(err)
 	}
-	if got := resolveWorkspaceByParts(encodedDir); got != workspace {
+	if got := resolveWorkspaceUnder(root, encodedDir); got != workspace {
 		t.Errorf("second resolve = %q, want cached %q", got, workspace)
 	}
 }
@@ -89,7 +87,7 @@ func TestResolveWorkspaceByParts_DirScanCaches(t *testing.T) {
 // session must actually reach the history slice. Pre-fix the "--" guard
 // dropped the directory before workspace resolution even ran.
 func TestRecentSessions_IncludesWorktreeSession(t *testing.T) {
-	claudeDir, workspace, encodedDir := makeWorktreeWorkspace(t, "dashboard-pw-replay")
+	root, claudeDir, workspace, encodedDir := makeWorktreeWorkspace(t, "dashboard-pw-replay")
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -103,7 +101,7 @@ func TestRecentSessions_IncludesWorktreeSession(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
+	got := recentSessionsUnder(context.Background(), root, claudeDir, 10, 365*24*time.Hour, nil, nil)
 	for _, s := range got {
 		if s.SessionID != sid {
 			continue
@@ -125,7 +123,7 @@ func TestRecentSessions_IncludesWorktreeSession(t *testing.T) {
 // fragments into the user-facing panel — the reason the guard existed.
 func TestRecentSessions_StillSkipsToolHiddenDirs(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
-	base := t.TempDir()
+	root := t.TempDir()
 
 	cases := []struct {
 		name string
@@ -146,13 +144,18 @@ func TestRecentSessions_StillSkipsToolHiddenDirs(t *testing.T) {
 
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			workspace := filepath.Join(base, tc.rel)
+			workspace := filepath.Join(root, tc.rel)
 			if err := os.MkdirAll(workspace, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			encodedDir := claudefs.ProjectSlug(workspace)
-			dfsPathCache.Delete(encodedDir)
-			t.Cleanup(func() { dfsPathCache.Delete(encodedDir) })
+			encodedDir := slugUnder(t, root, workspace)
+			// Premise: the name must RESOLVE. Otherwise the session is dropped
+			// one layer earlier (unresolvable dir) and this test passes whether
+			// or not the hidden-workspace filter exists — the trap #2744 found
+			// in the test this one sits next to.
+			if got := resolveWorkspaceUnder(root, encodedDir); got != workspace {
+				t.Fatalf("premise: %q resolves to %q, want %q — the filter would not be exercised", encodedDir, got, workspace)
+			}
 
 			projDir := filepath.Join(claudeDir, "projects", encodedDir)
 			if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -165,7 +168,7 @@ func TestRecentSessions_StillSkipsToolHiddenDirs(t *testing.T) {
 			dirFilesCache.Delete(projDir)
 			t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-			for _, s := range RecentSessions(claudeDir, 50, 365*24*time.Hour, nil, nil) {
+			for _, s := range recentSessionsUnder(context.Background(), root, claudeDir, 50, 365*24*time.Hour, nil, nil) {
 				if s.SessionID == sid {
 					t.Errorf("tool-owned hidden workspace %q leaked into history: %+v", workspace, s)
 				}
@@ -247,7 +250,10 @@ func TestRecentSessions_RelativeHiddenWorkspaceStillSkipped(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(".relhidden-tool-2370") })
 
 	// The encoded name is deliberately unresolvable so the index's
-	// originalPath is the only thing that can supply a workspace.
+	// originalPath is the only thing that can supply a workspace; an empty
+	// resolution root makes that true by construction rather than by hoping
+	// the host has no /nonresolvable.
+	root := t.TempDir()
 	projDir := filepath.Join(claudeDir, "projects", "-nonresolvable-relhidden-2370")
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -264,7 +270,7 @@ func TestRecentSessions_RelativeHiddenWorkspaceStillSkipped(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	for _, s := range RecentSessions(claudeDir, 50, 365*24*time.Hour, nil, nil) {
+	for _, s := range recentSessionsUnder(context.Background(), root, claudeDir, 50, 365*24*time.Hour, nil, nil) {
 		if s.SessionID == sid {
 			t.Errorf("relative hidden workspace leaked into history: ws=%q prompt=%q",
 				s.Workspace, s.LastPrompt)
@@ -288,17 +294,15 @@ func TestResolveByDirScan_AmbiguousPrefersDot(t *testing.T) {
 		}
 	}
 	want := filepath.Join(base, ".claude", "worktrees", "x")
-	encoded := claudefs.ProjectSlug(want)
-	dfsPathCache.Delete(encoded)
-	t.Cleanup(func() { dfsPathCache.Delete(encoded) })
+	encoded := slugUnder(t, base, want)
 
-	got := resolveWorkspaceByParts(encoded)
+	got := resolveWorkspaceUnder(base, encoded)
 	if got != want {
-		t.Errorf("resolveWorkspaceByParts(%q) = %q, want the dot variant %q", encoded, got, want)
+		t.Errorf("resolveWorkspaceUnder(%q) = %q, want the dot variant %q", encoded, got, want)
 	}
 	// The invariant, independent of which variant won.
-	if got != "" && claudefs.ProjectSlug(got) != encoded {
-		t.Errorf("resolved %q re-encodes to %q, want %q", got, claudefs.ProjectSlug(got), encoded)
+	if got != "" && slugUnder(t, base, got) != encoded {
+		t.Errorf("resolved %q re-encodes to %q, want %q", got, slugUnder(t, base, got), encoded)
 	}
 }
 
