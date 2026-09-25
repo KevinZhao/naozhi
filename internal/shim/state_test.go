@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -464,5 +465,53 @@ func TestStateFilePath(t *testing.T) {
 		if got != tc.wantSuffix {
 			t.Errorf("StateFilePath(%q, %q) = %q, want %q", tc.stateDir, tc.keyHash, got, tc.wantSuffix)
 		}
+	}
+}
+
+// TestReadStateFile_RefusesSymlink: the file carries the socket's auth token.
+// A 0600 state file somewhere else, linked in at the expected path, passes
+// the permission check (Stat follows the link); the read itself must refuse
+// it rather than hand that token to Reconnect.
+func TestReadStateFile_RefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	if err := WriteStateFile(target, State{ShimPID: 1, Socket: "/tmp/s.sock", AuthToken: "dA==", Key: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "linked.json")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if got, err := ReadStateFile(path); err == nil {
+		t.Fatalf("a symlinked state file was read (token %q), want refused", got.AuthToken)
+	}
+}
+
+// TestReadStateFile_OversizeRefused: over the cap is refused even when it is
+// otherwise a valid, current-version state (padding rides in an unknown
+// field, so only the cap can reject it).
+func TestReadStateFile_OversizeRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "big.json")
+	body := `{"version":` + strconv.Itoa(stateVersion) + `,"shim_pid":1,"socket":"/tmp/s.sock","auth_token":"dA==","key":"k","pad":"` +
+		strings.Repeat("x", maxStateFileBytes) + `"}`
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadStateFile(path); err == nil {
+		t.Error("an over-cap state file must be refused")
+	}
+}
+
+// TestReadStateFile_EmptyIsError: jsonfile reads an empty file as absent; the
+// state reader must still report it, because its callers drop the file only
+// on an error.
+func TestReadStateFile_EmptyIsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadStateFile(path); err == nil {
+		t.Error("an empty state file must be an error")
 	}
 }

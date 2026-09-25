@@ -2,9 +2,11 @@ package attachment
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -317,5 +319,96 @@ func TestGCWithRefs_CorruptMetaRetains(t *testing.T) {
 	}
 	if _, err := os.Stat(payload); err != nil {
 		t.Errorf("payload deleted despite corrupt meta: %v", err)
+	}
+}
+
+// TestGCWithRefs_HostileMetaRetainsAcrossSweeps: whatever sits at the .meta
+// path, a payload is reaped only on a sidecar the GC actually read. Each
+// variant below would otherwise fall to the no-meta branch, which assumes no
+// references. Two sweeps, because a loader that moved the bad sidecar aside
+// would retain on the first and reap on the second.
+func TestGCWithRefs_HostileMetaRetainsAcrossSweeps(t *testing.T) {
+	now := time.Now().UTC()
+	// Past the upload TTL with no references: exactly what the GC reaps.
+	reapable, err := json.Marshal(Meta{UploadedAt: now.AddDate(0, 0, -10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pad := strings.Repeat("x", maxMetaFileBytes)
+
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, metaPath string)
+	}{
+		{"corrupt", func(t *testing.T, p string) { writeFile(t, p, "{not json") }},
+		{"empty", func(t *testing.T, p string) { writeFile(t, p, "") }},
+		// Valid JSON over the cap: without the cap it parses as reapable.
+		{"oversize", func(t *testing.T, p string) {
+			writeFile(t, p, `{"uploaded_at":"`+now.AddDate(0, 0, -10).Format(time.RFC3339)+`","pad":"`+pad+`"}`)
+		}},
+		// A symlink to a reapable sidecar: following it would reap.
+		{"symlink", func(t *testing.T, p string) {
+			target := filepath.Join(t.TempDir(), "elsewhere.meta")
+			writeFile(t, target, string(reapable))
+			if err := os.Symlink(target, p); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := t.TempDir()
+			dayDir := filepath.Join(ws, Dir, now.AddDate(0, 0, -10).Format("2006-01-02"))
+			if err := os.MkdirAll(dayDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			payload := filepath.Join(dayDir, "hostile.png")
+			writeFile(t, payload, "x")
+			tc.plant(t, filepath.Join(dayDir, "hostile.meta"))
+
+			for sweep := 1; sweep <= 2; sweep++ {
+				res, err := GCWithRefs(context.Background(), ws, GCOptions{
+					UploadTTL: 7 * 24 * time.Hour,
+					RefTTL:    DefaultRefTTL,
+					Now:       now,
+				})
+				if err != nil {
+					t.Fatalf("sweep %d: GCWithRefs: %v", sweep, err)
+				}
+				if _, err := os.Stat(payload); err != nil {
+					t.Fatalf("sweep %d reaped the payload (Removed=%d): %v", sweep, res.Removed, err)
+				}
+			}
+		})
+	}
+}
+
+// TestGCWithRefs_MissingMetaStillReaps is the control: only a sidecar that is
+// truly absent takes the no-meta path.
+func TestGCWithRefs_MissingMetaStillReaps(t *testing.T) {
+	ws := t.TempDir()
+	now := time.Now().UTC()
+	dayDir := filepath.Join(ws, Dir, now.AddDate(0, 0, -10).Format("2006-01-02"))
+	if err := os.MkdirAll(dayDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(dayDir, "legacy.png")
+	writeFile(t, payload, "x")
+
+	if _, err := GCWithRefs(context.Background(), ws, GCOptions{
+		UploadTTL: 7 * 24 * time.Hour,
+		RefTTL:    DefaultRefTTL,
+		Now:       now,
+	}); err != nil {
+		t.Fatalf("GCWithRefs: %v", err)
+	}
+	if _, err := os.Stat(payload); !os.IsNotExist(err) {
+		t.Errorf("a legacy payload with no sidecar past the upload TTL must be reaped, stat = %v", err)
+	}
+}
+
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
