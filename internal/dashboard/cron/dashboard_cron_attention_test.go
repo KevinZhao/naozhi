@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/datadir"
 )
 
 func attentionTestScheduler(t *testing.T, storePath string) *cronpkg.Scheduler {
@@ -190,5 +192,41 @@ func TestHandleRunReplay_NilScheduler(t *testing.T) {
 	h.HandleRunReplay(w, req)
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501", w.Code)
+	}
+}
+
+// TestHandleAttentionList_MarksUnreadable: an unreadable record reaches the
+// wire flagged, so the card can offer confirm and withhold replay.
+func TestHandleAttentionList_MarksUnreadable(t *testing.T) {
+	t.Parallel()
+	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
+	sched := attentionTestScheduler(t, storePath)
+	runID := strings.Repeat("c", 16)
+	sched.WriteSandboxAttentionForTest(strings.Repeat("a", 16), runID, "transport", "job")
+	path := datadir.ForStore(storePath).Join("sandboxattention", runID+".json")
+	if err := os.WriteFile(path, []byte("{torn"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &Handlers{deps: Deps{Scheduler: sched}}
+	w := httptest.NewRecorder()
+	h.HandleAttentionList(w, httptest.NewRequest(http.MethodGet, "/api/cron/attention", nil))
+
+	var resp struct {
+		Items []struct {
+			JobID      string `json:"job_id"`
+			RunID      string `json:"run_id"`
+			Reason     string `json:"reason"`
+			Unreadable bool   `json:"unreadable"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, w.Body.String())
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %+v, want the unreadable record", resp.Items)
+	}
+	if it := resp.Items[0]; !it.Unreadable || it.RunID != runID || it.JobID != "" || it.Reason != "unreadable" {
+		t.Errorf("item = %+v, want unreadable under %s with no job", it, runID)
 	}
 }

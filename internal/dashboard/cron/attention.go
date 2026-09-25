@@ -20,6 +20,9 @@ type cronAttentionItemView struct {
 	JobLabel    string `json:"job_label,omitempty"`
 	StartedAtMS int64  `json:"started_at_ms,omitempty"`
 	CreatedAtMS int64  `json:"created_at_ms,omitempty"`
+	// Unreadable: the record on disk could not be read; only RunID and
+	// CreatedAtMS are meaningful, and the card offers confirm only.
+	Unreadable bool `json:"unreadable,omitempty"`
 }
 
 // cronAttentionListResp is the GET /api/cron/attention response.
@@ -49,6 +52,7 @@ func (h *Handlers) HandleAttentionList(w http.ResponseWriter, r *http.Request) {
 			JobLabel:    osutil.SanitizeForLog(it.JobLabel, 256),
 			StartedAtMS: it.StartedAtMS,
 			CreatedAtMS: it.CreatedAtMS,
+			Unreadable:  it.Unreadable,
 		})
 	}
 	httputil.WriteJSON(w, cronAttentionListResp{Items: out})

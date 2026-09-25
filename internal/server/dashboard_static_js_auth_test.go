@@ -283,3 +283,24 @@ func TestCronViewJS_NoTokenModeStillServes(t *testing.T) {
 		t.Fatalf("/static/cron_view.js no-token GET = %d, want 200; body=%q", w.Code, w.Body.String())
 	}
 }
+
+// TestCronAttentionJS_RequiresAuth_TokenMode: same SEC-4 gate for the
+// attention region split out of cron_view.js.
+func TestCronAttentionJS_RequiresAuth_TokenMode(t *testing.T) {
+	t.Parallel()
+	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/static/cron_attention.js", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("/static/cron_attention.js unauth GET = %d, want 401 (SEC-4 #1328)", w.Code)
+	}
+	body := w.Body.String()
+	for _, leak := range []string{"function ", "cronAttentionRefresh", "cronAttentionState"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("#923 regression: 401 body leaks cron_attention.js source token %q", leak)
+		}
+	}
+}
