@@ -181,18 +181,21 @@ func TestReplay_CorruptAttentionFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := s.ReplaySandboxRun(j.ID, origRunID)
-	if !errors.Is(err, ErrStopUnconfirmed) {
-		t.Fatalf("err = %v, want ErrStopUnconfirmed (corrupt record must fail closed)", err)
+	// An operator who sees the refusal retries. The record is still just as
+	// unreadable, so the retry must be refused too — a read that moved the
+	// file aside would let the second attempt see "no record" and dispatch.
+	for attempt := 1; attempt <= 2; attempt++ {
+		_, err := s.ReplaySandboxRun(j.ID, origRunID)
+		if !errors.Is(err, ErrStopUnconfirmed) {
+			t.Fatalf("attempt %d: err = %v, want ErrStopUnconfirmed (corrupt record must fail closed)", attempt, err)
+		}
 	}
 	runner.mu.Lock()
 	n := len(runner.gotJobs)
-	stops := len(runner.stopped)
 	runner.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("no replay run may dispatch on a corrupt attention read; runner saw %d jobs", n)
 	}
-	_ = stops // Stop may or may not have been attempted; the invariant is "no dispatch".
 }
 
 // panicReplayRunner panics inside RunJob, simulating an executeSandbox panic

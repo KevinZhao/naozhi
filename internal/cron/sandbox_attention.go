@@ -124,11 +124,14 @@ func (s *Scheduler) getSandboxAttention(runID string) (*sandboxAttention, bool, 
 	if !IsValidID(runID) {
 		return nil, false, errInvalidAttentionID
 	}
-	// Bounded + symlink-refusing, and an unparseable record is moved aside
-	// rather than re-failed on every poll (#2709).
+	// Bounded and symlink-refusing. An unparseable record stays where it is:
+	// moving it aside would turn the next read into "absent", and a retried
+	// replay would then skip the Stop and dispatch against a run that may
+	// still be live. It keeps failing closed until an operator removes it.
 	rec, outcome, err := jsonfile.Load[sandboxAttention](filepath.Join(dir, runID+".json"), jsonfile.Options{
 		MaxBytes: maxAttentionRecordBytes,
 		Label:    "cron sandbox attention record",
+		Corrupt:  jsonfile.LeaveCorrupt,
 	})
 	if err != nil {
 		return nil, false, err

@@ -7,18 +7,18 @@ import (
 	"testing"
 )
 
-// Both loaders below moved to osutil/jsonfile (#2709), which bounds the read,
-// refuses a symlink, and moves an unparseable file aside as .corrupt.<ts>
-// instead of leaving it to be re-read and re-failed forever. jsonfile reports
-// three outcomes, and these tests pin the mapping each caller needs — the
-// interesting half is that "corrupt" must NOT collapse into "absent".
+// Both loaders below read through osutil/jsonfile, which bounds the read and
+// refuses a symlink. jsonfile reports three outcomes, and these tests pin the
+// mapping each caller needs — the interesting half is that "corrupt" must NOT
+// collapse into "absent", on the first read or any later one.
 
-// TestGetSandboxAttention_CorruptFailsClosedAndIsMovedAside: the attention
-// record is what proves the original sandbox run was stopped, so an unreadable
-// one has to be an error. Reading it as "no record" would let a replay
-// dispatch against a run that may still be live (the invariant
-// TestReplay_CorruptAttentionFailsClosed guards end to end).
-func TestGetSandboxAttention_CorruptFailsClosedAndIsMovedAside(t *testing.T) {
+// TestGetSandboxAttention_CorruptFailsClosedOnEveryRead: the attention record
+// is what proves the original sandbox run was stopped, so an unreadable one
+// has to be an error — and it has to stay one. Moving the file aside on the
+// first read would make the second read "no record", and a retried replay
+// would dispatch against a run that may still be live
+// (TestReplay_CorruptAttentionFailsClosed guards that end to end).
+func TestGetSandboxAttention_CorruptFailsClosedOnEveryRead(t *testing.T) {
 	t.Parallel()
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
 	dir := s.sandboxAttentionDir()
@@ -31,26 +31,14 @@ func TestGetSandboxAttention_CorruptFailsClosedAndIsMovedAside(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec, ok, err := s.getSandboxAttention(runID)
-	if err == nil {
-		t.Fatalf("corrupt record must be an error, got rec=%v ok=%v", rec, ok)
-	}
-	if !errors.Is(err, errCorruptAttentionRecord) {
-		t.Errorf("err = %v, want errCorruptAttentionRecord", err)
-	}
-	// Moved aside, not left to fail on every poll.
-	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
-		t.Errorf("the unparseable record is still in place (%v); it must be renamed aside", serr)
-	}
-	ents, _ := os.ReadDir(dir)
-	found := false
-	for _, e := range ents {
-		if len(e.Name()) > len(runID) && e.Name()[:len(runID)] == runID && e.Name() != runID+".json" {
-			found = true
+	for read := 1; read <= 2; read++ {
+		rec, ok, err := s.getSandboxAttention(runID)
+		if !errors.Is(err, errCorruptAttentionRecord) {
+			t.Fatalf("read %d = (%v, %v, %v), want errCorruptAttentionRecord", read, rec, ok, err)
 		}
 	}
-	if !found {
-		t.Error("no .corrupt sibling left behind; the evidence was destroyed rather than preserved")
+	if _, serr := os.Stat(path); serr != nil {
+		t.Errorf("the unparseable record left its path (%v); it must stay until an operator removes it", serr)
 	}
 }
 
@@ -94,8 +82,9 @@ func TestGetSandboxAttention_OversizeIsRefused(t *testing.T) {
 	}
 }
 
-// TestSandboxRunSnapshotManifest_CorruptIsUnreadableNotMissing: the dashboard
-// should say the manifest is unreadable, not imply the run never had one.
+// TestSandboxRunSnapshotManifest_CorruptIsUnreadableNotMissing: the read that
+// finds a corrupt manifest reports it as unreadable rather than as a run that
+// never had one.
 func TestSandboxRunSnapshotManifest_CorruptIsUnreadableNotMissing(t *testing.T) {
 	t.Parallel()
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
