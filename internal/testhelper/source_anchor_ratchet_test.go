@@ -33,11 +33,11 @@ import (
 // write a behavioural test, or when the anchor genuinely is the right tool
 // (import bans, lock-shape pins with documented reasons), add it WITH an
 // anchor-keep line and argue the baseline bump in review.
-const anchorFileBaseline = 53
+const anchorFileBaseline = 52
 
 // unjustifiedAnchorBaseline counts anchor files lacking an `// anchor-keep:`
 // justification line. The triage pass drives this to zero file by file.
-const unjustifiedAnchorBaseline = 1
+const unjustifiedAnchorBaseline = 0
 
 // Patterns assembled at runtime so this file does not count itself (the same
 // trick sleep_ratchet_test.go uses for its token).
