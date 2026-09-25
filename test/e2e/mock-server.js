@@ -206,6 +206,8 @@ function defaultGitStates() {
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
+ * @param {object[]} [overrides.systemDaemons] - GET /api/system/daemons payload (an array).
+ *   Without it the route is absent (404). `systemDaemonsGetCount` counts requests.
  * @param {object} [overrides.cronTrigger] - Enables POST /api/cron/trigger: { status } (default 200).
  *   Bodies land in `cronTriggerCalls`.
  * @param {Function} [overrides.costSummary] - (searchParams) => GET /api/cost/summary payload,
@@ -276,6 +278,8 @@ function startMockServer(overrides = {}) {
   const runSnapshots = overrides.runSnapshots || {};
   const costSummary = overrides.costSummary || null;
   const cronTrigger = overrides.cronTrigger || null;
+  const systemDaemons = overrides.systemDaemons || null;
+  let systemDaemonsGetCount = 0;
   const cronTriggerCalls = [];
   const costSummaryCalls = [];
   const cronAttention = overrides.cronAttention ? overrides.cronAttention.slice() : null;
@@ -960,6 +964,15 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // 系统 view daemons: opt-in via overrides.systemDaemons.
+    if (systemDaemons && pathname === NZ_CONTRACT.API.system_daemons && req.method === 'GET') {
+      if (!checkAuth()) return;
+      systemDaemonsGetCount++;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(systemDaemons));
+      return;
+    }
+
     // Cron 立即执行: opt-in via overrides.cronTrigger.
     if (cronTrigger && pathname === NZ_CONTRACT.API.cron_trigger && req.method === 'POST') {
       if (!checkAuth()) return;
@@ -1093,6 +1106,7 @@ function startMockServer(overrides = {}) {
         get cronListGetCount() { return cronListGetCount; },
         get costSummaryCalls() { return costSummaryCalls; },
         get cronTriggerCalls() { return cronTriggerCalls; },
+        get systemDaemonsGetCount() { return systemDaemonsGetCount; },
         // Replace the served cron jobs mid-test (in place - GET closes over the array).
         setCronJobs(next) { cronJobsData.length = 0; cronJobsData.push(...next); },
         get loginCalls() { return loginCalls; },
