@@ -206,6 +206,8 @@ function defaultGitStates() {
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
+ * @param {object} [overrides.cronTrigger] - Enables POST /api/cron/trigger: { status } (default 200).
+ *   Bodies land in `cronTriggerCalls`.
  * @param {Function} [overrides.costSummary] - (searchParams) => GET /api/cost/summary payload,
  *   or null for a 404. Without it the route is absent (404). Calls land in `costSummaryCalls`
  *   as {group_by, job_id}.
@@ -273,6 +275,8 @@ function startMockServer(overrides = {}) {
   // {available:false}, which is what a local (non-sandbox) run really returns.
   const runSnapshots = overrides.runSnapshots || {};
   const costSummary = overrides.costSummary || null;
+  const cronTrigger = overrides.cronTrigger || null;
+  const cronTriggerCalls = [];
   const costSummaryCalls = [];
   const cronAttention = overrides.cronAttention ? overrides.cronAttention.slice() : null;
   const cronConfirmCalls = [];
@@ -956,6 +960,22 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // Cron 立即执行: opt-in via overrides.cronTrigger.
+    if (cronTrigger && pathname === NZ_CONTRACT.API.cron_trigger && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        let body = {};
+        try { body = JSON.parse(raw || '{}'); } catch (_) { /* record as {} */ }
+        cronTriggerCalls.push(body);
+        const status = cronTrigger.status || 200;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(status < 300 ? { status: 'ok' } : { error: 'upstream unavailable' }));
+      });
+      return;
+    }
+
     // Cost ledger summary: opt-in via overrides.costSummary.
     if (costSummary && pathname === NZ_CONTRACT.API.cost_summary && req.method === 'GET') {
       if (!checkAuth()) return;
@@ -1072,6 +1092,7 @@ function startMockServer(overrides = {}) {
         get fullCronListCalls() { return fullCronListCalls; },
         get cronListGetCount() { return cronListGetCount; },
         get costSummaryCalls() { return costSummaryCalls; },
+        get cronTriggerCalls() { return cronTriggerCalls; },
         // Replace the served cron jobs mid-test (in place - GET closes over the array).
         setCronJobs(next) { cronJobsData.length = 0; cronJobsData.push(...next); },
         get loginCalls() { return loginCalls; },
