@@ -108,10 +108,7 @@ func TestFinishRunClearsTheInflightMarker(t *testing.T) {
 	}, slog.Default()); path == "" {
 		t.Fatal("marker write failed")
 	}
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: time.Now().Add(-time.Second), trigger: TriggerScheduled,
-		state: RunStateSucceeded, result: "ok",
-	})
+	s.finishRun(runCtx{job: j, runID: runID, startedAt: time.Now().Add(-time.Second), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "ok"})
 	if left := markerFiles(t, s); len(left) != 0 {
 		t.Fatalf("marker survived a successful finish: %v", left)
 	}
@@ -143,10 +140,7 @@ func TestFinishRunClearsMarkerOnSkipPersistPaths(t *testing.T) {
 	s.writeRunInflightMarker(runInflightMarker{
 		JobID: jobID, RunID: runID, StartedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: time.Now().Add(-time.Second), trigger: TriggerScheduled,
-		state: RunStateCanceled, errClass: ErrClassCanceled, skipPersist: true,
-	})
+	s.finishRun(runCtx{job: j, runID: runID, startedAt: time.Now().Add(-time.Second), trigger: TriggerScheduled}, runOutcome{state: RunStateCanceled, errClass: ErrClassCanceled, skipPersist: true})
 	if left := markerFiles(t, s); len(left) != 0 {
 		t.Errorf("marker survived a skipPersist finish: %v — the run would be recorded twice next boot", left)
 	}

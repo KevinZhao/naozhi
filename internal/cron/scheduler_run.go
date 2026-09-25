@@ -81,7 +81,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		// preserves prior recordResult semantics where ctx-cancel did not
 		// touch LastRunAt. The broadcast still emits so the dashboard sees
 		// the run's terminal frame.
-		s.finishRunFor(args.runCtx, runOutcome{
+		s.finishRun(args.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 			skipPersist: true,
 			// Shutdown is the one canceller here (this branch IS the stopCtx
@@ -94,7 +94,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 	if !s.workDirReachableCached(snap.workDir) {
 		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
 			"work_dir", snap.workDir)
-		s.finishRunFor(args.runCtx, runOutcome{
+		s.finishRun(args.runCtx, runOutcome{
 			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
 			errMsg: "work_dir unreachable",
 		})
@@ -110,7 +110,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		!workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
 		lg.Warn("cron fresh spawn aborted: work_dir outside allowed root",
 			"work_dir", snap.workDir)
-		s.finishRunFor(args.runCtx, runOutcome{
+		s.finishRun(args.runCtx, runOutcome{
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
 		})
@@ -147,7 +147,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		refresh.run()
 		// Job deleted mid-execute: treat as canceled; no recordResult but
 		// broadcast for visibility.
-		s.finishRunFor(args.runCtx, runOutcome{
+		s.finishRun(args.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled,
 			errMsg: "job deleted mid-execute", skipPersist: true,
 		})
@@ -238,7 +238,7 @@ func (s *Scheduler) resolveCronWorkspace(rc runCtx) (workDirForCLI string, abort
 	failOutsideRoot := func(why string) (string, bool) {
 		lg.Warn("cron job work_dir outside allowed root"+why+"; aborting run",
 			"work_dir", snap.workDir)
-		s.finishRunFor(rc, runOutcome{
+		s.finishRun(rc, runOutcome{
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
 		})
@@ -694,7 +694,7 @@ func costTotalsOf(sess Session) costledger.Totals {
 // the sidebar stub.
 func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, costInc costledger.Increment) {
 	// Only what this function still reads directly; the identity fields it used to
-	// unpack are now spelled once inside finishRunFor(a.runCtx, ...).
+	// unpack are now spelled once, as finishRun(a.runCtx, ...).
 	snap, key := a.snap, a.key
 	lg, notifyTo, stubRefresh := a.lg, a.notifyTo, a.stubRefresh
 	if errors.Is(err, context.Canceled) {
@@ -725,7 +725,7 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 		// gate; a late refresh could clobber run-B's live stub with run-A's
 		// stale chain (phantom sidebar pointing at the prior session's JSONL).
 		stubRefresh.run()
-		s.finishRunFor(a.runCtx, runOutcome{
+		s.finishRun(a.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 			skipPersist: true, costInc: costInc,
 			// Keep the restart marker only when the cancel came from the process
@@ -769,7 +769,7 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 	// Stub re-register BEFORE finishRun releases the gate (see the cancel
 	// branch); deliverNotice (IM, stub-independent) stays after finishRun.
 	stubRefresh.run()
-	s.finishRunFor(a.runCtx, runOutcome{
+	s.finishRun(a.runCtx, runOutcome{
 		state: state, errClass: errClass,
 		errMsg:  "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
 		costInc: costInc,
@@ -801,7 +801,7 @@ func (s *Scheduler) execFinishSuccess(rc runCtx, result SendResult, costInc cost
 	// dashboard 点击 cron 侧边栏就看不到上一次的 JSONL 历史。
 	// Send 路径的 result 帧总会带 SessionID（process.go 成功分支会填），
 	// 传空只会出现在错误路径，finishRun 的 "" 分支自行短路。
-	s.finishRunFor(rc, runOutcome{
+	s.finishRun(rc, runOutcome{
 		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
 		endedAt: successEndedAt, costInc: costInc,
 	})
@@ -925,7 +925,7 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			// Stub re-register BEFORE finishRun releases the gate — see
 			// execSendError for the rationale.
 			a.stubRefresh.run()
-			s.finishRunFor(a.runCtx, runOutcome{
+			s.finishRun(a.runCtx, runOutcome{
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 				skipPersist: true, // cancel never touches LastRunAt
 			})
@@ -948,7 +948,7 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 		// Stub re-register BEFORE finishRun releases the gate — see execSendError;
 		// deliverNotice (IM, stub-independent) stays after finishRun.
 		a.stubRefresh.run()
-		s.finishRunFor(a.runCtx, runOutcome{
+		s.finishRun(a.runCtx, runOutcome{
 			state: state, errClass: errClass,
 			errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // mirrors send-error path
 		})

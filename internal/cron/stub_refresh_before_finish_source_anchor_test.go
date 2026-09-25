@@ -26,7 +26,7 @@ import (
 // A true concurrency race for the finalize()→stubRefresh.run() window is hard
 // to reproduce deterministically without injecting a hook in the gap, so this
 // pins the contract structurally: every stubRefresh.run() / a.stubRefresh.run()
-// call must be followed (in source order) by a finishRun(finishArgs{...}) call
+// call must be followed (in source order) by a finishRun(...) call
 // before the next stubRefresh.run() appears. A regression that moves any
 // stub-refresh call back below its finishRun fails here without needing an
 // end-to-end race.
@@ -73,12 +73,10 @@ func TestErrorPaths_StubRefreshBeforeFinishRun_SourceAnchor(t *testing.T) {
 	if refreshIdx < 0 {
 		t.Fatal("freshContextPreflightP0: no refresh.run() found — the delete-mid-execute stub re-register was removed (#2318)")
 	}
-	// The terminal call is s.finishRunFor(...) since Epic H #2546 folded the
-	// identity block out of the finishArgs literals; both spellings are accepted so
-	// this does not break again when the funnel moves.
-	reFinish := regexp.MustCompile(`s\.finishRun(?:For)?\(`)
+	// Every terminal branch in scheduler_run.go ends in s.finishRun(rc, out).
+	reFinish := regexp.MustCompile(`s\.finishRun\(`)
 	if reFinish.FindStringIndex(rest[refreshIdx:]) == nil {
-		t.Errorf("freshContextPreflightP0: refresh.run() at offset %d is not followed by a terminal finishRun/finishRunFor call. "+
+		t.Errorf("freshContextPreflightP0: refresh.run() at offset %d is not followed by a terminal finishRun call. "+
 			"The stub re-register MUST happen before the CAS gate is released, or a concurrent TriggerNow's live stub gets clobbered (#2318).",
 			refreshIdx)
 	}

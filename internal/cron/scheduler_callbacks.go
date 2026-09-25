@@ -111,7 +111,7 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 // bumpRunStateMetrics increments the per-state counter for the terminal
 // transition. It is the SINGLE owner of every per-state counter — the generic
 // CronRun<State>Total family AND the sandbox-specific CronSandboxRun*Total
-// pair (gated by sandbox, i.e. finishArgs.sandbox). Callers must never bump
+// pair (gated by sandbox, i.e. runOutcome.sandbox). Callers must never bump
 // these counters directly; run_metrics_owner_contract_test.go pins that.
 // Owning the whole state→counter mapping here makes double-count / missing-
 // counter drift structurally impossible (#2173).

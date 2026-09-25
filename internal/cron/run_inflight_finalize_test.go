@@ -57,14 +57,7 @@ func TestFinishRunFinalizesInflightBeforeBroadcast(t *testing.T) {
 	}
 
 	finalizer := &runFinalizer{inflight: inflight}
-	s.finishRun(finishArgs{
-		job:       j,
-		runID:     "r-finalize",
-		startedAt: time.Now(),
-		trigger:   TriggerScheduled,
-		state:     RunStateSucceeded,
-		finalizer: finalizer,
-	})
+	s.finishRun(runCtx{job: j, runID: "r-finalize", startedAt: time.Now(), trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded})
 
 	if sawOK.Load() {
 		phase := ""

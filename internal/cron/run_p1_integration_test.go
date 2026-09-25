@@ -29,11 +29,7 @@ func TestP1_FinishRunPersistsCronRun(t *testing.T) {
 
 	runID := mustGenerateRunID()
 	startedAt := time.Now().Add(-5 * time.Second)
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: startedAt, trigger: TriggerScheduled,
-		state: RunStateSucceeded, sessionID: "sess-AAA", result: "hello",
-		prompt: "do thing", workDir: "/tmp/wd", fresh: false,
-	})
+	s.finishRun(runCtx{job: j, runID: runID, startedAt: startedAt, trigger: TriggerScheduled, snap: jobSnapshot{prompt: "do thing", workDir: "/tmp/wd", fresh: false}}, runOutcome{state: RunStateSucceeded, sessionID: "sess-AAA", result: "hello"})
 
 	got, err := s.Run(jobID, runID)
 	if err != nil {
@@ -73,11 +69,7 @@ func TestP1_FinishRunSkipPersistDoesNotWriteHistory(t *testing.T) {
 	s.tblForTest().mu.Unlock()
 
 	runID := mustGenerateRunID()
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled,
-		state: RunStateCanceled, errClass: ErrClassCanceled,
-		errMsg: "context canceled", skipPersist: true,
-	})
+	s.finishRun(runCtx{job: j, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: "context canceled", skipPersist: true})
 
 	if _, err := s.Run(jobID, runID); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("expected ErrNotExist, got %v", err)
@@ -106,11 +98,7 @@ func TestP1_FinishRunSanitisationConsistency(t *testing.T) {
 	// Errors with absolute paths trigger redactPathsInCronError.
 	rawErr := "session error: open /etc/secret-config: permission denied"
 	runID := mustGenerateRunID()
-	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled,
-		state: RunStateFailed, errClass: ErrClassSessionError, errMsg: rawErr,
-		prompt: "x", workDir: "/wd", fresh: false,
-	})
+	s.finishRun(runCtx{job: j, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled, snap: jobSnapshot{prompt: "x", workDir: "/wd", fresh: false}}, runOutcome{state: RunStateFailed, errClass: ErrClassSessionError, errMsg: rawErr})
 
 	got, err := s.Run(jobID, runID)
 	if err != nil {
@@ -145,10 +133,7 @@ func TestP1_DeleteJobByIDRemovesRunsSubtree(t *testing.T) {
 	s.tblForTest().mu.Unlock()
 
 	// Append one run so the subtree exists.
-	s.finishRun(finishArgs{
-		job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
-		trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
-	})
+	s.finishRun(runCtx{job: j, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
 	subtree := filepath.Join(tmp, "runs", jobID)
 	if _, err := os.Stat(subtree); err != nil {
 		t.Fatalf("subtree should exist after append: %v", err)
@@ -180,10 +165,7 @@ func TestP1_StartTrimAllReclaimsStaleRuns(t *testing.T) {
 	// Append 3 runs, then push their mtimes to 60 days ago.
 	old := time.Now().Add(-60 * 24 * time.Hour)
 	for i := 0; i < 3; i++ {
-		s.finishRun(finishArgs{
-			job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
-			trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
-		})
+		s.finishRun(runCtx{job: j, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
 	}
 	subtree := filepath.Join(tmp, "runs", jobID)
 	entries, err := os.ReadDir(subtree)
@@ -231,10 +213,7 @@ func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
 	recs := make([]rec, 0, 5)
 	for i := 0; i < 5; i++ {
 		runID := mustGenerateRunID()
-		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: time.Now().Add(time.Duration(i) * time.Second),
-			trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
-		})
+		s.finishRun(runCtx{job: j, runID: runID, startedAt: time.Now().Add(time.Duration(i) * time.Second), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
 		// Force monotonic mtime for deterministic newest-first ordering on
 		// fast filesystems where ctime resolution may collapse adjacent
 		// writes.
@@ -275,10 +254,7 @@ func TestP1_DisabledStoreNoOps(t *testing.T) {
 	s.tblForTest().mu.Unlock()
 
 	// Should not panic.
-	s.finishRun(finishArgs{
-		job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
-		trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
-	})
+	s.finishRun(runCtx{job: j, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
 	if rows := s.ListRuns(jobID, 10, time.Time{}); len(rows) != 0 {
 		t.Errorf("disabled list: want empty, got %+v", rows)
 	}
@@ -313,10 +289,7 @@ func TestP1_ConcurrentFinishRunSerialised(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
-			s.finishRun(finishArgs{
-				job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
-				trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
-			})
+			s.finishRun(runCtx{job: j, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
 		}()
 	}
 	wg.Wait()

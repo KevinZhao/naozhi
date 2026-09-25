@@ -511,15 +511,19 @@ func (s *Scheduler) finishOrphanRun(p sandboxPending, js orphanJobSnapshot, j *J
 	// this process's CAS gate was never taken for it. The same job's run-B may be
 	// live RIGHT NOW holding the gate; a finalizer bound to s.jobInflight(jobID)
 	// would Store(false) run-B's gate and let a third tick double-run.
-	s.finishRun(finishArgs{
-		job: j, runID: p.RunID, startedAt: startedAt,
-		trigger: runtelemetry.TriggerScheduled,
-		state:   orphanTerminalState, errClass: orphanTerminalErrClass,
-		errMsg: orphanTerminalErrMsg,
-		prompt: js.prompt, workDir: js.workDir, fresh: js.freshContext,
-		finalizer: &runFinalizer{},
-		sandbox:   true,
-	})
+	s.finishRun(
+		runCtx{
+			job: j, runID: p.RunID, startedAt: startedAt,
+			trigger:   runtelemetry.TriggerScheduled,
+			finalizer: &runFinalizer{},
+			snap:      jobSnapshot{prompt: js.prompt, workDir: js.workDir, fresh: js.freshContext},
+		},
+		runOutcome{
+			state: orphanTerminalState, errClass: orphanTerminalErrClass,
+			errMsg:  orphanTerminalErrMsg,
+			sandbox: true,
+		},
+	)
 }
 
 // removeReconciledPending drops the pending file once reconcile has

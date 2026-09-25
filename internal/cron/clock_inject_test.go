@@ -88,15 +88,7 @@ func TestFinishRunUsesInjectedClock(t *testing.T) {
 	// the live clock value at finish time, not a captured constant.
 	clk.set(startedAt.Add(1500 * time.Millisecond))
 
-	sched.finishRun(finishArgs{
-		job:       j,
-		runID:     "r-clock",
-		startedAt: startedAt,
-		trigger:   TriggerScheduled,
-		state:     RunStateSucceeded,
-		result:    "ok",
-		finalizer: finalizer,
-	})
+	sched.finishRun(runCtx{job: j, runID: "r-clock", startedAt: startedAt, trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded, result: "ok"})
 
 	bc.mu.Lock()
 	defer bc.mu.Unlock()

@@ -10,29 +10,29 @@ import (
 // receipt, a local run the session-side increment (one USD row with the
 // per-model drill-down plus one row per backend metering unit). cron is the
 // run owner for both, so the session layer does not also write them.
-func (s *Scheduler) appendLedger(a finishArgs) {
+func (s *Scheduler) appendLedger(rc runCtx, out runOutcome) {
 	if s.ledger == nil || !s.ledger.Enabled() {
 		return
 	}
 	base := costledger.Entry{
-		JobID:     a.job.ID,
-		RunID:     a.runID,
-		Workspace: workspaceLabel(a.workDir),
-		Backend:   a.job.Backend,
+		JobID:     rc.job.ID,
+		RunID:     rc.runID,
+		Workspace: workspaceLabel(rc.snap.workDir),
+		Backend:   rc.job.Backend,
 	}
 	if base.Backend == "" {
 		base.Backend = "claude"
 	}
-	if a.sandboxMeta != nil {
-		if a.sandboxMeta.CostUSD > 0 {
+	if out.sandboxMeta != nil {
+		if out.sandboxMeta.CostUSD > 0 {
 			e := base
-			e.Source, e.Kind, e.Unit, e.Amount = costledger.SourceCronSandbox, costledger.KindReceipt, costledger.UnitUSD, a.sandboxMeta.CostUSD
-			e.Models, e.Basis = a.sandboxMeta.Models, a.sandboxMeta.Basis
+			e.Source, e.Kind, e.Unit, e.Amount = costledger.SourceCronSandbox, costledger.KindReceipt, costledger.UnitUSD, out.sandboxMeta.CostUSD
+			e.Models, e.Basis = out.sandboxMeta.Models, out.sandboxMeta.Basis
 			s.ledger.Append(e)
 		}
 		return
 	}
-	inc := a.costInc
+	inc := out.costInc
 	if inc.USD > 0 || len(inc.Models) > 0 {
 		e := base
 		e.Source, e.Kind, e.Unit = costledger.SourceCronLocal, costledger.KindTurn, costledger.UnitUSD

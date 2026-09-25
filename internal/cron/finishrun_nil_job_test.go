@@ -7,7 +7,7 @@ import (
 
 // TestFinishRun_NilJobNoPanicNoEmit pins R243-ARCH-6 (#837): the terminal
 // three-write protocol (recordTerminalResult → runStore.Append →
-// emitRunEnded) dereferences a.job in every branch. A finishArgs literal
+// emitRunEnded) dereferences a.job in every branch. A runCtx literal
 // carrying a nil job — a future call site mistake, or a snapshot path that
 // left job unset — would panic the cron-tick goroutine. robfig's Recover
 // wrapper swallows that panic ABOVE finishRun's frame, so the worst case is
@@ -39,14 +39,16 @@ func TestFinishRun_NilJobNoPanicNoEmit(t *testing.T) {
 			t.Fatalf("finishRun panicked on nil job: %v", r)
 		}
 	}()
-	s.finishRun(finishArgs{
-		job:       nil, // the contract under test
+	s.finishRun(runCtx{
+		job: nil,
+		// the contract under test
 		runID:     runID,
 		startedAt: time.Now(),
 		trigger:   TriggerScheduled,
-		state:     RunStateFailed,
-		errClass:  ErrClassSessionError,
-		errMsg:    "should never reach disk",
+	}, runOutcome{
+		state:    RunStateFailed,
+		errClass: ErrClassSessionError,
+		errMsg:   "should never reach disk",
 	})
 
 	if got := rec.endedCount(); got != 0 {
@@ -78,15 +80,7 @@ func TestFinishRun_NilJobFinalizesInflight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generateRunID: %v", err)
 	}
-	s.finishRun(finishArgs{
-		job:       nil,
-		runID:     runID,
-		startedAt: time.Now(),
-		trigger:   TriggerScheduled,
-		state:     RunStateFailed,
-		errClass:  ErrClassSessionError,
-		finalizer: fin,
-	})
+	s.finishRun(runCtx{job: nil, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled, finalizer: fin}, runOutcome{state: RunStateFailed, errClass: ErrClassSessionError})
 
 	if inf.running.Load() {
 		t.Error("nil-job guard must finalize the inflight gate (running should be false)")

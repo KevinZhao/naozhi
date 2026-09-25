@@ -181,9 +181,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			runner:  &fakeSandboxRunner{},
 			withJob: true,
 			run: func(_ *testing.T, s *Scheduler, j *Job, _ string) {
-				s.finishRun(finishArgs{job: j, runID: "deadbeef00000103", startedAt: time.Now().Add(-time.Minute),
-					trigger: TriggerScheduled, state: RunStateFailed, errClass: ErrClassSendError, errMsg: "boom",
-					finalizer: &runFinalizer{}})
+				s.finishRun(runCtx{job: j, runID: "deadbeef00000103", startedAt: time.Now().Add(-time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}}, runOutcome{state: RunStateFailed, errClass: ErrClassSendError, errMsg: "boom"})
 			},
 			want:      counterDeltas{Ended: 1, Failed: 1},
 			wantEnded: 1,
@@ -193,9 +191,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			runner:  &fakeSandboxRunner{},
 			withJob: true,
 			run: func(_ *testing.T, s *Scheduler, j *Job, _ string) {
-				s.finishRun(finishArgs{job: j, runID: "deadbeef00000104", startedAt: time.Now().Add(-time.Minute),
-					trigger: TriggerScheduled, state: RunStateTimedOut, errClass: ErrClassDeadlineExceeded, errMsg: "slow",
-					finalizer: &runFinalizer{}})
+				s.finishRun(runCtx{job: j, runID: "deadbeef00000104", startedAt: time.Now().Add(-time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}}, runOutcome{state: RunStateTimedOut, errClass: ErrClassDeadlineExceeded, errMsg: "slow"})
 			},
 			want:      counterDeltas{Ended: 1, TimedOut: 1},
 			wantEnded: 1,

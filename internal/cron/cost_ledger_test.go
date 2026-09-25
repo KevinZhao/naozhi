@@ -156,12 +156,10 @@ func TestAppendLedger_SandboxReceiptAndMetering(t *testing.T) {
 	ledger := costledger.NewStore(filepath.Join(t.TempDir(), "cost"), costledger.Options{})
 	s := &Scheduler{ledger: ledger}
 	job := &Job{ID: "job-sb", Backend: "claude"}
-	s.appendLedger(finishArgs{job: job, runID: "r1", workDir: "/w/alpha",
-		sandboxMeta: &SandboxRunMeta{CostUSD: 1.25, Basis: costledger.BasisManaged,
-			Models: []costledger.ModelDelta{{Model: "m", CostUSD: 1.25, Tokens: costledger.Tokens{Output: 7}}}}, sandbox: true})
-	s.appendLedger(finishArgs{job: job, runID: "r2", sandboxMeta: &SandboxRunMeta{CostUSD: 0}, sandbox: true})
-	s.appendLedger(finishArgs{job: &Job{ID: "job-k", Backend: "kiro"}, runID: "r3",
-		costInc: costledger.Increment{Metered: map[costledger.Unit]float64{costledger.UnitCredits: 3}}})
+	s.appendLedger(runCtx{job: job, runID: "r1", snap: jobSnapshot{workDir: "/w/alpha"}}, runOutcome{sandboxMeta: &SandboxRunMeta{CostUSD: 1.25, Basis: costledger.BasisManaged,
+		Models: []costledger.ModelDelta{{Model: "m", CostUSD: 1.25, Tokens: costledger.Tokens{Output: 7}}}}, sandbox: true})
+	s.appendLedger(runCtx{job: job, runID: "r2"}, runOutcome{sandboxMeta: &SandboxRunMeta{CostUSD: 0}, sandbox: true})
+	s.appendLedger(runCtx{job: &Job{ID: "job-k", Backend: "kiro"}, runID: "r3"}, runOutcome{costInc: costledger.Increment{Metered: map[costledger.Unit]float64{costledger.UnitCredits: 3}}})
 	ents := ledgerEntries(t, ledger)
 	if len(ents) != 2 {
 		t.Fatalf("entries = %d: %+v", len(ents), ents)
@@ -188,7 +186,7 @@ func TestAppendLedger_SandboxReceiptAndMetering(t *testing.T) {
 
 func TestAppendLedger_NilLedgerIsNoop(t *testing.T) {
 	s := &Scheduler{}
-	s.appendLedger(finishArgs{job: &Job{ID: "j"}, costInc: costledger.Increment{USD: 1}})
+	s.appendLedger(runCtx{job: &Job{ID: "j"}}, runOutcome{costInc: costledger.Increment{USD: 1}})
 }
 
 func near(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }

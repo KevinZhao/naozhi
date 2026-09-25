@@ -10,27 +10,24 @@ import (
 // run_ctx.go — the identity a run carries from admission to terminal state, and
 // the outcome it ends with. Epic H #2546, direction 1.
 //
-// Five *Args structs bundle the inputs of the execution phases (preflightArgs,
-// getSessionArgs, execSendArgs, sandboxExecArgs, finishArgs). Measured, they
-// share {job, runID, startedAt, trigger, finalizer} in all five and
-// {snap, lg, notifyTo, key, inflight} in three or more — the same block spelled
-// five times, and then spelled AGAIN at each of the fourteen
-// finishRun(finishArgs{...}) call sites, where eleven of the twenty-one fields
-// appear in thirteen or fourteen of them.
+// The execution-phase argument structs (preflightArgs, getSessionArgs,
+// execSendArgs, sandboxExecArgs) all carry {job, runID, startedAt, trigger,
+// finalizer}, and most also {snap, lg, notifyTo, key, inflight}. That shared
+// block is runCtx, embedded rather than re-spelled per phase.
 //
-// runCtx is that block, built once per run in executeAcquired. runOutcome is the
-// situational remainder. finishRunFor composes the two, so a terminal branch
-// spells only what is specific to it:
+// runCtx is that block, built once per run in executeAcquired; runOutcome is
+// the situational remainder. finishRun takes the two directly, so a terminal
+// branch spells only what is specific to it:
 //
-//	s.finishRunFor(a.runCtx, runOutcome{state: RunStateCanceled,
+//	s.finishRun(a.runCtx, runOutcome{state: RunStateCanceled,
 //	    errClass: ErrClassCanceled, errMsg: err.Error(), skipPersist: true})
 //
-// finishRun(finishArgs) is deliberately left in place rather than reshaped:
-// thirty-seven test call sites across eighteen files construct finishArgs
-// directly, and two production callers are not on the execution path at all
-// (sandbox_pending.go's restart reconciler and scheduler_finish.go's synthetic
-// skip), so they have no runCtx to pass. Funnelling those two would force
-// unrelated paths through one door for the sake of a count.
+// The two callers that are not on the execution path — the restart reconciler
+// (sandbox_pending.go) and the synthetic skip (scheduler_finish.go) — build a
+// runCtx holding only the identity they have. A zero snap there is the same
+// "prompt/workDir/fresh are zero before snapshotJob" contract every
+// pre-snapshot failure branch already relies on; the dashboard falls back to
+// Job.Prompt for display.
 
 // runCtx is one run's identity and context: everything a terminal branch needs
 // that does not depend on HOW the run ended.
@@ -46,17 +43,26 @@ type runCtx struct {
 	notifyTo NotifyTarget
 	// key is the router session key (`cron:<jobID>`).
 	key string
-	// runID pairs the terminal event with the started event already broadcast.
+	// runID pairs the terminal event with the started event already broadcast;
+	// the dashboard hub matches started→ended frames on it.
 	runID string
 	// trigger must match the RunStartedEvent's.
 	trigger TriggerKind
 	// job is the run's Job. Terminal branches pass it through; phases do not
-	// mutate it.
+	// mutate it. Required even on the overlap-skip path, because emitRunEnded
+	// keys the event by Job.ID; a DeleteJob racing the finish is caught by the
+	// jobs[id] re-check inside recordTerminalResult.
 	job *Job
 	// lg is the per-run logger, already tagged with jobID/runID.
 	lg *slog.Logger
 	// finalizer releases the inflight CAS gate. finishRun calls it before the
-	// terminal broadcast so CurrentRun and the broadcast agree.
+	// terminal broadcast so CurrentRun and the broadcast agree; the caller's
+	// defer calls it again as a backstop, and its done flag makes that
+	// idempotent and scoped to THIS run's gate. nil means "this finish owns no
+	// gate": the overlap-skip and synthetic-skip paths must pass nil, because
+	// the gate they would name belongs to the concurrent run they were skipped
+	// for. The restart reconciler passes an EMPTY non-nil finalizer for the
+	// same reason (the orphan's gate died with the previous process).
 	finalizer *runFinalizer
 	// inflight is the per-run gate slot; phases stamp progress on it.
 	inflight *runInflight
@@ -68,10 +74,15 @@ type runOutcome struct {
 	state    RunState
 	errClass ErrorClass
 	errMsg   string
-	// result is the CLI's final text, already sanitised by the caller where the
-	// path produces one.
+	// errClass is the machine-readable class the dashboard picks its icon and
+	// i18n copy by; errMsg is only the expanded detail — human-readable, control
+	// characters escaped, absolute paths redacted, ≤ maxCronErrMsgRunes.
+	// result is the CLI's final text, already through sanitiseRunResult (4K
+	// rune cap + truncation suffix + control-character filter) where the path
+	// produces one.
 	result string
-	// sessionID is the CLI session_id; empty on fresh-context and failure paths.
+	// sessionID is the CLI session_id; empty on fresh-context and failure
+	// paths, which hides the dashboard's open-session button.
 	sessionID string
 	// skipPersist keeps a transient terminal (canceled / overlap / deleted
 	// mid-execute) out of Job state and runs/ history. Metrics and the WS
@@ -93,37 +104,11 @@ type runOutcome struct {
 	// sandboxMeta is the cloud-execution receipt; nil for local runs.
 	sandboxMeta *SandboxRunMeta
 	// sandbox marks a placement=sandbox run even when no receipt exists yet
-	// (pre-invoke failures), so the sandbox metric buckets stay a strict subset.
+	// (pre-invoke failures), so bumpRunStateMetrics also advances the
+	// CronSandboxRun{Failed,TimedOut}Total buckets and they stay a strict
+	// subset of the run totals (#2173). Deliberately separate from
+	// sandboxMeta != nil for that reason.
 	sandbox bool
 	// replayOf links this run to the one it re-executes; "" normally.
 	replayOf string
-}
-
-// finishRunFor is the single composition point from (identity, outcome) to
-// finishRun. Snapshot fields come from rc.snap, which is the zero value on paths
-// that never reached snapshotJob — exactly the "prompt/workDir/fresh are zero
-// pre-snapshot" contract finishArgs already documents.
-func (s *Scheduler) finishRunFor(rc runCtx, out runOutcome) {
-	s.finishRun(finishArgs{
-		job:                rc.job,
-		runID:              rc.runID,
-		startedAt:          rc.startedAt,
-		trigger:            rc.trigger,
-		finalizer:          rc.finalizer,
-		prompt:             rc.snap.prompt,
-		workDir:            rc.snap.workDir,
-		fresh:              rc.snap.fresh,
-		state:              out.state,
-		errClass:           out.errClass,
-		errMsg:             out.errMsg,
-		result:             out.result,
-		sessionID:          out.sessionID,
-		skipPersist:        out.skipPersist,
-		keepInflightMarker: out.keepInflightMarker,
-		costInc:            out.costInc,
-		endedAt:            out.endedAt,
-		sandboxMeta:        out.sandboxMeta,
-		sandbox:            out.sandbox,
-		replayOf:           out.replayOf,
-	})
 }
