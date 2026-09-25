@@ -875,8 +875,10 @@ func TestProcess_Close_SendsShutdownNotCloseStdin(t *testing.T) {
 // Router.Reset and shutdown past the SIGTERM grace.
 //
 // The pipe's far end never reads, so the shutdown write can only finish by
-// timing out. A concurrent sender runs alongside so -race sees whether Close
-// really holds shimWMu around its write.
+// timing out. Close is the only contender for shimWMu until it is seen
+// holding it; only then does a second sender queue behind it, so the sender
+// cannot take the lock first and pin it with a write of its own (shimSend
+// sets no deadline).
 func TestProcess_Close_BoundedOnWedgedShim(t *testing.T) {
 	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
@@ -887,6 +889,13 @@ func TestProcess_Close_BoundedOnWedgedShim(t *testing.T) {
 		defer close(closed)
 		p.Close()
 	}()
+	testhelper.Eventually(t, func() bool {
+		if p.shimWMu.TryLock() {
+			p.shimWMu.Unlock()
+			return false
+		}
+		return true
+	}, 2*time.Second, "Close never took shimWMu around its shutdown write")
 	sent := make(chan error, 1)
 	go func() { sent <- p.shimSend(shimClientMsg{Type: "ping"}) }()
 
