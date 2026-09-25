@@ -464,19 +464,25 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 	func() {
 		s.tbl.mu.Lock()
 		defer s.tbl.mu.Unlock()
-		if _, exists := s.tbl.jobs[j.ID]; !exists {
+		// Resolve the table's own *Job by ID and mutate THAT, rather than the
+		// pointer the caller passed. Only j.ID is trusted: a caller outside the
+		// execution path (a run settled across a restart) holds an identity, not
+		// the table's object, and a mutation on a copy would be silently dropped
+		// by the snapshot below. jobTable never hands out its pointers.
+		cur, exists := s.tbl.jobs[j.ID]
+		if !exists {
 			return
 		}
-		prev = j.snapshotResultState()
+		prev = cur.snapshotResultState()
 
-		j.LastRunAt = endedAt
-		j.LastResult = result
-		j.LastError = errMsg
-		j.LastErrorClass = errClass
+		cur.LastRunAt = endedAt
+		cur.LastResult = result
+		cur.LastError = errMsg
+		cur.LastErrorClass = errClass
 		if sessionID != "" {
-			j.LastSessionID = sessionID
+			cur.LastSessionID = sessionID
 		}
-		j.RunCounters.addRun(state)
+		cur.RunCounters.addRun(state)
 
 		snap = s.snapshotJobsForSaveLocked()
 		haveSnap = true
@@ -496,8 +502,8 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 	saveFn, perr := s.persistSnapshot(snap)
 	if perr != nil {
 		s.tbl.mu.Lock()
-		if _, exists := s.tbl.jobs[j.ID]; exists {
-			prev.restore(j)
+		if cur, exists := s.tbl.jobs[j.ID]; exists {
+			prev.restore(cur)
 		}
 		s.tbl.mu.Unlock()
 		slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
