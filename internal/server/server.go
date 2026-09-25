@@ -425,27 +425,12 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		platformsStatus:    platformStatusMap(platNames),
 		platformCaps:       platform.CapabilityMatrix(platforms),
 		hubDropped:         s.hub.DroppedMessages,
-	}
-	if opts.Scheduler != nil {
-		s.healthH.cronRunStore = opts.Scheduler.RunStoreHealth
+		// A method value on a nil *cron.Scheduler is fine: RunStoreHealth
+		// reports disabled for a nil receiver and the probe omits the section.
+		cronRunStore: opts.Scheduler.RunStoreHealth,
 	}
 
-	if opts.ReverseNodeServer != nil {
-		s.reverseNodeServer = opts.ReverseNodeServer
-		for id, displayName := range opts.ReverseNodeServer.AllNodes() {
-			s.nodes.SetKnown(id, displayName)
-		}
-		opts.ReverseNodeServer.OnRegister = func(id string, rc *node.ReverseConn) {
-			s.nodes.Add(id, rc)
-			go s.nodeCache.RefreshFor(id) // RefreshFor calls onChange → BroadcastSessionsUpdate
-		}
-		opts.ReverseNodeServer.OnDeregister = func(id string) {
-			s.nodes.Remove(id)
-			s.nodeCache.PurgeNode(id)
-			s.hub.PurgeNodeSubscriptions(id)
-			s.hub.BroadcastSessionsUpdate()
-		}
-	}
+	s.attachReverseNodeServer(opts.ReverseNodeServer)
 
 	hs.checkLimiters(s.scheduler != nil)
 
