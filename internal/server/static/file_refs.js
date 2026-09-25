@@ -534,9 +534,8 @@ async function openFilePreview(wrapEl) {
   // with "image/" but cannot flow through <img src=...mode=raw>. The server
   // refuses inline SVG via raw (project_files.go: serveRaw rejects svg+xml)
   // because SVG can embed <script> and on* handlers that execute same-origin
-  // on top-level navigation. Route through the sandboxed-blob path instead,
-  // which serves attachment/octet-stream from the server and wraps the bytes
-  // in a Blob with type=image/svg+xml client-side.
+  // on top-level navigation. It renders in the sandboxed iframe instead, the
+  // same way HTML does.
   if (mime.startsWith('image/svg+xml')) {
     renderSandboxedBlob(project, node, path, body, 'image/svg+xml');
     return;
@@ -565,17 +564,11 @@ async function openFilePreview(wrapEl) {
     body.appendChild(frame);
     return;
   }
-  // HTML / XHTML: render via blob URL inside a sandboxed iframe.
-  //
-  // Why blob + sandbox instead of `iframe.src = fileApiUrl(...render)`:
-  // Firefox ignores the HTTP `Content-Security-Policy: sandbox` directive
-  // on top-level navigation, so a direct-URL open would run workspace HTML
-  // same-origin to the dashboard → stored-XSS via the Claude CLI Write tool.
-  // The server returns the bytes as `application/octet-stream + attachment`
-  // specifically so that a direct URL hit DOWNLOADS instead of renders.
-  // Client-side we fetch, wrap bytes in a Blob({type:'text/html'}), and
-  // feed the blob: URL into the iframe — blob origins are opaque, so even
-  // if sandbox is stripped the document cannot read dashboard cookies.
+  // HTML / XHTML: render in a sandboxed iframe pointed at the server's inline
+  // render form; renderSandboxedBlob below lists the layers. Opened as a
+  // top-level page the same URL would run workspace HTML same-origin to the
+  // dashboard (stored XSS via the CLI's Write tool), which is why the server
+  // answers that form only inside an iframe.
   if (mime.startsWith('text/html') || mime.startsWith('application/xhtml')) {
     renderSandboxedBlob(project, node, path, body, 'text/html');
     return;
@@ -596,10 +589,9 @@ async function openFilePreview(wrapEl) {
       const binMime = String(data.mime || '');
       // HTML / XHTML / SVG land in `binary:true` by design (R176-SEC-H3:
       // active-content bytes never flow through the preview JSON content
-      // field). Upgrade to the sandboxed blob render instead of showing a
-      // "please download" placeholder — that's the whole point of render
-      // mode. Blob type matches the source MIME so the iframe parses bytes
-      // as the right document type.
+      // field). Render them in the sandboxed iframe rather than showing a
+      // "please download" placeholder; the server detects the MIME from the
+      // bytes, so the iframe parses the right document type.
       if (binMime.startsWith('text/html') || binMime.startsWith('application/xhtml')) {
         renderSandboxedBlob(project, node, path, body, 'text/html');
         return;
@@ -645,34 +637,29 @@ async function openFilePreview(wrapEl) {
   }
 }
 
-// renderSandboxedBlob points a sandboxed iframe at the server's inline
-// render endpoint (mode=render&inline=1). The iframe document's CSP comes
-// from that response — NOT inherited from the dashboard page — which is what
-// keeps workspace HTML (MathJax / KaTeX / Mermaid) rendering after #1980
-// dropped script-src 'unsafe-inline' from the dashboard CSP: blob: and inline-doc
-// documents inherit the parent policy in current engines (measured in
-// docs/rfc/csp-data-action.md §4), so the old fetch→Blob desktop path and
-// the mobile inline-doc fallback would both have gone dead. Pointing src at the
-// endpoint also retires the WebKit blob-frame bug workaround and the old
-// fallback UTF-8/SVG parsing trade-offs — one path for every platform.
+// renderSandboxedBlob points a sandboxed iframe at the server's inline render
+// endpoint (mode=render&inline=1). The iframe document takes its CSP from that
+// response, not from the dashboard page, whose script-src has no
+// 'unsafe-inline'. A document built client-side (a blob: URL or an inline
+// document) inherits the parent policy in current engines
+// (docs/rfc/csp-data-action.md §4), so workspace HTML that uses MathJax /
+// KaTeX / Mermaid would not run in one.
 //
-// Defense layers (unchanged in spirit from the blob era):
-//   (1) The endpoint's inline form answers only requests stamped
-//       Sec-Fetch-Dest: iframe, so a direct URL hit gets 403 (covers
-//       Firefox's CSP-sandbox top-level-navigation gap); the legacy
-//       fetch form stays octet-stream + attachment.
+// Defense layers:
+//   (1) The inline form answers only requests stamped Sec-Fetch-Dest: iframe,
+//       so a direct URL hit gets 403 (Firefox ignores a CSP sandbox on
+//       top-level navigation); the plain render form is octet-stream +
+//       attachment.
 //   (2) The response carries `Content-Security-Policy: sandbox
-//       allow-scripts …` — an opaque origin regardless of embedding.
+//       allow-scripts …`, an opaque origin however it is embedded.
 //   (3) sandbox='allow-scripts' on the iframe withholds the same-origin
-//       token — the document cannot read dashboard cookies, storage, or
-//       DOM. Scripts are required so workspace HTML using MathJax / KaTeX /
-//       Mermaid / chart libs renders. The contract test
-//       (TestDashboardJS_SandboxedBlobRender) substring-matches this helper
-//       body for forbidden tokens, so comments must NEVER spell them out.
-// The name keeps its historic "Blob" for the window-bridge/API stability;
-// the body param is the container element, kept as-is; blobType is unused
-// since the server's detected MIME now drives parsing, kept for call-site
-// compatibility until #2557 PR-E trims the bridge.
+//       token, so the document cannot read dashboard cookies, storage or
+//       DOM. Scripts stay on so math and diagram libraries render.
+//       TestDashboardJS_SandboxedPreviewViaEndpoint rejects client-side
+//       document construction in this file by substring, so comments here
+//       must not spell those APIs out.
+// The body param is the container element. blobType is unused (the server's
+// detected MIME drives parsing); the call sites still pass it.
 function renderSandboxedBlob(project, node, path, body, blobType) {
   void blobType;
   body.innerHTML = '';
