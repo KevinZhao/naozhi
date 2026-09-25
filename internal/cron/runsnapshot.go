@@ -185,10 +185,11 @@ func readSandboxSnapshotManifest(path string) (*SandboxRunSnapshot, bool, error)
 	case jsonfile.Parsed:
 		return &man, true, nil
 	default:
-		// Corrupt stays an error rather than collapsing into "no snapshot": the
-		// dashboard should say the manifest is unreadable, not imply the run
-		// never had one. The blob GC's mark phase skips errors already, so a
-		// corrupt manifest marks no blobs either way.
+		// The read that finds it reports "unreadable" rather than "no
+		// snapshot". The file has been moved aside, so later reads see no
+		// manifest; that is safe because replay refuses without one, and the
+		// .corrupt sibling keeps the evidence. The blob GC's mark phase skips
+		// errors already, so a corrupt manifest marks no blobs either way.
 		return nil, false, fmt.Errorf("cron sandbox: unreadable snapshot manifest")
 	}
 }
