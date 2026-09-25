@@ -32,6 +32,7 @@ import {
   setCronTimezoneMeta,
   cronTimezoneSuffix,
 } from './cron_schedule.js';
+import { cronAttentionConfirm, cronAttentionQueueHtml, cronAttentionRefresh } from './cron_attention.js';
 import {
   closeCronDetail,
   configureCronDrawer,
@@ -1582,114 +1583,6 @@ function cronPlacementBadgeHtml(placement, errorClass) {
     cls += ' pl-failed';
   }
   return '<span class="' + cls + '" title="' + escAttr('云沙箱运行（跑完即焚）' + (errorClass ? ' · ' + cronErrorClassLabel(errorClass) : '')) + '">' + label + '</span>';
-}
-
-// ── §7.4 人工确认队列 (PR-6) ────────────────────────────────────────────────
-// The confirmation queue is the UI face of §6.2 double-run containment: a
-// side-effecting sandbox run that ended failed-transport (or was orphaned by a
-// naozhi restart) waits here for a human to decide. Two actions per card:
-//   确认已完成 → POST /confirm (no replay; operator verified the side effect
-//                landed already)
-//   确认未完成，重放 → POST /replay (server Stops the original microVM first
-//                       — §6.2 rule 1 — then re-injects the input snapshot)
-//
-// cronAttentionState holds the last fetched queue (array of items) so the
-// banner renders synchronously inside cronTimelineHtml; cronAttentionRefresh
-// repopulates it.
-let cronAttentionState = { items: [], loaded: false };
-
-// cronAttentionReasonLabel maps a queue item's reason to operator-facing text.
-function cronAttentionReasonLabel(reason) {
-  switch (reason) {
-    case 'transport': return '断流（云端状态未知）';
-    case 'orphaned': return '重启中断（孤儿 run）';
-    default: return reason || '待确认';
-  }
-}
-
-// cronAttentionQueueHtml renders the queue banner from cronAttentionState.
-// Returns '' when the queue is empty so a healthy setup shows nothing.
-function cronAttentionQueueHtml() {
-  const items = (cronAttentionState && Array.isArray(cronAttentionState.items)) ? cronAttentionState.items : [];
-  if (items.length === 0) return '';
-  const cards = items.map(cronAttentionCardHtml).join('');
-  return '<div class="ctr-queue" role="region" aria-label="待确认的云沙箱 run">' +
-      '<div class="ctr-queue-head">' +
-        '<span class="ctr-queue-title">⚠ 待确认 ' + items.length + ' 项</span>' +
-        '<span class="ctr-queue-sub">断流或重启中断的有副作用任务——请先确认副作用是否已发生</span>' +
-      '</div>' +
-      '<div class="ctr-queue-list">' + cards + '</div>' +
-    '</div>';
-}
-
-// cronAttentionCardHtml renders one queue card with both resolve actions.
-function cronAttentionCardHtml(it) {
-  if (!it || !it.run_id || !it.job_id) return '';
-  const label = it.job_label ? esc(it.job_label) : esc(it.job_id.slice(0, 8));
-  const reason = cronAttentionReasonLabel(it.reason);
-  const when = it.started_at_ms ? cronFormatTime(it.started_at_ms) : '';
-  return '<div class="ctr-queue-card" data-run-id="' + escAttr(it.run_id) + '">' +
-      '<div class="ctr-queue-card-main">' +
-        '<span class="ctr-queue-job">' + label + '</span>' +
-        '<span class="ctr-queue-reason">' + esc(reason) + '</span>' +
-        (when ? '<span class="ctr-queue-when">' + esc(when) + '</span>' : '') +
-      '</div>' +
-      '<div class="ctr-queue-actions">' +
-        '<button type="button" class="ctr-queue-confirm"' +
-          ' data-action="cron-att-confirm" data-run="' + escAttr(it.run_id) + '"' +
-          ' title="' + escAttr('副作用已发生 / 不需重跑——从队列移除') + '">确认已完成</button>' +
-        '<button type="button" class="ctr-queue-replay"' +
-          ' data-action="cron-att-replay" data-job="' + escAttr(it.job_id) + '" data-run="' + escAttr(it.run_id) + '"' +
-          ' title="' + escAttr('副作用未发生——先终止原微VM再用快照重放') + '">确认未完成，重放</button>' +
-      '</div>' +
-    '</div>';
-}
-
-// cronFormatTime renders a unix-ms timestamp as a short local time for queue
-// cards. Defensive against bad input.
-function cronFormatTime(ms) {
-  if (!ms || ms <= 0) return '';
-  try {
-    return new Date(ms).toLocaleString();
-  } catch (e) {
-    return '';
-  }
-}
-
-// cronAttentionRefresh fetches GET /api/cron/attention and repaints the queue
-// banner if the open cron panel is showing. Best-effort; auth errors are
-// swallowed (the periodic poll retries).
-async function cronAttentionRefresh() {
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const data = await fetchJSON(NZ_CONTRACT.API.cron_attention, { headers, timeoutMs: 8000 });
-    cronAttentionState = { items: (data && Array.isArray(data.items)) ? data.items : [], loaded: true };
-  } catch (e) {
-    if (e && e.status) return; // auth / rate-limit — leave the last good state
-    cronAttentionState = { items: [], loaded: true };
-  }
-  if (cronDetailJobId !== null) renderCronTimelinePanel(cronDetailJobId);
-}
-
-// cronAttentionConfirm resolves a queue item as "already done" (no replay).
-async function cronAttentionConfirm(runId) {
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch(NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/confirm', { method: 'POST', headers });
-    if (!r.ok) {
-      const raw = await r.text().catch(() => '');
-      showAPIError('确认 run', r.status, raw);
-      return;
-    }
-  } catch (e) {
-    showAPIError('确认 run', 0, String(e));
-    return;
-  }
-  await cronAttentionRefresh();
 }
 
 // cronAttentionReplay triggers a replay from the queue card (§7.4 `确认未完成，

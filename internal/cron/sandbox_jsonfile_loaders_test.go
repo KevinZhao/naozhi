@@ -102,3 +102,50 @@ func TestSandboxRunSnapshotManifest_CorruptIsUnreadableNotMissing(t *testing.T) 
 		t.Errorf("corrupt manifest = (%v, %v, %v), want an error", man, ok, err)
 	}
 }
+
+// TestListSandboxAttention_ListsUnreadableRecords: a record that cannot be read
+// still blocks replay of its run, so the queue has to show it or the operator
+// has no way to clear it. It is listed under its file-name run id with no job,
+// next to the readable records rather than instead of them; a file whose name
+// is not a run id could not be confirmed through the API and stays unlisted.
+func TestListSandboxAttention_ListsUnreadableRecords(t *testing.T) {
+	t.Parallel()
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
+	goodJob, goodRun := mustGenerateID(), mustGenerateRunID()
+	s.WriteSandboxAttentionForTest(goodJob, goodRun, attentionReasonTransport, "nightly")
+	dir := s.sandboxAttentionDir()
+	badRun := mustGenerateRunID()
+	if err := os.WriteFile(filepath.Join(dir, badRun+".json"), []byte("{not valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "not-an-id.json"), []byte("{not valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	items := s.ListSandboxAttention()
+	byRun := map[string]SandboxAttentionItem{}
+	for _, it := range items {
+		byRun[it.RunID] = it
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %+v, want the readable record and the unreadable one", items)
+	}
+	if got := byRun[goodRun]; got.Unreadable || got.JobID != goodJob {
+		t.Errorf("readable record = %+v", got)
+	}
+	bad, ok := byRun[badRun]
+	if !ok || !bad.Unreadable || bad.Reason != attentionReasonUnreadable || bad.JobID != "" {
+		t.Fatalf("unreadable record = %+v (listed %v), want Unreadable under its file-name run id with no job", bad, ok)
+	}
+	if bad.CreatedAtMS <= 0 {
+		t.Error("an unreadable item carries no queue time; want the file's mtime")
+	}
+
+	// Confirming it clears it, and nothing is left to block replay.
+	if err := s.ConfirmSandboxRun(badRun); err != nil {
+		t.Fatalf("ConfirmSandboxRun: %v", err)
+	}
+	if _, ok, err := s.getSandboxAttention(badRun); ok || err != nil {
+		t.Errorf("after confirm the record reads (%v, %v), want absent", ok, err)
+	}
+}
