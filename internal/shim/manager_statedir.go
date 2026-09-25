@@ -86,6 +86,22 @@ func (m *Manager) checkStateDirQuota() error {
 	return nil
 }
 
+// strandedTempAge separates a temp file stranded by a crash from one a live
+// shim is writing right now: WriteStateFile holds its temp file for a single
+// write, and a running shim rewrites its state while Discover scans.
+const strandedTempAge = 10 * time.Minute
+
+// strandedStateTemp reports whether a temp file is old enough to have been
+// left by a write that never finished. A successful write renames its temp
+// file into place, so one that outlives strandedTempAge carries no state.
+func strandedStateTemp(e fs.DirEntry, now time.Time) bool {
+	info, err := e.Info()
+	if err != nil {
+		return false
+	}
+	return now.Sub(info.ModTime()) > strandedTempAge
+}
+
 // Discover scans the state directory for existing shim state files.
 // Returns states for shims whose PIDs are still alive.
 func (m *Manager) Discover() ([]State, error) {
@@ -102,10 +118,10 @@ func (m *Manager) Discover() ([]State, error) {
 		if e.IsDir() {
 			continue
 		}
-		// Leftover os.CreateTemp files from a crashed WriteStateFile never carry
-		// usable state; a successful write would have renamed them into place.
-		if strings.HasPrefix(e.Name(), ".shim-state-") && strings.HasSuffix(e.Name(), ".tmp") {
-			_ = os.Remove(filepath.Join(m.stateDir, e.Name()))
+		if osutil.IsAtomicTempName(e.Name()) {
+			if strandedStateTemp(e, time.Now()) {
+				_ = os.Remove(filepath.Join(m.stateDir, e.Name()))
+			}
 			continue
 		}
 		if !strings.HasSuffix(e.Name(), ".json") {

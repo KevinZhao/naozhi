@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 func TestWriteReadStateFile_RoundTrip(t *testing.T) {
@@ -100,7 +102,7 @@ func TestWriteStateFile_IsAtomic(t *testing.T) {
 	// No temp files should remain
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".shim-state-") {
+		if osutil.IsAtomicTempName(e.Name()) {
 			t.Errorf("temp file left behind: %s", e.Name())
 		}
 	}

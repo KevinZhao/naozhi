@@ -358,6 +358,36 @@ func TestDiscover_SkipsNonJSONFiles(t *testing.T) {
 	}
 }
 
+// TestDiscover_RemovesOnlyStrandedTempFiles: a write killed mid-flight leaves
+// its temp file behind, and nothing but Discover will ever remove it. A fresh
+// one belongs to a live shim's write in progress and must survive the scan.
+func TestDiscover_RemovesOnlyStrandedTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	stranded := filepath.Join(dir, ".0123abcd.json.928115277.tmp")
+	inFlight := filepath.Join(dir, ".4567cdef.json.12345.tmp")
+	for _, p := range []string{stranded, inFlight} {
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-strandedTempAge - time.Minute)
+	if err := os.Chtimes(stranded, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
+	if _, err := m.Discover(); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	if _, err := os.Stat(stranded); !os.IsNotExist(err) {
+		t.Errorf("stranded temp file survived Discover: stat = %v", err)
+	}
+	if _, err := os.Stat(inFlight); err != nil {
+		t.Errorf("a fresh temp file (a live shim's write) was removed: %v", err)
+	}
+}
+
 func TestDiscover_RemovesCorruptStateFile(t *testing.T) {
 	dir := t.TempDir()
 
