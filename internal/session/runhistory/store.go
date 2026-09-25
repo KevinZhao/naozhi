@@ -139,6 +139,10 @@ func (s *Store) Close() {
 	s.wg.Wait()
 }
 
+// Enabled reports whether the store persists anything; false for a nil store,
+// an empty runs root, or a root refused as a symlink.
+func (s *Store) Enabled() bool { return s != nil && !s.disabled }
+
 // DropTotal returns the number of records dropped due to a full async queue.
 func (s *Store) DropTotal() int64 {
 	if s == nil {

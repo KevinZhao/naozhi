@@ -23,6 +23,37 @@ func (r *Router) SessionRunStats(key string) runhistory.SessionRunStats {
 	return r.sessionRuns.Stats(key)
 }
 
+// SessionRunsHealth is the session run-history store's loss counters, for
+// /health. Records are written off the conversation goroutine and a failure
+// cannot fail the user's turn, so these counters are the only signal that
+// history is being lost (#2792).
+type SessionRunsHealth struct {
+	// Enabled is false when run history is not persisted; /health then omits
+	// the section.
+	Enabled bool
+	// WriteFailedDiskFull / WriteFailedOther split record-write failures so
+	// ENOSPC is distinguishable from EACCES / I/O errors.
+	WriteFailedDiskFull int64
+	WriteFailedOther    int64
+	// AsyncDropped counts records dropped because the async write queue was
+	// full when the turn finished.
+	AsyncDropped int64
+}
+
+// SessionRunsHealth snapshots the run-history store's loss counters.
+func (r *Router) SessionRunsHealth() SessionRunsHealth {
+	if r == nil || !r.sessionRuns.Enabled() {
+		return SessionRunsHealth{}
+	}
+	full, other := r.sessionRuns.WriteFailedTotals()
+	return SessionRunsHealth{
+		Enabled:             true,
+		WriteFailedDiskFull: full,
+		WriteFailedOther:    other,
+		AsyncDropped:        r.sessionRuns.DropTotal(),
+	}
+}
+
 // CostLedgerConfig is the router-side view of config.cost.
 type CostLedgerConfig struct {
 	Disabled      bool

@@ -118,6 +118,22 @@ func (s *Scheduler) appendRun(run *CronRun) {
 	s.runStore.Append(run)
 }
 
+// RunStoreHealth snapshots the run store's loss counters. Safe on a nil or
+// persistence-disabled Scheduler.
+func (s *Scheduler) RunStoreHealth() RunStoreHealth {
+	if s == nil || !s.runStoreEnabled() {
+		return RunStoreHealth{}
+	}
+	full, other := s.runStore.WriteFailedTotals()
+	return RunStoreHealth{
+		Enabled:             true,
+		WriteFailedDiskFull: full,
+		WriteFailedOther:    other,
+		HistoryDropped:      s.runStore.HistoryDropTotal(),
+		CacheStaleEvictions: s.runStore.CacheStaleEvictionTotal(),
+	}
+}
+
 // recentSessionIDs returns up to n distinct non-empty SessionID strings from
 // jobID's newest-first run history; nil when persistence is disabled. Reads
 // off the cache ring under entry.mu — no scheduler lock involved.
