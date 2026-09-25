@@ -426,6 +426,9 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		platformCaps:       platform.CapabilityMatrix(platforms),
 		hubDropped:         s.hub.DroppedMessages,
 	}
+	if opts.Scheduler != nil {
+		s.healthH.cronRunStore = opts.Scheduler.RunStoreHealth
+	}
 
 	if opts.ReverseNodeServer != nil {
 		s.reverseNodeServer = opts.ReverseNodeServer
