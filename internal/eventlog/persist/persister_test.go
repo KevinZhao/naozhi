@@ -18,6 +18,13 @@ import (
 // entry is a convenience JSON-producing helper used across the tests.
 // Generates a minimal clievent.EventEntry-shape payload (time/uuid/type/summary)
 // that schema.MarshalRecord accepts.
+
+// opGuard bounds a Flush or Stop that a test expects to succeed. It is a hang
+// guard, not a latency bound: a flush fsyncs every dirty writer and its
+// directory, and a one-second bound failed on a slow CI disk while the code
+// was fine.
+const opGuard = 30 * time.Second
+
 func entry(t *testing.T, timeMS int64, uuid string) Entry {
 	t.Helper()
 	payload := map[string]any{
@@ -94,7 +101,7 @@ func TestPersister_WritesHeaderAndEntry(t *testing.T) {
 	sink([]Entry{entry(t, 1700000001000, "uuid-1")}, false /* replay */)
 
 	// Wait for debounce to fire.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	if err := p.Flush(ctx); err != nil {
 		t.Fatalf("Flush: %v", err)
@@ -123,7 +130,7 @@ func TestPersister_DropsReplayPhase(t *testing.T) {
 	// Feed a replay batch — should be silently dropped.
 	sink([]Entry{entry(t, 1700000001000, "uuid-r")}, true /* replay */)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	if err := p.Flush(ctx); err != nil {
 		t.Fatalf("Flush: %v", err)
@@ -237,7 +244,7 @@ func TestPersister_ObserverWiring_OnWriteOnFsync(t *testing.T) {
 	sink := p.SinkFor("dashboard:direct:alice:general")
 	sink([]Entry{entry(t, 1, "u1"), entry(t, 2, "u2")}, false)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	if err := p.Flush(ctx); err != nil {
 		t.Fatalf("Flush: %v", err)
@@ -291,7 +298,7 @@ func TestPersister_SeqMonotonic(t *testing.T) {
 		sink([]Entry{entry(t, int64(1700000000000+i), fmt.Sprintf("u%d", i))}, false)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	p.Flush(ctx)
 
@@ -318,7 +325,7 @@ func TestPersister_DropKey_RemovesFiles(t *testing.T) {
 	sink := p.SinkFor("k")
 	sink([]Entry{entry(t, 1, "u1")}, false)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	p.Flush(ctx)
 
@@ -371,7 +378,7 @@ func TestPersister_Stop_FlushesPending(t *testing.T) {
 // TestPersister_Stop_Idempotent: calling Stop twice is fine.
 func TestPersister_Stop_Idempotent(t *testing.T) {
 	p, _ := newTestPersister(t)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	if err := p.Stop(ctx); err != nil {
 		t.Fatalf("first Stop: %v", err)
@@ -451,7 +458,7 @@ func TestPersister_SurvivesRestart(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		sink1([]Entry{entry(t, int64(1700000000000+i), fmt.Sprintf("u%d", i))}, false)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	_ = p1.Flush(ctx)
 	_ = p1.Stop(ctx)
@@ -492,7 +499,7 @@ func TestPersister_Stats_ReflectsWrites(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		sink([]Entry{entry(t, int64(i+1), fmt.Sprintf("u%d", i))}, false)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	_ = p.Flush(ctx)
 
@@ -516,7 +523,7 @@ func TestPersister_WriterAlive_True_AfterDrain(t *testing.T) {
 	sink := p.SinkFor("k")
 	sink([]Entry{entry(t, 1, "u")}, false)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	p.Flush(ctx)
 
@@ -531,7 +538,7 @@ func TestPersister_WriterAlive_True_AfterDrain(t *testing.T) {
 // during graceful shutdown.
 func TestPersister_WriterAlive_False_AfterStop(t *testing.T) {
 	p, _ := newTestPersister(t)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	_ = p.Stop(ctx)
 	if p.WriterAlive() {
@@ -586,7 +593,7 @@ func TestPersister_WriterAlive_MatchesStatsLogic(t *testing.T) {
 
 	t.Run("after_stop", func(t *testing.T) {
 		p, _ := newTestPersister(t)
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 		defer cancel()
 		_ = p.Stop(ctx)
 		if got, want := p.WriterAlive(), statsAlive(p); got != want {
@@ -735,7 +742,7 @@ func TestPersister_Stats_NoRace(t *testing.T) {
 	}
 	close(done)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	_ = p.Flush(ctx)
 	if s := p.Stats(); s.Written == 0 {
