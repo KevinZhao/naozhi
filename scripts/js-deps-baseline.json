@@ -1,28 +1,9 @@
 {
   "matrix": {
-    "dashboard.js": {
-      "nz_util.js": [
-        "nz"
-      ]
-    },
-    "cron_view.js": {
-      "nz_util.js": [
-        "nz"
-      ],
-      "dashboard.js": [
-        "sending"
-      ]
-    },
     "asset_browser.js": {
       "nz_util.js": [
         "esc",
-        "fetchJSON",
-        "nz"
-      ]
-    },
-    "files_view.js": {
-      "nz_util.js": [
-        "nz"
+        "fetchJSON"
       ]
     }
   },
@@ -31,7 +12,7 @@
     "contract.js": 0,
     "nz_util.js": 1,
     "dashboard.js": 0,
-    "cron_view.js": 6,
+    "cron_view.js": 1,
     "agent_view.js": 0,
     "asset_browser.js": 0,
     "files_view.js": 0
