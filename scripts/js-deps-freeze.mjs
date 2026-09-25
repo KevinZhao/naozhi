@@ -469,18 +469,23 @@ function check(current) {
   return 0;
 }
 
-const analysis = analyze();
-const snapshot = buildSnapshot(analysis);
-const mode = process.argv[2] ?? '--check';
+export { bareIdents, stripComments, stripCommentsAndStrings };
 
-if (mode === '--write') {
-  fs.writeFileSync(BASELINE_PATH, JSON.stringify(snapshot, null, 2) + '\n');
-  console.log(`wrote ${path.relative(ROOT, BASELINE_PATH)}`);
-} else if (mode === '--globals') {
-  console.log(JSON.stringify(eslintGlobals(snapshot.matrix), null, 2));
-} else if (mode === '--check') {
-  process.exit(check(snapshot));
-} else {
-  console.error(`unknown mode ${mode}; use --check | --write | --globals`);
-  process.exit(2);
+// Run only when executed, so js-deps-freeze.test.mjs can import the scanners.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const analysis = analyze();
+  const snapshot = buildSnapshot(analysis);
+  const mode = process.argv[2] ?? '--check';
+
+  if (mode === '--write') {
+    fs.writeFileSync(BASELINE_PATH, JSON.stringify(snapshot, null, 2) + '\n');
+    console.log(`wrote ${path.relative(ROOT, BASELINE_PATH)}`);
+  } else if (mode === '--globals') {
+    console.log(JSON.stringify(eslintGlobals(snapshot.matrix), null, 2));
+  } else if (mode === '--check') {
+    process.exit(check(snapshot));
+  } else {
+    console.error(`unknown mode ${mode}; use --check | --write | --globals`);
+    process.exit(2);
+  }
 }
