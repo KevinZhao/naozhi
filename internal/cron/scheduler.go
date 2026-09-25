@@ -511,6 +511,11 @@ func (s *Scheduler) Start() error {
 	for _, st := range stubs {
 		s.registerStubByValue(st.id, st.workDir, st.prompt, st.lastSessionID)
 	}
+	// Claim adoptable in-flight runs BEFORE the first tick can fire: a claimed
+	// run holds its job's gate, so a tick due right now overlap-skips instead of
+	// sending a second turn into the same live CLI (#2751). The run-store half
+	// of the reconcile stays async below.
+	inflight := s.claimRunInflight()
 	s.cron.Start()
 	// P1 cron-run-history: cold-start GC pass over 'runs/' tree to collect
 	// retention-policy violators that accumulated while this process was
@@ -533,11 +538,11 @@ func (s *Scheduler) Start() error {
 	// blobs, and nothing else ever deletes them. Not gated on the run store —
 	// snapshots are written by sandbox runs regardless of run-history state.
 	s.goStartupPass("sandbox-blob-gc", s.gcSandboxBlobs)
-	// Epic H #2546: local runs left in flight by the previous process. Unlike a
-	// sandbox orphan there is nothing to stop — the process is gone — so this only
-	// writes the history rows that were missing. Async + gcWG-tracked for the same
-	// reason as the pass above: it touches the run store and must not block Start.
-	s.goStartupPass("run-inflight-reconcile", s.reconcileRunInflight)
+	// Epic H #2546: the async half of the in-flight reconcile claimed above —
+	// write the interrupted records and start each adoption's wait. Async +
+	// gcWG-tracked for the same reason as the pass above: it touches the run
+	// store and an adoption can wait for minutes, neither of which may block Start.
+	s.goStartupPass("run-inflight-reconcile", func() { s.settleRunInflight(inflight) })
 	slog.Info("cron scheduler started", "jobs", jobCount)
 	return nil
 }

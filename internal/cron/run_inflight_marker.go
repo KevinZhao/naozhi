@@ -134,24 +134,56 @@ func (s *Scheduler) rewriteRunInflightMarker(path string, m runInflightMarker) b
 // Runs are appended through appendRun, the same path a live finish uses, so
 // retention and the orphan re-check apply identically.
 func (s *Scheduler) reconcileRunInflight() {
+	s.settleRunInflight(s.claimRunInflight())
+}
+
+// inflightSettlement is what claimRunInflight decided and left for the async
+// half: the interrupted records to write (run-store IO) and the adoptions to
+// await (bounded by adoptionWaitBudget, far too long for Start).
+type inflightSettlement struct {
+	interrupted []*CronRun
+	adoptions   []inflightAdoption
+	adopted     int
+	dir         string
+}
+
+// inflightAdoption is one claimed adoption: the gate is already held, and await
+// waits for the adopted CLI turn to settle.
+type inflightAdoption struct {
+	runID string
+	await func()
+}
+
+// claimRunInflight is the synchronous half of the reconcile, and Start runs it
+// BEFORE s.cron.Start(). The order is the point (#2751): an adoptable run
+// claims its job's gate here, so the first tick finds the slot taken and
+// overlap-skips, instead of winning the CAS and sending a second turn into the
+// same live CLI while this process records the first one interrupted.
+//
+// Everything here is bounded and stays inside the runinflight directory — one
+// ReadDir, one small read per marker, a router map lookup, a gate CAS, and a
+// marker rewrite for the (rare) adoptable run. The run-store appends that the
+// original "must not block Start" rule was about are left in the settlement.
+// Needs the job table loaded: jobStillExists on an empty table would treat
+// every marker as an orphan.
+func (s *Scheduler) claimRunInflight() inflightSettlement {
 	dir := s.runInflightDir()
 	if dir == "" || !s.runStoreEnabled() {
-		return
+		return inflightSettlement{}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			slog.Warn("cron: run-inflight dir read failed; interrupted runs stay invisible", "dir", dir, "err", err)
 		}
-		return
+		return inflightSettlement{}
 	}
+	out := inflightSettlement{dir: dir}
 	now := time.Now()
 	// The adoption capability is asserted, never part of SessionRouter: the one
 	// production router gains it, every test fake degrades to "nothing to
 	// adopt" — the pre-adoption behaviour, and therefore the right default.
 	adopter, _ := s.router.(InFlightAdopter)
-	recovered := 0
-	adopted := 0
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".json") {
@@ -197,11 +229,12 @@ func (s *Scheduler) reconcileRunInflight() {
 					Phase:     PhaseSending,
 					Trigger:   m.Trigger,
 				})
-				mCopy := m
-				s.goStartupPass("run-adoption-"+m.RunID, func() {
-					s.adoptRun(mCopy, run, inflight)
+				mCopy, runCopy := m, run
+				out.adoptions = append(out.adoptions, inflightAdoption{
+					runID: m.RunID,
+					await: func() { s.adoptRun(mCopy, runCopy, inflight) },
 				})
-				adopted++
+				out.adopted++
 				continue
 			}
 			slog.Info("cron: adoption lost the run slot to a fresh tick; recording interrupted",
@@ -223,7 +256,7 @@ func (s *Scheduler) reconcileRunInflight() {
 			errClass, errMsg = ErrClassConfigDrift, "config changed across the restart; the old run's CLI was shut down"
 		}
 		startedAt := time.UnixMilli(m.StartedAtMS)
-		s.appendRun(&CronRun{
+		out.interrupted = append(out.interrupted, &CronRun{
 			RunID:      m.RunID,
 			JobID:      m.JobID,
 			State:      RunStateCanceled,
@@ -237,11 +270,22 @@ func (s *Scheduler) reconcileRunInflight() {
 			ErrorClass: errClass,
 			ErrorMsg:   errMsg,
 		})
-		recovered++
 	}
-	if recovered > 0 || adopted > 0 {
+	return out
+}
+
+// settleRunInflight is the async half: it writes the interrupted records and
+// starts each claimed adoption's wait, each in its own isolated startup pass.
+func (s *Scheduler) settleRunInflight(out inflightSettlement) {
+	for _, rec := range out.interrupted {
+		s.appendRun(rec)
+	}
+	for _, a := range out.adoptions {
+		s.goStartupPass("run-adoption-"+a.runID, a.await)
+	}
+	if len(out.interrupted) > 0 || out.adopted > 0 {
 		slog.Info("cron: reconciled runs from the previous process",
-			"interrupted", recovered, "adopted", adopted, "dir", dir)
+			"interrupted", len(out.interrupted), "adopted", out.adopted, "dir", out.dir)
 	}
 }
 
