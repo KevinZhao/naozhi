@@ -9,6 +9,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // recordingBroadcaster captures the runtelemetry events Manager produces so
@@ -81,14 +82,15 @@ func runOneAndWait(t *testing.T, m *Manager, rec *recordingBroadcaster) {
 	m.Start(ctx)
 	defer m.Stop(context.Background())
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ended := rec.snapshot(); len(ended) >= 1 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("no RunEnded event observed within deadline")
+	testhelper.Eventually(t, func() bool {
+		_, ended := rec.snapshot()
+		return len(ended) >= 1
+	}, 2*time.Second, "no RunEnded event observed within deadline")
+}
+
+func lastRunRecorded(m *Manager) bool {
+	st := m.Inspector()
+	return len(st) == 1 && st[0].LastRun != nil
 }
 
 // TestManager_EmitsSysessionSubsystem pins that both run events carry
@@ -156,15 +158,8 @@ func TestManager_NilBroadcasterIsSafe(t *testing.T) {
 
 	// Wait for the internal run record (recordRun runs even with nil
 	// broadcaster) — the absence of a panic is the primary assertion.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		st := m.Inspector()
-		if len(st) == 1 && st[0].LastRun != nil {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("no run recorded with nil broadcaster (or it panicked)")
+	testhelper.Eventually(t, func() bool { return lastRunRecorded(m) }, 2*time.Second,
+		"no run recorded with nil broadcaster (or it panicked)")
 }
 
 // TestManager_RunCountersBumpBroadcastIndependent pins that the symmetric
@@ -192,14 +187,8 @@ func TestManager_RunCountersBumpBroadcastIndependent(t *testing.T) {
 
 	// Wait for the internal run record (recordRun runs even with nil
 	// broadcaster); by then both emit helpers have fired.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		st := m.Inspector()
-		if len(st) == 1 && st[0].LastRun != nil {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testhelper.Eventually(t, func() bool { return lastRunRecorded(m) }, 2*time.Second,
+		"no run recorded")
 
 	if got := metrics.SysessionRunStartedTotal.Value() - startBefore; got != 1 {
 		t.Errorf("SysessionRunStartedTotal delta = %d, want 1 (must bump with nil broadcaster)", got)
@@ -225,14 +214,8 @@ func TestManager_SetTelemetryNilClears(t *testing.T) {
 	m.Start(ctx)
 	defer m.Stop(context.Background())
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		st := m.Inspector()
-		if len(st) == 1 && st[0].LastRun != nil {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testhelper.Eventually(t, func() bool { return lastRunRecorded(m) }, 2*time.Second,
+		"no run recorded")
 	if started, ended := rec.snapshot(); len(started) != 0 || len(ended) != 0 {
 		t.Errorf("cleared broadcaster still received events: started=%d ended=%d", len(started), len(ended))
 	}
@@ -320,7 +303,8 @@ func TestManager_UpstreamErrorClass(t *testing.T) {
 // concurrently with the per-daemon tick goroutine reading the pointer via
 // emitRun{Started,Ended}. Run under -race, this guards the atomic.Pointer
 // invariant the #1723 refactor depends on (the seam cron already proved).
-// The ticker is pulsed repeatedly so emit fires while SetTelemetry churns.
+// The writer churns until the daemon has completed every driven tick, so each
+// tick's emits overlap the stores.
 func TestManager_SetTelemetryRaceWithTick(t *testing.T) {
 	const name = "auto-titler"
 	d := &signalDaemon{
@@ -332,16 +316,15 @@ func TestManager_SetTelemetryRaceWithTick(t *testing.T) {
 	withRegistry(t, []builtinDaemonFactory{
 		{Name: name, Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
 	})
-	pulse := make(chan time.Time, 1)
-	tickerFn := func(_ time.Duration) (<-chan time.Time, func()) {
-		return pulse, func() {}
-	}
+	pulse, tickerFn, ready := readyPulseTicker()
 	m, err := NewManager(Config{
 		Enabled:     true,
 		TickTimeout: 200 * time.Millisecond,
 		Router:      newFakeRouter(),
 		Daemons: map[string]DaemonRuntimeConfig{
-			name: {Enabled: true, Tick: time.Hour},
+			// A short tick keeps the startup jitter short; pulses, not the
+			// period, drive the ticks.
+			name: {Enabled: true, Tick: time.Millisecond},
 		},
 		NewTicker: tickerFn,
 	})
@@ -353,14 +336,21 @@ func TestManager_SetTelemetryRaceWithTick(t *testing.T) {
 	defer cancel()
 	m.Start(ctx)
 	defer m.Stop(context.Background())
+	waitLoopReady(t, ready)
 
+	stop := make(chan struct{})
 	done := make(chan struct{})
 	// Writer goroutine: churn SetTelemetry between two broadcasters and nil.
 	go func() {
 		defer close(done)
 		a := &recordingBroadcaster{}
 		b := &recordingBroadcaster{}
-		for i := 0; i < 500; i++ {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			switch i % 3 {
 			case 0:
 				m.SetTelemetry(a)
@@ -372,14 +362,12 @@ func TestManager_SetTelemetryRaceWithTick(t *testing.T) {
 		}
 	}()
 
-	// Reader side: drive ticks so emitRun{Started,Ended} read the pointer
-	// concurrently with the writer churn above.
-	for i := 0; i < 50; i++ {
-		select {
-		case pulse <- time.Now():
-		default:
-		}
-		time.Sleep(time.Millisecond)
+	const ticks = 50
+	for i := 0; i < ticks; i++ {
+		pulse <- time.Now()
 	}
+	testhelper.Eventually(t, func() bool { return d.calls.Load() >= ticks }, 5*time.Second,
+		"daemon did not complete the driven ticks")
+	close(stop)
 	<-done
 }
