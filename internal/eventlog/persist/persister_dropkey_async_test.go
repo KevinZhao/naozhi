@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // TestPersister_DropKey_AsyncRemoveStillWaits pins R20260527-PERF-4 (#1284):
@@ -18,7 +17,7 @@ func TestPersister_DropKey_AsyncRemoveStillWaits(t *testing.T) {
 	p, dir := newTestPersister(t)
 	sink := p.SinkFor("k1")
 	sink([]Entry{entry(t, 1, "u1")}, false)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	if err := p.Flush(ctx); err != nil {
 		t.Fatalf("Flush: %v", err)
@@ -51,7 +50,7 @@ func TestPersister_DropKey_RemovesInMemoryWriterSynchronously(t *testing.T) {
 	// Round 1: write + drop.
 	sink1 := p.SinkFor("k2")
 	sink1([]Entry{entry(t, 1, "u1")}, false)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	if err := p.Flush(ctx); err != nil {
 		t.Fatalf("Flush 1: %v", err)
