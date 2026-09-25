@@ -268,6 +268,11 @@ jobs:
       - name: Check cross-file dependency freeze
         run: node scripts/js-deps-freeze.mjs --check
 
+      # The freeze may only shrink, so its tokenizer under-counting (reading
+      # code as string text) is what would let new coupling through unseen.
+      - name: Test the dependency-freeze tokenizer
+        run: node --test scripts/js-deps-freeze.test.mjs
+
       - name: Check growth ratchet
         run: node scripts/js-ratchet.mjs --check
 
