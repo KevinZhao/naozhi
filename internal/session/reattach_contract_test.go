@@ -139,9 +139,8 @@ func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 	// within a short window. We locate the first call and look back ~900
 	// characters for `isAlive()` — the typical shape is:
 	//    if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
-	//        r.ss.Unlock()
-	//        proc.Close()
-	//        continue
+	//        outcome = replaced
+	//        return
 	//    }
 	//    <R51 comment block>
 	//    if !sess.tryReattachProcessNoCallback(proc, ...) { ... }
@@ -167,33 +166,27 @@ func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 			"is actually desired.")
 	}
 
-	// 4) The call must be made while holding the table lock. Check that r.ss.Lock()
-	// appears within the same window and no intervening r.ss.Unlock() has
-	// been inserted between the guard and the Reattach call.
-	lastLock := strings.LastIndex(window, "r.ss.Lock()")
-	lastUnlock := strings.LastIndex(window, "r.ss.Unlock()")
-	if lastLock < 0 {
-		t.Error("r.ss.Lock() no longer appears in the 500 bytes preceding " +
-			"ReattachProcessNoCallback. R31-REL1: the sendMu-waiver relies on " +
-			"the caller holding r.mu so concurrent spawnSession/Reset paths " +
+	// 4) The call must be made inside the transaction that ran the guard:
+	// the Update opens within the window, its closure (opened at the top of
+	// commitShimReattach, one tab in) has not closed, and no tx.Unlocked
+	// window separates the guard from the Reattach call.
+	lastUpdate := strings.LastIndex(window, "r.ss.Update(func(tx sessTx) {")
+	if lastUpdate < 0 {
+		t.Fatal("no r.ss.Update transaction opens in the window preceding " +
+			"tryReattachProcessNoCallback. R31-REL1: the sendMu-waiver relies on " +
+			"the table lock being held so concurrent spawn/Reset paths " +
 			"cannot racily re-observe the session mid-reattach.")
 	}
-	if lastUnlock > lastLock && lastUnlock > 0 {
-		// An Unlock after the Lock within the window is suspicious — the
-		// canonical shape has `r.ss.Unlock()` only inside the abort branch
-		// of the guard, not on the fall-through path. Match the exact
-		// abort shape: `r.ss.Unlock()\n\t\t\tproc.Close()` must be the only
-		// Unlock, and it must be inside an `if` block.
-		postLock := window[lastLock:]
-		if strings.Count(postLock, "r.ss.Unlock()") > 0 {
-			// Permit the canonical abort branch: it ends with `continue`.
-			segment := postLock
-			if !strings.Contains(segment, "continue") {
-				t.Error("An r.mu.Unlock() appears between r.mu.Lock() and " +
-					"ReattachProcessNoCallback without a `continue` abort. " +
-					"R31-REL1: the Reattach must run while r.mu is held.")
-			}
-		}
+	inTx := window[lastUpdate:]
+	if strings.Contains(inTx, "\n\t})") {
+		t.Error("the transaction that ran the isAlive guard closes before " +
+			"tryReattachProcessNoCallback. R31-REL1: the Reattach must run in " +
+			"the same transaction as the guard.")
+	}
+	if strings.Contains(inTx, "tx.Unlocked(") {
+		t.Error("a tx.Unlocked window separates the isAlive guard from " +
+			"tryReattachProcessNoCallback. R31-REL1: the Reattach must run " +
+			"while the table lock is held.")
 	}
 }
 

@@ -189,19 +189,20 @@ func TestIndexInvariants_DiscoveryAndShimAdoption(t *testing.T) {
 	// --- shim adoption: a live shim missing from sessions.json ---
 	const shimID = "sess-id-shim"
 	keyS := "dashboard:direct:2026-01-01-000000-3:proj"
-	r.ss.Lock()
-	sess := r.adoptLiveShimLocked(shim.State{
-		Key:       keyS,
-		SessionID: shimID,
-		Workspace: "/tmp/ws",
-		Backend:   "claude",
-		ShimPID:   4242,
-	}, "claude", nil)
-	r.ss.Unlock()
+	var sess *ManagedSession
+	r.ss.Update(func(tx sessTx) {
+		sess = r.adoptLiveShim(tx, shim.State{
+			Key:       keyS,
+			SessionID: shimID,
+			Workspace: "/tmp/ws",
+			Backend:   "claude",
+			ShimPID:   4242,
+		}, "claude")
+	})
 	if sess == nil {
-		t.Fatal("adoptLiveShimLocked published no session")
+		t.Fatal("adoptLiveShim published no session")
 	}
-	checkIndexInvariants(t, r, "adoptLiveShimLocked")
+	checkIndexInvariants(t, r, "adoptLiveShim")
 	if mapped := keyForID(r, shimID); mapped != keyS {
 		t.Errorf("idToKey[%q] = %q, want %q — an adopted shim must be resumable by its id", shimID, mapped, keyS)
 	}

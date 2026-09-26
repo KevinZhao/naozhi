@@ -41,7 +41,7 @@ func TestAdoptableShimKey(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// adoptLiveShimLocked — #1875
+// adoptLiveShim — #1875
 // ---------------------------------------------------------------------------
 
 // TestAdoptLiveShimLocked_PublishesSession verifies that rebuilding a session
@@ -61,14 +61,13 @@ func TestAdoptLiveShimLocked_PublishesSession(t *testing.T) {
 		Backend:   "claude",
 		ShimPID:   3637949,
 	}
-	wrapper, backendID := r.wrapperFor(state.Backend)
+	_, backendID := r.wrapperFor(state.Backend)
 
-	r.ss.Lock()
-	got := r.adoptLiveShimLocked(state, backendID, wrapper)
-	r.ss.Unlock()
+	var got *ManagedSession
+	r.ss.Update(func(tx sessTx) { got = r.adoptLiveShim(tx, state, backendID) })
 
 	if got == nil {
-		t.Fatal("adoptLiveShimLocked returned nil")
+		t.Fatal("adoptLiveShim returned nil")
 	}
 	r.ss.Lock()
 	published, ok := r.ss.Lookup(key)
@@ -123,13 +122,14 @@ func TestAdoptLiveShimLocked_EmptySessionID(t *testing.T) {
 		Backend:   "claude",
 		ShimPID:   3659980,
 	}
-	wrapper, backendID := r.wrapperFor(state.Backend)
+	_, backendID := r.wrapperFor(state.Backend)
 
-	r.ss.Lock()
-	r.adoptLiveShimLocked(state, backendID, wrapper)
-	_, ok := r.ss.Lookup(key)
-	emptyIndexed := keyForID(r, "") != ""
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) { r.adoptLiveShim(tx, state, backendID) })
+	var ok, emptyIndexed bool
+	r.ss.View(func(v sessView) {
+		_, ok = v.Lookup(key)
+		_, emptyIndexed = v.KeyForID("")
+	})
 
 	if !ok {
 		t.Fatal("session with empty session_id must still be published for reconnect")
@@ -146,24 +146,25 @@ func TestAdoptLiveShimLocked_EmptySessionID(t *testing.T) {
 // symptom would be a cost figure that looks plausible while attributing a whole
 // CLI session's history to whichever run arrived first after a restart.
 //
-// The storeEntry adoptLiveShimLocked builds carries no LastCumulativeCost
+// The storeEntry adoptLiveShim builds carries no LastCumulativeCost
 // because there is no store entry to carry it from; that is precisely why the
 // flag has to be set here rather than derived in restoreSessionFromEntry.
 func TestAdoptLiveShim_MarksCostBaselineUnknown(t *testing.T) {
 	r := newTestRouter(3)
 	const key = "cron:09a61c45ad4c76ba"
 
-	r.ss.Lock()
-	sess := r.adoptLiveShimLocked(shim.State{
-		Key:       key,
-		SessionID: "sess-adopted-1",
-		Workspace: "/tmp/ws",
-		Backend:   "claude",
-		ShimPID:   4242,
-	}, "claude", nil)
-	r.ss.Unlock()
+	var sess *ManagedSession
+	r.ss.Update(func(tx sessTx) {
+		sess = r.adoptLiveShim(tx, shim.State{
+			Key:       key,
+			SessionID: "sess-adopted-1",
+			Workspace: "/tmp/ws",
+			Backend:   "claude",
+			ShimPID:   4242,
+		}, "claude")
+	})
 	if sess == nil {
-		t.Fatal("adoptLiveShimLocked published no session")
+		t.Fatal("adoptLiveShim published no session")
 	}
 
 	sess.costMu.Lock()
@@ -182,16 +183,17 @@ func TestRestoreSessionFromEntry_DoesNotMarkCostBaselineUnknown(t *testing.T) {
 	r := newTestRouter(3)
 	const key = "feishu:p2p:restored"
 
-	r.ss.Lock()
-	r.restoreSessionFromEntry(key, &storeEntry{
-		Key:                key,
-		SessionID:          "sess-restored-1",
-		Workspace:          "/tmp/ws",
-		Backend:            "claude",
-		LastCumulativeCost: 1.25,
+	var sess *ManagedSession
+	r.ss.Update(func(tx sessTx) {
+		r.restoreSessionFromEntry(tx, key, &storeEntry{
+			Key:                key,
+			SessionID:          "sess-restored-1",
+			Workspace:          "/tmp/ws",
+			Backend:            "claude",
+			LastCumulativeCost: 1.25,
+		})
+		sess = tx.Get(key)
 	})
-	sess := r.ss.Get(key)
-	r.ss.Unlock()
 	if sess == nil {
 		t.Fatal("restoreSessionFromEntry published no session")
 	}

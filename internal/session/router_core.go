@@ -710,20 +710,7 @@ func NewRouter(cfg RouterConfig) *Router {
 
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
-		for key, entry := range restored {
-			// SECURITY: reject sys: entries even though saveStore already skips
-			// them (RFC v2.1 §3.4). A sys: entry on disk means a tampered
-			// sessions.json; resurrecting it would let an attacker pre-seed a
-			// ManagedSession with chosen label_origin etc. Daemons re-register
-			// stubs at startup, so dropping the persisted copy is safe.
-			if IsSysKey(key) {
-				slog.Warn("session store: dropping unexpected sys: entry",
-					"key", key,
-					"hint", "sys entries should never persist; possible sessions.json tampering")
-				continue
-			}
-			r.restoreSessionFromEntry(key, entry)
-		}
+		r.ss.Update(func(tx sessTx) { r.restoreStore(tx, restored) })
 	}
 
 	// Sidebar is driven purely by sessions.json (and live activity); filesystem-
@@ -749,14 +736,28 @@ func NewRouter(cfg RouterConfig) *Router {
 	return r
 }
 
+// restoreStore publishes the sessions loaded from the store.
+func (r *Router) restoreStore(tx sessTx, restored map[string]*storeEntry) {
+	for key, entry := range restored {
+		// SECURITY: reject sys: entries even though saveStore already skips
+		// them (RFC v2.1 §3.4). A sys: entry on disk means a tampered
+		// sessions.json; resurrecting it would let an attacker pre-seed a
+		// ManagedSession with chosen label_origin etc. Daemons re-register
+		// stubs at startup, so dropping the persisted copy is safe.
+		if IsSysKey(key) {
+			slog.Warn("session store: dropping unexpected sys: entry",
+				"key", key,
+				"hint", "sys entries should never persist; possible sessions.json tampering")
+			continue
+		}
+		r.restoreSessionFromEntry(tx, key, entry)
+	}
+}
+
 // restoreSessionFromEntry rebuilds a single persisted ManagedSession from its
 // on-disk storeEntry and publishes it into the router's maps + indexes. The
 // caller owns the IsSysKey skip guard and the loadStore range.
-//
-// LOCK: must be invoked from NewRouter under construction (no concurrent
-// session-table writers); publishSessionLocked + the session-ID index write assume
-// exclusive access, which the publish-after-construct contract guarantees.
-func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
+func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntry) {
 	// Resolve the wrapper that owned this session's backend so the snapshot
 	// carries the correct CLI identity after a pure restore (no shim reconnect).
 	// Pre-multi-backend entries have empty Backend → router default.
@@ -842,11 +843,11 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 	default:
 		s.initCreatedAtIfUnset()
 	}
-	// publishSessionLocked funnels attachHistorySource + map insert + index
+	// publishSession funnels attachHistorySource + map insert + index
 	// update so the triple-index invariant is a property of the publish step.
-	r.publishSession(r.ss.AssumeLocked(), key, s, false)
+	r.publishSession(tx, key, s, false)
 	r.kid.Track(entry.SessionID)
-	r.ss.SetID(entry.SessionID, key)
+	tx.SetID(entry.SessionID, key)
 }
 
 // startBackgroundLifecycle launches the background side effects of
