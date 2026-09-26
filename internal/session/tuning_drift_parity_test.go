@@ -53,7 +53,7 @@ func TestTuningDriftParity_NoFalseDrift(t *testing.T) {
 	// production constructor. Hand-listing the fields here is what let the
 	// DebugFile regression through: this side omitted it, the drift side omitted
 	// it, and the comparison passed while production diverged.
-	sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Backend: "kiro", Workspace: "/ws"})
+	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{Backend: "kiro", Workspace: "/ws"})
 	realArgs := sp.Wrapper.Protocol.BuildArgs(
 		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
 
@@ -132,13 +132,13 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 	// argv of the respawn, as spawnSession assembles it from the OLD entry —
 	// through the production constructor, so this side cannot silently omit a
 	// field the drift side sets (or vice versa).
-	sp := r.resolveSpawnParamsLocked(key, "sess-drift-3", AgentOpts{Backend: "kiro", Workspace: "/ws"})
+	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "sess-drift-3", AgentOpts{Backend: "kiro", Workspace: "/ws"})
 	realArgs := sp.Wrapper.Protocol.BuildArgs(
 		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
 
 	// The spawn then replaces the entry, carrying the snapshotted overrides.
-	_, _, _, _, ov := snapshotOldSessionLocked(s)
-	fresh := r.installFreshSessionLocked(
+	_, _, _, _, ov := snapshotOldSession(sessView{}, s)
+	fresh := r.installFreshSession(r.ss.AssumeLocked(),
 		key, &cli.Process{}, "/ws", "kiro", "", sp.Wrapper, "sess-drift-3",
 		nil, nil, 0, 0, 0, false, "sess-drift-3", 0, ov,
 	)

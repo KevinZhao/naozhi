@@ -8,7 +8,7 @@ package session
 // key had to reach into the backend facet and remember all three: RenameSession
 // carried a twelve-line block moving each map's entry by hand, and terminal
 // removal deleted each one separately. Forgetting one leaks a stale pick onto the
-// next spawn — and one path already forgets two (see dropBackendLocked).
+// next spawn — and one path already forgets two (see dropBackend).
 //
 // Moving them here removes three of backendStore's nine columns and, more to the
 // point, gives the maintenance a name: rename and drop are one call each instead
@@ -47,18 +47,18 @@ type pendingPicks struct {
 	tuning map[string]pendingTuning
 }
 
-// initLocked allocates the maps. Separate from a constructor because Router is
+// init allocates the maps. Separate from a constructor because Router is
 // assembled field-by-field in NewRouter.
-func (p *pendingPicks) initLocked() {
+func (p *pendingPicks) init() {
 	p.backend = make(map[string]string)
 	p.accessProfile = make(map[string]string)
 	p.tuning = make(map[string]pendingTuning)
 }
 
-// renameLocked moves every pick from oldKey to newKey. One call instead of the
+// rename moves every pick from oldKey to newKey. One call instead of the
 // three open-coded move blocks RenameSession used to carry — the failure mode
 // being a fourth pick added later and renamed in only two of the three places.
-func (p *pendingPicks) renameLocked(oldKey, newKey string) {
+func (p *pendingPicks) rename(oldKey, newKey string) {
 	if b, ok := p.backend[oldKey]; ok {
 		p.backend[newKey] = b
 		delete(p.backend, oldKey)
@@ -73,16 +73,16 @@ func (p *pendingPicks) renameLocked(oldKey, newKey string) {
 	}
 }
 
-// dropAllLocked clears every pick for key. Used on terminal removal, where an
+// dropAll clears every pick for key. Used on terminal removal, where an
 // abandoned choice must not survive to be consumed by an unrelated future
 // session that happens to reuse the key.
-func (p *pendingPicks) dropAllLocked(key string) {
+func (p *pendingPicks) dropAll(key string) {
 	delete(p.backend, key)
 	delete(p.accessProfile, key)
 	delete(p.tuning, key)
 }
 
-// dropBackendLocked clears only the backend pick, which is what the ResetChat
+// dropBackend clears only the backend pick, which is what the ResetChat
 // path (/new, /clear) does.
 //
 // It deliberately leaves accessProfile and tuning: both are consumed on the
@@ -94,6 +94,6 @@ func (p *pendingPicks) dropAllLocked(key string) {
 // This asymmetry was previously an open-coded single delete with a comment
 // mentioning only backendOverrides; naming it records that the other two are
 // omitted on purpose rather than forgotten.
-func (p *pendingPicks) dropBackendLocked(key string) {
+func (p *pendingPicks) dropBackend(key string) {
 	delete(p.backend, key)
 }

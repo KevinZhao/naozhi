@@ -995,7 +995,7 @@ func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
 			r.ss.Put("k1", s)
 
 			r.ss.Lock()
-			r.unregisterSessionLocked("k1", s, tc.keep)
+			r.unregisterSession(r.ss.AssumeLocked(), "k1", s, tc.keep)
 			r.ss.Unlock()
 
 			if _, ok := r.ss.Lookup("k1"); ok {
@@ -2179,7 +2179,7 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 
 	t.Run("kiro resume survives guard", func(t *testing.T) {
 		r := mkRouter(t)
-		sp := r.resolveSpawnParamsLocked("dash:direct:c1:general", kiroSID,
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c1:general", kiroSID,
 			AgentOpts{Backend: "kiro", Workspace: "/some/ws"})
 		if sp.ResumeID != kiroSID {
 			t.Errorf("ResumeID = %q, want %q (kiro state exists — must not downgrade)",
@@ -2189,7 +2189,7 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 
 	t.Run("claude resume still downgrades when jsonl missing", func(t *testing.T) {
 		r := mkRouter(t)
-		sp := r.resolveSpawnParamsLocked("dash:direct:c1:general", kiroSID,
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c1:general", kiroSID,
 			AgentOpts{Backend: "claude", Workspace: "/some/ws"})
 		if sp.ResumeID != "" {
 			t.Errorf("ResumeID = %q, want \"\" (no claude jsonl for this id)", sp.ResumeID)
@@ -2204,7 +2204,7 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 			t.Fatal(err)
 		}
 		wrongCase := filepath.Join(base, "Workspace", "Proj")
-		sp := r.resolveSpawnParamsLocked("dash:direct:c2:general", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c2:general", "",
 			AgentOpts{Workspace: wrongCase})
 		if sp.Workspace != onDisk {
 			t.Errorf("Workspace = %q, want canonical %q", sp.Workspace, onDisk)
@@ -2222,7 +2222,7 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 		old := &ManagedSession{key: "dash:direct:c3:general"}
 		old.setWorkspace(stored)
 		r.ss.Put("dash:direct:c3:general", old)
-		sp := r.resolveSpawnParamsLocked("dash:direct:c3:general", kiroSID,
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c3:general", kiroSID,
 			AgentOpts{Backend: "kiro"})
 		if sp.ResumeID != kiroSID {
 			t.Fatalf("ResumeID = %q, want %q", sp.ResumeID, kiroSID)
@@ -2262,7 +2262,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 	t.Run("backendOverride wins when opts.Backend empty", func(t *testing.T) {
 		r := mkRouter()
 		r.ss.Ext().picks.backend["feishu:user:bob:agent1"] = "kiro"
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.BackendID != "kiro" {
 			t.Errorf("BackendID = %q, want kiro", sp.BackendID)
 		}
@@ -2281,7 +2281,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 	t.Run("opts.Backend beats backendOverride", func(t *testing.T) {
 		r := mkRouter()
 		r.ss.Ext().picks.backend["feishu:user:bob:agent1"] = "kiro"
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1", "",
 			AgentOpts{Backend: "claude"})
 		if sp.BackendID != "claude" {
 			t.Errorf("BackendID = %q, want claude", sp.BackendID)
@@ -2291,7 +2291,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 	t.Run("workspaceOverride (chatKey) wins when opts.Workspace empty", func(t *testing.T) {
 		r := mkRouter()
 		r.ss.Ext().workspaces.Seed(map[string]string{"feishu:user:alice": "/override/ws"})
-		sp := r.resolveSpawnParamsLocked("feishu:user:alice:agent1", "", AgentOpts{})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:alice:agent1", "", AgentOpts{})
 		if sp.Workspace != "/override/ws" {
 			t.Errorf("Workspace = %q, want /override/ws", sp.Workspace)
 		}
@@ -2300,7 +2300,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 	t.Run("opts.Workspace beats workspaceOverride", func(t *testing.T) {
 		r := mkRouter()
 		r.ss.Ext().workspaces.Seed(map[string]string{"feishu:user:alice": "/override/ws"})
-		sp := r.resolveSpawnParamsLocked("feishu:user:alice:agent1", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:alice:agent1", "",
 			AgentOpts{Workspace: "/opts/ws"})
 		if sp.Workspace != "/opts/ws" {
 			t.Errorf("Workspace = %q, want /opts/ws", sp.Workspace)
@@ -2311,7 +2311,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		// claudeDir + workspace set, jsonl missing → resolveResumeID returns "".
 		r := mkRouter()
 		r.claudeDir = t.TempDir()
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1",
 			"00000000-0000-0000-0000-000000000000", AgentOpts{Workspace: "/some/ws"})
 		if sp.ResumeID != "" {
 			t.Errorf("ResumeID = %q, want \"\" (downgraded)", sp.ResumeID)
@@ -2320,7 +2320,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	t.Run("all defaults when opts empty and no overrides", func(t *testing.T) {
 		r := mkRouter()
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.BackendID != "claude" {
 			t.Errorf("BackendID = %q, want claude", sp.BackendID)
 		}
@@ -2340,7 +2340,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	t.Run("opts.ExtraArgs appended after backend args", func(t *testing.T) {
 		r := mkRouter()
-		sp := r.resolveSpawnParamsLocked("k", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "k", "",
 			AgentOpts{Backend: "kiro", ExtraArgs: []string{"--extra"}})
 		want := []string{"--kiro-arg", "--extra"}
 		if len(sp.Args) != 2 || sp.Args[0] != want[0] || sp.Args[1] != want[1] {
@@ -2363,7 +2363,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		old := &ManagedSession{key: key}
 		old.SetBackend("kiro")
 		r.ss.Put(key, old)
-		sp := r.resolveSpawnParamsLocked(key,
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key,
 			"00000000-0000-0000-0000-000000000000", AgentOpts{})
 		if sp.BackendID != "kiro" {
 			t.Errorf("BackendID = %q, want kiro (inherited from existing session)", sp.BackendID)
@@ -2388,7 +2388,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		old := &ManagedSession{key: key}
 		old.SetBackend("kiro")
 		r.ss.Put(key, old)
-		sp := r.resolveSpawnParamsLocked(key, "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "",
 			AgentOpts{Backend: "claude"})
 		if sp.BackendID != "claude" {
 			t.Errorf("BackendID = %q, want claude (opts.Backend wins)", sp.BackendID)
@@ -2405,7 +2405,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		old.SetBackend("kiro")
 		r.ss.Put(key, old)
 		r.ss.Ext().picks.backend[key] = "claude"
-		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{})
 		if sp.BackendID != "claude" {
 			t.Errorf("BackendID = %q, want claude (override wins over session)", sp.BackendID)
 		}
@@ -2444,7 +2444,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 
 	t.Run("opts profile resolves env + default model", func(t *testing.T) {
 		r := mkRouter()
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1", "",
 			AgentOpts{AccessProfile: "1p-fable"})
 		if sp.AccessProfileID != "1p-fable" {
 			t.Errorf("AccessProfileID = %q, want 1p-fable", sp.AccessProfileID)
@@ -2459,7 +2459,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 
 	t.Run("explicit opts.Model beats profile default_model", func(t *testing.T) {
 		r := mkRouter()
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1", "",
 			AgentOpts{AccessProfile: "1p-fable", Model: "planner-pinned"})
 		if sp.Model != "planner-pinned" {
 			t.Errorf("Model = %q, want planner-pinned (opts wins)", sp.Model)
@@ -2473,7 +2473,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		old.SetAccessProfile("bedrock-opus")
 		r.ss.Put(key, old)
 		// Project since re-bound to 1p-fable, but resume must relock bedrock.
-		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{AccessProfile: "1p-fable"})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{AccessProfile: "1p-fable"})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock)", sp.AccessProfileID)
 		}
@@ -2484,7 +2484,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 
 	t.Run("unknown profile falls back to global default", func(t *testing.T) {
 		r := mkRouter()
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1", "",
 			AgentOpts{AccessProfile: "deleted-profile"})
 		if sp.AccessProfileID != "" {
 			t.Errorf("AccessProfileID = %q, want \"\" (fallback)", sp.AccessProfileID)
@@ -2496,7 +2496,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 
 	t.Run("no profile leaves baseline untouched", func(t *testing.T) {
 		r := mkRouter()
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.AccessProfileID != "" || sp.AccessProfileEnv != nil {
 			t.Errorf("expected empty profile, got id=%q env=%v", sp.AccessProfileID, sp.AccessProfileEnv)
 		}
@@ -2509,7 +2509,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		r := mkRouter()
 		key := "feishu:user:bob:agent1"
 		r.ss.Ext().picks.accessProfile[key] = "bedrock-opus"
-		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{AccessProfile: "1p-fable"})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{AccessProfile: "1p-fable"})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (override wins over opts)", sp.AccessProfileID)
 		}
@@ -2525,7 +2525,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		old.SetAccessProfile("bedrock-opus")
 		r.ss.Put(key, old)
 		r.ss.Ext().picks.accessProfile[key] = "1p-fable"
-		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock wins)", sp.AccessProfileID)
 		}
@@ -2534,7 +2534,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 	t.Run("default profile applies when nothing else picks one", func(t *testing.T) {
 		r := mkRouter()
 		r.defaultAccessProfile = "bedrock-opus"
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (default applied)", sp.AccessProfileID)
 		}
@@ -2549,7 +2549,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 	t.Run("explicit opts profile beats default", func(t *testing.T) {
 		r := mkRouter()
 		r.defaultAccessProfile = "bedrock-opus"
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1", "",
 			AgentOpts{AccessProfile: "1p-fable"})
 		if sp.AccessProfileID != "1p-fable" {
 			t.Errorf("AccessProfileID = %q, want 1p-fable (explicit beats default)", sp.AccessProfileID)
@@ -2563,7 +2563,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		old := &ManagedSession{key: key}
 		old.SetAccessProfile("bedrock-opus")
 		r.ss.Put(key, old)
-		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock beats default)", sp.AccessProfileID)
 		}
@@ -2572,7 +2572,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 	t.Run("unknown default profile falls back to global baseline", func(t *testing.T) {
 		r := mkRouter()
 		r.defaultAccessProfile = "ghost-profile"
-		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.AccessProfileID != "" || sp.AccessProfileEnv != nil {
 			t.Errorf("expected empty profile (unknown default → baseline), got id=%q env=%v",
 				sp.AccessProfileID, sp.AccessProfileEnv)
@@ -2703,7 +2703,7 @@ func TestCollectPreviousHistory(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// snapshotOldSessionLocked — CQ2 (R397) extraction
+// snapshotOldSession — CQ2 (R397) extraction
 // ---------------------------------------------------------------------------
 
 // TestSnapshotOldSessionLocked covers the four shapes spawnSession feeds in:
@@ -2714,16 +2714,16 @@ func TestCollectPreviousHistory(t *testing.T) {
 // plain function so it works without a Router).
 func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("nil returns zero values", func(t *testing.T) {
-		prev, cost, spent, created, ov := snapshotOldSessionLocked(nil)
+		prev, cost, spent, created, ov := snapshotOldSession(sessView{}, nil)
 		if prev != nil || cost != 0 || spent != 0 || created != 0 || ov != (sessionOverrides{}) {
-			t.Errorf("snapshotOldSessionLocked(nil) = (%v, %v, %v, %v, %+v), want zero values",
+			t.Errorf("snapshotOldSession(nil) = (%v, %v, %v, %v, %+v), want zero values",
 				prev, cost, spent, created, ov)
 		}
 	})
 
 	t.Run("prevSessionIDs defensive copy", func(t *testing.T) {
 		s := &ManagedSession{prevSessionIDs: []string{"id-a", "id-b"}}
-		prev, _, _, _, _ := snapshotOldSessionLocked(s)
+		prev, _, _, _, _ := snapshotOldSession(sessView{}, s)
 		if len(prev) != 2 || prev[0] != "id-a" || prev[1] != "id-b" {
 			t.Fatalf("prev = %v, want [id-a id-b]", prev)
 		}
@@ -2737,7 +2737,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("totalCost falls back to store when no proc", func(t *testing.T) {
 		s := &ManagedSession{}
 		storeTotalCost(&s.totalCost, 1.234)
-		_, cost, _, _, _ := snapshotOldSessionLocked(s)
+		_, cost, _, _, _ := snapshotOldSession(sessView{}, s)
 		if cost != 1.234 {
 			t.Errorf("cost = %v, want 1.234 (from store, proc=nil)", cost)
 		}
@@ -2746,7 +2746,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("costSpent carries the genuine monotonic total", func(t *testing.T) {
 		s := &ManagedSession{}
 		storeTotalCost(&s.costSpent, 7.5)
-		_, _, spent, _, _ := snapshotOldSessionLocked(s)
+		_, _, spent, _, _ := snapshotOldSession(sessView{}, s)
 		if spent != 7.5 {
 			t.Errorf("spent = %v, want 7.5 (carried across spawn)", spent)
 		}
@@ -2755,7 +2755,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("createdAt round-trips", func(t *testing.T) {
 		s := &ManagedSession{}
 		s.createdAt.Store(123456789)
-		_, _, _, created, _ := snapshotOldSessionLocked(s)
+		_, _, _, created, _ := snapshotOldSession(sessView{}, s)
 		if created != 123456789 {
 			t.Errorf("created = %v, want 123456789", created)
 		}
@@ -2763,7 +2763,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 
 	t.Run("empty prevSessionIDs yields nil (no zero-len alloc)", func(t *testing.T) {
 		s := &ManagedSession{}
-		prev, _, _, _, _ := snapshotOldSessionLocked(s)
+		prev, _, _, _, _ := snapshotOldSession(sessView{}, s)
 		if prev != nil {
 			t.Errorf("prev = %v, want nil for empty source", prev)
 		}
@@ -2775,7 +2775,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 		s.SetTuningEffort("low")
 		s.SetUserLabel("my label")
 		s.setLabelOrigin("auto")
-		_, _, _, _, ov := snapshotOldSessionLocked(s)
+		_, _, _, _, ov := snapshotOldSession(sessView{}, s)
 		want := sessionOverrides{tuningModel: "claude-haiku-4.5", tuningEffort: "low", userLabel: "my label", labelOrigin: "auto"}
 		if ov != want {
 			t.Errorf("overrides = %+v, want %+v", ov, want)

@@ -44,7 +44,7 @@ func checkIndexInvariants(t *testing.T, r *Router, after string) {
 // *Locked mutators directly rather than going through a spawn.
 func newIndexTestRouter() *Router {
 	r := &Router{ss: newSessionTable()}
-	r.ss.Ext().picks.initLocked()
+	r.ss.Ext().picks.init()
 	return r
 }
 
@@ -65,10 +65,10 @@ func TestIndexInvariants_AcrossEveryMutationPath(t *testing.T) {
 	sA := &ManagedSession{key: keyA}
 	sB := &ManagedSession{key: keyB}
 
-	r.publishSessionLocked(keyA, sA, false)
+	r.publishSession(r.ss.AssumeLocked(), keyA, sA, false)
 	checkIndexInvariants(t, r, "publishSessionLocked(A)")
 
-	r.publishSessionLocked(keyB, sB, false)
+	r.publishSession(r.ss.AssumeLocked(), keyB, sB, false)
 	checkIndexInvariants(t, r, "publishSessionLocked(B)")
 
 	// idToKey is learned asynchronously — the CLI reports the session ID after the
@@ -92,13 +92,13 @@ func TestIndexInvariants_AcrossEveryMutationPath(t *testing.T) {
 		t.Errorf("idToKey after rename = %q, want %q", got, keyARenamed)
 	}
 
-	r.unregisterSessionLocked(keyARenamed, sA, false)
+	r.unregisterSession(r.ss.AssumeLocked(), keyARenamed, sA, false)
 	checkIndexInvariants(t, r, "unregisterSessionLocked(A)")
 	if _, ok := r.ss.KeyForID("sess-id-A"); ok {
 		t.Error("idToKey still maps the removed session's ID")
 	}
 
-	r.unregisterSessionLocked(keyB, sB, false)
+	r.unregisterSession(r.ss.AssumeLocked(), keyB, sB, false)
 	checkIndexInvariants(t, r, "unregisterSessionLocked(B)")
 	if r.ss.Len() != 0 {
 		t.Errorf("sessions still holds %d entries", r.ss.Len())
@@ -118,12 +118,12 @@ func TestIndexInvariants_ResetChatDropsTheWholeChat(t *testing.T) {
 	const chat = "feishu:p2p:userC"
 	keys := []string{chat + ":general", chat + ":agent-one", chat + ":agent-two"}
 	for _, k := range keys {
-		r.publishSessionLocked(k, &ManagedSession{key: k}, false)
+		r.publishSession(r.ss.AssumeLocked(), k, &ManagedSession{key: k}, false)
 	}
 	// A session on a DIFFERENT chat must survive, or the wholesale byChat drop is
 	// too wide.
 	const other = "feishu:p2p:userD:general"
-	r.publishSessionLocked(other, &ManagedSession{key: other}, false)
+	r.publishSession(r.ss.AssumeLocked(), other, &ManagedSession{key: other}, false)
 	checkIndexInvariants(t, r, "publish 3 + 1")
 
 	r.ResetChat(chat)
@@ -146,8 +146,8 @@ func TestIndexInvariants_RenameToOccupiedKeyLeavesIndicesConsistent(t *testing.T
 	r := newIndexTestRouter()
 	const from = "feishu:p2p:userE:general"
 	const to = "feishu:p2p:userF:general"
-	r.publishSessionLocked(from, &ManagedSession{key: from}, false)
-	r.publishSessionLocked(to, &ManagedSession{key: to}, false)
+	r.publishSession(r.ss.AssumeLocked(), from, &ManagedSession{key: from}, false)
+	r.publishSession(r.ss.AssumeLocked(), to, &ManagedSession{key: to}, false)
 
 	r.RenameSession(from, to)
 	checkIndexInvariants(t, r, "RenameSession onto an occupied key")
@@ -208,8 +208,8 @@ func TestIndexInvariants_DiscoveryAndShimAdoption(t *testing.T) {
 
 	// --- and the indices stay consistent when those sessions go away ---
 	r.ss.Lock()
-	r.unregisterSessionLocked(keyD, r.ss.Get(keyD), false)
-	r.unregisterSessionLocked(keyS, r.ss.Get(keyS), false)
+	r.unregisterSession(r.ss.AssumeLocked(), keyD, r.ss.Get(keyD), false)
+	r.unregisterSession(r.ss.AssumeLocked(), keyS, r.ss.Get(keyS), false)
 	r.ss.Unlock()
 	// Check reports any idToKey entry left pointing at the gone sessions.
 	checkIndexInvariants(t, r, "unregister after discovery + adoption")

@@ -51,7 +51,7 @@ func mkSystemPromptRouter(t *testing.T) *Router {
 // fresh session: the production resolver feeding the production argv
 // constructor feeding the backend's BuildArgs.
 func spawnArgvFor(r *Router, key string, opts AgentOpts) []string {
-	sp := r.resolveSpawnParamsLocked(key, "", opts)
+	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", opts)
 	return sp.Wrapper.Protocol.BuildArgs(
 		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
 }

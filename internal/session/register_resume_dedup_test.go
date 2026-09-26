@@ -35,7 +35,7 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 	unrelated := &ManagedSession{key: reusedKey}
 	unrelated.setSessionID(liveSID)
 	r.ss.Lock()
-	r.publishSessionLocked(reusedKey, unrelated, false)
+	r.publishSession(r.ss.AssumeLocked(), reusedKey, unrelated, false)
 	r.ss.SetID(liveSID, reusedKey)
 	// The leaked residue: oldSID still maps to the reused key even though the
 	// session living there (C) never owned oldSID.
@@ -95,7 +95,7 @@ func TestRegisterForResume_LegitimateChainDedupStillWorks(t *testing.T) {
 	live := &ManagedSession{key: liveKey, prevSessionIDs: []string{prevSID}}
 	live.setSessionID(curSID)
 	r.ss.Lock()
-	r.publishSessionLocked(liveKey, live, false)
+	r.publishSession(r.ss.AssumeLocked(), liveKey, live, false)
 	r.ss.SetID(curSID, liveKey)
 	r.ss.SetID(prevSID, liveKey)
 	r.ss.Unlock()

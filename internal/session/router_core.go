@@ -320,9 +320,9 @@ type pendingSpawnSlot struct {
 
 // acquirePendingSpawnSlot takes a pending-spawn slot and returns a token
 // whose release method can be called from any lock state.
-func (r *Router) acquirePendingSpawnSlot(tx sessTx) *pendingSpawnSlot {
+func (r *Router) acquirePendingSpawnSlot(tx sessTx) pendingSpawnSlot {
 	tx.Ext().spawns.AcquireSpawnSlot()
-	return &pendingSpawnSlot{r: r}
+	return pendingSpawnSlot{r: r}
 }
 
 // releaseIn decrements pendingSpawns inside a transaction. Idempotent — a
@@ -420,7 +420,7 @@ func panicSafeSpawnFn(
 // looks sessions up.
 func newSessionTable() *sessiontable.Table[*ManagedSession, routerState] {
 	t := sessiontable.New[*ManagedSession, routerState](chatKeyFor, persist.KeyHash)
-	t.Ext().picks.initLocked()
+	t.Ext().picks.init()
 	return t
 }
 
@@ -844,7 +844,7 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 	}
 	// publishSessionLocked funnels attachHistorySource + map insert + index
 	// update so the triple-index invariant is a property of the publish step.
-	r.publishSessionLocked(key, s, false)
+	r.publishSession(r.ss.AssumeLocked(), key, s, false)
 	r.kid.Track(entry.SessionID)
 	r.ss.SetID(entry.SessionID, key)
 }

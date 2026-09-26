@@ -26,7 +26,7 @@ func TestResolveSpawnParams_TuningPrecedence(t *testing.T) {
 		s.SetTuningModel("tuned-model")
 		r.ss.Lock()
 		r.ss.Put(key, s)
-		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Model: "opts-model"})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{Model: "opts-model"})
 		r.ss.Unlock()
 		if sp.Model != "tuned-model" {
 			t.Errorf("Model = %q, want tuned-model (session tuning must be highest tier)", sp.Model)
@@ -40,7 +40,7 @@ func TestResolveSpawnParams_TuningPrecedence(t *testing.T) {
 		s.SetTuningEffort("low")
 		r.ss.Lock()
 		r.ss.Put(key, s)
-		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Effort: "max"})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{Effort: "max"})
 		r.ss.Unlock()
 		if sp.Effort != "low" {
 			t.Errorf("Effort = %q, want low (session tuning must be highest tier)", sp.Effort)
@@ -53,7 +53,7 @@ func TestResolveSpawnParams_TuningPrecedence(t *testing.T) {
 		s := newSessionWithID(key, "sess-3")
 		r.ss.Lock()
 		r.ss.Put(key, s)
-		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Model: "opts-model", Effort: "high"})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{Model: "opts-model", Effort: "high"})
 		r.ss.Unlock()
 		if sp.Model != "opts-model" {
 			t.Errorf("Model = %q, want opts-model (empty tuning must not mask lower tiers)", sp.Model)
@@ -63,7 +63,7 @@ func TestResolveSpawnParams_TuningPrecedence(t *testing.T) {
 		}
 
 		r.ss.Lock()
-		sp = r.resolveSpawnParamsLocked(key, "", AgentOpts{})
+		sp = r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{})
 		r.ss.Unlock()
 		if sp.Model != "cfg-default" {
 			t.Errorf("Model = %q, want cfg-default (config fallback)", sp.Model)
@@ -73,7 +73,7 @@ func TestResolveSpawnParams_TuningPrecedence(t *testing.T) {
 	t.Run("fresh key without session entry has no override", func(t *testing.T) {
 		r := newRouterWith(t)
 		r.ss.Lock()
-		sp := r.resolveSpawnParamsLocked("dash:direct:new:general", "", AgentOpts{})
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:new:general", "", AgentOpts{})
 		r.ss.Unlock()
 		if sp.Model != "cfg-default" || sp.Effort != "" {
 			t.Errorf("fresh key: Model=%q Effort=%q, want cfg-default/\"\"", sp.Model, sp.Effort)
