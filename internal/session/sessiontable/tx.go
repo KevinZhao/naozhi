@@ -30,10 +30,14 @@ func (t *Table[S, X]) View(fn func(v View[S, X])) {
 // returns, panics included.
 func (t *Table[S, X]) Update(fn func(tx Tx[S, X])) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	tx := t.begin()
-	defer func() { t.liveSeq = 0 }()
-	fn(tx)
+	defer t.end()
+	fn(t.begin())
+}
+
+// end retires the live Tx and releases the write lock.
+func (t *Table[S, X]) end() {
+	t.liveSeq = 0
+	t.mu.Unlock()
 }
 
 // begin issues a Tx for the current write-lock holder.

@@ -64,10 +64,7 @@ func (d *driftShutdowns) has(key string) bool {
 // a recorded drift shutdown, because a key could in principle be drift-shut
 // and then respawned mid-turn — the live turn is the newer fact.
 func (r *Router) AdoptInFlight(key string) (*cli.Process, AdoptState) {
-	r.ss.RLock()
-	sess := r.ss.Get(key)
-	r.ss.RUnlock()
-	if sess != nil {
+	if sess := r.ss.Load(key); sess != nil {
 		// loadProcess returns the processIface tests stub; the adopted-turn
 		// latch lives on the concrete *cli.Process only, so a stubbed process
 		// simply reports nothing to adopt.

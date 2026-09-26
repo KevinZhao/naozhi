@@ -94,13 +94,14 @@ func (r *Router) runOrphanSweep() {
 	if r.eventLogDir == "" {
 		return
 	}
-	// Snapshot known keys under the read lock so we don't race concurrent spawns.
-	r.ss.RLock()
-	known := make(map[string]struct{}, r.ss.Len())
-	for k := range r.ss.All() {
-		known[k] = struct{}{}
-	}
-	r.ss.RUnlock()
+	// Snapshot known keys in one View so we don't race concurrent spawns.
+	var known map[string]struct{}
+	r.ss.View(func(v sessView) {
+		known = make(map[string]struct{}, v.Len())
+		for k := range v.All() {
+			known[k] = struct{}{}
+		}
+	})
 
 	// runHistoryTask takes historyWg.Add(1) under r.historyWgMu, atomic with
 	// Shutdown's historyCancel(), so a Start after Shutdown cannot panic with

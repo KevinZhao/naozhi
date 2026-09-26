@@ -89,6 +89,23 @@ func waitResult(t *testing.T, ch <-chan spawnResult) spawnResult {
 	}
 }
 
+// spawnIn runs one whole spawn for key: before (when set) and the reserve in
+// one transaction, then the rest outside it.
+func spawnIn(r *Router, key string, before func(tx sessTx)) (*ManagedSession, error) {
+	var res spawnReservation
+	var err error
+	r.ss.Update(func(tx sessTx) {
+		if before != nil {
+			before(tx)
+		}
+		err = r.reserveSpawn(tx, &res, key, "", AgentOpts{})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.completeSpawn(context.Background(), &res)
+}
+
 // injectLocked installs a session for key under the table lock.
 func injectLocked(r *Router, key string, proc processIface) *ManagedSession {
 	r.ss.Lock()
@@ -282,11 +299,9 @@ func TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID(t *testing.T) {
 	old.costMu.Lock()
 	old.spent = costledger.Totals{Metered: map[costledger.Unit]float64{"requests": 3}}
 	old.costMu.Unlock()
-	r.ss.Lock()
-	r.ss.SetID("sid-old", key)
-	s, err := r.spawnSession(context.Background(), key, "", AgentOpts{}) // releases the table lock
+	s, err := spawnIn(r, key, func(tx sessTx) { tx.SetID("sid-old", key) })
 	if err != nil {
-		t.Fatalf("spawnSession: %v", err)
+		t.Fatalf("spawn: %v", err)
 	}
 	if got := s.CostTotals().Metered["requests"]; got != 3 {
 		t.Errorf("respawned session's metered spend = %v, want the replaced session's 3", got)

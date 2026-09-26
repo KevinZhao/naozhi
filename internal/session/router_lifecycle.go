@@ -881,20 +881,6 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 	return s, nil
 }
 
-// spawnSession is reserveSpawn + completeSpawn for callers that hold the lock
-// through Lock. Transitional: it goes when the last of them moves to Update.
-//
-// LOCK: enter with the table lock held; returns with it released.
-func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
-	var res spawnReservation
-	err := r.reserveSpawn(r.ss.AssumeLocked(), &res, key, resumeID, opts)
-	r.ss.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	return r.completeSpawn(ctx, &res)
-}
-
 // bindNewSessionHistory loads the resume-history chain into a freshly-spawned
 // session and THEN installs the event-log persist sink, in that exact order:
 // SetPersistSink must run only AFTER every InjectHistory call, otherwise the

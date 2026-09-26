@@ -76,8 +76,8 @@ var ErrTuningEffortUnsupported = errors.New("backend does not support effort tie
 // validation failures, or clierr.ErrSetModelRejected, where the override is NOT
 // recorded (§6 R8 ack-before-persist) and the CLI's rejection text is in the error.
 //
-// Concurrency: the table lock is held for the decide+record phase only. The RPC wait
-// and proc.Close run unlocked — a concurrent mutation between phases resolves
+// Concurrency: the decide+record phase is one transaction. The RPC wait and
+// proc.Close run outside it — a concurrent mutation between phases resolves
 // as last-write-wins (RFC §6 R5).
 func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort *string) (string, error) {
 	if model == nil && effort == nil {
@@ -94,95 +94,107 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		}
 	}
 
-	// ---- decide + (conditionally) record, under the table lock ----
-	r.ss.Lock()
-	sess := r.ss.Get(key)
-	if sess == nil {
-		err := r.setPendingTuningLocked(key, model, effort)
-		r.ss.Unlock()
-		if err != nil {
-			return "", err
+	// ---- decide + (conditionally) record, in one transaction ----
+	var (
+		sess                        *ManagedSession
+		proc                        processIface
+		err                         error
+		pending, noop               bool
+		modelChanged, effortChanged bool
+		respawnNeeded, rpcPath      bool
+		alive                       bool
+	)
+	r.ss.Update(func(tx sessTx) {
+		if sess = tx.Get(key); sess == nil {
+			pending, err = true, r.setPendingTuning(tx, key, model, effort)
+			return
 		}
+		wrapper, backendID := r.wrapperFor(sess.Backend())
+		// A missing wrapper degrades to zero caps: a model override is still
+		// safe to record (only feeds the next spawn's flags); an effort tier
+		// needs a capability we cannot confirm, so it is rejected below.
+		var caps cli.Caps
+		if wrapper != nil {
+			caps = cli.ProtocolCaps(wrapper.Protocol)
+		}
+		if effort != nil && *effort != "" && !caps.EffortTier {
+			err = fmt.Errorf("%w: %s", ErrTuningEffortUnsupported, backendID)
+			return
+		}
+
+		effortChanged = effort != nil && *effort != sess.TuningEffort()
+		modelChanged = model != nil && *model != sess.TuningModel()
+		if !effortChanged && !modelChanged {
+			noop = true // already at the requested values
+			return
+		}
+
+		// Effective tier AFTER this call decides the RPC-vs-respawn split. Only
+		// the backend default and the tuning override are visible here; the
+		// agents[].effort layer arrives via AgentOpts at send time, so an
+		// agent-tiered session on a tier-less kiro backend may take the RPC path
+		// and lose its agent tier until the next respawn (kiro-effort-control §4.5.1).
+		effectiveEffort := r.backendDefaultsFor(backendID).Effort
+		if effort != nil {
+			if *effort != "" {
+				effectiveEffort = *effort
+			}
+		} else if te := sess.TuningEffort(); te != "" {
+			effectiveEffort = te
+		}
+
+		// Clearing the model override ("恢复默认") has no model id to hand the
+		// CLI (set_model("") blanks kiro's header / is rejected by claude), so
+		// it always takes the respawn/deferred path and the config chain
+		// reapplies on the next spawn (RFC §4.3 清除语义).
+		modelCleared := modelChanged && *model == ""
+		respawnNeeded = effortChanged || modelCleared ||
+			(modelChanged && caps.EffortTier && effectiveEffort != "")
+
+		proc = sess.loadProcess()
+		alive = proc != nil && proc.Alive()
+
+		// RPC fast path defers recording until the CLI acks (§6 R8); every
+		// other path records now, in the same transaction as the decision.
+		// `*model != ""` is implied by !respawnNeeded but spelled out so "never
+		// RPC an empty model" survives refactors.
+		rpcPath = modelChanged && *model != "" && !respawnNeeded && alive
+		if !rpcPath {
+			if modelChanged {
+				sess.SetTuningModel(*model)
+			}
+			if effortChanged {
+				sess.SetTuningEffort(*effort)
+			}
+			tx.MarkChanged()
+		}
+	})
+	switch {
+	case err != nil:
+		return "", err
+	case pending:
 		slog.Info("session tuning recorded for a session not yet spawned",
 			"key", osutil.SanitizeForLog(key, 64), "model_set", model != nil, "effort_set", effort != nil)
 		return TuningAppliedDeferred, nil
+	case noop:
+		return TuningAppliedDeferred, nil
 	}
-	wrapper, backendID := r.wrapperFor(sess.Backend())
-	// A missing wrapper degrades to zero caps: a model override is still safe
-	// to record (only feeds the next spawn's flags); an effort tier needs a
-	// capability we cannot confirm, so it is rejected below.
-	var caps cli.Caps
-	if wrapper != nil {
-		caps = cli.ProtocolCaps(wrapper.Protocol)
-	}
-	if effort != nil && *effort != "" && !caps.EffortTier {
-		r.ss.Unlock()
-		return "", fmt.Errorf("%w: %s", ErrTuningEffortUnsupported, backendID)
-	}
-
-	effortChanged := effort != nil && *effort != sess.TuningEffort()
-	modelChanged := model != nil && *model != sess.TuningModel()
-	if !effortChanged && !modelChanged {
-		r.ss.Unlock()
-		return TuningAppliedDeferred, nil // no-op: already at the requested values
-	}
-
-	// Effective tier AFTER this call decides the RPC-vs-respawn split. Only
-	// the backend default and the tuning override are visible here; the
-	// agents[].effort layer arrives via AgentOpts at send time, so an
-	// agent-tiered session on a tier-less kiro backend may take the RPC path
-	// and lose its agent tier until the next respawn (kiro-effort-control §4.5.1).
-	effectiveEffort := r.backendDefaultsFor(backendID).Effort
-	if effort != nil {
-		if *effort != "" {
-			effectiveEffort = *effort
-		}
-	} else if te := sess.TuningEffort(); te != "" {
-		effectiveEffort = te
-	}
-
-	// Clearing the model override ("恢复默认") has no model id to hand the CLI
-	// (set_model("") blanks kiro's header / is rejected by claude), so it
-	// always takes the respawn/deferred path and the config chain reapplies
-	// on the next spawn (RFC §4.3 清除语义).
-	modelCleared := modelChanged && *model == ""
-	respawnNeeded := effortChanged || modelCleared ||
-		(modelChanged && caps.EffortTier && effectiveEffort != "")
-
-	proc := sess.loadProcess()
-	alive := proc != nil && proc.Alive()
-
-	// RPC fast path defers recording until the CLI acks (§6 R8); every other
-	// path records now, under the same the table lock hold as the decision. `*model != ""`
-	// is implied by !respawnNeeded but spelled out so "never RPC an empty
-	// model" survives refactors.
-	rpcPath := modelChanged && *model != "" && !respawnNeeded && alive
-	if !rpcPath {
-		if modelChanged {
-			sess.SetTuningModel(*model)
-		}
-		if effortChanged {
-			sess.SetTuningEffort(*effort)
-		}
-		r.ss.MarkChanged()
-	}
-	r.ss.Unlock()
 
 	logKey := osutil.SanitizeForLog(key, 64)
 
-	// ---- apply, unlocked ----
+	// ---- apply, outside the transaction ----
 	if rpcPath {
 		err := procSetModel(ctx, proc, *model)
 		switch {
 		case err == nil:
 			// Ack success → record + persist (the only deferred-record path).
-			r.ss.Lock()
-			if cur := r.ss.Get(key); cur != nil {
-				cur.SetTuningModel(*model)
-				cur.SetModel(*model) // persisted display mirror (F11)
-				r.ss.MarkChanged()
-			}
-			r.ss.Unlock()
+			r.ss.Update(func(tx sessTx) {
+				if cur := tx.Get(key); cur != nil {
+					cur.SetTuningModel(*model)
+					cur.SetModel(*model) // persisted display mirror (F11)
+					tx.MarkChanged()
+				}
+			})
 			r.notifyChange()
 			slog.Info("session tuning applied via rpc", "key", logKey, "model", *model)
 			return TuningAppliedRPC, nil
@@ -195,12 +207,12 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 			// Transport failure / no runtime channel / pre-handshake / ack
 			// timeout: degrade to record-only, applies on next spawn
 			// (§4.4 "失败则降级为记 override + 提示下次生效").
-			r.ss.Lock()
-			if cur := r.ss.Get(key); cur != nil {
-				cur.SetTuningModel(*model)
-				r.ss.MarkChanged()
-			}
-			r.ss.Unlock()
+			r.ss.Update(func(tx sessTx) {
+				if cur := tx.Get(key); cur != nil {
+					cur.SetTuningModel(*model)
+					tx.MarkChanged()
+				}
+			})
 			r.notifyChange()
 			slog.Warn("session tuning rpc failed; recorded for next spawn",
 				"key", logKey, "err", err)
@@ -217,12 +229,12 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		proc.Close()
 		// Recount (not activeCount.Add(-1)) so the per-backend gauge and total
 		// stay in lockstep with the map; otherwise every tuning respawn leaks
-		// one slot. Broadcast under the table lock so Shutdown's cond.Wait predicate
+		// one slot. Broadcast in a transaction so Shutdown's wait predicate
 		// cannot re-evaluate between Close and the wakeup.
-		r.ss.Lock()
-		r.ss.Broadcast()
-		r.countActive(r.ss.AssumeLocked())
-		r.ss.Unlock()
+		r.ss.Update(func(tx sessTx) {
+			tx.Broadcast()
+			r.countActive(tx)
+		})
 		r.notifyChange()
 		slog.Info("session tuning applied via respawn", "key", logKey,
 			"model_changed", modelChanged, "effort_changed", effortChanged)
@@ -249,12 +261,12 @@ func procSetModel(ctx context.Context, proc processIface, model string) error {
 	return ms.SetModel(ctx, model)
 }
 
-// setPendingTuningLocked records (or clears) the pre-spawn pick for key.
+// setPendingTuning records (or clears) the pre-spawn pick for key.
 // nil leaves a field as is; "" clears it; a record with both fields empty is
 // deleted so a "恢复默认" on a never-spawned session leaves no residue.
-// Caller holds the table lock.
-func (r *Router) setPendingTuningLocked(key string, model, effort *string) error {
-	cur, exists := r.ss.Ext().picks.tuning[key]
+func (r *Router) setPendingTuning(tx sessTx, key string, model, effort *string) error {
+	picks := &tx.Ext().picks
+	cur, exists := picks.tuning[key]
 	if model != nil {
 		cur.Model = *model
 	}
@@ -262,15 +274,15 @@ func (r *Router) setPendingTuningLocked(key string, model, effort *string) error
 		cur.Effort = *effort
 	}
 	if cur.Model == "" && cur.Effort == "" {
-		delete(r.ss.Ext().picks.tuning, key)
+		delete(picks.tuning, key)
 		return nil
 	}
-	if !exists && len(r.ss.Ext().picks.tuning) >= maxTuningOverrides {
+	if !exists && len(picks.tuning) >= maxTuningOverrides {
 		return ErrTuningCapacity
 	}
-	if r.ss.Ext().picks.tuning == nil {
-		r.ss.Ext().picks.tuning = make(map[string]pendingTuning)
+	if picks.tuning == nil {
+		picks.tuning = make(map[string]pendingTuning)
 	}
-	r.ss.Ext().picks.tuning[key] = cur
+	picks.tuning[key] = cur
 	return nil
 }
