@@ -1,8 +1,6 @@
 // File-block contract (server-split-phase4-design v0.6.1 §五):
 //
-//	WRITES:     broadcast block (debounceMu / debounceTimer / debounceFirst /
-//	            debounceClosed / debounceClosedFast / debounceFire) +
-//	            subscriber block (clients) for SendRaw fanout
+//	WRITES:     subscriber block (clients) for SendRaw fanout
 //	READS:      shared deps block (read-only after ctor) + send block
 //	            (queue / droppedTotal for broadcast-aware enqueue)
 package server
@@ -152,74 +150,12 @@ func (h *Hub) BroadcastSessionReady(key string) {
 	h.marshalBroadcastAuth(wsproto.NewSessionState(wsproto.SessionState{Key: key, State: "running"}))
 }
 
-// BroadcastSessionsUpdate debounces notifications: resets a 50ms timer on each
-// call; the actual broadcast fires only when no further calls arrive within the
-// window. A 500ms hard cap on the total debounce window guarantees the update
-// eventually fires even under sustained bursts, so clients never miss a refresh.
+// BroadcastSessionsUpdate asks for a sessions_update broadcast. Bursts
+// coalesce: the broadcast fires debounceInterval after the last call, and no
+// later than maxDebounceDelay after the first, so a sustained burst still
+// refreshes clients.
 func (h *Hub) BroadcastSessionsUpdate() {
-	const (
-		debounceInterval = 50 * time.Millisecond
-		maxDebounceDelay = 500 * time.Millisecond
-	)
-	// Lock-free fast path: once Shutdown has published the flag every call is a
-	// no-op. The authoritative debounceClosed check below still runs under the
-	// mutex for callers that arrive before the flag publishes (#723).
-	if h.debounceClosedFast.Load() {
-		return
-	}
-	// Capture wall clock outside the critical section so the vDSO call
-	// does not extend the mutex window.
-	now := time.Now()
-	h.debounceMu.Lock()
-	defer h.debounceMu.Unlock()
-	// Shutdown already drained the debounce WG slot; any new scheduling here
-	// would either leak (callback never waited for) or race clientWG.Wait.
-	if h.debounceClosed {
-		return
-	}
-	if h.debounceArmed {
-		if now.Sub(h.debounceFirst) >= maxDebounceDelay {
-			// Hard cap reached — let the pending timer fire without resetting.
-			return
-		}
-		// Reset on a timer whose AfterFunc already fired (callback blocked on
-		// debounceMu) would schedule a SECOND run without a matching
-		// clientWG.Add, breaking Shutdown's Wait. Stop() == false means the
-		// in-flight callback will do the broadcast; it clears debounceArmed so
-		// the next call re-arms via the idle branch below.
-		if h.debounceTimer.Stop() {
-			h.debounceTimer.Reset(debounceInterval)
-		}
-		return
-	}
-	h.debounceFirst = now
-	// Track the AfterFunc callback via clientWG so Shutdown can wait for
-	// any late-firing broadcast to finish touching the clients map. The
-	// callback still runs even after Stop() if it had already fired and
-	// was scheduled, so the tracking guards against a post-Shutdown race.
-	h.clientWG.Add(1)
-	// Production hubs pre-allocate debounceTimer in NewHub (bound to
-	// h.debounceFire) so the idle→armed transition is a Reset with no timer
-	// allocation (#1624). Hand-rolled test hubs leave it nil and fall back to a
-	// per-call AfterFunc whose closure keeps the closed-check for Shutdown races.
-	if h.debounceTimer != nil {
-		h.debounceArmed = true
-		h.debounceTimer.Reset(debounceInterval)
-		return
-	}
-	fire := func() {
-		defer h.clientWG.Done()
-		h.debounceMu.Lock()
-		h.debounceArmed = false
-		closed := h.debounceClosed
-		h.debounceMu.Unlock()
-		if closed {
-			return
-		}
-		h.doBroadcastSessionsUpdate()
-	}
-	h.debounceArmed = true
-	h.debounceTimer = time.AfterFunc(debounceInterval, fire)
+	h.debounce.trigger()
 }
 
 func (h *Hub) doBroadcastSessionsUpdate() {

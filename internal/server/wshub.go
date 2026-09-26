@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/sha256"
-	"math"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -124,23 +123,9 @@ type Hub struct {
 	auth     *auth.Handlers
 	upgrader websocket.Upgrader
 
-	debounceMu sync.Mutex
-	// debounceTimer is allocated once in NewHub and re-armed with Reset; nil
-	// on hand-rolled hubs, which fall back to per-call time.AfterFunc (#1624).
-	debounceTimer *time.Timer
-	// debounceArmed is true while a debounce window is pending and clientWG
-	// holds the matching Add(1). Written only under debounceMu.
-	debounceArmed bool
-	debounceFirst time.Time // first trigger in the current debounce window
-	// debounceClosed (under debounceMu) stops post-Shutdown broadcasts from
-	// adding to clientWG after Shutdown's drain point.
-	debounceClosed bool
-	// debounceClosedFast is a lock-free read-side mirror of debounceClosed;
-	// written only under debounceMu so "flag set ⇒ no new clientWG.Add(1)"
-	// still holds (#723).
-	debounceClosedFast atomic.Bool
-	// debounceFire is the AfterFunc callback bound once in NewHub.
-	debounceFire func()
+	// debounce coalesces sessions_update broadcasts; each pending fire holds
+	// a clientWG slot, so Shutdown's Wait covers a late-running broadcast.
+	debounce *debouncer
 
 	// tailers is the agentTailer registry behind agent_subscribe /
 	// agent_unsubscribe; initialised by NewHub, torn down in Shutdown.
@@ -276,23 +261,7 @@ func NewHub(opts HubOptions) *Hub {
 	h.historyMarshalCache = newHistoryMarshalCache()
 	h.userSendLimiters.Store(&sync.Map{})
 	h.connCountByOwner = make(map[string]int)
-	// Bound once so the high-frequency BroadcastSessionsUpdate path does not
-	// allocate a closure per call.
-	h.debounceFire = func() {
-		defer h.clientWG.Done()
-		h.debounceMu.Lock()
-		h.debounceArmed = false
-		closed := h.debounceClosed
-		h.debounceMu.Unlock()
-		if closed {
-			return
-		}
-		h.doBroadcastSessionsUpdate()
-	}
-	// Hub-lifetime timer, created idle; BroadcastSessionsUpdate arms it with
-	// Reset. AfterFunc(MaxInt64) cannot fire before Stop, so no drain needed.
-	h.debounceTimer = time.AfterFunc(time.Duration(math.MaxInt64), h.debounceFire)
-	h.debounceTimer.Stop()
+	h.debounce = newDebouncer(&h.clientWG, h.doBroadcastSessionsUpdate)
 	// Built last: h is now usable as the engine's sendNotifier. The engine
 	// keeps its own reference to each shared dependency (see sendEngine's
 	// INVARIANT note) rather than a *Hub back-pointer.
@@ -617,20 +586,9 @@ func (h *Hub) releaseOwnerSlotForClient(c *wsClient) {
 func (h *Hub) Shutdown() {
 	h.cancel() // cancel in-flight send goroutines
 
-	// Flag first (inside the critical section, so the atomic mirror is
-	// published before any later Stop/Reset) so no concurrent broadcast can
-	// add a clientWG slot past the Wait below. Only an armed timer holds a
-	// slot: Stop()==true means the callback never ran, so release it here.
-	h.debounceMu.Lock()
-	h.debounceClosed = true
-	h.debounceClosedFast.Store(true)
-	if h.debounceArmed && h.debounceTimer != nil {
-		if h.debounceTimer.Stop() {
-			h.clientWG.Done()
-		}
-		h.debounceArmed = false
-	}
-	h.debounceMu.Unlock()
+	// Before the clients go: no broadcast may take a clientWG slot past the
+	// Wait below, and a window that never fired gives its slot back here.
+	h.debounce.close()
 
 	// Close client conns first, then wait for pumps/eventPushLoop, so
 	// node/router teardown cannot race unregister → RemoveClient. Unsub
@@ -721,8 +679,8 @@ func (h *Hub) Shutdown() {
 	h.connCountByOwnerMu.Unlock()
 
 	// Send barrier. Position is load-bearing and drain's godoc spells out why:
-	// h.cancel() above, debounceClosed already published, none of h.mu /
-	// authMu / debounceMu held (the drained goroutines re-enter all three
+	// h.cancel() and h.debounce.close() above, none of h.mu / authMu / the
+	// debouncer's lock held (the drained goroutines re-enter all three
 	// through sendNotifier), and before the node Close loop below.
 	// wshub_shutdown_order_test.go pins the source order.
 	if h.engine != nil {

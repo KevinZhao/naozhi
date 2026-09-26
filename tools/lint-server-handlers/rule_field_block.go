@@ -5,12 +5,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
+// hubMethodRE matches a method declared on the Hub (pointer or value receiver).
+var hubMethodRE = regexp.MustCompile(`(?m)^func \(\w+ \*?Hub\) `)
+
 // scanFieldBlockMarkers (rule 3a) returns one Violation per wshub_*.go file
-// missing the godoc field-block marker. Text-level check, not AST: it
-// catches the common case of adding a method and forgetting the header.
+// that defines Hub methods but lacks the godoc field-block marker. Text-level
+// check, not AST: it catches the common case of adding a method and
+// forgetting the header. A file with no Hub methods (a sub-object that owns
+// its own lock and fields) has no Hub field block to declare.
 //
 // Markers: "Field-block contract:" (wshub.go, which owns the Hub struct and
 // its block table); "WRITES:" (a wshub_<block>.go method file);
@@ -58,6 +64,9 @@ func scanFieldBlockMarkers(serverPkg string) []Violation {
 		}
 
 		// hub_<block>.go: must contain WRITES / READS-ALSO / LIFECYCLE-METHOD
+		if !hubMethodRE.MatchString(string(data)) {
+			continue
+		}
 		if hasAnyMarker(header, "WRITES:", "READS-ALSO:", "LIFECYCLE-METHOD") {
 			continue
 		}
