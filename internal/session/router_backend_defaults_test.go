@@ -10,7 +10,7 @@ import (
 // router-level defaults, and a backend with no entry falls back cleanly.
 func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 	t.Run("falls back to router defaults when no backend entry", func(t *testing.T) {
-		r := &Router{}
+		r := &Router{ss: newSessionTable()}
 		r.bkStore.model = "router-default"
 		r.bkStore.extraArgs = []string{"--router-flag"}
 		r.bkStore.setBackendModelsForTest(map[string]string{})
@@ -25,7 +25,7 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 	})
 
 	t.Run("per-backend override wins over router default", func(t *testing.T) {
-		r := &Router{}
+		r := &Router{ss: newSessionTable()}
 		r.bkStore.model = "router-default"
 		r.bkStore.extraArgs = []string{"--router-flag"}
 		r.bkStore.setBackendModelsForTest(map[string]string{
@@ -47,7 +47,7 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 		// Mirrors the pre-helper inline logic: empty model / nil-or-zero
 		// extraArgs entries did NOT clear router defaults — they were
 		// transparent. Documented elsewhere as `bm != ""` and `len(ba) > 0`.
-		r := &Router{}
+		r := &Router{ss: newSessionTable()}
 		r.bkStore.model = "router-default"
 		r.bkStore.extraArgs = []string{"--router-flag"}
 		r.bkStore.setBackendModelsForTest(map[string]string{
@@ -70,7 +70,7 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 	// protocol ignores it), so the only question is per-backend lookup.
 	// docs/rfc/kiro-effort-control.md §4.2
 	t.Run("effort comes from the per-backend map only", func(t *testing.T) {
-		r := &Router{}
+		r := &Router{ss: newSessionTable()}
 		r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "xhigh"})
 
 		if got := r.backendDefaultsFor("kiro").Effort; got != "xhigh" {
@@ -82,14 +82,14 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 			t.Errorf("effort for unconfigured backend = %q, want empty", got)
 		}
 		// Nil map (no effort configured anywhere) must not panic.
-		r2 := &Router{}
+		r2 := &Router{ss: newSessionTable()}
 		if got := r2.backendDefaultsFor("kiro").Effort; got != "" {
 			t.Errorf("effort with nil map = %q, want empty", got)
 		}
 	})
 
 	t.Run("unknown backend ID falls through cleanly", func(t *testing.T) {
-		r := &Router{}
+		r := &Router{ss: newSessionTable()}
 		r.bkStore.model = "router-default"
 		r.bkStore.extraArgs = []string{"--router-flag"}
 		r.bkStore.setBackendModelsForTest(map[string]string{

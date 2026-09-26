@@ -73,7 +73,7 @@ func TestShutdown_SetsStoppedBeforeSnapshot(t *testing.T) {
 	// The leak this fix prevents is a fresh session installed AFTER the snapshot
 	// that never gets detached — it would show up here.
 	r.mu.RLock()
-	leaked := len(r.ss.sessions)
+	leaked := r.ss.Len()
 	r.mu.RUnlock()
 	if leaked != 0 {
 		t.Fatalf("r.ss.sessions has %d entries after Shutdown; a spawn raced past the snapshot and leaked a session (#1822 TOCTOU regression)", leaked)

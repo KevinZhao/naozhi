@@ -19,7 +19,7 @@ import (
 )
 
 // removeSnapshot captures everything finishRemoveCleanup needs from a session
-// AFTER unregisterSessionLocked dropped it from r.ss.sessions, taken under r.mu
+// AFTER unregisterSessionLocked dropped it from the session table, taken under r.mu
 // so the post-unlock teardown (possibly a detached RemoveAsync goroutine) never
 // reads router state again: finishRemoveCleanup MUST NOT touch r.ss.*.
 type removeSnapshot struct {
@@ -29,13 +29,13 @@ type removeSnapshot struct {
 }
 
 // unregisterAndSnapshot runs the fast, locked half of a session removal:
-// unregister from r.ss.sessions and all secondary indexes, finalise
+// unregister from the session table and all secondary indexes, finalise
 // active-count and dirty/version bookkeeping, hand back a value snapshot.
 // Returns ok=false when the key is absent — lookup+delete is atomic under r.mu,
 // so two concurrent Remove/RemoveAsync calls cannot both capture a non-nil proc.
 func (r *Router) unregisterAndSnapshot(key string) (removeSnapshot, bool) {
 	r.mu.Lock()
-	s, ok := r.ss.sessions[key]
+	s, ok := r.ss.Lookup(key)
 	if !ok {
 		r.mu.Unlock()
 		return removeSnapshot{}, false
@@ -44,21 +44,20 @@ func (r *Router) unregisterAndSnapshot(key string) (removeSnapshot, bool) {
 	proc := s.loadProcess()
 	wasActive := !s.exempt && proc != nil && proc.Alive()
 	// Snapshot workspace and session UUID BEFORE unregister: afterwards the
-	// session is gone from r.ss.sessions, and OnSessionRemoved needs the root
+	// session is gone from the session table, and OnSessionRemoved needs the root
 	// while notifyKeyRetired needs the UUID to stamp retired_at.
 	workspaceSnapshot := s.Workspace()
 	backend := s.Backend()
 	retiredSessionID := s.SessionID()
 	r.unregisterSessionLocked(key, s, false)
 	if wasActive {
-		if r.ss.activeCount.Add(-1) < 0 {
-			r.ss.activeCount.Store(0)
+		if r.ss.AddActive(-1) < 0 {
+			r.ss.SetActive(0)
 		}
 		// Per-backend gauge mirror (Multi-Backend RFC §10).
 		metrics.RecordSessionActive(backend, -1)
 	}
-	r.ss.dirty = true
-	r.ss.gen.Add(1)
+	r.ss.MarkChanged()
 	r.mu.Unlock()
 
 	return removeSnapshot{
@@ -97,7 +96,7 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	// per-session ring map stays bounded.
 	r.sessionRuns.Invalidate(key)
 	// Broadcast under r.mu to match every other Broadcast site. Not
-	// load-bearing for Shutdown: the session already left r.ss.sessions.
+	// load-bearing for Shutdown: the session already left the session table.
 	if r.shutdownCond != nil {
 		r.mu.Lock()
 		r.shutdownCond.Broadcast()
@@ -123,7 +122,7 @@ func (r *Router) Remove(key string) bool {
 
 // RemoveAsync removes a session from the router immediately (locked
 // unregister) and runs the slow teardown in a detached goroutine. Returns true
-// the instant the session is gone from r.ss.sessions.
+// the instant the session is gone from the session table.
 //
 // The teardown goroutine is intentionally NOT tracked by Shutdown (see its
 // single-shot + bounded-leak contract); each self-terminates in ≤15s. removeWg
@@ -222,7 +221,7 @@ func (r *Router) Cleanup() {
 	// Collect prune candidates in this same RLock pass so the write-locked
 	// prune section is O(expired) instead of ranging the whole map (#1607).
 	var pruneCandidates []string
-	for key, s := range r.ss.sessions {
+	for key, s := range r.ss.All() {
 		if s.exempt {
 			continue // planner sessions are never expired/pruned by TTL
 		}
@@ -334,7 +333,7 @@ func (r *Router) Cleanup() {
 	// Send) since the snapshot, and such a candidate must NOT be removed.
 	var pruned int
 	for _, key := range pruneCandidates {
-		s, ok := r.ss.sessions[key]
+		s, ok := r.ss.Lookup(key)
 		if !ok || s.exempt {
 			continue // already gone, or became exempt — skip
 		}
@@ -351,26 +350,25 @@ func (r *Router) Cleanup() {
 	if closedCount > 0 || pruned > 0 {
 		aliveTotal = r.reconcileSessionActiveByBackendLocked()
 	} else {
-		aliveTotal = r.ss.activeCount.Load()
+		aliveTotal = r.ss.Active()
 	}
-	r.ss.activeCount.Store(aliveTotal)
+	r.ss.SetActive(aliveTotal)
 
 	// Snapshot sessions for periodic save (while still holding the lock).
 	// Skip save if nothing changed since last Cleanup cycle.
 	if closedCount > 0 || pruned > 0 {
-		r.ss.dirty = true
-		r.ss.gen.Add(1)
+		r.ss.MarkChanged()
 	}
 	// Snapshot the dirty stores in the smallest shape the save path needs: a
 	// []*ManagedSession (#1606) and the ws-overrides map.
 	var sessionsCopy []*ManagedSession
 	var wsOverridesCopy map[string]string
 	storePath := r.storePath
-	snapshotGen := r.ss.gen.Load()
+	snapshotGen := r.ss.Gen()
 	snapshotWsGen := r.wsStore.Gen()
-	if r.ss.dirty {
-		sessionsCopy = make([]*ManagedSession, 0, len(r.ss.sessions))
-		for _, v := range r.ss.sessions {
+	if r.ss.Dirty() {
+		sessionsCopy = make([]*ManagedSession, 0, r.ss.Len())
+		for _, v := range r.ss.All() {
 			sessionsCopy = append(sessionsCopy, v)
 		}
 	}
@@ -392,8 +390,8 @@ func (r *Router) Cleanup() {
 		} else {
 			// Only clear dirty flag if no concurrent mutation occurred since snapshot.
 			r.mu.Lock()
-			if r.ss.gen.Load() == snapshotGen {
-				r.ss.dirty = false
+			if r.ss.Gen() == snapshotGen {
+				r.ss.SetDirty(false)
 			}
 			r.mu.Unlock()
 		}
@@ -525,9 +523,9 @@ func (r *Router) saveIfDirty() {
 	r.mu.RLock()
 	// Slice snapshot, not a map copy — see the matching note in Cleanup (#1606).
 	var sessionsCopy []*ManagedSession
-	if r.ss.dirty {
-		sessionsCopy = make([]*ManagedSession, 0, len(r.ss.sessions))
-		for _, v := range r.ss.sessions {
+	if r.ss.Dirty() {
+		sessionsCopy = make([]*ManagedSession, 0, r.ss.Len())
+		for _, v := range r.ss.All() {
 			sessionsCopy = append(sessionsCopy, v)
 		}
 	}
@@ -536,7 +534,7 @@ func (r *Router) saveIfDirty() {
 		wsOverridesCopy = r.wsStore.Snapshot()
 	}
 	storePath := r.storePath
-	snapshotGen := r.ss.gen.Load()
+	snapshotGen := r.ss.Gen()
 	snapshotWsGen := r.wsStore.Gen()
 	r.mu.RUnlock()
 
@@ -550,8 +548,8 @@ func (r *Router) saveIfDirty() {
 			slog.Warn("periodic session save failed", "err", err)
 		} else {
 			r.mu.Lock()
-			if r.ss.gen.Load() == snapshotGen {
-				r.ss.dirty = false
+			if r.ss.Gen() == snapshotGen {
+				r.ss.SetDirty(false)
 			}
 			r.mu.Unlock()
 		}
@@ -640,7 +638,7 @@ func (r *Router) shutdown() {
 	shutdownCondMissingLogged := false
 	for {
 		running := false
-		for _, s := range r.ss.sessions {
+		for _, s := range r.ss.All() {
 			if p := s.loadProcess(); p != nil && p.IsRunning() {
 				running = true
 				break
@@ -672,8 +670,8 @@ func (r *Router) shutdown() {
 
 	// Snapshot sessions for saving outside lock, as a value slice:
 	// saveStoreSlice only iterates values, so no map copy is needed.
-	sessionsCopy := make([]*ManagedSession, 0, len(r.ss.sessions))
-	for _, v := range r.ss.sessions {
+	sessionsCopy := make([]*ManagedSession, 0, r.ss.Len())
+	for _, v := range r.ss.All() {
 		sessionsCopy = append(sessionsCopy, v)
 	}
 	storePath := r.storePath
@@ -681,7 +679,7 @@ func (r *Router) shutdown() {
 
 	// Collect processes to close, then release lock to close concurrently
 	var procs []processIface
-	for key, s := range r.ss.sessions {
+	for key, s := range r.ss.All() {
 		if p := s.loadProcess(); p != nil && p.Alive() {
 			slog.Info("shutting down session", "key", key)
 			procs = append(procs, p)

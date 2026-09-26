@@ -33,7 +33,7 @@ import (
 func mkSystemPromptRouter(t *testing.T) *Router {
 	t.Helper()
 	r := &Router{
-		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:         newSessionTable(),
 		defaultCWD: "/default/ws",
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
@@ -247,7 +247,7 @@ func TestSystemPrompt_NoDriftRestart(t *testing.T) {
 	key := "project:proj:planner"
 	sess := newSessionWithID(key, "sess-sp-1")
 	sess.SetBackend("claude")
-	r.ss.sessions[key] = sess
+	r.ss.Put(key, sess)
 
 	state, sp := spawnShimState(t, r, key, "", AgentOpts{
 		Backend: "claude", SystemPrompt: "AGENT\n\nPLAN", Exempt: true, Workspace: t.TempDir(),

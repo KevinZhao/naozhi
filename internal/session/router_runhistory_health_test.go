@@ -14,7 +14,7 @@ import (
 // store's real state — disabled when nothing persists, enabled with its loss
 // counters otherwise.
 func TestRouter_SessionRunsHealth_MapsTheStoreCounters(t *testing.T) {
-	disabled := &Router{sessionRuns: runhistory.NewStore("", 0, 0)}
+	disabled := &Router{ss: newSessionTable(), sessionRuns: runhistory.NewStore("", 0, 0)}
 	if h := disabled.SessionRunsHealth(); h.Enabled {
 		t.Errorf("no-persistence router reported %+v, want Enabled=false", h)
 	}
@@ -26,7 +26,7 @@ func TestRouter_SessionRunsHealth_MapsTheStoreCounters(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "session-runs")
 	store := runhistory.NewStore(root, 5, time.Hour)
 	t.Cleanup(store.Close)
-	r := &Router{sessionRuns: store}
+	r := &Router{ss: newSessionTable(), sessionRuns: store}
 	if h := r.SessionRunsHealth(); !h.Enabled || h.WriteFailedOther != 0 {
 		t.Fatalf("fresh store = %+v, want enabled with zero counters", h)
 	}

@@ -353,7 +353,7 @@ func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
 	if backendID == "" {
 		backendID = r.bkStore.defaultBackend
 	}
-	for _, s := range r.ss.sessions {
+	for _, s := range r.ss.All() {
 		sb := s.Backend()
 		if sb == "" {
 			sb = r.bkStore.defaultBackend
@@ -403,7 +403,7 @@ func (r *Router) observedModelsLocked(backendID string) []cli.ModelInfo {
 	}
 	add(r.backendDefaultsFor(backendID).Model)
 	var rest []string
-	for _, s := range r.ss.sessions {
+	for _, s := range r.ss.All() {
 		sb := s.Backend()
 		if sb == "" {
 			sb = r.bkStore.defaultBackend

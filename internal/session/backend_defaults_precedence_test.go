@@ -107,7 +107,7 @@ func TestBackendDefaultsFor_MatchesMergeBackendDefaults(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			r := &Router{}
+			r := &Router{ss: newSessionTable()}
 			r.bkStore.model = c.routerModel
 			r.bkStore.extraArgs = c.routerArgs
 			if c.backendModel != "" {

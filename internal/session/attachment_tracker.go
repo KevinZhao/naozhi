@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/attachment/tracker"
-	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -53,9 +52,7 @@ func (attachmentMetricsObserver) OnDrop(n int) {
 // keyhash → tracker drops the bump silently.
 //
 // Runs on every persisted image-bearing event on the tracker worker goroutine,
-// so it consults r.ss.keyhash for an O(1) lookup and only falls back to the
-// O(N)-hash scan when the index misses (the index is a pure fast-path, never
-// the source of truth) (#1646).
+// so it resolves the hash through the session table's index: O(1).
 func (r *Router) workspaceResolverForTracker() tracker.WorkspaceResolver {
 	return func(keyhash string) string {
 		if keyhash == "" {
@@ -63,17 +60,10 @@ func (r *Router) workspaceResolverForTracker() tracker.WorkspaceResolver {
 		}
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		// Fast path re-verified against r.ss.sessions so a stale index entry
-		// degrades to the scan rather than returning a dead session's workspace.
-		if key, ok := r.ss.keyhash[keyhash]; ok {
-			if s := r.ss.sessions[key]; s != nil && persist.KeyHash(key) == keyhash {
-				return s.Workspace()
-			}
-		}
-		// Fallback scan covers test routers with a nil index and the stale-index
-		// case. Read-only — repairing the index would need the write lock.
-		for k, s := range r.ss.sessions {
-			if persist.KeyHash(k) == keyhash {
+		// The table keeps the hash index in step with its sessions, so a hit
+		// is a live session and a miss means there is none.
+		if key, ok := r.ss.KeyForHash(keyhash); ok {
+			if s := r.ss.Get(key); s != nil {
 				return s.Workspace()
 			}
 		}

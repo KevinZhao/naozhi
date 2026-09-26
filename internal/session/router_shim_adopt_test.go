@@ -52,7 +52,6 @@ func TestAdoptableShimKey(t *testing.T) {
 // shimStateOrphan.
 func TestAdoptLiveShimLocked_PublishesSession(t *testing.T) {
 	r := newTestRouter(3)
-	r.ss.idToKey = map[string]string{}
 
 	const key = "dashboard:direct:2026-06-07-150009-2-naozhi:general"
 	state := shim.State{
@@ -72,8 +71,8 @@ func TestAdoptLiveShimLocked_PublishesSession(t *testing.T) {
 		t.Fatal("adoptLiveShimLocked returned nil")
 	}
 	r.mu.Lock()
-	published, ok := r.ss.sessions[key]
-	mappedKey := r.ss.idToKey[state.SessionID]
+	published, ok := r.ss.Lookup(key)
+	mappedKey := keyForID(r, state.SessionID)
 	r.mu.Unlock()
 
 	if !ok {
@@ -115,7 +114,6 @@ func TestClassifyShimState_AdoptedSessionReconnects(t *testing.T) {
 // own empty-id guard.
 func TestAdoptLiveShimLocked_EmptySessionID(t *testing.T) {
 	r := newTestRouter(3)
-	r.ss.idToKey = map[string]string{}
 
 	const key = "dashboard:direct:2026-06-07-150409-3-naozhi:general"
 	state := shim.State{
@@ -129,15 +127,15 @@ func TestAdoptLiveShimLocked_EmptySessionID(t *testing.T) {
 
 	r.mu.Lock()
 	r.adoptLiveShimLocked(state, backendID, wrapper)
-	_, ok := r.ss.sessions[key]
-	idxLen := len(r.ss.idToKey)
+	_, ok := r.ss.Lookup(key)
+	emptyIndexed := keyForID(r, "") != ""
 	r.mu.Unlock()
 
 	if !ok {
 		t.Fatal("session with empty session_id must still be published for reconnect")
 	}
-	if idxLen != 0 {
-		t.Errorf("idToKey should stay empty when session_id is empty, got %d entries", idxLen)
+	if emptyIndexed {
+		t.Error("an empty session_id was indexed")
 	}
 }
 
@@ -192,7 +190,7 @@ func TestRestoreSessionFromEntry_DoesNotMarkCostBaselineUnknown(t *testing.T) {
 		Backend:            "claude",
 		LastCumulativeCost: 1.25,
 	})
-	sess := r.ss.sessions[key]
+	sess := r.ss.Get(key)
 	r.mu.Unlock()
 	if sess == nil {
 		t.Fatal("restoreSessionFromEntry published no session")

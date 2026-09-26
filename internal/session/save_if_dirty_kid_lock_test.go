@@ -17,7 +17,7 @@ func TestSaveIfDirty_KnownIDsConcurrentTrackAndSnapshot(t *testing.T) {
 	storePath := filepath.Join(dir, "sessions.json")
 
 	r := &Router{
-		ss:        sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:        newSessionTable(),
 		maxProcs:  3,
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,

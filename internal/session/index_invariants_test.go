@@ -1,12 +1,9 @@
 package session
 
 import (
-	"fmt"
-	"sort"
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -32,89 +29,21 @@ import (
 // writes it WRONG. checkIndexInvariants can, and the test below drives every
 // mutation path through it.
 
-// checkIndexInvariants verifies that the three indices agree with sessions.
-// Caller holds r.mu (or is single-threaded, as tests are).
+// checkIndexInvariants verifies that the table's indices agree with its
+// sessions (sessiontable.Table.Check), including that every live session's ID
+// resolves to it. Caller holds r.mu (or is single-threaded, as tests are).
 func checkIndexInvariants(t *testing.T, r *Router, after string) {
 	t.Helper()
-	var problems []string
-
-	// Every live session must be reachable through both key-derived indices.
-	for key := range r.ss.sessions {
-		if r.ss.byChat != nil {
-			ck := chatKeyFor(key)
-			if set := r.ss.byChat[ck]; set == nil {
-				problems = append(problems, fmt.Sprintf("byChat has no set for chat %q of live session %q", ck, key))
-			} else if _, ok := set[key]; !ok {
-				problems = append(problems, fmt.Sprintf("byChat[%q] is missing live session %q", ck, key))
-			}
-		}
-		if r.ss.keyhash != nil {
-			if got := r.ss.keyhash[persist.KeyHash(key)]; got != key {
-				problems = append(problems, fmt.Sprintf("keyhash[KeyHash(%q)] = %q, want %q", key, got, key))
-			}
-		}
-	}
-
-	// No index may point at a session that is gone: a stale byChat entry makes
-	// ResetChat try to reset a key that no longer exists, and a stale keyhash
-	// entry makes the attachment resolver hand out the wrong workspace (#1646).
-	for ck, set := range r.ss.byChat {
-		for key := range set {
-			if _, ok := r.ss.sessions[key]; !ok {
-				problems = append(problems, fmt.Sprintf("byChat[%q] holds dead session %q", ck, key))
-			}
-			if got := chatKeyFor(key); got != ck {
-				problems = append(problems, fmt.Sprintf("byChat[%q] holds session %q whose chat key is %q", ck, key, got))
-			}
-		}
-		if len(set) == 0 {
-			problems = append(problems, fmt.Sprintf("byChat[%q] is an empty set; it should have been removed", ck))
-		}
-	}
-	for kh, key := range r.ss.keyhash {
-		if _, ok := r.ss.sessions[key]; !ok {
-			problems = append(problems, fmt.Sprintf("keyhash[%q] holds dead session %q", kh, key))
-		}
-	}
-	for id, key := range r.ss.idToKey {
-		if _, ok := r.ss.sessions[key]; !ok {
-			problems = append(problems, fmt.Sprintf("idToKey[%q] holds dead session %q", id, key))
-		}
-	}
-	// The reverse direction: a live session that HAS an ID must be reachable by
-	// it. Only "no dangling entries" was checked, so a path that learned an ID
-	// and forgot to index it — the shape a missing setSessionIDIndex call takes —
-	// looked perfectly consistent while RegisterForResume's dedupe silently
-	// stopped finding the session.
-	if r.ss.idToKey != nil {
-		for key, s := range r.ss.sessions {
-			id := s.getSessionID()
-			if id == "" {
-				continue
-			}
-			if got, ok := r.ss.idToKey[id]; !ok {
-				problems = append(problems, fmt.Sprintf("live session %q reports id %q with no idToKey entry", key, id))
-			} else if got != key {
-				problems = append(problems, fmt.Sprintf("idToKey[%q] = %q, but that id belongs to live session %q", id, got, key))
-			}
-		}
-	}
-
-	if len(problems) > 0 {
-		sort.Strings(problems)
+	if problems := r.ss.Check((*ManagedSession).getSessionID); len(problems) > 0 {
 		t.Errorf("index invariants broken after %s:\n  %s", after, strings.Join(problems, "\n  "))
 	}
 }
 
-// newIndexTestRouter builds a router with all four maps allocated, which is what
-// NewRouter does. Hand-built so the test drives the *Locked mutators directly
-// rather than going through a spawn.
+// newIndexTestRouter builds a router with the session table and picks
+// allocated, which is what NewRouter does. Hand-built so the test drives the
+// *Locked mutators directly rather than going through a spawn.
 func newIndexTestRouter() *Router {
-	r := &Router{}
-	r.ss.sessions = make(map[string]*ManagedSession)
-	r.ss.byChat = make(map[string]map[string]struct{})
-	r.ss.keyhash = make(map[string]string)
-	r.ss.idToKey = make(map[string]string)
+	r := &Router{ss: newSessionTable()}
 	r.picks.initLocked()
 	return r
 }
@@ -150,7 +79,7 @@ func TestIndexInvariants_AcrossEveryMutationPath(t *testing.T) {
 	// entry and the invariant check reported it as a stale mapping — the checker was
 	// right and the fixture was wrong.
 	sA.setSessionID("sess-id-A")
-	r.ss.idToKey["sess-id-A"] = keyA
+	r.ss.SetID("sess-id-A", keyA)
 	checkIndexInvariants(t, r, "idToKey learned for A")
 
 	const keyARenamed = "feishu:p2p:userA:renamed"
@@ -159,20 +88,20 @@ func TestIndexInvariants_AcrossEveryMutationPath(t *testing.T) {
 		t.Fatal("RenameSession returned false for a live session")
 	}
 	checkIndexInvariants(t, r, "RenameSession(A)")
-	if got := r.ss.idToKey["sess-id-A"]; got != keyARenamed {
+	if got := keyForID(r, "sess-id-A"); got != keyARenamed {
 		t.Errorf("idToKey after rename = %q, want %q", got, keyARenamed)
 	}
 
 	r.unregisterSessionLocked(keyARenamed, sA, false)
 	checkIndexInvariants(t, r, "unregisterSessionLocked(A)")
-	if _, ok := r.ss.idToKey["sess-id-A"]; ok {
+	if _, ok := r.ss.KeyForID("sess-id-A"); ok {
 		t.Error("idToKey still maps the removed session's ID")
 	}
 
 	r.unregisterSessionLocked(keyB, sB, false)
 	checkIndexInvariants(t, r, "unregisterSessionLocked(B)")
-	if len(r.ss.sessions) != 0 {
-		t.Errorf("sessions still holds %d entries", len(r.ss.sessions))
+	if r.ss.Len() != 0 {
+		t.Errorf("sessions still holds %d entries", r.ss.Len())
 	}
 }
 
@@ -201,11 +130,11 @@ func TestIndexInvariants_ResetChatDropsTheWholeChat(t *testing.T) {
 	checkIndexInvariants(t, r, "ResetChat")
 
 	for _, k := range keys {
-		if _, ok := r.ss.sessions[k]; ok {
+		if _, ok := r.ss.Lookup(k); ok {
 			t.Errorf("session %q survived ResetChat", k)
 		}
 	}
-	if _, ok := r.ss.sessions[other]; !ok {
+	if _, ok := r.ss.Lookup(other); !ok {
 		t.Errorf("ResetChat removed %q, which is on a different chat", other)
 	}
 }
@@ -245,7 +174,7 @@ func TestIndexInvariants_DiscoveryAndShimAdoption(t *testing.T) {
 		t.Fatalf("RegisterForResume returned %q, want %q", got, keyD)
 	}
 	checkIndexInvariants(t, r, "RegisterForResume")
-	if mapped := r.ss.idToKey[resumeID]; mapped != keyD {
+	if mapped := keyForID(r, resumeID); mapped != keyD {
 		t.Errorf("idToKey[%q] = %q, want %q — the resume dedupe reads this", resumeID, mapped, keyD)
 	}
 
@@ -273,19 +202,17 @@ func TestIndexInvariants_DiscoveryAndShimAdoption(t *testing.T) {
 		t.Fatal("adoptLiveShimLocked published no session")
 	}
 	checkIndexInvariants(t, r, "adoptLiveShimLocked")
-	if mapped := r.ss.idToKey[shimID]; mapped != keyS {
+	if mapped := keyForID(r, shimID); mapped != keyS {
 		t.Errorf("idToKey[%q] = %q, want %q — an adopted shim must be resumable by its id", shimID, mapped, keyS)
 	}
 
 	// --- and the indices stay consistent when those sessions go away ---
 	r.mu.Lock()
-	r.unregisterSessionLocked(keyD, r.ss.sessions[keyD], false)
-	r.unregisterSessionLocked(keyS, r.ss.sessions[keyS], false)
+	r.unregisterSessionLocked(keyD, r.ss.Get(keyD), false)
+	r.unregisterSessionLocked(keyS, r.ss.Get(keyS), false)
 	r.mu.Unlock()
+	// Check reports any idToKey entry left pointing at the gone sessions.
 	checkIndexInvariants(t, r, "unregister after discovery + adoption")
-	if len(r.ss.idToKey) != 0 {
-		t.Errorf("idToKey still holds %v after both sessions were unregistered", r.ss.idToKey)
-	}
 }
 
 // clearSessionIDIndexIfOwnedBy exists for one scenario: a respawn rotates a
@@ -300,28 +227,23 @@ func TestClearSessionIDIndexIfOwnedBy_OnlyDeletesItsOwnEntry(t *testing.T) {
 	const owner = "dashboard:direct:2026-01-01-000000-1:proj"
 	const other = "dashboard:direct:2026-01-01-000000-2:proj"
 
-	r.setSessionIDIndex(id, owner)
+	r.ss.SetID(id, owner)
 
 	// A different key's cleanup must leave the owner's mapping alone.
-	r.clearSessionIDIndexIfOwnedBy(id, other)
-	if got := r.ss.idToKey[id]; got != owner {
+	r.ss.ClearIDIfOwnedBy(id, other)
+	if got := keyForID(r, id); got != owner {
 		t.Errorf("idToKey[%q] = %q after another key's cleanup, want %q untouched", id, got, owner)
 	}
 
 	// The owner's own cleanup drops it.
-	r.clearSessionIDIndexIfOwnedBy(id, owner)
-	if _, ok := r.ss.idToKey[id]; ok {
+	r.ss.ClearIDIfOwnedBy(id, owner)
+	if _, ok := r.ss.KeyForID(id); ok {
 		t.Errorf("idToKey[%q] survived its owner's cleanup", id)
 	}
 
-	// And the funnel is nil-safe / empty-safe, since test routers and sessions
-	// without an id both reach it.
-	empty := &Router{}
-	empty.setSessionIDIndex("x", "k")
-	empty.clearSessionIDIndex("x")
-	empty.clearSessionIDIndexIfOwnedBy("x", "k")
-	r.setSessionIDIndex("", owner)
-	if _, ok := r.ss.idToKey[""]; ok {
+	// Sessions without an id reach it too.
+	r.ss.SetID("", owner)
+	if _, ok := r.ss.KeyForID(""); ok {
 		t.Error("an empty session id must not be indexed")
 	}
 }

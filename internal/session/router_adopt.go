@@ -65,7 +65,7 @@ func (d *driftShutdowns) has(key string) bool {
 // and then respawned mid-turn — the live turn is the newer fact.
 func (r *Router) AdoptInFlight(key string) (*cli.Process, AdoptState) {
 	r.mu.RLock()
-	sess := r.ss.sessions[key]
+	sess := r.ss.Get(key)
 	r.mu.RUnlock()
 	if sess != nil {
 		// loadProcess returns the processIface tests stub; the adopted-turn

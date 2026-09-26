@@ -64,7 +64,7 @@ func TestAccessProfileInfos(t *testing.T) {
 	if err := os.WriteFile(present, []byte("sk-x"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	setAccessProfiles(r, map[string]AccessProfile{
 		"bedrock": {
 			DisplayName:  "Bedrock · Opus",
@@ -112,14 +112,14 @@ func TestAccessProfileInfos(t *testing.T) {
 }
 
 func TestAccessProfileInfos_EmptyRegistry(t *testing.T) {
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	if got := r.AccessProfileInfos(); got != nil {
 		t.Errorf("empty registry should return nil, got %v", got)
 	}
 }
 
 func TestAddAccessProfile(t *testing.T) {
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	setAccessProfiles(r, map[string]AccessProfile{
 		"existing": {DisplayName: "Existing"},
 	})
@@ -150,7 +150,7 @@ func TestAddAccessProfile(t *testing.T) {
 }
 
 func TestAddAccessProfile_NilMapBootstrap(t *testing.T) {
-	r := &Router{} // nil accessProfiles
+	r := &Router{ss: newSessionTable()} // nil accessProfiles
 	if err := r.AddAccessProfile("first", AccessProfile{DisplayName: "First"}); err != nil {
 		t.Fatalf("add to nil map: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestAddAccessProfile_NilMapBootstrap(t *testing.T) {
 // publish a copy of the registry; the loser of a swap retries on the winner's
 // map, so no add is lost and a duplicate id is accepted exactly once.
 func TestAddAccessProfile_ConcurrentAddsAllLand(t *testing.T) {
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	const n = 64
 	var wg sync.WaitGroup
 	var dupOK atomic.Int32

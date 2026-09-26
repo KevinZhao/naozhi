@@ -191,7 +191,7 @@ func TestSpawnSession_ReplacedMeanwhileContinuesTheReplacement(t *testing.T) {
 	second.storeProcess(newDeadProc())
 	second.setSessionID("sid-second")
 	r.mu.Lock()
-	r.ss.sessions[key] = second
+	r.ss.Put(key, second)
 	r.mu.Unlock()
 	close(g.release)
 
@@ -283,7 +283,7 @@ func TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID(t *testing.T) {
 	old.spent = costledger.Totals{Metered: map[costledger.Unit]float64{"requests": 3}}
 	old.costMu.Unlock()
 	r.mu.Lock()
-	r.setSessionIDIndex("sid-old", key)
+	r.ss.SetID("sid-old", key)
 	s, err := r.spawnSession(context.Background(), key, "", AgentOpts{}) // releases r.mu
 	if err != nil {
 		t.Fatalf("spawnSession: %v", err)
@@ -292,7 +292,7 @@ func TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID(t *testing.T) {
 		t.Errorf("respawned session's metered spend = %v, want the replaced session's 3", got)
 	}
 	r.mu.RLock()
-	_, stale := r.ss.idToKey["sid-old"]
+	_, stale := r.ss.KeyForID("sid-old")
 	r.mu.RUnlock()
 	if stale {
 		t.Error("the replaced session's ID still resolves to the key after the ID rotated")

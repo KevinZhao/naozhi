@@ -11,8 +11,7 @@ import (
 func addIndexedSession(r *Router, key, workspace string) *ManagedSession {
 	s := &ManagedSession{key: key}
 	s.setWorkspace(workspace)
-	r.ss.sessions[key] = s
-	r.indexAdd(key)
+	r.ss.Put(key, s)
 	return s
 }
 
@@ -20,10 +19,7 @@ func addIndexedSession(r *Router, key, workspace string) *ManagedSession {
 // keyhash to the right session's workspace via the O(1) keyhashToKey index.
 func TestWorkspaceResolver_IndexFastPath(t *testing.T) {
 	r := &Router{
-		ss: sessionStore{
-			sessions: make(map[string]*ManagedSession),
-			keyhash:  make(map[string]string),
-		},
+		ss: newSessionTable(),
 	}
 	addIndexedSession(r, "dashboard:direct:user:a", "/ws/a")
 	addIndexedSession(r, "dashboard:direct:user:b", "/ws/b")
@@ -36,20 +32,14 @@ func TestWorkspaceResolver_IndexFastPath(t *testing.T) {
 	if got := resolve(persist.KeyHash("dashboard:direct:user:b")); got != "/ws/b" {
 		t.Fatalf("resolve(b) = %q, want /ws/b", got)
 	}
-	// Index must be populated (proves the fast path is live, not the scan).
-	if len(r.ss.keyhash) != 2 {
-		t.Fatalf("keyhashToKey size = %d, want 2", len(r.ss.keyhash))
-	}
+
 }
 
 // TestWorkspaceResolver_EmptyAndUnknown covers the contract edges: empty
 // keyhash and a hash with no matching session both return "".
 func TestWorkspaceResolver_EmptyAndUnknown(t *testing.T) {
 	r := &Router{
-		ss: sessionStore{
-			sessions: make(map[string]*ManagedSession),
-			keyhash:  make(map[string]string),
-		},
+		ss: newSessionTable(),
 	}
 	addIndexedSession(r, "dashboard:direct:user:a", "/ws/a")
 	resolve := r.workspaceResolverForTracker()
@@ -59,70 +49,5 @@ func TestWorkspaceResolver_EmptyAndUnknown(t *testing.T) {
 	}
 	if got := resolve(persist.KeyHash("nope")); got != "" {
 		t.Fatalf("resolve(unknown) = %q, want empty", got)
-	}
-}
-
-// TestWorkspaceResolver_StaleIndexSelfHeals pins the self-healing fallback: a
-// keyhashToKey entry pointing at a key no longer in r.ss.sessions must NOT return
-// a workspace for the dead key, and must still find a live session via the
-// scan fallback.
-func TestWorkspaceResolver_StaleIndexSelfHeals(t *testing.T) {
-	r := &Router{
-		ss: sessionStore{
-			sessions: make(map[string]*ManagedSession),
-			keyhash:  make(map[string]string),
-		},
-	}
-	live := addIndexedSession(r, "dashboard:direct:user:live", "/ws/live")
-	_ = live
-
-	// Simulate a delete site that removed the session but left a stale index
-	// entry (e.g. a future path that bypasses indexDel).
-	stale := "dashboard:direct:user:stale"
-	r.ss.keyhash[persist.KeyHash(stale)] = stale // dangling: not in r.ss.sessions
-
-	resolve := r.workspaceResolverForTracker()
-
-	// Stale keyhash → no session in r.ss.sessions → resolver must return "".
-	if got := resolve(persist.KeyHash(stale)); got != "" {
-		t.Fatalf("resolve(stale) = %q, want empty (no dead-session workspace)", got)
-	}
-	// Live keyhash still resolves.
-	if got := resolve(persist.KeyHash("dashboard:direct:user:live")); got != "/ws/live" {
-		t.Fatalf("resolve(live) = %q, want /ws/live", got)
-	}
-}
-
-// TestWorkspaceResolver_NilIndexFallsBackToScan covers test-created routers
-// whose keyhashToKey is nil: the resolver must still work via the linear scan.
-func TestWorkspaceResolver_NilIndexFallsBackToScan(t *testing.T) {
-	r := &Router{ss: sessionStore{sessions: make(map[string]*ManagedSession)}} // keyhash nil
-	s := &ManagedSession{key: "dashboard:direct:user:a"}
-	s.setWorkspace("/ws/a")
-	r.ss.sessions[s.key] = s
-
-	resolve := r.workspaceResolverForTracker()
-	if got := resolve(persist.KeyHash("dashboard:direct:user:a")); got != "/ws/a" {
-		t.Fatalf("resolve(a) via scan = %q, want /ws/a", got)
-	}
-}
-
-// TestIndexDel_RemovesKeyhash verifies indexDel drops the keyhash entry so the
-// index stays bounded.
-func TestIndexDel_RemovesKeyhash(t *testing.T) {
-	r := &Router{
-		ss: sessionStore{
-			sessions: make(map[string]*ManagedSession),
-			keyhash:  make(map[string]string),
-		},
-	}
-	addIndexedSession(r, "dashboard:direct:user:a", "/ws/a")
-	if _, ok := r.ss.keyhash[persist.KeyHash("dashboard:direct:user:a")]; !ok {
-		t.Fatal("keyhash not added")
-	}
-	delete(r.ss.sessions, "dashboard:direct:user:a")
-	r.indexDel("dashboard:direct:user:a")
-	if _, ok := r.ss.keyhash[persist.KeyHash("dashboard:direct:user:a")]; ok {
-		t.Fatal("keyhash not removed by indexDel")
 	}
 }

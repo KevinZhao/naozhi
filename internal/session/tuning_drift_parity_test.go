@@ -17,7 +17,7 @@ import (
 func mkTuningRouter(t *testing.T) *Router {
 	t.Helper()
 	r := &Router{
-		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:         newSessionTable(),
 		defaultCWD: "/default/ws",
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
@@ -47,7 +47,7 @@ func TestTuningDriftParity_NoFalseDrift(t *testing.T) {
 	s.SetBackend("kiro")
 	s.SetTuningModel("claude-haiku-4.5")
 	s.SetTuningEffort("low")
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 
 	// Real spawn argv, exactly as spawnSession assembles it — through the
 	// production constructor. Hand-listing the fields here is what let the
@@ -85,7 +85,7 @@ func TestTuningDriftParity_ChangedOverrideIsRealDrift(t *testing.T) {
 	s := newSessionWithID(key, "sess-drift-2")
 	s.SetBackend("kiro")
 	s.SetTuningModel("claude-haiku-4.5")
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 
 	wrapper, backendID := r.wrapperFor("kiro")
 	noOverlay := &shim.SpawnOverlay{}                                       // spawned with no agent-level override
@@ -122,13 +122,12 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 	r := mkTuningRouter(t)
 	// installFreshSessionLocked touches the id indexes that NewRouter
 	// normally allocates; the minimal fixture above does not.
-	r.ss.idToKey = map[string]string{}
 	key := "dash:direct:drift3:general"
 	s := newSessionWithID(key, "sess-drift-3")
 	s.SetBackend("kiro")
 	s.SetTuningModel("claude-haiku-4.5")
 	s.SetTuningEffort("low")
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 
 	// argv of the respawn, as spawnSession assembles it from the OLD entry —
 	// through the production constructor, so this side cannot silently omit a

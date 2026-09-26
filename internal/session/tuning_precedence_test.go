@@ -25,7 +25,7 @@ func TestResolveSpawnParams_TuningPrecedence(t *testing.T) {
 		s := newSessionWithID(key, "sess-1")
 		s.SetTuningModel("tuned-model")
 		r.mu.Lock()
-		r.ss.sessions[key] = s
+		r.ss.Put(key, s)
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Model: "opts-model"})
 		r.mu.Unlock()
 		if sp.Model != "tuned-model" {
@@ -39,7 +39,7 @@ func TestResolveSpawnParams_TuningPrecedence(t *testing.T) {
 		s := newSessionWithID(key, "sess-2")
 		s.SetTuningEffort("low")
 		r.mu.Lock()
-		r.ss.sessions[key] = s
+		r.ss.Put(key, s)
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Effort: "max"})
 		r.mu.Unlock()
 		if sp.Effort != "low" {
@@ -52,7 +52,7 @@ func TestResolveSpawnParams_TuningPrecedence(t *testing.T) {
 		key := "dash:direct:p3:general"
 		s := newSessionWithID(key, "sess-3")
 		r.mu.Lock()
-		r.ss.sessions[key] = s
+		r.ss.Put(key, s)
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Model: "opts-model", Effort: "high"})
 		r.mu.Unlock()
 		if sp.Model != "opts-model" {

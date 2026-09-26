@@ -42,7 +42,7 @@ func TestTuningPersist_RoundTrip(t *testing.T) {
 	t.Cleanup(func() { r.Shutdown() })
 
 	r.mu.RLock()
-	got := r.ss.sessions[key]
+	got := r.ss.Get(key)
 	r.mu.RUnlock()
 	if got == nil {
 		t.Fatal("session not restored")
@@ -83,7 +83,7 @@ func TestTuningPersist_LoadRejectsInjectedValues(t *testing.T) {
 	t.Cleanup(func() { r.Shutdown() })
 
 	r.mu.RLock()
-	got := r.ss.sessions[key]
+	got := r.ss.Get(key)
 	r.mu.RUnlock()
 	if got == nil {
 		t.Fatal("session not restored (the entry itself must survive — only the tuning fields drop)")

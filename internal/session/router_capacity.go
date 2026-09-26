@@ -13,12 +13,12 @@ import (
 // so activeCount and the per-backend gauges update in one pass.
 func (r *Router) countActive() {
 	count := r.reconcileSessionActiveByBackendLocked()
-	r.ss.activeCount.Store(count)
+	r.ss.SetActive(count)
 }
 
 // reconcileSessionActiveByBackendLocked rebuilds the metrics.SessionActive
-// pair (unlabeled mirror + per-backend labeled gauge) from r.ss.sessions and
-// returns the alive non-exempt total so callers can refresh r.ss.activeCount
+// pair (unlabeled mirror + per-backend labeled gauge) from the session table and
+// returns the alive non-exempt total so callers can refresh the active count
 // from the same O(N) walk (#1607). Used by bulk teardown paths; single-session
 // sites (Reset / Remove) call metrics.RecordSessionActive(backend, -1) directly.
 // evictOldest must NOT add a manual -1 on top of this absolute reconcile —
@@ -29,7 +29,7 @@ func (r *Router) countActive() {
 func (r *Router) reconcileSessionActiveByBackendLocked() int64 {
 	var total int64
 	perBackend := make(map[string]int64, 4)
-	for _, s := range r.ss.sessions {
+	for _, s := range r.ss.All() {
 		if s.exempt {
 			continue
 		}
@@ -67,7 +67,7 @@ func (r *Router) reconcileSessionActiveByBackendLocked() int64 {
 // Per-namespace gating goes through countExemptByKind.
 func (r *Router) countExempt() int {
 	count := 0
-	for _, s := range r.ss.sessions {
+	for _, s := range r.ss.All() {
 		if s.exempt && s.isAlive() {
 			count++
 		}
@@ -85,7 +85,7 @@ func (r *Router) countExemptByKind(kind string) int {
 		return 0
 	}
 	count := 0
-	for k, s := range r.ss.sessions {
+	for k, s := range r.ss.All() {
 		if !s.exempt || !s.isAlive() {
 			continue
 		}
@@ -97,11 +97,11 @@ func (r *Router) countExemptByKind(kind string) int {
 }
 
 // countExemptCombined returns both the alive exempt count for a single
-// namespace and the global alive exempt total in ONE walk of r.ss.sessions
+// namespace and the global alive exempt total in ONE walk of the session table
 // (halves lock-held time on exempt spawns without drift-prone standalone
 // counters). Caller must hold r.mu. kind == "" yields perKind 0.
 func (r *Router) countExemptCombined(kind string) (perKind int, total int) {
-	for k, s := range r.ss.sessions {
+	for k, s := range r.ss.All() {
 		if !s.exempt || !s.isAlive() {
 			continue
 		}
@@ -118,7 +118,7 @@ func (r *Router) countExemptCombined(kind string) (perKind int, total int) {
 // Returns true if a session was evicted.
 func (r *Router) evictOldest() bool {
 	var oldest *ManagedSession
-	for _, s := range r.ss.sessions {
+	for _, s := range r.ss.All() {
 		if s.exempt {
 			continue // planner sessions are never evicted
 		}
@@ -149,7 +149,7 @@ func (r *Router) evictOldest() bool {
 	proc.Close()
 	r.mu.Lock()
 	// Broadcast under r.mu: Shutdown's cond.Wait predicate reads
-	// r.ss.sessions[*].loadProcess().IsRunning(), which Close() just flipped,
+	// r.ss.Get(*).loadProcess().IsRunning(), which Close() just flipped,
 	// so an unlocked Broadcast could be missed.
 	if r.shutdownCond != nil {
 		r.shutdownCond.Broadcast()
@@ -159,7 +159,6 @@ func (r *Router) evictOldest() bool {
 	// dashboard's Version() poll refreshes; otherwise a crash inside the save
 	// interval re-spawns the evicted session on restart and the sidebar keeps
 	// the dead entry.
-	r.ss.dirty = true
-	r.ss.gen.Add(1)
+	r.ss.MarkChanged()
 	return true
 }

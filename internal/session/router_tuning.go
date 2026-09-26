@@ -96,7 +96,7 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 
 	// ---- decide + (conditionally) record, under r.mu ----
 	r.mu.Lock()
-	sess := r.ss.sessions[key]
+	sess := r.ss.Get(key)
 	if sess == nil {
 		err := r.setPendingTuningLocked(key, model, effort)
 		r.mu.Unlock()
@@ -164,8 +164,7 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		if effortChanged {
 			sess.SetTuningEffort(*effort)
 		}
-		r.ss.dirty = true
-		r.ss.gen.Add(1)
+		r.ss.MarkChanged()
 	}
 	r.mu.Unlock()
 
@@ -178,11 +177,10 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		case err == nil:
 			// Ack success → record + persist (the only deferred-record path).
 			r.mu.Lock()
-			if cur := r.ss.sessions[key]; cur != nil {
+			if cur := r.ss.Get(key); cur != nil {
 				cur.SetTuningModel(*model)
 				cur.SetModel(*model) // persisted display mirror (F11)
-				r.ss.dirty = true
-				r.ss.gen.Add(1)
+				r.ss.MarkChanged()
 			}
 			r.mu.Unlock()
 			r.notifyChange()
@@ -198,10 +196,9 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 			// timeout: degrade to record-only, applies on next spawn
 			// (§4.4 "失败则降级为记 override + 提示下次生效").
 			r.mu.Lock()
-			if cur := r.ss.sessions[key]; cur != nil {
+			if cur := r.ss.Get(key); cur != nil {
 				cur.SetTuningModel(*model)
-				r.ss.dirty = true
-				r.ss.gen.Add(1)
+				r.ss.MarkChanged()
 			}
 			r.mu.Unlock()
 			r.notifyChange()

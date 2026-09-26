@@ -45,10 +45,9 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 // — the one piece of cross-facet state the eviction needs — is bound in
 // exactly one place. Caller holds r.mu. Reports whether the write landed.
 func (r *Router) putWorkspaceOverrideLocked(chatKey, path string) bool {
-	// "No live session" is len(r.ss.byChat[chatKey])==0, so an active
-	// conversation never loses its cwd. Indexing a nil byChat map yields a
-	// nil set (len 0), so no nil guard is needed.
-	isLive := func(k string) bool { return len(r.ss.byChat[k]) > 0 }
+	// An override is evictable only while its chat has no session, so an
+	// active conversation never loses its cwd.
+	isLive := r.ss.ChatHasSessions
 	return r.wsStore.SetBounded(chatKey, path, maxWorkspaceOverrides, isLive)
 }
 

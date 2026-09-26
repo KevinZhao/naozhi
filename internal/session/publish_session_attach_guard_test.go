@@ -40,7 +40,7 @@ func TestPublishSessionLocked_AlreadyAttachedButNilStillGetsNoop(t *testing.T) {
 	// Verify the session WAS actually inserted (the guard fires inline,
 	// not as an early return).
 	r.mu.RLock()
-	stored, ok := r.ss.sessions[s.key]
+	stored, ok := r.ss.Lookup(s.key)
 	r.mu.RUnlock()
 	if !ok || stored != s {
 		t.Fatalf("publishSessionLocked guard short-circuited the insertion: got=%v ok=%v", stored, ok)

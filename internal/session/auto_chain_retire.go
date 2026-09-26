@@ -24,14 +24,14 @@ var autoChainRetiredOrigins = map[string]bool{
 // Idempotent: once clean, later startups strip nothing and skip the dirty bump.
 //
 // CALLER CONTRACT: invoked from NewRouter BEFORE the background history loaders
-// launch, while the router is single-threaded — it snapshots r.ss.sessions
+// launch, while the router is single-threaded — it snapshots the session table
 // under r.mu briefly, then mutates each session via historyMu only.
 func (r *Router) retireAutoChainOnce() {
 	startedAt := time.Now()
 
 	r.mu.Lock()
-	candidates := make([]*ManagedSession, 0, len(r.ss.sessions))
-	for _, s := range r.ss.sessions {
+	candidates := make([]*ManagedSession, 0, r.ss.Len())
+	for _, s := range r.ss.All() {
 		candidates = append(candidates, s)
 	}
 	r.mu.Unlock()
@@ -73,8 +73,7 @@ func (r *Router) retireAutoChainOnce() {
 
 	if retired > 0 {
 		r.mu.Lock()
-		r.ss.dirty = true
-		r.ss.gen.Add(1)
+		r.ss.MarkChanged()
 		r.mu.Unlock()
 	}
 

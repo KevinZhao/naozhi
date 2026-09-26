@@ -35,7 +35,7 @@ func strp(s string) *string { return &s }
 func mkTuningTestRouter(t *testing.T) *Router {
 	t.Helper()
 	r := &Router{
-		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:         newSessionTable(),
 		defaultCWD: "/default/ws",
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
@@ -55,7 +55,7 @@ func addTuningSession(r *Router, key, backend string, proc processIface) *Manage
 	if proc != nil {
 		s.storeProcess(proc)
 	}
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 	return s
 }
 
@@ -86,7 +86,7 @@ func TestSetSessionTuning_Validation(t *testing.T) {
 	if via, err := r.SetSessionTuning(ctx, "k1", strp("us.anthropic.claude-fable-5-1[1m]"), nil); err != nil || via != TuningAppliedDeferred {
 		t.Errorf("[1m] model: via=%q err=%v, want deferred/nil", via, err)
 	}
-	if got := r.ss.sessions["k1"].TuningModel(); got != "us.anthropic.claude-fable-5-1[1m]" {
+	if got := r.ss.Get("k1").TuningModel(); got != "us.anthropic.claude-fable-5-1[1m]" {
 		t.Errorf("[1m] model: recorded = %q", got)
 	}
 	if _, err := r.SetSessionTuning(ctx, "k1", strp("[1m]"), nil); err == nil {
@@ -102,7 +102,7 @@ func TestSetSessionTuning_Validation(t *testing.T) {
 	if via, err := r.SetSessionTuning(ctx, "k1", nil, strp("high")); err != nil || via != TuningAppliedDeferred {
 		t.Errorf("claude+effort: via=%q err=%v, want deferred/nil", via, err)
 	}
-	if got := r.ss.sessions["k1"].TuningEffort(); got != "high" {
+	if got := r.ss.Get("k1").TuningEffort(); got != "high" {
 		t.Errorf("claude+effort: recorded tier = %q, want high", got)
 	}
 	// Clearing it is fine too.
@@ -418,8 +418,7 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 	old.SetUserLabel("my label")
 	old.setLabelOrigin("auto")
 	r.mu.Lock()
-	r.ss.sessions[key] = old
-	r.indexAdd(key)
+	r.ss.Put(key, old)
 
 	// Mirror spawnSession: snapshot under the first r.mu hold, then install.
 	// The fresh entry must be fed from that snapshot, not from a re-read of
@@ -430,7 +429,7 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 	stub := newSessionWithID(key, "sess-stub")
 	stub.SetTuningModel("stub-model")
 	stub.SetUserLabel("stub label")
-	r.ss.sessions[key] = stub
+	r.ss.Put(key, stub)
 
 	fresh := r.installFreshSessionLocked(
 		key, &cli.Process{}, "/ws", "kiro", "", wrapper, "sess-old",
@@ -457,7 +456,7 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 		t.Error("fresh session not published under key")
 	}
 	if fresh.TuningModel() == "stub-model" || fresh.UserLabel() == "stub label" {
-		t.Error("fresh entry took values from a re-read of r.ss.sessions[key] instead of the snapshot")
+		t.Error("fresh entry took values from a re-read of r.ss.Get(key) instead of the snapshot")
 	}
 }
 
@@ -475,8 +474,7 @@ func TestRenameSession_InheritsTuning(t *testing.T) {
 	s.SetUserLabel("auto title")
 	s.setLabelOrigin("auto")
 	r.mu.Lock()
-	r.ss.sessions[oldKey] = s
-	r.indexAdd(oldKey)
+	r.ss.Put(oldKey, s)
 	r.mu.Unlock()
 
 	if !r.RenameSession(oldKey, newKey) {
@@ -504,7 +502,7 @@ func TestSetSessionTuning_RespawnReleasesActiveSlot(t *testing.T) {
 	r := mkTuningTestRouter(t)
 	proc := &tuningFakeProc{TestProcess: NewTestProcess()}
 	addTuningSession(r, "k1", "kiro", proc)
-	r.ss.activeCount.Store(1) // the session above is the one live, non-exempt entry
+	r.ss.SetActive(1) // the session above is the one live, non-exempt entry
 
 	mode, err := r.SetSessionTuning(context.Background(), "k1", nil, strp("max"))
 	if err != nil {
@@ -513,7 +511,7 @@ func TestSetSessionTuning_RespawnReleasesActiveSlot(t *testing.T) {
 	if mode != TuningAppliedRespawn {
 		t.Fatalf("mode = %q, want respawn (test premise)", mode)
 	}
-	if got := r.ss.activeCount.Load(); got != 0 {
+	if got := r.ss.Active(); got != 0 {
 		t.Errorf("activeCount after tuning respawn = %d, want 0 (slot leaked)", got)
 	}
 }
@@ -536,7 +534,7 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 	if via, err := r.SetSessionTuning(ctx, key, nil, strp("high")); err != nil || via != TuningAppliedDeferred {
 		t.Fatalf("effort on pending key: via=%q err=%v, want deferred/nil", via, err)
 	}
-	if _, ok := r.ss.sessions[key]; ok {
+	if _, ok := r.ss.Lookup(key); ok {
 		t.Fatal("recording a pending pick must not create a ManagedSession")
 	}
 	if got := r.picks.tuning[key]; got != (pendingTuning{Model: "us.anthropic.claude-opus-5[1m]", Effort: "high"}) {
