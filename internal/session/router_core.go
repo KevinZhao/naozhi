@@ -313,6 +313,11 @@ type Router struct {
 	// read-only after NewRouter.
 	historyLoader HistoryLoader
 
+	// spawnHook, when set, replaces the CLI spawn in spawnSession, so tests
+	// can hand back a process of their own at a moment of their choosing.
+	// nil in production.
+	spawnHook func(ctx context.Context, opts cli.SpawnOptions) (processIface, error)
+
 	// resolver is the shared KeyResolver exposed via Resolver() so Dispatcher /
 	// Hub / upstream wiring read one instance instead of drifting copies (#604).
 	// nil when the caller did not opt in. Read-only after NewRouter; KeyResolver
@@ -367,6 +372,20 @@ func (s *pendingSpawnSlot) release() {
 		s.released = true
 	}
 	s.r.mu.Unlock()
+}
+
+// spawnProcess starts the session's CLI process: spawnHook when a test set
+// one, otherwise the backend's runner under panicSafeSpawn.
+func (r *Router) spawnProcess(ctx context.Context, wrapper *cli.Wrapper, opts cli.SpawnOptions, key, backendID string) (processIface, error) {
+	if r.spawnHook != nil {
+		return r.spawnHook(ctx, opts)
+	}
+	proc, err := panicSafeSpawn(ctx, wrapper.Runner(), opts, key, backendID)
+	if err != nil {
+		// Never a typed-nil *cli.Process inside a non-nil interface.
+		return nil, err
+	}
+	return proc, nil
 }
 
 // panicSafeSpawn invokes the runner's Spawn inside a deferred recover so a

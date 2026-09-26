@@ -583,6 +583,42 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, 
 	return oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, ov
 }
 
+// respawnSnapshot is what a respawn carries over from the session it
+// replaces, read under r.mu in one critical section.
+type respawnSnapshot struct {
+	sid       string // the ID being replaced; installFreshSessionLocked clears idToKey[sid] on rotation
+	prevIDs   []string
+	cost      float64 // the replaced process's cumulative cost (loadTotalCost fallback)
+	costSpent float64
+	createdAt int64
+	overrides sessionOverrides
+	// spent is the monotonic metering total, which follows the logical
+	// session across process replacement like costSpent.
+	spent costledger.Totals
+}
+
+func snapshotRespawnLocked(old *ManagedSession) respawnSnapshot {
+	var snap respawnSnapshot
+	snap.prevIDs, snap.cost, snap.costSpent, snap.createdAt, snap.overrides = snapshotOldSessionLocked(old)
+	if old != nil {
+		snap.sid = old.getSessionID()
+		snap.spent = old.CostTotals()
+	}
+	return snap
+}
+
+// respawnHistory is the replaced session's history, copied outside r.mu.
+type respawnHistory struct {
+	entries   []clievent.EventEntry
+	prevIDs   []string
+	userTurns int64
+}
+
+func collectRespawnHistory(old *ManagedSession, snap respawnSnapshot, resumeID string) respawnHistory {
+	entries, prevIDs, userTurns := collectPreviousHistory(old, snap.prevIDs, resumeID)
+	return respawnHistory{entries: entries, prevIDs: prevIDs, userTurns: userTurns}
+}
+
 // collectPreviousHistory gathers JSONL-backed history entries and the
 // session ID chain for a respawn. Returns (entries, chain, userTurns);
 // userTurns is computed here so the spawn path seeds persistedUserTurns
@@ -653,10 +689,15 @@ func countUserTurns(entries []clievent.EventEntry) int64 {
 }
 
 // spawnSession creates a new process, optionally resuming an existing session.
-// LOCK: enter with r.mu held. This function releases and re-acquires r.mu
-// internally (around Spawn() and history collection) to avoid blocking other
-// goroutines during slow protocol init (e.g. ACP handshake). Callers MUST NOT
-// hold any other lock when invoking; the defer reacquires r.mu only.
+//
+// LOCK: enter with r.mu held; returns with it released. The work runs in
+// three phases: a reserve critical section (shutdown gate, in-flight marker,
+// capacity, spawn params, pending slot, snapshot of the session being
+// replaced), one unlocked window (env overlay, Spawn — which may block on an
+// ACP handshake — and the previous-history copy), and a commit critical
+// section that re-checks the key and installs. Eviction at capacity drops
+// r.mu around the victim's Close() as well. Callers MUST NOT hold any other
+// lock; the deferred cleanup reacquires r.mu only.
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
 	// Shutdown gate (#1822): r.stopped is set under r.mu immediately before
 	// Shutdown's snapshot and read here with r.mu held on entry, so gate and
@@ -750,15 +791,20 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	spawnOpts.NoOutputTimeout = r.noOutputTimeout
 	spawnOpts.TotalTimeout = r.totalTimeout
 
-	// ── Lock release 1: Spawn may block (ACP Init handshake, process startup),
-	// so r.mu is released around it. pendingSpawns keeps a concurrent Cleanup
-	// from pruning the slot we are about to fill. The happy path decrements via
-	// releaseLocked() once r.mu is re-taken; the deferred release() is an
-	// idempotent safety net for panics / early returns.
+	// Take the pending slot and snapshot the session being replaced in this
+	// same critical section; everything slow then runs in ONE unlocked window.
+	// pendingSpawns keeps a concurrent Cleanup from pruning the slot we are
+	// about to fill. The happy path decrements via releaseLocked() once r.mu
+	// is re-taken; the deferred release() is an idempotent safety net for
+	// panics / early returns.
 	slot := r.acquirePendingSpawnSlotLocked()
 	defer slot.release()
+	old := r.ss.sessions[key]
+	snap := snapshotRespawnLocked(old)
 	r.mu.Unlock()
-	if wrapper == nil {
+
+	// ── Unlocked: env overlay, Spawn, previous-history copy. ──
+	if wrapper == nil && r.spawnHook == nil {
 		return nil, fmt.Errorf("spawn process (backend %q): %w", backendID, ErrNoCLIWrapper)
 	}
 	// Expand the access-profile env overlay OUTSIDE r.mu (reads *_FILE secrets
@@ -771,61 +817,51 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		}
 		spawnOpts.EnvOverlay = overlay
 	}
-	// Panic-safe: if Spawn panics, pendingSpawns must still be decremented or
-	// the router permanently refuses new sessions with ErrMaxProcs.
-	// wrapper.Runner() is the placement seam (agentcore-cloud-sandbox RFC §4.2).
-	proc, err := panicSafeSpawn(ctx, wrapper.Runner(), spawnOpts, key, backendID)
-	r.mu.Lock()
-	slot.releaseLocked()
+	// Spawn may block (ACP Init handshake, process startup). Panic-safe: a
+	// panicking Spawn must still decrement pendingSpawns or the router
+	// permanently refuses new sessions with ErrMaxProcs.
+	proc, err := r.spawnProcess(ctx, wrapper, spawnOpts, key, backendID)
 	if err != nil {
-		r.mu.Unlock()
 		return nil, fmt.Errorf("spawn process: %w", err)
 	}
+	// historyMu must not nest inside r.mu (event injection takes it on its
+	// own), so the old session's history is copied here. The old reference is
+	// safe to read: sessions are never mutated after creation, only replaced.
+	hist := collectRespawnHistory(old, snap, resumeID)
 
-	// ── TOCTOU guard 1: while unlocked for Spawn(), a concurrent spawnSession
-	// may have installed a live session for this key; if so discard ours.
-	if existing, ok := r.ss.sessions[key]; ok && existing.isAlive() {
+	// ── Commit. ──
+	r.mu.Lock()
+	slot.releaseLocked()
+	for {
+		// A concurrent spawnSession may have installed a live session for
+		// this key while we were unlocked; if so it wins and ours is closed.
+		cur := r.ss.sessions[key]
+		if cur != nil && cur.isAlive() {
+			r.mu.Unlock()
+			proc.Close()
+			return cur, nil
+		}
+		if cur == old {
+			break
+		}
+		// The key's entry was removed or replaced by a dead one meanwhile:
+		// the snapshot describes a session no longer in the table. Continue
+		// the one that is there now instead, so a removed session is not
+		// resurrected into this one.
+		old = cur
+		snap = snapshotRespawnLocked(old)
 		r.mu.Unlock()
-		proc.Close()
-		return existing, nil
+		hist = collectRespawnHistory(old, snap, resumeID)
+		r.mu.Lock()
 	}
-
-	// ── Lock release 2: copy old session history under historyMu only.
-	// Holding both r.mu and historyMu would violate lock ordering (historyMu
-	// is acquired independently by event injection). The old reference is
-	// safe to read because sessions are never mutated after creation, only replaced.
-	old := r.ss.sessions[key]
-	// Capture the SID being replaced: if the respawn rotates to a different
-	// effectiveSID, idToKey[oldSID] would dangle and later mis-route a resume;
-	// installFreshSessionLocked clears it (#2093).
-	var oldSID string
-	if old != nil {
-		oldSID = old.getSessionID()
-	}
-	oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, oldOverrides := snapshotOldSessionLocked(old)
-	// Monotonic spend (metering units, per-model totals) follows the logical
-	// session across process replacement just like costSpent does.
-	var oldSpent costledger.Totals
-	if old != nil {
-		oldSpent = old.CostTotals()
-	}
+	// A key with no session yet takes its pre-spawn tuning pick now, once the
+	// spawn has succeeded, so a failed spawn leaves the pick for the retry.
+	oldOverrides := snap.overrides
 	if old == nil {
 		oldOverrides = r.consumePendingTuningLocked(key, oldOverrides)
 	}
-	r.mu.Unlock()
-
-	oldHistory, prevIDs, oldUserTurns := collectPreviousHistory(old, oldPrevIDs, resumeID)
-
-	// prevIDs holds ONLY the real same-key sessionID rotation chain; no
-	// workspace-based chain guessing (docs/rfc/project-stable-session-key.md §9.1).
-
-	r.mu.Lock()
-	// ── TOCTOU guard 2: same check as guard 1 for the history-copy unlock window.
-	if existing, ok := r.ss.sessions[key]; ok && existing.isAlive() {
-		r.mu.Unlock()
-		proc.Close()
-		return existing, nil
-	}
+	oldHistory, prevIDs, oldUserTurns := hist.entries, hist.prevIDs, hist.userTurns
+	oldTotalCost, oldCostSpent, oldCreatedAt, oldSID, oldSpent := snap.cost, snap.costSpent, snap.createdAt, snap.sid, snap.spent
 
 	s := r.installFreshSessionLocked(
 		key, proc, workspace, backendID, accessProfileID, wrapper, resumeID,
@@ -854,7 +890,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 func (r *Router) bindNewSessionHistory(
 	ctx context.Context,
 	s *ManagedSession,
-	proc *cli.Process,
+	proc processIface,
 	key string,
 	resumeID string,
 	workspace string,
@@ -872,7 +908,7 @@ func (r *Router) bindNewSessionHistory(
 // LOCK: caller must hold r.mu for writing.
 func (r *Router) installFreshSessionLocked(
 	key string,
-	proc *cli.Process,
+	proc processIface,
 	workspace string,
 	backendID string,
 	accessProfileID string,
@@ -940,7 +976,9 @@ func (r *Router) installFreshSessionLocked(
 	snapshot := s.attachProcessAndSnapshotPersisted(proc)
 	// Notify the dashboard on out-of-band turn completion (as ReconnectShims
 	// does). SetOnTurnDone is mu-guarded inside Process, so post-storeProcess is safe.
-	proc.SetOnTurnDone(func() { r.notifyChange() })
+	if n, ok := proc.(turnDoneNotifier); ok {
+		n.SetOnTurnDone(func() { r.notifyChange() })
+	}
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
 	}

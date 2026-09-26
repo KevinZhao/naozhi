@@ -2777,47 +2777,6 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// installFreshSessionLocked — CQ2 Round 213 extraction
-// ---------------------------------------------------------------------------
-//
-// installFreshSessionLocked takes a concrete *cli.Process (the in-band
-// SetOnTurnDone hook is not part of processIface), so a behavior-level
-// table test would require spinning a real CLI subprocess. Instead we
-// assert the method exists with the expected signature — this guards
-// against accidental rename / parameter drift by future refactors and
-// confirms the extraction compiles as a pure relocation. The
-// underlying behavior is already covered end-to-end by every
-// TestSpawnSession* case that exercises the enclosing spawnSession
-// path, which now routes through this helper.
-func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
-	// Compile-time pin: if installFreshSessionLocked's signature drifts,
-	// this assignment fails to build. Method values on a concrete type
-	// are never nil, so a runtime nil-check here would be vacuous
-	// (staticcheck SA4031).
-	var _ = func(r *Router) func(
-		key string,
-		proc *cli.Process,
-		workspace string,
-		backendID string,
-		accessProfileID string,
-		wrapper *cli.Wrapper,
-		resumeID string,
-		oldHistory []clievent.EventEntry,
-		prevIDs []string,
-		oldTotalCost float64,
-		oldCostSpent float64,
-		oldCreatedAt int64,
-		exempt bool,
-		oldSID string,
-		oldUserTurns int64,
-		overrides sessionOverrides,
-	) *ManagedSession {
-		return r.installFreshSessionLocked
-	}
-	_ = t
-}
-
-// ---------------------------------------------------------------------------
 // R248-TEST-3 — spawningKeys close-then-delete invariants
 // ---------------------------------------------------------------------------
 
