@@ -22,24 +22,12 @@ func TestUnregister_DropsMarshalCacheOnLastSubscriber(t *testing.T) {
 	hub.historyMarshalCache.slot(lastKey)
 	hub.historyMarshalCache.slot(sharedKey)
 
-	// The disconnecting client subscribes to both keys.
-	c := &wsClient{
-		subscriptions: map[string]func(){
-			lastKey:   func() {},
-			sharedKey: func() {},
-		},
-	}
-
-	hub.mu.Lock()
-	if hub.clients == nil {
-		hub.clients = map[*wsClient]struct{}{}
-	}
-	hub.clients[c] = struct{}{}
-	// lastKey: only this client subscribes (count 1 -> 0 on unregister).
-	// sharedKey: a second tab still subscribes (count 2 -> 1), cache must stay.
-	hub.subscriberCount[lastKey] = 1
-	hub.subscriberCount[sharedKey] = 2
-	hub.mu.Unlock()
+	// The disconnecting client subscribes to both keys; a second tab still
+	// subscribes to sharedKey, so only lastKey's slot may go.
+	c := &wsClient{done: make(chan struct{})}
+	registerSub(hub, c, lastKey)
+	subscribeTest(hub, c, sharedKey, func() {})
+	registerSub(hub, &wsClient{done: make(chan struct{})}, sharedKey)
 
 	hub.unregister(c)
 

@@ -811,9 +811,7 @@ func TestWS_ClientDisconnectCleanup(t *testing.T) {
 	// Give time for cleanup
 	time.Sleep(100 * time.Millisecond)
 
-	hub.mu.Lock()
-	clientCount := len(hub.clients)
-	hub.mu.Unlock()
+	clientCount := registeredClients(hub)
 
 	if clientCount != 0 {
 		t.Errorf("client count = %d after disconnect, want 0", clientCount)
@@ -884,14 +882,19 @@ func TestWS_HubShutdown(t *testing.T) {
 	wsWrite(t, conn, node.ClientMsg{Type: "ping"})
 	_ = wsRead(t, conn) // pong
 
+	// Shutdown closes the live connection itself rather than waiting for the
+	// client to go away, and the client sees the close.
+	start := time.Now()
 	hub.Shutdown()
-
-	hub.mu.Lock()
-	clientCount := len(hub.clients)
-	hub.mu.Unlock()
-
-	if clientCount != 0 {
-		t.Errorf("client count = %d after shutdown, want 0", clientCount)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("Shutdown took %v with a client connected: it waited for the client instead of closing it", d)
+	}
+	if n := registeredClients(hub); n != 0 {
+		t.Errorf("client count = %d after shutdown, want 0", n)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Error("the connection is still open after Shutdown")
 	}
 }
 
@@ -981,10 +984,8 @@ func TestHandleAuth_WSToken_SetsUploadOwner(t *testing.T) {
 	defer hub.Shutdown()
 
 	c := &wsClient{
-		send:          make(chan []byte, 4),
-		done:          make(chan struct{}),
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
+		send: make(chan []byte, 4),
+		done: make(chan struct{}),
 	}
 	hub.handleAuth(c, node.ClientMsg{Type: "auth", Token: "secret"})
 
@@ -1010,10 +1011,8 @@ func TestHandleAuth_WSToken_OwnerStableAcrossCalls(t *testing.T) {
 
 	derive := func() string {
 		c := &wsClient{
-			send:          make(chan []byte, 4),
-			done:          make(chan struct{}),
-			subscriptions: make(map[string]func()),
-			subGen:        make(map[string]uint64),
+			send: make(chan []byte, 4),
+			done: make(chan struct{}),
 		}
 		hub.handleAuth(c, node.ClientMsg{Type: "auth", Token: "secret"})
 		return c.uploadOwnerKey()

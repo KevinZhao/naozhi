@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -26,41 +27,13 @@ import (
 // (tools/lint-server-handlers rule 3a); NewHub / Shutdown are the
 // LIFECYCLE-METHOD cross-block exemption.
 type Hub struct {
-	mu sync.RWMutex
+	// subs is who is connected, authenticated and subscribed to what.
+	subs *subscriberRegistry
 	// droppedTotal is the Hub-wide count of SendRaw drops (send channel
 	// full). Deliberately aggregated, not per-client: it is exported only
 	// via the auth-gated /health, and all authenticated users share one trust
 	// boundary. Multi-tenant auth would require moving it behind debug_mode (#1100).
 	droppedTotal atomic.Int64
-	clients      map[*wsClient]struct{}
-	// authClients mirrors clients whose authenticated flag is true so
-	// broadcastToAuthenticated skips the handshake-pending majority.
-	// Guarded by authMu, nested INSIDE h.mu by the writers (register /
-	// markAuthenticated / unregister / Shutdown); the broadcast read side
-	// takes authMu alone and never h.mu, so there is no inverse order.
-	// Nil on hand-rolled test hubs ⇒ legacy h.clients scan (#1409, #1621).
-	// The pad keeps authMu off h.mu's cache line (128 bytes: Apple silicon
-	// lines, x86 adjacent-line prefetch): broadcasts read-lock authMu while
-	// churn write-locks h.mu (BenchmarkHubSnapshotAuthenticated/churn +17%).
-	_           [128]byte
-	authMu      sync.RWMutex
-	authClients map[*wsClient]struct{}
-	// authClientsSlice + authClientsIdx mirror authClients as a contiguous
-	// slice (copy() instead of a map walk on the broadcast hot path) with an
-	// index for O(1) swap-delete. Maintained under authMu by the same
-	// writers; nil when authClients is nil (#2310).
-	authClientsSlice []*wsClient
-	authClientsIdx   map[*wsClient]int
-	// subscriberCount is the per-key subscriber count backing the
-	// maxSubscribersPerKey cap; mutated under h.mu with c.subscriptions,
-	// cleared on Shutdown (#716).
-	subscriberCount map[string]int
-	// subscriberCountFast is a lock-free mirror of subscriberCount for the
-	// event-push hot path (singleSubscriber). The map stays the source of
-	// truth; every mutation goes through bump/decSubscriberCountLocked or the
-	// Shutdown clear. A one-critical-section-stale read only affects the
-	// marshal-cache routing heuristic, never correctness (#1522).
-	subscriberCountFast sync.Map // key string -> *atomic.Int32
 	// router is the HubRouter consumer subset (consumer.go) so tests can
 	// inject a fake.
 	router    HubRouter
@@ -90,6 +63,10 @@ type Hub struct {
 	allowedRoot string          // workspace paths must be under this root (empty = unrestricted)
 	ctx         context.Context // cancelled on Shutdown to stop in-flight sends
 	cancel      context.CancelFunc
+
+	// resubscribeInterval is how often a push loop whose process went away
+	// looks for a new one (defaultResubscribeInterval; tests shorten it).
+	resubscribeInterval time.Duration
 
 	// clientWG tracks per-client pump/eventPushLoop goroutines plus the
 	// debounce callback; owned by the connection lifecycle (conn.Close),
@@ -179,23 +156,22 @@ func NewHub(opts HubOptions) *Hub {
 		nodes = newNodeRegistry(nil)
 	}
 	h := &Hub{
-		clients:         make(map[*wsClient]struct{}),
-		authClients:     make(map[*wsClient]struct{}),
-		authClientsIdx:  make(map[*wsClient]int),
-		subscriberCount: make(map[string]int),
-		router:          opts.Router,
-		agents:          opts.Agents,
-		agentCmds:       opts.AgentCmds,
-		nodes:           nodes,
-		projectMgr:      opts.ProjectMgr,
-		resolver:        opts.Resolver,
-		scheduler:       opts.Scheduler,
-		scratchPool:     opts.ScratchPool,
-		allowedRoot:     opts.AllowedRoot,
-		admit:           newConnAdmission(opts),
-		uploadStore:     opts.UploadStore,
-		ctx:             ctx,
-		cancel:          cancel,
+		subs:        newSubscriberRegistry(),
+		router:      opts.Router,
+		agents:      opts.Agents,
+		agentCmds:   opts.AgentCmds,
+		nodes:       nodes,
+		projectMgr:  opts.ProjectMgr,
+		resolver:    opts.Resolver,
+		scheduler:   opts.Scheduler,
+		scratchPool: opts.ScratchPool,
+		allowedRoot: opts.AllowedRoot,
+		admit:       newConnAdmission(opts),
+		uploadStore: opts.UploadStore,
+		ctx:         ctx,
+		cancel:      cancel,
+
+		resubscribeInterval: defaultResubscribeInterval,
 	}
 	h.tailers = newTailerRegistry(h)
 	h.wiredLinkers = make(map[agentlink.AgentLinker]struct{})
@@ -221,108 +197,18 @@ func NewHub(opts HubOptions) *Hub {
 }
 
 func (h *Hub) register(c *wsClient) {
-	h.mu.Lock()
-	h.clients[c] = struct{}{}
-	// Clients pre-authenticated by deriveUploadOwner (no-token / cookie
-	// path) join authClients here; token-mode clients join via
-	// markAuthenticated. authMu nests inside h.mu.
-	if h.authClients != nil && c.authenticated.Load() {
-		h.authMu.Lock()
-		h.addAuthClientLocked(c)
-		h.authMu.Unlock()
-	}
-	h.mu.Unlock()
-}
-
-// addAuthClientLocked inserts c into authClients and its slice mirror.
-// Idempotent (register's pre-auth insert may be followed by
-// markAuthenticated). Caller MUST hold authMu (write).
-func (h *Hub) addAuthClientLocked(c *wsClient) {
-	if _, ok := h.authClients[c]; ok {
-		return
-	}
-	h.authClients[c] = struct{}{}
-	if h.authClientsIdx != nil {
-		h.authClientsIdx[c] = len(h.authClientsSlice)
-		h.authClientsSlice = append(h.authClientsSlice, c)
-	}
-}
-
-// removeAuthClientLocked deletes c from authClients and swap-deletes it from
-// the slice mirror in O(1). No-op if absent. Caller MUST hold authMu (write).
-func (h *Hub) removeAuthClientLocked(c *wsClient) {
-	if _, ok := h.authClients[c]; !ok {
-		return
-	}
-	delete(h.authClients, c)
-	if h.authClientsIdx == nil {
-		return
-	}
-	i, ok := h.authClientsIdx[c]
-	delete(h.authClientsIdx, c)
-	if !ok {
-		return
-	}
-	last := len(h.authClientsSlice) - 1
-	if i != last {
-		moved := h.authClientsSlice[last]
-		h.authClientsSlice[i] = moved
-		h.authClientsIdx[moved] = i
-	}
-	h.authClientsSlice[last] = nil // let the removed client be GC'd
-	h.authClientsSlice = h.authClientsSlice[:last]
-}
-
-// markAuthenticated inserts c into the authClients mirror; the caller must
-// have stored c.authenticated=true first. Nil authClients is a no-op.
-func (h *Hub) markAuthenticated(c *wsClient) {
-	h.mu.Lock()
-	// Membership in h.clients is the source of truth: a delayed handleAuth
-	// racing unregister must not reinsert a torn-down client.
-	if h.authClients != nil {
-		if _, ok := h.clients[c]; ok {
-			h.authMu.Lock()
-			h.addAuthClientLocked(c)
-			h.authMu.Unlock()
-		}
-	}
-	h.mu.Unlock()
+	h.subs.add(c)
 }
 
 func (h *Hub) unregister(c *wsClient) {
-	// Per-key unsub closures take their own mutexes, so they are snapshotted
-	// under h.mu (map mutation must be atomic with the counter decrement) and
-	// invoked after release. Safe because no closure path acquires h.mu.
-	h.mu.Lock()
-	removed := false
-	var unsubs []func()
-	// Keys whose count hits zero drop their historyMarshalCache slot after
-	// h.mu is released, mirroring handleUnsubscribe (#2010).
-	var dropKeys []string
-	if _, ok := h.clients[c]; ok {
-		delete(h.clients, c)
-		if h.authClients != nil {
-			h.authMu.Lock()
-			h.removeAuthClientLocked(c)
-			h.authMu.Unlock()
-		}
-		if n := len(c.subscriptions); n > 0 {
-			unsubs = make([]func(), 0, n)
-			for key, unsub := range c.subscriptions {
-				unsubs = append(unsubs, unsub)
-				h.decSubscriberCountLocked(key)
-				if h.dropMarshalCacheForLocked(key) {
-					dropKeys = append(dropKeys, key)
-				}
-			}
-		}
-		c.subscriptions = nil
-		removed = true
-	}
-	h.mu.Unlock()
+	// The closures take EventLog locks; the registry hands them back so they
+	// run with its lock released.
+	unsubs, dropKeys, removed := h.subs.remove(c)
 	for _, unsub := range unsubs {
 		unsub()
 	}
+	// Keys left with no subscriber drop their historyMarshalCache slot, as
+	// handleUnsubscribe does.
 	if len(dropKeys) > 0 && h.historyMarshalCache != nil {
 		for _, key := range dropKeys {
 			h.historyMarshalCache.drop(key)
@@ -396,9 +282,9 @@ var unregisterNodesPool = sync.Pool{
 // (LIFECYCLE-METHOD: writes every field block).
 //
 // LOCK ORDER CONTRACT: unsub closures invoked from here and unregister take
-// eventLog.subMu; they are invoked after h.mu is released, and no EventLog
-// callback (notifySubscribers, eventPushLoop) may acquire h.mu while holding
-// subMu. Breaking this is an ABBA deadlock that surfaces as systemd
+// eventLog.subMu; they are invoked after the registry's lock is released, and
+// no EventLog callback (notifySubscribers, eventPushLoop) may take that lock
+// while holding subMu. Breaking this is an ABBA deadlock that surfaces as systemd
 // TimeoutStopSec + SIGKILL (shutdown_lock_order_test.go).
 func (h *Hub) Shutdown() {
 	h.cancel() // cancel in-flight send goroutines
@@ -408,57 +294,22 @@ func (h *Hub) Shutdown() {
 	h.debounce.close()
 
 	// Close client conns first, then wait for pumps/eventPushLoop, so
-	// node/router teardown cannot race unregister → RemoveClient. Unsub
-	// closures are snapshotted under h.mu and invoked after release (same
-	// lock-split as unregister).
-	h.mu.Lock()
-	conns := make([]*websocket.Conn, 0, len(h.clients))
-	var unsubs []func()
-	removed := 0
-	for c := range h.clients {
-		if n := len(c.subscriptions); n > 0 {
-			if unsubs == nil {
-				unsubs = make([]func(), 0, n)
-			}
-			for _, unsub := range c.subscriptions {
-				unsubs = append(unsubs, unsub)
-			}
-		}
-		c.subscriptions = nil
-		if c.conn != nil {
-			conns = append(conns, c.conn)
-		}
-		delete(h.clients, c)
-		removed++
-	}
-	// All subscriptions were just niled, so the per-key counts are zero.
-	for k := range h.subscriberCount {
-		delete(h.subscriberCount, k)
-		h.subscriberCountFast.Delete(k)
-	}
-	// Drain authClients (kept empty, not nil, so a straggler
-	// markAuthenticated still goes through the h.clients check) and its
-	// slice mirror so post-Shutdown broadcasts cannot reach torn-down clients.
-	h.authMu.Lock()
-	for c := range h.authClients {
-		delete(h.authClients, c)
-	}
-	for i := range h.authClientsSlice {
-		h.authClientsSlice[i] = nil
-	}
-	h.authClientsSlice = h.authClientsSlice[:0]
-	for c := range h.authClientsIdx {
-		delete(h.authClientsIdx, c)
-	}
-	h.authMu.Unlock()
-	h.mu.Unlock()
+	// node/router teardown cannot race unregister → RemoveClient. drain hands
+	// the unsub closures back so they run with the registry's lock released.
+	clients, unsubs := h.subs.drain()
 	for _, unsub := range unsubs {
 		unsub()
 	}
-	// unregister's decrement is gated on h.clients membership (just
-	// cleared), so release the slots here.
-	if removed > 0 {
-		h.admit.releaseConn(removed)
+	// unregister releases a slot only for a client still registered, and
+	// drain just emptied the registry, so release the slots here.
+	if len(clients) > 0 {
+		h.admit.releaseConn(len(clients))
+	}
+	conns := make([]*websocket.Conn, 0, len(clients))
+	for _, c := range clients {
+		if c.conn != nil {
+			conns = append(conns, c.conn)
+		}
 	}
 
 	for _, conn := range conns {
@@ -491,8 +342,8 @@ func (h *Hub) Shutdown() {
 	h.admit.close()
 
 	// Send barrier. Position is load-bearing and drain's godoc spells out why:
-	// h.cancel() and h.debounce.close() above, none of h.mu / authMu / the
-	// debouncer's lock held (the drained goroutines re-enter all three
+	// h.cancel() and h.debounce.close() above, none of the registry's locks
+	// or the debouncer's held (the drained goroutines re-enter them
 	// through sendNotifier), and before the node Close loop below.
 	// wshub_shutdown_order_test.go pins the source order.
 	if h.engine != nil {

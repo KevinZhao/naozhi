@@ -30,10 +30,8 @@ func TestHandleAuth_TokenRekeysOwnerSlot(t *testing.T) {
 	defer hub.Shutdown()
 
 	c := &wsClient{
-		send:          make(chan []byte, 4),
-		done:          make(chan struct{}),
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
+		send: make(chan []byte, 4),
+		done: make(chan struct{}),
 	}
 	// Simulate the upgrade-time reservation: token-mode pre-auth owner is "".
 	if !hub.admit.reserveOwner(c.uploadOwnerKey()) {
@@ -82,10 +80,8 @@ func TestHandleAuth_TokenRekey_ReserveFailRejects(t *testing.T) {
 	}
 
 	c := &wsClient{
-		send:          make(chan []byte, 4),
-		done:          make(chan struct{}),
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
+		send: make(chan []byte, 4),
+		done: make(chan struct{}),
 	}
 	// Upgrade-time reservation against the empty pre-auth owner.
 	if !hub.admit.reserveOwner(c.uploadOwnerKey()) {
@@ -129,10 +125,8 @@ func TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak(t *testing.T) {
 		hub, _ := newTestHub("secret")
 
 		c := &wsClient{
-			send:          make(chan []byte, 4),
-			done:          make(chan struct{}),
-			subscriptions: make(map[string]func()),
-			subGen:        make(map[string]uint64),
+			send: make(chan []byte, 4),
+			done: make(chan struct{}),
 		}
 		// Upgrade-time reservation against the empty pre-auth owner, then
 		// register so unregister's `removed` gate fires exactly once.
@@ -186,10 +180,8 @@ func TestRekeyOwnerSlot_SkipsWhenConnDone(t *testing.T) {
 	defer hub.Shutdown()
 
 	c := &wsClient{
-		send:          make(chan []byte, 4),
-		done:          make(chan struct{}),
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
+		send: make(chan []byte, 4),
+		done: make(chan struct{}),
 	}
 	if !hub.admit.reserveOwner(c.uploadOwnerKey()) {
 		t.Fatal("empty-owner reserve must succeed")
@@ -221,10 +213,8 @@ func TestUploadOwnerAtomic_NoRace(t *testing.T) {
 	defer hub.Shutdown()
 
 	c := &wsClient{
-		send:          make(chan []byte, 4),
-		done:          make(chan struct{}),
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
+		send: make(chan []byte, 4),
+		done: make(chan struct{}),
 	}
 	c.setUploadOwner("initial-owner")
 

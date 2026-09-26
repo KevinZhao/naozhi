@@ -80,13 +80,12 @@ func TestBroadcastSessionReady_ViaMarshalHelper(t *testing.T) {
 
 // TestMarshalBroadcastAuth_ZeroAuthClients_NoPanic verifies R20260608133928-PERF-1:
 // when NewHub has no authenticated clients, BroadcastRunStarted must not
-// panic and must not deliver any frame. Uses a production hub (authClients != nil)
-// so the fast-path is exercised.
+// panic and must not deliver any frame.
 func TestMarshalBroadcastAuth_ZeroAuthClients_NoPanic(t *testing.T) {
 	hub, _ := newTestHub("tok")
 	t.Cleanup(hub.Shutdown)
 
-	// No clients registered — authClients exists but is empty.
+	// No clients registered.
 	// Must not panic.
 	hub.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "aaaa", RunID: "bbbb", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
 }
@@ -98,11 +97,9 @@ func TestMarshalBroadcastAuth_ZeroAuthClients_NoSendRaw(t *testing.T) {
 	hub, _ := newTestHub("tok")
 	t.Cleanup(hub.Shutdown)
 
-	// Register an unauthenticated client — authClients still empty.
+	// Register an unauthenticated client: the authenticated set stays empty.
 	c := &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
-	hub.mu.Lock()
-	hub.clients[c] = struct{}{}
-	hub.mu.Unlock()
+	hub.register(c)
 
 	hub.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "cccc", RunID: "dddd", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
 
@@ -176,8 +173,8 @@ func TestSnapshotAuthenticated_EmptyMirror(t *testing.T) {
 }
 
 // TestMarshalBroadcastAuth_ConcurrentRegisterAndBroadcast stresses the broadcast
-// read side (authMu alone) against register/unregister writers (h.mu + nested
-// authMu) to surface any race introduced by consolidating the lock window.
+// read side against register/unregister writers to surface any race in the
+// authenticated set.
 // Run with -race.
 func TestMarshalBroadcastAuth_ConcurrentRegisterAndBroadcast(t *testing.T) {
 	hub, _ := newTestHub("tok")
@@ -212,21 +209,8 @@ func TestMarshalBroadcastAuth_ConcurrentRegisterAndBroadcast(t *testing.T) {
 			for j := 0; j < iters; j++ {
 				c := &wsClient{hub: hub, send: make(chan []byte, 64), done: make(chan struct{})}
 				c.authenticated.Store(true)
-				// Mirror the real register/unregister writers: mutate the
-				// authClients mirror with authMu nested inside h.mu.
-				hub.mu.Lock()
-				hub.authMu.Lock()
-				hub.clients[c] = struct{}{}
-				hub.addAuthClientLocked(c)
-				hub.authMu.Unlock()
-				hub.mu.Unlock()
-
-				hub.mu.Lock()
-				hub.authMu.Lock()
-				hub.removeAuthClientLocked(c)
-				delete(hub.clients, c)
-				hub.authMu.Unlock()
-				hub.mu.Unlock()
+				hub.subs.add(c)
+				hub.subs.remove(c)
 			}
 		}()
 	}

@@ -81,8 +81,6 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		// than ~once per second, while spammed interrupts could abort every turn.
 		// ~0.5/s sustained, burst 2 covers double-clicks.
 		interruptLimiter: rate.NewLimiter(rate.Every(2*time.Second), 2),
-		subscriptions:    make(map[string]func()),
-		subGen:           make(map[string]uint64),
 		done:             make(chan struct{}),
 	}
 	// Apply the owner / initial-auth results resolved before Upgrade (#1326).
@@ -175,10 +173,9 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 			}
 		}
 		c.authenticated.Store(true)
-		// Mirror the auth flip into h.authClients for broadcastToAuthenticated
-		// (#1409). The Store above must precede the mirror write so a concurrent
-		// broadcast that sees the mirror entry also sees authenticated==true.
-		h.markAuthenticated(c)
+		// The Store above precedes this so a broadcast that finds c in the
+		// authenticated set also sees authenticated==true.
+		h.subs.markAuthenticated(c)
 		c.SendRaw([]byte(wsproto.RawAuthOK))
 	} else {
 		c.SendRaw([]byte(wsproto.RawAuthFailInvalid))

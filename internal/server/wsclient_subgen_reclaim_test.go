@@ -1,271 +1,177 @@
 package server
 
 import (
-	"regexp"
+	"strconv"
 	"testing"
 	"time"
 )
 
-// TestSubGenReclaim_MarkAndSweepBeyondRetention pins the core reclamation
-// behaviour introduced by R175-P2. A wsClient that flaps through many
-// session subscriptions must eventually reclaim subGen entries so long-lived
-// dashboard connections do not accumulate the map indefinitely.
-//
-// Scenario: mark three keys for release at t0, advance past the retention
-// window, trigger a sweep. All three subGen entries must be gone.
+func newTestClientSubs() *clientSubs {
+	return &clientSubs{unsubs: make(map[string]func()), gen: make(map[string]uint64)}
+}
+
+// markReleasable stands in for dropLocked's scheduling step.
+func (cs *clientSubs) markReleasable(key string, nowNanos int64) {
+	if cs.releaseAt == nil {
+		cs.releaseAt = make(map[string]int64)
+	}
+	cs.releaseAt[key] = nowNanos + subGenRetentionNanos
+}
+
+// TestSubGenReclaim_MarkAndSweepBeyondRetention: a client flapping through many
+// session subscriptions eventually reclaims their generations, so long-lived
+// dashboard connections do not accumulate them indefinitely — but not inside
+// the retention window, where a stale resubscribe loop may still be parked.
 func TestSubGenReclaim_MarkAndSweepBeyondRetention(t *testing.T) {
 	t.Parallel()
 
-	c := &wsClient{
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
-	}
-	// Arrange: three historical subscribe/unsubscribe cycles.
-	for _, key := range []string{"a", "b", "c"} {
-		c.subGen[key] = 7
-	}
+	cs := newTestClientSubs()
 	t0 := time.Unix(1_000_000, 0).UnixNano()
 	for _, key := range []string{"a", "b", "c"} {
-		c.markSubGenReleasable(key, t0)
+		cs.gen[key] = 7
+		cs.markReleasable(key, t0)
 	}
 
-	// Sanity: markers populated, subGen entries still present.
-	if len(c.subGenReleaseAt) != 3 {
-		t.Fatalf("subGenReleaseAt len = %d, want 3", len(c.subGenReleaseAt))
-	}
-	if len(c.subGen) != 3 {
-		t.Fatalf("subGen len before sweep = %d, want 3", len(c.subGen))
-	}
-
-	// A sweep inside the retention window must NOT reclaim: stale resubscribe
-	// goroutines may still be parked in resubscribeEvents' 60s ticker.
-	// Force the sweep to run by bypassing the throttle with a distant zero
-	// lastSweep stamp (already zero); the window check still gates it.
 	inWindow := t0 + int64(10*time.Second)
-	if n := c.sweepSubGenExpiredLocked(inWindow); n != 0 {
+	if n := cs.sweepExpired(inWindow); n != 0 {
 		t.Fatalf("sweep inside retention window reclaimed %d entries, want 0", n)
 	}
-	if len(c.subGen) != 3 {
-		t.Fatalf("subGen len after in-window sweep = %d, want 3 (stale-goroutine contract broken)", len(c.subGen))
+	if len(cs.gen) != 3 {
+		t.Fatalf("gen len after in-window sweep = %d, want 3 (stale-goroutine contract broken)", len(cs.gen))
 	}
 
-	// Advance past retention. Also reset lastSweepNs so the throttle allows
-	// the scan — the first sweep above bumped it.
-	c.subGenLastSweepNs = 0
+	// Past retention; reset the throttle the first sweep armed.
+	cs.lastSweepNs = 0
 	past := t0 + subGenRetentionNanos + int64(time.Second)
-	if n := c.sweepSubGenExpiredLocked(past); n != 3 {
+	if n := cs.sweepExpired(past); n != 3 {
 		t.Fatalf("sweep past retention reclaimed %d entries, want 3", n)
 	}
-	if len(c.subGen) != 0 {
-		t.Fatalf("subGen after sweep = %d entries, want 0 (reclamation failed)", len(c.subGen))
-	}
-	if len(c.subGenReleaseAt) != 0 {
-		t.Fatalf("subGenReleaseAt after sweep = %d entries, want 0 (marker leak)", len(c.subGenReleaseAt))
+	if len(cs.gen) != 0 || len(cs.releaseAt) != 0 {
+		t.Fatalf("after sweep gen=%d releaseAt=%d entries, want 0/0", len(cs.gen), len(cs.releaseAt))
 	}
 }
 
-// TestSubGenReclaim_ActiveSubscriptionPreservesEntry pins the safety net
-// inside sweepSubGenExpiredLocked: if a marker somehow outlives a fresh
-// subscribe (e.g. a caller forgot to clearSubGenReleasable), the sweep must
-// NOT delete the live subGen entry — only drop the stale marker. Losing a
-// live subGen[key] would collapse the generation counter and re-expose the
-// R163 takeover-detection bug.
+// TestSubGenReclaim_ActiveSubscriptionPreservesEntry: a marker that outlives a
+// fresh subscribe must not take the live generation with it — losing gen[key]
+// would collapse the counter and defeat takeover detection. Only the stale
+// marker goes.
 func TestSubGenReclaim_ActiveSubscriptionPreservesEntry(t *testing.T) {
 	t.Parallel()
 
-	c := &wsClient{
-		subscriptions: map[string]func(){
-			"active-key": func() {},
-		},
-		subGen: map[string]uint64{
-			"active-key": 5,
-		},
-	}
+	cs := newTestClientSubs()
+	cs.unsubs["active-key"] = func() {}
+	cs.gen["active-key"] = 5
 	t0 := time.Unix(2_000_000, 0).UnixNano()
-	c.markSubGenReleasable("active-key", t0)
+	cs.markReleasable("active-key", t0)
 
-	past := t0 + subGenRetentionNanos + int64(time.Second)
-	_ = c.sweepSubGenExpiredLocked(past)
+	_ = cs.sweepExpired(t0 + subGenRetentionNanos + int64(time.Second))
 
-	if gen, ok := c.subGen["active-key"]; !ok || gen != 5 {
-		t.Fatalf("sweep deleted live subGen entry (got %v, ok=%v) — "+
-			"R163 takeover-detection contract broken", gen, ok)
+	if gen, ok := cs.gen["active-key"]; !ok || gen != 5 {
+		t.Fatalf("sweep deleted a live generation (got %v, ok=%v)", gen, ok)
 	}
-	if _, ok := c.subGenReleaseAt["active-key"]; ok {
-		t.Error("stale marker survived sweep for live key — marker-leak regression")
+	if _, ok := cs.releaseAt["active-key"]; ok {
+		t.Error("stale marker survived the sweep for a live key")
 	}
 }
 
-// TestSubGenReclaim_ClearReleasableOnFreshSubscribe pins the clear path:
-// when a key resubscribes after being marked for release, the marker MUST
-// be cleared immediately (completeSubscribe calls clearSubGenReleasable).
-// Without this, a sweep triggered mid-life would delete a live subGen
-// entry.
-func TestSubGenReclaim_ClearReleasableOnFreshSubscribe(t *testing.T) {
-	t.Parallel()
-
-	c := &wsClient{
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
-	}
-	t0 := time.Unix(3_000_000, 0).UnixNano()
-
-	// Subscribe, unsubscribe (mark), then resubscribe (clear).
-	c.subGen["k"] = 1
-	c.markSubGenReleasable("k", t0)
-	if _, marked := c.subGenReleaseAt["k"]; !marked {
-		t.Fatal("marker was not installed")
-	}
-	c.clearSubGenReleasable("k")
-	if _, marked := c.subGenReleaseAt["k"]; marked {
-		t.Error("clearSubGenReleasable did not remove marker")
-	}
-}
-
-// TestSubGenReclaim_SweepThrottle pins the rate-limit semantics: two sweeps
-// within subGenSweepMinIntervalNanos should be a no-op for the second call
-// UNLESS the map exceeds the high-water mark.
+// TestSubGenReclaim_SweepThrottle: two sweeps within
+// subGenSweepMinIntervalNanos — the second is a no-op.
 func TestSubGenReclaim_SweepThrottle(t *testing.T) {
 	t.Parallel()
 
-	c := &wsClient{
-		subscriptions: make(map[string]func()),
-		subGen:        map[string]uint64{"x": 1},
-	}
+	cs := newTestClientSubs()
+	cs.gen["x"] = 1
 	t0 := time.Unix(4_000_000, 0).UnixNano()
 	past := t0 + subGenRetentionNanos + int64(time.Second)
 
-	c.markSubGenReleasable("x", t0)
-	if n := c.sweepSubGenExpiredLocked(past); n != 1 {
+	cs.markReleasable("x", t0)
+	if n := cs.sweepExpired(past); n != 1 {
 		t.Fatalf("first sweep reclaimed %d, want 1", n)
 	}
 
-	// Second sweep right after should skip because lastSweepNs was bumped.
-	// Mark another key but stay within the throttle window.
-	c.subGen["y"] = 1
-	c.markSubGenReleasable("y", t0)
-	soon := past + int64(time.Second) // within 30s throttle
-	if n := c.sweepSubGenExpiredLocked(soon); n != 0 {
-		t.Errorf("throttled sweep reclaimed %d, want 0 (throttle broken)", n)
+	cs.gen["y"] = 1
+	cs.markReleasable("y", t0)
+	soon := past + int64(time.Second) // within the 30s throttle
+	if n := cs.sweepExpired(soon); n != 0 {
+		t.Errorf("throttled sweep reclaimed %d, want 0", n)
 	}
-	if _, stillThere := c.subGen["y"]; !stillThere {
+	if _, stillThere := cs.gen["y"]; !stillThere {
 		t.Error("throttle did not prevent reclamation")
 	}
 }
 
-// TestSubGenReclaim_HighWaterForcesSweep pins the escape hatch: when the
-// marker map grows past subGenHighWaterMark, a sweep MUST run even if the
-// throttle would otherwise suppress it. Bounds worst-case memory on
-// pathological clients.
+// TestSubGenReclaim_HighWaterForcesSweep: past subGenHighWaterMark markers a
+// sweep runs even inside the throttle, bounding memory on pathological
+// clients.
 func TestSubGenReclaim_HighWaterForcesSweep(t *testing.T) {
 	t.Parallel()
 
-	c := &wsClient{
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
-	}
+	cs := newTestClientSubs()
 	t0 := time.Unix(5_000_000, 0).UnixNano()
-
-	// Fill past high-water.
 	for i := 0; i < subGenHighWaterMark+10; i++ {
-		key := "k" + itoa(i)
-		c.subGen[key] = 1
-		c.markSubGenReleasable(key, t0)
+		key := "k" + strconv.Itoa(i)
+		cs.gen[key] = 1
+		cs.markReleasable(key, t0)
 	}
-	// Simulate a recent sweep that would normally suppress.
-	c.subGenLastSweepNs = t0 + int64(10*time.Second)
-
 	past := t0 + subGenRetentionNanos + int64(time.Second)
-	reclaimed := c.sweepSubGenExpiredLocked(past)
-	if reclaimed == 0 {
+	cs.lastSweepNs = past - int64(time.Second) // a sweep 1s ago: inside the throttle
+
+	if reclaimed := cs.sweepExpired(past); reclaimed == 0 {
 		t.Fatal("high-water sweep was suppressed — memory bound not enforced")
 	}
-	if len(c.subGenReleaseAt) != 0 {
-		t.Errorf("after high-water sweep, %d markers remain", len(c.subGenReleaseAt))
+	if len(cs.releaseAt) != 0 {
+		t.Errorf("after high-water sweep, %d markers remain", len(cs.releaseAt))
 	}
 }
 
-// TestSubGenReclaim_NilMapsSafe ensures the helpers don't panic on a
-// freshly-constructed wsClient whose subGenReleaseAt has not yet been
-// materialised. mark* lazy-inits; clear* and sweep* tolerate nil.
-func TestSubGenReclaim_NilMapsSafe(t *testing.T) {
+// TestSubGenReclaim_UnsubscribeSchedulesAndResubscribeCancels drives the
+// registry the way the handlers do: unsubscribe keeps the generation but
+// schedules it for reclamation; subscribing to the key again cancels that,
+// and the generation keeps counting up rather than restarting.
+func TestSubGenReclaim_UnsubscribeSchedulesAndResubscribeCancels(t *testing.T) {
 	t.Parallel()
 
-	c := &wsClient{
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
-	}
-	// Clear on a nil map must be a no-op, not a panic.
-	c.clearSubGenReleasable("nope")
-	if n := c.sweepSubGenExpiredLocked(time.Now().UnixNano()); n != 0 {
-		t.Errorf("sweep on nil map reclaimed %d, want 0", n)
-	}
-	// Mark lazily allocates.
-	c.markSubGenReleasable("k", time.Now().UnixNano())
-	if c.subGenReleaseAt == nil {
-		t.Fatal("markSubGenReleasable did not lazy-init subGenReleaseAt")
-	}
-}
-
-// TestSubGenReclaim_SourceAnchor pins the handleUnsubscribe wiring. A future
-// refactor that removes the markSubGenReleasable call would silently
-// re-introduce the unbounded accumulation R175-P2 fixed; this source-level
-// test trips immediately when the anchor goes missing.
-func TestSubGenReclaim_SourceAnchor(t *testing.T) {
-	t.Parallel()
-	// R243-ARCH-2 split: handleUnsubscribe and completeSubscribe moved to
-	// wshub_subscribe.go alongside the other subscribe handlers.
-	src := []byte(packageGoSource(t))
-
-	// handleUnsubscribe body must contain markSubGenReleasable + sweep.
-	reHandle := regexp.MustCompile(`(?ms)^func \(h \*Hub\) handleUnsubscribe\(.*?\n\}\n`)
-	m := reHandle.Find(src)
-	if m == nil {
-		t.Fatal("could not locate handleUnsubscribe body")
-	}
-	body := string(m)
-	for _, want := range []string{
-		"markSubGenReleasable(key",
-		"sweepSubGenExpiredLocked",
-	} {
-		if !regexp.MustCompile(regexp.QuoteMeta(want)).MatchString(body) {
-			t.Errorf("handleUnsubscribe missing anchor %q — R175-P2 reclamation wiring removed?", want)
+	r := newSubscriberRegistry()
+	c := &wsClient{done: make(chan struct{})}
+	r.add(c)
+	admit := func() bool { return true }
+	subscribe := func() uint64 {
+		t.Helper()
+		if res := r.reserve(c, "k"); res != reserveOK {
+			t.Fatalf("reserve = %v", res)
 		}
+		gen, ok := r.install(c, "k", func() {}, admit)
+		if !ok {
+			t.Fatal("install declined")
+		}
+		return gen
+	}
+	cs := r.clients[c]
+
+	if gen := subscribe(); gen != 1 {
+		t.Fatalf("first generation = %d, want 1", gen)
+	}
+	t0 := time.Unix(6_000_000, 0).UnixNano()
+	r.unsubscribe(c, "k", t0)
+	if got, ok := cs.releaseAt["k"]; !ok || got != t0+subGenRetentionNanos {
+		t.Fatalf("unsubscribe did not schedule reclamation (releaseAt=%v, ok=%v)", got, ok)
+	}
+	if cs.gen["k"] != 1 {
+		t.Fatalf("unsubscribe dropped the generation (%d): a parked loop's gen=1 could match a fresh subscribe", cs.gen["k"])
 	}
 
-	// completeSubscribe body must clear a stale marker on the resubscribe
-	// path.  Otherwise a sweep mid-life could delete live subGen[key].
-	reComplete := regexp.MustCompile(`(?ms)^func \(h \*Hub\) completeSubscribe\(.*?\n\}\n`)
-	cm := reComplete.Find(src)
-	if cm == nil {
-		t.Fatal("could not locate completeSubscribe body")
+	if gen := subscribe(); gen != 2 {
+		t.Errorf("resubscribe generation = %d, want 2", gen)
 	}
-	if !regexp.MustCompile(`clearSubGenReleasable\(key\)`).MatchString(string(cm)) {
-		t.Error("completeSubscribe missing clearSubGenReleasable(key) — " +
-			"a sweep mid-life could delete live subGen[key] and re-expose R163.")
+	if _, marked := cs.releaseAt["k"]; marked {
+		t.Error("resubscribe left the reclamation marker: a later sweep would delete the live generation")
 	}
-}
 
-// itoa is a tiny inline helper to avoid strconv + fmt imports for benchmarks
-// and keep the sweep test pure.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
+	// The next unsubscribe past the retention of an older marker sweeps it.
+	cs.gen["old"] = 3
+	cs.markReleasable("old", t0)
+	r.unsubscribe(c, "k", t0+subGenRetentionNanos+int64(time.Second))
+	if _, ok := cs.gen["old"]; ok {
+		t.Error("unsubscribe did not sweep an expired generation")
 	}
-	var buf [20]byte
-	i := len(buf)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }

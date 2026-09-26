@@ -39,15 +39,16 @@ const (
 	// tokens / ~330k CJK chars — under the model budget with stdin headroom.
 	maxWSSendTextBytes = 1024 * 1024
 
-	// subGenRetentionNanos is how long a wsClient.subGen[key] entry must be
+	// subGenRetentionNanos is how long a clientSubs.gen[key] entry must be
 	// kept past its last unsubscribe. resubscribeEvents parks up to 12 × 5s =
 	// 60s checking subGen[key] == gen; deleting earlier would let a fresh
 	// subscribe's gen=1 match a stale loop's remembered gen and silently resume
 	// on the wrong ManagedSession. 75s leaves a 15s buffer past that window.
 	subGenRetentionNanos = int64(75 * time.Second)
 	// subGenSweepMinIntervalNanos rate-limits opportunistic sweeps of
-	// subGenReleaseAt so a flappy client does not turn each subscribe /
-	// unsubscribe into an O(map) scan under h.mu; well under the 75s retention.
+	// clientSubs.releaseAt so a flappy client does not turn each subscribe /
+	// unsubscribe into an O(map) scan under the registry's lock; well under
+	// the 75s retention.
 	subGenSweepMinIntervalNanos = int64(30 * time.Second)
 	// subGenHighWaterMark forces an immediate sweep regardless of the throttle,
 	// bounding map growth on long-lived clients that flip many panels.
@@ -66,22 +67,11 @@ type wsClient struct {
 	remoteIP         string // for rate limiting
 	authenticated    atomic.Bool
 	authAttempts     atomic.Int32
-	sendLimiter      *rate.Limiter     // per-connection rate limit on "send" messages
-	interruptLimiter *rate.Limiter     // per-connection rate limit on "interrupt" messages (separate from send)
-	subscriptions    map[string]func() // key -> unsubscribe function
-	subGen           map[string]uint64 // key -> subscription generation (detects resubscribe race)
-	// subGenReleaseAt: earliest unix-nano deadline after which subGen[key] may
-	// be deleted. Entries cannot be deleted at unsubscribe time: a stale
-	// eventPushLoop may still be parked in resubscribeEvents' 60s wait and
-	// would resume if a fresh subscribe reset the generation to a value it
-	// remembers. nil map == empty; populated lazily on first unsubscribe.
-	subGenReleaseAt map[string]int64
-	// subGenLastSweepNs: unix-nano of the last sweep; sweeps run at most once
-	// per subGenSweepMinIntervalNanos from handleSubscribe / handleUnsubscribe.
-	subGenLastSweepNs int64
-	done              chan struct{}
-	doneOnce          sync.Once
-	dropped           atomic.Int64 // messages dropped due to full send buffer
+	sendLimiter      *rate.Limiter // per-connection rate limit on "send" messages
+	interruptLimiter *rate.Limiter // per-connection rate limit on "interrupt" messages (separate from send)
+	done             chan struct{}
+	doneOnce         sync.Once
+	dropped          atomic.Int64 // messages dropped due to full send buffer
 	// uploadOwner is the upload-store owner key (auth cookie, or IP in no-token
 	// mode). Written by readPump's handleAuth and read by writePump's unregister
 	// path (releaseOwnerFor) and readPump's send path, hence the atomic
@@ -104,62 +94,6 @@ func (c *wsClient) setUploadOwner(owner string) {
 
 func (c *wsClient) closeDone() {
 	c.doneOnce.Do(func() { close(c.done) })
-}
-
-// markSubGenReleasable flags a key for delayed reclamation. Callers MUST hold
-// Hub.mu (which serialises c.subscriptions / c.subGen). The entry is NOT
-// deleted here; sweepSubGenExpiredLocked reclaims it after the retention
-// window, once any stale resubscribeEvents loop has certainly exited.
-func (c *wsClient) markSubGenReleasable(key string, nowNanos int64) {
-	if c.subGenReleaseAt == nil {
-		c.subGenReleaseAt = make(map[string]int64)
-	}
-	c.subGenReleaseAt[key] = nowNanos + subGenRetentionNanos
-}
-
-// clearSubGenReleasable cancels a pending reclamation. Callers MUST hold
-// Hub.mu. Used when a fresh subscribe arrives for a key that was marked for
-// release, so the retention marker does not outlive the now-active subscription.
-func (c *wsClient) clearSubGenReleasable(key string) {
-	if c.subGenReleaseAt == nil {
-		return
-	}
-	delete(c.subGenReleaseAt, key)
-}
-
-// sweepSubGenExpiredLocked reclaims expired subGen entries. Callers MUST hold
-// Hub.mu. Throttled by subGenLastSweepNs + subGenSweepMinIntervalNanos unless
-// the map has grown past subGenHighWaterMark (in which case a sweep runs
-// regardless, to put a hard bound on memory). Returns the number of entries
-// reclaimed, for observability in tests.
-func (c *wsClient) sweepSubGenExpiredLocked(nowNanos int64) int {
-	if len(c.subGenReleaseAt) == 0 {
-		return 0
-	}
-	// Throttle: skip the scan if a recent sweep ran, unless the map has
-	// grown past the high-water mark (forces the scan to bound memory).
-	if len(c.subGenReleaseAt) < subGenHighWaterMark &&
-		nowNanos-c.subGenLastSweepNs < subGenSweepMinIntervalNanos {
-		return 0
-	}
-	c.subGenLastSweepNs = nowNanos
-	reclaimed := 0
-	for key, releaseAt := range c.subGenReleaseAt {
-		if nowNanos < releaseAt {
-			continue
-		}
-		// Final safety check: if the key is still actively subscribed, the
-		// marker is stale (bookkeeping bug elsewhere); leave subGen[key] in
-		// place and just drop the marker. Otherwise reclaim both.
-		if _, active := c.subscriptions[key]; active {
-			delete(c.subGenReleaseAt, key)
-			continue
-		}
-		delete(c.subGen, key)
-		delete(c.subGenReleaseAt, key)
-		reclaimed++
-	}
-	return reclaimed
 }
 
 func (c *wsClient) SendJSON(v any) {

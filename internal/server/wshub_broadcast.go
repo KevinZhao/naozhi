@@ -1,8 +1,7 @@
 // File-block contract (server-split-phase4-design v0.6.1 §五):
 //
-//	WRITES:     subscriber block (clients) for SendRaw fanout
-//	READS:      shared deps block (read-only after ctor) + send block
-//	            (queue / droppedTotal for broadcast-aware enqueue)
+//	WRITES:     (none)
+//	READS:      shared deps block (read-only after ctor), subs, droppedTotal
 package server
 
 import (
@@ -35,11 +34,6 @@ func marshalSessionsUpdate() []byte {
 // returned to broadcastClientSnapPool, so a spike cannot pin an oversized array.
 const broadcastSnapPoolMaxCap = maxWSConns
 
-// subFilterChunk bounds how many candidates fanOutToSubscribers filters per
-// h.mu.RLock acquisition, so register / unregister / markAuthenticated (write
-// lock) can interleave instead of waiting behind a whole-fleet scan (#1925).
-const subFilterChunk = 64
-
 // broadcastClientSnapPool reuses []*wsClient backing arrays across broadcasts.
 var broadcastClientSnapPool = sync.Pool{
 	New: func() any {
@@ -64,8 +58,8 @@ func releaseBroadcastSnap(snapPtr *[]*wsClient, snap []*wsClient) {
 }
 
 // broadcastToAuthenticated sends raw data to all authenticated WebSocket clients.
-// The recipient snapshot is taken under authMu and released before the per-client
-// SendRaw loop so register / unregister never serialise behind a broadcast.
+// The recipient snapshot is taken before the per-client SendRaw loop so
+// register / unregister never serialise behind a broadcast.
 func (h *Hub) broadcastToAuthenticated(data []byte) {
 	snapPtr, snap := h.snapshotAuthenticated()
 	for _, c := range snap {
@@ -74,42 +68,12 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 	releaseBroadcastSnap(snapPtr, snap)
 }
 
-// snapshotAuthenticated returns a pooled snapshot of the clients that should
-// receive an "all authenticated clients" broadcast. The caller MUST return the
-// snapshot to the pool via releaseBroadcastSnap once the fan-out completes.
-// The authClients mirror is read under its own authMu, not the Hub-wide h.mu
-// (#1621); it is nil only for hand-rolled test hubs that bypass NewHub, which
-// fall back to walking h.clients. authClients is fixed at NewHub, so the nil
-// check is lock-free.
+// snapshotAuthenticated returns a pooled snapshot of the authenticated
+// clients. The caller MUST return it via releaseBroadcastSnap once the
+// fan-out completes.
 func (h *Hub) snapshotAuthenticated() (*[]*wsClient, []*wsClient) {
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
-	snap := (*snapPtr)[:0]
-
-	if h.authClients != nil {
-		// Copy the slice mirror instead of ranging the map: one sequential
-		// memmove under authMu.RLock (#2310).
-		h.authMu.RLock()
-		if n := len(h.authClientsSlice); n > 0 {
-			if cap(snap) < n {
-				snap = make([]*wsClient, n)
-			} else {
-				snap = snap[:n]
-			}
-			copy(snap, h.authClientsSlice)
-		}
-		h.authMu.RUnlock()
-	} else {
-		// Legacy fallback for hand-rolled hubs that do not initialise
-		// authClients. Production hubs always go through NewHub.
-		h.mu.RLock()
-		for c := range h.clients {
-			if c.authenticated.Load() {
-				snap = append(snap, c)
-			}
-		}
-		h.mu.RUnlock()
-	}
-	return snapPtr, snap
+	return snapPtr, h.subs.authenticated((*snapPtr)[:0])
 }
 
 // marshalBroadcastAuth marshals v and fans it out to every authenticated client.

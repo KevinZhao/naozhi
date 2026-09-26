@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"unsafe"
+
+	"github.com/naozhi/naozhi/internal/node"
 )
 
 // Benchmarks for the Hub's subscriber hot paths. They exist as the gate for
@@ -34,11 +36,9 @@ const (
 // swamp the lock costs being measured.
 func benchAddClient(h *Hub) *wsClient {
 	c := &wsClient{
-		hub:           h,
-		send:          make(chan []byte),
-		done:          make(chan struct{}),
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
+		hub:  h,
+		send: make(chan []byte),
+		done: make(chan struct{}),
 	}
 	close(c.done)
 	c.authenticated.Store(true)
@@ -46,23 +46,14 @@ func benchAddClient(h *Hub) *wsClient {
 	return c
 }
 
+// benchSubscribe holds a subscription slot for key, as a subscribe in flight
+// does; fan-out delivers to it like to an installed one.
 func benchSubscribe(h *Hub, c *wsClient, key string) {
-	h.mu.Lock()
-	if _, ok := c.subscriptions[key]; !ok {
-		c.subscriptions[key] = func() {}
-		h.subscriberCount[key]++
-		h.setSubscriberCountFast(key, h.subscriberCount[key])
-	}
-	h.mu.Unlock()
+	h.subs.reserve(c, key)
 }
 
 func benchUnsubscribe(h *Hub, c *wsClient, key string) {
-	h.mu.Lock()
-	if _, ok := c.subscriptions[key]; ok {
-		delete(c.subscriptions, key)
-		h.decSubscriberCountLocked(key)
-	}
-	h.mu.Unlock()
+	h.subs.release(c, key)
 }
 
 // benchHub builds a Hub with benchClients authenticated clients, the first
@@ -203,12 +194,32 @@ func BenchmarkHubBroadcastSessionsUpdate(b *testing.B) {
 	})
 }
 
-// TestHub_AuthMuOffTheMuCacheLine keeps the padding between h.mu and
-// h.authMu from being lost to a field reshuffle: the benchmark only catches
+// BenchmarkHubSubscribeCycle is a subscribe that finds no session: the slot is
+// reserved against both caps and released. Its cost must not grow with the
+// number of connected clients (benchClients here); a scan of every client
+// under the lock would show up as a multiple of the quiet figure.
+func BenchmarkHubSubscribeCycle(b *testing.B) {
+	benchModes(b, func(b *testing.B, churn bool) {
+		h := benchHub(b, 0)
+		if churn {
+			startChurn(b, h)
+		}
+		c := benchAddClient(h)
+		msg := node.ClientMsg{Type: "subscribe", Key: "test:d:u:missing"}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			h.handleSubscribe(c, msg)
+		}
+	})
+}
+
+// TestHub_AuthMuOffTheMuCacheLine keeps the padding between the registry's
+// mu and authMu from being lost to a field reshuffle: the benchmark only catches
 // it when someone runs it.
 func TestHub_AuthMuOffTheMuCacheLine(t *testing.T) {
-	var h Hub
-	if d := unsafe.Offsetof(h.authMu) - unsafe.Offsetof(h.mu); d < 128 {
+	var r subscriberRegistry
+	if d := unsafe.Offsetof(r.authMu) - unsafe.Offsetof(r.mu); d < 128 {
 		t.Errorf("authMu is %d bytes after mu, want >= 128 so the two locks never share a cache line", d)
 	}
 }

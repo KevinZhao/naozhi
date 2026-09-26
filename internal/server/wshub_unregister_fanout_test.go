@@ -35,12 +35,7 @@ func TestUnregister_RemoveClientFanOutParallel(t *testing.T) {
 	}
 
 	c := &wsClient{}
-	hub.mu.Lock()
-	if hub.clients == nil {
-		hub.clients = map[*wsClient]struct{}{}
-	}
-	hub.clients[c] = struct{}{}
-	hub.mu.Unlock()
+	hub.register(c)
 
 	// Parallel: max(per-node-RTT) ≈ perCallSleep.
 	// Serial: N × perCallSleep = 400ms.
@@ -79,12 +74,7 @@ func TestUnregister_RemoveClientSingleNode(t *testing.T) {
 	hub.nodes.Add("single", stub)
 
 	c := &wsClient{}
-	hub.mu.Lock()
-	if hub.clients == nil {
-		hub.clients = map[*wsClient]struct{}{}
-	}
-	hub.clients[c] = struct{}{}
-	hub.mu.Unlock()
+	hub.register(c)
 
 	hub.unregister(c)
 

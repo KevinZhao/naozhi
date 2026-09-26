@@ -500,10 +500,8 @@ func TestHub_RemoteSend_UnknownNode(t *testing.T) {
 
 func newTestWSClient() *wsClient {
 	c := &wsClient{
-		send:          make(chan []byte, 256),
-		done:          make(chan struct{}),
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
+		send: make(chan []byte, 256),
+		done: make(chan struct{}),
 	}
 	c.authenticated.Store(true)
 	return c

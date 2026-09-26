@@ -1,68 +1,72 @@
 package server
 
-import (
-	"regexp"
-	"testing"
-)
+import "testing"
 
-// TestResubscribeEvents_OldUnsubReleasedOutsideMu is the H8 (Round 163)
-// pin for the "oldUnsub() must be invoked after releasing h.mu" contract
-// in Hub.resubscribeEvents.
-//
-// Why this matters: the global lock order is h.mu → EventLog.subMu
-// (see TestHubShutdown_LockOrderInvariant for the shutdown direction).
-// Calling an unsub closure while holding h.mu is technically legal
-// today — unsub ends up taking subMu, which is strictly downstream.
-// But if a future refactor adds anything to the unsub chain that
-// takes a lock which can be acquired under subMu (for example, an
-// audit or observability lock), the current pattern would silently
-// introduce the reverse order.
-//
-// The defensive pattern is: snapshot the old unsub pointer under
-// h.mu, swap in the new entry, release h.mu, then invoke the
-// closure. This source-level test pins the pattern so a future
-// "simplification" that moves oldUnsub() back under the lock fails
-// the build.
-func TestResubscribeEvents_OldUnsubReleasedOutsideMu(t *testing.T) {
-	// R243-ARCH-2 split: resubscribeEvents and the H8 anchor comment moved
-	// to wshub_eventpush.go alongside eventPushLoop. Read that file.
-	src := []byte(packageGoSource(t))
-	text := string(src)
+// TestRegistry_SwapAndExpireHandClosuresBack: the two resubscribe-path
+// methods return the closure they displace instead of running it, so
+// resubscribeEvents runs it after the registry's lock is released (lock order:
+// registry → EventLog.subMu). The closure here checks the lock is free when
+// it runs.
+func TestRegistry_SwapAndExpireHandClosuresBack(t *testing.T) {
+	r := newSubscriberRegistry()
+	c := &wsClient{done: make(chan struct{})}
+	c.authenticated.Store(true)
+	r.add(c)
 
-	// Invariant 1: the swap arm MUST follow the documented
-	// capture-swap-unlock-then-invoke pattern (whitespace-tolerant).
-	swapPattern := regexp.MustCompile(`(?s)oldUnsub\s*:=\s*c\.subscriptions\[key\]\s*\n\s*c\.subscriptions\[key\]\s*=\s*unsub\s*\n\s*h\.mu\.Unlock\(\)\s*\n\s*if\s+oldUnsub\s*!=\s*nil\s*\{\s*\n\s*oldUnsub\(\)\s*\n\s*\}`)
-	if !swapPattern.MatchString(text) {
-		t.Error("H8 (Round 163): resubscribeEvents swap arm no longer matches " +
-			"the capture-swap-unlock-then-invoke pattern. It must read:\n" +
-			"    oldUnsub := c.subscriptions[key]\n" +
-			"    c.subscriptions[key] = unsub\n" +
-			"    h.mu.Unlock()\n" +
-			"    if oldUnsub != nil { oldUnsub() }\n" +
-			"Calling oldUnsub() under h.mu reintroduces the latent reverse " +
-			"lock-order risk (h.mu held while downstream locks are taken). " +
-			"If you genuinely need to serialise the unsub with other h.mu " +
-			"protected state, document the new invariant and update this " +
-			"test — do not just move the call back under the lock.")
+	calls := 0
+	probe := func() {
+		calls++
+		if !r.mu.TryLock() {
+			t.Error("a displaced closure ran with the registry's lock held")
+			return
+		}
+		r.mu.Unlock()
 	}
+	r.reserve(c, "k")
+	gen, _ := r.install(c, "k", probe, func() bool { return true })
 
-	// Invariant 2: the timeout arm MUST also capture the stale unsub
-	// under h.mu, release, then invoke.
-	timeoutPattern := regexp.MustCompile(`(?s)var\s+staleUnsub\s+func\(\).*?delete\(c\.subscriptions,\s*key\)\s*\n.*?h\.mu\.Unlock\(\)\s*\n\s*if\s+staleUnsub\s*!=\s*nil\s*\{\s*\n\s*staleUnsub\(\)\s*\n\s*\}`)
-	if !timeoutPattern.MatchString(text) {
-		t.Error("H8 (Round 163): resubscribeEvents timeout cleanup no longer " +
-			"matches the capture-swap-unlock-then-invoke pattern for the " +
-			"staleUnsub path. Both the successful swap arm and the timeout " +
-			"arm must release h.mu before invoking the captured unsub.")
+	old, ok := r.swap(c, "k", gen, probe)
+	if !ok {
+		t.Fatal("swap at the current generation declined")
 	}
+	if calls != 0 {
+		t.Fatal("swap ran the displaced closure itself")
+	}
+	old()
 
-	// Invariant 3: the body MUST NOT contain the legacy inline pattern
-	// where oldUnsub() is invoked *before* h.mu.Unlock() in the swap
-	// arm. Matching specifically the pre-H8 shape.
-	legacyPattern := regexp.MustCompile(`(?s)if\s+oldUnsub,\s*exists\s*:=\s*c\.subscriptions\[key\];\s*exists\s*\{\s*\n?\s*oldUnsub\(\)\s*\n?\s*\}\s*\n\s*c\.subscriptions\[key\]\s*=\s*unsub\s*\n\s*h\.mu\.Unlock\(\)`)
-	if legacyPattern.MatchString(text) {
-		t.Error("H8 (Round 163): legacy pattern `if oldUnsub, exists ...; exists { oldUnsub() }` " +
-			"before h.mu.Unlock() has reappeared. This is exactly the shape " +
-			"H8 removed. Restore the capture-then-unlock form described above.")
+	stale, _ := r.expire(c, "k", 0)
+	if calls != 1 {
+		t.Fatal("expire ran the displaced closure itself")
+	}
+	stale()
+	if calls != 2 {
+		t.Fatalf("closures ran %d times, want 2", calls)
+	}
+}
+
+// TestRegistry_SwapDeclinesAStaleGeneration: a parked loop whose generation
+// was taken over by a newer subscribe must not install its unsub.
+func TestRegistry_SwapDeclinesAStaleGeneration(t *testing.T) {
+	r := newSubscriberRegistry()
+	c := &wsClient{done: make(chan struct{})}
+	r.add(c)
+	admit := func() bool { return true }
+	r.reserve(c, "k")
+	oldGen, _ := r.install(c, "k", func() {}, admit)
+	r.reserve(c, "k") // a newer subscribe
+	r.install(c, "k", func() {}, admit)
+
+	if _, ok := r.swap(c, "k", oldGen, func() { t.Error("stale unsub installed and run") }); ok {
+		t.Error("swap accepted a stale generation")
+	}
+	if gen, ok := r.generation(c, "k"); !ok || gen != oldGen+1 {
+		t.Errorf("generation = (%d,%v), want (%d,true)", gen, ok, oldGen+1)
+	}
+	r.remove(c)
+	if _, ok := r.generation(c, "k"); ok {
+		t.Error("generation still reported for a removed client")
+	}
+	if _, ok := r.swap(c, "k", oldGen+1, func() {}); ok {
+		t.Error("swap installed onto a removed client")
 	}
 }

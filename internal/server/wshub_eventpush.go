@@ -1,15 +1,14 @@
 // File-block contract (server-split-phase4-design v0.6.1 §五):
 //
 //	WRITES:     rate-limit/cache block (historyMarshalCache for replay cache)
-//	READS:      shared deps block (read-only after ctor) + subscriber block
-//	            (clients for fanout) + lifecycle block (ctx for cancel)
+//	READS:      shared deps block (read-only after ctor) + subs + lifecycle
+//	            block (ctx for cancel)
 package server
 
 import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
-	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -17,14 +16,14 @@ import (
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
-// resubscribeMaxAttempts × resubscribeInterval (60s) is the wait budget for
+// resubscribeMaxAttempts × defaultResubscribeInterval (60s) is the wait budget for
 // resubscribeEvents; it covers a `claude` CLI cold start (worst case 30-45s),
 // after which the flap is permanent and the client's reconnect loop takes over.
 // Split into attempts so the loop body (generation check, ctx / client-done
 // fan-out) runs at a 5s heartbeat instead of blocking the whole window.
 const (
-	resubscribeMaxAttempts = 12
-	resubscribeInterval    = 5 * time.Second
+	resubscribeMaxAttempts     = 12
+	defaultResubscribeInterval = 5 * time.Second
 )
 
 // maxHistoryPushEntries caps a single WS "history" push so a full-ring
@@ -68,22 +67,11 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []clievent
 	return data, err
 }
 
-// singleSubscriber reports whether `key` has exactly one subscriber.
-// Returns false for count 0 (teardown / never registered) so only the strict
-// "single tab" case takes the fast path (#944). Reads the lock-free
-// subscriberCountFast mirror rather than h.mu.RLock: the mirror is updated
-// under h.mu by every subscriberCount mutation, so a stale verdict only
-// changes whether this push uses the marshal cache, never the bytes (#1522).
-// nil subscriberCount (hand-built test hubs) yields false.
+// singleSubscriber reports whether key has exactly one subscriber, so only
+// the strict single-tab case skips the shared marshal cache. A stale verdict
+// only changes which path marshals this push, never the bytes.
 func (h *Hub) singleSubscriber(key string) bool {
-	if h.subscriberCount == nil {
-		return false
-	}
-	v, ok := h.subscriberCountFast.Load(key)
-	if !ok {
-		return false
-	}
-	return v.(*atomic.Int32).Load() == 1
+	return h.subs.singleSubscriber(key)
 }
 
 // eventPushLoop is the per-subscription pump that reads EventLog notifications
@@ -92,8 +80,8 @@ func (h *Hub) singleSubscriber(key string) bool {
 //
 // CLIENTWG CONTRACT: when resubscribeEvents swaps `sess` for a new process's
 // session the loop keeps running in this goroutine, so there is NO extra
-// Add(1): the tracked lifetime is the goroutine, and resubscribeEvents installs
-// the new unsub into c.subscriptions[key] under h.mu so Shutdown sees it.
+// Add(1): the tracked lifetime is the goroutine, and resubscribeEvents swaps
+// the new unsub into the registry so Shutdown's drain sees it.
 // Anyone splitting the resubscribe path into a new goroutine MUST Add(1) for it
 // and Done from its own defer, or Shutdown's clientWG.Wait hangs / panics.
 func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, csr *clievent.SinceCursor) {
@@ -107,7 +95,7 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 			slog.Debug("panic in ws eventPushLoop: stack",
 				"key", key, "stack", string(debug.Stack()))
 			// Close the connection so readPump/writePump unregister and tear down
-			// all subs; otherwise subscriptions[key]/subGen/subscriberCount linger
+			// all subs; otherwise the registry keeps this key subscribed
 			// and maxSubscribersPerKey eventually traps this client.
 			c.closeDone()
 		}
@@ -198,17 +186,17 @@ func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.Ma
 // resubscribeEvents waits for a new process to be attached to the session and
 // re-subscribes to its EventLog. Returns (ok, currentSession). ok is false if
 // the client disconnects, the wait times out (resubscribeMaxAttempts ×
-// resubscribeInterval = 60s), or a newer subscription has taken over this
+// resubscribeInterval, 60s by default), or a newer subscription has taken over this
 // key (generation mismatch).
 func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-chan struct{}) (bool, *session.ManagedSession) {
 	// Timer.Reset reuses one timer across iterations instead of a Ticker + its
 	// goroutine; client flap can trigger N simultaneous calls.
-	timer := time.NewTimer(resubscribeInterval)
+	timer := time.NewTimer(h.resubscribeInterval)
 	defer timer.Stop()
 
 	for i := range resubscribeMaxAttempts {
 		if i > 0 {
-			timer.Reset(resubscribeInterval)
+			timer.Reset(h.resubscribeInterval)
 		}
 		select {
 		case <-c.done:
@@ -218,13 +206,9 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 		case <-timer.C:
 		}
 
-		// Bail out if a newer subscription (handleSubscribe) has taken over.
-		// The RLock is the visibility barrier for c.subGen[key], written by
-		// handleSubscribe under h.mu.Lock; do not replace it with a lock-free read.
-		h.mu.RLock()
-		currentGen := c.subGen[key]
-		h.mu.RUnlock()
-		if currentGen != gen {
+		// Bail out once the client is gone or a newer subscription
+		// (handleSubscribe) has taken over.
+		if currentGen, ok := h.subs.generation(c, key); !ok || currentGen != gen {
 			return false, nil
 		}
 
@@ -249,26 +233,14 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 			// Channel is alive (not closed) — process is back.
 		}
 
-		// Update the subscription registration. Capture the old unsub under h.mu
-		// but call it AFTER releasing the lock: lock order is h.mu → EventLog.subMu
-		// (shutdown_lock_order_test.go), and calling oldUnsub under h.mu would
-		// reintroduce a reverse-order hazard if it ever took more locks.
-		h.mu.Lock()
-		if c.subscriptions == nil {
-			// Client was removed during Shutdown.
-			h.mu.Unlock()
+		// swap re-checks the generation under the registry's lock and hands
+		// the old unsub back to run after release (lock order: registry →
+		// EventLog.subMu).
+		oldUnsub, ok := h.subs.swap(c, key, gen, unsub)
+		if !ok {
 			unsub()
 			return false, nil
 		}
-		// Final generation check under write lock to prevent TOCTOU.
-		if c.subGen[key] != gen {
-			h.mu.Unlock()
-			unsub()
-			return false, nil
-		}
-		oldUnsub := c.subscriptions[key]
-		c.subscriptions[key] = unsub
-		h.mu.Unlock()
 		if oldUnsub != nil {
 			oldUnsub()
 		}
@@ -284,27 +256,10 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	}
 	// Timed out: tell the client so the dashboard can surface "subscription
 	// expired" instead of stale state, and free the dead subscription slot so
-	// it stops counting toward the per-connection cap. Same lock-order
-	// precaution: snapshot oldUnsub under h.mu, release, then invoke.
-	h.mu.Lock()
-	var staleUnsub func()
-	dropCache := false
-	if c.subscriptions != nil {
-		if u, exists := c.subscriptions[key]; exists {
-			staleUnsub = u
-			delete(c.subscriptions, key)
-			h.decSubscriberCountLocked(key)
-			// Mark subGen[key] for delayed reclamation, matching handleUnsubscribe;
-			// otherwise the slot stays pinned for the connection lifetime (#2224).
-			nowNanos := time.Now().UnixNano()
-			c.markSubGenReleasable(key, nowNanos)
-			c.sweepSubGenExpiredLocked(nowNanos)
-			// Drop the marshal cache slot when this removed the last subscriber,
-			// matching handleUnsubscribe/unregister (#2010).
-			dropCache = h.dropMarshalCacheForLocked(key)
-		}
-	}
-	h.mu.Unlock()
+	// it stops counting toward the per-connection cap. The stale unsub runs
+	// after the registry's lock is released; the last subscriber leaving
+	// drops the marshal cache slot, as handleUnsubscribe does.
+	staleUnsub, dropCache := h.subs.expire(c, key, time.Now().UnixNano())
 	if staleUnsub != nil {
 		staleUnsub()
 	}
