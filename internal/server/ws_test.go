@@ -70,6 +70,9 @@ func startWSServer(t *testing.T, hub *Hub) (string, func()) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", hub.HandleUpgrade)
 	ts := httptest.NewServer(mux)
+	// The listener closes with the test even when a caller discards the
+	// returned cleanup; Close is idempotent, so calling both is fine.
+	t.Cleanup(ts.Close)
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 	return wsURL, func() {
 		hub.Shutdown()

@@ -190,7 +190,7 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 // TestSendEngine_NotifyAfterDrainDoesNotArmClientWG is RFC send-engine-extraction
 // §6 test ③: once Shutdown has drained the engine, no notify path may
 // clientWG.Add — the debounce arm in BroadcastSessionsUpdate is the one that
-// can, and it must take the debounceClosed fast path instead. A late
+// can, and once closed it must decline. A late
 // remoteSend goroutine that slipped past drain would otherwise arm a
 // broadcast callback that runs after Shutdown emptied the client set.
 //
@@ -212,9 +212,9 @@ func TestSendEngine_NotifyAfterDrainDoesNotArmClientWG(t *testing.T) {
 	n.broadcastState("k", "running", "")
 	n.broadcastSendError("k", "boom")
 
-	hub.debounceMu.Lock()
-	armed := hub.debounceArmed
-	hub.debounceMu.Unlock()
+	hub.debounce.mu.Lock()
+	armed := hub.debounce.armed
+	hub.debounce.mu.Unlock()
 	if armed {
 		t.Error("BroadcastSessionsUpdate armed the debounce timer after Shutdown — clientWG.Add happened past drain")
 	}

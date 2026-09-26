@@ -131,20 +131,17 @@ func TestHubShutdown_OrderingInSource(t *testing.T) {
 // TestHubShutdown_SendDrainPositionInSource pins where h.engine.drain() sits
 // inside Shutdown (#2551). The barrier used to be four inline statements
 // (sendTrackMu / sendClosed / sendWG.Wait); collapsing it into one call makes
-// it look movable, and it is not: the goroutines drain waits on re-enter
-// h.mu / authMu / debounceMu through sendNotifier (BroadcastSessionReady →
-// authMu.RLock, broadcastState → h.mu.RLock, BroadcastSessionsUpdate →
-// debounceMu.Lock). Tidying the call up into the debounceMu critical section —
-// which is where the "close the window" statements live and therefore the most
-// tempting home for it — deadlocks deterministically: the in-flight goroutine
-// is already past the debounceClosedFast fast path and blocked on
-// debounceMu.Lock while Shutdown holds it waiting for wg.
+// it look movable, and it is not: the goroutines drain waits on re-enter the
+// Hub through sendNotifier (BroadcastSessionReady, broadcastState,
+// BroadcastSessionsUpdate), so drain has to run after the debouncer is closed
+// (a late BroadcastSessionsUpdate then declines instead of taking a clientWG
+// slot) and before the nodes close.
 //
-// -race cannot catch this (a lock-order inversion against a WaitGroup is not a
-// data race) and the behavioural tests cannot either — they would simply hang
-// until the suite's own timeout. Hence a source-order assertion:
+// -race cannot catch a misplaced barrier (an ordering against a WaitGroup is
+// not a data race) and the behavioural tests cannot either — they would simply
+// hang until the suite's own timeout. Hence a source-order assertion:
 //
-//	h.cancel()  <  debounceMu.Unlock()  <  h.clientWG.Wait()  <  drain()  <  nodes Close
+//	h.cancel()  <  h.debounce.close()  <  h.clientWG.Wait()  <  drain()  <  nodes Close
 func TestHubShutdown_SendDrainPositionInSource(t *testing.T) {
 	t.Parallel()
 
@@ -175,7 +172,7 @@ func TestHubShutdown_SendDrainPositionInSource(t *testing.T) {
 	// Ordered low → high, each with the reason a violation breaks something.
 	steps := []struct{ marker, why string }{
 		{"h.cancel()", "without ctx cancelled first, drain blocks for the full remote-RPC timeout instead of returning promptly"},
-		{"h.debounceMu.Unlock()", "drain must not hold debounceMu — the drained goroutines take it via BroadcastSessionsUpdate"},
+		{"h.debounce.close()", "the debouncer closes first, so a drained goroutine's BroadcastSessionsUpdate declines instead of taking a clientWG slot past the Wait"},
 		{"h.clientWG.Wait()", "client goroutines settle first; drain is the send-side barrier"},
 		{"h.engine.drain()", "the send barrier sits here; see sendEngine.drain's CALL-SITE PRECONDITIONS"},
 		{"h.nodes.Conns()", "nodes must close AFTER drain, or an in-flight remote RPC writes to a closed nc.conn"},

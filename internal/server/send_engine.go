@@ -172,18 +172,17 @@ func (e *sendEngine) TrackSend() (release func(), shuttingDown bool) {
 //  1. h.cancel() has been called. Otherwise wg.Wait blocks for the full
 //     remote-RPC timeout (60s in dashboard_send.go, remoteNodeProxyTimeout for
 //     the WS path) instead of returning as soon as ctx is cancelled.
-//  2. debounceClosed AND debounceClosedFast are already published. The waited
-//     goroutines call BroadcastSessionsUpdate through sendNotifier, which does
-//     clientWG.Add(1) to arm the debounce timer — a send goroutine can enlarge
-//     clientWG. Draining before the window is shut arms a callback that runs
-//     after Shutdown has emptied authClientsSlice.
-//  3. The caller holds NONE of h.mu / authMu / debounceMu. The waited
-//     goroutines re-enter all three through sendNotifier
+//  2. The debouncer is already closed. The waited goroutines call
+//     BroadcastSessionsUpdate through sendNotifier, and a trigger that opens
+//     a debounce window takes a clientWG slot — a send goroutine can enlarge
+//     clientWG. Draining before the debouncer is closed arms a callback that
+//     runs after Shutdown has emptied authClientsSlice.
+//  3. The caller holds NONE of h.mu / authMu / the debouncer's lock. The
+//     waited goroutines re-enter all three through sendNotifier
 //     (BroadcastSessionReady → authMu.RLock, broadcastState → h.mu.RLock,
-//     BroadcastSessionsUpdate → debounceMu.Lock). Calling drain inside the
-//     debounceMu critical section is a deterministic deadlock: the in-flight
-//     goroutine is already past the debounceClosedFast fast path and blocked
-//     on debounceMu.Lock while Shutdown holds it waiting for wg.
+//     BroadcastSessionsUpdate → debouncer.trigger). Calling drain while
+//     holding any of them is a deterministic deadlock: the in-flight
+//     goroutine blocks on that lock while Shutdown holds it waiting for wg.
 //
 // It must also run before the node connections are closed, so an in-flight
 // remote RPC cannot write to a closed nc.conn.
