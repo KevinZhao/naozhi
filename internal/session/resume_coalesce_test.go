@@ -67,9 +67,9 @@ func TestGetOrCreate_DeadSessionParksOnInflightGuard(t *testing.T) {
 	key := "feishu:direct:dead-parks:general"
 	injectSession(r, key, newDeadProc())
 
-	r.mu.Lock()
+	r.ss.Lock()
 	guardCh := r.pp.BeginSpawn(key)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	const N = 5
 	var wg sync.WaitGroup
@@ -98,9 +98,9 @@ func TestGetOrCreate_DeadSessionParksOnInflightGuard(t *testing.T) {
 	// Release the guard. Waiters wake, re-evaluate the loop, and (the dead
 	// session is still present, no in-flight marker) fall through to their own
 	// resume spawnSession, which fails fast against the nonexistent binary.
-	r.mu.Lock()
+	r.ss.Lock()
 	r.pp.EndSpawn(key, guardCh)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	done := make(chan struct{})
 	go func() {

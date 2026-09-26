@@ -61,9 +61,9 @@ func TestEvictOldest_GaugeMatchesReconcile(t *testing.T) {
 	newer.lastActive.Store(2)
 
 	// Seed the gauge to the truthful count (2).
-	r.mu.Lock()
+	r.ss.Lock()
 	r.reconcileSessionActiveByBackendLocked()
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if got := metrics.SessionActiveByBackend.Get(backend); got != 2 {
 		t.Fatalf("precondition: gauge=%d, want 2", got)
 	}
@@ -72,10 +72,10 @@ func TestEvictOldest_GaugeMatchesReconcile(t *testing.T) {
 	// reconcile still counts the evictee — final gauge must equal the recount
 	// (2), NOT 1 (the buggy manual -1 baseline that would have driven the
 	// pre-reconcile value off the true count).
-	r.mu.Lock()
+	r.ss.Lock()
 	evicted := r.evictOldest()
 	gauge := metrics.SessionActiveByBackend.Get(backend)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if !evicted {
 		t.Fatal("evictOldest returned false, expected an eviction")

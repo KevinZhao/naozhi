@@ -24,9 +24,9 @@ func TestSaveIfDirty_PersistsAndClearsFlag(t *testing.T) {
 		storePath: storePath,
 	}
 	r.ss.Put("feishu:direct:user1:general", newSessionWithID("feishu:direct:user1:general", "sess-abc"))
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.SetDirty(true)
-	r.mu.Unlock()
+	r.ss.Unlock()
 	r.ss.BumpGen()
 
 	r.saveIfDirty()
@@ -39,9 +39,9 @@ func TestSaveIfDirty_PersistsAndClearsFlag(t *testing.T) {
 		t.Fatalf("session not persisted correctly: %v", loaded)
 	}
 
-	r.mu.RLock()
+	r.ss.RLock()
 	dirty := r.ss.Dirty()
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if dirty {
 		t.Error("storeDirty should be cleared after a successful saveIfDirty with no concurrent mutation")
 	}

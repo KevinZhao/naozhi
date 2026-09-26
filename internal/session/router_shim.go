@@ -159,7 +159,7 @@ func shutdownShimViaReconnect(
 // #2494) are re-merged through the same mergeArgvLayers the spawn used. sess
 // may be nil (adopt path). A nil overlay (pre-#2494 state) degrades to a
 // backend-defaults-only comparison; the caller logs that once per shim.
-// Lock: called WITHOUT r.mu; the only guarded read is under RLock inside
+// Lock: called WITHOUT the table lock; the only guarded read is under RLock inside
 // accessProfileDefaultModel.
 func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID, key string, sess *ManagedSession, overlay *shim.SpawnOverlay) []string {
 	var ov shim.SpawnOverlay
@@ -248,7 +248,7 @@ func adoptableShimKey(key string) bool {
 // wired identically to persisted ones. Cost/label/model re-populate from the
 // first post-reconnect system/init + result events.
 //
-// LOCK: caller MUST hold r.mu (publishSessionLocked + idToKey writes).
+// LOCK: caller MUST hold the table lock (publishSessionLocked + idToKey writes).
 func (r *Router) adoptLiveShimLocked(state shim.State, backendID string, _ *cli.Wrapper) *ManagedSession {
 	entry := &storeEntry{
 		Key:       state.Key,
@@ -296,21 +296,21 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 
 	reconnected := 0
 	for _, state := range states {
-		r.mu.Lock()
+		r.ss.Lock()
 		sess, ok := r.ss.Lookup(state.Key)
 		var hasLiveProcess bool
 		var sessPrevIDs []string
 		if ok && sess.isAlive() {
 			hasLiveProcess = true
 		}
-		// Snapshot prevSessionIDs while still holding r.mu: the field is
-		// guarded by r.mu and written by the async history-load goroutine and
+		// Snapshot prevSessionIDs while still holding the table lock: the field is
+		// guarded by the table lock and written by the async history-load goroutine and
 		// concurrent spawnSession, so reading after Unlock would data-race.
 		if ok {
 			sessPrevIDs = slices.Clone(sess.prevSessionIDs)
 		}
 		_, spawning := r.pp.SpawnInFlight(state.Key)
-		r.mu.Unlock()
+		r.ss.Unlock()
 
 		// Resolve the wrapper recorded at shim startup so reconnect uses the
 		// matching Protocol and binary; an empty Backend falls back to the
@@ -342,7 +342,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// just before a crash has a live shim and no record. Adopt only when a
 		// wrapper exists and the key is adoptable; otherwise fall through.
 		if !ok && !spawning && recWrapper != nil && adoptableShimKey(state.Key) {
-			r.mu.Lock()
+			r.ss.Lock()
 			// Re-check under lock: a concurrent spawnSession may have installed
 			// the session (or its spawning marker) between the snapshot above
 			// and now.
@@ -371,7 +371,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 					"session_id", state.SessionID,
 					"pid", state.ShimPID)
 			}
-			r.mu.Unlock()
+			r.ss.Unlock()
 		}
 
 		switch classifyShimState(spawning, ok, hasLiveProcess, recWrapper == nil, argsDrift) {
@@ -564,21 +564,21 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// released). Then atomically attach the process under the same lock hold
 		// to eliminate the race window where a concurrent GetOrCreate could see
 		// isAlive()==false between check and ReattachProcess.
-		r.mu.Lock()
+		r.ss.Lock()
 		currentSess := r.ss.Get(state.Key)
 		if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
-			r.mu.Unlock()
+			r.ss.Unlock()
 			proc.Close()
 			slog.Info("shim reconnect aborted: session replaced concurrently", "key", state.Key)
 			continue
 		}
-		// ReattachProcess would call onSessionID which takes r.mu (held here;
+		// ReattachProcess would call onSessionID which takes the table lock (held here;
 		// not reentrant), so track directly; onTurnDone was bound earlier. The
 		// TryLock-guarded variant keeps a Send() still unwinding on the dead
 		// process (holding sendMu) from racing the storeProcess swap; non-blocking,
-		// so the sendMu→r.mu ordering holds. If busy, the next tick retries (#750).
+		// so the sendMu→the table lock ordering holds. If busy, the next tick retries (#750).
 		if !sess.tryReattachProcessNoCallback(proc, state.SessionID) {
-			r.mu.Unlock()
+			r.ss.Unlock()
 			proc.Close()
 			slog.Info("shim reconnect deferred: send in flight on session",
 				"key", state.Key)
@@ -607,7 +607,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// backend/CLI identity and active flag; every storeGen.Add site pairs
 		// with dirty = true.
 		r.ss.MarkChanged()
-		r.mu.Unlock()
+		r.ss.Unlock()
 
 		// Persist sink goes last so the InjectHistory + shim replay above land
 		// with sinkReady=false and are dropped rather than written back to disk
@@ -628,13 +628,13 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		r.notifyChange()
 		slog.Info("shim reconnect complete", "count", reconnected)
 		// Defensive activeCount reconciliation (#394): spawnSession runs
-		// concurrently and both Add(1) under r.mu; a same-key race can drift
+		// concurrently and both Add(1) under the table lock; a same-key race can drift
 		// the counter ±1 (spurious ErrMaxProcs). countActive() here converges
 		// it each reconcile tick without an O(N) walk on the spawn fast path.
 		// pendingSpawns is left alone: in-flight Spawns release it in their defer.
-		r.mu.Lock()
+		r.ss.Lock()
 		r.countActive()
-		r.mu.Unlock()
+		r.ss.Unlock()
 	}
 }
 

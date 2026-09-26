@@ -17,8 +17,8 @@ func TestCountExemptCombined(t *testing.T) {
 		r.RegisterCronStub("cron:job-"+strconv.Itoa(i), "/w", "p")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.ss.Lock()
+	defer r.ss.Unlock()
 
 	// kind set: perKind must equal the standalone per-kind sweep; total must
 	// equal the standalone global sweep.

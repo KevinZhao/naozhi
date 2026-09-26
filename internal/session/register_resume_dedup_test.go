@@ -34,13 +34,13 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 	// chain owns only liveSID — it has nothing to do with oldSID.
 	unrelated := &ManagedSession{key: reusedKey}
 	unrelated.setSessionID(liveSID)
-	r.mu.Lock()
+	r.ss.Lock()
 	r.publishSessionLocked(reusedKey, unrelated, false)
 	r.ss.SetID(liveSID, reusedKey)
 	// The leaked residue: oldSID still maps to the reused key even though the
 	// session living there (C) never owned oldSID.
 	r.ss.SetID(oldSID, reusedKey)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// User resumes the OLD session A.
 	got := r.RegisterForResume(resumeKey, oldSID, "/ws", "hello again")
@@ -56,9 +56,9 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 
 	// A fresh suspended session must now exist under the caller's key,
 	// targeting the requested sessionID.
-	r.mu.RLock()
+	r.ss.RLock()
 	fresh, ok := r.ss.Lookup(resumeKey)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if !ok {
 		t.Fatalf("no fresh session created under %q", resumeKey)
 	}
@@ -67,9 +67,9 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 	}
 
 	// The unrelated session must be untouched and still own its own SID.
-	r.mu.RLock()
+	r.ss.RLock()
 	stillThere, ok := r.ss.Lookup(reusedKey)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if !ok || stillThere != unrelated || stillThere.SessionID() != liveSID {
 		t.Fatalf("unrelated session at %q was disturbed by the resume", reusedKey)
 	}
@@ -94,11 +94,11 @@ func TestRegisterForResume_LegitimateChainDedupStillWorks(t *testing.T) {
 	// A live session whose rotation chain is [prevSID, curSID].
 	live := &ManagedSession{key: liveKey, prevSessionIDs: []string{prevSID}}
 	live.setSessionID(curSID)
-	r.mu.Lock()
+	r.ss.Lock()
 	r.publishSessionLocked(liveKey, live, false)
 	r.ss.SetID(curSID, liveKey)
 	r.ss.SetID(prevSID, liveKey)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// Resuming the current SID dedups to the live key.
 	if got := r.RegisterForResume("dashboard:resume:cur", curSID, "/ws", ""); got != liveKey {

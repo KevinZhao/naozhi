@@ -48,16 +48,16 @@ func TestPublishSessionLocked_AttachesHistorySource(t *testing.T) {
 	r := minimalRouter(t)
 	s := &ManagedSession{key: "feishu:direct:user1:general"}
 
-	r.mu.Lock()
+	r.ss.Lock()
 	r.publishSessionLocked(s.key, s, false)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if got := s.loadHistorySource(); got == nil {
 		t.Fatal("publishSessionLocked left HistorySource nil — EventEntriesBeforeCtx would return empty and dashboard history drawer would silently blank")
 	}
-	r.mu.RLock()
+	r.ss.RLock()
 	stored := r.ss.Get(s.key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if stored != s {
 		t.Fatalf("publishSessionLocked did not insert into r.ss.sessions: got %v, want %v", stored, s)
 	}
@@ -79,9 +79,9 @@ func TestPublishSessionLocked_AlreadyAttachedDoesNotOverwrite(t *testing.T) {
 	sentinel := history.Noop{}
 	s.SetHistorySource(sentinel)
 
-	r.mu.Lock()
+	r.ss.Lock()
 	r.publishSessionLocked(s.key, s, true)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	got := s.loadHistorySource()
 	if got == nil {
@@ -89,9 +89,9 @@ func TestPublishSessionLocked_AlreadyAttachedDoesNotOverwrite(t *testing.T) {
 	}
 	// The exact identity check is over-specified for some Source
 	// implementations (interface-typed values). Accept any non-nil.
-	r.mu.RLock()
+	r.ss.RLock()
 	stored := r.ss.Get(s.key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if stored != s {
 		t.Fatalf("publishSessionLocked did not insert into r.ss.sessions: got %v, want %v", stored, s)
 	}
@@ -106,15 +106,15 @@ func TestPublishSessionLocked_IndexAddObserved(t *testing.T) {
 	r := minimalRouter(t)
 	s := &ManagedSession{key: "feishu:direct:user1:general"}
 
-	r.mu.Lock()
+	r.ss.Lock()
 	r.publishSessionLocked(s.key, s, false)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// The session is indexed under its chat, so a follow-up ResetChat finds it.
-	r.mu.RLock()
+	r.ss.RLock()
 	if chatKey := chatKeyFor(s.key); !slices.Contains(r.ss.KeysOfChat(chatKey), s.key) {
-		r.mu.RUnlock()
+		r.ss.RUnlock()
 		t.Fatalf("publishSessionLocked left the session out of its chat index: chatKey=%q", chatKey)
 	}
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 }

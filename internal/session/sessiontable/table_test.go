@@ -167,3 +167,27 @@ func TestTable_AllStopsWhenAsked(t *testing.T) {
 		t.Errorf("All yielded %d of 3", seen)
 	}
 }
+
+// TestTable_WaitWakesOnBroadcast: Wait releases the lock while parked and
+// holds it again when it returns.
+func TestTable_WaitWakesOnBroadcast(t *testing.T) {
+	tab := newTable()
+	ready := false
+	done := make(chan struct{})
+	tab.Lock()
+	go func() {
+		tab.Lock()
+		ready = true
+		tab.Broadcast()
+		tab.Unlock()
+		close(done)
+	}()
+	for !ready {
+		tab.Wait() // must release the lock, or the goroutine above deadlocks
+	}
+	if tab.TryLock() {
+		t.Error("Wait returned without the lock held")
+	}
+	tab.Unlock()
+	<-done
+}

@@ -95,12 +95,12 @@ func (r *Router) runOrphanSweep() {
 		return
 	}
 	// Snapshot known keys under the read lock so we don't race concurrent spawns.
-	r.mu.RLock()
+	r.ss.RLock()
 	known := make(map[string]struct{}, r.ss.Len())
 	for k := range r.ss.All() {
 		known[k] = struct{}{}
 	}
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 
 	// runHistoryTask takes historyWg.Add(1) under r.historyWgMu, atomic with
 	// Shutdown's historyCancel(), so a Start after Shutdown cannot panic with

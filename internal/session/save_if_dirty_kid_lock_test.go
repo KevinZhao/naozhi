@@ -9,8 +9,8 @@ import (
 
 // TestSaveIfDirty_KnownIDsConcurrentTrackAndSnapshot pins the knownids lock
 // contract (#2306, #2495): the periodic save (ClaimSave + memo-cache rebuild),
-// lock-free snapshot readers and r.mu-held Track calls run concurrently and
-// stay race-free because the store owns its mutex — no r.mu mode (RLock vs
+// lock-free snapshot readers and the table lock-held Track calls run concurrently and
+// stay race-free because the store owns its mutex — no the table lock mode (RLock vs
 // Lock) can make a cache write race a reader. Run with -race.
 func TestSaveIfDirty_KnownIDsConcurrentTrackAndSnapshot(t *testing.T) {
 	dir := t.TempDir()
@@ -65,8 +65,8 @@ func TestSaveIfDirty_KnownIDsConcurrentTrackAndSnapshot(t *testing.T) {
 		}
 	}()
 
-	// Mutator: Track under r.mu as every publish site does (lock order
-	// r.mu → kid.mu), bumping gen so the caches keep rebuilding.
+	// Mutator: Track under the table lock as every publish site does (lock order
+	// the table lock → kid.mu), bumping gen so the caches keep rebuilding.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -78,9 +78,9 @@ func TestSaveIfDirty_KnownIDsConcurrentTrackAndSnapshot(t *testing.T) {
 			default:
 			}
 			i++
-			r.mu.Lock()
+			r.ss.Lock()
 			r.kid.Track(sessionIDForIter(i))
-			r.mu.Unlock()
+			r.ss.Unlock()
 		}
 	}()
 

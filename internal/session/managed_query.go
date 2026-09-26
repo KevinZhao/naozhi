@@ -30,7 +30,7 @@ func (s *ManagedSession) getSessionID() string {
 
 // SessionID returns the current CLI session ID, lock-free. Public alias for
 // getSessionID satisfying history.SessionView and cross-package callers
-// that need the ID without taking r.mu.
+// that need the ID without taking the table lock.
 func (s *ManagedSession) SessionID() string { return s.getSessionID() }
 
 // setSessionID stores the session ID atomically.
@@ -109,7 +109,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 
 // snapshotReadOnly is Snapshot without the SetModel mirror: snap.Model is
 // still resolved from the live process (falling back to the persisted
-// value) but nothing is written. VisitSessions runs under r.mu.RLock for
+// value) but nothing is written. VisitSessions runs under r.ss.RLock for
 // every live session, and a write on that read path is both unnecessary
 // and harder to reason about (#1577). The dashboard poll path keeps the
 // mirroring Snapshot() so the live model still lands in sessions.json.

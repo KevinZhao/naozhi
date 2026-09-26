@@ -30,34 +30,34 @@ func (r *Router) SetUserLabel(key, label string) bool {
 // When origin=="auto" and the current LabelOrigin is "user", the write is
 // rejected: AutoTitler reads a Snapshot, then spends 5–25s in an LLM call, and
 // a human rename in that window flips origin to "user", so origin MUST be
-// re-read under r.mu before the daemon overwrites (RFC v2.1 §11.1). Returns
+// re-read under the table lock before the daemon overwrites (RFC v2.1 §11.1). Returns
 // false when the key is unknown or the write is rejected.
 func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 	if origin != "user" && origin != "auto" {
 		origin = "user"
 	}
-	r.mu.Lock()
+	r.ss.Lock()
 	s := r.ss.Get(key)
 	if s == nil {
-		r.mu.Unlock()
+		r.ss.Unlock()
 		return false
 	}
 	// Re-read origin under the lock. Empty origin is equivalent to "user"
 	// (stores without an origin field), so daemons must leave those alone too.
 	currentOrigin := s.LabelOrigin()
 	if origin == "auto" && (currentOrigin == "user" || currentOrigin == "") && s.UserLabel() != "" {
-		r.mu.Unlock()
+		r.ss.Unlock()
 		return false
 	}
 	// No-op fast path: same label and same origin → don't dirty the store.
 	if s.UserLabel() == label && currentOrigin == origin {
-		r.mu.Unlock()
+		r.ss.Unlock()
 		return true
 	}
 	s.SetUserLabel(label)
 	s.setLabelOrigin(origin)
 	r.ss.MarkChanged()
-	r.mu.Unlock()
+	r.ss.Unlock()
 	// Kick the dashboard's onChange WS broadcast like every other mutator.
 	r.notifyChange()
 	return true
@@ -70,20 +70,20 @@ func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 // origin is the daemon's signal to retake control (RFC v2.1 §9.3).
 // Returns false when the session key is unknown.
 func (r *Router) ClearUserLabelOrigin(key string) bool {
-	r.mu.Lock()
+	r.ss.Lock()
 	s := r.ss.Get(key)
 	if s == nil {
-		r.mu.Unlock()
+		r.ss.Unlock()
 		return false
 	}
 	if s.LabelOrigin() == "" && s.UserLabel() == "" {
-		r.mu.Unlock()
+		r.ss.Unlock()
 		return true // already cleared, no-op
 	}
 	s.SetUserLabel("")
 	s.setLabelOrigin("")
 	r.ss.MarkChanged()
-	r.mu.Unlock()
+	r.ss.Unlock()
 	r.notifyChange()
 	return true
 }
@@ -92,11 +92,11 @@ func (r *Router) ClearUserLabelOrigin(key string) bool {
 // returning false stops early. The visit runs under RLock so the map cannot
 // mutate mid-iteration, and each snapshot is computed inline without leaking
 // the *ManagedSession (RFC v2.1 §8). fn must not call back into Router methods
-// that take r.mu. It uses snapshotReadOnly, NOT Snapshot, so the view computed
+// that take the table lock. It uses snapshotReadOnly, NOT Snapshot, so the view computed
 // under RLock is side-effect free (no SetModel mirror write) (#1577).
 func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	for _, s := range r.ss.All() {
 		if !fn(s.snapshotReadOnly()) {
 			return
@@ -106,12 +106,12 @@ func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
 
 // EventEntriesForKey returns the full event-log entries for the given session
 // key, or nil when the key is unknown (AutoTitler reviews every user turn).
-// r.mu is released before the read so the inner historyMu acquisition does
-// not nest under r.mu.
+// the table lock is released before the read so the inner historyMu acquisition does
+// not nest under the table lock.
 func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
-	r.mu.RLock()
+	r.ss.RLock()
 	s := r.ss.Get(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if s == nil {
 		return nil
 	}
@@ -124,9 +124,9 @@ func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
 // ManagedSession.EventEntriesAppend: the caller must not retain dst across
 // calls; the returned slice shares dst's backing array.
 func (r *Router) EventEntriesForKeyAppend(dst []clievent.EventEntry, key string) []clievent.EventEntry {
-	r.mu.RLock()
+	r.ss.RLock()
 	s := r.ss.Get(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if s == nil {
 		return dst
 	}
@@ -139,9 +139,9 @@ func (r *Router) EventEntriesForKeyAppend(dst []clievent.EventEntry, key string)
 // the live shim conversation. Prefer InterruptSessionSafe for operator-facing
 // actions; this is for process-level signalling and the fallback branch.
 func (r *Router) InterruptSession(key string) bool {
-	r.mu.RLock()
+	r.ss.RLock()
 	s := r.ss.Get(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if s == nil {
 		return false
 	}
@@ -185,9 +185,9 @@ func (r *Router) InterruptSessionSafe(key string) InterruptOutcome {
 // queued follow-ups on the same live CLI. Alive-but-idle returns
 // InterruptNoTurn, not InterruptNoSession.
 func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
-	r.mu.RLock()
+	r.ss.RLock()
 	s := r.ss.Get(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if s == nil {
 		return InterruptNoSession
 	}
@@ -212,8 +212,8 @@ func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 // suspended sessions are allowed through so their session files appear in the
 // history popover (deduplicated against the workspace).
 func (r *Router) DiscoveryExcludeIDs() map[string]bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	ids := make(map[string]bool, r.ss.Len())
 	for _, s := range r.ss.All() {
 		if s.loadProcess() == nil {
@@ -234,9 +234,9 @@ func (r *Router) DiscoveryExcludeIDs() map[string]bool {
 // If another session already targets the same sessionID, the existing key
 // is returned (deduplication) and no new entry is created.
 func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string) {
-	r.mu.Lock()
+	r.ss.Lock()
 	if _, exists := r.ss.Lookup(key); exists {
-		r.mu.Unlock()
+		r.ss.Unlock()
 		return key // already exists with this exact key
 	}
 	// Deduplicate: if another session already targets this sessionID, reuse it.
@@ -247,7 +247,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 			// Only dedup when the found session genuinely owns this sessionID;
 			// a blind reuse would cross-session bleed (#2093).
 			if slices.Contains(existing.SnapshotChainIDs(), sessionID) {
-				r.mu.Unlock()
+				r.ss.Unlock()
 				return existingKey
 			}
 		}
@@ -273,7 +273,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	s.initCreatedAtIfUnset()
 	r.publishSessionLocked(key, s, false)
 	r.ss.MarkChanged()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	r.notifyChange()
 	return key
@@ -321,12 +321,12 @@ func (r *Router) RegisterSystemStub(key, workspace, lastPrompt string) {
 // prevSessionIDs 并重挂 historySource，保证 cron recordResult 后侧边栏立刻
 // 能查到最新 JSONL。
 //
-// prevSessionIDs 的所有写路径都在 r.mu 下做，读路径同样在 r.mu 下；
+// prevSessionIDs 的所有写路径都在 the table lock 下做，读路径同样在 the table lock 下；
 // SnapshotChainIDs 的 historyMu.RLock 对该字段不构成真正同步，invariant 是
-// "r.mu 写/r.mu 读"，chain 刷新因此在 r.mu 临界区内做。attachHistorySource
-// 只读 r 的不可变字段 + 写 s 的 atomic.Pointer，在 r.mu 下调用同样安全。
+// "the table lock 写/the table lock 读"，chain 刷新因此在 the table lock 临界区内做。attachHistorySource
+// 只读 r 的不可变字段 + 写 s 的 atomic.Pointer，在 the table lock 下调用同样安全。
 func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []string) {
-	r.mu.Lock()
+	r.ss.Lock()
 	if existing, ok := r.ss.Lookup(key); ok {
 		changed := false
 		// Refresh workspace/prompt on existing stub; don't touch live process.
@@ -356,7 +356,7 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 				r.ss.MarkChanged()
 			}
 		}
-		r.mu.Unlock()
+		r.ss.Unlock()
 		// Always notify on refresh so the sidebar edit flow gets an immediate
 		// WS kick; notifyChange is cheap, saveIfDirty is what the gate guards.
 		r.notifyChange()
@@ -392,7 +392,7 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 	s.initCreatedAtIfUnset()
 	r.publishSessionLocked(key, s, false)
 	r.ss.MarkChanged()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	r.notifyChange()
 }
@@ -400,8 +400,8 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 // ManagedExcludeSets returns PIDs, session IDs, and CWDs of all managed sessions
 // in a single lock acquisition. Used by discovery.Scan to avoid three separate mutex grabs.
 func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]bool, cwds map[string]bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	pids = make(map[int]bool)
 	sessionIDs = make(map[string]bool)
 	cwds = make(map[string]bool)
@@ -433,7 +433,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	if err := validateBackend(opts.Backend); err != nil {
 		return nil, err
 	}
-	r.mu.Lock()
+	r.ss.Lock()
 	// If key already exists (e.g. re-takeover same CWD), close the old process
 	if s, ok := r.ss.Lookup(key); ok {
 		// Mirror resetLocked: only non-exempt AND alive sessions contributed to
@@ -443,12 +443,12 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			proc := p
 			oldBackend := s.Backend()
 			oldExempt := s.exempt
-			r.mu.Unlock()
+			r.ss.Unlock()
 			proc.Close()
 			// spawnSession below will StartShim against the same socket path;
 			// wait for the shim to release it (same race as Reset).
 			waitSocketGoneForKey(key, 2*time.Second)
-			r.mu.Lock()
+			r.ss.Lock()
 			// Only delete if no concurrent goroutine replaced this session.
 			// keepBackendOverride=true: Takeover re-spawns on the same key
 			// and spawnSession below consumes the override atomically.
@@ -464,7 +464,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			} else if cur != nil && cur.isAlive() {
 				// Concurrent GetOrCreate created a new session during Close();
 				// abort takeover rather than silently returning wrong session.
-				r.mu.Unlock()
+				r.ss.Unlock()
 				return nil, fmt.Errorf("concurrent session created for key %s during takeover", key)
 			}
 			// Implicit else: a concurrent goroutine replaced the session with an

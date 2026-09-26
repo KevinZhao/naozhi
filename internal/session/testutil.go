@@ -134,8 +134,8 @@ func (p *TestProcess) Effort() string      { return p.EffortVal }
 // For use in tests that need sessions without spawning real CLI processes.
 // A nil proc yields a detached (no-process / stub) session.
 func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.ss.Lock()
+	defer r.ss.Unlock()
 	s := &ManagedSession{
 		key:      key,
 		runStore: r.sessionRuns, // mirror production wiring so Send records runs

@@ -41,9 +41,9 @@ func TestTuningPersist_RoundTrip(t *testing.T) {
 	r := NewRouter(RouterConfig{MaxProcs: 3, StorePath: storePath})
 	t.Cleanup(func() { r.Shutdown() })
 
-	r.mu.RLock()
+	r.ss.RLock()
 	got := r.ss.Get(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if got == nil {
 		t.Fatal("session not restored")
 	}
@@ -82,9 +82,9 @@ func TestTuningPersist_LoadRejectsInjectedValues(t *testing.T) {
 	r := NewRouter(RouterConfig{MaxProcs: 3, StorePath: storePath})
 	t.Cleanup(func() { r.Shutdown() })
 
-	r.mu.RLock()
+	r.ss.RLock()
 	got := r.ss.Get(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if got == nil {
 		t.Fatal("session not restored (the entry itself must survive — only the tuning fields drop)")
 	}

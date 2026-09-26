@@ -35,7 +35,7 @@ func (r *Router) BackendsList() []cli.BackendInfo {
 	backends := make([]cli.BackendInfo, 0, len(ids))
 	for _, id := range ids {
 		info := cli.BackendInfo{ID: id, Available: true}
-		// BackendModelManifest takes r.mu internally; BackendsList runs
+		// BackendModelManifest takes the table lock internally; BackendsList runs
 		// unlocked (handler / reverse-RPC context), so no lock nesting.
 		info.Models = r.BackendModelManifest(id)
 		if wr := r.BackendWrapper(id); wr != nil {

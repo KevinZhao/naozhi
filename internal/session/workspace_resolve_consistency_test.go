@@ -49,9 +49,9 @@ func TestSpawnWorkspaceBaseMatchesGetWorkspace(t *testing.T) {
 			}
 
 			// Spawn-time base (no opts.Workspace, no resume) must agree.
-			r.mu.Lock()
+			r.ss.Lock()
 			sp := r.resolveSpawnParamsLocked(agentKey, "", AgentOpts{})
-			r.mu.Unlock()
+			r.ss.Unlock()
 			if sp.Workspace != tc.want {
 				t.Fatalf("resolveSpawnParamsLocked workspace = %q, want %q (Workspace=%q) — sources of truth drifted",
 					sp.Workspace, tc.want, gotGet)
@@ -69,9 +69,9 @@ func TestSpawnWorkspaceOptsOverrideWins(t *testing.T) {
 	// takes top priority (documented order: opts > per-chat > resume >
 	// default).
 	r := newWorkspaceTestRouter(def, map[string]string{chatKey: "/chat/override"})
-	r.mu.Lock()
+	r.ss.Lock()
 	sp := r.resolveSpawnParamsLocked(agentKey, "", AgentOpts{Workspace: "/opts/ws"})
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if sp.Workspace != "/opts/ws" {
 		t.Fatalf("opts.Workspace should win: got %q, want /opts/ws", sp.Workspace)
 	}

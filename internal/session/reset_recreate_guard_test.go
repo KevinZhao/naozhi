@@ -9,7 +9,7 @@ import (
 
 // TestSpawnSession_ReusesPreInstalledSpawningKey pins the #775 (R62-GO-3)
 // fix invariant: when a guard channel is already in flight for key
-// (typically pre-installed by ResetAndRecreate before releasing r.mu for
+// (typically pre-installed by ResetAndRecreate before releasing the table lock for
 // proc.Close), spawnSession's prologue MUST reuse that channel rather than
 // overwrite it. Overwriting would orphan any GetOrCreate goroutine parked on
 // the original channel — they'd never wake — and would also reopen the race
@@ -27,8 +27,8 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 
 	// Mirror ResetAndRecreate: install a guardCh in spawningKeys before
 	// the spawn call. Caller of spawnSession is required to enter with
-	// r.mu held.
-	r.mu.Lock()
+	// the table lock held.
+	r.ss.Lock()
 	guardCh := r.pp.BeginSpawn(key)
 
 	// spawnSession will fail because newTestRouter's wrapper points at
@@ -51,13 +51,13 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 	}
 
 	// And the map entry should be cleared so the next caller can spawn.
-	r.mu.Lock()
+	r.ss.Lock()
 	if _, stillPresent := r.pp.SpawnInFlight(key); stillPresent {
-		r.mu.Unlock()
+		r.ss.Unlock()
 		t.Fatal("in-flight entry still present after spawnSession returned; " +
 			"EndSpawn failed to delete the (possibly reused) entry")
 	}
-	r.mu.Unlock()
+	r.ss.Unlock()
 }
 
 // TestSpawnSession_FreshKeyInstallsOwnChannel pins the symmetric invariant:
@@ -70,12 +70,12 @@ func TestSpawnSession_FreshKeyInstallsOwnChannel(t *testing.T) {
 	key := "feishu:direct:fresh-key-installs:general"
 
 	// No pre-installed entry. spawnSession must create one.
-	r.mu.Lock()
+	r.ss.Lock()
 	_, _ = r.spawnSession(context.Background(), key, "", AgentOpts{})
 
 	// On error path spawnSession unlocks; relock to inspect map state.
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.ss.Lock()
+	defer r.ss.Unlock()
 	if _, present := r.pp.SpawnInFlight(key); present {
 		t.Fatal("in-flight entry leaked after spawnSession failed " +
 			"(defer should close+delete)")
@@ -83,7 +83,7 @@ func TestSpawnSession_FreshKeyInstallsOwnChannel(t *testing.T) {
 }
 
 // TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard exercises the
-// end-to-end #775 race: ResetAndRecreate is mid-tear-down with r.mu
+// end-to-end #775 race: ResetAndRecreate is mid-tear-down with the table lock
 // released, and a concurrent GetOrCreate must NOT race in to spawn its own
 // session before ResetAndRecreate's spawnSession runs. With the guardCh in
 // place the concurrent caller observes (no session, but inflight marker)
@@ -103,9 +103,9 @@ func TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard(t *testing.T) {
 
 	// Stage: install guardCh as ResetAndRecreate does just before
 	// proc.Close.
-	r.mu.Lock()
+	r.ss.Lock()
 	guardCh := r.pp.BeginSpawn(key)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// Launch N concurrent GetOrCreate. With the guard installed, none
 	// should successfully break out of the inflight-wait loop before we
@@ -137,9 +137,9 @@ func TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard(t *testing.T) {
 	// Now release the guard. Goroutines wake, retry the loop, and (since
 	// no session exists) fall through to their own spawnSession which
 	// fails fast against newTestRouter's nonexistent binary.
-	r.mu.Lock()
+	r.ss.Lock()
 	r.pp.EndSpawn(key, guardCh)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	done := make(chan struct{})
 	go func() {

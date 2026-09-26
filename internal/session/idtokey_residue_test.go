@@ -23,13 +23,13 @@ func TestRegisterForResume_StaleRotatedSID_DoesNotMisroute(t *testing.T) {
 	// Session C legitimately occupies detKey with its own live SID.
 	sessC := &ManagedSession{key: detKey}
 	sessC.setSessionID(liveSID)
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(detKey, sessC)
 	r.ss.SetID(liveSID, detKey)
 	// Dangling residue: the retired SID A still maps to detKey from a prior
 	// incarnation that rotated its SID.
 	r.ss.SetID(retiredSID, detKey)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	const resumeKey = "feishu:direct:bob:general"
 	got := r.RegisterForResume(resumeKey, retiredSID, "/tmp/ws", "resume A please")
@@ -43,8 +43,8 @@ func TestRegisterForResume_StaleRotatedSID_DoesNotMisroute(t *testing.T) {
 	if got != resumeKey {
 		t.Fatalf("RegisterForResume = %q, want fresh entry %q", got, resumeKey)
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	// The stale residue must be healed: retiredSID now maps to the new key.
 	if mapped := keyForID(r, retiredSID); mapped != resumeKey {
 		t.Errorf("idToKey[%q] = %q, want %q (self-healed)", retiredSID, mapped, resumeKey)
@@ -69,10 +69,10 @@ func TestRegisterForResume_MatchingSID_StillDedups(t *testing.T) {
 	const sid = "sid-live"
 	s := &ManagedSession{key: key}
 	s.setSessionID(sid)
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(key, s)
 	r.ss.SetID(sid, key)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	got := r.RegisterForResume("feishu:direct:bob:general", sid, "/tmp/ws", "p")
 	if got != key {
@@ -88,17 +88,17 @@ func TestRegisterForResume_StaleNoSession_CleansAndCreates(t *testing.T) {
 	r := NewRouter(RouterConfig{})
 
 	const sid = "sid-orphan"
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.SetID(sid, "ghost:key:no:session") // points at a key with no session
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	const resumeKey = "feishu:direct:bob:general"
 	got := r.RegisterForResume(resumeKey, sid, "/tmp/ws", "p")
 	if got != resumeKey {
 		t.Fatalf("RegisterForResume = %q, want fresh entry %q", got, resumeKey)
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	if mapped := keyForID(r, sid); mapped != resumeKey {
 		t.Errorf("idToKey[%q] = %q, want %q", sid, mapped, resumeKey)
 	}

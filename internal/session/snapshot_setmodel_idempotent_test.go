@@ -55,7 +55,7 @@ func TestSnapshot_SetModel_NoStoreWhenUnchanged(t *testing.T) {
 }
 
 // TestSnapshotReadOnly_NoSetModelWrite locks R20260602-PERF-3 (#1577):
-// the read-only snapshot variant (used by VisitSessions under r.mu.RLock)
+// the read-only snapshot variant (used by VisitSessions under r.ss.RLock)
 // must NEVER call SetModel, even when the live proc.Model() disagrees with
 // the persisted value. It still surfaces the live model in the returned
 // snapshot — it just doesn't dirty the model atomic.Pointer on the read

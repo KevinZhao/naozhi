@@ -6,7 +6,7 @@ package session
 //  1. Fresh key — no existing session, spawnSession runs immediately.
 //  2. Replace alive / dead session — existing session is closed and
 //     unregistered before the re-spawn.
-//  3. Concurrent-creation abort — while we release r.mu to Close() the
+//  3. Concurrent-creation abort — while we release the table lock to Close() the
 //     old process, another goroutine slips in a live session under the
 //     same key; Takeover must abort with a specific error instead of
 //     clobbering the interloper.
@@ -96,7 +96,7 @@ func TestTakeover_ReplacesDeadSession(t *testing.T) {
 
 // TestTakeover_ReplacesAliveSession — when the existing session's process
 // is alive, Takeover enters the close-and-recheck branch: Close() is
-// called on the old process while r.mu is released, then the session is
+// called on the old process while the table lock is released, then the session is
 // unregistered under the re-acquired lock. spawnSession fails afterward,
 // but the old process must be Close()'d and the session gone.
 func TestTakeover_ReplacesAliveSession(t *testing.T) {
@@ -123,7 +123,7 @@ func TestTakeover_ReplacesAliveSession(t *testing.T) {
 }
 
 // hookCloseProc is a fakeProcess whose Close() runs a hook. Takeover
-// calls Close() while holding neither r.mu nor any per-session lock, so
+// calls Close() while holding neither the table lock nor any per-session lock, so
 // the hook can exercise the concurrent-creation race.
 type hookCloseProc struct {
 	*fakeProcess
@@ -145,7 +145,7 @@ func (h *hookCloseProc) Close() {
 }
 
 // TestTakeover_ConcurrentCreationAborts — if another goroutine inserts a
-// live session under the same key while Takeover has released r.mu to
+// live session under the same key while Takeover has released the table lock to
 // Close() the old process, Takeover must abort with an explicit error
 // rather than silently unregister the interloper and spawn on top.
 func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
@@ -154,16 +154,16 @@ func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
 	key := "feishu:direct:user4:general"
 
 	interloper := newIdleProc()
-	// onClose runs after r.mu is released by Takeover. Inject a new live
+	// onClose runs after the table lock is released by Takeover. Inject a new live
 	// session under the same key to simulate a concurrent GetOrCreate
 	// winning the race.
 	hook := newHookCloseProc(func() {
-		r.mu.Lock()
+		r.ss.Lock()
 		s := &ManagedSession{key: key}
 		s.storeProcess(interloper)
 		s.touchLastActive()
 		r.ss.Put(key, s)
-		r.mu.Unlock()
+		r.ss.Unlock()
 	})
 	old := injectSession(r, key, hook)
 	old.setSessionID("old-sess")

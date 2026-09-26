@@ -16,7 +16,7 @@ import (
 // routerWithWorkspace spins up a Router with a session whose
 // Workspace() resolves to ws so the tracker's resolver closure
 // returns the expected directory. The fake ManagedSession is
-// registered via r.mu write-lock to keep concurrency semantics
+// registered via the table lock write-lock to keep concurrency semantics
 // correct.
 func routerWithWorkspace(t *testing.T, ws string, key string) (*Router, string) {
 	t.Helper()
@@ -33,9 +33,9 @@ func routerWithWorkspace(t *testing.T, ws string, key string) (*Router, string) 
 	// closure can locate it.
 	s := &ManagedSession{key: key}
 	s.setWorkspace(ws)
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(key, s)
-	r.mu.Unlock()
+	r.ss.Unlock()
 	return r, eventLogDir
 }
 
@@ -184,9 +184,9 @@ func TestTrackerIntegration_RemoveClearsRefs(t *testing.T) {
 	}
 	// Guard: workspace must be non-empty on the registered session
 	// — if setWorkspace didn't stick we'd silently skip clear.
-	r.mu.RLock()
+	r.ss.RLock()
 	ws2 := r.ss.Get(key).Workspace()
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if ws2 != ws {
 		t.Fatalf("workspace drift: got %q, want %q", ws2, ws)
 	}

@@ -20,7 +20,7 @@ func newStoppedGateRouter() *Router {
 }
 
 // TestSpawnSession_RejectedAfterStopped pins the #1822 (Option B) stopped gate:
-// once r.stopped is set (which Router.shutdown does under r.mu before snapshotting
+// once r.stopped is set (which Router.shutdown does under the table lock before snapshotting
 // sessions), every reverse-RPC spawn path that funnels into spawnSession —
 // GetOrCreate (send), Takeover (takeover), ResetAndRecreate (restart_planner) —
 // must refuse with ErrRouterStopped and must NOT install a fresh session into

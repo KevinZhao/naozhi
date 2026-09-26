@@ -160,7 +160,7 @@ func TestResetChatAndSetWorkspace_FreshKey(t *testing.T) {
 
 // TestResetChatAndSetWorkspace_ConcurrentReaderNeverSeesDefault hammers the
 // atomic method from one goroutine while a reader polls Workspace from another.
-// Because reset+set are fused under r.mu, the reader must only ever observe the
+// Because reset+set are fused under the table lock, the reader must only ever observe the
 // old or the new override value, never the default (which the #2342 two-call
 // ordering would briefly expose). Run with -race.
 func TestResetChatAndSetWorkspace_ConcurrentReaderNeverSeesDefault(t *testing.T) {
@@ -190,8 +190,8 @@ func TestResetChatAndSetWorkspace_ConcurrentReaderNeverSeesDefault(t *testing.T)
 
 // markChatLive gives chat a session, so its workspace override is not evictable.
 func markChatLive(r *Router, chat string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.ss.Lock()
+	defer r.ss.Unlock()
 	key := chat + ":general"
 	r.ss.Put(key, &ManagedSession{key: key})
 }

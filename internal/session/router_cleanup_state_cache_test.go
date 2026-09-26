@@ -33,7 +33,7 @@ func (c *countingProc) IsRunning() bool {
 
 // TestCleanup_PassTwo_UsesCachedState pins R220-PERF-4: pass-2 must derive
 // the running classification from the state snapshot taken once in pass-1
-// (under r.mu.RLock) instead of re-acquiring proc.mu.RLock. We verify this
+// (under r.ss.RLock) instead of re-acquiring proc.mu.RLock. We verify this
 // by counting IsRunning() invocations on a fakeProcess that increments a
 // counter on every call. After Cleanup the count must remain zero.
 func TestCleanup_PassTwo_UsesCachedState(t *testing.T) {

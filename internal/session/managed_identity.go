@@ -9,10 +9,10 @@ import (
 )
 
 // Workspace returns the effective cwd recorded for this session. Lock-free;
-// safe to call from Hub handlers and other call sites that don't hold r.mu.
+// safe to call from Hub handlers and other call sites that don't hold the table lock.
 func (s *ManagedSession) Workspace() string { return loadAtomicString(&s.workspace) }
 
-// setWorkspace stores the workspace path atomically. Writers hold r.mu; the
+// setWorkspace stores the workspace path atomically. Writers hold the table lock; the
 // atomic store lets lock-free readers (Workspace) stay race-free.
 func (s *ManagedSession) setWorkspace(ws string) { storeAtomicString(&s.workspace, ws) }
 
@@ -71,7 +71,7 @@ func (s *ManagedSession) loadCLIIdentity() cliIdentityBox {
 // updateCLIIdentity is the CAS-loop primitive all Set* helpers funnel
 // through: mut maps the current box (zero when unset) to the next one and
 // the CAS retries until it wins, so concurrent writers (spawn / reconnect
-// under r.mu, shim discovery) never drop each other's fields. Unchanged
+// under the table lock, shim discovery) never drop each other's fields. Unchanged
 // boxes short-circuit without a store.
 func (s *ManagedSession) updateCLIIdentity(mut func(cliIdentityBox) cliIdentityBox) {
 	for {
@@ -154,7 +154,7 @@ func (s *ManagedSession) LabelOrigin() string { return loadAtomicString(&s.label
 
 // setLabelOrigin records the origin of the current UserLabel. Unexported
 // because the only legitimate writers are Router.SetUserLabelWithOrigin
-// and ClearUserLabelOrigin, which run under r.mu so the re-read protocol
+// and ClearUserLabelOrigin, which run under the table lock so the re-read protocol
 // (RFC §11.1) stays atomic with the userLabel update.
 func (s *ManagedSession) setLabelOrigin(v string) { storeAtomicString(&s.labelOrigin, v) }
 
@@ -172,7 +172,7 @@ func (s *ManagedSession) TuningModel() string { return loadAtomicString(&s.tunin
 
 // SetTuningModel records the per-session model override. Callers must have
 // validated via tuningspec.ValidateModel; "" clears the override. Writers:
-// Router.SetSessionTuning (under r.mu) and the store-restore path.
+// Router.SetSessionTuning (under the table lock) and the store-restore path.
 func (s *ManagedSession) SetTuningModel(v string) { storeAtomicString(&s.tuningModel, v) }
 
 // TuningEffort returns the operator's per-session thinking-effort override

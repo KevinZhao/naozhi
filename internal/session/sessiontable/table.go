@@ -5,9 +5,11 @@
 // the table; the invariants that used to be comments on Router are enforced
 // here.
 //
-// Lock contract: Table carries NO lock. Call every method with
-// session.Router.mu held (reads under the read lock, mutations under the
-// write lock), except Active and Gen, which are atomic for lock-free readers.
+// Lock contract: Table owns its lock. Call every other method with it held
+// (Lock / RLock) — reads under the read lock, mutations under the write lock
+// — except Active and Gen, which are atomic for lock-free readers. The lock
+// also guards the state the caller keeps beside the table and changes
+// atomically with it (spawn bookkeeping, workspace overrides, picks).
 //
 // S is the session type; the table never looks inside it. Every index key is
 // derived from the session key string, or handed in (the session ID), so no
@@ -18,11 +20,17 @@ import (
 	"fmt"
 	"iter"
 	"sort"
+	"sync"
 	"sync/atomic"
 )
 
 // Table is the session table. The zero value is not usable; use New.
 type Table[S any] struct {
+	mu sync.RWMutex
+	// cond is signalled when a process changes state; its Locker is mu's
+	// write side, so Wait must be called with Lock held.
+	cond *sync.Cond
+
 	sessions map[string]S
 	// byChat: chat key → set of session keys, for O(k) chat resets.
 	byChat map[string]map[string]struct{}
@@ -49,7 +57,7 @@ type Table[S any] struct {
 // New returns an empty table. chatOf maps a session key to its chat key;
 // hashOf maps it to the hash KeyForHash resolves.
 func New[S any](chatOf, hashOf func(key string) string) *Table[S] {
-	return &Table[S]{
+	t := &Table[S]{
 		sessions: make(map[string]S),
 		byChat:   make(map[string]map[string]struct{}),
 		keyhash:  make(map[string]string),
@@ -57,7 +65,27 @@ func New[S any](chatOf, hashOf func(key string) string) *Table[S] {
 		chatOf:   chatOf,
 		hashOf:   hashOf,
 	}
+	t.cond = sync.NewCond(&t.mu)
+	return t
 }
+
+// Lock, Unlock, RLock, RUnlock and TryLock take and release the table's lock.
+func (t *Table[S]) Lock()         { t.mu.Lock() }
+func (t *Table[S]) Unlock()       { t.mu.Unlock() }
+func (t *Table[S]) RLock()        { t.mu.RLock() }
+func (t *Table[S]) RUnlock()      { t.mu.RUnlock() }
+func (t *Table[S]) TryLock() bool { return t.mu.TryLock() }
+
+// TryRLock takes the read lock if it is free, without waiting.
+func (t *Table[S]) TryRLock() bool { return t.mu.TryRLock() }
+
+// Broadcast wakes every Wait. Call it with Lock held, so a waiter that has
+// checked its condition but not yet parked cannot miss the signal.
+func (t *Table[S]) Broadcast() { t.cond.Broadcast() }
+
+// Wait releases the lock until Broadcast, then re-takes it. Call it with Lock
+// held, in a loop re-checking the condition waited for.
+func (t *Table[S]) Wait() { t.cond.Wait() }
 
 // Get returns key's session, or the zero S when there is none.
 func (t *Table[S]) Get(key string) S {

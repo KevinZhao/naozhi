@@ -115,9 +115,9 @@ func TestRenameSession_RecountsPersistedUserTurns(t *testing.T) {
 		{Time: 4, Type: "user", Summary: "q3"},
 	})
 
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(oldKey, s)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if !r.RenameSession(oldKey, newKey) {
 		t.Fatal("RenameSession returned false")

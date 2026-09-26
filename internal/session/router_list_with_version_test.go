@@ -7,7 +7,7 @@ import "testing"
 // ListSessions() in two separate critical sections, opening a small
 // race where a mutation landing between the reads could publish data
 // tagged with a stale version (or vice versa). The new tuple method
-// reads both inside a single r.mu.RLock epoch so callers always see a
+// reads both inside a single r.ss.RLock epoch so callers always see a
 // (snapshots, version) pair where the version is exactly the one that
 // produced the snapshot slice.
 func TestListSessionsWithVersion_PairsAtomically(t *testing.T) {
