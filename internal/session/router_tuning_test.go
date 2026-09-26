@@ -425,13 +425,13 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 	// the map — so swap the map entry for an unrelated stub in between (what
 	// RegisterForResume / Remove can do during the unlocked history copy) and
 	// require the ORIGINAL values to win.
-	_, _, _, _, ov := snapshotOldSessionLocked(old)
+	_, _, _, _, ov := snapshotOldSession(sessView{}, old)
 	stub := newSessionWithID(key, "sess-stub")
 	stub.SetTuningModel("stub-model")
 	stub.SetUserLabel("stub label")
 	r.ss.Put(key, stub)
 
-	fresh := r.installFreshSessionLocked(
+	fresh := r.installFreshSession(r.ss.AssumeLocked(),
 		key, &cli.Process{}, "/ws", "kiro", "", wrapper, "sess-old",
 		nil, nil, 0, 0, 0, false, "sess-old", 0, ov,
 	)
@@ -551,7 +551,7 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 
 	// First spawn's argv reads the parked pick (tuning is the top of both chains).
 	r.ss.Lock()
-	sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
+	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
 	r.ss.Unlock()
 	if sp.Model != "us.anthropic.claude-opus-5[1m]" || sp.Effort != "high" {
 		t.Errorf("first spawn params: model=%q effort=%q, want the parked pick", sp.Model, sp.Effort)
@@ -563,7 +563,7 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 
 	// spawnSession's consume step moves it onto the fresh entry and drops it.
 	r.ss.Lock()
-	ov := r.consumePendingTuningLocked(key, sessionOverrides{userLabel: "keep"})
+	ov := r.consumePendingTuning(r.ss.AssumeLocked(), key, sessionOverrides{userLabel: "keep"})
 	_, stillThere := r.ss.Ext().picks.tuning[key]
 	r.ss.Unlock()
 	if ov.tuningModel != "us.anthropic.claude-opus-5[1m]" || ov.tuningEffort != "high" || ov.userLabel != "keep" {
@@ -573,7 +573,7 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 		t.Error("consume must delete the one-shot record")
 	}
 	r.ss.Lock()
-	if ov2 := r.consumePendingTuningLocked(key, sessionOverrides{}); ov2 != (sessionOverrides{}) {
+	if ov2 := r.consumePendingTuning(r.ss.AssumeLocked(), key, sessionOverrides{}); ov2 != (sessionOverrides{}) {
 		t.Errorf("second consume must be a no-op, got %+v", ov2)
 	}
 	r.ss.Unlock()

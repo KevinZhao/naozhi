@@ -30,7 +30,7 @@ func TestPublishSessionLocked_AlreadyAttachedButNilStillGetsNoop(t *testing.T) {
 
 	// Caller LIES: claims alreadyAttached but never set the source.
 	r.ss.Lock()
-	r.publishSessionLocked(s.key, s, true)
+	r.publishSession(r.ss.AssumeLocked(), s.key, s, true)
 	r.ss.Unlock()
 
 	if got := s.loadHistorySource(); got == nil {

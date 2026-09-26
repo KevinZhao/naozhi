@@ -49,7 +49,7 @@ func TestPublishSessionLocked_AttachesHistorySource(t *testing.T) {
 	s := &ManagedSession{key: "feishu:direct:user1:general"}
 
 	r.ss.Lock()
-	r.publishSessionLocked(s.key, s, false)
+	r.publishSession(r.ss.AssumeLocked(), s.key, s, false)
 	r.ss.Unlock()
 
 	if got := s.loadHistorySource(); got == nil {
@@ -80,7 +80,7 @@ func TestPublishSessionLocked_AlreadyAttachedDoesNotOverwrite(t *testing.T) {
 	s.SetHistorySource(sentinel)
 
 	r.ss.Lock()
-	r.publishSessionLocked(s.key, s, true)
+	r.publishSession(r.ss.AssumeLocked(), s.key, s, true)
 	r.ss.Unlock()
 
 	got := s.loadHistorySource()
@@ -107,7 +107,7 @@ func TestPublishSessionLocked_IndexAddObserved(t *testing.T) {
 	s := &ManagedSession{key: "feishu:direct:user1:general"}
 
 	r.ss.Lock()
-	r.publishSessionLocked(s.key, s, false)
+	r.publishSession(r.ss.AssumeLocked(), s.key, s, false)
 	r.ss.Unlock()
 
 	// The session is indexed under its chat, so a follow-up ResetChat finds it.

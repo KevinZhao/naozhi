@@ -49,7 +49,7 @@ func (r *Router) unregisterAndSnapshot(key string) (removeSnapshot, bool) {
 	workspaceSnapshot := s.Workspace()
 	backend := s.Backend()
 	retiredSessionID := s.SessionID()
-	r.unregisterSessionLocked(key, s, false)
+	r.unregisterSession(r.ss.AssumeLocked(), key, s, false)
 	if wasActive {
 		if r.ss.AddActive(-1) < 0 {
 			r.ss.SetActive(0)
@@ -337,7 +337,7 @@ func (r *Router) Cleanup() {
 			continue // state changed since the RLock snapshot; leave it
 		}
 		// Terminal removal: also frees the backend override.
-		r.unregisterSessionLocked(key, s, false)
+		r.unregisterSession(r.ss.AssumeLocked(), key, s, false)
 		pruned++
 	}
 	// Recompute the per-backend gauge and the alive total in one reconcile

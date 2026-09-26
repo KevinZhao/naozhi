@@ -128,7 +128,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 
 	t.Run("backend tier applies when the agent sets none", func(t *testing.T) {
 		r := mkRouter(t, map[string]string{"kiro": "high"})
-		sp := r.resolveSpawnParamsLocked("dash:direct:c1:general", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c1:general", "",
 			AgentOpts{Backend: "kiro", Workspace: "/ws"})
 		if sp.Effort != "high" {
 			t.Errorf("Effort = %q, want high (backend default)", sp.Effort)
@@ -137,7 +137,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 
 	t.Run("agent tier overrides the backend tier", func(t *testing.T) {
 		r := mkRouter(t, map[string]string{"kiro": "high"})
-		sp := r.resolveSpawnParamsLocked("dash:direct:c2:reviewer", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c2:reviewer", "",
 			AgentOpts{Backend: "kiro", Workspace: "/ws", Effort: "max"})
 		if sp.Effort != "max" {
 			t.Errorf("Effort = %q, want max (agents[].effort wins)", sp.Effort)
@@ -146,7 +146,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 
 	t.Run("agent tier applies with no backend tier configured", func(t *testing.T) {
 		r := mkRouter(t, nil)
-		sp := r.resolveSpawnParamsLocked("dash:direct:c3:reviewer", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c3:reviewer", "",
 			AgentOpts{Backend: "kiro", Workspace: "/ws", Effort: "low"})
 		if sp.Effort != "low" {
 			t.Errorf("Effort = %q, want low", sp.Effort)
@@ -155,7 +155,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 
 	t.Run("nothing configured yields no tier", func(t *testing.T) {
 		r := mkRouter(t, nil)
-		sp := r.resolveSpawnParamsLocked("dash:direct:c4:general", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c4:general", "",
 			AgentOpts{Backend: "kiro", Workspace: "/ws"})
 		if sp.Effort != "" {
 			t.Errorf("Effort = %q, want empty so BuildArgs emits no flag", sp.Effort)
@@ -164,7 +164,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 
 	t.Run("an unconfigured backend gets no tier from another backend", func(t *testing.T) {
 		r := mkRouter(t, map[string]string{"kiro": "max"})
-		sp := r.resolveSpawnParamsLocked("dash:direct:c5:general", "",
+		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c5:general", "",
 			AgentOpts{Backend: "claude", Workspace: "/ws"})
 		if sp.Effort != "" {
 			t.Errorf("Effort = %q, want empty — kiro's tier must not leak to claude", sp.Effort)

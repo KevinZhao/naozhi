@@ -61,7 +61,7 @@ func mkOverlayRouter(t *testing.T) *Router {
 // hands to the shim.
 func spawnShimState(t *testing.T, r *Router, key, resumeID string, opts AgentOpts) (shim.State, spawnParams) {
 	t.Helper()
-	sp := r.resolveSpawnParamsLocked(key, resumeID, opts)
+	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, resumeID, opts)
 	if sp.Wrapper == nil {
 		t.Fatalf("no wrapper for backend %q", sp.BackendID)
 	}
@@ -421,7 +421,7 @@ func TestResolveSpawnParams_RecordsOverlay(t *testing.T) {
 	r := mkOverlayRouter(t)
 	setAccessProfiles(r, map[string]AccessProfile{"work": {DefaultModel: "m"}})
 
-	sp := r.resolveSpawnParamsLocked("dashboard:direct:2494-rec:reviewer", "", AgentOpts{
+	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dashboard:direct:2494-rec:reviewer", "", AgentOpts{
 		Backend: "kiro", Workspace: "/ws", Model: "sonnet", Effort: "max",
 		ExtraArgs: []string{"--x"}, AccessProfile: "work",
 	})
@@ -431,7 +431,7 @@ func TestResolveSpawnParams_RecordsOverlay(t *testing.T) {
 		t.Errorf("Overlay = %+v, want %+v", sp.Overlay, want)
 	}
 
-	sp = r.resolveSpawnParamsLocked("dashboard:direct:2494-rec2:general", "", AgentOpts{
+	sp = r.resolveSpawnParams(r.ss.AssumeLocked(), "dashboard:direct:2494-rec2:general", "", AgentOpts{
 		Backend: "claude", Workspace: "/ws", AccessProfile: "deleted-profile",
 	})
 	if sp.Overlay.AccessProfile != "" || sp.AccessProfileID != "" {

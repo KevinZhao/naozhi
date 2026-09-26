@@ -298,3 +298,50 @@ func TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID(t *testing.T) {
 		t.Error("the replaced session's ID still resolves to the key after the ID rotated")
 	}
 }
+
+// TestGetOrCreate_PanicInsideTheReserveLeavesNothingHeld: a panic in the
+// reserve transaction (here: the evicted victim's Close) reaches the caller,
+// and leaves neither the table lock held nor the key marked in flight — the
+// next GetOrCreate for the key spawns instead of parking forever.
+func TestGetOrCreate_PanicInsideTheReserveLeavesNothingHeld(t *testing.T) {
+	proc := newIdleProc()
+	r := spawnRouter(t, 1, func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil })
+	victim := injectLocked(r, "feishu:direct:victim:general", newHookCloseProc(func() { panic("close failed") }))
+	victim.lastActive.Store(1)
+	const key = "feishu:direct:after-panic:general"
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("the panic did not reach the caller")
+			}
+		}()
+		_, _, _ = r.GetOrCreate(context.Background(), key, AgentOpts{})
+	}()
+
+	if !r.HealthCheck() {
+		t.Fatal("the table lock is still held after the panic")
+	}
+	var inFlight bool
+	var pending int
+	r.ss.View(func(v sessView) {
+		_, inFlight = v.Ext().spawns.SpawnInFlight(key)
+		pending = v.Ext().spawns.PendingSpawns()
+	})
+	if inFlight || pending != 0 {
+		t.Fatalf("after the panic: inFlight=%v pending=%d, want false/0", inFlight, pending)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the next GetOrCreate: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the next GetOrCreate parked on a marker the panic left behind")
+	}
+}

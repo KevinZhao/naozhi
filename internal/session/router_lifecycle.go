@@ -3,8 +3,8 @@
 // This file holds session lifecycle: GetOrCreate / spawn / Reset / Rename /
 // workspace overrides / history wiring. router.go retains the Router struct
 // definition, NewRouter, and infrastructure helpers (panicSafeSpawn etc.).
-// Lock contracts are documented per-method via "// LOCK:" annotations on
-// `*Locked` suffix functions.
+// Functions that need the session table's lock take a sessTx / sessView,
+// which only exists inside a table transaction.
 package session
 
 import (
@@ -24,7 +24,7 @@ import (
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
-// publishSessionLocked is the single funnel for installing a freshly-built
+// publishSession is the single funnel for installing a freshly-built
 // ManagedSession into the router's lookup tables (attachHistorySource →
 // session table Put). Every spawn / discovery / rename / takeover path
 // must go through it so no site can forget the history source, which would
@@ -32,20 +32,18 @@ import (
 // attached the source pass alreadyAttached=true to avoid double-attach.
 //
 // Post-condition: s.loadHistorySource() is non-nil (Noop at worst).
-//
-// LOCK: caller must hold the table lock (write).
-func (r *Router) publishSessionLocked(key string, s *ManagedSession, alreadyAttached bool) {
+func (r *Router) publishSession(tx sessTx, key string, s *ManagedSession, alreadyAttached bool) {
 	if !alreadyAttached {
 		r.attachHistorySource(s)
 	}
 	if s.loadHistorySource() == nil {
 		// Defence-in-depth against a mistaken alreadyAttached=true: log the
 		// diagnostic and install a Noop so downstream callers need not nil-check.
-		slog.Error("publishSessionLocked: history source missing after attach — falling back to Noop",
+		slog.Error("publishSession: history source missing after attach — falling back to Noop",
 			"key", key, "alreadyAttached", alreadyAttached)
 		s.SetHistorySource(history.Noop{})
 	}
-	r.ss.Put(key, s)
+	tx.Put(key, s)
 }
 
 // attachHistorySource picks the right history.Source for a session based on
@@ -108,56 +106,50 @@ func (r *Router) ResetChatAndSetWorkspace(chatKeyPrefix, path string) {
 // chat's workspace override before releasing the table lock, so callers that reset+set
 // observe no intermediate state.
 func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWorkspace bool) {
-	r.ss.Lock()
 	var toClose []processIface
-	var closedActive int
-	// A copy of the chat's keys: resetSessionLocked deletes as it goes.
-	for _, key := range r.ss.KeysOfChat(chatKeyPrefix) {
-		r.resetSessionLocked(key, &toClose, &closedActive)
-	}
-	if closedActive > 0 {
-		newCount := r.ss.AddActive(-int64(closedActive))
-		if newCount < 0 {
-			r.ss.SetActive(0)
+	r.ss.Update(func(tx sessTx) {
+		var closedActive int
+		// A copy of the chat's keys: resetChatEntry deletes as it goes.
+		for _, key := range tx.KeysOfChat(chatKeyPrefix) {
+			r.resetChatEntry(tx, key, &toClose, &closedActive)
 		}
-		// Reconcile the per-backend labeled gauge by batched recount; O(n)
-		// but only on the rare chat-prefix reset.
-		r.reconcileActiveByBackend(r.ss.AssumeLocked().View)
-	}
-	// Delete marks the store dirty so the removal survives a crash before
-	// any other path flips the flag.
-	r.ss.Ext().workspaces.Delete(chatKeyPrefix)
-	if setWorkspace && chatKeyPrefix != "" {
-		// Same locked section as the reset so no concurrent GetOrCreate sees
-		// the chat reset with the override gone (#2342). The override was just
-		// deleted, so this is always a fresh insert.
-		r.putWorkspaceOverrideLocked(chatKeyPrefix, path)
-	}
-	r.ss.MarkChanged()
-	r.ss.Unlock()
-
-	for _, proc := range toClose {
-		proc.Close()
-	}
-	// Two locked sections by design: proc.Close() can block, so it runs
-	// unlocked. Broadcast must happen under the table lock and only AFTER Close() flips
-	// IsRunning() to false — Shutdown's Wait re-evaluates that predicate,
-	// so broadcasting earlier is a missed-wakeup window. Same
-	// Unlock→Close→relock-Broadcast shape as evictOldest.
-	r.ss.Lock()
-	r.ss.Broadcast()
-	r.ss.Unlock()
-
+		if closedActive > 0 {
+			if tx.AddActive(-int64(closedActive)) < 0 {
+				tx.SetActive(0)
+			}
+			// Reconcile the per-backend labeled gauge by batched recount;
+			// O(n) but only on the rare chat-prefix reset.
+			r.reconcileActiveByBackend(tx.View)
+		}
+		// Delete marks the store dirty so the removal survives a crash before
+		// any other path flips the flag.
+		tx.Ext().workspaces.Delete(chatKeyPrefix)
+		if setWorkspace && chatKeyPrefix != "" {
+			// Same transaction as the reset so no concurrent GetOrCreate sees
+			// the chat reset with the override gone (#2342). The override was
+			// just deleted, so this is always a fresh insert.
+			r.putWorkspaceOverride(tx, chatKeyPrefix, path)
+		}
+		tx.MarkChanged()
+		// proc.Close() can block, so it runs with the lock released; the
+		// Broadcast must come after it — Close() flips IsRunning() to false,
+		// which Shutdown's Wait re-evaluates.
+		tx.Unlocked(func() {
+			for _, proc := range toClose {
+				proc.Close()
+			}
+		})
+		tx.Broadcast()
+	})
 	r.notifyChange()
 }
 
-// resetSessionLocked tears down a single session for ResetChat: collects any
+// resetChatEntry tears down a single session for ResetChat: collects any
 // live process into toClose (caller Close()s it outside the table lock), drops the
 // session's record + sessionID and backend-override mappings, and bumps
-// closedActive when the session counted toward maxProcs. Caller MUST hold
-// the table lock.
-func (r *Router) resetSessionLocked(key string, toClose *[]processIface, closedActive *int) {
-	s := r.ss.Get(key)
+// closedActive when the session counted toward maxProcs.
+func (r *Router) resetChatEntry(tx sessTx, key string, toClose *[]processIface, closedActive *int) {
+	s := tx.Get(key)
 	if s == nil {
 		return
 	}
@@ -168,13 +160,13 @@ func (r *Router) resetSessionLocked(key string, toClose *[]processIface, closedA
 		}
 	}
 	if id := s.getSessionID(); id != "" {
-		r.ss.ClearID(id)
+		tx.ClearID(id)
 	}
-	r.ss.Delete(key)
+	tx.Delete(key)
 	// Backend pick only: /new returns to the default backend, while the two
-	// consumed-on-spawn picks still apply to this key. dropBackendLocked's doc
+	// consumed-on-spawn picks still apply to this key. dropBackend's doc
 	// records that the omission is deliberate.
-	r.ss.Ext().picks.dropBackendLocked(key)
+	tx.Ext().picks.dropBackend(key)
 }
 
 // AgentOpts provides per-agent overrides for session creation.
@@ -229,73 +221,94 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	if err := validateBackend(opts.Backend); err != nil {
 		return nil, 0, err
 	}
-	r.ss.Lock()
-
 	// N concurrent GetOrCreate on the same fresh key would each call
-	// spawnSession and only one would win the shim-socket dial guard. Park on
-	// the per-spawn done-channel (closed by spawnSession's defer) while a
-	// spawn is in flight, then relock and re-evaluate.
+	// spawnSession and only one would win the shim-socket dial guard. Each
+	// round is one transaction deciding between: the live session, waiting on
+	// a spawn already in flight (outside the lock, then another round), or
+	// reserving a spawn of our own — so the decision to spawn and the
+	// in-flight marker cannot be split by another caller.
+	// Fast path: a live session needs only a read of the table
+	// (touchLastActive is an atomic store), so concurrent hits do not
+	// serialise on the write lock.
+	if s := r.ss.Load(key); s != nil && s.isAlive() {
+		s.touchLastActive()
+		return s, SessionExisting, nil
+	}
 	for {
-		if s, ok := r.ss.Lookup(key); ok {
-			if s.isAlive() {
-				s.touchLastActive()
-				r.ss.Unlock()
-				return s, SessionExisting, nil
-			}
-			// The resume branch must honour the SAME coalesce guard as the
-			// not-found path: a second concurrent spawnSession would reuse the
-			// in-flight channel and its defer would close an already-closed
-			// channel → panic (#2221). The winner owns the close.
-			if ch, inflight := r.ss.Ext().spawns.SpawnInFlight(key); inflight {
-				r.ss.Unlock()
-				select {
-				case <-ctx.Done():
-					return nil, 0, ctx.Err()
-				case <-ch:
+		var (
+			live      *ManagedSession
+			wait      chan struct{}
+			res       spawnReservation
+			err       error
+			status    SessionStatus
+			stuck     bool
+			resumedID string
+		)
+		r.ss.Update(func(tx sessTx) {
+			if s, ok := tx.Lookup(key); ok {
+				if s.isAlive() {
+					s.touchLastActive()
+					live = s
+					return
 				}
-				r.ss.Lock()
-				continue
+				// The resume branch honours the SAME coalesce guard as the
+				// not-found path: a second concurrent spawn would reuse the
+				// in-flight channel and close it twice (#2221). The winner
+				// owns the close.
+				if ch, inflight := tx.Ext().spawns.SpawnInFlight(key); inflight {
+					wait = ch
+					return
+				}
+				resumedID, status = s.getSessionID(), SessionResumed
+				err = r.reserveSpawn(tx, &res, key, resumedID, opts)
+				return
 			}
-			slog.Info("session process exited, resuming", "key", key, "session_id", s.getSessionID())
-			s, err := r.spawnSession(ctx, key, s.getSessionID(), opts)
-			if err != nil {
-				return nil, 0, fmt.Errorf("session %s: %w", key, err)
+			if ch, inflight := tx.Ext().spawns.SpawnInFlight(key); inflight {
+				wait = ch
+				return
 			}
-			return s, SessionResumed, nil
+			// Consume the per-key shim-stuck flag (set by a Reset whose
+			// socket-gone wait timed out, #1324) in the same transaction that
+			// reserves the spawn; apply the wrap on the error path.
+			stuck, status = tx.Ext().spawns.ConsumeShimStuck(key), SessionNew
+			err = r.reserveSpawn(tx, &res, key, "", opts)
+		})
+		switch {
+		case live != nil:
+			return live, SessionExisting, nil
+		case wait != nil:
+			// Someone else is spawning this key: wait, then re-evaluate (pick
+			// up their session, or spawn our own on their failure).
+			select {
+			case <-ctx.Done():
+				return nil, 0, ctx.Err()
+			case <-wait:
+			}
+			continue
 		}
-		ch, inflight := r.ss.Ext().spawns.SpawnInFlight(key)
-		if !inflight {
-			break
+		if status == SessionResumed {
+			slog.Info("session process exited, resuming", "key", key, "session_id", resumedID)
+		} else {
+			// Debug, not Info: completeSpawn logs "session spawned" at Info
+			// moments later.
+			slog.Debug("creating new session", "key", key)
 		}
-		// Someone else is spawning this key; wait unlocked, then re-evaluate
-		// (pick up their session, or spawn our own on their failure).
-		r.ss.Unlock()
-		select {
-		case <-ctx.Done():
-			return nil, 0, ctx.Err()
-		case <-ch:
+		var s *ManagedSession
+		if err == nil {
+			s, err = r.completeSpawn(ctx, &res)
 		}
-		r.ss.Lock()
+		if err != nil {
+			if stuck {
+				// errors.Is chain lets callers pin on ErrShimStuck.
+				return nil, 0, fmt.Errorf("session %s: %w: %w", key, ErrShimStuck, err)
+			}
+			return nil, 0, fmt.Errorf("session %s: %w", key, err)
+		}
+		return s, status, nil
 	}
-
-	// Debug, not Info: spawnSession logs "session spawned" at Info moments later.
-	slog.Debug("creating new session", "key", key)
-	// Consume the per-key shim-stuck flag (set by a Reset whose
-	// socket-gone wait timed out, #1324) under the table lock BEFORE spawnSession,
-	// which unlocks/relocks internally; apply the wrap on the error path.
-	stuck := r.ss.Ext().spawns.ConsumeShimStuck(key)
-	s, err := r.spawnSession(ctx, key, "", opts)
-	if err != nil {
-		if stuck {
-			// errors.Is chain lets callers pin on ErrShimStuck.
-			return nil, 0, fmt.Errorf("session %s: %w: %w", key, ErrShimStuck, err)
-		}
-		return nil, 0, fmt.Errorf("session %s: %w", key, err)
-	}
-	return s, SessionNew, nil
 }
 
-// spawnParams carries the pure-computation output of resolveSpawnParamsLocked:
+// spawnParams carries the pure-computation output of resolveSpawnParams:
 // the merged backend, model, args, workspace, and (possibly downgraded)
 // resumeID that spawnSession feeds into cli.SpawnOptions.
 type spawnParams struct {
@@ -326,16 +339,14 @@ type spawnParams struct {
 	Overlay shim.SpawnOverlay
 }
 
-// resolveSpawnParamsLocked computes the merged spawn parameters for a new
+// resolveSpawnParams computes the merged spawn parameters for a new
 // session. It is the SINGLE source of truth for workspace + backend + model +
 // args + resumeID resolution; any spawn-adjacent path (Takeover, Reattach…)
 // MUST route through it rather than re-implement the precedence (#735).
 // workspace_resolver_contract_test.go asserts exactly one
 // `workspace = opts.Workspace` site survives in this file. No I/O beyond
 // bounded stat/ReadDir probes; consumes the one-shot dashboard backend pick.
-//
-// LOCK: caller must hold the table lock for writing.
-func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) spawnParams {
+func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentOpts) spawnParams {
 	// One registry snapshot for the whole resolution: the overlay env and the
 	// profile default model must come from the same map.
 	profiles := r.profiles()
@@ -345,14 +356,14 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// would respawn on the default backend, fail the resume probe, and
 	// silently downgrade to a fresh claude session.
 	reqBackend := opts.Backend
-	if len(r.ss.Ext().picks.backend) > 0 {
+	if len(tx.Ext().picks.backend) > 0 {
 		if reqBackend == "" {
-			reqBackend = r.ss.Ext().picks.backend[key]
+			reqBackend = tx.Ext().picks.backend[key]
 		}
-		delete(r.ss.Ext().picks.backend, key)
+		delete(tx.Ext().picks.backend, key)
 	}
 	if reqBackend == "" {
-		if old := r.ss.Get(key); old != nil {
+		if old := tx.Get(key); old != nil {
 			if b := old.Backend(); b != "" {
 				reqBackend = b
 			}
@@ -366,13 +377,13 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// dashboard override (consumed here) > opts.AccessProfile > "". An unknown
 	// ID resolves to "" with a warning: the SAFE default, never a wrong account.
 	accessProfileID := opts.AccessProfile
-	if len(r.ss.Ext().picks.accessProfile) > 0 {
-		if ov, ok := r.ss.Ext().picks.accessProfile[key]; ok {
+	if len(tx.Ext().picks.accessProfile) > 0 {
+		if ov, ok := tx.Ext().picks.accessProfile[key]; ok {
 			accessProfileID = ov
-			delete(r.ss.Ext().picks.accessProfile, key)
+			delete(tx.Ext().picks.accessProfile, key)
 		}
 	}
-	if old := r.ss.Get(key); old != nil {
+	if old := tx.Get(key); old != nil {
 		if ap := old.AccessProfile(); ap != "" {
 			accessProfileID = ap
 		}
@@ -414,9 +425,9 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// A key with no session yet may carry a pre-spawn pick
 	// (picks.tuning); spawnSession consumes it onto the fresh entry.
 	var tuningModel, tuningEffort string
-	if old := r.ss.Get(key); old != nil {
+	if old := tx.Get(key); old != nil {
 		tuningModel, tuningEffort = old.TuningModel(), old.TuningEffort()
-	} else if pt, ok := r.ss.Ext().picks.tuning[key]; ok {
+	} else if pt, ok := tx.Ext().picks.tuning[key]; ok {
 		tuningModel, tuningEffort = pt.Model, pt.Effort
 	}
 	merged := mergeArgvLayers(
@@ -426,7 +437,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	model, effort, args := merged.Model, merged.Effort, merged.Args
 
 	// Workspace: opts override > per-chat override > old session workspace >
-	// default. The chat tier goes through resolveWorkspaceLocked — the single
+	// default. The chat tier goes through resolveWorkspace — the single
 	// chat-level resolution point — so it cannot drift from GetWorkspace (#883).
 	workspaceOverridden := false
 	var workspace string
@@ -434,17 +445,17 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		workspace = opts.Workspace
 		workspaceOverridden = true
 	} else if chatKey := chatKeyFor(key); chatKey != key {
-		workspace = r.resolveWorkspaceLocked(chatKey)
+		workspace = r.resolveWorkspace(tx.View, chatKey)
 		// Only an explicit per-chat override pins out the resume tier; a bare
 		// default must still let the resume-session workspace win below.
-		if _, ok := r.ss.Ext().workspaces.Lookup(chatKey); ok {
+		if _, ok := tx.Ext().workspaces.Lookup(chatKey); ok {
 			workspaceOverridden = true
 		}
 	} else {
 		workspace = r.defaultCWD
 	}
 	if !workspaceOverridden && resumeID != "" {
-		if old := r.ss.Get(key); old != nil {
+		if old := tx.Get(key); old != nil {
 			if ws := old.Workspace(); ws != "" {
 				workspace = ws
 			}
@@ -483,7 +494,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 // sessionOverrides is the operator-owned per-session state that must outlive
 // the process it was set on: dashboard tuning override and user label with its
 // origin (label+origin travel as one unit). Captured by
-// snapshotOldSessionLocked and re-applied by installFreshSessionLocked.
+// snapshotOldSession and re-applied by installFreshSession.
 type sessionOverrides struct {
 	tuningModel  string
 	tuningEffort string
@@ -491,30 +502,29 @@ type sessionOverrides struct {
 	labelOrigin  string
 }
 
-// consumePendingTuningLocked moves a pre-spawn tuning pick
+// consumePendingTuning moves a pre-spawn tuning pick
 // (picks.tuning, recorded by SetSessionTuning for a key with no
-// session) onto the overrides installFreshSessionLocked will stamp on the
+// session) onto the overrides installFreshSession will stamp on the
 // new entry, and drops the one-shot record. Returns ov unchanged when there
-// is none. Caller holds the table lock.
-func (r *Router) consumePendingTuningLocked(key string, ov sessionOverrides) sessionOverrides {
-	pt, ok := r.ss.Ext().picks.tuning[key]
+// is none.
+func (r *Router) consumePendingTuning(tx sessTx, key string, ov sessionOverrides) sessionOverrides {
+	pt, ok := tx.Ext().picks.tuning[key]
 	if !ok {
 		return ov
 	}
-	delete(r.ss.Ext().picks.tuning, key)
+	delete(tx.Ext().picks.tuning, key)
 	out := ov
 	out.tuningModel = pt.Model
 	out.tuningEffort = pt.Effort
 	return out
 }
 
-// snapshotOldSessionLocked captures the per-session fields that spawnSession
-// needs to read AFTER it releases the table lock. Pure read; nil-safe.
-//
-// LOCK: caller MUST hold the table lock — these fields are written under the table lock by
-// sibling paths (RegisterCronStub, evictOldest, spawnSession itself), so
-// reading them after the table lock is released races those writers.
-func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, int64, sessionOverrides) {
+// snapshotOldSession captures the per-session fields a spawn needs after it
+// leaves the transaction. Pure read; nil-safe. It takes a View because these
+// fields are written inside transactions by sibling paths (RegisterCronStub,
+// evictOldest, the spawn itself), so reading them outside one races those
+// writers.
+func snapshotOldSession(_ sessView, old *ManagedSession) ([]string, float64, float64, int64, sessionOverrides) {
 	if old == nil {
 		return nil, 0, 0, 0, sessionOverrides{}
 	}
@@ -534,7 +544,7 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, 
 		oldTotalCost = loadTotalCost(&old.totalCost)
 	}
 	// Carry the original creation timestamp so the session keeps its sidebar
-	// position; installFreshSessionLocked stamps now when zero.
+	// position; installFreshSession stamps now when zero.
 	oldCreatedAt := old.createdAt.Load()
 	// costSpent MUST carry across the replacement (same logical session).
 	// lastCumulativeCost is deliberately NOT carried: the new CLI re-counts
@@ -543,7 +553,7 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, 
 	// on the orphaned struct; cost is advisory, not billing-authoritative (#2284).
 	oldCostSpent := loadTotalCost(&old.costSpent)
 	// Overrides are snapshotted HERE, under the same the table lock hold, from the same
-	// object as history/cost/createdAt. installFreshSessionLocked must not
+	// object as history/cost/createdAt. installFreshSession must not
 	// re-read r.ss.Get(key): the entry may be swapped or removed during
 	// the unlocked history copy, pairing one session's history with another's tuning.
 	ov := sessionOverrides{
@@ -558,7 +568,7 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, 
 // respawnSnapshot is what a respawn carries over from the session it
 // replaces, read under the table lock in one critical section.
 type respawnSnapshot struct {
-	sid       string // the ID being replaced; installFreshSessionLocked clears idToKey[sid] on rotation
+	sid       string // the ID being replaced; installFreshSession clears idToKey[sid] on rotation
 	prevIDs   []string
 	cost      float64 // the replaced process's cumulative cost (loadTotalCost fallback)
 	costSpent float64
@@ -569,9 +579,9 @@ type respawnSnapshot struct {
 	spent costledger.Totals
 }
 
-func snapshotRespawnLocked(old *ManagedSession) respawnSnapshot {
+func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
 	var snap respawnSnapshot
-	snap.prevIDs, snap.cost, snap.costSpent, snap.createdAt, snap.overrides = snapshotOldSessionLocked(old)
+	snap.prevIDs, snap.cost, snap.costSpent, snap.createdAt, snap.overrides = snapshotOldSession(v, old)
 	if old != nil {
 		snap.sid = old.getSessionID()
 		snap.spent = old.CostTotals()
@@ -594,9 +604,8 @@ func collectRespawnHistory(old *ManagedSession, snap respawnSnapshot, resumeID s
 // collectPreviousHistory gathers JSONL-backed history entries and the
 // session ID chain for a respawn. Returns (entries, chain, userTurns);
 // userTurns is computed here so the spawn path seeds persistedUserTurns
-// without an independent O(n) rescan (#2089). Pure computation; caller must
-// hold the table lock if it needs serialisation w.r.t. sibling spawn attempts. The
-// dead-process branch prefers EventEntries() over persistedHistory because it
+// without an independent O(n) rescan (#2089). Called outside the lock:
+// historyMu must not nest inside it. The dead-process branch prefers EventEntries() over persistedHistory because it
 // includes live events accumulated since the JSONL snapshot was loaded.
 func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resumeID string) ([]clievent.EventEntry, []string, int64) {
 	if oldSess == nil {
@@ -660,61 +669,77 @@ func countUserTurns(entries []clievent.EventEntry) int64 {
 	return n
 }
 
-// spawnSession creates a new process, optionally resuming an existing session.
-//
-// LOCK: enter with the table lock held; returns with it released. The work runs in
-// three phases: a reserve critical section (shutdown gate, in-flight marker,
-// capacity, spawn params, pending slot, snapshot of the session being
-// replaced), one unlocked window (env overlay, Spawn — which may block on an
-// ACP handshake — and the previous-history copy), and a commit critical
-// section that re-checks the key and installs. Eviction at capacity drops
-// the table lock around the victim's Close() as well. Callers MUST NOT hold any other
-// lock; the deferred cleanup reacquires the table lock only.
-func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
-	// Shutdown gate (#1822): r.stopped is set under the table lock immediately before
-	// Shutdown's snapshot and read here with the table lock held on entry, so gate and
-	// snapshot are mutually exclusive (no TOCTOU) and a late spawn cannot
-	// install a shim+CLI the snapshot missed. Sits BEFORE the done-channel
-	// defer so nothing is left dangling; unlock-on-error like every path below.
+// spawnReservation is what reserveSpawn hands to completeSpawn: everything
+// decided under the lock before the slow, unlocked part of a spawn.
+type spawnReservation struct {
+	key       string
+	resumeID  string
+	opts      AgentOpts
+	doneCh    chan struct{}
+	slot      pendingSpawnSlot
+	spawnOpts cli.SpawnOptions
+
+	wrapper          *cli.Wrapper
+	backendID        string
+	workspace        string
+	accessProfileID  string
+	accessProfileEnv map[string]string
+
+	// old is the session being replaced (nil for a fresh key), snapshotted
+	// in the same critical section.
+	old  *ManagedSession
+	snap respawnSnapshot
+}
+
+// reserveSpawn is the first phase of a spawn, run inside the caller's
+// transaction so the decision to spawn and the in-flight marker are one
+// critical section: the shutdown gate, the in-flight marker, capacity
+// (evicting at capacity, which closes the victim through tx.Unlocked), spawn
+// params, the pending slot and the snapshot of the session being replaced.
+// It fills res, which the caller owns so the reservation is never copied.
+// On error nothing is left reserved. completeSpawn runs the rest outside it.
+func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID string, opts AgentOpts) error {
+	// Shutdown gate (#1822): r.stopped is set in the same transaction as
+	// Shutdown's snapshot, so gate and snapshot are mutually exclusive and a
+	// late spawn cannot install a shim+CLI the snapshot missed.
 	if r.stopped.Load() {
-		r.ss.Unlock()
-		return nil, ErrRouterStopped
+		return ErrRouterStopped
 	}
 
 	// Mark this key as spawning so ReconnectShims does not treat the fresh
-	// shim's state file as an orphan. Every return path below leaves the table lock
-	// unlocked; the defer relocks and close(doneCh) wakes parked GetOrCreates.
-	// BeginSpawn reuses a guard pre-installed by ResetAndRecreate so the marker
-	// stays continuous and no concurrent GetOrCreate spawns with other opts (#775).
-	doneCh := r.ss.Ext().spawns.BeginSpawn(key)
+	// shim's state file as an orphan, and concurrent GetOrCreates park on the
+	// done-channel instead of spawning too. BeginSpawn reuses a guard
+	// pre-installed by ResetAndRecreate so the marker stays continuous (#775).
+	// Anything that fails from here on — an error or a panic — ends the
+	// marker before returning, so no waiter is left parked on it.
+	doneCh := tx.Ext().spawns.BeginSpawn(key)
+	reserved := false
 	defer func() {
-		r.ss.Lock()
-		r.ss.Ext().spawns.EndSpawn(key, doneCh)
-		r.ss.Unlock()
+		if !reserved {
+			tx.Ext().spawns.EndSpawn(key, doneCh)
+		}
 	}()
 
 	// Exempt sessions (planners) bypass maxProcs but have their own limit.
 	if !opts.Exempt {
 		// Only recount (O(n)) when we appear to be at capacity, to detect
-		// drift from undetected process exits before refusing. All three
-		// checks run under the table lock; int64 locals avoid 32-bit wrap.
+		// drift from undetected process exits before refusing. int64 locals
+		// avoid 32-bit wrap.
 		maxProcs64 := int64(r.maxProcs)
-		pending64 := int64(r.ss.Ext().spawns.PendingSpawns())
-		if r.ss.Active()+pending64 >= maxProcs64 {
-			r.countActive(r.ss.AssumeLocked())
+		pending64 := int64(tx.Ext().spawns.PendingSpawns())
+		if tx.Active()+pending64 >= maxProcs64 {
+			r.countActive(tx)
 		}
-		if r.ss.Active()+pending64 >= maxProcs64 {
-			if !r.evictOldest(r.ss.AssumeLocked()) {
-				r.ss.Unlock()
-				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
+		if tx.Active()+pending64 >= maxProcs64 {
+			if !r.evictOldest(tx) {
+				return fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 			}
-			// evictOldest() drops the table lock around proc.Close(), so pendingSpawns
-			// may have changed; re-read it or a stale value over-spawns past
-			// maxProcs / falsely refuses (#2082).
-			pending64 = int64(r.ss.Ext().spawns.PendingSpawns())
-			if r.ss.Active()+pending64 >= maxProcs64 {
-				r.ss.Unlock()
-				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
+			// evictOldest releases the lock around the victim's Close(), so
+			// pendingSpawns may have changed; re-read it or a stale value
+			// over-spawns past maxProcs / falsely refuses (#2082).
+			pending64 = int64(tx.Ext().spawns.PendingSpawns())
+			if tx.Active()+pending64 >= maxProcs64 {
+				return fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 			}
 		}
 	} else {
@@ -723,132 +748,151 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// maxExemptSessions ceiling is a relief valve for namespaces without
 		// sub-quota wiring. One combined walk yields both counts.
 		kind := exemptKind(key)
-		perKind, totalExempt := countExemptCombined(r.ss.AssumeLocked().View, kind)
-		if kind != "" {
-			if perKind >= exemptCapFor(kind) {
-				r.ss.Unlock()
-				return nil, fmt.Errorf("%w: %s namespace (%d)", ErrMaxExemptSessions, kind, exemptCapFor(kind))
-			}
+		perKind, totalExempt := countExemptCombined(tx.View, kind)
+		if kind != "" && perKind >= exemptCapFor(kind) {
+			return fmt.Errorf("%w: %s namespace (%d)", ErrMaxExemptSessions, kind, exemptCapFor(kind))
 		}
 		if totalExempt >= maxExemptSessions {
-			r.ss.Unlock()
-			return nil, fmt.Errorf("%w (%d)", ErrMaxExemptSessions, maxExemptSessions)
+			return fmt.Errorf("%w (%d)", ErrMaxExemptSessions, maxExemptSessions)
 		}
 	}
 
-	// Under the table lock; consumes the one-shot backendOverrides entry for `key`.
-	sp := r.resolveSpawnParamsLocked(key, resumeID, opts)
-	wrapper := sp.Wrapper
-	backendID := sp.BackendID
-	workspace := sp.Workspace
-	resumeID = sp.ResumeID
-	accessProfileID := sp.AccessProfileID
-	accessProfileEnv := sp.AccessProfileEnv
-
+	// Consumes the one-shot backend pick for `key`.
+	sp := r.resolveSpawnParams(tx, key, resumeID, opts)
+	res.key, res.resumeID, res.opts, res.doneCh = key, sp.ResumeID, opts, doneCh
+	res.wrapper, res.backendID, res.workspace = sp.Wrapper, sp.BackendID, sp.Workspace
+	res.accessProfileID, res.accessProfileEnv = sp.AccessProfileID, sp.AccessProfileEnv
 	// argv-bearing fields come from the shared constructor so this path and
 	// the arg-drift comparison cannot diverge. DebugFile uses the
 	// side-effecting cliDebugFileFor (log pre-created 0600) where drift uses
 	// the read-only cliDebugPathFor.
-	spawnOpts := r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
+	res.spawnOpts = r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
 	// ResumeID is session state, not config: the drift side strips it
 	// (stripResumeArgs) so a resumed session is not read as drift.
-	spawnOpts.ResumeID = resumeID
+	res.spawnOpts.ResumeID = res.resumeID
 	// Always non-nil: an empty overlay must be recorded as "known and empty"
 	// or the drift check treats this shim as legacy (#2494).
 	spawnOverlay := sp.Overlay
-	spawnOpts.SpawnOverlay = &spawnOverlay
+	res.spawnOpts.SpawnOverlay = &spawnOverlay
 	// Process wiring BuildArgs never reads.
-	spawnOpts.Key = key
-	spawnOpts.WorkingDir = workspace
-	spawnOpts.NoOutputTimeout = r.noOutputTimeout
-	spawnOpts.TotalTimeout = r.totalTimeout
+	res.spawnOpts.Key = key
+	res.spawnOpts.WorkingDir = res.workspace
+	res.spawnOpts.NoOutputTimeout = r.noOutputTimeout
+	res.spawnOpts.TotalTimeout = r.totalTimeout
 
-	// Take the pending slot and snapshot the session being replaced in this
-	// same critical section; everything slow then runs in ONE unlocked window.
-	// pendingSpawns keeps a concurrent Cleanup from pruning the slot we are
-	// about to fill. The happy path decrements via releaseIn once the table lock
-	// is re-taken; the deferred release() is an idempotent safety net for
-	// panics / early returns.
-	slot := r.acquirePendingSpawnSlot(r.ss.AssumeLocked())
-	defer slot.release()
-	old := r.ss.Get(key)
-	snap := snapshotRespawnLocked(old)
-	r.ss.Unlock()
+	// The snapshot is taken in this same critical section. The pending slot,
+	// taken last, keeps a concurrent Cleanup from pruning the slot we are about
+	// to fill; from here on completeSpawn owns the marker and the slot.
+	res.old = tx.Get(key)
+	res.snap = snapshotRespawn(tx.View, res.old)
+	res.slot = r.acquirePendingSpawnSlot(tx)
+	reserved = true
+	return nil
+}
 
-	// ── Unlocked: env overlay, Spawn, previous-history copy. ──
-	if wrapper == nil && r.spawnHook == nil {
-		return nil, fmt.Errorf("spawn process (backend %q): %w", backendID, ErrNoCLIWrapper)
+// completeSpawn runs a reserved spawn to the end, outside any transaction:
+// the env overlay, Spawn — which may block on an ACP handshake — and the
+// previous-history copy, then a commit transaction that re-checks the key and
+// installs. The in-flight marker and the pending slot are released however it
+// returns.
+func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*ManagedSession, error) {
+	key := res.key
+	// One transaction on the way out ends the spawn marker and, when the
+	// commit did not already, releases the slot. Panic-safe: a panicking
+	// Spawn must still decrement pendingSpawns or the router permanently
+	// refuses new sessions with ErrMaxProcs.
+	defer r.ss.Update(func(tx sessTx) {
+		res.slot.releaseIn(tx)
+		tx.Ext().spawns.EndSpawn(key, res.doneCh)
+	})
+
+	if res.wrapper == nil && r.spawnHook == nil {
+		return nil, fmt.Errorf("spawn process (backend %q): %w", res.backendID, ErrNoCLIWrapper)
 	}
-	// Expand the access-profile env overlay OUTSIDE the table lock (reads *_FILE secrets
-	// from disk). FAIL-LOUD on a missing secret — silently spawning on the
-	// global default would run this session on the wrong account.
-	if len(accessProfileEnv) > 0 {
-		overlay, err := resolveEnvOverlay(accessProfileEnv)
+	// Expand the access-profile env overlay outside the lock (reads *_FILE
+	// secrets from disk). FAIL-LOUD on a missing secret — silently spawning on
+	// the global default would run this session on the wrong account.
+	if len(res.accessProfileEnv) > 0 {
+		overlay, err := resolveEnvOverlay(res.accessProfileEnv)
 		if err != nil {
-			return nil, fmt.Errorf("access profile %q: %w", accessProfileID, err)
+			return nil, fmt.Errorf("access profile %q: %w", res.accessProfileID, err)
 		}
-		spawnOpts.EnvOverlay = overlay
+		res.spawnOpts.EnvOverlay = overlay
 	}
-	// Spawn may block (ACP Init handshake, process startup). Panic-safe: a
-	// panicking Spawn must still decrement pendingSpawns or the router
-	// permanently refuses new sessions with ErrMaxProcs.
-	proc, err := r.spawnProcess(ctx, wrapper, spawnOpts, key, backendID)
+	proc, err := r.spawnProcess(ctx, res.wrapper, res.spawnOpts, key, res.backendID)
 	if err != nil {
 		return nil, fmt.Errorf("spawn process: %w", err)
 	}
-	// historyMu must not nest inside the table lock (event injection takes it on its
-	// own), so the old session's history is copied here. The old reference is
-	// safe to read: sessions are never mutated after creation, only replaced.
-	hist := collectRespawnHistory(old, snap, resumeID)
+	// historyMu must not nest inside the table lock (event injection takes it
+	// on its own), so the old session's history is copied here. The old
+	// reference is safe to read: sessions are never mutated after creation,
+	// only replaced.
+	old, snap := res.old, res.snap
+	hist := collectRespawnHistory(old, snap, res.resumeID)
 
-	// ── Commit. ──
-	r.ss.Lock()
-	slot.releaseIn(r.ss.AssumeLocked())
-	for {
-		// A concurrent spawnSession may have installed a live session for
-		// this key while we were unlocked; if so it wins and ours is closed.
-		cur := r.ss.Get(key)
-		if cur != nil && cur.isAlive() {
-			r.ss.Unlock()
-			proc.Close()
-			return cur, nil
+	var s, winner *ManagedSession
+	var prevIDs []string
+	var oldHistory []clievent.EventEntry
+	r.ss.Update(func(tx sessTx) {
+		res.slot.releaseIn(tx)
+		for {
+			// A concurrent spawn may have installed a live session for this
+			// key while we were unlocked; if so it wins and ours is closed.
+			cur := tx.Get(key)
+			if cur != nil && cur.isAlive() {
+				winner = cur
+				return
+			}
+			if cur == old {
+				break
+			}
+			// The key's entry was removed or replaced by a dead one meanwhile:
+			// the snapshot describes a session no longer in the table.
+			// Continue the one that is there now instead, so a removed session
+			// is not resurrected into this one.
+			old = cur
+			snap = snapshotRespawn(tx.View, old)
+			tx.Unlocked(func() { hist = collectRespawnHistory(old, snap, res.resumeID) })
 		}
-		if cur == old {
-			break
+		// A key with no session yet takes its pre-spawn tuning pick now, once
+		// the spawn has succeeded, so a failed spawn leaves the pick for the
+		// retry.
+		overrides := snap.overrides
+		if old == nil {
+			overrides = r.consumePendingTuning(tx, key, overrides)
 		}
-		// The key's entry was removed or replaced by a dead one meanwhile:
-		// the snapshot describes a session no longer in the table. Continue
-		// the one that is there now instead, so a removed session is not
-		// resurrected into this one.
-		old = cur
-		snap = snapshotRespawnLocked(old)
-		r.ss.Unlock()
-		hist = collectRespawnHistory(old, snap, resumeID)
-		r.ss.Lock()
+		oldHistory, prevIDs = hist.entries, hist.prevIDs
+		s = r.installFreshSession(tx,
+			key, proc, res.workspace, res.backendID, res.accessProfileID, res.wrapper, res.resumeID,
+			oldHistory, prevIDs, snap.cost, snap.costSpent, snap.createdAt, res.opts.Exempt, snap.sid,
+			hist.userTurns, overrides,
+		)
+		s.costMu.Lock()
+		s.spent = snap.spent
+		s.costMu.Unlock()
+	})
+	if winner != nil {
+		proc.Close()
+		return winner, nil
 	}
-	// A key with no session yet takes its pre-spawn tuning pick now, once the
-	// spawn has succeeded, so a failed spawn leaves the pick for the retry.
-	oldOverrides := snap.overrides
-	if old == nil {
-		oldOverrides = r.consumePendingTuningLocked(key, oldOverrides)
-	}
-	oldHistory, prevIDs, oldUserTurns := hist.entries, hist.prevIDs, hist.userTurns
-	oldTotalCost, oldCostSpent, oldCreatedAt, oldSID, oldSpent := snap.cost, snap.costSpent, snap.createdAt, snap.sid, snap.spent
 
-	s := r.installFreshSessionLocked(
-		key, proc, workspace, backendID, accessProfileID, wrapper, resumeID,
-		oldHistory, prevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, opts.Exempt, oldSID,
-		oldUserTurns, oldOverrides,
-	)
-	s.costMu.Lock()
-	s.spent = oldSpent
-	s.costMu.Unlock()
-	r.ss.Unlock()
-
-	r.bindNewSessionHistory(ctx, s, proc, key, resumeID, workspace, prevIDs, oldHistory)
-
+	r.bindNewSessionHistory(ctx, s, proc, key, res.resumeID, res.workspace, prevIDs, oldHistory)
 	r.notifyChange()
 	return s, nil
+}
+
+// spawnSession is reserveSpawn + completeSpawn for callers that hold the lock
+// through Lock. Transitional: it goes when the last of them moves to Update.
+//
+// LOCK: enter with the table lock held; returns with it released.
+func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
+	var res spawnReservation
+	err := r.reserveSpawn(r.ss.AssumeLocked(), &res, key, resumeID, opts)
+	r.ss.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return r.completeSpawn(ctx, &res)
 }
 
 // bindNewSessionHistory loads the resume-history chain into a freshly-spawned
@@ -873,12 +917,10 @@ func (r *Router) bindNewSessionHistory(
 	r.installPersistSink(proc, key)
 }
 
-// installFreshSessionLocked attaches a freshly-spawned process to the router
+// installFreshSession attaches a freshly-spawned process to the router
 // indices + event log. Pure state mutation, no I/O. Callers must invoke
 // installPersistSink AFTER this returns (RFC §3.2.2).
-//
-// LOCK: caller must hold the table lock for writing.
-func (r *Router) installFreshSessionLocked(
+func (r *Router) installFreshSession(tx sessTx,
 	key string,
 	proc processIface,
 	workspace string,
@@ -903,11 +945,12 @@ func (r *Router) installFreshSessionLocked(
 		exempt:           exempt,
 		runStore:         r.sessionRuns,
 		costAcct:         r.costAcct,
+		// Runs later, when the CLI reports its session ID: its own transaction.
 		onSessionID: func(id string) {
-			r.ss.Lock()
-			r.kid.Track(id)
-			r.ss.SetID(id, key)
-			r.ss.Unlock()
+			r.ss.Update(func(tx sessTx) {
+				r.kid.Track(id)
+				tx.SetID(id, key)
+			})
 		},
 	}
 	// Seed persistedUserTurns so the proc==nil snapshot branch and AutoTitler
@@ -936,8 +979,8 @@ func (r *Router) installFreshSessionLocked(
 	// Operator-owned state must outlive the process: this spawn's argv was
 	// built from the OLD entry's tuning, and without carrying it the next TTL
 	// recycle drops back to config default and a restart reads the shim as
-	// arg-drift. Values come from the snapshotOldSessionLocked capture, never
-	// from a re-read of r.ss.Get(key).
+	// arg-drift. Values come from the snapshotOldSession capture, never
+	// from a re-read of tx.Get(key).
 	s.SetTuningModel(overrides.tuningModel)
 	s.SetTuningEffort(overrides.tuningEffort)
 	s.SetUserLabel(overrides.userLabel)
@@ -968,20 +1011,20 @@ func (r *Router) installFreshSessionLocked(
 	// the "still maps to key" guard avoids clobbering another live session's
 	// entry (#2093).
 	if oldSID != "" && oldSID != effectiveSID {
-		r.ss.ClearIDIfOwnedBy(oldSID, key)
+		tx.ClearIDIfOwnedBy(oldSID, key)
 	}
 	if effectiveSID != "" {
 		r.kid.Track(effectiveSID)
-		r.ss.SetID(effectiveSID, key)
+		tx.SetID(effectiveSID, key)
 	}
 	s.touchLastActive()
-	r.publishSessionLocked(key, s, false)
+	r.publishSession(tx, key, s, false)
 	if !exempt {
-		r.ss.AddActive(1)
+		tx.AddActive(1)
 	}
 
-	r.ss.MarkChanged()
-	logSessionLifecycle("spawned", key, "active", r.ss.Active(), "exempt", exempt)
+	tx.MarkChanged()
+	logSessionLifecycle("spawned", key, "active", tx.Active(), "exempt", exempt)
 	// Counters bumped inside the write-lock at the authoritative "spawn
 	// succeeded" point. Exempt sessions are excluded: they don't consume a
 	// slot and planner/scratch churn would muddy the signal.
@@ -1078,34 +1121,32 @@ func (r *Router) loadResumeHistoryOnSpawn(
 	}()
 }
 
-// unregisterSessionLocked removes a session from all routing indexes.
+// unregisterSession removes a session from all routing indexes.
 // If keepBackendOverride is true, backendOverrides[key] is preserved so a
 // following spawnSession can consume it atomically (used by
 // ResetAndRecreate / Takeover which reuse the same key). On terminal removal
 // paths (Reset / Remove / Cleanup prune) pass false to prevent override leaks.
-//
-// LOCK: caller must hold the table lock for writing.
-func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBackendOverride bool) {
+func (r *Router) unregisterSession(tx sessTx, key string, s *ManagedSession, keepBackendOverride bool) {
 	if s == nil {
 		return
 	}
 	if id := s.getSessionID(); id != "" {
-		r.ss.ClearID(id)
+		tx.ClearID(id)
 	}
-	r.ss.Delete(key)
+	tx.Delete(key)
 	if !keepBackendOverride {
 		// Every pick, so an abandoned choice cannot be consumed by a future
 		// session that reuses this key. See pendingPicks for the per-map
 		// lifecycles — the comment here used to claim accessProfile shared
 		// backendOverrides' lifecycle, which was backwards.
-		r.ss.Ext().picks.dropAllLocked(key)
+		tx.Ext().picks.dropAll(key)
 		// The shim-stuck flag is only consumed by GetOrCreate, so terminal
 		// removals must clear it or the entry lives for the process lifetime.
-		r.ss.Ext().spawns.ClearShimStuck(key)
+		tx.Ext().spawns.ClearShimStuck(key)
 	}
 }
 
-// resetLocked performs the in-lock teardown shared by Reset and
+// resetEntry performs the in-lock teardown shared by Reset and
 // ResetAndDiscardOverride. Caller must run the finishResetUnlocked
 // sequence after releasing the lock.
 //
@@ -1113,10 +1154,8 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 // UUID captured before teardown (for the retired-session notification —
 // r.ss.Get(key) is unregistered here, so callers cannot recover the
 // UUID after the lock drops), and the success flag.
-//
-// LOCK: caller must hold the table lock for writing.
-func (r *Router) resetLocked(key string) (processIface, string, bool) {
-	s, ok := r.ss.Lookup(key)
+func (r *Router) resetEntry(tx sessTx, key string) (processIface, string, bool) {
+	s, ok := tx.Lookup(key)
 	if !ok {
 		return nil, "", false
 	}
@@ -1124,22 +1163,23 @@ func (r *Router) resetLocked(key string) (processIface, string, bool) {
 	wasActive := !s.exempt && proc != nil && proc.Alive()
 	backend := s.Backend()
 	sessionID := s.SessionID()
-	r.unregisterSessionLocked(key, s, false)
+	r.unregisterSession(tx, key, s, false)
 	if wasActive {
-		if r.ss.AddActive(-1) < 0 {
-			r.ss.SetActive(0)
+		if tx.AddActive(-1) < 0 {
+			tx.SetActive(0)
 		}
 		metrics.RecordSessionActive(backend, -1)
 	}
-	r.ss.MarkChanged()
+	tx.MarkChanged()
 	return proc, sessionID, true
 }
 
 // Reset discards the session for the given key (user sent /new).
 func (r *Router) Reset(key string) {
-	r.ss.Lock()
-	proc, sessionID, ok := r.resetLocked(key)
-	r.ss.Unlock()
+	var proc processIface
+	var sessionID string
+	var ok bool
+	r.ss.Update(func(tx sessTx) { proc, sessionID, ok = r.resetEntry(tx, key) })
 	if !ok {
 		return
 	}
@@ -1150,10 +1190,13 @@ func (r *Router) Reset(key string) {
 // per-chat workspace override, so a concurrent SetWorkspace cannot survive a
 // bare Reset+delete pair and leak into the next session.
 func (r *Router) ResetAndDiscardOverride(key string) {
-	r.ss.Lock()
-	proc, sessionID, hadSession := r.resetLocked(key)
-	r.ss.Ext().workspaces.Delete(key)
-	r.ss.Unlock()
+	var proc processIface
+	var sessionID string
+	var hadSession bool
+	r.ss.Update(func(tx sessTx) {
+		proc, sessionID, hadSession = r.resetEntry(tx, key)
+		tx.Ext().workspaces.Delete(key)
+	})
 	if !hadSession {
 		return
 	}
@@ -1162,7 +1205,7 @@ func (r *Router) ResetAndDiscardOverride(key string) {
 
 // finishResetUnlocked runs the post-unlock teardown shared by Reset and
 // ResetAndDiscardOverride. Must be called without the table lock held. sessionID
-// is the UUID captured by resetLocked before unregister cleared
+// is the UUID captured by resetEntry before unregister cleared
 // r.ss.Get(key); pass through as-is to notifyKeyRetired so the
 // dashboard history-sort hook can stamp retired_at.
 func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
@@ -1174,17 +1217,19 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	// StartShim does not hit the dial-first "refusing to clobber" guard.
 	// Bounded so a truly stuck shim surfaces the real error instead of hanging.
 	gone := waitSocketGoneForKey(key, 2*time.Second)
-	// Broadcast must happen under the table lock (see evictOldest).
-	r.ss.Lock()
+	// Broadcast inside the transaction (see evictOldest).
+	r.ss.Update(func(tx sessTx) {
+		if !gone {
+			// Flag the key so the next GetOrCreate wraps any spawn error with
+			// ErrShimStuck (#1324); cleared by that GetOrCreate.
+			tx.Ext().spawns.MarkShimStuck(key)
+		}
+		tx.Broadcast()
+	})
 	if !gone {
-		// Flag the key so the next GetOrCreate wraps any spawn error with
-		// ErrShimStuck (#1324); cleared by that GetOrCreate.
-		r.ss.Ext().spawns.MarkShimStuck(key)
 		slog.Warn("shim socket still bound after Reset wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
 			"key", key)
 	}
-	r.ss.Broadcast()
-	r.ss.Unlock()
 
 	logSessionLifecycle("reset", key)
 	r.notifyKeyRetired(key, sessionID)
@@ -1205,57 +1250,66 @@ func waitSocketGoneForKey(key string, maxWait time.Duration) bool {
 // for proc.Close(); spawnSession reuses it, so the in-flight marker is
 // continuous from the first unlock through spawnSession's defer (#775).
 func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
-	r.ss.Lock()
-
-	// Delete old session if present
-	hadOld := false
-	if s, ok := r.ss.Lookup(key); ok {
-		hadOld = true
-		proc := s.loadProcess()
-		wasActive := !s.exempt && proc != nil && proc.Alive()
-		oldBackend := s.Backend()
-		// keepBackendOverride=true: the new opts may carry its own backend,
-		// and spawnSession below consumes and clears the override atomically.
-		r.unregisterSessionLocked(key, s, true)
-		if wasActive {
-			if r.ss.AddActive(-1) < 0 {
-				r.ss.SetActive(0)
+	var (
+		hadOld, stuck, stuckWarn bool
+		res                      spawnReservation
+		err                      error
+	)
+	r.ss.Update(func(tx sessTx) {
+		// Delete old session if present
+		if s, ok := tx.Lookup(key); ok {
+			hadOld = true
+			proc := s.loadProcess()
+			wasActive := !s.exempt && proc != nil && proc.Alive()
+			oldBackend := s.Backend()
+			// keepBackendOverride=true: the new opts may carry its own
+			// backend, and the spawn below consumes and clears the override.
+			r.unregisterSession(tx, key, s, true)
+			if wasActive {
+				if tx.AddActive(-1) < 0 {
+					tx.SetActive(0)
+				}
+				// The spawn below Incs the gauge for the (possibly
+				// different) new backend.
+				metrics.RecordSessionActive(oldBackend, -1)
 			}
-			// spawnSession below Incs the gauge for the (possibly different)
-			// new backend.
-			metrics.RecordSessionActive(oldBackend, -1)
-		}
-		r.ss.MarkChanged()
+			tx.MarkChanged()
 
-		if proc != nil && proc.Alive() {
-			// Install the guardCh BEFORE releasing the table lock so a concurrent
-			// GetOrCreate parks instead of spawning with different opts;
-			// spawnSession reuses it and its defer closes+removes it (#775).
-			r.ss.Ext().spawns.BeginSpawn(key)
-			r.ss.Unlock()
-			proc.Close()
-			// As in Reset: the shim socket must be gone before spawnSession's
-			// StartShim dials it, or the re-bind fails with "refusing to clobber".
-			gone := waitSocketGoneForKey(key, 2*time.Second)
-			r.ss.Lock()
-			if !gone {
-				// Flag for the ErrShimStuck wrap on the spawn failure path
-				// below (#1324); consumed inline here, not by GetOrCreate.
-				r.ss.Ext().spawns.MarkShimStuck(key)
-				slog.Warn("shim socket still bound after ResetAndRecreate wait — flagging key for ErrShimStuck wrap on spawn failure",
-					"key", key)
+			if proc != nil && proc.Alive() {
+				// Install the guard before releasing the lock so a concurrent
+				// GetOrCreate parks instead of spawning with different opts;
+				// the spawn reuses it and ends it (#775).
+				tx.Ext().spawns.BeginSpawn(key)
+				var gone bool
+				tx.Unlocked(func() {
+					proc.Close()
+					// As in Reset: the shim socket must be gone before the
+					// spawn's StartShim dials it, or the re-bind fails with
+					// "refusing to clobber".
+					gone = waitSocketGoneForKey(key, 2*time.Second)
+				})
+				if !gone {
+					// Flag for the ErrShimStuck wrap on the spawn failure path
+					// below (#1324); consumed inline here, not by GetOrCreate.
+					tx.Ext().spawns.MarkShimStuck(key)
+					stuckWarn = true
+				}
+				// Broadcast inside the transaction (see evictOldest).
+				tx.Broadcast()
 			}
-			// Broadcast must happen under the table lock (see evictOldest).
-			r.ss.Broadcast()
 		}
+		stuck = tx.Ext().spawns.ConsumeShimStuck(key)
+		err = r.reserveSpawn(tx, &res, key, "", opts)
+	})
+	if stuckWarn {
+		slog.Warn("shim socket still bound after ResetAndRecreate wait — flagging key for ErrShimStuck wrap on spawn failure",
+			"key", key)
 	}
-
-	// Still holding the table lock (spawnSession handles unlock/relock); consume the
-	// shim-stuck flag set above.
-	stuck := r.ss.Ext().spawns.ConsumeShimStuck(key)
-	s, err := r.spawnSession(ctx, key, "", opts)
+	var s *ManagedSession
+	if err == nil {
+		s, err = r.completeSpawn(ctx, &res)
+	}
 	if err != nil {
-		// spawnSession already unlocked mu on error
 		if hadOld {
 			r.notifyChange()
 		}
@@ -1264,10 +1318,10 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		}
 		return nil, err
 	}
-	// spawnSession's TOCTOU guard can return a concurrently-spawned session
-	// with err==nil; the stuck flag must not be silently swallowed (#1702).
+	// completeSpawn can return a concurrently-spawned session with err==nil;
+	// the stuck flag must not be silently swallowed (#1702).
 	warnShimStuckReuse(stuck, key)
-	// spawnSession already called notifyChange on success
+	// completeSpawn already called notifyChange on success
 	return s, nil
 }
 
@@ -1301,102 +1355,104 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		slog.Warn("rename session: invalid new key", "err", err)
 		return false
 	}
-	r.ss.Lock()
+	renamed := false
+	r.ss.Update(func(tx sessTx) {
+		old, ok := tx.Lookup(oldKey)
+		if !ok {
+			return
+		}
+		if _, collision := tx.Lookup(newKey); collision {
+			return
+		}
 
-	old, ok := r.ss.Lookup(oldKey)
-	if !ok {
-		r.ss.Unlock()
+		// Session key is immutable on ManagedSession (parseKeyParts caches via
+		// sync.Once), so a fresh struct is the only safe way to change it. Clone
+		// prevSessionIDs/persistedHistory: an in-place append on old (later spawn
+		// or the async history-load goroutine) would write into a backing array
+		// fresh shares. History + user-turn count snapshot together under historyMu.
+		old.historyMu.RLock()
+		freshHistory := slices.Clone(old.persistedHistory)
+		oldUserTurns := old.persistedUserTurns.Load()
+		old.historyMu.RUnlock()
+		fresh := &ManagedSession{
+			key:              newKey,
+			persistedHistory: freshHistory,
+			prevSessionIDs:   slices.Clone(old.prevSessionIDs),
+			exempt:           old.exempt,
+			runStore:         r.sessionRuns,
+			costAcct:         r.costAcct,
+			onSessionID: func(id string) {
+				r.ss.Update(func(tx sessTx) {
+					r.kid.Track(id)
+					tx.SetID(id, newKey)
+				})
+			},
+		}
+		// Seed persistedUserTurns so snapshot().MessageCount is correct before
+		// any new turns arrive.
+		if len(freshHistory) > 0 {
+			fresh.persistedUserTurns.Store(oldUserTurns)
+		}
+		storeTotalCost(&fresh.totalCost, loadTotalCost(&old.totalCost))
+		// Rename keeps the SAME live process, so the delta baseline carries over
+		// too — resetting it would double-count the next turn.
+		copyCostBaseline(fresh, old)
+		fresh.setWorkspace(old.Workspace())
+		// Atomic fields: plain Load/Store round-trips are race-safe; the table lock blocks
+		// all concurrent writers except the Send hot path (lastPrompt /
+		// lastActivity), which are idempotent on copy.
+		fresh.SetBackend(old.Backend())
+		fresh.SetCLIName(old.CLIName())
+		fresh.SetCLIVersion(old.CLIVersion())
+		fresh.SetUserLabel(old.UserLabel())
+		fresh.setLabelOrigin(old.LabelOrigin()) // label+origin travel as one unit
+		// Tuning overrides follow the conversation: dropping them would make the
+		// next respawn/drift check flip the session to default.
+		fresh.SetTuningModel(old.TuningModel())
+		fresh.SetTuningEffort(old.TuningEffort())
+		if dr := loadAtomicString(&old.deathReason); dr != "" {
+			storeAtomicString(&fresh.deathReason, dr)
+		}
+		fresh.lastActive.Store(old.lastActive.Load())
+		// Carry the creation timestamp so the renamed row keeps its sidebar position.
+		if oldCreatedAt := old.createdAt.Load(); oldCreatedAt != 0 {
+			fresh.createdAt.Store(oldCreatedAt)
+		} else {
+			fresh.initCreatedAtIfUnset()
+		}
+		// storeAtomicString allocates a fresh *string per write rather than
+		// sharing old's pointer, matching the codebase-wide convention.
+		if lp := loadAtomicString(&old.lastPrompt); lp != "" {
+			storeAtomicString(&fresh.lastPrompt, lp)
+		}
+		if la := loadAtomicString(&old.lastActivity); la != "" {
+			storeAtomicString(&fresh.lastActivity, la)
+		}
+		fresh.setSessionID(old.getSessionID())
+
+		// Move the process pointer; old becomes an orphan with process=nil so a
+		// stale Send fails cleanly. The proc's EventLog already holds the entries
+		// matching fresh.persistedHistory, so persistedSeededLen must mirror its
+		// length (adoptProcessAlreadySeeded does that under historyMu) and a later
+		// InjectHistory forwards only newly-arrived tail.
+		if proc := old.loadProcess(); proc != nil {
+			fresh.adoptProcessAlreadySeeded(proc)
+		}
+		old.storeProcess(nil)
+
+		// Rebind the history source (the old Source reads the orphaned struct);
+		// oldKey's map entry and index slot are removed next so the rename is
+		// atomic under the table lock.
+		r.publishSession(tx, newKey, fresh, false)
+		tx.Delete(oldKey)
+		tx.SetID(fresh.getSessionID(), newKey)
+		tx.Ext().picks.rename(oldKey, newKey)
+		tx.MarkChanged()
+		renamed = true
+	})
+	if !renamed {
 		return false
 	}
-	if _, collision := r.ss.Lookup(newKey); collision {
-		r.ss.Unlock()
-		return false
-	}
-
-	// Session key is immutable on ManagedSession (parseKeyParts caches via
-	// sync.Once), so a fresh struct is the only safe way to change it. Clone
-	// prevSessionIDs/persistedHistory: an in-place append on old (later spawn
-	// or the async history-load goroutine) would write into a backing array
-	// fresh shares. History + user-turn count snapshot together under historyMu.
-	old.historyMu.RLock()
-	freshHistory := slices.Clone(old.persistedHistory)
-	oldUserTurns := old.persistedUserTurns.Load()
-	old.historyMu.RUnlock()
-	fresh := &ManagedSession{
-		key:              newKey,
-		persistedHistory: freshHistory,
-		prevSessionIDs:   slices.Clone(old.prevSessionIDs),
-		exempt:           old.exempt,
-		runStore:         r.sessionRuns,
-		costAcct:         r.costAcct,
-		onSessionID: func(id string) {
-			r.ss.Lock()
-			r.kid.Track(id)
-			r.ss.SetID(id, newKey)
-			r.ss.Unlock()
-		},
-	}
-	// Seed persistedUserTurns so snapshot().MessageCount is correct before
-	// any new turns arrive.
-	if len(freshHistory) > 0 {
-		fresh.persistedUserTurns.Store(oldUserTurns)
-	}
-	storeTotalCost(&fresh.totalCost, loadTotalCost(&old.totalCost))
-	// Rename keeps the SAME live process, so the delta baseline carries over
-	// too — resetting it would double-count the next turn.
-	copyCostBaseline(fresh, old)
-	fresh.setWorkspace(old.Workspace())
-	// Atomic fields: plain Load/Store round-trips are race-safe; the table lock blocks
-	// all concurrent writers except the Send hot path (lastPrompt /
-	// lastActivity), which are idempotent on copy.
-	fresh.SetBackend(old.Backend())
-	fresh.SetCLIName(old.CLIName())
-	fresh.SetCLIVersion(old.CLIVersion())
-	fresh.SetUserLabel(old.UserLabel())
-	fresh.setLabelOrigin(old.LabelOrigin()) // label+origin travel as one unit
-	// Tuning overrides follow the conversation: dropping them would make the
-	// next respawn/drift check flip the session to default.
-	fresh.SetTuningModel(old.TuningModel())
-	fresh.SetTuningEffort(old.TuningEffort())
-	if dr := loadAtomicString(&old.deathReason); dr != "" {
-		storeAtomicString(&fresh.deathReason, dr)
-	}
-	fresh.lastActive.Store(old.lastActive.Load())
-	// Carry the creation timestamp so the renamed row keeps its sidebar position.
-	if oldCreatedAt := old.createdAt.Load(); oldCreatedAt != 0 {
-		fresh.createdAt.Store(oldCreatedAt)
-	} else {
-		fresh.initCreatedAtIfUnset()
-	}
-	// storeAtomicString allocates a fresh *string per write rather than
-	// sharing old's pointer, matching the codebase-wide convention.
-	if lp := loadAtomicString(&old.lastPrompt); lp != "" {
-		storeAtomicString(&fresh.lastPrompt, lp)
-	}
-	if la := loadAtomicString(&old.lastActivity); la != "" {
-		storeAtomicString(&fresh.lastActivity, la)
-	}
-	fresh.setSessionID(old.getSessionID())
-
-	// Move the process pointer; old becomes an orphan with process=nil so a
-	// stale Send fails cleanly. The proc's EventLog already holds the entries
-	// matching fresh.persistedHistory, so persistedSeededLen must mirror its
-	// length (adoptProcessAlreadySeeded does that under historyMu) and a later
-	// InjectHistory forwards only newly-arrived tail.
-	if proc := old.loadProcess(); proc != nil {
-		fresh.adoptProcessAlreadySeeded(proc)
-	}
-	old.storeProcess(nil)
-
-	// Rebind the history source (the old Source reads the orphaned struct);
-	// oldKey's map entry and index slot are removed next so the rename is
-	// atomic under the table lock.
-	r.publishSessionLocked(newKey, fresh, false)
-	r.ss.Delete(oldKey)
-	r.ss.SetID(fresh.getSessionID(), newKey)
-	r.ss.Ext().picks.renameLocked(oldKey, newKey)
-	r.ss.MarkChanged()
-	r.ss.Unlock()
 
 	slog.Info("session renamed", "old", oldKey, "new", newKey)
 	r.notifyChange()

@@ -127,7 +127,7 @@ func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
 	r.ss.Ext().spawns.MarkShimStuck(key)
 
 	r.ss.Lock()
-	r.unregisterSessionLocked(key, s, false)
+	r.unregisterSession(r.ss.AssumeLocked(), key, s, false)
 	r.ss.Unlock()
 
 	if r.ss.Ext().spawns.ShimStuck(key) {
@@ -189,7 +189,7 @@ func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
 	r.ss.Ext().spawns.MarkShimStuck(key)
 
 	r.ss.Lock()
-	r.unregisterSessionLocked(key, s, true)
+	r.unregisterSession(r.ss.AssumeLocked(), key, s, true)
 	r.ss.Unlock()
 
 	if !r.ss.Ext().spawns.ShimStuck(key) {

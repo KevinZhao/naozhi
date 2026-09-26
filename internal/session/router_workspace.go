@@ -33,37 +33,34 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 			"hint", "caller passed unauthenticated or misrouted chat_key — verify upstream auth")
 		return
 	}
-	r.ss.Lock()
-	defer r.ss.Unlock()
-	r.putWorkspaceOverrideLocked(chatKey, path)
+	r.ss.Update(func(tx sessTx) { r.putWorkspaceOverride(tx, chatKey, path) })
 }
 
-// putWorkspaceOverrideLocked installs the override under the capacity
+// putWorkspaceOverride installs the override under the capacity
 // policy (existing key: update in place; new key at cap: LRU-evict a
 // session-less override, else drop). Shared by SetWorkspace and the atomic
 // ResetChatAndSetWorkspace path (#2342) so the "is this chat live" predicate
 // — the one piece of cross-facet state the eviction needs — is bound in
-// exactly one place. Caller holds the table lock. Reports whether the write landed.
-func (r *Router) putWorkspaceOverrideLocked(chatKey, path string) bool {
+// exactly one place. Reports whether the write landed.
+func (r *Router) putWorkspaceOverride(tx sessTx, chatKey, path string) bool {
 	// An override is evictable only while its chat has no session, so an
 	// active conversation never loses its cwd.
-	isLive := r.ss.ChatHasSessions
-	return r.ss.Ext().workspaces.SetBounded(chatKey, path, maxWorkspaceOverrides, isLive)
+	isLive := tx.ChatHasSessions
+	return tx.Ext().workspaces.SetBounded(chatKey, path, maxWorkspaceOverrides, isLive)
 }
 
 // GetWorkspace returns the effective workspace for a chat key.
 func (r *Router) Workspace(chatKey string) string {
-	r.ss.RLock()
-	defer r.ss.RUnlock()
-	return r.resolveWorkspaceLocked(chatKey)
+	var ws string
+	r.ss.View(func(v sessView) { ws = r.resolveWorkspace(v, chatKey) })
+	return ws
 }
 
-// resolveWorkspaceLocked is the single chat-level workspace resolution point
-// (#883): per-chat override first, router default otherwise. Caller holds the table lock
-// (read or write). resolveSpawnParamsLocked layers the opts/resume tiers ON
-// TOP of this base rather than re-deriving it.
-func (r *Router) resolveWorkspaceLocked(chatKey string) string {
-	if ws, ok := r.ss.Ext().workspaces.Lookup(chatKey); ok {
+// resolveWorkspace is the single chat-level workspace resolution point (#883):
+// per-chat override first, router default otherwise. resolveSpawnParams
+// layers the opts/resume tiers ON TOP of this base rather than re-deriving it.
+func (r *Router) resolveWorkspace(v sessView, chatKey string) string {
+	if ws, ok := v.Ext().workspaces.Lookup(chatKey); ok {
 		return ws
 	}
 	return r.defaultCWD
@@ -74,10 +71,14 @@ func (r *Router) resolveWorkspaceLocked(chatKey string) string {
 // by the attachment-gc daemon, docs/rfc/attachment-gc-daemon.md §4.4). Roots
 // are returned raw (not symlink-resolved) — the caller normalises + dedupes.
 func (r *Router) WorkspaceRoots() []string {
-	r.ss.RLock()
-	defer r.ss.RUnlock()
-	seen := make(map[string]struct{}, r.ss.Ext().workspaces.Len()+1)
-	out := make([]string, 0, r.ss.Ext().workspaces.Len()+1)
+	var out []string
+	r.ss.View(func(v sessView) { out = r.workspaceRoots(v) })
+	return out
+}
+
+func (r *Router) workspaceRoots(v sessView) []string {
+	seen := make(map[string]struct{}, v.Ext().workspaces.Len()+1)
+	out := make([]string, 0, v.Ext().workspaces.Len()+1)
 	add := func(p string) {
 		if p == "" {
 			return
@@ -89,6 +90,6 @@ func (r *Router) WorkspaceRoots() []string {
 		out = append(out, p)
 	}
 	add(r.defaultCWD)
-	r.ss.Ext().workspaces.Range(func(_, ws string) { add(ws) })
+	v.Ext().workspaces.Range(func(_, ws string) { add(ws) })
 	return out
 }

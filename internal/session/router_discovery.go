@@ -271,7 +271,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	r.ss.SetID(sessionID, key)
 	s.lastActive.Store(time.Now().UnixNano())
 	s.initCreatedAtIfUnset()
-	r.publishSessionLocked(key, s, false)
+	r.publishSession(r.ss.AssumeLocked(), key, s, false)
 	r.ss.MarkChanged()
 	r.ss.Unlock()
 
@@ -390,7 +390,7 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 	}
 	s.lastActive.Store(time.Now().UnixNano())
 	s.initCreatedAtIfUnset()
-	r.publishSessionLocked(key, s, false)
+	r.publishSession(r.ss.AssumeLocked(), key, s, false)
 	r.ss.MarkChanged()
 	r.ss.Unlock()
 
@@ -453,7 +453,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			// keepBackendOverride=true: Takeover re-spawns on the same key
 			// and spawnSession below consumes the override atomically.
 			if cur, ok := r.ss.Lookup(key); ok && cur == oldSession {
-				r.unregisterSessionLocked(key, cur, true)
+				r.unregisterSession(r.ss.AssumeLocked(), key, cur, true)
 				r.ss.MarkChanged()
 				if !oldExempt {
 					if r.ss.AddActive(-1) < 0 {
@@ -473,7 +473,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 		} else {
 			// Dead session branch: same keepBackendOverride=true rationale.
 			// Dead sessions weren't in activeCount, so no decrement is needed.
-			r.unregisterSessionLocked(key, s, true)
+			r.unregisterSession(r.ss.AssumeLocked(), key, s, true)
 			r.ss.MarkChanged()
 		}
 	}
