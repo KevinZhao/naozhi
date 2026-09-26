@@ -1,7 +1,3 @@
-// File-block contract (server-split-phase4-design v0.6.1 §五):
-//
-//	WRITES:     none (pure function over []clievent.EventEntry; no Hub field access)
-//	READS:      none
 package server
 
 import (

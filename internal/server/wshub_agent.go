@@ -1,7 +1,3 @@
-// File-block contract (server-split-phase4-design v0.6.1 §五):
-//
-//	WRITES:     agent tailer block (tailers / wiredLinkersMu / wiredLinkers)
-//	READS:      shared deps block (router for session resolution)
 package server
 
 import (
@@ -32,7 +28,7 @@ type agentTaskDoneSetter interface {
 // granularity. Once task_done has closed the tailer it is gone from the
 // registry and the EventLog values stand.
 func (h *Hub) enrichSnapshot(snap *session.SessionSnapshot) {
-	if h == nil || h.tailers == nil || snap == nil || len(snap.Subagents) == 0 {
+	if h == nil || snap == nil || len(snap.Subagents) == 0 {
 		return
 	}
 	for i := range snap.Subagents {
@@ -72,28 +68,28 @@ func (h *Hub) enrichSnapshot(snap *session.SessionSnapshot) {
 // The linker is consumed via agentlink.AgentLinker so server stays decoupled
 // from the *subagent.Linker concrete type.
 func (h *Hub) maybeWireLinkerTailer(key string, sess *session.ManagedSession) {
-	// Nil-check the concrete return first: a typed-nil *subagent.Linker
-	// promoted to an interface value is non-nil at the interface layer.
+	// Nil-check the concrete returns first: a typed-nil pointer promoted to
+	// an interface value is non-nil at the interface layer.
 	concrete := sess.SubagentLinker()
-	if concrete == nil || h.tailers == nil {
+	if concrete == nil {
 		return
 	}
-	// Map dedup runs against (dynamic type, pointer value), so other
-	// AgentLinker implementations work without churn.
-	var linker agentlink.AgentLinker = concrete
-	h.wiredLinkersMu.Lock()
-	if h.wiredLinkers == nil {
-		// Hub shutting down — skip.
-		h.wiredLinkersMu.Unlock()
-		return
+	var taskDone agentTaskDoneSetter
+	if rawLog := sess.AgentEventLog(); rawLog != nil {
+		taskDone = rawLog
 	}
-	if _, ok := h.wiredLinkers[linker]; ok {
-		h.wiredLinkersMu.Unlock()
-		return
-	}
-	h.wiredLinkers[linker] = struct{}{}
-	h.wiredLinkersMu.Unlock()
+	h.wireLinker(key, concrete, taskDone)
+}
 
+// wireLinker installs key's tailer callbacks on linker, once per linker
+// (identity is the interface key, so other AgentLinker implementations work
+// without churn). taskDone, when set, closes a task's tailer on the parent
+// stream's task_done — firing agent_done to remaining subscribers and
+// flushing final meta.
+func (h *Hub) wireLinker(key string, linker agentlink.AgentLinker, taskDone agentTaskDoneSetter) {
+	if !h.tailers.wireOnce(linker) {
+		return
+	}
 	linker.OnResolve(func(taskID, toolUseID, internalAgentID string) {
 		if internalAgentID == "" {
 			// Tombstone — nothing to tail.
@@ -107,14 +103,8 @@ func (h *Hub) maybeWireLinkerTailer(key string, sess *session.ManagedSession) {
 		// WS agent_subscribe arrives; ensureTailer starts the ticker.
 		h.tailers.ensureTailer(key, taskID, toolUseID, info.JSONLPath)
 	})
-
-	// Parent stream task_done → close tailer (fires agent_done to remaining
-	// subscribers + flushes final meta). Same typed-nil guard on the concrete
-	// return as above; after it, route through agentTaskDoneSetter so the call
-	// site does not name *ring.EventLog (#625).
-	if rawLog := sess.AgentEventLog(); rawLog != nil {
-		var hook agentTaskDoneSetter = rawLog
-		hook.SetOnAgentTaskDone(func(taskID, status string) {
+	if taskDone != nil {
+		taskDone.SetOnAgentTaskDone(func(taskID, status string) {
 			h.tailers.closeTask(key, taskID, status)
 		})
 	}
@@ -222,9 +212,6 @@ func (h *Hub) handleAgentUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	if !agentTaskIDRe.MatchString(msg.TaskID) {
-		return
-	}
-	if h.tailers == nil {
 		return
 	}
 	h.tailers.detach(tailerKey{msg.Key, msg.TaskID}, c)

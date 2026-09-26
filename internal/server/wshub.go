@@ -13,19 +13,14 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
-// Hub manages WebSocket client connections and event subscriptions.
-//
-// Field-block contract: the send pipeline (engine), connection admission
-// (admit) and sessions_update debouncing (debounce) are sub-objects that own
-// their locks and fields. The rest are grouped into blocks — lifecycle
-// (mu / ctx / cancel), subscriber, broadcast, shared deps, agent tailer,
-// cache. Methods live in wshub_<block>.go and write only their own block,
-// declared by a `WRITES:` / `READS-ALSO:` godoc marker
-// (tools/lint-server-handlers rule 3a); NewHub / Shutdown are the
-// LIFECYCLE-METHOD cross-block exemption.
+// Hub manages WebSocket client connections and event subscriptions. Its
+// state lives in sub-objects that own their locks and fields: subs (who is
+// connected, authenticated and subscribed), admit (connection caps, rate
+// limits, credentials), engine (the send pipeline), debounce
+// (sessions_update coalescing) and tailers (agent JSONL tailing). The Hub
+// wires them together and orders their teardown in Shutdown.
 type Hub struct {
 	// subs is who is connected, authenticated and subscribed to what.
 	subs *subscriberRegistry
@@ -36,31 +31,21 @@ type Hub struct {
 	droppedTotal atomic.Int64
 	// router is the HubRouter consumer subset (consumer.go) so tests can
 	// inject a fake.
-	router    HubRouter
-	agents    map[string]session.AgentOpts
-	agentCmds map[string]string
-	// engine owns the send pipeline: queue / guard / send-goroutine accounting
-	// used to live here as six Hub fields (#2551). Hub now only forwards to
-	// it (WS handlers) and drains it (Shutdown); SendHandler holds the same
-	// instance. Named engine, not send, because wsClient already has a `send`
-	// channel and h.send / c.send would read alike. nil on hand-rolled test
-	// hubs that skip NewHub.
+	router HubRouter
+	// engine owns the send pipeline; SendHandler holds the same instance.
+	// Named engine, not send, because wsClient already has a `send` channel
+	// and h.send / c.send would read alike.
 	engine *sendEngine
 	// nodes is the same registry instance as Server.nodes (pinned by
 	// hub_shared_state_test.go); the registry owns its mutex.
-	nodes      *nodeRegistry
-	projectMgr *project.Manager
+	nodes *nodeRegistry
 	// resolver centralises session key → opts derivation; nil keeps the
 	// inline fallback for tests.
 	resolver *session.KeyResolver
 	// scheduler is the narrow CronView hook: stub revival on re-subscribe
 	// and first-prompt auto-save. Nil keeps both dormant.
 	scheduler   CronView
-	uploadStore *uploadStore // optional, for resolving WS-sent file_ids
-	// scratchPool resolves inherited AgentOpts for ephemeral "scratch" keys;
-	// nil when the feature is disabled.
-	scratchPool *session.ScratchPool
-	allowedRoot string          // workspace paths must be under this root (empty = unrestricted)
+	uploadStore *uploadStore    // optional, for resolving WS-sent file_ids
 	ctx         context.Context // cancelled on Shutdown to stop in-flight sends
 	cancel      context.CancelFunc
 
@@ -83,14 +68,6 @@ type Hub struct {
 	// tailers is the agentTailer registry behind agent_subscribe /
 	// agent_unsubscribe; initialised by NewHub, torn down in Shutdown.
 	tailers *tailerRegistry
-
-	// wiredLinkersMu + wiredLinkers dedup OnResolve / task_done callback
-	// registration across re-subscribes. Keys dedup on (dynamic type,
-	// value), so a producer MUST pass one canonical AgentLinker per
-	// cli.Process; a thin adapter type would double-fire OnResolve (#372).
-	// Shutdown nils the map so linkers can be GC'd.
-	wiredLinkersMu sync.Mutex
-	wiredLinkers   map[agentlink.AgentLinker]struct{}
 
 	// historyMarshalCache lets N tabs on one session pay one "history" frame
 	// marshal per notify wave; cleared on last unsubscribe per key and on
@@ -141,8 +118,7 @@ type HubOptions struct {
 	UploadStore *uploadStore
 }
 
-// NewHub creates a new WebSocket hub (LIFECYCLE-METHOD: writes every field
-// block). h.ctx derives from opts.ParentCtx (Background when nil) so a parent
+// NewHub creates a new WebSocket hub. h.ctx derives from opts.ParentCtx (Background when nil) so a parent
 // cancel reaches Hub goroutines even without Shutdown(); CancelFunc is
 // idempotent so both paths compose.
 func NewHub(opts HubOptions) *Hub {
@@ -158,14 +134,9 @@ func NewHub(opts HubOptions) *Hub {
 	h := &Hub{
 		subs:        newSubscriberRegistry(),
 		router:      opts.Router,
-		agents:      opts.Agents,
-		agentCmds:   opts.AgentCmds,
 		nodes:       nodes,
-		projectMgr:  opts.ProjectMgr,
 		resolver:    opts.Resolver,
 		scheduler:   opts.Scheduler,
-		scratchPool: opts.ScratchPool,
-		allowedRoot: opts.AllowedRoot,
 		admit:       newConnAdmission(opts),
 		uploadStore: opts.UploadStore,
 		ctx:         ctx,
@@ -173,8 +144,7 @@ func NewHub(opts HubOptions) *Hub {
 
 		resubscribeInterval: defaultResubscribeInterval,
 	}
-	h.tailers = newTailerRegistry(h)
-	h.wiredLinkers = make(map[agentlink.AgentLinker]struct{})
+	h.tailers = newTailerRegistry(h, opts.AllowedRoot)
 	h.historyMarshalCache = newHistoryMarshalCache()
 	h.debounce = newDebouncer(&h.clientWG, h.doBroadcastSessionsUpdate)
 	// Built last: h is now usable as the engine's sendNotifier. The engine
@@ -209,7 +179,7 @@ func (h *Hub) unregister(c *wsClient) {
 	}
 	// Keys left with no subscriber drop their historyMarshalCache slot, as
 	// handleUnsubscribe does.
-	if len(dropKeys) > 0 && h.historyMarshalCache != nil {
+	if len(dropKeys) > 0 {
 		for _, key := range dropKeys {
 			h.historyMarshalCache.drop(key)
 		}
@@ -223,9 +193,7 @@ func (h *Hub) unregister(c *wsClient) {
 		h.admit.releaseOwnerFor(c)
 		// Drop agent_subscribe refs so an abrupt disconnect cannot wedge a
 		// tailer slot in broadcasting mode.
-		if h.tailers != nil {
-			h.tailers.detachClient(c)
-		}
+		h.tailers.detachClient(c)
 	}
 
 	// appendConns skips alloc on an empty table (nodesPtr stays nil) so the
@@ -278,8 +246,7 @@ var unregisterNodesPool = sync.Pool{
 	},
 }
 
-// Shutdown closes all WebSocket client connections and relays
-// (LIFECYCLE-METHOD: writes every field block).
+// Shutdown closes all WebSocket client connections and relays.
 //
 // LOCK ORDER CONTRACT: unsub closures invoked from here and unregister take
 // eventLog.subMu; they are invoked after the registry's lock is released, and
@@ -318,25 +285,16 @@ func (h *Hub) Shutdown() {
 
 	// After closing conns so in-flight pollOnce iterations finish against a
 	// closed client (SendRaw drops gracefully).
-	if h.tailers != nil {
-		h.tailers.Shutdown()
-	}
+	h.tailers.Shutdown()
 
-	// clientWG.Wait MUST precede nil-ing wiredLinkers: an in-flight
-	// completeSubscribe → maybeWireLinkerTailer would otherwise take the
-	// "shutting down" branch and silently drop a wiring. After Wait,
-	// wiredLinkers == nil means exactly "no client goroutine remains" (#371).
+	// clientWG.Wait MUST precede releasing the wired linkers: an in-flight
+	// completeSubscribe → maybeWireLinkerTailer would otherwise find the set
+	// gone and silently drop a wiring. After Wait no client goroutine remains.
 	h.clientWG.Wait()
-
-	// Release wiredLinkers so linker objects can be GC'd.
-	h.wiredLinkersMu.Lock()
-	h.wiredLinkers = nil
-	h.wiredLinkersMu.Unlock()
+	h.tailers.releaseLinkers()
 
 	// Safe after clientWG.Wait — no eventPushLoop calls getOrMarshal again.
-	if h.historyMarshalCache != nil {
-		h.historyMarshalCache.reset()
-	}
+	h.historyMarshalCache.reset()
 
 	// After clientWG.Wait: no owner-slot or send-budget caller remains.
 	h.admit.close()
@@ -346,9 +304,7 @@ func (h *Hub) Shutdown() {
 	// or the debouncer's held (the drained goroutines re-enter them
 	// through sendNotifier), and before the node Close loop below.
 	// wshub_shutdown_order_test.go pins the source order.
-	if h.engine != nil {
-		h.engine.drain()
-	}
+	h.engine.drain()
 
 	// Nodes close last so unregister → RemoveClient and in-flight RPCs
 	// cannot race a closed node.

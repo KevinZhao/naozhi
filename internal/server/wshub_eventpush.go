@@ -1,8 +1,3 @@
-// File-block contract (server-split-phase4-design v0.6.1 §五):
-//
-//	WRITES:     rate-limit/cache block (historyMarshalCache for replay cache)
-//	READS:      shared deps block (read-only after ctor) + subs + lifecycle
-//	            block (ctx for cancel)
 package server
 
 import (
@@ -51,13 +46,9 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []clievent
 	// live push, and the dashboard persists frames to IndexedDB. Redaction runs
 	// inside the marshal closures so a cache HIT does not re-scan already-redacted
 	// entries (#1888); it never touches Time, so the fingerprint is unaffected.
-	if h.historyMarshalCache == nil {
-		// Hand-constructed test Hubs may skip the field; use the uncached path.
-		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: redactEntrySecrets(entries)}))
-	}
 	// Single-subscriber fast path (#944): with one tab every notify advances
 	// lastTime so the cache always misses; skip the sync.Map + mutex round-trip.
-	// count != 1 (or counter unwired in tests) falls through to the cached path.
+	// count != 1 falls through to the cached path.
 	if h.singleSubscriber(key) {
 		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: redactEntrySecrets(entries)}))
 	}
@@ -263,7 +254,7 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	if staleUnsub != nil {
 		staleUnsub()
 	}
-	if dropCache && h.historyMarshalCache != nil {
+	if dropCache {
 		h.historyMarshalCache.drop(key)
 	}
 	c.SendJSON(wsproto.NewSessionState(wsproto.SessionState{Key: key, State: "ready", Reason: "subscription_timeout"}))

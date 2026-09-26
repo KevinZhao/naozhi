@@ -1,7 +1,3 @@
-// File-block contract (server-split-phase4-design v0.6.1 §五):
-//
-//	WRITES:     clientWG
-//	READS:      shared deps block (read-only after ctor), subs
 package server
 
 import (
@@ -247,7 +243,7 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	// The last subscriber leaving drops the cached "history" marshal slot so
 	// its payload is GC'd.
 	dropMarshalCache := h.subs.unsubscribe(c, key, time.Now().UnixNano())
-	if dropMarshalCache && h.historyMarshalCache != nil {
+	if dropMarshalCache {
 		h.historyMarshalCache.drop(key)
 	}
 	c.SendJSON(wsproto.NewUnsubscribed(wsproto.Unsubscribed{Key: key}))

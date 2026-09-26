@@ -1,15 +1,16 @@
 package server
 
 import (
+	"path/filepath"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 	"github.com/naozhi/naozhi/internal/subagent"
 )
 
-// stubAgentLinker is the minimal AgentLinker used by the dedup contract
-// test below. Method bodies are noops because the test only inspects
-// map-key identity, not callback dispatch.
+// stubAgentLinker is a minimal AgentLinker for the wiring tests; its methods
+// are no-ops because the tests only look at identity.
 type stubAgentLinker struct {
 	id string
 }
@@ -25,9 +26,7 @@ func (s *stubAgentLinker) QueryOrResolveFast(taskID string) (subagent.LinkInfo, 
 func (s *stubAgentLinker) ProjectSessionDir() string { return "" }
 
 // secondStubAgentLinker is structurally identical to stubAgentLinker but
-// has a different dynamic type. Used to assert that the wiredLinkers map
-// keys two same-pointer-value-but-different-type linkers as separate
-// entries — the documented contract under R248-GO-5 (issue #372).
+// has a different dynamic type.
 type secondStubAgentLinker struct {
 	id string
 }
@@ -42,63 +41,105 @@ func (s *secondStubAgentLinker) QueryOrResolveFast(taskID string) (subagent.Link
 }
 func (s *secondStubAgentLinker) ProjectSessionDir() string { return "" }
 
-// TestWiredLinkers_DedupContract pins the dedup semantics of
-// wiredLinkers map[agentlink.AgentLinker]struct{} for issue #372:
-//
-//  1. Same pointer + same dynamic type → 1 entry (idempotent re-wire).
-//  2. Different pointer + same dynamic type → 2 entries (each linker
-//     registers its own callbacks).
-//  3. Same pointer value + different dynamic type → 2 entries (the
-//     interface key tuple is (T, V), not just V — this is *correct*
-//     because two different concrete types are observably different
-//     objects, but it is the foot-gun documented in the wiredLinkers
-//     godoc that future multi-backend authors must understand: an
-//     adapter that wraps a canonical AgentLinker without changing
-//     identity will produce a duplicate slot for the same underlying
-//     linker. Producers MUST satisfy 1:1 (one canonical AgentLinker
-//     per owner) or this dedup silently double-fires OnResolve.
-func TestWiredLinkers_DedupContract(t *testing.T) {
+// TestWiredLinkers_WireOnce: a linker's callbacks are installed once per
+// linker. Identity is the interface key (dynamic type, value): the same
+// pointer wires once, a different pointer wires again, and so does a
+// different type — which is why a producer must hand over one canonical
+// AgentLinker per process, or a thin adapter would double-fire OnResolve.
+// After releaseLinkers nothing wires.
+func TestWiredLinkers_WireOnce(t *testing.T) {
 	t.Parallel()
-
-	// Use the raw map type so the test exercises the same key-identity
-	// contract that wshub.go relies on. Hub initialisation isn't needed —
-	// we are pinning Go map semantics for the declared type.
-	m := map[agentlink.AgentLinker]struct{}{}
+	r := newTailerRegistry(nil, "")
 
 	a := &stubAgentLinker{id: "a"}
-
-	// Property 1: same pointer + same type → 1 entry.
-	m[a] = struct{}{}
-	m[a] = struct{}{}
-	if len(m) != 1 {
-		t.Errorf("same pointer+type must dedup to 1 entry, got len=%d", len(m))
+	if !r.wireOnce(a) {
+		t.Fatal("first wiring of a linker was refused")
 	}
-
-	// Property 2: different pointer + same type → 2 entries.
-	b := &stubAgentLinker{id: "b"}
-	m[b] = struct{}{}
-	if len(m) != 2 {
-		t.Errorf("distinct pointers must produce 2 entries, got len=%d", len(m))
+	if r.wireOnce(a) {
+		t.Error("the same linker wired twice")
 	}
-
-	// Property 3: different dynamic type → separate entries even when
-	// the producer might believe the underlying object is the same.
-	// We can't actually construct two interface values with the same
-	// unsafe.Pointer but different dynamic types without unsafe — instead
-	// we use two structurally-identical types to demonstrate that the
-	// dynamic-type half of the key tuple participates in dedup. This is
-	// the contract the godoc warns multi-backend authors about.
+	if !r.wireOnce(&stubAgentLinker{id: "b"}) {
+		t.Error("a different linker of the same type was refused")
+	}
 	var c agentlink.AgentLinker = &secondStubAgentLinker{id: "a"}
-	m[c] = struct{}{}
-	if len(m) != 3 {
-		t.Errorf("distinct dynamic types must produce a new entry, got len=%d (the (T,V) key tuple regressed to V-only — wshub dedup is no longer type-aware)", len(m))
+	if !r.wireOnce(c) {
+		t.Error("a linker of a different dynamic type was refused")
 	}
 
-	// Sanity: lookups must respect both halves of the key tuple.
-	if _, ok := m[a]; !ok {
-		t.Error("first stubAgentLinker entry missing after multi-type insert")
+	r.releaseLinkers()
+	if r.wireOnce(&stubAgentLinker{id: "late"}) {
+		t.Error("a linker wired after releaseLinkers")
 	}
-	if _, ok := m[c]; !ok {
-		t.Error("secondStubAgentLinker entry missing after multi-type insert")
+}
+
+// TestTailerRegistry_RefusesPathsOutsideAllowedRoot: with allowedRoot set, a
+// tailer is never started on a JSONL file outside it.
+func TestTailerRegistry_RefusesPathsOutsideAllowedRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	r := newTailerRegistry(nil, root)
+	outside := filepath.Join(t.TempDir(), "agent.jsonl")
+	if tl, ok := r.ensureTailer("k", "task-1", "tool-1", outside); ok || tl != nil {
+		t.Fatalf("ensureTailer accepted %q outside allowedRoot %q", outside, root)
+	}
+	if n := r.count.Load(); n != 0 {
+		t.Errorf("%d tailers registered after a refused path", n)
+	}
+
+	hub := NewHub(HubOptions{Router: session.NewRouter(session.RouterConfig{}), AllowedRoot: root})
+	defer hub.Shutdown()
+	if hub.tailers.allowedRoot != root {
+		t.Errorf("NewHub's tailers allowedRoot = %q, want HubOptions.AllowedRoot %q", hub.tailers.allowedRoot, root)
+	}
+}
+
+// recordingLinker captures its OnResolve registrations and answers Query
+// from a fixed table.
+type recordingLinker struct {
+	resolvers []func(taskID, toolUseID, internalAgentID string)
+	paths     map[string]string
+}
+
+func (l *recordingLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {
+	l.resolvers = append(l.resolvers, fn)
+}
+func (l *recordingLinker) Query(taskID string) (subagent.LinkInfo, bool) {
+	p, ok := l.paths[taskID]
+	return subagent.LinkInfo{JSONLPath: p}, ok
+}
+func (l *recordingLinker) QueryOrResolveFast(taskID string) (subagent.LinkInfo, bool) {
+	return l.Query(taskID)
+}
+func (l *recordingLinker) ProjectSessionDir() string { return "" }
+
+type recordingTaskDone struct{ hooks int }
+
+func (d *recordingTaskDone) SetOnAgentTaskDone(func(taskID, status string)) { d.hooks++ }
+
+// TestWireLinker_InstallsOnceAndTailsResolvedAgents: re-subscribes wire a
+// linker's callbacks once; a resolved agent with a JSONL path starts a silent
+// tailer, a tombstone or an unknown task does not.
+func TestWireLinker_InstallsOnceAndTailsResolvedAgents(t *testing.T) {
+	hub := NewHub(HubOptions{Router: session.NewRouter(session.RouterConfig{})})
+	defer hub.Shutdown()
+	jsonl := filepath.Join(t.TempDir(), "agent.jsonl")
+	l := &recordingLinker{paths: map[string]string{"task-1": jsonl}}
+	done := &recordingTaskDone{}
+
+	hub.wireLinker("k", l, done)
+	hub.wireLinker("k", l, done) // a re-subscribe
+	if len(l.resolvers) != 1 || done.hooks != 1 {
+		t.Fatalf("OnResolve registered %d times, task_done hooked %d times; want 1 and 1", len(l.resolvers), done.hooks)
+	}
+
+	resolve := l.resolvers[0]
+	resolve("task-1", "tool-1", "") // tombstone
+	resolve("task-2", "tool-2", "agent-2")
+	if n := hub.tailers.count.Load(); n != 0 {
+		t.Fatalf("%d tailers after a tombstone and an unknown task, want 0", n)
+	}
+	resolve("task-1", "tool-1", "agent-1")
+	if n := hub.tailers.count.Load(); n != 1 {
+		t.Errorf("%d tailers after resolving task-1, want 1", n)
 	}
 }

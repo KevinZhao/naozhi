@@ -1,7 +1,3 @@
-// File-block contract (server-split-phase4-design v0.6.1 §五):
-//
-//	WRITES:     (none)
-//	READS:      subs, for the per-key fan-out snapshot
 package server
 
 import (

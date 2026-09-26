@@ -246,13 +246,11 @@ func TestHistoryMarshalCache_EmptyEntriesBypass(t *testing.T) {
 	}
 }
 
-// TestHub_MarshalHistoryFrame_NilCacheFallback documents that a hand-built
-// Hub (no NewHub) without historyMarshalCache still produces correct bytes
-// — the fallback path matches the pre-fix marshalPooled output exactly.
-// Tests that construct a bare *Hub for narrow assertions rely on this.
-func TestHub_MarshalHistoryFrame_NilCacheFallback(t *testing.T) {
+// TestHub_MarshalHistoryFrame_SingleSubscriberBytes: the single-subscriber
+// path, which skips the cache, produces exactly the plain marshalPooled bytes.
+func TestHub_MarshalHistoryFrame_SingleSubscriberBytes(t *testing.T) {
 	t.Parallel()
-	h := &Hub{subs: newSubscriberRegistry()} // no cache
+	h := hubWithSubscribers("k", 1)
 	entries := []clievent.EventEntry{{Time: 1, Type: "text"}}
 	got, err := h.marshalHistoryFrame("k", 0, entries)
 	if err != nil {
@@ -263,7 +261,7 @@ func TestHub_MarshalHistoryFrame_NilCacheFallback(t *testing.T) {
 		t.Fatalf("marshalPooled: %v", err)
 	}
 	if string(got) != string(want) {
-		t.Fatalf("nil-cache fallback drift\n  got=%s\n want=%s", got, want)
+		t.Fatalf("single-subscriber bytes drift\n  got=%s\n want=%s", got, want)
 	}
 }
 

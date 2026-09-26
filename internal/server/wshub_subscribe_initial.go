@@ -1,7 +1,3 @@
-// File-block contract (server-split-phase4-design v0.6.1 §五):
-//
-//	WRITES:     none
-//	READS:      none; pure helpers for completeSubscribe (wshub_subscribe.go)
 package server
 
 import (
