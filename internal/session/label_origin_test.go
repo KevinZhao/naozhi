@@ -98,7 +98,7 @@ func TestSetUserLabelWithOrigin_UnknownKey(t *testing.T) {
 // under -race: many goroutines race a daemon (origin="auto") against a
 // human (origin="user"). The user's write must never be silently
 // overwritten by a concurrent daemon write — the daemon path must
-// re-read origin under r.mu.
+// re-read origin under the table lock.
 func TestSetUserLabelWithOrigin_RaceWindow(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)

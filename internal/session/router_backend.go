@@ -230,8 +230,8 @@ const maxBackendOverrides = 1024
 // SetSessionBackend remembers the backend picked for a new session. Applied on
 // the next spawnSession only; live sessions are not migrated. Empty clears.
 func (r *Router) SetSessionBackend(key, backend string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.ss.Lock()
+	defer r.ss.Unlock()
 	if backend == "" {
 		delete(r.picks.backend, key)
 		return
@@ -247,8 +247,8 @@ func (r *Router) SetSessionBackend(key, backend string) {
 
 // SessionBackend returns the backend override for key, or "" if none.
 func (r *Router) SessionBackend(key string) string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	return r.picks.backend[key]
 }
 
@@ -256,8 +256,8 @@ func (r *Router) SessionBackend(key string) string {
 // session (RFC project-access-profile §8.2). One-shot: consumed on the next
 // spawnSession. Empty clears. Mirrors SetSessionBackend including the cap.
 func (r *Router) SetSessionAccessProfile(key, profile string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.ss.Lock()
+	defer r.ss.Unlock()
 	if r.picks.accessProfile == nil {
 		r.picks.accessProfile = make(map[string]string)
 	}
@@ -275,8 +275,8 @@ func (r *Router) SetSessionAccessProfile(key, profile string) {
 
 // SessionAccessProfile returns the access-profile override for key, or "".
 func (r *Router) SessionAccessProfile(key string) string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	return r.picks.accessProfile[key]
 }
 
@@ -345,11 +345,11 @@ func (r *Router) backendDefaultsFor(backendID string) BackendDefaults {
 // a backend ("" = router default). Tiers: (1) runtime manifest from any LIVE
 // process, cached in bkStore.manifests; (2) configured
 // cli.backends[].models; (3) observedModelsLocked. Nil when no tier has data.
-// Reads the session table, so it takes r.mu for reading; the cache has its own
+// Reads the session table, so it takes the table lock for reading; the cache has its own
 // lock.
 func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	if backendID == "" {
 		backendID = r.bkStore.defaultBackend
 	}
@@ -390,7 +390,7 @@ func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
 
 // observedModelsLocked returns the deduped model ids seen for backendID in a
 // stable order (router default first, then sessions' Model() / TuningModel()
-// sorted). Caller holds r.mu. Nil when nothing observed.
+// sorted). Caller holds the table lock. Nil when nothing observed.
 func (r *Router) observedModelsLocked(backendID string) []cli.ModelInfo {
 	seen := make(map[string]bool)
 	var out []cli.ModelInfo

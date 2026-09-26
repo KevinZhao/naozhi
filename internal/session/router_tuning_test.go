@@ -417,10 +417,10 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 	old.SetTuningEffort("low")
 	old.SetUserLabel("my label")
 	old.setLabelOrigin("auto")
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(key, old)
 
-	// Mirror spawnSession: snapshot under the first r.mu hold, then install.
+	// Mirror spawnSession: snapshot under the first the table lock hold, then install.
 	// The fresh entry must be fed from that snapshot, not from a re-read of
 	// the map — so swap the map entry for an unrelated stub in between (what
 	// RegisterForResume / Remove can do during the unlocked history copy) and
@@ -435,7 +435,7 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 		key, &cli.Process{}, "/ws", "kiro", "", wrapper, "sess-old",
 		nil, nil, 0, 0, 0, false, "sess-old", 0, ov,
 	)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if fresh == old {
 		t.Fatal("test premise broken: installFreshSessionLocked must allocate a new struct")
@@ -473,9 +473,9 @@ func TestRenameSession_InheritsTuning(t *testing.T) {
 	s.SetTuningEffort("low")
 	s.SetUserLabel("auto title")
 	s.setLabelOrigin("auto")
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(oldKey, s)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if !r.RenameSession(oldKey, newKey) {
 		t.Fatal("RenameSession returned false")
@@ -550,9 +550,9 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 	}
 
 	// First spawn's argv reads the parked pick (tuning is the top of both chains).
-	r.mu.Lock()
+	r.ss.Lock()
 	sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if sp.Model != "us.anthropic.claude-opus-5[1m]" || sp.Effort != "high" {
 		t.Errorf("first spawn params: model=%q effort=%q, want the parked pick", sp.Model, sp.Effort)
 	}
@@ -562,21 +562,21 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 	}
 
 	// spawnSession's consume step moves it onto the fresh entry and drops it.
-	r.mu.Lock()
+	r.ss.Lock()
 	ov := r.consumePendingTuningLocked(key, sessionOverrides{userLabel: "keep"})
 	_, stillThere := r.picks.tuning[key]
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if ov.tuningModel != "us.anthropic.claude-opus-5[1m]" || ov.tuningEffort != "high" || ov.userLabel != "keep" {
 		t.Errorf("consumed overrides = %+v", ov)
 	}
 	if stillThere {
 		t.Error("consume must delete the one-shot record")
 	}
-	r.mu.Lock()
+	r.ss.Lock()
 	if ov2 := r.consumePendingTuningLocked(key, sessionOverrides{}); ov2 != (sessionOverrides{}) {
 		t.Errorf("second consume must be a no-op, got %+v", ov2)
 	}
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// 恢复默认 on both fields before any spawn leaves no residue.
 	if _, err := r.SetSessionTuning(ctx, key, strp("sonnet"), strp("low")); err != nil {

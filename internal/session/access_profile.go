@@ -149,7 +149,7 @@ func accessProfileSecretsOK(env map[string]string) bool {
 // FAIL-LOUD: a missing / unreadable *_FILE returns an error so the spawn fails
 // instead of silently falling back to the global default (the exact mis-charge
 // this feature prevents). The shim's filterShimEnv still enforces the allowlist.
-// Reads files, so it MUST be called OUTSIDE r.mu.
+// Reads files, so it MUST be called OUTSIDE the table lock.
 func resolveEnvOverlay(env map[string]string) (map[string]string, error) {
 	if len(env) == 0 {
 		return nil, nil

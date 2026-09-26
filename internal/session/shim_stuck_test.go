@@ -126,9 +126,9 @@ func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
 	r.ss.Put(key, s)
 	r.pp.MarkShimStuck(key)
 
-	r.mu.Lock()
+	r.ss.Lock()
 	r.unregisterSessionLocked(key, s, false)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if r.pp.ShimStuck(key) {
 		t.Error("shimStuckOnReset[key] must be deleted on terminal removal (keepBackendOverride=false)")
@@ -188,9 +188,9 @@ func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
 	r.ss.Put(key, s)
 	r.pp.MarkShimStuck(key)
 
-	r.mu.Lock()
+	r.ss.Lock()
 	r.unregisterSessionLocked(key, s, true)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if !r.pp.ShimStuck(key) {
 		t.Error("shimStuckOnReset[key] must survive unregisterSessionLocked with keepBackendOverride=true")

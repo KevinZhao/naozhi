@@ -98,8 +98,8 @@ func storeMetaPath(storePath string) string {
 //
 // CONTRACT: callers MUST hold no Router-level lock. This takes
 // ManagedSession.historyMu RLock for the prevSession* read and per-field
-// atomics/mutexes via accessors; holding r.mu here would violate the Router
-// contract (router_core.go) that historyMu is never held together with r.mu.
+// atomics/mutexes via accessors; holding the table lock here would violate the Router
+// contract (router_core.go) that historyMu is never held together with the table lock.
 func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	// Scratch (ephemeral aside) sessions must not persist, or loadStore would
 	// resurrect a zombie whose quoted-context system prompt is gone and whose

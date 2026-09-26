@@ -25,7 +25,7 @@ func TestPendingSpawnSlot_ReleaseLockedIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	r := &Router{ss: newSessionTable()}
-	r.mu.Lock()
+	r.ss.Lock()
 	slot := r.acquirePendingSpawnSlotLocked()
 	if r.pp.PendingSpawns() != 1 {
 		t.Fatalf("pendingSpawns=%d after acquire, want 1", r.pp.PendingSpawns())
@@ -34,15 +34,15 @@ func TestPendingSpawnSlot_ReleaseLockedIsIdempotent(t *testing.T) {
 	if r.pp.PendingSpawns() != 0 {
 		t.Fatalf("pendingSpawns=%d after releaseLocked, want 0", r.pp.PendingSpawns())
 	}
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// Defer-style release must be a no-op (idempotent).
 	slot.release()
-	r.mu.Lock()
+	r.ss.Lock()
 	if r.pp.PendingSpawns() != 0 {
 		t.Fatalf("pendingSpawns=%d after redundant release, want 0 (idempotent)", r.pp.PendingSpawns())
 	}
-	r.mu.Unlock()
+	r.ss.Unlock()
 }
 
 // TestPendingSpawnSlot_DeferReleaseAbsorbsPanic: the defer must decrement
@@ -62,10 +62,10 @@ func TestPendingSpawnSlot_DeferReleaseAbsorbsPanic(t *testing.T) {
 			_ = recover()
 		}()
 
-		r.mu.Lock()
+		r.ss.Lock()
 		slot := r.acquirePendingSpawnSlotLocked()
 		defer slot.release()
-		r.mu.Unlock()
+		r.ss.Unlock()
 
 		// Simulate a panic between ++ and the matching -- (e.g., the
 		// "future refactor introduces panic in the other 3 segments"
@@ -73,29 +73,29 @@ func TestPendingSpawnSlot_DeferReleaseAbsorbsPanic(t *testing.T) {
 		panic("synthetic panic between ++ and --")
 	}()
 
-	r.mu.Lock()
+	r.ss.Lock()
 	got := r.pp.PendingSpawns()
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if got != 0 {
 		t.Fatalf("pendingSpawns=%d after panic-then-defer-release, want 0 (counter would otherwise strand permanently and every GetOrCreate would refuse with ErrMaxProcs until restart)", got)
 	}
 }
 
 // TestPendingSpawnSlot_ReleaseTakesLock: when releaseLocked was never
-// called, release() must acquire r.mu itself and decrement.
+// called, release() must acquire the table lock itself and decrement.
 func TestPendingSpawnSlot_ReleaseTakesLock(t *testing.T) {
 	t.Parallel()
 
 	r := &Router{ss: newSessionTable()}
-	r.mu.Lock()
+	r.ss.Lock()
 	slot := r.acquirePendingSpawnSlotLocked()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	slot.release() // must self-lock + decrement
 
-	r.mu.Lock()
+	r.ss.Lock()
 	got := r.pp.PendingSpawns()
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if got != 0 {
 		t.Fatalf("pendingSpawns=%d after release(), want 0", got)
 	}
@@ -127,21 +127,21 @@ func TestPendingSpawnSlot_DoubleReleasePathsAreSafe(t *testing.T) {
 	t.Parallel()
 
 	r := &Router{ss: newSessionTable()}
-	r.mu.Lock()
+	r.ss.Lock()
 	slot := r.acquirePendingSpawnSlotLocked()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// First: simulate the post-Spawn re-lock + releaseLocked happy path.
-	r.mu.Lock()
+	r.ss.Lock()
 	slot.releaseLocked()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// Then: the deferred release() at function exit must be a no-op.
 	slot.release()
 
-	r.mu.Lock()
+	r.ss.Lock()
 	got := r.pp.PendingSpawns()
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if got != 0 {
 		t.Fatalf("pendingSpawns=%d after happy-path releaseLocked + defer release, want 0", got)
 	}

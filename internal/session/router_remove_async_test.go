@@ -36,9 +36,9 @@ func installSession(t *testing.T, r *Router, key string, proc processIface) *Man
 	if proc != nil {
 		s.storeProcess(proc)
 	}
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(key, s)
-	r.mu.Unlock()
+	r.ss.Unlock()
 	return s
 }
 
@@ -68,9 +68,9 @@ func TestRemoveAsync_UnregistersImmediately(t *testing.T) {
 
 	// Session must be gone from the map already, even though Close() is
 	// still blocked inside the detached teardown goroutine.
-	r.mu.RLock()
+	r.ss.RLock()
 	_, present := r.ss.Lookup(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if present {
 		t.Fatalf("session still in r.ss.sessions after RemoveAsync returned")
 	}
@@ -118,7 +118,7 @@ func TestRemoveAsync_AbsentKeyReturnsFalse(t *testing.T) {
 
 // TestRemoveAsync_DoubleRemoveSecondReturnsFalse proves two concurrent
 // removes of the same key cannot both run the teardown: the lookup+delete
-// is atomic under r.mu, so the loser sees the key already gone (review
+// is atomic under the table lock, so the loser sees the key already gone (review
 // M1). HandleDelete turns the second's false into a 404, which the
 // frontend already treats as success.
 func TestRemoveAsync_DoubleRemoveSecondReturnsFalse(t *testing.T) {
@@ -175,9 +175,9 @@ func TestRemove_StillSynchronous(t *testing.T) {
 	if proc.Alive() {
 		t.Fatalf("proc still alive immediately after synchronous Remove returned")
 	}
-	r.mu.RLock()
+	r.ss.RLock()
 	_, present := r.ss.Lookup(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if present {
 		t.Fatalf("session still in r.ss.sessions after Remove")
 	}

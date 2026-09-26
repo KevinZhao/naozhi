@@ -21,9 +21,9 @@ func TestRouter_OnSessionRetired_RemoveCarriesSessionID(t *testing.T) {
 	)
 	s := &ManagedSession{key: key}
 	s.setSessionID(sid)
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(key, s)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	var (
 		mu       sync.Mutex
@@ -70,9 +70,9 @@ func TestRouter_OnSessionRetired_ResetCarriesSessionID(t *testing.T) {
 	)
 	s := &ManagedSession{key: key}
 	s.setSessionID(sid)
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(key, s)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	gotCh := make(chan string, 1)
 	r.SetOnSessionRetired(func(_ string, sessionID string) {
@@ -105,9 +105,9 @@ func TestRouter_OnSessionRetired_NilFnSafe(t *testing.T) {
 	const key = "k"
 	s := &ManagedSession{key: key}
 	s.setSessionID("sid-x")
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(key, s)
-	r.mu.Unlock()
+	r.ss.Unlock()
 	r.Remove(key)
 
 	if called {
@@ -126,9 +126,9 @@ func TestRouter_OnKeyRetired_StillFiresAlongsideSessionRetired(t *testing.T) {
 	const key = "k"
 	s := &ManagedSession{key: key}
 	s.setSessionID("sid-x")
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(key, s)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	var (
 		mu       sync.Mutex

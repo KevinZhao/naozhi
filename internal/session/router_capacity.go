@@ -9,7 +9,7 @@ import (
 
 // countActive recounts alive processes (corrects drift from undetected exits).
 // Exempt sessions are not counted toward max_procs capacity. Caller must
-// hold r.mu. Reuses the single walk done by reconcileSessionActiveByBackendLocked
+// hold the table lock. Reuses the single walk done by reconcileSessionActiveByBackendLocked
 // so activeCount and the per-backend gauges update in one pass.
 func (r *Router) countActive() {
 	count := r.reconcileSessionActiveByBackendLocked()
@@ -25,7 +25,7 @@ func (r *Router) countActive() {
 // that drifts the gauge (#1645). Backends with no remaining sessions are
 // driven to zero via ForEachKey, otherwise their bucket sticks at its last value.
 //
-// LOCK: caller must hold r.mu for writing.
+// LOCK: caller must hold the table lock for writing.
 func (r *Router) reconcileSessionActiveByBackendLocked() int64 {
 	var total int64
 	perBackend := make(map[string]int64, 4)
@@ -51,7 +51,7 @@ func (r *Router) reconcileSessionActiveByBackendLocked() int64 {
 	metrics.SessionActiveByBackend.ForEachKey(func(k string) {
 		allBackends[k] = struct{}{}
 	})
-	// One atomic Add per key: r.mu does not guard the expvar map, so a
+	// One atomic Add per key: the table lock does not guard the expvar map, so a
 	// /debug/vars scraper racing a loop of N Inc/Dec would observe partial
 	// intermediate values. A single jump per backend avoids that.
 	for backend := range allBackends {
@@ -63,7 +63,7 @@ func (r *Router) reconcileSessionActiveByBackendLocked() int64 {
 }
 
 // countExempt returns the total number of alive exempt sessions across
-// all namespaces (the global-cap relief valve in spawn). Caller must hold r.mu.
+// all namespaces (the global-cap relief valve in spawn). Caller must hold the table lock.
 // Per-namespace gating goes through countExemptByKind.
 func (r *Router) countExempt() int {
 	count := 0
@@ -77,7 +77,7 @@ func (r *Router) countExempt() int {
 
 // countExemptByKind returns the alive exempt-session count for a single
 // namespace ("cron" / "project" / "sys") so a noisy cron chat cannot push
-// planner / sys stubs out of the global pool. Caller must hold r.mu.
+// planner / sys stubs out of the global pool. Caller must hold the table lock.
 // kind == "" returns 0 (an exempt session matching no known prefix is a
 // misconfiguration; log+continue rather than crash at startup).
 func (r *Router) countExemptByKind(kind string) int {
@@ -99,7 +99,7 @@ func (r *Router) countExemptByKind(kind string) int {
 // countExemptCombined returns both the alive exempt count for a single
 // namespace and the global alive exempt total in ONE walk of the session table
 // (halves lock-held time on exempt spawns without drift-prone standalone
-// counters). Caller must hold r.mu. kind == "" yields perKind 0.
+// counters). Caller must hold the table lock. kind == "" yields perKind 0.
 func (r *Router) countExemptCombined(kind string) (perKind int, total int) {
 	for k, s := range r.ss.All() {
 		if !s.exempt || !s.isAlive() {
@@ -114,7 +114,7 @@ func (r *Router) countExemptCombined(kind string) (perKind int, total int) {
 }
 
 // evictOldest closes the oldest idle (non-Running) session to free a slot.
-// Releases and re-acquires r.mu during Close() to avoid blocking other goroutines.
+// Releases and re-acquires the table lock during Close() to avoid blocking other goroutines.
 // Returns true if a session was evicted.
 func (r *Router) evictOldest() bool {
 	var oldest *ManagedSession
@@ -145,15 +145,13 @@ func (r *Router) evictOldest() bool {
 	// re-spawns the same key, so waitSocketGoneForKey is deliberately skipped
 	// (add it if a caller starts re-spawning the evicted key immediately).
 	proc := oldest.loadProcess()
-	r.mu.Unlock()
+	r.ss.Unlock()
 	proc.Close()
-	r.mu.Lock()
-	// Broadcast under r.mu: Shutdown's cond.Wait predicate reads
+	r.ss.Lock()
+	// Broadcast under the table lock: Shutdown's cond.Wait predicate reads
 	// r.ss.Get(*).loadProcess().IsRunning(), which Close() just flipped,
 	// so an unlocked Broadcast could be missed.
-	if r.shutdownCond != nil {
-		r.shutdownCond.Broadcast()
-	}
+	r.ss.Broadcast()
 	r.countActive() // recount instead of manual decrement to avoid double-count races
 	// Dirty + bump version so the eviction persists on the next save and the
 	// dashboard's Version() poll refreshes; otherwise a crash inside the save

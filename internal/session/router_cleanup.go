@@ -19,7 +19,7 @@ import (
 )
 
 // removeSnapshot captures everything finishRemoveCleanup needs from a session
-// AFTER unregisterSessionLocked dropped it from the session table, taken under r.mu
+// AFTER unregisterSessionLocked dropped it from the session table, taken under the table lock
 // so the post-unlock teardown (possibly a detached RemoveAsync goroutine) never
 // reads router state again: finishRemoveCleanup MUST NOT touch r.ss.*.
 type removeSnapshot struct {
@@ -31,13 +31,13 @@ type removeSnapshot struct {
 // unregisterAndSnapshot runs the fast, locked half of a session removal:
 // unregister from the session table and all secondary indexes, finalise
 // active-count and dirty/version bookkeeping, hand back a value snapshot.
-// Returns ok=false when the key is absent — lookup+delete is atomic under r.mu,
+// Returns ok=false when the key is absent — lookup+delete is atomic under the table lock,
 // so two concurrent Remove/RemoveAsync calls cannot both capture a non-nil proc.
 func (r *Router) unregisterAndSnapshot(key string) (removeSnapshot, bool) {
-	r.mu.Lock()
+	r.ss.Lock()
 	s, ok := r.ss.Lookup(key)
 	if !ok {
-		r.mu.Unlock()
+		r.ss.Unlock()
 		return removeSnapshot{}, false
 	}
 
@@ -58,7 +58,7 @@ func (r *Router) unregisterAndSnapshot(key string) (removeSnapshot, bool) {
 		metrics.RecordSessionActive(backend, -1)
 	}
 	r.ss.MarkChanged()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	return removeSnapshot{
 		proc:             proc,
@@ -69,7 +69,7 @@ func (r *Router) unregisterAndSnapshot(key string) (removeSnapshot, bool) {
 
 // finishRemoveCleanup runs the slow, unlocked half of a session removal: close
 // the process, wait for its shim socket to disappear, drop the event log +
-// attachment refs, fire lifecycle notifications. Must be called WITHOUT r.mu
+// attachment refs, fire lifecycle notifications. Must be called WITHOUT the table lock
 // held. Reads only `snap` — never router state — so it is safe in a detached
 // goroutine (the session is already gone from every map). Worst case ~15s.
 func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
@@ -95,13 +95,11 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	// Free the resident run-history ring (on-disk records stay) so the
 	// per-session ring map stays bounded.
 	r.sessionRuns.Invalidate(key)
-	// Broadcast under r.mu to match every other Broadcast site. Not
+	// Broadcast under the table lock to match every other Broadcast site. Not
 	// load-bearing for Shutdown: the session already left the session table.
-	if r.shutdownCond != nil {
-		r.mu.Lock()
-		r.shutdownCond.Broadcast()
-		r.mu.Unlock()
-	}
+	r.ss.Lock()
+	r.ss.Broadcast()
+	r.ss.Unlock()
 
 	logSessionLifecycle("removed", key)
 	r.notifyKeyRetired(key, snap.retiredSessionID)
@@ -205,13 +203,13 @@ func (r *Router) Cleanup() {
 	now := time.Now()
 
 	// ── Pass 1: snapshot candidate sessions under RLock ────────────
-	r.mu.RLock()
+	r.ss.RLock()
 	type cand struct {
 		key        string
 		s          *ManagedSession
 		proc       processIface
 		lastActive time.Time
-		// state is captured once under r.mu RLock so pass-2 avoids re-taking
+		// state is captured once under the table lock RLock so pass-2 avoids re-taking
 		// proc.mu.RLock while the hot Send path holds proc.mu.Lock. Staleness
 		// is acceptable: Running→Ready just defers stuckKill to the next tick,
 		// and death makes Alive() false anyway via the channel-close fast path.
@@ -236,7 +234,7 @@ func (r *Router) Cleanup() {
 	}
 	ttl := r.ttl
 	totalTimeout := r.totalTimeout
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 
 	if totalTimeout <= 0 {
 		totalTimeout = cli.DefaultTotalTimeout
@@ -284,7 +282,7 @@ func (r *Router) Cleanup() {
 		if now.Sub(effective) > ttl {
 			logSessionLifecycle("expired", c.key, "idle", now.Sub(effective))
 			// Carry the reason and stamp it only after the close-loop re-verify;
-			// stamping here (no r.mu) would corrupt the deathReason of a
+			// stamping here (no the table lock) would corrupt the deathReason of a
 			// replacement session spawned between this snapshot and the close loop.
 			expired = append(expired, expiredEntry{c.s, c.key, c.proc, "idle_timeout"})
 		}
@@ -293,7 +291,7 @@ func (r *Router) Cleanup() {
 	closedCount := 0
 	for _, e := range stuckKill {
 		// Re-verify the session still holds the proc we classified: pass-2 ran
-		// without r.mu, so a concurrent spawnSession / resetLocked may have
+		// without the table lock, so a concurrent spawnSession / resetLocked may have
 		// replaced s.process. Killing the captured proc would target an orphaned
 		// shim conn and stamp a bogus deathReason on the fresh session.
 		if cur := e.s.loadProcess(); cur != nil && cur != e.proc {
@@ -322,12 +320,10 @@ func (r *Router) Cleanup() {
 		closedCount++
 	}
 
-	r.mu.Lock()
-	// Broadcast under r.mu, after Lock, so Shutdown's cond.Wait predicate
+	r.ss.Lock()
+	// Broadcast under the table lock, after Lock, so Shutdown's cond.Wait predicate
 	// (IsRunning check) cannot re-evaluate between Close() and Broadcast.
-	if r.shutdownCond != nil {
-		r.shutdownCond.Broadcast()
-	}
+	r.ss.Broadcast()
 	// Prune only the candidates snapshotted in pass-1 (#1607), re-checked under
 	// the exclusive lock: process/lastActive may have changed (respawn, fresh
 	// Send) since the snapshot, and such a candidate must NOT be removed.
@@ -376,9 +372,9 @@ func (r *Router) Cleanup() {
 		wsOverridesCopy = r.wsStore.Snapshot()
 	}
 
-	r.mu.Unlock()
+	r.ss.Unlock()
 
-	// Known IDs live off r.mu. ClaimSave stamps savedAt so a concurrent
+	// Known IDs live off the table lock. ClaimSave stamps savedAt so a concurrent
 	// saveIfDirty tick skips the redundant work (an I/O budget gate, not a
 	// file-level race guard: tmp files are unique per WriteFileAtomic call).
 	knownIDsCopy, snapshotKnownIDsGen, knownIDsDue, knownIDsMarshalErr := r.kid.ClaimSave(now, knownIDsSaveInterval)
@@ -389,11 +385,11 @@ func (r *Router) Cleanup() {
 			slog.Warn("periodic session save failed", "err", err)
 		} else {
 			// Only clear dirty flag if no concurrent mutation occurred since snapshot.
-			r.mu.Lock()
+			r.ss.Lock()
 			if r.ss.Gen() == snapshotGen {
 				r.ss.SetDirty(false)
 			}
-			r.mu.Unlock()
+			r.ss.Unlock()
 		}
 	}
 	if wsOverridesCopy != nil {
@@ -401,9 +397,9 @@ func (r *Router) Cleanup() {
 			slog.Warn("periodic workspace overrides save failed", "err", err)
 		} else {
 			// Only clear dirty flag if no concurrent SetWorkspace occurred since snapshot.
-			r.mu.Lock()
+			r.ss.Lock()
 			r.wsStore.MarkSavedIfUnchanged(snapshotWsGen)
-			r.mu.Unlock()
+			r.ss.Unlock()
 		}
 	}
 	if knownIDsMarshalErr != nil {
@@ -424,7 +420,7 @@ func (r *Router) Cleanup() {
 }
 
 // shouldPrune returns true if a non-exempt session should be removed from the map.
-// Caller must hold r.mu.
+// Caller must hold the table lock.
 //
 // Product policy (#2278): a session that owns a Claude SessionID (a resumable
 // JSONL on disk) is NEVER auto-pruned — it stays until the user closes it
@@ -520,7 +516,7 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 func (r *Router) saveIfDirty() {
 	// The snapshot phase only READS state and dirty flags, so take the RLock
 	// and let hot GetOrCreate / Send paths proceed concurrently (#1535).
-	r.mu.RLock()
+	r.ss.RLock()
 	// Slice snapshot, not a map copy — see the matching note in Cleanup (#1606).
 	var sessionsCopy []*ManagedSession
 	if r.ss.Dirty() {
@@ -536,9 +532,9 @@ func (r *Router) saveIfDirty() {
 	storePath := r.storePath
 	snapshotGen := r.ss.Gen()
 	snapshotWsGen := r.wsStore.Gen()
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 
-	// Known IDs live off r.mu. ClaimSave checks the throttle and stamps
+	// Known IDs live off the table lock. ClaimSave checks the throttle and stamps
 	// savedAt in one critical section, so two ticks cannot both claim the
 	// same save window and double-write the file.
 	knownIDsCopy, snapshotKnownIDsGen, knownIDsDue, knownIDsMarshalErr := r.kid.ClaimSave(time.Now(), knownIDsSaveInterval)
@@ -547,11 +543,11 @@ func (r *Router) saveIfDirty() {
 		if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
 			slog.Warn("periodic session save failed", "err", err)
 		} else {
-			r.mu.Lock()
+			r.ss.Lock()
 			if r.ss.Gen() == snapshotGen {
 				r.ss.SetDirty(false)
 			}
-			r.mu.Unlock()
+			r.ss.Unlock()
 		}
 	}
 	if wsOverridesCopy != nil {
@@ -559,9 +555,9 @@ func (r *Router) saveIfDirty() {
 			slog.Warn("periodic workspace overrides save failed", "err", err)
 		} else {
 			// Only clear dirty flag if no concurrent SetWorkspace occurred since snapshot.
-			r.mu.Lock()
+			r.ss.Lock()
 			r.wsStore.MarkSavedIfUnchanged(snapshotWsGen)
-			r.mu.Unlock()
+			r.ss.Unlock()
 		}
 	}
 	if knownIDsMarshalErr != nil {
@@ -618,24 +614,20 @@ func (r *Router) shutdown() {
 	case <-historyTimer.C:
 		slog.Warn("shutdown: history loading timed out after 5s, proceeding")
 	}
-	// Deadline timer: broadcast to unblock Wait() on timeout. Must hold r.mu
+	// Deadline timer: broadcast to unblock Wait() on timeout. Must hold the table lock
 	// across Broadcast so the cond.Wait predicate evaluation below cannot race
 	// with the timer firing and silently lose the wakeup (same contract as NotifyIdle).
 	timer := time.AfterFunc(ShutdownTimeout, func() {
-		if r.shutdownCond != nil {
-			r.mu.Lock()
-			r.shutdownCond.Broadcast()
-			r.mu.Unlock()
-		}
+		r.ss.Lock()
+		r.ss.Broadcast()
+		r.ss.Unlock()
 	})
 	defer timer.Stop()
 
-	r.mu.Lock()
+	r.ss.Lock()
 
 	// Wait for running sessions to complete (up to ShutdownTimeout)
 	deadline := time.Now().Add(ShutdownTimeout)
-	// Log once per Shutdown when shutdownCond is nil (test shape).
-	shutdownCondMissingLogged := false
 	for {
 		running := false
 		for _, s := range r.ss.All() {
@@ -647,23 +639,11 @@ func (r *Router) shutdown() {
 		if !running || time.Now().After(deadline) {
 			break
 		}
-		if r.shutdownCond != nil {
-			r.shutdownCond.Wait() // atomically releases and re-acquires r.mu
-		} else {
-			// Fallback for tests without shutdownCond (production always goes
-			// through NewRouter); warn once so a bare `&Router{}` test is not silent.
-			if !shutdownCondMissingLogged {
-				slog.Warn("shutdown: Router constructed without shutdownCond — falling back to 100ms busy-poll; tests should use NewRouter")
-				shutdownCondMissingLogged = true
-			}
-			r.mu.Unlock()
-			time.Sleep(100 * time.Millisecond)
-			r.mu.Lock()
-		}
+		r.ss.Wait() // atomically releases and re-acquires the table lock
 	}
 
-	// Publish the stopped gate while still holding r.mu, immediately before the
-	// snapshot (#1822): spawnSession checks r.stopped under the same r.mu, so a
+	// Publish the stopped gate while still holding the table lock, immediately before the
+	// snapshot (#1822): spawnSession checks r.stopped under the same the table lock, so a
 	// concurrent spawn either completed (and is in the snapshot) or gets
 	// ErrRouterStopped. Do NOT move this out of the held-lock region.
 	r.stopped.Store(true)
@@ -685,9 +665,9 @@ func (r *Router) shutdown() {
 			procs = append(procs, p)
 		}
 	}
-	r.mu.Unlock()
+	r.ss.Unlock()
 
-	// Known IDs live off r.mu; the final save is unthrottled.
+	// Known IDs live off the table lock; the final save is unthrottled.
 	knownIDsCopy, knownIDsMarshalErr := r.kid.MarshalSnapshot()
 
 	// Save session state outside lock (avoids JSON marshal + file I/O under mutex).

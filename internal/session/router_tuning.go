@@ -76,7 +76,7 @@ var ErrTuningEffortUnsupported = errors.New("backend does not support effort tie
 // validation failures, or clierr.ErrSetModelRejected, where the override is NOT
 // recorded (§6 R8 ack-before-persist) and the CLI's rejection text is in the error.
 //
-// Concurrency: r.mu is held for the decide+record phase only. The RPC wait
+// Concurrency: the table lock is held for the decide+record phase only. The RPC wait
 // and proc.Close run unlocked — a concurrent mutation between phases resolves
 // as last-write-wins (RFC §6 R5).
 func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort *string) (string, error) {
@@ -94,12 +94,12 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		}
 	}
 
-	// ---- decide + (conditionally) record, under r.mu ----
-	r.mu.Lock()
+	// ---- decide + (conditionally) record, under the table lock ----
+	r.ss.Lock()
 	sess := r.ss.Get(key)
 	if sess == nil {
 		err := r.setPendingTuningLocked(key, model, effort)
-		r.mu.Unlock()
+		r.ss.Unlock()
 		if err != nil {
 			return "", err
 		}
@@ -116,14 +116,14 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		caps = cli.ProtocolCaps(wrapper.Protocol)
 	}
 	if effort != nil && *effort != "" && !caps.EffortTier {
-		r.mu.Unlock()
+		r.ss.Unlock()
 		return "", fmt.Errorf("%w: %s", ErrTuningEffortUnsupported, backendID)
 	}
 
 	effortChanged := effort != nil && *effort != sess.TuningEffort()
 	modelChanged := model != nil && *model != sess.TuningModel()
 	if !effortChanged && !modelChanged {
-		r.mu.Unlock()
+		r.ss.Unlock()
 		return TuningAppliedDeferred, nil // no-op: already at the requested values
 	}
 
@@ -153,7 +153,7 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 	alive := proc != nil && proc.Alive()
 
 	// RPC fast path defers recording until the CLI acks (§6 R8); every other
-	// path records now, under the same r.mu hold as the decision. `*model != ""`
+	// path records now, under the same the table lock hold as the decision. `*model != ""`
 	// is implied by !respawnNeeded but spelled out so "never RPC an empty
 	// model" survives refactors.
 	rpcPath := modelChanged && *model != "" && !respawnNeeded && alive
@@ -166,7 +166,7 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		}
 		r.ss.MarkChanged()
 	}
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	logKey := osutil.SanitizeForLog(key, 64)
 
@@ -176,13 +176,13 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		switch {
 		case err == nil:
 			// Ack success → record + persist (the only deferred-record path).
-			r.mu.Lock()
+			r.ss.Lock()
 			if cur := r.ss.Get(key); cur != nil {
 				cur.SetTuningModel(*model)
 				cur.SetModel(*model) // persisted display mirror (F11)
 				r.ss.MarkChanged()
 			}
-			r.mu.Unlock()
+			r.ss.Unlock()
 			r.notifyChange()
 			slog.Info("session tuning applied via rpc", "key", logKey, "model", *model)
 			return TuningAppliedRPC, nil
@@ -195,12 +195,12 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 			// Transport failure / no runtime channel / pre-handshake / ack
 			// timeout: degrade to record-only, applies on next spawn
 			// (§4.4 "失败则降级为记 override + 提示下次生效").
-			r.mu.Lock()
+			r.ss.Lock()
 			if cur := r.ss.Get(key); cur != nil {
 				cur.SetTuningModel(*model)
 				r.ss.MarkChanged()
 			}
-			r.mu.Unlock()
+			r.ss.Unlock()
 			r.notifyChange()
 			slog.Warn("session tuning rpc failed; recorded for next spawn",
 				"key", logKey, "err", err)
@@ -217,14 +217,12 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		proc.Close()
 		// Recount (not activeCount.Add(-1)) so the per-backend gauge and total
 		// stay in lockstep with the map; otherwise every tuning respawn leaks
-		// one slot. Broadcast under r.mu so Shutdown's cond.Wait predicate
+		// one slot. Broadcast under the table lock so Shutdown's cond.Wait predicate
 		// cannot re-evaluate between Close and the wakeup.
-		r.mu.Lock()
-		if r.shutdownCond != nil {
-			r.shutdownCond.Broadcast()
-		}
+		r.ss.Lock()
+		r.ss.Broadcast()
 		r.countActive()
-		r.mu.Unlock()
+		r.ss.Unlock()
 		r.notifyChange()
 		slog.Info("session tuning applied via respawn", "key", logKey,
 			"model_changed", modelChanged, "effort_changed", effortChanged)
@@ -254,7 +252,7 @@ func procSetModel(ctx context.Context, proc processIface, model string) error {
 // setPendingTuningLocked records (or clears) the pre-spawn pick for key.
 // nil leaves a field as is; "" clears it; a record with both fields empty is
 // deleted so a "恢复默认" on a never-spawned session leaves no residue.
-// Caller holds r.mu.
+// Caller holds the table lock.
 func (r *Router) setPendingTuningLocked(key string, model, effort *string) error {
 	cur, exists := r.picks.tuning[key]
 	if model != nil {

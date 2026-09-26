@@ -411,9 +411,9 @@ func TestRouterSetUserLabel(t *testing.T) {
 	// Inject a managed session directly so we can exercise the label path
 	// without running a full spawnSession — the contract under test is
 	// atomic.Value round-trip + storeGen/storeDirty bookkeeping.
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put("k1", &ManagedSession{key: "k1"})
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	before := r.ss.Gen()
 	if ok := r.SetUserLabel("k1", "我的会话"); !ok {
@@ -503,9 +503,9 @@ func TestNewRouterStoreRestore(t *testing.T) {
 		t.Errorf("active = %d, want 0 (no live processes)", active)
 	}
 
-	r.mu.Lock()
+	r.ss.Lock()
 	s1 := r.ss.Get("feishu:direct:alice:general")
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if s1 == nil || s1.getSessionID() != "sess-111" {
 		t.Errorf("alice session not restored: %+v", s1)
 	}
@@ -994,9 +994,9 @@ func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
 			s.setSessionID("sess-1")
 			r.ss.Put("k1", s)
 
-			r.mu.Lock()
+			r.ss.Lock()
 			r.unregisterSessionLocked("k1", s, tc.keep)
-			r.mu.Unlock()
+			r.ss.Unlock()
 
 			if _, ok := r.ss.Lookup("k1"); ok {
 				t.Error("session must be removed from r.ss.sessions regardless of keepBackendOverride")
@@ -1191,15 +1191,15 @@ func TestMaxProcs_EvictFailsWhenAllRunning(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// evictOldest (called with r.mu held)
+// evictOldest (called with the table lock held)
 // ---------------------------------------------------------------------------
 
 func TestEvictOldestEmptyRouter(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
 
-	r.mu.Lock()
+	r.ss.Lock()
 	evicted := r.evictOldest()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if evicted {
 		t.Error("evictOldest should return false for empty router")
@@ -1214,9 +1214,9 @@ func TestEvictOldestReturnsTrue(t *testing.T) {
 	s.touchLastActive()
 	r.ss.Put("key1", s)
 
-	r.mu.Lock()
+	r.ss.Lock()
 	evicted := r.evictOldest()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if !evicted {
 		t.Error("evictOldest should return true when an idle session exists")
@@ -1234,9 +1234,9 @@ func TestEvictOldestSkipsRunning(t *testing.T) {
 	s.touchLastActive()
 	r.ss.Put("key1", s)
 
-	r.mu.Lock()
+	r.ss.Lock()
 	evicted := r.evictOldest()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if evicted {
 		t.Error("evictOldest should skip running sessions")
@@ -1254,9 +1254,9 @@ func TestEvictOldestSkipsDead(t *testing.T) {
 	s.touchLastActive()
 	r.ss.Put("key1", s)
 
-	r.mu.Lock()
+	r.ss.Lock()
 	evicted := r.evictOldest()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if evicted {
 		t.Error("evictOldest should skip dead sessions")
@@ -1280,9 +1280,9 @@ func TestEvictOldestPicksOldest(t *testing.T) {
 	r.ss.Put("old-key", oldSession)
 	r.ss.Put("recent-key", recentSession)
 
-	r.mu.Lock()
+	r.ss.Lock()
 	evicted := r.evictOldest()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if !evicted {
 		t.Fatal("expected eviction to succeed")
@@ -1299,9 +1299,9 @@ func TestEvictOldestSkipsNilProcess(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
 	r.ss.Put("nil-key", newSessionWithID("nil-key", "sess-1"))
 
-	r.mu.Lock()
+	r.ss.Lock()
 	evicted := r.evictOldest()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if evicted {
 		t.Error("evictOldest should skip sessions with nil process")
@@ -1381,10 +1381,14 @@ func TestShutdownWaitsForRunningThenProceeds(t *testing.T) {
 	proc := newRunningProc()
 	injectSession(r, "key1", proc)
 
-	// Transition the process to idle after a short delay.
+	// Transition the process to idle after a short delay, signalling the end
+	// of the turn as a real process does.
+	var idled atomic.Bool
 	go func() {
 		time.Sleep(120 * time.Millisecond)
+		idled.Store(true)
 		proc.setRunning(false)
+		r.NotifyIdle()
 	}()
 
 	done := make(chan struct{})
@@ -1395,6 +1399,9 @@ func TestShutdownWaitsForRunningThenProceeds(t *testing.T) {
 
 	select {
 	case <-done:
+		if !idled.Load() {
+			t.Error("Shutdown returned while the session was still running")
+		}
 		if proc.Alive() {
 			t.Error("process should be closed after shutdown")
 		}
@@ -1439,9 +1446,9 @@ func TestCountActive_ReflectsAliveProcesses(t *testing.T) {
 	injectSession(r, "alive2", newRunningProc())
 	injectSession(r, "dead1", newDeadProc())
 
-	r.mu.Lock()
+	r.ss.Lock()
 	r.countActive()
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if got := r.ss.Active(); got != 2 {
 		t.Errorf("activeCount = %d, want 2", got)
@@ -1459,7 +1466,7 @@ func TestConcurrentGetOrCreate_SameKey_Race(t *testing.T) {
 	const N = 10
 	// Hard timeout — newTestRouter's wrapper points at a nonexistent binary,
 	// so each spawn fails fast (sub-millisecond). Even with 10 concurrent
-	// goroutines serialising through r.mu, a healthy run finishes in <1s.
+	// goroutines serialising through the table lock, a healthy run finishes in <1s.
 	// 10s is generous against -race + slow CI; a deadlock or missed
 	// close(doneCh) trips this rather than the test hanging the suite.
 	// R248-TEST-9.
@@ -1595,7 +1602,7 @@ func TestStats_ActiveNeverExceedsTotal(t *testing.T) {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// Mutator: flip session liveness via Reset (which acquires r.mu.Lock)
+	// Mutator: flip session liveness via Reset (which acquires r.ss.Lock)
 	// to create contention with Stats's RLock. We intentionally don't
 	// re-inject: Reset decrements activeCount and total in the same
 	// critical section, so the invariant must hold throughout.
@@ -1612,13 +1619,13 @@ func TestStats_ActiveNeverExceedsTotal(t *testing.T) {
 			r.Reset(key)
 			// Re-inject under the write lock so total grows and shrinks
 			// in sync with activeCount.
-			r.mu.Lock()
+			r.ss.Lock()
 			s := &ManagedSession{key: key}
 			s.storeProcess(newIdleProc())
 			s.touchLastActive()
 			r.ss.Put(key, s)
 			r.ss.AddActive(1)
-			r.mu.Unlock()
+			r.ss.Unlock()
 		}
 	}()
 
@@ -1810,9 +1817,9 @@ func TestSpawnSession_SpawningKeysClearedOnFailure(t *testing.T) {
 		t.Fatal("expected spawn error from nonexistent CLI")
 	}
 
-	r.mu.Lock()
+	r.ss.Lock()
 	_, stillMarked := r.pp.SpawnInFlight("key1")
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if stillMarked {
 		t.Error("spawningKeys still contains key1 after failed spawn")
 	}
@@ -1827,29 +1834,29 @@ func TestSpawnSession_SpawningKeysClearedOnFailure(t *testing.T) {
 func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 	r := newTestRouter(3)
 
-	// Simulate being inside spawnSession: caller enters with r.mu held,
+	// Simulate being inside spawnSession: caller enters with the table lock held,
 	// writes the marker, releases the lock for the Spawn() call.
-	r.mu.Lock()
+	r.ss.Lock()
 	doneCh := r.pp.BeginSpawn("cron:abc")
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// Reconcile's view: lock, snapshot, unlock.
-	r.mu.Lock()
+	r.ss.Lock()
 	_, spawning := r.pp.SpawnInFlight("cron:abc")
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if !spawning {
 		t.Fatal("reconcile should see spawningKeys marker and skip orphan check")
 	}
 
 	// After spawnSession's defer fires, the marker disappears (close +
 	// delete mirror the production defer order in spawnSession).
-	r.mu.Lock()
+	r.ss.Lock()
 	r.pp.EndSpawn("cron:abc", doneCh)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
-	r.mu.Lock()
+	r.ss.Lock()
 	_, stillMarked := r.pp.SpawnInFlight("cron:abc")
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if stillMarked {
 		t.Error("spawningKeys leaked after cleanup")
 	}
@@ -2703,7 +2710,7 @@ func TestCollectPreviousHistory(t *testing.T) {
 // nil old session (genuinely-new key), populated prevSessionIDs (defensive
 // copy), totalCost preference (process value wins over store), and createdAt
 // pass-through. Pure read helper — no mutation, lock-free in the test
-// (caller documentation pins the r.mu requirement; the helper itself is a
+// (caller documentation pins the the table lock requirement; the helper itself is a
 // plain function so it works without a Router).
 func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("nil returns zero values", func(t *testing.T) {
@@ -2786,7 +2793,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 // than tick-polling. The test simulates the in-flight window by manually
 // installing a doneCh via r.pp.BeginSpawn (mirroring spawnSession's prologue),
 // launches N concurrent GetOrCreate callers, and then performs the failure-
-// path defer (close + delete under r.mu) by hand. Every waiter must return
+// path defer (close + delete under the table lock) by hand. Every waiter must return
 // within 100ms (the historical poll interval was 20ms; instantaneous wakeup
 // targets <1ms in practice but 100ms gives ample margin for race-detector
 // scheduling on slow CI).
@@ -2801,9 +2808,9 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	// Install the spawningKeys marker so the next GetOrCreate hit takes
 	// the inflight wait path. spawnSession uses the same pattern in its
 	// prologue (router_lifecycle.go ~line 549).
-	r.mu.Lock()
+	r.ss.Lock()
 	doneCh := r.pp.BeginSpawn(key)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	const N = 10
 	var wg sync.WaitGroup
@@ -2812,7 +2819,7 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			// All N parked on the same key. Each will see the marker on
-			// the first iteration of GetOrCreate's loop, release r.mu,
+			// the first iteration of GetOrCreate's loop, release the table lock,
 			// and select on doneCh.
 			_, _, _ = r.GetOrCreate(context.Background(), key, AgentOpts{})
 		}()
@@ -2826,9 +2833,9 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	// Simulate spawnSession's failure-path defer: close BEFORE delete (the
 	// order is itself part of the contract — see TEST-3(b) below).
 	start := time.Now()
-	r.mu.Lock()
+	r.ss.Lock()
 	r.pp.EndSpawn(key, doneCh)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// All waiters should observe the close + retry the loop. With
 	// newTestRouter the second-iteration spawn also fails (binary
@@ -2869,13 +2876,13 @@ func TestSpawningKeys_CtxCancelPriorityOverDoneCh(t *testing.T) {
 
 	// Install an in-flight marker that we never close, so the doneCh arm
 	// stays not-ready. ctx.Done() must therefore be the first ready arm.
-	r.mu.Lock()
+	r.ss.Lock()
 	doneCh := r.pp.BeginSpawn(key)
-	r.mu.Unlock()
+	r.ss.Unlock()
 	defer func() {
-		r.mu.Lock()
+		r.ss.Lock()
 		r.pp.EndSpawn(key, doneCh)
-		r.mu.Unlock()
+		r.ss.Unlock()
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2892,5 +2899,23 @@ func TestSpawningKeys_CtxCancelPriorityOverDoneCh(t *testing.T) {
 	}
 	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
 		t.Errorf("ctx-cancelled GetOrCreate took %v; ctx.Done() arm should fire immediately", elapsed)
+	}
+}
+
+// TestHealthCheck_ReportsAHeldLock: HealthCheck answers false while the
+// table lock is held and true once it is free.
+func TestHealthCheck_ReportsAHeldLock(t *testing.T) {
+	r := newTestRouter(1)
+	if !r.HealthCheck() {
+		t.Fatal("HealthCheck false with the lock free")
+	}
+	r.ss.Lock()
+	held := r.HealthCheck()
+	r.ss.Unlock()
+	if held {
+		t.Error("HealthCheck true while the table lock was held")
+	}
+	if !r.HealthCheck() {
+		t.Error("HealthCheck false after the lock was released")
 	}
 }

@@ -89,10 +89,10 @@ func waitResult(t *testing.T, ch <-chan spawnResult) spawnResult {
 	}
 }
 
-// injectLocked installs a session for key under r.mu.
+// injectLocked installs a session for key under the table lock.
 func injectLocked(r *Router, key string, proc processIface) *ManagedSession {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.ss.Lock()
+	defer r.ss.Unlock()
 	return injectSession(r, key, proc)
 }
 
@@ -111,10 +111,10 @@ func TestSpawnSession_InstallsTheSpawnedProcess(t *testing.T) {
 	if r.SessionFor(key) != s {
 		t.Fatal("the session is not in the table")
 	}
-	r.mu.RLock()
+	r.ss.RLock()
 	pending := r.pp.PendingSpawns()
 	_, inFlight := r.pp.SpawnInFlight(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if pending != 0 || inFlight {
 		t.Errorf("after the spawn: pending=%d inFlight=%v, want 0/false", pending, inFlight)
 	}
@@ -190,9 +190,9 @@ func TestSpawnSession_ReplacedMeanwhileContinuesTheReplacement(t *testing.T) {
 	second := &ManagedSession{key: key}
 	second.storeProcess(newDeadProc())
 	second.setSessionID("sid-second")
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put(key, second)
-	r.mu.Unlock()
+	r.ss.Unlock()
 	close(g.release)
 
 	got := waitResult(t, res)
@@ -223,11 +223,11 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 	if _, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{}); !errors.Is(err, boom) {
 		t.Fatalf("GetOrCreate = %v, want the spawn error", err)
 	}
-	r.mu.RLock()
+	r.ss.RLock()
 	pt, ok := r.picks.tuning[key]
 	pending := r.pp.PendingSpawns()
 	_, inFlight := r.pp.SpawnInFlight(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if !ok || pt.Model != "claude-opus-5" {
 		t.Errorf("the tuning pick was consumed by a failed spawn (ok=%v, %+v)", ok, pt)
 	}
@@ -245,9 +245,9 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 	if s.TuningModel() != "claude-opus-5" {
 		t.Errorf("the session's tuning model = %q, want the pick", s.TuningModel())
 	}
-	r.mu.RLock()
+	r.ss.RLock()
 	_, still := r.picks.tuning[key]
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if still {
 		t.Error("the pick outlived the spawn that consumed it")
 	}
@@ -282,18 +282,18 @@ func TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID(t *testing.T) {
 	old.costMu.Lock()
 	old.spent = costledger.Totals{Metered: map[costledger.Unit]float64{"requests": 3}}
 	old.costMu.Unlock()
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.SetID("sid-old", key)
-	s, err := r.spawnSession(context.Background(), key, "", AgentOpts{}) // releases r.mu
+	s, err := r.spawnSession(context.Background(), key, "", AgentOpts{}) // releases the table lock
 	if err != nil {
 		t.Fatalf("spawnSession: %v", err)
 	}
 	if got := s.CostTotals().Metered["requests"]; got != 3 {
 		t.Errorf("respawned session's metered spend = %v, want the replaced session's 3", got)
 	}
-	r.mu.RLock()
+	r.ss.RLock()
 	_, stale := r.ss.KeyForID("sid-old")
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if stale {
 		t.Error("the replaced session's ID still resolves to the key after the ID rotated")
 	}

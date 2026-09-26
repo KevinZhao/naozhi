@@ -66,10 +66,10 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 }
 
 // ReattachProcessNoCallback is like ReattachProcess but skips the onSessionID
-// callback; for callers that already hold router.mu (onSessionID acquires it).
-// Does NOT acquire sendMu: the lock order is sendMu → router.mu and the caller
-// holds router.mu, so taking sendMu here would risk ABBA deadlock with Send()
-// (sendMu → onSessionID → router.mu).
+// callback; for callers that already hold routethe table lock (onSessionID acquires it).
+// Does NOT acquire sendMu: the lock order is sendMu → routethe table lock and the caller
+// holds routethe table lock, so taking sendMu here would risk ABBA deadlock with Send()
+// (sendMu → onSessionID → routethe table lock).
 //
 // SAFETY CONSTRAINT: only call when Send() cannot be in flight for this
 // session (ReconnectShims at startup, or a known-dead process). Otherwise the
@@ -88,12 +88,12 @@ func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID 
 
 // tryReattachProcessNoCallback is the runtime-reconcile variant of
 // ReattachProcessNoCallback: it enforces the no-in-flight-Send constraint via
-// a non-blocking sendMu.TryLock. The reconcile loop holds r.mu, and a Send may
+// a non-blocking sendMu.TryLock. The reconcile loop holds the table lock, and a Send may
 // still hold sendMu while unwinding on a just-died process, so its
 // timeout/death write would race the swap + deathReason reset (#750).
 //
-// A blocking sendMu.Lock would invert the sendMu → r.mu order and risk ABBA
-// deadlock against Send → onSessionID → r.mu; TryLock cannot. On failure the
+// A blocking sendMu.Lock would invert the sendMu → the table lock order and risk ABBA
+// deadlock against Send → onSessionID → the table lock; TryLock cannot. On failure the
 // caller skips this session and the next reconcile tick retries. Returns true
 // when the reattach completed.
 func (s *ManagedSession) tryReattachProcessNoCallback(proc processIface, sessionID string) bool {

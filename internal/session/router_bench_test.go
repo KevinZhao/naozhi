@@ -34,9 +34,9 @@ const (
 
 // benchInject installs a live session for key.
 func benchInject(r *Router, key string) {
-	r.mu.Lock()
+	r.ss.Lock()
 	injectSession(r, key, newIdleProc())
-	r.mu.Unlock()
+	r.ss.Unlock()
 }
 
 // benchRouter builds a Router holding benchSessions live sessions, benchKey

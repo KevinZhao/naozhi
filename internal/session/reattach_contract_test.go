@@ -18,7 +18,7 @@ import (
 //	diagnostic death reason that Send() just set.
 //
 // The constraint cannot be enforced with a runtime assertion — taking sendMu
-// inside ReattachProcessNoCallback would violate the documented sendMu→r.mu
+// inside ReattachProcessNoCallback would violate the documented sendMu→the table lock
 // lock ordering and risk ABBA deadlock. Instead, pin the invariant at source
 // level: ReattachProcessNoCallback must have exactly one production caller
 // (the shim-reconnect path in router_shim.go since the router-split refactor;
@@ -139,7 +139,7 @@ func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 	// within a short window. We locate the first call and look back ~900
 	// characters for `isAlive()` — the typical shape is:
 	//    if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
-	//        r.mu.Unlock()
+	//        r.ss.Unlock()
 	//        proc.Close()
 	//        continue
 	//    }
@@ -167,25 +167,25 @@ func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 			"is actually desired.")
 	}
 
-	// 4) The call must be made while holding r.mu. Check that r.mu.Lock()
-	// appears within the same window and no intervening r.mu.Unlock() has
+	// 4) The call must be made while holding the table lock. Check that r.ss.Lock()
+	// appears within the same window and no intervening r.ss.Unlock() has
 	// been inserted between the guard and the Reattach call.
-	lastLock := strings.LastIndex(window, "r.mu.Lock()")
-	lastUnlock := strings.LastIndex(window, "r.mu.Unlock()")
+	lastLock := strings.LastIndex(window, "r.ss.Lock()")
+	lastUnlock := strings.LastIndex(window, "r.ss.Unlock()")
 	if lastLock < 0 {
-		t.Error("r.mu.Lock() no longer appears in the 500 bytes preceding " +
+		t.Error("r.ss.Lock() no longer appears in the 500 bytes preceding " +
 			"ReattachProcessNoCallback. R31-REL1: the sendMu-waiver relies on " +
 			"the caller holding r.mu so concurrent spawnSession/Reset paths " +
 			"cannot racily re-observe the session mid-reattach.")
 	}
 	if lastUnlock > lastLock && lastUnlock > 0 {
 		// An Unlock after the Lock within the window is suspicious — the
-		// canonical shape has `r.mu.Unlock()` only inside the abort branch
+		// canonical shape has `r.ss.Unlock()` only inside the abort branch
 		// of the guard, not on the fall-through path. Match the exact
-		// abort shape: `r.mu.Unlock()\n\t\t\tproc.Close()` must be the only
+		// abort shape: `r.ss.Unlock()\n\t\t\tproc.Close()` must be the only
 		// Unlock, and it must be inside an `if` block.
 		postLock := window[lastLock:]
-		if strings.Count(postLock, "r.mu.Unlock()") > 0 {
+		if strings.Count(postLock, "r.ss.Unlock()") > 0 {
 			// Permit the canonical abort branch: it ends with `continue`.
 			segment := postLock
 			if !strings.Contains(segment, "continue") {

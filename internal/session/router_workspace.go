@@ -6,7 +6,7 @@ import "log/slog"
 // internal/session/workspacestore (#2495): its fields are private to that
 // package, so every access from Router goes through the Store method
 // surface and the compiler enforces the boundary. The store owns NO lock; every call below happens
-// under r.mu (see the workspacestore package doc for the cross-facet
+// under the table lock (see the workspacestore package doc for the cross-facet
 // atomicity requirements of #2342 that keep it there).
 
 // maxWorkspaceOverrides bounds the per-chat override map: authenticated
@@ -33,8 +33,8 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 			"hint", "caller passed unauthenticated or misrouted chat_key — verify upstream auth")
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.ss.Lock()
+	defer r.ss.Unlock()
 	r.putWorkspaceOverrideLocked(chatKey, path)
 }
 
@@ -43,7 +43,7 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 // session-less override, else drop). Shared by SetWorkspace and the atomic
 // ResetChatAndSetWorkspace path (#2342) so the "is this chat live" predicate
 // — the one piece of cross-facet state the eviction needs — is bound in
-// exactly one place. Caller holds r.mu. Reports whether the write landed.
+// exactly one place. Caller holds the table lock. Reports whether the write landed.
 func (r *Router) putWorkspaceOverrideLocked(chatKey, path string) bool {
 	// An override is evictable only while its chat has no session, so an
 	// active conversation never loses its cwd.
@@ -53,13 +53,13 @@ func (r *Router) putWorkspaceOverrideLocked(chatKey, path string) bool {
 
 // GetWorkspace returns the effective workspace for a chat key.
 func (r *Router) Workspace(chatKey string) string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	return r.resolveWorkspaceLocked(chatKey)
 }
 
 // resolveWorkspaceLocked is the single chat-level workspace resolution point
-// (#883): per-chat override first, router default otherwise. Caller holds r.mu
+// (#883): per-chat override first, router default otherwise. Caller holds the table lock
 // (read or write). resolveSpawnParamsLocked layers the opts/resume tiers ON
 // TOP of this base rather than re-deriving it.
 func (r *Router) resolveWorkspaceLocked(chatKey string) string {
@@ -74,8 +74,8 @@ func (r *Router) resolveWorkspaceLocked(chatKey string) string {
 // by the attachment-gc daemon, docs/rfc/attachment-gc-daemon.md §4.4). Roots
 // are returned raw (not symlink-resolved) — the caller normalises + dedupes.
 func (r *Router) WorkspaceRoots() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	seen := make(map[string]struct{}, r.wsStore.Len()+1)
 	out := make([]string, 0, r.wsStore.Len()+1)
 	add := func(p string) {

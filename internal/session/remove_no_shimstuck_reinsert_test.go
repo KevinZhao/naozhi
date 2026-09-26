@@ -46,9 +46,9 @@ func TestFinishRemoveCleanup_DoesNotReinsertShimStuck(t *testing.T) {
 	installSession(t, r, key, newIdleProc())
 
 	// Pre-condition: not flagged.
-	r.mu.RLock()
+	r.ss.RLock()
 	before := r.pp.ShimStuck(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if before {
 		t.Fatal("precondition: key should not be flagged before Remove")
 	}
@@ -59,9 +59,9 @@ func TestFinishRemoveCleanup_DoesNotReinsertShimStuck(t *testing.T) {
 		t.Fatal("Remove returned false for present key")
 	}
 
-	r.mu.RLock()
+	r.ss.RLock()
 	after := r.pp.ShimStuck(key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if after {
 		t.Error("#2261: shimStuckOnReset[key] re-inserted by terminal Remove — unbounded map leak for one-shot keys")
 	}

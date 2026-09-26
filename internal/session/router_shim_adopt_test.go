@@ -63,17 +63,17 @@ func TestAdoptLiveShimLocked_PublishesSession(t *testing.T) {
 	}
 	wrapper, backendID := r.wrapperFor(state.Backend)
 
-	r.mu.Lock()
+	r.ss.Lock()
 	got := r.adoptLiveShimLocked(state, backendID, wrapper)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if got == nil {
 		t.Fatal("adoptLiveShimLocked returned nil")
 	}
-	r.mu.Lock()
+	r.ss.Lock()
 	published, ok := r.ss.Lookup(key)
 	mappedKey := keyForID(r, state.SessionID)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if !ok {
 		t.Fatal("session not published into r.ss.sessions")
@@ -125,11 +125,11 @@ func TestAdoptLiveShimLocked_EmptySessionID(t *testing.T) {
 	}
 	wrapper, backendID := r.wrapperFor(state.Backend)
 
-	r.mu.Lock()
+	r.ss.Lock()
 	r.adoptLiveShimLocked(state, backendID, wrapper)
 	_, ok := r.ss.Lookup(key)
 	emptyIndexed := keyForID(r, "") != ""
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if !ok {
 		t.Fatal("session with empty session_id must still be published for reconnect")
@@ -153,7 +153,7 @@ func TestAdoptLiveShim_MarksCostBaselineUnknown(t *testing.T) {
 	r := newTestRouter(3)
 	const key = "cron:09a61c45ad4c76ba"
 
-	r.mu.Lock()
+	r.ss.Lock()
 	sess := r.adoptLiveShimLocked(shim.State{
 		Key:       key,
 		SessionID: "sess-adopted-1",
@@ -161,7 +161,7 @@ func TestAdoptLiveShim_MarksCostBaselineUnknown(t *testing.T) {
 		Backend:   "claude",
 		ShimPID:   4242,
 	}, "claude", nil)
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if sess == nil {
 		t.Fatal("adoptLiveShimLocked published no session")
 	}
@@ -182,7 +182,7 @@ func TestRestoreSessionFromEntry_DoesNotMarkCostBaselineUnknown(t *testing.T) {
 	r := newTestRouter(3)
 	const key = "feishu:p2p:restored"
 
-	r.mu.Lock()
+	r.ss.Lock()
 	r.restoreSessionFromEntry(key, &storeEntry{
 		Key:                key,
 		SessionID:          "sess-restored-1",
@@ -191,7 +191,7 @@ func TestRestoreSessionFromEntry_DoesNotMarkCostBaselineUnknown(t *testing.T) {
 		LastCumulativeCost: 1.25,
 	})
 	sess := r.ss.Get(key)
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if sess == nil {
 		t.Fatal("restoreSessionFromEntry published no session")
 	}

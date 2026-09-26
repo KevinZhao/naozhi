@@ -136,10 +136,10 @@ const (
 
 // Router manages session key -> ManagedSession mapping.
 //
-// Lock ordering: s.sendMu -> r.mu. The onSessionID callback acquires r.mu
+// Lock ordering: s.sendMu -> the table lock. The onSessionID callback acquires the table lock
 // while sendMu is held (Send → onSessionID → kid.Track + idToKey). Code that
-// holds r.mu (write) must NEVER acquire sendMu — release r.mu first.
-// s.historyMu protects persistedHistory independently; never held with sendMu or r.mu.
+// holds the table lock (write) must NEVER acquire sendMu — release the table lock first.
+// s.historyMu protects persistedHistory independently; never held with sendMu or the table lock.
 // Read-only operations (ListSessions, SessionFor, Stats, Version) use RLock.
 //
 // Fields used to carry a `// 读写:` annotation naming every router_*.go file that
@@ -148,15 +148,13 @@ const (
 // index_invariants_test.go asserts that directly. A comment saying "lifecycle
 // writes this" cannot catch a lifecycle path that writes it WRONG.
 type Router struct {
-	mu           sync.RWMutex
-	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu (write lock)
 	// drift records keys whose shims were shut down for argv drift at startup,
 	// for cron's adoption verdict (router_adopt.go). Own lock, startup-only writes.
 	drift driftShutdowns
 	// ss is the session table: key → session plus the chat / key-hash /
 	// session-ID indices, the live-process count and the change generation,
 	// in internal/session/sessiontable. No lock of its own — called under
-	// r.mu (Active / Gen excepted), because the spawn bookkeeping, workspace
+	// the table lock (Active / Gen excepted), because the spawn bookkeeping, workspace
 	// overrides and picks must change atomically with it.
 	ss *sessiontable.Table[*ManagedSession]
 	// picks holds the dashboard's per-session-key choices (backend /
@@ -168,14 +166,14 @@ type Router struct {
 	picks pendingPicks
 	// bkStore is the backend/policy facet (#383): read-only-after-NewRouter
 	// config fields plus the mutable backendOverrides map (router_backend.go).
-	// No lock of its own — mutations ONLY under r.mu write lock, reads under
+	// No lock of its own — mutations ONLY under the table's write lock, reads under
 	// RLock. The annotation below is the UNION of all domains; the lint
 	// recurses one level into backendStore's own annotations.
 	bkStore backendStore
 	// accessProfiles is the named auth/upstream overlay registry (RFC
 	// project-access-profile). Nil/empty ⇒ every session runs on the global
 	// baseline. Copy-on-write behind an atomic pointer: AddAccessProfile
-	// publishes a whole new map, so readers load it without r.mu and never see
+	// publishes a whole new map, so readers load it without the table lock and never see
 	// a half-inserted entry. Read it through profiles().
 	accessProfiles atomic.Pointer[map[string]AccessProfile]
 	// defaultAccessProfile is applied when a session resolves to no explicit
@@ -201,7 +199,7 @@ type Router struct {
 
 	// wsStore is the per-chat workspace-override facet (#383, #2495): overrides
 	// map + LRU seq, dirty flag and gen, in internal/session/workspacestore.
-	// No lock of its own — every method is called under r.mu because override
+	// No lock of its own — every method is called under the table lock because override
 	// mutations must be atomic with session mutations (#2342) and eviction
 	// asks the session table whether a chat is live. Zero value is usable.
 	wsStore workspacestore.Store
@@ -209,7 +207,7 @@ type Router struct {
 	// pp is the spawn-concurrency facet (#805, #2495): pending-spawn count,
 	// per-key in-flight spawn done-channels, shim-stuck flags and the
 	// RemoveAsync WaitGroup, in internal/session/spawnpool. No lock of its own —
-	// every method is called under r.mu (the WaitGroup methods excepted) because
+	// every method is called under the table lock (the WaitGroup methods excepted) because
 	// the pending count joins the live count in the capacity check and in-flight
 	// keys are checked against the live session index. Embeds a sync.WaitGroup:
 	// never copy Router or take it by value (go vet copylocks). Zero value is usable.
@@ -226,8 +224,8 @@ type Router struct {
 
 	// kid is the known-session-IDs facet: IDs set, FIFO order, dirty flag,
 	// gen and the gen-memoised save snapshot, in internal/session/knownids.
-	// Owns its own mutex and is never guarded by r.mu; Track runs with r.mu
-	// held at the publish sites, fixing the lock order r.mu → kid.mu (the
+	// Owns its own mutex and is never guarded by the table lock; Track runs with the table lock
+	// held at the publish sites, fixing the lock order the table lock → kid.mu (the
 	// store never calls back into Router). Zero value is usable.
 	kid knownids.Store
 
@@ -274,13 +272,13 @@ type Router struct {
 	// (leaking the first tracker's goroutine) and schedule a redundant orphan sweep.
 	startOnce sync.Once
 
-	// stopped is set true under r.mu inside Shutdown immediately before the
+	// stopped is set true under the table lock inside Shutdown immediately before the
 	// session snapshot is taken, and gates spawnSession: a spawn arriving after
 	// the snapshot is rejected with ErrRouterStopped instead of installing a
 	// shim+CLI the snapshot missed (leaking the subtree). Setting it under the
-	// SAME r.mu hold as the snapshot makes gate and snapshot mutually
+	// SAME the table lock hold as the snapshot makes gate and snapshot mutually
 	// exclusive (no TOCTOU). Set once, never cleared — a Router is not reusable
-	// after Shutdown. atomic.Bool so readers need only the r.mu they already hold (#1822).
+	// after Shutdown. atomic.Bool so readers need only the the table lock they already hold (#1822).
 	stopped atomic.Bool
 
 	// eventLogDir is where per-session event log files live. Empty disables
@@ -342,13 +340,13 @@ type pendingSpawnSlot struct {
 // acquirePendingSpawnSlotLocked takes a pending-spawn slot and returns a
 // slot token whose release method can be called from any lock state.
 //
-// LOCK: caller must hold r.mu (write).
+// LOCK: caller must hold the table lock (write).
 func (r *Router) acquirePendingSpawnSlotLocked() *pendingSpawnSlot {
 	r.pp.AcquireSpawnSlot()
 	return &pendingSpawnSlot{r: r}
 }
 
-// releaseLocked decrements pendingSpawns; caller must hold r.mu for writing.
+// releaseLocked decrements pendingSpawns; caller must hold the table lock for writing.
 // Idempotent — a second call (e.g. from defer) is a no-op.
 func (s *pendingSpawnSlot) releaseLocked() {
 	if s == nil || s.released {
@@ -358,19 +356,19 @@ func (s *pendingSpawnSlot) releaseLocked() {
 	s.released = true
 }
 
-// release is the lock-agnostic counterpart used from defer. It acquires r.mu
+// release is the lock-agnostic counterpart used from defer. It acquires the table lock
 // only when the slot has not yet been released, so the happy path (which calls
 // releaseLocked() inline) pays no extra lock acquisition. Idempotent.
 func (s *pendingSpawnSlot) release() {
 	if s == nil || s.released {
 		return
 	}
-	s.r.mu.Lock()
+	s.r.ss.Lock()
 	if !s.released {
 		s.r.pp.ReleaseSpawnSlot()
 		s.released = true
 	}
-	s.r.mu.Unlock()
+	s.r.ss.Unlock()
 }
 
 // spawnProcess starts the session's CLI process: spawnHook when a test set
@@ -697,7 +695,6 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.cliDebugDir = resolveCLIDebugDir(cfg.EventLogDir)
 	r.naozhiSettingsFile = cfg.NaozhiSettingsFile
 	r.mcpConfigFile = cfg.MCPConfigFile
-	r.shutdownCond = sync.NewCond(&r.mu)
 	// historyCtx is cancelled only by Shutdown so startup history loads and
 	// reconnect-time JSONL parses abort promptly on slow filesystems.
 	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
@@ -960,9 +957,9 @@ func (r *Router) startBackgroundHistoryLoaders() {
 			}
 
 			// Ordered chain (prev + current) via SnapshotChainIDs() — a clone
-			// under historyMu — because this goroutine holds neither r.mu nor
+			// under historyMu — because this goroutine holds neither the table lock nor
 			// historyMu while a concurrent cron stub refresh may reassign the
-			// slice header under r.mu (#2055). LoadHistoryChainTail walks
+			// slice header under the table lock (#2055). LoadHistoryChainTail walks
 			// newest→oldest and stops at maxPersistedHistory entries.
 			ids := s.SnapshotChainIDs()
 
@@ -1008,8 +1005,8 @@ func (r *Router) SetOnChange(fn func()) {
 }
 
 // notifyChange calls the onChange callback if set. Must be called outside
-// r.mu. Lock-free so stream-event callbacks (fired per result event) don't
-// contend r.mu with session mutations.
+// the table lock. Lock-free so stream-event callbacks (fired per result event) don't
+// contend the table lock with session mutations.
 func (r *Router) notifyChange() {
 	if h := r.onChange.Load(); h != nil {
 		h.fn()
@@ -1049,7 +1046,7 @@ func (r *Router) SetOnSessionRetired(fn func(key, sessionID string)) {
 }
 
 // notifyKeyRetired invokes both the onKeyRetired and onSessionRetired
-// callbacks (when set). Call outside r.mu. sessionID is captured from
+// callbacks (when set). Call outside the table lock. sessionID is captured from
 // the session before its teardown ran, so it remains valid even though
 // r.ss.Get(key) is already gone by the time we reach this hook.
 func (r *Router) notifyKeyRetired(key, sessionID string) {
@@ -1064,18 +1061,15 @@ func (r *Router) notifyKeyRetired(key, sessionID string) {
 // NotifyIdle wakes the Shutdown wait loop so it can re-check running sessions.
 // Call after a message send completes (session transitions running → ready).
 //
-// r.mu MUST be held around Broadcast: Shutdown re-checks "running" between
+// the table lock MUST be held around Broadcast: Shutdown re-checks "running" between
 // Wait() calls, so a Broadcast landing between that check and Wait() would be
 // lost and Shutdown would only wake from the 30s AfterFunc safety net.
-// Holding r.mu blocks NotifyIdle until Shutdown is parked in Wait(). Callers
+// Holding the table lock blocks NotifyIdle until Shutdown is parked in Wait(). Callers
 // are end-of-turn only, so the extra lock round-trip is free.
 func (r *Router) NotifyIdle() {
-	if r.shutdownCond == nil {
-		return
-	}
-	r.mu.Lock()
-	r.shutdownCond.Broadcast()
-	r.mu.Unlock()
+	r.ss.Lock()
+	r.ss.Broadcast()
+	r.ss.Unlock()
 }
 
 // ChatKey builds a chat-level key (without agent suffix) for workspace
@@ -1096,7 +1090,7 @@ func (r *Router) DefaultWorkspace() string {
 // Lock-free (atomic).
 //
 // The same counter serves two audiences: data version (session map changed;
-// bumped under r.mu) and render version (BumpVersion from non-session
+// bumped under the table lock) and render version (BumpVersion from non-session
 // mutations such as project favorite toggles). A Version() change therefore
 // does NOT guarantee ListSessions() returns new data; the cost is one
 // redundant debounced saveStore.
@@ -1128,10 +1122,10 @@ func (r *Router) MaxProcs() int {
 // cannot publish active = N+1 against a pre-spawn total = N (active > total on
 // the dashboard). activeCount stays atomic for the lock-free spawn-admission path.
 func (r *Router) Stats() (active, total int) {
-	r.mu.RLock()
+	r.ss.RLock()
 	total = r.ss.Len()
 	active = int(r.ss.Active())
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	return active, total
 }
 
@@ -1139,15 +1133,15 @@ func (r *Router) Stats() (active, total int) {
 // router's RWMutex is not permanently held (deadlock detection).
 // Returns true if the lock can be acquired, false if it appears stuck.
 func (r *Router) HealthCheck() bool {
-	if !r.mu.TryRLock() {
+	if !r.ss.TryRLock() {
 		return false
 	}
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	return true
 }
 
 // listRefsPool reuses the *ManagedSession slice ListSessions captures under
-// r.mu; at 1 Hz × N tabs × hundreds of sessions the per-call alloc dominates.
+// the table lock; at 1 Hz × N tabs × hundreds of sessions the per-call alloc dominates.
 var listRefsPool = sync.Pool{
 	New: func() any {
 		s := make([]*ManagedSession, 0, 64)
@@ -1156,7 +1150,7 @@ var listRefsPool = sync.Pool{
 }
 
 // ListSessions returns a snapshot of all sessions for the dashboard.
-// Collects references under r.mu, then releases before snapshotting
+// Collects references under the table lock, then releases before snapshotting
 // to avoid blocking the router while getSessionID() waits on sendMu.
 //
 // The SessionSnapshot slice is freshly allocated, never pooled: it escapes to
@@ -1169,15 +1163,15 @@ func (r *Router) ListSessions() []SessionSnapshot {
 }
 
 // ListSessionsWithVersion returns the session snapshot slice paired with the
-// gen value sampled in the same r.mu.RLock epoch, so /api/sessions tags data
+// gen value sampled in the same r.ss.RLock epoch, so /api/sessions tags data
 // with exactly the version that produced it (separate Version() +
 // ListSessions() reads could publish data with a stale version, #726).
-// Writers do `r.mu.Lock(); ...; gen.Add(1); r.mu.Unlock()`, so a reader
+// Writers do `r.ss.Lock(); ...; gen.Add(1); r.ss.Unlock()`, so a reader
 // holding RLock observes an atomically produced (sessions, gen) pair.
 func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]
-	r.mu.RLock()
+	r.ss.RLock()
 	if cap(refs) < r.ss.Len() {
 		// Grow once to the new max instead of the append growth path; the
 		// grown array is written back to the pool before Put below
@@ -1188,7 +1182,7 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 		refs = append(refs, s)
 	}
 	version := r.ss.Gen()
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 
 	snapshots := make([]SessionSnapshot, len(refs))
 	for i, s := range refs {
@@ -1209,7 +1203,7 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 // sinceVersion it returns (nil, sinceVersion, false) WITHOUT touching
 // the session table or building snapshots, so the handler can answer
 // {version, unchanged:true} and skip the marshal. Sound because writers bump
-// gen under r.mu.Lock (see ListSessionsWithVersion); changed==true reuses
+// gen under r.ss.Lock (see ListSessionsWithVersion); changed==true reuses
 // ListSessionsWithVersion so the (snapshots, version) pair stays atomic.
 func (r *Router) ListSessionsIfChanged(sinceVersion uint64) (snapshots []SessionSnapshot, version uint64, changed bool) {
 	if cur := r.ss.Gen(); cur == sinceVersion {
@@ -1221,8 +1215,8 @@ func (r *Router) ListSessionsIfChanged(sinceVersion uint64) (snapshots []Session
 
 // SessionFor returns the session for the given key, or nil.
 func (r *Router) SessionFor(key string) *ManagedSession {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
 	return r.ss.Get(key)
 }
 
@@ -1242,7 +1236,7 @@ func (r *Router) DiscardPassthroughPending(key string, reason error) {
 // still owns historyCtx/historyCancel/historyWg directly (#748); inline sites
 // that also need a semaphore + per-task timeout stay in place.
 //
-// LOCK: callers must hold r.mu (read or write) when invoking, OR call outside
+// LOCK: callers must hold the table lock (read or write) when invoking, OR call outside
 // the lock when historyCtx is guaranteed live (NewRouter init, early Start).
 // The historyWg.Add(1) must be visible to Shutdown before the goroutine
 // begins observable work.

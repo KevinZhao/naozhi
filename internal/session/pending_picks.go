@@ -15,7 +15,7 @@ package session
 // of three open-coded map operations that must agree.
 
 // pendingPicks holds per-session-key choices made before (or independently of)
-// the session's ManagedSession existing. Caller holds r.mu for every method:
+// the session's ManagedSession existing. Caller holds the table lock for every method:
 // these are Router state and the Locked suffix follows the package convention.
 //
 // The three have DIFFERENT lifecycles, which is why they stay three maps rather

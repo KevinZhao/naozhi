@@ -10,8 +10,8 @@ import (
 )
 
 // TestShutdown_SetsStoppedBeforeSnapshot is the TOCTOU race pin for #1822
-// (Option B). Router.shutdown sets r.stopped under r.mu immediately before
-// snapshotting r.ss.sessions; spawnSession checks r.stopped under the same r.mu on
+// (Option B). Router.shutdown sets r.stopped under the table lock immediately before
+// snapshotting r.ss.sessions; spawnSession checks r.stopped under the same the table lock on
 // entry. Therefore the gate and the snapshot are mutually exclusive: a
 // concurrent GetOrCreate either ran to completion before the snapshot (and is
 // thus captured) or observes stopped=true and is rejected with ErrRouterStopped
@@ -23,7 +23,7 @@ import (
 // router is wired to a bogus CLI binary, no spawn ever succeeds, so the strongest
 // observable is that every late caller either gets ErrRouterStopped or a normal
 // spawn failure — never a leaked, installed session. Run under -race to catch any
-// regression that reads r.stopped outside r.mu or sets it after the snapshot.
+// regression that reads r.stopped outside the table lock or sets it after the snapshot.
 func TestShutdown_SetsStoppedBeforeSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -72,9 +72,9 @@ func TestShutdown_SetsStoppedBeforeSnapshot(t *testing.T) {
 	// failed (bogus binary) or was gated, and Shutdown detached its snapshot.
 	// The leak this fix prevents is a fresh session installed AFTER the snapshot
 	// that never gets detached — it would show up here.
-	r.mu.RLock()
+	r.ss.RLock()
 	leaked := r.ss.Len()
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if leaked != 0 {
 		t.Fatalf("r.ss.sessions has %d entries after Shutdown; a spawn raced past the snapshot and leaked a session (#1822 TOCTOU regression)", leaked)
 	}

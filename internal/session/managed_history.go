@@ -12,10 +12,10 @@ import (
 // session ID is appended only when non-empty, matching how the router builds
 // the chain for JSONL loads. Callers must not mutate the returned slice.
 //
-// Lock contract: writers of prevSessionIDs hold r.mu; readers either hold r.mu
+// Lock contract: writers of prevSessionIDs hold the table lock; readers either hold the table lock
 // or accept a stale-but-not-torn snapshot. This reader runs from
-// cli.Wrapper.NewHistorySource factories which do NOT hold r.mu, so
-// historyMu.RLock here does not synchronise with r.mu writers — the
+// cli.Wrapper.NewHistorySource factories which do NOT hold the table lock, so
+// historyMu.RLock here does not synchronise with the table lock writers — the
 // slices.Clone-then-assign pattern in writers guarantees any observed value is
 // a complete prior snapshot. historyMu still serialises against InjectHistory.
 func (s *ManagedSession) SnapshotChainIDs() []string {

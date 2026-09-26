@@ -245,7 +245,7 @@ type ManagedSession struct {
 	runStore *runhistory.Store
 
 	// lastActive stores time.UnixNano atomically to avoid data races
-	// between Send() (under sendMu) and Cleanup/evictOldest (under r.mu).
+	// between Send() (under sendMu) and Cleanup/evictOldest (under the table lock).
 	lastActive atomic.Int64
 
 	// createdAt anchors the session's sidebar position: set once at
@@ -287,8 +287,8 @@ type ManagedSession struct {
 	// it targets (see cancelBox), so Interrupt() can skip a cancel whose
 	// process has been replaced by a concurrent spawnSession (#381).
 	sendCancel atomic.Pointer[cancelBox]
-	// workspace is the effective cwd at spawn time. Writers hold r.mu in the
-	// router, but Snapshot() is called from Hub handlers WITHOUT r.mu, so
+	// workspace is the effective cwd at spawn time. Writers hold the table lock in the
+	// router, but Snapshot() is called from Hub handlers WITHOUT the table lock, so
 	// the read must be atomic.
 	workspace atomic.Pointer[string]
 	// cliIdentity packs backend / cliName / cliVersion (always written
@@ -298,7 +298,7 @@ type ManagedSession struct {
 	deathReason atomic.Pointer[string] // why process died, empty if alive
 	// overlayDrift is the reconcile-computed per-field diff between the live
 	// shim's argv and a fresh spawn under current config (#2543). Written by
-	// reconnectShims outside r.mu, read lock-free by snapshot(); nil = none.
+	// reconnectShims outside the table lock, read lock-free by snapshot(); nil = none.
 	overlayDrift atomic.Pointer[[]OverlayFieldDrift]
 	// userLabel is an operator-set display name overriding summary/last_prompt
 	// in the dashboard. Empty = unset.
@@ -306,7 +306,7 @@ type ManagedSession struct {
 	// labelOrigin records who set userLabel: ""/"user" (operator) or "auto"
 	// (sysession daemon). Once a human writes, daemons must leave the session
 	// alone unless ClearUserLabelOrigin resets it (docs/rfc/system-session.md
-	// §7.3). Writes must go through Router.SetUserLabelWithOrigin so the r.mu
+	// §7.3). Writes must go through Router.SetUserLabelWithOrigin so the the table lock
 	// re-read closes the daemon-vs-user race (RFC §11.1).
 	labelOrigin atomic.Pointer[string]
 	// model is the most-recent CLI model identifier (system/init for claude,

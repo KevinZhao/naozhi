@@ -696,9 +696,9 @@ func TestEventEntriesForKeyAppend(t *testing.T) {
 	r := NewRouter(RouterConfig{})
 	s := &ManagedSession{key: "alpha"}
 	s.persistedHistory = []clievent.EventEntry{{Time: 100, Summary: "a"}}
-	r.mu.Lock()
+	r.ss.Lock()
 	r.ss.Put("alpha", s)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	// Unknown key: dst unchanged.
 	dst := []clievent.EventEntry{{Time: 1, Summary: "keep"}}

@@ -17,7 +17,7 @@ import (
 // loop, the re-verify check `cur != e.proc` skips the kill when the
 // session's proc has been replaced. We replicate this by having the
 // session hold a different proc from the one that was snapshotted.
-// Because Cleanup snapshots proc in pass-1 under r.mu.RLock and the
+// Because Cleanup snapshots proc in pass-1 under r.ss.RLock and the
 // kill loop reads s.loadProcess() without the lock, we can replace the
 // proc between pass-1 and pass-3 by injecting the session with a stale
 // proc but then directly swapping s.process before Cleanup runs — the

@@ -29,9 +29,9 @@ func TestPublishSessionLocked_AlreadyAttachedButNilStillGetsNoop(t *testing.T) {
 	s := &ManagedSession{key: "guard:direct:user1:general"}
 
 	// Caller LIES: claims alreadyAttached but never set the source.
-	r.mu.Lock()
+	r.ss.Lock()
 	r.publishSessionLocked(s.key, s, true)
-	r.mu.Unlock()
+	r.ss.Unlock()
 
 	if got := s.loadHistorySource(); got == nil {
 		t.Fatal("publishSessionLocked left HistorySource nil despite the post-publish guard — EventEntriesBeforeCtx would silently return empty and the dashboard 'history' drawer would blank")
@@ -39,9 +39,9 @@ func TestPublishSessionLocked_AlreadyAttachedButNilStillGetsNoop(t *testing.T) {
 
 	// Verify the session WAS actually inserted (the guard fires inline,
 	// not as an early return).
-	r.mu.RLock()
+	r.ss.RLock()
 	stored, ok := r.ss.Lookup(s.key)
-	r.mu.RUnlock()
+	r.ss.RUnlock()
 	if !ok || stored != s {
 		t.Fatalf("publishSessionLocked guard short-circuited the insertion: got=%v ok=%v", stored, ok)
 	}

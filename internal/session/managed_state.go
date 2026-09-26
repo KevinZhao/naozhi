@@ -56,7 +56,7 @@ func (m ManagedState) String() string {
 //
 // Locking: NOT lock-free — the final fallback calls hasInjectedHistory(),
 // which takes s.historyMu.RLock(). Callers must not hold a higher-layer lock
-// (e.g. router.mu): historyMu is never held together with r.mu (router_core.go),
+// (e.g. routethe table lock): historyMu is never held together with the table lock (router_core.go),
 // and nesting here would create one half of an AB-BA deadlock.
 //
 // Precedence: exempt → alive (live process) → suspended (session ID captured)

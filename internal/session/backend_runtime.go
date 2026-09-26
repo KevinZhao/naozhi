@@ -101,7 +101,7 @@ func (b *backendStore) initRuntimes(rows map[string]BackendRuntime) {
 // or index wrappers specifically (computeBackendIDs, shimManagers). Kept as a
 // projection rather than a stored second copy so the two cannot drift.
 //
-// Caller holds r.mu.
+// Caller holds the table lock.
 func (b *backendStore) backendWrappers() map[string]*cli.Wrapper {
 	if len(b.runtimes) == 0 {
 		return nil

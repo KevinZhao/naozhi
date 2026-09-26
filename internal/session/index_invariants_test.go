@@ -31,7 +31,7 @@ import (
 
 // checkIndexInvariants verifies that the table's indices agree with its
 // sessions (sessiontable.Table.Check), including that every live session's ID
-// resolves to it. Caller holds r.mu (or is single-threaded, as tests are).
+// resolves to it. Caller holds the table lock (or is single-threaded, as tests are).
 func checkIndexInvariants(t *testing.T, r *Router, after string) {
 	t.Helper()
 	if problems := r.ss.Check((*ManagedSession).getSessionID); len(problems) > 0 {
@@ -83,7 +83,7 @@ func TestIndexInvariants_AcrossEveryMutationPath(t *testing.T) {
 	checkIndexInvariants(t, r, "idToKey learned for A")
 
 	const keyARenamed = "feishu:p2p:userA:renamed"
-	// RenameSession takes r.mu itself.
+	// RenameSession takes the table lock itself.
 	if !r.RenameSession(keyA, keyARenamed) {
 		t.Fatal("RenameSession returned false for a live session")
 	}
@@ -189,7 +189,7 @@ func TestIndexInvariants_DiscoveryAndShimAdoption(t *testing.T) {
 	// --- shim adoption: a live shim missing from sessions.json ---
 	const shimID = "sess-id-shim"
 	keyS := "dashboard:direct:2026-01-01-000000-3:proj"
-	r.mu.Lock()
+	r.ss.Lock()
 	sess := r.adoptLiveShimLocked(shim.State{
 		Key:       keyS,
 		SessionID: shimID,
@@ -197,7 +197,7 @@ func TestIndexInvariants_DiscoveryAndShimAdoption(t *testing.T) {
 		Backend:   "claude",
 		ShimPID:   4242,
 	}, "claude", nil)
-	r.mu.Unlock()
+	r.ss.Unlock()
 	if sess == nil {
 		t.Fatal("adoptLiveShimLocked published no session")
 	}
@@ -207,10 +207,10 @@ func TestIndexInvariants_DiscoveryAndShimAdoption(t *testing.T) {
 	}
 
 	// --- and the indices stay consistent when those sessions go away ---
-	r.mu.Lock()
+	r.ss.Lock()
 	r.unregisterSessionLocked(keyD, r.ss.Get(keyD), false)
 	r.unregisterSessionLocked(keyS, r.ss.Get(keyS), false)
-	r.mu.Unlock()
+	r.ss.Unlock()
 	// Check reports any idToKey entry left pointing at the gone sessions.
 	checkIndexInvariants(t, r, "unregister after discovery + adoption")
 }
