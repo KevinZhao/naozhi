@@ -56,8 +56,8 @@ func TestHubScratchPoolWiredFromServer(t *testing.T) {
 	if s.scratchPool == nil {
 		t.Skip("bare test server has no scratchPool wired")
 	}
-	if s.hub.scratchPool != s.scratchPool {
-		t.Errorf("Hub.scratchPool = %p, want Server.scratchPool = %p (pool must be shared)",
-			s.hub.scratchPool, s.scratchPool)
+	if s.hub.engine.scratchPool != s.scratchPool {
+		t.Errorf("the Hub's send engine uses scratchPool %p, want Server.scratchPool %p (pool must be shared)",
+			s.hub.engine.scratchPool, s.scratchPool)
 	}
 }

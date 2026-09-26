@@ -91,7 +91,7 @@ func TestTailer_RegistryEnsureIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := writeJSONL(t, dir, "hi", false)
 
-	r := newTailerRegistry(nil)
+	r := newTailerRegistry(nil, "")
 	defer r.Shutdown()
 
 	t1, ok1 := r.ensureTailer("k", "t1", "toolu_A", path)
@@ -108,7 +108,7 @@ func TestTailer_CapacityRejected(t *testing.T) {
 	dir := t.TempDir()
 	path := writeJSONL(t, dir, "hi", false)
 
-	r := newTailerRegistry(nil)
+	r := newTailerRegistry(nil, "")
 	defer r.Shutdown()
 
 	// Fill to the cap.
@@ -134,7 +134,7 @@ func TestTailer_AttachReplaysBufferedEvents(t *testing.T) {
 	dir := t.TempDir()
 	path := writeJSONL(t, dir, "first", false)
 
-	r := newTailerRegistry(nil)
+	r := newTailerRegistry(nil, "")
 	defer r.Shutdown()
 
 	tl, ok := r.ensureTailer("k", "t1", "toolu", path)
@@ -180,7 +180,7 @@ func TestTailer_AttachEmptyBufferNoReplay(t *testing.T) {
 	dir := t.TempDir()
 	path := writeJSONL(t, dir, "later", false)
 
-	r := newTailerRegistry(nil)
+	r := newTailerRegistry(nil, "")
 	defer r.Shutdown()
 
 	if _, ok := r.ensureTailer("k", "t1", "toolu", path); !ok {
@@ -210,7 +210,7 @@ func TestTailer_CloseTaskFiresAgentDone(t *testing.T) {
 	dir := t.TempDir()
 	path := writeJSONL(t, dir, "x", false)
 
-	r := newTailerRegistry(nil)
+	r := newTailerRegistry(nil, "")
 	defer r.Shutdown()
 
 	_, _ = r.ensureTailer("k", "t1", "toolu", path)
@@ -261,7 +261,7 @@ func TestTailer_DetachDoesNotStopTailer(t *testing.T) {
 	dir := t.TempDir()
 	path := writeJSONL(t, dir, "x", false)
 
-	r := newTailerRegistry(nil)
+	r := newTailerRegistry(nil, "")
 	defer r.Shutdown()
 
 	tl, _ := r.ensureTailer("k", "t1", "toolu", path)
@@ -295,7 +295,7 @@ func TestTailer_AttachAfterDoneClosedIsNoOp(t *testing.T) {
 	dir := t.TempDir()
 	p1 := writeJSONL(t, dir, "one", false)
 
-	r := newTailerRegistry(nil)
+	r := newTailerRegistry(nil, "")
 	defer r.Shutdown()
 
 	r.ensureTailer("k", "t1", "u", p1)
@@ -338,7 +338,7 @@ func TestTailer_DetachClientDropsAllSubscriptions(t *testing.T) {
 	p2 := filepath.Join(dir, "agent-b.jsonl")
 	os.WriteFile(p2, []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"two"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`+"\n"), 0o644)
 
-	r := newTailerRegistry(nil)
+	r := newTailerRegistry(nil, "")
 	defer r.Shutdown()
 
 	r.ensureTailer("k", "t1", "u", p1)
@@ -428,7 +428,7 @@ func TestTailer_FinalizeClosesReaderFD(t *testing.T) {
 	path := writeJSONL(t, dir, "x", false)
 
 	t.Run("closeTask", func(t *testing.T) {
-		r := newTailerRegistry(nil)
+		r := newTailerRegistry(nil, "")
 		defer r.Shutdown()
 		tl, ok := r.ensureTailer("k", "t1", "toolu", path)
 		if !ok {
@@ -445,7 +445,7 @@ func TestTailer_FinalizeClosesReaderFD(t *testing.T) {
 	})
 
 	t.Run("shutdown", func(t *testing.T) {
-		r := newTailerRegistry(nil)
+		r := newTailerRegistry(nil, "")
 		tl, ok := r.ensureTailer("k", "t2", "toolu", path)
 		if !ok {
 			t.Fatal("ensureTailer failed")

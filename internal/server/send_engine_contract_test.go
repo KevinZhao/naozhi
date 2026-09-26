@@ -165,9 +165,9 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	if hub.engine.guard != guard {
 		t.Error("engine.guard is not the guard passed to NewHub")
 	}
-	if hub.engine.allowedRoot != hub.allowedRoot {
-		t.Errorf("engine.allowedRoot = %q, Hub.allowedRoot = %q — a workspace validated on one path would not be on the other",
-			hub.engine.allowedRoot, hub.allowedRoot)
+	if hub.engine.allowedRoot != hub.tailers.allowedRoot {
+		t.Errorf("engine.allowedRoot = %q, tailers.allowedRoot = %q — a path allowed on one side would not be on the other",
+			hub.engine.allowedRoot, hub.tailers.allowedRoot)
 	}
 	if hub.engine.notify != sendNotifier(hub) {
 		t.Error("engine.notify is not the Hub that built it")

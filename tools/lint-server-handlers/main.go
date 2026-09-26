@@ -16,8 +16,6 @@
 //     and a baseline more than baselineSlack lines ABOVE the file is itself a
 //     violation (#2636) — an inflated baseline silently admits that much
 //     growth, so shrinking a file means re-sampling its entry.
-//   - field_block: wshub_*.go godoc 头必须含 Field-block contract / WRITES: /
-//     READS-ALSO: / LIFECYCLE-METHOD 标注（文本扫描）。
 //   - send_engine_ownership (rule 3b-send): send 块字段只能声明在 sendEngine
 //     上、不能回到 Hub；send.go / send_owner_loop.go / send_engine.go 内不得
 //     出现 *Hub 接收者（#2551）。
@@ -34,6 +32,12 @@
 //     BE an /api/ route; the boundary it reconstructed from ASTs is a
 //     compile-time fact. 163 lines of tooling plus 139 of tests, replaced by a
 //     type.
+//
+// field_block (rule 3a) was deleted with the Hub split: it required a
+// WRITES: / READS-ALSO: header on every wshub_*.go and checked only that one
+// was present, never what it claimed. The Hub's state now lives in
+// sub-objects that own their fields and locks, so which code may touch what is
+// the compiler's answer, not a comment's.
 //
 // mode=warn (default) prints violations to stderr and exits 0; mode=fail
 // exits 1 on any violation. -sarif emits SARIF 2.1.0 on stdout.
@@ -74,7 +78,6 @@ const (
 var ruleIDs = []string{
 	"handle_decl",
 	"file_size",
-	"field_block",
 	"send_engine_ownership",
 	"stale_exemption",
 }
@@ -173,12 +176,8 @@ func main() {
 		vs = append(vs, scanFileSize(*dashboardPkg, 800, exemptFiles)...)
 	}
 
-	// Rule 3a: field_block godoc 标注扫描
-	vs = append(vs, scanFieldBlockMarkers(*serverPkg)...)
-
 	// Rule 3b-send: send_engine_ownership — send 块字段必须在 sendEngine 上，
-	// 流水线文件不得出现 *Hub 方法（#2551；rule 3a 只查 marker 是否存在、从不
-	// 校验内容，所以这条改看声明本身）。
+	// 流水线文件不得出现 *Hub 方法；检查的是声明本身。
 	vs = append(vs, scanSendEngineOwnership(*serverPkg)...)
 
 	// Rule 5: stale_exemption

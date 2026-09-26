@@ -1,7 +1,3 @@
-// File-block contract (server-split-phase4-design v0.6.1 §五):
-//
-//	WRITES:     rate-limit/cache block (historyMarshalCache only)
-//	READS:      none beyond historyMarshalCache itself; pure helper file
 package server
 
 import (

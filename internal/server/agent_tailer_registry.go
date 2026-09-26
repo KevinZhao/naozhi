@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/session/agentlink"
 	"github.com/naozhi/naozhi/internal/subagent"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
@@ -21,6 +22,15 @@ type tailerRegistry struct {
 	count      atomic.Int32
 	hub        *Hub
 	clientSubs map[*wsClient]map[tailerKey]struct{} // reverse index for client teardown
+	// allowedRoot, when set, confines the JSONL files a tailer may read.
+	allowedRoot string
+
+	// linkers dedups OnResolve / task_done wiring across re-subscribes. Keys
+	// dedup on (dynamic type, value), so a producer MUST pass one canonical
+	// AgentLinker per cli.Process; a thin adapter type would double-fire
+	// OnResolve. releaseLinkers nils the map so linkers can be GC'd.
+	linkersMu sync.Mutex
+	linkers   map[agentlink.AgentLinker]struct{}
 
 	// One registry-level ticker drives every tailer's pollOnce. pollWG lets
 	// Shutdown block until the final iteration has released every t.reader.
@@ -36,13 +46,39 @@ type tailerKey struct {
 }
 
 // newTailerRegistry wires a registry onto a Hub.
-func newTailerRegistry(hub *Hub) *tailerRegistry {
+func newTailerRegistry(hub *Hub, allowedRoot string) *tailerRegistry {
 	return &tailerRegistry{
-		byTask:     make(map[tailerKey]*agentTailer),
-		hub:        hub,
-		clientSubs: make(map[*wsClient]map[tailerKey]struct{}),
-		pollStop:   make(chan struct{}),
+		byTask:      make(map[tailerKey]*agentTailer),
+		hub:         hub,
+		clientSubs:  make(map[*wsClient]map[tailerKey]struct{}),
+		allowedRoot: allowedRoot,
+		linkers:     make(map[agentlink.AgentLinker]struct{}),
+		pollStop:    make(chan struct{}),
 	}
+}
+
+// wireOnce reports whether linker still needs its callbacks installed,
+// recording it so later calls say no. After releaseLinkers every call says no.
+func (r *tailerRegistry) wireOnce(linker agentlink.AgentLinker) bool {
+	r.linkersMu.Lock()
+	defer r.linkersMu.Unlock()
+	if r.linkers == nil {
+		return false
+	}
+	if _, ok := r.linkers[linker]; ok {
+		return false
+	}
+	r.linkers[linker] = struct{}{}
+	return true
+}
+
+// releaseLinkers drops the wired set so linkers can be GC'd. Shutdown calls
+// it only after every client goroutine has exited: before that, an in-flight
+// subscribe would find no set and silently skip a wiring it needs.
+func (r *tailerRegistry) releaseLinkers() {
+	r.linkersMu.Lock()
+	r.linkers = nil
+	r.linkersMu.Unlock()
 }
 
 // startCentralPoller lazily launches the single pollLoop goroutine on first
@@ -104,8 +140,8 @@ func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) 
 	// When allowedRoot is configured, refuse jsonlPath outside it so a
 	// malformed CLI event cannot make the tailer Stat/Tail an arbitrary file.
 	// Empty allowedRoot means unrestricted.
-	if r != nil && r.hub != nil && r.hub.allowedRoot != "" {
-		if !jsonlPathUnderAllowedRoot(jsonlPath, r.hub.allowedRoot) {
+	if r.allowedRoot != "" {
+		if !jsonlPathUnderAllowedRoot(jsonlPath, r.allowedRoot) {
 			slog.Warn("agent_tailer: jsonl path outside allowed_root rejected",
 				"key", key, "task", taskID, "path", jsonlPath)
 			return nil, false

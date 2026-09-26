@@ -32,8 +32,8 @@ func TestNewHub_SchedulerAndScratchPoolFromOptions(t *testing.T) {
 	if hub.scheduler == nil {
 		t.Fatal("hub.scheduler nil — HubOptions.Scheduler not wired at construction (#431)")
 	}
-	if hub.scratchPool != pool {
-		t.Fatal("hub.scratchPool not set from HubOptions.ScratchPool (#431)")
+	if hub.engine.scratchPool != pool {
+		t.Fatal("the send engine's scratchPool is not HubOptions.ScratchPool (#431)")
 	}
 }
 

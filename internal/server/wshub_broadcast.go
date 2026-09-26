@@ -1,7 +1,3 @@
-// File-block contract (server-split-phase4-design v0.6.1 §五):
-//
-//	WRITES:     (none)
-//	READS:      shared deps block (read-only after ctor), subs, droppedTotal
 package server
 
 import (
@@ -204,10 +200,9 @@ func (h *Hub) DroppedMessages() int64 {
 // real MessageQueue and never increment this; once every test fixture does
 // too, sessionSendLegacy can be deleted (#710).
 func (h *Hub) LegacySendInvokes() int64 {
-	// nil receiver / nil engine: package callers may probe a not-yet-built Hub
-	// through an interface, and hand-rolled test hubs skip NewHub. Both read 0
-	// rather than panicking — R-LEGACY-SEND tooling depends on it.
-	if h == nil || h.engine == nil {
+	// A nil receiver reads 0: package callers may probe a not-yet-built Hub
+	// through an interface, and R-LEGACY-SEND tooling depends on it.
+	if h == nil {
 		return 0
 	}
 	return h.engine.legacyInvokes.Load()

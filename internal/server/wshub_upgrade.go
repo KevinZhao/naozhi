@@ -1,7 +1,3 @@
-// File-block contract (server-split-phase4-design v0.6.1 §五):
-//
-//	WRITES:     subscriber block (clients / clientWG)
-//	READS:      admission (admit)
 package server
 
 import (

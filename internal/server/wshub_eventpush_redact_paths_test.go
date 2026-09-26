@@ -29,8 +29,8 @@ func TestMarshalHistoryFrame_RedactsOnEveryPath(t *testing.T) {
 		}
 	}
 
-	t.Run("nil cache fallback", func(t *testing.T) {
-		h := &Hub{subs: newSubscriberRegistry()} // historyMarshalCache == nil
+	t.Run("single-subscriber path", func(t *testing.T) {
+		h := hubWithSubscribers("k", 1) // skips the cache
 		data, err := h.marshalHistoryFrame("k", 0, entries)
 		if err != nil {
 			t.Fatalf("marshalHistoryFrame: %v", err)

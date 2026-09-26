@@ -48,12 +48,6 @@ func TestLegacySendInvokes_AtomicCounter(t *testing.T) {
 		t.Fatalf("nil Hub LegacySendInvokes = %d, want 0", got)
 	}
 
-	// Hand-rolled hub: engine is nil, so the getter must still read 0 rather
-	// than dereferencing it (#2551 moved the counter onto sendEngine).
-	if got := (&Hub{}).LegacySendInvokes(); got != 0 {
-		t.Fatalf("hand-rolled Hub LegacySendInvokes = %d, want 0", got)
-	}
-
 	h := &Hub{engine: newSendEngine(sendEngineOpts{})}
 	if got := h.LegacySendInvokes(); got != 0 {
 		t.Fatalf("fresh Hub LegacySendInvokes = %d, want 0", got)
