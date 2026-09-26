@@ -458,6 +458,7 @@ func TestRouterStoreRestoreUserLabel(t *testing.T) {
 	}
 
 	r := NewRouter(RouterConfig{StorePath: storePath})
+	t.Cleanup(r.Shutdown)
 	got := r.SessionFor(labeled.key)
 	if got == nil {
 		t.Fatalf("session not restored")
@@ -492,6 +493,7 @@ func TestNewRouterStoreRestore(t *testing.T) {
 	}
 
 	r := NewRouter(RouterConfig{MaxProcs: 3, StorePath: storePath})
+	t.Cleanup(r.Shutdown)
 
 	active, total := r.Stats()
 	if total != 2 {
@@ -2420,7 +2422,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		r.bkStore.model = "sonnet-default"
 		r.picks.backend = make(map[string]string)
 		r.picks.accessProfile = make(map[string]string)
-		r.accessProfiles = map[string]AccessProfile{
+		setAccessProfiles(r, map[string]AccessProfile{
 			"1p-fable": {
 				Env:          map[string]string{"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
 				DefaultModel: "claude-fable-5",
@@ -2429,7 +2431,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 				Env:          map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"},
 				DefaultModel: "claude-opus-4-8",
 			},
-		}
+		})
 		return r
 	}
 

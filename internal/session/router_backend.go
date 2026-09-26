@@ -14,11 +14,9 @@ import (
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
-// backendStore groups the backend/policy fields of Router (#383). It carries
-// NO lock of its own: config fields are read-only after NewRouter and read
-// lock-free; the override / manifest maps are mutated only under r.mu write
-// lock. The lint recurses one level so each inner field carries its own
-// per-domain annotation.
+// backendStore groups the backend/policy fields of Router. Everything but the
+// manifest cache is fixed once NewRouter returns and read without a lock; the
+// manifest cache carries its own.
 type backendStore struct {
 	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
 	// runtimes holds one BackendRuntime per backend ID — the row that replaced
@@ -34,6 +32,8 @@ type backendStore struct {
 	backendIDs []string
 	model      string
 	extraArgs  []string
+	// manifests caches agent-reported model lists (BackendModelManifest).
+	manifests manifestCache
 }
 
 // maxModelBytes caps model identifiers, which flow into the CLI child's
@@ -343,12 +343,13 @@ func (r *Router) backendDefaultsFor(backendID string) BackendDefaults {
 
 // BackendModelManifest returns the model list the dashboard popover offers for
 // a backend ("" = router default). Tiers: (1) runtime manifest from any LIVE
-// process, cached in bkStore.modelManifests; (2) configured
+// process, cached in bkStore.manifests; (2) configured
 // cli.backends[].models; (3) observedModelsLocked. Nil when no tier has data.
-// Takes r.mu for WRITING because a runtime hit updates the cache.
+// Reads the session table, so it takes r.mu for reading; the cache has its own
+// lock.
 func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if backendID == "" {
 		backendID = r.bkStore.defaultBackend
 	}
@@ -370,11 +371,11 @@ func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
 			continue
 		}
 		if models := am.AvailableModels(); len(models) > 0 {
-			r.bkStore.runtimeMut(backendID).Manifest = models
+			r.bkStore.manifests.set(backendID, models)
 			break
 		}
 	}
-	if m := r.bkStore.runtime(backendID).Manifest; len(m) > 0 {
+	if m := r.bkStore.manifests.get(backendID); len(m) > 0 {
 		return m
 	}
 	if lst := r.bkStore.runtime(backendID).ConfiguredModels; len(lst) > 0 {

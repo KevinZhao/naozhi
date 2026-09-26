@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -61,24 +64,23 @@ func TestAccessProfileInfos(t *testing.T) {
 	if err := os.WriteFile(present, []byte("sk-x"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	r := &Router{
-		accessProfiles: map[string]AccessProfile{
-			"bedrock": {
-				DisplayName:  "Bedrock · Opus",
-				ChipColor:    "#7c5cff",
-				DefaultModel: "claude-opus-4-8",
-				Env:          map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"},
-			},
-			"1p-ok": {
-				DisplayName: "1P · Fable",
-				Env:         map[string]string{"ANTHROPIC_AUTH_TOKEN_FILE": present},
-			},
-			"1p-broken": {
-				DisplayName: "1P · Broken",
-				Env:         map[string]string{"ANTHROPIC_AUTH_TOKEN_FILE": filepath.Join(dir, "missing")},
-			},
+	r := &Router{}
+	setAccessProfiles(r, map[string]AccessProfile{
+		"bedrock": {
+			DisplayName:  "Bedrock · Opus",
+			ChipColor:    "#7c5cff",
+			DefaultModel: "claude-opus-4-8",
+			Env:          map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"},
 		},
-	}
+		"1p-ok": {
+			DisplayName: "1P · Fable",
+			Env:         map[string]string{"ANTHROPIC_AUTH_TOKEN_FILE": present},
+		},
+		"1p-broken": {
+			DisplayName: "1P · Broken",
+			Env:         map[string]string{"ANTHROPIC_AUTH_TOKEN_FILE": filepath.Join(dir, "missing")},
+		},
+	})
 	infos := r.AccessProfileInfos()
 	if len(infos) != 3 {
 		t.Fatalf("want 3 infos, got %d", len(infos))
@@ -117,9 +119,10 @@ func TestAccessProfileInfos_EmptyRegistry(t *testing.T) {
 }
 
 func TestAddAccessProfile(t *testing.T) {
-	r := &Router{accessProfiles: map[string]AccessProfile{
+	r := &Router{}
+	setAccessProfiles(r, map[string]AccessProfile{
 		"existing": {DisplayName: "Existing"},
-	}}
+	})
 	if !r.HasAccessProfile("existing") {
 		t.Fatal("existing profile should be present")
 	}
@@ -153,5 +156,58 @@ func TestAddAccessProfile_NilMapBootstrap(t *testing.T) {
 	}
 	if !r.HasAccessProfile("first") {
 		t.Error("profile not registered into freshly-bootstrapped map")
+	}
+}
+
+// TestAddAccessProfile_ConcurrentAddsAllLand: adds racing each other each
+// publish a copy of the registry; the loser of a swap retries on the winner's
+// map, so no add is lost and a duplicate id is accepted exactly once.
+func TestAddAccessProfile_ConcurrentAddsAllLand(t *testing.T) {
+	r := &Router{}
+	const n = 64
+	var wg sync.WaitGroup
+	var dupOK atomic.Int32
+	for i := 0; i < n; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := r.AddAccessProfile("p"+strconv.Itoa(i), AccessProfile{}); err != nil {
+				t.Errorf("add p%d: %v", i, err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if r.AddAccessProfile("shared", AccessProfile{}) == nil {
+				dupOK.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		if !r.HasAccessProfile("p" + strconv.Itoa(i)) {
+			t.Errorf("p%d lost to a concurrent add", i)
+		}
+	}
+	if got := dupOK.Load(); got != 1 {
+		t.Errorf("the same id was accepted %d times, want exactly once", got)
+	}
+	if got := len(r.AccessProfileInfos()); got != n+1 {
+		t.Errorf("registry holds %d profiles, want %d", got, n+1)
+	}
+}
+
+// TestNewRouter_PublishesConfiguredAccessProfiles: profiles from the config
+// are visible from the first call, and a runtime add keeps them.
+func TestNewRouter_PublishesConfiguredAccessProfiles(t *testing.T) {
+	r := NewRouter(RouterConfig{AccessProfiles: map[string]AccessProfile{"work": {DisplayName: "Work"}}})
+	defer r.Shutdown()
+	if !r.HasAccessProfile("work") {
+		t.Fatal("a configured profile is not registered")
+	}
+	if err := r.AddAccessProfile("home", AccessProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.HasAccessProfile("work") || !r.HasAccessProfile("home") {
+		t.Error("a runtime add dropped the configured profile")
 	}
 }
