@@ -144,7 +144,7 @@ func TestHandleUpgrade_TrustedProxy_MissingXFF_SetsRetryAfter(t *testing.T) {
 // Retry-After: 60, consistent with the sibling 429 paths.
 func TestHandleUpgrade_LimiterDeny_SetsRetryAfter(t *testing.T) {
 	// Use a non-trustedProxy server so RemoteAddr always resolves, then inject
-	// an always-deny wsUpgradeLimiter to exercise the second 429 branch.
+	// an always-deny upgrade limiter to exercise the second 429 branch.
 	router := session.NewRouter(session.RouterConfig{})
 	srv := NewWithOptions(ServerOptions{
 		Addr:           ":0",
@@ -153,7 +153,7 @@ func TestHandleUpgrade_LimiterDeny_SetsRetryAfter(t *testing.T) {
 		DashboardToken: "secret",
 		TrustedProxy:   false,
 	})
-	srv.hub.wsUpgradeLimiter = func(ip string) bool { return false }
+	srv.hub.admit.upgradeLimiter = func(ip string) bool { return false }
 
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	req.RemoteAddr = "203.0.113.5:9000"

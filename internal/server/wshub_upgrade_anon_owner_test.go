@@ -17,14 +17,14 @@ import (
 // nz_anon closes on the HTTP path.
 func TestWSDeriveUploadOwner_NoTokenMintsAnonCookie(t *testing.T) {
 	t.Parallel()
-	h := &Hub{auth: &auth.Handlers{}} // dashToken == "" → no-token mode
+	h := newConnAdmission(HubOptions{Auth: &auth.Handlers{}}) // dashToken == "" → no-token mode
 	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	r.RemoteAddr = "10.0.0.1:1234" // co-NAT IP we explicitly do NOT want returned
 	w := httptest.NewRecorder()
 
-	owner, authed, ok := wsDeriveUploadOwner(w, r, h, "10.0.0.1")
+	owner, authed, ok := h.deriveUploadOwner(w, r, "10.0.0.1")
 	if !ok {
-		t.Fatalf("wsDeriveUploadOwner ok=false; want true (mint must succeed)")
+		t.Fatalf("deriveUploadOwner ok=false; want true (mint must succeed)")
 	}
 	if !authed {
 		t.Fatalf("authenticated=false in no-token mode; want true")
@@ -59,12 +59,12 @@ func TestWSDeriveUploadOwner_NoTokenMintsAnonCookie(t *testing.T) {
 // instead of minting a fresh cookie + bucket on every WS upgrade.
 func TestWSDeriveUploadOwner_ExistingAnonCookieReused(t *testing.T) {
 	t.Parallel()
-	h := &Hub{auth: &auth.Handlers{}}
+	h := newConnAdmission(HubOptions{Auth: &auth.Handlers{}})
 	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	r.AddCookie(&http.Cookie{Name: anonCookieName, Value: "deadbeefcafebabe0011223344556677"})
 	w := httptest.NewRecorder()
 
-	owner, authed, ok := wsDeriveUploadOwner(w, r, h, "10.0.0.1")
+	owner, authed, ok := h.deriveUploadOwner(w, r, "10.0.0.1")
 	if !ok || !authed {
 		t.Fatalf("ok=%v authed=%v; both must be true for cookie-presented path", ok, authed)
 	}
@@ -101,11 +101,11 @@ func TestWSDeriveUploadOwner_ExistingAnonCookieReused(t *testing.T) {
 // always passes Auth, so the SEC-2 fix takes effect there.
 func TestWSDeriveUploadOwner_NilAuthFallsBackToIPForTests(t *testing.T) {
 	t.Parallel()
-	h := &Hub{} // dashToken == "" AND auth == nil
+	h := newConnAdmission(HubOptions{}) // dashToken == "" AND auth == nil
 	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	w := httptest.NewRecorder()
 
-	owner, authed, ok := wsDeriveUploadOwner(w, r, h, "10.0.0.1")
+	owner, authed, ok := h.deriveUploadOwner(w, r, "10.0.0.1")
 	if !ok || !authed {
 		t.Fatalf("ok=%v authed=%v; nil-auth test path must still authenticate", ok, authed)
 	}
@@ -117,20 +117,20 @@ func TestWSDeriveUploadOwner_NilAuthFallsBackToIPForTests(t *testing.T) {
 // TestWSDeriveUploadOwner_NilAuthEmptyIPGetsUniqueOwner pins R202606j-SEC-8
 // (#2343): in the Auth-less fallback branch an empty client IP (trusted-proxy
 // mode with an XFF-less request) must NOT collapse to the empty-string owner
-// key. reserveOwnerSlot treats "" as the legacy cap-exempt single-user bucket,
+// key. reserveOwner treats "" as the legacy cap-exempt single-user bucket,
 // so a shared empty owner would let every such connection bypass
 // maxConnsPerOwner and exhaust the global pool. Each empty-IP connection must
 // instead receive a distinct, non-empty crypto-random owner so the per-owner
 // cap applies independently.
 func TestWSDeriveUploadOwner_NilAuthEmptyIPGetsUniqueOwner(t *testing.T) {
 	t.Parallel()
-	h := &Hub{} // dashToken == "" AND auth == nil → harness fallback
+	h := newConnAdmission(HubOptions{}) // dashToken == "" AND auth == nil → harness fallback
 
 	seen := make(map[string]bool)
 	for i := 0; i < 8; i++ {
 		r := httptest.NewRequest(http.MethodGet, "/ws", nil)
 		w := httptest.NewRecorder()
-		owner, authed, ok := wsDeriveUploadOwner(w, r, h, "" /* empty clientIP */)
+		owner, authed, ok := h.deriveUploadOwner(w, r, "" /* empty clientIP */)
 		if !ok || !authed {
 			t.Fatalf("ok=%v authed=%v; empty-IP fallback must still authenticate", ok, authed)
 		}

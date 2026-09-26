@@ -22,7 +22,7 @@ func TestHandleAuth_RateLimitEmitsRetryAfter(t *testing.T) {
 	// Always-deny limiter simulates a bucket that's already been drained —
 	// this is the structural branch the UI relies on; the limiter policy
 	// itself is orthogonal and covered by TestHandleLogin_Sets429AndRetryAfterOnRateLimit.
-	hub.wsAuthLimiter = func(ip string) bool { return false }
+	hub.admit.authLimiter = func(ip string) bool { return false }
 	defer hub.Shutdown()
 
 	c := &wsClient{
@@ -69,7 +69,7 @@ func TestHandleAuth_InvalidTokenOmitsRetryAfter(t *testing.T) {
 	hub, _ := newTestHub("secret")
 	// Limiter permissive so we land in the invalid-token branch, not the
 	// rate-limit branch.
-	hub.wsAuthLimiter = func(ip string) bool { return true }
+	hub.admit.authLimiter = func(ip string) bool { return true }
 	defer hub.Shutdown()
 
 	c := &wsClient{

@@ -17,11 +17,11 @@ func tokenOwnerKey(token string) string {
 }
 
 // TestHandleAuth_TokenRekeysOwnerSlot pins #1775: in token mode the conn is
-// upgraded with an empty uploadOwner, so reserveOwnerSlot at upgrade time is a
+// upgraded with an empty uploadOwner, so reserveOwner at upgrade time is a
 // no-op (owner == ""). When handleAuth derives the real owner from the token it
 // must re-key the reservation — release(old="") then reserve(new) — so that the
 // per-owner counter is incremented under the SAME owner that the teardown path
-// (releaseOwnerSlot(c.uploadOwnerKey())) later decrements. Before the fix the
+// (releaseOwner(c.uploadOwnerKey())) later decrements. Before the fix the
 // slot was reserved against "" but released against the token-derived owner,
 // driving the per-owner counter negative on disconnect (or, over reconnects,
 // wedging the cap with phantom slots).
@@ -36,7 +36,7 @@ func TestHandleAuth_TokenRekeysOwnerSlot(t *testing.T) {
 		subGen:        make(map[string]uint64),
 	}
 	// Simulate the upgrade-time reservation: token-mode pre-auth owner is "".
-	if !hub.reserveOwnerSlot(c.uploadOwnerKey()) {
+	if !hub.admit.reserveOwner(c.uploadOwnerKey()) {
 		t.Fatal("upgrade-time reserve for empty owner must succeed")
 	}
 
@@ -46,19 +46,19 @@ func TestHandleAuth_TokenRekeysOwnerSlot(t *testing.T) {
 	if c.uploadOwnerKey() != owner {
 		t.Fatalf("uploadOwner = %q, want %q", c.uploadOwnerKey(), owner)
 	}
-	hub.connCountByOwnerMu.Lock()
-	got := hub.connCountByOwner[owner]
-	hub.connCountByOwnerMu.Unlock()
+	hub.admit.ownersMu.Lock()
+	got := hub.admit.owners[owner]
+	hub.admit.ownersMu.Unlock()
 	if got != 1 {
 		t.Fatalf("after auth re-key, per-owner count = %d, want 1 (reserve must follow the owner)", got)
 	}
 
 	// Teardown path releases against the CURRENT owner; the counter must
 	// settle back to zero (entry removed) rather than going negative.
-	hub.releaseOwnerSlot(c.uploadOwnerKey())
-	hub.connCountByOwnerMu.Lock()
-	_, ok := hub.connCountByOwner[owner]
-	hub.connCountByOwnerMu.Unlock()
+	hub.admit.releaseOwner(c.uploadOwnerKey())
+	hub.admit.ownersMu.Lock()
+	_, ok := hub.admit.owners[owner]
+	hub.admit.ownersMu.Unlock()
 	if ok {
 		t.Fatalf("per-owner entry should be gone after the paired release, map still holds %q", owner)
 	}
@@ -76,7 +76,7 @@ func TestHandleAuth_TokenRekey_ReserveFailRejects(t *testing.T) {
 	owner := tokenOwnerKey("secret")
 	// Saturate the owner's per-owner cap with held slots from other conns.
 	for i := 0; i < maxConnsPerOwner; i++ {
-		if !hub.reserveOwnerSlot(owner) {
+		if !hub.admit.reserveOwner(owner) {
 			t.Fatalf("pre-fill reserve %d should succeed", i)
 		}
 	}
@@ -88,7 +88,7 @@ func TestHandleAuth_TokenRekey_ReserveFailRejects(t *testing.T) {
 		subGen:        make(map[string]uint64),
 	}
 	// Upgrade-time reservation against the empty pre-auth owner.
-	if !hub.reserveOwnerSlot(c.uploadOwnerKey()) {
+	if !hub.admit.reserveOwner(c.uploadOwnerKey()) {
 		t.Fatal("empty-owner reserve must succeed")
 	}
 
@@ -101,16 +101,16 @@ func TestHandleAuth_TokenRekey_ReserveFailRejects(t *testing.T) {
 	if c.uploadOwnerKey() != "" {
 		t.Fatalf("uploadOwner should remain empty on reject, got %q", c.uploadOwnerKey())
 	}
-	hub.connCountByOwnerMu.Lock()
-	got := hub.connCountByOwner[owner]
-	hub.connCountByOwnerMu.Unlock()
+	hub.admit.ownersMu.Lock()
+	got := hub.admit.owners[owner]
+	hub.admit.ownersMu.Unlock()
 	if got != maxConnsPerOwner {
 		t.Fatalf("per-owner count = %d, want %d (reject must not perturb held slots)", got, maxConnsPerOwner)
 	}
 
 	// The empty-owner slot we held at "upgrade time" must still be claimable
 	// for release without underflow (handleAuth re-claimed it on reject).
-	hub.releaseOwnerSlot(c.uploadOwnerKey())
+	hub.admit.releaseOwner(c.uploadOwnerKey())
 }
 
 // TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak pins R20260605B-CORR-4
@@ -119,8 +119,8 @@ func TestHandleAuth_TokenRekey_ReserveFailRejects(t *testing.T) {
 // lock, so a concurrent writePump-triggered unregister reading
 // c.uploadOwnerKey() in the window after reserve(new) but before
 // setUploadOwner(new) released the wrong owner ("") and leaked newOwner's
-// slot. rekeyOwnerSlot now performs the swap under connCountByOwnerMu and
-// gates on c.done; releaseOwnerSlotForClient reads the owner key under the
+// slot. rekeyOwner now performs the swap under ownersMu and
+// gates on c.done; releaseOwnerFor reads the owner key under the
 // same lock. For EVERY interleaving the per-owner counter must settle to
 // exactly zero — no phantom slot survives. Run under -race.
 func TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak(t *testing.T) {
@@ -136,7 +136,7 @@ func TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak(t *testing.T) {
 		}
 		// Upgrade-time reservation against the empty pre-auth owner, then
 		// register so unregister's `removed` gate fires exactly once.
-		if !hub.reserveOwnerSlot(c.uploadOwnerKey()) {
+		if !hub.admit.reserveOwner(c.uploadOwnerKey()) {
 			t.Fatal("empty-owner reserve must succeed")
 		}
 		hub.register(c)
@@ -146,10 +146,10 @@ func TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak(t *testing.T) {
 		// readPump arm: re-key to the token-derived owner.
 		go func() {
 			defer wg.Done()
-			hub.rekeyOwnerSlot(c, "", owner)
+			hub.admit.rekeyOwner(c, "", owner)
 		}()
 		// writePump teardown arm: close done (as the pump defer does) then
-		// unregister, which releases the slot via releaseOwnerSlotForClient.
+		// unregister, which releases the slot via releaseOwnerFor.
 		go func() {
 			defer wg.Done()
 			c.closeDone()
@@ -160,10 +160,10 @@ func TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak(t *testing.T) {
 		// Whichever order won, no live connection remains, so the per-owner
 		// counter for BOTH the empty and the token owner must be back to zero
 		// (the map drops entries that reach 0).
-		hub.connCountByOwnerMu.Lock()
-		gotNew := hub.connCountByOwner[owner]
-		gotEmpty := hub.connCountByOwner[""]
-		hub.connCountByOwnerMu.Unlock()
+		hub.admit.ownersMu.Lock()
+		gotNew := hub.admit.owners[owner]
+		gotEmpty := hub.admit.owners[""]
+		hub.admit.ownersMu.Unlock()
 		if gotNew != 0 {
 			hub.Shutdown()
 			t.Fatalf("iter %d: per-owner count for newOwner = %d, want 0 (slot leaked)", iter, gotNew)
@@ -178,7 +178,7 @@ func TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak(t *testing.T) {
 
 // TestRekeyOwnerSlot_SkipsWhenConnDone pins the done-gate: if the connection
 // has already torn down (c.done closed and its slot released by unregister)
-// when the delayed handleAuth re-key runs, rekeyOwnerSlot must NOT reserve a
+// when the delayed handleAuth re-key runs, rekeyOwner must NOT reserve a
 // fresh slot for the dead conn — that slot would never be released because
 // unregister's once-only `removed` gate has already passed.
 func TestRekeyOwnerSlot_SkipsWhenConnDone(t *testing.T) {
@@ -191,7 +191,7 @@ func TestRekeyOwnerSlot_SkipsWhenConnDone(t *testing.T) {
 		subscriptions: make(map[string]func()),
 		subGen:        make(map[string]uint64),
 	}
-	if !hub.reserveOwnerSlot(c.uploadOwnerKey()) {
+	if !hub.admit.reserveOwner(c.uploadOwnerKey()) {
 		t.Fatal("empty-owner reserve must succeed")
 	}
 	hub.register(c)
@@ -200,19 +200,19 @@ func TestRekeyOwnerSlot_SkipsWhenConnDone(t *testing.T) {
 	hub.unregister(c)
 
 	owner := tokenOwnerKey("secret")
-	if hub.rekeyOwnerSlot(c, "", owner) {
-		t.Fatal("rekeyOwnerSlot must return false once the conn is done")
+	if hub.admit.rekeyOwner(c, "", owner) {
+		t.Fatal("rekeyOwner must return false once the conn is done")
 	}
-	hub.connCountByOwnerMu.Lock()
-	got := hub.connCountByOwner[owner]
-	hub.connCountByOwnerMu.Unlock()
+	hub.admit.ownersMu.Lock()
+	got := hub.admit.owners[owner]
+	hub.admit.ownersMu.Unlock()
 	if got != 0 {
 		t.Fatalf("rekey reserved a phantom slot for a dead conn: count = %d, want 0", got)
 	}
 }
 
 // TestUploadOwnerAtomic_NoRace pins #1776: handleAuth writes c.uploadOwner from
-// the readPump while releaseOwnerSlot/allowSendForOwner read it from the
+// the readPump while releaseOwner/allowSend read it from the
 // writePump-driven teardown / send path. With the field as a plain string this
 // is a data race; the atomic.Pointer makes the read/write safe. Run under
 // `go test -race ./internal/server/...` — the race detector flags the regression.
@@ -238,18 +238,18 @@ func TestUploadOwnerAtomic_NoRace(t *testing.T) {
 			c.setUploadOwner("owner-" + string(rune('A'+i%26)))
 		}
 	}()
-	// Reader 1: mimics writePump teardown calling releaseOwnerSlot.
+	// Reader 1: mimics writePump teardown calling releaseOwner.
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 1000; i++ {
-			hub.releaseOwnerSlot(c.uploadOwnerKey())
+			hub.admit.releaseOwner(c.uploadOwnerKey())
 		}
 	}()
-	// Reader 2: mimics readPump send path calling allowSendForOwner.
+	// Reader 2: mimics readPump send path calling allowSend.
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 1000; i++ {
-			hub.allowSendForOwner(c.uploadOwnerKey())
+			hub.admit.allowSend(c.uploadOwnerKey())
 		}
 	}()
 	wg.Wait()

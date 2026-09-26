@@ -13,13 +13,12 @@ import (
 // let one logged-in user fan out per-message work N× past the
 // single-tab ceiling.
 func TestAllowSendForOwner_NTabsShareBudget(t *testing.T) {
-	h := &Hub{}
-	h.userSendLimiters.Store(&sync.Map{})
+	h := newConnAdmission(HubOptions{})
 
 	const owner = "owner-A"
 	allowed := 0
 	for i := 0; i < 50; i++ {
-		if h.allowSendForOwner(owner) {
+		if h.allowSend(owner) {
 			allowed++
 		}
 	}
@@ -38,17 +37,16 @@ func TestAllowSendForOwner_NTabsShareBudget(t *testing.T) {
 // do NOT share a bucket — bucketing by uploadOwner means user-B's
 // throttle does not depend on user-A's recent traffic.
 func TestAllowSendForOwner_OwnersIndependent(t *testing.T) {
-	h := &Hub{}
-	h.userSendLimiters.Store(&sync.Map{})
+	h := newConnAdmission(HubOptions{})
 
 	// Drain owner A.
 	for i := 0; i < 10; i++ {
-		h.allowSendForOwner("A")
+		h.allowSend("A")
 	}
 	// Owner B should still get its full burst.
 	allowedB := 0
 	for i := 0; i < 10; i++ {
-		if h.allowSendForOwner("B") {
+		if h.allowSend("B") {
 			allowedB++
 		}
 	}
@@ -63,22 +61,11 @@ func TestAllowSendForOwner_OwnersIndependent(t *testing.T) {
 // mints, and a hard refusal there would brick legitimate first-message
 // flows. The per-conn sendLimiter is the only gate in that path.
 func TestAllowSendForOwner_EmptyOwnerSkipsGate(t *testing.T) {
-	h := &Hub{}
-	h.userSendLimiters.Store(&sync.Map{})
+	h := newConnAdmission(HubOptions{})
 	for i := 0; i < 100; i++ {
-		if !h.allowSendForOwner("") {
+		if !h.allowSend("") {
 			t.Fatalf("empty owner should not be throttled (call %d)", i)
 		}
-	}
-}
-
-// TestAllowSendForOwner_NilMapNoCrash covers hand-built Hubs that
-// bypass NewHub (older tests, headless wiring) — the nil-guard must
-// fall through to allow so we don't break those code paths.
-func TestAllowSendForOwner_NilMapNoCrash(t *testing.T) {
-	h := &Hub{} // userSendLimiters left nil
-	if !h.allowSendForOwner("anyone") {
-		t.Error("nil userSendLimiters should fall through to allow")
 	}
 }
 
@@ -87,8 +74,7 @@ func TestAllowSendForOwner_NilMapNoCrash(t *testing.T) {
 // callers from N tabs hitting the WS readPump in parallel. Race
 // detection is enabled by `go test -race`.
 func TestAllowSendForOwner_ConcurrentAccess(t *testing.T) {
-	h := &Hub{}
-	h.userSendLimiters.Store(&sync.Map{})
+	h := newConnAdmission(HubOptions{})
 
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -96,7 +82,7 @@ func TestAllowSendForOwner_ConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				h.allowSendForOwner("shared-owner")
+				h.allowSend("shared-owner")
 			}
 		}()
 	}
