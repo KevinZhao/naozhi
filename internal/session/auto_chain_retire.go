@@ -25,16 +25,17 @@ var autoChainRetiredOrigins = map[string]bool{
 //
 // CALLER CONTRACT: invoked from NewRouter BEFORE the background history loaders
 // launch, while the router is single-threaded — it snapshots the session table
-// under the table lock briefly, then mutates each session via historyMu only.
+// in one View, then mutates each session via historyMu only.
 func (r *Router) retireAutoChainOnce() {
 	startedAt := time.Now()
 
-	r.ss.Lock()
-	candidates := make([]*ManagedSession, 0, r.ss.Len())
-	for _, s := range r.ss.All() {
-		candidates = append(candidates, s)
-	}
-	r.ss.Unlock()
+	var candidates []*ManagedSession
+	r.ss.View(func(v sessView) {
+		candidates = make([]*ManagedSession, 0, v.Len())
+		for _, s := range v.All() {
+			candidates = append(candidates, s)
+		}
+	})
 
 	retired := 0
 	for _, s := range candidates {
@@ -72,9 +73,7 @@ func (r *Router) retireAutoChainOnce() {
 	}
 
 	if retired > 0 {
-		r.ss.Lock()
-		r.ss.MarkChanged()
-		r.ss.Unlock()
+		r.ss.Update(func(tx sessTx) { tx.MarkChanged() })
 	}
 
 	slog.Info("auto-chain retire complete",

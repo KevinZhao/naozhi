@@ -58,16 +58,17 @@ func (r *Router) workspaceResolverForTracker() tracker.WorkspaceResolver {
 		if keyhash == "" {
 			return ""
 		}
-		r.ss.RLock()
-		defer r.ss.RUnlock()
 		// The table keeps the hash index in step with its sessions, so a hit
 		// is a live session and a miss means there is none.
-		if key, ok := r.ss.KeyForHash(keyhash); ok {
-			if s := r.ss.Get(key); s != nil {
-				return s.Workspace()
+		var ws string
+		r.ss.View(func(v sessView) {
+			if key, ok := v.KeyForHash(keyhash); ok {
+				if s := v.Get(key); s != nil {
+					ws = s.Workspace()
+				}
 			}
-		}
-		return ""
+		})
+		return ws
 	}
 }
 

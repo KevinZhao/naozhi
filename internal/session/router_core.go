@@ -706,7 +706,8 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.kid.Seed(loadKnownIDs(r.storePath))
 
 	// Load persisted workspace overrides (/cd settings)
-	r.ss.Ext().workspaces.Seed(loadWorkspaceOverrides(r.storePath))
+	wsOverrides := loadWorkspaceOverrides(r.storePath)
+	r.ss.Update(func(tx sessTx) { tx.Ext().workspaces.Seed(wsOverrides) })
 
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
@@ -874,15 +875,21 @@ func (r *Router) startBackgroundLifecycle() {
 // so ReconnectShims can inject first, then backfill only if still empty. One
 // historyLoadSem bounds total history I/O across both tiers. Both finish
 // BEFORE the process's PersistSink is installed, so replayed entries are
-// tagged replayPhase=true and dropped. LOCK: NewRouter-only — ranges over
-// the session table unlocked under the publish-after-construct contract.
+// tagged replayPhase=true and dropped. NewRouter-only.
 func (r *Router) startBackgroundHistoryLoaders() {
 	historyLoadSem := make(chan struct{}, historyLoadConcurrency)
+	var sessions []*ManagedSession
+	r.ss.View(func(v sessView) {
+		sessions = make([]*ManagedSession, 0, v.Len())
+		for _, s := range v.All() {
+			sessions = append(sessions, s)
+		}
+	})
 
 	// Tier 1: naozhilog (in-process per-session log).
 	if r.eventLogPersister != nil {
 		sem := historyLoadSem
-		for _, s := range r.ss.All() {
+		for _, s := range sessions {
 			r.historyWg.Add(1)
 			go func() {
 				defer r.historyWg.Done()
@@ -916,7 +923,7 @@ func (r *Router) startBackgroundHistoryLoaders() {
 	}
 	shimKeys := r.shimManagedKeys()
 	sem := historyLoadSem
-	for _, s := range r.ss.All() {
+	for _, s := range sessions {
 		if s.getSessionID() == "" {
 			continue
 		}
@@ -1092,7 +1099,7 @@ func (r *Router) DefaultWorkspace() string {
 // Lock-free (atomic).
 //
 // The same counter serves two audiences: data version (session map changed;
-// bumped under the table lock) and render version (BumpVersion from non-session
+// bumped inside an Update) and render version (BumpVersion from non-session
 // mutations such as project favorite toggles). A Version() change therefore
 // does NOT guarantee ListSessions() returns new data; the cost is one
 // redundant debounced saveStore.
@@ -1158,11 +1165,11 @@ func (r *Router) ListSessions() []SessionSnapshot {
 }
 
 // ListSessionsWithVersion returns the session snapshot slice paired with the
-// gen value sampled in the same r.ss.RLock epoch, so /api/sessions tags data
-// with exactly the version that produced it (separate Version() +
-// ListSessions() reads could publish data with a stale version, #726).
-// Writers do `r.ss.Lock(); ...; gen.Add(1); r.ss.Unlock()`, so a reader
-// holding RLock observes an atomically produced (sessions, gen) pair.
+// gen value sampled in the same View, so /api/sessions tags data with exactly
+// the version that produced it (separate Version() + ListSessions() reads
+// could publish data with a stale version, #726). Writers bump gen inside
+// their Update, so a View observes an atomically produced (sessions, gen)
+// pair.
 func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]
@@ -1199,7 +1206,7 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 // sinceVersion it returns (nil, sinceVersion, false) WITHOUT touching
 // the session table or building snapshots, so the handler can answer
 // {version, unchanged:true} and skip the marshal. Sound because writers bump
-// gen under r.ss.Lock (see ListSessionsWithVersion); changed==true reuses
+// gen inside their Update (see ListSessionsWithVersion); changed==true reuses
 // ListSessionsWithVersion so the (snapshots, version) pair stays atomic.
 func (r *Router) ListSessionsIfChanged(sinceVersion uint64) (snapshots []SessionSnapshot, version uint64, changed bool) {
 	if cur := r.ss.Gen(); cur == sinceVersion {

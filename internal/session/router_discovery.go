@@ -30,37 +30,39 @@ func (r *Router) SetUserLabel(key, label string) bool {
 // When origin=="auto" and the current LabelOrigin is "user", the write is
 // rejected: AutoTitler reads a Snapshot, then spends 5–25s in an LLM call, and
 // a human rename in that window flips origin to "user", so origin MUST be
-// re-read under the table lock before the daemon overwrites (RFC v2.1 §11.1). Returns
-// false when the key is unknown or the write is rejected.
+// re-read in the transaction that overwrites (RFC v2.1 §11.1). Returns false
+// when the key is unknown or the write is rejected.
 func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 	if origin != "user" && origin != "auto" {
 		origin = "user"
 	}
-	r.ss.Lock()
-	s := r.ss.Get(key)
-	if s == nil {
-		r.ss.Unlock()
-		return false
+	var ok, changed bool
+	r.ss.Update(func(tx sessTx) {
+		s := tx.Get(key)
+		if s == nil {
+			return
+		}
+		// Empty origin is equivalent to "user" (stores without an origin
+		// field), so daemons must leave those alone too.
+		currentOrigin := s.LabelOrigin()
+		if origin == "auto" && (currentOrigin == "user" || currentOrigin == "") && s.UserLabel() != "" {
+			return
+		}
+		ok = true
+		// No-op fast path: same label and same origin → don't dirty the store.
+		if s.UserLabel() == label && currentOrigin == origin {
+			return
+		}
+		s.SetUserLabel(label)
+		s.setLabelOrigin(origin)
+		tx.MarkChanged()
+		changed = true
+	})
+	if changed {
+		// Kick the dashboard's onChange WS broadcast like every other mutator.
+		r.notifyChange()
 	}
-	// Re-read origin under the lock. Empty origin is equivalent to "user"
-	// (stores without an origin field), so daemons must leave those alone too.
-	currentOrigin := s.LabelOrigin()
-	if origin == "auto" && (currentOrigin == "user" || currentOrigin == "") && s.UserLabel() != "" {
-		r.ss.Unlock()
-		return false
-	}
-	// No-op fast path: same label and same origin → don't dirty the store.
-	if s.UserLabel() == label && currentOrigin == origin {
-		r.ss.Unlock()
-		return true
-	}
-	s.SetUserLabel(label)
-	s.setLabelOrigin(origin)
-	r.ss.MarkChanged()
-	r.ss.Unlock()
-	// Kick the dashboard's onChange WS broadcast like every other mutator.
-	r.notifyChange()
-	return true
+	return ok
 }
 
 // ClearUserLabelOrigin clears both LabelOrigin and UserLabel so a sysession
@@ -70,48 +72,49 @@ func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 // origin is the daemon's signal to retake control (RFC v2.1 §9.3).
 // Returns false when the session key is unknown.
 func (r *Router) ClearUserLabelOrigin(key string) bool {
-	r.ss.Lock()
-	s := r.ss.Get(key)
-	if s == nil {
-		r.ss.Unlock()
-		return false
+	var ok, changed bool
+	r.ss.Update(func(tx sessTx) {
+		s := tx.Get(key)
+		if s == nil {
+			return
+		}
+		ok = true
+		if s.LabelOrigin() == "" && s.UserLabel() == "" {
+			return // already cleared, no-op
+		}
+		s.SetUserLabel("")
+		s.setLabelOrigin("")
+		tx.MarkChanged()
+		changed = true
+	})
+	if changed {
+		r.notifyChange()
 	}
-	if s.LabelOrigin() == "" && s.UserLabel() == "" {
-		r.ss.Unlock()
-		return true // already cleared, no-op
-	}
-	s.SetUserLabel("")
-	s.setLabelOrigin("")
-	r.ss.MarkChanged()
-	r.ss.Unlock()
-	r.notifyChange()
-	return true
+	return ok
 }
 
 // VisitSessions iterates over all live sessions, invoking fn for each; fn
-// returning false stops early. The visit runs under RLock so the map cannot
+// returning false stops early. The visit is one View so the map cannot
 // mutate mid-iteration, and each snapshot is computed inline without leaking
 // the *ManagedSession (RFC v2.1 §8). fn must not call back into Router methods
-// that take the table lock. It uses snapshotReadOnly, NOT Snapshot, so the view computed
-// under RLock is side-effect free (no SetModel mirror write) (#1577).
+// that run their own transaction. It uses snapshotReadOnly, NOT Snapshot, so
+// the view is side-effect free (no SetModel mirror write) (#1577).
 func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
-	r.ss.RLock()
-	defer r.ss.RUnlock()
-	for _, s := range r.ss.All() {
-		if !fn(s.snapshotReadOnly()) {
-			return
+	r.ss.View(func(v sessView) {
+		for _, s := range v.All() {
+			if !fn(s.snapshotReadOnly()) {
+				return
+			}
 		}
-	}
+	})
 }
 
 // EventEntriesForKey returns the full event-log entries for the given session
 // key, or nil when the key is unknown (AutoTitler reviews every user turn).
-// the table lock is released before the read so the inner historyMu acquisition does
-// not nest under the table lock.
+// The session is looked up first and read afterwards, so the inner historyMu
+// acquisition does not nest under the table lock.
 func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
-	r.ss.RLock()
-	s := r.ss.Get(key)
-	r.ss.RUnlock()
+	s := r.ss.Load(key)
 	if s == nil {
 		return nil
 	}
@@ -124,9 +127,7 @@ func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
 // ManagedSession.EventEntriesAppend: the caller must not retain dst across
 // calls; the returned slice shares dst's backing array.
 func (r *Router) EventEntriesForKeyAppend(dst []clievent.EventEntry, key string) []clievent.EventEntry {
-	r.ss.RLock()
-	s := r.ss.Get(key)
-	r.ss.RUnlock()
+	s := r.ss.Load(key)
 	if s == nil {
 		return dst
 	}
@@ -139,9 +140,7 @@ func (r *Router) EventEntriesForKeyAppend(dst []clievent.EventEntry, key string)
 // the live shim conversation. Prefer InterruptSessionSafe for operator-facing
 // actions; this is for process-level signalling and the fallback branch.
 func (r *Router) InterruptSession(key string) bool {
-	r.ss.RLock()
-	s := r.ss.Get(key)
-	r.ss.RUnlock()
+	s := r.ss.Load(key)
 	if s == nil {
 		return false
 	}
@@ -185,9 +184,7 @@ func (r *Router) InterruptSessionSafe(key string) InterruptOutcome {
 // queued follow-ups on the same live CLI. Alive-but-idle returns
 // InterruptNoTurn, not InterruptNoSession.
 func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
-	r.ss.RLock()
-	s := r.ss.Get(key)
-	r.ss.RUnlock()
+	s := r.ss.Load(key)
 	if s == nil {
 		return InterruptNoSession
 	}
@@ -211,21 +208,21 @@ func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 // Only sessions with a running process are excluded to prevent duplicates;
 // suspended sessions are allowed through so their session files appear in the
 // history popover (deduplicated against the workspace).
-func (r *Router) DiscoveryExcludeIDs() map[string]bool {
-	r.ss.RLock()
-	defer r.ss.RUnlock()
-	ids := make(map[string]bool, r.ss.Len())
-	for _, s := range r.ss.All() {
-		if s.loadProcess() == nil {
-			continue
+func (r *Router) DiscoveryExcludeIDs() (ids map[string]bool) {
+	r.ss.View(func(v sessView) {
+		ids = make(map[string]bool, v.Len())
+		for _, s := range v.All() {
+			if s.loadProcess() == nil {
+				continue
+			}
+			if id := s.getSessionID(); id != "" {
+				ids[id] = true
+			}
+			for _, id := range s.prevSessionIDs {
+				ids[id] = true
+			}
 		}
-		if id := s.getSessionID(); id != "" {
-			ids[id] = true
-		}
-		for _, id := range s.prevSessionIDs {
-			ids[id] = true
-		}
-	}
+	})
 	return ids
 }
 
@@ -234,49 +231,52 @@ func (r *Router) DiscoveryExcludeIDs() map[string]bool {
 // If another session already targets the same sessionID, the existing key
 // is returned (deduplication) and no new entry is created.
 func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string) {
-	r.ss.Lock()
-	if _, exists := r.ss.Lookup(key); exists {
-		r.ss.Unlock()
-		return key // already exists with this exact key
-	}
-	// Deduplicate: if another session already targets this sessionID, reuse it.
-	if existingKey, ok := r.ss.KeyForID(sessionID); ok {
-		if existing, exists := r.ss.Lookup(existingKey); exists {
-			// idToKey is not cleaned for rotated IDs, so idToKey[sessionID]=K can
-			// dangle while sessions[K] holds an UNRELATED session (key reused).
-			// Only dedup when the found session genuinely owns this sessionID;
-			// a blind reuse would cross-session bleed (#2093).
-			if slices.Contains(existing.SnapshotChainIDs(), sessionID) {
-				r.ss.Unlock()
-				return existingKey
-			}
+	created := false
+	r.ss.Update(func(tx sessTx) {
+		effectiveKey = key
+		if _, exists := tx.Lookup(key); exists {
+			return // already exists with this exact key
 		}
-		// Stale or leaked index entry; clean up and continue.
-		r.ss.ClearID(sessionID)
+		// Deduplicate: if another session already targets this sessionID, reuse it.
+		if existingKey, ok := tx.KeyForID(sessionID); ok {
+			if existing, exists := tx.Lookup(existingKey); exists {
+				// idToKey is not cleaned for rotated IDs, so idToKey[sessionID]=K
+				// can dangle while sessions[K] holds an UNRELATED session (key
+				// reused). Only dedup when the found session genuinely owns this
+				// sessionID; a blind reuse would cross-session bleed (#2093).
+				if slices.Contains(existing.SnapshotChainIDs(), sessionID) {
+					effectiveKey = existingKey
+					return
+				}
+			}
+			// Stale or leaked index entry; clean up and continue.
+			tx.ClearID(sessionID)
+		}
+		s := &ManagedSession{
+			key:      key,
+			exempt:   isExemptKey(key),
+			runStore: r.sessionRuns,
+			costAcct: r.costAcct,
+		}
+		s.setWorkspace(workspace)
+		s.SetCLIName(r.CLIName())
+		s.SetCLIVersion(r.CLIVersion())
+		s.setSessionID(sessionID)
+		if lastPrompt != "" {
+			storeAtomicString(&s.lastPrompt, lastPrompt)
+		}
+		r.kid.Track(sessionID)
+		tx.SetID(sessionID, key)
+		s.lastActive.Store(time.Now().UnixNano())
+		s.initCreatedAtIfUnset()
+		r.publishSession(tx, key, s, false)
+		tx.MarkChanged()
+		created = true
+	})
+	if created {
+		r.notifyChange()
 	}
-	s := &ManagedSession{
-		key:      key,
-		exempt:   isExemptKey(key),
-		runStore: r.sessionRuns,
-		costAcct: r.costAcct,
-	}
-	s.setWorkspace(workspace)
-	s.SetCLIName(r.CLIName())
-	s.SetCLIVersion(r.CLIVersion())
-	s.setSessionID(sessionID)
-	if lastPrompt != "" {
-		storeAtomicString(&s.lastPrompt, lastPrompt)
-	}
-	r.kid.Track(sessionID)
-	r.ss.SetID(sessionID, key)
-	s.lastActive.Store(time.Now().UnixNano())
-	s.initCreatedAtIfUnset()
-	r.publishSession(r.ss.AssumeLocked(), key, s, false)
-	r.ss.MarkChanged()
-	r.ss.Unlock()
-
-	r.notifyChange()
-	return key
+	return effectiveKey
 }
 
 // RegisterCronStub creates a suspended exempt session for a cron job so the
@@ -321,104 +321,114 @@ func (r *Router) RegisterSystemStub(key, workspace, lastPrompt string) {
 // prevSessionIDs 并重挂 historySource，保证 cron recordResult 后侧边栏立刻
 // 能查到最新 JSONL。
 //
-// prevSessionIDs 的所有写路径都在 the table lock 下做，读路径同样在 the table lock 下；
+// prevSessionIDs 的所有写路径都在表事务里做，读路径同样在表事务里；
 // SnapshotChainIDs 的 historyMu.RLock 对该字段不构成真正同步，invariant 是
-// "the table lock 写/the table lock 读"，chain 刷新因此在 the table lock 临界区内做。attachHistorySource
-// 只读 r 的不可变字段 + 写 s 的 atomic.Pointer，在 the table lock 下调用同样安全。
+// "事务内写/事务内读"，chain 刷新因此在同一个 Update 里做。attachHistorySource
+// 只读 r 的不可变字段 + 写 s 的 atomic.Pointer，在事务里调用同样安全。
 func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []string) {
-	r.ss.Lock()
-	if existing, ok := r.ss.Lookup(key); ok {
-		changed := false
-		// Refresh workspace/prompt on existing stub; don't touch live process.
-		if existing.loadProcess() == nil {
-			if workspace != "" && existing.Workspace() != workspace {
-				existing.setWorkspace(workspace)
-				changed = true
-			}
-			if lastPrompt != "" && loadAtomicString(&existing.lastPrompt) != lastPrompt {
-				storeAtomicString(&existing.lastPrompt, lastPrompt)
-				changed = true
-			}
-			if len(chainIDs) > 0 && !slices.Equal(existing.prevSessionIDs, chainIDs) {
-				// existing is already published, so SnapshotChainIDs (holding only
-				// historyMu.RLock) can race this refresh; the historyMu-guarded
-				// setter makes that RLock a real happens-before (#1777).
-				existing.ReplacePrevSessionIDs(chainIDs)
-				// workspace 变了 historySource 里也要刷（cwd 变化会导致
-				// projDirName 命中不同的 claude 项目目录）。
-				r.attachHistorySource(existing)
-				changed = true
-			}
-			// Only mark dirty when something changed: the cron scheduler
-			// re-registers stubs on every cron.yaml reload, and an unconditional
-			// dirty would force a saveIfDirty fsync + WS fanout for nothing.
-			if changed {
-				r.ss.MarkChanged()
-			}
+	var overQuota bool
+	var kind string
+	var existingCount int
+	r.ss.Update(func(tx sessTx) {
+		if existing, ok := tx.Lookup(key); ok {
+			r.refreshStub(tx, existing, workspace, lastPrompt, chainIDs)
+			return
 		}
-		r.ss.Unlock()
-		// Always notify on refresh so the sidebar edit flow gets an immediate
-		// WS kick; notifyChange is cheap, saveIfDirty is what the gate guards.
-		r.notifyChange()
-		return
-	}
-	// The per-namespace exempt sub-quota gate lives in spawnSession; stub
-	// registration creates an exempt entry WITHOUT spawning and never crosses
-	// it, so it could starve other namespaces' alive-spawn budget. Not
-	// hard-rejected (dropping a stub loses its history chain); surfaced (#720).
-	if kind := exemptKind(key); kind != "" {
-		if existing := countExemptByKind(r.ss.AssumeLocked().View, kind); existing >= exemptCapFor(kind) {
-			slog.Warn("exempt stub registration exceeds namespace sub-quota",
-				"key", key, "namespace", kind,
-				"existing", existing, "cap", exemptCapFor(kind))
+		// The per-namespace exempt sub-quota gate lives in reserveSpawn; stub
+		// registration creates an exempt entry WITHOUT spawning and never
+		// crosses it, so it could starve other namespaces' alive-spawn budget.
+		// Not hard-rejected (dropping a stub loses its history chain); surfaced
+		// (#720).
+		if kind = exemptKind(key); kind != "" {
+			existingCount = countExemptByKind(tx.View, kind)
+			overQuota = existingCount >= exemptCapFor(kind)
 		}
+		s := &ManagedSession{
+			key:      key,
+			exempt:   true,
+			runStore: r.sessionRuns,
+			costAcct: r.costAcct,
+		}
+		if len(chainIDs) > 0 {
+			s.prevSessionIDs = slices.Clone(chainIDs)
+		}
+		s.setWorkspace(workspace)
+		s.SetCLIName(r.CLIName())
+		s.SetCLIVersion(r.CLIVersion())
+		if lastPrompt != "" {
+			storeAtomicString(&s.lastPrompt, lastPrompt)
+		}
+		s.lastActive.Store(time.Now().UnixNano())
+		s.initCreatedAtIfUnset()
+		r.publishSession(tx, key, s, false)
+		tx.MarkChanged()
+	})
+	if overQuota {
+		slog.Warn("exempt stub registration exceeds namespace sub-quota",
+			"key", key, "namespace", kind,
+			"existing", existingCount, "cap", exemptCapFor(kind))
 	}
-	s := &ManagedSession{
-		key:      key,
-		exempt:   true,
-		runStore: r.sessionRuns,
-		costAcct: r.costAcct,
-	}
-	if len(chainIDs) > 0 {
-		s.prevSessionIDs = slices.Clone(chainIDs)
-	}
-	s.setWorkspace(workspace)
-	s.SetCLIName(r.CLIName())
-	s.SetCLIVersion(r.CLIVersion())
-	if lastPrompt != "" {
-		storeAtomicString(&s.lastPrompt, lastPrompt)
-	}
-	s.lastActive.Store(time.Now().UnixNano())
-	s.initCreatedAtIfUnset()
-	r.publishSession(r.ss.AssumeLocked(), key, s, false)
-	r.ss.MarkChanged()
-	r.ss.Unlock()
-
+	// Always notify, on a refresh too, so the sidebar edit flow gets an
+	// immediate WS kick; notifyChange is cheap, saveIfDirty is what the dirty
+	// gate guards.
 	r.notifyChange()
 }
 
+// refreshStub refreshes workspace, prompt and chain on an existing stub; a
+// live process is left alone.
+func (r *Router) refreshStub(tx sessTx, existing *ManagedSession, workspace, lastPrompt string, chainIDs []string) {
+	if existing.loadProcess() != nil {
+		return
+	}
+	changed := false
+	if workspace != "" && existing.Workspace() != workspace {
+		existing.setWorkspace(workspace)
+		changed = true
+	}
+	if lastPrompt != "" && loadAtomicString(&existing.lastPrompt) != lastPrompt {
+		storeAtomicString(&existing.lastPrompt, lastPrompt)
+		changed = true
+	}
+	if len(chainIDs) > 0 && !slices.Equal(existing.prevSessionIDs, chainIDs) {
+		// existing is already published, so SnapshotChainIDs (holding only
+		// historyMu.RLock) can race this refresh; the historyMu-guarded
+		// setter makes that RLock a real happens-before (#1777).
+		existing.ReplacePrevSessionIDs(chainIDs)
+		// workspace 变了 historySource 里也要刷（cwd 变化会导致
+		// projDirName 命中不同的 claude 项目目录）。
+		r.attachHistorySource(existing)
+		changed = true
+	}
+	// Only mark dirty when something changed: the cron scheduler re-registers
+	// stubs on every cron.yaml reload, and an unconditional dirty would force a
+	// saveIfDirty fsync + WS fanout for nothing.
+	if changed {
+		tx.MarkChanged()
+	}
+}
+
 // ManagedExcludeSets returns PIDs, session IDs, and CWDs of all managed sessions
-// in a single lock acquisition. Used by discovery.Scan to avoid three separate mutex grabs.
+// in one View. Used by discovery.Scan to avoid three separate table reads.
 func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]bool, cwds map[string]bool) {
-	r.ss.RLock()
-	defer r.ss.RUnlock()
 	pids = make(map[int]bool)
 	sessionIDs = make(map[string]bool)
 	cwds = make(map[string]bool)
-	for _, s := range r.ss.All() {
-		if id := s.getSessionID(); id != "" {
-			sessionIDs[id] = true
-		}
-		if p := s.loadProcess(); p != nil && p.Alive() {
-			if pid := p.PID(); pid > 0 {
-				pids[pid] = true
+	r.ss.View(func(v sessView) {
+		for _, s := range v.All() {
+			if id := s.getSessionID(); id != "" {
+				sessionIDs[id] = true
 			}
-			if ws := s.Workspace(); ws != "" {
-				cwds[ws] = true
+			if p := s.loadProcess(); p != nil && p.Alive() {
+				if pid := p.PID(); pid > 0 {
+					pids[pid] = true
+				}
+				if ws := s.Workspace(); ws != "" {
+					cwds[ws] = true
+				}
 			}
 		}
-	}
-	return
+	})
+	return pids, sessionIDs, cwds
 }
 
 // Takeover creates a managed session to replace an external Claude CLI session.
@@ -433,58 +443,66 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	if err := validateBackend(opts.Backend); err != nil {
 		return nil, err
 	}
-	r.ss.Lock()
-	// If key already exists (e.g. re-takeover same CWD), close the old process
-	if s, ok := r.ss.Lookup(key); ok {
-		// Mirror resetLocked: only non-exempt AND alive sessions contributed to
-		// activeCount, so only those get a -1 (no O(n) countActive recount).
-		if p := s.loadProcess(); p != nil && p.Alive() {
-			oldSession := s
-			proc := p
-			oldBackend := s.Backend()
-			oldExempt := s.exempt
-			r.ss.Unlock()
-			proc.Close()
-			// spawnSession below will StartShim against the same socket path;
-			// wait for the shim to release it (same race as Reset).
-			waitSocketGoneForKey(key, 2*time.Second)
-			r.ss.Lock()
-			// Only delete if no concurrent goroutine replaced this session.
-			// keepBackendOverride=true: Takeover re-spawns on the same key
-			// and spawnSession below consumes the override atomically.
-			if cur, ok := r.ss.Lookup(key); ok && cur == oldSession {
-				r.unregisterSession(r.ss.AssumeLocked(), key, cur, true)
-				r.ss.MarkChanged()
-				if !oldExempt {
-					if r.ss.AddActive(-1) < 0 {
-						r.ss.SetActive(0)
+	var (
+		res     spawnReservation
+		err     error
+		aborted bool
+	)
+	r.ss.Update(func(tx sessTx) {
+		// If key already exists (e.g. re-takeover same CWD), close the old process.
+		if s, ok := tx.Lookup(key); ok {
+			// Mirror reset: only non-exempt AND alive sessions contributed to
+			// activeCount, so only those get a -1 (no O(n) countActive recount).
+			if p := s.loadProcess(); p != nil && p.Alive() {
+				oldBackend, oldExempt := s.Backend(), s.exempt
+				tx.Unlocked(func() {
+					p.Close()
+					// The spawn below will StartShim against the same socket
+					// path; wait for the shim to release it (same race as Reset).
+					waitSocketGoneForKey(key, 2*time.Second)
+				})
+				// Only delete if no concurrent goroutine replaced this session.
+				// keepBackendOverride=true: Takeover re-spawns on the same key
+				// and the spawn below consumes the override.
+				if cur, ok := tx.Lookup(key); ok && cur == s {
+					r.unregisterSession(tx, key, cur, true)
+					tx.MarkChanged()
+					if !oldExempt {
+						if tx.AddActive(-1) < 0 {
+							tx.SetActive(0)
+						}
+						metrics.RecordSessionActive(oldBackend, -1)
 					}
-					metrics.RecordSessionActive(oldBackend, -1)
+				} else if cur != nil && cur.isAlive() {
+					// Concurrent GetOrCreate created a new session during
+					// Close(); abort takeover rather than silently returning
+					// the wrong session.
+					aborted = true
+					return
 				}
-			} else if cur != nil && cur.isAlive() {
-				// Concurrent GetOrCreate created a new session during Close();
-				// abort takeover rather than silently returning wrong session.
-				r.ss.Unlock()
-				return nil, fmt.Errorf("concurrent session created for key %s during takeover", key)
+				// Implicit else: a concurrent goroutine replaced the session with
+				// an exited one. Leave it — the spawn below overwrites it,
+				// indexes the key and counts it, so no index / delta work here.
+			} else {
+				// Dead session branch: same keepBackendOverride=true rationale.
+				// Dead sessions weren't in activeCount, so no decrement is needed.
+				r.unregisterSession(tx, key, s, true)
+				tx.MarkChanged()
 			}
-			// Implicit else: a concurrent goroutine replaced the session with an
-			// exited one. Leave it — spawnSession below overwrites it, calls
-			// indexes the key and Stores +1 if applicable, so no index / delta work here.
-		} else {
-			// Dead session branch: same keepBackendOverride=true rationale.
-			// Dead sessions weren't in activeCount, so no decrement is needed.
-			r.unregisterSession(r.ss.AssumeLocked(), key, s, true)
-			r.ss.MarkChanged()
 		}
+		// Workspace override for the chat key prefix. Adopt marks the store
+		// dirty (only when changed) so the override survives a crash before
+		// another flush.
+		if chatKey := chatKeyFor(key); chatKey != key {
+			tx.Ext().workspaces.Adopt(chatKey, workspace)
+		}
+		err = r.reserveSpawn(tx, &res, key, sessionID, opts)
+	})
+	if aborted {
+		return nil, fmt.Errorf("concurrent session created for key %s during takeover", key)
 	}
-	// Workspace override for the chat key prefix. Adopt marks the store dirty
-	// (only when changed) so the override survives a crash before another flush.
-	if chatKey := chatKeyFor(key); chatKey != key {
-		r.ss.Ext().workspaces.Adopt(chatKey, workspace)
-	}
-	s, err := r.spawnSession(ctx, key, sessionID, opts)
 	if err != nil {
 		return nil, err
 	}
-	return s, nil
+	return r.completeSpawn(ctx, &res)
 }

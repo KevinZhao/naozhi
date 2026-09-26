@@ -228,56 +228,53 @@ func computeBackendIDs(wrapper *cli.Wrapper, wrappers map[string]*cli.Wrapper, d
 const maxBackendOverrides = 1024
 
 // SetSessionBackend remembers the backend picked for a new session. Applied on
-// the next spawnSession only; live sessions are not migrated. Empty clears.
+// the next spawn only; live sessions are not migrated. Empty clears.
 func (r *Router) SetSessionBackend(key, backend string) {
-	r.ss.Lock()
-	defer r.ss.Unlock()
-	if backend == "" {
-		delete(r.ss.Ext().picks.backend, key)
-		return
-	}
-	// Updating an existing key never hits the cap; only brand-new inserts do.
-	if _, existing := r.ss.Ext().picks.backend[key]; !existing && len(r.ss.Ext().picks.backend) >= maxBackendOverrides {
+	var ok bool
+	r.ss.Update(func(tx sessTx) { ok = setPick(tx.Ext().picks.backend, key, backend) })
+	if !ok {
 		slog.Warn("backendOverrides at capacity; dropping override",
 			"key", key, "cap", maxBackendOverrides)
-		return
 	}
-	r.ss.Ext().picks.backend[key] = backend
 }
 
 // SessionBackend returns the backend override for key, or "" if none.
-func (r *Router) SessionBackend(key string) string {
-	r.ss.RLock()
-	defer r.ss.RUnlock()
-	return r.ss.Ext().picks.backend[key]
+func (r *Router) SessionBackend(key string) (backend string) {
+	r.ss.View(func(v sessView) { backend = v.Ext().picks.backend[key] })
+	return backend
+}
+
+// setPick sets (or, for "", clears) key's entry in a pick map. It reports
+// false when a brand-new key is refused because the map is at
+// maxBackendOverrides; updating an existing key never hits the cap.
+func setPick(m map[string]string, key, value string) bool {
+	if value == "" {
+		delete(m, key)
+		return true
+	}
+	if _, existing := m[key]; !existing && len(m) >= maxBackendOverrides {
+		return false
+	}
+	m[key] = value
+	return true
 }
 
 // SetSessionAccessProfile remembers the access profile picked for a new
 // session (RFC project-access-profile §8.2). One-shot: consumed on the next
-// spawnSession. Empty clears. Mirrors SetSessionBackend including the cap.
+// spawn. Empty clears. Mirrors SetSessionBackend including the cap.
 func (r *Router) SetSessionAccessProfile(key, profile string) {
-	r.ss.Lock()
-	defer r.ss.Unlock()
-	if r.ss.Ext().picks.accessProfile == nil {
-		r.ss.Ext().picks.accessProfile = make(map[string]string)
-	}
-	if profile == "" {
-		delete(r.ss.Ext().picks.accessProfile, key)
-		return
-	}
-	if _, existing := r.ss.Ext().picks.accessProfile[key]; !existing && len(r.ss.Ext().picks.accessProfile) >= maxBackendOverrides {
+	var ok bool
+	r.ss.Update(func(tx sessTx) { ok = setPick(tx.Ext().picks.accessProfile, key, profile) })
+	if !ok {
 		slog.Warn("accessProfileOverrides at capacity; dropping override",
 			"key", key, "cap", maxBackendOverrides)
-		return
 	}
-	r.ss.Ext().picks.accessProfile[key] = profile
 }
 
 // SessionAccessProfile returns the access-profile override for key, or "".
-func (r *Router) SessionAccessProfile(key string) string {
-	r.ss.RLock()
-	defer r.ss.RUnlock()
-	return r.ss.Ext().picks.accessProfile[key]
+func (r *Router) SessionAccessProfile(key string) (profile string) {
+	r.ss.View(func(v sessView) { profile = v.Ext().picks.accessProfile[key] })
+	return profile
 }
 
 // CLIPath returns the CLI binary path for health checks.
@@ -344,16 +341,18 @@ func (r *Router) backendDefaultsFor(backendID string) BackendDefaults {
 // BackendModelManifest returns the model list the dashboard popover offers for
 // a backend ("" = router default). Tiers: (1) runtime manifest from any LIVE
 // process, cached in bkStore.manifests; (2) configured
-// cli.backends[].models; (3) observedModelsLocked. Nil when no tier has data.
-// Reads the session table, so it takes the table lock for reading; the cache has its own
-// lock.
-func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
-	r.ss.RLock()
-	defer r.ss.RUnlock()
+// cli.backends[].models; (3) observedModels. Nil when no tier has data.
+// Reads the session table in one View; the cache has its own lock.
+func (r *Router) BackendModelManifest(backendID string) (models []cli.ModelInfo) {
 	if backendID == "" {
 		backendID = r.bkStore.defaultBackend
 	}
-	for _, s := range r.ss.All() {
+	r.ss.View(func(v sessView) { models = r.backendModelManifest(v, backendID) })
+	return models
+}
+
+func (r *Router) backendModelManifest(v sessView, backendID string) []cli.ModelInfo {
+	for _, s := range v.All() {
 		sb := s.Backend()
 		if sb == "" {
 			sb = r.bkStore.defaultBackend
@@ -385,13 +384,13 @@ func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
 		}
 		return out
 	}
-	return r.observedModelsLocked(backendID)
+	return r.observedModels(v, backendID)
 }
 
-// observedModelsLocked returns the deduped model ids seen for backendID in a
+// observedModels returns the deduped model ids seen for backendID in a
 // stable order (router default first, then sessions' Model() / TuningModel()
-// sorted). Caller holds the table lock. Nil when nothing observed.
-func (r *Router) observedModelsLocked(backendID string) []cli.ModelInfo {
+// sorted). Nil when nothing observed.
+func (r *Router) observedModels(v sessView, backendID string) []cli.ModelInfo {
 	seen := make(map[string]bool)
 	var out []cli.ModelInfo
 	add := func(id string) {
@@ -403,7 +402,7 @@ func (r *Router) observedModelsLocked(backendID string) []cli.ModelInfo {
 	}
 	add(r.backendDefaultsFor(backendID).Model)
 	var rest []string
-	for _, s := range r.ss.All() {
+	for _, s := range v.All() {
 		sb := s.Backend()
 		if sb == "" {
 			sb = r.bkStore.defaultBackend

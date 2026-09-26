@@ -16,8 +16,8 @@ import (
 // window where a concurrent GetOrCreate observes "no inflight marker" and
 // spawns its own session with mismatched opts.
 //
-// This is a structural test: we install a guardCh, call spawnSession (which
-// fails because the wrapper points at a nonexistent binary), and assert that
+// This is a structural test: we install a guardCh, spawn (which fails
+// because the wrapper points at a nonexistent binary), and assert that
 // the channel that was closed during teardown is the SAME channel we
 // installed. If the prologue ever drifts back to unconditional overwrite,
 // this test fails immediately.
@@ -25,18 +25,15 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 	r := newTestRouter(5)
 	key := "feishu:direct:reset-recreate-guard:general"
 
-	// Mirror ResetAndRecreate: install a guardCh in spawningKeys before
-	// the spawn call. Caller of spawnSession is required to enter with
-	// the table lock held.
-	r.ss.Lock()
-	guardCh := r.ss.Ext().spawns.BeginSpawn(key)
-
-	// spawnSession will fail because newTestRouter's wrapper points at
-	// /nonexistent/cli-binary, but its defer (EndSpawn) still
-	// runs and closes whichever channel it captured into doneCh. With the
-	// fix, that channel IS our guardCh.
-	_, _ = r.spawnSession(context.Background(), key, "", AgentOpts{})
-	// spawnSession unlocks on error; ensure unlocked before re-locking.
+	// Mirror ResetAndRecreate: install a guardCh in the transaction that
+	// reserves the spawn.
+	//
+	// The spawn fails because newTestRouter's wrapper points at
+	// /nonexistent/cli-binary, but its exit (EndSpawn) still closes whichever
+	// channel it captured into doneCh. With the fix, that channel IS our
+	// guardCh.
+	var guardCh chan struct{}
+	_, _ = spawnIn(r, key, func(tx sessTx) { guardCh = tx.Ext().spawns.BeginSpawn(key) })
 
 	// Verify the guardCh we installed was the one that got closed.
 	// A closed channel returns immediately on receive; an unclosed one
@@ -45,7 +42,7 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 	case <-guardCh:
 		// ok — fix is in place
 	case <-time.After(2 * time.Second):
-		t.Fatal("guardCh was not closed by spawnSession's defer; " +
+		t.Fatal("guardCh was not closed by the spawn's exit; " +
 			"prologue likely installed a fresh channel instead of reusing the guard " +
 			"(regression of #775 / R62-GO-3 fix)")
 	}
@@ -54,14 +51,14 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 	r.ss.Lock()
 	if _, stillPresent := r.ss.Ext().spawns.SpawnInFlight(key); stillPresent {
 		r.ss.Unlock()
-		t.Fatal("in-flight entry still present after spawnSession returned; " +
+		t.Fatal("in-flight entry still present after the spawn returned; " +
 			"EndSpawn failed to delete the (possibly reused) entry")
 	}
 	r.ss.Unlock()
 }
 
 // TestSpawnSession_FreshKeyInstallsOwnChannel pins the symmetric invariant:
-// when no caller pre-installed an entry, spawnSession's prologue creates
+// when no caller pre-installed an entry, the spawn's reserve creates
 // and installs its own channel (the original behaviour). Without this,
 // GetOrCreate's inflight-wait path would never see a marker and would
 // stack duplicate spawns on the shim socket.
@@ -69,16 +66,14 @@ func TestSpawnSession_FreshKeyInstallsOwnChannel(t *testing.T) {
 	r := newTestRouter(5)
 	key := "feishu:direct:fresh-key-installs:general"
 
-	// No pre-installed entry. spawnSession must create one.
-	r.ss.Lock()
-	_, _ = r.spawnSession(context.Background(), key, "", AgentOpts{})
+	// No pre-installed entry. The spawn must create one.
+	_, _ = spawnIn(r, key, nil)
 
-	// On error path spawnSession unlocks; relock to inspect map state.
 	r.ss.Lock()
 	defer r.ss.Unlock()
 	if _, present := r.ss.Ext().spawns.SpawnInFlight(key); present {
-		t.Fatal("in-flight entry leaked after spawnSession failed " +
-			"(defer should close+delete)")
+		t.Fatal("in-flight entry leaked after the spawn failed " +
+			"(its exit should close+delete)")
 	}
 }
 
