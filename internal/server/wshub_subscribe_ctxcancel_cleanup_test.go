@@ -2,7 +2,6 @@ package server
 
 import (
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,39 +9,18 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// installPlaceholderSub mirrors what handleSubscribe does just before it calls
-// completeSubscribe: it installs the no-op placeholder unsub and (when the
-// counter is allocated) bumps the per-key subscriber counter + its lock-free
-// mirror. Tests
-// use it to drive completeSubscribe directly with the exact pre-state the real
-// path produces.
+// installPlaceholderSub registers c and reserves its slot for key, the state
+// handleSubscribe leaves just before it calls completeSubscribe.
 func installPlaceholderSub(h *Hub, c *wsClient, key string) {
-	h.mu.Lock()
-	c.subscriptions[key] = func() {}
-	// Mirrors handleSubscribe's guard: the map's existence is what activates the
-	// counter since #2623, and writing to a nil map would panic.
-	if h.subscriberCount != nil {
-		h.subscriberCount[key]++
-		h.setSubscriberCountFast(key, h.subscriberCount[key])
+	c.authenticated.Store(true)
+	h.subs.add(c)
+	if res := h.subs.reserve(c, key); res != reserveOK {
+		panic(res)
 	}
-	h.mu.Unlock()
-}
-
-// fastSubscriberCount reads the lock-free subscriberCountFast mirror for key.
-func fastSubscriberCount(h *Hub, key string) int {
-	if v, ok := h.subscriberCountFast.Load(key); ok {
-		return int(v.(*atomic.Int32).Load())
-	}
-	return 0
 }
 
 func ownerSubState(h *Hub, c *wsClient, key string) (subCount int, hasSub bool, fast int) {
-	h.mu.Lock()
-	subCount = h.subscriberCount[key]
-	_, hasSub = c.subscriptions[key]
-	h.mu.Unlock()
-	fast = fastSubscriberCount(h, key)
-	return
+	return subscriberCountOf(h, key), isSubscribed(h, c, key), int(h.subs.count(key))
 }
 
 // TestCompleteSubscribe_CtxCancelledInReCheckNoLeak is the R20260605B-CORR-2
@@ -56,19 +34,13 @@ func ownerSubState(h *Hub, c *wsClient, key string) (subCount int, hasSub bool, 
 // subscriberCount[key] (toward maxSubscribersPerKey).
 //
 // To deterministically drive THAT branch (not the pre-lock fast-fail), the test
-// holds h.mu so completeSubscribe blocks at its re-lock with the pre-lock
+// holds the registry's lock so completeSubscribe blocks at its re-lock with the pre-lock
 // fast-fail already passed (ctx still live there), then cancels the ctx before
-// releasing h.mu. completeSubscribe therefore observes a live ctx at the
+// releasing it. completeSubscribe therefore observes a live ctx at the
 // fast-fail and a cancelled ctx at the re-check — exactly the #1806 window.
 func TestCompleteSubscribe_CtxCancelledInReCheckNoLeak(t *testing.T) {
 	hub, router := newTestHub("")
 	defer hub.Shutdown()
-	// newTestHub goes through NewHub, so the counter map is allocated — the caps
-	// this bug inflates are actually live. (Before #2623 this asserted an
-	// enforceCaps bool that said the same thing twice.)
-	if hub.subscriberCount == nil {
-		t.Fatal("expected NewHub to allocate subscriberCount so the leak counters are active")
-	}
 
 	key := "test:d:u:general"
 	proc := session.NewTestProcess()
@@ -78,31 +50,30 @@ func TestCompleteSubscribe_CtxCancelledInReCheckNoLeak(t *testing.T) {
 	}
 
 	c := &wsClient{
-		send:          make(chan []byte, 8),
-		done:          make(chan struct{}),
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
+		send: make(chan []byte, 8),
+		done: make(chan struct{}),
 	}
 	installPlaceholderSub(hub, c, key)
 	if cnt, ok, _ := ownerSubState(hub, c, key); cnt != 1 || !ok {
 		t.Fatalf("pre-state: subscriberCount=%d hasSub=%v, want 1/true", cnt, ok)
 	}
 
-	// Hold h.mu so completeSubscribe parks at its under-lock re-check after the
-	// pre-lock fast-fail (which sees a live ctx) and SubscribeEvents have run.
-	hub.mu.Lock()
+	// Hold the registry's lock so completeSubscribe parks at its under-lock
+	// re-check after the pre-lock fast-fail (which sees a live ctx) and
+	// SubscribeEvents have run.
+	hub.subs.mu.Lock()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		hub.completeSubscribe(c, key, node.ClientMsg{Type: "subscribe", Key: key}, sess)
 	}()
 	// Give the goroutine time to clear the fast-fail + SubscribeEvents and block
-	// on h.mu.Lock(). It cannot proceed past the re-lock until we Unlock below,
+	// on the lock. It cannot proceed past the re-lock until we Unlock below,
 	// so this only needs to be long enough to reach the blocked Lock.
 	time.Sleep(50 * time.Millisecond)
 	// Cancel WITHOUT Shutdown — the ParentCtx-cancel-forgot-Shutdown scenario.
 	hub.cancel()
-	hub.mu.Unlock()
+	hub.subs.mu.Unlock()
 	<-done
 
 	cnt, hasSub, fast := ownerSubState(hub, c, key)
@@ -113,7 +84,10 @@ func TestCompleteSubscribe_CtxCancelledInReCheckNoLeak(t *testing.T) {
 		t.Errorf("subscriberCount[%q] = %d after ctx-cancelled re-check, want 0 (leak)", key, cnt)
 	}
 	if fast != 0 {
-		t.Errorf("subscriberCountFast[%q] = %d, want 0 (mirror leaked)", key, fast)
+		t.Errorf("lock-free count[%q] = %d, want 0 (mirror leaked)", key, fast)
+	}
+	if n := proc.EventLog.SubscriberCount(); n != 0 {
+		t.Errorf("EventLog keeps %d subscriptions after the declined install: the unsub was not run", n)
 	}
 }
 
@@ -134,10 +108,8 @@ func TestCompleteSubscribe_CtxCancelMidFlightConsistent(t *testing.T) {
 		sess := router.InjectSession(key, proc)
 
 		c := &wsClient{
-			send:          make(chan []byte, 8),
-			done:          make(chan struct{}),
-			subscriptions: make(map[string]func()),
-			subGen:        make(map[string]uint64),
+			send: make(chan []byte, 8),
+			done: make(chan struct{}),
 		}
 		installPlaceholderSub(hub, c, key)
 
@@ -163,7 +135,7 @@ func TestCompleteSubscribe_CtxCancelMidFlightConsistent(t *testing.T) {
 			t.Fatalf("iter %d: no subscription installed but subscriberCount=%d, want 0 (counter leaked)", iter, cnt)
 		}
 		if fast != cnt {
-			t.Fatalf("iter %d: subscriberCountFast=%d != subscriberCount=%d (mirror desync)", iter, fast, cnt)
+			t.Fatalf("iter %d: lock-free count=%d != subscriber set size=%d (mirror desync)", iter, fast, cnt)
 		}
 		hub.Shutdown()
 	}

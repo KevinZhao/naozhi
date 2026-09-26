@@ -364,9 +364,7 @@ func TestHub_RemoteSubscribe(t *testing.T) {
 	defer hub.Shutdown()
 
 	client := newTestWSClient()
-	hub.mu.Lock()
-	hub.clients[client] = struct{}{}
-	hub.mu.Unlock()
+	hub.register(client)
 
 	hub.handleSubscribe(client, node.ClientMsg{
 		Type: "subscribe",
@@ -410,28 +408,15 @@ func TestHub_Subscribe_PerKeyCap(t *testing.T) {
 
 	const key = "test:d:u:general"
 
-	// Pre-seed maxSubscribersPerKey distinct clients each holding a placeholder
-	// subscription for `key`. Bypassing handleSubscribe avoids the
-	// "session not found" cleanup that otherwise removes the placeholder, so
-	// the cap-counting branch sees the full population. Mirror the increment
-	// that handleSubscribe normally does on the per-key counter
-	// (R246-PERF-4 / #716) so the cap check sees the seeded population.
-	hub.mu.Lock()
+	// Pre-seed maxSubscribersPerKey subscribers. Bypassing handleSubscribe
+	// avoids the "session not found" cleanup that would release each slot.
 	for i := 0; i < maxSubscribersPerKey; i++ {
-		c := newTestWSClient()
-		hub.clients[c] = struct{}{}
-		c.subscriptions[key] = func() {}
-		if hub.subscriberCount != nil {
-			hub.subscriberCount[key]++
-		}
+		registerSub(hub, newTestWSClient(), key)
 	}
-	hub.mu.Unlock()
 
 	// A new client subscribing to the same key must be rejected.
 	overflow := newTestWSClient()
-	hub.mu.Lock()
-	hub.clients[overflow] = struct{}{}
-	hub.mu.Unlock()
+	hub.register(overflow)
 
 	hub.handleSubscribe(overflow, node.ClientMsg{Type: "subscribe", Key: key})
 
@@ -444,10 +429,7 @@ func TestHub_Subscribe_PerKeyCap(t *testing.T) {
 	}
 
 	// The overflow client must NOT have leaked a placeholder subscription.
-	hub.mu.RLock()
-	_, leaked := overflow.subscriptions[key]
-	hub.mu.RUnlock()
-	if leaked {
+	if isSubscribed(hub, overflow, key) {
 		t.Error("rejected subscribe leaked placeholder into overflow.subscriptions")
 	}
 }

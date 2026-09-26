@@ -176,10 +176,10 @@ func (e *sendEngine) TrackSend() (release func(), shuttingDown bool) {
 //     BroadcastSessionsUpdate through sendNotifier, and a trigger that opens
 //     a debounce window takes a clientWG slot — a send goroutine can enlarge
 //     clientWG. Draining before the debouncer is closed arms a callback that
-//     runs after Shutdown has emptied authClientsSlice.
-//  3. The caller holds NONE of h.mu / authMu / the debouncer's lock. The
-//     waited goroutines re-enter all three through sendNotifier
-//     (BroadcastSessionReady → authMu.RLock, broadcastState → h.mu.RLock,
+//     runs after Shutdown has drained the subscriber registry.
+//  3. The caller holds NONE of the subscriber registry's locks or the
+//     debouncer's. The waited goroutines re-enter them through sendNotifier
+//     (BroadcastSessionReady / broadcastState → the registry's authMu,
 //     BroadcastSessionsUpdate → debouncer.trigger). Calling drain while
 //     holding any of them is a deterministic deadlock: the in-flight
 //     goroutine blocks on that lock while Shutdown holds it waiting for wg.

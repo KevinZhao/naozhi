@@ -48,37 +48,30 @@ func wshubLockOrderScanFiles(t *testing.T) []string {
 	return out
 }
 
-// TestHubShutdown_LockOrderInvariant is the R35-REL2 pin for the
-// h.mu → eventLog.subMu lock ordering documented on Hub.Shutdown.
-// Shutdown invokes per-key unsub closures while holding h.mu; each
-// closure ends up taking eventLog.l.subMu (write lock) via
-// EventLog.Unsubscribe. The inverse direction — any code path that
-// acquires subMu first and then tries to take h.mu — creates an
-// ABBA deadlock that surfaces only at Shutdown time, long after
-// the offending change merged.
+// TestHubShutdown_LockOrderInvariant pins the registry → eventLog.subMu
+// lock order documented on Hub.Shutdown. Unsub closures take
+// eventLog.l.subMu (write lock) via EventLog.Unsubscribe, and some registry
+// methods run them under the registry's lock. The inverse direction — a
+// code path that acquires subMu first and then a Hub-side lock — is an ABBA
+// deadlock that surfaces only at Shutdown time, long after the offending
+// change merged.
 //
 // Today the invariant holds because:
 //
 //  1. notifySubscribers holds subMu.RLock and touches no Hub state.
 //  2. eventPushLoop reads the Hub's context (h.ctx) via a value
-//     captured when the goroutine was spawned, never calls h.mu.Lock.
-//  3. readPump / writePump use hub.unregister which DOES take h.mu,
-//     but they are invoked from the goroutine's own stack — not
-//     from inside an EventLog callback.
+//     captured when the goroutine was spawned and takes no Hub lock
+//     while an EventLog lock is held.
+//  3. readPump / writePump call hub.unregister, which takes the registry's
+//     lock, from the goroutine's own stack — not from inside an EventLog
+//     callback.
 //
-// Guard all three properties at source level:
+// Guarded at source level:
 //
 //	A. None of the wshub_*.go files in this package may contain a
-//	   lexical pattern where a function acquires subMu and then
-//	   h.mu. (Originally only wshub.go was scanned; PR #327 split
-//	   the file and the relevant lock sites moved to siblings, so
-//	   the scan now covers every wshub_*.go that owns Hub or push
-//	   logic — see wshubLockOrderScanFiles.)
-//	B. the eventlog*.go files (internal/cli) must not import
-//	   internal/server — if any did, a direct h.mu access from a
-//	   subMu-holding callback would become possible without this test
-//	   catching it. ARCH-EVENTLOG-SPLIT spread EventLog across siblings,
-//	   so the scan globs every eventlog*.go (mirrors part A / PR #327).
+//	   lexical pattern where a function acquires subMu and then any
+//	   x.mu lock (see wshubLockOrderScanFiles).
+//	B. The no-import invariant moved to internal/eventlog/ring (below).
 //
 // Any failure here forces the author to re-evaluate whether the
 // new lock site can starve Shutdown.
@@ -86,19 +79,18 @@ func TestHubShutdown_LockOrderInvariant(t *testing.T) {
 	// A) within every wshub_*.go file in the package, reject any
 	// function body that acquires subMu (hypothetical future code
 	// accessing EventLog directly) AND also has a subsequent
-	// h.mu.Lock / h.mu.RLock.
+	// x.mu.Lock / x.mu.RLock.
 	//
 	// We use a conservative heuristic: within ~1000 chars of any
-	// `subMu.Lock(` or `subMu.RLock(` call, no `h.mu.Lock(` /
-	// `h.mu.RLock(` should appear. This catches the obvious
+	// `subMu.Lock(` or `subMu.RLock(` call, no `x.mu.Lock(` /
+	// `x.mu.RLock(` should appear. This catches the obvious
 	// reversed-order patterns; more creative violations (passing
 	// the hub into a subMu-holding callback) are out of scope for
 	// a lexical test but would need a runtime -race reproducer
 	// instead.
 	subMuRe := regexp.MustCompile(`subMu\.(?:R?Lock)\(`)
-	// Any single-letter-ish receiver, not just `h`: #2551 introduced
-	// (e *sendEngine) methods, and a hard-coded `h.mu.` would make invariant A
-	// blind to every receiver named anything else — a silently-passing test.
+	// Any receiver name: the registry's methods use `r`, the send engine's
+	// `e`; a hard-coded receiver would leave invariant A blind to the rest.
 	hMuRe := regexp.MustCompile(`\b[a-z][a-zA-Z0-9]*\.mu\.(?:R?Lock)\(`)
 	for _, file := range wshubLockOrderScanFiles(t) {
 		src, err := os.ReadFile(file)
@@ -113,8 +105,8 @@ func TestHubShutdown_LockOrderInvariant(t *testing.T) {
 			}
 			window := body[m[1]:end]
 			if hMuRe.MatchString(window) {
-				t.Errorf("%s acquires subMu at offset %d and then h.mu within "+
-					"the next ~1000 chars. R35-REL2: h.mu must be acquired BEFORE "+
+				t.Errorf("%s acquires subMu at offset %d and then a mu lock within "+
+					"the next ~1000 chars. Hub-side locks must be acquired BEFORE "+
 					"subMu (the Shutdown path) — the inverse ordering creates an "+
 					"ABBA deadlock.", file, m[0])
 			}

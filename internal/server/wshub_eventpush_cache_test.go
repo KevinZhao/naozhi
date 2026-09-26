@@ -252,7 +252,7 @@ func TestHistoryMarshalCache_EmptyEntriesBypass(t *testing.T) {
 // Tests that construct a bare *Hub for narrow assertions rely on this.
 func TestHub_MarshalHistoryFrame_NilCacheFallback(t *testing.T) {
 	t.Parallel()
-	h := &Hub{} // no cache
+	h := &Hub{subs: newSubscriberRegistry()} // no cache
 	entries := []clievent.EventEntry{{Time: 1, Type: "text"}}
 	got, err := h.marshalHistoryFrame("k", 0, entries)
 	if err != nil {
@@ -273,7 +273,7 @@ func TestHub_MarshalHistoryFrame_NilCacheFallback(t *testing.T) {
 // via byte-identity of the returned slice header. R214-PERF-4 contract.
 func TestHub_MarshalHistoryFrame_CoalescesWithCache(t *testing.T) {
 	t.Parallel()
-	h := &Hub{historyMarshalCache: newHistoryMarshalCache()}
+	h := &Hub{subs: newSubscriberRegistry(), historyMarshalCache: newHistoryMarshalCache()}
 	entries := []clievent.EventEntry{{Time: 1}, {Time: 2}}
 	a, err := h.marshalHistoryFrame("kk", 0, entries)
 	if err != nil {

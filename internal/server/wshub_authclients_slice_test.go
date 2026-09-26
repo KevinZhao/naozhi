@@ -5,121 +5,132 @@ import (
 	"testing"
 )
 
-// authClientsSliceConsistent asserts the slice mirror, its index map and the
-// authClients map all agree: same membership, every index points at the right
-// slot, and no nil/dup slots. Caller must hold authMu (or be single-threaded).
-func authClientsSliceConsistent(t *testing.T, h *Hub) {
+// authSetConsistent asserts the authenticated slice and its index agree: same
+// size, every index points at the right slot, no nil or duplicate slots.
+// Caller holds authMu or is single-threaded.
+func authSetConsistent(t *testing.T, r *subscriberRegistry) {
 	t.Helper()
-	if len(h.authClientsSlice) != len(h.authClients) {
-		t.Fatalf("slice len %d != map len %d", len(h.authClientsSlice), len(h.authClients))
+	if len(r.authIdx) != len(r.authSlice) {
+		t.Fatalf("idx len %d != slice len %d", len(r.authIdx), len(r.authSlice))
 	}
-	if len(h.authClientsIdx) != len(h.authClients) {
-		t.Fatalf("idx len %d != map len %d", len(h.authClientsIdx), len(h.authClients))
-	}
-	for i, c := range h.authClientsSlice {
+	for i, c := range r.authSlice {
 		if c == nil {
 			t.Fatalf("slice slot %d is nil", i)
 		}
-		if _, ok := h.authClients[c]; !ok {
-			t.Fatalf("slice slot %d holds a client absent from the map", i)
-		}
-		if got, ok := h.authClientsIdx[c]; !ok || got != i {
+		if got, ok := r.authIdx[c]; !ok || got != i {
 			t.Fatalf("idx[c] = (%d,%v), want (%d,true)", got, ok, i)
 		}
 	}
+	// Slots past the length must not pin removed clients for the GC.
+	for i, c := range r.authSlice[len(r.authSlice):cap(r.authSlice)] {
+		if c != nil {
+			t.Fatalf("slot %d past the length still holds a removed client", len(r.authSlice)+i)
+		}
+	}
 }
 
-// TestAuthClientsSliceMirror_AddRemove verifies R202606g-PERF-020 (#2310): the
-// contiguous slice mirror stays in lockstep with the authClients map across
-// add / swap-delete, including the swap-delete-of-a-middle-element path that
-// moves the tail into the freed slot.
-func TestAuthClientsSliceMirror_AddRemove(t *testing.T) {
-	hub, _ := newTestHub("tok")
-	t.Cleanup(hub.Shutdown)
-
+// TestAuthSet_AddRemove: the slice and its index stay in step across add and
+// swap-delete, including the middle-element delete that moves the tail into
+// the freed slot.
+func TestAuthSet_AddRemove(t *testing.T) {
+	r := newSubscriberRegistry()
 	mk := func() *wsClient {
-		return &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
+		c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
+		c.authenticated.Store(true)
+		return c
 	}
 	c1, c2, c3 := mk(), mk(), mk()
-
-	hub.authMu.Lock()
-	hub.addAuthClientLocked(c1)
-	hub.addAuthClientLocked(c2)
-	hub.addAuthClientLocked(c3)
-	// Idempotent: re-adding must not grow the slice or break the invariant.
-	hub.addAuthClientLocked(c2)
-	authClientsSliceConsistent(t, hub)
-	if len(hub.authClientsSlice) != 3 {
-		t.Fatalf("after 3 adds + 1 dup, slice len = %d, want 3", len(hub.authClientsSlice))
+	r.add(c1)
+	r.add(c2)
+	r.add(c3)
+	r.markAuthenticated(c2) // idempotent
+	authSetConsistent(t, r)
+	if len(r.authSlice) != 3 {
+		t.Fatalf("after 3 adds + 1 re-mark, slice len = %d, want 3", len(r.authSlice))
 	}
 
-	// Remove the MIDDLE element: the tail (c3) must be swapped into c2's slot
-	// and c3's index fixed up.
-	hub.removeAuthClientLocked(c2)
-	authClientsSliceConsistent(t, hub)
-	if _, ok := hub.authClients[c2]; ok {
-		t.Fatal("c2 still present after remove")
+	r.remove(c2) // the middle one
+	authSetConsistent(t, r)
+	if _, ok := r.authIdx[c2]; ok {
+		t.Fatal("c2 still authenticated after remove")
 	}
+	r.remove(c2) // not present: a no-op
+	authSetConsistent(t, r)
 
-	// Remove a non-present client: must be a no-op.
-	hub.removeAuthClientLocked(c2)
-	authClientsSliceConsistent(t, hub)
-
-	hub.removeAuthClientLocked(c1)
-	hub.removeAuthClientLocked(c3)
-	authClientsSliceConsistent(t, hub)
-	if len(hub.authClientsSlice) != 0 {
-		t.Fatalf("after removing all, slice len = %d, want 0", len(hub.authClientsSlice))
+	r.remove(c1)
+	r.remove(c3)
+	authSetConsistent(t, r)
+	if len(r.authSlice) != 0 {
+		t.Fatalf("after removing all, slice len = %d, want 0", len(r.authSlice))
 	}
-	hub.authMu.Unlock()
 }
 
-// TestSnapshotAuthenticated_UsesSliceMirror confirms snapshotAuthenticated
-// returns exactly the slice-mirror membership (the copy() fast path), and that
-// the snapshot survives a subsequent mutation of the mirror (it is a copy, not
-// an alias). R202606g-PERF-020 (#2310).
-func TestSnapshotAuthenticated_UsesSliceMirror(t *testing.T) {
+// TestAuthSet_MembershipFollowsRegistration: only a registered client can be
+// authenticated, and an unauthenticated one joins on markAuthenticated.
+func TestAuthSet_MembershipFollowsRegistration(t *testing.T) {
+	r := newSubscriberRegistry()
+	c := &wsClient{done: make(chan struct{})}
+	r.markAuthenticated(c) // not registered: stays out
+	if len(r.authSlice) != 0 {
+		t.Fatal("markAuthenticated admitted an unregistered client")
+	}
+	r.add(c) // not yet authenticated
+	if len(r.authSlice) != 0 {
+		t.Fatal("add admitted an unauthenticated client to the authenticated set")
+	}
+	c.authenticated.Store(true)
+	r.markAuthenticated(c)
+	if got := r.authenticated(nil); len(got) != 1 || got[0] != c {
+		t.Fatalf("authenticated = %v, want [c]", got)
+	}
+	r.remove(c)
+	r.markAuthenticated(c) // a delayed auth after teardown
+	if len(r.authSlice) != 0 {
+		t.Fatal("a delayed markAuthenticated reinserted a removed client")
+	}
+}
+
+// TestSnapshotAuthenticated_ReturnsTheAuthenticatedSet: the snapshot is
+// exactly the authenticated clients, and a copy rather than an alias.
+func TestSnapshotAuthenticated_ReturnsTheAuthenticatedSet(t *testing.T) {
 	hub, _ := newTestHub("tok")
 	t.Cleanup(hub.Shutdown)
 
 	c1 := &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
-	c1.authenticated.Store(true)
 	c2 := &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
-	c2.authenticated.Store(true)
 	registerSub(hub, c1, "")
 	registerSub(hub, c2, "")
+	pending := &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
+	hub.register(pending) // handshake still pending
 
 	snapPtr, snap := hub.snapshotAuthenticated()
-	if len(snap) != 2 {
-		t.Fatalf("snapshot len = %d, want 2", len(snap))
-	}
 	seen := map[*wsClient]bool{}
 	for _, c := range snap {
 		seen[c] = true
 	}
-	if !seen[c1] || !seen[c2] {
-		t.Fatalf("snapshot missing a client: c1=%v c2=%v", seen[c1], seen[c2])
+	if len(snap) != 2 || !seen[c1] || !seen[c2] {
+		t.Fatalf("snapshot = %d clients (c1=%v c2=%v), want exactly c1 and c2", len(snap), seen[c1], seen[c2])
+	}
+	hub.unregister(c1)
+	if snap[0] == nil || snap[1] == nil {
+		t.Fatal("removing a client mutated an existing snapshot")
 	}
 	releaseBroadcastSnap(snapPtr, snap)
 }
 
-// TestAuthClientsSliceMirror_ConcurrentChurn stresses the slice mirror under
-// the real lock discipline (h.mu + nested authMu) so -race surfaces any data
-// race introduced by maintaining the parallel slice/index. R202606g-PERF-020.
-func TestAuthClientsSliceMirror_ConcurrentChurn(t *testing.T) {
+// TestAuthSet_ConcurrentChurn: register / unregister churn beside a
+// broadcaster reading the set; -race surfaces any unguarded access.
+func TestAuthSet_ConcurrentChurn(t *testing.T) {
 	hub, _ := newTestHub("tok")
 	t.Cleanup(hub.Shutdown)
 
 	const writers = 4
 	const iters = 300
-	var writerWG sync.WaitGroup
-	var bcastWG sync.WaitGroup
+	var writerWG, bcastWG sync.WaitGroup
 	stop := make(chan struct{})
 
-	// Broadcaster reads the slice mirror via snapshotAuthenticated on a tight
-	// loop until the writers finish. It is tracked on its OWN WaitGroup so the
-	// writer drain (writerWG.Wait) does not deadlock waiting on a goroutine that
-	// only exits after that same drain signals stop.
+	// The broadcaster has its own WaitGroup: it only exits after the writers'
+	// drain signals stop.
 	bcastWG.Add(1)
 	go func() {
 		defer bcastWG.Done()
@@ -139,19 +150,9 @@ func TestAuthClientsSliceMirror_ConcurrentChurn(t *testing.T) {
 			defer writerWG.Done()
 			for j := 0; j < iters; j++ {
 				c := &wsClient{hub: hub, send: make(chan []byte, 64), done: make(chan struct{})}
-				hub.mu.Lock()
-				hub.authMu.Lock()
-				hub.clients[c] = struct{}{}
-				hub.addAuthClientLocked(c)
-				hub.authMu.Unlock()
-				hub.mu.Unlock()
-
-				hub.mu.Lock()
-				hub.authMu.Lock()
-				hub.removeAuthClientLocked(c)
-				delete(hub.clients, c)
-				hub.authMu.Unlock()
-				hub.mu.Unlock()
+				c.authenticated.Store(true)
+				hub.subs.add(c)
+				hub.subs.remove(c)
 			}
 		}()
 	}
@@ -159,7 +160,10 @@ func TestAuthClientsSliceMirror_ConcurrentChurn(t *testing.T) {
 	close(stop)
 	bcastWG.Wait()
 
-	hub.authMu.Lock()
-	authClientsSliceConsistent(t, hub)
-	hub.authMu.Unlock()
+	hub.subs.authMu.Lock()
+	authSetConsistent(t, hub.subs)
+	hub.subs.authMu.Unlock()
+	if n := authCount(hub); n != 0 {
+		t.Errorf("%d clients left authenticated after balanced churn", n)
+	}
 }

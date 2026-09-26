@@ -30,7 +30,7 @@ func TestMarshalHistoryFrame_RedactsOnEveryPath(t *testing.T) {
 	}
 
 	t.Run("nil cache fallback", func(t *testing.T) {
-		h := &Hub{} // historyMarshalCache == nil
+		h := &Hub{subs: newSubscriberRegistry()} // historyMarshalCache == nil
 		data, err := h.marshalHistoryFrame("k", 0, entries)
 		if err != nil {
 			t.Fatalf("marshalHistoryFrame: %v", err)
@@ -39,7 +39,7 @@ func TestMarshalHistoryFrame_RedactsOnEveryPath(t *testing.T) {
 	})
 
 	t.Run("normal hub paths", func(t *testing.T) {
-		h := &Hub{historyMarshalCache: newHistoryMarshalCache()}
+		h := &Hub{subs: newSubscriberRegistry(), historyMarshalCache: newHistoryMarshalCache()}
 		// First call to a fresh key (no subscribers wired) flows through the
 		// cached getOrMarshal path on a miss; a repeat call hits the cache.
 		first, err := h.marshalHistoryFrame("kk", 0, entries)

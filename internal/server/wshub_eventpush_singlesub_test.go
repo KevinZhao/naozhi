@@ -1,24 +1,19 @@
 package server
 
 import (
-	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// seedSubscriberCounts populates both the source map and the lock-free
-// subscriberCountFast mirror so hand-built test Hubs exercise the same
-// singleSubscriber read path as production (which always maintains the
-// mirror under h.mu). R20260531A-PERF-1 (#1522).
-func seedSubscriberCounts(h *Hub, counts map[string]int) {
-	h.subscriberCount = counts
-	for k, n := range counts {
-		var ctr atomic.Int32
-		ctr.Store(int32(n))
-		h.subscriberCountFast.Store(k, &ctr)
+// hubWithSubscribers builds a bare Hub whose key has n subscribers.
+func hubWithSubscribers(key string, n int) *Hub {
+	h := &Hub{subs: newSubscriberRegistry(), historyMarshalCache: newHistoryMarshalCache()}
+	for i := 0; i < n; i++ {
+		registerSub(h, &wsClient{done: make(chan struct{})}, key)
 	}
+	return h
 }
 
 // R249-PERF-30 (#944): pins the single-subscriber fast path that skips
@@ -29,11 +24,7 @@ func seedSubscriberCounts(h *Hub, counts map[string]int) {
 // cache slot allocation + per-key mutex round-trip is pure overhead.
 
 func TestSingleSubscriberFastPath_BypassesCache(t *testing.T) {
-	h := &Hub{
-		mu:                  sync.RWMutex{},
-		historyMarshalCache: newHistoryMarshalCache(),
-	}
-	seedSubscriberCounts(h, map[string]int{"only-tab": 1})
+	h := hubWithSubscribers("only-tab", 1)
 	entries := []clievent.EventEntry{{Time: 1, Type: "user"}}
 	if _, err := h.marshalHistoryFrame("only-tab", 0, entries); err != nil {
 		t.Fatalf("marshalHistoryFrame: %v", err)
@@ -55,11 +46,7 @@ func TestSingleSubscriberFastPath_MultiSubStillUsesCache(t *testing.T) {
 	// fan-out keeps coalescing the marshal call. Otherwise the R214-PERF-4
 	// optimisation (which #944 explicitly preserves) would silently
 	// regress.
-	h := &Hub{
-		mu:                  sync.RWMutex{},
-		historyMarshalCache: newHistoryMarshalCache(),
-	}
-	seedSubscriberCounts(h, map[string]int{"two-tabs": 2})
+	h := hubWithSubscribers("two-tabs", 2)
 	entries := []clievent.EventEntry{{Time: 1, Type: "user"}}
 	if _, err := h.marshalHistoryFrame("two-tabs", 0, entries); err != nil {
 		t.Fatalf("marshalHistoryFrame: %v", err)
@@ -80,14 +67,11 @@ func TestSingleSubscriber_ReportsCorrectCount(t *testing.T) {
 		{"zero", 0, false},
 		{"one", 1, true},
 		{"two", 2, false},
-		{"many", 50, false},
+		{"many", maxSubscribersPerKey, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := &Hub{
-				mu: sync.RWMutex{},
-			}
-			seedSubscriberCounts(h, map[string]int{"k": tc.count})
+			h := hubWithSubscribers("k", tc.count)
 			if got := h.singleSubscriber("k"); got != tc.want {
 				t.Fatalf("singleSubscriber(count=%d) = %v; want %v",
 					tc.count, got, tc.want)
@@ -96,75 +80,43 @@ func TestSingleSubscriber_ReportsCorrectCount(t *testing.T) {
 	}
 }
 
-// TestSubscriberCountFast_MirrorsWritePaths pins R20260531A-PERF-1
-// (#1522): the lock-free subscriberCountFast mirror read by
-// singleSubscriber must track the h.mu-guarded source map across the
-// bump (setSubscriberCountFast) and decrement (decSubscriberCountLocked)
-// write paths, including the delete-on-zero edge.
-func TestSubscriberCountFast_MirrorsWritePaths(t *testing.T) {
-	h := &Hub{
-		mu:              sync.RWMutex{},
-		subscriberCount: map[string]int{},
-	}
+// TestSubscriberCountFast_FollowsSubscribeAndUnsubscribe: the lock-free
+// count singleSubscriber reads tracks the registry across subscribe,
+// unsubscribe and unregister, and goes away with the last subscriber.
+func TestSubscriberCountFast_FollowsSubscribeAndUnsubscribe(t *testing.T) {
+	h := &Hub{subs: newSubscriberRegistry()}
 	fast := func(key string) (int32, bool) {
-		v, ok := h.subscriberCountFast.Load(key)
+		v, ok := h.subs.countFast.Load(key)
 		if !ok {
 			return 0, false
 		}
 		return v.(*atomic.Int32).Load(), true
 	}
-
-	// Two bumps → count 2, mirror 2, singleSubscriber false.
-	h.mu.Lock()
-	h.subscriberCount["k"]++
-	h.setSubscriberCountFast("k", h.subscriberCount["k"])
-	h.subscriberCount["k"]++
-	h.setSubscriberCountFast("k", h.subscriberCount["k"])
-	h.mu.Unlock()
+	a := &wsClient{done: make(chan struct{})}
+	b := &wsClient{done: make(chan struct{})}
+	registerSub(h, a, "k")
+	registerSub(h, b, "k")
 	if n, ok := fast("k"); !ok || n != 2 {
-		t.Fatalf("after 2 bumps: fast mirror = (%d,%v); want (2,true)", n, ok)
+		t.Fatalf("two subscribers: fast count = (%d,%v); want (2,true)", n, ok)
 	}
 	if h.singleSubscriber("k") {
 		t.Fatal("singleSubscriber must be false at count 2")
 	}
 
-	// One decrement → count 1, singleSubscriber true.
-	h.mu.Lock()
-	h.decSubscriberCountLocked("k")
-	h.mu.Unlock()
+	h.subs.unsubscribe(a, "k", 0)
 	if n, ok := fast("k"); !ok || n != 1 {
-		t.Fatalf("after 1 dec: fast mirror = (%d,%v); want (1,true)", n, ok)
+		t.Fatalf("after one unsubscribe: fast count = (%d,%v); want (1,true)", n, ok)
 	}
 	if !h.singleSubscriber("k") {
 		t.Fatal("singleSubscriber must be true at count 1")
 	}
 
-	// Final decrement → entry deleted from BOTH maps.
-	h.mu.Lock()
-	h.decSubscriberCountLocked("k")
-	h.mu.Unlock()
-	if _, ok := h.subscriberCount["k"]; ok {
-		t.Fatal("source map entry must be deleted at count 0")
-	}
+	h.subs.remove(b)
 	if _, ok := fast("k"); ok {
-		t.Fatal("fast mirror entry must be deleted at count 0 — a leaked " +
-			"*atomic.Int32 would let singleSubscriber read a stale count")
+		t.Fatal("fast count must be deleted with the last subscriber — a " +
+			"leaked counter would let singleSubscriber read a stale value")
 	}
-	if h.singleSubscriber("k") {
-		t.Fatal("singleSubscriber must be false after the key is fully torn down")
-	}
-}
-
-func TestSingleSubscriber_NilCounterFallsThroughToCache(t *testing.T) {
-	// Test fixtures that build a Hub without subscriberCount must
-	// continue to use the cached path — the fast-path gate is strictly
-	// additive, never bypasses the legacy behaviour, and never panics
-	// on the nil map. R040034-style hand-built Hubs in older tests
-	// still rely on this contract.
-	h := &Hub{}
-	if got := h.singleSubscriber("any"); got {
-		t.Fatal("nil subscriberCount must report singleSubscriber=false " +
-			"(force the legacy cached path); reporting true would panic on the " +
-			"nil map read.")
+	if subscriberCountOf(h, "k") != 0 || h.singleSubscriber("k") {
+		t.Fatal("key still has subscribers after the last one left")
 	}
 }

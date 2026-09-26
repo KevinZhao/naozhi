@@ -149,6 +149,11 @@ func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 	return sub.ch, unsub
 }
 
+// SubscriberCount is the number of live subscriptions.
+func (l *EventLog) SubscriberCount() int {
+	return int(l.subCount.Load())
+}
+
 // CloseSubscribers closes all subscriber channels and clears the subscriber list.
 // Called when the process dies so that eventPushLoop goroutines can exit.
 // After this returns, subsequent Subscribe calls receive a pre-closed channel.

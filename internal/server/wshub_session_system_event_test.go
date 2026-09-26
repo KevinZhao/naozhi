@@ -1,48 +1,13 @@
 package server
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/node"
 )
-
-// registerSub wires a captured client into the Hub maps and subscribes it to
-// key. Mirrors the bookkeeping handleSubscribe / markAuthenticated do under
-// h.mu so broadcastSessionSystemEvent's subscriber scan observes the client.
-func registerSub(h *Hub, c *wsClient, key string) {
-	h.mu.Lock()
-	if h.clients == nil {
-		h.clients = make(map[*wsClient]struct{})
-	}
-	if h.authClients == nil {
-		h.authClients = make(map[*wsClient]struct{})
-	}
-	if h.authClientsIdx == nil {
-		h.authClientsIdx = make(map[*wsClient]int)
-	}
-	h.clients[c] = struct{}{}
-	// R202606g-PERF-020 (#2310): keep the slice mirror in step with the map so
-	// snapshotAuthenticated (which now copies the slice) sees this client.
-	h.authMu.Lock()
-	h.addAuthClientLocked(c)
-	h.authMu.Unlock()
-	if c.subscriptions == nil {
-		c.subscriptions = make(map[string]func())
-	}
-	if key != "" {
-		c.subscriptions[key] = func() {}
-		// Mirror the real subscribe path's lock-free subscriberCountFast bump
-		// (wshub_subscribe.go) so broadcastSessionSystemEvent's #2308 zero-
-		// subscriber fast path sees a live count for this key.
-		if h.subscriberCount != nil {
-			h.subscriberCount[key]++
-			h.setSubscriberCountFast(key, h.subscriberCount[key])
-		}
-	}
-	h.mu.Unlock()
-}
 
 func recvMsg(t *testing.T, out <-chan node.ServerMsg) (node.ServerMsg, bool) {
 	t.Helper()
@@ -145,7 +110,7 @@ func TestBroadcastSessionSystemEvent_NoSubscribersNoop(t *testing.T) {
 }
 
 // TestBroadcastSessionSystemEvent_ZeroCountFastPath verifies R202606g-PERF-003
-// (#2308): when subscriberCountFast reports zero for the key the broadcast
+// (#2308): when the key's lock-free count is zero the broadcast
 // returns before touching the snapshot pool. We assert observable behaviour —
 // nothing is delivered — even though a client is wired into the Hub maps for a
 // DIFFERENT key, so the target key's fast count stays absent/zero.
@@ -154,7 +119,7 @@ func TestBroadcastSessionSystemEvent_ZeroCountFastPath(t *testing.T) {
 	t.Cleanup(hub.Shutdown)
 
 	// A live, authenticated client subscribed elsewhere; the target key has no
-	// subscriberCountFast entry, exercising the !ok branch of the fast path.
+	// count entry, exercising the fast path.
 	c, out := newCapturedClient(t, hub)
 	registerSub(hub, c, "feishu:p2p:elsewhere")
 
@@ -164,8 +129,7 @@ func TestBroadcastSessionSystemEvent_ZeroCountFastPath(t *testing.T) {
 }
 
 // TestBroadcastSessionSystemEvent_MultipleSubscribers verifies every client
-// subscribed to the key receives the system event after the #1902 two-phase
-// snapshot (authMu membership snapshot → short h.mu.RLock subscription filter).
+// subscribed to the key receives the system event.
 func TestBroadcastSessionSystemEvent_MultipleSubscribers(t *testing.T) {
 	hub, _ := newTestHub("tok")
 	t.Cleanup(hub.Shutdown)
@@ -195,13 +159,10 @@ func TestBroadcastSessionSystemEvent_MultipleSubscribers(t *testing.T) {
 	recvNone(t, otherOut)
 }
 
-// TestBroadcastSessionSystemEvent_ConcurrentChurn exercises the #1902 lock
-// split under the race detector: while a goroutine continuously broadcasts
-// session system events (taking authMu.RLock then h.mu.RLock), other
-// goroutines churn the authClients / subscriptions maps the way register /
-// unregister / handleSubscribe do under h.mu (+nested authMu). A client
-// dropped from authClients between the two phases must not corrupt state or
-// trip the detector. The test asserts no panic / no race; delivery counts are
+// TestBroadcastSessionSystemEvent_ConcurrentChurn runs the fan-out under the
+// race detector while subscribed clients are unregistered and re-registered
+// beside it. A client leaving mid-snapshot must not corrupt state or trip the
+// detector. The test asserts no panic / no race; delivery counts are
 // nondeterministic by design so they are not checked.
 func TestBroadcastSessionSystemEvent_ConcurrentChurn(t *testing.T) {
 	hub, _ := newTestHub("tok")
@@ -255,8 +216,8 @@ func TestBroadcastSessionSystemEvent_ConcurrentChurn(t *testing.T) {
 		}
 	}()
 
-	// Churner: add/remove clients from authClients + subscriptions the way the
-	// real register/unregister writers do — h.mu held, authMu nested inside.
+	// Churner: unregister and re-register subscribed clients, as disconnects
+	// and reconnects do.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -266,20 +227,8 @@ func TestBroadcastSessionSystemEvent_ConcurrentChurn(t *testing.T) {
 				return
 			default:
 				for _, c := range churn {
-					h := hub
-					h.mu.Lock()
-					h.authMu.Lock()
-					h.removeAuthClientLocked(c)
-					h.authMu.Unlock()
-					delete(c.subscriptions, key)
-					h.mu.Unlock()
-
-					h.mu.Lock()
-					h.authMu.Lock()
-					h.addAuthClientLocked(c)
-					h.authMu.Unlock()
-					c.subscriptions[key] = func() {}
-					h.mu.Unlock()
+					hub.subs.remove(c)
+					registerSub(hub, c, key)
 				}
 			}
 		}
@@ -290,34 +239,25 @@ func TestBroadcastSessionSystemEvent_ConcurrentChurn(t *testing.T) {
 	wg.Wait()
 }
 
-// TestBroadcastSessionSystemEvent_ChunkedFilter verifies the #1925 chunked
-// phase-2 subscription filter still delivers to every subscriber and skips
-// non-subscribers when the candidate set spans more than one subFilterChunk.
-// With > subFilterChunk authenticated clients the filter loop releases and
-// re-acquires h.mu.RLock between batches; this asserts the chunk boundary math
-// is correct (no client dropped or double-counted) across the seam.
-func TestBroadcastSessionSystemEvent_ChunkedFilter(t *testing.T) {
+// TestBroadcastSessionSystemEvent_FullKeyAmongManyClients: a key at its
+// subscriber cap, among many more clients subscribed elsewhere, reaches every
+// one of its subscribers and none of the others.
+func TestBroadcastSessionSystemEvent_FullKeyAmongManyClients(t *testing.T) {
 	hub, _ := newTestHub("tok")
 	t.Cleanup(hub.Shutdown)
 
 	const key = "feishu:p2p:chunk"
-	// Span two full chunks plus a partial third so both the interior seam and
-	// the final short batch are exercised.
-	const subCount = subFilterChunk*2 + 5
-
-	outs := make([]<-chan node.ServerMsg, 0, subCount)
-	for i := 0; i < subCount; i++ {
+	outs := make([]<-chan node.ServerMsg, 0, maxSubscribersPerKey)
+	for i := 0; i < maxSubscribersPerKey; i++ {
 		c, out := newCapturedClient(t, hub)
 		registerSub(hub, c, key)
 		outs = append(outs, out)
 	}
-	// Interleave non-subscribers (different key) so the filter must correctly
-	// reject them across chunk boundaries too.
-	const otherCount = subFilterChunk + 3
+	const otherCount = 3 * maxSubscribersPerKey
 	otherOuts := make([]<-chan node.ServerMsg, 0, otherCount)
 	for i := 0; i < otherCount; i++ {
 		c, out := newCapturedClient(t, hub)
-		registerSub(hub, c, "feishu:p2p:other")
+		registerSub(hub, c, "feishu:p2p:other"+strconv.Itoa(i%3))
 		otherOuts = append(otherOuts, out)
 	}
 
