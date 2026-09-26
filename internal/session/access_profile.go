@@ -47,12 +47,7 @@ type AccessProfileInfo struct {
 // access profile, sorted by ID for stable UI ordering; nil when none are
 // configured. The SecretOK preflight stats each *_FILE (cheap, picker-open only).
 func (r *Router) AccessProfileInfos() []AccessProfileInfo {
-	// The registry is copy-on-write (AddAccessProfile swaps the whole map
-	// pointer under the write lock), so an RLock reader sees either the old
-	// or the new map whole — never a half-inserted entry.
-	r.mu.RLock()
-	profiles := r.accessProfiles
-	r.mu.RUnlock()
+	profiles := r.profiles()
 	if len(profiles) == 0 {
 		return nil
 	}
@@ -85,19 +80,26 @@ func (r *Router) DefaultAccessProfile() string {
 }
 
 // HasAccessProfile reports whether an access profile with the given id is
-// registered. RLock, copy-on-write safe (see AccessProfileInfos).
+// registered.
 func (r *Router) HasAccessProfile(id string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	_, ok := r.accessProfiles[id]
+	_, ok := r.profiles()[id]
 	return ok
+}
+
+// profiles returns the current access-profile registry; nil when none are
+// configured. The map is never mutated after it is published.
+func (r *Router) profiles() map[string]AccessProfile {
+	if p := r.accessProfiles.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // AddAccessProfile registers a new access profile at runtime so a just-created
 // profile works WITHOUT a naozhi restart. Copy-on-write: builds a fresh map and
-// swaps the pointer under the write lock so RLock readers always observe a
-// consistent whole map. Errors on a duplicate id — callers must never silently
-// overwrite an operator's existing profile.
+// publishes it with a compare-and-swap, retrying if another add won the race,
+// so readers always observe a consistent whole map. Errors on a duplicate id —
+// callers must never silently overwrite an operator's existing profile.
 //
 // The caller must persist config.yaml FIRST and fail the request if that
 // write fails, so disk and memory cannot diverge on partial success.
@@ -105,18 +107,24 @@ func (r *Router) AddAccessProfile(id string, ap AccessProfile) error {
 	if id == "" {
 		return fmt.Errorf("access profile id is empty")
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, exists := r.accessProfiles[id]; exists {
-		return fmt.Errorf("access profile %q already exists", id)
+	for {
+		cur := r.accessProfiles.Load()
+		var old map[string]AccessProfile
+		if cur != nil {
+			old = *cur
+		}
+		if _, exists := old[id]; exists {
+			return fmt.Errorf("access profile %q already exists", id)
+		}
+		next := make(map[string]AccessProfile, len(old)+1)
+		for k, v := range old {
+			next[k] = v
+		}
+		next[id] = ap
+		if r.accessProfiles.CompareAndSwap(cur, &next) {
+			return nil
+		}
 	}
-	next := make(map[string]AccessProfile, len(r.accessProfiles)+1)
-	for k, v := range r.accessProfiles {
-		next[k] = v
-	}
-	next[id] = ap
-	r.accessProfiles = next
-	return nil
 }
 
 // accessProfileSecretsOK reports whether every *_FILE reference in the overlay

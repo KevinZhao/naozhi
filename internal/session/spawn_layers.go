@@ -53,9 +53,8 @@ func mergeArgvLayers(bd BackendDefaults, profileDefaultModel string, ov shim.Spa
 }
 
 // profileDefaultModelFor returns the default_model of profile id in profiles,
-// or "" when id is empty or unknown. Pure lookup shared by the spawn path
-// (r.accessProfiles under r.mu write lock) and the drift path
-// (accessProfileDefaultModel) so the two cannot disagree.
+// or "" when id is empty or unknown. Pure lookup shared by the spawn path and
+// the drift path (accessProfileDefaultModel) so the two cannot disagree.
 func profileDefaultModelFor(profiles map[string]AccessProfile, id string) string {
 	if id == "" {
 		return ""
@@ -66,17 +65,8 @@ func profileDefaultModelFor(profiles map[string]AccessProfile, id string) string
 	return ""
 }
 
-// accessProfileDefaultModel is the lock-taking form of profileDefaultModelFor
-// for callers that do NOT hold r.mu (driftCompareArgs runs after
-// reconnectShims releases it). RLock is sufficient: the registry is
-// copy-on-write (AddAccessProfile swaps the whole map under the write lock).
+// accessProfileDefaultModel is profileDefaultModelFor over the current
+// registry, for the drift check.
 func (r *Router) accessProfileDefaultModel(id string) string {
-	if id == "" {
-		return ""
-	}
-	r.mu.RLock()
-	profiles := r.accessProfiles
-	r.mu.RUnlock()
-	// Safe after RUnlock: writers never mutate this map in place.
-	return profileDefaultModelFor(profiles, id)
+	return profileDefaultModelFor(r.profiles(), id)
 }

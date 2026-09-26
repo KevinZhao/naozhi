@@ -1,6 +1,10 @@
 package session
 
-import "github.com/naozhi/naozhi/internal/cli"
+import (
+	"sync"
+
+	"github.com/naozhi/naozhi/internal/cli"
+)
 
 // backend_runtime.go — one backend's configuration as one value (G2 #2666).
 //
@@ -37,9 +41,6 @@ type BackendRuntime struct {
 	// ConfiguredModels is the operator-declared manifest (cli.backends[].models).
 	// docs/rfc/dashboard-model-effort-control.md §4.2.
 	ConfiguredModels []string
-	// Manifest caches the agent-reported model list; survives process death.
-	// Mutated under r.mu's write lock via backendStore.runtimeMut.
-	Manifest []cli.ModelInfo
 }
 
 // runtime returns id's row, or the ZERO value when the backend is unknown.
@@ -49,7 +50,7 @@ type BackendRuntime struct {
 // Returning a pointer would put a nil deref between the caller and that
 // behaviour — the typed-nil shape that produced #377, #2551 and #2561.
 //
-// Caller holds r.mu (read is enough).
+// The rows are fixed once NewRouter returns, so no lock is needed.
 func (b *backendStore) runtime(id string) BackendRuntime {
 	if rt := b.runtimes[id]; rt != nil {
 		return *rt
@@ -58,8 +59,8 @@ func (b *backendStore) runtime(id string) BackendRuntime {
 }
 
 // runtimeMut returns the stored pointer for in-place mutation, allocating the row
-// when the backend has none yet. Only the model-manifest cache uses this, and
-// only under r.mu's WRITE lock.
+// when the backend has none yet. Construction only (NewRouter, test setup):
+// after that the rows are read without a lock.
 func (b *backendStore) runtimeMut(id string) *BackendRuntime {
 	if b.runtimes == nil {
 		b.runtimes = make(map[string]*BackendRuntime)
@@ -112,4 +113,27 @@ func (b *backendStore) backendWrappers() map[string]*cli.Wrapper {
 		}
 	}
 	return out
+}
+
+// manifestCache holds each backend's agent-reported model list. It outlives
+// the process that reported it, and is the one piece of backend state written
+// after NewRouter, so it carries its own lock.
+type manifestCache struct {
+	mu   sync.Mutex
+	byID map[string][]cli.ModelInfo
+}
+
+func (m *manifestCache) get(id string) []cli.ModelInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.byID[id]
+}
+
+func (m *manifestCache) set(id string, models []cli.ModelInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.byID == nil {
+		m.byID = make(map[string][]cli.ModelInfo)
+	}
+	m.byID[id] = models
 }

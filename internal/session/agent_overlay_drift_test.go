@@ -176,9 +176,9 @@ func TestAgentOverlayDrift_BackendConfigChangeIsStillDrift(t *testing.T) {
 // drift, and an edited profile default_model is.
 func TestAgentOverlayDrift_AccessProfileDefaultModel(t *testing.T) {
 	r := mkOverlayRouter(t)
-	r.accessProfiles = map[string]AccessProfile{
+	setAccessProfiles(r, map[string]AccessProfile{
 		"work": {DefaultModel: "claude-sonnet-4.6", Env: map[string]string{"X": "1"}},
-	}
+	})
 	key := "dashboard:direct:2494-profile:general"
 	s := newSessionWithID(key, "sess-2494-profile")
 	s.SetBackend("claude")
@@ -198,7 +198,7 @@ func TestAgentOverlayDrift_AccessProfileDefaultModel(t *testing.T) {
 	}
 
 	// Operator edits the profile's default_model → genuine drift.
-	r.accessProfiles = map[string]AccessProfile{"work": {DefaultModel: "claude-haiku-4.5"}}
+	setAccessProfiles(r, map[string]AccessProfile{"work": {DefaultModel: "claude-haiku-4.5"}})
 	if drift, _, current := r.shimArgsDrift(wrapper, backendID, state, s); !drift {
 		t.Fatalf("profile default_model change masked: %v", current)
 	}
@@ -363,7 +363,7 @@ func TestAgentOverlayDrift_CompareHasNoSpawnSideEffects(t *testing.T) {
 	key := "dashboard:direct:2494-sidefx:general"
 	r.picks.backend[key] = "kiro"
 	r.picks.accessProfile[key] = "work"
-	r.accessProfiles = map[string]AccessProfile{"work": {DefaultModel: "m"}}
+	setAccessProfiles(r, map[string]AccessProfile{"work": {DefaultModel: "m"}})
 
 	wrapper, backendID := r.wrapperFor("claude")
 	state := shim.State{Key: key, Backend: "claude", CLIArgs: []string{"-p", "--model", "opusplan"},
@@ -419,7 +419,7 @@ func TestMergeArgvLayers(t *testing.T) {
 // "" when the configured id is unknown (mirrors the spawn's own fallback).
 func TestResolveSpawnParams_RecordsOverlay(t *testing.T) {
 	r := mkOverlayRouter(t)
-	r.accessProfiles = map[string]AccessProfile{"work": {DefaultModel: "m"}}
+	setAccessProfiles(r, map[string]AccessProfile{"work": {DefaultModel: "m"}})
 
 	sp := r.resolveSpawnParamsLocked("dashboard:direct:2494-rec:reviewer", "", AgentOpts{
 		Backend: "kiro", Workspace: "/ws", Model: "sonnet", Effort: "max",

@@ -175,9 +175,10 @@ type Router struct {
 	bkStore backendStore
 	// accessProfiles is the named auth/upstream overlay registry (RFC
 	// project-access-profile). Nil/empty ⇒ every session runs on the global
-	// baseline. Copy-on-write: AddAccessProfile swaps the whole map under the
-	// write lock, so readers outside r.mu snapshot the pointer under RLock (#2494).
-	accessProfiles map[string]AccessProfile
+	// baseline. Copy-on-write behind an atomic pointer: AddAccessProfile
+	// publishes a whole new map, so readers load it without r.mu and never see
+	// a half-inserted entry. Read it through profiles().
+	accessProfiles atomic.Pointer[map[string]AccessProfile]
 	// defaultAccessProfile is applied when a session resolves to no explicit
 	// profile (lowest precedence); "" = global-baseline fallthrough. Read-only after NewRouter.
 	defaultAccessProfile string
@@ -700,7 +701,10 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.picks.initLocked()
 	// One row per backend instead of six parallel columns (G2 #2666).
 	r.bkStore.initRuntimes(runtimes)
-	r.accessProfiles = cfg.AccessProfiles
+	if cfg.AccessProfiles != nil {
+		profiles := cfg.AccessProfiles
+		r.accessProfiles.Store(&profiles)
+	}
 	r.defaultAccessProfile = cfg.DefaultAccessProfile
 	// Run-history store is rooted next to the session store (its own config,
 	// NOT cron's). Empty StorePath disables persistence (no-op store).

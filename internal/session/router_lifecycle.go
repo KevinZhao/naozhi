@@ -364,6 +364,9 @@ type spawnParams struct {
 //
 // LOCK: caller must hold r.mu for writing.
 func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) spawnParams {
+	// One registry snapshot for the whole resolution: the overlay env and the
+	// profile default model must come from the same map.
+	profiles := r.profiles()
 	// Backend precedence: opts.Backend > one-shot backendOverrides[key]
 	// (consumed here) > existing session's Backend (resume continuity) >
 	// defaultBackend. Without the existing-session tier a dead kiro session
@@ -409,7 +412,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	}
 	var accessProfileEnv map[string]string
 	if accessProfileID != "" {
-		if ap, ok := r.accessProfiles[accessProfileID]; ok {
+		if ap, ok := profiles[accessProfileID]; ok {
 			accessProfileEnv = ap.Env
 		} else {
 			slog.Warn("access profile not found; falling back to global default",
@@ -446,7 +449,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	}
 	merged := mergeArgvLayers(
 		r.backendDefaultsFor(backendID),
-		profileDefaultModelFor(r.accessProfiles, accessProfileID),
+		profileDefaultModelFor(profiles, accessProfileID),
 		overlay, tuningModel, tuningEffort)
 	model, effort, args := merged.Model, merged.Effort, merged.Args
 

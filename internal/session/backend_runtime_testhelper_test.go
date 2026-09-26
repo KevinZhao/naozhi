@@ -66,10 +66,15 @@ func (b *backendStore) setConfiguredModelListsForTest(m map[string][]string) {
 }
 
 func (b *backendStore) setModelManifestsForTest(m map[string][]cli.ModelInfo) {
-	for _, rt := range b.runtimes {
-		rt.Manifest = nil
-	}
+	b.manifests.mu.Lock()
+	b.manifests.byID = nil
+	b.manifests.mu.Unlock()
 	for id, v := range m {
-		b.runtimeMut(id).Manifest = v
+		b.manifests.set(id, v)
 	}
+}
+
+// setAccessProfiles publishes m as r's access-profile registry.
+func setAccessProfiles(r *Router, m map[string]AccessProfile) {
+	r.accessProfiles.Store(&m)
 }
