@@ -41,7 +41,7 @@ func mkSystemPromptRouter(t *testing.T) *Router {
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
 	r.bkStore.defaultBackend = "claude"
-	r.picks.backend = make(map[string]string)
+	r.ss.Ext().picks.backend = make(map[string]string)
 	r.claudeDir = t.TempDir()
 	r.kiroSessionsDir = t.TempDir()
 	return r

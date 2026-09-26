@@ -233,23 +233,23 @@ func (r *Router) SetSessionBackend(key, backend string) {
 	r.ss.Lock()
 	defer r.ss.Unlock()
 	if backend == "" {
-		delete(r.picks.backend, key)
+		delete(r.ss.Ext().picks.backend, key)
 		return
 	}
 	// Updating an existing key never hits the cap; only brand-new inserts do.
-	if _, existing := r.picks.backend[key]; !existing && len(r.picks.backend) >= maxBackendOverrides {
+	if _, existing := r.ss.Ext().picks.backend[key]; !existing && len(r.ss.Ext().picks.backend) >= maxBackendOverrides {
 		slog.Warn("backendOverrides at capacity; dropping override",
 			"key", key, "cap", maxBackendOverrides)
 		return
 	}
-	r.picks.backend[key] = backend
+	r.ss.Ext().picks.backend[key] = backend
 }
 
 // SessionBackend returns the backend override for key, or "" if none.
 func (r *Router) SessionBackend(key string) string {
 	r.ss.RLock()
 	defer r.ss.RUnlock()
-	return r.picks.backend[key]
+	return r.ss.Ext().picks.backend[key]
 }
 
 // SetSessionAccessProfile remembers the access profile picked for a new
@@ -258,26 +258,26 @@ func (r *Router) SessionBackend(key string) string {
 func (r *Router) SetSessionAccessProfile(key, profile string) {
 	r.ss.Lock()
 	defer r.ss.Unlock()
-	if r.picks.accessProfile == nil {
-		r.picks.accessProfile = make(map[string]string)
+	if r.ss.Ext().picks.accessProfile == nil {
+		r.ss.Ext().picks.accessProfile = make(map[string]string)
 	}
 	if profile == "" {
-		delete(r.picks.accessProfile, key)
+		delete(r.ss.Ext().picks.accessProfile, key)
 		return
 	}
-	if _, existing := r.picks.accessProfile[key]; !existing && len(r.picks.accessProfile) >= maxBackendOverrides {
+	if _, existing := r.ss.Ext().picks.accessProfile[key]; !existing && len(r.ss.Ext().picks.accessProfile) >= maxBackendOverrides {
 		slog.Warn("accessProfileOverrides at capacity; dropping override",
 			"key", key, "cap", maxBackendOverrides)
 		return
 	}
-	r.picks.accessProfile[key] = profile
+	r.ss.Ext().picks.accessProfile[key] = profile
 }
 
 // SessionAccessProfile returns the access-profile override for key, or "".
 func (r *Router) SessionAccessProfile(key string) string {
 	r.ss.RLock()
 	defer r.ss.RUnlock()
-	return r.picks.accessProfile[key]
+	return r.ss.Ext().picks.accessProfile[key]
 }
 
 // CLIPath returns the CLI binary path for health checks.

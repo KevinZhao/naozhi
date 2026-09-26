@@ -156,14 +156,7 @@ type Router struct {
 	// in internal/session/sessiontable. No lock of its own — called under
 	// the table lock (Active / Gen excepted), because the spawn bookkeeping, workspace
 	// overrides and picks must change atomically with it.
-	ss *sessiontable.Table[*ManagedSession]
-	// picks holds the dashboard's per-session-key choices (backend /
-	// access-profile / tuning) for keys that may not have a ManagedSession yet.
-	// Keyed by session key, so it is NOT part of backendStore (G2 #2666).
-	// Unlike the other facets it has methods: renameLocked / dropAllLocked /
-	// dropBackendLocked, so the maintenance is one call per path instead of
-	// three open-coded map operations that must agree.
-	picks pendingPicks
+	ss *sessiontable.Table[*ManagedSession, routerState]
 	// bkStore is the backend/policy facet (#383): read-only-after-NewRouter
 	// config fields plus the mutable backendOverrides map (router_backend.go).
 	// No lock of its own — mutations ONLY under the table's write lock, reads under
@@ -197,21 +190,9 @@ type Router struct {
 	// plumbed into history.Wiring for the codexjsonl factory.
 	codexSessionsDir string
 
-	// wsStore is the per-chat workspace-override facet (#383, #2495): overrides
-	// map + LRU seq, dirty flag and gen, in internal/session/workspacestore.
-	// No lock of its own — every method is called under the table lock because override
-	// mutations must be atomic with session mutations (#2342) and eviction
-	// asks the session table whether a chat is live. Zero value is usable.
-	wsStore workspacestore.Store
-
-	// pp is the spawn-concurrency facet (#805, #2495): pending-spawn count,
-	// per-key in-flight spawn done-channels, shim-stuck flags and the
-	// RemoveAsync WaitGroup, in internal/session/spawnpool. No lock of its own —
-	// every method is called under the table lock (the WaitGroup methods excepted) because
-	// the pending count joins the live count in the capacity check and in-flight
-	// keys are checked against the live session index. Embeds a sync.WaitGroup:
-	// never copy Router or take it by value (go vet copylocks). Zero value is usable.
-	pp spawnpool.Store
+	// removes tracks RemoveAsync teardown goroutines, so tests can join them.
+	// Production never waits on it: Shutdown must not block on a teardown.
+	removes sync.WaitGroup
 
 	storePath string
 
@@ -328,7 +309,7 @@ type Router struct {
 type spawnerFunc func(context.Context, cli.SpawnOptions) (*cli.Process, error)
 
 // pendingSpawnSlot is a one-shot RAII token returned by
-// (*Router).acquirePendingSpawnSlotLocked. It guards the pending-spawn count against
+// (*Router).acquirePendingSpawnSlot. It guards the pending-spawn count against
 // a stranded ++ on any panic / error path between increment and decrement.
 // release() is idempotent: happy-path callers decrement explicitly at the
 // original site and a `defer token.release()` absorbs any unexpected exit.
@@ -337,38 +318,37 @@ type pendingSpawnSlot struct {
 	released bool
 }
 
-// acquirePendingSpawnSlotLocked takes a pending-spawn slot and returns a
-// slot token whose release method can be called from any lock state.
-//
-// LOCK: caller must hold the table lock (write).
-func (r *Router) acquirePendingSpawnSlotLocked() *pendingSpawnSlot {
-	r.pp.AcquireSpawnSlot()
+// acquirePendingSpawnSlot takes a pending-spawn slot and returns a token
+// whose release method can be called from any lock state.
+func (r *Router) acquirePendingSpawnSlot(tx sessTx) *pendingSpawnSlot {
+	tx.Ext().spawns.AcquireSpawnSlot()
 	return &pendingSpawnSlot{r: r}
 }
 
-// releaseLocked decrements pendingSpawns; caller must hold the table lock for writing.
-// Idempotent — a second call (e.g. from defer) is a no-op.
-func (s *pendingSpawnSlot) releaseLocked() {
+// releaseIn decrements pendingSpawns inside a transaction. Idempotent — a
+// second call (e.g. from defer) is a no-op.
+func (s *pendingSpawnSlot) releaseIn(tx sessTx) {
 	if s == nil || s.released {
 		return
 	}
-	s.r.pp.ReleaseSpawnSlot()
+	tx.Ext().spawns.ReleaseSpawnSlot()
 	s.released = true
 }
 
-// release is the lock-agnostic counterpart used from defer. It acquires the table lock
-// only when the slot has not yet been released, so the happy path (which calls
-// releaseLocked() inline) pays no extra lock acquisition. Idempotent.
+// release is the counterpart used from defer, outside any transaction. It
+// takes the lock only when the slot has not yet been released, so the happy
+// path (which calls releaseIn inline) pays no extra lock acquisition.
+// Idempotent.
 func (s *pendingSpawnSlot) release() {
 	if s == nil || s.released {
 		return
 	}
-	s.r.ss.Lock()
-	if !s.released {
-		s.r.pp.ReleaseSpawnSlot()
-		s.released = true
-	}
-	s.r.ss.Unlock()
+	s.r.ss.Update(func(tx sessTx) {
+		if !s.released {
+			tx.Ext().spawns.ReleaseSpawnSlot()
+			s.released = true
+		}
+	})
 }
 
 // spawnProcess starts the session's CLI process: spawnHook when a test set
@@ -438,9 +418,33 @@ func panicSafeSpawnFn(
 
 // newSessionTable returns an empty session table indexed the way the router
 // looks sessions up.
-func newSessionTable() *sessiontable.Table[*ManagedSession] {
-	return sessiontable.New[*ManagedSession](chatKeyFor, persist.KeyHash)
+func newSessionTable() *sessiontable.Table[*ManagedSession, routerState] {
+	t := sessiontable.New[*ManagedSession, routerState](chatKeyFor, persist.KeyHash)
+	t.Ext().picks.initLocked()
+	return t
 }
+
+// routerState is what the router keeps under the session table's lock beside
+// the table itself, because each must change atomically with it.
+type routerState struct {
+	// spawns: pending-spawn count, per-key in-flight done-channels and
+	// shim-stuck flags. The pending count joins the live count in the
+	// capacity check; in-flight keys are checked against the live sessions.
+	spawns spawnpool.Store
+	// workspaces: per-chat workspace overrides. They change with session
+	// resets, and eviction asks the table whether a chat is live.
+	workspaces workspacestore.Store
+	// picks: the dashboard's per-session-key choices (backend /
+	// access-profile / tuning) for keys that may not have a session yet; a
+	// spawn consumes them in the critical section that installs the session.
+	picks pendingPicks
+}
+
+// sessTx and sessView are the router's table transactions.
+type (
+	sessTx   = sessiontable.Tx[*ManagedSession, routerState]
+	sessView = sessiontable.View[*ManagedSession, routerState]
+)
 
 // chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
 func chatKeyFor(key string) string {
@@ -638,7 +642,6 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.bkStore.defaultBackend = defaultBackend
 	r.bkStore.model = cfg.Model
 	r.bkStore.extraArgs = cfg.ExtraArgs
-	r.picks.initLocked()
 	// One row per backend instead of six parallel columns (G2 #2666).
 	r.bkStore.initRuntimes(runtimes)
 	if cfg.AccessProfiles != nil {
@@ -703,7 +706,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.kid.Seed(loadKnownIDs(r.storePath))
 
 	// Load persisted workspace overrides (/cd settings)
-	r.wsStore.Seed(loadWorkspaceOverrides(r.storePath))
+	r.ss.Ext().workspaces.Seed(loadWorkspaceOverrides(r.storePath))
 
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
@@ -1067,9 +1070,7 @@ func (r *Router) notifyKeyRetired(key, sessionID string) {
 // Holding the table lock blocks NotifyIdle until Shutdown is parked in Wait(). Callers
 // are end-of-turn only, so the extra lock round-trip is free.
 func (r *Router) NotifyIdle() {
-	r.ss.Lock()
-	r.ss.Broadcast()
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) { tx.Broadcast() })
 }
 
 // ChatKey builds a chat-level key (without agent suffix) for workspace
@@ -1122,22 +1123,15 @@ func (r *Router) MaxProcs() int {
 // cannot publish active = N+1 against a pre-spawn total = N (active > total on
 // the dashboard). activeCount stays atomic for the lock-free spawn-admission path.
 func (r *Router) Stats() (active, total int) {
-	r.ss.RLock()
-	total = r.ss.Len()
-	active = int(r.ss.Active())
-	r.ss.RUnlock()
-	return active, total
+	n, a := r.ss.Count()
+	return int(a), n
 }
 
 // HealthCheck performs a lightweight liveness check by testing that the
 // router's RWMutex is not permanently held (deadlock detection).
 // Returns true if the lock can be acquired, false if it appears stuck.
 func (r *Router) HealthCheck() bool {
-	if !r.ss.TryRLock() {
-		return false
-	}
-	r.ss.RUnlock()
-	return true
+	return r.ss.Healthy()
 }
 
 // listRefsPool reuses the *ManagedSession slice ListSessions captures under
@@ -1171,18 +1165,19 @@ func (r *Router) ListSessions() []SessionSnapshot {
 func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]
-	r.ss.RLock()
-	if cap(refs) < r.ss.Len() {
-		// Grow once to the new max instead of the append growth path; the
-		// grown array is written back to the pool before Put below
-		// (regression guard: listrefspool_grow_test.go).
-		refs = make([]*ManagedSession, 0, r.ss.Len())
-	}
-	for _, s := range r.ss.All() {
-		refs = append(refs, s)
-	}
-	version := r.ss.Gen()
-	r.ss.RUnlock()
+	var version uint64
+	r.ss.View(func(v sessView) {
+		if cap(refs) < v.Len() {
+			// Grow once to the new max instead of the append growth path;
+			// the grown array is written back to the pool before Put below
+			// (regression guard: listrefspool_grow_test.go).
+			refs = make([]*ManagedSession, 0, v.Len())
+		}
+		for _, s := range v.All() {
+			refs = append(refs, s)
+		}
+		version = v.Gen()
+	})
 
 	snapshots := make([]SessionSnapshot, len(refs))
 	for i, s := range refs {
@@ -1215,9 +1210,7 @@ func (r *Router) ListSessionsIfChanged(sinceVersion uint64) (snapshots []Session
 
 // SessionFor returns the session for the given key, or nil.
 func (r *Router) SessionFor(key string) *ManagedSession {
-	r.ss.RLock()
-	defer r.ss.RUnlock()
-	return r.ss.Get(key)
+	return r.ss.Load(key)
 }
 
 // DiscardPassthroughPending fires reason to any in-flight passthrough sends for

@@ -44,7 +44,7 @@ func checkIndexInvariants(t *testing.T, r *Router, after string) {
 // *Locked mutators directly rather than going through a spawn.
 func newIndexTestRouter() *Router {
 	r := &Router{ss: newSessionTable()}
-	r.picks.initLocked()
+	r.ss.Ext().picks.initLocked()
 	return r
 }
 

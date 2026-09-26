@@ -221,7 +221,7 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		// cannot re-evaluate between Close and the wakeup.
 		r.ss.Lock()
 		r.ss.Broadcast()
-		r.countActive()
+		r.countActive(r.ss.AssumeLocked())
 		r.ss.Unlock()
 		r.notifyChange()
 		slog.Info("session tuning applied via respawn", "key", logKey,
@@ -254,7 +254,7 @@ func procSetModel(ctx context.Context, proc processIface, model string) error {
 // deleted so a "恢复默认" on a never-spawned session leaves no residue.
 // Caller holds the table lock.
 func (r *Router) setPendingTuningLocked(key string, model, effort *string) error {
-	cur, exists := r.picks.tuning[key]
+	cur, exists := r.ss.Ext().picks.tuning[key]
 	if model != nil {
 		cur.Model = *model
 	}
@@ -262,15 +262,15 @@ func (r *Router) setPendingTuningLocked(key string, model, effort *string) error
 		cur.Effort = *effort
 	}
 	if cur.Model == "" && cur.Effort == "" {
-		delete(r.picks.tuning, key)
+		delete(r.ss.Ext().picks.tuning, key)
 		return nil
 	}
-	if !exists && len(r.picks.tuning) >= maxTuningOverrides {
+	if !exists && len(r.ss.Ext().picks.tuning) >= maxTuningOverrides {
 		return ErrTuningCapacity
 	}
-	if r.picks.tuning == nil {
-		r.picks.tuning = make(map[string]pendingTuning)
+	if r.ss.Ext().picks.tuning == nil {
+		r.ss.Ext().picks.tuning = make(map[string]pendingTuning)
 	}
-	r.picks.tuning[key] = cur
+	r.ss.Ext().picks.tuning[key] = cur
 	return nil
 }

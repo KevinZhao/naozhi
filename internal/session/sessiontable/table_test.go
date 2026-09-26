@@ -17,11 +17,11 @@ func chatOf(key string) string {
 
 func hashOf(key string) string { return "h(" + key + ")" }
 
-func newTable() *Table[*sess] { return New[*sess](chatOf, hashOf) }
+func newTable() *Table[*sess, struct{}] { return New[*sess, struct{}](chatOf, hashOf) }
 
 func idOf(s *sess) string { return s.id }
 
-func consistent(t *testing.T, tab *Table[*sess], after string) {
+func consistent(t *testing.T, tab *Table[*sess, struct{}], after string) {
 	t.Helper()
 	if p := tab.Check(idOf); len(p) > 0 {
 		t.Fatalf("after %s:\n  %s", after, strings.Join(p, "\n  "))
@@ -66,7 +66,7 @@ func TestTable_PutDeleteKeepIndicesInStep(t *testing.T) {
 // TestTable_DeleteKeepsACollidingHash: two keys hashing alike must not let one
 // key's delete remove the other's entry.
 func TestTable_DeleteKeepsACollidingHash(t *testing.T) {
-	tab := New[*sess](chatOf, func(string) string { return "same" })
+	tab := New[*sess, struct{}](chatOf, func(string) string { return "same" })
 	tab.Put("x:a", &sess{})
 	tab.Put("x:b", &sess{}) // takes over the hash
 	tab.Delete("x:a")

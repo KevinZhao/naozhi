@@ -26,27 +26,27 @@ func TestPendingSpawnSlot_ReleaseLockedIsIdempotent(t *testing.T) {
 
 	r := &Router{ss: newSessionTable()}
 	r.ss.Lock()
-	slot := r.acquirePendingSpawnSlotLocked()
-	if r.pp.PendingSpawns() != 1 {
-		t.Fatalf("pendingSpawns=%d after acquire, want 1", r.pp.PendingSpawns())
+	slot := r.acquirePendingSpawnSlot(r.ss.AssumeLocked())
+	if r.ss.Ext().spawns.PendingSpawns() != 1 {
+		t.Fatalf("pendingSpawns=%d after acquire, want 1", r.ss.Ext().spawns.PendingSpawns())
 	}
-	slot.releaseLocked()
-	if r.pp.PendingSpawns() != 0 {
-		t.Fatalf("pendingSpawns=%d after releaseLocked, want 0", r.pp.PendingSpawns())
+	slot.releaseIn(r.ss.AssumeLocked())
+	if r.ss.Ext().spawns.PendingSpawns() != 0 {
+		t.Fatalf("pendingSpawns=%d after releaseIn, want 0", r.ss.Ext().spawns.PendingSpawns())
 	}
 	r.ss.Unlock()
 
 	// Defer-style release must be a no-op (idempotent).
 	slot.release()
 	r.ss.Lock()
-	if r.pp.PendingSpawns() != 0 {
-		t.Fatalf("pendingSpawns=%d after redundant release, want 0 (idempotent)", r.pp.PendingSpawns())
+	if r.ss.Ext().spawns.PendingSpawns() != 0 {
+		t.Fatalf("pendingSpawns=%d after redundant release, want 0 (idempotent)", r.ss.Ext().spawns.PendingSpawns())
 	}
 	r.ss.Unlock()
 }
 
 // TestPendingSpawnSlot_DeferReleaseAbsorbsPanic: the defer must decrement
-// pendingSpawns when a panic prevents the explicit releaseLocked() call.
+// pendingSpawns when a panic prevents the explicit releaseIn() call.
 // This is the core R215-ARCH-P1-2 guard: future code added between
 // ++ and -- that panics MUST NOT strand the counter.
 func TestPendingSpawnSlot_DeferReleaseAbsorbsPanic(t *testing.T) {
@@ -63,7 +63,7 @@ func TestPendingSpawnSlot_DeferReleaseAbsorbsPanic(t *testing.T) {
 		}()
 
 		r.ss.Lock()
-		slot := r.acquirePendingSpawnSlotLocked()
+		slot := r.acquirePendingSpawnSlot(r.ss.AssumeLocked())
 		defer slot.release()
 		r.ss.Unlock()
 
@@ -74,27 +74,27 @@ func TestPendingSpawnSlot_DeferReleaseAbsorbsPanic(t *testing.T) {
 	}()
 
 	r.ss.Lock()
-	got := r.pp.PendingSpawns()
+	got := r.ss.Ext().spawns.PendingSpawns()
 	r.ss.Unlock()
 	if got != 0 {
 		t.Fatalf("pendingSpawns=%d after panic-then-defer-release, want 0 (counter would otherwise strand permanently and every GetOrCreate would refuse with ErrMaxProcs until restart)", got)
 	}
 }
 
-// TestPendingSpawnSlot_ReleaseTakesLock: when releaseLocked was never
+// TestPendingSpawnSlot_ReleaseTakesLock: when releaseIn was never
 // called, release() must acquire the table lock itself and decrement.
 func TestPendingSpawnSlot_ReleaseTakesLock(t *testing.T) {
 	t.Parallel()
 
 	r := &Router{ss: newSessionTable()}
 	r.ss.Lock()
-	slot := r.acquirePendingSpawnSlotLocked()
+	slot := r.acquirePendingSpawnSlot(r.ss.AssumeLocked())
 	r.ss.Unlock()
 
 	slot.release() // must self-lock + decrement
 
 	r.ss.Lock()
-	got := r.pp.PendingSpawns()
+	got := r.ss.Ext().spawns.PendingSpawns()
 	r.ss.Unlock()
 	if got != 0 {
 		t.Fatalf("pendingSpawns=%d after release(), want 0", got)
@@ -114,11 +114,11 @@ func TestPendingSpawnSlot_NilReleaseSafe(t *testing.T) {
 	}()
 	var slot *pendingSpawnSlot
 	slot.release()
-	slot.releaseLocked()
+	slot.releaseIn(sessTx{})
 }
 
 // TestPendingSpawnSlot_DoubleReleasePathsAreSafe: spawnSession's happy
-// path calls releaseLocked() inline and the function-level defer also
+// path calls releaseIn() inline and the function-level defer also
 // fires release(). Both must net to a single decrement (single
 // goroutine — spawnSession is the only owner of the slot, so this is
 // not a concurrent test, just a sequential idempotency pin matching
@@ -128,21 +128,21 @@ func TestPendingSpawnSlot_DoubleReleasePathsAreSafe(t *testing.T) {
 
 	r := &Router{ss: newSessionTable()}
 	r.ss.Lock()
-	slot := r.acquirePendingSpawnSlotLocked()
+	slot := r.acquirePendingSpawnSlot(r.ss.AssumeLocked())
 	r.ss.Unlock()
 
-	// First: simulate the post-Spawn re-lock + releaseLocked happy path.
+	// First: simulate the post-Spawn re-lock + releaseIn happy path.
 	r.ss.Lock()
-	slot.releaseLocked()
+	slot.releaseIn(r.ss.AssumeLocked())
 	r.ss.Unlock()
 
 	// Then: the deferred release() at function exit must be a no-op.
 	slot.release()
 
 	r.ss.Lock()
-	got := r.pp.PendingSpawns()
+	got := r.ss.Ext().spawns.PendingSpawns()
 	r.ss.Unlock()
 	if got != 0 {
-		t.Fatalf("pendingSpawns=%d after happy-path releaseLocked + defer release, want 0", got)
+		t.Fatalf("pendingSpawns=%d after happy-path releaseIn + defer release, want 0", got)
 	}
 }

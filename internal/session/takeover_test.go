@@ -28,7 +28,7 @@ import (
 // (wsStore and pp are zero-value usable and need no init).
 func newTakeoverTestRouter(maxProcs int) *Router {
 	r := newTestRouter(maxProcs)
-	r.picks.backend = map[string]string{}
+	r.ss.Ext().picks.backend = map[string]string{}
 	return r
 }
 
@@ -52,10 +52,10 @@ func TestTakeover_NewKey(t *testing.T) {
 
 	// Workspace override must land on the chat key prefix, not the session key.
 	chatKey := chatKeyFor(key)
-	if got, _ := r.wsStore.Lookup(chatKey); got != workspace {
+	if got, _ := r.ss.Ext().workspaces.Lookup(chatKey); got != workspace {
 		t.Errorf("workspaceOverrides[%q] = %q, want %q", chatKey, got, workspace)
 	}
-	if !r.wsStore.Dirty() {
+	if !r.ss.Ext().workspaces.Dirty() {
 		t.Error("wsOverridesDirty should be set after Takeover writes override")
 	}
 
@@ -208,11 +208,11 @@ func TestTakeover_EmptyWorkspaceSkipsOverride(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected spawn error, got nil")
 	}
-	if r.wsStore.Len() != 0 {
+	if r.ss.Ext().workspaces.Len() != 0 {
 		t.Errorf("workspaceOverrides should remain empty for chatKey==key, got %v",
-			r.wsStore.Snapshot())
+			r.ss.Ext().workspaces.Snapshot())
 	}
-	if r.wsStore.Dirty() {
+	if r.ss.Ext().workspaces.Dirty() {
 		t.Error("wsOverridesDirty should not be set when override write is skipped")
 	}
 }
@@ -226,27 +226,27 @@ func TestTakeover_WorkspaceOverrideIdempotent(t *testing.T) {
 	key := "feishu:direct:user5:general"
 	chatKey := chatKeyFor(key)
 	// Seed = disk-loaded semantics: present, not dirty.
-	r.wsStore.Seed(map[string]string{chatKey: "/tmp/existing"})
+	r.ss.Ext().workspaces.Seed(map[string]string{chatKey: "/tmp/existing"})
 
 	// Same workspace: guard should see prev == workspace and skip dirty flip.
 	_, err := r.Takeover(context.Background(), key, "sess-y", "/tmp/existing", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error")
 	}
-	if r.wsStore.Dirty() {
+	if r.ss.Ext().workspaces.Dirty() {
 		t.Error("wsOverridesDirty should not flip when new workspace equals prior")
 	}
 
 	// Different workspace: must flip dirty.
-	r.wsStore.MarkSavedIfUnchanged(r.wsStore.Gen())
+	r.ss.Ext().workspaces.MarkSavedIfUnchanged(r.ss.Ext().workspaces.Gen())
 	_, err = r.Takeover(context.Background(), key, "sess-y", "/tmp/changed", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error")
 	}
-	if !r.wsStore.Dirty() {
+	if !r.ss.Ext().workspaces.Dirty() {
 		t.Error("wsOverridesDirty should flip when workspace changes")
 	}
-	if got, _ := r.wsStore.Lookup(chatKey); got != "/tmp/changed" {
+	if got, _ := r.ss.Ext().workspaces.Lookup(chatKey); got != "/tmp/changed" {
 		t.Errorf("workspaceOverrides[%q] = %q, want /tmp/changed", chatKey, got)
 	}
 }

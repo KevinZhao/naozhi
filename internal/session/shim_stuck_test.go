@@ -60,9 +60,9 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 	r := &Router{
 		ss: newSessionTable(),
 	}
-	r.picks.backend = make(map[string]string)
+	r.ss.Ext().picks.backend = make(map[string]string)
 	const key = "stuck:key:test"
-	r.pp.MarkShimStuck(key)
+	r.ss.Ext().spawns.MarkShimStuck(key)
 
 	_, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
 	if err == nil {
@@ -71,7 +71,7 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 	if !errors.Is(err, ErrShimStuck) {
 		t.Errorf("first GetOrCreate err did not wrap ErrShimStuck: %v", err)
 	}
-	if r.pp.ShimStuck(key) {
+	if r.ss.Ext().spawns.ShimStuck(key) {
 		t.Error("shimStuckOnReset[key] still set after GetOrCreate; flag must be consumed")
 	}
 
@@ -94,10 +94,10 @@ func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 	r := &Router{
 		ss: newSessionTable(),
 	}
-	r.picks.backend = make(map[string]string)
+	r.ss.Ext().picks.backend = make(map[string]string)
 	const stuckKey = "key:A"
 	const cleanKey = "key:B"
-	r.pp.MarkShimStuck(stuckKey)
+	r.ss.Ext().spawns.MarkShimStuck(stuckKey)
 
 	_, _, errClean := r.GetOrCreate(context.Background(), cleanKey, AgentOpts{})
 	if errClean == nil {
@@ -106,7 +106,7 @@ func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 	if errors.Is(errClean, ErrShimStuck) {
 		t.Errorf("clean key got ErrShimStuck wrap: %v", errClean)
 	}
-	if !r.pp.ShimStuck(stuckKey) {
+	if !r.ss.Ext().spawns.ShimStuck(stuckKey) {
 		t.Error("stuckKey flag must remain after GetOrCreate(cleanKey)")
 	}
 }
@@ -121,16 +121,16 @@ func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
 	r := &Router{
 		ss: newSessionTable(),
 	}
-	r.picks.backend = make(map[string]string)
+	r.ss.Ext().picks.backend = make(map[string]string)
 	s := &ManagedSession{key: key}
 	r.ss.Put(key, s)
-	r.pp.MarkShimStuck(key)
+	r.ss.Ext().spawns.MarkShimStuck(key)
 
 	r.ss.Lock()
 	r.unregisterSessionLocked(key, s, false)
 	r.ss.Unlock()
 
-	if r.pp.ShimStuck(key) {
+	if r.ss.Ext().spawns.ShimStuck(key) {
 		t.Error("shimStuckOnReset[key] must be deleted on terminal removal (keepBackendOverride=false)")
 	}
 }
@@ -183,16 +183,16 @@ func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
 	r := &Router{
 		ss: newSessionTable(),
 	}
-	r.picks.backend = make(map[string]string)
+	r.ss.Ext().picks.backend = make(map[string]string)
 	s := &ManagedSession{key: key}
 	r.ss.Put(key, s)
-	r.pp.MarkShimStuck(key)
+	r.ss.Ext().spawns.MarkShimStuck(key)
 
 	r.ss.Lock()
 	r.unregisterSessionLocked(key, s, true)
 	r.ss.Unlock()
 
-	if !r.pp.ShimStuck(key) {
+	if !r.ss.Ext().spawns.ShimStuck(key) {
 		t.Error("shimStuckOnReset[key] must survive unregisterSessionLocked with keepBackendOverride=true")
 	}
 }

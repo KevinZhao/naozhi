@@ -3,25 +3,16 @@
 // maxProcs capacity check, the per-key in-flight spawn done-channels that
 // coalesce concurrent GetOrCreate callers and stop ReconnectShims from
 // treating a half-spawned shim as an orphan, the per-key shim-stuck flags
-// that classify the next spawn failure as ErrShimStuck, and the WaitGroup
-// that lets tests join RemoveAsync teardowns. Fields are private so the
+// that classify the next spawn failure as ErrShimStuck. Fields are private so the
 // compiler enforces access through the method surface (#2495).
 //
-// Lock contract: Store carries NO lock. Call every method with
-// session.Router.mu held for writing, except the three WaitGroup methods
-// (TrackRemove, RemoveDone, WaitRemoves), which are self-synchronised and
-// run with r.mu released. The facet cannot leave r.mu: the pending count is
-// added to the live-session count inside the capacity check, in-flight keys
-// are checked against the live session index by reconnect and by
-// GetOrCreate's wait loop, and the stuck flag is consumed in the critical
-// section that enters spawnSession.
-//
-// Store embeds a sync.WaitGroup and must not be copied after first use;
-// Router holds it by value and is itself always heap-allocated (go vet
-// copylocks). Do not add functions that take or return Store by value.
+// Lock contract: Store carries NO lock. The router keeps it in its session
+// table's extension state, so every method runs inside a table transaction:
+// the pending count is added to the live-session count inside the capacity
+// check, in-flight keys are checked against the live session index by
+// reconnect and by GetOrCreate's wait loop, and the stuck flag is consumed
+// in the critical section that enters spawnSession.
 package spawnpool
-
-import "sync"
 
 // Store is the spawn-concurrency container; the zero value is ready to use.
 type Store struct {
@@ -35,8 +26,6 @@ type Store struct {
 	// shimStuck marks keys whose last Reset / ResetAndRecreate saw the shim
 	// socket outlive its wait; consumed by the next spawn for that key.
 	shimStuck map[string]bool
-	// removeWg tracks RemoveAsync teardown goroutines for tests only.
-	removeWg sync.WaitGroup
 }
 
 // PendingSpawns returns the number of spawns holding a slot.
@@ -105,13 +94,3 @@ func (s *Store) ShimStuck(key string) bool { return s.shimStuck[key] }
 // ClearShimStuck drops the flag for key; terminal removals call it so a
 // never-respawned key cannot pin an entry for the process lifetime.
 func (s *Store) ClearShimStuck(key string) { delete(s.shimStuck, key) }
-
-// TrackRemove registers one RemoveAsync teardown goroutine; RemoveDone
-// retires it. Production never waits on them: Shutdown must not join.
-func (s *Store) TrackRemove() { s.removeWg.Add(1) }
-
-// RemoveDone retires one teardown goroutine registered by TrackRemove.
-func (s *Store) RemoveDone() { s.removeWg.Done() }
-
-// WaitRemoves blocks until every tracked teardown has called RemoveDone.
-func (s *Store) WaitRemoves() { s.removeWg.Wait() }
