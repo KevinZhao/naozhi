@@ -37,7 +37,7 @@ import (
 func mkOverlayRouter(t *testing.T) *Router {
 	t.Helper()
 	r := &Router{
-		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:         newSessionTable(),
 		defaultCWD: "/default/ws",
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
@@ -86,7 +86,7 @@ func TestAgentOverlayDrift_ModelOverrideIsNotDrift(t *testing.T) {
 	key := "dashboard:direct:2494-model:code-reviewer"
 	s := newSessionWithID(key, "sess-2494-model")
 	s.SetBackend("claude")
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 
 	state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 	if !slices.Contains(state.CLIArgs, "sonnet") {
@@ -108,7 +108,7 @@ func TestAgentOverlayDrift_EffortAndExtraArgsAreNotDrift(t *testing.T) {
 	key := "dashboard:direct:2494-effort:reviewer"
 	s := newSessionWithID(key, "sess-2494-effort")
 	s.SetBackend("kiro")
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 
 	state, _ := spawnShimState(t, r, key, "", AgentOpts{
 		Backend: "kiro", Workspace: "/ws", Effort: "max", ExtraArgs: []string{"--agent-flag", "v1"},
@@ -133,7 +133,7 @@ func TestAgentOverlayDrift_BackendConfigChangeIsStillDrift(t *testing.T) {
 		key := "dashboard:direct:2494-cfg1:reviewer"
 		s := newSessionWithID(key, "sess-2494-cfg1")
 		s.SetBackend("kiro")
-		r.ss.sessions[key] = s
+		r.ss.Put(key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "kiro", Workspace: "/ws", Effort: "max"})
 
 		r.bkStore.model = "claude-haiku-4.5" // operator edits cli.model, restarts naozhi
@@ -154,7 +154,7 @@ func TestAgentOverlayDrift_BackendConfigChangeIsStillDrift(t *testing.T) {
 		key := "dashboard:direct:2494-cfg2:code-reviewer"
 		s := newSessionWithID(key, "sess-2494-cfg2")
 		s.SetBackend("claude")
-		r.ss.sessions[key] = s
+		r.ss.Put(key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 
 		r.bkStore.setBackendExtraArgsForTest(map[string][]string{"claude": {"--max-turns", "50"}})
@@ -182,7 +182,7 @@ func TestAgentOverlayDrift_AccessProfileDefaultModel(t *testing.T) {
 	key := "dashboard:direct:2494-profile:general"
 	s := newSessionWithID(key, "sess-2494-profile")
 	s.SetBackend("claude")
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 
 	state, sp := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", AccessProfile: "work"})
 	if sp.Overlay.AccessProfile != "work" || sp.Overlay.Model != "" {
@@ -213,7 +213,7 @@ func TestAgentOverlayDrift_TuningStaysOnTop(t *testing.T) {
 	s := newSessionWithID(key, "sess-2494-tuning")
 	s.SetBackend("claude")
 	s.SetTuningModel("claude-haiku-4.5")
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 
 	state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 	if !slices.Contains(state.CLIArgs, "claude-haiku-4.5") || slices.Contains(state.CLIArgs, "sonnet") {
@@ -238,7 +238,7 @@ func TestAgentOverlayDrift_ResumeArgsStripped(t *testing.T) {
 	key := "dashboard:direct:2494-resume:code-reviewer"
 	s := newSessionWithID(key, "sess-2494-resume")
 	s.SetBackend("claude")
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 
 	state, sp := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 	// resolveResumeID downgrades a missing on-disk target to fresh; inject the
@@ -278,7 +278,7 @@ func TestAgentOverlayDrift_LegacyStateFallsBack(t *testing.T) {
 		key := "dashboard:direct:2494-legacy-plain:general"
 		s := newSessionWithID(key, "sess-legacy-plain")
 		s.SetBackend("claude")
-		r.ss.sessions[key] = s
+		r.ss.Put(key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
 		state.SpawnOverlay = nil // written by a pre-#2494 shim
 
@@ -292,7 +292,7 @@ func TestAgentOverlayDrift_LegacyStateFallsBack(t *testing.T) {
 		key := "dashboard:direct:2494-legacy-agent:code-reviewer"
 		s := newSessionWithID(key, "sess-legacy-agent")
 		s.SetBackend("claude")
-		r.ss.sessions[key] = s
+		r.ss.Put(key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 		state.SpawnOverlay = nil
 
@@ -336,7 +336,7 @@ func TestAgentOverlayDrift_KnownEmptyOverlayIsNotLegacy(t *testing.T) {
 	key := "dashboard:direct:2494-empty:general"
 	s := newSessionWithID(key, "sess-2494-empty")
 	s.SetBackend("claude")
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 	state, sp := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
 	if ov := sp.Overlay; ov.Model != "" || ov.Effort != "" || ov.AccessProfile != "" || len(ov.ExtraArgs) != 0 {
 		t.Fatalf("no-override spawn produced a populated overlay: %+v", ov)

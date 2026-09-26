@@ -47,7 +47,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 		// Double-checked session-ID capture: the outer atomic load skips the
 		// lock once any turn has captured an ID; the inner re-check under
 		// sendMu ensures only the first of two concurrent turns calls
-		// onSessionID (which writes r.ss.idToKey under r.mu). Lock ordering:
+		// onSessionID (which indexes the session ID under r.mu). Lock ordering:
 		// sendMu → r.mu; sendMu is held only around this short CAS.
 		s.sendMu.Lock()
 		if s.getSessionID() == "" {

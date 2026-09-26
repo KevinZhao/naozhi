@@ -15,6 +15,7 @@ package session
 // double-attach when the caller already invoked attachHistorySource.
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -29,10 +30,7 @@ func minimalRouter(t *testing.T) *Router {
 	t.Helper()
 	w := &cli.Wrapper{} // zero-value wrapper; NewHistorySource returns Noop
 	r := &Router{
-		ss: sessionStore{
-			sessions: map[string]*ManagedSession{},
-			idToKey:  map[string]string{},
-		},
+		ss: newSessionTable(),
 	}
 	r.bkStore.wrapper = w
 	r.bkStore.defaultBackend = "claude"
@@ -58,7 +56,7 @@ func TestPublishSessionLocked_AttachesHistorySource(t *testing.T) {
 		t.Fatal("publishSessionLocked left HistorySource nil — EventEntriesBeforeCtx would return empty and dashboard history drawer would silently blank")
 	}
 	r.mu.RLock()
-	stored := r.ss.sessions[s.key]
+	stored := r.ss.Get(s.key)
 	r.mu.RUnlock()
 	if stored != s {
 		t.Fatalf("publishSessionLocked did not insert into r.ss.sessions: got %v, want %v", stored, s)
@@ -92,7 +90,7 @@ func TestPublishSessionLocked_AlreadyAttachedDoesNotOverwrite(t *testing.T) {
 	// The exact identity check is over-specified for some Source
 	// implementations (interface-typed values). Accept any non-nil.
 	r.mu.RLock()
-	stored := r.ss.sessions[s.key]
+	stored := r.ss.Get(s.key)
 	r.mu.RUnlock()
 	if stored != s {
 		t.Fatalf("publishSessionLocked did not insert into r.ss.sessions: got %v, want %v", stored, s)
@@ -112,15 +110,11 @@ func TestPublishSessionLocked_IndexAddObserved(t *testing.T) {
 	r.publishSessionLocked(s.key, s, false)
 	r.mu.Unlock()
 
-	// indexAdd populates sessionsByChat (lazy init); a follow-up
-	// ResetChat must find the session.
+	// The session is indexed under its chat, so a follow-up ResetChat finds it.
 	r.mu.RLock()
-	if r.ss.byChat != nil {
-		chatKey := chatKeyFor(s.key)
-		if _, ok := r.ss.byChat[chatKey][s.key]; !ok {
-			r.mu.RUnlock()
-			t.Fatalf("publishSessionLocked did not call indexAdd: chatKey=%q missing", chatKey)
-		}
+	if chatKey := chatKeyFor(s.key); !slices.Contains(r.ss.KeysOfChat(chatKey), s.key) {
+		r.mu.RUnlock()
+		t.Fatalf("publishSessionLocked left the session out of its chat index: chatKey=%q", chatKey)
 	}
 	r.mu.RUnlock()
 }

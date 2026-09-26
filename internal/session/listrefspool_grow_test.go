@@ -74,10 +74,10 @@ func steadyStateAllocs(t *testing.T, n int) float64 {
 	t.Cleanup(func() { r.Shutdown() })
 
 	r.mu.Lock()
-	r.ss.sessions = make(map[string]*ManagedSession, n)
+	r.ss = newSessionTable()
 	for i := 0; i < n; i++ {
 		key := keyOf(i)
-		r.ss.sessions[key] = newSessionWithID(key, "id")
+		r.ss.Put(key, newSessionWithID(key, "id"))
 	}
 	r.mu.Unlock()
 

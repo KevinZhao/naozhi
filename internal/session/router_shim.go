@@ -257,7 +257,7 @@ func (r *Router) adoptLiveShimLocked(state shim.State, backendID string, _ *cli.
 		Backend:   backendID,
 	}
 	r.restoreSessionFromEntry(state.Key, entry)
-	s := r.ss.sessions[state.Key]
+	s := r.ss.Get(state.Key)
 	if s != nil {
 		// The entry above carries no LastCumulativeCost because there is no store
 		// entry to carry it from. Without this the first post-reconnect result —
@@ -297,7 +297,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 	reconnected := 0
 	for _, state := range states {
 		r.mu.Lock()
-		sess, ok := r.ss.sessions[state.Key]
+		sess, ok := r.ss.Lookup(state.Key)
 		var hasLiveProcess bool
 		var sessPrevIDs []string
 		if ok && sess.isAlive() {
@@ -346,7 +346,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			// Re-check under lock: a concurrent spawnSession may have installed
 			// the session (or its spawning marker) between the snapshot above
 			// and now.
-			if existing, exists := r.ss.sessions[state.Key]; exists {
+			if existing, exists := r.ss.Lookup(state.Key); exists {
 				// A concurrent spawnSession won; re-snapshot instead of adopting a duplicate.
 				sess = existing
 				ok = true
@@ -565,7 +565,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// to eliminate the race window where a concurrent GetOrCreate could see
 		// isAlive()==false between check and ReattachProcess.
 		r.mu.Lock()
-		currentSess := r.ss.sessions[state.Key]
+		currentSess := r.ss.Get(state.Key)
 		if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
 			r.mu.Unlock()
 			proc.Close()
@@ -598,16 +598,15 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		}
 		if state.SessionID != "" {
 			r.kid.Track(state.SessionID)
-			r.setSessionIDIndex(state.SessionID, state.Key)
+			r.ss.SetID(state.SessionID, state.Key)
 		}
 		if !sess.exempt {
-			r.ss.activeCount.Add(1)
+			r.ss.AddActive(1)
 		}
 		// Mark store dirty so the next saveIfDirty persists the reconnected
 		// backend/CLI identity and active flag; every storeGen.Add site pairs
 		// with dirty = true.
-		r.ss.dirty = true
-		r.ss.gen.Add(1)
+		r.ss.MarkChanged()
 		r.mu.Unlock()
 
 		// Persist sink goes last so the InjectHistory + shim replay above land

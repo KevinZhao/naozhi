@@ -55,7 +55,7 @@ func TestSetWorkspace_NeverEvictsLiveSession(t *testing.T) {
 	// chat0 is the oldest override AND has a live session.
 	liveChat := "dashboard:direct:k0"
 	r.SetWorkspace(liveChat, "/ws/live")
-	r.ss.byChat[liveChat] = map[string]struct{}{liveChat + ":general": {}}
+	markChatLive(r, liveChat)
 
 	for i := 1; i < maxWorkspaceOverrides; i++ {
 		r.SetWorkspace(fmt.Sprintf("dashboard:direct:k%d", i), fmt.Sprintf("/ws/%d", i))
@@ -81,7 +81,7 @@ func TestSetWorkspace_DropsWhenAllLive(t *testing.T) {
 	for i := 0; i < maxWorkspaceOverrides; i++ {
 		k := fmt.Sprintf("dashboard:direct:k%d", i)
 		r.SetWorkspace(k, fmt.Sprintf("/ws/%d", i))
-		r.ss.byChat[k] = map[string]struct{}{k + ":general": {}}
+		markChatLive(r, k)
 	}
 	r.SetWorkspace("dashboard:direct:overflow", "/ws/overflow")
 
@@ -186,4 +186,12 @@ func TestResetChatAndSetWorkspace_ConcurrentReaderNeverSeesDefault(t *testing.T)
 			}
 		}
 	}
+}
+
+// markChatLive gives chat a session, so its workspace override is not evictable.
+func markChatLive(r *Router, chat string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := chat + ":general"
+	r.ss.Put(key, &ManagedSession{key: key})
 }

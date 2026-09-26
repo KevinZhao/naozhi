@@ -57,7 +57,7 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 	})
 
 	r = &Router{
-		ss:              sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:              newSessionTable(),
 		claudeDir:       "/claude/dir",
 		kiroSessionsDir: "/kiro/dir",
 	}
@@ -142,7 +142,7 @@ func TestAttachHistorySource_FallsBackToDefaultWhenSessionBackendEmpty(t *testin
 func TestAttachHistorySource_NilWrapperUsesNoop(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		ss: sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss: newSessionTable(),
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{})
 	r.bkStore.defaultBackend = ""
@@ -230,7 +230,7 @@ func TestAttachHistorySource_WithEventLogDirInstallsMerged(t *testing.T) {
 // pinning test makes that contract explicit.
 func TestAttachHistorySource_NilSession(t *testing.T) {
 	t.Parallel()
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	// Must not panic.
 	r.attachHistorySource(nil)
 }
@@ -247,7 +247,7 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 		return history.Noop{}
 	})
 	r := &Router{
-		ss:              sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:              newSessionTable(),
 		kiroSessionsDir: "/the/kiro/dir",
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
@@ -278,7 +278,7 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		ss:              sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:              newSessionTable(),
 		claudeDir:       "/claude/dir",
 		kiroSessionsDir: "/kiro/sessions/cli",
 	}

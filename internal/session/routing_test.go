@@ -707,7 +707,7 @@ func TestRouter_Resolver_Singleton(t *testing.T) {
 	})
 	t.Run("unconfigured router returns nil", func(t *testing.T) {
 		t.Parallel()
-		r := &Router{}
+		r := &Router{ss: newSessionTable()}
 		if got := r.Resolver(); got != nil {
 			t.Errorf("zero Router.Resolver() = %v, want nil", got)
 		}
@@ -715,7 +715,7 @@ func TestRouter_Resolver_Singleton(t *testing.T) {
 	t.Run("configured router returns the same instance", func(t *testing.T) {
 		t.Parallel()
 		shared := NewKeyResolver(map[string]AgentOpts{"general": {}}, nil)
-		r := &Router{resolver: shared}
+		r := &Router{ss: newSessionTable(), resolver: shared}
 		if got := r.Resolver(); got != shared {
 			t.Errorf("Router.Resolver() = %p, want %p (singleton identity)", got, shared)
 		}

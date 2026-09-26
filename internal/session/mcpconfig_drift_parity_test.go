@@ -68,7 +68,7 @@ func TestMCPConfigDriftParity_NoFalsePositive(t *testing.T) {
 	const mcpPath = "/data/naozhi/mcp.json"
 
 	key := "dashboard:direct:mcp-parity:general"
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	r.bkStore.model = "opus"
 	r.mcpConfigFile = mcpPath
 	proto := &cli.ClaudeProtocol{}

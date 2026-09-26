@@ -37,7 +37,7 @@ func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 		origin = "user"
 	}
 	r.mu.Lock()
-	s := r.ss.sessions[key]
+	s := r.ss.Get(key)
 	if s == nil {
 		r.mu.Unlock()
 		return false
@@ -56,8 +56,7 @@ func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 	}
 	s.SetUserLabel(label)
 	s.setLabelOrigin(origin)
-	r.ss.dirty = true
-	r.ss.gen.Add(1)
+	r.ss.MarkChanged()
 	r.mu.Unlock()
 	// Kick the dashboard's onChange WS broadcast like every other mutator.
 	r.notifyChange()
@@ -72,7 +71,7 @@ func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 // Returns false when the session key is unknown.
 func (r *Router) ClearUserLabelOrigin(key string) bool {
 	r.mu.Lock()
-	s := r.ss.sessions[key]
+	s := r.ss.Get(key)
 	if s == nil {
 		r.mu.Unlock()
 		return false
@@ -83,8 +82,7 @@ func (r *Router) ClearUserLabelOrigin(key string) bool {
 	}
 	s.SetUserLabel("")
 	s.setLabelOrigin("")
-	r.ss.dirty = true
-	r.ss.gen.Add(1)
+	r.ss.MarkChanged()
 	r.mu.Unlock()
 	r.notifyChange()
 	return true
@@ -99,7 +97,7 @@ func (r *Router) ClearUserLabelOrigin(key string) bool {
 func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, s := range r.ss.sessions {
+	for _, s := range r.ss.All() {
 		if !fn(s.snapshotReadOnly()) {
 			return
 		}
@@ -112,7 +110,7 @@ func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
 // not nest under r.mu.
 func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
 	r.mu.RLock()
-	s := r.ss.sessions[key]
+	s := r.ss.Get(key)
 	r.mu.RUnlock()
 	if s == nil {
 		return nil
@@ -127,7 +125,7 @@ func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
 // calls; the returned slice shares dst's backing array.
 func (r *Router) EventEntriesForKeyAppend(dst []clievent.EventEntry, key string) []clievent.EventEntry {
 	r.mu.RLock()
-	s := r.ss.sessions[key]
+	s := r.ss.Get(key)
 	r.mu.RUnlock()
 	if s == nil {
 		return dst
@@ -142,7 +140,7 @@ func (r *Router) EventEntriesForKeyAppend(dst []clievent.EventEntry, key string)
 // actions; this is for process-level signalling and the fallback branch.
 func (r *Router) InterruptSession(key string) bool {
 	r.mu.RLock()
-	s := r.ss.sessions[key]
+	s := r.ss.Get(key)
 	r.mu.RUnlock()
 	if s == nil {
 		return false
@@ -188,7 +186,7 @@ func (r *Router) InterruptSessionSafe(key string) InterruptOutcome {
 // InterruptNoTurn, not InterruptNoSession.
 func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 	r.mu.RLock()
-	s := r.ss.sessions[key]
+	s := r.ss.Get(key)
 	r.mu.RUnlock()
 	if s == nil {
 		return InterruptNoSession
@@ -216,8 +214,8 @@ func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 func (r *Router) DiscoveryExcludeIDs() map[string]bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	ids := make(map[string]bool, len(r.ss.sessions))
-	for _, s := range r.ss.sessions {
+	ids := make(map[string]bool, r.ss.Len())
+	for _, s := range r.ss.All() {
 		if s.loadProcess() == nil {
 			continue
 		}
@@ -237,13 +235,13 @@ func (r *Router) DiscoveryExcludeIDs() map[string]bool {
 // is returned (deduplication) and no new entry is created.
 func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string) {
 	r.mu.Lock()
-	if _, exists := r.ss.sessions[key]; exists {
+	if _, exists := r.ss.Lookup(key); exists {
 		r.mu.Unlock()
 		return key // already exists with this exact key
 	}
 	// Deduplicate: if another session already targets this sessionID, reuse it.
-	if existingKey, ok := r.ss.idToKey[sessionID]; ok {
-		if existing, exists := r.ss.sessions[existingKey]; exists {
+	if existingKey, ok := r.ss.KeyForID(sessionID); ok {
+		if existing, exists := r.ss.Lookup(existingKey); exists {
 			// idToKey is not cleaned for rotated IDs, so idToKey[sessionID]=K can
 			// dangle while sessions[K] holds an UNRELATED session (key reused).
 			// Only dedup when the found session genuinely owns this sessionID;
@@ -254,7 +252,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 			}
 		}
 		// Stale or leaked index entry; clean up and continue.
-		r.clearSessionIDIndex(sessionID)
+		r.ss.ClearID(sessionID)
 	}
 	s := &ManagedSession{
 		key:      key,
@@ -270,12 +268,11 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		storeAtomicString(&s.lastPrompt, lastPrompt)
 	}
 	r.kid.Track(sessionID)
-	r.setSessionIDIndex(sessionID, key)
+	r.ss.SetID(sessionID, key)
 	s.lastActive.Store(time.Now().UnixNano())
 	s.initCreatedAtIfUnset()
 	r.publishSessionLocked(key, s, false)
-	r.ss.dirty = true
-	r.ss.gen.Add(1)
+	r.ss.MarkChanged()
 	r.mu.Unlock()
 
 	r.notifyChange()
@@ -330,7 +327,7 @@ func (r *Router) RegisterSystemStub(key, workspace, lastPrompt string) {
 // 只读 r 的不可变字段 + 写 s 的 atomic.Pointer，在 r.mu 下调用同样安全。
 func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []string) {
 	r.mu.Lock()
-	if existing, ok := r.ss.sessions[key]; ok {
+	if existing, ok := r.ss.Lookup(key); ok {
 		changed := false
 		// Refresh workspace/prompt on existing stub; don't touch live process.
 		if existing.loadProcess() == nil {
@@ -356,8 +353,7 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 			// re-registers stubs on every cron.yaml reload, and an unconditional
 			// dirty would force a saveIfDirty fsync + WS fanout for nothing.
 			if changed {
-				r.ss.dirty = true
-				r.ss.gen.Add(1)
+				r.ss.MarkChanged()
 			}
 		}
 		r.mu.Unlock()
@@ -395,8 +391,7 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 	s.lastActive.Store(time.Now().UnixNano())
 	s.initCreatedAtIfUnset()
 	r.publishSessionLocked(key, s, false)
-	r.ss.dirty = true
-	r.ss.gen.Add(1)
+	r.ss.MarkChanged()
 	r.mu.Unlock()
 
 	r.notifyChange()
@@ -410,7 +405,7 @@ func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]
 	pids = make(map[int]bool)
 	sessionIDs = make(map[string]bool)
 	cwds = make(map[string]bool)
-	for _, s := range r.ss.sessions {
+	for _, s := range r.ss.All() {
 		if id := s.getSessionID(); id != "" {
 			sessionIDs[id] = true
 		}
@@ -440,7 +435,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	}
 	r.mu.Lock()
 	// If key already exists (e.g. re-takeover same CWD), close the old process
-	if s, ok := r.ss.sessions[key]; ok {
+	if s, ok := r.ss.Lookup(key); ok {
 		// Mirror resetLocked: only non-exempt AND alive sessions contributed to
 		// activeCount, so only those get a -1 (no O(n) countActive recount).
 		if p := s.loadProcess(); p != nil && p.Alive() {
@@ -457,13 +452,12 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			// Only delete if no concurrent goroutine replaced this session.
 			// keepBackendOverride=true: Takeover re-spawns on the same key
 			// and spawnSession below consumes the override atomically.
-			if cur, ok := r.ss.sessions[key]; ok && cur == oldSession {
+			if cur, ok := r.ss.Lookup(key); ok && cur == oldSession {
 				r.unregisterSessionLocked(key, cur, true)
-				r.ss.dirty = true
-				r.ss.gen.Add(1)
+				r.ss.MarkChanged()
 				if !oldExempt {
-					if r.ss.activeCount.Add(-1) < 0 {
-						r.ss.activeCount.Store(0)
+					if r.ss.AddActive(-1) < 0 {
+						r.ss.SetActive(0)
 					}
 					metrics.RecordSessionActive(oldBackend, -1)
 				}
@@ -475,13 +469,12 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			}
 			// Implicit else: a concurrent goroutine replaced the session with an
 			// exited one. Leave it — spawnSession below overwrites it, calls
-			// indexAdd and Stores +1 if applicable, so no indexDel/delta here.
+			// indexes the key and Stores +1 if applicable, so no index / delta work here.
 		} else {
 			// Dead session branch: same keepBackendOverride=true rationale.
 			// Dead sessions weren't in activeCount, so no decrement is needed.
 			r.unregisterSessionLocked(key, s, true)
-			r.ss.dirty = true
-			r.ss.gen.Add(1)
+			r.ss.MarkChanged()
 		}
 	}
 	// Workspace override for the chat key prefix. Adopt marks the store dirty

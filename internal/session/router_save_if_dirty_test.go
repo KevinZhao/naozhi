@@ -17,17 +17,17 @@ func TestSaveIfDirty_PersistsAndClearsFlag(t *testing.T) {
 	storePath := filepath.Join(dir, "sessions.json")
 
 	r := &Router{
-		ss:        sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:        newSessionTable(),
 		maxProcs:  3,
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,
 		storePath: storePath,
 	}
-	r.ss.sessions["feishu:direct:user1:general"] = newSessionWithID("feishu:direct:user1:general", "sess-abc")
+	r.ss.Put("feishu:direct:user1:general", newSessionWithID("feishu:direct:user1:general", "sess-abc"))
 	r.mu.Lock()
-	r.ss.dirty = true
+	r.ss.SetDirty(true)
 	r.mu.Unlock()
-	r.ss.gen.Add(1)
+	r.ss.BumpGen()
 
 	r.saveIfDirty()
 
@@ -40,7 +40,7 @@ func TestSaveIfDirty_PersistsAndClearsFlag(t *testing.T) {
 	}
 
 	r.mu.RLock()
-	dirty := r.ss.dirty
+	dirty := r.ss.Dirty()
 	r.mu.RUnlock()
 	if dirty {
 		t.Error("storeDirty should be cleared after a successful saveIfDirty with no concurrent mutation")
@@ -54,13 +54,13 @@ func TestSaveIfDirty_NoopWhenClean(t *testing.T) {
 	storePath := filepath.Join(dir, "sessions.json")
 
 	r := &Router{
-		ss:        sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:        newSessionTable(),
 		maxProcs:  3,
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,
 		storePath: storePath,
 	}
-	r.ss.sessions["feishu:direct:user1:general"] = newSessionWithID("feishu:direct:user1:general", "sess-abc")
+	r.ss.Put("feishu:direct:user1:general", newSessionWithID("feishu:direct:user1:general", "sess-abc"))
 
 	r.saveIfDirty()
 
@@ -76,7 +76,7 @@ func TestSaveIfDirty_KnownIDsThrottleCommit(t *testing.T) {
 	storePath := filepath.Join(dir, "sessions.json")
 
 	r := &Router{
-		ss:        sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:        newSessionTable(),
 		maxProcs:  3,
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,
@@ -125,7 +125,7 @@ func TestSaveIfDirty_KnownIDsSaveFailure_ResetsThrottle(t *testing.T) {
 	badStorePath := filepath.Join(conflict, "sessions.json")
 
 	r := &Router{
-		ss:        sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:        newSessionTable(),
 		maxProcs:  3,
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,
@@ -157,7 +157,7 @@ func TestCleanup_KnownIDsSaveFailure_ResetsThrottle(t *testing.T) {
 	badStorePath := filepath.Join(conflict, "sessions.json")
 
 	r := &Router{
-		ss:        sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:        newSessionTable(),
 		maxProcs:  3,
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,

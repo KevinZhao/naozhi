@@ -9,7 +9,7 @@ import "testing"
 
 func newWorkspaceTestRouter(def string, overrides map[string]string) *Router {
 	r := &Router{
-		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:         newSessionTable(),
 		defaultCWD: def,
 	}
 	r.wsStore.Seed(overrides)

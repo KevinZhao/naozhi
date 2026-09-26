@@ -111,7 +111,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 	mkRouter := func(t *testing.T, backendEfforts map[string]string) *Router {
 		t.Helper()
 		r := &Router{
-			ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+			ss:         newSessionTable(),
 			defaultCWD: "/default/ws",
 		}
 		r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
@@ -250,7 +250,7 @@ func TestFirstArgvDivergence(t *testing.T) {
 // to survive that lookup for the mirror to have anything to pass.
 func TestBackendEffortsFeedDriftCheck(t *testing.T) {
 	t.Parallel()
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	r.bkStore.model = "claude-fable-5"
 	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "xhigh"})
 

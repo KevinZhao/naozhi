@@ -11,7 +11,7 @@ import (
 // the R222-ARCH-17 (#748) helper: once historyCtx is cancelled, new tasks
 // must be refused rather than spawned past historyWg.Wait().
 func TestRunHistoryTask_SkipsAfterCancel(t *testing.T) {
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
 	r.historyCancel()
 
@@ -35,7 +35,7 @@ func TestRunHistoryTask_SkipsAfterCancel(t *testing.T) {
 // previous Wait has returned". With the fix the cancelled call is a pure
 // no-op on the counter, so the sequence is safe.
 func TestRunHistoryTask_CancelledPathDoesNotTouchWaitGroup(t *testing.T) {
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
 
 	// Drain the WaitGroup once so a stray Add() after this point would be a
@@ -65,7 +65,7 @@ func TestRunHistoryTask_CancelledPathDoesNotTouchWaitGroup(t *testing.T) {
 // goroutine runs, sees the historyCtx, and historyWg.Wait blocks until
 // it returns.
 func TestRunHistoryTask_RunsAndPropagatesCtx(t *testing.T) {
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
 	defer r.historyCancel()
 
@@ -96,7 +96,7 @@ func TestRunHistoryTask_RunsAndPropagatesCtx(t *testing.T) {
 // The helper must still spawn — otherwise unit tests of subsystems that
 // adopt this pattern silently no-op.
 func TestRunHistoryTask_NilCtxFallsBackToBackground(t *testing.T) {
-	r := &Router{} // historyCtx left nil
+	r := &Router{ss: newSessionTable()} // historyCtx left nil
 
 	done := make(chan struct{})
 	if !r.runHistoryTask(func(ctx context.Context) {

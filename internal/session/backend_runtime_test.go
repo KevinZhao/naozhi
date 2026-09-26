@@ -133,7 +133,7 @@ func TestBackendRuntime_BackendWrappersSkipsRowsWithoutOne(t *testing.T) {
 // asked for "kiro" is a real divergence — just a quiet one.
 func TestWrapperFor_LegacyBranchSurvivesConfigOnlyRows(t *testing.T) {
 	legacy := &cli.Wrapper{BackendID: "claude"}
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	r.bkStore.wrapper = legacy
 	// Config for a backend, no wrappers map — exactly the legacy shape.
 	r.bkStore.initRuntimes(map[string]BackendRuntime{"claude": {Model: "opus"}})

@@ -31,8 +31,8 @@ func TestSpawnSession_RejectedAfterStopped(t *testing.T) {
 
 	assertNoLeak := func(t *testing.T, r *Router) {
 		t.Helper()
-		if len(r.ss.sessions) != 0 {
-			t.Errorf("r.ss.sessions grew to %d after a rejected spawn; gate must run before any map mutation", len(r.ss.sessions))
+		if r.ss.Len() != 0 {
+			t.Errorf("r.ss.sessions grew to %d after a rejected spawn; gate must run before any map mutation", r.ss.Len())
 		}
 		if r.pp.SpawningCount() != 0 {
 			t.Errorf("r.pp.SpawningCount() = %d; gate must sit before spawningKeys lazy-init so no guard channel is left dangling", r.pp.SpawningCount())

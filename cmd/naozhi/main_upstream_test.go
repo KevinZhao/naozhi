@@ -46,7 +46,9 @@ func TestNewUpstreamDiscoverFunc_EmptyArrayOnScanError(t *testing.T) {
 	// Point at a path that does not exist so discovery.Scan errors out and
 	// the func falls back to marshalling an empty array.
 	claudeDir := filepath.Join(t.TempDir(), "no-such-claude-dir")
-	discover := newUpstreamDiscoverFunc(claudeDir, &session.Router{}, nil)
+	router := session.NewRouter(session.RouterConfig{})
+	t.Cleanup(router.Shutdown)
+	discover := newUpstreamDiscoverFunc(claudeDir, router, nil)
 
 	raw, err := discover()
 	if err != nil {

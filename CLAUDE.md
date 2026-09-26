@@ -47,7 +47,7 @@ cmd/naozhi/main.go
 
   核心链路（IM 消息 → CLI 进程）
   -> cli          Protocol 接口（stream-json/ACP）+ spawn/manage CLI 进程 + watchdog；子包 clievent/backend
-  -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/runhistory
+  -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/runhistory/sessiontable/spawnpool/workspacestore/knownids
   -> dispatch     消息处理 + slash 命令 + per-session 队列
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
   -> server       HTTP server、路由注册、WebSocket hub、REST API
@@ -316,7 +316,7 @@ Config field `session.workspace` is a deprecated alias for `session.cwd`. Both `
 
 ## Concurrency Patterns
 
-- **Router.mu** protects the sessions map. Released during `Spawn()` (may block on ACP handshake) with TOCTOU guard on re-acquire. `shutdownCond` is conditioned on `mu` for Shutdown wait.
+- **Router.mu** guards the session table (`internal/session/sessiontable`: sessions + chat / key-hash / session-ID indices) and the facets that change atomically with it (spawn bookkeeping, workspace overrides, picks). `spawnSession` releases it once, around `Spawn()` (may block on ACP handshake) and the history copy, and re-checks the key on re-acquire. `shutdownCond` is conditioned on `mu` for Shutdown wait.
 - **ManagedSession.sendMu** serializes Send() calls and protects session_id capture.
 - **sessionGuard** (`sync.Map`) prevents goroutine accumulation -- one message per session at a time.
 - **Hub.mu** protects WebSocket client set and subscriptions. `nodesMu` (shared with Server) protects the nodes map.

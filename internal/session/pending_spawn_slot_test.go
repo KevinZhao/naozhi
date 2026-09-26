@@ -24,7 +24,7 @@ import (
 func TestPendingSpawnSlot_ReleaseLockedIsIdempotent(t *testing.T) {
 	t.Parallel()
 
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	r.mu.Lock()
 	slot := r.acquirePendingSpawnSlotLocked()
 	if r.pp.PendingSpawns() != 1 {
@@ -52,7 +52,7 @@ func TestPendingSpawnSlot_ReleaseLockedIsIdempotent(t *testing.T) {
 func TestPendingSpawnSlot_DeferReleaseAbsorbsPanic(t *testing.T) {
 	t.Parallel()
 
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 
 	func() {
 		defer func() {
@@ -86,7 +86,7 @@ func TestPendingSpawnSlot_DeferReleaseAbsorbsPanic(t *testing.T) {
 func TestPendingSpawnSlot_ReleaseTakesLock(t *testing.T) {
 	t.Parallel()
 
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	r.mu.Lock()
 	slot := r.acquirePendingSpawnSlotLocked()
 	r.mu.Unlock()
@@ -126,7 +126,7 @@ func TestPendingSpawnSlot_NilReleaseSafe(t *testing.T) {
 func TestPendingSpawnSlot_DoubleReleasePathsAreSafe(t *testing.T) {
 	t.Parallel()
 
-	r := &Router{}
+	r := &Router{ss: newSessionTable()}
 	r.mu.Lock()
 	slot := r.acquirePendingSpawnSlotLocked()
 	r.mu.Unlock()

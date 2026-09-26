@@ -41,7 +41,7 @@ func TestLoadResumeHistoryOnSpawn_CancelledPathDoesNotTouchWaitGroup(t *testing.
 	// Wait/Add never overlap. Many iterations make the window deterministic
 	// under -race.
 	for iter := 0; iter < 300; iter++ {
-		r := &Router{claudeDir: "/tmp/does-not-matter"}
+		r := &Router{ss: newSessionTable(), claudeDir: "/tmp/does-not-matter"}
 		r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
 		r.historyCancel() // Shutdown signalled before the spawn lands.
 
@@ -101,6 +101,7 @@ func TestLoadResumeHistoryOnSpawn_CancelledPathDoesNotTouchWaitGroup(t *testing.
 func TestLoadResumeHistoryOnSpawn_CancelDuringSpawnNoPanic(t *testing.T) {
 	for iter := 0; iter < 300; iter++ {
 		r := &Router{
+			ss:            newSessionTable(),
 			claudeDir:     "/tmp/does-not-matter",
 			historyLoader: stubHistoryLoader{entries: mkEntries("h", 1)},
 		}
@@ -155,6 +156,7 @@ func TestLoadResumeHistoryOnSpawn_CancelDuringSpawnNoPanic(t *testing.T) {
 func TestLoadResumeHistoryOnSpawn_LivePathLoadsAndAccounts(t *testing.T) {
 	called := make(chan struct{})
 	r := &Router{
+		ss:            newSessionTable(),
 		claudeDir:     "/tmp/does-not-matter",
 		historyLoader: stubHistoryLoader{entries: mkEntries("h", 3), called: called},
 	}
@@ -179,7 +181,7 @@ func TestLoadResumeHistoryOnSpawn_LivePathLoadsAndAccounts(t *testing.T) {
 // TestLoadResumeHistoryOnSpawn_NoResumeIDIsNoOp guards the early-return
 // preconditions so the WaitGroup is never touched when there's nothing to load.
 func TestLoadResumeHistoryOnSpawn_NoResumeIDIsNoOp(t *testing.T) {
-	r := &Router{claudeDir: "/tmp/x"}
+	r := &Router{ss: newSessionTable(), claudeDir: "/tmp/x"}
 	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
 	defer r.historyCancel()
 	r.historyWg.Wait()

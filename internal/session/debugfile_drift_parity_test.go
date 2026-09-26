@@ -39,7 +39,7 @@ import (
 func mkClaudeDriftRouter(t *testing.T, debugDir string) *Router {
 	t.Helper()
 	r := &Router{
-		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:         newSessionTable(),
 		defaultCWD: "/default/ws",
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
@@ -64,7 +64,7 @@ func TestDebugFileDriftParity_NoFalseDrift(t *testing.T) {
 	key := "dashboard:direct:2026-09-02-151927-3-naozhi:general"
 	s := newSessionWithID(key, "sess-debugfile-1")
 	s.SetBackend("claude")
-	r.ss.sessions[key] = s
+	r.ss.Put(key, s)
 
 	// Spawn-side argv, assembled the way spawnSession does (router_lifecycle.go:
 	// argvSpawnOptions + the side-effecting cliDebugFileFor).

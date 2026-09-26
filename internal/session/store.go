@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/datadir"
@@ -530,44 +529,6 @@ func saveKnownIDsBytes(storePath string, data []byte) error {
 		return fmt.Errorf("save known IDs: %w", err)
 	}
 	return nil
-}
-
-// sessionStore groups the correlated session-table fields (#383). Value field
-// on Router, NO lock of its own, read/written ONLY under Router.mu.
-// INVARIANT: sessions + byChat + keyhash + idToKey MUST mutate together inside
-// ONE r.mu write critical section (indexAdd/indexDel paired with each
-// r.ss.sessions set/delete and the idToKey helpers) or a reader observes a torn
-// index. activeCount/gen are read lock-free by Stats()/Version() and MUST stay
-// atomic; dirty is a plain bool.
-//
-// That invariant is asserted, not just stated: index_invariants_test.go drives
-// every mutation path — two writes and three deletes across the whole package —
-// through a checker that verifies the three indices agree with sessions. It
-// replaced the `// 读写:` annotations and the linter that policed them (G3 #2667),
-// which named which files touch a field but could not tell whether one of them
-// touched it wrongly.
-type sessionStore struct {
-	sessions map[string]*ManagedSession
-	// byChat: chat key → set of session keys, for O(k) ResetChat with O(1)
-	// dedupe/removal. Nil in test-created routers; all helpers are nil-safe.
-	byChat map[string]map[string]struct{}
-	// keyhash: persist.KeyHash(sessionKey) → sessionKey, an O(1) lookup for the
-	// attachment tracker's workspace resolver (#1646). Maintained at the publish
-	// funnel + indexDel; the resolver self-heals on a miss by re-verifying
-	// against r.ss.sessions and re-populating via a one-off scan. Nil in tests.
-	keyhash map[string]string
-	// idToKey: session ID → session key, for O(1) RegisterForResume dedupe.
-	// Maintained under r.mu by setSessionIDIndex / clearSessionIDIndex /
-	// clearSessionIDIndexIfOwnedBy — the funnel this comment named for a while
-	// before it existed. index_invariants_test.go checks both directions.
-	idToKey map[string]string
-	// activeCount counts alive non-exempt processes. Writes happen under r.mu;
-	// atomic so Stats() reads lock-free on the dashboard /api/sessions hot path.
-	activeCount atomic.Int64
-	dirty       bool // true when sessions changed since last save
-	// gen increments on each mutation under r.mu; atomic so Version() reads
-	// lock-free on the dashboard poll path.
-	gen atomic.Uint64
 }
 
 // workspaceOverridesPath derives the overrides path (sessions.json → workspace-overrides.json).

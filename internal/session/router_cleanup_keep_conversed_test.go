@@ -13,7 +13,7 @@ import (
 // prunable so the map does not accumulate dead stubs.
 func TestShouldPrune_KeepsSessionWithSessionID(t *testing.T) {
 	r := &Router{
-		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:       newSessionTable(),
 		maxProcs: 10,
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
@@ -78,7 +78,7 @@ func TestShouldPrune_KeepsSessionWithSessionID(t *testing.T) {
 // still be present in r.ss.sessions after Cleanup.
 func TestCleanup_KeepsConversedSessionForever(t *testing.T) {
 	r := &Router{
-		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:       newSessionTable(),
 		maxProcs: 10,
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
@@ -95,14 +95,14 @@ func TestCleanup_KeepsConversedSessionForever(t *testing.T) {
 	// Orphan stub: no process, no SessionID, same age → prune.
 	orphan := &ManagedSession{key: "orphan"}
 	orphan.lastActive.Store(aged)
-	r.ss.sessions["orphan"] = orphan
+	r.ss.Put("orphan", orphan)
 
 	r.Cleanup()
 
-	if _, ok := r.ss.sessions["conversed"]; !ok {
+	if _, ok := r.ss.Lookup("conversed"); !ok {
 		t.Error("conversed session with SessionID must survive Cleanup regardless of age (#2278)")
 	}
-	if _, ok := r.ss.sessions["orphan"]; ok {
+	if _, ok := r.ss.Lookup("orphan"); ok {
 		t.Error("orphan stub without SessionID should still be pruned past pruneTTL")
 	}
 }

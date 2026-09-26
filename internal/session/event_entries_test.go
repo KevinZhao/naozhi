@@ -697,7 +697,7 @@ func TestEventEntriesForKeyAppend(t *testing.T) {
 	s := &ManagedSession{key: "alpha"}
 	s.persistedHistory = []clievent.EventEntry{{Time: 100, Summary: "a"}}
 	r.mu.Lock()
-	r.ss.sessions["alpha"] = s
+	r.ss.Put("alpha", s)
 	r.mu.Unlock()
 
 	// Unknown key: dst unchanged.

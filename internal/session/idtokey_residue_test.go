@@ -24,12 +24,11 @@ func TestRegisterForResume_StaleRotatedSID_DoesNotMisroute(t *testing.T) {
 	sessC := &ManagedSession{key: detKey}
 	sessC.setSessionID(liveSID)
 	r.mu.Lock()
-	r.ss.sessions[detKey] = sessC
-	r.indexAdd(detKey)
-	r.ss.idToKey[liveSID] = detKey
+	r.ss.Put(detKey, sessC)
+	r.ss.SetID(liveSID, detKey)
 	// Dangling residue: the retired SID A still maps to detKey from a prior
 	// incarnation that rotated its SID.
-	r.ss.idToKey[retiredSID] = detKey
+	r.ss.SetID(retiredSID, detKey)
 	r.mu.Unlock()
 
 	const resumeKey = "feishu:direct:bob:general"
@@ -47,14 +46,14 @@ func TestRegisterForResume_StaleRotatedSID_DoesNotMisroute(t *testing.T) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	// The stale residue must be healed: retiredSID now maps to the new key.
-	if mapped := r.ss.idToKey[retiredSID]; mapped != resumeKey {
+	if mapped := keyForID(r, retiredSID); mapped != resumeKey {
 		t.Errorf("idToKey[%q] = %q, want %q (self-healed)", retiredSID, mapped, resumeKey)
 	}
 	// Session C and its live SID mapping must be untouched.
-	if mapped := r.ss.idToKey[liveSID]; mapped != detKey {
+	if mapped := keyForID(r, liveSID); mapped != detKey {
 		t.Errorf("idToKey[%q] = %q, want %q (unrelated session untouched)", liveSID, mapped, detKey)
 	}
-	if r.ss.sessions[detKey] != sessC {
+	if r.ss.Get(detKey) != sessC {
 		t.Errorf("session at %q was unexpectedly replaced", detKey)
 	}
 }
@@ -71,9 +70,8 @@ func TestRegisterForResume_MatchingSID_StillDedups(t *testing.T) {
 	s := &ManagedSession{key: key}
 	s.setSessionID(sid)
 	r.mu.Lock()
-	r.ss.sessions[key] = s
-	r.indexAdd(key)
-	r.ss.idToKey[sid] = key
+	r.ss.Put(key, s)
+	r.ss.SetID(sid, key)
 	r.mu.Unlock()
 
 	got := r.RegisterForResume("feishu:direct:bob:general", sid, "/tmp/ws", "p")
@@ -91,7 +89,7 @@ func TestRegisterForResume_StaleNoSession_CleansAndCreates(t *testing.T) {
 
 	const sid = "sid-orphan"
 	r.mu.Lock()
-	r.ss.idToKey[sid] = "ghost:key:no:session" // points at a key with no session
+	r.ss.SetID(sid, "ghost:key:no:session") // points at a key with no session
 	r.mu.Unlock()
 
 	const resumeKey = "feishu:direct:bob:general"
@@ -101,7 +99,7 @@ func TestRegisterForResume_StaleNoSession_CleansAndCreates(t *testing.T) {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if mapped := r.ss.idToKey[sid]; mapped != resumeKey {
+	if mapped := keyForID(r, sid); mapped != resumeKey {
 		t.Errorf("idToKey[%q] = %q, want %q", sid, mapped, resumeKey)
 	}
 }

@@ -13,7 +13,7 @@ import (
 // Before any process reports, it falls back to the spawn-time wrapper version.
 func TestRouter_CLIVersion_PrefersLiveObserved(t *testing.T) {
 	r := &Router{
-		ss: sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss: newSessionTable(),
 	}
 	w := cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
 	w.CLIVersion = "2.1.100" // simulate spawn-time detection
@@ -33,7 +33,7 @@ func TestRouter_CLIVersion_PrefersLiveObserved(t *testing.T) {
 
 // TestRouter_CLIVersion_EmptyWhenNoWrapper guards the unwired-router path.
 func TestRouter_CLIVersion_EmptyWhenNoWrapper(t *testing.T) {
-	r := &Router{ss: sessionStore{sessions: make(map[string]*ManagedSession)}}
+	r := &Router{ss: newSessionTable()}
 	if got := r.CLIVersion(); got != "" {
 		t.Fatalf("CLIVersion with no wrapper = %q, want empty", got)
 	}

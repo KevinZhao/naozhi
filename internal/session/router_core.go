@@ -25,6 +25,7 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/knownids"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
+	"github.com/naozhi/naozhi/internal/session/sessiontable"
 	"github.com/naozhi/naozhi/internal/session/spawnpool"
 	"github.com/naozhi/naozhi/internal/session/workspacestore"
 	"github.com/naozhi/naozhi/internal/sessionconst"
@@ -143,7 +144,7 @@ const (
 //
 // Fields used to carry a `// 读写:` annotation naming every router_*.go file that
 // touches them, enforced by tools/check-router-fields. Both are gone (G3 #2667):
-// what they approximated is whether the sessionStore indices stay consistent, and
+// what they approximated is whether the session table's indices stay consistent, and
 // index_invariants_test.go asserts that directly. A comment saying "lifecycle
 // writes this" cannot catch a lifecycle path that writes it WRONG.
 type Router struct {
@@ -152,14 +153,12 @@ type Router struct {
 	// drift records keys whose shims were shut down for argv drift at startup,
 	// for cron's adoption verdict (router_adopt.go). Own lock, startup-only writes.
 	drift driftShutdowns
-	// ss is the session-table facet (#383): sessions + byChat/keyhash/idToKey
-	// indices, activeCount, dirty, gen (sessionStore, store.go). No lock of its
-	// own — read/written ONLY under r.mu. INVARIANT: sessions + byChat +
-	// keyhash + idToKey mutate together inside ONE r.mu write critical section;
-	// indexAdd/indexDel are the keyhash+byChat funnel. activeCount / gen are
-	// atomic for lock-free readers. The annotation below is the UNION of all
-	// domains; the lint recurses one level into sessionStore's own annotations.
-	ss sessionStore
+	// ss is the session table: key → session plus the chat / key-hash /
+	// session-ID indices, the live-process count and the change generation,
+	// in internal/session/sessiontable. No lock of its own — called under
+	// r.mu (Active / Gen excepted), because the spawn bookkeeping, workspace
+	// overrides and picks must change atomically with it.
+	ss *sessiontable.Table[*ManagedSession]
 	// picks holds the dashboard's per-session-key choices (backend /
 	// access-profile / tuning) for keys that may not have a ManagedSession yet.
 	// Keyed by session key, so it is NOT part of backendStore (G2 #2666).
@@ -204,7 +203,7 @@ type Router struct {
 	// map + LRU seq, dirty flag and gen, in internal/session/workspacestore.
 	// No lock of its own — every method is called under r.mu because override
 	// mutations must be atomic with session mutations (#2342) and eviction
-	// reads r.ss.byChat. Zero value is usable.
+	// asks the session table whether a chat is live. Zero value is usable.
 	wsStore workspacestore.Store
 
 	// pp is the spawn-concurrency facet (#805, #2495): pending-spawn count,
@@ -246,7 +245,7 @@ type Router struct {
 	onKeyRetired atomic.Pointer[onKeyRetiredHolder]
 
 	// onSessionRetired mirrors onKeyRetired but exposes the session UUID
-	// captured before teardown cleared r.ss.sessions[key]; see SetOnSessionRetired.
+	// captured before teardown cleared r.ss.Get(key); see SetOnSessionRetired.
 	onSessionRetired atomic.Pointer[onSessionRetiredHolder]
 
 	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
@@ -439,91 +438,18 @@ func panicSafeSpawnFn(
 	return spawn(ctx, opts)
 }
 
+// newSessionTable returns an empty session table indexed the way the router
+// looks sessions up.
+func newSessionTable() *sessiontable.Table[*ManagedSession] {
+	return sessiontable.New[*ManagedSession](chatKeyFor, persist.KeyHash)
+}
+
 // chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
 func chatKeyFor(key string) string {
 	if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
 		return key[:idx]
 	}
 	return key
-}
-
-// indexAdd adds key to the chat→sessions index. No-op when index is nil.
-// Must be called under r.mu.
-func (r *Router) indexAdd(key string) {
-	// keyhash → key fast-path for the attachment tracker resolver (#1646);
-	// independent of byChat (nil in some test routers).
-	if r.ss.keyhash != nil {
-		r.ss.keyhash[persist.KeyHash(key)] = key
-	}
-	if r.ss.byChat == nil {
-		return
-	}
-	ck := chatKeyFor(key)
-	set := r.ss.byChat[ck]
-	if set == nil {
-		set = make(map[string]struct{})
-		r.ss.byChat[ck] = set
-	}
-	set[key] = struct{}{}
-}
-
-// setSessionIDIndex points sessionID at key. The session ID arrives from the CLI
-// after the spawn, so this is the "learned later" index and every path that hears
-// an ID — first report, resume registration, discovery, shim state after a
-// restart, rename — funnels through here. No-op when the index is nil (test
-// routers). Must be called under r.mu.
-func (r *Router) setSessionIDIndex(sessionID, key string) {
-	if r.ss.idToKey == nil || sessionID == "" {
-		return
-	}
-	r.ss.idToKey[sessionID] = key
-}
-
-// clearSessionIDIndex drops sessionID's mapping. Must be called under r.mu.
-func (r *Router) clearSessionIDIndex(sessionID string) {
-	if r.ss.idToKey == nil {
-		return
-	}
-	delete(r.ss.idToKey, sessionID)
-}
-
-// clearSessionIDIndexIfOwnedBy drops sessionID's mapping only when it still
-// points at key. An ID rotation re-points the index at the same key, but a key
-// that was reused by an unrelated session must not have its mapping deleted by
-// the previous owner's cleanup (#2093 is the same hazard read from the other
-// side). Must be called under r.mu.
-func (r *Router) clearSessionIDIndexIfOwnedBy(sessionID, key string) {
-	if r.ss.idToKey == nil {
-		return
-	}
-	if mapped, ok := r.ss.idToKey[sessionID]; ok && mapped == key {
-		delete(r.ss.idToKey, sessionID)
-	}
-}
-
-// indexDel removes key from the chat→sessions index. No-op when index is nil.
-// Must be called under r.mu.
-func (r *Router) indexDel(key string) {
-	// Only delete the keyhash entry when the stored key matches, keeping the
-	// invariant exact under a (theoretical) hash collision (#1646).
-	if r.ss.keyhash != nil {
-		kh := persist.KeyHash(key)
-		if r.ss.keyhash[kh] == key {
-			delete(r.ss.keyhash, kh)
-		}
-	}
-	if r.ss.byChat == nil {
-		return
-	}
-	ck := chatKeyFor(key)
-	set := r.ss.byChat[ck]
-	if set == nil {
-		return
-	}
-	delete(set, key)
-	if len(set) == 0 {
-		delete(r.ss.byChat, ck)
-	}
 }
 
 // HistoryLoader abstracts loading a session's persisted JSONL history tail
@@ -706,13 +632,10 @@ func NewRouter(cfg RouterConfig) *Router {
 		historyLoader:    cfg.HistoryLoader,
 		resolver:         cfg.Resolver,
 	}
-	// Value facets (ss / bkStore) have no lock of their own and are not
-	// composite-literal initialised, so their maps are allocated here.
-	// wsStore, kid and pp are zero-value usable (maps allocated lazily).
-	r.ss.sessions = make(map[string]*ManagedSession)
-	r.ss.byChat = make(map[string]map[string]struct{})
-	r.ss.keyhash = make(map[string]string)
-	r.ss.idToKey = make(map[string]string)
+	// bkStore has no lock of its own and is not composite-literal
+	// initialised, so it is filled in here. wsStore, kid and pp are
+	// zero-value usable (maps allocated lazily).
+	r.ss = newSessionTable()
 	r.bkStore.wrapper = defaultWrapper
 	r.bkStore.defaultBackend = defaultBackend
 	r.bkStore.model = cfg.Model
@@ -831,7 +754,7 @@ func NewRouter(cfg RouterConfig) *Router {
 // caller owns the IsSysKey skip guard and the loadStore range.
 //
 // LOCK: must be invoked from NewRouter under construction (no concurrent
-// r.ss.sessions writers); publishSessionLocked + the idToKey write assume
+// session-table writers); publishSessionLocked + the session-ID index write assume
 // exclusive access, which the publish-after-construct contract guarantees.
 func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 	// Resolve the wrapper that owned this session's backend so the snapshot
@@ -923,7 +846,7 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 	// update so the triple-index invariant is a property of the publish step.
 	r.publishSessionLocked(key, s, false)
 	r.kid.Track(entry.SessionID)
-	r.setSessionIDIndex(entry.SessionID, key)
+	r.ss.SetID(entry.SessionID, key)
 }
 
 // startBackgroundLifecycle launches the background side effects of
@@ -951,14 +874,14 @@ func (r *Router) startBackgroundLifecycle() {
 // historyLoadSem bounds total history I/O across both tiers. Both finish
 // BEFORE the process's PersistSink is installed, so replayed entries are
 // tagged replayPhase=true and dropped. LOCK: NewRouter-only — ranges over
-// r.ss.sessions unlocked under the publish-after-construct contract.
+// the session table unlocked under the publish-after-construct contract.
 func (r *Router) startBackgroundHistoryLoaders() {
 	historyLoadSem := make(chan struct{}, historyLoadConcurrency)
 
 	// Tier 1: naozhilog (in-process per-session log).
 	if r.eventLogPersister != nil {
 		sem := historyLoadSem
-		for _, s := range r.ss.sessions {
+		for _, s := range r.ss.All() {
 			r.historyWg.Add(1)
 			go func() {
 				defer r.historyWg.Done()
@@ -992,7 +915,7 @@ func (r *Router) startBackgroundHistoryLoaders() {
 	}
 	shimKeys := r.shimManagedKeys()
 	sem := historyLoadSem
-	for _, s := range r.ss.sessions {
+	for _, s := range r.ss.All() {
 		if s.getSessionID() == "" {
 			continue
 		}
@@ -1098,7 +1021,7 @@ type onKeyRetiredHolder struct{ fn func(key string) }
 
 // onSessionRetiredHolder mirrors onKeyRetiredHolder but carries the session
 // UUID alongside the routing key, so the sessionID-keyed RetiredStore path
-// need not reverse-lookup the UUID after teardown cleared r.ss.sessions[key].
+// need not reverse-lookup the UUID after teardown cleared r.ss.Get(key).
 type onSessionRetiredHolder struct{ fn func(key, sessionID string) }
 
 // SetOnKeyRetired registers a callback fired from Reset/Remove AFTER the
@@ -1114,7 +1037,7 @@ func (r *Router) SetOnKeyRetired(fn func(key string)) {
 
 // SetOnSessionRetired registers a callback fired from Reset/Remove AFTER
 // teardown completes, receiving the routing key and the session UUID captured
-// before teardown cleared r.ss.sessions[key]. sessionID may be empty when the
+// before teardown cleared r.ss.Get(key). sessionID may be empty when the
 // session retired before the CLI ever returned a UUID; callbacks must tolerate
 // that. Independent of SetOnKeyRetired; both fire on the same teardown event.
 func (r *Router) SetOnSessionRetired(fn func(key, sessionID string)) {
@@ -1128,7 +1051,7 @@ func (r *Router) SetOnSessionRetired(fn func(key, sessionID string)) {
 // notifyKeyRetired invokes both the onKeyRetired and onSessionRetired
 // callbacks (when set). Call outside r.mu. sessionID is captured from
 // the session before its teardown ran, so it remains valid even though
-// r.ss.sessions[key] is already gone by the time we reach this hook.
+// r.ss.Get(key) is already gone by the time we reach this hook.
 func (r *Router) notifyKeyRetired(key, sessionID string) {
 	if h := r.onKeyRetired.Load(); h != nil {
 		h.fn(key)
@@ -1178,7 +1101,7 @@ func (r *Router) DefaultWorkspace() string {
 // does NOT guarantee ListSessions() returns new data; the cost is one
 // redundant debounced saveStore.
 func (r *Router) Version() uint64 {
-	return r.ss.gen.Load()
+	return r.ss.Gen()
 }
 
 // BumpVersion forces a version increment + onChange broadcast even when no
@@ -1188,7 +1111,7 @@ func (r *Router) Version() uint64 {
 // push is skipped. It does NOT set storeDirty — UI-refresh signal only, never
 // use it when session state must be persisted.
 func (r *Router) BumpVersion() {
-	r.ss.gen.Add(1)
+	r.ss.BumpGen()
 	r.notifyChange()
 }
 
@@ -1206,8 +1129,8 @@ func (r *Router) MaxProcs() int {
 // the dashboard). activeCount stays atomic for the lock-free spawn-admission path.
 func (r *Router) Stats() (active, total int) {
 	r.mu.RLock()
-	total = len(r.ss.sessions)
-	active = int(r.ss.activeCount.Load())
+	total = r.ss.Len()
+	active = int(r.ss.Active())
 	r.mu.RUnlock()
 	return active, total
 }
@@ -1255,16 +1178,16 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]
 	r.mu.RLock()
-	if cap(refs) < len(r.ss.sessions) {
+	if cap(refs) < r.ss.Len() {
 		// Grow once to the new max instead of the append growth path; the
 		// grown array is written back to the pool before Put below
 		// (regression guard: listrefspool_grow_test.go).
-		refs = make([]*ManagedSession, 0, len(r.ss.sessions))
+		refs = make([]*ManagedSession, 0, r.ss.Len())
 	}
-	for _, s := range r.ss.sessions {
+	for _, s := range r.ss.All() {
 		refs = append(refs, s)
 	}
-	version := r.ss.gen.Load()
+	version := r.ss.Gen()
 	r.mu.RUnlock()
 
 	snapshots := make([]SessionSnapshot, len(refs))
@@ -1284,12 +1207,12 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 // ListSessionsIfChanged is the gen-gated variant of ListSessionsWithVersion
 // for the /api/sessions REST poll path (#1886): when gen has not advanced since
 // sinceVersion it returns (nil, sinceVersion, false) WITHOUT touching
-// r.ss.sessions or building snapshots, so the handler can answer
+// the session table or building snapshots, so the handler can answer
 // {version, unchanged:true} and skip the marshal. Sound because writers bump
 // gen under r.mu.Lock (see ListSessionsWithVersion); changed==true reuses
 // ListSessionsWithVersion so the (snapshots, version) pair stays atomic.
 func (r *Router) ListSessionsIfChanged(sinceVersion uint64) (snapshots []SessionSnapshot, version uint64, changed bool) {
-	if cur := r.ss.gen.Load(); cur == sinceVersion {
+	if cur := r.ss.Gen(); cur == sinceVersion {
 		return nil, cur, false
 	}
 	snaps, v := r.ListSessionsWithVersion()
@@ -1300,7 +1223,7 @@ func (r *Router) ListSessionsIfChanged(sinceVersion uint64) (snapshots []Session
 func (r *Router) SessionFor(key string) *ManagedSession {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.ss.sessions[key]
+	return r.ss.Get(key)
 }
 
 // DiscardPassthroughPending fires reason to any in-flight passthrough sends for

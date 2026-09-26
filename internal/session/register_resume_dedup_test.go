@@ -36,10 +36,10 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 	unrelated.setSessionID(liveSID)
 	r.mu.Lock()
 	r.publishSessionLocked(reusedKey, unrelated, false)
-	r.ss.idToKey[liveSID] = reusedKey
+	r.ss.SetID(liveSID, reusedKey)
 	// The leaked residue: oldSID still maps to the reused key even though the
 	// session living there (C) never owned oldSID.
-	r.ss.idToKey[oldSID] = reusedKey
+	r.ss.SetID(oldSID, reusedKey)
 	r.mu.Unlock()
 
 	// User resumes the OLD session A.
@@ -57,7 +57,7 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 	// A fresh suspended session must now exist under the caller's key,
 	// targeting the requested sessionID.
 	r.mu.RLock()
-	fresh, ok := r.ss.sessions[resumeKey]
+	fresh, ok := r.ss.Lookup(resumeKey)
 	r.mu.RUnlock()
 	if !ok {
 		t.Fatalf("no fresh session created under %q", resumeKey)
@@ -68,7 +68,7 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 
 	// The unrelated session must be untouched and still own its own SID.
 	r.mu.RLock()
-	stillThere, ok := r.ss.sessions[reusedKey]
+	stillThere, ok := r.ss.Lookup(reusedKey)
 	r.mu.RUnlock()
 	if !ok || stillThere != unrelated || stillThere.SessionID() != liveSID {
 		t.Fatalf("unrelated session at %q was disturbed by the resume", reusedKey)
@@ -96,8 +96,8 @@ func TestRegisterForResume_LegitimateChainDedupStillWorks(t *testing.T) {
 	live.setSessionID(curSID)
 	r.mu.Lock()
 	r.publishSessionLocked(liveKey, live, false)
-	r.ss.idToKey[curSID] = liveKey
-	r.ss.idToKey[prevSID] = liveKey
+	r.ss.SetID(curSID, liveKey)
+	r.ss.SetID(prevSID, liveKey)
 	r.mu.Unlock()
 
 	// Resuming the current SID dedups to the live key.

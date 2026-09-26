@@ -18,7 +18,7 @@ import (
 // rewrite locked in (see TestCleanup_PruneSnapshot_ReVerifiesUnderLock).
 func TestCleanup_IdleClosedSession_StaysOneTick(t *testing.T) {
 	r := &Router{
-		ss:           sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss:           newSessionTable(),
 		maxProcs:     3,
 		ttl:          1 * time.Minute,
 		pruneTTL:     5 * time.Minute, // smaller than the idle age below
@@ -33,20 +33,20 @@ func TestCleanup_IdleClosedSession_StaysOneTick(t *testing.T) {
 
 	r.Cleanup()
 
-	if _, ok := r.ss.sessions["key1"]; !ok {
+	if _, ok := r.ss.Lookup("key1"); !ok {
 		t.Fatal("alive-then-idle-closed session must survive the tick it is closed in (master PERF-5 snapshot semantics)")
 	}
 	if proc.Alive() {
 		t.Error("idle session past TTL should have been closed this tick")
 	}
-	if got := r.ss.activeCount.Load(); got != 0 {
+	if got := r.ss.Active(); got != 0 {
 		t.Errorf("activeCount = %d, want 0 (closed session must not count as alive)", got)
 	}
 
 	// Second tick: pass-1 now observes the dead process + stale lastActive, so
 	// shouldPrune is true and the session is finally pruned.
 	r.Cleanup()
-	if _, ok := r.ss.sessions["key1"]; ok {
+	if _, ok := r.ss.Lookup("key1"); ok {
 		t.Fatal("dead session past pruneTTL must be pruned on the following tick")
 	}
 }

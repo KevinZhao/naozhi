@@ -21,7 +21,7 @@ func (p *manifestFakeProc) AvailableModels() []cli.ModelInfo { return p.models }
 func mkManifestRouter(t *testing.T) *Router {
 	t.Helper()
 	r := &Router{
-		ss: sessionStore{sessions: make(map[string]*ManagedSession)},
+		ss: newSessionTable(),
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
@@ -51,7 +51,7 @@ func TestBackendModelManifest_Tiers(t *testing.T) {
 		s := newSessionWithID("k1", "sess-1")
 		s.SetBackend("kiro")
 		s.storeProcess(proc)
-		r.ss.sessions["k1"] = s
+		r.ss.Put("k1", s)
 
 		got := r.BackendModelManifest("kiro")
 		if len(got) != 2 || got[0].ID != "claude-fable-5" {
@@ -93,7 +93,7 @@ func TestBackendModelManifest_ObservedTier(t *testing.T) {
 		s.SetBackend(backend)
 		s.SetModel(model)
 		s.SetTuningModel(tuning)
-		r.ss.sessions[key] = s
+		r.ss.Put(key, s)
 	}
 
 	t.Run("observed models when no runtime and no config", func(t *testing.T) {
