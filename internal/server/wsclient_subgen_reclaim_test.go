@@ -125,7 +125,7 @@ func TestSubGenReclaim_HighWaterForcesSweep(t *testing.T) {
 }
 
 // TestSubGenReclaim_UnsubscribeSchedulesAndResubscribeCancels drives the
-// registry the way the handlers do: unsubscribe keeps the generation but
+// registry the way the handlers do: unsubscribe advances the generation and
 // schedules it for reclamation; subscribing to the key again cancels that,
 // and the generation keeps counting up rather than restarting.
 func TestSubGenReclaim_UnsubscribeSchedulesAndResubscribeCancels(t *testing.T) {
@@ -156,12 +156,12 @@ func TestSubGenReclaim_UnsubscribeSchedulesAndResubscribeCancels(t *testing.T) {
 	if got, ok := cs.releaseAt["k"]; !ok || got != t0+subGenRetentionNanos {
 		t.Fatalf("unsubscribe did not schedule reclamation (releaseAt=%v, ok=%v)", got, ok)
 	}
-	if cs.gen["k"] != 1 {
-		t.Fatalf("unsubscribe dropped the generation (%d): a parked loop's gen=1 could match a fresh subscribe", cs.gen["k"])
+	if cs.gen["k"] != 2 {
+		t.Fatalf("generation after unsubscribe = %d, want 2: it must stay (a fresh subscribe must not restart at a value a parked loop remembers) and advance (the parked loop must see the key was given up)", cs.gen["k"])
 	}
 
-	if gen := subscribe(); gen != 2 {
-		t.Errorf("resubscribe generation = %d, want 2", gen)
+	if gen := subscribe(); gen != 3 {
+		t.Errorf("resubscribe generation = %d, want 3", gen)
 	}
 	if _, marked := cs.releaseAt["k"]; marked {
 		t.Error("resubscribe left the reclamation marker: a later sweep would delete the live generation")
