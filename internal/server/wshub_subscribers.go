@@ -349,12 +349,18 @@ func (r *subscriberRegistry) expire(c *wsClient, key string, nowNanos int64) (st
 	return stale, r.dropLocked(c, cs, key, nowNanos)
 }
 
-// dropLocked removes key from c's subscriptions and schedules its generation
-// for reclamation. gen[key] itself stays: a stale eventPushLoop may still be
-// parked in resubscribeEvents, and a fresh subscribe restarting the count at
-// 1 would let a remembered gen=1 silently resume.
+// dropLocked removes key from c's subscriptions, advances its generation and
+// schedules that for reclamation.
+//
+// The unsubscribe closure closes the push loop's notify channel, which the
+// loop cannot tell from its process going away: it parks in
+// resubscribeEvents and would re-install the subscription once the session
+// answers. Advancing the generation is what tells it the key was given up.
+// gen[key] itself stays until the retention passes, so a fresh subscribe does
+// not restart at a value a parked loop remembers.
 func (r *subscriberRegistry) dropLocked(c *wsClient, cs *clientSubs, key string, nowNanos int64) bool {
 	delete(cs.unsubs, key)
+	cs.gen[key]++
 	emptied := r.leaveLocked(c, key)
 	if cs.releaseAt == nil {
 		cs.releaseAt = make(map[string]int64)
