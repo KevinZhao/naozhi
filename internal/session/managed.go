@@ -345,7 +345,7 @@ type ManagedSession struct {
 	modelsBaselineUnknown bool
 	// costBaselineUnknown marks a session whose CLI had already spent an unknown
 	// amount before this process could observe any of it: an adopted live shim
-	// with no store entry (adoptLiveShimLocked). The first cumulative report then
+	// with no store entry (adoptLiveShim). The first cumulative report then
 	// ESTABLISHES the baseline instead of being attributed as one turn's
 	// increment — otherwise whichever run happens to be first after the restart
 	// is charged for the entire CLI session's history.

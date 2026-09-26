@@ -303,7 +303,7 @@ func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 }
 
 // TestAccountTurnCost_AdoptedBaselineChargesNothingForHistory covers the shim
-// adopted with no store entry (adoptLiveShimLocked): its CLI has already spent
+// adopted with no store entry (adoptLiveShim): its CLI has already spent
 // an unknown amount, and the first result it reports is a CUMULATIVE figure
 // covering turns this process never saw. Without the flag that figure is
 // differenced against zero, so whichever run arrives first after the restart is
