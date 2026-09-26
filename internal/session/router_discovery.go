@@ -367,7 +367,7 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 	// it, so it could starve other namespaces' alive-spawn budget. Not
 	// hard-rejected (dropping a stub loses its history chain); surfaced (#720).
 	if kind := exemptKind(key); kind != "" {
-		if existing := r.countExemptByKind(kind); existing >= exemptCapFor(kind) {
+		if existing := countExemptByKind(r.ss.AssumeLocked().View, kind); existing >= exemptCapFor(kind) {
 			slog.Warn("exempt stub registration exceeds namespace sub-quota",
 				"key", key, "namespace", kind,
 				"existing", existing, "cap", exemptCapFor(kind))
@@ -480,7 +480,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	// Workspace override for the chat key prefix. Adopt marks the store dirty
 	// (only when changed) so the override survives a crash before another flush.
 	if chatKey := chatKeyFor(key); chatKey != key {
-		r.wsStore.Adopt(chatKey, workspace)
+		r.ss.Ext().workspaces.Adopt(chatKey, workspace)
 	}
 	s, err := r.spawnSession(ctx, key, sessionID, opts)
 	if err != nil {

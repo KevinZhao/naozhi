@@ -122,11 +122,11 @@ func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWo
 		}
 		// Reconcile the per-backend labeled gauge by batched recount; O(n)
 		// but only on the rare chat-prefix reset.
-		r.reconcileSessionActiveByBackendLocked()
+		r.reconcileActiveByBackend(r.ss.AssumeLocked().View)
 	}
 	// Delete marks the store dirty so the removal survives a crash before
 	// any other path flips the flag.
-	r.wsStore.Delete(chatKeyPrefix)
+	r.ss.Ext().workspaces.Delete(chatKeyPrefix)
 	if setWorkspace && chatKeyPrefix != "" {
 		// Same locked section as the reset so no concurrent GetOrCreate sees
 		// the chat reset with the override gone (#2342). The override was just
@@ -174,7 +174,7 @@ func (r *Router) resetSessionLocked(key string, toClose *[]processIface, closedA
 	// Backend pick only: /new returns to the default backend, while the two
 	// consumed-on-spawn picks still apply to this key. dropBackendLocked's doc
 	// records that the omission is deliberate.
-	r.picks.dropBackendLocked(key)
+	r.ss.Ext().picks.dropBackendLocked(key)
 }
 
 // AgentOpts provides per-agent overrides for session creation.
@@ -246,7 +246,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			// not-found path: a second concurrent spawnSession would reuse the
 			// in-flight channel and its defer would close an already-closed
 			// channel → panic (#2221). The winner owns the close.
-			if ch, inflight := r.pp.SpawnInFlight(key); inflight {
+			if ch, inflight := r.ss.Ext().spawns.SpawnInFlight(key); inflight {
 				r.ss.Unlock()
 				select {
 				case <-ctx.Done():
@@ -263,7 +263,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			}
 			return s, SessionResumed, nil
 		}
-		ch, inflight := r.pp.SpawnInFlight(key)
+		ch, inflight := r.ss.Ext().spawns.SpawnInFlight(key)
 		if !inflight {
 			break
 		}
@@ -283,7 +283,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	// Consume the per-key shim-stuck flag (set by a Reset whose
 	// socket-gone wait timed out, #1324) under the table lock BEFORE spawnSession,
 	// which unlocks/relocks internally; apply the wrap on the error path.
-	stuck := r.pp.ConsumeShimStuck(key)
+	stuck := r.ss.Ext().spawns.ConsumeShimStuck(key)
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
 		if stuck {
@@ -345,11 +345,11 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// would respawn on the default backend, fail the resume probe, and
 	// silently downgrade to a fresh claude session.
 	reqBackend := opts.Backend
-	if len(r.picks.backend) > 0 {
+	if len(r.ss.Ext().picks.backend) > 0 {
 		if reqBackend == "" {
-			reqBackend = r.picks.backend[key]
+			reqBackend = r.ss.Ext().picks.backend[key]
 		}
-		delete(r.picks.backend, key)
+		delete(r.ss.Ext().picks.backend, key)
 	}
 	if reqBackend == "" {
 		if old := r.ss.Get(key); old != nil {
@@ -366,10 +366,10 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// dashboard override (consumed here) > opts.AccessProfile > "". An unknown
 	// ID resolves to "" with a warning: the SAFE default, never a wrong account.
 	accessProfileID := opts.AccessProfile
-	if len(r.picks.accessProfile) > 0 {
-		if ov, ok := r.picks.accessProfile[key]; ok {
+	if len(r.ss.Ext().picks.accessProfile) > 0 {
+		if ov, ok := r.ss.Ext().picks.accessProfile[key]; ok {
 			accessProfileID = ov
-			delete(r.picks.accessProfile, key)
+			delete(r.ss.Ext().picks.accessProfile, key)
 		}
 	}
 	if old := r.ss.Get(key); old != nil {
@@ -416,7 +416,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	var tuningModel, tuningEffort string
 	if old := r.ss.Get(key); old != nil {
 		tuningModel, tuningEffort = old.TuningModel(), old.TuningEffort()
-	} else if pt, ok := r.picks.tuning[key]; ok {
+	} else if pt, ok := r.ss.Ext().picks.tuning[key]; ok {
 		tuningModel, tuningEffort = pt.Model, pt.Effort
 	}
 	merged := mergeArgvLayers(
@@ -437,7 +437,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		workspace = r.resolveWorkspaceLocked(chatKey)
 		// Only an explicit per-chat override pins out the resume tier; a bare
 		// default must still let the resume-session workspace win below.
-		if _, ok := r.wsStore.Lookup(chatKey); ok {
+		if _, ok := r.ss.Ext().workspaces.Lookup(chatKey); ok {
 			workspaceOverridden = true
 		}
 	} else {
@@ -497,11 +497,11 @@ type sessionOverrides struct {
 // new entry, and drops the one-shot record. Returns ov unchanged when there
 // is none. Caller holds the table lock.
 func (r *Router) consumePendingTuningLocked(key string, ov sessionOverrides) sessionOverrides {
-	pt, ok := r.picks.tuning[key]
+	pt, ok := r.ss.Ext().picks.tuning[key]
 	if !ok {
 		return ov
 	}
-	delete(r.picks.tuning, key)
+	delete(r.ss.Ext().picks.tuning, key)
 	out := ov
 	out.tuningModel = pt.Model
 	out.tuningEffort = pt.Effort
@@ -686,10 +686,10 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// unlocked; the defer relocks and close(doneCh) wakes parked GetOrCreates.
 	// BeginSpawn reuses a guard pre-installed by ResetAndRecreate so the marker
 	// stays continuous and no concurrent GetOrCreate spawns with other opts (#775).
-	doneCh := r.pp.BeginSpawn(key)
+	doneCh := r.ss.Ext().spawns.BeginSpawn(key)
 	defer func() {
 		r.ss.Lock()
-		r.pp.EndSpawn(key, doneCh)
+		r.ss.Ext().spawns.EndSpawn(key, doneCh)
 		r.ss.Unlock()
 	}()
 
@@ -699,19 +699,19 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// drift from undetected process exits before refusing. All three
 		// checks run under the table lock; int64 locals avoid 32-bit wrap.
 		maxProcs64 := int64(r.maxProcs)
-		pending64 := int64(r.pp.PendingSpawns())
+		pending64 := int64(r.ss.Ext().spawns.PendingSpawns())
 		if r.ss.Active()+pending64 >= maxProcs64 {
-			r.countActive()
+			r.countActive(r.ss.AssumeLocked())
 		}
 		if r.ss.Active()+pending64 >= maxProcs64 {
-			if !r.evictOldest() {
+			if !r.evictOldest(r.ss.AssumeLocked()) {
 				r.ss.Unlock()
 				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 			}
 			// evictOldest() drops the table lock around proc.Close(), so pendingSpawns
 			// may have changed; re-read it or a stale value over-spawns past
 			// maxProcs / falsely refuses (#2082).
-			pending64 = int64(r.pp.PendingSpawns())
+			pending64 = int64(r.ss.Ext().spawns.PendingSpawns())
 			if r.ss.Active()+pending64 >= maxProcs64 {
 				r.ss.Unlock()
 				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
@@ -723,7 +723,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// maxExemptSessions ceiling is a relief valve for namespaces without
 		// sub-quota wiring. One combined walk yields both counts.
 		kind := exemptKind(key)
-		perKind, totalExempt := r.countExemptCombined(kind)
+		perKind, totalExempt := countExemptCombined(r.ss.AssumeLocked().View, kind)
 		if kind != "" {
 			if perKind >= exemptCapFor(kind) {
 				r.ss.Unlock()
@@ -766,10 +766,10 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// Take the pending slot and snapshot the session being replaced in this
 	// same critical section; everything slow then runs in ONE unlocked window.
 	// pendingSpawns keeps a concurrent Cleanup from pruning the slot we are
-	// about to fill. The happy path decrements via releaseLocked() once the table lock
+	// about to fill. The happy path decrements via releaseIn once the table lock
 	// is re-taken; the deferred release() is an idempotent safety net for
 	// panics / early returns.
-	slot := r.acquirePendingSpawnSlotLocked()
+	slot := r.acquirePendingSpawnSlot(r.ss.AssumeLocked())
 	defer slot.release()
 	old := r.ss.Get(key)
 	snap := snapshotRespawnLocked(old)
@@ -803,7 +803,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	// ── Commit. ──
 	r.ss.Lock()
-	slot.releaseLocked()
+	slot.releaseIn(r.ss.AssumeLocked())
 	for {
 		// A concurrent spawnSession may have installed a live session for
 		// this key while we were unlocked; if so it wins and ours is closed.
@@ -1098,10 +1098,10 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 		// session that reuses this key. See pendingPicks for the per-map
 		// lifecycles — the comment here used to claim accessProfile shared
 		// backendOverrides' lifecycle, which was backwards.
-		r.picks.dropAllLocked(key)
+		r.ss.Ext().picks.dropAllLocked(key)
 		// The shim-stuck flag is only consumed by GetOrCreate, so terminal
 		// removals must clear it or the entry lives for the process lifetime.
-		r.pp.ClearShimStuck(key)
+		r.ss.Ext().spawns.ClearShimStuck(key)
 	}
 }
 
@@ -1152,7 +1152,7 @@ func (r *Router) Reset(key string) {
 func (r *Router) ResetAndDiscardOverride(key string) {
 	r.ss.Lock()
 	proc, sessionID, hadSession := r.resetLocked(key)
-	r.wsStore.Delete(key)
+	r.ss.Ext().workspaces.Delete(key)
 	r.ss.Unlock()
 	if !hadSession {
 		return
@@ -1179,7 +1179,7 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	if !gone {
 		// Flag the key so the next GetOrCreate wraps any spawn error with
 		// ErrShimStuck (#1324); cleared by that GetOrCreate.
-		r.pp.MarkShimStuck(key)
+		r.ss.Ext().spawns.MarkShimStuck(key)
 		slog.Warn("shim socket still bound after Reset wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
 			"key", key)
 	}
@@ -1201,7 +1201,7 @@ func waitSocketGoneForKey(key string, maxWait time.Duration) bool {
 
 // ResetAndRecreate atomically resets a session and spawns a new one for the
 // same key, so no concurrent message can create a session with other opts. A
-// guard channel is installed via r.pp.BeginSpawn(key) BEFORE the table lock is released
+// guard channel is installed via r.ss.Ext().spawns.BeginSpawn(key) BEFORE the table lock is released
 // for proc.Close(); spawnSession reuses it, so the in-flight marker is
 // continuous from the first unlock through spawnSession's defer (#775).
 func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
@@ -1231,7 +1231,7 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			// Install the guardCh BEFORE releasing the table lock so a concurrent
 			// GetOrCreate parks instead of spawning with different opts;
 			// spawnSession reuses it and its defer closes+removes it (#775).
-			r.pp.BeginSpawn(key)
+			r.ss.Ext().spawns.BeginSpawn(key)
 			r.ss.Unlock()
 			proc.Close()
 			// As in Reset: the shim socket must be gone before spawnSession's
@@ -1241,7 +1241,7 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			if !gone {
 				// Flag for the ErrShimStuck wrap on the spawn failure path
 				// below (#1324); consumed inline here, not by GetOrCreate.
-				r.pp.MarkShimStuck(key)
+				r.ss.Ext().spawns.MarkShimStuck(key)
 				slog.Warn("shim socket still bound after ResetAndRecreate wait — flagging key for ErrShimStuck wrap on spawn failure",
 					"key", key)
 			}
@@ -1252,7 +1252,7 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 
 	// Still holding the table lock (spawnSession handles unlock/relock); consume the
 	// shim-stuck flag set above.
-	stuck := r.pp.ConsumeShimStuck(key)
+	stuck := r.ss.Ext().spawns.ConsumeShimStuck(key)
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
 		// spawnSession already unlocked mu on error
@@ -1394,7 +1394,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	r.publishSessionLocked(newKey, fresh, false)
 	r.ss.Delete(oldKey)
 	r.ss.SetID(fresh.getSessionID(), newKey)
-	r.picks.renameLocked(oldKey, newKey)
+	r.ss.Ext().picks.renameLocked(oldKey, newKey)
 	r.ss.MarkChanged()
 	r.ss.Unlock()
 

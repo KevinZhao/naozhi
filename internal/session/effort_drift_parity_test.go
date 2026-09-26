@@ -119,7 +119,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		})
 		r.bkStore.defaultBackend = "kiro"
-		r.picks.backend = make(map[string]string)
+		r.ss.Ext().picks.backend = make(map[string]string)
 		r.bkStore.setBackendEffortsForTest(backendEfforts)
 		r.claudeDir = t.TempDir()
 		r.kiroSessionsDir = t.TempDir()

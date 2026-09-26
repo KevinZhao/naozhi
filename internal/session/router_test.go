@@ -683,7 +683,7 @@ func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 		t.Fatalf("pre-reset workspace = %q, want /tmp/override", got)
 	}
 	r.ResetAndDiscardOverride("key1")
-	if _, ok := r.wsStore.Lookup("key1"); ok {
+	if _, ok := r.ss.Ext().workspaces.Lookup("key1"); ok {
 		t.Error("workspaceOverrides[key1] still present after ResetAndDiscardOverride")
 	}
 	if got := r.Workspace("key1"); got != "/default" {
@@ -725,11 +725,11 @@ func TestRouter_SetWorkspace_RejectsEmptyChatKey(t *testing.T) {
 	r.SetWorkspace("", "/tmp/attacker")
 
 	// 1) Empty-key slot must not be installed.
-	if _, ok := r.wsStore.Lookup(""); ok {
+	if _, ok := r.ss.Ext().workspaces.Lookup(""); ok {
 		t.Error("workspaceOverrides[\"\"] was installed; expected empty-chatKey reject")
 	}
 	// 2) Map cap must not have been consumed.
-	if got := r.wsStore.Len(); got != 0 {
+	if got := r.ss.Ext().workspaces.Len(); got != 0 {
 		t.Errorf("len(workspaceOverrides) = %d after empty-chatKey SetWorkspace; want 0", got)
 	}
 	// 3) Workspace("") must fall through to the configured default,
@@ -932,7 +932,7 @@ func TestCleanupSkipsDeadProcess(t *testing.T) {
 
 // TestCleanup_PrunesBackendOverride verifies R70-ARCH-MED: a nil-process
 // session that ages past pruneTTL is removed from r.ss.sessions AND its entry
-// in r.picks.backend is freed. A previous version of shouldPrune-branch
+// in r.ss.Ext().picks.backend is freed. A previous version of shouldPrune-branch
 // only touched r.ss.sessions, so a session that was SetSessionBackend'd and
 // then never spawned (e.g. config error at spawn time) would leave a
 // backendOverride live forever. R71-TEST-M1.
@@ -943,23 +943,23 @@ func TestCleanup_PrunesBackendOverride(t *testing.T) {
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
 	}
-	r.picks.backend = map[string]string{}
+	r.ss.Ext().picks.backend = map[string]string{}
 	// nil-process session past pruneTTL — shouldPrune returns true.
 	s := &ManagedSession{key: "k1"}
 	s.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
 	r.ss.Put("k1", s)
-	r.picks.backend["k1"] = "kiro"
-	r.picks.backend["other"] = "claude" // unrelated, must survive
+	r.ss.Ext().picks.backend["k1"] = "kiro"
+	r.ss.Ext().picks.backend["other"] = "claude" // unrelated, must survive
 
 	r.Cleanup()
 
 	if _, ok := r.ss.Lookup("k1"); ok {
 		t.Error("pruned session should be gone from r.ss.sessions")
 	}
-	if _, ok := r.picks.backend["k1"]; ok {
+	if _, ok := r.ss.Ext().picks.backend["k1"]; ok {
 		t.Error("pruned session's backendOverride should be freed")
 	}
-	if got := r.picks.backend["other"]; got != "claude" {
+	if got := r.ss.Ext().picks.backend["other"]; got != "claude" {
 		t.Errorf("unrelated backendOverride should survive, got %q", got)
 	}
 }
@@ -989,7 +989,7 @@ func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
 			r := &Router{
 				ss: newSessionTable(),
 			}
-			r.picks.backend = map[string]string{"k1": "kiro"}
+			r.ss.Ext().picks.backend = map[string]string{"k1": "kiro"}
 			s := &ManagedSession{key: "k1"}
 			s.setSessionID("sess-1")
 			r.ss.Put("k1", s)
@@ -1001,7 +1001,7 @@ func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
 			if _, ok := r.ss.Lookup("k1"); ok {
 				t.Error("session must be removed from r.ss.sessions regardless of keepBackendOverride")
 			}
-			got, ok := r.picks.backend["k1"]
+			got, ok := r.ss.Ext().picks.backend["k1"]
 			if tc.wantOverride == "" {
 				if ok {
 					t.Errorf("backendOverride must be freed, got %q", got)
@@ -1198,7 +1198,7 @@ func TestEvictOldestEmptyRouter(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
 
 	r.ss.Lock()
-	evicted := r.evictOldest()
+	evicted := r.evictOldest(r.ss.AssumeLocked())
 	r.ss.Unlock()
 
 	if evicted {
@@ -1215,7 +1215,7 @@ func TestEvictOldestReturnsTrue(t *testing.T) {
 	r.ss.Put("key1", s)
 
 	r.ss.Lock()
-	evicted := r.evictOldest()
+	evicted := r.evictOldest(r.ss.AssumeLocked())
 	r.ss.Unlock()
 
 	if !evicted {
@@ -1235,7 +1235,7 @@ func TestEvictOldestSkipsRunning(t *testing.T) {
 	r.ss.Put("key1", s)
 
 	r.ss.Lock()
-	evicted := r.evictOldest()
+	evicted := r.evictOldest(r.ss.AssumeLocked())
 	r.ss.Unlock()
 
 	if evicted {
@@ -1255,7 +1255,7 @@ func TestEvictOldestSkipsDead(t *testing.T) {
 	r.ss.Put("key1", s)
 
 	r.ss.Lock()
-	evicted := r.evictOldest()
+	evicted := r.evictOldest(r.ss.AssumeLocked())
 	r.ss.Unlock()
 
 	if evicted {
@@ -1281,7 +1281,7 @@ func TestEvictOldestPicksOldest(t *testing.T) {
 	r.ss.Put("recent-key", recentSession)
 
 	r.ss.Lock()
-	evicted := r.evictOldest()
+	evicted := r.evictOldest(r.ss.AssumeLocked())
 	r.ss.Unlock()
 
 	if !evicted {
@@ -1300,7 +1300,7 @@ func TestEvictOldestSkipsNilProcess(t *testing.T) {
 	r.ss.Put("nil-key", newSessionWithID("nil-key", "sess-1"))
 
 	r.ss.Lock()
-	evicted := r.evictOldest()
+	evicted := r.evictOldest(r.ss.AssumeLocked())
 	r.ss.Unlock()
 
 	if evicted {
@@ -1447,7 +1447,7 @@ func TestCountActive_ReflectsAliveProcesses(t *testing.T) {
 	injectSession(r, "dead1", newDeadProc())
 
 	r.ss.Lock()
-	r.countActive()
+	r.countActive(r.ss.AssumeLocked())
 	r.ss.Unlock()
 
 	if got := r.ss.Active(); got != 2 {
@@ -1818,7 +1818,7 @@ func TestSpawnSession_SpawningKeysClearedOnFailure(t *testing.T) {
 	}
 
 	r.ss.Lock()
-	_, stillMarked := r.pp.SpawnInFlight("key1")
+	_, stillMarked := r.ss.Ext().spawns.SpawnInFlight("key1")
 	r.ss.Unlock()
 	if stillMarked {
 		t.Error("spawningKeys still contains key1 after failed spawn")
@@ -1837,12 +1837,12 @@ func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 	// Simulate being inside spawnSession: caller enters with the table lock held,
 	// writes the marker, releases the lock for the Spawn() call.
 	r.ss.Lock()
-	doneCh := r.pp.BeginSpawn("cron:abc")
+	doneCh := r.ss.Ext().spawns.BeginSpawn("cron:abc")
 	r.ss.Unlock()
 
 	// Reconcile's view: lock, snapshot, unlock.
 	r.ss.Lock()
-	_, spawning := r.pp.SpawnInFlight("cron:abc")
+	_, spawning := r.ss.Ext().spawns.SpawnInFlight("cron:abc")
 	r.ss.Unlock()
 	if !spawning {
 		t.Fatal("reconcile should see spawningKeys marker and skip orphan check")
@@ -1851,11 +1851,11 @@ func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 	// After spawnSession's defer fires, the marker disappears (close +
 	// delete mirror the production defer order in spawnSession).
 	r.ss.Lock()
-	r.pp.EndSpawn("cron:abc", doneCh)
+	r.ss.Ext().spawns.EndSpawn("cron:abc", doneCh)
 	r.ss.Unlock()
 
 	r.ss.Lock()
-	_, stillMarked := r.pp.SpawnInFlight("cron:abc")
+	_, stillMarked := r.ss.Ext().spawns.SpawnInFlight("cron:abc")
 	r.ss.Unlock()
 	if stillMarked {
 		t.Error("spawningKeys leaked after cleanup")
@@ -2167,7 +2167,7 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 		})
 		r.bkStore.defaultBackend = "claude"
-		r.picks.backend = make(map[string]string)
+		r.ss.Ext().picks.backend = make(map[string]string)
 		r.claudeDir = t.TempDir() // empty: no claude jsonl exists anywhere
 		kiroDir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(kiroDir, kiroSID+".json"), []byte("{}"), 0o600); err != nil {
@@ -2255,13 +2255,13 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		r.bkStore.extraArgs = []string{"--flag-a"}
 		r.bkStore.setBackendModelsForTest(map[string]string{"kiro": "kiro-model"})
 		r.bkStore.setBackendExtraArgsForTest(map[string][]string{"kiro": {"--kiro-arg"}})
-		r.picks.backend = make(map[string]string)
+		r.ss.Ext().picks.backend = make(map[string]string)
 		return r
 	}
 
 	t.Run("backendOverride wins when opts.Backend empty", func(t *testing.T) {
 		r := mkRouter()
-		r.picks.backend["feishu:user:bob:agent1"] = "kiro"
+		r.ss.Ext().picks.backend["feishu:user:bob:agent1"] = "kiro"
 		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.BackendID != "kiro" {
 			t.Errorf("BackendID = %q, want kiro", sp.BackendID)
@@ -2273,14 +2273,14 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 			t.Errorf("Args = %v, want [--kiro-arg]", sp.Args)
 		}
 		// Override is consumed (one-shot).
-		if _, still := r.picks.backend["feishu:user:bob:agent1"]; still {
+		if _, still := r.ss.Ext().picks.backend["feishu:user:bob:agent1"]; still {
 			t.Error("backendOverride was not consumed")
 		}
 	})
 
 	t.Run("opts.Backend beats backendOverride", func(t *testing.T) {
 		r := mkRouter()
-		r.picks.backend["feishu:user:bob:agent1"] = "kiro"
+		r.ss.Ext().picks.backend["feishu:user:bob:agent1"] = "kiro"
 		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
 			AgentOpts{Backend: "claude"})
 		if sp.BackendID != "claude" {
@@ -2290,7 +2290,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	t.Run("workspaceOverride (chatKey) wins when opts.Workspace empty", func(t *testing.T) {
 		r := mkRouter()
-		r.wsStore.Seed(map[string]string{"feishu:user:alice": "/override/ws"})
+		r.ss.Ext().workspaces.Seed(map[string]string{"feishu:user:alice": "/override/ws"})
 		sp := r.resolveSpawnParamsLocked("feishu:user:alice:agent1", "", AgentOpts{})
 		if sp.Workspace != "/override/ws" {
 			t.Errorf("Workspace = %q, want /override/ws", sp.Workspace)
@@ -2299,7 +2299,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	t.Run("opts.Workspace beats workspaceOverride", func(t *testing.T) {
 		r := mkRouter()
-		r.wsStore.Seed(map[string]string{"feishu:user:alice": "/override/ws"})
+		r.ss.Ext().workspaces.Seed(map[string]string{"feishu:user:alice": "/override/ws"})
 		sp := r.resolveSpawnParamsLocked("feishu:user:alice:agent1", "",
 			AgentOpts{Workspace: "/opts/ws"})
 		if sp.Workspace != "/opts/ws" {
@@ -2404,7 +2404,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		old := &ManagedSession{key: key}
 		old.SetBackend("kiro")
 		r.ss.Put(key, old)
-		r.picks.backend[key] = "claude"
+		r.ss.Ext().picks.backend[key] = "claude"
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
 		if sp.BackendID != "claude" {
 			t.Errorf("BackendID = %q, want claude (override wins over session)", sp.BackendID)
@@ -2427,8 +2427,8 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		})
 		r.bkStore.defaultBackend = "claude"
 		r.bkStore.model = "sonnet-default"
-		r.picks.backend = make(map[string]string)
-		r.picks.accessProfile = make(map[string]string)
+		r.ss.Ext().picks.backend = make(map[string]string)
+		r.ss.Ext().picks.accessProfile = make(map[string]string)
 		setAccessProfiles(r, map[string]AccessProfile{
 			"1p-fable": {
 				Env:          map[string]string{"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
@@ -2508,12 +2508,12 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 	t.Run("one-shot dashboard override beats opts and is consumed", func(t *testing.T) {
 		r := mkRouter()
 		key := "feishu:user:bob:agent1"
-		r.picks.accessProfile[key] = "bedrock-opus"
+		r.ss.Ext().picks.accessProfile[key] = "bedrock-opus"
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{AccessProfile: "1p-fable"})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (override wins over opts)", sp.AccessProfileID)
 		}
-		if _, still := r.picks.accessProfile[key]; still {
+		if _, still := r.ss.Ext().picks.accessProfile[key]; still {
 			t.Error("one-shot override was not consumed")
 		}
 	})
@@ -2524,7 +2524,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		old := &ManagedSession{key: key}
 		old.SetAccessProfile("bedrock-opus")
 		r.ss.Put(key, old)
-		r.picks.accessProfile[key] = "1p-fable"
+		r.ss.Ext().picks.accessProfile[key] = "1p-fable"
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock wins)", sp.AccessProfileID)
@@ -2791,7 +2791,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 // guarantee: when the in-flight spawn for a key fails, every concurrent
 // GetOrCreate goroutine parked on the same key wakes immediately rather
 // than tick-polling. The test simulates the in-flight window by manually
-// installing a doneCh via r.pp.BeginSpawn (mirroring spawnSession's prologue),
+// installing a doneCh via r.ss.Ext().spawns.BeginSpawn (mirroring spawnSession's prologue),
 // launches N concurrent GetOrCreate callers, and then performs the failure-
 // path defer (close + delete under the table lock) by hand. Every waiter must return
 // within 100ms (the historical poll interval was 20ms; instantaneous wakeup
@@ -2809,7 +2809,7 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	// the inflight wait path. spawnSession uses the same pattern in its
 	// prologue (router_lifecycle.go ~line 549).
 	r.ss.Lock()
-	doneCh := r.pp.BeginSpawn(key)
+	doneCh := r.ss.Ext().spawns.BeginSpawn(key)
 	r.ss.Unlock()
 
 	const N = 10
@@ -2834,7 +2834,7 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	// order is itself part of the contract — see TEST-3(b) below).
 	start := time.Now()
 	r.ss.Lock()
-	r.pp.EndSpawn(key, doneCh)
+	r.ss.Ext().spawns.EndSpawn(key, doneCh)
 	r.ss.Unlock()
 
 	// All waiters should observe the close + retry the loop. With
@@ -2877,11 +2877,11 @@ func TestSpawningKeys_CtxCancelPriorityOverDoneCh(t *testing.T) {
 	// Install an in-flight marker that we never close, so the doneCh arm
 	// stays not-ready. ctx.Done() must therefore be the first ready arm.
 	r.ss.Lock()
-	doneCh := r.pp.BeginSpawn(key)
+	doneCh := r.ss.Ext().spawns.BeginSpawn(key)
 	r.ss.Unlock()
 	defer func() {
 		r.ss.Lock()
-		r.pp.EndSpawn(key, doneCh)
+		r.ss.Ext().spawns.EndSpawn(key, doneCh)
 		r.ss.Unlock()
 	}()
 

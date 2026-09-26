@@ -309,7 +309,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		if ok {
 			sessPrevIDs = slices.Clone(sess.prevSessionIDs)
 		}
-		_, spawning := r.pp.SpawnInFlight(state.Key)
+		_, spawning := r.ss.Ext().spawns.SpawnInFlight(state.Key)
 		r.ss.Unlock()
 
 		// Resolve the wrapper recorded at shim startup so reconnect uses the
@@ -354,7 +354,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				if sess.isAlive() {
 					hasLiveProcess = true
 				}
-			} else if _, racingSpawn := r.pp.SpawnInFlight(state.Key); racingSpawn {
+			} else if _, racingSpawn := r.ss.Ext().spawns.SpawnInFlight(state.Key); racingSpawn {
 				// spawnSession started inside the adopt window but hasn't
 				// published yet: promote spawning so classifyShimState routes
 				// to skip rather than adopting a competing copy.
@@ -633,7 +633,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// it each reconcile tick without an O(N) walk on the spawn fast path.
 		// pendingSpawns is left alone: in-flight Spawns release it in their defer.
 		r.ss.Lock()
-		r.countActive()
+		r.countActive(r.ss.AssumeLocked())
 		r.ss.Unlock()
 	}
 }

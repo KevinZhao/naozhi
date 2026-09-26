@@ -112,8 +112,8 @@ func TestSpawnSession_InstallsTheSpawnedProcess(t *testing.T) {
 		t.Fatal("the session is not in the table")
 	}
 	r.ss.RLock()
-	pending := r.pp.PendingSpawns()
-	_, inFlight := r.pp.SpawnInFlight(key)
+	pending := r.ss.Ext().spawns.PendingSpawns()
+	_, inFlight := r.ss.Ext().spawns.SpawnInFlight(key)
 	r.ss.RUnlock()
 	if pending != 0 || inFlight {
 		t.Errorf("after the spawn: pending=%d inFlight=%v, want 0/false", pending, inFlight)
@@ -224,9 +224,9 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 		t.Fatalf("GetOrCreate = %v, want the spawn error", err)
 	}
 	r.ss.RLock()
-	pt, ok := r.picks.tuning[key]
-	pending := r.pp.PendingSpawns()
-	_, inFlight := r.pp.SpawnInFlight(key)
+	pt, ok := r.ss.Ext().picks.tuning[key]
+	pending := r.ss.Ext().spawns.PendingSpawns()
+	_, inFlight := r.ss.Ext().spawns.SpawnInFlight(key)
 	r.ss.RUnlock()
 	if !ok || pt.Model != "claude-opus-5" {
 		t.Errorf("the tuning pick was consumed by a failed spawn (ok=%v, %+v)", ok, pt)
@@ -246,7 +246,7 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 		t.Errorf("the session's tuning model = %q, want the pick", s.TuningModel())
 	}
 	r.ss.RLock()
-	_, still := r.picks.tuning[key]
+	_, still := r.ss.Ext().picks.tuning[key]
 	r.ss.RUnlock()
 	if still {
 		t.Error("the pick outlived the spawn that consumed it")

@@ -48,7 +48,7 @@ func (r *Router) putWorkspaceOverrideLocked(chatKey, path string) bool {
 	// An override is evictable only while its chat has no session, so an
 	// active conversation never loses its cwd.
 	isLive := r.ss.ChatHasSessions
-	return r.wsStore.SetBounded(chatKey, path, maxWorkspaceOverrides, isLive)
+	return r.ss.Ext().workspaces.SetBounded(chatKey, path, maxWorkspaceOverrides, isLive)
 }
 
 // GetWorkspace returns the effective workspace for a chat key.
@@ -63,7 +63,7 @@ func (r *Router) Workspace(chatKey string) string {
 // (read or write). resolveSpawnParamsLocked layers the opts/resume tiers ON
 // TOP of this base rather than re-deriving it.
 func (r *Router) resolveWorkspaceLocked(chatKey string) string {
-	if ws, ok := r.wsStore.Lookup(chatKey); ok {
+	if ws, ok := r.ss.Ext().workspaces.Lookup(chatKey); ok {
 		return ws
 	}
 	return r.defaultCWD
@@ -76,8 +76,8 @@ func (r *Router) resolveWorkspaceLocked(chatKey string) string {
 func (r *Router) WorkspaceRoots() []string {
 	r.ss.RLock()
 	defer r.ss.RUnlock()
-	seen := make(map[string]struct{}, r.wsStore.Len()+1)
-	out := make([]string, 0, r.wsStore.Len()+1)
+	seen := make(map[string]struct{}, r.ss.Ext().workspaces.Len()+1)
+	out := make([]string, 0, r.ss.Ext().workspaces.Len()+1)
 	add := func(p string) {
 		if p == "" {
 			return
@@ -89,6 +89,6 @@ func (r *Router) WorkspaceRoots() []string {
 		out = append(out, p)
 	}
 	add(r.defaultCWD)
-	r.wsStore.Range(func(_, ws string) { add(ws) })
+	r.ss.Ext().workspaces.Range(func(_, ws string) { add(ws) })
 	return out
 }

@@ -45,8 +45,8 @@ func mkOverlayRouter(t *testing.T) *Router {
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
 	r.bkStore.defaultBackend = "claude"
-	r.picks.backend = make(map[string]string)
-	r.picks.accessProfile = make(map[string]string)
+	r.ss.Ext().picks.backend = make(map[string]string)
+	r.ss.Ext().picks.accessProfile = make(map[string]string)
 	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 	r.bkStore.model = "opusplan"
 	r.claudeDir = t.TempDir()
@@ -361,8 +361,8 @@ func TestAgentOverlayDrift_KnownEmptyOverlayIsNotLegacy(t *testing.T) {
 func TestAgentOverlayDrift_CompareHasNoSpawnSideEffects(t *testing.T) {
 	r := mkOverlayRouter(t)
 	key := "dashboard:direct:2494-sidefx:general"
-	r.picks.backend[key] = "kiro"
-	r.picks.accessProfile[key] = "work"
+	r.ss.Ext().picks.backend[key] = "kiro"
+	r.ss.Ext().picks.accessProfile[key] = "work"
 	setAccessProfiles(r, map[string]AccessProfile{"work": {DefaultModel: "m"}})
 
 	wrapper, backendID := r.wrapperFor("claude")
@@ -370,10 +370,10 @@ func TestAgentOverlayDrift_CompareHasNoSpawnSideEffects(t *testing.T) {
 		SpawnOverlay: &shim.SpawnOverlay{Model: "sonnet", AccessProfile: "work"}}
 	_, _, _ = r.shimArgsDrift(wrapper, backendID, state, nil)
 
-	if got := r.picks.backend[key]; got != "kiro" {
+	if got := r.ss.Ext().picks.backend[key]; got != "kiro" {
 		t.Errorf("drift compare consumed backendOverrides[%s]: got %q", key, got)
 	}
-	if got := r.picks.accessProfile[key]; got != "work" {
+	if got := r.ss.Ext().picks.accessProfile[key]; got != "work" {
 		t.Errorf("drift compare consumed accessProfileOverrides[%s]: got %q", key, got)
 	}
 }

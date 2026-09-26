@@ -35,7 +35,7 @@ func TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect(t *testing.T) {
 	s.lastActive.Store(time.Now().UnixNano())
 
 	// Seed the gauge to match the live set so reconcile would be a no-op.
-	r.reconcileSessionActiveByBackendLocked()
+	r.ss.View(func(v sessView) { r.reconcileActiveByBackend(v) })
 	wantBackend := metrics.SessionActiveByBackend.Get(s.Backend())
 	if wantBackend != 1 {
 		t.Fatalf("precondition: gauge for backend %q = %d, want 1", s.Backend(), wantBackend)

@@ -68,7 +68,7 @@ func TestGetOrCreate_DeadSessionParksOnInflightGuard(t *testing.T) {
 	injectSession(r, key, newDeadProc())
 
 	r.ss.Lock()
-	guardCh := r.pp.BeginSpawn(key)
+	guardCh := r.ss.Ext().spawns.BeginSpawn(key)
 	r.ss.Unlock()
 
 	const N = 5
@@ -99,7 +99,7 @@ func TestGetOrCreate_DeadSessionParksOnInflightGuard(t *testing.T) {
 	// session is still present, no in-flight marker) fall through to their own
 	// resume spawnSession, which fails fast against the nonexistent binary.
 	r.ss.Lock()
-	r.pp.EndSpawn(key, guardCh)
+	r.ss.Ext().spawns.EndSpawn(key, guardCh)
 	r.ss.Unlock()
 
 	done := make(chan struct{})

@@ -12,7 +12,7 @@ func newWorkspaceTestRouter(def string, overrides map[string]string) *Router {
 		ss:         newSessionTable(),
 		defaultCWD: def,
 	}
-	r.wsStore.Seed(overrides)
+	r.ss.Ext().workspaces.Seed(overrides)
 	return r
 }
 

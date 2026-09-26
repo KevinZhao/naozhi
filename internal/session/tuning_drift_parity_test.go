@@ -24,7 +24,7 @@ func mkTuningRouter(t *testing.T) *Router {
 		"kiro": cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
 	r.bkStore.defaultBackend = "kiro"
-	r.picks.backend = make(map[string]string)
+	r.ss.Ext().picks.backend = make(map[string]string)
 	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 	r.bkStore.model = "claude-fable-5"
 	r.claudeDir = t.TempDir()

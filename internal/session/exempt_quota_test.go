@@ -17,25 +17,26 @@ func TestCountExemptCombined(t *testing.T) {
 		r.RegisterCronStub("cron:job-"+strconv.Itoa(i), "/w", "p")
 	}
 
-	r.ss.Lock()
-	defer r.ss.Unlock()
+	r.ss.RLock()
+	defer r.ss.RUnlock()
+	v := r.ss.AssumeLocked().View
 
 	// kind set: perKind must equal the standalone per-kind sweep; total must
 	// equal the standalone global sweep.
-	perKind, total := r.countExemptCombined("cron")
-	if want := r.countExemptByKind("cron"); perKind != want {
+	perKind, total := countExemptCombined(v, "cron")
+	if want := countExemptByKind(v, "cron"); perKind != want {
 		t.Errorf("countExemptCombined(cron) perKind = %d, want %d", perKind, want)
 	}
-	if want := r.countExempt(); total != want {
+	if want := countExempt(v); total != want {
 		t.Errorf("countExemptCombined(cron) total = %d, want %d", total, want)
 	}
 
 	// kind=="" : perKind is always 0, total still counts all exempt sessions.
-	perKind0, total0 := r.countExemptCombined("")
+	perKind0, total0 := countExemptCombined(v, "")
 	if perKind0 != 0 {
 		t.Errorf("countExemptCombined(\"\") perKind = %d, want 0", perKind0)
 	}
-	if want := r.countExempt(); total0 != want {
+	if want := countExempt(v); total0 != want {
 		t.Errorf("countExemptCombined(\"\") total = %d, want %d", total0, want)
 	}
 }

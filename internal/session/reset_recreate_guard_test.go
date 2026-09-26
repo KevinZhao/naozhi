@@ -29,7 +29,7 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 	// the spawn call. Caller of spawnSession is required to enter with
 	// the table lock held.
 	r.ss.Lock()
-	guardCh := r.pp.BeginSpawn(key)
+	guardCh := r.ss.Ext().spawns.BeginSpawn(key)
 
 	// spawnSession will fail because newTestRouter's wrapper points at
 	// /nonexistent/cli-binary, but its defer (EndSpawn) still
@@ -52,7 +52,7 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 
 	// And the map entry should be cleared so the next caller can spawn.
 	r.ss.Lock()
-	if _, stillPresent := r.pp.SpawnInFlight(key); stillPresent {
+	if _, stillPresent := r.ss.Ext().spawns.SpawnInFlight(key); stillPresent {
 		r.ss.Unlock()
 		t.Fatal("in-flight entry still present after spawnSession returned; " +
 			"EndSpawn failed to delete the (possibly reused) entry")
@@ -76,7 +76,7 @@ func TestSpawnSession_FreshKeyInstallsOwnChannel(t *testing.T) {
 	// On error path spawnSession unlocks; relock to inspect map state.
 	r.ss.Lock()
 	defer r.ss.Unlock()
-	if _, present := r.pp.SpawnInFlight(key); present {
+	if _, present := r.ss.Ext().spawns.SpawnInFlight(key); present {
 		t.Fatal("in-flight entry leaked after spawnSession failed " +
 			"(defer should close+delete)")
 	}
@@ -104,7 +104,7 @@ func TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard(t *testing.T) {
 	// Stage: install guardCh as ResetAndRecreate does just before
 	// proc.Close.
 	r.ss.Lock()
-	guardCh := r.pp.BeginSpawn(key)
+	guardCh := r.ss.Ext().spawns.BeginSpawn(key)
 	r.ss.Unlock()
 
 	// Launch N concurrent GetOrCreate. With the guard installed, none
@@ -138,7 +138,7 @@ func TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard(t *testing.T) {
 	// no session exists) fall through to their own spawnSession which
 	// fails fast against newTestRouter's nonexistent binary.
 	r.ss.Lock()
-	r.pp.EndSpawn(key, guardCh)
+	r.ss.Ext().spawns.EndSpawn(key, guardCh)
 	r.ss.Unlock()
 
 	done := make(chan struct{})

@@ -5,7 +5,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestZeroValue_ReadsAreSafe(t *testing.T) {
@@ -20,13 +19,6 @@ func TestZeroValue_ReadsAreSafe(t *testing.T) {
 		t.Error("zero Store must not report a stuck key")
 	}
 	s.ClearShimStuck("k")
-	done := make(chan struct{})
-	go func() { s.WaitRemoves(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("WaitRemoves on zero Store must return immediately")
-	}
 }
 
 func TestSpawnSlots_CountAcquireAndRelease(t *testing.T) {
@@ -137,27 +129,4 @@ func TestShimStuck_ConsumeClearsFlag(t *testing.T) {
 		t.Error("ClearShimStuck must drop the flag")
 	}
 	s.ClearShimStuck("missing")
-}
-
-func TestRemoveWG_WaitJoinsTrackedTeardowns(t *testing.T) {
-	var s Store
-	s.TrackRemove()
-	release := make(chan struct{})
-	go func() {
-		<-release
-		s.RemoveDone()
-	}()
-	waited := make(chan struct{})
-	go func() { s.WaitRemoves(); close(waited) }()
-	select {
-	case <-waited:
-		t.Fatal("WaitRemoves returned before RemoveDone")
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(release)
-	select {
-	case <-waited:
-	case <-time.After(2 * time.Second):
-		t.Fatal("WaitRemoves did not return after RemoveDone")
-	}
 }

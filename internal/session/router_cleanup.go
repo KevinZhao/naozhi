@@ -130,9 +130,9 @@ func (r *Router) RemoveAsync(key string) bool {
 	if !ok {
 		return false
 	}
-	r.pp.TrackRemove()
+	r.removes.Add(1)
 	go func() {
-		defer r.pp.RemoveDone()
+		defer r.removes.Done()
 		// HandleDelete has already returned 200, so a panic in the teardown
 		// chain has no caller to recover it. Swallow + count it.
 		defer func() {
@@ -344,7 +344,7 @@ func (r *Router) Cleanup() {
 	// walk; skip the O(N) walk when nothing changed.
 	var aliveTotal int64
 	if closedCount > 0 || pruned > 0 {
-		aliveTotal = r.reconcileSessionActiveByBackendLocked()
+		aliveTotal = r.reconcileActiveByBackend(r.ss.AssumeLocked().View)
 	} else {
 		aliveTotal = r.ss.Active()
 	}
@@ -361,15 +361,15 @@ func (r *Router) Cleanup() {
 	var wsOverridesCopy map[string]string
 	storePath := r.storePath
 	snapshotGen := r.ss.Gen()
-	snapshotWsGen := r.wsStore.Gen()
+	snapshotWsGen := r.ss.Ext().workspaces.Gen()
 	if r.ss.Dirty() {
 		sessionsCopy = make([]*ManagedSession, 0, r.ss.Len())
 		for _, v := range r.ss.All() {
 			sessionsCopy = append(sessionsCopy, v)
 		}
 	}
-	if r.wsStore.Dirty() {
-		wsOverridesCopy = r.wsStore.Snapshot()
+	if r.ss.Ext().workspaces.Dirty() {
+		wsOverridesCopy = r.ss.Ext().workspaces.Snapshot()
 	}
 
 	r.ss.Unlock()
@@ -398,7 +398,7 @@ func (r *Router) Cleanup() {
 		} else {
 			// Only clear dirty flag if no concurrent SetWorkspace occurred since snapshot.
 			r.ss.Lock()
-			r.wsStore.MarkSavedIfUnchanged(snapshotWsGen)
+			r.ss.Ext().workspaces.MarkSavedIfUnchanged(snapshotWsGen)
 			r.ss.Unlock()
 		}
 	}
@@ -526,12 +526,12 @@ func (r *Router) saveIfDirty() {
 		}
 	}
 	var wsOverridesCopy map[string]string
-	if r.wsStore.Dirty() {
-		wsOverridesCopy = r.wsStore.Snapshot()
+	if r.ss.Ext().workspaces.Dirty() {
+		wsOverridesCopy = r.ss.Ext().workspaces.Snapshot()
 	}
 	storePath := r.storePath
 	snapshotGen := r.ss.Gen()
-	snapshotWsGen := r.wsStore.Gen()
+	snapshotWsGen := r.ss.Ext().workspaces.Gen()
 	r.ss.RUnlock()
 
 	// Known IDs live off the table lock. ClaimSave checks the throttle and stamps
@@ -556,7 +556,7 @@ func (r *Router) saveIfDirty() {
 		} else {
 			// Only clear dirty flag if no concurrent SetWorkspace occurred since snapshot.
 			r.ss.Lock()
-			r.wsStore.MarkSavedIfUnchanged(snapshotWsGen)
+			r.ss.Ext().workspaces.MarkSavedIfUnchanged(snapshotWsGen)
 			r.ss.Unlock()
 		}
 	}
@@ -655,7 +655,7 @@ func (r *Router) shutdown() {
 		sessionsCopy = append(sessionsCopy, v)
 	}
 	storePath := r.storePath
-	wsOverrides := r.wsStore.Snapshot()
+	wsOverrides := r.ss.Ext().workspaces.Snapshot()
 
 	// Collect processes to close, then release lock to close concurrently
 	var procs []processIface
