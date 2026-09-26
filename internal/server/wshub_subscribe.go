@@ -1,8 +1,6 @@
 // File-block contract (server-split-phase4-design v0.6.1 §五):
 //
-//	WRITES:     subscriber block (clients / connCount / subscriberCount /
-//	            clientWG / wsAuthLimiter / wsUpgradeLimiter / upgrader /
-//	            dashTokenHash / cookieMAC / trustedProxy)
+//	WRITES:     subscriber block (clients / subscriberCount / clientWG)
 //	READS:      shared deps block (read-only after ctor)
 //	(No send-block entry: the "READS-ALSO: send block (sendClosed only)" line
 //	that used to be here had no matching code reference anywhere in this file,

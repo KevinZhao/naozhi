@@ -2,14 +2,10 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
-	"net/http"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/gorilla/websocket"
-	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/dispatch"
@@ -21,20 +17,16 @@ import (
 
 // Hub manages WebSocket client connections and event subscriptions.
 //
-// Field-block contract: fields are grouped into 7 blocks — lifecycle
-// (mu / ctx / cancel), subscriber, broadcast, send, shared deps, agent
-// tailer, rate-limit/cache. Methods live in wshub_<block>.go and write only
-// their own block, declared by a `WRITES:` / `READS-ALSO:` godoc marker
+// Field-block contract: the send pipeline (engine), connection admission
+// (admit) and sessions_update debouncing (debounce) are sub-objects that own
+// their locks and fields. The rest are grouped into blocks — lifecycle
+// (mu / ctx / cancel), subscriber, broadcast, shared deps, agent tailer,
+// cache. Methods live in wshub_<block>.go and write only their own block,
+// declared by a `WRITES:` / `READS-ALSO:` godoc marker
 // (tools/lint-server-handlers rule 3a); NewHub / Shutdown are the
-// LIFECYCLE-METHOD cross-block exemption. Do not extract sub-structs
-// opportunistically — each block carries its own lock-ordering contract
-// (shutdown_lock_order_test.go).
+// LIFECYCLE-METHOD cross-block exemption.
 type Hub struct {
 	mu sync.RWMutex
-	// connCount mirrors len(h.clients) for the connection cap; reserved with
-	// an atomic Add before the check so concurrent upgrades cannot all pass
-	// `count < cap` and land past it (over-shoot is decremented).
-	connCount atomic.Int64
 	// droppedTotal is the Hub-wide count of SendRaw drops (send channel
 	// full). Deliberately aggregated, not per-client: it is exported only
 	// via the auth-gated /health, and all authenticated users share one trust
@@ -47,6 +39,10 @@ type Hub struct {
 	// markAuthenticated / unregister / Shutdown); the broadcast read side
 	// takes authMu alone and never h.mu, so there is no inverse order.
 	// Nil on hand-rolled test hubs ⇒ legacy h.clients scan (#1409, #1621).
+	// The pad keeps authMu off h.mu's cache line (128 bytes: Apple silicon
+	// lines, x86 adjacent-line prefetch): broadcasts read-lock authMu while
+	// churn write-locks h.mu (BenchmarkHubSnapshotAuthenticated/churn +17%).
+	_           [128]byte
 	authMu      sync.RWMutex
 	authClients map[*wsClient]struct{}
 	// authClientsSlice + authClientsIdx mirror authClients as a contiguous
@@ -70,14 +66,6 @@ type Hub struct {
 	router    HubRouter
 	agents    map[string]session.AgentOpts
 	agentCmds map[string]string
-	dashToken string
-	// dashTokenHash is sha256(dashToken) for constant-time auth comparison.
-	// Immutable after construction: rotating dashToken requires a restart.
-	dashTokenHash [32]byte
-	// cookieMAC is a getter (not a snapshot) so RotateCookieGen reaches the
-	// WS upgrade comparison without a Hub rebuild, matching the HTTP path
-	// (#1398). NewHub wraps a static CookieMAC when no getter is supplied.
-	cookieMAC func() string
 	// engine owns the send pipeline: queue / guard / send-goroutine accounting
 	// used to live here as six Hub fields (#2551). Hub now only forwards to
 	// it (WS handlers) and drains it (Shutdown); SendHandler holds the same
@@ -108,20 +96,8 @@ type Hub struct {
 	// whereas the send goroutines are owned by sendEngine (ctx cancel + drain).
 	clientWG sync.WaitGroup
 
-	// wsAuthLimiter gates the inner `auth` WS message (credential test);
-	// wsUpgradeLimiter gates the handshake itself, which fires legitimately
-	// on tab-reload / mobile-wake, so the two must not share a bucket.
-	// Both return true when the IP is allowed.
-	wsAuthLimiter    func(ip string) bool
-	wsUpgradeLimiter func(ip string) bool
-
-	trustedProxy bool // trust X-Forwarded-For for client IP extraction
-	// auth lets HandleUpgrade mint a per-browser nz_anon cookie in no-token
-	// mode so the WS upload owner matches the HTTP path's per-browser bucket
-	// instead of the client IP, which co-NAT clients share (#1326). Optional
-	// for test hubs that run no uploadStore.
-	auth     *auth.Handlers
-	upgrader websocket.Upgrader
+	// admit owns the connection caps, rate limits and credential checks.
+	admit *connAdmission
 
 	// debounce coalesces sessions_update broadcasts; each pending fire holds
 	// a clientWG slot, so Shutdown's Wait covers a late-running broadcast.
@@ -143,19 +119,6 @@ type Hub struct {
 	// marshal per notify wave; cleared on last unsubscribe per key and on
 	// Shutdown (see wshub_eventpush_cache.go).
 	historyMarshalCache *historyMarshalCache
-
-	// userSendLimiters buckets the WS send budget by uploadOwner so N tabs
-	// cannot multiply the per-connection burst N×; the per-conn limiter is
-	// still the floor. Nil pointer ⇒ not enabled (hand-built hubs); Shutdown
-	// stores nil atomically so in-flight callers see live map or nil (#888).
-	userSendLimiters atomic.Pointer[sync.Map] // map[string]*rate.Limiter
-
-	// connCountByOwner enforces the per-uploadOwner sub-cap
-	// (maxConnsPerOwner) so one token holder cannot monopolise maxWSConns;
-	// reserved at HandleUpgrade, released at unregister. Owner "" skips
-	// the cap (#1022).
-	connCountByOwnerMu sync.Mutex
-	connCountByOwner   map[string]int
 }
 
 // HubOptions holds configuration for a Hub.
@@ -211,56 +174,32 @@ func NewHub(opts HubOptions) *Hub {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
-	// Always install a getter so the WS upgrade path's `h.CookieMAC() != ""`
-	// guard never hits a nil callback.
-	cookieMACFn := opts.CookieMACFn
-	if cookieMACFn == nil {
-		staticMAC := opts.CookieMAC
-		cookieMACFn = func() string { return staticMAC }
-	}
 	nodes := opts.Nodes
 	if nodes == nil {
 		nodes = newNodeRegistry(nil)
 	}
 	h := &Hub{
-		clients:          make(map[*wsClient]struct{}),
-		authClients:      make(map[*wsClient]struct{}),
-		authClientsIdx:   make(map[*wsClient]int),
-		subscriberCount:  make(map[string]int),
-		router:           opts.Router,
-		agents:           opts.Agents,
-		agentCmds:        opts.AgentCmds,
-		dashToken:        opts.DashToken,
-		cookieMAC:        cookieMACFn,
-		nodes:            nodes,
-		projectMgr:       opts.ProjectMgr,
-		resolver:         opts.Resolver,
-		scheduler:        opts.Scheduler,
-		scratchPool:      opts.ScratchPool,
-		allowedRoot:      opts.AllowedRoot,
-		trustedProxy:     opts.TrustedProxy,
-		wsAuthLimiter:    opts.WSAuthLimiter,
-		wsUpgradeLimiter: opts.WSUpgradeLimiter,
-		auth:             opts.Auth,
-		uploadStore:      opts.UploadStore,
-		ctx:              ctx,
-		cancel:           cancel,
-	}
-	h.upgrader = websocket.Upgrader{
-		// Shared with the HTTP CSRF gate so both stay in lockstep (empty
-		// Origin permitted, "null" rejected, X-Forwarded-Host under trustedProxy).
-		CheckOrigin:     func(r *http.Request) bool { return auth.SameOriginOK(r, h.trustedProxy) },
-		ReadBufferSize:  8192,
-		WriteBufferSize: 8192,
-	}
-	if opts.DashToken != "" {
-		h.dashTokenHash = sha256.Sum256([]byte(opts.DashToken))
+		clients:         make(map[*wsClient]struct{}),
+		authClients:     make(map[*wsClient]struct{}),
+		authClientsIdx:  make(map[*wsClient]int),
+		subscriberCount: make(map[string]int),
+		router:          opts.Router,
+		agents:          opts.Agents,
+		agentCmds:       opts.AgentCmds,
+		nodes:           nodes,
+		projectMgr:      opts.ProjectMgr,
+		resolver:        opts.Resolver,
+		scheduler:       opts.Scheduler,
+		scratchPool:     opts.ScratchPool,
+		allowedRoot:     opts.AllowedRoot,
+		admit:           newConnAdmission(opts),
+		uploadStore:     opts.UploadStore,
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 	h.tailers = newTailerRegistry(h)
 	h.wiredLinkers = make(map[agentlink.AgentLinker]struct{})
 	h.historyMarshalCache = newHistoryMarshalCache()
-	h.userSendLimiters.Store(&sync.Map{})
-	h.connCountByOwner = make(map[string]int)
 	h.debounce = newDebouncer(&h.clientWG, h.doBroadcastSessionsUpdate)
 	// Built last: h is now usable as the engine's sendNotifier. The engine
 	// keeps its own reference to each shared dependency (see sendEngine's
@@ -281,31 +220,10 @@ func NewHub(opts HubOptions) *Hub {
 	return h
 }
 
-// allowSendForOwner is the per-user (uploadOwner-keyed) send ceiling that
-// stops N tabs multiplying the per-connection burst; the per-conn limiter
-// still gates first. The budget mirrors the per-conn shape (1/s, burst 5)
-// so a single tab sees no change. Owner "" and a nil map (hand-built hubs)
-// always admit (#888).
-func (h *Hub) allowSendForOwner(owner string) bool {
-	if h == nil || owner == "" {
-		return true
-	}
-	m := h.userSendLimiters.Load()
-	if m == nil {
-		return true
-	}
-	if v, ok := m.Load(owner); ok {
-		return v.(*rate.Limiter).Allow()
-	}
-	// LoadOrStore returns the canonical limiter on a concurrent create.
-	v, _ := m.LoadOrStore(owner, rate.NewLimiter(rate.Every(time.Second), 5))
-	return v.(*rate.Limiter).Allow()
-}
-
 func (h *Hub) register(c *wsClient) {
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
-	// Clients pre-authenticated by wsDeriveUploadOwner (no-token / cookie
+	// Clients pre-authenticated by deriveUploadOwner (no-token / cookie
 	// path) join authClients here; token-mode clients join via
 	// markAuthenticated. authMu nests inside h.mu.
 	if h.authClients != nil && c.authenticated.Load() {
@@ -413,10 +331,10 @@ func (h *Hub) unregister(c *wsClient) {
 	if removed {
 		// Guarded on `removed` so a double-unregister cannot drive the
 		// counter negative.
-		h.connCount.Add(-1)
-		// Reads c.uploadOwnerKey() under connCountByOwnerMu so a concurrent
-		// rekeyOwnerSlot cannot leak the new owner's slot (#1808).
-		h.releaseOwnerSlotForClient(c)
+		h.admit.releaseConn(1)
+		// Reads c's owner under the admission lock, so a concurrent re-key
+		// cannot leak the new owner's slot.
+		h.admit.releaseOwnerFor(c)
 		// Drop agent_subscribe refs so an abrupt disconnect cannot wedge a
 		// tailer slot in broadcasting mode.
 		if h.tailers != nil {
@@ -472,107 +390,6 @@ var unregisterNodesPool = sync.Pool{
 		s := make([]node.Conn, 0, 4)
 		return &s
 	},
-}
-
-// maxWSConns caps simultaneous WebSocket upgrades; the broadcast pool is
-// sized from it.
-const maxWSConns = 500
-
-// maxConnsPerOwner is the per-uploadOwner sub-cap: room for one power user's
-// tabs + integrations while a single stolen token cannot monopolise
-// maxWSConns (#1022).
-const maxConnsPerOwner = 20
-
-// reserveOwnerSlot increments the per-uploadOwner connection counter,
-// returning false at maxConnsPerOwner. Every success must be paired with a
-// release at teardown. Owner "" always succeeds without bumping the map.
-func (h *Hub) reserveOwnerSlot(owner string) bool {
-	if h == nil || owner == "" {
-		return true
-	}
-	h.connCountByOwnerMu.Lock()
-	defer h.connCountByOwnerMu.Unlock()
-	return h.reserveOwnerSlotLocked(owner)
-}
-
-// reserveOwnerSlotLocked is the connCountByOwnerMu-held body of
-// reserveOwnerSlot. owner=="" is handled by the callers (it never reaches
-// here from reserveOwnerSlot, and rekeyOwnerSlot guards "" explicitly).
-func (h *Hub) reserveOwnerSlotLocked(owner string) bool {
-	if owner == "" || h.connCountByOwner == nil {
-		return true
-	}
-	if h.connCountByOwner[owner] >= maxConnsPerOwner {
-		return false
-	}
-	h.connCountByOwner[owner]++
-	return true
-}
-
-// releaseOwnerSlot decrements the per-uploadOwner counter, deleting the entry
-// at zero so the map stays bounded to active owners.
-func (h *Hub) releaseOwnerSlot(owner string) {
-	if h == nil || owner == "" {
-		return
-	}
-	h.connCountByOwnerMu.Lock()
-	defer h.connCountByOwnerMu.Unlock()
-	h.releaseOwnerSlotLocked(owner)
-}
-
-// releaseOwnerSlotLocked is the connCountByOwnerMu-held body of
-// releaseOwnerSlot.
-func (h *Hub) releaseOwnerSlotLocked(owner string) {
-	if owner == "" || h.connCountByOwner == nil {
-		return
-	}
-	n := h.connCountByOwner[owner]
-	if n <= 1 {
-		delete(h.connCountByOwner, owner)
-		return
-	}
-	h.connCountByOwner[owner] = n - 1
-}
-
-// rekeyOwnerSlot moves c's per-owner slot from oldOwner to newOwner and
-// publishes c.setUploadOwner(newOwner) inside the SAME connCountByOwnerMu
-// critical section, so a concurrent releaseOwnerSlotForClient sees either
-// the old or the new owner with its slot held, never a half-applied state
-// (#1808). Returns false (nothing changed) when newOwner is at the ceiling.
-func (h *Hub) rekeyOwnerSlot(c *wsClient, oldOwner, newOwner string) bool {
-	if h == nil {
-		c.setUploadOwner(newOwner)
-		return true
-	}
-	h.connCountByOwnerMu.Lock()
-	defer h.connCountByOwnerMu.Unlock()
-	// A torn-down connection (c.done closed) must not reserve a fresh slot:
-	// unregister's one-shot release has already passed and would never free it.
-	select {
-	case <-c.done:
-		return false
-	default:
-	}
-	h.releaseOwnerSlotLocked(oldOwner)
-	if !h.reserveOwnerSlotLocked(newOwner) {
-		// Re-claim the old slot so the eventual release stays balanced.
-		h.reserveOwnerSlotLocked(oldOwner)
-		return false
-	}
-	c.setUploadOwner(newOwner)
-	return true
-}
-
-// releaseOwnerSlotForClient releases the slot for c's CURRENT upload owner,
-// reading c.uploadOwnerKey() under connCountByOwnerMu so it cannot
-// interleave with rekeyOwnerSlot.
-func (h *Hub) releaseOwnerSlotForClient(c *wsClient) {
-	if h == nil {
-		return
-	}
-	h.connCountByOwnerMu.Lock()
-	defer h.connCountByOwnerMu.Unlock()
-	h.releaseOwnerSlotLocked(c.uploadOwnerKey())
 }
 
 // Shutdown closes all WebSocket client connections and relays
@@ -641,7 +458,7 @@ func (h *Hub) Shutdown() {
 	// unregister's decrement is gated on h.clients membership (just
 	// cleared), so release the slots here.
 	if removed > 0 {
-		h.connCount.Add(int64(-removed))
+		h.admit.releaseConn(removed)
 	}
 
 	for _, conn := range conns {
@@ -670,13 +487,8 @@ func (h *Hub) Shutdown() {
 		h.historyMarshalCache.reset()
 	}
 
-	// Atomic nil-store: in-flight allowSendForOwner sees live map or nil.
-	h.userSendLimiters.Store(nil)
-
-	// Post clientWG.Wait no reserve/release caller remains.
-	h.connCountByOwnerMu.Lock()
-	h.connCountByOwner = nil
-	h.connCountByOwnerMu.Unlock()
+	// After clientWG.Wait: no owner-slot or send-budget caller remains.
+	h.admit.close()
 
 	// Send barrier. Position is load-bearing and drain's godoc spells out why:
 	// h.cancel() and h.debounce.close() above, none of h.mu / authMu / the

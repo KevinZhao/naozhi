@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"unsafe"
 )
 
 // Benchmarks for the Hub's subscriber hot paths. They exist as the gate for
@@ -200,4 +201,14 @@ func BenchmarkHubBroadcastSessionsUpdate(b *testing.B) {
 			}
 		})
 	})
+}
+
+// TestHub_AuthMuOffTheMuCacheLine keeps the padding between h.mu and
+// h.authMu from being lost to a field reshuffle: the benchmark only catches
+// it when someone runs it.
+func TestHub_AuthMuOffTheMuCacheLine(t *testing.T) {
+	var h Hub
+	if d := unsafe.Offsetof(h.authMu) - unsafe.Offsetof(h.mu); d < 128 {
+		t.Errorf("authMu is %d bytes after mu, want >= 128 so the two locks never share a cache line", d)
+	}
 }

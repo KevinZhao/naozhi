@@ -84,8 +84,8 @@ type wsClient struct {
 	dropped           atomic.Int64 // messages dropped due to full send buffer
 	// uploadOwner is the upload-store owner key (auth cookie, or IP in no-token
 	// mode). Written by readPump's handleAuth and read by writePump's unregister
-	// path (releaseOwnerSlot) and readPump's send path, hence the atomic
-	// pointer (#1776). nil reads as "" via uploadOwnerKey.
+	// path (releaseOwnerFor) and readPump's send path, hence the atomic
+	// pointer. nil reads as "" via uploadOwnerKey.
 	uploadOwner atomic.Pointer[string]
 }
 
@@ -302,7 +302,7 @@ func (c *wsClient) readPump() {
 			// Per-user (uploadOwner) ceiling so N tabs cannot multiply the burst
 			// budget by N; consulted only after the per-conn limiter admits the
 			// call, preserving single-tab burst semantics (#888).
-			if !c.hub.allowSendForOwner(c.uploadOwnerKey()) {
+			if !c.hub.admit.allowSend(c.uploadOwnerKey()) {
 				c.SendRaw([]byte(wsproto.RawErrRateLimited))
 				continue
 			}
