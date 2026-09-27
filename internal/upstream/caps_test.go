@@ -5,7 +5,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
@@ -44,30 +43,19 @@ func TestDerivedCaps_FromDefaultRegistry(t *testing.T) {
 }
 
 // TestDerivedCaps_DeterministicSort ensures registration order does
-// not leak into the output. Register a synthetic profile with a cap
-// that sorts before "acp" and assert the result is alpha-sorted.
-//
-// We can't safely register and unregister within a test (registry
-// reset is unexported); use a package-level sync.Once + a unique id
-// so the synthetic profile is added once and other tests still see
-// it deterministically.
-var deterministicSortOnce sync.Once
-
+// not leak into the output: a profile with a cap that sorts before "acp",
+// listed last, still comes out first. It builds its own profile list rather
+// than registering into the package registry, which has no unregister — a
+// synthetic profile left there would change what
+// TestDerivedCaps_FromDefaultRegistry sees on every later run.
 func TestDerivedCaps_DeterministicSort(t *testing.T) {
 	seedDefaultBackends(t)
-	deterministicSortOnce.Do(func() {
-		backend.Register(backend.Profile{
-			ID:               "synth-aaa",
-			DisplayName:      "synth-aaa",
-			DefaultBinary:    "synth-aaa",
-			DefaultTag:       "syn",
-			NewProtocol:      func(_ backend.ProtocolDeps) cli.Protocol { return nil },
-			DetectInProc:     func(_ string) bool { return false },
-			RequiredNodeCaps: []string{"aaa-cap"},
-		})
+	profiles := append(backend.All(), backend.Profile{
+		ID:               "synth-aaa",
+		RequiredNodeCaps: []string{"aaa-cap"},
 	})
 
-	got := derivedCaps()
+	got := capsOf(profiles)
 	if len(got) < 2 {
 		t.Fatalf("expected ≥2 caps, got %v", got)
 	}

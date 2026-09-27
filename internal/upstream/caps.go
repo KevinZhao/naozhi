@@ -16,9 +16,12 @@ import (
 // tag (#2496) — so the result is never empty and every register frame
 // carries Capabilities. Primaries predating capability negotiation ignore
 // unknown tags (WARN only), so this stays wire-compatible.
-func derivedCaps() []string {
+func derivedCaps() []string { return capsOf(backend.All()) }
+
+// capsOf is derivedCaps over an explicit profile list.
+func capsOf(profiles []backend.Profile) []string {
 	var seen map[string]struct{}
-	for _, p := range backend.All() {
+	for _, p := range profiles {
 		for _, c := range p.RequiredNodeCaps {
 			if c == "" {
 				continue
