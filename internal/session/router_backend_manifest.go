@@ -17,14 +17,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 )
 
-// BackendManifest is the wire shape of GET /api/cli/backends; the field tags
-// are the dashboard.js contract ({backends, default, detected}).
-type BackendManifest struct {
-	Backends []cli.BackendInfo `json:"backends"`
-	Default  string            `json:"default"`
-	Detected []cli.BackendInfo `json:"detected"`
-}
-
 // BackendsList returns the configured (spawnable) backends for this router,
 // each annotated with the CLI metadata its wrapper collected plus the
 // dashboard-facing Profile fields (ReplyTag / ChipColor / Features).

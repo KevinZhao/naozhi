@@ -46,8 +46,8 @@ cmd/naozhi/main.go
   -> config       YAML 加载、${ENV_VAR} 展开、校验
 
   核心链路（IM 消息 → CLI 进程）
-  -> cli          Protocol 接口（stream-json/ACP）+ spawn/manage CLI 进程 + watchdog；子包 clievent/backend
-  -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/runhistory/sessiontable/spawnpool/workspacestore/knownids
+  -> cli          Protocol 接口（stream-json/ACP）+ spawn/manage CLI 进程 + watchdog；子包 clievent/backend/procmeter
+  -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/runhistory/sessiontable/sessionview/spawnpool/workspacestore/knownids
   -> dispatch     消息处理 + slash 命令 + per-session 队列
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
   -> server       HTTP server、路由注册、WebSocket hub、REST API
