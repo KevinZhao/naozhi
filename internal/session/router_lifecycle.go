@@ -1139,8 +1139,8 @@ func (r *Router) unregisterSession(tx sessTx, key string, s *ManagedSession, kee
 //
 // Returns the live process (for Close after lock release), the session
 // UUID captured before teardown (for the retired-session notification —
-// r.ss.Get(key) is unregistered here, so callers cannot recover the
-// UUID after the lock drops), and the success flag.
+// the key's table entry is unregistered here, so callers cannot recover the
+// UUID once the transaction ends), and the success flag.
 func (r *Router) resetEntry(tx sessTx, key string) (processIface, string, bool) {
 	s, ok := tx.Lookup(key)
 	if !ok {
@@ -1192,8 +1192,8 @@ func (r *Router) ResetAndDiscardOverride(key string) {
 
 // finishResetUnlocked runs the post-unlock teardown shared by Reset and
 // ResetAndDiscardOverride. Must be called without the table lock held. sessionID
-// is the UUID captured by resetEntry before unregister cleared
-// r.ss.Get(key); pass through as-is to notifyKeyRetired so the
+// is the UUID captured by resetEntry before unregister removed the key's
+// table entry; pass through as-is to notifyKeyRetired so the
 // dashboard history-sort hook can stamp retired_at.
 func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	if proc != nil && proc.Alive() {
