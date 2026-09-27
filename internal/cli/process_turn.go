@@ -84,13 +84,13 @@ func lastTextEntryBefore(entries []clievent.EventEntry, resultIdx int) string {
 // swallowing it would force Send into the findResultSince fallback.
 func (p *Process) drainStaleEvents(ctx context.Context) error {
 	cutoff := time.Now()
-	// Read-and-clear both flags under p.mu, which Interrupt() holds while storing
+	// Read-and-clear both flags under p.turn.mu, which Interrupt() holds while storing
 	// them; two unlocked Swaps could lose a concurrent Interrupt, skipping the
 	// settle window so the SIGINT result leaks into the next turn.
-	p.mu.Lock()
-	wasInterrupted := p.interrupted.Swap(false)
-	wasRunning := p.interruptedRun.Swap(false)
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	wasInterrupted := p.turn.interrupted.Swap(false)
+	wasRunning := p.turn.interruptedRun.Swap(false)
+	p.turn.mu.Unlock()
 
 	// Stack-allocated [4]clievent.Event backing: post-cutoff events during an interrupt
 	// are rare (0-3), so the common case appends without heap allocation.

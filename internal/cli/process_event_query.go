@@ -126,9 +126,9 @@ func (p *Process) SetCwdForLinker(cwd string) {
 	projectDir := subagent.ProjectDir(cwd)
 	p.setProjectDir(projectDir)
 	session := p.linker.ParentSessionID()
-	// The wrapper sets proc.sessionID from Hello BEFORE any live init; mirror it so
+	// The wrapper sets proc.turn.sessionID from Hello BEFORE any live init; mirror it so
 	// Resolve works immediately on replayed tasks (a later init updates it via
-	// SetContext). SessionID() reads under p.mu, pairing with wrapper.go's store.
+	// SetContext). SessionID() reads under p.turn.mu, pairing with wrapper.go's store.
 	if sid := p.SessionID(); session == "" && sid != "" {
 		session = sid
 	}

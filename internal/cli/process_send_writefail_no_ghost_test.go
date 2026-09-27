@@ -65,7 +65,7 @@ func TestProcess_Send_WriteMessageFail_NoGhostUserEntry(t *testing.T) {
 	p := &Process{
 		protocol: proto,
 		caps:     ProtocolCaps(proto),
-		state:    StateReady,
+		turn:     turnState{state: StateReady},
 		eventCh:  make(chan clievent.Event, 8),
 		done:     make(chan struct{}),
 		eventLog: ring.NewEventLog(0),

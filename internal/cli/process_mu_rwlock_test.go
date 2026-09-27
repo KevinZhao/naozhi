@@ -17,7 +17,7 @@ import (
 // where a future refactor flips mu back to sync.Mutex.
 func TestProcess_ReadsUnderRLock_AllowConcurrency(t *testing.T) {
 	t.Parallel()
-	p := &Process{state: StateRunning, sessionID: "sess"}
+	p := &Process{turn: turnState{state: StateRunning, sessionID: "sess"}}
 
 	// Grab and hold an RLock in a helper goroutine so the readers below can
 	// only make progress if they also go through RLock (shared mode). If any
@@ -25,10 +25,10 @@ func TestProcess_ReadsUnderRLock_AllowConcurrency(t *testing.T) {
 	held := make(chan struct{})
 	release := make(chan struct{})
 	go func() {
-		p.mu.RLock()
+		p.turn.mu.RLock()
 		close(held)
 		<-release
-		p.mu.RUnlock()
+		p.turn.mu.RUnlock()
 	}()
 	<-held
 	defer close(release)

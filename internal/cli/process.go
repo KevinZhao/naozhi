@@ -83,18 +83,9 @@ type Process struct {
 	protocol Protocol
 	caps     Caps // cached protocol capabilities (immutable after construction)
 
-	// sessionID and state are protected by mu. Readers MUST use SessionID() /
-	// State() rather than the fields directly to avoid racing readLoop's
-	// transition writes (#623). state changes only through transition
-	// (process_turnstate.go), whose table makes Dead terminal.
-	sessionID string
-	state     ProcessState
-	// mu protects state / sessionID / onTurnDone, and makes the
-	// interrupted / interruptedRun pair change together with the state they
-	// were read against. Accessors use RLock so Snapshot polls run in
-	// parallel; write paths (transitions, Send's turn claim, Interrupt's
-	// snapshot-and-flag) use Lock.
-	mu sync.RWMutex
+	// turn is the turn state machine, session ID, turn-done hook and
+	// interrupt flags, under one lock.
+	turn turnState
 
 	eventCh  chan clievent.Event
 	done     chan struct{}
@@ -109,18 +100,9 @@ type Process struct {
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
-	interrupted     atomic.Bool // set by Interrupt(), cleared by next Send()
-	interruptedRun  atomic.Bool // true when Interrupt() was called while State==Running
 
-	// interruptSeq generates request_id suffixes for control_request interrupts;
-	// the CLI only echoes it back, so per-connection uniqueness suffices.
-	interruptSeq atomic.Int64
-
-	// controlAckMu guards controlAcks: pending SetModel ack waiters keyed by
-	// request_id, registered before the wire write and removed by the waiter, so
-	// a late ack is dropped harmlessly (docs/rfc/dashboard-model-effort-control.md §4.4).
-	controlAckMu sync.Mutex
-	controlAcks  map[string]chan error
+	// acks matches control_request acks (SetModel) to their waiters.
+	acks controlAcks
 
 	eventLog *ring.EventLog
 
@@ -141,24 +123,6 @@ type Process struct {
 	// the same frame; cap 2 covers ACP's two-event turn-end split.
 	readEventBuf [2]clievent.Event
 
-	// onTurnDone is called by readLoop when a result event transitions the
-	// process from Running to Ready without an active Send() (e.g. after a shim
-	// reconnect set StateRunning but the CLI finished before Send was called), so
-	// the session layer can broadcast state changes. Protected by mu — assign via
-	// SetOnTurnDone.
-	//
-	// Implementations MUST be idempotent: readLoop may fire the callback more
-	// than once per turn from arms that run back-to-back — the result +
-	// reconnectedMidTurn CAS path followed by <-killCh, plus cli_exited, the
-	// fall-out StateDead path and the panic defer.
-	onTurnDone func()
-
-	// reconnectedMidTurn is set by SpawnReconnect when the CLI was mid-turn at
-	// reconnect. It lets readLoop transition a stray result (no active Send)
-	// Running→Ready; otherwise that transition is owned by Send()'s defer and
-	// readLoop must not race it. Atomic: cleared without taking p.mu.
-	reconnectedMidTurn atomic.Bool
-
 	// adopted latches the outcome of the turn reconnectedMidTurn describes, so a
 	// caller that did not issue the Send can still learn how it ended. The flag
 	// above answers "may readLoop move this session to Ready?" and is consumed;
@@ -173,15 +137,8 @@ type Process struct {
 	// SetSlogKey before the reader goroutines start, so reads are lock-free.
 	log atomic.Pointer[slog.Logger]
 
-	// Passthrough slot machinery: with SendPassthrough, readLoop routes results
-	// through fanoutTurnResult instead of eventCh (legacy Send leaves pendingSlots
-	// nil). Lock ordering (docs/rfc/passthrough-mode.md §5.2.6):
-	//   link write lock → slotsMu  (Send path; append slot + write stdin atomically)
-	//   slotsMu alone      (readLoop, cancel, reconnect)
-	slotsMu          sync.Mutex
-	pendingSlots     []*sendSlot // FIFO by stdin write order
-	currentTurnSlots []*sendSlot // slots claimed by the in-flight turn
-	slotIDGen        atomic.Uint64
+	// slots is the passthrough slot machinery (SendPassthrough).
+	slots sendSlots
 
 	// linker maps parallel-agent task_ids to transcript jsonl paths for the
 	// dashboard's agent_events endpoint. Set by InitLinker; nil in test fakes.
@@ -312,7 +269,6 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 	p := &Process{
 		protocol: proto,
 		caps:     ProtocolCaps(proto),
-		state:    StateSpawning,
 		// 1024 so a TeamCreate fan-out (8 subagents × ~5 events/s) cannot fill the
 		// buffer before Send() drains it; drops force the findResultSince fallback (#1355).
 		eventCh:         make(chan clievent.Event, 1024),
@@ -349,9 +305,9 @@ func (p *Process) Alive() bool {
 
 // IsRunning returns true if the process is currently processing a message.
 func (p *Process) IsRunning() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.state == StateRunning
+	p.turn.mu.RLock()
+	defer p.turn.mu.RUnlock()
+	return p.turn.state == StateRunning
 }
 
 // Kill forcefully terminates the CLI process via shim.
@@ -419,9 +375,9 @@ func (p *Process) Detach() {
 
 // State returns the current process state.
 func (p *Process) State() ProcessState {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.state
+	p.turn.mu.RLock()
+	defer p.turn.mu.RUnlock()
+	return p.turn.state
 }
 
 // SetOnTurnDone sets the callback invoked by readLoop when a result event
@@ -430,9 +386,9 @@ func (p *Process) State() ProcessState {
 // times in rapid succession (mid-turn reconnect CAS path immediately followed
 // by a Kill; see the onTurnDone field godoc), so do only wake/broadcast work.
 func (p *Process) SetOnTurnDone(fn func()) {
-	p.mu.Lock()
-	p.onTurnDone = fn
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.onTurnDone = fn
+	p.turn.mu.Unlock()
 }
 
 // SetOnLiveVersion sets the callback fired by setLiveVersion when a distinct
@@ -444,9 +400,9 @@ func (p *Process) SetOnLiveVersion(fn func(string)) {
 
 // SessionID returns the session ID in a thread-safe manner.
 func (p *Process) SessionID() string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.sessionID
+	p.turn.mu.RLock()
+	defer p.turn.mu.RUnlock()
+	return p.turn.sessionID
 }
 
 // TotalCost is the cost the last result frame reported. Lock-free.

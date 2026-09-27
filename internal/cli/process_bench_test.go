@@ -38,9 +38,9 @@ var benchMetadata = clievent.Event{
 func benchProcess(b *testing.B) (*Process, *slog.Logger) {
 	b.Helper()
 	p, srv := shimTestPair(&ClaudeProtocol{})
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
 	quit := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -68,9 +68,9 @@ func ingestOne(p *Process, log *slog.Logger, i int) {
 	switch i % 32 {
 	case 30:
 		p.handleShimStdout(shimMsg{Type: "stdout", Seq: int64(i), Line: resultFrameWithModelUsage}, log)
-		p.mu.Lock()
-		p.state = StateRunning // the next turn
-		p.mu.Unlock()
+		p.turn.mu.Lock()
+		p.turn.state = StateRunning // the next turn
+		p.turn.mu.Unlock()
 	case 31:
 		p.dispatchProtocolEvent(benchMetadata, log)
 	default:

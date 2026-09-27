@@ -45,32 +45,19 @@ func nextState(from ProcessState, ev stateEvent) (ProcessState, bool) {
 	return from, false
 }
 
-// transition applies ev and reports the state before it and whether the state
-// moved.
+// transition applies ev to the turn state; see turnState.transition.
 func (p *Process) transition(ev stateEvent) (prev ProcessState, moved bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.transitionLocked(ev)
-}
-
-// transitionLocked is transition for a caller that holds mu.
-func (p *Process) transitionLocked(ev stateEvent) (prev ProcessState, moved bool) {
-	prev = p.state
-	next, moved := nextState(prev, ev)
-	if moved {
-		p.state = next
-	}
-	return prev, moved
+	return p.turn.transition(ev)
 }
 
 // die moves the process to Dead and fires onTurnDone, so a dashboard waiting
 // on the turn sees it end. onTurnDone is idempotent, so a second death (panic
 // recovery, then the loop's own exit) may fire it again.
 func (p *Process) die() {
-	p.mu.Lock()
-	p.transitionLocked(evDied)
-	cb := p.onTurnDone
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.transitionLocked(evDied)
+	cb := p.turn.onTurnDone
+	p.turn.mu.Unlock()
 	if cb != nil {
 		cb()
 	}

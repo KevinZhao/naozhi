@@ -29,8 +29,8 @@ func TestDrainStaleEvents_DES1_HoldFreshWaitForResult(t *testing.T) {
 		eventCh: make(chan clievent.Event, 8),
 		done:    make(chan struct{}), // open: isChanAlive must report true
 	}
-	p.interrupted.Store(true)
-	p.interruptedRun.Store(true)
+	p.turn.interrupted.Store(true)
+	p.turn.interruptedRun.Store(true)
 
 	// Both events post-date the cutoff captured at drainStaleEvents entry
 	// (cutoff := time.Now()), but only the result triggers the settle exit.
