@@ -684,34 +684,35 @@ func TestResetRunningSession(t *testing.T) {
 func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 	r := newTestRouter(3)
 	r.defaultCWD = "/default"
-	injectSession(r, "key1", newIdleProc())
-	r.SetWorkspace("key1", "/tmp/override")
-	if got := r.Workspace("key1"); got != "/tmp/override" {
+	// Keys shaped the way the dashboard makes them: the session key carries
+	// the agent, the override sits on the chat key (server/send.go).
+	const key, chat = "dashboard:direct:d1:general", "dashboard:direct:d1"
+	injectSession(r, key, newIdleProc())
+	r.SetWorkspace(chat, "/tmp/override")
+	if got := r.Workspace(chat); got != "/tmp/override" {
 		t.Fatalf("pre-reset workspace = %q, want /tmp/override", got)
 	}
-	r.ResetAndDiscardOverride("key1")
-	if _, ok := stateOf(r).workspaces.Lookup("key1"); ok {
-		t.Error("workspaceOverrides[key1] still present after ResetAndDiscardOverride")
-	}
-	if got := r.Workspace("key1"); got != "/default" {
-		t.Errorf("post-reset workspace = %q, want /default", got)
+	r.ResetAndDiscardOverride(key)
+	if got := r.Workspace(chat); got != "/default" {
+		t.Errorf("post-reset workspace = %q, want /default: the chat's override survived the reset", got)
 	}
 
 	// Race sub-case: concurrent SetWorkspace with ResetAndDiscardOverride
 	// must not trip -race; either order is acceptable as long as the lock
 	// pairs the clear with the override delete.
-	injectSession(r, "key2", newIdleProc())
-	r.SetWorkspace("key2", "/tmp/initial")
+	const key2, chat2 = "dashboard:direct:d2:general", "dashboard:direct:d2"
+	injectSession(r, key2, newIdleProc())
+	r.SetWorkspace(chat2, "/tmp/initial")
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := 0; i < 200; i++ {
-			r.SetWorkspace("key2", fmt.Sprintf("/tmp/racing-%d", i))
+			r.SetWorkspace(chat2, fmt.Sprintf("/tmp/racing-%d", i))
 		}
 	}()
-	r.ResetAndDiscardOverride("key2")
+	r.ResetAndDiscardOverride(key2)
 	<-done
-	_ = r.Workspace("key2")
+	_ = r.Workspace(chat2)
 }
 
 // TestRouter_SetWorkspace_RejectsEmptyChatKey pins R20260527122801-CR-16:
