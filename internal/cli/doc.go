@@ -48,7 +48,7 @@
 // ReadEvent turns one stdout line into zero or more Events; its done flag is
 // advisory and ignored by production callers — turn-end is detected from the
 // emitted events, so an implementation MUST emit a result/turn-end clievent.Event.
-// WriteUserMessageLocked requires the caller to hold Process.shimWMu so the
+// WriteUserMessageLocked requires the caller to hold the shim link's write lock so the
 // sendSlot append and the stdin write are atomic (FIFO slot matching).
 //
 // # Public surface

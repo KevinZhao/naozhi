@@ -80,7 +80,7 @@ func TestShimWriter_FastPath_SingleLine(t *testing.T) {
 	go p.readLoop()
 	defer p.Kill()
 
-	w := p.shimStdinWriter()
+	w := p.link.stdinWriter()
 	data := []byte(`{"type":"user_message"}` + "\n")
 	n, err := w.Write(data)
 	if err != nil {
@@ -101,7 +101,7 @@ func TestShimWriter_FastPath_TooLarge(t *testing.T) {
 	go p.readLoop()
 	defer p.Kill()
 
-	w := p.shimStdinWriter()
+	w := p.link.stdinWriter()
 	// maxStdinLineBytes = 12 MB; craft exactly maxStdinLineBytes+1 bytes of payload
 	// plus a trailing newline (total = maxStdinLineBytes+2).
 	bigLine := make([]byte, maxStdinLineBytes+2)
@@ -122,7 +122,7 @@ func TestShimWriter_SlowPath_Fragmented(t *testing.T) {
 	go p.readLoop()
 	defer p.Kill()
 
-	w := p.shimStdinWriter()
+	w := p.link.stdinWriter()
 	// Write part1 without newline → goes through slow path (buffer)
 	part1 := []byte(`{"type":"msg"`)
 	part2 := []byte(`}` + "\n") // completes the line
@@ -145,7 +145,7 @@ func TestShimWriter_SlowPath_MultiLine(t *testing.T) {
 	go p.readLoop()
 	defer p.Kill()
 
-	w := p.shimStdinWriter()
+	w := p.link.stdinWriter()
 	// Two complete lines containing a mid-content newline → slow path
 	twoLines := `{"type":"a"}` + "\n" + `{"type":"b"}` + "\n"
 	n, err := w.Write([]byte(twoLines))
@@ -167,7 +167,7 @@ func TestShimWriter_SlowPath_TooLarge(t *testing.T) {
 	go p.readLoop()
 	defer p.Kill()
 
-	w := p.shimStdinWriter()
+	w := p.link.stdinWriter()
 	// Write a partial line to force slow path, then a huge line terminator
 	partial := []byte(`{"a":`)
 	if _, err := w.Write(partial); err != nil {
@@ -217,7 +217,7 @@ func TestShimWriter_SlowPath_OversizedLineDoesNotPartialSend(t *testing.T) {
 	go p.readLoop()
 	defer p.Kill()
 
-	w := p.shimStdinWriter()
+	w := p.link.stdinWriter()
 	// One small valid line, then an oversized line, in a single Write. The
 	// embedded mid-content newline forces the slow path.
 	var payload bytes.Buffer
@@ -925,14 +925,14 @@ func TestProcess_Close_BoundedOnWedgedShim(t *testing.T) {
 		p.Close()
 	}()
 	testhelper.Eventually(t, func() bool {
-		if p.shimWMu.TryLock() {
-			p.shimWMu.Unlock()
+		if p.link.wMu.TryLock() {
+			p.link.wMu.Unlock()
 			return false
 		}
 		return true
 	}, 2*time.Second, "Close never took shimWMu around its shutdown write")
 	sent := make(chan error, 1)
-	go func() { sent <- p.shimSend(shimClientMsg{Type: "ping"}) }()
+	go func() { sent <- p.link.send(shimClientMsg{Type: "ping"}) }()
 
 	select {
 	case <-closed:
@@ -1304,7 +1304,7 @@ func TestProcess_ReadLoop_Pong(t *testing.T) {
 	// even when the pong race is lost — the prior wall-clock sleep was a
 	// best-effort observation, not a hard precondition.
 	select {
-	case <-p.pongRecv:
+	case <-p.link.pongRecv:
 		// Signal received
 	case <-time.After(200 * time.Millisecond):
 		// pongRecv is buffered(1) — might already have been consumed

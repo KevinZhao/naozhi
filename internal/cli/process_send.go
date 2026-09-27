@@ -119,7 +119,7 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 	// Turn start for the ring.EventLog fallback when eventCh drops events.
 	turnStartMS := time.Now().UnixMilli()
 
-	if err := p.protocol.WriteMessage(p.shimStdinWriter(), text, images); err != nil {
+	if err := p.protocol.WriteMessage(p.link.stdinWriter(), text, images); err != nil {
 		return nil, fmt.Errorf("write message: %w", err)
 	}
 
@@ -303,7 +303,7 @@ func (p *Process) Interrupt() {
 	if state == StateSpawning {
 		return
 	}
-	if err := p.shimSend(shimClientMsg{Type: "interrupt"}); err != nil {
+	if err := p.link.send(shimClientMsg{Type: "interrupt"}); err != nil {
 		slog.Warn("interrupt failed", "err", err)
 	}
 }
@@ -338,7 +338,7 @@ func (p *Process) InterruptViaControl() error {
 		return clierr.ErrNoActiveTurn
 	}
 	reqID := "naozhi-int-" + strconv.FormatInt(p.interruptSeq.Add(1), 10)
-	if err := p.protocol.WriteInterrupt(p.shimStdinWriter(), reqID); err != nil {
+	if err := p.protocol.WriteInterrupt(p.link.stdinWriter(), reqID); err != nil {
 		// Nothing reached the CLI, so no trailing result to drain. Roll back ONLY
 		// the flags we CAS'd — a concurrent Interrupt() that won owns its flag.
 		// Under mu, like every other write of the pair.
@@ -424,7 +424,7 @@ func (p *Process) SetModel(ctx context.Context, model string) error {
 	reqID := "naozhi-setmodel-" + strconv.FormatInt(p.interruptSeq.Add(1), 10)
 	ch := p.registerControlAck(reqID)
 	defer p.unregisterControlAck(reqID)
-	if err := ms.WriteSetModel(p.shimStdinWriter(), reqID, model); err != nil {
+	if err := ms.WriteSetModel(p.link.stdinWriter(), reqID, model); err != nil {
 		return err
 	}
 	timer := time.NewTimer(setModelAckTimeout)

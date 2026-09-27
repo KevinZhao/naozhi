@@ -24,7 +24,7 @@ func TestShimLineReader_BoundsNonStdoutFlood(t *testing.T) {
 	buf.WriteString(`{"type":"stdout","line":"unreachable"}` + "\n")
 
 	r := &shimLineReader{
-		proc: &Process{shimR: bufio.NewReader(&buf)},
+		proc: &Process{link: shimLink{r: bufio.NewReader(&buf)}},
 	}
 
 	data, eof, err := r.ReadLine()
@@ -52,7 +52,7 @@ func TestShimLineReader_BoundsUnparseableFlood(t *testing.T) {
 	}
 
 	r := &shimLineReader{
-		proc: &Process{shimR: bufio.NewReader(&buf)},
+		proc: &Process{link: shimLink{r: bufio.NewReader(&buf)}},
 	}
 
 	_, eof, err := r.ReadLine()
@@ -75,7 +75,7 @@ func TestShimLineReader_HappyPathReturnsStdout(t *testing.T) {
 	buf.WriteString(`{"type":"stdout","line":"hello"}` + "\n")
 
 	r := &shimLineReader{
-		proc: &Process{shimR: bufio.NewReader(&buf)},
+		proc: &Process{link: shimLink{r: bufio.NewReader(&buf)}},
 	}
 
 	data, eof, err := r.ReadLine()
@@ -102,7 +102,7 @@ func TestShimLineReader_HappyPathSkipsHandfulOfPings(t *testing.T) {
 	buf.WriteString(`{"type":"stdout","line":"after-warmup"}` + "\n")
 
 	r := &shimLineReader{
-		proc: &Process{shimR: bufio.NewReader(&buf)},
+		proc: &Process{link: shimLink{r: bufio.NewReader(&buf)}},
 	}
 
 	data, eof, err := r.ReadLine()
@@ -130,7 +130,7 @@ func TestShimLineReader_BoundsOversizeLine(t *testing.T) {
 	giant := bytes.Repeat([]byte("a"), 2*maxScannerBufBytes)
 
 	r := &shimLineReader{
-		proc: &Process{shimR: bufio.NewReader(bytes.NewReader(giant))},
+		proc: &Process{link: shimLink{r: bufio.NewReader(bytes.NewReader(giant))}},
 	}
 
 	data, eof, err := r.ReadLine()
@@ -162,7 +162,7 @@ func TestShimLineReader_HappyPathSpansBufferBoundary(t *testing.T) {
 	r := &shimLineReader{
 		// Small reader buffer forces ReadSlice to return ErrBufferFull
 		// repeatedly before the newline is reached.
-		proc: &Process{shimR: bufio.NewReaderSize(strings.NewReader(frame), 1024)},
+		proc: &Process{link: shimLink{r: bufio.NewReaderSize(strings.NewReader(frame), 1024)}},
 	}
 
 	data, eof, err := r.ReadLine()
@@ -187,7 +187,7 @@ func TestShimLineReader_CLIExitedReturnsErrorImmediately(t *testing.T) {
 	buf.WriteString(`{"type":"cli_exited"}` + "\n")
 
 	r := &shimLineReader{
-		proc: &Process{shimR: bufio.NewReader(&buf)},
+		proc: &Process{link: shimLink{r: bufio.NewReader(&buf)}},
 	}
 
 	data, eof, err := r.ReadLine()

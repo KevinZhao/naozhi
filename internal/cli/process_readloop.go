@@ -170,7 +170,7 @@ func (p *Process) readLoop() {
 	// carried forward via lineBuf = line below.
 	lineBuf := make([]byte, 0, 4096)
 	for {
-		line, capExceeded, readErr := readShimLine(p.shimR, lineBuf)
+		line, capExceeded, readErr := readShimLine(p.link.r, lineBuf)
 		// Carry grown capacity forward so one large event doesn't force every
 		// later iteration to re-grow from 4 KiB — but shrink back to a fresh
 		// buffer on capExceeded (don't pin a ~16 MiB array forever) or when a
@@ -275,7 +275,7 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 	case "pong":
 		// Signal heartbeat loop that shim is responsive.
 		select {
-		case p.pongRecv <- struct{}{}:
+		case p.link.pongRecv <- struct{}{}:
 		default:
 		}
 
@@ -318,7 +318,7 @@ func rpcErrorTurnEnd(err error) (tag string, ok bool) {
 // and runs each through HandleEvent / dispatchProtocolEvent. Returns
 // shimDispatchReturn when dispatch reports killCh fired.
 func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOutcome {
-	p.lastSeq.Store(msg.Seq)
+	p.link.lastSeq.Store(msg.Seq)
 	// Prefer ReadEventInto so the dominant single-event frame reuses
 	// p.readEventBuf instead of allocating a []clievent.Event per stdout line (#1676).
 	var (
@@ -368,7 +368,7 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 			p.deliverControlAck(ev)
 			continue
 		}
-		if p.protocol.HandleEvent(p.shimStdinWriter(), ev) {
+		if p.protocol.HandleEvent(p.link.stdinWriter(), ev) {
 			continue
 		}
 		if p.dispatchProtocolEvent(ev, log) {
@@ -400,18 +400,18 @@ func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 	p.transitionToDead()
 	// Close the shim conn so heartbeatLoop stops writing pings into a dead
 	// socket and the fd is released promptly (otherwise it leaks to GC if the
-	// process is never Kill/Detach'd). closeShimConn is sync.Once-guarded.
-	p.closeShimConn()
+	// process is never Kill/Detach'd). link.close is sync.Once-guarded.
+	p.link.close()
 }
 
 // transitionToDead performs the closing handshake when readLoop concludes a
 // process has stopped producing events: flips State to Dead, fires onTurnDone
 // once, and unblocks SendPassthrough callers parked on pendingSlots with
 // clierr.ErrProcessExited. Called from the cli_exited frame (caller stamps deathReason
-// and then closeShimConn) and from the fall-out exit (Kill / shim EOF / read
+// and then link.close) and from the fall-out exit (Kill / shim EOF / read
 // error; classifyEOF already stamped the reason, and Kill's shimConn.Close is
 // what unblocked us). Deliberately does NOT call setDeathReason or
-// closeShimConn so each caller keeps its own classification + cleanup contract.
+// link.close so each caller keeps its own classification + cleanup contract.
 func (p *Process) transitionToDead() {
 	p.die()
 	// Passthrough slot cleanup: every pending slot's caller is blocked inside
@@ -764,7 +764,7 @@ func (p *Process) heartbeatLoop() {
 			// healthy before it has answered.
 			for {
 				select {
-				case <-p.pongRecv:
+				case <-p.link.pongRecv:
 					continue
 				default:
 				}
@@ -772,7 +772,7 @@ func (p *Process) heartbeatLoop() {
 			}
 			// Ping payload is fully static; a pre-marshalled []byte skips the
 			// encoder pool + reflection every 30s × N live processes.
-			if err := p.shimSendRaw(shimPingBytes); err != nil {
+			if err := p.link.sendRaw(shimPingBytes); err != nil {
 				log.Debug("heartbeat ping failed", "err", err)
 				p.Kill()
 				return
@@ -785,7 +785,7 @@ func (p *Process) heartbeatLoop() {
 			// revving below 1.23 requires reinstating the explicit drain.
 			pongTimer.Reset(interval / 2)
 			select {
-			case <-p.pongRecv:
+			case <-p.link.pongRecv:
 				pongTimer.Stop()
 				misses = 0
 			case <-pongTimer.C:
