@@ -1,18 +1,10 @@
 package session
 
 import (
-	"errors"
-	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
-
-// MaxSessionKeyBytes caps the byte length of a session key accepted over any
-// trust boundary: 4 components of maxKeyComponent bytes each (enforced by
-// sanitizeKeyComponent on IM-path construction) plus 3 separators.
-const MaxSessionKeyBytes = 4*maxKeyComponent + 3
 
 // Reserved session-key namespace prefixes.
 //
@@ -128,35 +120,10 @@ func DeniedKeyRuneRanges() [][2]rune {
 	return sessionkey.DeniedKeyRuneRanges()
 }
 
-// ValidateSessionKey rejects session keys that contain control bytes, non-UTF-8
-// sequences, or exceed MaxSessionKeyBytes. The IM path silently sanitizes
-// (sanitizeKeyComponent) because operators cannot influence inbound chat IDs;
-// reverse-RPC / HTTP paths must reject outright so a compromised control-node
-// or dashboard caller cannot inject keys that corrupt slog output, terminal
-// log viewers, or sessions.json storage.
-//
-// Empty keys are rejected — callers wanting to short-circuit them must do so first.
-func ValidateSessionKey(k string) error {
-	if k == "" {
-		return errors.New("empty session key")
-	}
-	if len(k) > MaxSessionKeyBytes {
-		return fmt.Errorf("session key exceeds %d-byte limit", MaxSessionKeyBytes)
-	}
-	if !utf8.ValidString(k) {
-		return errors.New("session key invalid utf-8")
-	}
-	for _, r := range k {
-		switch {
-		case sessionkey.IsControlKeyRune(r):
-			return errors.New("session key contains control character")
-		case sessionkey.IsInvisibleKeyRune(r):
-			return errors.New("session key contains invisible control character")
-		}
-	}
-	// Deliberately does NOT enforce a 4-segment shape: cross-node protocols
-	// (internal/upstream) forward operator-supplied keys of unknown shape so
-	// router.GetSession can report the absence. Call sites relying on 4
-	// segments (promote, ChatKey extraction) must do their own split check.
-	return nil
-}
+// MaxSessionKeyBytes caps the byte length of a session key accepted over any
+// trust boundary; see sessionkey.MaxSessionKeyBytes.
+const MaxSessionKeyBytes = sessionkey.MaxSessionKeyBytes
+
+// ValidateSessionKey rejects keys that are unsafe to cross a trust boundary;
+// see sessionkey.ValidateSessionKey.
+func ValidateSessionKey(k string) error { return sessionkey.ValidateSessionKey(k) }
