@@ -34,13 +34,13 @@ func TestResolveOrFabricateKeyResolver_Precedence(t *testing.T) {
 	routerAttached := session.NewKeyResolver(map[string]session.AgentOpts{"general": {}}, nil)
 	router := session.NewRouter(session.RouterConfig{Resolver: routerAttached})
 	t.Cleanup(func() { router.Shutdown() })
-	got = resolveOrFabricateKeyResolver(DispatcherConfig{Router: router})
+	got = resolveOrFabricateKeyResolver(DispatcherConfig{Router: routerOf(router)})
 	if got != routerAttached {
 		t.Fatalf("router-attached resolver not adopted: got %p want %p", got, routerAttached)
 	}
 
 	// 4. Explicit Resolver beats router-attached.
-	got = resolveOrFabricateKeyResolver(DispatcherConfig{Router: router, Resolver: explicit})
+	got = resolveOrFabricateKeyResolver(DispatcherConfig{Router: routerOf(router), Resolver: explicit})
 	if got != explicit {
 		t.Fatalf("explicit resolver did not beat router-attached: got %p want %p (router %p)",
 			got, explicit, routerAttached)

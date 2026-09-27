@@ -29,14 +29,24 @@ func (s *Server) buildDispatcher() *dispatch.Dispatcher {
 	if s.scheduler != nil {
 		cronCommands = cronDispatchAdapter{s: s.scheduler}
 	}
+	// Same for the router and resolver: a nil pointer boxed into the
+	// interface field would defeat the dispatcher's nil checks.
+	var router dispatch.SessionRouter
+	if s.router != nil {
+		router = dispatchRouter{s.router}
+	}
+	var resolver dispatch.KeyResolver
+	if s.resolver != nil {
+		resolver = s.resolver
+	}
 	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
-		Router:                s.router,
+		Router:                router,
 		Platforms:             s.platforms,
 		Agents:                s.agents,
 		AgentCommands:         s.agentCommands,
 		Scheduler:             cronCommands,
 		ProjectMgr:            s.projectMgr,
-		Resolver:              s.resolver,
+		Resolver:              resolver,
 		Guard:                 s.sessionGuard,
 		Queue:                 s.msgQueue,
 		Dedup:                 s.dedup,

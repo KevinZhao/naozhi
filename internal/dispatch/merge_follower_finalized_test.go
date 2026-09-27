@@ -119,7 +119,7 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 	sendFn := func(
 		_ context.Context,
 		_ string,
-		_ *session.ManagedSession,
+		_ Session,
 		_ string,
 		_ []clievent.Attachment,
 		cb clievent.EventCallback,
@@ -173,7 +173,7 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 	// session can be pre-registered below.
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 10})
 	d, err := NewDispatcher(DispatcherConfig{
-		Router:                router,
+		Router:                routerOf(router),
 		Platforms:             map[string]platform.Platform{"fake": probe},
 		Agents:                map[string]session.AgentOpts{},
 		AgentCommands:         map[string]string{},

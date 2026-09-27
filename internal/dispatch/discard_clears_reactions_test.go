@@ -128,7 +128,7 @@ func TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions(t *testing.T) {
 	var calls atomic.Int64
 	router := &fakeSessionRouter{
 		notifyIdle: func() {},
-		getOrCreate: func(_ context.Context, _ string, _ session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
+		getOrCreate: func(_ context.Context, _ string, _ session.AgentOpts) (Session, session.SessionStatus, error) {
 			n := calls.Add(1)
 			if n == 1 {
 				// First (owner) turn: fail cleanly so sendAndReply returns

@@ -117,14 +117,14 @@ func (g *fakeGuard) Release(key string) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func newTestDispatcher(fp *fakePlatform, sendFn func(context.Context, string, *session.ManagedSession, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error)) *Dispatcher {
+func newTestDispatcher(fp *fakePlatform, sendFn func(context.Context, string, Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error)) *Dispatcher {
 	if sendFn == nil {
-		sendFn = func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+		sendFn = func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 			return &clievent.SendResult{Text: "ok"}, nil
 		}
 	}
 	d, err := NewDispatcher(DispatcherConfig{
-		Router:                session.NewRouter(session.RouterConfig{MaxProcs: 10}),
+		Router:                routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 10})),
 		Platforms:             map[string]platform.Platform{"fake": fp},
 		Agents:                map[string]session.AgentOpts{},
 		AgentCommands:         map[string]string{},
@@ -459,7 +459,7 @@ func TestBuildHandler_Help(t *testing.T) {
 func TestBuildHandler_EmptyText(t *testing.T) {
 	fp := &fakePlatform{}
 	called := false
-	d := newTestDispatcher(fp, func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+	d := newTestDispatcher(fp, func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		called = true
 		return &clievent.SendResult{Text: "ok"}, nil
 	})
@@ -583,7 +583,7 @@ func TestSendAndReply_GetOrCreateError_DefaultMessage(t *testing.T) {
 func TestSendAndReply_UnknownPlatform(t *testing.T) {
 	fp := &fakePlatform{}
 	called := false
-	d := newTestDispatcher(fp, func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+	d := newTestDispatcher(fp, func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		called = true
 		return &clievent.SendResult{Text: "ok"}, nil
 	})
@@ -1275,7 +1275,7 @@ func TestBuildHandler_GroupChatGate(t *testing.T) {
 // dispatcher resolved without driving a full Send through router/platform.
 type stubCaps struct{ id string }
 
-func (s stubCaps) Send(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+func (s stubCaps) Send(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 	return nil, fmt.Errorf("stubCaps:%s", s.id)
 }
 func (stubCaps) Takeover(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false }
@@ -1298,7 +1298,7 @@ func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
 	t.Parallel()
 
 	sendFnSentinel := errors.New("legacy-sendfn-fired")
-	legacySendFn := func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+	legacySendFn := func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		return nil, sendFnSentinel
 	}
 
@@ -1310,7 +1310,7 @@ func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
 		{
 			name: "only SendFn → closureCapabilities adapter",
 			cfg: DispatcherConfig{
-				Router: session.NewRouter(session.RouterConfig{MaxProcs: 1}),
+				Router: routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 1})),
 				SendFn: legacySendFn,
 			},
 			wantErrSub: "legacy-sendfn-fired",
@@ -1318,7 +1318,7 @@ func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
 		{
 			name: "only Capabilities → used directly",
 			cfg: DispatcherConfig{
-				Router:       session.NewRouter(session.RouterConfig{MaxProcs: 1}),
+				Router:       routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 1})),
 				Capabilities: stubCaps{id: "caps-only"},
 			},
 			wantErrSub: "stubCaps:caps-only",
@@ -1326,7 +1326,7 @@ func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
 		{
 			name: "both set → Capabilities wins (SendFn shadowed)",
 			cfg: DispatcherConfig{
-				Router:       session.NewRouter(session.RouterConfig{MaxProcs: 1}),
+				Router:       routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 1})),
 				Capabilities: stubCaps{id: "caps-wins"},
 				SendFn:       legacySendFn,
 			},

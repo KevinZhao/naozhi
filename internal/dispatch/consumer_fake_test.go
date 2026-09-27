@@ -110,13 +110,13 @@ func TestNewDispatcher_NilProjectMgrStaysUntypedNil(t *testing.T) {
 type fakeSessionRouter struct {
 	getOrCreateCalls atomic.Int64
 
-	getOrCreate               func(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
+	getOrCreate               func(ctx context.Context, key string, opts session.AgentOpts) (Session, session.SessionStatus, error)
 	notifyIdle                func()
 	discardPassthroughPending func(key string, reason error)
 	interruptViaControl       func(key string) session.InterruptOutcome
 }
 
-func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
+func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (Session, session.SessionStatus, error) {
 	f.getOrCreateCalls.Add(1)
 	if f.getOrCreate == nil {
 		panic("fakeSessionRouter.GetOrCreate not configured")
@@ -320,7 +320,7 @@ func TestNewDispatcher_PrefersRouterResolver(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{Resolver: shared})
 
 	d, err := NewDispatcher(DispatcherConfig{
-		Router:             router,
+		Router:             routerOf(router),
 		Agents:             map[string]session.AgentOpts{"general": {}},
 		AllowMissingSender: true,
 	})
@@ -353,7 +353,7 @@ func TestNewDispatcher_ResolverPrecedence(t *testing.T) {
 		router := session.NewRouter(session.RouterConfig{Resolver: routerOwned})
 
 		d, err := NewDispatcher(DispatcherConfig{
-			Router:             router,
+			Router:             routerOf(router),
 			Resolver:           explicit,
 			Agents:             map[string]session.AgentOpts{"general": {}},
 			AllowMissingSender: true,
@@ -389,7 +389,7 @@ func TestNewDispatcher_ResolverPrecedence(t *testing.T) {
 		// than panicking on the nil Router.Resolver() result.
 		router := session.NewRouter(session.RouterConfig{})
 		d, err := NewDispatcher(DispatcherConfig{
-			Router:             router,
+			Router:             routerOf(router),
 			Agents:             map[string]session.AgentOpts{"general": {}},
 			AllowMissingSender: true,
 		})

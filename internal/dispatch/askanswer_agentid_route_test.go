@@ -20,13 +20,13 @@ func newAgentRouteDispatcher(t *testing.T) *Dispatcher {
 	t.Helper()
 	fp := &fakePlatform{}
 	d, err := NewDispatcher(DispatcherConfig{
-		Router:        session.NewRouter(session.RouterConfig{MaxProcs: 10}),
+		Router:        routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 10})),
 		Platforms:     map[string]platform.Platform{"fake": fp},
 		Agents:        map[string]session.AgentOpts{},
 		AgentCommands: map[string]string{"review": "code-reviewer"},
 		Guard:         newFakeGuard(),
 		Dedup:         platform.NewDedup(100),
-		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+		SendFn: func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 			return &clievent.SendResult{Text: "ok"}, nil
 		},
 		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
@@ -69,7 +69,7 @@ func TestIsKnownAgent_MultipleCommands(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{}
 	d, err := NewDispatcher(DispatcherConfig{
-		Router:    session.NewRouter(session.RouterConfig{MaxProcs: 10}),
+		Router:    routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 10})),
 		Platforms: map[string]platform.Platform{"fake": fp},
 		Agents:    map[string]session.AgentOpts{},
 		AgentCommands: map[string]string{
@@ -79,7 +79,7 @@ func TestIsKnownAgent_MultipleCommands(t *testing.T) {
 		},
 		Guard: newFakeGuard(),
 		Dedup: platform.NewDedup(100),
-		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+		SendFn: func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 			return &clievent.SendResult{Text: "ok"}, nil
 		},
 		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },

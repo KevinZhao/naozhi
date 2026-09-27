@@ -29,6 +29,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session/spawnpool"
 	"github.com/naozhi/naozhi/internal/session/workspacestore"
 	"github.com/naozhi/naozhi/internal/sessionconst"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
@@ -1083,11 +1084,9 @@ func (r *Router) NotifyIdle() {
 }
 
 // ChatKey builds a chat-level key (without agent suffix) for workspace
-// overrides. SECURITY: components are sanitized with the same rule as
-// SessionKey so a malicious chat ID with C0/ANSI bytes or Unicode bidi
-// overrides cannot inject fabricated slog.TextHandler log lines.
+// overrides; see sessionkey.ChatKey.
 func ChatKey(platform, chatType, chatID string) string {
-	return sanitizeKeyComponent(platform) + ":" + sanitizeKeyComponent(chatType) + ":" + sanitizeKeyComponent(chatID)
+	return sessionkey.ChatKey(platform, chatType, chatID)
 }
 
 // DefaultWorkspace returns the router's default working directory.

@@ -13,7 +13,8 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -39,8 +40,8 @@ func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage
 			// nil log: msg.ChatID/Platform come straight from webhook payloads,
 			// so sanitize like BuildHandler's enriched logger does.
 			slog.Warn("reply failed",
-				"platform", session.SanitizeLogAttr(msg.Platform),
-				"chat", session.SanitizeLogAttr(msg.ChatID),
+				"platform", sessionkey.SanitizeLogAttr(msg.Platform),
+				"chat", sessionkey.SanitizeLogAttr(msg.ChatID),
 				"err", err)
 		}
 	}
@@ -90,7 +91,7 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		return true
 
 	case trimmed == "/pwd":
-		chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
+		chatKey := sessionkey.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
 		ws := d.router.Workspace(chatKey)
 		if ws == "" {
 			d.replyText(ctx, msg, "当前工作目录: （未设置，使用进程默认）", log)
@@ -135,13 +136,13 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.IncomingMessage, log *slog.Logger) {
 	outcome := d.interruptChat(msg.Platform, msg.ChatType, msg.ChatID)
 	switch outcome {
-	case session.InterruptSent:
+	case sessionview.InterruptSent:
 		d.replyText(ctx, msg, "已中断当前回复。", log)
-	case session.InterruptNoTurn, session.InterruptNoSession:
+	case sessionview.InterruptNoTurn, sessionview.InterruptNoSession:
 		d.replyText(ctx, msg, "当前没有正在进行的回复。", log)
-	case session.InterruptUnsupported:
+	case sessionview.InterruptUnsupported:
 		d.replyText(ctx, msg, "当前后端不支持软中断。", log)
-	case session.InterruptError:
+	case sessionview.InterruptError:
 		d.replyText(ctx, msg, "中断失败，请稍后重试或使用 /new 重置会话。", log)
 	}
 }
@@ -154,7 +155,7 @@ func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.Incomin
 //	Sent > Error > Unsupported > NoTurn > NoSession
 //
 // Keys are deduplicated: one agentID may be reachable via several commands.
-func (d *Dispatcher) interruptChat(platform, chatType, chatID string) session.InterruptOutcome {
+func (d *Dispatcher) interruptChat(platform, chatType, chatID string) sessionview.InterruptOutcome {
 	agentIDs := make(map[string]struct{}, len(d.agentCommands)+2)
 	agentIDs["general"] = struct{}{}
 	agentIDs["planner"] = struct{}{}
@@ -162,16 +163,16 @@ func (d *Dispatcher) interruptChat(platform, chatType, chatID string) session.In
 		agentIDs[id] = struct{}{}
 	}
 
-	best := session.InterruptNoSession
-	rank := func(o session.InterruptOutcome) int {
+	best := sessionview.InterruptNoSession
+	rank := func(o sessionview.InterruptOutcome) int {
 		switch o {
-		case session.InterruptSent:
+		case sessionview.InterruptSent:
 			return 4
-		case session.InterruptError:
+		case sessionview.InterruptError:
 			return 3
-		case session.InterruptUnsupported:
+		case sessionview.InterruptUnsupported:
 			return 2
-		case session.InterruptNoTurn:
+		case sessionview.InterruptNoTurn:
 			return 1
 		default: // InterruptNoSession
 			return 0
@@ -318,7 +319,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 			return
 		}
 	}
-	key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	key := sessionkey.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 	// #2185: discardQueue before Reset — see the planner branch above.
 	d.discardQueue(ctx, msg, key)
 	d.router.Reset(key)
@@ -629,7 +630,7 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		path = filepath.Join(home, path[1:])
 	}
 
-	chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
+	chatKey := sessionkey.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
 
 	var absPath string
 	if filepath.IsAbs(path) {

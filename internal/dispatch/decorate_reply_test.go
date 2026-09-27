@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -143,7 +142,7 @@ func TestDispatcher_DecorateReplyText_NilCapsIsPanic(t *testing.T) {
 // _ static checks ensure the helper signature stays compatible with
 // session.ManagedSession (most call sites pass a *session.ManagedSession
 // produced by Router.GetOrCreate).
-var _ = func(d *Dispatcher, s *session.ManagedSession, ctx context.Context) string {
+var _ = func(d *Dispatcher, s Session, ctx context.Context) string {
 	_ = ctx
 	return d.decorateReplyText(&clievent.SendResult{}, s)
 }

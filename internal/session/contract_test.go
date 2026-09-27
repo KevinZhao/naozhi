@@ -34,15 +34,13 @@ import (
 // docs/rfc/consumer-interfaces.md are covered here so any Router
 // signature drift surfaces in one CI failure instead of three.
 //
-// cron.SessionRouter and upstream.SessionRouter are INTENTIONALLY not
-// pinned: both speak in their own session type (cron.Session /
-// upstream.Session) rather than *session.ManagedSession, so
-// *session.Router does not satisfy them directly. wireup adapts it to each
-// and pins the adapters there (cron_router_adapter.go, upstream_router.go).
-var (
-	_ dispatch.SessionRouter = (*session.Router)(nil)
-	_ server.HubRouter       = (*session.Router)(nil)
-)
+// cron.SessionRouter, upstream.SessionRouter and dispatch.SessionRouter are
+// INTENTIONALLY not pinned: each speaks in its own session type
+// (cron.Session / upstream.Session / dispatch.Session) rather than
+// *session.ManagedSession, so *session.Router does not satisfy them directly.
+// The adapters are pinned where they live (wireup's cron_router_adapter.go and
+// upstream_router.go, server's dispatch_router_adapter.go).
+var _ server.HubRouter = (*session.Router)(nil)
 
 // dispatch.ProjectStore is the other consumer interface dispatch declares
 // (ARCH-DISP-1 #457). consumer.go relied on a runtime assignment in
@@ -55,3 +53,5 @@ var _ dispatch.ProjectStore = (*project.Manager)(nil)
 var _ = cron.SessionRouter(nil) // keep cron import alive for godoc cross-ref
 
 var _ = upstream.SessionRouter(nil) // keep upstream import alive for godoc cross-ref
+
+var _ = dispatch.SessionRouter(nil) // keep dispatch import alive for godoc cross-ref
