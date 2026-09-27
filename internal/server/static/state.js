@@ -110,6 +110,19 @@ export const transcript = {
   // The counter resets on every session switch (selectSession).
   autoPageBackCount: 0,
   exportInFlight: false,
+  // AskUserQuestion cards are single-submit: user picks one option per question
+  // (or multiple when multiSelect=true), then clicks a bottom "提交" button.
+  // That one click produces a single user message combining all answers, so CC
+  // never sees a partial answer. _askAnswered stores tool_use_ids that have
+  // already been submitted so a re-render (e.g. late history replay) can't
+  // resurrect an actionable card.
+  //
+  // Persistence note: the Set is in-memory only. History replay after a page
+  // reload rebuilds it in hydrateAskAnsweredFromHistory() by scanning for any
+  // user event that arrived AFTER a given ask_question — a later user message
+  // means the question was answered on some surface, so re-actioning must be
+  // disabled to prevent duplicate answers to CC.
+  askAnswered: new Set(),
 };
 
 // sessionList: the sidebar and its sources: sessions, nodes, projects, discovered and history sessions.
@@ -178,6 +191,13 @@ export const serverInfo = {
   // cached /api/access-profiles response: {profiles, default}
   accessProfiles: null,
   accessProfilesFetchedAt: 0,
+  // Per-node backend manifest cache for the node-aware new-session picker.
+  // Keyed by node id ('local' or a remote node id). Values: {data, at}. The
+  // global cliBackends above stays LOCAL-only — every chip / feature-gate /
+  // cost-unit consumer reads the local manifest — while the picker resolves
+  // the manifest for whichever node the "New Session" modal targets, so a
+  // remote node's backends + default drive the picker (picker node-aware fix).
+  cliBackendsByNode: {},
 };
 
 // timers: the dashboard's polling and debounce timer handles.
@@ -206,4 +226,64 @@ export const hooks = {
   getActiveScratchKey: null,
   closeScratchDrawer: null,
   askAside: null,
+  // Published by cron_view, which owns them: is this key the cron live view's,
+  // is this cron session's run frozen, and the current jobs list.
+  isCronLiveKey: null,
+  isCronSessionFrozen: null,
+  cronJobs: null,
+};
+
+// perSession: per-session maps keyed by session id (sid), each filled and
+// pruned in place.
+export const perSession = {
+  workspaces: {},
+  nodes: {},
+  // per-session CLI backend picked at creation ("claude" / "kiro" / ...)
+  backends: {},
+  // per-session access profile picked at creation ("" = global default)
+  accessProfiles: {},
+  // Header-chip picks made on a session that has no server entry yet (created,
+  // no message sent). The server parks them and applies them on first spawn;
+  // this mirror lets the chips show the pick meanwhile. Dropped on promotion.
+  // key -> { model, effort }
+  pendingTuning: {},
+  // key -> draft text, preserved across session switches
+  drafts: {},
+  // sessionScrollPos: sid(key,node) -> {fromBottom, atBottom}
+  // 记住每个会话上次切走时的 events-scroll 位置，回来时恢复，避免正在阅读
+  // 历史被强行拉回底部。atBottom=true 表示离开前就在底，回来后继续走贴底路径，
+  // 让新事件照常把视口拉到最新。
+  scrollPos: {},
+  // sessionUnread: sid(key,node) -> integer count of unread "turn completed" events
+  // for sessions that are NOT currently selected. Incremented on running->ready/dead
+  // transitions (i.e. the model finished answering) and cleared when the user opens
+  // the card. Drives the sidebar chat-style unread bubble.
+  unread: {},
+  // sessionOptimisticRunning: sid(key,node) -> true when sendMessage flipped
+  // state to 'running' locally before the server broadcast arrived. Rolled back
+  // by onSendAck on busy/error so the banner doesn't get stuck. Cleared on
+  // accepted/queued (server-side session_state takes over) and on any real
+  // session_state WS push.
+  optimisticRunning: {},
+  // sessionOptimisticPrevState: sid(key,node) -> 乐观翻转成 'running' 之前，服务端
+  // 最后报告的真实状态。onSessionState 判 dead→running 重订阅时必须用它：翻转发生
+  // 在网络往返之前，所以对每一次本页发起的 send，服务端真正的 running 广播到达时
+  // sessionsData[sKey].state 恒为 'running'，直接读它会把"进程被回收后从本页发消息"
+  // 这个最常见的失联场景判成普通 ready→running。与 sessionOptimisticRunning 同生
+  // 同灭。
+  optimisticPrevState: {},
+  // sessionLastSent: sid(key,node) -> 最近一次发出的用户文本（当前 turn 的输入）。
+  // 在 sendMessage 成功发出后记录；turn 自然跑完 (running→ready/dead) 时清掉。
+  // 若用户在 running 中点击中断，则把这段文本回填到 #msg-input（Claude Code
+  // 的中断-回填行为），方便修改后重发。只在输入框当前为空时回填，避免覆盖
+  // 用户已经开始敲的新内容。
+  lastSent: {},
+  // httpSendPending: sids this tab has an HTTP send in flight for (added before
+  // the request leaves, cleared on sync rejection / send_error / the key's next
+  // ready|dead state). onSendError gates on it so a send_error fanned out to
+  // every subscriber of the key is acted on only by the tab that sent — and,
+  // unlike sessionLastSent (which carries interrupt re-fill semantics and is
+  // only set when there is text), it also covers image-only sends, the main
+  // HTTP-send case.
+  httpSendPending: new Set(),
 };

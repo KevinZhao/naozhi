@@ -276,12 +276,3 @@ for (const type of DELEGATED) {
   });
 }
 
-// Cross-file mutable state accessors (D3 RFC §3): dashboard.js — still a
-// classic script — registers getters onto this object for its reassignable
-// top-level bindings (a classic script's let/const never lands on window,
-// and a copied value would go stale on reassignment). Migrated modules
-// import { nzState } and read nzState.<name> live at the use site. (Named
-// nzState, not state, so it never collides with the view modules' local
-// `state` objects.)
-export const nzState = {};
-nz.state = nzState;

@@ -1,3 +1,4 @@
+import { hooks, selection, serverInfo, sessionList, timers, ui } from './state.js';
 import {
   fetchCLIBackends,
   renderBackendPicker,
@@ -66,7 +67,6 @@ import {
   fetchJSON,
   formatCostUSD,
   nzBus,
-  nzState,
   nzViews,
   registerActions,
   showToast,
@@ -219,7 +219,7 @@ function buildCronWorkspaceBodyInternal(opts) {
   // Button label: 选中的项目名 > 选中的路径尾段 > 默认占位
   let label = '默认工作目录';
   if (selected) {
-    const match = nzState.projectsData.find(p => p.path === selected);
+    const match = sessionList.projectsData.find(p => p.path === selected);
     label = match ? match.name : shortPath(selected);
   }
   // 下拉按钮，点击 toggle popover
@@ -232,8 +232,8 @@ function buildCronWorkspaceBodyInternal(opts) {
     '</button>';
   // Popover 内容：项目列表 + "自定义路径" 触发条目
   let listItems = '';
-  if (nzState.projectsData.length > 0) {
-    listItems = nzState.projectsData.map(p => {
+  if (sessionList.projectsData.length > 0) {
+    listItems = sessionList.projectsData.map(p => {
       const sel = selected && p.path === selected;
       return '<li role="option" data-path="' + escAttr(p.path) + '"' +
         (sel ? ' class="selected" aria-selected="true"' : ' aria-selected="false"') +
@@ -253,9 +253,9 @@ function buildCronWorkspaceBodyInternal(opts) {
       '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
         listItems +
       '</ul>' +
-      '<div id="cron-ws-custom-form" class="nz-cron-ws-custom' + (selected && !nzState.projectsData.find(p => p.path === selected) ? '' : ' nz-hidden') + '">' +
-        '<input id="' + escAttr(opts.inputId) + '" placeholder="' + escAttr(nzState.defaultWorkspace || '/home/user/project') + '"' +
-          ' value="' + escAttr(selected && !nzState.projectsData.find(p => p.path === selected) ? selected : '') + '"' +
+      '<div id="cron-ws-custom-form" class="nz-cron-ws-custom' + (selected && !sessionList.projectsData.find(p => p.path === selected) ? '' : ' nz-hidden') + '">' +
+        '<input id="' + escAttr(opts.inputId) + '" placeholder="' + escAttr(serverInfo.defaultWorkspace || '/home/user/project') + '"' +
+          ' value="' + escAttr(selected && !sessionList.projectsData.find(p => p.path === selected) ? selected : '') + '"' +
           ' aria-label="工作目录路径">' +
       '</div>' +
     '</div>';
@@ -610,7 +610,7 @@ function updateCronWsDropdownLabel(path) {
   const labelEl = btn.querySelector('.ws-dropdown-label');
   if (!labelEl) return;
   if (!path) { labelEl.textContent = '默认工作目录'; return; }
-  const match = nzState.projectsData.find(p => p.path === path);
+  const match = sessionList.projectsData.find(p => p.path === path);
   labelEl.textContent = match ? match.name : shortPath(path);
 }
 
@@ -720,13 +720,13 @@ function openCronPanel() {
   // into openCronPanel — so the guard below is already satisfied on re-entry
   // and we don't recurse. Direct callers (legacy #btn-cron, openCronDetail)
   // route through here and get the view switch for free.
-  if (nzState.activeView !== 'cron') { setActivityView('cron'); return; }
+  if (ui.activeView !== 'cron') { setActivityView('cron'); return; }
   // Deselect managed session via selectedKey only — selectedNode is the
   // sidebar filter now (see previewDiscovered comment) and must survive
   // opening the cron panel so the user comes back to the right node list.
-  nzState.selectedKey = null;
+  selection.key = null;
   if (wsm.subscribedKey) wsm.unsubscribe();
-  if (nzState.eventTimer) { clearInterval(nzState.eventTimer); nzState.eventTimer = null; }
+  if (timers.events) { clearInterval(timers.events); timers.events = null; }
   setActiveSessionCard(null);
   // NOTE: no mobileEnterChat() here. Cron is a standalone view, not a chat
   // session — entering chat view would hide the bottom tab bar (the only nav
@@ -1106,7 +1106,7 @@ function isCronSessionFrozen(key) {
 // （cron drawer 打开时 openCronPanel 已清空 selectedKey，撞键不可能但兜底）。
 function isCronLiveKey(key) {
   if (!key) return false;
-  if (key === nzState.selectedKey) return false;
+  if (key === selection.key) return false;
   const cl = wsm.cronLive;
   if (cl.subscribedKey && key === cl.subscribedKey) return true;
   if (cl.pendingJobId && key === ('cron:' + cl.pendingJobId)) return true;
@@ -1321,12 +1321,12 @@ function ensureCronRunningTick() {
   //   - cron-list-items DOM 已不在文档（用户切到非 cron 视图）
   // R220-FE-1: 修复 timer 永不停的内存/CPU 泄漏。
   const cronListMounted = !!document.getElementById('cron-list-items');
-  const shouldRun = anyRunning && !nzState.selectedKey && cronListMounted;
+  const shouldRun = anyRunning && !selection.key && cronListMounted;
   if (shouldRun && !cronRunningTickTimer) {
     cronRunningTickTimer = setInterval(() => {
       // Defensive: 同样的三条件检查在 tick 内也跑一遍——避免 selectSession 切换
       // 之后这一帧还在 schedule 但 DOM 已经换了。
-      if (nzState.selectedKey || !document.getElementById('cron-list-items')) {
+      if (selection.key || !document.getElementById('cron-list-items')) {
         clearInterval(cronRunningTickTimer);
         cronRunningTickTimer = null;
         return;
@@ -1760,7 +1760,7 @@ function renderCronPanel() {
   // could fight the active view. Only paint when cron is the active view.
   // (Was `if (selectedKey) return` when cron borrowed #main; now cron has its
   // own #cron-main container and is gated purely on activeView.)
-  if (nzState.activeView !== 'cron') return;
+  if (ui.activeView !== 'cron') return;
   const main = document.getElementById('cron-main');
   if (!main) return;
   // Shell-preserving repaint: when the cron panel is already mounted (user
@@ -2528,7 +2528,7 @@ document.addEventListener('keydown', function(e) {
   // so gate on the live view + no overlay, or ↑↓ would preventDefault and
   // silently switch an invisible run. activeView is dashboard.js top-level
   // state (same pattern as renderCronPanel's guard above).
-  if (nzState.activeView !== 'cron') return;
+  if (ui.activeView !== 'cron') return;
   if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
@@ -2636,14 +2636,11 @@ nzBus.addEventListener('cron:run-ended', (e) => {
 nzBus.addEventListener('cron:timeline-refresh-head', (e) => cronTimelineRefreshHeadDebounced(e.detail));
 nzBus.addEventListener('cron:open-panel', () => openCronPanel());
 
-// Stateful predicates dashboard consults (frozen-run set / cronLive
-// bookkeeping live here). Registered on nz.state like the cronJobs getter —
-// they are reads of cron-owned state, and dashboard's `nzState.x && …` call
-// shape keeps the old typeof-guard resilience if cron_view ever fails to load.
-nzState.isCronLiveKey = isCronLiveKey;
-nzState.isCronSessionFrozen = isCronSessionFrozen;
-
-// cronJobs is reassigned on every fetch, so dashboard.js reads it through an
-// accessor (mirror of the dashboard-side nz.state getters, direction
-// reversed) — nz.state.cronJobs replaces its former bare references.
-Object.defineProperty(nzState, 'cronJobs', { get: function () { return cronJobs; } });
+// Reads of cron-owned state that dashboard consults (the frozen-run set,
+// cronLive bookkeeping, the jobs list — reassigned on every fetch). Published
+// in hooks because dashboard cannot import cron_view (cron_view imports it);
+// dashboard's `hooks.x && …` call shape keeps working if cron_view ever fails
+// to load.
+hooks.isCronLiveKey = isCronLiveKey;
+hooks.isCronSessionFrozen = isCronSessionFrozen;
+hooks.cronJobs = function () { return cronJobs; };

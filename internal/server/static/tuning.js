@@ -6,9 +6,10 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureTuning(), called from dashboard's module body.
-import { esc, escAttr, fetchJSON, isCronSessionKey, nzState, showToast } from './nz_util.js';
+import { perSession, selection, serverInfo, sessionList } from './state.js';
+import { esc, escAttr, fetchJSON, isCronSessionKey, showToast } from './nz_util.js';
 
 const deps = {
   debouncedFetchSessions: null,
@@ -25,9 +26,6 @@ const deps = {
   removePendingSession: null,
   renderMainHeader: null,
   sameDiscovered: null,
-  sessionAccessProfiles: null,
-  sessionBackends: null,
-  sessionWorkspaces: null,
   setHeaderGitChip: null,
   showAPIError: null,
   showNetworkError: null,
@@ -90,11 +88,11 @@ function tuningToast(msg, isError) {
 // kiro, cli.backends[].models fallback for claude). Empty list → the
 // popover shows its manual-input row only.
 function tuningModelsForSession(s) {
-  const backendID = (s && s.backend) || deps.sessionBackends[nzState.selectedKey] ||
-    (nzState.cliBackends && nzState.cliBackends.default) || '';
-  if (!nzState.cliBackends || !Array.isArray(nzState.cliBackends.backends)) return { models: [], backendID };
-  const entry = nzState.cliBackends.backends.find(b => b && b.id === backendID) ||
-    nzState.cliBackends.backends.find(b => b && b.id === (nzState.cliBackends.default || ''));
+  const backendID = (s && s.backend) || perSession.backends[selection.key] ||
+    (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
+  if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return { models: [], backendID };
+  const entry = serverInfo.cliBackends.backends.find(b => b && b.id === backendID) ||
+    serverInfo.cliBackends.backends.find(b => b && b.id === (serverInfo.cliBackends.default || ''));
   return {
     models: (entry && Array.isArray(entry.models)) ? entry.models : [],
     backendID: entry ? entry.id : backendID,
@@ -106,16 +104,16 @@ function tuningModelsForSession(s) {
 
 function openTuningPopover(kind) {
   dismissTuningPopover();
-  if (!nzState.selectedKey) return;
+  if (!selection.key) return;
   // NG4: override API is local-only in this slice; remote sessions get an
   // explanation instead of a dead control (mirrors git chip's local-only).
-  if ((nzState.selectedNode || 'local') !== 'local') {
+  if ((selection.node || 'local') !== 'local') {
     tuningToast('远程节点会话暂不支持切换模型/档位', false);
     return;
   }
-  const s = nzState.sessionsData[deps.sid(nzState.selectedKey, nzState.selectedNode)] ||
+  const s = sessionList.sessionsData[deps.sid(selection.key, selection.node)] ||
     // Not spawned yet: show the parked pick as current so a re-open marks it.
-    (nzState.sessionPendingTuning[nzState.selectedKey] || {});
+    (perSession.pendingTuning[selection.key] || {});
   const running = s.state === 'running';
   const rows = [];
   const current = kind === 'model' ? (s.model || '') : (s.effort || '');
@@ -222,7 +220,7 @@ function openTuningPopover(kind) {
 // with the server-confirmed value (no optimistic promotion — §4.1 三态;
 // a rollback is visible because the poll simply keeps the old value).
 async function postTuningOverride(kind, value) {
-  const key = nzState.selectedKey;
+  const key = selection.key;
   const chip = document.getElementById(kind === 'model' ? 'header-model' : 'header-effort');
   if (chip) chip.style.opacity = '0.45';
   const restore = () => { if (chip) chip.style.opacity = ''; };
@@ -247,12 +245,12 @@ async function postTuningOverride(kind, value) {
     const label = kind === 'model' ? '模型' : '档位';
     // No server row for this key = the session has not spawned yet; the pick
     // was parked server-side. Mirror it so the chips show it until promotion.
-    const isPending = !nzState.sessionsData[deps.sid(key, nzState.selectedNode)];
+    const isPending = !sessionList.sessionsData[deps.sid(key, selection.node)];
     if (isPending) {
-      const prev = nzState.sessionPendingTuning[key] || {};
+      const prev = perSession.pendingTuning[key] || {};
       const next = Object.assign({}, prev);
       next[kind] = value;
-      nzState.sessionPendingTuning[key] = next;
+      perSession.pendingTuning[key] = next;
       tuningToast(label + (value ? '已记录，发送首条消息时生效' : '已恢复默认'), false);
     } else if (via === 'rpc') {
       tuningToast(label + '已切换（对下一轮生效）', false);
@@ -274,8 +272,8 @@ async function postTuningOverride(kind, value) {
 // cache. Called at the end of renderMainShell so a header rebuild triggered by
 // something unrelated (rename, model update) doesn't drop the chip.
 function repaintGitChip() {
-  if (!nzState.selectedKey) { deps.setHeaderGitChip(''); return; }
-  deps.setHeaderGitChip(deps.gitChipHtml(deps.gitStateCache[deps.sid(nzState.selectedKey, nzState.selectedNode)]));
+  if (!selection.key) { deps.setHeaderGitChip(''); return; }
+  deps.setHeaderGitChip(deps.gitChipHtml(deps.gitStateCache[deps.sid(selection.key, selection.node)]));
 }
 
 async function fetchGitState(key, node) {
@@ -293,15 +291,15 @@ async function fetchGitState(key, node) {
     const resp = await fetch(NZ_CONTRACT.API.sessions_git + '?key=' + encodeURIComponent(key), { headers });
     // The cache entry is per-session so dropping it is always right; the
     // header chip is only cleared when this session is still the selected one.
-    if (!resp.ok) { delete deps.gitStateCache[cacheKey]; if (nzState.selectedKey !== key || nzState.selectedNode !== node) return; deps.setHeaderGitChip(''); return; }
+    if (!resp.ok) { delete deps.gitStateCache[cacheKey]; if (selection.key !== key || selection.node !== node) return; deps.setHeaderGitChip(''); return; }
     const data = await resp.json();
     deps.gitStateCache[cacheKey] = data;
     // Guard against a stale response landing after the user switched sessions.
-    if (nzState.selectedKey !== key || nzState.selectedNode !== node) return;
+    if (selection.key !== key || selection.node !== node) return;
     deps.setHeaderGitChip(deps.gitChipHtml(data));
   } catch (_) {
     delete deps.gitStateCache[cacheKey];
-    if (nzState.selectedKey !== key || nzState.selectedNode !== node) return;
+    if (selection.key !== key || selection.node !== node) return;
     deps.setHeaderGitChip('');
   }
 }
@@ -312,11 +310,11 @@ async function fetchGitState(key, node) {
 function invalidateGitState(key, node) {
   if (!key) return;
   delete deps.gitStateCache[deps.sid(key, node || 'local')];
-  if (key === nzState.selectedKey) fetchGitState(key, node || 'local');
+  if (key === selection.key) fetchGitState(key, node || 'local');
 }
 
 // removeSidebarCard drops a session card from the DOM without waiting for
-// the next renderSidebar. It MUST also reset nzState._lastSidebarHtml: renderSidebar
+// the next renderSidebar. It MUST also reset sessionList.lastSidebarHtml: renderSidebar
 // skips `list.innerHTML = html` when the rebuilt string equals the cache, so
 // a DOM-only removal would leave the cache describing a card that is no
 // longer mounted and the next (identical) render would never bring it back
@@ -326,7 +324,7 @@ function removeSidebarCard(key) {
   // a `"` or `\` would otherwise make querySelector throw mid-takeover/dismiss.
   const card = document.querySelector('.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
   if (card) card.remove();
-  nzState._lastSidebarHtml = null;
+  sessionList.lastSidebarHtml = null;
 }
 
 // dismissSession removes a session from the sidebar. The × button deletes
@@ -335,8 +333,8 @@ function removeSidebarCard(key) {
 // prompt (pending) or reopening the CLI (remote/discovered).
 async function dismissSession(key, node, opts) {
   node = node || 'local';
-  delete nzState.sessionDrafts[key];
-  delete nzState.sessionScrollPos[deps.sid(key, node)];
+  delete perSession.drafts[key];
+  delete perSession.scrollPos[deps.sid(key, node)];
   // Drop the cached git state so a later key reuse can't inherit this
   // session's branch chip before its own fetch resolves.
   delete deps.gitStateCache[deps.sid(key, node)];
@@ -345,8 +343,8 @@ async function dismissSession(key, node, opts) {
   // subsequent re-create with the same key (unlikely but possible if the
   // ms timestamp collides on rapid double-create) doesn't inherit a
   // stale backend pick.
-  delete deps.sessionBackends[key];
-  delete deps.sessionAccessProfiles[key];
+  delete perSession.backends[key];
+  delete perSession.accessProfiles[key];
 
   // cron-panel-consolidation RFC §4.2: defensive guard. Cron stubs are
   // filtered server-side so this branch should never run in production —
@@ -360,28 +358,28 @@ async function dismissSession(key, node, opts) {
     // (the cron scheduler still owns the stub) and DO NOT mutate any cron
     // panel state. Single source of truth for cron-job lifecycle remains
     // the 定时任务 panel (cronDelete → DELETE /api/cron).
-    if (nzState.selectedKey === key) {
-      nzState.selectedKey = null;
+    if (selection.key === key) {
+      selection.key = null;
       if (deps.wsm.subscribedKey === key) deps.wsm.unsubscribe();
       document.getElementById('main').innerHTML = deps.mainEmptyHtml();
       deps.wireQuickAskInput();
     }
     removeSidebarCard(key);
-    nzState.lastVersion = 0;
+    sessionList.lastVersion = 0;
     deps.debouncedFetchSessions();
     return;
   }
 
   // If it's a pending (never-sent) session, just remove from localStorage
-  if (deps.sessionWorkspaces[key] !== undefined) {
+  if (perSession.workspaces[key] !== undefined) {
     deps.removePendingSession(key);
-    delete nzState.sessionsData[deps.sid(key, node)];
-    if (nzState.selectedKey === key) {
-      nzState.selectedKey = null;
+    delete sessionList.sessionsData[deps.sid(key, node)];
+    if (selection.key === key) {
+      selection.key = null;
       document.getElementById('main').innerHTML = deps.mainEmptyHtml();
       deps.wireQuickAskInput();
     }
-    nzState.lastVersion = 0;
+    sessionList.lastVersion = 0;
     deps.debouncedFetchSessions();
     return;
   }
@@ -406,14 +404,14 @@ async function dismissSession(key, node, opts) {
         return;
       }
       deps.dropDiscovered(d.pid, d.node);
-      if (nzState.pendingDiscovered && deps.sameDiscovered(nzState.pendingDiscovered, d.pid, d.node)) {
-        nzState.pendingDiscovered = null;
+      if (selection.pendingDiscovered && deps.sameDiscovered(selection.pendingDiscovered, d.pid, d.node)) {
+        selection.pendingDiscovered = null;
         deps.stopPreviewPolling();
         document.getElementById('main').innerHTML = deps.mainEmptyHtml();
         deps.wireQuickAskInput();
       }
       removeSidebarCard(key);
-      nzState.lastVersion = 0;
+      sessionList.lastVersion = 0;
       deps.debouncedFetchSessions();
     } catch (e) { deps.showNetworkError('关闭外部会话', e); }
     return;
@@ -428,10 +426,10 @@ async function dismissSession(key, node, opts) {
   const skey = deps.sid(key, node);
   // Mark dismissed so an in-flight poll / sessions_update event can't
   // resurrect the card before DELETE confirms (cleared in finally below).
-  nzState._optimisticDeleteKeys.add(skey);
-  delete nzState.sessionsData[skey];
-  if (nzState.selectedKey === key) {
-    nzState.selectedKey = null;
+  sessionList.optimisticDeleteKeys.add(skey);
+  delete sessionList.sessionsData[skey];
+  if (selection.key === key) {
+    selection.key = null;
     if (deps.wsm.subscribedKey === key) deps.wsm.unsubscribe();
     document.getElementById('main').innerHTML = deps.mainEmptyHtml();
     deps.wireQuickAskInput();
@@ -460,8 +458,8 @@ async function dismissSession(key, node, opts) {
       // if the delete stuck, the session stays gone; if it failed, the card
       // comes back (operator must re-select it — we intentionally don't
       // restore the cleared main panel to avoid masking a failed delete).
-      nzState._optimisticDeleteKeys.delete(skey);
-      nzState.lastVersion = 0;
+      sessionList.optimisticDeleteKeys.delete(skey);
+      sessionList.lastVersion = 0;
       deps.debouncedFetchSessions();
     });
 }
@@ -471,8 +469,8 @@ async function dismissSession(key, node, opts) {
 // chain. Uses PATCH /api/sessions/label so the mutation round-trips through
 // the server and persists across reloads.
 async function renameSession() {
-  if (!nzState.selectedKey) return;
-  const s = nzState.sessionsData[deps.sid(nzState.selectedKey, nzState.selectedNode)] || {};
+  if (!selection.key) return;
+  const s = sessionList.sessionsData[deps.sid(selection.key, selection.node)] || {};
   const current = s.user_label || '';
   // RNEW-UX-013: replaced window.prompt with themed deps.promptDialog so the
   // rename flow matches the rest of the dashboard (dark theme, trapFocus,
@@ -491,8 +489,8 @@ async function renameSession() {
   const headers = {'Content-Type': 'application/json'};
   const token = deps.getToken();
   if (token) headers['Authorization'] = 'Bearer ' + token;
-  const body = {key: nzState.selectedKey, label: next};
-  if (nzState.selectedNode && nzState.selectedNode !== 'local') body.node = nzState.selectedNode;
+  const body = {key: selection.key, label: next};
+  if (selection.node && selection.node !== 'local') body.node = selection.node;
   try {
     await fetchJSON(NZ_CONTRACT.API.sessions_label, {
       timeoutMs: 10000,
@@ -505,11 +503,11 @@ async function renameSession() {
     return;
   }
   // Patch local cache so the title refreshes before the next poll lands.
-  const cacheKey = deps.sid(nzState.selectedKey, nzState.selectedNode);
-  if (nzState.sessionsData[cacheKey]) {
-    nzState.sessionsData[cacheKey].user_label = next;
+  const cacheKey = deps.sid(selection.key, selection.node);
+  if (sessionList.sessionsData[cacheKey]) {
+    sessionList.sessionsData[cacheKey].user_label = next;
   }
-  nzState.lastVersion = 0;
+  sessionList.lastVersion = 0;
   deps.debouncedFetchSessions();
   // Header-only repaint: a full renderMainShell would rebuild #events-scroll
   // empty with nothing refetching the conversation (see deps.renderMainHeader).

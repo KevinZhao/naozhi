@@ -7,9 +7,10 @@
 // round-trip.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back. Dashboard's mutable state is read through nz.state accessors; its
-// helpers are injected once via configureVoice().
-import { nzState, nzTest, showToast } from './nz_util.js';
+// back. Shared state is read from the state.js objects; its helpers are
+// injected once via configureVoice().
+import { selection, sessionList } from './state.js';
+import { nzTest, showToast } from './nz_util.js';
 
 const deps = {
   ICONS: null,
@@ -103,7 +104,7 @@ function toggleInputMode() {
     releaseMicStream();
   }
   // Sync send/stop button visibility after mode toggle
-  const sd = nzState.sessionsData[deps.sid(nzState.selectedKey, nzState.selectedNode || 'local')];
+  const sd = sessionList.sessionsData[deps.sid(selection.key, selection.node || 'local')];
   deps.updateSendButton(sd ? sd.state || '' : '');
 }
 
@@ -155,7 +156,7 @@ function voiceTouchCancel() {
 }
 
 // finishVoiceGesture ends the hold gesture. While recording (or still waiting
-// on the mic) it stops the recorder, nzState.sending or cancelling per the gesture.
+// on the mic) it stops the recorder, composer.sending or cancelling per the gesture.
 // Once the recording was already finalized by the MAX_REC_SECS cap it only
 // clears the pressed look: the "正在识别" overlay stays up until transcription
 // settles, and the lift/swipe can neither cancel nor re-send it (#2435).

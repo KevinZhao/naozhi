@@ -3,7 +3,8 @@
 //
 // Verbatim move out of dashboard.js; only the import + dep-wiring lines are
 // new. Layering (D4-1 rule): never import dashboard back.
-import { esc, escAttr, nzState, nzTest, showToast } from './nz_util.js';
+import { composer } from './state.js';
+import { esc, escAttr, nzTest, showToast } from './nz_util.js';
 
 const deps = {
   ICONS: null,
@@ -23,7 +24,7 @@ export function configureComposerFiles(impl) {
 // --- File handling ---
 //
 // Each selected image is pre-uploaded via POST /api/sessions/upload as soon
-// as it's picked. nzState.pendingFiles holds {file, blobUrl, id, status, error}:
+// as it's picked. composer.pendingFiles holds {file, blobUrl, id, status, error}:
 //   status: 'uploading' | 'ready' | 'error' — 'ready' means a valid server-side
 //   file id is in `id` and can be referenced later via file_ids on send.
 // This decouples image transfer from /send, avoids the 105 MB multipart body
@@ -146,7 +147,7 @@ function handleFiles(fileList) {
       showToast('图片过大（上限 40 MB）', 'warning');
       continue;
     }
-    if (nzState.pendingFiles.length >= 20) { showToast('最多上传 20 个文件', 'warning'); break; }
+    if (composer.pendingFiles.length >= 20) { showToast('最多上传 20 个文件', 'warning'); break; }
     const entry = {
       file: raw,
       kind,
@@ -159,7 +160,7 @@ function handleFiles(fileList) {
       status: 'uploading',
       error: '',
     };
-    nzState.pendingFiles.push(entry);
+    composer.pendingFiles.push(entry);
     toUpload.push(entry);
   }
   const fi = document.getElementById('file-input');
@@ -277,7 +278,7 @@ async function maybeAutoOrient(entry) {
     // the corrected JPEG inline as a data URL. Swap the preview to it so the
     // thumbnail matches what gets sent. The entry may have been removed while
     // the orient call was in flight — guard before touching it.
-    if (!nzState.pendingFiles.includes(entry)) return;
+    if (!composer.pendingFiles.includes(entry)) return;
     if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
     entry.blobUrl = j.image; // data: URL, no object URL to revoke later
   } catch (_) {
@@ -294,13 +295,13 @@ async function maybeAutoOrient(entry) {
 // or after ORIENT_MAX_WAIT_MS as a hard ceiling. send() awaits this so an
 // in-flight rotation lands (server Replace) BEFORE TakeAll consumes the
 // upload. Polling (rather than tracking promises) keeps it robust to entries
-// added/removed mid-wait — it simply re-reads the live nzState.pendingFiles each tick.
+// added/removed mid-wait — it simply re-reads the live composer.pendingFiles each tick.
 function awaitPendingOrients() {
-  if (!nzState.pendingFiles.some(f => f.orienting)) return Promise.resolve();
+  if (!composer.pendingFiles.some(f => f.orienting)) return Promise.resolve();
   return new Promise((resolve) => {
     const deadline = Date.now() + ORIENT_MAX_WAIT_MS;
     const tick = () => {
-      if (!nzState.pendingFiles.some(f => f.orienting) || Date.now() >= deadline) { resolve(); return; }
+      if (!composer.pendingFiles.some(f => f.orienting) || Date.now() >= deadline) { resolve(); return; }
       setTimeout(tick, 120);
     };
     setTimeout(tick, 120);
@@ -308,28 +309,28 @@ function awaitPendingOrients() {
 }
 
 function retryUpload(idx) {
-  const entry = nzState.pendingFiles[idx];
+  const entry = composer.pendingFiles[idx];
   if (entry && entry.status === 'error') enqueueUpload(entry);
 }
 
 function removeFile(idx) {
-  const [removed] = nzState.pendingFiles.splice(idx, 1);
+  const [removed] = composer.pendingFiles.splice(idx, 1);
   if (removed && removed.blobUrl) URL.revokeObjectURL(removed.blobUrl);
   renderFilePreviews();
 }
 
-// reorderPendingFile moves nzState.pendingFiles[from] to position `to`. Pure array
+// reorderPendingFile moves composer.pendingFiles[from] to position `to`. Pure array
 // operation extracted so the drag-drop handler and a keyboard a11y fallback
 // can share one code path and so contract tests can assert the move semantics
 // without touching the DOM. Returns true when the array actually changed.
 function reorderPendingFile(from, to) {
   if (!Number.isInteger(from) || !Number.isInteger(to)) return false;
-  if (from < 0 || from >= nzState.pendingFiles.length) return false;
+  if (from < 0 || from >= composer.pendingFiles.length) return false;
   if (to < 0) to = 0;
-  if (to > nzState.pendingFiles.length - 1) to = nzState.pendingFiles.length - 1;
+  if (to > composer.pendingFiles.length - 1) to = composer.pendingFiles.length - 1;
   if (from === to) return false;
-  const [moved] = nzState.pendingFiles.splice(from, 1);
-  nzState.pendingFiles.splice(to, 0, moved);
+  const [moved] = composer.pendingFiles.splice(from, 1);
+  composer.pendingFiles.splice(to, 0, moved);
   return true;
 }
 
@@ -342,7 +343,7 @@ function onThumbDragStart(ev, idx) {
   // Only 'ready' files are reorderable; uploading/error thumbs are pinned to
   // their current slot because their index may still be referenced by the
   // in-flight upload completion path.
-  const entry = nzState.pendingFiles[idx];
+  const entry = composer.pendingFiles[idx];
   if (!entry || entry.status !== 'ready') { ev.preventDefault(); return; }
   _dragReorderFrom = idx;
   try {
@@ -388,7 +389,7 @@ function onThumbDragEnd() {
 // left/right by one slot. Mirrors the drag gesture for keyboard-only users.
 function onThumbKeyDown(ev, idx) {
   if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
-  const entry = nzState.pendingFiles[idx];
+  const entry = composer.pendingFiles[idx];
   if (!entry || entry.status !== 'ready') return;
   const to = idx + (ev.key === 'ArrowLeft' ? -1 : 1);
   if (!reorderPendingFile(idx, to)) return;
@@ -405,7 +406,7 @@ function onThumbKeyDown(ev, idx) {
 function renderFilePreviews() {
   const el = document.getElementById('file-preview');
   if (!el) return;
-  el.innerHTML = nzState.pendingFiles.map((entry, i) => {
+  el.innerHTML = composer.pendingFiles.map((entry, i) => {
     const overlay =
       entry.status === 'uploading' ? '<div class="upload-status uploading"></div>' :
       entry.status === 'error' ? '<div class="upload-status error" title="' + escAttr(entry.error || 'upload failed') + '" data-action="upload-retry">\u21bb</div>' :

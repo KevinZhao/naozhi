@@ -172,22 +172,22 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 	if !strings.Contains(stopFn, "transcript.previewGen++;") {
 		t.Error("stopPreviewPolling() must bump transcript.previewGen so selectSession/createSession invalidate in-flight previews")
 	}
-	if !strings.Contains(fn, "deps.stopPreviewPolling();\n  const gen = nzState._previewGen;") {
+	if !strings.Contains(fn, "deps.stopPreviewPolling();\n  const gen = transcript.previewGen;") {
 		t.Error("previewDiscovered must call stopPreviewPolling() FIRST and then capture gen = transcript.previewGen (capturing before the call would be invalidated by its own bump)")
 	}
-	if strings.Contains(fn, "++nzState._previewGen") {
+	if strings.Contains(fn, "++transcript.previewGen") {
 		t.Error("previewDiscovered must not bump transcript.previewGen itself — the bump belongs to stopPreviewPolling()")
 	}
-	if strings.Count(fn, "if (gen !== nzState._previewGen) return;") < 3 {
+	if strings.Count(fn, "if (gen !== transcript.previewGen) return;") < 3 {
 		t.Error("previewDiscovered must check the generation after the awaited fetch (ok + error paths) AND inside the poll tick")
 	}
-	idxSet := strings.Index(fn, "previewTimer = setInterval(")
+	idxSet := strings.Index(fn, "timers.preview = setInterval(")
 	if idxSet < 0 {
-		t.Fatal("previewTimer = setInterval( not found")
+		t.Fatal("timers.preview = setInterval( not found")
 	}
-	idxGen := strings.Index(fn, "if (gen !== nzState._previewGen) return;\n    const el = document.getElementById('events-scroll');")
+	idxGen := strings.Index(fn, "if (gen !== transcript.previewGen) return;\n    const el = document.getElementById('events-scroll');")
 	if idxGen < 0 || idxGen > idxSet {
-		t.Fatal("generation check must precede the #events-scroll lookup and previewTimer = setInterval(")
+		t.Fatal("generation check must precede the #events-scroll lookup and timers.preview = setInterval(")
 	}
 	// Between the post-fetch generation check and arming the interval there
 	// must be NO stopPreviewPolling() call: it bumps _previewGen and would
@@ -200,7 +200,7 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 
 // TestDashboardJS_SidebarCardRemovalInvalidatesHtmlCache pins that no code
 // path removes a .session-card from the DOM without also resetting
-// _lastSidebarHtml. renderSidebar skips `list.innerHTML = html` when the
+// sessionList.lastSidebarHtml. renderSidebar skips `list.innerHTML = html` when the
 // freshly built string equals the cache; a DOM-only card.remove() leaves the
 // cache describing a card that is no longer mounted, so a failed DELETE
 // (whose .finally re-fetches) could never bring the card back.
@@ -215,8 +215,8 @@ func TestDashboardJS_SidebarCardRemovalInvalidatesHtmlCache(t *testing.T) {
 	if end := strings.Index(helper, "\n}\n"); end > 0 {
 		helper = helper[:end]
 	}
-	if !strings.Contains(helper, "if (card) card.remove();") || !strings.Contains(helper, "_lastSidebarHtml = null;") {
-		t.Error("removeSidebarCard must remove the card AND set _lastSidebarHtml = null")
+	if !strings.Contains(helper, "if (card) card.remove();") || !strings.Contains(helper, "sessionList.lastSidebarHtml = null;") {
+		t.Error("removeSidebarCard must remove the card AND set sessionList.lastSidebarHtml = null")
 	}
 	// The helper must be the ONLY place a session card is removed directly.
 	if n := strings.Count(js, "if (card) card.remove();"); n != 1 {

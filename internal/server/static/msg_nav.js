@@ -6,9 +6,10 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureMsgNav(), called from dashboard's module body.
-import { esc, nzState, nzViews, nzTest} from './nz_util.js';
+import { selection, sessionList, ui } from './state.js';
+import { esc, nzViews, nzTest } from './nz_util.js';
 
 const deps = {
   closeHistoryPopover: null,
@@ -304,7 +305,7 @@ document.addEventListener('keydown', function(e) {
   // click escape-hatch (see #voice-overlay click listener) on Esc for parity
   // with every other overlay.
   if (deps.escCloseVoiceOverlay()) closed = true;
-  if (nzState.activePopover) { deps.closeHistoryPopover(); closed = true; }
+  if (ui.activePopover) { deps.closeHistoryPopover(); closed = true; }
   if (document.getElementById('nav-list-popover')) { navDismissPopover(); closed = true; }
   // §16 inline-expand 回归 + cron-panel-consolidation RFC §6.4: Esc 关 cron 的
   // 行内展开 / drawer。优先级（行展开先于 drawer）与关闭逻辑都收在 cron_view.js
@@ -350,7 +351,7 @@ document.addEventListener('keydown', function(e) {
     e.preventDefault();
     const group = currentProjectSessions();
     if (group.length === 0) return;
-    const idx = group.findIndex(s => s.key === nzState.selectedKey && (s.node || 'local') === nzState.selectedNode);
+    const idx = group.findIndex(s => s.key === selection.key && (s.node || 'local') === selection.node);
     let next;
     if (idx < 0) {
       next = 0;
@@ -370,13 +371,13 @@ document.addEventListener('keydown', function(e) {
 // sharing the same project name but different workspaces belong to different
 // groups — include workspace in the match to mirror the sidebar's grouping.
 function currentProjectSessions() {
-  if (!nzState.allSessionsCache || nzState.allSessionsCache.length === 0) return [];
-  const cur = nzState.allSessionsCache.find(s => s.key === nzState.selectedKey && (s.node || 'local') === nzState.selectedNode);
+  if (!sessionList.allSessionsCache || sessionList.allSessionsCache.length === 0) return [];
+  const cur = sessionList.allSessionsCache.find(s => s.key === selection.key && (s.node || 'local') === selection.node);
   if (!cur) return [];
   const proj = cur.project || '';
   const isFallback = !!cur.project_fallback;
   const ws = cur.workspace || '';
-  return nzState.allSessionsCache.filter(s => {
+  return sessionList.allSessionsCache.filter(s => {
     if ((s.project || '') !== proj) return false;
     if (isFallback || s.project_fallback) {
       return !!s.project_fallback === isFallback && (s.workspace || '') === ws;
@@ -399,11 +400,11 @@ function startTurnWatchdog() {
   if (_turnWatchdogTimer) return;
   _turnWatchdogTimer = setInterval(() => {
     // Self-heal: if the selected session was cleared without routing through
-    // updateSendButton (dismissSession nulls nzState.selectedKey + swaps to the empty
+    // updateSendButton (dismissSession nulls selection.key + swaps to the empty
     // shell in three branches), the fetchSessions reconcile is gated on
-    // `if (nzState.selectedKey)` and would never stop us — so retire the watchdog here
+    // `if (selection.key)` and would never stop us — so retire the watchdog here
     // instead of polling /api/sessions forever for the page lifetime.
-    if (!nzState.selectedKey) { stopTurnWatchdog(); return; }
+    if (!selection.key) { stopTurnWatchdog(); return; }
     deps.debouncedFetchSessions();
   }, TURN_WATCHDOG_INTERVAL_MS);
 }
@@ -412,7 +413,7 @@ function stopTurnWatchdog() {
 }
 
 function updateSendButton(state) {
-  if (nzState.selectedKey) nzState._lastAppliedMainState = { key: deps.sid(nzState.selectedKey, nzState.selectedNode), state: state };
+  if (selection.key) selection.lastAppliedMainState = { key: deps.sid(selection.key, selection.node), state: state };
   const banner = document.getElementById('running-banner');
   const sendBtn = document.getElementById('btn-send');
   const stopBtn = document.getElementById('btn-stop');

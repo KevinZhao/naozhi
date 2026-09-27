@@ -6,9 +6,10 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureFileRefs(), called from dashboard's module body.
-import { esc, fetchJSON, nzState, showToast } from './nz_util.js';
+import { selection, sessionList } from './state.js';
+import { esc, fetchJSON, showToast } from './nz_util.js';
 
 const deps = {
   AVATAR_GROUP_GAP_MS: null,
@@ -192,13 +193,13 @@ const _FILE_REF_BATCH_MAX = 80; // paths per request (server caps at 100)
 // longest-prefix match on the session's workspace dir; returns null if
 // we cannot determine a project.
 function resolveActiveProject() {
-  if (!nzState.selectedKey) return null;
-  const sKey = sid(nzState.selectedKey, nzState.selectedNode);
-  const sd = nzState.sessionsData[sKey];
+  if (!selection.key) return null;
+  const sKey = sid(selection.key, selection.node);
+  const sd = sessionList.sessionsData[sKey];
   if (!sd) return null;
   const name = sd.project || deps.matchProject(sd.workspace);
   if (!name) return null;
-  return { name, node: nzState.selectedNode || 'local' };
+  return { name, node: selection.node || 'local' };
 }
 
 // Split a candidate like "src/foo.go:42" into {path, line}. Line is optional.
@@ -222,10 +223,10 @@ function splitPathLine(cand) {
 //   - path must be strictly inside the project dir (no prefix-only match like
 //     `/foo/barfoo` matching project `/foo/bar`).
 function resolveProjectForAbsPath(abs, node) {
-  if (!abs || !abs.startsWith('/') || !nzState.projectsData || nzState.projectsData.length === 0) return null;
+  if (!abs || !abs.startsWith('/') || !sessionList.projectsData || sessionList.projectsData.length === 0) return null;
   const wantNode = node || 'local';
   let best = null, bestLen = 0;
-  for (const p of nzState.projectsData) {
+  for (const p of sessionList.projectsData) {
     if ((p.node || 'local') !== wantNode) continue;
     if (!p.path) continue;
     const prefix = p.path.endsWith('/') ? p.path : p.path + '/';
@@ -299,10 +300,10 @@ function fileRefCode(inner, className) {
 function scanEventForFileRefs(eventEl) {
   const activeProj = resolveActiveProject();
   // activeProj is optional now: we can still resolve absolute paths via
-  // nzState.projectsData alone as long as we know the node. Fall back to the selected
+  // sessionList.projectsData alone as long as we know the node. Fall back to the selected
   // session's node when no project match exists for the session itself.
   const activeNode = activeProj ? activeProj.node :
-    (nzState.selectedKey ? (nzState.selectedNode || 'local') : null);
+    (selection.key ? (selection.node || 'local') : null);
   if (!activeNode) return;
   // Selector covers both shapes of container:
   //   - chat bubbles: `.event > .event-content > code/.md-code`
@@ -890,7 +891,7 @@ function setActiveSessionCard(key, node) {
 }
 
 function isMultiNode() {
-  const keys = Object.keys(nzState.nodesData);
+  const keys = Object.keys(sessionList.nodesData);
   return keys.length > 1 || (keys.length === 1 && keys[0] !== 'local');
 }
 

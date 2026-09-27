@@ -140,7 +140,7 @@ func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 	// repaints the shell that actually belongs to the renamed session.
 	// #2558 D4-3: the long-press action moved to mobile_nav.js, where the
 	// dashboard entry points are injected deps.
-	if strings.Contains(js, "nzState.selectedKey = key;\n        nzState.selectedNode = node;\n        deps.renameSession();") {
+	if strings.Contains(js, "selection.key = key;\n        selection.node = node;\n        deps.renameSession();") {
 		t.Error("long-press rename must not flip selection.key/selection.node directly before renameSession()")
 	}
 	if !strings.Contains(js, "        deps.selectSession(key, node);\n        deps.renameSession();") {
@@ -165,10 +165,10 @@ func TestDashboardJS_HeaderFetchErrorPathsStaleChecked(t *testing.T) {
 	if runs == "" {
 		t.Fatal("fetchSessionRuns not found")
 	}
-	if !strings.Contains(runs, "if (!resp.ok) { if (nzState.selectedKey !== key) return; panel.hidden = true; setHeaderRunStats(''); return; }") {
+	if !strings.Contains(runs, "if (!resp.ok) { if (selection.key !== key) return; panel.hidden = true; setHeaderRunStats(''); return; }") {
 		t.Error("fetchSessionRuns !resp.ok branch must stale-check selection.key before clearing #header-runstats")
 	}
-	if !strings.Contains(runs, "} catch (_) {\n    if (nzState.selectedKey !== key) return;\n    panel.hidden = true;\n    setHeaderRunStats('');") {
+	if !strings.Contains(runs, "} catch (_) {\n    if (selection.key !== key) return;\n    panel.hidden = true;\n    setHeaderRunStats('');") {
 		t.Error("fetchSessionRuns catch branch must stale-check selection.key before clearing #header-runstats")
 	}
 
@@ -176,10 +176,10 @@ func TestDashboardJS_HeaderFetchErrorPathsStaleChecked(t *testing.T) {
 	if git == "" {
 		t.Fatal("fetchGitState not found")
 	}
-	if !strings.Contains(git, "if (!resp.ok) { delete deps.gitStateCache[cacheKey]; if (nzState.selectedKey !== key || nzState.selectedNode !== node) return; deps.setHeaderGitChip(''); return; }") {
+	if !strings.Contains(git, "if (!resp.ok) { delete deps.gitStateCache[cacheKey]; if (selection.key !== key || selection.node !== node) return; deps.setHeaderGitChip(''); return; }") {
 		t.Error("fetchGitState !resp.ok branch must stale-check key+node before clearing #header-git (cache delete stays unconditional)")
 	}
-	if !strings.Contains(git, "} catch (_) {\n    delete deps.gitStateCache[cacheKey];\n    if (nzState.selectedKey !== key || nzState.selectedNode !== node) return;\n    deps.setHeaderGitChip('');") {
+	if !strings.Contains(git, "} catch (_) {\n    delete deps.gitStateCache[cacheKey];\n    if (selection.key !== key || selection.node !== node) return;\n    deps.setHeaderGitChip('');") {
 		t.Error("fetchGitState catch branch must stale-check key+node before clearing #header-git")
 	}
 }

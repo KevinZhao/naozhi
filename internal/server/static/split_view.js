@@ -6,7 +6,7 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureSplitView(), called from dashboard's module body.
 
 const deps = {

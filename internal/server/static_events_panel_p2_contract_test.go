@@ -126,7 +126,7 @@ func TestDashboardJS_AskCardLocksOnIncrementalUserEvent(t *testing.T) {
 	lock := jsFuncBody(t, js, "lockRenderedAskCards")
 	for _, want := range []string{
 		".event.ask_question[data-tool-use-id]",
-		"_askAnswered.add(tuid);",
+		"transcript.askAnswered.add(tuid);",
 		"b.disabled = true;",
 		"'ask-status'",
 		"indexOf('发送失败') === 0", // stale failure copy is overwritten with 已回答
