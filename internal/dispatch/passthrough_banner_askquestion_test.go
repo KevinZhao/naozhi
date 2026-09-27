@@ -192,7 +192,7 @@ func TestDispatcher_AskQuestionFired_SuppressesImages(t *testing.T) {
 	sendFn := func(
 		_ context.Context,
 		_ string,
-		_ *session.ManagedSession,
+		_ Session,
 		_ string,
 		_ []clievent.Attachment,
 		onEvent clievent.EventCallback,

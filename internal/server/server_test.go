@@ -119,7 +119,7 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 		cronCommands = cronDispatchAdapter{s: srv.scheduler}
 	}
 	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
-		Router:        srv.router,
+		Router:        dispatchRouter{srv.router},
 		Platforms:     srv.platforms,
 		Agents:        srv.agents,
 		AgentCommands: srv.agentCommands,
@@ -134,8 +134,8 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 			// resolve the tag the same way production does.
 			return replyTagForBackend(backendID)
 		},
-		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
-			return sess.Send(ctx, text, images, onEvent)
+		SendFn: func(ctx context.Context, key string, sess dispatch.Session, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
+			return sess.(*session.ManagedSession).Send(ctx, text, images, onEvent)
 		},
 		TakeoverFn: func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {
 			return false

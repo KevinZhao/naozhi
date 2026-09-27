@@ -4,21 +4,13 @@ import (
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// SanitizeLogAttr returns a version of s that is safe to feed directly into
-// slog attributes without fragmenting log lines (same rules as session-key
-// components). Call it on any IM-originated string (chat ID, user ID, raw
-// incoming key) BEFORE passing it to slog so an attacker-controlled ID
-// cannot inject \n, tabs, or ANSI into operator log streams.
-func SanitizeLogAttr(s string) string {
-	return sanitizeKeyComponent(s)
-}
+// SanitizeLogAttr makes s safe as a slog attribute; see
+// sessionkey.SanitizeLogAttr.
+func SanitizeLogAttr(s string) string { return sessionkey.SanitizeLogAttr(s) }
 
-// SessionKey builds a session key from components.
+// SessionKey builds a session key from components; see sessionkey.SessionKey.
 func SessionKey(platform, chatType, id, agentID string) string {
-	if agentID == "" {
-		agentID = "general"
-	}
-	return sanitizeKeyComponent(platform) + ":" + sanitizeKeyComponent(chatType) + ":" + sanitizeKeyComponent(id) + ":" + sanitizeKeyComponent(agentID)
+	return sessionkey.SessionKey(platform, chatType, id, agentID)
 }
 
 // sanitizeKeyComponent truncates and strips colons from a session key

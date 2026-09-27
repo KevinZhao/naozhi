@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/agentroute"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/limits"
@@ -20,7 +21,8 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/replyfmt"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
@@ -52,7 +54,7 @@ type Dispatcher struct {
 	// agents / agentCommands are immutable after NewDispatcher; the IM hot
 	// path reads them lock-free, so any future mutation MUST switch to
 	// atomic.Pointer swap-on-write or add a mutex.
-	agents        map[string]session.AgentOpts
+	agents        map[string]sessionview.AgentOpts
 	agentCommands map[string]string
 	// knownAgentIDs is the read-only set isKnownAgent accepts: agentCommands
 	// values plus "general"/"planner"; built once in NewDispatcher (#2148).
@@ -67,7 +69,7 @@ type Dispatcher struct {
 	projectMgr ProjectStore
 	// resolver centralises (key, opts) derivation; NewDispatcher guarantees
 	// non-nil. See docs/rfc/key-resolver.md.
-	resolver    *session.KeyResolver
+	resolver    KeyResolver
 	guard       SessionGuard // used by Dashboard/WS path
 	queue       *MessageQueue
 	dedup       *platform.Dedup
@@ -139,16 +141,16 @@ func (d *Dispatcher) markReplySuccess() {
 
 // DispatcherConfig holds all dependencies for constructing a Dispatcher.
 type DispatcherConfig struct {
-	Router        *session.Router
+	Router        SessionRouter
 	Platforms     map[string]platform.Platform
-	Agents        map[string]session.AgentOpts
+	Agents        map[string]sessionview.AgentOpts
 	AgentCommands map[string]string
 	// Scheduler is the cron consumer surface; nil disables /cron commands.
 	Scheduler  CronCommands
 	ProjectMgr *project.Manager
 	// Resolver is the central (key, opts) derivation. Optional: when nil,
 	// NewDispatcher fabricates a fallback from Agents / ProjectMgr.
-	Resolver    *session.KeyResolver
+	Resolver    KeyResolver
 	Guard       SessionGuard
 	Queue       *MessageQueue
 	Dedup       *platform.Dedup
@@ -182,12 +184,12 @@ type DispatcherConfig struct {
 	// queue gating has succeeded.
 	//
 	// Deprecated: prefer DispatcherConfig.Capabilities (#374).
-	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
+	SendFn func(ctx context.Context, key string, sess Session, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 	// TakeoverFn is the optional auto-takeover hook invoked on the first
 	// message of every chat. nil is treated as "return false".
 	//
 	// Deprecated: prefer DispatcherConfig.Capabilities (#374).
-	TakeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+	TakeoverFn func(ctx context.Context, chatKey, key string, opts sessionview.AgentOpts) bool
 
 	// StopCtx is the process-shutdown context the passthrough goroutine
 	// observes. Optional — nil falls back to context.Background() (#1320).
@@ -203,30 +205,6 @@ type DispatcherConfig struct {
 // ErrSendWireupMissing is returned by NewDispatcher when no usable Send hook
 // was supplied; tests may opt out via DispatcherConfig.AllowMissingSender.
 var ErrSendWireupMissing = errors.New("dispatch: Capabilities.Send is required (set DispatcherConfig.Capabilities or DispatcherConfig.SendFn; tests may set AllowMissingSender)")
-
-// resolveOrFabricateKeyResolver returns the KeyResolver Dispatcher holds.
-// Precedence (single track — do not copy this chain elsewhere, #543):
-//
-//  1. cfg.Resolver
-//  2. cfg.Router.Resolver() (Router-attached singleton, #604)
-//  3. a fresh resolver from cfg.Agents + project data source (nil-safe)
-//
-// Always non-nil, so callers dereference d.resolver without a guard.
-func resolveOrFabricateKeyResolver(cfg DispatcherConfig) *session.KeyResolver {
-	if cfg.Resolver != nil {
-		return cfg.Resolver
-	}
-	if cfg.Router != nil {
-		if r := cfg.Router.Resolver(); r != nil {
-			return r
-		}
-	}
-	var data session.PlannerDataSource
-	if cfg.ProjectMgr != nil {
-		data = project.NewDataSource(cfg.ProjectMgr)
-	}
-	return session.NewKeyResolver(cfg.Agents, data)
-}
 
 // NewDispatcher constructs a Dispatcher from cfg. Returns ErrSendWireupMissing
 // when neither cfg.Capabilities (with a non-noop Send) nor cfg.SendFn is set
@@ -360,7 +338,7 @@ type preparedInbound struct {
 	agentID   string
 	cleanText string
 	key       string
-	opts      session.AgentOpts
+	opts      sessionview.AgentOpts
 	images    []clievent.Attachment
 }
 
@@ -392,9 +370,9 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	// sanitize before slog so embedded \n / ANSI bytes cannot forge log
 	// lines. The logger is memoized on the sanitized triple (#2233), so the
 	// cache key cannot diverge from the attr values.
-	sp := session.SanitizeLogAttr(msg.Platform)
-	su := session.SanitizeLogAttr(msg.UserID)
-	sc := session.SanitizeLogAttr(msg.ChatID)
+	sp := sessionkey.SanitizeLogAttr(msg.Platform)
+	su := sessionkey.SanitizeLogAttr(msg.UserID)
+	sc := sessionkey.SanitizeLogAttr(msg.ChatID)
 	logKey := sp + "\x00" + su + "\x00" + sc
 	lg := d.inboundLogCache.get(logKey)
 	if lg == nil {
@@ -408,7 +386,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	}
 
 	// Resolve agent from command prefix (e.g. "/review code" -> agent=code-reviewer, text="code")
-	agentID, cleanText := session.ResolveAgent(trimmed, d.agentCommands)
+	agentID, cleanText := agentroute.ResolveAgent(trimmed, d.agentCommands)
 
 	// #2148: a synthetic message (e.g. a Feishu AskUserQuestion card click)
 	// pins its target agent via msg.AgentID so the answer routes back to the
@@ -486,20 +464,20 @@ func (d *Dispatcher) handleQueuedNonOwner(ctx context.Context, msg platform.Inco
 	// next prompt. All non-Sent outcomes degrade to Collect semantics.
 	if shouldInterrupt {
 		switch outcome := d.router.InterruptSessionViaControl(key); outcome {
-		case session.InterruptSent:
+		case sessionview.InterruptSent:
 			lg.Info("interrupt mode: aborted active turn to process follow-up",
 				"key", key)
-		case session.InterruptNoTurn:
+		case sessionview.InterruptNoTurn:
 			// Turn not active yet; the owner loop drains the follow-up later.
 			lg.Debug("interrupt mode: session idle or spawning, will process follow-up after current turn",
 				"key", key)
-		case session.InterruptNoSession:
+		case sessionview.InterruptNoSession:
 			lg.Debug("interrupt mode: session not found, falling back to collect",
 				"key", key)
-		case session.InterruptUnsupported:
+		case sessionview.InterruptUnsupported:
 			lg.Debug("interrupt mode: protocol does not support stdin interrupt, falling back to collect",
 				"key", key)
-		case session.InterruptError:
+		case sessionview.InterruptError:
 			// ManagedSession.InterruptViaControl already warned; paired dispatch-side trace.
 			lg.Warn("interrupt mode: transport error, falling back to collect",
 				"key", key)
@@ -608,7 +586,7 @@ func (d *Dispatcher) ownerLoop(
 	gen uint64,
 	first QueuedMsg,
 	agentID string,
-	opts session.AgentOpts,
+	opts sessionview.AgentOpts,
 	msg platform.IncomingMessage,
 	lg *slog.Logger,
 ) {
@@ -709,7 +687,7 @@ func (d *Dispatcher) goSendAndReply(
 	key, text string,
 	images []clievent.Attachment,
 	agentID string,
-	opts session.AgentOpts,
+	opts sessionview.AgentOpts,
 	msg platform.IncomingMessage,
 	lg *slog.Logger,
 	isFirst bool,
@@ -823,7 +801,7 @@ func (d *Dispatcher) sendAndReply(
 	key, text string,
 	images []clievent.Attachment,
 	agentID string,
-	opts session.AgentOpts,
+	opts sessionview.AgentOpts,
 	msg platform.IncomingMessage,
 	lg *slog.Logger,
 	isFirst bool,
@@ -832,7 +810,7 @@ func (d *Dispatcher) sendAndReply(
 	// success the external session was registered for resume and GetOrCreate
 	// rebuilds with it; on false GetOrCreate spawns fresh. Same caller flow.
 	if isFirst {
-		_ = d.caps.Takeover(ctx, session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
+		_ = d.caps.Takeover(ctx, sessionkey.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
 	}
 
 	sess, sessStatus, err := d.router.GetOrCreate(ctx, key, opts)
@@ -853,7 +831,7 @@ func (d *Dispatcher) sendAndReply(
 
 	// Session lifecycle notifications only on first message.
 	if isFirst {
-		if sessStatus == session.SessionNew && platform.SupportsInterimMessages(p) {
+		if sessStatus == sessionview.SessionNew && platform.SupportsInterimMessages(p) {
 			d.replyText(ctx, msg, "新会话已创建（之前的上下文已失效）。", lg)
 		}
 	}
@@ -994,7 +972,7 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 // decorateReplyText post-processes the raw CLI result text for IM delivery:
 // redacts secrets, localises API errors, appends the merge-group chip and the
 // per-session ReplyFooter. Returns "" when nothing should be sent (#656).
-func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess *session.ManagedSession) string {
+func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess Session) string {
 	// Redact credential shapes (sk-ant-, ghp_, AKIA, …) BEFORE localising so
 	// an echoed plaintext token never reaches the IM channel (#1571).
 	replyText := localizeAPIError(textutil.RedactSecrets(result.Text))
