@@ -2,12 +2,13 @@
 // session.Router (the `wsStore` facet); fields are private so the compiler
 // enforces access through the method surface (#2495).
 //
-// Lock contract: Store carries NO lock. Call every method with
-// session.Router.mu held — Lookup, Len, Range, Snapshot, Dirty, Gen and
-// CheckInvariants under RLock, everything else under Lock. Override mutations
-// must be atomic with session mutations (ResetChatAndSetWorkspace,
-// ResetAndDiscardOverride) and SetBounded's eviction reads the live-session
-// index, so both share r.mu.
+// Lock contract: Store carries NO lock. It lives in the router's session
+// table state and is reached only inside a table transaction — Lookup, Len,
+// Range, Snapshot, Dirty, Gen and CheckInvariants in a View or Update,
+// everything else in an Update. Override mutations must be atomic with
+// session mutations (ResetChatAndSetWorkspace, ResetAndDiscardOverride) and
+// SetBounded's eviction reads the live-session index, so both share the
+// table lock.
 //
 // Two-key invariant: keys are 3-segment chat keys "platform:chatType:chatID",
 // not the 4-segment session key. ResetChat clears both; SetWorkspace creates
