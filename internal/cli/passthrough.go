@@ -90,7 +90,6 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 	// stdinWriter (shimWriter) would re-acquire shimWMu via shimSend and
 	// deadlock, so write through a helper that reuses shimSendLocked.
 	writeErr := p.writeUserMessageUnderShimLock(slot.uuid, text, images, priority)
-	slot.writtenAt = time.Now()
 	p.shimWMu.Unlock()
 
 	if writeErr != nil {
@@ -367,7 +366,6 @@ func (p *Process) discardAllPending(reason error) {
 	victims = append(victims, p.currentTurnSlots...)
 	p.pendingSlots = nil
 	p.currentTurnSlots = nil
-	p.inTurn = false
 	p.slotsMu.Unlock()
 
 	for _, s := range victims {
@@ -394,11 +392,6 @@ func (p *Process) DiscardPassthroughPending(reason error) {
 // InterruptViaControl and the dashboard see the passthrough turn as active
 // (Send does this itself; passthrough callers block on resultCh instead).
 func (p *Process) onSystemInit() {
-	p.slotsMu.Lock()
-	p.turnStartedAt = time.Now()
-	p.inTurn = true
-	p.slotsMu.Unlock()
-
 	p.mu.Lock()
 	if p.state == StateReady || p.state == StateSpawning {
 		p.state = StateRunning
@@ -414,7 +407,6 @@ func (p *Process) onTurnResult() []*sendSlot {
 	p.slotsMu.Lock()
 	owners := p.currentTurnSlots
 	p.currentTurnSlots = nil
-	p.inTurn = false
 	p.removeSlotsLocked(owners)
 	pendingLeft := len(p.pendingSlots)
 	p.slotsMu.Unlock()

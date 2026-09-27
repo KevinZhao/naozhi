@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"strings"
 	"sync"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cli/procmeter"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/subagent"
@@ -110,9 +110,8 @@ type Process struct {
 	// lifecycleCtx is canceled when the process exits (readLoop returns or Kill());
 	// binds subagent-Resolve goroutines so SIGTERM doesn't leave them spinning
 	// (#644). Lazily initialised so &Process{} test fixtures still work.
-	lifecycleCtxOnce   sync.Once
-	lifecycleCtxValue  context.Context
-	lifecycleCtxCancel context.CancelFunc
+	lifecycleCtxOnce  sync.Once
+	lifecycleCtxValue context.Context
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
@@ -129,46 +128,15 @@ type Process struct {
 	controlAckMu sync.Mutex
 	controlAcks  map[string]chan error
 
-	eventLog  *ring.EventLog
-	totalCost atomic.Uint64 // math.Float64bits(lastResultCostUSD); atomic so Snapshot is lock-free.
+	eventLog *ring.EventLog
 
-	// Normalized metadata from backend metadata events (ACP _kiro.dev/metadata).
-	// Lock-free reads from Snapshot. See docs/rfc/multi-backend.md §8.8.
-	contextUsagePercentBits atomic.Uint64 // math.Float64bits of last ContextUsagePercent
-	turnDurationMs          atomic.Int64  // last TurnDurationMs (ms)
-	// effort is the backend-reported thinking-effort tier (kiro: low…max); empty
-	// when never reported. A string, not an enum, so an unrecognised future tier
-	// still reaches the dashboard (docs/rfc/kiro-effort-visibility.md §2).
-	effort atomic.Pointer[string]
+	// meter is what the process has reported about itself (cost, context
+	// usage, effort, model, binary version, metering, shadow usage).
+	meter procmeter.Meter
 	// spawnDiags is the gate decisions of this spawn (SpawnDiagsFor), set once
 	// by Wrapper.Spawn before readLoop; runtime observation only, never
-	// persisted (same lifecycle as effort). nil = none.
+	// persisted. nil = none.
 	spawnDiags atomic.Pointer[[]SpawnDiag]
-	// shadowMu guards shadow, the token usage of assistant frames since the
-	// last result frame (see clievent.ShadowUsage).
-	shadowMu sync.Mutex
-	shadow   clievent.ShadowUsage
-	// meteringMu guards meteringUsage (read-mostly: 1 Hz × N-tab polls, ≤1
-	// write/turn). meteringLen mirrors len(meteringUsage) under meteringMu so
-	// MeteringUsage() can skip the RLock when empty (claude-class backends).
-	meteringMu    sync.RWMutex
-	meteringUsage []clievent.MeteringEntry
-	// meteringIdx maps Unit → index into meteringUsage (O(1) merge); lazily built
-	// on first applyMetadata so zero-metering sessions stay allocation-free.
-	meteringIdx map[string]int
-	meteringLen atomic.Int32
-	// meteringGen counts metering writes (#2345), bumped under meteringMu, so a
-	// reader sampling MeteringGen BEFORE MeteringUsage never pairs a gen with
-	// older rows; ManagedSession.Snapshot keys its copy cache on it.
-	meteringGen atomic.Uint64
-	// model is the spawn-time CLI model identifier, set once by Wrapper.Spawn
-	// before readLoop starts. Empty means cli.backends[].model is unconfigured
-	// (dashboard renders "(模型未配置)"). atomic.Pointer keeps Snapshot lock-free.
-	model atomic.Pointer[string]
-	// liveVersion is the CLI binary version self-reported in system/init —
-	// authoritative for THIS process even after a host claude upgrade made the
-	// spawn-time Wrapper.CLIVersion stale. Empty until the init frame arrives.
-	liveVersion atomic.Pointer[string]
 	// onLiveVersion is invoked by setLiveVersion on each distinct binary version
 	// so the owning Wrapper can refresh the global dashboard banner. Assigned once
 	// before startReadLoop (no lock); nil for &Process{} test fixtures.
@@ -221,8 +189,6 @@ type Process struct {
 	slotsMu          sync.Mutex
 	pendingSlots     []*sendSlot // FIFO by stdin write order
 	currentTurnSlots []*sendSlot // slots claimed by the in-flight turn
-	turnStartedAt    time.Time   // set on system/init; zeroed on result
-	inTurn           bool
 	slotIDGen        atomic.Uint64
 
 	// linker maps parallel-agent task_ids to transcript jsonl paths for the
@@ -255,7 +221,6 @@ type sendSlot struct {
 	canceled  atomic.Bool
 	replayed  bool
 	enqueueAt time.Time
-	writtenAt time.Time
 }
 
 // isCanceled reads canceled atomically; fanout uses it lock-free outside
@@ -330,7 +295,6 @@ func (p *Process) lifecycleContext() context.Context {
 	p.lifecycleCtxOnce.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		p.lifecycleCtxValue = ctx
-		p.lifecycleCtxCancel = cancel
 		// Both channels nil (legacy test fixtures): no lifetime signal can ever
 		// fire, so cancel synchronously rather than leak the context (#1289);
 		// callers see an already-closed Done, i.e. "process is dead".
@@ -575,115 +539,33 @@ func (p *Process) SessionID() string {
 	return p.sessionID
 }
 
-// TotalCost returns the cumulative cost (lock-free via atomic.Uint64).
-func (p *Process) TotalCost() float64 {
-	return math.Float64frombits(p.totalCost.Load())
-}
+// TotalCost is the cost the last result frame reported. Lock-free.
+func (p *Process) TotalCost() float64 { return p.meter.TotalCost() }
 
-// ContextUsagePercent returns the last reported context-window utilisation
+// ContextUsagePercent is the last reported context-window utilisation
 // (0-100); 0 for backends that don't report it (claude stream-json). Lock-free.
-func (p *Process) ContextUsagePercent() float64 {
-	return math.Float64frombits(p.contextUsagePercentBits.Load())
-}
+func (p *Process) ContextUsagePercent() float64 { return p.meter.ContextUsagePercent() }
 
-// TurnDurationMs returns the duration of the most recently completed turn,
-// in ms. 0 when no turn has completed yet. Lock-free.
-func (p *Process) TurnDurationMs() int64 {
-	return p.turnDurationMs.Load()
-}
+// TurnDurationMs is the duration of the most recently completed turn, in ms;
+// 0 before any turn completes. Lock-free.
+func (p *Process) TurnDurationMs() int64 { return p.meter.TurnDurationMs() }
 
-// Effort returns the backend-reported thinking-effort tier for the most recent
-// turn (kiro: low…max); "" when the backend never reports one (claude, codex)
-// or before the first metadata frame. Lock-free.
-func (p *Process) Effort() string {
-	if e := p.effort.Load(); e != nil {
-		return *e
-	}
-	return ""
-}
+// Effort is the thinking-effort tier in force (kiro: low…max): the
+// backend-reported tier, or the spawn pin until one is reported; "" when
+// neither is known (codex). Lock-free.
+func (p *Process) Effort() string { return p.meter.Effort() }
 
-// MeteringUsage returns a defensive copy of the most recent backend-reported
-// billing rows; nil for backends that report cost only via TotalCost (claude).
-// An atomic length probe lets that dominant polled case skip the RLock.
-func (p *Process) MeteringUsage() []clievent.MeteringEntry {
-	if p.meteringLen.Load() == 0 {
-		return nil
-	}
-	p.meteringMu.RLock()
-	defer p.meteringMu.RUnlock()
-	if len(p.meteringUsage) == 0 {
-		return nil
-	}
-	out := make([]clievent.MeteringEntry, len(p.meteringUsage))
-	copy(out, p.meteringUsage)
-	return out
-}
+// MeteringUsage returns a copy of the backend-reported billing rows; nil for
+// backends that report cost only via TotalCost (claude).
+func (p *Process) MeteringUsage() []clievent.MeteringEntry { return p.meter.Metering() }
 
 // MeteringGen returns the number of metering writes applied so far. Rows
 // returned by MeteringUsage are unchanged while this value is unchanged, which
 // lets pollers cache the copy (#2345). Wait-free.
-func (p *Process) MeteringGen() uint64 {
-	return p.meteringGen.Load()
-}
+func (p *Process) MeteringGen() uint64 { return p.meter.MeteringGen() }
 
-// applyMetadata stores normalized metadata from a Type:"metadata" event (called
-// from readLoop): scalars atomically, MeteringUsage merged under meteringMu.
-// Every field is guarded on being non-zero so a frame that omits a field never
-// regresses an earlier value (pinned by TestProcess_ApplyMetadata_AndAccessors).
-func (p *Process) applyMetadata(m *clievent.EventMetadata) {
-	if m == nil {
-		return
-	}
-	if m.ContextUsagePercent > 0 {
-		p.contextUsagePercentBits.Store(math.Float64bits(m.ContextUsagePercent))
-	}
-	if m.TurnDurationMs > 0 {
-		p.turnDurationMs.Store(m.TurnDurationMs)
-	}
-	// Overwrite semantics (unlike the per-unit accumulation below): effort is a
-	// current-state tier, so xhigh→max mid-session must replace. The non-empty
-	// guard stops a frame that omits effort from blanking a known tier.
-	if m.Effort != "" {
-		// Change-gate: re-storing an identical value every frame would allocate
-		// and dirty a cache line the 1 Hz × N-tab Snapshot poll reads.
-		if prev := p.effort.Load(); prev == nil || *prev != m.Effort {
-			e := m.Effort
-			p.effort.Store(&e)
-		}
-	}
-	if len(m.MeteringUsage) > 0 {
-		p.meteringMu.Lock()
-		// kiro reports per-turn increments and no running total, so session totals
-		// are summed by Unit; maxMeteringUnits bounds growth from a buggy upstream.
-		const maxMeteringUnits = 16
-		// Lazy init so zero-metering sessions never allocate the map.
-		if p.meteringIdx == nil {
-			p.meteringIdx = make(map[string]int, maxMeteringUnits)
-			for i := range p.meteringUsage {
-				p.meteringIdx[p.meteringUsage[i].Unit] = i
-			}
-		}
-		for _, in := range m.MeteringUsage {
-			if i, ok := p.meteringIdx[in.Unit]; ok {
-				p.meteringUsage[i].Value += in.Value
-				if in.UnitPlural != "" {
-					p.meteringUsage[i].UnitPlural = in.UnitPlural
-				}
-				continue
-			}
-			if len(p.meteringUsage) >= maxMeteringUnits {
-				continue
-			}
-			p.meteringIdx[in.Unit] = len(p.meteringUsage)
-			p.meteringUsage = append(p.meteringUsage, in)
-		}
-		// Publish the post-merge length under meteringMu so MeteringUsage's
-		// lock-free fast path sees the same length the slice has after Unlock.
-		p.meteringLen.Store(int32(len(p.meteringUsage)))
-		p.meteringGen.Add(1)
-		p.meteringMu.Unlock()
-	}
-}
+// applyMetadata stores a Type:"metadata" frame (called from readLoop).
+func (p *Process) applyMetadata(m *clievent.EventMetadata) { p.meter.ApplyMetadata(m) }
 
 // ProtocolName returns the protocol name.
 func (p *Process) ProtocolName() string {
@@ -697,11 +579,10 @@ func (p *Process) ProtocolName() string {
 // reconnect — is never clobbered by the static pin. No-op without
 // Caps.EffortTier (codex): BuildArgs dropped the tier, so claiming it would lie.
 func (p *Process) seedEffort(tier string) {
-	if tier == "" || !p.caps.EffortTier {
+	if !p.caps.EffortTier {
 		return
 	}
-	e := tier
-	p.effort.CompareAndSwap(nil, &e)
+	p.meter.SeedEffort(tier)
 }
 
 // SeedEffortFromArgs is the reconnect-path seedEffort: SpawnReconnect has no
@@ -746,25 +627,13 @@ func (p *Process) SpawnDiags() []SpawnDiag {
 	return nil
 }
 
-// setModel records the spawn-time model. Called once by Wrapper.Spawn
-// before readLoop starts; never re-set afterwards.
-func (p *Process) setModel(model string) {
-	if model == "" {
-		p.model.Store(nil)
-		return
-	}
-	m := model
-	p.model.Store(&m)
-}
+// setModel records the model the CLI runs: the spawn pin (Wrapper.Spawn),
+// the one system/init resolves, or the one a set_model ack switched to.
+func (p *Process) setModel(model string) { p.meter.SetModel(model) }
 
-// Model returns the spawn-time CLI model identifier, or "" if the operator did
-// not configure one. Lock-free.
-func (p *Process) Model() string {
-	if m := p.model.Load(); m != nil {
-		return *m
-	}
-	return ""
-}
+// Model returns the CLI model identifier, or "" when neither the operator
+// configured one nor the CLI reported one yet. Lock-free.
+func (p *Process) Model() string { return p.meter.Model() }
 
 // AvailableModels returns the agent-reported model manifest captured during
 // Init (ACP only; nil otherwise). An optional protocol facet like ModelSetter,
@@ -777,31 +646,18 @@ func (p *Process) AvailableModels() []ModelInfo {
 }
 
 // setLiveVersion records the CLI binary version self-reported in system/init
-// (lock-free) and, when it changes, fires onLiveVersion so the owning Wrapper
-// can refresh the global dashboard banner. The change-gate keeps the duplicate
-// init captures (readLoop + Send()) from firing the callback twice.
+// and, when it changes, fires onLiveVersion so the owning Wrapper can refresh
+// the global dashboard banner. The change-gate keeps the duplicate init
+// captures (readLoop + Send()) from firing the callback twice.
 func (p *Process) setLiveVersion(v string) {
-	if v == "" {
-		return
-	}
-	if prev := p.liveVersion.Load(); prev != nil && *prev == v {
-		return
-	}
-	s := v
-	p.liveVersion.Store(&s)
-	if p.onLiveVersion != nil {
+	if p.meter.SetLiveVersion(v) && p.onLiveVersion != nil {
 		p.onLiveVersion(v)
 	}
 }
 
 // LiveVersion returns the CLI binary version self-reported by the running
 // process, or "" if the init frame has not arrived yet. Lock-free.
-func (p *Process) LiveVersion() string {
-	if v := p.liveVersion.Load(); v != nil {
-		return *v
-	}
-	return ""
-}
+func (p *Process) LiveVersion() string { return p.meter.LiveVersion() }
 
 // PID returns the CLI process ID (as reported by shim).
 func (p *Process) PID() int {
