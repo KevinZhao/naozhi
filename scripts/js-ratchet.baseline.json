@@ -66,7 +66,7 @@
     "topLevelLetVar": 11
   },
   "dashboard.js": {
-    "lines": 6625,
+    "lines": 6619,
     "maxFunctionLines": 249,
     "functionsOver100": 4,
     "topLevelLetVar": 0
@@ -102,7 +102,7 @@
     "topLevelLetVar": 5
   },
   "nz_util.js": {
-    "lines": 278,
+    "lines": 325,
     "maxFunctionLines": 7,
     "functionsOver100": 0,
     "topLevelLetVar": 0
@@ -114,7 +114,7 @@
     "topLevelLetVar": 6
   },
   "running_banner.js": {
-    "lines": 486,
+    "lines": 489,
     "maxFunctionLines": 95,
     "functionsOver100": 0,
     "topLevelLetVar": 0
@@ -150,7 +150,7 @@
     "topLevelLetVar": 1
   },
   "state.js": {
-    "lines": 292,
+    "lines": 277,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0
@@ -162,7 +162,7 @@
     "topLevelLetVar": 2
   },
   "tuning.js": {
-    "lines": 527,
+    "lines": 524,
     "maxFunctionLines": 132,
     "functionsOver100": 2,
     "topLevelLetVar": 1

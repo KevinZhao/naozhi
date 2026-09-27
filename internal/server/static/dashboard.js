@@ -1,5 +1,5 @@
 import { composer, hooks, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, nzTest, registerActions } from './nz_util.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, nzTest, reconcileChildren, registerActions } from './nz_util.js';
 import {
   BLOCK_SPLIT_RE,
   LIST_ITEM_RE,
@@ -832,6 +832,18 @@ function debouncedFetchSessions() {
   });
 }
 
+// sidebarRowKey is a sidebar row's reconcile identity: a card by its node and
+// session key, a project header by its group key; other rows (the 未分组
+// header, the empty-state CTA) match by position.
+function sidebarRowKey(el) {
+  if (el.classList.contains('session-card')) return 'c:' + (el.dataset.node || 'local') + '\n' + (el.dataset.key || '');
+  if (el.classList.contains('section-header')) {
+    const btn = el.querySelector('[data-action="project-collapse"]');
+    if (btn) return 'h:' + btn.dataset.key;
+  }
+  return null;
+}
+
 function renderSidebar(data) {
   const st = data.stats;
   updateStatusBar();
@@ -839,7 +851,6 @@ function renderSidebar(data) {
   if (st.projects) sessionList.projectsData = st.projects;
 
   const list = document.getElementById('session-list');
-  const scrollTop = list.scrollTop;
 
   // Merge discovered into sessions — tag them as source=terminal
   const allItemsUnfiltered = (data.sessions || []).map(s => {
@@ -1029,32 +1040,16 @@ function renderSidebar(data) {
   // aren't left staring at a dead sidebar. createNewSession is the same handler
   // the header `+` button invokes.
   if (!html) html = '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
-  // R33-UX1: skip the innerHTML write (and its full sidebar reflow) when
-  // the produced markup is byte-identical to what is already mounted.
-  // 20 sessions × 1 Hz polling cycle rebuilds the same string every tick
-  // whenever nothing has changed — the only thing the assignment did then
-  // was force a layout pass and detach `_activeCardEl`. Comparing strings
-  // is fast (length check short-circuits the common steady-state path
-  // when one item changed and the byte count differs anyway). If the
-  // strings match, the DOM is already correct: skip the write, the
-  // active-card re-resolve, and the scroll restoration (assigning the
-  // same value is a no-op but the rAF is still queued — so just bail).
-  if (html === sessionList.lastSidebarHtml) {
-    // Still refresh the history badge & home panel below — they read from
-    // allSessionsCache which was just refreshed regardless.
-  } else {
-    list.innerHTML = html;
-    sessionList.lastSidebarHtml = html;
-    // Sidebar rebuild detached the previously-cached active card; re-resolve
-    // it against the fresh DOM so selector switches stay O(1) on the next
-    // click. No-op when nothing is selected (openCronPanel / previewDiscovered
-    // clear paths already reset _activeCardEl).
-    if (selection.key) setActiveSessionCard(selection.key, selection.node);
-    // Restore scroll on the next frame so the browser finishes layout first;
-    // synchronous assignment after innerHTML can visibly jump on slow devices.
-    requestAnimationFrame(() => {
-      list.scrollTop = scrollTop;
-    });
+  // Keyed reconcile: only the cards (and headers) whose markup changed are
+  // replaced, so a 1 Hz poll with nothing new touches no DOM, and in-place
+  // patches (state dot, unread chip, a removed card) are compared as they
+  // stand rather than against a cached string.
+  // Kept nodes stay where they are, so the list keeps its scroll position
+  // without a restore.
+  if (reconcileChildren(list, html, sidebarRowKey) && selection.key) {
+    // A replaced card drops the cached active-card ref; re-resolve it so
+    // selector switches stay O(1) on the next click.
+    setActiveSessionCard(selection.key, selection.node);
   }
 
   // History badge (ui-polish-light-theme D10): the always-on total count
@@ -1554,7 +1549,7 @@ function sessionCardHtml(s) {
   const dismissBtn = '<button type="button" class="btn-close btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" data-action="session-dismiss" title="移除" aria-label="移除会话">' + ICONS.close + '</button>';
 
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.cli_name, s.entrypoint) : '';
-  const agentCount = s.subagents ? s.subagents.length : 0;
+  const agentCount = (isActive && turnState.agents.length) || (s.subagents ? s.subagents.length : 0);
   const agentBadge = agentCount > 0 ? '<span class="sc-agents">' + ICONS.robot + '\u00D7' + agentCount + '</span>' : '';
   // R110-P3 IM origin: show a small chip for sessions sourced from feishu /
   // slack / discord / weixin so operators can eyeball which cards are real
@@ -6536,7 +6531,6 @@ registerActions({
 // This list may only shrink as tests migrate to first-class assertions.
 Object.defineProperties(nzTest, {
   _lastSidebarData: { get: function () { return sessionList.lastSidebarData; }, set: function (v) { sessionList.lastSidebarData = v; } },
-  _lastSidebarHtml: { get: function () { return sessionList.lastSidebarHtml; }, set: function (v) { sessionList.lastSidebarHtml = v; } },
   activeView: { get: function () { return ui.activeView; }, set: function (v) { ui.activeView = v; } },
   discoveredItems: { get: function () { return sessionList.discoveredItems; }, set: function (v) { sessionList.discoveredItems = v; } },
   discoveredPollTimer: { get: function () { return timers.discoveredPoll; }, set: function (v) { timers.discoveredPoll = v; } },

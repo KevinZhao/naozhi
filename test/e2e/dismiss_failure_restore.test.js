@@ -1,12 +1,8 @@
 // @ts-check
-// Regression: dismissSession() removes the card from the DOM optimistically
-// and, when DELETE /api/sessions fails, re-fetches the list so "the card
-// comes back". That promise was broken because renderSidebar compares the
-// freshly built sidebar HTML against _lastSidebarHtml and skips the
-// innerHTML write when identical — and a DOM-only card.remove() left the
-// cache describing the pre-removal markup, so the re-render was a no-op and
-// the card stayed gone until an unrelated sidebar change. The fix routes DOM
-// removal through removeSidebarCard(), which also resets the cache.
+// dismissSession() removes the card from the DOM optimistically and, when
+// DELETE /api/sessions fails, re-fetches the list so the card comes back:
+// renderSidebar reconciles against the DOM as it stands, so a card removed in
+// place is re-inserted by the next render that still lists it.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 

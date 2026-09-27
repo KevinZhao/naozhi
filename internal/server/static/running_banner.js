@@ -217,6 +217,9 @@ function refreshBanner() {
   }
 }
 
+// updateSidebarAgentBadge patches the open card's agent badge between sidebar
+// renders; sessionCardHtml draws the same badge from turnState.agents for the
+// open card, so the next render keeps it.
 function updateSidebarAgentBadge() {
   if (!selection.key) return;
   var card = document.querySelector('.session-card[data-key="' + escAttr(selection.key) + '"]');

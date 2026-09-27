@@ -198,46 +198,6 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_SidebarCardRemovalInvalidatesHtmlCache pins that no code
-// path removes a .session-card from the DOM without also resetting
-// sessionList.lastSidebarHtml. renderSidebar skips `list.innerHTML = html` when the
-// freshly built string equals the cache; a DOM-only card.remove() leaves the
-// cache describing a card that is no longer mounted, so a failed DELETE
-// (whose .finally re-fetches) could never bring the card back.
-func TestDashboardJS_SidebarCardRemovalInvalidatesHtmlCache(t *testing.T) {
-	t.Parallel()
-	js := readDashboardJS(t)
-	helperIdx := strings.Index(js, "function removeSidebarCard(key) {")
-	if helperIdx < 0 {
-		t.Fatal("removeSidebarCard(key) helper must exist")
-	}
-	helper := js[helperIdx:]
-	if end := strings.Index(helper, "\n}\n"); end > 0 {
-		helper = helper[:end]
-	}
-	if !strings.Contains(helper, "if (card) card.remove();") || !strings.Contains(helper, "sessionList.lastSidebarHtml = null;") {
-		t.Error("removeSidebarCard must remove the card AND set sessionList.lastSidebarHtml = null")
-	}
-	// The helper must be the ONLY place a session card is removed directly.
-	if n := strings.Count(js, "if (card) card.remove();"); n != 1 {
-		t.Errorf("found %d `if (card) card.remove();` sites; only removeSidebarCard() may remove a session card directly (it invalidates sessionList.lastSidebarHtml)", n)
-	}
-	// dismissSession (the optimistic-delete path with the failure re-sync)
-	// must use the helper.
-	start := strings.Index(js, "async function dismissSession(")
-	if start < 0 {
-		t.Fatal("dismissSession not found")
-	}
-	end := strings.Index(js[start:], "async function renameSession(")
-	if end < 0 {
-		t.Fatal("renameSession must follow dismissSession")
-	}
-	dismiss := js[start : start+end]
-	if strings.Count(dismiss, "removeSidebarCard(key)") < 3 {
-		t.Errorf("dismissSession must call removeSidebarCard(key) on every DOM-removal branch (cron guard / discovered / optimistic delete), got %d", strings.Count(dismiss, "removeSidebarCard(key)"))
-	}
-}
-
 // TestDashboardJS_HistoryPanelGroupKeyMatchesSortKey pins that the history
 // popover's day-header grouping uses the same timestamp as its sort. Sorting
 // by `retired_at || last_active` while grouping by `last_active` produced
