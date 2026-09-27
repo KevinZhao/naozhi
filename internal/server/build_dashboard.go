@@ -70,7 +70,7 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	if s.scratchPool != nil {
 		hs.scratchH = scratch.New(scratch.Deps{
 			Broadcaster: s.hub,
-			Router:      s.hub.router,
+			Router:      scratchRouter{s.hub.router},
 			Pool:        s.scratchPool,
 			OpenLimit:   newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy),
 			Agents:      s.agents,
