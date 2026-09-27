@@ -40,8 +40,16 @@ let navPopoverOpen = false;
 let navIdx = -1; // -1 = not navigating
 
 function navRebuild() {
-  navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
   navIdx = -1;
+  navSync();
+}
+
+// navSync re-reads the user messages after events were added in place,
+// keeping the position while it still exists. The list and position are
+// this module's state: other modules call this rather than writing them.
+function navSync() {
+  navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
+  if (navIdx >= navUserEls.length) navIdx = -1;
   navUpdatePill();
 }
 
@@ -446,6 +454,7 @@ export {
   navPopoverOpen,
   navRebuild,
   navShowList,
+  navSync,
   navUpdatePill,
   navUserEls,
   updateSendButton,
@@ -456,5 +465,5 @@ export {
 Object.defineProperties(nzTest, {
   navIdx: { get: function () { return navIdx; }, set: function (v) { navIdx = v; }, configurable: true },
   navUserEls: { get: function () { return navUserEls; }, set: function (v) { navUserEls = v; }, configurable: true },
-  navPopoverOpen: { get: function () { return nzState.navPopoverOpen; }, set: function (v) { nzState.navPopoverOpen = v; }, configurable: true },
+  navPopoverOpen: { get: function () { return navPopoverOpen; }, set: function (v) { navPopoverOpen = v; }, configurable: true },
 });

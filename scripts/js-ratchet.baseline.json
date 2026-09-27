@@ -66,14 +66,14 @@
     "topLevelLetVar": 11
   },
   "dashboard.js": {
-    "lines": 6924,
+    "lines": 6914,
     "maxFunctionLines": 249,
     "functionsOver100": 4,
     "topLevelLetVar": 56
   },
   "discovery.js": {
-    "lines": 253,
-    "maxFunctionLines": 150,
+    "lines": 252,
+    "maxFunctionLines": 149,
     "functionsOver100": 1,
     "topLevelLetVar": 0
   },
@@ -96,7 +96,7 @@
     "topLevelLetVar": 3
   },
   "msg_nav.js": {
-    "lines": 460,
+    "lines": 469,
     "maxFunctionLines": 46,
     "functionsOver100": 0,
     "topLevelLetVar": 5
@@ -126,7 +126,7 @@
     "topLevelLetVar": 5
   },
   "send_message.js": {
-    "lines": 602,
+    "lines": 601,
     "maxFunctionLines": 223,
     "functionsOver100": 2,
     "topLevelLetVar": 1
@@ -162,7 +162,7 @@
     "topLevelLetVar": 1
   },
   "utilities.js": {
-    "lines": 1094,
+    "lines": 1091,
     "maxFunctionLines": 91,
     "functionsOver100": 0,
     "topLevelLetVar": 4

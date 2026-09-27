@@ -23,7 +23,7 @@ const deps = {
   httpSendPending: null,
   interruptSession: null,
   lastDividerTime: null,
-  navUpdatePill: null,
+  navSync: null,
   persistPending: null,
   removeSidebarCard: null,
   renderFilePreviews: null,
@@ -486,8 +486,7 @@ function renderOptimisticUserMsg(text, sendId) {
   // history. deps.stickEventsBottom handles async layout changes from input-area
   // collapse and lazy images.
   deps.stickEventsBottom();
-  nzState.navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-  deps.navUpdatePill();
+  deps.navSync();
 }
 
 function clearPendingFiles() {
