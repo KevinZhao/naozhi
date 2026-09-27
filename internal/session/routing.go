@@ -8,67 +8,17 @@
 package session
 
 import (
-	"log/slog"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/projectapi"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
-// maxPlannerPromptBytesAtSpawn caps the planner prompt that flows into
-// `--append-system-prompt` argv. Mirrors internal/project.MaxPlannerPromptBytes
-// (session cannot import project); bounds a tampered on-disk config that
-// slipped past the write-path validator.
-const maxPlannerPromptBytesAtSpawn = 8 * 1024
-
-// SanitisePlannerPromptForSpawn is defense-in-depth: re-validate the
-// PlannerPrompt at the spawn boundary before it crosses into CLI argv. Returns
-// "" for rejected input so the spawn runs with no planner prompt rather than a
-// poisoned one. Mirrors project.EffectivePlannerPrompt's rune guards plus a
-// length cap so any path bypassing the project layer still cannot inject
-// control bytes or oversize argv. Exported for the server-package
-// handlePlannerRestart fallback (#535).
+// SanitisePlannerPromptForSpawn re-validates a planner prompt at the spawn
+// boundary; see sessionview.SanitisePlannerPromptForSpawn.
 func SanitisePlannerPromptForSpawn(prompt, projectName string) string {
-	return sanitisePlannerPromptForSpawn(prompt, projectName)
-}
-
-// sanitisePlannerPromptForSpawn is the in-package implementation.
-func sanitisePlannerPromptForSpawn(prompt, projectName string) string {
-	if prompt == "" {
-		return ""
-	}
-	if len(prompt) > maxPlannerPromptBytesAtSpawn {
-		slog.Warn("planner prompt exceeds spawn-time length cap; dropping",
-			"project", projectName,
-			"len", len(prompt),
-			"cap", maxPlannerPromptBytesAtSpawn)
-		return ""
-	}
-	if !utf8.ValidString(prompt) {
-		slog.Warn("planner prompt contains invalid UTF-8 at spawn; dropping",
-			"project", projectName)
-		return ""
-	}
-	for i := 0; i < len(prompt); i++ {
-		c := prompt[i]
-		// tab / LF / CR are legitimate markdown; other C0 + NUL + DEL would
-		// truncate argv on execve or corrupt stream-json framing at the shim.
-		if c == 0 || (c < 0x20 && c != 0x09 && c != 0x0a && c != 0x0d) || c == 0x7f {
-			slog.Warn("planner prompt contains control byte at spawn; dropping",
-				"project", projectName, "byte", c)
-			return ""
-		}
-	}
-	for _, r := range prompt {
-		if osutil.IsLogInjectionRune(r) {
-			slog.Warn("planner prompt contains injection rune (C1/bidi/LS-PS) at spawn; dropping",
-				"project", projectName)
-			return ""
-		}
-	}
-	return prompt
+	return sessionview.SanitisePlannerPromptForSpawn(prompt, projectName)
 }
 
 // PlannerDataSource abstracts the project-layer data KeyResolver needs. All
@@ -151,7 +101,7 @@ func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string)
 		base.Model = b.PlannerModel
 	}
 	// Spawn-boundary re-validation (see SanitisePlannerPromptForSpawn).
-	if pp := sanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name); pp != "" {
+	if pp := sessionview.SanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name); pp != "" {
 		// `base` is a value copy, so this never mutates r.defaults[agentID].
 		base.SystemPrompt = JoinSystemPrompts(base.SystemPrompt, pp)
 	}
@@ -181,7 +131,7 @@ func (r *KeyResolver) ResolveForPlannerKey(projectName string) (key string, opts
 	}
 	// Same spawn-boundary check as ResolveForChat: b.PlannerPrompt may be a
 	// stale value cached from a prior disk reload.
-	if pp := sanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name); pp != "" {
+	if pp := sessionview.SanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name); pp != "" {
 		opts.SystemPrompt = pp
 	}
 	return plannerKeyFor(b.Name), opts, true

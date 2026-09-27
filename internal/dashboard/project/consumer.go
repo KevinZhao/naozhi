@@ -25,7 +25,7 @@ import (
 	"context"
 
 	projectpkg "github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 // ProjectStore is the *project.Manager surface: the project list, one project,
@@ -41,17 +41,26 @@ type ProjectStore interface {
 
 // RouterView is the 3 *session.Router methods this package calls, out of 77:
 // the planner-restart path (look up, recreate) plus the version bump that makes
-// the dashboard re-render.
+// the dashboard re-render. The router's own methods return the concrete
+// session; the adapter where this package is wired converts to these shapes.
 type RouterView interface {
-	SessionFor(key string) *session.ManagedSession
-	ResetAndRecreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, error)
+	// SessionFor returns nil (a nil interface) when no session has the key.
+	SessionFor(key string) PlannerSession
+	// ResetAndRecreate restarts the session under key; the new session itself
+	// is not needed here.
+	ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) error
 	BumpVersion()
+}
+
+// PlannerSession is what the project list reads off a planner session.
+type PlannerSession interface {
+	Snapshot() sessionview.SessionSnapshot
 }
 
 // PlannerKeyResolver is the one *session.KeyResolver method this package needs:
 // project name → planner session key + opts.
 type PlannerKeyResolver interface {
-	ResolveForPlannerKey(projectName string) (key string, opts session.AgentOpts, ok bool)
+	ResolveForPlannerKey(projectName string) (key string, opts sessionview.AgentOpts, ok bool)
 }
 
 // NodeCacheReader is the *node.CacheManager surface: the cached remote-node

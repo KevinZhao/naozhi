@@ -192,9 +192,9 @@ func buildProjectHandlers(
 	if opts.ProjectManager != nil {
 		projectStore = opts.ProjectManager
 	}
-	var projectRouter dashproject.RouterView
+	var projectRouterView dashproject.RouterView
 	if opts.Router != nil {
-		projectRouter = opts.Router
+		projectRouterView = projectRouter{opts.Router}
 	}
 	var plannerResolver dashproject.PlannerKeyResolver
 	if resolver != nil {
@@ -203,7 +203,7 @@ func buildProjectHandlers(
 	return dashproject.New(dashproject.Deps{
 		BaseCtx:            baseCtx,
 		ProjectMgr:         projectStore,
-		Router:             projectRouter,
+		Router:             projectRouterView,
 		Resolver:           plannerResolver,
 		NodeAccess:         nodeAccess,
 		NodeCache:          nodeCache,

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	projectpkg "github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 // fakeStore / fakeRouter are ProjectStore / RouterView implementations with
@@ -38,9 +38,9 @@ type fakeRouter struct{ bumps int }
 
 var _ RouterView = (*fakeRouter)(nil)
 
-func (f *fakeRouter) SessionFor(string) *session.ManagedSession { return nil }
-func (f *fakeRouter) ResetAndRecreate(context.Context, string, session.AgentOpts) (*session.ManagedSession, error) {
-	return nil, nil
+func (f *fakeRouter) SessionFor(string) PlannerSession { return nil }
+func (f *fakeRouter) ResetAndRecreate(context.Context, string, sessionview.AgentOpts) error {
+	return nil
 }
 func (f *fakeRouter) BumpVersion() { f.bumps++ }
 

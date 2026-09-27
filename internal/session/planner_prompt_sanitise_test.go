@@ -19,6 +19,8 @@ package session
 import (
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 // makeResolverWithBoundProject wires a minimal KeyResolver bound to a
@@ -59,7 +61,7 @@ func argvHasAppendSystemPrompt(opts AgentOpts) (string, bool) {
 func TestSanitisePlannerPrompt_DropsOversize(t *testing.T) {
 	t.Parallel()
 
-	huge := strings.Repeat("A", maxPlannerPromptBytesAtSpawn+1)
+	huge := strings.Repeat("A", sessionview.MaxPlannerPromptBytesAtSpawn+1)
 	opts := makeResolverWithBoundProject(t, huge)
 
 	got, ok := argvHasAppendSystemPrompt(opts)
@@ -147,12 +149,12 @@ func TestSanitisePlannerPrompt_AllowsNormalContent(t *testing.T) {
 }
 
 // TestSanitisePlannerPrompt_AllowsAtSizeBoundary pins the exact-cap
-// edge: a prompt of exactly maxPlannerPromptBytesAtSpawn bytes is
+// edge: a prompt of exactly sessionview.MaxPlannerPromptBytesAtSpawn bytes is
 // permitted; one byte over is dropped.
 func TestSanitisePlannerPrompt_AllowsAtSizeBoundary(t *testing.T) {
 	t.Parallel()
 
-	atCap := strings.Repeat("a", maxPlannerPromptBytesAtSpawn)
+	atCap := strings.Repeat("a", sessionview.MaxPlannerPromptBytesAtSpawn)
 	opts := makeResolverWithBoundProject(t, atCap)
 	if _, ok := argvHasAppendSystemPrompt(opts); !ok {
 		t.Fatalf("at-cap PlannerPrompt (%d bytes) was dropped", len(atCap))
@@ -167,7 +169,7 @@ func TestSanitisePlannerPrompt_AllowsAtSizeBoundary(t *testing.T) {
 func TestSanitisePlannerPrompt_PlannerKeyPathAlsoSanitised(t *testing.T) {
 	t.Parallel()
 
-	bad := strings.Repeat("X", maxPlannerPromptBytesAtSpawn+1)
+	bad := strings.Repeat("X", sessionview.MaxPlannerPromptBytesAtSpawn+1)
 	src := &fakeDataSource{
 		byName: map[string]ProjectBinding{
 			"myproj": {
@@ -185,35 +187,5 @@ func TestSanitisePlannerPrompt_PlannerKeyPathAlsoSanitised(t *testing.T) {
 	}
 	if got, hit := argvHasAppendSystemPrompt(opts); hit {
 		t.Fatalf("oversize PlannerPrompt reached argv via planner-restart path: %q...", got[:32])
-	}
-}
-
-// TestSanitisePlannerPromptForSpawn_DirectFunction directly exercises
-// the validator so a future caller (e.g. a third resolver branch) can
-// reuse it without re-deriving the policy.
-func TestSanitisePlannerPromptForSpawn_DirectFunction(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"empty", "", ""},
-		{"normal", "hello", "hello"},
-		{"oversize", strings.Repeat("a", maxPlannerPromptBytesAtSpawn+1), ""},
-		{"NUL", "x\x00y", ""},
-		{"BEL", "x\x07y", ""},
-		{"DEL", "x\x7fy", ""},
-		{"invalid utf8", "\xc0", ""},
-		{"bidi override", "x\u202ey", ""},
-		{"tab + LF + CR allowed", "a\tb\nc\rd", "a\tb\nc\rd"},
-		{"CJK allowed", "你好", "你好"},
-	}
-	for _, tc := range cases {
-		got := sanitisePlannerPromptForSpawn(tc.in, "test")
-		if got != tc.want {
-			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
-		}
 	}
 }
