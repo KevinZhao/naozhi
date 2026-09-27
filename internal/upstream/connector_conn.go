@@ -15,7 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error {
@@ -179,7 +179,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			key := msg.Key
 			// Trust-boundary gate: msg.Key flows into slog attrs and the
 			// router.SessionFor lookup; reject bidi/C1/newline bytes up front.
-			if err := session.ValidateSessionKey(key); err != nil {
+			if err := sessionkey.ValidateSessionKey(key); err != nil {
 				slog.Debug("connector subscribe: invalid key", "err", err)
 				break
 			}
@@ -226,7 +226,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 		case "unsubscribe":
 			key := msg.Key
 			// Same trust-boundary guard as subscribe.
-			if err := session.ValidateSessionKey(key); err != nil {
+			if err := sessionkey.ValidateSessionKey(key); err != nil {
 				slog.Debug("connector unsubscribe: invalid key", "err", err)
 				break
 			}

@@ -49,7 +49,7 @@ func TestReqSem_InflightGaugeBalanced(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
-	c := New(cfg, makeRouter(), nil, nil)
+	c := New(cfg, testRouter(makeRouter()), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -143,7 +143,7 @@ func TestReqSem_WaitCounterOnSaturation(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
-	c := New(cfg, makeRouter(), nil, nil)
+	c := New(cfg, testRouter(makeRouter()), nil, nil)
 
 	// Parking previewFunc: each call holds a reqSem slot until the
 	// test closes `release`. Returning empty-array JSON keeps the

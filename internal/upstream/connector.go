@@ -22,7 +22,6 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session"
 )
 
 // handleConnDrainBudget bounds the deferred wg.Wait() at the end of
@@ -81,7 +80,7 @@ type Connector struct {
 	projMgr *project.Manager // may be nil
 	// resolver derives planner-view opts for reverse-RPC restart_planner
 	// (docs/rfc/key-resolver.md Phase 5); nil falls back to inline AgentOpts.
-	resolver         *session.KeyResolver
+	resolver         PlannerResolver
 	claudeDir        string
 	hostname         string
 	defaultWorkspace string // used as allowedRoot for incoming workspace overrides
@@ -93,7 +92,7 @@ type Connector struct {
 
 // New creates a Connector. projMgr may be nil if projects are not configured;
 // resolver may be nil (restart_planner then uses the inline AgentOpts path).
-func New(cfg *Config, router *session.Router, projMgr *project.Manager, resolver *session.KeyResolver) *Connector {
+func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver PlannerResolver) *Connector {
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
@@ -363,7 +362,7 @@ const marshalResultMaxRetainBytes = 64 * 1024
 // EvalSymlinks to the cleaned syntactic path (close_discovered runs after
 // the CLI exited and its CWD may be gone).
 //
-// Callers must run session.ValidateRemoteWorkspacePath(raw) FIRST so
+// Callers must run sessionview.ValidateRemoteWorkspacePath(raw) FIRST so
 // traversal / control-byte / relative inputs are rejected before Clean folds
 // `/home/../etc` into `/etc`, and must apply their own empty-defaultWorkspace policy.
 func (c *Connector) sanitizeWorkspacePath(raw, kind string, tolerateMissing bool) (string, error) {
