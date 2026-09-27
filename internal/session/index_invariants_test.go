@@ -128,16 +128,16 @@ func TestIndexInvariants_ResetChatDropsTheWholeChat(t *testing.T) {
 	publishT(r, other, &ManagedSession{key: other}, false)
 	checkIndexInvariants(t, r, "publish 3 + 1")
 
-	r.ResetChat(chat)
-	checkIndexInvariants(t, r, "ResetChat")
+	r.ResetChatAndSetWorkspace(chat, t.TempDir())
+	checkIndexInvariants(t, r, "ResetChatAndSetWorkspace")
 
 	for _, k := range keys {
 		if _, ok := lookupT(r, k); ok {
-			t.Errorf("session %q survived ResetChat", k)
+			t.Errorf("session %q survived the chat reset", k)
 		}
 	}
 	if _, ok := lookupT(r, other); !ok {
-		t.Errorf("ResetChat removed %q, which is on a different chat", other)
+		t.Errorf("the chat reset removed %q, which is on a different chat", other)
 	}
 }
 

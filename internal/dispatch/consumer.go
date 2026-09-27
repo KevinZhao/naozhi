@@ -26,7 +26,6 @@ type SessionRouter interface {
 	// discardQueue never touches the concrete *session.ManagedSession (#1612).
 	DiscardPassthroughPending(key string, reason error)
 	Reset(key string)
-	ResetChat(chatKeyPrefix string)
 	Workspace(chatKey string) string
 	SetWorkspace(chatKey, path string)
 	// ResetChatAndSetWorkspace atomically resets the chat and installs a new
