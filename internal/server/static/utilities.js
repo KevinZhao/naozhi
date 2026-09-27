@@ -11,10 +11,7 @@
 import { esc, escAttr, nzState, showToast, trapFocus } from './nz_util.js';
 
 const deps = {
-  allSessionsCache: null,
-  cliBackends: null,
   getToken: null,
-  lastStatsSnapshot: null,
   renderSystemView: null,
   wsm: null,
 };
@@ -65,7 +62,7 @@ function mainEmptyHtml() {
   '</div>';
 }
 
-// computeHomeStats aggregates deps.allSessionsCache into the two stats surfaced
+// computeHomeStats aggregates nzState.allSessionsCache into the two stats surfaced
 // on the idle Home panel. Pure function so a contract test can exercise the
 // "today" boundary and cost summation without driving the DOM.
 //
@@ -176,10 +173,10 @@ function buildHomeHealthLines(stats) {
   // per-feature table lives in the doctor status panel (built by
   // renderBackendsDoctorPanel below) — this line is just the at-a-glance
   // health roll-up.
-  if (deps.cliBackends && Array.isArray(deps.cliBackends.backends) && deps.cliBackends.backends.length > 1) {
-    const okCount = deps.cliBackends.backends.filter(b => b && b.available).length;
-    const totalCount = deps.cliBackends.backends.length;
-    const ids = deps.cliBackends.backends.map(b => (b && b.id) || '?').join(' · ');
+  if (nzState.cliBackends && Array.isArray(nzState.cliBackends.backends) && nzState.cliBackends.backends.length > 1) {
+    const okCount = nzState.cliBackends.backends.filter(b => b && b.available).length;
+    const totalCount = nzState.cliBackends.backends.length;
+    const ids = nzState.cliBackends.backends.map(b => (b && b.id) || '?').join(' · ');
     lines.push({
       text: 'Backends: ' + okCount + '/' + totalCount + ' (' + ids + ')',
       kind: okCount === totalCount ? 'info' : 'warn',
@@ -199,7 +196,7 @@ function buildHomeHealthLines(stats) {
 }
 
 // renderRecentSessionsPanel populates the Home-panel slot inside the main
-// empty-state body. Reads deps.allSessionsCache (written by renderSidebar after
+// empty-state body. Reads nzState.allSessionsCache (written by renderSidebar after
 // each fetchSessions → so reflects the same authoritative snapshot the
 // sidebar shows), picks the 5 most recently active sessions, and renders a
 // compact clickable list. When there are zero sessions, returns an empty
@@ -219,7 +216,7 @@ function renderRecentSessionsPanel() {
   const host = document.getElementById('recent-sessions-panel');
   if (!host) return;
   if (nzState.selectedKey) return; // active session rendered by renderMainShell
-  const items = Array.isArray(deps.allSessionsCache) ? deps.allSessionsCache : [];
+  const items = Array.isArray(nzState.allSessionsCache) ? nzState.allSessionsCache : [];
   if (items.length === 0) { host.innerHTML = ''; return; }
   // Sort by last_active desc; sessions without last_active sink to the
   // bottom so a brand-new "new" card doesn't squat on position 1 forever.
@@ -352,7 +349,7 @@ function costStatHtml(stats) {
 }
 
 function renderServiceOverviewHtml() {
-  const items = Array.isArray(deps.allSessionsCache) ? deps.allSessionsCache : [];
+  const items = Array.isArray(nzState.allSessionsCache) ? nzState.allSessionsCache : [];
   const stats = computeHomeStats(items, Date.now());
   const statsHtml =
     '<div class="svc-stats" role="group" aria-label="今日概览">' +
@@ -366,7 +363,7 @@ function renderServiceOverviewHtml() {
       '</div>' +
       costStatHtml(stats) +
     '</div>';
-  const healthLines = buildHomeHealthLines(deps.lastStatsSnapshot);
+  const healthLines = buildHomeHealthLines(nzState.lastStatsSnapshot);
   for (const l of buildCostHealthLines(costSummaryCache)) healthLines.push(l);
   const healthHtml = healthLines.length === 0
     ? ''
@@ -387,14 +384,14 @@ function renderServiceOverviewHtml() {
 
 // renderBackendsDoctorPanel builds a foldable <details> panel listing each
 // enabled backend with its protocol caps + user-feature flags. Multi-Backend
-// RFC §8.3 D22. Returns '' for single-backend deployments / when deps.cliBackends
+// RFC §8.3 D22. Returns '' for single-backend deployments / when nzState.cliBackends
 // is unavailable so the cold-start home page doesn't show a half-empty
 // section. The output includes a small "▼" affordance and a screen-reader
 // label so keyboard users know the section is expandable.
 function renderBackendsDoctorPanel() {
-  if (!deps.cliBackends || !Array.isArray(deps.cliBackends.backends)) return '';
-  if (deps.cliBackends.backends.length <= 1) return '';
-  const rows = deps.cliBackends.backends.map(b => {
+  if (!nzState.cliBackends || !Array.isArray(nzState.cliBackends.backends)) return '';
+  if (nzState.cliBackends.backends.length <= 1) return '';
+  const rows = nzState.cliBackends.backends.map(b => {
     if (!b) return '';
     const id = esc(b.id || '?');
     const name = esc(b.display_name || b.id || '?');
@@ -423,7 +420,7 @@ function renderBackendsDoctorPanel() {
       (featPills ? '<div class="doctor-row-feats">' + featPills + '</div>' : '') +
     '</div>';
   }).join('');
-  const defaultID = esc(deps.cliBackends.default || '');
+  const defaultID = esc(nzState.cliBackends.default || '');
   // Arrow is supplied by the .doctor-summary::before CSS so it can flip
   // 90° on [open]. Don't bake it into the text.
   return '<details class="doctor-panel" aria-label="后端状态详情">' +

@@ -20,7 +20,7 @@ const deps = {
   lastDividerTime: null,
   mobileEnterChat: null,
   navRebuild: null,
-  navUpdatePill: null,
+  navSync: null,
   processEventsForDisplay: null,
   renderEventsWithDividers: null,
   sessionTypeTag: null,
@@ -228,8 +228,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
           if (t) prevT2 = t;
         });
         if (wasBottom) el2.scrollTop = el2.scrollHeight;
-        nzState.navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-        deps.navUpdatePill();
+        deps.navSync();
       } catch (_) {
       } finally {
         previewInFlight = false;

@@ -172,7 +172,7 @@ import {
   navPopoverOpen,
   navRebuild,
   navShowList,
-  navUpdatePill,
+  navSync,
   updateSendButton,
 } from './msg_nav.js';
 import {
@@ -3169,11 +3169,7 @@ function appendEvents(events) {
   if (sawUser) stickEventsBottom();
   else if (wasBottom) el.scrollTop = el.scrollHeight;
   runPendingAsync();
-  // Rebuild nav index but preserve current position
-  const oldIdx = nzState.navIdx;
-  nzState.navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-  nzState.navIdx = oldIdx >= 0 && oldIdx < nzState.navUserEls.length ? oldIdx : -1;
-  navUpdatePill();
+  navSync();
 }
 
 // Event types that are tracked in the running banner but never rendered
@@ -4623,9 +4619,7 @@ const wsm = {
       if (sawUser) stickEventsBottom();
       else if (wasBottom) el.scrollTop = el.scrollHeight;
       runPendingAsync();
-      nzState.navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-      if (nzState.navIdx >= 0 && nzState.navIdx < nzState.navUserEls.length) { /* preserve */ } else nzState.navIdx = -1;
-      navUpdatePill();
+      navSync();
     }
 
     if (events.length > 0) {
@@ -4801,10 +4795,7 @@ const wsm = {
     if (isUser) stickEventsBottom();
     else if (wasBottom) el.scrollTop = el.scrollHeight;
     runPendingAsync();
-    if (ev.type === 'user') {
-      nzState.navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-      navUpdatePill();
-    }
+    if (ev.type === 'user') navSync();
   },
 
   onSendAck(msg) {
@@ -5392,13 +5383,13 @@ function showOnboarding() {
 // is visible to importers, unlike a window-property copy.)
 // Wire the markdown renderers' dashboard-side helpers (#2558 D4). Runs in
 // dashboard's module body, before any render call.
-configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, featureForCurrent, fetchEvents, fetchSessions, getToken, httpSendPending, interruptSession, lastDividerTime, navUpdatePill, persistPending, removeSidebarCard, renderFilePreviews, selectSession, sessionAccessProfiles, sessionBackends, sessionNodes, sessionOptimisticPrevState, sessionOptimisticRunning, sessionWorkspaces, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton, wsm });
+configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, featureForCurrent, fetchEvents, fetchSessions, getToken, httpSendPending, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, sessionAccessProfiles, sessionBackends, sessionNodes, sessionOptimisticPrevState, sessionOptimisticRunning, sessionWorkspaces, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton, wsm });
 configureAuthModal({ applyFeatureGates, cliBackendsByNode, debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, sessionAccessProfiles, sessionBackends, sessionNodes, sessionWorkspaces, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar, wsm });
 configureSidebarProject({ PICKER_SELECT_ONLY_STYLE, PICKER_SELECT_STYLE, accessProfileChipInfo, debouncedFetchSessions, fetchAccessProfiles, fetchCLIBackends, fetchSessions, getToken, projectDisplayLabel, projectDisplayPrefix, renderAccessProfilePicker, renderBackendPicker, renderSidebar, showAPIError, showNetworkError });
 configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions, escCloseVoiceOverlay, handleFiles, refreshBanner, resetTurnState, selectSession, sid });
 configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, sessionAccessProfiles, sessionBackends, sessionWorkspaces, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput, wsm });
-configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navUpdatePill, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml, wsm });
-configureUtilities({ allSessionsCache, cliBackends, getToken, lastStatsSnapshot, renderSystemView, wsm });
+configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml, wsm });
+configureUtilities({ getToken, renderSystemView, wsm });
 configureFileRefs({ AVATAR_GROUP_GAP_MS, ICONS, collapseSidebarForDrawer, getToken, isInternalEvent, loadKatex, loadMermaid, matchProject, nzSplitBringToFront, nzSplitEnter, nzSplitExit, renderRich, restoreSidebarAfterDrawer, runPendingAsync });
 configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid, wsm });
 configureSystemView({ formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, setActivityView, timeAgo, wireQuickAskInput });
@@ -6803,7 +6794,7 @@ Object.defineProperties(nzState, {
   _lastSidebarHtml: { get: function () { return _lastSidebarHtml; }, set: function (v) { _lastSidebarHtml = v; } },
   lastStatsSnapshot: { get: function () { return lastStatsSnapshot; }, set: function (v) { lastStatsSnapshot = v; } },
   lastVersion: { get: function () { return lastVersion; }, set: function (v) { lastVersion = v; } },
-  navPopoverOpen: { get: function () { return navPopoverOpen; }, set: function (v) { navPopoverOpen = v; } },
+  navPopoverOpen: { get: function () { return navPopoverOpen; } },
   nodesData: { get: function () { return nodesData; } },
   oldestFetchedEventTime: { get: function () { return oldestFetchedEventTime; }, set: function (v) { oldestFetchedEventTime = v; } },
   _optimisticDeleteKeys: { get: function () { return _optimisticDeleteKeys; }, set: function (v) { _optimisticDeleteKeys = v; } },
@@ -6837,11 +6828,10 @@ Object.defineProperties(nzTest, {
   activeView: { get: function () { return activeView; }, set: function (v) { activeView = v; } },
   discoveredItems: { get: function () { return discoveredItems; }, set: function (v) { discoveredItems = v; } },
   discoveredPollTimer: { get: function () { return discoveredPollTimer; }, set: function (v) { discoveredPollTimer = v; } },
-  katexReady: { get: function () { return katexReady; }, set: function (v) { katexReady = v; } },
+  katexReady: { get: function () { return katexReady; } },
   lastEventTime: { get: function () { return lastEventTime; }, set: function (v) { lastEventTime = v; } },
   lastRenderedEventTime: { get: function () { return lastRenderedEventTime; }, set: function (v) { lastRenderedEventTime = v; } },
   lastVersion: { get: function () { return lastVersion; }, set: function (v) { lastVersion = v; } },
-  navPopoverOpen: { get: function () { return navPopoverOpen; }, set: function (v) { navPopoverOpen = v; } },
   pendingFiles: { get: function () { return pendingFiles; }, set: function (v) { pendingFiles = v; } },
   projectsData: { get: function () { return projectsData; }, set: function (v) { projectsData = v; } },
   selectedKey: { get: function () { return selectedKey; }, set: function (v) { selectedKey = v; } },
@@ -6849,7 +6839,7 @@ Object.defineProperties(nzTest, {
   sending: { get: function () { return sending; }, set: function (v) { sending = v; } },
   sessionPollTimer: { get: function () { return sessionPollTimer; }, set: function (v) { sessionPollTimer = v; } },
   sessionsData: { get: function () { return sessionsData; }, set: function (v) { sessionsData = v; } },
-  turnState: { get: function () { return turnState; }, set: function (v) { turnState = v; } },
+  turnState: { get: function () { return turnState; } },
 });
 Object.assign(nzTest, {
   BLOCK_SPLIT_RE: BLOCK_SPLIT_RE,
