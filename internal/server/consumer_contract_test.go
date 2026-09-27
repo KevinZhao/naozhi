@@ -50,10 +50,12 @@ var (
 
 // Same for dashproject and dashcron (#2561 E6-b). The measured narrowing is in
 // each package's consumer.go: 3 of *session.Router's 77 methods for
-// dashproject, 23 of *cron.Scheduler's 48 for dashcron.
+// dashproject, 23 of *cron.Scheduler's 48 for dashcron. dashproject's router
+// goes through projectRouter (project_router_adapter.go), which carries its
+// own guards.
 var (
 	_ dashproject.ProjectStore       = (*project.Manager)(nil)
-	_ dashproject.RouterView         = (*session.Router)(nil)
+	_ dashproject.RouterView         = projectRouter{}
 	_ dashproject.PlannerKeyResolver = (*session.KeyResolver)(nil)
 	_ dashproject.NodeCacheReader    = (*node.CacheManager)(nil)
 	_ dashcron.SchedulerView         = (*cron.Scheduler)(nil)

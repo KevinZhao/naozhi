@@ -13,7 +13,8 @@ import (
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // RedactGitRemoteURL strips embedded userinfo (user:password@) from a git
@@ -173,7 +174,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 
 		var stableKey string
 		if h.deps.ProjectStableKeyEnabled {
-			stableKey = session.ProjectStableKey(p.Path, "general")
+			stableKey = sessionkey.ProjectStableKey(p.Path, "general")
 		}
 
 		result = append(result, projectsListEntry{
@@ -398,7 +399,7 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 	// keeps the "do not read defaults" contract (docs/rfc/key-resolver.md
 	// §2.2 #6). Legacy fallback serves headless test paths without a resolver.
 	var plannerKey string
-	var opts session.AgentOpts
+	var opts sessionview.AgentOpts
 	if h.deps.Resolver != nil {
 		key, plannerOpts, ok := h.deps.Resolver.ResolveForPlannerKey(name)
 		if !ok {
@@ -414,7 +415,7 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		plannerKey = p.PlannerSessionKey()
-		opts = session.AgentOpts{
+		opts = sessionview.AgentOpts{
 			Model:     h.deps.ProjectMgr.EffectivePlannerModel(p),
 			Workspace: p.Path,
 			Exempt:    true,
@@ -423,14 +424,14 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 		// cached project.yaml / CLAUDE.md, which Claude's Write tool can mutate
 		// past ValidateConfig. Drop the prompt entirely when sanitisation fails
 		// rather than feeding control bytes / oversize argv to the CLI.
-		if pp := session.SanitisePlannerPromptForSpawn(h.deps.ProjectMgr.EffectivePlannerPrompt(p), p.Name); pp != "" {
+		if pp := sessionview.SanitisePlannerPromptForSpawn(h.deps.ProjectMgr.EffectivePlannerPrompt(p), p.Name); pp != "" {
 			opts.SystemPrompt = pp // #2493: dedicated field, not ExtraArgs
 		}
 	}
 
 	ctx, cancel := context.WithTimeout(h.restartCtx(), 30*time.Second)
 	defer cancel()
-	if _, err := h.deps.Router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
+	if err := h.deps.Router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
 		slog.Error("planner restart failed", "project", name, "err", err)
 		http.Error(w, "restart failed", http.StatusInternalServerError)
 		return

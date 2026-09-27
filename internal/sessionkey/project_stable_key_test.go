@@ -1,10 +1,8 @@
-package session
+package sessionkey
 
 import (
 	"strings"
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestProjectStableKey_Deterministic: same inputs → same key, every call.
@@ -80,7 +78,7 @@ func TestProjectStableKey_4SegmentShape(t *testing.T) {
 	if parts[3] != "sonnet" {
 		t.Errorf("agent = %q, want sonnet", parts[3])
 	}
-	if !sessionkey.IsDashboardProjectKey(key) {
+	if !IsDashboardProjectKey(key) {
 		t.Errorf("IsDashboardProjectKey(%q) = false, want true", key)
 	}
 	if err := ValidateSessionKey(key); err != nil {
@@ -112,5 +110,21 @@ func TestProjectStableKey_OverrideChangesKeyConsistently(t *testing.T) {
 	// Switching back to the original path reproduces the original key.
 	if back := ProjectStableKey("/proj/a", "general"); back != orig {
 		t.Errorf("same path did not reproduce key: %q != %q", back, orig)
+	}
+}
+
+// TestProjectStableKey_StableAcrossVersions: the key is persisted and carries
+// a session chain across restarts and upgrades, so its exact value for a given
+// path must never change. The hash prefixes are sha256(path)[:16], computable
+// with `printf '%s' <path> | shasum -a 256`.
+func TestProjectStableKey_StableAcrossVersions(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ path, agent, want string }{
+		{"/home/ec2-user/workspace/naozhi", "general", "dashboard:pj:33623265dd6257f8:general"},
+		{"/a/b", "reviewer", "dashboard:pj:662b7b62a798bb2d:reviewer"},
+	} {
+		if got := ProjectStableKey(tc.path, tc.agent); got != tc.want {
+			t.Errorf("ProjectStableKey(%q, %q) = %q, want %q (a changed key orphans every persisted chain)", tc.path, tc.agent, got, tc.want)
+		}
 	}
 }

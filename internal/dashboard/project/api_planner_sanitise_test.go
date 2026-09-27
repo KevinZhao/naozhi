@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 // TestSanitisePlannerPromptForSpawn_ServerCanReachIt pins R215-SEC-P1-2
@@ -12,7 +12,7 @@ import (
 // to feed EffectivePlannerPrompt straight into AgentOpts.ExtraArgs,
 // bypassing the spawn-boundary sanitiser the resolver path enforces.
 //
-// The fix exports session.SanitisePlannerPromptForSpawn so the server
+// The fix exports sessionview.SanitisePlannerPromptForSpawn so the server
 // fallback can re-use the same policy without rebuilding it. This test
 // is the cross-package smoke test that the export is grep-able from
 // the server package and rejects the same classes (oversize / control
@@ -37,7 +37,7 @@ func TestSanitisePlannerPromptForSpawn_ServerCanReachIt(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := session.SanitisePlannerPromptForSpawn(c.in, "demo")
+			got := sessionview.SanitisePlannerPromptForSpawn(c.in, "demo")
 			if got != c.want {
 				t.Errorf("Sanitise(%q) = %q, want %q", c.in, got, c.want)
 			}
