@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"expvar"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -109,8 +110,12 @@ func TestEmitSpawnDiags_MetricsAndDedup(t *testing.T) {
 
 	diags := []SpawnDiag{{Layer: "argv-denylist", Key: "--effort", Action: "dropped", Reason: "test"}}
 	before := read()
+	// Scopes unique per run: the dedup state is package-level, so a repeat
+	// run under -count would otherwise find them already emitted.
+	run := testRun.Add(1)
+	scope, otherScope := fmt.Sprintf("test-scope-2532-%d", run), fmt.Sprintf("test-scope-2532-b-%d", run)
 
-	EmitSpawnDiags("test-scope-2532", diags)
+	EmitSpawnDiags(scope, diags)
 	if got := read() - before; got != 1 {
 		t.Fatalf("first emission moved counter by %d, want 1", got)
 	}
@@ -118,7 +123,7 @@ func TestEmitSpawnDiags_MetricsAndDedup(t *testing.T) {
 		t.Fatalf("first emission logged warn=%d debug=%d, want 1/0", h.counts[slog.LevelWarn], h.counts[slog.LevelDebug])
 	}
 
-	EmitSpawnDiags("test-scope-2532", diags) // heartbeat repeat
+	EmitSpawnDiags(scope, diags) // heartbeat repeat
 	if got := read() - before; got != 1 {
 		t.Fatalf("repeat emission moved counter to +%d, want still +1", got)
 	}
@@ -127,7 +132,7 @@ func TestEmitSpawnDiags_MetricsAndDedup(t *testing.T) {
 	}
 
 	// A different scope (another session) warns again.
-	EmitSpawnDiags("test-scope-2532-b", diags)
+	EmitSpawnDiags(otherScope, diags)
 	if h.counts[slog.LevelWarn] != 2 {
 		t.Fatalf("new scope logged warn=%d, want 2", h.counts[slog.LevelWarn])
 	}
