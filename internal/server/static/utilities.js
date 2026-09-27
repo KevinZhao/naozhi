@@ -1070,7 +1070,6 @@ export {
   confirmDialog,
   copyCodeBlock,
   copyEventContent,
-  costSummaryCache,
   decodeEscEntities,
   formatAbsTime,
   formatTimeFull,

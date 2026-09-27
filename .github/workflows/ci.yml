@@ -273,6 +273,11 @@ jobs:
       - name: Test the dependency-freeze tokenizer
         run: node --test scripts/js-deps-freeze.test.mjs
 
+      # nz/configure-deps and nz/no-exported-let gate how modules share state;
+      # a rule that stops matching would pass every file silently.
+      - name: Test the dashboard lint rules
+        run: node --test scripts/eslint-plugin-nz.test.mjs
+
       - name: Check growth ratchet
         run: node scripts/js-ratchet.mjs --check
 

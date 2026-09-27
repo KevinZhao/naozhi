@@ -1026,7 +1026,6 @@ export {
   isMathDisplay,
   isMathInline,
   katexPending,
-  katexReady,
   loadKatex,
   loadMermaid,
   parseListItem,

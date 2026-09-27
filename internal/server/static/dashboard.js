@@ -9,7 +9,6 @@ import {
   isMathDisplay,
   isMathInline,
   katexPending,
-  katexReady,
   configureRenderMd,
   loadKatex,
   loadMermaid,
@@ -62,16 +61,12 @@ import {
   configureVoice,
   escCloseVoiceOverlay,
   toggleInputMode,
-  voiceInputMode,
   voiceMouseDown,
   voiceTouchStart,
 } from './voice.js';
 import {
   configureSplitView,
-  nzAnyDrawerOpen,
-  nzSplitBringToFront,
-  nzSplitEnter,
-  nzSplitExit,
+  splitDock,
 } from './split_view.js';
 import {
   configureSystemView,
@@ -541,7 +536,7 @@ function setActivityView(view) {
   // Leaving chat: close any docked preview / 追问 drawer. They are position:fixed
   // siblings of .container with no nz-view-* hide rule, so without this they
   // float over the assets/cron/settings view and leave the split padding
-  // reserved. Both close paths run nzSplitExit, clearing nz-split-open.
+  // reserved. Both close paths run splitDock.exit, clearing nz-split-open.
   if (prev === 'chat' && view !== 'chat') {
     closeFilePreview();
     if (hooks.closeScratchDrawer) hooks.closeScratchDrawer();
@@ -1476,7 +1471,7 @@ function applyFeatureGates() {
   // titles to their template defaults — otherwise the kiro-era hint
   // ("会先转写为文字") sticks forever. Default titles mirror
   // renderMainShell template (line ~2152 / ~2154).
-  const micDefaultTitle = voiceInputMode ? '切换键盘' : '切换语音';
+  const micDefaultTitle = composer.voiceInputMode ? '切换键盘' : '切换语音';
   const holdDefaultTitle = '按住说话改录音';
   if (!audioOK) {
     const audioHint = '当前后端 (' + backendName + ') 不直接接收音频，naozhi 会先转写为文字再发送';
@@ -2465,11 +2460,11 @@ function renderMainShell() {
       '<div class="rb-agents" id="rb-agents"></div>' +
       '<div class="rb-stats nz-hidden" id="rb-stats"></div>' +
     '</div>' +
-    '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
+    '<div class="input-area' + (composer.voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
         '<button type="button" class="btn-icon" data-action="file-picker" title="上传图片或 PDF" aria-label="上传图片或 PDF">' + ICONS.attach + '</button>' +
-        '<button type="button" class="btn-icon btn-mic" id="btn-mic" data-action="input-mode-toggle" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (voiceInputMode ? ICONS.keyboard : ICONS.mic) + '</button>' +
+        '<button type="button" class="btn-icon btn-mic" id="btn-mic" data-action="input-mode-toggle" title="' + (composer.voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (composer.voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (composer.voiceInputMode ? ICONS.keyboard : ICONS.mic) + '</button>' +
         '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." data-action-keydown="msg-input-key" data-action-compositionend="msg-input-compend"></div>' +
         '<button type="button" class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
         '<button type="button" class="btn-icon btn-send" id="btn-send" data-action="msg-send" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
@@ -5165,14 +5160,14 @@ configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions,
 configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput, wsm });
 configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml, wsm });
 configureUtilities({ getToken, renderSystemView, wsm });
-configureFileRefs({ AVATAR_GROUP_GAP_MS, ICONS, collapseSidebarForDrawer, getToken, isInternalEvent, loadKatex, loadMermaid, matchProject, nzSplitBringToFront, nzSplitEnter, nzSplitExit, renderRich, restoreSidebarAfterDrawer, runPendingAsync });
+configureFileRefs({ AVATAR_GROUP_GAP_MS, ICONS, collapseSidebarForDrawer, getToken, isInternalEvent, loadKatex, loadMermaid, matchProject, renderRich, restoreSidebarAfterDrawer, runPendingAsync });
 configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid, wsm });
 configureSystemView({ formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, setActivityView, timeAgo, wireQuickAskInput });
 configureSplitView({ lsGet, lsRemove, lsSet, stickEventsBottom });
 configureSelfUpdate({ confirmDialog, markSessionOptimisticRunning });
 configureSessionHeader({ fetchSessions, formatAbsTime, getToken, renderMainShell, sid });
 configureComposerFiles({ ICONS, featureForCurrent, formatFileSize, getToken, sendMessage, showAuthModal });
-configureMobileNav({ ICONS, confirmDialog, dismissSession, lsGet, lsSet, nzAnyDrawerOpen, nzSplitExit, renameSession, renderMainHeader, selectSession });
+configureMobileNav({ ICONS, confirmDialog, dismissSession, lsGet, lsSet, renameSession, renderMainHeader, selectSession });
 configureVoice({ ICONS, getMsgValue, getToken, sendMessage, setMsgValue, sid, updateSendButton });
 configureRenderMd({
   FILE_REF_HAS_EXT,
@@ -5671,13 +5666,13 @@ initSwipeBack();
   function showDrawer() {
     drawer.classList.add('visible');
     // Dock as a right-hand split on desktop (no-op on phone overlay).
-    if (nzSplitEnter) nzSplitEnter();
+    splitDock.enter();
     // Opened last → stack on top of the preview pane if both are docked.
-    if (nzSplitBringToFront) nzSplitBringToFront('scratch');
+    splitDock.bringToFront('scratch');
   }
   function hideDrawer() {
     drawer.classList.remove('visible');
-    if (nzSplitExit) nzSplitExit();
+    splitDock.exit();
     // Re-expand the sidebar if openScratch auto-collapsed it (no-op if the
     // preview drawer is still open or the user collapsed it themselves).
     restoreSidebarAfterDrawer();
@@ -6545,7 +6540,6 @@ Object.defineProperties(nzTest, {
   activeView: { get: function () { return ui.activeView; }, set: function (v) { ui.activeView = v; } },
   discoveredItems: { get: function () { return sessionList.discoveredItems; }, set: function (v) { sessionList.discoveredItems = v; } },
   discoveredPollTimer: { get: function () { return timers.discoveredPoll; }, set: function (v) { timers.discoveredPoll = v; } },
-  katexReady: { get: function () { return katexReady; } },
   lastEventTime: { get: function () { return transcript.lastEventTime; }, set: function (v) { transcript.lastEventTime = v; } },
   lastRenderedEventTime: { get: function () { return transcript.lastRenderedEventTime; }, set: function (v) { transcript.lastRenderedEventTime = v; } },
   lastVersion: { get: function () { return sessionList.lastVersion; }, set: function (v) { sessionList.lastVersion = v; } },

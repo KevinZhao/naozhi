@@ -82,13 +82,12 @@ func TestDashboardJS_SidebarAutoRestoreWired(t *testing.T) {
 
 	// Preview and 追问 can be docked simultaneously; only the LAST close may
 	// restore. The helper must consult the shared drawer-open guard (exported
-	// by the split-view block as nzAnyDrawerOpen) rather than its own copy.
-	if !strings.Contains(body, "nzAnyDrawerOpen") {
-		t.Error("restoreSidebarAfterDrawer must bail via nzAnyDrawerOpen while a drawer is still open — only the last close restores")
+	// by the split-view block as splitDock.anyDrawerOpen) rather than its own copy.
+	if !strings.Contains(body, "if (splitDock.anyDrawerOpen()) return;") {
+		t.Error("restoreSidebarAfterDrawer must bail via splitDock.anyDrawerOpen while a drawer is still open — only the last close restores")
 	}
-	// #2557 PR-E3: the export became a module-scope late-bound hook.
-	if !strings.Contains(js, "nzAnyDrawerOpen = anyDrawerOpen") {
-		t.Error("split-view block must assign anyDrawerOpen to the nzAnyDrawerOpen hook for the sidebar-restore guard")
+	if !strings.Contains(js, "return { anyDrawerOpen, bringToFront, enter, exit };") {
+		t.Error("split-view block must hand its anyDrawerOpen to splitDock for the sidebar-restore guard")
 	}
 
 	// The collapse side must arm the flag, and a manual toggle must disarm it

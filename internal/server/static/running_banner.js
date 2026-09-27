@@ -29,7 +29,9 @@ export function configureRunningBanner(impl) {
 
 // --- Running banner: tool activity + agent tracking ---
 
-let turnState = {
+// turnState is shared by reference (send_message and agent_view import it), so
+// it is reset in place and never reassigned.
+const turnState = {
   toolCount: 0, currentTool: null, agents: [], isThinking: false,
   thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: 0, isWriting: false,
   timerId: null, justSent: false
@@ -46,11 +48,11 @@ function resetTurnState(opts) {
     ? { turnStartTime: turnState.turnStartTime, timerId: turnState.timerId, justSent: turnState.justSent }
     : { turnStartTime: 0, timerId: null, justSent: false };
   if (!keepTimer && turnState.timerId) clearInterval(turnState.timerId);
-  turnState = {
+  Object.assign(turnState, {
     toolCount: 0, currentTool: null, agents: [], isThinking: false,
     thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: kept.turnStartTime, isWriting: false,
     timerId: kept.timerId, justSent: kept.justSent
-  };
+  });
   // #2435: blank the elapsed chip so the next banner does not open showing
   // the previous turn's final time until its first 1s tick lands.
   if (!keepTimer) {

@@ -3,7 +3,7 @@
 // bookkeeping and the missing-job placeholder with its fetch-once reconcile
 // (#2715 D4 follow-up: cron_view.js four-region split, region 3).
 //
-// Owns cronDetailJobId — the ONLY state gate for the drawer (RFC §4.5).
+// Owns cronDrawerState.jobId — the ONLY state gate for the drawer (RFC §4.5).
 // Consumers read it via the live import binding; the two writers outside
 // this file go through exported helpers (cronDrawerForgetJob for the delete
 // flow). Everything the drawer needs from the view proper — jobs array,
@@ -39,8 +39,8 @@ export function configureCronDrawer(impl) {
   }
 }
 
-// cron-panel-consolidation RFC §4.5: cronDetailJobId is the only state
-// gate for the per-job drawer. null = drawer closed; otherwise the
+// cron-panel-consolidation RFC §4.5: cronDrawerState.jobId is the only
+// state gate for the per-job drawer. null = drawer closed; otherwise the
 // currently-displayed job ID (NOT key — the drawer keys off cron job
 // ID, not the synthesised "cron:<id>" session key, since cron stubs
 // no longer surface as managed sessions on the dashboard side).
@@ -51,7 +51,8 @@ export function configureCronDrawer(impl) {
 //   - WS run_started / run_ended (subsystem cron) consult this gate (PR5)
 //     instead of selectedKey.
 //   - F5 / reload does NOT persist (RFC §4.5 Q5).
-let cronDetailJobId = null;
+// Exported as a const object so the other cron modules read the live value.
+const cronDrawerState = { jobId: null };
 
 // _cronDrawerFetchedFor tracks per-jobId reconcile attempts inside the
 // drawer's "task missing" branch. Without this guard, deep-linking to a
@@ -79,7 +80,7 @@ let _cronDrawerLastActiveRow = null;
 //     deps.renderCronPanel)
 //
 // Behaviour:
-//   - cronDetailJobId === null      → drawer hidden (no .is-open class)
+//   - cronDrawerState.jobId === null      → drawer hidden (no .is-open class)
 //   - jobId set, job present        → render 6-section drawer
 //   - jobId set, job missing        → "task deleted" empty state with
 //                                     auto-close after a frame so the
@@ -88,14 +89,14 @@ function renderCronDrawer() {
   const host = document.getElementById('cron-detail-pane');
   if (!host) return;
   const body = host.parentElement;
-  if (cronDetailJobId === null) {
+  if (cronDrawerState.jobId === null) {
     host.classList.remove('is-open');
     host.innerHTML = '';
     if (body) body.classList.remove('has-drawer');
     return;
   }
   if (body) body.classList.add('has-drawer');
-  const job = (deps.cronJobs() || []).find(x => x && x.id === cronDetailJobId);
+  const job = (deps.cronJobs() || []).find(x => x && x.id === cronDrawerState.jobId);
   if (!job) {
     // Either deep-link before deps.fetchCronJobs has populated the cache, or
     // the operator deleted the active job from another tab. Render a
@@ -115,22 +116,22 @@ function renderCronDrawer() {
     // flag so a system in which every cron job has been deleted (deps.cronJobs()
     // legitimately empty after fetch) cannot loop renderCronDrawer →
     // deps.fetchCronJobs → empty → renderCronDrawer indefinitely.
-    if (!_cronDrawerFetchedFor.has(cronDetailJobId) && (!Array.isArray(deps.cronJobs()) || deps.cronJobs().length === 0)) {
-      _cronDrawerFetchedFor.add(cronDetailJobId);
+    if (!_cronDrawerFetchedFor.has(cronDrawerState.jobId) && (!Array.isArray(deps.cronJobs()) || deps.cronJobs().length === 0)) {
+      _cronDrawerFetchedFor.add(cronDrawerState.jobId);
       deps.fetchCronJobs().then(() => renderCronDrawer()).catch(() => {});
     }
     return;
   }
   // Reset the fetched-once gate when we successfully render — re-opening a
   // different drawer that's also missing should be allowed to fetch again.
-  _cronDrawerFetchedFor.delete(cronDetailJobId);
+  _cronDrawerFetchedFor.delete(cronDrawerState.jobId);
   host.classList.add('is-open');
   host.innerHTML = cronDrawerHtml(job);
   syncCronDrawerHeaderHeight(host);
   // Re-mount timeline content. The drawer's history section embeds the
   // existing #cron-timeline-panel host, so the same renderer (and the
   // refreshHead / loadMore reconcilers) keep working without rewrites.
-  renderCronTimelineForJob(cronDetailJobId);
+  renderCronTimelineForJob(cronDrawerState.jobId);
   // cron-live RFC §3 / §4.3: drawer DOM 重建后调度协调器（jobId 切换时它会
   // unsub 旧的并清空 events 数组），然后才 repaint —— 顺序反了会把上一个
   // drawer 的事件渲到新 drawer 上。deps.repaintCronLive 自身也校验 jobId 一致性，
@@ -461,7 +462,7 @@ function cronTriggerLabel(trigger) {
 // Behaviour:
 //   - Records the originating .cj-row DOM element so closeCronDetail can
 //     restore focus to it (RFC §6.4).
-//   - Sets cronDetailJobId so subsequent deps.renderCronPanel paints render
+//   - Sets cronDrawerState.jobId so subsequent deps.renderCronPanel paints render
 //     the drawer at the right spot.
 //   - Calls deps.openCronPanel which internally deps.renderCronPanel — the
 //     shell-preserving branch already paints both list AND drawer in
@@ -487,7 +488,7 @@ function openCronDetail(jobId, originRow) {
     cronExpandedRunId.jobId = null;
     cronExpandedRunId.runId = null;
   }
-  cronDetailJobId = jobId;
+  cronDrawerState.jobId = jobId;
   deps.cronAttentionRefresh().catch(() => {}); // §7.4: pull confirmation queue on open
   deps.cronJobCostRefresh(jobId).catch(() => {});
   // deps.openCronPanel handles selectedKey reset / WS unsubscribe / mobile
@@ -522,7 +523,7 @@ function openCronDetail(jobId, originRow) {
       // Drawer is read-only: if the refetch failed we keep the truncated
       // cache rendered. Only re-render on a success result so the drawer
       // doesn't flicker when the network is slow / down.
-      if (res && res.ok && cronDetailJobId === jobId) renderCronDrawer();
+      if (res && res.ok && cronDrawerState.jobId === jobId) renderCronDrawer();
     }).catch(() => {});
   }
 }
@@ -533,7 +534,7 @@ function openCronDetail(jobId, originRow) {
 // when no drawer is open. Restores focus to the row that opened the
 // drawer (RFC §6.4) so keyboard users land back where they were.
 function closeCronDetail() {
-  if (cronDetailJobId === null) return;
+  if (cronDrawerState.jobId === null) return;
   // §16: drawer 关闭时连带清行内展开 — drawer 是 expand 的父级，drawer 不在
   // 也就没有 timeline 行可展开。deps.renderCronPanel 会重渲整个 cron 面板。
   if (cronExpandedRunId.runId) {
@@ -545,7 +546,7 @@ function closeCronDetail() {
   if (wsm.cronLive && wsm.cronLive.jobId) {
     wsm.unsubscribeCronLive();
   }
-  cronDetailJobId = null;
+  cronDrawerState.jobId = null;
   // Remove `.is-active` from any list row so the sidebar-style highlight
   // clears synchronously even before renderCronList re-paints.
   document.querySelectorAll('.cj-row.is-active').forEach(el => el.classList.remove('is-active'));
@@ -576,15 +577,15 @@ function closeCronDetail() {
 // the just-deleted task (RFC §4.5 row G). Import bindings are read-only, so
 // the writer lives here with the state.
 function cronDrawerForgetJob(jobId) {
-  if (cronDetailJobId === jobId) {
-    cronDetailJobId = null;
+  if (cronDrawerState.jobId === jobId) {
+    cronDrawerState.jobId = null;
   }
 }
 
 export {
   closeCronDetail,
   cronDrawerSpecPromptToggle,
-  cronDetailJobId,
+  cronDrawerState,
   cronDrawerForgetJob,
   openCronDetail,
   renderCronDrawer,

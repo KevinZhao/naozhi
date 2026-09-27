@@ -26,20 +26,13 @@ export function configureSplitView(impl) {
   if (initSplitWidth) initSplitWidth();
 }
 
-// Late-bound hooks: assigned by the code below, read by other modules at event
-// time (never at load time) — the shape they had as dashboard module-scope
-// lets before this extraction.
-let nzAnyDrawerOpen = null;
-let nzSplitBringToFront = null;
-let nzSplitEnter = null;
-let nzSplitExit = null;
 
 /* ===== Split-view docking (desktop only) =====
    The preview (#fv-drawer) and 追问 (#aside-drawer) panes used to overlay the
    transcript as a fixed slide-over. On desktop we now dock them as a right-hand
    split: body.nz-split-open reserves `--nz-split-w` on .container so the
    transcript compresses into the remaining width and stays fully visible
-   beside the pane. nzSplitEnter/nzSplitExit are called from the drawer
+   beside the pane. splitDock.enter/exit are called from the drawer
    open/close paths (openFilePreview / closeFilePreview / scratch showDrawer /
    hideDrawer). Phone (≤768px) keeps the original full-width overlay — every
    path here bails on a mobile viewport, and the CSS overrides are gated behind
@@ -50,7 +43,9 @@ let nzSplitExit = null;
    change, then re-pinning to the bottom AFTER layout settles — narrowing the
    transcript reflows text taller, which would otherwise leave the newest
    bubbles scrolled off-screen. */
-(function(){
+// splitDock is the dock's API for the drawer modules: anyDrawerOpen, enter,
+// exit and bringToFront. The block builds it once at load time.
+const splitDock = (function(){
   const LS_SPLIT_W = 'split_w';
   const MIN_W = 320;
   // Reserve at least this much for the activity-bar + sidebar + transcript so
@@ -95,10 +90,6 @@ let nzSplitExit = null;
     return (fv && fv.classList.contains('fv-open')) ||
            (ad && ad.classList.contains('visible'));
   }
-  // Exported for restoreSidebarAfterDrawer — keeps the "which drawers exist"
-  // knowledge in one place so adding a third drawer can't drift between the
-  // split-exit guard and the sidebar-restore guard.
-  nzAnyDrawerOpen = anyDrawerOpen;
   // Was the transcript scrolled to (or near) the bottom? 40px slack mirrors
   // the main-window wasBottom checks elsewhere in this file.
   function eventsAtBottom() {
@@ -115,7 +106,7 @@ let nzSplitExit = null;
     });
   }
 
-  nzSplitEnter = function() {
+  function enter() {
     if (isMobileVp()) return;  // phone keeps the full-width overlay
     if (document.body.classList.contains('nz-split-open')) return;
     const wasBottom = eventsAtBottom();
@@ -125,8 +116,8 @@ let nzSplitExit = null;
     if (!hasCustomW) applyW(splitDefaultW());
     document.body.classList.add('nz-split-open');
     preserveBottom(wasBottom);
-  };
-  nzSplitExit = function() {
+  }
+  function exit() {
     // Keep the split open while either drawer is still docked (mutually
     // exclusive today, but cheap to be correct if that ever changes).
     if (anyDrawerOpen()) return;
@@ -134,12 +125,12 @@ let nzSplitExit = null;
     const wasBottom = eventsAtBottom();
     document.body.classList.remove('nz-split-open');
     preserveBottom(wasBottom);
-  };
+  }
   // Preview and 追问 can be open at once and share the right strip. Whichever
   // was opened LAST should stack on top. Stamp .nz-split-front on the given
   // drawer and strip it from the other so exactly one pane is ever in front.
   // Called from both open paths (openFilePreview / scratch showDrawer).
-  nzSplitBringToFront = function(which) {
+  function bringToFront(which) {
     const ids = { preview: 'fv-drawer', scratch: 'aside-drawer' };
     const frontId = ids[which];
     if (!frontId) return;
@@ -147,7 +138,7 @@ let nzSplitExit = null;
       const el = document.getElementById(id);
       if (el) el.classList.toggle('nz-split-front', id === frontId);
     });
-  };
+  }
 
   // --- Drag-to-resize the seam ---
   if (resizer) {
@@ -211,12 +202,14 @@ let nzSplitExit = null;
     applyW(target);
     preserveBottom(wasBottom);
   });
+
+  // anyDrawerOpen is shared with restoreSidebarAfterDrawer — keeps the "which
+  // drawers exist" knowledge in one place so adding a third drawer can't drift
+  // between the split-exit guard and the sidebar-restore guard.
+  return { anyDrawerOpen, bringToFront, enter, exit };
 })();
 
 
 export {
-  nzAnyDrawerOpen,
-  nzSplitBringToFront,
-  nzSplitEnter,
-  nzSplitExit,
+  splitDock,
 };

@@ -9,7 +9,7 @@
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back. Shared state is read from the state.js objects; its helpers are
 // injected once via configureVoice().
-import { selection, sessionList } from './state.js';
+import { composer, selection, sessionList } from './state.js';
 import { nzTest, showToast } from './nz_util.js';
 
 const deps = {
@@ -37,7 +37,6 @@ let voiceRecTimer = null;
 let voiceRecStart = 0;
 const MAX_REC_SECS = 30;
 let pendingMic = false;
-let voiceInputMode = false;
 let voiceTouchStartY = 0;
 let voiceCancelled = false;
 let voiceActive = false; // true while hold gesture is in progress
@@ -89,15 +88,15 @@ function toggleInputMode() {
     mediaRecorder.stop();
   }
   hideVoiceOverlay();
-  voiceInputMode = !voiceInputMode;
+  composer.voiceInputMode = !composer.voiceInputMode;
   const ia = document.getElementById('input-area');
-  if (ia) ia.classList.toggle('voice-mode', voiceInputMode);
+  if (ia) ia.classList.toggle('voice-mode', composer.voiceInputMode);
   const btn = document.getElementById('btn-mic');
   if (btn) {
-    btn.innerHTML = voiceInputMode ? deps.ICONS.keyboard : deps.ICONS.mic;
-    btn.title = voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3';
+    btn.innerHTML = composer.voiceInputMode ? deps.ICONS.keyboard : deps.ICONS.mic;
+    btn.title = composer.voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3';
   }
-  if (voiceInputMode) {
+  if (composer.voiceInputMode) {
     // Pre-acquire mic permission so hold-to-talk won't prompt again
     acquireMicStream().catch(() => {});
   } else {
@@ -466,16 +465,10 @@ export {
   MAX_REC_SECS,
   cleanupVoiceTouchListeners,
   hideVoiceOverlay,
-  mediaRecorder,
   stopVoiceRecording,
   toggleInputMode,
   updateVoiceTimer,
-  voiceCancelled,
-  voiceInputMode,
   voiceMouseDown,
-  voiceRecStart,
-  voiceRecTimer,
-  voiceState,
   voiceTouchStart,
 };
 

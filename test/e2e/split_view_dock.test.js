@@ -6,7 +6,7 @@
 // （回退成 overlay / 缝消失 / 对话流被盖住）对应断言就红。
 //
 // 触发走真实路径：hover 一条消息 → 「追问」按钮 → openScratch → showDrawer
-// → nzSplitEnter 给 body 加 nz-split-open。
+// → splitDock.enter 给 body 加 nz-split-open。
 //
 // 跑法：cd test/e2e && npx playwright test split_view_dock.test.js --project=desktop-chrome
 
