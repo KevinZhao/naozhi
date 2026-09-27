@@ -33,9 +33,9 @@ func routerWithWorkspace(t *testing.T, ws string, key string) (*Router, string) 
 	// closure can locate it.
 	s := &ManagedSession{key: key}
 	s.setWorkspace(ws)
-	r.ss.Lock()
-	r.ss.Put(key, s)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(key, s)
+	})
 	return r, eventLogDir
 }
 
@@ -184,9 +184,10 @@ func TestTrackerIntegration_RemoveClearsRefs(t *testing.T) {
 	}
 	// Guard: workspace must be non-empty on the registered session
 	// — if setWorkspace didn't stick we'd silently skip clear.
-	r.ss.RLock()
-	ws2 := r.ss.Get(key).Workspace()
-	r.ss.RUnlock()
+	var ws2 string
+	r.ss.View(func(v sessView) {
+		ws2 = v.Get(key).Workspace()
+	})
 	if ws2 != ws {
 		t.Fatalf("workspace drift: got %q, want %q", ws2, ws)
 	}

@@ -16,13 +16,13 @@ func TestCleanup_PruneSnapshot_RemovesCandidatesKeepsAlive(t *testing.T) {
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
 	}
-	r.ss.Ext().picks.backend = map[string]string{}
+	stateOf(r).picks.backend = map[string]string{}
 
 	// nil-process stub past pruneTTL → prune candidate.
 	stub := &ManagedSession{key: "stub"}
 	stub.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
-	r.ss.Put("stub", stub)
-	r.ss.Ext().picks.backend["stub"] = "kiro"
+	putT(r, "stub", stub)
+	stateOf(r).picks.backend["stub"] = "kiro"
 
 	// dead process past pruneTTL with no session ID → prune candidate.
 	deadSession := injectSession(r, "dead", newDeadProc())
@@ -36,19 +36,19 @@ func TestCleanup_PruneSnapshot_RemovesCandidatesKeepsAlive(t *testing.T) {
 
 	r.Cleanup()
 
-	if _, ok := r.ss.Lookup("stub"); ok {
+	if _, ok := lookupT(r, "stub"); ok {
 		t.Error("nil-process stub past pruneTTL should be pruned")
 	}
-	if _, ok := r.ss.Ext().picks.backend["stub"]; ok {
+	if _, ok := stateOf(r).picks.backend["stub"]; ok {
 		t.Error("pruned stub's backendOverride should be freed")
 	}
-	if _, ok := r.ss.Lookup("dead"); ok {
+	if _, ok := lookupT(r, "dead"); ok {
 		t.Error("dead session past pruneTTL should be pruned")
 	}
-	if _, ok := r.ss.Lookup("aliveA"); !ok {
+	if _, ok := lookupT(r, "aliveA"); !ok {
 		t.Error("alive session aliveA should survive cleanup")
 	}
-	if _, ok := r.ss.Lookup("aliveB"); !ok {
+	if _, ok := lookupT(r, "aliveB"); !ok {
 		t.Error("alive session aliveB should survive cleanup")
 	}
 
@@ -85,7 +85,7 @@ func TestCleanup_PruneSnapshot_ReVerifiesUnderLock(t *testing.T) {
 
 	r.Cleanup()
 
-	if _, ok := r.ss.Lookup("agedButAlive"); !ok {
+	if _, ok := lookupT(r, "agedButAlive"); !ok {
 		t.Error("aged-but-alive session must not be pruned (alive process)")
 	}
 }
@@ -143,7 +143,7 @@ func TestCleanup_PruneSnapshot_ReVerify_ShouldPruneGate(t *testing.T) {
 	// Confirm Cleanup itself respects the same gate: run Cleanup and verify
 	// the session survives even though it was a pass-1 candidate.
 	r.Cleanup()
-	if _, ok := r.ss.Lookup("revivable"); !ok {
+	if _, ok := lookupT(r, "revivable"); !ok {
 		t.Error("session whose lastActive was refreshed before Cleanup's write lock must not be pruned")
 	}
 }

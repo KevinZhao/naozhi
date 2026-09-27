@@ -327,7 +327,7 @@ func MergeBackendDefaults(routerModel string, routerArgs []string, backendModel 
 }
 
 // backendDefaultsFor returns the merged spawn configuration for backendID.
-// Both resolveSpawnParamsLocked and the shim drift detector must end up with
+// Both resolveSpawnParams and the shim drift detector must end up with
 // the same values, which is why the precedence lives in MergeBackendDefaults
 // rather than here (#739, #2668).
 func (r *Router) backendDefaultsFor(backendID string) BackendDefaults {

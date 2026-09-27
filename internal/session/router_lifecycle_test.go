@@ -10,7 +10,7 @@ import (
 
 // newStoppedGateRouter builds a fully map-initialized Router (via NewRouter, so
 // spawningKeys / sessions are non-nil; wsStore is zero-value usable) wired to a
-// non-existent CLI binary. The stopped gate in spawnSession returns before any
+// non-existent CLI binary. The stopped gate in the spawn returns before any
 // real spawn, so the bogus binary is never executed.
 func newStoppedGateRouter() *Router {
 	return NewRouter(RouterConfig{
@@ -21,21 +21,21 @@ func newStoppedGateRouter() *Router {
 
 // TestSpawnSession_RejectedAfterStopped pins the #1822 (Option B) stopped gate:
 // once r.stopped is set (which Router.shutdown does under the table lock before snapshotting
-// sessions), every reverse-RPC spawn path that funnels into spawnSession —
+// sessions), every reverse-RPC spawn path that funnels into the spawn —
 // GetOrCreate (send), Takeover (takeover), ResetAndRecreate (restart_planner) —
 // must refuse with ErrRouterStopped and must NOT install a fresh session into
-// r.ss.sessions (the leak the issue is about). The gate sits before the spawningKeys
+// the session table (the leak the issue is about). The gate sits before the spawningKeys
 // lazy-init/defer, so no guard channel may be left dangling either.
 func TestSpawnSession_RejectedAfterStopped(t *testing.T) {
 	t.Parallel()
 
 	assertNoLeak := func(t *testing.T, r *Router) {
 		t.Helper()
-		if r.ss.Len() != 0 {
-			t.Errorf("r.ss.sessions grew to %d after a rejected spawn; gate must run before any map mutation", r.ss.Len())
+		if lenT(r) != 0 {
+			t.Errorf("the session table grew to %d after a rejected spawn; gate must run before any map mutation", lenT(r))
 		}
-		if r.ss.Ext().spawns.SpawningCount() != 0 {
-			t.Errorf("r.ss.Ext().spawns.SpawningCount() = %d; gate must sit before spawningKeys lazy-init so no guard channel is left dangling", r.ss.Ext().spawns.SpawningCount())
+		if stateOf(r).spawns.SpawningCount() != 0 {
+			t.Errorf("stateOf(r).spawns.SpawningCount() = %d; gate must sit before spawningKeys lazy-init so no guard channel is left dangling", stateOf(r).spawns.SpawningCount())
 		}
 	}
 

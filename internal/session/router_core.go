@@ -47,7 +47,7 @@ var ErrMaxProcs = errors.New("max concurrent processes reached")
 // exits. The wrapped %d count is the cap that actually rejected.
 var ErrMaxExemptSessions = errors.New("max exempt sessions reached")
 
-// ErrNoCLIWrapper is returned when spawnSession is called but the router
+// ErrNoCLIWrapper is returned when a spawn is attempted but the router
 // was constructed without a CLI wrapper (misconfiguration). This is
 // permanent until the operator fixes config and restarts; retry loops
 // should stop on this sentinel.
@@ -59,7 +59,7 @@ var ErrNoCLIWrapper = errors.New("no CLI wrapper configured")
 // "process needs to be spawned" from real CLI failures.
 var ErrNoActiveProcess = errors.New("session has no active process")
 
-// ErrRouterStopped is returned by spawnSession (and therefore GetOrCreate /
+// ErrRouterStopped is returned by reserveSpawn (and therefore GetOrCreate /
 // Takeover / ResetAndRecreate) once Router.Shutdown has set the stopped gate,
 // closing the spawn-after-snapshot leak window (#1822).
 var ErrRouterStopped = errors.New("router is shutting down")
@@ -140,7 +140,8 @@ const (
 // while sendMu is held (Send → onSessionID → kid.Track + idToKey). Code that
 // holds the table lock (write) must NEVER acquire sendMu — release the table lock first.
 // s.historyMu protects persistedHistory independently; never held with sendMu or the table lock.
-// Read-only operations (ListSessions, SessionFor, Stats, Version) use RLock.
+// Read-only operations run as Views (ListSessions) or as the single-value
+// reads Load and Count (SessionFor, Stats); Version is a lock-free atomic.
 //
 // Fields used to carry a `// 读写:` annotation naming every router_*.go file that
 // touches them, enforced by tools/check-router-fields. Both are gone (G3 #2667):
@@ -153,15 +154,15 @@ type Router struct {
 	drift driftShutdowns
 	// ss is the session table: key → session plus the chat / key-hash /
 	// session-ID indices, the live-process count and the change generation,
-	// in internal/session/sessiontable. No lock of its own — called under
-	// the table lock (Active / Gen excepted), because the spawn bookkeeping, workspace
-	// overrides and picks must change atomically with it.
+	// in internal/session/sessiontable. It owns the table lock and is reached
+	// only through View / Update transactions (plus Load / Count and the
+	// lock-free Active / Gen), because the spawn bookkeeping, workspace
+	// overrides and picks kept in routerState must change atomically with it.
 	ss *sessiontable.Table[*ManagedSession, routerState]
 	// bkStore is the backend/policy facet (#383): read-only-after-NewRouter
 	// config fields plus the mutable backendOverrides map (router_backend.go).
-	// No lock of its own — mutations ONLY under the table's write lock, reads under
-	// RLock. The annotation below is the UNION of all domains; the lint
-	// recurses one level into backendStore's own annotations.
+	// No lock of its own — mutations ONLY inside an Update, reads inside a
+	// View.
 	bkStore backendStore
 	// accessProfiles is the named auth/upstream overlay registry (RFC
 	// project-access-profile). Nil/empty ⇒ every session runs on the global
@@ -253,13 +254,14 @@ type Router struct {
 	// (leaking the first tracker's goroutine) and schedule a redundant orphan sweep.
 	startOnce sync.Once
 
-	// stopped is set true under the table lock inside Shutdown immediately before the
-	// session snapshot is taken, and gates spawnSession: a spawn arriving after
+	// stopped is set true inside Shutdown's transaction immediately before the
+	// session snapshot is taken, and gates reserveSpawn: a spawn arriving after
 	// the snapshot is rejected with ErrRouterStopped instead of installing a
-	// shim+CLI the snapshot missed (leaking the subtree). Setting it under the
-	// SAME the table lock hold as the snapshot makes gate and snapshot mutually
+	// shim+CLI the snapshot missed (leaking the subtree). Setting it in the
+	// SAME transaction as the snapshot makes gate and snapshot mutually
 	// exclusive (no TOCTOU). Set once, never cleared — a Router is not reusable
-	// after Shutdown. atomic.Bool so readers need only the the table lock they already hold (#1822).
+	// after Shutdown. atomic.Bool so readers need only the transaction they are
+	// already in (#1822).
 	stopped atomic.Bool
 
 	// eventLogDir is where per-session event log files live. Empty disables
@@ -291,7 +293,7 @@ type Router struct {
 	// read-only after NewRouter.
 	historyLoader HistoryLoader
 
-	// spawnHook, when set, replaces the CLI spawn in spawnSession, so tests
+	// spawnHook, when set, replaces the CLI spawn in spawnProcess, so tests
 	// can hand back a process of their own at a moment of their choosing.
 	// nil in production.
 	spawnHook func(ctx context.Context, opts cli.SpawnOptions) (processIface, error)
@@ -366,8 +368,7 @@ func (r *Router) spawnProcess(ctx context.Context, wrapper *cli.Wrapper, opts cl
 }
 
 // panicSafeSpawn invokes the runner's Spawn inside a deferred recover so a
-// panic from the spawn path cannot leave pendingSpawns stranded in
-// spawnSession (which would make every subsequent GetOrCreate fail with
+// panic from the spawn path cannot leave pendingSpawns stranded (which would make every subsequent GetOrCreate fail with
 // ErrMaxProcs until restart). The panic becomes a regular error so the
 // caller's standard "spawn process: %w" wrap applies.
 //
@@ -420,7 +421,7 @@ func panicSafeSpawnFn(
 // looks sessions up.
 func newSessionTable() *sessiontable.Table[*ManagedSession, routerState] {
 	t := sessiontable.New[*ManagedSession, routerState](chatKeyFor, persist.KeyHash)
-	t.Ext().picks.init()
+	t.Update(func(tx sessTx) { tx.Ext().picks.init() })
 	return t
 }
 
@@ -1072,10 +1073,10 @@ func (r *Router) notifyKeyRetired(key, sessionID string) {
 // NotifyIdle wakes the Shutdown wait loop so it can re-check running sessions.
 // Call after a message send completes (session transitions running → ready).
 //
-// the table lock MUST be held around Broadcast: Shutdown re-checks "running" between
-// Wait() calls, so a Broadcast landing between that check and Wait() would be
-// lost and Shutdown would only wake from the 30s AfterFunc safety net.
-// Holding the table lock blocks NotifyIdle until Shutdown is parked in Wait(). Callers
+// The Broadcast is a transaction: Shutdown re-checks "running" between waits,
+// so a Broadcast landing between that check and the wait would be lost and
+// Shutdown would only wake from the 30s AfterFunc safety net. Taking the
+// write lock blocks NotifyIdle until Shutdown is parked in its wait. Callers
 // are end-of-turn only, so the extra lock round-trip is free.
 func (r *Router) NotifyIdle() {
 	r.ss.Update(func(tx sessTx) { tx.Broadcast() })
@@ -1127,8 +1128,7 @@ func (r *Router) MaxProcs() int {
 // active = sessions with a live process (ready or running, excluding exempt);
 // total = all sessions in the map including suspended ones.
 //
-// Both reads happen inside the same RLock epoch so a concurrent spawnSession
-// cannot publish active = N+1 against a pre-spawn total = N (active > total on
+// Count reads both under one read lock so a concurrent spawn cannot publish active = N+1 against a pre-spawn total = N (active > total on
 // the dashboard). activeCount stays atomic for the lock-free spawn-admission path.
 func (r *Router) Stats() (active, total int) {
 	n, a := r.ss.Count()
@@ -1136,14 +1136,14 @@ func (r *Router) Stats() (active, total int) {
 }
 
 // HealthCheck performs a lightweight liveness check by testing that the
-// router's RWMutex is not permanently held (deadlock detection).
-// Returns true if the lock can be acquired, false if it appears stuck.
+// table lock is not permanently held (deadlock detection). Returns true if
+// the read lock can be taken right now, false if it appears stuck.
 func (r *Router) HealthCheck() bool {
 	return r.ss.Healthy()
 }
 
-// listRefsPool reuses the *ManagedSession slice ListSessions captures under
-// the table lock; at 1 Hz × N tabs × hundreds of sessions the per-call alloc dominates.
+// listRefsPool reuses the *ManagedSession slice ListSessions captures in its
+// View; at 1 Hz × N tabs × hundreds of sessions the per-call alloc dominates.
 var listRefsPool = sync.Pool{
 	New: func() any {
 		s := make([]*ManagedSession, 0, 64)
@@ -1237,8 +1237,6 @@ func (r *Router) DiscardPassthroughPending(key string, reason error) {
 // still owns historyCtx/historyCancel/historyWg directly (#748); inline sites
 // that also need a semaphore + per-task timeout stay in place.
 //
-// LOCK: callers must hold the table lock (read or write) when invoking, OR call outside
-// the lock when historyCtx is guaranteed live (NewRouter init, early Start).
 // The historyWg.Add(1) must be visible to Shutdown before the goroutine
 // begins observable work.
 func (r *Router) runHistoryTask(fn func(ctx context.Context)) bool {

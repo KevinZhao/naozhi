@@ -6,12 +6,12 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 )
 
-// addIndexedSession wires a session into r.ss.sessions + the keyhash index the
-// way publishSessionLocked/indexAdd do, without the full spawn machinery.
+// addIndexedSession wires a session into the session table + the keyhash index the
+// way publishSession/indexAdd do, without the full spawn machinery.
 func addIndexedSession(r *Router, key, workspace string) *ManagedSession {
 	s := &ManagedSession{key: key}
 	s.setWorkspace(workspace)
-	r.ss.Put(key, s)
+	putT(r, key, s)
 	return s
 }
 

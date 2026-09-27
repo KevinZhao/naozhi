@@ -45,7 +45,7 @@ func TestPanicSafeSpawn_NilRunnerFailsSoft(t *testing.T) {
 func TestPanicSafeSpawn_NilWrapperRunnerFailsSoft(t *testing.T) {
 	t.Parallel()
 
-	// The exact expression spawnSession would evaluate if its nil-wrapper
+	// The exact expression the spawn would evaluate if its nil-wrapper
 	// guard were ever removed: (*cli.Wrapper)(nil).Runner() is an untyped
 	// nil interface, so the helper's nil branch must catch it.
 	var w *cli.Wrapper

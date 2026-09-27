@@ -162,7 +162,7 @@ func TestInterrupt_ConcurrentSendRace(t *testing.T) {
 
 // TestFireSendCancel_SkipsStaleProcBinding pins SM3 (#381): when the
 // in-flight Send bound its cancel func to process A but a concurrent
-// spawnSession has since swapped the live process to B, an Interrupt that
+// the spawn has since swapped the live process to B, an Interrupt that
 // observes B must NOT fire A's cancel (cancelling A's ctx is a no-op against
 // B and would mislead the caller into thinking the live turn was aborted).
 func TestFireSendCancel_SkipsStaleProcBinding(t *testing.T) {

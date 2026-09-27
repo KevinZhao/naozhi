@@ -39,9 +39,10 @@ func TestRestoreSessionFromEntry_AllFields(t *testing.T) {
 	r := NewRouter(RouterConfig{MaxProcs: 3, StorePath: storePath})
 	t.Cleanup(func() { r.Shutdown() })
 
-	r.ss.RLock()
-	got := r.ss.Get(key)
-	r.ss.RUnlock()
+	var got *ManagedSession
+	r.ss.View(func(v sessView) {
+		got = v.Get(key)
+	})
 	if got == nil {
 		t.Fatal("session not restored")
 	}
@@ -102,9 +103,10 @@ func TestRestoreSessionFromEntry_CostSpentLegacyFallback(t *testing.T) {
 	r := NewRouter(RouterConfig{MaxProcs: 3, StorePath: storePath})
 	t.Cleanup(func() { r.Shutdown() })
 
-	r.ss.RLock()
-	got := r.ss.Get(key)
-	r.ss.RUnlock()
+	var got *ManagedSession
+	r.ss.View(func(v sessView) {
+		got = v.Get(key)
+	})
 	if got == nil {
 		t.Fatal("session not restored")
 	}
@@ -132,9 +134,10 @@ func TestRestoreSessionFromEntry_CreatedAtFallback(t *testing.T) {
 	r := NewRouter(RouterConfig{MaxProcs: 3, StorePath: storePath})
 	t.Cleanup(func() { r.Shutdown() })
 
-	r.ss.RLock()
-	got := r.ss.Get(key)
-	r.ss.RUnlock()
+	var got *ManagedSession
+	r.ss.View(func(v sessView) {
+		got = v.Get(key)
+	})
 	if got == nil {
 		t.Fatal("session not restored")
 	}

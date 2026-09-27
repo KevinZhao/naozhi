@@ -31,10 +31,12 @@ import (
 
 // checkIndexInvariants verifies that the table's indices agree with its
 // sessions (sessiontable.Table.Check), including that every live session's ID
-// resolves to it. Caller holds the table lock (or is single-threaded, as tests are).
+// resolves to it.
 func checkIndexInvariants(t *testing.T, r *Router, after string) {
 	t.Helper()
-	if problems := r.ss.Check((*ManagedSession).getSessionID); len(problems) > 0 {
+	var problems []string
+	r.ss.View(func(v sessView) { problems = v.Check((*ManagedSession).getSessionID) })
+	if len(problems) > 0 {
 		t.Errorf("index invariants broken after %s:\n  %s", after, strings.Join(problems, "\n  "))
 	}
 }
@@ -44,7 +46,7 @@ func checkIndexInvariants(t *testing.T, r *Router, after string) {
 // *Locked mutators directly rather than going through a spawn.
 func newIndexTestRouter() *Router {
 	r := &Router{ss: newSessionTable()}
-	r.ss.Ext().picks.init()
+	stateOf(r).picks.init()
 	return r
 }
 
@@ -65,21 +67,21 @@ func TestIndexInvariants_AcrossEveryMutationPath(t *testing.T) {
 	sA := &ManagedSession{key: keyA}
 	sB := &ManagedSession{key: keyB}
 
-	r.publishSession(r.ss.AssumeLocked(), keyA, sA, false)
-	checkIndexInvariants(t, r, "publishSessionLocked(A)")
+	publishT(r, keyA, sA, false)
+	checkIndexInvariants(t, r, "publishSession(A)")
 
-	r.publishSession(r.ss.AssumeLocked(), keyB, sB, false)
-	checkIndexInvariants(t, r, "publishSessionLocked(B)")
+	publishT(r, keyB, sB, false)
+	checkIndexInvariants(t, r, "publishSession(B)")
 
 	// idToKey is learned asynchronously — the CLI reports the session ID after the
-	// record already exists, which is why publishSessionLocked does not maintain
+	// record already exists, which is why publishSession does not maintain
 	// it. The ID must be set on the SESSION too, not just injected into the index:
-	// RenameSession and unregisterSessionLocked both find the entry to move or drop
+	// RenameSession and unregisterSession both find the entry to move or drop
 	// via s.getSessionID(). The first version of this test injected only the index
 	// entry and the invariant check reported it as a stale mapping — the checker was
 	// right and the fixture was wrong.
 	sA.setSessionID("sess-id-A")
-	r.ss.SetID("sess-id-A", keyA)
+	setIDT(r, "sess-id-A", keyA)
 	checkIndexInvariants(t, r, "idToKey learned for A")
 
 	const keyARenamed = "feishu:p2p:userA:renamed"
@@ -92,25 +94,25 @@ func TestIndexInvariants_AcrossEveryMutationPath(t *testing.T) {
 		t.Errorf("idToKey after rename = %q, want %q", got, keyARenamed)
 	}
 
-	r.unregisterSession(r.ss.AssumeLocked(), keyARenamed, sA, false)
-	checkIndexInvariants(t, r, "unregisterSessionLocked(A)")
-	if _, ok := r.ss.KeyForID("sess-id-A"); ok {
+	unregisterT(r, keyARenamed, sA, false)
+	checkIndexInvariants(t, r, "unregisterSession(A)")
+	if _, ok := keyForIDT(r, "sess-id-A"); ok {
 		t.Error("idToKey still maps the removed session's ID")
 	}
 
-	r.unregisterSession(r.ss.AssumeLocked(), keyB, sB, false)
-	checkIndexInvariants(t, r, "unregisterSessionLocked(B)")
-	if r.ss.Len() != 0 {
-		t.Errorf("sessions still holds %d entries", r.ss.Len())
+	unregisterT(r, keyB, sB, false)
+	checkIndexInvariants(t, r, "unregisterSession(B)")
+	if lenT(r) != 0 {
+		t.Errorf("sessions still holds %d entries", lenT(r))
 	}
 }
 
 // TestIndexInvariants_ResetChatDropsTheWholeChat covers the one path that does
-// NOT maintain byChat per session: resetSessionLocked deletes the record and
+// NOT maintain byChat per session: resetEntry deletes the record and
 // leaves byChat to its caller, because ResetChat drops the whole chat's set in
 // one operation instead of once per session.
 //
-// That delegation is documented on resetSessionLocked ("Caller … is responsible
+// That delegation is documented on resetEntry ("Caller … is responsible
 // for cleaning up r.ss.byChat"), and a documented delegation is exactly the shape
 // that rots. Asserted here.
 func TestIndexInvariants_ResetChatDropsTheWholeChat(t *testing.T) {
@@ -118,23 +120,23 @@ func TestIndexInvariants_ResetChatDropsTheWholeChat(t *testing.T) {
 	const chat = "feishu:p2p:userC"
 	keys := []string{chat + ":general", chat + ":agent-one", chat + ":agent-two"}
 	for _, k := range keys {
-		r.publishSession(r.ss.AssumeLocked(), k, &ManagedSession{key: k}, false)
+		publishT(r, k, &ManagedSession{key: k}, false)
 	}
 	// A session on a DIFFERENT chat must survive, or the wholesale byChat drop is
 	// too wide.
 	const other = "feishu:p2p:userD:general"
-	r.publishSession(r.ss.AssumeLocked(), other, &ManagedSession{key: other}, false)
+	publishT(r, other, &ManagedSession{key: other}, false)
 	checkIndexInvariants(t, r, "publish 3 + 1")
 
 	r.ResetChat(chat)
 	checkIndexInvariants(t, r, "ResetChat")
 
 	for _, k := range keys {
-		if _, ok := r.ss.Lookup(k); ok {
+		if _, ok := lookupT(r, k); ok {
 			t.Errorf("session %q survived ResetChat", k)
 		}
 	}
-	if _, ok := r.ss.Lookup(other); !ok {
+	if _, ok := lookupT(r, other); !ok {
 		t.Errorf("ResetChat removed %q, which is on a different chat", other)
 	}
 }
@@ -146,8 +148,8 @@ func TestIndexInvariants_RenameToOccupiedKeyLeavesIndicesConsistent(t *testing.T
 	r := newIndexTestRouter()
 	const from = "feishu:p2p:userE:general"
 	const to = "feishu:p2p:userF:general"
-	r.publishSession(r.ss.AssumeLocked(), from, &ManagedSession{key: from}, false)
-	r.publishSession(r.ss.AssumeLocked(), to, &ManagedSession{key: to}, false)
+	publishT(r, from, &ManagedSession{key: from}, false)
+	publishT(r, to, &ManagedSession{key: to}, false)
 
 	r.RenameSession(from, to)
 	checkIndexInvariants(t, r, "RenameSession onto an occupied key")
@@ -208,10 +210,10 @@ func TestIndexInvariants_DiscoveryAndShimAdoption(t *testing.T) {
 	}
 
 	// --- and the indices stay consistent when those sessions go away ---
-	r.ss.Lock()
-	r.unregisterSession(r.ss.AssumeLocked(), keyD, r.ss.Get(keyD), false)
-	r.unregisterSession(r.ss.AssumeLocked(), keyS, r.ss.Get(keyS), false)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		r.unregisterSession(tx, keyD, tx.Get(keyD), false)
+		r.unregisterSession(tx, keyS, tx.Get(keyS), false)
+	})
 	// Check reports any idToKey entry left pointing at the gone sessions.
 	checkIndexInvariants(t, r, "unregister after discovery + adoption")
 }
@@ -228,23 +230,23 @@ func TestClearSessionIDIndexIfOwnedBy_OnlyDeletesItsOwnEntry(t *testing.T) {
 	const owner = "dashboard:direct:2026-01-01-000000-1:proj"
 	const other = "dashboard:direct:2026-01-01-000000-2:proj"
 
-	r.ss.SetID(id, owner)
+	setIDT(r, id, owner)
 
 	// A different key's cleanup must leave the owner's mapping alone.
-	r.ss.ClearIDIfOwnedBy(id, other)
+	r.ss.Update(func(tx sessTx) { tx.ClearIDIfOwnedBy(id, other) })
 	if got := keyForID(r, id); got != owner {
 		t.Errorf("idToKey[%q] = %q after another key's cleanup, want %q untouched", id, got, owner)
 	}
 
 	// The owner's own cleanup drops it.
-	r.ss.ClearIDIfOwnedBy(id, owner)
-	if _, ok := r.ss.KeyForID(id); ok {
+	r.ss.Update(func(tx sessTx) { tx.ClearIDIfOwnedBy(id, owner) })
+	if _, ok := keyForIDT(r, id); ok {
 		t.Errorf("idToKey[%q] survived its owner's cleanup", id)
 	}
 
 	// Sessions without an id reach it too.
-	r.ss.SetID("", owner)
-	if _, ok := r.ss.KeyForID(""); ok {
+	setIDT(r, "", owner)
+	if _, ok := keyForIDT(r, ""); ok {
 		t.Error("an empty session id must not be indexed")
 	}
 }

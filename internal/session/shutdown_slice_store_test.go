@@ -31,8 +31,8 @@ func TestShutdown_SliceStore_MultiSessionRoundTrip(t *testing.T) {
 		ttl:       30 * time.Minute,
 		storePath: storePath,
 	}
-	r.ss.Put("feishu:direct:alice:general", newSessionWithID("feishu:direct:alice:general", "sess-alice"))
-	r.ss.Put("feishu:direct:bob:general", newSessionWithID("feishu:direct:bob:general", "sess-bob"))
+	putT(r, "feishu:direct:alice:general", newSessionWithID("feishu:direct:alice:general", "sess-alice"))
+	putT(r, "feishu:direct:bob:general", newSessionWithID("feishu:direct:bob:general", "sess-bob"))
 
 	r.Shutdown()
 

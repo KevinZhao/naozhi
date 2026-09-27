@@ -79,7 +79,7 @@ func TestMCPConfigDriftParity_NoFalsePositive(t *testing.T) {
 	// debug path).
 	driftArgs := proto.BuildArgs(
 		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugPathFor(key), "", bd.Args))
-	// What spawnSession builds for a session on backend defaults
+	// What the spawn builds for a session on backend defaults
 	// (router_lifecycle.go → side-effecting debug path).
 	spawnArgs := proto.BuildArgs(
 		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugFileFor(key), "", bd.Args))

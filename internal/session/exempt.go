@@ -29,7 +29,7 @@ var exemptKeyPrefixes = func() []string {
 
 // exemptInfo scans keyNamespaces once and reports both whether key belongs
 // to an exempt namespace and that namespace's kind label, so callers that
-// need both answers (spawnSession) pay for a single prefix scan.
+// need both answers (reserveSpawn) pay for a single prefix scan.
 func exemptInfo(key string) (isExempt bool, kind string) {
 	for _, ns := range keyNamespaces {
 		if !ns.exempt {
@@ -52,7 +52,7 @@ func isExemptKey(key string) bool {
 
 // exemptKind classifies an exempt session key as "cron", "project", "sys",
 // or "" if the key is not exempt. Drives the per-namespace sub-quota gate
-// in spawnSession so a noisy cron chat can't starve planner / sys sessions.
+// in reserveSpawn so a noisy cron chat can't starve planner / sys sessions.
 func exemptKind(key string) string {
 	_, kind := exemptInfo(key)
 	return kind

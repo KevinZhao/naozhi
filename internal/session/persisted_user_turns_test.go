@@ -61,7 +61,7 @@ func TestRecountPersistedUserTurns_AfterAppend(t *testing.T) {
 }
 
 // TestInstallFreshSessionLocked_RecountsPersistedUserTurns guards
-// R20260603040203-CODE-002: installFreshSessionLocked must seed
+// R20260603040203-CODE-002: installFreshSession must seed
 // persistedUserTurns from the restored oldHistory so snapshot().MessageCount
 // and the AutoTitler min-turn gate report the correct count before any new
 // turn arrives. Tested via the same locking pattern the production code uses
@@ -74,7 +74,7 @@ func TestInstallFreshSessionLocked_RecountsPersistedUserTurns(t *testing.T) {
 		{Time: 3, Type: "user", Summary: "q2"},
 	}
 
-	// Replicate the construction pattern from installFreshSessionLocked:
+	// Replicate the construction pattern from installFreshSession:
 	// create the ManagedSession, set persistedHistory, then call
 	// recountPersistedUserTurnsLocked under historyMu.
 	s := &ManagedSession{
@@ -115,9 +115,9 @@ func TestRenameSession_RecountsPersistedUserTurns(t *testing.T) {
 		{Time: 4, Type: "user", Summary: "q3"},
 	})
 
-	r.ss.Lock()
-	r.ss.Put(oldKey, s)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(oldKey, s)
+	})
 
 	if !r.RenameSession(oldKey, newKey) {
 		t.Fatal("RenameSession returned false")

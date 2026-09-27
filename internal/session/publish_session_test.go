@@ -1,16 +1,16 @@
 package session
 
 // R215-ARCH-P2-2 regression tests. attachHistorySource was previously
-// called manually at every site that inserted into r.ss.sessions —
+// called manually at every site that inserted into the session table —
 // 5 production paths (router_core.go reload, router_discovery.go
 // register/takeover ×2, router_lifecycle.go spawn / rename). Missing
 // the call at any of them would leave EventEntriesBeforeCtx returning
 // empty and the dashboard "history" drawer silently blank for that
-// session. The fix funnels every insertion through publishSessionLocked
+// session. The fix funnels every insertion through publishSession
 // so the (attachHistorySource → sessions map → indexAdd) triple is
 // invariant-by-construction.
 //
-// These tests pin the contract: every publishSessionLocked path leaves
+// These tests pin the contract: every publishSession path leaves
 // HistorySource non-nil, and the alreadyAttached short-circuit does not
 // double-attach when the caller already invoked attachHistorySource.
 
@@ -23,7 +23,7 @@ import (
 )
 
 // minimalRouter builds a Router with just enough wiring for
-// publishSessionLocked to run end-to-end. The default backend
+// publishSession to run end-to-end. The default backend
 // resolves to the package-default wrapper which returns a Noop
 // history source — that's fine; the test asserts on non-nil.
 func minimalRouter(t *testing.T) *Router {
@@ -48,18 +48,19 @@ func TestPublishSessionLocked_AttachesHistorySource(t *testing.T) {
 	r := minimalRouter(t)
 	s := &ManagedSession{key: "feishu:direct:user1:general"}
 
-	r.ss.Lock()
-	r.publishSession(r.ss.AssumeLocked(), s.key, s, false)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		r.publishSession(tx, s.key, s, false)
+	})
 
 	if got := s.loadHistorySource(); got == nil {
-		t.Fatal("publishSessionLocked left HistorySource nil — EventEntriesBeforeCtx would return empty and dashboard history drawer would silently blank")
+		t.Fatal("publishSession left HistorySource nil — EventEntriesBeforeCtx would return empty and dashboard history drawer would silently blank")
 	}
-	r.ss.RLock()
-	stored := r.ss.Get(s.key)
-	r.ss.RUnlock()
+	var stored *ManagedSession
+	r.ss.View(func(v sessView) {
+		stored = v.Get(s.key)
+	})
 	if stored != s {
-		t.Fatalf("publishSessionLocked did not insert into r.ss.sessions: got %v, want %v", stored, s)
+		t.Fatalf("publishSession did not insert into the session table: got %v, want %v", stored, s)
 	}
 }
 
@@ -79,21 +80,22 @@ func TestPublishSessionLocked_AlreadyAttachedDoesNotOverwrite(t *testing.T) {
 	sentinel := history.Noop{}
 	s.SetHistorySource(sentinel)
 
-	r.ss.Lock()
-	r.publishSession(r.ss.AssumeLocked(), s.key, s, true)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		r.publishSession(tx, s.key, s, true)
+	})
 
 	got := s.loadHistorySource()
 	if got == nil {
-		t.Fatal("publishSessionLocked cleared a pre-attached HistorySource")
+		t.Fatal("publishSession cleared a pre-attached HistorySource")
 	}
 	// The exact identity check is over-specified for some Source
 	// implementations (interface-typed values). Accept any non-nil.
-	r.ss.RLock()
-	stored := r.ss.Get(s.key)
-	r.ss.RUnlock()
+	var stored *ManagedSession
+	r.ss.View(func(v sessView) {
+		stored = v.Get(s.key)
+	})
 	if stored != s {
-		t.Fatalf("publishSessionLocked did not insert into r.ss.sessions: got %v, want %v", stored, s)
+		t.Fatalf("publishSession did not insert into the session table: got %v, want %v", stored, s)
 	}
 }
 
@@ -106,15 +108,15 @@ func TestPublishSessionLocked_IndexAddObserved(t *testing.T) {
 	r := minimalRouter(t)
 	s := &ManagedSession{key: "feishu:direct:user1:general"}
 
-	r.ss.Lock()
-	r.publishSession(r.ss.AssumeLocked(), s.key, s, false)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		r.publishSession(tx, s.key, s, false)
+	})
 
 	// The session is indexed under its chat, so a follow-up ResetChat finds it.
-	r.ss.RLock()
-	if chatKey := chatKeyFor(s.key); !slices.Contains(r.ss.KeysOfChat(chatKey), s.key) {
-		r.ss.RUnlock()
-		t.Fatalf("publishSessionLocked left the session out of its chat index: chatKey=%q", chatKey)
+	chatKey := chatKeyFor(s.key)
+	var keys []string
+	r.ss.View(func(v sessView) { keys = v.KeysOfChat(chatKey) })
+	if !slices.Contains(keys, s.key) {
+		t.Fatalf("publishSession left the session out of its chat index: chatKey=%q", chatKey)
 	}
-	r.ss.RUnlock()
 }

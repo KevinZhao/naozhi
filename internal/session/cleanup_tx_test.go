@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -35,7 +36,7 @@ func TestRemove_ReleasesTheActiveSlot(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	r := newTestRouter(4)
 	const key = "feishu:direct:remove-active:general"
-	injectLocked(r, key, newIdleProc())
+	injectSession(r, key, newIdleProc())
 	if got := r.ss.Active(); got != 1 {
 		t.Fatalf("active = %d before Remove, want 1", got)
 	}
@@ -55,7 +56,7 @@ func TestRemove_WakesAShutdownWaitingOnTheRemovedSession(t *testing.T) {
 	r := newTestRouter(4)
 	const key = "feishu:direct:remove-running:general"
 	probe := &runningProbe{fakeProcess: newRunningProc(), asked: make(chan struct{})}
-	injectLocked(r, key, probe)
+	injectSession(r, key, probe)
 
 	done := startShutdownOn(r, probe)
 	r.Remove(key)
@@ -68,7 +69,7 @@ func TestCleanup_WakesAShutdownWaitingOnTheSessionItKills(t *testing.T) {
 	r := newTestRouter(4)
 	const key = "feishu:direct:cleanup-stuck:general"
 	probe := &runningProbe{fakeProcess: newRunningProc(), asked: make(chan struct{})}
-	s := injectLocked(r, key, probe)
+	s := injectSession(r, key, probe)
 	s.lastActive.Store(time.Now().Add(-24 * time.Hour).UnixNano()) // running far past 2×totalTimeout
 
 	done := startShutdownOn(r, probe)
@@ -98,9 +99,9 @@ func TestCleanup_PruneRechecksEachCandidate(t *testing.T) {
 	r := newTestRouter(4)
 	old := time.Now().Add(-100 * time.Hour).UnixNano() // past pruneTTL and 2×totalTimeout
 	const stubKey = "feishu:direct:prune-stub:general"
-	stub := injectLocked(r, stubKey, nil)
+	stub := injectSession(r, stubKey, nil)
 	stub.lastActive.Store(old)
-	stuck := injectLocked(r, "feishu:direct:prune-stuck:general", &killHookProc{
+	stuck := injectSession(r, "feishu:direct:prune-stuck:general", &killHookProc{
 		fakeProcess: newRunningProc(),
 		onKill:      func() { stub.setSessionID("sess-gained") },
 	})
@@ -119,7 +120,7 @@ func TestCleanup_PruneRechecksEachCandidate(t *testing.T) {
 func TestSaveDirty_ClearsOnlyWhatDidNotChangeDuringTheWrite(t *testing.T) {
 	r := newTestRouter(4)
 	r.storePath = filepath.Join(t.TempDir(), "sessions.json")
-	injectLocked(r, "feishu:direct:save:general", newIdleProc())
+	injectSession(r, "feishu:direct:save:general", newIdleProc())
 	dirtyBoth := func() {
 		r.ss.Update(func(tx sessTx) { tx.MarkChanged() })
 		r.SetWorkspace("feishu:direct:save", t.TempDir())
@@ -157,7 +158,7 @@ func TestAdoptShimTarget(t *testing.T) {
 	t.Run("a session installed meanwhile wins", func(t *testing.T) {
 		r := newTestRouter(4)
 		const key = "feishu:direct:adopt-existing:general"
-		existing := injectLocked(r, key, newDeadProc())
+		existing := injectSession(r, key, newDeadProc())
 		tgt, adopted := r.adoptShimTarget(state(key), "claude")
 		if adopted || !tgt.found || tgt.sess != existing {
 			t.Errorf("adopted=%v found=%v sess==existing=%v, want the existing session", adopted, tgt.found, tgt.sess == existing)
@@ -198,7 +199,7 @@ func TestCommitShimReattach(t *testing.T) {
 
 	t.Run("attaches and counts", func(t *testing.T) {
 		r := newTestRouter(4)
-		sess := injectLocked(r, key, newDeadProc())
+		sess := injectSession(r, key, newDeadProc())
 		proc := newIdleProc()
 		if got := r.commitShimReattach(st, sess, proc, "claude", r.bkStore.wrapper); got != reattachDone {
 			t.Fatalf("outcome = %d, want reattachDone", got)
@@ -216,8 +217,8 @@ func TestCommitShimReattach(t *testing.T) {
 
 	t.Run("refuses a replaced session", func(t *testing.T) {
 		r := newTestRouter(4)
-		stale := injectLocked(r, key, newDeadProc())
-		current := injectLocked(r, key, newDeadProc())
+		stale := injectSession(r, key, newDeadProc())
+		current := injectSession(r, key, newDeadProc())
 		proc := newIdleProc()
 		if got := r.commitShimReattach(st, stale, proc, "claude", r.bkStore.wrapper); got != reattachReplaced {
 			t.Fatalf("outcome = %d, want reattachReplaced", got)
@@ -230,7 +231,7 @@ func TestCommitShimReattach(t *testing.T) {
 	t.Run("refuses a session that came alive", func(t *testing.T) {
 		r := newTestRouter(4)
 		live := newIdleProc()
-		sess := injectLocked(r, key, live)
+		sess := injectSession(r, key, live)
 		if got := r.commitShimReattach(st, sess, newIdleProc(), "claude", r.bkStore.wrapper); got != reattachReplaced {
 			t.Fatalf("outcome = %d, want reattachReplaced", got)
 		}
@@ -239,9 +240,22 @@ func TestCommitShimReattach(t *testing.T) {
 		}
 	})
 
+	t.Run("attaches inside the transaction", func(t *testing.T) {
+		r := newTestRouter(4)
+		sess := injectSession(r, key, newDeadProc())
+		sess.InjectHistory([]clievent.EventEntry{{Time: 1, Type: "user", Summary: "hi"}})
+		probe := &lockProbeProc{fakeProcess: newIdleProc(), r: r}
+		if got := r.commitShimReattach(st, sess, probe, "claude", r.bkStore.wrapper); got != reattachDone {
+			t.Fatalf("outcome = %d, want reattachDone", got)
+		}
+		if !probe.seeded || probe.tableFree {
+			t.Errorf("seeded=%v tableFree=%v: the process must be seeded while the reattach holds the table", probe.seeded, probe.tableFree)
+		}
+	})
+
 	t.Run("defers while a send is in flight", func(t *testing.T) {
 		r := newTestRouter(4)
-		sess := injectLocked(r, key, newDeadProc())
+		sess := injectSession(r, key, newDeadProc())
 		sess.sendMu.Lock()
 		defer sess.sendMu.Unlock()
 		proc := newIdleProc()
@@ -254,11 +268,23 @@ func TestCommitShimReattach(t *testing.T) {
 	})
 }
 
+// lockProbeProc records, when the reattach seeds it with the session's
+// history, whether the table's lock was free at that moment.
+type lockProbeProc struct {
+	*fakeProcess
+	r                 *Router
+	seeded, tableFree bool
+}
+
+func (p *lockProbeProc) InjectHistory([]clievent.EventEntry) {
+	p.seeded, p.tableFree = true, p.r.ss.Healthy()
+}
+
 // TestSettleReconnected_ConvergesTheActiveCount: a reconcile tick that
 // reattached sessions recounts the active slots from the table.
 func TestSettleReconnected_ConvergesTheActiveCount(t *testing.T) {
 	r := newTestRouter(4)
-	injectLocked(r, "feishu:direct:settle:general", newIdleProc())
+	injectSession(r, "feishu:direct:settle:general", newIdleProc())
 	r.ss.Update(func(tx sessTx) { tx.SetActive(3) }) // drifted
 	r.settleReconnected(1)
 	if got := r.ss.Active(); got != 1 {

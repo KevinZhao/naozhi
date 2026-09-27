@@ -116,7 +116,7 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	// getSessionID avoids a data race with concurrent Send; fall back to the
 	// process's SessionID (set on system/init, before Send propagates it).
 	// Snapshot loadProcess() once: a second call could observe a fresh process
-	// from a concurrent spawnSession whose TotalCost() is 0 and clobber the real cost.
+	// from a concurrent spawn whose TotalCost() is 0 and clobber the real cost.
 	proc := s.loadProcess()
 	sid := s.getSessionID()
 	if sid == "" && proc != nil {

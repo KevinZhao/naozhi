@@ -23,10 +23,10 @@ func TestSaveIfDirty_PersistsAndClearsFlag(t *testing.T) {
 		pruneTTL:  72 * time.Hour,
 		storePath: storePath,
 	}
-	r.ss.Put("feishu:direct:user1:general", newSessionWithID("feishu:direct:user1:general", "sess-abc"))
-	r.ss.Lock()
-	r.ss.SetDirty(true)
-	r.ss.Unlock()
+	putT(r, "feishu:direct:user1:general", newSessionWithID("feishu:direct:user1:general", "sess-abc"))
+	r.ss.Update(func(tx sessTx) {
+		tx.SetDirty(true)
+	})
 	r.ss.BumpGen()
 
 	r.saveIfDirty()
@@ -39,9 +39,10 @@ func TestSaveIfDirty_PersistsAndClearsFlag(t *testing.T) {
 		t.Fatalf("session not persisted correctly: %v", loaded)
 	}
 
-	r.ss.RLock()
-	dirty := r.ss.Dirty()
-	r.ss.RUnlock()
+	var dirty bool
+	r.ss.View(func(v sessView) {
+		dirty = v.Dirty()
+	})
 	if dirty {
 		t.Error("storeDirty should be cleared after a successful saveIfDirty with no concurrent mutation")
 	}
@@ -60,7 +61,7 @@ func TestSaveIfDirty_NoopWhenClean(t *testing.T) {
 		pruneTTL:  72 * time.Hour,
 		storePath: storePath,
 	}
-	r.ss.Put("feishu:direct:user1:general", newSessionWithID("feishu:direct:user1:general", "sess-abc"))
+	putT(r, "feishu:direct:user1:general", newSessionWithID("feishu:direct:user1:general", "sess-abc"))
 
 	r.saveIfDirty()
 

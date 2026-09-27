@@ -3,7 +3,7 @@ package session
 import "github.com/naozhi/naozhi/internal/cli"
 
 // ArgvSpawnOptions builds the SpawnOptions subset that Protocol.BuildArgs turns
-// into argv. THE one place it is built: the real spawn (spawnSession), the
+// into argv. THE one place it is built: the real spawn (reserveSpawn), the
 // arg-drift comparison (driftCompareArgs) and `naozhi config check --effective`
 // all come through here, so a field set on one path only cannot make them
 // disagree. An argv-bearing field missing from the spawn side reads as permanent

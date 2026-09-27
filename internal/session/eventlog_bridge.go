@@ -104,7 +104,7 @@ const batchScratchMaxCap = 4096
 //
 // Ordering contract (RFC §3.2.2 / attachment-refcount §3.2): this sink MUST be
 // installed on ring.EventLog.SetPersistSink AFTER any pre-hook InjectHistory
-// calls complete; spawnSession is the sole production caller responsible.
+// calls complete; completeSpawn is the sole production caller responsible.
 // attachTracker is optional: non-replay entries with ImagePaths bump the
 // attachment refcount. A marshal failure on one EventEntry does NOT abort the
 // batch — the entry is logged and skipped (best-effort persist, never block).

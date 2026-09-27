@@ -316,7 +316,7 @@ Config field `session.workspace` is a deprecated alias for `session.cwd`. Both `
 
 ## Concurrency Patterns
 
-- **Router.mu** guards the session table (`internal/session/sessiontable`: sessions + chat / key-hash / session-ID indices) and the facets that change atomically with it (spawn bookkeeping, workspace overrides, picks). `spawnSession` releases it once, around `Spawn()` (may block on ACP handshake) and the history copy, and re-checks the key on re-acquire. `shutdownCond` is conditioned on `mu` for Shutdown wait.
+- **The session table** (`internal/session/sessiontable`: sessions + chat / key-hash / session-ID indices) owns its lock, which also guards the router state that changes atomically with it (spawn bookkeeping, workspace overrides, picks). The only way in is a transaction — `r.ss.View` / `r.ss.Update`, plus `Load` / `Count` and the lock-free `Active` / `Gen` — and a `Tx` used after its callback panics. Slow work inside a transaction runs in `tx.Unlocked` (closing a process, waiting for a socket); a spawn reserves in the caller's transaction (`reserveSpawn`) and finishes outside it (`completeSpawn`, one commit transaction). Shutdown waits with `tx.Wait`.
 - **ManagedSession.sendMu** serializes Send() calls and protects session_id capture.
 - **sessionGuard** (`sync.Map`) prevents goroutine accumulation -- one message per session at a time.
 - **Hub.mu** protects WebSocket client set and subscriptions. `nodesMu` (shared with Server) protects the nodes map.

@@ -24,7 +24,7 @@ func mkTuningRouter(t *testing.T) *Router {
 		"kiro": cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
 	r.bkStore.defaultBackend = "kiro"
-	r.ss.Ext().picks.backend = make(map[string]string)
+	stateOf(r).picks.backend = make(map[string]string)
 	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 	r.bkStore.model = "claude-fable-5"
 	r.claudeDir = t.TempDir()
@@ -35,7 +35,7 @@ func mkTuningRouter(t *testing.T) *Router {
 // TestTuningDriftParity_NoFalseDrift is the load-bearing assertion: for a
 // session carrying tuning overrides, the drift-side argv reconstruction
 // (driftCompareArgs — what classifyShimState compares stored shim argv
-// against) must equal the real-spawn argv (resolveSpawnParamsLocked →
+// against) must equal the real-spawn argv (resolveSpawnParams →
 // BuildArgs). Both sides run the PRODUCTION code paths — building either
 // argv by hand here would repeat the mutation-testing trap documented in
 // effort_drift_parity_test.go (a test that constructs its own SpawnOptions
@@ -47,13 +47,13 @@ func TestTuningDriftParity_NoFalseDrift(t *testing.T) {
 	s.SetBackend("kiro")
 	s.SetTuningModel("claude-haiku-4.5")
 	s.SetTuningEffort("low")
-	r.ss.Put(key, s)
+	putT(r, key, s)
 
-	// Real spawn argv, exactly as spawnSession assembles it — through the
+	// Real spawn argv, exactly as the spawn assembles it — through the
 	// production constructor. Hand-listing the fields here is what let the
 	// DebugFile regression through: this side omitted it, the drift side omitted
 	// it, and the comparison passed while production diverged.
-	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{Backend: "kiro", Workspace: "/ws"})
+	sp := resolveT(r, key, "", AgentOpts{Backend: "kiro", Workspace: "/ws"})
 	realArgs := sp.Wrapper.Protocol.BuildArgs(
 		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
 
@@ -85,7 +85,7 @@ func TestTuningDriftParity_ChangedOverrideIsRealDrift(t *testing.T) {
 	s := newSessionWithID(key, "sess-drift-2")
 	s.SetBackend("kiro")
 	s.SetTuningModel("claude-haiku-4.5")
-	r.ss.Put(key, s)
+	putT(r, key, s)
 
 	wrapper, backendID := r.wrapperFor("kiro")
 	noOverlay := &shim.SpawnOverlay{}                                       // spawned with no agent-level override
@@ -115,33 +115,36 @@ func TestTuningDriftParity_NilSessionFallsBack(t *testing.T) {
 
 // TestTuningDriftParity_SurvivesRespawn extends the parity guard past the
 // first incarnation: after a tuning respawn replaces the ManagedSession
-// (installFreshSessionLocked), the NEW entry must still reconstruct the same
+// (installFreshSession), the NEW entry must still reconstruct the same
 // argv the spawn actually used. Otherwise the very restart that follows a
 // model switch misreads the tuned shim as arg-drift and rebuilds it default.
 func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 	r := mkTuningRouter(t)
-	// installFreshSessionLocked touches the id indexes that NewRouter
+	// installFreshSession touches the id indexes that NewRouter
 	// normally allocates; the minimal fixture above does not.
 	key := "dash:direct:drift3:general"
 	s := newSessionWithID(key, "sess-drift-3")
 	s.SetBackend("kiro")
 	s.SetTuningModel("claude-haiku-4.5")
 	s.SetTuningEffort("low")
-	r.ss.Put(key, s)
+	putT(r, key, s)
 
-	// argv of the respawn, as spawnSession assembles it from the OLD entry —
+	// argv of the respawn, as the spawn assembles it from the OLD entry —
 	// through the production constructor, so this side cannot silently omit a
 	// field the drift side sets (or vice versa).
-	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "sess-drift-3", AgentOpts{Backend: "kiro", Workspace: "/ws"})
+	sp := resolveT(r, key, "sess-drift-3", AgentOpts{Backend: "kiro", Workspace: "/ws"})
 	realArgs := sp.Wrapper.Protocol.BuildArgs(
 		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
 
 	// The spawn then replaces the entry, carrying the snapshotted overrides.
 	_, _, _, _, ov := snapshotOldSession(sessView{}, s)
-	fresh := r.installFreshSession(r.ss.AssumeLocked(),
-		key, &cli.Process{}, "/ws", "kiro", "", sp.Wrapper, "sess-drift-3",
-		nil, nil, 0, 0, 0, false, "sess-drift-3", 0, ov,
-	)
+	var fresh *ManagedSession
+	r.ss.Update(func(tx sessTx) {
+		fresh = r.installFreshSession(tx,
+			key, &cli.Process{}, "/ws", "kiro", "", sp.Wrapper, "sess-drift-3",
+			nil, nil, 0, 0, 0, false, "sess-drift-3", 0, ov,
+		)
+	})
 
 	wrapper, backendID := r.wrapperFor("kiro")
 	driftArgs := r.driftCompareArgs(wrapper, backendID, key, fresh, &sp.Overlay)

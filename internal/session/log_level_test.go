@@ -10,13 +10,13 @@ import (
 
 // TestGetOrCreate_CreatingNewSession_IsDebug locks R84's log-level demotion.
 // "creating new session" previously fired at Info immediately before
-// spawnSession's own "session spawned" Info row, doubling the per-spawn
+// the spawn's own "session spawned" Info row, doubling the per-spawn
 // journal noise. After the demotion it is Debug — captured only when
 // operators opt into verbose logging.
 //
 // We drive GetOrCreate through a failing-wrapper newTestRouter so spawn
 // errors out quickly; the "creating new session" log fires BEFORE
-// spawnSession is invoked, so the spawn failure does not mask the
+// the spawn is invoked, so the spawn failure does not mask the
 // assertion. The critical property: the captured Info-level handler must
 // NOT see the "creating new session" message, while a Debug-level handler
 // would still observe it.

@@ -103,16 +103,17 @@ func TestSetUserLabel_NoOpOnSameValue(t *testing.T) {
 		t.Fatalf("notified after first SetUserLabel = %d, want 1", notified)
 	}
 	genAfterFirst := r.ss.Gen()
-	r.ss.RLock()
-	dirtyAfterFirst := r.ss.Dirty()
-	r.ss.RUnlock()
+	var dirtyAfterFirst bool
+	r.ss.View(func(v sessView) {
+		dirtyAfterFirst = v.Dirty()
+	})
 	if !dirtyAfterFirst {
 		t.Fatalf("storeDirty should be true after first SetUserLabel")
 	}
 	// Simulate a saveIfDirty cycle clearing the flag.
-	r.ss.Lock()
-	r.ss.SetDirty(false)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.SetDirty(false)
+	})
 
 	// Second mutation with the SAME value must be a pure no-op: no notify,
 	// no dirty flip, no storeGen bump.
@@ -122,9 +123,10 @@ func TestSetUserLabel_NoOpOnSameValue(t *testing.T) {
 	if notified != 1 {
 		t.Errorf("onChange fired on same-value SetUserLabel: notified = %d, want 1", notified)
 	}
-	r.ss.RLock()
-	dirtyAfterSecond := r.ss.Dirty()
-	r.ss.RUnlock()
+	var dirtyAfterSecond bool
+	r.ss.View(func(v sessView) {
+		dirtyAfterSecond = v.Dirty()
+	})
 	if dirtyAfterSecond {
 		t.Errorf("storeDirty flipped on same-value SetUserLabel")
 	}
@@ -140,9 +142,10 @@ func TestSetUserLabel_NoOpOnSameValue(t *testing.T) {
 	if notified != 2 {
 		t.Errorf("onChange fired %d times after distinct-value SetUserLabel, want 2", notified)
 	}
-	r.ss.RLock()
-	dirtyAfterThird := r.ss.Dirty()
-	r.ss.RUnlock()
+	var dirtyAfterThird bool
+	r.ss.View(func(v sessView) {
+		dirtyAfterThird = v.Dirty()
+	})
 	if !dirtyAfterThird {
 		t.Errorf("storeDirty should be true after distinct-value SetUserLabel")
 	}

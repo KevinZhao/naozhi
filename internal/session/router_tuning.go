@@ -48,7 +48,7 @@ const (
 // ManagedSession yet (picks.tuning). A freshly created dashboard
 // session exists only client-side until its first message spawns the CLI,
 // yet its header chips are already clickable — so the pick is parked here
-// and spawnSession moves it onto the new entry. Empty field = no override.
+// and the spawn moves it onto the new entry. Empty field = no override.
 type pendingTuning struct {
 	Model  string
 	Effort string

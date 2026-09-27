@@ -106,13 +106,6 @@ func spawnIn(r *Router, key string, before func(tx sessTx)) (*ManagedSession, er
 	return r.completeSpawn(context.Background(), &res)
 }
 
-// injectLocked installs a session for key under the table lock.
-func injectLocked(r *Router, key string, proc processIface) *ManagedSession {
-	r.ss.Lock()
-	defer r.ss.Unlock()
-	return injectSession(r, key, proc)
-}
-
 func TestSpawnSession_InstallsTheSpawnedProcess(t *testing.T) {
 	proc := newIdleProc()
 	r := spawnRouter(t, 4, func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil })
@@ -128,10 +121,14 @@ func TestSpawnSession_InstallsTheSpawnedProcess(t *testing.T) {
 	if r.SessionFor(key) != s {
 		t.Fatal("the session is not in the table")
 	}
-	r.ss.RLock()
-	pending := r.ss.Ext().spawns.PendingSpawns()
-	_, inFlight := r.ss.Ext().spawns.SpawnInFlight(key)
-	r.ss.RUnlock()
+	var (
+		pending  int
+		inFlight bool
+	)
+	r.ss.View(func(v sessView) {
+		pending = v.Ext().spawns.PendingSpawns()
+		_, inFlight = v.Ext().spawns.SpawnInFlight(key)
+	})
 	if pending != 0 || inFlight {
 		t.Errorf("after the spawn: pending=%d inFlight=%v, want 0/false", pending, inFlight)
 	}
@@ -147,7 +144,7 @@ func TestSpawnSession_LiveSessionInstalledMeanwhileWins(t *testing.T) {
 
 	res := spawnAsync(r, key)
 	waitEntered(t, g)
-	winner := injectLocked(r, key, newIdleProc())
+	winner := injectSession(r, key, newIdleProc())
 	close(g.release)
 
 	got := waitResult(t, res)
@@ -169,7 +166,7 @@ func TestSpawnSession_RemovedMeanwhileStartsFresh(t *testing.T) {
 	g := newGatedSpawn()
 	r := spawnRouter(t, 4, g.hook)
 	const key = "feishu:direct:spawn-removed:general"
-	old := injectLocked(r, key, newDeadProc())
+	old := injectSession(r, key, newDeadProc())
 	old.setSessionID("sid-old")
 	storeTotalCost(&old.costSpent, 3.5)
 
@@ -199,7 +196,7 @@ func TestSpawnSession_ReplacedMeanwhileContinuesTheReplacement(t *testing.T) {
 	g := newGatedSpawn()
 	r := spawnRouter(t, 4, g.hook)
 	const key = "feishu:direct:spawn-replaced:general"
-	first := injectLocked(r, key, newDeadProc())
+	first := injectSession(r, key, newDeadProc())
 	first.setSessionID("sid-first")
 
 	res := spawnAsync(r, key)
@@ -207,9 +204,9 @@ func TestSpawnSession_ReplacedMeanwhileContinuesTheReplacement(t *testing.T) {
 	second := &ManagedSession{key: key}
 	second.storeProcess(newDeadProc())
 	second.setSessionID("sid-second")
-	r.ss.Lock()
-	r.ss.Put(key, second)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(key, second)
+	})
 	close(g.release)
 
 	got := waitResult(t, res)
@@ -240,11 +237,17 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 	if _, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{}); !errors.Is(err, boom) {
 		t.Fatalf("GetOrCreate = %v, want the spawn error", err)
 	}
-	r.ss.RLock()
-	pt, ok := r.ss.Ext().picks.tuning[key]
-	pending := r.ss.Ext().spawns.PendingSpawns()
-	_, inFlight := r.ss.Ext().spawns.SpawnInFlight(key)
-	r.ss.RUnlock()
+	var (
+		pt       pendingTuning
+		ok       bool
+		pending  int
+		inFlight bool
+	)
+	r.ss.View(func(v sessView) {
+		pt, ok = v.Ext().picks.tuning[key]
+		pending = v.Ext().spawns.PendingSpawns()
+		_, inFlight = v.Ext().spawns.SpawnInFlight(key)
+	})
 	if !ok || pt.Model != "claude-opus-5" {
 		t.Errorf("the tuning pick was consumed by a failed spawn (ok=%v, %+v)", ok, pt)
 	}
@@ -262,9 +265,10 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 	if s.TuningModel() != "claude-opus-5" {
 		t.Errorf("the session's tuning model = %q, want the pick", s.TuningModel())
 	}
-	r.ss.RLock()
-	_, still := r.ss.Ext().picks.tuning[key]
-	r.ss.RUnlock()
+	var still bool
+	r.ss.View(func(v sessView) {
+		_, still = v.Ext().picks.tuning[key]
+	})
 	if still {
 		t.Error("the pick outlived the spawn that consumed it")
 	}
@@ -294,7 +298,7 @@ func TestSpawnSession_ShutdownGateRefusesLateSpawns(t *testing.T) {
 func TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID(t *testing.T) {
 	r := spawnRouter(t, 4, func(context.Context, cli.SpawnOptions) (processIface, error) { return newIdleProc(), nil })
 	const key = "feishu:direct:respawn:general"
-	old := injectLocked(r, key, newDeadProc())
+	old := injectSession(r, key, newDeadProc())
 	old.setSessionID("sid-old")
 	old.costMu.Lock()
 	old.spent = costledger.Totals{Metered: map[costledger.Unit]float64{"requests": 3}}
@@ -306,9 +310,10 @@ func TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID(t *testing.T) {
 	if got := s.CostTotals().Metered["requests"]; got != 3 {
 		t.Errorf("respawned session's metered spend = %v, want the replaced session's 3", got)
 	}
-	r.ss.RLock()
-	_, stale := r.ss.KeyForID("sid-old")
-	r.ss.RUnlock()
+	var stale bool
+	r.ss.View(func(v sessView) {
+		_, stale = v.KeyForID("sid-old")
+	})
 	if stale {
 		t.Error("the replaced session's ID still resolves to the key after the ID rotated")
 	}
@@ -321,7 +326,7 @@ func TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID(t *testing.T) {
 func TestGetOrCreate_PanicInsideTheReserveLeavesNothingHeld(t *testing.T) {
 	proc := newIdleProc()
 	r := spawnRouter(t, 1, func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil })
-	victim := injectLocked(r, "feishu:direct:victim:general", newHookCloseProc(func() { panic("close failed") }))
+	victim := injectSession(r, "feishu:direct:victim:general", newHookCloseProc(func() { panic("close failed") }))
 	victim.lastActive.Store(1)
 	const key = "feishu:direct:after-panic:general"
 

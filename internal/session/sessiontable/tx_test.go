@@ -1,6 +1,8 @@
 package sessiontable
 
 import (
+	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -23,10 +25,10 @@ func TestUpdate_ReleasesTheLockWhenTheCallbackPanics(t *testing.T) {
 		}()
 		tab.Update(func(tx Tx[*sess, extState]) { panic("boom") })
 	}()
-	if !tab.TryLock() {
+	if !tab.mu.TryLock() {
 		t.Fatal("the lock stayed held after a panicking Update")
 	}
-	tab.Unlock()
+	tab.mu.Unlock()
 }
 
 func TestTx_UnusableAfterItsCallback(t *testing.T) {
@@ -48,20 +50,20 @@ func TestTx_UnlockedReleasesTheLock(t *testing.T) {
 	tab.Update(func(tx Tx[*sess, extState]) {
 		var free bool
 		tx.Unlocked(func() {
-			if tab.TryLock() {
+			if tab.mu.TryLock() {
 				free = true
-				tab.Unlock()
+				tab.mu.Unlock()
 			}
 		})
 		if !free {
 			t.Error("the lock was held inside Unlocked")
 		}
-		if tab.TryLock() {
+		if tab.mu.TryLock() {
 			t.Error("the lock was not taken again after Unlocked")
 		}
 		tx.Put("c:a", &sess{}) // still a working Tx
 	})
-	if tab.Len() != 1 {
+	if tab.size() != 1 {
 		t.Error("the Put after Unlocked did not land")
 	}
 }
@@ -141,10 +143,10 @@ func TestTx_MutatorsPanicInsideUnlocked(t *testing.T) {
 		})
 		tx.Put("c:b", &sess{}) // live again once the lock is back
 	})
-	if _, ok := tab.Lookup("c:a"); ok {
+	if _, ok := tab.lookup("c:a"); ok {
 		t.Error("the refused Put landed")
 	}
-	if _, ok := tab.Lookup("c:b"); !ok {
+	if _, ok := tab.lookup("c:b"); !ok {
 		t.Error("the Put after Unlocked did not land")
 	}
 }
@@ -180,5 +182,20 @@ func TestTable_LoadAndCount(t *testing.T) {
 	}
 	if n, act := tab.Count(); n != 2 || act != 1 {
 		t.Errorf("Count = (%d,%d), want (2,1)", n, act)
+	}
+}
+
+// TestTable_ExportedSurfaceIsTransactionsOnly: nothing reaches the table's
+// state except a transaction, the two single-value reads and the lock-free
+// atomics. A method added beside them would be a way around the lock.
+func TestTable_ExportedSurfaceIsTransactionsOnly(t *testing.T) {
+	typ := reflect.TypeOf(newTable())
+	var got []string
+	for i := 0; i < typ.NumMethod(); i++ {
+		got = append(got, typ.Method(i).Name)
+	}
+	want := []string{"Active", "BumpGen", "Count", "Gen", "Healthy", "Load", "Update", "View"}
+	if !slices.Equal(got, want) {
+		t.Errorf("exported methods = %v, want %v", got, want)
 	}
 }

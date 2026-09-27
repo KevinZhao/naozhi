@@ -7,7 +7,7 @@ import (
 
 // TestCleanup_StuckKill_SkipsWhenSessionReplacedProc pins the R217-CR-3
 // fix: pass-2 classifies a process as stuck without holding the table lock (PID
-// syscalls), so a concurrent spawnSession / resetLocked may have swapped
+// syscalls), so a concurrent spawn / resetEntry may have swapped
 // s.process by the time the kill loop runs. Without the re-verify the
 // captured (now-orphaned) proc was killed even though the session had
 // already moved on. We exercise the inequality branch directly via the

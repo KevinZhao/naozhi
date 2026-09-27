@@ -66,10 +66,10 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 }
 
 // ReattachProcessNoCallback is like ReattachProcess but skips the onSessionID
-// callback; for callers that already hold routethe table lock (onSessionID acquires it).
-// Does NOT acquire sendMu: the lock order is sendMu → routethe table lock and the caller
-// holds routethe table lock, so taking sendMu here would risk ABBA deadlock with Send()
-// (sendMu → onSessionID → routethe table lock).
+// callback; for callers that already hold the table lock (onSessionID acquires it).
+// Does NOT acquire sendMu: the lock order is sendMu → the table lock and the caller
+// holds the table lock, so taking sendMu here would risk ABBA deadlock with Send()
+// (sendMu → onSessionID → the table lock).
 //
 // SAFETY CONSTRAINT: only call when Send() cannot be in flight for this
 // session (ReconnectShims at startup, or a known-dead process). Otherwise the

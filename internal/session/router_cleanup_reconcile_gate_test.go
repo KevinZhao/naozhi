@@ -15,7 +15,7 @@ import (
 func TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect(t *testing.T) {
 	// Use a dedicated backend label so a concurrent test mutating the default
 	// "" bucket of the global SessionActiveByBackend gauge cannot pollute this
-	// assertion. reconcileSessionActiveByBackendLocked only touches the label
+	// assertion. reconcileActiveByBackend only touches the label
 	// of sessions actually present, so an isolated label is fully isolated.
 	const backend = "reconcile-gate-noop"
 	resetBackendGauge(t, backend)
@@ -74,7 +74,7 @@ func TestCleanup_ReconcileGate_NoOpSkipsReconcile(t *testing.T) {
 	// Pre-seed activeCount and the gauge to the correct live count so a real
 	// reconcile would be a no-op anyway — but we want to confirm the skip path
 	// reaches the Store(aliveTotal) with the same value.
-	r.ss.SetActive(1)
+	setActiveT(r, 1)
 	metrics.SessionActiveByBackend.Add(1, backend)
 
 	r.Cleanup()
@@ -110,7 +110,7 @@ func TestCleanup_ReconcileGate_PruneDrivesGaugeToZero(t *testing.T) {
 
 	r.Cleanup()
 
-	if _, ok := r.ss.Lookup("key1"); ok {
+	if _, ok := lookupT(r, "key1"); ok {
 		t.Fatal("precondition: session should have been pruned")
 	}
 	if got := metrics.SessionActiveByBackend.Get(backend); got != 0 {

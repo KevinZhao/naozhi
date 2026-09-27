@@ -10,7 +10,7 @@ import (
 
 // TestFinishRemoveCleanup_DoesNotReinsertShimStuck is the R20260622-LB-3
 // (#2261) regression guard. Remove is a TERMINAL operation: the key is never
-// recreated with the same key, and unregisterSessionLocked already delete()d
+// recreated with the same key, and unregisterSession already delete()d
 // the shimStuckOnReset entry as a leak-prevention clear (R090031-CR-5). The
 // shimStuckOnReset flag is consumed ONLY by a subsequent same-key
 // GetOrCreate, so re-inserting it inside finishRemoveCleanup (when the 2s
@@ -46,9 +46,10 @@ func TestFinishRemoveCleanup_DoesNotReinsertShimStuck(t *testing.T) {
 	installSession(t, r, key, newIdleProc())
 
 	// Pre-condition: not flagged.
-	r.ss.RLock()
-	before := r.ss.Ext().spawns.ShimStuck(key)
-	r.ss.RUnlock()
+	var before bool
+	r.ss.View(func(v sessView) {
+		before = v.Ext().spawns.ShimStuck(key)
+	})
 	if before {
 		t.Fatal("precondition: key should not be flagged before Remove")
 	}
@@ -59,9 +60,10 @@ func TestFinishRemoveCleanup_DoesNotReinsertShimStuck(t *testing.T) {
 		t.Fatal("Remove returned false for present key")
 	}
 
-	r.ss.RLock()
-	after := r.ss.Ext().spawns.ShimStuck(key)
-	r.ss.RUnlock()
+	var after bool
+	r.ss.View(func(v sessView) {
+		after = v.Ext().spawns.ShimStuck(key)
+	})
 	if after {
 		t.Error("#2261: shimStuckOnReset[key] re-inserted by terminal Remove — unbounded map leak for one-shot keys")
 	}

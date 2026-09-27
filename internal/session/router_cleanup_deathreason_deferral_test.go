@@ -9,7 +9,7 @@ import (
 // R20260603-GO-8: deathReason must NOT be stamped on a session whose
 // process is replaced between pass-2 classification and the pass-3 kill
 // loop. Before the fix, storeAtomicString ran in pass-2 (before
-// re-verify), so a concurrent spawnSession would leave the freshly-alive
+// re-verify), so a concurrent spawn would leave the freshly-alive
 // session with a "stuck_running" deathReason visible on the dashboard.
 //
 // Strategy: set up a session that will be classified as stuck-running

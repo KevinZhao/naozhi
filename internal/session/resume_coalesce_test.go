@@ -9,13 +9,13 @@ import (
 
 // TestGetOrCreate_ResumeCoalesceNoDoubleClose pins #2221: concurrent
 // GetOrCreate on a DEAD session (isAlive()==false — a process attached but
-// exited, the StateSuspended mid-state) must not race two spawnSession calls
+// exited, the StateSuspended mid-state) must not race two spawns
 // onto the same in-flight done-channel.
 //
-// Before the fix the resume branch called spawnSession directly, bypassing the
+// Before the fix the resume branch spawned directly, bypassing the
 // spawningKeys coalesce guard the fresh-spawn path uses. The first caller
 // installed a per-spawn done-channel (reused=false); a concurrent caller's
-// spawnSession prologue then reused that same channel (reused=true) and both
+// spawn's reserve then reused that same channel (reused=true) and both
 // defers ran EndSpawn → close of an already-closed channel → panic
 // ("close of closed channel"). This is a process-killing panic, so the only
 // assertion needed is "the concurrent storm completes without panicking".
@@ -54,22 +54,23 @@ func TestGetOrCreate_ResumeCoalesceNoDoubleClose(t *testing.T) {
 // for #2221 deterministically: when a spawn is already in flight for a dead
 // session's key (spawningKeys[key] holds an unclosed channel), concurrent
 // GetOrCreate callers hitting the resume branch must PARK on that channel
-// rather than each call spawnSession. Parking is what guarantees a single
+// rather than each spawn. Parking is what guarantees a single
 // creator owns the done-channel close.
 //
 // We simulate the in-flight window the way ResetAndRecreate does: inject a
 // dead session, pre-install a guard channel in spawningKeys, then launch
 // concurrent GetOrCreate. None may return before the guard is closed; if one
-// did, it broke out of the wait loop into its own spawnSession — the exact
+// did, it broke out of the wait loop into its own spawn — the exact
 // foot-gun that produced the double-close.
 func TestGetOrCreate_DeadSessionParksOnInflightGuard(t *testing.T) {
 	r := newTestRouter(5)
 	key := "feishu:direct:dead-parks:general"
 	injectSession(r, key, newDeadProc())
 
-	r.ss.Lock()
-	guardCh := r.ss.Ext().spawns.BeginSpawn(key)
-	r.ss.Unlock()
+	var guardCh chan struct{}
+	r.ss.Update(func(tx sessTx) {
+		guardCh = tx.Ext().spawns.BeginSpawn(key)
+	})
 
 	const N = 5
 	var wg sync.WaitGroup
@@ -90,17 +91,17 @@ func TestGetOrCreate_DeadSessionParksOnInflightGuard(t *testing.T) {
 		t.Fatal("a concurrent GetOrCreate on a DEAD session returned BEFORE " +
 			"the in-flight guard was closed; the resume branch did not honour " +
 			"the spawningKeys coalesce guard (#2221 — it would race a second " +
-			"spawnSession onto the in-flight done-channel and double-close it)")
+			"the spawn onto the in-flight done-channel and double-close it)")
 	default:
 		// ok — all parked on guardCh
 	}
 
 	// Release the guard. Waiters wake, re-evaluate the loop, and (the dead
 	// session is still present, no in-flight marker) fall through to their own
-	// resume spawnSession, which fails fast against the nonexistent binary.
-	r.ss.Lock()
-	r.ss.Ext().spawns.EndSpawn(key, guardCh)
-	r.ss.Unlock()
+	// resume spawn, which fails fast against the nonexistent binary.
+	r.ss.Update(func(tx sessTx) {
+		tx.Ext().spawns.EndSpawn(key, guardCh)
+	})
 
 	done := make(chan struct{})
 	go func() {

@@ -27,7 +27,7 @@ func clearDirty(r *Router) {
 func TestClearUserLabelOrigin_MarksTheStoreDirty(t *testing.T) {
 	r := newTestRouter(4)
 	const key = "feishu:direct:label-clear:general"
-	injectLocked(r, key, newIdleProc())
+	injectSession(r, key, newIdleProc())
 	r.SetUserLabel(key, "mine")
 	clearDirty(r)
 
@@ -44,7 +44,7 @@ func TestClearUserLabelOrigin_MarksTheStoreDirty(t *testing.T) {
 func TestRegisterCronStub_LeavesALiveSessionAlone(t *testing.T) {
 	r := newTestRouter(4)
 	const key = "cron:live-refresh"
-	s := injectLocked(r, key, newIdleProc())
+	s := injectSession(r, key, newIdleProc())
 	s.setWorkspace("/srv/running")
 
 	r.RegisterCronStub(key, "/srv/reloaded", "prompt")
@@ -59,7 +59,7 @@ func TestTakeover_ReplacingALiveSessionKeepsTheActiveCount(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	r := spawnRouter(t, 4, func(context.Context, cli.SpawnOptions) (processIface, error) { return newIdleProc(), nil })
 	const key = "feishu:direct:takeover-live:general"
-	injectLocked(r, key, newIdleProc())
+	injectSession(r, key, newIdleProc())
 
 	if _, err := r.Takeover(context.Background(), key, "sess-external", t.TempDir(), AgentOpts{}); err != nil {
 		t.Fatalf("Takeover: %v", err)
@@ -115,7 +115,7 @@ func TestSessionPicks_CapAndRoundTrip(t *testing.T) {
 // workspace from the discovery scan.
 func TestDiscoveryExclusions_CoverTheWholeChainAndLiveWorkspaces(t *testing.T) {
 	r := newTestRouter(4)
-	s := injectLocked(r, "feishu:direct:exclude:general", newIdleProc())
+	s := injectSession(r, "feishu:direct:exclude:general", newIdleProc())
 	s.setSessionID("sess-cur")
 	s.setWorkspace("/srv/live")
 	r.ss.Update(func(tx sessTx) { s.prevSessionIDs = []string{"sess-old"} })
@@ -133,7 +133,7 @@ func TestDiscoveryExclusions_CoverTheWholeChainAndLiveWorkspaces(t *testing.T) {
 // TestRetireAutoChainOnce_MarksTheStoreDirty: a stripped chain is persisted.
 func TestRetireAutoChainOnce_MarksTheStoreDirty(t *testing.T) {
 	r := newTestRouter(4)
-	s := injectLocked(r, "feishu:direct:retire:general", nil)
+	s := injectSession(r, "feishu:direct:retire:general", nil)
 	s.historyMu.Lock()
 	s.prevSessionIDs = []string{"real", "auto-x"}
 	s.prevSessionOrigins = []string{"manual", "auto-spawn"}
