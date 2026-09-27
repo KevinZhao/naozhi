@@ -84,9 +84,7 @@ func (a *adoptedTurn) arm() {
 func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event) {
 	switch {
 	case midTurn:
-		p.mu.Lock()
-		p.state = StateRunning
-		p.mu.Unlock()
+		p.transition(evReconnectMidTurn)
 		p.reconnectedMidTurn.Store(true)
 		p.adopted.arm()
 	case finished != nil:

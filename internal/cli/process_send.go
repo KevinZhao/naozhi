@@ -95,21 +95,14 @@ func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEnt
 // tool-activity heartbeat, not "new content". Full-stream consumers use
 // ring.EventLog.Subscribe; Send logs every event under the same lock, nothing is lost.
 func (p *Process) Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
-	p.mu.Lock()
-	if p.state == StateRunning {
-		p.mu.Unlock()
-		return nil, fmt.Errorf("process busy (state=%s): %w", p.state, clierr.ErrProcessBusy)
+	switch prev, claimed := p.transition(evSendBegin); {
+	case claimed:
+	case prev == StateDead:
+		return nil, fmt.Errorf("process dead: %w", clierr.ErrProcessExited)
+	default:
+		return nil, fmt.Errorf("process busy (state=%s): %w", prev, clierr.ErrProcessBusy)
 	}
-	p.state = StateRunning
-	p.mu.Unlock()
-
-	defer func() {
-		p.mu.Lock()
-		if p.state == StateRunning {
-			p.state = StateReady
-		}
-		p.mu.Unlock()
-	}()
+	defer p.transition(evSendEnd)
 
 	// Drain stale events from a previous turn that completed with no Send()
 	// active (readLoop already logged them). After a SIGINT the CLI may still be
@@ -348,12 +341,15 @@ func (p *Process) InterruptViaControl() error {
 	if err := p.protocol.WriteInterrupt(p.shimStdinWriter(), reqID); err != nil {
 		// Nothing reached the CLI, so no trailing result to drain. Roll back ONLY
 		// the flags we CAS'd — a concurrent Interrupt() that won owns its flag.
+		// Under mu, like every other write of the pair.
+		p.mu.Lock()
 		if iSet {
 			p.interrupted.Store(false)
 		}
 		if rSet {
 			p.interruptedRun.Store(false)
 		}
+		p.mu.Unlock()
 		return fmt.Errorf("write interrupt control_request: %w", err)
 	}
 	return nil

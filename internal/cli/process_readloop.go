@@ -156,13 +156,7 @@ func (p *Process) readLoop() {
 			log.Error("readLoop panic recovered",
 				"panic", r, "stack", string(debug.Stack()))
 			p.setDeathReason(DeathReasonReadLoopPanic)
-			p.mu.Lock()
-			p.state = StateDead
-			cb := p.onTurnDone
-			p.mu.Unlock()
-			if cb != nil {
-				cb()
-			}
+			p.die()
 			// Unblock SendPassthrough callers parked on slot.resultCh/errCh;
 			// they don't consume eventCh, so the deferred close(eventCh) alone
 			// would leave them blocked until the totalTimeout+30s tripwire.
@@ -419,13 +413,7 @@ func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 // what unblocked us). Deliberately does NOT call setDeathReason or
 // closeShimConn so each caller keeps its own classification + cleanup contract.
 func (p *Process) transitionToDead() {
-	p.mu.Lock()
-	p.state = StateDead
-	cb := p.onTurnDone
-	p.mu.Unlock()
-	if cb != nil {
-		cb()
-	}
+	p.die()
 	// Passthrough slot cleanup: every pending slot's caller is blocked inside
 	// SendPassthrough waiting on resultCh/errCh. Fire clierr.ErrProcessExited so they
 	// unblock with a clear error.
@@ -634,10 +622,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		// keeps Send and the latch from both owning one result.
 		p.adopted.resolveResult(ev)
 		p.mu.Lock()
-		wasRunning := p.state == StateRunning
-		if wasRunning {
-			p.state = StateReady
-		}
+		_, wasRunning := p.transitionLocked(evTurnEnded)
 		cb := p.onTurnDone
 		p.mu.Unlock()
 		if wasRunning && cb != nil {
@@ -713,13 +698,7 @@ func (p *Process) deliverEvent(ev clievent.Event, now time.Time, log *slog.Logge
 	select {
 	case <-p.killCh:
 		p.setDeathReason(DeathReasonKilled)
-		p.mu.Lock()
-		p.state = StateDead
-		cb := p.onTurnDone
-		p.mu.Unlock()
-		if cb != nil {
-			cb()
-		}
+		p.die()
 		// Unblock any passthrough SendPassthrough callers immediately.
 		// The defer at readLoop end also calls discardAllPending, but
 		// that runs after we drain any remaining stdin frames — a kill
