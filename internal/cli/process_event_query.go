@@ -89,8 +89,7 @@ func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 // calls SetContext). OnResolve writes the resolved (internal_agent_id,
 // jsonl_path, first_prompt_id) back onto the matching EventEntry for persistHistory.
 func (p *Process) InitLinker(cwd string) {
-	p.cwd = cwd
-	p.cachedProjectDir = subagent.ProjectDir(cwd)
+	p.setProjectDir(subagent.ProjectDir(cwd))
 	p.linker = subagent.NewLinker()
 	// Bind the resolve pool lifetime to the process-scoped ctx up front so it
 	// never captures a DispatchResolve caller's per-request ctx (#1661).
@@ -124,9 +123,8 @@ func (p *Process) SetCwdForLinker(cwd string) {
 	if p.linker == nil || cwd == "" {
 		return
 	}
-	p.cwd = cwd
 	projectDir := subagent.ProjectDir(cwd)
-	p.cachedProjectDir = projectDir
+	p.setProjectDir(projectDir)
 	session := p.linker.ParentSessionID()
 	// The wrapper sets proc.sessionID from Hello BEFORE any live init; mirror it so
 	// Resolve works immediately on replayed tasks (a later init updates it via
@@ -135,6 +133,17 @@ func (p *Process) SetCwdForLinker(cwd string) {
 		session = sid
 	}
 	p.linker.SetContext(projectDir, session)
+}
+
+func (p *Process) setProjectDir(dir string) { p.projectDir.Store(&dir) }
+
+// linkerProjectDir is the project dir the linker resolves transcripts in, ""
+// when none is known yet.
+func (p *Process) linkerProjectDir() string {
+	if d := p.projectDir.Load(); d != nil {
+		return *d
+	}
+	return ""
 }
 
 // EventEntries returns a copy of all event log entries.
