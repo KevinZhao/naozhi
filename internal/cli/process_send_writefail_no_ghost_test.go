@@ -63,13 +63,12 @@ func (writeMessageFailingProtocol) HandleEvent(_ io.Writer, _ clievent.Event) bo
 func TestProcess_Send_WriteMessageFail_NoGhostUserEntry(t *testing.T) {
 	proto := writeMessageFailingProtocol{}
 	p := &Process{
-		protocol:    proto,
-		caps:        ProtocolCaps(proto),
-		state:       StateReady,
-		eventCh:     make(chan clievent.Event, 8),
-		done:        make(chan struct{}),
-		eventLog:    ring.NewEventLog(0),
-		stdinWriter: nil, // unused: WriteMessage returns before touching the writer
+		protocol: proto,
+		caps:     ProtocolCaps(proto),
+		state:    StateReady,
+		eventCh:  make(chan clievent.Event, 8),
+		done:     make(chan struct{}),
+		eventLog: ring.NewEventLog(0),
 	}
 
 	_, err := p.Send(context.Background(), "ghost-message-text", nil, nil)

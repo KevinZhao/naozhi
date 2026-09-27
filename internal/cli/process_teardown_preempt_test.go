@@ -31,10 +31,10 @@ func TestProcess_TeardownPreemptsPinnedWriter(t *testing.T) {
 			t.Cleanup(func() { srv.conn.Close() })
 
 			sent := make(chan error, 1)
-			go func() { sent <- p.shimSend(shimClientMsg{Type: "ping"}) }()
+			go func() { sent <- p.link.send(shimClientMsg{Type: "ping"}) }()
 			testhelper.Eventually(t, func() bool {
-				if p.shimWMu.TryLock() {
-					p.shimWMu.Unlock()
+				if p.link.wMu.TryLock() {
+					p.link.wMu.Unlock()
 					return false
 				}
 				return true

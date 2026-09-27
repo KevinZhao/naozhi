@@ -1095,11 +1095,8 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 		// bufio.ReadBytes never observes it. For a shim-backed reader, poke the
 		// net.Conn read deadline so ReadBytes returns i/o timeout and the
 		// goroutine exits instead of lingering for the connection's lifetime.
-		if sl, ok := rw.R.(*shimLineReader); ok && sl.proc != nil && sl.proc.shimConn != nil {
-			// Pulse then clear the deadline so later shimConn operations are not
-			// prematurely cancelled; the reader observing an error is all we need.
-			_ = sl.proc.shimConn.SetReadDeadline(time.Now())
-			_ = sl.proc.shimConn.SetReadDeadline(time.Time{})
+		if sl, ok := rw.R.(*shimLineReader); ok && sl.proc != nil {
+			sl.proc.link.pulseReadDeadline()
 		}
 		// Non-shim readers (no SetReadDeadline hook) leak the goroutine until the
 		// ACP process pipe closes — known limitation, no fix designed yet.

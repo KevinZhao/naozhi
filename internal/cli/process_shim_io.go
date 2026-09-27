@@ -4,9 +4,9 @@ package cli
 // encoder pool primitives (encodeShimMsg / returnShimSendEnc). Pool lifetime
 // MUST share this file with shimWriter or buffers escape their owner's scope.
 //
-// Lock ordering invariant: shimWriter.mu -> Process.shimWMu. Callers that
-// already hold p.shimWMu must NOT go through shimWriter.Write — use
-// shimSendLocked instead.
+// Lock ordering invariant: shimWriter.mu -> shimLink.wMu. Callers that
+// already hold wMu (withWriteLock) must NOT go through shimWriter.Write — use
+// sendLocked instead.
 
 import (
 	"bytes"
@@ -20,11 +20,12 @@ import (
 
 // shimWriter wraps shim protocol write commands as an io.Writer. Thread-safe:
 // readLoop (HandleEvent) and Send (WriteMessage) may call concurrently. Write()
-// holds w.mu then takes p.shimWMu via shimSend — see the file header ordering.
+// holds w.mu then takes the link's wMu via sendLine — see the file header
+// ordering.
 type shimWriter struct {
-	p   *Process
-	mu  sync.Mutex
-	buf bytes.Buffer
+	link *shimLink
+	mu   sync.Mutex
+	buf  bytes.Buffer
 }
 
 func (w *shimWriter) Write(data []byte) (int, error) {
@@ -38,8 +39,8 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 		if len(data)-1 > maxStdinLineBytes {
 			return 0, fmt.Errorf("%w: %d bytes > %d", clierr.ErrMessageTooLarge, len(data)-1, maxStdinLineBytes)
 		}
-		// shimSendLine quotes the bytes directly into a pooled buffer (no string alloc).
-		if err := w.p.shimSendLine(data[:len(data)-1]); err != nil {
+		// sendLine quotes the bytes directly into a pooled buffer (no string alloc).
+		if err := w.link.sendLine(data[:len(data)-1]); err != nil {
 			return 0, err
 		}
 		return len(data), nil
@@ -90,7 +91,7 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 			consumed += len(line)
 			continue
 		}
-		if err := w.p.shimSendLine(line[:len(line)-1]); err != nil {
+		if err := w.link.sendLine(line[:len(line)-1]); err != nil {
 			// The failed line was already consumed; leaving the remainder would stitch
 			// a corrupted message on retry.
 			w.buf.Reset()
@@ -114,7 +115,7 @@ type shimClientMsg struct {
 }
 
 // shimSendEnc pairs a pooled bytes.Buffer with a json.Encoder bound to it so
-// the hot shimSend path has zero encoder allocations. The Encoder holds the
+// the hot send path has zero encoder allocations. The Encoder holds the
 // buffer by pointer, so resetting it between uses is safe.
 type shimSendEnc struct {
 	buf *bytes.Buffer
@@ -134,7 +135,7 @@ var shimSendBufPool = sync.Pool{
 
 // encodeShimMsg marshals msg into a pooled buffer with HTML escaping disabled.
 // Caller MUST return it via returnShimSendEnc after Write+Flush. Encoding
-// outside the write lock keeps shimWMu held only for the socket write, so a
+// outside the write lock keeps wMu held only for the socket write, so a
 // 400KB thumbnail does not serialize ping/interrupt on the encoder.
 func encodeShimMsg(msg shimClientMsg) (*shimSendEnc, error) {
 	se := shimSendBufPool.Get().(*shimSendEnc)
@@ -160,32 +161,33 @@ func returnShimSendEnc(se *shimSendEnc) {
 	shimSendBufPool.Put(se)
 }
 
-func (p *Process) shimSend(msg shimClientMsg) error {
+// send writes msg to the shim.
+func (l *shimLink) send(msg shimClientMsg) error {
 	se, err := encodeShimMsg(msg)
 	if err != nil {
 		return err
 	}
 	defer returnShimSendEnc(se)
 
-	p.shimWMu.Lock()
-	defer p.shimWMu.Unlock()
-	if _, err := p.shimW.Write(se.buf.Bytes()); err != nil {
+	l.wMu.Lock()
+	defer l.wMu.Unlock()
+	if _, err := l.w.Write(se.buf.Bytes()); err != nil {
 		return err
 	}
-	return p.shimW.Flush()
+	return l.w.Flush()
 }
 
 // shimWriteLineFramePrefix / shimWriteLineFrameSuffix bracket the "write"
-// envelope shimSendLine builds; the line is JSON-quoted between them.
+// envelope sendLine builds; the line is JSON-quoted between them.
 var (
 	shimWriteLineFramePrefix = []byte(`{"type":"write","line":`)
 	shimWriteLineFrameSuffix = []byte("}\n")
 )
 
-// shimSendLine writes a "write" frame whose line field is the given bytes —
-// wire-equivalent to shimSend(shimClientMsg{Type: "write", Line: string(line)})
+// sendLine writes a "write" frame whose line field is the given bytes —
+// wire-equivalent to send(shimClientMsg{Type: "write", Line: string(line)})
 // minus the per-frame string alloc: bytes are quoted straight into a pooled buffer.
-func (p *Process) shimSendLine(line []byte) error {
+func (l *shimLink) sendLine(line []byte) error {
 	bp := shimSendBufPool.Get().(*shimSendEnc)
 	defer returnShimSendEnc(bp)
 	bp.buf.Reset()
@@ -197,12 +199,12 @@ func (p *Process) shimSendLine(line []byte) error {
 	bp.buf.Write(line2)
 	bp.buf.Write(shimWriteLineFrameSuffix)
 
-	p.shimWMu.Lock()
-	defer p.shimWMu.Unlock()
-	if _, err := p.shimW.Write(bp.buf.Bytes()); err != nil {
+	l.wMu.Lock()
+	defer l.wMu.Unlock()
+	if _, err := l.w.Write(bp.buf.Bytes()); err != nil {
 		return err
 	}
-	return p.shimW.Flush()
+	return l.w.Flush()
 }
 
 // appendJSONStringBytes appends a JSON string literal of s to dst, mirroring
@@ -287,29 +289,29 @@ func appendJSONStringBytes(dst, s []byte) []byte {
 // every 30s per live process. The trailing '\n' is mandatory NDJSON framing.
 var shimPingBytes = []byte(`{"type":"ping"}` + "\n")
 
-// shimSendRaw writes a pre-marshalled shim wire frame. The caller MUST
+// sendRaw writes a pre-marshalled shim wire frame. The caller MUST
 // guarantee data is a valid NDJSON record (typically a package-level constant).
-func (p *Process) shimSendRaw(data []byte) error {
-	p.shimWMu.Lock()
-	defer p.shimWMu.Unlock()
-	if _, err := p.shimW.Write(data); err != nil {
+func (l *shimLink) sendRaw(data []byte) error {
+	l.wMu.Lock()
+	defer l.wMu.Unlock()
+	if _, err := l.w.Write(data); err != nil {
 		return err
 	}
-	return p.shimW.Flush()
+	return l.w.Flush()
 }
 
-// shimSendLocked is the locked variant of shimSend. The caller MUST hold
-// p.shimWMu. Kill() uses this to batch SetWriteDeadline+send+Close under a
-// single lock acquisition to avoid racing a concurrent shimSend.
-func (p *Process) shimSendLocked(msg shimClientMsg) error {
+// sendLocked is send for a caller inside withWriteLock. Teardown uses it to
+// batch deadline + send + close under one lock hold, so no concurrent sender
+// flushes into a closing conn.
+func (l *shimLink) sendLocked(msg shimClientMsg) error {
 	se, err := encodeShimMsg(msg)
 	if err != nil {
 		return err
 	}
 	defer returnShimSendEnc(se)
 
-	if _, err := p.shimW.Write(se.buf.Bytes()); err != nil {
+	if _, err := l.w.Write(se.buf.Bytes()); err != nil {
 		return err
 	}
-	return p.shimW.Flush()
+	return l.w.Flush()
 }

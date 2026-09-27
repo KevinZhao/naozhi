@@ -54,7 +54,7 @@ type Protocol interface {
 	WriteMessage(w io.Writer, text string, images []clievent.Attachment) error
 
 	// WriteUserMessageLocked is the passthrough-aware writer; the caller MUST
-	// hold Process.shimWMu so Process.Send can append the sendSlot and write
+	// hold the shim link's write lock so Process.Send can append the sendSlot and write
 	// the NDJSON line under one mutex — otherwise concurrent Sends interleave
 	// and break FIFO matching (docs/rfc/passthrough-mode.md §5.2.2).
 	WriteUserMessageLocked(w io.Writer, uuid, text string, images []clievent.Attachment, priority string) error

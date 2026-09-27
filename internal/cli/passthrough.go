@@ -72,25 +72,28 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 		enqueueAt: time.Now(),
 	}
 
-	// Lock order: shimWMu → slotsMu (the only place both are taken). Holding
-	// shimWMu across append+write guarantees pendingSlots order equals the
-	// order lines hit the shim socket; otherwise two concurrent sends could
-	// invert them and break FIFO turn-result attribution.
-	p.shimWMu.Lock()
-	p.slotsMu.Lock()
-
-	if len(p.pendingSlots) >= maxPendingSlots {
+	// Lock order: the link's write lock → slotsMu (the only place both are
+	// taken). Holding the write lock across append+write guarantees
+	// pendingSlots order equals the order lines hit the shim socket;
+	// otherwise two concurrent sends could invert them and break FIFO
+	// turn-result attribution.
+	queued := true
+	writeErr := p.link.withWriteLock(func() error {
+		p.slotsMu.Lock()
+		if len(p.pendingSlots) >= maxPendingSlots {
+			p.slotsMu.Unlock()
+			queued = false
+			return nil
+		}
+		p.pendingSlots = append(p.pendingSlots, slot)
 		p.slotsMu.Unlock()
-		p.shimWMu.Unlock()
+		// stdinWriter (shimWriter) would re-acquire the write lock and
+		// deadlock, so write through a helper that uses sendLocked.
+		return p.writeUserMessageUnderShimLock(slot.uuid, text, images, priority)
+	})
+	if !queued {
 		return nil, clierr.ErrTooManyPending
 	}
-	p.pendingSlots = append(p.pendingSlots, slot)
-	p.slotsMu.Unlock()
-
-	// stdinWriter (shimWriter) would re-acquire shimWMu via shimSend and
-	// deadlock, so write through a helper that reuses shimSendLocked.
-	writeErr := p.writeUserMessageUnderShimLock(slot.uuid, text, images, priority)
-	p.shimWMu.Unlock()
 
 	if writeErr != nil {
 		// CLI never saw this message; FIFO is intact because nothing was
@@ -141,9 +144,9 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 }
 
 // writeUserMessageUnderShimLock writes one NDJSON user-message line directly
-// to the shim via a pooled capture writer + shimSendLocked, bypassing
-// shimWriter's fast path that would re-acquire shimWMu. Caller MUST hold
-// shimWMu.
+// to the shim via a pooled capture writer + sendLocked, bypassing
+// shimWriter's fast path that would re-acquire the write lock. Caller MUST
+// be inside the link's withWriteLock.
 func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []clievent.Attachment, priority string) error {
 	cw := captureWriterPool.Get().(*captureWriter)
 	cw.bytes = cw.bytes[:0]
@@ -167,7 +170,7 @@ func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []c
 		return fmt.Errorf("%w: %d bytes > %d", clierr.ErrMessageTooLarge, len(line), maxStdinLineBytes)
 	}
 	// string(line) copies, so the pooled buffer is free to reuse after Put.
-	return p.shimSendLocked(shimClientMsg{Type: "write", Line: string(line)})
+	return p.link.sendLocked(shimClientMsg{Type: "write", Line: string(line)})
 }
 
 // captureWriter is an io.Writer that accumulates bytes into an in-memory

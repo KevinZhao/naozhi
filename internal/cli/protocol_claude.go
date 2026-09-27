@@ -352,7 +352,7 @@ func putUserMsgEnc(e *userMsgEnc) {
 }
 
 // WriteUserMessageLocked writes a user message with optional uuid + priority.
-// Caller must already hold Process.shimWMu (see protocol.go interface doc).
+// Caller must already hold the shim link's write lock (see protocol.go interface doc).
 // Empty uuid / priority are omitted (omitempty), so the payload is identical to
 // the plain WriteMessage path when both are empty.
 func (p *ClaudeProtocol) WriteUserMessageLocked(w io.Writer, uuid, text string, images []clievent.Attachment, priority string) error {

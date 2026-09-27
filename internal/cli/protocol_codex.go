@@ -592,9 +592,8 @@ func (p *CodexProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessa
 	case <-timer.C:
 		done.Store(true)
 		// Mirror ACP's read-deadline pulse so a reader parked in bufio.ReadBytes unblocks.
-		if sl, ok := rw.R.(*shimLineReader); ok && sl.proc != nil && sl.proc.shimConn != nil {
-			_ = sl.proc.shimConn.SetReadDeadline(time.Now())
-			_ = sl.proc.shimConn.SetReadDeadline(time.Time{})
+		if sl, ok := rw.R.(*shimLineReader); ok && sl.proc != nil {
+			sl.proc.link.pulseReadDeadline()
 		}
 		// Non-shim readers leak the goroutine until the pipe closes (same limitation as ACP).
 		return nil, fmt.Errorf("%w (id=%d)", ErrCodexTimeout, expectedID)

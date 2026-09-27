@@ -30,7 +30,7 @@ func TestProcess_Kill_SendsSIGUSR2ToShim(t *testing.T) {
 	t.Cleanup(func() { signal.Stop(sigCh) })
 
 	p, _ := shimTestPair(&ClaudeProtocol{})
-	p.shimPID = os.Getpid()
+	p.link.shimPID = os.Getpid()
 
 	p.Kill()
 
@@ -56,8 +56,8 @@ func TestProcess_Kill_NoSIGUSR2WhenShimPIDZero(t *testing.T) {
 	t.Cleanup(func() { signal.Stop(sigCh) })
 
 	p, _ := shimTestPair(&ClaudeProtocol{})
-	if p.shimPID != 0 {
-		t.Fatalf("precondition: shimPID = %d, want 0", p.shimPID)
+	if p.link.shimPID != 0 {
+		t.Fatalf("precondition: shimPID = %d, want 0", p.link.shimPID)
 	}
 
 	p.Kill()

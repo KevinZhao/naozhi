@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"io"
 	"log/slog"
 	"net"
 	"strings"
@@ -78,18 +77,11 @@ func (s ProcessState) String() string {
 
 // Process manages a CLI subprocess via a shim connection.
 type Process struct {
-	shimConn net.Conn
-	// shimCloseOnce serialises shimConn.Close across Kill / Detach / Close /
-	// readLoop EOF so a racing second Close never logs a misleading error.
-	shimCloseOnce sync.Once
-	shimR         *bufio.Reader
-	shimW         *bufio.Writer
-	shimWMu       sync.Mutex
-	stdinWriter   *shimWriter // cached shimStdinWriter instance
-	protocol      Protocol
-	caps          Caps // cached protocol capabilities (immutable after construction)
-	cliPID        int  // CLI PID reported by shim hello
-	shimPID       int  // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
+	// link is the connection to the shim (socket, reader, writer, PIDs,
+	// heartbeat, replay cursor).
+	link     shimLink
+	protocol Protocol
+	caps     Caps // cached protocol capabilities (immutable after construction)
 
 	// sessionID and state are protected by mu. Readers MUST use SessionID() /
 	// State() rather than the fields directly to avoid racing readLoop's
@@ -143,8 +135,6 @@ type Process struct {
 	// so the owning Wrapper can refresh the global dashboard banner. Assigned once
 	// before startReadLoop (no lock); nil for &Process{} test fixtures.
 	onLiveVersion func(string)
-	lastSeq       atomic.Int64  // last received shim seq, for reconnect
-	pongRecv      chan struct{} // signaled by readLoop on pong receipt
 
 	// readEventBuf is a reusable backing array for ReadEventInto (#1676), owned
 	// exclusively by handleShimStdout on the readLoop goroutine and consumed within
@@ -186,7 +176,7 @@ type Process struct {
 	// Passthrough slot machinery: with SendPassthrough, readLoop routes results
 	// through fanoutTurnResult instead of eventCh (legacy Send leaves pendingSlots
 	// nil). Lock ordering (docs/rfc/passthrough-mode.md §5.2.6):
-	//   shimWMu → slotsMu  (Send path; append slot + write stdin atomically)
+	//   link write lock → slotsMu  (Send path; append slot + write stdin atomically)
 	//   slotsMu alone      (readLoop, cancel, reconnect)
 	slotsMu          sync.Mutex
 	pendingSlots     []*sendSlot // FIFO by stdin write order
@@ -320,13 +310,8 @@ func (p *Process) lifecycleContext() context.Context {
 func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 	proto Protocol, cliPID, shimPID int, noOutputTimeout, totalTimeout time.Duration) *Process {
 	p := &Process{
-		shimConn: conn,
-		shimR:    reader,
-		shimW:    writer,
 		protocol: proto,
 		caps:     ProtocolCaps(proto),
-		cliPID:   cliPID,
-		shimPID:  shimPID,
 		state:    StateSpawning,
 		// 1024 so a TeamCreate fan-out (8 subagents × ~5 events/s) cannot fill the
 		// buffer before Send() drains it; drops force the findResultSince fallback (#1355).
@@ -336,19 +321,9 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		noOutputTimeout: noOutputTimeout,
 		totalTimeout:    totalTimeout,
 		eventLog:        ring.NewEventLog(0),
-		// maxMisses+1 so a heartbeatLoop scheduler stall cannot drop pongs
-		// (readLoop's pong arm is non-blocking) and miscount a healthy shim.
-		pongRecv: make(chan struct{}, 4),
 	}
-	p.stdinWriter = &shimWriter{p: p}
+	p.link.init(conn, reader, writer, cliPID, shimPID)
 	return p
-}
-
-// shimStdinWriter returns the io.Writer feeding CLI stdin via the shim. Same
-// instance each call (preserves buffered partial lines); initialised eagerly in
-// newShimProcess so readLoop and Send cannot race a lazy init on reconnect.
-func (p *Process) shimStdinWriter() io.Writer {
-	return p.stdinWriter
 }
 
 // startReadLoop begins the shim message reader goroutine and heartbeat.
@@ -390,28 +365,17 @@ func (p *Process) Kill() {
 	p.killOnce.Do(func() {
 		close(p.killCh)
 		// Best-effort kill with a short deadline (the shim's disconnect watchdog
-		// is the fallback). Hold shimWMu across deadline + send + Close: bufio.Writer
-		// is not safe against a concurrent Close()+Flush from heartbeat/interrupt.
-		p.preemptPinnedWriter(time.Second)
-		p.shimWMu.Lock()
-		// Skip the write if the deadline can't be set: without one shimSendLocked
-		// can block until TCP keepalive expires (minutes), starving shimWMu.
-		if err := p.shimConn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
-			slog.Debug("kill: SetWriteDeadline failed, skipping shim kill send", "err", err)
-		} else {
-			if err := p.shimSendLocked(shimClientMsg{Type: "kill"}); err != nil {
-				slog.Debug("kill: shimSend failed", "err", err)
-			}
+		// is the fallback).
+		if err := p.link.sendFinal(shimClientMsg{Type: "kill"}, time.Second, true); err != nil {
+			slog.Debug("kill: shim kill send failed", "err", err)
 		}
-		p.closeShimConn()
-		p.shimWMu.Unlock()
 
-		if p.shimPID > 0 {
+		if p.link.shimPID > 0 {
 			// A failing Signal (shim already gone) is fine — Discover's stat-check
 			// reaps the socket within 30s. No-op on Windows (shim is POSIX-only).
-			if err := osutil.SendShimReload(p.shimPID); err != nil {
+			if err := osutil.SendShimReload(p.link.shimPID); err != nil {
 				slog.Debug("kill: SendShimReload failed (likely already exited)",
-					"shim_pid", p.shimPID, "err", err)
+					"shim_pid", p.link.shimPID, "err", err)
 			}
 		}
 	})
@@ -425,23 +389,10 @@ func (p *Process) Kill() {
 // "close_stdin" leaves the shim listening for up to 30s and trips "refusing to
 // clobber" on fast Reset+Recreate. To keep the shim alive, use Detach().
 func (p *Process) Close() {
-	// Short write deadline under shimWMu: a live shim with a full TCP buffer
-	// would otherwise pin shimWMu until OS keepalive (minutes), stalling
+	// Short write deadline: a live shim with a full TCP buffer would otherwise
+	// pin the write lock until OS keepalive (minutes), stalling
 	// heartbeat/interrupt and Router shutdown past SIGTERM grace.
-	p.preemptPinnedWriter(2 * time.Second)
-	p.shimWMu.Lock()
-	if err := p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		p.shimWMu.Unlock()
-		p.Kill()
-		return
-	}
-	sendErr := p.shimSendLocked(shimClientMsg{Type: "shutdown"})
-	// Clear the deadline *before* releasing shimWMu so a concurrent heartbeat
-	// ping cannot inherit it, see a stale i/o timeout and Kill() — bypassing the
-	// graceful teardown. Failure is harmless (zero-time means "no deadline").
-	_ = p.shimConn.SetWriteDeadline(time.Time{})
-	p.shimWMu.Unlock()
-	if sendErr != nil {
+	if sendErr := p.link.sendFinal(shimClientMsg{Type: "shutdown"}, 2*time.Second, false); sendErr != nil {
 		// The shim will not process the shutdown; waiting processCloseTimeout on
 		// <-p.done would only double teardown latency. Fall through to Kill().
 		p.Kill()
@@ -452,7 +403,7 @@ func (p *Process) Close() {
 	select {
 	case <-p.done:
 	case <-timer.C:
-		slog.Warn("process close timeout, force killing", "pid", p.cliPID)
+		slog.Warn("process close timeout, force killing", "pid", p.link.cliPID)
 		p.Kill()
 	}
 }
@@ -461,48 +412,9 @@ func (p *Process) Close() {
 // shutdown). A short write deadline keeps Router.Shutdown's wg.Wait() from
 // being pinned for minutes by a dead/slow socket during SIGTERM handling.
 func (p *Process) Detach() {
-	p.preemptPinnedWriter(2 * time.Second)
-	p.shimWMu.Lock()
-	// Skip the send if the deadline can't be set: without one shimSendLocked
-	// can block until TCP keepalive expires. Same pattern as Kill().
-	if err := p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		slog.Debug("detach: SetWriteDeadline failed, skipping shim detach send", "err", err)
-	} else {
-		if err := p.shimSendLocked(shimClientMsg{Type: "detach"}); err != nil {
-			slog.Debug("detach: shimSend failed", "err", err)
-		}
+	if err := p.link.sendFinal(shimClientMsg{Type: "detach"}, 2*time.Second, true); err != nil {
+		slog.Debug("detach: shim detach send failed", "err", err)
 	}
-	// Zero the deadline before closeShimConn so a parallel teardown path (Kill,
-	// heartbeat) cannot inherit it and hit a spurious i/o timeout.
-	_ = p.shimConn.SetWriteDeadline(time.Time{})
-	p.closeShimConn()
-	p.shimWMu.Unlock()
-}
-
-// preemptPinnedWriter bounds how long a teardown path waits for shimWMu.
-// shimSend and shimSendLine set no write deadline, because the shim copies
-// each frame into the CLI's stdin synchronously and a busy CLI backpressures
-// them legitimately. So a writer can sit on shimWMu for as long as the shim
-// has stopped reading. A write deadline on the conn also applies to a write
-// already blocked in it, so setting one before Lock makes that writer fail
-// within d and release the lock. Only teardown paths call this: the writer's
-// frame is cut short, which is harmless on a connection about to close.
-func (p *Process) preemptPinnedWriter(d time.Duration) {
-	if err := p.shimConn.SetWriteDeadline(time.Now().Add(d)); err != nil {
-		// A conn that refuses a deadline is already closed or broken, so any
-		// write blocked in it has failed already; there is nothing to preempt.
-		slog.Debug("teardown: write-deadline preempt failed", "err", err)
-	}
-}
-
-// closeShimConn closes p.shimConn at most once across all teardown paths so a
-// second concurrent Close never logs a misleading error.
-func (p *Process) closeShimConn() {
-	p.shimCloseOnce.Do(func() {
-		if err := p.shimConn.Close(); err != nil {
-			slog.Debug("shimConn close failed", "err", err)
-		}
-	})
 }
 
 // State returns the current process state.
@@ -659,7 +571,7 @@ func (p *Process) LiveVersion() string { return p.meter.LiveVersion() }
 
 // PID returns the CLI process ID (as reported by shim).
 func (p *Process) PID() int {
-	return p.cliPID
+	return p.link.cliPID
 }
 
 // TotalTimeout returns the configured total timeout for a single turn.
@@ -671,4 +583,4 @@ func (p *Process) TotalTimeout() time.Duration {
 }
 
 // LastSeq returns the last received shim sequence number (for reconnect).
-func (p *Process) LastSeq() int64 { return p.lastSeq.Load() }
+func (p *Process) LastSeq() int64 { return p.link.lastSeq.Load() }

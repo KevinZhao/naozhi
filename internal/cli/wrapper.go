@@ -556,7 +556,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 
 	// Protocol init handshake (stream-json: no-op; ACP: initialize + session/new)
 	rw := &JSONRW{
-		W: proc.shimStdinWriter(),
+		W: proc.link.stdinWriter(),
 		R: &shimLineReader{proc: proc},
 	}
 	sessionID, err := proto.Init(rw, opts.ResumeID, opts.WorkingDir)
@@ -733,7 +733,7 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 		// Accumulate ReadSlice chunks under maxScannerBufBytes (#2183).
 		var rawLine []byte
 		for {
-			chunk, err := r.proc.shimR.ReadSlice('\n')
+			chunk, err := r.proc.link.r.ReadSlice('\n')
 			if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
 				// A partial chunk on a terminal error is useless; the connection is going away.
 				return nil, true, err
