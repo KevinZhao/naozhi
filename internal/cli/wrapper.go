@@ -569,12 +569,12 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		return nil, fmt.Errorf("protocol init: %w", err)
 	}
 	if sessionID != "" {
-		proc.sessionID = sessionID
+		proc.turn.sessionID = sessionID
 	}
 
 	// If shim already captured session_id from init event during startup
-	if handle.Hello.SessionID != "" && proc.sessionID == "" {
-		proc.sessionID = handle.Hello.SessionID
+	if handle.Hello.SessionID != "" && proc.turn.sessionID == "" {
+		proc.turn.sessionID = handle.Hello.SessionID
 	}
 
 	proc.startReadLoop()
@@ -625,7 +625,7 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	proc.SetOnLiveVersion(w.ObserveLiveVersion)
 
 	if handle.Hello.SessionID != "" {
-		proc.sessionID = handle.Hello.SessionID
+		proc.turn.sessionID = handle.Hello.SessionID
 	}
 
 	// Mid-turn detection: a last replayed event that is not a result means the CLI

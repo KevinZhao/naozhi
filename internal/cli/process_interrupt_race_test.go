@@ -57,7 +57,7 @@ func TestProcess_DrainStaleEvents_ConcurrentInterruptLossless(t *testing.T) {
 	var lostSignals atomic.Int64
 
 	// Producer: repeatedly mark (interrupted, interruptedRun) = (true, true)
-	// under p.mu, mirroring Interrupt()'s contract in the State==Running
+	// under p.turn.mu, mirroring Interrupt()'s contract in the State==Running
 	// branch. Under the pre-fix two-Swap code, this is the exact pattern
 	// that could leak: drain consumes interrupted from a prior Interrupt,
 	// producer re-Stores(true,true), drain consumes interruptedRun — and
@@ -73,10 +73,10 @@ func TestProcess_DrainStaleEvents_ConcurrentInterruptLossless(t *testing.T) {
 				return
 			default:
 			}
-			p.mu.Lock()
-			p.interrupted.Store(true)
-			p.interruptedRun.Store(true)
-			p.mu.Unlock()
+			p.turn.mu.Lock()
+			p.turn.interrupted.Store(true)
+			p.turn.interruptedRun.Store(true)
+			p.turn.mu.Unlock()
 			runtime.Gosched()
 		}
 	}()
@@ -103,16 +103,16 @@ func TestProcess_DrainStaleEvents_ConcurrentInterruptLossless(t *testing.T) {
 	// Consumer: after each drain, check the "half-consumed" invariant.
 	// The pre-fix code could leave (interrupted=false, interruptedRun=true)
 	// when a producer Stored(true,true) between drain's two Swaps. With the
-	// fix, both Swaps happen under p.mu — a concurrent producer is
+	// fix, both Swaps happen under p.turn.mu — a concurrent producer is
 	// serialised either entirely before or entirely after, never interleaved.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for i := 0; i < iterations; i++ {
 		_ = p.drainStaleEvents(ctx)
-		p.mu.Lock()
-		interrupted := p.interrupted.Load()
-		running := p.interruptedRun.Load()
-		p.mu.Unlock()
+		p.turn.mu.Lock()
+		interrupted := p.turn.interrupted.Load()
+		running := p.turn.interruptedRun.Load()
+		p.turn.mu.Unlock()
 		if !interrupted && running {
 			lostSignals.Add(1)
 		}
@@ -127,9 +127,9 @@ func TestProcess_DrainStaleEvents_ConcurrentInterruptLossless(t *testing.T) {
 	if err := p.drainStaleEvents(context.Background()); err != nil {
 		t.Errorf("final drainStaleEvents() err = %v", err)
 	}
-	if p.interrupted.Load() || p.interruptedRun.Load() {
+	if p.turn.interrupted.Load() || p.turn.interruptedRun.Load() {
 		t.Errorf("after quiescent drain: interrupted=%v run=%v, want both false",
-			p.interrupted.Load(), p.interruptedRun.Load())
+			p.turn.interrupted.Load(), p.turn.interruptedRun.Load())
 	}
 	if n := lostSignals.Load(); n > 0 {
 		t.Errorf("observed %d lost-signal windows (interrupted=false, interruptedRun=true); "+
@@ -167,8 +167,8 @@ func TestProcess_DrainStaleEvents_ClearsBothFlagsRegardlessOfEntry(t *testing.T)
 			p.startReadLoop()
 			defer p.Kill()
 
-			p.interrupted.Store(tc.interrupted)
-			p.interruptedRun.Store(tc.interruptedRun)
+			p.turn.interrupted.Store(tc.interrupted)
+			p.turn.interruptedRun.Store(tc.interruptedRun)
 
 			// When (true, true), drain enters the settle window and waits
 			// for a result event or timer. Feed it a synthetic result so
@@ -190,10 +190,10 @@ func TestProcess_DrainStaleEvents_ClearsBothFlagsRegardlessOfEntry(t *testing.T)
 			if err := p.drainStaleEvents(ctx); err != nil {
 				t.Fatalf("drainStaleEvents() err = %v", err)
 			}
-			if got := p.interrupted.Load(); got != tc.wantInterrupted {
+			if got := p.turn.interrupted.Load(); got != tc.wantInterrupted {
 				t.Errorf("interrupted = %v, want %v", got, tc.wantInterrupted)
 			}
-			if got := p.interruptedRun.Load(); got != tc.wantInterruptedRn {
+			if got := p.turn.interruptedRun.Load(); got != tc.wantInterruptedRn {
 				t.Errorf("interruptedRun = %v, want %v", got, tc.wantInterruptedRn)
 			}
 		})
@@ -204,7 +204,7 @@ func TestProcess_DrainStaleEvents_ClearsBothFlagsRegardlessOfEntry(t *testing.T)
 
 // TestDrainStaleEvents_SwapCallsAreUnderMu pins the fix at the source level:
 // both interrupted.Swap(false) and interruptedRun.Swap(false) must appear
-// inside drainStaleEvents between a p.mu.Lock()/Unlock() pair. If a future
+// inside drainStaleEvents between a p.turn.mu.Lock()/Unlock() pair. If a future
 // refactor moves either Swap outside the lock, the R39-CONCUR1 race reopens
 // and no behavioural test will reliably catch it — hence this static check.
 func TestDrainStaleEvents_SwapCallsAreUnderMu(t *testing.T) {
@@ -252,14 +252,14 @@ func TestDrainStaleEvents_SwapCallsAreUnderMu(t *testing.T) {
 	fnBody := rest[:end]
 
 	// Find the position of both Swap(false) calls and verify each sits
-	// between a `p.mu.Lock()` and a matching `p.mu.Unlock()` call that
+	// between a `p.turn.mu.Lock()` and a matching `p.turn.mu.Unlock()` call that
 	// appear earlier and later respectively in the function body.
 	type swap struct {
 		field string
 		at    int
 	}
 	var swaps []swap
-	for _, f := range []string{"p.interrupted.Swap(false)", "p.interruptedRun.Swap(false)"} {
+	for _, f := range []string{"p.turn.interrupted.Swap(false)", "p.turn.interruptedRun.Swap(false)"} {
 		pos := strings.Index(fnBody, f)
 		if pos < 0 {
 			t.Errorf("drainStaleEvents: %q not found — the fix may have been reverted or refactored; "+
@@ -273,10 +273,10 @@ func TestDrainStaleEvents_SwapCallsAreUnderMu(t *testing.T) {
 	}
 
 	// Find the nearest enclosing Lock/Unlock pair.
-	lockIdx := strings.Index(fnBody, "p.mu.Lock()")
-	unlockIdx := strings.Index(fnBody, "p.mu.Unlock()")
+	lockIdx := strings.Index(fnBody, "p.turn.mu.Lock()")
+	unlockIdx := strings.Index(fnBody, "p.turn.mu.Unlock()")
 	if lockIdx < 0 || unlockIdx < 0 {
-		t.Fatalf("drainStaleEvents must acquire p.mu around the Swap calls to keep the "+
+		t.Fatalf("drainStaleEvents must acquire p.turn.mu around the Swap calls to keep the "+
 			"Interrupt()/drain read path symmetric (R39-CONCUR1). Found Lock=%d Unlock=%d",
 			lockIdx, unlockIdx)
 	}
@@ -285,10 +285,10 @@ func TestDrainStaleEvents_SwapCallsAreUnderMu(t *testing.T) {
 	}
 	for _, s := range swaps {
 		if s.at < lockIdx || s.at > unlockIdx {
-			t.Errorf("drainStaleEvents: %q is outside the p.mu critical section "+
+			t.Errorf("drainStaleEvents: %q is outside the p.turn.mu critical section "+
 				"(lock at %d, unlock at %d, swap at %d). R39-CONCUR1 requires both Swap "+
-				"calls under p.mu so concurrent Interrupt() Store sequences (which "+
-				"run under p.mu per contract on lines 995-1001) cannot interleave.",
+				"calls under p.turn.mu so concurrent Interrupt() Store sequences (which "+
+				"run under p.turn.mu per contract on lines 995-1001) cannot interleave.",
 				s.field, lockIdx, unlockIdx, s.at)
 		}
 	}

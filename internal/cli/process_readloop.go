@@ -530,9 +530,9 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// ring.EventLog + eventCh so replay events don't pollute the dashboard
 	// transcript or trigger legacy result detection.
 	if ev.Type == "user" && ev.IsReplay {
-		p.slotsMu.Lock()
+		p.slots.mu.Lock()
 		p.handleReplayEventLocked(ev)
-		p.slotsMu.Unlock()
+		p.slots.mu.Unlock()
 		return false
 	}
 
@@ -542,10 +542,10 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// passthroughShouldFanOut. Legacy eventCh delivery still happens below.
 	// slotsMu is held only to snapshot owners — callbacks may block on Reply.
 	if ev.Type == "assistant" && p.caps.Replay && passthroughShouldFanOut(ev) {
-		p.slotsMu.Lock()
-		owners := make([]*sendSlot, len(p.currentTurnSlots))
-		copy(owners, p.currentTurnSlots)
-		p.slotsMu.Unlock()
+		p.slots.mu.Lock()
+		owners := make([]*sendSlot, len(p.slots.current))
+		copy(owners, p.slots.current)
+		p.slots.mu.Unlock()
 		for _, owner := range owners {
 			if owner.onEvent != nil {
 				owner.onEvent(ev)
@@ -613,7 +613,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// reconnectedMidTurn: otherwise State=Running means Send() owns the
 	// State→Ready transition via its defer, and racing it would let a second
 	// Send() start before that defer runs. The flag is one-shot.
-	if ev.Type == "result" && p.reconnectedMidTurn.CompareAndSwap(true, false) {
+	if ev.Type == "result" && p.turn.reconnectedMidTurn.CompareAndSwap(true, false) {
 		// Keep the outcome for a caller that did not issue the Send: past this
 		// point the frame's text survives nowhere (the ring.EventLog entry logged
 		// above is turn-boundary metadata only). This belongs HERE and not in
@@ -621,10 +621,10 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		// claimed the result. See resolveResult for why that placement is what
 		// keeps Send and the latch from both owning one result.
 		p.adopted.resolveResult(ev)
-		p.mu.Lock()
-		_, wasRunning := p.transitionLocked(evTurnEnded)
-		cb := p.onTurnDone
-		p.mu.Unlock()
+		p.turn.mu.Lock()
+		_, wasRunning := p.turn.transitionLocked(evTurnEnded)
+		cb := p.turn.onTurnDone
+		p.turn.mu.Unlock()
 		if wasRunning && cb != nil {
 			// The killCh select in deliverEvent may fire cb again in the same
 			// iteration if Kill() raced this path (onTurnDone is idempotent).

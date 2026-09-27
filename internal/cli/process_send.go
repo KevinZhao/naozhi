@@ -182,11 +182,11 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 			// --resume emits a fresh init with the forked session_id and a
 			// first-non-empty guard would pin the stale one (#393).
 			if ev.Type == "system" && ev.SubType == "init" {
-				p.mu.Lock()
+				p.turn.mu.Lock()
 				if ev.SessionID != "" {
-					p.sessionID = ev.SessionID
+					p.turn.sessionID = ev.SessionID
 				}
-				p.mu.Unlock()
+				p.turn.mu.Unlock()
 				// system/init advertises the resolved model; SpawnOptions.Model is empty
 				// for claude, so this is authoritative. Only overwrite when present.
 				if ev.Model != "" {
@@ -213,11 +213,11 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 			if ev.Type == "result" {
 				// Mirror the init-path fix: accept any non-empty session_id so
 				// --resume's new ID is recorded even if init was missed (#393).
-				p.mu.Lock()
+				p.turn.mu.Lock()
 				if ev.SessionID != "" {
-					p.sessionID = ev.SessionID
+					p.turn.sessionID = ev.SessionID
 				}
-				p.mu.Unlock()
+				p.turn.mu.Unlock()
 				sr := resultFromEvent(ev)
 				return &sr, nil
 			}
@@ -234,14 +234,14 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 
 // clearInflightFlags resets the interrupt atomics after a watchdog kill: a
 // leftover flag would make a future Send on a recycled Process burn the 500ms
-// settle window for a result that never arrives (#770). Held under p.mu to
+// settle window for a result that never arrives (#770). Held under p.turn.mu to
 // match Interrupt() / InterruptViaControl(), so a concurrent Interrupt and a
 // watchdog kill cannot race the flags into a torn state.
 func (p *Process) clearInflightFlags() {
-	p.mu.Lock()
-	p.interrupted.Store(false)
-	p.interruptedRun.Store(false)
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.interrupted.Store(false)
+	p.turn.interruptedRun.Store(false)
+	p.turn.mu.Unlock()
 }
 
 // handleWatchdogTick evaluates the no-output and total-turn deadlines for one
@@ -287,16 +287,16 @@ func (p *Process) Interrupt() {
 	if !p.Alive() {
 		return
 	}
-	// Store the atomics under p.mu so Send()'s State→Running transition (also
-	// under p.mu) serialises with us; otherwise interrupted=true could land with
+	// Store the atomics under p.turn.mu so Send()'s State→Running transition (also
+	// under p.turn.mu) serialises with us; otherwise interrupted=true could land with
 	// interruptedRun=false and the interrupted result would leak into the next turn.
-	p.mu.Lock()
-	state := p.state
-	p.interrupted.Store(true)
+	p.turn.mu.Lock()
+	state := p.turn.state
+	p.turn.interrupted.Store(true)
 	if state == StateRunning {
-		p.interruptedRun.Store(true)
+		p.turn.interruptedRun.Store(true)
 	}
-	p.mu.Unlock()
+	p.turn.mu.Unlock()
 	// While spawning the CLI's REPL isn't up and silently drops SIGINT: skip the
 	// wire send and leave interruptedRun unset so drainStaleEvents does not enter
 	// the settle loop (there is no stale result to absorb).
@@ -319,37 +319,37 @@ func (p *Process) InterruptViaControl() error {
 	if !p.Alive() {
 		return clierr.ErrNoActiveTurn
 	}
-	// Snapshot state and pre-commit the atomics under p.mu so a concurrent Send()
+	// Snapshot state and pre-commit the atomics under p.turn.mu so a concurrent Send()
 	// flipping State to Running cannot race us into "wrote control_request but
 	// skipped the settle flags". CompareAndSwap records which flags WE set, so a
 	// write-failure rollback cannot clobber a concurrent Interrupt()'s flags.
 	var iSet, rSet bool
-	p.mu.Lock()
-	state := p.state
+	p.turn.mu.Lock()
+	state := p.turn.state
 	if state == StateRunning {
-		iSet = p.interrupted.CompareAndSwap(false, true)
-		rSet = p.interruptedRun.CompareAndSwap(false, true)
+		iSet = p.turn.interrupted.CompareAndSwap(false, true)
+		rSet = p.turn.interruptedRun.CompareAndSwap(false, true)
 	}
-	p.mu.Unlock()
+	p.turn.mu.Unlock()
 	// Do NOT write the control_request when idle: the CLI would buffer it for
 	// the next turn and produce a spurious control_response against a turn the
 	// caller never intended to cancel.
 	if state != StateRunning {
 		return clierr.ErrNoActiveTurn
 	}
-	reqID := "naozhi-int-" + strconv.FormatInt(p.interruptSeq.Add(1), 10)
+	reqID := "naozhi-int-" + strconv.FormatInt(p.acks.seq.Add(1), 10)
 	if err := p.protocol.WriteInterrupt(p.link.stdinWriter(), reqID); err != nil {
 		// Nothing reached the CLI, so no trailing result to drain. Roll back ONLY
 		// the flags we CAS'd — a concurrent Interrupt() that won owns its flag.
 		// Under mu, like every other write of the pair.
-		p.mu.Lock()
+		p.turn.mu.Lock()
 		if iSet {
-			p.interrupted.Store(false)
+			p.turn.interrupted.Store(false)
 		}
 		if rSet {
-			p.interruptedRun.Store(false)
+			p.turn.interruptedRun.Store(false)
 		}
-		p.mu.Unlock()
+		p.turn.mu.Unlock()
 		return fmt.Errorf("write interrupt control_request: %w", err)
 	}
 	return nil
@@ -361,38 +361,8 @@ func (p *Process) InterruptViaControl() error {
 // single-digit risks false timeouts; 30s matches acpHandshakeTimeout's scale.
 const setModelAckTimeout = 30 * time.Second
 
-// registerControlAck installs an ack waiter for a control request_id. The
-// channel receives nil (success) or an error carrying the CLI's rejection
-// text; it is buffered so a delivery racing the timeout never blocks readLoop.
-func (p *Process) registerControlAck(reqID string) chan error {
-	ch := make(chan error, 1)
-	p.controlAckMu.Lock()
-	if p.controlAcks == nil {
-		p.controlAcks = make(map[string]chan error, 1)
-	}
-	p.controlAcks[reqID] = ch
-	p.controlAckMu.Unlock()
-	return ch
-}
-
-// unregisterControlAck removes an ack waiter (deferred by SetModel so a
-// late/never ack cannot leak the map entry).
-func (p *Process) unregisterControlAck(reqID string) {
-	p.controlAckMu.Lock()
-	delete(p.controlAcks, reqID)
-	p.controlAckMu.Unlock()
-}
-
-// deliverControlAck routes a control_ack clievent.Event from readLoop to its waiter.
-// Unmatched acks (waiter timed out, or an interrupt's control_response —
-// those never register) are dropped: fire-and-forget, no turn state.
 func (p *Process) deliverControlAck(ev clievent.Event) {
-	p.controlAckMu.Lock()
-	ch, ok := p.controlAcks[ev.RPCRequestID]
-	if ok {
-		delete(p.controlAcks, ev.RPCRequestID)
-	}
-	p.controlAckMu.Unlock()
+	ch, ok := p.acks.take(ev.RPCRequestID)
 	if !ok {
 		return
 	}
@@ -421,9 +391,9 @@ func (p *Process) SetModel(ctx context.Context, model string) error {
 	if !p.Alive() {
 		return fmt.Errorf("set_model: process not alive")
 	}
-	reqID := "naozhi-setmodel-" + strconv.FormatInt(p.interruptSeq.Add(1), 10)
-	ch := p.registerControlAck(reqID)
-	defer p.unregisterControlAck(reqID)
+	reqID := "naozhi-setmodel-" + strconv.FormatInt(p.acks.seq.Add(1), 10)
+	ch := p.acks.register(reqID)
+	defer p.acks.unregister(reqID)
 	if err := ms.WriteSetModel(p.link.stdinWriter(), reqID, model); err != nil {
 		return err
 	}

@@ -109,7 +109,7 @@ func TestProcess_IsRunning(t *testing.T) {
 		{StateDead, false},
 	}
 	for _, tc := range cases {
-		p := &Process{state: tc.state}
+		p := &Process{turn: turnState{state: tc.state}}
 		if got := p.IsRunning(); got != tc.want {
 			t.Errorf("state=%v: IsRunning() = %v, want %v", tc.state, got, tc.want)
 		}
@@ -155,9 +155,9 @@ func TestProcess_ReadLoop_SetsStateDeadOnCLIExited(t *testing.T) {
 		t.Fatal("done channel not closed after cli_exited")
 	}
 
-	p.mu.Lock()
-	state := p.state
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	state := p.turn.state
+	p.turn.mu.Unlock()
 
 	if state != StateDead {
 		t.Errorf("State = %v after cli_exited, want StateDead", state)
@@ -246,14 +246,14 @@ func TestProcess_StateTransitions(t *testing.T) {
 	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
 
-	if p.state != StateSpawning {
-		t.Errorf("initial state = %v, want StateSpawning", p.state)
+	if p.turn.state != StateSpawning {
+		t.Errorf("initial state = %v, want StateSpawning", p.turn.state)
 	}
 
 	go p.readLoop()
 
 	// TRUE-time-delay (not migrated to testhelper.Eventually): readLoop
-	// does not mutate p.state before blocking on shimR.ReadBytes — only
+	// does not mutate p.turn.state before blocking on shimR.ReadBytes — only
 	// startReadLoop() sets StateReady, and this test calls readLoop
 	// directly. No observable "loop is scheduled" signal exists, so we
 	// yield the scheduler briefly. Keep short; state mutations below
@@ -261,20 +261,20 @@ func TestProcess_StateTransitions(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Simulate Send() acquiring lock: Ready → Running
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
 
 	if !p.IsRunning() {
 		t.Error("IsRunning() = false after StateRunning, want true")
 	}
 
 	// Simulate Send() completing: Running → Ready
-	p.mu.Lock()
-	if p.state == StateRunning {
-		p.state = StateReady
+	p.turn.mu.Lock()
+	if p.turn.state == StateRunning {
+		p.turn.state = StateReady
 	}
-	p.mu.Unlock()
+	p.turn.mu.Unlock()
 
 	if p.IsRunning() {
 		t.Error("IsRunning() = true after StateReady, want false")
@@ -289,9 +289,9 @@ func TestProcess_StateTransitions(t *testing.T) {
 		t.Fatal("readLoop did not exit after cli_exited")
 	}
 
-	p.mu.Lock()
-	final := p.state
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	final := p.turn.state
+	p.turn.mu.Unlock()
 
 	if final != StateDead {
 		t.Errorf("final state = %v, want StateDead", final)

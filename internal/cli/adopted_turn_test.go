@@ -17,10 +17,10 @@ import (
 // the assertions stay on the latch and not on the reconnect plumbing; the
 // ordering itself is pinned by TestReconnectMidTurn_ResultTransitionsToReady.
 func armReconnectMidTurn(p *Process) {
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
-	p.reconnectedMidTurn.Store(true)
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
+	p.turn.reconnectedMidTurn.Store(true)
 	p.adopted.arm()
 }
 
@@ -42,7 +42,7 @@ func TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies(t *testing.T) {
 	t.Run("mid turn arms and waits", func(t *testing.T) {
 		p := &Process{}
 		p.applyReconnectVerdict(true, nil)
-		if !p.reconnectedMidTurn.Load() {
+		if !p.turn.reconnectedMidTurn.Load() {
 			t.Error("reconnectedMidTurn not armed for a mid-turn backlog")
 		}
 		if p.State() != StateRunning {
@@ -58,7 +58,7 @@ func TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies(t *testing.T) {
 		p.applyReconnectVerdict(false, &clievent.Event{
 			Type: "result", SubType: "success", Result: "from the backlog", SessionID: "s1",
 		})
-		if p.reconnectedMidTurn.Load() {
+		if p.turn.reconnectedMidTurn.Load() {
 			t.Error("reconnectedMidTurn armed for a turn that already ended")
 		}
 		if p.AdoptedTurnPending() {
@@ -76,7 +76,7 @@ func TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies(t *testing.T) {
 	t.Run("nothing in flight leaves the latch unarmed", func(t *testing.T) {
 		p := &Process{}
 		p.applyReconnectVerdict(false, nil)
-		if p.reconnectedMidTurn.Load() {
+		if p.turn.reconnectedMidTurn.Load() {
 			t.Error("reconnectedMidTurn armed with nothing in flight")
 		}
 		if _, err := p.AdoptedOutcome(newCtx(t)); !errors.Is(err, ErrNoAdoptableTurn) {

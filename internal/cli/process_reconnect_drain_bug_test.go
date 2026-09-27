@@ -53,8 +53,8 @@ func TestDrainStaleEvents_CtxDoneReenqueueOnClosedChan(t *testing.T) {
 		eventCh: make(chan clievent.Event, 4),
 		done:    make(chan struct{}), // OPEN: isChanAlive reports alive
 	}
-	p.interrupted.Store(true)
-	p.interruptedRun.Store(true)
+	p.turn.interrupted.Store(true)
+	p.turn.interruptedRun.Store(true)
 
 	// One post-cutoff event so holdback is non-empty when we reach the
 	// re-enqueue, then close the channel so the settle-window read observes
@@ -97,10 +97,10 @@ func TestReconnectMidTurn_ResultTransitionsToReady(t *testing.T) {
 	defer p.Kill()
 
 	// Mirror SpawnReconnect's ordering: arm BEFORE the read loop starts.
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
-	p.reconnectedMidTurn.Store(true)
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
+	p.turn.reconnectedMidTurn.Store(true)
 
 	done := make(chan struct{}, 1)
 	p.SetOnTurnDone(func() {

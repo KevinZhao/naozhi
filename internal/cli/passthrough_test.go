@@ -604,18 +604,18 @@ func TestRemoveSlotByID_ZerosTail(t *testing.T) {
 	s1 := &sendSlot{id: 1}
 	s2 := &sendSlot{id: 2}
 	s3 := &sendSlot{id: 3}
-	p := &Process{pendingSlots: []*sendSlot{s1, s2, s3}}
+	p := &Process{slots: sendSlots{pending: []*sendSlot{s1, s2, s3}}}
 
 	p.removeSlotByID(2) // remove from the middle
 
 	// FIFO order preserved among survivors.
-	if len(p.pendingSlots) != 2 || p.pendingSlots[0].id != 1 || p.pendingSlots[1].id != 3 {
-		t.Fatalf("pendingSlots = %+v, want ids [1 3]", p.pendingSlots)
+	if len(p.slots.pending) != 2 || p.slots.pending[0].id != 1 || p.slots.pending[1].id != 3 {
+		t.Fatalf("pendingSlots = %+v, want ids [1 3]", p.slots.pending)
 	}
 
 	// Tail of the backing array must be nil — inspect via reslice to the
 	// original capacity so the freed slot is observable.
-	full := p.pendingSlots[:cap(p.pendingSlots)]
+	full := p.slots.pending[:cap(p.slots.pending)]
 	if got := full[2]; got != nil {
 		t.Errorf("backing tail = %+v, want nil (dangling slot ref)", got)
 	}

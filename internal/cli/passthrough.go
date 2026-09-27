@@ -62,7 +62,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 	images = downscaleImagesForVision(images)
 
 	slot := &sendSlot{
-		id:        p.slotIDGen.Add(1),
+		id:        p.slots.idGen.Add(1),
 		uuid:      newSlotUUID(),
 		text:      text,
 		priority:  priority,
@@ -79,14 +79,14 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 	// turn-result attribution.
 	queued := true
 	writeErr := p.link.withWriteLock(func() error {
-		p.slotsMu.Lock()
-		if len(p.pendingSlots) >= maxPendingSlots {
-			p.slotsMu.Unlock()
+		p.slots.mu.Lock()
+		if len(p.slots.pending) >= maxPendingSlots {
+			p.slots.mu.Unlock()
 			queued = false
 			return nil
 		}
-		p.pendingSlots = append(p.pendingSlots, slot)
-		p.slotsMu.Unlock()
+		p.slots.pending = append(p.slots.pending, slot)
+		p.slots.mu.Unlock()
 		// stdinWriter (shimWriter) would re-acquire the write lock and
 		// deadlock, so write through a helper that uses sendLocked.
 		return p.writeUserMessageUnderShimLock(slot.uuid, text, images, priority)
@@ -129,15 +129,15 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 	case <-ctx.Done():
 		// Tombstone: keep the slot so FIFO positioning survives; fanout
 		// sees canceled=true and drops the late result.
-		p.slotsMu.Lock()
+		p.slots.mu.Lock()
 		slot.canceled.Store(true)
-		p.slotsMu.Unlock()
+		p.slots.mu.Unlock()
 		return nil, ctx.Err()
 	case <-bail.C:
 		// Mark canceled so a late result does not target a gone caller.
-		p.slotsMu.Lock()
+		p.slots.mu.Lock()
 		slot.canceled.Store(true)
-		p.slotsMu.Unlock()
+		p.slots.mu.Unlock()
 		slog.Warn("passthrough: slot orphaned", "slot_id", slot.id, "elapsed", time.Since(slot.enqueueAt))
 		return nil, clierr.ErrOrphanedSlot
 	}
@@ -201,12 +201,12 @@ const captureWriterMaxKeepBytes = 64 * 1024
 // removeSlotByID removes a single slot from pendingSlots. Used on write-fail.
 // FIFO preserved for the remaining entries.
 func (p *Process) removeSlotByID(id uint64) {
-	p.slotsMu.Lock()
-	defer p.slotsMu.Unlock()
-	for i, s := range p.pendingSlots {
+	p.slots.mu.Lock()
+	defer p.slots.mu.Unlock()
+	for i, s := range p.slots.pending {
 		if s.id == id {
-			old := p.pendingSlots
-			p.pendingSlots = append(old[:i], old[i+1:]...)
+			old := p.slots.pending
+			p.slots.pending = append(old[:i], old[i+1:]...)
 			// Zero the tail so GC can reclaim the dropped slot.
 			old[len(old)-1] = nil
 			return
@@ -221,9 +221,9 @@ func (p *Process) removeSlotsLocked(victims []*sendSlot) {
 		return
 	}
 	// ≤4 victims (the common case): allocation-free linear scan beats a map.
-	kept := p.pendingSlots[:0]
+	kept := p.slots.pending[:0]
 	if len(victims) <= 4 {
-		for _, s := range p.pendingSlots {
+		for _, s := range p.slots.pending {
 			isVictim := false
 			for _, v := range victims {
 				if s.id == v.id {
@@ -240,14 +240,14 @@ func (p *Process) removeSlotsLocked(victims []*sendSlot) {
 		for _, v := range victims {
 			victimSet[v.id] = struct{}{}
 		}
-		for _, s := range p.pendingSlots {
+		for _, s := range p.slots.pending {
 			if _, isVictim := victimSet[s.id]; !isVictim {
 				kept = append(kept, s)
 			}
 		}
 	}
-	for i := len(kept); i < len(p.pendingSlots); i++ {
-		p.pendingSlots[i] = nil
+	for i := len(kept); i < len(p.slots.pending); i++ {
+		p.slots.pending[i] = nil
 	}
 	// Shrink when <25% of the backing array is live so a burst to
 	// maxPendingSlots does not pin that array for the session's lifetime.
@@ -256,7 +256,7 @@ func (p *Process) removeSlotsLocked(victims []*sendSlot) {
 		copy(shrunk, kept)
 		kept = shrunk
 	}
-	p.pendingSlots = kept
+	p.slots.pending = kept
 }
 
 // findSlotByUUIDLocked returns the first pending slot whose uuid matches.
@@ -265,7 +265,7 @@ func (p *Process) findSlotByUUIDLocked(u string) *sendSlot {
 	if u == "" {
 		return nil
 	}
-	for _, s := range p.pendingSlots {
+	for _, s := range p.slots.pending {
 		if s.uuid == u {
 			return s
 		}
@@ -286,25 +286,25 @@ func (p *Process) handleReplayEventLocked(ev clievent.Event) {
 			return
 		}
 		slot.replayed = true
-		p.currentTurnSlots = append(p.currentTurnSlots, slot)
+		p.slots.current = append(p.slots.current, slot)
 		slog.Debug("passthrough: independent replay matched", "uuid", ev.UUID,
-			"slot_id", slot.id, "turn_slots", len(p.currentTurnSlots))
+			"slot_id", slot.id, "turn_slots", len(p.slots.current))
 		return
 	}
 
 	// Merged replay: sweep every unclaimed pending slot.
 	claimed := 0
-	for _, s := range p.pendingSlots {
+	for _, s := range p.slots.pending {
 		if s.replayed {
 			continue
 		}
 		s.replayed = true
-		p.currentTurnSlots = append(p.currentTurnSlots, s)
+		p.slots.current = append(p.slots.current, s)
 		claimed++
 	}
 	slog.Debug("passthrough: merged replay swept", "uuid", ev.UUID,
-		"claimed", claimed, "turn_slots", len(p.currentTurnSlots),
-		"pending_total", len(p.pendingSlots))
+		"claimed", claimed, "turn_slots", len(p.slots.current),
+		"pending_total", len(p.slots.pending))
 }
 
 // fanoutTurnResult delivers one CLI result event to every slot the turn
@@ -363,13 +363,13 @@ func deliverSlotResult(s *sendSlot, r *clievent.SendResult) {
 // 一起被通知，否则已被 replay 认领的 slot 会阻塞到 total+30s bail timer，IM
 // 用户表现为"无响应"而非明确错误。
 func (p *Process) discardAllPending(reason error) {
-	p.slotsMu.Lock()
-	victims := make([]*sendSlot, 0, len(p.pendingSlots)+len(p.currentTurnSlots))
-	victims = append(victims, p.pendingSlots...)
-	victims = append(victims, p.currentTurnSlots...)
-	p.pendingSlots = nil
-	p.currentTurnSlots = nil
-	p.slotsMu.Unlock()
+	p.slots.mu.Lock()
+	victims := make([]*sendSlot, 0, len(p.slots.pending)+len(p.slots.current))
+	victims = append(victims, p.slots.pending...)
+	victims = append(victims, p.slots.current...)
+	p.slots.pending = nil
+	p.slots.current = nil
+	p.slots.mu.Unlock()
 
 	for _, s := range victims {
 		if s.isCanceled() {
@@ -403,12 +403,12 @@ func (p *Process) onSystemInit() {
 // out-of-lock fanout (an aborted turn's victims are handled separately by
 // reapAbortedPreempted).
 func (p *Process) onTurnResult() []*sendSlot {
-	p.slotsMu.Lock()
-	owners := p.currentTurnSlots
-	p.currentTurnSlots = nil
+	p.slots.mu.Lock()
+	owners := p.slots.current
+	p.slots.current = nil
 	p.removeSlotsLocked(owners)
-	pendingLeft := len(p.pendingSlots)
-	p.slotsMu.Unlock()
+	pendingLeft := len(p.slots.pending)
+	p.slots.mu.Unlock()
 
 	// Mirror Send's State→Ready on the last passthrough turn. Only when
 	// owners were consumed: a result with no claim may be a Send-path turn or
@@ -425,21 +425,21 @@ func (p *Process) onTurnResult() []*sendSlot {
 // priority:"now" (those proceed into the next turn). Returns the victims
 // after removing them from pendingSlots.
 func (p *Process) reapAbortedPreempted() []*sendSlot {
-	p.slotsMu.Lock()
-	defer p.slotsMu.Unlock()
+	p.slots.mu.Lock()
+	defer p.slots.mu.Unlock()
 	var victims []*sendSlot
-	kept := p.pendingSlots[:0]
-	for _, s := range p.pendingSlots {
+	kept := p.slots.pending[:0]
+	for _, s := range p.slots.pending {
 		if !s.replayed && s.priority != "now" {
 			victims = append(victims, s)
 			continue
 		}
 		kept = append(kept, s)
 	}
-	for i := len(kept); i < len(p.pendingSlots); i++ {
-		p.pendingSlots[i] = nil
+	for i := len(kept); i < len(p.slots.pending); i++ {
+		p.slots.pending[i] = nil
 	}
-	p.pendingSlots = kept
+	p.slots.pending = kept
 	return victims
 }
 
@@ -461,17 +461,17 @@ func fireAbortErrors(victims []*sendSlot) {
 // currentTurn slot. Used by callers (dashboard, watchdog) to decide whether
 // result events should be routed through fanout vs. the legacy eventCh path.
 func (p *Process) PassthroughActive() bool {
-	p.slotsMu.Lock()
-	defer p.slotsMu.Unlock()
-	return len(p.pendingSlots) > 0 || len(p.currentTurnSlots) > 0
+	p.slots.mu.Lock()
+	defer p.slots.mu.Unlock()
+	return len(p.slots.pending) > 0 || len(p.slots.current) > 0
 }
 
 // PassthroughDepth returns the current pending slot count. Used by dispatch
 // for background pressure signaling.
 func (p *Process) PassthroughDepth() int {
-	p.slotsMu.Lock()
-	defer p.slotsMu.Unlock()
-	return len(p.pendingSlots)
+	p.slots.mu.Lock()
+	defer p.slots.mu.Unlock()
+	return len(p.slots.pending)
 }
 
 // SupportsPassthrough reports whether this Process's backing protocol can run

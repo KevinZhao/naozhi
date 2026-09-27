@@ -312,9 +312,9 @@ func TestProcess_Send_Busy(t *testing.T) {
 	startServerDrain(srv)
 	p.startReadLoop()
 
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
 
 	_, err := p.Send(context.Background(), "hello", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "busy") {
@@ -387,8 +387,8 @@ func TestProcess_Send_CapturesSessionID(t *testing.T) {
 
 // TestProcess_Send_UpdatesSessionIDAfterResume pins CLI2 (#393): after a
 // --resume flips the underlying CLI's session_id, the next Send observes a
-// fresh init/result carrying the new id and p.sessionID must follow. The
-// pre-fix guard `if p.sessionID == ""` pinned the field to whatever the
+// fresh init/result carrying the new id and p.turn.sessionID must follow. The
+// pre-fix guard `if p.turn.sessionID == ""` pinned the field to whatever the
 // first Send recorded and let it go stale relative to the CLI's view.
 func TestProcess_Send_UpdatesSessionIDAfterResume(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
@@ -523,11 +523,11 @@ func TestProcess_Interrupt_WhenReady(t *testing.T) {
 	p.startReadLoop()
 
 	p.Interrupt()
-	if !p.interrupted.Load() {
+	if !p.turn.interrupted.Load() {
 		t.Error("interrupted should be true after Interrupt()")
 	}
 	// interruptedRun should be false (not in Running state)
-	if p.interruptedRun.Load() {
+	if p.turn.interruptedRun.Load() {
 		t.Error("interruptedRun should be false when not running")
 	}
 }
@@ -537,12 +537,12 @@ func TestProcess_Interrupt_WhenRunning(t *testing.T) {
 	startServerDrain(srv)
 	p.startReadLoop()
 
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
 
 	p.Interrupt()
-	if !p.interruptedRun.Load() {
+	if !p.turn.interruptedRun.Load() {
 		t.Error("interruptedRun should be true when interrupted during Running state")
 	}
 }
@@ -592,7 +592,7 @@ func TestProcess_InterruptViaControl_NoActiveTurn(t *testing.T) {
 	if !errors.Is(err, clierr.ErrNoActiveTurn) {
 		t.Fatalf("InterruptViaControl on idle = %v, want clierr.ErrNoActiveTurn", err)
 	}
-	if p.interrupted.Load() || p.interruptedRun.Load() {
+	if p.turn.interrupted.Load() || p.turn.interruptedRun.Load() {
 		t.Error("idle InterruptViaControl must not set settle flags")
 	}
 }
@@ -603,21 +603,21 @@ func TestProcess_InterruptViaControl_Running_SetsFlagsAndWrites(t *testing.T) {
 	p.startReadLoop()
 	defer p.Kill()
 
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
 
 	if err := p.InterruptViaControl(); err != nil {
 		t.Fatalf("InterruptViaControl() = %v, want nil", err)
 	}
-	if !p.interrupted.Load() || !p.interruptedRun.Load() {
+	if !p.turn.interrupted.Load() || !p.turn.interruptedRun.Load() {
 		t.Error("successful InterruptViaControl must set interrupted and interruptedRun")
 	}
 }
 
 // TestInterruptViaControlConcurrentSetterNotClobbered (R260528-BUG-4)
 // pins the CAS-based rollback. Pre-fix, a write-fail rollback ran
-// p.interrupted.Store(false) + p.interruptedRun.Store(false)
+// p.turn.interrupted.Store(false) + p.turn.interruptedRun.Store(false)
 // unconditionally, which clobbered a concurrent Interrupt() that had
 // just Stored(true) on the same flags. The fix records which flags
 // the InterruptViaControl call ITSELF flipped (CompareAndSwap from
@@ -634,14 +634,14 @@ func TestInterruptViaControlConcurrentSetterNotClobbered(t *testing.T) {
 	p.startReadLoop()
 	defer p.Kill()
 
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
 	// Concurrent Interrupt() winning the race — both flags already true
 	// before InterruptViaControl runs. The CAS attempts inside the
 	// method must observe the flags as already-true and skip the rollback.
-	p.interrupted.Store(true)
-	p.interruptedRun.Store(true)
+	p.turn.interrupted.Store(true)
+	p.turn.interruptedRun.Store(true)
 
 	err := p.InterruptViaControl()
 	if err == nil {
@@ -652,10 +652,10 @@ func TestInterruptViaControlConcurrentSetterNotClobbered(t *testing.T) {
 	}
 	// The concurrent Interrupt()'s flags MUST survive — the rollback
 	// only owns flags THIS call's CAS flipped from false→true.
-	if !p.interrupted.Load() {
+	if !p.turn.interrupted.Load() {
 		t.Error("interrupted was clobbered: concurrent Interrupt()'s flag lost on rollback")
 	}
-	if !p.interruptedRun.Load() {
+	if !p.turn.interruptedRun.Load() {
 		t.Error("interruptedRun was clobbered: concurrent Interrupt()'s flag lost on rollback")
 	}
 }
@@ -670,9 +670,9 @@ func TestProcess_InterruptViaControl_WriteFailure_RollsBackFlags(t *testing.T) {
 	p.startReadLoop()
 	defer p.Kill()
 
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
 
 	err := p.InterruptViaControl()
 	if err == nil {
@@ -681,10 +681,10 @@ func TestProcess_InterruptViaControl_WriteFailure_RollsBackFlags(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Errorf("err = %v, want wrapped %v", err, wantErr)
 	}
-	if p.interrupted.Load() {
+	if p.turn.interrupted.Load() {
 		t.Error("interrupted must be rolled back after write failure")
 	}
-	if p.interruptedRun.Load() {
+	if p.turn.interruptedRun.Load() {
 		t.Error("interruptedRun must be rolled back after write failure")
 	}
 }
@@ -721,12 +721,12 @@ func TestProcess_InterruptViaControl_RequestIDIsPerProcess(t *testing.T) {
 	p2.startReadLoop()
 	defer p2.Kill()
 
-	p1.mu.Lock()
-	p1.state = StateRunning
-	p1.mu.Unlock()
-	p2.mu.Lock()
-	p2.state = StateRunning
-	p2.mu.Unlock()
+	p1.turn.mu.Lock()
+	p1.turn.state = StateRunning
+	p1.turn.mu.Unlock()
+	p2.turn.mu.Lock()
+	p2.turn.state = StateRunning
+	p2.turn.mu.Unlock()
 
 	if err := p1.InterruptViaControl(); err != nil {
 		t.Fatalf("p1 InterruptViaControl: %v", err)
@@ -734,11 +734,11 @@ func TestProcess_InterruptViaControl_RequestIDIsPerProcess(t *testing.T) {
 	if err := p2.InterruptViaControl(); err != nil {
 		t.Fatalf("p2 InterruptViaControl: %v", err)
 	}
-	if got := p1.interruptSeq.Load(); got != 1 {
-		t.Errorf("p1.interruptSeq = %d, want 1 (per-process counter)", got)
+	if got := p1.acks.seq.Load(); got != 1 {
+		t.Errorf("p1.acks.seq = %d, want 1 (per-process counter)", got)
 	}
-	if got := p2.interruptSeq.Load(); got != 1 {
-		t.Errorf("p2.interruptSeq = %d, want 1 (per-process counter)", got)
+	if got := p2.acks.seq.Load(); got != 1 {
+		t.Errorf("p2.acks.seq = %d, want 1 (per-process counter)", got)
 	}
 }
 
@@ -761,13 +761,13 @@ func TestProcess_DrainStaleEvents_InterruptedIdle(t *testing.T) {
 	startServerDrain(srv)
 	p.startReadLoop()
 
-	p.interrupted.Store(true)
-	p.interruptedRun.Store(false)
+	p.turn.interrupted.Store(true)
+	p.turn.interruptedRun.Store(false)
 
 	if err := p.drainStaleEvents(context.Background()); err != nil {
 		t.Errorf("drainStaleEvents() error = %v", err)
 	}
-	if p.interrupted.Load() {
+	if p.turn.interrupted.Load() {
 		t.Error("interrupted should be cleared by drainStaleEvents")
 	}
 }
@@ -777,8 +777,8 @@ func TestProcess_DrainStaleEvents_InterruptedRunning_WithResult(t *testing.T) {
 	startServerDrain(srv)
 	p.startReadLoop()
 
-	p.interrupted.Store(true)
-	p.interruptedRun.Store(true)
+	p.turn.interrupted.Store(true)
+	p.turn.interruptedRun.Store(true)
 
 	// Send result event to simulate the interrupted turn completing
 	done := make(chan error, 1)
@@ -789,7 +789,7 @@ func TestProcess_DrainStaleEvents_InterruptedRunning_WithResult(t *testing.T) {
 	// drainStaleEvents Swap(false)'s both flags on entry. Once interrupted
 	// clears, drain has taken ownership and is waiting on p.eventCh for the
 	// stale result — safe to inject it now.
-	testhelper.Eventually(t, func() bool { return !p.interrupted.Load() }, time.Second, "drainStaleEvents did not enter settle window")
+	testhelper.Eventually(t, func() bool { return !p.turn.interrupted.Load() }, time.Second, "drainStaleEvents did not enter settle window")
 	srv.SendStdout(`{"type":"result","result":"interrupted_result"}`)
 
 	select {
@@ -1026,10 +1026,10 @@ func TestProcess_SetOnTurnDone(t *testing.T) {
 	// Set state to Running and arm reconnectedMidTurn to simulate the
 	// post-reconnect path where readLoop owns the State→Ready transition.
 	// Outside reconnect, Send() owns the transition (see readLoop guard).
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
-	p.reconnectedMidTurn.Store(true)
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
+	p.turn.reconnectedMidTurn.Store(true)
 
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"s1"}`)
 
@@ -1061,9 +1061,9 @@ func TestProcess_ResultDoesNotFlipStateWithoutReconnect(t *testing.T) {
 
 	// Simulate Send() acquiring the turn: Ready → Running, but do NOT arm
 	// reconnectedMidTurn. This is the normal path.
-	p.mu.Lock()
-	p.state = StateRunning
-	p.mu.Unlock()
+	p.turn.mu.Lock()
+	p.turn.state = StateRunning
+	p.turn.mu.Unlock()
 
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"s1"}`)
 
@@ -1265,16 +1265,16 @@ func TestProcess_FindResultSince_EmptyWhenNoText(t *testing.T) {
 func TestProcess_StartReadLoop_StateReady(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	startServerDrain(srv)
-	if p.state != StateSpawning {
-		t.Errorf("initial state = %v, want StateSpawning", p.state)
+	if p.turn.state != StateSpawning {
+		t.Errorf("initial state = %v, want StateSpawning", p.turn.state)
 	}
 	p.startReadLoop()
 	// Poll for StateReady instead of sleeping a fixed 10ms; this is
 	// faster on idle runs and tolerant under -race / slow CI.
 	testhelper.Eventually(t, func() bool {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		return p.state == StateReady
+		p.turn.mu.Lock()
+		defer p.turn.mu.Unlock()
+		return p.turn.state == StateReady
 	}, time.Second, "startReadLoop did not reach StateReady")
 	p.Kill()
 }

@@ -25,7 +25,7 @@ func TestDeliverEvent_KillChClosed(t *testing.T) {
 		killCh:  killCh,
 		// onTurnDone is mu-protected; we install it directly because no
 		// concurrent goroutine has access to this Process instance.
-		onTurnDone: func() { cbFired = true },
+		turn: turnState{onTurnDone: func() { cbFired = true }},
 	}
 
 	ret := p.deliverEvent(clievent.Event{Type: "result"}, time.Now(), slog.New(slog.DiscardHandler))
@@ -35,9 +35,9 @@ func TestDeliverEvent_KillChClosed(t *testing.T) {
 	if got := p.DeathReason(); got != DeathReasonKilled {
 		t.Errorf("DeathReason = %q, want %q", got, DeathReasonKilled)
 	}
-	p.mu.RLock()
-	st := p.state
-	p.mu.RUnlock()
+	p.turn.mu.RLock()
+	st := p.turn.state
+	p.turn.mu.RUnlock()
 	if st != StateDead {
 		t.Errorf("state = %v, want StateDead", st)
 	}

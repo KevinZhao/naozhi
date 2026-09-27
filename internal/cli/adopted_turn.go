@@ -85,7 +85,7 @@ func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event) 
 	switch {
 	case midTurn:
 		p.transition(evReconnectMidTurn)
-		p.reconnectedMidTurn.Store(true)
+		p.turn.reconnectedMidTurn.Store(true)
 		p.adopted.arm()
 	case finished != nil:
 		// The turn ended while naozhi was down: its result is in the backlog just
