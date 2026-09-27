@@ -57,10 +57,22 @@ test.describe('Events panel #2430 P3 / #2432 protocol', () => {
       await openSession(page, mock, KEY_A);
       await expect(page.locator('#earlier-events-btn')).toBeVisible();
       expect(await page.locator('#events-scroll .event-time-divider').count()).toBe(1);
+      // The bubble the reader sees first must not move when the older page
+      // lands above it: the scroll offset is measured before the button comes
+      // out, and the seam divider goes before the scroll is restored.
+      const topBefore = await page.evaluate(() => {
+        // The reader is at the top, where the button is.
+        /** @type {HTMLElement} */ (document.getElementById('events-scroll')).scrollTop = 0;
+        const first = /** @type {HTMLElement} */ (document.querySelector('#events-scroll .event'));
+        /** @type {any} */ (window).__seamAnchor = first;
+        return first.getBoundingClientRect().top;
+      });
 
       await page.click('#earlier-events-btn');
       await expect(page.locator('#events-scroll .event', { hasText: 'Q-a-0' })).toHaveCount(1);
       expect(await page.locator('#events-scroll .event').count()).toBe(150);
+      const topAfter = await page.evaluate(() => /** @type {any} */ (window).__seamAnchor.getBoundingClientRect().top);
+      expect(Math.abs(topAfter - topBefore), 'the first bubble stays put across the prepend').toBeLessThan(1);
       // Old code: 2 (the prepended page's leading divider + the stale one).
       expect(await page.locator('#events-scroll .event-time-divider').count()).toBe(1);
       // The surviving divider precedes every bubble, and the prepended page

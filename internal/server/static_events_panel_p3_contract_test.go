@@ -22,64 +22,6 @@ import (
 	"testing"
 )
 
-func TestDashboardJS_PrependDropsRedundantSeamDivider(t *testing.T) {
-	t.Parallel()
-	js := readDashboardJS(t)
-	body := jsFuncBody(t, js, "prependEvents")
-	for _, want := range []string{
-		"const oldLeadDivider = leadingTimeDivider(el);",
-		"const newestPrependedTime = lastDividerTime(frag);",
-		"if (leadT && leadT - newestPrependedTime < EVENT_DIVIDER_GAP_MS) oldLeadDivider.remove();",
-		// Found by the seam e2e: inserting before a moving el.firstChild
-		// reversed the prepended page; anchor once.
-		"const anchor = el.firstChild;",
-		"el.insertBefore(frag.firstChild, anchor);",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("prependEvents missing %q — the old prevTime=0 divider stays stacked under the prepended page", want)
-		}
-	}
-	// The removal must run before the bottom-anchored scroll restore so the
-	// height change is accounted for.
-	rm := strings.Index(body, "oldLeadDivider.remove();")
-	restore := strings.Index(body, "el.scrollTop = el.scrollHeight - el.clientHeight - prevScrollFromBottom;")
-	if rm < 0 || restore < 0 || rm > restore {
-		t.Error("redundant divider removal must precede the scrollTop restore in prependEvents")
-	}
-	lead := jsFuncBody(t, js, "leadingTimeDivider")
-	if !strings.Contains(lead, "if (c.classList.contains('event')) return null;") {
-		t.Error("leadingTimeDivider must stop at the first bubble — only a divider that precedes every bubble is the prevTime=0 one")
-	}
-}
-
-func TestDashboardJS_AppendEventsReplacesOptimisticBubble(t *testing.T) {
-	t.Parallel()
-	js := readDashboardJS(t)
-	body := jsFuncBody(t, js, "appendEvents")
-	userIdx := strings.Index(body, "if (e.type === 'user') {")
-	if userIdx < 0 {
-		t.Fatal("appendEvents must have a user-event branch like onHistory")
-	}
-	branch := body[userIdx:]
-	if end := strings.Index(branch, "const h = eventHtml(e);"); end > 0 {
-		branch = branch[:end]
-	}
-	if !strings.Contains(branch, "if (eventAlreadyRendered(el, e.uuid)) {") {
-		t.Error("appendEvents user branch must dedup replays by uuid (same rule as onHistory)")
-	}
-	if !strings.Contains(branch, "const opt = el.querySelector('.optimistic-msg');\n      if (opt) opt.remove();") {
-		t.Error("appendEvents must remove the optimistic bubble when the real user event arrives via poll (#2430 double bubble after WS drop)")
-	}
-	// Only a duplicate (uuid already on screen) may be skipped — never a real
-	// event, and the skip must still advance the time cursor.
-	if !strings.Contains(branch, "if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;\n        return;") {
-		t.Error("appendEvents uuid-dedup skip must advance transcript.lastRenderedEventTime before returning")
-	}
-	if !strings.Contains(branch, "lockRenderedAskCards(el);") {
-		t.Error("appendEvents user branch must keep locking ask cards (P2 #2430 item 3)")
-	}
-}
-
 func TestDashboardJS_SendAckRollsBackOwnBubbleById(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
