@@ -72,17 +72,17 @@ test('the test surface writes the message-nav popover flag its owner reads', asy
   // A setter that assigns an imported binding throws in module (strict)
   // code; the flag's owner, msg_nav, is the only one that can write it.
   const result = await page.evaluate(async () => {
-    const { nzTest, nzState } = await import('/static/nz_util.js');
+    const { nzTest } = await import('/static/nz_util.js');
     try {
       nzTest.navPopoverOpen = true;
-      return { ok: true, test: nzTest.navPopoverOpen, state: nzState.navPopoverOpen };
+      return { ok: true, value: nzTest.navPopoverOpen };
     } catch (e) {
       return { ok: false, err: String(e) };
     } finally {
       nzTest.navPopoverOpen = false;
     }
   });
-  expect(result).toEqual({ ok: true, test: true, state: true });
+  expect(result).toEqual({ ok: true, value: true });
   expect(pageErrors).toEqual([]);
 
   await ctx.close();

@@ -5,7 +5,8 @@
 //
 // Verbatim move out of dashboard.js; only the import + dep-wiring lines are
 // new. Layering (D4-1 rule): never import dashboard back.
-import { esc, nzState, nzTest, showToast } from './nz_util.js';
+import { selection } from './state.js';
+import { esc, nzTest, showToast } from './nz_util.js';
 
 const deps = {
   ICONS: null,
@@ -76,7 +77,7 @@ window.addEventListener('popstate', () => {
 
 function initMobile() {
   if (!isMobile()) return;
-  const hasSession = !!nzState.selectedKey;
+  const hasSession = !!selection.key;
   document.body.classList.toggle('mobile-chat-view', hasSession);
   document.body.classList.toggle('mobile-list-view', !hasSession);
 }
@@ -234,7 +235,7 @@ function openSessionContextMenu(card, x, y) {
     {
       label: '重命名', icon: deps.ICONS.edit,
       action: () => {
-        // deps.renameSession() reads nzState.selectedKey/nzState.selectedNode and repaints only the
+        // deps.renameSession() reads selection.key/selection.node and repaints only the
         // header of the CURRENT shell (deps.renderMainHeader), so the target must
         // be properly selected first — flipping the globals alone would stamp
         // this card's header onto whatever conversation is on screen.

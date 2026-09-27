@@ -12,13 +12,13 @@
     "topLevelLetVar": 0
   },
   "auth_modal.js": {
-    "lines": 1576,
+    "lines": 1572,
     "maxFunctionLines": 101,
     "functionsOver100": 1,
     "topLevelLetVar": 2
   },
   "composer_files.js": {
-    "lines": 468,
+    "lines": 469,
     "maxFunctionLines": 65,
     "functionsOver100": 0,
     "topLevelLetVar": 2
@@ -60,25 +60,25 @@
     "topLevelLetVar": 1
   },
   "cron_view.js": {
-    "lines": 2649,
+    "lines": 2646,
     "maxFunctionLines": 127,
     "functionsOver100": 3,
     "topLevelLetVar": 11
   },
   "dashboard.js": {
-    "lines": 6757,
+    "lines": 6631,
     "maxFunctionLines": 249,
     "functionsOver100": 4,
     "topLevelLetVar": 0
   },
   "discovery.js": {
-    "lines": 252,
+    "lines": 253,
     "maxFunctionLines": 149,
     "functionsOver100": 1,
     "topLevelLetVar": 0
   },
   "file_refs.js": {
-    "lines": 924,
+    "lines": 925,
     "maxFunctionLines": 144,
     "functionsOver100": 1,
     "topLevelLetVar": 6
@@ -90,19 +90,19 @@
     "topLevelLetVar": 0
   },
   "mobile_nav.js": {
-    "lines": 574,
+    "lines": 575,
     "maxFunctionLines": 118,
     "functionsOver100": 1,
     "topLevelLetVar": 3
   },
   "msg_nav.js": {
-    "lines": 469,
+    "lines": 470,
     "maxFunctionLines": 46,
     "functionsOver100": 0,
     "topLevelLetVar": 5
   },
   "nz_util.js": {
-    "lines": 287,
+    "lines": 278,
     "maxFunctionLines": 7,
     "functionsOver100": 0,
     "topLevelLetVar": 0
@@ -114,7 +114,7 @@
     "topLevelLetVar": 6
   },
   "running_banner.js": {
-    "lines": 483,
+    "lines": 484,
     "maxFunctionLines": 95,
     "functionsOver100": 0,
     "topLevelLetVar": 1
@@ -126,19 +126,19 @@
     "topLevelLetVar": 5
   },
   "send_message.js": {
-    "lines": 601,
+    "lines": 596,
     "maxFunctionLines": 223,
     "functionsOver100": 2,
     "topLevelLetVar": 1
   },
   "session_header.js": {
-    "lines": 412,
+    "lines": 413,
     "maxFunctionLines": 33,
     "functionsOver100": 0,
     "topLevelLetVar": 0
   },
   "sidebar_project.js": {
-    "lines": 596,
+    "lines": 597,
     "maxFunctionLines": 102,
     "functionsOver100": 2,
     "topLevelLetVar": 0
@@ -150,31 +150,31 @@
     "topLevelLetVar": 5
   },
   "state.js": {
-    "lines": 209,
+    "lines": 289,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0
   },
   "system_view.js": {
-    "lines": 260,
+    "lines": 261,
     "maxFunctionLines": 73,
     "functionsOver100": 0,
     "topLevelLetVar": 2
   },
   "tuning.js": {
-    "lines": 529,
+    "lines": 527,
     "maxFunctionLines": 132,
     "functionsOver100": 2,
     "topLevelLetVar": 1
   },
   "utilities.js": {
-    "lines": 1091,
+    "lines": 1092,
     "maxFunctionLines": 91,
     "functionsOver100": 0,
     "topLevelLetVar": 4
   },
   "voice.js": {
-    "lines": 491,
+    "lines": 492,
     "maxFunctionLines": 73,
     "functionsOver100": 0,
     "topLevelLetVar": 12

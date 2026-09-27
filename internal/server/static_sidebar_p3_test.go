@@ -45,7 +45,7 @@ func TestDashboard_PendingCardWorkspaceFallback(t *testing.T) {
 	// from the workspace basename when the workspace is not a registered
 	// project — the same shape /api/sessions emits, so the card lands in the
 	// same group before and after the first send.
-	start := strings.Index(js, "const pendingKeys = Object.keys(sessionWorkspaces);")
+	start := strings.Index(js, "const pendingKeys = Object.keys(perSession.workspaces);")
 	if start < 0 {
 		t.Fatal("dashboard.js: pending-card merge block not found")
 	}
@@ -130,9 +130,9 @@ func TestDashboard_DiscoveredKeyIncludesNode(t *testing.T) {
 		extractJSFunction(t, js, "parseDiscoveredPid") +
 		extractJSFunction(t, js, "findDiscovered") +
 		extractJSFunction(t, js, "dropDiscovered") + `
-// #2558 D4-6: these helpers moved to discovery.js, where the discovered set
-// is read through the nz.state accessor — mirror that surface.
-const nzState = { discoveredItems: [
+// These helpers live in discovery.js, where the discovered set is read
+// from sessionList — mirror that surface.
+const sessionList = { discoveredItems: [
   { pid: 4242, node: 'local', session_id: 'a' },
   { pid: 4242, node: 'remote1', session_id: 'b' },
   { pid: 7, session_id: 'c' },
@@ -147,7 +147,7 @@ out.findLocal = (findDiscovered(4242, 'local') || {}).session_id || null;
 out.findDefault = (findDiscovered(7, undefined) || {}).session_id || null;
 out.findMissing = findDiscovered(4242, 'nope');
 dropDiscovered(4242, 'local');
-out.afterDrop = nzState.discoveredItems.map(d => d.session_id);
+out.afterDrop = sessionList.discoveredItems.map(d => d.session_id);
 process.stdout.write(JSON.stringify(out));
 `
 	var got struct {

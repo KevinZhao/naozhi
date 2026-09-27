@@ -6,9 +6,10 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureDiscovery(), called from dashboard's module body.
-import { esc, fetchJSON, nzState } from './nz_util.js';
+import { selection, sessionList, timers, transcript } from './state.js';
+import { esc, fetchJSON } from './nz_util.js';
 
 const deps = {
   EVENT_DIVIDER_GAP_MS: null,
@@ -57,10 +58,10 @@ function sameDiscovered(d, pid, node) {
   return d.pid === pid && (d.node || 'local') === (node || 'local');
 }
 function findDiscovered(pid, node) {
-  return nzState.discoveredItems.find(d => sameDiscovered(d, pid, node)) || null;
+  return sessionList.discoveredItems.find(d => sameDiscovered(d, pid, node)) || null;
 }
 function dropDiscovered(pid, node) {
-  nzState.discoveredItems = nzState.discoveredItems.filter(d => !sameDiscovered(d, pid, node));
+  sessionList.discoveredItems = sessionList.discoveredItems.filter(d => !sameDiscovered(d, pid, node));
 }
 
 async function scanDiscovered() {
@@ -71,18 +72,18 @@ async function scanDiscovered() {
     // RNEW-UX-003: 10s timeout — /api/discovered walks the filesystem, so a
     // stalled disk shouldn't wedge the scan button forever.
     const data = await fetchJSON(NZ_CONTRACT.API.discovered, { headers, timeoutMs: 10000 });
-    nzState.discoveredItems = data || [];
+    sessionList.discoveredItems = data || [];
     // #1770: only force a full sidebar re-render when the discovered set
     // actually changed. Previously every 30s (connected) / 5s (disconnected)
-    // scan unconditionally set nzState.lastVersion=0, defeating fetchSessions' version
+    // scan unconditionally set sessionList.lastVersion=0, defeating fetchSessions' version
     // short-circuit and rebuilding the whole sidebar DOM even when nothing
     // changed — wasted CPU/layout on low-end phones. Mirror the
     // nodesHash/historyHash pattern fetchSessions already uses.
-    const discoveredHash = JSON.stringify(nzState.discoveredItems);
-    if (discoveredHash === nzState.lastDiscoveredJSON) return;
-    nzState.lastDiscoveredJSON = discoveredHash;
+    const discoveredHash = JSON.stringify(sessionList.discoveredItems);
+    if (discoveredHash === sessionList.lastDiscoveredJSON) return;
+    sessionList.lastDiscoveredJSON = discoveredHash;
     // Trigger sidebar re-render to merge discovered into project groups
-    nzState.lastVersion = 0;
+    sessionList.lastVersion = 0;
     deps.debouncedFetchSessions();
   } catch (e) {
     console.warn('scanDiscovered error:', e.message);
@@ -93,19 +94,19 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
   // Generation guard: two rapid clicks on different discovered cards both
   // pass the synchronous prologue, then the first call's awaited fetch used to
   // resolve into the SECOND card's #events-scroll and arm a second
-  // setInterval without clearing the first (nzState.previewTimer was simply
+  // setInterval without clearing the first (timers.preview was simply
   // overwritten → leaked interval appending the wrong session's events).
-  // deps.stopPreviewPolling() bumps nzState._previewGen, so capture AFTER calling it.
+  // deps.stopPreviewPolling() bumps transcript.previewGen, so capture AFTER calling it.
   deps.stopPreviewPolling();
-  const gen = nzState._previewGen;
-  // Deselect any managed session. We null `nzState.selectedKey` but deliberately
+  const gen = transcript.previewGen;
+  // Deselect any managed session. We null `selection.key` but deliberately
   // leave `selectedNode` intact — it now doubles as the sidebar filter and
   // nulling it would strand the user on an empty list until their next
   // refresh. The "no managed session selected" state is fully represented
-  // by `nzState.selectedKey === null`; other call sites check it that way.
-  nzState.selectedKey = null;
+  // by `selection.key === null`; other call sites check it that way.
+  selection.key = null;
   if (deps.wsm.subscribedKey) deps.wsm.unsubscribe();
-  if (nzState.eventTimer) { clearInterval(nzState.eventTimer); nzState.eventTimer = null; }
+  if (timers.events) { clearInterval(timers.events); timers.events = null; }
   deps.mobileEnterChat();
 
   // Highlight the discovered card
@@ -137,7 +138,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
       '</div>' +
     '</div>';
   deps.navRebuild(); // clear stale nav state before async preview fetch
-  nzState.pendingDiscovered = {pid: pid, sessionId: sessionId, cwd: cwd, procStartTime: procStartTime, node: node};
+  selection.pendingDiscovered = {pid: pid, sessionId: sessionId, cwd: cwd, procStartTime: procStartTime, node: node};
 
   try {
     const nodeParam = node ? '&node=' + encodeURIComponent(node) : '';
@@ -158,7 +159,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     try {
       events = await fetchJSON(NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam, { headers, timeoutMs: 10000 });
     } catch (err) {
-      if (gen !== nzState._previewGen) return;
+      if (gen !== transcript.previewGen) return;
       const errText = err.message || '';
       const el0 = document.getElementById('events-scroll');
       if (el0) el0.innerHTML = '<div class="empty-state">' + esc(errText || '预览失败') + '</div>';
@@ -166,11 +167,11 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
       return;
     }
     // A newer previewDiscovered(), selectSession() or createSession() (all of
-    // which run deps.stopPreviewPolling → nzState._previewGen++) may have superseded this
+    // which run deps.stopPreviewPolling → transcript.previewGen++) may have superseded this
     // call while the fetch was in flight. The managed-session panel reuses the
     // #events-scroll id, so an element check alone is not enough — never
     // paint into someone else's panel.
-    if (gen !== nzState._previewGen) return;
+    if (gen !== transcript.previewGen) return;
     const el = document.getElementById('events-scroll');
     if (!el) return;
     const display = deps.processEventsForDisplay(events);
@@ -181,23 +182,23 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
       deps.stickEventsBottom();
     }
     deps.navRebuild();
-    // nzState.previewTimer is provably null here: it is only ever armed below, after
+    // timers.preview is provably null here: it is only ever armed below, after
     // this generation check, and any older generation's interval was cleared
     // by the deps.stopPreviewPolling() in our own prologue. Do NOT call
-    // deps.stopPreviewPolling() at this point — it would bump nzState._previewGen and
+    // deps.stopPreviewPolling() at this point — it would bump transcript.previewGen and
     // invalidate this very call.
-    nzState.previewEventCount = events.length;
+    transcript.previewEventCount = events.length;
     const capturedSid = sessionId;
     // #1770: guard against overlapping ticks. Each tick re-fetches the full
     // preview event list; on a slow link a fetch can outlast the 2s interval,
     // so without this flag consecutive ticks pile up concurrent requests.
     // Mirrors _fetchEventsInFlight on the main events poll.
     let previewInFlight = false;
-    nzState.previewTimer = setInterval(async () => {
+    timers.preview = setInterval(async () => {
       // A newer previewDiscovered() already cleared this interval in its
       // prologue; the check is defence-in-depth against a tick that was
       // queued before clearInterval landed.
-      if (gen !== nzState._previewGen) return;
+      if (gen !== transcript.previewGen) return;
       if (previewInFlight) return;
       previewInFlight = true;
       try {
@@ -207,10 +208,10 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         const r2 = await fetch(NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(capturedSid) + nodeParam + cwdParam, { headers: headers2 });
         if (!r2.ok) return;
         const all = await r2.json();
-        if (gen !== nzState._previewGen) return;
-        if (all.length <= nzState.previewEventCount) return;
-        const fresh = all.slice(nzState.previewEventCount);
-        nzState.previewEventCount = all.length;
+        if (gen !== transcript.previewGen) return;
+        if (all.length <= transcript.previewEventCount) return;
+        const fresh = all.slice(transcript.previewEventCount);
+        transcript.previewEventCount = all.length;
         const el2 = document.getElementById('events-scroll');
         if (!el2) { deps.stopPreviewPolling(); return; }
         const empty = el2.querySelector('.empty-state');

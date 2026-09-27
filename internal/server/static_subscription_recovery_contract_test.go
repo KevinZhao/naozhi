@@ -76,22 +76,22 @@ func TestDashboardJS_WasDeadNotMaskedByOptimisticRunning(t *testing.T) {
 	if end := strings.Index(markBody, "\n}\n"); end > 0 {
 		markBody = markBody[:end]
 	}
-	stashIdx := strings.Index(markBody, "sessionOptimisticPrevState[sKey] = sd.state")
+	stashIdx := strings.Index(markBody, "perSession.optimisticPrevState[sKey] = sd.state")
 	flipIdx := strings.Index(markBody, "sd.state = 'running'")
 	if stashIdx < 0 {
-		t.Fatal("markSessionOptimisticRunning must record the pre-flip state in sessionOptimisticPrevState — wasDead cannot otherwise tell a real 'running' from the optimistic flip")
+		t.Fatal("markSessionOptimisticRunning must record the pre-flip state in perSession.optimisticPrevState — wasDead cannot otherwise tell a real 'running' from the optimistic flip")
 	}
 	if flipIdx >= 0 && stashIdx > flipIdx {
-		t.Error("sessionOptimisticPrevState must be stashed BEFORE `sd.state = 'running'` — stashing after records the flip itself")
+		t.Error("perSession.optimisticPrevState must be stashed BEFORE `sd.state = 'running'` — stashing after records the flip itself")
 	}
 
 	body := extractJSBlock(t, js, "onSessionState(msg) {")
 
-	captureIdx := strings.Index(body, "const optimisticPrevState = sessionOptimisticPrevState[sKey]")
+	captureIdx := strings.Index(body, "const optimisticPrevState = perSession.optimisticPrevState[sKey]")
 	if captureIdx < 0 {
-		t.Fatal("onSessionState must read sessionOptimisticPrevState before deleting it")
+		t.Fatal("onSessionState must read perSession.optimisticPrevState before deleting it")
 	}
-	deleteIdx := strings.Index(body, "delete sessionOptimisticPrevState[sKey]")
+	deleteIdx := strings.Index(body, "delete perSession.optimisticPrevState[sKey]")
 	if deleteIdx >= 0 && deleteIdx < captureIdx {
 		t.Error("optimisticPrevState must be captured BEFORE its delete — capturing after always reads undefined")
 	}

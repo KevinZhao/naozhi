@@ -6,9 +6,11 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureSendMessage(), called from dashboard's module body.
-import { nzState, showToast } from './nz_util.js';
+import { composer, perSession, selection, sessionList, timers } from './state.js';
+import { turnState } from './running_banner.js';
+import { showToast } from './nz_util.js';
 
 const deps = {
   EVENT_DIVIDER_GAP_MS: null,
@@ -20,7 +22,6 @@ const deps = {
   fetchEvents: null,
   fetchSessions: null,
   getToken: null,
-  httpSendPending: null,
   interruptSession: null,
   lastDividerTime: null,
   navSync: null,
@@ -28,12 +29,6 @@ const deps = {
   removeSidebarCard: null,
   renderFilePreviews: null,
   selectSession: null,
-  sessionAccessProfiles: null,
-  sessionBackends: null,
-  sessionNodes: null,
-  sessionOptimisticPrevState: null,
-  sessionOptimisticRunning: null,
-  sessionWorkspaces: null,
   showAPIError: null,
   showAuthModal: null,
   showNetworkError: null,
@@ -59,7 +54,7 @@ let _lastEscAt = 0;
 function handleKey(e) {
   if (e.key === 'Escape') {
     e.preventDefault();
-    const sd = nzState.sessionsData[deps.sid(nzState.selectedKey, nzState.selectedNode || 'local')];
+    const sd = sessionList.sessionsData[deps.sid(selection.key, selection.node || 'local')];
     const running = sd && sd.state === 'running';
     if (!running) { _lastEscAt = 0; return; }
     const now = Date.now();
@@ -72,7 +67,7 @@ function handleKey(e) {
     }
     return;
   }
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && Date.now() - nzState.lastCompositionEnd > 30) { e.preventDefault(); sendMessage(); }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && Date.now() - composer.lastCompositionEnd > 30) { e.preventDefault(); sendMessage(); }
 }
 
 function getMsgValue(el) { return (el ? el.innerText : '').trim(); }
@@ -121,7 +116,7 @@ function validateComposerForSend(text) {
   // Block send while any attachment is still uploading or errored —
   // we only reference file_ids on the server, so partial uploads would
   // silently drop images. User can retry or remove the bad one.
-  if (nzState.pendingFiles.some(f => f.status === 'uploading')) {
+  if (composer.pendingFiles.some(f => f.status === 'uploading')) {
     showToast('图片上传中，请稍候…', 'warning');
     return false;
   }
@@ -129,19 +124,19 @@ function validateComposerForSend(text) {
 }
 
 async function sendMessage() {
-  if (nzState.sending) return;
+  if (composer.sending) return;
 
   // Auto-takeover: if viewing a discovered session, takeover first then send
-  if (nzState.pendingDiscovered && !nzState.selectedKey) {
+  if (selection.pendingDiscovered && !selection.key) {
     const input = document.getElementById('msg-input');
     const text = getMsgValue(input);
     if (!text) return;
-    nzState.sending = true;
+    composer.sending = true;
     const btn = document.getElementById('btn-send');
     if (btn) btn.classList.add('sending');
     if (input) input.dataset.placeholder = '正在接管会话…';
     if (input) input.contentEditable = 'false';
-    const pd = nzState.pendingDiscovered;
+    const pd = selection.pendingDiscovered;
     try {
       const headers = {'Content-Type': 'application/json'};
       const token = deps.getToken();
@@ -154,7 +149,7 @@ async function sendMessage() {
         const errText = await r.text().catch(() => '');
         deps.showAPIError('接管进程', r.status, errText);
         if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
-        nzState.sending = false;
+        composer.sending = false;
         if (btn) btn.classList.remove('sending');
         return;
       }
@@ -162,7 +157,7 @@ async function sendMessage() {
       if (!data.key) {
         showToast('接管进程失败：未返回会话标识', 'error');
         if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
-        nzState.sending = false;
+        composer.sending = false;
         if (btn) btn.classList.remove('sending');
         return;
       }
@@ -170,26 +165,26 @@ async function sendMessage() {
       deps.dropDiscovered(pd.pid, pd.node);
       // Remove the discovered card from sidebar
       deps.removeSidebarCard(deps.discoveredKey(pd.pid, pd.node));
-      nzState.pendingDiscovered = null;
+      selection.pendingDiscovered = null;
       // Poll until the session appears in managed sessions (up to 10s)
       const takenKey = data.key;
       const takenNode = pd.node || 'local';
       let ready = false;
       for (let i = 0; i < 20; i++) {
         await new Promise(resolve => setTimeout(resolve, 500));
-        nzState.lastVersion = 0;
+        sessionList.lastVersion = 0;
         await deps.fetchSessions();
-        if (nzState.sessionsData[deps.sid(takenKey, takenNode)]) { ready = true; break; }
+        if (sessionList.sessionsData[deps.sid(takenKey, takenNode)]) { ready = true; break; }
       }
       if (!ready) {
         showToast('接管超时：会话未就绪，请稍后重试', 'error');
         if (input) { input.dataset.placeholder = 'send a message...'; input.contentEditable = 'true'; }
-        nzState.sending = false;
+        composer.sending = false;
         if (btn) btn.classList.remove('sending');
         return;
       }
       // Session is ready — switch to it and send the message
-      nzState.sending = false;
+      composer.sending = false;
       deps.selectSession(takenKey, takenNode);
       // Restore the message text and send
       const newInput = document.getElementById('msg-input');
@@ -199,16 +194,16 @@ async function sendMessage() {
     } catch (e) {
       deps.showNetworkError('接管进程', e);
       if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
-      nzState.sending = false;
+      composer.sending = false;
       if (btn) btn.classList.remove('sending');
       return;
     }
   }
 
-  if (!nzState.selectedKey) return;
+  if (!selection.key) return;
   const input = document.getElementById('msg-input');
   const text = getMsgValue(input);
-  if (!text && nzState.pendingFiles.length === 0) return;
+  if (!text && composer.pendingFiles.length === 0) return;
   if (!validateComposerForSend(text)) return;
 
   // #2405 — close the reentrancy gate BEFORE the first await. sendComposerTurn
@@ -220,41 +215,41 @@ async function sendMessage() {
   // text-only ghost over WS. The `.sending` class is the visible cue that the
   // click registered. The finally is the ONLY reset — every exit path of the
   // gated half goes through it.
-  nzState.sending = true;
+  composer.sending = true;
   const btn = document.getElementById('btn-send');
   if (btn) btn.classList.add('sending');
   try {
-    await sendComposerTurn(nzState.selectedKey, nzState.selectedNode);
+    await sendComposerTurn(selection.key, selection.node);
   } finally {
-    nzState.sending = false;
+    composer.sending = false;
     if (btn) btn.classList.remove('sending');
   }
 }
 
 // sendComposerTurn is the gated half of sendMessage: the caller holds the
-// `nzState.sending` gate for its whole duration. targetKey/targetNode are the session
+// `composer.sending` gate for its whole duration. targetKey/targetNode are the session
 // the operator hit send on; a switch during the orient wait aborts the send
 // rather than redirecting the captured text to the newly selected session.
 async function sendComposerTurn(targetKey, targetNode) {
   // Auto-orient runs as a fire-and-forget vision side-call after upload
   // (maybeAutoOrient). If the user hits send within its ~12s window, the
   // server would TakeAll the upload BEFORE the rotation's in-place Replace
-  // lands — nzState.sending the original sideways image. Transparently wait for any
+  // lands — composer.sending the original sideways image. Transparently wait for any
   // in-flight orient to settle (hard-capped at ORIENT_MAX_WAIT_MS) so the
   // rotated bytes are in the store before we consume the file_ids. Silent by
   // design: no toast, the user already clicked send and the rotation is
   // best-effort.
   await deps.awaitPendingOrients();
-  if (!nzState.selectedKey || nzState.selectedKey !== targetKey || nzState.selectedNode !== targetNode) return;
+  if (!selection.key || selection.key !== targetKey || selection.node !== targetNode) return;
   // The composer stayed editable during the wait: re-read the text and re-run
   // the synchronous checks. Without the uploading re-check an id-less upload
   // dropped mid-wait was filtered out of fileIDs and then deleted by
   // clearPendingFiles() — the attachment vanished without a trace.
   const input = document.getElementById('msg-input');
   const text = getMsgValue(input);
-  if (!text && nzState.pendingFiles.length === 0) return;
+  if (!text && composer.pendingFiles.length === 0) return;
   if (!validateComposerForSend(text)) return;
-  const failed = nzState.pendingFiles.filter(f => f.status === 'error');
+  const failed = composer.pendingFiles.filter(f => f.status === 'error');
   if (failed.length > 0) {
     const detail = failed[0].error || '';
     const tail = detail ? '（' + detail.slice(0, 120) + '）' : '';
@@ -271,7 +266,7 @@ async function sendComposerTurn(targetKey, targetNode) {
   // up in the NDJSON line). Filtering by kind here keeps mixed image+PDF
   // sends from tripping the cap on the PDF's 20 MB that will never hit
   // stdin anyway.
-  const totalBytes = nzState.pendingFiles.reduce((n, f) => {
+  const totalBytes = composer.pendingFiles.reduce((n, f) => {
     if (f.kind === 'pdf' || f.serverKind === 'file_ref') return n;
     return n + (f.normalizedSize || f.file.size || 0);
   }, 0);
@@ -280,7 +275,7 @@ async function sendComposerTurn(targetKey, targetNode) {
     showToast('图片总大小 ' + Math.ceil(totalBytes / 1024 / 1024) + ' MB 超过 9 MB 上限，请分批发送或减少图片', 'warning');
     return;
   }
-  const fileIDs = nzState.pendingFiles.map(f => f.id).filter(Boolean);
+  const fileIDs = composer.pendingFiles.map(f => f.id).filter(Boolean);
 
   // Flip the send→stop button + running banner BEFORE the network round trip,
   // not after — a resumed session has no CLI process yet, so the first send
@@ -289,7 +284,7 @@ async function sendComposerTurn(targetKey, targetNode) {
   // and invites double-sends. onSendAck/rollbackOptimisticRunning undo this on
   // busy/error/reset; the 20s safety timer in markSessionOptimisticRunning
   // prevents a stuck banner if the server never responds.
-  markSessionOptimisticRunning(nzState.selectedKey, nzState.selectedNode);
+  markSessionOptimisticRunning(selection.key, selection.node);
 
   // WS path: preferred for TEXT-ONLY sends. Sends carrying file_ids MUST go
   // over HTTP instead: the uploadStore owner for a WS send is the one frozen
@@ -305,30 +300,30 @@ async function sendComposerTurn(targetKey, targetNode) {
   // path for consistency.
   if (deps.wsm.isConnected() && fileIDs.length === 0) {
     const id = 'r' + (++deps.wsm.sendCounter);
-    const sendMsg = { type: 'send', key: nzState.selectedKey, text: text, id: id };
+    const sendMsg = { type: 'send', key: selection.key, text: text, id: id };
     // No file_ids here by construction — file-bearing sends take the HTTP
     // path above so the uploadStore owner matches the upload's cookie.
-    if (nzState.selectedNode && nzState.selectedNode !== 'local') sendMsg.node = nzState.selectedNode;
-    if (deps.sessionWorkspaces[nzState.selectedKey]) sendMsg.workspace = deps.sessionWorkspaces[nzState.selectedKey];
-    if (deps.sessionBackends[nzState.selectedKey]) sendMsg.backend = deps.sessionBackends[nzState.selectedKey];
-    if (deps.sessionAccessProfiles[nzState.selectedKey]) sendMsg.access_profile = deps.sessionAccessProfiles[nzState.selectedKey];
+    if (selection.node && selection.node !== 'local') sendMsg.node = selection.node;
+    if (perSession.workspaces[selection.key]) sendMsg.workspace = perSession.workspaces[selection.key];
+    if (perSession.backends[selection.key]) sendMsg.backend = perSession.backends[selection.key];
+    if (perSession.accessProfiles[selection.key]) sendMsg.access_profile = perSession.accessProfiles[selection.key];
     if (deps.wsm.send(sendMsg)) {
       // Workspace/backend/access profile are consumed once on session spawn;
       // forget them only now that the frame is out. A failed deps.wsm.send falls
       // through to the HTTP path below, which must still see them.
       if (sendMsg.workspace) {
-        delete deps.sessionWorkspaces[nzState.selectedKey];
-        delete deps.sessionNodes[nzState.selectedKey];
+        delete perSession.workspaces[selection.key];
+        delete perSession.nodes[selection.key];
       }
-      delete deps.sessionBackends[nzState.selectedKey];
-      delete deps.sessionAccessProfiles[nzState.selectedKey];
+      delete perSession.backends[selection.key];
+      delete perSession.accessProfiles[selection.key];
       // Optimistic render: show user message immediately without waiting
       // for the CLI to echo it back as a "user" event.
       renderOptimisticUserMsg(text, id);
       if (input) clearMsg(input);
-      delete nzState.sessionDrafts[nzState.selectedKey];
+      delete perSession.drafts[selection.key];
       clearPendingFiles();
-      if (text) nzState.sessionLastSent[deps.sid(nzState.selectedKey, nzState.selectedNode)] = text;
+      if (text) perSession.lastSent[deps.sid(selection.key, selection.node)] = text;
       // Confirmed send: the workspace/node/backend were consumed above (and
       // deleted from the in-memory maps), so rewrite the durable blob without
       // this key. Only on the success path — a failed deps.wsm.send falls through to
@@ -345,34 +340,34 @@ async function sendComposerTurn(targetKey, targetNode) {
     const token = deps.getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
 
-    const payload = { key: nzState.selectedKey, text: text };
+    const payload = { key: selection.key, text: text };
     if (fileIDs.length > 0) payload.file_ids = fileIDs;
-    if (nzState.selectedNode && nzState.selectedNode !== 'local') payload.node = nzState.selectedNode;
-    if (deps.sessionWorkspaces[nzState.selectedKey]) {
-      payload.workspace = deps.sessionWorkspaces[nzState.selectedKey];
-      delete deps.sessionWorkspaces[nzState.selectedKey];
-      delete deps.sessionNodes[nzState.selectedKey];
+    if (selection.node && selection.node !== 'local') payload.node = selection.node;
+    if (perSession.workspaces[selection.key]) {
+      payload.workspace = perSession.workspaces[selection.key];
+      delete perSession.workspaces[selection.key];
+      delete perSession.nodes[selection.key];
     }
-    if (deps.sessionBackends[nzState.selectedKey]) {
-      payload.backend = deps.sessionBackends[nzState.selectedKey];
-      delete deps.sessionBackends[nzState.selectedKey];
+    if (perSession.backends[selection.key]) {
+      payload.backend = perSession.backends[selection.key];
+      delete perSession.backends[selection.key];
     }
-    if (deps.sessionAccessProfiles[nzState.selectedKey]) {
-      payload.access_profile = deps.sessionAccessProfiles[nzState.selectedKey];
-      delete deps.sessionAccessProfiles[nzState.selectedKey];
+    if (perSession.accessProfiles[selection.key]) {
+      payload.access_profile = perSession.accessProfiles[selection.key];
+      delete perSession.accessProfiles[selection.key];
     }
 
     // Mark this tab as the originator BEFORE the request leaves (text or
     // image-only alike): a send_error for this turn can arrive over the WS
     // any time after the server has the request.
-    const sentSid = deps.sid(nzState.selectedKey, nzState.selectedNode);
-    deps.httpSendPending.add(sentSid);
+    const sentSid = deps.sid(selection.key, selection.node);
+    perSession.httpSendPending.add(sentSid);
     const r = await fetch(NZ_CONTRACT.API.sessions_send, {method:'POST', headers, body: JSON.stringify(payload)});
 
     if (!r.ok) {
-      deps.httpSendPending.delete(sentSid); // rejected synchronously — no async frame will follow
+      perSession.httpSendPending.delete(sentSid); // rejected synchronously — no async frame will follow
       if (input) setMsgValue(input, text);
-      rollbackOptimisticRunning(nzState.selectedKey, nzState.selectedNode);
+      rollbackOptimisticRunning(selection.key, selection.node);
       // Some error paths still write text/plain; fall back to text() so we
       // always surface the real message instead of a generic "send failed".
       const raw = await r.text().catch(() => '');
@@ -412,13 +407,13 @@ async function sendComposerTurn(targetKey, targetNode) {
     // input) so we can branch on status without reviving the stale text.
     // Record the sent text BEFORE awaiting the body (interrupt re-fill source;
     // also a secondary onSendError gate).
-    if (text) nzState.sessionLastSent[sentSid] = text;
+    if (text) perSession.lastSent[sentSid] = text;
     let ackStatus = '';
     try { const j = await r.json(); if (j && j.status) ackStatus = j.status; } catch (_) {}
 
     // Clear input only after confirmed success
     if (input) clearMsg(input);
-    delete nzState.sessionDrafts[nzState.selectedKey];
+    delete perSession.drafts[selection.key];
     clearPendingFiles();
     // Confirmed send: the pending maps were consumed above; rewrite the durable
     // blob without this key. Only on this 2xx path so a failed send keeps the
@@ -427,9 +422,9 @@ async function sendComposerTurn(targetKey, targetNode) {
     if (ackStatus === 'reset') {
       // /clear and /new do not spawn a turn — undo the pre-send optimistic flip
       // so the running banner doesn't hang on a no-op command.
-      rollbackOptimisticRunning(nzState.selectedKey, nzState.selectedNode);
-      delete nzState.sessionLastSent[sentSid]; // no turn ran, nothing to re-fill on interrupt
-      deps.httpSendPending.delete(sentSid);
+      rollbackOptimisticRunning(selection.key, selection.node);
+      delete perSession.lastSent[sentSid]; // no turn ran, nothing to re-fill on interrupt
+      perSession.httpSendPending.delete(sentSid);
     } else {
       // Optimistic running flip already applied above — keep it.
       // Optimistic bubble parity with the WS path — but ONLY while WS is
@@ -442,19 +437,19 @@ async function sendComposerTurn(targetKey, targetNode) {
 
     // Speed up polling when WS not connected
     if (!deps.wsm.isConnected()) {
-      if (nzState.eventTimer) clearInterval(nzState.eventTimer);
-      nzState.eventTimer = setInterval(() => deps.fetchEvents(false), 500);
+      if (timers.events) clearInterval(timers.events);
+      timers.events = setInterval(() => deps.fetchEvents(false), 500);
       setTimeout(() => {
-        if (nzState.eventTimer) clearInterval(nzState.eventTimer);
+        if (timers.events) clearInterval(timers.events);
         if (!deps.wsm.isConnected()) {
-          nzState.eventTimer = setInterval(() => deps.fetchEvents(false), 1000);
+          timers.events = setInterval(() => deps.fetchEvents(false), 1000);
         }
       }, 15000);
     }
   } catch (e) {
-    deps.httpSendPending.delete(deps.sid(nzState.selectedKey, nzState.selectedNode));
+    perSession.httpSendPending.delete(deps.sid(selection.key, selection.node));
     if (input) setMsgValue(input, text);
-    rollbackOptimisticRunning(nzState.selectedKey, nzState.selectedNode);
+    rollbackOptimisticRunning(selection.key, selection.node);
     deps.showNetworkError('发送消息', e);
   }
 }
@@ -490,8 +485,8 @@ function renderOptimisticUserMsg(text, sendId) {
 }
 
 function clearPendingFiles() {
-  nzState.pendingFiles.forEach(f => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
-  nzState.pendingFiles = [];
+  composer.pendingFiles.forEach(f => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
+  composer.pendingFiles = [];
   deps.renderFilePreviews();
 }
 
@@ -534,17 +529,17 @@ function patchSidebarCardState(key, node, state) {
 function markSessionOptimisticRunning(key, node) {
   if (!key) return;
   const sKey = deps.sid(key, node || 'local');
-  const sd = nzState.sessionsData[sKey];
+  const sd = sessionList.sessionsData[sKey];
   if (sd && sd.state === 'running') return; // server already said running
-  // A just-created session has no nzState.sessionsData entry until the next list
+  // A just-created session has no sessionList.sessionsData entry until the next list
   // fetch. Still flip the button/banner below (#2405: the missing feedback on
   // a new session's first send invited Enter mashing); deps.fetchSessions keeps the
   // flag-forced 'running' once the entry lands, onSessionState clears it.
   if (sd) {
-    deps.sessionOptimisticPrevState[sKey] = sd.state;
+    perSession.optimisticPrevState[sKey] = sd.state;
     sd.state = 'running';
   }
-  deps.sessionOptimisticRunning[sKey] = true;
+  perSession.optimisticRunning[sKey] = true;
   // Sidebar parity: flip the card's dot/label to running right now so the
   // left list never looks idle while the main banner already says working.
   patchSidebarCardState(key, node, 'running');
@@ -552,16 +547,16 @@ function markSessionOptimisticRunning(key, node) {
   _optimisticRunningTimers[sKey] = setTimeout(() => {
     delete _optimisticRunningTimers[sKey];
     // Only rollback if still optimistic (no real running state arrived).
-    if (deps.sessionOptimisticRunning[sKey]) {
+    if (perSession.optimisticRunning[sKey]) {
       rollbackOptimisticRunning(key, node);
     }
   }, 20000);
-  if (key === nzState.selectedKey && (node || 'local') === nzState.selectedNode) {
+  if (key === selection.key && (node || 'local') === selection.node) {
     // justSent makes the banner's first line read "已发送，正在处理…" until the
     // first real event (tool/thinking/output) arrives, so the operator gets a
     // distinct "received, starting up" signal during CLI spawn rather than a
     // generic static "处理中…".
-    nzState.turnState.justSent = true;
+    turnState.justSent = true;
     deps.startTurnTimer();
     deps.updateSendButton('running');
   }
@@ -570,21 +565,21 @@ function markSessionOptimisticRunning(key, node) {
 function rollbackOptimisticRunning(key, node) {
   if (!key) return;
   const sKey = deps.sid(key, node || 'local');
-  if (!deps.sessionOptimisticRunning[sKey]) return;
-  delete deps.sessionOptimisticRunning[sKey];
-  delete deps.sessionOptimisticPrevState[sKey];
+  if (!perSession.optimisticRunning[sKey]) return;
+  delete perSession.optimisticRunning[sKey];
+  delete perSession.optimisticPrevState[sKey];
   if (_optimisticRunningTimers[sKey]) {
     clearTimeout(_optimisticRunningTimers[sKey]);
     delete _optimisticRunningTimers[sKey];
   }
-  const sd = nzState.sessionsData[sKey];
+  const sd = sessionList.sessionsData[sKey];
   if (sd && sd.state === 'running') {
     sd.state = 'ready';
     patchSidebarCardState(key, node, 'ready');
   }
-  // The flip may have been applied without a nzState.sessionsData entry (new session's
+  // The flip may have been applied without a sessionList.sessionsData entry (new session's
   // first send) — restore the button either way.
-  if (key === nzState.selectedKey && (node || 'local') === nzState.selectedNode) deps.updateSendButton('ready');
+  if (key === selection.key && (node || 'local') === selection.node) deps.updateSendButton('ready');
 }
 
 

@@ -6,9 +6,10 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureSidebarProject(), called from dashboard's module body.
-import { esc, escAttr, fetchJSON, nzState, showToast, trapFocus } from './nz_util.js';
+import { serverInfo, sessionList } from './state.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus } from './nz_util.js';
 
 const deps = {
   PICKER_SELECT_ONLY_STYLE: null,
@@ -109,7 +110,7 @@ function sectionHeaderFallbackHtml(p) {
   // Collapse key matches the group key used in deps.renderSidebar (node:name:ws)
   // so two folders with the same basename each own their own fold state.
   const ck = node + ':' + p.name + ':' + workspace;
-  const collapsed = nzState.collapsedProjects.has(ck);
+  const collapsed = sessionList.collapsedProjects.has(ck);
   const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
   const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
   const cTitle = collapsed ? '展开' : '收起';
@@ -130,7 +131,7 @@ function sectionHeaderHtml(p) {
   const starCls = fav ? 'sh-btn star-on' : 'sh-btn';
   const starTitle = fav ? 'Unfavorite' : 'Favorite';
   const ck = node + ':' + p.name;
-  const collapsed = nzState.collapsedProjects.has(ck);
+  const collapsed = sessionList.collapsedProjects.has(ck);
   const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
   const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
   const cTitle = collapsed ? '展开' : '收起';
@@ -138,7 +139,7 @@ function sectionHeaderHtml(p) {
   const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
 
   // No longer pass `data-fav` — the handler derives current state from the
-  // authoritative `nzState.projectsData` at click time, avoiding a stale DOM attribute
+  // authoritative `sessionList.projectsData` at click time, avoiding a stale DOM attribute
   // that could cause a fast second click (before re-render) to send a
   // redundant or wrong-polarity toggle.
   const starBtn = '<button type="button" class="' + starCls + '" data-action="project-favorite" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="' + starTitle + '" aria-label="' + starTitle + ' ' + escAttr(p.name) + '">' + STAR_SVG + '</button>';
@@ -204,20 +205,20 @@ function sectionHeaderHtml(p) {
 // Key format: "<node>:<name>" matching the grouping key in deps.renderSidebar.
 function toggleProjectCollapsed(key) {
   if (!key) return;
-  if (nzState.collapsedProjects.has(key)) nzState.collapsedProjects.delete(key);
-  else nzState.collapsedProjects.add(key);
+  if (sessionList.collapsedProjects.has(key)) sessionList.collapsedProjects.delete(key);
+  else sessionList.collapsedProjects.add(key);
   try {
-    localStorage.setItem('nz_collapsedProjects', JSON.stringify([...nzState.collapsedProjects]));
+    localStorage.setItem('nz_collapsedProjects', JSON.stringify([...sessionList.collapsedProjects]));
   } catch (_) {}
-  if (nzState._lastSidebarData) {
-    deps.renderSidebar(nzState._lastSidebarData);
+  if (sessionList.lastSidebarData) {
+    deps.renderSidebar(sessionList.lastSidebarData);
   } else {
     deps.debouncedFetchSessions();
   }
 }
 
 // In-flight guard against a double-click race: the star button's DOM state
-// lags behind nzState.projectsData until the next deps.fetchSessions re-render. Without
+// lags behind sessionList.projectsData until the next deps.fetchSessions re-render. Without
 // this set, a second click inside that window would read a stale DOM hint and
 // potentially fire the same or opposite polarity. Keyed by (node, name).
 const _favInFlight = new Set();
@@ -226,9 +227,9 @@ async function toggleFavorite(name, node) {
   const nodeID = node || 'local';
   const key = nodeID + ':' + name;
   if (_favInFlight.has(key)) return; // drop re-entry
-  // Derive current state from the source of truth (nzState.projectsData), not the
+  // Derive current state from the source of truth (sessionList.projectsData), not the
   // button's data-fav attribute which may not have been re-rendered yet.
-  const proj = nzState.projectsData.find(x => x.name === name && (x.node || 'local') === nodeID);
+  const proj = sessionList.projectsData.find(x => x.name === name && (x.node || 'local') === nodeID);
   if (!proj) return;
   const next = !proj.favorite;
   _favInFlight.add(key);
@@ -247,7 +248,7 @@ async function toggleFavorite(name, node) {
         deps.showNetworkError(next ? '收藏项目' : '取消收藏', err);
       }
       // Re-render from the server so the star's visual hover/click state
-      // snaps back to the authoritative `nzState.projectsData` value; otherwise the
+      // snaps back to the authoritative `sessionList.projectsData` value; otherwise the
       // user sees a phantom success.
       deps.fetchSessions();
       return;
@@ -290,8 +291,8 @@ async function openProjectSettings(name) {
     return;
   }
 
-  const accessProfilePicker = deps.renderAccessProfilePicker(nzState.accessProfiles, { selectId: 'ps-access-profile', selectedId: cfg.access_profile || '' });
-  const backendPicker = deps.renderBackendPicker(nzState.cliBackends, { selectId: 'ps-backend', selectedId: cfg.backend || '' });
+  const accessProfilePicker = deps.renderAccessProfilePicker(serverInfo.accessProfiles, { selectId: 'ps-access-profile', selectedId: cfg.access_profile || '' });
+  const backendPicker = deps.renderBackendPicker(serverInfo.cliBackends, { selectId: 'ps-backend', selectedId: cfg.backend || '' });
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -499,7 +500,7 @@ function openCreateAccessProfile(onCreated) {
     showToast('访问档已创建 · ' + id, 'success');
     // Force a registry refresh (bypass the 60s cache) so the new profile is
     // visible immediately to pickers/chips.
-    nzState.accessProfilesFetchedAt = 0;
+    serverInfo.accessProfilesFetchedAt = 0;
     await deps.fetchAccessProfiles();
     if (typeof onCreated === 'function') onCreated(id);
   });
@@ -509,8 +510,8 @@ function openCreateAccessProfile(onCreated) {
 // cached registry, or "" when unknown / global default. Used only for the
 // planner-model placeholder + preview — never a value the form submits.
 function accessProfileDefaultModel(profileID) {
-  if (!profileID || !nzState.accessProfiles || !Array.isArray(nzState.accessProfiles.profiles)) return '';
-  const e = nzState.accessProfiles.profiles.find(p => p && p.id === profileID);
+  if (!profileID || !serverInfo.accessProfiles || !Array.isArray(serverInfo.accessProfiles.profiles)) return '';
+  const e = serverInfo.accessProfiles.profiles.find(p => p && p.id === profileID);
   return (e && e.default_model) ? e.default_model : '';
 }
 

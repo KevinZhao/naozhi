@@ -6,9 +6,10 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureRunningBanner(), called from dashboard's module body.
-import { escAttr, nzState, nzTest, nzViews, showToast } from './nz_util.js';
+import { perSession, selection, sessionList } from './state.js';
+import { escAttr, nzTest, nzViews, showToast } from './nz_util.js';
 
 const deps = {
   ICONS: null,
@@ -202,8 +203,8 @@ function refreshBanner() {
   const banner = document.getElementById('running-banner');
   if (banner) {
     const hasContent = turnState.currentTool || turnState.isThinking || turnState.isWriting || turnState.agents.length > 0 || turnState.toolOrder.length > 0;
-    const sKey = deps.sid(nzState.selectedKey, nzState.selectedNode);
-    const sess = nzState.sessionsData[sKey];
+    const sKey = deps.sid(selection.key, selection.node);
+    const sess = sessionList.sessionsData[sKey];
     const isRunning = sess && sess.state === 'running';
     const hasActiveAgents = turnState.agents.some(function(a) { return a.status !== 'completed' && a.status !== 'error'; });
     if (hasContent && (isRunning || hasActiveAgents) && banner.classList.contains('nz-hidden')) {
@@ -215,8 +216,8 @@ function refreshBanner() {
 }
 
 function updateSidebarAgentBadge() {
-  if (!nzState.selectedKey) return;
-  var card = document.querySelector('.session-card[data-key="' + escAttr(nzState.selectedKey) + '"]');
+  if (!selection.key) return;
+  var card = document.querySelector('.session-card[data-key="' + escAttr(selection.key) + '"]');
   if (!card) return;
   var meta = card.querySelector('.sc-meta');
   if (!meta) return;
@@ -333,15 +334,15 @@ function applyEventToTurnState(ev) {
 }
 
 function interruptSession() {
-  if (!nzState.selectedKey) return;
-  const sd = nzState.sessionsData[deps.sid(nzState.selectedKey, nzState.selectedNode || 'local')];
+  if (!selection.key) return;
+  const sd = sessionList.sessionsData[deps.sid(selection.key, selection.node || 'local')];
   if (!sd || sd.state !== 'running') return;
-  const targetNode = nzState.selectedNode && nzState.selectedNode !== 'local' ? nzState.selectedNode : '';
+  const targetNode = selection.node && selection.node !== 'local' ? selection.node : '';
   // Claude Code 风格：中断时把刚发的那条用户文本回填到输入框方便改写。
   // 只在输入框当前为空时回填，避免覆盖用户已经开始输入的新内容；回填后
   // 把光标挪到末尾、聚焦、滚进视口。回填完成即消费掉 lastSent，防止同一条
   // 文本在后续多次中断里反复回填。
-  const lastText = nzState.sessionLastSent[deps.sid(nzState.selectedKey, nzState.selectedNode)];
+  const lastText = perSession.lastSent[deps.sid(selection.key, selection.node)];
   if (lastText) {
     const input = document.getElementById('msg-input');
     if (input && !deps.getMsgValue(input)) {
@@ -354,12 +355,12 @@ function interruptSession() {
         const sel = window.getSelection();
         if (sel) { sel.removeAllRanges(); sel.addRange(range); }
       } catch (_) {}
-      nzState.sessionDrafts[nzState.selectedKey] = lastText;
-      delete nzState.sessionLastSent[deps.sid(nzState.selectedKey, nzState.selectedNode)];
+      perSession.drafts[selection.key] = lastText;
+      delete perSession.lastSent[deps.sid(selection.key, selection.node)];
     }
   }
   if (deps.wsm.isConnected()) {
-    const req = { type: 'interrupt', key: nzState.selectedKey, id: 'int' + Date.now() };
+    const req = { type: 'interrupt', key: selection.key, id: 'int' + Date.now() };
     if (targetNode) req.node = targetNode;
     deps.wsm.send(req);
     showToast('已发送中断', 'warning');
@@ -368,7 +369,7 @@ function interruptSession() {
     const headers = {'Content-Type': 'application/json'};
     const t = deps.getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const body = { key: nzState.selectedKey };
+    const body = { key: selection.key };
     if (targetNode) body.node = targetNode;
     fetch(NZ_CONTRACT.API.sessions_interrupt, {
       method: 'POST',
@@ -394,7 +395,7 @@ function saveScrollPos(key, node) {
   if (el.clientHeight === 0) return;
   const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
   const atBottom = fromBottom <= 30;
-  nzState.sessionScrollPos[deps.sid(key, node || 'local')] = { fromBottom, atBottom };
+  perSession.scrollPos[deps.sid(key, node || 'local')] = { fromBottom, atBottom };
 }
 
 // restoreScrollPos: 如果有保存的位置且不是贴底，则恢复并返回 true；
@@ -402,7 +403,7 @@ function saveScrollPos(key, node) {
 function restoreScrollPos(key, node) {
   const el = document.getElementById('events-scroll');
   if (!el || !key) return false;
-  const pos = nzState.sessionScrollPos[deps.sid(key, node || 'local')];
+  const pos = perSession.scrollPos[deps.sid(key, node || 'local')];
   if (!pos || pos.atBottom) return false;
   const apply = () => {
     const target = Math.max(0, el.scrollHeight - el.clientHeight - pos.fromBottom);

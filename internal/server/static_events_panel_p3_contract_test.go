@@ -153,18 +153,18 @@ func TestDashboardJS_NodeDisconnectDeselectsStaleSession(t *testing.T) {
 	} else {
 		t.Fatal("node-disconnected branch must still call reconcileSelectedNode()")
 	}
-	// Ownership must come from the session store (sessionsData / sessionNodes
+	// Ownership must come from the session store (sessionsData / perSession.nodes
 	// keyed by the dead node), never from selectedNode: that global is the
 	// dispatch target and wireNodePicker rewrites it on the new-session
 	// picker's change event, so a local session with the picker on n1 would
 	// otherwise be wiped when n1 disconnects. Pending sessions stay alone.
-	if !strings.Contains(branch, "(sessionList.sessionsData[sid(selection.key, msg.node)] || sessionNodes[selection.key] === msg.node)") {
-		t.Error("node-disconnected branch must resolve the selected session's node from sessionList.sessionsData/sessionNodes, not selection.node")
+	if !strings.Contains(branch, "(sessionList.sessionsData[sid(selection.key, msg.node)] || perSession.nodes[selection.key] === msg.node)") {
+		t.Error("node-disconnected branch must resolve the selected session's node from sessionList.sessionsData/perSession.nodes, not selection.node")
 	}
 	if strings.Contains(branch, "selection.node === msg.node") {
 		t.Error("node-disconnected branch must not infer session ownership from selection.node (dispatch target, rewritten by wireNodePicker)")
 	}
-	if !strings.Contains(branch, "sessionWorkspaces[selection.key] === undefined") {
+	if !strings.Contains(branch, "perSession.workspaces[selection.key] === undefined") {
 		t.Error("node-disconnected branch must skip pending (never-sent) sessions")
 	}
 	if !strings.Contains(branch, "deselectNodeSession(msg.node);") {
@@ -172,10 +172,10 @@ func TestDashboardJS_NodeDisconnectDeselectsStaleSession(t *testing.T) {
 	}
 	fn := jsFuncBody(t, js, "deselectNodeSession")
 	// #2558 D4-4: deselectNodeSession moved to system_view.js, where dashboard
-	// state is read via nz.state and helpers are injected deps.
+	// state is read from the state.js objects and helpers are injected deps.
 	for _, want := range []string{
-		"if (draft) nzState.sessionDrafts[nzState.selectedKey] = draft;", // keep the operator's text
-		"nzState.selectedKey = null;",
+		"if (draft) perSession.drafts[selection.key] = draft;", // keep the operator's text
+		"selection.key = null;",
 		"main.innerHTML = deps.mainEmptyHtml();",
 		"deps.wireQuickAskInput();",
 		"已断开",
@@ -184,7 +184,7 @@ func TestDashboardJS_NodeDisconnectDeselectsStaleSession(t *testing.T) {
 			t.Errorf("deselectNodeSession missing %q", want)
 		}
 	}
-	for _, forbid := range []string{"removePendingSession", "delete sessionWorkspaces", "fetch(", "DELETE"} {
+	for _, forbid := range []string{"removePendingSession", "delete perSession.workspaces", "fetch(", "DELETE"} {
 		if strings.Contains(fn, forbid) {
 			t.Errorf("deselectNodeSession must not touch pending sessions or the backend (%q)", forbid)
 		}

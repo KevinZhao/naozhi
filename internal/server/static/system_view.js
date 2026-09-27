@@ -6,9 +6,10 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureSystemView(), called from dashboard's module body.
-import { esc, fetchJSON, formatDurationShort, nzState, showToast } from './nz_util.js';
+import { perSession, selection, sessionList, ui } from './state.js';
+import { esc, fetchJSON, formatDurationShort, showToast } from './nz_util.js';
 
 const deps = {
   formatAbsTime: null,
@@ -44,7 +45,7 @@ let systemDaemons = [];
 let systemPollTimer = null;
 
 function openSystemPanel() {
-  if (nzState.activeView !== 'system') { deps.setActivityView('system'); return; }
+  if (ui.activeView !== 'system') { deps.setActivityView('system'); return; }
   renderSystemView();              // paint from cache (instant)
   fetchSystemDaemons().then(renderSystemView).catch(function () {});
   startSystemPoll();
@@ -55,7 +56,7 @@ function startSystemPoll() {
   // 5s cadence: daemons tick on the order of 30s, so a faster poll only burns
   // requests. Skip the fetch when the tab is hidden to avoid background churn.
   systemPollTimer = setInterval(function () {
-    if (document.hidden || nzState.activeView !== 'system') return;
+    if (document.hidden || ui.activeView !== 'system') return;
     fetchSystemDaemons().then(renderSystemView).catch(function () {});
   }, 5000);
 }
@@ -216,10 +217,10 @@ function renderSystemView() {
     '</div>';
 }
 
-// reconcileSelectedNode keeps `nzState.selectedNode` honest now that the sidebar node
+// reconcileSelectedNode keeps `selection.node` honest now that the sidebar node
 // selector is gone (the node picker moved into the New Session modal). It no
 // longer touches any DOM — the sidebar lists every node's sessions together —
-// but `nzState.selectedNode` still drives dispatch targeting and the main header, so
+// but `selection.node` still drives dispatch targeting and the main header, so
 // if the persisted selection points at a node that has since disappeared
 // (remote removed server-side while the dashboard is open) we snap it back to
 // 'local'. Kept as a single entry point so the many call sites (poll, session
@@ -232,8 +233,8 @@ function renderSystemView() {
 function deselectNodeSession(nodeID) {
   const inp = document.getElementById('msg-input');
   const draft = inp ? deps.getMsgValue(inp) : '';
-  if (draft) nzState.sessionDrafts[nzState.selectedKey] = draft;
-  nzState.selectedKey = null;
+  if (draft) perSession.drafts[selection.key] = draft;
+  selection.key = null;
   const main = document.getElementById('main');
   if (main) {
     main.innerHTML = deps.mainEmptyHtml();
@@ -243,9 +244,9 @@ function deselectNodeSession(nodeID) {
 }
 
 function reconcileSelectedNode() {
-  if (nzState.selectedNode && nzState.selectedNode !== 'local' && !nzState.nodesData[nzState.selectedNode]) {
-    nzState.selectedNode = 'local';
-    try { localStorage.setItem('nz_selectedNode', nzState.selectedNode); } catch(_) {}
+  if (selection.node && selection.node !== 'local' && !sessionList.nodesData[selection.node]) {
+    selection.node = 'local';
+    try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
   }
 }
 

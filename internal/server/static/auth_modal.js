@@ -6,13 +6,13 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureAuthModal(), called from dashboard's module body.
-import { esc, escAttr, fetchJSON, nzState, showToast, trapFocus } from './nz_util.js';
+import { perSession, selection, serverInfo, sessionList, transcript } from './state.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus } from './nz_util.js';
 
 const deps = {
   applyFeatureGates: null,
-  cliBackendsByNode: null,
   debouncedFetchSessions: null,
   eagerBindWorkspace: null,
   fetchSessions: null,
@@ -27,10 +27,6 @@ const deps = {
   projectDisplayPrefix: null,
   renderMainShell: null,
   sendMessage: null,
-  sessionAccessProfiles: null,
-  sessionBackends: null,
-  sessionNodes: null,
-  sessionWorkspaces: null,
   setActiveSessionCard: null,
   setMsgValue: null,
   shortPath: null,
@@ -240,18 +236,18 @@ function startWSAuthRetryCountdown(seconds) {
 //
 // node (optional) selects which node's manifest to fetch for the node-aware
 // new-session picker. Omitted / 'local' returns the local manifest and keeps
-// the global nzState.cliBackends cache (which every chip / feature-gate consumer
+// the global serverInfo.cliBackends cache (which every chip / feature-gate consumer
 // reads) warm. A remote node id appends ?node=<id> so the primary proxies to
 // that node (picker node-aware fix); the remote result is cached per node in
-// deps.cliBackendsByNode and does NOT touch the global nzState.cliBackends / feature gates.
+// deps.cliBackendsByNode and does NOT touch the global serverInfo.cliBackends / feature gates.
 async function fetchCLIBackends(node) {
   const isLocal = !node || node === 'local';
   if (isLocal) {
-    if (nzState.cliBackends && Date.now() - nzState.cliBackendsFetchedAt < 60000) {
-      return nzState.cliBackends;
+    if (serverInfo.cliBackends && Date.now() - serverInfo.cliBackendsFetchedAt < 60000) {
+      return serverInfo.cliBackends;
     }
   } else {
-    const hit = deps.cliBackendsByNode[node];
+    const hit = serverInfo.cliBackendsByNode[node];
     if (hit && Date.now() - hit.at < 60000) {
       return hit.data;
     }
@@ -265,26 +261,26 @@ async function fetchCLIBackends(node) {
     const data = await fetchJSON(url, {credentials: 'same-origin'});
     const manifest = data && Array.isArray(data.backends) ? data : null;
     if (isLocal) {
-      nzState.cliBackends = manifest;
-      nzState.cliBackendsFetchedAt = Date.now();
+      serverInfo.cliBackends = manifest;
+      serverInfo.cliBackendsFetchedAt = Date.now();
       // Multi-Backend RFC §8.3 D9-D15: re-apply feature gates whenever the
       // LOCAL backends manifest lands. The boot path fires fetchCLIBackends()
       // in parallel with deps.fetchSessions, so the very first deps.renderMainShell may
-      // have run with nzState.cliBackends==null — call gates here so the input
+      // have run with serverInfo.cliBackends==null — call gates here so the input
       // controls update once the manifest is available. Remote-node fetches
       // must NOT drive feature gates (the input controls operate on the
       // locally-selected session), so this stays inside the isLocal branch.
       deps.applyFeatureGates();
     } else if (manifest) {
-      deps.cliBackendsByNode[node] = { data: manifest, at: Date.now() };
+      serverInfo.cliBackendsByNode[node] = { data: manifest, at: Date.now() };
     } else {
       // A null / malformed remote manifest must not be pinned for 60s —
       // drop any stale entry so the next open refetches (#2429).
-      delete deps.cliBackendsByNode[node];
+      delete serverInfo.cliBackendsByNode[node];
     }
     return manifest;
   } catch (e) {
-    if (!isLocal) delete deps.cliBackendsByNode[node];
+    if (!isLocal) delete serverInfo.cliBackendsByNode[node];
     return null;
   }
 }
@@ -303,14 +299,14 @@ function renderBackendFetchFailed(node) {
 // no profiles are configured (single-auth deployments — the picker/chip then
 // stay hidden). RFC project-access-profile §8.
 async function fetchAccessProfiles() {
-  if (nzState.accessProfiles && Date.now() - nzState.accessProfilesFetchedAt < 60000) {
-    return nzState.accessProfiles;
+  if (serverInfo.accessProfiles && Date.now() - serverInfo.accessProfilesFetchedAt < 60000) {
+    return serverInfo.accessProfiles;
   }
   try {
     const data = await fetchJSON(NZ_CONTRACT.API.access_profiles, {credentials: 'same-origin'});
-    nzState.accessProfiles = data && Array.isArray(data.profiles) ? data : null;
-    nzState.accessProfilesFetchedAt = Date.now();
-    return nzState.accessProfiles;
+    serverInfo.accessProfiles = data && Array.isArray(data.profiles) ? data : null;
+    serverInfo.accessProfilesFetchedAt = Date.now();
+    return serverInfo.accessProfiles;
   } catch (e) {
     return null;
   }
@@ -373,10 +369,10 @@ function getSelectedAccessProfile() {
 // id is empty. An id not in the registry (deleted profile) renders a neutral
 // chip with the raw id so the orphan state is visible. NEVER surfaces env/token.
 function accessProfileChipInfo(profileID) {
-  if (!nzState.accessProfiles || !Array.isArray(nzState.accessProfiles.profiles)) return null;
-  if (nzState.accessProfiles.profiles.length <= 1) return null; // single-auth mode
+  if (!serverInfo.accessProfiles || !Array.isArray(serverInfo.accessProfiles.profiles)) return null;
+  if (serverInfo.accessProfiles.profiles.length <= 1) return null; // single-auth mode
   if (!profileID) return null; // global default → no chip (matches "no overlay")
-  const entry = nzState.accessProfiles.profiles.find(p => p && p.id === profileID);
+  const entry = serverInfo.accessProfiles.profiles.find(p => p && p.id === profileID);
   if (!entry) {
     return { label: profileID, color: 'var(--nz-text-mute)', tooltip: '访问档未配置: ' + profileID };
   }
@@ -471,7 +467,7 @@ function getSelectedBackend() {
 // the server-side SetCLIName broadcasts the correct value.
 //
 // Resolution order:
-//   1. nzState.cliBackends cache (canonical: dashboard already paid for this fetch
+//   1. serverInfo.cliBackends cache (canonical: dashboard already paid for this fetch
 //      to render the picker, so the lookup is free).
 //   2. Hardcoded ID→display map for the brief boot window where the
 //      backend list hasn't resolved yet. Mirrors profile_claude.go /
@@ -480,8 +476,8 @@ function getSelectedBackend() {
 //      cliIcon's `=== 'kiro'` branch still works for kiro this way).
 function backendDisplayName(backendID) {
   if (!backendID) return '';
-  if (nzState.cliBackends && Array.isArray(nzState.cliBackends.backends)) {
-    const e = nzState.cliBackends.backends.find(b => b && b.id === backendID);
+  if (serverInfo.cliBackends && Array.isArray(serverInfo.cliBackends.backends)) {
+    const e = serverInfo.cliBackends.backends.find(b => b && b.id === backendID);
     if (e && (e.display_name || e.id)) return e.display_name || e.id;
   }
   if (backendID === 'claude') return 'claude-code';
@@ -493,11 +489,11 @@ function backendDisplayName(backendID) {
 // from the cached /api/cli/backends payload — that endpoint reports the
 // installed CLI version for each enabled backend, which is the same
 // value the wrapper would set on the session via SetCLIVersion once
-// spawned. Empty when nzState.cliBackends has not resolved yet (caller hides
+// spawned. Empty when serverInfo.cliBackends has not resolved yet (caller hides
 // the version suffix).
 function backendDisplayVersion(backendID) {
-  if (!backendID || !nzState.cliBackends || !Array.isArray(nzState.cliBackends.backends)) return '';
-  const e = nzState.cliBackends.backends.find(b => b && b.id === backendID);
+  if (!backendID || !serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return '';
+  const e = serverInfo.cliBackends.backends.find(b => b && b.id === backendID);
   return (e && e.version) ? e.version : '';
 }
 
@@ -507,21 +503,21 @@ function backendDisplayVersion(backendID) {
 // occupy: the sidebar node selector was removed, so choosing which connection
 // a new session lives on now happens here, at creation time. Mirrors
 // renderBackendPicker's shape — single <select id="new-node"> consumed by
-// getSelectedNode() at submit time — and pre-selects the current nzState.selectedNode
+// getSelectedNode() at submit time — and pre-selects the current selection.node
 // so the picker matches whatever the operator was last working on.
 //
 // 'local' is always pinned first (defensive: even if the server's nodes
 // payload omits it). Remotes follow, ordered by display name.
 function renderNodePicker() {
   if (!deps.isMultiNode()) return '';
-  const ids = Object.keys(nzState.nodesData);
+  const ids = Object.keys(sessionList.nodesData);
   if (ids.indexOf('local') === -1) ids.unshift('local');
   const sorted = ids.slice().sort((a, b) => {
     if (a === 'local' && b !== 'local') return -1;
     if (b === 'local' && a !== 'local') return 1;
     return deps.getNodeDisplayName(a).localeCompare(deps.getNodeDisplayName(b));
   });
-  const current = nzState.selectedNode || 'local';
+  const current = selection.node || 'local';
   const options = sorted.map(id => {
     const selected = id === current ? ' selected' : '';
     const status = deps.getNodeStatus(id);
@@ -537,25 +533,25 @@ function renderNodePicker() {
 }
 
 // getSelectedNode reads the modal's connection <select>. Falls back to the
-// current nzState.selectedNode (then 'local') when the picker isn't rendered — i.e.
+// current selection.node (then 'local') when the picker isn't rendered — i.e.
 // single-connection setups where there is nothing to choose.
 function getSelectedNode() {
   const el = document.getElementById('new-node');
   const v = el && el.value ? el.value : '';
-  return v || nzState.selectedNode || 'local';
+  return v || selection.node || 'local';
 }
 
 // wireNodePicker attaches a change listener to the modal's #new-node <select>
 // (added imperatively to stay clear of CSP's inline-handler ban). Picking a
-// connection updates the global nzState.selectedNode + persists it, then runs the
+// connection updates the global selection.node + persists it, then runs the
 // caller's onChange so a palette can re-filter its project list to the newly
 // chosen node. No-op when the picker isn't present (single-node setups).
 function wireNodePicker(onChange) {
   const el = document.getElementById('new-node');
   if (!el) return;
   el.addEventListener('change', function () {
-    nzState.selectedNode = el.value || 'local';
-    try { localStorage.setItem('nz_selectedNode', nzState.selectedNode); } catch (_) { /* noop */ }
+    selection.node = el.value || 'local';
+    try { localStorage.setItem('nz_selectedNode', selection.node); } catch (_) { /* noop */ }
     if (typeof onChange === 'function') onChange();
   });
 }
@@ -706,12 +702,12 @@ function keyTailDisplay(keyParts) {
 // `node` is normalized the same way the rest of the dashboard does it
 // (missing/empty → 'local') so legacy projects without a node field still
 // surface when the local node is selected. Single-node hosts (no remotes
-// connected) are unaffected: nzState.selectedNode stays 'local' and the filter
+// connected) are unaffected: selection.node stays 'local' and the filter
 // reduces to the previous local-only behaviour.
 function nodeFilteredProjects() {
-  if (!Array.isArray(nzState.projectsData)) return [];
-  const target = nzState.selectedNode || 'local';
-  return nzState.projectsData.filter(p => (p.node || 'local') === target);
+  if (!Array.isArray(sessionList.projectsData)) return [];
+  const target = selection.node || 'local';
+  return sessionList.projectsData.filter(p => (p.node || 'local') === target);
 }
 
 function createNewSession() {
@@ -723,11 +719,11 @@ function createNewSession() {
   // pre-selects that node's default backend, not the primary's (picker
   // node-aware fix). A node switch inside the modal re-fetches + repaints the
   // picker via refreshBackendPicker below.
-  Promise.all([fetchCLIBackends(nzState.selectedNode), fetchAccessProfiles()]).then(([backendsData, profilesData]) => {
-    // nzState.defaultWorkspace 来自 local stats，远程节点没有对应的 client 端字段，
+  Promise.all([fetchCLIBackends(selection.node), fetchAccessProfiles()]).then(([backendsData, profilesData]) => {
+    // serverInfo.defaultWorkspace 来自 local stats，远程节点没有对应的 client 端字段，
     // 因此选中 remote 时不预填路径，让用户显式输入远程上的工作目录。
-    const isLocal = (nzState.selectedNode || 'local') === 'local';
-    const ws = isLocal ? (nzState.defaultWorkspace || '') : '';
+    const isLocal = (selection.node || 'local') === 'local';
+    const ws = isLocal ? (serverInfo.defaultWorkspace || '') : '';
     const backendPicker = renderBackendPicker(backendsData);
     const accessProfilePicker = renderAccessProfilePicker(profilesData);
 
@@ -758,8 +754,8 @@ function createNewSession() {
       wireNodePicker(function () {
         const wsEl = document.getElementById('new-workspace');
         if (wsEl) {
-          const nowLocal = (nzState.selectedNode || 'local') === 'local';
-          const ph = nowLocal ? (nzState.defaultWorkspace || '') : '';
+          const nowLocal = (selection.node || 'local') === 'local';
+          const ph = nowLocal ? (serverInfo.defaultWorkspace || '') : '';
           wsEl.placeholder = ph;
           if (!wsEl.value) wsEl.value = ph;
         }
@@ -768,7 +764,7 @@ function createNewSession() {
       // First-open path: a failed REMOTE manifest arrives here as null and
       // renderBackendPicker(null) painted an empty slot. Route through
       // refreshBackendPicker so the retry notice shows on open too (#2429).
-      if (!backendsData && (nzState.selectedNode || 'local') !== 'local') refreshBackendPicker('new-backend-slot');
+      if (!backendsData && (selection.node || 'local') !== 'local') refreshBackendPicker('new-backend-slot');
       setTimeout(() => document.getElementById('new-workspace').focus(), 100);
       return;
     }
@@ -795,12 +791,12 @@ function refreshBackendPicker(slotId) {
   // node's manifest + default — reopening the very "backend selected for the
   // wrong node" bug this file fixes, just as a race. Mirrors the events path's
   // dispatchNode guard (fetchSessionEvents).
-  const reqNode = nzState.selectedNode;
+  const reqNode = selection.node;
   fetchCLIBackends(reqNode).then(backendsData => {
     // The modal may have closed while the fetch was in flight.
     if (!document.getElementById(slotId)) return;
     // Drop a stale response whose node no longer matches the selection.
-    if (nzState.selectedNode !== reqNode) return;
+    if (selection.node !== reqNode) return;
     if (!backendsData && reqNode && reqNode !== 'local') {
       slot.innerHTML = renderBackendFetchFailed(reqNode);
       const retry = slot.querySelector('.cp-backend-retry');
@@ -813,7 +809,7 @@ function refreshBackendPicker(slotId) {
 
 function openProjectPalette(backendsData, profilesData) {
   const backendPicker = renderBackendPicker(backendsData);
-  const accessProfilePicker = renderAccessProfilePicker(profilesData || nzState.accessProfiles);
+  const accessProfilePicker = renderAccessProfilePicker(profilesData || serverInfo.accessProfiles);
   const nodePicker = renderNodePicker();
   // The access-profile + backend + connection pickers sit inline above the
   // search box so the operator can pick them before choosing a project. The
@@ -857,7 +853,7 @@ function openProjectPalette(backendsData, profilesData) {
   input.addEventListener('input', () => renderPaletteList(state, input.value));
   input.addEventListener('keydown', e => handlePaletteKey(e, state, input));
   // Re-filter the project list when the connection changes — the list is
-  // scoped to nzState.selectedNode (nodeFilteredProjects), so a node switch must
+  // scoped to selection.node (nodeFilteredProjects), so a node switch must
   // repaint it against the current query. The backend picker also repaints
   // against the newly-selected node's manifest (picker node-aware fix).
   wireNodePicker(function () {
@@ -866,7 +862,7 @@ function openProjectPalette(backendsData, profilesData) {
   });
   // First-open path: see the no-projects modal above — a null remote
   // manifest must surface the retry notice, not an empty slot (#2429).
-  if (!backendsData && (nzState.selectedNode || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');
+  if (!backendsData && (selection.node || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');
   renderPaletteList(state, '');
   setTimeout(() => input.focus(), 50);
 }
@@ -929,7 +925,7 @@ function renderPaletteList(state, query) {
   if (!list) return;
   const q = query.trim();
   const scored = [];
-  // Palette is scoped to nzState.selectedNode: switching the node selector retargets
+  // Palette is scoped to selection.node: switching the node selector retargets
   // the palette so remote workspaces can be opened in one click. See
   // nodeFilteredProjects() for the rationale.
   nodeFilteredProjects().forEach(p => {
@@ -961,7 +957,7 @@ function renderPaletteList(state, query) {
     //           modified first (dir_mtime, unix ms, stamped by the backend at
     //           scan time). The folder you last touched on disk surfaces at
     //           the top of the non-favorite bucket; un-stat'able / older-remote
-    //           entries (dir_mtime 0) sort last, then original nzState.projectsData
+    //           entries (dir_mtime 0) sort last, then original sessionList.projectsData
     //           order is the final stable tiebreak.
     const withIndex = scored.map((s, i) => ({s, i}));
     withIndex.sort((a, b) => {
@@ -977,7 +973,7 @@ function renderPaletteList(state, query) {
       const ma = pa.dir_mtime || 0;
       const mb = pb.dir_mtime || 0;
       if (ma !== mb) return mb - ma;
-      // Final stable tiebreak: original nzState.projectsData order (input index).
+      // Final stable tiebreak: original sessionList.projectsData order (input index).
       return a.i - b.i;
     });
     scored.length = 0;
@@ -1093,12 +1089,12 @@ function buildProjectRow(s, idx) {
 // a remote node resolves its own default on dispatch, so name the node
 // instead of echoing the local path (#2429).
 function quickRowHint(node) {
-  if (!node || node === 'local') return nzState.defaultWorkspace ? deps.shortPath(nzState.defaultWorkspace) : '';
+  if (!node || node === 'local') return serverInfo.defaultWorkspace ? deps.shortPath(serverInfo.defaultWorkspace) : '';
   return deps.getNodeDisplayName(node) + ' · 默认工作区';
 }
 
 function buildQuickRow(idx) {
-  const hint = quickRowHint(nzState.selectedNode || 'local');
+  const hint = quickRowHint(selection.node || 'local');
   const el = document.createElement('div');
   el.className = 'cmd-palette-item';
   el.dataset.idx = String(idx);
@@ -1115,10 +1111,10 @@ function buildQuickRow(idx) {
 function pickPaletteQuick() {
   // 快速新建跟随当前选中节点：选中 remote 时让 quick session 也落在远程上，
   // 否则用户切到远程 workspace 后再点「快速新建」会意外回退到 local。
-  // nzState.defaultWorkspace 仍来自 local 的 stats（接口尚未按节点返回），使用前
+  // serverInfo.defaultWorkspace 仍来自 local 的 stats（接口尚未按节点返回），使用前
   // 兜底为空串，由后端 SessionDispatcher 的远程默认工作目录解析。
-  const node = nzState.selectedNode || 'local';
-  const workspace = node === 'local' ? (nzState.defaultWorkspace || '') : '';
+  const node = selection.node || 'local';
+  const workspace = node === 'local' ? (serverInfo.defaultWorkspace || '') : '';
   const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'quick') : 'quick';
   // Quick sessions are intentionally one-off (RFC §4.4): always a fresh
   // timestamp key, never a project-stable continuation.
@@ -1209,28 +1205,28 @@ function pickPaletteCustom(initialValue) {
   // Custom Workspace modal re-renders its own copies of the pickers, so we
   // carry the pre-selection forward rather than relying on the palette's DOM
   // (which is about to be nuked). The connection choice rides on the global
-  // nzState.selectedNode (wireNodePicker keeps it current), so renderNodePicker below
+  // selection.node (wireNodePicker keeps it current), so renderNodePicker below
   // pre-selects it without an explicit hand-off.
   const preselectedBackend = getSelectedBackend();
   const preselectedProfile = getSelectedAccessProfile();
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (overlay) overlay.remove();
-  // 选中 remote 节点时不用 local 的 nzState.defaultWorkspace 占位符，避免误导用户。
-  const isLocal = (nzState.selectedNode || 'local') === 'local';
-  const ws = isLocal ? (nzState.defaultWorkspace || '') : '';
+  // 选中 remote 节点时不用 local 的 serverInfo.defaultWorkspace 占位符，避免误导用户。
+  const isLocal = (selection.node || 'local') === 'local';
+  const ws = isLocal ? (serverInfo.defaultWorkspace || '') : '';
   const prefill = initialValue && (initialValue.startsWith('/') || initialValue.startsWith('~')) ? initialValue : '';
   // Re-render the access-profile + backend + connection pickers inside the
   // modal and pre-select the palette's choices, so switching to Custom
   // Workspace doesn't drop any of them. The backend picker is emitted from
   // the per-node cache (deps.cliBackendsByNode) for the currently-selected node,
-  // falling back to the local nzState.cliBackends for the boot window before the
+  // falling back to the local serverInfo.cliBackends for the boot window before the
   // per-node fetch resolves; refreshBackendPicker below repaints it against
   // the authoritative manifest and on every node switch (picker node-aware
   // fix).
-  const accessProfilePicker = renderAccessProfilePicker(nzState.accessProfiles, { selectedId: preselectedProfile });
-  const seedBackends = (nzState.selectedNode && nzState.selectedNode !== 'local' && deps.cliBackendsByNode[nzState.selectedNode])
-    ? deps.cliBackendsByNode[nzState.selectedNode].data
-    : nzState.cliBackends;
+  const accessProfilePicker = renderAccessProfilePicker(serverInfo.accessProfiles, { selectedId: preselectedProfile });
+  const seedBackends = (selection.node && selection.node !== 'local' && serverInfo.cliBackendsByNode[selection.node])
+    ? serverInfo.cliBackendsByNode[selection.node].data
+    : serverInfo.cliBackends;
   const picker = renderBackendPicker(seedBackends, { selectedId: preselectedBackend });
   const nodePicker = renderNodePicker();
   const modal = document.createElement('div');
@@ -1262,8 +1258,8 @@ function pickPaletteCustom(initialValue) {
   wireNodePicker(function () {
     const wsEl = document.getElementById('new-workspace');
     if (wsEl) {
-      const nowLocal = (nzState.selectedNode || 'local') === 'local';
-      wsEl.placeholder = nowLocal ? (nzState.defaultWorkspace || '') : '';
+      const nowLocal = (selection.node || 'local') === 'local';
+      wsEl.placeholder = nowLocal ? (serverInfo.defaultWorkspace || '') : '';
     }
     refreshBackendPicker('cw-backend-slot');
   });
@@ -1294,18 +1290,18 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   const stableKey = opts.stableKey || '';
   const overlay = document.querySelector('.modal-overlay, .cmd-palette-overlay');
   if (overlay) overlay.remove();
-  nzState.sessionCounter++;
+  sessionList.sessionCounter++;
   const now = new Date();
-  const ts = localDateStamp(now) + '-' + nzState.sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionList.sessionCounter;
   // Continue → backend-provided stable key (precise continuation); new →
   // fresh timestamp key (independent parallel session). resolveSessionKey
   // also falls back to a timestamp key when no stableKey is available.
   const key = resolveSessionKey(mode, stableKey, projectName, agent, ts);
 
-  deps.sessionWorkspaces[key] = projectPath;
-  if (nodeId && nodeId !== 'local') deps.sessionNodes[key] = nodeId;
-  if (backend) deps.sessionBackends[key] = backend;
-  if (accessProfile) deps.sessionAccessProfiles[key] = accessProfile;
+  perSession.workspaces[key] = projectPath;
+  if (nodeId && nodeId !== 'local') perSession.nodes[key] = nodeId;
+  if (backend) perSession.backends[key] = backend;
+  if (accessProfile) perSession.accessProfiles[key] = accessProfile;
   // Durably persist the pending workspace and eagerly bind it server-side so a
   // reload-before-first-send (the proven cwd-fallback trigger) no longer drops
   // the workspace. This is the primary fix path (project palette open).
@@ -1314,15 +1310,15 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
 
   deps.stopPreviewPolling();
   deps.wsm.unsubscribe();
-  nzState.selectedKey = key;
-  nzState.selectedNode = nodeId || 'local';
-  try { localStorage.setItem('nz_selectedNode', nzState.selectedNode); } catch(_) {}
-  nzState.lastEventTime = 0;
+  selection.key = key;
+  selection.node = nodeId || 'local';
+  try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
+  transcript.lastEventTime = 0;
   deps.mobileEnterChat();
-  deps.setActiveSessionCard(key, nzState.selectedNode);
+  deps.setActiveSessionCard(key, selection.node);
   deps.renderMainShell();
   deps.navRebuild();
-  nzState.lastVersion = 0;
+  sessionList.lastVersion = 0;
   deps.debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
@@ -1334,38 +1330,38 @@ function doCreateSession() {
   const agent = getSelectedAgent();
   // Read the connection picker directly so the choice lands even if the
   // change listener never fired (e.g. the operator never re-opened the
-  // select). getSelectedNode falls back to nzState.selectedNode / 'local'.
+  // select). getSelectedNode falls back to selection.node / 'local'.
   const targetNode = getSelectedNode();
   const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'session') : 'session';
   document.querySelector('.modal-overlay').remove();
 
-  nzState.sessionCounter++;
+  sessionList.sessionCounter++;
   const now = new Date();
-  const ts = localDateStamp(now) + '-' + nzState.sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionList.sessionCounter;
   // R110-P3 key schema (see buildDashboardSessionKey godoc): 4 segments
   // with agentID as the terminal segment so buildSessionOpts picks up the
   // right AgentOpts entry.
   const key = buildDashboardSessionKey(ts, folderName, agent);
 
-  if (workspace) deps.sessionWorkspaces[key] = workspace;
-  if (backend) deps.sessionBackends[key] = backend;
-  if (accessProfile) deps.sessionAccessProfiles[key] = accessProfile;
-  if (targetNode !== 'local') deps.sessionNodes[key] = targetNode;
+  if (workspace) perSession.workspaces[key] = workspace;
+  if (backend) perSession.backends[key] = backend;
+  if (accessProfile) perSession.accessProfiles[key] = accessProfile;
+  if (targetNode !== 'local') perSession.nodes[key] = targetNode;
   // Persist + eager-bind so the custom workspace survives a reload-before-send.
   deps.persistPending();
   if (workspace) deps.eagerBindWorkspace(key, workspace, targetNode);
 
   deps.stopPreviewPolling();
   deps.wsm.unsubscribe();
-  nzState.selectedKey = key;
-  nzState.selectedNode = targetNode;
-  try { localStorage.setItem('nz_selectedNode', nzState.selectedNode); } catch(_) {}
-  nzState.lastEventTime = 0;
+  selection.key = key;
+  selection.node = targetNode;
+  try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
+  transcript.lastEventTime = 0;
   deps.mobileEnterChat();
   deps.setActiveSessionCard(key, targetNode);
   deps.renderMainShell();
   deps.navRebuild();
-  nzState.lastVersion = 0;
+  sessionList.lastVersion = 0;
   deps.debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
@@ -1399,32 +1395,32 @@ function createQuickSession(initialText, onTextStranded) {
   // stack overlays (e.g. a quick-ask fired while a modal was still mounted).
   document.querySelectorAll('.modal-overlay, .cmd-palette-overlay').forEach(el => el.remove());
 
-  const workspace = nzState.defaultWorkspace || '';
+  const workspace = serverInfo.defaultWorkspace || '';
   const agent = 'general';
   const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'quick') : 'quick';
 
-  nzState.sessionCounter++;
+  sessionList.sessionCounter++;
   const now = new Date();
-  const ts = localDateStamp(now) + '-' + nzState.sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionList.sessionCounter;
   const key = buildDashboardSessionKey(ts, folderName, agent);
 
-  if (workspace) deps.sessionWorkspaces[key] = workspace;
+  if (workspace) perSession.workspaces[key] = workspace;
   // Backend left unset → router falls back to the configured default.
   // Persist so a reload-before-send keeps the workspace. No eager-bind: quick
-  // sessions use nzState.defaultWorkspace, so the override would just mirror defaultCWD.
+  // sessions use serverInfo.defaultWorkspace, so the override would just mirror defaultCWD.
   deps.persistPending();
 
   deps.stopPreviewPolling();
   deps.wsm.unsubscribe();
-  nzState.selectedKey = key;
-  nzState.selectedNode = 'local';
-  try { localStorage.setItem('nz_selectedNode', nzState.selectedNode); } catch(_) {}
-  nzState.lastEventTime = 0;
+  selection.key = key;
+  selection.node = 'local';
+  try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
+  transcript.lastEventTime = 0;
   deps.mobileEnterChat();
   deps.setActiveSessionCard(key, 'local');
   deps.renderMainShell();
   deps.navRebuild();
-  nzState.lastVersion = 0;
+  sessionList.lastVersion = 0;
   deps.debouncedFetchSessions();
   const text = (initialText || '').trim();
   // requestAnimationFrame ensures the composer DOM produced by deps.renderMainShell

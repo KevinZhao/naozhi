@@ -194,7 +194,7 @@ func TestDashboardJS_FallbackReconcileComparesLastAppliedState(t *testing.T) {
 	// session so a stale record from another session can never suppress the
 	// first reconcile after a switch.
 	usb := jsBlockBody(t, js, "function updateSendButton(state) {")
-	if !strings.Contains(usb, "nzState._lastAppliedMainState = { key: deps.sid(nzState.selectedKey, nzState.selectedNode), state: state };") {
+	if !strings.Contains(usb, "selection.lastAppliedMainState = { key: deps.sid(selection.key, selection.node), state: state };") {
 		t.Fatal("updateSendButton must record selection.lastAppliedMainState = {key, state} for the selected session")
 	}
 

@@ -1,5 +1,5 @@
-import { composer, hooks, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, nzViews, nzTest, registerActions   } from './nz_util.js';
+import { composer, hooks, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, nzTest, registerActions } from './nz_util.js';
 import {
   BLOCK_SPLIT_RE,
   LIST_ITEM_RE,
@@ -170,7 +170,6 @@ import {
   configureMsgNav,
   navDismissPopover,
   navMsg,
-  navPopoverOpen,
   navRebuild,
   navShowList,
   navSync,
@@ -247,59 +246,6 @@ selection.node = (function() {
   try { return localStorage.getItem('nz_selectedNode') || 'local'; }
   catch(_) { return 'local'; }
 })();
-const sessionWorkspaces = {};
-const sessionNodes = {};
-const sessionBackends = {}; // per-session CLI backend picked at creation ("claude" / "kiro" / ...)
-const sessionAccessProfiles = {}; // per-session access profile picked at creation ("" = global default)
-// Header-chip picks made on a session that has no server entry yet (created,
-// no message sent). The server parks them and applies them on first spawn;
-// this mirror lets the chips show the pick meanwhile. Dropped on promotion.
-const sessionPendingTuning = {}; // key -> { model, effort }
-// Per-node backend manifest cache for the node-aware new-session picker.
-// Keyed by node id ('local' or a remote node id). Values: {data, at}. The
-// global cliBackends above stays LOCAL-only — every chip / feature-gate /
-// cost-unit consumer reads the local manifest — while the picker resolves
-// the manifest for whichever node the "New Session" modal targets, so a
-// remote node's backends + default drive the picker (picker node-aware fix).
-const cliBackendsByNode = {};
-const sessionDrafts = {}; // key -> draft text, preserved across session switches
-// sessionScrollPos: sid(key,node) -> {fromBottom, atBottom}
-// 记住每个会话上次切走时的 events-scroll 位置，回来时恢复，避免正在阅读
-// 历史被强行拉回底部。atBottom=true 表示离开前就在底，回来后继续走贴底路径，
-// 让新事件照常把视口拉到最新。
-const sessionScrollPos = {};
-// sessionUnread: sid(key,node) -> integer count of unread "turn completed" events
-// for sessions that are NOT currently selected. Incremented on running->ready/dead
-// transitions (i.e. the model finished answering) and cleared when the user opens
-// the card. Drives the sidebar chat-style unread bubble.
-const sessionUnread = {};
-// sessionOptimisticRunning: sid(key,node) -> true when sendMessage flipped
-// state to 'running' locally before the server broadcast arrived. Rolled back
-// by onSendAck on busy/error so the banner doesn't get stuck. Cleared on
-// accepted/queued (server-side session_state takes over) and on any real
-// session_state WS push.
-const sessionOptimisticRunning = {};
-// sessionOptimisticPrevState: sid(key,node) -> 乐观翻转成 'running' 之前，服务端
-// 最后报告的真实状态。onSessionState 判 dead→running 重订阅时必须用它：翻转发生
-// 在网络往返之前，所以对每一次本页发起的 send，服务端真正的 running 广播到达时
-// sessionsData[sKey].state 恒为 'running'，直接读它会把"进程被回收后从本页发消息"
-// 这个最常见的失联场景判成普通 ready→running。与 sessionOptimisticRunning 同生
-// 同灭。
-const sessionOptimisticPrevState = {};
-// sessionLastSent: sid(key,node) -> 最近一次发出的用户文本（当前 turn 的输入）。
-// 在 sendMessage 成功发出后记录；turn 自然跑完 (running→ready/dead) 时清掉。
-// 若用户在 running 中点击中断，则把这段文本回填到 #msg-input（Claude Code
-// 的中断-回填行为），方便修改后重发。只在输入框当前为空时回填，避免覆盖
-// 用户已经开始敲的新内容。
-const sessionLastSent = {};
-// httpSendPending: sids this tab has an HTTP send in flight for (added before
-// the request leaves, cleared on sync rejection / send_error / the key's next
-// ready|dead state). onSendError gates on it so a send_error fanned out to
-// every subscriber of the key is acted on only by the tab that sent — and,
-// unlike sessionLastSent (which carries interrupt re-fill semantics and is
-// only set when there is text), it also covers image-only sends, the main
-// HTTP-send case.
-const httpSendPending = new Set();
 
 // collectWorkspaceSessionIDs returns the set of Claude session UUIDs that the
 // sidebar already represents — current session_id PLUS any prev_session_ids
@@ -350,13 +296,13 @@ const PENDING_LS_MAX = 64; // bound localStorage size — far above realistic un
 // persistPending snapshots the in-memory pending maps to localStorage. Called
 // after every mutation of the three maps. lsSet swallows quota/disabled errors.
 function persistPending() {
-  const keys = Object.keys(sessionWorkspaces).slice(0, PENDING_LS_MAX);
+  const keys = Object.keys(perSession.workspaces).slice(0, PENDING_LS_MAX);
   const obj = {};
   for (const k of keys) {
-    const entry = { ws: sessionWorkspaces[k] };
-    if (sessionNodes[k] && sessionNodes[k] !== 'local') entry.node = sessionNodes[k];
-    if (sessionBackends[k]) entry.backend = sessionBackends[k];
-    if (sessionAccessProfiles[k]) entry.access_profile = sessionAccessProfiles[k];
+    const entry = { ws: perSession.workspaces[k] };
+    if (perSession.nodes[k] && perSession.nodes[k] !== 'local') entry.node = perSession.nodes[k];
+    if (perSession.backends[k]) entry.backend = perSession.backends[k];
+    if (perSession.accessProfiles[k]) entry.access_profile = perSession.accessProfiles[k];
     obj[k] = entry;
   }
   lsSet(PENDING_LS_KEY, obj);
@@ -376,10 +322,10 @@ function restorePending() {
     if (typeof k !== 'string' || !k) continue;
     if (!v || typeof v !== 'object' || typeof v.ws !== 'string' || !v.ws) continue;
     if (v.ws[0] !== '/' && v.ws[0] !== '~') continue; // reject relative / junk
-    sessionWorkspaces[k] = v.ws;
-    if (v.node && v.node !== 'local') sessionNodes[k] = v.node;
-    if (v.backend) sessionBackends[k] = v.backend;
-    if (typeof v.access_profile === 'string' && v.access_profile) sessionAccessProfiles[k] = v.access_profile;
+    perSession.workspaces[k] = v.ws;
+    if (v.node && v.node !== 'local') perSession.nodes[k] = v.node;
+    if (v.backend) perSession.backends[k] = v.backend;
+    if (typeof v.access_profile === 'string' && v.access_profile) perSession.accessProfiles[k] = v.access_profile;
   }
 }
 
@@ -621,10 +567,10 @@ function setActivityView(view) {
 // and the top-level alias window.fetchJSON, loaded before this file.
 
 function removePendingSession(key) {
-  delete sessionWorkspaces[key];
-  delete sessionNodes[key];
-  delete sessionBackends[key];
-  delete sessionAccessProfiles[key];
+  delete perSession.workspaces[key];
+  delete perSession.nodes[key];
+  delete perSession.backends[key];
+  delete perSession.accessProfiles[key];
   persistPending();
 }
 
@@ -709,7 +655,7 @@ async function fetchSessions() {
       // lagging behind the send — otherwise the banner appears for a split
       // second, then a /api/sessions poll rewrites state to 'ready' and hides
       // it until the server's real session_state broadcast catches up.
-      if (sessionOptimisticRunning[sKey] && s.state !== 'running') {
+      if (perSession.optimisticRunning[sKey] && s.state !== 'running') {
         s = Object.assign({}, s, { state: 'running' });
       }
       // A workspace change (/cd, or the first snapshot after spawn resolved
@@ -732,20 +678,20 @@ async function fetchSessions() {
     // whole blob per key (M full JSON writes converging to one final state).
     // Delete in-memory here and call persistPending() a single time after.
     let reconciledAny = false;
-    for (const key of Object.keys(sessionWorkspaces)) {
+    for (const key of Object.keys(perSession.workspaces)) {
       if (backendKeys.has(key)) {
-        delete sessionWorkspaces[key];
-        delete sessionNodes[key];
-        delete sessionBackends[key];
-        delete sessionAccessProfiles[key];
-        delete sessionPendingTuning[key];
+        delete perSession.workspaces[key];
+        delete perSession.nodes[key];
+        delete perSession.backends[key];
+        delete perSession.accessProfiles[key];
+        delete perSession.pendingTuning[key];
         reconciledAny = true;
       }
     }
     if (reconciledAny) persistPending();
 
     // Merge pending dashboard sessions into data for sidebar rendering
-    const pendingKeys = Object.keys(sessionWorkspaces);
+    const pendingKeys = Object.keys(perSession.workspaces);
     if (pendingKeys.length > 0) {
       if (!data.sessions) data.sessions = [];
       for (const key of pendingKeys) {
@@ -770,7 +716,7 @@ async function fetchSessions() {
           // — which is router.CLIName() = the lone configured backend's
           // display name — so single-backend kiro deployments also get the
           // right icon instead of degrading to the 'cli' default branch.
-          const pendingBackend = sessionBackends[key] || '';
+          const pendingBackend = perSession.backends[key] || '';
           const pendingCLIName = backendDisplayName(pendingBackend) || serverInfo.defaultCLIName;
           // defaultCLIVersion is the DEFAULT backend's live version, tracked
           // from each session's system/init frame and refreshed from stats
@@ -789,7 +735,7 @@ async function fetchSessions() {
           // #2431: mirror the server's project/project_fallback shape so an
           // unregistered workspace groups under its basename from the first
           // paint instead of sitting in 未分组 until the first send promotes it.
-          const pendingWS = sessionWorkspaces[key];
+          const pendingWS = perSession.workspaces[key];
           const pendingProject = matchProject(pendingWS);
           const pendingFallback = pendingProject ? '' : workspaceFallbackName(pendingWS);
           data.sessions.push({
@@ -808,11 +754,11 @@ async function fetchSessions() {
             last_active: 0,
             last_prompt: '',
             last_response: '',
-            node: sessionNodes[key] || 'local',
+            node: perSession.nodes[key] || 'local',
             project: pendingProject || pendingFallback,
             project_fallback: !!pendingFallback,
             backend: pendingBackend,
-            access_profile: sessionAccessProfiles[key] || '',
+            access_profile: perSession.accessProfiles[key] || '',
             cli_name: pendingCLIName,
             cli_version: pendingCLIVersion,
           });
@@ -844,7 +790,7 @@ async function fetchSessions() {
     if (selection.key) {
       const sKey = sid(selection.key, selection.node);
       const sd = sessionList.sessionsData[sKey];
-      if (sd && (!wsConnected || (sd.state !== 'running' && !sessionOptimisticRunning[sKey]))) {
+      if (sd && (!wsConnected || (sd.state !== 'running' && !perSession.optimisticRunning[sKey]))) {
         // #2431: updateSendButton is not idempotent ('running' re-seeds agent
         // rows from the REST snapshot; 'ready' resets turn state + loading
         // indicator + scroll) and this runs every 5 s under fallback — only
@@ -1596,7 +1542,7 @@ function sessionCardHtml(s) {
   // Chat-style unread chip: rendered only when the session has completed
   // turns that the operator hasn't opened yet. Hidden on the active card —
   // selectSession zeroes the counter so this stays consistent on re-render.
-  const unreadCount = sessionUnread[sid(s.key, sNode)] || 0;
+  const unreadCount = perSession.unread[sid(s.key, sNode)] || 0;
   const unreadBadge = (unreadCount > 0 && !isActive)
     ? '<span class="sc-unread" aria-label="' + unreadCount + ' 条未读">' + (unreadCount > 99 ? '99+' : unreadCount) + '</span>'
     : '';
@@ -2030,8 +1976,8 @@ function selectSession(key, node) {
   if (selection.key) {
     const inp = document.getElementById('msg-input');
     const draft = getMsgValue(inp);
-    if (draft) sessionDrafts[selection.key] = draft;
-    else delete sessionDrafts[selection.key];
+    if (draft) perSession.drafts[selection.key] = draft;
+    else delete perSession.drafts[selection.key];
     // 同时快照当前会话的滚动位置，回来时恢复
     saveScrollPos(selection.key, selection.node);
   }
@@ -2060,8 +2006,8 @@ function selectSession(key, node) {
   // Opening a card counts as "reading" it — clear the chat-style unread chip
   // before the DOM toggle below so the next render reflects a zeroed state.
   const selSid = sid(key, node);
-  if (sessionUnread[selSid]) {
-    delete sessionUnread[selSid];
+  if (perSession.unread[selSid]) {
+    delete perSession.unread[selSid];
   }
   // Opening a session on another node retargets dispatch (selectedNode drives
   // the dispatch node + main header). The sidebar no longer filters by node,
@@ -2086,8 +2032,8 @@ function selectSession(key, node) {
   fetchGitState(key, node); // populate the branch / worktree chip (best-effort)
   navRebuild(); // clear stale nav state before async events arrive
   const draftInput = document.getElementById('msg-input');
-  if (draftInput && sessionDrafts[key]) {
-    setMsgValue(draftInput, sessionDrafts[key]);
+  if (draftInput && perSession.drafts[key]) {
+    setMsgValue(draftInput, perSession.drafts[key]);
   }
 
   const changed = prevKey !== key || prevNode !== node;
@@ -2306,7 +2252,7 @@ async function downloadSessionMarkdown() {
       key: key,
       node: node,
       cli: s.cli_name ? (s.cli_name + (s.cli_version ? ' v' + s.cli_version : '')) : '',
-      workspace: s.workspace || sessionWorkspaces[key] || '',
+      workspace: s.workspace || perSession.workspaces[key] || '',
       cost: (typeof s.total_cost === 'number' ? s.total_cost : null),
     }, events);
 
@@ -2350,8 +2296,8 @@ function mainHeaderHtml(s) {
   // feishu/slack/discord/weixin), right = cost (formatted per session's
   // cost_unit). originBadgeHtml / backendChipHtml return '' when the
   // session/deployment doesn't warrant a chip so the layout stays clean.
-  const effCLIName = s.cli_name || backendDisplayName(sessionBackends[selection.key]) || serverInfo.defaultCLIName;
-  const effCLIVersion = s.cli_version || backendDisplayVersion(sessionBackends[selection.key]) || serverInfo.defaultCLIVersion;
+  const effCLIName = s.cli_name || backendDisplayName(perSession.backends[selection.key]) || serverInfo.defaultCLIName;
+  const effCLIVersion = s.cli_version || backendDisplayVersion(perSession.backends[selection.key]) || serverInfo.defaultCLIVersion;
   // ui-polish-light-theme D5: the version string is debug info an operator
   // needs rarely — keep it in the hover title, show just the backend name.
   // (The settings 关于 section lists versions permanently.)
@@ -2368,8 +2314,8 @@ function mainHeaderHtml(s) {
   // "global.anthropic.claude-opus-4-7[1m]" → "claude-opus-4.7 1M") for
   // the dashboard but keep the raw value in `title` for debug.
   const rawModel = s.model ||
-    (!sessionList.sessionsData[sid(selection.key, selection.node)] && sessionPendingTuning[selection.key]
-      ? (sessionPendingTuning[selection.key].model || '') : '');
+    (!sessionList.sessionsData[sid(selection.key, selection.node)] && perSession.pendingTuning[selection.key]
+      ? (perSession.pendingTuning[selection.key].model || '') : '');
   const compactModel = rawModel
     .replace(/^(global|us|eu|apac)\.anthropic\./, '') // strip Bedrock inference-profile prefix
     .replace(/-(\d+)-(\d+)/, '-$1.$2')          // 4-7 → 4.7 (matches kiro list)
@@ -3087,19 +3033,6 @@ function renderTodoList(detail, summary) {
   return header + '<ul class="todo-list">' + items + '</ul>';
 }
 
-// AskUserQuestion cards are single-submit: user picks one option per question
-// (or multiple when multiSelect=true), then clicks a bottom "提交" button.
-// That one click produces a single user message combining all answers, so CC
-// never sees a partial answer. _askAnswered stores tool_use_ids that have
-// already been submitted so a re-render (e.g. late history replay) can't
-// resurrect an actionable card.
-//
-// Persistence note: the Set is in-memory only. History replay after a page
-// reload rebuilds it in hydrateAskAnsweredFromHistory() by scanning for any
-// user event that arrived AFTER a given ask_question — a later user message
-// means the question was answered on some surface, so re-actioning must be
-// disabled to prevent duplicate answers to CC.
-const _askAnswered = new Set();
 
 // hydrateAskAnsweredFromHistory walks a time-sorted event list and marks
 // every ask_question whose tool_use_id is followed by at least one user
@@ -3114,7 +3047,7 @@ function hydrateAskAnsweredFromHistory(events) {
     // Any later user event → this question was answered by some surface.
     for (let j = i + 1; j < events.length; j++) {
       if (events[j] && events[j].type === 'user') {
-        _askAnswered.add(tuid);
+        transcript.askAnswered.add(tuid);
         break;
       }
     }
@@ -3134,7 +3067,7 @@ function lockRenderedAskCards(scrollEl) {
   scrollEl.querySelectorAll('.event.ask_question[data-tool-use-id]').forEach(card => {
     const tuid = card.getAttribute('data-tool-use-id') || '';
     if (!tuid) return;
-    _askAnswered.add(tuid);
+    transcript.askAnswered.add(tuid);
     card.querySelectorAll('button').forEach(b => { b.disabled = true; });
     const content = card.querySelector('.event-content');
     if (!content) return;
@@ -3193,7 +3126,7 @@ function renderAskQuestionCard(e) {
       '<div class="event-content">' + esc(e.summary || 'AskUserQuestion (malformed: empty options)') + '</div></div>';
   }
   const tuid = aq.tool_use_id || '';
-  const locked = _askAnswered.has(tuid);
+  const locked = transcript.askAnswered.has(tuid);
   const groups = aq.items.map((item, qi) => {
     const header = item.header ? '<div class="ask-q-header">' + esc(item.header) + '</div>' : '';
     const question = '<div class="ask-q-text">' + esc(item.question || '') + '</div>';
@@ -3269,7 +3202,7 @@ function composeAskAnswerFromGroups(groups) {
 // Then re-evaluate the submit button's disabled state.
 function onAskOptionToggle(btn) {
   const tuid = btn.dataset.tuid || '';
-  if (!tuid || _askAnswered.has(tuid)) return;
+  if (!tuid || transcript.askAnswered.has(tuid)) return;
   const group = btn.closest('.ask-q-group');
   if (!group) return;
   const multi = group.dataset.multi === '1';
@@ -3297,7 +3230,7 @@ function updateAskSubmitState(card) {
 
 function onAskSubmit(btn) {
   const tuid = btn.dataset.tuid || '';
-  if (!tuid || _askAnswered.has(tuid)) return;
+  if (!tuid || transcript.askAnswered.has(tuid)) return;
   const card = btn.closest('.event.ask_question');
   if (!card) return;
   // Gather selections per question group.
@@ -3314,7 +3247,7 @@ function onAskSubmit(btn) {
   const answer = composeAskAnswerFromGroups(groups);
   if (!answer) return;
   // Lock the card so re-clicks or slow network can't duplicate the send.
-  _askAnswered.add(tuid);
+  transcript.askAnswered.add(tuid);
   card.querySelectorAll('button').forEach(b => { b.disabled = true; });
   const content = card.querySelector('.event-content');
   if (content && !content.querySelector('.ask-status')) {
@@ -3328,7 +3261,7 @@ function onAskSubmit(btn) {
   // path reads from the input box and manages optimistic rendering — the card
   // already shows "已回答", so duplicating would clash.
   sendAskAnswerViaAPI(answer, card).catch(err => {
-    _askAnswered.delete(tuid);
+    transcript.askAnswered.delete(tuid);
     card.querySelectorAll('button').forEach(b => { b.disabled = false; });
     updateAskSubmitState(card);
     const status = card.querySelector('.ask-status');
@@ -3448,7 +3381,7 @@ function eventHtml(e, opts) {
   // so each backend has a distinct visual identity in the transcript.
   if (e.type === 'text') {
     const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
-    const backendID = sess.backend || sessionBackends[selection.key] || (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
+    const backendID = sess.backend || perSession.backends[selection.key] || (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
     if (backendID === 'claude' || backendID === '') icon = CLAWD_SVG;
   }
 
@@ -4068,8 +4001,8 @@ const wsm = {
           // session with the picker on n1 must survive n1 going away.
           // Pending (never-sent) sessions are only a draft target — they stay
           // selected and are neither cleared nor deleted here.
-          if (selection.key && sessionWorkspaces[selection.key] === undefined &&
-              (sessionList.sessionsData[sid(selection.key, msg.node)] || sessionNodes[selection.key] === msg.node)) {
+          if (selection.key && perSession.workspaces[selection.key] === undefined &&
+              (sessionList.sessionsData[sid(selection.key, msg.node)] || perSession.nodes[selection.key] === msg.node)) {
             deselectNodeSession(msg.node);
           }
           sessionList.nodesData = Object.fromEntries(Object.entries(sessionList.nodesData).filter(([id]) => id !== msg.node));
@@ -4090,11 +4023,11 @@ const wsm = {
         }
         break;
       case 'history':
-        if (nzState.isCronLiveKey && nzState.isCronLiveKey(msg.key)) { this.onCronLiveHistory(msg); break; }
+        if (hooks.isCronLiveKey && hooks.isCronLiveKey(msg.key)) { this.onCronLiveHistory(msg); break; }
         this.onHistory(msg);
         break;
       case 'event':
-        if (nzState.isCronLiveKey && nzState.isCronLiveKey(msg.key)) { this.onCronLiveEvent(msg); break; }
+        if (hooks.isCronLiveKey && hooks.isCronLiveKey(msg.key)) { this.onCronLiveEvent(msg); break; }
         this.onEvent(msg);
         break;
       case 'send_ack':
@@ -4107,7 +4040,7 @@ const wsm = {
         this.onInterruptAck(msg);
         break;
       case 'session_state':
-        if (nzState.isCronLiveKey && nzState.isCronLiveKey(msg.key)) { this.onCronLiveSessionState(msg); break; }
+        if (hooks.isCronLiveKey && hooks.isCronLiveKey(msg.key)) { this.onCronLiveSessionState(msg); break; }
         this.onSessionState(msg);
         break;
       case 'sessions_update': {
@@ -4295,11 +4228,9 @@ const wsm = {
     // 仍含上轮事件，可回看）。
     if (this.cronLive.jobId) {
       const jobId = this.cronLive.jobId;
-      // cron_view is an ES module (D3 PR-C1): its cronJobs binding is reached
-      // through the nz.state accessor it registers, not a bare global.
-      const job = Array.isArray(nzState.cronJobs)
-        ? nzState.cronJobs.find(j => j && j.id === jobId)
-        : null;
+      // cron_view owns the jobs list and publishes a reader in hooks.
+      const jobs = hooks.cronJobs ? hooks.cronJobs() : null;
+      const job = Array.isArray(jobs) ? jobs.find(j => j && j.id === jobId) : null;
       const isRunning = !!(job && job.current_run && job.current_run.started_at);
       if (isRunning) {
         this.cronLive.subscribedKey = null;
@@ -4535,7 +4466,7 @@ const wsm = {
     // Cron timed_out / failed 终态后丢弃后续 ghost 事件（CLI 子进程
     // 在 deadline 命中后还会再吐 result，但 cron run 已记录为终态，
     // 继续追加只会让用户看到"超时但还在工作"的分裂视觉）。
-    if (nzState.isCronSessionFrozen && nzState.isCronSessionFrozen(msg.key)) return;
+    if (hooks.isCronSessionFrozen && hooks.isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
     if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
@@ -4648,7 +4579,7 @@ const wsm = {
     // flip. No banner, no turn.
     if (msg.status === 'reset') {
       rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
-      delete sessionLastSent[sid(msg.key || selection.key, msg.node || selection.node)];
+      delete perSession.lastSent[sid(msg.key || selection.key, msg.node || selection.node)];
       return;
     }
     // "accepted" = owner of a new turn, "queued" = appended to an active turn.
@@ -4697,7 +4628,7 @@ const wsm = {
       rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
       // send 从未真正进入 turn，别把它当成「当前 turn 的输入」残留 —— 否则
       // 下次中断会把这条从未送达的文本回填上来。
-      delete sessionLastSent[sid(msg.key || selection.key, msg.node || selection.node)];
+      delete perSession.lastSent[sid(msg.key || selection.key, msg.node || selection.node)];
     } else if (msg.status === 'error') {
       // The WS send_ack error is an in-band message, not an HTTP status,
       // but treat the server-supplied `error` string the same way as an
@@ -4706,7 +4637,7 @@ const wsm = {
       // Remove this send's optimistic message on send failure
       removeOptimisticMsg(msg.id);
       rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
-      delete sessionLastSent[sid(msg.key || selection.key, msg.node || selection.node)];
+      delete perSession.lastSent[sid(msg.key || selection.key, msg.node || selection.node)];
     }
   },
 
@@ -4746,14 +4677,14 @@ const wsm = {
     if (!msg || !msg.key) return;
     const node = msg.node || 'local';
     const sKey = sid(msg.key, node);
-    if (!sessionLastSent[sKey] && !httpSendPending.has(sKey)) return;
-    httpSendPending.delete(sKey);
+    if (!perSession.lastSent[sKey] && !perSession.httpSendPending.has(sKey)) return;
+    perSession.httpSendPending.delete(sKey);
     if (msg.key === selection.key && node === (selection.node || 'local')) {
       this.onSendAck({ status: 'error', key: msg.key, node: msg.node, error: msg.error });
       return;
     }
     rollbackOptimisticRunning(msg.key, node);
-    delete sessionLastSent[sKey];
+    delete perSession.lastSent[sKey];
   },
 
   onSessionState(msg) {
@@ -4764,10 +4695,10 @@ const wsm = {
     // turns don't short-circuit the running→ready rollback logic. Capture it
     // FIRST: the wasDead computation below needs to know whether prev.state
     // is a real server-reported 'running' or just the pre-send optimistic flip.
-    const wasOptimisticRunning = !!sessionOptimisticRunning[sKey];
-    const optimisticPrevState = sessionOptimisticPrevState[sKey];
-    delete sessionOptimisticRunning[sKey];
-    delete sessionOptimisticPrevState[sKey];
+    const wasOptimisticRunning = !!perSession.optimisticRunning[sKey];
+    const optimisticPrevState = perSession.optimisticPrevState[sKey];
+    delete perSession.optimisticRunning[sKey];
+    delete perSession.optimisticPrevState[sKey];
     if (_optimisticRunningTimers[sKey]) {
       clearTimeout(_optimisticRunningTimers[sKey]);
       delete _optimisticRunningTimers[sKey];
@@ -4813,16 +4744,16 @@ const wsm = {
     const turnCompleted = prevState === 'running' && (msg.state === 'ready' || msg.state === 'dead');
     const isActive = msg.key === selection.key && msgNode === selection.node;
     if (turnCompleted && !isActive) {
-      sessionUnread[sKey] = (sessionUnread[sKey] || 0) + 1;
+      perSession.unread[sKey] = (perSession.unread[sKey] || 0) + 1;
     }
     // Turn 自然跑完后清掉上一次发出的文本缓存，否则下一轮刚进 running
     // 就中断会把陈旧文本回填上来。中断路径不会走到这里被清掉，因为
     // interruptSession 会先消费 lastSent 再发中断。
-    if (turnCompleted) delete sessionLastSent[sKey];
+    if (turnCompleted) delete perSession.lastSent[sKey];
     // The HTTP send reached a terminal state (or never became a turn): the
     // originator mark is no longer needed — drop it so it cannot linger and
     // let a much later send_error for someone else's send slip through.
-    if (msg.state === 'ready' || msg.state === 'dead') httpSendPending.delete(sKey);
+    if (msg.state === 'ready' || msg.state === 'dead') perSession.httpSendPending.delete(sKey);
     // 一轮对话里 agent 很可能切了分支（git checkout / 新建 worktree 分支）。
     // 这不改 workspace 路径，所以 workspace-diff 那条失效路径不会触发，chip
     // 会一直停在选中会话那一刻的分支上。turn 边界是重新解析的自然时机：
@@ -4865,7 +4796,7 @@ const wsm = {
       // Sync the unread chip in place. fetchSessions re-renders from template
       // and reads sessionUnread directly; this path keeps the bubble fresh
       // between polls (WS state arrives faster than the sessions poll tick).
-      updateCardUnreadChip(card, sessionUnread[sKey] || 0);
+      updateCardUnreadChip(card, perSession.unread[sKey] || 0);
     }
     if (msg.key === selection.key && msgNode === selection.node) updateMainState(msg.state, msg.reason);
     // Re-subscribe when session transitions to "running" and we need a live event stream.
@@ -4924,7 +4855,7 @@ const wsm = {
   // cron-live RFC §5: 首批 history 帧到达。EventEntriesSince(after) 后端无条数
   // 上限（After>0 时 Limit 被忽略），前端必须自己截尾到 CRON_LIVE_MAX_EVENTS。
   onCronLiveHistory(msg) {
-    if (nzState.isCronSessionFrozen && nzState.isCronSessionFrozen(msg.key)) return;
+    if (hooks.isCronSessionFrozen && hooks.isCronSessionFrozen(msg.key)) return;
     const incoming = msg.events || [];
     if (incoming.length === 0) return;
     const lastTime = this.cronLive.lastEventTimeMs;
@@ -4949,7 +4880,7 @@ const wsm = {
   },
 
   onCronLiveEvent(msg) {
-    if (nzState.isCronSessionFrozen && nzState.isCronSessionFrozen(msg.key)) return;
+    if (hooks.isCronSessionFrozen && hooks.isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
     if (ev.time && ev.time < this.cronLive.lastEventTimeMs) return;
@@ -5052,8 +4983,8 @@ function updateHeaderCLI() {
   // Fallback chain mirrors renderMainShell — see backendDisplayName godoc
   // for why pending sessions need the sessionBackends lookup before the
   // global defaultCLIName fallback.
-  const name = s.cli_name || backendDisplayName(sessionBackends[selection.key]) || serverInfo.defaultCLIName;
-  const version = s.cli_version || backendDisplayVersion(sessionBackends[selection.key]) || serverInfo.defaultCLIVersion;
+  const name = s.cli_name || backendDisplayName(perSession.backends[selection.key]) || serverInfo.defaultCLIName;
+  const version = s.cli_version || backendDisplayVersion(perSession.backends[selection.key]) || serverInfo.defaultCLIVersion;
   // Same display rule as renderMainShell (D5): version lives in the hover
   // title only, the text is just the backend name.
   const text = name || '';
@@ -5161,7 +5092,7 @@ function maybeShowOnboarding(authResolved) {
   // the "pick one from the sidebar" guidance is misleading.
   if (window.innerWidth && window.innerWidth < 768) return;
   const hasSessions = (Object.keys(sessionList.sessionsData || {}).length > 0) ||
-    (Object.keys(sessionWorkspaces || {}).length > 0);
+    (Object.keys(perSession.workspaces || {}).length > 0);
   const hasProjects = (sessionList.projectsData && sessionList.projectsData.length > 0);
   if (hasSessions || hasProjects) {
     try { localStorage.setItem(ONBOARDING_LS_KEY, '1'); } catch (_) {}
@@ -5227,11 +5158,11 @@ function showOnboarding() {
 // is visible to importers, unlike a window-property copy.)
 // Wire the markdown renderers' dashboard-side helpers (#2558 D4). Runs in
 // dashboard's module body, before any render call.
-configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, featureForCurrent, fetchEvents, fetchSessions, getToken, httpSendPending, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, sessionAccessProfiles, sessionBackends, sessionNodes, sessionOptimisticPrevState, sessionOptimisticRunning, sessionWorkspaces, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton, wsm });
-configureAuthModal({ applyFeatureGates, cliBackendsByNode, debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, sessionAccessProfiles, sessionBackends, sessionNodes, sessionWorkspaces, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar, wsm });
+configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, featureForCurrent, fetchEvents, fetchSessions, getToken, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton, wsm });
+configureAuthModal({ applyFeatureGates, debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar, wsm });
 configureSidebarProject({ PICKER_SELECT_ONLY_STYLE, PICKER_SELECT_STYLE, accessProfileChipInfo, debouncedFetchSessions, fetchAccessProfiles, fetchCLIBackends, fetchSessions, getToken, projectDisplayLabel, projectDisplayPrefix, renderAccessProfilePicker, renderBackendPicker, renderSidebar, showAPIError, showNetworkError });
 configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions, escCloseVoiceOverlay, handleFiles, refreshBanner, resetTurnState, selectSession, sid });
-configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, sessionAccessProfiles, sessionBackends, sessionWorkspaces, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput, wsm });
+configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput, wsm });
 configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml, wsm });
 configureUtilities({ getToken, renderSystemView, wsm });
 configureFileRefs({ AVATAR_GROUP_GAP_MS, ICONS, collapseSidebarForDrawer, getToken, isInternalEvent, loadKatex, loadMermaid, matchProject, nzSplitBringToFront, nzSplitEnter, nzSplitExit, renderRich, restoreSidebarAfterDrawer, runPendingAsync });
@@ -6526,7 +6457,6 @@ export {
   lsGet,
   lsSet,
   renderEventsWithDividers,
-  sessionScrollPos,
   setActivityView,
   wsm,
 
@@ -6602,62 +6532,6 @@ registerActions({
   'tuning-effort': () => openTuningPopover('effort'),
 });
 
-// ─── D3 ES-module bridge (RFC docs/rfc/dashboard-es-modules.md §3) ─────────
-// nz.state accessors: the extracted modules reach
-// dashboard's reassignable top-level bindings through these accessors — a
-// classic script's let never lands on window, and a copied value would go
-// stale on reassignment. Setters exist only for the names cron_view
-// legitimately writes today (activeView / eventTimer / selectedKey); keep
-// the rest getter-only so a new cross-file write is a reviewed decision.
-Object.defineProperties(nzState, {
-  accessProfiles: { get: function () { return serverInfo.accessProfiles; }, set: function (v) { serverInfo.accessProfiles = v; } },
-  accessProfilesFetchedAt: { get: function () { return serverInfo.accessProfilesFetchedAt; }, set: function (v) { serverInfo.accessProfilesFetchedAt = v; } },
-  activePopover: { get: function () { return ui.activePopover; }, set: function (v) { ui.activePopover = v; } },
-  activeView: { get: function () { return ui.activeView; }, set: function (v) { ui.activeView = v; } },
-  allSessionsCache: { get: function () { return sessionList.allSessionsCache; }, set: function (v) { sessionList.allSessionsCache = v; } },
-  _autoPageBackCount: { get: function () { return transcript.autoPageBackCount; }, set: function (v) { transcript.autoPageBackCount = v; } },
-  cliBackends: { get: function () { return serverInfo.cliBackends; }, set: function (v) { serverInfo.cliBackends = v; } },
-  cliBackendsFetchedAt: { get: function () { return serverInfo.cliBackendsFetchedAt; }, set: function (v) { serverInfo.cliBackendsFetchedAt = v; } },
-  collapsedProjects: { get: function () { return sessionList.collapsedProjects; }, set: function (v) { sessionList.collapsedProjects = v; } },
-  defaultCLIName: { get: function () { return serverInfo.defaultCLIName; }, set: function (v) { serverInfo.defaultCLIName = v; } },
-  defaultCLIVersion: { get: function () { return serverInfo.defaultCLIVersion; }, set: function (v) { serverInfo.defaultCLIVersion = v; } },
-  defaultWorkspace: { get: function () { return serverInfo.defaultWorkspace; } },
-  discoveredItems: { get: function () { return sessionList.discoveredItems; }, set: function (v) { sessionList.discoveredItems = v; } },
-  _earlierGen: { get: function () { return transcript.earlierGen; }, set: function (v) { transcript.earlierGen = v; } },
-  _earlierLoading: { get: function () { return transcript.earlierLoading; }, set: function (v) { transcript.earlierLoading = v; } },
-  eventTimer: { get: function () { return timers.events; }, set: function (v) { timers.events = v; } },
-  getActiveScratchKey: { get: function () { return hooks.getActiveScratchKey; }, set: function (v) { hooks.getActiveScratchKey = v; } },
-  historySessionsData: { get: function () { return sessionList.historySessionsData; }, set: function (v) { sessionList.historySessionsData = v; } },
-  _lastAppliedMainState: { get: function () { return selection.lastAppliedMainState; }, set: function (v) { selection.lastAppliedMainState = v; } },
-  lastCompositionEnd: { get: function () { return composer.lastCompositionEnd; }, set: function (v) { composer.lastCompositionEnd = v; } },
-  lastDiscoveredJSON: { get: function () { return sessionList.lastDiscoveredJSON; }, set: function (v) { sessionList.lastDiscoveredJSON = v; } },
-  lastEventTime: { get: function () { return transcript.lastEventTime; }, set: function (v) { transcript.lastEventTime = v; } },
-  lastRenderedEventTime: { get: function () { return transcript.lastRenderedEventTime; }, set: function (v) { transcript.lastRenderedEventTime = v; } },
-  _lastSidebarData: { get: function () { return sessionList.lastSidebarData; }, set: function (v) { sessionList.lastSidebarData = v; } },
-  _lastSidebarHtml: { get: function () { return sessionList.lastSidebarHtml; }, set: function (v) { sessionList.lastSidebarHtml = v; } },
-  lastStatsSnapshot: { get: function () { return serverInfo.lastStatsSnapshot; }, set: function (v) { serverInfo.lastStatsSnapshot = v; } },
-  lastVersion: { get: function () { return sessionList.lastVersion; }, set: function (v) { sessionList.lastVersion = v; } },
-  navPopoverOpen: { get: function () { return navPopoverOpen; } },
-  nodesData: { get: function () { return sessionList.nodesData; } },
-  oldestFetchedEventTime: { get: function () { return transcript.oldestFetchedEventTime; }, set: function (v) { transcript.oldestFetchedEventTime = v; } },
-  _optimisticDeleteKeys: { get: function () { return sessionList.optimisticDeleteKeys; }, set: function (v) { sessionList.optimisticDeleteKeys = v; } },
-  pendingDiscovered: { get: function () { return selection.pendingDiscovered; }, set: function (v) { selection.pendingDiscovered = v; } },
-  pendingFiles: { get: function () { return composer.pendingFiles; }, set: function (v) { composer.pendingFiles = v; } },
-  previewEventCount: { get: function () { return transcript.previewEventCount; }, set: function (v) { transcript.previewEventCount = v; } },
-  _previewGen: { get: function () { return transcript.previewGen; }, set: function (v) { transcript.previewGen = v; } },
-  previewTimer: { get: function () { return timers.preview; }, set: function (v) { timers.preview = v; } },
-  projectsData: { get: function () { return sessionList.projectsData; } },
-  selectedKey: { get: function () { return selection.key; }, set: function (v) { selection.key = v; } },
-  selectedNode: { get: function () { return selection.node; }, set: function (v) { selection.node = v; } },
-  sending: { get: function () { return composer.sending; }, set: function (v) { composer.sending = v; } },
-  sessionCounter: { get: function () { return sessionList.sessionCounter; }, set: function (v) { sessionList.sessionCounter = v; } },
-  sessionDrafts: { get: function () { return sessionDrafts; } },
-  sessionLastSent: { get: function () { return sessionLastSent; } },
-  sessionPendingTuning: { get: function () { return sessionPendingTuning; } },
-  sessionScrollPos: { get: function () { return sessionScrollPos; } },
-  sessionsData: { get: function () { return sessionList.sessionsData; } },
-  turnState: { get: function () { return turnState; } },
-});
 // ─── nz.test: Playwright instrumentation surface (#2557 PR-E3) ─────────────
 // The e2e suite probes these bindings (page.evaluate). Reassignable lets are
 // exposed as accessors so a probe read always sees the live binding and a
@@ -6693,7 +6567,7 @@ Object.assign(nzTest, {
   MAX_LIST_DEPTH: MAX_LIST_DEPTH,
   MAX_LIVE_DOM_EVENTS: MAX_LIVE_DOM_EVENTS,
   WS_STATES: WS_STATES,
-  _askAnswered: _askAnswered,
+  _askAnswered: transcript.askAnswered,
   _mdCache: _mdCache,
   appendEvents: appendEvents,
   applyFeatureGates: applyFeatureGates,
@@ -6739,9 +6613,9 @@ Object.assign(nzTest, {
   selectSession: selectSession,
   sendMessage: sendMessage,
   sessionCardKey: sessionCardKey,
-  sessionDrafts: sessionDrafts,
-  sessionNodes: sessionNodes,
-  sessionWorkspaces: sessionWorkspaces,
+  sessionDrafts: perSession.drafts,
+  sessionNodes: perSession.nodes,
+  sessionWorkspaces: perSession.workspaces,
   setActivityView: setActivityView,
   setMsgValue: setMsgValue,
   showGitRemote: showGitRemote,

@@ -6,9 +6,10 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureUtilities(), called from dashboard's module body.
-import { esc, escAttr, nzState, showToast, trapFocus } from './nz_util.js';
+import { selection, serverInfo, sessionList, ui } from './state.js';
+import { esc, escAttr, showToast, trapFocus } from './nz_util.js';
 
 const deps = {
   getToken: null,
@@ -62,7 +63,7 @@ function mainEmptyHtml() {
   '</div>';
 }
 
-// computeHomeStats aggregates nzState.allSessionsCache into the two stats surfaced
+// computeHomeStats aggregates sessionList.allSessionsCache into the two stats surfaced
 // on the idle Home panel. Pure function so a contract test can exercise the
 // "today" boundary and cost summation without driving the DOM.
 //
@@ -173,10 +174,10 @@ function buildHomeHealthLines(stats) {
   // per-feature table lives in the doctor status panel (built by
   // renderBackendsDoctorPanel below) — this line is just the at-a-glance
   // health roll-up.
-  if (nzState.cliBackends && Array.isArray(nzState.cliBackends.backends) && nzState.cliBackends.backends.length > 1) {
-    const okCount = nzState.cliBackends.backends.filter(b => b && b.available).length;
-    const totalCount = nzState.cliBackends.backends.length;
-    const ids = nzState.cliBackends.backends.map(b => (b && b.id) || '?').join(' · ');
+  if (serverInfo.cliBackends && Array.isArray(serverInfo.cliBackends.backends) && serverInfo.cliBackends.backends.length > 1) {
+    const okCount = serverInfo.cliBackends.backends.filter(b => b && b.available).length;
+    const totalCount = serverInfo.cliBackends.backends.length;
+    const ids = serverInfo.cliBackends.backends.map(b => (b && b.id) || '?').join(' · ');
     lines.push({
       text: 'Backends: ' + okCount + '/' + totalCount + ' (' + ids + ')',
       kind: okCount === totalCount ? 'info' : 'warn',
@@ -196,12 +197,12 @@ function buildHomeHealthLines(stats) {
 }
 
 // renderRecentSessionsPanel populates the Home-panel slot inside the main
-// empty-state body. Reads nzState.allSessionsCache (written by renderSidebar after
+// empty-state body. Reads sessionList.allSessionsCache (written by renderSidebar after
 // each fetchSessions → so reflects the same authoritative snapshot the
 // sidebar shows), picks the 5 most recently active sessions, and renders a
 // compact clickable list. When there are zero sessions, returns an empty
 // innerHTML so the cold-start minimal CTA stays unchanged. Callers must
-// guard by nzState.selectedKey == null (active-session main shell wins).
+// guard by selection.key == null (active-session main shell wins).
 //
 // ui-polish-light-theme D3: the R110-P1 stats strip / health strip / doctor
 // panel used to render here too — version tags and subprocess counts are ops
@@ -215,8 +216,8 @@ function buildHomeHealthLines(stats) {
 function renderRecentSessionsPanel() {
   const host = document.getElementById('recent-sessions-panel');
   if (!host) return;
-  if (nzState.selectedKey) return; // active session rendered by renderMainShell
-  const items = Array.isArray(nzState.allSessionsCache) ? nzState.allSessionsCache : [];
+  if (selection.key) return; // active session rendered by renderMainShell
+  const items = Array.isArray(sessionList.allSessionsCache) ? sessionList.allSessionsCache : [];
   if (items.length === 0) { host.innerHTML = ''; return; }
   // Sort by last_active desc; sessions without last_active sink to the
   // bottom so a brand-new "new" card doesn't squat on position 1 forever.
@@ -310,7 +311,7 @@ async function refreshCostSummary() {
       '&to=' + encodeURIComponent(to.toISOString()), { headers });
     if (!resp.ok) return;
     costSummaryCache = summarizeCostBuckets(await resp.json());
-    if (nzState.activeView === 'system') deps.renderSystemView();
+    if (ui.activeView === 'system') deps.renderSystemView();
   } catch (_) {
   } finally {
     costSummaryInFlight = false;
@@ -349,7 +350,7 @@ function costStatHtml(stats) {
 }
 
 function renderServiceOverviewHtml() {
-  const items = Array.isArray(nzState.allSessionsCache) ? nzState.allSessionsCache : [];
+  const items = Array.isArray(sessionList.allSessionsCache) ? sessionList.allSessionsCache : [];
   const stats = computeHomeStats(items, Date.now());
   const statsHtml =
     '<div class="svc-stats" role="group" aria-label="今日概览">' +
@@ -363,7 +364,7 @@ function renderServiceOverviewHtml() {
       '</div>' +
       costStatHtml(stats) +
     '</div>';
-  const healthLines = buildHomeHealthLines(nzState.lastStatsSnapshot);
+  const healthLines = buildHomeHealthLines(serverInfo.lastStatsSnapshot);
   for (const l of buildCostHealthLines(costSummaryCache)) healthLines.push(l);
   const healthHtml = healthLines.length === 0
     ? ''
@@ -384,14 +385,14 @@ function renderServiceOverviewHtml() {
 
 // renderBackendsDoctorPanel builds a foldable <details> panel listing each
 // enabled backend with its protocol caps + user-feature flags. Multi-Backend
-// RFC §8.3 D22. Returns '' for single-backend deployments / when nzState.cliBackends
+// RFC §8.3 D22. Returns '' for single-backend deployments / when serverInfo.cliBackends
 // is unavailable so the cold-start home page doesn't show a half-empty
 // section. The output includes a small "▼" affordance and a screen-reader
 // label so keyboard users know the section is expandable.
 function renderBackendsDoctorPanel() {
-  if (!nzState.cliBackends || !Array.isArray(nzState.cliBackends.backends)) return '';
-  if (nzState.cliBackends.backends.length <= 1) return '';
-  const rows = nzState.cliBackends.backends.map(b => {
+  if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return '';
+  if (serverInfo.cliBackends.backends.length <= 1) return '';
+  const rows = serverInfo.cliBackends.backends.map(b => {
     if (!b) return '';
     const id = esc(b.id || '?');
     const name = esc(b.display_name || b.id || '?');
@@ -420,7 +421,7 @@ function renderBackendsDoctorPanel() {
       (featPills ? '<div class="doctor-row-feats">' + featPills + '</div>' : '') +
     '</div>';
   }).join('');
-  const defaultID = esc(nzState.cliBackends.default || '');
+  const defaultID = esc(serverInfo.cliBackends.default || '');
   // Arrow is supplied by the .doctor-summary::before CSS so it can flip
   // 90° on [open]. Don't bake it into the text.
   return '<details class="doctor-panel" aria-label="后端状态详情">' +

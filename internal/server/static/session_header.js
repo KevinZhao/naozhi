@@ -6,10 +6,11 @@
 // overlay-drift / spawn-diag chips). Only the import + dep-wiring lines are
 // new.
 //
-// Layering (D4-1 rule): never import dashboard back — its mutable state is
-// read via nz.state, its helpers are injected once via
+// Layering (D4-1 rule): never import dashboard back — shared state is read
+// from the state.js objects, its helpers are injected once via
 // configureSessionHeader().
-import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, nzState, nzTest, runStateDot, runStateLabel } from './nz_util.js';
+import { perSession, selection, sessionList } from './state.js';
+import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, nzTest, runStateDot, runStateLabel } from './nz_util.js';
 
 const deps = {
   fetchSessions: null,
@@ -176,13 +177,13 @@ async function fetchSessionRuns(key, node) {
     const resp = await fetch(NZ_CONTRACT.API.sessions_runs + '?key=' + encodeURIComponent(key), { headers });
     // Stale-check the error branch too: the header we would clear belongs to
     // whichever session is selected NOW, not the one this fetch was for.
-    if (!resp.ok) { if (nzState.selectedKey !== key) return; panel.hidden = true; setHeaderRunStats(''); return; }
+    if (!resp.ok) { if (selection.key !== key) return; panel.hidden = true; setHeaderRunStats(''); return; }
     const data = await resp.json();
     // Guard against a stale response landing after the user switched sessions.
-    if (nzState.selectedKey !== key) return;
+    if (selection.key !== key) return;
     renderSessionRunsPanel(data);
   } catch (_) {
-    if (nzState.selectedKey !== key) return;
+    if (selection.key !== key) return;
     panel.hidden = true;
     setHeaderRunStats('');
   }
@@ -297,10 +298,10 @@ function effortTagHtml(effort) {
 //
 // Called from two places, for two different reasons:
 //   - deps.renderMainShell tail: the header was just rebuilt, emptying the mount.
-//     No argument — read the cached nzState.sessionsData.
+//     No argument — read the cached sessionList.sessionsData.
 //   - deps.fetchSessions, BEFORE its version short-circuit: a tier change does not
 //     advance stats.version, so this is the only path that gets a new tier onto
-//     the screen. nzState.sessionsData hasn't been updated at that point, hence the
+//     the screen. sessionList.sessionsData hasn't been updated at that point, hence the
 //     optional `sessions` argument carrying the fresh response rows.
 //
 // docs/rfc/kiro-effort-visibility.md §5.1
@@ -308,18 +309,18 @@ function setHeaderEffortChip(sessions) {
   const el = document.getElementById('header-effort');
   if (!el) return;
   let effort = '';
-  if (nzState.selectedKey) {
+  if (selection.key) {
     if (sessions) {
-      const node = nzState.selectedNode || 'local';
-      const row = sessions.find(s => s && s.key === nzState.selectedKey && (s.node || 'local') === node);
+      const node = selection.node || 'local';
+      const row = sessions.find(s => s && s.key === selection.key && (s.node || 'local') === node);
       // A poll that no longer lists the session (deleted / filtered) clears
       // the tag rather than leaving the previous session's tier behind.
       effort = row ? row.effort : '';
     } else {
-      effort = (nzState.sessionsData[deps.sid(nzState.selectedKey, nzState.selectedNode)] || {}).effort;
+      effort = (sessionList.sessionsData[deps.sid(selection.key, selection.node)] || {}).effort;
     }
-    if (!effort && !nzState.sessionsData[deps.sid(nzState.selectedKey, nzState.selectedNode)] && nzState.sessionPendingTuning[nzState.selectedKey]) {
-      effort = nzState.sessionPendingTuning[nzState.selectedKey].effort || '';
+    if (!effort && !sessionList.sessionsData[deps.sid(selection.key, selection.node)] && perSession.pendingTuning[selection.key]) {
+      effort = perSession.pendingTuning[selection.key].effort || '';
     }
   }
   const html = effortTagHtml(effort);
@@ -348,13 +349,13 @@ function setHeaderSpawnDiagChip(sessions) {
   const el = document.getElementById('header-spawndiag');
   if (!el) return;
   let diags = null;
-  if (nzState.selectedKey) {
+  if (selection.key) {
     if (sessions) {
-      const node = nzState.selectedNode || 'local';
-      const row = sessions.find(s => s && s.key === nzState.selectedKey && (s.node || 'local') === node);
+      const node = selection.node || 'local';
+      const row = sessions.find(s => s && s.key === selection.key && (s.node || 'local') === node);
       diags = row ? row.spawn_diags : null;
     } else {
-      diags = (nzState.sessionsData[deps.sid(nzState.selectedKey, nzState.selectedNode)] || {}).spawn_diags;
+      diags = (sessionList.sessionsData[deps.sid(selection.key, selection.node)] || {}).spawn_diags;
     }
   }
   const html = spawnDiagChipHtml(diags);
@@ -382,13 +383,13 @@ function setHeaderOverlayDriftChip(sessions) {
   const el = document.getElementById('header-overlaydrift');
   if (!el) return;
   let drift = null;
-  if (nzState.selectedKey) {
+  if (selection.key) {
     if (sessions) {
-      const node = nzState.selectedNode || 'local';
-      const row = sessions.find(s => s && s.key === nzState.selectedKey && (s.node || 'local') === node);
+      const node = selection.node || 'local';
+      const row = sessions.find(s => s && s.key === selection.key && (s.node || 'local') === node);
       drift = row ? row.overlay_drift : null;
     } else {
-      drift = (nzState.sessionsData[deps.sid(nzState.selectedKey, nzState.selectedNode)] || {}).overlay_drift;
+      drift = (sessionList.sessionsData[deps.sid(selection.key, selection.node)] || {}).overlay_drift;
     }
   }
   const html = overlayDriftChipHtml(drift);
