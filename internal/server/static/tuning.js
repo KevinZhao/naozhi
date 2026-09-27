@@ -314,17 +314,14 @@ function invalidateGitState(key, node) {
 }
 
 // removeSidebarCard drops a session card from the DOM without waiting for
-// the next renderSidebar. It MUST also reset sessionList.lastSidebarHtml: renderSidebar
-// skips `list.innerHTML = html` when the rebuilt string equals the cache, so
-// a DOM-only removal would leave the cache describing a card that is no
-// longer mounted and the next (identical) render would never bring it back
-// — e.g. after a failed DELETE whose .finally re-fetches the list.
+// the next renderSidebar. The next render reconciles against the DOM, so a
+// card whose removal the server refused (a failed DELETE re-fetches the list)
+// comes back.
 function removeSidebarCard(key) {
   // Escape like setActiveSessionCard: discovered keys embed the node name, so
   // a `"` or `\` would otherwise make querySelector throw mid-takeover/dismiss.
   const card = document.querySelector('.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
   if (card) card.remove();
-  sessionList.lastSidebarHtml = null;
 }
 
 // dismissSession removes a session from the sidebar. The × button deletes

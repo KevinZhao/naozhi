@@ -223,6 +223,53 @@ function applyDataBg(root) {
     if (v && el.style.background !== v) el.style.background = v;
   }
 }
+// reconcileChildren makes parent's element children match the markup in html,
+// keyed by keyOf(el) (null = unkeyed, matched by position only). A child whose
+// key and content match an existing child keeps the existing node, so focus,
+// hover state and cached references survive; a changed child is replaced and
+// stale children are removed. The comparison is against the DOM as it stands:
+// a node patched in place compares by its current state, so there is no cache
+// to drift out of step. Returns whether anything changed.
+export function reconcileChildren(parent, html, keyOf) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  // The live nodes carry the CSSOM background data-nz-bg resolves to; give the
+  // incoming ones the same so an unchanged card compares equal.
+  applyDataBg(tpl.content);
+  const byKey = new Map();
+  for (const c of parent.children) {
+    const k = keyOf(c);
+    if (k !== null && !byKey.has(k)) byKey.set(k, c);
+  }
+  let changed = false;
+  let cursor = parent.firstElementChild;
+  for (const n of [...tpl.content.children]) {
+    const k = keyOf(n);
+    let old = k !== null ? byKey.get(k) : (cursor && keyOf(cursor) === null ? cursor : null);
+    if (k !== null) byKey.delete(k);
+    if (old && !old.isEqualNode(n)) {
+      if (old === cursor) cursor = cursor.nextElementSibling;
+      old.remove();
+      old = null;
+    }
+    const keep = old || n;
+    if (!old) changed = true;
+    if (keep === cursor) {
+      cursor = cursor.nextElementSibling;
+    } else {
+      parent.insertBefore(keep, cursor);
+      if (old) changed = true;
+    }
+  }
+  while (cursor) {
+    const next = cursor.nextElementSibling;
+    cursor.remove();
+    cursor = next;
+    changed = true;
+  }
+  return changed;
+}
+
 new MutationObserver((records) => {
   for (const r of records) {
     for (const n of r.addedNodes) {
