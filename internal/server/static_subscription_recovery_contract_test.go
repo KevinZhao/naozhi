@@ -111,47 +111,9 @@ func TestDashboardJS_WasDeadNotMaskedByOptimisticRunning(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_OnHistoryKeysInitialRenderOnServerFlag pins the fix for "运行中
-// 重复点击 session 后消息顺序错乱/丢失" (stale-frame race).
-//
-// Re-clicking the currently-selected running session calls wsm.subscribe()
-// (selectSession skips unsubscribe when the key is unchanged) which sets
-// _initialSubscribe=true. An in-flight incremental history frame from the
-// superseded subscription could then be consumed AS the initial frame:
-// full-page-replacing the pane with a couple of newest events and pushing
-// lastRenderedEventTime to the tip — after which the REAL initial frame was
-// batch-dropped by the incremental time guard.
-//
-// The decision MUST key on the server's per-frame Initial flag, not on arrival
-// order and not on whether the 'subscribed' ack has landed:
-//   - ReverseConn.Subscribe's first-subscriber path emits history from a local
-//     goroutine while the ack round-trips through the remote, so history can
-//     legitimately arrive first (an ack-gated gate blanks remote sessions).
-//   - A superseded eventPushLoop's backfill can land either side of the new ack,
-//     so an ack gate does not even close the race it targets.
-func TestDashboardJS_OnHistoryKeysInitialRenderOnServerFlag(t *testing.T) {
-	t.Parallel()
-	js := readDashboardJS(t)
-
-	body := extractJSBlock(t, js, "onHistory(msg) {")
-
-	if !strings.Contains(body, "const isInitial = this._initialSubscribe && msg.initial === true") {
-		t.Error("onHistory must gate the full-page render on the server's msg.initial flag: `this._initialSubscribe && msg.initial === true`")
-	}
-	// The flag must only be consumed when an initial frame was actually
-	// rendered. Unconditional consumption is what let a backfill frame burn it.
-	if !strings.Contains(body, "if (isInitial) this._initialSubscribe = false") {
-		t.Error("_initialSubscribe must be consumed only when isInitial holds — an incremental backfill frame must leave it armed for the real initial frame")
-	}
-	// Guard against a relapse to the ack-ordering assumption.
-	if strings.Contains(body, "_pendingSubscribeKey === msg.key) return") {
-		t.Error("onHistory must not drop frames based on the 'subscribed' ack having landed — reverseconn's first-subscribe path does not guarantee that order")
-	}
-}
-
 // TestServerMsg_InitialFlagOnlyOnOpeningFrames is the server half of the
-// contract TestDashboardJS_OnHistoryKeysInitialRenderOnServerFlag depends on.
-// Since the client now treats Initial as authoritative, an opening frame that
+// contract test/e2e/transcript_cursors.test.js pins on the client: the
+// dashboard treats Initial as authoritative, so an opening frame that
 // forgets the flag leaves the pane stuck on the loading placeholder, and a
 // backfill frame that wrongly sets it full-page-replaces a live conversation.
 // Both failure modes are invisible in unit tests of either side alone, so pin
@@ -205,47 +167,6 @@ func TestServerMsg_InitialFlagOnlyOnOpeningFrames(t *testing.T) {
 		if found == 0 {
 			t.Errorf("%s: expected at least one wsproto.NewHistory frame to pin, found none — did the emitter move?", tc.file)
 		}
-	}
-}
-
-// TestDashboardJS_EmptyInitialFrameResetsRenderCursor pins #2421 review
-// finding F3. The Initial branch of onHistory full-page-replaces the pane, so
-// lastRenderedEventTime must describe ONLY what that page rendered. It used to
-// be updated only when the frame carried events, which left a stale high
-// watermark behind in this sequence:
-//
-//  1. a superseded subscription's backfill frame (incremental) pushes
-//     lastRenderedEventTime to the tip;
-//  2. the real Initial frame for a just-started running session is EMPTY
-//     (completeSubscribe's "always send an empty history for running
-//     sessions" arm) — the pane resets to the loading placeholder but the
-//     watermark is left at the tip;
-//  3. the new eventPushLoop pushes the same batch again; every event fails
-//     `e.time <= lastRenderedEventTime` and the whole batch is dropped.
-//
-// Invariant before: Initial frame with events → cursor = last event time;
-// Initial frame without events → cursor unchanged (stale).
-// Invariant after:  Initial frame → cursor = last event time, or 0 when the
-// frame is empty — unconditionally, because the pane is now empty too.
-func TestDashboardJS_EmptyInitialFrameResetsRenderCursor(t *testing.T) {
-	t.Parallel()
-	js := readDashboardJS(t)
-
-	body := extractJSBlock(t, js, "onHistory(msg) {")
-	start := strings.Index(body, "if (isInitial) {")
-	if start < 0 {
-		t.Fatal("onHistory must have an `if (isInitial) {` full-render branch")
-	}
-	initial := body[start:]
-	if end := strings.Index(initial, "\n    } else {"); end > 0 {
-		initial = initial[:end]
-	}
-
-	if !strings.Contains(initial, "lastRenderedEventTime = events.length ? ") {
-		t.Error("Initial branch must reset lastRenderedEventTime unconditionally (`events.length ? <last.time> : 0`) — an empty Initial frame must clear the watermark, not leave a stale one that drops the next incremental batch")
-	}
-	if strings.Contains(initial, "if (last.time) lastRenderedEventTime = last.time") {
-		t.Error("Initial branch must not gate the cursor reset on the frame carrying events — see F3 rationale above")
 	}
 }
 

@@ -2703,6 +2703,12 @@ function prependEvents(events) {
     transcript.oldestFetchedEventTime = firstT;
   }
 
+  // Preserve visual stability: capture distance-from-bottom before ANY mutation
+  // (the reader clicked the button, so they sit at the top and removing it
+  // would jump the page by its height), then restore after. Bottom-anchored
+  // math holds however the content above changes height.
+  const prevScrollFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+
   // Remove "load earlier" button so we can place new events first; it'll be
   // re-added after.
   const btn = document.getElementById('earlier-events-btn');
@@ -2723,12 +2729,6 @@ function prependEvents(events) {
     const placeholder = el.querySelector('.empty-state');
     if (placeholder) placeholder.remove();
   }
-
-  // Preserve visual stability: capture distance-from-bottom before mutation,
-  // then restore after. scrollTop alone breaks because inserted content above
-  // shifts the anchor; bottom-anchored math works even when content height
-  // changes arbitrarily.
-  const prevScrollFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
 
   // The DOM's leading divider was emitted for prevTime=0 ("always divide
   // before the first visible bubble"). Once older bubbles sit above it, it is

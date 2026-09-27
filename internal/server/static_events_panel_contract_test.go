@@ -64,40 +64,6 @@ func TestDashboardJS_RenameRepaintsHeaderOnly(t *testing.T) {
 	}
 }
 
-func TestDashboardJS_SameMsEventsNotDroppedByWatermark(t *testing.T) {
-	t.Parallel()
-	js := readDashboardJS(t)
-
-	// The old inclusive gate must be gone from both render loops.
-	if n := strings.Count(js, "if (e.time && e.time <= transcript.lastRenderedEventTime) return;"); n != 0 {
-		t.Errorf("inclusive watermark gate `e.time <= transcript.lastRenderedEventTime` still present %d time(s) — same-ms thinking→text loses the text bubble", n)
-	}
-	// Strict gate + same-ms uuid dedup, once in onHistory and once in appendEvents.
-	if n := strings.Count(js, "if (e.time && e.time < transcript.lastRenderedEventTime) return;"); n != 2 {
-		t.Errorf("strict watermark gate must appear exactly twice (onHistory + appendEvents), got %d", n)
-	}
-	if n := strings.Count(js, "if (e.time && e.time === transcript.lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;"); n != 2 {
-		t.Errorf("same-ms uuid dedup must appear exactly twice (onHistory + appendEvents), got %d", n)
-	}
-
-	// Cron live buffer: same treatment against the in-memory array.
-	if !strings.Contains(js, "(e.time === lastTime && !(e.uuid && seen.has(e.uuid))));") {
-		t.Error("onCronLiveHistory must admit same-ms events and dedup them by uuid against cronLive.events")
-	}
-	if strings.Contains(js, "if (ev.time && ev.time <= this.cronLive.lastEventTimeMs) return;") {
-		t.Error("onCronLiveEvent still drops same-ms events on time alone")
-	}
-	if !strings.Contains(js, "if (ev.time && ev.time < this.cronLive.lastEventTimeMs) return;") {
-		t.Error("onCronLiveEvent must gate on strict `<`")
-	}
-
-	// thinking must still render nothing (the dedup fix must not "solve" the
-	// bug by painting thinking bubbles instead).
-	if !strings.Contains(js, "if (e && e.type === 'thinking') return '';") {
-		t.Error("eventHtml must keep returning '' for thinking events")
-	}
-}
-
 func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
