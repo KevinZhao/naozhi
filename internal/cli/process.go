@@ -93,13 +93,15 @@ type Process struct {
 
 	// sessionID and state are protected by mu. Readers MUST use SessionID() /
 	// State() rather than the fields directly to avoid racing readLoop's
-	// transition writes (#623).
+	// transition writes (#623). state changes only through transition
+	// (process_turnstate.go), whose table makes Dead terminal.
 	sessionID string
 	state     ProcessState
-	// mu protects state / sessionID / onTurnDone. Accessors use RLock so Snapshot
-	// polls run in parallel; write paths (readLoop transitions, Send state→Running,
-	// Interrupt snapshot-and-flag) use Lock so "read state + set interrupted" stays
-	// atomic. totalCost is a separate atomic so readers never nest p.mu under r.mu.
+	// mu protects state / sessionID / onTurnDone, and makes the
+	// interrupted / interruptedRun pair change together with the state they
+	// were read against. Accessors use RLock so Snapshot polls run in
+	// parallel; write paths (transitions, Send's turn claim, Interrupt's
+	// snapshot-and-flag) use Lock.
 	mu sync.RWMutex
 
 	eventCh  chan clievent.Event
@@ -355,11 +357,7 @@ func (p *Process) shimStdinWriter() io.Writer {
 // Ready here would let the stray-result CAS consume the flag with wasRunning
 // false, stranding the session in Running once SpawnReconnect re-sets it.
 func (p *Process) startReadLoop() {
-	p.mu.Lock()
-	if !(p.reconnectedMidTurn.Load() && p.state == StateRunning) {
-		p.state = StateReady
-	}
-	p.mu.Unlock()
+	p.transition(evReadLoopStart)
 	go p.readLoop()
 	go p.heartbeatLoop()
 }

@@ -392,11 +392,7 @@ func (p *Process) DiscardPassthroughPending(reason error) {
 // InterruptViaControl and the dashboard see the passthrough turn as active
 // (Send does this itself; passthrough callers block on resultCh instead).
 func (p *Process) onSystemInit() {
-	p.mu.Lock()
-	if p.state == StateReady || p.state == StateSpawning {
-		p.state = StateRunning
-	}
-	p.mu.Unlock()
+	p.transition(evTurnStarted)
 }
 
 // onTurnResult is called when readLoop sees a result event. It snapshots the
@@ -415,11 +411,7 @@ func (p *Process) onTurnResult() []*sendSlot {
 	// owners were consumed: a result with no claim may be a Send-path turn or
 	// a reconnect replay, which readLoop handles itself.
 	if len(owners) > 0 && pendingLeft == 0 {
-		p.mu.Lock()
-		if p.state == StateRunning {
-			p.state = StateReady
-		}
-		p.mu.Unlock()
+		p.transition(evTurnEnded)
 	}
 	return owners
 }
