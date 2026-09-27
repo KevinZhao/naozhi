@@ -6,22 +6,6 @@ import (
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
-// OverlayFieldDrift is one argv-bearing field whose live value (the argv the
-// surviving shim was spawned with) differs from what a fresh spawn under the
-// CURRENT config would use (#2543). Surfaced per session on /api/sessions as
-// overlay_drift; the remedy is restarting the session — a live session is
-// never auto-restarted over drift.
-type OverlayFieldDrift struct {
-	// Field is "model" | "effort" | "append_system_prompt", or "args" when
-	// the argv differs without any of the named tokens differing (codex-class
-	// backends render model/effort without dedicated flags).
-	Field string `json:"field"`
-	// Stored is the value in the shim's recorded argv ("" = absent).
-	Stored string `json:"stored"`
-	// Current is the value a fresh spawn would use now ("" = absent).
-	Current string `json:"current"`
-}
-
 // driftArgvFields maps the drift-visible fields to their argv flags.
 var driftArgvFields = []struct{ field, flag string }{
 	{"model", "--model"},
