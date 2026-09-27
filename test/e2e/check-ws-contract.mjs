@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripCommentsAndStrings } from '../../scripts/js-deps-freeze.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const schemaPath = path.join(ROOT, 'internal', 'wsproto', 'wsproto.schema.json');
@@ -95,8 +96,51 @@ for (const { file, key } of sendSites) {
   }
 }
 
+// ── Fields: every field the dashboard reads off a frame must be a property
+// some frame declares. The type checks above catch a renamed type; this one
+// catches a renamed or dropped field, which the frontend would otherwise read
+// as undefined without a sound. Every WS handler takes the frame as `msg`, so
+// the scan is `msg.<name>` reads; writes (`msg.after = …` on an outgoing
+// subscribe) are not reads of the wire.
+const schemaFields = new Set();
+for (const f of Object.values(schema.frames)) {
+  for (const k of Object.keys(f.properties || {})) schemaFields.add(k);
+}
+// Fields the dashboard adds itself before handing a frame on, with where.
+const FRONTEND_FIELDS = {
+  // dashboard.js maps a run frame's owner_id onto job_id for the cron bus.
+  job_id: 'cron:run-started / cron:run-ended bus detail',
+};
+const fieldReads = new Map(); // field -> Set(file)
+for (const f of fs.readdirSync(staticDir)) {
+  if (!f.endsWith('.js') || f === 'contract.js' || f === 'sw.js') continue;
+  const js = stripCommentsAndStrings(fs.readFileSync(path.join(staticDir, f), 'utf8'));
+  for (const m of js.matchAll(/\bmsg\.([A-Za-z_$][\w$]*)(?![\w$])(?!\s*=[^=])/g)) {
+    if (!fieldReads.has(m[1])) fieldReads.set(m[1], new Set());
+    fieldReads.get(m[1]).add(f);
+  }
+}
+if (fieldReads.size === 0) {
+  console.error('check-ws-contract: no msg.<field> reads found — the field check has gone blind (was the handler parameter renamed?)');
+  failures++;
+}
+for (const [field, files] of fieldReads) {
+  if (schemaFields.has(field) || field in FRONTEND_FIELDS) continue;
+  console.error(`${[...files].join(', ')} read${files.size === 1 ? 's' : ''} msg.${field}, which no frame in wsproto.schema.json declares`);
+  failures++;
+}
+for (const field of Object.keys(FRONTEND_FIELDS)) {
+  if (!fieldReads.has(field)) {
+    console.error(`FRONTEND_FIELDS lists ${field} but nothing reads msg.${field} any more — drop the entry`);
+    failures++;
+  } else if (schemaFields.has(field)) {
+    console.error(`FRONTEND_FIELDS lists ${field} but the schema now declares it — drop the entry`);
+    failures++;
+  }
+}
+
 if (failures) {
   console.error(`check-ws-contract: ${failures} mismatch(es) between wsproto.schema.json and dashboard.js`);
   process.exit(1);
 }
-console.log(`check-ws-contract: OK (${backendTypes.size} types + ${sendSites.length} send sites over ${inboundTypes.size} inbound types)`);
+console.log(`check-ws-contract: OK (${backendTypes.size} types + ${sendSites.length} send sites over ${inboundTypes.size} inbound types + ${fieldReads.size} frame fields read)`);
