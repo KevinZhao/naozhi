@@ -59,14 +59,14 @@ func TestDashboardJS_EffortTagWiring(t *testing.T) {
 	// point a future failure at the wrong thing.
 	//
 	// The fetchSessions site is the load-bearing half AND is position-sensitive
-	// — it must precede the `version === lastVersion` short-circuit, because a
+	// — it must precede the `version === sessionList.lastVersion` short-circuit, because a
 	// tier change does not advance stats.version. An earlier revision of this
 	// code sat after the short-circuit and never fired at all.
-	const pollSite = `if (selectedKey) setHeaderEffortChip(data.sessions);`
+	const pollSite = `if (selection.key) setHeaderEffortChip(data.sessions);`
 	if !strings.Contains(js, pollSite) {
 		t.Errorf("fetchSessions must repaint the effort tag: missing %q", pollSite)
 	}
-	shortCircuit := strings.Index(js, `if (wsConnected && version === lastVersion && version > 0`)
+	shortCircuit := strings.Index(js, `if (wsConnected && version === sessionList.lastVersion && version > 0`)
 	poll := strings.Index(js, pollSite)
 	switch {
 	case shortCircuit < 0:

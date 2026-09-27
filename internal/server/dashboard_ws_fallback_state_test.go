@@ -42,7 +42,7 @@ func TestDashboardJS_FetchSessionsVersionGateSkippedWhenWSDown(t *testing.T) {
 	}
 	body := jsBlockBody(t, string(data), "async function fetchSessions() {")
 
-	const gate = "version === lastVersion && version > 0"
+	const gate = "version === sessionList.lastVersion && version > 0"
 	gi := strings.Index(body, gate)
 	if gi < 0 {
 		t.Fatalf("version short-circuit %q missing from fetchSessions", gate)
@@ -88,15 +88,15 @@ func TestDashboardJS_OptimisticRunningWrittenBackToSidebarPayload(t *testing.T) 
 	}
 	wb := strings.Index(body, "data = Object.assign({}, data, { sessions });")
 	if wb < 0 {
-		t.Fatal("fetchSessions does not write the mapped sessions back into data (optimistic copy lost for renderSidebar/_lastSidebarData)")
+		t.Fatal("fetchSessions does not write the mapped sessions back into data (optimistic copy lost for renderSidebar/sessionList.lastSidebarData)")
 	}
 	rs := strings.Index(body, "renderSidebar(data);")
-	ls := strings.Index(body, "_lastSidebarData = data;")
+	ls := strings.Index(body, "sessionList.lastSidebarData = data;")
 	if rs < 0 || ls < 0 {
-		t.Fatalf("renderSidebar(data)/_lastSidebarData = data missing (rs=%d, ls=%d)", rs, ls)
+		t.Fatalf("renderSidebar(data)/sessionList.lastSidebarData = data missing (rs=%d, ls=%d)", rs, ls)
 	}
 	if !(oi < wb && wb < rs && rs < ls) {
-		t.Fatalf("order must be copy(%d) < write-back(%d) < renderSidebar(%d) < _lastSidebarData(%d)", oi, wb, rs, ls)
+		t.Fatalf("order must be copy(%d) < write-back(%d) < renderSidebar(%d) < sessionList.lastSidebarData(%d)", oi, wb, rs, ls)
 	}
 }
 
@@ -116,10 +116,10 @@ func TestDashboardJS_WSSetStateRespectsHiddenTab(t *testing.T) {
 	}
 	// Every fallback interval armed in setState must sit behind the gate.
 	for _, arm := range []string{
-		"sessionPollTimer = setInterval(fetchSessions, 5000);",
-		"discoveredPollTimer = setInterval(scanDiscovered, 5000);",
-		"discoveredPollTimer = setInterval(scanDiscovered, 30000);",
-		"eventTimer = setInterval(() => fetchEvents(false), 1000);",
+		"timers.sessionPoll = setInterval(fetchSessions, 5000);",
+		"timers.discoveredPoll = setInterval(scanDiscovered, 5000);",
+		"timers.discoveredPoll = setInterval(scanDiscovered, 30000);",
+		"timers.events = setInterval(() => fetchEvents(false), 1000);",
 	} {
 		i := strings.Index(body, arm)
 		if i < 0 {
@@ -145,7 +145,7 @@ func TestDashboardJS_StartPollersSkipsSessionsPollWhenWSConnected(t *testing.T) 
 	}
 	body := jsBlockBody(t, string(data), "  const startPollers = () => {")
 
-	const arm = "sessionPollTimer = setInterval(fetchSessions, 5000);"
+	const arm = "timers.sessionPoll = setInterval(fetchSessions, 5000);"
 	ai := strings.Index(body, arm)
 	if ai < 0 {
 		t.Fatalf("expected %q in startPollers", arm)
@@ -186,8 +186,8 @@ func TestDashboardJS_FallbackReconcileComparesLastAppliedState(t *testing.T) {
 		t.Fatal("reconcile branch head not found before updateMainState")
 	}
 	guard := fetch[head:ai]
-	if !strings.Contains(guard, "_lastAppliedMainState") || !strings.Contains(guard, "applied.state === sd.state") {
-		t.Fatalf("fetchSessions reconcile must compare sd.state with _lastAppliedMainState before updateMainState; got %q", guard)
+	if !strings.Contains(guard, "selection.lastAppliedMainState") || !strings.Contains(guard, "applied.state === sd.state") {
+		t.Fatalf("fetchSessions reconcile must compare sd.state with selection.lastAppliedMainState before updateMainState; got %q", guard)
 	}
 
 	// updateSendButton is the single recording point, keyed by the selected
@@ -195,7 +195,7 @@ func TestDashboardJS_FallbackReconcileComparesLastAppliedState(t *testing.T) {
 	// first reconcile after a switch.
 	usb := jsBlockBody(t, js, "function updateSendButton(state) {")
 	if !strings.Contains(usb, "nzState._lastAppliedMainState = { key: deps.sid(nzState.selectedKey, nzState.selectedNode), state: state };") {
-		t.Fatal("updateSendButton must record _lastAppliedMainState = {key, state} for the selected session")
+		t.Fatal("updateSendButton must record selection.lastAppliedMainState = {key, state} for the selected session")
 	}
 
 	// selectSession must clear the record so the new session's first poll
@@ -211,8 +211,8 @@ func TestDashboardJS_FallbackReconcileComparesLastAppliedState(t *testing.T) {
 		t.Fatal("could not bound selectSession")
 	}
 	sel := js[ss : ss+1+se]
-	if !strings.Contains(sel, "_lastAppliedMainState = null;") {
-		t.Fatal("selectSession must reset _lastAppliedMainState on session switch")
+	if !strings.Contains(sel, "selection.lastAppliedMainState = null;") {
+		t.Fatal("selectSession must reset selection.lastAppliedMainState on session switch")
 	}
 }
 
@@ -228,9 +228,9 @@ func TestDashboardJS_StartPollersForcesFullReconcileOnResume(t *testing.T) {
 		t.Fatalf("read embedded dashboard.js: %v", err)
 	}
 	body := jsBlockBody(t, string(data), "  const startPollers = () => {")
-	zi := strings.Index(body, "lastVersion = 0;")
+	zi := strings.Index(body, "sessionList.lastVersion = 0;")
 	fi := strings.Index(body, "fetchSessions();")
 	if zi < 0 || fi < 0 || zi > fi {
-		t.Fatalf("startPollers must zero lastVersion before the one-shot fetchSessions() (zero=%d, fetch=%d)", zi, fi)
+		t.Fatalf("startPollers must zero sessionList.lastVersion before the one-shot fetchSessions() (zero=%d, fetch=%d)", zi, fi)
 	}
 }

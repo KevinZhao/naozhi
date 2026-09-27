@@ -1,3 +1,4 @@
+import { composer, hooks, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzState, nzBus, nzViews, nzTest, registerActions   } from './nz_util.js';
 import {
   BLOCK_SPLIT_RE,
@@ -229,116 +230,23 @@ import {
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
-let selectedKey = null;
-// #2431: last (session, state) pushed through updateSendButton — the main-area
-// state that is actually on screen, whichever path (WS push, optimistic flip,
-// renderMainShell, REST reconcile) applied it. The fetchSessions reconcile
-// compares against this so a 5 s fallback poll only re-applies a state that
-// has actually changed. Cleared on session switch.
-let _lastAppliedMainState = null;
-// activeView is the root view-router state: which top-level view owns the
-// viewport. 'chat' is the default (session sidebar + chat main). 'assets' /
-// 'cron' / 'settings' are full-screen peers driven by setActivityView() and
-// the matching body.nz-view-* CSS classes. Cron rendering is gated on
-// activeView==='cron' (was selectedKey===null) so async cron repaints never
-// clobber the chat DOM and vice-versa.
-let activeView = 'chat';
-// _activeCardEl caches the currently-.active session card element so the
-// selector switch doesn't have to O(N) scan every card each time. Stays in
-// sync via setActiveSessionCard(); after renderSidebar rebuilds the list the
-// cached node becomes detached — the helper's isConnected guard recovers.
-let eventTimer = null;
-let lastEventTime = 0;
-let lastRenderedEventTime = 0;
-// oldestFetchedEventTime tracks the earliest server event we've already
-// requested, independent of what's currently rendered in the DOM. The
-// "load earlier" pagination originally took its cursor from the first
-// `.event` child in the scroller — but when a page of 100 events is
-// entirely internal-only (tool_use / agent / task_start / task_progress /
-// task_done / result, filtered out by INTERNAL_EVENT_TYPES), no `.event`
-// is rendered and the pagination silently bails with no cursor. That
-// happens in practice whenever a parallel agent team runs long enough to
-// fill the ring buffer with tool activity; the operator sees a blank
-// events panel and a dead "加载更早的事件" button. Keep this cursor so
-// pagination works regardless of what got filtered out.
-let oldestFetchedEventTime = 0;
-let lastCompositionEnd = 0;
-let sessionsData = {};
-let allSessionsCache = [];
-// costSummaryCache is the ledger's last-30-day unit-bucketed total from
-// /api/cost/summary (null until the first fetch lands); the 服务概览 花费 card
-// prefers it over the live-session sum, which forgets deleted sessions and cron.
-// Keys (sid(key,node)) optimistically removed by dismissSession before the
-// DELETE round-trips. fetchSessions/renderSidebar skip these so an in-flight
-// poll or sessions_update WS event that still lists the session cannot
-// resurrect a card the operator already dismissed. Cleared when DELETE
-// confirms (success/404) or fails — see dismissSession's normal-session branch.
-let _optimisticDeleteKeys = new Set();
 // Collapsed project sections: Set of "node:name" keys. Persisted in
 // localStorage so a user's fold state survives reloads. Toggled via the
 // chevron button in the project section-header; the renderer skips emitting
 // cards/empty-CTA for groups whose key is in this set.
-let collapsedProjects = (function() {
+sessionList.collapsedProjects = (function() {
   try { return new Set(JSON.parse(localStorage.getItem('nz_collapsedProjects') || '[]')); }
   catch(_) { return new Set(); }
 })();
-let pendingFiles = []; // {file, id, status: 'uploading'|'ready'|'error'}
-let sending = false;
 // selectedNode doubles as (a) the node the currently-selected session lives on
 // and (b) the "view" filter applied to the sidebar session list when multiple
 // nodes are connected. Persisted to localStorage so a reload keeps the user on
 // the node they were browsing; validated against nodesData on every fetch so a
 // removed/offline remote falls back to 'local'.
-let selectedNode = (function() {
+selection.node = (function() {
   try { return localStorage.getItem('nz_selectedNode') || 'local'; }
   catch(_) { return 'local'; }
 })();
-let nodesData = {};
-let lastVersion = 0;
-let lastNodesJSON = '';
-let lastHistoryJSON = '';
-// _lastSidebarData caches the most recent /api/sessions payload so the
-// sidebar can re-render locally without re-hitting the server. Set by
-// fetchSessions after a successful render.
-let _lastSidebarData = null;
-// _lastSidebarHtml caches the last fully-built sidebar HTML string so
-// renderSidebar can skip the (expensive) `list.innerHTML = html` write
-// when the produced markup is byte-identical to what is already mounted.
-// 20 sessions × 1 Hz polling rebuilds the same string every tick when
-// nothing actually changed — comparing the produced string to the cache
-// is O(n) but fast (string equality short-circuits on length and runs in
-// native code), and skipping the assignment avoids a full sidebar reflow
-// + active-card detachment / re-resolve cycle. The cache is the only
-// consumer of the *output* — input fingerprinting is intentionally
-// avoided because the card HTML embeds many fields (selectedKey/Node,
-// unread counts, last_active text, project flags …) and any missed
-// field would cause stale-DOM bugs. Comparing the final string is
-// inherently correct: if it differs by a byte we re-render, if it
-// doesn't there is no observable change to apply. R33-UX1.
-let _lastSidebarHtml = null;
-let sessionPollTimer = null;
-let discoveredPollTimer = null;
-let discoveredItems = []; // discovered sessions, merged into sidebar
-let lastDiscoveredJSON = ''; // #1770: last /api/discovered payload, to skip forced re-render when unchanged
-let previewTimer = null;
-let previewEventCount = 0;
-// _previewGen is bumped on every previewDiscovered() entry. The awaited
-// preview fetch and the 2s poll tick compare their captured generation
-// against it so a stale call can't render into (or start a second interval
-// for) a card the operator has since clicked away from.
-let _previewGen = 0;
-let pendingDiscovered = null; // {pid, sessionId, cwd, procStartTime, node} when previewing a discovered session
-let sessionCounter = 0;
-let defaultWorkspace = '';
-let projectsData = []; // [{name, path, node}] from API
-let defaultCLIName = '';
-let defaultCLIVersion = '';
-// R110-P1 Home panel health strip (Round 148) — cached snapshot of the
-// /api/sessions `stats` object so renderRecentSessionsPanel can surface
-// service health (active / running / ready / uptime / watchdog kills / cli
-// version) without an extra fetch. Refreshed by fetchSessions on every
-// successful poll. Nil-safe consumer: absence = show nothing, never throw.
-let lastStatsSnapshot = null;
 const sessionWorkspaces = {};
 const sessionNodes = {};
 const sessionBackends = {}; // per-session CLI backend picked at creation ("claude" / "kiro" / ...)
@@ -347,8 +255,6 @@ const sessionAccessProfiles = {}; // per-session access profile picked at creati
 // no message sent). The server parks them and applies them on first spawn;
 // this mirror lets the chips show the pick meanwhile. Dropped on promotion.
 const sessionPendingTuning = {}; // key -> { model, effort }
-let cliBackends = null; // cached LOCAL /api/cli/backends response: {backends, default, detected}
-let cliBackendsFetchedAt = 0;
 // Per-node backend manifest cache for the node-aware new-session picker.
 // Keyed by node id ('local' or a remote node id). Values: {data, at}. The
 // global cliBackends above stays LOCAL-only — every chip / feature-gate /
@@ -356,8 +262,6 @@ let cliBackendsFetchedAt = 0;
 // the manifest for whichever node the "New Session" modal targets, so a
 // remote node's backends + default drive the picker (picker node-aware fix).
 const cliBackendsByNode = {};
-let accessProfiles = null; // cached /api/access-profiles response: {profiles, default}
-let accessProfilesFetchedAt = 0;
 const sessionDrafts = {}; // key -> draft text, preserved across session switches
 // sessionScrollPos: sid(key,node) -> {fromBottom, atBottom}
 // 记住每个会话上次切走时的 events-scroll 位置，回来时恢复，避免正在阅读
@@ -396,7 +300,6 @@ const sessionLastSent = {};
 // only set when there is text), it also covers image-only sends, the main
 // HTTP-send case.
 const httpSendPending = new Set();
-let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
 // collectWorkspaceSessionIDs returns the set of Claude session UUIDs that the
 // sidebar already represents — current session_id PLUS any prev_session_ids
@@ -443,7 +346,6 @@ function lsRemove(key) { try { localStorage.removeItem(LS_PREFIX + key); } catch
 // no fuzzy cross-session guessing (the semantics #1567 deliberately removed).
 const PENDING_LS_KEY = 'pending_sessions';
 const PENDING_LS_MAX = 64; // bound localStorage size — far above realistic un-sent backlog
-let _pendingRestored = false;
 
 // persistPending snapshots the in-memory pending maps to localStorage. Called
 // after every mutation of the three maps. lsSet swallows quota/disabled errors.
@@ -466,8 +368,8 @@ function persistPending() {
 // a hand-edited blob cannot inject a non-string key or a non-absolute ws path
 // (defense in depth — the server still re-validates the workspace on send).
 function restorePending() {
-  if (_pendingRestored) return;
-  _pendingRestored = true;
+  if (selection.pendingRestored) return;
+  selection.pendingRestored = true;
   const saved = lsGet(PENDING_LS_KEY, {});
   if (!saved || typeof saved !== 'object') return;
   for (const [k, v] of Object.entries(saved)) {
@@ -566,7 +468,7 @@ function syncThemeFromServer() {
       if (THEME_ORDER.indexOf(srv) < 0) return;       // unknown/empty → keep local
       if (srv === getCurrentTheme()) return;            // already in sync
       applyTheme(srv);                                  // server wins; persist=false
-      if (activeView === 'settings') renderSettingsView(); // refresh active pill if open
+      if (ui.activeView === 'settings') renderSettingsView(); // refresh active pill if open
     })
     .catch(function () { /* offline / pre-persist server: keep localStorage */ });
 }
@@ -663,9 +565,9 @@ function authHeaders() {
 const ACTIVITY_VIEWS = ['chat', 'assets', 'files', 'cron', 'system', 'settings'];
 function setActivityView(view) {
   if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';
-  if (view === activeView) return;
-  const prev = activeView;
-  activeView = view;
+  if (view === ui.activeView) return;
+  const prev = ui.activeView;
+  ui.activeView = view;
   // Rail button active / aria-pressed state.
   [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-files', 'files'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
     .forEach(function (pair) {
@@ -696,7 +598,7 @@ function setActivityView(view) {
   // reserved. Both close paths run nzSplitExit, clearing nz-split-open.
   if (prev === 'chat' && view !== 'chat') {
     closeFilePreview();
-    if (closeScratchDrawer) closeScratchDrawer();
+    if (hooks.closeScratchDrawer) hooks.closeScratchDrawer();
   }
   // Enter the target view.
   if (view === 'assets') { if (nzViews.asset) nzViews.asset.show(); }
@@ -756,9 +658,9 @@ async function fetchSessions() {
     // happen BEFORE the version short-circuit below, which is exactly where an
     // earlier revision of this code sat and silently never fired.
     // docs/rfc/kiro-effort-visibility.md §5.1 / R1b
-    if (selectedKey) setHeaderEffortChip(data.sessions);
-    if (selectedKey) setHeaderSpawnDiagChip(data.sessions);
-    if (selectedKey) setHeaderOverlayDriftChip(data.sessions);
+    if (selection.key) setHeaderEffortChip(data.sessions);
+    if (selection.key) setHeaderSpawnDiagChip(data.sessions);
+    if (selection.key) setHeaderOverlayDriftChip(data.sessions);
     // #2431: under WS-fallback polling this REST poll is the ONLY state source,
     // and process state transitions (running↔ready, last_response, sc-time)
     // never advance stats.version — storeGen moves on add/remove/rename/reset
@@ -768,19 +670,19 @@ async function fetchSessions() {
     // the gate while disconnected; renderSidebar is idempotent so the 5 s
     // repaint is the intended fallback cost.
     const wsConnected = wsm.state === WS_STATES.CONNECTED;
-    if (wsConnected && version === lastVersion && version > 0 && nodesHash === lastNodesJSON && historyHash === lastHistoryJSON) return;
-    lastVersion = version;
-    lastNodesJSON = nodesHash;
-    lastHistoryJSON = historyHash;
-    if (data.nodes) nodesData = data.nodes;
-    if (data.stats.default_workspace) defaultWorkspace = data.stats.default_workspace;
-    if (data.stats.projects) projectsData = data.stats.projects;
-    if (data.stats.cli_name) defaultCLIName = data.stats.cli_name;
-    if (data.stats.cli_version) defaultCLIVersion = data.stats.cli_version;
+    if (wsConnected && version === sessionList.lastVersion && version > 0 && nodesHash === sessionList.lastNodesJSON && historyHash === sessionList.lastHistoryJSON) return;
+    sessionList.lastVersion = version;
+    sessionList.lastNodesJSON = nodesHash;
+    sessionList.lastHistoryJSON = historyHash;
+    if (data.nodes) sessionList.nodesData = data.nodes;
+    if (data.stats.default_workspace) serverInfo.defaultWorkspace = data.stats.default_workspace;
+    if (data.stats.projects) sessionList.projectsData = data.stats.projects;
+    if (data.stats.cli_name) serverInfo.defaultCLIName = data.stats.cli_name;
+    if (data.stats.cli_version) serverInfo.defaultCLIVersion = data.stats.cli_version;
     // R110-P1 Home panel: stash the full stats object so the health strip
     // can read uptime / watchdog / active-count without a second fetch.
-    lastStatsSnapshot = data.stats;
-    historySessionsData = data.history_sessions || [];
+    serverInfo.lastStatsSnapshot = data.stats;
+    sessionList.historySessionsData = data.history_sessions || [];
 
     // Track which keys the backend knows about
     const backendKeys = new Set();
@@ -790,9 +692,9 @@ async function fetchSessions() {
     // removed it. The key is cleared from _optimisticDeleteKeys once DELETE
     // resolves, so a genuinely-still-present session (failed delete) reappears
     // on the next fetch.
-    if (_optimisticDeleteKeys.size > 0) {
+    if (sessionList.optimisticDeleteKeys.size > 0) {
       data = Object.assign({}, data, {
-        sessions: (data.sessions || []).filter(s => !_optimisticDeleteKeys.has(sid(s.key, s.node || 'local'))),
+        sessions: (data.sessions || []).filter(s => !sessionList.optimisticDeleteKeys.has(sid(s.key, s.node || 'local'))),
       });
     }
     // #2431: map (not forEach) so the optimistic 'running' copy below lands in
@@ -813,11 +715,11 @@ async function fetchSessions() {
       // A workspace change (/cd, or the first snapshot after spawn resolved
       // the real cwd) invalidates the cached git state — the new directory can
       // be a different repo, a different worktree, or no repo at all.
-      const prevWS = sessionsData[sKey] && sessionsData[sKey].workspace;
+      const prevWS = sessionList.sessionsData[sKey] && sessionList.sessionsData[sKey].workspace;
       if (prevWS !== undefined && prevWS !== s.workspace) {
         invalidateGitState(s.key, n);
       }
-      sessionsData[sKey] = s;
+      sessionList.sessionsData[sKey] = s;
       backendKeys.add(s.key);
       return s;
     });
@@ -869,7 +771,7 @@ async function fetchSessions() {
           // display name — so single-backend kiro deployments also get the
           // right icon instead of degrading to the 'cli' default branch.
           const pendingBackend = sessionBackends[key] || '';
-          const pendingCLIName = backendDisplayName(pendingBackend) || defaultCLIName;
+          const pendingCLIName = backendDisplayName(pendingBackend) || serverInfo.defaultCLIName;
           // defaultCLIVersion is the DEFAULT backend's live version, tracked
           // from each session's system/init frame and refreshed from stats
           // every poll; backendDisplayVersion() reads the /api/cli/backends
@@ -880,10 +782,10 @@ async function fetchSessions() {
           // non-default backend (e.g. kiro) has no live source here, so keep
           // its manifest value — preferring defaultCLIVersion would mislabel it
           // with the default backend's version. R20260613-pending-version.
-          const isDefaultBackend = !pendingBackend || (cliBackends !== null && pendingBackend === cliBackends.default);
+          const isDefaultBackend = !pendingBackend || (serverInfo.cliBackends !== null && pendingBackend === serverInfo.cliBackends.default);
           const pendingCLIVersion = isDefaultBackend
-            ? (defaultCLIVersion || backendDisplayVersion(pendingBackend))
-            : (backendDisplayVersion(pendingBackend) || defaultCLIVersion);
+            ? (serverInfo.defaultCLIVersion || backendDisplayVersion(pendingBackend))
+            : (backendDisplayVersion(pendingBackend) || serverInfo.defaultCLIVersion);
           // #2431: mirror the server's project/project_fallback shape so an
           // unregistered workspace groups under its basename from the first
           // paint instead of sitting in 未分组 until the first send promotes it.
@@ -923,7 +825,7 @@ async function fetchSessions() {
     // search oninput handler can re-render locally without DoS'ing the
     // server with /api/sessions requests on every keystroke. The renderer
     // is idempotent — re-calling it with the same data just re-paints.
-    _lastSidebarData = data;
+    sessionList.lastSidebarData = data;
 
     // Reconcile main area state: if the selected session's state changed
     // (e.g. session_state WS message was missed), propagate the server-side
@@ -939,15 +841,15 @@ async function fetchSessions() {
     // reconcile toward 'running' over a live WS: that's the push side's job, and
     // a lagging REST snapshot would flicker the banner (the very reason the
     // optimistic-running flip at line 469-475 exists).
-    if (selectedKey) {
-      const sKey = sid(selectedKey, selectedNode);
-      const sd = sessionsData[sKey];
+    if (selection.key) {
+      const sKey = sid(selection.key, selection.node);
+      const sd = sessionList.sessionsData[sKey];
       if (sd && (!wsConnected || (sd.state !== 'running' && !sessionOptimisticRunning[sKey]))) {
         // #2431: updateSendButton is not idempotent ('running' re-seeds agent
         // rows from the REST snapshot; 'ready' resets turn state + loading
         // indicator + scroll) and this runs every 5 s under fallback — only
         // re-apply when REST differs from what the main area last applied.
-        const applied = _lastAppliedMainState;
+        const applied = selection.lastAppliedMainState;
         if (!(applied && applied.key === sKey && applied.state === sd.state)) {
           updateMainState(sd.state, sd.death_reason);
         }
@@ -968,7 +870,7 @@ async function fetchSessions() {
         }
       }
     }
-    if (selectedKey) updateHeaderCLI();
+    if (selection.key) updateHeaderCLI();
     return true;
   } catch (e) {
     console.error('fetchSessions:', e);
@@ -976,18 +878,14 @@ async function fetchSessions() {
   }
 }
 
-// Debounced variant: coalesces multiple calls within 300ms into a single fetch.
-// Returns a Promise that resolves after the actual fetch completes.
-let _fetchDbTimer = null;
-let _fetchDbResolvers = [];
 function debouncedFetchSessions() {
   return new Promise(resolve => {
-    _fetchDbResolvers.push(resolve);
-    if (_fetchDbTimer) clearTimeout(_fetchDbTimer);
-    _fetchDbTimer = setTimeout(() => {
-      _fetchDbTimer = null;
-      const resolvers = _fetchDbResolvers;
-      _fetchDbResolvers = [];
+    timers.fetchDebounceResolvers.push(resolve);
+    if (timers.fetchDebounce) clearTimeout(timers.fetchDebounce);
+    timers.fetchDebounce = setTimeout(() => {
+      timers.fetchDebounce = null;
+      const resolvers = timers.fetchDebounceResolvers;
+      timers.fetchDebounceResolvers = [];
       fetchSessions().then(() => resolvers.forEach(r => r()));
     }, 300);
   });
@@ -996,8 +894,8 @@ function debouncedFetchSessions() {
 function renderSidebar(data) {
   const st = data.stats;
   updateStatusBar();
-  if (st.default_workspace) defaultWorkspace = st.default_workspace;
-  if (st.projects) projectsData = st.projects;
+  if (st.default_workspace) serverInfo.defaultWorkspace = st.default_workspace;
+  if (st.projects) sessionList.projectsData = st.projects;
 
   const list = document.getElementById('session-list');
   const scrollTop = list.scrollTop;
@@ -1007,7 +905,7 @@ function renderSidebar(data) {
     if (!s.source) s.source = 'managed';
     return s;
   });
-  discoveredItems.forEach(d => {
+  sessionList.discoveredItems.forEach(d => {
     allItemsUnfiltered.push({
       key: discoveredKey(d.pid, d.node),
       state: d.state || 'ready',
@@ -1024,7 +922,7 @@ function renderSidebar(data) {
   });
 
   // Workspace sidebar: managed + discovered sessions (full cache, pre-filter).
-  allSessionsCache = allItemsUnfiltered;
+  sessionList.allSessionsCache = allItemsUnfiltered;
 
   // The sidebar lists every connected node's sessions together — the old
   // per-node filter (driven by the sidebar node selector) was removed when
@@ -1057,7 +955,7 @@ function renderSidebar(data) {
   {
     // Project lookup by (node,name) so we can reach favorite/github flags.
     const projIndex = {};
-    projectsData.forEach(p => {
+    sessionList.projectsData.forEach(p => {
       projIndex[(p.node || 'local') + ':' + p.name] = p;
     });
 
@@ -1101,7 +999,7 @@ function renderSidebar(data) {
     // filter was removed in #2180 when the node selector moved into the New
     // Session modal), so every favorite's header renders regardless of which
     // node it lives on — matching the unfiltered session list above.
-    projectsData.forEach(p => {
+    sessionList.projectsData.forEach(p => {
       if (!p.favorite) return;
       const pNode = p.node || 'local';
       const k = pNode + ':' + p.name;
@@ -1161,7 +1059,7 @@ function renderSidebar(data) {
         };
         p._sessionCount = g.items.length;
         html += g.fallback ? sectionHeaderFallbackHtml(p) : sectionHeaderHtml(p);
-        if (collapsedProjects.has(k)) return;
+        if (sessionList.collapsedProjects.has(k)) return;
         if (g.items.length > 0) {
           html += g.items.map(sessionCardHtml).join('');
         }
@@ -1200,17 +1098,17 @@ function renderSidebar(data) {
   // strings match, the DOM is already correct: skip the write, the
   // active-card re-resolve, and the scroll restoration (assigning the
   // same value is a no-op but the rAF is still queued — so just bail).
-  if (html === _lastSidebarHtml) {
+  if (html === sessionList.lastSidebarHtml) {
     // Still refresh the history badge & home panel below — they read from
     // allSessionsCache which was just refreshed regardless.
   } else {
     list.innerHTML = html;
-    _lastSidebarHtml = html;
+    sessionList.lastSidebarHtml = html;
     // Sidebar rebuild detached the previously-cached active card; re-resolve
     // it against the fresh DOM so selector switches stay O(1) on the next
     // click. No-op when nothing is selected (openCronPanel / previewDiscovered
     // clear paths already reset _activeCardEl).
-    if (selectedKey) setActiveSessionCard(selectedKey, selectedNode);
+    if (selection.key) setActiveSessionCard(selection.key, selection.node);
     // Restore scroll on the next frame so the browser finishes layout first;
     // synchronous assignment after innerHTML can visibly jump on slow devices.
     requestAnimationFrame(() => {
@@ -1275,10 +1173,10 @@ function workspaceFallbackName(ws) {
 }
 
 function matchProject(workspace) {
-  if (!workspace || !projectsData || projectsData.length === 0) return '';
+  if (!workspace || !sessionList.projectsData || sessionList.projectsData.length === 0) return '';
   const ws = workspace.endsWith('/') ? workspace : workspace + '/';
   let best = '', bestLen = 0;
-  for (const p of projectsData) {
+  for (const p of sessionList.projectsData) {
     const prefix = p.path.endsWith('/') ? p.path : p.path + '/';
     if (ws.startsWith(prefix) && p.path.length > bestLen) {
       best = p.name; bestLen = p.path.length;
@@ -1289,28 +1187,26 @@ function matchProject(workspace) {
 
 // --- History Popover ---
 
-let activePopover = null;
-let activePopoverBackdrop = null;
 
 function closeHistoryPopover() {
-  if (activePopoverBackdrop) { activePopoverBackdrop.remove(); activePopoverBackdrop = null; }
-  if (activePopover) { activePopover.remove(); activePopover = null; }
+  if (ui.activePopoverBackdrop) { ui.activePopoverBackdrop.remove(); ui.activePopoverBackdrop = null; }
+  if (ui.activePopover) { ui.activePopover.remove(); ui.activePopover = null; }
 }
 
 document.addEventListener('click', function(e) {
-  if (activePopover && !activePopover.contains(e.target) && !e.target.closest('#btn-history')) {
+  if (ui.activePopover && !ui.activePopover.contains(e.target) && !e.target.closest('#btn-history')) {
     closeHistoryPopover();
   }
 });
 
 function toggleHistory() {
-  if (activePopover) { closeHistoryPopover(); return; }
+  if (ui.activePopover) { closeHistoryPopover(); return; }
 
   // Show all filesystem history sessions, deduplicated against workspace.
   // Includes prev_session_ids so that earlier links in a resumed-chain
   // session don't appear twice (once in the sidebar, once in history).
-  const workspaceIDs = collectWorkspaceSessionIDs(allSessionsCache);
-  const merged = historySessionsData
+  const workspaceIDs = collectWorkspaceSessionIDs(sessionList.allSessionsCache);
+  const merged = sessionList.historySessionsData
     .filter(r => !workspaceIDs.has(r.session_id))
     .map(r => ({
       key: '_history:' + r.session_id, node: 'local', source: 'recent',
@@ -1360,10 +1256,10 @@ function toggleHistory() {
   const backdrop = document.createElement('div');
   backdrop.className = isMobile() ? 'history-backdrop is-sheet' : 'history-backdrop';
   backdrop.addEventListener('click', closeHistoryPopover);
-  activePopoverBackdrop = backdrop;
+  ui.activePopoverBackdrop = backdrop;
   document.body.appendChild(backdrop);
 
-  activePopover = popover;
+  ui.activePopover = popover;
   document.body.appendChild(popover);
 
   if (!isMobile()) {
@@ -1558,9 +1454,9 @@ function originBadgeHtml(key) {
 // features must be added to the Profile.Features map AND a hard-coded
 // caller in dashboard.js (no automatic fallback path).
 function featureForBackend(backendID, name) {
-  if (!cliBackends || !Array.isArray(cliBackends.backends)) return false;
-  if (!backendID) backendID = cliBackends.default || '';
-  const entry = cliBackends.backends.find(b => b && b.id === backendID);
+  if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return false;
+  if (!backendID) backendID = serverInfo.cliBackends.default || '';
+  const entry = serverInfo.cliBackends.backends.find(b => b && b.id === backendID);
   if (!entry || !entry.features) return false;
   return entry.features[name] === true;
 }
@@ -1571,10 +1467,10 @@ function featureForBackend(backendID, name) {
 // true in single-backend mode (length<=1) so claude-only deployments
 // preserve all historical behavior.
 function featureForCurrent(name) {
-  if (!cliBackends || !Array.isArray(cliBackends.backends)) return true;
-  if (cliBackends.backends.length <= 1) return true; // single-backend mode
-  const sess = sessionsData[sid(selectedKey, selectedNode)];
-  const backendID = (sess && sess.backend) || cliBackends.default || '';
+  if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return true;
+  if (serverInfo.cliBackends.backends.length <= 1) return true; // single-backend mode
+  const sess = sessionList.sessionsData[sid(selection.key, selection.node)];
+  const backendID = (sess && sess.backend) || serverInfo.cliBackends.default || '';
   return featureForBackend(backendID, name);
 }
 
@@ -1587,13 +1483,13 @@ function featureForCurrent(name) {
 // must have a hover/aria tooltip explaining why" — the title attribute
 // carries the operator-readable reason.
 function applyFeatureGates() {
-  if (!cliBackends || !Array.isArray(cliBackends.backends)) return;
-  if (cliBackends.backends.length <= 1) return; // single-backend mode
+  if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return;
+  if (serverInfo.cliBackends.backends.length <= 1) return; // single-backend mode
 
-  const sess = sessionsData[sid(selectedKey, selectedNode)] || {};
-  const backendID = sess.backend || cliBackends.default || '';
+  const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
+  const backendID = sess.backend || serverInfo.cliBackends.default || '';
   const backendName = (() => {
-    const e = cliBackends.backends.find(b => b && b.id === backendID);
+    const e = serverInfo.cliBackends.backends.find(b => b && b.id === backendID);
     return (e && (e.display_name || e.id)) || backendID || 'this backend';
   })();
 
@@ -1676,7 +1572,7 @@ function cliIcon(name) {
 
 function sessionCardHtml(s) {
   const sNode = s.node || 'local';
-  const isActive = selectedKey === s.key && selectedNode === sNode;
+  const isActive = selection.key === s.key && selection.node === sNode;
   const isNew = s.state === 'new';
   // cron-panel-consolidation RFC §4.2: cron sessions never render here
   // (server-side filter), so the prior `sc-cron-card` / `sc-cron` chip
@@ -1823,13 +1719,13 @@ function sessionCardKey(e) {
 }
 
 function resumeRecentSession(sessionId) {
-  const found = historySessionsData.find(r => r.session_id === sessionId);
+  const found = sessionList.historySessionsData.find(r => r.session_id === sessionId);
   resumeRecentById(sessionId, found ? found.workspace : '', found ? (found.last_prompt || found.summary || '') : '');
 }
 
 async function resumeRecentById(sessionId, workspace, lastPrompt) {
   // Guard: if already resuming this session, find the managed key and select it
-  for (const s of allSessionsCache) {
+  for (const s of sessionList.allSessionsCache) {
     if (s.session_id === sessionId) { selectSession(s.key, s.node || 'local'); return; }
   }
 
@@ -1851,7 +1747,7 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
     if (!key) return;
 
     // Force sidebar refresh to pick up the dismissed entry
-    lastVersion = 0;
+    sessionList.lastVersion = 0;
     await fetchSessions();
 
     selectSession(key, 'local');
@@ -1879,7 +1775,7 @@ async function previewRecentSession(expectedKey, sessionId, cwd) {
       if (err.status) return;
       throw err;
     }
-    if (selectedKey !== expectedKey) return; // user navigated away
+    if (selection.key !== expectedKey) return; // user navigated away
     if (!entries || entries.length === 0) return;
     renderEvents(entries);
   } catch (e) {
@@ -1933,7 +1829,7 @@ function updateStatusBar() {
   // node only" to reclaim vertical space. Single-node setups keep the legacy
   // behavior (local row always shown) so nothing regresses for the common case.
   const multi = isMultiNode();
-  const currentIsLocal = !multi || selectedNode === 'local';
+  const currentIsLocal = !multi || selection.node === 'local';
 
   // Local node row (always first)
   // Distinguish short reconnect vs stable polling mode
@@ -1987,7 +1883,7 @@ function updateStatusBar() {
     // Multi-node view with a remote selected: show one row for the chosen
     // remote. Other remotes are summarized by the selector's aggregated
     // alert dot \u2014 users open the dropdown to see the full list.
-    const nd = nodesData[selectedNode] || {};
+    const nd = sessionList.nodesData[selection.node] || {};
     const status = nd.status || (wsUp ? 'offline' : 'unreachable');
     const dotCls = VALID_DOT_CLASSES[status] || 'offline';
     const label = REMOTE_LABELS[status] || status;
@@ -2131,13 +2027,13 @@ function selectSession(key, node) {
   // Recent session card click → trigger resume flow
   // Discovered session card click → trigger preview flow
   // Save draft for current session before switching
-  if (selectedKey) {
+  if (selection.key) {
     const inp = document.getElementById('msg-input');
     const draft = getMsgValue(inp);
-    if (draft) sessionDrafts[selectedKey] = draft;
-    else delete sessionDrafts[selectedKey];
+    if (draft) sessionDrafts[selection.key] = draft;
+    else delete sessionDrafts[selection.key];
     // 同时快照当前会话的滚动位置，回来时恢复
-    saveScrollPos(selectedKey, selectedNode);
+    saveScrollPos(selection.key, selection.node);
   }
   if (isDiscoveredKey(key)) {
     const d = findDiscovered(parseDiscoveredPid(key), node);
@@ -2145,22 +2041,22 @@ function selectSession(key, node) {
       // #2431: same as the managed path below — leave assets/cron/settings
       // first, or the preview panel is written into a hidden #main while the
       // previous session has already been unsubscribed.
-      if (activeView !== 'chat') setActivityView('chat');
+      if (ui.activeView !== 'chat') setActivityView('chat');
       previewDiscovered(d.session_id, d.cwd, d.pid, d.proc_start_time || 0, d.node || '', d.cli_name || 'cli', d.entrypoint || '');
       return;
     }
   }
-  pendingDiscovered = null;
+  selection.pendingDiscovered = null;
   // Picking a session returns to the chat view from any other top-level view
   // (assets / cron / settings). This restores the chat sidebar+main, hides the
   // other view's panels, and flips activeView back to 'chat' so renderMainShell
   // (which writes #main) is visible and any in-flight cron repaint is suppressed.
-  if (activeView !== 'chat') setActivityView('chat');
-  const prevKey = selectedKey;
-  const prevNode = selectedNode;
-  selectedKey = key;
-  selectedNode = node;
-  _lastAppliedMainState = null; // #2431: new session → first poll must reconcile
+  if (ui.activeView !== 'chat') setActivityView('chat');
+  const prevKey = selection.key;
+  const prevNode = selection.node;
+  selection.key = key;
+  selection.node = node;
+  selection.lastAppliedMainState = null; // #2431: new session → first poll must reconcile
   // Opening a card counts as "reading" it — clear the chat-style unread chip
   // before the DOM toggle below so the next render reflects a zeroed state.
   const selSid = sid(key, node);
@@ -2170,17 +2066,17 @@ function selectSession(key, node) {
   // Opening a session on another node retargets dispatch (selectedNode drives
   // the dispatch node + main header). The sidebar no longer filters by node,
   // so there is no list to re-render — just persist the new target.
-  if (prevNode !== selectedNode) {
-    try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
+  if (prevNode !== selection.node) {
+    try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
   }
-  lastEventTime = 0;
-  lastRenderedEventTime = 0;
-  oldestFetchedEventTime = 0;
-  _autoPageBackCount = 0; // reset the blank-page recovery budget per session
+  transcript.lastEventTime = 0;
+  transcript.lastRenderedEventTime = 0;
+  transcript.oldestFetchedEventTime = 0;
+  transcript.autoPageBackCount = 0; // reset the blank-page recovery budget per session
   // Invalidate any in-flight "load earlier" page of the previous session and
   // free the flag so the new session can page back immediately.
-  _earlierGen++;
-  _earlierLoading = false;
+  transcript.earlierGen++;
+  transcript.earlierLoading = false;
   mobileEnterChat();
   stopPreviewPolling();
   const activeCard = setActiveSessionCard(key, node);
@@ -2199,11 +2095,11 @@ function selectSession(key, node) {
     if (changed) wsm.unsubscribe();
     wsm.lastEventTimeWs = 0;
     wsm.subscribe(key, node);
-    if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
+    if (timers.events) { clearInterval(timers.events); timers.events = null; }
   } else {
     fetchEvents(true);
-    if (eventTimer) clearInterval(eventTimer);
-    eventTimer = setInterval(() => fetchEvents(false), 1000);
+    if (timers.events) clearInterval(timers.events);
+    timers.events = setInterval(() => fetchEvents(false), 1000);
   }
 }
 
@@ -2313,7 +2209,6 @@ function formatSessionMarkdown(meta, events) {
 // is the hard stop (20k events) so a runaway session can't hang the tab.
 const EXPORT_PAGE_LIMIT = 500;
 const EXPORT_MAX_PAGES = 40;
-let _exportInFlight = false;
 
 // exportEventKey identifies an entry across overlapping pages: the backend's
 // uuid when present, else (time,type,detail) for pre-uuid synthetic entries.
@@ -2379,14 +2274,14 @@ async function fetchAllSessionEvents(key, node, headers) {
 }
 
 async function downloadSessionMarkdown() {
-  if (!selectedKey) return;
-  if (_exportInFlight) return;
-  _exportInFlight = true;
+  if (!selection.key) return;
+  if (transcript.exportInFlight) return;
+  transcript.exportInFlight = true;
   // Capture identity up front: the pager may take several round trips and
   // the operator can switch sessions meanwhile — the export still belongs to
   // the session whose button was clicked.
-  const key = selectedKey;
-  const node = selectedNode;
+  const key = selection.key;
+  const node = selection.node;
   try {
     const headers = {};
     const t = getToken();
@@ -2402,7 +2297,7 @@ async function downloadSessionMarkdown() {
       showToast('会话无可导出内容', 'warning');
       return;
     }
-    const s = sessionsData[sid(key, node)] || {};
+    const s = sessionList.sessionsData[sid(key, node)] || {};
     const keyParts = (key || '').split(':');
     const title = s.user_label || s.summary || s.last_prompt ||
       keyTailDisplay(keyParts) || key || '';
@@ -2435,7 +2330,7 @@ async function downloadSessionMarkdown() {
   } catch (e) {
     showNetworkError('导出会话', e);
   } finally {
-    _exportInFlight = false;
+    transcript.exportInFlight = false;
   }
 }
 
@@ -2444,19 +2339,19 @@ async function downloadSessionMarkdown() {
 // mounts) for session snapshot `s`. Shared by renderMainShell (full shell) and
 // renderMainHeader (header-only repaint) so the two can never drift.
 function mainHeaderHtml(s) {
-  const keyParts = (selectedKey || '').split(':');
+  const keyParts = (selection.key || '').split(':');
   const agentIsGeneric = !s.agent || s.agent === 'general';
   // Primary title: user_label (operator-set rename) > summary > latest prompt
   // > agent name > key tail.
-  const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyTailDisplay(keyParts) || selectedKey || '';
+  const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyTailDisplay(keyParts) || selection.key || '';
 
   // Detail line: left = CLI name + version, middle = backend chip (multi-
   // backend mode only) + IM origin chip (only for real IM threads —
   // feishu/slack/discord/weixin), right = cost (formatted per session's
   // cost_unit). originBadgeHtml / backendChipHtml return '' when the
   // session/deployment doesn't warrant a chip so the layout stays clean.
-  const effCLIName = s.cli_name || backendDisplayName(sessionBackends[selectedKey]) || defaultCLIName;
-  const effCLIVersion = s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion;
+  const effCLIName = s.cli_name || backendDisplayName(sessionBackends[selection.key]) || serverInfo.defaultCLIName;
+  const effCLIVersion = s.cli_version || backendDisplayVersion(sessionBackends[selection.key]) || serverInfo.defaultCLIVersion;
   // ui-polish-light-theme D5: the version string is debug info an operator
   // needs rarely — keep it in the hover title, show just the backend name.
   // (The settings 关于 section lists versions permanently.)
@@ -2473,8 +2368,8 @@ function mainHeaderHtml(s) {
   // "global.anthropic.claude-opus-4-7[1m]" → "claude-opus-4.7 1M") for
   // the dashboard but keep the raw value in `title` for debug.
   const rawModel = s.model ||
-    (!sessionsData[sid(selectedKey, selectedNode)] && sessionPendingTuning[selectedKey]
-      ? (sessionPendingTuning[selectedKey].model || '') : '');
+    (!sessionList.sessionsData[sid(selection.key, selection.node)] && sessionPendingTuning[selection.key]
+      ? (sessionPendingTuning[selection.key].model || '') : '');
   const compactModel = rawModel
     .replace(/^(global|us|eu|apac)\.anthropic\./, '') // strip Bedrock inference-profile prefix
     .replace(/-(\d+)-(\d+)/, '-$1.$2')          // 4-7 → 4.7 (matches kiro list)
@@ -2482,7 +2377,7 @@ function mainHeaderHtml(s) {
   const modelLabel = rawModel
     ? '<span class="model-label nz-clickable" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
     : '<span class="model-label model-label-unset nz-clickable" id="header-model" data-action="tuning-model" title="model 未在 system/init 上报；可能仍在 spawn 中 — 点击可指定模型">· (模型未配置)</span>';
-  const headerOriginBadge = originBadgeHtml(selectedKey);
+  const headerOriginBadge = originBadgeHtml(selection.key);
   // UI Round 5 R5-2: header backend chip removed. The "kiro v2.3.0" /
   // "claude-code 2.1.143" cliLabel already names the backend; the
   // surrounding chip was a duplicate signal that competed for attention
@@ -2514,7 +2409,7 @@ function mainHeaderHtml(s) {
   // Rename is available only for managed sessions owned by this or a connected
   // naozhi instance. Discovered (_discovered:*) entries are external processes
   // with no backend label storage, and we intentionally hide the control there.
-  const canRename = selectedKey && !isDiscoveredKey(selectedKey);
+  const canRename = selection.key && !isDiscoveredKey(selection.key);
   const renameBtn = canRename
     ? '<button type="button" class="btn-rename" data-action="session-rename" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
     : '';
@@ -2523,7 +2418,7 @@ function mainHeaderHtml(s) {
   // endpoint serves both managed and discovered keys uniformly. The button
   // shares the .btn-rename hover-reveal treatment so the header stays calm
   // by default.
-  const downloadBtn = selectedKey
+  const downloadBtn = selection.key
     ? '<button type="button" class="btn-rename btn-download" data-action="session-download-md" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
     : '';
 
@@ -2573,7 +2468,7 @@ function renderMainHeader() {
   const main = document.getElementById('main');
   const header = main ? main.querySelector(':scope > .main-header') : null;
   if (!header || !document.getElementById('events-scroll')) { renderMainShell(); return; }
-  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+  const s = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
   header.outerHTML = mainHeaderHtml(s);
   // The mounts inside the header were just emptied — repaint from cache /
   // refetch exactly as renderMainShell's tail does.
@@ -2581,7 +2476,7 @@ function renderMainHeader() {
   setHeaderEffortChip();
   setHeaderSpawnDiagChip();
   setHeaderOverlayDriftChip();
-  fetchSessionRuns(selectedKey, selectedNode);
+  fetchSessionRuns(selection.key, selection.node);
 }
 
 // #2437: the cli label carries a fixed id so updateHeaderCLI can refresh it
@@ -2596,7 +2491,7 @@ function headerCLILabelHtml(name, version) {
 
 function renderMainShell() {
   const main = document.getElementById('main');
-  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+  const s = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
 
   main.innerHTML =
     mainHeaderHtml(s) +
@@ -2685,45 +2580,25 @@ function renderMainShell() {
   setHeaderOverlayDriftChip();
 }
 
-// _fetchEventsInFlight gates concurrent HTTP polls of `/api/sessions/events`.
-// The 1 s `setInterval` driver and the on-demand `full` fetch (session
-// switch / WS fallback) can otherwise pile up when the network lags or the
-// server is slow: the second request completes first, `appendEvents`
-// re-orders events, and the first response is then applied on top. The
-// simpler in-flight flag (mirroring `_earlierLoading` on
-// `loadEarlierEvents`) skips overlapping polls — a missed tick is cheap
-// because the next tick will pick up any accumulated events via `after=`
-// anyway.
-//
-// A `full` fetch must NOT be coalesced (#2430): it is the session-switch
-// render. Dropping it left the new session to the next tick, which ran with
-// lastEventTime=0 and no `limit` → the server's legacy default branch handed
-// back the whole ring, appendEvents grafted ≤500 bubbles in one shot, and
-// neither "load earlier" nor the saved scroll position was restored. Instead
-// a full fetch bumps _fetchEventsGen so the tail still in flight becomes
-// stale: it can neither append into the new render nor release the in-flight
-// flag the full fetch now owns.
-let _fetchEventsInFlight = false;
-let _fetchEventsGen = 0;
 async function fetchEvents(full) {
-  if (!selectedKey) return;
-  if (!full && _fetchEventsInFlight) return;
+  if (!selection.key) return;
+  if (!full && transcript.fetchInFlight) return;
   // Capture session identity at dispatch time so a mid-flight switch doesn't
   // apply stale events to the new session's DOM. `selectedKey` can flip
   // synchronously from `pickSession`/`dismiss` callbacks while `await`
   // suspends us; applying `appendEvents` after that point would graft the
   // prior session's tail into the newly-opened session's scroller.
-  const dispatchKey = selectedKey;
-  const dispatchNode = selectedNode;
-  if (full) _fetchEventsGen++;
-  const gen = _fetchEventsGen;
-  const stale = () => selectedKey !== dispatchKey || selectedNode !== dispatchNode || gen !== _fetchEventsGen;
-  _fetchEventsInFlight = true;
+  const dispatchKey = selection.key;
+  const dispatchNode = selection.node;
+  if (full) transcript.fetchGen++;
+  const gen = transcript.fetchGen;
+  const stale = () => selection.key !== dispatchKey || selection.node !== dispatchNode || gen !== transcript.fetchGen;
+  transcript.fetchInFlight = true;
   try {
     let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(dispatchKey);
     if (dispatchNode && dispatchNode !== 'local') url += '&node=' + encodeURIComponent(dispatchNode);
-    if (!full && lastEventTime > 0) {
-      url += '&after=' + lastEventTime;
+    if (!full && transcript.lastEventTime > 0) {
+      url += '&after=' + transcript.lastEventTime;
     } else if (full) {
       // Initial fetch mirrors the WS subscribe: last INITIAL_HISTORY_LIMIT
       // events only. Older pages are loaded on demand by loadEarlierEvents().
@@ -2770,40 +2645,17 @@ async function fetchEvents(full) {
     }
 
     const last = events[events.length - 1];
-    if (last && last.time > lastEventTime) lastEventTime = last.time;
+    if (last && last.time > transcript.lastEventTime) transcript.lastEventTime = last.time;
   } catch (e) {
     console.error('fetch events:', e);
   } finally {
     // Only the newest generation owns the flag (mirrors loadEarlierEvents /
     // _earlierGen): a superseded tail must not free it under the full fetch.
-    if (gen === _fetchEventsGen) _fetchEventsInFlight = false;
+    if (gen === transcript.fetchGen) transcript.fetchInFlight = false;
   }
 }
 
-// loadEarlierEvents fetches up to EARLIER_PAGE_LIMIT events older than the
-// currently-oldest rendered bubble. Prepends the rendered output to the top
-// of the events pane and preserves scroll position so the user's view doesn't
-// jump when new content is injected above.
-//
-// Idempotent: calls bail out while a prior fetch is in flight.
-let _earlierLoading = false;
-// _earlierGen is bumped by selectSession so a stale loadEarlierEvents (still
-// awaiting the previous session's page) can neither prepend into the new
-// session's scroller nor clear the new session's in-flight flag.
-let _earlierGen = 0;
 
-// _autoPageBackCount bounds the frontend safety net for the "parallel agent
-// team ate my history" bug. The server's visible-aware initial read
-// (EventLastNVisibleCtx) already keeps the first page non-blank for local
-// sessions, but a few paths still can't guarantee it — remote nodes (their
-// reverse-RPC fetch predates the visible-aware read), disk-exhausted sessions,
-// or a precision gap where a visible-typed entry still renders to empty HTML.
-// When the rendered page is blank despite events existing, maybeAutoPageBack
-// transparently pages backward (reusing loadEarlierEvents + the
-// oldestFetchedEventTime cursor) up to AUTO_PAGEBACK_MAX times so the operator
-// sees real messages instead of the "该会话最近仅有 agent 活动" placeholder.
-// The counter resets on every session switch (selectSession).
-let _autoPageBackCount = 0;
 const AUTO_PAGEBACK_MAX = 3;
 
 // maybeAutoPageBack fires one bounded loadEarlierEvents when the events pane
@@ -2815,23 +2667,23 @@ function maybeAutoPageBack() {
   const el = document.getElementById('events-scroll');
   if (!el) return;
   // A visible bubble already rendered — nothing to recover.
-  if (el.querySelector('.event')) { _autoPageBackCount = 0; return; }
-  if (_autoPageBackCount >= AUTO_PAGEBACK_MAX) return;
-  if (_earlierLoading) return;
-  if (!oldestFetchedEventTime) return; // no cursor → cannot page back
-  _autoPageBackCount++;
+  if (el.querySelector('.event')) { transcript.autoPageBackCount = 0; return; }
+  if (transcript.autoPageBackCount >= AUTO_PAGEBACK_MAX) return;
+  if (transcript.earlierLoading) return;
+  if (!transcript.oldestFetchedEventTime) return; // no cursor → cannot page back
+  transcript.autoPageBackCount++;
   // loadEarlierEvents prepends older events and, when they include a visible
   // bubble, the placeholder is removed by prependEvents. If the new page is
   // still all-internal, chain another attempt (still bounded by the counter).
   Promise.resolve(loadEarlierEvents()).then(() => {
     const ev = document.getElementById('events-scroll');
     if (ev && !ev.querySelector('.event')) maybeAutoPageBack();
-    else _autoPageBackCount = 0;
+    else transcript.autoPageBackCount = 0;
   });
 }
 
 async function loadEarlierEvents() {
-  if (_earlierLoading || !selectedKey) return;
+  if (transcript.earlierLoading || !selection.key) return;
   const el = document.getElementById('events-scroll');
   if (!el) return;
 
@@ -2849,17 +2701,17 @@ async function loadEarlierEvents() {
   // parallel agent team turn), page against the cursor we recorded at
   // fetch time. Without this the button appears to do nothing and the
   // operator has no path back to the earlier conversation.
-  if (!oldestTime) oldestTime = oldestFetchedEventTime;
+  if (!oldestTime) oldestTime = transcript.oldestFetchedEventTime;
   if (!oldestTime) return;
 
   // Capture session identity at dispatch time (mirrors fetchEvents): the
   // operator can switch sessions while we await, and prepending the old
   // session's page into the new session's scroller grafts two histories.
-  const key = selectedKey;
-  const node = selectedNode;
-  const gen = _earlierGen;
-  const stale = () => selectedKey !== key || selectedNode !== node || gen !== _earlierGen;
-  _earlierLoading = true;
+  const key = selection.key;
+  const node = selection.node;
+  const gen = transcript.earlierGen;
+  const stale = () => selection.key !== key || selection.node !== node || gen !== transcript.earlierGen;
+  transcript.earlierLoading = true;
   updateEarlierButton('loading');
   try {
     let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(key) +
@@ -2890,7 +2742,7 @@ async function loadEarlierEvents() {
     // that flip selectedKey without selectSession (pending-session create,
     // dismiss / discovered preview → selectedKey=null) never reset the flag,
     // so a stale() check here would leave it stuck true until the next select.
-    if (gen === _earlierGen) _earlierLoading = false;
+    if (gen === transcript.earlierGen) transcript.earlierLoading = false;
   }
 }
 
@@ -2906,8 +2758,8 @@ function prependEvents(events) {
   // loadEarlierEvents sees the new floor even if the freshly prepended
   // batch was entirely internal-filtered.
   const firstT = events[0] && events[0].time;
-  if (firstT && (oldestFetchedEventTime === 0 || firstT < oldestFetchedEventTime)) {
-    oldestFetchedEventTime = firstT;
+  if (firstT && (transcript.oldestFetchedEventTime === 0 || firstT < transcript.oldestFetchedEventTime)) {
+    transcript.oldestFetchedEventTime = firstT;
   }
 
   // Remove "load earlier" button so we can place new events first; it'll be
@@ -3068,10 +2920,10 @@ function renderEvents(events, hasMore) {
   }
   if (events.length > 0) {
     const last = events[events.length - 1];
-    if (last.time) lastRenderedEventTime = last.time;
+    if (last.time) transcript.lastRenderedEventTime = last.time;
     const first = events[0];
-    if (first.time && (oldestFetchedEventTime === 0 || first.time < oldestFetchedEventTime)) {
-      oldestFetchedEventTime = first.time;
+    if (first.time && (transcript.oldestFetchedEventTime === 0 || first.time < transcript.oldestFetchedEventTime)) {
+      transcript.oldestFetchedEventTime = first.time;
     }
   }
   if (showEarlier) {
@@ -3079,7 +2931,7 @@ function renderEvents(events, hasMore) {
   }
   runPendingAsync();
   navRebuild();
-  if (!restoreScrollPos(selectedKey, selectedNode)) {
+  if (!restoreScrollPos(selection.key, selection.node)) {
     stickEventsBottom();
   }
   // Safety net: if the page rendered to the all-internal placeholder (no
@@ -3106,7 +2958,7 @@ function trimEventsScroll(el) {
     const isBubble = node.nodeType === 1 && node.classList && node.classList.contains('event');
     if (isBubble) {
       const t = parseInt(node.getAttribute('data-time') || '0', 10);
-      if (t && t > oldestFetchedEventTime) oldestFetchedEventTime = t;
+      if (t && t > transcript.oldestFetchedEventTime) transcript.oldestFetchedEventTime = t;
       bubbles--;
     }
     el.removeChild(node);
@@ -3136,8 +2988,8 @@ function appendEvents(events) {
     // Deduplicate: drop strictly-older events. Same-ms events are legitimate
     // siblings (thinking + text from one frame, two text blocks) and are only
     // dropped when their uuid is already on screen — same rule as onHistory.
-    if (e.time && e.time < lastRenderedEventTime) return;
-    if (e.time && e.time === lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
+    if (e.time && e.time < transcript.lastRenderedEventTime) return;
+    if (e.time && e.time === transcript.lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
     if (e.type === 'user') {
       // Same rules as the WS paths (onEvent / onHistory): a user bubble whose
       // uuid is already on screen is a replay, and the first arrival of the
@@ -3145,7 +2997,7 @@ function appendEvents(events) {
       // Without this a send that left over WS and was echoed by the poll
       // (socket dropped in between) painted the message twice (#2430).
       if (eventAlreadyRendered(el, e.uuid)) {
-        if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
+        if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
       }
       const opt = el.querySelector('.optimistic-msg');
@@ -3160,7 +3012,7 @@ function appendEvents(events) {
     }
     el.insertAdjacentHTML('beforeend', h);
     if (t) prevT = t;
-    if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
+    if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
     if (e.type === 'user') sawUser = true;
   });
   // Bound the live DOM before scroll/scan so a long streaming session can't
@@ -3492,11 +3344,11 @@ function onAskSubmit(btn) {
 // inside the drawer would land in the parent session and silently bypass
 // the scratch CLI process.
 async function sendAskAnswerViaAPI(text, card) {
-  let key = selectedKey;
-  let node = selectedNode;
+  let key = selection.key;
+  let node = selection.node;
   if (card && card.closest && card.closest('#aside-drawer')) {
-    const scratchKey = getActiveScratchKey
-      ? getActiveScratchKey()
+    const scratchKey = hooks.getActiveScratchKey
+      ? hooks.getActiveScratchKey()
       : '';
     if (!scratchKey) throw new Error('no active scratch session');
     key = scratchKey;
@@ -3595,8 +3447,8 @@ function eventHtml(e, opts) {
   // the default \u2726 glyph. Other backends (kiro, gemini, ...) keep the glyph
   // so each backend has a distinct visual identity in the transcript.
   if (e.type === 'text') {
-    const sess = sessionsData[sid(selectedKey, selectedNode)] || {};
-    const backendID = sess.backend || sessionBackends[selectedKey] || (cliBackends && cliBackends.default) || '';
+    const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
+    const backendID = sess.backend || sessionBackends[selection.key] || (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
     if (backendID === 'claude' || backendID === '') icon = CLAWD_SVG;
   }
 
@@ -3692,9 +3544,9 @@ function eventHtml(e, opts) {
       ? '<pre class="tr-detail">' + esc(detail) + '</pre>'
       : '';
     var persistedBtn = '';
-    if (persistedPath && selectedKey) {
-      var toolURL = NZ_CONTRACT.API.sessions_tool_result + '?key=' + encodeURIComponent(selectedKey) +
-        '&node=' + encodeURIComponent(selectedNode || 'local') +
+    if (persistedPath && selection.key) {
+      var toolURL = NZ_CONTRACT.API.sessions_tool_result + '?key=' + encodeURIComponent(selection.key) +
+        '&node=' + encodeURIComponent(selection.node || 'local') +
         '&path=' + encodeURIComponent(persistedPath);
       persistedBtn = '<a class="tr-persisted" href="' + escAttr(toolURL) +
         '" target="_blank" rel="noopener noreferrer" title="查看完整输出">📎 打开完整输出</a>';
@@ -3732,8 +3584,8 @@ function eventHtml(e, opts) {
     imgHtml = '<div class="event-images">' + e.images.map((src, i) => {
       const p = paths[i] || '';
       let full = src;
-      if (p && selectedKey) {
-        full = NZ_CONTRACT.API.sessions_attachment + '?key=' + encodeURIComponent(selectedKey) +
+      if (p && selection.key) {
+        full = NZ_CONTRACT.API.sessions_attachment + '?key=' + encodeURIComponent(selection.key) +
           '&path=' + encodeURIComponent(p) + cacheBust;
       }
       // No inline onclick: a document-level delegated listener in the
@@ -3879,7 +3731,7 @@ function removeOptimisticMsg(sendId) {
 // uses a Chinese '本地' for 'local' to match the rest of the UI.
 function getNodeDisplayName(id) {
   if (!id || id === 'local') return '本地';
-  const nd = nodesData[id];
+  const nd = sessionList.nodesData[id];
   if (nd && nd.display_name) return nd.display_name;
   return id;
 }
@@ -3894,7 +3746,7 @@ function getNodeStatus(id) {
     if (wsm.state === WS_STATES.CONNECTING || wsm.state === WS_STATES.AUTH) return 'connecting';
     return 'offline';
   }
-  const nd = nodesData[id];
+  const nd = sessionList.nodesData[id];
   if (!nd) return 'offline';
   return nd.status || 'offline';
 }
@@ -3930,12 +3782,12 @@ function renderSettingsView() {
   // a settings question, not a "问点什么" one. Sourced from the same
   // /api/sessions stats snapshot; rows render only when the field is
   // present so a cold view before the first poll stays clean.
-  const s = lastStatsSnapshot || {};
+  const s = serverInfo.lastStatsSnapshot || {};
   const aboutRows = [];
   if (s.version_tag) aboutRows.push(['naozhi', s.version_tag]);
   if (s.cli_name) aboutRows.push([s.cli_name, s.cli_version || '—']);
-  if (cliBackends && Array.isArray(cliBackends.backends) && cliBackends.backends.length > 0) {
-    aboutRows.push(['Backends', cliBackends.backends.map(function (b) {
+  if (serverInfo.cliBackends && Array.isArray(serverInfo.cliBackends.backends) && serverInfo.cliBackends.backends.length > 0) {
+    aboutRows.push(['Backends', serverInfo.cliBackends.backends.map(function (b) {
       return (b && b.id) || '?';
     }).join(' · ')]);
   }
@@ -3984,14 +3836,6 @@ const WS_STATES = { OFF: 'off', CONNECTING: 'connecting', AUTH: 'authenticating'
 // old direct calls; if cron_view ever failed to load, dispatch is a no-op
 // (same resilience the old typeof guards bought).
 
-// Late-bound intra-module hooks (#2557 PR-E3): these used to be IIFE
-// self-exports on window; they are module-scope lets now, assigned when the
-// owning IIFE runs and read at event time (never at load time).
-let openLightboxGroup = null;
-let openLightboxFromThumb = null;
-let getActiveScratchKey = null;
-let closeScratchDrawer = null;
-let askAside = null;
 
 const emitCron = (type, detail) => nzBus.dispatchEvent(new CustomEvent(type, { detail }));
 
@@ -4176,10 +4020,10 @@ const wsm = {
         // "suspended" means the session had no process — no live events will arrive
         // until the process starts, at which point onSessionState triggers re-subscribe.
         this._subscriptionSuspended = (msg.reason === 'suspended');
-        if (msg.state && msg.key === selectedKey && this.subscribedNode === selectedNode) {
+        if (msg.state && msg.key === selection.key && this.subscribedNode === selection.node) {
           const subSKey = sid(msg.key, this.subscribedNode);
-          if (sessionsData[subSKey]) {
-            sessionsData[subSKey].state = msg.state;
+          if (sessionList.sessionsData[subSKey]) {
+            sessionList.sessionsData[subSKey].state = msg.state;
             updateMainState(msg.state, msg.reason);
           }
         }
@@ -4224,13 +4068,13 @@ const wsm = {
           // session with the picker on n1 must survive n1 going away.
           // Pending (never-sent) sessions are only a draft target — they stay
           // selected and are neither cleared nor deleted here.
-          if (selectedKey && sessionWorkspaces[selectedKey] === undefined &&
-              (sessionsData[sid(selectedKey, msg.node)] || sessionNodes[selectedKey] === msg.node)) {
+          if (selection.key && sessionWorkspaces[selection.key] === undefined &&
+              (sessionList.sessionsData[sid(selection.key, msg.node)] || sessionNodes[selection.key] === msg.node)) {
             deselectNodeSession(msg.node);
           }
-          nodesData = Object.fromEntries(Object.entries(nodesData).filter(([id]) => id !== msg.node));
+          sessionList.nodesData = Object.fromEntries(Object.entries(sessionList.nodesData).filter(([id]) => id !== msg.node));
           reconcileSelectedNode();
-          lastVersion = 0;
+          sessionList.lastVersion = 0;
           debouncedFetchSessions();
           break;
         }
@@ -4270,17 +4114,17 @@ const wsm = {
         // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
         // a newly-added key after the fetch completes. Comparing sizes is
         // not enough (delete+create at the same tick would net to zero).
-        const prevSessKeys = new Set(Object.keys(sessionsData || {}));
+        const prevSessKeys = new Set(Object.keys(sessionList.sessionsData || {}));
         debouncedFetchSessions().then(() => {
           // Auto-subscribe to newly created session if we don't have an active
           // subscription. _pendingSubscribeKey is intentionally not checked:
           // a no-process subscribe returns "subscribed" + persisted history but
           // no live eventPushLoop, so subscribedKey may not be set while the
           // pending flag was already cleared. This ensures recovery.
-          if (selectedKey && !wsm.subscribedKey && sessionsData[sid(selectedKey, selectedNode)]) {
-            wsm.subscribe(selectedKey, selectedNode);
+          if (selection.key && !wsm.subscribedKey && sessionList.sessionsData[sid(selection.key, selection.node)]) {
+            wsm.subscribe(selection.key, selection.node);
           }
-          const added = Object.keys(sessionsData || {}).filter(k => !prevSessKeys.has(k));
+          const added = Object.keys(sessionList.sessionsData || {}).filter(k => !prevSessKeys.has(k));
           if (added.length > 0) announce('新会话已创建');
         });
         break;
@@ -4321,7 +4165,7 @@ const wsm = {
           // opened the view. Honour the RNEW-UX-014 hidden-tab suspension.
           if (document.hidden) break;
           fetchSystemDaemons().then(() => {
-            if (activeView === 'system') renderSystemView();
+            if (ui.activeView === 'system') renderSystemView();
           }).catch(() => {});
         }
         break;
@@ -4434,12 +4278,12 @@ const wsm = {
   /* -- WS event handlers -- */
 
   onConnected() {
-    if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
-    if (selectedKey) {
-      if (lastEventTime > 0 && this.lastEventTimeWs === 0) {
-        this.lastEventTimeWs = lastEventTime;
+    if (timers.events) { clearInterval(timers.events); timers.events = null; }
+    if (selection.key) {
+      if (transcript.lastEventTime > 0 && this.lastEventTimeWs === 0) {
+        this.lastEventTimeWs = transcript.lastEventTime;
       }
-      this.subscribe(selectedKey, selectedNode);
+      this.subscribe(selection.key, selection.node);
     }
     // cron-live RFC §3: 重连后若已有 cron live 订阅，后端 conn 已亡 sub 已丢，
     // 必须重发 subscribe 帧。直接走 wsm.subscribeCronLive 不行 —— 它的"已订
@@ -4473,7 +4317,7 @@ const wsm = {
   },
 
   onHistory(msg) {
-    if (msg.key !== selectedKey || (msg.node || 'local') !== selectedNode) return;
+    if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;
     const el = document.getElementById('events-scroll');
     if (!el) return;
     const events = msg.events || [];
@@ -4520,7 +4364,7 @@ const wsm = {
       if (html) {
         el.innerHTML = html;
       } else if (events.length === 0) {
-        const sd = sessionsData[sid(selectedKey, selectedNode)];
+        const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
         el.innerHTML = (sd && sd.state === 'running')
           ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>'
           : '<div class="empty-state">\u6682\u65e0\u4e8b\u4ef6</div>';
@@ -4544,11 +4388,11 @@ const wsm = {
       // 也必须把水位归零 —— 否则被顶替订阅的 stale 增量帧先到把水位推高、空
       // Initial 帧把面板重置成加载占位符但水位没动，新 pushLoop 推同批事件时
       // 全部撞上 `e.time <= lastRenderedEventTime` 被整批丢弃。
-      lastRenderedEventTime = events.length ? (events[events.length - 1].time || 0) : 0;
+      transcript.lastRenderedEventTime = events.length ? (events[events.length - 1].time || 0) : 0;
       if (events.length > 0) {
         const first = events[0];
-        if (first.time && (oldestFetchedEventTime === 0 || first.time < oldestFetchedEventTime)) {
-          oldestFetchedEventTime = first.time;
+        if (first.time && (transcript.oldestFetchedEventTime === 0 || first.time < transcript.oldestFetchedEventTime)) {
+          transcript.oldestFetchedEventTime = first.time;
         }
       }
       if (showEarlier) {
@@ -4557,7 +4401,7 @@ const wsm = {
       runPendingAsync();
       navRebuild();
       // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
-      if (!restoreScrollPos(selectedKey, selectedNode)) {
+      if (!restoreScrollPos(selection.key, selection.node)) {
         stickEventsBottom();
       }
       // Safety net: blank page despite events existing → page back to real
@@ -4585,8 +4429,8 @@ const wsm = {
         // same-time same-uuid pair is always the same entry (RFC dashboard-
         // event-uuid-idempotent-render §3). Newer-time events keep their
         // append behaviour untouched, so streaming text is never frozen.
-        if (e.time && e.time < lastRenderedEventTime) return;
-        if (e.time && e.time === lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
+        if (e.time && e.time < transcript.lastRenderedEventTime) return;
+        if (e.time && e.time === transcript.lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
         if (e.type === 'user') {
           // uuid idempotency for user bubbles: the time-cursor guard above
           // misses the bug case (onEvent rendered the real user event but a
@@ -4594,7 +4438,7 @@ const wsm = {
           // dedup on the authoritative uuid as the backstop. User-only by
           // design — streaming text re-emits the same uuid (RFC §3).
           if (eventAlreadyRendered(el, e.uuid)) {
-            if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
+            if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
             return;
           }
           const opt = el.querySelector('.optimistic-msg');
@@ -4611,7 +4455,7 @@ const wsm = {
           el.insertAdjacentHTML('beforeend', h);
           if (t) prevT = t;
         }
-        if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
+        if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
       });
       // Bound the live DOM on the incremental WS history path too (#398);
       // mirror appendEvents — trim before the scrollHeight reads below.
@@ -4659,21 +4503,21 @@ const wsm = {
         }
         if (ev.type === 'result') {
           if (ev.cost) {
-            const sKey = sid(selectedKey, selectedNode);
+            const sKey = sid(selection.key, selection.node);
             // ev.cost is the CLI's per-incarnation cumulative total, which
             // RESETS on resume. The authoritative session total is the
             // monotonic delta-sum the server ships as total_cost on the next
             // snapshot poll; never let this optimistic bump regress below it
             // (post-resume ev.cost is lower than the carried-over total).
-            if (sessionsData[sKey] && ev.cost > (sessionsData[sKey].total_cost || 0)) {
-              sessionsData[sKey].total_cost = ev.cost;
+            if (sessionList.sessionsData[sKey] && ev.cost > (sessionList.sessionsData[sKey].total_cost || 0)) {
+              sessionList.sessionsData[sKey].total_cost = ev.cost;
             }
           }
           // Optimistic: result means the turn is done. Update state to "ready"
           // immediately so the banner hides without waiting for session_state WS msg.
-          const rsKey = sid(selectedKey, selectedNode);
-          if (sessionsData[rsKey] && sessionsData[rsKey].state === 'running') {
-            sessionsData[rsKey].state = 'ready';
+          const rsKey = sid(selection.key, selection.node);
+          if (sessionList.sessionsData[rsKey] && sessionList.sessionsData[rsKey].state === 'running') {
+            sessionList.sessionsData[rsKey].state = 'ready';
             updateSendButton('ready');
           } else {
             resetTurnState();
@@ -4687,7 +4531,7 @@ const wsm = {
   },
 
   onEvent(msg) {
-    if (msg.key !== selectedKey || (msg.node || 'local') !== selectedNode) return;
+    if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;
     // Cron timed_out / failed 终态后丢弃后续 ghost 事件（CLI 子进程
     // 在 deadline 命中后还会再吐 result，但 cron run 已记录为终态，
     // 继续追加只会让用户看到"超时但还在工作"的分裂视觉）。
@@ -4708,7 +4552,7 @@ const wsm = {
       lockRenderedAskCards(document.getElementById('events-scroll'));
     } else if (ev.type === 'result') {
       if (ev.cost) {
-        const sKey = sid(selectedKey, selectedNode);
+        const sKey = sid(selection.key, selection.node);
         // total_cost still feeds the Home/recent-sessions aggregate; the header
         // cost chip itself was removed (see renderMainShell).
         //
@@ -4717,14 +4561,14 @@ const wsm = {
         // delta-sum the server ships as total_cost; never let this optimistic
         // bump regress below it (post-resume ev.cost is lower than the carried
         // total). In-process the two agree (deltas sum to the cumulative).
-        if (sessionsData[sKey] && ev.cost > (sessionsData[sKey].total_cost || 0)) {
-          sessionsData[sKey].total_cost = ev.cost;
+        if (sessionList.sessionsData[sKey] && ev.cost > (sessionList.sessionsData[sKey].total_cost || 0)) {
+          sessionList.sessionsData[sKey].total_cost = ev.cost;
         }
       }
       // Optimistic: result means the turn is done.
-      const reKey = sid(selectedKey, selectedNode);
-      if (sessionsData[reKey] && sessionsData[reKey].state === 'running') {
-        sessionsData[reKey].state = 'ready';
+      const reKey = sid(selection.key, selection.node);
+      if (sessionList.sessionsData[reKey] && sessionList.sessionsData[reKey].state === 'running') {
+        sessionList.sessionsData[reKey].state = 'ready';
         updateSendButton('ready');
       } else {
         resetTurnState();
@@ -4758,7 +4602,7 @@ const wsm = {
       // keep their existing append behaviour and never dedup by uuid here.
       if (eventAlreadyRendered(el, ev.uuid)) {
         const t = ev.time || 0;
-        if (t && t > lastRenderedEventTime) lastRenderedEventTime = t;
+        if (t && t > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = t;
         return;
       }
       // First arrival of the real user event: drop the optimistic placeholder.
@@ -4783,7 +4627,7 @@ const wsm = {
     // push path renders it, so the later time-gated onHistory replay
     // (e.time <= lastRenderedEventTime) admits it again and the uuid fallback
     // never fires → duplicate bubble (#2063).
-    if (evT && evT > lastRenderedEventTime) lastRenderedEventTime = evT;
+    if (evT && evT > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = evT;
     // Bound the live DOM before scroll/scan so a long streaming session over
     // the WS push path (the default real-time channel) can't grow
     // #events-scroll without limit and OOM the tab (#398). Without this the
@@ -4803,8 +4647,8 @@ const wsm = {
     // the session, not handed to the CLI, so roll back the optimistic running
     // flip. No banner, no turn.
     if (msg.status === 'reset') {
-      rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
-      delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
+      rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
+      delete sessionLastSent[sid(msg.key || selection.key, msg.node || selection.node)];
       return;
     }
     // "accepted" = owner of a new turn, "queued" = appended to an active turn.
@@ -4830,10 +4674,10 @@ const wsm = {
       // The old check (!subscribedKey && !_pendingSubscribeKey) failed when
       // the user was previously viewing a different session — subscribedKey
       // was set to the old key, blocking the subscribe for the new one.
-      const ackKey = msg.key || selectedKey;
+      const ackKey = msg.key || selection.key;
       if (ackKey && wsm.subscribedKey !== ackKey && wsm._pendingSubscribeKey !== ackKey) {
         wsm.lastEventTimeWs = 0;
-        wsm.subscribe(ackKey, selectedNode);
+        wsm.subscribe(ackKey, selection.node);
       }
       // Re-subscribe is NOT needed here for already-subscribed sessions.
       // The existing eventPushLoop is still connected to the process's event
@@ -4850,10 +4694,10 @@ const wsm = {
       // to retry — otherwise the UI silently eats the message.
       showToast('会话正忙，消息未送达，请稍后重试', 'error');
       removeOptimisticMsg(msg.id);
-      rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
+      rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
       // send 从未真正进入 turn，别把它当成「当前 turn 的输入」残留 —— 否则
       // 下次中断会把这条从未送达的文本回填上来。
-      delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
+      delete sessionLastSent[sid(msg.key || selection.key, msg.node || selection.node)];
     } else if (msg.status === 'error') {
       // The WS send_ack error is an in-band message, not an HTTP status,
       // but treat the server-supplied `error` string the same way as an
@@ -4861,8 +4705,8 @@ const wsm = {
       showAPIError('发送消息', 500, msg.error || '');
       // Remove this send's optimistic message on send failure
       removeOptimisticMsg(msg.id);
-      rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
-      delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
+      rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
+      delete sessionLastSent[sid(msg.key || selection.key, msg.node || selection.node)];
     }
   },
 
@@ -4904,7 +4748,7 @@ const wsm = {
     const sKey = sid(msg.key, node);
     if (!sessionLastSent[sKey] && !httpSendPending.has(sKey)) return;
     httpSendPending.delete(sKey);
-    if (msg.key === selectedKey && node === (selectedNode || 'local')) {
+    if (msg.key === selection.key && node === (selection.node || 'local')) {
       this.onSendAck({ status: 'error', key: msg.key, node: msg.node, error: msg.error });
       return;
     }
@@ -4943,7 +4787,7 @@ const wsm = {
       this._subscriptionSuspended = false;
       this.lastEventTimeWs = 0;
     }
-    const prev = sessionsData[sKey] || {};
+    const prev = sessionList.sessionsData[sKey] || {};
     const prevState = prev.state;   // capture before mutation
     // wasDead 判定必须穿透乐观 running 翻转：markSessionOptimisticRunning 在
     // 网络往返之前就把 sessionsData.state 写成 'running'，所以对所有
@@ -4967,7 +4811,7 @@ const wsm = {
     // just produced a reply. Bump the unread counter unless the operator is
     // already looking at that card — in which case they're reading it live.
     const turnCompleted = prevState === 'running' && (msg.state === 'ready' || msg.state === 'dead');
-    const isActive = msg.key === selectedKey && msgNode === selectedNode;
+    const isActive = msg.key === selection.key && msgNode === selection.node;
     if (turnCompleted && !isActive) {
       sessionUnread[sKey] = (sessionUnread[sKey] || 0) + 1;
     }
@@ -4985,13 +4829,13 @@ const wsm = {
     // 频率低（每轮一次而非定时轮询），且恰好覆盖"agent 干完活"这个分支最可能
     // 已变的时刻。invalidateGitState 内部只在该会话仍被选中时才真正发请求。
     if (turnCompleted) invalidateGitState(msg.key, msgNode);
-    if (sessionsData[sKey]) {
-      sessionsData[sKey].state = msg.state;
+    if (sessionList.sessionsData[sKey]) {
+      sessionList.sessionsData[sKey].state = msg.state;
       if (msg.reason) {
-        sessionsData[sKey].death_reason = msg.reason;
+        sessionList.sessionsData[sKey].death_reason = msg.reason;
       } else if (msg.state === 'running') {
         // Process revived: clear stale death_reason
-        delete sessionsData[sKey].death_reason;
+        delete sessionList.sessionsData[sKey].death_reason;
       }
     }
     let card = null;
@@ -5023,7 +4867,7 @@ const wsm = {
       // between polls (WS state arrives faster than the sessions poll tick).
       updateCardUnreadChip(card, sessionUnread[sKey] || 0);
     }
-    if (msg.key === selectedKey && msgNode === selectedNode) updateMainState(msg.state, msg.reason);
+    if (msg.key === selection.key && msgNode === selection.node) updateMainState(msg.state, msg.reason);
     // Re-subscribe when session transitions to "running" and we need a live event stream.
     // Covers: (1) not subscribed yet (new session, subscribedKey mismatch)
     //         (2) subscribed but process was dead → revived
@@ -5031,7 +4875,7 @@ const wsm = {
     //            — detected by the "suspended" reason the server sends for no-process subscribes.
     // Case 3 must NOT fire on normal ready→running transitions for already-subscribed
     // sessions — that would cause full re-render and wipe the optimistic user message.
-    if (msg.key === selectedKey && msgNode === selectedNode && msg.state === 'running') {
+    if (msg.key === selection.key && msgNode === selection.node && msg.state === 'running') {
       const needSub = (
         (wsm.subscribedKey !== msg.key && wsm._pendingSubscribeKey !== msg.key) || // case 1: not subscribed and no pending subscribe
         (wasDead && !msg.reason) ||                                   // case 2
@@ -5039,13 +4883,13 @@ const wsm = {
       );
       if (needSub) {
         wsm.lastEventTimeWs = 0;
-        wsm.subscribe(msg.key, selectedNode);
+        wsm.subscribe(msg.key, selection.node);
       }
     }
     // State changed: force next fetchSessions to re-render sidebar.
     // storeGen doesn't increment on process state transitions (only session
     // mutations), so the version cache would otherwise skip the re-render.
-    lastVersion = 0;
+    sessionList.lastVersion = 0;
     if (msg.reason) debouncedFetchSessions();
   },
 
@@ -5162,12 +5006,12 @@ const wsm = {
       if (prev !== WS_STATES.CONNECTED) announce(this._everConnected ? '已重新连接' : '已连接');
       this._everConnected = true;
       // WS connected: stop session polling, rely on push
-      if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
+      if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
       // Reduce discovered scan frequency
-      if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
+      if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
       // #2431: a hidden tab has had its pollers suspended by stopPollers;
       // re-arming here would undo that. startPollers re-arms on return.
-      if (!document.hidden) discoveredPollTimer = setInterval(scanDiscovered, 30000);
+      if (!document.hidden) timers.discoveredPoll = setInterval(scanDiscovered, 30000);
       // Pull fresh node/session state immediately to clear stale data
       debouncedFetchSessions();
     } else if (s === WS_STATES.DISCONNECTED) {
@@ -5178,12 +5022,12 @@ const wsm = {
       // stopPollers already suspended everything and startPollers re-arms on
       // visibilitychange from the then-current WS state.
       const visible = !document.hidden;
-      if (visible && !sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
-      if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
-      if (visible) discoveredPollTimer = setInterval(scanDiscovered, 5000);
-      if (selectedKey && !eventTimer) {
-        lastEventTime = this.lastEventTimeWs;
-        if (visible) eventTimer = setInterval(() => fetchEvents(false), 1000);
+      if (visible && !timers.sessionPoll) timers.sessionPoll = setInterval(fetchSessions, 5000);
+      if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
+      if (visible) timers.discoveredPoll = setInterval(scanDiscovered, 5000);
+      if (selection.key && !timers.events) {
+        transcript.lastEventTime = this.lastEventTimeWs;
+        if (visible) timers.events = setInterval(() => fetchEvents(false), 1000);
       }
     }
   },
@@ -5200,7 +5044,7 @@ function updateMainState(state, reason) {
 }
 
 function updateHeaderCLI() {
-  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+  const s = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
   // #2437: only touch the #header-cli span painted by headerCLILabelHtml.
   // Never rewrite the whole left container — #header-model lives next door.
   const el = document.getElementById('header-cli');
@@ -5208,8 +5052,8 @@ function updateHeaderCLI() {
   // Fallback chain mirrors renderMainShell — see backendDisplayName godoc
   // for why pending sessions need the sessionBackends lookup before the
   // global defaultCLIName fallback.
-  const name = s.cli_name || backendDisplayName(sessionBackends[selectedKey]) || defaultCLIName;
-  const version = s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion;
+  const name = s.cli_name || backendDisplayName(sessionBackends[selection.key]) || serverInfo.defaultCLIName;
+  const version = s.cli_version || backendDisplayVersion(sessionBackends[selection.key]) || serverInfo.defaultCLIVersion;
   // Same display rule as renderMainShell (D5): version lives in the hover
   // title only, the text is just the backend name.
   const text = name || '';
@@ -5230,14 +5074,14 @@ function flashSendBtn() {
 }
 
 function stopPreviewPolling() {
-  if (previewTimer) { clearInterval(previewTimer); previewTimer = null; }
-  previewEventCount = 0;
+  if (timers.preview) { clearInterval(timers.preview); timers.preview = null; }
+  transcript.previewEventCount = 0;
   // Invalidate any in-flight previewDiscovered(): every caller of this
   // function (selectSession, the createSession paths, a newer preview) is
   // moving the operator off the discovered panel, so a preview fetch that
   // resolves afterwards must neither paint into the now-managed
   // #events-scroll nor re-arm previewTimer.
-  _previewGen++;
+  transcript.previewGen++;
 }
 
 /* ===== Cron Tab =====
@@ -5316,9 +5160,9 @@ function maybeShowOnboarding(authResolved) {
   // Suppress on narrow viewports — the sidebar drawer UX differs enough that
   // the "pick one from the sidebar" guidance is misleading.
   if (window.innerWidth && window.innerWidth < 768) return;
-  const hasSessions = (Object.keys(sessionsData || {}).length > 0) ||
+  const hasSessions = (Object.keys(sessionList.sessionsData || {}).length > 0) ||
     (Object.keys(sessionWorkspaces || {}).length > 0);
-  const hasProjects = (projectsData && projectsData.length > 0);
+  const hasProjects = (sessionList.projectsData && sessionList.projectsData.length > 0);
   if (hasSessions || hasProjects) {
     try { localStorage.setItem(ONBOARDING_LS_KEY, '1'); } catch (_) {}
     return;
@@ -5416,9 +5260,9 @@ fetchCLIBackends();
 // accessProfiles is null.
 fetchAccessProfiles();
 fetchSessions().then(maybeShowOnboarding);
-sessionPollTimer = setInterval(fetchSessions, 5000);
+timers.sessionPoll = setInterval(fetchSessions, 5000);
 scanDiscovered();
-discoveredPollTimer = setInterval(scanDiscovered, 30000);
+timers.discoveredPoll = setInterval(scanDiscovered, 30000);
 // fetchCronJobs() bootstrap moved to cron_view.js tail (PR-1).
 fetchSystemDaemons().catch(function () {}); // prime the 系统 rail badge
 startSidebarTimeTick();
@@ -5439,9 +5283,9 @@ wsm.connect();
 // the #sidebar-status DOM no longer exists.)
 (function () {
   const stopPollers = () => {
-    if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
-    if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
-    if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
+    if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
+    if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
+    if (timers.events) { clearInterval(timers.events); timers.events = null; }
     stopSidebarTimeTick();
     // #1770: also pause the WS keep-alive ping while the tab is hidden. The
     // 30s app-level ping wakes the mobile radio every 30s for nothing —
@@ -5451,27 +5295,27 @@ wsm.connect();
     if (wsm && wsm.pingTimer) wsm.cleanup();
   };
   const startPollers = () => {
-    if (!sessionPollTimer) {
+    if (!timers.sessionPoll) {
       // #2431: a half-open socket (lid close / network switch) still reports
       // CONNECTED, so no frames arrive and no fallback poll is armed below;
       // the version gate would then short-circuit this one-shot fetch too.
       // Zero lastVersion so returning to the tab always repaints once.
-      lastVersion = 0;
+      sessionList.lastVersion = 0;
       fetchSessions(); // immediate refresh on resume so UI is not stale
       // #2431: the 5 s sessions poll is a WS-outage fallback. Over a live
       // socket session_state pushes already drive the sidebar; arming the
       // interval here made it run alongside WS until the next reconnect.
       if (!(wsm && wsm.state === WS_STATES.CONNECTED)) {
-        sessionPollTimer = setInterval(fetchSessions, 5000);
+        timers.sessionPoll = setInterval(fetchSessions, 5000);
       }
     }
     // Same rationale as the turn-boundary refresh in onSessionState: the branch
     // can change without the workspace path changing, and an operator switching
     // branches in their own terminal produces no turn at all. Re-resolving when
     // the tab regains focus catches that case without a dedicated poller.
-    if (selectedKey) invalidateGitState(selectedKey, selectedNode);
-    if (!discoveredPollTimer) {
-      discoveredPollTimer = setInterval(scanDiscovered, 30000);
+    if (selection.key) invalidateGitState(selection.key, selection.node);
+    if (!timers.discoveredPoll) {
+      timers.discoveredPoll = setInterval(scanDiscovered, 30000);
     }
     // Relative-time labels drifted while hidden; startSidebarTimeTick
     // refreshes them once immediately before re-arming the 60s tick.
@@ -5482,9 +5326,9 @@ wsm.connect();
     // eventTimer is a WS-outage fallback. If WS is live, events already
     // arrive via the socket and the timer is redundant; let the normal
     // WS state transitions re-arm it if the socket drops.
-    if (!eventTimer && selectedKey && wsm && wsm.state !== WS_STATES.CONNECTED) {
+    if (!timers.events && selection.key && wsm && wsm.state !== WS_STATES.CONNECTED) {
       fetchEvents(false);
-      eventTimer = setInterval(() => fetchEvents(false), 1000);
+      timers.events = setInterval(() => fetchEvents(false), 1000);
     }
     // #1770: re-arm the WS ping we paused in stopPollers, but only when the
     // socket is actually live — a dropped/offline socket has no ping to keep
@@ -5770,7 +5614,7 @@ initSwipeBack();
   // openLightboxGroup(list, start) opens a gallery over `list`, an array of
   // {full, thumb} URL-string snapshots, starting at index `start`. Single
   // lightbox instance: calling while already open simply replaces the group.
-  openLightboxGroup=function(list,start){
+  hooks.openLightboxGroup=function(list,start){
     items=(list&&list.length)?list:[];
     if(!items.length)return;
     preloaded={};
@@ -5788,13 +5632,13 @@ initSwipeBack();
   // clicked .event-images container into a gallery group. dataset reads copy
   // plain strings — no DOM references survive into `items`, so poll-driven
   // innerHTML re-renders can't invalidate an open lightbox.
-  openLightboxFromThumb=function(el){
+  hooks.openLightboxFromThumb=function(el){
     var box=el.closest&&el.closest('.event-images');
     var imgs=box?Array.prototype.slice.call(box.querySelectorAll('img[data-full]')):[el];
     var list=imgs.map(function(i){return{full:i.dataset.full||i.src,thumb:i.dataset.thumb||i.src}});
     // indexOf can only miss if `el` somehow lacks data-full (not rendered by
     // eventHtml); degrade to the first image rather than refusing to open.
-    openLightboxGroup(list,Math.max(0,imgs.indexOf(el)));
+    hooks.openLightboxGroup(list,Math.max(0,imgs.indexOf(el)));
   };
   // Compatibility shell: the historical single-image entry point. Kept so
   // any caller outside eventHtml (or user bookmarklets) keeps working.
@@ -5803,7 +5647,7 @@ initSwipeBack();
   // thumbnails without inline onclick; RFC lightbox-gallery-nav §3).
   document.addEventListener('click',function(e){
     var t=e.target&&e.target.closest&&e.target.closest('.event-images img[data-full]');
-    if(t)openLightboxFromThumb(t);
+    if(t)hooks.openLightboxFromThumb(t);
   });
   document.addEventListener('keydown',function(e){
     if(!ov.classList.contains('active'))return;
@@ -6297,7 +6141,7 @@ initSwipeBack();
       showToast('已保存为正式会话');
       // Refresh sidebar and try to select the new key.
       try {
-        if (typeof lastVersion !== 'undefined') lastVersion = 0;
+        if (typeof sessionList.lastVersion !== 'undefined') sessionList.lastVersion = 0;
         await fetchSessions();
         if (data.key) selectSession(data.key, 'local');
       } catch (_) {}
@@ -6311,7 +6155,7 @@ initSwipeBack();
   // AskUserQuestion submit handler) can route answers to the scratch CLI
   // instead of the parent session whose `selectedKey` is what `onAskSubmit`
   // would otherwise read. Returns '' when no scratch is open.
-  getActiveScratchKey = function() {
+  hooks.getActiveScratchKey = function() {
     return (state && state.key) ? state.key : '';
   };
 
@@ -6319,23 +6163,23 @@ initSwipeBack();
   // when leaving the chat view — the drawer is position:fixed and would
   // otherwise float over assets/cron/settings. closeScratch handles the
   // no-op-when-closed case internally.
-  closeScratchDrawer = function() { closeScratch(true); };
+  hooks.closeScratchDrawer = function() { closeScratch(true); };
 
   // Expose the global used by the ↗ button in eventHtml.
-  askAside = function(btn) {
+  hooks.askAside = function(btn) {
     if (!btn) return;
     const raw = btn.getAttribute('data-raw') || '';
     const msgTime = Number(btn.getAttribute('data-msg-time') || 0);
     if (!raw || raw.length < 1) return;
-    if (!selectedKey) {
+    if (!selection.key) {
       showToast('请先选择会话');
       return;
     }
     // Derive agentId from the current session key (4th segment) so the
     // server can inherit the matching agent registration.
-    const parts = String(selectedKey).split(':');
+    const parts = String(selection.key).split(':');
     const agentId = parts.length >= 4 ? parts[3] : 'general';
-    openScratch(raw, agentId, selectedKey, msgTime);
+    openScratch(raw, agentId, selection.key, msgTime);
   };
 
   // Wire drawer buttons.
@@ -6679,7 +6523,6 @@ export {
   getToken,
   isInternalEvent,
   lastDividerTime,
-  lastEventTime,
   lsGet,
   lsSet,
   renderEventsWithDividers,
@@ -6724,14 +6567,14 @@ registerActions({
   'file-picker': () => openFilePicker(),
   'input-mode-toggle': () => toggleInputMode(),
   'msg-input-key': (el, e) => handleKey(e),
-  'msg-input-compend': () => { lastCompositionEnd = Date.now(); },
+  'msg-input-compend': () => { composer.lastCompositionEnd = Date.now(); },
   'msg-send': () => sendMessage(),
   'session-interrupt': () => interruptSession(),
   'file-input-change': (el) => handleFiles(el.files),
   'ask-option-toggle': (el) => onAskOptionToggle(el),
   'ask-submit': (el) => onAskSubmit(el),
   'event-copy': (el) => copyEventContent(el),
-  'ask-aside': (el) => askAside(el),
+  'ask-aside': (el) => hooks.askAside(el),
   'upload-retry': (el) => retryUpload(thumbIdxOf(el)),
   'file-remove': (el) => removeFile(thumbIdxOf(el)),
   'thumb-dragstart': (el, e) => onThumbDragStart(e, thumbIdxOf(el)),
@@ -6767,52 +6610,52 @@ registerActions({
 // legitimately writes today (activeView / eventTimer / selectedKey); keep
 // the rest getter-only so a new cross-file write is a reviewed decision.
 Object.defineProperties(nzState, {
-  accessProfiles: { get: function () { return accessProfiles; }, set: function (v) { accessProfiles = v; } },
-  accessProfilesFetchedAt: { get: function () { return accessProfilesFetchedAt; }, set: function (v) { accessProfilesFetchedAt = v; } },
-  activePopover: { get: function () { return activePopover; }, set: function (v) { activePopover = v; } },
-  activeView: { get: function () { return activeView; }, set: function (v) { activeView = v; } },
-  allSessionsCache: { get: function () { return allSessionsCache; }, set: function (v) { allSessionsCache = v; } },
-  _autoPageBackCount: { get: function () { return _autoPageBackCount; }, set: function (v) { _autoPageBackCount = v; } },
-  cliBackends: { get: function () { return cliBackends; }, set: function (v) { cliBackends = v; } },
-  cliBackendsFetchedAt: { get: function () { return cliBackendsFetchedAt; }, set: function (v) { cliBackendsFetchedAt = v; } },
-  collapsedProjects: { get: function () { return collapsedProjects; }, set: function (v) { collapsedProjects = v; } },
-  defaultCLIName: { get: function () { return defaultCLIName; }, set: function (v) { defaultCLIName = v; } },
-  defaultCLIVersion: { get: function () { return defaultCLIVersion; }, set: function (v) { defaultCLIVersion = v; } },
-  defaultWorkspace: { get: function () { return defaultWorkspace; } },
-  discoveredItems: { get: function () { return discoveredItems; }, set: function (v) { discoveredItems = v; } },
-  _earlierGen: { get: function () { return _earlierGen; }, set: function (v) { _earlierGen = v; } },
-  _earlierLoading: { get: function () { return _earlierLoading; }, set: function (v) { _earlierLoading = v; } },
-  eventTimer: { get: function () { return eventTimer; }, set: function (v) { eventTimer = v; } },
-  getActiveScratchKey: { get: function () { return getActiveScratchKey; }, set: function (v) { getActiveScratchKey = v; } },
-  historySessionsData: { get: function () { return historySessionsData; }, set: function (v) { historySessionsData = v; } },
-  _lastAppliedMainState: { get: function () { return _lastAppliedMainState; }, set: function (v) { _lastAppliedMainState = v; } },
-  lastCompositionEnd: { get: function () { return lastCompositionEnd; }, set: function (v) { lastCompositionEnd = v; } },
-  lastDiscoveredJSON: { get: function () { return lastDiscoveredJSON; }, set: function (v) { lastDiscoveredJSON = v; } },
-  lastEventTime: { get: function () { return lastEventTime; }, set: function (v) { lastEventTime = v; } },
-  lastRenderedEventTime: { get: function () { return lastRenderedEventTime; }, set: function (v) { lastRenderedEventTime = v; } },
-  _lastSidebarData: { get: function () { return _lastSidebarData; }, set: function (v) { _lastSidebarData = v; } },
-  _lastSidebarHtml: { get: function () { return _lastSidebarHtml; }, set: function (v) { _lastSidebarHtml = v; } },
-  lastStatsSnapshot: { get: function () { return lastStatsSnapshot; }, set: function (v) { lastStatsSnapshot = v; } },
-  lastVersion: { get: function () { return lastVersion; }, set: function (v) { lastVersion = v; } },
+  accessProfiles: { get: function () { return serverInfo.accessProfiles; }, set: function (v) { serverInfo.accessProfiles = v; } },
+  accessProfilesFetchedAt: { get: function () { return serverInfo.accessProfilesFetchedAt; }, set: function (v) { serverInfo.accessProfilesFetchedAt = v; } },
+  activePopover: { get: function () { return ui.activePopover; }, set: function (v) { ui.activePopover = v; } },
+  activeView: { get: function () { return ui.activeView; }, set: function (v) { ui.activeView = v; } },
+  allSessionsCache: { get: function () { return sessionList.allSessionsCache; }, set: function (v) { sessionList.allSessionsCache = v; } },
+  _autoPageBackCount: { get: function () { return transcript.autoPageBackCount; }, set: function (v) { transcript.autoPageBackCount = v; } },
+  cliBackends: { get: function () { return serverInfo.cliBackends; }, set: function (v) { serverInfo.cliBackends = v; } },
+  cliBackendsFetchedAt: { get: function () { return serverInfo.cliBackendsFetchedAt; }, set: function (v) { serverInfo.cliBackendsFetchedAt = v; } },
+  collapsedProjects: { get: function () { return sessionList.collapsedProjects; }, set: function (v) { sessionList.collapsedProjects = v; } },
+  defaultCLIName: { get: function () { return serverInfo.defaultCLIName; }, set: function (v) { serverInfo.defaultCLIName = v; } },
+  defaultCLIVersion: { get: function () { return serverInfo.defaultCLIVersion; }, set: function (v) { serverInfo.defaultCLIVersion = v; } },
+  defaultWorkspace: { get: function () { return serverInfo.defaultWorkspace; } },
+  discoveredItems: { get: function () { return sessionList.discoveredItems; }, set: function (v) { sessionList.discoveredItems = v; } },
+  _earlierGen: { get: function () { return transcript.earlierGen; }, set: function (v) { transcript.earlierGen = v; } },
+  _earlierLoading: { get: function () { return transcript.earlierLoading; }, set: function (v) { transcript.earlierLoading = v; } },
+  eventTimer: { get: function () { return timers.events; }, set: function (v) { timers.events = v; } },
+  getActiveScratchKey: { get: function () { return hooks.getActiveScratchKey; }, set: function (v) { hooks.getActiveScratchKey = v; } },
+  historySessionsData: { get: function () { return sessionList.historySessionsData; }, set: function (v) { sessionList.historySessionsData = v; } },
+  _lastAppliedMainState: { get: function () { return selection.lastAppliedMainState; }, set: function (v) { selection.lastAppliedMainState = v; } },
+  lastCompositionEnd: { get: function () { return composer.lastCompositionEnd; }, set: function (v) { composer.lastCompositionEnd = v; } },
+  lastDiscoveredJSON: { get: function () { return sessionList.lastDiscoveredJSON; }, set: function (v) { sessionList.lastDiscoveredJSON = v; } },
+  lastEventTime: { get: function () { return transcript.lastEventTime; }, set: function (v) { transcript.lastEventTime = v; } },
+  lastRenderedEventTime: { get: function () { return transcript.lastRenderedEventTime; }, set: function (v) { transcript.lastRenderedEventTime = v; } },
+  _lastSidebarData: { get: function () { return sessionList.lastSidebarData; }, set: function (v) { sessionList.lastSidebarData = v; } },
+  _lastSidebarHtml: { get: function () { return sessionList.lastSidebarHtml; }, set: function (v) { sessionList.lastSidebarHtml = v; } },
+  lastStatsSnapshot: { get: function () { return serverInfo.lastStatsSnapshot; }, set: function (v) { serverInfo.lastStatsSnapshot = v; } },
+  lastVersion: { get: function () { return sessionList.lastVersion; }, set: function (v) { sessionList.lastVersion = v; } },
   navPopoverOpen: { get: function () { return navPopoverOpen; } },
-  nodesData: { get: function () { return nodesData; } },
-  oldestFetchedEventTime: { get: function () { return oldestFetchedEventTime; }, set: function (v) { oldestFetchedEventTime = v; } },
-  _optimisticDeleteKeys: { get: function () { return _optimisticDeleteKeys; }, set: function (v) { _optimisticDeleteKeys = v; } },
-  pendingDiscovered: { get: function () { return pendingDiscovered; }, set: function (v) { pendingDiscovered = v; } },
-  pendingFiles: { get: function () { return pendingFiles; }, set: function (v) { pendingFiles = v; } },
-  previewEventCount: { get: function () { return previewEventCount; }, set: function (v) { previewEventCount = v; } },
-  _previewGen: { get: function () { return _previewGen; }, set: function (v) { _previewGen = v; } },
-  previewTimer: { get: function () { return previewTimer; }, set: function (v) { previewTimer = v; } },
-  projectsData: { get: function () { return projectsData; } },
-  selectedKey: { get: function () { return selectedKey; }, set: function (v) { selectedKey = v; } },
-  selectedNode: { get: function () { return selectedNode; }, set: function (v) { selectedNode = v; } },
-  sending: { get: function () { return sending; }, set: function (v) { sending = v; } },
-  sessionCounter: { get: function () { return sessionCounter; }, set: function (v) { sessionCounter = v; } },
+  nodesData: { get: function () { return sessionList.nodesData; } },
+  oldestFetchedEventTime: { get: function () { return transcript.oldestFetchedEventTime; }, set: function (v) { transcript.oldestFetchedEventTime = v; } },
+  _optimisticDeleteKeys: { get: function () { return sessionList.optimisticDeleteKeys; }, set: function (v) { sessionList.optimisticDeleteKeys = v; } },
+  pendingDiscovered: { get: function () { return selection.pendingDiscovered; }, set: function (v) { selection.pendingDiscovered = v; } },
+  pendingFiles: { get: function () { return composer.pendingFiles; }, set: function (v) { composer.pendingFiles = v; } },
+  previewEventCount: { get: function () { return transcript.previewEventCount; }, set: function (v) { transcript.previewEventCount = v; } },
+  _previewGen: { get: function () { return transcript.previewGen; }, set: function (v) { transcript.previewGen = v; } },
+  previewTimer: { get: function () { return timers.preview; }, set: function (v) { timers.preview = v; } },
+  projectsData: { get: function () { return sessionList.projectsData; } },
+  selectedKey: { get: function () { return selection.key; }, set: function (v) { selection.key = v; } },
+  selectedNode: { get: function () { return selection.node; }, set: function (v) { selection.node = v; } },
+  sending: { get: function () { return composer.sending; }, set: function (v) { composer.sending = v; } },
+  sessionCounter: { get: function () { return sessionList.sessionCounter; }, set: function (v) { sessionList.sessionCounter = v; } },
   sessionDrafts: { get: function () { return sessionDrafts; } },
   sessionLastSent: { get: function () { return sessionLastSent; } },
   sessionPendingTuning: { get: function () { return sessionPendingTuning; } },
   sessionScrollPos: { get: function () { return sessionScrollPos; } },
-  sessionsData: { get: function () { return sessionsData; } },
+  sessionsData: { get: function () { return sessionList.sessionsData; } },
   turnState: { get: function () { return turnState; } },
 });
 // ─── nz.test: Playwright instrumentation surface (#2557 PR-E3) ─────────────
@@ -6823,22 +6666,22 @@ Object.defineProperties(nzState, {
 // window (test/e2e e2e-shim) for the suite's legacy bare-identifier probes.
 // This list may only shrink as tests migrate to first-class assertions.
 Object.defineProperties(nzTest, {
-  _lastSidebarData: { get: function () { return _lastSidebarData; }, set: function (v) { _lastSidebarData = v; } },
-  _lastSidebarHtml: { get: function () { return _lastSidebarHtml; }, set: function (v) { _lastSidebarHtml = v; } },
-  activeView: { get: function () { return activeView; }, set: function (v) { activeView = v; } },
-  discoveredItems: { get: function () { return discoveredItems; }, set: function (v) { discoveredItems = v; } },
-  discoveredPollTimer: { get: function () { return discoveredPollTimer; }, set: function (v) { discoveredPollTimer = v; } },
+  _lastSidebarData: { get: function () { return sessionList.lastSidebarData; }, set: function (v) { sessionList.lastSidebarData = v; } },
+  _lastSidebarHtml: { get: function () { return sessionList.lastSidebarHtml; }, set: function (v) { sessionList.lastSidebarHtml = v; } },
+  activeView: { get: function () { return ui.activeView; }, set: function (v) { ui.activeView = v; } },
+  discoveredItems: { get: function () { return sessionList.discoveredItems; }, set: function (v) { sessionList.discoveredItems = v; } },
+  discoveredPollTimer: { get: function () { return timers.discoveredPoll; }, set: function (v) { timers.discoveredPoll = v; } },
   katexReady: { get: function () { return katexReady; } },
-  lastEventTime: { get: function () { return lastEventTime; }, set: function (v) { lastEventTime = v; } },
-  lastRenderedEventTime: { get: function () { return lastRenderedEventTime; }, set: function (v) { lastRenderedEventTime = v; } },
-  lastVersion: { get: function () { return lastVersion; }, set: function (v) { lastVersion = v; } },
-  pendingFiles: { get: function () { return pendingFiles; }, set: function (v) { pendingFiles = v; } },
-  projectsData: { get: function () { return projectsData; }, set: function (v) { projectsData = v; } },
-  selectedKey: { get: function () { return selectedKey; }, set: function (v) { selectedKey = v; } },
-  selectedNode: { get: function () { return selectedNode; }, set: function (v) { selectedNode = v; } },
-  sending: { get: function () { return sending; }, set: function (v) { sending = v; } },
-  sessionPollTimer: { get: function () { return sessionPollTimer; }, set: function (v) { sessionPollTimer = v; } },
-  sessionsData: { get: function () { return sessionsData; }, set: function (v) { sessionsData = v; } },
+  lastEventTime: { get: function () { return transcript.lastEventTime; }, set: function (v) { transcript.lastEventTime = v; } },
+  lastRenderedEventTime: { get: function () { return transcript.lastRenderedEventTime; }, set: function (v) { transcript.lastRenderedEventTime = v; } },
+  lastVersion: { get: function () { return sessionList.lastVersion; }, set: function (v) { sessionList.lastVersion = v; } },
+  pendingFiles: { get: function () { return composer.pendingFiles; }, set: function (v) { composer.pendingFiles = v; } },
+  projectsData: { get: function () { return sessionList.projectsData; }, set: function (v) { sessionList.projectsData = v; } },
+  selectedKey: { get: function () { return selection.key; }, set: function (v) { selection.key = v; } },
+  selectedNode: { get: function () { return selection.node; }, set: function (v) { selection.node = v; } },
+  sending: { get: function () { return composer.sending; }, set: function (v) { composer.sending = v; } },
+  sessionPollTimer: { get: function () { return timers.sessionPoll; }, set: function (v) { timers.sessionPoll = v; } },
+  sessionsData: { get: function () { return sessionList.sessionsData; }, set: function (v) { sessionList.sessionsData = v; } },
   turnState: { get: function () { return turnState; } },
 });
 Object.assign(nzTest, {

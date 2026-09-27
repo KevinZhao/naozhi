@@ -131,7 +131,7 @@ func TestDashboardJS_ErrorFrameGuardsPendingSubscribeKey(t *testing.T) {
 		t.Error("error case must recognise the PurgeNodeSubscriptions frame (keyless + msg.node + 'node disconnected')")
 	}
 	if !strings.Contains(errCase, "reconcileSelectedNode()") {
-		t.Error("node-disconnected error must run reconcileSelectedNode() so selectedNode snaps back to local")
+		t.Error("node-disconnected error must run reconcileSelectedNode() so selection.node snaps back to local")
 	}
 }
 
@@ -153,8 +153,8 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 		t.Fatal("previewDiscovered body end not found")
 	}
 	fn := js[start : start+end]
-	if !strings.Contains(js, "let _previewGen = 0;") {
-		t.Error("_previewGen counter must be declared")
+	if !strings.Contains(js, "  previewGen: 0,") {
+		t.Error("transcript.previewGen counter must be declared in state.js")
 	}
 	// The bump lives in stopPreviewPolling() so EVERY caller that moves the
 	// operator off the discovered panel (selectSession, the createSession
@@ -169,14 +169,14 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 	if e := strings.Index(stopFn, "\n}\n"); e > 0 {
 		stopFn = stopFn[:e]
 	}
-	if !strings.Contains(stopFn, "_previewGen++;") {
-		t.Error("stopPreviewPolling() must bump _previewGen so selectSession/createSession invalidate in-flight previews")
+	if !strings.Contains(stopFn, "transcript.previewGen++;") {
+		t.Error("stopPreviewPolling() must bump transcript.previewGen so selectSession/createSession invalidate in-flight previews")
 	}
 	if !strings.Contains(fn, "deps.stopPreviewPolling();\n  const gen = nzState._previewGen;") {
-		t.Error("previewDiscovered must call stopPreviewPolling() FIRST and then capture gen = _previewGen (capturing before the call would be invalidated by its own bump)")
+		t.Error("previewDiscovered must call stopPreviewPolling() FIRST and then capture gen = transcript.previewGen (capturing before the call would be invalidated by its own bump)")
 	}
 	if strings.Contains(fn, "++nzState._previewGen") {
-		t.Error("previewDiscovered must not bump _previewGen itself — the bump belongs to stopPreviewPolling()")
+		t.Error("previewDiscovered must not bump transcript.previewGen itself — the bump belongs to stopPreviewPolling()")
 	}
 	if strings.Count(fn, "if (gen !== nzState._previewGen) return;") < 3 {
 		t.Error("previewDiscovered must check the generation after the awaited fetch (ok + error paths) AND inside the poll tick")
@@ -220,7 +220,7 @@ func TestDashboardJS_SidebarCardRemovalInvalidatesHtmlCache(t *testing.T) {
 	}
 	// The helper must be the ONLY place a session card is removed directly.
 	if n := strings.Count(js, "if (card) card.remove();"); n != 1 {
-		t.Errorf("found %d `if (card) card.remove();` sites; only removeSidebarCard() may remove a session card directly (it invalidates _lastSidebarHtml)", n)
+		t.Errorf("found %d `if (card) card.remove();` sites; only removeSidebarCard() may remove a session card directly (it invalidates sessionList.lastSidebarHtml)", n)
 	}
 	// dismissSession (the optimistic-delete path with the failure re-sync)
 	// must use the helper.
