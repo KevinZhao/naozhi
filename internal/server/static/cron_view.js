@@ -37,8 +37,8 @@ import { cronAttentionConfirm, cronAttentionQueueHtml, cronAttentionRefresh } fr
 import {
   closeCronDetail,
   configureCronDrawer,
-  cronDetailJobId,
   cronDrawerForgetJob,
+  cronDrawerState,
   cronDrawerSpecPromptToggle,
   openCronDetail,
   renderCronDrawer,
@@ -137,8 +137,8 @@ const cronJobCostCache = {};
 // the dashboard can simply assume no cron rows ever arrive. The single
 // helper retained from the old block was `isCronSessionKey`, kept for the
 // dismissSession safety check — moved to nz_util (#2557 PR-E1, imported
-// above). New cron-detail visibility lives in `cronDetailJobId`
-// (PR4 / cronDetailJobId state machine).
+// above). New cron-detail visibility lives in `cronDrawerState.jobId`
+// (PR4 / cronDrawerState.jobId state machine).
 // R110-P2 cron filter state — module-level so renderCronList can read the
 // live values each paint without a closure. Mirrors the sidebar-search
 // approach (cronFilterQuery is the substring, cronFilterStatus is one of
@@ -1147,7 +1147,7 @@ function updateCronLiveTruncated() {
 function repaintCronLive() {
   const el = document.getElementById('cron-live-events');
   if (!el) return;
-  const drawerJobId = (typeof cronDetailJobId !== 'undefined') ? cronDetailJobId : null;
+  const drawerJobId = cronDrawerState.jobId;
   if (drawerJobId && wsm.cronLive.jobId && wsm.cronLive.jobId !== drawerJobId) {
     el.innerHTML = '';
     return;
@@ -1220,8 +1220,7 @@ function appendEventsToContainer(el, events) {
 //   - drawer 开 + 任务空闲 → no-op（保留已订内容供回看；首次开 idle 任务则不订）
 // 故意不在 cronApplyRunEnded 钩 unsub —— 让操作员看完本轮事件，关 drawer 才撤。
 function ensureCronLiveSubscription() {
-  if (typeof cronDetailJobId === 'undefined') return;
-  const jobId = cronDetailJobId;
+  const jobId = cronDrawerState.jobId;
   const cl = wsm.cronLive;
   if (!jobId) {
     if (cl.jobId) wsm.unsubscribeCronLive();
@@ -1369,7 +1368,7 @@ function cronJobCardHtml(j) {
   const isError = !!j.last_error && !isPaused;
   const isMissed = !!j.missed && !isPaused;
   const isRunning = !!(j.current_run && j.current_run.started_at);
-  const isActive = cronDetailJobId === j.id;
+  const isActive = cronDrawerState.jobId === j.id;
   const rowClasses = ['cj-row'];
   if (isPaused) rowClasses.push('paused');
   if (isError) rowClasses.push('is-error');
@@ -1621,7 +1620,7 @@ async function cronReplayRunInner(jobId, runId, fromQueue) {
     await cronAttentionRefresh();
   }
   // Refresh the timeline so the new replay run shows up at the head.
-  if (cronDetailJobId === jobId) cronTimelineRefreshHeadDebounced(jobId);
+  if (cronDrawerState.jobId === jobId) cronTimelineRefreshHeadDebounced(jobId);
 }
 
 // cronJobCostRefresh pulls the job's 30-day ledger total and repaints the
@@ -1644,7 +1643,7 @@ async function cronJobCostRefresh(jobId) {
       if (b && b.unit === 'USD' && typeof b.amount === 'number') { usd += b.amount; entries += (b.entries | 0); }
     }
     cronJobCostCache[jobId] = { usd: usd, entries: entries, dropped: (data && data.dropped) | 0 };
-    if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
+    if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
   } catch (_) {}
 }
 
@@ -1660,7 +1659,7 @@ function cronJobLedgerCostHtml(jobId) {
 
 // cronEscClose — 全局 Esc 的 cron 分支委托入口。
 // dashboard.js 的 Global Esc handler 不再裸引用 cron 内部状态（cronExpandedRunId /
-// cronDetailJobId），而是经 `window.nzCronEscClose && window.nzCronEscClose()` 守卫调用，由本函数在 cron_view.js
+// cronDrawerState.jobId），而是经 `window.nzCronEscClose && window.nzCronEscClose()` 守卫调用，由本函数在 cron_view.js
 // 内部决定关哪一层。返回 true 表示"消费了 Esc"（调用方据此 preventDefault）。
 //
 // 这是 dashboard-cron-view-extraction RFC §2.6 B1 的修复：cron 状态搬入 cron_view.js
@@ -1671,7 +1670,7 @@ function cronJobLedgerCostHtml(jobId) {
 // 关闭优先级与原 dashboard.js 一致：行内展开（更靠前的二级状态）先于 drawer。
 function cronEscClose() {
   if (cronExpandedRunId && cronExpandedRunId.runId) { cronTimelineCollapse(); return true; }
-  if (cronDetailJobId !== null) { closeCronDetail(); return true; }
+  if (cronDrawerState.jobId !== null) { closeCronDetail(); return true; }
   return false;
 }
 
@@ -1859,7 +1858,7 @@ function renderCronPanel() {
         '</div>' +
         // cron-panel-consolidation RFC §4.1 / §4.2: drawer pane is always
         // present in the DOM but only shown (`.is-open`) when
-        // cronDetailJobId is non-null. Inline content is filled by
+        // cronDrawerState.jobId is non-null. Inline content is filled by
         // renderCronDrawer below; the existing `#cron-timeline-panel`
         // host lives inside the drawer, so cronTimelineHtml /
         // cronTimelineLoadMore / cronTimelineRefreshHead all keep
@@ -2503,7 +2502,7 @@ configureCronDrawer({
 });
 configureCronTimeline({
   cronAttentionQueueHtml,
-  cronDetailJobId: () => cronDetailJobId,
+  cronDetailJobId: () => cronDrawerState.jobId,
   cronErrorClassLabel,
   cronJobLedgerCostHtml,
   cronJobs: () => cronJobs,

@@ -11,7 +11,10 @@
 //
 // Dependency-free on purpose: the npm install lives in test/e2e, so this root
 // config cannot import packages (run it as
-// `test/e2e/node_modules/.bin/eslint internal/server/static`).
+// `test/e2e/node_modules/.bin/eslint internal/server/static`). The local
+// rules in scripts/eslint-plugin-nz.mjs are plain objects, not a package.
+
+import nz from './scripts/eslint-plugin-nz.mjs';
 
 const ro = (names) => Object.fromEntries(names.map((n) => [n, 'readonly']));
 const rw = (names) => Object.fromEntries(names.map((n) => [n, 'writable']));
@@ -121,7 +124,7 @@ const deps = {
   'cron_attention.js': {},
   'cron_drawer.js': {},
   'cron_trigger.js': {},
-  // ES module since D3 PR-B: utilities and nz.state come in via import;
+  // ES module since D3 PR-B: utilities and shared state come in via import;
   // dashboard globals are window.* dereferences.
   'agent_view.js': {},
   // ES modules since D3 PR-A: cross-file consumption is explicit (import /
@@ -188,4 +191,14 @@ export default [
     },
   },
   ...perFile,
+  // Shared state crosses module boundaries only as a const state object the
+  // owner exports (scripts/eslint-plugin-nz.mjs).
+  {
+    files: [...moduleFiles].map((f) => `internal/server/static/${f}`),
+    plugins: { nz },
+    rules: {
+      'nz/configure-deps': 'error',
+      'nz/no-exported-let': 'error',
+    },
+  },
 ];

@@ -36,10 +36,10 @@
     "topLevelLetVar": 1
   },
   "cron_drawer.js": {
-    "lines": 591,
+    "lines": 592,
     "maxFunctionLines": 137,
     "functionsOver100": 1,
-    "topLevelLetVar": 2
+    "topLevelLetVar": 1
   },
   "cron_schedule.js": {
     "lines": 522,
@@ -60,13 +60,13 @@
     "topLevelLetVar": 1
   },
   "cron_view.js": {
-    "lines": 2646,
+    "lines": 2645,
     "maxFunctionLines": 127,
     "functionsOver100": 3,
     "topLevelLetVar": 11
   },
   "dashboard.js": {
-    "lines": 6631,
+    "lines": 6625,
     "maxFunctionLines": 249,
     "functionsOver100": 4,
     "topLevelLetVar": 0
@@ -78,7 +78,7 @@
     "topLevelLetVar": 0
   },
   "file_refs.js": {
-    "lines": 925,
+    "lines": 921,
     "maxFunctionLines": 144,
     "functionsOver100": 1,
     "topLevelLetVar": 6
@@ -90,13 +90,13 @@
     "topLevelLetVar": 0
   },
   "mobile_nav.js": {
-    "lines": 575,
+    "lines": 574,
     "maxFunctionLines": 118,
     "functionsOver100": 1,
     "topLevelLetVar": 3
   },
   "msg_nav.js": {
-    "lines": 470,
+    "lines": 467,
     "maxFunctionLines": 46,
     "functionsOver100": 0,
     "topLevelLetVar": 5
@@ -108,16 +108,16 @@
     "topLevelLetVar": 0
   },
   "render_md.js": {
-    "lines": 1041,
+    "lines": 1040,
     "maxFunctionLines": 303,
     "functionsOver100": 2,
     "topLevelLetVar": 6
   },
   "running_banner.js": {
-    "lines": 484,
+    "lines": 486,
     "maxFunctionLines": 95,
     "functionsOver100": 0,
-    "topLevelLetVar": 1
+    "topLevelLetVar": 0
   },
   "self_update.js": {
     "lines": 373,
@@ -144,13 +144,13 @@
     "topLevelLetVar": 0
   },
   "split_view.js": {
-    "lines": 222,
+    "lines": 215,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
-    "topLevelLetVar": 5
+    "topLevelLetVar": 1
   },
   "state.js": {
-    "lines": 289,
+    "lines": 292,
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 0
@@ -168,15 +168,15 @@
     "topLevelLetVar": 1
   },
   "utilities.js": {
-    "lines": 1092,
+    "lines": 1091,
     "maxFunctionLines": 91,
     "functionsOver100": 0,
     "topLevelLetVar": 4
   },
   "voice.js": {
-    "lines": 492,
+    "lines": 485,
     "maxFunctionLines": 73,
     "functionsOver100": 0,
-    "topLevelLetVar": 12
+    "topLevelLetVar": 11
   }
 }

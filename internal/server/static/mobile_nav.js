@@ -7,6 +7,7 @@
 // new. Layering (D4-1 rule): never import dashboard back.
 import { selection } from './state.js';
 import { esc, nzTest, showToast } from './nz_util.js';
+import { splitDock } from './split_view.js';
 
 const deps = {
   ICONS: null,
@@ -14,8 +15,6 @@ const deps = {
   dismissSession: null,
   lsGet: null,
   lsSet: null,
-  nzAnyDrawerOpen: null,
-  nzSplitExit: null,
   renameSession: null,
   renderMainHeader: null,
   selectSession: null,
@@ -493,14 +492,14 @@ function collapseSidebarForDrawer() {
 // restoreSidebarAfterDrawer re-expands the sidebar when a right-side drawer
 // closes, undoing a collapse that collapseSidebarForDrawer applied. Preview
 // and 追问 can be docked at once, so bail while either is still open — only
-// the LAST close restores (same deps.nzAnyDrawerOpen guard deps.nzSplitExit uses; the
+// the LAST close restores (same splitDock.anyDrawerOpen guard splitDock.exit uses; the
 // close paths strip their open class before calling here). Like the collapse,
 // intentionally no localStorage write: the user's persisted preference was
 // never touched, the screen just returns to it.
 function restoreSidebarAfterDrawer() {
   if (isMobileViewport()) return;
   if (!_sidebarAutoCollapsed) return;
-  if (deps.nzAnyDrawerOpen && deps.nzAnyDrawerOpen()) return;
+  if (splitDock.anyDrawerOpen()) return;
   _sidebarAutoCollapsed = false;
   applySidebarCollapsed(false, false);
 }

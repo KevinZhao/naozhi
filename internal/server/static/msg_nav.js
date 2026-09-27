@@ -450,14 +450,11 @@ function updateSendButton(state) {
 
 export {
   navDismissPopover,
-  navIdx,
   navMsg,
-  navPopoverOpen,
   navRebuild,
   navShowList,
   navSync,
   navUpdatePill,
-  navUserEls,
   updateSendButton,
 };
 

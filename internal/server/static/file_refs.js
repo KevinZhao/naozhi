@@ -10,6 +10,7 @@
 // injected once via configureFileRefs(), called from dashboard's module body.
 import { selection, sessionList } from './state.js';
 import { esc, fetchJSON, showToast } from './nz_util.js';
+import { splitDock } from './split_view.js';
 
 const deps = {
   AVATAR_GROUP_GAP_MS: null,
@@ -20,9 +21,6 @@ const deps = {
   loadKatex: null,
   loadMermaid: null,
   matchProject: null,
-  nzSplitBringToFront: null,
-  nzSplitEnter: null,
-  nzSplitExit: null,
   renderRich: null,
   restoreSidebarAfterDrawer: null,
   runPendingAsync: null,
@@ -516,9 +514,9 @@ async function openFilePreview(wrapEl) {
   drawer.classList.add('fv-open');
   // Dock as a right-hand split on desktop so the transcript stays visible
   // beside the preview (no-op on phone — falls back to the overlay).
-  if (deps.nzSplitEnter) deps.nzSplitEnter();
+  splitDock.enter();
   // Opened last → stack on top of the 追问 pane if both are docked.
-  if (deps.nzSplitBringToFront) deps.nzSplitBringToFront('preview');
+  splitDock.bringToFront('preview');
   deps.collapseSidebarForDrawer();
   drawer.dataset.project = project;
   drawer.dataset.node = node;
@@ -713,7 +711,7 @@ function closeFilePreview() {
   drawer.classList.remove('fv-open');
   drawer.classList.add('hidden');
   // Undock the split (no-op if the 追问 drawer is still open).
-  if (deps.nzSplitExit) deps.nzSplitExit();
+  splitDock.exit();
   // Re-expand the sidebar if the open path auto-collapsed it (no-op if the
   // 追问 drawer is still open or the user collapsed it themselves).
   deps.restoreSidebarAfterDrawer();
@@ -905,8 +903,6 @@ function nodeColor(id) {
 
 export {
   FILE_REF_HAS_EXT,
-  _activeCardEl,
-  _pendingSnippet,
   closeFilePreview,
   fencedPathList,
   fileApiUrl,

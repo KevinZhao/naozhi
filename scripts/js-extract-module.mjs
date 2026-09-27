@@ -19,8 +19,8 @@
 //        needs    — names the moved code reads that stay in dashboard
 //        exposed  — names the moved code declares that dashboard still reads
 //        writes   — of `needs`, the reassignable ones the moved code assigns
-//   3. Classifies `needs` into nz.state reads (mutable dashboard state, listed
-//      in STATE below), nz_util imports, and injected deps (everything else).
+//   3. Classifies `needs` into state.js imports (the shared state objects),
+//      nz_util imports, and injected deps (everything else).
 //   4. Emits the module (header + deps + configureX + body + export block) and
 //      rewrites dashboard.js with the import block, the configureX call and the
 //      moved text removed — one atomic write per file.
@@ -46,24 +46,18 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATIC_DIR = path.join(ROOT, 'internal', 'server', 'static');
 const DASH = path.join(STATIC_DIR, 'dashboard.js');
 
-// Mutable dashboard state exposed through nz.state accessors. Read from
-// dashboard.js itself rather than hard-coded: the set grows every time a batch
-// promotes another shared binding, and a stale copy here would silently
-// classify a state read as an injected dep (which then can't be written).
-function readStateNames(src) {
-  const block = /Object\.defineProperties\(nzState, \{\n([\s\S]*?)\n\}\);/.exec(src);
-  const out = new Map(); // name -> hasSetter
-  for (const line of (block?.[1] ?? '').split('\n')) {
-    const m = /^\s*([A-Za-z_$][\w$]*): \{(.*)\}/.exec(line);
-    if (m) out.set(m[1], m[2].includes('set:'));
-  }
-  return out;
+// The shared state objects state.js exports. Read from state.js itself rather
+// than hard-coded: a stale copy here would classify a state object as an
+// injected dep instead of an import.
+function readStateObjects() {
+  const src = fs.readFileSync(path.join(STATIC_DIR, 'state.js'), 'utf8');
+  return new Set([...src.matchAll(/^export const ([A-Za-z_$][\w$]*) = /gm)].map((m) => m[1]));
 }
 
 // Names nz_util exports — a moved region referencing these imports them
 // directly instead of taking an injected dep.
 const NZ_UTIL = new Set([
-  'esc', 'escAttr', 'fetchJSON', 'showToast', 'trapFocus', 'nzState', 'nzBus',
+  'esc', 'escAttr', 'fetchJSON', 'showToast', 'trapFocus', 'nzBus',
   'nzViews', 'nzTest', 'nzActions', 'registerActions', 'formatCostUSD',
   'formatDurationShort', 'formatRunDuration', 'isCronSessionKey',
 ]);
@@ -153,8 +147,7 @@ const dryRun = argv.includes('--dry-run');
 if (!out || !regionArg) fail('usage: --out <module-name> --regions "<marker>,<marker>" [--dry-run]');
 
 const dashSrc = fs.readFileSync(DASH, 'utf8');
-const STATE_ACCESSORS = readStateNames(dashSrc);
-const STATE = new Set(STATE_ACCESSORS.keys());
+const STATE = readStateObjects();
 const lines = dashSrc.split('\n');
 const regs = regions(lines);
 const markers = regionArg.split(',').map((s) => s.trim()).filter(Boolean);
@@ -188,35 +181,24 @@ const exposed = [...movedDecls.keys()].filter((n) => restFree.has(n)).sort();
 // shows up as the surrounding feature quietly not working (the first attempt
 // at moving Message navigation broke session switching this way: 26 e2e specs
 // failed on navUserEls / navIdx / _lastAppliedMainState).
-// nz.state-backed names are excluded: the module reads/writes them through
-// the accessor, so dashboard keeps the binding and both sides stay in sync.
-const exposedWrittenByDash = exposed.filter((n) => restWrites.has(n) && !STATE.has(n));
-// Writes that land on a dashboard binding.
+const exposedWrittenByDash = exposed.filter((n) => restWrites.has(n));
+// Writes that land on a dashboard binding. State-object fields are member
+// writes (`selection.key = …`), never binding writes, so they do not count.
 const writesToDash = needs.filter((n) => movedWrites.has(n));
-
-// Late-bound hooks: dashboard declares the binding (`let x = null;`) but the
-// moved region is what ASSIGNS it — dashboard only reads it later, at event
-// time. Those belong to the module: it declares and exports them, and
-// dashboard's declaration goes away. Detected as "the region writes it AND
-// dashboard's declaration is a bare `let <name> = null;`".
-const lateBound = writesToDash.filter((n) => !STATE.has(n)
-  && restDecls.get(n) === 'let'
-  && new RegExp(`^let ${n} = null;$`, 'm').test(restText));
 
 const fromUtil = needs.filter((n) => NZ_UTIL.has(n)).sort();
 const fromState = needs.filter((n) => STATE.has(n)).sort();
-const asDeps = needs.filter((n) => !NZ_UTIL.has(n) && !STATE.has(n) && !lateBound.includes(n)).sort();
+const asDeps = needs.filter((n) => !NZ_UTIL.has(n) && !STATE.has(n)).sort();
 // A dep is captured ONCE, at configure time. If the name is a reassignable
 // dashboard `let`, the module would hold a snapshot forever — reads go stale
 // silently (the first D4-6 pass injected _lastSidebarData that way: it was
 // null at configure time, so the sidebar re-render path read null for the
-// rest of the page's life). Such names must go through nz.state instead.
+// rest of the page's life). Such values belong in a state.js object instead
+// (eslint nz/configure-deps rejects the injection too).
 const restLets = new Set(
   [...restDecls.entries()].filter(([, kind]) => kind === 'let').map(([n]) => n)
 );
 const snapshotTraps = asDeps.filter((n) => restLets.has(n));
-const stateWrites = writesToDash.filter((n) => STATE.has(n));
-const otherWrites = writesToDash.filter((n) => !STATE.has(n) && !lateBound.includes(n));
 
 const pascal = out.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join('');
 const configureName = 'configure' + pascal;
@@ -225,51 +207,32 @@ console.log(`# extract ${out}.js`);
 for (const r of picked) console.log(`  region ${r.start}-${r.end} (${r.end - r.start + 1} lines) ${r.label.slice(0, 56)}`);
 console.log(`  moved lines: ${movedLines.size}`);
 console.log(`  nz_util imports (${fromUtil.length}): ${fromUtil.join(', ') || '-'}`);
-console.log(`  nz.state reads (${fromState.length}): ${fromState.join(', ') || '-'}`);
+console.log(`  state.js imports (${fromState.length}): ${fromState.join(', ') || '-'}`);
 console.log(`  injected deps  (${asDeps.length}): ${asDeps.join(', ') || '-'}`);
 console.log(`  exports back   (${exposed.length}): ${exposed.join(', ') || '-'}`);
-if (lateBound.length) console.log(`  late-bound hooks moved with the region (${lateBound.length}): ${lateBound.join(', ')}`);
 if (snapshotTraps.length) {
   console.log(`  ! reassignable dashboard lets cannot be injected deps (value would be snapshotted at configure time): ${snapshotTraps.join(', ')}`);
-  if (!dryRun) fail('refusing to move: promote those names to nz.state (get+set) first');
+  if (!dryRun) fail('refusing to move: move those values into a state.js object first');
 }
-if (stateWrites.length) console.log(`  ! nz.state SETTERS required in dashboard.js: ${stateWrites.join(', ')}`);
-if (otherWrites.length) console.log(`  ! writes a non-state dashboard binding (NOT movable as-is): ${otherWrites.join(', ')}`);
-
-// nz.state accessor check: a state read only works if dashboard actually
-// registers a getter (and a state write needs a setter). The first D4-4 batch
-// shipped a read of `nodesData` with no accessor — every fetchSessions threw
-// and the sidebar silently kept its skeleton, which only the 15 s e2e timeout
-// surfaced. Fail early instead.
-{
-  const declared = STATE_ACCESSORS;
-  const missing = fromState.filter((n) => !declared.has(n));
-  const needSetter = stateWrites.filter((n) => declared.get(n) === false);
-  if (missing.length) console.log(`  ! nz.state GETTERS missing in dashboard.js: ${missing.join(', ')}`);
-  if (needSetter.length) console.log(`  ! nz.state accessors need a setter: ${needSetter.join(', ')}`);
-  if (!dryRun && (missing.length || needSetter.length)) {
-    fail('refusing to move: add the nz.state accessors listed above to dashboard.js first');
-  }
-}
+if (writesToDash.length) console.log(`  ! writes a dashboard binding (NOT movable as-is): ${writesToDash.join(', ')}`);
 
 if (exposedWrittenByDash.length) {
   console.log(`  ! dashboard ASSIGNS these moved names (import bindings are read-only): ${exposedWrittenByDash.join(', ')}`);
-  if (!dryRun) fail('refusing to move: keep those declarations in dashboard (or promote them to nz.state with setters) and re-run');
+  if (!dryRun) fail('refusing to move: keep those declarations in dashboard (or move the value into a state.js object) and re-run');
 }
 
-if (otherWrites.length) fail('refusing to move: the region assigns a dashboard binding that is not nz.state-backed — promote it to nz.state (or move its owner too) first');
+if (writesToDash.length) fail('refusing to move: the region assigns a dashboard binding — move the value into a state.js object (or move its owner too) first');
 
 // ── emit ───────────────────────────────────────────────────────────────────
 
-// rewriteRefs prefixes state/dep references — but only in CODE. A naive
-// global replace also rewrites string literals and comments: it turned the CSS
-// class name 'sending' into 'nzState.sending' and the .sending style stopped
-// applying (the send button lost its in-flight state; one e2e spec caught it).
+// rewriteRefs prefixes dep references — but only in CODE. A naive global
+// replace also rewrites string literals and comments: a dep named like a CSS
+// class ('sending') would turn the class into 'deps.sending' and silently stop
+// the style from applying.
 // Walk the source once, tracking string/template/comment state, and rewrite
 // identifiers only while in code.
 const rewriteRefs = (text) => {
   const prefixOf = new Map();
-  for (const n of fromState) prefixOf.set(n, 'nzState.');
   for (const n of asDeps) prefixOf.set(n, 'deps.');
   if (prefixOf.size === 0) return text;
   let out = '';
@@ -316,7 +279,6 @@ const rewriteRefs = (text) => {
 };
 
 const utilImports = new Set(fromUtil);
-if (fromState.length) utilImports.add('nzState');
 const header = `// ${out}.js — extracted from dashboard.js (#2558 D4).
 //
 // Verbatim region move: \`git diff --color-moved\` shows the body as a pure
@@ -325,9 +287,9 @@ const header = `// ${out}.js — extracted from dashboard.js (#2558 D4).
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Dashboard state is read through nz.state; its helpers are
+// module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via ${configureName}(), called from dashboard's module body.
-${utilImports.size ? `import { ${[...utilImports].sort().join(', ')} } from './nz_util.js';\n` : ''}`;
+${fromState.length ? `import { ${fromState.join(', ')} } from './state.js';\n` : ''}${utilImports.size ? `import { ${[...utilImports].sort().join(', ')} } from './nz_util.js';\n` : ''}`;
 
 const depsBlock = asDeps.length
   ? `
@@ -343,15 +305,7 @@ export function ${configureName}(impl) {
 `
   : '';
 
-const allExports = [...new Set([...exposed, ...lateBound])].sort();
-const lateBoundDecl = lateBound.length
-  ? `
-// Late-bound hooks: assigned by the code below, read by other modules at event
-// time (never at load time) — the shape they had as dashboard module-scope
-// lets before this extraction.
-${lateBound.map((n) => `let ${n} = null;`).join('\n')}
-`
-  : '';
+const allExports = [...exposed].sort();
 
 const exportBlock = allExports.length
   ? `
@@ -361,7 +315,7 @@ ${allExports.map((n) => `  ${n},`).join('\n')}
 `
   : '';
 
-const moduleSrc = header + depsBlock + lateBoundDecl + '\n' + rewriteRefs(movedText) + '\n' + exportBlock;
+const moduleSrc = header + depsBlock + '\n' + rewriteRefs(movedText) + '\n' + exportBlock;
 
 // dashboard.js: insert the import block after the last existing import, add the
 // configureX call next to the other configure* calls, drop the moved lines and
@@ -383,12 +337,6 @@ if (asDeps.length) {
   const anchor = /^configure[A-Za-z]+\(\{/m.exec(newDash);
   if (!anchor) fail('no existing configure* call site found in dashboard.js');
   newDash = newDash.slice(0, anchor.index) + callLine + newDash.slice(anchor.index);
-}
-
-// The late-bound hooks now live in the module: drop dashboard's placeholder
-// declarations (and the explanatory comment block above them, if any).
-for (const n of lateBound) {
-  newDash = newDash.replace(new RegExp(`^let ${n} = null;\\n`, 'm'), '');
 }
 
 // Remove moved names from dashboard's export block, if present there.

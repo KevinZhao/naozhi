@@ -2,11 +2,11 @@
 // the confirm action (cron_view.js split, attention region).
 //
 // Owns cronAttentionState. It reads which job the drawer shows through
-// cron_drawer.js's live cronDetailJobId binding and repaints through
+// cron_drawer.js's live cronDrawerState and repaints through
 // cron_timeline.js; neither module imports this one (they receive the queue
 // functions via their configure calls), so the edges stay one-way.
 
-import { cronDetailJobId } from './cron_drawer.js';
+import { cronDrawerState } from './cron_drawer.js';
 import { renderCronTimelinePanel } from './cron_timeline.js';
 import { getToken } from './dashboard.js';
 import { esc, escAttr, fetchJSON } from './nz_util.js';
@@ -122,7 +122,7 @@ export async function cronAttentionRefresh() {
     if (e && e.status) return; // auth / rate-limit — leave the last good state
     cronAttentionState = { items: [], loaded: true };
   }
-  if (cronDetailJobId !== null) renderCronTimelinePanel(cronDetailJobId);
+  if (cronDrawerState.jobId !== null) renderCronTimelinePanel(cronDrawerState.jobId);
 }
 
 // cronAttentionConfirm resolves a queue item as "already done" (no replay).

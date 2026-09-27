@@ -11,7 +11,7 @@
 import { getToken } from './dashboard.js';
 import { showToast } from './nz_util.js';
 import { showAPIError, showNetworkError } from './utilities.js';
-import { cronDetailJobId, renderCronDrawer } from './cron_drawer.js';
+import { cronDrawerState, renderCronDrawer } from './cron_drawer.js';
 
 const deps = {
   cronJobs: null, // () => Job[]
@@ -57,8 +57,8 @@ function cronTriggerButtonState(j) {
 // state and scroll position inside the drawer intact (a full
 // renderCronDrawer here used to wipe all three for 10 s after 立即执行).
 function cronDrawerRefreshTriggerBtn() {
-  if (cronDetailJobId === null) return;
-  const job = (deps.cronJobs() || []).find(x => x && x.id === cronDetailJobId);
+  if (cronDrawerState.jobId === null) return;
+  const job = (deps.cronJobs() || []).find(x => x && x.id === cronDrawerState.jobId);
   if (!job) return;
   const btns = document.querySelectorAll('#cron-detail-pane .cron-drawer-actions .cda-btn.primary');
   if (!btns.length) return;
@@ -142,7 +142,7 @@ async function cronTriggerNow(id) {
   // waiting for the 200 ms tick. List ghost Run isn't repainted per row
   // (would be expensive on 500-job dashboards) — its disabled-after-trigger
   // state is read at render time.
-  if (cronDetailJobId === id) renderCronDrawer();
+  if (cronDrawerState.jobId === id) renderCronDrawer();
   try {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
@@ -152,7 +152,7 @@ async function cronTriggerNow(id) {
       // Failure — clear the cooldown immediately so the user can retry.
       // The 10 s floor would be punishing on a transient 502.
       cronTriggerCooldownClear(id);
-      if (cronDetailJobId === id) renderCronDrawer();
+      if (cronDrawerState.jobId === id) renderCronDrawer();
       const raw = await r.text().catch(() => '');
       showAPIError('立即执行定时任务', r.status, raw);
       return;
@@ -164,7 +164,7 @@ async function cronTriggerNow(id) {
     showToast('已派发执行', 'success', 1500);
   } catch (e) {
     cronTriggerCooldownClear(id);
-    if (cronDetailJobId === id) renderCronDrawer();
+    if (cronDrawerState.jobId === id) renderCronDrawer();
     showNetworkError('立即执行定时任务', e);
   }
 }

@@ -42,6 +42,9 @@ export const composer = {
   // {file, id, status: 'uploading'|'ready'|'error'}
   pendingFiles: [],
   sending: false,
+  // voiceInputMode: the composer shows the hold-to-talk mic instead of the
+  // textarea (toggled by voice.js, read by the composer render).
+  voiceInputMode: false,
 };
 
 // transcript: the events pane: time cursors, paging and fetch generations.
