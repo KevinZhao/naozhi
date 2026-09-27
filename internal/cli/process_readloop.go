@@ -658,8 +658,7 @@ func (p *Process) notifyLinker(ev clievent.Event, nowMS int64, isSystemInit bool
 		return
 	}
 	if isSystemInit && ev.SessionID != "" {
-		// cachedProjectDir avoids a rune scan + os.UserHomeDir syscall per init.
-		p.linker.SetContext(p.cachedProjectDir, ev.SessionID)
+		p.linker.SetContext(p.linkerProjectDir(), ev.SessionID)
 	}
 	// Resolve for BOTH in-process teammates (task_type="in_process_teammate")
 	// AND standalone sub-agents (task_type often empty/vendor-specific): both

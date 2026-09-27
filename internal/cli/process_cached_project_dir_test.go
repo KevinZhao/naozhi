@@ -11,7 +11,7 @@ import (
 )
 
 // TestProcess_cachedProjectDir pins [R112714-PERF-2]: InitLinker must
-// populate cachedProjectDir so notifyLinker never recomputes subagent.ProjectDir
+// populate the project dir so notifyLinker never recomputes subagent.ProjectDir
 // on every system/init event.
 func TestProcess_cachedProjectDir(t *testing.T) {
 	t.Parallel()
@@ -21,12 +21,12 @@ func TestProcess_cachedProjectDir(t *testing.T) {
 
 	wantSuffix := "-home-ec2-user-workspace-naozhi"
 	wantFull := filepath.Join(os.Getenv("HOME"), ".claude", "projects", wantSuffix)
-	if p.cachedProjectDir != wantFull {
-		t.Errorf("cachedProjectDir = %q, want %q", p.cachedProjectDir, wantFull)
+	if got := p.linkerProjectDir(); got != wantFull {
+		t.Errorf("project dir = %q, want %q", got, wantFull)
 	}
 	// Verify it matches subagent.ProjectDir(cwd) exactly.
-	if got := subagent.ProjectDir(cwd); got != p.cachedProjectDir {
-		t.Errorf("cachedProjectDir %q != subagent.ProjectDir %q", p.cachedProjectDir, got)
+	if got := subagent.ProjectDir(cwd); got != p.linkerProjectDir() {
+		t.Errorf("project dir %q != subagent.ProjectDir %q", p.linkerProjectDir(), got)
 	}
 }
 
@@ -36,8 +36,8 @@ func TestProcess_cachedProjectDir_empty(t *testing.T) {
 	t.Parallel()
 	p := &Process{eventLog: ring.NewEventLog(0)}
 	p.InitLinker("")
-	if p.cachedProjectDir != "" {
-		t.Errorf("cachedProjectDir should be empty for empty cwd, got %q", p.cachedProjectDir)
+	if got := p.linkerProjectDir(); got != "" {
+		t.Errorf("project dir should be empty for empty cwd, got %q", got)
 	}
 }
 
