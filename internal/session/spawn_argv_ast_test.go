@@ -61,7 +61,7 @@ func spawnOptionsLiteralFields(t *testing.T, file string) (fields []string, lite
 // per-field assertions in this package check ONE literal instead of hunting for
 // every construction site.
 //
-// Before argvSpawnOptions existed, spawnSession and driftCompareArgs each built
+// Before argvSpawnOptions existed, the spawn and driftCompareArgs each built
 // their own cli.SpawnOptions literal and were expected to stay mirrored by
 // comment discipline. That failed four times (model/effort, SettingsFile,
 // MCPConfigFile, DebugFile), each time silently: a field present on the spawn

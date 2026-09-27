@@ -23,9 +23,10 @@ func bootRouterWithStore(t *testing.T, sessions map[string]*ManagedSession) *Rou
 
 func chainOf(t *testing.T, r *Router, key string) []string {
 	t.Helper()
-	r.ss.RLock()
-	s := r.ss.Get(key)
-	r.ss.RUnlock()
+	var s *ManagedSession
+	r.ss.View(func(v sessView) {
+		s = v.Get(key)
+	})
 	if s == nil {
 		t.Fatalf("session %q not restored", key)
 	}
@@ -100,9 +101,9 @@ func TestAutoChainRetire_Idempotent(t *testing.T) {
 
 	r := NewRouter(RouterConfig{MaxProcs: 3})
 	t.Cleanup(func() { r.Shutdown() })
-	r.ss.Lock()
-	r.ss.Put(key, src)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(key, src)
+	})
 
 	r.retireAutoChainOnce()
 	first := src.SnapshotPrevSessionIDs()

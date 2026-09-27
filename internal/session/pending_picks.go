@@ -25,7 +25,7 @@ package session
 //     that resets keeps the chosen backend. Dropped at reset and terminal removal.
 //   - accessProfile is CONSUMED on the first spawn (read-and-delete in
 //     resolveSpawnParams), then gone.
-//   - tuning is CONSUMED on the first spawn (consumePendingTuningLocked), then
+//   - tuning is CONSUMED on the first spawn (consumePendingTuning), then
 //     gone.
 //
 // The comments this replaced said accessProfile was "one-shot like

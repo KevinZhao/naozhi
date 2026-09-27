@@ -10,7 +10,7 @@ import (
 // TestSpawnSession_ReusesPreInstalledSpawningKey pins the #775 (R62-GO-3)
 // fix invariant: when a guard channel is already in flight for key
 // (typically pre-installed by ResetAndRecreate before releasing the table lock for
-// proc.Close), spawnSession's prologue MUST reuse that channel rather than
+// proc.Close), the spawn's reserve MUST reuse that channel rather than
 // overwrite it. Overwriting would orphan any GetOrCreate goroutine parked on
 // the original channel — they'd never wake — and would also reopen the race
 // window where a concurrent GetOrCreate observes "no inflight marker" and
@@ -48,13 +48,12 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 	}
 
 	// And the map entry should be cleared so the next caller can spawn.
-	r.ss.Lock()
-	if _, stillPresent := r.ss.Ext().spawns.SpawnInFlight(key); stillPresent {
-		r.ss.Unlock()
+	var stillPresent bool
+	r.ss.View(func(v sessView) { _, stillPresent = v.Ext().spawns.SpawnInFlight(key) })
+	if stillPresent {
 		t.Fatal("in-flight entry still present after the spawn returned; " +
 			"EndSpawn failed to delete the (possibly reused) entry")
 	}
-	r.ss.Unlock()
 }
 
 // TestSpawnSession_FreshKeyInstallsOwnChannel pins the symmetric invariant:
@@ -69,21 +68,21 @@ func TestSpawnSession_FreshKeyInstallsOwnChannel(t *testing.T) {
 	// No pre-installed entry. The spawn must create one.
 	_, _ = spawnIn(r, key, nil)
 
-	r.ss.Lock()
-	defer r.ss.Unlock()
-	if _, present := r.ss.Ext().spawns.SpawnInFlight(key); present {
-		t.Fatal("in-flight entry leaked after the spawn failed " +
-			"(its exit should close+delete)")
-	}
+	r.ss.Update(func(tx sessTx) {
+		if _, present := tx.Ext().spawns.SpawnInFlight(key); present {
+			t.Fatal("in-flight entry leaked after the spawn failed " +
+				"(its exit should close+delete)")
+		}
+	})
 }
 
 // TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard exercises the
 // end-to-end #775 race: ResetAndRecreate is mid-tear-down with the table lock
 // released, and a concurrent GetOrCreate must NOT race in to spawn its own
-// session before ResetAndRecreate's spawnSession runs. With the guardCh in
+// session before ResetAndRecreate's spawn runs. With the guardCh in
 // place the concurrent caller observes (no session, but inflight marker)
 // and parks; without it the concurrent caller would observe (no session,
-// no marker) and break out of the wait loop into its own spawnSession
+// no marker) and break out of the wait loop into its own spawn
 // invocation — which is exactly the foot-gun the issue called out.
 //
 // The test simulates the unlock window deterministically: it pre-installs
@@ -98,9 +97,10 @@ func TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard(t *testing.T) {
 
 	// Stage: install guardCh as ResetAndRecreate does just before
 	// proc.Close.
-	r.ss.Lock()
-	guardCh := r.ss.Ext().spawns.BeginSpawn(key)
-	r.ss.Unlock()
+	var guardCh chan struct{}
+	r.ss.Update(func(tx sessTx) {
+		guardCh = tx.Ext().spawns.BeginSpawn(key)
+	})
 
 	// Launch N concurrent GetOrCreate. With the guard installed, none
 	// should successfully break out of the inflight-wait loop before we
@@ -130,11 +130,11 @@ func TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard(t *testing.T) {
 	}
 
 	// Now release the guard. Goroutines wake, retry the loop, and (since
-	// no session exists) fall through to their own spawnSession which
+	// no session exists) fall through to their own the spawn which
 	// fails fast against newTestRouter's nonexistent binary.
-	r.ss.Lock()
-	r.ss.Ext().spawns.EndSpawn(key, guardCh)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Ext().spawns.EndSpawn(key, guardCh)
+	})
 
 	done := make(chan struct{})
 	go func() {

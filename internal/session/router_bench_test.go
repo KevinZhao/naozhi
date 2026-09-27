@@ -23,7 +23,7 @@ import (
 //
 //	go test -run '^$' -bench 'BenchmarkRouter' -benchtime 2s ./internal/session/
 //
-// GetOrCreate on a missing key runs spawnSession to the Spawn call: with no CLI
+// GetOrCreate on a missing key runs the spawn to the Spawn call: with no CLI
 // wrapper configured it fails there with ErrNoCLIWrapper, after the full
 // reserve / unlock / relock / release round trip, without starting a process.
 
@@ -34,9 +34,7 @@ const (
 
 // benchInject installs a live session for key.
 func benchInject(r *Router, key string) {
-	r.ss.Lock()
 	injectSession(r, key, newIdleProc())
-	r.ss.Unlock()
 }
 
 // benchRouter builds a Router holding benchSessions live sessions, benchKey
@@ -60,7 +58,7 @@ func benchRouter(b *testing.B) *Router {
 }
 
 // startRouterChurn runs writers beside the measured reader: one drives
-// GetOrCreate on fresh keys (spawnSession's write-lock round trip), one sets
+// GetOrCreate on fresh keys (the spawn's write-lock round trip), one sets
 // per-key backend picks.
 func startRouterChurn(b *testing.B, r *Router) {
 	b.Helper()

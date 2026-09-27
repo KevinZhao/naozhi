@@ -73,12 +73,12 @@ func steadyStateAllocs(t *testing.T, n int) float64 {
 	r := NewRouter(RouterConfig{MaxProcs: 0, TTL: 0})
 	t.Cleanup(func() { r.Shutdown() })
 
-	r.ss.Lock()
-	for i := 0; i < n; i++ {
-		key := keyOf(i)
-		r.ss.Put(key, newSessionWithID(key, "id"))
-	}
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		for i := 0; i < n; i++ {
+			key := keyOf(i)
+			tx.Put(key, newSessionWithID(key, "id"))
+		}
+	})
 
 	for i := 0; i < 20; i++ {
 		snaps, _ := r.ListSessionsWithVersion()

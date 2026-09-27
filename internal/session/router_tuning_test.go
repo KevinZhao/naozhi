@@ -44,7 +44,7 @@ func mkTuningTestRouter(t *testing.T) *Router {
 		"codex":  cli.NewWrapper("/bin/false", &cli.CodexProtocol{}, "codex"),
 	})
 	r.bkStore.defaultBackend = "claude"
-	r.ss.Ext().picks.backend = make(map[string]string)
+	stateOf(r).picks.backend = make(map[string]string)
 	r.bkStore.setBackendEffortsForTest(map[string]string{})
 	return r
 }
@@ -55,7 +55,7 @@ func addTuningSession(r *Router, key, backend string, proc processIface) *Manage
 	if proc != nil {
 		s.storeProcess(proc)
 	}
-	r.ss.Put(key, s)
+	putT(r, key, s)
 	return s
 }
 
@@ -86,7 +86,7 @@ func TestSetSessionTuning_Validation(t *testing.T) {
 	if via, err := r.SetSessionTuning(ctx, "k1", strp("us.anthropic.claude-fable-5-1[1m]"), nil); err != nil || via != TuningAppliedDeferred {
 		t.Errorf("[1m] model: via=%q err=%v, want deferred/nil", via, err)
 	}
-	if got := r.ss.Get("k1").TuningModel(); got != "us.anthropic.claude-fable-5-1[1m]" {
+	if got := r.ss.Load("k1").TuningModel(); got != "us.anthropic.claude-fable-5-1[1m]" {
 		t.Errorf("[1m] model: recorded = %q", got)
 	}
 	if _, err := r.SetSessionTuning(ctx, "k1", strp("[1m]"), nil); err == nil {
@@ -102,7 +102,7 @@ func TestSetSessionTuning_Validation(t *testing.T) {
 	if via, err := r.SetSessionTuning(ctx, "k1", nil, strp("high")); err != nil || via != TuningAppliedDeferred {
 		t.Errorf("claude+effort: via=%q err=%v, want deferred/nil", via, err)
 	}
-	if got := r.ss.Get("k1").TuningEffort(); got != "high" {
+	if got := r.ss.Load("k1").TuningEffort(); got != "high" {
 		t.Errorf("claude+effort: recorded tier = %q, want high", got)
 	}
 	// Clearing it is fine too.
@@ -400,7 +400,7 @@ func TestSetSessionTuning_ClearModelNeverTakesRPC(t *testing.T) {
 // TestInstallFreshSessionLocked_InheritsTuning pins the respawn half of the
 // tuning lifecycle: SetSessionTuning's respawn/deferred paths only record
 // the override on the CURRENT ManagedSession, and the next spawn builds its
-// argv from it (resolveSpawnParamsLocked) — but installFreshSessionLocked
+// argv from it (resolveSpawnParams) — but installFreshSession
 // then REPLACES that struct. If the fresh struct does not carry the override
 // forward, sessions.json is rewritten without it, the following TTL recycle
 // spawns back on the config default, and a naozhi restart in between reads
@@ -417,28 +417,32 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 	old.SetTuningEffort("low")
 	old.SetUserLabel("my label")
 	old.setLabelOrigin("auto")
-	r.ss.Lock()
-	r.ss.Put(key, old)
-
-	// Mirror spawnSession: snapshot under the first the table lock hold, then install.
-	// The fresh entry must be fed from that snapshot, not from a re-read of
-	// the map — so swap the map entry for an unrelated stub in between (what
-	// RegisterForResume / Remove can do during the unlocked history copy) and
-	// require the ORIGINAL values to win.
-	_, _, _, _, ov := snapshotOldSession(sessView{}, old)
-	stub := newSessionWithID(key, "sess-stub")
-	stub.SetTuningModel("stub-model")
-	stub.SetUserLabel("stub label")
-	r.ss.Put(key, stub)
-
-	fresh := r.installFreshSession(r.ss.AssumeLocked(),
-		key, &cli.Process{}, "/ws", "kiro", "", wrapper, "sess-old",
-		nil, nil, 0, 0, 0, false, "sess-old", 0, ov,
+	var (
+		stub  *ManagedSession
+		fresh *ManagedSession
 	)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(key, old)
+
+		// Mirror the spawn: snapshot under the first the table lock hold, then install.
+		// The fresh entry must be fed from that snapshot, not from a re-read of
+		// the map — so swap the map entry for an unrelated stub in between (what
+		// RegisterForResume / Remove can do during the unlocked history copy) and
+		// require the ORIGINAL values to win.
+		_, _, _, _, ov := snapshotOldSession(sessView{}, old)
+		stub = newSessionWithID(key, "sess-stub")
+		stub.SetTuningModel("stub-model")
+		stub.SetUserLabel("stub label")
+		tx.Put(key, stub)
+
+		fresh = r.installFreshSession(tx,
+			key, &cli.Process{}, "/ws", "kiro", "", wrapper, "sess-old",
+			nil, nil, 0, 0, 0, false, "sess-old", 0, ov,
+		)
+	})
 
 	if fresh == old {
-		t.Fatal("test premise broken: installFreshSessionLocked must allocate a new struct")
+		t.Fatal("test premise broken: installFreshSession must allocate a new struct")
 	}
 	if got := fresh.TuningModel(); got != "claude-haiku-4.5" {
 		t.Errorf("TuningModel after respawn = %q, want claude-haiku-4.5", got)
@@ -456,13 +460,13 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 		t.Error("fresh session not published under key")
 	}
 	if fresh.TuningModel() == "stub-model" || fresh.UserLabel() == "stub label" {
-		t.Error("fresh entry took values from a re-read of r.ss.Get(key) instead of the snapshot")
+		t.Error("fresh entry took values from a re-read of r.ss.Load(key) instead of the snapshot")
 	}
 }
 
 // TestRenameSession_InheritsTuning covers the takeover/rename path, which
 // builds its own fresh struct instead of going through
-// installFreshSessionLocked and must carry the override too.
+// installFreshSession and must carry the override too.
 func TestRenameSession_InheritsTuning(t *testing.T) {
 	r := NewRouter(RouterConfig{})
 	const oldKey = "scratch:abc:general:general"
@@ -473,9 +477,9 @@ func TestRenameSession_InheritsTuning(t *testing.T) {
 	s.SetTuningEffort("low")
 	s.SetUserLabel("auto title")
 	s.setLabelOrigin("auto")
-	r.ss.Lock()
-	r.ss.Put(oldKey, s)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(oldKey, s)
+	})
 
 	if !r.RenameSession(oldKey, newKey) {
 		t.Fatal("RenameSession returned false")
@@ -502,7 +506,7 @@ func TestSetSessionTuning_RespawnReleasesActiveSlot(t *testing.T) {
 	r := mkTuningTestRouter(t)
 	proc := &tuningFakeProc{TestProcess: NewTestProcess()}
 	addTuningSession(r, "k1", "kiro", proc)
-	r.ss.SetActive(1) // the session above is the one live, non-exempt entry
+	setActiveT(r, 1) // the session above is the one live, non-exempt entry
 
 	mode, err := r.SetSessionTuning(context.Background(), "k1", nil, strp("max"))
 	if err != nil {
@@ -519,8 +523,8 @@ func TestSetSessionTuning_RespawnReleasesActiveSlot(t *testing.T) {
 // TestSetSessionTuning_PendingSession covers the pre-spawn path: a dashboard
 // session exists only client-side until its first message, but its header
 // chips are already clickable. The pick must be recorded server-side, shape
-// the FIRST spawn's argv (resolveSpawnParamsLocked), land on the fresh
-// ManagedSession (spawnSession's consume step) and then leave no one-shot
+// the FIRST spawn's argv (resolveSpawnParams), land on the fresh
+// ManagedSession (the spawn's consume step) and then leave no one-shot
 // residue. Clearing both fields before spawn deletes the record outright.
 func TestSetSessionTuning_PendingSession(t *testing.T) {
 	r := mkTuningTestRouter(t)
@@ -534,10 +538,10 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 	if via, err := r.SetSessionTuning(ctx, key, nil, strp("high")); err != nil || via != TuningAppliedDeferred {
 		t.Fatalf("effort on pending key: via=%q err=%v, want deferred/nil", via, err)
 	}
-	if _, ok := r.ss.Lookup(key); ok {
+	if _, ok := lookupT(r, key); ok {
 		t.Fatal("recording a pending pick must not create a ManagedSession")
 	}
-	if got := r.ss.Ext().picks.tuning[key]; got != (pendingTuning{Model: "us.anthropic.claude-opus-5[1m]", Effort: "high"}) {
+	if got := stateOf(r).picks.tuning[key]; got != (pendingTuning{Model: "us.anthropic.claude-opus-5[1m]", Effort: "high"}) {
 		t.Fatalf("pending record = %+v", got)
 	}
 
@@ -550,33 +554,38 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 	}
 
 	// First spawn's argv reads the parked pick (tuning is the top of both chains).
-	r.ss.Lock()
-	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
-	r.ss.Unlock()
+	var sp spawnParams
+	r.ss.Update(func(tx sessTx) {
+		sp = r.resolveSpawnParams(tx, key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
+	})
 	if sp.Model != "us.anthropic.claude-opus-5[1m]" || sp.Effort != "high" {
 		t.Errorf("first spawn params: model=%q effort=%q, want the parked pick", sp.Model, sp.Effort)
 	}
 	// resolve is a read: a failed Spawn() must leave the pick for the retry.
-	if _, ok := r.ss.Ext().picks.tuning[key]; !ok {
-		t.Error("resolveSpawnParamsLocked must not consume the pending pick")
+	if _, ok := stateOf(r).picks.tuning[key]; !ok {
+		t.Error("resolveSpawnParams must not consume the pending pick")
 	}
 
-	// spawnSession's consume step moves it onto the fresh entry and drops it.
-	r.ss.Lock()
-	ov := r.consumePendingTuning(r.ss.AssumeLocked(), key, sessionOverrides{userLabel: "keep"})
-	_, stillThere := r.ss.Ext().picks.tuning[key]
-	r.ss.Unlock()
+	// the spawn's consume step moves it onto the fresh entry and drops it.
+	var (
+		ov         sessionOverrides
+		stillThere bool
+	)
+	r.ss.Update(func(tx sessTx) {
+		ov = r.consumePendingTuning(tx, key, sessionOverrides{userLabel: "keep"})
+		_, stillThere = tx.Ext().picks.tuning[key]
+	})
 	if ov.tuningModel != "us.anthropic.claude-opus-5[1m]" || ov.tuningEffort != "high" || ov.userLabel != "keep" {
 		t.Errorf("consumed overrides = %+v", ov)
 	}
 	if stillThere {
 		t.Error("consume must delete the one-shot record")
 	}
-	r.ss.Lock()
-	if ov2 := r.consumePendingTuning(r.ss.AssumeLocked(), key, sessionOverrides{}); ov2 != (sessionOverrides{}) {
-		t.Errorf("second consume must be a no-op, got %+v", ov2)
-	}
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		if ov2 := r.consumePendingTuning(tx, key, sessionOverrides{}); ov2 != (sessionOverrides{}) {
+			t.Errorf("second consume must be a no-op, got %+v", ov2)
+		}
+	})
 
 	// 恢复默认 on both fields before any spawn leaves no residue.
 	if _, err := r.SetSessionTuning(ctx, key, strp("sonnet"), strp("low")); err != nil {
@@ -585,7 +594,7 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 	if _, err := r.SetSessionTuning(ctx, key, strp(""), strp("")); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := r.ss.Ext().picks.tuning[key]; ok {
+	if _, ok := stateOf(r).picks.tuning[key]; ok {
 		t.Error("clearing both fields must delete the pending record")
 	}
 }
@@ -596,22 +605,22 @@ func TestSetSessionTuning_PendingSession(t *testing.T) {
 func TestSetSessionTuning_PendingCapacity(t *testing.T) {
 	r := mkTuningTestRouter(t)
 	ctx := context.Background()
-	r.ss.Ext().picks.tuning = make(map[string]pendingTuning, maxTuningOverrides)
+	stateOf(r).picks.tuning = make(map[string]pendingTuning, maxTuningOverrides)
 	for i := 0; i < maxTuningOverrides; i++ {
-		r.ss.Ext().picks.tuning["k:"+strings.Repeat("x", 3)+string(rune('a'+i%26))+strconv.Itoa(i)] = pendingTuning{Model: "m"}
+		stateOf(r).picks.tuning["k:"+strings.Repeat("x", 3)+string(rune('a'+i%26))+strconv.Itoa(i)] = pendingTuning{Model: "m"}
 	}
 	if _, err := r.SetSessionTuning(ctx, "dashboard:direct:new:general", strp("opus"), nil); !errors.Is(err, ErrTuningCapacity) {
 		t.Errorf("new key at cap: err = %v, want ErrTuningCapacity", err)
 	}
 	var existing string
-	for k := range r.ss.Ext().picks.tuning {
+	for k := range stateOf(r).picks.tuning {
 		existing = k
 		break
 	}
 	if _, err := r.SetSessionTuning(ctx, existing, strp("opus"), nil); err != nil {
 		t.Errorf("updating an existing key at cap must succeed: %v", err)
 	}
-	if got := r.ss.Ext().picks.tuning[existing].Model; got != "opus" {
+	if got := stateOf(r).picks.tuning[existing].Model; got != "opus" {
 		t.Errorf("existing key model = %q, want opus", got)
 	}
 }

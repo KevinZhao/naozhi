@@ -23,13 +23,13 @@ func TestRegisterForResume_StaleRotatedSID_DoesNotMisroute(t *testing.T) {
 	// Session C legitimately occupies detKey with its own live SID.
 	sessC := &ManagedSession{key: detKey}
 	sessC.setSessionID(liveSID)
-	r.ss.Lock()
-	r.ss.Put(detKey, sessC)
-	r.ss.SetID(liveSID, detKey)
-	// Dangling residue: the retired SID A still maps to detKey from a prior
-	// incarnation that rotated its SID.
-	r.ss.SetID(retiredSID, detKey)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(detKey, sessC)
+		tx.SetID(liveSID, detKey)
+		// Dangling residue: the retired SID A still maps to detKey from a prior
+		// incarnation that rotated its SID.
+		tx.SetID(retiredSID, detKey)
+	})
 
 	const resumeKey = "feishu:direct:bob:general"
 	got := r.RegisterForResume(resumeKey, retiredSID, "/tmp/ws", "resume A please")
@@ -43,19 +43,19 @@ func TestRegisterForResume_StaleRotatedSID_DoesNotMisroute(t *testing.T) {
 	if got != resumeKey {
 		t.Fatalf("RegisterForResume = %q, want fresh entry %q", got, resumeKey)
 	}
-	r.ss.RLock()
-	defer r.ss.RUnlock()
-	// The stale residue must be healed: retiredSID now maps to the new key.
-	if mapped := keyForID(r, retiredSID); mapped != resumeKey {
-		t.Errorf("idToKey[%q] = %q, want %q (self-healed)", retiredSID, mapped, resumeKey)
-	}
-	// Session C and its live SID mapping must be untouched.
-	if mapped := keyForID(r, liveSID); mapped != detKey {
-		t.Errorf("idToKey[%q] = %q, want %q (unrelated session untouched)", liveSID, mapped, detKey)
-	}
-	if r.ss.Get(detKey) != sessC {
-		t.Errorf("session at %q was unexpectedly replaced", detKey)
-	}
+	r.ss.View(func(v sessView) {
+		// The stale residue must be healed: retiredSID now maps to the new key.
+		if mapped := keyIn(v, retiredSID); mapped != resumeKey {
+			t.Errorf("idToKey[%q] = %q, want %q (self-healed)", retiredSID, mapped, resumeKey)
+		}
+		// Session C and its live SID mapping must be untouched.
+		if mapped := keyIn(v, liveSID); mapped != detKey {
+			t.Errorf("idToKey[%q] = %q, want %q (unrelated session untouched)", liveSID, mapped, detKey)
+		}
+		if v.Get(detKey) != sessC {
+			t.Errorf("session at %q was unexpectedly replaced", detKey)
+		}
+	})
 }
 
 // TestRegisterForResume_MatchingSID_StillDedups guards against the #2093 fix
@@ -69,10 +69,10 @@ func TestRegisterForResume_MatchingSID_StillDedups(t *testing.T) {
 	const sid = "sid-live"
 	s := &ManagedSession{key: key}
 	s.setSessionID(sid)
-	r.ss.Lock()
-	r.ss.Put(key, s)
-	r.ss.SetID(sid, key)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(key, s)
+		tx.SetID(sid, key)
+	})
 
 	got := r.RegisterForResume("feishu:direct:bob:general", sid, "/tmp/ws", "p")
 	if got != key {
@@ -88,18 +88,18 @@ func TestRegisterForResume_StaleNoSession_CleansAndCreates(t *testing.T) {
 	r := NewRouter(RouterConfig{})
 
 	const sid = "sid-orphan"
-	r.ss.Lock()
-	r.ss.SetID(sid, "ghost:key:no:session") // points at a key with no session
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.SetID(sid, "ghost:key:no:session") // points at a key with no session
+	})
 
 	const resumeKey = "feishu:direct:bob:general"
 	got := r.RegisterForResume(resumeKey, sid, "/tmp/ws", "p")
 	if got != resumeKey {
 		t.Fatalf("RegisterForResume = %q, want fresh entry %q", got, resumeKey)
 	}
-	r.ss.RLock()
-	defer r.ss.RUnlock()
-	if mapped := keyForID(r, sid); mapped != resumeKey {
-		t.Errorf("idToKey[%q] = %q, want %q", sid, mapped, resumeKey)
-	}
+	r.ss.View(func(v sessView) {
+		if mapped := keyIn(v, sid); mapped != resumeKey {
+			t.Errorf("idToKey[%q] = %q, want %q", sid, mapped, resumeKey)
+		}
+	})
 }

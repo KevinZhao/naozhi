@@ -3,7 +3,7 @@ package session
 // system_prompt_argv_test.go — cross-seam regression tests for #2493.
 //
 // The bug survived because every existing test stopped at one side of the
-// AgentOpts → resolveSpawnParamsLocked → BuildArgs seam: upstream tests
+// AgentOpts → resolveSpawnParams → BuildArgs seam: upstream tests
 // asserted the prompt was placed in AgentOpts.ExtraArgs, downstream tests
 // asserted `--append-system-prompt` in ExtraArgs MUST be stripped. Both were
 // green while the prompt never reached argv. The tests here run the
@@ -11,7 +11,7 @@ package session
 //
 // TestSystemPrompt_PlannerPath_ReachesArgv and
 // TestSystemPrompt_ScratchPath_ReachesArgv use only APIs that predate the fix
-// (KeyResolver.ResolveForChat / ScratchPool.Open / resolveSpawnParamsLocked /
+// (KeyResolver.ResolveForChat / ScratchPool.Open / resolveSpawnParams /
 // BuildArgs) and fail on the pre-fix tree. Verified against 49bffb15 (the
 // master this fix was branched from) with only the argvSpawnOptions call
 // adapted to its 4-arg signature: both failed with `argv values = []`, and
@@ -27,7 +27,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-// mkSystemPromptRouter builds the minimal Router resolveSpawnParamsLocked
+// mkSystemPromptRouter builds the minimal Router resolveSpawnParams
 // needs, defaulting to the claude backend (the only one that renders the
 // prompt).
 func mkSystemPromptRouter(t *testing.T) *Router {
@@ -41,17 +41,17 @@ func mkSystemPromptRouter(t *testing.T) *Router {
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
 	r.bkStore.defaultBackend = "claude"
-	r.ss.Ext().picks.backend = make(map[string]string)
+	stateOf(r).picks.backend = make(map[string]string)
 	r.claudeDir = t.TempDir()
 	r.kiroSessionsDir = t.TempDir()
 	return r
 }
 
-// spawnArgvFor reproduces exactly what spawnSession hands to the shim for a
+// spawnArgvFor reproduces exactly what the spawn hands to the shim for a
 // fresh session: the production resolver feeding the production argv
 // constructor feeding the backend's BuildArgs.
 func spawnArgvFor(r *Router, key string, opts AgentOpts) []string {
-	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, "", opts)
+	sp := resolveT(r, key, "", opts)
 	return sp.Wrapper.Protocol.BuildArgs(
 		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
 }
@@ -69,7 +69,7 @@ func appendSystemPromptValues(args []string) []string {
 }
 
 // TestSystemPrompt_AgentOpts_ReachesArgv is the direct seam test the issue
-// asked for: AgentOpts.SystemPrompt → resolveSpawnParamsLocked → BuildArgs
+// asked for: AgentOpts.SystemPrompt → resolveSpawnParams → BuildArgs
 // must put the prompt in the final argv, exactly once.
 func TestSystemPrompt_AgentOpts_ReachesArgv(t *testing.T) {
 	t.Parallel()
@@ -247,7 +247,7 @@ func TestSystemPrompt_NoDriftRestart(t *testing.T) {
 	key := "project:proj:planner"
 	sess := newSessionWithID(key, "sess-sp-1")
 	sess.SetBackend("claude")
-	r.ss.Put(key, sess)
+	putT(r, key, sess)
 
 	state, sp := spawnShimState(t, r, key, "", AgentOpts{
 		Backend: "claude", SystemPrompt: "AGENT\n\nPLAN", Exempt: true, Workspace: t.TempDir(),

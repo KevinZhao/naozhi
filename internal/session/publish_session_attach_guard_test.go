@@ -1,6 +1,6 @@
 package session
 
-// R215-ARCH-P2-2 follow-up: the publishSessionLocked funnel collapsed five
+// R215-ARCH-P2-2 follow-up: the publishSession funnel collapsed five
 // production publish sites into one helper, but it still trusted the
 // alreadyAttached parameter. A future caller that flips alreadyAttached
 // to true without first calling SetHistorySource would silently leave the
@@ -8,7 +8,7 @@ package session
 // `return nil` and yields a blank dashboard "history" drawer for that
 // session — exactly the symptom R215-ARCH-P2-2 was filed against.
 //
-// The guard added in publishSessionLocked converts the silent failure
+// The guard added in publishSession converts the silent failure
 // into an observable one (slog.Error) and installs history.Noop so
 // downstream callers don't see nil. This test pins that contract.
 
@@ -21,7 +21,7 @@ import (
 // having actually called SetHistorySource. The funnel must NOT publish
 // the session with src==nil; the post-publish guarantee is that
 // loadHistorySource returns non-nil for any session reachable through
-// r.ss.sessions.
+// the session table.
 func TestPublishSessionLocked_AlreadyAttachedButNilStillGetsNoop(t *testing.T) {
 	t.Parallel()
 
@@ -29,20 +29,24 @@ func TestPublishSessionLocked_AlreadyAttachedButNilStillGetsNoop(t *testing.T) {
 	s := &ManagedSession{key: "guard:direct:user1:general"}
 
 	// Caller LIES: claims alreadyAttached but never set the source.
-	r.ss.Lock()
-	r.publishSession(r.ss.AssumeLocked(), s.key, s, true)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		r.publishSession(tx, s.key, s, true)
+	})
 
 	if got := s.loadHistorySource(); got == nil {
-		t.Fatal("publishSessionLocked left HistorySource nil despite the post-publish guard — EventEntriesBeforeCtx would silently return empty and the dashboard 'history' drawer would blank")
+		t.Fatal("publishSession left HistorySource nil despite the post-publish guard — EventEntriesBeforeCtx would silently return empty and the dashboard 'history' drawer would blank")
 	}
 
 	// Verify the session WAS actually inserted (the guard fires inline,
 	// not as an early return).
-	r.ss.RLock()
-	stored, ok := r.ss.Lookup(s.key)
-	r.ss.RUnlock()
+	var (
+		stored *ManagedSession
+		ok     bool
+	)
+	r.ss.View(func(v sessView) {
+		stored, ok = v.Lookup(s.key)
+	})
 	if !ok || stored != s {
-		t.Fatalf("publishSessionLocked guard short-circuited the insertion: got=%v ok=%v", stored, ok)
+		t.Fatalf("publishSession guard short-circuited the insertion: got=%v ok=%v", stored, ok)
 	}
 }

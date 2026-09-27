@@ -129,7 +129,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []clieven
 	ctx, cancel := context.WithCancel(ctx)
 	// Store the cancel func with proc=nil first so a concurrent Interrupt in
 	// this window still fires; once proc is known the box is re-stored with
-	// proc bound, letting a later Interrupt detect a spawnSession swap and skip
+	// proc bound, letting a later Interrupt detect a respawn swap and skip
 	// the stale cancel (#381).
 	box := &cancelBox{cancel: cancel}
 	s.sendCancel.Store(box)
@@ -211,7 +211,7 @@ func (s *ManagedSession) Interrupt() bool {
 // fireSendCancel cancels the in-flight Send()'s context only when the cancel
 // func still targets the live process, or is not yet bound to any process
 // (box.proc==nil window inside Send before loadProcess). A concurrent
-// spawnSession may have replaced the process after Send stored its cancel;
+// A spawn may have replaced the process after Send stored its cancel;
 // cancelling that stale ctx would be a no-op against the new process, so it is
 // skipped rather than reported as success (#381).
 //

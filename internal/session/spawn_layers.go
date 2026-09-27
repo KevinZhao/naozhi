@@ -16,7 +16,7 @@ type argvLayers struct {
 }
 
 // mergeArgvLayers is the single, side-effect-free precedence rule for the
-// argv-bearing spawn parameters, shared by resolveSpawnParamsLocked (real spawn)
+// argv-bearing spawn parameters, shared by resolveSpawnParams (real spawn)
 // and driftCompareArgs (drift on reconnect) so the two argv only differ when
 // something genuinely changed since the shim was spawned (#2494). Pure: no
 // Router access; a fresh Args slice is returned so no caller aliases bd.Args.

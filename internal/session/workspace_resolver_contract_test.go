@@ -11,7 +11,7 @@ import (
 // workspace decision (opts.Workspace > workspaceOverrides[chatKey] > old
 // session workspace > router default) MUST live in exactly one place —
 // resolveSpawnParams. Earlier rounds had this logic copy-pasted
-// across spawnSession / Resume / ResetAndRecreate; centralisation
+// across the spawn / Resume / ResetAndRecreate; centralisation
 // happened in R70-ARCH-H2 (extracted into spawnParams) but no contract
 // test pinned the invariant, so a future "quick fix" could silently
 // reintroduce the duplication.
@@ -44,7 +44,7 @@ func TestWorkspaceResolution_SingleSiteContract(t *testing.T) {
 			len(matches))
 	}
 	// Sanity: the surviving site must sit within resolveSpawnParams,
-	// not bare-floating in spawnSession or ResetAndRecreate. Find the
+	// not bare-floating in the spawn or ResetAndRecreate. Find the
 	// preceding `func` declaration.
 	idx := matches[0][0]
 	prefix := body[:idx]

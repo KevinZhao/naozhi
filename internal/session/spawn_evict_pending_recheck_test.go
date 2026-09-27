@@ -10,10 +10,10 @@ import (
 
 // TestSpawnSession_RechecksPendingAfterEvictWindow pins #2082.
 //
-// spawnSession's non-exempt capacity admission snapshots pendingSpawns under
+// the spawn's non-exempt capacity admission snapshots pendingSpawns under
 // the table lock (router_lifecycle.go:707). When at capacity it calls evictOldest(),
 // which releases and re-acquires the table lock around proc.Close() (router_capacity.go).
-// A concurrent spawnSession can ++ pendingSpawns inside that unlock window. The
+// A concurrent spawn can ++ pendingSpawns inside that unlock window. The
 // post-evict recheck must therefore re-read pendingSpawns rather than reuse the
 // pre-evict snapshot — otherwise a stale (smaller) value lets us over-spawn past
 // maxProcs.
@@ -31,10 +31,10 @@ func TestSpawnSession_RechecksPendingAfterEvictWindow(t *testing.T) {
 
 	hook := newHookCloseProc(func() {
 		// Runs after evictOldest has released the table lock for proc.Close(). Mimic a
-		// concurrent spawnSession that acquired a pending slot in the window.
-		r.ss.Lock()
-		r.ss.Ext().spawns.AcquireSpawnSlot()
-		r.ss.Unlock()
+		// concurrent spawn that acquired a pending slot in the window.
+		r.ss.Update(func(tx sessTx) {
+			tx.Ext().spawns.AcquireSpawnSlot()
+		})
 	})
 	old := injectSession(r, "old-key", hook)
 	old.lastActive.Store(time.Now().Add(-1 * time.Hour).UnixNano())

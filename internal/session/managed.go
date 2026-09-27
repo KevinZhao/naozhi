@@ -216,7 +216,7 @@ type processBox struct{ p processIface }
 // cancelBox binds a Send()'s context cancel func to the process pointer that
 // Send loaded for that turn, so Interrupt() only fires cancel when the live
 // process still matches the in-flight Send's target (#381). Send stores the
-// cancel func before loadProcess(); if a concurrent spawnSession replaces
+// cancel func before loadProcess(); if a concurrent spawn replaces
 // the process in that window, a bare cancel would target the old ctx and
 // silently no-op. Interrupt skips a stale box and reports failure instead.
 // nil proc means "not yet bound" — Interrupt still fires it because that
@@ -285,7 +285,7 @@ type ManagedSession struct {
 	costMu sync.Mutex
 	// sendCancel holds the in-flight Send()'s cancel func bound to the process
 	// it targets (see cancelBox), so Interrupt() can skip a cancel whose
-	// process has been replaced by a concurrent spawnSession (#381).
+	// process has been replaced by a concurrent spawn (#381).
 	sendCancel atomic.Pointer[cancelBox]
 	// workspace is the effective cwd at spawn time. Writers hold the table lock in the
 	// router, but Snapshot() is called from Hub handlers WITHOUT the table lock, so
@@ -306,7 +306,7 @@ type ManagedSession struct {
 	// labelOrigin records who set userLabel: ""/"user" (operator) or "auto"
 	// (sysession daemon). Once a human writes, daemons must leave the session
 	// alone unless ClearUserLabelOrigin resets it (docs/rfc/system-session.md
-	// §7.3). Writes must go through Router.SetUserLabelWithOrigin so the the table lock
+	// §7.3). Writes must go through Router.SetUserLabelWithOrigin so the table lock
 	// re-read closes the daemon-vs-user race (RFC §11.1).
 	labelOrigin atomic.Pointer[string]
 	// model is the most-recent CLI model identifier (system/init for claude,
@@ -315,7 +315,7 @@ type ManagedSession struct {
 	model atomic.Pointer[string]
 	// tuningModel / tuningEffort are the operator's per-session overrides
 	// (docs/rfc/dashboard-model-effort-control.md §4.3); "" = none. They top
-	// resolveSpawnParamsLocked's precedence and persist to sessions.json.
+	// resolveSpawnParams's precedence and persist to sessions.json.
 	// Unlike `model` (REPORTED) they record what the operator DEMANDED;
 	// tuningspec-validated on write and store load so a hand-edited
 	// sessions.json cannot inject argv (§4.6).

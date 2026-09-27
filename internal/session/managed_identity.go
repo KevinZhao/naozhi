@@ -104,7 +104,7 @@ func (s *ManagedSession) SetBackend(id string) {
 }
 
 // AccessProfile returns the access-profile ID this session spawned under
-// ("" = global default). Used by resolveSpawnParamsLocked for resume-lock and
+// ("" = global default). Used by resolveSpawnParams for resume-lock and
 // by the store persister. RFC project-access-profile §7.
 func (s *ManagedSession) AccessProfile() string { return s.loadCLIIdentity().accessProfile }
 

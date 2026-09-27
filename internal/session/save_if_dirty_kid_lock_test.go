@@ -78,9 +78,9 @@ func TestSaveIfDirty_KnownIDsConcurrentTrackAndSnapshot(t *testing.T) {
 			default:
 			}
 			i++
-			r.ss.Lock()
-			r.kid.Track(sessionIDForIter(i))
-			r.ss.Unlock()
+			r.ss.Update(func(tx sessTx) {
+				r.kid.Track(sessionIDForIter(i))
+			})
 		}
 	}()
 

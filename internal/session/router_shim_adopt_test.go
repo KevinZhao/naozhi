@@ -69,13 +69,18 @@ func TestAdoptLiveShimLocked_PublishesSession(t *testing.T) {
 	if got == nil {
 		t.Fatal("adoptLiveShim returned nil")
 	}
-	r.ss.Lock()
-	published, ok := r.ss.Lookup(key)
-	mappedKey := keyForID(r, state.SessionID)
-	r.ss.Unlock()
+	var (
+		published *ManagedSession
+		ok        bool
+		mappedKey string
+	)
+	r.ss.Update(func(tx sessTx) {
+		published, ok = tx.Lookup(key)
+		mappedKey = keyIn(tx.View, state.SessionID)
+	})
 
 	if !ok {
-		t.Fatal("session not published into r.ss.sessions")
+		t.Fatal("session not published into the session table")
 	}
 	if published != got {
 		t.Error("returned session differs from the published one")

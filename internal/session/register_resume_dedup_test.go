@@ -34,13 +34,13 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 	// chain owns only liveSID — it has nothing to do with oldSID.
 	unrelated := &ManagedSession{key: reusedKey}
 	unrelated.setSessionID(liveSID)
-	r.ss.Lock()
-	r.publishSession(r.ss.AssumeLocked(), reusedKey, unrelated, false)
-	r.ss.SetID(liveSID, reusedKey)
-	// The leaked residue: oldSID still maps to the reused key even though the
-	// session living there (C) never owned oldSID.
-	r.ss.SetID(oldSID, reusedKey)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		r.publishSession(tx, reusedKey, unrelated, false)
+		tx.SetID(liveSID, reusedKey)
+		// The leaked residue: oldSID still maps to the reused key even though the
+		// session living there (C) never owned oldSID.
+		tx.SetID(oldSID, reusedKey)
+	})
 
 	// User resumes the OLD session A.
 	got := r.RegisterForResume(resumeKey, oldSID, "/ws", "hello again")
@@ -56,9 +56,13 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 
 	// A fresh suspended session must now exist under the caller's key,
 	// targeting the requested sessionID.
-	r.ss.RLock()
-	fresh, ok := r.ss.Lookup(resumeKey)
-	r.ss.RUnlock()
+	var (
+		fresh *ManagedSession
+		ok    bool
+	)
+	r.ss.View(func(v sessView) {
+		fresh, ok = v.Lookup(resumeKey)
+	})
 	if !ok {
 		t.Fatalf("no fresh session created under %q", resumeKey)
 	}
@@ -67,9 +71,7 @@ func TestRegisterForResume_LeakedIDToKeyDoesNotMisroute(t *testing.T) {
 	}
 
 	// The unrelated session must be untouched and still own its own SID.
-	r.ss.RLock()
-	stillThere, ok := r.ss.Lookup(reusedKey)
-	r.ss.RUnlock()
+	stillThere, ok := lookupT(r, reusedKey)
 	if !ok || stillThere != unrelated || stillThere.SessionID() != liveSID {
 		t.Fatalf("unrelated session at %q was disturbed by the resume", reusedKey)
 	}
@@ -94,11 +96,11 @@ func TestRegisterForResume_LegitimateChainDedupStillWorks(t *testing.T) {
 	// A live session whose rotation chain is [prevSID, curSID].
 	live := &ManagedSession{key: liveKey, prevSessionIDs: []string{prevSID}}
 	live.setSessionID(curSID)
-	r.ss.Lock()
-	r.publishSession(r.ss.AssumeLocked(), liveKey, live, false)
-	r.ss.SetID(curSID, liveKey)
-	r.ss.SetID(prevSID, liveKey)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		r.publishSession(tx, liveKey, live, false)
+		tx.SetID(curSID, liveKey)
+		tx.SetID(prevSID, liveKey)
+	})
 
 	// Resuming the current SID dedups to the live key.
 	if got := r.RegisterForResume("dashboard:resume:cur", curSID, "/ws", ""); got != liveKey {

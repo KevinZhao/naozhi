@@ -46,7 +46,7 @@ func mkClaudeDriftRouter(t *testing.T, debugDir string) *Router {
 		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 	})
 	r.bkStore.defaultBackend = "claude"
-	r.ss.Ext().picks.backend = make(map[string]string)
+	stateOf(r).picks.backend = make(map[string]string)
 	r.bkStore.setBackendEffortsForTest(make(map[string]string))
 	r.bkStore.model = "claude-sonnet-5"
 	r.claudeDir = t.TempDir()
@@ -64,9 +64,9 @@ func TestDebugFileDriftParity_NoFalseDrift(t *testing.T) {
 	key := "dashboard:direct:2026-09-02-151927-3-naozhi:general"
 	s := newSessionWithID(key, "sess-debugfile-1")
 	s.SetBackend("claude")
-	r.ss.Put(key, s)
+	putT(r, key, s)
 
-	// Spawn-side argv, assembled the way spawnSession does (router_lifecycle.go:
+	// Spawn-side argv, assembled the way the spawn does (router_lifecycle.go:
 	// argvSpawnOptions + the side-effecting cliDebugFileFor).
 	wrapper, backendID := r.wrapperFor("claude")
 	bd := r.backendDefaultsFor(backendID)

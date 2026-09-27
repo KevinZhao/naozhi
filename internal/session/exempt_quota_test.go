@@ -17,33 +17,32 @@ func TestCountExemptCombined(t *testing.T) {
 		r.RegisterCronStub("cron:job-"+strconv.Itoa(i), "/w", "p")
 	}
 
-	r.ss.RLock()
-	defer r.ss.RUnlock()
-	v := r.ss.AssumeLocked().View
+	r.ss.View(func(v sessView) {
 
-	// kind set: perKind must equal the standalone per-kind sweep; total must
-	// equal the standalone global sweep.
-	perKind, total := countExemptCombined(v, "cron")
-	if want := countExemptByKind(v, "cron"); perKind != want {
-		t.Errorf("countExemptCombined(cron) perKind = %d, want %d", perKind, want)
-	}
-	if want := countExempt(v); total != want {
-		t.Errorf("countExemptCombined(cron) total = %d, want %d", total, want)
-	}
+		// kind set: perKind must equal the standalone per-kind sweep; total must
+		// equal the standalone global sweep.
+		perKind, total := countExemptCombined(v, "cron")
+		if want := countExemptByKind(v, "cron"); perKind != want {
+			t.Errorf("countExemptCombined(cron) perKind = %d, want %d", perKind, want)
+		}
+		if want := countExempt(v); total != want {
+			t.Errorf("countExemptCombined(cron) total = %d, want %d", total, want)
+		}
 
-	// kind=="" : perKind is always 0, total still counts all exempt sessions.
-	perKind0, total0 := countExemptCombined(v, "")
-	if perKind0 != 0 {
-		t.Errorf("countExemptCombined(\"\") perKind = %d, want 0", perKind0)
-	}
-	if want := countExempt(v); total0 != want {
-		t.Errorf("countExemptCombined(\"\") total = %d, want %d", total0, want)
-	}
+		// kind=="" : perKind is always 0, total still counts all exempt sessions.
+		perKind0, total0 := countExemptCombined(v, "")
+		if perKind0 != 0 {
+			t.Errorf("countExemptCombined(\"\") perKind = %d, want 0", perKind0)
+		}
+		if want := countExempt(v); total0 != want {
+			t.Errorf("countExemptCombined(\"\") total = %d, want %d", total0, want)
+		}
+	})
 }
 
 // TestExemptKindClassification pins R242-ARCH-2: each exempt prefix
 // resolves to its own namespace string and non-exempt keys return "".
-// Sub-quota dispatch in spawnSession depends on this mapping; a
+// Sub-quota dispatch in the spawn depends on this mapping; a
 // classification regression would silently route a stub into the wrong
 // quota.
 func TestExemptKindClassification(t *testing.T) {

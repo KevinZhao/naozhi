@@ -3,7 +3,7 @@ package session
 // R70-ARCH-H3 regression tests for Router.Takeover.
 //
 // Takeover has three branches that previously had zero direct coverage:
-//  1. Fresh key — no existing session, spawnSession runs immediately.
+//  1. Fresh key — no existing session, the spawn runs immediately.
 //  2. Replace alive / dead session — existing session is closed and
 //     unregistered before the re-spawn.
 //  3. Concurrent-creation abort — while we release the table lock to Close() the
@@ -13,7 +13,7 @@ package session
 //
 // The real spawn call at the end of Takeover fails because newTestRouter's
 // wrapper points at /nonexistent/cli-binary. That's fine: these tests
-// assert the side effects up to and including spawnSession, not a
+// assert the side effects up to and including the spawn, not a
 // successful spawn.
 
 import (
@@ -24,11 +24,11 @@ import (
 )
 
 // newTakeoverTestRouter builds a Router that has every map Takeover and
-// spawnSession touch which the older newTestRouter helper leaves nil
+// the spawn touch which the older newTestRouter helper leaves nil
 // (wsStore and pp are zero-value usable and need no init).
 func newTakeoverTestRouter(maxProcs int) *Router {
 	r := newTestRouter(maxProcs)
-	r.ss.Ext().picks.backend = map[string]string{}
+	stateOf(r).picks.backend = map[string]string{}
 	return r
 }
 
@@ -52,15 +52,15 @@ func TestTakeover_NewKey(t *testing.T) {
 
 	// Workspace override must land on the chat key prefix, not the session key.
 	chatKey := chatKeyFor(key)
-	if got, _ := r.ss.Ext().workspaces.Lookup(chatKey); got != workspace {
+	if got, _ := stateOf(r).workspaces.Lookup(chatKey); got != workspace {
 		t.Errorf("workspaceOverrides[%q] = %q, want %q", chatKey, got, workspace)
 	}
-	if !r.ss.Ext().workspaces.Dirty() {
+	if !stateOf(r).workspaces.Dirty() {
 		t.Error("wsOverridesDirty should be set after Takeover writes override")
 	}
 
 	// No stale session should have been injected.
-	if _, ok := r.ss.Lookup(key); ok {
+	if _, ok := lookupT(r, key); ok {
 		t.Error("sessions[key] should be empty after failed spawn on a fresh Takeover")
 	}
 }
@@ -75,7 +75,7 @@ func TestTakeover_ReplacesDeadSession(t *testing.T) {
 
 	old := injectSession(r, key, newDeadProc())
 	old.setSessionID("old-sess")
-	r.ss.SetID("old-sess", key)
+	setIDT(r, "old-sess", key)
 	genBefore := r.ss.Gen()
 
 	_, err := r.Takeover(context.Background(), key, "new-sess", "/tmp/ws", AgentOpts{})
@@ -83,10 +83,10 @@ func TestTakeover_ReplacesDeadSession(t *testing.T) {
 		t.Fatal("expected spawn error after dead-session unregister")
 	}
 
-	if _, ok := r.ss.Lookup(key); ok {
+	if _, ok := lookupT(r, key); ok {
 		t.Error("dead session should have been unregistered")
 	}
-	if _, ok := r.ss.KeyForID("old-sess"); ok {
+	if _, ok := keyForIDT(r, "old-sess"); ok {
 		t.Error("old session ID should have been removed from sessionIDToKey")
 	}
 	if r.ss.Gen() <= genBefore {
@@ -97,7 +97,7 @@ func TestTakeover_ReplacesDeadSession(t *testing.T) {
 // TestTakeover_ReplacesAliveSession — when the existing session's process
 // is alive, Takeover enters the close-and-recheck branch: Close() is
 // called on the old process while the table lock is released, then the session is
-// unregistered under the re-acquired lock. spawnSession fails afterward,
+// unregistered under the re-acquired lock. the spawn fails afterward,
 // but the old process must be Close()'d and the session gone.
 func TestTakeover_ReplacesAliveSession(t *testing.T) {
 	t.Parallel()
@@ -107,7 +107,7 @@ func TestTakeover_ReplacesAliveSession(t *testing.T) {
 	oldProc := newIdleProc()
 	old := injectSession(r, key, oldProc)
 	old.setSessionID("old-alive-sess")
-	r.ss.SetID("old-alive-sess", key)
+	setIDT(r, "old-alive-sess", key)
 
 	_, err := r.Takeover(context.Background(), key, "new-sess", "/tmp/ws", AgentOpts{})
 	if err == nil {
@@ -117,7 +117,7 @@ func TestTakeover_ReplacesAliveSession(t *testing.T) {
 	if oldProc.Alive() {
 		t.Error("old alive process must be Close()'d during Takeover")
 	}
-	if _, ok := r.ss.Lookup(key); ok {
+	if _, ok := lookupT(r, key); ok {
 		t.Error("old session should have been unregistered before re-spawn failed")
 	}
 }
@@ -158,12 +158,13 @@ func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
 	// session under the same key to simulate a concurrent GetOrCreate
 	// winning the race.
 	hook := newHookCloseProc(func() {
-		r.ss.Lock()
-		s := &ManagedSession{key: key}
-		s.storeProcess(interloper)
-		s.touchLastActive()
-		r.ss.Put(key, s)
-		r.ss.Unlock()
+		var s *ManagedSession
+		r.ss.Update(func(tx sessTx) {
+			s = &ManagedSession{key: key}
+			s.storeProcess(interloper)
+			s.touchLastActive()
+			tx.Put(key, s)
+		})
 	})
 	old := injectSession(r, key, hook)
 	old.setSessionID("old-sess")
@@ -178,7 +179,7 @@ func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
 
 	// Interloper session must survive untouched; Takeover may not
 	// clobber a live parallel session.
-	cur, ok := r.ss.Lookup(key)
+	cur, ok := lookupT(r, key)
 	if !ok {
 		t.Fatal("interloper session should still be in sessions map")
 	}
@@ -208,11 +209,11 @@ func TestTakeover_EmptyWorkspaceSkipsOverride(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected spawn error, got nil")
 	}
-	if r.ss.Ext().workspaces.Len() != 0 {
+	if stateOf(r).workspaces.Len() != 0 {
 		t.Errorf("workspaceOverrides should remain empty for chatKey==key, got %v",
-			r.ss.Ext().workspaces.Snapshot())
+			stateOf(r).workspaces.Snapshot())
 	}
-	if r.ss.Ext().workspaces.Dirty() {
+	if stateOf(r).workspaces.Dirty() {
 		t.Error("wsOverridesDirty should not be set when override write is skipped")
 	}
 }
@@ -226,27 +227,27 @@ func TestTakeover_WorkspaceOverrideIdempotent(t *testing.T) {
 	key := "feishu:direct:user5:general"
 	chatKey := chatKeyFor(key)
 	// Seed = disk-loaded semantics: present, not dirty.
-	r.ss.Ext().workspaces.Seed(map[string]string{chatKey: "/tmp/existing"})
+	stateOf(r).workspaces.Seed(map[string]string{chatKey: "/tmp/existing"})
 
 	// Same workspace: guard should see prev == workspace and skip dirty flip.
 	_, err := r.Takeover(context.Background(), key, "sess-y", "/tmp/existing", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error")
 	}
-	if r.ss.Ext().workspaces.Dirty() {
+	if stateOf(r).workspaces.Dirty() {
 		t.Error("wsOverridesDirty should not flip when new workspace equals prior")
 	}
 
 	// Different workspace: must flip dirty.
-	r.ss.Ext().workspaces.MarkSavedIfUnchanged(r.ss.Ext().workspaces.Gen())
+	stateOf(r).workspaces.MarkSavedIfUnchanged(stateOf(r).workspaces.Gen())
 	_, err = r.Takeover(context.Background(), key, "sess-y", "/tmp/changed", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error")
 	}
-	if !r.ss.Ext().workspaces.Dirty() {
+	if !stateOf(r).workspaces.Dirty() {
 		t.Error("wsOverridesDirty should flip when workspace changes")
 	}
-	if got, _ := r.ss.Ext().workspaces.Lookup(chatKey); got != "/tmp/changed" {
+	if got, _ := stateOf(r).workspaces.Lookup(chatKey); got != "/tmp/changed" {
 		t.Errorf("workspaceOverrides[%q] = %q, want /tmp/changed", chatKey, got)
 	}
 }

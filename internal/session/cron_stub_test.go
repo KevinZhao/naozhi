@@ -20,10 +20,14 @@ func TestRegisterCronStub_CreatesFreshStub(t *testing.T) {
 	if notified != 1 {
 		t.Fatalf("onChange fired %d times on first stub, want 1", notified)
 	}
-	r.ss.RLock()
-	_, ok := r.ss.Lookup("cron:job-1")
-	dirty := r.ss.Dirty()
-	r.ss.RUnlock()
+	var (
+		ok    bool
+		dirty bool
+	)
+	r.ss.View(func(v sessView) {
+		_, ok = v.Lookup("cron:job-1")
+		dirty = v.Dirty()
+	})
 	if !ok {
 		t.Fatalf("cron stub was not registered")
 	}
@@ -49,17 +53,19 @@ func TestRegisterCronStub_NoOpOnIdenticalRefresh(t *testing.T) {
 
 	// Reset tracking to isolate the second call.
 	r.SetOnChange(func() {})
-	r.ss.Lock()
-	r.ss.SetDirty(false)
-	genBefore := r.ss.Gen()
-	r.ss.Unlock()
+	var genBefore uint64
+	r.ss.Update(func(tx sessTx) {
+		tx.SetDirty(false)
+		genBefore = tx.Gen()
+	})
 
 	// Reload with identical values — must NOT mark dirty / bump version.
 	r.RegisterCronStub("cron:job-2", "/w", "p")
 
-	r.ss.RLock()
-	dirty := r.ss.Dirty()
-	r.ss.RUnlock()
+	var dirty bool
+	r.ss.View(func(v sessView) {
+		dirty = v.Dirty()
+	})
 	if dirty {
 		t.Errorf("storeDirty flipped on identical RegisterCronStub refresh")
 	}
@@ -91,19 +97,21 @@ func TestRegisterCronStub_DirtyOnActualChange(t *testing.T) {
 
 			var notified int
 			r.SetOnChange(func() { notified++ })
-			r.ss.Lock()
-			r.ss.SetDirty(false)
-			genBefore := r.ss.Gen()
-			r.ss.Unlock()
+			var genBefore uint64
+			r.ss.Update(func(tx sessTx) {
+				tx.SetDirty(false)
+				genBefore = tx.Gen()
+			})
 
 			r.RegisterCronStub("cron:job-3", c.newWorkspace, c.newPrompt)
 
 			if notified != 1 {
 				t.Errorf("onChange fired %d times on %s, want 1", notified, c.name)
 			}
-			r.ss.RLock()
-			dirty := r.ss.Dirty()
-			r.ss.RUnlock()
+			var dirty bool
+			r.ss.View(func(v sessView) {
+				dirty = v.Dirty()
+			})
 			if !dirty {
 				t.Errorf("storeDirty should be true after %s", c.name)
 			}
@@ -124,23 +132,24 @@ func TestRegisterCronStub_EmptyValuesDoNotClobber(t *testing.T) {
 	r.RegisterCronStub("cron:job-4", "/keep", "keepme")
 
 	r.SetOnChange(func() {})
-	r.ss.Lock()
-	r.ss.SetDirty(false)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.SetDirty(false)
+	})
 
 	// Both empty — no data change expected.
 	r.RegisterCronStub("cron:job-4", "", "")
 
-	r.ss.RLock()
-	dirty := r.ss.Dirty()
-	r.ss.RUnlock()
+	var dirty bool
+	r.ss.View(func(v sessView) {
+		dirty = v.Dirty()
+	})
 	if dirty {
 		t.Errorf("storeDirty flipped on empty-values refresh")
 	}
-	if got := r.ss.Get("cron:job-4").Workspace(); got != "/keep" {
+	if got := r.ss.Load("cron:job-4").Workspace(); got != "/keep" {
 		t.Errorf("workspace clobbered by empty refresh: got %q", got)
 	}
-	if got := loadAtomicString(&r.ss.Get("cron:job-4").lastPrompt); got != "keepme" {
+	if got := loadAtomicString(&r.ss.Load("cron:job-4").lastPrompt); got != "keepme" {
 		t.Errorf("lastPrompt clobbered by empty refresh: got %q", got)
 	}
 }
@@ -156,9 +165,10 @@ func TestRegisterCronStubWithChain_SetsChainOnFreshStub(t *testing.T) {
 
 	r.RegisterCronStubWithChain("cron:job-c1", "/w", "p", chain)
 
-	r.ss.RLock()
-	s := r.ss.Get("cron:job-c1")
-	r.ss.RUnlock()
+	var s *ManagedSession
+	r.ss.View(func(v sessView) {
+		s = v.Get("cron:job-c1")
+	})
 	if s == nil {
 		t.Fatal("stub not registered")
 	}
@@ -182,16 +192,18 @@ func TestRegisterCronStubWithChain_NoOpOnIdenticalChain(t *testing.T) {
 	r.RegisterCronStubWithChain("cron:job-c2", "/w", "p", []string{"sess-xxx"})
 
 	r.SetOnChange(func() {})
-	r.ss.Lock()
-	r.ss.SetDirty(false)
-	genBefore := r.ss.Gen()
-	r.ss.Unlock()
+	var genBefore uint64
+	r.ss.Update(func(tx sessTx) {
+		tx.SetDirty(false)
+		genBefore = tx.Gen()
+	})
 
 	r.RegisterCronStubWithChain("cron:job-c2", "/w", "p", []string{"sess-xxx"})
 
-	r.ss.RLock()
-	dirty := r.ss.Dirty()
-	r.ss.RUnlock()
+	var dirty bool
+	r.ss.View(func(v sessView) {
+		dirty = v.Dirty()
+	})
 	if dirty {
 		t.Errorf("storeDirty flipped on identical chain refresh")
 	}
@@ -210,18 +222,23 @@ func TestRegisterCronStubWithChain_DirtyOnChainChange(t *testing.T) {
 	r.RegisterCronStubWithChain("cron:job-c3", "/w", "p", []string{"sess-old"})
 
 	r.SetOnChange(func() {})
-	r.ss.Lock()
-	r.ss.SetDirty(false)
-	genBefore := r.ss.Gen()
-	r.ss.Unlock()
+	var genBefore uint64
+	r.ss.Update(func(tx sessTx) {
+		tx.SetDirty(false)
+		genBefore = tx.Gen()
+	})
 
 	newChain := []string{"sess-new"}
 	r.RegisterCronStubWithChain("cron:job-c3", "/w", "p", newChain)
 
-	r.ss.RLock()
-	dirty := r.ss.Dirty()
-	s := r.ss.Get("cron:job-c3")
-	r.ss.RUnlock()
+	var (
+		dirty bool
+		s     *ManagedSession
+	)
+	r.ss.View(func(v sessView) {
+		dirty = v.Dirty()
+		s = v.Get("cron:job-c3")
+	})
 	if !dirty {
 		t.Errorf("storeDirty should be true after chain change")
 	}
@@ -245,9 +262,10 @@ func TestRegisterCronStubWithChain_NilChainLeavesExistingChain(t *testing.T) {
 
 	r.RegisterCronStub("cron:job-c4", "/w", "p") // equivalent to nil chain
 
-	r.ss.RLock()
-	s := r.ss.Get("cron:job-c4")
-	r.ss.RUnlock()
+	var s *ManagedSession
+	r.ss.View(func(v sessView) {
+		s = v.Get("cron:job-c4")
+	})
 	if !slices.Equal(s.prevSessionIDs, []string{"sess-keep"}) {
 		t.Errorf("nil chain wiped existing prevSessionIDs: got %v", s.prevSessionIDs)
 	}
@@ -269,9 +287,10 @@ func TestRegisterCronStubWithChain_ChainRefreshRaceFree(t *testing.T) {
 	// racy line) is exercised rather than the fresh-create branch.
 	r.RegisterCronStubWithChain(key, "/w", "p", []string{"sess-0"})
 
-	r.ss.RLock()
-	s := r.ss.Get(key)
-	r.ss.RUnlock()
+	var s *ManagedSession
+	r.ss.View(func(v sessView) {
+		s = v.Get(key)
+	})
 	if s == nil {
 		t.Fatal("stub not registered")
 	}
@@ -310,7 +329,7 @@ func TestRegisterCronStubWithChain_ChainRefreshRaceFree(t *testing.T) {
 
 // TestRegisterCronStub_OverSubQuotaStillRegisters pins the R242-ARCH-2
 // (#720) stub-path behaviour: the per-namespace exempt sub-quota gate
-// lives in spawnSession, but stub registration never spawns a process, so
+// lives in the spawn, but stub registration never spawns a process, so
 // it must NOT hard-reject when the cron bucket is already at its cap.
 // Dropping an over-quota cron stub would lose its history chain and break
 // the dashboard event panel; the fix only logs the over-quota condition.
@@ -327,14 +346,15 @@ func TestRegisterCronStub_OverSubQuotaStillRegisters(t *testing.T) {
 		r.RegisterCronStub(key, "/w", "p")
 	}
 
-	r.ss.RLock()
-	got := 0
-	for k := range r.ss.All() {
-		if exemptKind(k) == "cron" {
-			got++
+	var got int
+	r.ss.View(func(v sessView) {
+		got = 0
+		for k := range v.All() {
+			if exemptKind(k) == "cron" {
+				got++
+			}
 		}
-	}
-	r.ss.RUnlock()
+	})
 	if got != total {
 		t.Fatalf("over-quota cron stubs were dropped: registered %d, want %d", got, total)
 	}

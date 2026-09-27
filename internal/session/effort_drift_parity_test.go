@@ -12,7 +12,7 @@ import (
 //
 // Two independent places feed cli.SpawnOptions into Protocol.BuildArgs:
 //
-//	spawnSession                     — the real spawn (router_lifecycle.go)
+//	the spawn                     — the real spawn (router_lifecycle.go)
 //	classifyShimState's drift check  — "do the surviving shim's args still
 //	                                   match what we would spawn today?"
 //	                                   (router_shim.go)
@@ -101,7 +101,7 @@ func TestEffortAffectsArgv(t *testing.T) {
 //
 // This exists because the first cut of these tests guarded the wrong thing.
 // Mutation-testing the implementation found that deleting the agent-override
-// branch in resolveSpawnParamsLocked, or `Effort: sp.Effort` from the
+// branch in resolveSpawnParams, or `Effort: sp.Effort` from the
 // SpawnOptions literal, left the entire suite green — every "effort works"
 // test built its own SpawnOptions or called backendDefaultsFor directly, so
 // nothing asserted the resolver's output. The elaborate AST guard sat on the
@@ -119,7 +119,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		})
 		r.bkStore.defaultBackend = "kiro"
-		r.ss.Ext().picks.backend = make(map[string]string)
+		stateOf(r).picks.backend = make(map[string]string)
 		r.bkStore.setBackendEffortsForTest(backendEfforts)
 		r.claudeDir = t.TempDir()
 		r.kiroSessionsDir = t.TempDir()
@@ -128,7 +128,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 
 	t.Run("backend tier applies when the agent sets none", func(t *testing.T) {
 		r := mkRouter(t, map[string]string{"kiro": "high"})
-		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c1:general", "",
+		sp := resolveT(r, "dash:direct:c1:general", "",
 			AgentOpts{Backend: "kiro", Workspace: "/ws"})
 		if sp.Effort != "high" {
 			t.Errorf("Effort = %q, want high (backend default)", sp.Effort)
@@ -137,7 +137,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 
 	t.Run("agent tier overrides the backend tier", func(t *testing.T) {
 		r := mkRouter(t, map[string]string{"kiro": "high"})
-		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c2:reviewer", "",
+		sp := resolveT(r, "dash:direct:c2:reviewer", "",
 			AgentOpts{Backend: "kiro", Workspace: "/ws", Effort: "max"})
 		if sp.Effort != "max" {
 			t.Errorf("Effort = %q, want max (agents[].effort wins)", sp.Effort)
@@ -146,7 +146,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 
 	t.Run("agent tier applies with no backend tier configured", func(t *testing.T) {
 		r := mkRouter(t, nil)
-		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c3:reviewer", "",
+		sp := resolveT(r, "dash:direct:c3:reviewer", "",
 			AgentOpts{Backend: "kiro", Workspace: "/ws", Effort: "low"})
 		if sp.Effort != "low" {
 			t.Errorf("Effort = %q, want low", sp.Effort)
@@ -155,7 +155,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 
 	t.Run("nothing configured yields no tier", func(t *testing.T) {
 		r := mkRouter(t, nil)
-		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c4:general", "",
+		sp := resolveT(r, "dash:direct:c4:general", "",
 			AgentOpts{Backend: "kiro", Workspace: "/ws"})
 		if sp.Effort != "" {
 			t.Errorf("Effort = %q, want empty so BuildArgs emits no flag", sp.Effort)
@@ -164,7 +164,7 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 
 	t.Run("an unconfigured backend gets no tier from another backend", func(t *testing.T) {
 		r := mkRouter(t, map[string]string{"kiro": "max"})
-		sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dash:direct:c5:general", "",
+		sp := resolveT(r, "dash:direct:c5:general", "",
 			AgentOpts{Backend: "claude", Workspace: "/ws"})
 		if sp.Effort != "" {
 			t.Errorf("Effort = %q, want empty — kiro's tier must not leak to claude", sp.Effort)

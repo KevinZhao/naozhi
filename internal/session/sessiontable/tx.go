@@ -55,18 +55,18 @@ func (tx Tx[S, X]) live() *Table[S, X] {
 	return tx.t
 }
 
-func (v View[S, X]) Get(key string) S                   { return v.t.Get(key) }
-func (v View[S, X]) Lookup(key string) (S, bool)        { return v.t.Lookup(key) }
-func (v View[S, X]) Len() int                           { return v.t.Len() }
-func (v View[S, X]) All() iter.Seq2[string, S]          { return v.t.All() }
-func (v View[S, X]) KeysOfChat(chat string) []string    { return v.t.KeysOfChat(chat) }
-func (v View[S, X]) ChatHasSessions(chat string) bool   { return v.t.ChatHasSessions(chat) }
-func (v View[S, X]) KeyForHash(h string) (string, bool) { return v.t.KeyForHash(h) }
-func (v View[S, X]) KeyForID(id string) (string, bool)  { return v.t.KeyForID(id) }
+func (v View[S, X]) Get(key string) S                   { return v.t.get(key) }
+func (v View[S, X]) Lookup(key string) (S, bool)        { return v.t.lookup(key) }
+func (v View[S, X]) Len() int                           { return v.t.size() }
+func (v View[S, X]) All() iter.Seq2[string, S]          { return v.t.all() }
+func (v View[S, X]) KeysOfChat(chat string) []string    { return v.t.keysOfChat(chat) }
+func (v View[S, X]) ChatHasSessions(chat string) bool   { return v.t.chatHasSessions(chat) }
+func (v View[S, X]) KeyForHash(h string) (string, bool) { return v.t.keyForHash(h) }
+func (v View[S, X]) KeyForID(id string) (string, bool)  { return v.t.keyForID(id) }
 func (v View[S, X]) Active() int64                      { return v.t.Active() }
 func (v View[S, X]) Gen() uint64                        { return v.t.Gen() }
-func (v View[S, X]) Dirty() bool                        { return v.t.Dirty() }
-func (v View[S, X]) Check(idOf func(S) string) []string { return v.t.Check(idOf) }
+func (v View[S, X]) Dirty() bool                        { return v.t.isDirty() }
+func (v View[S, X]) Check(idOf func(S) string) []string { return v.t.check(idOf) }
 
 // Ext is the caller's state kept under the table's lock. Through a View it
 // must only be read.
@@ -75,16 +75,16 @@ func (v View[S, X]) Ext() *X { return &v.t.ext }
 // Ext is the caller's state kept under the table's lock, for writing.
 func (tx Tx[S, X]) Ext() *X { return &tx.live().ext }
 
-func (tx Tx[S, X]) Put(key string, s S)             { tx.live().Put(key, s) }
-func (tx Tx[S, X]) Delete(key string)               { tx.live().Delete(key) }
-func (tx Tx[S, X]) SetID(id, key string)            { tx.live().SetID(id, key) }
-func (tx Tx[S, X]) ClearID(id string)               { tx.live().ClearID(id) }
-func (tx Tx[S, X]) ClearIDIfOwnedBy(id, key string) { tx.live().ClearIDIfOwnedBy(id, key) }
-func (tx Tx[S, X]) AddActive(n int64) int64         { return tx.live().AddActive(n) }
-func (tx Tx[S, X]) SetActive(n int64)               { tx.live().SetActive(n) }
+func (tx Tx[S, X]) Put(key string, s S)             { tx.live().put(key, s) }
+func (tx Tx[S, X]) Delete(key string)               { tx.live().remove(key) }
+func (tx Tx[S, X]) SetID(id, key string)            { tx.live().setID(id, key) }
+func (tx Tx[S, X]) ClearID(id string)               { tx.live().clearID(id) }
+func (tx Tx[S, X]) ClearIDIfOwnedBy(id, key string) { tx.live().clearIDIfOwnedBy(id, key) }
+func (tx Tx[S, X]) AddActive(n int64) int64         { return tx.live().addActive(n) }
+func (tx Tx[S, X]) SetActive(n int64)               { tx.live().setActive(n) }
 func (tx Tx[S, X]) BumpGen()                        { tx.live().BumpGen() }
-func (tx Tx[S, X]) MarkChanged()                    { tx.live().MarkChanged() }
-func (tx Tx[S, X]) SetDirty(d bool)                 { tx.live().SetDirty(d) }
+func (tx Tx[S, X]) MarkChanged()                    { tx.live().markChanged() }
+func (tx Tx[S, X]) SetDirty(d bool)                 { tx.live().setDirty(d) }
 
 // Broadcast wakes every Wait.
 func (tx Tx[S, X]) Broadcast() { tx.live().cond.Broadcast() }
@@ -113,11 +113,6 @@ func (tx Tx[S, X]) Unlocked(fn func()) {
 	}()
 	fn()
 }
-
-// AssumeLocked returns a Tx for code that already holds the write lock
-// through Lock. Transitional: it exists while call sites move to Update, and
-// goes with Lock / Unlock.
-func (t *Table[S, X]) AssumeLocked() Tx[S, X] { return t.begin() }
 
 // Load returns key's session (zero S when none) under the read lock, for a
 // caller that needs that one value and nothing else consistent with it.

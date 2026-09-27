@@ -38,7 +38,7 @@ func TestCleanup_Expired_DeathReasonStampedWhenProcUnchanged(t *testing.T) {
 // deathReason only AFTER the close-loop re-verify confirms the proc is
 // still current. Before the fix, "idle_timeout" was stamped in pass-2
 // (before re-verify), so a session whose proc was replaced by a
-// concurrent spawnSession / resetLocked between the pass-1 snapshot and
+// concurrent spawn / resetEntry between the pass-1 snapshot and
 // the close loop would show "idle_timeout" on the dashboard even though
 // its fresh proc was never closed.
 //

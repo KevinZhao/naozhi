@@ -94,17 +94,17 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 }
 
 // ResetChatAndSetWorkspace atomically resets all sessions belonging to a chat
-// and installs a new workspace override for it under a single the table lock critical
-// section. Two separate locked calls would let a concurrent GetOrCreate see the
+// and installs a new workspace override for it in one transaction. Two
+// separate transactions would let a concurrent GetOrCreate see the
 // key idle with the override deleted and spawn in the OLD workspace (#2342).
 func (r *Router) ResetChatAndSetWorkspace(chatKeyPrefix, path string) {
 	r.resetChatAndMaybeSetWorkspace(chatKeyPrefix, path, true)
 }
 
-// resetChatAndMaybeSetWorkspace is the shared locked core for ResetChat and
-// ResetChatAndSetWorkspace. When setWorkspace is true it installs `path` as the
-// chat's workspace override before releasing the table lock, so callers that reset+set
-// observe no intermediate state.
+// resetChatAndMaybeSetWorkspace is the shared transactional core for ResetChat
+// and ResetChatAndSetWorkspace. When setWorkspace is true it installs `path` as
+// the chat's workspace override in the same transaction, so callers that
+// reset+set observe no intermediate state.
 func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWorkspace bool) {
 	var toClose []processIface
 	r.ss.Update(func(tx sessTx) {
@@ -221,12 +221,6 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	if err := validateBackend(opts.Backend); err != nil {
 		return nil, 0, err
 	}
-	// N concurrent GetOrCreate on the same fresh key would each call
-	// spawnSession and only one would win the shim-socket dial guard. Each
-	// round is one transaction deciding between: the live session, waiting on
-	// a spawn already in flight (outside the lock, then another round), or
-	// reserving a spawn of our own — so the decision to spawn and the
-	// in-flight marker cannot be split by another caller.
 	// Fast path: a live session needs only a read of the table
 	// (touchLastActive is an atomic store), so concurrent hits do not
 	// serialise on the write lock.
@@ -234,6 +228,12 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		s.touchLastActive()
 		return s, SessionExisting, nil
 	}
+	// N concurrent GetOrCreate on the same fresh key would each spawn, and
+	// only one would win the shim-socket dial guard. Each round is one
+	// transaction deciding between: the live session, waiting on a spawn
+	// already in flight (outside the lock, then another round), or reserving
+	// a spawn of our own — so the decision to spawn and the in-flight marker
+	// cannot be split by another caller.
 	for {
 		var (
 			live      *ManagedSession
@@ -310,7 +310,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 
 // spawnParams carries the pure-computation output of resolveSpawnParams:
 // the merged backend, model, args, workspace, and (possibly downgraded)
-// resumeID that spawnSession feeds into cli.SpawnOptions.
+// resumeID that reserveSpawn feeds into cli.SpawnOptions.
 type spawnParams struct {
 	BackendID string // effective backend ID after override/fallback resolution
 	Wrapper   *cli.Wrapper
@@ -329,8 +329,8 @@ type spawnParams struct {
 	// resume relocks the same auth chain.
 	AccessProfileID string
 	// AccessProfileEnv is the RAW profile env map (still holding *_FILE
-	// references); nil when AccessProfileID is "". spawnSession expands it
-	// AFTER releasing the table lock — file reads must not happen under the lock.
+	// references); nil when AccessProfileID is "". completeSpawn expands it
+	// outside the transaction — file reads must not happen under the lock.
 	AccessProfileEnv map[string]string
 	// Overlay is the per-request layer that went into Model/Effort/Args. The
 	// shim persists it so the arg-drift comparison on the next restart can
@@ -423,7 +423,7 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	// tuningspec-validated at write and at store load). Effort deliberately has
 	// NO access-profile tier (docs/rfc/kiro-effort-control.md §4.2).
 	// A key with no session yet may carry a pre-spawn pick
-	// (picks.tuning); spawnSession consumes it onto the fresh entry.
+	// (picks.tuning); completeSpawn consumes it onto the fresh entry.
 	var tuningModel, tuningEffort string
 	if old := tx.Get(key); old != nil {
 		tuningModel, tuningEffort = old.TuningModel(), old.TuningEffort()
@@ -552,10 +552,11 @@ func snapshotOldSession(_ sessView, old *ManagedSession) ([]string, float64, flo
 	// bounded loss: a turn still in flight on the OLD process lands its delta
 	// on the orphaned struct; cost is advisory, not billing-authoritative (#2284).
 	oldCostSpent := loadTotalCost(&old.costSpent)
-	// Overrides are snapshotted HERE, under the same the table lock hold, from the same
-	// object as history/cost/createdAt. installFreshSession must not
-	// re-read r.ss.Get(key): the entry may be swapped or removed during
-	// the unlocked history copy, pairing one session's history with another's tuning.
+	// Overrides are snapshotted HERE, in the same transaction, from the same
+	// object as history/cost/createdAt. installFreshSession must not re-read
+	// the key's entry: it may be swapped or removed during the history copy
+	// outside the transaction, pairing one session's history with another's
+	// tuning.
 	ov := sessionOverrides{
 		tuningModel:  old.TuningModel(),
 		tuningEffort: old.TuningEffort(),
@@ -1109,7 +1110,7 @@ func (r *Router) loadResumeHistoryOnSpawn(
 
 // unregisterSession removes a session from all routing indexes.
 // If keepBackendOverride is true, backendOverrides[key] is preserved so a
-// following spawnSession can consume it atomically (used by
+// following spawn can consume it in the same transaction (used by
 // ResetAndRecreate / Takeover which reuse the same key). On terminal removal
 // paths (Reset / Remove / Cleanup prune) pass false to prevent override leaks.
 func (r *Router) unregisterSession(tx sessTx, key string, s *ManagedSession, keepBackendOverride bool) {
@@ -1232,9 +1233,9 @@ func waitSocketGoneForKey(key string, maxWait time.Duration) bool {
 
 // ResetAndRecreate atomically resets a session and spawns a new one for the
 // same key, so no concurrent message can create a session with other opts. A
-// guard channel is installed via r.ss.Ext().spawns.BeginSpawn(key) BEFORE the table lock is released
-// for proc.Close(); spawnSession reuses it, so the in-flight marker is
-// continuous from the first unlock through spawnSession's defer (#775).
+// guard channel is installed with BeginSpawn before the transaction releases
+// the lock for proc.Close(); reserveSpawn reuses it, so the in-flight marker
+// is continuous from that first release until completeSpawn ends it (#775).
 func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
 	var (
 		hadOld, stuck, stuckWarn bool
@@ -1312,7 +1313,7 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 }
 
 // warnShimStuckReuse logs the shim-stuck diagnostic when ResetAndRecreate set
-// shim-stuck but spawnSession returned a usable session without error
+// shim-stuck but the spawn returned a usable session without error
 // (TOCTOU guard reused a concurrently-spawned session), so the signal is not
 // lost on the success path (#1702).
 func warnShimStuckReuse(stuck bool, key string) {

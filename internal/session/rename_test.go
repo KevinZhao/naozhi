@@ -26,10 +26,10 @@ func TestRenameSession_HappyPath(t *testing.T) {
 	storeTotalCost(&s.lastCumulativeCost, 1.42)
 	s.lastActive.Store(time.Now().UnixNano())
 
-	r.ss.Lock()
-	r.ss.Put(oldKey, s)
-	r.ss.SetID("sess-promote-1", oldKey)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(oldKey, s)
+		tx.SetID("sess-promote-1", oldKey)
+	})
 
 	if !r.RenameSession(oldKey, newKey) {
 		t.Fatal("RenameSession returned false")
@@ -63,9 +63,10 @@ func TestRenameSession_HappyPath(t *testing.T) {
 		t.Errorf("backend not preserved: %q", got.Backend())
 	}
 	// Reverse index must point at the new key.
-	r.ss.RLock()
-	idxKey := keyForID(r, "sess-promote-1")
-	r.ss.RUnlock()
+	var idxKey string
+	r.ss.View(func(v sessView) {
+		idxKey = keyIn(v, "sess-promote-1")
+	})
 	if idxKey != newKey {
 		t.Errorf("sessionIDToKey = %q, want %q", idxKey, newKey)
 	}
@@ -85,10 +86,10 @@ func TestRenameSession_CollisionRefused(t *testing.T) {
 	const oldKey = "scratch:abc:general:general"
 	const newKey = "feishu:direct:alice:general"
 
-	r.ss.Lock()
-	r.ss.Put(oldKey, &ManagedSession{key: oldKey})
-	r.ss.Put(newKey, &ManagedSession{key: newKey})
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(oldKey, &ManagedSession{key: oldKey})
+		tx.Put(newKey, &ManagedSession{key: newKey})
+	})
 
 	if r.RenameSession(oldKey, newKey) {
 		t.Error("RenameSession should refuse collisions")
@@ -111,9 +112,9 @@ func TestRenameSession_InvalidNewKey(t *testing.T) {
 	r := NewRouter(RouterConfig{})
 	const oldKey = "scratch:abc:general:general"
 
-	r.ss.Lock()
-	r.ss.Put(oldKey, &ManagedSession{key: oldKey})
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(oldKey, &ManagedSession{key: oldKey})
+	})
 
 	// control byte in new key must be rejected by ValidateSessionKey.
 	if r.RenameSession(oldKey, "bad:key\x00:x:y") {
@@ -137,10 +138,10 @@ func TestRenameSession_PreservesCreatedAt(t *testing.T) {
 	s.createdAt.Store(stamp)
 	s.lastActive.Store(stamp + int64(time.Hour))
 
-	r.ss.Lock()
-	r.ss.Put(oldKey, s)
-	r.ss.SetID("sess-rename-ca", oldKey)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(oldKey, s)
+		tx.SetID("sess-rename-ca", oldKey)
+	})
 
 	if !r.RenameSession(oldKey, newKey) {
 		t.Fatal("RenameSession returned false")
@@ -169,10 +170,10 @@ func TestRenameSession_StampsCreatedAtWhenSourceUnstamped(t *testing.T) {
 	s.setSessionID("sess-rename-zero")
 	// createdAt left at 0 to simulate the pre-feature pathological case.
 
-	r.ss.Lock()
-	r.ss.Put(oldKey, s)
-	r.ss.SetID("sess-rename-zero", oldKey)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(oldKey, s)
+		tx.SetID("sess-rename-zero", oldKey)
+	})
 
 	before := time.Now().UnixNano()
 	if !r.RenameSession(oldKey, newKey) {

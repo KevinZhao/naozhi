@@ -26,7 +26,7 @@ func TestResetAndRecreate_ParksAConcurrentGetOrCreate(t *testing.T) {
 	const key = "feishu:direct:recreate:general"
 	closing := make(chan struct{})
 	release := make(chan struct{})
-	injectLocked(r, key, newHookCloseProc(func() {
+	injectSession(r, key, newHookCloseProc(func() {
 		close(closing)
 		<-release
 	}))
@@ -83,9 +83,9 @@ func (p *runningProbe) IsRunning() bool {
 func TestResetChat_ClosesTheChatsProcessesAndWakesShutdown(t *testing.T) {
 	r := newTestRouter(4)
 	running := &runningProbe{fakeProcess: newRunningProc(), asked: make(chan struct{})}
-	injectLocked(r, "feishu:group:chatA:general", running)
+	injectSession(r, "feishu:group:chatA:general", running)
 	idle := newIdleProc()
-	injectLocked(r, "feishu:group:chatA:other", idle)
+	injectSession(r, "feishu:group:chatA:other", idle)
 
 	shutdownDone := make(chan struct{})
 	go func() {
@@ -119,7 +119,7 @@ func TestReset_FlagsAShimSocketThatOutlivesTheWait(t *testing.T) {
 	}
 	boom := errors.New("spawn failed")
 	r := spawnRouter(t, 4, func(context.Context, cli.SpawnOptions) (processIface, error) { return nil, boom })
-	injectLocked(r, key, newIdleProc())
+	injectSession(r, key, newIdleProc())
 
 	r.Reset(key) // waits out the 2s socket-gone window
 

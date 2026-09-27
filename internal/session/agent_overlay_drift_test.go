@@ -5,7 +5,7 @@ package session
 // Symptom: every naozhi restart killed every live session whose agent set
 // agents[].model / agents[].effort / agents[].extra_args. driftCompareArgs
 // rebuilt the argv from backend defaults + session tuning only, while the real
-// spawn (resolveSpawnParamsLocked) layered the per-agent AgentOpts on top —
+// spawn (resolveSpawnParams) layered the per-agent AgentOpts on top —
 // so `--model sonnet` (spawned) never equalled `--model opusplan` (rebuilt),
 // classifyShimState saw shimStateDrift, and the shim was shut down.
 //
@@ -45,8 +45,8 @@ func mkOverlayRouter(t *testing.T) *Router {
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
 	r.bkStore.defaultBackend = "claude"
-	r.ss.Ext().picks.backend = make(map[string]string)
-	r.ss.Ext().picks.accessProfile = make(map[string]string)
+	stateOf(r).picks.backend = make(map[string]string)
+	stateOf(r).picks.accessProfile = make(map[string]string)
 	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 	r.bkStore.model = "opusplan"
 	r.claudeDir = t.TempDir()
@@ -56,12 +56,12 @@ func mkOverlayRouter(t *testing.T) *Router {
 
 // spawnShimState runs the PRODUCTION spawn-side computation for key/opts and
 // returns the shim.State a shim spawned from it would persist: the argv
-// exactly as spawnSession assembles it (resolveSpawnParamsLocked →
-// argvSpawnOptions → BuildArgs, plus --resume) and the overlay spawnSession
+// exactly as the spawn assembles it (resolveSpawnParams →
+// argvSpawnOptions → BuildArgs, plus --resume) and the overlay the spawn
 // hands to the shim.
 func spawnShimState(t *testing.T, r *Router, key, resumeID string, opts AgentOpts) (shim.State, spawnParams) {
 	t.Helper()
-	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), key, resumeID, opts)
+	sp := resolveT(r, key, resumeID, opts)
 	if sp.Wrapper == nil {
 		t.Fatalf("no wrapper for backend %q", sp.BackendID)
 	}
@@ -86,7 +86,7 @@ func TestAgentOverlayDrift_ModelOverrideIsNotDrift(t *testing.T) {
 	key := "dashboard:direct:2494-model:code-reviewer"
 	s := newSessionWithID(key, "sess-2494-model")
 	s.SetBackend("claude")
-	r.ss.Put(key, s)
+	putT(r, key, s)
 
 	state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 	if !slices.Contains(state.CLIArgs, "sonnet") {
@@ -108,7 +108,7 @@ func TestAgentOverlayDrift_EffortAndExtraArgsAreNotDrift(t *testing.T) {
 	key := "dashboard:direct:2494-effort:reviewer"
 	s := newSessionWithID(key, "sess-2494-effort")
 	s.SetBackend("kiro")
-	r.ss.Put(key, s)
+	putT(r, key, s)
 
 	state, _ := spawnShimState(t, r, key, "", AgentOpts{
 		Backend: "kiro", Workspace: "/ws", Effort: "max", ExtraArgs: []string{"--agent-flag", "v1"},
@@ -133,7 +133,7 @@ func TestAgentOverlayDrift_BackendConfigChangeIsStillDrift(t *testing.T) {
 		key := "dashboard:direct:2494-cfg1:reviewer"
 		s := newSessionWithID(key, "sess-2494-cfg1")
 		s.SetBackend("kiro")
-		r.ss.Put(key, s)
+		putT(r, key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "kiro", Workspace: "/ws", Effort: "max"})
 
 		r.bkStore.model = "claude-haiku-4.5" // operator edits cli.model, restarts naozhi
@@ -154,7 +154,7 @@ func TestAgentOverlayDrift_BackendConfigChangeIsStillDrift(t *testing.T) {
 		key := "dashboard:direct:2494-cfg2:code-reviewer"
 		s := newSessionWithID(key, "sess-2494-cfg2")
 		s.SetBackend("claude")
-		r.ss.Put(key, s)
+		putT(r, key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 
 		r.bkStore.setBackendExtraArgsForTest(map[string][]string{"claude": {"--max-turns", "50"}})
@@ -182,7 +182,7 @@ func TestAgentOverlayDrift_AccessProfileDefaultModel(t *testing.T) {
 	key := "dashboard:direct:2494-profile:general"
 	s := newSessionWithID(key, "sess-2494-profile")
 	s.SetBackend("claude")
-	r.ss.Put(key, s)
+	putT(r, key, s)
 
 	state, sp := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", AccessProfile: "work"})
 	if sp.Overlay.AccessProfile != "work" || sp.Overlay.Model != "" {
@@ -213,7 +213,7 @@ func TestAgentOverlayDrift_TuningStaysOnTop(t *testing.T) {
 	s := newSessionWithID(key, "sess-2494-tuning")
 	s.SetBackend("claude")
 	s.SetTuningModel("claude-haiku-4.5")
-	r.ss.Put(key, s)
+	putT(r, key, s)
 
 	state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 	if !slices.Contains(state.CLIArgs, "claude-haiku-4.5") || slices.Contains(state.CLIArgs, "sonnet") {
@@ -238,7 +238,7 @@ func TestAgentOverlayDrift_ResumeArgsStripped(t *testing.T) {
 	key := "dashboard:direct:2494-resume:code-reviewer"
 	s := newSessionWithID(key, "sess-2494-resume")
 	s.SetBackend("claude")
-	r.ss.Put(key, s)
+	putT(r, key, s)
 
 	state, sp := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 	// resolveResumeID downgrades a missing on-disk target to fresh; inject the
@@ -278,7 +278,7 @@ func TestAgentOverlayDrift_LegacyStateFallsBack(t *testing.T) {
 		key := "dashboard:direct:2494-legacy-plain:general"
 		s := newSessionWithID(key, "sess-legacy-plain")
 		s.SetBackend("claude")
-		r.ss.Put(key, s)
+		putT(r, key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
 		state.SpawnOverlay = nil // written by a pre-#2494 shim
 
@@ -292,7 +292,7 @@ func TestAgentOverlayDrift_LegacyStateFallsBack(t *testing.T) {
 		key := "dashboard:direct:2494-legacy-agent:code-reviewer"
 		s := newSessionWithID(key, "sess-legacy-agent")
 		s.SetBackend("claude")
-		r.ss.Put(key, s)
+		putT(r, key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 		state.SpawnOverlay = nil
 
@@ -336,7 +336,7 @@ func TestAgentOverlayDrift_KnownEmptyOverlayIsNotLegacy(t *testing.T) {
 	key := "dashboard:direct:2494-empty:general"
 	s := newSessionWithID(key, "sess-2494-empty")
 	s.SetBackend("claude")
-	r.ss.Put(key, s)
+	putT(r, key, s)
 	state, sp := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
 	if ov := sp.Overlay; ov.Model != "" || ov.Effort != "" || ov.AccessProfile != "" || len(ov.ExtraArgs) != 0 {
 		t.Fatalf("no-override spawn produced a populated overlay: %+v", ov)
@@ -353,7 +353,7 @@ func TestAgentOverlayDrift_KnownEmptyOverlayIsNotLegacy(t *testing.T) {
 	}
 }
 
-// TestAgentOverlayDrift_CompareHasNoSpawnSideEffects: resolveSpawnParamsLocked
+// TestAgentOverlayDrift_CompareHasNoSpawnSideEffects: resolveSpawnParams
 // CONSUMES the one-shot dashboard picks (backendOverrides /
 // accessProfileOverrides). The drift comparison runs for every surviving shim
 // at startup and must never touch them — otherwise a restart would silently
@@ -361,8 +361,8 @@ func TestAgentOverlayDrift_KnownEmptyOverlayIsNotLegacy(t *testing.T) {
 func TestAgentOverlayDrift_CompareHasNoSpawnSideEffects(t *testing.T) {
 	r := mkOverlayRouter(t)
 	key := "dashboard:direct:2494-sidefx:general"
-	r.ss.Ext().picks.backend[key] = "kiro"
-	r.ss.Ext().picks.accessProfile[key] = "work"
+	stateOf(r).picks.backend[key] = "kiro"
+	stateOf(r).picks.accessProfile[key] = "work"
 	setAccessProfiles(r, map[string]AccessProfile{"work": {DefaultModel: "m"}})
 
 	wrapper, backendID := r.wrapperFor("claude")
@@ -370,10 +370,10 @@ func TestAgentOverlayDrift_CompareHasNoSpawnSideEffects(t *testing.T) {
 		SpawnOverlay: &shim.SpawnOverlay{Model: "sonnet", AccessProfile: "work"}}
 	_, _, _ = r.shimArgsDrift(wrapper, backendID, state, nil)
 
-	if got := r.ss.Ext().picks.backend[key]; got != "kiro" {
+	if got := stateOf(r).picks.backend[key]; got != "kiro" {
 		t.Errorf("drift compare consumed backendOverrides[%s]: got %q", key, got)
 	}
-	if got := r.ss.Ext().picks.accessProfile[key]; got != "work" {
+	if got := stateOf(r).picks.accessProfile[key]; got != "work" {
 		t.Errorf("drift compare consumed accessProfileOverrides[%s]: got %q", key, got)
 	}
 }
@@ -421,7 +421,7 @@ func TestResolveSpawnParams_RecordsOverlay(t *testing.T) {
 	r := mkOverlayRouter(t)
 	setAccessProfiles(r, map[string]AccessProfile{"work": {DefaultModel: "m"}})
 
-	sp := r.resolveSpawnParams(r.ss.AssumeLocked(), "dashboard:direct:2494-rec:reviewer", "", AgentOpts{
+	sp := resolveT(r, "dashboard:direct:2494-rec:reviewer", "", AgentOpts{
 		Backend: "kiro", Workspace: "/ws", Model: "sonnet", Effort: "max",
 		ExtraArgs: []string{"--x"}, AccessProfile: "work",
 	})
@@ -431,7 +431,7 @@ func TestResolveSpawnParams_RecordsOverlay(t *testing.T) {
 		t.Errorf("Overlay = %+v, want %+v", sp.Overlay, want)
 	}
 
-	sp = r.resolveSpawnParams(r.ss.AssumeLocked(), "dashboard:direct:2494-rec2:general", "", AgentOpts{
+	sp = resolveT(r, "dashboard:direct:2494-rec2:general", "", AgentOpts{
 		Backend: "claude", Workspace: "/ws", AccessProfile: "deleted-profile",
 	})
 	if sp.Overlay.AccessProfile != "" || sp.AccessProfileID != "" {

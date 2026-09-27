@@ -57,7 +57,7 @@ func TestEventLogIntegration_DirectSinkWorks(t *testing.T) {
 	sinkBuilder := r.eventLogPersister.SinkFor("k")
 	// Tests construct the sink with a nil tracker and empty keyhash
 	// to exercise the persist path in isolation. Integration through
-	// the Router (see spawnSession/installPersistSink) supplies real
+	// the Router (see completeSpawn/installPersistSink) supplies real
 	// values.
 	sink := newEventLogSink(sinkBuilder, nil, "")
 
@@ -100,7 +100,7 @@ func TestEventLogIntegration_RouterDropKeyRemovesFiles(t *testing.T) {
 	key := "dashboard:direct:alice:general"
 
 	// Direct sink so we don't need a full cli.Process — the Router's
-	// Remove path exercises DropKey independently of spawnSession.
+	// Remove path exercises DropKey independently of the spawn.
 	sink := newEventLogSink(r.eventLogPersister.SinkFor(key), nil, "")
 	sink([]clievent.EventEntry{{UUID: "aa", Time: 1, Type: "user"}}, false)
 

@@ -75,7 +75,7 @@ func TestShouldPrune_KeepsSessionWithSessionID(t *testing.T) {
 // confirm a conversed (SessionID-bearing) but long-dead session survives while
 // a same-age orphan stub is pruned. This is the end-to-end guard for the
 // "opened session vanished a day later" bug (#2278): the resumable card must
-// still be present in r.ss.sessions after Cleanup.
+// still be present in the session table after Cleanup.
 func TestCleanup_KeepsConversedSessionForever(t *testing.T) {
 	r := &Router{
 		ss:       newSessionTable(),
@@ -83,7 +83,7 @@ func TestCleanup_KeepsConversedSessionForever(t *testing.T) {
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
 	}
-	r.ss.Ext().picks.backend = map[string]string{}
+	stateOf(r).picks.backend = map[string]string{}
 
 	aged := time.Now().Add(-100 * time.Hour).UnixNano()
 
@@ -95,14 +95,14 @@ func TestCleanup_KeepsConversedSessionForever(t *testing.T) {
 	// Orphan stub: no process, no SessionID, same age → prune.
 	orphan := &ManagedSession{key: "orphan"}
 	orphan.lastActive.Store(aged)
-	r.ss.Put("orphan", orphan)
+	putT(r, "orphan", orphan)
 
 	r.Cleanup()
 
-	if _, ok := r.ss.Lookup("conversed"); !ok {
+	if _, ok := lookupT(r, "conversed"); !ok {
 		t.Error("conversed session with SessionID must survive Cleanup regardless of age (#2278)")
 	}
-	if _, ok := r.ss.Lookup("orphan"); ok {
+	if _, ok := lookupT(r, "orphan"); ok {
 		t.Error("orphan stub without SessionID should still be pruned past pruneTTL")
 	}
 }

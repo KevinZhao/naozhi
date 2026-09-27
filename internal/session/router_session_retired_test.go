@@ -8,7 +8,7 @@ import (
 
 // TestRouter_OnSessionRetired_RemoveCarriesSessionID locks the contract
 // that Router.Remove fires the SetOnSessionRetired callback with the
-// session UUID captured before unregister cleared r.ss.Get(key).
+// session UUID captured before unregister cleared r.ss.Load(key).
 // The history-drawer wiring depends on this — without it the dashboard
 // would have no UUID to stamp retired_at against.
 func TestRouter_OnSessionRetired_RemoveCarriesSessionID(t *testing.T) {
@@ -21,9 +21,9 @@ func TestRouter_OnSessionRetired_RemoveCarriesSessionID(t *testing.T) {
 	)
 	s := &ManagedSession{key: key}
 	s.setSessionID(sid)
-	r.ss.Lock()
-	r.ss.Put(key, s)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(key, s)
+	})
 
 	var (
 		mu       sync.Mutex
@@ -56,8 +56,8 @@ func TestRouter_OnSessionRetired_RemoveCarriesSessionID(t *testing.T) {
 }
 
 // TestRouter_OnSessionRetired_ResetCarriesSessionID mirrors the Remove
-// case for Router.Reset, the /new code path. resetLocked drops
-// r.ss.Get(key) before notifyKeyRetired runs, so the callback must
+// case for Router.Reset, the /new code path. resetEntry drops
+// r.ss.Load(key) before notifyKeyRetired runs, so the callback must
 // receive the snapshotted UUID rather than reading from the (now
 // missing) session entry.
 func TestRouter_OnSessionRetired_ResetCarriesSessionID(t *testing.T) {
@@ -70,9 +70,9 @@ func TestRouter_OnSessionRetired_ResetCarriesSessionID(t *testing.T) {
 	)
 	s := &ManagedSession{key: key}
 	s.setSessionID(sid)
-	r.ss.Lock()
-	r.ss.Put(key, s)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(key, s)
+	})
 
 	gotCh := make(chan string, 1)
 	r.SetOnSessionRetired(func(_ string, sessionID string) {
@@ -105,9 +105,9 @@ func TestRouter_OnSessionRetired_NilFnSafe(t *testing.T) {
 	const key = "k"
 	s := &ManagedSession{key: key}
 	s.setSessionID("sid-x")
-	r.ss.Lock()
-	r.ss.Put(key, s)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(key, s)
+	})
 	r.Remove(key)
 
 	if called {
@@ -126,9 +126,9 @@ func TestRouter_OnKeyRetired_StillFiresAlongsideSessionRetired(t *testing.T) {
 	const key = "k"
 	s := &ManagedSession{key: key}
 	s.setSessionID("sid-x")
-	r.ss.Lock()
-	r.ss.Put(key, s)
-	r.ss.Unlock()
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(key, s)
+	})
 
 	var (
 		mu       sync.Mutex

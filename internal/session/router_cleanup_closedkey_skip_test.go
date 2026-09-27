@@ -33,7 +33,7 @@ func TestCleanup_IdleClosedSession_StaysOneTick(t *testing.T) {
 
 	r.Cleanup()
 
-	if _, ok := r.ss.Lookup("key1"); !ok {
+	if _, ok := lookupT(r, "key1"); !ok {
 		t.Fatal("alive-then-idle-closed session must survive the tick it is closed in (master PERF-5 snapshot semantics)")
 	}
 	if proc.Alive() {
@@ -46,7 +46,7 @@ func TestCleanup_IdleClosedSession_StaysOneTick(t *testing.T) {
 	// Second tick: pass-1 now observes the dead process + stale lastActive, so
 	// shouldPrune is true and the session is finally pruned.
 	r.Cleanup()
-	if _, ok := r.ss.Lookup("key1"); ok {
+	if _, ok := lookupT(r, "key1"); ok {
 		t.Fatal("dead session past pruneTTL must be pruned on the following tick")
 	}
 }

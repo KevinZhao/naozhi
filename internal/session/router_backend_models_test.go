@@ -51,7 +51,7 @@ func TestBackendModelManifest_Tiers(t *testing.T) {
 		s := newSessionWithID("k1", "sess-1")
 		s.SetBackend("kiro")
 		s.storeProcess(proc)
-		r.ss.Put("k1", s)
+		putT(r, "k1", s)
 
 		got := r.BackendModelManifest("kiro")
 		if len(got) != 2 || got[0].ID != "claude-fable-5" {
@@ -93,7 +93,7 @@ func TestBackendModelManifest_ObservedTier(t *testing.T) {
 		s.SetBackend(backend)
 		s.SetModel(model)
 		s.SetTuningModel(tuning)
-		r.ss.Put(key, s)
+		putT(r, key, s)
 	}
 
 	t.Run("observed models when no runtime and no config", func(t *testing.T) {
