@@ -14,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
@@ -27,7 +28,7 @@ type Handler struct {
 	router      ScratchRouter
 	pool        *session.ScratchPool
 	openLimit   IPLimiter
-	agents      map[string]session.AgentOpts
+	agents      map[string]sessionview.AgentOpts
 }
 
 // openRequest is the POST /api/scratch/open body.
@@ -84,7 +85,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Validate source key at the trust boundary (mirrors the IM ValidateSessionKey gate).
-	if err := session.ValidateSessionKey(req.SourceKey); err != nil {
+	if err := sessionkey.ValidateSessionKey(req.SourceKey); err != nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid source_key"})
 		return
 	}
@@ -106,7 +107,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	if agentID == "" {
 		agentID = "general"
 	}
-	base := session.AgentOpts{}
+	base := sessionview.AgentOpts{}
 	if h.agents != nil {
 		base = h.agents[agentID]
 	}
@@ -144,15 +145,15 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, session.ErrScratchPoolFull):
 			httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "scratch pool full"})
 		default:
-			slog.Warn("scratch open failed", "err", err, "source_key", session.SanitizeLogAttr(req.SourceKey))
+			slog.Warn("scratch open failed", "err", err, "source_key", sessionkey.SanitizeLogAttr(req.SourceKey))
 			httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "failed to open scratch"})
 		}
 		return
 	}
 	slog.Info("scratch opened",
 		"id", sc.ID,
-		"source", session.SanitizeLogAttr(req.SourceKey),
-		"agent", session.SanitizeLogAttr(agentID),
+		"source", sessionkey.SanitizeLogAttr(req.SourceKey),
+		"agent", sessionkey.SanitizeLogAttr(agentID),
 		"quote_truncated", sc.QuoteTrunc,
 		"requested_turns", req.ContextTurns, // pre-clamp, as the client asked
 		"applied_turns", turns, // post-clamp, what collectScratchContext used
@@ -182,7 +183,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 // GetOrCreate applies) and Effort with tuningspec. A failing value is
 // skipped at Info and the registry default kept. AccessProfile needs no
 // gate: an unknown ID degrades to the global default at spawn.
-func inheritSourceTuning(base session.AgentOpts, snap session.SessionSnapshot) session.AgentOpts {
+func inheritSourceTuning(base sessionview.AgentOpts, snap sessionview.SessionSnapshot) sessionview.AgentOpts {
 	out := base
 	if snap.AccessProfile != "" {
 		out.AccessProfile = snap.AccessProfile
@@ -190,8 +191,8 @@ func inheritSourceTuning(base session.AgentOpts, snap session.SessionSnapshot) s
 	if snap.Model != "" {
 		if err := session.ValidateModelID(snap.Model); err != nil {
 			slog.Info("scratch: not inheriting source model",
-				"source_key", session.SanitizeLogAttr(snap.Key),
-				"model", session.SanitizeLogAttr(snap.Model), "err", err)
+				"source_key", sessionkey.SanitizeLogAttr(snap.Key),
+				"model", sessionkey.SanitizeLogAttr(snap.Model), "err", err)
 		} else {
 			out.Model = snap.Model
 		}
@@ -199,8 +200,8 @@ func inheritSourceTuning(base session.AgentOpts, snap session.SessionSnapshot) s
 	if snap.Effort != "" {
 		if err := tuningspec.ValidateEffort("scratch inherited effort", snap.Effort); err != nil {
 			slog.Info("scratch: not inheriting source effort",
-				"source_key", session.SanitizeLogAttr(snap.Key),
-				"effort", session.SanitizeLogAttr(snap.Effort), "err", err)
+				"source_key", sessionkey.SanitizeLogAttr(snap.Key),
+				"effort", sessionkey.SanitizeLogAttr(snap.Effort), "err", err)
 		} else {
 			out.Effort = snap.Effort
 		}
@@ -212,7 +213,7 @@ func inheritSourceTuning(base session.AgentOpts, snap session.SessionSnapshot) s
 // of the quoted message (tail of the log when sourceMessageTime == 0). Slices
 // stay chronological for the pool's renderer; EventEntriesBeforeCtx reaches
 // the disk-tier history when the message is older than the in-memory ring.
-func collectScratchContext(ctx context.Context, sess *session.ManagedSession, sourceMessageTime int64, turns int) (before, after []clievent.EventEntry) {
+func collectScratchContext(ctx context.Context, sess SourceSession, sourceMessageTime int64, turns int) (before, after []clievent.EventEntry) {
 	if sess == nil || turns <= 0 {
 		return nil, nil
 	}
@@ -306,7 +307,7 @@ func (h *Handler) HandlePromote(w http.ResponseWriter, r *http.Request) {
 	if sc.AgentID != "" {
 		newAgent = "aside-" + sc.AgentID + "-" + short
 	}
-	newKey := session.SessionKey(srcParts[0], srcParts[1], srcParts[2], newAgent)
+	newKey := sessionkey.SessionKey(srcParts[0], srcParts[1], srcParts[2], newAgent)
 
 	if !h.router.RenameSession(sc.Key, newKey) {
 		// Collision, invalid key, or entry vanished post-Detach: stay orphan-free.
@@ -352,7 +353,7 @@ type Deps struct {
 	Router      ScratchRouter
 	Pool        *session.ScratchPool
 	OpenLimit   IPLimiter
-	Agents      map[string]session.AgentOpts
+	Agents      map[string]sessionview.AgentOpts
 }
 
 // New constructs a Handler from injected deps.

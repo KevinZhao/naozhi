@@ -33,7 +33,7 @@ func TestHandleOpen_InheritsAccessProfileAndModel(t *testing.T) {
 
 	pool := session.NewScratchPool(r, 4, time.Minute)
 	h := New(Deps{
-		Router: r,
+		Router: sourceRouter{r},
 		Pool:   pool,
 		Agents: map[string]session.AgentOpts{"general": {Model: "registry-default"}},
 	})
@@ -127,4 +127,15 @@ func TestInheritSourceTuning_GatesUnsafeValues(t *testing.T) {
 	if base.Model != "reg-model" || base.AccessProfile != "reg-profile" {
 		t.Errorf("base was mutated: %+v", base)
 	}
+}
+
+// sourceRouter adapts a real router for the handler the way server's
+// scratchRouter does in production.
+type sourceRouter struct{ *session.Router }
+
+func (s sourceRouter) SessionFor(key string) SourceSession {
+	if ms := s.Router.SessionFor(key); ms != nil {
+		return ms
+	}
+	return nil
 }

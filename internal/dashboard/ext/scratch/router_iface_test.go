@@ -2,8 +2,6 @@ package scratch
 
 import (
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/session"
 )
 
 // TestScratchRouter_InjectableForTesting exercises the deeper "consumer
@@ -32,7 +30,7 @@ type recordingScratchRouter struct {
 	getSession, remove, rename int
 }
 
-func (r *recordingScratchRouter) SessionFor(string) *session.ManagedSession {
+func (r *recordingScratchRouter) SessionFor(string) SourceSession {
 	r.getSession++
 	return nil
 }
