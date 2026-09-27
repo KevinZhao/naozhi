@@ -75,10 +75,10 @@ func (s *ManagedSession) HasProcess() bool {
 	return s.loadProcess() != nil
 }
 
-// State returns just the live process state ("ready" / "busy" / etc.)
-// without the SetModel mirror or a full SessionSnapshot — lock-free hot
-// path for high-frequency observers. Returns "ready" when no process is
-// attached, mirroring Snapshot's no-proc branch.
+// State returns just the live process state — "ready", "running" or "dead"
+// (cli.ProcessState.String) — without the SetModel mirror or a full
+// SessionSnapshot: a lock-free hot path for high-frequency observers. Returns
+// "ready" when no process is attached, mirroring Snapshot's no-proc branch.
 func (s *ManagedSession) State() string {
 	proc := s.loadProcess()
 	if proc == nil {

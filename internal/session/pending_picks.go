@@ -15,25 +15,22 @@ package session
 // of three open-coded map operations that must agree.
 
 // pendingPicks holds per-session-key choices made before (or independently of)
-// the session's ManagedSession existing. Caller holds the table lock for every method:
-// these are Router state and the Locked suffix follows the package convention.
+// the session's ManagedSession existing. It lives in the router's table state,
+// so every method runs inside a table transaction.
 //
-// The three have DIFFERENT lifecycles, which is why they stay three maps rather
-// than one struct:
+// Each pick is consumed by the key's next spawn, and the session then carries
+// the choice itself (a respawn of an existing session reuses its backend,
+// access profile and tuning). They stay three maps because they are consumed
+// at different points:
 //
-//   - backend PERSISTS. resolveSpawnParams reads it on every spawn, so a session
-//     that resets keeps the chosen backend. Dropped at reset and terminal removal.
-//   - accessProfile is CONSUMED on the first spawn (read-and-delete in
-//     resolveSpawnParams), then gone.
-//   - tuning is CONSUMED on the first spawn (consumePendingTuning), then
-//     gone.
+//   - backend and accessProfile are consumed when the spawn is reserved
+//     (read-and-delete in resolveSpawnParams), so a spawn that then fails has
+//     used them up.
+//   - tuning is consumed only once the spawn succeeds (consumePendingTuning in
+//     the commit), so a failed spawn leaves it for the retry.
 //
-// The comments this replaced said accessProfile was "one-shot like
-// backendOverrides" and had "the same lifecycle as backendOverrides". Both were
-// wrong in the same direction: backend is the one that is NOT one-shot.
-// accessProfile's real twin is tuning. That matters because accessProfile gates
-// which credentials a spawn gets (RFC project-access-profile §8.2), so a reader
-// who trusted the comment would have the wrong model of when it clears.
+// accessProfile gates which credentials a spawn gets (RFC
+// project-access-profile §8.2), so when it clears matters.
 type pendingPicks struct {
 	// backend: per-session backend picks keyed by full session key (with agent
 	// suffix) so two sessions on one chat can run different backends.
@@ -82,18 +79,15 @@ func (p *pendingPicks) dropAll(key string) {
 	delete(p.tuning, key)
 }
 
-// dropBackend clears only the backend pick, which is what the ResetChat
-// path (/new, /clear) does.
+// dropBackend clears only the backend pick, which is what the chat reset
+// (ResetChatAndSetWorkspace, IM /cd) does; the per-key resets (/new, /clear)
+// drop every pick.
 //
 // It deliberately leaves accessProfile and tuning: both are consumed on the
 // first spawn, so normally there is nothing to clear, and in the window where
-// there IS (a dashboard pick made before the first message, then /new) the pick
-// was made for THIS key and still applies to the next spawn. Only the backend
-// pick resets, so /new returns to the default backend.
-//
-// This asymmetry was previously an open-coded single delete with a comment
-// mentioning only backendOverrides; naming it records that the other two are
-// omitted on purpose rather than forgotten.
+// there IS (a pick made before the first message, then /cd) the pick was made
+// for THIS key and still applies to the next spawn. Only the backend pick
+// resets, so the chat returns to the default backend.
 func (p *pendingPicks) dropBackend(key string) {
 	delete(p.backend, key)
 }

@@ -11,7 +11,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -88,30 +90,35 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 	s.SetHistorySource(mergeWithEventLog(r.eventLogDir, s.key, fallback))
 }
 
-// ResetChat resets all sessions belonging to a chat (all agents).
-func (r *Router) ResetChat(chatKeyPrefix string) {
-	r.resetChatAndMaybeSetWorkspace(chatKeyPrefix, "", false)
-}
+// The reset family. Every variant removes the key(s) from the table in one
+// transaction and then, outside it, releases them (releaseKeys: close the
+// process, wait for the shim socket, flag shim-stuck). They differ in scope,
+// in which picks survive, and in whether the key is retired:
+//
+//   - Reset / ResetAndDiscardOverride: one key; every pick is dropped; the
+//     key is retired (notifyKeyRetired → the message queue's Cleanup, the
+//     history cache, retired_at). Cleanup requires that no in-flight queue
+//     owner can arrive on the key afterwards, which is why callers discard
+//     the key's queue first (dispatch /new, server /clear).
+//   - ResetChatAndSetWorkspace: every agent key of a chat; only the backend
+//     pick is dropped (pendingPicks.dropBackend); the keys are NOT retired —
+//     /cd does not discard their queues, and queued messages are meant to run
+//     in the new workspace.
+//   - ResetAndRecreate: one key, re-spawned in the same transaction; picks
+//     are kept for that spawn; not retired, for the same Cleanup reason.
 
 // ResetChatAndSetWorkspace atomically resets all sessions belonging to a chat
-// and installs a new workspace override for it in one transaction. Two
-// separate transactions would let a concurrent GetOrCreate see the
-// key idle with the override deleted and spawn in the OLD workspace (#2342).
+// (all agents) and installs a new workspace override for it in one
+// transaction. Two separate transactions would let a concurrent GetOrCreate
+// see the key idle with the override deleted and spawn in the OLD workspace
+// (#2342).
 func (r *Router) ResetChatAndSetWorkspace(chatKeyPrefix, path string) {
-	r.resetChatAndMaybeSetWorkspace(chatKeyPrefix, path, true)
-}
-
-// resetChatAndMaybeSetWorkspace is the shared transactional core for ResetChat
-// and ResetChatAndSetWorkspace. When setWorkspace is true it installs `path` as
-// the chat's workspace override in the same transaction, so callers that
-// reset+set observe no intermediate state.
-func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWorkspace bool) {
-	var toClose []processIface
+	var released []releasedKey
 	r.ss.Update(func(tx sessTx) {
 		var closedActive int
 		// A copy of the chat's keys: resetChatEntry deletes as it goes.
 		for _, key := range tx.KeysOfChat(chatKeyPrefix) {
-			r.resetChatEntry(tx, key, &toClose, &closedActive)
+			released = r.resetChatEntry(tx, key, released, &closedActive)
 		}
 		if closedActive > 0 {
 			if tx.AddActive(-int64(closedActive)) < 0 {
@@ -124,49 +131,104 @@ func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWo
 		// Delete marks the store dirty so the removal survives a crash before
 		// any other path flips the flag.
 		tx.Ext().workspaces.Delete(chatKeyPrefix)
-		if setWorkspace && chatKeyPrefix != "" {
+		if chatKeyPrefix != "" {
 			// Same transaction as the reset so no concurrent GetOrCreate sees
 			// the chat reset with the override gone (#2342). The override was
 			// just deleted, so this is always a fresh insert.
 			r.putWorkspaceOverride(tx, chatKeyPrefix, path)
 		}
 		tx.MarkChanged()
-		// proc.Close() can block, so it runs with the lock released; the
-		// Broadcast must come after it — Close() flips IsRunning() to false,
-		// which Shutdown's Wait re-evaluates.
-		tx.Unlocked(func() {
-			for _, proc := range toClose {
-				proc.Close()
-			}
-		})
-		tx.Broadcast()
 	})
+	r.releaseKeys(released)
 	r.notifyChange()
 }
 
-// resetChatEntry tears down a single session for ResetChat: collects any
-// live process into toClose (caller Close()s it outside the table lock), drops the
-// session's record + sessionID and backend-override mappings, and bumps
-// closedActive when the session counted toward maxProcs.
-func (r *Router) resetChatEntry(tx sessTx, key string, toClose *[]processIface, closedActive *int) {
+// resetChatEntry removes one session of a chat reset: drops the session's
+// record, its session-ID mapping and its backend pick, appends it to released,
+// and bumps closedActive when the session counted toward maxProcs.
+func (r *Router) resetChatEntry(tx sessTx, key string, released []releasedKey, closedActive *int) []releasedKey {
 	s := tx.Get(key)
 	if s == nil {
-		return
+		return released
 	}
-	if p := s.loadProcess(); p != nil && p.Alive() {
-		*toClose = append(*toClose, p)
-		if !s.exempt {
-			*closedActive++
-		}
+	p := s.loadProcess()
+	if p != nil && p.Alive() && !s.exempt {
+		*closedActive++
 	}
 	if id := s.getSessionID(); id != "" {
 		tx.ClearID(id)
 	}
 	tx.Delete(key)
-	// Backend pick only: /new returns to the default backend, while the two
-	// consumed-on-spawn picks still apply to this key. dropBackend's doc
+	// Backend pick only: the chat returns to the default backend, while the
+	// two consumed-on-spawn picks still apply to this key. dropBackend's doc
 	// records that the omission is deliberate.
 	tx.Ext().picks.dropBackend(key)
+	return append(released, releasedKey{key: key, proc: p})
+}
+
+// releasedKey is a key a reset removed from the table, with the process it
+// had (nil when none).
+type releasedKey struct {
+	key  string
+	proc processIface
+}
+
+// releaseKeys finishes resets outside any transaction. It closes each live
+// process and waits for its key's shim socket to go, so a same-key StartShim
+// does not hit the dial-first "refusing to clobber" guard; proc may be nil or
+// dead with the socket still bound (CLI crash, stale pointer), so the wait
+// runs regardless. A socket still bound after the bounded wait flags its key
+// shim-stuck, and the next GetOrCreate wraps its spawn error with
+// ErrShimStuck (#1324). Several keys are released concurrently, so a chat
+// reset waits one window rather than one per key. The Broadcast at the end
+// wakes a Shutdown waiting on one of the processes.
+func (r *Router) releaseKeys(keys []releasedKey) {
+	if len(keys) == 0 {
+		return
+	}
+	stuck := make([]bool, len(keys))
+	release := func(i int) {
+		k := keys[i]
+		if k.proc != nil && k.proc.Alive() {
+			k.proc.Close()
+		}
+		stuck[i] = !waitSocketGoneForKey(k.key, 2*time.Second)
+	}
+	if len(keys) == 1 {
+		release(0)
+	} else {
+		var wg sync.WaitGroup
+		for i := range keys {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() {
+					if rec := recover(); rec != nil {
+						metrics.PanicRecoveredTotal.Add(1)
+						slog.Error("reset: releasing a key panicked",
+							"key", keys[i].key, "panic", rec, "stack", string(debug.Stack()))
+					}
+				}()
+				release(i)
+			}()
+		}
+		wg.Wait()
+	}
+	r.ss.Update(func(tx sessTx) {
+		for i, k := range keys {
+			if stuck[i] {
+				tx.Ext().spawns.MarkShimStuck(k.key)
+			}
+		}
+		tx.Broadcast()
+	})
+	for i, k := range keys {
+		if stuck[i] {
+			slog.Warn("shim socket still bound after reset wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
+				"key", k.key)
+		}
+		logSessionLifecycle("reset", k.key)
+	}
 }
 
 // AgentOpts provides per-agent overrides for session creation.
@@ -1197,29 +1259,7 @@ func (r *Router) ResetAndDiscardOverride(key string) {
 // table entry; pass through as-is to notifyKeyRetired so the
 // dashboard history-sort hook can stamp retired_at.
 func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
-	if proc != nil && proc.Alive() {
-		proc.Close()
-	}
-	// proc may be nil/!Alive with the shim socket still bound (CLI crash,
-	// stale pointer); give it a short window to disappear so a same-key
-	// StartShim does not hit the dial-first "refusing to clobber" guard.
-	// Bounded so a truly stuck shim surfaces the real error instead of hanging.
-	gone := waitSocketGoneForKey(key, 2*time.Second)
-	// Broadcast inside the transaction (see evictOldest).
-	r.ss.Update(func(tx sessTx) {
-		if !gone {
-			// Flag the key so the next GetOrCreate wraps any spawn error with
-			// ErrShimStuck (#1324); cleared by that GetOrCreate.
-			tx.Ext().spawns.MarkShimStuck(key)
-		}
-		tx.Broadcast()
-	})
-	if !gone {
-		slog.Warn("shim socket still bound after Reset wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
-			"key", key)
-	}
-
-	logSessionLifecycle("reset", key)
+	r.releaseKeys([]releasedKey{{key: key, proc: proc}})
 	r.notifyKeyRetired(key, sessionID)
 	r.notifyChange()
 }

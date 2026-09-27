@@ -96,7 +96,7 @@ func TestResetChat_ClosesTheChatsProcessesAndWakesShutdown(t *testing.T) {
 	// Wait; the reset's transaction runs only once that Wait releases it.
 	<-running.asked
 
-	r.ResetChat("feishu:group:chatA")
+	r.ResetChatAndSetWorkspace("feishu:group:chatA", t.TempDir())
 	if running.Alive() || idle.Alive() {
 		t.Error("ResetChat left a chat process running")
 	}
@@ -126,5 +126,66 @@ func TestReset_FlagsAShimSocketThatOutlivesTheWait(t *testing.T) {
 	_, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
 	if !errors.Is(err, ErrShimStuck) || !errors.Is(err, boom) {
 		t.Errorf("GetOrCreate after a Reset that left the socket = %v, want ErrShimStuck wrapping the spawn error", err)
+	}
+}
+
+// TestResetChatAndSetWorkspace_FlagsShimSocketsThatOutliveTheWait: the next
+// message after /cd spawns on the same key, so a chat reset waits for each
+// key's shim socket like Reset does, and flags a key whose socket outlives
+// the wait. The keys wait together: one window, not one per key.
+func TestResetChatAndSetWorkspace_FlagsShimSocketsThatOutliveTheWait(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	const chat = "feishu:group:stuckchat"
+	keys := []string{chat + ":general", chat + ":reviewer"}
+	for _, key := range keys {
+		if err := os.WriteFile(shim.SocketPath(shim.KeyHash(key)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	boom := errors.New("spawn failed")
+	r := spawnRouter(t, 4, func(context.Context, cli.SpawnOptions) (processIface, error) { return nil, boom })
+	for _, key := range keys {
+		injectSession(r, key, newIdleProc())
+	}
+
+	start := time.Now()
+	r.ResetChatAndSetWorkspace(chat, t.TempDir()) // waits out the 2s socket-gone window
+	if waited := time.Since(start); waited >= 4*time.Second {
+		t.Errorf("the chat reset waited %v for two keys, want one ~2s window", waited)
+	}
+
+	for _, key := range keys {
+		_, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
+		if !errors.Is(err, ErrShimStuck) || !errors.Is(err, boom) {
+			t.Errorf("GetOrCreate(%s) after the chat reset = %v, want ErrShimStuck wrapping the spawn error", key, err)
+		}
+	}
+}
+
+// TestResetChatAndSetWorkspace_ReleasesTheSlotsAndOnlyTheBackendPick: the
+// chat's live sessions give their slots back, and of the picks made for a
+// key only the backend one clears — the access profile and tuning picks were
+// made for that key and still apply to its next spawn.
+func TestResetChatAndSetWorkspace_ReleasesTheSlotsAndOnlyTheBackendPick(t *testing.T) {
+	r := newTestRouter(4)
+	const chat = "feishu:group:picks"
+	key := chat + ":general"
+	injectSession(r, key, newIdleProc())
+	injectSession(r, chat+":reviewer", newIdleProc())
+	r.SetSessionBackend(key, "kiro")
+	r.SetSessionAccessProfile(key, "work")
+	if got := r.ss.Active(); got != 2 {
+		t.Fatalf("active = %d before the reset, want 2", got)
+	}
+
+	r.ResetChatAndSetWorkspace(chat, t.TempDir())
+	if got := r.ss.Active(); got != 0 {
+		t.Errorf("active = %d after the chat reset, want 0", got)
+	}
+	if got := r.SessionBackend(key); got != "" {
+		t.Errorf("backend pick = %q after the chat reset, want cleared", got)
+	}
+	if got := r.SessionAccessProfile(key); got != "work" {
+		t.Errorf("access-profile pick = %q after the chat reset, want it kept", got)
 	}
 }
