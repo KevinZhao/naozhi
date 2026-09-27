@@ -527,7 +527,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// ---- Passthrough mode hooks ----
 	// These run before the legacy eventCh / ring.EventLog delivery paths.
 	// They are cheap no-ops when passthrough is not in use (zero
-	// pending slots, inTurn=false, protocol doesn't support replay).
+	// pending slots, protocol doesn't support replay).
 
 	// system/init: mark start of new turn for turn-aggregation owner tracking
 	// and watchdog baseline. Unconditional is harmless — onSystemInit only
