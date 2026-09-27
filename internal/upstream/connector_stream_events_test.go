@@ -28,7 +28,7 @@ func TestStreamEvents_NotifyClosedAfterReset_EmitsTerminalState(t *testing.T) {
 		t.Fatal("setup: RegisterCronStub did not install session")
 	}
 
-	c := &Connector{router: r}
+	c := &Connector{router: testRouter(r)}
 	notify := make(chan struct{})
 
 	// Simulate the lifecycle: Reset() removes the session from the router,

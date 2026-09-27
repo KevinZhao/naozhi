@@ -30,21 +30,18 @@ import (
 )
 
 // Enforce *session.Router satisfies every consumer's interface. The
-// dispatch / server / upstream consumers from
+// dispatch / server consumers from
 // docs/rfc/consumer-interfaces.md are covered here so any Router
 // signature drift surfaces in one CI failure instead of three.
 //
-// cron.SessionRouter is INTENTIONALLY not pinned: post Phase B
-// (docs/rfc/cron-sysession-merge.md §3.3) the cron interface speaks
-// in cron-local types (cron.AgentOpts / cron.Session) rather than
-// session.AgentOpts / *session.ManagedSession, so *session.Router no
-// longer satisfies it directly. The cmd/naozhi adapter
-// (cronRouterAdapter) bridges the two; the round-trip test for that
-// adapter lives in internal/wireup/cron_router_adapter_test.go.
+// cron.SessionRouter and upstream.SessionRouter are INTENTIONALLY not
+// pinned: both speak in their own session type (cron.Session /
+// upstream.Session) rather than *session.ManagedSession, so
+// *session.Router does not satisfy them directly. wireup adapts it to each
+// and pins the adapters there (cron_router_adapter.go, upstream_router.go).
 var (
 	_ dispatch.SessionRouter = (*session.Router)(nil)
 	_ server.HubRouter       = (*session.Router)(nil)
-	_ upstream.SessionRouter = (*session.Router)(nil)
 )
 
 // dispatch.ProjectStore is the other consumer interface dispatch declares
@@ -56,3 +53,5 @@ var (
 var _ dispatch.ProjectStore = (*project.Manager)(nil)
 
 var _ = cron.SessionRouter(nil) // keep cron import alive for godoc cross-ref
+
+var _ = upstream.SessionRouter(nil) // keep upstream import alive for godoc cross-ref

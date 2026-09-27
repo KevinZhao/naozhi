@@ -21,7 +21,8 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // handleRequest dispatches a reverse-RPC request received from the primary.
@@ -76,7 +77,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("fetch_events params: %w", err)
 		}
-		if err := session.ValidateSessionKey(p.Key); err != nil {
+		if err := sessionkey.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("fetch_events key: %w", err)
 		}
 		sess := c.router.SessionFor(p.Key)
@@ -105,7 +106,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("send params: %w", err)
 		}
-		if err := session.ValidateSessionKey(p.Key); err != nil {
+		if err := sessionkey.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("send key: %w", err)
 		}
 		// Reject oversized text at the trust boundary before it reaches CLI
@@ -115,11 +116,11 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if n := len(p.Text); n > limits.MaxCoalescedText {
 			return nil, fmt.Errorf("send text too long: %d bytes", n)
 		}
-		opts := session.AgentOpts{}
+		opts := sessionview.AgentOpts{}
 		if p.Workspace != "" {
 			// Syntactic pre-check before Clean/EvalSymlinks: Clean folds
 			// `/home/../etc` into `/etc`, defeating a post-Clean prefix check.
-			if err := session.ValidateRemoteWorkspacePath(p.Workspace); err != nil {
+			if err := sessionview.ValidateRemoteWorkspacePath(p.Workspace); err != nil {
 				return nil, fmt.Errorf("workspace path invalid: %w", err)
 			}
 			// With no allowed root configured the workspace cannot be bounded;
@@ -202,7 +203,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if cwd != "unknown" {
 			// Syntactic pre-check always — traversal / control bytes / relative
 			// paths must not reach filepath.Clean.
-			if err := session.ValidateRemoteWorkspacePath(cwd); err != nil {
+			if err := sessionview.ValidateRemoteWorkspacePath(cwd); err != nil {
 				return nil, fmt.Errorf("takeover cwd invalid: %w", err)
 			}
 			// No allowed root configured: refuse the cwd override (same policy
@@ -217,8 +218,8 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			}
 			cwd = cleanCWD
 		}
-		cwdKey := session.SanitizeCWDKey(cwd)
-		key := session.TakeoverKey(cwdKey)
+		cwdKey := sessionkey.SanitizeCWDKey(cwd)
+		key := sessionkey.TakeoverKey(cwdKey)
 		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
 		// wg keeps reconnect waiting for in-flight cleanup; appCtx so a
 		// transient connection drop does not abort cleanup already in progress.
@@ -237,7 +238,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			// Empty AgentOpts by design: the remote node has no agents registry,
 			// so per-agent overrides (model / args / system_prompt, #2493) do
 			// not cross the node boundary on takeover.
-			if _, err := c.router.Takeover(appCtx, key, sessionID, cwd, session.AgentOpts{}); err != nil {
+			if _, err := c.router.Takeover(appCtx, key, sessionID, cwd, sessionview.AgentOpts{}); err != nil {
 				slog.Debug("connector takeover failed", "key", key, "err", err)
 			}
 		}()
@@ -271,7 +272,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		// enforce the EvalSymlinks + allowed-root check takeover performs. Empty
 		// defaultWorkspace falls back to syntactic-only validation (single-node).
 		if p.CWD != "" {
-			if err := session.ValidateRemoteWorkspacePath(p.CWD); err != nil {
+			if err := sessionview.ValidateRemoteWorkspacePath(p.CWD); err != nil {
 				return nil, fmt.Errorf("close_discovered cwd invalid: %w", err)
 			}
 			if c.defaultWorkspace != "" {
@@ -330,7 +331,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		// (docs/rfc/key-resolver.md §2.2, #7); the inline path serves
 		// headless/test callers without a resolver.
 		var plannerKey string
-		var opts session.AgentOpts
+		var opts sessionview.AgentOpts
 		if c.resolver != nil {
 			key, plannerOpts, ok := c.resolver.ResolveForPlannerKey(p.ProjectName)
 			if !ok {
@@ -349,7 +350,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 				return nil, fmt.Errorf("project not found: %q", p.ProjectName)
 			}
 			plannerKey = proj.PlannerSessionKey()
-			opts = session.AgentOpts{
+			opts = sessionview.AgentOpts{
 				Model:     c.projMgr.EffectivePlannerModel(proj),
 				Workspace: proj.Path,
 				Exempt:    true,
@@ -401,7 +402,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("remove_session params: %w", err)
 		}
-		if err := session.ValidateSessionKey(p.Key); err != nil {
+		if err := sessionkey.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("remove_session key: %w", err)
 		}
 		removed := c.router.Remove(p.Key)
@@ -414,14 +415,14 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("interrupt_session params: %w", err)
 		}
-		if err := session.ValidateSessionKey(p.Key); err != nil {
+		if err := sessionkey.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("interrupt_session key: %w", err)
 		}
 		// Prefer the non-destructive control_request path: raw SIGINT kills
 		// Claude `-p` outright, forcing a fresh spawn (losing resume context and
 		// leaking socket files). Matches the dashboard HTTP / WS handlers.
 		outcome := c.router.InterruptSessionSafe(p.Key)
-		interrupted := outcome == session.InterruptSent
+		interrupted := outcome == sessionview.InterruptSent
 		return marshalResult(map[string]bool{"interrupted": interrupted})
 
 	case "set_session_label":
@@ -432,13 +433,13 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("set_session_label params: %w", err)
 		}
-		if err := session.ValidateSessionKey(p.Key); err != nil {
+		if err := sessionkey.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("set_session_label key: %w", err)
 		}
 		// Full validation (length + UTF-8 + C0/C1 control gate) again on the
 		// server-role node: defends against a compromised control node shipping
 		// log-injection / terminal-corruption bytes.
-		label, err := session.ValidateUserLabel(p.Label)
+		label, err := sessionview.ValidateUserLabel(p.Label)
 		if err != nil {
 			return nil, fmt.Errorf("set_session_label label: %w", err)
 		}
