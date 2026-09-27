@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/history"
@@ -40,8 +42,9 @@ func TestNewHistorySource_MissingFactoryWarnsOncePerBackend(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	// Unique unregistered backend id so the package-level dedup map state
-	// from other tests / runs cannot mask this assertion.
-	const backendID = "missing-factory-975-test"
+	// from other tests, and from earlier runs under -count, cannot mask this
+	// assertion.
+	backendID := fmt.Sprintf("missing-factory-975-test-%d", testRun.Add(1))
 	w := &Wrapper{BackendID: backendID}
 
 	for i := 0; i < 5; i++ {
@@ -78,3 +81,7 @@ func TestNewHistorySource_EmptyBackendNeverWarns(t *testing.T) {
 		t.Errorf("empty backend warned %d times, want 0", got)
 	}
 }
+
+// testRun numbers the runs of tests that key package-level dedup state, so
+// each run under -count uses keys the earlier runs did not.
+var testRun atomic.Int64

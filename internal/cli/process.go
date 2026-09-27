@@ -228,12 +228,11 @@ type Process struct {
 	// linker maps parallel-agent task_ids to transcript jsonl paths for the
 	// dashboard's agent_events endpoint. Set by InitLinker; nil in test fakes.
 	linker *subagent.Linker
-	// cwd is the Spawn working directory, kept so the linker projectDir can be
-	// re-derived on shim reconnect.
-	cwd string
-	// cachedProjectDir is subagent.ProjectDir(cwd), computed once (cwd is immutable)
-	// to avoid a rune scan + os.UserHomeDir syscall per system/init event.
-	cachedProjectDir string
+	// projectDir is subagent.ProjectDir of the working directory, computed
+	// once so a system/init event costs no rune scan + os.UserHomeDir
+	// syscall. Atomic because the reconnect path sets it (SetCwdForLinker)
+	// while the read loop is already running and reading it.
+	projectDir atomic.Pointer[string]
 }
 
 // sendSlot tracks one in-flight passthrough Send call: appended to pendingSlots
