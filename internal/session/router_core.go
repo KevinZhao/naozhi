@@ -225,7 +225,7 @@ type Router struct {
 	onKeyRetired atomic.Pointer[onKeyRetiredHolder]
 
 	// onSessionRetired mirrors onKeyRetired but exposes the session UUID
-	// captured before teardown cleared r.ss.Get(key); see SetOnSessionRetired.
+	// captured before teardown removed the key's table entry; see SetOnSessionRetired.
 	onSessionRetired atomic.Pointer[onSessionRetiredHolder]
 
 	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
@@ -1030,7 +1030,7 @@ type onKeyRetiredHolder struct{ fn func(key string) }
 
 // onSessionRetiredHolder mirrors onKeyRetiredHolder but carries the session
 // UUID alongside the routing key, so the sessionID-keyed RetiredStore path
-// need not reverse-lookup the UUID after teardown cleared r.ss.Get(key).
+// need not reverse-lookup the UUID after teardown removed the key's table entry.
 type onSessionRetiredHolder struct{ fn func(key, sessionID string) }
 
 // SetOnKeyRetired registers a callback fired from Reset/Remove AFTER the
@@ -1046,7 +1046,7 @@ func (r *Router) SetOnKeyRetired(fn func(key string)) {
 
 // SetOnSessionRetired registers a callback fired from Reset/Remove AFTER
 // teardown completes, receiving the routing key and the session UUID captured
-// before teardown cleared r.ss.Get(key). sessionID may be empty when the
+// before teardown removed the key's table entry. sessionID may be empty when the
 // session retired before the CLI ever returned a UUID; callbacks must tolerate
 // that. Independent of SetOnKeyRetired; both fire on the same teardown event.
 func (r *Router) SetOnSessionRetired(fn func(key, sessionID string)) {
@@ -1060,7 +1060,7 @@ func (r *Router) SetOnSessionRetired(fn func(key, sessionID string)) {
 // notifyKeyRetired invokes both the onKeyRetired and onSessionRetired
 // callbacks (when set). Call outside the table lock. sessionID is captured from
 // the session before its teardown ran, so it remains valid even though
-// r.ss.Get(key) is already gone by the time we reach this hook.
+// the key's table entry is already gone by the time we reach this hook.
 func (r *Router) notifyKeyRetired(key, sessionID string) {
 	if h := r.onKeyRetired.Load(); h != nil {
 		h.fn(key)
