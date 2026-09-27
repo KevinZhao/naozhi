@@ -66,10 +66,10 @@
     "topLevelLetVar": 11
   },
   "dashboard.js": {
-    "lines": 6914,
+    "lines": 6757,
     "maxFunctionLines": 249,
     "functionsOver100": 4,
-    "topLevelLetVar": 56
+    "topLevelLetVar": 0
   },
   "discovery.js": {
     "lines": 252,
@@ -148,6 +148,12 @@
     "maxFunctionLines": 0,
     "functionsOver100": 0,
     "topLevelLetVar": 5
+  },
+  "state.js": {
+    "lines": 209,
+    "maxFunctionLines": 0,
+    "functionsOver100": 0,
+    "topLevelLetVar": 0
   },
   "system_view.js": {
     "lines": 260,

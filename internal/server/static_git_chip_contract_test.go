@@ -43,7 +43,7 @@ func TestDashboardJS_GitChipWiring(t *testing.T) {
 		`if (turnCompleted) invalidateGitState(msg.key, msgNode);`,
 		// An operator switching branches in their own terminal produces no turn
 		// at all; refresh when the tab regains focus to cover that.
-		`if (selectedKey) invalidateGitState(selectedKey, selectedNode);`,
+		`if (selection.key) invalidateGitState(selection.key, selection.node);`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("dashboard.js missing git-chip wiring: %q", want)

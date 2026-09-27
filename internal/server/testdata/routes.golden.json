@@ -516,6 +516,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/state.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/system_view.js",
     "handler_type": "http.HandlerFunc"
   },

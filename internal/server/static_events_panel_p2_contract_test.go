@@ -53,8 +53,8 @@ func TestDashboardJS_ExportPagesFullHistory(t *testing.T) {
 		t.Error("downloadSessionMarkdown must warn in the toast when the export was truncated")
 	}
 	// Re-entrancy guard: a double click must not launch two pagers.
-	if !strings.Contains(dl, "_exportInFlight") {
-		t.Error("downloadSessionMarkdown must be guarded by _exportInFlight")
+	if !strings.Contains(dl, "transcript.exportInFlight") {
+		t.Error("downloadSessionMarkdown must be guarded by transcript.exportInFlight")
 	}
 
 	pager := jsFuncBody(t, js, "fetchAllSessionEvents")
@@ -96,26 +96,26 @@ func TestDashboardJS_FullFetchNotSwallowedByInFlightGate(t *testing.T) {
 	js := readDashboardJS(t)
 
 	fe := jsFuncBody(t, js, "fetchEvents")
-	if strings.Contains(fe, "\n  if (_fetchEventsInFlight) return;") {
-		t.Error("fetchEvents still gates `full` fetches on _fetchEventsInFlight — a WS-down session switch during a slow tail poll drops the paged first page")
+	if strings.Contains(fe, "\n  if (transcript.fetchInFlight) return;") {
+		t.Error("fetchEvents still gates `full` fetches on transcript.fetchInFlight — a WS-down session switch during a slow tail poll drops the paged first page")
 	}
-	if !strings.Contains(fe, "if (!full && _fetchEventsInFlight) return;") {
+	if !strings.Contains(fe, "if (!full && transcript.fetchInFlight) return;") {
 		t.Error("fetchEvents must only coalesce tail polls (`!full`) behind the in-flight flag")
 	}
 	// Generation guard: a full fetch invalidates whatever tail is still in
 	// flight so the stale response can neither append nor release the flag.
 	for _, want := range []string{
-		"if (full) _fetchEventsGen++;",
-		"const gen = _fetchEventsGen;",
-		"gen !== _fetchEventsGen",
-		"if (gen === _fetchEventsGen) _fetchEventsInFlight = false;",
+		"if (full) transcript.fetchGen++;",
+		"const gen = transcript.fetchGen;",
+		"gen !== transcript.fetchGen",
+		"if (gen === transcript.fetchGen) transcript.fetchInFlight = false;",
 	} {
 		if !strings.Contains(fe, want) {
 			t.Errorf("fetchEvents missing generation guard piece %q", want)
 		}
 	}
-	if !strings.Contains(js, "let _fetchEventsGen = 0;") {
-		t.Error("_fetchEventsGen declaration missing")
+	if !strings.Contains(js, "  fetchGen: 0,") {
+		t.Error("transcript.fetchGen must be declared in state.js")
 	}
 }
 

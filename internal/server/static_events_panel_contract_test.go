@@ -53,7 +53,7 @@ func TestDashboardJS_RenameRepaintsHeaderOnly(t *testing.T) {
 	// The header-only path must repaint the mounts the rebuild emptied, exactly
 	// like renderMainShell's tail (git chip from cache, effort tag, run stats).
 	hdr := jsFuncBody(t, js, "renderMainHeader")
-	for _, want := range []string{"repaintGitChip();", "setHeaderEffortChip();", "fetchSessionRuns(selectedKey, selectedNode);"} {
+	for _, want := range []string{"repaintGitChip();", "setHeaderEffortChip();", "fetchSessionRuns(selection.key, selection.node);"} {
 		if !strings.Contains(hdr, want) {
 			t.Errorf("renderMainHeader must call %q after replacing the header", want)
 		}
@@ -69,14 +69,14 @@ func TestDashboardJS_SameMsEventsNotDroppedByWatermark(t *testing.T) {
 	js := readDashboardJS(t)
 
 	// The old inclusive gate must be gone from both render loops.
-	if n := strings.Count(js, "if (e.time && e.time <= lastRenderedEventTime) return;"); n != 0 {
-		t.Errorf("inclusive watermark gate `e.time <= lastRenderedEventTime` still present %d time(s) — same-ms thinking→text loses the text bubble", n)
+	if n := strings.Count(js, "if (e.time && e.time <= transcript.lastRenderedEventTime) return;"); n != 0 {
+		t.Errorf("inclusive watermark gate `e.time <= transcript.lastRenderedEventTime` still present %d time(s) — same-ms thinking→text loses the text bubble", n)
 	}
 	// Strict gate + same-ms uuid dedup, once in onHistory and once in appendEvents.
-	if n := strings.Count(js, "if (e.time && e.time < lastRenderedEventTime) return;"); n != 2 {
+	if n := strings.Count(js, "if (e.time && e.time < transcript.lastRenderedEventTime) return;"); n != 2 {
 		t.Errorf("strict watermark gate must appear exactly twice (onHistory + appendEvents), got %d", n)
 	}
-	if n := strings.Count(js, "if (e.time && e.time === lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;"); n != 2 {
+	if n := strings.Count(js, "if (e.time && e.time === transcript.lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;"); n != 2 {
 		t.Errorf("same-ms uuid dedup must appear exactly twice (onHistory + appendEvents), got %d", n)
 	}
 
@@ -107,15 +107,15 @@ func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 		t.Fatal("loadEarlierEvents not found")
 	}
 	for _, want := range []string{
-		"const key = selectedKey;",
-		"const node = selectedNode;",
-		"const gen = _earlierGen;",
-		"const stale = () => selectedKey !== key || selectedNode !== node || gen !== _earlierGen;",
+		"const key = selection.key;",
+		"const node = selection.node;",
+		"const gen = transcript.earlierGen;",
+		"const stale = () => selection.key !== key || selection.node !== node || gen !== transcript.earlierGen;",
 		// The URL must be built from the captured identity, not the live globals.
 		"encodeURIComponent(key) +",
 		// finally keys on the generation only: selectedKey=null paths (dismiss /
 		// pending create) never reset the flag, so a full stale() would stick it.
-		"if (gen === _earlierGen) _earlierLoading = false;",
+		"if (gen === transcript.earlierGen) transcript.earlierLoading = false;",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("loadEarlierEvents missing stale guard piece: %q", want)
@@ -129,11 +129,11 @@ func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 	if n := strings.Count(body[:prepend], "if (stale()) return;"); n < 2 {
 		t.Errorf("loadEarlierEvents needs a stale check after each await before prependEvents, found %d", n)
 	}
-	if strings.Contains(body, "encodeURIComponent(selectedKey)") {
-		t.Error("loadEarlierEvents must not read the live selectedKey after capture")
+	if strings.Contains(body, "encodeURIComponent(selection.key)") {
+		t.Error("loadEarlierEvents must not read the live selection.key after capture")
 	}
-	if strings.Contains(body, "if (!stale()) _earlierLoading = false;") {
-		t.Error("loadEarlierEvents finally must not gate the flag release on stale() — selectedKey=null switch paths never reset it")
+	if strings.Contains(body, "if (!stale()) transcript.earlierLoading = false;") {
+		t.Error("loadEarlierEvents finally must not gate the flag release on stale() — selection.key=null switch paths never reset it")
 	}
 
 	// Mobile long-press rename must go through selectSession so renderMainHeader
@@ -141,7 +141,7 @@ func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 	// #2558 D4-3: the long-press action moved to mobile_nav.js, where the
 	// dashboard entry points are injected deps.
 	if strings.Contains(js, "nzState.selectedKey = key;\n        nzState.selectedNode = node;\n        deps.renameSession();") {
-		t.Error("long-press rename must not flip selectedKey/selectedNode directly before renameSession()")
+		t.Error("long-press rename must not flip selection.key/selection.node directly before renameSession()")
 	}
 	if !strings.Contains(js, "        deps.selectSession(key, node);\n        deps.renameSession();") {
 		t.Error("long-press rename must call selectSession(key, node) before renameSession()")
@@ -149,11 +149,11 @@ func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 
 	// selectSession resets the flag + bumps the generation, right after the
 	// cursor resets it already performs.
-	if !strings.Contains(js, "_autoPageBackCount = 0; // reset the blank-page recovery budget per session\n  // Invalidate any in-flight \"load earlier\" page of the previous session and\n  // free the flag so the new session can page back immediately.\n  _earlierGen++;\n  _earlierLoading = false;\n") {
-		t.Error("selectSession must bump _earlierGen and reset _earlierLoading next to the cursor resets")
+	if !strings.Contains(js, "transcript.autoPageBackCount = 0; // reset the blank-page recovery budget per session\n  // Invalidate any in-flight \"load earlier\" page of the previous session and\n  // free the flag so the new session can page back immediately.\n  transcript.earlierGen++;\n  transcript.earlierLoading = false;\n") {
+		t.Error("selectSession must bump transcript.earlierGen and reset transcript.earlierLoading next to the cursor resets")
 	}
-	if !strings.Contains(js, "let _earlierGen = 0;") {
-		t.Error("_earlierGen must be declared at module scope")
+	if !strings.Contains(js, "  earlierGen: 0,") {
+		t.Error("transcript.earlierGen must be declared in state.js")
 	}
 }
 
@@ -166,10 +166,10 @@ func TestDashboardJS_HeaderFetchErrorPathsStaleChecked(t *testing.T) {
 		t.Fatal("fetchSessionRuns not found")
 	}
 	if !strings.Contains(runs, "if (!resp.ok) { if (nzState.selectedKey !== key) return; panel.hidden = true; setHeaderRunStats(''); return; }") {
-		t.Error("fetchSessionRuns !resp.ok branch must stale-check selectedKey before clearing #header-runstats")
+		t.Error("fetchSessionRuns !resp.ok branch must stale-check selection.key before clearing #header-runstats")
 	}
 	if !strings.Contains(runs, "} catch (_) {\n    if (nzState.selectedKey !== key) return;\n    panel.hidden = true;\n    setHeaderRunStats('');") {
-		t.Error("fetchSessionRuns catch branch must stale-check selectedKey before clearing #header-runstats")
+		t.Error("fetchSessionRuns catch branch must stale-check selection.key before clearing #header-runstats")
 	}
 
 	git := jsFuncBody(t, js, "fetchGitState")
@@ -209,6 +209,7 @@ func readDashboardJS(t *testing.T) string {
 		"tuning.js",
 		"msg_nav.js",
 		"sidebar_project.js",
+		"state.js",
 		"auth_modal.js",
 		"send_message.js",
 	} {

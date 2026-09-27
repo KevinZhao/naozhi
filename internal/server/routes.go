@@ -120,6 +120,7 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mux.HandleFunc("GET /static/css/{file}", auth(handleDashboardCSS))
 	s.mux.HandleFunc("GET /static/contract.js", auth(serveStaticJS("contract.js")))
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(serveStaticJS("nz_util.js")))
+	s.mux.HandleFunc("GET /static/state.js", auth(serveStaticJS("state.js")))
 	s.mux.HandleFunc("GET /static/render_md.js", auth(serveStaticJS("render_md.js")))
 	s.mux.HandleFunc("GET /static/self_update.js", auth(serveStaticJS("self_update.js")))
 	s.mux.HandleFunc("GET /static/voice.js", auth(serveStaticJS("voice.js")))

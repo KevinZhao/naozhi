@@ -72,8 +72,8 @@ func TestDashboardJS_AppendEventsReplacesOptimisticBubble(t *testing.T) {
 	}
 	// Only a duplicate (uuid already on screen) may be skipped — never a real
 	// event, and the skip must still advance the time cursor.
-	if !strings.Contains(branch, "if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;\n        return;") {
-		t.Error("appendEvents uuid-dedup skip must advance lastRenderedEventTime before returning")
+	if !strings.Contains(branch, "if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;\n        return;") {
+		t.Error("appendEvents uuid-dedup skip must advance transcript.lastRenderedEventTime before returning")
 	}
 	if !strings.Contains(branch, "lockRenderedAskCards(el);") {
 		t.Error("appendEvents user branch must keep locking ask cards (P2 #2430 item 3)")
@@ -158,13 +158,13 @@ func TestDashboardJS_NodeDisconnectDeselectsStaleSession(t *testing.T) {
 	// dispatch target and wireNodePicker rewrites it on the new-session
 	// picker's change event, so a local session with the picker on n1 would
 	// otherwise be wiped when n1 disconnects. Pending sessions stay alone.
-	if !strings.Contains(branch, "(sessionsData[sid(selectedKey, msg.node)] || sessionNodes[selectedKey] === msg.node)") {
-		t.Error("node-disconnected branch must resolve the selected session's node from sessionsData/sessionNodes, not selectedNode")
+	if !strings.Contains(branch, "(sessionList.sessionsData[sid(selection.key, msg.node)] || sessionNodes[selection.key] === msg.node)") {
+		t.Error("node-disconnected branch must resolve the selected session's node from sessionList.sessionsData/sessionNodes, not selection.node")
 	}
-	if strings.Contains(branch, "selectedNode === msg.node") {
-		t.Error("node-disconnected branch must not infer session ownership from selectedNode (dispatch target, rewritten by wireNodePicker)")
+	if strings.Contains(branch, "selection.node === msg.node") {
+		t.Error("node-disconnected branch must not infer session ownership from selection.node (dispatch target, rewritten by wireNodePicker)")
 	}
-	if !strings.Contains(branch, "sessionWorkspaces[selectedKey] === undefined") {
+	if !strings.Contains(branch, "sessionWorkspaces[selection.key] === undefined") {
 		t.Error("node-disconnected branch must skip pending (never-sent) sessions")
 	}
 	if !strings.Contains(branch, "deselectNodeSession(msg.node);") {
