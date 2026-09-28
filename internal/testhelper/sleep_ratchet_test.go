@@ -37,16 +37,27 @@ func TestBareSleepRatchet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	bare, exempt, bareByFile, err := countBareSleeps(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range sleepRatchetProblems(bare, exempt, bareByFile) {
+		t.Error(p)
+	}
+}
 
-	bareByFile := map[string]int{}
-	bare, exempt := 0, 0
+// countBareSleeps counts sleeps in every test file under root, skipping the
+// old clone nested at <root>/naozhi and vendored trees.
+func countBareSleeps(root string) (bare, exempt int, bareByFile map[string]int, err error) {
+	bareByFile = map[string]int{}
+	nested := filepath.Join(root, "naozhi") // an old clone kept inside the main worktree
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == "node_modules" || name == ".git" {
+			if path == nested || name == "node_modules" || name == ".git" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -73,12 +84,34 @@ func TestBareSleepRatchet(t *testing.T) {
 		}
 		return nil
 	})
+	return bare, exempt, bareByFile, err
+}
+
+func TestCountBareSleeps_SkipsTheNestedClone(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "naozhi")
+	line := sleepToken + "time.Millisecond)\n"
+	for p, src := range map[string]string{
+		"internal/a/a_test.go":            line + line,
+		"cmd/naozhi/b_test.go":            line + sleepToken + "1) // sleep-ok: measures a duration\n",
+		"naozhi/internal/a/a_test.go":     line,
+		"test/e2e/node_modules/x_test.go": line,
+		"internal/a/a.go":                 line,
+	} {
+		full := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bare, exempt, _, err := countBareSleeps(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	for _, p := range sleepRatchetProblems(bare, exempt, bareByFile) {
-		t.Error(p)
+	if bare != 3 || exempt != 1 {
+		t.Errorf("bare=%d exempt=%d, want 3/1 (nested clone, node_modules and non-test files skipped; cmd/naozhi counted)", bare, exempt)
 	}
 }
 
