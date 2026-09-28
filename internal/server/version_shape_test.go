@@ -19,7 +19,7 @@ import (
 func TestHealth_VersionAbsentOnUnauthedProbe(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
-	srv := NewWithOptions(ServerOptions{
+	_, hs := buildServerWithHandlers(ServerOptions{
 		Addr:           ":0",
 		Router:         router,
 		Platforms:      platforms,
@@ -30,7 +30,7 @@ func TestHealth_VersionAbsentOnUnauthedProbe(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
@@ -57,7 +57,7 @@ func TestHealth_VersionAbsentOnUnauthedProbe(t *testing.T) {
 func TestHealth_VersionPresentOnAuthedProbe(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
-	srv := NewWithOptions(ServerOptions{
+	_, hs := buildServerWithHandlers(ServerOptions{
 		Addr:           ":0",
 		Router:         router,
 		Platforms:      platforms,
@@ -69,7 +69,7 @@ func TestHealth_VersionPresentOnAuthedProbe(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {

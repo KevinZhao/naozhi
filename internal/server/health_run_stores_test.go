@@ -39,14 +39,14 @@ func TestRunStoresHealthProbe_OmitsWhenNothingPersists(t *testing.T) {
 // store's comments called these "the only operator-visible signal" of lost
 // history while nothing outside tests read them.
 func TestHandleHealth_RunStoresCarryTheCounters(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
-	srv.healthH.cronRunStore = func() cron.RunStoreHealth {
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
+	hs.healthH.cronRunStore = func() cron.RunStoreHealth {
 		return cron.RunStoreHealth{Enabled: true, WriteFailedDiskFull: 1, WriteFailedOther: 2, HistoryDropped: 3, CacheStaleEvictions: 4}
 	}
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var body struct {
 		RunStores map[string]map[string]float64 `json:"run_stores"`
@@ -70,13 +70,13 @@ func TestHandleHealth_RunStoresCarryTheCounters(t *testing.T) {
 // TestHandleHealth_RunStoresHiddenFromAnonymousProbes: the section is part of
 // the authenticated view only, like every other store detail.
 func TestHandleHealth_RunStoresHiddenFromAnonymousProbes(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
-	srv.healthH.cronRunStore = func() cron.RunStoreHealth {
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
+	hs.healthH.cronRunStore = func() cron.RunStoreHealth {
 		return cron.RunStoreHealth{Enabled: true, WriteFailedOther: 9}
 	}
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
@@ -96,7 +96,7 @@ func TestNewWithOptions_WiresTheCronRunStoreIntoHealth(t *testing.T) {
 		cron.SchedulerConfig{MaxJobs: 5, StorePath: filepath.Join(t.TempDir(), "cron_jobs.json"), AllowNilRouter: true},
 		cron.SchedulerDeps{},
 	)
-	srv := NewWithOptions(ServerOptions{
+	_, hs := buildServerWithHandlers(ServerOptions{
 		Addr:           ":0",
 		Router:         session.NewRouter(session.RouterConfig{}),
 		Platforms:      map[string]platform.Platform{"test": &mockPlatform{}},
@@ -107,7 +107,7 @@ func TestNewWithOptions_WiresTheCronRunStoreIntoHealth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var body struct {
 		RunStores map[string]map[string]float64 `json:"run_stores"`

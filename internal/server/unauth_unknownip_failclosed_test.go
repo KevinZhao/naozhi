@@ -13,9 +13,15 @@ import (
 // TrustedProxy=true so the unauthenticated rate-limit gates resolve the
 // client IP from X-Forwarded-For rather than RemoteAddr.
 func newTestServerTrustedProxy(p *mockPlatform, token string) *Server {
+	s, _ := newTestServerTrustedProxyHS(p, token)
+	return s
+}
+
+// newTestServerTrustedProxyHS is newTestServerTrustedProxy plus the handlerSet.
+func newTestServerTrustedProxyHS(p *mockPlatform, token string) (*Server, *handlerSet) {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
-	s := NewWithOptions(ServerOptions{
+	return buildServerWithHandlers(ServerOptions{
 		Addr:           ":0",
 		Router:         router,
 		Platforms:      platforms,
@@ -23,7 +29,6 @@ func newTestServerTrustedProxy(p *mockPlatform, token string) *Server {
 		DashboardToken: token,
 		TrustedProxy:   true,
 	})
-	return s
 }
 
 // TestHandleHealth_TrustedProxy_MissingXFF_FailsClosed pins R20260614-SEC-10
@@ -38,12 +43,12 @@ func newTestServerTrustedProxy(p *mockPlatform, token string) *Server {
 // first XFF-less request through (fresh unknownIPKey bucket has full budget),
 // so a single 429-on-first-request assertion catches the revert.
 func TestHandleHealth_TrustedProxy_MissingXFF_FailsClosed(t *testing.T) {
-	srv := newTestServerTrustedProxy(&mockPlatform{}, "secret")
+	_, hs := newTestServerTrustedProxyHS(&mockPlatform{}, "secret")
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.RemoteAddr = "10.0.0.1:1234" // proxy hop IP; no XFF appended
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("unauth /health with trustedProxy=true and missing XFF returned %d on first request, want 429 (fail-closed); the unknownIPKey shared-bucket regression is back", w.Code)
@@ -54,13 +59,13 @@ func TestHandleHealth_TrustedProxy_MissingXFF_FailsClosed(t *testing.T) {
 // a parseable XFF resolves a real per-client IP and the first request is
 // served (the gate is not just always-deny).
 func TestHandleHealth_TrustedProxy_ValidXFF_FirstAllowed(t *testing.T) {
-	srv := newTestServerTrustedProxy(&mockPlatform{}, "secret")
+	_, hs := newTestServerTrustedProxyHS(&mockPlatform{}, "secret")
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.RemoteAddr = "10.0.0.1:1234"
 	req.Header.Set("X-Forwarded-For", "203.0.113.5")
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("unauth /health with trustedProxy=true and valid XFF returned %d on first request, want 200", w.Code)

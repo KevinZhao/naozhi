@@ -56,7 +56,7 @@ func TestNewWithOptions_NilMapsTolerated(t *testing.T) {
 // guarding.
 func TestNewWithOptions_FieldsRoundTrip(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
-	srv := NewWithOptions(ServerOptions{
+	srv, hs := buildServerWithHandlers(ServerOptions{
 		Addr:          ":0",
 		Router:        router,
 		Backend:       "kiro",
@@ -72,8 +72,8 @@ func TestNewWithOptions_FieldsRoundTrip(t *testing.T) {
 	// Same shape as backendTag above: Server.workspaceName was write-only and
 	// removed in #2553 (nothing ever read s.workspaceName — the value goes
 	// straight from opts into HealthHandler). Assert it reaches the consumer.
-	if srv.healthH == nil || srv.healthH.workspaceName != "Alpha" {
-		t.Errorf("healthH.workspaceName = %q, want Alpha", srv.healthH.workspaceName)
+	if hs.healthH == nil || hs.healthH.workspaceName != "Alpha" {
+		t.Errorf("healthH.workspaceName = %q, want Alpha", hs.healthH.workspaceName)
 	}
 	if srv.addr != ":0" {
 		t.Errorf("addr = %q, want :0", srv.addr)

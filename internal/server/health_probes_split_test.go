@@ -16,10 +16,10 @@ import (
 // handleLivez would turn a transient eventlog drain wobble into a kill;
 // this test fails in that case.
 func TestHandleLivez_AlwaysOK(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
 	w := httptest.NewRecorder()
-	srv.healthH.handleLivez(w, req)
+	hs.healthH.handleLivez(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", w.Code)
@@ -38,10 +38,10 @@ func TestHandleLivez_AlwaysOK(t *testing.T) {
 // TestHandleReadyz_OKWhenWired returns 200 ready when router is wired —
 // the standard happy path on a normally-started server.
 func TestHandleReadyz_OKWhenWired(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	w := httptest.NewRecorder()
-	srv.healthH.handleReadyz(w, req)
+	hs.healthH.handleReadyz(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", w.Code)
@@ -72,13 +72,34 @@ func TestHandleReadyz_FailsWhenRouterNil(t *testing.T) {
 // the K8s liveness probe carries no credentials and a 401/403 here would
 // trigger a restart loop the same way a 5xx would.
 func TestHandleLivez_NoAuthRequired(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
 	// No Authorization header.
 	w := httptest.NewRecorder()
-	srv.healthH.handleLivez(w, req)
+	hs.healthH.handleLivez(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("unauth status = %d, want 200", w.Code)
+	}
+}
+
+// TestHealthProbes_RoutedToTheirHandlers drives each probe through the mux:
+// the other health tests call the handler methods directly, so they cannot
+// see a route mounted on the wrong one.
+func TestHealthProbes_RoutedToTheirHandlers(t *testing.T) {
+	srv, _ := newTestServerWithTokenHS(&mockPlatform{}, "secret")
+	get := func(path string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		return w
+	}
+	if w := get("/health"); w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Type"), "application/json") || !strings.Contains(w.Body.String(), `"status"`) {
+		t.Errorf("GET /health = %d %q %q, want the JSON health body", w.Code, w.Header().Get("Content-Type"), w.Body.String())
+	}
+	if w := get("/livez"); w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "ok" {
+		t.Errorf("GET /livez = %d %q, want 200 ok", w.Code, w.Body.String())
+	}
+	if w := get("/readyz"); w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "ready" {
+		t.Errorf("GET /readyz = %d %q, want 200 ready", w.Code, w.Body.String())
 	}
 }
