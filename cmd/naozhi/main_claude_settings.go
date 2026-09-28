@@ -174,15 +174,13 @@ func applyClaudeEnvSettings(ctx context.Context) error {
 	return nil
 }
 
-// resolveNaozhiSettingsFile returns the absolute path of the opt-in
-// naozhi-owned isolated Claude settings file for SpawnOptions.SettingsFile,
-// or "" to keep `--setting-sources user` (RFC naozhi-owned-settings-v3). When
-// enabled the file is bootstrapped ONCE from the local settings with
-// hooks+env stripped; a bootstrap warning is non-fatal as long as a file exists.
-func resolveNaozhiSettingsFile(cfg *config.Config, storePath, claudeDir string) string {
-	if !cfg.NaozhiSettings.Enabled {
-		return ""
-	}
+// naozhiSettingsPath resolves where the naozhi-owned settings file lives,
+// without creating it, so read-only callers share one answer with the spawn path.
+//
+// The result MUST be absolute: BuildArgs silently falls back to
+// `--setting-sources user` for a relative --settings, re-reading the file the
+// operator opted OUT of.
+func naozhiSettingsPath(cfg *config.Config, storePath string) (string, error) {
 	path := osutil.ExpandHome(cfg.NaozhiSettings.Path)
 	if path == "" {
 		// Default next to the session store; CWD only when storePath is unset.
@@ -192,17 +190,26 @@ func resolveNaozhiSettingsFile(cfg *config.Config, storePath, claudeDir string) 
 		}
 		path = lay.NaozhiSettingsPath()
 	}
-	// MUST be absolute: BuildArgs silently falls back to `--setting-sources
-	// user` for a relative --settings, re-reading the file the operator opted
-	// OUT of. Refuse to enable rather than appear enabled while using local.
-	if !filepath.IsAbs(path) {
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			slog.Error("naozhi settings: cannot resolve absolute path; staying on local settings",
-				"path", path, "err", err)
-			return ""
-		}
-		path = abs
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	return filepath.Abs(path)
+}
+
+// resolveNaozhiSettingsFile returns the absolute path of the opt-in
+// naozhi-owned isolated Claude settings file for SpawnOptions.SettingsFile,
+// or "" to keep `--setting-sources user` (RFC naozhi-owned-settings-v3). When
+// enabled the file is bootstrapped ONCE from the local settings with
+// hooks+env stripped; a bootstrap warning is non-fatal as long as a file exists.
+func resolveNaozhiSettingsFile(cfg *config.Config, storePath, claudeDir string) string {
+	if !cfg.NaozhiSettings.Enabled {
+		return ""
+	}
+	path, err := naozhiSettingsPath(cfg, storePath)
+	if err != nil {
+		slog.Error("naozhi settings: cannot resolve absolute path; staying on local settings",
+			"path", cfg.NaozhiSettings.Path, "err", err)
+		return ""
 	}
 	localPath := ""
 	if claudeDir != "" {

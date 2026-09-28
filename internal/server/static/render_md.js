@@ -775,8 +775,62 @@ function runMermaid() {
     // Re-initialise per run so diagrams rendered after a theme switch pick
     // up the current theme (already-rendered SVGs are left as-is).
     window.mermaid.initialize(mermaidConfig());
-    window.mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+    Promise.resolve(window.mermaid.run({ nodes: document.querySelectorAll('.mermaid') }))
+      .then(adoptMermaidStyles, adoptMermaidStyles);
   }
+}
+
+// The dashboard CSP has no style-src 'unsafe-inline', so the browser refuses
+// style attributes and <style> elements that arrive as markup — which is how
+// KaTeX's renderToString and mermaid's SVG carry their layout and theme. CSSOM
+// writes are not markup and are not refused, so the same declarations are
+// applied again through el.style and constructed style sheets. Only KaTeX and
+// mermaid output goes through here; renderMd escapes every author-supplied tag.
+
+// applyMarkupStyles re-applies the style attribute of root and its descendants.
+function applyMarkupStyles(root) {
+  const els = root.matches('[style]') ? [root] : [];
+  root.querySelectorAll('[style]').forEach(el => els.push(el));
+  els.forEach(el => { el.style.cssText = el.getAttribute('style'); });
+}
+
+// applyKatexStyles styles every KaTeX tree not yet handled. renderToString
+// output reaches the DOM as markup; katex.render (the pending path) builds
+// nodes through CSSOM already and needs nothing.
+function applyKatexStyles() {
+  document.querySelectorAll('.katex:not([data-nz-styled])').forEach(k => {
+    applyMarkupStyles(k);
+    k.setAttribute('data-nz-styled', '');
+  });
+}
+
+// mermaidSheets holds the constructed sheet of each rendered diagram, keyed by
+// its svg id. Mermaid scopes every rule under that id, so adopting the sheet at
+// document level styles only its own diagram. mermaidAdopted is the set last
+// written to document.adoptedStyleSheets, so sheets other code adopts survive.
+const mermaidSheets = new Map();
+const mermaidAdopted = new Set();
+
+function adoptMermaidStyles() {
+  document.querySelectorAll('.mermaid svg[id]').forEach(svg => {
+    if (mermaidSheets.has(svg.id)) return;
+    let css = '';
+    svg.querySelectorAll('style').forEach(st => { css += st.textContent; });
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(css);
+    mermaidSheets.set(svg.id, sheet);
+    applyMarkupStyles(svg);
+  });
+  // A diagram that left the DOM takes its sheet with it.
+  for (const id of mermaidSheets.keys()) {
+    if (!document.getElementById(id)) mermaidSheets.delete(id);
+  }
+  const live = [...mermaidSheets.values()];
+  document.adoptedStyleSheets = document.adoptedStyleSheets
+    .filter(sh => !mermaidAdopted.has(sh))
+    .concat(live);
+  mermaidAdopted.clear();
+  live.forEach(sh => mermaidAdopted.add(sh));
 }
 
 // mermaidThemeName maps the resolved dashboard theme (data-theme, with
@@ -911,6 +965,7 @@ function renderKatex(tex, displayMode) {
 function runPendingAsync() {
   runMermaid();
   runKatex();
+  applyKatexStyles();
 }
 
 // renderRich — unified rich-text entrypoint. Single source of truth for

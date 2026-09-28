@@ -6265,6 +6265,7 @@ initSwipeBack();
       parts.push('<div class="mem-pop-body">' + renderMd(data.body) + '</div>');
     }
     popContent.innerHTML = parts.join('');
+    runPendingAsync();
   }
 
   function markBroken(slug) {

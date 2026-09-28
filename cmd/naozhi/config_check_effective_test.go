@@ -77,6 +77,11 @@ naozhi_settings:
 	if !argvPair(eff.Argv, "--setting-sources", "") {
 		t.Errorf("argv must show settings sources suppressed, got %v", eff.Argv)
 	}
+	// A check reports the path; creating the file is the startup's job. A file
+	// the check wrote would be unseeded, and startup only seeds a missing one.
+	if _, err := os.Stat(settings); !os.IsNotExist(err) {
+		t.Errorf("config check created the naozhi settings file (stat err=%v); the next start would not seed it", err)
+	}
 }
 
 func TestConfigCheckEffective_DropsAnEffortTheBackendCannotTake(t *testing.T) {
