@@ -13,6 +13,7 @@
 // (MAX_REC_SECS is a const, and waiting 30s would exceed the suite timeout).
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { installTouch } = require('./touch');
 
 let mock;
 const SESSION = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -64,14 +65,14 @@ const stubMedia = () => {
   });
 };
 
-function touch(page, type, y) {
+async function touch(page, type, y) {
+  await installTouch(page);
   return page.evaluate(({ type, y }) => {
+    const nz = /** @type {any} */ (window).__nzTouch;
     const btn = document.getElementById('btn-hold-talk');
-    const t = new Touch({ identifier: 1, target: btn, clientX: 100, clientY: y });
-    const ev = new TouchEvent(type, {
-      touches: type === 'touchend' ? [] : [t], changedTouches: [t], targetTouches: type === 'touchend' ? [] : [t],
-      bubbles: true, cancelable: true,
-    });
+    const t = nz.touch(btn, 1, 100, y);
+    const live = type === 'touchend' ? [] : [t];
+    const ev = nz.event(type, { touches: live, changedTouches: [t], targetTouches: live });
     (type === 'touchstart' ? btn : document).dispatchEvent(ev);
   }, { type, y });
 }

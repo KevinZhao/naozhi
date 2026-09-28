@@ -85,7 +85,7 @@ test.describe('auth modal keeps the keyboard', () => {
     mock.server.close();
   });
 
-  test('with no modal in the way cold start still autofocuses quick-ask', async ({ browser }) => {
+  test('with no modal in the way cold start still autofocuses quick-ask (pointer-fine only)', async ({ browser }) => {
     const mock = await startMockServer({ sessions: [] });
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
@@ -94,8 +94,16 @@ test.describe('auth modal keeps the keyboard', () => {
     await page.waitForSelector('#quick-ask-input');
 
     // The guard must not cost the feature: "open the page, start typing" is
-    // the reason the autofocus exists.
-    await expect(page.locator('#quick-ask-input')).toBeFocused();
+    // the reason the autofocus exists. It is a pointer-fine feature: on a
+    // touch screen focusing pops the keyboard and shifts the layout, so there
+    // the page must leave focus alone.
+    const pointerFine = await page.evaluate(() => window.matchMedia('(pointer: fine)').matches);
+    if (pointerFine) {
+      await expect(page.locator('#quick-ask-input')).toBeFocused();
+    } else {
+      await page.waitForTimeout(300); // past the 50ms deferred focus
+      await expect(page.locator('#quick-ask-input')).not.toBeFocused();
+    }
 
     await ctx.close();
     mock.server.close();

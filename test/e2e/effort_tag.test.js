@@ -6,6 +6,7 @@
 // no effort. docs/rfc/kiro-effort-visibility.md
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { openSessionCard } = require('./session_nav');
 
 // Four sessions: a kiro one per interesting tier plus a claude one that reports
 // none. Keys are shaped like the dashboard's own so nothing else in the UI
@@ -72,7 +73,7 @@ function effortSessions() {
 // settle on that session.
 async function selectByKey(page, keySuffix) {
   const card = page.locator(`.session-card[data-key*="${keySuffix}"]`).first();
-  await card.click();
+  await openSessionCard(page, card);
   await page.waitForTimeout(350);
 }
 
@@ -157,14 +158,18 @@ test.describe('header effort tag', () => {
     // once both chips are on the row.
     await expect(page.locator('.main-header .git-chip')).toHaveCount(1);
 
-    const detail = await page.locator('.main-header .detail').boundingBox();
     const left = await page.locator('.main-header .detail-left').boundingBox();
+    const git = await page.locator('.main-header .git-chip').boundingBox();
     const tag = await page.locator('.main-header .detail-effort').boundingBox();
 
     const gap = tag.x - (left.x + left.width);
     expect(gap, `effort tag is ${gap}px from .detail-left with a git chip present`)
       .toBeLessThan(180); // git chip sits between them, so a wider bound than the no-git case
-    expect(tag.x, 'effort tag drifted past the row centre').toBeLessThan(detail.x + detail.width / 2);
+    // The tag follows the git chip directly. The row's width varies (a phone
+    // header is half a desktop one), so "left of the row centre" is not the
+    // invariant; flung to the far side, the tag would leave a wide gap here.
+    const afterGit = tag.x - (git.x + git.width);
+    expect(afterGit, `effort tag is ${afterGit}px after the git chip`).toBeLessThan(24);
   });
 
   // This is the regression that a version-gated repaint hides: a turn boundary

@@ -2,6 +2,7 @@
 // E2E: session-header git branch / worktree chip.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { openSessionCard } = require('./session_nav');
 
 // Sidebar order is derived (created_at / last_active), not source order, so
 // address cards by key rather than by index.
@@ -30,7 +31,7 @@ function card(page, key) {
 }
 
 test('main-tree session shows a plain branch chip', async ({ page }) => {
-  await card(page, MAIN_TREE_KEY).click();
+  await openSessionCard(page, card(page, MAIN_TREE_KEY));
   const chip = page.locator('#header-git .git-chip');
   await expect(chip).toHaveCount(1);
   await expect(chip.locator('.git-chip-text')).toHaveText('master');
@@ -41,7 +42,7 @@ test('main-tree session shows a plain branch chip', async ({ page }) => {
 });
 
 test('linked-worktree session shows worktree · branch with accent', async ({ page }) => {
-  await card(page, WORKTREE_KEY).click();
+  await openSessionCard(page, card(page, WORKTREE_KEY));
   const chip = page.locator('#header-git .git-chip');
   await expect(chip).toHaveCount(1);
   await expect(chip).toHaveClass(/git-chip-worktree/);
@@ -54,7 +55,7 @@ test('linked-worktree session shows worktree · branch with accent', async ({ pa
 // This key has no entry in the mock's gitStates map → is_repo:false.
 test('non-repo workspace renders no chip and collapses the slot', async ({ page }) => {
   const settled = page.waitForResponse(r => r.url().includes('/api/sessions/git'));
-  await card(page, NON_REPO_KEY).click();
+  await openSessionCard(page, card(page, NON_REPO_KEY));
   await settled;
   await expect(page.locator('#header-git .git-chip')).toHaveCount(0);
   // :empty collapses the wrapper so a plain folder leaves no gap in the header.
@@ -62,17 +63,17 @@ test('non-repo workspace renders no chip and collapses the slot', async ({ page 
 });
 
 test('switching sessions replaces the chip rather than stacking', async ({ page }) => {
-  await card(page, MAIN_TREE_KEY).click();
+  await openSessionCard(page, card(page, MAIN_TREE_KEY));
   await expect(page.locator('#header-git .git-chip-text')).toHaveText('master');
 
-  await card(page, WORKTREE_KEY).click();
+  await openSessionCard(page, card(page, WORKTREE_KEY));
   const chip = page.locator('#header-git .git-chip');
   await expect(chip).toHaveCount(1);
   await expect(chip.locator('.git-chip-text')).toContainText('feat-x');
 });
 
 test('chip survives a header rebuild (rename)', async ({ page }) => {
-  await card(page, MAIN_TREE_KEY).click();
+  await openSessionCard(page, card(page, MAIN_TREE_KEY));
   await expect(page.locator('#header-git .git-chip-text')).toHaveText('master');
   // renderMainShell rebuilds the whole header, emptying #header-git; the
   // cached repaint must put the chip back rather than leave it blank (a blank
@@ -82,7 +83,7 @@ test('chip survives a header rebuild (rename)', async ({ page }) => {
 });
 
 test('a workspace change (/cd) re-resolves the chip', async ({ page }) => {
-  await card(page, MAIN_TREE_KEY).click();
+  await openSessionCard(page, card(page, MAIN_TREE_KEY));
   await expect(page.locator('#header-git .git-chip-text')).toHaveText('master');
 
   // Simulate /cd: the session's workspace moves to a different checkout, which
@@ -105,7 +106,7 @@ test('a workspace change (/cd) re-resolves the chip', async ({ page }) => {
 });
 
 test('a branch switch inside a turn re-resolves the chip (workspace unchanged)', async ({ page }) => {
-  await card(page, MAIN_TREE_KEY).click();
+  await openSessionCard(page, card(page, MAIN_TREE_KEY));
   await expect(page.locator('#header-git .git-chip-text')).toHaveText('master');
 
   // The agent runs `git checkout` mid-turn: the branch changes but the
@@ -142,7 +143,7 @@ test('detached HEAD shows the abbreviated sha with the detached tint', async ({ 
       detached: true, head_sha: 'a1b2c3d',
     }),
   }));
-  await card(page, MAIN_TREE_KEY).click();
+  await openSessionCard(page, card(page, MAIN_TREE_KEY));
 
   const chip = page.locator('#header-git .git-chip');
   await expect(chip).toHaveClass(/git-chip-detached/);
@@ -158,7 +159,7 @@ test('a hostile branch name is escaped, not executed', async ({ page }) => {
       is_repo: true, repo: 'x', branch: '<img src=x onerror=window.__pwned=1>',
     }),
   }));
-  await card(page, MAIN_TREE_KEY).click();
+  await openSessionCard(page, card(page, MAIN_TREE_KEY));
 
   const chip = page.locator('#header-git .git-chip');
   await expect(chip).toHaveCount(1);
@@ -170,7 +171,7 @@ test('a hostile branch name is escaped, not executed', async ({ page }) => {
 
 test('a failed git fetch leaves the header usable', async ({ page }) => {
   await page.route('**/api/sessions/git**', route => route.fulfill({ status: 500, body: 'boom' }));
-  await card(page, MAIN_TREE_KEY).click();
+  await openSessionCard(page, card(page, MAIN_TREE_KEY));
 
   await expect(page.locator('#header-git .git-chip')).toHaveCount(0);
   // The conversation surface must not be blocked on the chip.
