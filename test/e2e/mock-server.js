@@ -206,6 +206,8 @@ function defaultGitStates() {
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
+ * @param {object} [overrides.memories] - slug → GET /api/memory/{slug} payload. Slugs not listed 404;
+ *   without it the route is absent (404).
  * @param {object[]} [overrides.systemDaemons] - GET /api/system/daemons payload (an array).
  *   Without it the route is absent (404). `systemDaemonsGetCount` counts requests.
  * @param {object} [overrides.cronTrigger] - Enables POST /api/cron/trigger: { status } (default 200).
@@ -279,6 +281,7 @@ function startMockServer(overrides = {}) {
   const costSummary = overrides.costSummary || null;
   const cronTrigger = overrides.cronTrigger || null;
   const systemDaemons = overrides.systemDaemons || null;
+  const memories = overrides.memories || null;
   let systemDaemonsGetCount = 0;
   const cronTriggerCalls = [];
   const costSummaryCalls = [];
@@ -964,6 +967,16 @@ function startMockServer(overrides = {}) {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', favorite: fav }));
+      return;
+    }
+
+    // Memory popover: opt-in via overrides.memories.
+    const memPrefix = NZ_CONTRACT.API.memory_slug.replace('{slug}', '');
+    if (memories && pathname.startsWith(memPrefix) && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const mem = memories[decodeURIComponent(pathname.slice(memPrefix.length))];
+      res.writeHead(mem ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(mem || { error: 'not found' }));
       return;
     }
 

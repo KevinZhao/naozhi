@@ -66,7 +66,7 @@
     "topLevelLetVar": 11
   },
   "dashboard.js": {
-    "lines": 6629,
+    "lines": 6630,
     "maxFunctionLines": 249,
     "functionsOver100": 4,
     "topLevelLetVar": 0
@@ -108,7 +108,7 @@
     "topLevelLetVar": 0
   },
   "render_md.js": {
-    "lines": 1040,
+    "lines": 1095,
     "maxFunctionLines": 303,
     "functionsOver100": 2,
     "topLevelLetVar": 6
