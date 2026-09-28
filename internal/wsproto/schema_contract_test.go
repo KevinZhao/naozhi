@@ -69,3 +69,22 @@ func TestSchema_CoversEveryFrame(t *testing.T) {
 		}
 	}
 }
+
+// TestSchema_IsGenerated: the committed schema is exactly what the registry
+// renders, nested structs included, so a renamed field in EventEntry or any
+// other nested shape fails here until the schema is regenerated — and the
+// regenerated file is what check-ws-contract.mjs holds the dashboard to.
+func TestSchema_IsGenerated(t *testing.T) {
+	t.Parallel()
+	want, err := wsproto.SchemaJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile("wsproto.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Error("wsproto.schema.json is stale: run `go generate ./internal/wsproto`")
+	}
+}

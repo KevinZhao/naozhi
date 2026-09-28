@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripCommentsAndStrings } from '../../scripts/js-deps-freeze.mjs';
+import { checkNested } from '../../scripts/ws-contract-nested.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const schemaPath = path.join(ROOT, 'internal', 'wsproto', 'wsproto.schema.json');
@@ -139,8 +140,31 @@ for (const field of Object.keys(FRONTEND_FIELDS)) {
   }
 }
 
+// ── Nested fields (#2909): see scripts/ws-contract-nested.mjs.
+let nestedReads = 0;
+let typedFns = 0;
+const defs = schema.defs || {};
+for (const f of fs.readdirSync(staticDir)) {
+  if (!f.endsWith('.js') || f === 'contract.js' || f === 'sw.js') continue;
+  const r = checkNested(fs.readFileSync(path.join(staticDir, f), 'utf8'), schema);
+  nestedReads += r.reads;
+  typedFns += r.typedFns;
+  for (const p of r.problems) {
+    console.error(`${f}:${p}`);
+    failures++;
+  }
+}
+if (!defs['clievent.EventEntry']) {
+  console.error('check-ws-contract: the schema has no defs for clievent.EventEntry — regenerate it (go generate ./internal/wsproto)');
+  failures++;
+}
+if (typedFns === 0) {
+  console.error('check-ws-contract: no function types a parameter as EventEntry — the nested-field check has gone blind');
+  failures++;
+}
+
 if (failures) {
   console.error(`check-ws-contract: ${failures} mismatch(es) between wsproto.schema.json and dashboard.js`);
   process.exit(1);
 }
-console.log(`check-ws-contract: OK (${backendTypes.size} types + ${sendSites.length} send sites over ${inboundTypes.size} inbound types + ${fieldReads.size} frame fields read)`);
+console.log(`check-ws-contract: OK (${backendTypes.size} types + ${sendSites.length} send sites over ${inboundTypes.size} inbound types + ${fieldReads.size} frame fields read + ${nestedReads} nested reads in ${typedFns} EventEntry functions)`);

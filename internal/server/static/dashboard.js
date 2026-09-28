@@ -2974,7 +2974,7 @@ const INTERNAL_EVENT_TYPES = new Set(['tool_use','result','agent','task_start','
 // while the turn is in flight, and the subagent panel still renders the
 // rich tool_call progress row via eventHtml(includeInternal=true) so
 // operators can drill into per-agent tool runs when needed.
-function isInternalEvent(e) {
+function isInternalEvent(/** @type {EventEntry} */ e) {
   if (!e || !INTERNAL_EVENT_TYPES.has(e.type)) return false;
   return true;
 }
@@ -3352,7 +3352,7 @@ function stripLeakedToolCalls(text) {
 // empty even when the jsonl transcript is full of content. RFC v4 §3.6.7 /
 // §3.6.1 contract: parent and agent views share the bubble renderer but
 // differ on the filter policy.
-function eventHtml(e, opts) {
+function eventHtml(/** @type {EventEntry} */ e, opts) {
   if (e && e.type === 'thinking') return '';
   const includeInternal = !!(opts && opts.includeInternal);
   if (!includeInternal && isInternalEvent(e)) return '';

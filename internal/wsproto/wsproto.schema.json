@@ -424,5 +424,198 @@
         "type"
       ]
     }
+  },
+  "defs": {
+    "clievent.AskQuestion": {
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "clievent.AskQuestionItem"
+          }
+        },
+        "tool_use_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items",
+        "tool_use_id"
+      ]
+    },
+    "clievent.AskQuestionItem": {
+      "properties": {
+        "header": {
+          "type": "string"
+        },
+        "multi_select": {
+          "type": "boolean"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "clievent.AskQuestionOpt"
+          }
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "options",
+        "question"
+      ]
+    },
+    "clievent.AskQuestionOpt": {
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "label"
+      ]
+    },
+    "clievent.EventEntry": {
+      "properties": {
+        "ask_question": {
+          "type": "object",
+          "$ref": "clievent.AskQuestion"
+        },
+        "background": {
+          "type": "boolean"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "first_prompt_id": {
+          "type": "string"
+        },
+        "image_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "internal_agent_id": {
+          "type": "string"
+        },
+        "jsonl_path": {
+          "type": "string"
+        },
+        "last_tool": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "subagent": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "task_type": {
+          "type": "string"
+        },
+        "team_name": {
+          "type": "string"
+        },
+        "time": {
+          "type": "integer"
+        },
+        "tokens": {
+          "type": "integer"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "tool_call": {
+          "type": "object",
+          "$ref": "clievent.ToolCall"
+        },
+        "tool_use_id": {
+          "type": "string"
+        },
+        "tool_uses": {
+          "type": "integer"
+        },
+        "type": {
+          "type": "string"
+        },
+        "uuid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "time",
+        "type"
+      ]
+    },
+    "clievent.ToolCall": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "input_json": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "output_json": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "wsproto.AgentMetaPatch": {
+      "properties": {
+        "duration_ms": {
+          "type": "integer"
+        },
+        "last_detail": {
+          "type": "string"
+        },
+        "last_tool": {
+          "type": "string"
+        },
+        "tool_uses": {
+          "type": "integer"
+        }
+      },
+      "required": []
+    }
   }
 }
