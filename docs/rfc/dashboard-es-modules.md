@@ -57,6 +57,8 @@ nz.actions 再清成 data-action。
 
 ### 3. 跨文件可变状态：`nz.state`
 
+> **已被替代（Epic L，#2550）**：`nz.state` 门面已删除（#2868）。跨模块共享状态现在只有一种机制：由所有者导出的 const 状态对象（`static/state.js` 的 `ui` / `selection` / `composer` / `transcript` / `sessionList` / `serverInfo` / `perSession` / `timers` / `hooks`，以及 `turnState`、`cronDrawerState`、`splitDock`），读取方在使用处取字段；事件走 `nz.bus`。两条 eslint 规则守住这一点（`scripts/eslint-plugin-nz.mjs`）：`nz/configure-deps`（configureX 的 deps 只能是函数或 const 绑定）和 `nz/no-exported-let`（模块不导出 let）。下文保留为 D3 当时的设计记录。
+
 只收**跨文件**读写的名字（冻结矩阵实测：cron_view 写 dashboard 的
 activeView / eventTimer / selectedKey，读 sessionsData / sending /
 projectsData / turnState / navUserEls 等 ~10；agent_view 读 7），不动
@@ -125,4 +127,5 @@ cron module 的导出访问器。跨文件"函数是否存在"探测（typeof �
 ## 验收
 
 按 issue #2557 验收执行；「`window.X =` 归零或只剩 window.nz 单入口」按
-后者达成（nz.actions / nz.state / nz.bus 皆挂 nz 之下）。
+后者达成（nz.actions / nz.state / nz.bus 皆挂 nz 之下）。`nz.state` 其后已由
+state.js 的 const 状态对象取代，见 §3 开头的说明。
