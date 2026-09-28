@@ -6,6 +6,8 @@ package testhelper
 // channel; a genuinely time-based sleep gets an explicit `// sleep-ok:
 // <reason>` on the same line. The counts below may only go down.
 
+// anchor-keep: the ratchet counts bare sleeps by reading every test file; that is its job.
+
 import (
 	"fmt"
 	"os"
