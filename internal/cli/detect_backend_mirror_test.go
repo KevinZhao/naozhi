@@ -91,6 +91,27 @@ func TestBackendMirrorMatchesRegistry(t *testing.T) {
 	}
 }
 
+// TestKnownBackendsDisplayNamesMatchProfiles: a wrapper's CLIName and the
+// doctor / dashboard probe list both read DisplayName off the cli-side mirror,
+// so a profile renamed without its mirror row would show the old name with no
+// other test noticing.
+func TestKnownBackendsDisplayNamesMatchProfiles(t *testing.T) {
+	backend.EnsureDefaults()
+	names := make(map[string]string, len(cli.ExportedKnownBackends))
+	for _, b := range cli.ExportedKnownBackends {
+		names[b.ID] = b.DisplayName
+	}
+	for _, p := range backend.All() {
+		got, ok := names[p.ID]
+		if !ok {
+			continue // reported by the ID-set parity check
+		}
+		if got != p.DisplayName {
+			t.Errorf("knownBackends[%q].DisplayName = %q, want %q (backend.Profile.DisplayName). Update internal/cli/detect.go.", p.ID, got, p.DisplayName)
+		}
+	}
+}
+
 // sameStringSet reports whether a and b contain the same elements, ignoring
 // order and treating each as a set (duplicates collapse).
 func sameStringSet(a, b []string) bool {
