@@ -6,11 +6,11 @@ import (
 	"testing"
 )
 
-// TestRPCErrorTurnEnd pins the readLoop's RPC-error-sentinel recognition
-// (#2216). handleShimStdout only synthesizes a turn-closing result event when
-// rpcErrorTurnEnd returns ok; before the fix it inlined errors.Is(err,
-// ErrACPRPC) only, so a codex turn/start error (wrapping ErrCodexRPC) fell
-// through to "skip unparseable event" and the session hung in state=running.
+// TestRPCErrorTurnEnd pins the readLoop's recognition of a rejected turn:
+// handleShimStdout only synthesizes a turn-closing result event when
+// rpcErrorTurnEnd returns ok, and an unrecognised rejection leaves the session
+// in state=running (#2216, where a codex turn/start error fell through to
+// "skip unparseable event").
 func TestRPCErrorTurnEnd(t *testing.T) {
 	t.Parallel()
 
@@ -21,26 +21,33 @@ func TestRPCErrorTurnEnd(t *testing.T) {
 		wantTag string
 	}{
 		{
-			name:    "ACP RPC error wraps ErrACPRPC",
-			err:     fmt.Errorf("%w -32000: model overloaded", ErrACPRPC),
+			name:    "kiro rejection",
+			err:     &TurnRejectedError{Backend: "kiro", Err: fmt.Errorf("%w -32000: model overloaded", ErrACPRPC)},
 			wantOK:  true,
 			wantTag: "[kiro] ",
 		},
 		{
-			name:    "codex RPC error wraps ErrCodexRPC",
-			err:     fmt.Errorf("%w -32001: Server overloaded", ErrCodexRPC),
+			name:    "codex rejection",
+			err:     &TurnRejectedError{Backend: "codex", Err: fmt.Errorf("%w -32001: Server overloaded", ErrCodexRPC)},
 			wantOK:  true,
 			wantTag: "[codex] ",
 		},
 		{
-			name:   "bare ErrCodexRPC sentinel",
-			err:    ErrCodexRPC,
-			wantOK: true, wantTag: "[codex] ",
+			name:    "rejection wrapped further up still counts",
+			err:     fmt.Errorf("readEvent: %w", &TurnRejectedError{Backend: "codex", Err: ErrCodexRPC}),
+			wantOK:  true,
+			wantTag: "[codex] ",
 		},
 		{
-			name:   "bare ErrACPRPC sentinel",
-			err:    ErrACPRPC,
-			wantOK: true, wantTag: "[kiro] ",
+			name:    "protocol built without a backend ID gets no tag",
+			err:     &TurnRejectedError{Err: ErrACPRPC},
+			wantOK:  true,
+			wantTag: "",
+		},
+		{
+			name:   "a bare RPC sentinel is not a rejected turn",
+			err:    fmt.Errorf("%w 1: handshake", ErrCodexRPC),
+			wantOK: false,
 		},
 		{
 			name:   "unrelated parse error is not a turn-end",
@@ -54,7 +61,6 @@ func TestRPCErrorTurnEnd(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tag, ok := rpcErrorTurnEnd(tc.err)
@@ -68,17 +74,40 @@ func TestRPCErrorTurnEnd(t *testing.T) {
 	}
 }
 
-// TestRPCErrorTurnEnd_CodexNotConfusedWithACP guards the exact bug: the codex
-// sentinel must NOT require the ACP sentinel to be recognised. errors.Is
-// across the two distinct sentinels is false, which is why the old
-// ACP-only check dropped codex errors.
-func TestRPCErrorTurnEnd_CodexNotConfusedWithACP(t *testing.T) {
+// TestTurnRejectedError_KeepsTheProtocolSentinel: callers that match the
+// protocol's own sentinel still can, and the message is the protocol's.
+func TestTurnRejectedError_KeepsTheProtocolSentinel(t *testing.T) {
 	t.Parallel()
-	codexErr := fmt.Errorf("%w 1: boom", ErrCodexRPC)
-	if errors.Is(codexErr, ErrACPRPC) {
-		t.Fatal("ErrCodexRPC must not satisfy errors.Is(ErrACPRPC) — the two are distinct sentinels")
+	inner := fmt.Errorf("%w 1: boom", ErrCodexRPC)
+	err := error(&TurnRejectedError{Backend: "codex", Err: inner})
+	if !errors.Is(err, ErrCodexRPC) {
+		t.Error("errors.Is(rejection, ErrCodexRPC) = false, want the sentinel reachable")
 	}
-	if _, ok := rpcErrorTurnEnd(codexErr); !ok {
-		t.Fatal("codex RPC error must be recognised as a turn-end (regression #2216)")
+	if errors.Is(err, ErrACPRPC) {
+		t.Error("a codex rejection must not satisfy errors.Is(ErrACPRPC)")
+	}
+	if err.Error() != inner.Error() {
+		t.Errorf("Error() = %q, want the protocol's message %q", err.Error(), inner.Error())
+	}
+}
+
+// TestProtocols_TagTheRejectionWithTheirBackend: ACP and codex are protocols a
+// backend picks, so a rejection is tagged with the backend the protocol was
+// built for, not with the one that first used it.
+func TestProtocols_TagTheRejectionWithTheirBackend(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		proto Protocol
+		frame string
+	}{
+		{"acp", &ACPProtocol{BackendID: "other-acp"}, `{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"no"}}`},
+		{"codex", &CodexProtocol{BackendID: "other-codex"}, `{"jsonrpc":"2.0","id":3,"error":{"code":-32001,"message":"no"}}`},
+	} {
+		_, _, err := tc.proto.ReadEvent(tc.frame)
+		tag, ok := rpcErrorTurnEnd(err)
+		if want := "[other-" + tc.name + "] "; !ok || tag != want {
+			t.Errorf("%s rejection: rpcErrorTurnEnd = (%q, %v), want (%q, true)", tc.name, tag, ok, want)
+		}
 	}
 }
