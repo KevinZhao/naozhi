@@ -565,3 +565,44 @@ func TestFilterEnv_BaseURLRejectionIsReportedWithoutTheValue(t *testing.T) {
 		t.Errorf("reason is %d bytes; a guard error must be capped", len(d.Reason))
 	}
 }
+
+// A key the Runner allowlist admits but the sysession column does not decide
+// used to pass unchecked, while the shim guarded the same key. These are the
+// shim-guarded keys the AWS_ prefix reaches.
+func TestFilterEnv_PrefixAllowlistFacesTheShimGuards(t *testing.T) {
+	cases := []struct {
+		key, bad, good string
+	}{
+		{"AWS_ENDPOINT_URL", "http://169.254.169.254/", "https://bedrock-runtime.us-east-1.amazonaws.com"},
+		{"AWS_CONFIG_FILE", "../../etc/aws-config", "/home/op/.aws/config"},
+		{"AWS_SHARED_CREDENTIALS_FILE", "creds/../../x", "/home/op/.aws/credentials"},
+		{"AWS_WEB_IDENTITY_TOKEN_FILE", "token", "/var/run/secrets/eks/token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			t.Setenv(tc.key, tc.bad)
+			if envHasKey(filterEnv([]string{"AWS_"}), tc.key) {
+				t.Errorf("%s=%q passed the AWS_ prefix; the shim guard refuses it", tc.key, tc.bad)
+			}
+			t.Setenv(tc.key, tc.good)
+			if !envHasKey(filterEnv([]string{"AWS_"}), tc.key) {
+				t.Errorf("%s=%q dropped; a value the shim accepts must still reach the daemon", tc.key, tc.good)
+			}
+		})
+	}
+}
+
+// CLAUDE_CODE_OAUTH_TOKEN is a direct-Anthropic credential: a Bedrock daemon
+// never gets it, whatever the CLAUDE_ prefix admits; a direct-Anthropic one
+// still does, since that is how it authenticates.
+func TestFilterEnv_OAuthTokenGatedByBackend(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+	if envHasKey(filterEnv([]string{"CLAUDE_"}), "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Error("Bedrock daemon received CLAUDE_CODE_OAUTH_TOKEN through the CLAUDE_ prefix")
+	}
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "")
+	if !envHasKey(filterEnv([]string{"CLAUDE_"}), "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Error("direct-Anthropic daemon lost CLAUDE_CODE_OAUTH_TOKEN")
+	}
+}

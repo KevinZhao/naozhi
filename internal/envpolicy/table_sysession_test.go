@@ -186,15 +186,17 @@ func TestGuardErrorReason_CollapsesTheQuotedValue(t *testing.T) {
 	}
 }
 
-// The three credential sets used to be literals in backend.go. They are now
-// derived from the Table's Cred marks, so this pins the derivation against
-// copies of those literals: a mark added to or removed from a row shows up here
-// as a set that no longer matches, rather than as a backend that silently starts
-// or stops receiving a secret.
+// The three credential sets are derived from the Table's Cred marks, so this
+// pins the derivation against literals: a mark added to or removed from a row
+// shows up here as a set that no longer matches, rather than as a backend that
+// silently starts or stops receiving a secret. CLAUDE_CODE_OAUTH_TOKEN is the
+// subscription login, a direct-Anthropic credential like the API key: without
+// the mark the Runner's CLAUDE_ prefix handed it to a Bedrock daemon's
+// prompt-driven Bash (#1400).
 func TestCredSets_MatchTheRetiredLiterals(t *testing.T) {
 	t.Parallel()
 	retired := map[BackendMode][]string{
-		BackendAnthropic: {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"},
+		BackendAnthropic: {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"},
 		BackendBedrock:   {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"},
 		BackendVertex:    {"GOOGLE_APPLICATION_CREDENTIALS"},
 	}
@@ -216,7 +218,7 @@ func TestCredSets_MatchTheRetiredLiterals(t *testing.T) {
 	}
 	// AllCredKeys is the union the inactive-backend deny set is built from; a
 	// key that fell out of it would stop being stripped for other backends.
-	if got, want := len(AllCredKeys), 6; got != want {
+	if got, want := len(AllCredKeys), 7; got != want {
 		t.Errorf("AllCredKeys has %d keys, want %d: %v", got, want, AllCredKeys)
 	}
 }
