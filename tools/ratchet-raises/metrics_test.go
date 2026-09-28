@@ -44,18 +44,18 @@ func TestRaises_JSRatchet(t *testing.T) {
 	}
 }
 
-// A long function moved into a new file is a new key there, so only the
-// totals can see it.
+// A long function or an injection moved into a new file is a new key there,
+// so only the totals can see it.
 func TestRaises_JSRatchet_NewFileCannotAbsorbALongFunction(t *testing.T) {
 	t.Parallel()
 	base, head := metrics{}, metrics{}
-	if err := jsRatchet(`{"a.js":{"lines":100,"maxFnLines":80,"fnOver100":0}}`, base); err != nil {
+	if err := jsRatchet(`{"a.js":{"lines":100,"maxFnLines":80,"fnOver100":0,"configureDeps":10}}`, base); err != nil {
 		t.Fatal(err)
 	}
-	if err := jsRatchet(`{"a.js":{"lines":100,"maxFnLines":80,"fnOver100":0},"n.js":{"lines":0,"maxFnLines":150,"fnOver100":1}}`, head); err != nil {
+	if err := jsRatchet(`{"a.js":{"lines":100,"maxFnLines":80,"fnOver100":0,"configureDeps":10},"n.js":{"lines":0,"maxFnLines":150,"fnOver100":1,"configureDeps":3}}`, head); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"js-ratchet:MAX.maxFnLines", "js-ratchet:TOTAL.fnOver100"}
+	want := []string{"js-ratchet:MAX.maxFnLines", "js-ratchet:TOTAL.configureDeps", "js-ratchet:TOTAL.fnOver100"}
 	if got := gates(raises(base, head)); !slices.Equal(got, want) {
 		t.Errorf("raises = %v, want %v", got, want)
 	}

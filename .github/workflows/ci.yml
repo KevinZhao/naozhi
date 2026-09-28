@@ -336,6 +336,12 @@ jobs:
       - name: Test the growth ratchet
         run: node --test scripts/js-ratchet.test.mjs
 
+      # Every dashboard script linted as a module with only the shared browser
+      # globals: the condition under which no-undef rules out implicit
+      # cross-file references.
+      - name: Check the eslint scope
+        run: node --test scripts/eslint-config.test.mjs
+
       - name: Check growth ratchet
         run: node scripts/js-ratchet.mjs --check
 
