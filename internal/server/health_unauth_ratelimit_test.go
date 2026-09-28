@@ -23,14 +23,14 @@ import (
 // the limiter rate stays below 200/s — which it must, otherwise the
 // gate would be useless.
 func TestHandleHealth_Unauthenticated_RateLimited(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 
 	saw429 := false
 	for i := 0; i < 200; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		req.RemoteAddr = "10.42.42.42:33333"
 		w := httptest.NewRecorder()
-		srv.healthH.handleHealth(w, req)
+		hs.healthH.handleHealth(w, req)
 		if w.Code == http.StatusTooManyRequests {
 			saw429 = true
 			if got := w.Header().Get("Retry-After"); got != "60" {
@@ -67,14 +67,14 @@ func TestHandleHealth_Unauthenticated_RateLimited(t *testing.T) {
 // against the unauth bucket the dashboard would 429 itself within seconds
 // of opening multiple tabs.
 func TestHandleHealth_Authenticated_BypassesUnauthLimiter(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 
 	for i := 0; i < 200; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		req.RemoteAddr = "10.42.42.43:33333"
 		req.Header.Set("Authorization", "Bearer secret")
 		w := httptest.NewRecorder()
-		srv.healthH.handleHealth(w, req)
+		hs.healthH.handleHealth(w, req)
 		if w.Code == http.StatusTooManyRequests {
 			t.Fatalf("authenticated /health hit 429 at probe %d — unauth limiter is firing on auth'd path", i)
 		}

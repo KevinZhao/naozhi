@@ -73,7 +73,6 @@ type Server struct {
 	auth       *auth.Handlers
 	discoveryH *discovery.Handlers
 	sessionH   *dashsession.Handlers
-	healthH    *HealthHandler
 
 	// ── send / dispatch wiring ─────────────────────────
 	dispatcher      *dispatch.Dispatcher // ctor builds; Start only calls BuildHandler
@@ -403,7 +402,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	s.dispatcher = s.buildDispatcher()
 
 	platNames := platformNameSet(platforms)
-	s.healthH = &HealthHandler{
+	hs.healthH = &HealthHandler{
 		dispatcherMetrics:  s.dispatcher.Metrics,
 		router:             router,
 		auth:               s.auth,
@@ -434,7 +433,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 
 	hs.checkLimiters(s.scheduler != nil)
 
-	// Server keeps the four handlers that outlive registration (see
+	// Server keeps the handlers that outlive registration (see
 	// handler_set.go for why each one does).
 	s.sessionH = hs.sessionH
 	s.discoveryH = hs.discoveryH

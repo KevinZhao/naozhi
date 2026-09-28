@@ -99,16 +99,22 @@ func newTestServerWithScheduler(p *mockPlatform) *Server {
 }
 
 func newTestServerWithToken(p *mockPlatform, token string) *Server {
+	s, _ := newTestServerWithTokenHS(p, token)
+	return s
+}
+
+// newTestServerWithTokenHS is newTestServerWithToken plus the handlerSet, for
+// tests that drive a registration-only handler (the health probes) directly.
+func newTestServerWithTokenHS(p *mockPlatform, token string) (*Server, *handlerSet) {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
-	s := NewWithOptions(ServerOptions{
+	return buildServerWithHandlers(ServerOptions{
 		Addr:           ":0",
 		Router:         router,
 		Platforms:      platforms,
 		Backend:        "claude",
 		DashboardToken: token,
 	})
-	return s
 }
 
 func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
@@ -195,11 +201,11 @@ func TestValidateRemoteWorkspace(t *testing.T) {
 // ─── handleHealth ─────────────────────────────────────────────────────────────
 
 func TestHandleHealth_ReturnsJSONContentType(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
+	_, hs := newTestServerHS(&mockPlatform{})
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -211,11 +217,11 @@ func TestHandleHealth_ReturnsJSONContentType(t *testing.T) {
 }
 
 func TestHandleHealth_StatusOkAndUptime(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
+	_, hs := newTestServerHS(&mockPlatform{})
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
@@ -231,11 +237,11 @@ func TestHandleHealth_StatusOkAndUptime(t *testing.T) {
 }
 
 func TestHandleHealth_SessionsField(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
+	_, hs := newTestServerHS(&mockPlatform{})
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {

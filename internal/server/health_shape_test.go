@@ -18,10 +18,10 @@ import (
 // when nil. Breaking this test would leak internal topology to anonymous
 // probes (load balancers / liveness checks) which must never see it.
 func TestHandleHealth_Unauthenticated_OnlyBaseFields(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
@@ -46,11 +46,11 @@ func TestHandleHealth_Unauthenticated_OnlyBaseFields(t *testing.T) {
 // migration (R60-PERF-001) does not silently drop or rename a field that
 // operator tooling consumes via curl / monitoring agents.
 func TestHandleHealth_Authenticated_ShapeStable(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
@@ -105,12 +105,12 @@ func TestHandleHealth_Authenticated_ShapeStable(t *testing.T) {
 // != nil { resp["ws_dropped"] = ... }`; the struct now holds `*int64` so
 // omitempty on absence + pointer on presence preserves the old wire shape.
 func TestHandleHealth_WSDroppedField_PresentWhenHubWired(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
-	srv.healthH.hubDropped = func() int64 { return 42 }
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
+	hs.healthH.hubDropped = func() int64 { return 42 }
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
@@ -132,12 +132,12 @@ func TestHandleHealth_WSDroppedField_PresentWhenHubWired(t *testing.T) {
 // This is the subtle bug the pointer-to-int approach was specifically
 // chosen to avoid — plain `int64` + `omitempty` would drop a zero value.
 func TestHandleHealth_WSDropped_ZeroEmitted(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
-	srv.healthH.hubDropped = func() int64 { return 0 }
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
+	hs.healthH.hubDropped = func() int64 { return 0 }
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
@@ -156,18 +156,18 @@ func TestHandleHealth_WSDropped_ZeroEmitted(t *testing.T) {
 // `map[string]string` per-probe; the struct keeps that exact type so
 // platform.Platform names passed into New() marshal as-is.
 func TestHandleHealth_PlatformsShape(t *testing.T) {
-	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 	// inject a second platform so we exercise the multi-entry path.
 	// R20260616-PERF-002: the served `platforms` map is now pre-built once at
 	// construction (platformsStatus) rather than rebuilt from `platforms` per
 	// request, so override the pre-built map directly here.
-	srv.healthH.platforms = map[string]struct{}{"feishu": {}, "slack": {}}
-	srv.healthH.platformsStatus = map[string]string{"feishu": "registered", "slack": "registered"}
+	hs.healthH.platforms = map[string]struct{}{"feishu": {}, "slack": {}}
+	hs.healthH.platformsStatus = map[string]string{"feishu": "registered", "slack": "registered"}
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
-	srv.healthH.handleHealth(w, req)
+	hs.healthH.handleHealth(w, req)
 
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
@@ -200,29 +200,29 @@ func TestHealthEndpoints_SecurityHeaders(t *testing.T) {
 	}
 
 	t.Run("livez", func(t *testing.T) {
-		srv := newTestServerWithToken(&mockPlatform{}, "secret")
+		_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 		w := httptest.NewRecorder()
-		srv.healthH.handleLivez(w, httptest.NewRequest(http.MethodGet, "/livez", nil))
+		hs.healthH.handleLivez(w, httptest.NewRequest(http.MethodGet, "/livez", nil))
 		assertHeaders(t, w)
 	})
 	t.Run("readyz", func(t *testing.T) {
-		srv := newTestServerWithToken(&mockPlatform{}, "secret")
+		_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 		w := httptest.NewRecorder()
-		srv.healthH.handleReadyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		hs.healthH.handleReadyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 		assertHeaders(t, w)
 	})
 	t.Run("health_unauth", func(t *testing.T) {
-		srv := newTestServerWithToken(&mockPlatform{}, "secret")
+		_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 		w := httptest.NewRecorder()
-		srv.healthH.handleHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+		hs.healthH.handleHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
 		assertHeaders(t, w)
 	})
 	t.Run("health_authed", func(t *testing.T) {
-		srv := newTestServerWithToken(&mockPlatform{}, "secret")
+		_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		req.Header.Set("Authorization", "Bearer secret")
 		w := httptest.NewRecorder()
-		srv.healthH.handleHealth(w, req)
+		hs.healthH.handleHealth(w, req)
 		assertHeaders(t, w)
 	})
 }
