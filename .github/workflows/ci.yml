@@ -57,13 +57,42 @@ jobs:
   # The branch-protection required check. It passes only when every shard
   # passed, so protection keeps naming one stable job however the shards move.
   test:
-    needs: test-shard
+    needs: [test-shard, ratchet-raises]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: All test shards passed
         run: test "${{ needs.test-shard.result }}" = success
+      # Skipped on pushes to master, where there is no base to compare.
+      - name: No unapproved ratchet raise
+        run: test "${{ needs.ratchet-raises.result }}" = success -o "${{ needs.ratchet-raises.result }}" = skipped
+
+  # A pull request that loosens a ratchet — a baseline constant, a JS metric,
+  # a dependency edge, a lint exemption — needs a ledger line citing an issue
+  # the owner labelled ratchet-raise-approved (#2900). Gated through the
+  # required `test` check above.
+  ratchet-raises:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check raises against the ledger
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: go run ./tools/ratchet-raises -base "${{ github.event.pull_request.base.sha }}"
 
   # gofmt (make lint-gofmt). fail mode from the start: the backlog this job was
   # added alongside is at 0, and formatting has an unambiguous fix (gofmt -w)

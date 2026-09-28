@@ -77,7 +77,18 @@ func TestBareSleepRatchet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if bare > bareSleepBaseline {
+	for _, p := range sleepRatchetProblems(bare, exempt, bareByFile) {
+		t.Error(p)
+	}
+}
+
+// sleepRatchetProblems reports how the counts are out of step with the
+// baselines, in either direction: a drop fails too, so the PR that removes a
+// sleep lowers the baseline and the slack cannot be refilled later.
+func sleepRatchetProblems(bare, exempt int, bareByFile map[string]int) []string {
+	var out []string
+	switch {
+	case bare > bareSleepBaseline:
 		type fc struct {
 			file string
 			n    int
@@ -94,16 +105,42 @@ func TestBareSleepRatchet(t *testing.T) {
 		for _, e := range top {
 			fmt.Fprintf(&b, "  %3d  %s\n", e.n, e.file)
 		}
-		t.Fatalf("bare %s count in test files grew: %d > baseline %d.\n"+
+		out = append(out, fmt.Sprintf("bare %s count in test files grew: %d > baseline %d.\n"+
 			"Waiting for an async effect? Poll with testhelper.Eventually or join a channel.\n"+
 			"Genuinely time-based? Annotate the line with `// sleep-ok: <reason>`.\n"+
-			"Top offenders:\n%s", sleepToken, bare, bareSleepBaseline, b.String())
+			"Top offenders:\n%s", sleepToken, bare, bareSleepBaseline, b.String()))
+	case bare < bareSleepBaseline:
+		out = append(out, fmt.Sprintf("bare sleep count dropped to %d (baseline %d): lower bareSleepBaseline to %d", bare, bareSleepBaseline, bare))
 	}
-	if bare < bareSleepBaseline {
-		t.Logf("bare sleep count dropped to %d (baseline %d) — lower bareSleepBaseline in this file", bare, bareSleepBaseline)
+	switch {
+	case exempt > exemptSleepBaseline:
+		out = append(out, fmt.Sprintf("sleep-ok exemptions grew: %d > baseline %d — exemptions are for genuinely "+
+			"time-based sleeps only; raising the baseline needs an approved ledger entry (scripts/ratchet-raises.jsonl)", exempt, exemptSleepBaseline))
+	case exempt < exemptSleepBaseline:
+		out = append(out, fmt.Sprintf("sleep-ok exemptions dropped to %d (baseline %d): lower exemptSleepBaseline to %d", exempt, exemptSleepBaseline, exempt))
 	}
-	if exempt > exemptSleepBaseline {
-		t.Fatalf("sleep-ok exemptions grew: %d > baseline %d — exemptions are for genuinely "+
-			"time-based sleeps only; raise the baseline here in the same PR with justification", exempt, exemptSleepBaseline)
+	return out
+}
+
+func TestSleepRatchetProblems_BothDirections(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		bare, exempt int
+		want         string
+	}{
+		{"at baseline", bareSleepBaseline, exemptSleepBaseline, ""},
+		{"bare grew", bareSleepBaseline + 1, exemptSleepBaseline, "grew"},
+		{"bare dropped", bareSleepBaseline - 1, exemptSleepBaseline, "lower bareSleepBaseline"},
+		{"exempt grew", bareSleepBaseline, exemptSleepBaseline + 1, "exemptions grew"},
+	}
+	for _, tc := range cases {
+		got := sleepRatchetProblems(tc.bare, tc.exempt, map[string]int{"a_test.go": 1})
+		switch {
+		case tc.want == "" && len(got) != 0:
+			t.Errorf("%s: %q, want none", tc.name, got)
+		case tc.want != "" && (len(got) != 1 || !strings.Contains(got[0], tc.want)):
+			t.Errorf("%s: %q, want one containing %q", tc.name, got, tc.want)
+		}
 	}
 }

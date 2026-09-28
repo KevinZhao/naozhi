@@ -15,6 +15,14 @@ go test -run TestCandidatePaths ./internal/cli/...   # run a single test
 bin/naozhi --config config.yaml                      # run locally
 ```
 
+Ratchets only go down: the baselines in `*Baseline*` test constants,
+`scripts/js-ratchet.baseline.json`, `scripts/js-deps-baseline.json` and
+`tools/lint-server-handlers/exemptions.yaml` fail CI when a count drops below
+them, so lower them in the same PR. Raising one needs a line appended to
+`scripts/ratchet-raises.jsonl` citing an issue labelled
+`ratchet-raise-approved`; `go run ./tools/ratchet-raises -base origin/master`
+prints the lines a change needs.
+
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.
 
