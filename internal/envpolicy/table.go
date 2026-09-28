@@ -151,7 +151,7 @@ var Table = []Rule{
 	{Pattern: "CLAUDE_*", Specified: SourceSettings | SourceExpansion, Allowed: SourceSettings},
 	{Pattern: "ANTHROPIC_API_KEY", Specified: SourceShim | SourceOverlay | SourceSysession, Allowed: SourceShim | SourceOverlay, Cred: credAnthropic},
 	{Pattern: "ANTHROPIC_AUTH_TOKEN", Specified: SourceShim | SourceOverlay | SourceSysession, Allowed: SourceShim | SourceOverlay, Cred: credAnthropic},
-	{Pattern: "CLAUDE_CODE_OAUTH_TOKEN", Specified: SourceShim | SourceOverlay, Allowed: SourceShim | SourceOverlay},
+	{Pattern: "CLAUDE_CODE_OAUTH_TOKEN", Specified: SourceShim | SourceOverlay | SourceSysession, Allowed: SourceShim | SourceOverlay, Cred: credAnthropic},
 	{Pattern: "ANTHROPIC_MODEL", Specified: SourceShim | SourceOverlay | SourceSysession, Allowed: SourceShim | SourceOverlay | SourceSysession},
 	{
 		Pattern:   "ANTHROPIC_BASE_URL",

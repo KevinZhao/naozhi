@@ -54,6 +54,8 @@ func envCredsForBackend(mode backendMode) []string {
 // sysession column passes, the raw-credential keys of the *detected* backend only, allowlist
 // exact matches, and prefix matches for allowlist entries ending in "_"
 // ("ANTHROPIC_" matches every ANTHROPIC_* var; "ANTHROPIC" only the bare key).
+// A key the allowlist admits still faces the value guard the Table attaches to
+// it for the shim.
 // Credentials of NON-active backends are stripped unconditionally — even when
 // a broad prefix such as "ANTHROPIC_" / "AWS_" would re-admit them — so a
 // Bedrock-only deployment never hands ANTHROPIC_API_KEY (or Vertex's
@@ -120,18 +122,37 @@ func filterEnv(allowlist []string) []string {
 			out = append(out, kv)
 			continue
 		}
-		if _, ok := exact[key]; ok {
-			out = append(out, kv)
+		if !listed(key, exact, prefixes) {
 			continue
 		}
-		for _, p := range prefixes {
-			if strings.HasPrefix(key, p) {
-				out = append(out, kv)
-				break
+		// The allowlist admits keys the sysession column does not decide. The
+		// shim is the other pipeline that hands env to a CLI, so a key the Table
+		// guards there (endpoint URLs, credential file paths) carries the same
+		// risk here and its value faces the same check.
+		if check := envpolicy.GuardFor(key, envpolicy.SourceShim); check != nil {
+			if err := check(kv[idx+1:]); err != nil {
+				spawndiag.One(sysessionEnvScope, layerEnvFilter, key, "dropped",
+					"value fails its guard: "+envpolicy.GuardErrorReason(err))
+				continue
 			}
 		}
+		out = append(out, kv)
 	}
 	return out
+}
+
+// listed reports whether the Runner allowlist admits key: an exact entry, or a
+// prefix entry (one ending in "_").
+func listed(key string, exact map[string]struct{}, prefixes []string) bool {
+	if _, ok := exact[key]; ok {
+		return true
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // allCredKeys is the union of every backend's raw-credential keys; filterEnv

@@ -53,7 +53,7 @@ func TestEnvCredsForBackend(t *testing.T) {
 		mode BackendMode
 		want []string
 	}{
-		{BackendAnthropic, []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}},
+		{BackendAnthropic, []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}},
 		{BackendBedrock, []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}},
 		{BackendVertex, []string{"GOOGLE_APPLICATION_CREDENTIALS"}},
 	}
@@ -70,6 +70,7 @@ func TestAllCredKeys(t *testing.T) {
 	want := []string{
 		"ANTHROPIC_API_KEY",
 		"ANTHROPIC_AUTH_TOKEN",
+		"CLAUDE_CODE_OAUTH_TOKEN",
 		"AWS_ACCESS_KEY_ID",
 		"AWS_SECRET_ACCESS_KEY",
 		"AWS_SESSION_TOKEN",
