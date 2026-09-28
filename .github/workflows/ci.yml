@@ -244,6 +244,33 @@ jobs:
           path: test/e2e/test-results/
           retention-days: 7
 
+  # The iPhone-13 project (webkit). Phone-only paths (visual-viewport drawers,
+  # voice gestures, mobile nav) otherwise ship without a CI run.
+  e2e-mobile-safari:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Playwright + webkit
+        working-directory: test/e2e
+        # npm install (not ci): repo policy gitignores package-lock.json.
+        run: |
+          npm install
+          npx playwright install --with-deps webkit
+
+      - name: Run mock-server suite (mobile-safari)
+        working-directory: test/e2e
+        run: npx playwright test --project=mobile-safari
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-mobile-safari-test-results
+          path: test/e2e/test-results/
+          retention-days: 7
+
   # JS no-undef gate + cross-file dependency freeze + growth ratchet for the
   # dashboard's classic <script defer> files. eslint.config.mjs holds a
   # per-file globals whitelist (the explicit dependency graph);
