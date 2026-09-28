@@ -1,4 +1,4 @@
-package cron
+package sandboxstore
 
 import (
 	"cmp"
@@ -14,23 +14,23 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
-// sandboxAttention is the confirmation-queue record: a sandbox run that ends
-// in an UNKNOWN-fate state writes one, and it stays on disk until an operator
+// Attention is the confirmation-queue record: a sandbox run that ends in an
+// UNKNOWN-fate state writes one, and it stays on disk until an operator
 // resolves it (confirm-done or replay) — the only human step in the double-run
-// containment. Producers: executeSandbox's failed-transport branch (only when
-// the job declared side_effects=true; a side-effect-free failure is safe to
-// re-run) and reconcileOneSandboxOrphan (a restart-orphaned side-effecting run
-// may have pushed a PR while naozhi was down). Stored flat at
-// <store-dir>/sandboxattention/<runID>.json; RunID is scheduler hex.
-type sandboxAttention struct {
+// containment. Producers (in cron): executeSandbox's failed-transport branch
+// (only when the job declared side_effects=true; a side-effect-free failure is
+// safe to re-run) and reconcileOneSandboxOrphan (a restart-orphaned
+// side-effecting run may have pushed a PR while naozhi was down). Stored flat
+// at <root>/sandboxattention/<runID>.json; RunID is scheduler hex.
+type Attention struct {
 	JobID string `json:"job_id"`
 	RunID string `json:"run_id"`
 	// RuntimeSessionID is the platform session id of the lost run — the handle
-	// ReplaySandboxRun needs to StopSession before any replay. Empty only for
+	// cron's ReplaySandboxRun needs to StopSession before any replay. Empty only for
 	// records written without a known session.
 	RuntimeSessionID string `json:"runtime_session_id,omitempty"`
 	// Reason classifies why the run needs attention, surfaced in the queue
-	// card. One of attentionReason* below.
+	// card. One of Reason* below.
 	Reason string `json:"reason"`
 	// JobLabel is the human title at write time, so the queue card renders a
 	// name even after the job is edited/deleted. SanitizeForLog'd at the
@@ -43,48 +43,48 @@ type sandboxAttention struct {
 }
 
 const (
-	// attentionReasonTransport: stream lost mid-run, microVM fate unknown, job
+	// ReasonTransport: stream lost mid-run, microVM fate unknown, job
 	// declares side effects.
-	attentionReasonTransport = "transport"
-	// attentionReasonOrphaned: naozhi restarted while the run was in flight
+	ReasonTransport = "transport"
+	// ReasonOrphaned: naozhi restarted while the run was in flight
 	// (RFC §6.5); the orphan reconcile Stopped the microVM but a side effect
 	// may already have landed.
-	attentionReasonOrphaned = "orphaned"
-	// attentionReasonUnreadable: the record exists but cannot be parsed or
+	ReasonOrphaned = "orphaned"
+	// ReasonUnreadable: the record exists but cannot be parsed or
 	// validated, so neither the job nor the microVM it names is known. Only
-	// ListSandboxAttention produces it; nothing writes it to disk.
-	attentionReasonUnreadable = "unreadable"
+	// ListAttention produces it; nothing writes it to disk.
+	ReasonUnreadable = "unreadable"
 )
 
-// sandboxAttentionDir resolves the queue directory ("" when persistence is
-// disabled — store-less test fixtures skip the queue entirely).
-// errCorruptAttentionRecord reports a record that exists but cannot be parsed.
+// ErrCorruptAttention reports a record that exists but cannot be parsed.
 // Distinct from "absent" on purpose: see the switch in the reader.
-var errCorruptAttentionRecord = errors.New("cron sandbox: corrupt attention record")
+var ErrCorruptAttention = errors.New("cron sandbox: corrupt attention record")
 
 // maxAttentionRecordBytes caps one attention record: a run id, a job id, a
 // reason and a label — never free-form output — so 32 KiB is far above any
 // legitimate payload and bounds what a tampered file can allocate.
 const maxAttentionRecordBytes = 32 << 10
 
-func (s *Scheduler) sandboxAttentionDir() string {
-	return s.stateSubtree("sandboxattention")
+// attentionDir resolves the queue directory ("" when persistence is disabled —
+// store-less test fixtures skip the queue entirely).
+func (st Store) attentionDir() string {
+	return st.Subtree("sandboxattention")
 }
 
-// writeSandboxAttention persists one queue record. Best-effort: the run's
+// WriteAttention persists one queue record. Best-effort: the run's
 // terminal record is already durable and still warns "check for side effects",
 // so a missed queue entry degrades to "operator reads run history" — the
 // safety is in the no-auto-replay rule, not the queue.
-func (s *Scheduler) writeSandboxAttention(rec sandboxAttention, lg *slog.Logger) {
-	dir := s.sandboxAttentionDir()
+func (st Store) WriteAttention(rec Attention, lg *slog.Logger) {
+	dir := st.attentionDir()
 	if dir == "" {
 		return
 	}
-	if !IsValidID(rec.JobID) || !IsValidID(rec.RunID) {
+	if !validID(rec.JobID) || !validID(rec.RunID) {
 		lg.Warn("cron sandbox: attention write rejected non-hex id", "job_id", rec.JobID, "run_id", rec.RunID)
 		return
 	}
-	if err := s.mkdirStateSubtree(dir); err != nil {
+	if err := st.MkdirSubtree(dir); err != nil {
 		lg.Warn("cron sandbox: attention dir create failed; run not enqueued for confirmation", "err", err)
 		return
 	}
@@ -94,21 +94,21 @@ func (s *Scheduler) writeSandboxAttention(rec sandboxAttention, lg *slog.Logger)
 		return
 	}
 	// Atomic write so a crash mid-write cannot leave a truncated record that
-	// ListSandboxAttention skips as corrupt.
+	// ListAttention lists as unreadable.
 	if err := osutil.WriteFileAtomic(filepath.Join(dir, rec.RunID+".json"), b, 0o600); err != nil {
 		lg.Warn("cron sandbox: attention write failed; run not enqueued for confirmation", "err", err)
 	}
 }
 
-// removeSandboxAttention deletes a resolved queue record. Idempotent: a
+// RemoveAttention deletes a resolved queue record. Idempotent: a
 // missing file (already resolved by a concurrent action) is not an error.
-func (s *Scheduler) removeSandboxAttention(runID string) error {
-	dir := s.sandboxAttentionDir()
+func (st Store) RemoveAttention(runID string) error {
+	dir := st.attentionDir()
 	if dir == "" {
 		return nil
 	}
-	if !IsValidID(runID) {
-		return errInvalidAttentionID
+	if !validID(runID) {
+		return ErrInvalidID
 	}
 	err := os.Remove(filepath.Join(dir, runID+".json"))
 	if err != nil && !os.IsNotExist(err) {
@@ -117,22 +117,22 @@ func (s *Scheduler) removeSandboxAttention(runID string) error {
 	return nil
 }
 
-// getSandboxAttention reads one queue record (the replay/confirm path needs
+// GetAttention reads one queue record (the replay/confirm path needs
 // the runtime session id + jobID). (nil, false, nil) when the record does not
 // exist — already resolved, or never enqueued.
-func (s *Scheduler) getSandboxAttention(runID string) (*sandboxAttention, bool, error) {
-	dir := s.sandboxAttentionDir()
+func (st Store) GetAttention(runID string) (*Attention, bool, error) {
+	dir := st.attentionDir()
 	if dir == "" {
 		return nil, false, nil
 	}
-	if !IsValidID(runID) {
-		return nil, false, errInvalidAttentionID
+	if !validID(runID) {
+		return nil, false, ErrInvalidID
 	}
 	// Bounded and symlink-refusing. An unparseable record stays where it is:
 	// moving it aside would turn the next read into "absent", and a retried
 	// replay would then skip the Stop and dispatch against a run that may
 	// still be live. It keeps failing closed until an operator removes it.
-	rec, outcome, err := jsonfile.Load[sandboxAttention](filepath.Join(dir, runID+".json"), jsonfile.Options{
+	rec, outcome, err := jsonfile.Load[Attention](filepath.Join(dir, runID+".json"), jsonfile.Options{
 		MaxBytes: maxAttentionRecordBytes,
 		Label:    "cron sandbox attention record",
 		Corrupt:  jsonfile.LeaveCorrupt,
@@ -152,16 +152,16 @@ func (s *Scheduler) getSandboxAttention(runID string) (*sandboxAttention, bool, 
 		// sandbox run was stopped, so an unreadable one must fail closed —
 		// mapping it to "absent" would let a replay dispatch against a run
 		// that may still be live.
-		return nil, false, errCorruptAttentionRecord
+		return nil, false, ErrCorruptAttention
 	}
 	return &rec, true, nil
 }
 
-// SandboxAttentionItem is the read-model returned to the dashboard queue
+// AttentionItem is the read-model returned to the dashboard queue
 // (RFC §7.4). It re-exports the on-disk record's safe fields; the runtime
 // session id is deliberately NOT exposed (operator-irrelevant, and it is an
 // internal platform handle).
-type SandboxAttentionItem struct {
+type AttentionItem struct {
 	JobID       string `json:"job_id"`
 	RunID       string `json:"run_id"`
 	Reason      string `json:"reason"`
@@ -175,15 +175,15 @@ type SandboxAttentionItem struct {
 	Unreadable bool `json:"unreadable,omitempty"`
 }
 
-// ListSandboxAttention returns every unresolved §7.4 queue record, newest
+// ListAttention returns every unresolved §7.4 queue record, newest
 // first (by CreatedAtMS). A record that cannot be read is listed as
 // Unreadable rather than skipped: it still blocks replay of its run, so the
 // operator has to see it to clear it, and one bad file must not hide the rest
 // of the queue either. Returns an empty slice (never nil) so the dashboard
 // renders an empty queue consistently.
-func (s *Scheduler) ListSandboxAttention() []SandboxAttentionItem {
-	out := []SandboxAttentionItem{}
-	dir := s.sandboxAttentionDir()
+func (st Store) ListAttention() []AttentionItem {
+	out := []AttentionItem{}
+	dir := st.attentionDir()
 	if dir == "" {
 		return out
 	}
@@ -202,26 +202,26 @@ func (s *Scheduler) ListSandboxAttention() []SandboxAttentionItem {
 		if err != nil {
 			continue // benign: a concurrent resolve may have removed it
 		}
-		var rec sandboxAttention
-		if err := json.Unmarshal(raw, &rec); err != nil || !IsValidID(rec.RunID) || !IsValidID(rec.JobID) {
-			// The file name is the run id getSandboxAttention and
-			// ConfirmSandboxRun key on, so it is the handle to list. A name
+		var rec Attention
+		if err := json.Unmarshal(raw, &rec); err != nil || !validID(rec.RunID) || !validID(rec.JobID) {
+			// The file name is the run id GetAttention and
+			// cron's ConfirmSandboxRun key on, so it is the handle to list. A name
 			// that is not a valid id could not be confirmed through the API
 			// either; skip it.
 			runID := strings.TrimSuffix(e.Name(), ".json")
-			if !IsValidID(runID) {
+			if !validID(runID) {
 				slog.Warn("cron sandbox: corrupt attention record with an invalid name skipped", "file", osutil.SanitizeForLog(e.Name(), 256))
 				continue
 			}
 			slog.Warn("cron sandbox: corrupt attention record listed as unreadable", "run_id", runID)
-			item := SandboxAttentionItem{RunID: runID, Reason: attentionReasonUnreadable, Unreadable: true}
+			item := AttentionItem{RunID: runID, Reason: ReasonUnreadable, Unreadable: true}
 			if info, ierr := e.Info(); ierr == nil {
 				item.CreatedAtMS = info.ModTime().UnixMilli()
 			}
 			out = append(out, item)
 			continue
 		}
-		out = append(out, SandboxAttentionItem{
+		out = append(out, AttentionItem{
 			JobID:       rec.JobID,
 			RunID:       rec.RunID,
 			Reason:      rec.Reason,
@@ -231,17 +231,17 @@ func (s *Scheduler) ListSandboxAttention() []SandboxAttentionItem {
 		})
 	}
 	// Newest first: the queue reads as a stack of recent incidents.
-	slices.SortFunc(out, func(a, b SandboxAttentionItem) int {
+	slices.SortFunc(out, func(a, b AttentionItem) int {
 		return cmp.Compare(b.CreatedAtMS, a.CreatedAtMS)
 	})
 	return out
 }
 
-// SandboxAttentionCount returns the number of queue records on disk, readable
-// or not: a cheap dir-entry count that skips non-.json noise. Tests use it to
-// observe the queue; the dashboard reads ListSandboxAttention.
-func (s *Scheduler) SandboxAttentionCount() int {
-	dir := s.sandboxAttentionDir()
+// AttentionCount returns the number of queue records on disk, readable or not:
+// a cheap dir-entry count that skips non-.json noise. Tests use it to observe
+// the queue; the dashboard reads ListAttention.
+func (st Store) AttentionCount() int {
+	dir := st.attentionDir()
 	if dir == "" {
 		return 0
 	}
@@ -258,12 +258,12 @@ func (s *Scheduler) SandboxAttentionCount() int {
 	return n
 }
 
-// deleteJobAttention removes every queue record belonging to jobID (called
-// from deleteJobRuns when a job is deleted, §7.4). Records are keyed by runID
+// DeleteJobAttention removes every queue record belonging to jobID (cron calls
+// it when a job is deleted, §7.4). Records are keyed by runID
 // in a flat dir, so this scans and matches on the JobID field. Best-effort:
 // a read/remove failure on one record does not abort the rest.
-func (s *Scheduler) deleteJobAttention(jobID string) {
-	dir := s.sandboxAttentionDir()
+func (st Store) DeleteJobAttention(jobID string) {
+	dir := st.attentionDir()
 	if dir == "" {
 		return
 	}
@@ -280,7 +280,7 @@ func (s *Scheduler) deleteJobAttention(jobID string) {
 		if rerr != nil {
 			continue
 		}
-		var rec sandboxAttention
+		var rec Attention
 		if json.Unmarshal(raw, &rec) != nil || rec.JobID != jobID {
 			continue
 		}
@@ -288,24 +288,4 @@ func (s *Scheduler) deleteJobAttention(jobID string) {
 			slog.Warn("cron sandbox: delete-job attention remove failed", "job_id", jobID, "file", e.Name(), "err", err)
 		}
 	}
-}
-
-// attentionNowMS is the injectable clock read for the queue record's
-// CreatedAtMS. Uses the scheduler clock so tests pin a deterministic value.
-func (s *Scheduler) attentionNowMS() int64 {
-	return s.now().UnixMilli()
-}
-
-// WriteSandboxAttentionForTest is an exported seam so consumer-package tests
-// (dashboard handlers) can stage a §7.4 queue record without driving a full
-// failed-transport run. Production code uses the unexported
-// writeSandboxAttention. NOT for runtime use.
-func (s *Scheduler) WriteSandboxAttentionForTest(jobID, runID, reason, jobLabel string) {
-	s.writeSandboxAttention(sandboxAttention{
-		JobID:       jobID,
-		RunID:       runID,
-		Reason:      reason,
-		JobLabel:    jobLabel,
-		CreatedAtMS: s.attentionNowMS(),
-	}, slog.Default())
 }

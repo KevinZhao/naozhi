@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
@@ -452,7 +453,7 @@ func (s *Scheduler) maybeEnqueueOrphanAttention(p sandboxPending, js orphanJobSn
 	if !js.sideEffects {
 		return
 	}
-	rec, qok, qerr := s.getSandboxAttention(p.RunID)
+	rec, qok, qerr := s.sandboxState().GetAttention(p.RunID)
 	if qerr != nil {
 		lg.Warn("cron sandbox: attention probe failed; keeping any existing record, skipping orphaned write", "err", qerr)
 		return
@@ -460,11 +461,11 @@ func (s *Scheduler) maybeEnqueueOrphanAttention(p sandboxPending, js orphanJobSn
 	if qok || rec != nil {
 		return
 	}
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID:            p.JobID,
 		RunID:            p.RunID,
 		RuntimeSessionID: p.RuntimeSessionID,
-		Reason:           attentionReasonOrphaned,
+		Reason:           sandboxstore.ReasonOrphaned,
 		JobLabel:         js.label,
 		StartedAtMS:      p.StartedAtMS,
 		CreatedAtMS:      s.attentionNowMS(),

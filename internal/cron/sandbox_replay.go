@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -15,9 +16,9 @@ import (
 // Idempotent: a run not in the queue returns nil; an invalid id is the only error.
 func (s *Scheduler) ConfirmSandboxRun(runID string) error {
 	if !IsValidID(runID) {
-		return errInvalidAttentionID
+		return sandboxstore.ErrInvalidID
 	}
-	if err := s.removeSandboxAttention(runID); err != nil {
+	if err := s.sandboxState().RemoveAttention(runID); err != nil {
 		return err
 	}
 	slog.Info("cron sandbox: run confirmed done via dashboard; removed from attention queue", "run_id", runID)
@@ -36,7 +37,7 @@ func (s *Scheduler) ConfirmSandboxRun(runID string) error {
 // registered with triggerWG so Stop() drains it.
 func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 	if !IsValidID(jobID) || !IsValidID(origRunID) {
-		return "", errInvalidAttentionID
+		return "", sandboxstore.ErrInvalidID
 	}
 
 	// stopped is an atomic and stopWithCtx never takes s.tbl.mu, so reading it inside
@@ -88,7 +89,7 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 	// StopSession FIRST. FAIL-CLOSED on a read error — a torn/corrupt attention
 	// file means the original's fate cannot be confirmed, and proceeding would skip
 	// the Stop and risk the double-run this containment exists to prevent.
-	rec, qok, qerr := s.getSandboxAttention(origRunID)
+	rec, qok, qerr := s.sandboxState().GetAttention(origRunID)
 	if qerr != nil {
 		slog.Error("cron sandbox: replay refused — attention record unreadable, microVM fate unknown",
 			"job_id", jobID, "orig_run_id", origRunID, "err", qerr)
@@ -138,7 +139,7 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 
 	// The incident is actioned: drop the attention record. Best-effort, and done
 	// AFTER dispatch so a dispatch failure leaves the record for a retry.
-	if rerr := s.removeSandboxAttention(origRunID); rerr != nil {
+	if rerr := s.sandboxState().RemoveAttention(origRunID); rerr != nil {
 		slog.Warn("cron sandbox: replay dispatched but attention record removal failed", "orig_run_id", origRunID, "err", rerr)
 	}
 	return newRunID, nil

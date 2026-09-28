@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
@@ -24,7 +25,7 @@ func replaySetup(t *testing.T, runner *fakeSandboxRunner) (*Scheduler, *recordin
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sideEffectsJob(t, s)
 	origRunID := "feedfacefeedface"
-	s.writeSandboxSnapshot(j.ID, origRunID, "replay this prompt", "haiku", "img-v1", nil, slog.Default())
+	s.sandboxState().WriteSnapshot(j.ID, origRunID, "replay this prompt", "haiku", "img-v1", nil, slog.Default())
 	return s, rec, j, origRunID
 }
 
@@ -78,7 +79,7 @@ func TestReplay_SanitizesLegacySnapshotPrompt(t *testing.T) {
 	// U+202E (RLO) bidi override + a raw NUL (C0): both are in the
 	// containsCronUnsafe / SanitizeForLog deny set.
 	dirty := "do safe\u202erm -rf\x00 thing"
-	s.writeSandboxSnapshot(j.ID, origRunID, dirty, "haiku", "img-v1", nil, slog.Default())
+	s.sandboxState().WriteSnapshot(j.ID, origRunID, dirty, "haiku", "img-v1", nil, slog.Default())
 
 	if _, err := s.ReplaySandboxRun(j.ID, origRunID); err != nil {
 		t.Fatalf("ReplaySandboxRun: %v", err)
@@ -112,10 +113,10 @@ func TestReplay_StopsBeforeReplayWhenQueued(t *testing.T) {
 	}
 	s, rec, j, origRunID := replaySetup(t, runner)
 	// Enqueue the original as a transport failure with a known runtime session.
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID: j.ID, RunID: origRunID,
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
-		Reason:           attentionReasonTransport, CreatedAtMS: time.Now().UnixMilli(),
+		Reason:           sandboxstore.ReasonTransport, CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 
 	if _, err := s.ReplaySandboxRun(j.ID, origRunID); err != nil {
@@ -140,10 +141,10 @@ func TestReplay_StopsBeforeReplayWhenQueued(t *testing.T) {
 func TestReplay_RefusesWhenStopUnconfirmed(t *testing.T) {
 	runner := &fakeSandboxRunner{stopErr: errors.New("platform unreachable")}
 	s, _, j, origRunID := replaySetup(t, runner)
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID: j.ID, RunID: origRunID,
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
-		Reason:           attentionReasonTransport, CreatedAtMS: time.Now().UnixMilli(),
+		Reason:           sandboxstore.ReasonTransport, CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 
 	_, err := s.ReplaySandboxRun(j.ID, origRunID)
@@ -173,7 +174,7 @@ func TestReplay_CorruptAttentionFailsClosed(t *testing.T) {
 	}
 	s, _, j, origRunID := replaySetup(t, runner)
 	// Stage a corrupt attention file for the original run (truncated JSON).
-	dir := s.sandboxAttentionDir()
+	dir := s.stateSubtree("sandboxattention")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +236,7 @@ func TestReplay_PanicStillEmitsRunEnded(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sideEffectsJob(t, s)
 	origRunID := "feedfacefeedface"
-	s.writeSandboxSnapshot(j.ID, origRunID, "replay this prompt", "haiku", "img-v1", nil, slog.Default())
+	s.sandboxState().WriteSnapshot(j.ID, origRunID, "replay this prompt", "haiku", "img-v1", nil, slog.Default())
 
 	newRunID, err := s.ReplaySandboxRun(j.ID, origRunID)
 	if err != nil {
@@ -311,7 +312,7 @@ func TestReplay_PanicFinalizesBeforeBroadcast(t *testing.T) {
 
 	j := sideEffectsJob(t, s)
 	origRunID := "feedfacefeedface"
-	s.writeSandboxSnapshot(j.ID, origRunID, "replay this prompt", "haiku", "img-v1", nil, slog.Default())
+	s.sandboxState().WriteSnapshot(j.ID, origRunID, "replay this prompt", "haiku", "img-v1", nil, slog.Default())
 
 	if _, err := s.ReplaySandboxRun(j.ID, origRunID); err != nil {
 		t.Fatalf("ReplaySandboxRun: %v", err)
@@ -407,7 +408,7 @@ func TestReplay_PanicKeepsStartedEndedBalanced(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sideEffectsJob(t, s)
 	origRunID := "feedfacefeedface"
-	s.writeSandboxSnapshot(j.ID, origRunID, "panic metrics test", "haiku", "img-v1", nil, slog.Default())
+	s.sandboxState().WriteSnapshot(j.ID, origRunID, "panic metrics test", "haiku", "img-v1", nil, slog.Default())
 
 	startedBefore := metrics.CronRunStartedTotal.Value()
 	endedBefore := metrics.CronRunEndedTotal.Value()
@@ -440,7 +441,7 @@ func TestReplay_PanicBumpsFailedCounters(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sideEffectsJob(t, s)
 	origRunID := "feedfacefeedface"
-	s.writeSandboxSnapshot(j.ID, origRunID, "panic failed-counter test", "haiku", "img-v1", nil, slog.Default())
+	s.sandboxState().WriteSnapshot(j.ID, origRunID, "panic failed-counter test", "haiku", "img-v1", nil, slog.Default())
 
 	failedBefore := metrics.CronRunFailedTotal.Value()
 	sandboxFailedBefore := metrics.CronSandboxRunFailedTotal.Value()
@@ -468,8 +469,8 @@ func TestReplay_InvalidID(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
-	if _, err := s.ReplaySandboxRun("../bad", "feedfacefeedface"); !errors.Is(err, errInvalidAttentionID) {
-		t.Fatalf("err = %v, want errInvalidAttentionID", err)
+	if _, err := s.ReplaySandboxRun("../bad", "feedfacefeedface"); !errors.Is(err, sandboxstore.ErrInvalidID) {
+		t.Fatalf("err = %v, want sandboxstore.ErrInvalidID", err)
 	}
 }
 

@@ -1,21 +1,14 @@
 package cron
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
-	"os"
-	"path/filepath"
 	"regexp"
-	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/costledger"
-
-	"github.com/naozhi/naozhi/internal/limits"
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 // runtimeSessionIDRe matches the format produced by sandboxRuntimeSessionID:
@@ -196,9 +189,9 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	// Input snapshot (content-addressed prompt + model) persisted BEFORE the invoke
 	// so a replay re-injects the exact payload. No secrets are injected yet, and
 	// the image version is unknown until the run reports it. Best-effort.
-	s.writeSandboxSnapshot(a.snap.jobID, a.runID, a.prompt, a.model, "", nil, a.lg)
+	s.sandboxState().WriteSnapshot(a.snap.jobID, a.runID, a.prompt, a.model, "", nil, a.lg)
 
-	sink, closeSink := s.sandboxEventSink(a.snap.jobID, a.runID, a.lg)
+	sink, closeSink := s.sandboxState().EventSink(a.snap.jobID, a.runID, a.lg)
 	// RunJob can panic inside SDK/streaming code and skip the ordered closeSink()
 	// below, leaking the event-log fd; closeSink is idempotent so this defer is a
 	// safe fallback (#2317).
@@ -297,11 +290,11 @@ func (s *Scheduler) enqueueSandboxTransportAttention(a sandboxExecArgs, runtimeS
 			"job_id", a.snap.jobID, "run_id", a.runID)
 		return
 	}
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID:            a.snap.jobID,
 		RunID:            a.runID,
 		RuntimeSessionID: runtimeSID,
-		Reason:           attentionReasonTransport,
+		Reason:           sandboxstore.ReasonTransport,
 		JobLabel:         a.snap.label,
 		StartedAtMS:      a.startedAt.UnixMilli(),
 		CreatedAtMS:      s.attentionNowMS(),
@@ -375,203 +368,3 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 	}
 	s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), notice))
 }
-
-// sandboxEventSink opens the per-run event log
-// (<store-dir>/sandboxevents/<jobID>/<runID>.ndjson) and returns a sink
-// writing one envelope per line, plus a closer. Streaming to disk means the
-// events received before a mid-job stream break are already durable. On open
-// failure the sink degrades to a no-op with one WARN (the run is more valuable
-// than its event log). Deliberately separate from the runStore's runs/ tree.
-func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink func([]byte) error, closer func()) {
-	if s.storePath == "" {
-		return func([]byte) error { return nil }, func() {}
-	}
-	dir := s.stateSubtree("sandboxevents", jobID)
-	if err := s.mkdirStateSubtree(dir); err != nil {
-		lg.Warn("cron sandbox: event log dir create failed; events not persisted", "err", err)
-		return func([]byte) error { return nil }, func() {}
-	}
-	// runID is scheduler-generated hex, path-safe by construction; join
-	// defensively anyway.
-	f, err := os.OpenFile(filepath.Join(dir, runID+".ndjson"),
-		os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
-	if err != nil {
-		lg.Warn("cron sandbox: event log open failed; events not persisted", "err", err)
-		return func([]byte) error { return nil }, func() {}
-	}
-	w := bufio.NewWriterSize(f, 64*1024)
-	// Write failures degrade to a no-op sink (one WARN): a naozhi-side disk error
-	// must not abort a healthy run — propagating it would classify the run
-	// failed-transport and Stop a microVM whose stream is fine. Per-line Flush
-	// keeps crash durability to at most the line being written.
-	degraded := false
-	sink = func(line []byte) error {
-		if degraded {
-			return nil
-		}
-		// The reader (SandboxRunEvents) caps a token at sandboxEventsMaxLineSize; a
-		// line reaching it would make the scanner hit ErrTooLong and drop every later
-		// event, so drop just the oversized line with a WARN instead (#2083). `>=`
-		// keeps line+'\n' <= cap.
-		if len(line) >= sandboxEventsMaxLineSize {
-			lg.Warn("cron sandbox: oversized event line dropped; will not be readable by scanner",
-				"len", len(line))
-			return nil
-		}
-		_, werr := w.Write(line)
-		if werr == nil {
-			werr = w.WriteByte('\n')
-		}
-		if werr == nil {
-			werr = w.Flush()
-		}
-		if werr != nil {
-			degraded = true
-			lg.Warn("cron sandbox: event log write failed; further events not persisted", "err", werr)
-		}
-		return nil
-	}
-	// Single fd-release path, idempotent via sync.Once so callers can order the
-	// explicit flush before the RunEnded broadcast AND `defer closeSink()` as a
-	// panic-safe fallback without double-closing (#2317).
-	var closeOnce sync.Once
-	closer = func() {
-		closeOnce.Do(func() {
-			if err := w.Flush(); err != nil && !degraded {
-				lg.Warn("cron sandbox: event log flush failed", "err", err)
-			}
-			if err := f.Close(); err != nil {
-				lg.Warn("cron sandbox: event log close failed", "err", err)
-			}
-		})
-	}
-	return sink, closer
-}
-
-// SandboxRunEvents reads the persisted event log for one sandbox run
-// (sandboxevents/<jobID>/<runID>.ndjson) and returns up to maxLines raw NDJSON
-// lines (no trailing newline) for the dashboard run-detail event stream.
-//
-// Returns (nil, nil) when the file does not exist (local run, events disabled,
-// sink degraded on open) so the caller renders an empty stream. jobID/runID
-// are re-validated defensively for path safety. maxLines keeps the FIRST
-// maxLines (boot + early turns are the most useful for "where did it break");
-// the truncated flag lets the UI show "… N more events".
-func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byte, bool, error) {
-	if s == nil || s.storePath == "" {
-		return nil, false, nil
-	}
-	if !IsValidID(jobID) || !IsValidID(runID) {
-		return nil, false, fmt.Errorf("cron sandbox: invalid jobID/runID")
-	}
-	if maxLines <= 0 {
-		maxLines = sandboxEventsDefaultMax
-	}
-	// Bound concurrent reads: a non-blocking acquire fails fast with
-	// ErrSandboxEventsBusy rather than letting a burst pin unbounded scanner
-	// buffers (#2066).
-	select {
-	case sandboxEventsSem <- struct{}{}:
-		defer func() { <-sandboxEventsSem }()
-	default:
-		return nil, false, ErrSandboxEventsBusy
-	}
-	path := s.stateSubtree("sandboxevents", jobID, runID+".ndjson")
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil // no event log — render empty stream
-		}
-		return nil, false, fmt.Errorf("cron sandbox: open event log: %w", err)
-	}
-	defer f.Close()
-
-	out := make([][]byte, 0, maxLines)
-	sc := bufio.NewScanner(f)
-	// Cap a single line at sandboxEventsMaxLineSize so a concurrent burst cannot
-	// pin gigabytes of scanner buffers.
-	sc.Buffer(make([]byte, 64*1024), sandboxEventsMaxLineSize)
-	truncated := false
-	for sc.Scan() {
-		line := sc.Bytes()
-		if !json.Valid(line) {
-			continue // skip any partial/corrupt tail line
-		}
-		cp := make([]byte, len(line))
-		copy(cp, line)
-		out = append(out, cp)
-		// A file with exactly maxLines valid lines must NOT report truncated: peek
-		// for a further valid line first.
-		if len(out) >= maxLines {
-			if hasMoreValidJSON(sc) {
-				truncated = true
-			}
-			break
-		}
-	}
-	if err := sc.Err(); err != nil {
-		// Return the partial head plus the error; a missing tail means truncated, so
-		// the UI signals an incomplete stream.
-		return out, true, fmt.Errorf("cron sandbox: scan event log: %w", err)
-	}
-	return out, truncated, nil
-}
-
-// hasMoreValidJSON advances the scanner looking for one more valid-JSON line
-// after the cap was hit, so truncated reflects "real events were dropped"
-// rather than "the file ended exactly at the cap". Trailing blank/corrupt
-// lines do not count as a dropped event. The scanner is already consumed by
-// the caller's break, so advancing it here is safe.
-func hasMoreValidJSON(sc *bufio.Scanner) bool {
-	for sc.Scan() {
-		if json.Valid(sc.Bytes()) {
-			return true
-		}
-	}
-	return false
-}
-
-// sandboxEventsDefaultMax bounds SandboxRunEvents when the caller passes a
-// non-positive cap. 2000 frames covers a typical run's opening comfortably
-// while keeping the response well under a megabyte for the dashboard.
-const sandboxEventsDefaultMax = 2000
-
-// sandboxEventsMaxLineSize caps a single NDJSON line on the sandbox event
-// wire. It must equal agentcore.MaxEnvelopeLineBytes (the SSE decoder's
-// ceiling) so the writer's accept ceiling and this reader's scanner token limit
-// never drift: a writer/reader split let lines write but never read back,
-// silently dropping every later event (#2083). cron cannot import
-// internal/agentcore (AWS SDK; no_agentcore_import_test.go pins the edge), so
-// both derive from limits.MaxStreamJSONLine + 64KiB. Reader memory is bounded
-// by sandboxEventsSemCap, not by shrinking this cap.
-const sandboxEventsMaxLineSize = limits.MaxStreamJSONLine + (64 << 10)
-
-// sandboxEventsSemCap bounds concurrent SandboxRunEvents reads (mirrors the
-// dashboard transcriptSem). Each read holds up to maxLines×64KB plus a scanner
-// buffer; without the gate one authenticated client could exhaust memory
-// (#2066). Non-blocking acquire fails fast rather than parking goroutines.
-const sandboxEventsSemCap = 8
-
-// sandboxEventsSem limits concurrent SandboxRunEvents reads process-wide.
-// Package-level (not per-Scheduler) because the bound protects the host's
-// memory, of which there is one regardless of how many schedulers exist in a
-// test binary.
-var sandboxEventsSem = make(chan struct{}, sandboxEventsSemCap)
-
-// deleteJobSandboxEvents removes a deleted job's sandboxevents subtree.
-// Best-effort: a missing tree is fine. A 60-minute run can emit several MB, so
-// leaving it orphaned would be an observable disk leak.
-func (s *Scheduler) deleteJobSandboxEvents(jobID string) {
-	if s.storePath == "" || !IsValidID(jobID) {
-		return
-	}
-	dir := s.stateSubtree("sandboxevents", jobID)
-	if err := os.RemoveAll(dir); err != nil {
-		slog.Warn("cron sandbox: event subtree delete failed", "job_id", jobID, "err", err)
-	}
-}
-
-// ErrSandboxEventsBusy is returned by SandboxRunEvents when the concurrency
-// semaphore is saturated. The dashboard handler maps it to HTTP 503 so a
-// burst fails fast instead of allocating unbounded scanner buffers.
-var ErrSandboxEventsBusy = errors.New("cron sandbox: event reads busy")

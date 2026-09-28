@@ -166,13 +166,13 @@ func (s *Scheduler) deleteJobRuns(jobID string) {
 	// content-addressed and shared across jobs, so they are NOT removed here.
 	// TODO(agentcore §5.2): blob GC pass (refcount or mark-sweep against live
 	// manifests) for the runsnapshots/blobs/ tree.
-	s.deleteJobSnapshots(jobID)
-	// Drop sandbox event logs written by sandboxEventSink (§6.1); a 60-minute
+	s.sandboxState().DeleteJobSnapshots(jobID)
+	// Drop sandbox event logs written by the sandbox event sink (§6.1); a 60-minute
 	// sandbox run can accumulate several MB.
-	s.deleteJobSandboxEvents(jobID)
+	s.sandboxState().DeleteJobEvents(jobID)
 	// §7.4: drop unresolved confirmation-queue records — a deleted job has
 	// nothing left to confirm or replay.
-	s.deleteJobAttention(jobID)
+	s.sandboxState().DeleteJobAttention(jobID)
 }
 
 // finishRun is the single terminal hook for every cron execution path.

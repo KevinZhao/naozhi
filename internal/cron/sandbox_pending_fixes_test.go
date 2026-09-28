@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -445,11 +446,11 @@ func TestReconcileOrphan_PreservesExistingTransportAttentionReason(t *testing.T)
 
 	// (a) In-process transport failure already enqueued a transport record for
 	// this runID before the process died.
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID:            j.ID,
 		RunID:            runID,
 		RuntimeSessionID: "run-aabbccddeeff0119-1234567890123456789",
-		Reason:           attentionReasonTransport,
+		Reason:           sandboxstore.ReasonTransport,
 		JobLabel:         "push a PR",
 		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
 		CreatedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
@@ -466,16 +467,16 @@ func TestReconcileOrphan_PreservesExistingTransportAttentionReason(t *testing.T)
 	s.reconcileSandboxPending()
 	waitEnded(t, rec)
 
-	got, ok, err := s.getSandboxAttention(runID)
+	got, ok, err := s.sandboxState().GetAttention(runID)
 	if err != nil {
-		t.Fatalf("getSandboxAttention: %v", err)
+		t.Fatalf("GetAttention: %v", err)
 	}
 	if !ok || got == nil {
 		t.Fatal("attention record disappeared after reconcile; want preserved")
 	}
-	if got.Reason != attentionReasonTransport {
+	if got.Reason != sandboxstore.ReasonTransport {
 		t.Fatalf("reason = %q, want %q (orphan reconcile must not clobber the in-process transport record) [#2119]",
-			got.Reason, attentionReasonTransport)
+			got.Reason, sandboxstore.ReasonTransport)
 	}
 	// Exactly one queue entry — no duplicate written.
 	if items := s.ListSandboxAttention(); len(items) != 1 {
@@ -503,16 +504,16 @@ func TestReconcileOrphan_WritesOrphanedAttentionWhenNonePreexists(t *testing.T) 
 	s.reconcileSandboxPending()
 	waitEnded(t, rec)
 
-	got, ok, err := s.getSandboxAttention(runID)
+	got, ok, err := s.sandboxState().GetAttention(runID)
 	if err != nil {
-		t.Fatalf("getSandboxAttention: %v", err)
+		t.Fatalf("GetAttention: %v", err)
 	}
 	if !ok || got == nil {
 		t.Fatal("orphaned attention record not written when none pre-existed")
 	}
-	if got.Reason != attentionReasonOrphaned {
+	if got.Reason != sandboxstore.ReasonOrphaned {
 		t.Fatalf("reason = %q, want %q (clean orphan must enqueue with orphaned reason) [#2119]",
-			got.Reason, attentionReasonOrphaned)
+			got.Reason, sandboxstore.ReasonOrphaned)
 	}
 }
 
@@ -557,7 +558,7 @@ func TestReconcileSandboxPending_EmptyRuntimeSessionIDDroppedAsCorrupt(t *testin
 
 // ---------------------------------------------------------------------------
 // R20260615-030459-COR-001: reconcileOneSandboxOrphan must re-check job
-// existence under RLock immediately before writeSandboxAttention so a
+// existence under RLock immediately before WriteAttention so a
 // concurrent DeleteJobByID that runs between the initial snapshot RUnlock and
 // the attention write cannot leave a ghost queue card (TOCTOU, analogous to
 // the fix for enqueueSandboxTransportAttention in OPEN #2129).

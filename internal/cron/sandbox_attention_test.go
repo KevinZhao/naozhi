@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 // boolPtr is defined elsewhere in the package test suite; sideEffectsJob adds a
@@ -46,8 +48,8 @@ func TestAttention_TransportFailureEnqueuesSideEffectingJob(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("queue len = %d, want 1 (side-effecting transport failure must enqueue)", len(items))
 	}
-	if items[0].Reason != attentionReasonTransport {
-		t.Errorf("reason = %q, want %q", items[0].Reason, attentionReasonTransport)
+	if items[0].Reason != sandboxstore.ReasonTransport {
+		t.Errorf("reason = %q, want %q", items[0].Reason, sandboxstore.ReasonTransport)
 	}
 	if items[0].JobID != j.ID {
 		t.Errorf("jobID = %q, want %q", items[0].JobID, j.ID)
@@ -104,9 +106,9 @@ func TestConfirmSandboxRun_RemovesFromQueue(t *testing.T) {
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID: "0123456789abcdef", RunID: "feedfacefeedface",
-		Reason: attentionReasonTransport, StartedAtMS: time.Now().UnixMilli(),
+		Reason: sandboxstore.ReasonTransport, StartedAtMS: time.Now().UnixMilli(),
 		CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 
@@ -130,8 +132,8 @@ func TestConfirmSandboxRun_InvalidID(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
-	if err := s.ConfirmSandboxRun("../etc/passwd"); !errors.Is(err, errInvalidAttentionID) {
-		t.Fatalf("err = %v, want errInvalidAttentionID", err)
+	if err := s.ConfirmSandboxRun("../etc/passwd"); !errors.Is(err, sandboxstore.ErrInvalidID) {
+		t.Fatalf("err = %v, want sandboxstore.ErrInvalidID", err)
 	}
 }
 
@@ -141,16 +143,16 @@ func TestDeleteJobAttention_ClearsQueue(t *testing.T) {
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID: "0123456789abcdef", RunID: "1111111111111111",
-		Reason: attentionReasonTransport, CreatedAtMS: time.Now().UnixMilli(),
+		Reason: sandboxstore.ReasonTransport, CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID: "aaaaaaaaaaaaaaaa", RunID: "2222222222222222",
-		Reason: attentionReasonOrphaned, CreatedAtMS: time.Now().UnixMilli(),
+		Reason: sandboxstore.ReasonOrphaned, CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 
-	s.deleteJobAttention("0123456789abcdef")
+	s.sandboxState().DeleteJobAttention("0123456789abcdef")
 
 	items := s.ListSandboxAttention()
 	if len(items) != 1 || items[0].JobID != "aaaaaaaaaaaaaaaa" {
@@ -168,17 +170,17 @@ func TestListSandboxAttention_NewestFirst(t *testing.T) {
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
 	base := time.Now().UnixMilli()
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID: "0123456789abcdef", RunID: "aaaaaaaaaaaaaaaa",
-		Reason: attentionReasonTransport, CreatedAtMS: base,
+		Reason: sandboxstore.ReasonTransport, CreatedAtMS: base,
 	}, slog.Default())
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID: "0123456789abcdef", RunID: "bbbbbbbbbbbbbbbb",
-		Reason: attentionReasonOrphaned, CreatedAtMS: base + 1000,
+		Reason: sandboxstore.ReasonOrphaned, CreatedAtMS: base + 1000,
 	}, slog.Default())
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID: "0123456789abcdef", RunID: "cccccccccccccccc",
-		Reason: attentionReasonTransport, CreatedAtMS: base + 500,
+		Reason: sandboxstore.ReasonTransport, CreatedAtMS: base + 500,
 	}, slog.Default())
 
 	items := s.ListSandboxAttention()
@@ -201,12 +203,12 @@ func TestListSandboxAttention_SkipsCorruptWithInvalidName(t *testing.T) {
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID: "0123456789abcdef", RunID: "1111111111111111",
-		Reason: attentionReasonTransport, CreatedAtMS: time.Now().UnixMilli(),
+		Reason: sandboxstore.ReasonTransport, CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 	// Drop a corrupt file alongside it.
-	if err := os.WriteFile(filepath.Join(s.sandboxAttentionDir(), "garbage.json"), []byte("{not json"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(s.stateSubtree("sandboxattention"), "garbage.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

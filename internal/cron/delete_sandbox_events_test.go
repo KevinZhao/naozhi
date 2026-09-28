@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestDeleteJobSandboxEvents_RemovesDir verifies that deleteJobSandboxEvents
+// TestDeleteJobSandboxEvents_RemovesDir verifies that DeleteJobEvents
 // removes the sandboxevents/<jobID>/ subtree when persistence is enabled.
 // R20260614-LOGIC-2: the helper must be called from deleteJobRuns so a
 // deleted job leaves no orphaned event-log tree on disk.
@@ -35,15 +35,15 @@ func TestDeleteJobSandboxEvents_RemovesDir(t *testing.T) {
 		t.Fatalf("setup: WriteFile: %v", err)
 	}
 
-	s.deleteJobSandboxEvents(jobID)
+	s.sandboxState().DeleteJobEvents(jobID)
 
 	if _, err := os.Stat(eventsDir); !os.IsNotExist(err) {
-		t.Errorf("sandboxevents/<jobID>/ still exists after deleteJobSandboxEvents; stat err=%v", err)
+		t.Errorf("sandboxevents/<jobID>/ still exists after DeleteJobEvents; stat err=%v", err)
 	}
 }
 
 // TestDeleteJobSandboxEvents_MissingDirNoError verifies that
-// deleteJobSandboxEvents is a no-op when the subtree does not exist —
+// DeleteJobEvents is a no-op when the subtree does not exist —
 // os.RemoveAll on a missing path returns nil.
 func TestDeleteJobSandboxEvents_MissingDirNoError(t *testing.T) {
 	t.Parallel()
@@ -61,12 +61,12 @@ func TestDeleteJobSandboxEvents_MissingDirNoError(t *testing.T) {
 	t.Cleanup(func() { s.Stop() })
 
 	// Directory was never created; helper must not error.
-	s.deleteJobSandboxEvents("0123456789abcdef")
+	s.sandboxState().DeleteJobEvents("0123456789abcdef")
 }
 
 // TestDeleteJobSandboxEvents_EmptyStorePathSkips verifies the storePath==""
 // guard: when persistence is disabled the helper returns without touching
-// the filesystem, mirroring the sandboxSnapshotDir empty-storePath guard.
+// the filesystem, mirroring the snapshot tree's empty-storePath guard.
 func TestDeleteJobSandboxEvents_EmptyStorePathSkips(t *testing.T) {
 	t.Parallel()
 
@@ -80,7 +80,7 @@ func TestDeleteJobSandboxEvents_EmptyStorePathSkips(t *testing.T) {
 	t.Cleanup(func() { s.Stop() })
 
 	// Must not panic; no filesystem side-effects to assert on.
-	s.deleteJobSandboxEvents("0123456789abcdef")
+	s.sandboxState().DeleteJobEvents("0123456789abcdef")
 }
 
 // TestDeleteJobSandboxEvents_InvalidIDSkips verifies the IsValidID guard:
@@ -107,7 +107,7 @@ func TestDeleteJobSandboxEvents_InvalidIDSkips(t *testing.T) {
 	}
 
 	// Non-hex ID should be rejected by IsValidID — no removal attempted.
-	s.deleteJobSandboxEvents("../canary")
+	s.sandboxState().DeleteJobEvents("../canary")
 
 	if _, err := os.Stat(filepath.Join(dir, "canary")); os.IsNotExist(err) {
 		t.Error("IsValidID guard failed: canary directory was removed by an invalid jobID")
@@ -115,7 +115,7 @@ func TestDeleteJobSandboxEvents_InvalidIDSkips(t *testing.T) {
 }
 
 // TestDeleteJobByID_CleansSandboxEventsDir is the integration path:
-// DeleteJobByID must call deleteJobSandboxEvents so a deleted job leaves
+// DeleteJobByID must call DeleteJobEvents so a deleted job leaves
 // no orphaned sandboxevents/<jobID>/ tree on disk.
 func TestDeleteJobByID_CleansSandboxEventsDir(t *testing.T) {
 	t.Parallel()
