@@ -51,8 +51,10 @@ async function openSession(page) {
   await expect(page.locator('#header-git .git-chip')).toHaveCount(1);
 }
 
-test('390px: header meta row children stay inside the viewport', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+// 390px is the common phone width; 320px (iPhone SE) is where a branch name
+// long enough to need the ellipsis runs out of room with any font.
+for (const [width, height] of [[390, 844], [320, 640]]) test(`${width}px: header meta row children stay inside the viewport`, async ({ page }) => {
+  await page.setViewportSize({ width, height });
   await openSession(page);
 
   const detail = page.locator('.main-header .detail');

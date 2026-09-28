@@ -6,6 +6,7 @@
 // attachment-404 → thumbnail fallback path.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { installTouch } = require('./touch');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const SESSION_KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -210,19 +211,17 @@ test.describe('Lightbox gallery navigation', () => {
   });
 
   // ── Touch gesture arbitration (RFC §3) ──
-  // webkit (mobile-safari project) lacks system libs on this host, so the
-  // swipe contract is exercised on chromium with synthetic TouchEvents:
+  // Synthetic TouchEvents (touch.js builds them for both engines):
   // isTrusted=false but addEventListener-based handlers fire identically.
   /** Dispatch a touch sequence on the lightbox <img>. */
   async function dispatchSwipe(page, dx, opts = {}) {
+    await installTouch(page);
     await page.evaluate(([dx, opts]) => {
+      const nz = /** @type {any} */ (window).__nzTouch;
       const img = document.querySelector('.lightbox-overlay img');
       const mk = (type, touches, changed) => {
-        const toTouch = (p, i) => new Touch({
-          identifier: i, target: img, clientX: p.x, clientY: p.y,
-        });
-        img.dispatchEvent(new TouchEvent(type, {
-          bubbles: true, cancelable: true,
+        const toTouch = (p, i) => nz.touch(img, i, p.x, p.y);
+        img.dispatchEvent(nz.event(type, {
           touches: touches.map(toTouch),
           changedTouches: changed.map(toTouch),
         }));

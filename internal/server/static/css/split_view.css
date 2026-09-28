@@ -529,6 +529,10 @@
    visibly jump position a beat after the session opens. */
 .main-header .detail-git{display:inline-flex;align-items:center;min-width:0;flex-shrink:1;margin-right:auto;overflow:hidden}
 .main-header .detail-git:empty{display:none}
+/* The chip must be able to shrink with its slot: as a flex item it otherwise
+   keeps its content width, the slot clips it mid-border and .git-chip-text
+   never reaches its ellipsis. */
+.main-header .detail-git .git-chip{min-width:0}
 /* Only ONE element in the row may claim the free space: in flex the first auto
    margin absorbs all of it, so with both chips present the git chip would eat
    the slack and leave the effort tag stranded at the far right. The effort tag

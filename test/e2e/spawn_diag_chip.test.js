@@ -4,6 +4,7 @@
 // session (spawn_diags: []) must collapse the mount entirely.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { openSessionCard } = require('./session_nav');
 
 function diagSessions() {
   const base = {
@@ -45,7 +46,7 @@ function diagSessions() {
 
 async function selectByKey(page, keySuffix) {
   const card = page.locator(`.session-card[data-key*="${keySuffix}"]`).first();
-  await card.click();
+  await openSessionCard(page, card);
   await page.waitForTimeout(350);
 }
 
