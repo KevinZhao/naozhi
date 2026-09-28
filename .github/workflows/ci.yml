@@ -29,9 +29,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  # The -race suite in two parallel shards (#2828): most of the job was
+  # compiling every test binary under -race, so halving the package set per
+  # runner halves the wall clock. scripts/ci-test-shard.sh owns the split.
+  test-shard:
+    name: test (${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [a, b]
     steps:
       - uses: actions/checkout@v7
 
@@ -41,17 +49,21 @@ jobs:
           cache: true
 
       - name: Test
-        # go test -race implicitly builds and vets all packages before running.
-        # Separate Build and Vet steps are redundant and have been removed.
+        # go test -race implicitly builds and vets the packages it runs.
         # Tests quarantined in .github/quarantine.txt (#2537) are skipped here
         # and run in the non-blocking test-quarantined job instead.
-        run: |
-          pattern=$(grep -v '^#' .github/quarantine.txt 2>/dev/null | grep -v '^$' | paste -sd'|' -)
-          skip=""
-          if [ -n "$pattern" ]; then
-            skip="-skip $pattern"
-          fi
-          go test -race -timeout 300s $skip ./...
+        run: scripts/ci-test-shard.sh ${{ matrix.shard }}
+
+  # The branch-protection required check. It passes only when every shard
+  # passed, so protection keeps naming one stable job however the shards move.
+  test:
+    needs: test-shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: All test shards passed
+        run: test "${{ needs.test-shard.result }}" = success
 
   # gofmt (make lint-gofmt). fail mode from the start: the backlog this job was
   # added alongside is at 0, and formatting has an unambiguous fix (gofmt -w)
