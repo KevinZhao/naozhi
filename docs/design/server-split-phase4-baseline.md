@@ -1,5 +1,7 @@
 # server-split Phase 4 — Baseline 数据
 
+> **已归档（2026-09-28，#2716）**：Phase 4 设计稿（`server-split-phase4-design.md`）的配套基线，随设计稿一起归档，不再维护；数字停在采集当日。
+
 > **采集日期**：2026-05-28（branch `cron/todo-fix-20260526-211641`，origin/master HEAD `44a10e8d`）
 >
 > **v0.6 修订**（取代 v0.4 baseline）：本地落后 master 33 commits 后实测，多处数字与 v0.4 baseline 不符——server 包从 17156 行膨胀到 21313 行；Hub 字段从 37 增到 47（多 10 个）；超 800 行文件从 6 个增到 9 个。本文件按当前 origin/master 重新采集。

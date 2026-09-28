@@ -1,6 +1,6 @@
 # RFC: lint-fact-table — 设计稿事实速查表自动校验（LINT-FACT-TABLE）
 
-> **状态**：Draft v1（2026-05-28）
+> **状态**：**已退役（2026-09-28，#2716）**。它唯一的校验对象 server 拆分 Phase 4 设计稿已归档，工具（`tools/lint-fact-table`）、Makefile target 与 CI job 一并删除。本文保留为设计记录。原状态：Draft v1（2026-05-28）
 > **作者**：naozhi team
 > **创建日期**：2026-05-28
 > **范围**：新建 `tools/lint-fact-table/` 工具，扫描 markdown 设计稿中的关键数字 token 与事实速查表对账，漂移即 fail
