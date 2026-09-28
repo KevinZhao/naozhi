@@ -176,28 +176,6 @@
   .cj-row{grid-template-columns:18px minmax(0,1fr) auto}
   .cj-stats{display:none}
 }
-/* 窄 list-pane 修复：narrow / single 模式 (list-pane ≤ 320) 下，三个 auto 列
- * (cj-when 39 + cj-stats 52 + cj-actions 91) 总宽 ~180px 把 1fr 列 (cj-main)
- * 挤到 ~0.4px，title/sub 被压成竖排单字。复用 mobile 644 媒体查询的策略：
- * 隐藏 cj-when + cj-stats，回 3 列 (dot / main / actions)。时间靠 sub-row
- * 的 cj-when-inline 兜住。stats 徽章在窄屏信息密度过高，进 detail 看完整
- * 时间轴更合适，与 mobile 同款决策。
- *
- * data-cron-layout 由 setupCronLayoutObserver (dashboard.js) 写入 .cron-detail-body：
- *   wide   ≥1100  list 380
- *   medium ≥820   list 360
- *   narrow ≥560   list 320  ← 此规则触发
- *   single <560   list 全屏覆盖（cj-row 也走窄逻辑）
- */
-.cron-detail-body[data-cron-layout="medium"] .cj-row,
-.cron-detail-body[data-cron-layout="narrow"] .cj-row,
-.cron-detail-body[data-cron-layout="single"] .cj-row{grid-template-columns:18px minmax(0,1fr) auto;gap:8px}
-.cron-detail-body[data-cron-layout="medium"] .cj-when,
-.cron-detail-body[data-cron-layout="narrow"] .cj-when,
-.cron-detail-body[data-cron-layout="single"] .cj-when,
-.cron-detail-body[data-cron-layout="medium"] .cj-stats,
-.cron-detail-body[data-cron-layout="narrow"] .cj-stats,
-.cron-detail-body[data-cron-layout="single"] .cj-stats{display:none}
 /* cron-dashboard-redesign P0 follow-up — list rows show only title +
  * schedule. Everything else (icons / last-ago chip / when-inline /
  * stats badge / when-column / next-time across all layout modes) is
@@ -214,18 +192,6 @@
  * provides the same affordance with more context. Keeps the row
  * actions to a single ⋯ entrypoint. */
 .cj-list .cj-row .cj-actions .cj-run{display:none}
-.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-when-inline,
-.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline,
-.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline{display:inline;color:var(--nz-text-mute)}
-.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-when-inline.imminent,
-.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline.imminent,
-.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline.imminent{color:var(--nz-accent);font-weight:600}
-.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-when-inline.paused,
-.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline.paused,
-.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline.paused{color:var(--nz-text-faint)}
-.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-ago,
-.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-ago,
-.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-ago{display:none}
 .cj-stats{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:36px;height:22px;padding:0 8px;border-radius:11px;border:1px solid var(--nz-border);background:var(--nz-bg-2);font-size:var(--nz-fs-xs);line-height:1;color:var(--nz-text-mute);font-variant-numeric:tabular-nums;cursor:default;outline:none}
 .cj-stats:hover,.cj-stats:focus-visible{border-color:var(--nz-text-faint);color:var(--nz-text)}
 .cj-stats.ok{color:var(--nz-green);border-color:rgba(63,185,80,.35);background:rgba(63,185,80,.08)}
@@ -719,12 +685,15 @@
  * those operators as "wide enough for two columns" and the drawer ends
  * up at < 240px wide where prompt + timeline can't coexist.
  *
- * The data-cron-layout attribute is written by a ResizeObserver on the
- * .main element (see dashboard.js setupCronLayoutObserver). Three modes:
- *   wide     — main ≥ 1100   list 380, drawer ≥ 720
- *   medium   — main ≥ 820    list 360, drawer ≥ 460
- *   narrow   — main ≥ 560    list 320, drawer barely fits
- *   single   — main <  560   drawer pushes over the list
+ * The data-cron-layout attribute is written by a ResizeObserver on
+ * .cron-detail-body (cron_view.js setupCronLayoutObserver), gauged off the
+ * body's own width, which opening the drawer does not change:
+ *   wide     — body ≥ 1100   list 380, drawer ≥ 720
+ *   medium   — body ≥ 820    list 360, drawer ≥ 460
+ *   narrow   — body ≥ 560    list 320, drawer barely fits
+ *   single   — body <  560   drawer pushes over the list
+ * The attribute only drives this split; list-row density is fixed by the
+ * .cj-list .cj-row rules above.
  *
  * The legacy @media fallback below stays as a safety net for the
  * pre-JS-init paint window so users never see a 250px-wide drawer flash.

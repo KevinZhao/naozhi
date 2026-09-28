@@ -1902,19 +1902,15 @@ function setupCronLayoutObserver() {
   const body = document.querySelector('.cron-detail-body');
   if (!body) return;
   const apply = (w) => {
-    // cron-dashboard-redesign P0 fix: gauge layout off the *list-pane*
-    // width, not the parent body. The body grows to accommodate the
-    // detail-pane when a drawer is open, but cj-row only ever lives
-    // inside list-pane; using body width caused list-pane ≈ 360 to
-    // still classify as 'medium' (because body was ≈ 740 from the
-    // open drawer), which kept .cj-stats visible and squeezed the
-    // 1fr title column to ~70 px.
-    const lp = body.querySelector('.cron-list-pane');
-    const lpW = lp ? lp.offsetWidth : w;
+    // The tier is gauged off the body, which is what the observer watches
+    // and what the drawer does not resize. The tier sets the list pane's
+    // width while a drawer is open (cron.css), so gauging off the list pane
+    // fed the tier back into itself and made the width depend on whether the
+    // window had been resized with the drawer open.
     let mode;
-    if (lpW >= 600) mode = 'wide';
-    else if (lpW >= 420) mode = 'medium';
-    else if (lpW >= 300) mode = 'narrow';
+    if (w >= 1100) mode = 'wide';
+    else if (w >= 820) mode = 'medium';
+    else if (w >= 560) mode = 'narrow';
     else mode = 'single';
     if (body.dataset.cronLayout !== mode) body.dataset.cronLayout = mode;
   };
