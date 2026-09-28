@@ -18,6 +18,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
@@ -61,6 +63,29 @@ func Build(routesGoldenPath string) (string, error) {
 		fmt.Fprintf(&b, "      %s: '%s',\n", apiKey(p), p)
 	}
 	b.WriteString("    },\n")
+
+	// ENUMS: the death_reason and session-state wire vocabularies, so the
+	// dashboard can check a value it received against the full set instead of
+	// restating each member as a literal (#2909 G5). SESSION_STATE is not yet
+	// enforced against literal comparisons — see the PR for why.
+	deathReasons := append([]string{}, cli.AllDeathReasons()...)
+	deathReasons = append(deathReasons, session.DeathReasonIdleTimeout, session.DeathReasonEvicted)
+	sort.Strings(deathReasons)
+	b.WriteString("    ENUMS: {\n      DEATH_REASON: [")
+	for i, r := range deathReasons {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "'%s'", r)
+	}
+	b.WriteString("],\n      SESSION_STATE: [")
+	for i, s := range cli.AllSessionStates() {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "'%s'", s)
+	}
+	b.WriteString("],\n    },\n")
 
 	b.WriteString(`  };
   if (typeof module !== 'undefined' && module.exports) {

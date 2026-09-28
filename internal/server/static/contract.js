@@ -97,6 +97,10 @@
       system_update_apply: '/api/system/update/apply',
       transcribe: '/api/transcribe',
     },
+    ENUMS: {
+      DEATH_REASON: ['cli_exited', 'evicted', 'idle_timeout', 'killed', 'no_output_timeout', 'readloop_panic', 'shim_eof', 'shim_oversize_then_eof', 'shim_oversize_then_read_error', 'shim_read_error', 'total_timeout'],
+      SESSION_STATE: ['dead', 'ready', 'running'],
+    },
   };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = NZ_CONTRACT;

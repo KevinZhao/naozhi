@@ -136,7 +136,7 @@ func (r *Router) evictOldest(tx sessTx) bool {
 	// Do NOT decrement the labeled gauge here: countActive() below reconciles
 	// each bucket to an absolute recount, and a manual -1 on top of that
 	// drifts the gauge when Close() flips Alive() asynchronously (#1645).
-	storeAtomicString(&oldest.deathReason, "evicted")
+	storeAtomicString(&oldest.deathReason, DeathReasonEvicted)
 	// Keep oldest.process non-nil so concurrent holders don't nil-panic; after
 	// Close(), Alive() is false and countActive() recounts. Eviction never
 	// re-spawns the same key, so waitSocketGoneForKey is deliberately skipped
