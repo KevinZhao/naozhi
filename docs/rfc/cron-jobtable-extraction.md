@@ -163,7 +163,7 @@ func (t *jobTable) apply(id string, m jobMutation) (jobsSnapshot, bool)
 
 ### 6.5 其它必须先处理的共享状态
 
-包级 `sandboxEventsSem`（`sandbox.go:562`，cap 8）是**进程级**而非 per-Scheduler：搬包后它就不再节流 cron 这边的任何东西。7 个导出错误变量被 `internal/dashboard/cron` 以 `cronpkg.*` import（`attention.go:127`、`update.go:204`、`runs.go:229`），`consumer.go:53-58` 的 Scheduler 方法签名不能变 → cron 需要 6 个转发壳。测试钩子 `WriteSandboxAttentionForTest`、`WriteSandboxSnapshotForTest`、`finishRunPreAppendHook` 会变成跨包。
+包级 `sandboxEventsSem`（`sandbox.go:562`，cap 8）是**进程级**而非 per-Scheduler。它跟着事件读取一起搬进子包，就仍然是进程级：Go 的包级变量在哪个包里都只有一份，决定它是否节流全部读取的，是所有读取是否都经过它，而不是它放在哪个包里。实施见 #2890：`sandboxstore.eventsSem`，由 `TestRunEvents_SemIsProcessWide` 钉住。7 个导出错误变量被 `internal/dashboard/cron` 以 `cronpkg.*` import（`attention.go:127`、`update.go:204`、`runs.go:229`），`consumer.go:53-58` 的 Scheduler 方法签名不能变 → cron 需要 6 个转发壳。测试钩子 `WriteSandboxAttentionForTest`、`WriteSandboxSnapshotForTest`、`finishRunPreAppendHook` 会变成跨包。
 
 ## 7. `finishArgs`：真实剩余工作
 
@@ -197,7 +197,7 @@ func (t *jobTable) apply(id string, m jobMutation) (jobsSnapshot, bool)
 1. §4.1 的 `registerJob` 持锁跨 cron channel：先修，还是写进允许清单？（**阻塞步 2**）
 2. `sandbox_replay.go` 那个已经是幻觉的复合 RLock 保证：修还是删注释？（**阻塞步 2**）
 3. §8.5 的 analyzer 要不要写？不写就接受"gate 不与表同时持有"在步 4 后没有机器保障。
-4. `sandboxEventsSem` 的进程级语义在子包化后如何保留（移进子包 = 每个 Scheduler 各一份，是行为变化）。
+4. ~~`sandboxEventsSem` 的进程级语义在子包化后如何保留~~ **已解决**：owner 定为保持进程级。这个问题本身源于一个误判：包级变量移进子包后仍然全进程只有一份，只有改成 Store 的字段才会变成每个实例各一份。#2890 采用包级变量，见 §6.5。
 
 ## 10. v2 → v3：步 2 开工时的实测修正
 
