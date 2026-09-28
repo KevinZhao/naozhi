@@ -37,10 +37,11 @@ func goConsts(files map[string]string, into metrics) {
 }
 
 // jsRatchet reads scripts/js-ratchet.baseline.json: every per-file metric
-// except lines, plus the sum of lines. Lines are gated only as the sum:
-// moving code between files is a refactor, not a raise, and the sum is what
-// keeps a new file from absorbing growth. js-ratchet --check still holds each
-// file's own lines.
+// except lines, plus totals across files. Lines are gated only as their sum:
+// moving code between files is a refactor, not a raise. A new file's metrics
+// are new keys, so the totals are what keep one from absorbing growth: the sum
+// of lines and of fnOver100, and the longest function anywhere (MAX.maxFnLines).
+// js-ratchet --check still holds each file's own lines.
 func jsRatchet(raw string, into metrics) error {
 	if raw == "" {
 		return nil
@@ -49,17 +50,26 @@ func jsRatchet(raw string, into metrics) error {
 	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
 		return fmt.Errorf("js-ratchet baseline: %w", err)
 	}
-	var total int64
+	// A total exists only once some file carries its metric: a revision that
+	// predates the metric has no such ratchet, rather than one at zero.
+	totals := map[string]int64{}
 	for file, ms := range doc {
 		for name, v := range ms {
-			if name == "lines" {
-				total += v
+			switch name {
+			case "lines":
+				totals["TOTAL.lines"] += v
 				continue
+			case "fnOver100":
+				totals["TOTAL.fnOver100"] += v
+			case "maxFnLines":
+				totals["MAX.maxFnLines"] = max(totals["MAX.maxFnLines"], v)
 			}
 			into["js-ratchet:"+file+"."+name] = metric{value: v}
 		}
 	}
-	into["js-ratchet:TOTAL.lines"] = metric{value: total}
+	for k, v := range totals {
+		into["js-ratchet:"+k] = metric{value: v}
+	}
 	return nil
 }
 
