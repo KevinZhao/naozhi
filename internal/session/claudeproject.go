@@ -25,13 +25,13 @@ func isENOENTErr(err error) bool {
 // exists for the backend that will consume it, returning "" to downgrade the
 // spawn to a fresh session when it does not. Each backend probes its own layout:
 //   - "claude" / "": <claudeDir>/projects/<slug(workspace)>/<id>.jsonl (what `claude --resume` reads).
-//   - "kiro": <kiroSessionsDir>/<id>.json, UUID-keyed and workspace-independent (ACP `session/load`).
+//   - "kiro": <backendDirs["kiro"]>/<id>.json, UUID-keyed and workspace-independent (ACP `session/load`).
 //   - anything else: no pre-check; codex rollouts are date-bucketed with no
 //     cheap probe, so a missing target surfaces as a protocol Init error.
 //
 // A resumeID containing path separators or ".." is rejected outright: it
 // flows into filepath.Join against a trusted root (defense-in-depth).
-func resolveResumeID(backendID, claudeDir, kiroSessionsDir, workspace, key, resumeID string) string {
+func resolveResumeID(backendID, claudeDir string, backendDirs map[string]string, workspace, key, resumeID string) string {
 	if resumeID == "" {
 		return resumeID
 	}
@@ -42,7 +42,7 @@ func resolveResumeID(backendID, claudeDir, kiroSessionsDir, workspace, key, resu
 	}
 	switch backendID {
 	case "kiro":
-		return resolveKiroResumeID(kiroSessionsDir, key, resumeID)
+		return resolveKiroResumeID(backendDirs["kiro"], key, resumeID)
 	case "claude", "":
 		return resolveClaudeResumeID(claudeDir, workspace, key, resumeID)
 	default:

@@ -2153,7 +2153,7 @@ func TestResolveResumeID(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveResumeID(tc.backendID, tc.claudeDir, tc.kiroDir, tc.workspace, "cron:test", tc.resumeID)
+			got := resolveResumeID(tc.backendID, tc.claudeDir, map[string]string{"kiro": tc.kiroDir}, tc.workspace, "cron:test", tc.resumeID)
 			if got != tc.want {
 				t.Errorf("resolveResumeID(be=%q, cd=%q, kd=%q, ws=%q, id=%q) = %q, want %q",
 					tc.backendID, tc.claudeDir, tc.kiroDir, tc.workspace, tc.resumeID, got, tc.want)
@@ -2191,7 +2191,7 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(kiroDir, kiroSID+".json"), []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		r.kiroSessionsDir = kiroDir
+		r.backendDirs = map[string]string{"kiro": kiroDir}
 		return r
 	}
 

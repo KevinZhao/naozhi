@@ -22,7 +22,7 @@ func (s *stubKiroSession) SessionID() string          { return s.sid }
 func (s *stubKiroSession) SnapshotChainIDs() []string { return s.chain }
 
 // TestFactory_KiroReturnsKirojsonlSource pins the happy path — when
-// KiroSessionsDir is set, the factory must return a *Source wired with
+// the kiro directory is wired, the factory must return a *Source wired with
 // the supplied rootDir and session-ID accessor. A future refactor that
 // accidentally swapped accessors (e.g. closing over Workspace instead
 // of SessionID) would break the dashboard's "load earlier" path on
@@ -34,7 +34,7 @@ func TestFactory_KiroReturnsKirojsonlSource(t *testing.T) {
 		ws:  "/tmp/ws",
 		sid: "kiro-sess-1",
 	}
-	got := factory(sess, history.Wiring{KiroSessionsDir: "/kiro/dir"})
+	got := factory(sess, history.Wiring{BackendDirs: map[string]string{"kiro": "/kiro/dir"}})
 	src, ok := got.(*Source)
 	if !ok {
 		t.Fatalf("factory(kiro, dir set) = %T; want *Source", got)
@@ -63,7 +63,7 @@ func TestInit_RegistersKiroBackend(t *testing.T) {
 	w := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro")
 	src := w.NewHistorySource(
 		&stubKiroSession{sid: "x"},
-		history.Wiring{KiroSessionsDir: "/kiro/dir"},
+		history.Wiring{BackendDirs: map[string]string{"kiro": "/kiro/dir"}},
 	)
 	if _, ok := src.(*Source); !ok {
 		t.Errorf("wrapper(kiro).NewHistorySource = %T; want *Source — init() registration regressed", src)

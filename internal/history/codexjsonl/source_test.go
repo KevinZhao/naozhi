@@ -180,13 +180,13 @@ func TestSource_LoadBefore_MalformedLinesSkipped(t *testing.T) {
 
 func TestFactory_DegradesWithoutDir(t *testing.T) {
 	t.Parallel()
-	got := factory(stubView{sid: "x"}, history.Wiring{}) // no CodexSessionsDir
+	got := factory(stubView{sid: "x"}, history.Wiring{}) // no codex transcript directory
 	if _, ok := got.(history.Noop); !ok {
-		t.Errorf("factory without CodexSessionsDir = %T; want NoopHistorySource", got)
+		t.Errorf("factory without a codex directory = %T; want NoopHistorySource", got)
 	}
-	got2 := factory(stubView{sid: "x"}, history.Wiring{CodexSessionsDir: "/tmp"})
+	got2 := factory(stubView{sid: "x"}, history.Wiring{BackendDirs: map[string]string{"codex": "/tmp"}})
 	if _, ok := got2.(*Source); !ok {
-		t.Errorf("factory with CodexSessionsDir = %T; want *Source", got2)
+		t.Errorf("factory with a codex directory = %T; want *Source", got2)
 	}
 }
 

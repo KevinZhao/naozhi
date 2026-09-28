@@ -47,15 +47,20 @@ type SessionView interface {
 type Wiring struct {
 	// ClaudeDir is the Claude CLI's projects/ root (~/.claude).
 	ClaudeDir string
-	// KiroSessionsDir is ~/.kiro/sessions/cli (wired from cmd/naozhi/main.go).
-	KiroSessionsDir string
-	// CodexSessionsDir is ~/.codex/sessions; the codexjsonl factory globs
-	// YYYY/MM/DD/rollout-*-<threadId>.jsonl beneath it.
-	CodexSessionsDir string
+	// BackendDirs maps a backend ID to the directory that backend keeps its
+	// session transcripts in (backend.Profile.HistoryDir, expanded). A factory
+	// reads its own entry; a missing one disables that backend's fallback
+	// history. Claude's reader uses ClaudeDir instead: claudefs derives the
+	// per-workspace projects/ path from the root.
+	BackendDirs map[string]string
 	// EventLogDir is naozhi's per-session event log directory. Unused by the
 	// current factories (naozhilog is wired separately by the router).
 	EventLogDir string
 }
+
+// BackendDir returns the transcript directory wired for backendID, "" when
+// there is none.
+func (w Wiring) BackendDir(backendID string) string { return w.BackendDirs[backendID] }
 
 // Source exposes a read-only view of a session's past events.
 //

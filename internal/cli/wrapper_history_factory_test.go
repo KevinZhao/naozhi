@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/history"
@@ -172,9 +173,9 @@ func TestNewHistorySource_DepsRoundTrip(t *testing.T) {
 	}
 
 	want := history.Wiring{
-		ClaudeDir:       "/claude/dir",
-		KiroSessionsDir: "/kiro/dir",
-		EventLogDir:     "/event/log",
+		ClaudeDir:   "/claude/dir",
+		BackendDirs: map[string]string{"kiro": "/kiro/dir"},
+		EventLogDir: "/event/log",
 	}
 	fakeSess := &fakeHistorySession{
 		key: "feishu:direct:alice:general", workspace: "/tmp/ws",
@@ -183,7 +184,7 @@ func TestNewHistorySource_DepsRoundTrip(t *testing.T) {
 
 	_ = w.NewHistorySource(fakeSess, want)
 
-	if sawDeps != want {
+	if !reflect.DeepEqual(sawDeps, want) {
 		t.Errorf("deps round-trip lost data: got %+v want %+v", sawDeps, want)
 	}
 	if sawWS != fakeSess.workspace {
