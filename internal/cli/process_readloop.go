@@ -293,25 +293,16 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 	return shimDispatchContinue
 }
 
-// rpcErrorTurnEnd reports whether err is a protocol RPC-error sentinel that
-// ReadEvent returns (with done=true) to signal "the backend rejected the
-// request — close the turn". When it is, ok=true and tag is the short
-// backend prefix for the synthesized result text. A non-RPC error (e.g. an
+// rpcErrorTurnEnd reports whether err is a TurnRejectedError, the backend
+// telling ReadEvent it rejected the turn. When it is, ok=true and tag is the
+// backend prefix for the synthesized result text. Any other error (e.g. an
 // unparseable frame) returns ok=false so the readLoop skips it.
-//
-// Every backend whose ReadEvent surfaces a post-handshake RPC error this way
-// MUST register its sentinel here, else handleShimStdout drops the error and
-// the session hangs in state=running. ACP/kiro: ErrACPRPC (session/prompt
-// reject); codex: ErrCodexRPC (deferred turn/start reject, #2216).
 func rpcErrorTurnEnd(err error) (tag string, ok bool) {
-	switch {
-	case errors.Is(err, ErrACPRPC):
-		return "[kiro] ", true
-	case errors.Is(err, ErrCodexRPC):
-		return "[codex] ", true
-	default:
-		return "", false
+	var rejected *TurnRejectedError
+	if errors.As(err, &rejected) {
+		return rejected.resultPrefix(), true
 	}
+	return "", false
 }
 
 // handleShimStdout decodes a stdout frame into one or more protocol Events
@@ -338,8 +329,8 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 		// Backend RPC error (ACP/kiro session/prompt reject; codex's deferred
 		// turn/start reply, e.g. -32001 overload): the turn is over from the
 		// backend's POV, so synthesize a visible "result" and let the active
-		// Send() unblock — otherwise state stays "running" forever. New
-		// protocols must register their sentinel in rpcErrorTurnEnd.
+		// Send() unblock — otherwise state stays "running" forever. The
+		// protocol says so by returning a TurnRejectedError.
 		if tag, ok := rpcErrorTurnEnd(err); ok {
 			events = []clievent.Event{{
 				Type:    "result",
