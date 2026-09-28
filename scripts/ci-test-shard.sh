@@ -25,3 +25,13 @@ fi
 
 # shellcheck disable=SC2086 # one package per word
 go test -race -timeout 300s "${skip[@]}" $pkgs
+
+# Tests write only below their temp dirs. A file left in the checkout is a
+# fixture writing relative to the package directory, and `git add -A` would
+# commit it.
+leftover=$(git status --porcelain --untracked-files=all)
+if [ -n "$leftover" ]; then
+  echo "tests left files in the checkout:" >&2
+  echo "$leftover" >&2
+  exit 1
+fi
