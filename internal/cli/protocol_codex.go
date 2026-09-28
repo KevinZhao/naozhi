@@ -330,8 +330,8 @@ func (p *CodexProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 		p.mu.Lock()
 		p.textBuf.Reset()
 		p.mu.Unlock()
-		return nil, true, fmt.Errorf("%w %d: %s", ErrCodexRPC,
-			msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))
+		return nil, true, &TurnRejectedError{Backend: p.BackendID, Err: fmt.Errorf("%w %d: %s", ErrCodexRPC,
+			msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))}
 	}
 	return nil, false, nil
 }
