@@ -8,6 +8,9 @@
 //                   their own); a top-level IIFE is a module scope, not a function
 //   fnOver100       count of such functions longer than 100 lines
 //   topLevelLetVar  column-0 `let` / `var` declarations (mutable globals)
+//   configureDeps   properties passed in `configureX({ ... })` calls: the
+//                   dependencies a module receives by injection instead of
+//                   import, invisible to the module graph (a spread counts 1)
 //
 // Function lengths come from espree, the parser eslint installs into
 // test/e2e/node_modules (npm install there first). typeof-guard counts are
@@ -21,8 +24,8 @@
 // --write refuses to raise a value: deliberate growth requires hand-editing
 // scripts/js-ratchet.baseline.json and an approved scripts/ratchet-raises.jsonl
 // entry (tools/ratchet-raises), which also holds the sum of lines and
-// fnOver100 and the maximum maxFnLines across files, so a new file cannot
-// absorb growth.
+// fnOver100 and configureDeps and the maximum maxFnLines across files, so a
+// new file cannot absorb growth.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -73,6 +76,26 @@ function functions(program) {
   return out;
 }
 
+// configureDeps counts the properties of the object literal handed to each
+// configure[A-Z]… call.
+function configureDeps(program) {
+  let n = 0;
+  const walk = (node) => {
+    if (!node || typeof node.type !== 'string') return;
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' &&
+        /^configure[A-Z]/.test(node.callee.name) && node.arguments[0]?.type === 'ObjectExpression') {
+      n += node.arguments[0].properties.length;
+    }
+    for (const [k, v] of Object.entries(node)) {
+      if (k === 'loc' || k === 'range') continue;
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') walk(v);
+    }
+  };
+  walk(program);
+  return n;
+}
+
 export function measureSource(src, espree = loadEspree()) {
   const lines = src.split('\n');
   const total = lines.length - (src.endsWith('\n') ? 1 : 0);
@@ -85,6 +108,7 @@ export function measureSource(src, espree = loadEspree()) {
     maxFnLines: fns.reduce((m, f) => Math.max(m, f.lines), 0),
     fnOver100: fns.filter((f) => f.lines > 100).length,
     topLevelLetVar: letVar,
+    configureDeps: configureDeps(program),
   };
 }
 

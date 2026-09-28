@@ -69,3 +69,14 @@ test('--write refuses to raise, and only to raise', () => {
   assert.deepEqual(raisedMetrics({ 'a.js': { lines: 11, maxFnLines: 4 } }, base), ['a.js lines 10 -> 11']);
   assert.deepEqual(raisedMetrics({ 'a.js': { lines: 9, maxFnLines: 5 }, 'n.js': { lines: 50 } }, base), []);
 });
+
+test('configureDeps counts what configure calls inject', () => {
+  const src = [
+    'configureA({ a, b, c });',
+    'configureB({ ...shared, d: () => d() });',
+    'configure({ x, y });', // not configure[A-Z]
+    'setup({ p, q });',
+    'function f() { configureC({ e }); }',
+  ].join('\n');
+  assert.equal(measureSource(src).configureDeps, 6);
+});

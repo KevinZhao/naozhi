@@ -39,8 +39,9 @@ func goConsts(files map[string]string, into metrics) {
 // jsRatchet reads scripts/js-ratchet.baseline.json: every per-file metric
 // except lines, plus totals across files. Lines are gated only as their sum:
 // moving code between files is a refactor, not a raise. A new file's metrics
-// are new keys, so the totals are what keep one from absorbing growth: the sum
-// of lines and of fnOver100, and the longest function anywhere (MAX.maxFnLines).
+// are new keys, so the totals are what keep one from absorbing growth: the sums
+// of lines, fnOver100 and configureDeps, and the longest function anywhere
+// (MAX.maxFnLines).
 // js-ratchet --check still holds each file's own lines.
 func jsRatchet(raw string, into metrics) error {
 	if raw == "" {
@@ -61,6 +62,8 @@ func jsRatchet(raw string, into metrics) error {
 				continue
 			case "fnOver100":
 				totals["TOTAL.fnOver100"] += v
+			case "configureDeps":
+				totals["TOTAL.configureDeps"] += v
 			case "maxFnLines":
 				totals["MAX.maxFnLines"] = max(totals["MAX.maxFnLines"], v)
 			}
