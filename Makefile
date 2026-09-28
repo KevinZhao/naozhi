@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 BINARY  := naozhi
 MAIN    := ./cmd/naozhi/
 
-.PHONY: build vet test lint lint-gofmt vuln deploy release clean lint-server lint-server-fail lint-fact-table lint-fact-table-fail release-gate release-gate-live
+.PHONY: build vet test lint lint-gofmt vuln deploy release clean lint-server lint-server-fail release-gate release-gate-live
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags='$(LDFLAGS)' -o bin/$(BINARY) $(MAIN)
@@ -59,20 +59,6 @@ lint-server:
 
 lint-server-fail:
 	go run ./tools/lint-server-handlers -mode fail
-
-# fact-table drift detection (server-split-phase4-design.md v0.6.1 §0 纪律 5).
-# 扫 design / RFC markdown 中的关键数字 token 与 speech 表对账，漂移即报。
-# 2026-07-31 清零存量后 CI 已切 lint-fact-table-fail（同 lint-server，
-# ADR-001 后"Phase 5 完工"不再是可等待的触发条件）；warn 模式保留本地用。
-lint-fact-table:
-	go run ./tools/lint-fact-table -mode warn \
-		docs/design/server-split-phase4-design.md \
-		docs/design/server-split-phase4-baseline.md
-
-lint-fact-table-fail:
-	go run ./tools/lint-fact-table -mode fail \
-		docs/design/server-split-phase4-design.md \
-		docs/design/server-split-phase4-baseline.md
 
 # Router 字段 `// 读写:` 注释漂移检测（router-split P0 安全网，RFC
 # router-god-object-split）。AST 解析 Router 结构每个字段的声明访问域，再扫

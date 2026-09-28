@@ -1,5 +1,7 @@
 # server 包拆分 Phase 4 设计稿
 
+> **已归档（2026-09-28，#2716）**：本文是 server 包拆分 Phase 4 的历史记录，不再维护。Phase 4b/3f/4c/5 已按 §十五 ADR-001 暂缓，Server 的实际解纠缠由 Epic E（#2528）完成（现状以代码为准：Server 38 个字段、只保留活过注册期的 handler）。文中的数字冻结在最后修订时，与当前代码不一致属预期；校验这些数字的 `lint-fact-table` 已随本次归档退役。
+
 > **状态**：设计稿 v0.6.4（2026-07-31）。**Phase 4b 经两轮实地实现尝试后判定为"当前结构下负 ROI，暂缓"——见 §十五 ADR-001。server-split 在已完成的物理切分 + lint 防膨胀闭环处正式收束。** v0.6.2 及以前历史见下方版本表。
 >
 > **v0.6.4 摘要**：lint-server / lint-fact-table 切 fail 模式前的对账整改。ADR-001 暂缓 4b 后，"Phase 5 完工后切 fail"的触发条件不再会到来，warn 模式事实上被永久化——本次清零两 linter 存量后直接上膛：exemptions.yaml baseline 按 2026-07-31 实测重采（8 处）+ 补录 wshub_broadcast/subscribe（R243-ARCH-2 拆分产物）+ 删 agent_tailer.go 已达标条目；本文 7 处 token 锚定修正（历史 changelog 加 lint:allow、复合 bold 拆分、2 处措辞对齐键名）；§0 fact-table 新增"server 包文件硬上限 500 行 / internal/dashboard 子包文件硬上限 800 行"两行（v0.6.1 N4 曾因此矛盾）；baseline.md 补 fact-table 标记。
