@@ -25,13 +25,13 @@ func TestRun_EveryBaselineSourceIsRead(t *testing.T) {
 	t.Parallel()
 	base := fakeTree{
 		"internal/testhelper/sleep_ratchet_test.go": "const bareSleepBaseline = 138\n",
-		jsRatchetPath:  `{"a.js":{"lines":10,"maxFunctionLines":3}}`,
+		jsRatchetPath:  `{"a.js":{"lines":10,"maxFnLines":3}}`,
 		jsDepsPath:     `{"matrix":{},"tdz":{},"typeofGuards":{},"bridgeRefs":{}}`,
 		exemptionsPath: "file_size: []\nhandle_baseline: []\n",
 	}
 	head := fakeTree{
 		"internal/testhelper/sleep_ratchet_test.go": "const bareSleepBaseline = 139\n",
-		jsRatchetPath:  `{"a.js":{"lines":11,"maxFunctionLines":3}}`,
+		jsRatchetPath:  `{"a.js":{"lines":11,"maxFnLines":3}}`,
 		jsDepsPath:     `{"matrix":{"a.js":{"b.js":["x"]}},"tdz":{},"typeofGuards":{},"bridgeRefs":{}}`,
 		exemptionsPath: "file_size:\n  - path: s.go\n    current: 600\n    limit: 500\n    until: \"2027-03-31\"\nhandle_baseline: []\n",
 	}
