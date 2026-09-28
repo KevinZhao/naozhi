@@ -30,17 +30,50 @@ func TestRaises_GoConstants(t *testing.T) {
 func TestRaises_JSRatchet(t *testing.T) {
 	t.Parallel()
 	base, head := metrics{}, metrics{}
-	if err := jsRatchet(`{"a.js":{"lines":100,"maxFunctionLines":50},"b.js":{"lines":10,"maxFunctionLines":5}}`, base); err != nil {
+	if err := jsRatchet(`{"a.js":{"lines":100,"maxFnLines":50,"fnOver100":0},"b.js":{"lines":10,"maxFnLines":5,"fnOver100":0}}`, base); err != nil {
 		t.Fatal(err)
 	}
 	// 20 lines move from a.js to b.js, and a new c.js adds 5: only the sum
 	// rose. b.js's longest function grew.
-	if err := jsRatchet(`{"a.js":{"lines":80,"maxFunctionLines":50},"b.js":{"lines":30,"maxFunctionLines":6},"c.js":{"lines":5,"maxFunctionLines":1}}`, head); err != nil {
+	if err := jsRatchet(`{"a.js":{"lines":80,"maxFnLines":50,"fnOver100":0},"b.js":{"lines":30,"maxFnLines":6,"fnOver100":0},"c.js":{"lines":5,"maxFnLines":1,"fnOver100":0}}`, head); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"js-ratchet:TOTAL.lines", "js-ratchet:b.js.maxFunctionLines"}
+	want := []string{"js-ratchet:TOTAL.lines", "js-ratchet:b.js.maxFnLines"}
 	if got := gates(raises(base, head)); !slices.Equal(got, want) {
 		t.Errorf("raises = %v, want %v", got, want)
+	}
+}
+
+// A long function moved into a new file is a new key there, so only the
+// totals can see it.
+func TestRaises_JSRatchet_NewFileCannotAbsorbALongFunction(t *testing.T) {
+	t.Parallel()
+	base, head := metrics{}, metrics{}
+	if err := jsRatchet(`{"a.js":{"lines":100,"maxFnLines":80,"fnOver100":0}}`, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := jsRatchet(`{"a.js":{"lines":100,"maxFnLines":80,"fnOver100":0},"n.js":{"lines":0,"maxFnLines":150,"fnOver100":1}}`, head); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"js-ratchet:MAX.maxFnLines", "js-ratchet:TOTAL.fnOver100"}
+	if got := gates(raises(base, head)); !slices.Equal(got, want) {
+		t.Errorf("raises = %v, want %v", got, want)
+	}
+}
+
+// The revision that introduces a metric has no total for it at the base, so
+// the new total is a new ratchet, not a raise from zero.
+func TestRaises_JSRatchet_IntroducingAMetric(t *testing.T) {
+	t.Parallel()
+	base, head := metrics{}, metrics{}
+	if err := jsRatchet(`{"a.js":{"lines":100,"maxFunctionLines":80}}`, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := jsRatchet(`{"a.js":{"lines":100,"maxFnLines":300,"fnOver100":2}}`, head); err != nil {
+		t.Fatal(err)
+	}
+	if rs := raises(base, head); len(rs) != 0 {
+		t.Errorf("raises = %v, want none", rs)
 	}
 }
 

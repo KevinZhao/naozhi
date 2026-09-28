@@ -302,7 +302,8 @@ jobs:
   # scripts/js-deps-freeze.mjs enforces that the implicit cross-file reference
   # matrix only shrinks (baseline: scripts/js-deps-baseline.json);
   # scripts/js-ratchet.mjs enforces that per-file line counts, function
-  # lengths and top-level mutable state only shrink
+  # lengths (every function form, from the AST) and top-level mutable state
+  # only shrink
   # (baseline: scripts/js-ratchet.baseline.json).
   lint-js:
     runs-on: ubuntu-latest
@@ -329,6 +330,11 @@ jobs:
       # a rule that stops matching would pass every file silently.
       - name: Test the dashboard lint rules
         run: node --test scripts/eslint-plugin-nz.test.mjs
+
+      # What the ratchet counts as a function; a counter that stops seeing a
+      # form (methods, arrows) would let that form grow unmeasured.
+      - name: Test the growth ratchet
+        run: node --test scripts/js-ratchet.test.mjs
 
       - name: Check growth ratchet
         run: node scripts/js-ratchet.mjs --check
