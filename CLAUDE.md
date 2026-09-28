@@ -84,7 +84,7 @@ cmd/naozhi/main.go
   -> assets       Dashboard "installed assets" 零依赖叶子
   -> ccassets     Claude Code 资产浏览 provider（dashboard 用）
   -> transcribe   语音转写（Amazon Transcribe Streaming）
-  -> selfupdate   GitHub Releases 自升级 + 校验
+  -> selfupdate   GitHub Releases 自升级 + 校验（macOS 上保留自签名身份，见 docs/ops/macos-codesign.md）
   -> shim         零停机重启：outlive naozhi 的 sidecar 进程
   -> usermsg      用户消息分类
   -> gitinfo      读取目录的 git branch / worktree 状态

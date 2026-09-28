@@ -30,6 +30,7 @@ naozhi doctor --timeout 2s
 | 类别 | 通过 | 警告 | 失败 |
 |---|---|---|---|
 | `binary` | 能解析自身路径 | 路径不可读 | - |
+| `codesign` | 非 darwin；或签名身份固定（leaf / Developer ID），升级后 macOS 授权保留 | ad-hoc 签名，每次升级都会重新弹文件夹授权（见 [macos-codesign.md](macos-codesign.md)）/ 读不到签名 | - |
 | `systemd` | `systemctl is-active = active` | 非 Linux 或 systemctl 不存在 | 服务不活跃 |
 | `http /health` | 返回 200 + JSON | - | 不可达 / 非 200 |
 | `auth` | token 通过 `/api/sessions` 200 | 无 token / 响应码意外 | token 被 401/403 |

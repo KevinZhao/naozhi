@@ -20,6 +20,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/selfupdate"
 )
 
 func (d *doctor) checkBinary() {
@@ -34,6 +35,41 @@ func (d *doctor) checkBinary() {
 	}
 	d.add("binary", "pass", fmt.Sprintf("%s · version=%s · %s/%s",
 		resolved, version, runtime.GOOS, runtime.GOARCH))
+}
+
+// codesignGOOS and inspectCodesignFn are indirected so the verdicts are
+// testable off darwin.
+var (
+	codesignGOOS      = runtime.GOOS
+	inspectCodesignFn = selfupdate.InspectCodesign
+)
+
+// checkCodesign warns when macOS privacy grants will not survive an upgrade:
+// an ad-hoc requirement is the cdhash, which every new binary changes.
+func (d *doctor) checkCodesign() {
+	if codesignGOOS != "darwin" {
+		d.add("codesign", "pass", "skipped (not darwin)")
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		d.add("codesign", "warn", "cannot resolve own path: "+err.Error())
+		return
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	switch kind, id := inspectCodesignFn(exe); kind {
+	case selfupdate.CodesignLeaf:
+		d.add("codesign", "pass", fmt.Sprintf("identifier=%s leaf=%s · upgrades re-sign with it, macOS privacy grants persist",
+			id.Identifier, id.LeafSHA1))
+	case selfupdate.CodesignOther:
+		d.add("codesign", "pass", "signed with a non-ad-hoc identity · macOS privacy grants persist")
+	case selfupdate.CodesignAdhoc:
+		d.add("codesign", "warn", "ad-hoc signature · macOS re-asks for folder access after every upgrade; see docs/ops/macos-codesign.md")
+	default:
+		d.add("codesign", "warn", "cannot read the code signature of "+exe)
+	}
 }
 
 func (d *doctor) checkSystemd() {
