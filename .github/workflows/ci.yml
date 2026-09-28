@@ -348,6 +348,9 @@ jobs:
       - name: Check WS contract (wsproto schema vs dashboard dispatch)
         run: node test/e2e/check-ws-contract.mjs
 
+      - name: Test the nested WS field check
+        run: node --test scripts/ws-contract-nested.test.mjs
+
       # The flaky-report regexes fail open — a pattern that stops matching files
       # nothing and the job still goes green, which is indistinguishable from a
       # quiet week. This replays real log lines through them.
