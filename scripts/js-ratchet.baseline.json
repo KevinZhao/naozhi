@@ -60,7 +60,7 @@
     "topLevelLetVar": 1
   },
   "cron_view.js": {
-    "lines": 2645,
+    "lines": 2641,
     "maxFunctionLines": 127,
     "functionsOver100": 3,
     "topLevelLetVar": 11
