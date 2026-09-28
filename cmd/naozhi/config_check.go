@@ -130,7 +130,14 @@ func configCheck(args []string, stdout io.Writer) int {
 	// the real spawn passes; omitting them (as this did) described an argv that
 	// never happens.
 	storePath := osutil.ExpandHome(cfg.Session.StorePath)
-	settingsFile := resolveNaozhiSettingsFile(cfg, storePath, "")
+	// Path only: the startup path bootstraps the file, and one a check created
+	// unseeded would stop the next start from seeding it from local settings.
+	settingsFile := ""
+	if cfg.NaozhiSettings.Enabled {
+		if p, err := naozhiSettingsPath(cfg, storePath); err == nil {
+			settingsFile = p
+		}
+	}
 	mcpConfigFile := resolveMCPConfigFile(cfg)
 	// Same two-step main() takes: the debug root hangs off the event-log dir,
 	// and the file name is the session key hash. CLIDebugDir is the read-only
