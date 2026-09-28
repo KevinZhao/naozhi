@@ -8,19 +8,17 @@
 // a permanent field.
 //
 // handlerSet is that local. buildServer creates one, registers the routes from
-// it, and lets it fall out of scope. Server keeps a pointer only to the four
+// it, and lets it fall out of scope. Server keeps a pointer only to the three
 // handlers something OTHER than registration needs:
 //
 //	auth        — debug_expvar / debug_pprof / ccassets wrappers, RotateDashboardSessions
 //	sessionH    — retired-store flusher loop, WarmHistory + Flush on shutdown
-//	healthH     — /health, /livez, /readyz are server-owned routes (routes.go)
-//	              and the tests drive the handler directly; since #2633 it
-//	              takes dispatcherMetrics at construction, so nothing binds
-//	              into it after buildServer
 //	discoveryH  — Wait() drains takeover goroutines during shutdown
 //
-// Those four are lifecycle participants, not views, so they stay. Everything
-// else is unreachable after registration and has no business outliving it.
+// Those three are lifecycle participants, not views, so they stay. Everything
+// else is unreachable after registration and has no business outliving it; a
+// test that drives one of those handlers directly receives the set from
+// buildServerWithHandlers.
 //
 // Field names deliberately match the old Server field names: the routes
 // snapshot resolves a handler's type by the outermost selector's FIELD name
@@ -64,6 +62,8 @@ type handlerSet struct {
 	systemH         *system.Handlers
 	plannerH        *planner.Handlers
 	accessProfilesH *accessprofile.Handler
+	// healthH serves the server-owned probes (/health, /livez, /readyz).
+	healthH *HealthHandler
 
 	// The three lifecycle handlers are held here too, because registration
 	// needs them like any other. Server holds the same pointers for the
