@@ -55,11 +55,6 @@ var ErrPromptAlreadySet = errors.New("cron: job already has a prompt; use Update
 // would let a restart replay the mutation's inverse (e.g. resurrect a deleted job).
 var ErrPersistFailed = errors.New("cron: persist jobs failed")
 
-// errInvalidAttentionID is returned by the §7.4 queue helpers when a runID is
-// not scheduler-generated hex (the IDs flow into filesystem paths and the
-// broadcast, so they are shape-validated before use).
-var errInvalidAttentionID = errors.New("cron sandbox: invalid attention run id")
-
 // ErrJobNotSandbox is returned by ReplaySandboxRun when the target job is not
 // at placement=sandbox: a local job has no snapshot to replay and no microVM
 // to inject into (RFC §7.3). The dashboard maps it to 409 Conflict.

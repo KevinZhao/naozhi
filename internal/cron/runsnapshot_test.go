@@ -23,7 +23,7 @@ func TestSnapshot_WriteThenReadRoundTrip(t *testing.T) {
 
 	jobID, runID := "0123456789abcdef", "feedfacefeedface"
 	prompt := "do the cloud thing"
-	s.writeSandboxSnapshot(jobID, runID, prompt, "haiku", "phase2", nil, slog.Default())
+	s.sandboxState().WriteSnapshot(jobID, runID, prompt, "haiku", "phase2", nil, slog.Default())
 
 	man, ok, err := s.SandboxRunSnapshotManifest(jobID, runID)
 	if err != nil || !ok {
@@ -57,7 +57,7 @@ func TestSnapshot_NeverPersistsSecretValues(t *testing.T) {
 	const secretValue = "ghp_SUPERSECRETTOKENVALUE_must_never_persist"
 	// The writer takes secret REF NAMES only — never values. Pass the ref
 	// name; the value must not appear because we never hand it to the writer.
-	s.writeSandboxSnapshot("0123456789abcdef", "feedfacefeedface",
+	s.sandboxState().WriteSnapshot("0123456789abcdef", "feedfacefeedface",
 		"summarise the repo", "haiku", "phase2", []string{"github_token"}, slog.Default())
 
 	// Walk the whole snapshot tree and assert the secret value is absent.
@@ -91,8 +91,8 @@ func TestSnapshot_ContentAddressedDedup(t *testing.T) {
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
 	prompt := "same prompt across runs"
-	s.writeSandboxSnapshot("0123456789abcdef", "1111111111111111", prompt, "", "", nil, slog.Default())
-	s.writeSandboxSnapshot("0123456789abcdef", "2222222222222222", prompt, "", "", nil, slog.Default())
+	s.sandboxState().WriteSnapshot("0123456789abcdef", "1111111111111111", prompt, "", "", nil, slog.Default())
+	s.sandboxState().WriteSnapshot("0123456789abcdef", "2222222222222222", prompt, "", "", nil, slog.Default())
 
 	blobs, err := os.ReadDir(filepath.Join(snapDirOf(storePath), "blobs"))
 	if err != nil {
@@ -176,13 +176,13 @@ func TestSnapshot_DeletedJobDropsManifests(t *testing.T) {
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
 	jobID, runID := "0123456789abcdef", "feedfacefeedface"
-	s.writeSandboxSnapshot(jobID, runID, "p", "", "", nil, slog.Default())
+	s.sandboxState().WriteSnapshot(jobID, runID, "p", "", "", nil, slog.Default())
 
 	jobDir := filepath.Join(snapDirOf(storePath), jobID)
 	if _, err := os.Stat(jobDir); err != nil {
 		t.Fatalf("snapshot dir should exist before delete: %v", err)
 	}
-	s.deleteJobSnapshots(jobID)
+	s.sandboxState().DeleteJobSnapshots(jobID)
 	if _, err := os.Stat(jobDir); !os.IsNotExist(err) {
 		t.Fatal("snapshot manifest subtree must be removed on job delete")
 	}

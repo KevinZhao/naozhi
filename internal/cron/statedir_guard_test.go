@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 // #2166: every sandbox-state writer routes its MkdirAll through
@@ -74,10 +76,10 @@ func TestStateDirGuard_AttentionRefusesSymlink(t *testing.T) {
 	s, dir := guardScheduler(t)
 	target := plantSymlink(t, dir, "sandboxattention")
 
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID:       "0123456789abcdef",
 		RunID:       "feedfacefeedface",
-		Reason:      attentionReasonTransport,
+		Reason:      sandboxstore.ReasonTransport,
 		CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 
@@ -91,7 +93,7 @@ func TestStateDirGuard_SnapshotRefusesSymlink(t *testing.T) {
 	// (which happens first) and never reach the manifest write.
 	target := plantSymlink(t, dir, "runsnapshots")
 
-	s.writeSandboxSnapshot("0123456789abcdef", "feedfacefeedface", "the prompt", "", "", nil, slog.Default())
+	s.sandboxState().WriteSnapshot("0123456789abcdef", "feedfacefeedface", "the prompt", "", "", nil, slog.Default())
 
 	assertTargetEmpty(t, target, "runsnapshots")
 }
@@ -99,7 +101,7 @@ func TestStateDirGuard_SnapshotRefusesSymlink(t *testing.T) {
 func TestStateDirGuard_BlobRefusesSymlink(t *testing.T) {
 	s, dir := guardScheduler(t)
 	// Pre-create runsnapshots as a real dir, then symlink only its blobs/
-	// subdir. writeSnapshotBlob's mkdirStateSubtree(blobs) must refuse.
+	// subdir. The blob write's MkdirSubtree(blobs) must refuse.
 	root := filepath.Join(dir, "runsnapshots")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -109,7 +111,7 @@ func TestStateDirGuard_BlobRefusesSymlink(t *testing.T) {
 		t.Skipf("symlink unsupported on this platform: %v", err)
 	}
 
-	s.writeSandboxSnapshot("0123456789abcdef", "feedfacefeedface", "the prompt", "", "", nil, slog.Default())
+	s.sandboxState().WriteSnapshot("0123456789abcdef", "feedfacefeedface", "the prompt", "", "", nil, slog.Default())
 
 	assertTargetEmpty(t, target, "runsnapshots/blobs")
 	// The manifest must not have been written either (blob write failed first).
@@ -124,7 +126,7 @@ func TestStateDirGuard_EventSinkRefusesSymlink(t *testing.T) {
 	// parent so the per-job MkdirAll resolves through it.
 	target := plantSymlink(t, dir, "sandboxevents")
 
-	sink, closeSink := s.sandboxEventSink("0123456789abcdef", "feedfacefeedface", slog.Default())
+	sink, closeSink := s.sandboxState().EventSink("0123456789abcdef", "feedfacefeedface", slog.Default())
 	// Degraded no-op sink: write must not panic and must not land a file.
 	if err := sink([]byte(`{"k":"v"}`)); err != nil {
 		t.Fatalf("degraded sink returned error: %v", err)
@@ -155,10 +157,10 @@ func TestStateDirGuard_HappyPath(t *testing.T) {
 	assertMode0700(t, filepath.Join(dir, "sandboxpending"))
 
 	// Attention.
-	s.writeSandboxAttention(sandboxAttention{
+	s.sandboxState().WriteAttention(sandboxstore.Attention{
 		JobID:       "0123456789abcdef",
 		RunID:       "feedfacefeedface",
-		Reason:      attentionReasonTransport,
+		Reason:      sandboxstore.ReasonTransport,
 		CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 	if s.SandboxAttentionCount() != 1 {
@@ -167,7 +169,7 @@ func TestStateDirGuard_HappyPath(t *testing.T) {
 	assertMode0700(t, filepath.Join(dir, "sandboxattention"))
 
 	// Snapshot + blob.
-	s.writeSandboxSnapshot("0123456789abcdef", "feedfacefeedface", "the prompt", "", "", nil, slog.Default())
+	s.sandboxState().WriteSnapshot("0123456789abcdef", "feedfacefeedface", "the prompt", "", "", nil, slog.Default())
 	man, ok, err := s.SandboxRunSnapshotManifest("0123456789abcdef", "feedfacefeedface")
 	if err != nil || !ok || man == nil {
 		t.Fatalf("snapshot manifest not readable on a normal dir: ok=%v err=%v", ok, err)
@@ -176,7 +178,7 @@ func TestStateDirGuard_HappyPath(t *testing.T) {
 	assertMode0700(t, filepath.Join(dir, "runsnapshots", "blobs"))
 
 	// Event sink.
-	sink, closeSink := s.sandboxEventSink("0123456789abcdef", "abcabcabcabcabc1", slog.Default())
+	sink, closeSink := s.sandboxState().EventSink("0123456789abcdef", "abcabcabcabcabc1", slog.Default())
 	if err := sink([]byte(`{"k":"v"}`)); err != nil {
 		t.Fatalf("event sink write error on normal dir: %v", err)
 	}

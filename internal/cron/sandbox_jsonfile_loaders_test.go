@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 // Both loaders below read through osutil/jsonfile, which bounds the read and
@@ -21,7 +23,7 @@ import (
 func TestGetSandboxAttention_CorruptFailsClosedOnEveryRead(t *testing.T) {
 	t.Parallel()
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
-	dir := s.sandboxAttentionDir()
+	dir := s.stateSubtree("sandboxattention")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -32,9 +34,9 @@ func TestGetSandboxAttention_CorruptFailsClosedOnEveryRead(t *testing.T) {
 	}
 
 	for read := 1; read <= 2; read++ {
-		rec, ok, err := s.getSandboxAttention(runID)
-		if !errors.Is(err, errCorruptAttentionRecord) {
-			t.Fatalf("read %d = (%v, %v, %v), want errCorruptAttentionRecord", read, rec, ok, err)
+		rec, ok, err := s.sandboxState().GetAttention(runID)
+		if !errors.Is(err, sandboxstore.ErrCorruptAttention) {
+			t.Fatalf("read %d = (%v, %v, %v), want sandboxstore.ErrCorruptAttention", read, rec, ok, err)
 		}
 	}
 	if _, serr := os.Stat(path); serr != nil {
@@ -47,38 +49,9 @@ func TestGetSandboxAttention_CorruptFailsClosedOnEveryRead(t *testing.T) {
 func TestGetSandboxAttention_AbsentIsNotAnError(t *testing.T) {
 	t.Parallel()
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
-	rec, ok, err := s.getSandboxAttention(mustGenerateRunID())
+	rec, ok, err := s.sandboxState().GetAttention(mustGenerateRunID())
 	if err != nil || ok || rec != nil {
 		t.Errorf("absent record = (%v, %v, %v), want (nil, false, nil)", rec, ok, err)
-	}
-}
-
-// TestGetSandboxAttention_OversizeIsRefused: the record carries a handful of
-// ids and a label, so a multi-megabyte one is a tampered or runaway file and
-// must not be allocated.
-func TestGetSandboxAttention_OversizeIsRefused(t *testing.T) {
-	t.Parallel()
-	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
-	dir := s.sandboxAttentionDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	runID := mustGenerateRunID()
-	// Valid JSON, just far too big: padding rides in an unknown field, which
-	// encoding/json ignores. A payload that is merely malformed would be
-	// refused as corrupt even with no cap at all, so it could not tell whether
-	// the cap is doing anything.
-	pad := make([]byte, maxAttentionRecordBytes)
-	for i := range pad {
-		pad[i] = 'x'
-	}
-	body := `{"run_id":"` + runID + `","job_id":"0123456789abcdef","pad":"` + string(pad) + `"}`
-	if err := os.WriteFile(filepath.Join(dir, runID+".json"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, ok, err := s.getSandboxAttention(runID); err == nil || ok {
-		t.Error("an over-cap record must be refused rather than parsed")
 	}
 }
 
@@ -89,7 +62,7 @@ func TestSandboxRunSnapshotManifest_CorruptIsUnreadableNotMissing(t *testing.T) 
 	t.Parallel()
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
 	jobID, runID := mustGenerateID(), mustGenerateRunID()
-	dir := filepath.Join(s.sandboxSnapshotDir(), jobID)
+	dir := filepath.Join(s.stateSubtree("runsnapshots"), jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -112,8 +85,8 @@ func TestListSandboxAttention_ListsUnreadableRecords(t *testing.T) {
 	t.Parallel()
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
 	goodJob, goodRun := mustGenerateID(), mustGenerateRunID()
-	s.WriteSandboxAttentionForTest(goodJob, goodRun, attentionReasonTransport, "nightly")
-	dir := s.sandboxAttentionDir()
+	s.WriteSandboxAttentionForTest(goodJob, goodRun, sandboxstore.ReasonTransport, "nightly")
+	dir := s.stateSubtree("sandboxattention")
 	badRun := mustGenerateRunID()
 	if err := os.WriteFile(filepath.Join(dir, badRun+".json"), []byte("{not valid"), 0o600); err != nil {
 		t.Fatal(err)
@@ -134,7 +107,7 @@ func TestListSandboxAttention_ListsUnreadableRecords(t *testing.T) {
 		t.Errorf("readable record = %+v", got)
 	}
 	bad, ok := byRun[badRun]
-	if !ok || !bad.Unreadable || bad.Reason != attentionReasonUnreadable || bad.JobID != "" {
+	if !ok || !bad.Unreadable || bad.Reason != sandboxstore.ReasonUnreadable || bad.JobID != "" {
 		t.Fatalf("unreadable record = %+v (listed %v), want Unreadable under its file-name run id with no job", bad, ok)
 	}
 	if bad.CreatedAtMS <= 0 {
@@ -145,7 +118,7 @@ func TestListSandboxAttention_ListsUnreadableRecords(t *testing.T) {
 	if err := s.ConfirmSandboxRun(badRun); err != nil {
 		t.Fatalf("ConfirmSandboxRun: %v", err)
 	}
-	if _, ok, err := s.getSandboxAttention(badRun); ok || err != nil {
+	if _, ok, err := s.sandboxState().GetAttention(badRun); ok || err != nil {
 		t.Errorf("after confirm the record reads (%v, %v), want absent", ok, err)
 	}
 }

@@ -537,7 +537,7 @@ func (s *Scheduler) Start() error {
 	// Blob GC for the snapshot store (#2682): manifest retention strands
 	// blobs, and nothing else ever deletes them. Not gated on the run store —
 	// snapshots are written by sandbox runs regardless of run-history state.
-	s.goStartupPass("sandbox-blob-gc", s.gcSandboxBlobs)
+	s.goStartupPass("sandbox-blob-gc", s.sandboxState().GCBlobs)
 	// Epic H #2546: the async half of the in-flight reconcile claimed above —
 	// write the interrupted records and start each adoption's wait. Async +
 	// gcWG-tracked for the same reason as the pass above: it touches the run

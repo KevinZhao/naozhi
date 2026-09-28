@@ -1,6 +1,6 @@
-package cron
+package sandboxstore
 
-// runsnapshot_gc.go — mark-sweep for the content-addressed blob store
+// gc.go — mark-sweep for the content-addressed blob store
 // (#2682, agentcore §5.2's TODO).
 //
 // Blobs are deduped across jobs and runs, so retention can never age them
@@ -10,7 +10,7 @@ package cron
 // blob; the tree only grew. The pass below marks every hash a live manifest
 // references, then sweeps the rest.
 //
-// The hard part is the window writeSandboxSnapshot opens: it writes the blob
+// The hard part is the window WriteSnapshot opens: it writes the blob
 // FIRST, then the manifest (a truncated manifest must never dangle a hash to
 // a missing blob — the same reason readers get atomic writes). A mark taken
 // between those two steps misses the new blob and the sweep would delete it.
@@ -32,11 +32,11 @@ import (
 // paused VM) with six orders of magnitude to spare. Var for tests.
 var blobGCGrace = time.Hour
 
-// gcSandboxBlobs removes blobs no live manifest references. Startup pass,
-// scheduled next to the run-history GC: retention trims manifests, and a
-// trimmed manifest is exactly what strands a blob.
-func (s *Scheduler) gcSandboxBlobs() {
-	root := s.sandboxSnapshotDir()
+// GCBlobs removes blobs no live manifest references. cron runs it as a startup
+// pass next to the run-history GC: retention trims manifests, and a trimmed
+// manifest is exactly what strands a blob.
+func (st Store) GCBlobs() {
+	root := st.snapshotDir()
 	if root == "" {
 		return
 	}
@@ -67,7 +67,7 @@ func (s *Scheduler) gcSandboxBlobs() {
 			if mf.IsDir() {
 				continue
 			}
-			man, ok, err := readSandboxSnapshotManifest(filepath.Join(root, jd.Name(), mf.Name()))
+			man, ok, err := readManifest(filepath.Join(root, jd.Name(), mf.Name()))
 			if err != nil || !ok {
 				continue
 			}
@@ -87,7 +87,7 @@ func (s *Scheduler) gcSandboxBlobs() {
 			continue
 		}
 		// The age barrier: a blob younger than the grace may belong to a
-		// manifest that has not landed yet (writeSandboxSnapshot writes the
+		// manifest that has not landed yet (WriteSnapshot writes the
 		// blob first). Leftover .tmp-* files from crashed writers age past the
 		// same cutoff and get collected with everything else.
 		info, err := b.Info()

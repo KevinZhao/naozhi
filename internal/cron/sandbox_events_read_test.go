@@ -1,14 +1,13 @@
 package cron
 
 import (
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/agentcore"
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 func writeSandboxEventLog(t *testing.T, storePath, jobID, runID string, lines []string) {
@@ -69,7 +68,7 @@ func TestSandboxEventSink_CloserIdempotent(t *testing.T) {
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
 	jobID, runID := "0123456789abcdef", "feedfacefeedface"
-	sink, closeSink := s.sandboxEventSink(jobID, runID, slog.Default())
+	sink, closeSink := s.sandboxState().EventSink(jobID, runID, slog.Default())
 
 	if err := sink([]byte(`{"kind":"boot"}`)); err != nil {
 		t.Fatalf("sink write: %v", err)
@@ -183,52 +182,8 @@ func TestSandboxRunEvents_RejectsBadIDs(t *testing.T) {
 	}
 }
 
-// TestSandboxRunEvents_BusyWhenSemSaturated verifies the concurrency gate
-// [R20260613-SEC-5 / #2066]: when all sandboxEventsSemCap slots are held, a
-// further read fails fast with ErrSandboxEventsBusy instead of allocating
-// another scanner buffer.
-func TestSandboxRunEvents_BusyWhenSemSaturated(t *testing.T) {
-	dir := t.TempDir()
-	storePath := filepath.Join(dir, "cron_jobs.json")
-	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
-	writeSandboxEventLog(t, storePath, "0123456789abcdef", "feedfacefeedface",
-		[]string{`{"kind":"boot"}`})
-
-	// Saturate the package-level semaphore, then restore it on cleanup so the
-	// gate does not leak into sibling tests sharing the process-wide channel.
-	for i := 0; i < sandboxEventsSemCap; i++ {
-		sandboxEventsSem <- struct{}{}
-	}
-	t.Cleanup(func() {
-		for i := 0; i < sandboxEventsSemCap; i++ {
-			<-sandboxEventsSem
-		}
-	})
-
-	if _, _, err := s.SandboxRunEvents("0123456789abcdef", "feedfacefeedface", 10); !errors.Is(err, ErrSandboxEventsBusy) {
-		t.Fatalf("saturated sem: err = %v, want ErrSandboxEventsBusy", err)
-	}
-}
-
-// TestSandboxRunEvents_ReleasesSemOnReturn verifies the semaphore slot is
-// freed once a read completes, so back-to-back reads (the common case) all
-// succeed rather than the gate latching after the first.
-func TestSandboxRunEvents_ReleasesSemOnReturn(t *testing.T) {
-	dir := t.TempDir()
-	storePath := filepath.Join(dir, "cron_jobs.json")
-	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
-	writeSandboxEventLog(t, storePath, "0123456789abcdef", "feedfacefeedface",
-		[]string{`{"kind":"boot"}`})
-
-	for i := 0; i < sandboxEventsSemCap+2; i++ {
-		if _, _, err := s.SandboxRunEvents("0123456789abcdef", "feedfacefeedface", 10); err != nil {
-			t.Fatalf("read %d: unexpected err %v (slot not released?)", i, err)
-		}
-	}
-}
-
 // TestSandboxEventSink_OversizeLineDropped verifies R20260613-ARCH-2: when
-// the sink receives a line >= sandboxEventsMaxLineSize it is silently
+// the sink receives a line >= sandboxstore.EventsMaxLineSize it is silently
 // discarded (not written to the NDJSON log) and subsequent normal-size
 // lines are still written and readable by SandboxRunEvents. Without this
 // guard an oversized line written to disk causes bufio.Scanner to return
@@ -242,10 +197,10 @@ func TestSandboxEventSink_OversizeLineDropped(t *testing.T) {
 	jobID := "0123456789abcdef"
 	runID := "feedfacefeedface"
 
-	sink, closer := s.sandboxEventSink(jobID, runID, slog.Default())
+	sink, closer := s.sandboxState().EventSink(jobID, runID, slog.Default())
 
-	// Send an oversized line (>= sandboxEventsMaxLineSize bytes).
-	oversized := make([]byte, sandboxEventsMaxLineSize)
+	// Send an oversized line (>= sandboxstore.EventsMaxLineSize bytes).
+	oversized := make([]byte, sandboxstore.EventsMaxLineSize)
 	for i := range oversized {
 		oversized[i] = 'x'
 	}
@@ -272,17 +227,17 @@ func TestSandboxEventSink_OversizeLineDropped(t *testing.T) {
 }
 
 // TestSandboxRunEvents_LineSizeCap verifies a line exceeding
-// sandboxEventsMaxLineSize is handled as a scan error rather than silently
+// sandboxstore.EventsMaxLineSize is handled as a scan error rather than silently
 // growing the scanner buffer without bound. The cap is the shared
 // agentcore.MaxEnvelopeLineBytes ceiling [#2083; concurrency bounded by
-// sandboxEventsSemCap, R20260613-SEC-5 / #2066].
+// the process-wide read gate, R20260613-SEC-5 / #2066].
 func TestSandboxRunEvents_LineSizeCap(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
 	// One valid small line followed by a line that exceeds the shared cap.
-	big := `{"kind":"huge","data":"` + strings.Repeat("x", sandboxEventsMaxLineSize+1) + `"}`
+	big := `{"kind":"huge","data":"` + strings.Repeat("x", sandboxstore.EventsMaxLineSize+1) + `"}`
 	writeSandboxEventLog(t, storePath, "0123456789abcdef", "feedfacefeedface",
 		[]string{`{"kind":"boot"}`, big})
 
@@ -317,12 +272,12 @@ func TestSandboxEvents_LargeLineWriteReadRoundTrip(t *testing.T) {
 	const payloadLen = 4 << 20
 	big := []byte(`{"kind":"cli","line":{"type":"tool_result","data":"` +
 		strings.Repeat("x", payloadLen) + `"}}`)
-	if len(big) >= sandboxEventsMaxLineSize {
+	if len(big) >= sandboxstore.EventsMaxLineSize {
 		t.Fatalf("test payload %d must stay below the shared cap %d",
-			len(big), sandboxEventsMaxLineSize)
+			len(big), sandboxstore.EventsMaxLineSize)
 	}
 
-	sink, closer := s.sandboxEventSink(jobID, runID, slog.Default())
+	sink, closer := s.sandboxState().EventSink(jobID, runID, slog.Default())
 	if err := sink(big); err != nil {
 		t.Fatalf("sink rejected an in-band large line: %v", err)
 	}
@@ -347,16 +302,5 @@ func TestSandboxEvents_LargeLineWriteReadRoundTrip(t *testing.T) {
 	}
 	if string(got[1]) != string(follow) {
 		t.Fatalf("follower line lost after large line: got %q", got[1])
-	}
-}
-
-// TestSandboxEventsCap_SharesAgentcoreCeiling pins the single-source-of-truth
-// invariant (#2083): the cron reader's line cap must equal the agentcore SSE
-// decoder's accept ceiling. If a future edit forks one end, this fails before
-// the silent-drop bug can recur.
-func TestSandboxEventsCap_SharesAgentcoreCeiling(t *testing.T) {
-	if sandboxEventsMaxLineSize != agentcore.MaxEnvelopeLineBytes {
-		t.Fatalf("reader cap %d != agentcore wire ceiling %d — the two ends have drifted (#2083)",
-			sandboxEventsMaxLineSize, agentcore.MaxEnvelopeLineBytes)
 	}
 }
