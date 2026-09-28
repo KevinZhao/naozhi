@@ -57,9 +57,9 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 	})
 
 	r = &Router{
-		ss:              newSessionTable(),
-		claudeDir:       "/claude/dir",
-		kiroSessionsDir: "/kiro/dir",
+		ss:          newSessionTable(),
+		claudeDir:   "/claude/dir",
+		backendDirs: map[string]string{"kiro": "/kiro/dir"},
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude-routed": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude-routed"),
@@ -235,20 +235,20 @@ func TestAttachHistorySource_NilSession(t *testing.T) {
 	r.attachHistorySource(nil)
 }
 
-// TestRouter_KiroSessionsDirRoundTrip verifies the new RouterConfig
+// TestRouter_KiroBackendDirRoundTrip verifies the new RouterConfig
 // field reaches the per-call HistoryWiring. Without this the
 // Sprint 1c kirojsonl factory would receive an empty dir even after
 // cmd-level wiring lands.
-func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
+func TestRouter_KiroBackendDirRoundTrip(t *testing.T) {
 	t.Parallel()
 	saw := ""
 	history.RegisterFactory("kiro-rt-probe", func(s history.SessionView, deps history.Wiring) history.Source {
-		saw = deps.KiroSessionsDir
+		saw = deps.BackendDir("kiro")
 		return history.Noop{}
 	})
 	r := &Router{
-		ss:              newSessionTable(),
-		kiroSessionsDir: "/the/kiro/dir",
+		ss:          newSessionTable(),
+		backendDirs: map[string]string{"kiro": "/the/kiro/dir"},
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"kiro-rt-probe": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-rt-probe"),
@@ -263,7 +263,7 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 	r.attachHistorySource(s)
 
 	if saw != "/the/kiro/dir" {
-		t.Errorf("HistoryWiring.KiroSessionsDir = %q; want /the/kiro/dir", saw)
+		t.Errorf("HistoryWiring.BackendDir(kiro) = %q; want /the/kiro/dir", saw)
 	}
 }
 
@@ -278,9 +278,9 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		ss:              newSessionTable(),
-		claudeDir:       "/claude/dir",
-		kiroSessionsDir: "/kiro/sessions/cli",
+		ss:          newSessionTable(),
+		claudeDir:   "/claude/dir",
+		backendDirs: map[string]string{"kiro": "/kiro/sessions/cli"},
 	}
 	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),

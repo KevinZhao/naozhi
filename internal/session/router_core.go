@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -184,13 +185,10 @@ type Router struct {
 	// to CLI processes when a session has no per-chat override (#732).
 	defaultCWD string // default cwd for CLI processes
 	claudeDir  string // ~/.claude dir for loading session history
-	// kiroSessionsDir is the kiro session-state root, plumbed into
-	// history.Wiring at attachHistorySource time for the kirojsonl factory.
-	kiroSessionsDir string
-
-	// codexSessionsDir is the codex session-state root (~/.codex/sessions),
-	// plumbed into history.Wiring for the codexjsonl factory.
-	codexSessionsDir string
+	// backendDirs maps a backend ID to its transcript directory, plumbed into
+	// history.Wiring at attachHistorySource time and read by resume
+	// validation. A private copy of RouterConfig.BackendDirs.
+	backendDirs map[string]string
 
 	// removes tracks RemoveAsync teardown goroutines, so tests can join them.
 	// Production never waits on it: Shutdown must not block on a teardown.
@@ -523,12 +521,11 @@ type RouterConfig struct {
 	// `mcpServers` object) — cc refuses to start otherwise, turning a typo into
 	// a total spawn outage; cmd/naozhi's resolveMCPConfigFile passes "" on failure.
 	MCPConfigFile string
-	// KiroSessionsDir is the kiro CLI's session-state root (~/.kiro/sessions/cli).
-	// Empty disables kiro history fallback.
-	KiroSessionsDir string
-	// CodexSessionsDir is the codex CLI's session-state root (~/.codex/sessions).
-	// Empty disables codex history fallback.
-	CodexSessionsDir string
+	// BackendDirs maps a backend ID to the directory that backend keeps its
+	// session transcripts in (backend.Profile.HistoryDir, expanded). A missing
+	// entry disables that backend's history fallback and resume check.
+	// Claude reads ClaudeDir instead.
+	BackendDirs map[string]string
 	// EventLogDir is where per-session event log files live. Empty DISABLES
 	// event log persistence (Claude CLI JSONL becomes the sole history source);
 	// non-empty spins up a persist.Persister, wires every session's ring.EventLog
@@ -622,19 +619,18 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 
 	r := &Router{
-		maxProcs:         cfg.MaxProcs,
-		ttl:              cfg.TTL,
-		pruneTTL:         cfg.PruneTTL,
-		defaultCWD:       cfg.Workspace,
-		claudeDir:        cfg.ClaudeDir,
-		kiroSessionsDir:  cfg.KiroSessionsDir,
-		codexSessionsDir: cfg.CodexSessionsDir,
-		storePath:        cfg.StorePath,
-		noOutputTimeout:  cfg.NoOutputTimeout,
-		totalTimeout:     cfg.TotalTimeout,
-		eventLogDir:      cfg.EventLogDir,
-		historyLoader:    cfg.HistoryLoader,
-		resolver:         cfg.Resolver,
+		maxProcs:        cfg.MaxProcs,
+		ttl:             cfg.TTL,
+		pruneTTL:        cfg.PruneTTL,
+		defaultCWD:      cfg.Workspace,
+		claudeDir:       cfg.ClaudeDir,
+		backendDirs:     maps.Clone(cfg.BackendDirs),
+		storePath:       cfg.StorePath,
+		noOutputTimeout: cfg.NoOutputTimeout,
+		totalTimeout:    cfg.TotalTimeout,
+		eventLogDir:     cfg.EventLogDir,
+		historyLoader:   cfg.HistoryLoader,
+		resolver:        cfg.Resolver,
 	}
 	// bkStore has no lock of its own and is not composite-literal
 	// initialised, so it is filled in here. wsStore, kid and pp are

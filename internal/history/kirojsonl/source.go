@@ -88,13 +88,14 @@ func init() {
 	history.RegisterFactory("kiro", factory)
 }
 
-// factory returns history.Noop when the wiring lacks a
-// KiroSessionsDir so a router-level misconfig still yields a non-nil source.
+// factory returns history.Noop when the wiring has no kiro transcript
+// directory, so a router-level misconfig still yields a non-nil source.
 func factory(s history.SessionView, deps history.Wiring) history.Source {
-	if deps.KiroSessionsDir == "" {
+	dir := deps.BackendDir("kiro")
+	if dir == "" {
 		return history.Noop{}
 	}
-	return New(deps.KiroSessionsDir, s.SessionID)
+	return New(dir, s.SessionID)
 }
 
 // kiroRecord is the on-disk wrapper; data stays raw for kind-specific decode.

@@ -72,10 +72,9 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 	}
 
 	deps := history.Wiring{
-		ClaudeDir:        r.claudeDir,
-		KiroSessionsDir:  r.kiroSessionsDir,
-		CodexSessionsDir: r.codexSessionsDir,
-		EventLogDir:      r.eventLogDir,
+		ClaudeDir:   r.claudeDir,
+		BackendDirs: r.backendDirs,
+		EventLogDir: r.eventLogDir,
 	}
 
 	// Wrapper.NewHistorySource never returns nil; the guard pins that
@@ -488,7 +487,7 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	// ResumeID guard: drop when the backend's on-disk resume target is missing
 	// so the spawn falls through to a fresh session instead of failing on
 	// "No conversation found". The probe is backend-aware (see resolveResumeID).
-	resumeID = resolveResumeID(backendID, r.claudeDir, r.kiroSessionsDir, workspace, key, resumeID)
+	resumeID = resolveResumeID(backendID, r.claudeDir, r.backendDirs, workspace, key, resumeID)
 
 	// Canonicalize on-disk case for fresh spawns: on case-insensitive APFS a
 	// differently-cased spelling forks two project identities for one tree.

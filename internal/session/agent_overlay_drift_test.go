@@ -50,7 +50,7 @@ func mkOverlayRouter(t *testing.T) *Router {
 	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 	r.bkStore.model = "opusplan"
 	r.claudeDir = t.TempDir()
-	r.kiroSessionsDir = t.TempDir()
+	r.backendDirs = map[string]string{"kiro": t.TempDir()}
 	return r
 }
 

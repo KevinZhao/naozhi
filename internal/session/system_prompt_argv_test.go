@@ -43,7 +43,7 @@ func mkSystemPromptRouter(t *testing.T) *Router {
 	r.bkStore.defaultBackend = "claude"
 	stateOf(r).picks.backend = make(map[string]string)
 	r.claudeDir = t.TempDir()
-	r.kiroSessionsDir = t.TempDir()
+	r.backendDirs = map[string]string{"kiro": t.TempDir()}
 	return r
 }
 

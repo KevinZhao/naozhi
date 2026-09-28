@@ -28,7 +28,7 @@ func mkTuningRouter(t *testing.T) *Router {
 	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 	r.bkStore.model = "claude-fable-5"
 	r.claudeDir = t.TempDir()
-	r.kiroSessionsDir = t.TempDir()
+	r.backendDirs = map[string]string{"kiro": t.TempDir()}
 	return r
 }
 

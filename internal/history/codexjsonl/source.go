@@ -76,13 +76,14 @@ func init() {
 	history.RegisterFactory("codex", factory)
 }
 
-// factory returns history.Noop when the wiring lacks a
-// CodexSessionsDir so a router-level misconfig still yields a non-nil source.
+// factory returns history.Noop when the wiring has no codex transcript
+// directory, so a router-level misconfig still yields a non-nil source.
 func factory(s history.SessionView, deps history.Wiring) history.Source {
-	if deps.CodexSessionsDir == "" {
+	dir := deps.BackendDir("codex")
+	if dir == "" {
 		return history.Noop{}
 	}
-	return New(deps.CodexSessionsDir, s.SessionID)
+	return New(dir, s.SessionID)
 }
 
 // codexRecord is the on-disk line wrapper. Payload is held as RawMessage so

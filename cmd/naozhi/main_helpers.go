@@ -440,6 +440,19 @@ func backendHistoryDir(id string) string {
 	return osutil.ExpandHome(p.HistoryDir)
 }
 
+// backendHistoryDirs is backendHistoryDir for every registered backend that
+// declares a HistoryDir, keyed by backend ID: a new backend's transcripts are
+// wired by registering its profile, not by another line here.
+func backendHistoryDirs() map[string]string {
+	out := map[string]string{}
+	for _, p := range backend.All() {
+		if dir := backendHistoryDir(p.ID); dir != "" {
+			out[p.ID] = dir
+		}
+	}
+	return out
+}
+
 // sysessionJSONLMaxAge is the retention window for dataDir/sys-sessions/*.jsonl.
 // Default 7 days when unset; "0" disables the sweep (datadir.Pass treats a
 // non-positive MaxAge as "do nothing").

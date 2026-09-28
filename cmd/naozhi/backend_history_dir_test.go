@@ -86,12 +86,8 @@ func TestClaudeHistoryDir_AgreesWithTheProfile(t *testing.T) {
 // anywhere.
 func TestEveryBackendProfileDeclaresAHistoryDir(t *testing.T) {
 	backend.EnsureDefaults()
-	for _, id := range []string{"claude", "kiro", "codex"} {
-		p, ok := backend.Get(id)
-		if !ok {
-			t.Errorf("backend %q is not registered", id)
-			continue
-		}
+	for _, p := range backend.All() {
+		id := p.ID
 		if p.HistoryDir == "" {
 			t.Errorf("backend %q declares no HistoryDir. Add one: it is both what doctor "+
 				"reports and, for everything but claude, what the history factory reads.", id)
@@ -110,5 +106,22 @@ func TestBackendHistoryDir_UnknownBackendIsEmpty(t *testing.T) {
 	backend.EnsureDefaults()
 	if got := backendHistoryDir("no-such-backend"); got != "" {
 		t.Errorf("backendHistoryDir(unknown) = %q, want empty", got)
+	}
+}
+
+// TestBackendHistoryDirs_OneEntryPerRegisteredBackend: the router's transcript
+// directories come from the profile registry, so every registered backend is
+// wired without a per-backend line in main.go.
+func TestBackendHistoryDirs_OneEntryPerRegisteredBackend(t *testing.T) {
+	backend.EnsureDefaults()
+	got := backendHistoryDirs()
+	all := backend.All()
+	if len(got) != len(all) {
+		t.Errorf("backendHistoryDirs() has %d entries, want one per registered backend (%d): %v", len(got), len(all), got)
+	}
+	for _, p := range all {
+		if want := osutil.ExpandHome(p.HistoryDir); got[p.ID] != want {
+			t.Errorf("backendHistoryDirs()[%q] = %q, want %q", p.ID, got[p.ID], want)
+		}
 	}
 }
