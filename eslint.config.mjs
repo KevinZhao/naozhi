@@ -62,6 +62,7 @@ const browserGlobals = ro([
   'TouchEvent',
   'ClipboardItem',
   'DOMParser',
+  'CSSStyleSheet',
   'FormData',
   'Blob',
   'File',
