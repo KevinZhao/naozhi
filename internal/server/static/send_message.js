@@ -10,7 +10,7 @@
 // injected once via configureSendMessage(), called from dashboard's module body.
 import { composer, perSession, selection, sessionList, timers } from './state.js';
 import { turnState } from './running_banner.js';
-import { showToast } from './nz_util.js';
+import { showToast, patchCardExitChip } from './nz_util.js';
 
 const deps = {
   EVENT_DIVIDER_GAP_MS: null,
@@ -524,6 +524,8 @@ function patchSidebarCardState(key, node, state) {
     const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
     if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
   }
+  const sd = sessionList.sessionsData[deps.sid(key, msgNode)];
+  patchCardExitChip(card, state, sd ? sd.death_reason : '');
 }
 
 function markSessionOptimisticRunning(key, node) {

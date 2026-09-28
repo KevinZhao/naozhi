@@ -9,7 +9,7 @@
 // module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureUtilities(), called from dashboard's module body.
 import { selection, serverInfo, sessionList, ui } from './state.js';
-import { esc, escAttr, showToast, trapFocus } from './nz_util.js';
+import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_util.js';
 
 const deps = {
   getToken: null,
@@ -233,6 +233,7 @@ function renderRecentSessionsPanel() {
       'data-action="session-select">' +
       '<span class="recent-dot ' + dotCls + '" aria-hidden="true"></span>' +
       '<span class="recent-label" title="' + escAttr(label) + '">' + esc(label) + '</span>' +
+      sessionExitChipHtml(s.state, s.death_reason) +
       (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
       '</button>';
   }).join('');

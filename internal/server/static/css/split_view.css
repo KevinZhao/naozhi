@@ -529,6 +529,15 @@
    visibly jump position a beat after the session opens. */
 .main-header .detail-git{display:inline-flex;align-items:center;min-width:0;flex-shrink:1;margin-right:auto;overflow:hidden}
 .main-header .detail-git:empty{display:none}
+/* Exit chip: why a dead session has no process (nz_util sessionExitChipHtml).
+   A warning for an abnormal exit, muted for a reclaim; either way the next
+   send resumes. */
+.sc-exit{display:inline-flex;align-items:center;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;flex-shrink:0;white-space:nowrap;line-height:1.3}
+.sc-exit-crashed{color:var(--nz-warn);background:color-mix(in srgb, var(--nz-warn) 14%, transparent);border:1px solid color-mix(in srgb, var(--nz-warn) 35%, transparent)}
+.sc-exit-reclaimed{color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border)}
+.main-header .detail-exit{display:inline-flex;align-items:center;flex-shrink:0}
+.main-header .detail-exit:empty{display:none}
+.recent-row .sc-exit{margin-left:6px}
 /* The chip must be able to shrink with its slot: as a flex item it otherwise
    keeps its content width, the slot clips it mid-border and .git-chip-text
    never reaches its ellipsis. */

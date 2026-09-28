@@ -175,7 +175,7 @@ func TestDashboardJS_FallbackReconcileComparesLastAppliedState(t *testing.T) {
 	js := readDashboardJS(t)
 
 	fetch := jsBlockBody(t, js, "async function fetchSessions() {")
-	const apply = "updateMainState(sd.state, sd.death_reason);"
+	const apply = "updateMainState(sd.state);"
 	ai := strings.Index(fetch, apply)
 	if ai < 0 {
 		t.Fatalf("expected %q in fetchSessions reconcile", apply)
