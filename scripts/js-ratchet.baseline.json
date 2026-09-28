@@ -66,7 +66,7 @@
     "topLevelLetVar": 11
   },
   "dashboard.js": {
-    "lines": 6619,
+    "lines": 6629,
     "maxFunctionLines": 249,
     "functionsOver100": 4,
     "topLevelLetVar": 0
@@ -102,7 +102,7 @@
     "topLevelLetVar": 5
   },
   "nz_util.js": {
-    "lines": 325,
+    "lines": 379,
     "maxFunctionLines": 7,
     "functionsOver100": 0,
     "topLevelLetVar": 0
@@ -126,7 +126,7 @@
     "topLevelLetVar": 5
   },
   "send_message.js": {
-    "lines": 596,
+    "lines": 598,
     "maxFunctionLines": 223,
     "functionsOver100": 2,
     "topLevelLetVar": 1
@@ -168,7 +168,7 @@
     "topLevelLetVar": 1
   },
   "utilities.js": {
-    "lines": 1091,
+    "lines": 1092,
     "maxFunctionLines": 91,
     "functionsOver100": 0,
     "topLevelLetVar": 4

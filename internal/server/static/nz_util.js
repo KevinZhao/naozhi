@@ -211,6 +211,60 @@ export function runStateLabel(state) {
   }
 }
 
+// DEATH_REASONS translates the backend's death_reason (cli/process.go
+// DeathReason*, the router's idle_timeout / evicted) into what an operator
+// reads. crashed separates a process that ended on its own from one the
+// router reclaimed on purpose; either way the next send resumes the session.
+const DEATH_REASONS = {
+  idle_timeout: { crashed: false, text: '空闲超时，进程已回收' },
+  evicted: { crashed: false, text: '为腾出容量，进程已回收' },
+  cli_exited: { crashed: true, text: 'CLI 进程退出' },
+  shim_eof: { crashed: true, text: '与 CLI 的连接断开' },
+  shim_read_error: { crashed: true, text: '读取 CLI 输出出错' },
+  shim_oversize_then_eof: { crashed: true, text: 'CLI 输出超长后连接断开' },
+  shim_oversize_then_read_error: { crashed: true, text: 'CLI 输出超长后读取出错' },
+  readloop_panic: { crashed: true, text: '读取循环崩溃' },
+  killed: { crashed: true, text: '进程被终止' },
+  no_output_timeout: { crashed: true, text: '长时间无输出，进程已终止' },
+  total_timeout: { crashed: true, text: '超过单轮时长上限，进程已终止' },
+};
+
+// sessionExit describes why a session has no process, or null when it is not
+// dead. Only state==='dead' counts: a timeout can leave death_reason on a
+// session whose process is still alive. An unrecognised or missing reason is
+// shown as an abnormal exit, carrying the raw value.
+export function sessionExit(state, reason) {
+  if (state !== 'dead') return null;
+  const known = Object.prototype.hasOwnProperty.call(DEATH_REASONS, reason) ? DEATH_REASONS[reason] : null;
+  const info = known || { crashed: true, text: reason ? '进程已退出（' + reason + '）' : '进程已退出' };
+  return { crashed: info.crashed, text: info.text, title: info.text + '，下次发送时自动恢复' };
+}
+
+// sessionExitChipHtml is the chip sidebar cards and the session header show
+// for a dead session: a warning for an abnormal exit, a muted note for a
+// reclaim. '' when the session is not dead.
+export function sessionExitChipHtml(state, reason) {
+  const x = sessionExit(state, reason);
+  if (!x) return '';
+  const cls = x.crashed ? 'sc-exit sc-exit-crashed' : 'sc-exit sc-exit-reclaimed';
+  const label = x.crashed ? '⚠ 异常退出' : '已回收';
+  return '<span class="' + cls + '" title="' + escAttr(x.title) + '">' + label + '</span>';
+}
+
+// patchCardExitChip brings a rendered session card's exit chip in line with
+// state / reason, for the paths that patch a card in place between renders;
+// it produces the markup sessionCardHtml renders, right after the state text.
+export function patchCardExitChip(card, state, reason) {
+  const meta = card && card.querySelector('.sc-meta');
+  if (!meta) return;
+  const old = meta.querySelector('.sc-exit');
+  if (old) old.remove();
+  const html = sessionExitChipHtml(state, reason);
+  if (!html) return;
+  const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
+  if (stateSpan) stateSpan.insertAdjacentHTML('afterend', html);
+}
+
 // data-nz-bg: the only styling JS computes per element is a node /
 // access-profile colour, which no class can express. The renderers put the value
 // in a data attribute and this observer applies it via CSSOM — a property

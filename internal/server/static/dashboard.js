@@ -1,5 +1,5 @@
 import { composer, hooks, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
-import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, nzTest, reconcileChildren, registerActions } from './nz_util.js';
+import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, nzTest, reconcileChildren, registerActions, sessionExitChipHtml, patchCardExitChip } from './nz_util.js';
 import {
   BLOCK_SPLIT_RE,
   LIST_ITEM_RE,
@@ -792,7 +792,7 @@ async function fetchSessions() {
         // re-apply when REST differs from what the main area last applied.
         const applied = selection.lastAppliedMainState;
         if (!(applied && applied.key === sKey && applied.state === sd.state)) {
-          updateMainState(sd.state, sd.death_reason);
+          updateMainState(sd.state);
         }
       } else if (sd && wsConnected && sd.state === 'running') {
         // Self-heal a DROPPED 'running' session_state push. renderSidebar above
@@ -807,7 +807,7 @@ async function fetchSessions() {
         // untouched, so this can't flicker a banner that's correctly showing.
         const banner = document.getElementById('running-banner');
         if (banner && banner.classList.contains('nz-hidden')) {
-          updateMainState('running', sd.death_reason);
+          updateMainState('running');
         }
       }
     }
@@ -1573,7 +1573,7 @@ function sessionCardHtml(s) {
   // only carries one low-entropy bit (which backend). Title owns line 1.
   const metaHtml = icon +
     '<span class="sc-dot ' + dotCls + '"></span>' +
-    '<span>' + esc(displayState) + '</span>' +
+    '<span>' + esc(displayState) + '</span>' + sessionExitChipHtml(s.state, s.death_reason) +
     nodeBadge +
     originBadge +
     accessProfileChip +
@@ -2366,6 +2366,7 @@ function mainHeaderHtml(s) {
         '<span class="detail-left">' + cliLabel + modelLabel + '</span>' +
         headerBackendChip +
         headerOriginBadge +
+        '<span class="detail-exit" id="header-exit">' + sessionExitChipHtml(s.state, s.death_reason) + '</span>' +
         // Git branch / worktree chip. Built empty here and filled
         // asynchronously by renderGitChip once /api/sessions/git resolves;
         // stays empty (collapses via :empty) for non-repo workspaces and
@@ -3947,7 +3948,7 @@ const wsm = {
           const subSKey = sid(msg.key, this.subscribedNode);
           if (sessionList.sessionsData[subSKey]) {
             sessionList.sessionsData[subSKey].state = msg.state;
-            updateMainState(msg.state, msg.reason);
+            updateMainState(msg.state);
           }
         }
         break;
@@ -4783,12 +4784,13 @@ const wsm = {
         const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
         if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
       }
+      patchCardExitChip(card, msg.state, msg.reason);
       // Sync the unread chip in place. fetchSessions re-renders from template
       // and reads sessionUnread directly; this path keeps the bubble fresh
       // between polls (WS state arrives faster than the sessions poll tick).
       updateCardUnreadChip(card, perSession.unread[sKey] || 0);
     }
-    if (msg.key === selection.key && msgNode === selection.node) updateMainState(msg.state, msg.reason);
+    if (msg.key === selection.key && msgNode === selection.node) updateMainState(msg.state);
     // Re-subscribe when session transitions to "running" and we need a live event stream.
     // Covers: (1) not subscribed yet (new session, subscribedKey mismatch)
     //         (2) subscribed but process was dead → revived
@@ -4958,10 +4960,18 @@ const wsm = {
 
 /* ===== WS Helper Functions ===== */
 
-function updateMainState(state, reason) {
+function updateMainState(state) {
   const ia = document.getElementById('input-area');
   if (ia) ia.classList.toggle('disabled', false);
   updateSendButton(state);
+  // The header's exit chip reads the session's own death_reason: the reason a
+  // caller has in hand may be a subscription status ('suspended'), not a death.
+  const exitEl = document.getElementById('header-exit');
+  if (exitEl) {
+    const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
+    const html = sessionExitChipHtml(state, sd ? sd.death_reason : '');
+    if (exitEl.innerHTML !== html) exitEl.innerHTML = html;
+  }
 }
 
 function updateHeaderCLI() {
