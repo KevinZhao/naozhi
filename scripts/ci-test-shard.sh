@@ -9,7 +9,7 @@
 # with the quarantine list (.github/quarantine.txt, #2537) skipped as before.
 set -euo pipefail
 
-heavy='^github.com/naozhi/naozhi/internal/(cli|cron|server|upstream|history|dashboard)(/|$)'
+heavy='^github.com/naozhi/naozhi/internal/(cli|cron|server|upstream|history|dashboard|session)(/|$)'
 
 case "${1:-}" in
   a) pkgs=$(go list ./... | grep -E "$heavy") ;;
