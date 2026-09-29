@@ -30,28 +30,28 @@ func TestMutate_Delete(t *testing.T) {
 	if r.lookupErr != nil || r.opErr != nil || r.persistErr != nil {
 		t.Fatalf("delete: %+v", r)
 	}
-	if r.removeEntry != 7 || r.plan != nil || r.job.ID != active.ID || r.seq != 1 {
-		t.Errorf("delete result: removeEntry=%d plan=%v job=%q seq=%d", r.removeEntry, r.plan, r.job.ID, r.seq)
+	if r.removeEntry != 7 || r.plan != nil || r.job.ID != active.ID || r.snap.seq != 1 {
+		t.Errorf("delete result: removeEntry=%d plan=%v job=%q seq=%d", r.removeEntry, r.plan, r.job.ID, r.snap.seq)
 	}
 	if _, ok := tbl.jobs[active.ID]; ok || slices.Contains(tbl.sortedJobIDs, active.ID) || tbl.chatJobCount[chatKeyFor("p", "c")] != 1 {
 		t.Error("deleted job still indexed")
 	}
-	if strings.Contains(string(r.data), active.ID) || !strings.Contains(string(r.data), "bbbb2222") {
-		t.Errorf("snapshot = %s, want only the remaining job", r.data)
+	if strings.Contains(string(r.snap.data), active.ID) || !strings.Contains(string(r.snap.data), "bbbb2222") {
+		t.Errorf("snapshot = %s, want only the remaining job", r.snap.data)
 	}
 }
 
 func TestMutate_Pause(t *testing.T) {
 	tbl, active, _ := mutateTable(t)
 	r := tbl.mutateByID(active.ID, mutPause)
-	if r.opErr != nil || r.persistErr != nil || r.removeEntry != 7 || r.plan != nil || r.seq != 1 {
+	if r.opErr != nil || r.persistErr != nil || r.removeEntry != 7 || r.plan != nil || r.snap.seq != 1 {
 		t.Fatalf("pause: %+v", r)
 	}
 	if !active.Paused || active.entryID != 0 || !r.job.Paused {
 		t.Errorf("after pause: live Paused=%v entryID=%d, result Paused=%v", active.Paused, active.entryID, r.job.Paused)
 	}
-	if !strings.Contains(string(r.data), `"paused":true`) {
-		t.Errorf("snapshot missed the pause: %s", r.data)
+	if !strings.Contains(string(r.snap.data), `"paused":true`) {
+		t.Errorf("snapshot missed the pause: %s", r.snap.data)
 	}
 	if _, ok := tbl.jobs[active.ID]; !ok {
 		t.Error("pause dropped the job")
@@ -61,7 +61,7 @@ func TestMutate_Pause(t *testing.T) {
 func TestMutate_Resume(t *testing.T) {
 	tbl, _, paused := mutateTable(t)
 	r := tbl.mutateByID(paused.ID, mutResume)
-	if r.opErr != nil || r.persistErr != nil || r.removeEntry != 0 || r.seq != 1 {
+	if r.opErr != nil || r.persistErr != nil || r.removeEntry != 0 || r.snap.seq != 1 {
 		t.Fatalf("resume: %+v", r)
 	}
 	if r.plan == nil || r.plan.jobID != paused.ID || r.plan.sched == nil {
@@ -95,7 +95,7 @@ func TestMutate_NoOps(t *testing.T) {
 		if err == nil || (tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs)) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.wantErrIs)
 		}
-		if tc.r.data != nil || tc.r.seq != 0 || tc.r.removeEntry != 0 || tc.r.plan != nil {
+		if tc.r.snap.data != nil || tc.r.snap.seq != 0 || tc.r.removeEntry != 0 || tc.r.plan != nil {
 			t.Errorf("%s: result carries effects: %+v", tc.name, tc.r)
 		}
 	}
@@ -116,7 +116,7 @@ func TestMutate_PersistFailure(t *testing.T) {
 			target = paused
 		}
 		r := tbl.mutateByID(target.ID, kind)
-		if !errors.Is(r.persistErr, ErrPersistFailed) || r.data != nil || r.seq != 0 || tbl.saveSeq.Load() != 0 {
+		if !errors.Is(r.persistErr, ErrPersistFailed) || r.snap.data != nil || r.snap.seq != 0 || tbl.saveSeq.Load() != 0 {
 			t.Fatalf("kind %d: %+v", kind, r)
 		}
 		if kind == mutDelete {

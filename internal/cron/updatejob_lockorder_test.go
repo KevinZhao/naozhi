@@ -68,7 +68,7 @@ func TestUpdateJob_ScheduleChange_SurvivesConcurrentReaders(t *testing.T) {
 	const iterations = 20
 	var wg sync.WaitGroup
 
-	// Cycling through distinct schedules keeps schedNeedsRereg true, so every
+	// Cycling through distinct schedules keeps the edit a reschedule, so every
 	// iteration really does take the Remove + registerJob path rather than
 	// short-circuiting on an unchanged schedule.
 	schedules := []string{"@daily", "*/5 * * * *", "@weekly", "@hourly"}

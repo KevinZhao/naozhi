@@ -14,8 +14,8 @@ import (
 // comment lowers the baseline. Raising one needs an approved ledger entry
 // (scripts/ratchet-raises.jsonl).
 const (
-	inFuncBlocksOver5Baseline = 33
-	docOver10Baseline         = 42
+	inFuncBlocksOver5Baseline = 32
+	docOver10Baseline         = 41
 	packageDocOver60Baseline  = 1
 	reviewAnchorsBaseline     = 0
 	historyPhrasesBaseline    = 44

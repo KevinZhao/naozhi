@@ -66,7 +66,7 @@ func TestStart_PerChatCapEnforced(t *testing.T) {
 
 // TestStart_PerChatCapAllowsExactlyAtCap pins the boundary: when the on-disk
 // per-chat count equals the cap, every job in that chat loads. The cap is
-// "no MORE than maxJobsPerChat", mirroring addJobAcquiringLock's
+// "no MORE than maxJobsPerChat", mirroring jobTable.insert's
 // `>= s.maxJobsPerChat` rejection.
 func TestStart_PerChatCapAllowsExactlyAtCap(t *testing.T) {
 	t.Parallel()

@@ -49,7 +49,7 @@ func TestStart_MaxJobsCapEnforced(t *testing.T) {
 
 // TestStart_MaxJobsCapAllowsExactlyAtCap pins the boundary: when the
 // on-disk count equals the cap, every job loads. The cap is "no MORE
-// than maxJobs", not "strictly less than". Mirrors addJobAcquiringLock's
+// than maxJobs", not "strictly less than". Mirrors jobTable.insert's
 // `len(s.tbl.jobs) >= s.maxJobs` rejection condition.
 func TestStart_MaxJobsCapAllowsExactlyAtCap(t *testing.T) {
 	t.Parallel()
