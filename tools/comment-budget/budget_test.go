@@ -18,7 +18,7 @@ const (
 	docOver10Baseline         = 43
 	packageDocOver60Baseline  = 1
 	reviewAnchorsBaseline     = 0
-	historyPhrasesBaseline    = 47
+	historyPhrasesBaseline    = 44
 )
 
 // budgetFloor: a repository this size has far more issue references than
