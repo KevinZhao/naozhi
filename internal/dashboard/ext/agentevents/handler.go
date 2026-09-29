@@ -160,9 +160,9 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Defence in depth at the HTTP boundary: JSONLPath must be under the
-	// allowed root (SeedFromHistory already validates cli-side). Empty
-	// allowedRoot (first run) fails closed to 404.
-	if h.allowedRoot != "" && !jsonlPathUnderAllowedRoot(info.JSONLPath, h.allowedRoot) {
+	// allowed root (SeedFromHistory already validates cli-side). An empty
+	// allowedRoot fails closed to 404: jsonlPathUnderAllowedRoot rejects it.
+	if !jsonlPathUnderAllowedRoot(info.JSONLPath, h.allowedRoot) {
 		slog.Warn("agent_events: JSONLPath outside allowed root, rejecting",
 			"path", info.JSONLPath, "allowed_root", h.allowedRoot)
 		http.Error(w, "unknown task", http.StatusNotFound)
