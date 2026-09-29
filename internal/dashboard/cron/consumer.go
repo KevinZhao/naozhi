@@ -1,17 +1,15 @@
 // consumer.go — the consumer-side dependency interface this package needs
 // (#2561).
 //
-// Deps named *cron.Scheduler, whose 48 exported methods cover scheduling,
+// Deps named *cron.Scheduler, whose exported methods cover scheduling,
 // persistence, the sandbox runner and the notify plumbing. SchedulerView is the
-// MEASURED call surface — grep h.deps.Scheduler.<Method> across the package — at 23.
-//
-// 23 of 48 is a narrower cut than dashproject's 3 of 77, and that is honest
-// rather than disappointing: this package IS the cron UI, so it reads jobs, runs,
+// MEASURED call surface — grep h.deps.Scheduler.<Method> across the package — at
+// 23 of the scheduler's 35: this package IS the cron UI, so it reads jobs, runs,
 // the inflight view, the sandbox attention queue and the snapshot blobs, and it
 // writes every job mutation the dashboard offers. What the interface buys is that
-// the other 25 — the tick loop, the store internals, the notify senders — can
-// change without touching the handlers, and that a test can fake the surface
-// instead of standing up a real Scheduler.
+// the rest — the tick loop, the store internals, the notify senders — can change
+// without touching the handlers, and that a test can fake the surface instead of
+// standing up a real Scheduler.
 //
 // Declared here rather than in internal/dashboard/contracts: contracts is for
 // shapes several sub-packages share, and only this package consumes a Scheduler
@@ -30,9 +28,18 @@ import (
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
-// SchedulerView is the *cron.Scheduler surface the cron dashboard uses.
+// SchedulerView is the *cron.Scheduler surface the cron dashboard uses: one
+// Deps field, composed of one interface per purpose (#2897 D6), so a helper
+// or a fake that needs one purpose names only that one.
 type SchedulerView interface {
-	// Job CRUD reachable from the cron panel.
+	JobStore
+	RunHistory
+	SandboxRuns
+	ScheduleFacts
+}
+
+// JobStore is job CRUD reachable from the cron panel.
+type JobStore interface {
 	AddJob(j *cronpkg.Job) error
 	GetJob(id string) (cronpkg.Job, bool)
 	ListJobs(plat, chatID string) []cronpkg.Job
@@ -42,22 +49,29 @@ type SchedulerView interface {
 	PauseJobByID(id string) (*cronpkg.Job, error)
 	ResumeJobByID(id string) (*cronpkg.Job, error)
 	TriggerNow(id string) error
+}
 
-	// Run history + the live run.
+// RunHistory is run history and the live run.
+type RunHistory interface {
 	Run(jobID, runID string) (*cronpkg.CronRun, error)
 	ListRuns(jobID string, limit int, before time.Time) []cronpkg.CronRunSummary
 	RecentRuns(jobID string, n int) []cronpkg.CronRunSummary
 	CurrentRun(jobID string) (cronpkg.RunInflightView, bool)
+}
 
-	// Sandbox runs (docs/rfc/agentcore-cloud-sandbox.md §7.4).
+// SandboxRuns is the cloud sandbox's attention queue, replay and run
+// artefacts (docs/rfc/agentcore-cloud-sandbox.md §7.4).
+type SandboxRuns interface {
 	ListSandboxAttention() []cronpkg.SandboxAttentionItem
 	ConfirmSandboxRun(runID string) error
 	ReplaySandboxRun(jobID, origRunID string) (string, error)
 	SandboxRunEvents(jobID, runID string, maxLines int) ([][]byte, bool, error)
 	SandboxRunSnapshotManifest(jobID, runID string) (*cronpkg.SandboxRunSnapshot, bool, error)
 	SandboxRunSnapshotPrompt(blobHash string) (string, error)
+}
 
-	// Schedule preview + facts the payloads carry.
+// ScheduleFacts is the schedule preview and the facts the payloads carry.
+type ScheduleFacts interface {
 	PreviewScheduleN(schedule string, n int) ([]time.Time, error)
 	Location() *time.Location
 	NotifyDefault() cronpkg.NotifyTarget
