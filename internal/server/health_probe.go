@@ -5,6 +5,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // HealthProbe populates one or more /health auth-section fields without
@@ -54,6 +55,15 @@ func (h *HealthHandler) subsystemProbes() []HealthProbe {
 		EventLogHealthProbe(h.router),
 		AttachmentTrackerHealthProbe(h.router),
 		runStoresHealthProbe(h.cronRunStore, h.router),
+		spawnDiagsHealthProbe,
+	}
+}
+
+// spawnDiagsHealthProbe populates spawn_diags from the process-wide gate
+// summary; the field stays omitted until some gate has dropped an input.
+func spawnDiagsHealthProbe(auth *healthAuthSection) {
+	if s, ok := spawndiag.Snapshot(); ok {
+		auth.SpawnDiags = &s
 	}
 }
 

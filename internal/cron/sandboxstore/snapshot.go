@@ -4,13 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // RunSnapshot is the content-addressed record of a sandbox run's INPUT
@@ -212,14 +215,47 @@ func (st Store) SnapshotPrompt(blobHash string) (string, error) {
 		return "", fmt.Errorf("cron sandbox: invalid blob hash")
 	}
 	path := filepath.Join(st.snapshotDir(), "blobs", blobHash)
-	b, err := os.ReadFile(path)
+	b, err := readRegularBounded(path, textutil.MaxCronPromptBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil // blob GC'd or never written
 		}
 		return "", fmt.Errorf("cron sandbox: read snapshot blob: %w", err)
 	}
+	// Content-addressed: bytes that do not hash to their name are not the
+	// prompt the run used.
+	if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != blobHash {
+		return "", fmt.Errorf("cron sandbox: snapshot blob does not match its hash")
+	}
 	return string(b), nil
+}
+
+// errNotRegular reports a path that is a symlink or not a regular file.
+var errNotRegular = errors.New("not a regular file")
+
+// readRegularBounded reads path when it is a regular file (not a symlink) of
+// at most max bytes.
+func readRegularBounded(path string, max int64) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errNotRegular
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("over the %d-byte cap", max)
+	}
+	return b, nil
 }
 
 // DeleteJobSnapshots removes a deleted job's snapshot manifest subtree
