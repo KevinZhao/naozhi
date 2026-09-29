@@ -13,6 +13,7 @@
 // escAttr, not esc, for attribute-value context: nz_util's esc deliberately
 // leaves quotes alone, so a file named `a"b` would truncate data-name="…" and
 // the click handler navigated to the wrong path.
+import { NZ_CONTRACT } from './contract.js';
 import { esc, escAttr, showToast, fetchJSON, nzViews } from './nz_util.js';
 import { fileApiUrl, formatFileSize, renderSandboxedBlob } from './file_refs.js';
 

@@ -8,6 +8,7 @@
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureUtilities(), called from dashboard's module body.
+import { NZ_CONTRACT } from './contract.js';
 import { selection, serverInfo, sessionList, ui } from './state.js';
 import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_util.js';
 

@@ -9,7 +9,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { stripCommentsAndStrings } from '../../scripts/js-deps-freeze.mjs';
 import { checkNested } from '../../scripts/ws-contract-nested.mjs';
 
@@ -69,11 +69,8 @@ for (const t of backendTypes) {
 // be a Blob MIME or a list-item tag), and every key referenced must be one
 // of the inbound types the generator embedded in contract.js.
 const contractPath = path.join(ROOT, 'internal', 'server', 'static', 'contract.js');
-const contractSrc = fs.readFileSync(contractPath, 'utf8');
-const contractKeys = new Set();
-for (const m of contractSrc.matchAll(/^\s{6}([a-z_]+): '[a-z_]+',$/gm)) {
-  contractKeys.add(m[1]);
-}
+const { NZ_CONTRACT } = await import(pathToFileURL(contractPath).href);
+const contractKeys = new Set(Object.keys(NZ_CONTRACT.WS));
 // Inbound = the contract's WS keys that are not outbound schema types.
 const inboundTypes = new Set([...contractKeys].filter((k) => !backendTypes.has(k)));
 

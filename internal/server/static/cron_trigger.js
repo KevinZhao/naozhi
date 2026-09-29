@@ -8,6 +8,7 @@
 // deps. The WS run_started handler (cron_view.js) clears the cooldown via
 // the exported cronTriggerCooldownClear.
 
+import { NZ_CONTRACT } from './contract.js';
 import { getToken } from './dashboard.js';
 import { showToast } from './nz_util.js';
 import { showAPIError, showNetworkError } from './utilities.js';

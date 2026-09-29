@@ -146,7 +146,7 @@ func TestDashboardJS_FetchCLIBackends_DoesNotCacheNullRemote(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
 	script := `
-const NZ_CONTRACT = require('./static/contract.js');
+let NZ_CONTRACT;
 let cliBackends = null, cliBackendsFetchedAt = 0;
 // fetchCLIBackends lives in auth_modal.js — its dashboard collaborators
 // arrive as injected deps and the backend caches via serverInfo.
@@ -162,6 +162,7 @@ async function fetchJSON() {
 }
 ` + extractJSAsyncFunction(t, js, "fetchCLIBackends") + `
 (async () => {
+  ({ NZ_CONTRACT } = await import(require('url').pathToFileURL(require('path').resolve('static/contract.js')).href));
   const a = await fetchCLIBackends('n1');
   const b = await fetchCLIBackends('n1');
   const c = await fetchCLIBackends('n1');

@@ -9,6 +9,7 @@
 // Layering (D4-1 rule): never import dashboard back — shared state is read
 // from the state.js objects, its helpers are injected once via
 // configureSessionHeader().
+import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList } from './state.js';
 import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, runStateDot, runStateLabel } from './nz_util.js';
 

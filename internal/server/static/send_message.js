@@ -8,6 +8,7 @@
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureSendMessage(), called from dashboard's module body.
+import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, sessionList, timers } from './state.js';
 import { turnState } from './running_banner.js';
 import { showToast, patchCardExitChip } from './nz_util.js';

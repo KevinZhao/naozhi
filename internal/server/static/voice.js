@@ -9,6 +9,7 @@
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back. Shared state is read from the state.js objects; its helpers are
 // injected once via configureVoice().
+import { NZ_CONTRACT } from './contract.js';
 import { composer, selection, sessionList } from './state.js';
 import { showToast } from './nz_util.js';
 

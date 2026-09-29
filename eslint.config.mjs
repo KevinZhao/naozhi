@@ -91,8 +91,6 @@ const browserGlobals = ro([
   'indexedDB',
   'CSS',
   'createImageBitmap',
-  // Generated contract global (contract.js loads first, #2539).
-  'NZ_CONTRACT',
 ]);
 
 // Cross-file whitelists (js-deps-freeze --globals output, frozen 2026-09-05).

@@ -8,6 +8,7 @@
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back (that cycle puts dashboard's own consts in TDZ). The two dashboard
 // helpers this chip calls are injected once via configureSelfUpdate().
+import { NZ_CONTRACT } from './contract.js';
 import { showToast } from './nz_util.js';
 
 const deps = {

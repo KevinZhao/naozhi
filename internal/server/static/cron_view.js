@@ -1,3 +1,4 @@
+import { NZ_CONTRACT } from './contract.js';
 import { hooks, selection, serverInfo, sessionList, timers, ui } from './state.js';
 import {
   fetchCLIBackends,
