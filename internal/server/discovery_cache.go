@@ -4,10 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -114,7 +114,7 @@ func (dc *discoveryCache) refresh() {
 
 	// Capture dir mtime BEFORE scan so files created mid-scan make the next
 	// tryShortCircuit miss instead of being missed permanently.
-	sessDir := filepath.Join(dc.claudeDir, "sessions")
+	sessDir := claudefs.LiveSessionsDir(dc.claudeDir)
 	var newDirMtime time.Time
 	if info, err := os.Stat(sessDir); err == nil {
 		newDirMtime = info.ModTime()
@@ -221,7 +221,7 @@ func (dc *discoveryCache) tryShortCircuit() bool {
 		return false // first run, must do full scan
 	}
 
-	info, err := os.Stat(filepath.Join(dc.claudeDir, "sessions"))
+	info, err := os.Stat(claudefs.LiveSessionsDir(dc.claudeDir))
 	if err != nil {
 		return false // directory gone or inaccessible, do full scan
 	}

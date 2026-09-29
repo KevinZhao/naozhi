@@ -3,7 +3,10 @@ package claudefs
 // Session-ID validation and the project-directory encoding, moved with the
 // implementation out of internal/discovery (#2643).
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestIsValidSessionID(t *testing.T) {
 	t.Parallel()
@@ -57,5 +60,41 @@ func TestProjectSlug(t *testing.T) {
 				t.Errorf("ProjectSlug(%q) = %q, want %q", tc.cwd, got, tc.want)
 			}
 		})
+	}
+}
+
+// The layout functions naozhi's readers share: one place knows where the CLI
+// keeps live-session files, sub-agent transcripts and project memory.
+func TestLayoutPaths(t *testing.T) {
+	proj := filepath.Join("/c", "projects", "-w")
+	for _, c := range []struct{ got, want string }{
+		{LiveSessionsDir("/c"), filepath.Join("/c", "sessions")},
+		{LiveSessionFile("/c", 42), filepath.Join("/c", "sessions", "42.json")},
+		{TranscriptIn(proj, "s1"), filepath.Join(proj, "s1.jsonl")},
+		{SessionJSONL("/c", "/w", "s1"), filepath.Join(proj, "s1.jsonl")},
+		{MemoryDir(proj), filepath.Join(proj, "memory")},
+		{SubagentsDir(proj, "s1"), filepath.Join(proj, "s1", "subagents")},
+		{SubagentJSONL("/d", "ab12"), filepath.Join("/d", "agent-ab12.jsonl")},
+		{SubagentMeta("/d", "ab12"), filepath.Join("/d", "agent-ab12.meta.json")},
+	} {
+		if c.got != c.want {
+			t.Errorf("got %q, want %q", c.got, c.want)
+		}
+	}
+}
+
+// An unresolvable root yields "", never a path relative to the process cwd.
+func TestLayoutPaths_EmptyRootIsEmpty(t *testing.T) {
+	for name, got := range map[string]string{
+		"LiveSessionsDir": LiveSessionsDir(""),
+		"LiveSessionFile": LiveSessionFile("", 1),
+		"TranscriptIn":    TranscriptIn("", "s"),
+		"MemoryDir":       MemoryDir(""),
+		"SubagentsDir":    SubagentsDir("", "s"),
+		"SubagentsDir id": SubagentsDir("/p", ""),
+	} {
+		if got != "" {
+			t.Errorf("%s = %q, want \"\"", name, got)
+		}
 	}
 }

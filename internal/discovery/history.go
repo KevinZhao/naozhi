@@ -118,7 +118,7 @@ func (s *Scanner) findSessionJSONL(claudeDir, sessionID string) (string, error) 
 		if !e.IsDir() {
 			continue
 		}
-		candidate := filepath.Join(projectsDir, e.Name(), sessionID+".jsonl")
+		candidate := claudefs.TranscriptIn(filepath.Join(projectsDir, e.Name()), sessionID)
 		if _, err := os.Stat(candidate); err == nil {
 			s.pathCacheStorePositive(key, candidate)
 			return candidate, nil

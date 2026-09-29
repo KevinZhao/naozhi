@@ -302,7 +302,7 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 // ScanContext is the cancellation-aware variant of (*Scanner).Scan; see the
 // package-level ScanContext.
 func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
-	sessDir := filepath.Join(claudeDir, "sessions")
+	sessDir := claudefs.LiveSessionsDir(claudeDir)
 	entries, err := os.ReadDir(sessDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -948,7 +948,7 @@ func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDi
 		}
 	}
 	if claudeDir != "" {
-		_ = os.Remove(filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid)))
+		_ = os.Remove(claudefs.LiveSessionFile(claudeDir, pid))
 	}
 	if cwd != "" && sessionID != "" && claudefs.IsValidSessionID(sessionID) {
 		encodedCWD := claudefs.ProjectSlug(cwd)
