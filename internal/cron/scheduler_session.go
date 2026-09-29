@@ -65,18 +65,10 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 	jobIDsPtr := jobIDsScratchPool.Get().(*[]string)
 	jobIDs := (*jobIDsPtr)[:0]
 
-	// Allocate the map BEFORE taking the RLock so make() does not run inside
-	// the lock window; a fixed initial capacity trades a few rehashes for a
-	// shorter lock hold.
+	// Allocate the map before the lock window, so make() does not run inside
+	// it; a fixed initial capacity trades a few rehashes for a shorter hold.
 	out := make(map[string]struct{}, 32)
-	s.tbl.mu.RLock()
-	for id, j := range s.tbl.jobs {
-		jobIDs = append(jobIDs, id)
-		if j.LastSessionID != "" {
-			out[j.LastSessionID] = struct{}{}
-		}
-	}
-	s.tbl.mu.RUnlock()
+	jobIDs = s.tbl.sessionIDs(jobIDs, out)
 
 	// In-flight runs may have a SessionID set even before the run
 	// terminates (set by setSessionID after GetOrCreate returns).

@@ -1,68 +1,14 @@
-// anchor-keep: map-alloc placement relative to the RLock is behaviourally invisible (either order returns the same set); only source shows the lock-window cost.
-// known_sessions_map_hint_test.go: structural and behavioural pins for
-// buildKnownSessionsSet map allocation. Originally R20260603-PERF-3 sized the
-// map from len(s.tbl.jobs) under the RLock; R202606-PERF-003 reverses that
-// placement — the map is now allocated BEFORE the RLock to shorten the lock
-// window, at the cost of a fixed initial capacity hint. The lock-hold
-// reduction is the higher-value tradeoff for write-contended schedulers.
+// known_sessions_map_hint_test.go: buildKnownSessionsSet's output map. It is
+// allocated before the registry lock window (R202606-PERF-003) — by the
+// caller, since jobTable.sessionIDs only fills a map it is handed — at the
+// cost of a fixed initial capacity hint.
 
 package cron
 
 import (
 	"fmt"
-	"os"
-	"strings"
 	"testing"
 )
-
-// TestBuildKnownSessionsSet_MapAllocBeforeLock is a structural
-// pin that verifies buildKnownSessionsSet allocates the output map BEFORE
-// taking s.tbl.mu.RLock(), so the make() does not run inside the lock window and
-// block writers. This supersedes the earlier R20260603-PERF-3 pin that
-// required the make to read len(s.tbl.jobs) under the lock.
-func TestBuildKnownSessionsSet_MapAllocBeforeLock(t *testing.T) {
-	src, err := os.ReadFile("scheduler_session.go")
-	if err != nil {
-		t.Fatalf("read scheduler_session.go: %v", err)
-	}
-	body := string(src)
-
-	const fnMarker = "func (s *Scheduler) buildKnownSessionsSet()"
-	idx := strings.Index(body, fnMarker)
-	if idx < 0 {
-		t.Fatalf("buildKnownSessionsSet not found in scheduler_session.go")
-	}
-	rest := body[idx:]
-	if next := strings.Index(rest[len(fnMarker):], "\nfunc "); next >= 0 {
-		rest = rest[:len(fnMarker)+next]
-	}
-
-	// The map make must appear BEFORE s.tbl.mu.RLock() so the allocation is not
-	// performed while holding the read lock. R202606-PERF-003.
-	idxRLock := strings.Index(rest, "s.tbl.mu.RLock()")
-	idxMake := strings.Index(rest, "make(map[string]struct{}")
-	if idxRLock < 0 {
-		t.Fatal("buildKnownSessionsSet: s.tbl.mu.RLock() not found")
-	}
-	if idxMake < 0 {
-		t.Fatal("buildKnownSessionsSet: make(map[string]struct{}) not found")
-	}
-	if idxMake >= idxRLock {
-		t.Error("buildKnownSessionsSet: map make must appear before s.tbl.mu.RLock() " +
-			"so the allocation does not extend the lock window (R202606-PERF-003)")
-	}
-
-	// The map alloc must not depend on len(s.tbl.jobs): that read needs the lock,
-	// which is exactly what we moved the alloc out of.
-	makeStmt := rest[idxMake:]
-	if end := strings.Index(makeStmt, ")"); end >= 0 {
-		makeStmt = makeStmt[:end+1]
-	}
-	if strings.Contains(makeStmt, "len(s.tbl.jobs)") {
-		t.Error("buildKnownSessionsSet: map make must not size from len(s.tbl.jobs) " +
-			"now that it runs before the RLock (R202606-PERF-003)")
-	}
-}
 
 // TestBuildKnownSessionsSet_MapHint_ScalesWithJobs is a behavioural test
 // verifying that buildKnownSessionsSet returns all LastSessionIDs even for

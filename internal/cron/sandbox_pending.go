@@ -378,12 +378,8 @@ func (s *Scheduler) snapshotOrphanJob(jobID string) (orphanJobSnapshot, *Job) {
 	}, j
 }
 
-// jobExists re-checks s.tbl.jobs[jobID] under RLock (the COR-001 TOCTOU guard).
-func (s *Scheduler) jobExists(jobID string) bool {
-	s.tbl.mu.RLock()
-	defer s.tbl.mu.RUnlock()
-	return s.tbl.jobs[jobID] != nil
-}
+// jobExists re-checks that jobID is registered (the COR-001 TOCTOU guard).
+func (s *Scheduler) jobExists(jobID string) bool { return s.tbl.exists(jobID) }
 
 // maybeEnqueueOrphanAttention enqueues a live side-effecting job's orphan for
 // human confirmation: the microVM was Stopped, but it may have completed and

@@ -35,30 +35,14 @@ var listNextByIDPool = sync.Pool{
 // O(jobs-in-chat), not O(all jobs) — since dashboard polls hit this at 1Hz
 // per active chat.
 func (s *Scheduler) ListJobs(plat, chatID string) []Job {
-	s.tbl.mu.RLock()
-	defer s.tbl.mu.RUnlock()
-
-	bucket := s.tbl.jobsByChat[chatKeyFor(plat, chatID)]
-	// Pre-allocate so an empty result marshals as `[]`, not `null`, matching
-	// ListAllJobsWithNextRun and frontend `.length` checks.
-	result := make([]Job, 0, len(bucket))
-	for _, j := range bucket {
-		result = append(result, *j)
-	}
-	return result
+	return s.tbl.forChat(chatKeyFor(plat, chatID))
 }
 
 // GetJob returns a copy of the job with the given id. The bool is false when
 // no such job exists. Read-only; callers that need to mutate go through
 // UpdateJob so persistence and cron re-registration stay atomic.
 func (s *Scheduler) GetJob(id string) (Job, bool) {
-	s.tbl.mu.RLock()
-	defer s.tbl.mu.RUnlock()
-	j, ok := s.tbl.jobs[id]
-	if !ok {
-		return Job{}, false
-	}
-	return *j, true
+	return s.tbl.snapshot(id)
 }
 
 // JobWithNextRun pairs a Job snapshot with its next scheduled run time so
@@ -87,19 +71,9 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 		listEntryIDsPool.Put(idsPtr)
 	}()
 
-	var result []JobWithNextRun
-	s.tbl.mu.RLock()
-	if cap(ids) < len(s.tbl.jobs) {
-		ids = make([]cronEntryID, 0, len(s.tbl.jobs))
-	}
-	result = make([]JobWithNextRun, 0, len(s.tbl.jobs))
-	for _, j := range s.tbl.jobs {
-		// Single Job copy: directly into the caller-owned result. NextRun is
-		// patched in by index below once Entries() has been read lock-free.
-		result = append(result, JobWithNextRun{Job: *j})
-		ids = append(ids, j.entryID)
-	}
-	s.tbl.mu.RUnlock()
+	// NextRun is patched in by index below once Entries() has been read
+	// without the registry lock.
+	result, ids := s.tbl.allWithEntryIDs(ids)
 
 	// Single Entries() snapshot → pooled map, `clear()`-ed before re-Put so
 	// stale keys from a larger snapshot don't leak. Called outside s.tbl.mu (see
