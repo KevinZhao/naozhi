@@ -132,6 +132,64 @@ func (t *jobTable) lastSessionID(id string) (string, bool) {
 	return j.LastSessionID, true
 }
 
+// snapshot returns a copy of the registered job id.
+func (t *jobTable) snapshot(id string) (Job, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	j, ok := t.jobs[id]
+	if !ok {
+		return Job{}, false
+	}
+	return *j, true
+}
+
+// forChat returns copies of one chat's jobs, via the per-chat index —
+// O(jobs-in-chat), not O(all jobs). Never nil, so an empty result marshals as
+// [].
+func (t *jobTable) forChat(k chatJobKey) []Job {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	bucket := t.jobsByChat[k]
+	out := make([]Job, 0, len(bucket))
+	for _, j := range bucket {
+		out = append(out, *j)
+	}
+	return out
+}
+
+// allWithEntryIDs returns a copy of every job, each paired with the job's
+// NextRun still zero, and appends each job's robfig entry ID to ids in the
+// same order, so the caller can fill NextRun from s.cron.Entries() without
+// holding the lock across the scheduler. Each Job is copied once, straight
+// into the result.
+func (t *jobTable) allWithEntryIDs(ids []cronEntryID) ([]JobWithNextRun, []cronEntryID) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if cap(ids) < len(t.jobs) {
+		ids = make([]cronEntryID, 0, len(t.jobs))
+	}
+	out := make([]JobWithNextRun, 0, len(t.jobs))
+	for _, j := range t.jobs {
+		out = append(out, JobWithNextRun{Job: *j})
+		ids = append(ids, j.entryID)
+	}
+	return out, ids
+}
+
+// sessionIDs appends every registered job ID to ids and adds each non-empty
+// LastSessionID to into, in one lock hold.
+func (t *jobTable) sessionIDs(ids []string, into map[string]struct{}) []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for id, j := range t.jobs {
+		ids = append(ids, id)
+		if j.LastSessionID != "" {
+			into[j.LastSessionID] = struct{}{}
+		}
+	}
+	return ids
+}
+
 // nextSaveSeq assigns the next snapshot sequence. Callers that already hold mu
 // use saveSeq.Add directly; this exists for the paths that do not.
 func (t *jobTable) nextSaveSeq() uint64 { return t.saveSeq.Add(1) }

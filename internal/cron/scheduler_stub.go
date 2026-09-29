@@ -59,23 +59,15 @@ func (s *Scheduler) EnsureStub(key string) bool {
 	if id == "" {
 		return false
 	}
-	// Snapshot workDir/prompt under RLock, release before reaching into
-	// router: RegisterCronStubWithChain calls notifyChange which fans out to
-	// hub broadcasters, and holding s.tbl.mu across that path risks lock-order
+	// A copy, not the registry lock, before reaching into router:
+	// RegisterCronStubWithChain calls notifyChange, which fans out to hub
+	// broadcasters, and holding s.tbl.mu across that path risks lock-order
 	// inversion with the cron dispatcher (see ListAllJobsWithNextRun).
-	s.tbl.mu.RLock()
-	j, ok := s.tbl.jobs[id]
-	var workDir, prompt, lastSessionID string
-	if ok {
-		workDir = j.WorkDir
-		prompt = j.Prompt
-		lastSessionID = j.LastSessionID
-	}
-	s.tbl.mu.RUnlock()
+	j, ok := s.tbl.snapshot(id)
 	if !ok {
 		return false
 	}
-	return s.registerStubByValue(id, workDir, prompt, lastSessionID)
+	return s.registerStubFromJob(&j)
 }
 
 // resetRouterStub is the deferred router-side cleanup that pairs with
