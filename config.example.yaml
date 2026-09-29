@@ -26,7 +26,9 @@
 # Two-name compatibility:
 #   - `nodes:` and `reverse_nodes:` are treated as synonyms; pick one.
 #   - `workspaces:` and `projects:` map to the same Project registry.
-#   - `session.cwd` and `session.workspace` both set the default CWD.
+#   - `session.workspace` is the schema v1 spelling of `session.cwd`; a file
+#     without schema_version still loads it, and `naozhi config migrate`
+#     rewrites it.
 #
 # When in doubt: `sudo NAOZHI_DASHBOARD_TOKEN=xxx bin/naozhi --config …
 # --doctor` prints the effective resolved config.
@@ -195,25 +197,13 @@ session:
     no_output_timeout: "1800s"
     total_timeout: "14400s"
   store_path: "~/.naozhi/sessions.json"
-  # auto_chain — DEPRECATED / NO EFFECT.
-  #
-  # This block used to join multiple sessions in the same workspace into
-  # one chain by guessing that "same workspace slug + 7d window" meant
-  # "semantically continuous conversation". That guess was wrong often
-  # enough to be harmful — unrelated one-off conversations sharing a
-  # default workspace got stitched together as each other's history — so
-  # the feature was retired (docs/rfc/project-stable-session-key.md §9).
-  #
-  # The keys are still PARSED so existing config files don't fail to
-  # load, but they change nothing; setting any of them logs a
-  # deprecation warning at startup. Delete the block.
-  #
-  # Precise continuation is now carried by the project-level stable
-  # session key below, which is default-on.
-  # auto_chain:
-  #   enabled: true
-  #   window_hours: 168
-  #   cap: 32
+  # auto_chain — REMOVED (schema v2). It joined sessions in the same
+  # workspace by guessing that "same slug + 7d window" meant one conversation,
+  # which stitched unrelated one-off sessions together as each other's history
+  # (docs/rfc/project-stable-session-key.md §9). A file without schema_version
+  # still loads with the block, reported as deprecated and ignored; `naozhi
+  # config migrate` removes it. Precise continuation is the project-level
+  # stable session key below, which is default-on.
   #
   # project_stable_key — project-level stable session key. Default-on;
   # set enabled: false to fall back to the legacy timestamp-key path for

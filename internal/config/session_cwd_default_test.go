@@ -1,91 +1,52 @@
 package config
 
 import (
-	"strings"
 	"testing"
 )
 
-// TestApplyDefaults_SessionCWDWorkspaceReconcile pins #1782: applyDefaults must
-// reconcile session.cwd / deprecated session.workspace against the operator's
-// RAW input before filling the default. Filling the default into the deprecated
-// workspace field first (the old bug) made a pure-default deployment falsely
-// trip the deprecation warning.
-//
-// The four cases below cover:
-//
-//	(a) pure default      -> no warning at all, default lands in cwd
-//	(b) only cwd set       -> no "both ... configured" warning
-//	(c) only workspace set -> deprecation warning still fires
-//	(d) default applied    -> final cwd is non-empty
-func TestApplyDefaults_SessionCWDWorkspaceReconcile(t *testing.T) {
-	const deprecMsg = "'session.workspace' is deprecated"
-	const bothMsg = "both 'session.cwd' and deprecated 'session.workspace'"
-
+// TestLoad_SessionCWDWorkspaceReconcile pins #1782 through the migration
+// chain: session.cwd and the deprecated session.workspace are reconciled on
+// the operator's RAW input, so a pure-default deployment reports nothing, and
+// the default lands in cwd only when neither key is set.
+func TestLoad_SessionCWDWorkspaceReconcile(t *testing.T) {
 	tests := []struct {
-		name           string
-		cwd            string
-		workspace      string
-		wantDeprecWarn bool
-		wantBothWarn   bool
-		wantCWD        string
+		name       string
+		session    string
+		wantAction string // the session.workspace diag's action; "" = none
+		wantCWD    string
 	}{
-		{
-			name:           "pure_default_no_warning",
-			wantDeprecWarn: false,
-			wantBothWarn:   false,
-			wantCWD:        defaultSessionCWD,
-		},
-		{
-			name:           "only_cwd_no_both_warning",
-			cwd:            "/srv/work",
-			wantDeprecWarn: false,
-			wantBothWarn:   false,
-			wantCWD:        "/srv/work",
-		},
-		{
-			name:           "only_workspace_warns_deprecation",
-			workspace:      "/srv/legacy",
-			wantDeprecWarn: true,
-			wantBothWarn:   false,
-			wantCWD:        "/srv/legacy",
-		},
-		{
-			name:           "both_set_diverging_warns_both",
-			cwd:            "/srv/work",
-			workspace:      "/srv/legacy",
-			wantDeprecWarn: false,
-			wantBothWarn:   true,
-			wantCWD:        "/srv/work",
-		},
+		{name: "pure_default_no_diag", wantCWD: defaultSessionCWD},
+		{name: "only_cwd_no_diag", session: "  cwd: /srv/work\n", wantCWD: "/srv/work"},
+		{name: "only_workspace_rewritten", session: "  workspace: /srv/legacy\n", wantAction: "rewritten", wantCWD: "/srv/legacy"},
+		{name: "both_set_cwd_wins", session: "  cwd: /srv/work\n  workspace: /srv/legacy\n", wantAction: "ignored", wantCWD: "/srv/work"},
 	}
-
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{}
-			cfg.Session.CWD = tt.cwd
-			cfg.Session.Workspace = tt.workspace
-
-			out := captureSlog(t, func() {
-				applyDefaults(cfg)
-			})
-
-			if got := strings.Contains(out, deprecMsg); got != tt.wantDeprecWarn {
-				t.Errorf("deprecation warn = %v, want %v; log = %q", got, tt.wantDeprecWarn, out)
+			body := "platforms:\n  weixin:\n    token: \"x\"\n"
+			if tt.session != "" {
+				body += "session:\n" + tt.session
 			}
-			if got := strings.Contains(out, bothMsg); got != tt.wantBothWarn {
-				t.Errorf("both warn = %v, want %v; log = %q", got, tt.wantBothWarn, out)
+			diags, cfg, err := collectLoadDiags(t, writeCfg(t, body))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
 			}
-			if cfg.Session.CWD == "" {
-				t.Errorf("session.cwd must be non-empty after defaults; got empty")
+			var actions []string
+			for _, d := range diags {
+				if d.Key == "session.workspace" {
+					actions = append(actions, d.Action)
+				}
+				if d.Layer == "config-unknown" {
+					t.Errorf("unexpected unknown-key diag %+v", d)
+				}
+			}
+			switch {
+			case tt.wantAction == "" && len(actions) != 0:
+				t.Errorf("session.workspace diags %v, want none", actions)
+			case tt.wantAction != "" && (len(actions) != 1 || actions[0] != tt.wantAction):
+				t.Errorf("session.workspace diags %v, want exactly [%s]", actions, tt.wantAction)
 			}
 			if cfg.Session.CWD != tt.wantCWD {
 				t.Errorf("session.cwd = %q, want %q", cfg.Session.CWD, tt.wantCWD)
-			}
-			// The deprecated alias must stay mirrored so existing readers work.
-			if cfg.Session.Workspace != cfg.Session.CWD {
-				t.Errorf("session.workspace = %q, want mirror of cwd %q",
-					cfg.Session.Workspace, cfg.Session.CWD)
 			}
 		})
 	}

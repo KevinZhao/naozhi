@@ -97,55 +97,6 @@ func TestSplitLegacySystemPromptArgs(t *testing.T) {
 	}
 }
 
-// TestLiftLegacySystemPromptArgs exercises the config-level migration on a
-// Config value: the legacy flag moves into system_prompt, other agents are
-// untouched, and an explicit conflict is rejected.
-func TestLiftLegacySystemPromptArgs(t *testing.T) {
-	t.Parallel()
-	t.Run("lifts and cleans args", func(t *testing.T) {
-		t.Parallel()
-		cfg := &Config{Agents: map[string]AgentConfig{
-			"reviewer": {Model: "sonnet", Args: []string{"--append-system-prompt", "You are a code review expert.", "--keep"}},
-			"other":    {Args: []string{"--keep"}},
-		}}
-		if err := liftLegacySystemPromptArgs(cfg); err != nil {
-			t.Fatalf("lift: %v", err)
-		}
-		got := cfg.Agents["reviewer"]
-		if got.SystemPrompt != "You are a code review expert." || !slices.Equal(got.Args, []string{"--keep"}) || got.Model != "sonnet" {
-			t.Errorf("reviewer after lift = %+v", got)
-		}
-		if other := cfg.Agents["other"]; !slices.Equal(other.Args, []string{"--keep"}) || other.SystemPrompt != "" {
-			t.Errorf("unrelated agent changed: %+v", other)
-		}
-		// The lifted value must then pass the system_prompt validator so the
-		// migrated config loads.
-		if err := validateConfig(cfg); err != nil {
-			t.Errorf("migrated config fails validation: %v", err)
-		}
-	})
-	t.Run("conflict with explicit system_prompt is an error", func(t *testing.T) {
-		t.Parallel()
-		cfg := &Config{Agents: map[string]AgentConfig{
-			"reviewer": {SystemPrompt: "explicit", Args: []string{"--append-system-prompt", "legacy"}},
-		}}
-		err := liftLegacySystemPromptArgs(cfg)
-		if err == nil || !strings.Contains(err.Error(), "agents[reviewer]") || !strings.Contains(err.Error(), "system_prompt") {
-			t.Fatalf("error = %v, want conflict naming agents[reviewer] and system_prompt", err)
-		}
-	})
-	t.Run("nothing to lift is a no-op", func(t *testing.T) {
-		t.Parallel()
-		cfg := &Config{Agents: map[string]AgentConfig{"a": {Args: []string{"--keep"}, SystemPrompt: "S"}}}
-		if err := liftLegacySystemPromptArgs(cfg); err != nil {
-			t.Fatal(err)
-		}
-		if a := cfg.Agents["a"]; a.SystemPrompt != "S" || !slices.Equal(a.Args, []string{"--keep"}) {
-			t.Errorf("no-op changed the agent: %+v", a)
-		}
-	})
-}
-
 // TestLoad_AgentSystemPrompt is the operator-facing end to end: a YAML block
 // scalar system_prompt loads verbatim, and a legacy `--append-system-prompt`
 // under args is lifted by Load so the config that never worked (#2493) now

@@ -185,7 +185,7 @@ func TestMigrations_AreNoOpsOnTheirTargetShape(t *testing.T) {
 			t.Fatal(err)
 		}
 		changed, err := m.Apply(doc.Content[0])
-		if err != nil || changed {
+		if err != nil || len(changed) > 0 {
 			t.Errorf("migration from v%d on a clean document: changed=%v err=%v, want a no-op", m.From, changed, err)
 		}
 	}
@@ -269,9 +269,9 @@ func TestMigrateFile_RefusesToProduceAnInvalidDocument(t *testing.T) {
 	migrations = []migration{{
 		From: 1,
 		Desc: "test: write a node url the validator refuses",
-		Apply: func(root *yaml.Node) (bool, error) {
+		Apply: func(root *yaml.Node) ([]change, error) {
 			root.Content = append(root.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Value: "nodes"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "workspaces"},
 				&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
 					{Kind: yaml.ScalarNode, Value: "bad"},
 					{Kind: yaml.MappingNode, Content: []*yaml.Node{
@@ -279,7 +279,7 @@ func TestMigrateFile_RefusesToProduceAnInvalidDocument(t *testing.T) {
 						{Kind: yaml.ScalarNode, Value: "ftp://example.com"},
 					}},
 				}})
-			return true, nil
+			return []change{{Key: "workspaces", Action: "rewritten"}}, nil
 		},
 	}}
 
