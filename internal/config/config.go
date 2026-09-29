@@ -159,6 +159,7 @@ func Load(path string) (*Config, error) {
 	if err := parseDurations(&cfg); err != nil {
 		return nil, err
 	}
+	reportUnusableValues(&cfg)
 	// Before validation so the lifted value is validated as system_prompt
 	// and the (now removed) flag is not reported by validateArgvStrings.
 	if err := liftLegacySystemPromptArgs(&cfg); err != nil {

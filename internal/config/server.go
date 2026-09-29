@@ -122,8 +122,7 @@ func applyUpdateDefaults(cfg *Config) {
 		switch cfg.Update.Mode {
 		case "notify", "download", "auto":
 		default:
-			slog.Warn("update.mode unrecognized, falling back to download",
-				"mode", cfg.Update.Mode)
+			reportFallback("update.mode", "fallback", "not notify, download or auto; updates run in download mode")
 			cfg.Update.Mode = "download"
 		}
 		if cfg.Update.Interval == "" {
