@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -62,11 +63,6 @@ type RunnerConfig struct {
 	// predate this field.
 	BackendID string
 
-	// EnvAllowlist names the env vars passed to the subprocess (PATH and
-	// HOME always pass). Everything else is stripped: daemons must NOT
-	// inherit IM tokens, dashboard secrets or AWS creds.
-	EnvAllowlist []string
-
 	// Ledger receives one cost entry per Run, attributed to the daemon run
 	// carried on the context (RunInfoFromContext). nil = not recorded.
 	Ledger CostLedger
@@ -97,8 +93,11 @@ func NewRunner(cfg RunnerConfig) (Runner, error) {
 		return nil, fmt.Errorf("sysession: backend %q cannot run the daemon one-shot argv (%v); daemons require the %q backend",
 			id, runnerImplBaseArgs, BackendClaude)
 	}
-	// Allowlist + parent env are stable post-construction; filter once.
-	env := filterEnv(cfg.EnvAllowlist)
+	// The allowlist and the parent env are stable post-construction; filter
+	// once. The list is envpolicy's, not the caller's: everything outside it
+	// is stripped, so daemons do not inherit IM tokens, dashboard secrets or
+	// another backend's credentials.
+	env := filterEnv(envpolicy.SysessionRunnerAllowlist())
 	// Pin BinPath to an absolute path using the PATH snapshot inside env.
 	// exec.CommandContext would otherwise resolve a relative BinPath via
 	// the live os.Getenv("PATH") at call time, so a later os.Setenv could

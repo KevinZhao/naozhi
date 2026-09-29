@@ -382,13 +382,6 @@ func main() {
 			BackendID: orientBackendID,
 			WorkDir:   orientWorkDir,
 			Model:     cfg.ImageOrient.Model,
-			EnvAllowlist: []string{
-				"ANTHROPIC_",
-				"CLAUDE_",
-				"AWS_",
-				"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
-				"http_proxy", "https_proxy", "no_proxy",
-			},
 		}); err != nil {
 			slog.Warn("image auto-orient disabled: vision runner build failed", "err", err)
 			orientEnabled = false

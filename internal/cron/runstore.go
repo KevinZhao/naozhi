@@ -40,10 +40,8 @@ type runStore struct {
 	// clock is the time source Append reads. nil = time.Now(), so production and
 	// every existing construction path are unchanged. It exists so a test can
 	// prove Append reads the clock ONCE and shares that instant between
-	// skipAppendTrim and trimJobLocked (R20260603-PERF-11) — with a stepping
-	// clock, two reads produce two different cutoffs and the trim decision
-	// diverges observably. Before this, that property was pinned by a regexp over
-	// this file (Epic I #2547).
+	// skipAppendTrim and trimJobLocked — with a stepping clock, two reads
+	// produce two different cutoffs and the trim decision diverges observably.
 	clock        cronClock
 	enableTrimGC bool // true in production; tests can disable for determinism
 
