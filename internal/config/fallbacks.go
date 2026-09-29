@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // A value naozhi cannot use is replaced so the process still starts, and the
@@ -14,7 +14,7 @@ import (
 
 // reportFallback records that key's configured value was replaced.
 func reportFallback(key, action, reason string) {
-	cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
+	spawndiag.Emit("config", []spawndiag.Diag{{
 		Layer: "config-invalid", Key: key, Action: action, Reason: reason,
 	}})
 }

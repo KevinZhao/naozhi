@@ -17,9 +17,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/spawndiag"
 	"gopkg.in/yaml.v3"
-
-	"github.com/naozhi/naozhi/internal/cli"
 )
 
 // migration rewrites a config document from schema version From to From+1.
@@ -38,8 +37,8 @@ type change struct {
 	Key, Action, Reason string
 }
 
-func (c change) diag() cli.SpawnDiag {
-	return cli.SpawnDiag{Layer: "config-deprecated", Key: c.Key, Action: c.Action, Reason: c.Reason}
+func (c change) diag() spawndiag.Diag {
+	return spawndiag.Diag{Layer: "config-deprecated", Key: c.Key, Action: c.Action, Reason: c.Reason}
 }
 
 // migrations is the chain, ordered by From. Each entry moves exactly one

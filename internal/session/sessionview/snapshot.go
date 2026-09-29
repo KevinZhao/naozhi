@@ -1,9 +1,9 @@
 package sessionview
 
 import (
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // SessionSnapshot is a point-in-time view of a session for the dashboard API.
@@ -85,7 +85,7 @@ type SessionSnapshot struct {
 	// (#2532). Always serialised — an empty array, not undefined, so the
 	// dashboard can index it unconditionally. Runtime observation like
 	// Effort: empty for evicted sessions and across restarts.
-	SpawnDiags []cli.SpawnDiag `json:"spawn_diags"`
+	SpawnDiags []spawndiag.Diag `json:"spawn_diags"`
 	// OverlayDrift lists the argv-bearing fields whose live value differs
 	// from what a fresh spawn under the current config would use (#2543);
 	// remedy is restarting the session. Same always-an-array contract as

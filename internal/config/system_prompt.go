@@ -9,7 +9,7 @@ import (
 
 // MaxAgentSystemPromptBytes caps agents[<id>].system_prompt: larger than the
 // planner-prompt cap, yet with a full scratch block (24 KiB) still inside
-// cli.MaxAppendSystemPromptBytes (64 KiB).
+// cliinfo.MaxAppendSystemPromptBytes (64 KiB).
 const MaxAgentSystemPromptBytes = 32 * 1024
 
 // legacySystemPromptFlag is the flag Load lifts out of agents[].args (#2493).

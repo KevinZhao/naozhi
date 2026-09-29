@@ -8,9 +8,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/spawndiag"
 	"gopkg.in/yaml.v3"
-
-	"github.com/naozhi/naozhi/internal/cli"
 )
 
 // Config is the top-level naozhi configuration loaded from config.yaml.
@@ -202,12 +201,12 @@ func migrateLoaded(doc *yaml.Node) (map[string]bool, error) {
 		return nil, nil
 	}
 	migrated := make(map[string]bool, len(changes))
-	diags := make([]cli.SpawnDiag, 0, len(changes))
+	diags := make([]spawndiag.Diag, 0, len(changes))
 	for _, c := range changes {
 		migrated[c.Key] = true
 		diags = append(diags, c.diag())
 	}
-	cli.EmitSpawnDiags("config", diags)
+	spawndiag.Emit("config", diags)
 	return migrated, nil
 }
 

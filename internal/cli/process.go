@@ -12,19 +12,20 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/procmeter"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/subagent"
 )
 
-// ProcessState represents the lifecycle state of a CLI process.
-type ProcessState int
+// ProcessState is cliinfo.ProcessState (see there).
+type ProcessState = cliinfo.ProcessState
 
 const (
-	StateSpawning ProcessState = iota
-	StateReady
-	StateRunning
-	StateDead
+	StateSpawning = cliinfo.StateSpawning
+	StateReady    = cliinfo.StateReady
+	StateRunning  = cliinfo.StateRunning
+	StateDead     = cliinfo.StateDead
 )
 
 const (
@@ -58,22 +59,6 @@ const maxPendingSlots = 16
 // socket (closeStdin + waitOrKill(5s) + listener.Close + os.Remove, so 8s is
 // headroom); on expiry Close falls through to Kill. Var so tests can shorten it.
 var processCloseTimeout = 8 * time.Second
-
-func (s ProcessState) String() string {
-	switch s {
-	case StateSpawning:
-		return "running" // spawning is transient; visible as running
-	case StateReady:
-		return "ready"
-	case StateRunning:
-		return "running"
-	case StateDead:
-		// Not "ready": the dashboard must not show crashed processes as idle.
-		return "dead"
-	default:
-		return "unknown"
-	}
-}
 
 // Process manages a CLI subprocess via a shim connection.
 type Process struct {
@@ -196,18 +181,17 @@ func (p *Process) slogger() *slog.Logger {
 	return slog.Default()
 }
 
-// Death reason labels. Kept as exported constants so session/router callers
-// can match without relying on stringly-typed literals that drift.
+// Death reason labels (cliinfo.DeathReason*).
 const (
-	DeathReasonCLIExited           = "cli_exited"
-	DeathReasonShimEOF             = "shim_eof"
-	DeathReasonShimReadErr         = "shim_read_error"
-	DeathReasonShimOversizeThenEOF = "shim_oversize_then_eof"
-	DeathReasonShimOversizeThenErr = "shim_oversize_then_read_error"
-	DeathReasonReadLoopPanic       = "readloop_panic"
-	DeathReasonKilled              = "killed"
-	DeathReasonNoOutputTimeout     = "no_output_timeout"
-	DeathReasonTotalTimeout        = "total_timeout"
+	DeathReasonCLIExited           = cliinfo.DeathReasonCLIExited
+	DeathReasonShimEOF             = cliinfo.DeathReasonShimEOF
+	DeathReasonShimReadErr         = cliinfo.DeathReasonShimReadErr
+	DeathReasonShimOversizeThenEOF = cliinfo.DeathReasonShimOversizeThenEOF
+	DeathReasonShimOversizeThenErr = cliinfo.DeathReasonShimOversizeThenErr
+	DeathReasonReadLoopPanic       = cliinfo.DeathReasonReadLoopPanic
+	DeathReasonKilled              = cliinfo.DeathReasonKilled
+	DeathReasonNoOutputTimeout     = cliinfo.DeathReasonNoOutputTimeout
+	DeathReasonTotalTimeout        = cliinfo.DeathReasonTotalTimeout
 )
 
 // setDeathReason records the death reason if not already set. First writer wins

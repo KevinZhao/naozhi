@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cliinfo"
+
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -90,10 +92,8 @@ type SpawnOptions struct {
 	AppendSystemPrompt string
 }
 
-// MaxAppendSystemPromptBytes caps SpawnOptions.AppendSystemPrompt: the worst
-// case (32 KiB agent prompt + 24 KiB scratch context or 8 KiB planner) fits
-// with ~2x headroom, below the 128 KiB maxExtraArgsBytes budget and ARG_MAX.
-const MaxAppendSystemPromptBytes = 64 * 1024
+// MaxAppendSystemPromptBytes is cliinfo.MaxAppendSystemPromptBytes.
+const MaxAppendSystemPromptBytes = cliinfo.MaxAppendSystemPromptBytes
 
 // PermissionMode selects how a Claude-CLI spawn handles tool permissions.
 type PermissionMode uint8

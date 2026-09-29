@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // writeCfg writes body to a temp config.yaml and returns its path.
@@ -23,10 +23,10 @@ func writeCfg(t *testing.T, body string) string {
 
 // collectLoadDiags loads path with a diag observer installed and returns the
 // diags Load emitted, the config and the error.
-func collectLoadDiags(t *testing.T, path string) ([]cli.SpawnDiag, *Config, error) {
+func collectLoadDiags(t *testing.T, path string) ([]spawndiag.Diag, *Config, error) {
 	t.Helper()
-	var got []cli.SpawnDiag
-	restore := cli.ObserveSpawnDiags(func(scope string, d cli.SpawnDiag) {
+	var got []spawndiag.Diag
+	restore := spawndiag.Observe(func(scope string, d spawndiag.Diag) {
 		if scope != "config" {
 			t.Errorf("diag scope = %q, want \"config\"", scope)
 		}
@@ -37,8 +37,8 @@ func collectLoadDiags(t *testing.T, path string) ([]cli.SpawnDiag, *Config, erro
 	return got, cfg, err
 }
 
-func unknownDiags(in []cli.SpawnDiag) []cli.SpawnDiag {
-	var out []cli.SpawnDiag
+func unknownDiags(in []spawndiag.Diag) []spawndiag.Diag {
+	var out []spawndiag.Diag
 	for _, d := range in {
 		if d.Layer == "config-unknown" {
 			out = append(out, d)

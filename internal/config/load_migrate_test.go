@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // legacyConfig carries every v1 shape the migration chain rewrites.
@@ -29,7 +29,7 @@ agents:
     args: ["--keep", "--append-system-prompt"]
 `
 
-func deprecatedDiags(diags []cli.SpawnDiag) []string {
+func deprecatedDiags(diags []spawndiag.Diag) []string {
 	var out []string
 	for _, d := range diags {
 		if d.Layer == "config-deprecated" {

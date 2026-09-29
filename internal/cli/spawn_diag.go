@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
@@ -44,7 +45,7 @@ func SpawnDiagsFor(opts SpawnOptions, caps Caps) []SpawnDiag {
 	}
 	seen := map[string]bool{}
 	for _, a := range opts.ExtraArgs {
-		if !isDeniedFlag(a) {
+		if !cliinfo.IsDeniedExtraFlag(a) {
 			continue
 		}
 		name := a
