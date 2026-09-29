@@ -48,8 +48,6 @@ function defaultSessions() {
         last_activity: 'reviewing code',
         node: 'local',
         project: 'otherproject',
-        active_tools: ['Read', 'Grep'],
-        active_agents: [{ name: 'code-reviewer', activity: 'reading files' }],
       },
       {
         key: 'dashboard:direct:2026-01-01-120002-3:myproject',

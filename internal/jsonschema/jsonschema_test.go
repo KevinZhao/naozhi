@@ -1,4 +1,4 @@
-package wsproto
+package jsonschema
 
 import (
 	"encoding/json"
@@ -25,8 +25,8 @@ type describeNode struct {
 // struct that refers to itself, and names JSON-only shapes by what they carry.
 func TestDescriber(t *testing.T) {
 	t.Parallel()
-	d := describer{defs: map[string]objectSchema{}}
-	got := d.object(reflect.TypeOf(describeNode{}))
+	d := New()
+	got := d.Object(reflect.TypeOf(describeNode{}))
 	keys := make([]string, 0, len(got.Properties))
 	for k := range got.Properties {
 		keys = append(keys, k)
@@ -42,11 +42,11 @@ func TestDescriber(t *testing.T) {
 		t.Errorf("cost = %+v, raw = %+v", got.Properties["cost"], got.Properties["raw"])
 	}
 	ch := got.Properties["children"]
-	if ch.Type != "array" || ch.Items == nil || ch.Items.Ref != "wsproto.describeNode" {
+	if ch.Type != "array" || ch.Items == nil || ch.Items.Ref != "jsonschema.describeNode" {
 		t.Errorf("children = %+v", ch)
 	}
-	if _, ok := d.defs["wsproto.describeNode"].Properties["children"]; !ok {
-		t.Errorf("the self-referencing struct's def was not filled: %+v", d.defs["wsproto.describeNode"])
+	if _, ok := d.Defs["jsonschema.describeNode"].Properties["children"]; !ok {
+		t.Errorf("the self-referencing struct's def was not filled: %+v", d.Defs["jsonschema.describeNode"])
 	}
 	_ = describeNode{}.hidden
 	_ = describeNode{}.Skip

@@ -80,7 +80,16 @@ test.describe('dead session exit chip', () => {
   });
 
   test('the header chip follows session_state pushes', async ({ page }) => {
-    const mock = await startMockServer({ sessions: exitSessions(), ws: true });
+    // The 5 s /api/sessions poll must agree with each push, as the real
+    // backend's would; a mock still answering 'dead' after a 'running' push
+    // repaints the chip the push just cleared.
+    const data = exitSessions();
+    const mock = await startMockServer({ sessions: data, ws: true });
+    const setState = (state, reason) => {
+      const s = data.sessions.find((x) => x.key === CRASHED);
+      s.state = state;
+      s.death_reason = reason || '';
+    };
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector(`.session-card[data-key="${CRASHED}"]`);
     // @ts-ignore — wsm / WS_STATES are mirrored onto window by the e2e shim.
@@ -91,10 +100,12 @@ test.describe('dead session exit chip', () => {
 
     await expect.poll(() => mock.wsConnections.length).toBeGreaterThan(0);
     const conn = mock.wsConnections[mock.wsConnections.length - 1];
+    setState('running');
     conn.send({ type: 'session_state', key: CRASHED, state: 'running' });
     await expect(header).toHaveCount(0);
     await expect(card(page, CRASHED).locator('.sc-exit')).toHaveCount(0);
 
+    setState('dead', 'readloop_panic');
     conn.send({ type: 'session_state', key: CRASHED, state: 'dead', reason: 'readloop_panic' });
     await expect(header).toHaveAttribute('title', '读取循环崩溃，下次发送时自动恢复');
     await expect(card(page, CRASHED).locator('.sc-exit')).toHaveAttribute('title', '读取循环崩溃，下次发送时自动恢复');

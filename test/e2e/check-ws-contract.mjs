@@ -140,13 +140,26 @@ for (const field of Object.keys(FRONTEND_FIELDS)) {
   }
 }
 
-// ── Nested fields (#2909): see scripts/ws-contract-nested.mjs.
+// ── Nested fields (#2909): see scripts/ws-contract-nested.mjs. Typed
+// parameters resolve against the WS defs and the REST response schemas' defs.
+const REST_SCHEMAS = [path.join(ROOT, 'internal', 'dashboard', 'session', 'testdata', 'rest.schema.json')];
+const defs = { ...(schema.defs || {}) };
+for (const p of REST_SCHEMAS) Object.assign(defs, JSON.parse(fs.readFileSync(p, 'utf8')).defs);
+const typedSchema = { ...schema, defs };
+// Fields the dashboard adds to a backend struct itself, with where.
+const FRONTEND_STRUCT_FIELDS = {
+  'sessionview.SessionSnapshot': {
+    source: "renderSidebar marks a card 'managed' or 'terminal' (a discovered CLI session)",
+    entrypoint: 'renderSidebar copies a discovered session\'s CLI entrypoint onto its card',
+  },
+};
+const usedStructExtras = new Set();
 let nestedReads = 0;
 let typedFns = 0;
-const defs = schema.defs || {};
 for (const f of fs.readdirSync(staticDir)) {
   if (!f.endsWith('.js') || f === 'contract.js' || f === 'sw.js') continue;
-  const r = checkNested(fs.readFileSync(path.join(staticDir, f), 'utf8'), schema);
+  const r = checkNested(fs.readFileSync(path.join(staticDir, f), 'utf8'), typedSchema, FRONTEND_STRUCT_FIELDS);
+  for (const u of r.usedExtras) usedStructExtras.add(u);
   nestedReads += r.reads;
   typedFns += r.typedFns;
   for (const p of r.problems) {
@@ -158,8 +171,19 @@ if (!defs['clievent.EventEntry']) {
   console.error('check-ws-contract: the schema has no defs for clievent.EventEntry — regenerate it (go generate ./internal/wsproto)');
   failures++;
 }
+for (const [def, fields] of Object.entries(FRONTEND_STRUCT_FIELDS)) {
+  for (const field of Object.keys(fields)) {
+    if (!usedStructExtras.has(def + '.' + field)) {
+      console.error(`FRONTEND_STRUCT_FIELDS lists ${def}.${field} but no typed function reads it any more — drop the entry`);
+      failures++;
+    } else if (defs[def]?.properties?.[field]) {
+      console.error(`FRONTEND_STRUCT_FIELDS lists ${def}.${field} but the schema now declares it — drop the entry`);
+      failures++;
+    }
+  }
+}
 if (typedFns === 0) {
-  console.error('check-ws-contract: no function types a parameter as EventEntry — the nested-field check has gone blind');
+  console.error('check-ws-contract: no function types a parameter — the nested-field check has gone blind');
   failures++;
 }
 
@@ -167,4 +191,4 @@ if (failures) {
   console.error(`check-ws-contract: ${failures} mismatch(es) between wsproto.schema.json and dashboard.js`);
   process.exit(1);
 }
-console.log(`check-ws-contract: OK (${backendTypes.size} types + ${sendSites.length} send sites over ${inboundTypes.size} inbound types + ${fieldReads.size} frame fields read + ${nestedReads} nested reads in ${typedFns} EventEntry functions)`);
+console.log(`check-ws-contract: OK (${backendTypes.size} types + ${sendSites.length} send sites over ${inboundTypes.size} inbound types + ${fieldReads.size} frame fields read + ${nestedReads} nested reads in ${typedFns} typed functions)`);
