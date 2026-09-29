@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
+	"github.com/naozhi/naozhi/internal/cli/backend"
 )
 
 // TestScan_SessionIDNeverUpgradedToOtherSessionJSONL is the regression guard
@@ -75,6 +76,10 @@ func TestScan_SessionIDNeverUpgradedToOtherSessionJSONL(t *testing.T) {
 			continue
 		}
 		found = true
+		// The type chip's label rides along, from the detected CLI's profile.
+		if s.TypeLabel == "" || s.TypeLabel != backend.TerminalLabelFor(s.CLIName, s.Entrypoint) {
+			t.Errorf("TypeLabel = %q, want TerminalLabelFor(%q, %q)", s.TypeLabel, s.CLIName, s.Entrypoint)
+		}
 		if s.SessionID != ownSession {
 			t.Errorf("crosstalk: process SessionID = %q, want %q (the value from {pid}.json); "+
 				"the upgrade heuristic mis-assigned a sibling JSONL", s.SessionID, ownSession)

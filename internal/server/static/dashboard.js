@@ -841,7 +841,7 @@ function renderSidebar(data) {
       key: discoveredKey(d.pid, d.node),
       state: d.state || 'ready',
       cli_name: d.cli_name || 'cli',
-      entrypoint: d.entrypoint || '',
+      type_label: d.type_label || '',
       last_active: d.last_active || d.started_at,
       last_prompt: d.last_prompt || d.summary || '',
       workspace: d.cwd,
@@ -1282,14 +1282,8 @@ function applyHistoryFilter(merged, query) {
   }).join('');
 }
 
-function sessionTypeTag(cliName, entrypoint) {
-  var label;
-  if (cliName === 'kiro') { label = 'Kiro CLI'; }
-  else if (cliName === 'codex') { label = 'Codex CLI'; }
-  else if (entrypoint === 'claude-vscode') { label = 'Claude VS Extension'; }
-  else if (cliName === 'claude-code') { label = 'Claude CLI'; }
-  else { label = 'CLI'; }
-  return '<span class="sc-type-tag">' + label + '</span>';
+function sessionTypeTag(label) {
+  return '<span class="sc-type-tag">' + esc(label || 'CLI') + '</span>';
 }
 
 // PLATFORM_ORIGINS maps the first component of a session key (the platform
@@ -1527,7 +1521,7 @@ function sessionCardHtml(/** @type {SessionSnapshot} */ s) {
 
   const dismissBtn = '<button type="button" class="btn-close btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" data-action="session-dismiss" title="移除" aria-label="移除会话">' + ICONS.close + '</button>';
 
-  const typeTag = s.source === 'terminal' ? sessionTypeTag(s.cli_name, s.entrypoint) : '';
+  const typeTag = s.source === 'terminal' ? sessionTypeTag(s.type_label) : '';
   const agentCount = (isActive && turnState.agents.length) || (s.subagents ? s.subagents.length : 0);
   const agentBadge = agentCount > 0 ? '<span class="sc-agents">' + ICONS.robot + '\u00D7' + agentCount + '</span>' : '';
   // R110-P3 IM origin: show a small chip for sessions sourced from feishu /
@@ -1957,7 +1951,7 @@ function selectSession(key, node) {
       // first, or the preview panel is written into a hidden #main while the
       // previous session has already been unsubscribed.
       if (ui.activeView !== 'chat') setActivityView('chat');
-      previewDiscovered(d.session_id, d.cwd, d.pid, d.proc_start_time || 0, d.node || '', d.cli_name || 'cli', d.entrypoint || '');
+      previewDiscovered(d.session_id, d.cwd, d.pid, d.proc_start_time || 0, d.node || '', d.type_label || '');
       return;
     }
   }

@@ -30,7 +30,8 @@ func codexProfile() Profile {
 		},
 		RequiredNodeCaps: []string{"codex-app-server"},
 		// Threads under ~/.codex/sessions/ ("~/" kept for doctor display).
-		HistoryDir: "~/.codex/sessions/",
+		HistoryDir:    "~/.codex/sessions/",
+		TerminalLabel: func(string) string { return "Codex CLI" },
 		// app-server reports per-turn token usage (thread/tokenUsage/updated);
 		// no USD figure on the wire.
 		CostUnit: "tokens",

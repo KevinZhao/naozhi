@@ -36,6 +36,12 @@ func claudeProfile() Profile {
 			}
 			return claudefs.SessionJSONL(claudeDir, workspace, sessionID)
 		},
+		TerminalLabel: func(entrypoint string) string {
+			if entrypoint == "claude-vscode" {
+				return "Claude VS Extension"
+			}
+			return "Claude CLI"
+		},
 		// Process.TotalCost reports cumulative spend in USD.
 		CostUnit: "USD",
 		// Full naozhi UX surface; audio goes through Transcribe before the CLI.

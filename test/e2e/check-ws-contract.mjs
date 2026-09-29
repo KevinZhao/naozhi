@@ -150,7 +150,7 @@ const typedSchema = { ...schema, defs };
 const FRONTEND_STRUCT_FIELDS = {
   'sessionview.SessionSnapshot': {
     source: "renderSidebar marks a card 'managed' or 'terminal' (a discovered CLI session)",
-    entrypoint: 'renderSidebar copies a discovered session\'s CLI entrypoint onto its card',
+    type_label: 'renderSidebar copies a discovered session\'s type-chip label (backend.Profile.TerminalLabel) onto its card',
   },
 };
 const usedStructExtras = new Set();

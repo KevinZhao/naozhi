@@ -37,6 +37,7 @@ func kiroProfile() Profile {
 			}
 			return filepath.Join(dir, sessionID+".json")
 		},
+		TerminalLabel: func(string) string { return "Kiro CLI" },
 		// Per-turn metering accrues as ACP "credits", not dollars.
 		CostUnit: "credits",
 		// askuser: no ACP equivalent; passthrough: no replay-user-messages →
