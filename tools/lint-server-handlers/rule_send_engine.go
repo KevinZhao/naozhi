@@ -22,8 +22,8 @@
 //	B. send.go / send_owner_loop.go / send_engine.go carry *sendEngine
 //	   receivers only: a *Hub method there is a piece of the pipeline written
 //	   back onto the Hub.
-//	C. dashboard_send.go may CALL engine methods but never READ an engine
-//	   field. `h.engine.sessionSend(...)` is fine; `h.engine.allowedRoot` is
+//	C. SendHandler methods (whichever file holds them) may CALL engine
+//	   methods but never READ an engine field. `h.engine.sessionSend(...)` is fine; `h.engine.allowedRoot` is
 //	   not. Before #2632 the handler did the latter in 8 places, which was the
 //	   old hub+router "two views of one state" pattern with a new name.
 package main
@@ -43,7 +43,9 @@ import (
 // back onto the Hub.
 var sendPipelineFiles = []string{"send.go", "send_owner_loop.go", "send_engine.go"}
 
-// sendHandlerFile is the HTTP transport over the engine; check C reads it.
+// sendHandlerFile is where SendHandler is declared. Check C reads every
+// *SendHandler method wherever it lives (upload and attachment handlers sit in
+// their own files).
 const sendHandlerFile = "dashboard_send.go"
 
 // sendBoundaryTypes are the structs that must not hold a *Hub (check A), with
@@ -61,6 +63,11 @@ func scanSendEngineOwnership(pkgDir string) []Violation {
 	// A: no *Hub field on the boundary structs. Scan every non-test file so a
 	// moved struct is still found (and a missing one is still reported).
 	found := map[string]bool{}
+	type parsed struct {
+		path string
+		f    *ast.File
+	}
+	var files []parsed
 	entries, err := os.ReadDir(pkgDir)
 	if err != nil {
 		return append(out, Violation{
@@ -83,6 +90,7 @@ func scanSendEngineOwnership(pkgDir string) []Violation {
 			})
 			continue
 		}
+		files = append(files, parsed{path, f})
 		ast.Inspect(f, func(n ast.Node) bool {
 			ts, ok := n.(*ast.TypeSpec)
 			if !ok {
@@ -157,8 +165,24 @@ func scanSendEngineOwnership(pkgDir string) []Violation {
 		}
 	}
 
-	// C: dashboard_send.go calls engine methods, never reads engine fields.
-	out = append(out, scanEngineFieldReads(fset, filepath.Join(pkgDir, sendHandlerFile))...)
+	// C: SendHandler methods call engine methods, never read engine fields.
+	methods := 0
+	for _, pf := range files {
+		for _, decl := range pf.f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Recv == nil || len(fd.Recv.List) == 0 || fd.Body == nil || recvTypeName(fd.Recv.List[0].Type) != "SendHandler" {
+				continue
+			}
+			methods++
+			out = append(out, scanEngineFieldReads(fset, pf.path, fd.Body)...)
+		}
+	}
+	if methods == 0 {
+		out = append(out, Violation{
+			Rule: "send_engine_ownership", File: filepath.ToSlash(filepath.Join(pkgDir, sendHandlerFile)),
+			Message: "no *SendHandler methods found — check C (engine field reads) has nothing to read; if the handler moved packages, move this rule with it",
+		})
+	}
 	return out
 }
 
@@ -172,27 +196,14 @@ func isStarHub(e ast.Expr) bool {
 	return ok && id.Name == "Hub"
 }
 
-// scanEngineFieldReads flags every `<x>.engine.<name>` in path that is NOT the
+// scanEngineFieldReads flags every `<x>.engine.<name>` in body that is NOT the
 // callee of a call expression. A method call keeps the engine's invariants in
 // the engine; a field read copies them into the handler, which is how the
 // allowedRoot / resolver / ctx / notify reads accumulated before #2632.
-func scanEngineFieldReads(fset *token.FileSet, path string) []Violation {
-	f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []Violation{{
-				Rule: "send_engine_ownership", File: filepath.ToSlash(path),
-				Message: "dashboard_send.go not found — the HTTP send handler moved; point check C at its new file",
-			}}
-		}
-		return []Violation{{
-			Rule: "send_engine_ownership", File: filepath.ToSlash(path),
-			Message: fmt.Sprintf("parse failed, cannot check engine field reads: %v", err),
-		}}
-	}
+func scanEngineFieldReads(fset *token.FileSet, path string, body *ast.BlockStmt) []Violation {
 	// First pass: every SelectorExpr that is a call's callee is a method call.
 	callees := map[*ast.SelectorExpr]bool{}
-	ast.Inspect(f, func(n ast.Node) bool {
+	ast.Inspect(body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				callees[sel] = true
@@ -201,7 +212,7 @@ func scanEngineFieldReads(fset *token.FileSet, path string) []Violation {
 		return true
 	})
 	var out []Violation
-	ast.Inspect(f, func(n ast.Node) bool {
+	ast.Inspect(body, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
 		if !ok || callees[sel] {
 			return true
@@ -214,7 +225,7 @@ func scanEngineFieldReads(fset *token.FileSet, path string) []Violation {
 			Rule:    "send_engine_ownership",
 			File:    filepath.ToSlash(path),
 			Line:    fset.Position(sel.Pos()).Line,
-			Message: fmt.Sprintf("dashboard_send.go reads engine field %q directly. The HTTP handler reaches the engine through methods only (#2632) — add one to send_engine.go (see the method surface block there) rather than copying engine state into the handler", sel.Sel.Name),
+			Message: fmt.Sprintf("a SendHandler method reads engine field %q directly. The HTTP handler reaches the engine through methods only (#2632) — add one to send_engine.go (see the method surface block there) rather than copying engine state into the handler", sel.Sel.Name),
 		})
 		return true
 	})
