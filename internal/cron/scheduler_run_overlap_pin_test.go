@@ -36,7 +36,7 @@ func TestOverlapSkip_EmitsPairedStartedEnded(t *testing.T) {
 		t.Fatal("precondition: initial CAS on a fresh inflight gate must succeed")
 	}
 
-	s.executeOpt(j, true /* viaTriggerNow */)
+	s.executeOpt(j.ID, true /* viaTriggerNow */)
 
 	// The gate must STILL be held (overlap path must not release the
 	// concurrent run's gate — R246-GO-3 / #689: emitOverlapSkipped passes a
@@ -121,7 +121,7 @@ func TestPerJobIDGate_RejectsConcurrentSameJob(t *testing.T) {
 	// A concurrent executeOpt for the same jobID must be rejected (overlap
 	// skip), NOT run a second body. Observable signature: it emits exactly one
 	// skipped pair and leaves the gate held for the in-flight run.
-	s.executeOpt(j, false)
+	s.executeOpt(j.ID, false)
 
 	if !inflight.running.Load() {
 		t.Fatal("second executeOpt cleared the in-flight gate — concurrent same-jobID run was NOT rejected (#1706 regression)")

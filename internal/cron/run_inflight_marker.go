@@ -313,13 +313,13 @@ func (s *Scheduler) readRunInflightMarker(path string) (runInflightMarker, bool)
 // newer one.
 //
 // The run has no execution context in this process, so rc carries only its
-// identity: finishRun reads rc.job.ID and nothing else from the Job, and
-// recordTerminalResult resolves the table's own object by that ID.
+// identity, which is all a runCtx holds of its job anyway: recordTerminalResult
+// resolves the table's own object by that ID.
 // finalizer is the adoption's gate holder, or nil for an interrupted run,
 // which never claimed one.
 func (s *Scheduler) finishRestartedRun(m runInflightMarker, finalizer *runFinalizer, out runOutcome) {
 	s.finishRun(runCtx{
-		job:       &Job{ID: m.JobID},
+		jobID:     m.JobID,
 		runID:     m.RunID,
 		startedAt: time.UnixMilli(m.StartedAtMS),
 		trigger:   m.Trigger,

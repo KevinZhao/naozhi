@@ -88,7 +88,7 @@ func TestFinishRunUsesInjectedClock(t *testing.T) {
 	// the live clock value at finish time, not a captured constant.
 	clk.set(startedAt.Add(1500 * time.Millisecond))
 
-	sched.finishRun(runCtx{job: j, runID: "r-clock", startedAt: startedAt, trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded, result: "ok"})
+	sched.finishRun(runCtx{jobID: j.ID, runID: "r-clock", startedAt: startedAt, trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded, result: "ok"})
 
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -126,7 +126,7 @@ func TestSyntheticSkippedUsesInjectedClock(t *testing.T) {
 
 	j := &Job{ID: "job-skip-clock", Schedule: "@every 5m", Prompt: "ping"}
 
-	sched.emitOverlapSkipped(j, false)
+	sched.emitOverlapSkipped(j.ID, false)
 
 	bc.mu.Lock()
 	defer bc.mu.Unlock()

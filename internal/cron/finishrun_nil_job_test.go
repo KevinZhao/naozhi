@@ -40,7 +40,7 @@ func TestFinishRun_NilJobNoPanicNoEmit(t *testing.T) {
 		}
 	}()
 	s.finishRun(runCtx{
-		job: nil,
+		jobID: "",
 		// the contract under test
 		runID:     runID,
 		startedAt: time.Now(),
@@ -80,7 +80,7 @@ func TestFinishRun_NilJobFinalizesInflight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generateRunID: %v", err)
 	}
-	s.finishRun(runCtx{job: nil, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled, finalizer: fin}, runOutcome{state: RunStateFailed, errClass: ErrClassSessionError})
+	s.finishRun(runCtx{jobID: "", runID: runID, startedAt: time.Now(), trigger: TriggerScheduled, finalizer: fin}, runOutcome{state: RunStateFailed, errClass: ErrClassSessionError})
 
 	if inf.running.Load() {
 		t.Error("nil-job guard must finalize the inflight gate (running should be false)")

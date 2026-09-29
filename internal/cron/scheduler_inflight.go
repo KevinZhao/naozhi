@@ -10,7 +10,7 @@ import (
 
 // executeIfNotDeletedOrPaused is the TriggerNow dispatch entry: snapshot the
 // freshest *Job under s.tbl.mu.RLock, then — only if still present and not
-// paused — release the lock and call executeOpt(cur, true). Deleted or paused
+// paused — call executeOpt(jobID, true). Deleted or paused
 // jobs surface as a Debug-log skip with no run record.
 //
 // LOCK: caller MUST NOT hold s.tbl.mu; the snapshot → release → executeOpt split
@@ -41,14 +41,7 @@ func recordTriggerNowPanic(jobID string, r any) {
 // (executeIfNotDeletedOrPaused) and the registered tick closure; only the
 // viaTriggerNow flag and the skip-log subject ("TriggerNow:" vs "cron:") differ.
 func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubject string) {
-	// NOT s.liveness(jobID): executeOpt takes the live *Job, so the pointer has to
-	// escape this critical section. That is the one registry escape hatch left in
-	// production, and closing it means giving executeOpt a snapshot instead — a
-	// change to the run pipeline, not to the registry.
-	s.tbl.mu.RLock()
-	cur, ok := s.tbl.jobs[jobID]
-	paused := ok && cur.Paused
-	s.tbl.mu.RUnlock()
+	ok, paused := s.tbl.liveness(jobID)
 	// slog.With is built lazily (skip path only) to avoid ~500 wasted
 	// allocs/sec on the hot live-job path.
 	if !ok || paused {
@@ -60,7 +53,7 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 		}
 		return
 	}
-	s.executeOpt(cur, viaTriggerNow)
+	s.executeOpt(jobID, viaTriggerNow)
 }
 
 // rangeRunningSessionIDs invokes fn for the Claude session ID of every

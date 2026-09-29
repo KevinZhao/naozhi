@@ -56,7 +56,7 @@ func TestP0_OverlapSkippedEmitsTerminalEvent(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.emitOverlapSkipped(j, true)
+	s.emitOverlapSkipped(j.ID, true)
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
@@ -142,7 +142,7 @@ func TestP0_FinishRunCanceledSkipsPersist(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.finishRun(runCtx{job: j, runID: "r1", startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: context.Canceled.Error(), skipPersist: true})
+	s.finishRun(runCtx{jobID: j.ID, runID: "r1", startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: context.Canceled.Error(), skipPersist: true})
 
 	s.tblForTest().mu.RLock()
 	if !j.LastRunAt.Equal(prevRun) {
@@ -180,7 +180,7 @@ func TestP0_PreflightWorkdirUnreachableMapsCorrectErrorClass(t *testing.T) {
 	}
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
 	stubRefresh, ok := s.freshContextPreflightP0(preflightArgs{runCtx: runCtx{
-		job: j, snap: snap, key: sessionkey.CronKey(j.ID), lg: lg,
+		jobID: j.ID, snap: snap, key: sessionkey.CronKey(j.ID), lg: lg,
 		notifyTo: NotifyTarget{}, runID: "r1", startedAt: time.Now(), trigger: TriggerScheduled,
 	}})
 	if ok {

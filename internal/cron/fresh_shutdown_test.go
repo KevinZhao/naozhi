@@ -62,7 +62,7 @@ func TestCRON3_FreshExecuteSkippedAfterStopCtxCancel(t *testing.T) {
 	// s.execute is unexported; we re-enter through the stored Job pointer
 	// that AddJob pinned into s.tbl.jobs. execute() is safe to call on a
 	// stopped scheduler — the guard is exactly what we're testing.
-	s.executeOpt(job, false)
+	s.executeOpt(job.ID, false)
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -119,7 +119,7 @@ func TestCRON3_FreshExecuteRunsBeforeStop(t *testing.T) {
 	// still want the enclosing test to fail on assertion mismatches.
 	func() {
 		defer func() { _ = recover() }()
-		s.executeOpt(job, false)
+		s.executeOpt(job.ID, false)
 	}()
 
 	fake.mu.Lock()
@@ -188,7 +188,7 @@ func TestCRON3_PersistentModeUnaffectedByGuard(t *testing.T) {
 	s.Stop()
 	func() {
 		defer func() { _ = recover() }() // absorb nil-session Send panic
-		s.executeOpt(job, false)
+		s.executeOpt(job.ID, false)
 	}()
 
 	fake.mu.Lock()

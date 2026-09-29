@@ -49,11 +49,12 @@ type runCtx struct {
 	runID string
 	// trigger must match the RunStartedEvent's.
 	trigger TriggerKind
-	// job is the run's Job. Terminal branches pass it through; phases do not
-	// mutate it. Required even on the overlap-skip path, because emitRunEnded
-	// keys the event by Job.ID; a DeleteJob racing the finish is caught by the
-	// jobs[id] re-check inside recordTerminalResult.
-	job *Job
+	// jobID identifies the run's job. A run holds an identity, not the
+	// registry's *Job: what it needs of the job is in snap, and
+	// recordTerminalResult resolves the table's own object by this ID, so a
+	// DeleteJob racing the finish is caught there. Required even on the
+	// overlap-skip path, because emitRunEnded keys the event by it.
+	jobID string
 	// lg is the per-run logger, already tagged with jobID/runID.
 	lg *slog.Logger
 	// finalizer releases the inflight CAS gate. finishRun calls it before the

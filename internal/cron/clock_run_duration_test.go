@@ -68,7 +68,7 @@ func TestRunDurationDeterministicUnderClock(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true /* viaTriggerNow: skip jitter for determinism */)
+	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter for determinism */)
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())

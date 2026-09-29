@@ -25,7 +25,7 @@ func newGetSessionArgs(t *testing.T, s *Scheduler, j *Job) getSessionArgs {
 		spawnCancel: cancel,
 		runCtx: runCtx{
 			key:       "cron:" + j.ID,
-			job:       j,
+			jobID:     j.ID,
 			snap:      jobSnapshot{jobID: j.ID, prompt: "ping"},
 			runID:     "r-getsession",
 			startedAt: time.Now(),

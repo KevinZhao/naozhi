@@ -33,7 +33,7 @@ func TestPreflightDeleteMidExecute_RefreshesStubBeforeGateRelease(t *testing.T) 
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
+	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d; sequence=%v", rec.endedCount(), ord.events())

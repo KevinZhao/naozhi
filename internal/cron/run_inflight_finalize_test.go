@@ -57,7 +57,7 @@ func TestFinishRunFinalizesInflightBeforeBroadcast(t *testing.T) {
 	}
 
 	finalizer := &runFinalizer{inflight: inflight}
-	s.finishRun(runCtx{job: j, runID: "r-finalize", startedAt: time.Now(), trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded})
+	s.finishRun(runCtx{jobID: j.ID, runID: "r-finalize", startedAt: time.Now(), trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded})
 
 	if sawOK.Load() {
 		phase := ""
@@ -98,7 +98,7 @@ func TestOverlapSkippedDoesNotReleaseOwnerGate(t *testing.T) {
 
 	// emitOverlapSkipped goes through finishRun with finalizer=nil, so
 	// finalize() short-circuits and the owner's metadata stays intact.
-	s.emitOverlapSkipped(j, true)
+	s.emitOverlapSkipped(j.ID, true)
 
 	v, ok := inflight.snapshot()
 	if !ok {

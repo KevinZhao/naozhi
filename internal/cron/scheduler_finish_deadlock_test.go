@@ -53,7 +53,7 @@ func TestRecordTerminalResult_PanicReleasesLock(t *testing.T) {
 				t.Errorf("expected recordTerminalResult to propagate the marshal panic")
 			}
 		}()
-		s.recordTerminalResult(job, "result", "", "", ErrClassNone, RunStateSucceeded, time.Now())
+		s.recordTerminalResult(job.ID, "result", "", "", ErrClassNone, RunStateSucceeded, time.Now())
 	}()
 
 	// Restore a sane marshaler so the lock-acquisition probe's own persist (if

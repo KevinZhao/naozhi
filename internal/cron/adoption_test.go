@@ -258,7 +258,7 @@ func TestShutdownCancelKeepsMarker(t *testing.T) {
 	rc := runCtx{
 		snap:      jobSnapshot{jobID: jobID, prompt: "p", workDir: "/tmp/wd"},
 		startedAt: time.Now().Add(-30 * time.Second),
-		runID:     runID, trigger: TriggerScheduled, job: j, lg: slog.Default(),
+		runID:     runID, trigger: TriggerScheduled, jobID: j.ID, lg: slog.Default(),
 	}
 
 	// Shutdown-cancel: marker survives.

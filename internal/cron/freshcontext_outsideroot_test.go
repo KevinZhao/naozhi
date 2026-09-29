@@ -50,7 +50,7 @@ func runFreshPreflight(s *Scheduler, j *Job, workDir string) (stubRefresher, boo
 		prompt:  j.Prompt,
 	}
 	return s.freshContextPreflightP0(preflightArgs{runCtx: runCtx{
-		job:       j,
+		jobID:     j.ID,
 		snap:      snap,
 		key:       key,
 		lg:        slog.Default(),

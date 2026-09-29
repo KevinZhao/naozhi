@@ -32,7 +32,7 @@ func TestSandbox_MetaFlowsIntoRunRecord(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	run, err := s.Run(j.ID, rec.endedAtCron(0).RunID)

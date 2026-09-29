@@ -1,10 +1,7 @@
-// anchor-keep: the source anchor here pins the jitter call sites; the behavioural half of this file tests the jitter maths directly.
 package cron
 
 import (
 	"context"
-	"os"
-	"regexp"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -179,7 +176,7 @@ func TestExecuteOpt_TriggerNowSkipsJitter(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.executeOpt(j, true) // viaTriggerNow=true
+		s.executeOpt(j.ID, true) // viaTriggerNow=true
 	}()
 
 	select {
@@ -227,53 +224,28 @@ func TestExecuteOpt_ScheduledTickAppliesJitter_WhenEnabled(t *testing.T) {
 	}
 }
 
-// TestExecuteOpt_JitterPausedReCheck_SourceAnchor 是 R246-GO-7 的源码锚点：
-// jitter 等待结束后那段 RLock 必须同时读 cur.Paused，不只是
-// stillRegistered。registerJob closure 里的 paused-check 在 jitter *之前*，
-// 无法防住 jitter 窗口内（默认 ≤30s）的 PauseJobByID — 这之后再 spawn /
-// send 就违反了 "Paused job must not run" 不变量。
-//
-// 任何回退（删掉 paused 读 / 删掉 paused 早退分支）都让本测试立刻报错，
-// 而不必依赖端到端的 fake-router 时序构造。
-func TestExecuteOpt_JitterPausedReCheck_SourceAnchor(t *testing.T) {
+// TestApplyJitterAndRecheck_AbortsPausedOrDeleted pins R246-GO-7: the
+// registerJob closure's paused check runs BEFORE the jitter wait, so the
+// recheck after it must catch a PauseJobByID or DeleteJob that landed inside
+// the window, and only a live job may leave with a snapshot.
+func TestApplyJitterAndRecheck_AbortsPausedOrDeleted(t *testing.T) {
 	t.Parallel()
-
-	src, err := os.ReadFile("scheduler_run.go")
-	if err != nil {
-		t.Fatalf("read scheduler_run.go: %v", err)
-	}
-	body := string(src)
-
-	// jitter block：applyJitter[Sched](...) ... cur, stillRegistered ... cur.Paused
-	// 必须按这个顺序串起来 — 即 jitter 之后那段 RLock 既读 cur 又读 paused。
-	// R250-CR-14 (#1147): jitter 入口被拆成 applyJitter / applyJitterSched
-	// （后者复用已 parse 的 robfigcron.Schedule 避开重复 Parse），原本的
-	// `applyJitter(...)` 单行变成 if-parsedSched/else 两行——else 分支的
-	// `applyJitter(...)` 后面紧跟 `}` 关闭 else 块，再到 paused re-check。
-	// 锚点选 else 分支：applyJitterSched 走 if 分支、applyJitter 走 else
-	// 分支，整段 jitter 等待无论走哪条路径都在 else 的 `}` 之前结束。
-	// `[^}]*?` 限定不能再跨越任何 `}`——如果将 paused check 挪到外层
-	// scope 之外（额外 `}`），本断言立即失败。
-	rePausedRead := regexp.MustCompile(`(?s)applyJitter\([^)]*\)\s*\}[^}]*?cur,\s*stillRegistered\s*:=\s*s\.tbl\.jobs\[[^]]+\][^}]*?paused\s*:=\s*stillRegistered\s*&&\s*cur\.Paused`)
-	if !rePausedRead.MatchString(body) {
-		t.Error("scheduler_run.go jitter block 不再 re-check cur.Paused (R246-GO-7 防退化失守)")
-	}
-
-	// applyJitterSched 必须存在且位于 paused re-check 之前——保证 fast-path
-	// （已 parse Schedule 复用）也走同一个 jitter→paused 流水线，不会绕开。
-	// 用 SubexpIndex 做位置比较：两个 anchor 同时存在且顺序正确即可。
-	idxSched := regexp.MustCompile(`applyJitterSched\(`).FindStringIndex(body)
-	idxPaused := regexp.MustCompile(`paused\s*:=\s*stillRegistered\s*&&\s*cur\.Paused`).FindStringIndex(body)
-	if idxSched == nil {
-		t.Error("scheduler_run.go 缺少 applyJitterSched 调用 (R250-CR-14 fast-path 退化)")
-	} else if idxPaused == nil || idxSched[0] >= idxPaused[0] {
-		t.Error("scheduler_run.go 中 applyJitterSched 必须先于 paused re-check (R250-CR-14 / R246-GO-7)")
-	}
-
-	// 还要存在 paused → return 的早退分支。仅读 paused 不 return 不算修复。
-	reEarlyReturn := regexp.MustCompile(`(?s)if\s+paused\s*\{[^}]*?paused during jitter window[^}]*?return`)
-	if !reEarlyReturn.MatchString(body) {
-		t.Error("scheduler_run.go jitter block 缺 paused → return 早退分支 (R246-GO-7)")
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, AllowNilRouter: true, JitterMax: time.Millisecond}, SchedulerDeps{})
+	s.tblForTest().mu.Lock()
+	s.tblForTest().jobs["live"] = &Job{ID: "live", Schedule: "@every 1m", Prompt: "p"}
+	s.tblForTest().jobs["paused"] = &Job{ID: "paused", Schedule: "@every 1m", Paused: true}
+	s.tblForTest().mu.Unlock()
+	for _, c := range []struct {
+		id        string
+		wantAbort bool
+	}{{"live", false}, {"paused", true}, {"gone", true}} {
+		snap, taken, abort := s.applyJitterAndRecheck(c.id, "run-1", &runInflight{})
+		if abort != c.wantAbort || taken == abort {
+			t.Errorf("%s: abort=%v snapTaken=%v, want abort=%v and a snapshot exactly when not aborted", c.id, abort, taken, c.wantAbort)
+		}
+		if !abort && snap.prompt != "p" {
+			t.Errorf("%s: snapshot = %+v, want the live job's", c.id, snap)
+		}
 	}
 }
 

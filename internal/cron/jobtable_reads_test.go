@@ -1,8 +1,10 @@
 package cron
 
 import (
+	"errors"
 	"slices"
 	"testing"
+	"time"
 )
 
 // tableWith returns a table holding jobs, indexed as the add path indexes them.
@@ -128,5 +130,30 @@ func TestJobExists(t *testing.T) {
 	s.tbl.mu.Unlock()
 	if !s.jobExists("a") || s.jobExists("gone") {
 		t.Errorf("jobExists(a)=%v jobExists(gone)=%v, want true and false", s.jobExists("a"), s.jobExists("gone"))
+	}
+}
+
+// A job deleted between the dispatch CAS and the snapshot is not run: no
+// snapshot, no started frame.
+func TestExecSnapshotAndEmit_DeletedJobAborts(t *testing.T) {
+	rec := &recordingBroadcaster{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, AllowNilRouter: true}, SchedulerDeps{Telemetry: rec})
+	_, _, _, abort := s.execSnapshotAndEmit("gone", true, "run-1", time.Now(), TriggerManual, &runInflight{})
+	if !abort {
+		t.Fatal("a deleted job was not aborted")
+	}
+	if n := rec.startedCount(); n != 0 {
+		t.Errorf("%d started frames for an aborted run, want 0", n)
+	}
+}
+
+// A replay whose job is gone by the time it snapshots gives the gate back.
+func TestDispatchReplay_DeletedJobReleasesTheGate(t *testing.T) {
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, AllowNilRouter: true}, SchedulerDeps{})
+	if _, err := s.dispatchReplay("gone", "p", "m", "orig"); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("dispatchReplay = %v, want ErrJobNotFound", err)
+	}
+	if _, won := s.gate.acquire("gone"); !won {
+		t.Error("the gate was left held after the replay gave up")
 	}
 }

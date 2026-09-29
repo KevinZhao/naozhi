@@ -91,7 +91,7 @@ func TestExecuteOpt_PhaseSequence(t *testing.T) {
 	// this fixture (no jitter, fake router/session), instead sample from
 	// inside the run via the router/session hooks plus one post-populate
 	// check below.
-	s.executeOpt(j, true /* viaTriggerNow: deterministic, skips jitter */)
+	s.executeOpt(j.ID, true /* viaTriggerNow: deterministic, skips jitter */)
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
@@ -133,7 +133,7 @@ func TestExecPopulateInflight_SeedsPhaseQueued(t *testing.T) {
 	}
 	defer inflight.running.Store(false)
 
-	runID, _, _, ok := s.execPopulateInflight(j, true, inflight)
+	runID, _, _, ok := s.execPopulateInflight(j.ID, true, inflight)
 	if !ok {
 		t.Fatal("execPopulateInflight aborted unexpectedly")
 	}

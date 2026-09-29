@@ -100,7 +100,7 @@ func TestCRON2_FreshExecuteSkipsWhenWorkDirMissing(t *testing.T) {
 	baselineGetCreate := len(fake.getCreateKeys)
 	fake.mu.Unlock()
 
-	s.executeOpt(job, false)
+	s.executeOpt(job.ID, false)
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -160,7 +160,7 @@ func TestCRON2_FreshExecuteProceedsWhenWorkDirExists(t *testing.T) {
 	// before the panic site.
 	func() {
 		defer func() { _ = recover() }()
-		s.executeOpt(job, false)
+		s.executeOpt(job.ID, false)
 	}()
 
 	fake.mu.Lock()
@@ -208,7 +208,7 @@ func TestCRON2_EmptyWorkDirPassesThrough(t *testing.T) {
 
 	func() {
 		defer func() { _ = recover() }()
-		s.executeOpt(job, false)
+		s.executeOpt(job.ID, false)
 	}()
 
 	// Empty WorkDir must reach Reset (guard is permissive on empty).

@@ -60,7 +60,7 @@ func TestSpawnStartUsesInjectedClock(t *testing.T) {
 		stubRefresh: stubRefresher{}, // active=false → run() is a no-op
 		runCtx: runCtx{
 			key:       "feishu:private:u-spawn-clock",
-			job:       j,
+			jobID:     j.ID,
 			snap:      jobSnapshot{jobID: j.ID},
 			runID:     "r-spawn-clock",
 			startedAt: fixed,

@@ -45,18 +45,13 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 	if s.stopped.Load() {
 		return "", ErrSchedulerStopped
 	}
-	s.tbl.mu.RLock()
-	j, ok := s.tbl.jobs[jobID]
+	cur, ok := s.tbl.snapshot(jobID)
 	if !ok {
-		s.tbl.mu.RUnlock()
 		return "", ErrJobNotFound
 	}
-	if !placementIsSandbox(j.Placement) {
-		s.tbl.mu.RUnlock()
+	if !placementIsSandbox(cur.Placement) {
 		return "", ErrJobNotSandbox
 	}
-	jobCopy := j // pointer is stable; snapshotJob re-reads under lock below
-	s.tbl.mu.RUnlock()
 
 	if s.sandbox == nil {
 		return "", ErrSandboxUnavailable
@@ -128,7 +123,7 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 		return "", ErrSchedulerStopped
 	}
 	s.triggerWG.Add(1)
-	newRunID, derr := s.dispatchReplay(jobCopy, prompt, man.Model, origRunID)
+	newRunID, derr := s.dispatchReplay(jobID, prompt, man.Model, origRunID)
 	if derr != nil {
 		// Pre-spawn failure (CAS lost / generate failed): undo the registration; once
 		// spawned, the goroutine owns Done.
@@ -150,12 +145,12 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 // Returns (newRunID, nil) once the run goroutine is spawned; (–, err) on a
 // pre-spawn failure (CAS lost, run-id generation) so the caller can undo its
 // triggerWG.Add. The spawned goroutine owns the triggerWG.Done.
-func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (string, error) {
+func (s *Scheduler) dispatchReplay(jobID, prompt, model, origRunID string) (string, error) {
 	// Per-job CAS gate: a replay must not overlap a tick / manual trigger / another
 	// replay. acquire is called directly (not via execAcquireSlot) so an
 	// operator-initiated replay gets a clean 409 instead of a phantom
 	// overlap-skip frame.
-	inflight, won := s.gate.acquire(j.ID)
+	inflight, won := s.gate.acquire(jobID)
 	if !won {
 		return "", ErrReplayInFlight
 	}
@@ -177,7 +172,12 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 
 	// Snapshot the job's CURRENT routing fields (notify target, label, placement);
 	// the PAYLOAD is the snapshot's, injected below.
-	snap := s.snapshotJob(j)
+	snap, ok := s.tbl.runSnapshot(jobID)
+	if !ok {
+		// Deleted since the checks above; release the gate we just won.
+		inflight.running.Store(false)
+		return "", ErrJobNotFound
+	}
 	notifyTo := s.resolveNotifyTarget(snap.platName, snap.chatID, snap.notifyPlat, snap.notifyChat, snap.notify)
 
 	s.emitRunStarted(RunStartedEvent{
@@ -203,7 +203,7 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 		// runScaffold owns the finalizer/gauge defers and the completed-guarded panic
 		// recover (shared with executeOpt); onPanic runs only after the scaffold has
 		// finalized (#2174, #2094).
-		rc := runCtx{job: j, snap: replaySnap, runID: runID, startedAt: startedAt, trigger: TriggerManual, notifyTo: notifyTo, inflight: inflight, finalizer: finalizer, lg: lg, term: &runTerm{}}
+		rc := runCtx{jobID: jobID, snap: replaySnap, runID: runID, startedAt: startedAt, trigger: TriggerManual, notifyTo: notifyTo, inflight: inflight, finalizer: finalizer, lg: lg, term: &runTerm{}}
 		runScaffold{
 			finalizer: finalizer,
 			jobID:     snap.jobID,

@@ -103,7 +103,7 @@ func TestScheduler_RunJobPropagatesBackendToAgentOpts(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				s.executeOpt(j, true)
+				s.executeOpt(j.ID, true)
 			}()
 			select {
 			case <-done:

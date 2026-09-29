@@ -54,8 +54,7 @@ func TestJobSnapshotCoversExecuteFields(t *testing.T) {
 		FreshContext:   true,
 	}
 
-	s := &Scheduler{}
-	snap := s.snapshotJob(j)
+	snap := snapshotJobLocked(j)
 
 	if snap.jobID != j.ID {
 		t.Errorf("jobID: got %q want %q", snap.jobID, j.ID)
@@ -106,19 +105,15 @@ func TestJobSnapshotCoversExecuteFields(t *testing.T) {
 	}
 	// nil Notify must round-trip as nil (tri-state "unset").
 	jNil := &Job{ID: "0123456789abcdef", Schedule: "@every 5m", Prompt: "p", Platform: "feishu", ChatID: "c"}
-	if snapNil := s.snapshotJob(jNil); snapNil.notify != nil {
+	if snapNil := snapshotJobLocked(jNil); snapNil.notify != nil {
 		t.Errorf("notify: nil Job.Notify must snapshot as nil, got %v", *snapNil.notify)
 	}
 }
 
 // TestSnapshotJobLockedMirrorsSnapshotJob is the R20260528-PERF-2 (#1351)
-// fold contract test. snapshotJobLocked is the lock-held variant
-// executeOpt's jitter block uses to fold the post-jitter recheck and
-// snapshot copy into one RLock window. Any divergence between the two
-// outputs would mean the jitter path observes a different view of *j
-// than the no-jitter path — silent semantic drift the existing
-// snapshotJob test would not catch since it only exercises the
-// public method.
+// fold contract test: the jitter path's runSnapshotIfLive (recheck and
+// snapshot in one lock hold) and the no-jitter path's runSnapshot must yield
+// the same view of the job, or the two execute paths drift apart silently.
 func TestSnapshotJobLockedMirrorsSnapshotJob(t *testing.T) {
 	tru := true
 	j := &Job{
@@ -136,14 +131,14 @@ func TestSnapshotJobLockedMirrorsSnapshotJob(t *testing.T) {
 		FreshContext:   true,
 	}
 
-	s := &Scheduler{}
-	viaPublic := s.snapshotJob(j)
-
-	// snapshotJobLocked requires the caller to hold s.tbl.mu — emulate
-	// executeOpt's jitter block by RLock straddling the call.
-	s.tblForTest().mu.RLock()
-	viaLocked := snapshotJobLocked(j)
-	s.tblForTest().mu.RUnlock()
+	// The no-jitter path snapshots with runSnapshot, the jitter path with
+	// runSnapshotIfLive (recheck and snapshot in one lock hold).
+	tbl := tableWith(t, j)
+	viaPublic, _ := tbl.runSnapshot(j.ID)
+	viaLocked, registered, paused := tbl.runSnapshotIfLive(j.ID)
+	if !registered || paused {
+		t.Fatalf("runSnapshotIfLive: registered=%v paused=%v, want a live job", registered, paused)
+	}
 
 	if viaPublic.jobID != viaLocked.jobID ||
 		viaPublic.prompt != viaLocked.prompt ||
@@ -157,7 +152,7 @@ func TestSnapshotJobLockedMirrorsSnapshotJob(t *testing.T) {
 		viaPublic.label != viaLocked.label ||
 		viaPublic.fresh != viaLocked.fresh ||
 		viaPublic.lastSessionID != viaLocked.lastSessionID {
-		t.Fatalf("snapshotJobLocked diverged from snapshotJob:\n  public=%+v\n  locked=%+v",
+		t.Fatalf("runSnapshotIfLive diverged from runSnapshot:\n  public=%+v\n  locked=%+v",
 			viaPublic, viaLocked)
 	}
 	// R090135-PERF-003 (#1931): both paths alias j.Notify (alloc-free).

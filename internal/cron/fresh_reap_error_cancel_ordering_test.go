@@ -62,7 +62,7 @@ func TestFreshContextResetsOnSendError(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
+	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
@@ -118,7 +118,7 @@ func TestFreshContextResetsOnCancel(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
+	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())

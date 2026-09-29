@@ -31,6 +31,7 @@ package cron
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type jobTable struct {
@@ -188,6 +189,46 @@ func (t *jobTable) sessionIDs(ids []string, into map[string]struct{}) []string {
 		}
 	}
 	return ids
+}
+
+// runSnapshot returns the lock-free field snapshot a run works from
+// (jobSnapshot), taken in one lock hold.
+func (t *jobTable) runSnapshot(id string) (jobSnapshot, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	j, ok := t.jobs[id]
+	if !ok {
+		return jobSnapshot{}, false
+	}
+	return snapshotJobLocked(j), true
+}
+
+// runSnapshotIfLive is the delete/pause recheck and, when it passes, the run
+// snapshot, in the SAME lock hold, so the snapshot reflects the instant the
+// recheck verified (#1351).
+func (t *jobTable) runSnapshotIfLive(id string) (snap jobSnapshot, registered, paused bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	j, ok := t.jobs[id]
+	if !ok {
+		return jobSnapshot{}, false, false
+	}
+	if j.Paused {
+		return jobSnapshot{}, true, true
+	}
+	return snapshotJobLocked(j), true, false
+}
+
+// scheduleFacts is what the jitter window is sized from: the schedule string,
+// the robfig entry ID and the period cached when the entry was registered.
+func (t *jobTable) scheduleFacts(id string) (schedule string, entryID cronEntryID, cachedPeriod time.Duration, ok bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	j, ok := t.jobs[id]
+	if !ok {
+		return "", 0, 0, false
+	}
+	return j.Schedule, j.entryID, j.cachedPeriod, true
 }
 
 // nextSaveSeq assigns the next snapshot sequence. Callers that already hold mu

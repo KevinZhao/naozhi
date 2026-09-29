@@ -69,7 +69,7 @@ func TestSpawnCtxCancelsWhenStopCtxCancels(t *testing.T) {
 	s.tblForTest().mu.Unlock()
 
 	done := make(chan struct{})
-	go func() { s.executeOpt(j, true); close(done) }()
+	go func() { s.executeOpt(j.ID, true); close(done) }()
 
 	select {
 	case <-router.entered:
@@ -106,7 +106,7 @@ func TestSpawnCtxCancelledBeforeSend(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 
 	select {
 	case doneAtSend := <-router.spawnDoneAtSend:

@@ -159,30 +159,26 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 // applyJitterAndRecheck performs the post-CAS jitter sleep and the post-jitter
 // delete/pause recheck for a scheduled (non-TriggerNow) run with jitter enabled.
 //
-// When the recheck passes, snap is the under-RLock snapshot of j and snapTaken
+// When the recheck passes, snap is the snapshot taken with it and snapTaken
 // is true so the caller skips the redundant snapshotJob. abort=true means a
 // DeleteJob / PauseJobByID landed during the jitter window; the caller MUST
 // return immediately (the deferred finalizer releases the inflight CAS + gauge).
 // Only invoked when !viaTriggerNow && s.jitterMax > 0, after inflight metadata
 // is populated (so setPhase(PhaseJittering) is the correct transition).
-func (s *Scheduler) applyJitterAndRecheck(j *Job, runID string, inflight *runInflight) (snap jobSnapshot, snapTaken bool, abort bool) {
+func (s *Scheduler) applyJitterAndRecheck(jobID string, runID string, inflight *runInflight) (snap jobSnapshot, snapTaken bool, abort bool) {
 	inflight.setPhase(PhaseJittering)
-	// Snapshot Schedule / entryID / cachedPeriod under s.tbl.mu.RLock so a concurrent
-	// UpdateJob cannot race the reads. The pre-parsed robfigcron.Schedule comes
-	// from s.cron.Entry(entryID) instead of re-parsing the schedule string;
-	// entryID==0 (not yet registered, e.g. tests) or a concurrently removed
-	// entry falls back to the string-parse path.
-	s.tbl.mu.RLock()
-	schedStr := j.Schedule
-	entryID := j.entryID
-	cachedPeriod := j.cachedPeriod
+	// Schedule / entryID / cachedPeriod come from one registry read, so a
+	// concurrent UpdateJob cannot tear them. The pre-parsed robfigcron.Schedule
+	// comes from s.cron.Entry(entryID) — outside the registry lock — instead of
+	// re-parsing the schedule string; entryID==0 (not yet registered, e.g.
+	// tests) or a concurrently removed entry falls back to the string parse.
+	schedStr, entryID, cachedPeriod, _ := s.tbl.scheduleFacts(jobID)
 	var parsedSched robfigcron.Schedule
 	if entryID != 0 && cachedPeriod <= 0 {
 		// Only fetch the parsed Schedule when the period cache is cold;
 		// registerJob populates cachedPeriod alongside entryID.
 		parsedSched = s.cron.Entry(entryID).Schedule
 	}
-	s.tbl.mu.RUnlock()
 	switch {
 	case cachedPeriod > 0:
 		// hot path — period was cached at registerJob time.
@@ -198,22 +194,16 @@ func (s *Scheduler) applyJitterAndRecheck(j *Job, runID string, inflight *runInf
 	// check ran BEFORE the sleep. The snapshot is taken under the SAME RLock
 	// when the recheck passes so it reflects the instant the recheck verified
 	// (#1351). jitter_test.go pins this recheck against silent removal.
-	s.tbl.mu.RLock()
-	cur, stillRegistered := s.tbl.jobs[j.ID]
-	paused := stillRegistered && cur.Paused
-	if stillRegistered && !paused {
-		snap = snapshotJobLocked(j)
-		snapTaken = true
-	}
-	s.tbl.mu.RUnlock()
+	snap, stillRegistered, paused := s.tbl.runSnapshotIfLive(jobID)
+	snapTaken = stillRegistered && !paused
 	if !stillRegistered {
 		slog.Debug("cron: job deleted during jitter window, aborting run",
-			"job_id", j.ID, "run_id", runID)
+			"job_id", jobID, "run_id", runID)
 		return jobSnapshot{}, false, true
 	}
 	if paused {
 		slog.Debug("cron: job paused during jitter window, aborting run",
-			"job_id", j.ID, "run_id", runID)
+			"job_id", jobID, "run_id", runID)
 		return jobSnapshot{}, false, true
 	}
 	return snap, snapTaken, false
@@ -276,29 +266,23 @@ func (s *Scheduler) resolveCronWorkspace(rc runCtx) (workDirForCLI string, abort
 // Phase badge switch points (dashboard reads runInflight.Phase): PhaseQueued in
 // execPopulateInflight, PhaseJittering in applyJitterAndRecheck, PhaseSpawning
 // in executeGetSession, PhaseSending in execSend. inflight_phase_test.go pins it.
-func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
+func (s *Scheduler) executeOpt(jobID string, viaTriggerNow bool) {
 	// Nil-router self-defence: the inflight CAS has not been taken yet, so an
 	// early return is safe; without it Reset/GetOrCreate would NPE deep in the
 	// run loop with CAS gates held.
 	if s == nil || s.router == nil {
-		slog.Error("cron: router is nil; skipping run",
-			"id", func() string {
-				if j == nil {
-					return ""
-				}
-				return j.ID
-			}())
+		slog.Error("cron: router is nil; skipping run", "id", jobID)
 		// Synthetic started→ended pair keeps dashboard counters consistent;
 		// errClass=router_missing distinguishes it from a real overlap (#1323).
-		if s != nil && j != nil {
-			s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassRouterMissing, "router unavailable", "router-missing")
+		if s != nil && jobID != "" {
+			s.emitSyntheticSkipped(jobID, viaTriggerNow, ErrClassRouterMissing, "router unavailable", "router-missing")
 		}
 		return
 	}
 	// The finalizer defer (runScaffold.run wrapping the WHOLE executeAcquired
 	// body) and the spawn-ctx defer (executeAcquired's frame) both fire at run
 	// end — moving either into a phase helper would fire it at helper return.
-	inflight, ok := s.execAcquireSlot(j, viaTriggerNow)
+	inflight, ok := s.execAcquireSlot(jobID, viaTriggerNow)
 	if !ok {
 		// CAS lost: execAcquireSlot already emitted the overlap-skip pair.
 		// No finalizer exists yet and the gauge was never incremented, so a
@@ -314,12 +298,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// be read as an interrupted run at the next boot. Before the started event
 	// nothing was announced, so there is nothing to close.
 	started := &runStarted{}
-	runScaffold{finalizer: finalizer, jobID: j.ID, onPanic: func(any) {
+	runScaffold{finalizer: finalizer, jobID: jobID, onPanic: func(any) {
 		if started.rc != nil {
 			s.finishRun(*started.rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, errMsg: "the run panicked"})
 		}
 	}}.run(func() {
-		s.executeAcquired(j, viaTriggerNow, inflight, finalizer, started)
+		s.executeAcquired(jobID, viaTriggerNow, inflight, finalizer, started)
 	})
 }
 
@@ -328,13 +312,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 // + inflight gauge) is armed. Every early `return` here lands in the scaffold's
 // defer, which releases the slot. Kept directly below executeOpt so the
 // source-anchor tests' whole-file ordering assumptions hold.
-func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInflight, finalizer *runFinalizer, started *runStarted) {
-	runID, startedAt, trigger, ok := s.execPopulateInflight(j, viaTriggerNow, inflight)
+func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *runInflight, finalizer *runFinalizer, started *runStarted) {
+	runID, startedAt, trigger, ok := s.execPopulateInflight(jobID, viaTriggerNow, inflight)
 	if !ok {
 		return
 	}
 
-	snap, notifyTo, lg, abortSnap := s.execSnapshotAndEmit(j, viaTriggerNow, runID, startedAt, trigger, inflight)
+	snap, notifyTo, lg, abortSnap := s.execSnapshotAndEmit(jobID, viaTriggerNow, runID, startedAt, trigger, inflight)
 	if abortSnap {
 		return
 	}
@@ -345,7 +329,7 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 	// as soon as the started event is out, so a panic from here on closes it.
 	rc := runCtx{
 		snap: snap, startedAt: startedAt, notifyTo: notifyTo,
-		runID: runID, trigger: trigger, job: j, lg: lg,
+		runID: runID, trigger: trigger, jobID: jobID, lg: lg,
 		finalizer: finalizer, inflight: inflight, term: &runTerm{},
 	}
 	started.rc = &rc
@@ -356,7 +340,7 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 	// snapshot so it carries the prompt/workDir the history row needs, and after
 	// the started event so a marker never outlives a run the dashboard never saw.
 	s.writeRunInflightMarker(runInflightMarker{
-		JobID:       j.ID,
+		JobID:       jobID,
 		RunID:       runID,
 		Trigger:     trigger,
 		StartedAtMS: startedAt.UnixMilli(),
@@ -426,15 +410,15 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 // after the CAS; the heavy run body does not need it.
 //
 // ok=false → the overlap skip pair was emitted; caller returns without cleanup.
-func (s *Scheduler) execAcquireSlot(j *Job, viaTriggerNow bool) (inflight *runInflight, ok bool) {
+func (s *Scheduler) execAcquireSlot(jobID string, viaTriggerNow bool) (inflight *runInflight, ok bool) {
 	// TriggerNow bypasses the cron chain's SkipIfStillRunning, so the runGate
 	// CAS is the uniform overlap guard for both paths.
-	inflight, won := s.gate.acquire(j.ID)
+	inflight, won := s.gate.acquire(jobID)
 	if !won {
-		slog.Info("cron: job already running, skipping overlap", "job_id", j.ID)
+		slog.Info("cron: job already running, skipping overlap", "job_id", jobID)
 		// Overlap is a skipped state (no LastRunAt update). Counters /
 		// broadcast still fire so dashboards can surface the skip.
-		s.emitOverlapSkipped(j, viaTriggerNow)
+		s.emitOverlapSkipped(jobID, viaTriggerNow)
 		return nil, false
 	}
 	return inflight, true
@@ -446,24 +430,24 @@ func (s *Scheduler) execAcquireSlot(j *Job, viaTriggerNow bool) (inflight *runIn
 // ok=false → a synthetic skip pair was emitted (or generateRunID failed with a
 // plain log) and the caller must return; the caller's finalizer defer handles
 // the CAS release + gauge decrement, so no cleanup happens here.
-func (s *Scheduler) execPopulateInflight(j *Job, viaTriggerNow bool, inflight *runInflight) (runID string, startedAt time.Time, trigger TriggerKind, ok bool) {
+func (s *Scheduler) execPopulateInflight(jobID string, viaTriggerNow bool, inflight *runInflight) (runID string, startedAt time.Time, trigger TriggerKind, ok bool) {
 	// Post-CAS paused/deleted recheck (#1322): the dispatch callers check under
 	// s.tbl.mu.RLock and release it BEFORE executeOpt, leaving a µs window where
 	// Pause/Delete can land; the jitter-window recheck does not cover TriggerNow
 	// or jitter==0 ticks. Recheck once here before any heavy work; the caller's
 	// finalizer defer releases the CAS on this early return.
-	stillRegisteredCAS, pausedCAS := s.tbl.liveness(j.ID)
+	stillRegisteredCAS, pausedCAS := s.tbl.liveness(jobID)
 	if !stillRegisteredCAS || pausedCAS {
-		casLg := slog.With("job_id", j.ID, "trigger_now", viaTriggerNow)
+		casLg := slog.With("job_id", jobID, "trigger_now", viaTriggerNow)
 		if !stillRegisteredCAS {
 			casLg.Debug("cron: job deleted between dispatch lookup and CAS, aborting run")
 			// Synthetic started→ended pair so subscribers see a complete
 			// lifecycle frame instead of a gap (#1410).
-			s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassDeletedConcurrent, "job deleted between dispatch and CAS", "deleted-during-dispatch")
+			s.emitSyntheticSkipped(jobID, viaTriggerNow, ErrClassDeletedConcurrent, "job deleted between dispatch and CAS", "deleted-during-dispatch")
 		} else {
 			casLg.Debug("cron: job paused between dispatch lookup and CAS, aborting run")
 			// Pause in the cross-lock window also gets a synthetic pair (#1410).
-			s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassPausedConcurrent, "job paused between dispatch and CAS", "paused-during-dispatch")
+			s.emitSyntheticSkipped(jobID, viaTriggerNow, ErrClassPausedConcurrent, "job paused between dispatch and CAS", "paused-during-dispatch")
 		}
 		return "", time.Time{}, "", false
 	}
@@ -476,7 +460,7 @@ func (s *Scheduler) execPopulateInflight(j *Job, viaTriggerNow bool, inflight *r
 		// crypto/rand 不可用时不能 panic：log + skip 该次 tick，下一周期自然恢复
 		// （getrandom 失效是瞬时的内核事件）。caller 的 defer 已覆盖 inflight 释放。
 		slog.Error("cron: failed to generate run ID; skipping tick",
-			"job_id", j.ID, "trigger_now", viaTriggerNow, "err", err)
+			"job_id", jobID, "trigger_now", viaTriggerNow, "err", err)
 		return "", time.Time{}, "", false
 	}
 	// Read via the injected clock so a fake clock can pin a deterministic run
@@ -502,7 +486,7 @@ func (s *Scheduler) execPopulateInflight(j *Job, viaTriggerNow bool, inflight *r
 // abort=true → the jitter-window recheck observed a delete/pause and already
 // drove its own finish path inside applyJitterAndRecheck; the caller returns
 // and its finalizer defer releases the slot.
-func (s *Scheduler) execSnapshotAndEmit(j *Job, viaTriggerNow bool, runID string, startedAt time.Time, trigger TriggerKind, inflight *runInflight) (snap jobSnapshot, notifyTo NotifyTarget, lg *slog.Logger, abort bool) {
+func (s *Scheduler) execSnapshotAndEmit(jobID string, viaTriggerNow bool, runID string, startedAt time.Time, trigger TriggerKind, inflight *runInflight) (snap jobSnapshot, notifyTo NotifyTarget, lg *slog.Logger, abort bool) {
 	// snapTaken tracks whether the jitter block already took the snapshot under
 	// the recheck's RLock; snapshotting twice could read a fresher UpdateJob than
 	// the recheck observed, breaking the "snapshot reflects the verified instant"
@@ -514,7 +498,7 @@ func (s *Scheduler) execSnapshotAndEmit(j *Job, viaTriggerNow bool, runID string
 	// TriggerNow skips jitter to preserve "run now = run now".
 	if !viaTriggerNow && s.jitterMax > 0 {
 		var abortJitter bool
-		snap, snapTaken, abortJitter = s.applyJitterAndRecheck(j, runID, inflight)
+		snap, snapTaken, abortJitter = s.applyJitterAndRecheck(jobID, runID, inflight)
 		if abortJitter {
 			return jobSnapshot{}, NotifyTarget{}, nil, true
 		}
@@ -523,7 +507,13 @@ func (s *Scheduler) execSnapshotAndEmit(j *Job, viaTriggerNow bool, runID string
 	// Snapshot mutable Job fields once under s.tbl.mu so the rest of the run is
 	// lock-free; concurrent SetJobPrompt/UpdateJob land for the next tick.
 	if !snapTaken {
-		snap = s.snapshotJob(j)
+		var ok bool
+		if snap, ok = s.tbl.runSnapshot(jobID); !ok {
+			// Deleted between the CAS and here: nothing to run, and no started
+			// frame is out yet, so there is nothing to close.
+			slog.Debug("cron: job deleted before snapshot, aborting run", "job_id", jobID, "run_id", runID)
+			return jobSnapshot{}, NotifyTarget{}, nil, true
+		}
 	}
 	inflight.setFresh(snap.fresh)
 
@@ -565,7 +555,7 @@ func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) 
 	// The ten values this used to take positionally are the run's identity block;
 	// rc is that block, built once by executeAcquired (Epic H #2546). Locals keep
 	// the body below unchanged.
-	j, snap, runID, startedAt, trigger := rc.job, rc.snap, rc.runID, rc.startedAt, rc.trigger
+	jobID, snap, runID, startedAt, trigger := rc.jobID, rc.snap, rc.runID, rc.startedAt, rc.trigger
 	lg, notifyTo, finalizer, inflight := rc.lg, rc.notifyTo, rc.finalizer, rc.inflight
 	// agentCommands/agents are published once at construction and read
 	// lock-free via configMaps(); a future hot-reload Store()s a fresh
@@ -591,7 +581,7 @@ func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) 
 		// budget, and keeping this ctx alive would hand later code a misleading one.
 		spawnCancel()
 		s.executeSandbox(sandboxExecArgs{
-			runCtx: runCtx{job: j, snap: snap, runID: runID, startedAt: startedAt, trigger: trigger, notifyTo: notifyTo, inflight: inflight, finalizer: finalizer, lg: lg},
+			runCtx: runCtx{jobID: jobID, snap: snap, runID: runID, startedAt: startedAt, trigger: trigger, notifyTo: notifyTo, inflight: inflight, finalizer: finalizer, lg: lg},
 			prompt: cleanText,
 			model:  opts.Model,
 		})
