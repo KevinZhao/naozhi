@@ -102,9 +102,14 @@ test('30s cap: trailing swipe/lift cannot cancel, hide the overlay or re-toast; 
   await expect(page.locator('#voice-overlay')).toHaveClass(/show/);
   await expect.poll(() => page.evaluate(() => voiceState)).toBe('recording');
 
-  // Hit the cap while the finger is still down. Tick twice: before the fix
-  // the interval kept firing and every tick re-toasted + hid the overlay.
-  await page.evaluate(() => { voiceRecStart = Date.now() - (MAX_REC_SECS + 1) * 1000; updateVoiceTimer(); updateVoiceTimer(); });
+  // Hit the cap while the finger is still down: the clock reads past the cap
+  // for two ticks. Before the fix the interval kept firing and every tick
+  // re-toasted + hid the overlay.
+  await page.evaluate(() => {
+    const realNow = Date.now;
+    Date.now = () => realNow() + (MAX_REC_SECS + 1) * 1000;
+    try { updateVoiceTimer(); updateVoiceTimer(); } finally { Date.now = realNow; }
+  });
   expect(await page.evaluate(() => voiceRecTimer)).toBeNull();
   expect(await page.evaluate(() => window.__toasts.filter(m => m.indexOf('已达最长') === 0).length)).toBe(1);
 

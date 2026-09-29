@@ -9,7 +9,7 @@
 // module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureMsgNav(), called from dashboard's module body.
 import { selection, sessionList, ui } from './state.js';
-import { esc, nzViews, nzTest } from './nz_util.js';
+import { esc, nzViews } from './nz_util.js';
 
 const deps = {
   closeHistoryPopover: null,
@@ -30,18 +30,22 @@ export function configureMsgNav(impl) {
 }
 
 // --- Message navigation ---
-let navUserEls = [];
 let navPopoverCloseHandler = null;
-// #1772: synchronous "is the nav popover mounted" flag. Set true the moment the
-// popover is appended, false when dismissed. Lets the per-scroll-tick handler
-// skip a getElementById on the common (no-popover) path without the race of
-// reading navPopoverCloseHandler, which is only assigned in a deferred
-// setTimeout(0) after mount.
-let navPopoverOpen = false;
-let navIdx = -1; // -1 = not navigating
+// navState is the navigation position, exported for the e2e suite
+// (test/e2e/e2e-shim.js); this module is its only writer.
+export const navState = {
+  userEls: [],
+  // #1772: synchronous "is the nav popover mounted" flag. Set true the moment
+  // the popover is appended, false when dismissed. Lets the per-scroll-tick
+  // handler skip a getElementById on the common (no-popover) path without the
+  // race of reading navPopoverCloseHandler, which is only assigned in a
+  // deferred setTimeout(0) after mount.
+  popoverOpen: false,
+  idx: -1, // -1 = not navigating
+};
 
 function navRebuild() {
-  navIdx = -1;
+  navState.idx = -1;
   navSync();
 }
 
@@ -49,8 +53,8 @@ function navRebuild() {
 // keeping the position while it still exists. The list and position are
 // this module's state: other modules call this rather than writing them.
 function navSync() {
-  navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-  if (navIdx >= navUserEls.length) navIdx = -1;
+  navState.userEls = [...document.querySelectorAll('#events-scroll .event.user')];
+  if (navState.idx >= navState.userEls.length) navState.idx = -1;
   navUpdatePill();
 }
 
@@ -60,11 +64,11 @@ function navSync() {
 // every user message, or -1 when there are none.
 function navCurrentIdxFromScroll() {
   const scroller = document.getElementById('events-scroll');
-  if (!scroller || navUserEls.length === 0) return -1;
+  if (!scroller || navState.userEls.length === 0) return -1;
   const anchor = scroller.getBoundingClientRect().top + scroller.clientHeight * 0.3;
   let lastAbove = -1;
-  for (let i = 0; i < navUserEls.length; i++) {
-    const top = navUserEls[i].getBoundingClientRect().top;
+  for (let i = 0; i < navState.userEls.length; i++) {
+    const top = navState.userEls[i].getBoundingClientRect().top;
     if (top <= anchor) lastAbove = i;
     else break;
   }
@@ -72,33 +76,33 @@ function navCurrentIdxFromScroll() {
 }
 
 function navMsg(dir) {
-  if (navUserEls.length === 0) return;
+  if (navState.userEls.length === 0) return;
   // Shell-history 语义：第一次按方向键只定位到「视图锚点」消息本身
   // （prev → 最近一条用户消息；next → 视图内第一条用户消息），
-  // 不额外再走一步。只有已在导航中（navIdx >= 0）时才做 ±1 步进。
-  const firstPress = navIdx < 0;
-  if (firstPress) navIdx = navCurrentIdxFromScroll();
+  // 不额外再走一步。只有已在导航中（navState.idx >= 0）时才做 ±1 步进。
+  const firstPress = navState.idx < 0;
+  if (firstPress) navState.idx = navCurrentIdxFromScroll();
   let target;
   if (dir === 'prev') {
     target = firstPress
-      ? (navIdx < 0 ? navUserEls.length - 1 : navIdx)
-      : Math.max(0, navIdx - 1);
+      ? (navState.idx < 0 ? navState.userEls.length - 1 : navState.idx)
+      : Math.max(0, navState.idx - 1);
   } else {
     target = firstPress
-      ? (navIdx < 0 ? 0 : navIdx)
-      : Math.min(navUserEls.length - 1, navIdx + 1);
+      ? (navState.idx < 0 ? 0 : navState.idx)
+      : Math.min(navState.userEls.length - 1, navState.idx + 1);
   }
-  if (!firstPress && target === navIdx) {
+  if (!firstPress && target === navState.idx) {
     // Already at the edge — flash the current one so the user sees the no-op.
-    const cur = navUserEls[navIdx];
+    const cur = navState.userEls[navState.idx];
     if (cur) {
       cur.classList.add('nav-highlight');
       setTimeout(() => cur.classList.remove('nav-highlight'), 600);
     }
     return;
   }
-  navIdx = target;
-  const el = navUserEls[navIdx];
+  navState.idx = target;
+  const el = navState.userEls[navState.idx];
   if (!el) return;
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   // highlight flash
@@ -112,22 +116,22 @@ function navUpdatePill() {
   const pill = document.getElementById('nav-pill');
   const counter = document.getElementById('nav-counter');
   if (!pill) return;
-  if (navUserEls.length < 2) {
+  if (navState.userEls.length < 2) {
     pill.classList.remove('visible');
     return;
   }
   pill.classList.add('visible');
-  if (navIdx < 0) {
-    counter.textContent = navUserEls.length;
+  if (navState.idx < 0) {
+    counter.textContent = navState.userEls.length;
   } else {
-    counter.textContent = (navIdx + 1) + '/' + navUserEls.length;
+    counter.textContent = (navState.idx + 1) + '/' + navState.userEls.length;
   }
 }
 
 function navDismissPopover() {
   const pop = document.getElementById('nav-list-popover');
   if (pop) pop.remove();
-  navPopoverOpen = false;
+  navState.popoverOpen = false;
   if (navPopoverCloseHandler) {
     document.removeEventListener('click', navPopoverCloseHandler);
     navPopoverCloseHandler = null;
@@ -135,13 +139,13 @@ function navDismissPopover() {
 }
 
 function navShowList() {
-  if (navUserEls.length === 0) return;
+  if (navState.userEls.length === 0) return;
   let existing = document.getElementById('nav-list-popover');
   if (existing) { navDismissPopover(); return; } // toggle off
-  const items = navUserEls.map((el, i) => {
+  const items = navState.userEls.map((el, i) => {
     const txt = (el.querySelector('.event-content')?.textContent || '').trim();
     const summary = txt.length > 50 ? txt.slice(0, 50) + '...' : txt;
-    const active = i === navIdx ? ' class="nz-accent-strong"' : '';
+    const active = i === navState.idx ? ' class="nz-accent-strong"' : '';
     return '<div class="nav-list-item" data-idx="' + i + '"' + active + '>' +
       '<span class="nz-faint-lead">' + (i+1) + '.</span>' + esc(summary) + '</div>';
   });
@@ -152,14 +156,14 @@ function navShowList() {
   popover.style.cssText = 'position:absolute;right:44px;bottom:0;width:' + maxW + 'px;max-height:300px;overflow-y:auto;background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:10px;padding:6px 0;z-index:11;font-size:13px;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent';
   popover.innerHTML = items.join('');
   pill.appendChild(popover);
-  navPopoverOpen = true;
+  navState.popoverOpen = true;
   popover.querySelectorAll('.nav-list-item').forEach(item => {
     item.style.cssText += 'padding:8px 12px;cursor:pointer;color:var(--nz-text);transition:background .1s;border-bottom:1px solid var(--nz-bg-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
     item.onmouseenter = () => item.style.background = 'var(--nz-hover-bg)';
     item.onmouseleave = () => item.style.background = '';
     item.onclick = () => {
-      navIdx = parseInt(item.dataset.idx);
-      const el = navUserEls[navIdx];
+      navState.idx = parseInt(item.dataset.idx);
+      const el = navState.userEls[navState.idx];
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
         document.querySelectorAll('.event.nav-highlight').forEach(e => e.classList.remove('nav-highlight'));
@@ -196,16 +200,16 @@ function navShowList() {
       // #1772: only touch the DOM to dismiss the nav popover when one is
       // actually open, skipping a per-scroll-tick getElementById on the
       // overwhelmingly common path (no popover) during inertial scrolling.
-      if (navPopoverOpen) navDismissPopover();
+      if (navState.popoverOpen) navDismissPopover();
       if (scrollResetTimer) clearTimeout(scrollResetTimer);
       scrollResetTimer = setTimeout(() => {
-        if (navIdx < 0 || !navUserEls[navIdx]) return;
+        if (navState.idx < 0 || !navState.userEls[navState.idx]) return;
         const scrollerRect = el.getBoundingClientRect();
-        const targetRect = navUserEls[navIdx].getBoundingClientRect();
+        const targetRect = navState.userEls[navState.idx].getBoundingClientRect();
         const targetCenter = targetRect.top + targetRect.height / 2;
         const viewportCenter = scrollerRect.top + scrollerRect.height / 2;
         if (Math.abs(targetCenter - viewportCenter) > scrollerRect.height / 2) {
-          navIdx = -1;
+          navState.idx = -1;
           navUpdatePill();
         }
       }, 300);
@@ -457,11 +461,3 @@ export {
   navUpdatePill,
   updateSendButton,
 };
-
-// nz.test surface for the Playwright specs (#2557 PR-E3 pattern) — the
-// bindings live here now, so only this module can offer working setters.
-Object.defineProperties(nzTest, {
-  navIdx: { get: function () { return navIdx; }, set: function (v) { navIdx = v; }, configurable: true },
-  navUserEls: { get: function () { return navUserEls; }, set: function (v) { navUserEls = v; }, configurable: true },
-  navPopoverOpen: { get: function () { return navPopoverOpen; }, set: function (v) { navPopoverOpen = v; }, configurable: true },
-});
