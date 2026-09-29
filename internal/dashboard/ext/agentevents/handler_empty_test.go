@@ -28,7 +28,7 @@ func TestAgentEvents_EmptyTranscriptReturnsEmptyArray(t *testing.T) {
 		JSONLPath:       path,
 		Subagent:        "worker",
 	}})
-	h := &Handler{linkerFor: func(string) agentlink.AgentLinker { return linker }}
+	h := &Handler{linkerFor: func(string) agentlink.AgentLinker { return linker }, allowedRoot: claudeProjectsAllowedRoot()}
 
 	w := httptest.NewRecorder()
 	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", "", ""))

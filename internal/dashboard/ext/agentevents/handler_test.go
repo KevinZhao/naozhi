@@ -86,6 +86,7 @@ func TestAgentEvents_Happy(t *testing.T) {
 	}})
 
 	h := &Handler{
+		allowedRoot: claudeProjectsAllowedRoot(),
 		linkerFor: func(k string) agentlink.AgentLinker {
 			if k != testAgentEventsKey {
 				return nil
@@ -192,7 +193,8 @@ func TestAgentEvents_AfterFilter(t *testing.T) {
 	}})
 
 	h := &Handler{
-		linkerFor: func(k string) agentlink.AgentLinker { return linker },
+		allowedRoot: claudeProjectsAllowedRoot(),
+		linkerFor:   func(k string) agentlink.AgentLinker { return linker },
 	}
 	// after=2026-05-10T10:00:03Z → only line2 should remain. Parse as ms.
 	// 2026-05-10T10:00:03Z = 1778407203000
@@ -467,5 +469,23 @@ func TestAgentEvents_JSONLPathUnderAllowedRoot_Accepted(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s — legitimate JSONLPath under allowedRoot must be accepted [R112714-SEC-3]",
 			w.Code, w.Body.String())
+	}
+}
+
+// An empty allowed root rejects every path (404), as documented: it must not
+// switch the containment check off.
+func TestAgentEvents_EmptyAllowedRootFailsClosed(t *testing.T) {
+	dir := claudeProjectsTestRoot(t)
+	path := writeTranscript(t, dir, "ddddddddddddddddd", nil)
+	linker := subagent.NewLinker()
+	linker.SeedFromHistory([]clievent.EventEntry{{
+		Type: "task_start", ToolUseID: "toolu_T", TaskID: "t1",
+		InternalAgentID: "agent-ddddddddddddddddd", JSONLPath: path, Subagent: "worker",
+	}})
+	h := &Handler{linkerFor: func(string) agentlink.AgentLinker { return linker }}
+	w := httptest.NewRecorder()
+	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", "", ""))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404 with no allowed root", w.Code)
 	}
 }
