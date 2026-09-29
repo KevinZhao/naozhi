@@ -113,14 +113,14 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 			} else {
 				w.Header().Set("X-Events-Has-More", "0")
 			}
-			httputil.WriteJSON(w, page)
+			httputil.WriteJSON(w, clievent.ForWire(page))
 			return
 		}
 		// Page cap so legacy peers still yield a consistent-size payload.
 		if limit > 0 && len(entries) > limit {
 			entries = entries[len(entries)-limit:]
 		}
-		httputil.WriteJSON(w, entries)
+		httputil.WriteJSON(w, clievent.ForWire(entries))
 		return
 	}
 
@@ -180,5 +180,5 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		entries = sess.EventEntries()
 	}
 
-	httputil.WriteJSON(w, entries)
+	httputil.WriteJSON(w, clievent.ForWire(entries))
 }

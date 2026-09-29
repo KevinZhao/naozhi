@@ -50,10 +50,10 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []clievent
 	// lastTime so the cache always misses; skip the sync.Map + mutex round-trip.
 	// count != 1 falls through to the cached path.
 	if h.singleSubscriber(key) {
-		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: redactEntrySecrets(entries)}))
+		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: entries}))
 	}
 	data, _, err := h.historyMarshalCache.getOrMarshal(key, lastTime, entries, func() ([]byte, error) {
-		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: redactEntrySecrets(entries)}))
+		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: entries}))
 	})
 	return data, err
 }
