@@ -17,7 +17,7 @@ func TestRegisterJob_PopulatesCachedPeriod(t *testing.T) {
 	t.Parallel()
 
 	s := &Scheduler{
-		tbl:  newJobTable(),
+		tbl:  newJobTable(nil),
 		cron: robfigcron.New(robfigcron.WithParser(cronParser)),
 	}
 
@@ -51,7 +51,7 @@ func TestRegisterJob_CachedPeriodConsistentWithSched(t *testing.T) {
 	t.Parallel()
 
 	s := &Scheduler{
-		tbl:  newJobTable(),
+		tbl:  newJobTable(nil),
 		cron: robfigcron.New(robfigcron.WithParser(cronParser)),
 	}
 

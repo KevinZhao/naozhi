@@ -21,14 +21,14 @@ func (t *jobTable) indexLocked(j *Job) {
 	key := chatKeyFor(j.Platform, j.ChatID)
 	t.chatJobCount[key]++
 	t.jobsByChat[key] = append(t.jobsByChat[key], j)
-	t.insertSortedID(j.ID)
+	t.insertSortedIDLocked(j.ID)
 }
 
-// insertSortedID keeps t.sortedJobIDs ascending via binary-search insert
+// insertSortedIDLocked keeps t.sortedJobIDs ascending via binary-search insert
 // so marshalLocked can iterate without re-sorting on every persist.
 // Idempotent on a duplicate ID so a malformed disk load keeps the slice 1:1
 // with the map. Caller must hold t.mu.Lock() (#1598).
-func (t *jobTable) insertSortedID(id string) {
+func (t *jobTable) insertSortedIDLocked(id string) {
 	i, found := slices.BinarySearch(t.sortedJobIDs, id)
 	if found {
 		return
@@ -36,10 +36,10 @@ func (t *jobTable) insertSortedID(id string) {
 	t.sortedJobIDs = slices.Insert(t.sortedJobIDs, i, id)
 }
 
-// removeSortedID drops id from t.sortedJobIDs preserving order. No-op if
+// removeSortedIDLocked drops id from t.sortedJobIDs preserving order. No-op if
 // absent so a double-delete (rollback path) cannot panic. Caller must hold
 // t.mu.Lock().
-func (t *jobTable) removeSortedID(id string) {
+func (t *jobTable) removeSortedIDLocked(id string) {
 	if i, found := slices.BinarySearch(t.sortedJobIDs, id); found {
 		t.sortedJobIDs = slices.Delete(t.sortedJobIDs, i, i+1)
 	}
@@ -62,7 +62,7 @@ func (t *jobTable) deleteLocked(j *Job) (removeEntryID cronEntryID) {
 		delete(t.jobs, j.ID)
 		// Paired removal from the sorted-ID slice, guarded by the same
 		// membership check so a double-delete cannot disturb it.
-		t.removeSortedID(j.ID)
+		t.removeSortedIDLocked(j.ID)
 		// Paired decrement for the per-chat counter; the membership guard keeps
 		// a double-delete from driving it negative (which would silently disable
 		// the per-chat cap). Drop the key at zero so the map tracks live chats.

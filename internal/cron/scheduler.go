@@ -270,7 +270,6 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 				robfigcron.SkipIfStillRunning(cronLogger),
 			),
 		),
-		tbl:    newJobTable(),
 		router: deps.Router,
 		// notifySender / agents / agentCommands are published via configMapsPtr below.
 		storePath:      cfg.StorePath,
@@ -300,9 +299,10 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		// Tests swap a fake via the withClock seam.
 		clock: defaultClock,
 	}
-	// Seed so marshalLocked never Load()s nil.
+	// Seed so marshalLocked never Load()s nil. The table takes the slot's
+	// address, so it is built once s exists.
 	s.marshalJobs.Store(&defaultMarshalJobs)
-	s.tbl.marshal = &s.marshalJobs
+	s.tbl = newJobTable(&s.marshalJobs)
 	s.watchdogInterruptTimeoutNanos.Store(int64(watchdogInterruptTimeoutDefault))
 	// maps.Clone severs the alias to the caller-supplied maps so post-Start
 	// mutation of deps.* cannot race the lock-free readers (#506, #991).

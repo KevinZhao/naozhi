@@ -10,7 +10,7 @@ import (
 // tableWith returns a table holding jobs, indexed as the add path indexes them.
 func tableWith(t *testing.T, jobs ...*Job) *jobTable {
 	t.Helper()
-	tbl := newJobTable()
+	tbl := newJobTable(nil)
 	tbl.mu.Lock()
 	for _, j := range jobs {
 		tbl.jobs[j.ID] = j
@@ -124,7 +124,7 @@ func TestEnsureStub_RegistersFromTheJobCopy(t *testing.T) {
 
 // jobExists answers from the registry (the COR-001 TOCTOU re-check).
 func TestJobExists(t *testing.T) {
-	s := &Scheduler{tbl: newJobTable()}
+	s := &Scheduler{tbl: newJobTable(nil)}
 	s.tbl.mu.Lock()
 	s.tbl.jobs["a"] = &Job{ID: "a"}
 	s.tbl.mu.Unlock()

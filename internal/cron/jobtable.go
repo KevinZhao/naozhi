@@ -64,13 +64,16 @@ type jobTable struct {
 	// storeMu after a newer one and overwrite it on disk.
 	saveSeq atomic.Uint64
 	// marshal is the Scheduler's serializer slot (marshalJobsFn), which tests
-	// swap to exercise persist failures. A pointer to it, set once by
-	// NewScheduler; nil means the production serializer.
+	// swap to exercise persist failures. Fixed at construction; nil means the
+	// production serializer.
 	marshal *atomic.Pointer[marshalJobsFn]
 }
 
-func newJobTable() jobTable {
+// newJobTable returns an empty table persisting through marshal (nil: the
+// production serializer).
+func newJobTable(marshal *atomic.Pointer[marshalJobsFn]) jobTable {
 	return jobTable{
+		marshal:      marshal,
 		jobs:         make(map[string]*Job),
 		chatJobCount: make(map[chatJobKey]int),
 		jobsByChat:   make(map[chatJobKey][]*Job),
@@ -234,7 +237,3 @@ func (t *jobTable) scheduleFacts(id string) (schedule string, entryID cronEntryI
 	}
 	return j.Schedule, j.entryID, j.cachedPeriod, true
 }
-
-// nextSaveSeq assigns the next snapshot sequence. Callers that already hold mu
-// use saveSeq.Add directly; this exists for the paths that do not.
-func (t *jobTable) nextSaveSeq() uint64 { return t.saveSeq.Add(1) }
