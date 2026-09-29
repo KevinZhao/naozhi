@@ -2139,6 +2139,7 @@ func TestResolveResumeID(t *testing.T) {
 		{"jsonl in wrong workspace downgrades (work_dir edit regression)",
 			"claude", claudeDir, kiroDir, workspaceB, okID, ""},
 		{"legacy empty backend uses claude layout", "", claudeDir, kiroDir, workspaceA, okID, okID},
+		{"legacy empty backend downgrades a missing claude jsonl", "", claudeDir, kiroDir, workspaceA, missingID, ""},
 
 		// kiro branch (incident 2026-07-14): probe <kiroSessionsDir>/<sid>.json,
 		// never the claude projects slug — workspace must not participate.

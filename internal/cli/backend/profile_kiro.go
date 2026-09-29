@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"path/filepath"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -27,6 +28,15 @@ func kiroProfile() Profile {
 		// ~/.kiro/sessions/cli/<sid>.json[l]: JSON sidecar + JSONL transcript,
 		// consumed by internal/history/kirojsonl ("~/" kept for doctor display).
 		HistoryDir: "~/.kiro/sessions/cli/",
+		// ACP session/load reads <dir>/<sid>.json, keyed by session UUID with
+		// no workspace component. A stale .lock does not block a resume (kiro
+		// recovers stale-PID locks).
+		ResumeTarget: func(dir, _, _, sessionID string) string {
+			if dir == "" {
+				return ""
+			}
+			return filepath.Join(dir, sessionID+".json")
+		},
 		// Per-turn metering accrues as ACP "credits", not dollars.
 		CostUnit: "credits",
 		// askuser: no ACP equivalent; passthrough: no replay-user-messages →

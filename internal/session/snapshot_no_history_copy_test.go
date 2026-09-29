@@ -46,7 +46,7 @@ func TestSnapshot_DoesNotCopyPersistedHistory(t *testing.T) {
 	}
 
 	// Warm: first call may pay one-time costs (parseKeyParts sync.Once,
-	// costUnitForBackendOnce). Subsequent calls are the steady-state path.
+	// backendProfileOnce). Subsequent calls are the steady-state path.
 	_ = s.Snapshot()
 
 	allocs := testing.AllocsPerRun(50, func() {
