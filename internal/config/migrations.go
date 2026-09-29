@@ -1,20 +1,11 @@
 package config
 
-// Schema migrations: how a deprecated key actually LEAVES an operator's
-// config.yaml.
+// Schema migrations: how a deprecated key leaves an operator's config.yaml.
 //
-// Before this, four renames/removals were handled at load time only — nodes →
-// workspaces, session.workspace → session.cwd, the dead session.auto_chain
-// block, and `--append-system-prompt` inside agents[].args. Every one of them
-// reported itself on every boot and then stayed on disk forever, because nothing
-// could rewrite the file. CurrentSchemaVersion existed but only ever refused a
-// NEWER version; there were zero migration functions.
-//
-// The load path is unchanged: a v1 document still loads, still gets the
-// in-memory rename, still reports the diag. What is new is that
-// `naozhi config migrate --write` can apply the same rewrites to the FILE and
-// bump its schema_version, after which those diags stop because the deprecated
-// keys are gone.
+// The load path accepts the deprecated spellings in memory and reports each as
+// a diag; `naozhi config migrate -write` applies the same rewrites to the FILE
+// and bumps its schema_version, after which those diags stop because the
+// deprecated keys are gone.
 //
 // Migrations operate on a yaml.Node document, not on Config: the point is to
 // preserve the operator's comments, key order and formatting. A migration that
@@ -77,11 +68,8 @@ var migrations = []migration{
 // MigrateDocument runs every migration from the document's schema_version up to
 // CurrentSchemaVersion, in order, and bumps schema_version to match. It returns
 // the descriptions of the migrations that changed something, so a caller can
-// print what it would do (or did).
-//
-// A document with no schema_version is treated as CurrentSchemaVersion, exactly
-// as the load path treats it: absent means "current", so an unversioned file is
-// not silently rewritten by a future migration it was never written for.
+// print what it would do (or did). A document without schema_version starts
+// at unversionedSchema.
 func MigrateDocument(root *yaml.Node) (applied []string, err error) {
 	if root == nil || root.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("config root is not a mapping")
@@ -122,8 +110,16 @@ func migrationFrom(v int) *migration {
 	return nil
 }
 
-// documentSchemaVersion reads schema_version from the document; absent is
-// CurrentSchemaVersion (the load path's rule).
+// unversionedSchema is the version a document without schema_version is
+// migrated from. Every config written before versioning has none, so absent is
+// the oldest shape, not the newest. Running every migration on it is safe
+// because each is a no-op on a document already in its target shape
+// (TestMigrations_AreNoOpsOnTheirTargetShape), and migrate writes only with
+// -write.
+const unversionedSchema = 1
+
+// documentSchemaVersion reads schema_version from the document; absent (or a
+// non-positive value) is unversionedSchema.
 func documentSchemaVersion(root *yaml.Node) (int, error) {
 	for i := 0; i+1 < len(root.Content); i += 2 {
 		if root.Content[i].Value != "schema_version" {
@@ -134,11 +130,11 @@ func documentSchemaVersion(root *yaml.Node) (int, error) {
 			return 0, fmt.Errorf("schema_version is not an integer: %w", err)
 		}
 		if v <= 0 {
-			return CurrentSchemaVersion, nil
+			return unversionedSchema, nil
 		}
 		return v, nil
 	}
-	return CurrentSchemaVersion, nil
+	return unversionedSchema, nil
 }
 
 // setSchemaVersion writes schema_version, adding it as the FIRST key when

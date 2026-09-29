@@ -160,16 +160,34 @@ agents:
 
 // An unversioned file is treated as current by the load path, so the migration
 // must not silently rewrite it for a migration it was never written for.
-func TestMigrateFile_UnversionedIsLeftAlone(t *testing.T) {
+func TestMigrateFile_UnversionedMigratesFromV1(t *testing.T) {
 	in := `session:
   workspace: "/home/u/work"
 `
 	got, applied := migrateGolden(t, in)
-	if got != in {
-		t.Errorf("an unversioned file must be left byte-identical\n--- got ---\n%s", got)
+	want := "schema_version: 2\nsession:\n  cwd: \"/home/u/work\"\n"
+	if got != want {
+		t.Errorf("every config written before versioning has no schema_version, so it migrates from v1\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
-	if len(applied) != 0 {
-		t.Errorf("applied = %v, want nothing", applied)
+	if len(applied) != 2 {
+		t.Errorf("applied = %v, want the v1 → v2 rewrite and the version bump", applied)
+	}
+}
+
+// Running the chain on a document already in a migration's target shape
+// changes nothing but the version: that is what makes migrating an
+// unversioned file from v1 safe even when it was written for a later version.
+func TestMigrations_AreNoOpsOnTheirTargetShape(t *testing.T) {
+	clean := "platforms:\n  weixin:\n    token: \"x\"\nworkspaces:\n  a:\n    url: \"https://a.example\"\nsession:\n  cwd: \"/w\"\n"
+	for _, m := range migrations {
+		var doc yaml.Node
+		if err := yaml.Unmarshal([]byte(clean), &doc); err != nil {
+			t.Fatal(err)
+		}
+		changed, err := m.Apply(doc.Content[0])
+		if err != nil || changed {
+			t.Errorf("migration from v%d on a clean document: changed=%v err=%v, want a no-op", m.From, changed, err)
+		}
 	}
 }
 
@@ -287,5 +305,52 @@ func TestMigrateFile_RefusesToProduceAnInvalidDocument(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(path); string(got) != before {
 		t.Errorf("the file must be untouched, got:\n%s", got)
+	}
+}
+
+// migrate and check agree: an unversioned file carrying deprecated keys is
+// reported by Load, and once migrated, Load reports none of them.
+func TestMigrate_ClearsWhatLoadReports(t *testing.T) {
+	in := `platforms:
+  weixin:
+    token: "x"
+nodes:
+  a:
+    url: "https://a.example"
+session:
+  workspace: "/home/u/work"
+  auto_chain:
+    enabled: true
+`
+	deprecated := func(body string) []string {
+		diags, _, err := collectLoadDiags(t, writeCfg(t, body))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		var keys []string
+		for _, d := range diags {
+			if d.Layer == "config-deprecated" {
+				keys = append(keys, d.Key)
+			}
+		}
+		return keys
+	}
+	if got := deprecated(in); len(got) < 2 {
+		t.Fatalf("Load reported %v for the unversioned file, want its deprecated keys", got)
+	}
+	migrated, applied := migrateGolden(t, in)
+	if len(applied) == 0 {
+		t.Fatal("migrate changed nothing on a file Load reports deprecated keys for")
+	}
+	if got := deprecated(migrated); len(got) != 0 {
+		t.Errorf("after migrate, Load still reports %v\n%s", got, migrated)
+	}
+}
+
+// schema_version: 0 is an unversioned file written with the key present.
+func TestMigrateFile_ZeroVersionMigratesFromV1(t *testing.T) {
+	got, _ := migrateGolden(t, "schema_version: 0\nsession:\n  workspace: \"/w\"\n")
+	if !strings.Contains(got, "cwd:") || !strings.Contains(got, "schema_version: 2") {
+		t.Errorf("schema_version 0 was not migrated from v1:\n%s", got)
 	}
 }
