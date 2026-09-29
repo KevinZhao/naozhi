@@ -28,7 +28,7 @@ func TestDashboardJS_RenameRepaintsHeaderOnly(t *testing.T) {
 	js := readDashboardJS(t)
 
 	for _, want := range []string{
-		`function mainHeaderHtml(s) {`,
+		`function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {`,
 		`function renderMainHeader() {`,
 		// Both shells must be built from the shared header builder.
 		"  main.innerHTML =\n    mainHeaderHtml(s) +",

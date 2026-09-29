@@ -1,0 +1,540 @@
+{
+  "responses": {
+    "sessions": {
+      "properties": {
+        "history_sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "discovery.RecentSession"
+          }
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "sessionview.SessionSnapshot"
+          }
+        },
+        "stats": {
+          "type": "object",
+          "$ref": "session.sessionStats"
+        }
+      },
+      "required": [
+        "sessions",
+        "stats"
+      ]
+    },
+    "sessions_multi": {
+      "properties": {
+        "history_sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "discovery.RecentSession"
+          }
+        },
+        "nodes": {
+          "type": "object"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "any"
+          }
+        },
+        "stats": {
+          "type": "object",
+          "$ref": "session.sessionStats"
+        }
+      },
+      "required": [
+        "nodes",
+        "sessions",
+        "stats"
+      ]
+    }
+  },
+  "defs": {
+    "clievent.MeteringEntry": {
+      "properties": {
+        "unit": {
+          "type": "string"
+        },
+        "unit_plural": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "unit",
+        "value"
+      ]
+    },
+    "discovery.RecentSession": {
+      "properties": {
+        "last_active": {
+          "type": "integer"
+        },
+        "last_prompt": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "retired_at": {
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "workspace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "last_active",
+        "session_id"
+      ]
+    },
+    "project.ChatBinding": {
+      "properties": {
+        "chat_id": {
+          "type": "string"
+        },
+        "chat_type": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chat_id",
+        "platform"
+      ]
+    },
+    "project.ProjectConfig": {
+      "properties": {
+        "access_profile": {
+          "type": "string"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "chat_bindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "project.ChatBinding"
+          }
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "emoji": {
+          "type": "string"
+        },
+        "favorite": {
+          "type": "boolean"
+        },
+        "git_remote": {
+          "type": "string"
+        },
+        "git_sync": {
+          "type": "boolean"
+        },
+        "memory_file": {
+          "type": "string"
+        },
+        "planner_model": {
+          "type": "string"
+        },
+        "planner_prompt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "git_sync"
+      ]
+    },
+    "ring.SubagentInfo": {
+      "properties": {
+        "activity": {
+          "type": "string"
+        },
+        "background": {
+          "type": "boolean"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "internal_agent_id": {
+          "type": "string"
+        },
+        "last_detail": {
+          "type": "string"
+        },
+        "last_tool": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "started_at_ms": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "task_type": {
+          "type": "string"
+        },
+        "tool_use_id": {
+          "type": "string"
+        },
+        "tool_uses": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "session.projectListEntry": {
+      "properties": {
+        "config": {
+          "type": "object",
+          "$ref": "project.ProjectConfig"
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "dir_mtime": {
+          "type": "integer"
+        },
+        "favorite": {
+          "type": "boolean"
+        },
+        "git_remote_url": {
+          "type": "string"
+        },
+        "github": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "stableKey": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "config",
+        "name",
+        "node",
+        "path"
+      ]
+    },
+    "session.sessionStats": {
+      "properties": {
+        "active": {
+          "type": "integer"
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "backend": {
+          "type": "string"
+        },
+        "cli_name": {
+          "type": "string"
+        },
+        "cli_version": {
+          "type": "string"
+        },
+        "default_workspace": {
+          "type": "string"
+        },
+        "max_procs": {
+          "type": "integer"
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "session.projectListEntry"
+          }
+        },
+        "ready": {
+          "type": "integer"
+        },
+        "running": {
+          "type": "integer"
+        },
+        "system": {
+          "type": "object"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "uptime": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        },
+        "version_tag": {
+          "type": "string"
+        },
+        "watchdog": {
+          "type": "object",
+          "$ref": "session.watchdogStats"
+        },
+        "workspace_id": {
+          "type": "string"
+        },
+        "workspace_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "active",
+        "agents",
+        "backend",
+        "cli_name",
+        "cli_version",
+        "default_workspace",
+        "max_procs",
+        "projects",
+        "ready",
+        "running",
+        "system",
+        "total",
+        "uptime",
+        "version",
+        "watchdog",
+        "workspace_id",
+        "workspace_name"
+      ]
+    },
+    "session.watchdogStats": {
+      "properties": {
+        "no_output_kills": {
+          "type": "integer"
+        },
+        "total_kills": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "no_output_kills",
+        "total_kills"
+      ]
+    },
+    "sessionview.OverlayFieldDrift": {
+      "properties": {
+        "current": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        },
+        "stored": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "current",
+        "field",
+        "stored"
+      ]
+    },
+    "sessionview.SessionSnapshot": {
+      "properties": {
+        "access_profile": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "chat_id": {
+          "type": "string"
+        },
+        "chat_type": {
+          "type": "string"
+        },
+        "cli_name": {
+          "type": "string"
+        },
+        "cli_version": {
+          "type": "string"
+        },
+        "context_usage_percent": {
+          "type": "number"
+        },
+        "cost_unit": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "death_reason": {
+          "type": "string"
+        },
+        "effort": {
+          "type": "string"
+        },
+        "is_planner": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "label_origin": {
+          "type": "string"
+        },
+        "last_active": {
+          "type": "integer"
+        },
+        "last_activity": {
+          "type": "string"
+        },
+        "last_prompt": {
+          "type": "string"
+        },
+        "last_response": {
+          "type": "string"
+        },
+        "message_count": {
+          "type": "integer"
+        },
+        "metering_usage": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "clievent.MeteringEntry"
+          }
+        },
+        "model": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "overlay_drift": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "sessionview.OverlayFieldDrift"
+          }
+        },
+        "platform": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "project_fallback": {
+          "type": "boolean"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "spawn_diags": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "spawndiag.Diag"
+          }
+        },
+        "state": {
+          "type": "string"
+        },
+        "subagents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "ring.SubagentInfo"
+          }
+        },
+        "summary": {
+          "type": "string"
+        },
+        "total_cost": {
+          "type": "number"
+        },
+        "turn_duration_ms": {
+          "type": "integer"
+        },
+        "user_label": {
+          "type": "string"
+        },
+        "workspace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "key",
+        "last_active",
+        "overlay_drift",
+        "platform",
+        "protocol",
+        "session_id",
+        "spawn_diags",
+        "state",
+        "total_cost"
+      ]
+    },
+    "spawndiag.Diag": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "layer": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "key",
+        "layer",
+        "reason"
+      ]
+    }
+  }
+}
