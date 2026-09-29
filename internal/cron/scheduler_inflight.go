@@ -27,10 +27,11 @@ func (s *Scheduler) executeIfNotDeletedOrPaused(jobID string) {
 	s.executeJobIDIfLive(jobID, true /* viaTriggerNow */, "TriggerNow")
 }
 
-// recordTriggerNowPanic logs a TriggerNow-path panic; split out so the recover
-// site stays a one-liner and the log path is testable.
+// recordTriggerNowPanic logs a panic recovered from a run's goroutine; split
+// out so each recover site stays a one-liner. A run that had started is closed
+// as failed by its scaffold (runStarted).
 func recordTriggerNowPanic(jobID string, r any) {
-	slog.Error("TriggerNow: panic recovered, run abandoned",
+	slog.Error("cron: panic recovered in a run",
 		"job_id", jobID,
 		"panic", r,
 		"stack", string(debug.Stack()))

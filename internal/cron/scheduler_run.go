@@ -309,10 +309,17 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// scaffold 的 defer 兜底覆盖早返路径。并发隔离来自 finalizer 的 per-run 身份
 	// （done 标记），run-A 的 defer 绝不会动到 run-B 已抢占的 *runInflight (#689)。
 	finalizer := &runFinalizer{inflight: inflight}
-	// No onPanic: this path keeps propagating to the caller's recover boundary
-	// (executeIfNotDeletedOrPaused / robfig Recover).
-	runScaffold{finalizer: finalizer, jobID: j.ID}.run(func() {
-		s.executeAcquired(j, viaTriggerNow, inflight, finalizer)
+	// A panic after the started event closes the run as failed: without it the
+	// dashboard keeps a run that never ends and the inflight marker survives to
+	// be read as an interrupted run at the next boot. Before the started event
+	// nothing was announced, so there is nothing to close.
+	started := &runStarted{}
+	runScaffold{finalizer: finalizer, jobID: j.ID, onPanic: func(any) {
+		if started.rc != nil {
+			s.finishRun(*started.rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, errMsg: "the run panicked"})
+		}
+	}}.run(func() {
+		s.executeAcquired(j, viaTriggerNow, inflight, finalizer, started)
 	})
 }
 
@@ -321,7 +328,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 // + inflight gauge) is armed. Every early `return` here lands in the scaffold's
 // defer, which releases the slot. Kept directly below executeOpt so the
 // source-anchor tests' whole-file ordering assumptions hold.
-func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInflight, finalizer *runFinalizer) {
+func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInflight, finalizer *runFinalizer, started *runStarted) {
 	runID, startedAt, trigger, ok := s.execPopulateInflight(j, viaTriggerNow, inflight)
 	if !ok {
 		return
@@ -331,6 +338,17 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 	if abortSnap {
 		return
 	}
+
+	// The run's identity, built once. Every phase below and every terminal branch
+	// reads it from here instead of re-listing the same ten values (Epic H #2546).
+	// key is filled in after execPrepareSpawn derives it. Handed to the scaffold
+	// as soon as the started event is out, so a panic from here on closes it.
+	rc := runCtx{
+		snap: snap, startedAt: startedAt, notifyTo: notifyTo,
+		runID: runID, trigger: trigger, job: j, lg: lg,
+		finalizer: finalizer, inflight: inflight, term: &runTerm{},
+	}
+	started.rc = &rc
 
 	// Restart fate for this run (Epic H #2546): the marker says "still in flight".
 	// finishRun removes it on every terminal state; anything left at the next boot
@@ -346,15 +364,6 @@ func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInf
 		WorkDir:     snap.workDir,
 		Fresh:       snap.fresh,
 	}, lg)
-
-	// The run's identity, built once. Every phase below and every terminal branch
-	// reads it from here instead of re-listing the same ten values (Epic H #2546).
-	// key is filled in after execPrepareSpawn derives it.
-	rc := runCtx{
-		snap: snap, startedAt: startedAt, notifyTo: notifyTo,
-		runID: runID, trigger: trigger, job: j, lg: lg,
-		finalizer: finalizer, inflight: inflight,
-	}
 
 	// Per-job timeout is always s.execTimeout: robfig/cron's SkipIfStillRunning
 	// chain wrapper drops a colliding tick instead of killing a long-running job,

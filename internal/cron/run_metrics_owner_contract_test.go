@@ -30,25 +30,23 @@ import (
 func TestRunMetricsOwnerContract(t *testing.T) {
 	// counter → set of "file.go:FuncName" allowed to call metrics.<counter>.Add.
 	allowed := map[string][]string{
-		// Per-state buckets: bumpRunStateMetrics is the single owner. The
-		// sandbox_replay.go exception is the panic-recover path in
-		// dispatchReplay (#2223) which bypasses finishRun entirely; folding
-		// it into finishRun is deferred to the #2174 run-goroutine scaffold PR.
+		// Per-state buckets: bumpRunStateMetrics is the single owner; a panicked
+		// run closes through finishRun like any other (#2897 C1).
 		"CronRunSucceededTotal": {"scheduler_callbacks.go:bumpRunStateMetrics"},
-		"CronRunFailedTotal":    {"scheduler_callbacks.go:bumpRunStateMetrics", "sandbox_replay.go:dispatchReplay"},
+		"CronRunFailedTotal":    {"scheduler_callbacks.go:bumpRunStateMetrics"},
 		"CronRunSkippedTotal":   {"scheduler_callbacks.go:bumpRunStateMetrics"},
 		"CronRunTimedOutTotal":  {"scheduler_callbacks.go:bumpRunStateMetrics"},
 		"CronRunCanceledTotal":  {"scheduler_callbacks.go:bumpRunStateMetrics"},
 		// Sandbox-specific per-state buckets: same owner, gated by the
 		// runOutcome.sandbox bool. No caller may bump these directly.
-		"CronSandboxRunFailedTotal":   {"scheduler_callbacks.go:bumpRunStateMetrics", "sandbox_replay.go:dispatchReplay"},
+		"CronSandboxRunFailedTotal":   {"scheduler_callbacks.go:bumpRunStateMetrics"},
 		"CronSandboxRunTimedOutTotal": {"scheduler_callbacks.go:bumpRunStateMetrics"},
 		// Lifecycle pair. emitRunStarted / finishRun own the live paths;
 		// finishOrphanRun is the metrics-only mirror for a reconciled orphan
 		// whose job no longer exists (no broadcast, so it cannot route through
 		// emitRunStarted/finishRun without emitting a phantom lifecycle).
 		"CronRunStartedTotal": {"scheduler_callbacks.go:emitRunStarted", "sandbox_pending.go:finishOrphanRun"},
-		"CronRunEndedTotal":   {"scheduler_finish.go:finishRun", "sandbox_pending.go:finishOrphanRun", "sandbox_replay.go:dispatchReplay"},
+		"CronRunEndedTotal":   {"scheduler_finish.go:finishRun", "sandbox_pending.go:finishOrphanRun"},
 	}
 
 	got := collectMetricAddSites(t, ".", allowed)

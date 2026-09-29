@@ -5,7 +5,6 @@ import (
 	"log/slog"
 
 	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -204,32 +203,22 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 		// runScaffold owns the finalizer/gauge defers and the completed-guarded panic
 		// recover (shared with executeOpt); onPanic runs only after the scaffold has
 		// finalized (#2174, #2094).
+		rc := runCtx{job: j, snap: replaySnap, runID: runID, startedAt: startedAt, trigger: TriggerManual, notifyTo: notifyTo, inflight: inflight, finalizer: finalizer, lg: lg, term: &runTerm{}}
 		runScaffold{
 			finalizer: finalizer,
 			jobID:     snap.jobID,
 			onPanic: func(any) {
-				// emitRunStarted fired synchronously above, so a panic before
-				// finishSandboxRun → emitRunEnded would leave the run "queued" forever;
-				// close the lifecycle here (#2064).
-				s.emitRunEnded(RunEndedEvent{
-					JobID:      snap.jobID,
-					RunID:      runID,
-					State:      RunStateFailed,
-					StartedAt:  startedAt,
-					EndedAt:    s.now(),
-					Trigger:    TriggerManual,
-					ErrorClass: ErrClassSandboxFailed,
-					ErrorMsg:   "sandbox replay panicked before terminal record",
+				// emitRunStarted fired synchronously above, so a panic before the
+				// sandbox run's own finishRun would leave the run queued forever;
+				// close it the same way (#2064).
+				s.finishRun(rc, runOutcome{
+					state: RunStateFailed, errClass: ErrClassPanic,
+					errMsg: "the sandbox replay panicked", sandbox: true,
 				})
-				metrics.CronRunEndedTotal.Add(1) // completed==false guarantees no double-count
-				// This path bypasses finishRun → bumpRunStateMetrics, so bump the per-state
-				// + sandbox failure counters itself or they undercount vs CronRunEndedTotal (#2223).
-				metrics.CronRunFailedTotal.Add(1)
-				metrics.CronSandboxRunFailedTotal.Add(1)
 			},
 		}.run(func() {
 			s.executeSandbox(sandboxExecArgs{
-				runCtx:   runCtx{job: j, snap: replaySnap, runID: runID, startedAt: startedAt, trigger: TriggerManual, notifyTo: notifyTo, inflight: inflight, finalizer: finalizer, lg: lg},
+				runCtx:   rc,
 				prompt:   prompt,
 				model:    model,
 				replayOf: origRunID,

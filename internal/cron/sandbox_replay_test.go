@@ -257,6 +257,10 @@ func TestReplay_PanicStillEmitsRunEnded(t *testing.T) {
 	if ev.State == RunStateSucceeded {
 		t.Fatalf("panicked run must not report succeeded; state = %q", ev.State)
 	}
+	// The replay closes through finishRun like any other run (#2897 C1).
+	if ev.ErrorClass != ErrClassPanic {
+		t.Errorf("error class = %q, want %q", ev.ErrorClass, ErrClassPanic)
+	}
 	if ev.StartedAt.IsZero() {
 		t.Fatal("ended frame must carry the original StartedAt so the timeline pairs")
 	}

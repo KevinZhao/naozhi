@@ -2,6 +2,7 @@ package cron
 
 import (
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/costledger"
@@ -66,6 +67,10 @@ type runCtx struct {
 	finalizer *runFinalizer
 	// inflight is the per-run gate slot; phases stamp progress on it.
 	inflight *runInflight
+	// term is claimed by the first finishRun for this run; a second call is
+	// dropped, so a run is closed exactly once however its paths overlap. nil
+	// in hand-built contexts, which then skip the check.
+	term *runTerm
 }
 
 // runOutcome is how a run ended: the fields that vary per terminal branch.
@@ -112,3 +117,14 @@ type runOutcome struct {
 	// replayOf links this run to the one it re-executes; "" normally.
 	replayOf string
 }
+
+// runTerm records that a run's terminal protocol has begun.
+type runTerm struct{ claimed atomic.Bool }
+
+// claim reports whether this is the first finish for the run.
+func (t *runTerm) claim() bool { return t.claimed.CompareAndSwap(false, true) }
+
+// runStarted hands the run scaffold the identity of a run once its started
+// event is out, so a panic after that point can still close the run: rc stays
+// nil until then, and the scaffold has nothing to close before it.
+type runStarted struct{ rc *runCtx }
