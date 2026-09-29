@@ -88,3 +88,21 @@ func TestAllowSendForOwner_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// Hub.admitSend is the owner budget wsClient consults: it shares one bucket
+// with the admission object behind it, so it throttles past the burst too.
+func TestHubAdmitSend_UsesOwnerBudget(t *testing.T) {
+	h := &Hub{admit: newConnAdmission(HubOptions{})}
+	allowed := 0
+	for i := 0; i < 50; i++ {
+		if h.admitSend("owner-A") {
+			allowed++
+		}
+	}
+	if allowed < 5 || allowed > 7 {
+		t.Errorf("expected ~5 admits per owner (burst=5), got %d", allowed)
+	}
+	if !h.admitSend("owner-B") {
+		t.Error("another owner was throttled by owner-A's budget")
+	}
+}

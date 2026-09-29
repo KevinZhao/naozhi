@@ -236,7 +236,7 @@ func (c *wsClient) readPump() {
 			// Per-user (uploadOwner) ceiling so N tabs cannot multiply the burst
 			// budget by N; consulted only after the per-conn limiter admits the
 			// call, preserving single-tab burst semantics (#888).
-			if !c.hub.admit.allowSend(c.uploadOwnerKey()) {
+			if !c.hub.admitSend(c.uploadOwnerKey()) {
 				c.SendRaw([]byte(wsproto.RawErrRateLimited))
 				continue
 			}

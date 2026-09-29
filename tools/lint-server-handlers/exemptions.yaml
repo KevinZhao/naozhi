@@ -61,10 +61,10 @@ file_size:
     # moved to internal/dashboard/project/files.go. Closes-exemption trailer
     # in commit message satisfies rule 5. New dashboard/project/files.go
     # entry tracks the post-move size (1633) until Phase 5 internal split.
-    - path: internal/server/dashboard_send.go
-      current: 783                          # 2026-09-09 重采（#2632）：851 → 783，remote-send goroutine / workspace 解析收进 sendEngine 方法。上一次 2026-09-07（#2551 E1-c）1089 → 851
-      limit: 500
-      until: "2027-03-31"     # 退役者 Epic K #2549（send 管线随 Hub 拆分收口）/ #2197（Server 余下部分）。#2561 E6-c 已合并且未拆此文件，2026-09-09（#2636）改挂。历史：3f → "E6" → "#2561" → 日期
+    # internal/server/dashboard_send.go: entry removed 2026-09-29（#2928 S4
+    # PR-1c）—— upload 与 attachment handler 拆到 dashboard_upload.go /
+    # dashboard_attachment.go 后降到 395 行，≤ 500 上限。
+    # Closes-exemption: internal/server/dashboard_send.go
     # internal/server/dashboard_cron.go: removed Phase 1 (PR #1438) — file
     # moved to internal/dashboard/cron/handlers.go. Closes-exemption trailer
     # in commit message satisfies rule 5.

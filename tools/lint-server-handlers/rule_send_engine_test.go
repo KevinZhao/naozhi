@@ -115,7 +115,7 @@ func TestSendEngineOwnership_FlagsHubFieldOnEngine(t *testing.T) {
 // side, including the embedded form (`*Hub` with no field name).
 func TestSendEngineOwnership_FlagsHubFieldOnSendHandler(t *testing.T) {
 	p := cleanPkg()
-	p.handler = "package server\ntype SendHandler struct {\n\tengine *sendEngine\n\t*Hub\n}\n"
+	p.handler = "package server\ntype SendHandler struct {\n\tengine *sendEngine\n\t*Hub\n}\nfunc (h *SendHandler) handleBind() {}\n"
 	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
 	if len(vs) != 1 {
 		t.Fatalf("want 1 violation, got %d:\n%s", len(vs), msgs(vs))
@@ -194,18 +194,35 @@ func TestSendEngineOwnership_FlagsMissingEngineType(t *testing.T) {
 	}
 }
 
-// TestSendEngineOwnership_FlagsMissingHandlerFile: check C must not pass
-// vacuously when dashboard_send.go is gone.
-func TestSendEngineOwnership_FlagsMissingHandlerFile(t *testing.T) {
+// TestSendEngineOwnership_FlagsMissingHandler: check C must not pass
+// vacuously when SendHandler and its methods are gone.
+func TestSendEngineOwnership_FlagsMissingHandler(t *testing.T) {
 	p := cleanPkg()
 	p.handler = ""
 	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
-	var sawType, sawFile bool
+	var sawType, sawMethods bool
 	for _, v := range vs {
 		sawType = sawType || strings.Contains(v.Message, "type SendHandler not found")
-		sawFile = sawFile || strings.Contains(v.Message, "dashboard_send.go not found")
+		sawMethods = sawMethods || strings.Contains(v.Message, "no *SendHandler methods found")
 	}
-	if !sawType || !sawFile {
-		t.Fatalf("want 'SendHandler not found' and 'dashboard_send.go not found', got:\n%s", msgs(vs))
+	if !sawType || !sawMethods {
+		t.Fatalf("want 'SendHandler not found' and 'no *SendHandler methods found', got:\n%s", msgs(vs))
+	}
+}
+
+// Check C follows SendHandler methods into any file, and reads only them: an
+// engine field read in another type's method is not the handler's.
+func TestSendEngineOwnership_ChecksHandlerMethodsInEveryFile(t *testing.T) {
+	dir := writeSendEnginePkg(t, cleanPkg())
+	extra := `package server
+func (h *SendHandler) handleUpload() { _ = h.engine.allowedRoot }
+func (e *sendEngine) own() { _ = e.engine.allowedRoot }
+`
+	if err := os.WriteFile(filepath.Join(dir, "dashboard_upload.go"), []byte(extra), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vs := scanSendEngineOwnership(dir)
+	if len(vs) != 1 || !strings.HasSuffix(vs[0].File, "dashboard_upload.go") || vs[0].Line != 2 {
+		t.Fatalf("want one violation at dashboard_upload.go:2, got:\n%s", msgs(vs))
 	}
 }

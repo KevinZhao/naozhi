@@ -49,7 +49,7 @@ func (s *secondStubAgentLinker) ProjectSessionDir() string { return "" }
 // After releaseLinkers nothing wires.
 func TestWiredLinkers_WireOnce(t *testing.T) {
 	t.Parallel()
-	r := newTailerRegistry(nil, "")
+	r := newTailerRegistry("")
 
 	a := &stubAgentLinker{id: "a"}
 	if !r.wireOnce(a) {
@@ -77,7 +77,7 @@ func TestWiredLinkers_WireOnce(t *testing.T) {
 func TestTailerRegistry_RefusesPathsOutsideAllowedRoot(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	r := newTailerRegistry(nil, root)
+	r := newTailerRegistry(root)
 	outside := filepath.Join(t.TempDir(), "agent.jsonl")
 	if tl, ok := r.ensureTailer("k", "task-1", "tool-1", outside); ok || tl != nil {
 		t.Fatalf("ensureTailer accepted %q outside allowedRoot %q", outside, root)

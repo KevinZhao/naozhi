@@ -20,42 +20,18 @@ type agentTaskDoneSetter interface {
 }
 
 // enrichSnapshot overlays tailer-local aggregator metrics onto each
-// SubagentInfo in snap. No-op when h.tailers is nil (unit test harness).
-//
-// Precedence: the Snapshot carries what the EventLog recorded from
-// parent-stream task_progress; the tailer overwrites only with a later value,
-// since it tracks per-agent tool_use count and step duration at finer
-// granularity. Once task_done has closed the tailer it is gone from the
-// registry and the EventLog values stand.
+// SubagentInfo in snap (tailerRegistry.enrich).
 func (h *Hub) enrichSnapshot(snap *session.SessionSnapshot) {
-	if h == nil || snap == nil || len(snap.Subagents) == 0 {
+	if h == nil {
 		return
 	}
-	for i := range snap.Subagents {
-		taskID := snap.Subagents[i].TaskID
-		if taskID == "" {
-			continue
-		}
-		h.tailers.mu.RLock()
-		t := h.tailers.byTask[tailerKey{snap.Key, taskID}]
-		h.tailers.mu.RUnlock()
-		if t == nil {
-			continue
-		}
-		meta := t.MetaSnapshot()
-		if meta.LastTool != "" {
-			snap.Subagents[i].LastTool = meta.LastTool
-		}
-		if meta.LastDetail != "" {
-			snap.Subagents[i].LastDetail = meta.LastDetail
-		}
-		if meta.ToolUses > snap.Subagents[i].ToolUses {
-			snap.Subagents[i].ToolUses = meta.ToolUses
-		}
-		if meta.DurationMS > snap.Subagents[i].DurationMS {
-			snap.Subagents[i].DurationMS = meta.DurationMS
-		}
-	}
+	h.tailers.enrich(snap)
+}
+
+// admitSend reports whether owner's per-user send budget admits one more
+// send; wsClient consults it after its own per-connection limiter.
+func (h *Hub) admitSend(owner string) bool {
+	return h.admit.allowSend(owner)
 }
 
 // maybeWireLinkerTailer installs the server-side OnResolve handler onto

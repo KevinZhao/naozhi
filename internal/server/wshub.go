@@ -144,7 +144,7 @@ func NewHub(opts HubOptions) *Hub {
 
 		resubscribeInterval: defaultResubscribeInterval,
 	}
-	h.tailers = newTailerRegistry(h, opts.AllowedRoot)
+	h.tailers = newTailerRegistry(opts.AllowedRoot)
 	h.historyMarshalCache = newHistoryMarshalCache()
 	h.debounce = newDebouncer(&h.clientWG, h.doBroadcastSessionsUpdate)
 	// Built last: h is now usable as the engine's sendNotifier. The engine
