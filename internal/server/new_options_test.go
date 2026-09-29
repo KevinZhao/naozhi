@@ -98,9 +98,9 @@ func TestNewWithOptions_FieldsRoundTrip(t *testing.T) {
 // R237-ARCH-14 / #614.
 func TestServerNew_NotReintroduced(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("server.go")
+	data, err := os.ReadFile("build_server.go")
 	if err != nil {
-		t.Fatalf("read server.go: %v", err)
+		t.Fatalf("read build_server.go: %v", err)
 	}
 	// (1) The legacy func definition shape must NOT come back. Scan
 	// only at start-of-line so the deletion-rationale godoc above
@@ -108,10 +108,11 @@ func TestServerNew_NotReintroduced(t *testing.T) {
 	// prose) does not generate a false positive — Go function defs
 	// always start at column 0, so a `^func New(addr string` anchor
 	// distinguishes definitions from references.
-	// Positive anchor (#2630): server.go must still be where the constructor
-	// lives, otherwise the negative check below passes against the wrong file.
+	// Positive anchor (#2630): build_server.go must still be where the
+	// constructor lives, otherwise the negative check below passes against the
+	// wrong file.
 	if !strings.Contains(string(data), "\nfunc NewWithOptions(opts ServerOptions) *Server {") {
-		t.Fatal("server.go no longer declares NewWithOptions — re-point this test at the constructor's file")
+		t.Fatal("build_server.go no longer declares NewWithOptions — re-point this test at the constructor's file")
 	}
 	// The definition scan covers EVERY non-test file in the package, not just
 	// server.go: a `func New(addr string` added to any file of package server

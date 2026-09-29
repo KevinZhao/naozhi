@@ -237,8 +237,12 @@ func TestServerStart_LinksCallerCtxWithoutSecondContext(t *testing.T) {
 			"the srv.Serve error path all go through it — R20260531-GO-001)")
 	}
 	// The app context itself must be a cancellable child created at construction.
-	if !regexp.MustCompile(`s\.appCtx,\s*s\.appCancel\s*=\s*context\.WithCancel\(`).MatchString(body) {
-		t.Error("server.go: buildServer must create appCtx/appCancel with context.WithCancel (#2552)")
+	build, err := os.ReadFile(filepath.Join(filepath.Dir(self), "build_server.go"))
+	if err != nil {
+		t.Fatalf("read build_server.go: %v", err)
+	}
+	if !regexp.MustCompile(`s\.appCtx,\s*s\.appCancel\s*=\s*context\.WithCancel\(`).Match(build) {
+		t.Error("build_server.go: the constructor must create appCtx/appCancel with context.WithCancel (#2552)")
 	}
 	if !regexp.MustCompile(`\bappCtx\s+context\.Context\b`).MatchString(body) {
 		t.Error("server.go: Server struct must declare appCtx context.Context field")
