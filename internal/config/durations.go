@@ -6,7 +6,6 @@ package config
 
 import (
 	"fmt"
-	"log/slog"
 	"time"
 )
 
@@ -35,8 +34,7 @@ func parseDurations(cfg *Config) error {
 	}
 	// 硬上限 10m：clamp 并 warn，不把配置错误升成启动失败。
 	if cfg.cachedJitterMax > cronJitterMaxHardCap {
-		slog.Warn("cron.jitter_max exceeds 10m hard cap, clamping",
-			"requested", cfg.cachedJitterMax, "cap", cronJitterMaxHardCap)
+		reportFallback("cron.jitter_max", "clamped", "above the 10m cap; jitter is capped at 10m")
 		cfg.cachedJitterMax = cronJitterMaxHardCap
 	}
 	if cfg.UpdateEnabled() {
@@ -45,8 +43,7 @@ func parseDurations(cfg *Config) error {
 		}
 		// 1h floor protects GitHub; clamp + warn rather than fail.
 		if cfg.cachedInterval < time.Hour {
-			slog.Warn("update.interval below 1h floor, clamping",
-				"requested", cfg.cachedInterval, "floor", time.Hour)
+			reportFallback("update.interval", "clamped", "below the 1h floor; update checks run hourly")
 			cfg.cachedInterval = time.Hour
 		}
 	}

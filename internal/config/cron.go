@@ -1,7 +1,6 @@
 package config
 
 import (
-	"log/slog"
 	"strings"
 	"time"
 )
@@ -47,7 +46,7 @@ func (c *Config) ParseExecutionTimeout() time.Duration {
 
 // ParseCronTimezone returns the *time.Location used for cron schedule evaluation.
 // Empty or "Local" returns time.Local (respects $TZ or the system tz).
-// An invalid zone falls back to time.Local with a warning.
+// An invalid zone falls back to time.Local; Load reports it as a config diag.
 func (c *Config) ParseCronTimezone() *time.Location {
 	name := strings.TrimSpace(c.Cron.Timezone)
 	if name == "" || strings.EqualFold(name, "Local") {
@@ -55,7 +54,6 @@ func (c *Config) ParseCronTimezone() *time.Location {
 	}
 	loc, err := time.LoadLocation(name)
 	if err != nil {
-		slog.Warn("invalid cron.timezone, falling back to Local", "value", name, "err", err)
 		return time.Local
 	}
 	return loc

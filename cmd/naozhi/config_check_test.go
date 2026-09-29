@@ -192,3 +192,23 @@ func TestConfigCheck_RegisteredSubcommand(t *testing.T) {
 		t.Fatal(`registry has no "config" entry`)
 	}
 }
+
+// A value naozhi replaces with a default is configured input that has no
+// effect, so check exits 1 on it rather than printing OK (#2897 C4).
+func TestConfigCheck_ReplacedValuesExit1(t *testing.T) {
+	for name, body := range map[string]string{
+		"timezone":     "cron:\n  timezone: Mars/Olympus\n",
+		"update mode":  "update:\n  mode: dowload\n",
+		"tick timeout": "sysession:\n  tick_timeout: 5 minutes\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out bytes.Buffer
+			if code := configCheck([]string{"-config", writeCheckConfig(t, cleanCheckConfig+body)}, &out); code != 1 {
+				t.Errorf("exit %d, want 1\n%s", code, out.String())
+			}
+			if !strings.Contains(out.String(), "config-invalid") {
+				t.Errorf("output does not name the replaced value:\n%s", out.String())
+			}
+		})
+	}
+}
