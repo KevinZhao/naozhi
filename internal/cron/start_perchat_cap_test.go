@@ -49,7 +49,7 @@ func TestStart_PerChatCapEnforced(t *testing.T) {
 	if len(jobs) != 2 {
 		t.Fatalf("after restart with MaxJobsPerChat=2: loaded %d jobs, want 2", len(jobs))
 	}
-	if n := s2.PerChatJobCount("p", "c"); n != 2 {
+	if n := s2.tbl.countForChat(chatKeyFor("p", "c")); n != 2 {
 		t.Fatalf("chatJobCount after clamp = %d, want 2", n)
 	}
 

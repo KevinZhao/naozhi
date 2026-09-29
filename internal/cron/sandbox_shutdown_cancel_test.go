@@ -125,7 +125,7 @@ func TestSandbox_ShutdownCancelSideEffectingDoesNotEnqueueAttention(t *testing.T
 		t.Fatalf("state = %q, want canceled", ev.State)
 	}
 	// The core assertion: shutdown-cancel must keep the run out of the queue.
-	if n := s.SandboxAttentionCount(); n != 0 {
+	if n := s.sandboxState().AttentionCount(); n != 0 {
 		t.Fatalf("queue count = %d, want 0 (shutdown-cancel must not enqueue attention even with side_effects)", n)
 	}
 	if items := s.ListSandboxAttention(); len(items) != 0 {
@@ -168,7 +168,7 @@ func TestSandbox_DeadlineExceededSideEffectingEnqueuesAttention(t *testing.T) {
 	if ev := rec.endedAtCron(0); ev.State != RunStateTimedOut {
 		t.Fatalf("state = %q, want timed_out", ev.State)
 	}
-	if n := s.SandboxAttentionCount(); n != 1 {
+	if n := s.sandboxState().AttentionCount(); n != 1 {
 		t.Fatalf("queue count = %d, want 1 (real DeadlineExceeded transport failure on side-effecting job must enqueue)", n)
 	}
 }

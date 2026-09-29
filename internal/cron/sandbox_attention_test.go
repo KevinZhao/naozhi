@@ -54,8 +54,8 @@ func TestAttention_TransportFailureEnqueuesSideEffectingJob(t *testing.T) {
 	if items[0].JobID != j.ID {
 		t.Errorf("jobID = %q, want %q", items[0].JobID, j.ID)
 	}
-	if s.SandboxAttentionCount() != 1 {
-		t.Errorf("count = %d, want 1", s.SandboxAttentionCount())
+	if s.sandboxState().AttentionCount() != 1 {
+		t.Errorf("count = %d, want 1", s.sandboxState().AttentionCount())
 	}
 }
 
@@ -74,7 +74,7 @@ func TestAttention_TransportFailureNoSideEffectsSkipsQueue(t *testing.T) {
 	s.executeOpt(j, true)
 	waitEnded(t, rec)
 
-	if n := s.SandboxAttentionCount(); n != 0 {
+	if n := s.sandboxState().AttentionCount(); n != 0 {
 		t.Fatalf("queue count = %d, want 0 (no-side-effect transport failure must NOT enqueue)", n)
 	}
 }
@@ -94,7 +94,7 @@ func TestAttention_SuccessDoesNotEnqueue(t *testing.T) {
 	s.executeOpt(j, true)
 	waitEnded(t, rec)
 
-	if n := s.SandboxAttentionCount(); n != 0 {
+	if n := s.sandboxState().AttentionCount(); n != 0 {
 		t.Fatalf("queue count = %d, want 0 (success must not enqueue)", n)
 	}
 }
@@ -112,13 +112,13 @@ func TestConfirmSandboxRun_RemovesFromQueue(t *testing.T) {
 		CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 
-	if s.SandboxAttentionCount() != 1 {
+	if s.sandboxState().AttentionCount() != 1 {
 		t.Fatalf("precondition: expected 1 queued")
 	}
 	if err := s.ConfirmSandboxRun("feedfacefeedface"); err != nil {
 		t.Fatalf("ConfirmSandboxRun: %v", err)
 	}
-	if s.SandboxAttentionCount() != 0 {
+	if s.sandboxState().AttentionCount() != 0 {
 		t.Fatalf("confirm must remove the record")
 	}
 	// Idempotent: confirming again is a no-op, not an error.

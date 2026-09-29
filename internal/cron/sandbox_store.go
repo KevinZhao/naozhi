@@ -1,8 +1,6 @@
 package cron
 
 import (
-	"log/slog"
-
 	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 	"github.com/naozhi/naozhi/internal/datadir"
 )
@@ -31,11 +29,6 @@ func (s *Scheduler) sandboxState() sandboxstore.Store {
 // ListSandboxAttention returns every unresolved queue record, newest first.
 func (s *Scheduler) ListSandboxAttention() []SandboxAttentionItem {
 	return s.sandboxState().ListAttention()
-}
-
-// SandboxAttentionCount returns the number of queue records on disk.
-func (s *Scheduler) SandboxAttentionCount() int {
-	return s.sandboxState().AttentionCount()
 }
 
 // SandboxRunSnapshotManifest reads one run's input manifest; (nil, false, nil)
@@ -67,24 +60,4 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 // CreatedAtMS. Uses the scheduler clock so tests pin a deterministic value.
 func (s *Scheduler) attentionNowMS() int64 {
 	return s.now().UnixMilli()
-}
-
-// WriteSandboxAttentionForTest is an exported seam so consumer-package tests
-// (dashboard handlers) can stage a §7.4 queue record without driving a full
-// failed-transport run. NOT for runtime use.
-func (s *Scheduler) WriteSandboxAttentionForTest(jobID, runID, reason, jobLabel string) {
-	s.sandboxState().WriteAttention(sandboxstore.Attention{
-		JobID:       jobID,
-		RunID:       runID,
-		Reason:      reason,
-		JobLabel:    jobLabel,
-		CreatedAtMS: s.attentionNowMS(),
-	}, slog.Default())
-}
-
-// WriteSandboxSnapshotForTest is an exported seam so consumer-package tests
-// (dashboard handlers) can stage a snapshot without driving a full run. NOT
-// for runtime use — mirrors agentcore.NewWithAPIForTest.
-func (s *Scheduler) WriteSandboxSnapshotForTest(jobID, runID, prompt, model, imageVersion string, secretRefs []string) {
-	s.sandboxState().WriteSnapshot(jobID, runID, prompt, model, imageVersion, secretRefs, slog.Default())
 }
