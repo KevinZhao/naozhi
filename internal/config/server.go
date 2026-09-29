@@ -14,13 +14,6 @@ type ServerConfig struct {
 	// both 404 even for loopback+auth callers, so a leaked dashboard token
 	// cannot enumerate goroutine stacks (which carry file paths and queue
 	// contents) or expvar counters. Turn it on only while capturing a profile.
-	//
-	// R244-SEC-P3-1 specified this key and the review record said it shipped,
-	// but only the ServerOptions field existed — nothing ever read a config
-	// value into it, so the endpoints were unreachable regardless of config.
-	// Wired for real in #2553's follow-up; the gates it feeds (requireAuth +
-	// loopback-only + a refusal when dashboard_token is empty) were already
-	// there.
 	DebugMode bool `yaml:"debug_mode,omitempty"`
 }
 
