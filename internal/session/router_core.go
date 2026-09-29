@@ -160,7 +160,7 @@ type Router struct {
 	// only through View / Update transactions (plus Load / Count and the
 	// lock-free Active / Gen), because the spawn bookkeeping, workspace
 	// overrides and picks kept in routerState must change atomically with it.
-	ss *sessiontable.Table[*ManagedSession, routerState]
+	ss *sessiontable.Table[*ManagedSession, routerState, routerStateView]
 	// bk is the backend table (internal/session/backendstore), fixed once
 	// NewRouter returns; nil on a hand-built test Router, which reads as empty.
 	bk *backendstore.Store
@@ -416,8 +416,8 @@ func panicSafeSpawnFn(
 
 // newSessionTable returns an empty session table indexed the way the router
 // looks sessions up.
-func newSessionTable() *sessiontable.Table[*ManagedSession, routerState] {
-	t := sessiontable.New[*ManagedSession, routerState](chatKeyFor, persist.KeyHash)
+func newSessionTable() *sessiontable.Table[*ManagedSession, routerState, routerStateView] {
+	t := sessiontable.New[*ManagedSession, routerState](chatKeyFor, persist.KeyHash, readOnlyRouterState)
 	t.Update(func(tx sessTx) { tx.Ext().picks.init() })
 	return t
 }
@@ -440,9 +440,68 @@ type routerState struct {
 
 // sessTx and sessView are the router's table transactions.
 type (
-	sessTx   = sessiontable.Tx[*ManagedSession, routerState]
-	sessView = sessiontable.View[*ManagedSession, routerState]
+	sessTx   = sessiontable.Tx[*ManagedSession, routerState, routerStateView]
+	sessView = sessiontable.View[*ManagedSession, routerState, routerStateView]
 )
+
+// routerStateView is what a read transaction sees of routerState. A View
+// holds just the read lock, so writing through it would race; the view holds
+// each part only as an interface of its read methods, so a write through a
+// View does not compile — in this package too, where a pointer to
+// routerState would not stop it.
+type routerStateView struct {
+	workspaces interface {
+		Lookup(chatKey string) (string, bool)
+		Len() int
+		Range(fn func(chatKey, path string))
+		Gen() uint64
+		Dirty() bool
+		Snapshot() map[string]string
+	}
+	spawns interface {
+		SpawnInFlight(key string) (chan struct{}, bool)
+	}
+	picks interface {
+		pickedBackend(key string) string
+		pickedAccessProfile(key string) string
+	}
+}
+
+func readOnlyRouterState(s *routerState) routerStateView {
+	return routerStateView{workspaces: &s.workspaces, spawns: &s.spawns, picks: &s.picks}
+}
+
+// Workspace returns chatKey's workspace override.
+func (v routerStateView) Workspace(chatKey string) (string, bool) {
+	return v.workspaces.Lookup(chatKey)
+}
+
+// WorkspaceCount is the number of workspace overrides.
+func (v routerStateView) WorkspaceCount() int { return v.workspaces.Len() }
+
+// RangeWorkspaces calls fn for each workspace override.
+func (v routerStateView) RangeWorkspaces(fn func(chatKey, path string)) { v.workspaces.Range(fn) }
+
+// WorkspacesGen, WorkspacesDirty and WorkspacesSnapshot are what a save
+// reads of the overrides.
+func (v routerStateView) WorkspacesGen() uint64 { return v.workspaces.Gen() }
+
+func (v routerStateView) WorkspacesDirty() bool { return v.workspaces.Dirty() }
+
+func (v routerStateView) WorkspacesSnapshot() map[string]string { return v.workspaces.Snapshot() }
+
+// PickedBackend and PickedAccessProfile are the dashboard's pending picks for
+// key ("" when none).
+func (v routerStateView) PickedBackend(key string) string { return v.picks.pickedBackend(key) }
+
+func (v routerStateView) PickedAccessProfile(key string) string {
+	return v.picks.pickedAccessProfile(key)
+}
+
+// SpawnInFlight reports whether a spawn for key is in progress.
+func (v routerStateView) SpawnInFlight(key string) (chan struct{}, bool) {
+	return v.spawns.SpawnInFlight(key)
+}
 
 // chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
 func chatKeyFor(key string) string {

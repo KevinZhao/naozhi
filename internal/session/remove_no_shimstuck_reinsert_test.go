@@ -47,7 +47,7 @@ func TestFinishRemoveCleanup_DoesNotReinsertShimStuck(t *testing.T) {
 
 	// Pre-condition: not flagged.
 	var before bool
-	r.ss.View(func(v sessView) {
+	r.ss.Update(func(v sessTx) {
 		before = v.Ext().spawns.ShimStuck(key)
 	})
 	if before {
@@ -61,7 +61,7 @@ func TestFinishRemoveCleanup_DoesNotReinsertShimStuck(t *testing.T) {
 	}
 
 	var after bool
-	r.ss.View(func(v sessView) {
+	r.ss.Update(func(v sessTx) {
 		after = v.Ext().spawns.ShimStuck(key)
 	})
 	if after {

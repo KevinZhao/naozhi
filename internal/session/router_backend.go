@@ -138,7 +138,7 @@ func (r *Router) SetSessionBackend(key, backend string) {
 
 // SessionBackend returns the backend override for key, or "" if none.
 func (r *Router) SessionBackend(key string) (backend string) {
-	r.ss.View(func(v sessView) { backend = v.Ext().picks.backend[key] })
+	r.ss.View(func(v sessView) { backend = v.Ext().PickedBackend(key) })
 	return backend
 }
 
@@ -171,7 +171,7 @@ func (r *Router) SetSessionAccessProfile(key, profile string) {
 
 // SessionAccessProfile returns the access-profile override for key, or "".
 func (r *Router) SessionAccessProfile(key string) (profile string) {
-	r.ss.View(func(v sessView) { profile = v.Ext().picks.accessProfile[key] })
+	r.ss.View(func(v sessView) { profile = v.Ext().PickedAccessProfile(key) })
 	return profile
 }
 

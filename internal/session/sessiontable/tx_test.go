@@ -10,7 +10,9 @@ import (
 
 type extState struct{ n int }
 
-func newExtTable() *Table[*sess, extState] { return New[*sess, extState](chatOf, hashOf) }
+func newExtTable() *Table[*sess, extState, extState] {
+	return New[*sess, extState, extState](chatOf, hashOf, func(x *extState) extState { return *x })
+}
 
 // TestUpdate_ReleasesTheLockWhenTheCallbackPanics: a panic inside a
 // transaction propagates to the caller and leaves the lock free, rather than
@@ -23,7 +25,7 @@ func TestUpdate_ReleasesTheLockWhenTheCallbackPanics(t *testing.T) {
 				t.Fatal("the panic did not reach the caller")
 			}
 		}()
-		tab.Update(func(tx Tx[*sess, extState]) { panic("boom") })
+		tab.Update(func(tx Tx[*sess, extState, extState]) { panic("boom") })
 	}()
 	if !tab.mu.TryLock() {
 		t.Fatal("the lock stayed held after a panicking Update")
@@ -33,8 +35,8 @@ func TestUpdate_ReleasesTheLockWhenTheCallbackPanics(t *testing.T) {
 
 func TestTx_UnusableAfterItsCallback(t *testing.T) {
 	tab := newExtTable()
-	var kept Tx[*sess, extState]
-	tab.Update(func(tx Tx[*sess, extState]) { kept = tx })
+	var kept Tx[*sess, extState, extState]
+	tab.Update(func(tx Tx[*sess, extState, extState]) { kept = tx })
 	defer func() {
 		if recover() == nil {
 			t.Error("a Tx kept past its callback still worked")
@@ -47,7 +49,7 @@ func TestTx_UnusableAfterItsCallback(t *testing.T) {
 // free, and the transaction holds it again afterwards.
 func TestTx_UnlockedReleasesTheLock(t *testing.T) {
 	tab := newExtTable()
-	tab.Update(func(tx Tx[*sess, extState]) {
+	tab.Update(func(tx Tx[*sess, extState, extState]) {
 		var free bool
 		tx.Unlocked(func() {
 			if tab.mu.TryLock() {
@@ -72,13 +74,13 @@ func TestView_ConcurrentReaders(t *testing.T) {
 	tab := newExtTable()
 	inside := make(chan struct{})
 	release := make(chan struct{})
-	go tab.View(func(v View[*sess, extState]) {
+	go tab.View(func(v View[*sess, extState, extState]) {
 		close(inside)
 		<-release
 	})
 	<-inside
 	done := make(chan struct{})
-	go tab.View(func(v View[*sess, extState]) { close(done) })
+	go tab.View(func(v View[*sess, extState, extState]) { close(done) })
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
@@ -96,12 +98,12 @@ func TestTx_ExtChangesWithTheTable(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			tab.Update(func(tx Tx[*sess, extState]) { tx.Ext().n++ })
+			tab.Update(func(tx Tx[*sess, extState, extState]) { tx.Ext().n++ })
 		}()
 	}
 	wg.Wait()
 	var n int
-	tab.View(func(v View[*sess, extState]) { n = v.Ext().n })
+	tab.View(func(v View[*sess, extState, extState]) { n = v.Ext().n })
 	if n != 50 {
 		t.Errorf("ext counter = %d, want 50", n)
 	}
@@ -115,12 +117,12 @@ func TestTx_WaitReleasesUntilBroadcast(t *testing.T) {
 	go func() {
 		<-waiting
 		// Takes the lock only once the waiter's Wait has released it.
-		tab.Update(func(tx Tx[*sess, extState]) {
+		tab.Update(func(tx Tx[*sess, extState, extState]) {
 			tx.Ext().n = 1
 			tx.Broadcast()
 		})
 	}()
-	tab.Update(func(tx Tx[*sess, extState]) {
+	tab.Update(func(tx Tx[*sess, extState, extState]) {
 		close(waiting)
 		for tx.Ext().n == 0 {
 			tx.Wait()
@@ -132,7 +134,7 @@ func TestTx_WaitReleasesUntilBroadcast(t *testing.T) {
 // Unlocked, so its mutators refuse to run there.
 func TestTx_MutatorsPanicInsideUnlocked(t *testing.T) {
 	tab := newExtTable()
-	tab.Update(func(tx Tx[*sess, extState]) {
+	tab.Update(func(tx Tx[*sess, extState, extState]) {
 		tx.Unlocked(func() {
 			defer func() {
 				if recover() == nil {
@@ -155,10 +157,10 @@ func TestTx_MutatorsPanicInsideUnlocked(t *testing.T) {
 // that ran inside another's Unlocked window stays dead after the window.
 func TestTx_StaleTxFromAnInterleavedUpdateIsRefused(t *testing.T) {
 	tab := newExtTable()
-	var stale Tx[*sess, extState]
-	tab.Update(func(tx Tx[*sess, extState]) {
+	var stale Tx[*sess, extState, extState]
+	tab.Update(func(tx Tx[*sess, extState, extState]) {
 		tx.Unlocked(func() {
-			tab.Update(func(inner Tx[*sess, extState]) { stale = inner })
+			tab.Update(func(inner Tx[*sess, extState, extState]) { stale = inner })
 		})
 		defer func() {
 			if recover() == nil {
@@ -172,7 +174,7 @@ func TestTx_StaleTxFromAnInterleavedUpdateIsRefused(t *testing.T) {
 func TestTable_LoadAndCount(t *testing.T) {
 	tab := newExtTable()
 	a := &sess{}
-	tab.Update(func(tx Tx[*sess, extState]) {
+	tab.Update(func(tx Tx[*sess, extState, extState]) {
 		tx.Put("c:a", a)
 		tx.Put("c:b", &sess{})
 		tx.SetActive(1)
@@ -197,5 +199,18 @@ func TestTable_ExportedSurfaceIsTransactionsOnly(t *testing.T) {
 	want := []string{"Active", "BumpGen", "Count", "Gen", "Healthy", "Load", "Update", "View"}
 	if !slices.Equal(got, want) {
 		t.Errorf("exported methods = %v, want %v", got, want)
+	}
+}
+
+// A read transaction gets the caller's read-only view of Ext (what New's
+// readOnly returns), a write transaction the state itself.
+func TestExt_ViewGetsTheReadOnlyView(t *testing.T) {
+	calls := 0
+	tab := New[*sess, extState](chatOf, hashOf, func(x *extState) int { calls++; return x.n * 10 })
+	tab.Update(func(tx Tx[*sess, extState, int]) { tx.Ext().n = 4 })
+	var got int
+	tab.View(func(v View[*sess, extState, int]) { got = v.Ext() })
+	if got != 40 || calls != 1 {
+		t.Errorf("View.Ext() = %d after %d readOnly calls, want 40 after 1", got, calls)
 	}
 }

@@ -587,7 +587,7 @@ func lookupShimTarget(v sessView, key string) shimTarget {
 		t.live = t.sess.isAlive()
 		t.prevIDs = slices.Clone(t.sess.prevSessionIDs)
 	}
-	_, t.spawning = v.Ext().spawns.SpawnInFlight(key)
+	_, t.spawning = v.Ext().SpawnInFlight(key)
 	return t
 }
 

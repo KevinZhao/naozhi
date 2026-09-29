@@ -130,7 +130,7 @@ func TestSaveDirty_ClearsOnlyWhatDidNotChangeDuringTheWrite(t *testing.T) {
 		return snap
 	}
 	dirty := func() (sessions, workspaces bool) {
-		r.ss.View(func(v sessView) { sessions, workspaces = v.Dirty(), v.Ext().workspaces.Dirty() })
+		r.ss.Update(func(v sessTx) { sessions, workspaces = v.Dirty(), v.Ext().workspaces.Dirty() })
 		return sessions, workspaces
 	}
 

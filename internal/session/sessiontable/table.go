@@ -13,7 +13,8 @@
 // the transaction's Ext.
 //
 // S is the session type and X the caller's state kept under the same lock;
-// the table looks inside neither. Every index key is derived from the session
+// R is the read-only view of X a read transaction gets. The table looks
+// inside none of them. Every index key is derived from the session
 // key string, or handed in (the session ID), so no constraint is needed.
 package sessiontable
 
@@ -26,7 +27,7 @@ import (
 )
 
 // Table is the session table. The zero value is not usable; use New.
-type Table[S, X any] struct {
+type Table[S, X, R any] struct {
 	mu sync.RWMutex
 	// cond is signalled when a process changes state; its Locker is mu's
 	// write side, so Wait must be called with Lock held.
@@ -57,6 +58,9 @@ type Table[S, X any] struct {
 	// ext is the caller's state that changes atomically with the table and
 	// is guarded by the same lock; the table never looks inside it.
 	ext X
+	// readOnly turns ext into R, the view a read transaction gets: a View
+	// holds only the read lock, so it must not be able to write ext.
+	readOnly func(*X) R
 
 	// seqs numbers every Tx issued; liveSeq is the number of the Tx that
 	// currently holds the write lock (0 when none does), so a Tx used after
@@ -66,9 +70,11 @@ type Table[S, X any] struct {
 }
 
 // New returns an empty table with a zero X. chatOf maps a session key to its chat key;
-// hashOf maps it to the hash keyForHash resolves.
-func New[S, X any](chatOf, hashOf func(key string) string) *Table[S, X] {
-	t := &Table[S, X]{
+// hashOf maps it to the hash keyForHash resolves; readOnly gives a read
+// transaction its view R of the caller's state.
+func New[S, X, R any](chatOf, hashOf func(key string) string, readOnly func(*X) R) *Table[S, X, R] {
+	t := &Table[S, X, R]{
+		readOnly: readOnly,
 		sessions: make(map[string]S),
 		byChat:   make(map[string]map[string]struct{}),
 		keyhash:  make(map[string]string),
@@ -81,22 +87,22 @@ func New[S, X any](chatOf, hashOf func(key string) string) *Table[S, X] {
 }
 
 // get returns key's session, or the zero S when there is none.
-func (t *Table[S, X]) get(key string) S {
+func (t *Table[S, X, R]) get(key string) S {
 	return t.sessions[key]
 }
 
 // lookup returns key's session and whether there is one.
-func (t *Table[S, X]) lookup(key string) (S, bool) {
+func (t *Table[S, X, R]) lookup(key string) (S, bool) {
 	s, ok := t.sessions[key]
 	return s, ok
 }
 
 // size is the number of sessions.
-func (t *Table[S, X]) size() int { return len(t.sessions) }
+func (t *Table[S, X, R]) size() int { return len(t.sessions) }
 
 // all iterates the sessions in unspecified order. The table must not be
 // mutated during the iteration; collect keys first when it will be.
-func (t *Table[S, X]) all() iter.Seq2[string, S] {
+func (t *Table[S, X, R]) all() iter.Seq2[string, S] {
 	return func(yield func(string, S) bool) {
 		for k, s := range t.sessions {
 			if !yield(k, s) {
@@ -108,7 +114,7 @@ func (t *Table[S, X]) all() iter.Seq2[string, S] {
 
 // put installs s for key, indexing its chat and hash. An existing session
 // for key is replaced; its session-ID mapping is the caller's to retire.
-func (t *Table[S, X]) put(key string, s S) {
+func (t *Table[S, X, R]) put(key string, s S) {
 	t.sessions[key] = s
 	t.keyhash[t.hashOf(key)] = key
 	ck := t.chatOf(key)
@@ -123,7 +129,7 @@ func (t *Table[S, X]) put(key string, s S) {
 // remove removes key's session and its chat and hash entries. The session-ID
 // mapping is the caller's to retire (clearID / clearIDIfOwnedBy), because only
 // the caller knows the session's ID.
-func (t *Table[S, X]) remove(key string) {
+func (t *Table[S, X, R]) remove(key string) {
 	delete(t.sessions, key)
 	// Equality-guarded so a hash collision cannot remove another key's entry.
 	if kh := t.hashOf(key); t.keyhash[kh] == key {
@@ -140,7 +146,7 @@ func (t *Table[S, X]) remove(key string) {
 
 // keysOfChat returns a copy of the session keys under chat, so the caller may
 // remove them while walking the result.
-func (t *Table[S, X]) keysOfChat(chat string) []string {
+func (t *Table[S, X, R]) keysOfChat(chat string) []string {
 	set := t.byChat[chat]
 	if len(set) == 0 {
 		return nil
@@ -153,18 +159,18 @@ func (t *Table[S, X]) keysOfChat(chat string) []string {
 }
 
 // chatHasSessions reports whether any session key maps to chat.
-func (t *Table[S, X]) chatHasSessions(chat string) bool {
+func (t *Table[S, X, R]) chatHasSessions(chat string) bool {
 	return len(t.byChat[chat]) > 0
 }
 
 // keyForHash resolves a key hash to its session key.
-func (t *Table[S, X]) keyForHash(hash string) (string, bool) {
+func (t *Table[S, X, R]) keyForHash(hash string) (string, bool) {
 	k, ok := t.keyhash[hash]
 	return k, ok
 }
 
 // setID points session ID id at key; an empty id is ignored.
-func (t *Table[S, X]) setID(id, key string) {
+func (t *Table[S, X, R]) setID(id, key string) {
 	if id == "" {
 		return
 	}
@@ -172,57 +178,57 @@ func (t *Table[S, X]) setID(id, key string) {
 }
 
 // clearID drops id's mapping.
-func (t *Table[S, X]) clearID(id string) {
+func (t *Table[S, X, R]) clearID(id string) {
 	delete(t.idToKey, id)
 }
 
 // clearIDIfOwnedBy drops id's mapping only while it still points at key, so
 // a key reused by an unrelated session keeps its mapping when the previous
 // owner is cleaned up.
-func (t *Table[S, X]) clearIDIfOwnedBy(id, key string) {
+func (t *Table[S, X, R]) clearIDIfOwnedBy(id, key string) {
 	if mapped, ok := t.idToKey[id]; ok && mapped == key {
 		delete(t.idToKey, id)
 	}
 }
 
 // keyForID resolves a session ID to its session key.
-func (t *Table[S, X]) keyForID(id string) (string, bool) {
+func (t *Table[S, X, R]) keyForID(id string) (string, bool) {
 	k, ok := t.idToKey[id]
 	return k, ok
 }
 
 // Active is the live-process count. Safe without the lock.
-func (t *Table[S, X]) Active() int64 { return t.active.Load() }
+func (t *Table[S, X, R]) Active() int64 { return t.active.Load() }
 
 // addActive adjusts the live-process count and returns the new value.
-func (t *Table[S, X]) addActive(n int64) int64 { return t.active.Add(n) }
+func (t *Table[S, X, R]) addActive(n int64) int64 { return t.active.Add(n) }
 
 // setActive replaces the live-process count, after a recount.
-func (t *Table[S, X]) setActive(n int64) { t.active.Store(n) }
+func (t *Table[S, X, R]) setActive(n int64) { t.active.Store(n) }
 
 // Gen is the change generation. Safe without the lock.
-func (t *Table[S, X]) Gen() uint64 { return t.gen.Load() }
+func (t *Table[S, X, R]) Gen() uint64 { return t.gen.Load() }
 
 // BumpGen advances the change generation without marking the table for save:
 // a change pollers must see that is not persisted.
-func (t *Table[S, X]) BumpGen() { t.gen.Add(1) }
+func (t *Table[S, X, R]) BumpGen() { t.gen.Add(1) }
 
 // markChanged marks the table for save and advances the change generation.
-func (t *Table[S, X]) markChanged() {
+func (t *Table[S, X, R]) markChanged() {
 	t.dirty = true
 	t.gen.Add(1)
 }
 
 // isDirty reports whether the table changed since the save flag was cleared.
-func (t *Table[S, X]) isDirty() bool { return t.dirty }
+func (t *Table[S, X, R]) isDirty() bool { return t.dirty }
 
 // setDirty sets the save flag without advancing the generation.
-func (t *Table[S, X]) setDirty(v bool) { t.dirty = v }
+func (t *Table[S, X, R]) setDirty(v bool) { t.dirty = v }
 
 // check returns every disagreement between the table and its indices, sorted;
 // empty when they are consistent. idOf reports a session's ID ("" when it has
 // none yet), for the idToKey direction the caller maintains.
-func (t *Table[S, X]) check(idOf func(S) string) []string {
+func (t *Table[S, X, R]) check(idOf func(S) string) []string {
 	var problems []string
 	for key, s := range t.sessions {
 		ck := t.chatOf(key)

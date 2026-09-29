@@ -49,7 +49,7 @@ func resolveT(r *Router, key, resumeID string, opts AgentOpts) (sp spawnParams) 
 // only for tests that are single-threaded at that point (-race reports a
 // test that is not).
 func stateOf(r *Router) (x *routerState) {
-	r.ss.View(func(v sessView) { x = v.Ext() })
+	r.ss.Update(func(v sessTx) { x = v.Ext() })
 	return x
 }
 
