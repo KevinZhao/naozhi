@@ -2,6 +2,7 @@ package cron
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,7 @@ func TestSandboxStore_RootIsTheCronStateDir(t *testing.T) {
 		t.Fatalf("store root = %q, want the cron state dir %q", got, dir)
 	}
 	jobID, runID := mustGenerateID(), mustGenerateRunID()
-	s.WriteSandboxAttentionForTest(jobID, runID, sandboxstore.ReasonTransport, "nightly")
+	s.sandboxState().WriteAttention(sandboxstore.Attention{JobID: jobID, RunID: runID, Reason: sandboxstore.ReasonTransport, JobLabel: "nightly", CreatedAtMS: s.attentionNowMS()}, slog.Default())
 	if _, err := os.Stat(filepath.Join(dir, "sandboxattention", runID+".json")); err != nil {
 		t.Fatalf("attention record not at <state-dir>/sandboxattention: %v", err)
 	}
@@ -55,7 +56,7 @@ func TestSandboxStore_RootIsTheCronStateDir(t *testing.T) {
 	if got := bare.sandboxState(); got != (sandboxstore.Store{}) {
 		t.Fatalf("store-less scheduler store = %+v, want the zero Store", got)
 	}
-	bare.WriteSandboxSnapshotForTest(jobID, runID, "p", "", "", nil)
+	bare.sandboxState().WriteSnapshot(jobID, runID, "p", "", "", nil, slog.Default())
 	if man, ok, err := bare.SandboxRunSnapshotManifest(jobID, runID); man != nil || ok || err != nil {
 		t.Fatalf("store-less manifest = (%v, %v, %v), want absent", man, ok, err)
 	}

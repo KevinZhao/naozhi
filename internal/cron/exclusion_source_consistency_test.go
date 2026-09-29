@@ -6,28 +6,10 @@ import (
 	"time"
 )
 
-// TestExclusionSourceConsistency pins R244-ARCH-10 (#1051): the cron session
-// exclusion logic exposes two entry points that MUST agree on every
-// sessionID, regardless of which underlying source the ID lives in:
-//
-//   - LookupKnownSessionID  — the named in-package single-key probe
-//   - KnownSessionIDs()[id] — the full-set dashboard accessor
-//
-// (IsExcluded was a third entry point that duplicated LookupKnownSessionID;
-// it has been removed — R20260614-ARCH-1.)
-//
-// The exclusion logic is deliberately scattered across cheap fast paths
-// (Job.LastSessionID, in-flight runningJobs) and an expensive cold build
-// (runStore.Recent). The single-key probe short-circuits on the cheap
-// sources; the full-set accessor always walks every source. If those code
-// paths ever drift — e.g. a new source is added to buildKnownSessionsSet but
-// not to containsSessionID's fast path, or vice versa — a sessionID could be
-// excluded by one API and not the other, silently leaking a cron JSONL into
-// the dashboard history panel.
-//
-// This is the consistency invariant a future ExcluderRegistry refactor must
-// preserve; pinning it now means the refactor (or any incremental drift) is
-// caught at the API boundary instead of in production.
+// TestExclusionSourceConsistency: KnownSessionIDs, the one cron session
+// exclusion entry point, covers every source a cron session ID lives in —
+// Job.LastSessionID, the in-flight runs and runStore.Recent — so no cron JSONL
+// leaks into the dashboard history panel (#1051).
 func TestExclusionSourceConsistency(t *testing.T) {
 	t.Parallel()
 
@@ -89,25 +71,10 @@ func TestExclusionSourceConsistency(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			// Re-cold the cache before each probe so the single-key API and
-			// the full-set accessor each start from the same uncached state —
-			// otherwise an earlier probe's warm snapshot could mask a drift in
-			// a later cold-path probe.
+			// Re-cold the cache so each probe exercises the full build.
 			s.invalidateKnownSessionsCache()
-			gotLookup := s.LookupKnownSessionID(tc.sessionID)
-
-			s.invalidateKnownSessionsCache()
-			_, gotInSet := s.KnownSessionIDs()[tc.sessionID]
-			if tc.sessionID == "" {
-				// The empty string is never a legitimate key; KnownSessionIDs
-				// never inserts it, so gotInSet is trivially false and the
-				// probe API short-circuits. Only assert the probe API here.
-				gotInSet = false
-			}
-
-			if gotLookup != tc.want || gotInSet != tc.want {
-				t.Fatalf("exclusion APIs disagree for %q:\n  LookupKnownSessionID=%v\n  id∈KnownSessionIDs=%v\n  want all=%v\n(the two exclusion entry points must agree across every source — #1051)",
-					tc.sessionID, gotLookup, gotInSet, tc.want)
+			if _, got := s.KnownSessionIDs()[tc.sessionID]; got != tc.want {
+				t.Fatalf("KnownSessionIDs()[%q] = %v, want %v (#1051)", tc.sessionID, got, tc.want)
 			}
 		})
 	}

@@ -402,7 +402,7 @@ func TestEnqueueSandboxTransportAttention_SkipsDeletedJob(t *testing.T) {
 
 	s.enqueueSandboxTransportAttention(a, "run-deadbeefdeadbe01-1234567890123456789")
 
-	if n := s.SandboxAttentionCount(); n != 0 {
+	if n := s.sandboxState().AttentionCount(); n != 0 {
 		t.Fatalf("attention count = %d, want 0 — deleted-job transport failure must not write a ghost card [R20260614-ARCH-1]", n)
 	}
 }
@@ -423,7 +423,7 @@ func TestEnqueueSandboxTransportAttention_WritesForLiveJob(t *testing.T) {
 
 	s.enqueueSandboxTransportAttention(a, "run-deadbeefdeadbe02-1234567890123456789")
 
-	if n := s.SandboxAttentionCount(); n != 1 {
+	if n := s.sandboxState().AttentionCount(); n != 1 {
 		t.Fatalf("attention count = %d, want 1 — live-job side-effecting transport failure must enqueue [R20260614-ARCH-1]", n)
 	}
 }
@@ -610,7 +610,7 @@ func TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck(t *testing.
 		t.Fatalf("RunStarted count grew %d→%d for job-gone reconcile — phantom lifecycle [#2156]", startedBefore, got)
 	}
 	// Critical: no ghost attention card must have been written.
-	if n := s.SandboxAttentionCount(); n != 0 {
+	if n := s.sandboxState().AttentionCount(); n != 0 {
 		t.Fatalf("attention count = %d after job-deleted reconcile; want 0 — re-check must prevent ghost card [COR-001]", n)
 	}
 	// Pending file removed.
@@ -721,7 +721,7 @@ func TestReconcileOrphan_JobDeletedInGap_NoBroadcastBalancedMetrics(t *testing.T
 		t.Fatalf("CronSandboxRunFailedTotal delta = %d, want 1 [#2156]", d)
 	}
 	// No ghost attention card.
-	if n := s.SandboxAttentionCount(); n != 0 {
+	if n := s.sandboxState().AttentionCount(); n != 0 {
 		t.Fatalf("attention count = %d, want 0 [#2156]", n)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -775,7 +775,7 @@ func TestReconcileOrphan_AttentionRecheck_RaceWithDelete(t *testing.T) {
 
 	// Under -race this will surface any unguarded concurrent access.
 	// Attention count may be 0 or 1 — the invariant is: never > 1 (no ghost dup).
-	if n := s.SandboxAttentionCount(); n > 1 {
+	if n := s.sandboxState().AttentionCount(); n > 1 {
 		t.Fatalf("attention count = %d; re-check must prevent ghost duplicate cards [COR-001]", n)
 	}
 }

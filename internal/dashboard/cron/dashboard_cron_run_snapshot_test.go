@@ -2,6 +2,7 @@ package cron
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,7 +30,7 @@ func TestHandleRunSnapshot_ServesManifest(t *testing.T) {
 	sched := snapshotTestScheduler(t, storePath)
 
 	jobID, runID := strings.Repeat("a", 16), strings.Repeat("b", 16)
-	sched.WriteSandboxSnapshotForTest(jobID, runID, "the cloud prompt", "haiku", "phase2", []string{"github_token"})
+	sandboxStateOf(storePath).WriteSnapshot(jobID, runID, "the cloud prompt", "haiku", "phase2", []string{"github_token"}, slog.Default())
 
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/snapshot?job_id="+jobID, nil)
@@ -67,7 +68,8 @@ func TestHandleRunSnapshot_ServesManifest(t *testing.T) {
 func TestHandleRunSnapshot_MissingUnavailable(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	sched := snapshotTestScheduler(t, filepath.Join(tmp, "cron_jobs.json"))
+	storePath := filepath.Join(tmp, "cron_jobs.json")
+	sched := snapshotTestScheduler(t, storePath)
 
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet,
@@ -91,12 +93,13 @@ func TestHandleRunSnapshot_MissingUnavailable(t *testing.T) {
 func TestHandleRunSnapshot_SecretRefs_Sanitized(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	sched := snapshotTestScheduler(t, filepath.Join(tmp, "cron_jobs.json"))
+	storePath := filepath.Join(tmp, "cron_jobs.json")
+	sched := snapshotTestScheduler(t, storePath)
 
 	jobID, runID := strings.Repeat("a", 16), strings.Repeat("b", 16)
 	// U+202E RIGHT-TO-LEFT OVERRIDE embedded in a ref name.
 	taintedRef := "github\u202etoken"
-	sched.WriteSandboxSnapshotForTest(jobID, runID, "p", "haiku", "phase2", []string{taintedRef})
+	sandboxStateOf(storePath).WriteSnapshot(jobID, runID, "p", "haiku", "phase2", []string{taintedRef}, slog.Default())
 
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/snapshot?job_id="+jobID, nil)
@@ -127,7 +130,8 @@ func TestHandleRunSnapshot_SecretRefs_Sanitized(t *testing.T) {
 // TestHandleRunSnapshot_RejectsBadIDs guards the path-traversal surface.
 func TestHandleRunSnapshot_RejectsBadIDs(t *testing.T) {
 	t.Parallel()
-	sched := snapshotTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
+	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
+	sched := snapshotTestScheduler(t, storePath)
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/x/snapshot?job_id="+strings.Repeat("a", 16), nil)

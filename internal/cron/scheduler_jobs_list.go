@@ -1,7 +1,6 @@
 // scheduler_jobs_list.go: cron Job read-only list / snapshot surface
-// (PerChatJobCount, ListJobs, GetJob, ListJobsWithNextRun,
-// ListAllJobsWithNextRun) plus the sync.Pool scratch containers only this
-// cluster uses.
+// (ListJobs, GetJob, ListAllJobsWithNextRun) plus the sync.Pool scratch
+// containers only this cluster uses.
 
 package cron
 
@@ -30,20 +29,6 @@ var listNextByIDPool = sync.Pool{
 		m := make(map[cronEntryID]time.Time, 64)
 		return &m
 	},
-}
-
-// PerChatJobCount returns the number of jobs registered against the
-// (Platform, ChatID) chat — O(1) via s.tbl.chatJobCount, for dashboard / metrics
-// surfaces rendering "N/M cron jobs in this chat" without a ListJobs walk.
-// Returns 0 for an unknown chat and on a nil *Scheduler (dashboard renders
-// during bootstrap before the scheduler is wired).
-func (s *Scheduler) PerChatJobCount(plat, chatID string) int {
-	if s == nil {
-		return 0
-	}
-	s.tbl.mu.RLock()
-	defer s.tbl.mu.RUnlock()
-	return s.tbl.chatJobCount[chatKeyFor(plat, chatID)]
 }
 
 // ListJobs returns jobs for a specific chat. Walks the jobsByChat index —
@@ -82,86 +67,6 @@ type JobWithNextRun struct {
 	Job     Job
 	NextRun time.Time
 }
-
-// ListJobsWithNextRun returns the jobs for a specific chat plus each job's
-// next scheduled run — the chat-narrowed twin of ListAllJobsWithNextRun, so
-// callers need not walk every job to render one chat (#956).
-//
-// Lock strategy mirrors ListAllJobsWithNextRun: snapshot (Job copy, entryID)
-// under s.tbl.mu.RLock, release, then read s.cron.Entries() lock-free to avoid
-// inverting the cron dispatcher's lock order (cron-internal → execute →
-// s.tbl.mu.Lock). The result is always non-nil (`[]`) for wire-format symmetry.
-func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
-	// Same pool as ListAllJobsWithNextRun so 1Hz polls pay zero allocs for
-	// the transient ids buffer.
-	idsPtr := listEntryIDsPool.Get().(*[]cronEntryID)
-	ids := (*idsPtr)[:0]
-	defer func() {
-		*idsPtr = ids[:0]
-		listEntryIDsPool.Put(idsPtr)
-	}()
-
-	s.tbl.mu.RLock()
-	bucket := s.tbl.jobsByChat[chatKeyFor(plat, chatID)]
-	result := make([]JobWithNextRun, 0, len(bucket))
-	if cap(ids) < len(bucket) {
-		ids = make([]cronEntryID, 0, len(bucket))
-	}
-	for _, j := range bucket {
-		result = append(result, JobWithNextRun{Job: *j})
-		ids = append(ids, j.entryID)
-	}
-	s.tbl.mu.RUnlock()
-
-	if len(result) == 0 {
-		return result
-	}
-
-	// Entries() read outside s.tbl.mu (lock-order safe). entryID 0 = paused, keeps
-	// zero NextRun. Small buckets take a linear scan per job — cheaper than
-	// building a map and avoids touching the shared pool; above
-	// listNextRunMapThreshold the jobs × |entries| product wins and we switch
-	// to the pooled entryID→Next map (#1583).
-	entries := s.cron.Entries()
-	if len(result) <= listNextRunMapThreshold {
-		for i, id := range ids {
-			if id == 0 {
-				continue
-			}
-			for _, e := range entries {
-				if e.ID == id {
-					result[i].NextRun = e.Next
-					break
-				}
-			}
-		}
-		return result
-	}
-
-	nextByIDPtr := listNextByIDPool.Get().(*map[cronEntryID]time.Time)
-	nextByID := *nextByIDPtr
-	clear(nextByID)
-	defer func() {
-		clear(nextByID)
-		listNextByIDPool.Put(nextByIDPtr)
-	}()
-	for _, e := range entries {
-		nextByID[e.ID] = e.Next
-	}
-	for i, id := range ids {
-		if id != 0 {
-			result[i].NextRun = nextByID[id]
-		}
-	}
-	return result
-}
-
-// listNextRunMapThreshold is the per-chat job count at or below which
-// ListJobsWithNextRun linearly scans Entries() per job instead of building the
-// pooled entryID→Next map. 8 is past the common 1-5 jobs/chat bucket, so the
-// typical poll stays allocation-free while a job-hoarding chat stays
-// linear instead of quadratic (#1583).
-const listNextRunMapThreshold = 8
 
 // ListAllJobsWithNextRun returns every job plus its next scheduled run.
 // Lock strategy: snapshot (Job copy, entryID) under s.tbl.mu.RLock, release, then
