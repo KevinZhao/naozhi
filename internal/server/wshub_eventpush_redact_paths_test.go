@@ -7,12 +7,10 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// TestMarshalHistoryFrame_RedactsOnEveryPath pins R20260607-PERF-1 (#1888):
-// the redactEntrySecrets call was moved from above the marshal cache down into
-// each marshal closure to avoid re-scanning already-redacted entries on cache
-// hits. This test guards that the move did NOT open a credential-leak hole —
-// the produced "history" frame bytes must never contain the secret on ANY of
-// the three serialization paths:
+// TestMarshalHistoryFrame_RedactsOnEveryPath: the history frame's bytes never
+// carry a credential shape or a local agent-linkage field on ANY of its
+// serialization paths (wsproto.NewHistory applies clievent.ForWire inside
+// each marshal closure, so a cache hit does not re-scan):
 //  1. nil-cache defensive fallback
 //  2. single-subscriber fast path
 //  3. multi-subscriber getOrMarshal cache path (both miss and hit)
@@ -20,12 +18,18 @@ func TestMarshalHistoryFrame_RedactsOnEveryPath(t *testing.T) {
 	const secret = "sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBB"
 	entries := []clievent.EventEntry{
 		{Type: "text", Time: 100, Summary: "leak " + secret, Detail: "detail " + secret},
+		{Type: "task_start", Time: 101, JSONLPath: "/home/u/.claude/projects/p/s/subagents/agent-x.jsonl", InternalAgentID: "agent-x"},
 	}
 
 	assertNoSecret := func(t *testing.T, data []byte) {
 		t.Helper()
 		if bytes.Contains(data, []byte(secret)) {
 			t.Fatalf("secret survived in marshalled history frame: %q", data)
+		}
+		for _, internal := range []string{"jsonl_path", "internal_agent_id", "/home/u/"} {
+			if bytes.Contains(data, []byte(internal)) {
+				t.Fatalf("%q survived in marshalled history frame: %q", internal, data)
+			}
 		}
 	}
 

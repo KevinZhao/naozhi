@@ -135,7 +135,14 @@ type History struct {
 	Initial bool `json:"initial,omitempty"`
 }
 
-func NewHistory(f History) History { f.Type = TypeHistory; return f }
+// NewHistory, NewEvent and NewAgentEvent carry their entries through
+// clievent.ForWire, so every WS frame holding an EventEntry leaves without
+// the local agent-linkage fields and with credential shapes redacted.
+func NewHistory(f History) History {
+	f.Type = TypeHistory
+	f.Events = clievent.ForWire(f.Events)
+	return f
+}
 
 type Event struct {
 	Type  MsgType              `json:"type"`
@@ -144,7 +151,11 @@ type Event struct {
 	Node  string               `json:"node,omitempty"`
 }
 
-func NewEvent(f Event) Event { f.Type = TypeEvent; return f }
+func NewEvent(f Event) Event {
+	f.Type = TypeEvent
+	f.Event = clievent.ForWireOne(f.Event)
+	return f
+}
 
 type SendAck struct {
 	Type   MsgType `json:"type"`
@@ -242,7 +253,11 @@ type AgentEvent struct {
 	TaskID string               `json:"task_id,omitempty"`
 }
 
-func NewAgentEvent(f AgentEvent) AgentEvent { f.Type = TypeAgentEvent; return f }
+func NewAgentEvent(f AgentEvent) AgentEvent {
+	f.Type = TypeAgentEvent
+	f.Event = clievent.ForWireOne(f.Event)
+	return f
+}
 
 type AgentMeta struct {
 	Type      MsgType         `json:"type"`

@@ -55,7 +55,7 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 			cand := sess.EventEntriesSince(csr.QueryAfter())
 			entries := csr.Filter(cand)
 			if len(entries) > 0 {
-				if err := writeJSON(node.ReverseMsg{Type: "events", Key: key, Events: entries}); err != nil {
+				if err := writeJSON(node.ReverseMsg{Type: "events", Key: key, Events: clievent.ForWire(entries)}); err != nil {
 					return
 				}
 				csr.Advance(entries)
