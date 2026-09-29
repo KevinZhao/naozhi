@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 // concurrencyProbeRunner records the max number of StopSession calls in flight
@@ -62,7 +64,7 @@ func TestReconcileSandboxPending_BailsSendSideOnStopCtx(t *testing.T) {
 	const nOrphans = 50
 	for i := 0; i < nOrphans; i++ {
 		runID := fmt.Sprintf("feedface0001%04d", i)
-		writePendingFixture(t, storePath, sandboxPending{
+		writePendingFixture(t, storePath, sandboxstore.Pending{
 			JobID:            fmt.Sprintf("0123456789cd%04d", i),
 			RunID:            runID,
 			RuntimeSessionID: "run-" + runID + "-1234567890123456789",
@@ -112,7 +114,7 @@ func TestReconcileSandboxPending_ParallelStopsAllOrphans(t *testing.T) {
 			paths := make([]string, 0, tc.nOrphans)
 			for i := 0; i < tc.nOrphans; i++ {
 				runID := fmt.Sprintf("feedface0000%04d", i)
-				p := sandboxPending{
+				p := sandboxstore.Pending{
 					JobID:            fmt.Sprintf("0123456789ab%04d", i),
 					RunID:            runID,
 					RuntimeSessionID: "run-" + runID + "-1234567890123456789",

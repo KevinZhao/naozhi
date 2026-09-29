@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -201,7 +202,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			runner:  &fakeSandboxRunner{},
 			withJob: true,
 			run: func(t *testing.T, s *Scheduler, j *Job, storePath string) {
-				writePendingFixture(t, storePath, sandboxPending{
+				writePendingFixture(t, storePath, sandboxstore.Pending{
 					JobID: j.ID, RunID: "abcabcabc0000101",
 					RuntimeSessionID: "run-abcabcabc0000101-1234567890123456789",
 					StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
@@ -216,7 +217,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			runner:  &fakeSandboxRunner{},
 			withJob: false,
 			run: func(t *testing.T, s *Scheduler, _ *Job, storePath string) {
-				writePendingFixture(t, storePath, sandboxPending{
+				writePendingFixture(t, storePath, sandboxstore.Pending{
 					JobID: "0123456789abcdef", RunID: "abcabcabc0000102",
 					RuntimeSessionID: "run-abcabcabc0000102-1234567890123456789",
 					StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
@@ -231,7 +232,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			runner:  &fakeSandboxRunner{},
 			withJob: true,
 			run: func(t *testing.T, s *Scheduler, j *Job, storePath string) {
-				p := sandboxPending{
+				p := sandboxstore.Pending{
 					JobID: j.ID, RunID: "abcabcabc0000103",
 					RuntimeSessionID: "run-abcabcabc0000103-1234567890123456789",
 					StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
@@ -289,7 +290,7 @@ func TestReconcileOrphan_TerminalCounterParity(t *testing.T) {
 		if withJob {
 			jobID = sandboxJob(t, s).ID
 		}
-		writePendingFixture(t, storePath, sandboxPending{
+		writePendingFixture(t, storePath, sandboxstore.Pending{
 			JobID: jobID, RunID: "abcabcabc0000110",
 			RuntimeSessionID: "run-abcabcabc0000110-1234567890123456789",
 			StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),

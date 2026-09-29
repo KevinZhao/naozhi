@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 // TestStopSandboxRunsForJob_StopsAndRemoves: deleting a job that has an
@@ -17,7 +19,7 @@ func TestStopSandboxRunsForJob_StopsAndRemoves(t *testing.T) {
 	runner := &fakeSandboxRunner{}
 	s, _ := sandboxTestScheduler(t, runner, storePath)
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: "0123456789abcdef", RunID: "feedfacefeedface",
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
 		StartedAtMS:      time.Now().UnixMilli(),
@@ -45,7 +47,7 @@ func TestStopSandboxRunsForJob_StopFailureKeepsPending(t *testing.T) {
 	runner := &fakeSandboxRunner{stopErr: errors.New("api down")}
 	s, _ := sandboxTestScheduler(t, runner, storePath)
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: "0123456789abcdef", RunID: "deadbeefdeadbeef",
 		RuntimeSessionID: "run-deadbeefdeadbeef-1234567890123456789",
 		StartedAtMS:      time.Now().UnixMilli(),
@@ -66,7 +68,7 @@ func TestStopSandboxRunsForJob_IgnoresOtherJobs(t *testing.T) {
 	runner := &fakeSandboxRunner{}
 	s, _ := sandboxTestScheduler(t, runner, storePath)
 
-	otherPath := writePendingFixture(t, storePath, sandboxPending{
+	otherPath := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: "aaaaaaaaaaaaaaaa", RunID: "1111111111111111",
 		RuntimeSessionID: "run-1111111111111111-1234567890123456789",
 		StartedAtMS:      time.Now().UnixMilli(),
@@ -92,7 +94,7 @@ func TestStopSandboxRunsForJob_NoSandboxNoOp(t *testing.T) {
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	s, _ := sandboxTestScheduler(t, nil, storePath)
 	// Even if a stale pending file exists, nil sandbox short-circuits.
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: "0123456789abcdef", RunID: "2222222222222222",
 		RuntimeSessionID: "run-2222222222222222-1234567890123456789",
 		StartedAtMS:      time.Now().UnixMilli(),
@@ -114,7 +116,7 @@ func TestDeleteJobByID_StopsInflightSandbox(t *testing.T) {
 	t.Cleanup(func() { s.Stop() })
 	j := sandboxJob(t, s)
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "cafecafecafecafe",
 		RuntimeSessionID: "run-cafecafecafecafe-1234567890123456789",
 		StartedAtMS:      time.Now().UnixMilli(),

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 // TestClassifyOrphanPending is the table for the pure §6.2/§6.5 containment
@@ -150,7 +152,7 @@ func TestReconcileOrphan_EmptyRuntimeSessionIDKeepsPending(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s)
 
-	p := sandboxPending{
+	p := sandboxstore.Pending{
 		JobID: j.ID, RunID: "abcabcabc0000007",
 		RuntimeSessionID: "",
 		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),

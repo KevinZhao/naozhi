@@ -2,13 +2,9 @@ package cron
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,50 +14,13 @@ import (
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// sandboxPending is the in-flight record written to
-// <store-dir>/sandboxpending/<runID>.json before InvokeAgentRuntime and removed
-// after the run reaches a terminal state. It exists to survive a naozhi
-// restart: the held stream dies with the process but the microVM keeps
-// running, and this file is the only handle the next boot has to Stop it.
-type sandboxPending struct {
-	JobID            string `json:"job_id"`
-	RunID            string `json:"run_id"`
-	RuntimeSessionID string `json:"runtime_session_id"`
-	StartedAtMS      int64  `json:"started_at_ms"`
-}
-
-// sandboxPendingDir resolves the pending directory ("" when persistence is
-// disabled — store-less test fixtures skip the §6.5 machinery entirely).
-func (s *Scheduler) sandboxPendingDir() string {
-	return s.stateSubtree("sandboxpending")
-}
-
-// writeSandboxPending persists the in-flight record. Returns the file path
-// for the paired remove, or "" when persistence is off / the write failed
-// (best-effort: §6.5 protection degrades to the maxLifetime bound, the run
-// itself proceeds).
-func (s *Scheduler) writeSandboxPending(p sandboxPending, lg *slog.Logger) string {
-	dir := s.sandboxPendingDir()
-	if dir == "" {
-		return ""
-	}
-	// Symlink-guarded dir create: a planted `<stateDir>/sandboxpending → /elsewhere`
-	// must not redirect the restart-reconcile handle (#2166). Degrades to no handle.
-	if err := s.mkdirStateSubtree(dir); err != nil {
-		lg.Warn("cron sandbox: pending dir create failed; restart reconcile unavailable for this run", "err", err)
-		return ""
-	}
-	b, err := json.Marshal(p)
-	if err != nil {
-		lg.Warn("cron sandbox: pending marshal failed", "err", err)
-		return ""
-	}
-	// runID is scheduler-generated hex — path-safe by construction.
-	path := filepath.Join(dir, p.RunID+".json")
-	// Atomic write: this file is the ONLY restart-reconcile handle; a truncated
-	// record from a crash mid-write would be dropped as corrupt → permanent orphan.
-	if err := osutil.WriteFileAtomic(path, b, 0o600); err != nil {
-		lg.Warn("cron sandbox: pending write failed; restart reconcile unavailable for this run", "err", err)
+// writeSandboxPending persists the in-flight record (sandboxstore) and indexes
+// its path by job. Returns the path for the paired remove, or "" when
+// persistence is off or the write failed (best-effort: §6.5 protection
+// degrades to the maxLifetime bound, the run itself proceeds).
+func (s *Scheduler) writeSandboxPending(p sandboxstore.Pending, lg *slog.Logger) string {
+	path := s.sandboxState().WritePending(p, lg)
+	if path == "" {
 		return ""
 	}
 	// Live jobID→path index lets DeleteJobByID find this run's pending file with
@@ -105,11 +64,8 @@ func (s *Scheduler) lookupSandboxPendingIndex(jobID string) string {
 
 // removeSandboxPending deletes the in-flight record after terminal state.
 // "" path (write skipped/failed) is a no-op.
-func removeSandboxPending(path string, lg *slog.Logger) {
-	if path == "" {
-		return
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+func (s *Scheduler) removeSandboxPending(path string, lg *slog.Logger) {
+	if err := s.sandboxState().RemovePending(path); err != nil {
 		lg.Warn("cron sandbox: pending remove failed; next start will reconcile a finished run (harmless Stop)", "err", err)
 	}
 }
@@ -125,49 +81,38 @@ func removeSandboxPending(path string, lg *slog.Logger) {
 // Stops fan out across sandboxReconcileWorkers since each is an independent
 // ~30s network call (#2142). reconcileOneSandboxOrphan is concurrency-safe.
 func (s *Scheduler) reconcileSandboxPending() {
-	dir := s.sandboxPendingDir()
-	if dir == "" {
-		return
-	}
-	entries, err := os.ReadDir(dir)
+	entries, err := s.sandboxState().ListPending()
 	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("cron sandbox: pending scan failed", "err", err)
-		}
+		slog.Warn("cron sandbox: pending scan failed", "err", err)
 		return
 	}
 
 	type orphan struct {
-		p    sandboxPending
+		p    sandboxstore.Pending
 		path string
 	}
 	orphans := make([]orphan, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
 		// Bail on shutdown so N×30s Stop timeouts don't exhaust gcWaitBudget.
 		if s.stopCtx.Err() != nil {
 			return
 		}
-		path := filepath.Join(dir, e.Name())
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			slog.Warn("cron sandbox: pending read failed; skipping", "file", osutil.SanitizeForLog(e.Name(), 256), "err", err)
+		if e.State == sandboxstore.PendingUnreadable {
+			slog.Warn("cron sandbox: pending read failed; skipping", "file", osutil.SanitizeForLog(e.Name, 256))
 			continue
 		}
-		var p sandboxPending
-		if err := json.Unmarshal(raw, &p); err != nil || !IsValidID(p.RunID) || !IsValidID(p.JobID) || p.StartedAtMS <= 0 || p.RuntimeSessionID == "" {
+		p := e.Rec
+		if e.State == sandboxstore.PendingCorrupt || !IsValidID(p.RunID) || !IsValidID(p.JobID) || p.StartedAtMS <= 0 || p.RuntimeSessionID == "" {
 			// Corrupt or tampered record: RunID/JobID flow into run-record paths and the
 			// broadcast, StartedAtMS<=0 would produce a 1970 StartedAt and an astronomical
 			// DurationMS, and a record without a RuntimeSessionID cannot be reconciled
 			// (Stop would be skipped yet finishRun + remove would still run). Drop it so
 			// it does not re-warn on every boot.
-			slog.Warn("cron sandbox: corrupt pending record dropped", "file", osutil.SanitizeForLog(e.Name(), 256), "err", err)
-			_ = os.Remove(path)
+			slog.Warn("cron sandbox: corrupt pending record dropped", "file", osutil.SanitizeForLog(e.Name, 256))
+			_ = s.sandboxState().RemovePending(e.Path)
 			continue
 		}
-		orphans = append(orphans, orphan{p: p, path: path})
+		orphans = append(orphans, orphan{p: p, path: e.Path})
 	}
 
 	if len(orphans) == 0 {
@@ -329,7 +274,7 @@ func classifyOrphanPending(pr orphanProbe) orphanVerdict {
 // probe the durable run record. The ordering is load-bearing: the record
 // probe is meaningless while the microVM's fate is unknown, and a failed
 // Stop must short-circuit before any local read.
-func (s *Scheduler) probeOrphan(p sandboxPending) orphanProbe {
+func (s *Scheduler) probeOrphan(p sandboxstore.Pending) orphanProbe {
 	pr := orphanProbe{sandboxConfigured: s.sandbox != nil, runtimeSessionID: p.RuntimeSessionID}
 	if _, blocked := orphanStopBlocked(pr.sandboxConfigured, pr.runtimeSessionID); blocked {
 		return pr
@@ -370,7 +315,7 @@ func logOrphanVerdict(lg *slog.Logger, v orphanVerdict, pr orphanProbe) {
 // Stop failure keeps the file so the NEXT start retries — until a Stop is
 // confirmed the microVM's fate is unknown and §6.2 containment is not
 // satisfied.
-func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
+func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxstore.Pending, path string) {
 	lg := slog.With("job_id", p.JobID, "run_id", p.RunID)
 	lg.Warn("cron sandbox: reconciling orphaned run from previous process")
 
@@ -381,7 +326,7 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	case orphanKeepPending:
 		return
 	case orphanRemoveOnly:
-		removeReconciledPending(path, lg)
+		s.removeReconciledPending(path, lg)
 		return
 	}
 
@@ -399,7 +344,7 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		s.maybeEnqueueOrphanAttention(p, js, lg)
 	}
 	s.finishOrphanRun(p, js, j, jobExists, lg)
-	removeReconciledPending(path, lg)
+	s.removeReconciledPending(path, lg)
 }
 
 // orphanJobSnapshot is the subset of *Job the orphan finish needs, copied
@@ -449,7 +394,7 @@ func (s *Scheduler) jobExists(jobID string) bool {
 // runID (reason=transport); an unconditional write would clobber it and
 // downgrade the reason to "orphaned" (#2119). Probe first; a read error is
 // treated as "may exist" → skip.
-func (s *Scheduler) maybeEnqueueOrphanAttention(p sandboxPending, js orphanJobSnapshot, lg *slog.Logger) {
+func (s *Scheduler) maybeEnqueueOrphanAttention(p sandboxstore.Pending, js orphanJobSnapshot, lg *slog.Logger) {
 	if !js.sideEffects {
 		return
 	}
@@ -490,7 +435,7 @@ const (
 // since a started/ended pair for a job the dashboard already dropped would be a
 // phantom lifecycle. TestReconcileOrphan_TerminalCounterParity pins that both
 // branches move every counter identically.
-func (s *Scheduler) finishOrphanRun(p sandboxPending, js orphanJobSnapshot, j *Job, jobExists bool, lg *slog.Logger) {
+func (s *Scheduler) finishOrphanRun(p sandboxstore.Pending, js orphanJobSnapshot, j *Job, jobExists bool, lg *slog.Logger) {
 	startedAt := time.UnixMilli(p.StartedAtMS)
 	if !jobExists {
 		metrics.CronRunStartedTotal.Add(1)               // 1. emitRunStarted's bump
@@ -529,8 +474,8 @@ func (s *Scheduler) finishOrphanRun(p sandboxPending, js orphanJobSnapshot, j *J
 
 // removeReconciledPending drops the pending file once reconcile has
 // discharged everything it owed for the orphan.
-func removeReconciledPending(path string, lg *slog.Logger) {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+func (s *Scheduler) removeReconciledPending(path string, lg *slog.Logger) {
+	if err := s.sandboxState().RemovePending(path); err != nil {
 		lg.Warn("cron sandbox: reconciled pending remove failed", "err", err)
 	}
 }
@@ -549,10 +494,6 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 	if s.sandbox == nil {
 		return // sandbox placement not configured — nothing could be in flight
 	}
-	dir := s.sandboxPendingDir()
-	if dir == "" {
-		return
-	}
 	// Fast path: this process wrote the record, so its path is in the index.
 	if path := s.lookupSandboxPendingIndex(jobID); path != "" {
 		if s.stopOneSandboxPendingFile(jobID, path) {
@@ -562,11 +503,9 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 	}
 	// Slow path (index miss): a pending file left by a previous process; scan for
 	// a JobID match.
-	entries, err := os.ReadDir(dir)
+	entries, err := s.sandboxState().ListPending()
 	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("cron sandbox: delete-stop pending scan failed", "job_id", jobID, "err", err)
-		}
+		slog.Warn("cron sandbox: delete-stop pending scan failed", "job_id", jobID, "err", err)
 		return
 	}
 	for _, e := range entries {
@@ -574,20 +513,11 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 		if s.stopCtx.Err() != nil {
 			return
 		}
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.State != sandboxstore.PendingOK || e.Rec.JobID != jobID {
 			continue
 		}
-		path := filepath.Join(dir, e.Name())
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			continue // benign: the run goroutine may have just removed it
-		}
-		var p sandboxPending
-		if err := json.Unmarshal(raw, &p); err != nil || p.JobID != jobID {
-			continue
-		}
-		if s.stopOneSandboxPendingFile(jobID, path) {
-			s.clearSandboxPendingIndex(jobID, path)
+		if s.stopOneSandboxPendingFile(jobID, e.Path) {
+			s.clearSandboxPendingIndex(jobID, e.Path)
 		}
 	}
 }
@@ -602,14 +532,11 @@ func (s *Scheduler) stopOneSandboxPendingFile(jobID, path string) bool {
 	if s.stopCtx.Err() != nil {
 		return false
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return false // benign: the run goroutine may have just removed it
-	}
-	var p sandboxPending
-	// RunID is validated too: it is read from operator-writable disk and flows
-	// into slog fields, so a tampered file could inject control characters.
-	if err := json.Unmarshal(raw, &p); err != nil || p.JobID != jobID || p.RuntimeSessionID == "" || !IsValidID(p.RunID) {
+	// A record that is gone (the run goroutine just removed it), unreadable or
+	// corrupt is skipped. RunID is validated too: it is read from
+	// operator-writable disk and flows into slog fields.
+	p, state := s.sandboxState().ReadPending(path)
+	if state != sandboxstore.PendingOK || p.JobID != jobID || p.RuntimeSessionID == "" || !IsValidID(p.RunID) {
 		return false
 	}
 	// Validate RuntimeSessionID from disk before StopSession; on invalid format
@@ -630,7 +557,7 @@ func (s *Scheduler) stopOneSandboxPendingFile(jobID, path string) bool {
 		lg.Error("cron sandbox: delete-stop failed; pending record kept for startup reconcile", "err", stopErr)
 		return false
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := s.sandboxState().RemovePending(path); err != nil {
 		lg.Warn("cron sandbox: delete-stop pending remove failed", "err", err)
 	}
 	return true

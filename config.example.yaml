@@ -32,6 +32,10 @@
 # --doctor` prints the effective resolved config.
 # ============================================================================
 
+# The config schema this file is written for; `naozhi config migrate` upgrades
+# an older file (one without this key is migrated from version 1).
+schema_version: 2
+
 server:
   addr: ":8180"
   dashboard_token: "${NAOZHI_DASHBOARD_TOKEN}"

@@ -128,15 +128,8 @@ func (st Store) GetAttention(runID string) (*Attention, bool, error) {
 	if !validID(runID) {
 		return nil, false, ErrInvalidID
 	}
-	// Bounded and symlink-refusing. An unparseable record stays where it is:
-	// moving it aside would turn the next read into "absent", and a retried
-	// replay would then skip the Stop and dispatch against a run that may
-	// still be live. It keeps failing closed until an operator removes it.
-	rec, outcome, err := jsonfile.Load[Attention](filepath.Join(dir, runID+".json"), jsonfile.Options{
-		MaxBytes: maxAttentionRecordBytes,
-		Label:    "cron sandbox attention record",
-		Corrupt:  jsonfile.LeaveCorrupt,
-	})
+	// An unparseable record keeps failing closed until an operator removes it.
+	rec, outcome, err := loadAttention(filepath.Join(dir, runID+".json"))
 	if err != nil {
 		return nil, false, err
 	}
@@ -155,6 +148,18 @@ func (st Store) GetAttention(runID string) (*Attention, bool, error) {
 		return nil, false, ErrCorruptAttention
 	}
 	return &rec, true, nil
+}
+
+// loadAttention reads one record, bounded and symlink-refusing. An
+// unparseable record stays where it is: moving it aside would turn the next
+// read into "absent", and a retried replay would then skip the Stop and
+// dispatch against a run that may still be live.
+func loadAttention(path string) (Attention, jsonfile.Outcome, error) {
+	return jsonfile.Load[Attention](path, jsonfile.Options{
+		MaxBytes: maxAttentionRecordBytes,
+		Label:    "cron sandbox attention record",
+		Corrupt:  jsonfile.LeaveCorrupt,
+	})
 }
 
 // AttentionItem is the read-model returned to the dashboard queue
@@ -198,12 +203,13 @@ func (st Store) ListAttention() []AttentionItem {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue // benign: a concurrent resolve may have removed it
+		// Same bounded, symlink-refusing read as GetAttention: a record that
+		// read refuses blocks replay of its run, so it has to be listed too.
+		rec, outcome, err := loadAttention(filepath.Join(dir, e.Name()))
+		if err == nil && outcome == jsonfile.Absent {
+			continue // a concurrent resolve removed it
 		}
-		var rec Attention
-		if err := json.Unmarshal(raw, &rec); err != nil || !validID(rec.RunID) || !validID(rec.JobID) {
+		if err != nil || outcome != jsonfile.Parsed || !validID(rec.RunID) || !validID(rec.JobID) {
 			// The file name is the run id GetAttention and
 			// cron's ConfirmSandboxRun key on, so it is the handle to list. A name
 			// that is not a valid id could not be confirmed through the API
@@ -276,12 +282,8 @@ func (st Store) DeleteJobAttention(jobID string) {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
-		raw, rerr := os.ReadFile(path)
-		if rerr != nil {
-			continue
-		}
-		var rec Attention
-		if json.Unmarshal(raw, &rec) != nil || rec.JobID != jobID {
+		rec, outcome, err := loadAttention(path)
+		if err != nil || outcome != jsonfile.Parsed || rec.JobID != jobID {
 			continue
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
