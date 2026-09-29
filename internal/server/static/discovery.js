@@ -90,7 +90,7 @@ async function scanDiscovered() {
   }
 }
 
-async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliName, entrypoint) {
+async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, typeLabel) {
   // Generation guard: two rapid clicks on different discovered cards both
   // pass the synchronous prologue, then the first call's awaited fetch used to
   // resolve into the SECOND card's #events-scroll and arm a second
@@ -120,7 +120,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
       '<div class="main-header-content">' +
         '<h2>' + esc(base) + '</h2>' +
         '<div class="detail">' +
-          deps.sessionTypeTag(cliName || 'cli', entrypoint || '') +
+          deps.sessionTypeTag(typeLabel) +
         '</div>' +
       '</div>' +
     '</div>' +

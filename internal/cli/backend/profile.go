@@ -64,6 +64,12 @@ type Profile struct {
 	// probe for this backend.
 	ResumeTarget func(dir, claudeDir, workspace, sessionID string) string
 
+	// TerminalLabel names a session of this backend found running in a
+	// terminal, for the dashboard's type chip ("Claude CLI"); entrypoint is
+	// the CLI's own session-file entrypoint ("cli", "claude-vscode"). nil =
+	// the generic "CLI".
+	TerminalLabel func(entrypoint string) string
+
 	// CostUnit labels cumulative cost cells: "USD" (claude), "credits" (kiro).
 	// Empty means no cost concept — the dashboard hides the cell.
 	CostUnit string
@@ -178,4 +184,16 @@ func RegisterDefaults() {
 // partial-registration race.
 func EnsureDefaults() {
 	defaultsOnce.Do(RegisterDefaults)
+}
+
+// TerminalLabelFor is the type-chip label for a terminal session whose CLI
+// detected as displayName (a Profile.DisplayName, as discovery reports it):
+// that backend's TerminalLabel, or "CLI" for an unknown CLI.
+func TerminalLabelFor(displayName, entrypoint string) string {
+	for _, p := range All() {
+		if p.DisplayName == displayName && p.TerminalLabel != nil {
+			return p.TerminalLabel(entrypoint)
+		}
+	}
+	return "CLI"
 }

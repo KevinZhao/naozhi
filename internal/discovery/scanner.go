@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
+	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -252,6 +253,7 @@ type DiscoveredSession struct {
 	Kind       string `json:"kind"`                  // "interactive" etc.
 	Entrypoint string `json:"entrypoint"`            // "cli" etc.
 	CLIName    string `json:"cli_name,omitempty"`    // "claude-code", "kiro" (detected from process cmdline)
+	TypeLabel  string `json:"type_label,omitempty"`  // dashboard type chip ("Claude CLI"), from the backend profile
 	Summary    string `json:"summary,omitempty"`     // Claude-generated session name from sessions-index
 	LastPrompt string `json:"last_prompt,omitempty"` // most recent user message
 	// ProcStartTime is a per-PID boot identity that detects PID reuse (Linux:
@@ -415,6 +417,7 @@ func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs
 		if c.lastActive > nowMs-int64(runningThreshold/time.Millisecond) {
 			state = "running"
 		}
+		cliName := detectCLIName(c.sf.PID)
 		result = append(result, DiscoveredSession{
 			PID:           c.sf.PID,
 			SessionID:     c.sf.SessionID,
@@ -424,7 +427,8 @@ func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs
 			State:         state,
 			Kind:          c.sf.Kind,
 			Entrypoint:    c.sf.Entrypoint,
-			CLIName:       detectCLIName(c.sf.PID),
+			CLIName:       cliName,
+			TypeLabel:     backend.TerminalLabelFor(cliName, c.sf.Entrypoint),
 			Summary:       SanitizePromptForTransport(summaryMap[c.sf.SessionID]),
 			LastPrompt:    prompts[i],
 			ProcStartTime: pst,
