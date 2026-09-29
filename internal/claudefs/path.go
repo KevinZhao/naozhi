@@ -84,11 +84,61 @@ func ProjectDir(claudeDir, cwd string) string {
 // building it — this function encodes the layout, it does not authorise the
 // read.
 func SessionJSONL(claudeDir, cwd, sessionID string) string {
-	dir := ProjectDir(claudeDir, cwd)
+	return TranscriptIn(ProjectDir(claudeDir, cwd), sessionID)
+}
+
+// TranscriptIn is a session's transcript inside an already-resolved project
+// directory (a caller walking projects/ by directory name has no cwd to slug).
+func TranscriptIn(projectDir, sessionID string) string {
+	if projectDir == "" {
+		return ""
+	}
+	return filepath.Join(projectDir, sessionID+".jsonl")
+}
+
+// MemoryDir is a project's memory directory (<projectDir>/memory).
+func MemoryDir(projectDir string) string {
+	if projectDir == "" {
+		return ""
+	}
+	return filepath.Join(projectDir, "memory")
+}
+
+// SubagentsDir holds one session's sub-agent transcripts:
+// <projectDir>/<sessionID>/subagents.
+func SubagentsDir(projectDir, sessionID string) string {
+	if projectDir == "" || sessionID == "" {
+		return ""
+	}
+	return filepath.Join(projectDir, sessionID, "subagents")
+}
+
+// SubagentJSONL is one sub-agent's transcript in a SubagentsDir.
+func SubagentJSONL(subagentsDir, agentID string) string {
+	return filepath.Join(subagentsDir, "agent-"+agentID+".jsonl")
+}
+
+// SubagentMeta is one sub-agent's meta.json sidecar in a SubagentsDir.
+func SubagentMeta(subagentsDir, agentID string) string {
+	return filepath.Join(subagentsDir, "agent-"+agentID+".meta.json")
+}
+
+// LiveSessionsDir is <claudeDir>/sessions, where each running CLI process
+// keeps a <pid>.json. Empty claudeDir yields "".
+func LiveSessionsDir(claudeDir string) string {
+	if claudeDir == "" {
+		return ""
+	}
+	return filepath.Join(claudeDir, "sessions")
+}
+
+// LiveSessionFile is a running CLI process's <pid>.json.
+func LiveSessionFile(claudeDir string, pid int) string {
+	dir := LiveSessionsDir(claudeDir)
 	if dir == "" {
 		return ""
 	}
-	return filepath.Join(dir, sessionID+".jsonl")
+	return filepath.Join(dir, strconv.Itoa(pid)+".json")
 }
 
 // SessionsIndexPath is a project's sessions-index.json sidecar.
