@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
@@ -1019,5 +1020,38 @@ func TestHandleAuth_WSToken_OwnerStableAcrossCalls(t *testing.T) {
 	}
 	if a, b := derive(), derive(); a != b {
 		t.Errorf("uploadOwner not stable: %q vs %q", a, b)
+	}
+}
+
+// Two tabs of one user share the per-owner send budget: once it is spent, the
+// second tab's first send is rate limited although its own per-connection
+// limiter is untouched. The spent budget is installed after tab A's first
+// send creates it, so the test does not race the 1/s refill.
+func TestWS_Send_OwnerBudgetSharedAcrossTabs(t *testing.T) {
+	hub, _ := newTestHub("")
+	url, cleanup := startWSServer(t, hub)
+	defer cleanup()
+
+	a := dialWS(t, url)
+	defer a.Close()
+	b := dialWS(t, url)
+	defer b.Close()
+
+	wsWrite(t, a, node.ClientMsg{Type: "send", Key: "nope", Text: "hi"})
+	if resp := wsRead(t, a); resp.Error == "rate limited" {
+		t.Fatal("tab A's first send was rate limited")
+	}
+	owners := 0
+	hub.admit.sendLimiters.Range(func(k, _ any) bool {
+		hub.admit.sendLimiters.Store(k, rate.NewLimiter(rate.Every(time.Hour), 0))
+		owners++
+		return true
+	})
+	if owners != 1 {
+		t.Fatalf("%d owner budgets after one send, want 1", owners)
+	}
+	wsWrite(t, b, node.ClientMsg{Type: "send", Key: "nope", Text: "hi"})
+	if resp := wsRead(t, b); resp.Error != "rate limited" {
+		t.Errorf("tab B's first send = %+v, want rate limited by the shared owner budget", resp)
 	}
 }

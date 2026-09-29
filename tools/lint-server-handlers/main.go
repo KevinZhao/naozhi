@@ -20,6 +20,9 @@
 //     上、不能回到 Hub；send.go / send_owner_loop.go / send_engine.go 内不得
 //     出现 *Hub 接收者（#2551）。
 //   - stale_exemption: exemptions 条目必须指向存在的文件。
+//   - struct_budget / server_field_liveness: rule_server_fields.go.
+//   - sublock_encapsulation: a sub-object's lock is taken by its own methods
+//     (rule_sublock.go).
 //
 // Two rules were deleted in #2554:
 //   - iface_match scanned for godoc `satisfies:` comments and cross-checked them
@@ -82,6 +85,7 @@ var ruleIDs = []string{
 	"stale_exemption",
 	"struct_budget",
 	"server_field_liveness",
+	"sublock_encapsulation",
 }
 
 type Violation struct {
@@ -145,49 +149,11 @@ func main() {
 		return
 	}
 
-	var vs []Violation
-
-	// Rule 1: handle_decl
-	currentHandlers, err := scanHandleHandlers(*serverPkg)
+	vs, err := collectViolations(*serverPkg, *dashboardPkg, exempts, time.Now())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scan %s: %v\n", *serverPkg, err)
 		os.Exit(2)
 	}
-	baseline := make(map[string]struct{}, len(exempts.HandleBaseline))
-	for _, n := range exempts.HandleBaseline {
-		baseline[n] = struct{}{}
-	}
-	for _, h := range currentHandlers {
-		if _, ok := baseline[h]; ok {
-			continue
-		}
-		vs = append(vs, Violation{
-			Rule:    "handle_decl",
-			File:    *serverPkg + "/server.go",
-			Message: fmt.Sprintf("%q is a Server handler: internal/server owns only the HTTP pipe, every /api/* handler lives in an internal/dashboard/<sub> package behind a Deps struct (internal/server/doc.go); only the static shell is exempt via exemptions.yaml handle_baseline", h),
-		})
-	}
-
-	// Rule 2: file_size
-	exemptFiles := make(map[string]exemption, len(exempts.FileSize))
-	for _, e := range exempts.FileSize {
-		exemptFiles[e.Path] = e
-	}
-	vs = append(vs, scanFileSize(*serverPkg, 500, exemptFiles)...)
-	if _, err := os.Stat(*dashboardPkg); err == nil {
-		vs = append(vs, scanFileSize(*dashboardPkg, 800, exemptFiles)...)
-	}
-
-	// Rule 3b-send: send_engine_ownership — send 块字段必须在 sendEngine 上，
-	// 流水线文件不得出现 *Hub 方法；检查的是声明本身。
-	vs = append(vs, scanSendEngineOwnership(*serverPkg)...)
-
-	// struct_budget / server_field_liveness: Server keeps only what something
-	// reads after construction (#2897 S4).
-	vs = append(vs, scanServerFields(*serverPkg)...)
-
-	// Rule 5: stale_exemption
-	vs = append(vs, scanStaleExemption(exempts, time.Now())...)
 
 	if os.Getenv("LINT_VERBOSE") == "1" {
 		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b partially landed — send-block slice is enforced (send_engine_ownership, #2551); the general AST field_block 对账 was owed to Phase 4b, which ADR-001 shelved. rule 4 method-set 对账 + rule 5 git tag 对账 due Phase 1 (server-split-phase4-design.md v0.6.1 §六.2.0.4)")
@@ -202,6 +168,57 @@ func main() {
 	if len(vs) > 0 && m == modeFail {
 		os.Exit(1)
 	}
+}
+
+// collectViolations runs every rule over serverPkg and dashboardPkg.
+func collectViolations(serverPkg, dashboardPkg string, exempts *exemptions, now time.Time) ([]Violation, error) {
+	var vs []Violation
+
+	// Rule 1: handle_decl
+	currentHandlers, err := scanHandleHandlers(serverPkg)
+	if err != nil {
+		return nil, err
+	}
+	baseline := make(map[string]struct{}, len(exempts.HandleBaseline))
+	for _, n := range exempts.HandleBaseline {
+		baseline[n] = struct{}{}
+	}
+	for _, h := range currentHandlers {
+		if _, ok := baseline[h]; ok {
+			continue
+		}
+		vs = append(vs, Violation{
+			Rule:    "handle_decl",
+			File:    serverPkg + "/server.go",
+			Message: fmt.Sprintf("%q is a Server handler: internal/server owns only the HTTP pipe, every /api/* handler lives in an internal/dashboard/<sub> package behind a Deps struct (internal/server/doc.go); only the static shell is exempt via exemptions.yaml handle_baseline", h),
+		})
+	}
+
+	// Rule 2: file_size
+	exemptFiles := make(map[string]exemption, len(exempts.FileSize))
+	for _, e := range exempts.FileSize {
+		exemptFiles[e.Path] = e
+	}
+	vs = append(vs, scanFileSize(serverPkg, 500, exemptFiles)...)
+	if _, err := os.Stat(dashboardPkg); err == nil {
+		vs = append(vs, scanFileSize(dashboardPkg, 800, exemptFiles)...)
+	}
+
+	// Rule 3b-send: send_engine_ownership — send 块字段必须在 sendEngine 上，
+	// 流水线文件不得出现 *Hub 方法；检查的是声明本身。
+	vs = append(vs, scanSendEngineOwnership(serverPkg)...)
+
+	// struct_budget / server_field_liveness: Server keeps only what something
+	// reads after construction (#2897 S4).
+	vs = append(vs, scanServerFields(serverPkg)...)
+
+	// sublock_encapsulation: a sub-object's lock is taken by its own methods
+	// (#2897 S6).
+	vs = append(vs, scanSublocks([]string{serverPkg, dashboardPkg}, sublockTestBaseline)...)
+
+	// Rule 5: stale_exemption
+	vs = append(vs, scanStaleExemption(exempts, now)...)
+	return vs, nil
 }
 
 // scanHandleHandlers returns "Server.handleX" for every method in pkgDir
