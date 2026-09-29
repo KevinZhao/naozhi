@@ -179,7 +179,7 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	// orphaned microVM and close the run. Best-effort: a write failure only loses
 	// restart immunity (orphan bounded by maxLifetime), it does not fail the run.
 	runtimeSID := sandboxRuntimeSessionID(a.runID, a.startedAt)
-	pendingPath := s.writeSandboxPending(sandboxPending{
+	pendingPath := s.writeSandboxPending(sandboxstore.Pending{
 		JobID:            a.snap.jobID,
 		RunID:            a.runID,
 		RuntimeSessionID: runtimeSID,
@@ -209,7 +209,7 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	if err != nil {
 		// Pre-flight failure: the job never reached the platform, so the pending
 		// handle is moot.
-		removeSandboxPending(pendingPath, a.lg)
+		s.removeSandboxPending(pendingPath, a.lg)
 		s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, "",
 			"sandbox preflight: "+sanitiseRunErrMsg(err.Error()), nil)
@@ -222,11 +222,11 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 
 	switch outcome.State {
 	case SandboxStateSuccess:
-		removeSandboxPending(pendingPath, a.lg)
+		s.removeSandboxPending(pendingPath, a.lg)
 		s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 		s.finishSandboxRun(a, RunStateSucceeded, ErrClassNone, outcome.ResultText, "", metaPtr)
 	case SandboxStateFailedClean:
-		removeSandboxPending(pendingPath, a.lg)
+		s.removeSandboxPending(pendingPath, a.lg)
 		s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, outcome.ResultText,
 			sanitiseRunErrMsg(outcome.ErrMsg), metaPtr)
@@ -239,7 +239,7 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		}
 		if outcome.StopConfirmed {
 			// §6.2 rule 1 satisfied in-process — the retry handle is spent.
-			removeSandboxPending(pendingPath, a.lg)
+			s.removeSandboxPending(pendingPath, a.lg)
 			s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 			msg += " (microVM termination confirmed)"
 		} else {

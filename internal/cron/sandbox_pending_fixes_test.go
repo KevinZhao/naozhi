@@ -33,7 +33,7 @@ func TestReconcileOrphan_NoRaceWithConcurrentUpdateJob(t *testing.T) {
 	j := sandboxJob(t, s)
 
 	// Write a pending fixture for the existing job.
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "aabbccddeeff0022",
 		RuntimeSessionID: "run-aabbccddeeff0022-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
@@ -141,7 +141,7 @@ func TestReconcileOrphan_DeletedJobBumpsMetrics(t *testing.T) {
 	// No job added → s.tbl.jobs["nonexistentjobid"] == nil.
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: "0123456789abcdef", RunID: "cafebabe00000001",
 		RuntimeSessionID: "run-cafebabe00000001-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-3 * time.Minute).UnixMilli(),
@@ -176,7 +176,7 @@ func TestReconcileOrphan_DeletedJobBumpsStartedTotal(t *testing.T) {
 	// No job registered → s.tbl.jobs[jobID] == nil.
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: "0123456789abcdef", RunID: "cafebabe00000002",
 		RuntimeSessionID: "run-cafebabe00000002-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-4 * time.Minute).UnixMilli(),
@@ -216,7 +216,7 @@ func TestStopSandboxRunsForJob_InvalidRunIDSkipped(t *testing.T) {
 	if err := os.MkdirAll(pdir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	p := sandboxPending{
+	p := sandboxstore.Pending{
 		JobID:            jobID,
 		RunID:            "evil\ninjected", // fails IsValidID
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
@@ -251,7 +251,7 @@ func TestStopSandboxRunsForJob_ValidRunIDProcessed(t *testing.T) {
 
 	jobID := "0123456789abcdef"
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: jobID, RunID: "feedfacefeedface",
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
 		StartedAtMS:      time.Now().UnixMilli(),
@@ -286,7 +286,7 @@ func TestReconcileOrphan_LiveJobBumpsSandboxFailedMetric(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s) // job still exists at reconcile time
 
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "abcabcabc0000001",
 		RuntimeSessionID: "run-abcabcabc0000001-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
@@ -309,7 +309,7 @@ func TestReconcileOrphan_DeletedJobBumpsSandboxFailedMetric(t *testing.T) {
 	// No job added → nil-job branch.
 	s, _ := sandboxTestScheduler(t, runner, storePath)
 
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: "0123456789abcdef", RunID: "abcabcabc0000002",
 		RuntimeSessionID: "run-abcabcabc0000002-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
@@ -337,7 +337,7 @@ func TestReconcileSandboxPending_ZeroStartedAtDroppedAsCorrupt(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s)
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "abcabcabc0000003",
 		RuntimeSessionID: "run-abcabcabc0000003-1234567890123456789",
 		StartedAtMS:      0, // corrupt: would yield a 1970 StartedAt
@@ -361,7 +361,7 @@ func TestReconcileSandboxPending_NegativeStartedAtDroppedAsCorrupt(t *testing.T)
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s)
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "abcabcabc0000004",
 		RuntimeSessionID: "run-abcabcabc0000004-1234567890123456789",
 		StartedAtMS:      -5000,
@@ -458,7 +458,7 @@ func TestReconcileOrphan_PreservesExistingTransportAttentionReason(t *testing.T)
 
 	// (b)+(c) Process crashed before removing the pending file; restart
 	// reconcile sees the orphan and would re-write attention for the same runID.
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: runID,
 		RuntimeSessionID: "run-aabbccddeeff0119-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
@@ -495,7 +495,7 @@ func TestReconcileOrphan_WritesOrphanedAttentionWhenNonePreexists(t *testing.T) 
 
 	// No prior attention record: a clean restart orphan (process died before
 	// any in-process transport attention was written).
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: runID,
 		RuntimeSessionID: "run-aabbccddeeff0120-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
@@ -531,7 +531,7 @@ func TestReconcileSandboxPending_EmptyRuntimeSessionIDDroppedAsCorrupt(t *testin
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s)
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID:            j.ID,
 		RunID:            "abcabcabc0000005",
 		RuntimeSessionID: "", // empty: no microVM handle, §6.2 containment broken
@@ -579,7 +579,7 @@ func TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck(t *testing.
 	j := sideEffectsJob(t, s)
 
 	runID := "aabbccddeeff0201"
-	p := sandboxPending{
+	p := sandboxstore.Pending{
 		JobID:            j.ID,
 		RunID:            runID,
 		RuntimeSessionID: "run-aabbccddeeff0201-1234567890123456789",
@@ -636,7 +636,7 @@ func TestReconcileSandboxPending_ShutdownBeforeReconcileSkipsStop(t *testing.T) 
 	j := sandboxJob(t, s)
 
 	// Exactly one orphan → the single-orphan serial fast path.
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "abcabcabc0000006",
 		RuntimeSessionID: "run-abcabcabc0000006-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
@@ -675,7 +675,7 @@ func TestReconcileOrphan_JobDeletedInGap_NoBroadcastBalancedMetrics(t *testing.T
 	j := sideEffectsJob(t, s)
 
 	runID := "aabbccddeeff0203"
-	p := sandboxPending{
+	p := sandboxstore.Pending{
 		JobID:            j.ID,
 		RunID:            runID,
 		RuntimeSessionID: "run-aabbccddeeff0203-1234567890123456789",
@@ -741,7 +741,7 @@ func TestReconcileOrphan_AttentionRecheck_RaceWithDelete(t *testing.T) {
 	j := sideEffectsJob(t, s)
 
 	runID := "aabbccddeeff0202"
-	p := sandboxPending{
+	p := sandboxstore.Pending{
 		JobID:            j.ID,
 		RunID:            runID,
 		RuntimeSessionID: "run-aabbccddeeff0202-1234567890123456789",

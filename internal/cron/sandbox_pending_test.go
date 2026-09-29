@@ -9,13 +9,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 func pendingDirOf(storePath string) string {
 	return filepath.Join(filepath.Dir(storePath), "sandboxpending")
 }
 
-func writePendingFixture(t *testing.T, storePath string, p sandboxPending) string {
+func writePendingFixture(t *testing.T, storePath string, p sandboxstore.Pending) string {
 	t.Helper()
 	dir := pendingDirOf(storePath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -95,7 +97,7 @@ func TestSandboxReconcile_StopsOrphanAndClosesRun(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s)
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "feedfacefeedface",
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-5 * time.Minute).UnixMilli(),
@@ -135,7 +137,7 @@ func TestSandboxReconcile_StopFailureKeepsPending(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s)
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "deadbeefdeadbeef",
 		RuntimeSessionID: "run-deadbeefdeadbeef-1234567890123456789",
 		StartedAtMS:      time.Now().UnixMilli(),
@@ -160,7 +162,7 @@ func TestSandboxReconcile_DeletedJobClosesFileOnly(t *testing.T) {
 	runner := &fakeSandboxRunner{}
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: "0123456789abcdef", RunID: "cafebabecafebabe",
 		RuntimeSessionID: "run-cafebabecafebabe-1234567890123456789",
 		StartedAtMS:      time.Now().UnixMilli(),
@@ -216,7 +218,7 @@ func TestSandboxReconcile_NilSandboxKeepsPending(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, nil, storePath)
 	j := sandboxJob(t, s)
 
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "0011223344556677",
 		RuntimeSessionID: "run-0011223344556677-1234567890123456789",
 		StartedAtMS:      time.Now().UnixMilli(),
@@ -418,12 +420,12 @@ func TestSandboxReconcile_BailsWhenStopCtxCancelled(t *testing.T) {
 
 	// Write two pending files so the loop would call StopSession twice if it
 	// did not respect the stopCtx cancellation.
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "aabbccddeeff0011",
 		RuntimeSessionID: "run-aabbccddeeff0011-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
 	})
-	writePendingFixture(t, storePath, sandboxPending{
+	writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID: j.ID, RunID: "1122334455667788",
 		RuntimeSessionID: "run-1122334455667788-1234567890123456789",
 		StartedAtMS:      time.Now().Add(-3 * time.Minute).UnixMilli(),
