@@ -38,27 +38,34 @@ func (s *Store) AcquireSpawnSlot() { s.pending++ }
 // ReleaseSpawnSlot undoes one AcquireSpawnSlot.
 func (s *Store) ReleaseSpawnSlot() { s.pending-- }
 
-// BeginSpawn marks key as spawning and returns its done-channel: the one
-// already installed when a spawn is in flight (ResetAndRecreate pre-installs
-// the guard that spawnSession then reuses), otherwise a fresh channel.
-func (s *Store) BeginSpawn(key string) chan struct{} {
+// BeginSpawn marks key as spawning and returns its done-channel. owned is
+// false when a spawn is already in flight for key: ch is then that spawn's
+// channel, to wait on, and the caller must not end it. Only the owner — the
+// caller that got owned=true — ends a spawn, which is what makes the close
+// happen exactly once.
+func (s *Store) BeginSpawn(key string) (ch chan struct{}, owned bool) {
 	if s.spawning == nil {
 		s.spawning = make(map[string]chan struct{})
 	}
 	if ch, ok := s.spawning[key]; ok {
-		return ch
+		return ch, false
 	}
-	ch := make(chan struct{})
+	ch = make(chan struct{})
 	s.spawning[key] = ch
-	return ch
+	return ch, true
 }
 
-// EndSpawn closes ch, waking every waiter parked on it, then removes key.
-// ch must be the channel BeginSpawn returned for this spawn; only the spawn
-// that owns it may call EndSpawn, so the close happens exactly once.
-func (s *Store) EndSpawn(key string, ch chan struct{}) {
+// EndSpawn closes ch, waking every waiter parked on it, and removes key —
+// if ch is key's current marker. Otherwise it does nothing and returns
+// false: a second end, or an end by a caller that never owned the spawn,
+// must not close a channel twice or retire someone else's marker.
+func (s *Store) EndSpawn(key string, ch chan struct{}) bool {
+	if cur, ok := s.spawning[key]; !ok || cur != ch {
+		return false
+	}
 	close(ch)
 	delete(s.spawning, key)
+	return true
 }
 
 // SpawnInFlight returns the done-channel of the spawn in flight for key.

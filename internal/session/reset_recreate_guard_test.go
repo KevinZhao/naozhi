@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -32,8 +33,19 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 	// /nonexistent/cli-binary, but its exit (EndSpawn) still closes whichever
 	// channel it captured into doneCh. With the fix, that channel IS our
 	// guardCh.
-	var guardCh chan struct{}
-	_, _ = spawnIn(r, key, func(tx sessTx) { guardCh = tx.Ext().spawns.BeginSpawn(key) })
+	var (
+		guardCh chan struct{}
+		res     spawnReservation
+		err     error
+	)
+	r.ss.Update(func(tx sessTx) {
+		guardCh, _ = tx.Ext().spawns.BeginSpawn(key)
+		res.guard = guardCh
+		err = r.reserveSpawn(tx, &res, key, "", AgentOpts{})
+	})
+	if err == nil {
+		_, _ = r.completeSpawn(context.Background(), &res)
+	}
 
 	// Verify the guardCh we installed was the one that got closed.
 	// A closed channel returns immediately on receive; an unclosed one
@@ -54,6 +66,39 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 		t.Fatal("in-flight entry still present after the spawn returned; " +
 			"EndSpawn failed to delete the (possibly reused) entry")
 	}
+}
+
+// A spawn in flight that the reserving caller did not install is refused,
+// not joined: joining would run two spawns for one key and end the other
+// caller's guard, closing it twice.
+func TestReserveSpawn_RefusesAnotherCallersInFlightSpawn(t *testing.T) {
+	r := newTestRouter(5)
+	key := "feishu:direct:refuse-joining:general"
+	var (
+		other chan struct{}
+		res   spawnReservation
+		err   error
+	)
+	r.ss.Update(func(tx sessTx) {
+		other, _ = tx.Ext().spawns.BeginSpawn(key)
+		err = r.reserveSpawn(tx, &res, key, "", AgentOpts{})
+	})
+	if !errors.Is(err, ErrSpawnInFlight) {
+		t.Fatalf("reserveSpawn = %v, want ErrSpawnInFlight", err)
+	}
+	select {
+	case <-other:
+		t.Fatal("the refused reservation ended the other caller's guard")
+	default:
+	}
+	r.ss.Update(func(tx sessTx) {
+		if ch, ok := tx.Ext().spawns.SpawnInFlight(key); !ok || ch != other {
+			t.Error("the other caller's marker is gone")
+		}
+		if n := tx.Ext().spawns.PendingSpawns(); n != 0 {
+			t.Errorf("the refused reservation holds %d pending slots", n)
+		}
+	})
 }
 
 // TestSpawnSession_FreshKeyInstallsOwnChannel pins the symmetric invariant:
@@ -99,7 +144,7 @@ func TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard(t *testing.T) {
 	// proc.Close.
 	var guardCh chan struct{}
 	r.ss.Update(func(tx sessTx) {
-		guardCh = tx.Ext().spawns.BeginSpawn(key)
+		guardCh, _ = tx.Ext().spawns.BeginSpawn(key)
 	})
 
 	// Launch N concurrent GetOrCreate. With the guard installed, none

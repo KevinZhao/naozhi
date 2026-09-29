@@ -695,10 +695,14 @@ func countUserTurns(entries []clievent.EventEntry) int64 {
 // spawnReservation is what reserveSpawn hands to completeSpawn: everything
 // decided under the lock before the slow, unlocked part of a spawn.
 type spawnReservation struct {
-	key       string
-	resumeID  string
-	opts      AgentOpts
-	doneCh    chan struct{}
+	key      string
+	resumeID string
+	opts     AgentOpts
+	doneCh   chan struct{}
+	// guard is the in-flight marker the caller installed before reserving
+	// (ResetAndRecreate, across its unlocked close); reserveSpawn takes it
+	// over. Nil when the reservation installs its own.
+	guard     chan struct{}
 	slot      pendingSpawnSlot
 	spawnOpts cli.SpawnOptions
 
@@ -731,11 +735,15 @@ func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID st
 
 	// Mark this key as spawning so ReconnectShims does not treat the fresh
 	// shim's state file as an orphan, and concurrent GetOrCreates park on the
-	// done-channel instead of spawning too. BeginSpawn reuses a guard
-	// pre-installed by ResetAndRecreate so the marker stays continuous (#775).
-	// Anything that fails from here on — an error or a panic — ends the
-	// marker before returning, so no waiter is left parked on it.
-	doneCh := tx.Ext().spawns.BeginSpawn(key)
+	// done-channel instead of spawning too. A guard the caller pre-installed
+	// (res.guard, ResetAndRecreate) is reused so the marker stays continuous
+	// (#775); anyone else's in-flight spawn is refused, not joined — joining
+	// runs two spawns for one key and ends the guard twice. From here on any
+	// failure, error or panic, ends the marker so no waiter is left parked.
+	doneCh, owned := tx.Ext().spawns.BeginSpawn(key)
+	if !owned && doneCh != res.guard {
+		return ErrSpawnInFlight
+	}
 	reserved := false
 	defer func() {
 		if !reserved {
@@ -1237,13 +1245,39 @@ func waitSocketGoneForKey(key string, maxWait time.Duration) bool {
 // guard channel is installed with BeginSpawn before the transaction releases
 // the lock for proc.Close(); reserveSpawn reuses it, so the in-flight marker
 // is continuous from that first release until completeSpawn ends it (#775).
+//
+// One spawn per key at a time: a spawn already in flight for key — another
+// ResetAndRecreate mid-close, a GetOrCreate, a takeover — is waited out first,
+// then the reset runs against whatever it installed. Joining it instead would
+// run two spawns for one key and end its guard twice.
 func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
+	for {
+		s, wait, err := r.resetAndRecreateOnce(ctx, key, opts)
+		if wait == nil {
+			return s, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-wait:
+		}
+	}
+}
+
+// resetAndRecreateOnce is one ResetAndRecreate attempt; a non-nil wait is the
+// in-flight spawn it found and did not touch.
+func (r *Router) resetAndRecreateOnce(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, chan struct{}, error) {
 	var (
 		hadOld, stuck, stuckWarn bool
 		res                      spawnReservation
 		err                      error
+		wait                     chan struct{}
 	)
 	r.ss.Update(func(tx sessTx) {
+		if ch, inflight := tx.Ext().spawns.SpawnInFlight(key); inflight {
+			wait = ch
+			return
+		}
 		// Delete old session if present
 		if s, ok := tx.Lookup(key); ok {
 			hadOld = true
@@ -1266,8 +1300,9 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			if proc != nil && proc.Alive() {
 				// Install the guard before releasing the lock so a concurrent
 				// GetOrCreate parks instead of spawning with different opts;
-				// the spawn reuses it and ends it (#775).
-				tx.Ext().spawns.BeginSpawn(key)
+				// the spawn reuses it and ends it (#775). Owned: nothing was in
+				// flight at the top of this transaction.
+				res.guard, _ = tx.Ext().spawns.BeginSpawn(key)
 				var gone bool
 				tx.Unlocked(func() {
 					proc.Close()
@@ -1289,6 +1324,9 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		stuck = tx.Ext().spawns.ConsumeShimStuck(key)
 		err = r.reserveSpawn(tx, &res, key, "", opts)
 	})
+	if wait != nil {
+		return nil, wait, nil
+	}
 	if stuckWarn {
 		slog.Warn("shim socket still bound after ResetAndRecreate wait — flagging key for ErrShimStuck wrap on spawn failure",
 			"key", key)
@@ -1302,15 +1340,15 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			r.notifyChange()
 		}
 		if stuck {
-			return nil, fmt.Errorf("%w: %w", ErrShimStuck, err)
+			return nil, nil, fmt.Errorf("%w: %w", ErrShimStuck, err)
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	// completeSpawn can return a concurrently-spawned session with err==nil;
 	// the stuck flag must not be silently swallowed (#1702).
 	warnShimStuckReuse(stuck, key)
 	// completeSpawn already called notifyChange on success
-	return s, nil
+	return s, nil, nil
 }
 
 // warnShimStuckReuse logs the shim-stuck diagnostic when ResetAndRecreate set

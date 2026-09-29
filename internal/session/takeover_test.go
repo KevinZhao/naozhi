@@ -18,9 +18,14 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/naozhi/naozhi/internal/cli"
 )
 
 // newTakeoverTestRouter builds a Router that has every map Takeover and
@@ -188,6 +193,77 @@ func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
 	}
 	if !interloper.Alive() {
 		t.Error("interloper's fakeProcess should not have been Close()'d by Takeover")
+	}
+	// The abort ends Takeover's lease: a marker left behind would park every
+	// later GetOrCreate for the key forever.
+	r.ss.Update(func(tx sessTx) {
+		if _, inflight := tx.Ext().spawns.SpawnInFlight(key); inflight {
+			t.Error("aborted Takeover left its spawn marker")
+		}
+	})
+}
+
+// A GetOrCreate that lands while Takeover has the lock released to close the
+// old process parks on Takeover's lease and then gets Takeover's session. It
+// used to find the key unmarked, spawn its own, and make Takeover abort.
+func TestTakeover_ParksConcurrentGetOrCreate(t *testing.T) {
+	t.Parallel()
+	r := newTakeoverTestRouter(3)
+	key := "feishu:direct:user-park:general"
+	var spawns atomic.Int32
+	r.spawnHook = func(context.Context, cli.SpawnOptions) (processIface, error) {
+		spawns.Add(1)
+		return newIdleProc(), nil
+	}
+
+	var got *ManagedSession
+	var status SessionStatus
+	getDone := make(chan struct{})
+	var hook *hookCloseProc
+	hook = newHookCloseProc(func() {
+		// The old process is down, the session still registered: the window a
+		// GetOrCreate would resume into.
+		hook.fakeProcess.Close()
+		go func() {
+			defer close(getDone)
+			got, status, _ = r.GetOrCreate(context.Background(), key, AgentOpts{})
+		}()
+		// The GetOrCreate either parks (right) or spawns and returns (wrong);
+		// give it the chance to do the wrong thing before the close finishes.
+		select {
+		case <-getDone:
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
+	injectSession(r, key, hook).setSessionID("old-sess")
+
+	took, err := r.Takeover(context.Background(), key, "new-sess", t.TempDir(), AgentOpts{})
+	if err != nil {
+		t.Fatalf("Takeover: %v", err)
+	}
+	<-getDone
+	if got != took || status != SessionExisting {
+		t.Errorf("concurrent GetOrCreate got %p (status %v), want Takeover's session %p as existing", got, status, took)
+	}
+	if n := spawns.Load(); n != 1 {
+		t.Errorf("%d spawns, want 1 (Takeover's)", n)
+	}
+}
+
+// A takeover meeting a spawn already in flight refuses before touching the
+// session there.
+func TestTakeover_RefusesBeforeClosingDuringInFlightSpawn(t *testing.T) {
+	t.Parallel()
+	r := newTakeoverTestRouter(3)
+	key := "feishu:direct:user-inflight:general"
+	proc := newIdleProc()
+	injectSession(r, key, proc)
+	r.ss.Update(func(tx sessTx) { tx.Ext().spawns.BeginSpawn(key) })
+	if _, err := r.Takeover(context.Background(), key, "new-sess", t.TempDir(), AgentOpts{}); !errors.Is(err, ErrSpawnInFlight) {
+		t.Errorf("Takeover = %v, want ErrSpawnInFlight", err)
+	}
+	if !proc.Alive() {
+		t.Error("the refused Takeover closed the live process")
 	}
 }
 

@@ -1857,7 +1857,7 @@ func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 	// writes the marker, releases the lock for the Spawn() call.
 	var doneCh chan struct{}
 	r.ss.Update(func(tx sessTx) {
-		doneCh = tx.Ext().spawns.BeginSpawn("cron:abc")
+		doneCh, _ = tx.Ext().spawns.BeginSpawn("cron:abc")
 	})
 
 	// Reconcile's view: lock, snapshot, unlock.
@@ -2833,7 +2833,7 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	// prologue (router_lifecycle.go ~line 549).
 	var doneCh chan struct{}
 	r.ss.Update(func(tx sessTx) {
-		doneCh = tx.Ext().spawns.BeginSpawn(key)
+		doneCh, _ = tx.Ext().spawns.BeginSpawn(key)
 	})
 
 	const N = 10
@@ -2902,7 +2902,7 @@ func TestSpawningKeys_CtxCancelPriorityOverDoneCh(t *testing.T) {
 	// stays not-ready. ctx.Done() must therefore be the first ready arm.
 	var doneCh chan struct{}
 	r.ss.Update(func(tx sessTx) {
-		doneCh = tx.Ext().spawns.BeginSpawn(key)
+		doneCh, _ = tx.Ext().spawns.BeginSpawn(key)
 	})
 	defer func() {
 		r.ss.Update(func(tx sessTx) {

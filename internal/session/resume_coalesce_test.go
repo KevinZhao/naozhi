@@ -69,7 +69,7 @@ func TestGetOrCreate_DeadSessionParksOnInflightGuard(t *testing.T) {
 
 	var guardCh chan struct{}
 	r.ss.Update(func(tx sessTx) {
-		guardCh = tx.Ext().spawns.BeginSpawn(key)
+		guardCh, _ = tx.Ext().spawns.BeginSpawn(key)
 	})
 
 	const N = 5

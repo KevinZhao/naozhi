@@ -66,6 +66,11 @@ var ErrNoActiveProcess = errors.New("session has no active process")
 // closing the spawn-after-snapshot leak window (#1822).
 var ErrRouterStopped = errors.New("router is shutting down")
 
+// ErrSpawnInFlight is returned when a spawn is reserved for a key that
+// another caller is already spawning; waiting on that spawn and retrying is
+// the caller's call.
+var ErrSpawnInFlight = errors.New("a spawn for this key is already in flight")
+
 // Router defaults applied by NewRouter when the corresponding RouterConfig
 // field is zero. The source of truth lives in internal/sessionconst so
 // internal/config can read it without importing internal/session; these
