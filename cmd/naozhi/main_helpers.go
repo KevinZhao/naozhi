@@ -280,10 +280,8 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 
 	tickTimeout := 30 * time.Second
 	if v := cfg.Sysession.TickTimeout; v != "" {
-		parsed, err := time.ParseDuration(v)
-		if err != nil {
-			slog.Warn("sysession: bad tick_timeout; using default 30s", "err", err, "value", v)
-		} else {
+		// An unparsable value keeps the default; config.Load reported it.
+		if parsed, err := time.ParseDuration(v); err == nil {
 			tickTimeout = parsed
 		}
 	}
@@ -292,11 +290,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 	for name, dcfg := range cfg.Sysession.Daemons {
 		tick := 30 * time.Second
 		if dcfg.Tick != "" {
-			parsed, err := time.ParseDuration(dcfg.Tick)
-			if err != nil {
-				slog.Warn("sysession: bad daemon tick; using default 30s",
-					"daemon", name, "err", err, "value", dcfg.Tick)
-			} else {
+			if parsed, err := time.ParseDuration(dcfg.Tick); err == nil {
 				tick = parsed
 			}
 		}
