@@ -4,7 +4,7 @@
 // Verbatim move out of dashboard.js; only the import + dep-wiring lines are
 // new. Layering (D4-1 rule): never import dashboard back.
 import { composer } from './state.js';
-import { esc, escAttr, nzTest, showToast } from './nz_util.js';
+import { esc, escAttr, showToast } from './nz_util.js';
 
 const deps = {
   ICONS: null,
@@ -465,5 +465,3 @@ export {
   retryUpload,
 };
 
-// nz.test surface for the Playwright specs (#2557 PR-E3 pattern).
-Object.assign(nzTest, { ORIENT_MAX_WAIT_MS, awaitPendingOrients, maybeAutoOrient, renderFilePreviews, handleFiles, openFilePicker, removeFile, retryUpload });

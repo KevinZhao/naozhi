@@ -73,20 +73,18 @@ test('the test surface writes the message-nav popover flag its owner reads', asy
   await page.goto(mock.url + '/dashboard');
   await page.waitForSelector('.session-card');
 
-  // A setter that assigns an imported binding throws in module (strict)
-  // code; the flag's owner, msg_nav, is the only one that can write it.
+  // The e2e shim's accessors write the exported state object msg_nav reads,
+  // not a copy of it.
   const result = await page.evaluate(async () => {
-    const { nzTest } = await import('/static/nz_util.js');
+    const { navState } = await import('/static/msg_nav.js');
     try {
-      nzTest.navPopoverOpen = true;
-      return { ok: true, value: nzTest.navPopoverOpen };
-    } catch (e) {
-      return { ok: false, err: String(e) };
+      window.nz.test.navPopoverOpen = true;
+      return { owner: navState.popoverOpen, window: window.navPopoverOpen };
     } finally {
-      nzTest.navPopoverOpen = false;
+      window.nz.test.navPopoverOpen = false;
     }
   });
-  expect(result).toEqual({ ok: true, value: true });
+  expect(result).toEqual({ owner: true, window: true });
   expect(pageErrors).toEqual([]);
 
   await ctx.close();

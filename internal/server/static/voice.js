@@ -10,7 +10,7 @@
 // back. Shared state is read from the state.js objects; its helpers are
 // injected once via configureVoice().
 import { composer, selection, sessionList } from './state.js';
-import { nzTest, showToast } from './nz_util.js';
+import { showToast } from './nz_util.js';
 
 const deps = {
   ICONS: null,
@@ -33,20 +33,24 @@ export function configureVoice(impl) {
 let mediaRecorder = null;
 let audioChunks = [];
 let isUnloading = false;
-let voiceRecTimer = null;
-let voiceRecStart = 0;
 const MAX_REC_SECS = 30;
 let pendingMic = false;
 let voiceTouchStartY = 0;
-let voiceCancelled = false;
 let voiceActive = false; // true while hold gesture is in progress
-// voiceState is the recording lifecycle, independent of the finger gesture
-// (voiceActive): 'idle' → 'recording' (MediaRecorder started) → 'finalizing'
-// (recorder stopped, onstop / transcription pending) → 'idle'. #2435: the
-// 30s cap stops the recorder while the finger is still down; without this
-// state the trailing swipe/lift re-ran the send/cancel logic against a
-// recorder that was already finalized.
-let voiceState = 'idle';
+// voiceRec is the recording's state, exported for the e2e suite
+// (test/e2e/e2e-shim.js); this module is its only writer.
+export const voiceRec = {
+  timer: null, // the cap tick (updateVoiceTimer)
+  start: 0, // Date.now() when recording started
+  cancelled: false, // the hold was swiped away
+  // state is the recording lifecycle, independent of the finger gesture
+  // (voiceActive): 'idle' → 'recording' (MediaRecorder started) →
+  // 'finalizing' (recorder stopped, onstop / transcription pending) → 'idle'.
+  // #2435: the 30s cap stops the recorder while the finger is still down;
+  // without this state the trailing swipe/lift re-ran the send/cancel logic
+  // against a recorder that was already finalized.
+  state: 'idle',
+};
 let persistentMicStream = null; // keep mic stream alive to avoid repeated permission prompts
 
 window.addEventListener('pagehide', () => {
@@ -84,7 +88,7 @@ function toggleInputMode() {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     voiceActive = false;
     cleanupVoiceTouchListeners();
-    voiceCancelled = true;
+    voiceRec.cancelled = true;
     mediaRecorder.stop();
   }
   hideVoiceOverlay();
@@ -123,18 +127,18 @@ function voiceTouchStart(e) {
 function voiceTouchMove(e) {
   if (!voiceActive) return;
   e.preventDefault();
-  if (voiceState !== 'recording') return; // cap already finalized: gesture can no longer cancel
+  if (voiceRec.state !== 'recording') return; // cap already finalized: gesture can no longer cancel
   const touch = e.touches[0];
   if (!touch) return;
   const dy = voiceTouchStartY - touch.clientY;
   const overlay = document.getElementById('voice-overlay');
   const hint = document.getElementById('vo-hint');
   if (dy > 80) {
-    voiceCancelled = true;
+    voiceRec.cancelled = true;
     if (overlay) overlay.classList.add('cancel');
     if (hint) hint.textContent = '\u677e\u5f00\u53d6\u6d88';
   } else {
-    voiceCancelled = false;
+    voiceRec.cancelled = false;
     if (overlay) overlay.classList.remove('cancel');
     if (hint) hint.textContent = '\u677e\u5f00\u53d1\u9001 \u00b7 \u4e0a\u6ed1\u53d6\u6d88';
   }
@@ -145,7 +149,7 @@ function voiceTouchEnd(e) {
   e.preventDefault();
   voiceActive = false;
   cleanupVoiceTouchListeners();
-  finishVoiceGesture(!voiceCancelled);
+  finishVoiceGesture(!voiceRec.cancelled);
 }
 
 function voiceTouchCancel() {
@@ -160,7 +164,7 @@ function voiceTouchCancel() {
 // clears the pressed look: the "正在识别" overlay stays up until transcription
 // settles, and the lift/swipe can neither cancel nor re-send it (#2435).
 function finishVoiceGesture(shouldSend) {
-  if (voiceState !== 'finalizing') {
+  if (voiceRec.state !== 'finalizing') {
     stopVoiceRecording(shouldSend);
     return;
   }
@@ -180,16 +184,16 @@ function voiceMouseDown(e) {
   startVoiceRecording();
   const startY = e.clientY;
   const onMove = (me) => {
-    if (voiceState !== 'recording') return;
+    if (voiceRec.state !== 'recording') return;
     const dy = startY - me.clientY;
     const overlay = document.getElementById('voice-overlay');
     const hint = document.getElementById('vo-hint');
     if (dy > 80) {
-      voiceCancelled = true;
+      voiceRec.cancelled = true;
       if (overlay) overlay.classList.add('cancel');
       if (hint) hint.textContent = '\u677e\u5f00\u53d6\u6d88';
     } else {
-      voiceCancelled = false;
+      voiceRec.cancelled = false;
       if (overlay) overlay.classList.remove('cancel');
       if (hint) hint.textContent = '\u677e\u5f00\u53d1\u9001 \u00b7 \u4e0a\u6ed1\u53d6\u6d88';
     }
@@ -198,7 +202,7 @@ function voiceMouseDown(e) {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
     voiceActive = false;
-    finishVoiceGesture(!voiceCancelled);
+    finishVoiceGesture(!voiceRec.cancelled);
   };
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
@@ -207,11 +211,11 @@ function voiceMouseDown(e) {
 function startVoiceRecording() {
   // A previous recording still transcribing owns the overlay; starting another
   // would let its completion hide the new recording's overlay mid-hold.
-  if (pendingMic || voiceState === 'finalizing') return;
+  if (pendingMic || voiceRec.state === 'finalizing') return;
   // Cleared only once a recording really starts: a press landing in the
   // stop()→onstop window of a cancelled recording must not flip that
   // recording's pending "cancel" into "send".
-  voiceCancelled = false;
+  voiceRec.cancelled = false;
   pendingMic = true;
   const holdBtn = document.getElementById('btn-hold-talk');
   if (holdBtn) holdBtn.classList.add('active');
@@ -229,14 +233,14 @@ function startVoiceRecording() {
     mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
     mediaRecorder.onstop = () => {
-      voiceState = 'finalizing';
-      clearInterval(voiceRecTimer);
-      voiceRecTimer = null;
+      voiceRec.state = 'finalizing';
+      clearInterval(voiceRec.timer);
+      voiceRec.timer = null;
       // Do NOT stop persistent stream tracks — keep them alive for next recording
       if (holdBtn) holdBtn.classList.remove('active');
       if (isUnloading) return;
 
-      if (voiceCancelled) {
+      if (voiceRec.cancelled) {
         hideVoiceOverlay();
         showToast('\u5df2\u53d6\u6d88');
         audioChunks = [];
@@ -258,9 +262,9 @@ function startVoiceRecording() {
       transcribeAudio(blob, true);
     };
     mediaRecorder.start();
-    voiceState = 'recording';
-    voiceRecStart = Date.now();
-    voiceRecTimer = setInterval(updateVoiceTimer, 200);
+    voiceRec.state = 'recording';
+    voiceRec.start = Date.now();
+    voiceRec.timer = setInterval(updateVoiceTimer, 200);
     updateVoiceTimer();
     // Show overlay
     const overlay = document.getElementById('voice-overlay');
@@ -305,14 +309,14 @@ function describeMicError(err) {
 function stopVoiceRecording(shouldSend) {
   // Already stopped (MAX_REC_SECS cap or an earlier lift): onstop /
   // transcription own the overlay now, and a later gesture must not flip
-  // voiceCancelled or hide the "正在识别" overlay underneath it.
-  if (voiceState === 'finalizing') return;
-  if (!shouldSend) voiceCancelled = true;
-  if (voiceRecTimer) { clearInterval(voiceRecTimer); voiceRecTimer = null; }
+  // voiceRec.cancelled or hide the "正在识别" overlay underneath it.
+  if (voiceRec.state === 'finalizing') return;
+  if (!shouldSend) voiceRec.cancelled = true;
+  if (voiceRec.timer) { clearInterval(voiceRec.timer); voiceRec.timer = null; }
   const holdBtn = document.getElementById('btn-hold-talk');
   if (holdBtn) holdBtn.classList.remove('active');
   if (mediaRecorder && mediaRecorder.state === 'recording') {
-    voiceState = 'finalizing';
+    voiceRec.state = 'finalizing';
     mediaRecorder.stop(); // triggers onstop handler
   } else {
     hideVoiceOverlay();
@@ -320,7 +324,7 @@ function stopVoiceRecording(shouldSend) {
 }
 
 function hideVoiceOverlay() {
-  voiceState = 'idle';
+  voiceRec.state = 'idle';
   const overlay = document.getElementById('voice-overlay');
   if (overlay) overlay.classList.remove('show', 'cancel', 'transcribing');
 }
@@ -342,10 +346,10 @@ document.getElementById('voice-overlay')?.addEventListener('click', function(e) 
 function updateVoiceTimer() {
   const el = document.getElementById('vo-timer');
   if (!el) return;
-  const secs = Math.floor((Date.now() - voiceRecStart) / 1000);
+  const secs = Math.floor((Date.now() - voiceRec.start) / 1000);
   el.textContent = secs + 's';
-  if (secs >= MAX_REC_SECS && voiceState === 'recording') {
-    // stopVoiceRecording clears voiceRecTimer, so this toast fires once
+  if (secs >= MAX_REC_SECS && voiceRec.state === 'recording') {
+    // stopVoiceRecording clears voiceRec.timer, so this toast fires once
     // instead of on every 200ms tick until onstop lands (#2435).
     stopVoiceRecording(true);
     showToast('\u5df2\u8fbe\u6700\u957f' + MAX_REC_SECS + '\u79d2');
@@ -353,7 +357,7 @@ function updateVoiceTimer() {
 }
 
 // TRANSCRIBE_TIMEOUT_MS bounds /api/transcribe: without it a stalled upload
-// left the overlay in "正在识别" and voiceState in finalizing forever.
+// left the overlay in "正在识别" and voiceRec.state in finalizing forever.
 const TRANSCRIBE_TIMEOUT_MS = 30000;
 
 function transcribeAudio(blob, autoSend) {
@@ -398,7 +402,7 @@ function transcribeAudio(blob, autoSend) {
     } else {
       // Empty transcription — compute recorded duration so the user knows
       // whether the issue is "no speech detected" vs "too quiet" vs "silence".
-      const secs = Math.max(0, Math.round((Date.now() - voiceRecStart) / 1000));
+      const secs = Math.max(0, Math.round((Date.now() - voiceRec.start) / 1000));
       const hint = secs < 2
         ? '\u672a\u68c0\u6d4b\u5230\u8bed\u97f3\uff08\u5f55\u97f3\u592a\u77ed\uff0c\u8bf7\u6309\u4f4f\u8bf4\u8bdd\u81f3\u5c11 2 \u79d2\uff09'
         : '\u672a\u68c0\u6d4b\u5230\u8bed\u97f3\uff08' + secs + 's\uff09\uff0c\u8bf7\u9760\u8fd1\u9ea6\u514b\u98ce\u540e\u91cd\u8bd5';
@@ -471,15 +475,3 @@ export {
   voiceMouseDown,
   voiceTouchStart,
 };
-
-// nz.test surface for the Playwright voice specs (#2557 PR-E3 pattern):
-// registered here because only this module can offer a working setter for
-// its own let bindings — an importer's `voiceRecStart = …` would assign to
-// a read-only import binding.
-Object.defineProperties(nzTest, {
-  voiceRecStart: { get: function () { return voiceRecStart; }, set: function (v) { voiceRecStart = v; }, configurable: true },
-  voiceRecTimer: { get: function () { return voiceRecTimer; }, set: function (v) { voiceRecTimer = v; }, configurable: true },
-  voiceCancelled: { get: function () { return voiceCancelled; }, set: function (v) { voiceCancelled = v; }, configurable: true },
-  voiceState: { get: function () { return voiceState; }, set: function (v) { voiceState = v; }, configurable: true },
-});
-Object.assign(nzTest, { MAX_REC_SECS, updateVoiceTimer });

@@ -9,7 +9,7 @@
 // module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureRunningBanner(), called from dashboard's module body.
 import { perSession, selection, sessionList } from './state.js';
-import { escAttr, nzTest, nzViews, showToast } from './nz_util.js';
+import { escAttr, nzViews, showToast } from './nz_util.js';
 
 const deps = {
   ICONS: null,
@@ -485,5 +485,3 @@ export {
   turnState,
 };
 
-// nz.test surface for the Playwright specs (#2557 PR-E3 pattern).
-Object.assign(nzTest, { fmtDuration });
