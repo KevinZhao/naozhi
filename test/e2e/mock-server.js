@@ -251,11 +251,10 @@ function defaultGitStates() {
  * @returns {Promise<{server: http.Server, port: number, url: string}>}
  */
 function startMockServer(overrides = {}) {
-  // e2e-shim (#2557 PR-E3): production exports exactly one global —
-  // window.nz. The legacy suite probes dashboard bindings as bare
-  // identifiers, so the mock injects a test-only script that mirrors the
-  // nz.test instrumentation surface onto window (accessor properties keep
-  // reads live and route writes back). New tests should use nz.test.*.
+  // e2e-shim (#2941): production exports exactly one global, window.nz,
+  // and carries no test surface. The mock injects test/e2e/e2e-shim.js,
+  // which imports the modules' exports and mirrors the names the suite
+  // probes onto window and window.nz.test. New tests should use nz.test.*.
   const html = fs
     .readFileSync(path.join(STATIC_DIR, 'dashboard.html'), 'utf8')
     .replace('</body>', '<script type="module" src="/e2e-shim.js"></script>\n</body>');
@@ -363,14 +362,7 @@ function startMockServer(overrides = {}) {
 
     if (pathname === '/e2e-shim.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
-      res.end(
-        "import { nzTest } from '/static/nz_util.js';\n" +
-        "for (const k of Object.getOwnPropertyNames(nzTest)) {\n" +
-        "  const d = Object.getOwnPropertyDescriptor(nzTest, k);\n" +
-        "  if (d.get) Object.defineProperty(window, k, { get: d.get, set: d.set, configurable: true });\n" +
-        "  else Object.defineProperty(window, k, { get: () => nzTest[k], set: (v) => { nzTest[k] = v; }, configurable: true });\n" +
-        "}\n"
-      );
+      res.end(fs.readFileSync(path.join(__dirname, 'e2e-shim.js')));
       return;
     }
 

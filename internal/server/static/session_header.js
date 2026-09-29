@@ -10,7 +10,7 @@
 // from the state.js objects, its helpers are injected once via
 // configureSessionHeader().
 import { perSession, selection, sessionList } from './state.js';
-import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, nzTest, runStateDot, runStateLabel } from './nz_util.js';
+import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, runStateDot, runStateLabel } from './nz_util.js';
 
 const deps = {
   fetchSessions: null,
@@ -409,5 +409,3 @@ export {
   setHeaderSpawnDiagChip,
 };
 
-// nz.test surface for the Playwright specs (#2557 PR-E3 pattern).
-Object.assign(nzTest, { renderSessionRunsPanel, setHeaderRunStats });

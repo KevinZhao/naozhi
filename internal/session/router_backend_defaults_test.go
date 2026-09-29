@@ -3,6 +3,8 @@ package session
 import (
 	"slices"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 )
 
 // TestBackendDefaultsFor_PrecedenceAndFallback pins the merge logic that the
@@ -11,10 +13,10 @@ import (
 func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 	t.Run("falls back to router defaults when no backend entry", func(t *testing.T) {
 		r := &Router{ss: newSessionTable()}
-		r.bkStore.model = "router-default"
-		r.bkStore.extraArgs = []string{"--router-flag"}
-		r.bkStore.setBackendModelsForTest(map[string]string{})
-		r.bkStore.setBackendExtraArgsForTest(map[string][]string{})
+		r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "router-default" })
+		r.editBackendsForTest(func(c *backendstore.Config) { c.ExtraArgs = []string{"--router-flag"} })
+		r.setBackendModelsForTest(map[string]string{})
+		r.setBackendExtraArgsForTest(map[string][]string{})
 		bd := r.backendDefaultsFor("kiro")
 		if bd.Model != "router-default" {
 			t.Errorf("model = %q, want router default", bd.Model)
@@ -26,12 +28,12 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 
 	t.Run("per-backend override wins over router default", func(t *testing.T) {
 		r := &Router{ss: newSessionTable()}
-		r.bkStore.model = "router-default"
-		r.bkStore.extraArgs = []string{"--router-flag"}
-		r.bkStore.setBackendModelsForTest(map[string]string{
+		r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "router-default" })
+		r.editBackendsForTest(func(c *backendstore.Config) { c.ExtraArgs = []string{"--router-flag"} })
+		r.setBackendModelsForTest(map[string]string{
 			"kiro": "kiro-model",
 		})
-		r.bkStore.setBackendExtraArgsForTest(map[string][]string{
+		r.setBackendExtraArgsForTest(map[string][]string{
 			"kiro": {"--kiro-flag"},
 		})
 		bd := r.backendDefaultsFor("kiro")
@@ -48,12 +50,12 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 		// extraArgs entries did NOT clear router defaults — they were
 		// transparent. Documented elsewhere as `bm != ""` and `len(ba) > 0`.
 		r := &Router{ss: newSessionTable()}
-		r.bkStore.model = "router-default"
-		r.bkStore.extraArgs = []string{"--router-flag"}
-		r.bkStore.setBackendModelsForTest(map[string]string{
+		r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "router-default" })
+		r.editBackendsForTest(func(c *backendstore.Config) { c.ExtraArgs = []string{"--router-flag"} })
+		r.setBackendModelsForTest(map[string]string{
 			"kiro": "",
 		})
-		r.bkStore.setBackendExtraArgsForTest(map[string][]string{
+		r.setBackendExtraArgsForTest(map[string][]string{
 			"kiro": nil,
 		})
 		bd := r.backendDefaultsFor("kiro")
@@ -71,7 +73,7 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 	// docs/rfc/kiro-effort-control.md §4.2
 	t.Run("effort comes from the per-backend map only", func(t *testing.T) {
 		r := &Router{ss: newSessionTable()}
-		r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "xhigh"})
+		r.setBackendEffortsForTest(map[string]string{"kiro": "xhigh"})
 
 		if got := r.backendDefaultsFor("kiro").Effort; got != "xhigh" {
 			t.Errorf("effort = %q, want xhigh", got)
@@ -90,9 +92,9 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 
 	t.Run("unknown backend ID falls through cleanly", func(t *testing.T) {
 		r := &Router{ss: newSessionTable()}
-		r.bkStore.model = "router-default"
-		r.bkStore.extraArgs = []string{"--router-flag"}
-		r.bkStore.setBackendModelsForTest(map[string]string{
+		r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "router-default" })
+		r.editBackendsForTest(func(c *backendstore.Config) { c.ExtraArgs = []string{"--router-flag"} })
+		r.setBackendModelsForTest(map[string]string{
 			"kiro": "kiro-model",
 		})
 		bd := r.backendDefaultsFor("nonexistent")

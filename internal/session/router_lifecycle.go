@@ -61,14 +61,14 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 	}
 	backend := s.Backend()
 	if backend == "" {
-		backend = r.bkStore.defaultBackend
+		backend = r.bk.DefaultID()
 	}
 
 	// Unknown backend ID falls back to the default wrapper so a misconfigured
 	// Backend() still gets a usable source instead of Noop.
-	wrapper := r.bkStore.runtime(backend).Wrapper
+	wrapper := r.bk.Runtime(backend).Wrapper
 	if wrapper == nil {
-		wrapper = r.bkStore.wrapper
+		wrapper = r.bk.Fallback()
 	}
 
 	deps := history.Wiring{

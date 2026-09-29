@@ -35,7 +35,7 @@ test.describe('#1772 mobile render hotspots', () => {
       path.join(__dirname, '..', '..', 'internal/server/static/msg_nav.js'),
       'utf8'
     );
-    expect(navJs).toContain('if (navPopoverOpen) navDismissPopover();');
+    expect(navJs).toContain('if (navState.popoverOpen) navDismissPopover();');
   });
 
   test('source: asset_browser search input is debounced', async () => {

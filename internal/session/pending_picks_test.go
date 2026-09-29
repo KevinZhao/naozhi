@@ -3,6 +3,8 @@ package session
 import (
 	"reflect"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 )
 
 // The failure mode pendingPicks exists to prevent: a per-session pick that some
@@ -141,7 +143,7 @@ func TestPendingPicks_RenameOfAbsentKeyIsANoop(t *testing.T) {
 }
 
 // TestPendingPicks_BackendStoreHoldsNoSessionKeyedMaps is the structural half:
-// backendStore is keyed by BACKEND ID. A map keyed by session key belongs here
+// the backend table (backendstore.Store) is keyed by BACKEND ID. A map keyed by session key belongs here
 // instead, which is why these three moved (G2 #2666).
 //
 // Checked by field name because that is the only signal available — Go cannot
@@ -149,8 +151,7 @@ func TestPendingPicks_RenameOfAbsentKeyIsANoop(t *testing.T) {
 // used to live in backendStore are listed explicitly so re-adding one is what
 // fails, rather than any new map.
 func TestPendingPicks_BackendStoreHoldsNoSessionKeyedMaps(t *testing.T) {
-	var bs backendStore
-	v := reflect.ValueOf(&bs).Elem()
+	v := reflect.ValueOf(backendstore.Store{})
 	moved := map[string]bool{
 		"backendOverrides":       true,
 		"accessProfileOverrides": true,
@@ -159,7 +160,7 @@ func TestPendingPicks_BackendStoreHoldsNoSessionKeyedMaps(t *testing.T) {
 	for i := 0; i < v.NumField(); i++ {
 		name := v.Type().Field(i).Name
 		if moved[name] {
-			t.Errorf("backendStore.%s is back: it is keyed by SESSION key, so every path that "+
+			t.Errorf("backendstore.Store.%s is back: it is keyed by SESSION key, so every path that "+
 				"manipulates a session key has to remember it. pendingPicks owns those, and "+
 				"rename/dropAll keep them consistent.", name)
 		}

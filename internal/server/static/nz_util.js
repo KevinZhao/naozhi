@@ -176,13 +176,6 @@ nz.bus = nzBus;
 export const nzViews = {};
 nz.views = nzViews;
 
-// nz.test (#2557 PR-E3): the Playwright instrumentation surface — dashboard
-// registers accessors for the bindings the e2e suite probes. Production code
-// must never read it; the mock server mirrors it onto window for the legacy
-// bare-identifier probes (see test/e2e/mock-server.js e2e-shim).
-export const nzTest = {};
-nz.test = nzTest;
-
 // runStateDot / runStateLabel —— 统一 run 词表（runtelemetry.RunState）的
 // 单一状态色 / 中文文案表（#2540）。cron 时间轴、session 运行记录面板共用：
 // 三种 run 历史在 wire 上说同一种 state 之后，渲染侧若各自维护词表，新增

@@ -21,7 +21,7 @@
     "configureDeps": 0
   },
   "composer_files.js": {
-    "lines": 469,
+    "lines": 467,
     "maxFnLines": 65,
     "fnOver100": 0,
     "topLevelLetVar": 2,
@@ -77,7 +77,7 @@
     "configureDeps": 24
   },
   "dashboard.js": {
-    "lines": 6630,
+    "lines": 6516,
     "maxFnLines": 249,
     "fnOver100": 8,
     "topLevelLetVar": 0,
@@ -105,21 +105,21 @@
     "configureDeps": 0
   },
   "mobile_nav.js": {
-    "lines": 574,
+    "lines": 572,
     "maxFnLines": 118,
     "fnOver100": 1,
     "topLevelLetVar": 3,
     "configureDeps": 0
   },
   "msg_nav.js": {
-    "lines": 467,
+    "lines": 463,
     "maxFnLines": 48,
     "fnOver100": 0,
-    "topLevelLetVar": 5,
+    "topLevelLetVar": 2,
     "configureDeps": 0
   },
   "nz_util.js": {
-    "lines": 379,
+    "lines": 372,
     "maxFnLines": 39,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -133,7 +133,7 @@
     "configureDeps": 0
   },
   "running_banner.js": {
-    "lines": 489,
+    "lines": 487,
     "maxFnLines": 95,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -154,7 +154,7 @@
     "configureDeps": 0
   },
   "session_header.js": {
-    "lines": 413,
+    "lines": 411,
     "maxFnLines": 33,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -203,10 +203,10 @@
     "configureDeps": 0
   },
   "voice.js": {
-    "lines": 485,
+    "lines": 477,
     "maxFnLines": 73,
     "fnOver100": 0,
-    "topLevelLetVar": 11,
+    "topLevelLetVar": 7,
     "configureDeps": 0
   }
 }

@@ -135,14 +135,14 @@ func TestDashboardJS_VoiceCap_StateMachine(t *testing.T) {
 		t.Fatalf("read voice.js: %v", err)
 	}
 	js := string(data)
-	if !strings.Contains(js, "\nlet voiceState = 'idle';") {
+	if !strings.Contains(js, "\n  state: 'idle',\n};") {
 		t.Fatal("voice.js must declare the voiceState lifecycle (idle/recording/finalizing) (#2435)")
 	}
 	stop := extractJSFunction(t, js, "stopVoiceRecording")
-	if !strings.Contains(stop, "if (voiceState === 'finalizing') return;") {
+	if !strings.Contains(stop, "if (voiceRec.state === 'finalizing') return;") {
 		t.Error("stopVoiceRecording must ignore calls once the recording is finalizing")
 	}
-	if !strings.Contains(stop, "clearInterval(voiceRecTimer)") {
+	if !strings.Contains(stop, "clearInterval(voiceRec.timer)") {
 		t.Error("stopVoiceRecording must clear voiceRecTimer so the cap toast fires once")
 	}
 	for _, fn := range []string{"voiceTouchEnd", "voiceTouchCancel"} {
@@ -150,11 +150,11 @@ func TestDashboardJS_VoiceCap_StateMachine(t *testing.T) {
 			t.Errorf("%s must route through finishVoiceGesture", fn)
 		}
 	}
-	if !strings.Contains(extractJSFunction(t, js, "hideVoiceOverlay"), "voiceState = 'idle';") {
+	if !strings.Contains(extractJSFunction(t, js, "hideVoiceOverlay"), "voiceRec.state = 'idle';") {
 		t.Error("hideVoiceOverlay must return the lifecycle to idle")
 	}
 	move := extractJSFunction(t, js, "voiceTouchMove")
-	if !strings.Contains(move, "if (voiceState !== 'recording') return;") {
+	if !strings.Contains(move, "if (voiceRec.state !== 'recording') return;") {
 		t.Error("voiceTouchMove must ignore the cancel gesture once finalizing")
 	}
 	tr := extractJSFunction(t, js, "transcribeAudio")
@@ -263,13 +263,13 @@ func TestDashboardJS_VoiceFinalizing_HasEscapeHatches(t *testing.T) {
 		}
 		// Only the press path matters; voiceMouseDown's move closure legitimately
 		// toggles the flag while recording.
-		if strings.Contains(body[:call], "voiceCancelled = false;") {
+		if strings.Contains(body[:call], "voiceRec.cancelled = false;") {
 			t.Errorf("%s must not clear voiceCancelled before startVoiceRecording's guard (F3)", fn)
 		}
 	}
 	start := extractJSFunction(t, js, "startVoiceRecording")
-	guard := strings.Index(start, "voiceState === 'finalizing') return;")
-	clear := strings.Index(start, "voiceCancelled = false;")
+	guard := strings.Index(start, "voiceRec.state === 'finalizing') return;")
+	clear := strings.Index(start, "voiceRec.cancelled = false;")
 	if guard < 0 || clear < 0 || clear < guard {
 		t.Error("startVoiceRecording must clear voiceCancelled only after its early-return guard (F3)")
 	}

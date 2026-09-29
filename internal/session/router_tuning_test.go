@@ -13,6 +13,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 )
 
 // tuningFakeProc extends TestProcess with a controllable SetModel so tests
@@ -38,14 +39,14 @@ func mkTuningTestRouter(t *testing.T) *Router {
 		ss:         newSessionTable(),
 		defaultCWD: "/default/ws",
 	}
-	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
+	r.setWrappersForTest(map[string]*cli.Wrapper{
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		"codex":  cli.NewWrapper("/bin/false", &cli.CodexProtocol{}, "codex"),
 	})
-	r.bkStore.defaultBackend = "claude"
+	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)
-	r.bkStore.setBackendEffortsForTest(map[string]string{})
+	r.setBackendEffortsForTest(map[string]string{})
 	return r
 }
 
@@ -235,7 +236,7 @@ func TestSetSessionTuning_F9PathSelection(t *testing.T) {
 
 	t.Run("kiro with backend-level effort: model switch respawns", func(t *testing.T) {
 		r := mkTuningTestRouter(t)
-		r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
+		r.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 		proc := &tuningFakeProc{TestProcess: NewTestProcess()}
 		addTuningSession(r, "k1", "kiro", proc)
 

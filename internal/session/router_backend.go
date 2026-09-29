@@ -14,24 +14,6 @@ import (
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
-// backendStore groups the backend/policy fields of Router. Everything but the
-// manifest cache is fixed once NewRouter returns and read without a lock; the
-// manifest cache carries its own.
-type backendStore struct {
-	wrapper *cli.Wrapper // fallback: the default backend's wrapper, or the first with one
-	// runtimes holds one BackendRuntime per backend ID — the row that replaced
-	// six parallel map[backendID]→property tables (G2 #2666). See
-	// backend_runtime.go.
-	runtimes       map[string]*BackendRuntime
-	defaultBackend string // backend ID used when AgentOpts.Backend is empty
-	// backendIDs caches BackendIDs' ordering; computed once in NewRouter.
-	backendIDs []string
-	model      string
-	extraArgs  []string
-	// manifests caches agent-reported model lists (BackendModelManifest).
-	manifests manifestCache
-}
-
 // maxModelBytes caps model identifiers, which flow into the CLI child's
 // `--model` argv. Keep in sync with project's plannerModelRe.
 const maxModelBytes = 128
@@ -94,8 +76,8 @@ func validateBackend(backend string) error {
 // CLIName exposes the wrapper's CLI display name for status endpoints.
 // Returns empty when no wrapper is wired (tests, early boot).
 func (r *Router) CLIName() string {
-	if r.bkStore.wrapper != nil {
-		return r.bkStore.wrapper.CLIName
+	if w := r.bk.Fallback(); w != nil {
+		return w.CLIName
 	}
 	return ""
 }
@@ -103,35 +85,16 @@ func (r *Router) CLIName() string {
 // CLIVersion exposes the default backend's CLI version, preferring the live
 // version observed from a spawned process so host upgrades show without restart.
 func (r *Router) CLIVersion() string {
-	if r.bkStore.wrapper != nil {
-		return r.bkStore.wrapper.EffectiveVersion()
+	if w := r.bk.Fallback(); w != nil {
+		return w.EffectiveVersion()
 	}
 	return ""
 }
 
-// wrapperFor selects the wrapper for the requested backend ID (empty = router
-// default) and returns (wrapper, effectiveID): the requested backend's row,
-// else the default backend's, else the fallback wrapper. effectiveID is always
-// the returned wrapper's own backend, so a session is stamped with the CLI
-// that actually runs it. Callers must treat a nil wrapper as "no backend
-// available" and fail fast.
+// wrapperFor is backendstore.Store.WrapperFor: (wrapper, effectiveID), the
+// id always the wrapper's own; a nil wrapper means no backend is available.
 func (r *Router) wrapperFor(backend string) (*cli.Wrapper, string) {
-	if backend != "" {
-		if w := r.bkStore.runtime(backend).Wrapper; w != nil {
-			return w, backend
-		}
-	}
-	if r.bkStore.defaultBackend != "" {
-		if w := r.bkStore.runtime(r.bkStore.defaultBackend).Wrapper; w != nil {
-			return w, r.bkStore.defaultBackend
-		}
-	}
-	// Last resort pairs r.bkStore.wrapper with its OWN BackendID so callers
-	// never see a non-empty ID alongside a nil wrapper.
-	if r.bkStore.wrapper != nil {
-		return r.bkStore.wrapper, r.bkStore.wrapper.BackendID
-	}
-	return nil, ""
+	return r.bk.WrapperFor(backend)
 }
 
 // managerFor returns the shim.Manager for the given backend ID (empty = router
@@ -146,66 +109,15 @@ func (r *Router) managerFor(backend string) *shim.Manager {
 
 // BackendIDs returns the backend IDs the router can spawn against, default
 // first. Returns a defensive copy so callers cannot mutate the cache.
-func (r *Router) BackendIDs() []string {
-	if r.bkStore.backendIDs != nil {
-		out := make([]string, len(r.bkStore.backendIDs))
-		copy(out, r.bkStore.backendIDs)
-		return out
-	}
-	return computeBackendIDs(r.bkStore.wrapper, r.bkStore.backendWrappers(), r.bkStore.defaultBackend)
-}
+func (r *Router) BackendIDs() []string { return r.bk.IDs() }
 
 // DefaultBackend returns the backend ID used when no explicit backend is
 // requested. May be empty for test-only routers without a wrapper.
-func (r *Router) DefaultBackend() string {
-	if r.bkStore.defaultBackend != "" {
-		return r.bkStore.defaultBackend
-	}
-	if r.bkStore.wrapper != nil {
-		return r.bkStore.wrapper.BackendID
-	}
-	return ""
-}
+func (r *Router) DefaultBackend() string { return r.bk.Default() }
 
 // BackendWrapper returns the wrapper registered for the given backend ID, or
 // nil if none matches. For read-only metadata (CLIName, CLIVersion, CLIPath).
-func (r *Router) BackendWrapper(id string) *cli.Wrapper {
-	if id == "" {
-		id = r.bkStore.defaultBackend
-	}
-	return r.bkStore.runtime(id).Wrapper
-}
-
-// computeBackendIDs builds the dashboard-stable ordering used by BackendIDs:
-// default backend first, remaining IDs sorted ascending.
-func computeBackendIDs(wrapper *cli.Wrapper, wrappers map[string]*cli.Wrapper, defaultBackend string) []string {
-	if len(wrappers) == 0 {
-		if wrapper != nil {
-			id := wrapper.BackendID
-			if id == "" {
-				id = "claude"
-			}
-			return []string{id}
-		}
-		return nil
-	}
-	out := make([]string, 0, len(wrappers))
-	if defaultBackend != "" {
-		if _, ok := wrappers[defaultBackend]; ok {
-			out = append(out, defaultBackend)
-		}
-	}
-	rest := make([]string, 0, len(wrappers))
-	for id := range wrappers {
-		if id == defaultBackend {
-			continue
-		}
-		rest = append(rest, id)
-	}
-	slices.Sort(rest)
-	out = append(out, rest...)
-	return out
-}
+func (r *Router) BackendWrapper(id string) *cli.Wrapper { return r.bk.Wrapper(id) }
 
 // maxBackendOverrides caps the per-key override maps so an authenticated
 // dashboard user cannot exhaust memory by POSTing unique keys: abandoned picks
@@ -265,10 +177,10 @@ func (r *Router) SessionAccessProfile(key string) (profile string) {
 
 // CLIPath returns the CLI binary path for health checks.
 func (r *Router) CLIPath() string {
-	if r.bkStore.wrapper == nil {
-		return ""
+	if w := r.bk.Fallback(); w != nil {
+		return w.CLIPath
 	}
-	return r.bkStore.wrapper.CLIPath
+	return ""
 }
 
 // BackendDefaults is the merged per-backend spawn configuration — one backend's
@@ -317,21 +229,21 @@ func MergeBackendDefaults(routerModel string, routerArgs []string, backendModel 
 // the same values, which is why the precedence lives in MergeBackendDefaults
 // rather than here (#739, #2668).
 func (r *Router) backendDefaultsFor(backendID string) BackendDefaults {
-	rt := r.bkStore.runtime(backendID)
+	rt := r.bk.Runtime(backendID)
 	return MergeBackendDefaults(
-		r.bkStore.model, r.bkStore.extraArgs,
+		r.bk.RouterModel(), r.bk.RouterArgs(),
 		rt.Model, rt.ExtraArgs, rt.Effort,
 	)
 }
 
 // BackendModelManifest returns the model list the dashboard popover offers for
 // a backend ("" = router default). Tiers: (1) runtime manifest from any LIVE
-// process, cached in bkStore.manifests; (2) configured
+// process, cached in the backend store; (2) configured
 // cli.backends[].models; (3) observedModels. Nil when no tier has data.
 // Reads the session table in one View; the cache has its own lock.
 func (r *Router) BackendModelManifest(backendID string) (models []cli.ModelInfo) {
 	if backendID == "" {
-		backendID = r.bkStore.defaultBackend
+		backendID = r.bk.DefaultID()
 	}
 	r.ss.View(func(v sessView) { models = r.backendModelManifest(v, backendID) })
 	return models
@@ -341,7 +253,7 @@ func (r *Router) backendModelManifest(v sessView, backendID string) []cli.ModelI
 	for _, s := range v.All() {
 		sb := s.Backend()
 		if sb == "" {
-			sb = r.bkStore.defaultBackend
+			sb = r.bk.DefaultID()
 		}
 		if sb != backendID {
 			continue
@@ -356,14 +268,14 @@ func (r *Router) backendModelManifest(v sessView, backendID string) []cli.ModelI
 			continue
 		}
 		if models := am.AvailableModels(); len(models) > 0 {
-			r.bkStore.manifests.set(backendID, models)
+			r.bk.SetManifest(backendID, models)
 			break
 		}
 	}
-	if m := r.bkStore.manifests.get(backendID); len(m) > 0 {
+	if m := r.bk.Manifest(backendID); len(m) > 0 {
 		return m
 	}
-	if lst := r.bkStore.runtime(backendID).ConfiguredModels; len(lst) > 0 {
+	if lst := r.bk.Runtime(backendID).ConfiguredModels; len(lst) > 0 {
 		out := make([]cli.ModelInfo, 0, len(lst))
 		for _, id := range lst {
 			out = append(out, cli.ModelInfo{ID: id})
@@ -391,7 +303,7 @@ func (r *Router) observedModels(v sessView, backendID string) []cli.ModelInfo {
 	for _, s := range v.All() {
 		sb := s.Backend()
 		if sb == "" {
-			sb = r.bkStore.defaultBackend
+			sb = r.bk.DefaultID()
 		}
 		if sb != backendID {
 			continue

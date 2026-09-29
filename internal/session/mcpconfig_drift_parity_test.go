@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 )
 
 // TestSpawnArgvConstructor_CarriesMCPConfigFile is the RFC cli-mcp-config half
@@ -69,7 +70,7 @@ func TestMCPConfigDriftParity_NoFalsePositive(t *testing.T) {
 
 	key := "dashboard:direct:mcp-parity:general"
 	r := &Router{ss: newSessionTable()}
-	r.bkStore.model = "opus"
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "opus" })
 	r.mcpConfigFile = mcpPath
 	proto := &cli.ClaudeProtocol{}
 
