@@ -18,9 +18,6 @@ import "github.com/naozhi/naozhi/internal/cli"
 // should set one column at a time.
 
 func (b *backendStore) setWrappersForTest(m map[string]*cli.Wrapper) {
-	// perBackendWrappers is what wrapperFor's legacy branch keys on, and it must
-	// track this map rather than len(runtimes) — config alone can populate rows.
-	b.perBackendWrappers = len(m) > 0
 	for _, rt := range b.runtimes {
 		rt.Wrapper = nil
 	}

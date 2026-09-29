@@ -479,11 +479,11 @@ func (discoveryHistoryLoader) LoadHistoryChainTail(ctx context.Context, claudeDi
 // restart, except `~/.claude/settings.json`, which cc re-reads on every spawn
 // via `--setting-sources user` (docs/rfc/direct-user-settings.md).
 type RouterConfig struct {
-	// Wrapper is the legacy single-backend field. If Wrappers is nil/empty
-	// this wrapper is used for every session.
+	// Wrapper is the router's fallback wrapper. With no BackendRuntimes it is
+	// also the one backend row, under its BackendID ("claude" when empty).
 	Wrapper *cli.Wrapper
 	// DefaultBackend names the backend ID used when AgentOpts.Backend is
-	// empty. Ignored when Wrappers is empty.
+	// empty; "" picks the first backend (sorted) that has a wrapper.
 	DefaultBackend string
 	MaxProcs       int
 	TTL            time.Duration
