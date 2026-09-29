@@ -449,12 +449,22 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 		aborted bool
 	)
 	r.ss.Update(func(tx sessTx) {
+		// One spawn per key (see ResetAndRecreate): a spawn already in flight
+		// is refused, not joined.
+		if _, inflight := tx.Ext().spawns.SpawnInFlight(key); inflight {
+			err = ErrSpawnInFlight
+			return
+		}
 		// If key already exists (e.g. re-takeover same CWD), close the old process.
 		if s, ok := tx.Lookup(key); ok {
 			// Mirror reset: only non-exempt AND alive sessions contributed to
 			// activeCount, so only those get a -1 (no O(n) countActive recount).
 			if p := s.loadProcess(); p != nil && p.Alive() {
 				oldBackend, oldExempt := s.Backend(), s.exempt
+				// Lease the key before releasing the lock, as ResetAndRecreate
+				// does: a concurrent GetOrCreate parks on it instead of spawning
+				// into the close window, and the spawn below takes it over.
+				res.guard, _ = tx.Ext().spawns.BeginSpawn(key)
 				tx.Unlocked(func() {
 					p.Close()
 					// The spawn below will StartShim against the same socket
@@ -474,9 +484,11 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 						metrics.RecordSessionActive(oldBackend, -1)
 					}
 				} else if cur != nil && cur.isAlive() {
-					// Concurrent GetOrCreate created a new session during
-					// Close(); abort takeover rather than silently returning
-					// the wrong session.
+					// A live session reached the key during Close() without a
+					// spawn (a rename into it after a concurrent removal); abort
+					// rather than silently return the wrong session, ending the
+					// lease so its waiters wake.
+					tx.Ext().spawns.EndSpawn(key, res.guard)
 					aborted = true
 					return
 				}
