@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 // TestSandboxPendingIndex_ConcurrentReadWrite is a -race canary for
@@ -63,7 +65,7 @@ func TestSandboxPendingIndex_WriteThenLookup(t *testing.T) {
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
 	jobID := "0123456789abcdef"
-	p := sandboxPending{
+	p := sandboxstore.Pending{
 		JobID:            jobID,
 		RunID:            "feedfacefeedface",
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
@@ -129,7 +131,7 @@ func TestStopSandboxRunsForJob_IndexFastPath(t *testing.T) {
 			s, _ := sandboxTestScheduler(t, runner, storePath)
 
 			jobID := "0123456789abcdef"
-			path := s.writeSandboxPending(sandboxPending{
+			path := s.writeSandboxPending(sandboxstore.Pending{
 				JobID:            jobID,
 				RunID:            "feedfacefeedface",
 				RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
@@ -174,7 +176,7 @@ func TestStopSandboxRunsForJob_SlowPathScanOnIndexMiss(t *testing.T) {
 	jobID := "0123456789abcdef"
 	// writePendingFixture writes the file WITHOUT populating the index —
 	// exactly the previous-process-orphan scenario.
-	path := writePendingFixture(t, storePath, sandboxPending{
+	path := writePendingFixture(t, storePath, sandboxstore.Pending{
 		JobID:            jobID,
 		RunID:            "feedfacefeedface",
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 func TestWriteSandboxPending_SymlinkDirRefused(t *testing.T) {
@@ -62,7 +64,7 @@ func TestWriteSandboxPending_SymlinkDirRefused(t *testing.T) {
 			pendingDir := pendingDirOf(storePath)
 			target := tc.setup(t, storeDir, pendingDir)
 
-			p := sandboxPending{
+			p := sandboxstore.Pending{
 				JobID:            "0123456789abcdef",
 				RunID:            "feedfacefeedface",
 				RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
@@ -90,5 +92,37 @@ func TestWriteSandboxPending_SymlinkDirRefused(t *testing.T) {
 				t.Fatalf("pending file not written at %s: %v", got, err)
 			}
 		})
+	}
+}
+
+// A pending record the bounded read refuses (here a symlink) is neither
+// followed nor dropped: reconcile cannot tell which run it names, so it
+// leaves it for the operator rather than Stopping whatever the link points at.
+func TestReconcileSandboxPending_KeepsARecordItCannotRead(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, _ := sandboxTestScheduler(t, runner, storePath)
+	pdir := filepath.Join(dir, "sandboxpending")
+	if err := os.MkdirAll(pdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	body := `{"job_id":"0123456789abcdef","run_id":"feedfacefeedface","runtime_session_id":"run-feedfacefeedface-1","started_at_ms":1}`
+	if err := os.WriteFile(target, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(pdir, "feedfacefeedface.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	s.reconcileSandboxPending()
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("reconcile removed a record it could not read: %v", err)
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.stopped) != 0 {
+		t.Errorf("reconcile Stopped %v through a symlinked record", runner.stopped)
 	}
 }
