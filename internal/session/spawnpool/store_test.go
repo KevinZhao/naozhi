@@ -38,20 +38,22 @@ func TestSpawnSlots_CountAcquireAndRelease(t *testing.T) {
 	}
 }
 
-func TestBeginSpawn_ReusesInFlightChannel(t *testing.T) {
+// A second BeginSpawn for an in-flight key gets the installed channel to wait
+// on, and is told it does not own it.
+func TestBeginSpawn_SecondCallerDoesNotOwn(t *testing.T) {
 	var s Store
-	a := s.BeginSpawn("k")
-	if a == nil {
-		t.Fatal("BeginSpawn returned nil channel")
+	a, owned := s.BeginSpawn("k")
+	if a == nil || !owned {
+		t.Fatalf("first BeginSpawn = %v, owned %v; want a fresh owned channel", a, owned)
 	}
-	if again := s.BeginSpawn("k"); again != a {
-		t.Error("second BeginSpawn for an in-flight key must return the installed channel")
+	if again, owned := s.BeginSpawn("k"); again != a || owned {
+		t.Errorf("second BeginSpawn = owned %v, same channel %v; want the installed channel, not owned", owned, again == a)
 	}
 	if got, ok := s.SpawnInFlight("k"); !ok || got != a {
 		t.Errorf("SpawnInFlight = %v,%v; want the installed channel", got, ok)
 	}
-	if b := s.BeginSpawn("other"); b == a {
-		t.Error("distinct keys must get distinct channels")
+	if b, owned := s.BeginSpawn("other"); b == a || !owned {
+		t.Error("distinct keys must get distinct owned channels")
 	}
 	if s.SpawningCount() != 2 {
 		t.Errorf("SpawningCount=%d, want 2", s.SpawningCount())
@@ -63,9 +65,41 @@ func TestBeginSpawn_ReusesInFlightChannel(t *testing.T) {
 	}
 }
 
+// Only the current marker is ended: a second end of the same channel, or an
+// end with a channel that is not key's marker, closes nothing.
+func TestEndSpawn_OnlyTheCurrentMarker(t *testing.T) {
+	var s Store
+	ch, _ := s.BeginSpawn("k")
+	if !s.EndSpawn("k", ch) {
+		t.Fatal("owner's EndSpawn reported no-op")
+	}
+	if s.EndSpawn("k", ch) {
+		t.Error("second EndSpawn of the same channel reported a close")
+	}
+	next, _ := s.BeginSpawn("k")
+	if s.EndSpawn("k", ch) {
+		t.Error("EndSpawn with a stale channel retired the next spawn's marker")
+	}
+	select {
+	case <-next:
+		t.Fatal("a stale EndSpawn closed the next spawn's channel")
+	default:
+	}
+	if got, ok := s.SpawnInFlight("k"); !ok || got != next {
+		t.Error("the next spawn's marker is gone")
+	}
+	if s.EndSpawn("absent", make(chan struct{})) {
+		t.Error("EndSpawn of an absent key reported a close")
+	}
+	// An absent key with a nil channel is a no-op too, not a close(nil) panic.
+	if s.EndSpawn("absent", nil) {
+		t.Error("EndSpawn(absent, nil) reported a close")
+	}
+}
+
 func TestEndSpawn_ClosesOnceAndRemovesKey(t *testing.T) {
 	var s Store
-	ch := s.BeginSpawn("k")
+	ch, _ := s.BeginSpawn("k")
 	s.EndSpawn("k", ch)
 	select {
 	case <-ch:
@@ -78,7 +112,7 @@ func TestEndSpawn_ClosesOnceAndRemovesKey(t *testing.T) {
 	if s.SpawningCount() != 0 {
 		t.Errorf("SpawningCount=%d after EndSpawn, want 0", s.SpawningCount())
 	}
-	next := s.BeginSpawn("k")
+	next, _ := s.BeginSpawn("k")
 	if next == ch {
 		t.Fatal("BeginSpawn after EndSpawn must install a fresh channel, not the closed one")
 	}
