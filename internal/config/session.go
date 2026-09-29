@@ -3,24 +3,18 @@ package config
 import (
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/sessionconst"
 )
 
 type SessionConfig struct {
-	MaxProcs  int            `yaml:"max_procs"`
-	TTL       string         `yaml:"ttl"`
-	PruneTTL  string         `yaml:"prune_ttl"` // how long dead/suspended sessions stay in the list before removal
-	Watchdog  WatchdogConfig `yaml:"watchdog"`
-	Queue     QueueConfig    `yaml:"queue"`
-	StorePath string         `yaml:"store_path"`
-	CWD       string         `yaml:"cwd"` // default working directory for CLI processes
-	// Deprecated: use CWD instead. Still parsed for existing config files.
-	Workspace string     `yaml:"workspace"`
-	Shim      ShimConfig `yaml:"shim"`
-	// Deprecated: auto_chain has no effect (see AutoChainYAMLConfig); still
-	// parsed so existing files load, with a one-line warning if set.
-	AutoChain        AutoChainYAMLConfig        `yaml:"auto_chain,omitempty"`
+	MaxProcs         int                        `yaml:"max_procs"`
+	TTL              string                     `yaml:"ttl"`
+	PruneTTL         string                     `yaml:"prune_ttl"` // how long dead/suspended sessions stay in the list before removal
+	Watchdog         WatchdogConfig             `yaml:"watchdog"`
+	Queue            QueueConfig                `yaml:"queue"`
+	StorePath        string                     `yaml:"store_path"`
+	CWD              string                     `yaml:"cwd"` // default working directory for CLI processes
+	Shim             ShimConfig                 `yaml:"shim"`
 	ProjectStableKey ProjectStableKeyYAMLConfig `yaml:"project_stable_key,omitempty"`
 }
 
@@ -38,41 +32,6 @@ func (c ProjectStableKeyYAMLConfig) ResolvedEnabled(def bool) bool {
 		return def
 	}
 	return *c.Enabled
-}
-
-// AutoChainYAMLConfig is the DEPRECATED, no-effect auto-workspace-chain block
-// (docs/rfc/project-stable-session-key.md §9). Fields are parsed so old files
-// load; nothing consumes them. Do NOT wire them back: "same slug + time window"
-// chained unrelated sessions as each other's history. Enabled is *bool so the
-// deprecation warn can tell an absent key from an explicit `enabled: false`.
-type AutoChainYAMLConfig struct {
-	Enabled     *bool `yaml:"enabled,omitempty"`
-	WindowHours int   `yaml:"window_hours,omitempty"` // 0 → 168 (7d)
-	Cap         int   `yaml:"cap,omitempty"`          // 0 → 32
-}
-
-// ResolvedEnabled returns the effective on/off flag.
-func (c AutoChainYAMLConfig) ResolvedEnabled(def bool) bool {
-	if c.Enabled == nil {
-		return def
-	}
-	return *c.Enabled
-}
-
-// ResolvedWindowHours returns the effective window in hours.
-func (c AutoChainYAMLConfig) ResolvedWindowHours(def int) int {
-	if c.WindowHours <= 0 {
-		return def
-	}
-	return c.WindowHours
-}
-
-// ResolvedCap returns the effective chain length cap.
-func (c AutoChainYAMLConfig) ResolvedCap(def int) int {
-	if c.Cap <= 0 {
-		return def
-	}
-	return c.Cap
 }
 
 // QueueConfig controls IM message queuing when a session is busy.
@@ -137,12 +96,8 @@ func (c *Config) QueueMode() string {
 	return c.Session.Queue.Mode
 }
 
-// applySessionDefaults fills the session limits and queue knobs, reconciles
-// session.cwd with the deprecated session.workspace alias, and reports a
-// configured-but-dead auto_chain block. The cwd reconciliation runs on the
-// operator's RAW input — pre-filling the default first would make a
-// pure-default deployment trip the deprecation report. Split out of
-// applyDefaults (#2710 J11).
+// applySessionDefaults fills the session limits, queue knobs and cwd. Split
+// out of applyDefaults (#2710 J11).
 func applySessionDefaults(cfg *Config) {
 	if cfg.Session.MaxProcs <= 0 {
 		cfg.Session.MaxProcs = sessionconst.DefaultMaxProcs
@@ -163,33 +118,7 @@ func applySessionDefaults(cfg *Config) {
 	if cfg.Session.Queue.Mode == "" {
 		cfg.Session.Queue.Mode = defaultQueueMode
 	}
-	// Reconcile cwd / deprecated workspace on the operator's raw input — the
-	// default must NOT be pre-filled first or a pure-default deployment would
-	// trip the deprecation warning.
-	if cfg.Session.CWD != "" {
-		if cfg.Session.Workspace != "" && cfg.Session.Workspace != cfg.Session.CWD {
-			cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
-				Layer: "config-deprecated", Key: "session.workspace", Action: "ignored",
-				Reason: "both 'session.cwd' and deprecated 'session.workspace' configured; using 'cwd'",
-			}})
-		}
-		cfg.Session.Workspace = cfg.Session.CWD
-	} else if cfg.Session.Workspace != "" {
-		cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
-			Layer: "config-deprecated", Key: "session.workspace", Action: "rewritten",
-			Reason: "'session.workspace' is deprecated, please rename to 'session.cwd'",
-		}})
-		cfg.Session.CWD = cfg.Session.Workspace
-	} else {
-		// Mirror the default into the alias so readers of either field work.
+	if cfg.Session.CWD == "" {
 		cfg.Session.CWD = defaultSessionCWD
-		cfg.Session.Workspace = defaultSessionCWD
-	}
-
-	if cfg.Session.AutoChain.Enabled != nil || cfg.Session.AutoChain.WindowHours != 0 || cfg.Session.AutoChain.Cap != 0 {
-		cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
-			Layer: "config-deprecated", Key: "session.auto_chain", Action: "ignored",
-			Reason: "'session.auto_chain' is deprecated and has no effect; remove this block from config",
-		}})
 	}
 }

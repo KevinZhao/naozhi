@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 
@@ -169,9 +170,10 @@ func keyPathsByLine(expanded []byte) map[leafKey]string {
 // no bespoke warning would: `naozhi config check` sees them via its observer
 // and exits 1, naozhi_spawn_diag_total{layer="config-unknown"} makes a typo
 // countable instead of log-greppable, and the wording lands beside the other
-// "you configured this and it did nothing" findings.
-func reportUnknownKeys(expanded []byte) {
-	unknown := findUnknownKeys(expanded)
+// "you configured this and it did nothing" findings. A path in migrated was
+// already reported as deprecated by the migration chain and is skipped.
+func reportUnknownKeys(expanded []byte, migrated map[string]bool) {
+	unknown := slices.DeleteFunc(findUnknownKeys(expanded), func(u unknownKey) bool { return migrated[u.Path] })
 	if len(unknown) == 0 {
 		return
 	}

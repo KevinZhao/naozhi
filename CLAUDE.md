@@ -321,7 +321,7 @@ Each phase emits a `phase=` timing log line so a hung subsystem is attributable 
 - **transcribe**: `enabled`, `region`, `language` (voice message STT). There is no `provider` key — the AWS Transcribe backend is the only implementation and is selected implicitly
 - **log**: `level` (debug/info/warn/error)
 
-Config field `session.workspace` is a deprecated alias for `session.cwd`. Both `nodes` and `workspaces` are accepted (`workspaces` is the preferred name; **`workspaces` takes precedence if both are present** and `nodes` is overwritten with a `slog.Warn` — see `Config.Normalize`, R71-ARCH-L1).
+Config describes schema v2 only. The v1 keys (`nodes`, `session.workspace`, `session.auto_chain`, `--append-system-prompt` in `agents[].args`) are understood solely by the migration chain (`internal/config/migrations.go`), which `Load` runs in memory from the file's own `schema_version` (absent = v1) and `naozhi config migrate -write` applies to the file; each rewrite is a `config-deprecated` diag. When both `nodes` and `workspaces` are present, `workspaces` wins. `cfg.Nodes` is the Go-side view `Config.Normalize` mirrors from `Workspaces`.
 
 ## Concurrency Patterns
 

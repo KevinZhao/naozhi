@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -41,46 +40,6 @@ func validateSystemPrompt(field, prompt string) error {
 		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("%s contains invalid unicode controls (C1/bidi/LS-PS)", field)
 		}
-	}
-	return nil
-}
-
-// liftLegacySystemPromptArgs migrates `--append-system-prompt <p>` /
-// `--append-system-prompt=<p>` under agents[<id>].args into system_prompt
-// with a warning. Lift rather than reject: the flag under args is denylisted
-// at spawn, so rejecting would break exactly the configs the field repairs
-// (#2493). Multiple occurrences join with "\n\n"; an explicit system_prompt
-// alongside the flag is a conflict and rejected. cli.args / cli.backends[].args
-// have no field to lift into and get validateArgvStrings' warning instead.
-func liftLegacySystemPromptArgs(cfg *Config) error {
-	for id, ac := range cfg.Agents {
-		kept, lifted, ok := splitLegacySystemPromptArgs(ac.Args)
-		if !ok {
-			continue
-		}
-		field := fmt.Sprintf("agents[%s]", id)
-		if lifted == "" {
-			// Bare trailing flag: nothing to lift, but drop the dangling token.
-			cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
-				Layer: "config-deprecated", Key: field + ".args", Action: "dropped",
-				Reason: "bare " + legacySystemPromptFlag + " with no value; the dangling token is removed",
-			}})
-		} else if ac.SystemPrompt != "" {
-			return fmt.Errorf("%s: both system_prompt and %s in args are set; remove the args entry (system_prompt is the supported field)",
-				field, legacySystemPromptFlag)
-		} else {
-			cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
-				Layer: "config-deprecated", Key: field + ".args", Action: "rewritten",
-				Reason: fmt.Sprintf("%s under args is denied at spawn; its %d bytes were lifted into %s.system_prompt — move it in config.yaml",
-					legacySystemPromptFlag, len(lifted), field),
-			}})
-		}
-		next := ac // copy; never mutate the map value in place
-		next.Args = kept
-		if lifted != "" {
-			next.SystemPrompt = lifted
-		}
-		cfg.Agents[id] = next
 	}
 	return nil
 }
