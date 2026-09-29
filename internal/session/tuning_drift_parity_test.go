@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -20,13 +21,13 @@ func mkTuningRouter(t *testing.T) *Router {
 		ss:         newSessionTable(),
 		defaultCWD: "/default/ws",
 	}
-	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
+	r.setWrappersForTest(map[string]*cli.Wrapper{
 		"kiro": cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
-	r.bkStore.defaultBackend = "kiro"
+	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "kiro" })
 	stateOf(r).picks.backend = make(map[string]string)
-	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
-	r.bkStore.model = "claude-fable-5"
+	r.setBackendEffortsForTest(map[string]string{"kiro": "high"})
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "claude-fable-5" })
 	r.claudeDir = t.TempDir()
 	r.backendDirs = map[string]string{"kiro": t.TempDir()}
 	return r

@@ -39,7 +39,7 @@ func TestAgentEvents_AfterReadmitsWatermarkMillisecond(t *testing.T) {
 		JSONLPath:       path,
 		Subagent:        "worker",
 	}})
-	h := &Handler{linkerFor: func(string) agentlink.AgentLinker { return linker }}
+	h := &Handler{linkerFor: func(string) agentlink.AgentLinker { return linker }, allowedRoot: claudeProjectsAllowedRoot()}
 
 	fetch := func(after, limit string) []clievent.EventEntry {
 		t.Helper()

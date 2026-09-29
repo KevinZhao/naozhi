@@ -29,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -40,15 +41,15 @@ func mkOverlayRouter(t *testing.T) *Router {
 		ss:         newSessionTable(),
 		defaultCWD: "/default/ws",
 	}
-	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
+	r.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
-	r.bkStore.defaultBackend = "claude"
+	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)
 	stateOf(r).picks.accessProfile = make(map[string]string)
-	r.bkStore.setBackendEffortsForTest(map[string]string{"kiro": "high"})
-	r.bkStore.model = "opusplan"
+	r.setBackendEffortsForTest(map[string]string{"kiro": "high"})
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "opusplan" })
 	r.claudeDir = t.TempDir()
 	r.backendDirs = map[string]string{"kiro": t.TempDir()}
 	return r
@@ -136,8 +137,7 @@ func TestAgentOverlayDrift_BackendConfigChangeIsStillDrift(t *testing.T) {
 		putT(r, key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "kiro", Workspace: "/ws", Effort: "max"})
 
-		r.bkStore.model = "claude-haiku-4.5" // operator edits cli.model, restarts naozhi
-
+		r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "claude-haiku-4.5" }) // operator edits cli.model, restarts naozhi
 		wrapper, backendID := r.wrapperFor(state.Backend)
 		drift, stored, current := r.shimArgsDrift(wrapper, backendID, state, s)
 		if !drift {
@@ -157,7 +157,7 @@ func TestAgentOverlayDrift_BackendConfigChangeIsStillDrift(t *testing.T) {
 		putT(r, key, s)
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 
-		r.bkStore.setBackendExtraArgsForTest(map[string][]string{"claude": {"--max-turns", "50"}})
+		r.setBackendExtraArgsForTest(map[string][]string{"claude": {"--max-turns", "50"}})
 
 		wrapper, backendID := r.wrapperFor(state.Backend)
 		drift, _, current := r.shimArgsDrift(wrapper, backendID, state, s)

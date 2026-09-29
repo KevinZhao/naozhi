@@ -20,6 +20,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/history"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 )
 
 // minimalRouter builds a Router with just enough wiring for
@@ -32,9 +33,9 @@ func minimalRouter(t *testing.T) *Router {
 	r := &Router{
 		ss: newSessionTable(),
 	}
-	r.bkStore.wrapper = w
-	r.bkStore.defaultBackend = "claude"
-	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{"claude": w})
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = w })
+	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
+	r.setWrappersForTest(map[string]*cli.Wrapper{"claude": w})
 	return r
 }
 

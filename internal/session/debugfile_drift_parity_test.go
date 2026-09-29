@@ -31,6 +31,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -42,13 +43,13 @@ func mkClaudeDriftRouter(t *testing.T, debugDir string) *Router {
 		ss:         newSessionTable(),
 		defaultCWD: "/default/ws",
 	}
-	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
+	r.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 	})
-	r.bkStore.defaultBackend = "claude"
+	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)
-	r.bkStore.setBackendEffortsForTest(make(map[string]string))
-	r.bkStore.model = "claude-sonnet-5"
+	r.setBackendEffortsForTest(make(map[string]string))
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "claude-sonnet-5" })
 	r.claudeDir = t.TempDir()
 	r.cliDebugDir = debugDir
 	return r
