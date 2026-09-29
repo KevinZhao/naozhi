@@ -24,7 +24,6 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/uiprefs"
 )
 
@@ -42,10 +41,9 @@ const defaultDedupCapacity = 10000
 // role-grouped dividers below are the cognitive map (#2197).
 type Server struct {
 	// ── HTTP entry ─────────────────────────────────────
-	addr      string
-	mux       *http.ServeMux
-	startedAt time.Time
-	onReady   func() // called after listener is bound
+	addr    string
+	mux     *http.ServeMux
+	onReady func() // called after listener is bound
 	// appCtx is the process-lifetime context every background loop, the Hub
 	// and the upload-store cleaner hang off. Created in buildServer (#2552) so
 	// construction no longer has to wait for Start: Start links its own ctx to
@@ -61,8 +59,7 @@ type Server struct {
 
 	// ── core deps ──────────────────────────────────────
 	router     *session.Router
-	scheduler  cronScheduler // narrowed to the cronScheduler consumer view, #1648
-	hub        *Hub          // WebSocket hub
+	hub        *Hub // WebSocket hub
 	projectMgr *project.Manager
 
 	// ── multi-node ─────────────────────────────────────
@@ -76,13 +73,7 @@ type Server struct {
 
 	// ── send / dispatch wiring ─────────────────────────
 	dispatcher      *dispatch.Dispatcher // ctor builds; Start only calls BuildHandler
-	dedup           *platform.Dedup      // ctor only
-	sessionGuard    *session.Guard
-	msgQueue        *dispatch.MessageQueue
-	agents          map[string]session.AgentOpts
-	agentCommands   map[string]string
 	dashboardToken  string
-	allowedRoot     string        // also Hub.allowedRoot
 	noOutputTimeout time.Duration // timeout error messages
 	totalTimeout    time.Duration
 
@@ -90,19 +81,9 @@ type Server struct {
 	claudeDir      string
 	discoveryCache *discoveryCache      // background-cached local discovery results
 	scratchPool    *session.ScratchPool // ephemeral aside sessions for preview drawer
-	sysessionMgr   *sysession.Manager   // system-daemon Tick scheduling
-	orient         *orientConfig        // image auto-orientation; nil = feature off
 
 	// ── modes / resolver / node cache ──────────────────
-	debugMode bool                 // gates /api/debug/pprof and /api/debug/vars
-	resolver  *session.KeyResolver // session-key → opts derivation
-	nodeCache *node.CacheManager   // background-cached remote node data
-
-	// ── watchdog counters ──────────────────────────────
-	// watchdog holds the no-output / total watchdog-kill counters exposed via
-	// /health and /api/sessions; dispatch increments them via noOutPtr()/totalPtr().
-	// 读写: build_dispatch.go, server.go
-	watchdog watchdogCounters
+	nodeCache *node.CacheManager // background-cached remote node data
 
 	// shutdownComplete closes once Start's shutdown goroutine has drained
 	// in-flight HTTP requests; the process shutdown sequencer blocks on it
@@ -188,7 +169,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	agents := opts.Agents
 	agentCommands := opts.AgentCommands
 	// A nil *cron.Scheduler must become a nil interface, not a non-nil
-	// interface wrapping nil, or every `s.scheduler != nil` guard would fire.
+	// interface wrapping nil, or every `scheduler != nil` guard would fire.
 	var scheduler cronScheduler
 	if opts.Scheduler != nil {
 		scheduler = opts.Scheduler
@@ -229,36 +210,41 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// NewDataSource returns untyped nil when projectMgr is nil.
 	resolver := session.NewKeyResolver(agents, project.NewDataSource(opts.ProjectManager))
 
+	// Dependencies only the build steps below read: they reach the dispatcher,
+	// the Hub and the handlers through hs.wiring and are not kept on Server.
+	w := &wiring{
+		dedup:        platform.NewDedup(defaultDedupCapacity),
+		sessionGuard: session.NewGuard(),
+		msgQueue: dispatch.NewMessageQueueWithMode(
+			opts.Queue.MaxDepth,
+			opts.Queue.CollectDelay,
+			dispatch.ParseQueueMode(opts.Queue.Mode),
+		),
+		startedAt:     time.Now(),
+		agents:        agents,
+		agentCommands: agentCommands,
+		allowedRoot:   opts.AllowedRoot,
+		debugMode:     opts.DebugMode,
+		resolver:      resolver,
+		sysessionMgr:  opts.Sysession.Manager,
+		orient:        buildOrientConfig(opts),
+		scheduler:     scheduler,
+	}
+
 	s := &Server{
 		addr:             addr,
 		mux:              http.NewServeMux(),
 		shutdownComplete: make(chan struct{}),
 		platforms:        platforms,
 		router:           router,
-		dedup:            platform.NewDedup(defaultDedupCapacity),
-		sessionGuard:     session.NewGuard(),
-		msgQueue: dispatch.NewMessageQueueWithMode(
-			opts.Queue.MaxDepth,
-			opts.Queue.CollectDelay,
-			dispatch.ParseQueueMode(opts.Queue.Mode),
-		),
-		startedAt:       time.Now(),
-		logger:          opts.Logger,
-		agents:          agents,
-		agentCommands:   agentCommands,
-		scheduler:       scheduler,
-		claudeDir:       claudeDir,
-		allowedRoot:     opts.AllowedRoot,
-		noOutputTimeout: opts.NoOutputTimeout,
-		totalTimeout:    opts.TotalTimeout,
-		dashboardToken:  opts.DashboardToken,
-		debugMode:       opts.DebugMode,
-		onReady:         opts.OnReady,
-		projectMgr:      opts.ProjectManager,
-		resolver:        resolver,
-		nodes:           nodes,
-		sysessionMgr:    opts.Sysession.Manager,
-		orient:          buildOrientConfig(opts),
+		logger:           opts.Logger,
+		claudeDir:        claudeDir,
+		noOutputTimeout:  opts.NoOutputTimeout,
+		totalTimeout:     opts.TotalTimeout,
+		dashboardToken:   opts.DashboardToken,
+		onReady:          opts.OnReady,
+		projectMgr:       opts.ProjectManager,
+		nodes:            nodes,
 
 		// auth stays on Server: debug_expvar / debug_pprof / ccassets wrap
 		// through it and RotateDashboardSessions reaches for it at runtime.
@@ -270,6 +256,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// then goes out of scope (#2553, handler_set.go). Only the four lifecycle
 	// participants get copied onto Server.
 	hs := &handlerSet{
+		wiring:   w,
 		systemH:  buildSystemHandlers(opts, router),
 		plannerH: planner.New(planner.Deps{Router: router}),
 		// Empty StateDir yields an in-memory prefs store (no persistence).
@@ -351,13 +338,13 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		AgentIDs:         agentIDs,
 		NodeAccess:       s.nodes,
 		NodeCache:        s.nodeCache,
-		StartedAt:        s.startedAt,
+		StartedAt:        w.startedAt,
 		BackendTag:       tag,
 		WorkspaceID:      opts.WorkspaceID,
 		WorkspaceName:    opts.WorkspaceName,
 		VersionTag:       opts.Version,
-		WatchdogNoOut:    s.watchdog.noOutPtr(),
-		WatchdogTotal:    s.watchdog.totalPtr(),
+		WatchdogNoOut:    w.watchdog.noOutPtr(),
+		WatchdogTotal:    w.watchdog.totalPtr(),
 		RetiredStore:     retiredReader,
 		ValidateWS:       validateWorkspace,
 		SystemInfoFn:     systemInfo,
@@ -372,7 +359,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// per-session FIFO entry; InvalidateHistoryCache makes the retired
 	// session visible to the history popover within one poll.
 	{
-		msgCleanup := s.msgQueue.Cleanup
+		msgCleanup := w.msgQueue.Cleanup
 		sessionH := hs.sessionH
 		router.SetOnKeyRetired(func(key string) {
 			msgCleanup(key)
@@ -399,14 +386,14 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// Dispatcher is built HERE, not in Start (#2633); see build_dispatch.go.
 	// Building it before healthH lets the metrics closure be a constructor
 	// argument rather than a field back-filled from Start.
-	s.dispatcher = s.buildDispatcher()
+	s.dispatcher = s.buildDispatcher(w)
 
 	platNames := platformNameSet(platforms)
 	hs.healthH = &HealthHandler{
 		dispatcherMetrics:  s.dispatcher.Metrics,
 		router:             router,
 		auth:               s.auth,
-		startedAt:          s.startedAt,
+		startedAt:          w.startedAt,
 		workspaceID:        opts.WorkspaceID,
 		workspaceName:      opts.WorkspaceName,
 		version:            opts.Version,
@@ -414,8 +401,8 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		totalTimeout:       opts.TotalTimeout,
 		noOutputTimeoutStr: opts.NoOutputTimeout.String(),
 		totalTimeoutStr:    opts.TotalTimeout.String(),
-		watchdogNoOut:      s.watchdog.noOutPtr(),
-		watchdogTotal:      s.watchdog.totalPtr(),
+		watchdogNoOut:      w.watchdog.noOutPtr(),
+		watchdogTotal:      w.watchdog.totalPtr(),
 		nodeAccess:         s.nodes,
 		configSHA256:       opts.Config.SHA256,
 		configLoadedAt:     opts.Config.LoadedAt,
@@ -431,7 +418,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 
 	s.attachReverseNodeServer(opts.ReverseNodeServer)
 
-	hs.checkLimiters(s.scheduler != nil)
+	hs.checkLimiters(w.scheduler != nil)
 
 	// Server keeps the handlers that outlive registration (see
 	// handler_set.go for why each one does).

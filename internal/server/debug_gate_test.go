@@ -6,14 +6,14 @@ import (
 )
 
 // TestPprofExpvarGatedByDebugMode pins R244-SEC-P3-1 [REPEAT-3]: the pprof
-// + expvar route registrations must sit inside an `if s.debugMode` block in
+// + expvar route registrations must sit inside an `if hs.wiring.debugMode` block in
 // routes.go's setupRoutes. Without the gate, an authenticated dashboard
 // caller from loopback (every operator session in a UDS / SSH-tunnel deploy)
 // could enumerate goroutine stacks (which embed file paths and queue
 // contents) and expvar counters at all times — turning a leaked dashboard
 // token into a host-fingerprint primitive.
 //
-// The fix is already in place (`if s.debugMode { s.registerPprof();
+// The fix is already in place (`if hs.wiring.debugMode { s.registerPprof();
 // s.registerExpvar() }`); this test pins it so a refactor that splits the
 // two registrations or removes the gate trips a compile-time signal.
 //
@@ -26,13 +26,13 @@ func TestPprofExpvarGatedByDebugMode(t *testing.T) {
 	data := []byte(packageGoSource(t))
 	src := string(data)
 
-	// Match `if s.debugMode {` followed by both registerPprof() and
+	// Match `if hs.wiring.debugMode {` followed by both registerPprof() and
 	// registerExpvar() within the same block (closed by `}`). Tolerant
 	// of whitespace and comments between the registrations.
-	gate := regexp.MustCompile(`(?s)if\s+s\.debugMode\s*\{[^}]*s\.registerPprof\(\)[^}]*s\.registerExpvar\(\)[^}]*\}`)
+	gate := regexp.MustCompile(`(?s)if\s+hs\.wiring\.debugMode\s*\{[^}]*s\.registerPprof\(\)[^}]*s\.registerExpvar\(\)[^}]*\}`)
 	if !gate.MatchString(src) {
 		t.Fatal(`routes.go must register pprof + expvar inside ` +
-			`"if s.debugMode { s.registerPprof(); s.registerExpvar() }". ` +
+			`"if hs.wiring.debugMode { s.registerPprof(); s.registerExpvar() }". ` +
 			`A debug_mode flag is the R244-SEC-P3-1 [REPEAT-3] mitigation: ` +
 			`without the gate, an authenticated loopback caller can dump ` +
 			`goroutine stacks and expvar counters whenever the server is ` +

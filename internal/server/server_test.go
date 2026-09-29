@@ -9,7 +9,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -117,46 +116,10 @@ func newTestServerWithTokenHS(p *mockPlatform, token string) (*Server, *handlerS
 	})
 }
 
+// newTestDispatcher returns the dispatcher the constructor built, so a test
+// drives the production wiring rather than a copy of it.
 func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
-	// #1164: mirror production wiring — wrap the concrete scheduler in the
-	// adapter, keeping the nil guard outside (see Server.Start).
-	var cronCommands dispatch.CronCommands
-	if srv.scheduler != nil {
-		cronCommands = cronDispatchAdapter{s: srv.scheduler}
-	}
-	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
-		Router:        dispatchRouter{srv.router},
-		Platforms:     srv.platforms,
-		Agents:        srv.agents,
-		AgentCommands: srv.agentCommands,
-		Scheduler:     cronCommands,
-		ProjectMgr:    srv.projectMgr,
-		Guard:         srv.sessionGuard,
-		Dedup:         srv.dedup,
-		AllowedRoot:   srv.allowedRoot,
-		ClaudeDir:     srv.claudeDir,
-		ReplyFooterFn: func(backendID string) string {
-			// R20260603-ARCH-1: the server-global backendTag field was removed;
-			// resolve the tag the same way production does.
-			return replyTagForBackend(backendID)
-		},
-		SendFn: func(ctx context.Context, key string, sess dispatch.Session, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
-			return sess.(*session.ManagedSession).Send(ctx, text, images, onEvent)
-		},
-		TakeoverFn: func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {
-			return false
-		},
-		NoOutputTimeout:       srv.noOutputTimeout,
-		TotalTimeout:          srv.totalTimeout,
-		WatchdogNoOutputKills: srv.watchdog.noOutPtr(),
-		WatchdogTotalKills:    srv.watchdog.totalPtr(),
-	})
-	if err != nil {
-		// Test helper passes a real SendFn so wireup never fails. Panic
-		// keeps the helper signature simple (no testing.T plumbing).
-		panic("newTestDispatcher: NewDispatcher returned error with SendFn set: " + err.Error())
-	}
-	return d
+	return srv.dispatcher
 }
 
 // ─── validateRemoteWorkspace (R61-SEC-2) ─────────────────────────────────────

@@ -93,7 +93,7 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	// pprof / expvar are auth-gated + loopback-only AND require debug_mode so a
 	// leaked dashboard token cannot enumerate goroutine stacks or counters.
 	// Runbook: docs/ops/pprof.md.
-	if s.debugMode {
+	if hs.wiring.debugMode {
 		s.registerPprof()
 		s.registerExpvar()
 	}

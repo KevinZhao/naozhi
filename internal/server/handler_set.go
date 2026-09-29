@@ -28,6 +28,8 @@
 package server
 
 import (
+	"time"
+
 	dashcost "github.com/naozhi/naozhi/internal/dashboard/cost"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
@@ -43,11 +45,18 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
+	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sysession"
 )
 
 // handlerSet carries the dashboard handlers from construction to route
 // registration. It is a buildServer local; nothing may store it.
 type handlerSet struct {
+	// wiring is what the build steps read and nothing keeps (see wiring).
+	wiring *wiring
+
 	cronH           *dashcron.Handlers
 	transcribeH     *transcribe.Handler
 	projectH        *dashproject.Handlers
@@ -97,4 +106,27 @@ func (hs *handlerSet) checkLimiters(schedulerWired bool) {
 	if !hs.cronH.HasTranscriptLimiter() {
 		panic("server: transcriptLimiter must be non-nil when scheduler is wired")
 	}
+}
+
+// wiring holds the dependencies buildServerWithHandlers creates for the build
+// steps alone — the dispatcher, the Hub, the dashboard handlers and route
+// registration read them, and once those hold their own references nothing on
+// Server needs them. A Server field only construction reads is a field every
+// later reader has to rule out (#2897 S4).
+type wiring struct {
+	dedup         *platform.Dedup
+	sessionGuard  *session.Guard
+	msgQueue      *dispatch.MessageQueue
+	startedAt     time.Time
+	agents        map[string]session.AgentOpts
+	agentCommands map[string]string
+	allowedRoot   string
+	debugMode     bool // gates /api/debug/pprof and /api/debug/vars
+	resolver      *session.KeyResolver
+	sysessionMgr  *sysession.Manager
+	orient        *orientConfig // nil = image auto-orientation off
+	scheduler     cronScheduler // nil when cron is not configured (see buildServerWithHandlers)
+	// watchdog holds the no-output / total watchdog-kill counters; the
+	// dispatcher, the session handlers and /health each get pointers into it.
+	watchdog watchdogCounters
 }

@@ -741,12 +741,12 @@ func TestHandleAPISend_AcceptedNoAuth(t *testing.T) {
 }
 
 func TestHandleAPISend_InterruptWhenBusy(t *testing.T) {
-	srv, hs := newTestServerHS(&mockPlatform{})
+	_, hs := newTestServerHS(&mockPlatform{})
 	key := "p:t:u:general"
 
 	// Manually acquire the session guard to simulate a busy session.
-	srv.sessionGuard.TryAcquire(key)
-	defer srv.sessionGuard.Release(key)
+	hs.wiring.sessionGuard.TryAcquire(key)
+	defer hs.wiring.sessionGuard.Release(key)
 
 	body := `{"key":"p:t:u:general","text":"hi"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
