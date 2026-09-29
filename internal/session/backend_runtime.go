@@ -77,23 +77,11 @@ func (b *backendStore) runtimeMut(id string) *BackendRuntime {
 // per-property maps. The key set is their UNION plus every wrapper: a backend can
 // be configured without a wrapper (its model list is still reachable from the
 // dashboard) and a wrapper can exist with no config overrides.
-//
-// perBackendWrappers records whether wrappers was non-empty, separately from
-// len(runtimes). wrapperFor's legacy single-wrapper branch keys on "were there
-// per-backend wrappers", and runtimes can be non-empty from config alone — so
-// deriving that from len(runtimes) would silently take the wrong branch.
 func (b *backendStore) initRuntimes(rows map[string]BackendRuntime) {
 	b.runtimes = make(map[string]*BackendRuntime, len(rows))
-	b.perBackendWrappers = false
 	for id, rt := range rows {
 		row := rt
 		b.runtimes[id] = &row
-		if row.Wrapper != nil {
-			// Equivalent to the old len(wrappers) > 0: rows can come from config
-			// alone, and wrapperFor's legacy branch asks whether any backend
-			// actually brought a wrapper.
-			b.perBackendWrappers = true
-		}
 	}
 }
 

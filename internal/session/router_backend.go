@@ -18,16 +18,12 @@ import (
 // manifest cache is fixed once NewRouter returns and read without a lock; the
 // manifest cache carries its own.
 type backendStore struct {
-	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
+	wrapper *cli.Wrapper // fallback: the default backend's wrapper, or the first with one
 	// runtimes holds one BackendRuntime per backend ID — the row that replaced
 	// six parallel map[backendID]→property tables (G2 #2666). See
 	// backend_runtime.go.
-	runtimes map[string]*BackendRuntime
-	// perBackendWrappers records whether the composition root supplied
-	// per-backend wrappers. Distinct from len(runtimes), which config alone can
-	// make non-empty — wrapperFor's legacy branch needs the former.
-	perBackendWrappers bool
-	defaultBackend     string // backend ID used when AgentOpts.Backend is empty
+	runtimes       map[string]*BackendRuntime
+	defaultBackend string // backend ID used when AgentOpts.Backend is empty
 	// backendIDs caches BackendIDs' ordering; computed once in NewRouter.
 	backendIDs []string
 	model      string
@@ -114,16 +110,12 @@ func (r *Router) CLIVersion() string {
 }
 
 // wrapperFor selects the wrapper for the requested backend ID (empty = router
-// default) and returns (wrapper, effectiveID). Callers must treat a nil
-// wrapper as "no backend available" and fail fast.
+// default) and returns (wrapper, effectiveID): the requested backend's row,
+// else the default backend's, else the fallback wrapper. effectiveID is always
+// the returned wrapper's own backend, so a session is stamped with the CLI
+// that actually runs it. Callers must treat a nil wrapper as "no backend
+// available" and fail fast.
 func (r *Router) wrapperFor(backend string) (*cli.Wrapper, string) {
-	if !r.bkStore.perBackendWrappers {
-		id := backend
-		if id == "" && r.bkStore.wrapper != nil {
-			id = r.bkStore.wrapper.BackendID
-		}
-		return r.bkStore.wrapper, id
-	}
 	if backend != "" {
 		if w := r.bkStore.runtime(backend).Wrapper; w != nil {
 			return w, backend
@@ -178,12 +170,6 @@ func (r *Router) DefaultBackend() string {
 // BackendWrapper returns the wrapper registered for the given backend ID, or
 // nil if none matches. For read-only metadata (CLIName, CLIVersion, CLIPath).
 func (r *Router) BackendWrapper(id string) *cli.Wrapper {
-	if !r.bkStore.perBackendWrappers {
-		if id == "" || r.bkStore.wrapper == nil || r.bkStore.wrapper.BackendID == id || (id == "claude" && r.bkStore.wrapper.BackendID == "") {
-			return r.bkStore.wrapper
-		}
-		return nil
-	}
 	if id == "" {
 		id = r.bkStore.defaultBackend
 	}
