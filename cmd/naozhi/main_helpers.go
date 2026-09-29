@@ -273,16 +273,6 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		WorkDir:   resolvedWorkDir,
 		Model:     cfg.Sysession.Runner.Model,
 		Ledger:    router.CostLedger(),
-		// Same Bedrock/Anthropic/proxy plumbing as session spawns. Trailing
-		// underscore = prefix match. AWS_ auth-source vars never reach naozhi's
-		// env in the first place (filterClaudeEnv denylist).
-		EnvAllowlist: []string{
-			"ANTHROPIC_",
-			"CLAUDE_",
-			"AWS_",
-			"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
-			"http_proxy", "https_proxy", "no_proxy",
-		},
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("new runner: %w", err)
