@@ -45,7 +45,7 @@ func TestExecuteOpt_PostCASPausedRecheck_EmitsSyntheticSkipped(t *testing.T) {
 	s.tblForTest().jobs[jobID].Paused = true
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true /* viaTriggerNow */)
+	s.executeOpt(j.ID, true /* viaTriggerNow */)
 
 	if got := rec.endedCount(); got != 1 {
 		t.Fatalf("want 1 ended event from paused-recheck synthetic, got %d", got)
@@ -102,7 +102,7 @@ func TestExecuteOpt_PostCASDeletedRecheck_EmitsSyntheticSkipped(t *testing.T) {
 	delete(s.tblForTest().jobs, j.ID)
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true /* viaTriggerNow */)
+	s.executeOpt(j.ID, true /* viaTriggerNow */)
 
 	if got := rec.endedCount(); got != 1 {
 		t.Fatalf("want 1 ended event from deleted-recheck synthetic, got %d", got)
@@ -164,7 +164,7 @@ func TestExecuteOpt_PostCASPausedRecheck_TriggerNow(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.executeOpt(j, true /* viaTriggerNow */)
+		s.executeOpt(j.ID, true /* viaTriggerNow */)
 	}()
 
 	select {
@@ -219,7 +219,7 @@ func TestExecuteOpt_PostCASDeletedRecheck_TriggerNow(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.executeOpt(j, true /* viaTriggerNow */)
+		s.executeOpt(j.ID, true /* viaTriggerNow */)
 	}()
 
 	select {

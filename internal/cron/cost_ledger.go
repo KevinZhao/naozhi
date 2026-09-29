@@ -15,10 +15,10 @@ func (s *Scheduler) appendLedger(rc runCtx, out runOutcome) {
 		return
 	}
 	base := costledger.Entry{
-		JobID:     rc.job.ID,
+		JobID:     rc.jobID,
 		RunID:     rc.runID,
 		Workspace: workspaceLabel(rc.snap.workDir),
-		Backend:   rc.job.Backend,
+		Backend:   rc.snap.backend,
 	}
 	if base.Backend == "" {
 		base.Backend = "claude"

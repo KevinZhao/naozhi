@@ -49,7 +49,7 @@ func TestCRON1_FreshResetSerializedByInflightCAS(t *testing.T) {
 	// Run #2 (a scheduled tick or TriggerNow) races the in-flight run.
 	// It must be overlap-skipped at the CAS gate and never reach the fresh
 	// preflight's Reset.
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()

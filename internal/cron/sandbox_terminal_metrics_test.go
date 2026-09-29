@@ -93,7 +93,7 @@ func assertCounterDeltas(t *testing.T, got []int64, want counterDeltas) {
 // a fake runner).
 func sandboxDirectArgs(j *Job, runID string) sandboxExecArgs {
 	return sandboxExecArgs{
-		runCtx: runCtx{job: j, snap: jobSnapshot{jobID: j.ID, prompt: j.Prompt, label: jobTitleOrFallback(j)}, runID: runID, startedAt: time.Now().Add(-time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}, lg: slog.Default()},
+		runCtx: runCtx{jobID: j.ID, snap: jobSnapshot{jobID: j.ID, prompt: j.Prompt, label: jobTitleOrFallback(j)}, runID: runID, startedAt: time.Now().Add(-time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}, lg: slog.Default()},
 	}
 }
 
@@ -129,7 +129,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			name:        "exec success",
 			runner:      &fakeSandboxRunner{outcome: SandboxOutcome{State: SandboxStateSuccess, ResultText: "ok"}},
 			withJob:     true,
-			run:         func(_ *testing.T, s *Scheduler, j *Job, _ string) { s.executeOpt(j, true) },
+			run:         func(_ *testing.T, s *Scheduler, j *Job, _ string) { s.executeOpt(j.ID, true) },
 			want:        counterDeltas{Started: 1, Ended: 1, Succeeded: 1},
 			wantStarted: 1, wantEnded: 1,
 		},
@@ -137,7 +137,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			name:        "exec failed-clean",
 			runner:      &fakeSandboxRunner{outcome: SandboxOutcome{State: SandboxStateFailedClean, ErrMsg: "exit 1"}},
 			withJob:     true,
-			run:         func(_ *testing.T, s *Scheduler, j *Job, _ string) { s.executeOpt(j, true) },
+			run:         func(_ *testing.T, s *Scheduler, j *Job, _ string) { s.executeOpt(j.ID, true) },
 			want:        sandboxFailed,
 			wantStarted: 1, wantEnded: 1,
 		},
@@ -145,7 +145,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			name:        "exec failed-transport stop unconfirmed",
 			runner:      &fakeSandboxRunner{outcome: SandboxOutcome{State: SandboxStateFailedTransport, ErrMsg: "stream lost"}},
 			withJob:     true,
-			run:         func(_ *testing.T, s *Scheduler, j *Job, _ string) { s.executeOpt(j, true) },
+			run:         func(_ *testing.T, s *Scheduler, j *Job, _ string) { s.executeOpt(j.ID, true) },
 			want:        sandboxFailed,
 			wantStarted: 1, wantEnded: 1,
 		},
@@ -153,7 +153,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			name:        "exec preflight error",
 			runner:      &fakeSandboxRunner{err: errors.New("empty prompt")},
 			withJob:     true,
-			run:         func(_ *testing.T, s *Scheduler, j *Job, _ string) { s.executeOpt(j, true) },
+			run:         func(_ *testing.T, s *Scheduler, j *Job, _ string) { s.executeOpt(j.ID, true) },
 			want:        sandboxFailed,
 			wantStarted: 1, wantEnded: 1,
 		},
@@ -182,7 +182,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			runner:  &fakeSandboxRunner{},
 			withJob: true,
 			run: func(_ *testing.T, s *Scheduler, j *Job, _ string) {
-				s.finishRun(runCtx{job: j, runID: "deadbeef00000103", startedAt: time.Now().Add(-time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}}, runOutcome{state: RunStateFailed, errClass: ErrClassSendError, errMsg: "boom"})
+				s.finishRun(runCtx{jobID: j.ID, runID: "deadbeef00000103", startedAt: time.Now().Add(-time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}}, runOutcome{state: RunStateFailed, errClass: ErrClassSendError, errMsg: "boom"})
 			},
 			want:      counterDeltas{Ended: 1, Failed: 1},
 			wantEnded: 1,
@@ -192,7 +192,7 @@ func TestSandboxTerminalPaths_CounterDeltas(t *testing.T) {
 			runner:  &fakeSandboxRunner{},
 			withJob: true,
 			run: func(_ *testing.T, s *Scheduler, j *Job, _ string) {
-				s.finishRun(runCtx{job: j, runID: "deadbeef00000104", startedAt: time.Now().Add(-time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}}, runOutcome{state: RunStateTimedOut, errClass: ErrClassDeadlineExceeded, errMsg: "slow"})
+				s.finishRun(runCtx{jobID: j.ID, runID: "deadbeef00000104", startedAt: time.Now().Add(-time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}}, runOutcome{state: RunStateTimedOut, errClass: ErrClassDeadlineExceeded, errMsg: "slow"})
 			},
 			want:      counterDeltas{Ended: 1, TimedOut: 1},
 			wantEnded: 1,

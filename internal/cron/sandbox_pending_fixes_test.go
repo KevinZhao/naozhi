@@ -77,7 +77,7 @@ func TestFinishSandboxRunWith_TimedOutDoesNotIncrementFailedMetric(t *testing.T)
 		label:  jobTitleOrFallback(j),
 	}
 	a := sandboxExecArgs{
-		runCtx: runCtx{job: j, snap: snap, runID: "deadbeef00000001", startedAt: time.Now().Add(-5 * time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}, lg: slog.Default()},
+		runCtx: runCtx{jobID: j.ID, snap: snap, runID: "deadbeef00000001", startedAt: time.Now().Add(-5 * time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}, lg: slog.Default()},
 	}
 
 	before := metrics.CronSandboxRunFailedTotal.Value()
@@ -111,7 +111,7 @@ func TestFinishSandboxRunWith_FailedIncrementsFailedMetric(t *testing.T) {
 		label:  jobTitleOrFallback(j),
 	}
 	a := sandboxExecArgs{
-		runCtx: runCtx{job: j, snap: snap, runID: "deadbeef00000002", startedAt: time.Now().Add(-5 * time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}, lg: slog.Default()},
+		runCtx: runCtx{jobID: j.ID, snap: snap, runID: "deadbeef00000002", startedAt: time.Now().Add(-5 * time.Minute), trigger: TriggerScheduled, finalizer: &runFinalizer{}, lg: slog.Default()},
 	}
 
 	before := metrics.CronSandboxRunFailedTotal.Value()

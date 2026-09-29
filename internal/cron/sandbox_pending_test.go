@@ -58,7 +58,7 @@ func TestSandboxPending_WrittenAndRemovedAroundRun(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, probe, storePath)
 	j := sandboxJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	if len(seenDuringRun) != 1 {
@@ -247,7 +247,7 @@ func TestSandboxPending_KeptOnUnconfirmedTransport(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	left, _ := os.ReadDir(pendingDirOf(storePath))
@@ -272,7 +272,7 @@ func TestSandboxReconcile_NoDoubleFinishForInProcessTerminal(t *testing.T) {
 	j := sandboxJob(t, s)
 
 	// In-process transport failure: finishRun runs once, pending file kept.
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	startedAfterRun := rec.startedCount()
@@ -341,7 +341,7 @@ func TestSandboxReconcile_TransientReadKeepsPendingNoDoubleFinish(t *testing.T) 
 	j := sandboxJob(t, s)
 
 	// In-process transport failure: finishRun runs once, pending file kept.
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	startedAfterRun := rec.startedCount()
@@ -455,7 +455,7 @@ func TestSandboxPending_RemovedOnConfirmedTransport(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	left, _ := os.ReadDir(pendingDirOf(storePath))

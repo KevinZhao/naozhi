@@ -116,23 +116,10 @@ func (s jobSnapshot) labelOrID() string {
 	return s.jobID
 }
 
-// snapshotJob reads j under s.tbl.mu.RLock so a concurrent SetJobPrompt /
-// UpdateJob cannot tear the read across fields. Always returns a value; j is
-// dereferenced inside the lock.
-//
-// LOCK: Must NOT be called while s.tbl.mu is already held — acquires s.tbl.mu.RLock
-// internally. robfig/cron callbacks must never hold s.tbl.mu when invoking it.
-func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
-	s.tbl.mu.RLock()
-	defer s.tbl.mu.RUnlock()
-	return snapshotJobLocked(j)
-}
-
-// snapshotJobLocked is the lock-held variant of snapshotJob: callers MUST hold
-// s.tbl.mu (read or write). executeOpt's jitter-window block uses it to fold the
-// post-jitter `cur.Paused` recheck and the snapshot copy into a single RLock
-// window (#1351). A free function rather than a method so the dependency on
-// the caller's lock is explicit and the helper cannot re-acquire it.
+// snapshotJobLocked copies the fields a run works from; callers MUST hold
+// s.tbl.mu (read or write). jobTable's runSnapshot / runSnapshotIfLive are its
+// callers. A free function rather than a method so the dependency on the
+// caller's lock is explicit and the helper cannot re-acquire it.
 func snapshotJobLocked(j *Job) jobSnapshot {
 	snap := jobSnapshot{
 		prompt:        j.Prompt,

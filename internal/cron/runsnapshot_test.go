@@ -157,7 +157,7 @@ func TestSnapshot_WrittenBeforeInvoke(t *testing.T) {
 	schedForProbe = s
 	j := sandboxJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	if !sawDuringRun {

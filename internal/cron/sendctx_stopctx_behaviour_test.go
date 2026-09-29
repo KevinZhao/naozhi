@@ -72,7 +72,7 @@ func TestSendCtxCancelsWhenStopCtxCancels(t *testing.T) {
 	s.tblForTest().mu.Unlock()
 
 	done := make(chan struct{})
-	go func() { s.executeOpt(j, true /* viaTriggerNow: skip jitter */); close(done) }()
+	go func() { s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */); close(done) }()
 
 	// Wait for Send to actually be in flight before cancelling, so the assertion's
 	// premise (a Send is blocked on its ctx) is guaranteed rather than timed.

@@ -333,17 +333,17 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxstore.Pending, path strin
 	// orphanRemoveAfterFinish. The job may have been deleted while we were
 	// down — finishRun's recordTerminalResult re-checks s.tbl.jobs[id] and no-ops
 	// the persist; the broadcast pair still closes subscriber timelines.
-	js, j := s.snapshotOrphanJob(p.JobID)
+	js, found := s.snapshotOrphanJob(p.JobID)
 	// Re-check job existence under RLock ONCE before any subscriber-visible write:
 	// a concurrent DeleteJobByID in the gap since the snapshot deletes the job and
 	// sweeps the attention queue, so writing would leave a ghost attention card and
 	// a phantom started/ended pair (#2156). The SAME boolean feeds both the
 	// attention write and finishOrphanRun so they agree.
-	jobExists := j != nil && s.jobExists(p.JobID)
+	jobExists := found && s.jobExists(p.JobID)
 	if jobExists {
 		s.maybeEnqueueOrphanAttention(p, js, lg)
 	}
-	s.finishOrphanRun(p, js, j, jobExists, lg)
+	s.finishOrphanRun(p, js, jobExists, lg)
 	s.removeReconciledPending(path, lg)
 }
 
@@ -358,24 +358,20 @@ type orphanJobSnapshot struct {
 	workDir      string
 }
 
-// snapshotOrphanJob returns the lock-safe field snapshot plus the *Job
-// pointer (nil when the job no longer exists). Passing j on to finishRun is
-// safe: finishRun re-locks (recordTerminalResult re-checks s.tbl.jobs[id]) —
-// only THIS file's lock-free reads need to be snapshots.
-func (s *Scheduler) snapshotOrphanJob(jobID string) (orphanJobSnapshot, *Job) {
-	s.tbl.mu.RLock()
-	defer s.tbl.mu.RUnlock()
-	j := s.tbl.jobs[jobID]
-	if j == nil {
-		return orphanJobSnapshot{}, nil
+// snapshotOrphanJob returns the fields an orphaned run's finish needs; ok is
+// false when the job no longer exists.
+func (s *Scheduler) snapshotOrphanJob(jobID string) (orphanJobSnapshot, bool) {
+	snap, ok := s.tbl.runSnapshot(jobID)
+	if !ok {
+		return orphanJobSnapshot{}, false
 	}
 	return orphanJobSnapshot{
-		sideEffects:  j.SideEffects != nil && *j.SideEffects,
-		label:        jobTitleOrFallback(j),
-		freshContext: j.FreshContext,
-		prompt:       j.Prompt,
-		workDir:      j.WorkDir,
-	}, j
+		sideEffects:  snap.sideEffects,
+		label:        snap.label,
+		freshContext: snap.fresh,
+		prompt:       snap.prompt,
+		workDir:      snap.workDir,
+	}, true
 }
 
 // jobExists re-checks that jobID is registered (the COR-001 TOCTOU guard).
@@ -431,7 +427,7 @@ const (
 // since a started/ended pair for a job the dashboard already dropped would be a
 // phantom lifecycle. TestReconcileOrphan_TerminalCounterParity pins that both
 // branches move every counter identically.
-func (s *Scheduler) finishOrphanRun(p sandboxstore.Pending, js orphanJobSnapshot, j *Job, jobExists bool, lg *slog.Logger) {
+func (s *Scheduler) finishOrphanRun(p sandboxstore.Pending, js orphanJobSnapshot, jobExists bool, lg *slog.Logger) {
 	startedAt := time.UnixMilli(p.StartedAtMS)
 	if !jobExists {
 		metrics.CronRunStartedTotal.Add(1)               // 1. emitRunStarted's bump
@@ -455,7 +451,7 @@ func (s *Scheduler) finishOrphanRun(p sandboxstore.Pending, js orphanJobSnapshot
 	// would Store(false) run-B's gate and let a third tick double-run.
 	s.finishRun(
 		runCtx{
-			job: j, runID: p.RunID, startedAt: startedAt,
+			jobID: p.JobID, runID: p.RunID, startedAt: startedAt,
 			trigger:   runtelemetry.TriggerScheduled,
 			finalizer: &runFinalizer{},
 			snap:      jobSnapshot{prompt: js.prompt, workDir: js.workDir, fresh: js.freshContext},

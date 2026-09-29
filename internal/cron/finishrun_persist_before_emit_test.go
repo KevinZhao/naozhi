@@ -83,7 +83,7 @@ func TestFinishRunUpdatesJobBeforeEmit(t *testing.T) {
 	}
 	finalizer := &runFinalizer{inflight: inflight}
 
-	sched.finishRun(runCtx{job: j, runID: "r-finish-order", startedAt: time.Now(), trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded, sessionID: "NEW-SESSION", result: "NEW-RESULT"})
+	sched.finishRun(runCtx{jobID: j.ID, runID: "r-finish-order", startedAt: time.Now(), trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded, sessionID: "NEW-SESSION", result: "NEW-RESULT"})
 
 	observedMu.Lock()
 	defer observedMu.Unlock()
@@ -138,7 +138,7 @@ func TestFinishRunPersistsBeforeEmit(t *testing.T) {
 	}
 	finalizer := &runFinalizer{inflight: inflight}
 
-	sched.finishRun(runCtx{job: j, runID: "r-persist-order", startedAt: time.Now(), trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded, result: "NEW"})
+	sched.finishRun(runCtx{jobID: j.ID, runID: "r-persist-order", startedAt: time.Now(), trigger: TriggerScheduled, finalizer: finalizer}, runOutcome{state: RunStateSucceeded, result: "NEW"})
 
 	if got := seenSeq.Load(); got == 0 {
 		t.Errorf("RunEnded fired before saveMarshaledSeq advanced lastSavedSeq (got 0); broadcast must follow persist")

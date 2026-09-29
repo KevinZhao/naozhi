@@ -191,12 +191,11 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 			"run_id", rc.runID, "state", string(out.state), "err_class", string(out.errClass))
 		return
 	}
-	// Defensive nil-job guard (#837): a panic here would be swallowed by
-	// robfig's Recover ABOVE this frame, skipping finalize() + emitRunEnded and
-	// leaving an orphaned "running" badge forever. Finalize this run's gate
-	// and bail loudly instead.
-	if rc.job == nil {
-		slog.Error("cron: finishRun called with nil job; finalizing inflight gate and skipping terminal protocol",
+	// Defensive no-job guard (#837): a run with no job identity has nothing to
+	// key its terminal record and run_ended by. Finalize this run's gate and
+	// bail loudly instead of emitting a frame no subscriber can place.
+	if rc.jobID == "" {
+		slog.Error("cron: finishRun called without a job id; finalizing inflight gate and skipping terminal protocol",
 			"run_id", rc.runID, "state", string(out.state), "err_class", string(out.errClass))
 		rc.finalizer.finalize()
 		return
@@ -244,7 +243,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 		// Broadcast last so hub locks aren't held while we hold s.tbl.mu.
 		rc.finalizer.finalize()
 		s.emitRunEnded(RunEndedEvent{
-			JobID:      rc.job.ID,
+			JobID:      rc.jobID,
 			RunID:      rc.runID,
 			State:      out.state,
 			StartedAt:  rc.startedAt,
@@ -259,7 +258,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 	}()
 	jobPersistOK := false
 	if !out.skipPersist {
-		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(rc.job, out.result, out.errMsg, out.sessionID, out.errClass, out.state, endedAt)
+		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(rc.jobID, out.result, out.errMsg, out.sessionID, out.errClass, out.state, endedAt)
 	} else {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
@@ -287,12 +286,12 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 	// (1) pre-write jobStillExists skips the write; (2) post-write re-check
 	// drops exactly the record we wrote (dropOrphanRun). Both pinned by tests.
 	if s.finishRunPreAppendHook != nil {
-		s.finishRunPreAppendHook(rc.job.ID)
+		s.finishRunPreAppendHook(rc.jobID)
 	}
-	if !out.skipPersist && jobPersistOK && s.runStoreEnabled() && s.jobStillExists(rc.job.ID) {
+	if !out.skipPersist && jobPersistOK && s.runStoreEnabled() && s.jobStillExists(rc.jobID) {
 		s.appendRun(&CronRun{
 			RunID:      rc.runID,
-			JobID:      rc.job.ID,
+			JobID:      rc.jobID,
 			State:      out.state,
 			Trigger:    rc.trigger,
 			StartedAt:  rc.startedAt,
@@ -316,10 +315,10 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 			CostUSD: out.costInc.USD,
 		})
 		// #2479 (2): post-write re-check; see above.
-		if !s.jobStillExists(rc.job.ID) {
-			s.runStore.dropOrphanRun(rc.job.ID, rc.runID)
+		if !s.jobStillExists(rc.jobID) {
+			s.runStore.dropOrphanRun(rc.jobID, rc.runID)
 			slog.Info("cron run: job deleted during history write; dropped orphan run record",
-				"job_id", rc.job.ID, "run_id", rc.runID)
+				"job_id", rc.jobID, "run_id", rc.runID)
 		}
 		// A new run record may introduce a SessionID the cache does not know
 		// about; drop the snapshot so the next KnownSessionIDs() call rebuilds.
@@ -382,8 +381,8 @@ func sanitiseRunErrMsg(s string) string {
 // or ended-only variant is not acceptable (#521). finishRun's skipPersist
 // keeps the synthetic run off disk. Kept as a named helper (#747) so future
 // CAS-style guards reuse the same lifecycle contract.
-func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
-	s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassOverlapSkipped, "previous run still in flight", "overlap-skipped")
+func (s *Scheduler) emitOverlapSkipped(jobID string, viaTriggerNow bool) {
+	s.emitSyntheticSkipped(jobID, viaTriggerNow, ErrClassOverlapSkipped, "previous run still in flight", "overlap-skipped")
 }
 
 // emitSyntheticSkipped synthesises a started→ended pair for a CAS-bypassing
@@ -392,13 +391,13 @@ func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 // dashboards see the same lifecycle frames as a real run, with errClass
 // distinguishing why the run never reached spawn. logTag distinguishes the
 // slog message on the rare RunID-mint failure path.
-func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass ErrorClass, errMsg, logTag string) {
+func (s *Scheduler) emitSyntheticSkipped(jobID string, viaTriggerNow bool, errClass ErrorClass, errMsg, logTag string) {
 	runID, err := generateRunID()
 	if err != nil {
 		// rand failure: suppressing the WS frame beats panicking from the cron
 		// tick goroutine (#706); the underlying guard's slog.Error still shows.
 		slog.Error("cron: failed to generate run ID for synthetic skipped event; suppressing",
-			"job_id", j.ID, "trigger_now", viaTriggerNow, "err_class", string(errClass), "tag", logTag, "err", err)
+			"job_id", jobID, "trigger_now", viaTriggerNow, "err_class", string(errClass), "tag", logTag, "err", err)
 		return
 	}
 	// Injected clock so a fake clock drives deterministic startedAt/endedAt.
@@ -408,14 +407,14 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 		trigger = TriggerManual
 	}
 	s.emitRunStarted(RunStartedEvent{
-		JobID:     j.ID,
+		JobID:     jobID,
 		RunID:     runID,
 		StartedAt: startedAt,
 		Trigger:   trigger,
 	})
 	// nil finalizer: the gate belongs to the run this tick was skipped for.
 	s.finishRun(
-		runCtx{job: j, runID: runID, startedAt: startedAt, trigger: trigger},
+		runCtx{jobID: jobID, runID: runID, startedAt: startedAt, trigger: trigger},
 		runOutcome{state: RunStateSkipped, errClass: errClass, errMsg: errMsg, skipPersist: true},
 	)
 }
@@ -470,7 +469,7 @@ func (j *Job) snapshotResultState() JobState {
 // when marshal/persist failed and the Job fields were rolled back in-memory.
 // In both cases the caller MUST also skip the CronRun history record so the
 // dashboard list (Job fields) and timeline (CronRun) never diverge.
-func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState, endedAt time.Time) (string, string, bool) {
+func (s *Scheduler) recordTerminalResult(jobID string, result, errMsg, sessionID string, errClass ErrorClass, state RunState, endedAt time.Time) (string, string, bool) {
 	// truncateWithSuffix is the single source of truth for the rune trim +
 	// …[truncated] suffix; this path and sanitiseRunResult must stay
 	// byte-identical.
@@ -502,12 +501,9 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 	func() {
 		s.tbl.mu.Lock()
 		defer s.tbl.mu.Unlock()
-		// Resolve the table's own *Job by ID and mutate THAT, rather than the
-		// pointer the caller passed. Only j.ID is trusted: a caller outside the
-		// execution path (a run settled across a restart) holds an identity, not
-		// the table's object, and a mutation on a copy would be silently dropped
-		// by the snapshot below. jobTable never hands out its pointers.
-		cur, exists := s.tbl.jobs[j.ID]
+		// Resolve the table's own *Job by ID and mutate THAT: a run holds an
+		// identity, never the table's object.
+		cur, exists := s.tbl.jobs[jobID]
 		if !exists {
 			return
 		}
@@ -540,12 +536,12 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 	saveFn, perr := s.persistSnapshot(snap)
 	if perr != nil {
 		s.tbl.mu.Lock()
-		if cur, exists := s.tbl.jobs[j.ID]; exists {
+		if cur, exists := s.tbl.jobs[jobID]; exists {
 			prev.restore(cur)
 		}
 		s.tbl.mu.Unlock()
 		slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
-			"job_id", j.ID, "err", perr)
+			"job_id", jobID, "err", perr)
 		return result, errMsg, false
 	}
 	save = saveFn

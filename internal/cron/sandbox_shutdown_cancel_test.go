@@ -42,7 +42,7 @@ func TestSandbox_ShutdownCancelMapsToCanceled(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		s.executeOpt(j, true)
+		s.executeOpt(j.ID, true)
 		close(done)
 	}()
 
@@ -103,7 +103,7 @@ func TestSandbox_ShutdownCancelSideEffectingDoesNotEnqueueAttention(t *testing.T
 
 	done := make(chan struct{})
 	go func() {
-		s.executeOpt(j, true)
+		s.executeOpt(j.ID, true)
 		close(done)
 	}()
 
@@ -154,7 +154,7 @@ func TestSandbox_DeadlineExceededSideEffectingEnqueuesAttention(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		s.executeOpt(j, true)
+		s.executeOpt(j.ID, true)
 		close(done)
 	}()
 

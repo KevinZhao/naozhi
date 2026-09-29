@@ -71,7 +71,7 @@ func TestFinishRun_DeleteRaceNoOrphanRunsDir(t *testing.T) {
 	if !inflight.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS must succeed")
 	}
-	s.finishRun(runCtx{job: j, runID: "0123456789abcdef", startedAt: time.Now(), trigger: TriggerScheduled, finalizer: &runFinalizer{inflight: inflight}}, runOutcome{state: RunStateSucceeded, sessionID: "sess-1", result: "ok"})
+	s.finishRun(runCtx{jobID: j.ID, runID: "0123456789abcdef", startedAt: time.Now(), trigger: TriggerScheduled, finalizer: &runFinalizer{inflight: inflight}}, runOutcome{state: RunStateSucceeded, sessionID: "sess-1", result: "ok"})
 
 	if hookCalls != 1 {
 		t.Fatalf("finishRunPreAppendHook calls = %d, want 1", hookCalls)

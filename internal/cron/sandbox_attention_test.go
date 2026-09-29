@@ -41,7 +41,7 @@ func TestAttention_TransportFailureEnqueuesSideEffectingJob(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sideEffectsJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	items := s.ListSandboxAttention()
@@ -71,7 +71,7 @@ func TestAttention_TransportFailureNoSideEffectsSkipsQueue(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s) // no side effects
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	if n := s.sandboxState().AttentionCount(); n != 0 {
@@ -91,7 +91,7 @@ func TestAttention_SuccessDoesNotEnqueue(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sideEffectsJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	if n := s.sandboxState().AttentionCount(); n != 0 {

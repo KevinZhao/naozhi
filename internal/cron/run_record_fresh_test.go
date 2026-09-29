@@ -25,7 +25,7 @@ func TestLocalRun_RecordsFreshSnapshotThroughFinishRun(t *testing.T) {
 			s.tblForTest().jobs[j.ID] = j
 			s.tblForTest().mu.Unlock()
 
-			s.executeOpt(j, true)
+			s.executeOpt(j.ID, true)
 
 			runs := s.RecentRuns(j.ID, 5)
 			if len(runs) != 1 {

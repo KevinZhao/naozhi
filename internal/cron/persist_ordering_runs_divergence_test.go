@@ -62,7 +62,7 @@ func TestPersistOrdering_RunsNeverDivergeAheadOfJob(t *testing.T) {
 	finalizer := &runFinalizer{inflight: inflight}
 
 	s.finishRun(runCtx{
-		job:   j,
+		jobID: j.ID,
 		runID: "0123456789abcdef",
 		// valid 16-hex so Append would NOT bail on id check
 		startedAt: time.Now(),

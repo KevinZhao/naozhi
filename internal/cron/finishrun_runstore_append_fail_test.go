@@ -104,7 +104,7 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 	// completing without panic is itself part of the assertion (finishRun must
 	// not panic when Append fails after the Job side landed).
 	s.finishRun(runCtx{
-		job:   j,
+		jobID: j.ID,
 		runID: "0123456789abcdef",
 		// valid 16-hex so Append reaches the write
 		startedAt: time.Now(),

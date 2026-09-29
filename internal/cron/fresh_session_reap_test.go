@@ -96,7 +96,7 @@ func TestFreshContextReapsSessionAfterSuccess(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
+	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
@@ -191,7 +191,7 @@ func TestFreshReapSkipsStubReregisterWhenJobDeleted(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 
 	wantKey := sessionkey.CronKey(j.ID)
 	_, regs := router.snapshot()
@@ -229,7 +229,7 @@ func TestFreshReapEmptySessionIDRegistersChainlessStub(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
+	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
@@ -276,7 +276,7 @@ func TestPersistentContextNotReapedAfterSuccess(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 
 	if got := rec.endedAtCron(0); got.State != RunStateSucceeded {
 		t.Fatalf("state: want succeeded, got %q (err=%q)", got.State, got.ErrorClass)

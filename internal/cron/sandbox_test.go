@@ -105,7 +105,7 @@ func TestSandbox_SuccessRoutesThroughFinishRun(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, "")
 	j := sandboxJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	ev := rec.endedAtCron(0)
@@ -135,7 +135,7 @@ func TestSandbox_FailedCleanMapsToSandboxFailed(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, "")
 	j := sandboxJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	ev := rec.endedAtCron(0)
@@ -154,7 +154,7 @@ func TestSandbox_TransportMapsToSandboxTransport_UnconfirmedStopInMessage(t *tes
 	s, rec := sandboxTestScheduler(t, runner, "")
 	j := sandboxJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	ev := rec.endedAtCron(0)
@@ -171,7 +171,7 @@ func TestSandbox_NoRunnerConfigured(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, nil, "")
 	j := sandboxJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	ev := rec.endedAtCron(0)
@@ -195,7 +195,7 @@ func TestSandbox_EventsStreamToDisk(t *testing.T) {
 	s, rec := sandboxTestScheduler(t, runner, storePath)
 	j := sandboxJob(t, s)
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 
 	// §6.1 streaming-to-disk: every envelope line must be on disk.
@@ -225,7 +225,7 @@ func TestSandbox_NeverTouchesRouter(t *testing.T) {
 	runner := &fakeSandboxRunner{outcome: SandboxOutcome{State: SandboxStateSuccess}}
 	s, rec := sandboxTestScheduler(t, runner, "")
 	j := sandboxJob(t, s)
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 	waitEnded(t, rec)
 }
 

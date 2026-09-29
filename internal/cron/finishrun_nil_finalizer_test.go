@@ -48,7 +48,7 @@ func TestFinishRun_NilFinalizerNoPanic(t *testing.T) {
 		}
 	}()
 	s.finishRun(runCtx{
-		job:       j,
+		jobID:     j.ID,
 		runID:     runID,
 		startedAt: startedAt,
 		trigger:   TriggerScheduled,

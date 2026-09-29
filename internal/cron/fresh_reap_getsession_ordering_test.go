@@ -50,7 +50,7 @@ func TestFreshGetSession_SessionError_ResetsBeforeFinishRun(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
+	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
@@ -105,7 +105,7 @@ func TestFreshGetSession_CancelError_ResetsBeforeFinishRun(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
+	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
@@ -162,7 +162,7 @@ func TestPersistentGetSession_SessionError_NoReset(t *testing.T) {
 	s.tblForTest().jobs[j.ID] = j
 	s.tblForTest().mu.Unlock()
 
-	s.executeOpt(j, true)
+	s.executeOpt(j.ID, true)
 
 	wantKey := sessionkey.CronKey(j.ID)
 	resets, _ := router.snapshot()

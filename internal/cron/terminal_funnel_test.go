@@ -66,7 +66,7 @@ func TestFinishRun_OncePerRun(t *testing.T) {
 	rec := &recordingBroadcaster{}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 	job := &Job{ID: mustGenerateID(), Schedule: "@hourly", Prompt: "p"}
-	rc := runCtx{job: job, runID: mustGenerateRunID(), startedAt: time.Now(), finalizer: &runFinalizer{}, term: &runTerm{}}
+	rc := runCtx{jobID: job.ID, runID: mustGenerateRunID(), startedAt: time.Now(), finalizer: &runFinalizer{}, term: &runTerm{}}
 	s.finishRun(rc, runOutcome{state: RunStateSucceeded, skipPersist: true})
 	s.finishRun(rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, skipPersist: true})
 	if rec.endedCount() != 1 || rec.endedAtCron(0).State != RunStateSucceeded {

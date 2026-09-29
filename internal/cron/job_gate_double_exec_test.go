@@ -142,7 +142,7 @@ func TestJobGate_NoDoubleExecutionUnderDeleteTriggerRace(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < rounds; i++ {
 		wg.Add(2)
-		go func() { defer wg.Done(); s.executeOpt(j, true) }()
+		go func() { defer wg.Done(); s.executeOpt(j.ID, true) }()
 		go func() { defer wg.Done(); s.gateForTest().cleanupRunningJobIfIdle(jobID) }()
 	}
 	wg.Wait()

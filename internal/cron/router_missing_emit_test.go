@@ -31,7 +31,7 @@ func TestExecuteOpt_RouterMissingEmitsTerminalEvent(t *testing.T) {
 	// Direct executeOpt call — bypasses the public TriggerNow goroutine
 	// fan-out so the synthetic event lands synchronously and the
 	// recordingBroadcaster sees it before t.Run returns.
-	s.executeOpt(j, true /* viaTriggerNow */)
+	s.executeOpt(j.ID, true /* viaTriggerNow */)
 
 	if got := rec.endedCount(); got != 1 {
 		t.Fatalf("want 1 ended event from router-missing short-circuit, got %d", got)
@@ -65,7 +65,7 @@ func TestExecuteOpt_RouterMissingNilJobNoPanic(t *testing.T) {
 	})
 
 	// Must not panic.
-	s.executeOpt(nil, false)
+	s.executeOpt("", false)
 
 	if got := rec.endedCount(); got != 0 {
 		t.Errorf("nil-j short-circuit must not emit; got %d ended events", got)
