@@ -386,15 +386,15 @@ type saveSnapshot struct {
 
 // dirtySaveSnapshot takes a saveSnapshot of the dirty stores.
 func (r *Router) dirtySaveSnapshot(v sessView) saveSnapshot {
-	snap := saveSnapshot{storePath: r.storePath, gen: v.Gen(), wsGen: v.Ext().workspaces.Gen()}
+	snap := saveSnapshot{storePath: r.storePath, gen: v.Gen(), wsGen: v.Ext().WorkspacesGen()}
 	if v.Dirty() {
 		snap.sessions = make([]*ManagedSession, 0, v.Len())
 		for _, s := range v.All() {
 			snap.sessions = append(snap.sessions, s)
 		}
 	}
-	if v.Ext().workspaces.Dirty() {
-		snap.wsOverrides = v.Ext().workspaces.Snapshot()
+	if v.Ext().WorkspacesDirty() {
+		snap.wsOverrides = v.Ext().WorkspacesSnapshot()
 	}
 	return snap
 }

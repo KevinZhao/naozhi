@@ -125,7 +125,7 @@ func TestSpawnSession_InstallsTheSpawnedProcess(t *testing.T) {
 		pending  int
 		inFlight bool
 	)
-	r.ss.View(func(v sessView) {
+	r.ss.Update(func(v sessTx) {
 		pending = v.Ext().spawns.PendingSpawns()
 		_, inFlight = v.Ext().spawns.SpawnInFlight(key)
 	})
@@ -243,7 +243,7 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 		pending  int
 		inFlight bool
 	)
-	r.ss.View(func(v sessView) {
+	r.ss.Update(func(v sessTx) {
 		pt, ok = v.Ext().picks.tuning[key]
 		pending = v.Ext().spawns.PendingSpawns()
 		_, inFlight = v.Ext().spawns.SpawnInFlight(key)
@@ -266,7 +266,7 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 		t.Errorf("the session's tuning model = %q, want the pick", s.TuningModel())
 	}
 	var still bool
-	r.ss.View(func(v sessView) {
+	r.ss.Update(func(v sessTx) {
 		_, still = v.Ext().picks.tuning[key]
 	})
 	if still {
@@ -344,7 +344,7 @@ func TestGetOrCreate_PanicInsideTheReserveLeavesNothingHeld(t *testing.T) {
 	}
 	var inFlight bool
 	var pending int
-	r.ss.View(func(v sessView) {
+	r.ss.Update(func(v sessTx) {
 		_, inFlight = v.Ext().spawns.SpawnInFlight(key)
 		pending = v.Ext().spawns.PendingSpawns()
 	})

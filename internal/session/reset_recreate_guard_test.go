@@ -49,7 +49,7 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 
 	// And the map entry should be cleared so the next caller can spawn.
 	var stillPresent bool
-	r.ss.View(func(v sessView) { _, stillPresent = v.Ext().spawns.SpawnInFlight(key) })
+	r.ss.Update(func(v sessTx) { _, stillPresent = v.Ext().spawns.SpawnInFlight(key) })
 	if stillPresent {
 		t.Fatal("in-flight entry still present after the spawn returned; " +
 			"EndSpawn failed to delete the (possibly reused) entry")

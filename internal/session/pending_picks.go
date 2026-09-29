@@ -91,3 +91,9 @@ func (p *pendingPicks) dropAll(key string) {
 func (p *pendingPicks) dropBackend(key string) {
 	delete(p.backend, key)
 }
+
+// pickedBackend and pickedAccessProfile are the read side a routerStateView
+// exposes.
+func (p *pendingPicks) pickedBackend(key string) string { return p.backend[key] }
+
+func (p *pendingPicks) pickedAccessProfile(key string) string { return p.accessProfile[key] }

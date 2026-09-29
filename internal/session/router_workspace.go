@@ -60,7 +60,7 @@ func (r *Router) Workspace(chatKey string) string {
 // per-chat override first, router default otherwise. resolveSpawnParams
 // layers the opts/resume tiers ON TOP of this base rather than re-deriving it.
 func (r *Router) resolveWorkspace(v sessView, chatKey string) string {
-	if ws, ok := v.Ext().workspaces.Lookup(chatKey); ok {
+	if ws, ok := v.Ext().Workspace(chatKey); ok {
 		return ws
 	}
 	return r.defaultCWD
@@ -77,8 +77,8 @@ func (r *Router) WorkspaceRoots() []string {
 }
 
 func (r *Router) workspaceRoots(v sessView) []string {
-	seen := make(map[string]struct{}, v.Ext().workspaces.Len()+1)
-	out := make([]string, 0, v.Ext().workspaces.Len()+1)
+	seen := make(map[string]struct{}, v.Ext().WorkspaceCount()+1)
+	out := make([]string, 0, v.Ext().WorkspaceCount()+1)
 	add := func(p string) {
 		if p == "" {
 			return
@@ -90,6 +90,6 @@ func (r *Router) workspaceRoots(v sessView) []string {
 		out = append(out, p)
 	}
 	add(r.defaultCWD)
-	v.Ext().workspaces.Range(func(_, ws string) { add(ws) })
+	v.Ext().RangeWorkspaces(func(_, ws string) { add(ws) })
 	return out
 }
