@@ -16,6 +16,9 @@ const modPrefix = "github.com/naozhi/naozhi/"
 var cliImporters = []string{
 	"internal/dashboard/ext/cli",
 	"internal/session",
+	// session's backend table: its rows hold the *cli.Wrapper each backend
+	// spawns through (#2939).
+	"internal/session/backendstore",
 	"internal/upstream",
 	"internal/wireup",
 }

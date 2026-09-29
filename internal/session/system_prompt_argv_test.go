@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 )
 
 // mkSystemPromptRouter builds the minimal Router resolveSpawnParams
@@ -36,11 +37,11 @@ func mkSystemPromptRouter(t *testing.T) *Router {
 		ss:         newSessionTable(),
 		defaultCWD: "/default/ws",
 	}
-	r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
+	r.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
-	r.bkStore.defaultBackend = "claude"
+	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)
 	r.claudeDir = t.TempDir()
 	r.backendDirs = map[string]string{"kiro": t.TempDir()}

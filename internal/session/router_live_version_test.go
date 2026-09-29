@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 )
 
 // TestRouter_CLIVersion_PrefersLiveObserved pins R20260612-global-version:
@@ -17,8 +18,7 @@ func TestRouter_CLIVersion_PrefersLiveObserved(t *testing.T) {
 	}
 	w := cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
 	w.CLIVersion = "2.1.100" // simulate spawn-time detection
-	r.bkStore.wrapper = w
-
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = w })
 	if got := r.CLIVersion(); got != "2.1.100" {
 		t.Fatalf("CLIVersion before live observe = %q, want spawn-time 2.1.100", got)
 	}
