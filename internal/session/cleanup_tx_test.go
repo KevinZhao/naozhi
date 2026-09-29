@@ -201,7 +201,7 @@ func TestCommitShimReattach(t *testing.T) {
 		r := newTestRouter(4)
 		sess := injectSession(r, key, newDeadProc())
 		proc := newIdleProc()
-		if got := r.commitShimReattach(st, sess, proc, "claude", r.bkStore.wrapper); got != reattachDone {
+		if got := r.commitShimReattach(st, sess, proc, "claude", r.bk.Fallback()); got != reattachDone {
 			t.Fatalf("outcome = %d, want reattachDone", got)
 		}
 		if sess.loadProcess() != proc {
@@ -220,7 +220,7 @@ func TestCommitShimReattach(t *testing.T) {
 		stale := injectSession(r, key, newDeadProc())
 		current := injectSession(r, key, newDeadProc())
 		proc := newIdleProc()
-		if got := r.commitShimReattach(st, stale, proc, "claude", r.bkStore.wrapper); got != reattachReplaced {
+		if got := r.commitShimReattach(st, stale, proc, "claude", r.bk.Fallback()); got != reattachReplaced {
 			t.Fatalf("outcome = %d, want reattachReplaced", got)
 		}
 		if stale.loadProcess() == proc || current.loadProcess() == proc || r.ss.Active() != 0 {
@@ -232,7 +232,7 @@ func TestCommitShimReattach(t *testing.T) {
 		r := newTestRouter(4)
 		live := newIdleProc()
 		sess := injectSession(r, key, live)
-		if got := r.commitShimReattach(st, sess, newIdleProc(), "claude", r.bkStore.wrapper); got != reattachReplaced {
+		if got := r.commitShimReattach(st, sess, newIdleProc(), "claude", r.bk.Fallback()); got != reattachReplaced {
 			t.Fatalf("outcome = %d, want reattachReplaced", got)
 		}
 		if sess.loadProcess() != live {
@@ -245,7 +245,7 @@ func TestCommitShimReattach(t *testing.T) {
 		sess := injectSession(r, key, newDeadProc())
 		sess.InjectHistory([]clievent.EventEntry{{Time: 1, Type: "user", Summary: "hi"}})
 		probe := &lockProbeProc{fakeProcess: newIdleProc(), r: r}
-		if got := r.commitShimReattach(st, sess, probe, "claude", r.bkStore.wrapper); got != reattachDone {
+		if got := r.commitShimReattach(st, sess, probe, "claude", r.bk.Fallback()); got != reattachDone {
 			t.Fatalf("outcome = %d, want reattachDone", got)
 		}
 		if !probe.seeded || probe.tableFree {
@@ -259,7 +259,7 @@ func TestCommitShimReattach(t *testing.T) {
 		sess.sendMu.Lock()
 		defer sess.sendMu.Unlock()
 		proc := newIdleProc()
-		if got := r.commitShimReattach(st, sess, proc, "claude", r.bkStore.wrapper); got != reattachSendInFlight {
+		if got := r.commitShimReattach(st, sess, proc, "claude", r.bk.Fallback()); got != reattachSendInFlight {
 			t.Fatalf("outcome = %d, want reattachSendInFlight", got)
 		}
 		if sess.loadProcess() == proc || r.ss.Active() != 0 {

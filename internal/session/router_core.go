@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"runtime/debug"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +23,7 @@ import (
 	// internal/wireup, not here, so this package stays backend-agnostic; the
 	// generic naozhilog tier is constructed via eventlog_bridge.go (#403, #567).
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 	"github.com/naozhi/naozhi/internal/session/knownids"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 	"github.com/naozhi/naozhi/internal/session/sessiontable"
@@ -161,11 +161,9 @@ type Router struct {
 	// lock-free Active / Gen), because the spawn bookkeeping, workspace
 	// overrides and picks kept in routerState must change atomically with it.
 	ss *sessiontable.Table[*ManagedSession, routerState]
-	// bkStore is the backend/policy facet (#383): read-only-after-NewRouter
-	// config fields plus the mutable backendOverrides map (router_backend.go).
-	// No lock of its own — mutations ONLY inside an Update, reads inside a
-	// View.
-	bkStore backendStore
+	// bk is the backend table (internal/session/backendstore), fixed once
+	// NewRouter returns; nil on a hand-built test Router, which reads as empty.
+	bk *backendstore.Store
 	// accessProfiles is the named auth/upstream overlay registry (RFC
 	// project-access-profile). Nil/empty ⇒ every session runs on the global
 	// baseline. Copy-on-write behind an atomic pointer: AddAccessProfile
@@ -576,48 +574,6 @@ func NewRouter(cfg RouterConfig) *Router {
 		cfg.PruneTTL = DefaultPruneTTL
 	}
 
-	// Normalize the per-backend rows. Accept either a BackendRuntimes map or a
-	// single Wrapper; when both are set, BackendRuntimes wins and Wrapper is kept
-	// as a compat alias for code that still reads r.bkStore.wrapper directly
-	// (mostly tests).
-	runtimes := cfg.BackendRuntimes
-	defaultBackend := cfg.DefaultBackend
-	if len(runtimes) == 0 && cfg.Wrapper != nil {
-		id := cfg.Wrapper.BackendID
-		if id == "" {
-			id = "claude"
-		}
-		runtimes = map[string]BackendRuntime{id: {Wrapper: cfg.Wrapper}}
-		if defaultBackend == "" {
-			defaultBackend = id
-		}
-	}
-	defaultWrapper := cfg.Wrapper
-	if defaultWrapper == nil && defaultBackend != "" {
-		defaultWrapper = runtimes[defaultBackend].Wrapper
-	}
-	if defaultWrapper == nil {
-		// Pick deterministically: Go map iteration is randomised, so without
-		// sorting a multi-backend deployment with no explicit DefaultBackend
-		// would flip its default on every process start.
-		ids := make([]string, 0, len(runtimes))
-		for id := range runtimes {
-			ids = append(ids, id)
-		}
-		slices.Sort(ids)
-		// Skip rows without a wrapper: unlike the old wrappers map, a row can
-		// exist from config alone and such a backend is not spawnable.
-		for _, id := range ids {
-			if w := runtimes[id].Wrapper; w != nil {
-				defaultWrapper = w
-				if defaultBackend == "" {
-					defaultBackend = id
-				}
-				break
-			}
-		}
-	}
-
 	r := &Router{
 		maxProcs:        cfg.MaxProcs,
 		ttl:             cfg.TTL,
@@ -632,16 +588,15 @@ func NewRouter(cfg RouterConfig) *Router {
 		historyLoader:   cfg.HistoryLoader,
 		resolver:        cfg.Resolver,
 	}
-	// bkStore has no lock of its own and is not composite-literal
-	// initialised, so it is filled in here. wsStore, kid and pp are
-	// zero-value usable (maps allocated lazily).
+	// wsStore, kid and pp are zero-value usable (maps allocated lazily).
 	r.ss = newSessionTable()
-	r.bkStore.wrapper = defaultWrapper
-	r.bkStore.defaultBackend = defaultBackend
-	r.bkStore.model = cfg.Model
-	r.bkStore.extraArgs = cfg.ExtraArgs
-	// One row per backend instead of six parallel columns (G2 #2666).
-	r.bkStore.initRuntimes(runtimes)
+	r.bk = backendstore.New(backendstore.Config{
+		Wrapper:        cfg.Wrapper,
+		DefaultBackend: cfg.DefaultBackend,
+		Model:          cfg.Model,
+		ExtraArgs:      cfg.ExtraArgs,
+		Runtimes:       cfg.BackendRuntimes,
+	})
 	if cfg.AccessProfiles != nil {
 		profiles := cfg.AccessProfiles
 		r.accessProfiles.Store(&profiles)
@@ -729,8 +684,6 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Orphan sweep + attachment tracker are background side effects funnelled
 	// through startBackgroundLifecycle (startOnce-guarded; Start() shares it).
 	r.startBackgroundLifecycle()
-
-	r.bkStore.backendIDs = computeBackendIDs(r.bkStore.wrapper, r.bkStore.backendWrappers(), r.bkStore.defaultBackend)
 
 	return r
 }

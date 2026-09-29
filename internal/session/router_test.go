@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -289,7 +290,9 @@ func newTestRouter(maxProcs int) *Router {
 		ttl:      30 * time.Minute,
 		pruneTTL: 72 * time.Hour,
 	}
-	r.bkStore.wrapper = cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	r.editBackendsForTest(func(c *backendstore.Config) {
+		c.Wrapper = cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	})
 	return r
 }
 
@@ -1131,10 +1134,11 @@ func TestGetOrCreate_AgentOptsOverride(t *testing.T) {
 		maxProcs: 3,
 		ttl:      30 * time.Minute,
 	}
-	r.bkStore.wrapper = cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
-	r.bkStore.model = "default-model"
-	r.bkStore.extraArgs = []string{"--base-arg"}
-
+	r.editBackendsForTest(func(c *backendstore.Config) {
+		c.Wrapper = cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	})
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "default-model" })
+	r.editBackendsForTest(func(c *backendstore.Config) { c.ExtraArgs = []string{"--base-arg"} })
 	// Even with overrides, spawn will still fail — we just verify no panic.
 	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{
 		Model:     "override-model",
@@ -2180,11 +2184,11 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 			ss:         newSessionTable(),
 			defaultCWD: "/default/ws",
 		}
-		r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
+		r.setWrappersForTest(map[string]*cli.Wrapper{
 			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 		})
-		r.bkStore.defaultBackend = "claude"
+		r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 		stateOf(r).picks.backend = make(map[string]string)
 		r.claudeDir = t.TempDir() // empty: no claude jsonl exists anywhere
 		kiroDir := t.TempDir()
@@ -2264,15 +2268,15 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 			ss:         newSessionTable(),
 			defaultCWD: "/default/ws",
 		}
-		r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
+		r.setWrappersForTest(map[string]*cli.Wrapper{
 			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 		})
-		r.bkStore.defaultBackend = "claude"
-		r.bkStore.model = "sonnet-default"
-		r.bkStore.extraArgs = []string{"--flag-a"}
-		r.bkStore.setBackendModelsForTest(map[string]string{"kiro": "kiro-model"})
-		r.bkStore.setBackendExtraArgsForTest(map[string][]string{"kiro": {"--kiro-arg"}})
+		r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
+		r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "sonnet-default" })
+		r.editBackendsForTest(func(c *backendstore.Config) { c.ExtraArgs = []string{"--flag-a"} })
+		r.setBackendModelsForTest(map[string]string{"kiro": "kiro-model"})
+		r.setBackendExtraArgsForTest(map[string][]string{"kiro": {"--kiro-arg"}})
 		stateOf(r).picks.backend = make(map[string]string)
 		return r
 	}
@@ -2368,7 +2372,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	// Regression: a session whose process exited but whose entry is still
 	// in the session table must resume against the SAME backend it ran on. Before
-	// this fix, resolveSpawnParams fell through to r.bkStore.defaultBackend
+	// this fix, resolveSpawnParams fell through to r.bk.DefaultID()
 	// when opts.Backend was empty AND backendOverrides[key] was already
 	// consumed (one-shot). For a kiro session that meant the second turn
 	// silently respawned under claude with the kiro session_id, which then
@@ -2440,11 +2444,11 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 			ss:         newSessionTable(),
 			defaultCWD: "/default/ws",
 		}
-		r.bkStore.setWrappersForTest(map[string]*cli.Wrapper{
+		r.setWrappersForTest(map[string]*cli.Wrapper{
 			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		})
-		r.bkStore.defaultBackend = "claude"
-		r.bkStore.model = "sonnet-default"
+		r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
+		r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "sonnet-default" })
 		stateOf(r).picks.backend = make(map[string]string)
 		stateOf(r).picks.accessProfile = make(map[string]string)
 		setAccessProfiles(r, map[string]AccessProfile{

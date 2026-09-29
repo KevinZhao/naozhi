@@ -3,6 +3,8 @@ package session
 import (
 	"reflect"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 )
 
 // MergeBackendDefaults is the one precedence rule for a backend's spawn
@@ -108,16 +110,15 @@ func TestBackendDefaultsFor_MatchesMergeBackendDefaults(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			r := &Router{ss: newSessionTable()}
-			r.bkStore.model = c.routerModel
-			r.bkStore.extraArgs = c.routerArgs
+			r.editBackendsForTest(func(bc *backendstore.Config) { bc.Model, bc.ExtraArgs = c.routerModel, c.routerArgs })
 			if c.backendModel != "" {
-				r.bkStore.setBackendModelsForTest(map[string]string{backendID: c.backendModel})
+				r.setBackendModelsForTest(map[string]string{backendID: c.backendModel})
 			}
 			if len(c.backendArgs) > 0 {
-				r.bkStore.setBackendExtraArgsForTest(map[string][]string{backendID: c.backendArgs})
+				r.setBackendExtraArgsForTest(map[string][]string{backendID: c.backendArgs})
 			}
 			if c.effort != "" {
-				r.bkStore.setBackendEffortsForTest(map[string]string{backendID: c.effort})
+				r.setBackendEffortsForTest(map[string]string{backendID: c.effort})
 			}
 
 			viaRouter := r.backendDefaultsFor(backendID)
