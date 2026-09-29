@@ -1,37 +1,14 @@
 // Package datadir owns the on-disk layout policy for naozhi's state: given the
 // directory a store file lives in, it is the only place that knows what the
-// siblings are called. R250-ARCH-13 (#1175), F1 (#2641).
+// siblings are called (#1175, #2641).
 //
-// # Why the first version was never adopted
-//
-// This package shipped as six free functions of the shape `f(dataDir) string`,
-// four of which had zero callers — production AND test — while ~18 sites
-// open-coded `filepath.Dir(storePath) + "/xxx"` instead. The reason was not
-// neglect: the API asked a question the configuration cannot answer.
-//
-// There is no data root in the config. There are TWO independently configurable
-// store files with no same-directory constraint: `session.store_path` and
-// `cron.store_path`. So three of those functions were not merely unused, they
-// were unusable:
-//
-//   - SessionsPath(root) rebuilt `<root>/sessions.json`, discarding the operator's
-//     configured filename. Adopting it would have pointed the loader at a file
-//     that does not exist.
-//   - CronJobsPath(root) did the same for cron.
-//   - CronRunsRoot(root) assumed cron state sits under the SESSION root, while
-//     cron derives it from its own store path. Adopting it would have relocated
-//     run history for anyone who split the two.
-//
-// EnsureDir, UISettingsPath and CLIDebugRoot were adopted precisely because
-// they do not invert that relationship.
-//
-// # The shape that works
-//
-// Layout wraps ONE store directory, constructed either from a store file path
-// (ForStore) or from a root that the caller already holds (FromRoot). A single
-// Layout carrying both store paths was rejected: it would put RunsRoot() one
-// method call away from reading the session root, which is the exact miswiring
-// above. One Layout per store file makes that unrepresentable.
+// There is no data root in the config. There are TWO independently
+// configurable store files with no same-directory constraint:
+// `session.store_path` and `cron.store_path`. So a Layout wraps ONE store
+// directory, constructed from a store file path (ForStore) or from a root the
+// caller already holds (FromRoot). One Layout carrying both store paths would
+// put RunsRoot() one method call away from reading the session root; one
+// Layout per store file makes that miswiring unrepresentable.
 //
 // A configured path is never rebuilt from a root — Layout only ever derives
 // SIBLINGS. The store file path itself stays whatever the operator wrote.

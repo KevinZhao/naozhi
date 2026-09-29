@@ -32,11 +32,6 @@ type ProjectsConfig struct {
 	// sockets, not general content. Accesses are audit-logged at Info
 	// ("public_tmp file access"). Same single-operator caveat as IncludeRoot
 	// above, and the same file-endpoint gates.
-	//
-	// Three review items (R242-SEC-6, R244-SEC-P3-2, R245-SEC-7) all asked for
-	// exactly this: an operator opt-in flag defaulting to false. The
-	// ServerOptions field existed; the config key did not, so the feature was
-	// off unconditionally. Wired in #2553's follow-up.
 	PublicTmp bool `yaml:"public_tmp,omitempty"`
 }
 
