@@ -37,9 +37,8 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/naozhi/naozhi/internal/spawndiag"
 	"gopkg.in/yaml.v3"
-
-	"github.com/naozhi/naozhi/internal/cli"
 )
 
 // unknownKey is one config key with no corresponding struct field.
@@ -181,9 +180,9 @@ func reportUnknownKeys(expanded []byte, migrated map[string]bool) {
 	if len(shown) > maxUnknownKeyDiags {
 		shown = shown[:maxUnknownKeyDiags]
 	}
-	diags := make([]cli.SpawnDiag, 0, len(shown)+1)
+	diags := make([]spawndiag.Diag, 0, len(shown)+1)
 	for _, u := range shown {
-		diags = append(diags, cli.SpawnDiag{
+		diags = append(diags, spawndiag.Diag{
 			Layer:  "config-unknown",
 			Key:    u.Path,
 			Action: "ignored",
@@ -191,12 +190,12 @@ func reportUnknownKeys(expanded []byte, migrated map[string]bool) {
 		})
 	}
 	if rest := len(unknown) - len(shown); rest > 0 {
-		diags = append(diags, cli.SpawnDiag{
+		diags = append(diags, spawndiag.Diag{
 			Layer:  "config-unknown",
 			Key:    "(more)",
 			Action: "ignored",
 			Reason: fmt.Sprintf("%d further unknown key(s) not listed; fix the ones above and re-run `naozhi config check`", rest),
 		})
 	}
-	cli.EmitSpawnDiags("config", diags)
+	spawndiag.Emit("config", diags)
 }

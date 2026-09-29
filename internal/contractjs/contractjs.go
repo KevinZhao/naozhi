@@ -18,7 +18,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
@@ -68,7 +68,7 @@ func Build(routesGoldenPath string) (string, error) {
 	// dashboard can check a value it received against the full set instead of
 	// restating each member as a literal (#2909 G5). SESSION_STATE is not yet
 	// enforced against literal comparisons — see the PR for why.
-	deathReasons := append([]string{}, cli.AllDeathReasons()...)
+	deathReasons := append([]string{}, cliinfo.AllDeathReasons()...)
 	deathReasons = append(deathReasons, session.DeathReasonIdleTimeout, session.DeathReasonEvicted)
 	sort.Strings(deathReasons)
 	b.WriteString("    ENUMS: {\n      DEATH_REASON: [")
@@ -79,7 +79,7 @@ func Build(routesGoldenPath string) (string, error) {
 		fmt.Fprintf(&b, "'%s'", r)
 	}
 	b.WriteString("],\n      SESSION_STATE: [")
-	for i, s := range cli.AllSessionStates() {
+	for i, s := range cliinfo.AllSessionStates() {
 		if i > 0 {
 			b.WriteString(", ")
 		}

@@ -1,4 +1,4 @@
-package cli
+package imageorient
 
 import (
 	"bytes"
@@ -16,19 +16,24 @@ import (
 // orientWorkerCap bounds concurrent auto-orient decodes. Orient is a
 // user-triggered, rate-limited path (POST /api/sessions/orient, 10/min) with
 // one decode per request, so 2 suffices. Deliberately not thumbnailWorkerCap,
-// which sizes the thumbnail worker pool in process_send.go.
+// which sizes the thumbnail worker pool in cli/process_send.go.
 const orientWorkerCap = 2
 
-// orientSem is separate from thumbSem so auto-orient and multi-image
-// thumbnail generation cannot starve each other.
+// orientSem is separate from cli's thumbnail pool so auto-orient and
+// multi-image thumbnail generation cannot starve each other.
 var orientSem = make(chan struct{}, orientWorkerCap)
+
+// maxDecodePixels is the largest source image (pixel count) RotateJPEG
+// decodes, the same ceiling cli.MakeThumbnail applies: a full RGBA decode of
+// 4096x4096 is 64 MB.
+const maxDecodePixels = 4096 * 4096
 
 // RotateJPEG decodes raw image bytes, rotates the pixels clockwise by
 // `degCW` (must be 90, 180, or 270), and re-encodes to JPEG. degCW==0
 // returns the input unchanged. Used by auto-orient to bake the rotation into
 // EXIF-less images so every downstream consumer sees them upright.
 //
-// Same safety as MakeThumbnail: DecodeConfig pixel pre-check, orientSem, and
+// Same safety as cli.MakeThumbnail: DecodeConfig pixel pre-check, orientSem, and
 // recover() on decoder panics. On any failure it returns (nil, false) and the
 // caller MUST fall back to the original bytes — auto-orient is best-effort
 // and never destructive.
@@ -52,7 +57,7 @@ func RotateJPEG(data []byte, degCW int) (out []byte, ok bool) {
 	if err != nil {
 		return nil, false
 	}
-	if int64(cfg.Width)*int64(cfg.Height) >= maxThumbnailPixels {
+	if int64(cfg.Width)*int64(cfg.Height) >= maxDecodePixels {
 		return nil, false
 	}
 

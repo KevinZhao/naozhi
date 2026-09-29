@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/selfupdate"
@@ -275,7 +275,7 @@ func (h *Handlers) runningSessionCount() int {
 	if h.router == nil {
 		return 0
 	}
-	running := cli.StateRunning.String()
+	running := cliinfo.StateRunning.String()
 	n := 0
 	for _, snap := range h.router.ListSessions() {
 		if snap.State == running {

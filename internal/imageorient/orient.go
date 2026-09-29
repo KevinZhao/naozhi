@@ -1,4 +1,8 @@
-package cli
+// Package imageorient turns an EXIF-less, sideways image upright: it builds
+// the vision-model query that asks which edge holds the top of the text,
+// parses the verdict, and bakes the rotation into the JPEG. A leaf: it imports
+// only the standard library, x/image and clievent.
+package imageorient
 
 import (
 	"bytes"

@@ -1,4 +1,4 @@
-package cli
+package imageorient
 
 import (
 	"encoding/base64"

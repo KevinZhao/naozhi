@@ -6,59 +6,40 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/cliinfo"
 )
 
-// BackendInfo describes a probed CLI backend available on this host. The
-// dashboard-facing fields (ReplyTag / ChipColor / Features / Models) are filled
-// from backend.Profile by session.Router.BackendsList at /api/cli/backends time;
-// they live here so dashboard.js consumes one struct, not a join (RFC §8.2).
-type BackendInfo struct {
-	ID          string `json:"id"`           // "claude" | "kiro"
-	DisplayName string `json:"display_name"` // "claude-code" | "kiro"
-	Protocol    string `json:"protocol"`     // "stream-json" | "acp"
-	Path        string `json:"path,omitempty"`
-	Version     string `json:"version,omitempty"`
-	Available   bool   `json:"available"`
-	// Models is the model manifest the dashboard's per-session model popover
-	// offers: agent-reported (kiro availableModels) or the cli.backends[].models
-	// fallback. Dashboard-only; DetectBackendsCtx leaves it nil.
-	Models []ModelInfo `json:"models,omitempty"`
-	// ReplyTag is the short tag (e.g. "cc", "kiro") appended to IM replies and
-	// dashboard chips; empty when no Profile is registered for the ID.
-	ReplyTag string `json:"reply_tag,omitempty"`
-	// ChipColor is the CSS color for the backend chip background; empty falls
-	// back to the dashboard's default token (--nz-accent).
-	ChipColor string `json:"chip_color,omitempty"`
-	// Features mirrors backend.Profile.Features verbatim so the dashboard can gray
-	// out controls the backend lacks; missing key == false. Dashboard-only:
-	// DetectBackendsCtx leaves it nil (cli cannot import internal/cli/backend —
-	// cycle), and readers of that output must treat nil as all-false.
-	Features map[string]bool `json:"features,omitempty"`
+// BackendInfo is cliinfo.BackendInfo (see there).
+type BackendInfo = cliinfo.BackendInfo
 
-	// defaultBinary is the executable detectCLI probes absent an explicit CLIPath
-	// — the cli-side mirror of backend.Profile.DefaultBinary (import cycle), kept
-	// on the row so adding a backend is a single-row edit (#408). Unexported: not wire.
+// knownBackend is one row of knownBackends: the wire row plus the executable
+// detectCLI probes absent an explicit CLIPath — the cli-side mirror of
+// backend.Profile.DefaultBinary (import cycle), kept on the row so adding a
+// backend is a single-row edit (#408). defaultBinary is not wire.
+type knownBackend struct {
+	BackendInfo
 	defaultBinary string
 }
 
 // knownBackends enumerates every backend naozhi can drive, in preferred order.
 // cli-side mirror of backend.Profile.{ID,DefaultBinary} (import cycle);
 // detect_backend_mirror_test.go pins ID+binary parity in CI (#408).
-var knownBackends = []BackendInfo{
-	{ID: "claude", DisplayName: "claude-code", Protocol: "stream-json", defaultBinary: "claude"},
-	{ID: "kiro", DisplayName: "kiro", Protocol: "acp", defaultBinary: "kiro-cli"},
-	{ID: "codex", DisplayName: "codex", Protocol: "codex-app-server", defaultBinary: "codex"},
+var knownBackends = []knownBackend{
+	{BackendInfo{ID: "claude", DisplayName: "claude-code", Protocol: "stream-json"}, "claude"},
+	{BackendInfo{ID: "kiro", DisplayName: "kiro", Protocol: "acp"}, "kiro-cli"},
+	{BackendInfo{ID: "codex", DisplayName: "codex", Protocol: "codex-app-server"}, "codex"},
 }
 
 // lookupBackend returns the knownBackends row for id — the single scan point
 // shared by knownBackendBinary / isKnownBackendID / backendDisplayName (#408).
-func lookupBackend(id string) (BackendInfo, bool) {
+func lookupBackend(id string) (knownBackend, bool) {
 	for _, b := range knownBackends {
 		if b.ID == id {
 			return b, true
 		}
 	}
-	return BackendInfo{}, false
+	return knownBackend{}, false
 }
 
 // knownBackendBinary returns the default executable detectCLI probes for the
@@ -78,7 +59,7 @@ func knownBackendBinary(id string) (string, bool) {
 func DetectBackendsCtx(ctx context.Context) []BackendInfo {
 	out := make([]BackendInfo, 0, len(knownBackends))
 	for _, b := range knownBackends {
-		info := b
+		info := b.BackendInfo
 		info.Path = detectCLI(b.ID)
 		// detectCLI may return a bare name; os.Stat short-circuits absent binaries so
 		// a missing backend doesn't pay the 5s --version timeout on every restart. Stat

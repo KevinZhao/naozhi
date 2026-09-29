@@ -5,11 +5,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
@@ -216,8 +217,8 @@ func validateArgvStrings(field string, args []string) error {
 				return fmt.Errorf("%s[%d] contains control byte (0x%02x) — refusing (argv injection guard)", field, i, r)
 			}
 		}
-		if cli.IsDeniedExtraFlag(a) {
-			cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
+		if cliinfo.IsDeniedExtraFlag(a) {
+			spawndiag.Emit("config", []spawndiag.Diag{{
 				Layer: "argv-denylist", Key: a, Action: "dropped",
 				Reason: fmt.Sprintf("%s[%d]: the spawn pipeline strips this flag; it will NOT reach the CLI — use the dedicated config field instead", field, i),
 			}})

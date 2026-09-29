@@ -1,4 +1,4 @@
-package cli
+package imageorient
 
 import (
 	"bytes"
@@ -178,42 +178,12 @@ func TestRotateJPEG_MarkerLandsCorrectly(t *testing.T) {
 	}
 }
 
-// TestRotateJPEG_UsesIndependentOrientSem proves auto-orient acquires its own
-// orientSem (cap orientWorkerCap) rather than the shared thumbSem, so a burst
-// of orient work can never starve thumbnail generation. It also asserts
-// acquire/release balance: orientSem returns to empty after a successful call.
-func TestRotateJPEG_UsesIndependentOrientSem(t *testing.T) {
-	// orientSem must have the expected ceiling and start empty in a fresh test.
+// TestRotateJPEG_OrientSemCap pins the orient decode ceiling. The semaphore is
+// independent of cli's thumbnail pool by construction: this package does not
+// import internal/cli.
+func TestRotateJPEG_OrientSemCap(t *testing.T) {
 	if cap(orientSem) != orientWorkerCap {
 		t.Fatalf("orientSem cap = %d, want orientWorkerCap=%d", cap(orientSem), orientWorkerCap)
-	}
-	if len(orientSem) != 0 {
-		t.Fatalf("orientSem should start empty, got len=%d", len(orientSem))
-	}
-
-	// Saturate orientSem to capacity to simulate concurrent orient requests
-	// holding every orient slot.
-	for i := 0; i < orientWorkerCap; i++ {
-		orientSem <- struct{}{}
-	}
-	defer func() {
-		for i := 0; i < orientWorkerCap; i++ {
-			<-orientSem
-		}
-	}()
-
-	// Even with orientSem fully saturated, thumbSem must remain fully
-	// drainable — proving the two paths do not share a slot pool and orient
-	// cannot starve thumbnail generation.
-	for i := 0; i < cap(thumbSem); i++ {
-		select {
-		case thumbSem <- struct{}{}:
-		default:
-			t.Fatalf("thumbSem slot %d blocked while orientSem saturated; semaphores are not independent", i)
-		}
-	}
-	for i := 0; i < cap(thumbSem); i++ {
-		<-thumbSem
 	}
 }
 

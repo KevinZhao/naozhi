@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // The runtime semantics of a denied flag in args are: naozhi STARTS, the flag is
@@ -30,11 +30,11 @@ func writeConfigFile(t *testing.T, body string) string {
 }
 
 // loadWithDiags loads path while collecting the diags Load emits.
-func loadWithDiags(t *testing.T, path string) (*Config, []cli.SpawnDiag, error) {
+func loadWithDiags(t *testing.T, path string) (*Config, []spawndiag.Diag, error) {
 	t.Helper()
 	var mu sync.Mutex
-	var diags []cli.SpawnDiag
-	restore := cli.ObserveSpawnDiags(func(_ string, d cli.SpawnDiag) {
+	var diags []spawndiag.Diag
+	restore := spawndiag.Observe(func(_ string, d spawndiag.Diag) {
 		mu.Lock()
 		diags = append(diags, d)
 		mu.Unlock()
@@ -46,13 +46,13 @@ func loadWithDiags(t *testing.T, path string) (*Config, []cli.SpawnDiag, error) 
 	return cfg, diags, err
 }
 
-func diagFor(diags []cli.SpawnDiag, key string) (cli.SpawnDiag, bool) {
+func diagFor(diags []spawndiag.Diag, key string) (spawndiag.Diag, bool) {
 	for _, d := range diags {
 		if d.Key == key {
 			return d, true
 		}
 	}
-	return cli.SpawnDiag{}, false
+	return spawndiag.Diag{}, false
 }
 
 func TestDeniedFlagInArgs_LoadsAndReportsRatherThanRefusing(t *testing.T) {

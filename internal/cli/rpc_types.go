@@ -3,6 +3,8 @@ package cli
 import (
 	"encoding/json"
 	"strconv"
+
+	"github.com/naozhi/naozhi/internal/cliinfo"
 )
 
 // RPCRequest is a JSON-RPC 2.0 request.
@@ -145,13 +147,8 @@ type ACPModelInfo struct {
 	Description string `json:"description"`
 }
 
-// ModelInfo is the protocol-agnostic model-manifest entry naozhi caches and
-// serves via /api/cli/backends. JSON tags are the dashboard wire shape.
-type ModelInfo struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
-}
+// ModelInfo is cliinfo.ModelInfo (see there).
+type ModelInfo = cliinfo.ModelInfo
 
 // ACPPermissionRequestParams is the params of a session/request_permission
 // request. HandleEvent picks the optionId whose Kind matches the desired

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cliinfo"
 )
 
 // TestSpawnDiagsFor_DeniedFlags reproduces #2412 (`--effort high` smuggled in
@@ -40,7 +42,7 @@ func TestSpawnDiagsFor_DeniedFlags(t *testing.T) {
 	// Parity: every diagnosed flag really is stripped from the argv.
 	kept := capExtraArgsBytes(opts.ExtraArgs)
 	for _, a := range kept {
-		if isDeniedFlag(a) {
+		if cliinfo.IsDeniedExtraFlag(a) {
 			t.Errorf("denied flag %q survived capExtraArgsBytes", a)
 		}
 	}

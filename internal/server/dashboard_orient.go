@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/imageorient"
 )
 
 // VisionOrienter is the minimal capability the orient handler needs from a
@@ -114,7 +114,7 @@ func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
 // failure/no-op path it returns (0, nil) and the original stored bytes stay
 // put.
 func (h *SendHandler) orientImage(parent context.Context, id, owner string, img clievent.Attachment) (int, []byte) {
-	line, err := cli.BuildOrientMessage(img.Data, img.MimeType)
+	line, err := imageorient.BuildOrientMessage(img.Data, img.MimeType)
 	if err != nil {
 		slog.Warn("orient: build message failed", "err", err)
 		return 0, nil
@@ -134,12 +134,12 @@ func (h *SendHandler) orientImage(parent context.Context, id, owner string, img 
 		return 0, nil
 	}
 
-	v, actionable := cli.ParseOrientStreamJSON(stdout)
+	v, actionable := imageorient.ParseOrientStreamJSON(stdout)
 	if !actionable {
 		return 0, nil
 	}
 
-	out, ok := cli.RotateJPEG(img.Data, v.DegreesCW)
+	out, ok := imageorient.RotateJPEG(img.Data, v.DegreesCW)
 	if !ok {
 		slog.Warn("orient: rotate failed despite actionable verdict", "deg", v.DegreesCW)
 		return 0, nil
