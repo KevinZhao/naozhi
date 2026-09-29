@@ -3,6 +3,7 @@ package backend
 import (
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
@@ -28,6 +29,13 @@ func claudeProfile() Profile {
 		RequiredNodeCaps: nil,
 		// Session JSONL under ~/.claude/projects/ ("~/" kept for doctor display).
 		HistoryDir: "~/.claude/projects/",
+		// claude --resume reads <claudeDir>/projects/<slug(workspace)>/<sid>.jsonl.
+		ResumeTarget: func(_, claudeDir, workspace, sessionID string) string {
+			if claudeDir == "" || workspace == "" {
+				return ""
+			}
+			return claudefs.SessionJSONL(claudeDir, workspace, sessionID)
+		},
 		// Process.TotalCost reports cumulative spend in USD.
 		CostUnit: "USD",
 		// Full naozhi UX surface; audio goes through Transcribe before the CLI.

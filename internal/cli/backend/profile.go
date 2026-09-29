@@ -56,6 +56,14 @@ type Profile struct {
 	// means no on-disk history — check before joining paths.
 	HistoryDir string
 
+	// ResumeTarget returns the file a resume of sessionID reads, so a spawn
+	// can fall back to a fresh session when it is gone; "" means there is no
+	// cheap probe (or not enough to locate the file) and the resume proceeds.
+	// dir is this backend's state directory (cli.backends[].dir); claude
+	// resolves its per-project layout from claudeDir and workspace. nil = no
+	// probe for this backend.
+	ResumeTarget func(dir, claudeDir, workspace, sessionID string) string
+
 	// CostUnit labels cumulative cost cells: "USD" (claude), "credits" (kiro).
 	// Empty means no cost concept — the dashboard hides the cell.
 	CostUnit string

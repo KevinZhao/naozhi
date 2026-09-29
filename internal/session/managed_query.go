@@ -805,39 +805,43 @@ func scanLastSummaries(entries []clievent.EventEntry) (prompt, activity, respons
 // costUnitForBackend returns the SessionSnapshot.CostUnit value for a given
 // backend, read from backend.Profile.CostUnit (docs/rfc/multi-backend.md
 // §8.3 D5). Empty backend (legacy stores predating the Backend field) means
-// claude, hence USD.
+// claude, hence USD. An unregistered ID (config typo, unwired backend) yields
+// "", so the dashboard hides the cost cell rather than render a misleading
+// unit.
 func costUnitForBackend(backendID string) string {
 	if backendID == "" {
 		backendID = "claude"
 	}
-	// Fast path: production registers defaults before any session exists.
-	if p, ok := backend.Get(backendID); ok {
+	if p, ok := backendProfile(backendID); ok {
 		return p.CostUnit
 	}
-	// Lazy bootstrap for tests that never call RegisterDefaults (#890). Only
-	// when the registry is completely empty: a partially-populated one (a
-	// sibling test's custom backend) would panic on duplicate IDs. recover
-	// covers the race with a concurrent wireup.RegisterCLIBackends between
-	// the empty-check and RegisterDefaults — benign, registry ends populated.
-	costUnitForBackendOnce.Do(func() {
+	return ""
+}
+
+// backendProfile returns the registered Profile for id. Production registers
+// the defaults before any session exists; tests that never call
+// RegisterDefaults (#890) get them lazily, but only into a completely empty
+// registry: a partially-populated one (a sibling test's custom backend) would
+// panic on duplicate IDs. recover covers the race with a concurrent
+// wireup.RegisterCLIBackends between the empty-check and RegisterDefaults —
+// benign, the registry ends populated.
+func backendProfile(id string) (backend.Profile, bool) {
+	if p, ok := backend.Get(id); ok {
+		return p, true
+	}
+	backendProfileOnce.Do(func() {
 		if len(backend.All()) != 0 {
 			return
 		}
 		defer func() {
 			if r := recover(); r != nil {
 				// Logged so unexpected (non-duplicate) panics stay visible.
-				slog.Debug("costUnitForBackend: recovered panic in RegisterDefaults",
-					"recovered", r)
+				slog.Debug("backendProfile: recovered panic in RegisterDefaults", "recovered", r)
 			}
 		}()
 		backend.RegisterDefaults()
 	})
-	if p, ok := backend.Get(backendID); ok {
-		return p.CostUnit
-	}
-	// Unregistered ID (config typo, unwired backend): "" makes the dashboard
-	// hide the cost cell rather than render a misleading unit.
-	return ""
+	return backend.Get(id)
 }
 
-var costUnitForBackendOnce sync.Once
+var backendProfileOnce sync.Once

@@ -4,11 +4,8 @@ import (
 	"errors"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
-
-	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // Stateless resume-target validation + Claude-CLI project-directory helpers.
@@ -21,16 +18,15 @@ func isENOENTErr(err error) bool {
 	return err != nil && errors.Is(err, syscall.ENOENT)
 }
 
-// resolveResumeID validates that resumeID's on-disk session state still
-// exists for the backend that will consume it, returning "" to downgrade the
-// spawn to a fresh session when it does not. Each backend probes its own layout:
-//   - "claude" / "": <claudeDir>/projects/<slug(workspace)>/<id>.jsonl (what `claude --resume` reads).
-//   - "kiro": <backendDirs["kiro"]>/<id>.json, UUID-keyed and workspace-independent (ACP `session/load`).
-//   - anything else: no pre-check; codex rollouts are date-bucketed with no
-//     cheap probe, so a missing target surfaces as a protocol Init error.
-//
-// A resumeID containing path separators or ".." is rejected outright: it
-// flows into filepath.Join against a trusted root (defense-in-depth).
+// resolveResumeID returns "" — a fresh session — when resumeID's on-disk state
+// is gone, so a missing claude jsonl (work_dir changed, or the prior process
+// died before flushing a turn) cannot loop every tick on the CLI's exit 1 "No
+// conversation found". Where the state lives is the backend's layout
+// (backend.Profile.ResumeTarget, dir = backendDirs[backendID]); a backend
+// without one (codex) or an unregistered ID is not pre-checked. A stat error
+// other than ErrNotExist downgrades too. Empty backendID is a legacy claude
+// session. A resumeID with a path separator or ".." is rejected outright: it
+// is joined against a trusted root.
 func resolveResumeID(backendID, claudeDir string, backendDirs map[string]string, workspace, key, resumeID string) string {
 	if resumeID == "" {
 		return resumeID
@@ -40,75 +36,26 @@ func resolveResumeID(backendID, claudeDir string, backendDirs map[string]string,
 			"key", key, "resume_id_len", len(resumeID))
 		return ""
 	}
-	switch backendID {
-	case "kiro":
-		return resolveKiroResumeID(backendDirs["kiro"], key, resumeID)
-	case "claude", "":
-		return resolveClaudeResumeID(claudeDir, workspace, key, resumeID)
-	default:
+	if backendID == "" {
+		backendID = "claude"
+	}
+	p, ok := backendProfile(backendID)
+	if !ok || p.ResumeTarget == nil {
 		return resumeID
 	}
-}
-
-// resolveClaudeResumeID returns resumeID if the corresponding jsonl
-// conversation file exists under claudeDir (i.e. Claude CLI's --resume will
-// actually find it), or "" to downgrade the spawn to a fresh session.
-// Without it a missing jsonl (work_dir changed → different slug, or the prior
-// process died before flushing a turn) makes the CLI exit 1 with "No
-// conversation found" and every tick loops on fresh-but-unsaved ids.
-//
-// Skipped when claudeDir or workspace is empty (test harness / misconfig).
-// Stat errors other than ErrNotExist also downgrade — a broken claudeDir
-// would otherwise produce the same silent exit-1 loop.
-func resolveClaudeResumeID(claudeDir, workspace, key, resumeID string) string {
-	if claudeDir == "" || workspace == "" {
+	target := p.ResumeTarget(backendDirs[backendID], claudeDir, workspace, resumeID)
+	if target == "" {
 		return resumeID
 	}
-	jsonlPath := claudefs.SessionJSONL(claudeDir, workspace, resumeID)
-	if _, err := os.Stat(jsonlPath); err != nil {
+	if _, err := os.Stat(target); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			slog.Warn("resume target missing, starting fresh session",
-				"key", key,
-				"resume_id", resumeID,
-				"workspace", workspace,
-				"expected_path", jsonlPath)
+				"key", key, "resume_id", resumeID, "backend", backendID,
+				"workspace", workspace, "expected_path", target)
 		} else {
 			slog.Warn("resume target stat failed, starting fresh session",
-				"key", key,
-				"resume_id", resumeID,
-				"expected_path", jsonlPath,
-				"err", err)
-		}
-		return ""
-	}
-	return resumeID
-}
-
-// resolveKiroResumeID returns resumeID if kiro's session-state file exists
-// under kiroSessionsDir (i.e. ACP `session/load` will actually find it), or
-// "" to downgrade the spawn to a fresh session. kiro keys <sid>.json by
-// session UUID with no workspace component, so workspace never participates;
-// a stale .lock does not block resume (kiro auto-recovers stale-PID locks).
-// Skipped when kiroSessionsDir is empty (test harness / misconfig).
-func resolveKiroResumeID(kiroSessionsDir, key, resumeID string) string {
-	if kiroSessionsDir == "" {
-		return resumeID
-	}
-	statePath := filepath.Join(kiroSessionsDir, resumeID+".json")
-	if _, err := os.Stat(statePath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			slog.Warn("resume target missing, starting fresh session",
-				"key", key,
-				"resume_id", resumeID,
-				"backend", "kiro",
-				"expected_path", statePath)
-		} else {
-			slog.Warn("resume target stat failed, starting fresh session",
-				"key", key,
-				"resume_id", resumeID,
-				"backend", "kiro",
-				"expected_path", statePath,
-				"err", err)
+				"key", key, "resume_id", resumeID, "backend", backendID,
+				"expected_path", target, "err", err)
 		}
 		return ""
 	}
