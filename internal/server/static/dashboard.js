@@ -1,3 +1,4 @@
+import { NZ_CONTRACT } from './contract.js';
 import { composer, hooks, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, reconcileChildren, registerActions, sessionExitChipHtml, patchCardExitChip } from './nz_util.js';
 import {

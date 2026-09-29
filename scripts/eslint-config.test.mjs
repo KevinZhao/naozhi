@@ -17,8 +17,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATIC_DIR = path.join(ROOT, 'internal', 'server', 'static');
 const { ESLint } = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'))('eslint');
 
-// sw.js is a service worker with its own scope; contract.js is the generated
-// classic script the modules read NZ_CONTRACT from.
+// sw.js is a service worker with its own scope; contract.js is generated (and
+// ignored by eslint), though it is a module like the rest.
 const NOT_MODULES = new Set(['sw.js', 'contract.js']);
 
 export async function effectiveConfigs(configFile) {

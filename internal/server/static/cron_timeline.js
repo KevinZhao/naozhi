@@ -8,6 +8,7 @@
 // injected once via configureCronTimeline(), called from cron_view.js's
 // module body; the dependency edge stays one-way (view → timeline).
 
+import { NZ_CONTRACT } from './contract.js';
 import { showAuthModal } from './auth_modal.js';
 import { getToken } from './dashboard.js';
 import { renderMd, runPendingAsync } from './render_md.js';

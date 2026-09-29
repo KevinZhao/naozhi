@@ -7,6 +7,7 @@
 // Self-contained ES module (D3 PR-A): no cross-file consumption, no imports;
 // its esc/fetchJSON are deliberately local. The only dashboard.js touch is
 // the activity-bar wiring (calls the exported window.nzAssetView.{show,hide}).
+import { NZ_CONTRACT } from './contract.js';
 import { nzViews } from './nz_util.js';
 
 (function () {

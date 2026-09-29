@@ -3,6 +3,7 @@
 //
 // Verbatim move out of dashboard.js; only the import + dep-wiring lines are
 // new. Layering (D4-1 rule): never import dashboard back.
+import { NZ_CONTRACT } from './contract.js';
 import { composer } from './state.js';
 import { esc, escAttr, showToast } from './nz_util.js';
 

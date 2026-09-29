@@ -7,10 +7,13 @@ const path = require('path');
 const crypto = require('crypto');
 
 const STATIC_DIR = path.join(__dirname, '..', '..', 'internal', 'server', 'static');
-// The generated backend contract — the same file the dashboard loads. Stub
-// paths reference it so a route rename breaks the mock in the same commit
-// that regenerates contract.js (#2539).
-const NZ_CONTRACT = require(path.join(STATIC_DIR, 'contract.js'));
+// The generated backend contract — the same ES module the dashboard imports.
+// Stub paths reference it so a route rename breaks the mock in the same
+// commit that regenerates contract.js (#2539). startMockServer listens only
+// once it has loaded.
+let NZ_CONTRACT;
+const contractReady = import(require('url').pathToFileURL(path.join(STATIC_DIR, 'contract.js')).href)
+  .then((m) => { NZ_CONTRACT = m.NZ_CONTRACT; });
 
 // The dashboard CSP exactly as production serves it (routes.go / #1980).
 // A Go drift test (TestDashboardCSP_MockServerHeaderInSync) compares this
@@ -194,6 +197,7 @@ function defaultGitStates() {
 /**
  * Start a mock HTTP server.
  * @param {object} [overrides] - Override specific route handlers.
+ * @param {boolean} [overrides.shim] - false serves dashboard.html without the e2e shim, as production does.
  * @param {object} [overrides.sessions] - Custom sessions response.
  * @param {object[]} [overrides.events] - Custom events response.
  * @param {object} [overrides.eventsByKey] - session key → events array; keys not listed fall back to `events`.
@@ -255,9 +259,11 @@ function startMockServer(overrides = {}) {
   // and carries no test surface. The mock injects test/e2e/e2e-shim.js,
   // which imports the modules' exports and mirrors the names the suite
   // probes onto window and window.nz.test. New tests should use nz.test.*.
-  const html = fs
-    .readFileSync(path.join(STATIC_DIR, 'dashboard.html'), 'utf8')
-    .replace('</body>', '<script type="module" src="/e2e-shim.js"></script>\n</body>');
+  // overrides.shim === false serves the page exactly as production does.
+  const page = fs.readFileSync(path.join(STATIC_DIR, 'dashboard.html'), 'utf8');
+  const html = overrides.shim === false
+    ? page
+    : page.replace('</body>', '<script type="module" src="/e2e-shim.js"></script>\n</body>');
   const manifest = fs.readFileSync(path.join(STATIC_DIR, 'manifest.json'), 'utf8');
 
   const sessionsData = overrides.sessions || defaultSessions();
@@ -1095,7 +1101,7 @@ function startMockServer(overrides = {}) {
   }
 
   return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
+    contractReady.then(() => server.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
       resolve({
         server,
@@ -1156,7 +1162,7 @@ function startMockServer(overrides = {}) {
         },
         resetCalls() { sendCalls = []; bindCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; labelCalls = []; discoveredCloseCalls = []; },
       });
-    });
+    }));
   });
 }
 

@@ -43,7 +43,7 @@ func TestContractJS_KnownAnchors(t *testing.T) {
 		"run_started: 'run_started'",         // WS enum, unified run frames (#2540)
 		"subscribe: 'subscribe'",             // WS enum, inbound (send-side check reads these)
 		"sessions: '/api/sessions'",          // API table
-		"module.exports = NZ_CONTRACT",       // node consumer path
+		"export const NZ_CONTRACT = {",       // the module export every consumer imports
 	} {
 		if !strings.Contains(out, anchor) {
 			t.Errorf("contract.js lacks anchor %q", anchor)

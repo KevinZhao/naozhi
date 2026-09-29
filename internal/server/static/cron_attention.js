@@ -6,6 +6,7 @@
 // cron_timeline.js; neither module imports this one (they receive the queue
 // functions via their configure calls), so the edges stay one-way.
 
+import { NZ_CONTRACT } from './contract.js';
 import { cronDrawerState } from './cron_drawer.js';
 import { renderCronTimelinePanel } from './cron_timeline.js';
 import { getToken } from './dashboard.js';

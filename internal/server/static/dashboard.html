@@ -272,12 +272,9 @@
      agent_view.js + asset_browser.js consume at runtime) and runs all three
      before DOMContentLoaded. The inline theme-setter above is self-contained
      and still runs at parse time. (#1769) -->
-<!-- contract.js must stay first (classic defer: it owns the NZ_CONTRACT
-     global before any module runs). The modules' order is expressed by their
-     import graph (nz_util ← dashboard ← views); tags stay listed for
-     preload clarity. No async: each file's top-level bootstrap runs in the
-     shared deferred queue. -->
-<script defer src="/static/contract.js"></script>
+<!-- The modules' order is expressed by their import graph (contract and
+     nz_util ← dashboard ← views); tags stay listed for preload clarity. No
+     async: each file's top-level bootstrap runs in the shared deferred queue. -->
 <script type="module" src="/static/nz_util.js"></script>
 <script type="module" src="/static/state.js"></script>
 <script type="module" src="/static/render_md.js"></script>

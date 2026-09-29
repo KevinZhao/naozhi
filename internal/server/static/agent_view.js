@@ -9,6 +9,7 @@
 // come in via import; shared state comes in via the state.js objects, read
 // at the call site. Never snapshot a state field at top level — the owners
 // reassign the primitives.
+import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, transcript } from './state.js';
 import { esc, escAttr, showToast, nzViews } from './nz_util.js';
 import {

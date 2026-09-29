@@ -19,8 +19,7 @@
 //   node scripts/check-enum-literals.mjs
 import fs from 'node:fs';
 import path from 'node:path';
-import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { stripComments } from './js-deps-freeze.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -77,10 +76,8 @@ export function run(files, contractReasons) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  // contract.js is the classic (module.exports || root.NZ_CONTRACT) script
-  // the browser also loads via <script defer>; require() picks the
-  // module.exports branch, same as mock-server.js does.
-  const contract = createRequire(import.meta.url)(path.join(STATIC_DIR, 'contract.js'));
+  // contract.js is the ES module the dashboard's modules import.
+  const { NZ_CONTRACT: contract } = await import(pathToFileURL(path.join(STATIC_DIR, 'contract.js')).href);
   const files = {};
   for (const f of fs.readdirSync(STATIC_DIR).filter((f) => f.endsWith('.js') && f !== 'sw.js')) {
     files[f] = fs.readFileSync(path.join(STATIC_DIR, f), 'utf8');

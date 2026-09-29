@@ -1,41 +1,41 @@
 {
   "agent_view.js": {
-    "lines": 735,
+    "lines": 736,
     "maxFnLines": 66,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0
   },
   "asset_browser.js": {
-    "lines": 252,
+    "lines": 253,
     "maxFnLines": 58,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0
   },
   "auth_modal.js": {
-    "lines": 1572,
+    "lines": 1573,
     "maxFnLines": 101,
     "fnOver100": 1,
     "topLevelLetVar": 2,
     "configureDeps": 0
   },
   "composer_files.js": {
-    "lines": 467,
+    "lines": 468,
     "maxFnLines": 65,
     "fnOver100": 0,
     "topLevelLetVar": 2,
     "configureDeps": 0
   },
   "contract.js": {
-    "lines": 110,
+    "lines": 103,
     "maxFnLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0
   },
   "cron_attention.js": {
-    "lines": 145,
+    "lines": 146,
     "maxFnLines": 23,
     "fnOver100": 0,
     "topLevelLetVar": 1,
@@ -56,49 +56,49 @@
     "configureDeps": 0
   },
   "cron_timeline.js": {
-    "lines": 937,
+    "lines": 938,
     "maxFnLines": 70,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0
   },
   "cron_trigger.js": {
-    "lines": 178,
+    "lines": 179,
     "maxFnLines": 38,
     "fnOver100": 0,
     "topLevelLetVar": 1,
     "configureDeps": 0
   },
   "cron_view.js": {
-    "lines": 2641,
+    "lines": 2642,
     "maxFnLines": 127,
     "fnOver100": 3,
     "topLevelLetVar": 11,
     "configureDeps": 24
   },
   "dashboard.js": {
-    "lines": 6510,
+    "lines": 6511,
     "maxFnLines": 249,
     "fnOver100": 8,
     "topLevelLetVar": 0,
     "configureDeps": 181
   },
   "discovery.js": {
-    "lines": 253,
+    "lines": 254,
     "maxFnLines": 149,
     "fnOver100": 1,
     "topLevelLetVar": 0,
     "configureDeps": 0
   },
   "file_refs.js": {
-    "lines": 921,
+    "lines": 922,
     "maxFnLines": 144,
     "fnOver100": 1,
     "topLevelLetVar": 6,
     "configureDeps": 0
   },
   "files_view.js": {
-    "lines": 439,
+    "lines": 440,
     "maxFnLines": 59,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -133,35 +133,35 @@
     "configureDeps": 0
   },
   "running_banner.js": {
-    "lines": 487,
+    "lines": 488,
     "maxFnLines": 95,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0
   },
   "self_update.js": {
-    "lines": 373,
+    "lines": 374,
     "maxFnLines": 61,
     "fnOver100": 0,
     "topLevelLetVar": 5,
     "configureDeps": 0
   },
   "send_message.js": {
-    "lines": 598,
+    "lines": 599,
     "maxFnLines": 223,
     "fnOver100": 2,
     "topLevelLetVar": 1,
     "configureDeps": 0
   },
   "session_header.js": {
-    "lines": 411,
+    "lines": 412,
     "maxFnLines": 33,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0
   },
   "sidebar_project.js": {
-    "lines": 597,
+    "lines": 598,
     "maxFnLines": 102,
     "fnOver100": 2,
     "topLevelLetVar": 0,
@@ -182,28 +182,28 @@
     "configureDeps": 0
   },
   "system_view.js": {
-    "lines": 261,
+    "lines": 262,
     "maxFnLines": 73,
     "fnOver100": 0,
     "topLevelLetVar": 2,
     "configureDeps": 0
   },
   "tuning.js": {
-    "lines": 524,
+    "lines": 525,
     "maxFnLines": 132,
     "fnOver100": 2,
     "topLevelLetVar": 1,
     "configureDeps": 0
   },
   "utilities.js": {
-    "lines": 1092,
+    "lines": 1093,
     "maxFnLines": 91,
     "fnOver100": 0,
     "topLevelLetVar": 4,
     "configureDeps": 0
   },
   "voice.js": {
-    "lines": 477,
+    "lines": 478,
     "maxFnLines": 73,
     "fnOver100": 0,
     "topLevelLetVar": 7,
