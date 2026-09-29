@@ -59,7 +59,7 @@ func TestStateDirGuard_PendingRefusesSymlink(t *testing.T) {
 	s, dir := guardScheduler(t)
 	target := plantSymlink(t, dir, "sandboxpending")
 
-	path := s.writeSandboxPending(sandboxPending{
+	path := s.writeSandboxPending(sandboxstore.Pending{
 		JobID:            "0123456789abcdef",
 		RunID:            "feedfacefeedface",
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
@@ -142,7 +142,7 @@ func TestStateDirGuard_HappyPath(t *testing.T) {
 	s, dir := guardScheduler(t)
 
 	// Pending.
-	path := s.writeSandboxPending(sandboxPending{
+	path := s.writeSandboxPending(sandboxstore.Pending{
 		JobID:            "0123456789abcdef",
 		RunID:            "feedfacefeedface",
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
