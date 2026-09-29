@@ -1,5 +1,5 @@
 // scheduler_jobs_preview.go: schedule-preview / timezone helpers
-// (previewLocation, PreviewSchedule, PreviewScheduleN, Location). These do
+// (previewLocation, PreviewScheduleN, Location). These do
 // ZERO locking — they only read Scheduler.location and parse cron expressions.
 
 package cron
@@ -21,17 +21,6 @@ func (s *Scheduler) previewLocation() *time.Location {
 		return time.Local
 	}
 	return s.location
-}
-
-// PreviewSchedule validates a schedule expression and returns the next run
-// time. Safe on a nil *Scheduler (computes in UTC for tests / dashboard
-// bootstrap before the scheduler is wired).
-func (s *Scheduler) PreviewSchedule(schedule string) (time.Time, error) {
-	sched, err := cronParser.Parse(schedule)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return sched.Next(time.Now().In(s.previewLocation())), nil
 }
 
 // PreviewScheduleN returns the next n run times for a schedule expression, in

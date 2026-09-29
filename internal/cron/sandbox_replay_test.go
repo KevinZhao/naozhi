@@ -131,8 +131,8 @@ func TestReplay_StopsBeforeReplayWhenQueued(t *testing.T) {
 		t.Fatalf("§6.2 rule 1 violated: pre-replay Stop calls = %v, want the queued runtime id", stopped)
 	}
 	// The queue entry must be resolved after a successful replay.
-	if s.SandboxAttentionCount() != 0 {
-		t.Errorf("replay must resolve the queue entry; count = %d", s.SandboxAttentionCount())
+	if s.sandboxState().AttentionCount() != 0 {
+		t.Errorf("replay must resolve the queue entry; count = %d", s.sandboxState().AttentionCount())
 	}
 }
 
@@ -158,8 +158,8 @@ func TestReplay_RefusesWhenStopUnconfirmed(t *testing.T) {
 		t.Fatalf("no replay run may dispatch when Stop is unconfirmed; runner saw %d jobs", n)
 	}
 	// The queue entry must remain (the incident is unresolved).
-	if s.SandboxAttentionCount() != 1 {
-		t.Errorf("queue entry must survive a refused replay; count = %d", s.SandboxAttentionCount())
+	if s.sandboxState().AttentionCount() != 1 {
+		t.Errorf("queue entry must survive a refused replay; count = %d", s.sandboxState().AttentionCount())
 	}
 }
 

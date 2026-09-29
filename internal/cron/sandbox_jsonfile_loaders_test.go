@@ -2,6 +2,7 @@ package cron
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,7 +86,7 @@ func TestListSandboxAttention_ListsUnreadableRecords(t *testing.T) {
 	t.Parallel()
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
 	goodJob, goodRun := mustGenerateID(), mustGenerateRunID()
-	s.WriteSandboxAttentionForTest(goodJob, goodRun, sandboxstore.ReasonTransport, "nightly")
+	s.sandboxState().WriteAttention(sandboxstore.Attention{JobID: goodJob, RunID: goodRun, Reason: sandboxstore.ReasonTransport, JobLabel: "nightly", CreatedAtMS: s.attentionNowMS()}, slog.Default())
 	dir := s.stateSubtree("sandboxattention")
 	badRun := mustGenerateRunID()
 	if err := os.WriteFile(filepath.Join(dir, badRun+".json"), []byte("{not valid"), 0o600); err != nil {

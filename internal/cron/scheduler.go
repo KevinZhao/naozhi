@@ -371,33 +371,6 @@ func (s *Scheduler) StartedAt() time.Time {
 	return time.Unix(0, ns)
 }
 
-// StartContext binds ctx to the scheduler's lifecycle and then calls Start.
-// It is the idiomatic Start(ctx) entry point (#1168): a non-nil ctx's
-// cancellation propagates INTO stopCtx exactly like ParentCtx does, so app
-// shutdown interrupts running jobs via the same stopCtx.Done() signal Stop()
-// drives, without constructing a SchedulerConfig just to thread the ctx.
-//
-// A nil ctx behaves identically to Start(). The watcher goroutine exits when
-// EITHER ctx or stopCtx is done, so it never outlives the scheduler. Not
-// meant to be combined with a separate Start() call; idempotent via the same
-// started/stopped CAS guards.
-func (s *Scheduler) StartContext(ctx context.Context) error {
-	if ctx != nil {
-		// Mirror ParentCtx's "cancel propagates into stopCtx" contract
-		// without re-parenting stopCtx (which is created eagerly in
-		// NewScheduler). A lightweight watcher cancels stopCtx when ctx
-		// fires; it also drains on stopCtx so it cannot leak past Stop().
-		go func() {
-			select {
-			case <-ctx.Done():
-				s.stopCancel()
-			case <-s.stopCtx.Done():
-			}
-		}()
-	}
-	return s.Start()
-}
-
 // Start loads persisted jobs and starts the cron scheduler.
 //
 // Idempotent: a second Start() returns nil immediately without re-loading

@@ -2,16 +2,25 @@ package cron
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 	"github.com/naozhi/naozhi/internal/datadir"
 )
+
+// sandboxStateOf is the sandbox store a Scheduler built on storePath reads,
+// for staging queue records and snapshots without driving a run.
+func sandboxStateOf(storePath string) sandboxstore.Store {
+	return sandboxstore.Store{Root: datadir.ForStore(storePath).Root()}
+}
 
 func attentionTestScheduler(t *testing.T, storePath string) *cronpkg.Scheduler {
 	t.Helper()
@@ -27,7 +36,7 @@ func TestHandleAttentionList_ReturnsQueue(t *testing.T) {
 	t.Parallel()
 	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
 	sched := attentionTestScheduler(t, storePath)
-	sched.WriteSandboxAttentionForTest(strings.Repeat("a", 16), strings.Repeat("b", 16), "transport", "nightly PR job")
+	sandboxStateOf(storePath).WriteAttention(sandboxstore.Attention{JobID: strings.Repeat("a", 16), RunID: strings.Repeat("b", 16), Reason: "transport", JobLabel: "nightly PR job", CreatedAtMS: time.Now().UnixMilli()}, slog.Default())
 
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/attention", nil)
@@ -60,7 +69,8 @@ func TestHandleAttentionList_ReturnsQueue(t *testing.T) {
 // null / 404) so the drawer renders deterministically.
 func TestHandleAttentionList_EmptyArray(t *testing.T) {
 	t.Parallel()
-	sched := attentionTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
+	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
+	sched := attentionTestScheduler(t, storePath)
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/attention", nil)
 	w := httptest.NewRecorder()
@@ -76,9 +86,10 @@ func TestHandleAttentionList_EmptyArray(t *testing.T) {
 // TestHandleRunConfirm_Resolves: POST /confirm removes the queue record.
 func TestHandleRunConfirm_Resolves(t *testing.T) {
 	t.Parallel()
-	sched := attentionTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
+	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
+	sched := attentionTestScheduler(t, storePath)
 	runID := strings.Repeat("b", 16)
-	sched.WriteSandboxAttentionForTest(strings.Repeat("a", 16), runID, "transport", "job")
+	sandboxStateOf(storePath).WriteAttention(sandboxstore.Attention{JobID: strings.Repeat("a", 16), RunID: runID, Reason: "transport", JobLabel: "job", CreatedAtMS: time.Now().UnixMilli()}, slog.Default())
 
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodPost, "/api/cron/runs/"+runID+"/confirm", nil)
@@ -89,15 +100,16 @@ func TestHandleRunConfirm_Resolves(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	if sched.SandboxAttentionCount() != 0 {
-		t.Fatalf("confirm must clear the queue; count = %d", sched.SandboxAttentionCount())
+	if len(sched.ListSandboxAttention()) != 0 {
+		t.Fatalf("confirm must clear the queue; count = %d", len(sched.ListSandboxAttention()))
 	}
 }
 
 // TestHandleRunConfirm_RejectsBadID guards the path-traversal surface.
 func TestHandleRunConfirm_RejectsBadID(t *testing.T) {
 	t.Parallel()
-	sched := attentionTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
+	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
+	sched := attentionTestScheduler(t, storePath)
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodPost, "/api/cron/runs/x/confirm", nil)
 	req.SetPathValue("run_id", "../../etc")
@@ -111,7 +123,8 @@ func TestHandleRunConfirm_RejectsBadID(t *testing.T) {
 // TestHandleRunReplay_RequiresJobID: replay without job_id is a 400.
 func TestHandleRunReplay_RequiresJobID(t *testing.T) {
 	t.Parallel()
-	sched := attentionTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
+	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
+	sched := attentionTestScheduler(t, storePath)
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 	runID := strings.Repeat("b", 16)
 	req := httptest.NewRequest(http.MethodPost, "/api/cron/runs/"+runID+"/replay", strings.NewReader(`{}`))
@@ -126,7 +139,8 @@ func TestHandleRunReplay_RequiresJobID(t *testing.T) {
 // TestHandleRunReplay_JobNotFound: replaying a run for a missing job → 404.
 func TestHandleRunReplay_JobNotFound(t *testing.T) {
 	t.Parallel()
-	sched := attentionTestScheduler(t, filepath.Join(t.TempDir(), "cron_jobs.json"))
+	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
+	sched := attentionTestScheduler(t, storePath)
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 	runID, jobID := strings.Repeat("b", 16), strings.Repeat("a", 16)
 	req := httptest.NewRequest(http.MethodPost, "/api/cron/runs/"+runID+"/replay",
@@ -149,7 +163,7 @@ func TestHandleAttentionList_SanitizesReason(t *testing.T) {
 	sched := attentionTestScheduler(t, storePath)
 	// Reason contains a newline (log-injection) and an HTML tag (XSS-adjacent).
 	dirtyReason := "transport\n<script>alert(1)</script>"
-	sched.WriteSandboxAttentionForTest(strings.Repeat("a", 16), strings.Repeat("b", 16), dirtyReason, "job")
+	sandboxStateOf(storePath).WriteAttention(sandboxstore.Attention{JobID: strings.Repeat("a", 16), RunID: strings.Repeat("b", 16), Reason: dirtyReason, JobLabel: "job", CreatedAtMS: time.Now().UnixMilli()}, slog.Default())
 
 	h := &Handlers{deps: Deps{Scheduler: sched}}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/attention", nil)
@@ -202,7 +216,7 @@ func TestHandleAttentionList_MarksUnreadable(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
 	sched := attentionTestScheduler(t, storePath)
 	runID := strings.Repeat("c", 16)
-	sched.WriteSandboxAttentionForTest(strings.Repeat("a", 16), runID, "transport", "job")
+	sandboxStateOf(storePath).WriteAttention(sandboxstore.Attention{JobID: strings.Repeat("a", 16), RunID: runID, Reason: "transport", JobLabel: "job", CreatedAtMS: time.Now().UnixMilli()}, slog.Default())
 	path := datadir.ForStore(storePath).Join("sandboxattention", runID+".json")
 	if err := os.WriteFile(path, []byte("{torn"), 0o600); err != nil {
 		t.Fatal(err)

@@ -163,8 +163,8 @@ func TestStateDirGuard_HappyPath(t *testing.T) {
 		Reason:      sandboxstore.ReasonTransport,
 		CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
-	if s.SandboxAttentionCount() != 1 {
-		t.Fatalf("attention count = %d, want 1 on a normal dir", s.SandboxAttentionCount())
+	if s.sandboxState().AttentionCount() != 1 {
+		t.Fatalf("attention count = %d, want 1 on a normal dir", s.sandboxState().AttentionCount())
 	}
 	assertMode0700(t, filepath.Join(dir, "sandboxattention"))
 
