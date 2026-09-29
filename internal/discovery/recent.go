@@ -149,7 +149,7 @@ func recentSessionsUnder(ctx context.Context, root, claudeDir string, limit int,
 					if filter.SkipSessionID(rs.SessionID) {
 						continue
 					}
-					jsonlPaths[rs.SessionID] = filepath.Join(projDir, rs.SessionID+".jsonl")
+					jsonlPaths[rs.SessionID] = claudefs.TranscriptIn(projDir, rs.SessionID)
 					all = append(all, rs)
 				}
 				continue
@@ -163,7 +163,7 @@ func recentSessionsUnder(ctx context.Context, root, claudeDir string, limit int,
 			if filter.SkipSessionID(rs.SessionID) {
 				continue
 			}
-			jsonlPaths[rs.SessionID] = filepath.Join(projDir, rs.SessionID+".jsonl")
+			jsonlPaths[rs.SessionID] = claudefs.TranscriptIn(projDir, rs.SessionID)
 			all = append(all, rs)
 		}
 	}

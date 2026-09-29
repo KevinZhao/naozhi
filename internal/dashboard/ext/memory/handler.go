@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 )
@@ -117,8 +118,8 @@ func encodeCurrentProjectDir(projectsDir string) string {
 	if err != nil || pwd == "" {
 		return ""
 	}
-	encoded := "-" + strings.ReplaceAll(strings.TrimPrefix(pwd, "/"), "/", "-")
-	candidate := filepath.Join(projectsDir, encoded, "memory")
+	encoded := claudefs.ProjectSlug(pwd)
+	candidate := claudefs.MemoryDir(filepath.Join(projectsDir, encoded))
 	if st, err := os.Stat(candidate); err == nil && st.IsDir() {
 		return encoded
 	}
@@ -254,7 +255,7 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 	if !memoryProjectDirRE.MatchString(projectDir) {
 		return nil, nil
 	}
-	full := filepath.Join(h.projectsDir, projectDir, "memory", slug+".md")
+	full := filepath.Join(claudefs.MemoryDir(filepath.Join(h.projectsDir, projectDir)), slug+".md")
 	clean := filepath.Clean(full)
 
 	// Defence in depth: re-verify the path stays inside projectsDir using the

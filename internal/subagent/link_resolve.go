@@ -10,8 +10,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // SetPoolContext binds the resolve worker-pool lifetime to a process-scoped
@@ -43,7 +44,7 @@ func (l *Linker) QueryOrResolveFast(taskID string) (LinkInfo, bool) {
 	if projectDir == "" || sessionID == "" {
 		return LinkInfo{}, false
 	}
-	subagentDir := filepath.Join(projectDir, sessionID, "subagents")
+	subagentDir := claudefs.SubagentsDir(projectDir, sessionID)
 	info, ok := l.resolveByTaskIDFast(taskID, "", subagentDir, sessionID)
 	return info, ok
 }
@@ -176,7 +177,7 @@ func (l *Linker) Resolve(ctx context.Context, taskID, toolUseID, name, descripti
 		return LinkInfo{}, false
 	}
 
-	subagentDir := filepath.Join(projectDir, sessionID, "subagents")
+	subagentDir := claudefs.SubagentsDir(projectDir, sessionID)
 
 	// Fast path: one stat on agent-<task_id>.jsonl beats scanning the
 	// directory, and works when the replayed entry has an empty name.
@@ -383,7 +384,7 @@ func (l *Linker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, sessionID s
 		slog.Debug("agent_link: fast-path skip, bad hex", "task_id", taskID)
 		return LinkInfo{}, false
 	}
-	jsonlPath := filepath.Join(subagentDir, "agent-"+taskID+".jsonl")
+	jsonlPath := claudefs.SubagentJSONL(subagentDir, taskID)
 	st, err := os.Stat(jsonlPath)
 	if err != nil || st.Size() == 0 {
 		slog.Debug("agent_link: fast-path stat miss",
@@ -402,7 +403,7 @@ func (l *Linker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, sessionID s
 
 	// Display name from the sibling meta.json; optional.
 	name := ""
-	if data, err := os.ReadFile(filepath.Join(subagentDir, "agent-"+taskID+".meta.json")); err == nil {
+	if data, err := os.ReadFile(claudefs.SubagentMeta(subagentDir, taskID)); err == nil {
 		var m struct {
 			AgentType string `json:"agentType"`
 		}

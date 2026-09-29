@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
 // memoryTestHandler builds a handler with a temp projects dir + permissive
@@ -677,5 +679,31 @@ func TestParseMemoryFrontmatter_TopLevelType(t *testing.T) {
 				t.Errorf("body = %q", body)
 			}
 		})
+	}
+}
+
+// The current project's directory is found under the CLI's own slug, which
+// replaces every non-alphanumeric byte — not only '/' — so a cwd with '.' or
+// '_' in it still finds its memory.
+func TestEncodeCurrentProjectDir_UsesTheCLISlug(t *testing.T) {
+	work := filepath.Join(t.TempDir(), "my.proj_x")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	pwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := claudefs.ProjectSlug(pwd)
+	if strings.ContainsAny(slug, "._") {
+		t.Fatalf("fixture: slug %q should have '.' and '_' replaced", slug)
+	}
+	projects := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projects, slug, "memory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := encodeCurrentProjectDir(projects); got != slug {
+		t.Errorf("encodeCurrentProjectDir = %q, want the CLI slug %q", got, slug)
 	}
 }

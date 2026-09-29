@@ -149,7 +149,7 @@ func rawScanSubagentsDir(dir string) []metaEntry {
 		out = append(out, metaEntry{
 			hex:       hex,
 			metaPath:  metaPath,
-			jsonlPath: filepath.Join(dir, "agent-"+hex+".jsonl"),
+			jsonlPath: claudefs.SubagentJSONL(dir, hex),
 			agentType: m.AgentType,
 		})
 	}
