@@ -186,6 +186,11 @@ func (s *Scheduler) deleteJobRuns(jobID string) {
 // terminal branch spells only its outcome. Adding a new error class is one
 // mapping plus one runOutcome literal at the call site.
 func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
+	if rc.term != nil && !rc.term.claim() {
+		slog.Warn("cron: a second finish for one run was dropped",
+			"run_id", rc.runID, "state", string(out.state), "err_class", string(out.errClass))
+		return
+	}
 	// Defensive nil-job guard (#837): a panic here would be swallowed by
 	// robfig's Recover ABOVE this frame, skipping finalize() + emitRunEnded and
 	// leaving an orphaned "running" badge forever. Finalize this run's gate
@@ -226,6 +231,32 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 
 	persistedResult := out.result
 	persistedErrMsg := out.errMsg
+	errMsgSettled := false // persistedErrMsg is the sanitised copy
+	// The broadcast half is deferred so it runs even when the persistence half
+	// panics: subscribers see the run end either way, and the scaffold's recover
+	// then finds the run already claimed (runTerm) instead of closing it again.
+	defer func() {
+		msg := endedErrMsg(errMsgSettled, persistedErrMsg, out.errMsg)
+		// Finalize before the broadcast (#689) so a dashboard list arriving
+		// concurrently with cron_run_ended observes CurrentRun(jobID) == ok:false.
+		// The finalizer is per-run stack-local: the executeOpt defer fires second as
+		// a no-op and can never reset a racing run-B's freshly-installed metadata.
+		// Broadcast last so hub locks aren't held while we hold s.tbl.mu.
+		rc.finalizer.finalize()
+		s.emitRunEnded(RunEndedEvent{
+			JobID:      rc.job.ID,
+			RunID:      rc.runID,
+			State:      out.state,
+			StartedAt:  rc.startedAt,
+			EndedAt:    endedAt,
+			DurationMS: durationMS,
+			SessionID:  out.sessionID,
+			ErrorClass: out.errClass,
+			ErrorMsg:   msg,
+			Trigger:    rc.trigger,
+		})
+		metrics.CronRunEndedTotal.Add(1)
+	}()
 	jobPersistOK := false
 	if !out.skipPersist {
 		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(rc.job, out.result, out.errMsg, out.sessionID, out.errClass, out.state, endedAt)
@@ -233,6 +264,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
 	}
+	errMsgSettled = true
 
 	// Bump per-state metric only AFTER persistence settles, so a marshal-failure
 	// rollback never leaves CronRunSucceededTotal +1 against a reverted Job.
@@ -298,27 +330,17 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 	// even when the record is skipped (cancel / skipPersist paths included),
 	// dropped as orphan, or has no store.
 	s.appendLedger(rc, out)
+}
 
-	// Finalize before the broadcast (#689) so a dashboard list arriving
-	// concurrently with cron_run_ended observes CurrentRun(jobID) == ok:false.
-	// The finalizer is per-run stack-local: the executeOpt defer fires second as
-	// a no-op and can never reset a racing run-B's freshly-installed metadata.
-	// Broadcast last so hub locks aren't held while we hold s.tbl.mu.
-	rc.finalizer.finalize()
-
-	s.emitRunEnded(RunEndedEvent{
-		JobID:      rc.job.ID,
-		RunID:      rc.runID,
-		State:      out.state,
-		StartedAt:  rc.startedAt,
-		EndedAt:    endedAt,
-		DurationMS: durationMS,
-		SessionID:  out.sessionID,
-		ErrorClass: out.errClass,
-		ErrorMsg:   persistedErrMsg,
-		Trigger:    rc.trigger,
-	})
-	metrics.CronRunEndedTotal.Add(1)
+// endedErrMsg is the message run_ended carries: the persisted, sanitised copy
+// once the persistence half produced it, otherwise the raw message through the
+// same sanitiser. SECURITY: never the raw message — it can carry absolute
+// paths and secrets.
+func endedErrMsg(settled bool, persisted, raw string) string {
+	if settled {
+		return persisted
+	}
+	return sanitiseRunErrMsg(raw)
 }
 
 // sanitiseRunResult applies the same rune truncation + secret redaction +

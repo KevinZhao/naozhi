@@ -236,8 +236,8 @@ const (
 	// ErrClassDeletedConcurrent fires when the post-CAS recheck sees the job
 	// removed from s.tbl.jobs in the same cross-lock window (#1410).
 	ErrClassDeletedConcurrent ErrorClass = "deleted_concurrent"
-	// ErrClassPanic is reserved for the future panic-recovery path
-	// (P3, not yet implemented); finishRun does not emit it today.
+	// ErrClassPanic marks a run whose body panicked after it started; the run
+	// scaffold closes it through finishRun (runStarted).
 	ErrClassPanic ErrorClass = "panic"
 	// Sandbox placement classes; wire values mirror runtelemetry.ErrClassCronSandbox*.
 	// Transport is the double-run-risk state (microVM fate unknown).
