@@ -1,0 +1,2 @@
+{"gate": "go:internal/testhelper/source_anchor_ratchet_test.go#anchorFileBaseline", "from": 98, "to": 99, "issue": 2909, "reason": "enum_wire_test.go reads process.go to keep AllDeathReasons in step with its DeathReason* constants; a legitimate anchor (anchor-keep present), same footing as the ratchet files themselves."}
+{"gate": "js-ratchet:TOTAL.lines", "from": 24231, "to": 24235, "issue": 2909, "reason": "contractjs.Build gains the ENUMS.DEATH_REASON/SESSION_STATE block into generated contract.js (#2909 G5 PR2); the growth is generator output, reviewable in the diff."}

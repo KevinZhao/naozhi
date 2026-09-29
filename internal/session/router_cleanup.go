@@ -274,7 +274,7 @@ func (r *Router) Cleanup() {
 			// Carry the reason and stamp it only after the close-loop re-verify;
 			// stamping here would corrupt the deathReason of a replacement
 			// session spawned between this snapshot and the close loop.
-			expired = append(expired, expiredEntry{c.s, c.key, c.proc, "idle_timeout"})
+			expired = append(expired, expiredEntry{c.s, c.key, c.proc, DeathReasonIdleTimeout})
 		}
 	}
 

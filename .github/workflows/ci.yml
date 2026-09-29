@@ -351,6 +351,12 @@ jobs:
       - name: Test the nested WS field check
         run: node --test scripts/ws-contract-nested.test.mjs
 
+      - name: Test the death_reason enum check
+        run: node --test scripts/check-enum-literals.test.mjs
+
+      - name: Check death_reason is read from the generated contract
+        run: node scripts/check-enum-literals.mjs
+
       # The flaky-report regexes fail open — a pattern that stops matching files
       # nothing and the job still goes green, which is indistinguishable from a
       # quiet week. This replays real log lines through them.
