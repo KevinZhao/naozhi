@@ -42,7 +42,6 @@ type agentTailer struct {
 	toolUseID string
 	reader    *subagent.TranscriptReader
 	reg       *tailerRegistry
-	hub       *Hub
 
 	stopCh   chan struct{}
 	doneOnce sync.Once

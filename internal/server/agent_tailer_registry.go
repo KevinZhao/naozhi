@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 	"github.com/naozhi/naozhi/internal/subagent"
 	"github.com/naozhi/naozhi/internal/wsproto"
@@ -20,7 +21,6 @@ type tailerRegistry struct {
 	mu         sync.RWMutex
 	byTask     map[tailerKey]*agentTailer
 	count      atomic.Int32
-	hub        *Hub
 	clientSubs map[*wsClient]map[tailerKey]struct{} // reverse index for client teardown
 	// allowedRoot, when set, confines the JSONL files a tailer may read.
 	allowedRoot string
@@ -46,10 +46,9 @@ type tailerKey struct {
 }
 
 // newTailerRegistry wires a registry onto a Hub.
-func newTailerRegistry(hub *Hub, allowedRoot string) *tailerRegistry {
+func newTailerRegistry(allowedRoot string) *tailerRegistry {
 	return &tailerRegistry{
 		byTask:      make(map[tailerKey]*agentTailer),
-		hub:         hub,
 		clientSubs:  make(map[*wsClient]map[tailerKey]struct{}),
 		allowedRoot: allowedRoot,
 		linkers:     make(map[agentlink.AgentLinker]struct{}),
@@ -128,6 +127,50 @@ func (r *tailerRegistry) snapshotTailers(dst []*agentTailer) []*agentTailer {
 	return dst
 }
 
+// lookup returns the live tailer for tk, or nil.
+func (r *tailerRegistry) lookup(tk tailerKey) *agentTailer {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.byTask[tk]
+}
+
+// enrich overlays tailer-local aggregator metrics onto each SubagentInfo in
+// snap. No-op on a nil registry (unit test harness).
+//
+// Precedence: the Snapshot carries what the EventLog recorded from
+// parent-stream task_progress; the tailer overwrites only with a later value,
+// since it tracks per-agent tool_use count and step duration at finer
+// granularity. Once task_done has closed the tailer it is gone from the
+// registry and the EventLog values stand.
+func (r *tailerRegistry) enrich(snap *session.SessionSnapshot) {
+	if r == nil || snap == nil {
+		return
+	}
+	for i := range snap.Subagents {
+		sa := &snap.Subagents[i]
+		if sa.TaskID == "" {
+			continue
+		}
+		t := r.lookup(tailerKey{snap.Key, sa.TaskID})
+		if t == nil {
+			continue
+		}
+		meta := t.MetaSnapshot()
+		if meta.LastTool != "" {
+			sa.LastTool = meta.LastTool
+		}
+		if meta.LastDetail != "" {
+			sa.LastDetail = meta.LastDetail
+		}
+		if meta.ToolUses > sa.ToolUses {
+			sa.ToolUses = meta.ToolUses
+		}
+		if meta.DurationMS > sa.DurationMS {
+			sa.DurationMS = meta.DurationMS
+		}
+	}
+}
+
 // ensureTailer is called by the Linker OnResolve callback or by an
 // agent_subscribe message before the silent tailer has started. Idempotent:
 // repeated calls for the same (key, taskID) return the existing tailer.
@@ -170,7 +213,6 @@ func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) 
 		toolUseID:  toolUseID,
 		reader:     subagent.NewTranscriptReader(jsonlPath),
 		reg:        r,
-		hub:        r.hub,
 		stopCh:     make(chan struct{}),
 		subs:       make(map[*wsClient]struct{}),
 		lastActive: time.Now(),
