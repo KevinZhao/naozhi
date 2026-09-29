@@ -102,13 +102,7 @@ func applyCronEntry(j *Job, p cronEntryPlan, id cronEntryID) {
 // freshly committed entry must be removed or it ticks for a job nobody can see.
 func (s *Scheduler) commitAndApplyCronEntry(p cronEntryPlan) {
 	id := s.commitCronEntry(p)
-	s.tbl.mu.Lock()
-	j, ok := s.tbl.jobs[p.jobID]
-	if ok {
-		applyCronEntry(j, p, id)
-	}
-	s.tbl.mu.Unlock()
-	if !ok {
+	if !s.tbl.applyEntry(p, id) {
 		s.cron.Remove(id)
 	}
 }

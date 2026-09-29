@@ -518,7 +518,7 @@ func (s *Scheduler) recordTerminalResult(jobID string, result, errMsg, sessionID
 		}
 		cur.RunCounters.addRun(state)
 
-		snap = s.snapshotJobsForSaveLocked()
+		snap = s.tbl.snapshotForSaveLocked()
 		haveSnap = true
 		// Detect whether LastSessionID changed under the lock so the
 		// KnownSessionIDs TTL cache is invalidated exactly when the set shifted.

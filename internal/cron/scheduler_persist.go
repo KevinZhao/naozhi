@@ -8,14 +8,13 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"slices"
 	"sync"
 
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// marshalEntriesPool reuses the []*Job snapshot slice that marshalJobsLocked
+// marshalEntriesPool reuses the []*Job snapshot slice that marshalLocked
 // builds on every mutation — the dominant transient alloc on the finishRun →
 // persist hot path. The JSON payload still allocates fresh because
 // saveMarshaledSeq holds the bytes across the async storeMu write. Put drops
@@ -35,7 +34,7 @@ var marshalEntriesPool = sync.Pool{
 const marshalEntriesCapDrop = 4 * maxJobsHardCap // 2000 *Job slots
 
 // putMarshalEntries returns the slice to the pool. Nil-checked so the
-// fallback path in marshalJobsLocked (where a brand-new slice was used
+// fallback path in marshalLocked (where a brand-new slice was used
 // because the pool was empty) stays safe.
 func putMarshalEntries(s *[]*Job) {
 	if s == nil {
@@ -54,7 +53,7 @@ func putMarshalEntries(s *[]*Job) {
 	marshalEntriesPool.Put(s)
 }
 
-// jobIDCmpForSort is the package-level comparator for marshalJobsLocked's
+// jobIDCmpForSort is the package-level comparator for marshalLocked's
 // drift fallback, hoisted so the persist hot path does not allocate a closure
 // header per call (#1340).
 func jobIDCmpForSort(a, b *Job) int {
@@ -62,9 +61,9 @@ func jobIDCmpForSort(a, b *Job) int {
 }
 
 // marshalJobsFn is the signature of the JSON serializer used by
-// marshalJobsLocked. Tests swap it via the per-Scheduler atomic.Pointer
+// marshalLocked. Tests swap it via the per-Scheduler atomic.Pointer
 // (see withFailingMarshal) to exercise persist-failure paths; atomic because
-// parallel tests would otherwise race concurrent marshalJobsLocked readers,
+// parallel tests would otherwise race concurrent marshalLocked readers,
 // per-Scheduler so one test's failing marshal cannot leak into another
 // instance. Pinned by TestMarshalJobs_PerSchedulerIsolation.
 type marshalJobsFn func(any) ([]byte, error)
@@ -74,55 +73,6 @@ type marshalJobsFn func(any) ([]byte, error)
 // (read-only after init) so the *Scheduler initialiser can take its
 // address without allocating a fresh closure per scheduler.
 var defaultMarshalJobs = marshalJobsFn(json.Marshal)
-
-// marshalJobsLocked serialises the current jobs map to JSON while the caller
-// still holds s.tbl.mu. Safe because json.Marshal only reads Job fields and the
-// output []byte is independent of s.tbl.jobs, so the caller can drop s.tbl.mu
-// immediately. The unexported entryID never leaks into cron_jobs.json.
-// The entries slice comes from marshalEntriesPool; the output bytes are fresh
-// each call because saveMarshaledSeq holds them across the async storeMu write.
-func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
-	entriesPtr := marshalEntriesPool.Get().(*[]*Job)
-	defer putMarshalEntries(entriesPtr)
-	entries := *entriesPtr
-	// Grow when the pooled cap is below the job count; the grown slice circulates back.
-	if cap(entries) < len(s.tbl.jobs) {
-		entries = make([]*Job, 0, len(s.tbl.jobs))
-	}
-	// Emit in s.tbl.sortedJobIDs order so on-disk JSON stays deterministic without an
-	// O(N log N) sort inside the s.tbl.mu critical section (#1598). s.tbl.jobs remains the
-	// source of truth: if the hint drifted (a test helper poking s.tbl.jobs directly)
-	// fall back to building + sorting from the map so no job is silently dropped.
-	useHint := len(s.tbl.sortedJobIDs) == len(s.tbl.jobs)
-	if useHint {
-		for _, id := range s.tbl.sortedJobIDs {
-			j, ok := s.tbl.jobs[id]
-			if !ok {
-				useHint = false
-				break
-			}
-			entries = append(entries, j)
-		}
-	}
-	if !useHint {
-		// Drift fallback: rebuild from the map (authoritative) and sort. Cold in production.
-		entries = entries[:0]
-		for _, j := range s.tbl.jobs {
-			entries = append(entries, j)
-		}
-		if len(entries) > 1 {
-			slices.SortFunc(entries, jobIDCmpForSort)
-		}
-	}
-	*entriesPtr = entries
-	fn := s.marshalJobs.Load()
-	if fn == nil {
-		// Zero-value *Scheduler (or a path that forgot the field) still uses the
-		// production marshaller.
-		return defaultMarshalJobs(entries)
-	}
-	return (*fn)(entries)
-}
 
 // persistJobsLocked marshals under the caller's s.tbl.mu and writes asynchronously:
 // the caller produces the payload + save func here, unlocks, then calls save().
@@ -135,7 +85,7 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 // surface it (e.g. HTTP 500): the in-memory mutation already happened and is
 // now unpersisted, so a restart would replay the prior on-disk state.
 func (s *Scheduler) persistJobsLocked() (func(), error) {
-	data, err := s.marshalJobsLocked()
+	data, err := s.tbl.marshalLocked()
 	if err != nil {
 		slog.Error("marshal cron store", "err", err)
 		return nil, fmt.Errorf("%w: %w", ErrPersistFailed, err)
@@ -159,64 +109,8 @@ type jobsSnapshot struct {
 	pooled *[]*Job
 }
 
-// snapshotJobsForSaveLocked captures the current job set into a detached
-// marshal-ready snapshot under the caller's s.tbl.mu, plus the persist seq.
-// Entries are value copies so the caller can release s.tbl.mu and marshal off the
-// hot lock. Job is a flat value type — the only pointer field is Notify *bool,
-// which is deep-copied so the off-lock marshal cannot race a mutator; entryID /
-// cachedPeriod / cachedSched are runtime-only and excluded from JSON. The
-// sorted-ID hint and drift fallback mirror marshalJobsLocked so the on-disk
-// ordering is byte-identical regardless of which persist path ran.
-func (s *Scheduler) snapshotJobsForSaveLocked() jobsSnapshot {
-	// Pooled outer slice (same pool as marshalJobsLocked), returned by
-	// persistSnapshot after marshal (#1975).
-	entriesPtr := marshalEntriesPool.Get().(*[]*Job)
-	entries := *entriesPtr
-	if cap(entries) < len(s.tbl.jobs) {
-		entries = make([]*Job, 0, len(s.tbl.jobs))
-	} else {
-		entries = entries[:0]
-	}
-	useHint := len(s.tbl.sortedJobIDs) == len(s.tbl.jobs)
-	if useHint {
-		for _, id := range s.tbl.sortedJobIDs {
-			j, ok := s.tbl.jobs[id]
-			if !ok {
-				useHint = false
-				break
-			}
-			cp := *j
-			// Deep-copy Notify so the off-lock marshal never aliases the live job.
-			if j.Notify != nil {
-				v := *j.Notify
-				cp.Notify = &v
-			}
-			entries = append(entries, &cp)
-		}
-	}
-	if !useHint {
-		entries = entries[:0]
-		for _, j := range s.tbl.jobs {
-			cp := *j
-			// Deep-copy Notify so the off-lock marshal never aliases the live job.
-			if j.Notify != nil {
-				v := *j.Notify
-				cp.Notify = &v
-			}
-			entries = append(entries, &cp)
-		}
-		if len(entries) > 1 {
-			slices.SortFunc(entries, jobIDCmpForSort)
-		}
-	}
-	// Write the (possibly grown) slice back into the pooled handle so a grow
-	// circulates through the pool.
-	*entriesPtr = entries
-	return jobsSnapshot{entries: entries, seq: s.tbl.saveSeq.Add(1), pooled: entriesPtr}
-}
-
 // persistSnapshot marshals a detached snapshot taken by
-// snapshotJobsForSaveLocked and returns the save func without holding s.tbl.mu
+// snapshotForSaveLocked and returns the save func without holding s.tbl.mu
 // (#1923). On marshal failure returns (nil, ErrPersistFailed) so the caller can
 // roll back, preserving persistJobsLocked's contract; the seq captured under
 // the lock is reused so saveMarshaledSeq's ordering gate is unaffected.

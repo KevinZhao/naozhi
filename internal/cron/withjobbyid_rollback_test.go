@@ -125,9 +125,9 @@ func TestResumeJobByID_RollbackOnPersistFailure(t *testing.T) {
 
 // TestPauseJobByID_RollbackKeepsCronEntryAlive is the operator-visible
 // counterpart: after a rolled-back Pause, the cron entry that
-// pauseJobLocked would have torn down via cron.Remove (in postCleanup)
-// must still be live. The withJobByIDOpt helper skips postCleanup when
-// rollback fires, so the cron.Remove never runs.
+// the pause would have torn down via cron.Remove must still be live. A
+// rolled-back pause hands finishMutation no entry to remove, so the
+// cron.Remove never runs.
 func TestPauseJobByID_RollbackKeepsCronEntryAlive(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 	if _, err := s.ResumeJobByID(id); err != nil {
@@ -161,7 +161,7 @@ func TestPauseJobByID_RollbackKeepsCronEntryAlive(t *testing.T) {
 // closure in ResumeJobByID previously called s.cron.Remove while holding
 // s.tbl.mu, causing a lock-order inversion with the cron-tick goroutine (which
 // needs s.tbl.mu.RLock to call executeJobIDIfLive). The fix defers the Remove to
-// after withJobByIDOpt returns (s.tbl.mu released). This test verifies that after
+// after mutateByID returns (s.tbl.mu released). This test verifies that after
 // a rolled-back Resume, the freshly-registered cron entry has been removed so
 // the scheduler is not left with a live entry for a still-paused job.
 func TestResumeJobByID_RollbackRemovesCronEntry(t *testing.T) {

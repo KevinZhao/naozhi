@@ -5,7 +5,7 @@
 //     pools its transient entryID slice + nextByID map. The pool must be
 //     reset cleanly between calls so a "second poll" sees no leakage from
 //     the first.
-//   - R242-GO-3 (#548): withJobByID returns a value-copy *Job. A caller
+//   - R242-GO-3 (#548): mutateByID returns a value-copy *Job. A caller
 //     that mutates the returned pointer's fields must NOT influence the
 //     scheduler's in-memory state (the live *Job in s.tbl.jobs).
 //

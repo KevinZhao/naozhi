@@ -10,14 +10,14 @@ import (
 // tableWith returns a table holding jobs, indexed as the add path indexes them.
 func tableWith(t *testing.T, jobs ...*Job) *jobTable {
 	t.Helper()
-	s := &Scheduler{tbl: newJobTable()}
-	s.tbl.mu.Lock()
+	tbl := newJobTable()
+	tbl.mu.Lock()
 	for _, j := range jobs {
-		s.tbl.jobs[j.ID] = j
-		s.addToChatIndexLocked(j)
+		tbl.jobs[j.ID] = j
+		tbl.indexLocked(j)
 	}
-	s.tbl.mu.Unlock()
-	return &s.tbl
+	tbl.mu.Unlock()
+	return &tbl
 }
 
 // The read API hands out copies: changing what it returned changes nothing in

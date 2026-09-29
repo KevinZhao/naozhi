@@ -84,9 +84,8 @@ func TestPauseJobLocked_ReturnsCronRemoveClosure(t *testing.T) {
 }
 
 // TestPauseJobByID_DoesNotHoldMuDuringCronRemove pins the post-Unlock
-// invariant: PauseJobByID drives pauseJobLocked → withJobByID, with the
-// cron.Remove closure scheduled into postCleanup so it fires AFTER s.tbl.mu
-// is released. The test exercises the happy path end-to-end and asserts
+// invariant: PauseJobByID drives mutateByID → finishMutation, and the
+// cron.Remove runs in finishMutation, AFTER s.tbl.mu is released. The test exercises the happy path end-to-end and asserts
 // the visible after-state (Paused=true, NextRun=0) so a regression that
 // pulls cron.Remove back inside s.tbl.mu fails here even before any
 // timing-based test catches it.

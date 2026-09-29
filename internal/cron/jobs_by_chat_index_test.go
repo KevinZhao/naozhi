@@ -139,7 +139,7 @@ func TestJobsByChatIndex_TracksAddDelete(t *testing.T) {
 // TestFindByPrefixLocked_UsesPerChatIndex verifies findByPrefixLocked
 // correctly resolves prefix lookups via the per-chat index — same job
 // data, but only the matching chat's slice is scanned. The existing
-// withJobByPrefix callers (DeleteByPrefix etc.) exercise the full path.
+// mutateByPrefix callers (DeleteByPrefix etc.) exercise the full path.
 func TestFindByPrefixLocked_UsesPerChatIndex(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

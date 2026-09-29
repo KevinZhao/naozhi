@@ -60,8 +60,8 @@ func TestPauseJob_RollbackOnPersistFailure(t *testing.T) {
 
 // TestPauseJob_RollbackKeepsCronEntryAlive verifies the operator-visible
 // consequence of the CR-1 rollback: after a rolled-back PauseJob, the
-// robfig/cron entry that pauseJobLocked would have removed via postCleanup
-// must still be live. withJobByPrefix skips postCleanup on rollback, so
+// robfig/cron entry the pause would have retired must still be live. A
+// rolled-back pause hands finishMutation no entry to remove, so
 // cron.Remove never runs and the next tick still fires the active job.
 func TestPauseJob_RollbackKeepsCronEntryAlive(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)

@@ -53,9 +53,9 @@ type jobTable struct {
 	// keys — add appends, delete swaps-and-shrinks.
 	jobsByChat map[chatJobKey][]*Job
 	// sortedJobIDs mirrors the keys of jobs in ascending ID order, maintained
-	// incrementally at the two seams that mutate jobs (addToChatIndexLocked /
-	// deleteJobLocked) so persist avoids an O(N log N) sort under mu. jobs stays
-	// the source of truth: marshalJobsLocked validates this hint and rebuilds
+	// incrementally at the two seams that mutate jobs (indexLocked /
+	// deleteLocked) so persist avoids an O(N log N) sort under mu. jobs stays
+	// the source of truth: marshalLocked validates this hint and rebuilds
 	// from the map on drift.
 	sortedJobIDs []string
 	// saveSeq tags every marshaled snapshot at capture time, under mu.
@@ -63,6 +63,10 @@ type jobTable struct {
 	// newer: sync.Mutex is not FIFO, so an older snapshot could otherwise reach
 	// storeMu after a newer one and overwrite it on disk.
 	saveSeq atomic.Uint64
+	// marshal is the Scheduler's serializer slot (marshalJobsFn), which tests
+	// swap to exercise persist failures. A pointer to it, set once by
+	// NewScheduler; nil means the production serializer.
+	marshal *atomic.Pointer[marshalJobsFn]
 }
 
 func newJobTable() jobTable {

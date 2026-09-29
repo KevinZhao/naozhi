@@ -71,7 +71,7 @@ func (s *Scheduler) EnsureStub(key string) bool {
 }
 
 // resetRouterStub is the deferred router-side cleanup that pairs with
-// deleteJobLocked. Caller MUST NOT hold s.tbl.mu — router.Reset re-enters router
+// deleteLocked. Caller MUST NOT hold s.tbl.mu — router.Reset re-enters router
 // state and its notifyChange callback may take s.tbl.mu. Safe on a nil router and
 // on a nil receiver (partial test fixtures drive deletion paths).
 func (s *Scheduler) resetRouterStub(jobID string) {
