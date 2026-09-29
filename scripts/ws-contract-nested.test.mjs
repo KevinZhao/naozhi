@@ -57,3 +57,25 @@ test('a type comment on the parameter types it too', () => {
   // A type comment on another parameter does not type this one.
   assert.equal(checkNested('function f(e, /** @type {EventEntry} */ x) { return e.nope; }', schema).problems.length, 0);
 });
+
+test('any def short name types a parameter, and an unknown one is reported', () => {
+  const s2 = { frames: {}, defs: { 'sessionview.SessionSnapshot': { properties: { state: { type: 'string' } } } } };
+  assert.deepEqual(checkNested('function f(/** @type {SessionSnapshot} */ s) { return s.state; }', s2).problems, []);
+  assert.match(checkNested('function f(/** @type {SessionSnapshot} */ s) { return s.stat; }', s2).problems[0], /SessionSnapshot has no field "stat"/);
+  assert.match(checkNested('function f(/** @type {Nope} */ s) { return s.x; }', s2).problems[0], /types s as Nope, which no schema defines/);
+});
+
+test('fields the dashboard adds to a struct are allowed and reported as used', () => {
+  const s2 = { frames: {}, defs: { 'sessionview.SessionSnapshot': { properties: { state: { type: 'string' } } } } };
+  const extras = { 'sessionview.SessionSnapshot': { source: 'card kind' } };
+  const r = checkNested('function f(/** @type {SessionSnapshot} */ s) { return s.source + s.state; }', s2, extras);
+  assert.deepEqual(r.problems, []);
+  assert.deepEqual([...r.usedExtras], ['sessionview.SessionSnapshot.source']);
+  assert.equal(checkNested('function f(/** @type {SessionSnapshot} */ s) { return s.source; }', s2).problems.length, 1);
+});
+
+test('a short name two defs end in is ambiguous, not a guess', async () => {
+  const { defKey } = await import('./ws-contract-nested.mjs');
+  assert.equal(defKey({ 'a.Entry': {}, 'b.Entry': {} }, 'Entry'), null);
+  assert.equal(defKey({ 'a.Entry': {}, 'b.Other': {} }, 'Entry'), 'a.Entry');
+});

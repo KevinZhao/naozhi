@@ -354,6 +354,12 @@ jobs:
       - name: Test the death_reason enum check
         run: node --test scripts/check-enum-literals.test.mjs
 
+      # The e2e mock stands in for the backend: a field it returns that the Go
+      # response type does not declare is a test passing against a server that
+      # does not exist.
+      - name: Check the e2e mock's REST shapes
+        run: node --test scripts/check-mock-rest.test.mjs
+
       - name: Check death_reason is read from the generated contract
         run: node scripts/check-enum-literals.mjs
 
