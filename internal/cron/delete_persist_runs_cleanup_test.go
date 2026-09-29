@@ -16,11 +16,10 @@ import (
 // generator + tiny but non-zero collision probability) inherits the old
 // job's run history.
 //
-// The fix lives in scheduler_jobs.go DeleteJobByID's postCleanup, which
-// runs lock-free AFTER op + persist but BEFORE the persist error is
-// returned to the caller. withJobByIDOpt only skips postCleanup when
-// rolledBack == true, and DeleteJobByID provides no rollbackOnPersistErr,
-// so postCleanup fires unconditionally on the persist-failure path.
+// The fix lives in finishMutation's delete cleanup, which runs lock-free
+// AFTER op + persist but BEFORE the persist error is returned to the
+// caller. A delete is never rolled back, so the cleanup fires
+// unconditionally on the persist-failure path.
 //
 // Test shape:
 //  1. Build a Scheduler + seed one job
@@ -28,7 +27,7 @@ import (
 //     exists on disk
 //  3. Install the failing marshaler (so persistJobsLocked errors)
 //  4. Call DeleteJobByID — expect ErrPersistFailed
-//  5. Assert runs/<jobID>/ no longer exists (postCleanup ran despite perr)
+//  5. Assert runs/<jobID>/ no longer exists (the cleanup ran despite perr)
 func TestDeleteJobByID_PersistFailureCleansRunsDir(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 
@@ -59,7 +58,7 @@ func TestDeleteJobByID_PersistFailureCleansRunsDir(t *testing.T) {
 		t.Fatalf("DeleteJobByID err = %v, want ErrPersistFailed", err)
 	}
 
-	// The whole point of #495: even though persist failed, postCleanup ran
+	// The whole point of #495: even though persist failed, the cleanup ran
 	// and runs/<jobID>/ is gone — so a future AddJob with the same ID will
 	// not inherit stale run history.
 	if _, err := os.Stat(jobDir); !os.IsNotExist(err) {
@@ -70,8 +69,8 @@ func TestDeleteJobByID_PersistFailureCleansRunsDir(t *testing.T) {
 
 // TestDeleteJobByPrefix_PersistFailureCleansRunsDir mirrors the byID
 // counterpart for the IM-prefix DeleteJob path. Both paths flow through
-// postCleanup → runStore.DeleteJob; the prefix path has its own
-// withJobByPrefix helper so a divergence between the two helpers would
+// finishMutation → runStore.DeleteJob; the prefix path has its own
+// lookup (mutateByPrefix) so a divergence between the two paths would
 // silently leak runs/ on the prefix path while the byID path stays clean.
 func TestDeleteJobByPrefix_PersistFailureCleansRunsDir(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)

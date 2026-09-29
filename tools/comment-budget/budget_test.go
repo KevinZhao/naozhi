@@ -15,7 +15,7 @@ import (
 // (scripts/ratchet-raises.jsonl).
 const (
 	inFuncBlocksOver5Baseline = 33
-	docOver10Baseline         = 43
+	docOver10Baseline         = 42
 	packageDocOver60Baseline  = 1
 	reviewAnchorsBaseline     = 0
 	historyPhrasesBaseline    = 44

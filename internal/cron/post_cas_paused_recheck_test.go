@@ -208,7 +208,7 @@ func TestExecuteOpt_PostCASDeletedRecheck_TriggerNow(t *testing.T) {
 
 	// Simulate the dispatch-vs-delete race: caller resolved cur from
 	// s.tbl.jobs, released RLock, and a Delete landed before CAS. We can't
-	// call DeleteJobByID because it also runs router.Reset / postCleanup
+	// call DeleteJobByID because it also runs router.Reset / the runs cleanup
 	// in ways that aren't on the hot path of this test; mutating the map
 	// directly is the smallest reproduction of the executeOpt-visible
 	// state.

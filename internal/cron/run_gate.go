@@ -123,7 +123,7 @@ func (g *runGate) jobInflight(id string) *runInflight {
 //
 // Returns true if the entry was deleted. Safe to call after the registry lock
 // is released — sync.Map needs no scheduler lock; callers run it from
-// lock-free postCleanup branches.
+// the lock-free delete cleanup (deleteJobPostCleanup).
 func (g *runGate) cleanupRunningJobIfIdle(jobID string) bool {
 	if gateHook != nil {
 		gateHook()

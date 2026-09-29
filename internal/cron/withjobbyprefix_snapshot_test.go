@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestWithJobByPrefix_ReturnsSnapshot pins R250531-CR-2: withJobByPrefix must
-// return a value-copy snapshot of the Job (like withJobByIDOpt's "snapshot =
+// TestWithJobByPrefix_ReturnsSnapshot pins R250531-CR-2: mutateByPrefix must
+// return a value-copy snapshot of the Job (like mutateByID's "snapshot =
 // *j" pattern from R242-GO-3/#548) rather than the live *Job pointer from
 // s.tbl.jobs. Without the copy, a concurrent UpdateJob or SetJobPrompt can race
 // on the string fields of the returned *Job while the caller reads them.
@@ -40,7 +40,7 @@ func TestWithJobByPrefix_ReturnsSnapshot(t *testing.T) {
 	}
 
 	// PauseJob is a no-op here since the job is already paused, but the real
-	// ResumeJob path exercises withJobByPrefix with a live op; let's use
+	// ResumeJob path exercises mutateByPrefix with a live op; let's use
 	// ResumeJob to exercise the full path (op mutates then snapshots).
 	got, err := s.ResumeJob(j.ID[:4], "feishu", "chat1")
 	if err != nil {
@@ -59,7 +59,7 @@ func TestWithJobByPrefix_ReturnsSnapshot(t *testing.T) {
 		t.Fatalf("live job gone from s.tbl.jobs after ResumeJob")
 	}
 	if got == live {
-		t.Errorf("withJobByPrefix returned live *Job pointer; want a stable snapshot copy")
+		t.Errorf("mutateByPrefix returned live *Job pointer; want a stable snapshot copy")
 	}
 	// Values must match at this point (no concurrent mutation between Resume
 	// and this check).
@@ -70,7 +70,7 @@ func TestWithJobByPrefix_ReturnsSnapshot(t *testing.T) {
 
 // TestWithJobByPrefix_SnapshotRaceDeleteJob exercises the -race detector path:
 // a concurrent UpdateJob mutating the Prompt string field of the live *Job
-// must not tear when withJobByPrefix returns a snapshot. Without the copy,
+// must not tear when mutateByPrefix returns a snapshot. Without the copy,
 // the returned *Job's string header points into the same backing array a
 // concurrent goroutine is overwriting → data race. With the copy, the caller
 // holds its own stable string.
@@ -105,9 +105,9 @@ func TestWithJobByPrefix_SnapshotRaceDeleteJob(t *testing.T) {
 	}
 
 	// Fire concurrent UpdateJob (Prompt mutation) while calling ResumeJob
-	// (which goes through withJobByPrefix). Without the snapshot fix both
+	// (which goes through mutateByPrefix). Without the snapshot fix both
 	// goroutines operate on the same *Job pointer — the race detector flags
-	// concurrent string writes against the reads inside withJobByPrefix.
+	// concurrent string writes against the reads inside mutateByPrefix.
 	var wg sync.WaitGroup
 
 	wg.Add(1)

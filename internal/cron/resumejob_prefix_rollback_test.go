@@ -62,7 +62,7 @@ func TestResumeJob_RollbackOnPersistFailure(t *testing.T) {
 // TestResumeJob_RollbackRemovesCronEntry pins the lock-order safety of
 // R20260531070014-CR-2: the rollback closure captures the freshly-registered
 // entryID and the actual s.cron.Remove is deferred until AFTER
-// withJobByPrefix returns (s.tbl.mu released). This test verifies that after
+// mutateByPrefix returns (s.tbl.mu released). This test verifies that after
 // a rolled-back ResumeJob the orphaned cron entry is gone and NextRun returns
 // zero — the scheduler is not left with a live entry for a still-paused job.
 func TestResumeJob_RollbackRemovesCronEntry(t *testing.T) {

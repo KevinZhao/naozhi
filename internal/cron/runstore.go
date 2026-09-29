@@ -472,8 +472,8 @@ func readAllInto(f *os.File, buf []byte) ([]byte, error) {
 // dir is a no-op. Does NOT delete ~/.claude/projects/<cwd>/<session_id>.jsonl
 // (user-facing claude session logs).
 //
-// runs/ and cron_jobs.json have no atomic transaction spanning both; in
-// withJobByPrefix this runs BEFORE cron_jobs.json is saved. A crash in that
+// runs/ and cron_jobs.json have no atomic transaction spanning both; on
+// delete this runs BEFORE cron_jobs.json is saved. A crash in that
 // window is benign: the job reloads with empty history and repopulates runs/.
 // The reverse order would orphan a runs/<jobID>/ subtree that trimAll (known
 // jobs only) never reclaims, so "remove runs/ first" is deliberate; it also

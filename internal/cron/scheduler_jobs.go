@@ -7,7 +7,6 @@ package cron
 import (
 	"fmt"
 	"log/slog"
-	"slices"
 	"time"
 	"unicode/utf8"
 )
@@ -46,7 +45,7 @@ func (s *Scheduler) AddJob(j *Job) error {
 	// addJobAcquiringLock owns s.tbl.mu (acquire + deferred unlock) so every
 	// early-return path releases the lock in one place. It plans the cron entry
 	// but does not commit it: on a persist failure there is therefore no robfig
-	// entry to roll back — deleteJobLocked under the still-held lock undoes
+	// entry to roll back — deleteLocked under the still-held lock undoes
 	// everything, and the rollbackEntryID hand-off this path used to need is
 	// gone with the reason for it.
 	save, stub, plan, perr := s.addJobAcquiringLock(j)
@@ -83,7 +82,7 @@ type addJobStubFields struct {
 //
 // plan is non-nil for an active job and is committed by AddJob AFTER this
 // function releases s.tbl.mu. Because the commit has not happened yet, a persist
-// failure rolls everything back with deleteJobLocked alone — there is no
+// failure rolls everything back with deleteLocked alone — there is no
 // robfig entry to remove, which is what retired the rollbackEntryID hand-off
 // (#1810) this signature used to carry.
 func (s *Scheduler) addJobAcquiringLock(j *Job) (save func(), stub addJobStubFields, plan *cronEntryPlan, err error) {
@@ -95,8 +94,8 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (save func(), stub addJobStubFie
 	}
 
 	// Per-chat limit so one chat cannot exhaust the global quota. O(1) via
-	// s.tbl.chatJobCount, kept in lock-step with s.tbl.jobs by addToChatIndexLocked /
-	// deleteJobLocked (#661).
+	// s.tbl.chatJobCount, kept in lock-step with s.tbl.jobs by indexLocked /
+	// deleteLocked (#661).
 	chatKey := chatKeyFor(j.Platform, j.ChatID)
 	if s.tbl.chatJobCount[chatKey] >= s.maxJobsPerChat {
 		return nil, addJobStubFields{}, nil, fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
@@ -151,17 +150,17 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (save func(), stub addJobStubFie
 		plan = &p
 	}
 	s.tbl.jobs[j.ID] = j
-	// Per-chat counter + index move in lockstep with s.tbl.jobs; deleteJobLocked
+	// Per-chat counter + index move in lockstep with s.tbl.jobs; deleteLocked
 	// is the paired inverse (also used by the rollback below).
-	s.addToChatIndexLocked(j)
+	s.tbl.indexLocked(j)
 	save, perr := s.persistJobsLocked()
 	if perr != nil {
 		// Persist failed after the map insertion. The cron entry was only
-		// planned, never committed, so deleteJobLocked under the still-held
+		// planned, never committed, so deleteLocked under the still-held
 		// s.tbl.mu undoes everything — there is no robfig state to clean up. The
 		// router stub is only registered after a successful save, so no router
 		// cleanup is needed either.
-		s.deleteJobLocked(j)
+		s.tbl.deleteLocked(j)
 		return nil, addJobStubFields{}, nil, perr
 	}
 	// Snapshot under s.tbl.mu what registerStubByValue reads so AddJob need not
@@ -175,90 +174,8 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (save func(), stub addJobStubFie
 	return save, stub, plan, nil
 }
 
-// addToChatIndexLocked records a job into the per-chat side indexes that must
-// move in lockstep with s.tbl.jobs (chatJobCount cap counter, jobsByChat lookup
-// slice, sortedJobIDs). Caller MUST hold s.tbl.mu.Lock() and have already
-// inserted j into s.tbl.jobs. deleteJobLocked is the paired inverse.
-func (s *Scheduler) addToChatIndexLocked(j *Job) {
-	key := chatKeyFor(j.Platform, j.ChatID)
-	s.tbl.chatJobCount[key]++
-	s.tbl.jobsByChat[key] = append(s.tbl.jobsByChat[key], j)
-	s.insertSortedJobID(j.ID)
-}
-
-// insertSortedJobID keeps s.tbl.sortedJobIDs ascending via binary-search insert
-// so marshalJobsLocked can iterate without re-sorting on every persist.
-// Idempotent on a duplicate ID so a malformed disk load keeps the slice 1:1
-// with the map. Caller must hold s.tbl.mu.Lock() (#1598).
-func (s *Scheduler) insertSortedJobID(id string) {
-	i, found := slices.BinarySearch(s.tbl.sortedJobIDs, id)
-	if found {
-		return
-	}
-	s.tbl.sortedJobIDs = slices.Insert(s.tbl.sortedJobIDs, i, id)
-}
-
-// removeSortedJobID drops id from s.tbl.sortedJobIDs preserving order. No-op if
-// absent so a double-delete (rollback path) cannot panic. Caller must hold
-// s.tbl.mu.Lock().
-func (s *Scheduler) removeSortedJobID(id string) {
-	if i, found := slices.BinarySearch(s.tbl.sortedJobIDs, id); found {
-		s.tbl.sortedJobIDs = slices.Delete(s.tbl.sortedJobIDs, i, i+1)
-	}
-}
-
-// deleteJobLocked performs the in-memory side effects of removing a job:
-// snapshot+zero the cron entry and drop the map/index entries. It returns the
-// captured cron entryID (0 if none) so the caller runs the cron Remove AFTER
-// releasing s.tbl.mu — Remove sends on the unbuffered c.remove channel that only
-// run() drains, so doing it under s.tbl.mu would hold the write lock across a
-// cron-select round-trip (#1810). Caller must hold s.tbl.mu.Lock().
-//
-// Intentionally does NOT delete from s.gate.runningJobs (a concurrent execute may
-// still hold the CAS gate; see cleanupRunningJobIfIdle) and MUST NOT call
-// router.Reset (its callbacks may re-take s.tbl.mu) — callers do that after unlock.
-func (s *Scheduler) deleteJobLocked(j *Job) (removeEntryID cronEntryID) {
-	removeEntryID = j.entryID
-	j.entryID = 0
-	if _, present := s.tbl.jobs[j.ID]; present {
-		delete(s.tbl.jobs, j.ID)
-		// Paired removal from the sorted-ID slice, guarded by the same
-		// membership check so a double-delete cannot disturb it.
-		s.removeSortedJobID(j.ID)
-		// Paired decrement for the per-chat counter; the membership guard keeps
-		// a double-delete from driving it negative (which would silently disable
-		// the per-chat cap). Drop the key at zero so the map tracks live chats.
-		key := chatKeyFor(j.Platform, j.ChatID)
-		if n := s.tbl.chatJobCount[key]; n > 1 {
-			s.tbl.chatJobCount[key] = n - 1
-		} else {
-			delete(s.tbl.chatJobCount, key)
-		}
-		// Paired remove from the per-chat index. Swap-and-shrink is fine:
-		// findByPrefixLocked reports ambiguity instead of picking a winner, so
-		// order is irrelevant. Drop the key when the slice empties.
-		if list := s.tbl.jobsByChat[key]; len(list) > 0 {
-			for i, p := range list {
-				if p == j {
-					last := len(list) - 1
-					list[i] = list[last]
-					list[last] = nil // help GC drop the pointer
-					list = list[:last]
-					break
-				}
-			}
-			if len(list) == 0 {
-				delete(s.tbl.jobsByChat, key)
-			} else {
-				s.tbl.jobsByChat[key] = list
-			}
-		}
-	}
-	return removeEntryID
-}
-
 // deleteJobPostCleanup runs the lock-free side effects that must follow
-// deleteJobLocked, shared by DeleteJobByID and DeleteJob. Caller MUST NOT
+// deleteLocked, shared by DeleteJobByID and DeleteJob. Caller MUST NOT
 // hold s.tbl.mu:
 //   - cron Remove of removeEntryID (0 = no entry; Remove(0) is a no-op) keeps
 //     the unbuffered c.remove send off the s.tbl.mu write hold (#1810);
@@ -277,54 +194,6 @@ func (s *Scheduler) deleteJobPostCleanup(jobID string, removeEntryID cronEntryID
 	s.stopSandboxRunsForJob(jobID)
 	s.deleteJobRuns(jobID)
 	s.gate.cleanupRunningJobIfIdle(jobID)
-}
-
-// pauseJobLocked transitions a job to Paused under s.tbl.mu. Returns
-// ErrJobAlreadyPaused without mutation if already paused (callers map it to
-// 409). The cron Remove is NOT done here: robfig's Remove sends on the
-// unbuffered c.remove channel, so it is returned as cronCleanup for callers
-// to run AFTER releasing s.tbl.mu (#537). cronCleanup is never nil and is
-// idempotent (the captured entryID is consumed on the first call), so
-// callers can defer it unconditionally.
-func (s *Scheduler) pauseJobLocked(j *Job) (cronCleanup func(), err error) {
-	if j.Paused {
-		return func() {}, fmt.Errorf("%w: id %q", ErrJobAlreadyPaused, j.ID)
-	}
-	// Snapshot the entryID for post-unlock removal and zero it under lock so
-	// concurrent ListAllJobsWithNextRun / NextRun / TriggerNow snapshots see
-	// the entry-removed state before cron's own table catches up.
-	captured := j.entryID
-	j.entryID = 0
-	j.Paused = true
-	if captured == 0 {
-		return func() {}, nil
-	}
-	return func() { s.cron.Remove(captured) }, nil
-}
-
-// resumePlanLocked transitions a paused job back to active under s.tbl.mu and
-// returns the cron-entry plan the caller must commit AFTER releasing the lock
-// (commitAndApplyCronEntry). Returns ErrJobNotPaused, or a parse error, both
-// without mutation.
-//
-// The registration itself used to happen right here, which meant three things
-// at once: a robfig rendezvous under s.tbl.mu, a persist-failure rollback that had
-// to un-register a live entry from outside the lock (#1226's double-fire), and
-// entryID/cached* snapshots threaded through every caller to make that rollback
-// exact. Deferring the commit until after persist dissolves all three — a
-// persist failure now happens BEFORE any entry exists, so the rollback is one
-// field write, and the window it opens (Paused=false, entryID=0) is fenced by
-// entryMu, which every caller holds.
-func (s *Scheduler) resumePlanLocked(j *Job) (cronEntryPlan, error) {
-	if !j.Paused {
-		return cronEntryPlan{}, fmt.Errorf("%w: id %q", ErrJobNotPaused, j.ID)
-	}
-	p, err := planCronEntry(j.ID, j.Schedule, time.Now())
-	if err != nil {
-		return cronEntryPlan{}, err
-	}
-	j.Paused = false
-	return p, nil
 }
 
 // JobUpdate captures fields a dashboard user may edit on an existing cron
@@ -677,7 +546,7 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	defer s.entryMu.Unlock()
 
 	// The critical section is an IIFE with deferred unlock so a panic inside
-	// resumePlanLocked cannot leave s.tbl.mu held. The plan commit and save() run
+	// resumeLocked cannot leave s.tbl.mu held. The plan commit and save() run
 	// post-unlock so the robfig rendezvous stays outside s.tbl.mu.
 	var resumePlan *cronEntryPlan
 	type stubFields struct {
@@ -707,7 +576,7 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 			// Shared helper keeps the plan + Paused transition consistent with
 			// Resume/UpdateJob. The plan is committed after this IIFE returns,
 			// off the lock.
-			p, rerr := s.resumePlanLocked(j)
+			p, rerr := s.tbl.resumeLocked(j)
 			if rerr != nil {
 				j.Prompt = "" // rollback: Prompt was empty before this call
 				return nil, stubFields{}, rerr

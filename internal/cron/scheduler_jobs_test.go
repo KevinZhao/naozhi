@@ -30,7 +30,7 @@ func schedulerForJobsR241GO2Test(t *testing.T) *Scheduler {
 // signalled "not found" by returning a nil *Job, which conflicted with
 // the latent callsite contract "j is *Job, may be nil for valid Jobs"
 // and was correct only by accident. The current implementation routes
-// through withJobByIDOpt with an explicit `found bool`, so a missing
+// through mutateByID, which reports a lookup miss as its own error, so a missing
 // id surfaces as (nil, ErrJobNotFound) — this test pins that contract
 // so a future refactor cannot reintroduce the nil-sentinel ambiguity.
 func TestDeleteJobByID_NotFoundReturnsErrJobNotFound(t *testing.T) {
@@ -48,9 +48,9 @@ func TestDeleteJobByID_NotFoundReturnsErrJobNotFound(t *testing.T) {
 
 // TestPauseJobByID_NotFoundReturnsErrJobNotFound is the
 // regression test for R241-GO-3 (#488 — same pattern). PauseJobByID
-// uses withJobByIDOpt's rollback path so the test also implicitly
-// exercises that the rollback shim does not mask not-found as a
-// success-with-nil-Job — the explicit found bool dominates.
+// can roll back so the test also implicitly exercises that the rollback
+// does not mask not-found as a success-with-nil-Job — the lookup error
+// comes first.
 func TestPauseJobByID_NotFoundReturnsErrJobNotFound(t *testing.T) {
 	t.Parallel()
 	s := schedulerForJobsR241GO2Test(t)

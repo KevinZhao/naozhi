@@ -205,7 +205,7 @@ type Scheduler struct {
 	// set (LastSessionID assignment, runStore.Append).
 	knownSessionsCache knownSessionsCache
 
-	// marshalJobs is the JSON serializer used by marshalJobsLocked, behind
+	// marshalJobs is the JSON serializer used by marshalLocked, behind
 	// atomic.Pointer so tests (withFailingMarshal) can swap a failing stub
 	// without racing concurrent persist readers under -race. Per-Scheduler
 	// (not a package var) so parallel tests cannot leak a stub across
@@ -300,8 +300,9 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		// Tests swap a fake via the withClock seam.
 		clock: defaultClock,
 	}
-	// Seed so marshalJobsLocked never Load()s nil.
+	// Seed so marshalLocked never Load()s nil.
 	s.marshalJobs.Store(&defaultMarshalJobs)
+	s.tbl.marshal = &s.marshalJobs
 	s.watchdogInterruptTimeoutNanos.Store(int64(watchdogInterruptTimeoutDefault))
 	// maps.Clone severs the alias to the caller-supplied maps so post-Start
 	// mutation of deps.* cannot race the lock-free readers (#506, #991).
@@ -455,7 +456,7 @@ func (s *Scheduler) Start() error {
 		}
 		if j.Paused {
 			s.tbl.jobs[j.ID] = j
-			s.addToChatIndexLocked(j)
+			s.tbl.indexLocked(j)
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
 		}
@@ -464,7 +465,7 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		s.tbl.jobs[j.ID] = j
-		s.addToChatIndexLocked(j)
+		s.tbl.indexLocked(j)
 		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
 	jobCount := len(s.tbl.jobs)
