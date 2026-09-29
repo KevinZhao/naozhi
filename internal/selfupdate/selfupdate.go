@@ -190,7 +190,9 @@ const stagingPattern = ".naozhi-upgrade-*.staging"
 // to installPath+backupSuffix, write newBin to an O_EXCL random-suffix staging
 // file in the same directory (a fixed name would give a hostile UID on a
 // shared install dir a pre-creatable target), os.Rename into place, and
-// restore the backup on any failure after the backup was taken.
+// restore the backup on any failure after the backup was taken. On macOS the
+// staged copy is first re-signed with the installed binary's self-signed
+// identity, if it has one (codesign.go).
 func Replace(newBin, installPath string) (backupPath string, err error) {
 	backupPath = installPath + backupSuffix
 
@@ -218,6 +220,13 @@ func Replace(newBin, installPath string) (backupPath string, err error) {
 		_ = os.Remove(stagePath)
 		_ = os.Remove(backupPath)
 		return "", fmt.Errorf("stage new binary: %w", err)
+	}
+
+	// Before the rename, so the binary that goes live already carries the identity.
+	if err := preserveCodesign(installPath, stagePath, func() error { return copyFile(newBin, stagePath) }); err != nil {
+		_ = os.Remove(stagePath)
+		_ = os.Remove(backupPath)
+		return "", err
 	}
 
 	if err := os.Rename(stagePath, installPath); err != nil {

@@ -161,6 +161,7 @@ func (d *doctor) httpClient() *http.Client {
 
 func (d *doctor) run() {
 	d.checkBinary()
+	d.checkCodesign()
 	d.checkSystemd()
 	d.checkHealth()
 	d.checkAuth()
