@@ -10,7 +10,7 @@ import (
 // runtime rather than by the test.
 func newTestTable(t *testing.T, jobs ...*Job) *Scheduler {
 	t.Helper()
-	s := &Scheduler{tbl: newJobTable()}
+	s := &Scheduler{tbl: newJobTable(nil)}
 	for _, j := range jobs {
 		s.tblForTest().jobs[j.ID] = j
 		s.addToChatIndexLocked(j)
@@ -112,7 +112,7 @@ func TestJobTable_LastSessionID(t *testing.T) {
 // Scheduler — a seq assigned under a lock that no longer serialises it against
 // the snapshot it tags would order nothing.
 func TestJobTable_SaveSeqIsMonotonicUnderConcurrency(t *testing.T) {
-	s := &Scheduler{tbl: newJobTable()}
+	tbl := newJobTable(nil)
 	const n = 200
 	seen := make([]uint64, n)
 	var wg sync.WaitGroup
@@ -120,7 +120,11 @@ func TestJobTable_SaveSeqIsMonotonicUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			seen[i] = s.tblForTest().nextSaveSeq()
+			m, err := tbl.persist()
+			if err != nil {
+				t.Error(err)
+			}
+			seen[i] = m.seq
 		}(i)
 	}
 	wg.Wait()
@@ -128,7 +132,7 @@ func TestJobTable_SaveSeqIsMonotonicUnderConcurrency(t *testing.T) {
 	uniq := make(map[uint64]bool, n)
 	for _, v := range seen {
 		if v == 0 {
-			t.Fatal("nextSaveSeq returned 0; zero is the never-saved sentinel lastSavedSeq compares against")
+			t.Fatal("persist took seq 0; zero is the never-saved sentinel lastSavedSeq compares against")
 		}
 		if uniq[v] {
 			t.Fatalf("seq %d assigned twice; a stale snapshot could overwrite a newer one on disk", v)

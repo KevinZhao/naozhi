@@ -195,7 +195,7 @@ func near(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
 // job's current one: an UpdateJob landing mid-run applies to the next run.
 func TestAppendLedger_RecordsTheSnapshotBackend(t *testing.T) {
 	ledger := costledger.NewStore(filepath.Join(t.TempDir(), "cost"), costledger.Options{})
-	s := &Scheduler{ledger: ledger, tbl: newJobTable()}
+	s := &Scheduler{ledger: ledger, tbl: newJobTable(nil)}
 	s.tbl.jobs["j"] = &Job{ID: "j", Backend: "kiro"}
 	s.appendLedger(runCtx{jobID: "j", runID: "r", snap: jobSnapshot{backend: "codex"}},
 		runOutcome{costInc: costledger.Increment{Metered: map[costledger.Unit]float64{costledger.UnitCredits: 1}}})
