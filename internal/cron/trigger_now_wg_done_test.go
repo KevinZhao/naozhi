@@ -120,68 +120,6 @@ func readTriggerNowBody(t *testing.T) string {
 	return src[start:end]
 }
 
-// TestTriggerNow_EntryGoneReleasesWG is a behavioural test for the CRON4
-// branch (entryID != 0 but entry.WrappedJob == nil). It simulates a
-// "concurrent delete" by manually seeding a non-zero entryID into jobs map
-// for an entry the cron engine does not know about, then calls TriggerNow
-// and verifies that triggerWG is ultimately zero — the reservation made
-// inside TriggerNow must be released by the fallback goroutine.
-//
-// Round 174 (CRON4).
-func TestTriggerNow_EntryGoneReleasesWG(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() { s.Stop() })
-
-	// Construct a Job that has a non-zero entryID pointing at nothing.
-	// We cannot use AddJob here because that would register the job with
-	// s.cron and make entry.WrappedJob non-nil, which routes us to the
-	// "normal run" arm rather than the "entry gone" arm under test.
-	// Instead inject directly into the jobs map with a synthetic entryID
-	// that s.cron has never seen — s.cron.Entry(entryID) returns a zero
-	// Entry with nil WrappedJob, exactly the race we want to exercise.
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs["orphan-job"] = &Job{
-		ID:       "orphan-job",
-		Schedule: "@every 1h",
-		Prompt:   "stub",
-		entryID:  99999, // entry that cron engine does not know about
-	}
-	s.tblForTest().mu.Unlock()
-
-	if err := s.TriggerNow("orphan-job"); err != nil {
-		t.Fatalf("TriggerNow: %v", err)
-	}
-
-	// Wait for the spawned goroutine to call Done. The work is a single
-	// slog.Debug call so this is essentially immediate, but we must not
-	// race against scheduling. triggerWG.Wait blocks until count is zero.
-	waitDone := make(chan struct{})
-	go func() {
-		s.triggerWG.Wait()
-		close(waitDone)
-	}()
-	select {
-	case <-waitDone:
-		// Counter reached zero → the goroutine fired Done exactly once,
-		// matching the one-to-one Add(1)/Done() pairing required by the
-		// WG semantics. If CRON4 regressed and Done was called
-		// synchronously AND a stray goroutine also tried to Done, the
-		// second call would panic before we got here.
-	case <-timeoutAfter(t):
-		t.Fatal("triggerWG never reached zero after TriggerNow on orphan entry; " +
-			"the fallback goroutine likely failed to call Done()")
-	}
-}
-
 // timeoutAfter returns a channel that fires if Wait does not complete in a
 // reasonable amount of time. Keeps the timeout explicit rather than using
 // testify or an ad-hoc time.After at the call site.

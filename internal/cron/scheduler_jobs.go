@@ -377,30 +377,18 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 }
 
 // NextRun returns the next scheduled run time for a job. entryID is resolved
-// under s.tbl.mu.RLock and s.tbl.mu is released BEFORE s.cron.Entry(): Entry walks
-// Entries(), which round-trips the dispatcher's snapshot channel, so holding
-// s.tbl.mu across it would invert the lock order the cron dispatch path takes
-// (cron-internal → execute → recordResult → s.tbl.mu.Lock) — the same discipline
-// ListAllJobsWithNextRun follows (#1117).
-//
-// When j.entryID is zero (a *Job that did not flow through AddJob / loadJobs,
-// e.g. a deserialised snapshot) fall back to the live s.tbl.jobs[j.ID] record so
-// the dashboard does not render a misleading "01/01 00:00" (#784).
+// under the table lock (jobTable.entryIDOf, which falls back to the registered
+// job when j is a detached copy with no entry, #784) and the lock is released
+// BEFORE s.cron.Entry(): Entry round-trips the dispatcher's snapshot channel,
+// so holding the table lock across it would invert the lock order the cron
+// dispatch path takes (cron-internal → execute → recordResult → table lock) —
+// the same discipline ListAllJobsWithNextRun follows (#1117).
 func (s *Scheduler) NextRun(j *Job) time.Time {
 	if j == nil {
 		return time.Time{}
 	}
-	// Resolve entryID under RLock, release, then read cron (see godoc).
-	// TriggerNow deliberately keeps its cross-lock: it needs one consistent
-	// instant for the entry-gone check against a racing DeleteJob.
-	s.tbl.mu.RLock()
-	entryID := j.entryID
-	if entryID == 0 && j.ID != "" {
-		if live, ok := s.tbl.jobs[j.ID]; ok {
-			entryID = live.entryID
-		}
-	}
-	s.tbl.mu.RUnlock()
+	// Resolve entryID under the table lock, release, then read cron (see godoc).
+	entryID := s.tbl.entryIDOf(j)
 	if entryID == 0 {
 		return time.Time{}
 	}
@@ -408,98 +396,31 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 	return entry.Next
 }
 
-// cronEntryGoneLocked reports whether the robfig/cron Entry identified by id
-// has been removed (or never existed). It is the single point where scheduler
-// code touches robfig's removed-entry sentinel (zero Entry, WrappedJob == nil),
-// so a lib bump that changes the sentinel lands here once (#774).
-//
-// Caller must hold s.tbl.mu (read or write) so the read cannot race a concurrent
-// delete; the helper does not re-acquire, so it is safe inside an existing
-// lock window.
-func (s *Scheduler) cronEntryGoneLocked(id cronEntryID) bool {
-	if id == 0 {
-		return true
-	}
-	return s.cron.Entry(id).WrappedJob == nil
-}
-
 // TriggerNow manually executes a job by ID in a new goroutine (for debugging/dashboard).
 // Returns an error if the job is not found, paused, or has no prompt.
 func (s *Scheduler) TriggerNow(id string) error {
-	s.tbl.mu.RLock()
 	// Gate triggerWG.Add behind the stopped flag: stopWithCtx sets s.stopped
 	// before draining triggerWG, and an in-flight HandleTrigger could otherwise
 	// Add(1) from zero concurrently with Wait, violating the WaitGroup contract
 	// and letting a trigger goroutine escape the drain barrier (#2012).
 	if s.stopped.Load() {
-		s.tbl.mu.RUnlock()
 		return ErrSchedulerStopped
 	}
-	j, ok := s.tbl.jobs[id]
-	if !ok {
-		s.tbl.mu.RUnlock()
-		return fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
-	if j.Paused {
-		s.tbl.mu.RUnlock()
-		return fmt.Errorf("%w: id %q", ErrJobPaused, id)
-	}
-	if j.Prompt == "" {
-		s.tbl.mu.RUnlock()
-		return fmt.Errorf("%w: id %q", ErrJobNoPrompt, id)
-	}
-	entryID := j.entryID
-	jobID := j.ID
-	// Add to triggerWG before releasing s.tbl.mu so a concurrent Stop() cannot see
-	// an empty WaitGroup and return before our goroutine starts; paired with
-	// the single deferred Done() in the goroutine body.
-	s.triggerWG.Add(1)
-
-	// Hold s.tbl.mu.RLock across cron.Entry + the entry-gone check so a racing
-	// DeleteJob is observed at one consistent instant (cron's lock never calls
-	// back into scheduler code). entryID==0 means paused/unregistered, never
-	// "gone". TriggerNow 跳过 cron chain 直接 executeOpt（"run now" 不要 jitter）；
-	// 重叠由 jobRunningGuard CAS 覆盖，panic 由 recordTriggerNowPanic recover 覆盖。
-	entryGone := entryID != 0 && s.cronEntryGoneLocked(entryID)
-	s.tbl.mu.RUnlock()
-
-	go func() {
-		defer s.triggerWG.Done()
-		if entryGone {
-			slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "job_id", id, "entry_id", entryID)
-			return
-		}
-		s.executeIfNotDeletedOrPaused(jobID)
-	}()
-	return nil
-}
-
-// registerJob plans, commits and applies in one call, under whatever lock the
-// caller holds. Its ONLY caller is Start's load loop, and that is a contract,
-// not a coincidence: before s.cron.Start() robfig is not running, so Schedule
-// appends to a slice instead of rendezvousing with the run loop (cron.go:168),
-// and holding s.tbl.mu across it costs nothing. Every post-start writer must use
-// the split form instead — planCronEntry under the lock, commitAndApplyCronEntry
-// off it, with entryMu held around the pair (see entry_registration.go).
-func (s *Scheduler) registerJob(j *Job) error {
-	// Parse + derive first (pure), then hand the parsed schedule to robfig. The
-	// old shape called AddFunc and then read the schedule back with
-	// s.cron.Entry(entryID) purely to fill the cache — a blocking round trip with
-	// the run loop, performed with s.tbl.mu held. The value was already in hand.
-	//
-	// The cache exists so per-tick applyJitterSched need not run sched.Next twice,
-	// and so handleList's 1 Hz HasMissedSchedule fanout avoids re-parsing (#664,
-	// #477). It is now always populated: a parse failure returns before anything
-	// is registered, so the "entry vanished, cache it as zero" branch the
-	// read-back needed has no remaining case.
-	//
-	// Every caller still holds s.tbl.mu across commitCronEntry; see cron_entry.go for
-	// why that is latency rather than deadlock, and what removing it costs.
-	p, err := planCronEntry(j.ID, j.Schedule, time.Now())
-	if err != nil {
+	if err := s.tbl.triggerable(id); err != nil {
 		return err
 	}
-	applyCronEntry(j, p, s.commitCronEntry(p))
+	// Add before starting the goroutine so a concurrent Stop() cannot see an
+	// empty WaitGroup and return before it runs; paired with the single deferred
+	// Done() in the goroutine body.
+	s.triggerWG.Add(1)
+	// A delete or pause landing after the lookup is caught by
+	// executeIfNotDeletedOrPaused, which re-checks under the table lock.
+	// TriggerNow 跳过 cron chain 直接 executeOpt（"run now" 不要 jitter）；重叠由
+	// jobRunningGuard CAS 覆盖，panic 由 recordTriggerNowPanic recover 覆盖。
+	go func() {
+		defer s.triggerWG.Done()
+		s.executeIfNotDeletedOrPaused(id)
+	}()
 	return nil
 }
 

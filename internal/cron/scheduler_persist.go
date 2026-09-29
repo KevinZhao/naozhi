@@ -74,24 +74,6 @@ type marshalJobsFn func(any) ([]byte, error)
 // address without allocating a fresh closure per scheduler.
 var defaultMarshalJobs = marshalJobsFn(json.Marshal)
 
-// persistJobsLocked marshals under the caller's s.tbl.mu and writes asynchronously:
-// the caller produces the payload + save func here, unlocks, then calls save().
-// Marshal latency stays in the critical section (snapshot consistency); disk
-// I/O + storeMu contention move outside.
-//
-// On success returns a non-nil save func; caller must unlock s.tbl.mu before
-// invoking it. On marshal failure returns (nil, ErrPersistFailed) wrapped with
-// the cause via multi-%w so callers can errors.Is either. The caller MUST
-// surface it (e.g. HTTP 500): the in-memory mutation already happened and is
-// now unpersisted, so a restart would replay the prior on-disk state.
-func (s *Scheduler) persistJobsLocked() (func(), error) {
-	m, err := s.tbl.persistLocked()
-	if err != nil {
-		return nil, err
-	}
-	return func() { s.save(m) }, nil
-}
-
 // save writes a snapshot the table marshaled. Caller must not hold s.tbl.mu.
 func (s *Scheduler) save(m marshaledJobs) { s.saveMarshaledSeq(m.data, m.seq) }
 

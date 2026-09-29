@@ -426,7 +426,7 @@ func (s *Scheduler) emitSyntheticSkipped(jobID string, viaTriggerNow bool, errCl
 // exactly one place; capture (Job.snapshotResultState) and rollback (restore)
 // both route through it without changing the on-disk JSON shape (#764).
 //
-// restore re-applies the captured values to j; caller MUST hold s.tbl.mu.
+// restore re-applies the captured values to j; caller MUST hold the table lock.
 type JobState struct {
 	LastRunAt      time.Time
 	LastResult     string
@@ -446,7 +446,7 @@ func (p JobState) restore(j *Job) {
 }
 
 // snapshotResultState captures the runtime-mutable terminal-result state into
-// a JobState. Caller must hold s.tbl.mu. Paired with restore so adding a
+// a JobState. Caller must hold the table lock. Paired with restore so adding a
 // runtime-state field is a two-site edit rather than a hunt across mutation
 // paths.
 func (j *Job) snapshotResultState() JobState {
@@ -486,67 +486,28 @@ func (s *Scheduler) recordTerminalResult(jobID string, result, errMsg, sessionID
 	result = osutil.SanitizeForLog(result, maxStoredResultRunes+len(truncatedSuffix))
 	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
 
-	// The critical section runs under a single deferred Unlock inside an IIFE
-	// so any exit path (incl. panic) releases s.tbl.mu. Only the Job field mutation
-	// and a detached value-copy snapshot happen under the lock; json.Marshal
-	// runs in persistSnapshot OFF the lock so a large encode does not serialise
-	// the dashboard read path on every tick (#1923).
-	var (
-		save           func()
-		sessionChanged bool
-		snap           jobsSnapshot
-		haveSnap       bool
-		prev           JobState
-	)
-	func() {
-		s.tbl.mu.Lock()
-		defer s.tbl.mu.Unlock()
-		// Resolve the table's own *Job by ID and mutate THAT: a run holds an
-		// identity, never the table's object.
-		cur, exists := s.tbl.jobs[jobID]
-		if !exists {
-			return
-		}
-		prev = cur.snapshotResultState()
-
-		cur.LastRunAt = endedAt
-		cur.LastResult = result
-		cur.LastError = errMsg
-		cur.LastErrorClass = errClass
-		if sessionID != "" {
-			cur.LastSessionID = sessionID
-		}
-		cur.RunCounters.addRun(state)
-
-		snap = s.tbl.snapshotForSaveLocked()
-		haveSnap = true
-		// Detect whether LastSessionID changed under the lock so the
-		// KnownSessionIDs TTL cache is invalidated exactly when the set shifted.
-		sessionChanged = sessionID != "" && sessionID != prev.LastSessionID
-	}()
-
-	if !haveSnap {
+	// Only the field writes and a detached value-copy snapshot happen under the
+	// table lock; json.Marshal runs in persistSnapshot off it, so a large encode
+	// does not serialise the dashboard read path on every tick (#1923).
+	c, ok := s.tbl.recordResult(jobID, terminalRecord{
+		endedAt: endedAt, result: result, errMsg: errMsg,
+		sessionID: sessionID, errClass: errClass, state: state,
+	})
+	if !ok {
 		return result, errMsg, false
 	}
-
-	// Marshal OFF the lock (#1923). On failure re-acquire s.tbl.mu and roll back the
-	// in-memory mutation so live reads and the on-disk snapshot stay in sync.
-	// The brief window where the unpersisted mutation is visible is acceptable:
+	// On failure roll the in-memory result back so live reads and disk agree.
+	// The brief window where the unpersisted result is visible is acceptable:
 	// finishRun gates cron_run_ended on this function's ok return.
-	saveFn, perr := s.persistSnapshot(snap)
+	save, perr := s.persistSnapshot(c.snap)
 	if perr != nil {
-		s.tbl.mu.Lock()
-		if cur, exists := s.tbl.jobs[jobID]; exists {
-			prev.restore(cur)
-		}
-		s.tbl.mu.Unlock()
+		s.tbl.revertResult(jobID, c.prev)
 		slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
 			"job_id", jobID, "err", perr)
 		return result, errMsg, false
 	}
-	save = saveFn
-
-	if sessionChanged {
+	// Invalidate the KnownSessionIDs TTL cache exactly when the set shifted.
+	if c.sessionChanged {
 		s.invalidateKnownSessionsCache()
 	}
 	save()
