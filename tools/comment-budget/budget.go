@@ -34,7 +34,7 @@ type Counts struct {
 
 var (
 	reviewAnchorRe  = regexp.MustCompile(`\bR\d{3,}[a-z]?(?:-[A-Z0-9]+)+-\d+\b`)
-	historyPhraseRe = regexp.MustCompile(`(?i)\b(used to (?:be|live|have|return|run|take|keep|hold)|was removed|were removed|historically|historical note|formerly|no longer exists)\b|以前|原先|旧逻辑|旧实现`)
+	historyPhraseRe = regexp.MustCompile(`(?i)\b(used to (?:be|live|have|return|run|take|keep|hold)|was removed|were removed|historically|historical note|formerly)\b|以前|原先|旧逻辑|旧实现`)
 	issueRefRe      = regexp.MustCompile(`#\d{3,5}\b`)
 )
 
