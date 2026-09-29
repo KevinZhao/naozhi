@@ -302,6 +302,27 @@ func (t *jobTable) applyEntry(p cronEntryPlan, id cronEntryID) bool {
 	return ok
 }
 
+// marshaledJobs is a persist snapshot: the marshaled job set and the seq that
+// orders it against every other snapshot (saveMarshaledSeq drops one older
+// than what already landed).
+type marshaledJobs struct {
+	data []byte
+	seq  uint64
+}
+
+// persistLocked marshals the job set under the caller's t.mu and takes the
+// next seq. A failure is wrapped as ErrPersistFailed with the cause, and the
+// caller must undo the mutation it was persisting or surface the error: the
+// in-memory state is now ahead of disk.
+func (t *jobTable) persistLocked() (marshaledJobs, error) {
+	data, err := t.marshalLocked()
+	if err != nil {
+		slog.Error("marshal cron store", "err", err)
+		return marshaledJobs{}, fmt.Errorf("%w: %w", ErrPersistFailed, err)
+	}
+	return marshaledJobs{data: data, seq: t.saveSeq.Add(1)}, nil
+}
+
 // mutationKind is a per-job state change the dashboard and IM commands make by
 // exact ID or by chat-scoped prefix.
 type mutationKind int
@@ -331,9 +352,8 @@ type mutationResult struct {
 	// entry a resume must commit.
 	removeEntry cronEntryID
 	plan        *cronEntryPlan
-	// data and seq are the snapshot to write when persistErr is nil.
-	data []byte
-	seq  uint64
+	// snap is the snapshot to write when persistErr is nil.
+	snap marshaledJobs
 }
 
 // mutateByID applies kind to the job with exact id.
@@ -380,16 +400,10 @@ func (t *jobTable) mutateLocked(j *Job, kind mutationKind) (r mutationResult) {
 		}
 		r.plan = &p
 	}
-	data, err := t.marshalLocked()
-	if err != nil {
-		slog.Error("marshal cron store", "err", err)
-		r.persistErr = fmt.Errorf("%w: %w", ErrPersistFailed, err)
-		if kind != mutDelete {
-			j.entryID, j.Paused = prevEntry, prevPaused
-			r.removeEntry, r.plan = 0, nil
-		}
-	} else {
-		r.data, r.seq = data, t.saveSeq.Add(1)
+	r.snap, r.persistErr = t.persistLocked()
+	if r.persistErr != nil && kind != mutDelete {
+		j.entryID, j.Paused = prevEntry, prevPaused
+		r.removeEntry, r.plan = 0, nil
 	}
 	r.job = *j
 	return r

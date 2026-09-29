@@ -179,7 +179,7 @@ type SchedulerConfig struct {
 // chatJobKey identifies a (Platform, ChatID) pair for the per-chat job
 // counter, making the maxJobsPerChat check one map lookup instead of an O(N)
 // scan over s.tbl.jobs under s.tbl.mu (#661). Updates piggy-back on the already-locked
-// s.tbl.mu sections (addJobAcquiringLock / deleteLocked / Start) so the counter
+// s.tbl.mu sections (jobTable.insert / deleteLocked / Start) so the counter
 // never drifts from len-by-chat(s.tbl.jobs).
 type chatJobKey struct {
 	Platform string

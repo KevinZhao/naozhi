@@ -36,7 +36,7 @@ func (s *Scheduler) finishMutation(r mutationResult, kind mutationKind) (*Job, e
 	if r.persistErr != nil {
 		return nil, r.persistErr
 	}
-	s.saveMarshaledSeq(r.data, r.seq)
+	s.save(r.snap)
 	job := r.job
 	return &job, nil
 }

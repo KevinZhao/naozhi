@@ -1,88 +1,15 @@
-// anchor-keep: defer-vs-explicit Unlock is panic-safety, observable only by injecting a panic mid-critical-section; no production seam exists for that.
 package cron
 
 import (
-	"os"
-	"strings"
 	"testing"
 	"time"
 )
 
-// TestSetJobPrompt_UsesIIFEWithDeferUnlock_Structural pins R112714-LOGIC-2:
-// SetJobPrompt must wrap its critical section in an IIFE with
-// defer s.tbl.mu.Unlock() so that a panic inside resumePlanLocked (schedule
-// parsing) does not permanently lock the mutex. The previous code used
-// s.tbl.mu.Lock() without defer and relied on 5 explicit Unlock() calls across
-// all return paths — a panic skipped all of them.
-//
-// Structural check: the SetJobPrompt function body must contain the IIFE
-// pattern (func() ... { s.tbl.mu.Lock(); defer s.tbl.mu.Unlock() }) rather than a
-// bare s.tbl.mu.Lock() followed by explicit s.tbl.mu.Unlock() calls.
-func TestSetJobPrompt_UsesIIFEWithDeferUnlock_Structural(t *testing.T) {
-	src, err := os.ReadFile("scheduler_jobs.go")
-	if err != nil {
-		t.Fatalf("read scheduler_jobs.go: %v", err)
-	}
-	body := string(src)
-
-	const fnMarker = "func (s *Scheduler) SetJobPrompt("
-	fnIdx := strings.Index(body, fnMarker)
-	if fnIdx < 0 {
-		t.Fatal("SetJobPrompt not found in scheduler_jobs.go")
-	}
-	fnBody := body[fnIdx:]
-	if next := strings.Index(fnBody[len(fnMarker):], "\nfunc "); next >= 0 {
-		fnBody = fnBody[:len(fnMarker)+next]
-	}
-
-	// Must contain the deferred unlock pattern inside a closure.
-	if !strings.Contains(fnBody, "defer s.tbl.mu.Unlock()") {
-		t.Error("R112714-LOGIC-2: SetJobPrompt must use `defer s.tbl.mu.Unlock()` " +
-			"inside an IIFE so a panic in resumeJobLocked does not permanently " +
-			"lock s.tbl.mu. The previous bare s.tbl.mu.Lock() + 5 explicit Unlock() " +
-			"calls had no panic safety.")
-	}
-
-	// Must NOT contain bare s.tbl.mu.Unlock() outside a defer (i.e. direct
-	// calls like `s.tbl.mu.Unlock()` that are not prefixed by `defer`).
-	// We check that the only Unlock call is the deferred one. Count non-defer
-	// occurrences: any "s.tbl.mu.Unlock()" not preceded by "defer" is a leftover
-	// explicit call from the old pattern.
-	remaining := fnBody
-	bareUnlockCount := 0
-	const bareUnlock = "s.tbl.mu.Unlock()"
-	const deferUnlock = "defer s.tbl.mu.Unlock()"
-	for {
-		idx := strings.Index(remaining, bareUnlock)
-		if idx < 0 {
-			break
-		}
-		// Check if this occurrence is part of a defer statement.
-		// Look back up to 10 chars for "defer ".
-		start := idx
-		if start > 10 {
-			start = idx - 10
-		}
-		context := remaining[start:idx]
-		if !strings.Contains(context, "defer") {
-			bareUnlockCount++
-		}
-		remaining = remaining[idx+len(bareUnlock):]
-	}
-	_ = deferUnlock // used above indirectly
-	if bareUnlockCount > 0 {
-		t.Errorf("R112714-LOGIC-2: SetJobPrompt still contains %d bare "+
-			"s.tbl.mu.Unlock() call(s) not covered by defer. These are the old "+
-			"explicit unlock points that a panic would skip. All unlocks must "+
-			"be handled by the single `defer s.tbl.mu.Unlock()` in the IIFE.",
-			bareUnlockCount)
-	}
-}
-
 // TestSetJobPrompt_AllReturnPathsUnlock verifies that SetJobPrompt unlocks
 // s.tbl.mu on all observable return paths (not-found, already-set, persist-fail,
-// success) — the IIFE + defer pattern guarantees this structurally, but this
-// runtime test catches any regression where the lock is held after return.
+// success) — jobTable.fillPrompt's deferred Unlock guarantees this
+// structurally, but this runtime test catches any regression where the lock
+// is held after return.
 func TestSetJobPrompt_AllReturnPathsUnlock(t *testing.T) {
 	t.Parallel()
 

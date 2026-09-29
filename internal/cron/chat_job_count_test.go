@@ -1,6 +1,6 @@
 // chat_job_count_test.go pins the R237-PERF-5 (#661) per-chat counter
 // invariant: s.tbl.chatJobCount must stay in lock-step with s.tbl.jobs grouped by
-// (Platform, ChatID). The prior O(N) scan in addJobAcquiringLock was the
+// (Platform, ChatID). The prior O(N) scan on the add path was the
 // canonical truth; the new counter is a derived index that the per-chat
 // cap depends on, so any drift would silently disable the cap or reject
 // legitimate adds.

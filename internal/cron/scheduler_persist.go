@@ -85,17 +85,15 @@ var defaultMarshalJobs = marshalJobsFn(json.Marshal)
 // surface it (e.g. HTTP 500): the in-memory mutation already happened and is
 // now unpersisted, so a restart would replay the prior on-disk state.
 func (s *Scheduler) persistJobsLocked() (func(), error) {
-	data, err := s.tbl.marshalLocked()
+	m, err := s.tbl.persistLocked()
 	if err != nil {
-		slog.Error("marshal cron store", "err", err)
-		return nil, fmt.Errorf("%w: %w", ErrPersistFailed, err)
+		return nil, err
 	}
-	// Monotonic seq captured under s.tbl.mu total-orders marshals with the state they
-	// represent; saveMarshaledSeq skips writes older than what already landed
-	// (sync.Mutex is not FIFO, so a later marshal can reach storeMu first).
-	seq := s.tbl.saveSeq.Add(1)
-	return func() { s.saveMarshaledSeq(data, seq) }, nil
+	return func() { s.save(m) }, nil
 }
+
+// save writes a snapshot the table marshaled. Caller must not hold s.tbl.mu.
+func (s *Scheduler) save(m marshaledJobs) { s.saveMarshaledSeq(m.data, m.seq) }
 
 // jobsSnapshot is a marshal-ready capture of the persisted job set taken under
 // s.tbl.mu: value copies of *Job in sortedJobIDs order, detached from s.tbl.jobs so

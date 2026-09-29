@@ -1,91 +1,77 @@
 package cron
 
 import (
-	"path/filepath"
 	"testing"
 )
 
-// TestUpdateJob_DoubleReregFail_JobMarkedPaused pins R20260607-LOGIC-1:
-// when both re-register attempts in the UpdateJob rollback path fail (the
-// "double-failure" path at scheduler_jobs.go ~line 797), the job must be
-// marked Paused so the dashboard shows a degraded state instead of
-// falsely reporting it as active with entryID=0 (zombie job).
+// revertReschedule is UpdateJob's way back when the new schedule fails to
+// plan after the old entry is already gone. validateSchedule shares the
+// parser, so the public API cannot reach it; these drive it directly.
 //
-// The double-failure path inside UpdateJob's schedRegErr!=nil block is not
-// reachable via the public UpdateJob API because validateSchedule (called
-// before the IIFE) uses the same robfig/cron parser as registerJob, so any
-// schedule that fails registerJob is already rejected by validateSchedule.
-// This test therefore exercises the fix directly by calling registerJob
-// with a schedule that bypasses validateSchedule (simulating future code
-// paths or engine changes that could decouple the two) and asserting that:
-//  1. registerJob returns an error for an invalid spec.
-//  2. Setting j.Paused = true after the failed re-register (the fix)
-//     is correctly observable — confirming the fix is in place and the
-//     field assignment path is reachable.
-//
-// Anchor: R20260607-LOGIC-1, scheduler_jobs.go "j2.Paused = true".
-func TestUpdateJob_DoubleReregFail_JobMarkedPaused(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
+// When even the old schedule no longer plans, the job must end Paused — on
+// disk too — so the dashboard shows the degraded state instead of an active
+// job with entryID=0 that never fires (R20260607-LOGIC-1).
+func TestRevertReschedule_OldScheduleBroken_JobMarkedPaused(t *testing.T) {
+	s, id := newTestSchedulerForPersist(t)
+	if _, err := s.ResumeJobByID(id); err != nil {
+		t.Fatal(err)
 	}
-	defer s.Stop()
+	entriesBefore := len(s.cron.Entries())
 
-	j := &Job{
-		Schedule: "@hourly",
-		Prompt:   "p",
-		Platform: "x",
-		ChatID:   "c1",
-	}
-	if err := s.AddJob(j); err != nil {
-		t.Fatalf("AddJob: %v", err)
-	}
+	s.revertReschedule(id, "INVALID_FOR_REREG")
 
-	// Simulate the double-failure state: the job has entryID=0 (first
-	// registerJob already failed and cleared it) and Schedule has been
-	// rolled back to an invalid spec (the old schedule was somehow corrupt).
-	// We bypass validateSchedule by writing directly into s.tbl.jobs.
-	s.tblForTest().mu.Lock()
-	lj := s.tblForTest().jobs[j.ID]
-	if lj == nil {
-		s.tblForTest().mu.Unlock()
-		t.Fatal("job not found after AddJob")
+	j, _ := s.tbl.snapshot(id)
+	if !j.Paused || j.Schedule != "INVALID_FOR_REREG" {
+		t.Errorf("live job = paused %v schedule %q, want paused on the old schedule", j.Paused, j.Schedule)
 	}
-	lj.entryID = 0
-	lj.Paused = false
-	lj.Schedule = "INVALID_FOR_REREG"
-	s.tblForTest().mu.Unlock()
-
-	// Call registerJob directly — this is what the rollback block does.
-	// Expect an error (invalid schedule).
-	s.tblForTest().mu.Lock()
-	j2 := s.tblForTest().jobs[j.ID]
-	if j2 == nil {
-		s.tblForTest().mu.Unlock()
-		t.Fatal("job vanished")
+	if onDisk, err := loadJobs(s.storePath); err != nil || onDisk[id] == nil || !onDisk[id].Paused {
+		t.Errorf("on disk: %+v, err %v; want paused", onDisk[id], err)
 	}
-	reErr := s.registerJob(j2)
-	if reErr == nil {
-		s.tblForTest().mu.Unlock()
-		t.Fatal("registerJob must fail for invalid schedule; precondition for fix is not met")
+	if n := len(s.cron.Entries()); n != entriesBefore {
+		t.Errorf("entries %d → %d; a broken schedule must not register", entriesBefore, n)
 	}
-	// R20260607-LOGIC-1: apply the fix under lock, mirroring the production code.
-	j2.Paused = true
-	s.tblForTest().mu.Unlock()
+}
 
-	// Verify the job is now Paused in s.tbl.jobs.
-	s.tblForTest().mu.RLock()
-	live := s.tblForTest().jobs[j.ID]
-	paused := live != nil && live.Paused
-	s.tblForTest().mu.RUnlock()
+// When the old schedule still plans, the job goes back to it with a live
+// entry, and disk agrees.
+func TestRevertReschedule_RestoresOldEntry(t *testing.T) {
+	s, id := newTestSchedulerForPersist(t)
+	if _, err := s.ResumeJobByID(id); err != nil {
+		t.Fatal(err)
+	}
+	// The state UpdateJob leaves before the new plan fails: the job on the new
+	// schedule, its old entry retired.
+	next := "@every 2h"
+	r, err := s.tbl.update(id, JobUpdate{Schedule: &next})
+	if err != nil || r.resched == nil {
+		t.Fatalf("update: %+v, %v", r, err)
+	}
+	s.cron.Remove(r.resched.removeEntry)
 
-	if !paused {
-		t.Error("R20260607-LOGIC-1: job must be Paused=true after double re-register failure")
+	s.revertReschedule(id, r.resched.oldSchedule)
+
+	j, _ := s.tbl.snapshot(id)
+	if j.Paused || j.Schedule != "@every 1h" || s.NextRun(&j).IsZero() {
+		t.Errorf("live job = paused %v schedule %q next %v, want active on @every 1h", j.Paused, j.Schedule, s.NextRun(&j))
+	}
+	if onDisk, err := loadJobs(s.storePath); err != nil || onDisk[id] == nil || onDisk[id].Schedule != "@every 1h" {
+		t.Errorf("on disk: %+v, err %v; want @every 1h", onDisk[id], err)
+	}
+}
+
+// A job deleted before the revert lands is left alone, and the entry the
+// revert committed for it is retired.
+func TestRevertReschedule_JobGone(t *testing.T) {
+	s, id := newTestSchedulerForPersist(t)
+	if _, err := s.DeleteJobByID(id); err != nil {
+		t.Fatal(err)
+	}
+	before := len(s.cron.Entries())
+	s.revertReschedule(id, "@every 1h")
+	if _, ok := s.tbl.snapshot(id); ok {
+		t.Error("revert resurrected a deleted job")
+	}
+	if n := len(s.cron.Entries()); n != before {
+		t.Errorf("entries %d → %d; the orphan entry must be retired", before, n)
 	}
 }

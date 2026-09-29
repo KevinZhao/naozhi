@@ -15,7 +15,7 @@ import (
 // the entry would round-trip back to disk on every persist and
 // inflate every /api/cron list broadcast.
 //
-// The write path (addJobAcquiringLock + UpdateJob) already enforces
+// The write path (jobTable.insert + UpdateJob) already enforces
 // the same cap; this test asserts loadJobs mirrors it.
 func TestLoadJobsDropsOverlongTitle(t *testing.T) {
 	t.Parallel()
