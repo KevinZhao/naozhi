@@ -20,7 +20,6 @@ func TestSessionsGitRoute_EndToEnd(t *testing.T) {
 
 	// A repo whose .git/HEAD names a branch, inside the server's allowed root.
 	root := t.TempDir()
-	srv.allowedRoot = root
 	srv.sessionH.SetAllowedRootForTest(root)
 	repo := filepath.Join(root, "proj")
 	gitDir := filepath.Join(repo, ".git")
@@ -90,7 +89,6 @@ func TestSessionsGitRoute_DoesNotDiscloseRepoAboveAllowedRoot(t *testing.T) {
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	srv.allowedRoot = allowed
 	srv.sessionH.SetAllowedRootForTest(allowed)
 
 	const key = "dashboard:pj:abc0123456789012:general"

@@ -27,20 +27,20 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 
 	s.hub = NewHub(HubOptions{
 		Router:    s.router,
-		Agents:    s.agents,
-		AgentCmds: s.agentCommands,
+		Agents:    hs.wiring.agents,
+		AgentCmds: hs.wiring.agentCommands,
 		DashToken: s.dashboardToken,
 		// Live getter, not a snapshot: RotateCookieGen must invalidate WS
 		// upgrades on the next handshake (#1398).
 		CookieMACFn:      s.auth.CookieMAC,
-		Guard:            s.sessionGuard,
-		Queue:            s.msgQueue,
+		Guard:            hs.wiring.sessionGuard,
+		Queue:            hs.wiring.msgQueue,
 		Nodes:            s.nodes,
 		ProjectMgr:       s.projectMgr,
-		Resolver:         s.resolver,
-		Scheduler:        s.scheduler,
+		Resolver:         hs.wiring.resolver,
+		Scheduler:        hs.wiring.scheduler,
 		ScratchPool:      s.scratchPool,
-		AllowedRoot:      s.allowedRoot,
+		AllowedRoot:      hs.wiring.allowedRoot,
 		TrustedProxy:     s.auth.TrustedProxy,
 		WSAuthLimiter:    s.auth.LoginAllow,
 		WSUpgradeLimiter: s.auth.WSUpgradeAllow,
@@ -62,7 +62,7 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.TrustedProxy), // 30 sends/min per IP (burst 30)
 		auth:          s.auth,
 		trustedProxy:  s.auth.TrustedProxy,
-		orient:        s.orient,
+		orient:        hs.wiring.orient,
 	}
 
 	// Scratch (ephemeral aside) API: pool built in buildServer; the sweeper
@@ -73,7 +73,7 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 			Router:      scratchRouter{s.hub.router},
 			Pool:        s.scratchPool,
 			OpenLimit:   newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy),
-			Agents:      s.agents,
+			Agents:      hs.wiring.agents,
 		})
 	}
 
@@ -97,10 +97,10 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	// WS payload selection happens inside hubBroadcaster. Same note as
 	// SetOnChange: both objects come from main.go.
 	telemetry := newHubBroadcaster(s.hub)
-	if s.scheduler != nil {
-		s.scheduler.SetTelemetry(telemetry)
+	if hs.wiring.scheduler != nil {
+		hs.wiring.scheduler.SetTelemetry(telemetry)
 	}
-	if s.sysessionMgr != nil {
-		s.sysessionMgr.SetTelemetry(telemetry)
+	if hs.wiring.sysessionMgr != nil {
+		hs.wiring.sysessionMgr.SetTelemetry(telemetry)
 	}
 }

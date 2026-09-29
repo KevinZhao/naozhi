@@ -80,6 +80,8 @@ var ruleIDs = []string{
 	"file_size",
 	"send_engine_ownership",
 	"stale_exemption",
+	"struct_budget",
+	"server_field_liveness",
 }
 
 type Violation struct {
@@ -179,6 +181,10 @@ func main() {
 	// Rule 3b-send: send_engine_ownership — send 块字段必须在 sendEngine 上，
 	// 流水线文件不得出现 *Hub 方法；检查的是声明本身。
 	vs = append(vs, scanSendEngineOwnership(*serverPkg)...)
+
+	// struct_budget / server_field_liveness: Server keeps only what something
+	// reads after construction (#2897 S4).
+	vs = append(vs, scanServerFields(*serverPkg)...)
 
 	// Rule 5: stale_exemption
 	vs = append(vs, scanStaleExemption(exempts, time.Now())...)

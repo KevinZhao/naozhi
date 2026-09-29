@@ -18,16 +18,16 @@ import (
 	"github.com/naozhi/naozhi/internal/dispatch"
 )
 
-// buildDispatcher wires the dispatcher from Server state that already exists
-// at this point in buildServerWithHandlers (router, platforms, queue, guard,
-// watchdog counters, appCtx).
-func (s *Server) buildDispatcher() *dispatch.Dispatcher {
+// buildDispatcher wires the dispatcher from the Server state that already
+// exists at this point in buildServerWithHandlers (router, platforms, watchdog
+// counters, appCtx) and the construction-only dependencies in w.
+func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 	// The nil guard must stay OUTSIDE the adapter: wrapping a nil scheduler in
 	// a struct value yields a non-nil interface and breaks the "nil disables
 	// /cron" contract (#1164).
 	var cronCommands dispatch.CronCommands
-	if s.scheduler != nil {
-		cronCommands = cronDispatchAdapter{s: s.scheduler}
+	if w.scheduler != nil {
+		cronCommands = cronDispatchAdapter{s: w.scheduler}
 	}
 	// Same for the router and resolver: a nil pointer boxed into the
 	// interface field would defeat the dispatcher's nil checks.
@@ -36,27 +36,27 @@ func (s *Server) buildDispatcher() *dispatch.Dispatcher {
 		router = dispatchRouter{s.router}
 	}
 	var resolver dispatch.KeyResolver
-	if s.resolver != nil {
-		resolver = s.resolver
+	if w.resolver != nil {
+		resolver = w.resolver
 	}
 	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:                router,
 		Platforms:             s.platforms,
-		Agents:                s.agents,
-		AgentCommands:         s.agentCommands,
+		Agents:                w.agents,
+		AgentCommands:         w.agentCommands,
 		Scheduler:             cronCommands,
 		ProjectMgr:            s.projectMgr,
 		Resolver:              resolver,
-		Guard:                 s.sessionGuard,
-		Queue:                 s.msgQueue,
-		Dedup:                 s.dedup,
-		AllowedRoot:           s.allowedRoot,
+		Guard:                 w.sessionGuard,
+		Queue:                 w.msgQueue,
+		Dedup:                 w.dedup,
+		AllowedRoot:           w.allowedRoot,
 		ClaudeDir:             s.claudeDir,
 		Capabilities:          serverCaps{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,
 		TotalTimeout:          s.totalTimeout,
-		WatchdogNoOutputKills: s.watchdog.noOutPtr(),
-		WatchdogTotalKills:    s.watchdog.totalPtr(),
+		WatchdogNoOutputKills: w.watchdog.noOutPtr(),
+		WatchdogTotalKills:    w.watchdog.totalPtr(),
 		// Service ctx so the passthrough send goroutine observes SIGTERM
 		// instead of waiting out its internal totalTimeout (#1320). appCtx is
 		// cancelled by Start's linker when the caller's ctx is.
