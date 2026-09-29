@@ -200,29 +200,20 @@ func (s *Scheduler) drainTriggerWG(ctx context.Context, stopStart time.Time) {
 // the seq we queued; a newer save racing ahead also advances it, which is
 // correctly treated as success (#1301).
 func (s *Scheduler) persistOnShutdown() {
-	s.tbl.mu.Lock()
-	save, err := s.persistJobsLocked()
-	// Read the seq we just queued so the post-save check below is
-	// deterministic (saveSeq.Add was the last mutation persistJobsLocked
-	// performed before returning).
-	queuedSeq := s.tbl.saveSeq.Load()
-	s.tbl.mu.Unlock()
+	m, err := s.tbl.persist()
 	if err != nil {
 		slog.Error("marshal cron store on shutdown",
 			"err", err,
 			"persist", "FAILED_DURING_SHUTDOWN")
 		return
 	}
-	if save == nil {
-		return
-	}
-	save()
-	// After save() returns, lastSavedSeq has either advanced to >= queuedSeq
+	s.save(m)
+	// After the save returns, lastSavedSeq has either advanced to >= m.seq
 	// (success or a newer save raced ahead) or it has not (WriteFileAtomic
 	// failed AND no newer save took our place — disk lags memory at exit).
-	if landed := s.lastSavedSeq.Load(); landed < queuedSeq {
+	if landed := s.lastSavedSeq.Load(); landed < m.seq {
 		slog.Error("save cron store on shutdown failed; in-memory state will not survive restart",
-			"queued_seq", queuedSeq,
+			"queued_seq", m.seq,
 			"last_saved_seq", landed,
 			"persist", "FAILED_DURING_SHUTDOWN")
 	}

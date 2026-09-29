@@ -412,64 +412,28 @@ func (s *Scheduler) Start() error {
 		return fmt.Errorf("load cron store: %w", err)
 	}
 
-	s.tbl.mu.Lock()
-	// Snapshot the fields passed to registerStub under lock so no *Job is
-	// dereferenced after s.tbl.mu is released (a later UpdateJob could race).
-	// lastSessionID 一起快照，重启后恢复的 cron stub 才能带上上次成功执行的
-	// session_id，historySource 才能从 JSONL 把历史读回来给 dashboard 显示。
-	type stubRow struct{ id, workDir, prompt, lastSessionID string }
-	var stubs []stubRow
-	// Enforce s.maxJobs during restore: an operator who lowered MaxJobs after
-	// the on-disk store already exceeded it must not silently load every job
-	// (#1187). Skipped jobs stay on disk (Start never persists), so raising
-	// the cap and restarting recovers them; a WARN per skipped job names it.
-	skippedOverCap := 0
-	skippedOverPerChat := 0
+	// Reject persisted jobs whose WorkDir escapes the configured sandbox:
+	// replaying an on-disk tampered entry must not grant filesystem access that
+	// validateWorkspace would reject at creation. Filtered before the caps so a
+	// rejected entry does not consume a slot. No-op when allowedRoot is empty.
+	admitted := make([]*Job, 0, len(restored))
 	for _, j := range restored {
-		// Reject persisted jobs whose WorkDir escapes the configured
-		// sandbox. Replaying an on-disk tampered entry must not grant
-		// filesystem access that validateWorkspace would reject at
-		// creation. When allowedRoot is empty (tests), this is a no-op.
 		if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot, s.allowedRootResolved) {
 			slog.Warn("cron job work_dir outside allowed_root; skipping",
 				"job_id", j.ID, "work_dir", j.WorkDir)
 			continue
 		}
-		// Cap check fires AFTER the workDir filter so a sandbox-rejected
-		// entry does not consume a cap slot.
-		if len(s.tbl.jobs) >= s.maxJobs {
-			slog.Warn("cron job over maxJobs cap; skipping (raise cron.MaxJobs to restore)",
-				"job_id", j.ID, "schedule", j.Schedule, "cap", s.maxJobs)
-			skippedOverCap++
-			continue
-		}
-		// Enforce the per-chat cap on the load path too: a legacy /
-		// hand-edited store with an over-cap chat would otherwise leave
-		// chatJobCount above the cap and make AddJob report "limit reached"
-		// while the operator believes there is headroom (#2060). Over-cap
-		// entries stay on disk like the maxJobs skip above.
-		if s.tbl.chatJobCount[chatKeyFor(j.Platform, j.ChatID)] >= s.maxJobsPerChat {
-			slog.Warn("cron job over per-chat cap; skipping (raise cron.MaxJobsPerChat to restore)",
-				"job_id", j.ID, "platform", j.Platform, "chat_id", j.ChatID, "cap", s.maxJobsPerChat)
-			skippedOverPerChat++
-			continue
-		}
-		if j.Paused {
-			s.tbl.jobs[j.ID] = j
-			s.tbl.indexLocked(j)
-			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
-			continue
-		}
-		if err := s.registerJob(j); err != nil {
-			slog.Warn("skip invalid cron job", "job_id", j.ID, "schedule", j.Schedule, "err", err)
-			continue
-		}
-		s.tbl.jobs[j.ID] = j
-		s.tbl.indexLocked(j)
-		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
+		admitted = append(admitted, j)
 	}
-	jobCount := len(s.tbl.jobs)
-	s.tbl.mu.Unlock()
+	// Entry-lifecycle writer like any other: the load plans, the commits below
+	// apply. Before s.cron.Start() a commit only appends to robfig's slice.
+	s.entryMu.Lock()
+	lr := s.tbl.load(admitted, s.maxJobs, s.maxJobsPerChat)
+	for _, p := range lr.plans {
+		s.commitAndApplyCronEntry(p)
+	}
+	s.entryMu.Unlock()
+	skippedOverCap, skippedOverPerChat, jobCount, stubs := lr.skippedOverCap, lr.skippedOverPerChat, lr.loaded, lr.stubs
 	if skippedOverCap > 0 {
 		slog.Warn("cron Start: jobs skipped due to maxJobs cap; remaining entries are still on disk",
 			"skipped", skippedOverCap, "loaded", jobCount, "cap", s.maxJobs)
