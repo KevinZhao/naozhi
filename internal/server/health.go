@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
 // HealthHandler serves the /health endpoint with system status information.
@@ -112,6 +113,11 @@ type healthAuthSection struct {
 	// stores are best-effort — a write failure never fails the run it records —
 	// so these counters are the only operator-visible trace of lost history.
 	RunStores *healthRunStores `json:"run_stores,omitempty"`
+	// SpawnDiags is every gate decision that dropped or ignored configured
+	// input since start: counts per layer|action and the latest keys, never
+	// the values. Without it an env var the filter refused shows up only in
+	// the log. Omitted while there are none.
+	SpawnDiags *spawndiag.Summary `json:"spawn_diags,omitempty"`
 }
 
 // healthRunStores groups the two run-history stores. Each sub-object is nil
