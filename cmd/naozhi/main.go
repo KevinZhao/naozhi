@@ -472,11 +472,8 @@ func main() {
 		// ResolveForPlannerKey path as the dashboard handler without coupling
 		// upstream to the server package.
 		upstreamResolver := session.NewKeyResolver(agents, project.NewDataSource(projectMgr))
-		conn := upstream.New(buildUpstreamConfig(cfg), wireup.UpstreamRouter(router), projectMgr, upstreamResolver)
-		if claudeDir != "" {
-			conn.SetDiscoverFunc(newUpstreamDiscoverFunc(claudeDir, router, projectMgr))
-			conn.SetPreviewFunc(newUpstreamPreviewFunc(claudeDir))
-		}
+		conn := upstream.New(buildUpstreamConfig(cfg), wireup.UpstreamRouter(router), projectMgr, upstreamResolver,
+			upstreamDiscovery(claudeDir, router, projectMgr))
 		go conn.Run(ctx)
 		slog.Info("upstream connector starting", "url", cfg.Upstream.URL, "node_id", cfg.Upstream.NodeID)
 	}
