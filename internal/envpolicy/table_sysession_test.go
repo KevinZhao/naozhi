@@ -1,8 +1,10 @@
 package envpolicy
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // Copies of the three retired sysession lists exactly as they stood in
@@ -220,5 +222,60 @@ func TestCredSets_MatchTheRetiredLiterals(t *testing.T) {
 	// key that fell out of it would stop being stripped for other backends.
 	if got, want := len(AllCredKeys), 7; got != want {
 		t.Errorf("AllCredKeys has %d keys, want %d: %v", got, want, AllCredKeys)
+	}
+}
+
+// %q escapes a quote inside the value as `\"`; the collapser used to treat that
+// as the closing quote, so everything after it leaked into the reason (#2973).
+// The three escape shapes: an escaped quote, an escaped backslash, and a value
+// whose last byte is a backslash.
+func TestGuardErrorReason_HonoursEscapesInsideTheQuotedValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"escaped quote", `ht"tpSECRET`, `scheme "…" not allowed; use https://`},
+		{"escaped backslash", `ht\SECRET`, `scheme "…" not allowed; use https://`},
+		{"trailing backslash", `htSECRET\`, `scheme "…" not allowed; use https://`},
+		{"escaped quote then quote", `a"b"SECRET`, `scheme "…" not allowed; use https://`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := fmt.Errorf("scheme %q not allowed; use https://", tc.value)
+			got := GuardErrorReason(err)
+			if got != tc.want {
+				t.Errorf("GuardErrorReason(%s) = %q, want %q", err.Error(), got, tc.want)
+			}
+			if strings.Contains(got, "SECRET") {
+				t.Errorf("reason leaks the value: %q", got)
+			}
+		})
+	}
+
+	// url.Parse renders the whole input with %q too, so the end-to-end guard
+	// path has the same exposure.
+	got := GuardErrorReason(ValidateBaseURLValue("http://x\"y\rSECRET.example/"))
+	if strings.Contains(got, "SECRET") {
+		t.Errorf("reason leaks the value through url.Parse: %q", got)
+	}
+}
+
+// The bound is applied per rune, not per byte: the ellipsis the collapser
+// writes is three bytes, so a byte cut could land inside it and emit invalid
+// UTF-8 into a log line.
+func TestGuardErrorReason_TruncatesOnRuneBoundaries(t *testing.T) {
+	t.Parallel()
+	msg := strings.Repeat("é", 159) + `"v"tail`
+	got := GuardErrorReason(fmt.Errorf("%s", msg))
+	if !utf8.ValidString(got) {
+		t.Fatalf("reason is not valid UTF-8: %q", got)
+	}
+	if utf8.RuneCountInString(got) != 161 { // 160 kept + the trailing ellipsis
+		t.Errorf("rune count = %d, want 161: %q", utf8.RuneCountInString(got), got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated reason lacks the ellipsis: %q", got)
 	}
 }
