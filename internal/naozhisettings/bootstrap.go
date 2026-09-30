@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -42,11 +43,69 @@ func Bootstrap(local []byte) (doc []byte, ok bool, err error) {
 	}
 	// Re-emit in original key order so the naozhi file is a minimal diff against
 	// the local one (the RFC §5.3 "view differences" feature depends on it).
+	return emitOrdered(keys, vals, stripped), true, nil
+}
+
+// SetTopLevel returns doc with every key in updates replaced IN PLACE, so key
+// order and untouched values survive verbatim; keys absent from doc are appended
+// in sorted order. A nil update value DELETES the key instead. An empty doc
+// starts from "{}".
+//
+// Callers own only the keys they pass: this is how a settings file can be
+// machine-maintained for a few keys while staying hand-editable everywhere else.
+func SetTopLevel(doc []byte, updates map[string]json.RawMessage) ([]byte, error) {
+	if len(bytes.TrimSpace(doc)) == 0 {
+		doc = []byte("{}")
+	}
+	keys, vals, err := parseTopLevelOrdered(doc)
+	if err != nil {
+		return nil, err
+	}
+	pending := make(map[string]bool, len(updates))
+	for k, v := range updates {
+		pending[k] = v != nil
+	}
+	drop := map[string]bool{}
+	for i, k := range keys {
+		v, ok := updates[k]
+		if !ok {
+			continue
+		}
+		delete(pending, k)
+		if v == nil {
+			drop[k] = true
+			continue
+		}
+		vals[i] = v
+	}
+	for _, k := range sortedKeys(pending) {
+		keys = append(keys, k)
+		vals = append(vals, updates[k])
+	}
+	return emitOrdered(keys, vals, drop), nil
+}
+
+// sortedKeys returns the true-valued keys of set in sorted order, so an appended
+// key block is deterministic across runs.
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k, v := range set {
+		if v {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// emitOrdered serialises parallel key/value slices as a two-space-indented JSON
+// object, skipping any key in skip.
+func emitOrdered(keys []string, vals []json.RawMessage, skip map[string]bool) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("{")
 	first := true
 	for i, k := range keys {
-		if stripped[k] {
+		if skip[k] {
 			continue
 		}
 		if !first {
@@ -63,7 +122,7 @@ func Bootstrap(local []byte) (doc []byte, ok bool, err error) {
 		buf.WriteString("\n")
 	}
 	buf.WriteString("}")
-	return buf.Bytes(), true, nil
+	return buf.Bytes()
 }
 
 // parseTopLevelOrdered parses a JSON object into parallel key/value slices in
