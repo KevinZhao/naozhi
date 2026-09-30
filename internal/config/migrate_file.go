@@ -26,6 +26,12 @@ type MigrateResult struct {
 	Applied []string
 	// Before and After are the file bytes; equal when nothing changed.
 	Before, After []byte
+	// Warnings are validation failures the produced document shares with the
+	// original, so the migration did not cause them. The usual one is an
+	// unset ${VAR}: `config migrate` runs in an operator's shell, which rarely
+	// has the systemd EnvironmentFile loaded, and the placeholder is what the
+	// file is supposed to carry. Reported, not fatal.
+	Warnings []string
 }
 
 // Changed reports whether the migration would rewrite the file.
@@ -69,22 +75,42 @@ func MigrateFile(path string) (MigrateResult, error) {
 		return res, fmt.Errorf("close encoder: %w", err)
 	}
 
-	// The produced document must load. Unmarshal + the full validator, not just
-	// a YAML parse: a rewrite that dropped a required key would otherwise be
-	// written and only fail at the next boot.
-	var check Config
-	if err := yaml.Unmarshal(buf.Bytes(), &check); err != nil {
-		return res, fmt.Errorf("re-parse produced config: %w", err)
-	}
-	applyDefaults(&check)
-	if err := parseDurations(&check); err != nil {
-		return res, fmt.Errorf("produced config failed duration parsing: %w", err)
-	}
-	if err := validateConfig(&check); err != nil {
-		return res, fmt.Errorf("produced config failed validation: %w", err)
+	// The produced document must load: the full validator, not just a YAML
+	// parse, or a rewrite that dropped a required key would only fail at the
+	// next boot. Validation sees the bytes the way Load does — after ${VAR}
+	// expansion — while the file keeps the placeholders (#2968).
+	if err := checkProduced(buf.Bytes()); err != nil {
+		// A failure the original document has too was not caused by this
+		// migration (typically an operator shell without the service's env);
+		// it is reported, not fatal. A failure only the produced document has
+		// is the surgery's own, and still refuses.
+		if before := checkProduced(data); before != nil && before.Error() == err.Error() {
+			res.Warnings = append(res.Warnings,
+				fmt.Sprintf("config fails validation before and after migration (not caused by it): %s", err))
+		} else {
+			return res, err
+		}
 	}
 	res.After = buf.Bytes()
 	return res, nil
+}
+
+// checkProduced runs the load path's checks over raw config bytes: env
+// expansion, decode, defaults, durations, validation. It is the migration's
+// re-validate step, so the wording of each error names the produced config.
+func checkProduced(raw []byte) error {
+	var check Config
+	if err := yaml.Unmarshal(expandEnvVars(raw), &check); err != nil {
+		return fmt.Errorf("re-parse produced config: %w", err)
+	}
+	applyDefaults(&check)
+	if err := parseDurations(&check); err != nil {
+		return fmt.Errorf("produced config failed duration parsing: %w", err)
+	}
+	if err := validateConfig(&check); err != nil {
+		return fmt.Errorf("produced config failed validation: %w", err)
+	}
+	return nil
 }
 
 // WriteMigrated replaces the config at path with res.After, atomically at 0600.
