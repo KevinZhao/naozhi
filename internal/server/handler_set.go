@@ -128,9 +128,9 @@ type wiring struct {
 	sysessionMgr  *sysession.Manager
 	orient        *orientConfig // nil = image auto-orientation off
 	scheduler     cronScheduler // nil when cron is not configured (see buildServerWithHandlers)
-	// routerEvents is opts.RouterEvents; buildDashboard binds the hub to it.
+	// routerEvents is opts.Relays.Router; buildDashboard binds the hub to it.
 	routerEvents *routerrelay.Relay
-	// runTelemetry is opts.RunTelemetry; buildDashboard binds the hub to it.
+	// runTelemetry is opts.Relays.RunTelemetry; buildDashboard binds the hub to it.
 	runTelemetry *runtelemetry.Relay
 	// watchdog holds the no-output / total watchdog-kill counters; the
 	// dispatcher, the session handlers and /health each get pointers into it.

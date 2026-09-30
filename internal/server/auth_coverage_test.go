@@ -46,9 +46,11 @@ func TestAPIUnauthenticatedRejected(t *testing.T) {
 		Router:         router,
 		Backend:        "claude",
 		DashboardToken: "unauth-coverage-token",
-		// /api/debug/* are only mounted in debug mode; mount them so the scan
-		// covers the routes the golden lists rather than a 404 subset.
-		DebugMode: true,
+		Features: FeatureOptions{
+			// /api/debug/* are only mounted in debug mode; mount them so the scan
+			// covers the routes the golden lists rather than a 404 subset.
+			Debug: true,
+		},
 	})
 	t.Cleanup(srv.appCancel)
 

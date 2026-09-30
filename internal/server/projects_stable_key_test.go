@@ -36,12 +36,14 @@ func newProjectsListForStableKeyTest(t *testing.T, enabled bool) (rows []map[str
 
 	router := session.NewRouter(session.RouterConfig{})
 	_, hs := buildServerWithHandlers(ServerOptions{
-		Addr:                    ":0",
-		Router:                  router,
-		Platforms:               map[string]platform.Platform{"test": &mockPlatform{}},
-		Backend:                 "claude",
-		ProjectManager:          mgr,
-		ProjectStableKeyEnabled: enabled,
+		Addr:           ":0",
+		Router:         router,
+		Platforms:      map[string]platform.Platform{"test": &mockPlatform{}},
+		Backend:        "claude",
+		ProjectManager: mgr,
+		Features: FeatureOptions{
+			ProjectStableKey: enabled,
+		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/projects", nil)

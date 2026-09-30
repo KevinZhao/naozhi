@@ -65,8 +65,8 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// "" when UserHomeDir fails; downstream sites nil-check claudeDir.
 	claudeDir := resolveClaudeDir()
 
-	// Single owner of the live node table; nil opts.Nodes ⇒ empty table.
-	nodes := newNodeRegistry(opts.Nodes)
+	// Single owner of the live node table; nil opts.Remote.Nodes ⇒ empty table.
+	nodes := newNodeRegistry(opts.Remote.Nodes)
 
 	warnUnsetAllowedRoot(opts)
 
@@ -95,13 +95,13 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		agents:        agents,
 		agentCommands: agentCommands,
 		allowedRoot:   opts.AllowedRoot,
-		debugMode:     opts.DebugMode,
+		debugMode:     opts.Features.Debug,
 		resolver:      resolver,
 		sysessionMgr:  opts.Sysession.Manager,
 		orient:        buildOrientConfig(opts),
 		scheduler:     scheduler,
-		routerEvents:  opts.RouterEvents,
-		runTelemetry:  opts.RunTelemetry,
+		routerEvents:  opts.Relays.Router,
+		runTelemetry:  opts.Relays.RunTelemetry,
 	}
 
 	s := &Server{
@@ -112,10 +112,10 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		router:           router,
 		logger:           opts.Logger,
 		claudeDir:        claudeDir,
-		noOutputTimeout:  opts.NoOutputTimeout,
-		totalTimeout:     opts.TotalTimeout,
+		noOutputTimeout:  opts.Watchdog.NoOutput,
+		totalTimeout:     opts.Watchdog.Total,
 		dashboardToken:   opts.DashboardToken,
-		onReady:          opts.OnReady,
+		onReady:          opts.Lifecycle.OnReady,
 		projectMgr:       opts.ProjectManager,
 		nodes:            nodes,
 
@@ -184,7 +184,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	})
 
 	// StartupCtx lets SIGTERM during startup abort the --version probe.
-	startupCtx := opts.StartupCtx
+	startupCtx := opts.Lifecycle.StartupCtx
 	if startupCtx == nil {
 		startupCtx = context.Background()
 	}
@@ -198,7 +198,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 
 	hs.healthH = buildHealthHandler(opts, s, w)
 
-	s.attachReverseNodeServer(opts.ReverseNodeServer)
+	s.attachReverseNodeServer(opts.Remote.ReverseServer)
 
 	hs.checkLimiters(w.scheduler != nil)
 
@@ -273,16 +273,16 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		NodeCache:        s.nodeCache,
 		StartedAt:        w.startedAt,
 		BackendTag:       tag,
-		WorkspaceID:      opts.WorkspaceID,
-		WorkspaceName:    opts.WorkspaceName,
-		VersionTag:       opts.Version,
+		WorkspaceID:      opts.Identity.WorkspaceID,
+		WorkspaceName:    opts.Identity.WorkspaceName,
+		VersionTag:       opts.Identity.Version,
 		WatchdogNoOut:    w.watchdog.noOutPtr(),
 		WatchdogTotal:    w.watchdog.totalPtr(),
 		RetiredStore:     retiredReader,
 		ValidateWS:       validateWorkspace,
 		SystemInfoFn:     systemInfo,
 
-		ProjectStableKeyEnabled: opts.ProjectStableKeyEnabled,
+		ProjectStableKeyEnabled: opts.Features.ProjectStableKey,
 	})
 	sessionH.InitStaticStats()
 	sessionH.WarmHistoryCache()
@@ -291,9 +291,9 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 	// half-wired while WarmHistoryCache runs: msgQueue.Cleanup frees the
 	// per-session FIFO entry; RecordRetired stamps the session and makes it
 	// visible to the history popover within one poll.
-	if opts.RouterEvents != nil {
+	if opts.Relays.Router != nil {
 		msgCleanup := w.msgQueue.Cleanup
-		opts.RouterEvents.BindKeyRetired(func(key, sessionID string) {
+		opts.Relays.Router.BindKeyRetired(func(key, sessionID string) {
 			msgCleanup(key)
 			sessionH.RecordRetired(sessionID)
 		})
@@ -311,13 +311,13 @@ func buildHealthHandler(opts ServerOptions, s *Server, w *wiring) *HealthHandler
 		router:             s.router,
 		auth:               s.auth,
 		startedAt:          w.startedAt,
-		workspaceID:        opts.WorkspaceID,
-		workspaceName:      opts.WorkspaceName,
-		version:            opts.Version,
-		noOutputTimeout:    opts.NoOutputTimeout,
-		totalTimeout:       opts.TotalTimeout,
-		noOutputTimeoutStr: opts.NoOutputTimeout.String(),
-		totalTimeoutStr:    opts.TotalTimeout.String(),
+		workspaceID:        opts.Identity.WorkspaceID,
+		workspaceName:      opts.Identity.WorkspaceName,
+		version:            opts.Identity.Version,
+		noOutputTimeout:    opts.Watchdog.NoOutput,
+		totalTimeout:       opts.Watchdog.Total,
+		noOutputTimeoutStr: opts.Watchdog.NoOutput.String(),
+		totalTimeoutStr:    opts.Watchdog.Total.String(),
 		watchdogNoOut:      w.watchdog.noOutPtr(),
 		watchdogTotal:      w.watchdog.totalPtr(),
 		nodeAccess:         s.nodes,

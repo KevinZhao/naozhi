@@ -35,9 +35,11 @@ func TestShutdownComplete_ClosesOnlyAfterDrain(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	ready := make(chan struct{})
 	srv := NewWithOptions(ServerOptions{
-		Addr:    "127.0.0.1:0",
-		Router:  router,
-		OnReady: func() { close(ready) },
+		Addr:   "127.0.0.1:0",
+		Router: router,
+		Lifecycle: LifecycleOptions{
+			OnReady: func() { close(ready) },
+		},
 	})
 
 	// Contract (a): channel exists and is open before Start.

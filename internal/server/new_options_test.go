@@ -57,12 +57,14 @@ func TestNewWithOptions_NilMapsTolerated(t *testing.T) {
 func TestNewWithOptions_FieldsRoundTrip(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	srv, hs := buildServerWithHandlers(ServerOptions{
-		Addr:          ":0",
-		Router:        router,
-		Backend:       "kiro",
-		WorkspaceID:   "ws-a",
-		WorkspaceName: "Alpha",
-		Version:       "v0.0.1",
+		Addr:    ":0",
+		Router:  router,
+		Backend: "kiro",
+		Identity: IdentityOptions{
+			WorkspaceID:   "ws-a",
+			WorkspaceName: "Alpha",
+			Version:       "v0.0.1",
+		},
 	})
 	// Backend selection must derive the kiro reply tag (R20260603-ARCH-1: the
 	// write-only backendTag field was removed; assert the resolver directly).

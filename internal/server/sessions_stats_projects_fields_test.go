@@ -39,12 +39,14 @@ func TestSessionsStatsProjects_CarriesPaletteFields(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	srv := NewWithOptions(ServerOptions{
-		Addr:                    ":0",
-		Router:                  router,
-		Platforms:               map[string]platform.Platform{"test": &mockPlatform{}},
-		Backend:                 "claude",
-		ProjectManager:          mgr,
-		ProjectStableKeyEnabled: true,
+		Addr:           ":0",
+		Router:         router,
+		Platforms:      map[string]platform.Platform{"test": &mockPlatform{}},
+		Backend:        "claude",
+		ProjectManager: mgr,
+		Features: FeatureOptions{
+			ProjectStableKey: true,
+		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
