@@ -2586,34 +2586,33 @@ function maybeAutoPageBack() {
   // loadEarlierEvents prepends older events and, when they include a visible
   // bubble, the placeholder is removed by prependEvents. If the new page is
   // still all-internal, chain another attempt (still bounded by the counter).
-  Promise.resolve(loadEarlierEvents()).then(() => {
+  Promise.resolve(loadEarlierEvents(1)).then(() => {
     const ev = document.getElementById('events-scroll');
     if (ev && !ev.querySelector('.event')) maybeAutoPageBack();
     else transcript.autoPageBackCount = 0;
   });
 }
 
-async function loadEarlierEvents() {
+// EARLIER_SKIP_MAX_PAGES bounds the pages one click walks while each is all
+// internal (an agent team leaves thousands of task_progress in a row); the
+// cursor keeps advancing, so an exhausted budget still helps the next click.
+const EARLIER_SKIP_MAX_PAGES = 10;
+
+// loadEarlierEvents pages backward from the cursor, up to maxPages requests
+// (default EARLIER_SKIP_MAX_PAGES), until a page shows a visible bubble.
+async function loadEarlierEvents(maxPages) {
   if (transcript.earlierLoading || !selection.key) return;
   const el = document.getElementById('events-scroll');
   if (!el) return;
 
-  // The oldest currently-rendered event timestamp comes from the first
-  // .event child in the scroller. Walk children forward to skip dividers.
-  let oldestTime = 0;
-  for (const c of el.children) {
-    if (c.classList && c.classList.contains('event')) {
-      oldestTime = Number(c.getAttribute('data-time') || 0);
-      break;
-    }
-  }
-  // Fallback: when no `.event` is rendered (e.g. the visible page was
-  // entirely internal events filtered out by INTERNAL_EVENT_TYPES during a
-  // parallel agent team turn), page against the cursor we recorded at
-  // fetch time. Without this the button appears to do nothing and the
-  // operator has no path back to the earlier conversation.
-  if (!oldestTime) oldestTime = transcript.oldestFetchedEventTime;
+  // Cursor = oldest FETCHED event, not the oldest rendered bubble: an all-
+  // internal page never reaches the DOM, so a DOM cursor re-fetched that same
+  // page on every click. The DOM head only covers a missing cursor.
+  let oldestTime = transcript.oldestFetchedEventTime;
+  const head = oldestTime ? null : el.querySelector(':scope > .event');
+  if (head) oldestTime = Number(head.getAttribute('data-time') || 0);
   if (!oldestTime) return;
+  const budget = maxPages > 0 ? maxPages : EARLIER_SKIP_MAX_PAGES;
 
   // Capture session identity at dispatch time (mirrors fetchEvents): the
   // operator can switch sessions while we await, and prepending the old
@@ -2623,26 +2622,31 @@ async function loadEarlierEvents() {
   const gen = transcript.earlierGen;
   const stale = () => selection.key !== key || selection.node !== node || gen !== transcript.earlierGen;
   transcript.earlierLoading = true;
-  updateEarlierButton('loading');
   try {
-    let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(key) +
-              '&before=' + oldestTime + '&limit=' + EARLIER_PAGE_LIMIT;
-    if (node && node !== 'local') url += '&node=' + encodeURIComponent(node);
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch(url, { headers });
-    if (stale()) return;
-    if (!r.ok) { updateEarlierButton('error'); return; }
-    const events = await r.json();
-    if (stale()) return;
-    if (!Array.isArray(events) || events.length === 0) {
-      updateEarlierButton('done');
-      return;
+    for (let n = 1; ; n++) {
+      // Per page: prependEvents re-mounts the button in its 'ready' state.
+      updateEarlierButton('loading');
+      let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(key) +
+                '&before=' + oldestTime + '&limit=' + EARLIER_PAGE_LIMIT;
+      if (node && node !== 'local') url += '&node=' + encodeURIComponent(node);
+      const r = await fetch(url, { headers });
+      if (stale()) return;
+      if (!r.ok) { updateEarlierButton('error'); return; }
+      const body = await r.json();
+      if (stale()) return;
+      const events = Array.isArray(body) ? body : [];
+      const shown = prependEvents(events);
+      // A short (or empty) page means the history is exhausted.
+      if (events.length < EARLIER_PAGE_LIMIT) { updateEarlierButton('done'); return; }
+      const next = transcript.oldestFetchedEventTime;
+      // Stop on a visible bubble, on budget, or on a stuck cursor (a server
+      // ignoring `before` must not spin this loop).
+      if (shown || n >= budget || !next || next >= oldestTime) { updateEarlierButton('ready'); return; }
+      oldestTime = next;
     }
-    prependEvents(events);
-    // If we got a full page there may be more; otherwise mark done.
-    updateEarlierButton(events.length >= EARLIER_PAGE_LIMIT ? 'ready' : 'done');
   } catch (e) {
     console.error('load earlier events:', e);
     if (!stale()) updateEarlierButton('error');
@@ -2661,9 +2665,10 @@ async function loadEarlierEvents() {
 // the user's visual position stable (the bubble they're currently reading
 // should not shift). Only runs KaTeX/Mermaid on the freshly-inserted fragment
 // so 500-bubble sessions don't re-scan the entire DOM on each page.
+// Returns whether the page rendered at least one visible bubble.
 function prependEvents(events) {
   const el = document.getElementById('events-scroll');
-  if (!el || !events || events.length === 0) return;
+  if (!el || !events || events.length === 0) return false;
 
   // Advance the pagination cursor before DOM work so a subsequent
   // loadEarlierEvents sees the new floor even if the freshly prepended
@@ -2733,6 +2738,7 @@ function prependEvents(events) {
   // incremental — no DOM scan is needed.
   runPendingAsync();
   navRebuild();
+  return !!html;
 }
 
 // ensureEarlierButton injects/refreshes the "load earlier" affordance at the
@@ -2748,7 +2754,7 @@ function ensureEarlierButton() {
     btn.className = 'earlier-events-btn';
     btn.style.cssText = 'display:block;margin:8px auto;padding:6px 14px;background:var(--nz-bg-2);border:1px solid var(--nz-border);color:var(--nz-text);border-radius:6px;cursor:pointer;font-size:12px';
     btn.textContent = '加载更早的事件';
-    btn.onclick = loadEarlierEvents;
+    btn.onclick = () => loadEarlierEvents();
     el.insertBefore(btn, el.firstChild);
   } else if (el.firstChild !== btn) {
     el.insertBefore(btn, el.firstChild);
@@ -2832,10 +2838,9 @@ function renderEvents(events, hasMore) {
   if (events.length > 0) {
     const last = events[events.length - 1];
     if (last.time) transcript.lastRenderedEventTime = last.time;
-    const first = events[0];
-    if (first.time && (transcript.oldestFetchedEventTime === 0 || first.time < transcript.oldestFetchedEventTime)) {
-      transcript.oldestFetchedEventTime = first.time;
-    }
+    // Wholesale replace: the cursor restarts at this page's head; an older one
+    // kept across a WS reconnect / fallback full fetch would skip the gap.
+    if (events[0].time) transcript.oldestFetchedEventTime = events[0].time;
   }
   if (showEarlier) {
     ensureEarlierButton();
@@ -2854,8 +2859,8 @@ function renderEvents(events, hasMore) {
 
 // trimEventsScroll bounds the live DOM (#398): drop oldest top children once the
 // scroller exceeds MAX_LIVE_DOM_EVENTS. Preserves a pinned "load earlier" button
-// (it always lives at the top) and advances oldestFetchedEventTime so a later
-// loadEarlierEvents re-fetches whatever we just evicted instead of leaving a gap.
+// (it always lives at the top) and moves oldestFetchedEventTime to the new head
+// so a later loadEarlierEvents re-fetches whatever we just evicted, gap-free.
 function trimEventsScroll(el) {
   if (!el) return;
   // Count rendered event bubbles only; dividers/buttons are cheap and ride along.
@@ -2866,15 +2871,13 @@ function trimEventsScroll(el) {
   while (node && bubbles > MAX_LIVE_DOM_EVENTS) {
     const next = node.nextSibling;
     if (node === btn) { node = next; continue; }
-    const isBubble = node.nodeType === 1 && node.classList && node.classList.contains('event');
-    if (isBubble) {
-      const t = parseInt(node.getAttribute('data-time') || '0', 10);
-      if (t && t > transcript.oldestFetchedEventTime) transcript.oldestFetchedEventTime = t;
-      bubbles--;
-    }
+    if (node.nodeType === 1 && node.classList && node.classList.contains('event')) bubbles--;
     el.removeChild(node);
     node = next;
   }
+  // The surviving head, not the last evicted bubble: `before=` is strict.
+  const t = Number(el.querySelector(':scope > .event')?.getAttribute('data-time') || 0);
+  if (t > transcript.oldestFetchedEventTime) transcript.oldestFetchedEventTime = t;
   // The tail no longer starts at the true session head, so make "load earlier"
   // available even if the initial page was short.
   ensureEarlierButton();
@@ -4285,12 +4288,8 @@ const wsm = {
       // Initial 帧把面板重置成加载占位符但水位没动，新 pushLoop 推同批事件时
       // 全部撞上 `e.time <= lastRenderedEventTime` 被整批丢弃。
       transcript.lastRenderedEventTime = events.length ? (events[events.length - 1].time || 0) : 0;
-      if (events.length > 0) {
-        const first = events[0];
-        if (first.time && (transcript.oldestFetchedEventTime === 0 || first.time < transcript.oldestFetchedEventTime)) {
-          transcript.oldestFetchedEventTime = first.time;
-        }
-      }
+      // Full replace: the cursor restarts at this frame's head (see renderEvents).
+      if (events.length > 0 && events[0].time) transcript.oldestFetchedEventTime = events[0].time;
       if (showEarlier) {
         ensureEarlierButton();
       }

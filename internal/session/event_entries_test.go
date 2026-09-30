@@ -12,13 +12,16 @@ import (
 // filesystem. Records calls so tests can assert the fallback is (or is not)
 // consulted.
 type fakeHistorySource struct {
-	calls   int
-	entries []clievent.EventEntry
-	err     error
+	calls      int
+	lastBefore int64
+	lastLimit  int
+	entries    []clievent.EventEntry
+	err        error
 }
 
-func (f *fakeHistorySource) LoadBefore(_ context.Context, _ int64, _ int) ([]clievent.EventEntry, error) {
+func (f *fakeHistorySource) LoadBefore(_ context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	f.calls++
+	f.lastBefore, f.lastLimit = beforeMS, limit
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -101,23 +104,76 @@ func TestEventEntriesBeforeCtx_FallsBackToSourceWhenMemoryEmpty(t *testing.T) {
 	}
 }
 
-func TestEventEntriesBeforeCtx_SkipsSourceWhenMemoryHit(t *testing.T) {
+func TestEventEntriesBeforeCtx_SkipsSourceWhenMemoryFillsPage(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	s.persistedHistory = []clievent.EventEntry{
-		{Time: 50, Summary: "mem-a"},
+		{Time: 40, Summary: "mem-a"},
+		{Time: 50, Summary: "mem-b"},
 	}
 	fake := &fakeHistorySource{
 		entries: []clievent.EventEntry{{Time: 10, Summary: "disk"}},
 	}
 	s.SetHistorySource(fake)
 
-	got := s.EventEntriesBeforeCtx(context.Background(), 100, 10)
+	got := s.EventEntriesBeforeCtx(context.Background(), 100, 2)
 	if fake.calls != 0 {
-		t.Errorf("memory hit must not consult Source; got %d calls", fake.calls)
+		t.Errorf("a full memory page must not consult Source; got %d calls", fake.calls)
 	}
+	if len(got) != 2 || got[0].Summary != "mem-a" || got[1].Summary != "mem-b" {
+		t.Errorf("got %+v, want mem-a, mem-b", got)
+	}
+}
+
+// A short memory page means the memory bottom was reached. Returning it alone
+// made the dashboard's "load earlier" stop there ("没有更早的事件") while the
+// disk tier still held older history; the rest of the page must come from
+// disk, anchored strictly before the earliest memory entry so tiers never
+// overlap.
+func TestEventEntriesBeforeCtx_TopsUpShortMemoryPageFromSource(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []clievent.EventEntry{
+		{Time: 50, Summary: "mem-a"},
+	}
+	fake := &fakeHistorySource{
+		entries: []clievent.EventEntry{
+			{Time: 10, Summary: "disk-1"},
+			{Time: 20, Summary: "disk-2"},
+		},
+	}
+	s.SetHistorySource(fake)
+
+	got := s.EventEntriesBeforeCtx(context.Background(), 100, 10)
+	if fake.calls != 1 {
+		t.Fatalf("short memory page must consult Source once; got %d calls", fake.calls)
+	}
+	if fake.lastBefore != 50 {
+		t.Errorf("disk read anchored at before=%d, want 50 (earliest memory entry)", fake.lastBefore)
+	}
+	if fake.lastLimit != 9 {
+		t.Errorf("disk read limit=%d, want 9 (page minus memory entries)", fake.lastLimit)
+	}
+	want := []string{"disk-1", "disk-2", "mem-a"}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i].Summary != w {
+			t.Errorf("got[%d]=%q want %q", i, got[i].Summary, w)
+		}
+	}
+}
+
+func TestEventEntriesBeforeCtx_SourceErrorKeepsMemoryPage(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []clievent.EventEntry{{Time: 50, Summary: "mem-a"}}
+	s.SetHistorySource(&fakeHistorySource{err: errors.New("disk read failed")})
+
+	got := s.EventEntriesBeforeCtx(context.Background(), 100, 10)
 	if len(got) != 1 || got[0].Summary != "mem-a" {
-		t.Errorf("got %+v, want mem-a", got)
+		t.Errorf("got %+v, want the memory page on Source error", got)
 	}
 }
 
