@@ -83,6 +83,7 @@ cmd/naozhi/main.go
   -> agentroute   "/command agentId" 解析的单一真相源
   -> assets       Dashboard "installed assets" 零依赖叶子
   -> ccassets     Claude Code 资产浏览 provider（dashboard 用）
+  -> ccmodels     toolbox 推荐模型清单 ↔ cc settings 的对账（纯逻辑；子包 ccprobe 负责实跑验证）
   -> transcribe   语音转写（Amazon Transcribe Streaming）
   -> selfupdate   GitHub Releases 自升级 + 校验（macOS 上保留自签名身份，见 docs/ops/macos-codesign.md）
   -> shim         零停机重启：outlive naozhi 的 sidecar 进程

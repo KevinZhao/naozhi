@@ -26,7 +26,7 @@ func TestHandleRequest_FetchEvents_AfterReadmitsWatermarkMillisecond(t *testing.
 	proc.EventLog.Append(clievent.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
 	proc.EventLog.Append(clievent.EventEntry{Time: 2000, UUID: "a", Type: "thinking", Summary: "..."})
 	router.InjectSession(key, proc)
-	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(router), nil, nil)
+	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(router), nil, nil, Discovery{})
 
 	// The dashboard rendered "a" (cursor 2000); its same-ms sibling lands next.
 	proc.EventLog.Append(clievent.EventEntry{Time: 2000, UUID: "b", Type: "text", Summary: "answer"})
