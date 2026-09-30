@@ -87,20 +87,17 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 		hs.memoryH = memory.New(resolveClaudeProjectsDir(), newIPLimiterWithProxy(memory.MemoryLimiterRate, memory.MemoryLimiterBurst, s.auth.TrustedProxy))
 	}
 
-	// Push session list changes to WS clients. Still a setter because the
-	// router is constructed in cmd/naozhi/main.go, not here — but it now runs
-	// at construction time, so no request can be served by a Hub that the
-	// router does not yet know about.
-	s.router.SetOnChange(s.hub.BroadcastSessionsUpdate)
-
-	// cron and sysession share one runtelemetry.Broadcaster; per-subsystem
-	// WS payload selection happens inside hubBroadcaster. Same note as
-	// SetOnChange: both objects come from main.go.
-	telemetry := newHubBroadcaster(s.hub)
-	if hs.wiring.scheduler != nil {
-		hs.wiring.scheduler.SetTelemetry(telemetry)
+	// Push session list changes to WS clients. The router is built in
+	// cmd/naozhi/main.go before the Hub can exist, so it was handed the relay
+	// and the Hub binds to it here — at construction time, so no request can
+	// be served by a Hub the router does not yet reach.
+	if hs.wiring.routerEvents != nil {
+		hs.wiring.routerEvents.BindSessionsChanged(s.hub.BroadcastSessionsUpdate)
 	}
-	if hs.wiring.sysessionMgr != nil {
-		hs.wiring.sysessionMgr.SetTelemetry(telemetry)
+
+	// cron and sysession share one relay, built in main.go before the Hub;
+	// per-subsystem WS payload selection happens inside hubBroadcaster.
+	if hs.wiring.runTelemetry != nil {
+		hs.wiring.runTelemetry.Bind(newHubBroadcaster(s.hub))
 	}
 }

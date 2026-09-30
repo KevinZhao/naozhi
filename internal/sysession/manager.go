@@ -70,6 +70,10 @@ type Config struct {
 	// drain. Defaults to os.Exit; embedders hosting sysession in a larger
 	// process can override it to shut down without killing the process.
 	OnHardFail func(code int)
+
+	// Telemetry receives daemon run-started / run-ended events on the seam
+	// cron uses (#1723); nil drops them.
+	Telemetry runtelemetry.Broadcaster
 }
 
 // DaemonRuntimeConfig is the common-shape per-daemon runtime knobs
@@ -166,11 +170,8 @@ type Manager struct {
 	// between Start, Stop and the daemon goroutines (#1653).
 	lifeP atomic.Pointer[ctxCancel]
 
-	// telemetry is the host's runtelemetry.Broadcaster (#1723), the same
-	// seam cron uses. atomic.Pointer because SetTelemetry is wired late
-	// (after the Hub is built) and races emitRun* reads on every Tick;
-	// nil ⇒ emit* is a silent no-op. Same shape as cron.Scheduler.telemetry.
-	telemetry atomic.Pointer[runtelemetry.Broadcaster]
+	// telemetry is cfg.Telemetry; nil ⇒ emit* is a silent no-op.
+	telemetry runtelemetry.Broadcaster
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -198,11 +199,11 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 
 	m := &Manager{
-		enabled: cfg.Enabled,
-		cfg:     cfg,
-		tickFn:  cfg.NewTicker,
+		enabled:   cfg.Enabled,
+		cfg:       cfg,
+		tickFn:    cfg.NewTicker,
+		telemetry: cfg.Telemetry,
 	}
-	// telemetry stays nil until the host wires it via SetTelemetry.
 	if !cfg.Enabled {
 		// Build nothing; Start is a no-op.
 		return m, nil

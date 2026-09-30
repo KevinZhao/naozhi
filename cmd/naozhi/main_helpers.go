@@ -23,6 +23,7 @@ import (
 	slackplatform "github.com/naozhi/naozhi/internal/platform/slack"
 	weixinplatform "github.com/naozhi/naozhi/internal/platform/weixin"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
 	"github.com/naozhi/naozhi/internal/sysession"
@@ -242,9 +243,10 @@ func sysSessionsWorkDir(cfg *config.Config, storePath string) string {
 // buildSysessionManager wires sysession.Manager from cfg.Sysession. Returns
 // (nil, "", nil) when disabled so the caller's nil guard stays meaningful, and
 // (nil, "", err) when enabled but unusable — the caller logs and continues
-// without daemons. Telemetry is wired later via Manager.SetTelemetry (#1723).
+// without daemons. telemetry is the run-event relay cron shares (#1723).
 func buildSysessionManager(cfg *config.Config, router *session.Router,
 	projectMgr *project.Manager, defaultWrapper *cli.Wrapper, storePath string,
+	telemetry runtelemetry.Broadcaster,
 ) (*sysession.Manager, string, error) {
 	if !cfg.Sysession.Enabled {
 		return nil, "", nil
@@ -364,6 +366,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		Daemons:     daemons,
 		// attachment-gc sweeps these roots; nil-safe inside the lister.
 		WorkspaceRoots: workspaceRootLister{router: router, projectMgr: projectMgr},
+		Telemetry:      telemetry,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("new manager: %w", err)

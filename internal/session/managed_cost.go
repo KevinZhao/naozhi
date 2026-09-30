@@ -19,8 +19,8 @@ import (
 // cron scheduler instead of writing them here (docs/rfc/cost-ledger.md §5.0).
 type costAccounting struct {
 	ledger *costledger.Store
-
-	mu         sync.RWMutex
+	// ownedByRun reports a turn some run writes the ledger for itself; nil
+	// means none is.
 	ownedByRun func(key string) bool
 
 	warnMu      sync.Mutex
@@ -30,28 +30,12 @@ type costAccounting struct {
 // maxWarnedModels bounds the unknown-basis dedup set.
 const maxWarnedModels = 64
 
-func newCostAccounting(ledger *costledger.Store) *costAccounting {
-	return &costAccounting{ledger: ledger, warnedModel: make(map[string]struct{})}
-}
-
-// setRunOwnership installs the gate; nil means no turn is owned elsewhere.
-func (c *costAccounting) setRunOwnership(fn func(key string) bool) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.ownedByRun = fn
-	c.mu.Unlock()
+func newCostAccounting(ledger *costledger.Store, ownedByRun func(key string) bool) *costAccounting {
+	return &costAccounting{ledger: ledger, ownedByRun: ownedByRun, warnedModel: make(map[string]struct{})}
 }
 
 func (c *costAccounting) owned(key string) bool {
-	if c == nil {
-		return false
-	}
-	c.mu.RLock()
-	fn := c.ownedByRun
-	c.mu.RUnlock()
-	return fn != nil && fn(key)
+	return c != nil && c.ownedByRun != nil && c.ownedByRun(key)
 }
 
 // warnUnknownBasis logs once per model whose price the CLI had to guess.
