@@ -25,8 +25,8 @@ type SchedulerDeps struct {
 	Agents        map[string]AgentOpts
 	AgentCommands map[string]string
 	// Telemetry receives RunStartedEvent / RunEndedEvent for every cron run.
-	// nil = no broadcast. cmd/naozhi builds the Scheduler before the Hub
-	// exists and injects late via SetTelemetry; both paths coexist.
+	// nil = no broadcast. cmd/naozhi passes a runtelemetry.Relay the server
+	// binds once the Hub exists.
 	Telemetry runtelemetry.Broadcaster
 	// Sandbox executes placement=sandbox jobs on AgentCore microVMs
 	// (agentcore-cloud-sandbox RFC §4.2); built by the wireup layer so cron
