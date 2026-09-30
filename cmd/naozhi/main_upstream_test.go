@@ -62,3 +62,13 @@ func TestNewUpstreamDiscoverFunc_EmptyArrayOnScanError(t *testing.T) {
 		t.Fatalf("discover payload is not a JSON array: %q (%v)", raw, uerr)
 	}
 }
+
+// Without a Claude projects dir neither RPC is wired; with one, both are.
+func TestUpstreamDiscovery(t *testing.T) {
+	if d := upstreamDiscovery("", nil, nil); d.Sessions != nil || d.Preview != nil {
+		t.Error("no claude dir: discovery RPCs wired anyway")
+	}
+	if d := upstreamDiscovery(t.TempDir(), nil, nil); d.Sessions == nil || d.Preview == nil {
+		t.Error("claude dir set: a discovery RPC is missing")
+	}
+}

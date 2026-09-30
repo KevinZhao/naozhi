@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -53,12 +52,14 @@ var circuitBreakerBackoff = 5 * time.Minute
 // Downstream consumers (reverseconn.go, dashboard.js) match this literal.
 const reasonSessionReset = "session_reset"
 
-// discoverFn is the callback type behind Connector.discoverFunc; a named
-// type so atomic.Pointer can box it.
-type discoverFn func() (json.RawMessage, error)
-
-// previewFn is the callback type behind Connector.previewFunc.
-type previewFn func(sessionID string) (json.RawMessage, error)
+// Discovery serves the primary's discovered-session RPCs from this node's local
+// Claude sessions. Either func may be nil; its RPC then answers an empty array.
+type Discovery struct {
+	// Sessions lists the discovered sessions as JSON.
+	Sessions func() (json.RawMessage, error)
+	// Preview returns a discovered session's conversation history as JSON.
+	Preview func(sessionID string) (json.RawMessage, error)
+}
 
 // Config is the upstream-local value shape New consumes. The cmd boundary
 // translates config.UpstreamConfig → upstream.Config so this bottom-of-DAG
@@ -84,15 +85,12 @@ type Connector struct {
 	claudeDir        string
 	hostname         string
 	defaultWorkspace string // used as allowedRoot for incoming workspace overrides
-	// discoverFunc / previewFunc are atomic so SetDiscoverFunc and
-	// handleRequest may run concurrently; Load returns nil when never set.
-	discoverFunc atomic.Pointer[discoverFn]
-	previewFunc  atomic.Pointer[previewFn]
+	discovery        Discovery
 }
 
 // New creates a Connector. projMgr may be nil if projects are not configured;
 // resolver may be nil (restart_planner then uses the inline AgentOpts path).
-func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver PlannerResolver) *Connector {
+func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver PlannerResolver, discovery Discovery) *Connector {
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
@@ -110,46 +108,8 @@ func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver P
 		claudeDir:        claudeDir,
 		hostname:         hostname,
 		defaultWorkspace: router.DefaultWorkspace(),
+		discovery:        discovery,
 	}
-}
-
-// SetDiscoverFunc sets a callback that returns discovered sessions as JSON.
-// Safe to call concurrently with handleRequest; nil clears the callback
-// (the RPC then returns an empty array).
-func (c *Connector) SetDiscoverFunc(fn func() (json.RawMessage, error)) {
-	if fn == nil {
-		c.discoverFunc.Store(nil)
-		return
-	}
-	boxed := discoverFn(fn)
-	c.discoverFunc.Store(&boxed)
-}
-
-// SetPreviewFunc sets a callback that returns conversation history for a discovered session.
-// Same semantics as SetDiscoverFunc; nil clears the callback.
-func (c *Connector) SetPreviewFunc(fn func(sessionID string) (json.RawMessage, error)) {
-	if fn == nil {
-		c.previewFunc.Store(nil)
-		return
-	}
-	boxed := previewFn(fn)
-	c.previewFunc.Store(&boxed)
-}
-
-// loadDiscoverFunc returns the current discover callback, or nil if none was installed.
-func (c *Connector) loadDiscoverFunc() discoverFn {
-	if p := c.discoverFunc.Load(); p != nil {
-		return *p
-	}
-	return nil
-}
-
-// loadPreviewFunc returns the current preview callback, or nil if none was installed.
-func (c *Connector) loadPreviewFunc() previewFn {
-	if p := c.previewFunc.Load(); p != nil {
-		return *p
-	}
-	return nil
 }
 
 // Run connects to the primary and serves requests. Reconnects on disconnect.

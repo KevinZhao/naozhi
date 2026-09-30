@@ -112,7 +112,7 @@ func TestConnector_CircuitBreakerTripsAndEmitsSingleWARN(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(origLogger) })
 
 	cfg := &Config{URL: wsAddr, NodeID: "node-cb", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil)
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
 
 	// Run for long enough to let 3+ failures accumulate (each attempt
 	// is fast because the server rejects immediately; sleeps are
@@ -209,7 +209,7 @@ func TestConnector_CircuitBreakerResetsOnSuccess(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(origLogger) })
 
 	cfg := &Config{URL: wsAddr, NodeID: "node-reset", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil)
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -11,7 +11,7 @@ import (
 // generated usage lists each command so `naozhi` with no / unknown args can
 // print an accurate listing.
 func TestSubcmdRegistryDispatch(t *testing.T) {
-	names := []string{"setup", "install", "uninstall", "version", "shim", "doctor", "upgrade", "cost", "config"}
+	names := []string{"setup", "install", "uninstall", "version", "shim", "doctor", "upgrade", "cost", "config", "models"}
 	for _, name := range names {
 		sc := findSubcmd(name)
 		if sc == nil {
