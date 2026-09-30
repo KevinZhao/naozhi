@@ -8,7 +8,7 @@ import (
 // TestJobResultSnapshotRestore pins the contract that JobState.restore
 // returns every field captured at snapshot time back to the target Job. The
 // recordTerminalResult rollback path relies on this round-trip when
-// persistJobsLocked fails — drift between the field set captured here and the
+// persistLocked fails — drift between the field set captured here and the
 // fields mutated under s.tbl.mu would silently leak partially-updated state into
 // dashboard reads. R247-CR-14 (#586).
 func TestJobResultSnapshotRestore(t *testing.T) {

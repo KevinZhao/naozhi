@@ -107,9 +107,7 @@ func TestJobTableSessionIDs(t *testing.T) {
 func TestEnsureStub_RegistersFromTheJobCopy(t *testing.T) {
 	r := &reapRouter{}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: r})
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs["jS"] = &Job{ID: "jS", WorkDir: "/w", Prompt: "p", LastSessionID: "sess-1", Schedule: "0 * * * *"}
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(&Job{ID: "jS", WorkDir: "/w", Prompt: "p", LastSessionID: "sess-1", Schedule: "0 * * * *"})
 	if !s.EnsureStub("cron:jS") {
 		t.Fatal("EnsureStub returned false for a registered job")
 	}

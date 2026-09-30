@@ -4,59 +4,39 @@ import "testing"
 
 // TestAddToChatIndexLocked_SyncsBothIndexes pins the invariant the Scheduler
 // godoc promises and that R249-CR-4 / R260528-ARCH-7 (#948 / #1368) made
-// structural: addToChatIndexLocked moves chatJobCount and jobsByChat in
-// lockstep, and deleteJobLocked is the exact inverse.
+// structural: indexLocked moves chatJobCount and jobsByChat in lockstep, and
+// deleteLocked is the exact inverse.
 func TestAddToChatIndexLocked_SyncsBothIndexes(t *testing.T) {
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10, AllowNilRouter: true}, SchedulerDeps{})
 	key := chatJobKey{Platform: "feishu", ChatID: "c1"}
-
 	jobs := []*Job{
 		{ID: "a", Platform: "feishu", ChatID: "c1"},
 		{ID: "b", Platform: "feishu", ChatID: "c1"},
 	}
+	tbl := tableWith(t, jobs...)
 
-	s.tblForTest().mu.Lock()
-	for _, j := range jobs {
-		s.tblForTest().jobs[j.ID] = j
-		s.addToChatIndexLocked(j)
+	if got := tbl.chatJobCount[key]; got != 2 {
+		t.Fatalf("chatJobCount = %d, want 2", got)
 	}
-	gotCount := s.tblForTest().chatJobCount[key]
-	gotLen := len(s.tblForTest().jobsByChat[key])
-	s.tblForTest().mu.Unlock()
-
-	if gotCount != 2 {
-		t.Fatalf("chatJobCount = %d, want 2", gotCount)
-	}
-	if gotLen != 2 {
-		t.Fatalf("len(jobsByChat) = %d, want 2", gotLen)
+	if got := len(tbl.jobsByChat[key]); got != 2 {
+		t.Fatalf("len(jobsByChat) = %d, want 2", got)
 	}
 
-	// deleteJobLocked must unwind both indexes in lockstep.
-	s.tblForTest().mu.Lock()
-	s.deleteJobLocked(jobs[0])
-	afterCount := s.tblForTest().chatJobCount[key]
-	afterLen := len(s.tblForTest().jobsByChat[key])
-	s.tblForTest().mu.Unlock()
-
-	if afterCount != 1 {
-		t.Fatalf("chatJobCount after delete = %d, want 1", afterCount)
+	// deleteLocked must unwind both indexes in lockstep.
+	tbl.deleteLocked(jobs[0])
+	if got := tbl.chatJobCount[key]; got != 1 {
+		t.Fatalf("chatJobCount after delete = %d, want 1", got)
 	}
-	if afterLen != 1 {
-		t.Fatalf("len(jobsByChat) after delete = %d, want 1", afterLen)
+	if got := len(tbl.jobsByChat[key]); got != 1 {
+		t.Fatalf("len(jobsByChat) after delete = %d, want 1", got)
 	}
 
 	// Removing the last job drops both map entries so the working set
 	// tracks only live chats.
-	s.tblForTest().mu.Lock()
-	s.deleteJobLocked(jobs[1])
-	_, countPresent := s.tblForTest().chatJobCount[key]
-	_, listPresent := s.tblForTest().jobsByChat[key]
-	s.tblForTest().mu.Unlock()
-
-	if countPresent {
+	tbl.deleteLocked(jobs[1])
+	if _, present := tbl.chatJobCount[key]; present {
 		t.Fatal("chatJobCount entry should be deleted when count hits zero")
 	}
-	if listPresent {
+	if _, present := tbl.jobsByChat[key]; present {
 		t.Fatal("jobsByChat entry should be deleted when slice empties")
 	}
 }

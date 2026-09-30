@@ -11,37 +11,24 @@ import (
 	"testing"
 )
 
-// chatGroupCounts is the *canonical* truth — recomputes chatJobCount from
-// scratch the way the original scan did, so the test can verify the
-// counter map matches.
-func chatGroupCounts(s *Scheduler) map[chatJobKey]int {
-	s.tblForTest().mu.RLock()
-	defer s.tblForTest().mu.RUnlock()
-	got := make(map[chatJobKey]int, len(s.tblForTest().jobs))
-	for _, j := range s.tblForTest().jobs {
-		got[chatJobKey{Platform: j.Platform, ChatID: j.ChatID}]++
-	}
-	return got
-}
-
+// assertChatJobCountInSync checks the counter map against a recount grouped
+// from the job map — the scan the counter replaced — taken from one lock hold.
 func assertChatJobCountInSync(t *testing.T, s *Scheduler) {
 	t.Helper()
-	want := chatGroupCounts(s)
-	s.tblForTest().mu.RLock()
-	defer s.tblForTest().mu.RUnlock()
-	if len(want) != len(s.tblForTest().chatJobCount) {
+	counter, want := s.chatCountsForTest()
+	if len(want) != len(counter) {
 		t.Fatalf("chatJobCount size mismatch: counter=%d, scan=%d (counter=%v scan=%v)",
-			len(s.tblForTest().chatJobCount), len(want), s.tblForTest().chatJobCount, want)
+			len(counter), len(want), counter, want)
 	}
 	for k, v := range want {
-		if got := s.tblForTest().chatJobCount[k]; got != v {
+		if got := counter[k]; got != v {
 			t.Errorf("chatJobCount[%+v] = %d, want %d", k, got, v)
 		}
 	}
 	// Bonus: counter MUST NOT carry zero entries — they leak memory and
 	// the chat-set view (KnownSessionIDs et al.) treats len() as live-
 	// chat count.
-	for k, v := range s.tblForTest().chatJobCount {
+	for k, v := range counter {
 		if v == 0 {
 			t.Errorf("chatJobCount[%+v] = 0; zero entries must be deleted", k)
 		}
@@ -65,8 +52,8 @@ func TestChatJobCount_TracksJobsByChat(t *testing.T) {
 
 	// Empty scheduler — no chats tracked.
 	assertChatJobCountInSync(t, s)
-	if got := len(s.tblForTest().chatJobCount); got != 0 {
-		t.Fatalf("expected empty chatJobCount, got %d entries", got)
+	if counter, _ := s.chatCountsForTest(); len(counter) != 0 {
+		t.Fatalf("expected empty chatJobCount, got %d entries", len(counter))
 	}
 
 	// Add 3 jobs to chat A, 2 to chat B.
@@ -84,10 +71,10 @@ func TestChatJobCount_TracksJobsByChat(t *testing.T) {
 		}
 	}
 	assertChatJobCountInSync(t, s)
-	if got := s.tblForTest().chatJobCount[chatJobKey{Platform: "feishu", ChatID: "A"}]; got != 3 {
+	if got := s.tbl.countForChat(chatJobKey{Platform: "feishu", ChatID: "A"}); got != 3 {
 		t.Errorf("chat A count = %d, want 3", got)
 	}
-	if got := s.tblForTest().chatJobCount[chatJobKey{Platform: "feishu", ChatID: "B"}]; got != 2 {
+	if got := s.tbl.countForChat(chatJobKey{Platform: "feishu", ChatID: "B"}); got != 2 {
 		t.Errorf("chat B count = %d, want 2", got)
 	}
 
@@ -100,7 +87,7 @@ func TestChatJobCount_TracksJobsByChat(t *testing.T) {
 		t.Fatalf("DeleteJobByID: %v", err)
 	}
 	assertChatJobCountInSync(t, s)
-	if got := s.tblForTest().chatJobCount[chatJobKey{Platform: "feishu", ChatID: "A"}]; got != 2 {
+	if got := s.tbl.countForChat(chatJobKey{Platform: "feishu", ChatID: "A"}); got != 2 {
 		t.Errorf("after delete: chat A count = %d, want 2", got)
 	}
 
@@ -113,14 +100,15 @@ func TestChatJobCount_TracksJobsByChat(t *testing.T) {
 		}
 	}
 	assertChatJobCountInSync(t, s)
-	if _, present := s.tblForTest().chatJobCount[chatJobKey{Platform: "feishu", ChatID: "A"}]; present {
+	counter, _ := s.chatCountsForTest()
+	if _, present := counter[chatJobKey{Platform: "feishu", ChatID: "A"}]; present {
 		t.Errorf("after deleting all A jobs, chatJobCount still tracks chat A")
 	}
 }
 
 // TestChatJobCount_RollbackOnPersistFailure verifies the counter unwinds
 // when AddJob's persist step fails (the rollback path goes through
-// deleteJobLocked). Without proper rollback the counter would over-count
+// deleteLocked). Without proper rollback the counter would over-count
 // and silently shrink the per-chat cap by 1.
 func TestChatJobCount_RollbackOnPersistFailure(t *testing.T) {
 	t.Parallel()
@@ -138,7 +126,7 @@ func TestChatJobCount_RollbackOnPersistFailure(t *testing.T) {
 	if err := s.AddJob(&Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "X"}); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	if got := s.tblForTest().chatJobCount[chatJobKey{Platform: "feishu", ChatID: "X"}]; got != 1 {
+	if got := s.tbl.countForChat(chatJobKey{Platform: "feishu", ChatID: "X"}); got != 1 {
 		t.Fatalf("baseline chat X count = %d, want 1", got)
 	}
 
@@ -151,7 +139,7 @@ func TestChatJobCount_RollbackOnPersistFailure(t *testing.T) {
 		t.Fatal("expected AddJob to fail when persist is broken")
 	}
 	// After rollback, counter should be back to 1.
-	if got := s.tblForTest().chatJobCount[chatJobKey{Platform: "feishu", ChatID: "X"}]; got != 1 {
+	if got := s.tbl.countForChat(chatJobKey{Platform: "feishu", ChatID: "X"}); got != 1 {
 		t.Errorf("after rollback: chat X count = %d, want 1 (counter leaked)", got)
 	}
 	assertChatJobCountInSync(t, s)
@@ -185,7 +173,7 @@ func TestChatJobCount_StartLoadPopulates(t *testing.T) {
 		t.Fatalf("Start s2: %v", err)
 	}
 	defer s2.Stop()
-	if got := s2.tblForTest().chatJobCount[chatJobKey{Platform: "feishu", ChatID: "Z"}]; got != 3 {
+	if got := s2.tbl.countForChat(chatJobKey{Platform: "feishu", ChatID: "Z"}); got != 3 {
 		t.Errorf("after reload: chat Z count = %d, want 3", got)
 	}
 	assertChatJobCountInSync(t, s2)

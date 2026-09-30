@@ -264,3 +264,33 @@ func (s *Scheduler) f() int { return s.tbl.good("x") + s.tbl.pure() }`})
 		t.Errorf("the allowed shapes were flagged: %q", got)
 	}
 }
+
+// testTableLockBaseline is how many times cron tests take the registry lock
+// through tblForTest: the lock-order tests, which hold or probe it to prove
+// the discipline, and one identity check that needs the live pointer.
+// Everything else seeds and reads through the export_test.go ports (#3007).
+const testTableLockBaseline = 29
+
+// Tests reach the registry lock only where the lock itself is under test.
+// More is a regression to a port; fewer means the baseline comes down with it.
+func TestTableLockRatchet(t *testing.T) {
+	paths, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	needle := "tblForTest" + "().mu"
+	n := 0
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n += strings.Count(string(b), needle)
+	}
+	switch {
+	case n > testTableLockBaseline:
+		t.Errorf("cron tests take the registry lock through tblForTest %d times, above the baseline of %d: seed and read through the export_test.go ports", n, testTableLockBaseline)
+	case n < testTableLockBaseline:
+		t.Errorf("cron tests take the registry lock through tblForTest %d times: lower testTableLockBaseline to %d", n, n)
+	}
+}

@@ -118,7 +118,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// 直接 json.Marshal + os.WriteFile，绕过 saveJobs（生产路径用的是
-	// persistJobsLocked + saveMarshaledSeq；saveJobs 已删除）。测试关心的
+	// persistLocked + saveMarshaledSeq；saveJobs 已删除）。测试关心的
 	// 是 loadJobs 能恢复出磁盘上写好的 JSON 数组。
 	entries := make([]*Job, 0, len(jobs))
 	for _, j := range jobs {
@@ -253,7 +253,7 @@ func TestLoadJobsCorruptPreserves(t *testing.T) {
 
 // TestSchedulerStartFailsOnOversize is the end-to-end guarantee: when the
 // store is oversize, Start returns an error so main.go can os.Exit(1) before
-// any code path triggers persistJobsLocked and clobbers the file with `[]`.
+// any code path triggers persistLocked and clobbers the file with `[]`.
 func TestSchedulerStartFailsOnOversize(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -1061,11 +1061,11 @@ func TestNewSchedulerNilRouterWarns(t *testing.T) {
 }
 
 // TestSchedulerStopIdempotent verifies repeat Stop() invocations are a
-// no-op (CAS-guarded) — they must not panic, double-run persistJobsLocked,
+// no-op (CAS-guarded) — they must not panic, double-run persistLocked,
 // or attempt to allocate a second set of timers. R20260526-GO-007.
 //
 // Failure mode pre-fix: each Stop call re-entered the timer-allocating
-// branches and the persistJobsLocked path, racing the final marshaled
+// branches and the persistLocked path, racing the final marshaled
 // write against itself. Mirrors Start()'s `started` CAS.
 func TestSchedulerStopIdempotent(t *testing.T) {
 	t.Parallel()

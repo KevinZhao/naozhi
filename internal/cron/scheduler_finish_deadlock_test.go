@@ -40,7 +40,7 @@ func TestRecordTerminalResult_PanicReleasesLock(t *testing.T) {
 		t.Fatalf("AddJob: %v", err)
 	}
 
-	// Stub that panics inside persistJobsLocked → marshalJobsLocked, mimicking
+	// Stub that panics inside persistLocked → marshalLocked, mimicking
 	// a future Job-field type bug or a buggy custom marshaler.
 	panicStub := marshalJobsFn(func(any) ([]byte, error) {
 		panic("injected marshal panic")

@@ -26,7 +26,7 @@ func TestRegisterJob_PopulatesCachedPeriod(t *testing.T) {
 		Schedule: "@every 30m",
 	}
 
-	if err := s.registerJob(j); err != nil {
+	if err := s.registerJobForTest(j); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	t.Cleanup(func() { s.cron.Remove(j.entryID) })
@@ -62,7 +62,7 @@ func TestRegisterJob_CachedPeriodConsistentWithSched(t *testing.T) {
 	}
 	for _, expr := range cases {
 		j := &Job{ID: "fedcba9876543210", Schedule: expr}
-		if err := s.registerJob(j); err != nil {
+		if err := s.registerJobForTest(j); err != nil {
 			t.Fatalf("%s: registerJob: %v", expr, err)
 		}
 		sched := s.cron.Entry(j.entryID).Schedule

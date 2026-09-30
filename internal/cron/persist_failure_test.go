@@ -1,6 +1,6 @@
 package cron
 
-// R51-QUAL-001 regression tests. persistJobsLocked used to return a silent
+// R51-QUAL-001 regression tests. persistLocked used to return a silent
 // no-op func on marshal failure; every mutation API then reported success
 // while nothing reached disk. A process restart replayed stale state —
 // "deleted" jobs came back, "paused" jobs started firing, etc.
@@ -226,7 +226,7 @@ func TestPersistFailure_SetJobPrompt(t *testing.T) {
 }
 
 // TestPersistFailure_RecordResultRollsBack verifies RNEW-011: when
-// persistJobsLocked fails inside recordResultP0WithSanitised, the
+// persistLocked fails inside recordResultP0WithSanitised, the
 // in-memory fields (LastRunAt / LastResult / LastError / LastSessionID
 // / LastErrorClass / RunCounters) must revert to their
 // pre-mutation values so the live WS broadcast and the on-disk snapshot stay
@@ -290,7 +290,7 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 }
 
 // TestPersistFailure_RecordResultHappyPathApplies is the positive
-// counterpart: when persistJobsLocked succeeds, recordTerminalResult
+// counterpart: when persistLocked succeeds, recordTerminalResult
 // must apply the new Job values. Without this counterpart a regression
 // that accidentally always rolls back (e.g. inverted error check) would
 // pass the rollback test above.
@@ -336,7 +336,7 @@ func TestPersistFailure_RecordResultHappyPathApplies(t *testing.T) {
 	}
 }
 
-func TestPersistFailure_PersistJobsLockedReturnsErrAndNilFunc(t *testing.T) {
+func TestPersistFailure_TablePersistReturnsErr(t *testing.T) {
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
@@ -349,12 +349,9 @@ func TestPersistFailure_PersistJobsLockedReturnsErrAndNilFunc(t *testing.T) {
 
 	withFailingMarshal(t, s)
 
-	s.tblForTest().mu.Lock()
-	save, err := s.persistJobsLocked()
-	s.tblForTest().mu.Unlock()
-
-	if save != nil {
-		t.Fatal("save func should be nil on marshal failure")
+	m, err := s.tbl.persist()
+	if m.data != nil || m.seq != 0 {
+		t.Fatalf("a failed persist handed back a snapshot: %d bytes, seq %d", len(m.data), m.seq)
 	}
 	if !errors.Is(err, ErrPersistFailed) {
 		t.Fatalf("err = %v, want ErrPersistFailed", err)

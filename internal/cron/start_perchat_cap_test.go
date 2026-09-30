@@ -7,7 +7,7 @@ import (
 
 // TestStart_PerChatCapEnforced covers R20260613-CR-10 (#2060): the startup
 // load path (loadJobs) must enforce maxJobsPerChat just like AddJob does.
-// Previously loadJobs went straight to addToChatIndexLocked, so a legacy /
+// Previously loadJobs went straight to indexLocked, so a legacy /
 // hand-edited cron_jobs.json whose single chat held more than the cap would
 // load every entry — leaving the in-memory chatJobCount above the cap, after
 // which AddJob would report "per-chat limit reached" while the operator

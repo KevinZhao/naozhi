@@ -26,11 +26,9 @@ func TestMarshalJobsLocked_SkipSortEmpty(t *testing.T) {
 	}
 	defer s.Stop()
 
-	s.tblForTest().mu.RLock()
-	defer s.tblForTest().mu.RUnlock()
-	got, err := s.marshalJobsLocked()
+	got, err := s.marshalForTest()
 	if err != nil {
-		t.Fatalf("marshalJobsLocked: %v", err)
+		t.Fatalf("marshalLocked: %v", err)
 	}
 	// json.Marshal of a nil/empty []*Job emits "null" (not "[]") because
 	// json.NewEncoder + nil slice → null. Pin both shapes since either
@@ -65,15 +63,14 @@ func TestMarshalJobsLocked_SkipSortSingle(t *testing.T) {
 	defer s.Stop()
 
 	jobID := mustGenerateID()
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = &Job{ID: jobID, Schedule: "@every 1m", Prompt: "p"}
-	s.tblForTest().mu.Unlock()
+	s.putUnindexedJobForTest(&Job{ID: jobID, Schedule: "@every 1m", Prompt: "p"})
+	if len(s.tbl.ids()) != 0 || len(s.mapKeysForTest()) != 1 {
+		t.Fatal("precondition: the job must be in the map but not the sorted-ID index")
+	}
 
-	s.tblForTest().mu.RLock()
-	got, err := s.marshalJobsLocked()
-	s.tblForTest().mu.RUnlock()
+	got, err := s.marshalForTest()
 	if err != nil {
-		t.Fatalf("marshalJobsLocked: %v", err)
+		t.Fatalf("marshalLocked: %v", err)
 	}
 	var rt []*Job
 	if err := json.Unmarshal(got, &rt); err != nil {

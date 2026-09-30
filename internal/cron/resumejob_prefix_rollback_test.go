@@ -6,7 +6,7 @@ import (
 )
 
 // TestResumeJob_RollbackOnPersistFailure pins R20260531070014-CR-2: resume
-// flips j.Paused=false BEFORE persistJobsLocked runs, so a persist failure
+// flips j.Paused=false BEFORE persistLocked runs, so a persist failure
 // must leave memory agreeing with the un-persisted disk (still paused, no
 // entry) or a restart re-registers the schedule on top of surviving state and
 // double-fires. The assertions are order-independent — under the current
