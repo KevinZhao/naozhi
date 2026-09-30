@@ -532,33 +532,49 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []clieven
 }
 
 // EventEntriesBeforeCtx extends EventEntriesBefore with a disk-tier
-// fallback: when memory has no entries strictly older than beforeMS, the
-// session's history.Source is consulted.
+// fallback: when memory holds fewer than `limit` entries strictly older than
+// beforeMS, the session's history.Source fills the rest of the page.
 //
-// The two tiers are never merged: memory is authoritative for any range it
-// covers (it includes naozhi-synthesized events like LogSystemEvent that
-// never reach disk), and falling through only when memory is empty keeps
-// the result chronological without dedup. Cost: one extra round trip on
-// the page that straddles the memory bottom.
+// The tiers never overlap: memory is authoritative for any range it covers
+// (it includes naozhi-synthesized events like LogSystemEvent that never reach
+// disk), so the disk read is anchored strictly older than the earliest memory
+// entry and prepended — chronological without dedup. A short memory page
+// means the memory bottom was reached; returning it alone would read as
+// end-of-history to the dashboard, which stops paging on a short page.
 func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 {
 		return nil
 	}
-	if mem := s.EventEntriesBefore(beforeMS, limit); len(mem) > 0 {
+	mem := s.EventEntriesBefore(beforeMS, limit)
+	if len(mem) >= limit {
 		return mem
 	}
 	src := s.loadHistorySource()
 	if src == nil {
-		return nil
+		return mem
 	}
-	entries, err := src.LoadBefore(ctx, beforeMS, limit)
+	diskBefore := beforeMS
+	if len(mem) > 0 {
+		// A zero Time would read as "no upper bound" and overlap memory.
+		if mem[0].Time <= 0 {
+			return mem
+		}
+		diskBefore = mem[0].Time
+	}
+	entries, err := src.LoadBefore(ctx, diskBefore, limit-len(mem))
 	if err != nil {
 		// Treat as end-of-history, matching the JSONL load sites in router.go.
 		slog.Warn("history source load failed", "key", s.key, "err", err)
-		return nil
+		return mem
 	}
 	sortEntriesByTimeStable(entries)
-	return entries
+	if len(mem) == 0 {
+		return entries
+	}
+	// Fresh slice: the source may hand back a buffer it still owns.
+	out := make([]clievent.EventEntry, 0, len(entries)+len(mem))
+	out = append(out, entries...)
+	return append(out, mem...)
 }
 
 // countVisibleEntries returns how many entries the dashboard would render as

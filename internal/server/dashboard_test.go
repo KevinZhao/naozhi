@@ -491,9 +491,11 @@ func TestHandleAPISessionEvents_BeforeFallsBackToHistorySource(t *testing.T) {
 }
 
 // TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers pins the
-// inverse: when memory can satisfy the page, the Source must not be
+// inverse: when memory fills the whole page, the Source must not be
 // consulted. Preserves the hot-path invariant that the first N pages of
-// "load earlier" don't incur disk I/O.
+// "load earlier" don't incur disk I/O. (A short memory page is the memory
+// bottom and is topped up from the Source — see
+// TestEventEntriesBeforeCtx_TopsUpShortMemoryPageFromSource.)
 func TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := seedEventSession(t, srv, 1000, 2000, 3000)
@@ -504,9 +506,9 @@ func TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers(t *testing.T) 
 	src := &fakeEventsSource{entries: []clievent.EventEntry{{Time: 100, Summary: "ancient"}}}
 	sess.SetHistorySource(src)
 
-	// before=2500 — memory has {1000, 2000} matching; no need for Source.
+	// before=2500&limit=2 — memory's {1000, 2000} fill the page; no need for Source.
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/sessions/events?key="+key+"&before=2500&limit=10", nil)
+		"/api/sessions/events?key="+key+"&before=2500&limit=2", nil)
 	w := httptest.NewRecorder()
 	srv.sessionH.HandleEvents(w, req)
 
