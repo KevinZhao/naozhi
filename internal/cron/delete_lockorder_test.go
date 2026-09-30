@@ -6,18 +6,18 @@ import (
 )
 
 // TestDeleteJobLocked_ReturnsCronEntryID pins R20260605B-CORR-6 (#1810):
-// deleteJobLocked must split its responsibilities into "in-memory mutation
+// deleteLocked must split its responsibilities into "in-memory mutation
 // under lock" (drop from s.tbl.jobs, zero j.entryID) and "cron.Remove outside
 // lock" (the returned entryID, removed by the caller after s.tbl.mu is released).
-// Before this split deleteJobLocked called s.cron.Remove while the caller
+// Before this split deleteLocked called s.cron.Remove while the caller
 // held s.tbl.mu — sending on robfig/cron's unbuffered c.remove channel under the
-// write lock, the exact anti-pattern pauseJobLocked / UpdateJob already
+// write lock, the exact anti-pattern pauseLocked / UpdateJob already
 // hoist their Remove for (and resume now defers its whole commit past the
 // lock via commitAndApplyCronEntry).
 //
 // Contract:
 //
-//  1. deleteJobLocked must NOT call s.cron.Remove itself.
+//  1. deleteLocked must NOT call s.cron.Remove itself.
 //  2. It must zero j.entryID under lock so a concurrent
 //     ListAllJobsWithNextRun snapshot sees the entry-removed state.
 //  3. It must return the captured entryID so the caller can remove it from
@@ -45,15 +45,15 @@ func TestDeleteJobLocked_ReturnsCronEntryID(t *testing.T) {
 		t.Fatalf("expected a registered job with non-zero entryID after AddJob")
 	}
 	want := j.entryID
-	removeEntryID := s.deleteJobLocked(j)
+	removeEntryID := s.tblForTest().deleteLocked(j)
 	zeroed := j.entryID
 	s.tblForTest().mu.Unlock()
 
 	if removeEntryID != want {
-		t.Errorf("deleteJobLocked returned entryID %d; want the captured %d", removeEntryID, want)
+		t.Errorf("deleteLocked returned entryID %d; want the captured %d", removeEntryID, want)
 	}
 	if zeroed != 0 {
-		t.Errorf("j.entryID = %d after deleteJobLocked; want 0 (cron.Remove deferred, but entryID must be cleared under lock)", zeroed)
+		t.Errorf("j.entryID = %d after deleteLocked; want 0 (cron.Remove deferred, but entryID must be cleared under lock)", zeroed)
 	}
 
 	// Caller removes the entry from cron outside the lock — must not panic.
@@ -61,7 +61,7 @@ func TestDeleteJobLocked_ReturnsCronEntryID(t *testing.T) {
 }
 
 // TestDeleteJobByID_DoesNotHoldMuDuringCronRemove pins the post-Unlock
-// invariant end-to-end: DeleteJobByID routes deleteJobLocked's captured
+// invariant end-to-end: DeleteJobByID routes deleteLocked's captured
 // entryID through deleteJobPostCleanup, which runs s.cron.Remove AFTER s.tbl.mu
 // is released. A regression that pulls cron.Remove back under s.tbl.mu (or drops
 // it entirely) fails here: the job must be gone from the list and its cron

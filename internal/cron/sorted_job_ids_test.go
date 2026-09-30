@@ -43,18 +43,11 @@ func addNJobs(t *testing.T, s *Scheduler, n int) []string {
 // snapshotSortedIDs reads the maintained slice under the lock so the test
 // never races the scheduler's own writers.
 func (s *Scheduler) snapshotSortedIDs() []string {
-	s.tblForTest().mu.RLock()
-	defer s.tblForTest().mu.RUnlock()
-	return slices.Clone(s.tblForTest().sortedJobIDs)
+	return s.tbl.ids()
 }
 
 func (s *Scheduler) sortedMapKeys() []string {
-	s.tblForTest().mu.RLock()
-	defer s.tblForTest().mu.RUnlock()
-	keys := make([]string, 0, len(s.tblForTest().jobs))
-	for id := range s.tblForTest().jobs {
-		keys = append(keys, id)
-	}
+	keys := s.mapKeysForTest()
 	sort.Strings(keys)
 	return keys
 }
@@ -62,7 +55,7 @@ func (s *Scheduler) sortedMapKeys() []string {
 // TestSortedJobIDs_StayOrderedAcrossMutations pins the #1598 invariant: the
 // incrementally-maintained sortedJobIDs slice equals the sorted set of
 // s.tbl.jobs keys after a sequence of AddJob / DeleteJob mutations, so
-// marshalJobsLocked can iterate it without re-sorting in the critical section.
+// marshalLocked can iterate it without re-sorting in the critical section.
 func TestSortedJobIDs_StayOrderedAcrossMutations(t *testing.T) {
 	t.Parallel()
 	s := newSortedIDsScheduler(t)
@@ -104,11 +97,9 @@ func TestMarshalJobsLocked_UsesSortedHint(t *testing.T) {
 	s := newSortedIDsScheduler(t)
 	addNJobs(t, s, 5)
 
-	s.tblForTest().mu.RLock()
-	got, err := s.marshalJobsLocked()
-	s.tblForTest().mu.RUnlock()
+	got, err := s.marshalForTest()
 	if err != nil {
-		t.Fatalf("marshalJobsLocked: %v", err)
+		t.Fatalf("marshalLocked: %v", err)
 	}
 	var rt []*Job
 	if err := json.Unmarshal(got, &rt); err != nil {
@@ -127,9 +118,9 @@ func TestMarshalJobsLocked_UsesSortedHint(t *testing.T) {
 }
 
 // TestMarshalJobsLocked_DriftFallbackRebuilds pins the correctness guard: if a
-// caller pokes s.tbl.jobs directly (bypassing the addToChatIndexLocked seam, as a
+// caller pokes s.tbl.jobs directly (bypassing the indexLocked seam, as a
 // handful of in-package test helpers do), the sortedJobIDs hint goes stale.
-// marshalJobsLocked MUST detect the drift and rebuild from the map so the
+// marshalLocked MUST detect the drift and rebuild from the map so the
 // direct-inserted job is never silently dropped from the on-disk snapshot.
 func TestMarshalJobsLocked_DriftFallbackRebuilds(t *testing.T) {
 	t.Parallel()
@@ -141,15 +132,14 @@ func TestMarshalJobsLocked_DriftFallbackRebuilds(t *testing.T) {
 	// length mismatch so the hint path is rejected. "a-direct" sorts before
 	// any hex8 ID, so a correct rebuild puts it first.
 	const directID = "a-direct-id-000"
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[directID] = &Job{ID: directID, Schedule: "@every 5m", Prompt: "p"}
-	s.tblForTest().mu.Unlock()
+	s.putUnindexedJobForTest(&Job{ID: directID, Schedule: "@every 5m", Prompt: "p"})
+	if slices.Contains(s.tbl.ids(), directID) || !slices.Contains(s.mapKeysForTest(), directID) {
+		t.Fatal("precondition: the direct-poked job must be in the map but not the sorted-ID index")
+	}
 
-	s.tblForTest().mu.RLock()
-	got, err := s.marshalJobsLocked()
-	s.tblForTest().mu.RUnlock()
+	got, err := s.marshalForTest()
 	if err != nil {
-		t.Fatalf("marshalJobsLocked: %v", err)
+		t.Fatalf("marshalLocked: %v", err)
 	}
 	var rt []*Job
 	if err := json.Unmarshal(got, &rt); err != nil {

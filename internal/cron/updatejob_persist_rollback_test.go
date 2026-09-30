@@ -5,7 +5,7 @@ package cron
 // UpdateJob applies non-Schedule fields via JobUpdate.applyTo (Prompt /
 // WorkDir / Notify / NotifyPlatform / NotifyChatID / FreshContext / Title /
 // Backend, plus LastSessionID clearing on WorkDir change) directly into the
-// live *Job before persistJobsLocked. If the persist failed, those writes —
+// live *Job before persistLocked. If the persist failed, those writes —
 // and any Schedule field mutation — used to stay in memory while disk kept
 // the old values, so a restart replayed the stale persisted job and silently
 // reverted the edit (memory/disk divergence). The fix snapshots *j by value

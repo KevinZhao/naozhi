@@ -21,7 +21,7 @@ import (
 //
 //   - Two Schedulers, A and B, each with a different marshalJobs stub
 //     (A returns "injected-A", B returns errors).
-//   - Trigger persistJobsLocked on both concurrently, repeatedly.
+//   - Trigger persistLocked on both concurrently, repeatedly.
 //   - A's mutations must always see "injected-A" output and never observe
 //     B's failure (which would prove cross-Scheduler leak).
 //

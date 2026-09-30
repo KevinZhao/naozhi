@@ -45,7 +45,7 @@ func TestRegisterJob_KeepsTheSchedulerChain(t *testing.T) {
 			s := &Scheduler{tbl: newJobTable(nil), cron: robfigcron.New(opts...)}
 
 			j := &Job{ID: "0123456789abcdef", Schedule: "@every 1h"}
-			if err := s.registerJob(j); err != nil {
+			if err := s.registerJobForTest(j); err != nil {
 				t.Fatalf("registerJob: %v", err)
 			}
 			t.Cleanup(func() { s.cron.Remove(j.entryID) })
@@ -81,7 +81,7 @@ func TestRegisterJob_ParseFailureRegistersNothing(t *testing.T) {
 
 	before := len(s.cron.Entries())
 	j := &Job{ID: "0123456789abcdef", Schedule: "not a schedule"}
-	err := s.registerJob(j)
+	err := s.registerJobForTest(j)
 	if err == nil {
 		t.Fatal("registerJob accepted an unparseable schedule")
 	}
@@ -123,7 +123,7 @@ func TestPlanCronEntry_IsPureAndMatchesTheCache(t *testing.T) {
 
 	s := &Scheduler{tbl: newJobTable(nil), cron: robfigcron.New(robfigcron.WithParser(cronParser))}
 	j := &Job{ID: p.jobID, Schedule: "*/5 * * * *"}
-	if err := s.registerJob(j); err != nil {
+	if err := s.registerJobForTest(j); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	t.Cleanup(func() { s.cron.Remove(j.entryID) })

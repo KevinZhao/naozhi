@@ -28,7 +28,7 @@ func (s *Scheduler) marshalJobsSnapshotForTest(snap jobsSnapshot) ([]byte, error
 
 // TestSnapshotJobsForSaveLocked_MatchesMarshalLocked pins on-disk byte parity
 // between the new off-lock snapshot+marshal path and the legacy in-lock
-// marshalJobsLocked path. cron_jobs.json shape must not drift regardless of
+// marshalLocked path. cron_jobs.json shape must not drift regardless of
 // which persist path produced it.
 func TestSnapshotJobsForSaveLocked_MatchesMarshalLocked(t *testing.T) {
 	t.Parallel()
@@ -53,14 +53,11 @@ func TestSnapshotJobsForSaveLocked_MatchesMarshalLocked(t *testing.T) {
 		}
 	}
 
-	s.tblForTest().mu.RLock()
-	wantBytes, err := s.marshalJobsLocked()
+	wantBytes, err := s.marshalForTest()
 	if err != nil {
-		s.tblForTest().mu.RUnlock()
-		t.Fatalf("marshalJobsLocked: %v", err)
+		t.Fatalf("marshalForTest: %v", err)
 	}
-	snap := s.snapshotJobsForSaveLocked()
-	s.tblForTest().mu.RUnlock()
+	snap := s.snapshotForSaveForTest()
 
 	gotBytes, err := s.marshalJobsSnapshotForTest(snap)
 	if err != nil {
@@ -94,9 +91,7 @@ func TestSnapshotJobsForSaveLocked_PoolReuse(t *testing.T) {
 	}
 
 	// Cycle 1: snapshot under lock, marshal+Put off lock via persistSnapshot.
-	s.tblForTest().mu.Lock()
-	snap1 := s.snapshotJobsForSaveLocked()
-	s.tblForTest().mu.Unlock()
+	snap1 := s.snapshotForSaveForTest()
 	if snap1.pooled == nil {
 		t.Fatal("snapshot should carry a pooled handle (#1975)")
 	}
@@ -115,9 +110,7 @@ func TestSnapshotJobsForSaveLocked_PoolReuse(t *testing.T) {
 	if err := s.AddJob(j2); err != nil {
 		t.Fatalf("AddJob j2: %v", err)
 	}
-	s.tblForTest().mu.Lock()
-	snap2 := s.snapshotJobsForSaveLocked()
-	s.tblForTest().mu.Unlock()
+	snap2 := s.snapshotForSaveForTest()
 	bytes2, err := s.marshalJobsSnapshotForTest(snap2)
 	if err != nil {
 		t.Fatalf("marshal snap2: %v", err)
@@ -158,16 +151,11 @@ func TestSnapshotJobsForSaveLocked_Detached(t *testing.T) {
 	defer s.Stop()
 
 	j := &Job{ID: "abcd1234", Schedule: "@every 1h", Prompt: "original", Platform: "feishu", ChatID: "c1", ChatType: "direct", Paused: true}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().sortedJobIDs = append(s.tblForTest().sortedJobIDs, j.ID)
-	snap := s.snapshotJobsForSaveLocked()
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
+	snap := s.snapshotForSaveForTest()
 
 	// Mutate the live job AFTER the snapshot was taken and the lock dropped.
-	s.tblForTest().mu.Lock()
 	j.Prompt = "MUTATED"
-	s.tblForTest().mu.Unlock()
 
 	data, err := s.marshalJobsSnapshotForTest(snap)
 	if err != nil {
@@ -260,7 +248,7 @@ func TestRecordTerminalResult_MarshalRunsOffLock(t *testing.T) {
 }
 
 // TestSnapshotJobsForSaveLocked_NotifyDeepCopy pins R20260608133928-CR-5:
-// snapshotJobsForSaveLocked must deep-copy the Notify *bool field so that
+// snapshotForSaveLocked must deep-copy the Notify *bool field so that
 // reassigning the live job's Notify pointer after the snapshot is taken does
 // not affect the snapshot value seen by the off-lock json.Marshal
 // (R20260607-PERF-005 / #1923).
@@ -282,11 +270,8 @@ func TestSnapshotJobsForSaveLocked_NotifyDeepCopy(t *testing.T) {
 		Platform: "feishu", ChatID: "c1", ChatType: "direct", Paused: true,
 		Notify: &trueVal,
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().sortedJobIDs = append(s.tblForTest().sortedJobIDs, j.ID)
-	snap := s.snapshotJobsForSaveLocked()
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
+	snap := s.snapshotForSaveForTest()
 
 	// The snapshot entry's Notify pointer must be a distinct allocation.
 	if len(snap.entries) != 1 {
@@ -302,9 +287,7 @@ func TestSnapshotJobsForSaveLocked_NotifyDeepCopy(t *testing.T) {
 
 	// Reassign the live job's Notify to a different value after the snapshot.
 	falseVal := false
-	s.tblForTest().mu.Lock()
 	j.Notify = &falseVal
-	s.tblForTest().mu.Unlock()
 
 	// The snapshot's Notify must still reflect the original true value.
 	if !*snapNotify {
@@ -350,11 +333,8 @@ func TestSnapshotJobsForSaveLocked_NotifyNilSafe(t *testing.T) {
 		Platform: "feishu", ChatID: "c1", ChatType: "direct", Paused: true,
 		Notify: nil,
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().sortedJobIDs = append(s.tblForTest().sortedJobIDs, j.ID)
-	snap := s.snapshotJobsForSaveLocked()
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
+	snap := s.snapshotForSaveForTest()
 
 	if len(snap.entries) != 1 {
 		t.Fatalf("want 1 snapshot entry, got %d", len(snap.entries))

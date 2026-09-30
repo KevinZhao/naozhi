@@ -32,7 +32,7 @@ func TestRegisterJob_TickReportsScheduledTrigger(t *testing.T) {
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 1h", Prompt: "ping"}
 	s.putJobForTest(j)
-	if err := s.registerJob(j); err != nil {
+	if err := s.registerJobForTest(j); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 
@@ -63,7 +63,7 @@ func TestRegisterJob_TickSkipsAPausedJob(t *testing.T) {
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 1h", Prompt: "ping"}
 	s.putJobForTest(j)
-	if err := s.registerJob(j); err != nil {
+	if err := s.registerJobForTest(j); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	// Pause AFTER registration, the way an operator does: the callback captured
@@ -87,7 +87,7 @@ func TestRegisterJob_TickSkipsADeletedJob(t *testing.T) {
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 1h", Prompt: "ping"}
 	s.putJobForTest(j)
-	if err := s.registerJob(j); err != nil {
+	if err := s.registerJobForTest(j); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	entry := s.cron.Entry(j.entryID)

@@ -6,7 +6,7 @@ import (
 )
 
 // TestPauseJobByID_RollbackOnPersistFailure pins the R20260527-COR-1 (#1272)
-// fix: when persistJobsLocked fails AFTER pauseJobLocked already mutated
+// fix: when persistLocked fails AFTER pauseLocked already mutated
 // (j.entryID=0, j.Paused=true), the helper now rolls back the in-memory
 // mutation so a subsequent restart-from-disk view (Paused=false) and the
 // in-memory view stay aligned.
@@ -56,7 +56,7 @@ func TestPauseJobByID_RollbackOnPersistFailure(t *testing.T) {
 }
 
 // TestResumeJobByID_RollbackOnPersistFailure pins R20260526-GO-001 (#1226):
-// resume flips j.Paused=false BEFORE persistJobsLocked runs, so a persist
+// resume flips j.Paused=false BEFORE persistLocked runs, so a persist
 // failure must restore the pre-op view or memory and disk disagree — a
 // restart would then replay the paused-on-disk view onto live state and
 // double-fire the schedule. The assertions below (still paused, no entry,

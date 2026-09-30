@@ -10,61 +10,31 @@ import (
 	"testing"
 )
 
-// chatGroupIndex is the canonical truth: recomputes jobsByChat from
-// scratch by scanning s.tbl.jobs grouped by (Platform, ChatID), so the test
-// can compare set-equality with the maintained index.
-func chatGroupIndex(s *Scheduler) map[chatJobKey]map[string]bool {
-	s.tblForTest().mu.RLock()
-	defer s.tblForTest().mu.RUnlock()
-	got := make(map[chatJobKey]map[string]bool, len(s.tblForTest().jobs))
-	for _, j := range s.tblForTest().jobs {
-		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
-		if got[key] == nil {
-			got[key] = make(map[string]bool)
-		}
-		got[key][j.ID] = true
-	}
-	return got
-}
-
+// assertJobsByChatInSync checks the per-chat index against a regrouping of the
+// job map — the scan the index replaced — taken from one lock hold.
 func assertJobsByChatInSync(t *testing.T, s *Scheduler) {
 	t.Helper()
-	want := chatGroupIndex(s)
-	s.tblForTest().mu.RLock()
-	defer s.tblForTest().mu.RUnlock()
-	if len(want) != len(s.tblForTest().jobsByChat) {
-		t.Fatalf("jobsByChat size mismatch: index=%d scan=%d (index keys=%v)",
-			len(s.tblForTest().jobsByChat), len(want), keysOfChatIndex(s.tblForTest().jobsByChat))
+	index, want := s.chatIndexForTest()
+	if len(want) != len(index) {
+		t.Fatalf("jobsByChat size mismatch: index=%d scan=%d (index=%v)", len(index), len(want), index)
 	}
 	for k, idSet := range want {
-		got := s.tblForTest().jobsByChat[k]
+		got := index[k]
 		if len(got) != len(idSet) {
 			t.Errorf("jobsByChat[%+v] len = %d, want %d", k, len(got), len(idSet))
 		}
-		for _, p := range got {
-			if p == nil {
-				t.Errorf("jobsByChat[%+v] holds nil pointer", k)
-				continue
-			}
-			if !idSet[p.ID] {
-				t.Errorf("jobsByChat[%+v] holds stale job %q (not in s.tbl.jobs)", k, p.ID)
+		for _, id := range got {
+			if !idSet[id] {
+				t.Errorf("jobsByChat[%+v] holds stale job %q (not in s.tbl.jobs)", k, id)
 			}
 		}
 	}
 	// Bonus: zero-length slices must be deleted from the map.
-	for k, list := range s.tblForTest().jobsByChat {
+	for k, list := range index {
 		if len(list) == 0 {
 			t.Errorf("jobsByChat[%+v] is empty; zero-length entries must be deleted", k)
 		}
 	}
-}
-
-func keysOfChatIndex(m map[chatJobKey][]*Job) []chatJobKey {
-	keys := make([]chatJobKey, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }
 
 // TestJobsByChatIndex_TracksAddDelete exercises the AddJob / DeleteJob
@@ -84,8 +54,8 @@ func TestJobsByChatIndex_TracksAddDelete(t *testing.T) {
 
 	// Empty scheduler — no chats indexed.
 	assertJobsByChatInSync(t, s)
-	if got := len(s.tblForTest().jobsByChat); got != 0 {
-		t.Fatalf("expected empty jobsByChat, got %d entries", got)
+	if index, _ := s.chatIndexForTest(); len(index) != 0 {
+		t.Fatalf("expected empty jobsByChat, got %d entries", len(index))
 	}
 
 	mkJob := func(plat, chat string) *Job {
@@ -108,10 +78,10 @@ func TestJobsByChatIndex_TracksAddDelete(t *testing.T) {
 		}
 	}
 	assertJobsByChatInSync(t, s)
-	if got := len(s.tblForTest().jobsByChat[chatJobKey{Platform: "feishu", ChatID: "A"}]); got != 3 {
+	if got := len(s.tbl.forChat(chatJobKey{Platform: "feishu", ChatID: "A"})); got != 3 {
 		t.Errorf("chat A index len = %d, want 3", got)
 	}
-	if got := len(s.tblForTest().jobsByChat[chatJobKey{Platform: "feishu", ChatID: "B"}]); got != 2 {
+	if got := len(s.tbl.forChat(chatJobKey{Platform: "feishu", ChatID: "B"})); got != 2 {
 		t.Errorf("chat B index len = %d, want 2", got)
 	}
 
@@ -120,7 +90,7 @@ func TestJobsByChatIndex_TracksAddDelete(t *testing.T) {
 		t.Fatalf("DeleteJobByID: %v", err)
 	}
 	assertJobsByChatInSync(t, s)
-	if got := len(s.tblForTest().jobsByChat[chatJobKey{Platform: "feishu", ChatID: "A"}]); got != 2 {
+	if got := len(s.tbl.forChat(chatJobKey{Platform: "feishu", ChatID: "A"})); got != 2 {
 		t.Errorf("chat A index len after delete = %d, want 2", got)
 	}
 
@@ -131,7 +101,8 @@ func TestJobsByChatIndex_TracksAddDelete(t *testing.T) {
 		}
 	}
 	assertJobsByChatInSync(t, s)
-	if _, present := s.tblForTest().jobsByChat[chatJobKey{Platform: "feishu", ChatID: "A"}]; present {
+	index, _ := s.chatIndexForTest()
+	if _, present := index[chatJobKey{Platform: "feishu", ChatID: "A"}]; present {
 		t.Errorf("after deleting all A jobs, jobsByChat still tracks chat A")
 	}
 }
@@ -163,9 +134,7 @@ func TestFindByPrefixLocked_UsesPerChatIndex(t *testing.T) {
 	}
 
 	// Lookup by full ID, scoped to A — must find jA.
-	s.tblForTest().mu.RLock()
-	got, err := s.findByPrefixLocked(jA.ID, "feishu", "A")
-	s.tblForTest().mu.RUnlock()
+	got, err := s.findByPrefixForTest(jA.ID, "feishu", "A")
 	if err != nil {
 		t.Fatalf("findByPrefixLocked A: %v", err)
 	}
@@ -174,17 +143,13 @@ func TestFindByPrefixLocked_UsesPerChatIndex(t *testing.T) {
 	}
 
 	// Same prefix scoped to B — must NOT match jA (cross-chat isolation).
-	s.tblForTest().mu.RLock()
-	_, err = s.findByPrefixLocked(jA.ID, "feishu", "B")
-	s.tblForTest().mu.RUnlock()
+	_, err = s.findByPrefixForTest(jA.ID, "feishu", "B")
 	if err == nil {
 		t.Errorf("expected ErrJobNotFound when looking up A's ID under chat B")
 	}
 
 	// Empty / nonexistent chat returns ErrJobNotFound, not a panic.
-	s.tblForTest().mu.RLock()
-	_, err = s.findByPrefixLocked("any", "feishu", "ghost")
-	s.tblForTest().mu.RUnlock()
+	_, err = s.findByPrefixForTest("any", "feishu", "ghost")
 	if err == nil {
 		t.Errorf("expected ErrJobNotFound for missing chat key")
 	}

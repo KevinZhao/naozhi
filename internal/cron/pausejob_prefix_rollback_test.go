@@ -6,7 +6,7 @@ import (
 )
 
 // TestPauseJob_RollbackOnPersistFailure pins R20260531070014-CR-1:
-// when persistJobsLocked fails AFTER pauseJobLocked already mutated
+// when persistLocked fails AFTER pauseLocked already mutated
 // (j.entryID=0, j.Paused=true), PauseJob must roll back the in-memory
 // mutation so disk (Paused=false, un-persisted) and memory stay aligned.
 // Without the fix, a process restart sees Paused=false on disk and

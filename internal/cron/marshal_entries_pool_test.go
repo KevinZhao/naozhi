@@ -12,11 +12,11 @@ import (
 
 // TestMarshalEntriesPool_RecyclesUnderCap verifies a slice put back into
 // the pool is reused (cap preserved, contents zeroed). Allocations stay
-// bounded across many marshalJobsLocked calls.
+// bounded across many marshalLocked calls.
 func TestMarshalEntriesPool_RecyclesUnderCap(t *testing.T) {
 	// NOT t.Parallel(): this test donates a slice into the process-global
 	// marshalEntriesPool and then reads the recycled slice's backing array.
-	// Parallel tests that hit marshalJobsLocked (e.g. AddJob) concurrently
+	// Parallel tests that hit marshalLocked (e.g. AddJob) concurrently
 	// Get the same slice and append/zero it — a data race on the shared
 	// backing array. Running serially keeps pool inspection out of the
 	// concurrent window. R247-PERF-11 (#551) flaky-race fix.
@@ -47,7 +47,7 @@ func TestMarshalEntriesPool_RecyclesUnderCap(t *testing.T) {
 func TestMarshalEntriesPool_ZeroesOnPut(t *testing.T) {
 	// NOT t.Parallel(): reads the donated slice's backing array after
 	// putMarshalEntries hands it to the shared global pool, which races a
-	// concurrent Get+write from parallel marshalJobsLocked callers. See
+	// concurrent Get+write from parallel marshalLocked callers. See
 	// TestMarshalEntriesPool_RecyclesUnderCap. R247-PERF-11 (#551).
 
 	j := &Job{ID: "abc"}
@@ -67,7 +67,7 @@ func TestMarshalEntriesPool_ZeroesOnPut(t *testing.T) {
 // pinning a multi-MB backing array forever via the pool.
 func TestMarshalEntriesPool_DropsOversize(t *testing.T) {
 	// NOT t.Parallel(): Gets from and reads the shared global pool's slot
-	// caps, which races concurrent Get+write from parallel marshalJobsLocked
+	// caps, which races concurrent Get+write from parallel marshalLocked
 	// callers. See TestMarshalEntriesPool_RecyclesUnderCap. R247-PERF-11 (#551).
 
 	// Build a slice well above the cap-drop threshold.
@@ -113,23 +113,19 @@ func TestMarshalJobsLocked_OutputUnchangedAcrossCalls(t *testing.T) {
 		}
 	}
 
-	s.tblForTest().mu.RLock()
-	first, err := s.marshalJobsLocked()
-	s.tblForTest().mu.RUnlock()
+	first, err := s.marshalForTest()
 	if err != nil {
-		t.Fatalf("marshalJobsLocked first: %v", err)
+		t.Fatalf("marshalLocked first: %v", err)
 	}
 	// Run several more marshals; output must be byte-identical because
 	// jobs map is unchanged.
 	for i := 0; i < 4; i++ {
-		s.tblForTest().mu.RLock()
-		got, err := s.marshalJobsLocked()
-		s.tblForTest().mu.RUnlock()
+		got, err := s.marshalForTest()
 		if err != nil {
-			t.Fatalf("marshalJobsLocked iter %d: %v", i, err)
+			t.Fatalf("marshalLocked iter %d: %v", i, err)
 		}
 		if string(got) != string(first) {
-			t.Errorf("marshalJobsLocked iter %d differs from first call", i)
+			t.Errorf("marshalLocked iter %d differs from first call", i)
 		}
 	}
 }

@@ -12,8 +12,7 @@ func newTestTable(t *testing.T, jobs ...*Job) *Scheduler {
 	t.Helper()
 	s := &Scheduler{tbl: newJobTable(nil)}
 	for _, j := range jobs {
-		s.tblForTest().jobs[j.ID] = j
-		s.addToChatIndexLocked(j)
+		s.putJobForTest(j)
 	}
 	return s
 }

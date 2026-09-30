@@ -14,8 +14,8 @@ import (
 // Without the seq gate, Go's non-FIFO sync.Mutex allowed the following
 // schedule to roll back persisted state:
 //
-//	T1: persistJobsLocked → data_A (seq=1) → release s.tbl.mu → wait storeMu
-//	T2: persistJobsLocked → data_B (seq=2) → release s.tbl.mu → wait storeMu
+//	T1: persistLocked → data_A (seq=1) → release s.tbl.mu → wait storeMu
+//	T2: persistLocked → data_B (seq=2) → release s.tbl.mu → wait storeMu
 //	T2: acquires storeMu first → writes data_B → releases
 //	T1: acquires storeMu → writes data_A (STALE)   ← old bug
 //	disk now reflects seq=1 state, not seq=2
@@ -75,7 +75,7 @@ func TestSaveMarshaledSeq_AcceptsAdvancingSeq(t *testing.T) {
 
 // TestSaveMarshaledSeq_EqualSeqIsDropped verifies the `seq <= last` boundary:
 // two writers sharing the same seq (can't happen in production because
-// persistJobsLocked.Add(1) is monotonic, but contract-test the gate) do not
+// persistLocked.Add(1) is monotonic, but contract-test the gate) do not
 // both land. This matters if a future refactor ever reuses a seq value.
 func TestSaveMarshaledSeq_EqualSeqIsDropped(t *testing.T) {
 	t.Parallel()

@@ -9,7 +9,7 @@ import (
 )
 
 // TestDeleteJobByID_PersistFailureCleansRunsDir is a regression test for
-// R236-GO-04 (#495): when persistJobsLocked fails inside DeleteJobByID,
+// R236-GO-04 (#495): when persistLocked fails inside DeleteJobByID,
 // the in-memory delete already happened — if runStore.DeleteJob does NOT
 // also fire on the persist-failure path, the runs/<jobID>/ subtree
 // remains on disk. A subsequent AddJob that reuses the same ID (16-hex
@@ -25,7 +25,7 @@ import (
 //  1. Build a Scheduler + seed one job
 //  2. Append a fake CronRun directly via runStore so runs/<jobID>/<runID>.json
 //     exists on disk
-//  3. Install the failing marshaler (so persistJobsLocked errors)
+//  3. Install the failing marshaler (so persistLocked errors)
 //  4. Call DeleteJobByID — expect ErrPersistFailed
 //  5. Assert runs/<jobID>/ no longer exists (the cleanup ran despite perr)
 func TestDeleteJobByID_PersistFailureCleansRunsDir(t *testing.T) {
