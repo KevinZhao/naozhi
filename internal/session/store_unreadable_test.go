@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // oversizedStoreFile writes a file just past maxStoreFileBytes so jsonfile.Load
@@ -127,18 +129,135 @@ func TestLoadStore_ReadableAgainResumesSaves(t *testing.T) {
 		t.Fatal("expected the save to be blocked while the file was unreadable")
 	}
 
-	// Operator moves the oversized file aside.
+	// Operator moves the oversized file aside. The loaders run once, in
+	// NewRouter, so this cannot depend on a second load: the next save tick
+	// itself has to notice (#2972).
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	// A read of an absent file is Absent with a nil error: naozhi now owns the
-	// path, so writing it destroys nothing.
-	loadStore(path)
 	if err := saveStoreSlice(path, []*ManagedSession{{key: "dashboard:direct:abc:general"}}); err != nil {
-		t.Fatalf("save still blocked after the file became readable: %v", err)
+		t.Fatalf("save still blocked after the file was moved aside: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("save reported success but wrote nothing: %v", err)
+	}
+	// Other tests in the package leave their own blocks behind; only this path
+	// matters here.
+	for _, b := range StoreBlocks() {
+		if b.Path == path {
+			t.Errorf("StoreBlocks() still lists %s after the lift: %+v", path, b)
+		}
+	}
+}
+
+// A file the operator truncates to 0 bytes is the other "nothing left to
+// clobber" shape: jsonfile.Load itself reads an empty file as Absent.
+func TestLoadStore_TruncatedFileResumesSaves(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	oversizedStoreFile(t, path)
+	loadStore(path)
+
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := saveStoreSlice(path, []*ManagedSession{{key: "dashboard:direct:abc:general"}}); err != nil {
+		t.Fatalf("save still blocked after the file was truncated: %v", err)
+	}
+}
+
+// A file repaired IN PLACE is readable again but was never loaded: the process
+// started empty, so a save would still replace the operator's sessions with a
+// near-empty set — the #2680 outcome by a longer road. The block has to hold,
+// and say what actually lifts it.
+func TestLoadStore_RepairedInPlaceStaysBlockedUntilRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	oversizedStoreFile(t, path)
+	loadStore(path)
+
+	repaired := []byte(`[{"key":"feishu:direct:u1:general","session_id":"11111111-1111-4111-8111-111111111111"}]`)
+	if err := os.WriteFile(path, repaired, 0o600); err != nil {
+		t.Fatalf("write repaired: %v", err)
+	}
+	err := saveStoreSlice(path, []*ManagedSession{{key: "dashboard:direct:abc:general"}})
+	if err == nil {
+		t.Fatal("save went through over a repaired file whose contents were never loaded")
+	}
+	var blocked *errStoreReadBlocked
+	if !errors.As(err, &blocked) {
+		t.Fatalf("save failed with %v; want errStoreReadBlocked", err)
+	}
+	if !strings.Contains(err.Error(), "restart naozhi") {
+		t.Errorf("reason does not tell the operator what lifts the block: %v", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || string(got) != string(repaired) {
+		t.Fatalf("repaired file was touched: err=%v body=%s", readErr, got)
+	}
+	blocks := StoreBlocks()
+	found := false
+	for _, b := range blocks {
+		if b.Path == path {
+			found = true
+			if !b.NeedRestart {
+				t.Errorf("StoreBlocks().NeedRestart = false for a repaired file: %+v", b)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("StoreBlocks() = %+v, want an entry for %s", blocks, path)
+	}
+	// A second tick with the file unchanged must not re-read it; the probe is
+	// one Lstat. Observable only indirectly: the verdict is the same.
+	if err := saveStoreSlice(path, nil); err == nil {
+		t.Fatal("second save went through")
+	}
+	t.Cleanup(func() { storeReadBlocked.Delete(path) })
+}
+
+// The 30s save tick used to warn identically on every pass — ~2,880 lines a day
+// per blocked file. The first failure warns; the rest are demoted for an hour.
+func TestErrStoreReadBlocked_WarnIsThrottled(t *testing.T) {
+	b := &storeBlock{label: "session store", reason: "r"}
+	e := &errStoreReadBlocked{path: "/x", reason: "r", block: b}
+	if !e.warnDue() {
+		t.Fatal("first failure must warn")
+	}
+	if e.warnDue() {
+		t.Fatal("second failure within the window must not warn")
+	}
+	b.mu.Lock()
+	b.lastWarn = time.Now().Add(-storeBlockedWarnEvery - time.Second)
+	b.mu.Unlock()
+	if !e.warnDue() {
+		t.Fatal("a failure after the window must warn again")
+	}
+}
+
+// StoreWriteBlocks is the Router-scoped view /health serves: this Router's own
+// store files, not every blocked path in the process.
+func TestRouter_StoreWriteBlocks_ScopedToOwnFiles(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "sessions.json")
+	oversizedStoreFile(t, storePath)
+	other := filepath.Join(t.TempDir(), "sessions.json")
+	oversizedStoreFile(t, other)
+	loadStore(other)
+	t.Cleanup(func() { storeReadBlocked.Delete(other) })
+
+	r := NewRouter(RouterConfig{MaxProcs: 1, StorePath: storePath})
+	t.Cleanup(func() { storeReadBlocked.Delete(storePath) })
+	blocks := r.StoreWriteBlocks()
+	if len(blocks) != 1 || blocks[0].Path != storePath || blocks[0].Label != "session store" {
+		t.Fatalf("StoreWriteBlocks() = %+v, want exactly this router's sessions.json", blocks)
+	}
+	if blocks[0].Reason == "" || blocks[0].Since.IsZero() {
+		t.Errorf("block lacks reason/since: %+v", blocks[0])
+	}
+	var nilRouter *Router
+	if got := nilRouter.StoreWriteBlocks(); got != nil {
+		t.Errorf("nil router reported %+v", got)
 	}
 }
 

@@ -113,11 +113,21 @@ type healthAuthSection struct {
 	// stores are best-effort — a write failure never fails the run it records —
 	// so these counters are the only operator-visible trace of lost history.
 	RunStores *healthRunStores `json:"run_stores,omitempty"`
+	// SessionStore lists the session-store files whose writes are refused
+	// because startup could not read them (#2680, #2972). Omitted while every
+	// store file is writable, so its presence alone means "sessions are not
+	// being persisted".
+	SessionStore *healthSessionStore `json:"session_store,omitempty"`
 	// SpawnDiags is every gate decision that dropped or ignored configured
 	// input since start: counts per layer|action and the latest keys, never
 	// the values. Without it an env var the filter refused shows up only in
 	// the log. Omitted while there are none.
 	SpawnDiags *spawndiag.Summary `json:"spawn_diags,omitempty"`
+}
+
+// healthSessionStore is the /health "session_store" sub-object.
+type healthSessionStore struct {
+	Blocked []session.StoreBlock `json:"blocked"`
 }
 
 // healthRunStores groups the two run-history stores. Each sub-object is nil

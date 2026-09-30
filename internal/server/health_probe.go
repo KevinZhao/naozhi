@@ -55,7 +55,25 @@ func (h *HealthHandler) subsystemProbes() []HealthProbe {
 		EventLogHealthProbe(h.router),
 		AttachmentTrackerHealthProbe(h.router),
 		runStoresHealthProbe(h.cronRunStore, h.router),
+		sessionStoreHealthProbe(h.router),
 		spawnDiagsHealthProbe,
+	}
+}
+
+// sessionStoreHealthProbe populates session_store with the store files whose
+// writes are currently refused. The section is omitted while there are none:
+// the router's saves are the only thing that lifts or sets a block, so the
+// field is exactly "is session state reaching disk right now".
+func sessionStoreHealthProbe(router *session.Router) HealthProbe {
+	return func(auth *healthAuthSection) {
+		if router == nil || auth == nil {
+			return
+		}
+		blocked := router.StoreWriteBlocks()
+		if len(blocked) == 0 {
+			return
+		}
+		auth.SessionStore = &healthSessionStore{Blocked: blocked}
 	}
 }
 
