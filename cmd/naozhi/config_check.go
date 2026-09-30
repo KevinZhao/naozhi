@@ -145,6 +145,10 @@ func configCheck(args []string, stdout io.Writer) int {
 	debugFile := session.CLIDebugPath(
 		session.CLIDebugDir(datadir.ForStore(storePath).EventsRoot()), effectiveSessionKey)
 
+	// The same session-layer view NewRouter receives, so default_model resolves
+	// through the same lookup the spawn path uses.
+	accessProfiles := buildAccessProfiles(cfg.AccessProfiles)
+
 	for _, b := range cfg.EnabledBackends() {
 		id := b.ID
 		profile, ok := backend.Get(id)
@@ -169,7 +173,13 @@ func configCheck(args []string, stdout io.Writer) int {
 		if !caps.EffortTier {
 			effort = ""
 		}
-		opts := session.ArgvSpawnOptions(b.Model, effort, debugFile, "", b.Args, settingsFile, mcpConfigFile)
+		// The argv chain is the spawn path's own (session.EffectiveArgvLayers →
+		// mergeArgvLayers): backend defaults < default access profile's
+		// default_model < agent. A hand-written copy here reported agent args as
+		// replacing the backend's and ignored default_model (#2969).
+		bd := session.BackendDefaults{Model: b.Model, Args: b.Args, Effort: effort}
+		baseModel, baseEffort, baseArgs, _ := session.EffectiveArgvLayers(bd, accessProfiles, cfg.DefaultAccessProfile, session.AgentOpts{})
+		opts := session.ArgvSpawnOptions(baseModel, baseEffort, debugFile, "", baseArgs, settingsFile, mcpConfigFile)
 		for _, d := range cli.SpawnDiagsFor(
 			session.ArgvSpawnOptions(b.Model, b.Effort, debugFile, "", b.Args, settingsFile, mcpConfigFile),
 			caps,
@@ -182,25 +192,19 @@ func configCheck(args []string, stdout io.Writer) int {
 				Env:  maskEnvValues(filteredEnv),
 			}
 			for agentID, ac := range cfg.Agents {
-				agentEffort := ac.Effort
-				if agentEffort == "" {
-					agentEffort = effort
-				} else if !caps.EffortTier {
+				model, agentEffort, args, prompt := session.EffectiveArgvLayers(bd, accessProfiles, cfg.DefaultAccessProfile, session.AgentOpts{
+					Model: ac.Model, Effort: ac.Effort, ExtraArgs: ac.Args, SystemPrompt: ac.SystemPrompt,
+				})
+				// The startup path drops the tier for a backend without one; an
+				// agent's own effort meets the same gate at spawn.
+				if !caps.EffortTier {
 					agentEffort = ""
-				}
-				agentModel := ac.Model
-				if agentModel == "" {
-					agentModel = b.Model
-				}
-				agentArgs := b.Args
-				if len(ac.Args) > 0 {
-					agentArgs = ac.Args
 				}
 				if eff.Agents == nil {
 					eff.Agents = map[string][]string{}
 				}
 				eff.Agents[agentID] = proto.BuildArgs(session.ArgvSpawnOptions(
-					agentModel, agentEffort, debugFile, ac.SystemPrompt, agentArgs, settingsFile, mcpConfigFile))
+					model, agentEffort, debugFile, prompt, args, settingsFile, mcpConfigFile))
 			}
 			for apID, ap := range cfg.AccessProfiles {
 				if len(ap.Env) == 0 {
@@ -209,7 +213,11 @@ func configCheck(args []string, stdout io.Writer) int {
 				if eff.Profiles == nil {
 					eff.Profiles = map[string][]string{}
 				}
-				eff.Profiles[apID] = maskEnvValues(envpolicy.MergeShimEnv(filteredEnv, ap.Env))
+				env, diags := effectiveProfileEnv(filteredEnv, apID, ap.Env)
+				eff.Profiles[apID] = env
+				for _, d := range diags {
+					result.Diags = append(result.Diags, backendDiag{Backend: id, SpawnDiag: d})
+				}
 			}
 			result.Effective[id] = eff
 		}
@@ -371,4 +379,52 @@ func sysessionBackendDiags(cfg *config.Config) []backendDiag {
 		add("image_orient.enabled", "image auto-orient")
 	}
 	return out
+}
+
+// effectiveProfileEnv is the masked env an access profile's overlay produces
+// on top of the filtered baseline, resolved the way the spawn path resolves it
+// (session.resolveEnvOverlay + envpolicy.MergeShimEnv). Handing MergeShimEnv the
+// raw overlay dropped every *_FILE key silently — it is overlay-allowed but not
+// shim-allowed — so the report showed a profile injecting no credential at all
+// while the runtime reads the file and injects the concrete key (#2969).
+//
+// The file is not read here: the entry names its source instead, and an
+// unreadable file becomes a diag, because at spawn it is a FAIL-LOUD error.
+// Every drop the merge gate makes is a diag too, keyed by profile.
+func effectiveProfileEnv(baseline []string, profileID string, overlay map[string]string) ([]string, []cli.SpawnDiag) {
+	var diags []cli.SpawnDiag
+	resolved := make(map[string]string, len(overlay))
+	fromFile := map[string]string{} // concrete key -> file path
+	for k, v := range overlay {
+		concrete, ok := envpolicy.ResolvedFileKey(k)
+		if !ok {
+			resolved[k] = v
+			continue
+		}
+		if _, err := os.Stat(v); err != nil {
+			diags = append(diags, cli.SpawnDiag{
+				Layer: "access-profile", Key: "access_profiles." + profileID + ".env." + k, Action: "ignored",
+				Reason: fmt.Sprintf("secret file is not readable (%v); a spawn under this profile fails instead of falling back to the global default", err),
+			})
+			continue
+		}
+		fromFile[concrete] = v
+		resolved[concrete] = "(from " + v + ")"
+	}
+	for _, d := range envpolicy.MergeShimEnvDrops(baseline, resolved) {
+		diags = append(diags, cli.SpawnDiag{
+			Layer: "env-filter", Key: "access_profiles." + profileID + ".env." + d.Key, Action: "dropped", Reason: d.Reason,
+		})
+	}
+	env := maskEnvValues(envpolicy.MergeShimEnv(baseline, resolved))
+	for i, kv := range env {
+		key := kv
+		if j := strings.IndexByte(kv, '='); j >= 0 {
+			key = kv[:j]
+		}
+		if path, ok := fromFile[key]; ok {
+			env[i] = key + "=<read from " + path + " at spawn>"
+		}
+	}
+	return env, diags
 }
