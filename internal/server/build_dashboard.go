@@ -95,14 +95,9 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 		hs.wiring.routerEvents.BindSessionsChanged(s.hub.BroadcastSessionsUpdate)
 	}
 
-	// cron and sysession share one runtelemetry.Broadcaster; per-subsystem
-	// WS payload selection happens inside hubBroadcaster. Same note as
-	// the session list: both objects come from main.go.
-	telemetry := newHubBroadcaster(s.hub)
-	if hs.wiring.scheduler != nil {
-		hs.wiring.scheduler.SetTelemetry(telemetry)
-	}
-	if hs.wiring.sysessionMgr != nil {
-		hs.wiring.sysessionMgr.SetTelemetry(telemetry)
+	// cron and sysession share one relay, built in main.go before the Hub;
+	// per-subsystem WS payload selection happens inside hubBroadcaster.
+	if hs.wiring.runTelemetry != nil {
+		hs.wiring.runTelemetry.Bind(newHubBroadcaster(s.hub))
 	}
 }
