@@ -419,15 +419,11 @@ func main() {
 	srv := server.NewWithOptions(server.ServerOptions{
 		Addr:          cfg.Server.Addr,
 		Router:        router,
-		RouterEvents:  routerEvents,
-		RunTelemetry:  runTelemetry,
 		Platforms:     platforms,
 		Agents:        agents,
 		AgentCommands: cfg.AgentCommands,
 		Scheduler:     scheduler,
 		Backend:       cfg.CLI.Backend,
-		WorkspaceID:   cfg.Workspace.ID,
-		WorkspaceName: cfg.Workspace.Name,
 		AllowedRoot:   workspace,
 		StateDir:      sessionLayout.Root(),
 		Config: server.ConfigOptions{
@@ -439,23 +435,15 @@ func main() {
 			LoadedAt:                cfg.Fingerprint.LoadedAt,
 			AccessProfileSecretsDir: sessionLayout.AccessProfileSecretsRoot(),
 		},
-		NoOutputTimeout: noOutputTimeout,
-		TotalTimeout:    totalTimeout,
 		Queue: server.QueueOptions{
 			MaxDepth:     cfg.QueueMaxDepth(),
 			CollectDelay: cfg.ParseCollectDelay(),
 			Mode:         cfg.QueueMode(),
 		},
-		DashboardToken:    cfg.Server.DashboardToken,
-		TrustedProxy:      cfg.Server.TrustedProxy,
-		DebugMode:         cfg.Server.DebugMode,
-		PublicTmpEnabled:  cfg.Projects.PublicTmp,
-		ProjectManager:    projectMgr,
-		Nodes:             nodes,
-		ReverseNodeServer: rns,
-		Transcriber:       stt,
-		StartupCtx:        ctx,
-		Version:           version,
+		DashboardToken: cfg.Server.DashboardToken,
+		TrustedProxy:   cfg.Server.TrustedProxy,
+		ProjectManager: projectMgr,
+		Transcriber:    stt,
 		Update: server.UpdateOptions{
 			Status:           updateStatus,
 			Checker:          updateChecker,
@@ -465,17 +453,41 @@ func main() {
 			Manager: sysMgr,
 			WorkDir: sysWorkDir,
 		},
-		// Default-on; opt-out via session.project_stable_key.enabled: false.
-		ProjectStableKeyEnabled: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
 		ImageOrient: server.ImageOrientOptions{
 			Enabled: orientEnabled,
 			Model:   cfg.ImageOrient.Model,
 			Runner:  orientRunner,
 		},
-		OnReady: func() {
-			if err := osutil.SdNotify("READY=1"); err != nil {
-				slog.Warn("sd_notify READY failed", "err", err)
-			}
+		Identity: server.IdentityOptions{
+			WorkspaceID:   cfg.Workspace.ID,
+			WorkspaceName: cfg.Workspace.Name,
+			Version:       version,
+		},
+		Watchdog: server.WatchdogOptions{
+			NoOutput: noOutputTimeout,
+			Total:    totalTimeout,
+		},
+		Features: server.FeatureOptions{
+			Debug:     cfg.Server.DebugMode,
+			PublicTmp: cfg.Projects.PublicTmp,
+			// Default-on; opt-out via session.project_stable_key.enabled: false.
+			ProjectStableKey: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
+		},
+		Lifecycle: server.LifecycleOptions{
+			StartupCtx: ctx,
+			OnReady: func() {
+				if err := osutil.SdNotify("READY=1"); err != nil {
+					slog.Warn("sd_notify READY failed", "err", err)
+				}
+			},
+		},
+		Remote: server.RemoteOptions{
+			Nodes:         nodes,
+			ReverseServer: rns,
+		},
+		Relays: server.RelayOptions{
+			Router:       routerEvents,
+			RunTelemetry: runTelemetry,
 		},
 	})
 	metrics.StartupPhaseServerMs.Set(time.Since(t0).Milliseconds())

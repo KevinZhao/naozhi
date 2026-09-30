@@ -25,7 +25,9 @@ func TestHealth_VersionAbsentOnUnauthedProbe(t *testing.T) {
 		Platforms:      platforms,
 		Backend:        "claude",
 		DashboardToken: "secret",
-		Version:        "v1.2.3-test",
+		Identity: IdentityOptions{
+			Version: "v1.2.3-test",
+		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -63,7 +65,9 @@ func TestHealth_VersionPresentOnAuthedProbe(t *testing.T) {
 		Platforms:      platforms,
 		Backend:        "claude",
 		DashboardToken: "secret",
-		Version:        "v1.2.3-test",
+		Identity: IdentityOptions{
+			Version: "v1.2.3-test",
+		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -94,7 +98,9 @@ func TestStats_VersionTagPresent(t *testing.T) {
 		Addr:    ":0",
 		Router:  router,
 		Backend: "claude",
-		Version: "v9.9.9-test",
+		Identity: IdentityOptions{
+			Version: "v9.9.9-test",
+		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)

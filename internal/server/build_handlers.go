@@ -211,9 +211,9 @@ func buildProjectHandlers(
 		ConfigPutLimiter:   newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
 		// Process-local (resets on restart); not a filesystem quota.
 		UploadQuotaBytes: defaultUploadQuotaBytes,
-		PublicTmpEnabled: opts.PublicTmpEnabled,
+		PublicTmpEnabled: opts.Features.PublicTmp,
 
-		ProjectStableKeyEnabled: opts.ProjectStableKeyEnabled,
+		ProjectStableKeyEnabled: opts.Features.ProjectStableKey,
 	})
 }
 
@@ -273,7 +273,7 @@ func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Han
 		Router:        router,
 		UpdateStatus:  opts.Update.Status,
 		UpdateChecker: checker,
-		BuildVersion:  opts.Version,
+		BuildVersion:  opts.Identity.Version,
 		// nil ⇒ enabled, matching config.UpdateDashboardInstall's default.
 		InstallEnabled: opts.Update.DashboardInstall == nil || *opts.Update.DashboardInstall,
 	})

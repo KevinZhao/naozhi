@@ -14,11 +14,13 @@ import (
 func TestServer_BindsRunTelemetry(t *testing.T) {
 	relay := &runtelemetry.Relay{}
 	_ = NewWithOptions(ServerOptions{
-		Addr:         ":0",
-		Router:       session.NewRouter(session.RouterConfig{}),
-		RunTelemetry: relay,
-		Platforms:    map[string]platform.Platform{"test": &mockPlatform{}},
-		Backend:      "claude",
+		Addr:      ":0",
+		Router:    session.NewRouter(session.RouterConfig{}),
+		Platforms: map[string]platform.Platform{"test": &mockPlatform{}},
+		Backend:   "claude",
+		Relays: RelayOptions{
+			RunTelemetry: relay,
+		},
 	})
 	defer func() {
 		if p, _ := recover().(string); !strings.Contains(p, "bound twice") {

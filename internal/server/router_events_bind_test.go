@@ -16,13 +16,15 @@ func TestServer_BindsRouterEvents(t *testing.T) {
 	relay := &routerrelay.Relay{}
 	stateDir := t.TempDir()
 	_, hs := buildServerWithHandlers(ServerOptions{
-		Addr:         ":0",
-		Router:       session.NewRouter(session.RouterConfig{Observer: relay}),
-		RouterEvents: relay,
-		Platforms:    map[string]platform.Platform{"test": &mockPlatform{}},
-		Backend:      "claude",
-		StateDir:     stateDir,
-		Queue:        QueueOptions{MaxDepth: 4},
+		Addr:      ":0",
+		Router:    session.NewRouter(session.RouterConfig{Observer: relay}),
+		Platforms: map[string]platform.Platform{"test": &mockPlatform{}},
+		Backend:   "claude",
+		StateDir:  stateDir,
+		Queue:     QueueOptions{MaxDepth: 4},
+		Relays: RelayOptions{
+			Router: relay,
+		},
 	})
 
 	const key = "feishu:direct:u:general"

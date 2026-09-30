@@ -27,17 +27,17 @@ import (
 // re-reads config or re-validates. New fields needing a derived value must
 // take the derived form here, not the raw yaml shape (#681).
 type ServerOptions struct {
-	WorkspaceID   string
-	WorkspaceName string
-	AllowedRoot   string // restricts /cd to paths under this root
+	// Identity groups what the server reports about itself (S8, #2987).
+	Identity    IdentityOptions
+	AllowedRoot string // restricts /cd to paths under this root
 	// StateDir is the only state directory the constructor owns end-to-end
 	// (cookie_secret 0700/0600, retired-key ledger, size warning). Other state
 	// dirs (~/.claude, workspace cwd, attachments, cron runs/shims) are owned
 	// elsewhere (#407). Empty is legal: cookie secret becomes in-memory and
 	// the retired-key store degrades to no-op.
-	StateDir        string
-	NoOutputTimeout time.Duration
-	TotalTimeout    time.Duration
+	StateDir string
+	// Watchdog groups the per-turn kill timeouts (S8, #2987).
+	Watchdog WatchdogOptions
 	// Queue groups the dispatch-queue knobs (#2553).
 	Queue QueueOptions
 	// Update groups the self-update surface (#2553).
@@ -50,44 +50,17 @@ type ServerOptions struct {
 	// (#2553).
 	Config ConfigOptions
 
-	DashboardToken    string // optional bearer token for dashboard API
-	TrustedProxy      bool   // trust X-Forwarded-For for client IP
-	ProjectManager    *project.Manager
-	Nodes             map[string]node.Conn
-	ReverseNodeServer *node.ReverseServer
-	Transcriber       transcribepkg.Service
-	OnReady           func() // called after the listener is bound and serving
-	// StartupCtx, when set, is threaded into blocking init probes (e.g. the
-	// --version subprocess) so SIGTERM during startup aborts them promptly.
-	// Nil is equivalent to context.Background().
-	StartupCtx context.Context
-	// Version is the build version string (the `-X main.version=...` ldflag).
-	// Surfaced only on the authenticated part of /health and as `version_tag`
-	// in /api/sessions stats; empty means unknown and /health omits the field.
-	Version string
+	DashboardToken string // optional bearer token for dashboard API
+	TrustedProxy   bool   // trust X-Forwarded-For for client IP
+	ProjectManager *project.Manager
+	// Remote groups the remote-node connections (S8, #2987).
+	Remote      RemoteOptions
+	Transcriber transcribepkg.Service
+	// Lifecycle groups the startup hooks (S8, #2987).
+	Lifecycle LifecycleOptions
 
-	// DebugMode gates registration of /api/debug/pprof and /api/debug/vars.
-	// Default false: both are 404 even for loopback+auth callers, so a leaked
-	// dashboard token cannot enumerate goroutine stacks (file paths, queue
-	// contents) or expvar counters. Set `server.debug_mode: true` only while
-	// capturing a profile.
-	DebugMode bool
-
-	// PublicTmpEnabled opts the __public_tmp__ pseudo-project in (#646). When
-	// false (default) that pseudo-project is a regular "project not found".
-	//
-	// SECURITY: MUST stay false on any shared / multi-operator deployment or
-	// where the dashboard token is shared. When enabled every authenticated
-	// dashboard user can read non-credential files anywhere under /tmp (the
-	// credential allowlist and foreign-private-UID gate block secrets and
-	// sockets, not general content). Accesses are audit-logged at Info
-	// ("public_tmp file access") (#1678).
-	PublicTmpEnabled bool
-
-	// ProjectStableKeyEnabled toggles the per-project StableKey field in the
-	// /api/projects list response (docs/rfc/project-stable-session-key.md §4.2).
-	// When false the dashboard falls back to the timestamp-key "continue" path.
-	ProjectStableKeyEnabled bool
+	// Features groups the opt-in feature switches (S8, #2987).
+	Features FeatureOptions
 
 	// === Core dependencies ===
 	//
@@ -95,13 +68,8 @@ type ServerOptions struct {
 	// fields in opts with its positional args.
 	Addr   string
 	Router *session.Router
-	// RouterEvents is the relay Router was built with as its observer; the
-	// server binds the dashboard's session-list and key-retirement consumers to
-	// it. nil leaves them unbound.
-	RouterEvents *routerrelay.Relay
-	// RunTelemetry is the relay cron and sysession were built with; the
-	// server binds the Hub's run-event broadcaster to it. nil leaves it unbound.
-	RunTelemetry  *runtelemetry.Relay
+	// Relays groups the construction-cycle relays the server binds (S7/S8).
+	Relays        RelayOptions
 	Platforms     map[string]platform.Platform
 	Agents        map[string]session.AgentOpts
 	AgentCommands map[string]string
@@ -111,6 +79,76 @@ type ServerOptions struct {
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).
 	Logger *slog.Logger
+}
+
+// IdentityOptions is what the server reports about itself.
+type IdentityOptions struct {
+	WorkspaceID   string
+	WorkspaceName string
+	// Version is the build version string (the `-X main.version=...` ldflag).
+	// Surfaced only on the authenticated part of /health and as `version_tag`
+	// in /api/sessions stats; empty means unknown and /health omits the field.
+	Version string
+}
+
+// WatchdogOptions are the per-turn kill timeouts the dispatcher enforces.
+type WatchdogOptions struct {
+	NoOutput time.Duration
+	Total    time.Duration
+}
+
+// FeatureOptions are the opt-in feature switches.
+type FeatureOptions struct {
+	// Debug gates registration of /api/debug/pprof and /api/debug/vars.
+	// Default false: both are 404 even for loopback+auth callers, so a leaked
+	// dashboard token cannot enumerate goroutine stacks (file paths, queue
+	// contents) or expvar counters. Set `server.debug_mode: true` only while
+	// capturing a profile.
+	Debug bool
+
+	// PublicTmp opts the __public_tmp__ pseudo-project in (#646). When
+	// false (default) that pseudo-project is a regular "project not found".
+	//
+	// SECURITY: MUST stay false on any shared / multi-operator deployment or
+	// where the dashboard token is shared. When enabled every authenticated
+	// dashboard user can read non-credential files anywhere under /tmp (the
+	// credential allowlist and foreign-private-UID gate block secrets and
+	// sockets, not general content). Accesses are audit-logged at Info
+	// ("public_tmp file access") (#1678).
+	PublicTmp bool
+
+	// ProjectStableKey toggles the per-project StableKey field in the
+	// /api/projects list response (docs/rfc/project-stable-session-key.md §4.2).
+	// When false the dashboard falls back to the timestamp-key "continue" path.
+	ProjectStableKey bool
+}
+
+// LifecycleOptions are the startup hooks.
+type LifecycleOptions struct {
+	// OnReady is called after the listener is bound and serving.
+	OnReady func()
+	// StartupCtx, when set, is threaded into blocking init probes (e.g. the
+	// --version subprocess) so SIGTERM during startup aborts them promptly.
+	// Nil is equivalent to context.Background().
+	StartupCtx context.Context
+}
+
+// RemoteOptions are the remote-node connections.
+type RemoteOptions struct {
+	Nodes         map[string]node.Conn
+	ReverseServer *node.ReverseServer
+}
+
+// RelayOptions are the relays the router, cron and sysession were built with;
+// the server binds its consumers to them once they exist. nil leaves a relay
+// unbound.
+type RelayOptions struct {
+	// Router is the relay Router was built with as its observer; the server
+	// binds the dashboard's session-list and key-retirement consumers to it.
+	Router *routerrelay.Relay
+	// RunTelemetry is the relay cron and sysession were built with; the server
+	// binds the Hub's run-event broadcaster to it.
+	RunTelemetry *runtelemetry.Relay
 }
 
 // QueueOptions are the dispatch-queue knobs. Grouped out of the flat
