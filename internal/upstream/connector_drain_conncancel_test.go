@@ -76,7 +76,7 @@ func TestHandleConn_ReadErrorCancelsConnCtxBeforeDrain(t *testing.T) {
 
 	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(r), nil, nil)
+	c := New(cfg, testRouter(r), nil, nil, Discovery{})
 
 	// Live parent ctx: never cancelled during the test. This isolates the fix
 	// — only connCancel() inside the drain defer can release the ping ticker.

@@ -9,7 +9,21 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/upstream"
 )
+
+// upstreamDiscovery wires the primary's discovered-session RPCs to this node's
+// Claude projects dir; without one there is nothing to discover and both RPCs
+// answer an empty array.
+func upstreamDiscovery(claudeDir string, router *session.Router, projectMgr *project.Manager) upstream.Discovery {
+	if claudeDir == "" {
+		return upstream.Discovery{}
+	}
+	return upstream.Discovery{
+		Sessions: newUpstreamDiscoverFunc(claudeDir, router, projectMgr),
+		Preview:  newUpstreamPreviewFunc(claudeDir),
+	}
+}
 
 // newUpstreamDiscoverFunc builds the connector's session-discovery callback:
 // scans claudeDir minus naozhi-managed pids/sessions/cwds, backfills Project

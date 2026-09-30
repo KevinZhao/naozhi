@@ -83,7 +83,7 @@ func TestSubscribe_AfterConnCtxCancel_NoStreamGoroutine(t *testing.T) {
 	defer conn.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(r), nil, nil)
+	c := New(cfg, testRouter(r), nil, nil, Discovery{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // connCtx is born cancelled → the guard fires for any subscribe.
