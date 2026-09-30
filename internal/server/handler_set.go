@@ -47,6 +47,7 @@ import (
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
@@ -126,6 +127,8 @@ type wiring struct {
 	sysessionMgr  *sysession.Manager
 	orient        *orientConfig // nil = image auto-orientation off
 	scheduler     cronScheduler // nil when cron is not configured (see buildServerWithHandlers)
+	// routerEvents is opts.RouterEvents; buildDashboard binds the hub to it.
+	routerEvents *routerrelay.Relay
 	// watchdog holds the no-output / total watchdog-kill counters; the
 	// dispatcher, the session handlers and /health each get pointers into it.
 	watchdog watchdogCounters

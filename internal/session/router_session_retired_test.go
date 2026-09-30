@@ -7,7 +7,7 @@ import (
 )
 
 // TestRouter_OnSessionRetired_RemoveCarriesSessionID locks the contract
-// that Router.Remove fires the SetOnSessionRetired callback with the
+// that Router.Remove fires the observer's KeyRetired with the
 // session UUID captured before unregister cleared r.ss.Load(key).
 // The history-drawer wiring depends on this — without it the dashboard
 // would have no UUID to stamp retired_at against.
@@ -31,12 +31,12 @@ func TestRouter_OnSessionRetired_RemoveCarriesSessionID(t *testing.T) {
 		gotSID   string
 		gotCount int
 	)
-	r.SetOnSessionRetired(func(k, sessionID string) {
+	observe(r).retired = func(k, sessionID string) {
 		mu.Lock()
 		gotKey, gotSID = k, sessionID
 		gotCount++
 		mu.Unlock()
-	})
+	}
 
 	if !r.Remove(key) {
 		t.Fatalf("Remove returned false")
@@ -75,9 +75,9 @@ func TestRouter_OnSessionRetired_ResetCarriesSessionID(t *testing.T) {
 	})
 
 	gotCh := make(chan string, 1)
-	r.SetOnSessionRetired(func(_ string, sessionID string) {
+	observe(r).retired = func(_ string, sessionID string) {
 		gotCh <- sessionID
-	})
+	}
 
 	r.Reset(key)
 
@@ -91,35 +91,10 @@ func TestRouter_OnSessionRetired_ResetCarriesSessionID(t *testing.T) {
 	}
 }
 
-// TestRouter_OnSessionRetired_NilFnSafe locks the contract that
-// SetOnSessionRetired(nil) clears the callback without panicking the
-// next teardown — used by tests/teardown that swap callbacks midway.
-func TestRouter_OnSessionRetired_NilFnSafe(t *testing.T) {
-	r := NewRouter(RouterConfig{MaxProcs: 4, TTL: time.Hour})
-	t.Cleanup(r.Shutdown)
-
-	called := false
-	r.SetOnSessionRetired(func(_, _ string) { called = true })
-	r.SetOnSessionRetired(nil) // clear
-
-	const key = "k"
-	s := &ManagedSession{key: key}
-	s.setSessionID("sid-x")
-	r.ss.Update(func(tx sessTx) {
-		tx.Put(key, s)
-	})
-	r.Remove(key)
-
-	if called {
-		t.Fatalf("nil-cleared callback was still invoked")
-	}
-}
-
-// TestRouter_OnKeyRetired_StillFiresAlongsideSessionRetired locks the
-// contract that the existing SetOnKeyRetired wiring (used by
-// dispatch.MessageQueue.Cleanup) is not disturbed when SetOnSessionRetired
-// is also registered: both callbacks must fire on the same teardown.
-func TestRouter_OnKeyRetired_StillFiresAlongsideSessionRetired(t *testing.T) {
+// TestRouter_NilObserverSafe locks the contract that a router built without
+// an Observer retires sessions without panicking: tests and tools that never
+// wire the dashboard construct routers this way.
+func TestRouter_NilObserverSafe(t *testing.T) {
 	r := NewRouter(RouterConfig{MaxProcs: 4, TTL: time.Hour})
 	t.Cleanup(r.Shutdown)
 
@@ -129,28 +104,8 @@ func TestRouter_OnKeyRetired_StillFiresAlongsideSessionRetired(t *testing.T) {
 	r.ss.Update(func(tx sessTx) {
 		tx.Put(key, s)
 	})
-
-	var (
-		mu       sync.Mutex
-		keyHits  int
-		sessHits int
-	)
-	r.SetOnKeyRetired(func(string) {
-		mu.Lock()
-		keyHits++
-		mu.Unlock()
-	})
-	r.SetOnSessionRetired(func(string, string) {
-		mu.Lock()
-		sessHits++
-		mu.Unlock()
-	})
-
 	r.Remove(key)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if keyHits != 1 || sessHits != 1 {
-		t.Fatalf("expected both callbacks to fire once each; got keyHits=%d sessHits=%d", keyHits, sessHits)
+	if got := r.ss.Load(key); got != nil {
+		t.Fatal("Remove left the key registered")
 	}
 }

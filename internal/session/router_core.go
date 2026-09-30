@@ -216,19 +216,9 @@ type Router struct {
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
 
-	// onChange is an atomic.Pointer so notifyChange can load it lock-free on
-	// the stream-event hot path (after every result event); set once at startup.
-	// onChangeHolder makes the "function value through atomic pointer" idiom
-	// explicit instead of `&fn` on a parameter copy.
-	onChange atomic.Pointer[onChangeHolder]
-
-	// onKeyRetired fires after Reset/Remove finish; lets side-indices keyed
-	// on the session key (e.g. dispatch.MessageQueue) drop their entries.
-	onKeyRetired atomic.Pointer[onKeyRetiredHolder]
-
-	// onSessionRetired mirrors onKeyRetired but exposes the session UUID
-	// captured before teardown removed the key's table entry; see SetOnSessionRetired.
-	onSessionRetired atomic.Pointer[onSessionRetiredHolder]
+	// observer receives the notifications notifyChange / notifyKeyRetired
+	// raise; nil drops them. Fixed at construction.
+	observer Observer
 
 	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
 	historyWg sync.WaitGroup
@@ -614,6 +604,14 @@ type RouterConfig struct {
 	// inject a fixture (#458).
 	HistoryLoader HistoryLoader
 
+	// Observer receives the router's session-list and key-retirement
+	// notifications; nil drops them.
+	Observer Observer
+	// CostRunOwner reports whether a turn on key belongs to a run that writes
+	// its own ledger entry (a cron run), so the session layer stays silent for
+	// it; nil means no turn is owned elsewhere.
+	CostRunOwner func(key string) bool
+
 	// Resolver is the shared KeyResolver. When set, callers (Dispatcher, Hub,
 	// upstream wiring) should fetch it via Router.Resolver() instead of building
 	// their own from cfg.Agents, which drifted across construction sites (#604).
@@ -639,6 +637,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 
 	r := &Router{
+		observer:        cfg.Observer,
 		maxProcs:        cfg.MaxProcs,
 		ttl:             cfg.TTL,
 		pruneTTL:        cfg.PruneTTL,
@@ -680,7 +679,7 @@ func NewRouter(cfg RouterConfig) *Router {
 			RollupDays:    cfg.CostLedger.RollupDays,
 		})
 	}
-	r.costAcct = newCostAccounting(ledger)
+	r.costAcct = newCostAccounting(ledger, cfg.CostRunOwner)
 
 	// nil HistoryLoader → production discovery-backed implementation so the
 	// rest of the router can call r.historyLoader unconditionally (#458).
@@ -1015,72 +1014,33 @@ func (r *Router) Start(_ context.Context) {
 	r.startBackgroundLifecycle()
 }
 
-// onChangeHolder wraps a callback so the atomic pointer Store site is an
-// explicit composite literal rather than `&fn` (address of a parameter copy),
-// which is easy to break when inlining / renaming the parameter.
-type onChangeHolder struct{ fn func() }
-
-// SetOnChange registers a callback invoked when the session list changes.
-// Replaces any previous callback; nil fn clears the callback.
-func (r *Router) SetOnChange(fn func()) {
-	if fn == nil {
-		r.onChange.Store(nil)
-		return
-	}
-	r.onChange.Store(&onChangeHolder{fn: fn})
+// Observer receives the router's lifecycle notifications, always outside the
+// table lock.
+type Observer interface {
+	// SessionsChanged fires whenever the session list or a session's
+	// dashboard-visible state changed — per result event on the hot path, so
+	// it must be cheap.
+	SessionsChanged()
+	// KeyRetired fires from Reset/Remove after teardown completes (LRU eviction
+	// does not), with the session UUID captured before the key's table entry
+	// went away. sessionID may be empty when the session retired before the
+	// CLI ever returned one.
+	KeyRetired(key, sessionID string)
 }
 
-// notifyChange calls the onChange callback if set. Must be called outside
-// the table lock. Lock-free so stream-event callbacks (fired per result event) don't
-// contend the table lock with session mutations.
+// notifyChange tells the observer the session list changed. Must be called
+// outside the table lock.
 func (r *Router) notifyChange() {
-	if h := r.onChange.Load(); h != nil {
-		h.fn()
+	if r.observer != nil {
+		r.observer.SessionsChanged()
 	}
 }
 
-// onKeyRetiredHolder mirrors onChangeHolder for the key-retirement hook.
-type onKeyRetiredHolder struct{ fn func(key string) }
-
-// onSessionRetiredHolder mirrors onKeyRetiredHolder but carries the session
-// UUID alongside the routing key, so the sessionID-keyed RetiredStore path
-// need not reverse-lookup the UUID after teardown removed the key's table entry.
-type onSessionRetiredHolder struct{ fn func(key, sessionID string) }
-
-// SetOnKeyRetired registers a callback fired from Reset/Remove AFTER the
-// session teardown completes. Typical wiring: dispatch.MessageQueue.Cleanup
-// so it does not accumulate empty entries Discard retains for gen-monotonicity.
-func (r *Router) SetOnKeyRetired(fn func(key string)) {
-	if fn == nil {
-		r.onKeyRetired.Store(nil)
-		return
-	}
-	r.onKeyRetired.Store(&onKeyRetiredHolder{fn: fn})
-}
-
-// SetOnSessionRetired registers a callback fired from Reset/Remove AFTER
-// teardown completes, receiving the routing key and the session UUID captured
-// before teardown removed the key's table entry. sessionID may be empty when the
-// session retired before the CLI ever returned a UUID; callbacks must tolerate
-// that. Independent of SetOnKeyRetired; both fire on the same teardown event.
-func (r *Router) SetOnSessionRetired(fn func(key, sessionID string)) {
-	if fn == nil {
-		r.onSessionRetired.Store(nil)
-		return
-	}
-	r.onSessionRetired.Store(&onSessionRetiredHolder{fn: fn})
-}
-
-// notifyKeyRetired invokes both the onKeyRetired and onSessionRetired
-// callbacks (when set). Call outside the table lock. sessionID is captured from
-// the session before its teardown ran, so it remains valid even though
-// the key's table entry is already gone by the time we reach this hook.
+// notifyKeyRetired tells the observer key finished retiring. Call outside the
+// table lock.
 func (r *Router) notifyKeyRetired(key, sessionID string) {
-	if h := r.onKeyRetired.Load(); h != nil {
-		h.fn(key)
-	}
-	if h := r.onSessionRetired.Load(); h != nil {
-		h.fn(key, sessionID)
+	if r.observer != nil {
+		r.observer.KeyRetired(key, sessionID)
 	}
 }
 

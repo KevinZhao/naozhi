@@ -100,6 +100,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		sysessionMgr:  opts.Sysession.Manager,
 		orient:        buildOrientConfig(opts),
 		scheduler:     scheduler,
+		routerEvents:  opts.RouterEvents,
 	}
 
 	s := &Server{
@@ -287,16 +288,15 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 	// Router.Reset/Remove hook (LRU eviction deliberately does not fire it),
 	// registered once AFTER sessionH exists so the fan-out is never
 	// half-wired while WarmHistoryCache runs: msgQueue.Cleanup frees the
-	// per-session FIFO entry; InvalidateHistoryCache makes the retired
-	// session visible to the history popover within one poll.
-	msgCleanup := w.msgQueue.Cleanup
-	router.SetOnKeyRetired(func(key string) {
-		msgCleanup(key)
-		sessionH.InvalidateHistoryCache()
-	})
-	router.SetOnSessionRetired(func(_ string, sessionID string) {
-		sessionH.RecordRetired(sessionID)
-	})
+	// per-session FIFO entry; RecordRetired stamps the session and makes it
+	// visible to the history popover within one poll.
+	if opts.RouterEvents != nil {
+		msgCleanup := w.msgQueue.Cleanup
+		opts.RouterEvents.BindKeyRetired(func(key, sessionID string) {
+			msgCleanup(key)
+			sessionH.RecordRetired(sessionID)
+		})
+	}
 	return sessionH
 }
 

@@ -134,7 +134,7 @@ func (h *Handlers) WaitWarmHistory() {
 }
 
 // InvalidateHistoryCache forces the next poll to repopulate historyCache from
-// disk. Wired into Router.SetOnKeyRetired so a just-retired session's jsonl
+// disk. Wired into the router observer's KeyRetired so a just-retired session's jsonl
 // appears in the history popover within one poll instead of up to 120s later.
 func (h *Handlers) InvalidateHistoryCache() {
 	h.historyCacheMu.Lock()
