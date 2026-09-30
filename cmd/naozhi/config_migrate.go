@@ -43,6 +43,9 @@ func configMigrate(args []string, stdout io.Writer) int {
 	for _, a := range res.Applied {
 		fmt.Fprintf(stdout, "MIGRATE: %s\n", a)
 	}
+	for _, w := range res.Warnings {
+		fmt.Fprintf(stdout, "WARN: %s\n", w)
+	}
 	if !*write {
 		// The diff is what an operator needs to see before agreeing to a
 		// rewrite of a file they hand-maintain; the byte count alone is not

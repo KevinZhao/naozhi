@@ -15,7 +15,7 @@ import (
 //
 // We:
 //  1. Build a Manager with a daemon whose Tick deliberately ignores ctx
-//     (sleeps long), so wg.Wait() can't return inside Stop's stopCtx.
+//     (blocks until cleanup), so wg.Wait() can't return inside Stop's stopCtx.
 //  2. Supply OnHardFail that bumps a counter then panics.
 //  3. Call Stop with an already-expired stopCtx.
 //  4. Assert Stop returns within a reasonable budget (no goroutine leak
@@ -23,12 +23,13 @@ import (
 func TestManager_StopOnHardFailPanicRecovered(t *testing.T) {
 	pulse, tickFn := pulseTicker()
 
-	// Daemon Tick ignores ctx and sleeps so wg.Wait() never returns
-	// within stopCtx.
+	// Daemon Tick ignores ctx and blocks until cleanup, so wg.Wait() never
+	// returns within stopCtx.
+	release := make(chan struct{})
 	d := &signalDaemon{
 		name: "auto-titler",
 		tickFn: func(_ context.Context, _ int32) (TickReport, error) {
-			time.Sleep(2 * time.Second)
+			<-release
 			return TickReport{}, nil
 		},
 	}
@@ -54,6 +55,13 @@ func TestManager_StopOnHardFailPanicRecovered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	// The tick outlives Stop's deadline by design. Release it and wait for it
+	// before the test ends, or its run-ended event lands in a later test's
+	// global-counter delta.
+	t.Cleanup(func() {
+		close(release)
+		m.wg.Wait()
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

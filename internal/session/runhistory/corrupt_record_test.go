@@ -99,3 +99,70 @@ func TestWarmRefusesOversizedRecord(t *testing.T) {
 		t.Errorf("oversized record must be left in place for inspection: %v", err)
 	}
 }
+
+// A 0-byte record is a write that never finished. jsonfile.Load reports it as
+// Absent — nothing to preserve — but the file stays on disk, so before #2974 it
+// was skipped in place and re-read on every warm, the behaviour the corrupt
+// path had already been cured of.
+func TestWarmRemovesEmptyRecord(t *testing.T) {
+	root := t.TempDir()
+	const key = "chat:empty"
+	dir := filepath.Join(root, dirHashFor(key))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	good := SessionRun{RunID: "aaaa0000deadbeef", SessionKey: key, StartedAt: time.Now()}
+	body, err := json.Marshal(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, good.RunID+".json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(dir, "cccc0000deadbeef.json")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := NewStore(root, 10, time.Hour).Recent(key, 0)
+	if len(got) != 1 || got[0].RunID != good.RunID {
+		t.Fatalf("Recent() = %+v, want just the parseable record", got)
+	}
+	if _, err := os.Stat(empty); err == nil {
+		t.Error("empty record is still on disk; it would be re-read on every warm")
+	}
+}
+
+// The .corrupt.<ts>.<nonce> sibling readRunFile leaves behind has no other
+// reaper: trimLocked works off RunIDs and the datadir sweeper never descends
+// into <root>/<dirHash>/. Warm keeps it for one keepWindow (it is evidence)
+// and removes it after.
+func TestWarmReapsCorruptSiblingsPastKeepWindow(t *testing.T) {
+	root := t.TempDir()
+	const key = "chat:reap"
+	dir := filepath.Join(root, dirHashFor(key))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, "bbbb0000deadbeef.json.corrupt.20240101-000000.0badf00d")
+	fresh := filepath.Join(dir, "dddd0000deadbeef.json.corrupt.20240101-000000.cafe0000")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte(`{"run_id": truncated`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := NewStore(root, 10, time.Hour).Recent(key, 0); len(got) != 0 {
+		t.Fatalf("Recent() = %+v, want nothing: corrupt siblings are never records", got)
+	}
+	if _, err := os.Stat(stale); err == nil {
+		t.Error("corrupt sibling older than keepWindow is still on disk")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("corrupt sibling inside keepWindow was removed: %v", err)
+	}
+}

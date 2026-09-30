@@ -3,7 +3,7 @@
 // cron-specific fields (Trigger=cron.TriggerKind, ErrorClass=cron.ErrorClass)
 // and are translated to the wire runtelemetry shapes inside the private emit
 // helpers, so external callers reach the broadcast surface only through
-// SchedulerDeps.Telemetry or SetTelemetry (RFC §3.5).
+// SchedulerDeps.Telemetry (RFC §3.5).
 
 package cron
 
@@ -41,31 +41,6 @@ type RunEndedEvent struct {
 	Trigger    TriggerKind
 }
 
-// SetTelemetry installs (or replaces) the broadcaster after construction:
-// cmd/naozhi builds the Scheduler before the Hub exists and injects once
-// dashboard.go finishes wiring. Storage is atomic.Pointer because wiring
-// goroutines can call this while cron tick goroutines are already inside
-// emitRunStarted / emitRunEnded. Passing nil clears the broadcaster.
-func (s *Scheduler) SetTelemetry(b runtelemetry.Broadcaster) {
-	if b == nil {
-		s.telemetry.Store(nil)
-		return
-	}
-	bb := b
-	s.telemetry.Store(&bb)
-}
-
-// loadTelemetry returns the current broadcaster or nil. Centralised so
-// the deref dance (atomic.Pointer wraps a *Broadcaster, dereferencing
-// can panic on nil) lives in one place.
-func (s *Scheduler) loadTelemetry() runtelemetry.Broadcaster {
-	ptr := s.telemetry.Load()
-	if ptr == nil {
-		return nil
-	}
-	return *ptr
-}
-
 // emitRunStarted translates a cron-local RunStartedEvent to the shared
 // runtelemetry shape and forwards through the configured broadcaster; a nil
 // broadcaster (tests / no-WS) is silently dropped. CronRunStartedTotal bumps
@@ -73,7 +48,7 @@ func (s *Scheduler) loadTelemetry() runtelemetry.Broadcaster {
 // event count when a new emit path lands.
 func (s *Scheduler) emitRunStarted(ev RunStartedEvent) {
 	metrics.CronRunStartedTotal.Add(1)
-	b := s.loadTelemetry()
+	b := s.telemetry
 	if b == nil {
 		return
 	}
@@ -89,7 +64,7 @@ func (s *Scheduler) emitRunStarted(ev RunStartedEvent) {
 }
 
 func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
-	b := s.loadTelemetry()
+	b := s.telemetry
 	if b == nil {
 		return
 	}

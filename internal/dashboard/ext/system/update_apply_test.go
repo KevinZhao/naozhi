@@ -517,3 +517,14 @@ func TestUpdateApply_PanicIsRecovered(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A zero Deps carries the checker-disabled status: the status endpoint
+// answers from it instead of dereferencing a nil interface.
+func TestNew_ZeroDepsStatusIsSafe(t *testing.T) {
+	h := New(Deps{Router: session.NewRouter(session.RouterConfig{})})
+	rec := httptest.NewRecorder()
+	h.HandleUpdateStatus(rec, httptest.NewRequest(http.MethodGet, "/api/system/update", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
