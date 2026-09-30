@@ -8,7 +8,7 @@ import (
 // schedulerMethodBaseline is *Scheduler's exported method count (#2955). A new
 // method is surface every consumer can reach; fewer means the baseline is
 // lowered in the same change, so the room cannot be refilled.
-const schedulerMethodBaseline = 35
+const schedulerMethodBaseline = 34
 
 func TestSchedulerSurface_Ratchet(t *testing.T) {
 	t.Parallel()

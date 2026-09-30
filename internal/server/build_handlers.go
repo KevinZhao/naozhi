@@ -255,18 +255,24 @@ func platformStatusMap(names map[string]struct{}) map[string]string {
 }
 
 // buildSystemHandlers constructs the /api/system/* group. A nil
-// SysessionManager must become a nil interface, not a non-nil interface
-// wrapping nil, or the daemons endpoint's disabled path never fires.
+// SysessionManager or update Checker must become a nil interface, not a
+// non-nil interface wrapping nil, or the endpoints' disabled paths never fire.
+// The Status goes in as-is: *selfupdate.Status is nil-receiver safe, and the
+// handlers call it unguarded.
 func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Handlers {
 	var daemons system.DaemonInspector
 	if opts.Sysession.Manager != nil {
 		daemons = opts.Sysession.Manager
 	}
+	var checker system.UpdateChecker
+	if opts.Update.Checker != nil {
+		checker = opts.Update.Checker
+	}
 	return system.New(system.Deps{
 		Daemons:       daemons,
 		Router:        router,
 		UpdateStatus:  opts.Update.Status,
-		UpdateChecker: opts.Update.Checker,
+		UpdateChecker: checker,
 		BuildVersion:  opts.Version,
 		// nil ⇒ enabled, matching config.UpdateDashboardInstall's default.
 		InstallEnabled: opts.Update.DashboardInstall == nil || *opts.Update.DashboardInstall,

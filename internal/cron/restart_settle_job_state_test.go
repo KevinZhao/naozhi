@@ -22,7 +22,7 @@ func TestAdoption_SettleUpdatesJobStateAndBroadcasts(t *testing.T) {
 	router := &adoptingRouter{verdicts: map[string]AdoptVerdict{}, runs: map[string]*fakeInFlightRun{}}
 	s, jobID, runID, _ := seedMarkedRun(t, router, 0)
 	rb := &recordingBroadcaster{}
-	s.SetTelemetry(rb)
+	s.telemetry = rb
 	key := "cron:" + jobID
 	run := &fakeInFlightRun{
 		outcome: AdoptedRunOutcome{Completed: true, Text: "the late answer", SubType: "success", SessionID: "sess-a1"},
@@ -73,7 +73,7 @@ func TestInterruptedReconcile_UpdatesJobState(t *testing.T) {
 	t.Parallel()
 	s, jobID, runID, _ := seedMarkedRun(t, &fakeRouter{}, 0)
 	rb := &recordingBroadcaster{}
-	s.SetTelemetry(rb)
+	s.telemetry = rb
 
 	s.reconcileRunInflight()
 

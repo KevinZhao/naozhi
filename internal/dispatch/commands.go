@@ -279,7 +279,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 	if b := d.resolver.ProjectBindingForChat(msg.Platform, msg.ChatType, msg.ChatID); b.Bound {
 		if agentToReset == "" {
 			plannerKey := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
-			// discardQueue BEFORE Reset: Reset fires onKeyRetired → msgQueue.Cleanup,
+			// discardQueue BEFORE Reset: Reset fires the observer's KeyRetired → msgQueue.Cleanup,
 			// which drops the ring without clearing parked ⏳ reactions (#2185).
 			d.discardQueue(ctx, msg, plannerKey)
 			d.router.Reset(plannerKey)

@@ -9,13 +9,13 @@ import (
 
 // #2185: the /new command handler must run discardQueue (the #2013
 // drain-and-clear-reactions path) BEFORE router.Reset. Reset synchronously
-// fires onKeyRetired → msgQueue.Cleanup, which deletes the queue ring without
+// fires the observer's KeyRetired → msgQueue.Cleanup, which deletes the queue ring without
 // surfacing the parked messages' HOURGLASS reactions. If discardQueue runs
 // AFTER Reset, the ring is already empty and the ⏳ marks hang until the
 // platform reaction-cache TTL (feishu: 12h).
 //
 // These tests model Reset's synchronous side effect with msgQueue.Cleanup
-// (exactly what the production onKeyRetired closure calls, server.go:510) and
+// (exactly what the production the observer's KeyRetired closure calls, server.go:510) and
 // pin both orderings so a future refactor cannot silently regress the order.
 
 // TestNewOrder_DiscardBeforeReset_ClearsReactions is the fixed ordering: the
@@ -33,7 +33,7 @@ func TestNewOrder_DiscardBeforeReset_ClearsReactions(t *testing.T) {
 	// Fixed order: discardQueue first (while ring is populated), then the
 	// Reset-equivalent Cleanup.
 	d.discardQueue(context.Background(), msg, key)
-	d.queue.Cleanup(key) // models router.Reset → onKeyRetired → Cleanup
+	d.queue.Cleanup(key) // models router.Reset → the observer's KeyRetired → Cleanup
 
 	got := removedIDs(rp)
 	want := map[string]bool{"m1": true, "m2": true}
