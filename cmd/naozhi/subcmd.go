@@ -26,6 +26,7 @@ var subcmds = []subcmd{
 	{"upgrade", "self-update to the latest release", runUpgrade},
 	{"cost", "cost ledger maintenance (backfill)", runCost},
 	{"config", "validate config.yaml (check) or upgrade its schema (migrate)", runConfig},
+	{"models", "reconcile the toolbox model recommendation into cc settings (sync)", runModels},
 }
 
 // findSubcmd returns the registry entry for name, or nil.
