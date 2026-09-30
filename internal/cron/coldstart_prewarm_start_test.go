@@ -51,9 +51,7 @@ func TestScheduler_Start_PrewarmsRecentCacheOnRestart(t *testing.T) {
 	t.Cleanup(s2.Stop)
 
 	// The job must have been reloaded from cron_jobs.json.
-	s2.tblForTest().mu.RLock()
-	_, loaded := s2.tblForTest().jobs[jobID]
-	s2.tblForTest().mu.RUnlock()
+	loaded := s2.tbl.exists(jobID)
 	if !loaded {
 		t.Fatalf("restart did not reload job %s from %s", jobID, storePath)
 	}

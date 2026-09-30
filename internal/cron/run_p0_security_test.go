@@ -18,9 +18,7 @@ func TestSkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	rawErr := "session error: open /home/ops/private-secret/file.go: " + context.Canceled.Error()
 	s.finishRun(runCtx{jobID: j.ID, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: rawErr, skipPersist: true})
@@ -51,9 +49,7 @@ func TestSuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: tmp + "/cron_jobs.json"}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	rawErr := "send error: dial tcp 10.0.0.1:443: connect: connection refused"
 	s.finishRun(runCtx{jobID: j.ID, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateFailed, errClass: ErrClassSendError, errMsg: rawErr})
@@ -70,10 +66,9 @@ func TestSuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 		t.Errorf("expected [redacted-addr] sentinel in broadcast ErrorMsg: %q", got.ErrorMsg)
 	}
 	// Consistency invariant: broadcast must equal on-disk Job.LastError.
-	s.tblForTest().mu.RLock()
-	defer s.tblForTest().mu.RUnlock()
-	if got.ErrorMsg != j.LastError {
-		t.Errorf("broadcast ErrorMsg %q diverges from Job.LastError %q", got.ErrorMsg, j.LastError)
+	snap := s.jobForTest(t, j.ID)
+	if got.ErrorMsg != snap.LastError {
+		t.Errorf("broadcast ErrorMsg %q diverges from Job.LastError %q", got.ErrorMsg, snap.LastError)
 	}
 }
 

@@ -38,14 +38,8 @@ func TestUpdateJob_ScheduleChangeRollback_RestoresCachedSched(t *testing.T) {
 	}
 
 	// Capture pre-update cachedSched — must be non-nil for a registered job.
-	s.tblForTest().mu.RLock()
-	live := s.tblForTest().jobs[j.ID]
-	if live == nil {
-		s.tblForTest().mu.RUnlock()
-		t.Fatal("job missing from s.tbl.jobs after AddJob")
-	}
+	live := s.jobForTest(t, j.ID)
 	preCachedSched := live.cachedSched
-	s.tblForTest().mu.RUnlock()
 
 	if preCachedSched == nil {
 		t.Fatal("precondition: cachedSched must be non-nil for a registered active job")
@@ -61,12 +55,7 @@ func TestUpdateJob_ScheduleChangeRollback_RestoresCachedSched(t *testing.T) {
 
 	// After the rolled-back UpdateJob, cachedSched must be restored to the
 	// pre-update value — not nil.
-	s.tblForTest().mu.RLock()
-	defer s.tblForTest().mu.RUnlock()
-	got := s.tblForTest().jobs[j.ID]
-	if got == nil {
-		t.Fatal("job vanished from s.tbl.jobs after rolled-back UpdateJob")
-	}
+	got := s.jobForTest(t, j.ID)
 	if got.cachedSched == nil {
 		t.Fatal("R20260602-CR-1: cachedSched is nil after rollback; pre-update parsed schedule must be restored")
 	}

@@ -134,9 +134,7 @@ func TestJobGate_NoDoubleExecutionUnderDeleteTriggerRace(t *testing.T) {
 
 	const jobID = "job-race"
 	j := &Job{ID: jobID, Schedule: "@every 5m", Prompt: "ping", Platform: "feishu", ChatID: "X"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	const rounds = 500
 	var wg sync.WaitGroup

@@ -28,13 +28,11 @@ func TestTriggerNow_RejectsAfterStop(t *testing.T) {
 
 	// Register a normal, runnable job so the only reason TriggerNow can fail
 	// is the stopped gate — not ErrJobNotFound / Paused / NoPrompt.
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs["job-1"] = &Job{
+	s.putJobForTest(&Job{
 		ID:       "job-1",
 		Schedule: "@every 1h",
 		Prompt:   "stub",
-	}
-	s.tblForTest().mu.Unlock()
+	})
 
 	s.Stop()
 

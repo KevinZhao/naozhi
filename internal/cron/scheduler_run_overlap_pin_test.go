@@ -25,9 +25,7 @@ func TestOverlapSkip_EmitsPairedStartedEnded(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 
 	j := &Job{ID: "job-overlap", Schedule: "@every 5m", Prompt: "ping", Platform: "feishu", ChatID: "X"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// Pre-take the inflight gate so executeOpt's CompareAndSwap(false, true)
 	// loses — exactly the state a concurrent in-flight run would leave.
@@ -102,9 +100,7 @@ func TestPerJobIDGate_RejectsConcurrentSameJob(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 
 	j := &Job{ID: "job-gate", Schedule: "@every 5m", Prompt: "ping", Platform: "feishu", ChatID: "X"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// jobGateLock must return the SAME mutex for the same jobID — the gate is
 	// what serialises the load→CAS against cleanup (#1706 precondition).

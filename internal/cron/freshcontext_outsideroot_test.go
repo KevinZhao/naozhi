@@ -80,9 +80,7 @@ func TestCRON3_FreshPreflightSkipsWhenWorkDirOutsideRoot(t *testing.T) {
 		WorkDir:      outside,
 		FreshContext: true,
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	_, ok := runFreshPreflight(s, j, outside)
 	if ok {
@@ -98,10 +96,8 @@ func TestCRON3_FreshPreflightSkipsWhenWorkDirOutsideRoot(t *testing.T) {
 	}
 	fake.mu.Unlock()
 
-	s.tblForTest().mu.RLock()
-	gotErr := s.tblForTest().jobs[j.ID].LastError
-	gotClass := s.tblForTest().jobs[j.ID].LastErrorClass
-	s.tblForTest().mu.RUnlock()
+	gotErr := s.jobForTest(t, j.ID).LastError
+	gotClass := s.jobForTest(t, j.ID).LastErrorClass
 	if !strings.Contains(gotErr, "outside allowed root") {
 		t.Errorf("LastError = %q, want contains %q", gotErr, "outside allowed root")
 	}
@@ -127,9 +123,7 @@ func TestCRON3_FreshPreflightProceedsWhenWorkDirUnderRoot(t *testing.T) {
 		WorkDir:      root,
 		FreshContext: true,
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	_, ok := runFreshPreflight(s, j, root)
 	if !ok {
@@ -168,9 +162,7 @@ func TestCRON3_FreshPreflightNoAllowedRootSkipsCheck(t *testing.T) {
 		WorkDir:      workDir,
 		FreshContext: true,
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	_, ok := runFreshPreflight(s, j, workDir)
 	if !ok {

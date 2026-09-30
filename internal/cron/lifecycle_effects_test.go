@@ -162,9 +162,7 @@ func TestTriggerNow_RefusesOrRuns(t *testing.T) {
 			t.Errorf("TriggerNow(%s) = %v, want %v", tc.id, err, tc.want)
 		}
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[noPrompt].Paused = false
-	s.tblForTest().mu.Unlock()
+	s.editJobForTest(t, noPrompt, func(j *Job) { j.Paused = false })
 	if err := s.TriggerNow(noPrompt); !errors.Is(err, ErrJobNoPrompt) {
 		t.Errorf("TriggerNow(no prompt) = %v, want ErrJobNoPrompt", err)
 	}

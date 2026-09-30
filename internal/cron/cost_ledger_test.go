@@ -68,9 +68,7 @@ func TestLocalRun_CostIsPerRunDeltaNotCumulative(t *testing.T) {
 	sess := &costSession{cumulative: []float64{0.3, 0.5}}
 	s, ledger := newCostScheduler(t, costRouter{sess: sess})
 	j := &Job{ID: "0123456789abcdef", Schedule: "@every 5m", Prompt: "ping", WorkDir: "/home/u/proj"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	s.executeOpt(j.ID, true)
 	s.executeOpt(j.ID, true)
@@ -123,9 +121,7 @@ func (r failingCostRouter) GetOrCreate(context.Context, string, AgentOpts) (Sess
 func TestLocalRun_SendErrorStillBooksSpend(t *testing.T) {
 	s, ledger := newCostScheduler(t, failingCostRouter{sess: &failingCostSession{}})
 	j := &Job{ID: "00000000deadbeef", Schedule: "@every 5m", Prompt: "ping"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 	s.executeOpt(j.ID, true)
 	runs := s.RecentRuns(j.ID, 1)
 	if len(runs) != 1 || runs[0].State != RunStateFailed || !near(runs[0].CostUSD, 0.7) {
@@ -140,9 +136,7 @@ func TestLocalRun_SendErrorStillBooksSpend(t *testing.T) {
 func TestLocalRun_SessionWithoutCostReporterRecordsZero(t *testing.T) {
 	s, ledger := newCostScheduler(t, okRouter{sid: "sess-1"})
 	j := &Job{ID: "fedcba9876543210", Schedule: "@every 5m", Prompt: "ping"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 	s.executeOpt(j.ID, true)
 	if runs := s.RecentRuns(j.ID, 1); len(runs) != 1 || runs[0].CostUSD != 0 {
 		t.Fatalf("runs = %+v", runs)

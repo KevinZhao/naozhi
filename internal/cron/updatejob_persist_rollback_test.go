@@ -56,9 +56,7 @@ func TestUpdateJob_PersistFailureRollsBackAllFields(t *testing.T) {
 
 	// Capture the pre-update snapshot the way a restart-replay would observe
 	// it (a value copy of the persisted job).
-	s.tblForTest().mu.RLock()
-	before := *s.tblForTest().jobs[id]
-	s.tblForTest().mu.RUnlock()
+	before := s.jobForTest(t, id)
 
 	withFailingMarshal(t, s)
 
@@ -87,9 +85,7 @@ func TestUpdateJob_PersistFailureRollsBackAllFields(t *testing.T) {
 		t.Fatalf("UpdateJob err = %v, want ErrPersistFailed", err)
 	}
 
-	s.tblForTest().mu.RLock()
-	got := *s.tblForTest().jobs[id]
-	s.tblForTest().mu.RUnlock()
+	got := s.jobForTest(t, id)
 
 	if got.Prompt != before.Prompt {
 		t.Errorf("Prompt not rolled back: got %q, want %q", got.Prompt, before.Prompt)
@@ -158,9 +154,7 @@ func TestUpdateJob_PersistSuccessAppliesFields(t *testing.T) {
 		t.Fatalf("UpdateJob: %v", err)
 	}
 
-	s.tblForTest().mu.RLock()
-	got := *s.tblForTest().jobs[id]
-	s.tblForTest().mu.RUnlock()
+	got := s.jobForTest(t, id)
 
 	if got.Prompt != newPrompt {
 		t.Errorf("Prompt not applied: got %q, want %q", got.Prompt, newPrompt)

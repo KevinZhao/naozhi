@@ -36,9 +36,7 @@ func TestInterruptedLocalRunAppearsInHistory(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing", WorkDir: "/tmp/wd"}
-	s1.tblForTest().mu.Lock()
-	s1.tblForTest().jobs[jobID] = j
-	s1.tblForTest().mu.Unlock()
+	s1.putJobForTest(j)
 
 	runID := mustGenerateRunID()
 	startedAt := time.Now().Add(-90 * time.Second)
@@ -52,9 +50,7 @@ func TestInterruptedLocalRunAppearsInHistory(t *testing.T) {
 
 	// Process B: same store, so it inherits the marker.
 	s2 := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
-	s2.tblForTest().mu.Lock()
-	s2.tblForTest().jobs[jobID] = j
-	s2.tblForTest().mu.Unlock()
+	s2.putJobForTest(j)
 	s2.reconcileRunInflight()
 
 	got, err := s2.Run(jobID, runID)
@@ -98,9 +94,7 @@ func TestFinishRunClearsTheInflightMarker(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	runID := mustGenerateRunID()
 	if path := s.writeRunInflightMarker(runInflightMarker{
@@ -132,9 +126,7 @@ func TestFinishRunClearsMarkerOnSkipPersistPaths(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	runID := mustGenerateRunID()
 	s.writeRunInflightMarker(runInflightMarker{
@@ -152,9 +144,7 @@ func TestReconcileDropsUnusableMarkers(t *testing.T) {
 	t.Parallel()
 	s, _ := newSchedulerWithStore(t)
 	jobID := mustGenerateID()
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(&Job{ID: jobID, Schedule: "@every 5m"})
 
 	dir := s.runInflightDir()
 	if err := s.mkdirStateSubtree(dir); err != nil {
@@ -240,9 +230,7 @@ func TestExecuteWritesTheInflightMarker(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	done := make(chan struct{})
 	go func() { s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */); close(done) }()

@@ -205,9 +205,7 @@ func TestPersistFailure_SetJobPrompt(t *testing.T) {
 		ChatType: "direct",
 		Paused:   true,
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	withFailingMarshal(t, s)
 
@@ -218,13 +216,12 @@ func TestPersistFailure_SetJobPrompt(t *testing.T) {
 
 	// Rollback assertions: in-memory state must revert to the pre-call values
 	// so that a process restart does not see a partially-applied mutation.
-	s.tblForTest().mu.RLock()
-	defer s.tblForTest().mu.RUnlock()
-	if j.Prompt != "" {
-		t.Errorf("rollback: j.Prompt = %q, want empty string", j.Prompt)
+	snap := s.jobForTest(t, j.ID)
+	if snap.Prompt != "" {
+		t.Errorf("rollback: snap.Prompt = %q, want empty string", snap.Prompt)
 	}
-	if !j.Paused {
-		t.Errorf("rollback: j.Paused = false, want true (initial state)")
+	if !snap.Paused {
+		t.Errorf("rollback: snap.Paused = false, want true (initial state)")
 	}
 }
 
@@ -265,9 +262,7 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 		LastError:     "",
 		LastSessionID: "prior-sess",
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	withFailingMarshal(t, s)
 
@@ -278,20 +273,19 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 	// LastRunAt/LastResult/LastError/LastSessionID fields.
 	_, _, _ = s.recordTerminalResult(j.ID, "new-result", "new-error", "new-sess", ErrClassSessionError, RunStateFailed, time.Now())
 
-	s.tblForTest().mu.Lock()
-	defer s.tblForTest().mu.Unlock()
+	snap := s.jobForTest(t, j.ID)
 
-	if !j.LastRunAt.Equal(time.Unix(1000, 0)) {
-		t.Errorf("LastRunAt not reverted: got %v, want %v", j.LastRunAt, time.Unix(1000, 0))
+	if !snap.LastRunAt.Equal(time.Unix(1000, 0)) {
+		t.Errorf("LastRunAt not reverted: got %v, want %v", snap.LastRunAt, time.Unix(1000, 0))
 	}
-	if j.LastResult != "prior-result" {
-		t.Errorf("LastResult not reverted: got %q, want %q", j.LastResult, "prior-result")
+	if snap.LastResult != "prior-result" {
+		t.Errorf("LastResult not reverted: got %q, want %q", snap.LastResult, "prior-result")
 	}
-	if j.LastError != "" {
-		t.Errorf("LastError not reverted: got %q, want empty", j.LastError)
+	if snap.LastError != "" {
+		t.Errorf("LastError not reverted: got %q, want empty", snap.LastError)
 	}
-	if j.LastSessionID != "prior-sess" {
-		t.Errorf("LastSessionID not reverted: got %q, want %q", j.LastSessionID, "prior-sess")
+	if snap.LastSessionID != "prior-sess" {
+		t.Errorf("LastSessionID not reverted: got %q, want %q", snap.LastSessionID, "prior-sess")
 	}
 }
 
@@ -324,9 +318,7 @@ func TestPersistFailure_RecordResultHappyPathApplies(t *testing.T) {
 		Paused:     true,
 		LastResult: "prior",
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// Real marshaler — persist succeeds. R230C-CR-1 / R247-CR-14 (#586):
 	// exercises the production path directly (recordTerminalResult, formerly
@@ -334,14 +326,13 @@ func TestPersistFailure_RecordResultHappyPathApplies(t *testing.T) {
 	// happy-path test that exercises a separate helper.
 	_, _, _ = s.recordTerminalResult(j.ID, "fresh-result", "", "sess-1", ErrClassNone, RunStateSucceeded, time.Now())
 
-	s.tblForTest().mu.Lock()
-	defer s.tblForTest().mu.Unlock()
+	snap := s.jobForTest(t, j.ID)
 
-	if j.LastResult != "fresh-result" {
-		t.Errorf("LastResult not applied: got %q, want %q", j.LastResult, "fresh-result")
+	if snap.LastResult != "fresh-result" {
+		t.Errorf("LastResult not applied: got %q, want %q", snap.LastResult, "fresh-result")
 	}
-	if j.LastSessionID != "sess-1" {
-		t.Errorf("LastSessionID not applied: got %q, want %q", j.LastSessionID, "sess-1")
+	if snap.LastSessionID != "sess-1" {
+		t.Errorf("LastSessionID not applied: got %q, want %q", snap.LastSessionID, "sess-1")
 	}
 }
 

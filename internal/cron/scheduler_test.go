@@ -901,10 +901,9 @@ func TestKnownSessionIDs_AggregatesFromJobs(t *testing.T) {
 	// Inject LastSessionID directly through the Scheduler's internal map —
 	// the public surface to set this is via execute() side-effect, which
 	// requires an actual running router.
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[job1.ID].LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001"
-	s.tblForTest().jobs[job2.ID].LastSessionID = "" // empty must NOT show up
-	s.tblForTest().mu.Unlock()
+	s.editJobForTest(t, job1.ID, func(j *Job) { j.LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001" })
+	// Empty must NOT show up.
+	s.editJobForTest(t, job2.ID, func(j *Job) { j.LastSessionID = "" })
 
 	got := s.KnownSessionIDs()
 	if _, ok := got["11111111-aaaa-bbbb-cccc-000000000001"]; !ok {
@@ -993,9 +992,7 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	if err := s.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[job.ID].LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001"
-	s.tblForTest().mu.Unlock()
+	s.editJobForTest(t, job.ID, func(j *Job) { j.LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001" })
 
 	// First call populates cache.
 	first := s.KnownSessionIDs()
@@ -1012,9 +1009,7 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 
 	// Mutate LastSessionID *without* invalidating — the cache should
 	// still serve the old snapshot until it expires or is invalidated.
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[job.ID].LastSessionID = "22222222-aaaa-bbbb-cccc-000000000002"
-	s.tblForTest().mu.Unlock()
+	s.editJobForTest(t, job.ID, func(j *Job) { j.LastSessionID = "22222222-aaaa-bbbb-cccc-000000000002" })
 
 	cached := s.KnownSessionIDs()
 	if _, ok := cached["11111111-aaaa-bbbb-cccc-000000000001"]; !ok {

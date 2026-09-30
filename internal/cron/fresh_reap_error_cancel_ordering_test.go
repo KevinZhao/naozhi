@@ -58,9 +58,7 @@ func TestFreshContextResetsOnSendError(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-send-err", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
@@ -114,9 +112,7 @@ func TestFreshContextResetsOnCancel(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-cancel", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 

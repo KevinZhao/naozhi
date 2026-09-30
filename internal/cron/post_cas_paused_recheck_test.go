@@ -41,9 +41,7 @@ func TestExecuteOpt_PostCASPausedRecheck_EmitsSyntheticSkipped(t *testing.T) {
 	jobID := j.ID
 
 	// Cross-lock race: by the time executeOpt runs, the job is paused.
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID].Paused = true
-	s.tblForTest().mu.Unlock()
+	s.editJobForTest(t, jobID, func(j *Job) { j.Paused = true })
 
 	s.executeOpt(j.ID, true /* viaTriggerNow */)
 
@@ -98,9 +96,7 @@ func TestExecuteOpt_PostCASDeletedRecheck_EmitsSyntheticSkipped(t *testing.T) {
 	// Cross-lock race: caller resolved cur from s.tbl.jobs, released RLock,
 	// and a Delete landed before CAS. Emulate by removing the s.tbl.jobs
 	// entry directly.
-	s.tblForTest().mu.Lock()
-	delete(s.tblForTest().jobs, j.ID)
-	s.tblForTest().mu.Unlock()
+	s.dropJobForTest(j.ID)
 
 	s.executeOpt(j.ID, true /* viaTriggerNow */)
 
@@ -157,9 +153,7 @@ func TestExecuteOpt_PostCASPausedRecheck_TriggerNow(t *testing.T) {
 	// has been paused. Mutate Paused directly under s.tbl.mu so we don't
 	// require a full PauseJobByID dance (which would also tear down the
 	// cron entry and is orthogonal to this test).
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID].Paused = true
-	s.tblForTest().mu.Unlock()
+	s.editJobForTest(t, j.ID, func(j *Job) { j.Paused = true })
 
 	done := make(chan struct{})
 	go func() {
@@ -212,9 +206,7 @@ func TestExecuteOpt_PostCASDeletedRecheck_TriggerNow(t *testing.T) {
 	// in ways that aren't on the hot path of this test; mutating the map
 	// directly is the smallest reproduction of the executeOpt-visible
 	// state.
-	s.tblForTest().mu.Lock()
-	delete(s.tblForTest().jobs, j.ID)
-	s.tblForTest().mu.Unlock()
+	s.dropJobForTest(j.ID)
 
 	done := make(chan struct{})
 	go func() {

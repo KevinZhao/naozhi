@@ -96,9 +96,7 @@ func TestScheduler_RunJobPropagatesBackendToAgentOpts(t *testing.T) {
 			// scheduler to tick. executeOpt is the path real ticks land
 			// in via the registered tick — calling it directly with viaTriggerNow=true
 			// skips jitter so the test stays fast and deterministic.
-			s.tblForTest().mu.Lock()
-			s.tblForTest().jobs[j.ID] = j
-			s.tblForTest().mu.Unlock()
+			s.putJobForTest(j)
 
 			done := make(chan struct{})
 			go func() {

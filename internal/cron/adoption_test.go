@@ -52,9 +52,7 @@ func seedMarkedRun(t *testing.T, router SessionRouter, attempts int) (s *Schedul
 	s = NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: router})
 	jobID = mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing", WorkDir: "/tmp/wd"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 	runID = mustGenerateRunID()
 	if path := s.writeRunInflightMarker(runInflightMarker{
 		JobID: jobID, RunID: runID, Trigger: TriggerScheduled,
@@ -249,16 +247,10 @@ func TestShutdownCancelKeepsMarker(t *testing.T) {
 		t.Fatalf("seed marker missing: %v", err)
 	}
 
-	j, _ := func() (*Job, bool) {
-		s.tblForTest().mu.RLock()
-		defer s.tblForTest().mu.RUnlock()
-		jj, ok := s.tblForTest().jobs[jobID]
-		return jj, ok
-	}()
 	rc := runCtx{
 		snap:      jobSnapshot{jobID: jobID, prompt: "p", workDir: "/tmp/wd"},
 		startedAt: time.Now().Add(-30 * time.Second),
-		runID:     runID, trigger: TriggerScheduled, jobID: j.ID, lg: slog.Default(),
+		runID:     runID, trigger: TriggerScheduled, jobID: s.jobForTest(t, jobID).ID, lg: slog.Default(),
 	}
 
 	// Shutdown-cancel: marker survives.

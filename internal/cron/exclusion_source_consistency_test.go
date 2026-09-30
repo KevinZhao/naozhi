@@ -34,9 +34,7 @@ func TestExclusionSourceConsistency(t *testing.T) {
 
 	// Source 1 (cheap fast path): Job.LastSessionID.
 	const lastSessionID = "src1-last-aaaa-bbbb-cccc-000000000001"
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[job.ID].LastSessionID = lastSessionID
-	s.tblForTest().mu.Unlock()
+	s.editJobForTest(t, job.ID, func(j *Job) { j.LastSessionID = lastSessionID })
 
 	// Source 2 (cold-build only): a persisted run's SessionID that lives
 	// ONLY in runStore.Recent — not in LastSessionID, not in-flight. This is

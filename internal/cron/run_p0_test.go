@@ -52,9 +52,7 @@ func TestP0_OverlapSkippedEmitsTerminalEvent(t *testing.T) {
 	// is the synthetic terminal event for this path; it should record one
 	// run-ended with state=skipped + class=overlap_skipped.
 	j := &Job{ID: "job-overlap", Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	s.emitOverlapSkipped(j.ID, true)
 
@@ -138,17 +136,13 @@ func TestP0_FinishRunCanceledSkipsPersist(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 	prevRun := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	j := &Job{ID: "job-c", Schedule: "@every 5m", LastRunAt: prevRun}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	s.finishRun(runCtx{jobID: j.ID, runID: "r1", startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: context.Canceled.Error(), skipPersist: true})
 
-	s.tblForTest().mu.RLock()
-	if !j.LastRunAt.Equal(prevRun) {
-		t.Errorf("skipPersist=true must leave LastRunAt unchanged: got %v want %v", j.LastRunAt, prevRun)
+	if got := s.jobForTest(t, j.ID); !got.LastRunAt.Equal(prevRun) {
+		t.Errorf("skipPersist=true must leave LastRunAt unchanged: got %v want %v", got.LastRunAt, prevRun)
 	}
-	s.tblForTest().mu.RUnlock()
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
 	}
@@ -171,9 +165,7 @@ func TestP0_PreflightWorkdirUnreachableMapsCorrectErrorClass(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-w", Schedule: "@every 5m", FreshContext: true, WorkDir: "/nonexistent-naozhi-test-dir-xyz"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	snap := jobSnapshot{
 		jobID: "job-w", schedule: "@every 5m", workDir: j.WorkDir, fresh: true,

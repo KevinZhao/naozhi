@@ -590,9 +590,7 @@ func TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck(t *testing.
 	// Simulate the TOCTOU race: remove the job from s.tbl.jobs directly so neither
 	// the initial snapshot NOR the re-check can find it. The deleted-job branch
 	// must not write an attention card regardless.
-	s.tblForTest().mu.Lock()
-	delete(s.tblForTest().jobs, j.ID)
-	s.tblForTest().mu.Unlock()
+	s.dropJobForTest(j.ID)
 
 	startedBefore := rec.startedCount()
 	s.reconcileOneSandboxOrphan(p, path)
@@ -686,9 +684,7 @@ func TestReconcileOrphan_JobDeletedInGap_NoBroadcastBalancedMetrics(t *testing.T
 	// Delete the job out from under the snapshot. Done before the call so the
 	// re-check deterministically sees nil even if the snapshot raced and saw
 	// the job — the routing into the metrics-only path is the contract.
-	s.tblForTest().mu.Lock()
-	delete(s.tblForTest().jobs, j.ID)
-	s.tblForTest().mu.Unlock()
+	s.dropJobForTest(j.ID)
 
 	startedBefore := rec.startedCount()
 	endedBefore := rec.endedCount()
@@ -755,13 +751,11 @@ func TestReconcileOrphan_AttentionRecheck_RaceWithDelete(t *testing.T) {
 		for i := 0; i < 50; i++ {
 			// Toggle: delete the job so some reconcile iterations hit
 			// the re-check with nil, others with non-nil.
-			s.tblForTest().mu.Lock()
-			if _, ok := s.tblForTest().jobs[j.ID]; ok {
-				delete(s.tblForTest().jobs, j.ID)
+			if s.tbl.exists(j.ID) {
+				s.dropJobForTest(j.ID)
 			} else {
-				s.tblForTest().jobs[j.ID] = j
+				s.putJobForTest(j)
 			}
-			s.tblForTest().mu.Unlock()
 			time.Sleep(time.Microsecond)
 		}
 	}()

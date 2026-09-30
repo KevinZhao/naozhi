@@ -30,9 +30,7 @@ func TestFinishRun_NilFinalizerNoPanic(t *testing.T) {
 	})
 
 	j := &Job{ID: "job-nil-finalizer", Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// Direct finishRun call mirroring emitOverlapSkipped's finishRun call
 	// literal (scheduler_finish.go's emitSyntheticSkipped) — finalizer

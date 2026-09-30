@@ -22,14 +22,12 @@ func TestBuildKnownSessionsSet_MapHint_ScalesWithJobs(t *testing.T) {
 	s := schedulerForJobsR241GO2Test(t)
 
 	wantSessions := make(map[string]bool, nJobs)
-	s.tblForTest().mu.Lock()
 	for i := 0; i < nJobs; i++ {
 		id := fmt.Sprintf("job%04d", i)
 		sid := "sid-" + id
-		s.tblForTest().jobs[id] = &Job{ID: id, LastSessionID: sid}
+		s.putJobForTest(&Job{ID: id, LastSessionID: sid})
 		wantSessions[sid] = true
 	}
-	s.tblForTest().mu.Unlock()
 
 	got := s.buildKnownSessionsSet()
 	for sid := range wantSessions {

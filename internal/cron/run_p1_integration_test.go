@@ -23,9 +23,7 @@ func TestP1_FinishRunPersistsCronRun(t *testing.T) {
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	runID := mustGenerateRunID()
 	startedAt := time.Now().Add(-5 * time.Second)
@@ -64,9 +62,7 @@ func TestP1_FinishRunSkipPersistDoesNotWriteHistory(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	runID := mustGenerateRunID()
 	s.finishRun(runCtx{jobID: j.ID, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: "context canceled", skipPersist: true})
@@ -91,9 +87,7 @@ func TestP1_FinishRunSanitisationConsistency(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// Errors with absolute paths trigger redactPathsInCronError.
 	rawErr := "session error: open /etc/secret-config: permission denied"
@@ -104,9 +98,7 @@ func TestP1_FinishRunSanitisationConsistency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRun: %v", err)
 	}
-	s.tblForTest().mu.RLock()
-	jobLastErr := s.tblForTest().jobs[jobID].LastError
-	s.tblForTest().mu.RUnlock()
+	jobLastErr := s.jobForTest(t, jobID).LastError
 
 	if got.ErrorMsg != jobLastErr {
 		t.Errorf("CronRun.ErrorMsg %q diverges from Job.LastError %q", got.ErrorMsg, jobLastErr)
@@ -128,9 +120,7 @@ func TestP1_DeleteJobByIDRemovesRunsSubtree(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// Append one run so the subtree exists.
 	s.finishRun(runCtx{jobID: j.ID, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
@@ -158,9 +148,7 @@ func TestP1_StartTrimAllReclaimsStaleRuns(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// Append 3 runs, then push their mtimes to 60 days ago.
 	old := time.Now().Add(-60 * 24 * time.Hour)
@@ -199,9 +187,7 @@ func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// Disable auto-trim so all 5 entries persist regardless of clock skew.
 	s.runStore.enableTrimGC = false
@@ -249,9 +235,7 @@ func TestP1_DisabledStoreNoOps(t *testing.T) {
 	}
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// Should not panic.
 	s.finishRun(runCtx{jobID: j.ID, runID: mustGenerateRunID(), startedAt: time.Now(), trigger: TriggerScheduled}, runOutcome{state: RunStateSucceeded, result: "x"})
@@ -279,9 +263,7 @@ func TestP1_ConcurrentFinishRunSerialised(t *testing.T) {
 	s.runStore.enableTrimGC = false
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[jobID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	const N = 30
 	var wg sync.WaitGroup
