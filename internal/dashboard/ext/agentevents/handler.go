@@ -50,7 +50,7 @@ const (
 // (agentlink.AgentLinker) is injectable so tests stub the lookup without a
 // live *cli.Process; production uses linkerForSession.
 type Handler struct {
-	router      *session.Router
+	router      SessionLookup
 	nodeAccess  NodeAccessor
 	linkerFor   func(key string) agentlink.AgentLinker
 	allowedRoot string // EvalSymlinks-resolved ~/.claude/projects; set by New
@@ -274,7 +274,7 @@ func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 
 // Deps bundles all wiring for New.
 type Deps struct {
-	Router     *session.Router
+	Router     SessionLookup
 	NodeAccess NodeAccessor
 }
 
@@ -344,4 +344,10 @@ func jsonlPathUnderAllowedRoot(p, root string) bool {
 		return false // exact root match is not under root
 	}
 	return strings.HasPrefix(abs, root+string(filepath.Separator))
+}
+
+// SessionLookup is the *session.Router surface agentevents reads: the live
+// session behind a key.
+type SessionLookup interface {
+	SessionFor(key string) *session.ManagedSession
 }
