@@ -177,8 +177,9 @@ access_profiles:
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2 (fatal); output:\n%s", code, out.String())
 	}
-	// The overlay allowlist is enforced at load, not at report time — which is
-	// why the reported profile env never has to show a filtered overlay.
+	// The overlay KEY allowlist is enforced at load. Value-level gates and the
+	// *_FILE expansion still happen at report time (effectiveProfileEnv), and
+	// what they drop is reported as a diag, not hidden (#2969).
 	if !strings.Contains(out.String(), "NOT_ALLOWED_KEY") || !strings.Contains(out.String(), "overlay allowlist") {
 		t.Errorf("the fatal must name the refused key and the allowlist:\n%s", out.String())
 	}
