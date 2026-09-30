@@ -304,6 +304,11 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if path == "" {
 		return nil
 	}
+	// Before the marshal, not only inside writeStoreData: a blocked store used
+	// to serialise every session each tick just to be refused (#2972).
+	if err := blockedIfUnreadable(path); err != nil {
+		return err
+	}
 	// Per-session cached encodings: per tick O(changed), not O(N) (#1523).
 	data, err := marshalStoreEntries(sessions)
 	if err != nil {
@@ -321,6 +326,9 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 func saveStoreSlice(path string, sessions []*ManagedSession) error {
 	if path == "" {
 		return nil
+	}
+	if err := blockedIfUnreadable(path); err != nil {
+		return err
 	}
 	data, err := marshalStoreEntriesSlice(sessions)
 	if err != nil {

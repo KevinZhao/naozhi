@@ -360,7 +360,7 @@ func (r *Router) Cleanup() {
 		slog.Warn("periodic known IDs marshal failed", "err", knownIDsMarshalErr)
 	} else if knownIDsDue {
 		if err := saveKnownIDsBytes(snap.storePath, knownIDsCopy); err != nil {
-			slog.Warn("periodic known IDs save failed", "err", err)
+			logStoreSaveFailure("periodic known IDs save failed", err)
 			r.kid.ResetSaveThrottle()
 		} else {
 			r.kid.MarkSavedIfUnchanged(snapshotKnownIDsGen)
@@ -404,7 +404,7 @@ func (r *Router) dirtySaveSnapshot(v sessView) saveSnapshot {
 func (r *Router) saveDirty(snap saveSnapshot) {
 	if snap.sessions != nil {
 		if err := saveStoreSlice(snap.storePath, snap.sessions); err != nil {
-			slog.Warn("periodic session save failed", "err", err)
+			logStoreSaveFailure("periodic session save failed", err)
 		} else {
 			r.ss.Update(func(tx sessTx) {
 				if tx.Gen() == snap.gen {
@@ -415,7 +415,7 @@ func (r *Router) saveDirty(snap saveSnapshot) {
 	}
 	if snap.wsOverrides != nil {
 		if err := saveWorkspaceOverrides(snap.storePath, snap.wsOverrides); err != nil {
-			slog.Warn("periodic workspace overrides save failed", "err", err)
+			logStoreSaveFailure("periodic workspace overrides save failed", err)
 		} else {
 			r.ss.Update(func(tx sessTx) { tx.Ext().workspaces.MarkSavedIfUnchanged(snap.wsGen) })
 		}
@@ -533,7 +533,7 @@ func (r *Router) saveIfDirty() {
 		slog.Warn("periodic known IDs marshal failed", "err", knownIDsMarshalErr)
 	} else if knownIDsDue {
 		if err := saveKnownIDsBytes(snap.storePath, knownIDsCopy); err != nil {
-			slog.Warn("periodic known IDs save failed", "err", err)
+			logStoreSaveFailure("periodic known IDs save failed", err)
 			r.kid.ResetSaveThrottle()
 		} else {
 			r.kid.MarkSavedIfUnchanged(snapshotKnownIDsGen)
