@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
 // Drop is one entry the shim filter refused for a GATE reason: the operator set
@@ -334,8 +335,16 @@ func GuardErrorReason(err error) string {
 	const limit = 160
 	var b strings.Builder
 	inQuote := false
+	escaped := false
 	for _, r := range err.Error() {
 		switch {
+		case inQuote && escaped:
+			// The rune after a backslash inside a %q span is part of the
+			// value, however it renders — `\"` in particular must not end
+			// the span, or everything after it leaks (#2973).
+			escaped = false
+		case inQuote && r == '\\':
+			escaped = true
 		case r == '"':
 			b.WriteRune(r)
 			if !inQuote {
@@ -350,11 +359,29 @@ func GuardErrorReason(err error) string {
 			b.WriteRune(r)
 		}
 	}
-	out := b.String()
-	if len(out) > limit {
-		return out[:limit] + "…"
+	if inQuote {
+		// An unterminated span (a value ending in `\`, or a message cut
+		// mid-quote) still closes so the reader sees a collapsed value.
+		b.WriteRune('"')
 	}
-	return out
+	return truncateRunes(b.String(), limit)
+}
+
+// truncateRunes bounds s to at most limit runes, appending an ellipsis when it
+// cut anything. Cutting by byte could split a multi-byte rune — the ellipsis
+// GuardErrorReason inserts is itself three bytes — and leave invalid UTF-8.
+func truncateRunes(s string, limit int) string {
+	if utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+	n := 0
+	for i := range s {
+		if n == limit {
+			return s[:i] + "…"
+		}
+		n++
+	}
+	return s
 }
 
 // kvKeyPrefix returns the key part (before '=') of a KEY=value env string,

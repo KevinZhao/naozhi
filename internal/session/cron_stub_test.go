@@ -13,7 +13,7 @@ func TestRegisterCronStub_CreatesFreshStub(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
 	var notified int
-	r.SetOnChange(func() { notified++ })
+	observe(r).changed = func() { notified++ }
 
 	r.RegisterCronStub("cron:job-1", "/tmp/work", "initial prompt")
 
@@ -52,7 +52,7 @@ func TestRegisterCronStub_NoOpOnIdenticalRefresh(t *testing.T) {
 	r.RegisterCronStub("cron:job-2", "/w", "p")
 
 	// Reset tracking to isolate the second call.
-	r.SetOnChange(func() {})
+	observe(r).changed = func() {}
 	var genBefore uint64
 	r.ss.Update(func(tx sessTx) {
 		tx.SetDirty(false)
@@ -96,7 +96,7 @@ func TestRegisterCronStub_DirtyOnActualChange(t *testing.T) {
 			r.RegisterCronStub("cron:job-3", "/w", "p")
 
 			var notified int
-			r.SetOnChange(func() { notified++ })
+			observe(r).changed = func() { notified++ }
 			var genBefore uint64
 			r.ss.Update(func(tx sessTx) {
 				tx.SetDirty(false)
@@ -131,7 +131,7 @@ func TestRegisterCronStub_EmptyValuesDoNotClobber(t *testing.T) {
 	r := newTestRouter(3)
 	r.RegisterCronStub("cron:job-4", "/keep", "keepme")
 
-	r.SetOnChange(func() {})
+	observe(r).changed = func() {}
 	r.ss.Update(func(tx sessTx) {
 		tx.SetDirty(false)
 	})
@@ -191,7 +191,7 @@ func TestRegisterCronStubWithChain_NoOpOnIdenticalChain(t *testing.T) {
 	r := newTestRouter(3)
 	r.RegisterCronStubWithChain("cron:job-c2", "/w", "p", []string{"sess-xxx"})
 
-	r.SetOnChange(func() {})
+	observe(r).changed = func() {}
 	var genBefore uint64
 	r.ss.Update(func(tx sessTx) {
 		tx.SetDirty(false)
@@ -221,7 +221,7 @@ func TestRegisterCronStubWithChain_DirtyOnChainChange(t *testing.T) {
 	r := newTestRouter(3)
 	r.RegisterCronStubWithChain("cron:job-c3", "/w", "p", []string{"sess-old"})
 
-	r.SetOnChange(func() {})
+	observe(r).changed = func() {}
 	var genBefore uint64
 	r.ss.Update(func(tx sessTx) {
 		tx.SetDirty(false)

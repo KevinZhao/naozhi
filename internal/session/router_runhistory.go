@@ -69,9 +69,3 @@ func (r *Router) CostLedger() *costledger.Store {
 	}
 	return r.costAcct.ledger
 }
-
-// SetCostRunOwnership installs the gate that tells accountTurnCost a turn is
-// owned by a cron run (which writes the ledger itself). nil disables the gate.
-func (r *Router) SetCostRunOwnership(fn func(key string) bool) {
-	r.costAcct.setRunOwnership(fn)
-}

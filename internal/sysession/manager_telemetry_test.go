@@ -46,7 +46,7 @@ func (r *recordingBroadcaster) snapshot() ([]runtelemetry.RunStartedEvent, []run
 // newTelemetryManager builds a Manager whose single test daemon's Tick is
 // fully under the caller's control via tickFn. RunOnStart=true with a 1h tick
 // so the one Tick fires deterministically at startup without a ticker pulse.
-func newTelemetryManager(t *testing.T, name string, tickFn func() (TickReport, error)) *Manager {
+func newTelemetryManager(t *testing.T, name string, tickFn func() (TickReport, error), tel runtelemetry.Broadcaster) *Manager {
 	t.Helper()
 	d := &signalDaemon{
 		name: name,
@@ -66,6 +66,7 @@ func newTelemetryManager(t *testing.T, name string, tickFn func() (TickReport, e
 			name: {Enabled: true, Tick: time.Hour, RunOnStart: true},
 		},
 		NewTicker: tickerFn,
+		Telemetry: tel,
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -98,11 +99,10 @@ func lastRunRecorded(m *Manager) bool {
 // non-empty RunID and OwnerID (the daemon name).
 func TestManager_EmitsSysessionSubsystem(t *testing.T) {
 	const name = "auto-titler"
+	rec := &recordingBroadcaster{}
 	m := newTelemetryManager(t, name, func() (TickReport, error) {
 		return TickReport{Acted: 1}, nil
-	})
-	rec := &recordingBroadcaster{}
-	m.SetTelemetry(rec)
+	}, rec)
 
 	runOneAndWait(t, m, rec)
 
@@ -141,15 +141,15 @@ func TestManager_EmitsSysessionSubsystem(t *testing.T) {
 	}
 }
 
-// TestManager_NilBroadcasterIsSafe pins that a Manager which never had
-// SetTelemetry called (the default after construction, and the test/no-WS
-// deployment shape) ticks without panicking and records the run internally.
+// TestManager_NilBroadcasterIsSafe pins that a Manager built without a
+// Telemetry broadcaster (the test/no-WS deployment shape) ticks without
+// panicking and records the run internally.
 func TestManager_NilBroadcasterIsSafe(t *testing.T) {
 	const name = "auto-titler"
 	m := newTelemetryManager(t, name, func() (TickReport, error) {
 		return TickReport{Acted: 1}, nil
-	})
-	// Deliberately do NOT call SetTelemetry — telemetry pointer stays nil.
+	}, nil)
+	// Deliberately no Telemetry — the broadcaster stays nil.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -176,8 +176,8 @@ func TestManager_RunCountersBumpBroadcastIndependent(t *testing.T) {
 
 	m := newTelemetryManager(t, name, func() (TickReport, error) {
 		return TickReport{Acted: 1}, nil
-	})
-	// Deliberately do NOT call SetTelemetry — telemetry pointer stays nil so
+	}, nil)
+	// Deliberately no Telemetry — the broadcaster stays nil so
 	// the broadcast path is never taken, isolating the counter bump.
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -195,29 +195,6 @@ func TestManager_RunCountersBumpBroadcastIndependent(t *testing.T) {
 	}
 	if got := metrics.SysessionRunEndedTotal.Value() - endBefore; got != 1 {
 		t.Errorf("SysessionRunEndedTotal delta = %d, want 1 (must bump with nil broadcaster)", got)
-	}
-}
-
-// TestManager_SetTelemetryNilClears pins that passing nil to SetTelemetry
-// reverts to no-broadcast mode without panicking on a subsequent emit.
-func TestManager_SetTelemetryNilClears(t *testing.T) {
-	const name = "auto-titler"
-	m := newTelemetryManager(t, name, func() (TickReport, error) {
-		return TickReport{Acted: 1}, nil
-	})
-	rec := &recordingBroadcaster{}
-	m.SetTelemetry(rec)
-	m.SetTelemetry(nil) // clear before any tick fires
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
-
-	testhelper.Eventually(t, func() bool { return lastRunRecorded(m) }, 2*time.Second,
-		"no run recorded")
-	if started, ended := rec.snapshot(); len(started) != 0 || len(ended) != 0 {
-		t.Errorf("cleared broadcaster still received events: started=%d ended=%d", len(started), len(ended))
 	}
 }
 
@@ -241,6 +218,7 @@ func TestManager_TimeoutMapsToDeadlineExceeded(t *testing.T) {
 		{Name: name, Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
 	})
 	_, tickerFn := pulseTicker()
+	rec := &recordingBroadcaster{}
 	m, err := NewManager(Config{
 		Enabled:     true,
 		TickTimeout: 30 * time.Millisecond,
@@ -249,12 +227,11 @@ func TestManager_TimeoutMapsToDeadlineExceeded(t *testing.T) {
 			name: {Enabled: true, Tick: time.Hour, RunOnStart: true},
 		},
 		NewTicker: tickerFn,
+		Telemetry: rec,
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	rec := &recordingBroadcaster{}
-	m.SetTelemetry(rec)
 
 	runOneAndWait(t, m, rec)
 
@@ -279,11 +256,10 @@ func TestManager_TimeoutMapsToDeadlineExceeded(t *testing.T) {
 // Tick error emits ErrClassSysessionUpstream and RunStateFailed on the wire.
 func TestManager_UpstreamErrorClass(t *testing.T) {
 	const name = "auto-titler"
+	rec := &recordingBroadcaster{}
 	m := newTelemetryManager(t, name, func() (TickReport, error) {
 		return TickReport{}, fmt.Errorf("CLI exploded")
-	})
-	rec := &recordingBroadcaster{}
-	m.SetTelemetry(rec)
+	}, rec)
 
 	runOneAndWait(t, m, rec)
 
@@ -297,77 +273,4 @@ func TestManager_UpstreamErrorClass(t *testing.T) {
 	if ended[0].ErrorClass != runtelemetry.ErrClassSysessionUpstream {
 		t.Errorf("ended ErrorClass = %q, want %q", ended[0].ErrorClass, runtelemetry.ErrClassSysessionUpstream)
 	}
-}
-
-// TestManager_SetTelemetryRaceWithTick exercises SetTelemetry stores
-// concurrently with the per-daemon tick goroutine reading the pointer via
-// emitRun{Started,Ended}. Run under -race, this guards the atomic.Pointer
-// invariant the #1723 refactor depends on (the seam cron already proved).
-// The writer churns until the daemon has completed every driven tick, so each
-// tick's emits overlap the stores.
-func TestManager_SetTelemetryRaceWithTick(t *testing.T) {
-	const name = "auto-titler"
-	d := &signalDaemon{
-		name: name,
-		tickFn: func(_ context.Context, _ int32) (TickReport, error) {
-			return TickReport{Acted: 1}, nil
-		},
-	}
-	withRegistry(t, []builtinDaemonFactory{
-		{Name: name, Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
-	})
-	pulse, tickerFn, ready := readyPulseTicker()
-	m, err := NewManager(Config{
-		Enabled:     true,
-		TickTimeout: 200 * time.Millisecond,
-		Router:      newFakeRouter(),
-		Daemons: map[string]DaemonRuntimeConfig{
-			// A short tick keeps the startup jitter short; pulses, not the
-			// period, drive the ticks.
-			name: {Enabled: true, Tick: time.Millisecond},
-		},
-		NewTicker: tickerFn,
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
-	waitLoopReady(t, ready)
-
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	// Writer goroutine: churn SetTelemetry between two broadcasters and nil.
-	go func() {
-		defer close(done)
-		a := &recordingBroadcaster{}
-		b := &recordingBroadcaster{}
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			switch i % 3 {
-			case 0:
-				m.SetTelemetry(a)
-			case 1:
-				m.SetTelemetry(b)
-			default:
-				m.SetTelemetry(nil)
-			}
-		}
-	}()
-
-	const ticks = 50
-	for i := 0; i < ticks; i++ {
-		pulse <- time.Now()
-	}
-	testhelper.Eventually(t, func() bool { return d.calls.Load() >= ticks }, 5*time.Second,
-		"daemon did not complete the driven ticks")
-	close(stop)
-	<-done
 }
