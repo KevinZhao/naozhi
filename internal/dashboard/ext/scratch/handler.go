@@ -26,7 +26,7 @@ import (
 type Handler struct {
 	broadcaster Broadcaster
 	router      ScratchRouter
-	pool        *session.ScratchPool
+	pool        Pool
 	openLimit   IPLimiter
 	agents      map[string]sessionview.AgentOpts
 }
@@ -351,7 +351,7 @@ func shortPromoteSuffix() (string, error) {
 type Deps struct {
 	Broadcaster Broadcaster
 	Router      ScratchRouter
-	Pool        *session.ScratchPool
+	Pool        Pool
 	OpenLimit   IPLimiter
 	Agents      map[string]sessionview.AgentOpts
 }
@@ -374,3 +374,10 @@ func (h *Handler) SetOpenLimitForTest(l IPLimiter) { h.openLimit = l }
 // RouterIsWired reports whether the router field has been wired; used by the
 // server-package wiring-regression test.
 func (h *Handler) RouterIsWired() bool { return h.router != nil }
+
+// Pool is the *session.ScratchPool surface the scratch handlers drive.
+type Pool interface {
+	Open(opts session.OpenOptions) (*session.Scratch, error)
+	Close(id string) error
+	Detach(id string) (*session.Scratch, error)
+}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -260,6 +261,16 @@ func (s *Store) warmLocked(e *sessionEntry, dirHash string) {
 			continue
 		}
 		name := ent.Name()
+		if isCorruptSibling(name) {
+			// <RunID>.json.corrupt.<ts>.<nonce> is what readRunFile leaves
+			// behind. Nothing else reaches this subtree — the datadir sweeper
+			// is top-level only and trimLocked works off RunIDs — so the
+			// evidence is kept for one keepWindow and then reaped here (#2974).
+			if info, err := ent.Info(); err == nil && info.Mode().IsRegular() && info.ModTime().Before(cutoff) {
+				_ = os.Remove(filepath.Join(dir, name))
+			}
+			continue
+		}
 		if filepath.Ext(name) != ".json" {
 			continue
 		}
@@ -269,6 +280,12 @@ func (s *Store) warmLocked(e *sessionEntry, dirHash string) {
 		}
 		var run SessionRun
 		if err := readRunFile(filepath.Join(dir, name), &run); err != nil {
+			if errors.Is(err, errRunFileEmpty) {
+				// A 0-byte record is a write that never finished. Load reports
+				// it as absent, but the file is still there, so left alone it
+				// would be re-read on every warm forever (#2974).
+				_ = os.Remove(filepath.Join(dir, name))
+			}
 			continue
 		}
 		if run.StartedAt.Before(cutoff) {
@@ -301,16 +318,35 @@ func readRunFile(path string, dst *SessionRun) error {
 	if err != nil {
 		return err
 	}
-	if out != jsonfile.Parsed {
+	switch out {
+	case jsonfile.Parsed:
+		*dst = run
+		return nil
+	case jsonfile.Absent:
+		// Absent covers both "no file" and "empty file"; only the latter
+		// leaves something on disk for the caller to remove.
+		if fi, statErr := os.Lstat(path); statErr == nil && fi.Mode().IsRegular() && fi.Size() == 0 {
+			return errRunFileEmpty
+		}
+		return errRunFileUnusable
+	default:
 		return errRunFileUnusable
 	}
-	*dst = run
-	return nil
 }
 
-// errRunFileUnusable reports a record that is absent, empty, or was moved aside
-// as corrupt — in every case there is nothing to load and nothing left to clean.
+// errRunFileUnusable reports a record that is absent or was moved aside as
+// corrupt — in either case there is nothing to load and nothing left to clean.
 var errRunFileUnusable = errors.New("runhistory: run record unusable")
+
+// errRunFileEmpty reports a record that exists but is 0 bytes: nothing to load,
+// but the file itself is still there for warmLocked to remove.
+var errRunFileEmpty = errors.New("runhistory: run record empty")
+
+// isCorruptSibling reports whether name is a file readRunFile (via
+// jsonfile.Load) moved aside: <RunID>.json.corrupt.<ts>.<nonce>.
+func isCorruptSibling(name string) bool {
+	return strings.Contains(name, ".json.corrupt.")
+}
 
 // Recent returns up to n newest-first runs (n <= 0: all cached) as a fresh copy.
 func (s *Store) Recent(sessionKey string, n int) []SessionRun {

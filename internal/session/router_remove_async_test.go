@@ -198,7 +198,7 @@ func TestRemoveAsync_FiresRetiredCallbackWithSessionID(t *testing.T) {
 	wantSID := s.SessionID()
 
 	gotCh := make(chan string, 1)
-	r.SetOnSessionRetired(func(_ string, sessionID string) { gotCh <- sessionID })
+	observe(r).retired = func(_ string, sessionID string) { gotCh <- sessionID }
 
 	if !r.RemoveAsync(key) {
 		t.Fatalf("RemoveAsync returned false")
