@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
@@ -91,8 +92,12 @@ type ServerOptions struct {
 	//
 	// The legacy New(addr, router, ..., opts) wrapper *overrides* matching
 	// fields in opts with its positional args.
-	Addr          string
-	Router        *session.Router
+	Addr   string
+	Router *session.Router
+	// RouterEvents is the relay Router was built with as its observer; the
+	// server binds the dashboard's session-list and key-retirement consumers to
+	// it. nil leaves them unbound.
+	RouterEvents  *routerrelay.Relay
 	Platforms     map[string]platform.Platform
 	Agents        map[string]session.AgentOpts
 	AgentCommands map[string]string

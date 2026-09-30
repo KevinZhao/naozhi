@@ -53,7 +53,7 @@ func TestSetUserLabel_NotifiesChange(t *testing.T) {
 	injectSession(r, sk, nil)
 
 	var notified int
-	r.SetOnChange(func() { notified++ })
+	observe(r).changed = func() { notified++ }
 
 	if !r.SetUserLabel(sk, "custom") {
 		t.Fatalf("SetUserLabel returned false for registered session")
@@ -73,7 +73,7 @@ func TestSetUserLabel_UnknownKeyNoNotify(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
 	var notified int
-	r.SetOnChange(func() { notified++ })
+	observe(r).changed = func() { notified++ }
 	if r.SetUserLabel("missing:key:here:agent", "x") {
 		t.Fatalf("SetUserLabel returned true for unknown key")
 	}
@@ -95,7 +95,7 @@ func TestSetUserLabel_NoOpOnSameValue(t *testing.T) {
 
 	// First mutation primes state and fires one notify.
 	var notified int
-	r.SetOnChange(func() { notified++ })
+	observe(r).changed = func() { notified++ }
 	if !r.SetUserLabel(sk, "custom") {
 		t.Fatalf("SetUserLabel returned false on registered session")
 	}
@@ -167,7 +167,7 @@ func TestBumpVersion_NotifiesAndIncrements(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
 	var notified int
-	r.SetOnChange(func() { notified++ })
+	observe(r).changed = func() { notified++ }
 	before := r.Version()
 	r.BumpVersion()
 	if after := r.Version(); after <= before {
