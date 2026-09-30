@@ -49,7 +49,7 @@ func TestReqSem_InflightGaugeBalanced(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil)
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -86,7 +86,7 @@ func TestReqSem_InflightGaugeBalanced(t *testing.T) {
 // TestReqSem_WaitCounterOnSaturation verifies the counter increments
 // when a request actually had to block for a slot. We drive 17
 // concurrent requests (one over the reqSem cap of 16) through a
-// parking previewFunc so every slot stays pinned until we observe the
+// parking the preview func so every slot stays pinned until we observe the
 // wait bump, then release them for a clean shutdown.
 func TestReqSem_WaitCounterOnSaturation(t *testing.T) {
 	startWait := reqSemReqWaitTotal.Value()
@@ -108,12 +108,12 @@ func TestReqSem_WaitCounterOnSaturation(t *testing.T) {
 		handshake(t, conn)
 
 		// Fire all 17 requests back-to-back. Each targets the parking
-		// previewFunc; because the cap is 16, the 17th request lands
+		// the preview func; because the cap is 16, the 17th request lands
 		// in the blocking `select` branch, incrementing WaitTotal.
 		//
 		// Empty session_id bypasses the discovery.IsValidSessionID
 		// validation (line 612 checks `SessionID != ""`), letting the
-		// handler short-circuit to previewFunc directly. That makes
+		// handler short-circuit to the preview func directly. That makes
 		// the test insensitive to unrelated changes in session-id
 		// format rules.
 		for i := 0; i < total; i++ {
@@ -143,16 +143,16 @@ func TestReqSem_WaitCounterOnSaturation(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil)
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
 
-	// Parking previewFunc: each call holds a reqSem slot until the
+	// Parking the preview func: each call holds a reqSem slot until the
 	// test closes `release`. Returning empty-array JSON keeps the
 	// response path happy and avoids a marshal error masking the
 	// metric assertion we actually care about.
-	c.SetPreviewFunc(func(string) (json.RawMessage, error) {
+	c.discovery.Preview = func(string) (json.RawMessage, error) {
 		<-release
 		return json.RawMessage("[]"), nil
-	})
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

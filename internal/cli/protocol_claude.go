@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/naozhi/naozhi/internal/cliinfo"
@@ -81,7 +82,15 @@ func resumeIDPreview(id string) string {
 // identically to a command-line cc. Hook feedback-loop protection lives at
 // naozhi's HTTP entry auth (webhook signing + dashboard token), not in a
 // filtered copy of the user's settings file.
-type ClaudeProtocol struct{}
+type ClaudeProtocol struct {
+	// settingsPath records which settings file BuildArgs pointed this process
+	// at, so AvailableModels reads the same list cc enforces.
+	// localSettingsMarker means `--setting-sources user`.
+	settingsPath atomic.Pointer[string]
+	// models caches the parsed manifest keyed by the settings file's identity;
+	// see availableModelsFrom.
+	models modelCache
+}
 
 func (p *ClaudeProtocol) Name() string { return "stream-json" }
 
@@ -105,10 +114,12 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	// SettingsFile instead gets `--setting-sources "" --settings <file>`. The
 	// path must be absolute with no leading '-' (argv-injection guard); a bad
 	// value falls back to `user` rather than spawning with no settings.
-	if opts.SettingsFile != "" && filepath.IsAbs(opts.SettingsFile) && !strings.HasPrefix(opts.SettingsFile, "-") {
-		args = append(args, "--setting-sources", "", "--settings", opts.SettingsFile)
+	if f := usableSettingsFile(opts.SettingsFile); f != "" {
+		args = append(args, "--setting-sources", "", "--settings", f)
+		p.settingsPath.Store(&f)
 	} else {
 		args = append(args, "--setting-sources", "user")
+		p.settingsPath.Store(&localSettingsMarker)
 	}
 	// --dangerously-skip-permissions is required by naozhi's `-p` long-lived
 	// process model (headless mode has no interactive prompt surface), so the
