@@ -177,6 +177,29 @@ func TestEventEntriesBeforeCtx_SourceErrorKeepsMemoryPage(t *testing.T) {
 	}
 }
 
+// Every production write path (ring append's zero-Time fallback to
+// time.Now(), and the Claude/Codex/Kiro JSONL readers' explicit ts<=0 drop)
+// keeps Time>0 in anything that reaches persistedHistory, so mem[0].Time<=0
+// should be unreachable there. This pins the defensive branch anyway: if that
+// invariant is ever violated, skipping the disk top-up (rather than passing
+// a beforeMS<=0 "no upper bound" down and risking a memory/disk overlap) is
+// the deliberately chosen degradation.
+func TestEventEntriesBeforeCtx_ZeroTimeMemoryHeadSkipsDiskTopUp(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []clievent.EventEntry{{Time: 0, Summary: "mem-a"}}
+	fake := &fakeHistorySource{entries: []clievent.EventEntry{{Time: -10, Summary: "disk"}}}
+	s.SetHistorySource(fake)
+
+	got := s.EventEntriesBeforeCtx(context.Background(), 100, 10)
+	if fake.calls != 0 {
+		t.Errorf("a zero-Time memory head must not consult Source; got %d calls", fake.calls)
+	}
+	if len(got) != 1 || got[0].Summary != "mem-a" {
+		t.Errorf("got %+v, want just the memory page", got)
+	}
+}
+
 func TestEventEntriesBeforeCtx_NilSourceReturnsEmpty(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
