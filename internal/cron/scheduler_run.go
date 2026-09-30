@@ -339,15 +339,21 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 	// becomes a canceled record with ErrClassInterrupted. Written AFTER the
 	// snapshot so it carries the prompt/workDir the history row needs, and after
 	// the started event so a marker never outlives a run the dashboard never saw.
-	s.writeRunInflightMarker(runInflightMarker{
-		JobID:       jobID,
-		RunID:       runID,
-		Trigger:     trigger,
-		StartedAtMS: startedAt.UnixMilli(),
-		Prompt:      snap.prompt,
-		WorkDir:     snap.workDir,
-		Fresh:       snap.fresh,
-	}, lg)
+	if !placementIsSandbox(snap.placement) {
+		// LOCAL runs only: a sandbox run's in-flight record is
+		// sandboxpending/<runID>.json, and only its reconciler stops the
+		// microVM and classifies the orphan. A second marker here let the
+		// local reconcile settle the run first, or finish it twice (#2970).
+		s.writeRunInflightMarker(runInflightMarker{
+			JobID:       jobID,
+			RunID:       runID,
+			Trigger:     trigger,
+			StartedAtMS: startedAt.UnixMilli(),
+			Prompt:      snap.prompt,
+			WorkDir:     snap.workDir,
+			Fresh:       snap.fresh,
+		}, lg)
+	}
 
 	// Per-job timeout is always s.execTimeout: robfig/cron's SkipIfStillRunning
 	// chain wrapper drops a colliding tick instead of killing a long-running job,

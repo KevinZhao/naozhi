@@ -64,6 +64,17 @@ func (st Store) WritePending(p Pending, lg *slog.Logger) string {
 	return path
 }
 
+// HasPending reports whether a pending record for runID is on disk. A stat,
+// not a read: the caller only needs to know which reconciler owns the run.
+func (st Store) HasPending(runID string) bool {
+	dir := st.pendingDir()
+	if dir == "" || runID == "" {
+		return false
+	}
+	fi, err := os.Lstat(filepath.Join(dir, runID+".json"))
+	return err == nil && fi.Mode().IsRegular()
+}
+
 // errNotPending reports a path outside the pending directory.
 var errNotPending = errors.New("cron sandbox: not a pending record path")
 

@@ -206,6 +206,18 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 			}
 			continue
 		}
+		// A marker whose run also has a sandbox pending record (left by an
+		// older binary) belongs to the sandbox reconciler: only that pass
+		// stops the microVM and classifies the orphan. Settling it here
+		// recorded the run interrupted first, or finished it twice (#2970).
+		if s.sandboxState().HasPending(m.RunID) {
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("cron: run-inflight marker remove failed during reconcile", "path", path, "err", err)
+			}
+			slog.Info("cron: run-inflight marker belongs to a sandbox run; left to the sandbox reconciler",
+				"job_id", m.JobID, "run_id", m.RunID)
+			continue
+		}
 		// The adoption verdict, before anything is deleted: a live mid-turn CLI
 		// behind this job's shim means the run may still complete (#2712).
 		verdict := AdoptNone
