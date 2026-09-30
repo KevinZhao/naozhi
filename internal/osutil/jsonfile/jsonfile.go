@@ -130,21 +130,15 @@ func Load[T any](path string, opts Options) (T, Outcome, error) {
 		slog.Warn("open "+opts.Label+" failed", "path", path, "err", err)
 		return zero, Absent, fmt.Errorf("open %s: %w", opts.Label, err)
 	}
-	defer f.Close()
-	fi, err := f.Stat()
+	data, err := readCapped(f, opts)
+	// The descriptor is closed here, before anything below renames the file.
+	// Windows opens without FILE_SHARE_DELETE, so a rename over an open handle
+	// fails — and a failed corrupt-rename is the error path callers treat as
+	// "refuse to ever save again" (#2974). Read-then-close is also what the
+	// per-store loaders did before they were unified here.
+	f.Close()
 	if err != nil {
-		slog.Warn(opts.Label+": fstat failed; refusing to load", "path", path, "err", err)
-		return zero, Absent, fmt.Errorf("fstat %s: %w", opts.Label, err)
-	}
-	if !fi.Mode().IsRegular() {
-		slog.Warn(opts.Label+": not a regular file; refusing to load",
-			"path", path, "mode", fi.Mode().String())
-		return zero, Absent, fmt.Errorf("%s: not a regular file, refusing to load", opts.Label)
-	}
-	data, err := io.ReadAll(io.LimitReader(f, opts.MaxBytes+1))
-	if err != nil {
-		slog.Warn("read "+opts.Label+" failed", "path", path, "err", err)
-		return zero, Absent, fmt.Errorf("read %s: %w", opts.Label, err)
+		return zero, Absent, err
 	}
 	if int64(len(data)) > opts.MaxBytes {
 		// LimitReader stopped at cap+1, so only "at least" is known.
@@ -189,4 +183,25 @@ func randomNonce() string {
 		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
 	}
 	return hex.EncodeToString(rb[:])
+}
+
+// readCapped validates the opened inode and reads at most MaxBytes+1 bytes, so
+// the caller can tell "over cap" from "exactly at cap". It does not close f.
+func readCapped(f *os.File, opts Options) ([]byte, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		slog.Warn(opts.Label+": fstat failed; refusing to load", "path", f.Name(), "err", err)
+		return nil, fmt.Errorf("fstat %s: %w", opts.Label, err)
+	}
+	if !fi.Mode().IsRegular() {
+		slog.Warn(opts.Label+": not a regular file; refusing to load",
+			"path", f.Name(), "mode", fi.Mode().String())
+		return nil, fmt.Errorf("%s: not a regular file, refusing to load", opts.Label)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, opts.MaxBytes+1))
+	if err != nil {
+		slog.Warn("read "+opts.Label+" failed", "path", f.Name(), "err", err)
+		return nil, fmt.Errorf("read %s: %w", opts.Label, err)
+	}
+	return data, nil
 }
