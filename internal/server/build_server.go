@@ -101,6 +101,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		orient:        buildOrientConfig(opts),
 		scheduler:     scheduler,
 		routerEvents:  opts.RouterEvents,
+		runTelemetry:  opts.RunTelemetry,
 	}
 
 	s := &Server{

@@ -21,6 +21,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
@@ -328,6 +329,9 @@ func main() {
 			"platform", cfg.Cron.NotifyDefault.Platform,
 			"chat_id_suffix", chatIDSuffix(cfg.Cron.NotifyDefault.ChatID))
 	}
+	// cron and sysession run-events reach the dashboard Hub, which does not
+	// exist yet; the server binds it to this relay.
+	runTelemetry := &runtelemetry.Relay{}
 	schedulers, err := boot.WireSchedulers(wireup.SchedulersDeps{
 		Cfg:           cfg,
 		Router:        router,
@@ -337,9 +341,9 @@ func main() {
 		Workspace:     workspace,
 		CronStorePath: osutil.ExpandHome(cfg.Cron.StorePath),
 		ParentCtx:     ctx,
-		Telemetry:     nil, // wired at Server construction via build_dashboard.go SetTelemetry
+		Telemetry:     runTelemetry,
 		BuildSysession: func() (*sysession.Manager, string, error) {
-			return buildSysessionManager(cfg, router, projectMgr, wrapper, storePath)
+			return buildSysessionManager(cfg, router, projectMgr, wrapper, storePath, runTelemetry)
 		},
 	})
 	if err != nil {
@@ -416,6 +420,7 @@ func main() {
 		Addr:          cfg.Server.Addr,
 		Router:        router,
 		RouterEvents:  routerEvents,
+		RunTelemetry:  runTelemetry,
 		Platforms:     platforms,
 		Agents:        agents,
 		AgentCommands: cfg.AgentCommands,

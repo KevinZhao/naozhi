@@ -48,6 +48,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/routerrelay"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
@@ -129,6 +130,8 @@ type wiring struct {
 	scheduler     cronScheduler // nil when cron is not configured (see buildServerWithHandlers)
 	// routerEvents is opts.RouterEvents; buildDashboard binds the hub to it.
 	routerEvents *routerrelay.Relay
+	// runTelemetry is opts.RunTelemetry; buildDashboard binds the hub to it.
+	runTelemetry *runtelemetry.Relay
 	// watchdog holds the no-output / total watchdog-kill counters; the
 	// dispatcher, the session handlers and /health each get pointers into it.
 	watchdog watchdogCounters
