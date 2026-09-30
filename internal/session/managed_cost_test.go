@@ -17,7 +17,7 @@ func newLedgerSession(t *testing.T, key string, proc *TestProcess) (*ManagedSess
 	t.Helper()
 	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(ledger.Close)
-	s := &ManagedSession{key: key, costAcct: newCostAccounting(ledger)}
+	s := &ManagedSession{key: key, costAcct: newCostAccounting(ledger, nil)}
 	s.SetBackend("claude")
 	s.setWorkspace("/home/u/work/proj")
 	s.storeProcess(proc)
@@ -105,7 +105,7 @@ func TestAccountTurnCost_WritesOneEntryPerTurnWithModels(t *testing.T) {
 func TestAccountTurnCost_CronOwnedTurnSkipsLedgerButAccrues(t *testing.T) {
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(&clievent.SendResult{Text: "a", CostUSD: 0.4})}
 	s, ledger := newLedgerSession(t, "cron:job1", proc)
-	s.costAcct.setRunOwnership(func(key string) bool { return key == "cron:job1" })
+	s.costAcct.ownedByRun = func(key string) bool { return key == "cron:job1" }
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
 		t.Fatal(err)
 	}

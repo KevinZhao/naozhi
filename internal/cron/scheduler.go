@@ -128,11 +128,9 @@ type Scheduler struct {
 	// ParentCtx, so it is the single cancel signal — never read ParentCtx (#974).
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
-	// telemetry receives cron-run lifecycle events. atomic.Pointer because
-	// SetTelemetry can land after tick goroutines already read it in
-	// emitRunStarted / emitRunEnded. Broadcaster is an interface, so we store
-	// *Broadcaster and Load + deref; nil pointer == no broadcaster.
-	telemetry atomic.Pointer[runtelemetry.Broadcaster]
+	// telemetry receives cron-run lifecycle events; nil drops them. Fixed at
+	// construction (deps.Telemetry).
+	telemetry runtelemetry.Broadcaster
 
 	// triggerWG tracks goroutines spawned by TriggerNow so Stop() can wait
 	// for them to finish. The scheduled entries are already drained by
@@ -312,11 +310,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		agents:        maps.Clone(deps.Agents),
 		agentCommands: maps.Clone(deps.AgentCommands),
 	})
-	// nil deps.Telemetry leaves the pointer zero-valued (no broadcast).
-	if deps.Telemetry != nil {
-		b := deps.Telemetry
-		s.telemetry.Store(&b)
-	}
+	s.telemetry = deps.Telemetry
 	// Eagerly clamp the store parent dir to 0o700 at construction: the
 	// storeDirOnce gate in saveMarshaledSeq only fires on the first save, so
 	// otherwise the dir keeps its inherited XDG mode (often 0o755) until then

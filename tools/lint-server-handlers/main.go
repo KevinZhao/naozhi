@@ -23,6 +23,8 @@
 //   - struct_budget / server_field_liveness: rule_server_fields.go.
 //   - sublock_encapsulation: a sub-object's lock is taken by its own methods
 //     (rule_sublock.go).
+//   - no_late_setters: session / cron / sysession / upstream take their
+//     collaborators at construction (rule_late_setters.go).
 //
 // Two rules were deleted in #2554:
 //   - iface_match scanned for godoc `satisfies:` comments and cross-checked them
@@ -86,6 +88,7 @@ var ruleIDs = []string{
 	"struct_budget",
 	"server_field_liveness",
 	"sublock_encapsulation",
+	"no_late_setters",
 }
 
 type Violation struct {
@@ -215,6 +218,16 @@ func collectViolations(serverPkg, dashboardPkg string, exempts *exemptions, now 
 	// sublock_encapsulation: a sub-object's lock is taken by its own methods
 	// (#2897 S6).
 	vs = append(vs, scanSublocks([]string{serverPkg, dashboardPkg}, sublockTestBaseline)...)
+
+	// no_late_setters: the core runtime packages beside the server package take
+	// their collaborators at construction (#2897 S7).
+	var coreDirs []string
+	for _, p := range lateSetterPkgs {
+		if d := filepath.Join(filepath.Dir(serverPkg), p); dirExists(d) {
+			coreDirs = append(coreDirs, d)
+		}
+	}
+	vs = append(vs, scanLateSetters(coreDirs)...)
 
 	// Rule 5: stale_exemption
 	vs = append(vs, scanStaleExemption(exempts, now)...)

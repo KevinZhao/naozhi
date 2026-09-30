@@ -70,3 +70,21 @@ func profileDefaultModelFor(profiles map[string]AccessProfile, id string) string
 func (r *Router) accessProfileDefaultModel(id string) string {
 	return profileDefaultModelFor(r.profiles(), id)
 }
+
+// EffectiveArgvLayers is mergeArgvLayers for an offline caller — `naozhi
+// config check --effective` — describing what the spawn path would pass for a
+// session of agent on backend bd under access profile profileID. Same
+// function, same chain; the only tier absent is session tuning, which is a
+// live dashboard pick and not part of any config. Before this existed the
+// check kept a second copy of the precedence and it drifted on two points
+// (agent args replaced instead of appended; default_model ignored) (#2969).
+func EffectiveArgvLayers(bd BackendDefaults, profiles map[string]AccessProfile, profileID string, agent AgentOpts) (model, effort string, args []string, systemPrompt string) {
+	merged := mergeArgvLayers(bd, profileDefaultModelFor(profiles, profileID), shim.SpawnOverlay{
+		Model:              agent.Model,
+		Effort:             agent.Effort,
+		ExtraArgs:          agent.ExtraArgs,
+		AccessProfile:      profileID,
+		AppendSystemPrompt: agent.SystemPrompt,
+	}, "", "")
+	return merged.Model, merged.Effort, merged.Args, merged.SystemPrompt
+}

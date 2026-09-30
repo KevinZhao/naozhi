@@ -85,7 +85,7 @@ type ScratchRouter interface {
 }
 
 // HubBroadcaster names the broadcast / fan-out facet of *Hub — the "push a
-// frame to authenticated WS clients" surface producers (router SetOnChange,
+// frame to authenticated WS clients" surface producers (the router observer's SessionsChanged,
 // send paths, cron / sysession run-lifecycle hooks, node register/deregister)
 // reach for. *Hub satisfies it structurally; consumer_contract_test.go guards
 // the binding. Prefer the narrower subsets (SessionsBus.Publish,

@@ -53,7 +53,7 @@ type Handlers struct {
 	bg              sync.WaitGroup  // tracks background takeover/close goroutines for graceful drain
 	cache           CacheView
 	nodeAccess      NodeAccessor
-	nodeCache       *node.CacheManager
+	nodeCache       NodeCacheReader
 	claudeDir       string
 	router          SessionRouter
 	allowedRoot     string
@@ -76,7 +76,7 @@ type Deps struct {
 
 	Cache        CacheView
 	NodeAccess   NodeAccessor
-	NodeCache    *node.CacheManager
+	NodeCache    NodeCacheReader
 	ClaudeDir    string
 	Router       SessionRouter
 	AllowedRoot  string
@@ -135,6 +135,12 @@ func (h *Handlers) Wait() {
 // SetClaudeDirForTest swaps claudeDir for tests. NOT for production use.
 func (h *Handlers) SetClaudeDirForTest(dir string) {
 	h.claudeDir = dir
+}
+
+// NodeCacheReader is the *node.CacheManager surface discovery reads: remote
+// nodes' cached discovered sessions, folded into the local list.
+type NodeCacheReader interface {
+	Discovered() map[string][]map[string]any
 }
 
 // HandleList serves GET /api/discovered — list discovered external CLI sessions.

@@ -6,13 +6,13 @@ import (
 )
 
 // RecordRetired stamps the retirement instant for sessionID and invalidates
-// the history cache so the new ordering shows on the next poll. No-op when
-// the store is unconfigured or sessionID is empty (CLI never returned a UUID).
+// the history cache so the retired session shows on the next poll. The stamp
+// is skipped when the store is unconfigured (and the store ignores an empty
+// sessionID, from a CLI that never returned a UUID); the invalidation never is.
 func (h *Handlers) RecordRetired(sessionID string) {
-	if h.deps.RetiredStore == nil || sessionID == "" {
-		return
+	if h.deps.RetiredStore != nil {
+		h.deps.RetiredStore.MarkRetired(sessionID, time.Now())
 	}
-	h.deps.RetiredStore.MarkRetired(sessionID, time.Now())
 	h.InvalidateHistoryCache()
 }
 

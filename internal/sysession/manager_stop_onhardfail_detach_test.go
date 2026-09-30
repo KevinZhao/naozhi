@@ -29,10 +29,11 @@ import (
 func TestManager_StopOnHardFailDetachReturns(t *testing.T) {
 	pulse, tickFn := pulseTicker()
 
+	release := make(chan struct{})
 	d := &signalDaemon{
 		name: "auto-titler",
 		tickFn: func(_ context.Context, _ int32) (TickReport, error) {
-			time.Sleep(2 * time.Second)
+			<-release
 			return TickReport{}, nil
 		},
 	}
@@ -61,6 +62,13 @@ func TestManager_StopOnHardFailDetachReturns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	// The tick outlives Stop's deadline by design. Release it and wait for it
+	// before the test ends, or its run-ended event lands in a later test's
+	// global-counter delta.
+	t.Cleanup(func() {
+		close(release)
+		m.wg.Wait()
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

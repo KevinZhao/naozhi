@@ -13,36 +13,12 @@ import (
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// SetTelemetry installs (or replaces) the broadcaster after construction; the
-// server package injects it once dashboard wiring finishes. Storage is
-// atomic.Pointer because SetTelemetry can race with tick goroutines already
-// calling emitRun*, so the read path must be lock-free. nil clears it (also
-// the default) and emit* becomes a silent no-op.
-func (m *Manager) SetTelemetry(b runtelemetry.Broadcaster) {
-	if b == nil {
-		m.telemetry.Store(nil)
-		return
-	}
-	bb := b
-	m.telemetry.Store(&bb)
-}
-
-// loadTelemetry returns the current broadcaster or nil (atomic.Pointer wraps
-// a *Broadcaster; a nil deref would panic). Lock-free.
-func (m *Manager) loadTelemetry() runtelemetry.Broadcaster {
-	ptr := m.telemetry.Load()
-	if ptr == nil {
-		return nil
-	}
-	return *ptr
-}
-
 // emitRunStarted broadcasts a run-started event tagged SubsystemSysession. The
 // metric bump happens unconditionally so the counter cannot drift from the
 // broadcast path. Fired post-CAS, pre-IO from runOnce, outside any lock.
 func (m *Manager) emitRunStarted(name, runID string, trigger DaemonTriggerKind, startedAt time.Time) {
 	metrics.SysessionRunStartedTotal.Add(1)
-	b := m.loadTelemetry()
+	b := m.telemetry
 	if b == nil {
 		return
 	}
@@ -61,7 +37,7 @@ func (m *Manager) emitRunStarted(name, runID string, trigger DaemonTriggerKind, 
 // recordRun outside any lock.
 func (m *Manager) emitRunEnded(name, runID string, state DaemonRunState, durationMS int64, errorClass DaemonErrorClass, trigger DaemonTriggerKind) {
 	metrics.SysessionRunEndedTotal.Add(1)
-	b := m.loadTelemetry()
+	b := m.telemetry
 	if b == nil {
 		return
 	}
