@@ -31,6 +31,16 @@ func (l *Linker) SeedFromHistory(entries []clievent.EventEntry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	claudeRoot := claudeProjectsRoot()
+	if claudeRoot == "" {
+		// No resolvable home means no ~/.claude/projects to anchor on. An
+		// empty root would turn the prefix check below into HasPrefix(p, "/")
+		// and admit every absolute path (#2971); refusing the whole seed is
+		// the fail-closed answer, and the only thing lost is a reconnect
+		// convenience the CLI cannot deliver without a home dir anyway.
+		slog.Warn("agent_link: SeedFromHistory skipped: claude projects root unresolvable (no home dir)",
+			"entries", len(entries))
+		return
+	}
 	for _, e := range entries {
 		if e.TaskID == "" || e.InternalAgentID == "" || e.JSONLPath == "" {
 			continue
