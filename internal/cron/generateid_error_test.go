@@ -105,9 +105,7 @@ func TestAddJob_RandFailurePropagates(t *testing.T) {
 	}
 	// AddJob must not have inserted anything into the in-memory map: the
 	// caller's view (failure -> nothing happened) must hold.
-	s.tblForTest().mu.Lock()
-	jobCount := len(s.tblForTest().jobs)
-	s.tblForTest().mu.Unlock()
+	jobCount := s.tbl.count()
 	if jobCount != 0 {
 		t.Errorf("AddJob: expected 0 jobs in map after rand failure, got %d", jobCount)
 	}

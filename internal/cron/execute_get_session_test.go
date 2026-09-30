@@ -50,9 +50,7 @@ func TestExecuteGetSession_CanceledAbortsSkipPersist(t *testing.T) {
 		Telemetry: rec,
 	})
 	j := &Job{ID: "job-getsession-cancel", Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	sess, _, abort := s.executeGetSession(newGetSessionArgs(t, s, j))
 	if !abort {
@@ -88,9 +86,7 @@ func TestExecuteGetSession_SessionErrorAborts(t *testing.T) {
 		Telemetry: rec,
 	})
 	j := &Job{ID: "job-getsession-err", Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	sess, _, abort := s.executeGetSession(newGetSessionArgs(t, s, j))
 	if !abort {

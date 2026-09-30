@@ -176,9 +176,7 @@ func TestEntryLifecycle_ConcurrentWritersInvariant(t *testing.T) {
 		<-done
 		<-done
 
-		s.tblForTest().mu.RLock()
-		paused := s.tblForTest().jobs[activeID].Paused
-		s.tblForTest().mu.RUnlock()
+		paused := s.jobForTest(t, activeID).Paused
 		// The other seeded job is paused throughout, so it contributes 0.
 		want := 1
 		if paused {

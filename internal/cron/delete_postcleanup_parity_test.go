@@ -71,13 +71,10 @@ func TestDeletePostCleanup_ParityBetweenEntryPoints(t *testing.T) {
 		// runningJobs is a sync.Map accessed lock-free; everything else is
 		// guarded by s.tbl.mu.
 		_, runningGuard := s.gateForTest().runningJobs.Load(jobID)
-		s.tblForTest().mu.RLock()
-		defer s.tblForTest().mu.RUnlock()
-		_, jobPresent := s.tblForTest().jobs[jobID]
 		return postState{
-			jobPresent:   jobPresent,
-			chatCount:    s.tblForTest().chatJobCount[key],
-			chatIndexLen: len(s.tblForTest().jobsByChat[key]),
+			jobPresent:   s.tbl.exists(jobID),
+			chatCount:    s.tbl.countForChat(key),
+			chatIndexLen: len(s.tbl.forChat(key)),
 			runningGuard: runningGuard,
 		}
 	}

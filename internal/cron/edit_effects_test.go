@@ -78,9 +78,7 @@ func TestUpdateJobAndSetJobPrompt_PersistAndRefreshStub(t *testing.T) {
 func TestUpdateJob_RescheduleCarriesSessionIDRecordedDuringCommit(t *testing.T) {
 	s, r, activeID, _ := newEditEffectsScheduler(t)
 	cronCommitHook = func() {
-		s.tblForTest().mu.Lock()
-		s.tblForTest().jobs[activeID].LastSessionID = "recorded-mid-commit"
-		s.tblForTest().mu.Unlock()
+		s.editJobForTest(t, activeID, func(j *Job) { j.LastSessionID = "recorded-mid-commit" })
 	}
 	t.Cleanup(func() { cronCommitHook = nil })
 

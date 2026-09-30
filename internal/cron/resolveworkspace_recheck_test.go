@@ -70,9 +70,7 @@ func runResolveWorkspace(s *Scheduler, j *Job, workDir string) (string, bool) {
 
 func registerResolveJob(t *testing.T, s *Scheduler, j *Job) {
 	t.Helper()
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 }
 
 // TestResolveWorkspace_RetargetAfterCacheWarmAborts is the core regression:
@@ -126,10 +124,8 @@ func TestResolveWorkspace_RetargetAfterCacheWarmAborts(t *testing.T) {
 		t.Errorf("after retarget path = %q, want empty on abort", gotPath)
 	}
 
-	s.tblForTest().mu.RLock()
-	gotErr := s.tblForTest().jobs[j.ID].LastError
-	gotClass := s.tblForTest().jobs[j.ID].LastErrorClass
-	s.tblForTest().mu.RUnlock()
+	gotErr := s.jobForTest(t, j.ID).LastError
+	gotClass := s.jobForTest(t, j.ID).LastErrorClass
 	if !strings.Contains(gotErr, "outside allowed root") {
 		t.Errorf("LastError = %q, want contains %q", gotErr, "outside allowed root")
 	}
@@ -158,9 +154,7 @@ func TestResolveWorkspace_OutsideRootAborts(t *testing.T) {
 		t.Errorf("path = %q, want empty on abort", gotPath)
 	}
 
-	s.tblForTest().mu.RLock()
-	gotClass := s.tblForTest().jobs[j.ID].LastErrorClass
-	s.tblForTest().mu.RUnlock()
+	gotClass := s.jobForTest(t, j.ID).LastErrorClass
 	if gotClass != ErrClassWorkDirOutsideRoot {
 		t.Errorf("LastErrorClass = %q, want %q", gotClass, ErrClassWorkDirOutsideRoot)
 	}

@@ -24,14 +24,12 @@ func TestEnsureStub_NilRouterReturnsFalse(t *testing.T) {
 	// proceeds to the registerStubByValue call. AddJob would also call
 	// registerStubFromJob (now also returning bool) but ignoring the
 	// result there is fine — we only assert EnsureStub's bool.
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs["jX"] = &Job{
+	s.putJobForTest(&Job{
 		ID:       "jX",
 		WorkDir:  "/tmp",
 		Prompt:   "p",
 		Schedule: "0 * * * *",
-	}
-	s.tblForTest().mu.Unlock()
+	})
 
 	if got := s.EnsureStub("cron:jX"); got {
 		t.Error("EnsureStub returned true with router=nil (regression of #491)")

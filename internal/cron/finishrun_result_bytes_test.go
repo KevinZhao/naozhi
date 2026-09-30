@@ -68,9 +68,7 @@ func TestFinishRunResultBytesIsStoredNotRaw(t *testing.T) {
 				Schedule: "@every 5m",
 				Prompt:   "ping",
 			}
-			sched.tblForTest().mu.Lock()
-			sched.tblForTest().jobs[j.ID] = j
-			sched.tblForTest().mu.Unlock()
+			sched.putJobForTest(j)
 
 			inflight := sched.gateForTest().jobInflight(j.ID)
 			if !inflight.running.CompareAndSwap(false, true) {

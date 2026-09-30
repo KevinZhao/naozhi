@@ -51,9 +51,7 @@ func TestFinishRunUpdatesJobBeforeEmit(t *testing.T) {
 	deps := SchedulerDeps{
 		Router: &fakeRouter{},
 		Telemetry: observingBroadcaster{onEnded: func() {
-			sched.tblForTest().mu.RLock()
-			defer sched.tblForTest().mu.RUnlock()
-			if jj, ok := sched.tblForTest().jobs["job-finish-order"]; ok {
+			if jj, ok := sched.tbl.snapshot("job-finish-order"); ok {
 				observedMu.Lock()
 				observedResult = jj.LastResult
 				observedSession = jj.LastSessionID
@@ -70,9 +68,7 @@ func TestFinishRunUpdatesJobBeforeEmit(t *testing.T) {
 		LastResult:    "OLD-RESULT",
 		LastSessionID: "OLD-SESSION",
 	}
-	sched.tblForTest().mu.Lock()
-	sched.tblForTest().jobs[j.ID] = j
-	sched.tblForTest().mu.Unlock()
+	sched.putJobForTest(j)
 
 	// Drive finishRun directly — bypassing executeOpt — so the test isolates
 	// the recordResultP0WithSanitised → emitRunEnded ordering contract from
@@ -128,9 +124,7 @@ func TestFinishRunPersistsBeforeEmit(t *testing.T) {
 		Prompt:     "ping",
 		LastResult: "OLD",
 	}
-	sched.tblForTest().mu.Lock()
-	sched.tblForTest().jobs[j.ID] = j
-	sched.tblForTest().mu.Unlock()
+	sched.putJobForTest(j)
 
 	inflight := sched.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {

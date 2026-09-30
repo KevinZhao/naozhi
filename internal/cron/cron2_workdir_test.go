@@ -113,13 +113,10 @@ func TestCRON2_FreshExecuteSkipsWhenWorkDirMissing(t *testing.T) {
 
 	// The job should have LastError set to the unreachable reason so the
 	// dashboard can surface it — mirrors the allowed_root rejection path.
-	s.tblForTest().mu.RLock()
-	stored := s.tblForTest().jobs[job.ID]
 	var gotErr string
-	if stored != nil {
+	if stored, ok := s.tbl.snapshot(job.ID); ok {
 		gotErr = stored.LastError
 	}
-	s.tblForTest().mu.RUnlock()
 	if !strings.Contains(gotErr, "unreachable") {
 		t.Errorf("LastError = %q, want contains %q", gotErr, "unreachable")
 	}

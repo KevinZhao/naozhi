@@ -34,9 +34,7 @@ func TestCRON1_FreshResetSerializedByInflightCAS(t *testing.T) {
 		WorkDir:      "/tmp",
 		Prompt:       "x",
 	}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[id] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// Hold the inflight gate as if run #1 is mid-flight (between its own
 	// Reset and GetOrCreate, say). Do NOT release until the assertion.

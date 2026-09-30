@@ -70,9 +70,7 @@ func (r *deleteOnResetRouter) Reset(key string) {
 		at = 2
 	}
 	if seq == at { // simulate a concurrent Delete winning the race
-		r.s.tblForTest().mu.Lock()
-		delete(r.s.tblForTest().jobs, r.jobID)
-		r.s.tblForTest().mu.Unlock()
+		r.s.dropJobForTest(r.jobID)
 	}
 }
 
@@ -92,9 +90,7 @@ func TestFreshContextReapsSessionAfterSuccess(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-reap", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
@@ -187,9 +183,7 @@ func TestFreshReapSkipsStubReregisterWhenJobDeleted(t *testing.T) {
 
 	j := &Job{ID: "job-deleted-mid", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
 	router.jobID = j.ID
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	s.executeOpt(j.ID, true)
 
@@ -225,9 +219,7 @@ func TestFreshReapEmptySessionIDRegistersChainlessStub(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-empty-sid", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
@@ -272,9 +264,7 @@ func TestPersistentContextNotReapedAfterSuccess(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-persist", Schedule: "@every 5m", Prompt: "ping", FreshContext: false}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	s.executeOpt(j.ID, true)
 

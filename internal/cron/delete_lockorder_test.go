@@ -83,9 +83,7 @@ func TestDeleteJobByID_DoesNotHoldMuDuringCronRemove(t *testing.T) {
 	}
 
 	// Capture the entryID before delete so we can assert it left cron.
-	s.tblForTest().mu.RLock()
-	entryID := s.tblForTest().jobs[job.ID].entryID
-	s.tblForTest().mu.RUnlock()
+	entryID := s.jobForTest(t, job.ID).entryID
 	if entryID == 0 {
 		t.Fatalf("expected non-zero entryID after AddJob")
 	}

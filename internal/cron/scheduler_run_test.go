@@ -118,9 +118,7 @@ func TestStubRefresher(t *testing.T) {
 	}
 
 	// Active + job present: re-registers via the router.
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs["job-a"] = &Job{ID: "job-a", Schedule: "@every 5m"}
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(&Job{ID: "job-a", Schedule: "@every 5m"})
 	active := stubRefresher{s: s, jobID: "job-a", workDir: "/tmp", prompt: "p", active: true}
 	active.run()
 	if router.registers != 1 {
@@ -156,9 +154,7 @@ func TestExecuteJobIDIfLive_SkipLogLabels(t *testing.T) {
 	// Deleted job: not in s.tbl.jobs at all.
 	s.executeJobIDIfLive("missing-job", false, "cron")
 	// Paused job.
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs["paused-job"] = &Job{ID: "paused-job", Schedule: "@every 5m", Paused: true}
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(&Job{ID: "paused-job", Schedule: "@every 5m", Paused: true})
 	s.executeJobIDIfLive("paused-job", false, "cron")
 
 	out := buf.String()

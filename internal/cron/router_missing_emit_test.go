@@ -24,9 +24,7 @@ func TestExecuteOpt_RouterMissingEmitsTerminalEvent(t *testing.T) {
 	})
 
 	j := &Job{ID: "job-router-missing", Schedule: "@every 5m"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	// Direct executeOpt call — bypasses the public TriggerNow goroutine
 	// fan-out so the synthetic event lands synchronously and the

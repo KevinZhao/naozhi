@@ -67,9 +67,7 @@ func TestSendCtxCancelsWhenStopCtxCancels(t *testing.T) {
 	s.stopCtx = stopCtx
 
 	j := &Job{ID: "job-sendctx-stop", Schedule: "@every 5m", Prompt: "ping"}
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	done := make(chan struct{})
 	go func() { s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */); close(done) }()

@@ -169,9 +169,7 @@ func TestExecuteOpt_TriggerNowSkipsJitter(t *testing.T) {
 	// s.tbl.jobs[j.ID] to close the dispatch→CAS race window. Insert the job
 	// into the map so the recheck sees it as live; this test focuses on
 	// jitter-skip behaviour, not the registry lifecycle.
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs[j.ID] = j
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(j)
 
 	done := make(chan struct{})
 	go func() {
@@ -231,10 +229,8 @@ func TestExecuteOpt_ScheduledTickAppliesJitter_WhenEnabled(t *testing.T) {
 func TestApplyJitterAndRecheck_AbortsPausedOrDeleted(t *testing.T) {
 	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, AllowNilRouter: true, JitterMax: time.Millisecond}, SchedulerDeps{})
-	s.tblForTest().mu.Lock()
-	s.tblForTest().jobs["live"] = &Job{ID: "live", Schedule: "@every 1m", Prompt: "p"}
-	s.tblForTest().jobs["paused"] = &Job{ID: "paused", Schedule: "@every 1m", Paused: true}
-	s.tblForTest().mu.Unlock()
+	s.putJobForTest(&Job{ID: "live", Schedule: "@every 1m", Prompt: "p"})
+	s.putJobForTest(&Job{ID: "paused", Schedule: "@every 1m", Paused: true})
 	for _, c := range []struct {
 		id        string
 		wantAbort bool
