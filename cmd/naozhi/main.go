@@ -181,6 +181,10 @@ func main() {
 	// `--setting-sources user` path (RFC naozhi-owned-settings-v3).
 	naozhiSettingsFile := resolveNaozhiSettingsFile(cfg, storePath, claudeDir)
 
+	// The claude model popover reads availableModels off a live process; seed the
+	// same list from the settings file so a cold start offers it too.
+	seedClaudeModelManifest(backendRuntimes, naozhiSettingsFile, claudeDir)
+
 	// Opt-in operator MCP server set (RFC cli-mcp-config); "" omits --mcp-config.
 	// Validated first: cc refuses to start on a bad --mcp-config, so an
 	// unvalidated path would turn a typo into a total spawn outage.
@@ -468,11 +472,8 @@ func main() {
 		// ResolveForPlannerKey path as the dashboard handler without coupling
 		// upstream to the server package.
 		upstreamResolver := session.NewKeyResolver(agents, project.NewDataSource(projectMgr))
-		conn := upstream.New(buildUpstreamConfig(cfg), wireup.UpstreamRouter(router), projectMgr, upstreamResolver)
-		if claudeDir != "" {
-			conn.SetDiscoverFunc(newUpstreamDiscoverFunc(claudeDir, router, projectMgr))
-			conn.SetPreviewFunc(newUpstreamPreviewFunc(claudeDir))
-		}
+		conn := upstream.New(buildUpstreamConfig(cfg), wireup.UpstreamRouter(router), projectMgr, upstreamResolver,
+			upstreamDiscovery(claudeDir, router, projectMgr))
 		go conn.Run(ctx)
 		slog.Info("upstream connector starting", "url", cfg.Upstream.URL, "node_id", cfg.Upstream.NodeID)
 	}
