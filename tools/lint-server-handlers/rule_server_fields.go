@@ -3,7 +3,11 @@
 //
 //	struct_budget: Server has exactly serverFieldBaseline fields. More is a new
 //	  field to justify; fewer means the baseline is lowered in the same change,
-//	  so the room cannot be refilled.
+//	  so the room cannot be refilled. #2897 S5 reuses the same check for two
+//	  more structs via additionalStructBudgets: HubOptions and sendEngineOpts
+//	  are plain config/opts carriers, so they get the count pin without
+//	  server_field_liveness's build-step distinction — their dead-field
+//	  problem is option_liveness's job (rule_option_liveness.go) instead.
 //	server_field_liveness: every Server field is read by some function that
 //	  is not a build step (build*, register*, New*, new*). A field only
 //	  construction reads belongs in the construction's own locals (wiring).
@@ -22,6 +26,27 @@ import (
 
 // serverFieldBaseline is Server's field count.
 const serverFieldBaseline = 25
+
+// hubOptionsFieldBaseline is HubOptions's field count (#2897 S5a drops the
+// dead AgentCmds; S5c2 later drops the five fields only sendEngineOpts reads
+// and adds Engine/Broadcaster).
+const hubOptionsFieldBaseline = 19
+
+// sendEngineOptsFieldBaseline is sendEngineOpts's field count.
+const sendEngineOptsFieldBaseline = 11
+
+// additionalStructBudgets are the struct_budget subjects besides Server:
+// plain opts carriers pinned on count alone (server_field_liveness's
+// build-step distinction does not apply to them; option_liveness covers
+// their dead-field case instead).
+var additionalStructBudgets = []struct {
+	TypeName     string
+	BaselineName string
+	Baseline     int
+}{
+	{"HubOptions", "hubOptionsFieldBaseline", hubOptionsFieldBaseline},
+	{"sendEngineOpts", "sendEngineOptsFieldBaseline", sendEngineOptsFieldBaseline},
+}
 
 // isBuildStep reports whether a function name is a construction step.
 func isBuildStep(name string) bool {
@@ -54,7 +79,7 @@ func scanServerFields(pkgDir string) []Violation {
 		names = append(names, n)
 	}
 
-	fields, declFile, declLine := serverFields(fset, files, names)
+	fields, declFile, declLine := structFields(fset, files, names, "Server")
 	if fields == nil {
 		return []Violation{{Rule: "struct_budget", File: pkgDir, Message: "type Server struct not found"}}
 	}
@@ -66,6 +91,23 @@ func scanServerFields(pkgDir string) []Violation {
 	case n < serverFieldBaseline:
 		out = append(out, Violation{Rule: "struct_budget", File: declFile, Line: declLine,
 			Message: fmt.Sprintf("Server has %d fields: lower serverFieldBaseline to %d", n, n)})
+	}
+
+	for _, b := range additionalStructBudgets {
+		bFields, bFile, bLine := structFields(fset, files, names, b.TypeName)
+		if bFields == nil {
+			out = append(out, Violation{Rule: "struct_budget", File: pkgDir,
+				Message: fmt.Sprintf("type %s struct not found — %s has nothing to check; if it moved, move this entry with it", b.TypeName, b.BaselineName)})
+			continue
+		}
+		switch n := len(bFields); {
+		case n > b.Baseline:
+			out = append(out, Violation{Rule: "struct_budget", File: bFile, Line: bLine,
+				Message: fmt.Sprintf("%s has %d fields, above the baseline of %d: justify the new field", b.TypeName, n, b.Baseline)})
+		case n < b.Baseline:
+			out = append(out, Violation{Rule: "struct_budget", File: bFile, Line: bLine,
+				Message: fmt.Sprintf("%s has %d fields: lower %s to %d", b.TypeName, n, b.BaselineName, n)})
+		}
 	}
 
 	read := map[string]bool{}
@@ -94,9 +136,11 @@ func scanServerFields(pkgDir string) []Violation {
 	return out
 }
 
-// serverFields returns Server's field names with their lines, and where the
-// struct is declared.
-func serverFields(fset *token.FileSet, files []*ast.File, names []string) (map[string]int, string, int) {
+// structFields returns typeName's field names with their lines, and where
+// the struct is declared, scanning files already parsed from one package dir.
+// Shared by struct_budget (for Server and additionalStructBudgets) and
+// option_liveness (rule_option_liveness.go).
+func structFields(fset *token.FileSet, files []*ast.File, names []string, typeName string) (map[string]int, string, int) {
 	for i, f := range files {
 		for _, d := range f.Decls {
 			gd, ok := d.(*ast.GenDecl)
@@ -105,7 +149,7 @@ func serverFields(fset *token.FileSet, files []*ast.File, names []string) (map[s
 			}
 			for _, sp := range gd.Specs {
 				ts, ok := sp.(*ast.TypeSpec)
-				if !ok || ts.Name.Name != "Server" {
+				if !ok || ts.Name.Name != typeName {
 					continue
 				}
 				st, ok := ts.Type.(*ast.StructType)

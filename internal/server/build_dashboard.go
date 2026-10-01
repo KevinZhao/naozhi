@@ -28,7 +28,6 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	s.hub = NewHub(HubOptions{
 		Router:    s.router,
 		Agents:    hs.wiring.agents,
-		AgentCmds: hs.wiring.agentCommands,
 		DashToken: s.dashboardToken,
 		// Live getter, not a snapshot: RotateCookieGen must invalidate WS
 		// upgrades on the next handshake (#1398).
