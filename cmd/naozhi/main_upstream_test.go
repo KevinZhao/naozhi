@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -70,5 +73,38 @@ func TestUpstreamDiscovery(t *testing.T) {
 	}
 	if d := upstreamDiscovery(t.TempDir(), nil, nil); d.Sessions == nil || d.Preview == nil {
 		t.Error("claude dir set: a discovery RPC is missing")
+	}
+}
+
+// TestNewUpstreamPreviewFunc_SendsTheWireView: the preview payload goes to the
+// primary's dashboard, so a credential in the transcript is redacted.
+func TestNewUpstreamPreviewFunc_SendsTheWireView(t *testing.T) {
+	t.Parallel()
+	const (
+		sessionID = "00000000-0000-0000-0000-0000000013b1"
+		cwd       = "/home/u/wire-view"
+		secret    = "sk-ant-api03-PPPPPPPPPPPPPPPPPPPPPPPP"
+	)
+	claudeDir := t.TempDir()
+	path := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"my key is ` + secret + `"}}`
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := newUpstreamPreviewFunc(claudeDir)(sessionID)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if !strings.Contains(string(raw), "my key is") {
+		t.Fatalf("preview lost the entry: %s", raw)
+	}
+	for _, leak := range []string{"jsonl_path", secret} {
+		if strings.Contains(string(raw), leak) {
+			t.Errorf("preview payload carries %q: %s", leak, raw)
+		}
 	}
 }

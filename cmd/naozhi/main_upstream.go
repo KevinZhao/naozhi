@@ -63,6 +63,6 @@ func newUpstreamPreviewFunc(claudeDir string) func(sessionID string) (json.RawMe
 		if entries == nil {
 			entries = []clievent.EventEntry{}
 		}
-		return json.Marshal(entries)
+		return json.Marshal(clievent.ForWire(entries))
 	}
 }

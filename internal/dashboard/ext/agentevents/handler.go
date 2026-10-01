@@ -190,7 +190,7 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		// as "no data" and never subscribes to the live feed.
 		entries = []clievent.EventEntry{}
 	}
-	httputil.WriteJSON(w, entries)
+	httputil.WriteJSON(w, clievent.ForWire(entries))
 }
 
 func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
