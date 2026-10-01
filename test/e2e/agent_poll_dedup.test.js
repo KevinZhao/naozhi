@@ -42,15 +42,15 @@ const T0 = BASE, T_SAME = BASE + 2000, T_LATER = BASE + 3000;
 
 /**
  * Starts the HTTP-poll fallback the way production does: startHttpPoll is only
- * reached from onAgentSubscribeRejected('capacity'), so a mock with no WS never
- * polls at all. Without this the "nothing was replayed" assertion is vacuous —
- * measured: it passed while the poll had never run.
+ * reached from an agent_subscribe_rejected{capacity} frame, so a mock with no
+ * WS never polls at all. Without this the "nothing was replayed" assertion is
+ * vacuous — measured: it passed while the poll had never run.
  * @param {import('@playwright/test').Page} page
  */
 async function startPollFallback(page) {
   await page.evaluate((taskID) => {
-    (/** @type {any} */ (window)).nz.views.agent.onAgentSubscribeRejected({
-      task_id: taskID, reason: 'capacity',
+    (/** @type {any} */ (window)).wsm.onMessage({
+      type: 'agent_subscribe_rejected', task_id: taskID, reason: 'capacity',
     });
   }, TASK_ID);
 }

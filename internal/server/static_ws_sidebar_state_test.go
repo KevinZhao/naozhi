@@ -8,25 +8,48 @@ import (
 	"testing"
 )
 
-// Contract tests for the dashboard WS dispatch table + sidebar state
+// Contract tests for the dashboard WS receive table + sidebar state
 // handling. They read dashboard.js source (same approach as
 // static_event_uuid_dedup_test.go) so a regression in any of these
 // branches fails `go test` rather than only surfacing in a browser.
 
-// wsOnMessageBody extracts the body of wsm.onMessage(msg) — the WS dispatch
-// switch — so assertions can be scoped to that function instead of the
-// whole 15k-line file.
-func wsOnMessageBody(t *testing.T, js string) string {
+// wsOnHandler returns the source of the wsm.on(...) call for type key: the
+// unconditional registration, or with claim set the first one passing a claim
+// (a third argument). Bracket depth bounds the call; the scan does not skip
+// string contents, which the registrations do not need.
+func wsOnHandler(t *testing.T, js, key string, claim bool) string {
 	t.Helper()
-	start := strings.Index(js, "onMessage(msg) {")
-	if start < 0 {
-		t.Fatal("wsm.onMessage(msg) not found in dashboard.js")
+	head := "wsm.on(NZ_CONTRACT.WS." + key + ","
+	for from := 0; ; {
+		i := strings.Index(js[from:], head)
+		if i < 0 {
+			t.Fatalf("no wsm.on registration for %s (claim=%v)", key, claim)
+		}
+		start := from + i
+		depth, commas, end := 0, 0, -1
+		for j := start + len("wsm.on"); j < len(js) && end < 0; j++ {
+			switch js[j] {
+			case '(', '{', '[':
+				depth++
+			case ')', '}', ']':
+				depth--
+				if depth == 0 {
+					end = j + 1
+				}
+			case ',':
+				if depth == 1 {
+					commas++
+				}
+			}
+		}
+		if end < 0 {
+			t.Fatalf("unbounded wsm.on registration for %s", key)
+		}
+		if (commas == 2) == claim {
+			return js[start:end]
+		}
+		from = end
 	}
-	end := strings.Index(js[start:], "startPing() {")
-	if end < 0 {
-		t.Fatal("wsm.startPing() must follow onMessage so the dispatch body can be sliced")
-	}
-	return js[start : start+end]
 }
 
 // TestDashboardJS_WSSwitchCoversBackendFrameTypes was here. It required every
@@ -44,27 +67,35 @@ func wsOnMessageBody(t *testing.T, js string) string {
 // hidden-tab suspension below, which the e2e suite does not drive.
 func TestDashboardJS_DaemonRunFramesRefreshSystemDaemons(t *testing.T) {
 	t.Parallel()
-	body := wsOnMessageBody(t, readDashboardJS(t))
-	idx := strings.Index(body, "msg.subsystem === 'sysession'")
+	js := readDashboardJS(t)
+	for _, reg := range []string{
+		"const sysRun = (msg) => msg.subsystem === 'sysession';",
+		"wsm.on(NZ_CONTRACT.WS.run_started, daemonRun, sysRun);",
+		"wsm.on(NZ_CONTRACT.WS.run_ended, daemonRun, sysRun);",
+	} {
+		if !strings.Contains(js, reg) {
+			t.Errorf("sysession run frames must be claimed by daemonRun: missing %q", reg)
+		}
+	}
+	idx := strings.Index(js, "const daemonRun = () => {")
 	if idx < 0 {
-		t.Fatal("sysession branch missing from the run_started/run_ended dispatch")
+		t.Fatal("daemonRun handler missing")
 	}
-	tail := body[idx:]
-	end := strings.Index(tail, "case 'pong':")
+	daemonCase := js[idx:]
+	end := strings.Index(daemonCase, "\n};")
 	if end < 0 {
-		t.Fatal("case 'pong' must follow the unified run dispatch")
+		t.Fatal("daemonRun handler has no closing `};` line")
 	}
-	daemonCase := tail[:end]
+	daemonCase = daemonCase[:end]
 	if !strings.Contains(daemonCase, "fetchSystemDaemons()") {
 		t.Error("sysession run frames must call fetchSystemDaemons() so updateSystemBadge runs")
 	}
 	// Hub-wide broadcast, ~4 frames/min/tab: must honour the RNEW-UX-014
 	// hidden-tab suspension instead of fetching in the background.
-	if !strings.Contains(daemonCase, "if (document.hidden) break;") {
-		t.Error("the sysession branch must skip the fetch while document.hidden")
+	if !strings.HasPrefix(strings.TrimSpace(daemonCase[len("const daemonRun = () => {"):]), "if (document.hidden) return;") {
+		t.Error("daemonRun must return before fetching while document.hidden")
 	}
 	// ...and startPollers must re-sync the badge once the tab is visible again.
-	js := readDashboardJS(t)
 	startIdx := strings.Index(js, "const startPollers = () => {")
 	visIdx := strings.Index(js, "document.addEventListener('visibilitychange'")
 	if startIdx < 0 || visIdx < startIdx {
@@ -83,18 +114,8 @@ func TestDashboardJS_DaemonRunFramesRefreshSystemDaemons(t *testing.T) {
 func TestDashboardJS_InterruptAckSurfacesStatus(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
-	body := wsOnMessageBody(t, js)
-	idx := strings.Index(body, "case 'interrupt_ack':")
-	if idx < 0 {
-		t.Fatal("case 'interrupt_ack' missing")
-	}
-	tail := body[idx:]
-	brk := strings.Index(tail, "break;")
-	if brk < 0 {
-		t.Fatal("interrupt_ack case has no break")
-	}
-	if !strings.Contains(tail[:brk], "this.onInterruptAck(msg)") {
-		t.Error("interrupt_ack case must dispatch to this.onInterruptAck(msg) instead of a bare break")
+	if got := wsOnHandler(t, js, "interrupt_ack", false); got != "wsm.on(NZ_CONTRACT.WS.interrupt_ack, (msg) => wsm.onInterruptAck(msg))" {
+		t.Errorf("interrupt_ack must dispatch to wsm.onInterruptAck(msg) instead of a no-op, got %q", got)
 	}
 	if !strings.Contains(js, "onInterruptAck(msg) {") {
 		t.Fatal("wsm.onInterruptAck(msg) handler must exist")
@@ -114,18 +135,9 @@ func TestDashboardJS_InterruptAckSurfacesStatus(t *testing.T) {
 // `error` frames and used to wipe an unrelated in-flight subscribe.
 func TestDashboardJS_ErrorFrameGuardsPendingSubscribeKey(t *testing.T) {
 	t.Parallel()
-	body := wsOnMessageBody(t, readDashboardJS(t))
-	idx := strings.Index(body, "case 'error':")
-	if idx < 0 {
-		t.Fatal("case 'error' missing")
-	}
-	next := strings.Index(body[idx:], "case 'history':")
-	if next < 0 {
-		t.Fatal("case 'history' must follow case 'error'")
-	}
-	errCase := body[idx : idx+next]
-	if !strings.Contains(errCase, "msg.key === this._pendingSubscribeKey") {
-		t.Error("error case must compare msg.key against this._pendingSubscribeKey before clearing pending state")
+	errCase := wsOnHandler(t, readDashboardJS(t), "error", false)
+	if !strings.Contains(errCase, "msg.key === wsm._pendingSubscribeKey") {
+		t.Error("error case must compare msg.key against wsm._pendingSubscribeKey before clearing pending state")
 	}
 	if !strings.Contains(errCase, "if (!msg.key && msg.node && msg.error === 'node disconnected')") {
 		t.Error("error case must recognise the PurgeNodeSubscriptions frame (keyless + msg.node + 'node disconnected')")

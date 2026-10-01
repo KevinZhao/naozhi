@@ -348,6 +348,14 @@ jobs:
       - name: Check WS contract (wsproto schema vs dashboard dispatch)
         run: node test/e2e/check-ws-contract.mjs
 
+      # Frames reach handlers only through the wsm.on table (S18, #3024); a
+      # rule that stops matching would let a hand-rolled switch back in.
+      - name: Test the WS receiver rules
+        run: node --test scripts/check-ws-receivers.test.mjs
+
+      - name: Check WS receivers (no hand-rolled frame-type dispatch)
+        run: node scripts/check-ws-receivers.mjs
+
       - name: Test the nested WS field check
         run: node --test scripts/ws-contract-nested.test.mjs
 

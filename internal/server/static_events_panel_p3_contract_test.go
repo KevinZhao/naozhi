@@ -64,27 +64,21 @@ func TestDashboardJS_SendAckRollsBackOwnBubbleById(t *testing.T) {
 
 func TestDashboardJS_UnsubscribedFrameIsExplicitNoop(t *testing.T) {
 	t.Parallel()
-	body := wsOnMessageBody(t, readDashboardJS(t))
-	idx := strings.Index(body, "case 'unsubscribed':")
-	if idx < 0 {
-		t.Fatal("wsm.onMessage must have an explicit `case 'unsubscribed':` — the hub emits it from three sites in wshub_subscribe.go")
+	js := readDashboardJS(t)
+	// A documented no-op: a handler with no parameter and an empty body, and
+	// no claim that could act on the frame instead.
+	if got := wsOnHandler(t, js, "unsubscribed", false); got != "wsm.on(NZ_CONTRACT.WS.unsubscribed, () => {})" {
+		t.Errorf("unsubscribed must be a bare documented no-op (wsm.unsubscribe already reset the client state), got %q", got)
 	}
-	seg := body[idx:]
-	if next := strings.Index(seg, "case '"); next > 0 {
-		if n2 := strings.Index(seg[next:], "case '"); n2 > 0 {
-			seg = seg[:next+n2]
-		}
-	}
-	// A documented no-op: comment + break, no state mutation.
-	if !strings.Contains(seg, "break;") || strings.Contains(seg[:strings.Index(seg, "break;")], "this.") {
-		t.Error("unsubscribed case must be a bare documented no-op (wsm.unsubscribe already reset the client state)")
+	if n := strings.Count(js, "wsm.on(NZ_CONTRACT.WS.unsubscribed,"); n != 1 {
+		t.Errorf("unsubscribed has %d registrations, want the one no-op", n)
 	}
 }
 
 func TestDashboardJS_NodeDisconnectDeselectsStaleSession(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
-	body := wsOnMessageBody(t, js)
+	body := wsOnHandler(t, js, "error", false)
 	idx := strings.Index(body, "if (!msg.key && msg.node && msg.error === 'node disconnected')")
 	if idx < 0 {
 		t.Fatal("node-disconnected branch missing")

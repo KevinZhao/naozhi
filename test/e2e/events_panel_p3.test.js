@@ -217,10 +217,16 @@ test.describe('Events panel #2430 P3 / #2432 protocol', () => {
         const ws = eval('typeof wsm !== "undefined" ? wsm : null');
         const g = (expr) => eval(expr);
         if (!ws) return { err: 'wsm missing' };
-        // B1: unsubscribed frame — no throw, no state change.
-        const subBefore = { key: ws.subscribedKey, node: ws.subscribedNode };
+        // B1: unsubscribed frame — no throw, no state change. Seed the
+        // bookkeeping first: with the mock's WS off it is null, and a
+        // handler that nulls it would compare equal.
+        ws.subscribedKey = 'seeded-key';
+        ws.subscribedNode = 'seeded-node';
         ws.onMessage({ type: 'unsubscribed', key: 'whatever' });
         const subAfter = { key: ws.subscribedKey, node: ws.subscribedNode };
+        const subBefore = { key: 'seeded-key', node: 'seeded-node' };
+        ws.subscribedKey = null;
+        ws.subscribedNode = null;
 
         // Draft the operator was typing must survive the deselect.
         const inp = document.getElementById('msg-input');

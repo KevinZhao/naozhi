@@ -3866,229 +3866,27 @@ const wsm = {
     this.backoff = Math.min(this.backoff * 2, this.maxBackoff);
   },
 
+  // _frames is the receive dispatch table: an outbound NZ_CONTRACT.WS type to
+  // its claims (handlers with a `when`, tried in registration order, the first
+  // match wins) and its one unconditional handler, run when no claim matches.
+  // No match, or an unregistered type, drops the frame.
+  _frames: new Map(),
+
+  on(type, fn, when) {
+    if (!Object.hasOwn(NZ_CONTRACT.WS, type)) throw new Error('wsm.on: unknown frame type ' + type);
+    const t = this._frames.get(type) || { claims: [], fallback: null };
+    if (when) t.claims.push({ fn, when });
+    else if (t.fallback) throw new Error('wsm.on: ' + type + ' already has a handler');
+    else t.fallback = fn;
+    this._frames.set(type, t);
+  },
+
   onMessage(msg) {
-    switch (msg.type) {
-      case 'auth_ok':
-        this.setState(WS_STATES.CONNECTED);
-        this.backoff = 1000;
-        this.startPing();
-        this.onConnected();
-        break;
-      case 'auth_fail':
-        // Classify the in-band WS auth error by pattern: the server emits
-        // "too many attempts" for rate-limit lockouts (should be a warn
-        // toast, not an error; the operator just needs to wait), and
-        // anything else is a token-mismatch fail requiring re-login.
-        //
-        // Rate-limit replies also carry `retry_after` (seconds) so the
-        // UI can show a countdown instead of the legacy generic "稍后
-        // 重试" hint. Older servers omit the field — parseInt of
-        // undefined is NaN, and startWSAuthRetryCountdown clamps to a
-        // 60s default so the UX degrades gracefully.
-        {
-          const raw = (msg.error || '').toString();
-          if (raw.toLowerCase().includes('too many')) {
-            let retryAfter = parseInt(msg.retry_after, 10);
-            if (!Number.isFinite(retryAfter) || retryAfter <= 0) retryAfter = 60;
-            startWSAuthRetryCountdown(retryAfter);
-          } else {
-            showAPIError('WebSocket 鉴权', 401, raw || '令牌无效');
-          }
-        }
-        this.conn.close();
-        break;
-      case 'subscribed':
-        // cron-live RFC §2.2: cron live 订阅命中时不污染主订阅状态
-        if (this.cronLive.pendingJobId && msg.key === ('cron:' + this.cronLive.pendingJobId)) {
-          this.cronLive.subscribedKey = msg.key;
-          this.cronLive.pendingJobId = null;
-          this.cronLive.suspended = (msg.reason === 'suspended');
-          this.cronLive.status = this.cronLive.suspended ? 'pending' : 'live';
-          emitCron('cron:live-status', this.cronLive.status);
-          break;
-        }
-        // Server confirmed subscription — apply authoritative state
-        this.subscribedKey = this._pendingSubscribeKey || msg.key;
-        // 非 pending 时以帧自带的 node 为准，不退到 'local'：relay 重建远端订阅
-        // (remoteDropped) 或 reconnect 后，远端 subscribed 经 relay 扇出给该 key
-        // 下所有 tab（relay 每帧注入 node，reverseconn 也带 Node）。非 pending 的
-        // tab 若被改写成 'local'，之后 subscription_timeout 处理要求 node 匹配就
-        // 不再清簿记 → 不重订阅，原 bug 复现。
-        this.subscribedNode = this._pendingSubscribeNode || msg.node || 'local';
-        this._pendingSubscribeKey = null;
-        this._pendingSubscribeNode = null;
-        // Track whether the server started an eventPushLoop for this subscription.
-        // "suspended" means the session had no process — no live events will arrive
-        // until the process starts, at which point onSessionState triggers re-subscribe.
-        this._subscriptionSuspended = (msg.reason === 'suspended');
-        if (msg.state && msg.key === selection.key && this.subscribedNode === selection.node) {
-          const subSKey = sid(msg.key, this.subscribedNode);
-          if (sessionList.sessionsData[subSKey]) {
-            sessionList.sessionsData[subSKey].state = msg.state;
-            updateMainState(msg.state);
-          }
-        }
-        break;
-      case 'unsubscribed':
-        // Server ack for an explicit unsubscribe (wshub_subscribe.go, three
-        // emit sites incl. the relayed remote ack). wsm.unsubscribe() already
-        // cleared subscribedKey/Node synchronously and a relayed ack may name
-        // a key this tab no longer tracks — nothing to reconcile. Listed so
-        // the frame is a documented no-op rather than an unhandled type.
-        break;
-      case 'error':
-        // cron-live RFC §2.2: 错误命中 cron live pending → 单独清理
-        if (msg.key && this.cronLive.pendingJobId && msg.key === ('cron:' + this.cronLive.pendingJobId)) {
-          this.cronLive.pendingJobId = null;
-          this.cronLive.subscribedKey = null;
-          this.cronLive.status = 'stopped';
-          emitCron('cron:live-status', 'stopped');
-          break;
-        }
-        // PurgeNodeSubscriptions broadcast: error{node, "node disconnected"}
-        // reaches every tab regardless of what it is subscribed to. Drop only
-        // the bookkeeping that points at the dead node, snap selectedNode back
-        // to local via the existing reconcile path, and re-fetch so the
-        // sidebar reflects the node's sessions going away.
-        if (!msg.key && msg.node && msg.error === 'node disconnected') {
-          if (this.subscribedNode === msg.node) {
-            this.subscribedKey = null;
-            this.subscribedNode = null;
-          }
-          if (this._pendingSubscribeNode === msg.node) {
-            this._pendingSubscribeKey = null;
-            this._pendingSubscribeNode = null;
-          }
-          // The selected session lived on the dead node: no pushes can reach
-          // it any more and its key means nothing under the `local` node
-          // reconcileSelectedNode snaps to, so deselect it (the backend's
-          // "deselect stale sessions" contract) before selectedNode moves.
-          // Ownership comes from the session store, NOT from selectedNode:
-          // that global is the dispatch target and wireNodePicker rewrites
-          // it the moment the new-session picker changes node, so a local
-          // session with the picker on n1 must survive n1 going away.
-          // Pending (never-sent) sessions are only a draft target — they stay
-          // selected and are neither cleared nor deleted here.
-          if (selection.key && perSession.workspaces[selection.key] === undefined &&
-              (sessionList.sessionsData[sid(selection.key, msg.node)] || perSession.nodes[selection.key] === msg.node)) {
-            deselectNodeSession(msg.node);
-          }
-          sessionList.nodesData = Object.fromEntries(Object.entries(sessionList.nodesData).filter(([id]) => id !== msg.node));
-          reconcileSelectedNode();
-          sessionList.lastVersion = 0;
-          debouncedFetchSessions();
-          break;
-        }
-        // Subscribe failed (e.g. session not found yet) — reset pending, but
-        // only when the frame is about THIS subscribe: a keyed error for a
-        // different key (or an agent_subscribe validation error, which also
-        // arrives as a bare `error`) must not wipe an unrelated in-flight
-        // subscribe. Keyless frames without a node are the legacy shape of a
-        // subscribe rejection and still clear pending.
-        if (!msg.key || msg.key === this._pendingSubscribeKey) {
-          this._pendingSubscribeKey = null;
-          this._pendingSubscribeNode = null;
-        }
-        break;
-      case 'history':
-        if (hooks.isCronLiveKey && hooks.isCronLiveKey(msg.key)) { this.onCronLiveHistory(msg); break; }
-        this.onHistory(msg);
-        break;
-      case 'event':
-        if (hooks.isCronLiveKey && hooks.isCronLiveKey(msg.key)) { this.onCronLiveEvent(msg); break; }
-        this.onEvent(msg);
-        break;
-      case 'send_ack':
-        this.onSendAck(msg);
-        break;
-      case 'send_error':
-        this.onSendError(msg);
-        break;
-      case 'interrupt_ack':
-        this.onInterruptAck(msg);
-        break;
-      case 'session_state':
-        if (hooks.isCronLiveKey && hooks.isCronLiveKey(msg.key)) { this.onCronLiveSessionState(msg); break; }
-        this.onSessionState(msg);
-        break;
-      case 'sessions_update': {
-        // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
-        // a newly-added key after the fetch completes. Comparing sizes is
-        // not enough (delete+create at the same tick would net to zero).
-        const prevSessKeys = new Set(Object.keys(sessionList.sessionsData || {}));
-        debouncedFetchSessions().then(() => {
-          // Auto-subscribe to newly created session if we don't have an active
-          // subscription. _pendingSubscribeKey is intentionally not checked:
-          // a no-process subscribe returns "subscribed" + persisted history but
-          // no live eventPushLoop, so subscribedKey may not be set while the
-          // pending flag was already cleared. This ensures recovery.
-          if (selection.key && !wsm.subscribedKey && sessionList.sessionsData[sid(selection.key, selection.node)]) {
-            wsm.subscribe(selection.key, selection.node);
-          }
-          const added = Object.keys(sessionList.sessionsData || {}).filter(k => !prevSessKeys.has(k));
-          if (added.length > 0) announce('新会话已创建');
-        });
-        break;
-      }
-      // Phase D (RFC §3.5) deleted the legacy cron_result frame. The
-      // announce("定时任务已完成") moved to the cron_run_ended succeeded
-      // branch below; the list refetch was a strict subset of what the
-      // cron_run_ended branch already does.
-      case 'run_started':
-      case 'run_ended': {
-        // Unified run-lifecycle frames (#2540): one wire shape for every run
-        // producer, discriminated by subsystem. The per-subsystem handling
-        // below predates the merge and is unchanged — cron's optimistic
-        // patches ride nz.bus with the field names cron_view has always
-        // consumed (job_id), so the projection happens here, once, at the
-        // wire boundary, instead of every consumer learning owner_id.
-        if (msg.subsystem === 'cron') {
-          const cronMsg = Object.assign({}, msg, { job_id: msg.owner_id });
-          if (msg.type === 'run_started') {
-            // P0 cron-run-history (RFC §7.2) — drive the "运行中 Xs" inline
-            // badge without waiting for a list refetch; cronApplyRunStarted
-            // repaints both the list and the per-job drawer.
-            emitCron('cron:run-started', cronMsg);
-          } else {
-            // P0 — terminal frame, fires for every terminal state (succeeded /
-            // failed / skipped / timed_out / canceled); only succeeded should
-            // celebrate (Phase D absorbed the legacy cron_result frame).
-            if (cronMsg.state === 'succeeded') announce('定时任务已完成');
-            emitCron('cron:run-ended', cronMsg);
-            // P2 — refresh the timeline head through the rAF-debounced wrapper
-            // so bursty terminal frames for one job collapse per paint frame.
-            if (cronMsg.job_id) emitCron('cron:timeline-refresh-head', cronMsg.job_id);
-          }
-        } else if (msg.subsystem === 'sysession') {
-          // System-daemon run boundary. fetchSystemDaemons is the only path
-          // that updates the 系统 rail attention badge; without this a daemon
-          // failing in the background never lit the badge until the operator
-          // opened the view. Honour the RNEW-UX-014 hidden-tab suspension.
-          if (document.hidden) break;
-          fetchSystemDaemons().then(() => {
-            if (ui.activeView === 'system') renderSystemView();
-          }).catch(() => {});
-        }
-        break;
-      }
-      case 'pong':
-        break;
-      // RFC v4 agent-team-ui §3.5.2 — drill-in flow. All four handlers
-      // live in agent_view.js so new agent-view functionality doesn't
-      // mean touching this dispatch table.
-      case 'agent_event':
-        if (nzViews.agent) nzViews.agent.onAgentEvent(msg);
-        break;
-      case 'agent_meta':
-        if (nzViews.agent) nzViews.agent.onAgentMeta(msg);
-        break;
-      case 'agent_done':
-        if (nzViews.agent) nzViews.agent.onAgentDone(msg);
-        break;
-      case 'agent_subscribe_rejected':
-        if (nzViews.agent) nzViews.agent.onAgentSubscribeRejected(msg);
-        break;
-    }
+    const t = this._frames.get(msg.type);
+    if (!t) return;
+    const c = t.claims.find((x) => x.when(msg));
+    if (c) c.fn(msg);
+    else if (t.fallback) t.fallback(msg);
   },
 
   startPing() {
@@ -4930,6 +4728,189 @@ const wsm = {
 
   isConnected() { return this.state === WS_STATES.CONNECTED; }
 };
+
+/* ===== WS receive table: one registration per outbound frame type ===== */
+
+wsm.on(NZ_CONTRACT.WS.auth_ok, () => {
+  wsm.setState(WS_STATES.CONNECTED);
+  wsm.backoff = 1000;
+  wsm.startPing();
+  wsm.onConnected();
+});
+// Classify the in-band WS auth error by pattern: the server emits
+// "too many attempts" for rate-limit lockouts (should be a warn
+// toast, not an error; the operator just needs to wait), and
+// anything else is a token-mismatch fail requiring re-login.
+//
+// Rate-limit replies also carry `retry_after` (seconds) so the
+// UI can show a countdown instead of the legacy generic "稍后
+// 重试" hint. Older servers omit the field — parseInt of
+// undefined is NaN, and startWSAuthRetryCountdown clamps to a
+// 60s default so the UX degrades gracefully.
+wsm.on(NZ_CONTRACT.WS.auth_fail, (msg) => {
+  const raw = (msg.error || '').toString();
+  if (raw.toLowerCase().includes('too many')) {
+    let retryAfter = parseInt(msg.retry_after, 10);
+    if (!Number.isFinite(retryAfter) || retryAfter <= 0) retryAfter = 60;
+    startWSAuthRetryCountdown(retryAfter);
+  } else {
+    showAPIError('WebSocket 鉴权', 401, raw || '令牌无效');
+  }
+  wsm.conn.close();
+});
+// cron-live RFC §2.2: cron live 订阅命中时不污染主订阅状态
+wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
+  wsm.cronLive.subscribedKey = msg.key;
+  wsm.cronLive.pendingJobId = null;
+  wsm.cronLive.suspended = (msg.reason === 'suspended');
+  wsm.cronLive.status = wsm.cronLive.suspended ? 'pending' : 'live';
+  emitCron('cron:live-status', wsm.cronLive.status);
+}, (msg) => wsm.cronLive.pendingJobId && msg.key === ('cron:' + wsm.cronLive.pendingJobId));
+wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
+  // Server confirmed subscription — apply authoritative state
+  wsm.subscribedKey = wsm._pendingSubscribeKey || msg.key;
+  // 非 pending 时以帧自带的 node 为准，不退到 'local'：relay 重建远端订阅
+  // (remoteDropped) 或 reconnect 后，远端 subscribed 经 relay 扇出给该 key
+  // 下所有 tab（relay 每帧注入 node，reverseconn 也带 Node）。非 pending 的
+  // tab 若被改写成 'local'，之后 subscription_timeout 处理要求 node 匹配就
+  // 不再清簿记 → 不重订阅，原 bug 复现。
+  wsm.subscribedNode = wsm._pendingSubscribeNode || msg.node || 'local';
+  wsm._pendingSubscribeKey = null;
+  wsm._pendingSubscribeNode = null;
+  // Track whether the server started an eventPushLoop for this subscription.
+  // "suspended" means the session had no process — no live events will arrive
+  // until the process starts, at which point onSessionState triggers re-subscribe.
+  wsm._subscriptionSuspended = (msg.reason === 'suspended');
+  if (msg.state && msg.key === selection.key && wsm.subscribedNode === selection.node) {
+    const subSKey = sid(msg.key, wsm.subscribedNode);
+    if (sessionList.sessionsData[subSKey]) {
+      sessionList.sessionsData[subSKey].state = msg.state;
+      updateMainState(msg.state);
+    }
+  }
+});
+// Server ack for an explicit unsubscribe (wshub_subscribe.go, three
+// emit sites incl. the relayed remote ack). wsm.unsubscribe() already
+// cleared subscribedKey/Node synchronously and a relayed ack may name
+// a key this tab no longer tracks — nothing to reconcile. Registered so
+// the frame is a documented no-op rather than an unhandled type.
+wsm.on(NZ_CONTRACT.WS.unsubscribed, () => {});
+// cron-live RFC §2.2: 错误命中 cron live pending → 单独清理
+wsm.on(NZ_CONTRACT.WS.error, () => {
+  wsm.cronLive.pendingJobId = null;
+  wsm.cronLive.subscribedKey = null;
+  wsm.cronLive.status = 'stopped';
+  emitCron('cron:live-status', 'stopped');
+}, (msg) => msg.key && wsm.cronLive.pendingJobId && msg.key === ('cron:' + wsm.cronLive.pendingJobId));
+wsm.on(NZ_CONTRACT.WS.error, (msg) => {
+  // PurgeNodeSubscriptions broadcast: error{node, "node disconnected"}
+  // reaches every tab regardless of what it is subscribed to. Drop only
+  // the bookkeeping that points at the dead node, snap selectedNode back
+  // to local via the existing reconcile path, and re-fetch so the
+  // sidebar reflects the node's sessions going away.
+  if (!msg.key && msg.node && msg.error === 'node disconnected') {
+    if (wsm.subscribedNode === msg.node) {
+      wsm.subscribedKey = null;
+      wsm.subscribedNode = null;
+    }
+    if (wsm._pendingSubscribeNode === msg.node) {
+      wsm._pendingSubscribeKey = null;
+      wsm._pendingSubscribeNode = null;
+    }
+    // The selected session lived on the dead node: no pushes can reach
+    // it any more and its key means nothing under the `local` node
+    // reconcileSelectedNode snaps to, so deselect it (the backend's
+    // "deselect stale sessions" contract) before selectedNode moves.
+    // Ownership comes from the session store, NOT from selectedNode:
+    // that global is the dispatch target and wireNodePicker rewrites
+    // it the moment the new-session picker changes node, so a local
+    // session with the picker on n1 must survive n1 going away.
+    // Pending (never-sent) sessions are only a draft target — they stay
+    // selected and are neither cleared nor deleted here.
+    if (selection.key && perSession.workspaces[selection.key] === undefined &&
+        (sessionList.sessionsData[sid(selection.key, msg.node)] || perSession.nodes[selection.key] === msg.node)) {
+      deselectNodeSession(msg.node);
+    }
+    sessionList.nodesData = Object.fromEntries(Object.entries(sessionList.nodesData).filter(([id]) => id !== msg.node));
+    reconcileSelectedNode();
+    sessionList.lastVersion = 0;
+    debouncedFetchSessions();
+    return;
+  }
+  // Subscribe failed (e.g. session not found yet) — reset pending, but
+  // only when the frame is about THIS subscribe: a keyed error for a
+  // different key (or an agent_subscribe validation error, which also
+  // arrives as a bare `error`) must not wipe an unrelated in-flight
+  // subscribe. Keyless frames without a node are the legacy shape of a
+  // subscribe rejection and still clear pending.
+  if (!msg.key || msg.key === wsm._pendingSubscribeKey) {
+    wsm._pendingSubscribeKey = null;
+    wsm._pendingSubscribeNode = null;
+  }
+});
+const cronLiveKey = (msg) => hooks.isCronLiveKey && hooks.isCronLiveKey(msg.key);
+wsm.on(NZ_CONTRACT.WS.history, (msg) => wsm.onCronLiveHistory(msg), cronLiveKey);
+wsm.on(NZ_CONTRACT.WS.history, (msg) => wsm.onHistory(msg));
+wsm.on(NZ_CONTRACT.WS.event, (msg) => wsm.onCronLiveEvent(msg), cronLiveKey);
+wsm.on(NZ_CONTRACT.WS.event, (msg) => wsm.onEvent(msg));
+wsm.on(NZ_CONTRACT.WS.send_ack, (msg) => wsm.onSendAck(msg));
+wsm.on(NZ_CONTRACT.WS.send_error, (msg) => wsm.onSendError(msg));
+wsm.on(NZ_CONTRACT.WS.interrupt_ack, (msg) => wsm.onInterruptAck(msg));
+wsm.on(NZ_CONTRACT.WS.session_state, (msg) => wsm.onCronLiveSessionState(msg), cronLiveKey);
+wsm.on(NZ_CONTRACT.WS.session_state, (msg) => wsm.onSessionState(msg));
+wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
+  // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
+  // a newly-added key after the fetch completes. Comparing sizes is
+  // not enough (delete+create at the same tick would net to zero).
+  const prevSessKeys = new Set(Object.keys(sessionList.sessionsData || {}));
+  debouncedFetchSessions().then(() => {
+    // Auto-subscribe to newly created session if we don't have an active
+    // subscription. _pendingSubscribeKey is intentionally not checked:
+    // a no-process subscribe returns "subscribed" + persisted history but
+    // no live eventPushLoop, so subscribedKey may not be set while the
+    // pending flag was already cleared. This ensures recovery.
+    if (selection.key && !wsm.subscribedKey && sessionList.sessionsData[sid(selection.key, selection.node)]) {
+      wsm.subscribe(selection.key, selection.node);
+    }
+    const added = Object.keys(sessionList.sessionsData || {}).filter(k => !prevSessKeys.has(k));
+    if (added.length > 0) announce('新会话已创建');
+  });
+});
+// Unified run-lifecycle frames (#2540): one wire shape for every run
+// producer, discriminated by subsystem. cron's optimistic patches ride
+// nz.bus with the field names cron_view has always consumed (job_id), so
+// the projection happens here, once, at the wire boundary.
+const cronRun = (msg) => msg.subsystem === 'cron';
+const cronMsgOf = (msg) => Object.assign({}, msg, { job_id: msg.owner_id });
+// P0 cron-run-history (RFC §7.2) — drive the "运行中 Xs" inline badge
+// without waiting for a list refetch; cronApplyRunStarted repaints both the
+// list and the per-job drawer.
+wsm.on(NZ_CONTRACT.WS.run_started, (msg) => emitCron('cron:run-started', cronMsgOf(msg)), cronRun);
+wsm.on(NZ_CONTRACT.WS.run_ended, (msg) => {
+  // P0 — terminal frame, fires for every terminal state (succeeded /
+  // failed / skipped / timed_out / canceled); only succeeded should
+  // celebrate (Phase D absorbed the legacy cron_result frame).
+  const cronMsg = cronMsgOf(msg);
+  if (cronMsg.state === 'succeeded') announce('定时任务已完成');
+  emitCron('cron:run-ended', cronMsg);
+  // P2 — refresh the timeline head through the rAF-debounced wrapper
+  // so bursty terminal frames for one job collapse per paint frame.
+  if (cronMsg.job_id) emitCron('cron:timeline-refresh-head', cronMsg.job_id);
+}, cronRun);
+// System-daemon run boundary. fetchSystemDaemons is the only path that
+// updates the 系统 rail attention badge; without this a daemon failing in
+// the background never lit the badge until the operator opened the view.
+// Honour the RNEW-UX-014 hidden-tab suspension.
+const daemonRun = () => {
+  if (document.hidden) return;
+  fetchSystemDaemons().then(() => {
+    if (ui.activeView === 'system') renderSystemView();
+  }).catch(() => {});
+};
+const sysRun = (msg) => msg.subsystem === 'sysession';
+wsm.on(NZ_CONTRACT.WS.run_started, daemonRun, sysRun);
+wsm.on(NZ_CONTRACT.WS.run_ended, daemonRun, sysRun);
+wsm.on(NZ_CONTRACT.WS.pong, () => {});
 
 /* ===== WS Helper Functions ===== */
 
