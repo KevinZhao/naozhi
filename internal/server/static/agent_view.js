@@ -483,9 +483,9 @@ import {
   }
 
   // ─── WS message dispatch entrypoints ───────────────────────────────
-  // Called by dashboard.js's onMessage switch for the four "agent_*"
-  // message types. Keeping them here means new message types don't
-  // force churn in dashboard.js.
+  // Registered with wsm.on (below, before the exports) for the four
+  // "agent_*" frame types, so agent-view frames never touch the
+  // dashboard.js receive table.
 
   function onAgentEvent(msg) {
     if (!msg || !msg.event) return;
@@ -712,6 +712,10 @@ import {
     hideBreadcrumb();
   }
 
+  wsm.on(NZ_CONTRACT.WS.agent_event, (msg) => onAgentEvent(msg));
+  wsm.on(NZ_CONTRACT.WS.agent_meta, (msg) => onAgentMeta(msg));
+  wsm.on(NZ_CONTRACT.WS.agent_done, (msg) => onAgentDone(msg));
+  wsm.on(NZ_CONTRACT.WS.agent_subscribe_rejected, (msg) => onAgentSubscribeRejected(msg));
   // ─── Exports ───────────────────────────────────────────────────────
 
   // nz.views.agent — the view's public surface (#2557 PR-E3). dashboard
@@ -726,10 +730,6 @@ import {
 
     // Phase 3 API.
     switchTo: switchTo,
-    onAgentEvent: onAgentEvent,
-    onAgentMeta: onAgentMeta,
-    onAgentDone: onAgentDone,
-    onAgentSubscribeRejected: onAgentSubscribeRejected,
     onSessionSwitch: onSessionSwitch,
     activeTaskID: function () { return state.activeTaskID; },
   };

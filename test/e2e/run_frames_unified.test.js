@@ -102,12 +102,16 @@ test.describe('统一 run 帧的 WS 分发', () => {
     await expect(row).toHaveClass(/is-running/);
 
     delete JOBS[0].current_run;
+    const listsBefore = mock.cronListGetCount;
     conn.send({
       type: 'run_ended', subsystem: 'cron', owner_id: 'cron-wire-1',
       run_id: 'run-wire-1', state: 'succeeded', started_at: startedAt,
       ended_at: Date.now(), duration_ms: 1200, trigger: 'cron',
     });
     await expect(row).not.toHaveClass(/is-running/);
+    await expect(page.locator('#sr-announce'), 'succeeded 应播报').toHaveText('定时任务已完成');
+    // run_ended 还要重拉列表，计数与 last_error_class 才会从后端回填。
+    await expect.poll(() => mock.cronListGetCount, { message: 'run_ended 应触发一次列表重拉' }).toBeGreaterThan(listsBefore);
     expect(pageErrors, '分发与投影不应抛异常').toEqual([]);
 
     await ctx.close();
@@ -132,6 +136,10 @@ test.describe('统一 run 帧的 WS 分发', () => {
       error_class: 'spawn_failed', trigger: 'tick',
     });
     await daemonsFetch;
+
+    const startedFetch = page.waitForRequest((req) => req.url().includes('/api/system/daemons'), { timeout: 5000 });
+    conn.send({ type: 'run_started', subsystem: 'sysession', owner_id: 'autotitler', run_id: 'run-daemon-2', trigger: 'tick' });
+    await startedFetch;
 
     await ctx.close();
   });

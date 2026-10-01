@@ -188,18 +188,11 @@ func TestDashboardJS_SubscribedAckKeepsNodeForNonPendingTab(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
 
-	idx := strings.Index(js, "case 'subscribed':")
-	if idx < 0 {
-		t.Fatal("case 'subscribed' handler not found")
-	}
-	body := js[idx:]
-	if end := strings.Index(body, "case 'error':"); end > 0 {
-		body = body[:end]
-	}
-	if !strings.Contains(body, "this.subscribedNode = this._pendingSubscribeNode || msg.node || 'local'") {
+	body := wsOnHandler(t, js, "subscribed", false)
+	if !strings.Contains(body, "wsm.subscribedNode = wsm._pendingSubscribeNode || msg.node || 'local'") {
 		t.Error("subscribed handler must resolve subscribedNode as `_pendingSubscribeNode || msg.node || 'local'` — a fanned-out remote ack must not rewrite a remote key's node to 'local'")
 	}
-	if strings.Contains(body, "this.subscribedNode = this._pendingSubscribeNode || 'local'") {
+	if strings.Contains(body, "wsm.subscribedNode = wsm._pendingSubscribeNode || 'local'") {
 		t.Error("subscribed handler must not fall straight back to 'local' when not pending — see rationale above")
 	}
 }

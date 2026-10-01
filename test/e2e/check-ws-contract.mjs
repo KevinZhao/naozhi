@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // check-ws-contract.mjs — the frontend half of the #2535 WS contract: the
-// dashboard's wsm.onMessage switch and the backend-generated
+// dashboard's wsm.on receive registrations and the backend-generated
 // internal/wsproto/wsproto.schema.json must agree on the message-type set.
-// Every case the frontend dispatches on must be a type the backend declares,
-// and every backend type must have a case (a deliberately ignored type still
-// gets an explicit no-op case, like `unsubscribed`). Runs in the lint-js CI
+// Every type the frontend registers must be a type the backend declares, and
+// every backend type must have a registration (a deliberately ignored type
+// still gets an explicit no-op, like `unsubscribed`). Runs in the lint-js CI
 // job next to eslint and the freeze/ratchet checks.
 
 import fs from 'node:fs';
@@ -12,42 +12,24 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { stripCommentsAndStrings } from '../../scripts/js-deps-freeze.mjs';
 import { checkNested } from '../../scripts/ws-contract-nested.mjs';
+import { check as checkReceivers } from '../../scripts/check-ws-receivers.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const schemaPath = path.join(ROOT, 'internal', 'wsproto', 'wsproto.schema.json');
-const dashboardPath = path.join(ROOT, 'internal', 'server', 'static', 'dashboard.js');
 
 const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 const backendTypes = new Set(schema.types);
+const staticDir = path.join(ROOT, 'internal', 'server', 'static');
+const contractPath = path.join(staticDir, 'contract.js');
+const { NZ_CONTRACT } = await import(pathToFileURL(contractPath).href);
+const contractKeys = new Set(Object.keys(NZ_CONTRACT.WS));
 
-// Extract the case labels of the wsm onMessage dispatch. The switch is
-// located by its `switch (msg.type)` header; case labels must have the quote
-// adjacent to `case` so comment prose can never match.
-const src = fs.readFileSync(dashboardPath, 'utf8');
-const switchStart = src.indexOf('switch (msg.type)');
-if (switchStart < 0) {
-  console.error('check-ws-contract: dashboard.js has no `switch (msg.type)` dispatch');
-  process.exit(1);
-}
-// Bound the scan to the switch body: from the header to its closing brace,
-// tracked with a simple depth counter starting at the first `{` after it.
-let i = src.indexOf('{', switchStart);
-let depth = 0;
-let end = i;
-for (; end < src.length; end++) {
-  const c = src[end];
-  if (c === '{') depth++;
-  else if (c === '}') {
-    depth--;
-    if (depth === 0) break;
-  }
-}
-const body = src.slice(i, end);
-const frontendTypes = new Set();
-for (const m of body.matchAll(/case\s+['"]([a-z_]+)['"]\s*:/g)) {
-  frontendTypes.add(m[1]);
-}
-
+// The receive side is the wsm.on registrations across static/*.js, read by
+// the same AST pass the receiver gate uses (scripts/check-ws-receivers.mjs).
+const staticFiles = fs.readdirSync(staticDir)
+  .filter((f) => f.endsWith('.js') && f !== 'contract.js' && f !== 'sw.js').sort()
+  .map((f) => [f, fs.readFileSync(path.join(staticDir, f), 'utf8')]);
+const frontendTypes = new Set(checkReceivers(staticFiles, contractKeys).regs.map((r) => r.key).filter(Boolean));
 let failures = 0;
 for (const t of frontendTypes) {
   if (!backendTypes.has(t)) {
@@ -57,24 +39,20 @@ for (const t of frontendTypes) {
 }
 for (const t of backendTypes) {
   if (!frontendTypes.has(t)) {
-    console.error(`backend declares ${JSON.stringify(t)} but dashboard.js has no case for it — add a handler or an explicit no-op case`);
+    console.error(`backend declares ${JSON.stringify(t)} but no module registers wsm.on for it — add a handler or an explicit no-op`);
     failures++;
   }
 }
-// ── Third direction: the SEND side (#2715). The receive switch above has
+// ── Third direction: the SEND side (#2715). The receive side above has
 // always had this two-way check; a frame the dashboard SENDS had nothing —
 // a typo'd type went over the wire and the backend silently ignored it.
 // Send sites now write `type: NZ_CONTRACT.WS.<key>` (the constant is what
 // makes "this is a WS frame" machine-recognisable; a bare `type: 'x'` could
 // be a Blob MIME or a list-item tag), and every key referenced must be one
 // of the inbound types the generator embedded in contract.js.
-const contractPath = path.join(ROOT, 'internal', 'server', 'static', 'contract.js');
-const { NZ_CONTRACT } = await import(pathToFileURL(contractPath).href);
-const contractKeys = new Set(Object.keys(NZ_CONTRACT.WS));
 // Inbound = the contract's WS keys that are not outbound schema types.
 const inboundTypes = new Set([...contractKeys].filter((k) => !backendTypes.has(k)));
 
-const staticDir = path.join(ROOT, 'internal', 'server', 'static');
 const sendSites = [];
 for (const f of fs.readdirSync(staticDir)) {
   if (!f.endsWith('.js') || f === 'contract.js') continue;

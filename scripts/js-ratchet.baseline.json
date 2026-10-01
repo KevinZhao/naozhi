@@ -77,9 +77,9 @@
     "configureDeps": 24
   },
   "dashboard.js": {
-    "lines": 6510,
+    "lines": 6491,
     "maxFnLines": 249,
-    "fnOver100": 8,
+    "fnOver100": 7,
     "topLevelLetVar": 0,
     "configureDeps": 181
   },
