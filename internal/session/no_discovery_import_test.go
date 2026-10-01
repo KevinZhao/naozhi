@@ -7,16 +7,13 @@ import (
 )
 
 // no_discovery_import_test.go pins the #3020 S15b invariant: internal/session
-// must NOT depend on internal/discovery in production code.
-//
-// Background: discoveryHistoryLoader used to call discovery.LoadHistoryChainTailCtx
-// directly, pinning a session→discovery edge. #3020 replaced it with
-// claudeTranscriptLoader, which resolves the "claude" backend through
-// history.PickFactory instead — the same inversion internal/cli already uses
-// for its backend factories. This test runs `go list -deps` on session's
-// production (non-test) closure and fails if internal/discovery reappears; a
-// `go list` failure here means a broken module graph in a job that is
-// already running `go test`, so it is a hard failure rather than a skip.
+// must NOT depend on internal/discovery in production code. The transcript
+// loader resolves the "claude" backend through history.PickFactory, the same
+// inversion internal/cli uses for its backend factories. The test runs
+// `go list -deps` on session's production closure and fails if
+// internal/discovery appears; a `go list` failure is a hard failure, since
+// this job already runs `go test`.
+
 const (
 	sessionPkg   = "github.com/naozhi/naozhi/internal/session"
 	discoveryPkg = "github.com/naozhi/naozhi/internal/discovery"

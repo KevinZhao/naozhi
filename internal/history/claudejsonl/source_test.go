@@ -165,14 +165,10 @@ func TestSource_LoadBefore_DegradesOnMisconfig(t *testing.T) {
 	}
 }
 
-// TestSource_LoadBefore_TailEquivalence pins #3020 S15b's load-bearing claim:
-// session's claudeTranscriptLoader calls LoadBefore(ctx, 0, limit) and expects
-// that to behave exactly like the old discovery.LoadHistoryChainTailCtx call
-// it replaced. LoadBefore's beforeMS<=0 branch forwards straight into
-// discovery.LoadHistoryChainBeforeCtx, which degrades to
-// LoadHistoryChainTailCtx for beforeMS<=0 (history_tail.go:394-395); this
-// test exercises both call paths on the same fixture and compares results
-// rather than relying on reading that forwarding code.
+// TestSource_LoadBefore_TailEquivalence pins that LoadBefore(ctx, 0, limit),
+// the call session's claudeTranscriptLoader makes, returns exactly what
+// discovery.LoadHistoryChainTailCtx returns for the same chain, by running
+// both on one fixture (see #3020).
 func TestSource_LoadBefore_TailEquivalence(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)

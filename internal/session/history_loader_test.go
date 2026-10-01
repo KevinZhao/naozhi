@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -26,17 +27,26 @@ func (f *fakeHistoryLoader) LoadHistoryChainTail(_ context.Context, _ string, id
 }
 
 // TestNewRouter_HistoryLoaderDefault verifies that NewRouter installs the
-// production claude-factory-backed loader when the caller leaves
-// cfg.HistoryLoader nil, so existing call sites keep working without
-// explicit wiring.
+// production loader when cfg.HistoryLoader is nil and that its pick is
+// history.PickFactory, the global registry internal/wireup fills. With
+// TestClaudeTranscriptLoader_InjectedPick (the loader uses its pick) and
+// wireup's TestHistoryBackends_ClaudeFactoryRegistered (the registry holds
+// claudejsonl), this closes the production default path end to end.
 func TestNewRouter_HistoryLoaderDefault(t *testing.T) {
 	t.Parallel()
 	r := NewRouter(RouterConfig{})
 	if r.historyLoader == nil {
 		t.Fatal("NewRouter left historyLoader nil; expected claudeTranscriptLoader default")
 	}
-	if _, ok := r.historyLoader.(claudeTranscriptLoader); !ok {
+	l, ok := r.historyLoader.(claudeTranscriptLoader)
+	if !ok {
 		t.Fatalf("default historyLoader = %T, want claudeTranscriptLoader", r.historyLoader)
+	}
+	if l.pick == nil {
+		t.Fatal("default claudeTranscriptLoader.pick is nil, want history.PickFactory")
+	}
+	if got, want := reflect.ValueOf(l.pick).Pointer(), reflect.ValueOf(history.PickFactory).Pointer(); got != want {
+		t.Fatalf("default claudeTranscriptLoader.pick = %#x, want history.PickFactory (%#x)", got, want)
 	}
 }
 
