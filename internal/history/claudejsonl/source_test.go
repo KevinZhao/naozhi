@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/history"
 )
 
@@ -160,6 +162,43 @@ func TestSource_LoadBefore_DegradesOnMisconfig(t *testing.T) {
 				t.Errorf("misconfig must yield nil entries, got %d", len(got))
 			}
 		})
+	}
+}
+
+// TestSource_LoadBefore_TailEquivalence pins #3020 S15b's load-bearing claim:
+// session's claudeTranscriptLoader calls LoadBefore(ctx, 0, limit) and expects
+// that to behave exactly like the old discovery.LoadHistoryChainTailCtx call
+// it replaced. LoadBefore's beforeMS<=0 branch forwards straight into
+// discovery.LoadHistoryChainBeforeCtx, which degrades to
+// LoadHistoryChainTailCtx for beforeMS<=0 (history_tail.go:394-395); this
+// test exercises both call paths on the same fixture and compares results
+// rather than relying on reading that forwarding code.
+func TestSource_LoadBefore_TailEquivalence(t *testing.T) {
+	t.Parallel()
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/cjsonl-tail-equiv"
+	dirName := claudefs.ProjectSlug(cwd)
+	id := "44444444-4444-4444-4444-444444444bb4"
+
+	lines := make([]string, 0, 8)
+	for i := 0; i < 8; i++ {
+		lines = append(lines, userLineAt(fmt.Sprintf("tail-%d", i), int64(3000+i)))
+	}
+	writeSessionJSONL(t, claudeDir, dirName, id, lines)
+
+	src := New(claudeDir, cwd, func() []string { return []string{id} })
+	viaSource, err := src.LoadBefore(context.Background(), 0, 5)
+	if err != nil {
+		t.Fatalf("Source.LoadBefore: %v", err)
+	}
+
+	viaDiscovery := discovery.LoadHistoryChainTailCtx(context.Background(), claudeDir, []string{id}, cwd, 5)
+
+	if len(viaSource) == 0 {
+		t.Fatal("Source.LoadBefore(ctx, 0, 5) returned no entries on a non-empty fixture")
+	}
+	if !reflect.DeepEqual(viaSource, viaDiscovery) {
+		t.Fatalf("Source.LoadBefore(ctx,0,n) = %+v, want discovery.LoadHistoryChainTailCtx result %+v", viaSource, viaDiscovery)
 	}
 }
 

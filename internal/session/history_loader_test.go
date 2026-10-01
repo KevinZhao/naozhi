@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 // fakeHistoryLoader records its invocation and returns canned entries,
@@ -25,16 +26,85 @@ func (f *fakeHistoryLoader) LoadHistoryChainTail(_ context.Context, _ string, id
 }
 
 // TestNewRouter_HistoryLoaderDefault verifies that NewRouter installs the
-// production discovery-backed loader when the caller leaves cfg.HistoryLoader
-// nil, so existing call sites keep working without explicit wiring.
+// production claude-factory-backed loader when the caller leaves
+// cfg.HistoryLoader nil, so existing call sites keep working without
+// explicit wiring.
 func TestNewRouter_HistoryLoaderDefault(t *testing.T) {
 	t.Parallel()
 	r := NewRouter(RouterConfig{})
 	if r.historyLoader == nil {
-		t.Fatal("NewRouter left historyLoader nil; expected discoveryHistoryLoader default")
+		t.Fatal("NewRouter left historyLoader nil; expected claudeTranscriptLoader default")
 	}
-	if _, ok := r.historyLoader.(discoveryHistoryLoader); !ok {
-		t.Fatalf("default historyLoader = %T, want discoveryHistoryLoader", r.historyLoader)
+	if _, ok := r.historyLoader.(claudeTranscriptLoader); !ok {
+		t.Fatalf("default historyLoader = %T, want claudeTranscriptLoader", r.historyLoader)
+	}
+}
+
+// TestClaudeTranscriptLoader_InjectedPick verifies the loader resolves the
+// "claude" factory through an injected pick (not the global registry),
+// passes beforeMS==0 and limit through unchanged, and hands the factory a
+// SessionView/Wiring built from the loader's own arguments.
+func TestClaudeTranscriptLoader_InjectedPick(t *testing.T) {
+	t.Parallel()
+	var gotID string
+	var gotCWD string
+	var gotIDs []string
+	var gotClaudeDir string
+	var gotBeforeMS int64
+	var gotLimit int
+
+	factory := history.FactoryFn(func(s history.SessionView, deps history.Wiring) history.Source {
+		gotCWD = s.Workspace()
+		gotIDs = s.SnapshotChainIDs()
+		gotClaudeDir = deps.ClaudeDir
+		return fakeSourceFn(func(_ context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
+			gotBeforeMS = beforeMS
+			gotLimit = limit
+			return []clievent.EventEntry{{Time: 1, Type: "user", Summary: "hi"}}, nil
+		})
+	})
+	loader := claudeTranscriptLoader{pick: func(id string) history.FactoryFn {
+		gotID = id
+		return factory
+	}}
+
+	got := loader.LoadHistoryChainTail(context.Background(), "/claude", []string{"sid"}, "/ws", 10)
+
+	if gotID != "claude" {
+		t.Errorf("pick called with id=%q, want \"claude\"", gotID)
+	}
+	if gotCWD != "/ws" || len(gotIDs) != 1 || gotIDs[0] != "sid" {
+		t.Errorf("factory saw Workspace=%q SnapshotChainIDs=%v, want /ws [sid]", gotCWD, gotIDs)
+	}
+	if gotClaudeDir != "/claude" {
+		t.Errorf("factory saw Wiring.ClaudeDir=%q, want /claude", gotClaudeDir)
+	}
+	if gotBeforeMS != 0 {
+		t.Errorf("LoadBefore beforeMS=%d, want 0", gotBeforeMS)
+	}
+	if gotLimit != 10 {
+		t.Errorf("LoadBefore limit=%d, want 10 (unchanged)", gotLimit)
+	}
+	if len(got) != 1 || got[0].Summary != "hi" {
+		t.Fatalf("got %v, want 1 entry 'hi'", got)
+	}
+}
+
+// fakeSourceFn adapts a func to history.Source for TestClaudeTranscriptLoader_InjectedPick.
+type fakeSourceFn func(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error)
+
+func (f fakeSourceFn) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
+	return f(ctx, beforeMS, limit)
+}
+
+// TestClaudeTranscriptLoader_MissingFactory verifies a nil pick result (no
+// "claude" factory registered) degrades to an empty load rather than a panic.
+func TestClaudeTranscriptLoader_MissingFactory(t *testing.T) {
+	t.Parallel()
+	loader := claudeTranscriptLoader{pick: func(string) history.FactoryFn { return nil }}
+	got := loader.LoadHistoryChainTail(context.Background(), "/claude", []string{"sid"}, "/ws", 10)
+	if got != nil {
+		t.Fatalf("got %v, want nil", got)
 	}
 }
 
