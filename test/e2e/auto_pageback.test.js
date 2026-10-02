@@ -17,10 +17,10 @@
 // and the five code substrings say the machinery is spelled out, not that a
 // blank page ever recovers or that the recovery ever stops.
 //
-// That file's first test, TestInternalEventTypes_JSGoParity, has since gone
-// too: dashboard.js builds its hidden-type Set from
+// The JS/Go internal-kind parity that file's first test checked is
+// structural: dashboard.js builds INTERNAL_EVENT_TYPES from
 // NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL, which contractjs generates from the
-// same clievent kindTable column IsInternalEventType reads (S13b-4).
+// clievent kindTable column IsInternalEventType reads.
 //
 // 跑法：cd test/e2e && npx playwright test auto_pageback.test.js --project=desktop-chrome
 

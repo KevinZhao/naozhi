@@ -20,13 +20,29 @@
 //   a. ENUMS.EVENT_TYPE, EVENT_TYPE_INTERNAL and EVENT_TYPE_MD_IGNORE are
 //      non-empty, and the last two are subsets of the first.
 //   b. No array literal holds two or more kind literals — counted, so
-//      `new Set([...X, 'tool_use', 'result'])` is a restated set too — and
-//      every key of an object literal looked up by `[x.type]` is a kind.
-//   c. A string compared with `.type` (===, !==, ==, !=, a switch case) is a
-//      WS frame type, a kind, or listed for its file in OTHER_TYPES; an
-//      OTHER_TYPES entry no comparison uses is dead and fails.
+//      `new Set([...X, 'tool_use', 'result'])` is a restated set too — no
+//      object literal is a kind set (two or more kind keys, every value
+//      `true` or `1`), and every key of an object literal looked up by
+//      `[x.type]` is a kind.
+//   c. A string compared with a type expression (===, !==, ==, !=, a switch
+//      case, or an element of an inline array / `new Set([...])`, or of a
+//      const bound to one, passed to .includes/.has/.indexOf) is a WS frame
+//      type, a kind, or listed for its file in OTHER_TYPES; an OTHER_TYPES
+//      entry no comparison uses is dead and fails. A type expression is
+//      `x.type`, `x?.type`, `x['type']`, or a name a const binds to one
+//      (`const t = x.type`, `const t = x && x.type`, `const t = x.type || ''`,
+//      `const { type: t } = x`).
 //   Blind guards: a file that does not parse fails, and every KIND_SENTINELS
 //   file must compare `.type` with a kind at least once.
+//
+//   Limits, so nobody reads this as full coverage: aliases are by name per
+//   file, not by scope (a const alias makes every same-named identifier in
+//   the file a type expression — that can only add findings, not hide one);
+//   a type value passed through a function argument, a `let`, or a property
+//   is not followed; and a kind-keyed table whose values are real (the icons
+//   table) is allowed by (b) unless it is looked up by `[x.type]` with a
+//   non-kind key. The kind sets themselves come from contract.js, so those
+//   paths would have to restate a kind on purpose to slip past.
 //
 //   node scripts/check-enum-literals.mjs
 import fs from 'node:fs';
@@ -126,7 +142,12 @@ const walk = (n, fn) => {
     else if (v && typeof v === 'object') walk(v, fn);
   }
 };
-const isTypeMember = (n) => n?.type === 'MemberExpression' && !n.computed && n.property.name === 'type';
+const unchain = (n) => (n?.type === 'ChainExpression' ? n.expression : n);
+// isTypeMember: x.type, x?.type or x['type'].
+const isTypeMember = (n) => {
+  const m = unchain(n);
+  return m?.type === 'MemberExpression' && (m.computed ? str(m.property) === 'type' : m.property.name === 'type');
+};
 // str: the value of a string literal or of a template with no expressions.
 const str = (n) => {
   if (n?.type === 'Literal' && typeof n.value === 'string') return n.value;
@@ -155,9 +176,24 @@ export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = K
     }
     const at = (n) => `${file}:${n.loc.start.line}`;
     const objects = new Map();
+    const arrays = new Map(); // const name → the ArrayExpressions bound to it (directly or via new Set([...]))
+    const aliases = new Set(); // const names bound to a type expression
+    const typeValued = (n) =>
+      isTypeMember(n) ||
+      (n?.type === 'LogicalExpression' && (n.operator === '&&' ? isTypeMember(n.right) : isTypeMember(n.left)));
+    const isType = (n) => isTypeMember(n) || (n?.type === 'Identifier' && aliases.has(n.name));
+    const arrayOf = (n) =>
+      n?.type === 'ArrayExpression' ? n : n?.type === 'NewExpression' && n.callee.name === 'Set' && n.arguments[0]?.type === 'ArrayExpression' ? n.arguments[0] : null;
+    const push = (m, k, v) => m.set(k, [...(m.get(k) || []), v]);
     walk(ast, (n) => {
-      if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init?.type === 'ObjectExpression') {
-        objects.set(n.id.name, [...(objects.get(n.id.name) || []), n.init]);
+      if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init?.type === 'ObjectExpression') push(objects, n.id.name, n.init);
+      if (n.type !== 'VariableDeclaration' || n.kind !== 'const') return;
+      for (const d of n.declarations) {
+        if (d.id.type === 'Identifier' && arrayOf(d.init)) push(arrays, d.id.name, arrayOf(d.init));
+        if (d.id.type === 'Identifier' && typeValued(d.init)) aliases.add(d.id.name);
+        if (d.id.type === 'ObjectPattern') {
+          for (const p of d.id.properties) if (keyName(p) === 'type' && p.value.type === 'Identifier') aliases.add(p.value.name);
+        }
       }
     });
     const compared = (node, v) => {
@@ -176,7 +212,12 @@ export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = K
         const hit = n.elements.map(str).filter((v) => v !== null && kinds.has(v));
         if (hit.length >= 2) problems.push(`${at(n)}: array restates ${hit.length} kinds (${hit.join(', ')}) — read NZ_CONTRACT.ENUMS.EVENT_TYPE*`);
       }
-      if (n.type === 'MemberExpression' && n.computed && isTypeMember(n.property)) {
+      if (n.type === 'ObjectExpression') {
+        const hit = n.properties.map(keyName).filter((k) => k !== null && kinds.has(k));
+        const setLike = n.properties.every((p) => p.type === 'Property' && p.value.type === 'Literal' && (p.value.value === true || p.value.value === 1));
+        if (hit.length >= 2 && setLike) problems.push(`${at(n)}: object restates ${hit.length} kinds as a set (${hit.join(', ')}) — read NZ_CONTRACT.ENUMS.EVENT_TYPE*`);
+      }
+      if (n.type === 'MemberExpression' && n.computed && isType(n.property)) {
         const tables = n.object.type === 'ObjectExpression' ? [n.object] : n.object.type === 'Identifier' ? objects.get(n.object.name) || [] : [];
         for (const t of tables) {
           counts.lookups++;
@@ -189,11 +230,16 @@ export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = K
       }
       if (n.type === 'BinaryExpression' && /^[!=]==?$/.test(n.operator)) {
         for (const [a, b] of [[n.left, n.right], [n.right, n.left]]) {
-          if (isTypeMember(a) && str(b) !== null) compared(n, str(b));
+          if (isType(a) && str(b) !== null) compared(n, str(b));
         }
       }
-      if (n.type === 'SwitchStatement' && isTypeMember(n.discriminant)) {
+      if (n.type === 'SwitchStatement' && isType(n.discriminant)) {
         for (const c of n.cases) if (str(c.test) !== null) compared(c, str(c.test));
+      }
+      const callee = unchain(n.type === 'CallExpression' ? n.callee : null);
+      if (callee?.type === 'MemberExpression' && !callee.computed && ['includes', 'has', 'indexOf'].includes(callee.property.name) && isType(n.arguments[0])) {
+        const lists = arrayOf(callee.object) ? [arrayOf(callee.object)] : callee.object.type === 'Identifier' ? arrays.get(callee.object.name) || [] : [];
+        for (const l of lists) for (const el of l.elements) if (str(el) !== null) compared(el, str(el));
       }
     });
   }
@@ -229,5 +275,5 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   const { kindComparisons, otherComparisons, lookups } = counts;
   console.log(`check-enum-literals: OK (${contract.ENUMS.DEATH_REASON.length} death reasons, ${contract.ENUMS.EVENT_TYPE.length} kinds; ` +
-    `${kindComparisons} kind and ${otherComparisons} other .type comparisons, ${lookups} [.type] table(s); ${Object.keys(files).length - 2} files checked)`);
+    `${kindComparisons} kind and ${otherComparisons} other .type comparisons, ${lookups} [.type] table(s); ${Object.keys(files).length - 1} files scanned for kinds, ${Object.keys(files).length - 2} for death-reason literals)`);
 }

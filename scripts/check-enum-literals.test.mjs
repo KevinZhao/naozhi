@@ -97,6 +97,16 @@ const BAD = [
   ['a computed lookup-table key', "const kk = 'user'; const icons2 = { [kk]: 1 }; icons2[e.type];", /a key that is not a static name/],
   ['a spread into a lookup table', "const icons2 = { ...base }; icons2[e.type];", /a key that is not a static name/],
   ['a file that does not parse', 'const = ;', /a\.js: does not parse/],
+  ['a typo through a const && alias', "const et = e && e.type; if (et === 'txt') {}", /\.type compared with "txt"/],
+  ['a typo through a const || alias in a switch', "const et = e.type || ''; switch (et) { case 'txt': break; }", /\.type compared with "txt"/],
+  ['a typo through a destructured alias', "const { type: et } = e; if (et === 'txt') {}", /\.type compared with "txt"/],
+  ["a typo against e['type']", "if (e['type'] === 'txt') {}", /\.type compared with "txt"/],
+  ['a typo against e?.type', "if (e?.type === 'txt') {}", /\.type compared with "txt"/],
+  ['a typo in an inline [..].includes', "if (['txt'].includes(e.type)) {}", /\.type compared with "txt"/],
+  ['a typo in an inline new Set([..]).has', "if (new Set(['txt']).has(e.type)) {}", /\.type compared with "txt"/],
+  ['a typo in a const array passed to .indexOf', "const L = ['txt']; L.indexOf(e.type);", /\.type compared with "txt"/],
+  ['a kind-keyed object used as a set', "const S2 = new Set(Object.keys({ tool_use: 1, result: 1 }));", /object restates 2 kinds as a set \(tool_use, result\)/],
+  ['a kind-keyed true table', "const HIDE = { tool_use: true, result: true }; HIDE[e.type];", /object restates 2 kinds as a set/],
 ];
 for (const [name, extra, want] of BAD) {
   test(`kindProblems rejects ${name}`, () => {
@@ -121,7 +131,9 @@ test('kindProblems fails a sentinel file that is gone or compares no kind', () =
 });
 
 test('kindProblems leaves one kind literal, a non-.type comparison and a non-.type index alone', () => {
-  const ok = { ...clean, 'a.js': clean['a.js'] + "const one = ['user', 'x']; if (e.kind === 'txt') {} const t = { txt: 1 }; t[e.kind]; t[type];" };
+  const ok = { ...clean, 'a.js': clean['a.js'] + "const one = ['user', 'x']; if (e.kind === 'txt') {} const t = { txt: 1 }; t[e.kind]; t[type];" +
+    // not an alias (the type is only the fallback), a non-type .includes, a kind-keyed table of real values, one kind as a set
+    "const s = e.summary || e.type; if (s === 'txt') {} ['txt'].includes(e.kind); const ic = { user: 'u', text: 't' }; const one2 = { user: true };" };
   assert.deepEqual(check(ok).problems, []);
 });
 
