@@ -66,14 +66,14 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 	}
 	backend := s.Backend()
 	if backend == "" {
-		backend = r.bk.DefaultID()
+		backend = r.backends.bk.DefaultID()
 	}
 
 	// Unknown backend ID falls back to the default wrapper so a misconfigured
 	// Backend() still gets a usable source instead of Noop.
-	wrapper := r.bk.Runtime(backend).Wrapper
+	wrapper := r.backends.bk.Runtime(backend).Wrapper
 	if wrapper == nil {
-		wrapper = r.bk.Fallback()
+		wrapper = r.backends.bk.Fallback()
 	}
 
 	deps := history.Wiring{
@@ -376,7 +376,7 @@ type spawnParams struct {
 func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentOpts) spawnParams {
 	// One registry snapshot for the whole resolution: the overlay env and the
 	// profile default model must come from the same map.
-	profiles := r.profiles()
+	profiles := r.backends.profiles()
 	// Backend precedence: opts.Backend > one-shot backendOverrides[key]
 	// (consumed here) > existing session's Backend (resume continuity) >
 	// defaultBackend. Without the existing-session tier a dead kiro session
@@ -396,7 +396,7 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 			}
 		}
 	}
-	wrapper, backendID := r.wrapperFor(reqBackend)
+	wrapper, backendID := r.backends.wrapperFor(reqBackend)
 
 	// Access-profile precedence (RFC project-access-profile §2/§7): existing
 	// session's recorded profile (RESUME LOCK — a dead session must resume on
@@ -417,8 +417,8 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	}
 	// defaultAccessProfile is the lowest tier: applies ONLY when every source
 	// above left the ID empty, so picks and resume-locked profiles always win.
-	if accessProfileID == "" && r.defaultAccessProfile != "" {
-		accessProfileID = r.defaultAccessProfile
+	if accessProfileID == "" && r.backends.defaultAccessProfile != "" {
+		accessProfileID = r.backends.defaultAccessProfile
 	}
 	var accessProfileEnv map[string]string
 	if accessProfileID != "" {
@@ -458,7 +458,7 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 		tuningModel, tuningEffort = pt.Model, pt.Effort
 	}
 	merged := mergeArgvLayers(
-		r.backendDefaultsFor(backendID),
+		r.backends.backendDefaultsFor(backendID),
 		profileDefaultModelFor(profiles, accessProfileID),
 		overlay, tuningModel, tuningEffort)
 	model, effort, args := merged.Model, merged.Effort, merged.Args

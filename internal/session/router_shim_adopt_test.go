@@ -61,7 +61,7 @@ func TestAdoptLiveShimLocked_PublishesSession(t *testing.T) {
 		Backend:   "claude",
 		ShimPID:   3637949,
 	}
-	_, backendID := r.wrapperFor(state.Backend)
+	_, backendID := r.backends.wrapperFor(state.Backend)
 
 	var got *ManagedSession
 	r.ss.Update(func(tx sessTx) { got = r.adoptLiveShim(tx, state, backendID) })
@@ -127,7 +127,7 @@ func TestAdoptLiveShimLocked_EmptySessionID(t *testing.T) {
 		Backend:   "claude",
 		ShimPID:   3659980,
 	}
-	_, backendID := r.wrapperFor(state.Backend)
+	_, backendID := r.backends.wrapperFor(state.Backend)
 
 	r.ss.Update(func(tx sessTx) { r.adoptLiveShim(tx, state, backendID) })
 	var ok, emptyIndexed bool

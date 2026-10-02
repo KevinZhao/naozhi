@@ -23,14 +23,14 @@ import (
 //
 // The ordering is BackendIDs()'s: default backend first, remainder sorted.
 func (r *Router) BackendsList() []cli.BackendInfo {
-	ids := r.BackendIDs()
+	ids := r.backends.BackendIDs()
 	backends := make([]cli.BackendInfo, 0, len(ids))
 	for _, id := range ids {
 		info := cli.BackendInfo{ID: id, Available: true}
 		// BackendModelManifest takes the table lock internally; BackendsList runs
 		// unlocked (handler / reverse-RPC context), so no lock nesting.
 		info.Models = r.BackendModelManifest(id)
-		if wr := r.BackendWrapper(id); wr != nil {
+		if wr := r.backends.BackendWrapper(id); wr != nil {
 			info.DisplayName = wr.CLIName
 			// Path intentionally omitted — installed-binary paths leak host
 			// filesystem layout to any authenticated dashboard user.
@@ -76,7 +76,7 @@ func (r *Router) BackendsManifest(detected []cli.BackendInfo) BackendManifest {
 	}
 	return BackendManifest{
 		Backends: r.BackendsList(),
-		Default:  r.DefaultBackend(),
+		Default:  r.backends.DefaultBackend(),
 		Detected: detected,
 	}
 }

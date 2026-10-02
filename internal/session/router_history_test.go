@@ -68,7 +68,7 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = defaultBackend })
 	stateOf(r).picks.backend = make(map[string]string)
-	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = r.bk.Runtime(defaultBackend).Wrapper })
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = r.backends.bk.Runtime(defaultBackend).Wrapper })
 	return
 }
 
@@ -148,7 +148,7 @@ func TestAttachHistorySource_NilWrapperUsesNoop(t *testing.T) {
 	r.setWrappersForTest(map[string]*cli.Wrapper{})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "" })
 	stateOf(r).picks.backend = make(map[string]string)
-	// r.bk.Fallback() intentionally nil.
+	// r.backends.bk.Fallback() intentionally nil.
 
 	s := &ManagedSession{key: "feishu:direct:dave:general"}
 	s.SetBackend("orphan-backend")
@@ -256,7 +256,7 @@ func TestRouter_KiroBackendDirRoundTrip(t *testing.T) {
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "kiro-rt-probe" })
 	stateOf(r).picks.backend = make(map[string]string)
-	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = r.bk.Runtime("kiro-rt-probe").Wrapper })
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = r.backends.bk.Runtime("kiro-rt-probe").Wrapper })
 	s := &ManagedSession{key: "feishu:direct:greta:general"}
 	s.SetBackend("kiro-rt-probe")
 
@@ -288,7 +288,7 @@ func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)
-	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = r.bk.Runtime("claude").Wrapper })
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = r.backends.bk.Runtime("claude").Wrapper })
 	s := &ManagedSession{key: "feishu:direct:harry:general"}
 	s.SetBackend("kiro")
 	s.setWorkspace("/tmp/ws")

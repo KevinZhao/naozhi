@@ -9,7 +9,7 @@ import (
 
 // MergeBackendDefaults is the one precedence rule for a backend's spawn
 // defaults, and it exists because two paths were computing it differently:
-// the live spawn (Router.backendDefaultsFor, reading the router's maps) and the
+// the live spawn (BackendRegistry.backendDefaultsFor, reading the backend table) and the
 // offline `naozhi shim` drift view (cmd/naozhi, reading config). The CLI took the
 // per-backend value with NO fallback to the router-level base, so a backend
 // inheriting the global cli.args reported a spurious DRIFT extra_args and told
@@ -121,7 +121,7 @@ func TestBackendDefaultsFor_MatchesMergeBackendDefaults(t *testing.T) {
 				r.setBackendEffortsForTest(map[string]string{backendID: c.effort})
 			}
 
-			viaRouter := r.backendDefaultsFor(backendID)
+			viaRouter := r.backends.backendDefaultsFor(backendID)
 			viaPure := MergeBackendDefaults(c.routerModel, c.routerArgs, c.backendModel, c.backendArgs, c.effort)
 			if viaRouter.Model != viaPure.Model || viaRouter.Effort != viaPure.Effort ||
 				!reflect.DeepEqual(viaRouter.Args, viaPure.Args) {

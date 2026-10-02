@@ -23,8 +23,8 @@ import (
 // shimManagedKeys returns the set of session keys that have a surviving shim
 // process. Called by NewRouter to skip async JSONL loading for sessions that
 // will be fully restored by ReconnectShims (replay + JSONL user entries).
-func (r *Router) shimManagedKeys() map[string]bool {
-	managers := r.shimManagers()
+func (b *BackendRegistry) shimManagedKeys() map[string]bool {
+	managers := b.shimManagers()
 	if len(managers) == 0 {
 		return nil
 	}
@@ -48,7 +48,7 @@ func (r *Router) shimManagedKeys() map[string]bool {
 // Dedup is by *shim.Manager pointer identity: wrappers sharing one manager
 // appear once; separately-constructed managers appear separately, since each
 // owns its own UNIX socket / cgroup pool and Discover()/handshake must hit each.
-func (r *Router) shimManagers() []*shim.Manager {
+func (b *BackendRegistry) shimManagers() []*shim.Manager {
 	var out []*shim.Manager
 	seen := make(map[*shim.Manager]bool)
 	add := func(w *cli.Wrapper) {
@@ -58,10 +58,10 @@ func (r *Router) shimManagers() []*shim.Manager {
 		seen[w.ShimManager] = true
 		out = append(out, w.ShimManager)
 	}
-	for _, w := range r.bk.Wrappers() {
+	for _, w := range b.bk.Wrappers() {
 		add(w)
 	}
-	add(r.bk.Fallback())
+	add(b.bk.Fallback())
 	return out
 }
 
@@ -157,8 +157,8 @@ func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID, key string
 		tuningModel, tuningEffort = sess.TuningModel(), sess.TuningEffort()
 	}
 	merged := mergeArgvLayers(
-		r.backendDefaultsFor(backendID),
-		r.accessProfileDefaultModel(ov.AccessProfile),
+		r.backends.backendDefaultsFor(backendID),
+		r.backends.accessProfileDefaultModel(ov.AccessProfile),
 		ov, tuningModel, tuningEffort)
 	// Every argv-bearing field is mirrored by construction via argvSpawnOptions.
 	// cliDebugPathFor (not cliDebugFileFor) keeps the comparison read-only.
@@ -257,7 +257,7 @@ func (r *Router) adoptLiveShim(tx sessTx, state shim.State, backendID string) *M
 // on every tick; parentCtx bounds the per-shim handshakes so SIGTERM aborts
 // them promptly instead of waiting per session.
 func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
-	managers := r.shimManagers()
+	managers := r.backends.shimManagers()
 	if len(managers) == 0 {
 		return
 	}
@@ -290,7 +290,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// Resolve the wrapper recorded at shim startup so reconnect uses the
 		// matching Protocol and binary; an empty Backend falls back to the
 		// router default.
-		recWrapper, recBackendID := r.wrapperFor(state.Backend)
+		recWrapper, recBackendID := r.backends.wrapperFor(state.Backend)
 
 		// Args drift is only meaningful when we have a wrapper;
 		// classifyShimState picks the branch.
@@ -409,7 +409,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 			if isENOENTErr(err) {
 				slog.Warn("shim reconnect: socket missing, cleaning up zombie",
 					"key", state.Key, "pid", state.ShimPID, "err", err)
-				if mgr := r.managerFor(recBackendID); mgr != nil {
+				if mgr := r.backends.managerFor(recBackendID); mgr != nil {
 					mgr.ForceCleanupZombie(state)
 				}
 				continue

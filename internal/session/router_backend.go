@@ -75,8 +75,8 @@ func validateBackend(backend string) error {
 
 // CLIName exposes the wrapper's CLI display name for status endpoints.
 // Returns empty when no wrapper is wired (tests, early boot).
-func (r *Router) CLIName() string {
-	if w := r.bk.Fallback(); w != nil {
+func (b *BackendRegistry) CLIName() string {
+	if w := b.bk.Fallback(); w != nil {
 		return w.CLIName
 	}
 	return ""
@@ -84,8 +84,8 @@ func (r *Router) CLIName() string {
 
 // CLIVersion exposes the default backend's CLI version, preferring the live
 // version observed from a spawned process so host upgrades show without restart.
-func (r *Router) CLIVersion() string {
-	if w := r.bk.Fallback(); w != nil {
+func (b *BackendRegistry) CLIVersion() string {
+	if w := b.bk.Fallback(); w != nil {
 		return w.EffectiveVersion()
 	}
 	return ""
@@ -93,14 +93,14 @@ func (r *Router) CLIVersion() string {
 
 // wrapperFor is backendstore.Store.WrapperFor: (wrapper, effectiveID), the
 // id always the wrapper's own; a nil wrapper means no backend is available.
-func (r *Router) wrapperFor(backend string) (*cli.Wrapper, string) {
-	return r.bk.WrapperFor(backend)
+func (b *BackendRegistry) wrapperFor(backend string) (*cli.Wrapper, string) {
+	return b.bk.WrapperFor(backend)
 }
 
 // managerFor returns the shim.Manager for the given backend ID (empty = router
 // default). Returns nil when none is configured, so callers must guard.
-func (r *Router) managerFor(backend string) *shim.Manager {
-	w, _ := r.wrapperFor(backend)
+func (b *BackendRegistry) managerFor(backend string) *shim.Manager {
+	w, _ := b.wrapperFor(backend)
 	if w == nil {
 		return nil
 	}
@@ -109,15 +109,15 @@ func (r *Router) managerFor(backend string) *shim.Manager {
 
 // BackendIDs returns the backend IDs the router can spawn against, default
 // first. Returns a defensive copy so callers cannot mutate the cache.
-func (r *Router) BackendIDs() []string { return r.bk.IDs() }
+func (b *BackendRegistry) BackendIDs() []string { return b.bk.IDs() }
 
 // DefaultBackend returns the backend ID used when no explicit backend is
 // requested. May be empty for test-only routers without a wrapper.
-func (r *Router) DefaultBackend() string { return r.bk.Default() }
+func (b *BackendRegistry) DefaultBackend() string { return b.bk.Default() }
 
 // BackendWrapper returns the wrapper registered for the given backend ID, or
 // nil if none matches. For read-only metadata (CLIName, CLIVersion, CLIPath).
-func (r *Router) BackendWrapper(id string) *cli.Wrapper { return r.bk.Wrapper(id) }
+func (b *BackendRegistry) BackendWrapper(id string) *cli.Wrapper { return b.bk.Wrapper(id) }
 
 // maxBackendOverrides caps the per-key override maps so an authenticated
 // dashboard user cannot exhaust memory by POSTing unique keys: abandoned picks
@@ -164,8 +164,8 @@ func (r *Router) SetSessionAccessProfile(key, profile string) {
 }
 
 // CLIPath returns the CLI binary path for health checks.
-func (r *Router) CLIPath() string {
-	if w := r.bk.Fallback(); w != nil {
+func (b *BackendRegistry) CLIPath() string {
+	if w := b.bk.Fallback(); w != nil {
 		return w.CLIPath
 	}
 	return ""
@@ -194,7 +194,7 @@ type BackendDefaults struct {
 // backend"). Effort has no base tier.
 //
 // Pure and exported because TWO paths must agree: the live spawn (via
-// Router.backendDefaultsFor, reading the router's maps) and the offline drift
+// BackendRegistry.backendDefaultsFor, reading the backend table) and the offline drift
 // view (cmd/naozhi's `naozhi shim`, reading config directly). They did not —
 // the CLI took the per-backend value with no fallback, so a backend inheriting
 // the global cli.args produced a spurious DRIFT telling the operator to restart
@@ -216,10 +216,10 @@ func MergeBackendDefaults(routerModel string, routerArgs []string, backendModel 
 // Both resolveSpawnParams and the shim drift detector must end up with
 // the same values, which is why the precedence lives in MergeBackendDefaults
 // rather than here (#739, #2668).
-func (r *Router) backendDefaultsFor(backendID string) BackendDefaults {
-	rt := r.bk.Runtime(backendID)
+func (b *BackendRegistry) backendDefaultsFor(backendID string) BackendDefaults {
+	rt := b.bk.Runtime(backendID)
 	return MergeBackendDefaults(
-		r.bk.RouterModel(), r.bk.RouterArgs(),
+		b.bk.RouterModel(), b.bk.RouterArgs(),
 		rt.Model, rt.ExtraArgs, rt.Effort,
 	)
 }
@@ -231,7 +231,7 @@ func (r *Router) backendDefaultsFor(backendID string) BackendDefaults {
 // Reads the session table in one View; the cache has its own lock.
 func (r *Router) BackendModelManifest(backendID string) (models []cli.ModelInfo) {
 	if backendID == "" {
-		backendID = r.bk.DefaultID()
+		backendID = r.backends.bk.DefaultID()
 	}
 	r.ss.View(func(v sessView) { models = r.backendModelManifest(v, backendID) })
 	return models
@@ -241,7 +241,7 @@ func (r *Router) backendModelManifest(v sessView, backendID string) []cli.ModelI
 	for _, s := range v.All() {
 		sb := s.Backend()
 		if sb == "" {
-			sb = r.bk.DefaultID()
+			sb = r.backends.bk.DefaultID()
 		}
 		if sb != backendID {
 			continue
@@ -256,14 +256,14 @@ func (r *Router) backendModelManifest(v sessView, backendID string) []cli.ModelI
 			continue
 		}
 		if models := am.AvailableModels(); len(models) > 0 {
-			r.bk.SetManifest(backendID, models)
+			r.backends.bk.SetManifest(backendID, models)
 			break
 		}
 	}
-	if m := r.bk.Manifest(backendID); len(m) > 0 {
+	if m := r.backends.bk.Manifest(backendID); len(m) > 0 {
 		return m
 	}
-	if lst := r.bk.Runtime(backendID).ConfiguredModels; len(lst) > 0 {
+	if lst := r.backends.bk.Runtime(backendID).ConfiguredModels; len(lst) > 0 {
 		out := make([]cli.ModelInfo, 0, len(lst))
 		for _, id := range lst {
 			out = append(out, cli.ModelInfo{ID: id})
@@ -286,12 +286,12 @@ func (r *Router) observedModels(v sessView, backendID string) []cli.ModelInfo {
 		seen[id] = true
 		out = append(out, cli.ModelInfo{ID: id})
 	}
-	add(r.backendDefaultsFor(backendID).Model)
+	add(r.backends.backendDefaultsFor(backendID).Model)
 	var rest []string
 	for _, s := range v.All() {
 		sb := s.Backend()
 		if sb == "" {
-			sb = r.bk.DefaultID()
+			sb = r.backends.bk.DefaultID()
 		}
 		if sb != backendID {
 			continue

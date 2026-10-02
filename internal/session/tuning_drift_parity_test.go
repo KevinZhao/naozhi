@@ -60,7 +60,7 @@ func TestTuningDriftParity_NoFalseDrift(t *testing.T) {
 
 	// Drift-side reconstruction for the surviving shim of the same session,
 	// fed the overlay the spawn persisted into shim state (#2494).
-	wrapper, backendID := r.wrapperFor("kiro")
+	wrapper, backendID := r.backends.wrapperFor("kiro")
 	driftArgs := r.driftCompareArgs(wrapper, backendID, key, s, &sp.Overlay)
 
 	if !slices.Equal(realArgs, driftArgs) {
@@ -88,7 +88,7 @@ func TestTuningDriftParity_ChangedOverrideIsRealDrift(t *testing.T) {
 	s.SetTuningModel("claude-haiku-4.5")
 	putT(r, key, s)
 
-	wrapper, backendID := r.wrapperFor("kiro")
+	wrapper, backendID := r.backends.wrapperFor("kiro")
 	noOverlay := &shim.SpawnOverlay{}                                       // spawned with no agent-level override
 	storedArgs := r.driftCompareArgs(wrapper, backendID, key, s, noOverlay) // argv the shim recorded at spawn
 
@@ -107,7 +107,7 @@ func TestTuningDriftParity_ChangedOverrideIsRealDrift(t *testing.T) {
 // defaults, not panic.
 func TestTuningDriftParity_NilSessionFallsBack(t *testing.T) {
 	r := mkTuningRouter(t)
-	wrapper, backendID := r.wrapperFor("kiro")
+	wrapper, backendID := r.backends.wrapperFor("kiro")
 	args := r.driftCompareArgs(wrapper, backendID, "dash:direct:adopt:general", nil, nil)
 	if !slices.Contains(args, "claude-fable-5") || !slices.Contains(args, "high") {
 		t.Errorf("nil-session drift args must carry backend defaults, got %v", args)
@@ -147,7 +147,7 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 		)
 	})
 
-	wrapper, backendID := r.wrapperFor("kiro")
+	wrapper, backendID := r.backends.wrapperFor("kiro")
 	driftArgs := r.driftCompareArgs(wrapper, backendID, key, fresh, &sp.Overlay)
 	if !slices.Equal(realArgs, driftArgs) {
 		t.Fatalf("post-respawn entry diverges from the argv it was spawned with — "+

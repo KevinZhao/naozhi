@@ -28,7 +28,7 @@ func TestHandleEvents_AfterReadmitsWatermarkMillisecond(t *testing.T) {
 	proc.EventLog.Append(clievent.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
 	proc.EventLog.Append(clievent.EventEntry{Time: 2000, UUID: "a", Type: "thinking", Summary: "..."})
 	r.InjectSession(key, proc)
-	h := New(Deps{Router: r})
+	h := New(Deps{Router: realRouter{r}})
 
 	// Client polled once and rendered "a" (cursor = 2000); the sibling lands
 	// in the same millisecond afterwards.

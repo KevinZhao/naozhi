@@ -25,7 +25,7 @@ func newOverrideHandler(t *testing.T, key string) *Handlers {
 		// covered by router_tuning_test.go.
 		r.InjectSession(key, &sessionpkg.TestProcess{AliveVal: false})
 	}
-	return New(Deps{Router: r})
+	return New(Deps{Router: realRouter{r}})
 }
 
 func doOverride(t *testing.T, h *Handlers, body string) *http.Response {

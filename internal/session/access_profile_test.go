@@ -81,7 +81,7 @@ func TestAccessProfileInfos(t *testing.T) {
 			Env:         map[string]string{"ANTHROPIC_AUTH_TOKEN_FILE": filepath.Join(dir, "missing")},
 		},
 	})
-	infos := r.AccessProfileInfos()
+	infos := r.backends.AccessProfileInfos()
 	if len(infos) != 3 {
 		t.Fatalf("want 3 infos, got %d", len(infos))
 	}
@@ -113,7 +113,7 @@ func TestAccessProfileInfos(t *testing.T) {
 
 func TestAccessProfileInfos_EmptyRegistry(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
-	if got := r.AccessProfileInfos(); got != nil {
+	if got := r.backends.AccessProfileInfos(); got != nil {
 		t.Errorf("empty registry should return nil, got %v", got)
 	}
 }
@@ -123,38 +123,38 @@ func TestAddAccessProfile(t *testing.T) {
 	setAccessProfiles(r, map[string]AccessProfile{
 		"existing": {DisplayName: "Existing"},
 	})
-	if !r.HasAccessProfile("existing") {
+	if !r.backends.HasAccessProfile("existing") {
 		t.Fatal("existing profile should be present")
 	}
-	if r.HasAccessProfile("new") {
+	if r.backends.HasAccessProfile("new") {
 		t.Fatal("new profile should be absent before add")
 	}
-	if err := r.AddAccessProfile("new", AccessProfile{DisplayName: "New", DefaultModel: "m"}); err != nil {
+	if err := r.backends.AddAccessProfile("new", AccessProfile{DisplayName: "New", DefaultModel: "m"}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if !r.HasAccessProfile("new") {
+	if !r.backends.HasAccessProfile("new") {
 		t.Error("new profile should be present after add")
 	}
 	// Existing untouched (copy-on-write preserves prior entries).
-	if !r.HasAccessProfile("existing") {
+	if !r.backends.HasAccessProfile("existing") {
 		t.Error("existing profile lost after add")
 	}
 	// Duplicate rejected.
-	if err := r.AddAccessProfile("new", AccessProfile{}); err == nil {
+	if err := r.backends.AddAccessProfile("new", AccessProfile{}); err == nil {
 		t.Error("duplicate add should be rejected")
 	}
 	// Empty id rejected.
-	if err := r.AddAccessProfile("", AccessProfile{}); err == nil {
+	if err := r.backends.AddAccessProfile("", AccessProfile{}); err == nil {
 		t.Error("empty id should be rejected")
 	}
 }
 
 func TestAddAccessProfile_NilMapBootstrap(t *testing.T) {
 	r := &Router{ss: newSessionTable()} // nil accessProfiles
-	if err := r.AddAccessProfile("first", AccessProfile{DisplayName: "First"}); err != nil {
+	if err := r.backends.AddAccessProfile("first", AccessProfile{DisplayName: "First"}); err != nil {
 		t.Fatalf("add to nil map: %v", err)
 	}
-	if !r.HasAccessProfile("first") {
+	if !r.backends.HasAccessProfile("first") {
 		t.Error("profile not registered into freshly-bootstrapped map")
 	}
 }
@@ -171,27 +171,27 @@ func TestAddAccessProfile_ConcurrentAddsAllLand(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			if err := r.AddAccessProfile("p"+strconv.Itoa(i), AccessProfile{}); err != nil {
+			if err := r.backends.AddAccessProfile("p"+strconv.Itoa(i), AccessProfile{}); err != nil {
 				t.Errorf("add p%d: %v", i, err)
 			}
 		}()
 		go func() {
 			defer wg.Done()
-			if r.AddAccessProfile("shared", AccessProfile{}) == nil {
+			if r.backends.AddAccessProfile("shared", AccessProfile{}) == nil {
 				dupOK.Add(1)
 			}
 		}()
 	}
 	wg.Wait()
 	for i := 0; i < n; i++ {
-		if !r.HasAccessProfile("p" + strconv.Itoa(i)) {
+		if !r.backends.HasAccessProfile("p" + strconv.Itoa(i)) {
 			t.Errorf("p%d lost to a concurrent add", i)
 		}
 	}
 	if got := dupOK.Load(); got != 1 {
 		t.Errorf("the same id was accepted %d times, want exactly once", got)
 	}
-	if got := len(r.AccessProfileInfos()); got != n+1 {
+	if got := len(r.backends.AccessProfileInfos()); got != n+1 {
 		t.Errorf("registry holds %d profiles, want %d", got, n+1)
 	}
 }
@@ -201,13 +201,13 @@ func TestAddAccessProfile_ConcurrentAddsAllLand(t *testing.T) {
 func TestNewRouter_PublishesConfiguredAccessProfiles(t *testing.T) {
 	r := NewRouter(RouterConfig{AccessProfiles: map[string]AccessProfile{"work": {DisplayName: "Work"}}})
 	defer r.Shutdown()
-	if !r.HasAccessProfile("work") {
+	if !r.backends.HasAccessProfile("work") {
 		t.Fatal("a configured profile is not registered")
 	}
-	if err := r.AddAccessProfile("home", AccessProfile{}); err != nil {
+	if err := r.backends.AddAccessProfile("home", AccessProfile{}); err != nil {
 		t.Fatal(err)
 	}
-	if !r.HasAccessProfile("work") || !r.HasAccessProfile("home") {
+	if !r.backends.HasAccessProfile("work") || !r.backends.HasAccessProfile("home") {
 		t.Error("a runtime add dropped the configured profile")
 	}
 }

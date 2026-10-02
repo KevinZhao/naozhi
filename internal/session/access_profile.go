@@ -46,8 +46,8 @@ type AccessProfileInfo struct {
 // AccessProfileInfos returns the non-sensitive projection of every configured
 // access profile, sorted by ID for stable UI ordering; nil when none are
 // configured. The SecretOK preflight stats each *_FILE (cheap, picker-open only).
-func (r *Router) AccessProfileInfos() []AccessProfileInfo {
-	profiles := r.profiles()
+func (b *BackendRegistry) AccessProfileInfos() []AccessProfileInfo {
+	profiles := b.profiles()
 	if len(profiles) == 0 {
 		return nil
 	}
@@ -75,21 +75,21 @@ func (r *Router) AccessProfileInfos() []AccessProfileInfo {
 // resolves to no explicit profile (RouterConfig.DefaultAccessProfile). Empty
 // means the global-baseline fallthrough (no overlay). Read-only after
 // NewRouter, so no lock is taken.
-func (r *Router) DefaultAccessProfile() string {
-	return r.defaultAccessProfile
+func (b *BackendRegistry) DefaultAccessProfile() string {
+	return b.defaultAccessProfile
 }
 
 // HasAccessProfile reports whether an access profile with the given id is
 // registered.
-func (r *Router) HasAccessProfile(id string) bool {
-	_, ok := r.profiles()[id]
+func (b *BackendRegistry) HasAccessProfile(id string) bool {
+	_, ok := b.profiles()[id]
 	return ok
 }
 
 // profiles returns the current access-profile registry; nil when none are
 // configured. The map is never mutated after it is published.
-func (r *Router) profiles() map[string]AccessProfile {
-	if p := r.accessProfiles.Load(); p != nil {
+func (b *BackendRegistry) profiles() map[string]AccessProfile {
+	if p := b.accessProfiles.Load(); p != nil {
 		return *p
 	}
 	return nil
@@ -103,12 +103,12 @@ func (r *Router) profiles() map[string]AccessProfile {
 //
 // The caller must persist config.yaml FIRST and fail the request if that
 // write fails, so disk and memory cannot diverge on partial success.
-func (r *Router) AddAccessProfile(id string, ap AccessProfile) error {
+func (b *BackendRegistry) AddAccessProfile(id string, ap AccessProfile) error {
 	if id == "" {
 		return fmt.Errorf("access profile id is empty")
 	}
 	for {
-		cur := r.accessProfiles.Load()
+		cur := b.accessProfiles.Load()
 		var old map[string]AccessProfile
 		if cur != nil {
 			old = *cur
@@ -121,7 +121,7 @@ func (r *Router) AddAccessProfile(id string, ap AccessProfile) error {
 			next[k] = v
 		}
 		next[id] = ap
-		if r.accessProfiles.CompareAndSwap(cur, &next) {
+		if b.accessProfiles.CompareAndSwap(cur, &next) {
 			return nil
 		}
 	}

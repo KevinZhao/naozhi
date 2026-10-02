@@ -40,14 +40,14 @@ var _ sendNotifier = (*wsBroadcaster)(nil)
 // or the narrowing would be undone by the assertion itself. server already
 // imports both sides.
 var (
-	_ dashsession.RouterView      = (*session.Router)(nil)
+	_ dashsession.RouterView      = sessionRouterView{}
 	_ dashsession.ProjectSource   = (*project.Manager)(nil)
 	_ dashsession.NodeCacheReader = (*node.CacheManager)(nil)
 	_ dashsession.RetiredReader   = (*discovery.RetiredStore)(nil)
 )
 
 // Same for dashproject and dashcron (#2561 E6-b). The measured narrowing is in
-// each package's consumer.go: 3 of *session.Router's 77 methods for
+// each package's consumer.go: 3 of the 77 *session.Router methods (when measured) for
 // dashproject, 23 of *cron.Scheduler's 48 for dashcron. dashproject's router
 // goes through projectRouter (project_router_adapter.go), which carries its
 // own guards.

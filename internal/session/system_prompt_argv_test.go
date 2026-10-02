@@ -260,7 +260,7 @@ func TestSystemPrompt_NoDriftRestart(t *testing.T) {
 		t.Fatalf("prompt not recorded in the spawn overlay: %+v", sp.Overlay)
 	}
 
-	wrapper, backendID := r.wrapperFor(state.Backend)
+	wrapper, backendID := r.backends.wrapperFor(state.Backend)
 	if drift, stored, current := r.shimArgsDrift(wrapper, backendID, state, sess); drift {
 		t.Fatalf("prompted session misread as arg-drift — every naozhi restart would kill it\n"+
 			"  stored:  %v\n  current: %v", stored, current)

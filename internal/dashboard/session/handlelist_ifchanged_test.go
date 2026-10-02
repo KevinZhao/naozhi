@@ -33,7 +33,7 @@ func newIfChangedTestHandlers(t *testing.T, na NodeAccessor) *Handlers {
 	t.Helper()
 	r := sessionpkg.NewRouter(sessionpkg.RouterConfig{MaxProcs: 3})
 	return New(Deps{
-		Router:        r,
+		Router:        realRouter{r},
 		NodeAccess:    na,
 		NodeCache:     node.NewCacheManager(func() map[string]node.Conn { return nil }, func() {}),
 		StartedAt:     time.Now(),

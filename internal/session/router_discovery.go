@@ -246,8 +246,8 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 			costAcct: r.costAcct,
 		}
 		s.setWorkspace(workspace)
-		s.SetCLIName(r.CLIName())
-		s.SetCLIVersion(r.CLIVersion())
+		s.SetCLIName(r.backends.CLIName())
+		s.SetCLIVersion(r.backends.CLIVersion())
 		s.setSessionID(sessionID)
 		if lastPrompt != "" {
 			storeAtomicString(&s.lastPrompt, lastPrompt)
@@ -332,8 +332,8 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 			s.prevSessionIDs = slices.Clone(chainIDs)
 		}
 		s.setWorkspace(workspace)
-		s.SetCLIName(r.CLIName())
-		s.SetCLIVersion(r.CLIVersion())
+		s.SetCLIName(r.backends.CLIName())
+		s.SetCLIVersion(r.backends.CLIVersion())
 		if lastPrompt != "" {
 			storeAtomicString(&s.lastPrompt, lastPrompt)
 		}

@@ -69,8 +69,8 @@ func TestDebugFileDriftParity_NoFalseDrift(t *testing.T) {
 
 	// Spawn-side argv, assembled the way the spawn does (router_lifecycle.go:
 	// argvSpawnOptions + the side-effecting cliDebugFileFor).
-	wrapper, backendID := r.wrapperFor("claude")
-	bd := r.backendDefaultsFor(backendID)
+	wrapper, backendID := r.backends.wrapperFor("claude")
+	bd := r.backends.backendDefaultsFor(backendID)
 	realArgs := wrapper.Protocol.BuildArgs(
 		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugFileFor(key), "", bd.Args))
 
@@ -119,7 +119,7 @@ func TestDebugFileDriftParity_ReadOnlyWhenComparing(t *testing.T) {
 	debugDir := t.TempDir()
 	r := mkClaudeDriftRouter(t, debugDir)
 	key := "dashboard:direct:never-respawns:general"
-	wrapper, backendID := r.wrapperFor("claude")
+	wrapper, backendID := r.backends.wrapperFor("claude")
 
 	_ = r.driftCompareArgs(wrapper, backendID, key, nil, nil)
 
@@ -138,7 +138,7 @@ func TestDebugFileDriftParity_ReadOnlyWhenComparing(t *testing.T) {
 func TestDebugFileDriftParity_CaptureOffEmitsNoFlag(t *testing.T) {
 	r := mkClaudeDriftRouter(t, "")
 	key := "dashboard:direct:no-capture:general"
-	wrapper, backendID := r.wrapperFor("claude")
+	wrapper, backendID := r.backends.wrapperFor("claude")
 
 	args := r.driftCompareArgs(wrapper, backendID, key, nil, nil)
 	if slices.Contains(args, "--debug-file") {
