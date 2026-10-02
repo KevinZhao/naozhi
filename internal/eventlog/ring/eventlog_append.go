@@ -309,6 +309,13 @@ func (l *EventLog) appendBatch(entries []clievent.EventEntry, isReplay bool) {
 		// cumulative count together with the other per-turn state.
 		l.userTurnCount.Add(userDelta)
 	}
+	// The live CLI stream arrives here, not through Append, so this is where
+	// Cleanup's heartbeat must advance — without it a long turn streaming
+	// events was force-killed as stuck once 2×TotalTimeout passed since Send.
+	// Read under l.mu like Append's so the stored value never goes backwards.
+	if !isReplay {
+		l.lastEventAt.Store(time.Now().UnixNano())
+	}
 	l.mu.Unlock()
 
 	l.fireTaskDoneCallbacks(pendingDone)
