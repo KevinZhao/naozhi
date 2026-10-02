@@ -831,7 +831,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 		tx.Ext().spawns.EndSpawn(key, res.doneCh)
 	})
 
-	if res.wrapper == nil && r.spawn.hook == nil {
+	if res.wrapper == nil {
 		return nil, fmt.Errorf("spawn process (backend %q): %w", res.backendID, ErrNoCLIWrapper)
 	}
 	// Expand the access-profile env overlay outside the lock (reads *_FILE
