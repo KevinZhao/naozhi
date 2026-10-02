@@ -1,15 +1,15 @@
 // @ts-check
-// Regression for #1768: the WS real-time push path (wsm.onEvent) and the
-// incremental WS history path (wsm.onHistory) must bound the live DOM via
+// Regression for #1768: the WS real-time push path (sessionFrames.onEvent) and
+// the incremental WS history path (sessionFrames.onHistory) must bound the live DOM via
 // trimEventsScroll, exactly like the HTTP-poll fallback (appendEvents) already
 // did. Before the fix, MAX_LIVE_DOM_EVENTS (600) only capped the poll path, so
 // a long streaming session over WS grew #events-scroll without limit and could
 // OOM the tab (#398 was effectively a no-op while WS was live).
 //
 // The mock server rejects /ws to force HTTP fallback, so we can't exercise a
-// real socket here. Instead we drive the exported global `wsm.onEvent`
-// directly in-page after selecting a session — that is the exact function the
-// live socket invokes per frame, so it is a faithful regression of the bug.
+// real socket here. Instead we push event frames through the exported
+// `wsm.onMessage` in-page after selecting a session — the exact dispatch the
+// live socket feeds per frame, so it is a faithful regression of the bug.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 
@@ -21,7 +21,7 @@ test.describe('#1768 WS event append bounds the live DOM', () => {
   test.beforeAll(async () => { mock = await startMockServer(); });
   test.afterAll(() => mock.server.close());
 
-  test('wsm.onEvent caps #events-scroll at MAX_LIVE_DOM_EVENTS', async ({ browser }) => {
+  test('WS event frames cap #events-scroll at MAX_LIVE_DOM_EVENTS', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
@@ -42,7 +42,8 @@ test.describe('#1768 WS event append bounds the live DOM', () => {
       if (!w || !sk || cap == null) return { err: 'globals missing', sk, hasW: !!w, cap };
       const base = Date.now();
       for (let i = 0; i < 1000; i++) {
-        w.onEvent({
+        w.onMessage({
+          type: 'event',
           key: sk,
           node: sn,
           event: { type: 'text', detail: 'streamed chunk ' + i, time: base + i },

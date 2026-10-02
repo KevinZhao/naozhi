@@ -122,7 +122,7 @@ test('a branch switch inside a turn re-resolves the chip (workspace unchanged)',
     // eslint-disable-next-line no-undef
     sessionsData[sid(key, 'local')].state = 'running';
     // eslint-disable-next-line no-undef
-    wsm.onSessionState({ type: 'session_state', key, node: 'local', state: 'ready' });
+    wsm.onMessage({ type: 'session_state', key, node: 'local', state: 'ready' });
   }, MAIN_TREE_KEY);
 
   await expect(page.locator('#header-git .git-chip-text')).toHaveText('feat/mid-turn', { timeout: 10000 });

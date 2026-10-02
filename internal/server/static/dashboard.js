@@ -3905,8 +3905,6 @@ const wsm = {
     this.lastEventTimeWs = 0;
   },
 
-  /* -- WS event handlers -- */
-
   onConnected() {
     if (timers.events) { clearInterval(timers.events); timers.events = null; }
     if (selection.key) {
@@ -3917,6 +3915,77 @@ const wsm = {
     }
   },
 
+  setState(s) {
+    const prev = this.state;
+    this.state = s;
+    // R110-P1 outage duration timestamp maintenance. Arm on first
+    // transition OUT of CONNECTED (or from a cold OFF start that never
+    // reached CONNECTED — treat any persistent non-CONNECTED as outage).
+    // Guard with `=== 0` so a connecting→auth→connecting cycle during
+    // backoff doesn't reset the clock to zero mid-outage. Clear on
+    // entering CONNECTED so the next outage arms fresh.
+    if (s === WS_STATES.CONNECTED) {
+      this._disconnectedSince = 0;
+    } else if (prev === WS_STATES.CONNECTED && this._disconnectedSince === 0) {
+      // Just left a healthy connection — stamp the wall clock.
+      this._disconnectedSince = Date.now();
+    } else if (this._disconnectedSince === 0 && s !== WS_STATES.OFF) {
+      // Cold-start / never-connected case: arm from the first
+      // CONNECTING attempt so the user sees a duration even before the
+      // first successful handshake. OFF (the initial synthetic state)
+      // is excluded — pre-boot doesn't count as outage.
+      this._disconnectedSince = Date.now();
+    }
+    updateStatusBar();
+    // (Removed _updateStatusTick — issue #434: the 1s repaint timer was a
+    // no-op since #sidebar-status DOM was deleted; selectedNode reconciliation
+    // is already driven by this updateStatusBar() call.)
+    if (s === WS_STATES.CONNECTED) {
+      // No reconnect toast: the sidebar status row already conveys the
+      // transition (amber "connecting..." dot → green "connected" dot,
+      // and .status-outage drops off) which is the user-visible signal.
+      // The previous top-of-screen toast was redundant and on mobile
+      // covered the header. _everConnected stays on the wsm struct because
+      // future consumers may still want to differentiate first-handshake
+      // from reconnect (e.g. fresh session poll vs. no-op).
+      // RNEW-UX-010 — sighted users see the dot flip; AT users get the
+      // transition announced politely. Only announce when it's a real
+      // transition (prev !== CONNECTED) to avoid re-announcing on no-op
+      // state refreshes.
+      if (prev !== WS_STATES.CONNECTED) announce(this._everConnected ? '已重新连接' : '已连接');
+      this._everConnected = true;
+      // WS connected: stop session polling, rely on push
+      if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
+      // Reduce discovered scan frequency
+      if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
+      // #2431: a hidden tab has had its pollers suspended by stopPollers;
+      // re-arming here would undo that. startPollers re-arms on return.
+      if (!document.hidden) timers.discoveredPoll = setInterval(scanDiscovered, 30000);
+      // Pull fresh node/session state immediately to clear stale data
+      debouncedFetchSessions();
+    } else if (s === WS_STATES.DISCONNECTED) {
+      // RNEW-UX-010 — announce only on real transitions from connected, so
+      // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
+      if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
+      // WS lost: start fallback polling — unless the tab is hidden (#2431):
+      // stopPollers already suspended everything and startPollers re-arms on
+      // visibilitychange from the then-current WS state.
+      const visible = !document.hidden;
+      if (visible && !timers.sessionPoll) timers.sessionPoll = setInterval(fetchSessions, 5000);
+      if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
+      if (visible) timers.discoveredPoll = setInterval(scanDiscovered, 5000);
+      if (selection.key && !timers.events) {
+        transcript.lastEventTime = this.lastEventTimeWs;
+        if (visible) timers.events = setInterval(() => fetchEvents(false), 1000);
+      }
+    }
+  },
+
+  isConnected() { return this.state === WS_STATES.CONNECTED; }
+};
+
+// Session-stream frame handlers; the subscription bookkeeping lives on wsm.
+const sessionFrames = {
   onHistory(msg) {
     if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;
     const el = document.getElementById('events-scroll');
@@ -3933,9 +4002,9 @@ const wsm = {
     // 时间戳守卫整批丢弃 —— 即"运行中重复点击会话后消息丢失/顺序错乱"。
     // backfill 帧不带 initial 标记，所以无论何时落地都只走增量 append，
     // _initialSubscribe 留给真正的初始帧消费。
-    const isInitial = this._initialSubscribe && msg.initial === true;
+    const isInitial = wsm._initialSubscribe && msg.initial === true;
     // 只有真正消费了初始帧才清标记（旧代码无条件清，是上述丢帧的直接原因）。
-    if (isInitial) this._initialSubscribe = false;
+    if (isInitial) wsm._initialSubscribe = false;
 
     // Rebuild the answered-set from history BEFORE rendering so card
     // re-renders show the correct locked state. The Set is in-memory so
@@ -4065,7 +4134,7 @@ const wsm = {
 
     if (events.length > 0) {
       const last = events[events.length - 1];
-      if (last.time > this.lastEventTimeWs) this.lastEventTimeWs = last.time;
+      if (last.time > wsm.lastEventTimeWs) wsm.lastEventTimeWs = last.time;
     }
     // Build turnState from events
     if (isInitial) {
@@ -4135,7 +4204,7 @@ const wsm = {
     if (hooks.isCronSessionFrozen && hooks.isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
-    if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
+    if (ev.time > wsm.lastEventTimeWs) wsm.lastEventTimeWs = ev.time;
     // Turn boundaries: reset state, don't feed into applyEventToTurnState
     if (ev.type === 'user') {
       const text = ev.detail || ev.summary || '';
@@ -4218,12 +4287,11 @@ const wsm = {
       el.insertAdjacentHTML('beforeend', timeDividerHtml(evT));
     }
     el.insertAdjacentHTML('beforeend', html);
-    // Advance the event-time cursor on first render too, matching appendEvents
-    // (3159) and onHistory (10745). Without this, a synthetic CLI history entry
-    // with no uuid (pre-uuid events) leaves the cursor un-advanced after the WS
-    // push path renders it, so the later time-gated onHistory replay
-    // (e.time <= lastRenderedEventTime) admits it again and the uuid fallback
-    // never fires → duplicate bubble (#2063).
+    // Advance the event-time cursor on first render too, like appendEvents and
+    // onHistory: otherwise a synthetic CLI history entry with no uuid (pre-uuid
+    // events) leaves the cursor behind once this push renders it, the later
+    // time-gated onHistory replay (e.time <= lastRenderedEventTime) admits it
+    // again and the uuid fallback never fires → duplicate bubble (#2063).
     if (evT && evT > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = evT;
     // Bound the live DOM before scroll/scan so a long streaming session over
     // the WS push path (the default real-time channel) can't grow
@@ -4346,7 +4414,7 @@ const wsm = {
     if (!perSession.lastSent[sKey] && !perSession.httpSendPending.has(sKey)) return;
     perSession.httpSendPending.delete(sKey);
     if (msg.key === selection.key && node === (selection.node || 'local')) {
-      this.onSendAck({ status: 'error', key: msg.key, node: msg.node, error: msg.error });
+      sessionFrames.onSendAck({ status: 'error', key: msg.key, node: msg.node, error: msg.error });
       return;
     }
     rollbackOptimisticRunning(msg.key, node);
@@ -4377,12 +4445,12 @@ const wsm = {
     // dashboard 静止直到手动重新点击会话（bug: 出结果后不自动更新）。
     // 清掉之后，下一次 running 广播经 case 1 重新订阅，拿到完整初始帧。
     if (msg.reason === 'subscription_timeout' &&
-        this.subscribedKey === msg.key &&
-        (this.subscribedNode || 'local') === msgNode) {
-      this.subscribedKey = null;
-      this.subscribedNode = null;
-      this._subscriptionSuspended = false;
-      this.lastEventTimeWs = 0;
+        wsm.subscribedKey === msg.key &&
+        (wsm.subscribedNode || 'local') === msgNode) {
+      wsm.subscribedKey = null;
+      wsm.subscribedNode = null;
+      wsm._subscriptionSuspended = false;
+      wsm.lastEventTimeWs = 0;
     }
     const prev = sessionList.sessionsData[sKey] || {};
     const prevState = prev.state;   // capture before mutation
@@ -4490,74 +4558,6 @@ const wsm = {
     sessionList.lastVersion = 0;
     if (msg.reason) debouncedFetchSessions();
   },
-
-  setState(s) {
-    const prev = this.state;
-    this.state = s;
-    // R110-P1 outage duration timestamp maintenance. Arm on first
-    // transition OUT of CONNECTED (or from a cold OFF start that never
-    // reached CONNECTED — treat any persistent non-CONNECTED as outage).
-    // Guard with `=== 0` so a connecting→auth→connecting cycle during
-    // backoff doesn't reset the clock to zero mid-outage. Clear on
-    // entering CONNECTED so the next outage arms fresh.
-    if (s === WS_STATES.CONNECTED) {
-      this._disconnectedSince = 0;
-    } else if (prev === WS_STATES.CONNECTED && this._disconnectedSince === 0) {
-      // Just left a healthy connection — stamp the wall clock.
-      this._disconnectedSince = Date.now();
-    } else if (this._disconnectedSince === 0 && s !== WS_STATES.OFF) {
-      // Cold-start / never-connected case: arm from the first
-      // CONNECTING attempt so the user sees a duration even before the
-      // first successful handshake. OFF (the initial synthetic state)
-      // is excluded — pre-boot doesn't count as outage.
-      this._disconnectedSince = Date.now();
-    }
-    updateStatusBar();
-    // (Removed _updateStatusTick — issue #434: the 1s repaint timer was a
-    // no-op since #sidebar-status DOM was deleted; selectedNode reconciliation
-    // is already driven by this updateStatusBar() call.)
-    if (s === WS_STATES.CONNECTED) {
-      // No reconnect toast: the sidebar status row already conveys the
-      // transition (amber "connecting..." dot → green "connected" dot,
-      // and .status-outage drops off) which is the user-visible signal.
-      // The previous top-of-screen toast was redundant and on mobile
-      // covered the header. _everConnected stays on the wsm struct because
-      // future consumers may still want to differentiate first-handshake
-      // from reconnect (e.g. fresh session poll vs. no-op).
-      // RNEW-UX-010 — sighted users see the dot flip; AT users get the
-      // transition announced politely. Only announce when it's a real
-      // transition (prev !== CONNECTED) to avoid re-announcing on no-op
-      // state refreshes.
-      if (prev !== WS_STATES.CONNECTED) announce(this._everConnected ? '已重新连接' : '已连接');
-      this._everConnected = true;
-      // WS connected: stop session polling, rely on push
-      if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
-      // Reduce discovered scan frequency
-      if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
-      // #2431: a hidden tab has had its pollers suspended by stopPollers;
-      // re-arming here would undo that. startPollers re-arms on return.
-      if (!document.hidden) timers.discoveredPoll = setInterval(scanDiscovered, 30000);
-      // Pull fresh node/session state immediately to clear stale data
-      debouncedFetchSessions();
-    } else if (s === WS_STATES.DISCONNECTED) {
-      // RNEW-UX-010 — announce only on real transitions from connected, so
-      // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
-      if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
-      // WS lost: start fallback polling — unless the tab is hidden (#2431):
-      // stopPollers already suspended everything and startPollers re-arms on
-      // visibilitychange from the then-current WS state.
-      const visible = !document.hidden;
-      if (visible && !timers.sessionPoll) timers.sessionPoll = setInterval(fetchSessions, 5000);
-      if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
-      if (visible) timers.discoveredPoll = setInterval(scanDiscovered, 5000);
-      if (selection.key && !timers.events) {
-        transcript.lastEventTime = this.lastEventTimeWs;
-        if (visible) timers.events = setInterval(() => fetchEvents(false), 1000);
-      }
-    }
-  },
-
-  isConnected() { return this.state === WS_STATES.CONNECTED; }
 };
 
 /* ===== WS receive table: one registration per outbound frame type ===== */
@@ -4665,12 +4665,12 @@ wsm.on(NZ_CONTRACT.WS.error, (msg) => {
     wsm._pendingSubscribeNode = null;
   }
 });
-wsm.on(NZ_CONTRACT.WS.history, (msg) => wsm.onHistory(msg));
-wsm.on(NZ_CONTRACT.WS.event, (msg) => wsm.onEvent(msg));
-wsm.on(NZ_CONTRACT.WS.send_ack, (msg) => wsm.onSendAck(msg));
-wsm.on(NZ_CONTRACT.WS.send_error, (msg) => wsm.onSendError(msg));
-wsm.on(NZ_CONTRACT.WS.interrupt_ack, (msg) => wsm.onInterruptAck(msg));
-wsm.on(NZ_CONTRACT.WS.session_state, (msg) => wsm.onSessionState(msg));
+wsm.on(NZ_CONTRACT.WS.history, (msg) => sessionFrames.onHistory(msg));
+wsm.on(NZ_CONTRACT.WS.event, (msg) => sessionFrames.onEvent(msg));
+wsm.on(NZ_CONTRACT.WS.send_ack, (msg) => sessionFrames.onSendAck(msg));
+wsm.on(NZ_CONTRACT.WS.send_error, (msg) => sessionFrames.onSendError(msg));
+wsm.on(NZ_CONTRACT.WS.interrupt_ack, (msg) => sessionFrames.onInterruptAck(msg));
+wsm.on(NZ_CONTRACT.WS.session_state, (msg) => sessionFrames.onSessionState(msg));
 wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
   // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
   // a newly-added key after the fetch completes. Comparing sizes is

@@ -46,9 +46,10 @@ func TestDashboardJS_SubscriptionTimeoutClearsClientBookkeeping(t *testing.T) {
 	toIdx := strings.Index(body, "'subscription_timeout'")
 	tail := body[toIdx:]
 	for _, want := range []string{
-		"this.subscribedKey = null",
-		"this.subscribedNode = null",
-		"this.lastEventTimeWs = 0",
+		"wsm.subscribedKey = null",
+		"wsm.subscribedNode = null",
+		"wsm._subscriptionSuspended = false",
+		"wsm.lastEventTimeWs = 0",
 	} {
 		if !strings.Contains(tail, want) {
 			t.Errorf("subscription_timeout handling must include %q so the next running broadcast triggers a fresh subscribe", want)

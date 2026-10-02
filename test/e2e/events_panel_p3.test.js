@@ -164,12 +164,12 @@ test.describe('Events panel #2430 P3 / #2432 protocol', () => {
         w.renderOptimisticUserMsg('second send', 'r2');
         w.renderOptimisticUserMsg('third send', 'r3');
         const before = ids();
-        ws.onSendAck({ type: 'send_ack', id: 'r2', status: 'busy', key: 'x' });
+        ws.onMessage({ type: 'send_ack', id: 'r2', status: 'busy', key: 'x' });
         const afterBusy = ids();
-        ws.onSendAck({ type: 'send_ack', id: 'r3', status: 'error', error: 'boom', key: 'x' });
+        ws.onMessage({ type: 'send_ack', id: 'r3', status: 'error', error: 'boom', key: 'x' });
         const afterError = ids();
         // Legacy id-less ack keeps the first-bubble fallback.
-        ws.onSendAck({ type: 'send_ack', status: 'error', error: 'boom', key: 'x' });
+        ws.onMessage({ type: 'send_ack', status: 'error', error: 'boom', key: 'x' });
         const afterLegacy = ids();
         return { before, afterBusy, afterError, afterLegacy };
       });

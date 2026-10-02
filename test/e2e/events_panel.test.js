@@ -12,10 +12,10 @@
 //     content blocks; ACP's trailing thinking/text/result) was dropped. The
 //     gate is now strict `<` and same-ms events dedup by uuid instead.
 //
-// The mock server rejects /ws to force HTTP fallback, so (2) drives the
-// exported `wsm.onHistory` / `appendEvents` directly in-page — the exact
-// functions a live socket / poll tick invokes per frame (same technique as
-// ws_dom_trim.test.js).
+// The mock server rejects /ws to force HTTP fallback, so (2) pushes history
+// frames through `wsm.onMessage` (the dispatch table a live socket feeds) and
+// calls `appendEvents` (what a poll tick runs) directly in-page (same
+// technique as ws_dom_trim.test.js).
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 
@@ -79,7 +79,7 @@ test.describe('Session events panel regressions', () => {
     await ctx.close();
   });
 
-  test('wsm.onHistory: same-ms thinking + text in one frame renders the text', async ({ browser }) => {
+  test('history frame: same-ms thinking + text in one frame renders the text', async ({ browser }) => {
     const { ctx, page } = await openSession(browser, mock);
 
     const result = await page.evaluate(() => {
@@ -94,17 +94,17 @@ test.describe('Session events panel regressions', () => {
       const times = [...el.querySelectorAll('.event[data-time]')].map(n => Number(n.getAttribute('data-time')));
       const T = Math.max(...times, Date.now()) + 60000; // strictly newer than everything on screen
       const frame = () => ({
-        key: sk, node: sn,
+        type: 'history', key: sk, node: sn,
         events: [
           { type: 'thinking', detail: 'let me think', time: T, uuid: 'TH-same-ms' },
           { type: 'text', detail: 'SAME_MS_TEXT_MARKER', time: T, uuid: 'TX-same-ms' },
         ],
       });
-      w.onHistory(frame());
+      w.onMessage(frame());
       const afterFirst = el.querySelectorAll('.event.text[data-uuid="TX-same-ms"]').length;
       // Backend re-admits the watermark millisecond on the next backfill
       // (#2402): the replay must be absorbed by uuid, not painted twice.
-      w.onHistory(frame());
+      w.onMessage(frame());
       const afterReplay = el.querySelectorAll('.event.text[data-uuid="TX-same-ms"]').length;
       return { afterFirst, afterReplay, thinking: el.querySelectorAll('.event.thinking').length };
     });
@@ -117,7 +117,7 @@ test.describe('Session events panel regressions', () => {
     await ctx.close();
   });
 
-  test('wsm.onHistory: thinking(T) in one frame, text(T) in the next still renders', async ({ browser }) => {
+  test('history frame: thinking(T) in one frame, text(T) in the next still renders', async ({ browser }) => {
     const { ctx, page } = await openSession(browser, mock);
 
     const result = await page.evaluate(() => {
@@ -129,8 +129,8 @@ test.describe('Session events panel regressions', () => {
       const el = document.getElementById('events-scroll');
       const times = [...el.querySelectorAll('.event[data-time]')].map(n => Number(n.getAttribute('data-time')));
       const T = Math.max(...times, Date.now()) + 120000;
-      w.onHistory({ key: sk, node: sn, events: [{ type: 'thinking', detail: 'hmm', time: T, uuid: 'TH-split' }] });
-      w.onHistory({ key: sk, node: sn, events: [{ type: 'text', detail: 'SPLIT_FRAME_TEXT', time: T, uuid: 'TX-split' }] });
+      w.onMessage({ type: 'history', key: sk, node: sn, events: [{ type: 'thinking', detail: 'hmm', time: T, uuid: 'TH-split' }] });
+      w.onMessage({ type: 'history', key: sk, node: sn, events: [{ type: 'text', detail: 'SPLIT_FRAME_TEXT', time: T, uuid: 'TX-split' }] });
       return { text: el.querySelectorAll('.event.text[data-uuid="TX-split"]').length };
     });
 

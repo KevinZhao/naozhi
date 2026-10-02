@@ -9,11 +9,11 @@ const OUT = new Set(['history', 'pong']);
 
 // A clean pair of modules: a claim and a fallback for history, a no-op for pong.
 const CLEAN = `
-const wsm = { onHistory(msg) { return msg.key; } };
+const sessionFrames = { onHistory(msg) { return msg.key; } };
 const live = (msg) => msg.key === 'cron:x';
 function onLive(msg) { return msg.events; }
 wsm.on(NZ_CONTRACT.WS.history, onLive, live);
-wsm.on(NZ_CONTRACT.WS.history, (msg) => wsm.onHistory(msg));
+wsm.on(NZ_CONTRACT.WS.history, (msg) => sessionFrames.onHistory(msg));
 wsm.on(NZ_CONTRACT.WS.pong, () => {});
 `;
 
@@ -91,7 +91,7 @@ test('R4: fewer registrations than outbound types means the scan went blind', ()
 });
 
 test('R6: a handler or claim parameter not named msg', () => {
-  const h = problemsOf(CLEAN.replace('(msg) => wsm.onHistory(msg)', '(frame) => wsm.onHistory(frame)'));
+  const h = problemsOf(CLEAN.replace('(msg) => sessionFrames.onHistory(msg)', '(frame) => sessionFrames.onHistory(frame)'));
   assert.ok(h.some((x) => /handler must name its frame parameter msg/.test(x)), h.join('\n'));
   const c = problemsOf(CLEAN.replace("const live = (msg) => msg.key === 'cron:x';", "const live = (f) => f.key === 'cron:x';"));
   assert.ok(c.some((x) => /claim must name its frame parameter msg/.test(x)), c.join('\n'));
@@ -104,6 +104,11 @@ test('R6: msg forwarded to a same-file function or method whose parameter is not
   assert.ok(f.some((x) => /handler must name its frame parameter msg/.test(x)), f.join('\n'));
   const fwd = problemsOf(CLEAN + "function helper(frame) { return frame; }\nwsm.on(NZ_CONTRACT.WS.pong, (msg) => helper(msg), live);");
   assert.ok(fwd.some((x) => /forwarded to a parameter not named msg/.test(x)), fwd.join('\n'));
+});
+
+test('R6: msg forwarded to a method its same-file object does not define', () => {
+  const p = problemsOf(CLEAN.replace('(msg) => sessionFrames.onHistory(msg)', '(msg) => sessionFrames.onEvent(msg)'));
+  assert.ok(p.some((x) => /forwarded to sessionFrames.onEvent, which sessionFrames does not define/.test(x)), p.join('\n'));
 });
 
 test('R6: msg forwarded to an imported binding is refused', () => {

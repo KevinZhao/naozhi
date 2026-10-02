@@ -175,9 +175,9 @@ test.describe('Events panel #2430 P2', () => {
         const afterPoll = state('tu-poll');
 
         // (b) WS push path.
-        ws.onEvent({ key: sk, node: sn, event: ask('tu-ws') });
+        ws.onMessage({ type: 'event', key: sk, node: sn, event: ask('tu-ws') });
         const beforeWs = state('tu-ws');
-        ws.onEvent({ key: sk, node: sn, event: user('ws') });
+        ws.onMessage({ type: 'event', key: sk, node: sn, event: user('ws') });
         const afterWs = state('tu-ws');
 
         // (c) poll full render of an ask→user history must render locked.
