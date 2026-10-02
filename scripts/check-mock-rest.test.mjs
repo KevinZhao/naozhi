@@ -46,10 +46,18 @@ const ROUTES = [
   { name: 'sessions_agent_events', url: '/api/sessions/agent_events?key=k&task_id=t1', inject: (entries) => ({ agentEvents: { t1: entries } }) },
 ];
 const GOOD = [{ type: 'text', time: 1, summary: 'hi' }];
+// Each bad fixture names the violation the 500 must carry; the last one hides
+// it behind a good entry, so a guard that looks only at the first is caught.
 const BAD = {
-  'an internal field': [{ type: 'text', time: 1, jsonl_path: '/home/u/.claude/projects/p/s.jsonl' }],
-  'an unregistered type': [{ type: 'txt', time: 1 }],
-  'a nested field': [{ type: 'ask_question', time: 1, ask_question: { stale: 1 } }],
+  'an internal field': [[{ type: 'text', time: 1, jsonl_path: '/home/u/.claude/projects/p/s.jsonl' }], '[0].jsonl_path'],
+  'an unregistered type': [[{ type: 'txt', time: 1 }], '[0].type="txt" is not in its enum'],
+  'a nested field': [[{ type: 'ask_question', time: 1, ask_question: { stale: 1 } }], '[0].ask_question.stale'],
+  'no type': [[{ time: 1, summary: 'no type' }], '[0].type is required'],
+  'no time': [[{ type: 'text' }], '[0].time is required'],
+  'a string time': [[{ type: 'text', time: 'notanumber' }], '[0].time is not an integer'],
+  'a null entry': [[null], '[0] is not an object'],
+  'a string entry': [['str'], '[0] is not an object'],
+  'a bad second entry': [[...GOOD, { type: 'txt', time: 2 }], '[1].type="txt" is not in its enum'],
 };
 for (const r of ROUTES) {
   test(`${r.name} serves a good fixture and refuses a bad one`, async () => {
@@ -58,11 +66,11 @@ for (const r of ROUTES) {
       assert.equal(res.status, 200);
       assert.deepEqual(await res.json(), GOOD);
     });
-    for (const [what, entries] of Object.entries(BAD)) {
+    for (const [what, [entries, violation]] of Object.entries(BAD)) {
       await withMock(r.inject(entries), async (mock) => {
         const res = await fetch(mock.url + r.url);
         assert.equal(res.status, 500, `${r.name} served a fixture with ${what}`);
-        assert.match((await res.json()).error, new RegExp(r.name));
+        assert.ok((await res.json()).error.includes(r.name + violation), `${r.name}: the 500 for ${what} does not name ${violation}`);
       });
     }
   });
@@ -91,6 +99,18 @@ test('schemaViolations holds a value to its property\'s enum', () => {
   const list = { type: 'array', items: { type: 'object', $ref: 'E' } };
   assert.deepEqual(schemaViolations([{ type: 'text', summary: 'anything' }, { type: 'user' }], list, defs, 'r'), []);
   assert.deepEqual(schemaViolations([{ type: 'txt' }, {}], list, defs, 'r'), ['r[0].type="txt" is not in its enum']);
+});
+
+test('strict schemaViolations holds a value to its JSON type and a def to its required keys', () => {
+  const defs = {
+    E: { required: ['time'], properties: { time: { type: 'integer' }, ok: { type: 'boolean' }, cost: { type: 'number' }, tags: { type: 'array', items: { type: 'string' } }, meta: { type: 'any' }, sub: { type: 'object', $ref: 'F' } } },
+    F: { required: ['name'], properties: { name: { type: 'string' } } },
+  };
+  const list = { type: 'array', items: { type: 'object', $ref: 'E' } };
+  assert.deepEqual(schemaViolations([{ time: 1, ok: true, cost: 0.5, tags: ['a'], meta: 'x', sub: { name: 'n' } }, { time: 2, meta: [1], tags: null }], list, defs, 'r', { strict: true }), []);
+  assert.deepEqual(schemaViolations([{ time: 1.5, ok: 'yes', cost: '0.5', tags: 'a' }, { tags: [1], sub: {} }, null, 'str'], list, defs, 'r', { strict: true }),
+    ['r[0].time is not an integer', 'r[0].ok is not a boolean', 'r[0].cost is not a number', 'r[0].tags is not an array', 'r[1].time is required', 'r[1].tags[0] is not a string', 'r[1].sub.name is required', 'r[2] is not an object', 'r[3] is not an object']);
+  assert.deepEqual(schemaViolations([{ time: 'x' }, {}, null], list, defs, 'r'), [], 'types or required keys were checked without opts.strict');
 });
 
 test('unionResponse takes each field from the first variant that declares it', () => {

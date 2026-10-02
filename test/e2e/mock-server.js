@@ -24,10 +24,11 @@ const contractReady = Promise.all([
     .then((m) => { ({ schemaViolations, EVENT_ENTRIES } = m); }),
 ]);
 
-// sendEntries answers an event route with entries, or with 500 naming every
-// violation when one is not a shape the backend produces.
-function sendEntries(res, route, entries, headers = { 'Content-Type': 'application/json' }) {
-  const bad = schemaViolations(entries, EVENT_ENTRIES, WS_DEFS, route);
+// sendEntries answers an event route with page, or with 500 naming every
+// violation when an entry of fixture (the whole injected list, not just the
+// page a filter let through) is not a shape the backend produces.
+function sendEntries(res, route, fixture, page, headers = { 'Content-Type': 'application/json' }) {
+  const bad = schemaViolations(fixture, EVENT_ENTRIES, WS_DEFS, route, { strict: true });
   if (bad.length) {
     const error = `mock fixture is not an EventEntry the backend sends: ${bad.join(', ')}`;
     console.error(`mock-server: ${error}`);
@@ -36,7 +37,7 @@ function sendEntries(res, route, entries, headers = { 'Content-Type': 'applicati
     return;
   }
   res.writeHead(200, headers);
-  res.end(JSON.stringify(entries));
+  res.end(JSON.stringify(page));
 }
 
 // The dashboard CSP exactly as production serves it (routes.go / #1980).
@@ -525,12 +526,12 @@ function startMockServer(overrides = {}) {
       const headers = { 'Content-Type': 'application/json' };
       let out;
       if (after > 0) {
-        out = all.filter(e => !e.time || e.time > after);
+        out = all.filter(e => !e?.time || e.time > after);
         if (limit > 0 && out.length > limit) out = out.slice(-limit);
       } else if (before > 0) {
         // handlers.go `before` branch: strictly older, newest `limit` of them,
         // chronological.
-        out = all.filter(e => e.time && e.time < before);
+        out = all.filter(e => e?.time && e.time < before);
         if (limit > 0 && out.length > limit) out = out.slice(-limit);
       } else if (limit > 0) {
         // handlers.go initial-page branch: tail N + authoritative has-more header.
@@ -540,7 +541,7 @@ function startMockServer(overrides = {}) {
         // handlers.go default branch: the in-memory ring only.
         out = all.slice(-eventsRingSize);
       }
-      const reply = () => sendEntries(res, 'sessions_events', out, headers);
+      const reply = () => sendEntries(res, 'sessions_events', all, out, headers);
       if (after > 0 && eventsTailDelayMs > 0) setTimeout(reply, eventsTailDelayMs);
       else reply();
       return;
@@ -684,7 +685,7 @@ function startMockServer(overrides = {}) {
 
     if (pathname === NZ_CONTRACT.API.discovered_preview && req.method === 'GET') {
       if (!checkAuth()) return;
-      sendEntries(res, 'discovered_preview', discoveredPreview);
+      sendEntries(res, 'discovered_preview', discoveredPreview, discoveredPreview);
       return;
     }
 
@@ -821,8 +822,8 @@ function startMockServer(overrides = {}) {
       const limit = Number(url.searchParams.get('limit') || 200);
       const all = agentEvents[taskId] || [];
       // Inclusive, like the server: entries AT the watermark come back again.
-      const page = all.filter(e => (e.time || 0) >= after).slice(0, limit);
-      sendEntries(res, 'sessions_agent_events', page);
+      const page = all.filter(e => (e?.time || 0) >= after).slice(0, limit);
+      sendEntries(res, 'sessions_agent_events', all, page);
       return;
     }
 
