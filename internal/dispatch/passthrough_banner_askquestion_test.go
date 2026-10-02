@@ -214,9 +214,9 @@ func TestDispatcher_AskQuestionFired_SuppressesImages(t *testing.T) {
 		return &clievent.SendResult{Text: "see " + imgFile}, nil
 	}
 
-	// newTestDispatcher wires a Router and Guard; override the platform map
-	// manually so our image-capturing platform is used.
-	d := newTestDispatcher(fp, sendFn)
+	// newTestDispatcher wires a Router, Guard and a real queue; override the
+	// platform map manually so our image-capturing platform is used.
+	d := newTestDispatcher(fp, withSendFn(sendFn))
 	d.platforms["fake"] = fpImg
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

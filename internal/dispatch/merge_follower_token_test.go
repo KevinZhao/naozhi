@@ -50,7 +50,7 @@ func TestAckMergedFollower_SingleUseToken_SkipsTextFallback(t *testing.T) {
 	t.Parallel()
 
 	fp := &fakeSingleUseReactorless{}
-	d := newTestDispatcher(&fakePlatform{}, nil)
+	d := newTestDispatcher(&fakePlatform{})
 	d.platforms = map[string]platform.Platform{fp.Name(): fp}
 
 	msg := platform.IncomingMessage{Platform: fp.Name(), MessageID: "m1", ChatID: "c1"}
@@ -67,7 +67,7 @@ func TestAckMergedFollower_MultiSend_StillSendsTextFallback(t *testing.T) {
 	t.Parallel()
 
 	fp := &fakePlatform{} // multi-send, not a Reactor
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 
 	msg := platform.IncomingMessage{Platform: "fake", MessageID: "m1", ChatID: "c1"}
 	d.ackMergedFollower(context.Background(), msg, "fake:direct:c1", 2, nil)

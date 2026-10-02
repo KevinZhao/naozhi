@@ -33,8 +33,7 @@ func testIncomingMsg() platform.IncomingMessage {
 func TestHandleOwnerLoopPanic_SendsReplyToUser(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
-	d.queue = NewMessageQueue(5, 0)
+	d := newTestDispatcher(fp)
 
 	key := session.SessionKey("fake", "direct", "chat-panic", "general")
 	msg := testIncomingMsg()
@@ -53,8 +52,7 @@ func TestHandleOwnerLoopPanic_SendsReplyToUser(t *testing.T) {
 func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
-	d.queue = NewMessageQueue(5, 0)
+	d := newTestDispatcher(fp)
 
 	key := session.SessionKey("fake", "direct", "chat-panic", "general")
 	// Seed queued messages so we can verify Discard clears them.
@@ -74,8 +72,10 @@ func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
 func TestHandleOwnerLoopPanic_NilQueueNoCrash(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
-	d.queue = nil // Guard-based deployments leave queue unset.
+	// withQueue(nil) pins handleOwnerLoopPanic's own nil-queue guard (it is
+	// called directly here, not via BuildHandler), which production can
+	// still reach today via the Guard-based deployment path.
+	d := newTestDispatcher(fp, withQueue(nil))
 
 	// Must not panic on nil queue. The reply still goes out.
 	d.handleOwnerLoopPanic("any-key", testIncomingMsg(), "synthetic test panic", nil)
@@ -92,9 +92,8 @@ func TestHandleOwnerLoopPanic_ReplyPanicAbsorbed(t *testing.T) {
 	// swallow this cascade so the caller's outer defer is not unwound
 	// and the process can drain other owners.
 	fp := &panicReplyPlatform{}
-	d := newTestDispatcher(nil, nil) // base dispatcher without fake platform
+	d := newTestDispatcher(nil) // base dispatcher without fake platform
 	d.platforms = map[string]platform.Platform{"fake": fp}
-	d.queue = NewMessageQueue(5, 0)
 
 	// This call must not re-panic past the test frame.
 	defer func() {

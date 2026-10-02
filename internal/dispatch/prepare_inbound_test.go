@@ -12,7 +12,7 @@ import (
 // agent, and cleaned text so the dispatch-strategy tail can proceed.
 func TestPrepareInbound_ValidMessage(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 
 	p, ok := d.prepareInbound(context.Background(), incomingMsg("hello world"))
 	if !ok {
@@ -36,7 +36,7 @@ func TestPrepareInbound_ValidMessage(t *testing.T) {
 // event ID and an un-mentioned group message must both yield ok=false.
 func TestPrepareInbound_DedupAndGate(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	ctx := context.Background()
 
 	msg := platform.IncomingMessage{
@@ -63,7 +63,7 @@ func TestPrepareInbound_DedupAndGate(t *testing.T) {
 // ok=false (with no agent prefix → no reply).
 func TestPrepareInbound_EmptyTextDropped(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	if _, ok := d.prepareInbound(context.Background(), incomingMsg("   ")); ok {
 		t.Error("whitespace-only message must be dropped (ok=false)")
 	}

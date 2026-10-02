@@ -671,3 +671,88 @@ func TestConcurrent_EnqueueDrain(t *testing.T) {
 
 	wg.Wait()
 }
+
+// ---------------------------------------------------------------------------
+// ShouldNotify dropNotifyTimes path
+// ---------------------------------------------------------------------------
+//
+// #3004/T-P1: moved here from dispatch_test.go. These construct a
+// *MessageQueue directly and never touch a Dispatcher, so they belong next
+// to the rest of the MessageQueue unit tests (and will move with
+// msgqueue.go to internal/turn in #3004-B without needing to be split out
+// of dispatch_test.go at that point). All three were grouped under one
+// "ShouldNotify dropNotifyTimes path" heading in dispatch_test.go, so all
+// three move together rather than splitting the pair that reads
+// dropNotifyLRU/dropNotifyIndex directly from the one that doesn't.
+
+func TestShouldNotify_DropPath(t *testing.T) {
+	q := NewMessageQueue(0, 0)
+	if !q.ShouldNotify("k") {
+		t.Fatal("first call should return true")
+	}
+	if q.ShouldNotify("k") {
+		t.Fatal("immediate second call should be rate-limited")
+	}
+}
+
+func TestShouldNotify_DropPath_Eviction(t *testing.T) {
+	q := NewMessageQueue(0, 0)
+	for i := 0; i < dropNotifyMaxKeys; i++ {
+		q.ShouldNotify(fmt.Sprintf("key-%d", i))
+	}
+	if !q.ShouldNotify("overflow-key") {
+		t.Fatal("should notify after eviction at capacity")
+	}
+	q.mu.Lock()
+	size := q.dropNotifyLRU.Len()
+	idxSize := len(q.dropNotifyIndex)
+	q.mu.Unlock()
+	if size > dropNotifyMaxKeys {
+		t.Errorf("dropNotifyLRU size = %d > cap %d", size, dropNotifyMaxKeys)
+	}
+	if idxSize != size {
+		t.Errorf("dropNotifyIndex size %d != LRU size %d", idxSize, size)
+	}
+}
+
+// TestShouldNotify_DropPath_BackPointerConsistent pins the R249-PERF-12 (#932)
+// refactor invariant: dropNotifyIndex maps directly to *dropNotifyEntry and each
+// entry's elem back-pointer must always reference the live list element, so the
+// LRU stays in lock-step with the map across refresh and eviction.
+func TestShouldNotify_DropPath_BackPointerConsistent(t *testing.T) {
+	q := NewMessageQueue(0, 0)
+	q.ShouldNotify("a")
+	q.ShouldNotify("b")
+
+	q.mu.Lock()
+	for key, entry := range q.dropNotifyIndex {
+		if entry.elem == nil {
+			t.Fatalf("entry %q has nil elem back-pointer", key)
+		}
+		if got := entry.elem.Value.(*dropNotifyEntry); got != entry {
+			t.Fatalf("entry %q elem points at a different entry", key)
+		}
+		if entry.key != key {
+			t.Fatalf("index key %q != entry.key %q", key, entry.key)
+		}
+	}
+	q.mu.Unlock()
+
+	// Fill to capacity then overflow; the eviction must drop exactly one key
+	// and keep the map and list the same size (no dangling back-pointers).
+	for i := 0; i < dropNotifyMaxKeys; i++ {
+		q.ShouldNotify(fmt.Sprintf("fill-%d", i))
+	}
+	q.mu.Lock()
+	if q.dropNotifyLRU.Len() != len(q.dropNotifyIndex) {
+		t.Fatalf("LRU/index size mismatch after overflow: %d vs %d",
+			q.dropNotifyLRU.Len(), len(q.dropNotifyIndex))
+	}
+	for e := q.dropNotifyLRU.Front(); e != nil; e = e.Next() {
+		entry := e.Value.(*dropNotifyEntry)
+		if q.dropNotifyIndex[entry.key] != entry {
+			t.Fatalf("list entry %q missing/stale in index", entry.key)
+		}
+	}
+	q.mu.Unlock()
+}

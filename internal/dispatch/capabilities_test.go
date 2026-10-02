@@ -9,6 +9,44 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// fakeCapabilities is newTestDispatcher's default Capabilities test double
+// (#3004/T-P1). Tests used to hand DispatcherConfig the deprecated SendFn /
+// TakeoverFn closures directly; routing them through a real Capabilities
+// implementation instead matches what #3004-C2's turnSender will expect
+// (DispatcherConfig.SendFn/TakeoverFn are closure-adapter paths, not the
+// shape new callers get) and keeps the harness from drifting back to the
+// closure fields as they are deprecated. Zero value behaves like
+// NoopCapabilities' non-Send methods (Takeover=false, ReplyFooter="") so
+// tests only need to set the hooks they actually exercise.
+type fakeCapabilities struct {
+	send        func(ctx context.Context, key string, sess Session, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
+	takeover    func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+	replyFooter func(backendID string) string
+}
+
+func (f fakeCapabilities) Send(ctx context.Context, key string, sess Session, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
+	if f.send == nil {
+		return &clievent.SendResult{Text: "ok"}, nil
+	}
+	return f.send(ctx, key, sess, text, images, onEvent)
+}
+
+func (f fakeCapabilities) Takeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {
+	if f.takeover == nil {
+		return false
+	}
+	return f.takeover(ctx, chatKey, key, opts)
+}
+
+func (f fakeCapabilities) ReplyFooter(backendID string) string {
+	if f.replyFooter == nil {
+		return ""
+	}
+	return f.replyFooter(backendID)
+}
+
+var _ Capabilities = fakeCapabilities{}
+
 // R248-TEST-1: NoopCapabilities.Send must panic with a "not wired" message so
 // a misconfigured deployment fails loud at boot rather than accepting messages
 // and silently dropping the reply. Mirrors the legacy "no fallback for SendFn"
