@@ -46,8 +46,13 @@ test('cron-live claims subscribed / session_state / error without touching the s
   await expect(status).toHaveText('等待事件…');
   expect(await page.evaluate(() => wsm.subscribedKey), 'the cron ack must not become the session subscription').toBe(mainKey);
 
+  // An event the suspended sub already holds sets the re-sub threshold: after
+  // is its time (T), not the run start (about now - 5s).
+  conn.send({ type: 'event', key: 'cron:cron-001', event: ev('held', T) });
   conn.send({ type: 'session_state', key: 'cron:cron-001', state: 'running' });
-  await expect.poll(() => subs(conn, 'cron:cron-001'), { message: 'a suspended cron sub re-subscribes on running' }).toBe(2);
+  await expect.poll(() => conn.messages.filter((m) => m.type === 'subscribe' && m.key === 'cron:cron-001').slice(1),
+    { message: 'a suspended cron sub re-subscribes on running, after the last event it holds' })
+    .toEqual([{ type: 'subscribe', key: 'cron:cron-001', after: T }]);
 
   conn.send({ type: 'error', key: 'cron:cron-001', error: 'session not found' });
   await expect(status).toHaveText('已停止');
