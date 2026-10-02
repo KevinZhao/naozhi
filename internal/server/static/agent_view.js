@@ -12,7 +12,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, transcript } from './state.js';
 import { esc, escAttr, showToast, nzViews } from './nz_util.js';
-import { fetchEvents } from './dashboard.js';
+import { fetchEvents } from './event_stream.js';
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { wsm } from './ws_manager.js';
 import {
@@ -164,7 +164,7 @@ import {
   // (WS live push + HTTP-poll fallback) bounded the node count, so a long
   // agent task could OOM the tab while drilled in. Cap higher than the
   // main panel (600) because internal events are denser. We do NOT reuse
-  // dashboard.js trimEventsScroll: it mutates main-panel pagination state
+  // event_stream.js trimEventsScroll: it mutates main-panel pagination state
   // (oldestFetchedEventTime) and mounts a "load earlier" button that the agent
   // panel has no backing fetch for. This is an agent-local top-trim, mirroring
   // the cron-live appendEventsToContainer cap.

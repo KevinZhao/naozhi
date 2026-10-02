@@ -91,7 +91,7 @@
     "configureDeps": 24
   },
   "dashboard.js": {
-    "lines": 5300,
+    "lines": 4849,
     "maxFnLines": 249,
     "fnOver100": 6,
     "topLevelLetVar": 0,
@@ -107,6 +107,13 @@
   "event_render.js": {
     "lines": 420,
     "maxFnLines": 41,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0
+  },
+  "event_stream.js": {
+    "lines": 462,
+    "maxFnLines": 74,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0

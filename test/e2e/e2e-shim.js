@@ -13,6 +13,7 @@ import * as composerFiles from '/static/composer_files.js';
 import * as dashboard from '/static/dashboard.js';
 import * as discovery from '/static/discovery.js';
 import * as eventRender from '/static/event_render.js';
+import * as eventStream from '/static/event_stream.js';
 import * as fileRefs from '/static/file_refs.js';
 import * as mobileNav from '/static/mobile_nav.js';
 import * as msgNav from '/static/msg_nav.js';
@@ -52,9 +53,10 @@ function stateField(name, obj, key) {
 
 expose(authModal, ['createNewSession', 'doCreateInProject', 'getSelectedNode', 'highlight', 'openProjectPalette', 'pickPaletteCustom', 'renderNodePicker', 'wireNodePicker']);
 expose(composerFiles, ['ORIENT_MAX_WAIT_MS', 'awaitPendingOrients', 'handleFiles', 'maybeAutoOrient', 'openFilePicker', 'removeFile', 'renderFilePreviews', 'retryUpload']);
-expose(dashboard, ['appendEvents', 'applyFeatureGates', 'closeHistoryPopover', 'debouncedFetchSessions', 'fetchEvents', 'fetchSessions', 'getNodeStatus', 'maybeShowOnboarding', 'renderEvents', 'renderMainShell', 'renderSidebar', 'restorePending', 'selectSession', 'sessionCardKey', 'setActivityView', 'toggleHistory', 'trimEventsScroll', 'updateHeaderCLI', 'updateStatusBar']);
+expose(dashboard, ['applyFeatureGates', 'closeHistoryPopover', 'debouncedFetchSessions', 'fetchSessions', 'getNodeStatus', 'maybeShowOnboarding', 'renderMainShell', 'renderSidebar', 'restorePending', 'selectSession', 'sessionCardKey', 'setActivityView', 'toggleHistory', 'updateHeaderCLI', 'updateStatusBar']);
 expose(discovery, ['scanDiscovered']);
 expose(eventRender, ['eventAlreadyRendered', 'eventHtml']);
+expose(eventStream, ['appendEvents', 'fetchEvents', 'renderEvents', 'trimEventsScroll']);
 expose(fileRefs, ['isFileRefCandidate', 'sid', 'splitPathLine']);
 expose(mobileNav, ['isMobile', 'mobileEnterChat', 'mobileShowList', 'toggleSidebarCollapsed']);
 expose(msgNav, ['navDismissPopover']);
