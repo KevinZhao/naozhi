@@ -145,300 +145,379 @@ function renderMdUncached(s) {
   // Split by fenced code blocks and display math blocks (including LaTeX
   // environments like \begin{aligned}...\end{aligned}).
   const parts = mergeProseDollarBlocks(s.split(BLOCK_SPLIT_RE));
-  return parts.map(part => {
-    if (part.startsWith('```')) {
-      // Single-line fence (```ls -la```) carries no info string — everything
-      // between the backticks is code. Skip the info-string match for it,
-      // otherwise the greedy `[^\n]*` below would swallow the body as "lang".
-      const oneLine = part.indexOf('\n') === -1;
-      const m = oneLine ? null : part.match(/^```([^\n]*)\n?([\s\S]*?)```$/);
-      // Info string → lang: first word, cut at whitespace / `:` / `{` so
-      // `python:main.py` and `js {1,3}` yield `python` / `js`; restricted to a
-      // safe charset so `c++` / `c#` / `objective-c` survive intact while stray
-      // punctuation never reaches data-lang. The old `(\w*)` stopped at the
-      // first non-word char and left the remainder (`++`) in the code body.
-      const lang = m ? (m[1].trim().split(/[\s:{]/)[0] || '').replace(/[^\w+#.\-]/g, '') : '';
-      // Unclosed fence (streaming tail: BLOCK_SPLIT_RE needs a closing ```, so
-      // the remainder arrives as a plain part that still starts with ```):
-      // strip only the opening ```lang line. The old slice(3, -3) assumed a
-      // closing fence and ate the last 3 characters of live output.
-      const code = oneLine
-        ? part.replace(/^```/, '').replace(/```$/, '')
-        : m ? m[2].replace(/\n$/, '') : part.replace(/^```[^\n]*\n?/, '');
-      if (lang === 'mermaid') {
-        const id = 'mmd-' + (++mermaidCounter);
-        mermaidPending[id] = code;
-        return '<div class="mermaid-wrap"><pre id="' + id + '" class="mermaid-pending"></pre></div>';
-      }
-      // Opt-in math fence: ```math / ```latex / ```tex hand the entire block
-      // to KaTeX in displayMode. Mirrors the mermaid convention — authors
-      // explicitly mark intent so legitimate $-bearing source code (shell
-      // $VAR, Make $@, Perl $_, Python f-strings) keeps its existing
-      // verbatim rendering. KaTeX renderToString errors fall through to
-      // an error span with throwOnError:false so a malformed expression
-      // still surfaces the source instead of crashing the bubble.
-      if (lang === 'math' || lang === 'latex' || lang === 'tex') {
-        return '<div class="md-math-display">' + renderKatex(code, true) + '</div>';
-      }
-      // Path-list fence: a language-less block whose every non-empty line is a
-      // file-path literal (the shape AI emits when it lists generated files,
-      // e.g. a "here are the files I created" reply). Inside <pre><code> these
-      // paths are invisible to scanEventForFileRefs (which deliberately skips
-      // fenced blocks — see its `code.closest('pre')` guard), so they never get
-      // preview/download buttons. Render each line as its own non-<pre> <code>
-      // inside the wrap so the file-ref scanner can attach buttons, while the
-      // whole block keeps a single copy button. Requiring EVERY line to be a
-      // path candidate keeps real code blocks (which always carry at least one
-      // non-path line) on the verbatim path.
-      const pathLines = lang === '' ? deps.fencedPathList(code) : null;
-      if (pathLines) {
-        // Each row is {path, note}. The path goes in <code> so the file-ref
-        // scanner + copy see only the bare path; the optional note renders as
-        // a dimmed sibling span outside the <code> so it is visible but never
-        // folded into the path the exists-check queries.
-        const rows = pathLines.map(p => {
-          const noteHtml = p.note
-            ? '<span class="md-pathnote">' + esc(p.note) + '</span>'
-            : '';
-          return '<div class="md-pathline">' + deps.fileRefCode(esc(p.path), '') + noteHtml + '</div>';
-        }).join('');
-        return '<div class="md-code-wrap md-pathlist">' + rows +
-          '<div class="md-code-actions">' +
-            '<button type="button" class="md-code-btn md-copy-btn" data-action="code-copy" aria-label="Copy file paths">copy</button>' +
-          '</div>' +
-          '</div>';
-      }
-      const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
-      return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +
-        '<div class="md-code-actions">' +
-          '<button type="button" class="md-code-btn md-copy-btn" data-action="code-copy" aria-label="Copy code snippet">copy</button>' +
-        '</div>' +
-        '</div>';
-    }
-    // isMathDisplay re-checked here: mergeProseDollarBlocks folds a rejected
-    // `$$...$$` back into its neighbouring text, and when both neighbours are
-    // empty the merged prose part itself still starts/ends with `$$`.
-    if (part.startsWith('$$') && part.endsWith('$$') && isMathDisplay(part.slice(2, -2))) {
-      return '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>';
-    }
-    if (part.startsWith('\\[') && part.endsWith('\\]')) {
-      return '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>';
-    }
-    if (part.startsWith('\\begin{')) {
-      // Hand the whole environment to KaTeX in displayMode. KaTeX accepts
-      // `\begin{aligned}...\end{aligned}` etc. directly without outer `\[ \]`.
-      return '<div class="md-math-display">' + renderKatex(part, true) + '</div>';
-    }
-    // Pre-extract cross-line `\(...\)` before the per-line loop runs. inlineMd
-    // processes one line at a time, which would otherwise truncate multi-line
-    // inline math. Tokens survive esc() (NUL byte is not an HTML special) and
-    // get swapped back in after list/heading/table rendering completes.
-    // Alternation puts single-line `code` spans first so a `\(...\)` written
-    // inside backticks (e.g. a regex like `\(\d+\)`) is skipped here and
-    // reaches inlineMd intact, where the code-span pass claims it before the
-    // math pass (#2428). Code spans are returned verbatim — no placeholder —
-    // so nothing new can leak into later markdown stages. `[^`\n]` mirrors
-    // inlineMd's per-line code-span scope; a stray backtick pair spanning
-    // lines is not a code span there either.
-    const inlineMathTokens = [];
-    if (part.indexOf('\\(') !== -1) {
-      part = part.replace(/`[^`\n]+`|\\\(([\s\S]+?)\\\)/g, function(m, tex) {
-        if (tex === undefined) return m;
-        inlineMathTokens.push(renderKatex(tex.trim(), false));
-        return '\x00ILM' + (inlineMathTokens.length - 1) + '\x00';
-      });
-    }
-    // Process line by line for block elements. Accumulate into a chunks array
-    // + single join() at the end rather than `html +=` per line: V8 reallocates
-    // the underlying string on every concat past the small-string threshold,
-    // which is O(n^2) over line count. A 200-line response rendered ~50 times
-    // per history replay was the dominant cost in the text-event path.
-    const lines = part.split('\n');
-    const chunks = [];
-    // List state: stack of { kind: 'ol'|'ul', depth }, outermost at index 0.
-    // Replaces a single 'inList' string so we can render nested + mixed-type
-    // lists without each unordered run cleaving an enclosing ordered list.
-    // baselineCols anchors depth=0 to the first list item's column so an
-    // entire indented block does not start at depth>0.
-    const listStack = [];
-    let baselineCols = -1;
-    const closeTo = (targetTopDepth) => {
-      while (listStack.length > 0 &&
-             listStack[listStack.length - 1].depth > targetTopDepth) {
-        chunks.push('</li>');
-        chunks.push('</' + listStack.pop().kind + '>');
-      }
-      if (listStack.length === 0) baselineCols = -1;
-    };
-    const closeAll = () => closeTo(-1);
-    for (let i = 0; i < lines.length; i++) {
-      let line = lines[i];
-      // Headings
-      const hm = line.match(/^(#{1,4})\s+(.+)$/);
-      if (hm) {
-        closeAll();
-        const level = hm[1].length;
-        chunks.push('<strong class="md-h' + level + '">' + inlineMd(hm[2]) + '</strong>\n');
-        continue;
-      }
-      const li = parseListItem(line, baselineCols);
-      if (li) {
-        if (listStack.length === 0) baselineCols = li.cols;
-        // Step 1: when the new bullet matches an existing frame in the stack
-        // by *source column AND kind*, that frame owns the bullet. Pop down
-        // to it and re-use it as a sibling. This is the key correctness
-        // fix-up over the original lenient-promotion design: without it, a
-        // promoted-up sibling chain like "1. a\n- b\n- c\n" causes each `-`
-        // to first close the just-promoted <ul> (because parseListItem
-        // computes li.depth=0 from cols=0 while top.depth was promoted to 1)
-        // and then reopen a brand-new <ul> — every bullet ends up in its
-        // own one-item list. Walking the stack first lets us recognise that
-        // `- c` belongs to the `- b` frame and emit a sibling <li>.
-        for (let k = listStack.length - 1; k >= 0; k--) {
-          const f = listStack[k];
-          if (f.cols === li.cols && f.kind === li.kind) {
-            // Close everything strictly above this frame, then sibling-emit.
-            closeTo(f.depth);
-            chunks.push('</li><li>' + listItemHtml(li.content));
-            // We did NOT mutate the frame's depth, so no extra book-keeping.
-            // Skip the rest of the dispatch.
-            li.handled = true;
-            break;
-          }
-          // Another frame at strictly shallower cols means we cannot match
-          // anything further down — treat the new bullet as belonging to
-          // a position deeper than that frame.
-          if (f.cols < li.cols) break;
-        }
-        if (li.handled) continue;
-
-        // Step 2: standard depth-based dispatch (unchanged from R1).
-        const top = listStack[listStack.length - 1];
-        if (top && top.depth > li.depth) {
-          closeTo(li.depth);
-        }
-        let top2 = listStack[listStack.length - 1];
-        // Lenient nesting: an unindented bullet of the opposite kind at the
-        // same visual depth as the current frame becomes a nested child
-        // rather than slicing the parent list. LLM output routinely writes
-        // "1. parent\n- detail\n2. next" without indenting the bullets —
-        // strict CommonMark would render three separate lists (the
-        // dashboard screenshot's "全是 1." root cause). MAX_LIST_DEPTH cap
-        // keeps the stack bounded under adversarial deep-promote sequences.
-        if (top2 && top2.depth === li.depth && top2.kind !== li.kind) {
-          if (li.depth < MAX_LIST_DEPTH) {
-            li.depth = li.depth + 1;
-          } else {
-            // already at the cap → fall back to the strict same-depth swap
-            chunks.push('</li>');
-            chunks.push('</' + listStack.pop().kind + '>');
-          }
-          top2 = listStack[listStack.length - 1];
-        }
-        if (top2 && top2.depth === li.depth) {
-          if (top2.kind === li.kind) {
-            chunks.push('</li><li>' + listItemHtml(li.content));
-            continue;
-          }
-          chunks.push('</li>');
-          chunks.push('</' + listStack.pop().kind + '>');
-        }
-        // startNum=0 / negative / NaN never produce a start attribute —
-        // <ol start="0"> renders "0. 1. ..." which is jarring; let the
-        // browser fall back to default "1. 2. ..." instead.
-        const startAttr = (li.kind === 'ol' && li.startNum >= 2)
-            ? ' start="' + li.startNum + '"' : '';
-        const cls = li.kind === 'ol' ? 'md-ol' : 'md-ul';
-        chunks.push('<' + li.kind + ' class="' + cls + '"' + startAttr + '>');
-        // Frame stores li.cols too so lazy-continuation can use the original
-        // source column rather than the (possibly promoted) depth — promotion
-        // mutates depth but not the user's actual indent.
-        listStack.push({ kind: li.kind, depth: li.depth, cols: li.cols });
-        chunks.push('<li>' + listItemHtml(li.content));
-        continue;
-      }
-      // Treat all-whitespace lines as blanks: LLM/IM pipelines occasionally
-      // emit a single space on otherwise-empty lines. Without this they fall
-      // through to lazy continuation (or closeAll) and visibly fracture lists.
-      if (line === '' || /^\s+$/.test(line)) {
-        if (listStack.length > 0) {
-          // Look ahead: only keep list state when the next non-blank line is
-          // a list item OF THE SAME KIND as the active top frame. Cross-kind
-          // continuation across a blank line is exactly the case the user
-          // means as "two separate lists with paragraph break between them"
-          // — keeping state would force the next list into a nested child.
-          let peek = i + 1;
-          while (peek < lines.length && (lines[peek] === '' || /^\s+$/.test(lines[peek]))) peek++;
-          if (peek < lines.length) {
-            const pli = parseListItem(lines[peek], baselineCols);
-            const top = listStack[listStack.length - 1];
-            if (pli && pli.kind === top.kind) {
-              continue;
-            }
-          }
-          closeAll();
-        }
-        chunks.push('<div class="md-blank"></div>');
-        continue;
-      }
-      // Lazy continuation: a non-list line indented at least one step beyond
-      // the active top frame's source column folds into the open <li>. Using
-      // top.cols (raw source column) instead of top.depth keeps the threshold
-      // honest after lenient promotion bumped depth without bumping cols.
-      // Guard rails: never fold lines that *look* like a list bullet shape
-      // (ordinal capped out — see OL_START_MAX), a markdown table row, or
-      // a heading. Without these guards an indented "2024. ..." paragraph,
-      // an indented "| h | v |" table, or an indented "## sub" heading
-      // disappears into the previous <li> as silent inline text.
-      if (listStack.length > 0) {
-        const top = listStack[listStack.length - 1];
-        const cols = leadingColumns(line);
-        if (cols - top.cols >= LIST_DEPTH_STEP) {
-          const trimmed = line.trim();
-          const looksLikeBlock =
-            LIST_SHAPE_RE.test(line) ||
-            /^\|.+\|$/.test(trimmed) ||
-            /^#{1,4}\s/.test(trimmed);
-          if (!looksLikeBlock) {
-            chunks.push(' ' + inlineMd(trimmed));
-            continue;
-          }
-        }
-      }
-      closeAll();
-      // Blockquote: consecutive `>` lines merge into one <blockquote>; the
-      // marker is stripped BEFORE inlineMd so the remaining text still goes
-      // through esc(). Nested `> >` is not unwrapped (renders as literal &gt;).
-      const qm = BLOCKQUOTE_RE.exec(line);
-      if (qm) {
-        const q = [qm[1]];
-        while (i + 1 < lines.length && BLOCKQUOTE_RE.test(lines[i + 1])) {
-          q.push(BLOCKQUOTE_RE.exec(lines[++i])[1]);
-        }
-        chunks.push('<blockquote class="md-quote">' + q.map(inlineMd).join('<br>') + '</blockquote>');
-        continue;
-      }
-      if (/^\|.+\|$/.test(line.trim())) {
-        let tbl = [line];
-        while (i + 1 < lines.length && /^\|.+\|$/.test(lines[i + 1].trim())) { tbl.push(lines[++i]); }
-        chunks.push(renderTable(tbl));
-        continue;
-      }
-      chunks.push(inlineMd(line) + '<br>');
-    }
-    closeAll();
-    let rendered = chunks.join('');
-    // Restore the cross-line `\(...\)` tokens captured before the per-line
-    // loop. inlineMd tokens (`\x00KTX*\x00`) were already restored inside
-    // inlineMd itself; these ILM tokens sit at the block level.
-    if (inlineMathTokens.length > 0) {
-      rendered = rendered.replace(/\x00ILM(\d+)\x00/g, function(_, idx) {
-        return inlineMathTokens[+idx];
-      });
-    }
-    return rendered;
-  }).join('');
+  return parts.map(renderBlockPart).join('');
 }
+
+// BLOCK_RENDERERS — ordered dispatch for one `BLOCK_SPLIT_RE` part: first
+// matching `test` wins. `prose` is a catch-all (test always true) and MUST
+// stay last — fence/math parts never reach it, and nothing after it would
+// ever run. isMathDisplay is re-checked for `$$`: mergeProseDollarBlocks
+// folds a rejected `$$...$$` back into its neighbouring text, and when both
+// neighbours are empty the merged prose part itself still starts/ends with
+// `$$`.
+const BLOCK_RENDERERS = [
+  { test: (part) => part.startsWith('```'), render: renderFence },
+  {
+    test: (part) => part.startsWith('$$') && part.endsWith('$$') && isMathDisplay(part.slice(2, -2)),
+    render: (part) => '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>',
+  },
+  {
+    test: (part) => part.startsWith('\\[') && part.endsWith('\\]'),
+    render: (part) => '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>',
+  },
+  {
+    // Hand the whole environment to KaTeX in displayMode. KaTeX accepts
+    // `\begin{aligned}...\end{aligned}` etc. directly without outer `\[ \]`.
+    test: (part) => part.startsWith('\\begin{'),
+    render: (part) => '<div class="md-math-display">' + renderKatex(part, true) + '</div>',
+  },
+  { test: () => true, render: renderProse },
+];
+
+function renderBlockPart(part) {
+  for (const { test, render } of BLOCK_RENDERERS) {
+    if (test(part)) return render(part);
+  }
+  return renderProse(part);
+}
+
+// renderFence — fenced code block (```lang\n...\n```). Dispatches on the
+// info-string language via FENCE_RENDERERS; falls back to the path-list
+// shape, then verbatim code.
+function renderFence(part) {
+  // Single-line fence (```ls -la```) carries no info string — everything
+  // between the backticks is code. Skip the info-string match for it,
+  // otherwise the greedy `[^\n]*` below would swallow the body as "lang".
+  const oneLine = part.indexOf('\n') === -1;
+  const m = oneLine ? null : part.match(/^```([^\n]*)\n?([\s\S]*?)```$/);
+  // Info string → lang: first word, cut at whitespace / `:` / `{` so
+  // `python:main.py` and `js {1,3}` yield `python` / `js`; restricted to a
+  // safe charset so `c++` / `c#` / `objective-c` survive intact while stray
+  // punctuation never reaches data-lang. The old `(\w*)` stopped at the
+  // first non-word char and left the remainder (`++`) in the code body.
+  const lang = m ? (m[1].trim().split(/[\s:{]/)[0] || '').replace(/[^\w+#.\-]/g, '') : '';
+  // Unclosed fence (streaming tail: BLOCK_SPLIT_RE needs a closing ```, so
+  // the remainder arrives as a plain part that still starts with ```):
+  // strip only the opening ```lang line. The old slice(3, -3) assumed a
+  // closing fence and ate the last 3 characters of live output.
+  const code = oneLine
+    ? part.replace(/^```/, '').replace(/```$/, '')
+    : m ? m[2].replace(/\n$/, '') : part.replace(/^```[^\n]*\n?/, '');
+  // FENCE_RENDERERS is a Map, not a plain object, so a fence lang of
+  // `constructor` / `__proto__` / `toString` cannot resolve to an inherited
+  // Object.prototype member — only a lang explicitly registered below ever
+  // dispatches.
+  const fenceRenderer = FENCE_RENDERERS.get(lang);
+  if (fenceRenderer) return fenceRenderer(code);
+  // Path-list fence: a language-less block whose every non-empty line is a
+  // file-path literal (the shape AI emits when it lists generated files,
+  // e.g. a "here are the files I created" reply). Inside <pre><code> these
+  // paths are invisible to scanEventForFileRefs (which deliberately skips
+  // fenced blocks — see its `code.closest('pre')` guard), so they never get
+  // preview/download buttons. Render each line as its own non-<pre> <code>
+  // inside the wrap so the file-ref scanner can attach buttons, while the
+  // whole block keeps a single copy button. Requiring EVERY line to be a
+  // path candidate keeps real code blocks (which always carry at least one
+  // non-path line) on the verbatim path.
+  const pathLines = lang === '' ? deps.fencedPathList(code) : null;
+  if (pathLines) return renderPathListFence(pathLines);
+  return renderCodeFence(code, lang);
+}
+
+function renderMermaidFence(code) {
+  const id = 'mmd-' + (++mermaidCounter);
+  mermaidPending[id] = code;
+  return '<div class="mermaid-wrap"><pre id="' + id + '" class="mermaid-pending"></pre></div>';
+}
+
+// renderMathFence — opt-in math fence: ```math / ```latex / ```tex hand the
+// entire block to KaTeX in displayMode. Mirrors the mermaid convention —
+// authors explicitly mark intent so legitimate $-bearing source code (shell
+// $VAR, Make $@, Perl $_, Python f-strings) keeps its existing verbatim
+// rendering. KaTeX renderToString errors fall through to an error span with
+// throwOnError:false so a malformed expression still surfaces the source
+// instead of crashing the bubble.
+function renderMathFence(code) {
+  return '<div class="md-math-display">' + renderKatex(code, true) + '</div>';
+}
+
+const FENCE_RENDERERS = new Map([
+  ['mermaid', renderMermaidFence],
+  ['math', renderMathFence],
+  ['latex', renderMathFence],
+  ['tex', renderMathFence],
+]);
+
+function renderPathListFence(pathLines) {
+  // Each row is {path, note}. The path goes in <code> so the file-ref
+  // scanner + copy see only the bare path; the optional note renders as
+  // a dimmed sibling span outside the <code> so it is visible but never
+  // folded into the path the exists-check queries.
+  const rows = pathLines.map(p => {
+    const noteHtml = p.note
+      ? '<span class="md-pathnote">' + esc(p.note) + '</span>'
+      : '';
+    return '<div class="md-pathline">' + deps.fileRefCode(esc(p.path), '') + noteHtml + '</div>';
+  }).join('');
+  return '<div class="md-code-wrap md-pathlist">' + rows +
+    '<div class="md-code-actions">' +
+      '<button type="button" class="md-code-btn md-copy-btn" data-action="code-copy" aria-label="Copy file paths">copy</button>' +
+    '</div>' +
+    '</div>';
+}
+
+function renderCodeFence(code, lang) {
+  const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
+  return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +
+    '<div class="md-code-actions">' +
+      '<button type="button" class="md-code-btn md-copy-btn" data-action="code-copy" aria-label="Copy code snippet">copy</button>' +
+    '</div>' +
+    '</div>';
+}
+
+// renderProse — the non-fence, non-display-math branch: block elements
+// (headings, lists, blockquotes, tables) built line by line, with inline
+// formatting (bold/italic/code/links/inline math) handled per line by
+// inlineMd. Line-level state lives in `ctx` so LINE_HANDLERS can be plain
+// functions rather than closures.
+function renderProse(part) {
+  // Pre-extract cross-line `\(...\)` before the per-line loop runs. inlineMd
+  // processes one line at a time, which would otherwise truncate multi-line
+  // inline math. Tokens survive esc() (NUL byte is not an HTML special) and
+  // get swapped back in after list/heading/table rendering completes.
+  // Alternation puts single-line `code` spans first so a `\(...\)` written
+  // inside backticks (e.g. a regex like `\(\d+\)`) is skipped here and
+  // reaches inlineMd intact, where the code-span pass claims it before the
+  // math pass (#2428). Code spans are returned verbatim — no placeholder —
+  // so nothing new can leak into later markdown stages. `[^`\n]` mirrors
+  // inlineMd's per-line code-span scope; a stray backtick pair spanning
+  // lines is not a code span there either.
+  const inlineMathTokens = [];
+  if (part.indexOf('\\(') !== -1) {
+    part = part.replace(/`[^`\n]+`|\\\(([\s\S]+?)\\\)/g, function(m, tex) {
+      if (tex === undefined) return m;
+      inlineMathTokens.push(renderKatex(tex.trim(), false));
+      return '\x00ILM' + (inlineMathTokens.length - 1) + '\x00';
+    });
+  }
+  // ctx accumulates block-level output (chunks) + single join() at the end
+  // rather than `html +=` per line: V8 reallocates the underlying string on
+  // every concat past the small-string threshold, which is O(n^2) over line
+  // count. A 200-line response rendered ~50 times per history replay was the
+  // dominant cost in the text-event path. listStack/baselineCols are the
+  // list-nesting state LINE_HANDLERS read and mutate; `i` lets a handler
+  // consume extra lines (blockquote/table lookahead) by advancing it.
+  const ctx = { chunks: [], listStack: [], baselineCols: -1, lines: part.split('\n'), i: 0 };
+  for (ctx.i = 0; ctx.i < ctx.lines.length; ctx.i++) {
+    for (const handler of LINE_HANDLERS) {
+      if (handler(ctx)) break;
+    }
+  }
+  closeAll(ctx);
+  let rendered = ctx.chunks.join('');
+  // Restore the cross-line `\(...\)` tokens captured before the per-line
+  // loop. inlineMd tokens (`\x00KTX*\x00`) were already restored inside
+  // inlineMd itself; these ILM tokens sit at the block level.
+  if (inlineMathTokens.length > 0) {
+    rendered = rendered.replace(/\x00ILM(\d+)\x00/g, function(_, idx) {
+      return inlineMathTokens[+idx];
+    });
+  }
+  return rendered;
+}
+
+// closeTo/closeAll pop the open <li>/<ol>/<ul> tags down to (and not
+// including) a target depth. baselineCols resets to "unset" once the stack
+// is fully closed so the NEXT list anchors depth=0 to its own first item's
+// column instead of inheriting a prior list's indent.
+function closeTo(ctx, targetTopDepth) {
+  const listStack = ctx.listStack;
+  while (listStack.length > 0 && listStack[listStack.length - 1].depth > targetTopDepth) {
+    ctx.chunks.push('</li>');
+    ctx.chunks.push('</' + listStack.pop().kind + '>');
+  }
+  if (listStack.length === 0) ctx.baselineCols = -1;
+}
+function closeAll(ctx) { closeTo(ctx, -1); }
+
+function headingHandler(ctx) {
+  const line = ctx.lines[ctx.i];
+  const hm = line.match(/^(#{1,4})\s+(.+)$/);
+  if (!hm) return false;
+  closeAll(ctx);
+  const level = hm[1].length;
+  ctx.chunks.push('<strong class="md-h' + level + '">' + inlineMd(hm[2]) + '</strong>\n');
+  return true;
+}
+
+// listItemHandler — list-item dispatch (R1 depth logic + the sibling-frame
+// fix-up below). Step 1: when the new bullet matches an existing frame in
+// the stack by *source column AND kind*, that frame owns the bullet. Pop
+// down to it and re-use it as a sibling — without this, a promoted-up
+// sibling chain like "1. a\n- b\n- c\n" causes each `-` to first close the
+// just-promoted <ul> (because parseListItem computes li.depth=0 from cols=0
+// while top.depth was promoted to 1) and then reopen a brand-new <ul> —
+// every bullet ends up in its own one-item list. Walking the stack first
+// lets us recognise that `- c` belongs to the `- b` frame and emit a
+// sibling <li>. Step 2 is the standard depth-based dispatch, including
+// lenient nesting: an unindented bullet of the opposite kind at the same
+// visual depth as the current frame becomes a nested child rather than
+// slicing the parent list (LLM output routinely writes "1. parent\n-
+// detail\n2. next" without indenting the bullets), capped by
+// MAX_LIST_DEPTH against adversarial deep-promote sequences.
+function listItemHandler(ctx) {
+  const line = ctx.lines[ctx.i];
+  const li = parseListItem(line, ctx.baselineCols);
+  if (!li) return false;
+  const listStack = ctx.listStack;
+  if (listStack.length === 0) ctx.baselineCols = li.cols;
+  for (let k = listStack.length - 1; k >= 0; k--) {
+    const f = listStack[k];
+    if (f.cols === li.cols && f.kind === li.kind) {
+      // Close everything strictly above this frame, then sibling-emit. We
+      // did NOT mutate the frame's depth, so no extra book-keeping.
+      closeTo(ctx, f.depth);
+      ctx.chunks.push('</li><li>' + listItemHtml(li.content));
+      li.handled = true;
+      break;
+    }
+    // Another frame at strictly shallower cols means we cannot match
+    // anything further down — treat the new bullet as belonging to a
+    // position deeper than that frame.
+    if (f.cols < li.cols) break;
+  }
+  if (li.handled) return true;
+
+  const top = listStack[listStack.length - 1];
+  if (top && top.depth > li.depth) closeTo(ctx, li.depth);
+  let top2 = listStack[listStack.length - 1];
+  if (top2 && top2.depth === li.depth && top2.kind !== li.kind) {
+    if (li.depth < MAX_LIST_DEPTH) {
+      li.depth = li.depth + 1;
+    } else {
+      // already at the cap → fall back to the strict same-depth swap
+      ctx.chunks.push('</li>');
+      ctx.chunks.push('</' + listStack.pop().kind + '>');
+    }
+    top2 = listStack[listStack.length - 1];
+  }
+  if (top2 && top2.depth === li.depth) {
+    if (top2.kind === li.kind) {
+      ctx.chunks.push('</li><li>' + listItemHtml(li.content));
+      return true;
+    }
+    ctx.chunks.push('</li>');
+    ctx.chunks.push('</' + listStack.pop().kind + '>');
+  }
+  // startNum=0 / negative / NaN never produce a start attribute — <ol
+  // start="0"> renders "0. 1. ..." which is jarring; let the browser fall
+  // back to default "1. 2. ..." instead.
+  const startAttr = (li.kind === 'ol' && li.startNum >= 2) ? ' start="' + li.startNum + '"' : '';
+  const cls = li.kind === 'ol' ? 'md-ol' : 'md-ul';
+  ctx.chunks.push('<' + li.kind + ' class="' + cls + '"' + startAttr + '>');
+  // Frame stores li.cols too so lazy-continuation can use the original
+  // source column rather than the (possibly promoted) depth — promotion
+  // mutates depth but not the user's actual indent.
+  listStack.push({ kind: li.kind, depth: li.depth, cols: li.cols });
+  ctx.chunks.push('<li>' + listItemHtml(li.content));
+  return true;
+}
+
+// blankHandler — treat all-whitespace lines as blanks too: LLM/IM pipelines
+// occasionally emit a single space on otherwise-empty lines. Look ahead:
+// only keep list state when the next non-blank line is a list item OF THE
+// SAME KIND as the active top frame. Cross-kind continuation across a blank
+// line is exactly the case the user means as "two separate lists with
+// paragraph break between them" — keeping state would force the next list
+// into a nested child.
+function blankHandler(ctx) {
+  const line = ctx.lines[ctx.i];
+  if (line !== '' && !/^\s+$/.test(line)) return false;
+  if (ctx.listStack.length > 0) {
+    let peek = ctx.i + 1;
+    while (peek < ctx.lines.length && (ctx.lines[peek] === '' || /^\s+$/.test(ctx.lines[peek]))) peek++;
+    if (peek < ctx.lines.length) {
+      const pli = parseListItem(ctx.lines[peek], ctx.baselineCols);
+      const top = ctx.listStack[ctx.listStack.length - 1];
+      if (pli && pli.kind === top.kind) return true;
+    }
+    closeAll(ctx);
+  }
+  ctx.chunks.push('<div class="md-blank"></div>');
+  return true;
+}
+
+// listContinuationHandler — lazy continuation: a non-list line indented at
+// least one step beyond the active top frame's source column folds into the
+// open <li>. Using top.cols (raw source column) instead of top.depth keeps
+// the threshold honest after lenient promotion bumped depth without bumping
+// cols. Guard rails: never fold lines that *look* like a list bullet shape
+// (ordinal capped out — see OL_START_MAX), a markdown table row, or a
+// heading. Without these guards an indented "2024. ..." paragraph, an
+// indented "| h | v |" table, or an indented "## sub" heading disappears
+// into the previous <li> as silent inline text.
+function listContinuationHandler(ctx) {
+  if (ctx.listStack.length === 0) return false;
+  const line = ctx.lines[ctx.i];
+  const top = ctx.listStack[ctx.listStack.length - 1];
+  const cols = leadingColumns(line);
+  if (cols - top.cols < LIST_DEPTH_STEP) return false;
+  const trimmed = line.trim();
+  const looksLikeBlock =
+    LIST_SHAPE_RE.test(line) ||
+    /^\|.+\|$/.test(trimmed) ||
+    /^#{1,4}\s/.test(trimmed);
+  if (looksLikeBlock) return false;
+  ctx.chunks.push(' ' + inlineMd(trimmed));
+  return true;
+}
+
+// blockquoteHandler — consecutive `>` lines merge into one <blockquote>; the
+// marker is stripped BEFORE inlineMd so the remaining text still goes
+// through esc(). Nested `> >` is not unwrapped (renders as literal &gt;).
+// closeAll runs here unconditionally (ahead of the table/paragraph
+// fallbacks too — a no-op once the stack is already empty) because none of
+// blockquote/table/paragraph continue an open list.
+function blockquoteHandler(ctx) {
+  closeAll(ctx);
+  const line = ctx.lines[ctx.i];
+  const qm = BLOCKQUOTE_RE.exec(line);
+  if (!qm) return false;
+  const q = [qm[1]];
+  while (ctx.i + 1 < ctx.lines.length && BLOCKQUOTE_RE.test(ctx.lines[ctx.i + 1])) {
+    q.push(BLOCKQUOTE_RE.exec(ctx.lines[++ctx.i])[1]);
+  }
+  ctx.chunks.push('<blockquote class="md-quote">' + q.map(inlineMd).join('<br>') + '</blockquote>');
+  return true;
+}
+
+function tableHandler(ctx) {
+  const line = ctx.lines[ctx.i];
+  if (!/^\|.+\|$/.test(line.trim())) return false;
+  const tbl = [line];
+  while (ctx.i + 1 < ctx.lines.length && /^\|.+\|$/.test(ctx.lines[ctx.i + 1].trim())) {
+    tbl.push(ctx.lines[++ctx.i]);
+  }
+  ctx.chunks.push(renderTable(tbl));
+  return true;
+}
+
+function paragraphHandler(ctx) {
+  ctx.chunks.push(inlineMd(ctx.lines[ctx.i]) + '<br>');
+  return true;
+}
+
+// LINE_HANDLERS — tried in order per prose line; the first to return true
+// claims the line. paragraphHandler is the catch-all and MUST stay last.
+const LINE_HANDLERS = [
+  headingHandler,
+  listItemHandler,
+  blankHandler,
+  listContinuationHandler,
+  blockquoteHandler,
+  tableHandler,
+  paragraphHandler,
+];
 
 /* Inline markdown: bold, italic, code, links, math */
 // `[text]( dest "title" )` — dest is a run of non-space/non-paren chars with
@@ -450,11 +529,7 @@ const MD_LINK_RE = /\[([^\]]+)\]\(\s*((?:[^()\s]|\([^()\s]*\))+)(?:\s+(?:"([^"]*
 const MD_AUTOLINK_RE = /(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g;
 const MD_ANCHOR_SPLIT_RE = /(<a [^>]*>[\s\S]*?<\/a>)/;
 function inlineMd(s) {
-  // Extract `code` spans FIRST — before math/bold/italic — so KaTeX does not
-  // peek inside them. Previously `$NVIDIA_DEVICE_PLUGIN_IMAGE$` written inside
-  // backticks was grabbed by the `$...$` math pass and rendered as italicised
-  // subscripts, mangling legitimate shell/env-var snippets. Code content is
-  // esc()'d immediately so the final token restore emits literal text safely.
+  // `code` spans extracted FIRST so later passes never peek inside them.
   const codeTokens = [];
   if (s.indexOf('`') !== -1) {
     s = s.replace(/`([^`]+)`/g, function(_, c) {
@@ -463,19 +538,10 @@ function inlineMd(s) {
       return '\x00CODE' + idx + '\x00';
     });
   }
-  // Extract inline math before HTML escaping. Use \x00 delimiters to avoid
-  // collisions with user content. Fast path: the overwhelming majority of
-  // lines in tool output / assistant text have no math markers, so we
-  // short-circuit the two regex scans + mathTokens allocation when neither
-  // `$` nor `\(` appears. This is called once per line in renderMdUncached
-  // — on a 200-line response the savings are measurable in V8 profiler.
+  // Inline math extracted before HTML escaping, via \x00 delimiters.
   const mathTokens = [];
   if (s.indexOf('$') !== -1 || s.indexOf('\\(') !== -1) {
-    // `$...$`: require non-alphanumeric outside + math-like content inside.
-    // The outer guard (non-alphanumeric on both sides) handles the "每月$650$USD"
-    // prose case. The inner guard (isMathInline) decides whether the captured
-    // span looks like a formula — accepting plain algebra like `$x=1$` /
-    // `$2x$` / `$a+b$` which the previous LaTeX-only heuristic rejected.
+    // `$...$`: non-alphanumeric outside + isMathInline on the inside.
     s = s.replace(/(?<![A-Za-z0-9])\$([^\s\$][^\$\n]*?[^\s\$]|[^\s\$])\$(?![A-Za-z0-9])/g, function(match, tex) {
       if (!isMathInline(tex)) return match;
       const idx = mathTokens.length;
@@ -489,35 +555,13 @@ function inlineMd(s) {
     });
   }
   s = esc(s);
-  // Memory wiki-link `[[slug]]`: Claude's auto-memory cross-reference syntax
-  // occasionally leaks into chat output. Substitute before `[link](url)` runs
-  // so the [[…]] form cannot collide with the markdown link grammar
-  // (`[label](url)`); slug charset is locked to [a-zA-Z0-9_-]{1,64} which
-  // also makes path-traversal in the data-slug attribute impossible by
-  // construction. The popover handler below attaches lazily on hover/click.
-  // See docs/rfc/memory-link-rendering.md.
-  // Chip render: type prefix → color + emoji icon; tail of slug → short label.
-  // Type heuristic uses Claude's auto-memory naming convention (feedback_*,
-  // project_*, user_*, reference_*) — unknown prefixes fall back to a neutral
-  // 🧠 chip. Hover popover (below) still shows full slug + body.
-  // a11y contract: aria-label exposes the full [[slug]] to screen readers and
-  // role=link + tabindex=0 + Enter/Space handler (see popover IIFE) make the
-  // chip keyboard-activable. Copy fallback: a document-level `copy` listener
-  // rewrites clipboardData to [[slug]] when selection touches a chip, so the
-  // wiki-link survives copy/paste even though the visible glyphs are shorter.
+  // Memory wiki-link `[[slug]]`, substituted before `[link](url)` so the
+  // two grammars cannot collide. See docs/rfc/memory-link-rendering.md.
   s = s.replace(/\[\[([a-zA-Z0-9_\-]{1,64})\]\]/g, function(_, slug) {
     var m = slug.match(/^(feedback|project|user|reference)_(.+)$/);
     var type = m ? m[1] : 'memory';
-    var tail = m ? m[2] : slug;
-    var segs = tail.split('_');
-    var label = segs.slice(-3).join('_');
-    var icon = ({
-      feedback:  '💡',
-      project:   '📌',
-      user:      '👤',
-      reference: '🔗',
-      memory:    '🧠',
-    })[type];
+    var label = (m ? m[2] : slug).split('_').slice(-3).join('_');
+    var icon = ({ feedback: '💡', project: '📌', user: '👤', reference: '🔗', memory: '🧠' })[type];
     var ariaLabel = 'memory 引用：[[' + slug + ']]';
     return '<span class="md-memlink" data-slug="' + escAttr(slug) +
       '" data-type="' + type + '" tabindex="0" role="link"' +
@@ -525,128 +569,41 @@ function inlineMd(s) {
       '<span class="md-memlink-icon" aria-hidden="true">' + icon + '</span>' +
       '<span class="md-memlink-label">' + esc(label) + '</span></span>';
   });
-  // Use function-form replacements to prevent JS's special $-sequences
-  // ($&, $', $`, $n) from expanding inside the replacement string. Those
-  // sequences survive esc() (they aren't HTML entities) and would let an
-  // attacker-controlled LLM snippet splice unescaped characters into the
-  // emitted HTML by embedding `$&` inside a backtick/bold region.
-  //
-  // SECURITY CONTRACT: bold/italic regex must run AFTER esc(s) (line ~8193)
-  // AND AFTER code/wiki-link injection passes. The bold .+? capture can
-  // span injected <span>/<code> HTML; this is safe ONLY because the inner
-  // text was already esc()'d. Do NOT reorder these passes without first
-  // adding a unit test asserting the bold output never contains a raw
-  // '<' character.
+  // SECURITY CONTRACT: bold/italic regex must run AFTER esc(s) and the
+  // code/wiki-link passes above — same for strike/link below (`.+?`
+  // captures may span already-esc()'d injected HTML) — do not reorder
+  // without a test asserting the output never contains a raw '<'.
   s = s.replace(/\*\*(.+?)\*\*/g, (_, c) => '<strong>' + c + '</strong>');
-  // Italic requires the opening `*` to be followed by, and the closing `*` to
-  // be preceded by, non-whitespace — so arithmetic like `2 * 3 * 4` no longer
-  // turns into `2 <em> 3 </em> 4`. Lookbehind is already relied upon by the
-  // inline-math pass above.
   s = s.replace(/\*(?!\s)(.+?)(?<!\s)\*/g, (_, c) => '<em>' + c + '</em>');
-  // `__bold__`: both delimiters must sit at a word boundary (not touching
-  // [A-Za-z0-9_]) so `snake_case_name` / `foo__bar__baz` stay literal —
-  // mirrors GFM's flanking rule for `_`. The opener additionally rejects a
-  // preceding `/` or `.` because these passes run BEFORE the link/autolink
-  // passes: `https://x/pkg/__init__.py`, `pkg/__init__.py` (local-file
-  // rescue) and `foo.__init__()` must survive verbatim, while `a __bold__ b`
-  // and `__all__ = []` still bold. `~~del~~` gets the same opener guard so
-  // `https://x.com/a~~b~~c` is not sliced; `~/.config` and a lone ` ~~ ` are
-  // untouched by construction. Body is capped at 300 chars: an unbounded
-  // `.+?` rescans to end-of-line from every opener (quadratic on inputs like
-  // `' __a'.repeat(10000)`). Same post-esc() contract as the passes above.
+  // `__bold__`/`~~del~~` require a word boundary and no preceding `/`/`.`
+  // (so `pkg/__init__.py` survives); body capped at 300 chars.
   s = s.replace(/(?<![A-Za-z0-9_\/.])__(?!\s)(.{1,300}?)(?<!\s)__(?![A-Za-z0-9_])/g, (_, c) => '<strong>' + c + '</strong>');
   s = s.replace(/(?<![A-Za-z0-9_\/.])~~(?!\s)(.{1,300}?)(?<!\s)~~/g, (_, c) => '<del>' + c + '</del>');
-  // `![alt](url)` image syntax. The dashboard CSP (img-src 'self' data: blob:)
-  // blocks remote images, so an <img> would only ever render broken. Drop the
-  // `!` and let the link pass below handle the target: remote → clickable
-  // md-link labelled with the alt text; local path → the deps.fileRefCode rescue
-  // below, which is the existing image-preview path (preview/download buttons).
+  // `![alt](url)`: CSP blocks remote images; drop `!`, let the link pass
+  // below render the target (remote link or local file-ref rescue).
   s = s.replace(/!(?=\[[^\]]+\]\([^)]+\))/g, '');
-  // Destination grammar: one level of balanced parens is allowed inside the
-  // URL (`https://x/a_(b)`) and an optional `"title"` / `'title'` may follow
-  // after whitespace (GFM link title). The title never reaches the href; it
-  // is emitted as a title attribute through escAttr. `"` survives esc() (only
-  // & < > are encoded) so the quote delimiters match literally.
   s = s.replace(MD_LINK_RE, function(_, text, urlEsc, titleDq, titleSq) {
     const title = titleDq !== undefined ? titleDq : titleSq;
-    // `urlEsc` is the esc()'d capture (`&` → `&amp;`). Decode esc's entities
-    // before the scheme check + escAttr so the href is encoded exactly once —
-    // previously `?a=1&b=2` shipped as `?a=1&amp;amp;b=2`.
     const url = deps.decodeEscEntities(urlEsc);
     const safe = deps.safeUrl(url);
     const titleAttr = title ? ' title="' + escAttr(deps.decodeEscEntities(title)) + '"' : '';
-    // `text` is the already-esc()'d+partially-transformed capture — it may
-    // legitimately contain <strong>/<em>/<code> spans from prior passes.
-    // When the URL is rejected we still want to render the label, but
-    // returning `text` as-is lets those inline tags survive in the output
-    // stream unattached to an anchor. This is accepted (matches GitHub's
-    // behaviour) because the substituted tags are naozhi-controlled and
-    // cannot contain unescaped attacker content (each bold/italic/code
-    // substitution already used `esc()`'d capture groups).
     if (safe === '#') {
-      // Local-file link: claude CLI routinely emits generated files as
-      // markdown links `[数学/专题/foo.html](数学/专题/foo.html)` rather than
-      // backtick code. deps.safeUrl rejects the non-http target (→ '#'), so the
-      // anchor branch is skipped and the link would collapse to plain text —
-      // invisible to scanEventForFileRefs (which only walks <code>/.md-code).
-      // Re-render a path-shaped target as inline <code> so the file-ref
-      // scanner attaches the same [↗ preview][↓ download] buttons it gives
-      // backtick paths. `urlEsc` is already esc()'d (esc ran above), so embed it
-      // directly; scanEventForFileRefs reads code.textContent (browser-decoded
-      // back to the real path) when calling the exists API. Display uses the
-      // path itself rather than `text` so the user sees which file resolves —
-      // and so the scanner's textContent is the path, not a friendly label.
-      //
-      // The `urlEsc` capture is NOT raw text — earlier inlineMd passes have already
-      // tokenized it. Two classes of contamination must be rejected before the
-      // target can be embedded in <code>:
-      //   1. naozhi-injected markup: the bold/italic passes run before this and
-      //      splice <strong>/<em> spans into the capture when the target itself
-      //      contains `**`/`*` (e.g. `[a](**x**/y.html)`). A real file path
-      //      never contains `<`, so reject any `<`-bearing target.
-      //   2. tokenizer placeholders: the backtick-code and inline-math passes
-      //      replace `` `x` ``/`$x$` with \x00CODE<n>\x00 / \x00KTX<n>\x00
-      //      sentinels. \x00 is non-whitespace/non-colon so it slips through
-      //      deps.isFileRefCandidate, and the restore passes that run AFTER this one
-      //      would rewrite the sentinel into a nested <code>/<span> inside our
-      //      new <code> — malformed HTML plus a corrupted path for the scanner.
-      //      Reject any \x00-bearing target.
-      // Finally require a real extension (the same deps.FILE_REF_HAS_EXT gate
-      // deps.fencedPathList applies) so slash-shaped non-files — dates `2024/01/02`,
-      // fractions `1/2`, doc slugs without an extension — don't hijack the link
-      // into a bogus file ref with the author's label discarded.
+      // Local-file link rescue: `urlEsc` is tokenized, not raw text —
+      // reject a `<`-bearing or \x00-bearing target before it reaches
+      // deps.fileRefCode, and require a real extension.
       const target = urlEsc.trim();
       if (target.indexOf('<') === -1 && target.indexOf('\x00') === -1 && deps.isFileRefCandidate(target)) {
         const { path: bare } = deps.splitPathLine(target);
         const base = bare.slice(bare.lastIndexOf('/') + 1);
-        if (deps.FILE_REF_HAS_EXT.test(base)) {
-          return deps.fileRefCode(target);
-        }
+        if (deps.FILE_REF_HAS_EXT.test(base)) return deps.fileRefCode(target);
       }
       return text;
     }
     return '<a href="' + escAttr(safe) + '" class="md-link"' + titleAttr + ' target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
   // Auto-link bare URLs not already inside an <a> tag.
-  // R243-SEC-11 (#797): strip a wider set of trailing punctuation —
-  // including `>`, `]`, `"` and `'` — before forming the anchor. escAttr
-  // already neutralises these inside the href attribute, but stripping
-  // here also keeps them out of the link's visible text where they would
-  // otherwise dangle past sentences like `see <https://x.y/z>` or
-  // `[link](https://x.y/z)`. Defence-in-depth, not the only barrier.
-  // The URL charset additionally stops at CJK / fullwidth *punctuation* only
-  // (U+3001–3003, 3008–3011, 3014–301F, FF01–FF0F, FF1A–FF20, FF3B–FF40,
-  // FF5B–FF65) so `https://x.com/a。然后` no longer swallows the rest of the
-  // sentence, while 々〆〇 and halfwidth katakana (U+FF61–FF9F) stay legal so
-  // Japanese paths survive. It also stops at the `&lt;`/`&gt;` entities esc()
-  // emitted for `<https://…>` so the closing bracket stays out of the href.
-  // Odd segments of the split are the <a>…</a> runs emitted by the link pass
-  // above (esc() turned every authored `<` into &lt;, so `<a ` can only be
-  // ours); they are passed through untouched.
   const autolinkSeg = function(seg) {
     return seg.replace(MD_AUTOLINK_RE, function(_, prefix, url) {
-      // `shown` is still esc()'d — safe to emit as the anchor's text. `clean` is
-      // the decoded URL for the href (escAttr re-encodes it exactly once).
       var shown = url.replace(/[.,;:!?)>\]"'。，、；：！？）》」』】〉]+$/, '');
       var trail = url.slice(shown.length);
       var clean = deps.decodeEscEntities(shown);
@@ -658,11 +615,9 @@ function inlineMd(s) {
       ? autolinkSeg(s)
       : s.split(MD_ANCHOR_SPLIT_RE).map((seg, k) => (k % 2 ? seg : autolinkSeg(seg))).join('');
   }
-  // Restore math tokens after escaping
   if (mathTokens.length > 0) {
     s = s.replace(/\x00KTX(\d+)\x00/g, function(_, idx) { return mathTokens[+idx]; });
   }
-  // Restore code tokens last — their contents were esc()'d at capture time.
   if (codeTokens.length > 0) {
     s = s.replace(/\x00CODE(\d+)\x00/g, function(_, idx) {
       return deps.fileRefCode(codeTokens[+idx]);

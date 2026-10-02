@@ -147,9 +147,9 @@
     "configureDeps": 0
   },
   "render_md.js": {
-    "lines": 1095,
-    "maxFnLines": 303,
-    "fnOver100": 3,
+    "lines": 1050,
+    "maxFnLines": 97,
+    "fnOver100": 0,
     "topLevelLetVar": 6,
     "configureDeps": 0
   },
