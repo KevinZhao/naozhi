@@ -106,6 +106,11 @@ test('R6: msg forwarded to a same-file function or method whose parameter is not
   assert.ok(fwd.some((x) => /forwarded to a parameter not named msg/.test(x)), fwd.join('\n'));
 });
 
+test('R6: msg forwarded to a method its same-file object does not define', () => {
+  const p = problemsOf(CLEAN.replace('(msg) => sessionFrames.onHistory(msg)', '(msg) => sessionFrames.onEvent(msg)'));
+  assert.ok(p.some((x) => /forwarded to sessionFrames.onEvent, which sessionFrames does not define/.test(x)), p.join('\n'));
+});
+
 test('R6: msg forwarded to an imported binding is refused', () => {
   const p = problemsOf("import { cronLiveEvent } from './cron_view.js';\n" + CLEAN +
     'wsm.on(NZ_CONTRACT.WS.pong, (msg) => cronLiveEvent(msg), live);');

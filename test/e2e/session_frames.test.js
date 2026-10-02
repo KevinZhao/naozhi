@@ -10,7 +10,11 @@
 //    cursor is reset, not carried over);
 //  - a running push for the session already subscribed does not resubscribe;
 //    a dead→running push resubscribes from an initial page, and so does a
-//    running push after a suspended subscribe.
+//    running push after a suspended subscribe;
+//  - a send_error for the session on screen undoes the send this tab made
+//    (toast, optimistic bubble, running flip); for a session sent to and then
+//    left it only rolls the running flip back; a tab that sent nothing ignores
+//    it.
 // A bookkeeping write that lands on sessionFrames instead of wsm leaves wsm's
 // fields stale without throwing, so each case asserts a frame the mock saw.
 const { test, expect } = require('@playwright/test');
@@ -47,6 +51,15 @@ async function open(browser, mock, ack = {}) {
 
 // shown waits until the frame carrying uuid u-<text> has been painted.
 const shown = (page, text) => page.waitForSelector(`#events-scroll .event[data-uuid="u-${text}"]`);
+
+// sendText sends text on the selected session over the socket and waits for
+// the send frame; the mock never acks it, so the optimistic state stays up.
+async function sendText(page, conn, text) {
+  await page.evaluate((t) => { setMsgValue(document.getElementById('msg-input'), t); sendMessage(); }, text);
+  await expect.poll(() => conn.messages.filter((m) => m.type === 'send' && m.text === text).length).toBe(1);
+}
+
+const running = (page, key) => page.evaluate((k) => sessionsData[sid(k, 'local')].state, key);
 
 // barrier: frames the page sent while handling earlier frames are on the
 // socket ahead of a ping sent after them.
@@ -148,6 +161,50 @@ test.describe('sessionFrames keep the bookkeeping on wsm', () => {
     await page.waitForFunction(() => wsm._subscriptionSuspended === true);
     conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
     await reSub(conn);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a send_error for the session on screen undoes the send it failed', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    await sendText(page, conn, 'm1');
+    const bubble = page.locator('#events-scroll .event.user.optimistic-msg');
+    await expect(bubble).toHaveCount(1);
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    expect(await running(page, KEY_A)).toBe('running');
+
+    conn.send({ type: 'send_error', key: KEY_A, error: 'boom' });
+    await expect(page.locator('#toast')).toHaveClass(/\berror\b/);
+    await expect(page.locator('#toast')).toContainText('发送消息失败');
+    await expect(page.locator('#toast')).toContainText('boom');
+    await expect(bubble, 'the failed send\'s bubble is removed').toHaveCount(0);
+    await expect(page.locator('#btn-send')).toBeVisible();
+    expect(await running(page, KEY_A), 'the running flip is rolled back').toBe('ready');
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a send_error for a session sent to and left only rolls its running flip back', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    await sendText(page, conn, 'm2');
+    await page.click(`.session-card[data-key="${KEY_B}"]`);
+    await page.waitForFunction((key) => selectedKey === key, KEY_B);
+    expect(await running(page, KEY_A)).toBe('running');
+
+    conn.send({ type: 'send_error', key: KEY_A, error: 'boom' });
+    // Well inside the 20s safety timer, so only the send_error can roll it back.
+    await expect.poll(() => running(page, KEY_A), { message: 'the running flip is rolled back' }).toBe('ready');
+    await expect(page.locator('#toast'), 'no toast for a session off screen').not.toContainText('发送消息失败');
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a send_error for a send this tab never made is ignored', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    conn.send({ type: 'send_error', key: KEY_A, error: 'boom' });
+    conn.send({ type: 'event', key: KEY_A, event: ev('n1', Date.now() + 60000) });
+    await shown(page, 'n1'); // the send_error ahead of it has been handled
+    await expect(page.locator('#toast')).not.toContainText('发送消息失败');
     expect(errors).toEqual([]);
     await ctx.close();
   });

@@ -13,7 +13,9 @@
 //   R4  blind guard: at least as many registrations as outbound types.
 //   R6  a handler / claim that takes a parameter names it `msg`; a handler that
 //       forwards `msg` to a same-file function reaches a parameter named `msg`;
-//       forwarding it to an imported binding is refused. check-ws-contract's
+//       forwarding it to a method its same-file object literal does not
+//       define (a handler left on wsm after a move) or to an imported binding
+//       is refused. check-ws-contract's
 //       field check only reads `msg.<field>`, so a renamed parameter would
 //       drop that handler's reads out of it without a sound.
 //
@@ -93,7 +95,14 @@ export function checkSource(file, src, outbound) {
           let o = c.callee.object;
           while (o.type === 'MemberExpression') o = o.object;
           root = o.type === 'Identifier' ? o.name : null;
-          if (c.callee.object.type === 'Identifier') target = objs.get(c.callee.object.name)?.get(c.callee.property.name);
+          if (c.callee.object.type === 'Identifier') {
+            const obj = objs.get(c.callee.object.name);
+            target = obj?.get(c.callee.property.name);
+            if (obj && !target) {
+              problems.push(`${at(c)}: msg is forwarded to ${c.callee.object.name}.${c.callee.property.name}, which ${c.callee.object.name} does not define (R6)`);
+              return;
+            }
+          }
         }
         if (target) {
           const p = target.params[i];
