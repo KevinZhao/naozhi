@@ -20,7 +20,7 @@ func TestNewRouter_ObserverAndCostRunOwnerFromConfig(t *testing.T) {
 	if changes != 1 || retired != "k/s" {
 		t.Errorf("observer saw changes=%d retired=%q", changes, retired)
 	}
-	if !r.costAcct.owned("cron:j") || r.costAcct.owned("cron:other") {
+	if !r.runs.cost.owned("cron:j") || r.runs.cost.owned("cron:other") {
 		t.Error("cost-run ownership does not consult RouterConfig.CostRunOwner")
 	}
 }

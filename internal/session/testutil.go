@@ -136,7 +136,7 @@ func (p *TestProcess) Effort() string      { return p.EffortVal }
 func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	s := &ManagedSession{
 		key:      key,
-		runStore: r.sessionRuns, // mirror production wiring so Send records runs
+		runStore: r.runs.runs, // mirror production wiring so Send records runs
 	}
 	if proc != nil { // typed-nil *TestProcess must not become a non-nil iface
 		s.storeProcess(proc)

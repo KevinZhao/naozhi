@@ -86,7 +86,7 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	r.hist.clearAttachmentTrackerRefs(key, snap.workspace)
 	// Free the resident run-history ring (on-disk records stay) so the
 	// per-session ring map stays bounded.
-	r.sessionRuns.Invalidate(key)
+	r.runs.Invalidate(key)
 	// Wake a Shutdown waiting on this session running: it has left the
 	// table, so the wait predicate may now pass.
 	r.ss.Update(func(tx sessTx) { tx.Broadcast() })
@@ -674,10 +674,8 @@ func (r *Router) shutdown() {
 	r.hist.stopAttachmentTracker()
 
 	// Flush the session-run-history write worker so records from the final
-	// turns reach disk. Close blocks on the bounded queue draining; nil store is a no-op.
-	r.sessionRuns.Close()
-	// Same for the cost ledger: its worker fsyncs the tail of the day file.
-	if r.costAcct != nil {
-		r.costAcct.ledger.Close()
-	}
+	// turns reach disk, and the cost ledger's day-file worker (fsyncs its
+	// tail). Both block on their bounded queues draining; RunLedger.Close is
+	// a no-op where either half is disabled.
+	r.runs.Close()
 }

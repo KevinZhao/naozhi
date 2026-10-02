@@ -22,10 +22,10 @@ const (
 	// routerFieldBaseline counts Router's field names; an embedded field is 1.
 	// A type that stands in for Router (see routerTypeRefBaseline) adds its
 	// own fields, the embedded Router excluded.
-	routerFieldBaseline = 24
+	routerFieldBaseline = 23
 	// routerMethodBaseline counts methods whose receiver is Router, *Router
 	// or a type that stands in for Router.
-	routerMethodBaseline = 108
+	routerMethodBaseline = 105
 	// routerTypeRefBaseline counts the identifier Router outside method
 	// receivers and its own declaration: parameters, results, fields,
 	// aliases, conversions, composite literals. A package func taking *Router

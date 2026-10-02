@@ -105,7 +105,7 @@ func runStoresHealthProbe(cronRunStore func() cron.RunStoreHealth, router *sessi
 			}
 		}
 		if router != nil {
-			if sr := router.SessionRunsHealth(); sr.Enabled {
+			if sr := router.Runs().Health(); sr.Enabled {
 				rs.Session = &healthSessionRunStore{
 					WriteFailedDiskFull: sr.WriteFailedDiskFull,
 					WriteFailedOther:    sr.WriteFailedOther,
