@@ -11,7 +11,7 @@ const SESSION_KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
 
 test.describe('dismiss failure restores the sidebar card', () => {
   let mock;
-  test.beforeAll(async () => { mock = await startMockServer({ deleteStatus: 500 }); });
+  test.beforeAll(async () => { mock = await startMockServer({ deleteStatus: 500, ws: true }); });
   test.afterAll(() => mock.server.close());
 
   test('card reappears after DELETE /api/sessions returns 500', async ({ browser }) => {
@@ -19,6 +19,17 @@ test.describe('dismiss failure restores the sidebar card', () => {
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector(`.session-card[data-key="${SESSION_KEY}"]`);
+
+    // Only the failed DELETE's re-sync may bring the card back, so nothing
+    // else may refetch the list in the window: the WS is up (no fallback
+    // polling), the 5s poll is stopped and the load-time refetches are done.
+    await page.evaluate(() => {
+      // @ts-ignore
+      clearInterval(window.nz.test.sessionPollTimer);
+      // @ts-ignore
+      window.nz.test.sessionPollTimer = null;
+    });
+    await page.waitForLoadState('networkidle');
 
     // Drive the same entry point the × button uses. dismissSession is a
     // top-level function declaration so it is reachable on window.
