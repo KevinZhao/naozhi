@@ -5,6 +5,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/routerrelay"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 // manualDebounceTimer stands in for the debouncer's *time.Timer: it fires
@@ -326,15 +329,22 @@ func TestWSBroadcaster_DebounceFiresSessionsUpdate(t *testing.T) {
 	}
 }
 
-// TestHub_BroadcastSessionsUpdateForwardsToBroadcaster covers the Hub-level
-// entry point every sessions_update producer still calls (routerEvents,
-// scratch, discovery, the node cache, server loops): a NewHub-built hub must
-// route BroadcastSessionsUpdate into bcast's debounce window, and that
-// window's fire must deliver sessionsUpdateMsg to an authenticated client.
-// TestWSBroadcaster_DebounceFiresSessionsUpdate drives the broadcaster
-// directly and stays green with the Hub forward emptied.
-func TestHub_BroadcastSessionsUpdateForwardsToBroadcaster(t *testing.T) {
-	hub, _ := newTestHub("tok")
+// TestBuildServer_SessionsChangedReachesHubClients drives one construction-
+// time producer end to end: the router relay buildDashboard binds to
+// w.bcast must open a debounce window on the Hub's own broadcaster, and that
+// window's fire must deliver sessionsUpdateMsg to a client registered on the
+// Hub. TestWSBroadcaster_DebounceFiresSessionsUpdate drives a broadcaster
+// directly and stays green if the producer is bound to a different one.
+func TestBuildServer_SessionsChangedReachesHubClients(t *testing.T) {
+	relay := &routerrelay.Relay{}
+	srv, _ := buildServerWithHandlers(ServerOptions{
+		Addr:    ":0",
+		Router:  session.NewRouter(session.RouterConfig{Observer: relay}),
+		Backend: "claude",
+		Relays:  RelayOptions{Router: relay},
+	})
+	t.Cleanup(srv.appCancel)
+	hub := srv.hub
 	t.Cleanup(hub.Shutdown)
 	timer := &manualDebounceTimer{}
 	hub.bcast.debounce.timer = timer // idle until the first trigger below
@@ -342,9 +352,9 @@ func TestHub_BroadcastSessionsUpdateForwardsToBroadcaster(t *testing.T) {
 	c.authenticated.Store(true)
 	registerSub(hub, c, "")
 
-	hub.BroadcastSessionsUpdate()
+	relay.SessionsChanged()
 	if !timer.expire() {
-		t.Fatal("Hub.BroadcastSessionsUpdate did not open a debounce window on bcast")
+		t.Fatal("the router relay's SessionsChanged did not open a debounce window on the Hub's bcast")
 	}
 	hub.bcast.debounce.onTimer()
 

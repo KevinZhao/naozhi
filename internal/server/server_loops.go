@@ -96,6 +96,6 @@ func (s *Server) projectScanTick() {
 		if s.router != nil {
 			s.router.BumpVersion()
 		}
-		s.hub.BroadcastSessionsUpdate()
+		s.hub.bcast.BroadcastSessionsUpdate()
 	}
 }

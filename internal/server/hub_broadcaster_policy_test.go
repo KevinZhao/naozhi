@@ -25,7 +25,7 @@ func TestHubBroadcaster_DropsSysessionErrorMsg(t *testing.T) {
 	c.authenticated.Store(true)
 	registerSub(hub, c, "")
 
-	b := newHubBroadcaster(hub)
+	b := newHubBroadcaster(hub.bcast)
 	ended := func(sub runtelemetry.Subsystem) runtelemetry.RunEndedEvent {
 		return runtelemetry.RunEndedEvent{
 			Subsystem: sub, OwnerID: "autotitler", RunID: "aaaabbbbccccdddd",
@@ -74,9 +74,9 @@ func TestHubBroadcaster_DropsSysessionErrorMsg(t *testing.T) {
 
 // TestHubBroadcaster_RunStartedReachesClient drives run_started through the
 // seam cron and sysession are bound to in production
-// (runTelemetry.Bind(newHubBroadcaster(s.hub))), so the hubBroadcaster method
-// and the Hub's forward to bcast are both on the path. The marshal tests call
-// hub.bcast directly and would stay green with either link dropped.
+// (runTelemetry.Bind(newHubBroadcaster(w.bcast))), so the hubBroadcaster
+// method is on the path. The marshal tests call hub.bcast directly and would
+// stay green with that link dropped.
 func TestHubBroadcaster_RunStartedReachesClient(t *testing.T) {
 	hub, _ := newTestHub("tok")
 	t.Cleanup(hub.Shutdown)
@@ -84,14 +84,14 @@ func TestHubBroadcaster_RunStartedReachesClient(t *testing.T) {
 	c.authenticated.Store(true)
 	registerSub(hub, c, "")
 
-	newHubBroadcaster(hub).BroadcastRunStarted(runtelemetry.RunStartedEvent{
+	newHubBroadcaster(hub.bcast).BroadcastRunStarted(runtelemetry.RunStartedEvent{
 		Subsystem: runtelemetry.SubsystemCron, OwnerID: "job1", RunID: "aaaabbbbccccdddd",
 		Trigger: runtelemetry.TriggerManual, StartedAt: time.Now(),
 	})
 
 	data, ok := recvRaw(t, c)
 	if !ok {
-		t.Fatal("run_started never reached the authenticated client through newHubBroadcaster(hub)")
+		t.Fatal("run_started never reached the authenticated client through newHubBroadcaster(hub.bcast)")
 	}
 	var frame wsproto.RunStarted
 	if err := json.Unmarshal(data, &frame); err != nil {

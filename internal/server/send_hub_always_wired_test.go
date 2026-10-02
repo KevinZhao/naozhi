@@ -11,21 +11,45 @@ import (
 // (#2634). ServerOptions.Headless promised a Server "wired without a
 // dashboard Hub on purpose"; after #2552 no constructor path could produce
 // one — buildDashboard runs unconditionally — so the flag documented a state
-// that did not exist and its fail-loud gate was reachable only from a
-// hand-built &Server{}. What is worth pinning is the fact that made the flag
-// dead: every constructed Server has a Hub with an engine, and the IM / cron
-// send entry reaches that engine.
+// that did not exist. What is worth pinning is the fact that made the flag
+// dead: every constructed Server has a Hub with an engine, and the IM entry
+// (serverCaps, which buildDispatcher hands the dispatcher) holds that same
+// engine.
 func TestSendWithBroadcast_HubAlwaysWired(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
-	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
+	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	t.Cleanup(srv.appCancel)
 
 	if srv.hub == nil || srv.hub.engine == nil {
-		t.Fatal("NewWithOptions produced a Server without a Hub / send engine — the hub-less mode #2634 removed has come back")
+		t.Fatal("buildServer produced a Server without a Hub / send engine — the hub-less mode #2634 removed has come back")
 	}
-	// The nil-session guard is the only branch left before delegation.
-	if _, err := srv.sendWithBroadcast(context.Background(), "k", nil, "hi", nil, nil); err == nil {
-		t.Fatal("sendWithBroadcast with nil session must return an error")
+	if hs.wiring.engine != srv.hub.engine {
+		t.Fatal("wiring.engine is not the Hub's engine — the dispatcher's serverCaps would send through a different pipeline than the dashboard")
 	}
+	caps := serverCaps{s: srv, send: hs.wiring.engine}
+	// The nil-session guard is the only branch before delegation.
+	if _, err := caps.Send(context.Background(), "k", nil, "hi", nil, nil); err == nil {
+		t.Fatal("serverCaps.Send with nil session must return an error")
+	}
+}
+
+// TestBuildDispatcher_RequiresEngine pins buildDispatcher's construction-time
+// refusal: without it a wiring that skipped buildWSStack would build a
+// dispatcher whose first IM message nil-derefs inside serverCaps.Send.
+func TestBuildDispatcher_RequiresEngine(t *testing.T) {
+	t.Parallel()
+	router := session.NewRouter(session.RouterConfig{})
+	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
+	t.Cleanup(srv.appCancel)
+
+	// The Server is already built; dropping the engine from its wiring now
+	// only affects the second buildDispatcher call below.
+	hs.wiring.engine = nil
+	defer func() {
+		if recover() == nil {
+			t.Fatal("buildDispatcher accepted a wiring with no engine")
+		}
+	}()
+	srv.buildDispatcher(hs.wiring)
 }

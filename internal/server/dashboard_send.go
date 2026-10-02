@@ -55,8 +55,8 @@ func rejectIfTooManyFields(w http.ResponseWriter, r *http.Request) bool {
 // `h.hub != nil` in five places — the HTTP layer asking whether the WebSocket
 // layer exists — and now depends only on the send pipeline it actually uses.
 // It is NOT optional: build it with newSendEngine (production wiring passes
-// s.hub.engine), never as a zero value. See sendEngine's godoc for what each
-// zero field breaks.
+// buildWSStack's w.engine), never as a zero value. See sendEngine's godoc for
+// what each zero field breaks.
 //
 // There is deliberately no router field (#2632). Until then the handler held
 // a SendRouter view AND reached engine.router for writes — two handles on one

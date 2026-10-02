@@ -13,7 +13,8 @@
 //	C3 accessor: no FuncDecl or FuncLit (other than newSendEngine) may return
 //	   *sendEngine.
 //	C4 holder whitelist: a struct field of type *sendEngine must be one of
-//	   Hub.engine, SendHandler.engine, wiring.engine, serverCaps.send.
+//	   Hub.engine, SendHandler.engine, wiring.engine, serverCaps.send,
+//	   HubOptions.Engine.
 //	C5 Hub is not a notifier: *Hub must not declare BroadcastSessionReady,
 //	   BroadcastSessionsUpdate, broadcastState or broadcastSendError.
 //	C6 notifier does not point back: any type declaring broadcastState or
@@ -51,23 +52,20 @@ import (
 )
 
 // siblingCtorBaseline is the count of newSendEngine( / buildWSStack( call
-// sites outside their one allowed caller. Today (#2897 S5a) buildWSStack does
-// not exist yet, so this is just NewHub's own newSendEngine( call; S5c2
-// introduces buildWSStack and drives this to 0.
-const siblingCtorBaseline = 1
+// sites outside their one allowed caller. Zero since buildWSStack became the
+// engine's only constructor (#2897 S5c2); the constant stays as a strict check.
+const siblingCtorBaseline = 0
 
 // siblingEngineReachBaseline is the count of `.engine` selectors whose base
-// is not an allowed one. Today: build_dashboard.go's `s.hub.engine`,
-// send.go's `s.hub.engine.sendWithBroadcast`, and NewHub's own `h.engine =`
-// assignment (NewHub is a constructor, not a *Hub method, so its local `h`
-// does not qualify as a receiver).
-const siblingEngineReachBaseline = 3
+// is not an allowed one. Zero: the build steps take the engine from wiring
+// and NewHub sets it in the Hub literal (#2897 S5c2). The constant stays as a
+// strict check.
+const siblingEngineReachBaseline = 0
 
 // siblingHubNotifierBaseline is the count of sendNotifier-shaped methods
-// still declared on *Hub. Today: the one-line BroadcastSessionsUpdate
-// forward to wsBroadcaster that the composition root's producers still
-// call; S5c2 rewires them to the broadcaster and drives this to 0.
-const siblingHubNotifierBaseline = 1
+// still declared on *Hub. Zero since the producers bind to the broadcaster
+// itself (#2897 S5c2); the constant stays as a strict check.
+const siblingHubNotifierBaseline = 0
 
 // siblingFieldReadBaseline is the count of direct `h.engine.<field>` /
 // `h.bcast.<field>` reads inside *Hub methods, as opposed to method calls.
@@ -76,14 +74,14 @@ const siblingHubNotifierBaseline = 1
 const siblingFieldReadBaseline = 0
 
 // sendEngineHolders are the only (ownerType, fieldName) pairs allowed to
-// declare a *sendEngine field (C4). wiring.engine and serverCaps.send do not
-// exist until S5c2; listing them now means this rule does not need to change
-// again when they land.
+// declare a *sendEngine field (C4). HubOptions.Engine is the hand-off from
+// buildWSStack into NewHub, which copies it into Hub.engine.
 var sendEngineHolders = map[string]map[string]bool{
 	"Hub":         {"engine": true},
 	"SendHandler": {"engine": true},
 	"wiring":      {"engine": true},
 	"serverCaps":  {"send": true},
+	"HubOptions":  {"Engine": true},
 }
 
 // hubNotifierMethods are the sendNotifier-shaped names *Hub must not declare
@@ -378,7 +376,7 @@ func scanSiblingHolderWhitelist(fset *token.FileSet, files []siblingSrcFile) []V
 					}
 					out = append(out, Violation{Rule: "send_engine_sibling", File: filepath.ToSlash(sf.path),
 						Line:    fset.Position(fld.Pos()).Line,
-						Message: fmt.Sprintf("%s.%s holds a *sendEngine; only Hub.engine, SendHandler.engine, wiring.engine and serverCaps.send may (C4) — a new holder is a new way to pass the engine around outside the composition root", ts.Name.Name, fname)})
+						Message: fmt.Sprintf("%s.%s holds a *sendEngine; only Hub.engine, SendHandler.engine, wiring.engine, serverCaps.send and HubOptions.Engine may (C4) — a new holder is a new way to pass the engine around outside the composition root", ts.Name.Name, fname)})
 				}
 			}
 			return true

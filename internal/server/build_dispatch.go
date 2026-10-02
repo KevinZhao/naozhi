@@ -39,6 +39,12 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 	if w.resolver != nil {
 		resolver = w.resolver
 	}
+	// The engine comes from buildWSStack, which buildDashboard has run by
+	// now; without it every IM send would nil-deref on its first message.
+	caps := serverCaps{s: s, send: w.engine}
+	if caps.send == nil {
+		panic("server: buildDispatcher needs w.engine; buildDashboard must run first")
+	}
 	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:                router,
 		Platforms:             s.platforms,
@@ -52,7 +58,7 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 		Dedup:                 w.dedup,
 		AllowedRoot:           w.allowedRoot,
 		ClaudeDir:             s.claudeDir,
-		Capabilities:          serverCaps{s: s},
+		Capabilities:          caps,
 		NoOutputTimeout:       s.noOutputTimeout,
 		TotalTimeout:          s.totalTimeout,
 		WatchdogNoOutputKills: w.watchdog.noOutPtr(),

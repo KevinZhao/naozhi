@@ -88,6 +88,10 @@ type Hub struct {
 	engine *sendEngine
 }
 
+type HubOptions struct {
+	Engine *sendEngine
+}
+
 func NewHub(opts HubOptions) *Hub {
 	return &Hub{engine: opts.Engine}
 }
@@ -277,7 +281,7 @@ func TestScanSiblingHolderWhitelist(t *testing.T) {
 	t.Parallel()
 	fset, files := parseSiblingPkg(t, siblingCleanPkg())
 	if vs := scanSiblingHolderWhitelist(fset, files); len(vs) != 0 {
-		t.Fatalf("clean (Hub.engine, wiring.engine, serverCaps.send all whitelisted): want 0, got %d: %+v", len(vs), vs)
+		t.Fatalf("clean (Hub.engine, HubOptions.Engine, wiring.engine, serverCaps.send all whitelisted): want 0, got %d: %+v", len(vs), vs)
 	}
 
 	// m7: a new struct holds *sendEngine.
@@ -451,6 +455,6 @@ func TestRatchetViolation(t *testing.T) {
 func TestScanSendEngineSibling_RealPackage(t *testing.T) {
 	t.Parallel()
 	if vs := scanSendEngineSibling("../../internal/server"); len(vs) != 0 {
-		t.Errorf("internal/server should sit exactly at today's baselines (#2897 S5a): %+v", vs)
+		t.Errorf("internal/server should sit exactly at today's baselines: %+v", vs)
 	}
 }

@@ -10,8 +10,9 @@ import (
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
-// Broadcaster is the subset of *server.Hub the scratch handler uses to nudge
-// the sidebar after open/delete/promote, without reverse-importing server.
+// Broadcaster is the subset of the server's WebSocket broadcaster the scratch
+// handler uses to nudge the sidebar after open/delete/promote, without
+// reverse-importing server.
 type Broadcaster interface {
 	BroadcastSessionsUpdate()
 }

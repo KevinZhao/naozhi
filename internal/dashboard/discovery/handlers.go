@@ -58,7 +58,7 @@ type Handlers struct {
 	router          SessionRouter
 	allowedRoot     string
 	defaultAgent    session.AgentOpts // agents["general"]
-	broadcast       func()            // hub.BroadcastSessionsUpdate
+	broadcast       func()            // bcast.BroadcastSessionsUpdate
 	validateWS      func(ws, root string) (string, error)
 	verifyProcIdent func(pid int, expectedStartTime uint64) bool
 	// procStartTime reads /proc start_time for a pid; feeds the pidfd-based
