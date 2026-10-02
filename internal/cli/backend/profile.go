@@ -78,7 +78,7 @@ type Profile struct {
 	// out controls. Distinct from protocol-level cli.Caps. Keys the frontend
 	// hard-codes: "askuser", "passthrough", "embedded_context", "image_input",
 	// "audio_input", "mcp_http", "mcp_sse". Missing key == false. Adding a
-	// feature: extend dashboard.js featureForCurrent + every supporting Profile.
+	// feature: extend features.js featureForCurrent + every supporting Profile.
 	Features map[string]bool
 
 	// AssetProvider, when non-nil, exposes this backend's installed assets to
