@@ -1,42 +1,34 @@
-// Rule turn_boundary (#2897 T3004 A1): gates the turn-orchestration merge
-// land BEFORE any of the structural moves they protect, per #3004's design.
-// Four checks, all AST-only over non-test production files, all ratchets
-// (own *Baseline constant, both directions checked — a lowered count without
-// a lowered constant fails exactly like a raised one):
+// Rule turn_boundary gates #3004's turn-orchestration merge before any of
+// its structural moves land (#2897 T3004 A1). Three checks, AST-only over
+// non-test production files, each a ratchet with its own *Baseline constant
+// checked in both directions (a lowered count without a lowered constant
+// fails exactly like a raised one):
 //
 //	G-a ctx marker: call sites of WithPassthrough/IsPassthrough/WithUrgent/
-//	   IsUrgent (never their own func declarations — an *ast.CallExpr-only
-//	   walk cannot match a FuncDecl), plus context.WithValue( call sites.
-//	   Scans dispatch/server/turn, because turn is where C1's Orchestrator
-//	   legitimately reads request-level fields instead of a ctx marker — the
-//	   count must still see it appear there if someone backslides.
-//	G-b queue escape: .Enqueue(/.DoneOrDrain( call sites in dispatch/server
-//	   ONLY. Deliberately excludes turn: once B moves MessageQueue there,
-//	   turn's own Submit/loop implementation calls these legitimately, and
-//	   G-b is asking whether anything OUTSIDE turn still reaches around the
-//	   port.
-//	G-d slash literals: the six `"/new"`/`"/new "`/`"/clear"`/`"/clear "`/
-//	   `"/urgent"`/`"/urgent "` string literals in dispatch/server ONLY.
-//	   Deliberately excludes turn: turn/parse.go is their one sanctioned home
-//	   from C1 onward (#3004 分叉 3/6), so a literal appearing there is not
-//	   a boundary violation and must not block that PR's own gate value.
+//	   IsUrgent, bare or qualified (never their own func declarations — an
+//	   *ast.CallExpr-only walk cannot match a FuncDecl), in dispatch, server,
+//	   turn and upstream; plus context.WithValue( call sites in dispatch,
+//	   server and turn.
+//	G-b queue escape: .Enqueue(/.DoneOrDrain( call sites in dispatch, server
+//	   and upstream. turn is excluded: it is where the queue's own drain
+//	   protocol is meant to live, so G-b asks whether anything outside turn
+//	   still reaches around the port.
+//	G-d slash literals: the six "/new"/"/clear"/"/urgent" (with and without
+//	   a trailing space) string literals in dispatch/server. turn is
+//	   excluded: turn/parse.go is their one sanctioned home.
 //
-// G-c (the matching reflect check that *MessageQueue's and
-// dispatch.SessionRouter's exported method sets equal an explicit list of
-// names) lives in internal/dispatch/queue_surface_test.go instead: it reads
-// no source file, so it runs under `go test`, not this AST scan.
+// upstream is scanned by G-a's marker slice and G-b because its send RPC is
+// the third turn entry (#3004 decision 6, deferred to its own issue): the
+// most likely place for a new caller to bypass the port unseen.
 //
-// internal/turn does not exist until #2897 T3004-C1. turnBoundaryDirs mirrors
-// the dirExists filter lateSetterPkgs already uses for session/cron/sysession
-// upstream: an absent turn directory is scanned as empty, which is correct
-// today (every one of G-a/G-b/G-d's baseline occurrences already sits in
-// dispatch/server, matching #3004's measured state) and stays correct once
-// C1 adds the directory, because the three checks above read it (or
-// deliberately don't) by design, not by its mere presence. The dispatch and
-// server directories are not optional: scanTurnBoundary reports a Violation
-// (rather than silently scanning nothing) if either is unreadable, so a
-// misconfigured -server-pkg cannot narrow G-a/G-b/G-d's scope the way it
-// would be allowed to for the optional dashboard package.
+// G-c (*MessageQueue's and dispatch.SessionRouter's exported method sets)
+// lives in internal/dispatch/queue_surface_test.go: it reads no source, so
+// it runs under `go test`.
+//
+// dispatch and server are required: an unreadable one is reported, so a
+// misconfigured -server-pkg cannot narrow the scope. turn (absent until
+// #3004's C1) and upstream are scanned only if present; C1 must make turn
+// required once it creates the package.
 package main
 
 import (
@@ -50,32 +42,21 @@ import (
 	"strings"
 )
 
-// turnCtxMarkerBaseline is G-a's first slice: call sites of the four ctx
-// marker functions. 6 on master (dispatch.go:526, commands.go:221 ×2,
-// send.go:58/92/355) — #3004's measured state. Falls to 3 at C2 (dispatch's
-// three calls move into turn), 0 at D (send.go's three calls go with it;
-// WithPassthrough/IsPassthrough/WithUrgent/IsUrgent are deleted).
+// turnCtxMarkerBaseline is G-a's first slice: ctx marker call sites. 6 is
+// #3004's measured state; it only goes down (#3004 has the per-phase plan).
 const turnCtxMarkerBaseline = 6
 
-// turnCtxWithValueBaseline is G-a's second slice: internal/dispatch's and
-// internal/server's own context.WithValue( call sites (not stdlib's, not
-// turn's — turn's Admission port may reasonably need one of its own). 1
-// today: withSendOpts in passthrough_ctx.go. Falls to 0 when D deletes that
-// file.
+// turnCtxWithValueBaseline is G-a's second slice: context.WithValue( call
+// sites in dispatch, server and turn (today only withSendOpts in
+// dispatch/passthrough_ctx.go). 1 is #3004's measured state; the target is 0.
 const turnCtxWithValueBaseline = 1
 
-// turnQueueEscapeBaseline is G-b: .Enqueue(/.DoneOrDrain( call sites in
-// dispatch/server. 4 today (dispatch.go:538/631, send.go:255,
-// send_owner_loop.go:44). B does not change this count (the callers don't
-// move, only the type's package does); C2 drops it to 2 (IM's two calls move
-// into turn.Orchestrator.Submit/the drain loop); D drops it to 0.
+// turnQueueEscapeBaseline is G-b: .Enqueue(/.DoneOrDrain( call sites outside
+// turn. 4 is #3004's measured state; the target is 0.
 const turnQueueEscapeBaseline = 4
 
-// turnSlashLiteralBaseline is G-d: occurrences of the six slash-command
-// string literals in dispatch/server. 11 today (commands.go:108/109/117/
-// 118/122, send.go:145/239/240 — #3004's measured state, confirmed on this
-// branch). Falls as turn.Parse absorbs each side's parsing (C2, then D),
-// reaching 0 once only turn/parse.go holds them.
+// turnSlashLiteralBaseline is G-d: slash-command literal occurrences in
+// dispatch/server. 11 is #3004's measured state; the target is 0.
 const turnSlashLiteralBaseline = 11
 
 // ctxMarkerCallNames are G-a's first slice: the four ctx marker functions
@@ -136,44 +117,56 @@ func parseProductionGoFiles(fset *token.FileSet, dir string) ([]turnBoundarySrcF
 	return files, nil
 }
 
-// scanTurnBoundary implements rule turn_boundary: G-a, G-b and G-d.
-// dispatchPkg/turnPkg are derived from serverPkg's parent directory, mirroring
-// lateSetterPkgs. dispatch is required (a read error is reported, not
-// swallowed); turn is optional until C1 and skipped if absent.
+// scanTurnBoundary implements rule turn_boundary: G-a, G-b and G-d. The
+// sibling package directories are derived from serverPkg's parent, mirroring
+// lateSetterPkgs.
 func scanTurnBoundary(serverPkg string) []Violation {
 	parent := filepath.Dir(serverPkg)
-	dispatchPkg := filepath.Join(parent, "dispatch")
-	turnPkg := filepath.Join(parent, "turn")
-
 	fset := token.NewFileSet()
-	dispatchFiles, err := parseProductionGoFiles(fset, dispatchPkg)
-	if err != nil {
-		return []Violation{{Rule: "turn_boundary", File: filepath.ToSlash(dispatchPkg), Message: err.Error()}}
-	}
-	serverFiles, err := parseProductionGoFiles(fset, serverPkg)
-	if err != nil {
-		return []Violation{{Rule: "turn_boundary", File: filepath.ToSlash(serverPkg), Message: err.Error()}}
-	}
-	var turnFiles []turnBoundarySrcFile
-	if dirExists(turnPkg) {
-		turnFiles, err = parseProductionGoFiles(fset, turnPkg)
-		if err != nil {
-			return []Violation{{Rule: "turn_boundary", File: filepath.ToSlash(turnPkg), Message: err.Error()}}
+	parseDir := func(dir string, required bool) ([]turnBoundarySrcFile, []Violation) {
+		if !required && !dirExists(dir) {
+			return nil, nil
 		}
+		files, err := parseProductionGoFiles(fset, dir)
+		if err != nil {
+			return nil, []Violation{{Rule: "turn_boundary", File: filepath.ToSlash(dir), Message: err.Error()}}
+		}
+		return files, nil
+	}
+	dispatchFiles, errV := parseDir(filepath.Join(parent, "dispatch"), true)
+	if errV != nil {
+		return errV
+	}
+	serverFiles, errV := parseDir(serverPkg, true)
+	if errV != nil {
+		return errV
+	}
+	turnFiles, errV := parseDir(filepath.Join(parent, "turn"), false)
+	if errV != nil {
+		return errV
+	}
+	upstreamFiles, errV := parseDir(filepath.Join(parent, "upstream"), false)
+	if errV != nil {
+		return errV
 	}
 
-	// G-a scans dispatch + server + turn.
-	gaFiles := append(append([]turnBoundarySrcFile{}, dispatchFiles...), serverFiles...)
-	gaFiles = append(gaFiles, turnFiles...)
-	// G-b and G-d scan dispatch + server only (see package doc for why turn
-	// is excluded from both).
-	gbdFiles := append(append([]turnBoundarySrcFile{}, dispatchFiles...), serverFiles...)
+	join := func(sets ...[]turnBoundarySrcFile) []turnBoundarySrcFile {
+		var out []turnBoundarySrcFile
+		for _, s := range sets {
+			out = append(out, s...)
+		}
+		return out
+	}
+	markerFiles := join(dispatchFiles, serverFiles, turnFiles, upstreamFiles)
+	withValueFiles := join(dispatchFiles, serverFiles, turnFiles)
+	queueFiles := join(dispatchFiles, serverFiles, upstreamFiles)
+	slashFiles := join(dispatchFiles, serverFiles)
 
 	var out []Violation
-	out = append(out, ratchetViolation("turn_boundary", "turnCtxMarkerBaseline", turnCtxMarkerBaseline, scanCtxMarkerCalls(fset, gaFiles), serverPkg)...)
-	out = append(out, ratchetViolation("turn_boundary", "turnCtxWithValueBaseline", turnCtxWithValueBaseline, scanContextWithValue(fset, gaFiles), serverPkg)...)
-	out = append(out, ratchetViolation("turn_boundary", "turnQueueEscapeBaseline", turnQueueEscapeBaseline, scanQueueEscapeCalls(fset, gbdFiles), serverPkg)...)
-	out = append(out, ratchetViolation("turn_boundary", "turnSlashLiteralBaseline", turnSlashLiteralBaseline, scanSlashLiterals(fset, gbdFiles), serverPkg)...)
+	out = append(out, ratchetViolation("turn_boundary", "turnCtxMarkerBaseline", turnCtxMarkerBaseline, scanCtxMarkerCalls(fset, markerFiles), serverPkg)...)
+	out = append(out, ratchetViolation("turn_boundary", "turnCtxWithValueBaseline", turnCtxWithValueBaseline, scanContextWithValue(fset, withValueFiles), serverPkg)...)
+	out = append(out, ratchetViolation("turn_boundary", "turnQueueEscapeBaseline", turnQueueEscapeBaseline, scanQueueEscapeCalls(fset, queueFiles), serverPkg)...)
+	out = append(out, ratchetViolation("turn_boundary", "turnSlashLiteralBaseline", turnSlashLiteralBaseline, scanSlashLiterals(fset, slashFiles), serverPkg)...)
 	return out
 }
 
@@ -215,7 +208,7 @@ func scanContextWithValue(fset *token.FileSet, files []turnBoundarySrcFile) []Vi
 			}
 			out = append(out, Violation{Rule: "turn_boundary", File: filepath.ToSlash(sf.path),
 				Line:    fset.Position(call.Pos()).Line,
-				Message: "context.WithValue in dispatch/server: the ctx marker it backs is meant to go, not grow a second value key (#3004 G-a)"})
+				Message: "context.WithValue in dispatch/server/turn: the ctx marker it backs is meant to go, not grow a second value key (#3004 G-a)"})
 			return true
 		})
 	}
@@ -237,7 +230,7 @@ func scanQueueEscapeCalls(fset *token.FileSet, files []turnBoundarySrcFile) []Vi
 			}
 			out = append(out, Violation{Rule: "turn_boundary", File: filepath.ToSlash(sf.path),
 				Line:    fset.Position(call.Pos()).Line,
-				Message: fmt.Sprintf("%s called outside internal/turn: the queue's drain protocol is meant to be reached through the turn port, not directly by dispatch/server (#3004 G-b)", sel.Sel.Name)})
+				Message: fmt.Sprintf("%s called outside internal/turn: the queue's drain protocol is meant to be reached through the turn port, not directly (#3004 G-b)", sel.Sel.Name)})
 			return true
 		})
 	}

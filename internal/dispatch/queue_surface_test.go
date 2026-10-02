@@ -7,20 +7,11 @@ import (
 )
 
 // G-c (#2897 T3004 A1): *MessageQueue's and SessionRouter's exported method
-// sets equal an explicit list of names, not merely a count — renaming
-// TryAcquire to Acquire would leave messageQueueMethodBaseline's count
-// unchanged but is exactly the kind of surface drift this item exists to
-// make visible before #3004's structural moves start. Both directions fail:
-// a name added or removed, in either list, must come with an edit to the
-// list it belongs to, here, in the same change.
-//
-// 14 names is #3004's measured state (6 of them — Depth, TryAcquire,
-// ShouldSendWait, Release, ReleaseWithDrain, SetStrandHandler — have no
-// production caller; B deletes those six). 8 names is dispatch.SessionRouter's
-// current interface (7 of them have a production caller; SetWorkspace does
-// not). B shrinks MessageQueue's list to the 8 names that survive; C2 shrinks
-// SessionRouter's list to 3 (Workspace, ResetChatAndSetWorkspace,
-// InterruptSessionViaControl).
+// sets equal an explicit list of names, not merely a count, so a rename
+// (TryAcquire → Acquire) is as visible as an addition. Both directions fail:
+// a name added or removed must come with an edit to its list here, in the
+// same change. 14 and 8 names are #3004's measured state; #3004 has the plan
+// that shrinks both lists.
 var messageQueueMethodNames = []string{
 	"Cleanup",
 	"CollectDelay",

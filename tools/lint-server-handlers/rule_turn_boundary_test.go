@@ -11,13 +11,17 @@ import (
 
 // markerCallSrc returns n calls to one of the four ctx marker functions,
 // cycling through all four so a single-name regression (only one of them
-// gaining/losing a call) would still be caught.
-func markerCallSrc(pkgName string, n int) string {
+// gaining/losing a call) would still be caught. qual "" writes the bare form
+// dispatch uses on itself; otherwise the qualified form (dispatch.IsUrgent).
+func markerCallSrc(pkgName, qual string, n int) string {
 	names := []string{"WithPassthrough", "IsPassthrough", "WithUrgent", "IsUrgent"}
+	if qual != "" {
+		qual += "."
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "package %s\n\nfunc markerCalls() {\n", pkgName)
 	for i := 0; i < n; i++ {
-		fmt.Fprintf(&b, "\t_ = %s(nil)\n", names[i%len(names)])
+		fmt.Fprintf(&b, "\t_ = %s%s(nil)\n", qual, names[i%len(names)])
 	}
 	b.WriteString("}\n")
 	return b.String()
@@ -65,16 +69,28 @@ func slashLiteralSrc(pkgName string, n int) string {
 	return b.String()
 }
 
-// writeTurnBoundaryRoot lays out root/dispatch, root/server and (if turnFiles
-// is non-nil) root/turn, and returns root. serverPkg for scanTurnBoundary is
-// always filepath.Join(root, "server").
-func writeTurnBoundaryRoot(t *testing.T, dispatchFiles, serverFiles, turnFiles map[string]string) string {
+// noiseSrc holds near-misses no check may count: a FuncDecl named like a
+// marker, WithValue on a receiver other than context, another context call,
+// a lookalike method name and a lookalike literal.
+const noiseSrc = `package dispatch
+
+func WithPassthrough(ctx any) any { return ctx }
+
+func noise(x *T) {
+	_ = x.WithValue(nil, nil, nil)
+	_ = context.Background()
+	_ = x.Enqueued()
+	_ = "/news"
+}
+`
+
+// writeTurnBoundaryRoot lays out root/<sub>/<name> for every entry of dirs
+// and returns root. serverPkg for scanTurnBoundary is always
+// filepath.Join(root, "server").
+func writeTurnBoundaryRoot(t *testing.T, dirs map[string]map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
-	write := func(sub string, files map[string]string) {
-		if files == nil {
-			return
-		}
+	for sub, files := range dirs {
 		dir := filepath.Join(root, sub)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -85,34 +101,40 @@ func writeTurnBoundaryRoot(t *testing.T, dispatchFiles, serverFiles, turnFiles m
 			}
 		}
 	}
-	write("dispatch", dispatchFiles)
-	write("server", serverFiles)
-	write("turn", turnFiles)
 	return root
 }
 
-// cleanFixture splits each baseline exactly between a dispatch and a server
-// file, proving the rule sums across both directories rather than reading
-// only one.
+// baselineDirs splits each baseline between dispatch (bare marker calls) and
+// server (qualified ones), proving the rule sums across both directories and
+// recognises both call forms. sMarker == 3 is exactly every baseline (marker
+// 3+3 == 6, slash 6+5 == 11, queue 2+2 == 4, WithValue 1).
+func baselineDirs(sMarker int) map[string]map[string]string {
+	return map[string]map[string]string{
+		"dispatch": {
+			"d_marker.go": markerCallSrc("dispatch", "", 3),
+			"d_value.go":  withValueSrc("dispatch", turnCtxWithValueBaseline),
+			"d_queue.go":  queueEscapeSrc("dispatch", 2),
+			"d_slash.go":  slashLiteralSrc("dispatch", 6),
+			"d_noise.go":  noiseSrc,
+		},
+		"server": {
+			"s_marker.go": markerCallSrc("server", "dispatch", sMarker),
+			"s_queue.go":  queueEscapeSrc("server", 2),
+			"s_slash.go":  slashLiteralSrc("server", 5),
+		},
+	}
+}
+
 func cleanFixture(t *testing.T) string {
 	t.Helper()
-	dMarker, sMarker := 3, 3 // turnCtxMarkerBaseline == 6
-	dSlash, sSlash := 6, 5   // turnSlashLiteralBaseline == 11
-	dQueue, sQueue := 2, 2   // turnQueueEscapeBaseline == 4
-	return writeTurnBoundaryRoot(t,
-		map[string]string{
-			"d_marker.go": markerCallSrc("dispatch", dMarker),
-			"d_value.go":  withValueSrc("dispatch", turnCtxWithValueBaseline), // all 1 here
-			"d_queue.go":  queueEscapeSrc("dispatch", dQueue),
-			"d_slash.go":  slashLiteralSrc("dispatch", dSlash),
-		},
-		map[string]string{
-			"s_marker.go": markerCallSrc("server", sMarker),
-			"s_queue.go":  queueEscapeSrc("server", sQueue),
-			"s_slash.go":  slashLiteralSrc("server", sSlash),
-		},
-		nil,
-	)
+	return writeTurnBoundaryRoot(t, baselineDirs(3))
+}
+
+func writeExtra(t *testing.T, root, sub, name, src string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, sub, name), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // At exactly the four baselines, scanTurnBoundary reports nothing.
@@ -130,10 +152,7 @@ func TestScanTurnBoundary_CleanAtBaseline(t *testing.T) {
 func TestScanTurnBoundary_ExtraMarkerCall(t *testing.T) {
 	t.Parallel()
 	root := cleanFixture(t)
-	extra := filepath.Join(root, "dispatch", "d_extra_marker.go")
-	if err := os.WriteFile(extra, []byte(markerCallSrc("dispatch", 1)), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeExtra(t, root, "dispatch", "d_extra_marker.go", markerCallSrc("dispatch", "", 1))
 	vs := scanTurnBoundary(filepath.Join(root, "server"))
 	if !hasRatchetViolation(vs, "turnCtxMarkerBaseline") {
 		t.Fatalf("extra marker call not reported: %+v", vs)
@@ -145,10 +164,7 @@ func TestScanTurnBoundary_ExtraMarkerCall(t *testing.T) {
 func TestScanTurnBoundary_ExtraQueueEscape(t *testing.T) {
 	t.Parallel()
 	root := cleanFixture(t)
-	extra := filepath.Join(root, "server", "s_extra_queue.go")
-	if err := os.WriteFile(extra, []byte(queueEscapeSrc("server", 1)), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeExtra(t, root, "server", "s_extra_queue.go", queueEscapeSrc("server", 1))
 	vs := scanTurnBoundary(filepath.Join(root, "server"))
 	if !hasRatchetViolation(vs, "turnQueueEscapeBaseline") {
 		t.Fatalf("extra queue escape call not reported: %+v", vs)
@@ -160,11 +176,8 @@ func TestScanTurnBoundary_ExtraQueueEscape(t *testing.T) {
 func TestScanTurnBoundary_ExtraSlashLiteral(t *testing.T) {
 	t.Parallel()
 	root := cleanFixture(t)
-	extra := filepath.Join(root, "server", "s_extra_slash.go")
-	src := "package server\n\nfunc extraSlash(s string) bool { return s == \"/urgent \" }\n"
-	if err := os.WriteFile(extra, []byte(src), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeExtra(t, root, "server", "s_extra_slash.go",
+		"package server\n\nfunc extraSlash(s string) bool { return s == \"/urgent \" }\n")
 	vs := scanTurnBoundary(filepath.Join(root, "server"))
 	if !hasRatchetViolation(vs, "turnSlashLiteralBaseline") {
 		t.Fatalf("extra slash literal not reported: %+v", vs)
@@ -175,10 +188,7 @@ func TestScanTurnBoundary_ExtraSlashLiteral(t *testing.T) {
 func TestScanTurnBoundary_ExtraContextWithValue(t *testing.T) {
 	t.Parallel()
 	root := cleanFixture(t)
-	extra := filepath.Join(root, "server", "s_extra_value.go")
-	if err := os.WriteFile(extra, []byte(withValueSrc("server", 1)), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeExtra(t, root, "server", "s_extra_value.go", withValueSrc("server", 1))
 	vs := scanTurnBoundary(filepath.Join(root, "server"))
 	if !hasRatchetViolation(vs, "turnCtxWithValueBaseline") {
 		t.Fatalf("extra context.WithValue call not reported: %+v", vs)
@@ -186,26 +196,11 @@ func TestScanTurnBoundary_ExtraContextWithValue(t *testing.T) {
 }
 
 // The count dropping without the baseline following it fails just as loudly
-// as a rise (mutation: "计数降了但基线没改 → 双向检查失败") — delete one of the
-// two files carrying ctx marker calls instead of lowering the constant.
+// as a rise (mutation: "计数降了但基线没改 → 双向检查失败"): server carries 2
+// marker calls instead of 3, total 5, one below turnCtxMarkerBaseline.
 func TestScanTurnBoundary_LoweredCountWithoutLoweredBaseline(t *testing.T) {
 	t.Parallel()
-	root := writeTurnBoundaryRoot(t,
-		map[string]string{
-			"d_marker.go": markerCallSrc("dispatch", 3),
-			"d_value.go":  withValueSrc("dispatch", turnCtxWithValueBaseline),
-			"d_queue.go":  queueEscapeSrc("dispatch", 2),
-			"d_slash.go":  slashLiteralSrc("dispatch", 6),
-		},
-		map[string]string{
-			// Only 2 marker calls here instead of 3: total is 5, one below
-			// turnCtxMarkerBaseline (6).
-			"s_marker.go": markerCallSrc("server", 2),
-			"s_queue.go":  queueEscapeSrc("server", 2),
-			"s_slash.go":  slashLiteralSrc("server", 5),
-		},
-		nil,
-	)
+	root := writeTurnBoundaryRoot(t, baselineDirs(2))
 	vs := scanTurnBoundary(filepath.Join(root, "server"))
 	v, ok := findRatchetViolation(vs, "turnCtxMarkerBaseline")
 	if !ok {
@@ -217,35 +212,26 @@ func TestScanTurnBoundary_LoweredCountWithoutLoweredBaseline(t *testing.T) {
 }
 
 // G-a scans internal/turn (if present); G-b and G-d deliberately do not —
-// a marker call inside turn is still reported, but an Enqueue call or a
-// slash literal legitimately living there must not be.
+// a marker call or context.WithValue inside turn is still reported, but an
+// Enqueue call or a slash literal legitimately living there must not be.
 func TestScanTurnBoundary_TurnDirectoryGaIncludedGbdExcluded(t *testing.T) {
 	t.Parallel()
-	root := writeTurnBoundaryRoot(t,
-		map[string]string{
-			"d_marker.go": markerCallSrc("dispatch", 3),
-			"d_value.go":  withValueSrc("dispatch", turnCtxWithValueBaseline),
-			"d_queue.go":  queueEscapeSrc("dispatch", 2),
-			"d_slash.go":  slashLiteralSrc("dispatch", 6),
-		},
-		map[string]string{
-			"s_marker.go": markerCallSrc("server", 2), // one short on purpose
-			"s_queue.go":  queueEscapeSrc("server", 2),
-			"s_slash.go":  slashLiteralSrc("server", 5),
-		},
-		map[string]string{
-			// Legitimate turn-side code: one marker call (G-a must count it,
-			// bringing the total back to the baseline of 6), plus the queue's
-			// own Enqueue/DoneOrDrain implementation and turn/parse.go's
-			// slash literals, neither of which G-b/G-d may count.
-			"t_marker.go": markerCallSrc("turn", 1),
-			"parse.go":    slashLiteralSrc("turn", 20),
-			"queue.go":    queueEscapeSrc("turn", 20),
-		},
-	)
+	dirs := baselineDirs(2) // one marker call short on purpose
+	// turn's one marker call brings G-a back to its baseline of 6; the
+	// queue's own implementation and turn/parse.go's literals must not count.
+	dirs["turn"] = map[string]string{
+		"t_marker.go": markerCallSrc("turn", "dispatch", 1),
+		"t_value.go":  withValueSrc("turn", 1),
+		"parse.go":    slashLiteralSrc("turn", 20),
+		"queue.go":    queueEscapeSrc("turn", 20),
+	}
+	root := writeTurnBoundaryRoot(t, dirs)
 	vs := scanTurnBoundary(filepath.Join(root, "server"))
 	if _, ok := findRatchetViolation(vs, "turnCtxMarkerBaseline"); ok {
 		t.Errorf("turn's marker call was not counted into G-a: %+v", vs)
+	}
+	if !hasRatchetViolation(vs, "turnCtxWithValueBaseline") {
+		t.Errorf("turn's context.WithValue call was not counted into G-a: %+v", vs)
 	}
 	if v, ok := findRatchetViolation(vs, "turnQueueEscapeBaseline"); ok {
 		t.Errorf("turn's own Enqueue/DoneOrDrain calls were counted by G-b: %+v", v)
@@ -255,10 +241,35 @@ func TestScanTurnBoundary_TurnDirectoryGaIncludedGbdExcluded(t *testing.T) {
 	}
 }
 
-// internal/turn absent (as it is until #2897 T3004-C1) is scanned as empty,
-// not an error — the baseline fixture above already covers this (it passes
-// no turnFiles), this test pins that the directory is allowed to not exist
-// at all on disk.
+// internal/upstream (the deferred third turn entry) is covered by G-a's
+// marker slice and by G-b, but not by the context.WithValue slice or G-d.
+func TestScanTurnBoundary_UpstreamMarkerAndQueueCounted(t *testing.T) {
+	t.Parallel()
+	dirs := baselineDirs(3)
+	dirs["upstream"] = map[string]string{
+		"u_marker.go": markerCallSrc("upstream", "dispatch", 1),
+		"u_queue.go":  queueEscapeSrc("upstream", 1),
+		"u_value.go":  withValueSrc("upstream", 5),
+		"u_slash.go":  slashLiteralSrc("upstream", 5),
+	}
+	root := writeTurnBoundaryRoot(t, dirs)
+	vs := scanTurnBoundary(filepath.Join(root, "server"))
+	if !hasRatchetViolation(vs, "turnCtxMarkerBaseline") {
+		t.Errorf("upstream's marker call was not counted by G-a: %+v", vs)
+	}
+	if !hasRatchetViolation(vs, "turnQueueEscapeBaseline") {
+		t.Errorf("upstream's DoneOrDrain-style call was not counted by G-b: %+v", vs)
+	}
+	if v, ok := findRatchetViolation(vs, "turnCtxWithValueBaseline"); ok {
+		t.Errorf("upstream's context.WithValue calls were counted: %+v", v)
+	}
+	if v, ok := findRatchetViolation(vs, "turnSlashLiteralBaseline"); ok {
+		t.Errorf("upstream's slash literals were counted by G-d: %+v", v)
+	}
+}
+
+// internal/turn absent (as it is until #3004's C1) is scanned as empty, not
+// an error: this pins that the directory may not exist on disk at all.
 func TestScanTurnBoundary_TurnDirectoryAbsentIsNotAnError(t *testing.T) {
 	t.Parallel()
 	root := cleanFixture(t)
@@ -271,21 +282,25 @@ func TestScanTurnBoundary_TurnDirectoryAbsentIsNotAnError(t *testing.T) {
 	}
 }
 
-// dispatch is required: unlike the optional turn/dashboard directories, a
-// missing dispatch directory is reported, not silently scanned as empty — a
-// misconfigured -server-pkg must not be able to narrow G-a/G-b/G-d's scope.
-func TestScanTurnBoundary_MissingDispatchDirectoryErrors(t *testing.T) {
+// dispatch and server are required: unlike the optional turn/upstream
+// directories, a missing one is reported, not silently scanned as empty — a
+// misconfigured -server-pkg must not be able to narrow the rule's scope.
+func TestScanTurnBoundary_MissingRequiredDirectoryErrors(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir() // no dispatch/, no server/
-	if err := os.MkdirAll(filepath.Join(root, "server"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	vs := scanTurnBoundary(filepath.Join(root, "server"))
-	if len(vs) != 1 || vs[0].Rule != "turn_boundary" {
-		t.Fatalf("want exactly one turn_boundary error violation, got %+v", vs)
-	}
-	if !strings.Contains(vs[0].File, "dispatch") {
-		t.Errorf("violation file = %q, want it to name the dispatch directory", vs[0].File)
+	for _, missing := range []string{"dispatch", "server"} {
+		t.Run(missing, func(t *testing.T) {
+			t.Parallel()
+			dirs := baselineDirs(3)
+			delete(dirs, missing)
+			root := writeTurnBoundaryRoot(t, dirs)
+			vs := scanTurnBoundary(filepath.Join(root, "server"))
+			if len(vs) != 1 || vs[0].Rule != "turn_boundary" {
+				t.Fatalf("want exactly one turn_boundary error violation, got %+v", vs)
+			}
+			if !strings.HasSuffix(vs[0].File, "/"+missing) {
+				t.Errorf("violation file = %q, want it to name the %s directory", vs[0].File, missing)
+			}
+		})
 	}
 }
 
