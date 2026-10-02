@@ -6,7 +6,7 @@
 // #events-scroll — and a long cron run grew #cron-live-events — until the tab
 // OOMed. Three append paths carry the budget:
 //
-//   - wsm.onEvent / wsm.onHistory (the WS socket)  → ws_dom_trim.test.js
+//   - sessionFrames.onEvent / .onHistory (WS)      → ws_dom_trim.test.js
 //   - appendEvents (the HTTP-poll fallback)        → here
 //   - cron_live's claim on a cron key's event frame → here
 //
