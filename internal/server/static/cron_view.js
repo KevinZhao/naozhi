@@ -35,6 +35,7 @@ import {
   cronTimezoneSuffix,
 } from './cron_schedule.js';
 import { cronAttentionConfirm, cronAttentionQueueHtml, cronAttentionRefresh } from './cron_attention.js';
+import { cronLive, subscribeCronLive, unsubscribeCronLive } from './cron_live.js';
 import {
   closeCronDetail,
   configureCronDrawer,
@@ -100,7 +101,8 @@ import {
 // cronSortOrder initializer below finds lsGet ready, and the wsm.on
 // registrations and bootstrap fetchCronJobs() at the tail run after every
 // cron function is defined. dashboard reaches back only through nz.bus and
-// hooks (bottom of file).
+// hooks (bottom of file); cron_live.js imports this module back and calls in
+// only at frame time.
 
 /* ===== Cron Tab ===== */
 
@@ -1014,14 +1016,14 @@ function cronApplyRunStarted(msg) {
   //   - persistent 模式：同 stub 跨 run 持续，但用户视角下 Run #2 是新 run，
   //     不该把 Run #1 的事件混在容器里。
   // 即使 ensureCronLiveSubscription 短路（jobId 已订）也要清。runStartedAt
-  // 更新成新 run 的 started_at，让 onConnected / onCronLiveSessionState 的
-  // re-sub 路径用正确的 after= 阈值。
-  if (wsm.cronLive && wsm.cronLive.jobId === msg.job_id) {
-    wsm.cronLive.events = [];
-    wsm.cronLive.lastEventTimeMs = 0;
-    wsm.cronLive.truncatedCount = 0;
-    wsm.cronLive.runStartedAt = msg.started_at || Date.now();
-    wsm.cronLive.status = 'pending';
+  // 更新成新 run 的 started_at，让 cron_live 的 onReady / onCronLiveSessionState
+  // 的 re-sub 路径用正确的 after= 阈值。
+  if (cronLive.jobId === msg.job_id) {
+    cronLive.events = [];
+    cronLive.lastEventTimeMs = 0;
+    cronLive.truncatedCount = 0;
+    cronLive.runStartedAt = msg.started_at || Date.now();
+    cronLive.status = 'pending';
     setCronLiveStatus('pending');
   }
   renderCronPanel();
@@ -1077,8 +1079,8 @@ function cronApplyRunEnded(msg) {
   // cron-live RFC §3 / §6: 任务进入终态（任意 state），cron live 订阅保留供
   // 操作员回看，但 status 切到 'stopped' 让用户清楚区分"直播中"vs"已结束"。
   // unsub 仅在 closeCronDetail / 切换 jobId 时发生。
-  if (wsm.cronLive && wsm.cronLive.jobId === msg.job_id) {
-    wsm.cronLive.status = 'stopped';
+  if (cronLive.jobId === msg.job_id) {
+    cronLive.status = 'stopped';
     setCronLiveStatus('stopped');
   }
   renderCronPanel();
@@ -1088,7 +1090,7 @@ function cronApplyRunEnded(msg) {
 // cron session key 的形态是 "cron:" + jobID（见 session.CronKey）；只有
 // dashboard 当前看的就是这条 cron 的实时面板时才需要丢事件，其他视图
 // 不受影响。
-function isCronSessionFrozen(key) {
+export function isCronSessionFrozen(key) {
   if (!key || typeof key !== 'string') return false;
   if (!key.startsWith('cron:')) return false;
   return cronFrozenRuns.has(key.slice('cron:'.length));
@@ -1096,21 +1098,9 @@ function isCronSessionFrozen(key) {
 
 /* ===== cron live event stream（cron-live RFC） ===== */
 
-// isCronLiveKey 判断一条 WS 消息的 key 是否属于 cron live 订阅。带双保险：
-// 既已订阅 (subscribedKey) 或 pending 中，且与主订阅 selectedKey 不撞键
-// （cron drawer 打开时 openCronPanel 已清空 selectedKey，撞键不可能但兜底）。
-function isCronLiveKey(key) {
-  if (!key) return false;
-  if (key === selection.key) return false;
-  const cl = wsm.cronLive;
-  if (cl.subscribedKey && key === cl.subscribedKey) return true;
-  if (cl.pendingJobId && key === ('cron:' + cl.pendingJobId)) return true;
-  return false;
-}
-
-// setCronLiveStatus 将 wsm.cronLive.status 字符串投影到 DOM 上。
+// setCronLiveStatus 将 cronLive.status（cron_live.js）字符串投影到 DOM 上。
 // 三态：'pending' / 'live' / 'stopped'，'idle' 时清空文本。
-function setCronLiveStatus(state) {
+export function setCronLiveStatus(state) {
   const el = document.getElementById('cron-live-status');
   if (!el) return;
   const labels = {
@@ -1123,10 +1113,10 @@ function setCronLiveStatus(state) {
   el.className = 'cdl-status cdl-status-' + state;
 }
 
-function updateCronLiveTruncated() {
+export function updateCronLiveTruncated() {
   const trunc = document.getElementById('cron-live-truncated');
   if (!trunc) return;
-  const n = wsm.cronLive.truncatedCount || 0;
+  const n = cronLive.truncatedCount || 0;
   if (n > 0) {
     trunc.hidden = false;
     trunc.textContent = '已折叠 ' + n + ' 条更早事件，请等任务结束后查看历史详情';
@@ -1135,19 +1125,19 @@ function updateCronLiveTruncated() {
   }
 }
 
-// repaintCronLive 把 wsm.cronLive.events 数组重渲到 #cron-live-events 容器。
+// repaintCronLive 把 cronLive.events 数组重渲到 #cron-live-events 容器。
 // 在 renderCronDrawer 重渲后调一次，让重建的 DOM 立刻显示已累积的事件。
 // jobId 一致性守卫：若 cronLive.jobId 与当前 drawer 的 jobId 不一致就清空，
 // 避免 ensureCronLiveSubscription 还未完成切换前一帧渲到错的 drawer。
-function repaintCronLive() {
+export function repaintCronLive() {
   const el = document.getElementById('cron-live-events');
   if (!el) return;
   const drawerJobId = cronDrawerState.jobId;
-  if (drawerJobId && wsm.cronLive.jobId && wsm.cronLive.jobId !== drawerJobId) {
+  if (drawerJobId && cronLive.jobId && cronLive.jobId !== drawerJobId) {
     el.innerHTML = '';
     return;
   }
-  const events = wsm.cronLive.events || [];
+  const events = cronLive.events || [];
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
   if (html) {
@@ -1164,13 +1154,13 @@ function repaintCronLive() {
   regroupAvatars(el);
   el.scrollTop = el.scrollHeight;
   updateCronLiveTruncated();
-  setCronLiveStatus(wsm.cronLive.status);
+  setCronLiveStatus(cronLive.status);
 }
 
 // appendEventsToContainer 是 appendEvents 的容器化变体：不动主面板的
 // turnState / banner / navUserEls / optimistic-msg，只把事件 HTML 追加到
 // 指定容器。供 cron live 增量推送复用。
-function appendEventsToContainer(el, events) {
+export function appendEventsToContainer(el, events) {
   if (!el) return;
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   // 若容器当前只挂着 agent-only 占位（repaintCronLive 渲过），在追加真实
@@ -1216,21 +1206,20 @@ function appendEventsToContainer(el, events) {
 // 故意不在 cronApplyRunEnded 钩 unsub —— 让操作员看完本轮事件，关 drawer 才撤。
 function ensureCronLiveSubscription() {
   const jobId = cronDrawerState.jobId;
-  const cl = wsm.cronLive;
   if (!jobId) {
-    if (cl.jobId) wsm.unsubscribeCronLive();
+    if (cronLive.jobId) unsubscribeCronLive();
     return;
   }
-  if (cl.jobId && cl.jobId !== jobId) {
-    wsm.unsubscribeCronLive();
+  if (cronLive.jobId && cronLive.jobId !== jobId) {
+    unsubscribeCronLive();
   }
-  if (cl.jobId === jobId) return;
+  if (cronLive.jobId === jobId) return;
   const job = (typeof cronJobs !== 'undefined' && Array.isArray(cronJobs))
     ? cronJobs.find(j => j && j.id === jobId)
     : null;
   const isRunning = !!(job && job.current_run && job.current_run.started_at);
   if (!isRunning) return;
-  wsm.subscribeCronLive(jobId, job.current_run.started_at);
+  subscribeCronLive(jobId, job.current_run.started_at);
 }
 
 // formatRunningElapsed returns a colloquial "正在运行 12s / 2m" label for
@@ -2617,23 +2606,15 @@ wsm.on(NZ_CONTRACT.WS.run_ended, (msg) => {
   fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   if (msg.owner_id) cronTimelineRefreshHeadDebounced(msg.owner_id);
 }, cronRun);
-// dashboard's cron-live code drives the view through nz.bus (#2557 PR-E1):
-// dashboard cannot import cron_view, which imports it.
-nzBus.addEventListener('cron:live-status', (e) => setCronLiveStatus(e.detail));
-nzBus.addEventListener('cron:live-repaint', () => repaintCronLive());
-nzBus.addEventListener('cron:live-ensure-subscription', () => ensureCronLiveSubscription());
-nzBus.addEventListener('cron:live-event', (e) => {
-  appendEventsToContainer(document.getElementById('cron-live-events'), [e.detail]);
-  setCronLiveStatus('live');
-  updateCronLiveTruncated();
-});
+// A reconnect with no live stream to resume re-checks whether the open drawer
+// should start one; cron_live's own onReady (registered first) resumes one.
+wsm.onReady(() => { if (!cronLive.jobId) ensureCronLiveSubscription(); });
+// dashboard cannot import cron_view (#2557 PR-E1), so it opens the panel over nz.bus.
 nzBus.addEventListener('cron:open-panel', () => openCronPanel());
 
-// Reads of cron-owned state that dashboard consults (the frozen-run set,
-// cronLive bookkeeping, the jobs list — reassigned on every fetch). Published
-// in hooks because dashboard cannot import cron_view (cron_view imports it);
-// dashboard's `hooks.x && …` call shape keeps working if cron_view ever fails
-// to load.
-hooks.isCronLiveKey = isCronLiveKey;
+// Reads of cron-owned state: the frozen-run set for dashboard, which cannot
+// import cron_view, and the jobs list (reassigned on every fetch, so a getter
+// rather than an exported let) for cron_live's reconnect. dashboard's
+// `hooks.x && …` call shape keeps working if cron_view ever fails to load.
 hooks.isCronSessionFrozen = isCronSessionFrozen;
 hooks.cronJobs = function () { return cronJobs; };

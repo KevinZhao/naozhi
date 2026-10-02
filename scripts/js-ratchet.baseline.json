@@ -42,10 +42,17 @@
     "configureDeps": 0
   },
   "cron_drawer.js": {
-    "lines": 592,
-    "maxFnLines": 137,
+    "lines": 590,
+    "maxFnLines": 136,
     "fnOver100": 1,
     "topLevelLetVar": 1,
+    "configureDeps": 0
+  },
+  "cron_live.js": {
+    "lines": 195,
+    "maxFnLines": 24,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
     "configureDeps": 0
   },
   "cron_schedule.js": {
@@ -70,14 +77,14 @@
     "configureDeps": 0
   },
   "cron_view.js": {
-    "lines": 2639,
+    "lines": 2620,
     "maxFnLines": 127,
     "fnOver100": 3,
     "topLevelLetVar": 11,
     "configureDeps": 24
   },
   "dashboard.js": {
-    "lines": 6470,
+    "lines": 6287,
     "maxFnLines": 249,
     "fnOver100": 7,
     "topLevelLetVar": 0,
@@ -175,7 +182,7 @@
     "configureDeps": 0
   },
   "state.js": {
-    "lines": 277,
+    "lines": 276,
     "maxFnLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,

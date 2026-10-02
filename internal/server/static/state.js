@@ -214,9 +214,8 @@ export const hooks = {
   getActiveScratchKey: null,
   closeScratchDrawer: null,
   askAside: null,
-  // Published by cron_view, which owns them: is this key the cron live view's,
-  // is this cron session's run frozen, and the current jobs list.
-  isCronLiveKey: null,
+  // Published by cron_view, which owns them: is this cron session's run
+  // frozen, and the current jobs list.
   isCronSessionFrozen: null,
   cronJobs: null,
 };

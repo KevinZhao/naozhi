@@ -160,9 +160,9 @@ export function isCronSessionKey(key) {
   return typeof key === 'string' && key.indexOf('cron:') === 0;
 }
 
-// nz.bus (#2557 PR-E1): the cross-module notification channel. dashboard's
-// WS core dispatches cron-view commands here instead of calling cron
-// functions through the window bridge — the reverse dashboard→view edge
+// nz.bus (#2557 PR-E1): the cross-module notification channel. dashboard
+// dispatches cron-view commands here (WS frames reach the cron modules
+// through their own wsm.on registrations) — the reverse dashboard→view edge
 // must not become an import (a dashboard→cron import would invert module
 // execution order and break cron's load-time init). dispatchEvent is
 // synchronous, so ordering matches the old direct calls.
