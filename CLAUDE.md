@@ -58,7 +58,7 @@ cmd/naozhi/main.go
   -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/backendstore/runhistory/sessiontable/sessionview/spawnpool/workspacestore/knownids
   -> routerrelay  Router 通知与 cost-run 归属的一次性绑定转发器（断开 router↔hub/scheduler 构造环）
   -> dispatch     消息处理 + slash 命令；per-session 队列见 turn
-  -> turn         per-session 消息队列 + 合并（Queue/Msg/Mode/ParseMode/Coalesce）；dispatch 和 server 共用同一个 Queue 实例
+  -> turn         per-session 消息队列 + 合并（Queue/Msg/Mode/ParseMode/Coalesce）+ Orchestrator（Submit/Reset：owner loop、按 Sink 去重投递、detached 轮、panic 恢复；端口 Origin/Delivery/Sender/Admission）+ /new /clear /urgent 解析（Parse）；dispatch 和 server 共用同一个 Queue 实例；不 import dispatch/server/platform/session
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
   -> server       HTTP server、路由注册、WebSocket hub、REST API
   -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*；httputil 叶子）

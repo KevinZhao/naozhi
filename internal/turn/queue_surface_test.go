@@ -68,3 +68,12 @@ func TestQueueSurface_Ratchet(t *testing.T) {
 	got := exportedMethodNames(reflect.TypeFor[*Queue]())
 	assertMethodSet(t, "*Queue", got, queueMethodNames)
 }
+
+// TestOrchestratorSurface_Ratchet pins *Orchestrator's exported method set
+// at #3004's final one: entry points submit, reset, rate-limit notices and
+// clean up, and reach the Queue through nothing else.
+func TestOrchestratorSurface_Ratchet(t *testing.T) {
+	t.Parallel()
+	got := exportedMethodNames(reflect.TypeFor[*Orchestrator]())
+	assertMethodSet(t, "*Orchestrator", got, []string{"Cleanup", "Reset", "ShouldNotify", "Submit"})
+}
