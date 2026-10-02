@@ -85,7 +85,7 @@ func entryAffectsAgentState(t string) bool {
 // fireTaskDoneCallbacks.
 func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pending pendingTaskDone) {
 	switch e.Type {
-	case "agent":
+	case clievent.KindAgent:
 		label := e.Subagent
 		if label == "" {
 			label = e.TeamName
@@ -129,7 +129,7 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 			}
 		}
 		l.turnAgentCount.Store(int32(len(l.turnAgents) + len(l.bgAgents)))
-	case "task_start":
+	case clievent.KindTaskStart:
 		// Match by ToolUseID (Agent tool_use → system.task_started carry the
 		// same id). InternalAgentID is filled later by SetAgentInternalID once
 		// the async linker locates the jsonl. Try the toolUseIndex sidecar
@@ -185,7 +185,7 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 				return false, pendingTaskDone{}
 			}
 		}
-	case "task_progress":
+	case clievent.KindTaskProgress:
 		// The parent stream is authoritative for totals when present. Sidecar
 		// index is stable within a turn (slices only grow between resets);
 		// fall back to the scan if it is stale (e.g. taskIndex reset by an
@@ -238,7 +238,7 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 				return false, pendingTaskDone{}
 			}
 		}
-	case "task_done":
+	case clievent.KindTaskDone:
 		status := e.Status
 		if status == "" {
 			status = "completed"
@@ -296,7 +296,7 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 			return true, pendingTaskDone{TaskID: e.TaskID, Status: status}
 		}
 		return false, pendingTaskDone{}
-	case "result", "user":
+	case clievent.KindResult, clievent.KindUser:
 		// Turn boundary. Drop backing arrays/maps that grew past a typical
 		// turn so a TeamCreate fan-out doesn't pin them (and inflate every
 		// later Snapshot copy); small ones are reused in place.
@@ -496,7 +496,7 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 	if pos, ok := l.agentRingByToolUse[toolUseID]; ok {
 		if pos.agentIdx >= 0 && pos.agentIdx < l.maxSize {
 			e := &l.entries[pos.agentIdx]
-			if e.Type == "agent" && e.ToolUseID == toolUseID {
+			if e.Type == clievent.KindAgent && e.ToolUseID == toolUseID {
 				e.InternalAgentID = internalAgentID
 				e.JSONLPath = jsonlPath
 				e.FirstPromptID = firstPromptID
@@ -505,7 +505,7 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 		}
 		if pos.taskStartIdx >= 0 && pos.taskStartIdx < l.maxSize {
 			e := &l.entries[pos.taskStartIdx]
-			if e.Type == "task_start" && e.ToolUseID == toolUseID {
+			if e.Type == clievent.KindTaskStart && e.ToolUseID == toolUseID {
 				e.InternalAgentID = internalAgentID
 				e.JSONLPath = jsonlPath
 				e.FirstPromptID = firstPromptID
@@ -536,12 +536,12 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 			continue
 		}
 		switch e.Type {
-		case "agent":
+		case clievent.KindAgent:
 			if foundAgent {
 				continue
 			}
 			foundAgent = true
-		case "task_start":
+		case clievent.KindTaskStart:
 			if foundTaskStart {
 				continue
 			}

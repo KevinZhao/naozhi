@@ -7,7 +7,6 @@ import (
 	"slices"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/eventlog/schema"
 )
 
 // GapFill returns the fallback turns hidden behind local's persist_gap
@@ -71,7 +70,7 @@ func gapWindows(local []clievent.EventEntry) []gapWindow {
 	var out []gapWindow
 	lo := int64(minTime)
 	for _, e := range local {
-		if e.Type != schema.GapEntryType {
+		if e.Type != clievent.KindPersistGap {
 			lo = e.Time - contentSkewLagMS
 			continue
 		}

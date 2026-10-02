@@ -690,7 +690,7 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 func countUserTurns(entries []clievent.EventEntry) int64 {
 	var n int64
 	for i := range entries {
-		if entries[i].Type == "user" {
+		if entries[i].Type == clievent.KindUser {
 			n++
 		}
 	}

@@ -323,11 +323,11 @@ func decodeLine(line []byte) (clievent.EventEntry, bool) {
 	var entryType string
 	switch ev.Type {
 	case "user_message":
-		entryType = "user"
+		entryType = clievent.KindUser
 	case "agent_message":
 		// "text" is what dashboard.js renders as a markdown bubble;
 		// "assistant" would fall through to the unknown-type card.
-		entryType = "text"
+		entryType = clievent.KindText
 	default:
 		// system / reasoning / token_count / task_* lines are not chat bubbles.
 		return clievent.EventEntry{}, false

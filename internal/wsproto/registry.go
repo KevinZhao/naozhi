@@ -18,13 +18,13 @@ var Frames = map[MsgType]any{
 	TypeUnsubscribed: NewUnsubscribed(Unsubscribed{Key: "k", Node: "n"}),
 	TypeHistory: NewHistory(History{
 		Key:     "k",
-		Events:  []clievent.EventEntry{{Time: 1, Type: "text"}},
+		Events:  []clievent.EventEntry{{Time: 1, Type: clievent.KindText}},
 		Node:    "n",
 		HasMore: boolPtr(true),
 		Initial: true,
 	}),
 	TypeEvent: NewEvent(Event{
-		Key: "k", Event: &clievent.EventEntry{Time: 1, Type: "text"}, Node: "n",
+		Key: "k", Event: &clievent.EventEntry{Time: 1, Type: clievent.KindText}, Node: "n",
 	}),
 	TypeSendAck: NewSendAck(SendAck{
 		Key: "k", ID: "i", Status: "accepted", Error: "e", Node: "n",
@@ -46,7 +46,7 @@ var Frames = map[MsgType]any{
 		EndedAt: 2, DurationMS: 1, SessionID: "s", ErrorClass: "c", ErrorMsg: "m", Trigger: "cron",
 	}),
 	TypeAgentEvent: NewAgentEvent(AgentEvent{
-		Key: "k", Event: &clievent.EventEntry{Time: 1, Type: "text"}, TaskID: "t",
+		Key: "k", Event: &clievent.EventEntry{Time: 1, Type: clievent.KindText}, TaskID: "t",
 	}),
 	TypeAgentMeta: NewAgentMeta(AgentMeta{
 		Key: "k", TaskID: "t",

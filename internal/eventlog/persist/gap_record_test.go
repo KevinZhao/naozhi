@@ -137,3 +137,15 @@ func TestGapEntryShape_MatchesEventEntry(t *testing.T) {
 		t.Errorf("round-trip lost fields: %+v", round)
 	}
 }
+
+// TestGapEntryType_IsRegisteredKind: the gap record's type is spelled by
+// schema (persist stays clear of clievent in production code), so this is
+// where it is held to clievent's kind registry — the dashboard and the
+// history readers (history/merged compares clievent.KindPersistGap) only
+// recognise registered kinds.
+func TestGapEntryType_IsRegisteredKind(t *testing.T) {
+	t.Parallel()
+	if !clievent.IsKnownKind(gapEntryType) || gapEntryType != clievent.KindPersistGap {
+		t.Errorf("gapEntryType = %q, want the registered clievent.KindPersistGap (%q)", gapEntryType, clievent.KindPersistGap)
+	}
+}

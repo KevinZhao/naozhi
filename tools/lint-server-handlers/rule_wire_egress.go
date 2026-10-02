@@ -119,19 +119,26 @@ type egressSite struct {
 	Verdict   string // projected | exempt | violation
 }
 
-// collectTypedViolations loads the module at root and runs the typed rules.
-func collectTypedViolations(root string, report bool) ([]Violation, error) {
+// collectTypedViolations loads the module at root and runs the typed rules
+// (wire_egress, evententry_kind), listing their sites on stderr on request.
+func collectTypedViolations(root string, egressReport, kindReport bool) ([]Violation, error) {
 	prog, err := loadTyped(root)
 	if err != nil {
 		return nil, err
 	}
 	sites, vs := scanWireEgress(prog, wireEgress)
-	if report {
+	if egressReport {
 		for _, s := range sites {
 			fmt.Fprintf(os.Stderr, "wire_egress %-10s %s:%d %s %s\n", s.Verdict, s.File, s.Line, s.Callee, s.Form)
 		}
 	}
-	return vs, nil
+	kinds, kvs := scanEventEntryKind(prog, kindSentinels)
+	if kindReport {
+		for _, s := range kinds {
+			fmt.Fprintf(os.Stderr, "evententry_kind %-9s %s:%d %s %s %s\n", s.Verdict, s.File, s.Line, s.Where, s.Form, s.Why)
+		}
+	}
+	return append(vs, kvs...), nil
 }
 
 // scanWireEgress returns every conversion site and the violations among them,

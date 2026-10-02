@@ -206,7 +206,7 @@ func (t *agentTailer) pollOnce() bool {
 // Caller must hold t.mu.
 func (t *agentTailer) updateMetaFromEventLocked(e clievent.EventEntry, now time.Time) {
 	switch e.Type {
-	case "tool_use":
+	case clievent.KindToolUse:
 		t.meta.ToolUses++
 		if e.Tool != "" {
 			t.meta.LastTool = e.Tool
@@ -214,12 +214,12 @@ func (t *agentTailer) updateMetaFromEventLocked(e clievent.EventEntry, now time.
 		if e.Summary != "" {
 			t.meta.LastDetail = e.Summary
 		}
-	case "tool_result":
+	case clievent.KindToolResult:
 		// ToolUses already counted on tool_use; only refresh LastDetail.
 		if e.Summary != "" {
 			t.meta.LastDetail = e.Summary
 		}
-	case "thinking":
+	case clievent.KindThinking:
 		// Not a tool use, but advances the "doing right now" line.
 		t.meta.LastTool = "thinking"
 	}

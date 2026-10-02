@@ -27,14 +27,14 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 	switch ev.Type {
 	case "system":
 		entry := base
-		entry.Type = "system"
+		entry.Type = clievent.KindSystem
 		entry.Summary = ev.SubType
 		if ev.SubType == "init" {
 			return nil
 		}
 		switch ev.SubType {
 		case "task_started":
-			entry.Type = "task_start"
+			entry.Type = clievent.KindTaskStart
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
 			entry.TaskType = ev.TaskType
@@ -42,7 +42,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 				entry.Summary = textutil.TruncateRunes(ev.Description, 120)
 			}
 		case "task_progress", "task_updated":
-			entry.Type = "task_progress"
+			entry.Type = clievent.KindTaskProgress
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
 			if ev.Description != "" {
@@ -55,7 +55,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 				entry.DurationMS = ev.Usage.DurationMS
 			}
 		case "task_notification":
-			entry.Type = "task_done"
+			entry.Type = clievent.KindTaskDone
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
 			if ev.Description != "" {
@@ -81,7 +81,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 		// onto the prior tool_use by ToolUseID (Multi-Backend RFC §8.3 D17).
 		if ev.SubType == "tool_result" && ev.ToolCall != nil {
 			entry := base
-			entry.Type = "tool_use"
+			entry.Type = clievent.KindToolUse
 			entry.ToolUseID = ev.ToolUseID
 			if ev.ToolCall.Title != "" {
 				entry.Tool = ev.ToolCall.Title
@@ -111,17 +111,17 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 			entry := base
 			switch block.Type {
 			case "thinking":
-				entry.Type = "thinking"
+				entry.Type = clievent.KindThinking
 				// One UTF-8 scan derives both Summary and Detail.
 				entry.Summary, entry.Detail = textutil.TruncateRunesPair(block.Text, 120, clievent.EventDetailMaxRunes)
 			case "tool_use":
-				entry.Type = "tool_use"
+				entry.Type = clievent.KindToolUse
 				entry.Summary = block.Name
 				entry.Tool = block.Name
 				switch block.Name {
 				case "Agent":
 					inp := parseAgentInput(block.Input)
-					entry.Type = "agent"
+					entry.Type = clievent.KindAgent
 					entry.Subagent = inp.SubagentType
 					if entry.Subagent == "" {
 						entry.Subagent = inp.Name
@@ -140,7 +140,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 				case "TodoWrite":
 					entry.Detail = formatToolDetail(block)
 					if todos, rawTodos, ok := clievent.ParseTodosWithRaw(block.Input); ok {
-						entry.Type = "todo"
+						entry.Type = clievent.KindTodo
 						entry.Tool = "TodoWrite"
 						entry.Summary = clievent.TodosSummary(todos)
 						// Dashboard renderTodoList expects a JSON array of clievent.TodoItem, not the
@@ -158,7 +158,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 					entry.ToolCall = ev.ToolCall
 				}
 			case "text":
-				entry.Type = "text"
+				entry.Type = clievent.KindText
 				// Single-scan dual truncation; see the thinking branch.
 				entry.Summary, entry.Detail = textutil.TruncateRunesPair(block.Text, 120, 16000)
 			}
@@ -169,7 +169,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 		// order and the Agent → task_started tool_use_id linkage are preserved.
 		if ev.AskQuestion != nil {
 			entry := base
-			entry.Type = "ask_question"
+			entry.Type = clievent.KindAskQuestion
 			entry.Tool = "AskUserQuestion"
 			entry.ToolUseID = ev.AskQuestion.ToolUseID
 			// Summary is the sidebar digest; AskQuestion carries the full card.
@@ -191,7 +191,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 		// stopReason, so both backends share the invariant); copying ev.Result into
 		// Summary/Detail would duplicate the bubble. dashboard.js never renders "result".
 		entry := base
-		entry.Type = "result"
+		entry.Type = clievent.KindResult
 		entry.Cost = ev.CostUSD
 		return []clievent.EventEntry{entry}
 	}

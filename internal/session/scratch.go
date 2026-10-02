@@ -577,7 +577,7 @@ func filterContextEntries(in []clievent.EventEntry) []clievent.EventEntry {
 	out := make([]clievent.EventEntry, 0, len(in))
 	for _, e := range in {
 		switch e.Type {
-		case "user", "text", "result":
+		case clievent.KindUser, clievent.KindText, clievent.KindResult:
 			// Either text (streaming) or result (final envelope) may carry
 			// the visible reply, so both are kept.
 		default:
@@ -595,7 +595,7 @@ func filterContextEntries(in []clievent.EventEntry) []clievent.EventEntry {
 // sanitized and capped so a single multi-KB entry cannot eat the whole budget.
 func renderTurnLine(e clievent.EventEntry) string {
 	role := "assistant"
-	if e.Type == "user" {
+	if e.Type == clievent.KindUser {
 		role = "user"
 	}
 	payload, _ := SanitizeQuote(pickEntryText(e)) // reuse control-char / bidi scrubber

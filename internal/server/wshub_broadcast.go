@@ -182,7 +182,7 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 	h.fanOutToSubscribers(key, func() any {
 		ev := clievent.EventEntry{
 			Time:    time.Now().UnixMilli(),
-			Type:    "system",
+			Type:    clievent.KindSystem,
 			Summary: summary,
 		}
 		return wsproto.NewEvent(wsproto.Event{Key: key, Event: &ev})

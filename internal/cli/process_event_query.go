@@ -30,7 +30,7 @@ func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 	seen := make(map[string]struct{})
 	taskStartByToolUse := make(map[string]clievent.EventEntry, len(entries))
 	for _, e := range entries {
-		if e.Type == "task_start" && e.ToolUseID != "" {
+		if e.Type == clievent.KindTaskStart && e.ToolUseID != "" {
 			taskStartByToolUse[e.ToolUseID] = e
 		}
 	}
@@ -59,7 +59,7 @@ func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 	}
 	for _, e := range entries {
 		switch e.Type {
-		case "agent":
+		case clievent.KindAgent:
 			if e.ToolUseID == "" || e.InternalAgentID != "" {
 				continue
 			}
@@ -72,7 +72,7 @@ func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 				name = e.TeamName
 			}
 			kick(ts.TaskID, e.ToolUseID, name, e.Summary, e.Time)
-		case "task_start", "task_progress":
+		case clievent.KindTaskStart, clievent.KindTaskProgress:
 			// Orphan task: the agent entry was evicted from the ring before the replay
 			// window; without this Linker.Query stays ok=false forever (HTTP 202).
 			// Resolve by task_id works because Claude names the jsonl after it.

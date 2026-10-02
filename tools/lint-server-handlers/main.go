@@ -30,9 +30,9 @@
 //     (rule_sublock.go).
 //   - no_late_setters: session / cron / sysession / upstream take their
 //     collaborators at construction (rule_late_setters.go).
-//   - wire_egress: an EventEntry leaves the process only as its wire view
-//     (rule_wire_egress.go). Typed over the whole module, so it runs from
-//     main beside collectViolations, whose tests use fixture directories.
+//   - wire_egress / evententry_kind: an EventEntry leaves only as its wire view
+//     and its kind is a clievent.Kind* constant. Typed over the whole module, so
+//     they run from main beside collectViolations (whose tests use fixtures).
 //
 // Two rules were deleted in #2554:
 //   - iface_match scanned for godoc `satisfies:` comments and cross-checked them
@@ -100,6 +100,7 @@ var ruleIDs = []string{
 	"sublock_encapsulation",
 	"no_late_setters",
 	"wire_egress",
+	"evententry_kind",
 }
 
 type Violation struct {
@@ -136,6 +137,7 @@ func main() {
 		dashboardPkg = flag.String("dashboard-pkg", "internal/dashboard", "dashboard package directory (may not exist yet)")
 		moduleRoot   = flag.String("module-root", ".", "module root the typed rules load")
 		egressReport = flag.Bool("egress-report", false, "list every wire_egress conversion site with its verdict on stderr")
+		kindReport   = flag.Bool("kind-report", false, "list every evententry_kind position with its verdict on stderr")
 	)
 	flag.Parse()
 
@@ -170,7 +172,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "scan %s: %v\n", *serverPkg, err)
 		os.Exit(2)
 	}
-	typed, err := collectTypedViolations(*moduleRoot, *egressReport)
+	typed, err := collectTypedViolations(*moduleRoot, *egressReport, *kindReport)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "typed rules: %v\n", err)
 		os.Exit(2)

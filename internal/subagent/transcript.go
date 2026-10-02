@@ -323,7 +323,7 @@ func mapJSONLLine(line []byte) []clievent.EventEntry {
 		if raw.SubType != "api_error" {
 			return nil
 		}
-		return []clievent.EventEntry{{Time: ts, Type: "system", Summary: "api_error"}}
+		return []clievent.EventEntry{{Time: ts, Type: clievent.KindSystem, Summary: "api_error"}}
 	default:
 		return nil
 	}
@@ -369,7 +369,7 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 		}
 		return []clievent.EventEntry{{
 			Time:    ts,
-			Type:    "text",
+			Type:    clievent.KindText,
 			Summary: textutil.TruncateRunes(s, 120),
 			Detail:  textutil.TruncateRunes(s, clievent.EventDetailMaxRunes),
 		}}
@@ -391,7 +391,7 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 			}
 			out = append(out, clievent.EventEntry{
 				Time:    ts,
-				Type:    "text",
+				Type:    clievent.KindText,
 				Summary: textutil.TruncateRunes(block.Text, 120),
 				Detail:  textutil.TruncateRunes(block.Text, clievent.EventDetailMaxRunes),
 			})
@@ -402,7 +402,7 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 			}
 			entry := clievent.EventEntry{
 				Time:    ts,
-				Type:    "tool_result",
+				Type:    clievent.KindToolResult,
 				Summary: summary,
 				Detail:  detail,
 			}
@@ -440,21 +440,21 @@ func mapAssistantLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 		case "thinking":
 			out = append(out, clievent.EventEntry{
 				Time:    ts,
-				Type:    "thinking",
+				Type:    clievent.KindThinking,
 				Summary: textutil.TruncateRunes(block.Text, 120),
 				Detail:  textutil.TruncateRunes(block.Text, clievent.EventDetailMaxRunes),
 			})
 		case "text":
 			out = append(out, clievent.EventEntry{
 				Time:    ts,
-				Type:    "text",
+				Type:    clievent.KindText,
 				Summary: textutil.TruncateRunes(block.Text, 120),
 				Detail:  textutil.TruncateRunes(block.Text, clievent.EventDetailMaxRunes),
 			})
 		case "tool_use":
 			entry := clievent.EventEntry{
 				Time:    ts,
-				Type:    "tool_use",
+				Type:    clievent.KindToolUse,
 				Tool:    block.Name,
 				Summary: block.Name,
 			}
