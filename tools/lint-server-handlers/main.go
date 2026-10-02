@@ -99,6 +99,7 @@ var ruleIDs = []string{
 	"option_liveness",
 	"sublock_encapsulation",
 	"no_late_setters",
+	"turn_boundary",
 	"wire_egress",
 	"evententry_kind",
 }
@@ -259,6 +260,10 @@ func collectViolations(serverPkg, dashboardPkg string, exempts *exemptions, now 
 		}
 	}
 	vs = append(vs, scanLateSetters(coreDirs)...)
+
+	// turn_boundary: G-a/G-b/G-d gate #3004's turn-orchestration merge in
+	// before any structural move (#2897 T3004 A1).
+	vs = append(vs, scanTurnBoundary(serverPkg)...)
 
 	// Rule 5: stale_exemption
 	vs = append(vs, scanStaleExemption(exempts, now)...)
