@@ -84,16 +84,23 @@
     "configureDeps": 24
   },
   "dashboard.js": {
-    "lines": 6011,
+    "lines": 5981,
     "maxFnLines": 249,
     "fnOver100": 7,
     "topLevelLetVar": 0,
-    "configureDeps": 175
+    "configureDeps": 173
   },
   "discovery.js": {
     "lines": 254,
     "maxFnLines": 149,
     "fnOver100": 1,
+    "topLevelLetVar": 0,
+    "configureDeps": 0
+  },
+  "features.js": {
+    "lines": 30,
+    "maxFnLines": 7,
+    "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0
   },

@@ -461,6 +461,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/features.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/file_refs.js",
     "handler_type": "http.HandlerFunc"
   },

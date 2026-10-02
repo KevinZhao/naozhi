@@ -13,6 +13,7 @@ import { composer, perSession, selection, sessionList, timers } from './state.js
 import { turnState } from './running_banner.js';
 import { showToast, patchCardExitChip } from './nz_util.js';
 import { wsm } from './ws_manager.js';
+import { featureForCurrent } from './features.js';
 
 const deps = {
   EVENT_DIVIDER_GAP_MS: null,
@@ -20,7 +21,6 @@ const deps = {
   discoveredKey: null,
   dropDiscovered: null,
   eventHtml: null,
-  featureForCurrent: null,
   fetchEvents: null,
   fetchSessions: null,
   getToken: null,
@@ -90,7 +90,7 @@ function validateComposerForSend(text) {
   // wonder where their preemption went. Title-attr on /urgent button
   // would be ideal but /urgent is a text prefix typed in the input;
   // detect at send time instead.
-  if (text && /^\s*\/urgent\b/.test(text) && !deps.featureForCurrent('passthrough')) {
+  if (text && /^\s*\/urgent\b/.test(text) && !featureForCurrent('passthrough')) {
     showToast('当前后端不支持 /urgent 抢占（请用 Esc 中断后再发）', 'warning');
     return false;
   }
@@ -100,7 +100,7 @@ function validateComposerForSend(text) {
   // (claude does; kiro doesn't). Strip-and-warn would silently change
   // the prompt; better to abort + toast so the operator can paste the
   // absolute path or content explicitly.
-  if (text && /(?:^|\s)@[\w./-]/.test(text) && !deps.featureForCurrent('embedded_context')) {
+  if (text && /(?:^|\s)@[\w./-]/.test(text) && !featureForCurrent('embedded_context')) {
     showToast('当前后端不支持 @ 文件 mention，请粘贴绝对路径或文件内容', 'warning');
     return false;
   }
