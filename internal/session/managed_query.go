@@ -756,7 +756,7 @@ func (s *ManagedSession) LogSystemEvent(summary string) {
 	}
 	entry := clievent.EventEntry{
 		Time:    time.Now().UnixMilli(),
-		Type:    "system",
+		Type:    clievent.KindSystem,
 		Summary: summary,
 	}
 	// InjectHistory owns proc/persistedHistory routing and subscriber wakeup.
@@ -799,13 +799,13 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 func scanLastSummaries(entries []clievent.EventEntry) (prompt, activity, response string) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
-		if prompt == "" && e.Type == "user" {
+		if prompt == "" && e.Type == clievent.KindUser {
 			prompt = e.Summary
 		}
 		if activity == "" && clievent.IsActivityType(e.Type) {
 			activity = e.Summary
 		}
-		if response == "" && e.Type == "text" {
+		if response == "" && e.Type == clievent.KindText {
 			// Mirrors EventLog's store-time strip so the replay-seeded
 			// cache and the live summary render identically (#2435).
 			response = textutil.StripMarkdown(e.Summary)

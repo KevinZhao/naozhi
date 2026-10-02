@@ -279,7 +279,7 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 		e := clievent.EventEntry{
 			UUID:    uuidFromClaudeLine(hl, ts, "user", summary, detail),
 			Time:    ts,
-			Type:    "user",
+			Type:    clievent.KindUser,
 			Summary: summary,
 			Detail:  detail,
 		}
@@ -310,7 +310,7 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 			out = append(out, clievent.EventEntry{
 				UUID:    uuidFromClaudeBlock(hl, idx, ts, "text", summary, detail),
 				Time:    ts,
-				Type:    "text",
+				Type:    clievent.KindText,
 				Summary: summary,
 				Detail:  detail,
 			})

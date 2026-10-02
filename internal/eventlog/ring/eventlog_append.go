@@ -119,10 +119,10 @@ func (l *EventLog) Append(e clievent.EventEntry) {
 
 	// Summary Stores happen inside l.mu so a concurrent AppendBatch (which
 	// holds l.mu for its whole run) cannot invert last-writer order.
-	if e.Type == "user" {
+	if e.Type == clievent.KindUser {
 		storeAtomicString(&l.lastPromptSummary, e.Summary)
 		l.userTurnCount.Add(1)
-	} else if e.Type == "text" {
+	} else if e.Type == clievent.KindText {
 		// Stored even when Summary is empty so a fresh empty text block
 		// overwrites last turn's preview. Markdown is stripped because the
 		// sidebar renders plain text (#2435).
@@ -267,7 +267,7 @@ func (l *EventLog) appendBatch(entries []clievent.EventEntry, isReplay bool) {
 		// replayed entries may still be linker-pending after reconnect. The
 		// inline type gate keeps the call off the 500-entry common path; the
 		// map is only mutable under l.mu (#1360, #1549).
-		if ePtr.Type == "agent" || ePtr.Type == "task_start" {
+		if ePtr.Type == clievent.KindAgent || ePtr.Type == clievent.KindTaskStart {
 			l.recordAgentRingPosLocked(ePtr.Type, ePtr.ToolUseID, ringIdx)
 		}
 
@@ -282,11 +282,11 @@ func (l *EventLog) appendBatch(entries []clievent.EventEntry, isReplay bool) {
 		// Track last-of-kind summaries for one Store below (still under l.mu).
 		// The "saw" flag is separate from the value so an empty final Summary
 		// still overwrites, matching Append's unconditional store.
-		if ePtr.Type == "user" {
+		if ePtr.Type == clievent.KindUser {
 			lastPrompt = ePtr.Summary
 			sawPrompt = true
 			userDelta++
-		} else if ePtr.Type == "text" {
+		} else if ePtr.Type == clievent.KindText {
 			lastResponse = ePtr.Summary
 			sawResponse = true
 		} else if clievent.IsActivityType(ePtr.Type) {

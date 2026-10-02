@@ -253,10 +253,10 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		// borrowed its ts ticks it. Assistants with their own meta.timestamp
 		// don't advance the offset.
 		switch entry.Type {
-		case "user":
+		case clievent.KindUser:
 			lastPromptMS = entry.Time
 			asstOffset = 0
-		case "text":
+		case clievent.KindText:
 			if lastPromptMS > 0 && entry.Time == lastPromptMS+1+asstOffset {
 				asstOffset++
 			}
@@ -407,11 +407,11 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 				continue
 			}
 			switch {
-			case e.Type == "user":
+			case e.Type == clievent.KindUser:
 				a.promptMS = e.Time
 				a.asstOffset = count
 				return a
-			case e.Type == "text" && e.Time == borrowProbeMS+1:
+			case e.Type == clievent.KindText && e.Time == borrowProbeMS+1:
 				count++
 			}
 		}
@@ -445,11 +445,11 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (clievent.EventEntr
 	var entryType string
 	switch rec.Kind {
 	case "Prompt":
-		entryType = "user"
+		entryType = clievent.KindUser
 	case "AssistantMessage":
 		// "text" is what dashboard.js renders as a markdown bubble;
 		// "assistant" would fall through to the unknown-type card.
-		entryType = "text"
+		entryType = clievent.KindText
 	default:
 		// Unknown kinds are skipped rather than surfaced as generic system entries.
 		return clievent.EventEntry{}, false
@@ -466,7 +466,7 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (clievent.EventEntr
 		// Borrow the most recent Prompt ts plus offset for an AssistantMessage.
 		// Anything else without a ts is dropped rather than forged as ts=0, which
 		// would collapse records to epoch and corrupt the strict-< cursor.
-		if entryType != "text" || lastPromptMS <= 0 {
+		if entryType != clievent.KindText || lastPromptMS <= 0 {
 			return clievent.EventEntry{}, false
 		}
 		timeMS = lastPromptMS + 1 + asstOffset
@@ -477,7 +477,7 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (clievent.EventEntr
 	// Drop an AssistantMessage with no plain text (thinking + tool_use only)
 	// so tool-driven turns don't inject blank cards. Prompts stay permissive
 	// so pagination cursors advance.
-	if entryType == "text" && strings.TrimSpace(fullText) == "" {
+	if entryType == clievent.KindText && strings.TrimSpace(fullText) == "" {
 		return clievent.EventEntry{}, false
 	}
 

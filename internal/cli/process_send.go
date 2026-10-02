@@ -25,7 +25,7 @@ import (
 func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEntry {
 	entry := clievent.EventEntry{
 		Time:    time.Now().UnixMilli(),
-		Type:    "user",
+		Type:    clievent.KindUser,
 		Summary: textutil.TruncateRunes(text, 120),
 		Detail:  textutil.TruncateRunes(text, clievent.EventDetailMaxRunes),
 	}

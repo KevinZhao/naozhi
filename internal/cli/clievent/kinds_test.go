@@ -39,3 +39,69 @@ func TestIsActivityType_Set(t *testing.T) {
 		})
 	}
 }
+
+// TestKindTable pins the registry: names are unique and non-empty, and the
+// three derived sets equal the sets pinned below (which the dashboard's two
+// hand-written Sets also hold).
+func TestKindTable(t *testing.T) {
+	seen := map[string]bool{}
+	for _, k := range kindTable {
+		if k.Name == "" || seen[k.Name] {
+			t.Errorf("kind %q is empty or listed twice", k.Name)
+		}
+		seen[k.Name] = true
+	}
+	consts := []string{KindUser, KindText, KindThinking, KindToolUse, KindToolResult, KindAgent, KindTodo,
+		KindAskQuestion, KindTaskStart, KindTaskProgress, KindTaskDone, KindResult, KindSystem, KindPersistGap}
+	for _, k := range consts {
+		if !IsKnownKind(k) {
+			t.Errorf("constant %q has no kindTable row", k)
+		}
+	}
+	if got := AllKinds(); len(got) != len(consts) || len(got) != len(kindTable) {
+		t.Errorf("AllKinds() = %v, want one row per Kind* constant (%d)", got, len(consts))
+	}
+	sets := []struct {
+		name string
+		pred func(string) bool
+		list []string
+		want []string
+	}{
+		{"activity", IsActivityType, nil, []string{"tool_use", "thinking", "agent", "task_start", "task_progress", "todo"}},
+		{"internal", IsInternalEventType, InternalKinds(), []string{"tool_use", "result", "agent", "task_start", "task_progress", "task_done"}},
+		{"markdown-ignore", nil, MarkdownIgnoreKinds(), []string{"tool_use", "result", "agent", "task_start", "task_progress", "task_done", "thinking", "ask_question"}},
+	}
+	for _, s := range sets {
+		want := map[string]bool{}
+		for _, w := range s.want {
+			want[w] = true
+			if !IsKnownKind(w) {
+				t.Errorf("%s: %q is not a registered kind", s.name, w)
+			}
+		}
+		for _, k := range append(AllKinds(), "", "init", "unknown_kind") {
+			if s.pred != nil && s.pred(k) != want[k] {
+				t.Errorf("%s(%q) = %v, want %v", s.name, k, s.pred(k), want[k])
+			}
+		}
+		if s.list != nil {
+			got := map[string]bool{}
+			for _, k := range s.list {
+				got[k] = true
+			}
+			if len(got) != len(want) || len(s.list) != len(want) {
+				t.Errorf("%s list = %v, want %v", s.name, s.list, s.want)
+			}
+			for w := range want {
+				if !got[w] {
+					t.Errorf("%s list lacks %q", s.name, w)
+				}
+			}
+		}
+	}
+	for _, bad := range []string{"", "init", "txt", "Text"} {
+		if IsKnownKind(bad) {
+			t.Errorf("IsKnownKind(%q) = true", bad)
+		}
+	}
+}

@@ -49,7 +49,7 @@ func resultFromEvent(ev clievent.Event) clievent.SendResult {
 func (p *Process) findResultSince(afterMS int64) *clievent.SendResult {
 	entries := p.eventLog.EntriesSince(afterMS)
 	for i := len(entries) - 1; i >= 0; i-- {
-		if entries[i].Type != "result" {
+		if entries[i].Type != clievent.KindResult {
 			continue
 		}
 		text := entries[i].Detail
@@ -70,7 +70,7 @@ func (p *Process) findResultSince(afterMS int64) *clievent.SendResult {
 // entry at an index < resultIdx, or "" when the turn produced no text entry.
 func lastTextEntryBefore(entries []clievent.EventEntry, resultIdx int) string {
 	for j := resultIdx - 1; j >= 0; j-- {
-		if entries[j].Type == "text" && entries[j].Detail != "" {
+		if entries[j].Type == clievent.KindText && entries[j].Detail != "" {
 			return entries[j].Detail
 		}
 	}

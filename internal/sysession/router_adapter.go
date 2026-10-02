@@ -67,7 +67,7 @@ func (a routerAdapter) EventEntriesForKey(key string) []SystemEventEntry {
 	// survives keeps the empty-seed contract.
 	out := make([]SystemEventEntry, 0, len(raw))
 	for _, e := range raw {
-		if e.Type != "user" || strings.TrimSpace(e.Summary) == "" {
+		if e.Type != clievent.KindUser || strings.TrimSpace(e.Summary) == "" {
 			continue
 		}
 		out = append(out, SystemEventEntry{Type: e.Type, Summary: e.Summary})

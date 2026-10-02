@@ -327,14 +327,14 @@ func (s *ManagedSession) injectHistory(entries []clievent.EventEntry, onlyIfEmpt
 	// persisted_user_turns_incremental_test.go.
 	userTurns := s.persistedUserTurns.Load()
 	for i := range entries {
-		if entries[i].Type == "user" {
+		if entries[i].Type == clievent.KindUser {
 			userTurns++
 		}
 	}
 	s.persistedHistory = append(s.persistedHistory, entries...)
 	if trimmed := len(s.persistedHistory) - maxPersistedHistory; trimmed > 0 {
 		for i := 0; i < trimmed; i++ {
-			if s.persistedHistory[i].Type == "user" {
+			if s.persistedHistory[i].Type == clievent.KindUser {
 				userTurns--
 			}
 		}
