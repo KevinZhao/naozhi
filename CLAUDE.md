@@ -269,7 +269,7 @@ Key invariants:
 - `<keyhash>` is `sha256(session_key)[:16]` — file names never leak the raw session key; the in-file header records the plaintext key so operators can `less`/`jq` to audit
 - Write order is strict: `log.Write → log.Sync → idx.Write → idx.Sync`. A crash between any two steps is recovered by `Recover()` on next startup by truncating the log to the idx-backed safe edge
 - `cli.EventLog.SetPersistSink` MUST be called AFTER any `InjectHistory` (replay) completes. A runtime `replayPhase` guard in `EventLog` tags pre-sink entries so a broken caller gets surfaced as `naozhi_eventlog_persist_replay_leak_total > 0` (or panic in DevMode)
-- Read path is `merged.Source` = `naozhilog.Source` (primary) + `claudejsonl.Source` (fallback). UUID dedup keeps the local richer entry when both tiers see the same turn
+- Read path is `merged.Source` = `naozhilog.Source` (primary) + `claudejsonl.Source` (fallback). UUID dedup keeps the local richer entry when both tiers see the same turn; fallback turns behind a `persist_gap` record in the startup tail are spliced into memory pages (`merged.GapFill` → `ManagedSession.withGapFill`), memory itself unchanged
 - Rotate threshold 100 MiB; rotate keeps the newest `DefaultKeepRecords` (1000) records, splices via offset-index so it's O(1) in practice
 - Orphan `<keyhash>.log` files whose stem doesn't match any known session AND whose mtime is > 30 days get swept on NewRouter startup
 - FS detection (Linux `statfs`) runs once and surfaces via `/health.eventlog.{fs_type, fs_supported}`; NFS/overlayfs report `supported=false` so operators see a warning

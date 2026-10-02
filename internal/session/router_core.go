@@ -923,7 +923,8 @@ func (r *Router) startBackgroundLifecycle() {
 // so ReconnectShims can inject first, then backfill only if still empty. One
 // historyLoadSem bounds total history I/O across both tiers. Both finish
 // BEFORE the process's PersistSink is installed, so replayed entries are
-// tagged replayPhase=true and dropped. NewRouter-only.
+// tagged replayPhase=true and dropped. Tier 1 reads persist_gap fill after it
+// injects (fillPersistGaps). NewRouter-only.
 func (r *Router) startBackgroundHistoryLoaders() {
 	historyLoadSem := make(chan struct{}, historyLoadConcurrency)
 	var sessions []*ManagedSession
@@ -948,10 +949,12 @@ func (r *Router) startBackgroundHistoryLoaders() {
 				}
 				defer func() { <-sem }()
 				src := newEventLogLocalSource(r.eventLogDir, s.key)
-				entries, err := src.LoadLatest(r.historyCtx, maxPersistedHistory)
-				if err != nil || len(entries) == 0 {
+				all, err := src.LoadLatest(r.historyCtx, 2*maxPersistedHistory)
+				if err != nil || len(all) == 0 {
 					return
 				}
+				// The extra look-back lets a gap record just below the cut count.
+				entries := all[max(0, len(all)-maxPersistedHistory):]
 				// InjectHistoryIfEmpty atomically guards against a concurrent
 				// ReconnectShims / Tier 2 loader having already filled the
 				// session; a separate check-then-inject would double-inject (#1812).
@@ -961,6 +964,7 @@ func (r *Router) startBackgroundHistoryLoaders() {
 				slog.Info("loaded session history from naozhi event log",
 					"key", s.key, "entries", len(entries))
 				r.notifyChange()
+				s.fillPersistGaps(r.historyCtx, all, entries[0].Time)
 			}()
 		}
 	}

@@ -45,6 +45,11 @@ func (r *Router) publishSession(tx sessTx, key string, s *ManagedSession, alread
 			"key", key, "alreadyAttached", alreadyAttached)
 		s.SetHistorySource(history.Noop{})
 	}
+	// A struct replacing key's entry (a respawn) is the same logical session
+	// and shares its gap fill cell.
+	if prev := tx.Get(key); prev != nil && prev != s && s.gapFill.Load() == nil {
+		s.gapFill.Store(prev.gapFillCell())
+	}
 	tx.Put(key, s)
 }
 
@@ -1455,6 +1460,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 			storeAtomicString(&fresh.lastActivity, la)
 		}
 		fresh.setSessionID(old.getSessionID())
+		fresh.gapFill.Store(old.gapFillCell())
 
 		// Move the process pointer; old becomes an orphan with process=nil so a
 		// stale Send fails cleanly. The proc's EventLog already holds the entries

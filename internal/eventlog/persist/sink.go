@@ -41,10 +41,10 @@ type gapEntryJSON struct {
 	Detail  string `json:"detail,omitempty"`
 }
 
-// gapEntryType is the EventEntry.Type of a persistence-gap record. Additive:
-// consumers that predate it render the summary text through their default
-// branch (dashboard.js eventHtml), which is exactly the visibility wanted.
-const gapEntryType = "persist_gap"
+// gapEntryType is the EventEntry.Type of a persistence-gap record, owned by
+// schema so readers share it. Additive: consumers that do not know it render
+// the summary text through their default branch (dashboard.js eventHtml).
+const gapEntryType = schema.GapEntryType
 
 func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	p := s.p

@@ -531,33 +531,31 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []clieven
 	return out
 }
 
-// EventEntriesBeforeCtx extends EventEntriesBefore with a disk-tier
-// fallback: when memory holds fewer than `limit` entries strictly older than
-// beforeMS, the session's history.Source fills the rest of the page.
-//
-// The tiers never overlap: memory is authoritative for any range it covers
-// (it includes naozhi-synthesized events like LogSystemEvent that never reach
-// disk), so the disk read is anchored strictly older than the earliest memory
-// entry and prepended — chronological without dedup. A short memory page
-// means the memory bottom was reached; returning it alone would read as
-// end-of-history to the dashboard, which stops paging on a short page.
+// EventEntriesBeforeCtx is EventEntriesBefore plus the disk tier: a memory
+// page shorter than `limit` (the memory bottom, which the dashboard would
+// read as end-of-history) is topped up from the history.Source, anchored
+// strictly older than the earliest memory entry and prepended. Memory is
+// authoritative for the range it covers (LogSystemEvent never reaches disk),
+// so the tiers never overlap and need no dedup. The memory part carries its
+// gap-fill turns (withGapFill), so a page may exceed `limit`.
 func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 {
 		return nil
 	}
 	mem := s.EventEntriesBefore(beforeMS, limit)
+	filled := s.withGapFill(mem, beforeMS)
 	if len(mem) >= limit {
-		return mem
+		return filled
 	}
 	src := s.loadHistorySource()
 	if src == nil {
-		return mem
+		return filled
 	}
 	diskBefore := beforeMS
 	if len(mem) > 0 {
 		// A zero Time would read as "no upper bound" and overlap memory.
 		if mem[0].Time <= 0 {
-			return mem
+			return filled
 		}
 		diskBefore = mem[0].Time
 	}
@@ -565,16 +563,16 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 	if err != nil {
 		// Treat as end-of-history, matching the JSONL load sites in router.go.
 		slog.Warn("history source load failed", "key", s.key, "err", err)
-		return mem
+		return filled
 	}
 	sortEntriesByTimeStable(entries)
 	if len(mem) == 0 {
 		return entries
 	}
 	// Fresh slice: the source may hand back a buffer it still owns.
-	out := make([]clievent.EventEntry, 0, len(entries)+len(mem))
+	out := make([]clievent.EventEntry, 0, len(entries)+len(filled))
 	out = append(out, entries...)
-	return append(out, mem...)
+	return append(out, filled...)
 }
 
 // countVisibleEntries returns how many entries the dashboard would render as
@@ -642,19 +640,20 @@ func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget
 		mem = s.persistedHistoryTailVisible(visibleTarget, maxTotal)
 	}
 
+	filled := s.withGapFill(mem, 0)
 	if visibleTarget <= 0 {
-		return mem
+		return filled
 	}
 	vis := countVisibleEntries(mem)
 	if vis >= visibleTarget || len(mem) >= maxTotal {
-		return mem
+		return filled
 	}
 
 	// Disk tier: the ring couldn't satisfy the target. Page backward through
 	// the durable source, strictly older than the earliest in-memory entry.
 	src := s.loadHistorySource()
 	if src == nil {
-		return mem
+		return filled
 	}
 	before := int64(0)
 	if len(mem) > 0 {
@@ -686,17 +685,17 @@ func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget
 		}
 	}
 	if len(pages) == 0 {
-		return mem
+		return filled
 	}
 	totalOlder := 0
 	for _, p := range pages {
 		totalOlder += len(p)
 	}
-	older := make([]clievent.EventEntry, 0, totalOlder)
+	older := make([]clievent.EventEntry, 0, totalOlder+len(filled))
 	for i := len(pages) - 1; i >= 0; i-- {
 		older = append(older, pages[i]...)
 	}
-	return append(older, mem...)
+	return append(older, filled...)
 }
 
 // persistedHistoryTailVisible returns a contiguous tail of persistedHistory

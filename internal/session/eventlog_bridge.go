@@ -12,9 +12,11 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/naozhi/naozhi/internal/attachment/tracker"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -49,6 +51,90 @@ func mergeWithEventLog(eventLogDir, key string, fallback history.Source) history
 		Local:    newEventLogLocalSource(eventLogDir, key),
 		Fallback: fallback,
 	}
+}
+
+// fillPersistGaps stores the fallback turns hidden behind persist_gap records
+// of local (the event-log tail tier 1 read, reaching below floor, the oldest
+// injected Time) for withGapFill. No-op unless the source is a merged.Source.
+func (s *ManagedSession) fillPersistGaps(ctx context.Context, local []clievent.EventEntry, floor int64) {
+	ms, ok := s.loadHistorySource().(*merged.Source)
+	if !ok {
+		return
+	}
+	if gf := ms.GapFill(ctx, local, floor, maxPersistedHistory); len(gf) > 0 {
+		s.gapFillCell().turns.Store(&gf)
+		slog.Info("filled persist gaps from fallback history", "key", s.key, "entries", len(gf))
+	}
+}
+
+// gapFillCell is the gap fill a logical session's structs share.
+type gapFillCell struct {
+	turns atomic.Pointer[[]clievent.EventEntry]
+}
+
+// gapFillCell returns s's cell, allocating it on first use. CompareAndSwap
+// makes a concurrent first use from tier 1 and from a successor's publish
+// agree on one cell.
+func (s *ManagedSession) gapFillCell() *gapFillCell {
+	if c := s.gapFill.Load(); c != nil {
+		return c
+	}
+	s.gapFill.CompareAndSwap(nil, new(gapFillCell))
+	return s.gapFill.Load()
+}
+
+// loadGapFill returns the stored fill turns, nil when there are none.
+func (s *ManagedSession) loadGapFill() []clievent.EventEntry {
+	if c := s.gapFill.Load(); c != nil {
+		if gf := c.turns.Load(); gf != nil {
+			return *gf
+		}
+	}
+	return nil
+}
+
+// withGapFill splices the gap-fill turns with Time in [page[0].Time, before)
+// (before <= 0: no upper bound) into a memory page by Time, after page
+// entries of equal Time. The page keeps its order and its first entry, the
+// caller's next cursor, so consecutive pages split the turns between them.
+// A turn whose UUID the page already holds (a later InjectHistory appended
+// the transcript tail, #3028) is skipped.
+func (s *ManagedSession) withGapFill(page []clievent.EventEntry, before int64) []clievent.EventEntry {
+	gf := s.loadGapFill()
+	if len(gf) == 0 || len(page) == 0 {
+		return page
+	}
+	lo := page[0].Time
+	var onPage map[string]struct{}
+	var add []clievent.EventEntry
+	for _, f := range gf {
+		if f.Time < lo || (before > 0 && f.Time >= before) {
+			continue
+		}
+		if onPage == nil {
+			onPage = make(map[string]struct{}, len(page))
+			for _, e := range page {
+				onPage[e.UUID] = struct{}{}
+			}
+		}
+		if _, dup := onPage[f.UUID]; dup && f.UUID != "" {
+			continue
+		}
+		add = append(add, f)
+	}
+	if len(add) == 0 {
+		return page
+	}
+	out := make([]clievent.EventEntry, 0, len(page)+len(add))
+	j := 0
+	for _, e := range page {
+		for j < len(add) && add[j].Time < e.Time {
+			out = append(out, add[j])
+			j++
+		}
+		out = append(out, e)
+	}
+	return append(out, add[j:]...)
 }
 
 // bridgeEncBuf pools a bytes.Buffer + json.Encoder pair so the bridge hot path

@@ -30,6 +30,11 @@ const (
 	TypeEntry  = "entry"
 )
 
+// GapEntryType is the EventEntry.Type of the record persist writes in front
+// of the first batch that gets through after it dropped batches: no UUID, Time
+// of that batch's first entry. Readers (history/merged) key gap windows on it.
+const GapEntryType = "persist_gap"
+
 // MaxRecordBytes caps a single serialized Record, enforced by the framing
 // layer. 4 MiB fits a large multi-image user message while bounding reader
 // memory; an oversize record is a caller bug, rejected at write time.
