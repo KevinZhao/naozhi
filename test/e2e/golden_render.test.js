@@ -199,6 +199,9 @@ const UNKNOWN = [
   { name: 'type __proto__', e: { type: '__proto__', summary: 'proto name', time: T0 } },
   { name: 'type toString', e: { type: 'toString', summary: 'proto name', time: T0 } },
   { name: 'type toString, internal', opts: { includeInternal: true }, e: { type: 'toString', detail: 'd', time: T0 } },
+  // defaultEventChip writes all three into innerHTML: each needs its esc/escAttr.
+  { name: 'markup in type, summary and detail', e: { type: '<img src=x onerror=alert(1)>', summary: '<b>s</b>', detail: '"><svg onload=1>', time: T0 } },
+  { name: 'markup in type and summary, no detail', e: { type: 'x"><i>', summary: '"><svg onload=2>', time: T0 } },
 ];
 
 async function renderEvents(page, cases) {

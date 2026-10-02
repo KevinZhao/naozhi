@@ -82,5 +82,26 @@
       "includeInternal": true
     },
     "html": "<div class=\"event toString\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"d\">toString</span></div></div>"
+  },
+  {
+    "name": "markup in type, summary and detail",
+    "input": {
+      "type": "<img src=x onerror=alert(1)>",
+      "summary": "<b>s</b>",
+      "detail": "\"><svg onload=1>",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event &lt;img src=x onerror=alert(1)&gt;\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"&quot;&gt;&lt;svg onload=1&gt;\">&lt;img src=x onerror=alert(1)&gt;</span> &lt;b&gt;s&lt;/b&gt;</div></div>"
+  },
+  {
+    "name": "markup in type and summary, no detail",
+    "input": {
+      "type": "x\"><i>",
+      "summary": "\"><svg onload=2>",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event x&quot;&gt;&lt;i&gt;\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"&quot;&gt;&lt;svg onload=2&gt;\">x\"&gt;&lt;i&gt;</span> \"&gt;&lt;svg onload=2&gt;</div></div>"
   }
 ]

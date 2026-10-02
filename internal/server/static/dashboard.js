@@ -3299,9 +3299,9 @@ const EVENT_ICONS = new Map([
   ['todo', ICONS.todo],
 ]);
 
-// shouldHideEvent is eventHtml's pre-filter (order unchanged): an internal
-// type without includeInternal, injected system XML, and the CLI's own
-// SIGINT interrupt marker.
+// shouldHideEvent is eventHtml's pre-filter, run before any table lookup:
+// an internal type without includeInternal, injected system XML, and the
+// CLI's own SIGINT interrupt marker.
 function shouldHideEvent(e, includeInternal) {
   if (!includeInternal && isInternalEvent(e)) return true;
   const raw = e.detail || e.summary || '';
@@ -3449,9 +3449,9 @@ function eventActionsHtml(e, cleanRaw) {
 // parent view hides — agent_view.js's sub-agent panel needs them, since a
 // team member's work is almost entirely tool_use.
 function eventHtml(/** @type {EventEntry} */ e, opts) {
-  if (e && EVENT_WHOLE.has(e.type)) return EVENT_WHOLE.get(e.type)(e);
   const includeInternal = !!(opts && opts.includeInternal);
   if (shouldHideEvent(e, includeInternal)) return '';
+  if (EVENT_WHOLE.has(e.type)) return EVENT_WHOLE.get(e.type)(e);
   const icon = eventIconHtml(e);
 
   // Strip redundant "[+N image(s)]" suffix when thumbnails are present.
@@ -3466,7 +3466,7 @@ function eventHtml(/** @type {EventEntry} */ e, opts) {
   // data-uuid: the backend's entry identity, the dedup key for a restart's
   // history replay (docs/rfc/dashboard-event-uuid-idempotent-render.md).
   const uuidAttr = e.uuid ? ' data-uuid="' + escAttr(e.uuid) + '"' : '';
-  return '<div class="event ' + esc(e.type||'') + '"' + timeAttr + uuidAttr + '>' +
+  return '<div class="event ' + escAttr(e.type || '') + '"' + timeAttr + uuidAttr + '>' +
     '<span class="event-icon">' + icon + '</span>' +
     '<div class="event-content">' + content + imgHtml + copyBtn + askBtn + '</div></div>';
 }

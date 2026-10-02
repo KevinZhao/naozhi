@@ -42,7 +42,9 @@ type KindInfo struct {
 	MarkdownIgnore bool
 }
 
-// kindTable is the single registry of kinds; kinds_test.go pins its sets.
+// kindTable is the single registry of kinds; kinds_test.go pins its sets. A
+// new kind also needs an EVENT_WHOLE or EVENT_CONTENT entry in the dashboard
+// (scripts/check-enum-literals.mjs fails until it has one).
 var kindTable = []KindInfo{
 	{Name: KindUser},
 	{Name: KindText},
