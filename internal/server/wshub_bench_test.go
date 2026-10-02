@@ -64,7 +64,7 @@ func benchHub(b *testing.B, subs int) *Hub {
 	// they break benchstat parsing.
 	prevLog := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	h, _ := newTestHub("")
+	h, _ := newTestHub(b, "")
 	for i := 0; i < benchClients; i++ {
 		c := benchAddClient(h)
 		if i < subs {

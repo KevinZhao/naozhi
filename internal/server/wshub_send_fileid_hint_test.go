@@ -12,7 +12,7 @@ import (
 // so a TakeAll miss must tell the user to re-attach + resend rather than just
 // "file not found or expired".
 func TestWS_SendUnknownFileIDHintsReattach(t *testing.T) {
-	hub, _ := newTestHubWithUploads("")
+	hub, _ := newTestHubWithUploads(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 

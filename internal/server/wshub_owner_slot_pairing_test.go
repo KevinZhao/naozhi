@@ -26,7 +26,7 @@ func tokenOwnerKey(token string) string {
 // driving the per-owner counter negative on disconnect (or, over reconnects,
 // wedging the cap with phantom slots).
 func TestHandleAuth_TokenRekeysOwnerSlot(t *testing.T) {
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	defer hub.Shutdown()
 
 	c := &wsClient{
@@ -68,7 +68,7 @@ func TestHandleAuth_TokenRekeysOwnerSlot(t *testing.T) {
 // for the genuinely-held slots (no leak of the just-released "" slot, no phantom
 // increment under the capped owner).
 func TestHandleAuth_TokenRekey_ReserveFailRejects(t *testing.T) {
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	defer hub.Shutdown()
 
 	owner := tokenOwnerKey("secret")
@@ -122,7 +122,7 @@ func TestHandleAuth_TokenRekey_ReserveFailRejects(t *testing.T) {
 func TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak(t *testing.T) {
 	owner := tokenOwnerKey("secret")
 	for iter := 0; iter < 200; iter++ {
-		hub, _ := newTestHub("secret")
+		hub, _ := newTestHub(t, "secret")
 
 		c := &wsClient{
 			send: make(chan []byte, 4),
@@ -176,7 +176,7 @@ func TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak(t *testing.T) {
 // fresh slot for the dead conn — that slot would never be released because
 // unregister's once-only `removed` gate has already passed.
 func TestRekeyOwnerSlot_SkipsWhenConnDone(t *testing.T) {
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	defer hub.Shutdown()
 
 	c := &wsClient{
@@ -209,7 +209,7 @@ func TestRekeyOwnerSlot_SkipsWhenConnDone(t *testing.T) {
 // is a data race; the atomic.Pointer makes the read/write safe. Run under
 // `go test -race ./internal/server/...` — the race detector flags the regression.
 func TestUploadOwnerAtomic_NoRace(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	defer hub.Shutdown()
 
 	c := &wsClient{

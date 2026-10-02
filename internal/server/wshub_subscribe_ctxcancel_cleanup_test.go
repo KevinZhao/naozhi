@@ -39,7 +39,7 @@ func ownerSubState(h *Hub, c *wsClient, key string) (subCount int, hasSub bool, 
 // releasing it. completeSubscribe therefore observes a live ctx at the
 // fast-fail and a cancelled ctx at the re-check — exactly the #1806 window.
 func TestCompleteSubscribe_CtxCancelledInReCheckNoLeak(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	defer hub.Shutdown()
 
 	key := "test:d:u:general"
@@ -103,7 +103,7 @@ func TestCompleteSubscribe_CtxCancelledInReCheckNoLeak(t *testing.T) {
 func TestCompleteSubscribe_CtxCancelMidFlightConsistent(t *testing.T) {
 	key := "test:d:u:general"
 	for iter := 0; iter < 300; iter++ {
-		hub, router := newTestHub("")
+		hub, router := newTestHub(t, "")
 		proc := session.NewTestProcess()
 		sess := router.InjectSession(key, proc)
 

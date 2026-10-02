@@ -14,7 +14,7 @@ import (
 // per-IP send / upload limiters. Each limiter must return its own
 // user-facing label so the client can just display the body.
 func TestHandleSend_RateLimit429BodiesAreDistinct(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 	h := &SendHandler{
 		engine:      hub.engine,

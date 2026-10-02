@@ -59,7 +59,7 @@ func readUntilHistoryWith(t *testing.T, conn interface {
 // permanently; the SinceCursor (inclusive watermark query + UUID dedup) must
 // deliver it.
 func TestEventPush_SameMillisecondAcrossNotifyWaves(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	// Seed one history entry so the initial subscribe push exercises the
 	// cursor-seeding path in completeSubscribe too.
@@ -119,7 +119,7 @@ func TestEventPush_SameMillisecondAcrossNotifyWaves(t *testing.T) {
 // cursor: after the same-millisecond redelivery window, already-sent UUIDs
 // must not be pushed again on subsequent waves.
 func TestEventPush_SameMillisecondNoDuplicates(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	router.InjectSession("test:d:u:general", proc)
 

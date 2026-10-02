@@ -442,8 +442,7 @@ func TestHub_RemoteSend(t *testing.T) {
 		"remote": node.NewHTTPClient("remote", ts.URL, "", "Remote"),
 	}
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
-	hub := newHubForTest(HubOptions{Router: router, Nodes: newNodeRegistry(nodes)}, sendEngineOpts{Guard: guard})
+	hub := newHubForTest(t, HubOptions{Router: router, Nodes: newNodeRegistry(nodes)}, sendEngineOpts{})
 	defer hub.Shutdown()
 
 	client := newTestWSClient()
@@ -476,7 +475,7 @@ func TestHub_RemoteSend(t *testing.T) {
 }
 
 func TestHub_RemoteSend_UnknownNode(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	client := newTestWSClient()
 
 	hub.handleSend(client, node.ClientMsg{

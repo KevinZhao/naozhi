@@ -30,7 +30,7 @@ func TestHandleSend_PostTakeAllFailureFlagsFilesConsumed(t *testing.T) {
 	// non-optional, and these assertions are about rejections that happen
 	// BEFORE the engine is reached, so it must be present without changing
 	// where the request stops.
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 	h := &SendHandler{engine: hub.engine, uploadStore: store}
 

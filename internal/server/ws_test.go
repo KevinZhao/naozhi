@@ -35,10 +35,10 @@ func testCookieMAC(token string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func newTestHub(token string) (*Hub, *session.Router) {
+func newTestHub(t testing.TB, token string) (*Hub, *session.Router) {
+	t.Helper()
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
-	hub := newHubForTest(HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token)}, sendEngineOpts{Guard: guard})
+	hub := newHubForTest(t, HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token)}, sendEngineOpts{})
 	return hub, router
 }
 
@@ -46,22 +46,22 @@ func newTestHub(token string) (*Hub, *session.Router) {
 // because HubOptions.UploadStore replaced Hub.SetUploadStore in #2552, and a
 // hub without a store takes the "uploads not configured" branch — which is a
 // different assertion than the ones about resolving file_ids.
-func newTestHubWithUploads(token string) (*Hub, *session.Router) {
+func newTestHubWithUploads(t testing.TB, token string) (*Hub, *session.Router) {
+	t.Helper()
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
-	hub := newHubForTest(HubOptions{
+	hub := newHubForTest(t, HubOptions{
 		Router:      router,
 		DashToken:   token,
 		CookieMAC:   testCookieMAC(token),
 		UploadStore: newUploadStore(),
-	}, sendEngineOpts{Guard: guard})
+	}, sendEngineOpts{})
 	return hub, router
 }
 
-func newTestHubWithAgents(token string, agents map[string]session.AgentOpts) (*Hub, *session.Router) {
+func newTestHubWithAgents(t testing.TB, token string, agents map[string]session.AgentOpts) (*Hub, *session.Router) {
+	t.Helper()
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
-	hub := newHubForTest(HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token)}, sendEngineOpts{Guard: guard, Agents: agents})
+	hub := newHubForTest(t, HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token)}, sendEngineOpts{Agents: agents})
 	return hub, router
 }
 
@@ -109,7 +109,7 @@ func wsRead(t *testing.T, conn *websocket.Conn) node.ServerMsg {
 // ─── Auth tests ──────────────────────────────────────────────────────────────
 
 func TestWS_AuthOK(t *testing.T) {
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -125,7 +125,7 @@ func TestWS_AuthOK(t *testing.T) {
 }
 
 func TestWS_AuthFail(t *testing.T) {
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -144,7 +144,7 @@ func TestWS_AuthFail(t *testing.T) {
 }
 
 func TestWS_AuthCookiePreAuth(t *testing.T) {
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -168,7 +168,7 @@ func TestWS_AuthCookiePreAuth(t *testing.T) {
 }
 
 func TestWS_AuthNotRequired(t *testing.T) {
-	hub, _ := newTestHub("") // no token required
+	hub, _ := newTestHub(t, "") // no token required
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -185,7 +185,7 @@ func TestWS_AuthNotRequired(t *testing.T) {
 }
 
 func TestWS_UnauthenticatedCommandRejected(t *testing.T) {
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -207,7 +207,7 @@ func TestWS_UnauthenticatedCommandRejected(t *testing.T) {
 // ─── Ping/Pong test ─────────────────────────────────────────────────────────
 
 func TestWS_Ping(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -228,7 +228,7 @@ func TestWS_Ping(t *testing.T) {
 // unbounded json.Marshal + channel sends. Limiter is rate 1/s burst 5;
 // sending 20 pings rapidly should produce strictly fewer than 20 pongs.
 func TestWS_Ping_UnauthenticatedRateLimited(t *testing.T) {
-	hub, _ := newTestHub("secret-token") // token gate so connection is unauth
+	hub, _ := newTestHub(t, "secret-token") // token gate so connection is unauth
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -264,7 +264,7 @@ func TestWS_Ping_UnauthenticatedRateLimited(t *testing.T) {
 // ─── Subscribe tests ─────────────────────────────────────────────────────────
 
 func TestWS_SubscribeSessionNotFound(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -285,7 +285,7 @@ func TestWS_SubscribeSessionNotFound(t *testing.T) {
 }
 
 func TestWS_SubscribeMissingKey(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -301,7 +301,7 @@ func TestWS_SubscribeMissingKey(t *testing.T) {
 }
 
 func TestWS_SubscribeAndHistory(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "system", Summary: "init"})
 	proc.EventLog.Append(clievent.EventEntry{Time: 2000, Type: "text", Summary: "hello"})
@@ -341,7 +341,7 @@ func TestWS_SubscribeAndHistory(t *testing.T) {
 }
 
 func TestWS_SubscribeWithAfter(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "system", Summary: "init"})
 	proc.EventLog.Append(clievent.EventEntry{Time: 2000, Type: "text", Summary: "hello"})
@@ -376,7 +376,7 @@ func TestWS_SubscribeWithAfter(t *testing.T) {
 // a fresh subscribe with limit=N only receives the newest N events instead
 // of the full event log.
 func TestWS_SubscribeWithLimit(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	for i := 1; i <= 5; i++ {
 		proc.EventLog.Append(clievent.EventEntry{Time: int64(i * 1000), Type: "text", Summary: "msg"})
@@ -416,7 +416,7 @@ func TestWS_SubscribeWithLimit(t *testing.T) {
 // earlier". The old client heuristic (len>=INITIAL_HISTORY_LIMIT) would have
 // hidden the button because only 2 events came back.
 func TestWS_SubscribeLimitHasMore(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	for i := 1; i <= 5; i++ {
 		proc.EventLog.Append(clievent.EventEntry{Time: int64(i * 1000), Type: "text", Summary: "msg"})
@@ -450,7 +450,7 @@ func TestWS_SubscribeLimitHasMore(t *testing.T) {
 // TestWS_SubscribeLimitNoMore: the whole log fits in the page → has_more is a
 // non-nil false (the modern "no more" answer must survive serialization).
 func TestWS_SubscribeLimitNoMore(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "text", Summary: "only"})
 	router.InjectSession("test:d:u:general", proc)
@@ -482,7 +482,7 @@ func TestWS_SubscribeLimitNoMore(t *testing.T) {
 // TestWS_SubscribeAfterOmitsHasMore: an after-cursor catch-up is not an initial
 // page, so has_more must be omitted (nil) — the client keeps its fallback.
 func TestWS_SubscribeAfterOmitsHasMore(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "text"})
 	proc.EventLog.Append(clievent.EventEntry{Time: 2000, Type: "text"})
@@ -522,7 +522,7 @@ func wsReadEmptyInitialHistory(t *testing.T, conn *websocket.Conn) {
 }
 
 func TestWS_EventPush(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	router.InjectSession("test:d:u:general", proc)
 
@@ -562,7 +562,7 @@ func TestWS_EventPush(t *testing.T) {
 }
 
 func TestWS_EventPushMultiple(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	router.InjectSession("test:d:u:general", proc)
 
@@ -597,7 +597,7 @@ func TestWS_EventPushMultiple(t *testing.T) {
 // ─── Unsubscribe test ────────────────────────────────────────────────────────
 
 func TestWS_Unsubscribe(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	router.InjectSession("test:d:u:general", proc)
 
@@ -625,7 +625,7 @@ func TestWS_Unsubscribe(t *testing.T) {
 // ─── Send tests ──────────────────────────────────────────────────────────────
 
 func TestWS_SendAccepted(t *testing.T) {
-	hub, router := newTestHubWithAgents("", nil)
+	hub, router := newTestHubWithAgents(t, "", nil)
 	proc := session.NewTestProcess()
 	router.InjectSession("test:d:u:general", proc)
 
@@ -660,7 +660,7 @@ func TestWS_SendAccepted(t *testing.T) {
 // the Hub's own registry; a notifier wired anywhere else stays silent and the
 // read below runs into dialWS's deadline.
 func TestWS_SendBroadcastsRunningToAuthenticatedClient(t *testing.T) {
-	hub, router := newTestHubWithAgents("", nil)
+	hub, router := newTestHubWithAgents(t, "", nil)
 	const key = "test:d:u:general"
 	router.InjectSession(key, session.NewTestProcess())
 
@@ -694,12 +694,11 @@ func readUntilType(t *testing.T, conn *websocket.Conn, wantType string) node.Ser
 }
 
 func TestWS_SendBusy(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	key := "test:d:u:general"
 
-	// Pre-acquire the guard — new message will interrupt and wait
-	hub.engine.guard.TryAcquire(key)
-	defer hub.engine.guard.Release(key)
+	// Another send owns the key's turn, so this one queues behind it.
+	busyForTest(t, hub, key)
 
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
@@ -713,10 +712,8 @@ func TestWS_SendBusy(t *testing.T) {
 	if resp.Type != "send_ack" {
 		t.Fatalf("type = %q, want send_ack", resp.Type)
 	}
-	// With interrupt-on-busy, the immediate ack is "accepted";
-	// the goroutine will eventually timeout waiting for the guard.
-	if resp.Status != "accepted" {
-		t.Errorf("status = %q, want accepted", resp.Status)
+	if resp.Status != "queued" {
+		t.Errorf("status = %q, want queued", resp.Status)
 	}
 	if resp.ID != "req-2" {
 		t.Errorf("id = %q, want req-2", resp.ID)
@@ -724,7 +721,7 @@ func TestWS_SendBusy(t *testing.T) {
 }
 
 func TestWS_SendMissingKey(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -743,7 +740,7 @@ func TestWS_SendMissingKey(t *testing.T) {
 }
 
 func TestWS_SendMissingText(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -767,7 +764,7 @@ func TestWS_SendMissingText(t *testing.T) {
 // wsMaxMessageSize bytes into nc.Send, amplifying input into the remote
 // shim's 12 MB stdin line ceiling via coalesce at the remote. R62-SEC-1.
 func TestWS_RemoteSendTextTooLong(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -795,7 +792,7 @@ func TestWS_RemoteSendTextTooLong(t *testing.T) {
 // dispatch queue's coalescing depth is bounded but the per-message cap is
 // what prevents a single send from dominating memory. R59-SEC-H1.
 func TestWS_SendTextTooLong(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 
@@ -819,7 +816,7 @@ func TestWS_SendTextTooLong(t *testing.T) {
 // ─── Client disconnect cleanup ──────────────────────────────────────────────
 
 func TestWS_ClientDisconnectCleanup(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	router.InjectSession("test:d:u:general", proc)
 
@@ -847,7 +844,7 @@ func TestWS_ClientDisconnectCleanup(t *testing.T) {
 // ─── Multiple clients ────────────────────────────────────────────────────────
 
 func TestWS_MultipleClientsReceiveEvents(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	router.InjectSession("test:d:u:general", proc)
 
@@ -899,7 +896,7 @@ func TestWS_MultipleClientsReceiveEvents(t *testing.T) {
 // ─── Hub shutdown ────────────────────────────────────────────────────────────
 
 func TestWS_HubShutdown(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	url, _ := startWSServer(t, hub)
 
 	conn := dialWS(t, url)
@@ -927,7 +924,7 @@ func TestWS_HubShutdown(t *testing.T) {
 // ─── Integration: auth + subscribe + event push ──────────────────────────────
 
 func TestWS_FullFlow(t *testing.T) {
-	hub, router := newTestHub("tok")
+	hub, router := newTestHub(t, "tok")
 	proc := session.NewTestProcess()
 	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "system", Summary: "init"})
 	router.InjectSession("test:d:u:general", proc)
@@ -1006,7 +1003,7 @@ func TestWsServerMsg_JSONRoundtrip(t *testing.T) {
 // per-owner upload quota is enforced. Before the fix, c.uploadOwner stayed
 // "" and any WS-token-authed client could bypass maxUploadPerOwner.
 func TestHandleAuth_WSToken_SetsUploadOwner(t *testing.T) {
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	defer hub.Shutdown()
 
 	c := &wsClient{
@@ -1032,7 +1029,7 @@ func TestHandleAuth_WSToken_SetsUploadOwner(t *testing.T) {
 // deterministic so that files uploaded under the same token from HTTP and
 // WS can cross-claim in the upload store.
 func TestHandleAuth_WSToken_OwnerStableAcrossCalls(t *testing.T) {
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	defer hub.Shutdown()
 
 	derive := func() string {
@@ -1053,7 +1050,7 @@ func TestHandleAuth_WSToken_OwnerStableAcrossCalls(t *testing.T) {
 // limiter is untouched. The spent budget is installed after tab A's first
 // send creates it, so the test does not race the 1/s refill.
 func TestWS_Send_OwnerBudgetSharedAcrossTabs(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 

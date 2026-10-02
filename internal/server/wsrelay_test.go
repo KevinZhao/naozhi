@@ -359,8 +359,7 @@ func TestHub_RemoteSubscribe(t *testing.T) {
 		"remote": node.NewHTTPClient("remote", ts.URL, "", "Remote"),
 	}
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
-	hub := newHubForTest(HubOptions{Router: router, Nodes: newNodeRegistry(nodes)}, sendEngineOpts{Guard: guard})
+	hub := newHubForTest(t, HubOptions{Router: router, Nodes: newNodeRegistry(nodes)}, sendEngineOpts{})
 	defer hub.Shutdown()
 
 	client := newTestWSClient()
@@ -382,7 +381,7 @@ func TestHub_RemoteSubscribe(t *testing.T) {
 }
 
 func TestHub_RemoteSubscribe_UnknownNode(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	client := newTestWSClient()
 
 	hub.handleSubscribe(client, node.ClientMsg{
@@ -403,7 +402,7 @@ func TestHub_RemoteSubscribe_UnknownNode(t *testing.T) {
 // maxSubscribersPerKey clients are subscribed to the same key, the next
 // subscribe attempt must be rejected with "too many subscribers for key".
 func TestHub_Subscribe_PerKeyCap(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	defer hub.Shutdown()
 
 	const key = "test:d:u:general"
@@ -435,7 +434,7 @@ func TestHub_Subscribe_PerKeyCap(t *testing.T) {
 }
 
 func TestHub_RemoteUnsubscribe_NoRelay(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	client := newTestWSClient()
 
 	hub.handleUnsubscribe(client, node.ClientMsg{
@@ -459,7 +458,7 @@ func TestHub_RemoteUnsubscribe_NoRelay(t *testing.T) {
 // the remote path is also guarded. Mirrors the existing subscribe/interrupt
 // regression tests in dashboard_test.go.
 func TestHub_Unsubscribe_RejectInvalidKey(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	defer hub.Shutdown()
 	cases := map[string]string{
 		"embedded_LF":  "test:direct:abc\ndef:general",

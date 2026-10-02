@@ -139,7 +139,7 @@ func TestConnAdmission_RekeyRefusedKeepsTheOldSlot(t *testing.T) {
 // TestHandleUpgrade_RejectsCrossOriginHandshake: a page on another origin
 // cannot open a WebSocket to the dashboard with the user's cookies.
 func TestHandleUpgrade_RejectsCrossOriginHandshake(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	url, cleanup := startWSServer(t, hub)
 	defer cleanup()
 	host := strings.TrimPrefix(strings.TrimSuffix(url, "/ws"), "ws://")

@@ -22,7 +22,7 @@ func TestHub_CookieMACFn_PropagatesRotation(t *testing.T) {
 	t.Parallel()
 
 	current := "MAC_v1"
-	hub := newHubForTest(HubOptions{
+	hub := newHubForTest(t, HubOptions{
 		CookieMACFn: func() string { return current },
 	}, sendEngineOpts{})
 
@@ -50,7 +50,7 @@ func TestHub_CookieMACFn_PropagatesRotation(t *testing.T) {
 func TestHub_CookieMAC_StaticFallback(t *testing.T) {
 	t.Parallel()
 
-	hub := newHubForTest(HubOptions{
+	hub := newHubForTest(t, HubOptions{
 		CookieMAC: "static-mac",
 	}, sendEngineOpts{})
 
@@ -74,7 +74,7 @@ func TestHub_CookieMAC_StaticFallback(t *testing.T) {
 func TestHub_CookieMAC_NilCallback_SafeEmpty(t *testing.T) {
 	t.Parallel()
 
-	hub := newHubForTest(HubOptions{}, sendEngineOpts{}) // no MAC provided
+	hub := newHubForTest(t, HubOptions{}, sendEngineOpts{}) // no MAC provided
 	if got := hub.admit.cookieMAC(); got != "" {
 		t.Fatalf("unset cookieMAC = %q, want empty string — NewHub must install a safe-empty closure even when neither option is set, otherwise deriveUploadOwner panics on the constant-time compare path", got)
 	}

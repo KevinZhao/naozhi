@@ -12,7 +12,7 @@ import (
 // Shutdown for every multi-tab session that bypassed the singleSubscriber
 // fast path.
 func TestUnregister_DropsMarshalCacheOnLastSubscriber(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 
 	const lastKey = "feishu:p2p:last"

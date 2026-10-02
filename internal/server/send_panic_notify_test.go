@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/turn"
 )
 
 func TestHandleOwnerLoopPanic_CallsOnAsyncError(t *testing.T) {
-	hub, _ := newTestHub("")
-	hub.engine.queue = turn.NewQueueWithMode(5, 0, turn.ModeCollect)
+	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 
 	var (
@@ -44,8 +44,7 @@ func TestHandleOwnerLoopPanic_CallsOnAsyncError(t *testing.T) {
 func TestHandleOwnerLoopPanic_NilOnAsyncErrorNoCrash(t *testing.T) {
 	// HTTP path uses nil onAsyncError because the 202 ack has already
 	// been shipped; the recover path must tolerate that silently.
-	hub, _ := newTestHub("")
-	hub.engine.queue = turn.NewQueueWithMode(5, 0, turn.ModeCollect)
+	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 
 	defer func() {
@@ -57,9 +56,8 @@ func TestHandleOwnerLoopPanic_NilOnAsyncErrorNoCrash(t *testing.T) {
 }
 
 func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
-	hub, _ := newTestHub("")
 	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
-	hub.engine.queue = q
+	hub := newHubForTest(t, HubOptions{Router: session.NewRouter(session.RouterConfig{})}, sendEngineOpts{Queue: q})
 	t.Cleanup(hub.Shutdown)
 
 	key := "key-c"
@@ -79,8 +77,7 @@ func TestHandleOwnerLoopPanic_OnAsyncErrorPanicAbsorbed(t *testing.T) {
 	// A broken WS writer (or any user-supplied onAsyncError) might panic
 	// when the process is under duress. The nested recover inside
 	// handleOwnerLoopPanic must swallow it so the outer defer finishes.
-	hub, _ := newTestHub("")
-	hub.engine.queue = turn.NewQueueWithMode(5, 0, turn.ModeCollect)
+	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 
 	called := false

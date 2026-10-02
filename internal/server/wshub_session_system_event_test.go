@@ -46,7 +46,7 @@ func recvNone(t *testing.T, outs ...<-chan node.ServerMsg) {
 // (#433) parity: a remote-send failure fans out to every dashboard subscribed
 // to the session key as a `system` event, not just the originating tab.
 func TestBroadcastSessionSystemEvent_ReachesSubscribers(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	sub, subOut := newCapturedClient(t, hub)
@@ -82,7 +82,7 @@ func TestBroadcastSessionSystemEvent_ReachesSubscribers(t *testing.T) {
 // scoped to the session's subscribers — a tab watching a different session
 // must not receive cross-tenant noise.
 func TestBroadcastSessionSystemEvent_SkipsNonSubscribers(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	other, otherOut := newCapturedClient(t, hub)
@@ -98,7 +98,7 @@ func TestBroadcastSessionSystemEvent_SkipsNonSubscribers(t *testing.T) {
 // must not deliver anything (and must not panic). The single connected client
 // is subscribed to a DIFFERENT key, so the target key has zero subscribers.
 func TestBroadcastSessionSystemEvent_NoSubscribersNoop(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	c, out := newCapturedClient(t, hub)
@@ -115,7 +115,7 @@ func TestBroadcastSessionSystemEvent_NoSubscribersNoop(t *testing.T) {
 // nothing is delivered — even though a client is wired into the Hub maps for a
 // DIFFERENT key, so the target key's fast count stays absent/zero.
 func TestBroadcastSessionSystemEvent_ZeroCountFastPath(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	// A live, authenticated client subscribed elsewhere; the target key has no
@@ -131,7 +131,7 @@ func TestBroadcastSessionSystemEvent_ZeroCountFastPath(t *testing.T) {
 // TestBroadcastSessionSystemEvent_MultipleSubscribers verifies every client
 // subscribed to the key receives the system event.
 func TestBroadcastSessionSystemEvent_MultipleSubscribers(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	const key = "feishu:p2p:alice"
@@ -165,7 +165,7 @@ func TestBroadcastSessionSystemEvent_MultipleSubscribers(t *testing.T) {
 // detector. The test asserts no panic / no race; delivery counts are
 // nondeterministic by design so they are not checked.
 func TestBroadcastSessionSystemEvent_ConcurrentChurn(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	const key = "feishu:p2p:churn"
@@ -243,7 +243,7 @@ func TestBroadcastSessionSystemEvent_ConcurrentChurn(t *testing.T) {
 // subscriber cap, among many more clients subscribed elsewhere, reaches every
 // one of its subscribers and none of the others.
 func TestBroadcastSessionSystemEvent_FullKeyAmongManyClients(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	const key = "feishu:p2p:chunk"
@@ -278,7 +278,7 @@ func TestBroadcastSessionSystemEvent_FullKeyAmongManyClients(t *testing.T) {
 // TestBroadcastSessionSystemEvent_EmptyArgsNoop guards the early return so an
 // empty key or summary cannot emit a malformed frame.
 func TestBroadcastSessionSystemEvent_EmptyArgsNoop(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	sub, subOut := newCapturedClient(t, hub)

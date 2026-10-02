@@ -742,13 +742,20 @@ func TestHandleAPISend_AcceptedNoAuth(t *testing.T) {
 	}
 }
 
-func TestHandleAPISend_InterruptWhenBusy(t *testing.T) {
-	_, hs := newTestServerHS(&mockPlatform{})
+func TestHandleAPISend_QueuedWhenBusy(t *testing.T) {
+	// A queue with room, as config's default max_depth gives production;
+	// newTestServerHS's zero QueueOptions turn queueing off.
+	srv, hs := buildServerWithHandlers(ServerOptions{
+		Addr:    ":0",
+		Router:  session.NewRouter(session.RouterConfig{}),
+		Backend: "claude",
+		Queue:   QueueOptions{MaxDepth: 5},
+	})
+	t.Cleanup(srv.appCancel)
 	key := "p:t:u:general"
 
-	// Manually acquire the session guard to simulate a busy session.
-	hs.wiring.sessionGuard.TryAcquire(key)
-	defer hs.wiring.sessionGuard.Release(key)
+	// Another send owns the key's turn, so this one queues behind it.
+	busyForTest(t, srv.hub, key)
 
 	body := `{"key":"p:t:u:general","text":"hi"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
@@ -757,8 +764,6 @@ func TestHandleAPISend_InterruptWhenBusy(t *testing.T) {
 	w := httptest.NewRecorder()
 	hs.sendH.handleSend(w, req)
 
-	// With interrupt-on-busy, the API accepts immediately and interrupts
-	// the running session; the goroutine will timeout waiting for the guard.
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
 	}
@@ -766,8 +771,8 @@ func TestHandleAPISend_InterruptWhenBusy(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp["status"] != "accepted" {
-		t.Errorf("status = %q, want 'accepted'", resp["status"])
+	if resp["status"] != "queued" {
+		t.Errorf("status = %q, want 'queued'", resp["status"])
 	}
 }
 

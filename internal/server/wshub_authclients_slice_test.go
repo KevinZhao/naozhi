@@ -93,7 +93,7 @@ func TestAuthSet_MembershipFollowsRegistration(t *testing.T) {
 // TestSnapshotAuthenticated_ReturnsTheAuthenticatedSet: the snapshot is
 // exactly the authenticated clients, and a copy rather than an alias.
 func TestSnapshotAuthenticated_ReturnsTheAuthenticatedSet(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	c1 := &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
@@ -121,7 +121,7 @@ func TestSnapshotAuthenticated_ReturnsTheAuthenticatedSet(t *testing.T) {
 // TestAuthSet_ConcurrentChurn: register / unregister churn beside a
 // broadcaster reading the set; -race surfaces any unguarded access.
 func TestAuthSet_ConcurrentChurn(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	const writers = 4

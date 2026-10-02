@@ -22,15 +22,15 @@ func (f *failInterruptNode) ProxyInterruptSession(_ context.Context, _ string) (
 
 // newTestHubWithNodes builds a Hub wired with a static node table so the
 // remote-* handlers can resolve a peer without a real reverse connection.
-func newTestHubWithNodes(nodes map[string]node.Conn) *Hub {
+func newTestHubWithNodes(t testing.TB, nodes map[string]node.Conn) *Hub {
+	t.Helper()
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
-	return newHubForTest(HubOptions{
+	return newHubForTest(t, HubOptions{
 		Router:    router,
 		Nodes:     newNodeRegistry(nodes),
 		DashToken: "tok",
 		CookieMAC: testCookieMAC("tok"),
-	}, sendEngineOpts{Guard: guard})
+	}, sendEngineOpts{})
 }
 
 // TestHandleRemoteInterrupt_FailureBroadcastsToSubscribers verifies R176-ARCH-NX
@@ -40,7 +40,7 @@ func newTestHubWithNodes(nodes map[string]node.Conn) *Hub {
 func TestHandleRemoteInterrupt_FailureBroadcastsToSubscribers(t *testing.T) {
 	const key = "node1:p2p:carol"
 	nodes := map[string]node.Conn{"node1": &failInterruptNode{fakeCapNode{id: "node1"}}}
-	hub := newTestHubWithNodes(nodes)
+	hub := newTestHubWithNodes(t, nodes)
 	t.Cleanup(hub.Shutdown)
 
 	// Originating client (issues the interrupt) and a separate watcher that

@@ -13,22 +13,21 @@ import (
 // lives on sendEngine, #2551). Assigning a
 // nil concrete pointer straight into an interface field would make
 // `e.queue == nil` read false and silently disable the legacy-fallback
-// gate in send.go. NewHub must only assign a non-nil Queue, so a Hub built
-// without a queue keeps a nil interface field.
+// gate in send.go. newSendEngine must only assign a non-nil Queue, so an
+// engine built without a queue keeps a nil interface field. newHubForTest
+// always wires a queue, so the nil half builds the engine directly.
 func TestNewHub_NilQueue_LeavesInterfaceFieldNil(t *testing.T) {
-	hub, _ := newTestHub("") // newTestHub wires no Queue
-	t.Cleanup(hub.Shutdown)
-	if hub.engine.queue != nil {
-		t.Fatalf("Hub built without Queue: engine.queue = %v, want nil interface", hub.engine.queue)
+	noQueue := newSendEngine(sendEngineOpts{})
+	t.Cleanup(noQueue.drain)
+	if noQueue.queue != nil {
+		t.Fatalf("engine built without Queue: queue = %v, want nil interface", noQueue.queue)
 	}
 
-	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
 	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
-	withQueue := newHubForTest(HubOptions{Router: router}, sendEngineOpts{Guard: guard, Queue: q})
+	withQueue := newHubForTest(t, HubOptions{Router: session.NewRouter(session.RouterConfig{})}, sendEngineOpts{Queue: q})
 	t.Cleanup(withQueue.Shutdown)
-	if withQueue.engine.queue == nil {
-		t.Fatal("Hub built with a real Queue: engine.queue is nil, want non-nil interface")
+	if withQueue.engine.queue != MessageEnqueuer(q) {
+		t.Fatalf("Hub built with a real Queue: engine.queue = %v, want that queue", withQueue.engine.queue)
 	}
 }
 

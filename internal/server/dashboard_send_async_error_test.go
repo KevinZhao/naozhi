@@ -37,7 +37,7 @@ func postSendJSON(t *testing.T, h *SendHandler, token string, body map[string]an
 // owner goroutine, exercising exactly the asynchronous branch.
 func TestHandleSend_AsyncFailureReachesSubscribers(t *testing.T) {
 	const key = "test:d:u:general"
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 
 	watcher, watcherOut := newCapturedClient(t, hub)
@@ -90,7 +90,7 @@ func TestBroadcastSendError_Scoping(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow: skipped in -short")
 	}
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	sub, subOut := newCapturedClient(t, hub)
@@ -126,7 +126,7 @@ func TestBroadcastSendError_Scoping(t *testing.T) {
 // Real failures (spawn error) must still fan out.
 func TestHTTPSendErrorCallback_SkipsInformationalErrors(t *testing.T) {
 	const key = "feishu:p2p:alice"
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 	sub, subOut := newCapturedClient(t, hub)
 	registerSub(hub, sub, key)

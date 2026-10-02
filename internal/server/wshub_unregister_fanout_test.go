@@ -20,7 +20,7 @@ func TestUnregister_RemoveClientFanOutParallel(t *testing.T) {
 	const numNodes = 5
 	const perCallSleep = 80 * time.Millisecond
 
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 
 	stubs := make([]*recordingFanoutNode, 0, numNodes)
@@ -65,7 +65,7 @@ func TestUnregister_RemoveClientFanOutParallel(t *testing.T) {
 // single-node branch skips the goroutine spawn for the steady-state
 // deployment where fan-out has no benefit.
 func TestUnregister_RemoveClientSingleNode(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 
 	stub := &recordingFanoutNode{

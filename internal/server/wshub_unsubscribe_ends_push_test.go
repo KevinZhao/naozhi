@@ -14,7 +14,7 @@ import (
 // give up rather than install a fresh subscription and keep pushing the key's
 // events to a client that dropped it.
 func TestUnsubscribe_EndsTheParkedPushLoop(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	defer hub.Shutdown()
 	hub.resubscribeInterval = time.Millisecond
 	const key = "test:d:u:general"

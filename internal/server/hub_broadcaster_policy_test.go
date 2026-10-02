@@ -19,7 +19,7 @@ import (
 // hubBroadcaster. This test is what stands between that if-statement and a
 // silent cross-tenant leak.
 func TestHubBroadcaster_DropsSysessionErrorMsg(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 	c := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
 	c.authenticated.Store(true)
@@ -78,7 +78,7 @@ func TestHubBroadcaster_DropsSysessionErrorMsg(t *testing.T) {
 // method is on the path. The marshal tests call hub.bcast directly and would
 // stay green with that link dropped.
 func TestHubBroadcaster_RunStartedReachesClient(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 	c := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
 	c.authenticated.Store(true)
