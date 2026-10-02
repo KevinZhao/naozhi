@@ -4,6 +4,7 @@ import { INITIAL_HISTORY_LIMIT, sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { composer, hooks, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, reconcileChildren, registerActions, sessionExitChipHtml, patchCardExitChip } from './nz_util.js';
+import { featureForBackend, featureForCurrent } from './features.js';
 import {
   configureRenderMd,
   loadKatex,
@@ -1329,37 +1330,6 @@ function originBadgeHtml(key) {
   const info = originBadgeInfo(key);
   if (!info) return '';
   return '<span class="sc-origin kind-' + esc(info.kind) + '" title="' + escAttr(info.label) + '">' + esc(info.label) + '</span>';
-}
-
-// featureForBackend resolves a backend feature flag (RFC §8.2). Returns
-// true when the feature is supported, false when missing / unknown
-// backend / no cache yet. Default-false on uncertainty matches the
-// spec's "missing key == false" — controls degrade to disabled rather
-// than letting users hit a backend that doesn't support them.
-//
-// Only "askuser", "passthrough", "embedded_context", "image_input",
-// "audio_input", "mcp_http", "mcp_sse" are recognized today; new
-// features must be added to the Profile.Features map AND a hard-coded
-// caller in dashboard.js (no automatic fallback path).
-function featureForBackend(backendID, name) {
-  if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return false;
-  if (!backendID) backendID = serverInfo.cliBackends.default || '';
-  const entry = serverInfo.cliBackends.backends.find(b => b && b.id === backendID);
-  if (!entry || !entry.features) return false;
-  return entry.features[name] === true;
-}
-
-// featureForCurrent reads the active session's backend feature flag.
-// Used by feature-gate sites (file picker, voice button, /urgent hint)
-// to gray out controls that don't apply to the current session. Returns
-// true in single-backend mode (length<=1) so claude-only deployments
-// preserve all historical behavior.
-function featureForCurrent(name) {
-  if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return true;
-  if (serverInfo.cliBackends.backends.length <= 1) return true; // single-backend mode
-  const sess = sessionList.sessionsData[sid(selection.key, selection.node)];
-  const backendID = (sess && sess.backend) || serverInfo.cliBackends.default || '';
-  return featureForBackend(backendID, name);
 }
 
 // applyFeatureGates updates the input-area controls to reflect the
@@ -4643,7 +4613,7 @@ function showOnboarding() {
 // is visible to importers, unlike a window-property copy.)
 // Wire the markdown renderers' dashboard-side helpers (#2558 D4). Runs in
 // dashboard's module body, before any render call.
-configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, featureForCurrent, fetchEvents, fetchSessions, getToken, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton });
+configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, fetchEvents, fetchSessions, getToken, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton });
 configureAuthModal({ applyFeatureGates, debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar });
 configureSidebarProject({ PICKER_SELECT_ONLY_STYLE, PICKER_SELECT_STYLE, accessProfileChipInfo, debouncedFetchSessions, fetchAccessProfiles, fetchCLIBackends, fetchSessions, getToken, projectDisplayLabel, projectDisplayPrefix, renderAccessProfilePicker, renderBackendPicker, renderSidebar, showAPIError, showNetworkError });
 configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions, escCloseVoiceOverlay, handleFiles, refreshBanner, resetTurnState, selectSession, sid });
@@ -4656,7 +4626,7 @@ configureSystemView({ formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSumm
 configureSplitView({ lsGet, lsRemove, lsSet, stickEventsBottom });
 configureSelfUpdate({ confirmDialog, markSessionOptimisticRunning });
 configureSessionHeader({ fetchSessions, formatAbsTime, getToken, renderMainShell, sid });
-configureComposerFiles({ ICONS, featureForCurrent, formatFileSize, getToken, sendMessage, showAuthModal });
+configureComposerFiles({ ICONS, formatFileSize, getToken, sendMessage, showAuthModal });
 configureMobileNav({ ICONS, confirmDialog, dismissSession, lsGet, lsSet, renameSession, renderMainHeader, selectSession });
 configureVoice({ ICONS, getMsgValue, getToken, sendMessage, setMsgValue, sid, updateSendButton });
 configureRenderMd({

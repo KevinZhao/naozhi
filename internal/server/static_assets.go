@@ -122,6 +122,9 @@ var wsManagerJS embed.FS
 //go:embed static/session_stream.js
 var sessionStreamJS embed.FS
 
+//go:embed static/features.js
+var featuresJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -234,6 +237,7 @@ var staticAssets = func() map[string]staticAsset {
 		{"platform.js", platformJS, "static/platform.js", true},
 		{"ws_manager.js", wsManagerJS, "static/ws_manager.js", true},
 		{"session_stream.js", sessionStreamJS, "static/session_stream.js", true},
+		{"features.js", featuresJS, "static/features.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},

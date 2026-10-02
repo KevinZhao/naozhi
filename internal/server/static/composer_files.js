@@ -6,10 +6,10 @@
 import { NZ_CONTRACT } from './contract.js';
 import { composer } from './state.js';
 import { esc, escAttr, showToast } from './nz_util.js';
+import { featureForCurrent } from './features.js';
 
 const deps = {
   ICONS: null,
-  featureForCurrent: null,
   formatFileSize: null,
   getToken: null,
   sendMessage: null,
@@ -35,7 +35,7 @@ function openFilePicker() {
   // Multi-Backend RFC §8.3 D14: respect feature gate. Toast instead of
   // silently no-op so the user understands why the click did nothing —
   // the .feat-disabled class is the visual cue, this is the audible cue.
-  if (!deps.featureForCurrent('image_input')) {
+  if (!featureForCurrent('image_input')) {
     showToast('当前后端不支持图片上传', 'warn');
     return;
   }
