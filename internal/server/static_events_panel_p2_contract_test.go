@@ -20,7 +20,7 @@ import (
 	"testing"
 )
 
-// jsMethodBody slices a `  name(args) {` object-literal method (wsm.onEvent
+// jsMethodBody slices a `  name(args) {` object-literal method (sessionFrames.onEvent
 // style) up to its two-space-indented closing `},`. jsFuncBody only handles
 // `function name(` declarations.
 func jsMethodBody(t *testing.T, js, name string) string {
@@ -138,11 +138,11 @@ func TestDashboardJS_AskCardLocksOnIncrementalUserEvent(t *testing.T) {
 
 	// WS push path.
 	if !strings.Contains(jsMethodBody(t, js, "onEvent"), "lockRenderedAskCards(") {
-		t.Error("wsm.onEvent must lock rendered AskUserQuestion cards when a `user` event lands")
+		t.Error("sessionFrames.onEvent must lock rendered AskUserQuestion cards when a `user` event lands")
 	}
 	// WS backfill (non-initial history frame) path.
 	if !strings.Contains(jsMethodBody(t, js, "onHistory"), "lockRenderedAskCards(el);") {
-		t.Error("wsm.onHistory incremental branch must lock rendered AskUserQuestion cards on a `user` event")
+		t.Error("sessionFrames.onHistory incremental branch must lock rendered AskUserQuestion cards on a `user` event")
 	}
 	// Poll fallback paths.
 	if !strings.Contains(jsFuncBody(t, js, "appendEvents"), "lockRenderedAskCards(el);") {

@@ -9,11 +9,11 @@ const OUT = new Set(['history', 'pong']);
 
 // A clean pair of modules: a claim and a fallback for history, a no-op for pong.
 const CLEAN = `
-const wsm = { onHistory(msg) { return msg.key; } };
+const sessionFrames = { onHistory(msg) { return msg.key; } };
 const live = (msg) => msg.key === 'cron:x';
 function onLive(msg) { return msg.events; }
 wsm.on(NZ_CONTRACT.WS.history, onLive, live);
-wsm.on(NZ_CONTRACT.WS.history, (msg) => wsm.onHistory(msg));
+wsm.on(NZ_CONTRACT.WS.history, (msg) => sessionFrames.onHistory(msg));
 wsm.on(NZ_CONTRACT.WS.pong, () => {});
 `;
 
@@ -91,7 +91,7 @@ test('R4: fewer registrations than outbound types means the scan went blind', ()
 });
 
 test('R6: a handler or claim parameter not named msg', () => {
-  const h = problemsOf(CLEAN.replace('(msg) => wsm.onHistory(msg)', '(frame) => wsm.onHistory(frame)'));
+  const h = problemsOf(CLEAN.replace('(msg) => sessionFrames.onHistory(msg)', '(frame) => sessionFrames.onHistory(frame)'));
   assert.ok(h.some((x) => /handler must name its frame parameter msg/.test(x)), h.join('\n'));
   const c = problemsOf(CLEAN.replace("const live = (msg) => msg.key === 'cron:x';", "const live = (f) => f.key === 'cron:x';"));
   assert.ok(c.some((x) => /claim must name its frame parameter msg/.test(x)), c.join('\n'));

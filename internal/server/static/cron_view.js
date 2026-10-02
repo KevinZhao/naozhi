@@ -1033,7 +1033,7 @@ function cronApplyRunStarted(msg) {
 }
 
 // cronFrozenRuns 是 timed_out（或其他非 succeeded/skipped 终态）后
-// 冻结事件流的 jobID 集合。命中后，wsm.onEvent 对该 cron session
+// 冻结事件流的 jobID 集合。命中后，sessionFrames.onEvent 对该 cron session
 // 的实时事件直接丢弃，避免 dashboard 在 cron 历史卡显示"超时"
 // 的同时事件流仍在追加（CLI 子进程没立刻停，会再吐几个 ghost
 // 事件）。下一次 run_started（cron）同 job 时清空。

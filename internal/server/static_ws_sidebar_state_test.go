@@ -114,16 +114,14 @@ func TestDashboardJS_DaemonRunFramesRefreshSystemDaemons(t *testing.T) {
 func TestDashboardJS_InterruptAckSurfacesStatus(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
-	if got := wsOnHandler(t, js, "interrupt_ack", false); got != "wsm.on(NZ_CONTRACT.WS.interrupt_ack, (msg) => wsm.onInterruptAck(msg))" {
-		t.Errorf("interrupt_ack must dispatch to wsm.onInterruptAck(msg) instead of a no-op, got %q", got)
+	if got := wsOnHandler(t, js, "interrupt_ack", false); got != "wsm.on(NZ_CONTRACT.WS.interrupt_ack, (msg) => sessionFrames.onInterruptAck(msg))" {
+		t.Errorf("interrupt_ack must dispatch to sessionFrames.onInterruptAck(msg) instead of a no-op, got %q", got)
 	}
-	if !strings.Contains(js, "onInterruptAck(msg) {") {
-		t.Fatal("wsm.onInterruptAck(msg) handler must exist")
-	}
-	if !strings.Contains(js, "showAPIError('中断会话', 500, msg.error || '')") {
+	ack := jsMethodBody(t, js, "onInterruptAck")
+	if !strings.Contains(ack, "showAPIError('中断会话', 500, msg.error || '')") {
 		t.Error("onInterruptAck must toast status:'error' acks via showAPIError('中断会话', 500, msg.error || '')")
 	}
-	if !strings.Contains(js, "msg.status === 'not_running'") {
+	if !strings.Contains(ack, "msg.status === 'not_running'") {
 		t.Error("onInterruptAck must handle status:'not_running' with a distinct hint")
 	}
 }
