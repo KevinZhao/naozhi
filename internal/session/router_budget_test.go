@@ -20,16 +20,22 @@ import (
 // constant in the same change, so nothing grows back into the slack.
 const (
 	// routerFieldBaseline counts Router's field names; an embedded field is 1.
+	// A type that stands in for Router (see routerTypeRefBaseline) adds its
+	// own fields, the embedded Router excluded.
 	routerFieldBaseline = 35
-	// routerMethodBaseline counts methods whose receiver is Router or *Router.
+	// routerMethodBaseline counts methods whose receiver is Router, *Router
+	// or a type that stands in for Router.
 	routerMethodBaseline = 143
 	// routerTypeRefBaseline counts the identifier Router outside method
 	// receivers and its own declaration: parameters, results, fields,
 	// aliases, conversions, composite literals. A package func taking *Router
 	// or a routerOps{r *Router} wrapper would each slip past the method count;
-	// they land here. An alias that mentions Router (`type R = Router`,
-	// `type RP = *Router`) is Router under another spelling: every use of it
-	// counts here too, and a method on R counts as a Router method.
+	// they land here. A type that stands in for Router is Router under
+	// another spelling: an alias that mentions it (`type R = Router`,
+	// `type RP = *Router`), a defined type over it (`type X Router`, which
+	// has its fields) and a struct that embeds it (`struct{ *Router }`,
+	// which has its fields and methods), chains included. Every use of one
+	// counts here too, and its methods count as Router methods.
 	routerTypeRefBaseline = 5
 )
 
@@ -144,18 +150,29 @@ func parseRouterSources(t *testing.T, srcs map[string]string) (*token.FileSet, m
 	return fset, files
 }
 
-// recvBase is the type name a receiver expression names: T, *T, T[P], *T[P].
+// baseType strips pointers, parentheses and type arguments from a type
+// expression: what is left of *T[P] is T, of *pkg.T is pkg.T.
+func baseType(e ast.Expr) ast.Expr {
+	for {
+		switch x := e.(type) {
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.IndexListExpr:
+			e = x.X
+		default:
+			return e
+		}
+	}
+}
+
+// recvBase is the type name a receiver or embedded field names: T, *T, T[P],
+// *T[P]; "" for a qualified or unnamed type.
 func recvBase(e ast.Expr) string {
-	if st, ok := e.(*ast.StarExpr); ok {
-		e = st.X
-	}
-	switch x := e.(type) {
-	case *ast.IndexExpr:
-		e = x.X
-	case *ast.IndexListExpr:
-		e = x.X
-	}
-	if id, ok := e.(*ast.Ident); ok {
+	if id, ok := baseType(e).(*ast.Ident); ok {
 		return id.Name
 	}
 	return ""
@@ -228,8 +245,8 @@ func measureRouter(fset *token.FileSet, files map[string]*ast.File, lines map[st
 			}
 		}
 	}
-	router := aliasSpellings(files, map[string]bool{"Router": true}, false)
-	forbidden := aliasSpellings(files, routerForbidden, true)
+	router := spellings(files, map[string]bool{"Router": true}, false)
+	forbidden := spellings(files, routerForbidden, true)
 
 	for _, name := range names {
 		f := files[name]
@@ -307,6 +324,27 @@ func measureRouter(fset *token.FileSet, files map[string]*ast.File, lines map[st
 			visit(fl.Type, routerDecl.file, "Router field", true)
 		}
 	}
+	// A struct standing in for Router holds its own fields next to the
+	// embedded Router: they are Router's fields under another name.
+	for _, name := range slices.Sorted(maps.Keys(router)) {
+		d, declared := types[name]
+		sst, isStruct := d.spec.Type.(*ast.StructType)
+		if name == "Router" || !declared || !isStruct {
+			continue
+		}
+		for _, fl := range sst.Fields.List {
+			if len(fl.Names) == 0 && router[recvBase(fl.Type)] {
+				continue
+			}
+			if len(fl.Names) == 0 {
+				m.fields = append(m.fields, name+"."+recvBase(fl.Type))
+			}
+			for _, n := range fl.Names {
+				m.fields = append(m.fields, name+"."+n.Name)
+			}
+			visit(fl.Type, d.file, name+" field", true)
+		}
+	}
 	for len(queue) > 0 {
 		name := queue[0]
 		queue = queue[1:]
@@ -323,23 +361,26 @@ func measureRouter(fset *token.FileSet, files map[string]*ast.File, lines map[st
 	return m
 }
 
-// aliasSpellings is seed plus every alias, at any scope, whose right-hand
-// side mentions a name already in the set, chains included: for Router that
-// is `type R = Router`, `type RP = *Router`, `type RR = R`. With table, an
-// alias naming a sessiontable type joins too. A defined type
-// (`type X Router`) is a new type with none of Router's methods, so it is a
-// reference, not a spelling.
-func aliasSpellings(files map[string]*ast.File, seed map[string]bool, table bool) map[string]bool {
-	type alias struct {
+// spellings is seed plus every type, at any scope, that stands in for a name
+// already in the set, chains included. For Router that is an alias whose
+// right-hand side mentions it (`type R = Router`, `type RP = *Router`,
+// `type RR = R`), a defined type over it (`type X Router`, `type X *R`: the
+// same fields, so its methods reach r.ss) and a struct embedding it
+// (`struct{ *Router }`: its fields and methods are promoted). With table, a
+// type standing in for a sessiontable type joins the same three ways. A
+// struct that holds Router in a named field (`struct{ r *Router }`) is not a
+// spelling: its declaration is one reference.
+func spellings(files map[string]*ast.File, seed map[string]bool, table bool) map[string]bool {
+	type spec struct {
 		spec  *ast.TypeSpec
 		table string
 	}
-	var aliases []alias
+	var specs []spec
 	for _, f := range files {
 		imp := tableImportName(f)
 		ast.Inspect(f, func(n ast.Node) bool {
-			if ts, ok := n.(*ast.TypeSpec); ok && ts.Assign.IsValid() {
-				aliases = append(aliases, alias{ts, imp})
+			if ts, ok := n.(*ast.TypeSpec); ok {
+				specs = append(specs, spec{ts, imp})
 			}
 			return true
 		})
@@ -347,22 +388,48 @@ func aliasSpellings(files map[string]*ast.File, seed map[string]bool, table bool
 	set := maps.Clone(seed)
 	for grew := true; grew; {
 		grew = false
-		for _, a := range aliases {
-			name := a.spec.Name.Name
+		for _, s := range specs {
+			name := s.spec.Name.Name
 			join := func() {
 				if !set[name] {
 					set[name], grew = true, true
 				}
 			}
-			typeRefs(a.spec.Type, func(id *ast.Ident) {
-				if set[id.Name] {
-					join()
+			if s.spec.Assign.IsValid() {
+				typeRefs(s.spec.Type, func(id *ast.Ident) {
+					if set[id.Name] {
+						join()
+					}
+				}, func(pkg, _ *ast.Ident) {
+					if table && s.table != "" && pkg.Name == s.table {
+						join()
+					}
+				})
+				continue
+			}
+			// A defined type stands in for what its underlying type names;
+			// a struct for what it embeds.
+			under := []ast.Expr{s.spec.Type}
+			if st, ok := s.spec.Type.(*ast.StructType); ok {
+				under = nil
+				for _, fl := range st.Fields.List {
+					if len(fl.Names) == 0 {
+						under = append(under, fl.Type)
+					}
 				}
-			}, func(pkg, _ *ast.Ident) {
-				if table && a.table != "" && pkg.Name == a.table {
-					join()
+			}
+			for _, u := range under {
+				switch b := baseType(u).(type) {
+				case *ast.Ident:
+					if set[b.Name] {
+						join()
+					}
+				case *ast.SelectorExpr:
+					if pkg, ok := b.X.(*ast.Ident); ok && table && s.table != "" && pkg.Name == s.table {
+						join()
+					}
 				}
-			})
+			}
 		}
 	}
 	return set
@@ -607,7 +674,40 @@ func TestRouterBudget_CatchesEachRule(t *testing.T) {
 		{"facet method takes an alias of the table", map[string]string{"facets.go": strings.NewReplacer(
 			"package session\n", "package session\nimport st \""+sessiontableImport+"\"\n",
 			"peek(n int)", "peek(t *myTable)").Replace(routerFixture["facets.go"]) + "type myTable = st.Table[int, int, int]\n"}, nil, nil, []string{"isolation"}},
+		// A struct embedding Router has its fields and methods: it is Router.
+		{"embedding wrapper with methods", map[string]string{"x.go": "package session\ntype routerExt struct{ *Router }\nfunc (r *routerExt) sneaky() bool { return r.ss == nil }\n"}, nil, nil, []string{"methods", "refs"}},
+		{"embedding wrapper paid for by a dropped reference", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }", "type routerExt struct{ *Router }\nfunc (r *routerExt) Hidden() bool { return r.ss == nil }", 1)}, nil, nil, []string{"methods"}},
+		{"embedding wrapper replaces an existing *Router", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }",
+			"type session struct{ r *routerExt }\ntype routerExt struct{ *Router }\nfunc (r *routerExt) HiddenOne() {}\nfunc newSession(r *Router) session { return session{r: &routerExt{r}} }", 1)}, nil, nil, []string{"methods", "refs"}},
+		{"embedding chain with methods", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }", "type outer struct{ inner }\ntype inner struct{ *Router }\nfunc (o outer) Hidden() {}", 1)}, nil, nil, []string{"methods", "refs"}},
+		{"embedding a Router alias", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }", "type routerExt struct{ R }\ntype R = Router\nfunc (r routerExt) Hidden() {}", 1)}, nil, nil, []string{"methods", "refs"}},
+		{"embedding wrapper's own field", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }", "type routerExt struct{\n\t*Router\n\textra map[string]int\n}", 1)}, nil, nil, []string{"fields"}},
+		{"embedding wrapper's field reaches the table", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }", "type routerExt struct{\n\t*Router\n\tpeek func(sessView)\n}", 1)}, nil, nil, []string{"fields", "isolation"}},
+		// A defined type over Router has its fields, so its methods reach r.ss.
+		{"defined type over Router with methods", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }", "type routerX Router\nfunc (x *routerX) Hidden() bool { return x.ss == nil }", 1)}, nil, nil, []string{"methods"}},
+		{"defined type over Router replaces an existing *Router", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }", "type session struct{ r *routerX }\ntype routerX Router", 1)}, nil, nil, []string{"refs"}},
+		{"facet method takes a struct embedding sessTx", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"peek(n int)", "peek(t txExt)", 1) + "type txExt struct{ sessTx }\n"}, nil, nil, []string{"isolation"}},
+		{"facet method takes a struct embedding the table", map[string]string{"facets.go": strings.NewReplacer(
+			"package session\n", "package session\nimport st \""+sessiontableImport+"\"\n",
+			"peek(n int)", "peek(t tableExt)").Replace(routerFixture["facets.go"]) + "type tableExt struct{ *st.Table[int, int, int] }\n"}, nil, nil, []string{"isolation"}},
+		{"facet method takes a defined type over routerState", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"peek(n int)", "peek(s myState)", 1) + "type myState routerState\n"}, nil, nil, []string{"isolation"}},
 		{"wrapper struct", map[string]string{"x.go": "package session\ntype routerOps struct{ r *Router }\n"}, nil, nil, []string{"refs"}},
+		// Accepted limit of a count: a struct holding Router in a named field
+		// costs one reference, and its methods are not Router methods. Paid for
+		// by a dropped reference, it passes, the same as ScratchPool's methods
+		// reaching p.router today. Pinned so a change to it is deliberate.
+		{"named-field holder paid for by a dropped reference", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }", "type routerOps struct{ r *Router }\nfunc (o *routerOps) Hidden() bool { return o.r.ss == nil }", 1)}, nil, nil, nil},
 		{"package func param", map[string]string{"x.go": "package session\nfunc resetFoo(r *Router) {}\n"}, nil, nil, []string{"refs"}},
 		{"conversion", map[string]string{"x.go": "package session\nvar _ = (*Router)(nil)\n"}, nil, nil, []string{"refs"}},
 		{"the table imported but not named by a facet", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
