@@ -253,3 +253,34 @@ func TestDebouncer_RealTimerFires(t *testing.T) {
 	}
 	waitReturns(t, &wg)
 }
+
+// TestWSBroadcaster_WaitCoversAnOpenWindow pins that the debouncer takes its
+// slots in the broadcaster's own pending WaitGroup: Shutdown's bcast.wait is
+// what holds it until a sessions_update fire that opened before close has
+// returned. A debouncer counting on any other WaitGroup leaves wait with
+// nothing to wait for, and a late fire runs past Shutdown.
+func TestWSBroadcaster_WaitCoversAnOpenWindow(t *testing.T) {
+	t.Parallel()
+	b := newWSBroadcaster(newSubscriberRegistry())
+	timer := &manualDebounceTimer{}
+	b.debounce.timer = timer
+	b.BroadcastSessionsUpdate() // opens a window: one pending slot
+
+	done := make(chan struct{})
+	go func() { b.wait(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("bcast.wait returned while a debounce window was open — the window's slot is not in bcast.pending")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if !timer.expire() {
+		t.Fatal("BroadcastSessionsUpdate did not arm the debounce timer")
+	}
+	b.debounce.onTimer()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bcast.wait did not return after the window's fire completed")
+	}
+}
