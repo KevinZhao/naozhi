@@ -86,7 +86,7 @@ func TestTailerRegistry_RefusesPathsOutsideAllowedRoot(t *testing.T) {
 		t.Errorf("%d tailers registered after a refused path", n)
 	}
 
-	hub := NewHub(HubOptions{Router: session.NewRouter(session.RouterConfig{}), AllowedRoot: root})
+	hub := newHubForTest(HubOptions{Router: session.NewRouter(session.RouterConfig{}), AllowedRoot: root}, sendEngineOpts{})
 	defer hub.Shutdown()
 	if hub.tailers.allowedRoot != root {
 		t.Errorf("NewHub's tailers allowedRoot = %q, want HubOptions.AllowedRoot %q", hub.tailers.allowedRoot, root)
@@ -120,7 +120,7 @@ func (d *recordingTaskDone) SetOnAgentTaskDone(func(taskID, status string)) { d.
 // linker's callbacks once; a resolved agent with a JSONL path starts a silent
 // tailer, a tombstone or an unknown task does not.
 func TestWireLinker_InstallsOnceAndTailsResolvedAgents(t *testing.T) {
-	hub := NewHub(HubOptions{Router: session.NewRouter(session.RouterConfig{})})
+	hub := newHubForTest(HubOptions{Router: session.NewRouter(session.RouterConfig{})}, sendEngineOpts{})
 	defer hub.Shutdown()
 	jsonl := filepath.Join(t.TempDir(), "agent.jsonl")
 	l := &recordingLinker{paths: map[string]string{"task-1": jsonl}}

@@ -360,7 +360,7 @@ func TestHub_RemoteSubscribe(t *testing.T) {
 	}
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	hub := NewHub(HubOptions{Router: router, Guard: guard, Nodes: newNodeRegistry(nodes)})
+	hub := newHubForTest(HubOptions{Router: router, Nodes: newNodeRegistry(nodes)}, sendEngineOpts{Guard: guard})
 	defer hub.Shutdown()
 
 	client := newTestWSClient()

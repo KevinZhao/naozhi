@@ -25,11 +25,10 @@ func TestNewHub_ParentCtxCancelPropagates(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	hub := NewHub(HubOptions{
+	hub := newHubForTest(HubOptions{
 		Router:    router,
-		Guard:     guard,
 		ParentCtx: parent,
-	})
+	}, sendEngineOpts{Guard: guard})
 
 	// Pre-cancel sanity: hub context must not be Done yet.
 	select {
@@ -75,11 +74,10 @@ func TestNewHub_NilParentCtxFallsBackToBackground(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	hub := NewHub(HubOptions{
+	hub := newHubForTest(HubOptions{
 		Router: router,
-		Guard:  guard,
 		// ParentCtx intentionally omitted.
-	})
+	}, sendEngineOpts{Guard: guard})
 
 	select {
 	case <-hub.ctx.Done():

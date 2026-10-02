@@ -25,13 +25,12 @@ func (f *failInterruptNode) ProxyInterruptSession(_ context.Context, _ string) (
 func newTestHubWithNodes(nodes map[string]node.Conn) *Hub {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	return NewHub(HubOptions{
+	return newHubForTest(HubOptions{
 		Router:    router,
-		Guard:     guard,
 		Nodes:     newNodeRegistry(nodes),
 		DashToken: "tok",
 		CookieMAC: testCookieMAC("tok"),
-	})
+	}, sendEngineOpts{Guard: guard})
 }
 
 // TestHandleRemoteInterrupt_FailureBroadcastsToSubscribers verifies R176-ARCH-NX

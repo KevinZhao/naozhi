@@ -92,10 +92,10 @@ func newAnonTestHub(t *testing.T) *Hub {
 	t.Helper()
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	return NewHub(HubOptions{
-		Router: router, DashToken: "", Guard: guard,
+	return newHubForTest(HubOptions{
+		Router: router, DashToken: "",
 		Auth: &auth.Handlers{},
-	})
+	}, sendEngineOpts{Guard: guard})
 }
 
 // TestHandleUpgrade_SetCookieRidesThe101 pins the responseHeader fix: gorilla

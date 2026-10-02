@@ -38,7 +38,7 @@ func testCookieMAC(token string) string {
 func newTestHub(token string) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	hub := NewHub(HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard})
+	hub := newHubForTest(HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token)}, sendEngineOpts{Guard: guard})
 	return hub, router
 }
 
@@ -49,20 +49,19 @@ func newTestHub(token string) (*Hub, *session.Router) {
 func newTestHubWithUploads(token string) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	hub := NewHub(HubOptions{
+	hub := newHubForTest(HubOptions{
 		Router:      router,
 		DashToken:   token,
 		CookieMAC:   testCookieMAC(token),
-		Guard:       guard,
 		UploadStore: newUploadStore(),
-	})
+	}, sendEngineOpts{Guard: guard})
 	return hub, router
 }
 
 func newTestHubWithAgents(token string, agents map[string]session.AgentOpts) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	hub := NewHub(HubOptions{Router: router, Agents: agents, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard})
+	hub := newHubForTest(HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token)}, sendEngineOpts{Guard: guard, Agents: agents})
 	return hub, router
 }
 
