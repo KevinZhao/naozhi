@@ -10,9 +10,10 @@
 //   topLevelLetVar  column-0 `let` / `var` declarations (mutable globals)
 //   configureDeps   dependencies the module receives by injection instead of
 //                   import, counted where they land (S20a, #3026): the keys
-//                   an exported function copies out of its parameter into
-//                   module scope, whatever the function is called, plus one
-//                   per shell.X upcall slot the module uses
+//                   an exported function (or a helper it hands the
+//                   parameter to) copies out of its parameter into module
+//                   scope, whatever the function is called, plus one per
+//                   shell.X upcall slot the module uses
 //   deadInjections  of those keys, the ones the module never reads
 //   innerHTMLAssign assignments to .innerHTML (any operator, ['innerHTML'] too)
 //   htmlInsert      the other HTML-string sinks: outerHTML assignments,
@@ -236,26 +237,29 @@ function fnName(fn, parent, key) {
   return null;
 }
 
-// LATE_BINDING_TABLES: the late-bound function tables, by the module that
-// exports each (state.js hooks, nz_util.js nzViews).
-const LATE_BINDING_TABLES = { hooks: 'state.js', nzViews: 'nz_util.js' };
+// The analysis reads three lists from caps.json, where tools/ratchet-raises
+// sees them (as constants here, each could zero a count without a raise):
+//   lateBindingTables  the late-bound function tables, by the module that
+//                      exports each (state.js hooks, nz_util.js nzViews); a
+//                      dropped table is a raise there
+//   injectionAllow     "file:fn" receivers that copy a parameter's fields
+//                      into module scope on purpose and are not dependency
+//                      injection (registerActions: the data-action registry).
+//                      Each must still match a receiver: a stale one fails
+//                      the check. A new entry is a raise there
+//   shellRoots         the modules allowed to registerShell (a new one is a
+//                      raise there)
+// NO_CAPS is the empty set of each, for analysing a fixture.
+export const NO_CAPS = Object.freeze({ lateBindingTables: {}, injectionAllow: [], shellRoots: [], leaves: [] });
 
-// INJECTION_ALLOW: receiver functions that copy a parameter's fields into
-// module scope on purpose and are not dependency injection. Each entry must
-// still match a receiver: a stale one fails the check (rather than allowing
-// whatever lands under that name next).
-//   registerActions  the data-action registry (name -> click handler)
-export const INJECTION_ALLOW = ['nz_util.js:registerActions'];
-
-// SHELL_* — the upcall table (S20f): the root modules register their
+// SHELL_MODULE — the upcall table (S20f): the root modules register their
 // orchestration functions once with registerShell({...}) and lower modules
 // call shell.X(...).
 export const SHELL_MODULE = 'shell.js';
-export const SHELL_ROOTS = ['cron_view.js', 'dashboard.js'];
 
 // analyzeProgram collects everything the per-file metrics and the _global
 // checks need from one module.
-function analyzeProgram(program, file) {
+function analyzeProgram(program, file, caps = NO_CAPS) {
   const facts = {
     file,
     imports: [], // { local, imported ('default' | '*' | name), from, line }
@@ -272,8 +276,11 @@ function analyzeProgram(program, file) {
     deadInjections: [],
     shellUses: new Set(),
     shellRegs: [], // ObjectExpression args of registerShell(...)
+    tables: new Set(), // local names of the late-binding tables
+    shellNames: new Set(), // local names of shell.js's shell
   };
   const exportedLocal = new Set();
+  let defaultFn = null; // export default function (…) {…}
   for (const st of program.body) {
     if (st.type === 'ImportDeclaration') {
       const from = moduleFile(st.source.value);
@@ -291,7 +298,12 @@ function analyzeProgram(program, file) {
       else facts.starFrom.push(moduleFile(st.source.value));
       continue;
     }
-    if (st.type === 'ExportDefaultDeclaration') facts.exportNames.add('default');
+    if (st.type === 'ExportDefaultDeclaration') {
+      facts.exportNames.add('default');
+      const d = st.declaration;
+      if (d.type === 'Identifier') exportedLocal.add(d.name);
+      else if (isFn(d)) defaultFn = { name: d.id?.name ?? 'default', fn: d };
+    }
     if (st.type === 'ExportNamedDeclaration') {
       for (const sp of st.specifiers) {
         facts.exportNames.add(sp.exported.name ?? sp.exported.value);
@@ -319,12 +331,13 @@ function analyzeProgram(program, file) {
     }
   }
   const localOf = (module, name) => facts.imports.filter((i) => i.from === module && i.imported === name).map((i) => i.local);
-  const tables = new Set();
-  for (const [name, module] of Object.entries(LATE_BINDING_TABLES)) {
+  const tables = facts.tables;
+  for (const [name, module] of Object.entries(caps.lateBindingTables)) {
     if (file === module) tables.add(name);
     for (const l of localOf(module, name)) tables.add(l);
   }
-  const shellNames = new Set(localOf(SHELL_MODULE, 'shell'));
+  const shellNames = facts.shellNames;
+  for (const l of localOf(SHELL_MODULE, 'shell')) shellNames.add(l);
   const registerShellNames = new Set(localOf(SHELL_MODULE, 'registerShell'));
 
   // One walk: functions (with the chain of enclosing ones), calls, sinks,
@@ -366,31 +379,60 @@ function analyzeProgram(program, file) {
     if (pushed) stack.pop();
   };
   walk(program, null, null);
-  findInjections(program, facts, exportedLocal);
+  findInjections(program, facts, exportedLocal, defaultFn, caps.injectionAllow);
   return facts;
 }
 
-// findInjections: an exported function that copies its parameter's fields
-// (p.x, p[k], a destructured field, Object.assign from p) into a module-scope
-// binding is receiving injected dependencies, whatever it is called. So is
-// one that stores a whole parameter in a binding the module then calls. The
-// keys landed are counted (a whole-table copy counts the table's keys); a
-// key the module never reads is dead.
-function findInjections(program, facts, exportedLocal) {
-  const receivers = [];
+// findInjections: a function another module can call (an export, the
+// default export) that copies its parameter's fields (p.x, p[k], a
+// destructured field, a spread of p, Object.assign from p) into a
+// module-scope binding is receiving injected dependencies, whatever it is
+// called. So is one that stores a whole parameter, or anything made from one,
+// in a binding the module then calls. A parameter (or a field of one) handed
+// to a function of this module by a bare call makes that function a receiver
+// on that parameter position, to a fixed point: a thin export over a private
+// helper lands the same keys. The bindings of a for-of / for-in over a
+// parameter and the parameters of a callback given to a call on one
+// (Object.entries(p).forEach(([k, v]) => …)) carry its fields too. The keys
+// landed are counted (a whole-table copy counts the table's keys); a key the
+// module never reads is dead.
+//
+// Known gaps: a class constructor or a method of an exported object as the
+// receiver; a parameter handed on through .call / .apply or a member call
+// (helpers.set(p)); a callback stored and only passed on (listeners.push(cb));
+// a field copied by a static copy into a slot the module never calls.
+function findInjections(program, facts, exportedLocal, defaultFn, allow) {
+  const receivers = new Map(); // fn node -> { name, fn, at: receiving parameter indices }
+  const receive = (name, fn, indices) => {
+    if (!receivers.has(fn)) receivers.set(fn, { name, fn, at: new Set() });
+    const r = receivers.get(fn);
+    let grew = false;
+    for (const i of indices) if (i < fn.params.length && !r.at.has(i)) { r.at.add(i); grew = true; }
+    return grew;
+  };
+  const every = (fn) => fn.params.map((_, i) => i);
   for (const name of exportedLocal) {
     const d = facts.top.get(name);
     const fn = d?.type === 'FunctionDeclaration' ? d : (d?.type === 'VariableDeclarator' && isFn(d.init) ? d.init : null);
-    if (fn && fn.params.length) receivers.push({ name, fn });
+    if (fn) receive(name, fn, every(fn));
   }
+  if (defaultFn) receive(defaultFn.name, defaultFn.fn, every(defaultFn.fn));
+  // The functions of this module a bare call reaches, by name.
+  const local = new Map();
+  for (const f of facts.fns) if (f.bound && f.name) local.set(f.name, [...(local.get(f.name) ?? []), f.node]);
   // Every static read of a module binding's member, and every call path.
   const reads = new Set();
   const calledPaths = new Set();
+  const calledRoots = new Set(); // bindings something is called through: t.f(), t[k](), const f = t[k]; f()
+  const memberAliases = []; // [local, root] for const local = t.x / t[k]
   visit(program, (n, parent, key) => {
     if (n.type === 'MemberExpression') {
       const writeTarget = parent?.type === 'AssignmentExpression' && key === 'left';
       const path = memberPath(n);
       if (path && !writeTarget) reads.add(path);
+    }
+    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init?.type === 'MemberExpression') {
+      memberAliases.push([n.id.name, rootIdent(n.init)]);
     }
     if (n.type === 'VariableDeclarator' && n.id.type === 'ObjectPattern' && n.init?.type === 'Identifier') {
       for (const q of n.id.properties) {
@@ -402,8 +444,10 @@ function findInjections(program, facts, exportedLocal) {
     if (n.type === 'CallExpression') {
       const path = memberPath(n.callee);
       if (path) calledPaths.add(path);
+      if (n.callee.type === 'MemberExpression') calledRoots.add(rootIdent(n.callee));
     }
   });
+  for (const [l, t] of memberAliases) if (calledPaths.has(l)) calledRoots.add(t);
   const tableKeys = (t) => {
     const d = facts.top.get(t);
     const literal = d?.type === 'VariableDeclarator' && d.init?.type === 'ObjectExpression'
@@ -413,63 +457,109 @@ function findInjections(program, facts, exportedLocal) {
     const read = [...reads].filter((r) => r.startsWith(t + '.') && !r.slice(t.length + 1).includes('.')).map((r) => r.slice(t.length + 1));
     return read.length ? read : ['*']; // a registry with no static keys: one table
   };
-  for (const { name, fn } of receivers) {
-    const params = new Set(fn.params.flatMap((p) => p.type === 'Identifier' ? [p.name] : []));
-    const fields = new Set(fn.params.flatMap((p) => p.type === 'Identifier' ? [] : patternNames(p)));
-    const locals = new Set();
-    visit(fn.body, (n) => { if (n.type === 'VariableDeclarator') patternNames(n.id).forEach((x) => locals.add(x)); });
-    const readsField = (e) => {
+  // carriesOf: does an expression carry what the receiver's receiving
+  // parameters hold (the parameter itself, a field of it, or a binding that
+  // carries one)?
+  const carriesOf = ({ fn, at }) => {
+    const params = new Set();
+    const fields = new Set();
+    fn.params.forEach((p, i) => {
+      if (!at.has(i)) return;
+      if (p.type === 'Identifier') params.add(p.name);
+      else patternNames(p).forEach((x) => fields.add(x));
+    });
+    const carries = (e) => {
       let hit = false;
       visit(e, (n, parent, key) => {
-        if (hit) return;
-        if (n.type === 'MemberExpression' && n.object.type === 'Identifier' && params.has(n.object.name)) hit = true;
-        else if (isReference(n, parent, key) && fields.has(n.name)) hit = true;
+        if (!hit && isReference(n, parent, key) && (params.has(n.name) || fields.has(n.name))) hit = true;
       });
       return hit;
     };
-    // A local assigned from a parameter's field carries that field.
-    for (let i = 0; i < 2; i++) {
+    for (let grew = true; grew;) {
+      grew = false;
+      const add = (names) => { for (const x of names) if (!fields.has(x) && !params.has(x)) { fields.add(x); grew = true; } };
       visit(fn.body, (n) => {
-        if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init && readsField(n.init)) fields.add(n.id.name);
+        if (n.type === 'VariableDeclarator' && n.init && carries(n.init)) add(patternNames(n.id));
+        if ((n.type === 'ForOfStatement' || n.type === 'ForInStatement') && carries(n.right)) {
+          add(n.left.type === 'VariableDeclaration' ? n.left.declarations.flatMap((d) => patternNames(d.id)) : patternNames(n.left));
+        }
+        if (n.type === 'CallExpression' && (carries(n.callee) || n.arguments.some((a) => !isFn(a) && carries(a)))) {
+          for (const a of n.arguments) if (isFn(a)) add(a.params.flatMap((q) => patternNames(q)));
+        }
       });
     }
+    return carries;
+  };
+  // Delegation: a bare call to a function of this module with an argument
+  // that carries a receiving parameter.
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const r of [...receivers.values()]) {
+      const carries = carriesOf(r);
+      visit(r.fn.body, (n) => {
+        if (n.type !== 'CallExpression' || n.callee.type !== 'Identifier') return;
+        for (const callee of local.get(n.callee.name) ?? []) {
+          const at = [];
+          n.arguments.forEach((a, i) => {
+            if (a.type !== 'SpreadElement') { if (carries(a)) at.push(i); } else if (carries(a.argument)) for (let j = i; j < callee.params.length; j++) at.push(j);
+          });
+          if (receive(n.callee.name, callee, at)) grew = true;
+        }
+      });
+    }
+  }
+  for (const r of receivers.values()) {
+    const { name, fn } = r;
+    if (!r.at.size) continue;
+    const carries = carriesOf(r);
+    const own = new Set(fn.params.flatMap((p) => patternNames(p)));
+    const locals = new Set();
+    visit(fn.body, (n) => { if (n.type === 'VariableDeclarator') patternNames(n.id).forEach((x) => locals.add(x)); });
     const keys = [];
-    // A copy keyed by a runtime value (deps[k] = impl[k]) lands the whole
-    // table. A copy to a static target (slot = x.f, deps.a = x.a, deps = x)
-    // is injection when the module calls what landed there; otherwise it is
-    // state taken from a data argument (turnState.tool = ev.tool).
+    const whole = (t) => keys.push(...tableKeys(t).map((k) => `${t}.${k}`));
+    const moduleBinding = (t) => t && facts.top.has(t) && !locals.has(t) && !own.has(t);
+    // Whatever lands is injection only when the module calls what landed
+    // there; otherwise it is state taken from a data argument (turnState.tool
+    // = ev.tool, pending[id] = { tex }). A copy keyed by a runtime value
+    // (deps[k] = impl[k]) lands the whole table, if anything is called
+    // through it. A copy to a static target (slot = x.f, deps.a = x.a) lands
+    // its path; a whole binding (deps = x, deps = { ...x }) the whole table,
+    // when a function is called straight off it (deps.f(), not el.classList.add()).
     const land = (target) => {
       const t = rootIdent(target);
-      if (!t || !facts.top.has(t) || locals.has(t) || params.has(t)) return;
-      if (target.type === 'MemberExpression' && propName(target) === null) { keys.push(...tableKeys(t).map((k) => `${t}.${k}`)); return; }
+      if (!moduleBinding(t)) return;
+      if (target.type === 'MemberExpression' && propName(target) === null) { if (calledRoots.has(t)) whole(t); return; }
       const path = memberPath(target);
       if (path && calledPaths.has(path)) keys.push(path);
-      else if (target.type === 'Identifier' && [...calledPaths].some((c) => c.startsWith(path + '.'))) keys.push(...tableKeys(t).map((k) => `${t}.${k}`));
+      else if (target.type === 'Identifier' && [...calledPaths].some((c) => c.startsWith(path + '.') && !c.slice(path.length + 1).includes('.'))) whole(t);
     };
     visit(fn.body, (n) => {
-      if (n.type === 'AssignmentExpression') {
-        if (readsField(n.right) || (n.right.type === 'Identifier' && params.has(n.right.name))) land(n.left);
-      }
-      // Object.assign(T, p) copies p's runtime keys: the whole table. With
-      // a literal source, each property is a static copy to T.key.
+      if (n.type === 'AssignmentExpression' && carries(n.right)) land(n.left);
+      // Object.assign(T, p) copies p's runtime keys: the whole table; so does
+      // a spread of p in a literal source. Any other literal property is a
+      // static copy to T.key.
       if (n.type === 'CallExpression' && memberPath(n.callee) === 'Object.assign' && n.arguments.length > 1) {
         const t = rootIdent(n.arguments[0]);
-        if (!t || !facts.top.has(t) || locals.has(t) || params.has(t)) return;
+        if (!moduleBinding(t)) return;
         for (const src of n.arguments.slice(1)) {
           if (src.type !== 'ObjectExpression') {
-            if (mentions(src, params) || readsField(src)) keys.push(...tableKeys(t).map((k) => `${t}.${k}`));
+            if (carries(src)) whole(t);
             continue;
           }
           for (const q of src.properties) {
-            const k = q.type === 'Property' ? propName({ computed: q.computed, property: q.key }) : null;
+            if (q.type === 'SpreadElement') { if (carries(q.argument)) whole(t); continue; }
+            const k = propName({ computed: q.computed, property: q.key });
             const path = `${memberPath(n.arguments[0]) ?? t}.${k}`;
-            if (k !== null && (readsField(q.value) || mentions(q.value, params)) && calledPaths.has(path)) keys.push(path);
+            if (k !== null && carries(q.value) && calledPaths.has(path)) keys.push(path);
           }
         }
       }
     });
     if (!keys.length) continue;
-    if (INJECTION_ALLOW.includes(`${facts.file}:${name}`)) { facts.allowHits.add(`${facts.file}:${name}`); continue; }
+    // The shell table is counted where it is used (one per shell.X slot a
+    // module calls), not again where registerShell fills it.
+    if (facts.file === SHELL_MODULE && name === 'registerShell') continue;
+    if (allow.includes(`${facts.file}:${name}`)) { facts.allowHits.add(`${facts.file}:${name}`); continue; }
     for (const k of keys) if (!facts.injections.has(k)) facts.injections.set(k, name);
   }
   // A registry (T.*) is read by runtime key; it has no static key to miss.
@@ -488,9 +578,9 @@ function perFileMetrics(facts) {
 }
 
 // analyzeSources parses { file: source } and returns per-file facts.
-export function analyzeSources(sources, espree = loadEspree()) {
+export function analyzeSources(sources, espree = loadEspree(), caps = NO_CAPS) {
   const out = {};
-  for (const [f, src] of Object.entries(sources)) out[f] = analyzeProgram(espree.parse(src, PARSE), f);
+  for (const [f, src] of Object.entries(sources)) out[f] = analyzeProgram(espree.parse(src, PARSE), f, caps);
   return out;
 }
 
@@ -510,14 +600,20 @@ function exportsOf(all, file, seen = new Set()) {
 // which of its parameters carry the HTML, so passing the element it writes
 // to does not make the caller a wrapper too. A call resolves through its
 // binding (a local function, an import, a namespace member); a call through
-// an injected table or a late binding (deps.f(...), hooks.f(...)) resolves by
-// the property name, the only handle such a call has.
+// an injected table, a late-binding table or the shell (deps.f(...),
+// hooks.f(...), shell.f(...)) resolves by the property name, the only handle
+// such a call has. Any other member call (el.f(...), obj.render(...)) is not
+// resolved: a same-named wrapper elsewhere says nothing about it.
 function sinkWrappers(all) {
   const key = (f, fn) => `${f}:${fn.name ?? '@' + fn.node.loc.start.line + ':' + fn.node.loc.start.column}`;
   const wrappers = new Map(); // key -> { file, fn, html: Set of parameter indices }
   const byNode = new Map();
   for (const [f, facts] of Object.entries(all)) for (const fn of facts.fns) byNode.set(fn.node, fn);
   const find = (pred) => { for (const w of wrappers.values()) if (pred(w)) return w; return null; };
+  // byName: per file, the bindings a call resolves through by property name.
+  const byName = new Map(Object.entries(all).map(([f, facts]) => [f, new Set([
+    ...facts.tables, ...facts.shellNames, ...[...facts.injections.keys()].map((k) => k.split('.')[0]),
+  ])]));
   const resolve = (f, callee) => {
     const facts = all[f];
     if (callee.type === 'Identifier') {
@@ -531,7 +627,7 @@ function sinkWrappers(all) {
     if (p === null) return null;
     const ns = callee.object.type === 'Identifier' && facts.imports.find((i) => i.local === callee.object.name && i.imported === '*');
     if (ns) return find((w) => w.file === ns.from && w.fn.bound && w.fn.name === p);
-    return find((w) => w.fn.name === p);
+    return byName.get(f).has(rootIdent(callee.object)) ? find((w) => w.fn.name === p) : null;
   };
   const htmlArgs = (w, call) => [...w.html].map((i) => call.arguments[i]).filter(Boolean);
   for (let changed = true; changed;) {
@@ -578,13 +674,13 @@ function reachable(graph, from) {
 // caller could import is a disguised import). A module using shell.X must be
 // one the root that registered X reaches through imports (else a plain
 // import would not close a cycle, and the upcall is not one).
-function upcalls(all, graph) {
+function upcalls(all, graph, shellRoots) {
   const forwarders = [];
   const notUp = [];
   const owner = new Map();
   for (const [f, facts] of Object.entries(all)) {
     for (const { arg, line } of facts.shellRegs) {
-      if (!SHELL_ROOTS.includes(f)) { forwarders.push(`${f}:${line}: registerShell outside the root modules (${SHELL_ROOTS.join(', ')})`); continue; }
+      if (!shellRoots.includes(f)) { forwarders.push(`${f}:${line}: registerShell outside the root modules (${shellRoots.join(', ')})`); continue; }
       if (arg?.type !== 'ObjectExpression') { forwarders.push(`${f}:${line}: registerShell needs an object literal`); continue; }
       for (const q of arg.properties) {
         const slot = q.type === 'Property' ? propName({ computed: q.computed, property: q.key }) : null;
@@ -611,7 +707,8 @@ function upcalls(all, graph) {
 
 // measureGlobal computes the _global entry from every file's facts and the
 // import graph; details holds the finding behind each counted item.
-export function measureGlobal(all, graph, leaves = []) {
+export function measureGlobal(all, graph, caps = NO_CAPS) {
+  const { leaves } = caps;
   const details = {};
   const totals = { innerHTMLAssign: 0, htmlInsert: 0 };
   for (const facts of Object.values(all)) for (const s of facts.sinks) totals[s.kind]++;
@@ -636,7 +733,7 @@ export function measureGlobal(all, graph, leaves = []) {
   for (const f of leaves) {
     for (const to of graph[f] ?? []) if (graph[to] && !leafSet.has(to)) details.leafImports.push(`${f} imports ${to}, which is not a leaf`);
   }
-  const { forwarders, notUp } = upcalls(all, graph);
+  const { forwarders, notUp } = upcalls(all, graph, caps.shellRoots);
   details.upcallForwarders = forwarders;
   details.upcallNotUp = notUp;
   return {
@@ -659,7 +756,7 @@ export function importsOfSource(src, espree = loadEspree()) {
   return importsOf(espree.parse(src, PARSE));
 }
 
-export function measureSource(src, espree = loadEspree(), file = '') {
+export function measureSource(src, espree = loadEspree(), file = '', caps = NO_CAPS) {
   const lines = src.split('\n');
   const total = lines.length - (src.endsWith('\n') ? 1 : 0);
   const program = espree.parse(src, PARSE);
@@ -671,7 +768,7 @@ export function measureSource(src, espree = loadEspree(), file = '') {
     maxFnLines: fns.reduce((m, f) => Math.max(m, f.lines), 0),
     fnOver100: fns.filter((f) => f.lines > 100).length,
     topLevelLetVar: letVar,
-    ...perFileMetrics(analyzeProgram(program, file)),
+    ...perFileMetrics(analyzeProgram(program, file, caps)),
   };
 }
 
@@ -693,19 +790,19 @@ function readSources() {
 export const GLOBAL = '_global';
 
 // snapshot measures every file, plus the _global entry. problems are the
-// findings that fail the run outright (a stale INJECTION_ALLOW entry);
+// findings that fail the run outright (a stale caps.injectionAllow entry);
 // details back each _global count.
-function snapshot(leaves) {
+function snapshot(caps) {
   const espree = loadEspree();
   const sources = readSources();
-  const all = analyzeSources(sources, espree);
+  const all = analyzeSources(sources, espree, caps);
   const out = {};
-  for (const f of Object.keys(sources)) out[f] = measureSource(sources[f], espree, f);
+  for (const f of Object.keys(sources)) out[f] = measureSource(sources[f], espree, f, caps);
   const graph = importGraph(espree);
-  const { metrics, details } = measureGlobal(all, graph, leaves);
+  const { metrics, details } = measureGlobal(all, graph, caps);
   out[GLOBAL] = metrics;
   const hits = new Set(Object.values(all).flatMap((a) => [...a.allowHits]));
-  const problems = INJECTION_ALLOW.filter((a) => !hits.has(a)).map((a) => `INJECTION_ALLOW: ${a} no longer receives an injection — drop it from the allowlist`);
+  const problems = caps.injectionAllow.filter((a) => !hits.has(a)).map((a) => `caps.injectionAllow: ${a} no longer receives an injection — drop it from the list`);
   return { current: out, graph, details, problems };
 }
 
@@ -773,7 +870,7 @@ export function loadCaps(capsPath = CAPS_PATH) {
     return { errors: [`${path.relative(ROOT, capsPath)} is not valid JSON: ${e.message}`] };
   }
   const errors = [];
-  for (const key of ['maxFnLines', 'lines', 'sideEffectLegacy', 'cycleLegacy', 'leaves']) {
+  for (const key of ['maxFnLines', 'lines', 'sideEffectLegacy', 'cycleLegacy', 'leaves', 'lateBindingTables', 'injectionAllow', 'shellRoots']) {
     if (!(key in raw)) errors.push(`caps is missing the top-level key "${key}"`);
   }
   if (errors.length) return { errors };
@@ -797,6 +894,14 @@ export function loadCaps(capsPath = CAPS_PATH) {
   if (!Array.isArray(raw.sideEffectLegacy)) errors.push('caps.sideEffectLegacy must be an array');
   if (!Array.isArray(raw.cycleLegacy)) errors.push('caps.cycleLegacy must be an array');
   if (!Array.isArray(raw.leaves)) errors.push('caps.leaves must be an array');
+  const tables = raw.lateBindingTables;
+  if (typeof tables !== 'object' || tables === null || Array.isArray(tables) || !Object.values(tables).every((m) => typeof m === 'string')) {
+    errors.push('caps.lateBindingTables must map a table name to the module that exports it');
+  }
+  if (!Array.isArray(raw.injectionAllow) || !raw.injectionAllow.every((a) => typeof a === 'string' && /^[^:]+\.js:[A-Za-z_$][\w$]*$/.test(a))) {
+    errors.push('caps.injectionAllow must be an array of "file.js:function"');
+  }
+  if (!Array.isArray(raw.shellRoots)) errors.push('caps.shellRoots must be an array');
   if (errors.length) return { errors };
   return { caps: raw };
 }
@@ -834,6 +939,16 @@ export function capProblems(current, graph, caps) {
   }
   for (const f of caps.leaves) {
     if (!exists(f)) problems.push(`caps.leaves: ${f} does not exist in static/`);
+  }
+  for (const f of caps.shellRoots ?? []) {
+    if (!exists(f)) problems.push(`caps.shellRoots: ${f} does not exist in static/`);
+  }
+  for (const [t, f] of Object.entries(caps.lateBindingTables ?? {})) {
+    if (!exists(f)) problems.push(`caps.lateBindingTables.${t}: ${f} does not exist in static/`);
+  }
+  for (const a of caps.injectionAllow ?? []) {
+    const f = a.slice(0, a.indexOf(':'));
+    if (!exists(f)) problems.push(`caps.injectionAllow: ${f} does not exist in static/`);
   }
   const cyclic = new Set(sccs(graph).flat());
   for (const f of caps.cycleLegacy) {
@@ -950,7 +1065,7 @@ function write({ current, graph, problems: snapProblems }, caps, errors) {
 // Run as a script; imported by the tests for measureSource.
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { caps, errors } = loadCaps();
-  const snap = snapshot(caps?.leaves ?? []);
+  const snap = snapshot(caps ?? NO_CAPS);
   const mode = process.argv[2] ?? '--check';
   if (mode === '--check') process.exit(check(snap, caps, errors));
   else if (mode === '--write') process.exit(write(snap, caps, errors));

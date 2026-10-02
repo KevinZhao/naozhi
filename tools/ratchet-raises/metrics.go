@@ -116,6 +116,12 @@ func jsCaps(raw string, into metrics) error {
 		SideEffectLegacy []string         `json:"sideEffectLegacy"`
 		CycleLegacy      []string         `json:"cycleLegacy"`
 		Leaves           []string         `json:"leaves"`
+		// The lists js-ratchet's analysis reads (S20a): an allowed receiver
+		// or a new shell root zeroes or frees counts; a dropped late-binding
+		// table stops counting its writes.
+		InjectionAllow    []string          `json:"injectionAllow"`
+		ShellRoots        []string          `json:"shellRoots"`
+		LateBindingTables map[string]string `json:"lateBindingTables"`
 	}
 	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
 		return fmt.Errorf("js-ratchet caps: %w", err)
@@ -140,7 +146,26 @@ func jsCaps(raw string, into metrics) error {
 	for _, f := range doc.Leaves {
 		into["js-caps:leaf:"+f] = metric{value: 1, goneIsRaise: true}
 	}
+	for _, a := range doc.InjectionAllow {
+		into[capsSections["injectionAllow"]+a] = metric{value: 1, newIsRaise: true}
+	}
+	for _, f := range doc.ShellRoots {
+		into[capsSections["shellRoots"]+f] = metric{value: 1, newIsRaise: true}
+	}
+	for name, f := range doc.LateBindingTables {
+		into[capsSections["lateBindingTables"]+name+"="+f] = metric{value: 1, goneIsRaise: true}
+	}
 	return nil
+}
+
+// capsSections maps the caps.json lists that arrived after the document
+// itself to their metric key prefix. A list base does not have yet is being
+// created, so its first entries are recorded, not raised (run()), the same
+// rule as for the whole document.
+var capsSections = map[string]string{
+	"injectionAllow":    "js-caps:injectionAllow:",
+	"shellRoots":        "js-caps:shellRoot:",
+	"lateBindingTables": "js-caps:lateBindingTable:",
 }
 
 // goldenPins reads test/e2e/golden/pins.json: a map from golden fixture file

@@ -7,8 +7,14 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   compare, measureSource, raisedMetrics, loadCaps, capProblems, sccs, importsOfSource,
-  analyzeSources, measureGlobal, INJECTION_ALLOW, GLOBAL,
+  analyzeSources, measureGlobal, NO_CAPS, GLOBAL,
 } from './js-ratchet.mjs';
+
+// The real caps: the late-binding tables, the injection allowlist and the
+// shell roots the analysis reads from them.
+const { caps: REAL_CAPS } = loadCaps();
+// The keys every caps fixture below needs besides the one it is about.
+const ANALYSIS_KEYS = { lateBindingTables: {}, injectionAllow: [], shellRoots: [] };
 
 // body returns n lines of statements, so a function around it spans n + 2.
 const body = (n) => Array.from({ length: n }, (_, i) => `  x(${i});`).join('\n');
@@ -99,7 +105,7 @@ test('loadCaps fails closed when the file is missing', () => {
 
 test('loadCaps fails closed on a top-level key rename', () => {
   withCapsFile(
-    JSON.stringify({ maxFn: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], leaves: [] }),
+    JSON.stringify({ maxFn: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], leaves: [], ...ANALYSIS_KEYS }),
     (file) => {
       const { errors } = loadCaps(file);
       assert.ok(errors.some((e) => /maxFnLines/.test(e)), errors);
@@ -109,7 +115,7 @@ test('loadCaps fails closed on a top-level key rename', () => {
 
 test('loadCaps fails closed when default is not a number', () => {
   withCapsFile(
-    JSON.stringify({ maxFnLines: { default: '120', exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], leaves: [] }),
+    JSON.stringify({ maxFnLines: { default: '120', exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], leaves: [], ...ANALYSIS_KEYS }),
     (file) => {
       const { errors } = loadCaps(file);
       assert.ok(errors.some((e) => /default must be a positive safe integer/.test(e)), errors);
@@ -122,7 +128,7 @@ test('loadCaps fails closed on a default or a line cap that is not a safe intege
   // not be the only side that notices (#3057 review).
   for (const d of [1e19, 120.5, 0, -1]) {
     withCapsFile(
-      JSON.stringify({ maxFnLines: { default: d, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], leaves: [] }),
+      JSON.stringify({ maxFnLines: { default: d, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], leaves: [], ...ANALYSIS_KEYS }),
       (file) => {
         const { errors } = loadCaps(file);
         assert.ok(errors?.some((e) => /default must be a positive safe integer/.test(e)), `default ${d}: ${errors}`);
@@ -131,7 +137,7 @@ test('loadCaps fails closed on a default or a line cap that is not a safe intege
   }
   for (const v of [1e19, 6011.5, -1, '6011', null]) {
     withCapsFile(
-      JSON.stringify({ maxFnLines: { default: 120, exempt: [] }, lines: { 'dashboard.js': v }, sideEffectLegacy: [], cycleLegacy: [], leaves: [] }),
+      JSON.stringify({ maxFnLines: { default: 120, exempt: [] }, lines: { 'dashboard.js': v }, sideEffectLegacy: [], cycleLegacy: [], leaves: [], ...ANALYSIS_KEYS }),
       (file) => {
         const { errors } = loadCaps(file);
         assert.ok(errors?.some((e) => /caps\.lines\.dashboard\.js must be a non-negative safe integer/.test(e)), `lines ${v}: ${errors}`);
@@ -142,7 +148,7 @@ test('loadCaps fails closed on a default or a line cap that is not a safe intege
 
 test('loadCaps accepts a well-formed caps file', () => {
   withCapsFile(
-    JSON.stringify({ maxFnLines: { default: 120, exempt: ['a.js'] }, lines: { 'dashboard.js': 100 }, sideEffectLegacy: [], cycleLegacy: [], leaves: [] }),
+    JSON.stringify({ maxFnLines: { default: 120, exempt: ['a.js'] }, lines: { 'dashboard.js': 100 }, sideEffectLegacy: [], cycleLegacy: [], leaves: [], ...ANALYSIS_KEYS }),
     (file) => {
       const { errors, caps } = loadCaps(file);
       assert.equal(errors, undefined);
@@ -249,7 +255,7 @@ test('capProblems: a cycleLegacy entry no longer in a cycle must move out', () =
 
 test('loadCaps fails closed without a leaves list', () => {
   for (const leaves of [undefined, 'contract.js', null]) {
-    const raw = { maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] };
+    const raw = { maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], ...ANALYSIS_KEYS };
     if (leaves !== undefined) raw.leaves = leaves;
     withCapsFile(JSON.stringify(raw), (file) => {
       const { errors } = loadCaps(file);
@@ -264,6 +270,41 @@ test('capProblems: a leaves entry pointing at a missing file fails', () => {
   assert.ok(problems.some((p) => /caps\.leaves: gone\.js does not exist/.test(p)), problems);
 });
 
+test('loadCaps fails closed without the analysis lists, or with a malformed one', () => {
+  const base = { maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], leaves: [], ...ANALYSIS_KEYS };
+  for (const key of Object.keys(ANALYSIS_KEYS)) {
+    const raw = { ...base };
+    delete raw[key];
+    withCapsFile(JSON.stringify(raw), (file) => {
+      const { errors } = loadCaps(file);
+      assert.ok(errors?.some((e) => e.includes(`"${key}"`)), `${key}: ${errors}`);
+    });
+  }
+  for (const [key, v, re] of [
+    ['lateBindingTables', ['state.js'], /lateBindingTables must map/],
+    ['lateBindingTables', { hooks: 1 }, /lateBindingTables must map/],
+    ['injectionAllow', ['registerActions'], /injectionAllow must be an array of "file.js:function"/],
+    ['injectionAllow', 'nz_util.js:registerActions', /injectionAllow must be an array/],
+    ['shellRoots', 'dashboard.js', /shellRoots must be an array/],
+  ]) {
+    withCapsFile(JSON.stringify({ ...base, [key]: v }), (file) => {
+      const { errors } = loadCaps(file);
+      assert.ok(errors?.some((e) => re.test(e)), `${key}=${JSON.stringify(v)}: ${errors}`);
+    });
+  }
+});
+
+test('capProblems: an analysis list naming a file not in static/ fails', () => {
+  const caps = {
+    maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], leaves: [],
+    lateBindingTables: { hooks: 'gone_state.js' }, injectionAllow: ['gone_util.js:registerActions'], shellRoots: ['gone_root.js'],
+  };
+  const problems = capProblems({ 'a.js': { lines: 1, maxFnLines: 1 } }, {}, caps);
+  for (const re of [/lateBindingTables\.hooks: gone_state\.js does not exist/, /injectionAllow: gone_util\.js does not exist/, /shellRoots: gone_root\.js does not exist/]) {
+    assert.ok(problems.some((p) => re.test(p)), `${re}: ${problems}`);
+  }
+});
+
 test('capProblems: a sideEffectLegacy entry pointing at a missing file fails', () => {
   const caps = { maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: ['missing.js'], cycleLegacy: [], leaves: [] };
   const current = { 'a.js': { lines: 1, maxFnLines: 1 } };
@@ -274,10 +315,11 @@ test('capProblems: a sideEffectLegacy entry pointing at a missing file fails', (
 // --- S20a (#3026): HTML sinks, injections, late bindings, the module graph --
 
 const js = (...lines) => lines.join('\n') + '\n';
-const global = (sources, leaves = []) => {
-  const all = analyzeSources(sources);
+// global measures fixtures with the real tables and shell roots, no leaves.
+const global = (sources, caps = { ...REAL_CAPS, leaves: [] }) => {
+  const all = analyzeSources(sources, undefined, caps);
   const graph = Object.fromEntries(Object.entries(sources).map(([f, src]) => [f, importsOfSource(src)]));
-  return measureGlobal(all, graph, leaves);
+  return measureGlobal(all, graph, caps);
 };
 
 test('innerHTMLAssign counts every assignment operator and the computed form', () => {
@@ -333,13 +375,18 @@ test('htmlSinks: a wrapper does not hide the sink it wraps', () => {
     ),
     'b.js': js(
       "import { paint as p } from './a.js';",
+      'const deps = { setHTML: null };',
+      'export function configureB(impl) { Object.assign(deps, impl); }',
       'p(c, x);',
       'p(d, y);',
       'deps.setHTML(e, z);',
+      'el.setHTML(e, z);', // a member call on anything else is not resolved by name
     ),
   };
   // 1 assignment + setHTML() inside paint + p() twice + deps.setHTML().
   assert.equal(global(deeper).metrics.htmlSinks, 5);
+  // Through a late-binding table too.
+  assert.equal(global({ ...deeper, 'c.js': js("import { hooks } from './state.js';", 'hooks.setHTML(e, z);') }).metrics.htmlSinks, 6);
   // Passing only the element a wrapper writes to does not make the caller a
   // wrapper: frame() and its two calls add nothing over setHTML's one call.
   const element = {
@@ -366,9 +413,13 @@ test('lateBindings counts hooks.X / nzViews.X writes, an object literal by its k
     'other.x = 1;',
     'const y = h.openLightbox;',
   );
-  assert.equal(measureSource(src).lateBindings, 6);
+  assert.equal(measureSource(src, undefined, '', REAL_CAPS).lateBindings, 6);
   // Not imported from state.js / nz_util.js: some other object called hooks.
-  assert.equal(measureSource(js('const hooks = {};', 'hooks.x = 1;')).lateBindings, 0);
+  assert.equal(measureSource(js('const hooks = {};', 'hooks.x = 1;'), undefined, '', REAL_CAPS).lateBindings, 0);
+  // The tables come from caps.lateBindingTables, where ratchet-raises sees a
+  // dropped one: without them nothing is a late binding.
+  assert.equal(measureSource(src).lateBindings, 0);
+  assert.deepEqual(REAL_CAPS.lateBindingTables, { hooks: 'state.js', nzViews: 'nz_util.js' });
 });
 
 test('configureDeps counts injections where they land, whatever the receiver is called', () => {
@@ -423,6 +474,56 @@ test('configureDeps no longer depends on how the caller spells the injection', (
   assert.equal(measureSource(receiver).configureDeps, 2);
 });
 
+test('configureDeps: a spread, a private helper or a default export does not hide the injection', () => {
+  // The voice.js shape: seven-key deps table, called at use sites.
+  const voice = (receiver) => js(
+    'const deps = { a: null, b: null, c: null };',
+    receiver,
+    'export function go() { deps.a(); deps.b(); deps.c(); }',
+  );
+  const forms = {
+    'Object.assign from a spread literal': 'export function wireFoo(impl) { Object.assign(deps, { ...impl }); }',
+    'a spread into a whole-table store': 'export function wireFoo(impl) { deps = { ...impl }; }',
+    'a spread of a field': 'export function wireFoo(o) { Object.assign(deps, { ...o.deps }); }',
+    'a store of an expression of the parameter': 'export function wireFoo(impl) { deps = Object.freeze(impl); }',
+    'a private helper': 'function setDeps(i) { Object.assign(deps, i); }\nexport function wireFoo(impl) { setDeps(impl); }',
+    'a chain of private helpers': 'const put = (t) => { for (const k of Object.keys(deps)) deps[k] = t[k]; };\nfunction setDeps(x, i) { put(i); }\nexport function wireFoo(impl) { setDeps(null, impl); }',
+    'a nested helper': 'export function wireFoo(impl) { const set = (i) => Object.assign(deps, i); set(impl); }',
+    'a spread argument': 'function setDeps(i) { Object.assign(deps, i); }\nexport function wireFoo(...a) { setDeps(...a); }',
+    'a for-of over the entries': 'export function wireFoo(impl) { for (const [k, v] of Object.entries(impl)) deps[k] = v; }',
+    'a callback over the entries': 'export function wireFoo(impl) { Object.entries(impl).forEach(([k, v]) => { deps[k] = v; }); }',
+    'a default export': 'export default function (impl) { Object.assign(deps, impl); }',
+    'a named default export': 'function wireFoo(impl) { Object.assign(deps, impl); }\nexport default wireFoo;',
+  };
+  for (const [name, receiver] of Object.entries(forms)) {
+    assert.equal(measureSource(voice(receiver)).configureDeps, 3, name);
+  }
+  // The helper is the receiver the allowlist names: allowing the export does
+  // not allow what it delegates to.
+  const delegated = voice('function setDeps(i) { Object.assign(deps, i); }\nexport function wireFoo(impl) { setDeps(impl); }');
+  assert.equal(measureSource(delegated, undefined, 'v.js', { ...NO_CAPS, injectionAllow: ['v.js:wireFoo'] }).configureDeps, 3);
+  assert.equal(measureSource(delegated, undefined, 'v.js', { ...NO_CAPS, injectionAllow: ['v.js:setDeps'] }).configureDeps, 0);
+  // Only the parameter that carries the injection: a helper given a data
+  // argument by its position is not a receiver on the others.
+  assert.equal(measureSource(voice('function setDeps(i, d) { Object.assign(deps, d); }\nexport function wireFoo(impl) { setDeps(impl, {}); }')).configureDeps, 0);
+});
+
+test('configureDeps: data handed to a helper stays data', () => {
+  // render_md.js renderKatex, send_message.js's timer table, file_refs.js's
+  // active card: keyed by a runtime value or stored whole, but nothing is
+  // called through the table, or only a method of a member (el.classList.add).
+  const src = js(
+    'const pending = {};',
+    'const timers = {};',
+    'let activeEl = null;',
+    'function stash(id, tex) { pending[id] = { tex }; }',
+    'function arm(k) { timers[k] = setTimeout(() => {}, 1); }',
+    'function mark(el) { activeEl = el; activeEl.classList.add("on"); }',
+    'export function render(tex, k, el) { stash("x", tex); arm(k); mark(el); return pending.x || timers.y || activeEl.isConnected; }',
+  );
+  assert.equal(measureSource(src).configureDeps, 0);
+});
+
 test('deadInjections: a deps key the module never reads', () => {
   const src = (extra) => js(
     `const deps = { a: null, b: null${extra} };`,
@@ -435,19 +536,20 @@ test('deadInjections: a deps key the module never reads', () => {
   assert.equal(m.configureDeps, 3);
 });
 
-test('INJECTION_ALLOW: registerActions is the data-action registry, not injection', () => {
+test('caps.injectionAllow: registerActions is the data-action registry, not injection', () => {
   const src = js(
     'const nzActions = Object.create(null);',
     'export function registerActions(map) { for (const k of Object.keys(map)) nzActions[k] = map[k]; }',
-    "document.addEventListener('click', (e) => nzActions[e.target.dataset.action](e));",
+    "document.addEventListener('click', (e) => { const fn = nzActions[e.target.dataset.action]; fn(e); });",
   );
-  assert.equal(measureSource(src, undefined, 'nz_util.js').configureDeps, 0);
-  assert.deepEqual([...analyzeSources({ 'nz_util.js': src })['nz_util.js'].allowHits], ['nz_util.js:registerActions']);
-  // The same function anywhere else is counted: one registry table, which
-  // is read by runtime key and so is never dead.
-  assert.equal(measureSource(src, undefined, 'other.js').configureDeps, 1);
-  assert.equal(measureSource(src, undefined, 'other.js').deadInjections, 0);
-  assert.deepEqual(INJECTION_ALLOW, ['nz_util.js:registerActions']);
+  assert.equal(measureSource(src, undefined, 'nz_util.js', REAL_CAPS).configureDeps, 0);
+  assert.deepEqual([...analyzeSources({ 'nz_util.js': src }, undefined, REAL_CAPS)['nz_util.js'].allowHits], ['nz_util.js:registerActions']);
+  // The same function anywhere else, or without the caps entry, is counted:
+  // one registry table, which is read by runtime key and so is never dead.
+  assert.equal(measureSource(src, undefined, 'other.js', REAL_CAPS).configureDeps, 1);
+  assert.equal(measureSource(src, undefined, 'nz_util.js').configureDeps, 1);
+  assert.equal(measureSource(src, undefined, 'other.js', REAL_CAPS).deadInjections, 0);
+  assert.deepEqual(REAL_CAPS.injectionAllow, ['nz_util.js:registerActions']);
 });
 
 test('importCycles: an edge through a re-export and a /static/ specifier closes a cycle', () => {
@@ -484,11 +586,11 @@ test('leafImports: a leaf importing a non-leaf fails without any cycle', () => {
     'leaf.js': js("import { C } from './contract.js';", "import { show } from './view.js';"),
     'view.js': js('export function show() {}'),
   };
-  const g = global(sources, ['contract.js', 'leaf.js']);
+  const g = global(sources, { ...REAL_CAPS, leaves: ['contract.js', 'leaf.js'] });
   assert.equal(g.metrics.importCycles, 0);
   assert.equal(g.metrics.leafImports, 1);
   assert.match(g.details.leafImports[0], /leaf\.js imports view\.js/);
-  assert.equal(global(sources, ['contract.js', 'leaf.js', 'view.js']).metrics.leafImports, 0);
+  assert.equal(global(sources, { ...REAL_CAPS, leaves: ['contract.js', 'leaf.js', 'view.js'] }).metrics.leafImports, 0);
 });
 
 test('shell: a slot that only forwards, and an upcall that could be an import', () => {
@@ -513,9 +615,15 @@ test('shell: a slot that only forwards, and an upcall that could be an import', 
   };
   let g = global(good);
   assert.equal(g.metrics.upcallForwarders, 0, g.details.upcallForwarders.join('\n'));
+  // The roots come from caps.shellRoots: without dashboard.js there, its
+  // registerShell is outside the roots.
+  assert.match(global(good, NO_CAPS).details.upcallForwarders.join('\n'), /registerShell outside the root modules/);
   assert.equal(g.metrics.upcallNotUp, 0, g.details.upcallNotUp.join('\n'));
-  // Each (module, slot) pair a module uses is one injection.
+  // Each (module, slot) pair a module uses is one injection; registerShell
+  // filling the table is not counted again (elsewhere it would be).
   assert.equal(measureSource(good['view.js']).configureDeps, 1);
+  assert.equal(measureSource(shell, undefined, 'shell.js').configureDeps, 0);
+  assert.equal(measureSource(shell, undefined, 'other.js').configureDeps, 1);
 
   // sidUp only forwards to an import: a disguised import.
   g = global({ ...good, 'dashboard.js': good['dashboard.js'].replace('registerShell({ selectSession });', 'function sidUp(k) { return sid(k); }\nregisterShell({ selectSession, sidUp });') });
@@ -546,9 +654,9 @@ test('compare and raisedMetrics treat _global as the cross-file entry', () => {
   assert.deepEqual(raisedMetrics({ [GLOBAL]: { importCycles: 2, htmlSinks: 1 } }, base), ['global importCycles 0 -> 2']);
 });
 
-test('the INJECTION_ALLOW entry still matches a receiver in static/', () => {
+test('the caps.injectionAllow entry still matches a receiver in static/', () => {
   const dir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'internal', 'server', 'static');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.js') && f !== 'sw.js');
-  const all = analyzeSources(Object.fromEntries(files.map((f) => [f, fs.readFileSync(path.join(dir, f), 'utf8')])));
+  const all = analyzeSources(Object.fromEntries(files.map((f) => [f, fs.readFileSync(path.join(dir, f), 'utf8')])), undefined, REAL_CAPS);
   assert.ok(Object.values(all).some((a) => a.allowHits.has('nz_util.js:registerActions')));
 });

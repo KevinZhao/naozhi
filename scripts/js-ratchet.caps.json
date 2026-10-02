@@ -45,5 +45,16 @@
     "session_stream.js",
     "state.js",
     "ws_manager.js"
+  ],
+  "lateBindingTables": {
+    "hooks": "state.js",
+    "nzViews": "nz_util.js"
+  },
+  "injectionAllow": [
+    "nz_util.js:registerActions"
+  ],
+  "shellRoots": [
+    "cron_view.js",
+    "dashboard.js"
   ]
 }
