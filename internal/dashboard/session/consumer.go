@@ -1,7 +1,7 @@
 // consumer.go — the consumer-side dependency interfaces this package needs
 // (#2561).
 //
-// Deps used to name concrete types: *session.Router (77 exported methods),
+// Deps used to name concrete types: *session.Router (77 exported methods when measured),
 // *project.Manager, *node.CacheManager, *discovery.RetiredStore. The physical
 // split worked — no dashboard sub-package imports internal/server — but taking
 // the whole type back means this package is coupled to every future method on

@@ -3,7 +3,8 @@ package session
 import "testing"
 
 // TestRouterFacets_NilRouter: a facet accessor on a nil Router returns nil
-// rather than panicking, so callers holding an optional router can ask.
+// rather than panicking. Only the accessor is nil-safe: the registry's methods
+// still dereference it, as (*Router)(nil).CLIPath() did before the move.
 func TestRouterFacets_NilRouter(t *testing.T) {
 	var r *Router
 	if got := r.Backends(); got != nil {
