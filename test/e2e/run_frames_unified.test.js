@@ -81,6 +81,9 @@ test.describe('统一 run 帧的 WS 分发', () => {
     const page = await ctx.newPage();
     const pageErrors = [];
     page.on('pageerror', (e) => pageErrors.push(String(e)));
+    // 真实 socket 路径上 handler 抛的异常被 onmessage 的 try/catch 吞成
+    // console.error('ws parse error:', …)，不会变成 pageerror，所以两处都要收。
+    page.on('console', (m) => { if (m.type() === 'error' && m.text().startsWith('ws parse error')) pageErrors.push(m.text()); });
 
     await page.goto(mock.url + '/dashboard');
     await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
