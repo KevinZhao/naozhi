@@ -149,11 +149,16 @@ const noExportedLet = {
 // isPureExpr reports whether evaluating node can only ever bind a name — no
 // DOM/network/global touch, no function call escaping the small whitelist
 // below. Deliberately recursive on object/array literals and new/Object.*
-// so `Object.freeze({ a: new Set([1]) })` is still pure. Every sub-expression
-// that runs at evaluation time is checked: computed member properties and
+// so `Object.freeze({ a: new Set([1]) })` is still pure. The sub-expressions
+// that run at evaluation time are checked: computed member properties and
 // object keys, a class's heritage, computed member keys, static field
-// initialisers and static blocks. Object.assign/freeze mutate their first
-// argument, so it must be a fresh object or array literal.
+// initialisers and static blocks, and (isPurePattern) a destructuring
+// pattern's defaults and computed keys. Object.assign/freeze mutate their
+// first argument, so it must be a fresh object or array literal. Reading a
+// property can run a getter: a spread or Object.assign source written as a
+// literal with get/set accessors is rejected (definesAccessor), but a
+// property read through a name (`o.x`, `{ ...o }`) is not resolved to what
+// the name holds — the rule is syntactic and does not track bindings.
 function isPureExpr(node) {
   if (!node) return true;
   switch (node.type) {
@@ -169,7 +174,7 @@ function isPureExpr(node) {
       return node.expressions.every(isPureExpr);
     case 'ObjectExpression':
       return node.properties.every((p) => (p.type === 'SpreadElement'
-        ? isPureExpr(p.argument)
+        ? isPureExpr(p.argument) && !definesAccessor(p.argument)
         : (!p.computed || isPureExpr(p.key)) && isPureExpr(p.value)));
     case 'ArrayExpression':
       return node.elements.every((e) => e === null || isPureExpr(e));
@@ -194,13 +199,58 @@ function isPureExpr(node) {
 
 // isPureObjectCall reports Object.create(...), or Object.assign/freeze whose
 // target is a literal created right there (so nothing outside is mutated).
+// Object.assign reads every source's properties and writes the target's, so
+// a source literal's getter, or a target literal's setter, would run.
 function isPureObjectCall(node) {
   const c = node.callee;
   if (c.type !== 'MemberExpression' || c.computed || c.object.type !== 'Identifier' || c.object.name !== 'Object') return false;
   if (c.property.name === 'create') return true;
   if (c.property.name !== 'assign' && c.property.name !== 'freeze') return false;
   const target = node.arguments[0];
+  if (c.property.name === 'assign' && node.arguments.some(definesAccessor)) return false;
   return !!target && (target.type === 'ObjectExpression' || target.type === 'ArrayExpression');
+}
+
+// definesAccessor reports an object literal (or a conditional / logical
+// choice between expressions that may be one) with a get or set property:
+// copying its properties — a spread, an Object.assign source — calls the
+// getter, and Object.assign onto it calls the setter (a setter-only literal
+// spread runs nothing, but is rejected too: one rule is easier to hold than
+// the distinction). Binding such a literal to a name, or freezing it, runs
+// nothing and stays pure.
+function definesAccessor(node) {
+  switch (node.type) {
+    case 'ObjectExpression':
+      return node.properties.some((p) => p.type === 'Property' && (p.kind === 'get' || p.kind === 'set'));
+    case 'ConditionalExpression':
+      return definesAccessor(node.consequent) || definesAccessor(node.alternate);
+    case 'LogicalExpression':
+      return definesAccessor(node.left) || definesAccessor(node.right);
+    default:
+      return false;
+  }
+}
+
+// isPurePattern reports whether binding a declarator's id runs nothing
+// beyond the initialiser: a default (`{ a = init() }`, `[b = init()]`) and a
+// computed key (`{ [init()]: c }`) are evaluated at load time too.
+function isPurePattern(node) {
+  switch (node.type) {
+    case 'Identifier':
+      return true;
+    case 'AssignmentPattern':
+      return isPurePattern(node.left) && isPureExpr(node.right);
+    case 'RestElement':
+      return isPurePattern(node.argument);
+    case 'ArrayPattern':
+      return node.elements.every((e) => e === null || isPurePattern(e));
+    case 'ObjectPattern':
+      return node.properties.every((p) => (p.type === 'RestElement'
+        ? isPurePattern(p)
+        : (!p.computed || isPureExpr(p.key)) && isPurePattern(p.value)));
+    default:
+      return false;
+  }
 }
 
 // isPureClass reports whether defining the class runs nothing: instance
@@ -250,7 +300,12 @@ const noModuleSideEffects = {
           return;
         case 'VariableDeclaration': {
           const bad = st.declarations.find((d) => d.init !== null && !isPureExpr(d.init));
-          if (bad) context.report({ node: bad.init, messageId: 'sideEffect', data: { what: `'${st.kind}' initialiser` } });
+          if (bad) {
+            context.report({ node: bad.init, messageId: 'sideEffect', data: { what: `'${st.kind}' initialiser` } });
+            return;
+          }
+          const badPattern = st.declarations.find((d) => !isPurePattern(d.id));
+          if (badPattern) context.report({ node: badPattern.id, messageId: 'sideEffect', data: { what: `'${st.kind}' destructuring default or computed key` } });
           return;
         }
         case 'ExpressionStatement':

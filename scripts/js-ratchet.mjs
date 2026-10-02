@@ -97,17 +97,29 @@ function configureDeps(program) {
   return n;
 }
 
-// importsOf lists the relative module specifiers a file imports (its own
-// import graph edges). An absolute or bare specifier would be a dependency
-// outside static/, which is out of scope for the cycle check.
+// importsOf lists the relative module specifiers a file loads (its own
+// import graph edges): every `import … from`, and every re-export
+// (`export { x } from`, `export * from`), which loads and evaluates the
+// target exactly like an import does — a cycle closed through a re-export is
+// still a cycle. A dynamic import() runs later, not at evaluation, and is not
+// an edge. An absolute or bare specifier would be a dependency outside
+// static/, which is out of scope for the cycle check.
 function importsOf(program) {
   const out = [];
   for (const st of program.body) {
-    if (st.type !== 'ImportDeclaration') continue;
+    const loads = st.type === 'ImportDeclaration' || st.type === 'ExportAllDeclaration'
+      || (st.type === 'ExportNamedDeclaration' && st.source);
+    if (!loads) continue;
     const spec = st.source.value;
     if (spec.startsWith('./') || spec.startsWith('../')) out.push(path.basename(spec));
   }
   return out;
+}
+
+// importsOfSource is importsOf on source text (the unit tests' entry point;
+// importGraph reads the same function over every static/*.js file).
+export function importsOfSource(src, espree = loadEspree()) {
+  return importsOf(espree.parse(src, { ecmaVersion: 'latest', sourceType: 'module', loc: true }));
 }
 
 export function measureSource(src, espree = loadEspree()) {

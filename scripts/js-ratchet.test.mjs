@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { compare, measureSource, raisedMetrics, loadCaps, capProblems, sccs } from './js-ratchet.mjs';
+import { compare, measureSource, raisedMetrics, loadCaps, capProblems, sccs, importsOfSource } from './js-ratchet.mjs';
 
 // body returns n lines of statements, so a function around it spans n + 2.
 const body = (n) => Array.from({ length: n }, (_, i) => `  x(${i});`).join('\n');
@@ -167,6 +167,32 @@ test('sccs finds a two-file import cycle', () => {
     sccs(graph).map((c) => [...c].sort()),
     [['a.js', 'b.js']],
   );
+});
+
+test('importsOf: an import, a named re-export and export * are all edges', () => {
+  const src = [
+    "import { a } from './a.js';",
+    "import './side.js';",
+    "export { b } from './b.js';",
+    "export * from './c.js';",
+    "export * as ns from '../d.js';",
+    "const local = 1;",
+    "export { local };", // no source: not an edge
+    "export const other = 2;",
+    "import bare from 'bare-pkg';", // outside static/: not an edge
+    "const lazy = () => import('./lazy.js');", // runs later: not an edge
+  ].join('\n');
+  assert.deepEqual(importsOfSource(src), ['a.js', 'side.js', 'b.js', 'c.js', 'd.js']);
+});
+
+test('sccs finds a cycle that closes through a re-export', () => {
+  // utilities.js imports nz_util.js; nz_util.js re-exports from utilities.js.
+  const graph = {
+    'utilities.js': importsOfSource("import { esc } from './nz_util.js';\nexport function configureUtilities() {}\n"),
+    'nz_util.js': importsOfSource("export { configureUtilities } from './utilities.js';\nexport const esc = 1;\n"),
+    'star.js': importsOfSource("export * from './nz_util.js';\n"),
+  };
+  assert.deepEqual(sccs(graph).map((c) => [...c].sort()), [['nz_util.js', 'utilities.js']]);
 });
 
 test('capProblems: an import cycle not listed in cycleLegacy fails', () => {

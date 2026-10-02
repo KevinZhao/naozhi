@@ -17,7 +17,9 @@ import { loadCaps } from './js-ratchet.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATIC_DIR = path.join(ROOT, 'internal', 'server', 'static');
-const { ESLint, Linter } = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'))('eslint');
+const e2eRequire = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'));
+const { ESLint, Linter } = e2eRequire('eslint');
+const espree = e2eRequire('espree');
 
 // sw.js is a service worker with its own scope; contract.js is generated (and
 // ignored by eslint), though it is a module like the rest.
@@ -86,6 +88,62 @@ test('nz/no-module-side-effects covers every file but the legacy list, which is 
     if (messages.length === 0) problems.push(`${f}: in caps.sideEffectLegacy but clean — move it out`);
   }
   assert.deepEqual(problems, []);
+});
+
+// nzInlineOverrides lists every inline comment in src that switches an nz/*
+// rule off: an `eslint-disable[-line|-next-line]` naming an nz/ rule or
+// naming no rule at all (a blanket disable covers nz/* too), and an
+// `/* eslint nz/…: … */` rule-config comment. The config-level scope above
+// (and caps.sideEffectLegacy's shrink-only list) would otherwise be one
+// comment away from moot.
+export function nzInlineOverrides(src) {
+  let comments;
+  try {
+    comments = espree.parse(src, { ecmaVersion: 'latest', sourceType: 'module', comment: true, loc: true }).comments;
+  } catch {
+    comments = espree.parse(src, { ecmaVersion: 'latest', sourceType: 'script', comment: true, loc: true }).comments;
+  }
+  const out = [];
+  for (const c of comments) {
+    const text = c.value.trim().split(/\s--\s/)[0].trim();
+    const m = /^(eslint-disable(?:-next-line|-line)?|eslint)(?:\s+([\s\S]*))?$/.exec(text);
+    if (!m) continue;
+    const rules = (m[2] ?? '').trim();
+    if (m[1] === 'eslint' ? /\bnz\//.test(rules) : rules === '' || /(^|[\s,])nz\//.test(rules)) {
+      out.push(`line ${c.loc.start.line}: ${text}`);
+    }
+  }
+  return out;
+}
+
+test('no static script switches an nz/* rule off inline', () => {
+  const problems = [];
+  for (const f of fs.readdirSync(STATIC_DIR).filter((x) => x.endsWith('.js')).sort()) {
+    for (const p of nzInlineOverrides(fs.readFileSync(path.join(STATIC_DIR, f), 'utf8'))) problems.push(`${f} ${p}`);
+  }
+  assert.deepEqual(problems, []);
+});
+
+test('nzInlineOverrides names nz/* and blanket disables, not other rules', () => {
+  const flagged = [
+    '// eslint-disable-next-line nz/no-module-side-effects\nf();',
+    'f(); // eslint-disable-line nz/configure-deps -- because',
+    '/* eslint-disable no-console, nz/no-exported-let */',
+    '/* eslint-disable */',
+    '// eslint-disable-next-line',
+    '/* eslint nz/no-module-side-effects: off */',
+    "/* eslint nz/no-module-side-effects: 'off' */",
+  ];
+  for (const src of flagged) assert.equal(nzInlineOverrides(src).length, 1, src);
+  assert.match(nzInlineOverrides('f();\n// eslint-disable-next-line nz/x\ng();')[0], /^line 2: /);
+  const clean = [
+    '// eslint-disable-next-line no-console\nf();',
+    '/* eslint-disable no-unused-vars -- mentions nz/ only in the description */',
+    '/* eslint no-console: off */',
+    "// a comment about nz/no-module-side-effects",
+    "const s = '// eslint-disable-next-line nz/x';",
+  ];
+  for (const src of clean) assert.deepEqual(nzInlineOverrides(src), [], src);
 });
 
 test('problems names a script-mode file and an extra global', () => {

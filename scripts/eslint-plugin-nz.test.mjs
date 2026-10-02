@@ -90,6 +90,15 @@ tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
     'wsm.onStateChange((s) => f(s));',
     'wsm.onAuthFail((msg) => f(msg));',
     'wsm.on(NZ_CONTRACT.WS.history, handleHistory);',
+    // Destructuring with pure defaults and computed keys, and an accessor
+    // literal bound to a name (its getter runs only when read later).
+    "const { a = 1, ['k' + 'ey']: kk, ...rest } = {};",
+    'const [b = new Set(), , ...more] = [];',
+    'const { p: { q = [] } = {} } = {};',
+    'const acc = { get x() { return init(); }, set x(v) { save(v); } };',
+    'const spread = { ...{ a: 1 }, ...base };',
+    'const merged = Object.assign({}, { a: 1 }, base);',
+    'const frozenAcc = Object.freeze({ get x() { return init(); } });',
   ],
   invalid: [
     // A bare top-level call.
@@ -129,5 +138,17 @@ tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
     { code: 'export class Y { static { f(); } }', errors: [{ messageId: 'sideEffect' }] },
     { code: 'export default class { static { f(); } }', errors: [{ messageId: 'sideEffect' }] },
     { code: 'const Y = class { static t = f(); };', errors: [{ messageId: 'sideEffect' }] },
+    // A destructuring pattern's defaults and computed keys run at load time.
+    { code: 'const { a = init() } = {};', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const [b = init()] = [];', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const { [init()]: c } = {};', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const { p: { q = init() } } = { p: {} };', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const [...[r = init()]] = [];', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'export const { zzTimer = setInterval(() => {}, 1000) } = {};', errors: [{ messageId: 'sideEffect' }] },
+    // Copying a literal's accessors (spread, Object.assign source) calls the getter.
+    { code: 'const d = { ...{ get x() { init(); return 1; } } };', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const d = { ...(c ? { set x(v) {} } : {}) };', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const f = Object.assign({}, { get x() { return init(); } });', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const f = Object.assign({ set x(v) { init(v); } }, { x: 1 });', errors: [{ messageId: 'sideEffect' }] },
   ],
 });
