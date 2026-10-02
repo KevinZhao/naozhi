@@ -67,12 +67,21 @@ func run(base, head tree, labels labelSource) ([]string, []raise, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("head: %w", err)
 	}
+	// Once base has a pins document, every change to it is a raise, a pin head
+	// adds included; the first document is free because golden metrics are
+	// not newIsRaise on their own.
+	basePins, err := base.read(goldenPinsPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if strings.TrimSpace(basePins) != "" {
+		markNewIsRaise(hm, "golden:")
+	}
 	rs := raises(bm, hm)
 	// Creating scripts/js-ratchet.caps.json establishes a new ratchet, not a
-	// raise: its first exempt/legacy/cycle entries are today's already-real
-	// violations, not ones this change introduces (#3025 S19-0's own PR —
-	// jsCaps parses one side at a time and cannot tell "first ever" from
-	// "incrementally added" by itself).
+	// raise: its first exempt/legacy/cycle entries are already-real
+	// violations being recorded. jsCaps parses one side at a time, so only
+	// run() can tell "first document" from "entry added to it".
 	baseCaps, err := base.read(jsCapsPath)
 	if err != nil {
 		return nil, nil, err
@@ -119,6 +128,16 @@ func collect(t tree) (metrics, error) {
 		}
 	}
 	return m, nil
+}
+
+// markNewIsRaise sets newIsRaise on every metric whose key starts with prefix.
+func markNewIsRaise(m metrics, prefix string) {
+	for k, v := range m {
+		if strings.HasPrefix(k, prefix) {
+			v.newIsRaise = true
+			m[k] = v
+		}
+	}
 }
 
 // withoutPrefix drops every raise whose gate starts with prefix.

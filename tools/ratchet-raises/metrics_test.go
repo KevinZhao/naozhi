@@ -142,9 +142,7 @@ handle_baseline:
 }
 
 // Deleting a file's metrics (and TOTAL.lines with them) must surface as a
-// raise even though head no longer carries the key at all — the gap the
-// critique found in the original raises(), which only ever walked head's
-// keys (#3025 S19-0).
+// raise to -1 even though head no longer carries the key at all (#3025).
 func TestRaises_JSRatchet_DeletingBaselineIsARaise(t *testing.T) {
 	t.Parallel()
 	base, head := metrics{}, metrics{}
@@ -266,7 +264,8 @@ func TestRaises_JSCaps(t *testing.T) {
 
 // A pin's sha is not an ordered quantity: ratchet-raises must catch a change
 // in either direction, and must not require an entry just because the file
-// was created (S19-1 records the first set of pins, not a raise).
+// was created (the first set of pins is recorded, not raised). A pin added
+// to an existing document is covered at run() level, in run_test.go.
 func TestRaises_GoldenPins(t *testing.T) {
 	t.Parallel()
 	base := metrics{}

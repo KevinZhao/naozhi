@@ -77,11 +77,19 @@ tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
     'const assigned = Object.assign({}, { a: 1 });',
     'const n = 1 + 2;',
     'const t = `a${1}b`;',
+    "const k = { [NZ_CONTRACT.WS.history]: 1, ['a' + 'b']: 2 };",
+    "const m = NZ_CONTRACT.WS['history'];",
+    // A class definition runs nothing unless its heritage, computed keys,
+    // static fields or static blocks do; instance fields run at construction.
+    'class D extends Base { static n = 1; x = f(); m() { g(); } }',
+    'export default class { static s = new Set(); }',
+    'const E = class { static k = {}; };',
     // D2: the WS dispatch table's registration calls are the one exception.
     "wsm.on(NZ_CONTRACT.WS.history, (msg) => f(msg));",
     'wsm.onReady(() => f());',
     'wsm.onStateChange((s) => f(s));',
     'wsm.onAuthFail((msg) => f(msg));',
+    'wsm.on(NZ_CONTRACT.WS.history, handleHistory);',
   ],
   invalid: [
     // A bare top-level call.
@@ -98,5 +106,28 @@ tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
     // exception.
     { code: 'sessionStream.reset();', errors: [{ messageId: 'sideEffect' }] },
     { code: 'wsm.connect();', errors: [{ messageId: 'sideEffect' }] },
+    // The D2 method names on any object other than wsm are not exempt.
+    { code: "bus.on('x', f);", errors: [{ messageId: 'sideEffect' }] },
+    { code: 'sessionStream.onReady(() => f());', errors: [{ messageId: 'sideEffect' }] },
+    // A computed member names whatever the variable holds, not wsm's method.
+    { code: "wsm[on]('x', f);", errors: [{ messageId: 'sideEffect' }] },
+    // The registration is exempt; building its handler by a call is not.
+    { code: "wsm.on('x', init());", errors: [{ messageId: 'sideEffect' }] },
+    // Object.assign/freeze mutate their first argument; only a fresh literal
+    // keeps them pure.
+    { code: 'const g = Object.assign(window, { x: 1 });', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const g = Object.freeze(window);', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const g = Object[assign]({}, {});', errors: [{ messageId: 'sideEffect' }] },
+    // Calls laundered through a computed member property or object key.
+    { code: 'const z = window[setTimeout(() => {}, 0)];', errors: [{ messageId: 'sideEffect' }] },
+    { code: "const z = { [fetch('/x')]: 1 };", errors: [{ messageId: 'sideEffect' }] },
+    // Class definitions that run code at load time.
+    { code: 'class Y { static t = setInterval(() => {}, 1000); }', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'class Y { static { setInterval(() => {}, 1000); } }', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'class Y { [f()]() {} }', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'class Y extends mixin(Base) {}', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'export class Y { static { f(); } }', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'export default class { static { f(); } }', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const Y = class { static t = f(); };', errors: [{ messageId: 'sideEffect' }] },
   ],
 });

@@ -93,6 +93,33 @@ func TestRun_WideningCapsAfterItExistsIsARaise(t *testing.T) {
 	}
 }
 
+// The first pins.json is recorded, not raised; once base has one, a pin head
+// adds is a raise like a changed or deleted one.
+func TestRun_GoldenPins_AddedPinRaisesOnlyOnceBaseHasPins(t *testing.T) {
+	t.Parallel()
+	const one = `{"event_render_known.json":"112233445566"}`
+	const two = `{"event_render_known.json":"112233445566","sidebar.json":"aabbccddeeff"}`
+	t.Run("creating the document", func(t *testing.T) {
+		_, rs, err := run(fakeTree{}, fakeTree{goldenPinsPath: two}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rs) != 0 {
+			t.Errorf("raises = %v, want none", rs)
+		}
+	})
+	t.Run("adding a pin to an existing document", func(t *testing.T) {
+		_, rs, err := run(fakeTree{goldenPinsPath: one}, fakeTree{goldenPinsPath: two}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"golden:sidebar.json"}
+		if got := gates(rs); !slices.Equal(got, want) {
+			t.Fatalf("raises = %v, want %v", got, want)
+		}
+	})
+}
+
 func TestGrepPaths(t *testing.T) {
 	t.Parallel()
 	got := grepPaths("origin/master:internal/a_test.go\n3f2e1d:tools/x/main.go\n")

@@ -16,8 +16,8 @@ import (
 // a new ratchet otherwise (a new baseline constant, a new JS file whose lines
 // the TOTAL already counts). A key that exists only in base — the baseline
 // lost the file that carried it, or the whole document — is a raise to -1
-// when goneIsRaise is set: deleting the ratchet silently un-does it (#3025
-// S19-0). anyChangeIsRaise raises on a value change in either direction, for
+// when goneIsRaise is set: deleting the ratchet silently un-does it (#3025).
+// anyChangeIsRaise raises on a value change in either direction, for
 // metrics whose value is not itself ordered (a sha-derived int for a golden
 // pin: a smaller number is not an improvement).
 type metric struct {
@@ -78,8 +78,7 @@ func jsRatchet(raw string, into metrics) error {
 		}
 	}
 	// Deleting a file's metrics, or the whole document, must not silently
-	// erase the sum/max it fed (#2900 follow-up: the critique that found
-	// raises() only ever walked head's keys).
+	// erase the sum/max it fed: a total only base holds is a raise to -1.
 	for k, v := range totals {
 		into["js-ratchet:"+k] = metric{value: v, goneIsRaise: true}
 	}
@@ -130,9 +129,9 @@ func jsCaps(raw string, into metrics) error {
 // to its sha256 (hex). Only the first 12 hex chars are kept, as an int64 —
 // enough entropy to make a collision between two genuinely different
 // renderings not worth engineering ratchet metrics around, and small enough
-// to fit the same int64 every other metric uses. Creating the file (base has
-// none of these keys) is not a raise — see run()'s bootstrap exception, which
-// this alone cannot implement (this function sees only one side at a time).
+// to fit the same int64 every other metric uses. A changed or deleted pin is
+// a raise; new pins are not newIsRaise here, so creating the file is free,
+// and run() marks them newIsRaise once base already has a pins document.
 func goldenPins(raw string, into metrics) error {
 	if raw == "" {
 		return nil
@@ -234,7 +233,7 @@ type raise struct {
 
 // raises lists every value that went up between base and head, sorted by
 // gate. A key base held but head lost is a raise to -1 when base marked it
-// goneIsRaise; walking head alone would miss exactly that (#3025 S19-0).
+// goneIsRaise (#3025).
 func raises(base, head metrics) []raise {
 	var out []raise
 	seen := make(map[string]bool, len(head))

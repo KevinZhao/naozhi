@@ -149,7 +149,11 @@ const noExportedLet = {
 // isPureExpr reports whether evaluating node can only ever bind a name — no
 // DOM/network/global touch, no function call escaping the small whitelist
 // below. Deliberately recursive on object/array literals and new/Object.*
-// so `Object.freeze({ a: new Set([1]) })` is still pure.
+// so `Object.freeze({ a: new Set([1]) })` is still pure. Every sub-expression
+// that runs at evaluation time is checked: computed member properties and
+// object keys, a class's heritage, computed member keys, static field
+// initialisers and static blocks. Object.assign/freeze mutate their first
+// argument, so it must be a fresh object or array literal.
 function isPureExpr(node) {
   if (!node) return true;
   switch (node.type) {
@@ -157,12 +161,16 @@ function isPureExpr(node) {
     case 'Identifier':
     case 'FunctionExpression':
     case 'ArrowFunctionExpression':
-    case 'ClassExpression':
       return true;
+    case 'ClassExpression':
+    case 'ClassDeclaration':
+      return isPureClass(node);
     case 'TemplateLiteral':
       return node.expressions.every(isPureExpr);
     case 'ObjectExpression':
-      return node.properties.every((p) => (p.type === 'SpreadElement' ? isPureExpr(p.argument) : isPureExpr(p.value)));
+      return node.properties.every((p) => (p.type === 'SpreadElement'
+        ? isPureExpr(p.argument)
+        : (!p.computed || isPureExpr(p.key)) && isPureExpr(p.value)));
     case 'ArrayExpression':
       return node.elements.every((e) => e === null || isPureExpr(e));
     case 'UnaryExpression':
@@ -173,27 +181,50 @@ function isPureExpr(node) {
     case 'ConditionalExpression':
       return isPureExpr(node.test) && isPureExpr(node.consequent) && isPureExpr(node.alternate);
     case 'MemberExpression':
-      return isPureExpr(node.object);
+      return isPureExpr(node.object) && (!node.computed || isPureExpr(node.property));
     case 'NewExpression':
       return node.callee.type === 'Identifier' && /^(Set|Map|WeakMap|WeakSet|RegExp)$/.test(node.callee.name)
         && node.arguments.every(isPureExpr);
     case 'CallExpression':
-      return node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier'
-        && node.callee.object.name === 'Object' && node.callee.property.type === 'Identifier'
-        && /^(freeze|create|assign)$/.test(node.callee.property.name)
-        && node.arguments.every(isPureExpr);
+      return isPureObjectCall(node) && node.arguments.every(isPureExpr);
     default:
       return false;
   }
 }
 
+// isPureObjectCall reports Object.create(...), or Object.assign/freeze whose
+// target is a literal created right there (so nothing outside is mutated).
+function isPureObjectCall(node) {
+  const c = node.callee;
+  if (c.type !== 'MemberExpression' || c.computed || c.object.type !== 'Identifier' || c.object.name !== 'Object') return false;
+  if (c.property.name === 'create') return true;
+  if (c.property.name !== 'assign' && c.property.name !== 'freeze') return false;
+  const target = node.arguments[0];
+  return !!target && (target.type === 'ObjectExpression' || target.type === 'ArrayExpression');
+}
+
+// isPureClass reports whether defining the class runs nothing: instance
+// field initialisers and method bodies run later, but the heritage clause,
+// computed member keys, static field initialisers and static blocks run now.
+function isPureClass(node) {
+  if (!isPureExpr(node.superClass)) return false;
+  return node.body.body.every((m) => {
+    if (m.type === 'StaticBlock') return false;
+    if (m.computed && !isPureExpr(m.key)) return false;
+    return !(m.type === 'PropertyDefinition' && m.static && !isPureExpr(m.value));
+  });
+}
+
 // isWsmRegistration reports the one standing exception: a top-level call
 // that registers a handler or lifecycle hook on the managed wsm object (D2).
+// Its arguments must be pure too — the registration is exempt, not whatever
+// `wsm.on(X, init())` would evaluate to build the handler.
 function isWsmRegistration(expr) {
   if (expr.type !== 'CallExpression') return false;
   const c = expr.callee;
-  return c.type === 'MemberExpression' && c.object.type === 'Identifier' && c.object.name === 'wsm'
-    && c.property.type === 'Identifier' && /^(on|onReady|onStateChange|onAuthFail)$/.test(c.property.name);
+  return c.type === 'MemberExpression' && !c.computed && c.object.type === 'Identifier' && c.object.name === 'wsm'
+    && /^(on|onReady|onStateChange|onAuthFail)$/.test(c.property.name)
+    && expr.arguments.every(isPureExpr);
 }
 
 const noModuleSideEffects = {
@@ -213,7 +244,9 @@ const noModuleSideEffects = {
       switch (st.type) {
         case 'ImportDeclaration':
         case 'FunctionDeclaration':
+          return;
         case 'ClassDeclaration':
+          if (!isPureClass(st)) context.report({ node: st, messageId: 'sideEffect', data: { what: 'class definition' } });
           return;
         case 'VariableDeclaration': {
           const bad = st.declarations.find((d) => d.init !== null && !isPureExpr(d.init));
@@ -236,7 +269,7 @@ const noModuleSideEffects = {
               if (st.declaration) checkOne(st.declaration);
               continue;
             case 'ExportDefaultDeclaration':
-              if (/Function|Class/.test(st.declaration.type)) continue;
+              if (/Function/.test(st.declaration.type)) continue;
               if (!isPureExpr(st.declaration)) context.report({ node: st.declaration, messageId: 'sideEffect', data: { what: 'default export' } });
               continue;
             case 'ExportAllDeclaration':
