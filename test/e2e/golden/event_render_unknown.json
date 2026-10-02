@@ -1,0 +1,86 @@
+[
+  {
+    "name": "persist_gap",
+    "input": {
+      "type": "persist_gap",
+      "summary": "12 events were not persisted",
+      "detail": "eventlog: disk full",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event persist_gap\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">eventlog: disk full</div></div>"
+  },
+  {
+    "name": "persist_gap without detail",
+    "input": {
+      "type": "persist_gap",
+      "summary": "3 events were not persisted",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event persist_gap\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">3 events were not persisted</div></div>"
+  },
+  {
+    "name": "zz_future",
+    "input": {
+      "type": "zz_future",
+      "summary": "a kind from a newer server",
+      "detail": "payload",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event zz_future\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">payload</div></div>"
+  },
+  {
+    "name": "zz_future bare",
+    "input": {
+      "type": "zz_future",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event zz_future\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">zz_future</div></div>"
+  },
+  {
+    "name": "type constructor",
+    "input": {
+      "type": "constructor",
+      "summary": "proto name",
+      "detail": "detail",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event constructor\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">function Object() { [native code] }</span><div class=\"event-content\">detail</div></div>"
+  },
+  {
+    "name": "type __proto__",
+    "input": {
+      "type": "__proto__",
+      "summary": "proto name",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event __proto__\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">[object Object]</span><div class=\"event-content\">proto name</div></div>"
+  },
+  {
+    "name": "type toString",
+    "input": {
+      "type": "toString",
+      "summary": "proto name",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event toString\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">function toString() { [native code] }</span><div class=\"event-content\">proto name</div></div>"
+  },
+  {
+    "name": "type toString, internal",
+    "input": {
+      "type": "toString",
+      "detail": "d",
+      "time": 1767268800000
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event toString\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">function toString() { [native code] }</span><div class=\"event-content\">d</div></div>"
+  }
+]

@@ -1,0 +1,571 @@
+[
+  {
+    "name": "system",
+    "input": {
+      "type": "system",
+      "summary": "session started",
+      "time": 1767268800000,
+      "uuid": "u-sys"
+    },
+    "opts": null,
+    "html": "<div class=\"event system\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\" data-uuid=\"u-sys\"><span class=\"event-icon\">⚙</span><div class=\"event-content\">session started</div></div>"
+  },
+  {
+    "name": "system without summary",
+    "input": {
+      "type": "system",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event system\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">⚙</span><div class=\"event-content\">system</div></div>"
+  },
+  {
+    "name": "user markdown",
+    "input": {
+      "type": "user",
+      "detail": "hello **world** and `code`",
+      "time": 1767268801000,
+      "uuid": "u-usr"
+    },
+    "opts": null,
+    "html": "<div class=\"event user\" data-time=\"1767268801000\" title=\"2026-01-01 12:00:01\" data-uuid=\"u-usr\"><span class=\"event-icon\">&gt;_</span><div class=\"event-content\">hello <strong>world</strong> and <code class=\"md-code\">code</code><br></div></div>"
+  },
+  {
+    "name": "user summary only",
+    "input": {
+      "type": "user",
+      "summary": "from summary",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event user\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">&gt;_</span><div class=\"event-content\">from summary<br></div></div>"
+  },
+  {
+    "name": "user system-reminder is hidden",
+    "input": {
+      "type": "user",
+      "detail": "<system-reminder>x</system-reminder>",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": ""
+  },
+  {
+    "name": "user task-notification is hidden",
+    "input": {
+      "type": "user",
+      "detail": "<task-notification>\nx",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": ""
+  },
+  {
+    "name": "user interrupt marker is hidden",
+    "input": {
+      "type": "user",
+      "detail": "[Request interrupted by user]",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": ""
+  },
+  {
+    "name": "user interrupt for tool use is hidden",
+    "input": {
+      "type": "user",
+      "detail": "[Request interrupted by user for tool use]",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": ""
+  },
+  {
+    "name": "user long",
+    "input": {
+      "type": "user",
+      "detail": "This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar.",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event user\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">&gt;_</span><div class=\"event-content\">This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar.<br><button class=\"event-copy-btn hover-only\" type=\"button\" data-raw=\"This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar.\" data-action=\"event-copy\" title=\"复制\" aria-label=\"复制消息\">复制</button></div></div>"
+  },
+  {
+    "name": "user images, unselected",
+    "input": {
+      "type": "user",
+      "detail": "look [+2 image(s)]",
+      "images": [
+        "data:image/png;base64,iVBORw0KGgo=",
+        "data:image/png;base64,iVBORw0KGgo="
+      ],
+      "image_paths": [
+        "a/1.png",
+        "a/2.png"
+      ],
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event user\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">&gt;_</span><div class=\"event-content\">look<br><div class=\"event-images\"><img src=\"data:image/png;base64,iVBORw0KGgo=\" loading=\"lazy\" data-full=\"data:image/png;base64,iVBORw0KGgo=\" data-thumb=\"data:image/png;base64,iVBORw0KGgo=\"><img src=\"data:image/png;base64,iVBORw0KGgo=\" loading=\"lazy\" data-full=\"data:image/png;base64,iVBORw0KGgo=\" data-thumb=\"data:image/png;base64,iVBORw0KGgo=\"></div></div></div>"
+  },
+  {
+    "name": "user images, selected",
+    "input": {
+      "type": "user",
+      "detail": "look [+2 image(s)]",
+      "images": [
+        "data:image/png;base64,iVBORw0KGgo=",
+        "data:image/png;base64,iVBORw0KGgo="
+      ],
+      "image_paths": [
+        "a/1.png"
+      ],
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event user\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">&gt;_</span><div class=\"event-content\">look<br><div class=\"event-images\"><img src=\"data:image/png;base64,iVBORw0KGgo=\" loading=\"lazy\" data-full=\"/api/sessions/attachment?key=dashboard%3Adirect%3A2026-01-01-120000-1%3Amyproject&amp;path=a%2F1.png&amp;v=1767268800000\" data-thumb=\"data:image/png;base64,iVBORw0KGgo=\"><img src=\"data:image/png;base64,iVBORw0KGgo=\" loading=\"lazy\" data-full=\"data:image/png;base64,iVBORw0KGgo=\" data-thumb=\"data:image/png;base64,iVBORw0KGgo=\"></div></div></div>"
+  },
+  {
+    "name": "user images without time",
+    "input": {
+      "type": "user",
+      "detail": "look",
+      "images": [
+        "data:image/png;base64,iVBORw0KGgo="
+      ],
+      "image_paths": [
+        "a/1.png"
+      ]
+    },
+    "opts": null,
+    "html": "<div class=\"event user\"><span class=\"event-icon\">&gt;_</span><div class=\"event-content\">look<br><div class=\"event-images\"><img src=\"data:image/png;base64,iVBORw0KGgo=\" loading=\"lazy\" data-full=\"/api/sessions/attachment?key=dashboard%3Adirect%3A2026-01-01-120000-1%3Amyproject&amp;path=a%2F1.png\" data-thumb=\"data:image/png;base64,iVBORw0KGgo=\"></div></div></div>"
+  },
+  {
+    "name": "text, no selection",
+    "input": {
+      "type": "text",
+      "detail": "# Title\n\nSome *prose*.",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event text\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"><svg class=\"cc-clawd\" viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z\"/></svg></span><div class=\"event-content\"><strong class=\"md-h1\">Title</strong>\n<div class=\"md-blank\"></div>Some <em>prose</em>.<br></div></div>"
+  },
+  {
+    "name": "text, claude session",
+    "input": {
+      "type": "text",
+      "detail": "claude says hi",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event text\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"><svg class=\"cc-clawd\" viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z\"/></svg></span><div class=\"event-content\">claude says hi<br></div></div>"
+  },
+  {
+    "name": "text, kiro session",
+    "input": {
+      "type": "text",
+      "detail": "kiro says hi",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event text\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">✦</span><div class=\"event-content\">kiro says hi<br></div></div>"
+  },
+  {
+    "name": "text long",
+    "input": {
+      "type": "text",
+      "detail": "This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar.",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event text\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"><svg class=\"cc-clawd\" viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z\"/></svg></span><div class=\"event-content\">This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar.<br><button class=\"event-copy-btn hover-only\" type=\"button\" data-raw=\"This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar.\" data-action=\"event-copy\" title=\"复制\" aria-label=\"复制消息\">复制</button><button class=\"event-ask-btn hover-only\" type=\"button\" data-raw=\"This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar. This paragraph is long enough to expose the bubble toolbar.\" data-msg-time=\"1767268800000\" data-action=\"ask-aside\" title=\"基于此内容追问\">↗ 追问</button></div></div>"
+  },
+  {
+    "name": "text leaked tool call",
+    "input": {
+      "type": "text",
+      "detail": "Let me check the file.\ncall\n<invoke name=\"Read\">\n<parameter name=\"file_path\">/tmp/a.txt</parameter>\n</invoke>",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event text\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"><svg class=\"cc-clawd\" viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z\"/></svg></span><div class=\"event-content\">Let me check the file.<br><details class=\"leaked-toolcall\"><summary class=\"leaked-toolcall-summary\">⚠ 模型输出了未执行的工具调用（已折叠）</summary><pre class=\"leaked-toolcall-body\">call\n&lt;invoke name=\"Read\"&gt;\n&lt;parameter name=\"file_path\"&gt;/tmp/a.txt&lt;/parameter&gt;\n&lt;/invoke&gt;</pre></details></div></div>"
+  },
+  {
+    "name": "text leaked tool call, no prose",
+    "input": {
+      "type": "text",
+      "detail": "call\n<invoke name=\"Bash\">\n</invoke>\n</function_calls>",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event text\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"><svg class=\"cc-clawd\" viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z\"/></svg></span><div class=\"event-content\">text<br><details class=\"leaked-toolcall\"><summary class=\"leaked-toolcall-summary\">⚠ 模型输出了未执行的工具调用（已折叠）</summary><pre class=\"leaked-toolcall-body\">call\n&lt;invoke name=\"Bash\"&gt;\n&lt;/invoke&gt;\n&lt;/function_calls&gt;</pre></details></div></div>"
+  },
+  {
+    "name": "text empty",
+    "input": {
+      "type": "text",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event text\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"><svg class=\"cc-clawd\" viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z\"/></svg></span><div class=\"event-content\">text<br></div></div>"
+  },
+  {
+    "name": "todo",
+    "input": {
+      "type": "todo",
+      "summary": "2 todos",
+      "detail": "[{\"content\":\"write tests\",\"status\":\"completed\"},{\"content\":\"ship\",\"status\":\"in_progress\",\"activeForm\":\"Shipping\"},{\"content\":\"rest\",\"status\":\"pending\"}]",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event todo\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">☰</span><div class=\"event-content\"><div class=\"todo-header\"><span class=\"todo-title\">任务清单</span><span class=\"todo-counts\"><span class=\"todo-count\">3 项</span><span class=\"todo-count done\">1 完成</span><span class=\"todo-count active\">1 进行中</span><span class=\"todo-count\">1 待办</span></span></div><ul class=\"todo-list\"><li class=\"todo-item todo-done\"><span class=\"todo-mark\">✔</span><span class=\"todo-text\">write tests</span></li><li class=\"todo-item todo-active\"><span class=\"todo-mark\">▸</span><span class=\"todo-text\">Shipping</span></li><li class=\"todo-item todo-pending\"><span class=\"todo-mark\">○</span><span class=\"todo-text\">rest</span></li></ul></div></div>"
+  },
+  {
+    "name": "todo malformed",
+    "input": {
+      "type": "todo",
+      "summary": "todos",
+      "detail": "{not json",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event todo\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">☰</span><div class=\"event-content\">todos</div></div>"
+  },
+  {
+    "name": "thinking renders nothing",
+    "input": {
+      "type": "thinking",
+      "detail": "hmm",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": ""
+  },
+  {
+    "name": "ask_question",
+    "input": {
+      "type": "ask_question",
+      "summary": "Which approach?",
+      "ask_question": {
+        "tool_use_id": "toolu_ask_1",
+        "items": [
+          {
+            "question": "Which approach?",
+            "header": "Approach",
+            "multi_select": false,
+            "options": [
+              {
+                "label": "Fast",
+                "description": "ship today"
+              },
+              {
+                "label": "Safe",
+                "description": "one more review"
+              }
+            ]
+          }
+        ]
+      },
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event ask_question\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\" data-tool-use-id=\"toolu_ask_1\"><span class=\"event-icon\">?</span><div class=\"event-content ask-card\"><div class=\"ask-title\">AskUserQuestion · 全部作答后提交</div><div class=\"ask-q-group\" data-qi=\"0\" data-multi=\"0\"><div class=\"ask-q-header\">Approach</div><div class=\"ask-q-text\">Which approach?</div><div class=\"ask-opts\"><button class=\"ask-opt\" type=\"button\" data-tuid=\"toolu_ask_1\" data-qi=\"0\" data-oi=\"0\" data-multi=\"0\" data-header=\"Approach\" data-label=\"Fast\" data-action=\"ask-option-toggle\"><span class=\"ask-opt-label\">Fast</span><span class=\"ask-opt-desc\">ship today</span></button><button class=\"ask-opt\" type=\"button\" data-tuid=\"toolu_ask_1\" data-qi=\"0\" data-oi=\"1\" data-multi=\"0\" data-header=\"Approach\" data-label=\"Safe\" data-action=\"ask-option-toggle\"><span class=\"ask-opt-label\">Safe</span><span class=\"ask-opt-desc\">one more review</span></button></div></div><div class=\"ask-submit-row\"><button class=\"ask-submit\" type=\"button\" data-tuid=\"toolu_ask_1\" disabled data-action=\"ask-submit\">提交全部回答</button></div></div></div>"
+  },
+  {
+    "name": "ask_question without items",
+    "input": {
+      "type": "ask_question",
+      "summary": "Ask",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event ask_question\"><span class=\"event-icon\">?</span><div class=\"event-content\">Ask</div></div>"
+  },
+  {
+    "name": "ask_question with an option-less item",
+    "input": {
+      "type": "ask_question",
+      "summary": "Ask",
+      "ask_question": {
+        "tool_use_id": "t2",
+        "items": [
+          {
+            "question": "q",
+            "options": []
+          }
+        ]
+      },
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event ask_question\"><span class=\"event-icon\">?</span><div class=\"event-content\">Ask</div></div>"
+  },
+  {
+    "name": "tool_use hidden by default",
+    "input": {
+      "type": "tool_use",
+      "summary": "Bash",
+      "tool": "Bash",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": ""
+  },
+  {
+    "name": "tool_use internal, no tool_call",
+    "input": {
+      "type": "tool_use",
+      "summary": "Bash: ls",
+      "tool": "Bash",
+      "time": 1767268800000
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event tool_use\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">Bash: ls</div></div>"
+  },
+  {
+    "name": "tool_use internal, kiro stdout",
+    "input": {
+      "type": "tool_use",
+      "summary": "shell",
+      "time": 1767268800000,
+      "tool_call": {
+        "id": "tc1",
+        "title": "ls -la",
+        "kind": "execute",
+        "status": "completed",
+        "output_json": "{\"items\":[{\"Json\":{\"exit_status\":\"0\",\"stdout\":\"a\\nb\"}}]}"
+      }
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event tool_use\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><details class=\"tc-wrap\"><summary class=\"tc-summary\"><span class=\"tc-icon\" aria-hidden=\"true\">🛠</span><span class=\"tc-title\">ls -la</span><span class=\"tc-kind\">execute</span><span class=\"tc-status tc-status-completed\">completed</span></summary><pre class=\"tc-body\">a\nb</pre></details></div></div>"
+  },
+  {
+    "name": "tool_use internal, failed, other output",
+    "input": {
+      "type": "tool_use",
+      "time": 1767268800000,
+      "tool_call": {
+        "id": "tc2",
+        "name": "fetch",
+        "status": "failed",
+        "output_json": "{\"error\":\"boom\"}"
+      }
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event tool_use\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><details class=\"tc-wrap\" open><summary class=\"tc-summary\"><span class=\"tc-icon\" aria-hidden=\"true\">🛠</span><span class=\"tc-title\">fetch</span><span class=\"tc-status tc-status-failed\">failed</span></summary><pre class=\"tc-body\">{\n  \"error\": \"boom\"\n}</pre></details></div></div>"
+  },
+  {
+    "name": "tool_use internal, bad output json",
+    "input": {
+      "type": "tool_use",
+      "time": 1767268800000,
+      "tool_call": {
+        "id": "tc3",
+        "output_json": "not json"
+      }
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event tool_use\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><details class=\"tc-wrap\"><summary class=\"tc-summary\"><span class=\"tc-icon\" aria-hidden=\"true\">🛠</span><span class=\"tc-title\">tc3</span><span class=\"tc-status tc-status-pending\">pending</span></summary><pre class=\"tc-body\">not json</pre></details></div></div>"
+  },
+  {
+    "name": "tool_use internal, input only",
+    "input": {
+      "type": "tool_use",
+      "time": 1767268800000,
+      "tool_call": {
+        "id": "tc4",
+        "status": "in_progress",
+        "input_json": "{\"path\":\"/x\"}"
+      }
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event tool_use\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><details class=\"tc-wrap\"><summary class=\"tc-summary\"><span class=\"tc-icon\" aria-hidden=\"true\">🛠</span><span class=\"tc-title\">tc4</span><span class=\"tc-status tc-status-in_progress\">in_progress</span></summary><pre class=\"tc-body\">{\n  \"path\": \"/x\"\n}</pre></details></div></div>"
+  },
+  {
+    "name": "tool_use internal, bad input json",
+    "input": {
+      "type": "tool_use",
+      "time": 1767268800000,
+      "tool_call": {
+        "id": "tc5",
+        "input_json": "{"
+      }
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event tool_use\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><details class=\"tc-wrap\"><summary class=\"tc-summary\"><span class=\"tc-icon\" aria-hidden=\"true\">🛠</span><span class=\"tc-title\">tc5</span><span class=\"tc-status tc-status-pending\">pending</span></summary><pre class=\"tc-body\">{</pre></details></div></div>"
+  },
+  {
+    "name": "tool_use internal, huge output",
+    "input": {
+      "type": "tool_use",
+      "time": 1767268800000,
+      "tool_call": {
+        "id": "tc6",
+        "title": "cat",
+        "output_json": "{\"items\":[{\"Json\":{\"stdout\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"}}]}"
+      }
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event tool_use\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><details class=\"tc-wrap\"><summary class=\"tc-summary\"><span class=\"tc-icon\" aria-hidden=\"true\">🛠</span><span class=\"tc-title\">cat</span><span class=\"tc-status tc-status-pending\">pending</span></summary><pre class=\"tc-body\">yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n…</pre></details></div></div>"
+  },
+  {
+    "name": "tool_result",
+    "input": {
+      "type": "tool_result",
+      "summary": "first line",
+      "detail": "first line\nsecond <b>line</b>",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event tool_result\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><details class=\"tr-wrap\"><summary class=\"tr-summary\">first line</summary><pre class=\"tr-detail\">first line\nsecond &lt;b&gt;line&lt;/b&gt;</pre></details></div></div>"
+  },
+  {
+    "name": "tool_result empty",
+    "input": {
+      "type": "tool_result",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event tool_result\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><details class=\"tr-wrap\"><summary class=\"tr-summary\">(tool result)</summary></details></div></div>"
+  },
+  {
+    "name": "tool_result persisted, unselected",
+    "input": {
+      "type": "tool_result",
+      "summary": "big",
+      "tool": "persisted:tool-results/abc.txt",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event tool_result\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><details class=\"tr-wrap\"><summary class=\"tr-summary\">big</summary></details></div></div>"
+  },
+  {
+    "name": "tool_result persisted, selected",
+    "input": {
+      "type": "tool_result",
+      "summary": "big",
+      "detail": "head",
+      "tool": "persisted:tool-results/abc.txt",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event tool_result\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><details class=\"tr-wrap\"><summary class=\"tr-summary\">big</summary><pre class=\"tr-detail\">head</pre><a class=\"tr-persisted\" href=\"/api/sessions/tool_result?key=dashboard%3Adirect%3A2026-01-01-120000-1%3Amyproject&amp;node=local&amp;path=tool-results%2Fabc.txt\" target=\"_blank\" rel=\"noopener noreferrer\" title=\"查看完整输出\">📎 打开完整输出</a></details></div></div>"
+  },
+  {
+    "name": "agent hidden by default",
+    "input": {
+      "type": "agent",
+      "summary": "reviewer started",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": ""
+  },
+  {
+    "name": "agent internal",
+    "input": {
+      "type": "agent",
+      "summary": "reviewer started",
+      "detail": "Review the diff",
+      "time": 1767268800000
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event agent\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">Review the diff</div></div>"
+  },
+  {
+    "name": "task_start internal",
+    "input": {
+      "type": "task_start",
+      "summary": "task 1",
+      "time": 1767268800000
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event task_start\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">task 1</div></div>"
+  },
+  {
+    "name": "task_progress internal",
+    "input": {
+      "type": "task_progress",
+      "summary": "step 2/3",
+      "time": 1767268800000
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event task_progress\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">step 2/3</div></div>"
+  },
+  {
+    "name": "task_done internal",
+    "input": {
+      "type": "task_done",
+      "summary": "done",
+      "detail": "all good",
+      "time": 1767268800000
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event task_done\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">all good</div></div>"
+  },
+  {
+    "name": "task_done hidden by default",
+    "input": {
+      "type": "task_done",
+      "summary": "done",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": ""
+  },
+  {
+    "name": "result internal",
+    "input": {
+      "type": "result",
+      "summary": "turn complete",
+      "time": 1767268800000
+    },
+    "opts": {
+      "includeInternal": true
+    },
+    "html": "<div class=\"event result\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">turn complete</div></div>"
+  },
+  {
+    "name": "result hidden by default",
+    "input": {
+      "type": "result",
+      "summary": "turn complete",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": ""
+  },
+  {
+    "name": "escaping in type and uuid",
+    "input": {
+      "type": "system",
+      "summary": "<img src=x onerror=1>",
+      "uuid": "u\"><b>",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event system\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\" data-uuid=\"u&quot;&gt;&lt;b&gt;\"><span class=\"event-icon\">⚙</span><div class=\"event-content\">&lt;img src=x onerror=1&gt;</div></div>"
+  }
+]
