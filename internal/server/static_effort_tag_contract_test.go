@@ -59,15 +59,26 @@ func TestDashboardJS_EffortTagWiring(t *testing.T) {
 	// point a future failure at the wrong thing.
 	//
 	// The fetchSessions site is the load-bearing half AND is position-sensitive
-	// — it must precede the `version === sessionList.lastVersion` short-circuit, because a
-	// tier change does not advance stats.version. An earlier revision of this
-	// code sat after the short-circuit and never fired at all.
+	// — it must precede the sessionsUnchanged short-circuit, because a tier
+	// change does not advance stats.version. An earlier revision of this code
+	// sat after the short-circuit and never fired at all. Both are looked up
+	// inside fetchSessions' own body: sessionsUnchanged is a separate function
+	// whose place in the file says nothing about the order of the calls.
+	// effort_tag.test.js's "picks up a tier change that does not bump
+	// stats.version" pins the same order by running it.
 	const pollSite = `if (selection.key) setHeaderEffortChip(data.sessions);`
-	if !strings.Contains(js, pollSite) {
+	fetchBody := ""
+	if i := strings.Index(js, "\nasync function fetchSessions("); i >= 0 {
+		fetchBody = js[i:]
+		if end := strings.Index(fetchBody, "\n}\n"); end >= 0 {
+			fetchBody = fetchBody[:end]
+		}
+	}
+	if !strings.Contains(fetchBody, pollSite) {
 		t.Errorf("fetchSessions must repaint the effort tag: missing %q", pollSite)
 	}
-	shortCircuit := strings.Index(js, `if (wsConnected && version === sessionList.lastVersion && version > 0`)
-	poll := strings.Index(js, pollSite)
+	shortCircuit := strings.Index(fetchBody, `if (sessionsUnchanged(data, wsConnected)) return;`)
+	poll := strings.Index(fetchBody, pollSite)
 	switch {
 	case shortCircuit < 0:
 		t.Error("could not locate fetchSessions version short-circuit; " +
