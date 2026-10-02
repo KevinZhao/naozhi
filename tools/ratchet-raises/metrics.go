@@ -43,13 +43,13 @@ func goConsts(files map[string]string, into metrics) {
 	}
 }
 
-// jsRatchet reads scripts/js-ratchet.baseline.json: every per-file metric
-// except lines, plus totals across files. Lines are gated only as their sum:
-// moving code between files is a refactor, not a raise. A new file's metrics
-// are new keys, so the totals are what keep one from absorbing growth: the sums
-// of lines, fnOver100 and configureDeps, and the longest function anywhere
-// (MAX.maxFnLines).
-// js-ratchet --check still holds each file's own lines.
+// jsRatchet reads scripts/js-ratchet.baseline.json. lines, configureDeps,
+// deadInjections, innerHTMLAssign, htmlInsert and lateBindings are gated only
+// as their sum: moving code between files is a refactor, not a raise (S20a,
+// #3026 D-S20-4); the other per-file metrics are keys of their own. A new
+// file's metrics are new keys, so the totals and MAX.maxFnLines keep one from
+// absorbing growth; js-ratchet --check still holds each file's own values.
+// The "_global" entry is not a file: its metrics are GLOBAL.<name>.
 func jsRatchet(raw string, into metrics) error {
 	if raw == "" {
 		return nil
@@ -62,15 +62,19 @@ func jsRatchet(raw string, into metrics) error {
 	// predates the metric has no such ratchet, rather than one at zero.
 	totals := map[string]int64{}
 	for file, ms := range doc {
+		if file == jsGlobal {
+			for name, v := range ms {
+				totals["GLOBAL."+name] = v
+			}
+			continue
+		}
 		for name, v := range ms {
 			switch name {
-			case "lines":
-				totals["TOTAL.lines"] += v
+			case "lines", "configureDeps", "deadInjections", "innerHTMLAssign", "htmlInsert", "lateBindings":
+				totals["TOTAL."+name] += v
 				continue
 			case "fnOver100":
 				totals["TOTAL.fnOver100"] += v
-			case "configureDeps":
-				totals["TOTAL.configureDeps"] += v
 			case "maxFnLines":
 				totals["MAX.maxFnLines"] = max(totals["MAX.maxFnLines"], v)
 			}
@@ -84,6 +88,10 @@ func jsRatchet(raw string, into metrics) error {
 	}
 	return nil
 }
+
+// jsGlobal is the js-ratchet baseline's cross-file entry (no static/ file
+// can be named it: they all end in .js).
+const jsGlobal = "_global"
 
 // jsCaps reads scripts/js-ratchet.caps.json: the fail-closed caps that sit
 // alongside js-ratchet.baseline.json (#3025 S19-0). maxFnLines.default and
@@ -107,6 +115,13 @@ func jsCaps(raw string, into metrics) error {
 		Lines            map[string]int64 `json:"lines"`
 		SideEffectLegacy []string         `json:"sideEffectLegacy"`
 		CycleLegacy      []string         `json:"cycleLegacy"`
+		Leaves           []string         `json:"leaves"`
+		// The lists js-ratchet's analysis reads (S20a): an allowed receiver
+		// or a new shell root zeroes or frees counts; a dropped late-binding
+		// table stops counting its writes.
+		InjectionAllow    []string          `json:"injectionAllow"`
+		ShellRoots        []string          `json:"shellRoots"`
+		LateBindingTables map[string]string `json:"lateBindingTables"`
 	}
 	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
 		return fmt.Errorf("js-ratchet caps: %w", err)
@@ -126,7 +141,31 @@ func jsCaps(raw string, into metrics) error {
 	for _, f := range doc.CycleLegacy {
 		into["js-caps:cycleLegacy:"+f] = metric{value: 1, newIsRaise: true}
 	}
+	// A leaf may import only other leaves (S20a); dropping a file from the
+	// list frees it to import anything, so a lost entry is the raise.
+	for _, f := range doc.Leaves {
+		into["js-caps:leaf:"+f] = metric{value: 1, goneIsRaise: true}
+	}
+	for _, a := range doc.InjectionAllow {
+		into[capsSections["injectionAllow"]+a] = metric{value: 1, newIsRaise: true}
+	}
+	for _, f := range doc.ShellRoots {
+		into[capsSections["shellRoots"]+f] = metric{value: 1, newIsRaise: true}
+	}
+	for name, f := range doc.LateBindingTables {
+		into[capsSections["lateBindingTables"]+name+"="+f] = metric{value: 1, goneIsRaise: true}
+	}
 	return nil
+}
+
+// capsSections maps the caps.json lists that arrived after the document
+// itself to their metric key prefix. A list base does not have yet is being
+// created, so its first entries are recorded, not raised (run()), the same
+// rule as for the whole document.
+var capsSections = map[string]string{
+	"injectionAllow":    "js-caps:injectionAllow:",
+	"shellRoots":        "js-caps:shellRoot:",
+	"lateBindingTables": "js-caps:lateBindingTable:",
 }
 
 // goldenPins reads test/e2e/golden/pins.json: a map from golden fixture file

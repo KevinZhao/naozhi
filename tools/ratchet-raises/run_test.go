@@ -93,6 +93,49 @@ func TestRun_WideningCapsAfterItExistsIsARaise(t *testing.T) {
 	}
 }
 
+// The analysis lists js-ratchet reads from caps.json (S20a): the PR that
+// moves one into an existing document records its entries; after that a new
+// allowed receiver or shell root, or a dropped or re-pointed late-binding
+// table, is a raise.
+func TestRun_CapsAnalysisLists(t *testing.T) {
+	t.Parallel()
+	const pre = `{"maxFnLines":{"default":120,"exempt":[]},"lines":{},"sideEffectLegacy":[],"cycleLegacy":[],"leaves":[]`
+	doc := func(rest string) fakeTree { return fakeTree{jsCapsPath: pre + rest + "}"} }
+	const now = `,"lateBindingTables":{"hooks":"state.js","nzViews":"nz_util.js"},"injectionAllow":["nz_util.js:registerActions"],"shellRoots":["dashboard.js"]`
+	t.Run("adding the lists to an existing document", func(t *testing.T) {
+		_, rs, err := run(doc(""), doc(now), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rs) != 0 {
+			t.Errorf("raises = %v, want none", rs)
+		}
+	})
+	for _, tc := range []struct {
+		name, head string
+		want       []string
+	}{
+		{"an allowed receiver", `,"lateBindingTables":{"hooks":"state.js","nzViews":"nz_util.js"},"injectionAllow":["nz_util.js:registerActions","voice.js:configureVoice"],"shellRoots":["dashboard.js"]`,
+			[]string{"js-caps:injectionAllow:voice.js:configureVoice"}},
+		{"a shell root", `,"lateBindingTables":{"hooks":"state.js","nzViews":"nz_util.js"},"injectionAllow":["nz_util.js:registerActions"],"shellRoots":["dashboard.js","view.js"]`,
+			[]string{"js-caps:shellRoot:view.js"}},
+		{"a dropped and a re-pointed table", `,"lateBindingTables":{"hooks":"other.js"},"injectionAllow":["nz_util.js:registerActions"],"shellRoots":["dashboard.js"]`,
+			[]string{"js-caps:lateBindingTable:hooks=state.js", "js-caps:lateBindingTable:nzViews=nz_util.js"}},
+		{"dropping the allowlist entry and a root is free", `,"lateBindingTables":{"hooks":"state.js","nzViews":"nz_util.js"},"injectionAllow":[],"shellRoots":[]`,
+			nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, rs, err := run(doc(now), doc(tc.head), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := gates(rs); !slices.Equal(got, tc.want) {
+				t.Fatalf("raises = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // The first pins.json is recorded, not raised; once base has one, a pin head
 // adds is a raise like a changed or deleted one.
 func TestRun_GoldenPins_AddedPinRaisesOnlyOnceBaseHasPins(t *testing.T) {

@@ -88,6 +88,16 @@ func run(base, head tree, labels labelSource) ([]string, []raise, error) {
 	}
 	if strings.TrimSpace(baseCaps) == "" {
 		rs = withoutPrefix(rs, "js-caps:")
+	} else {
+		var sections map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(baseCaps), &sections); err != nil {
+			return nil, nil, fmt.Errorf("base: js-ratchet caps: %w", err)
+		}
+		for key, prefix := range capsSections {
+			if _, ok := sections[key]; !ok {
+				rs = withoutPrefix(rs, prefix)
+			}
+		}
 	}
 	bl, err := base.read(ledgerPath)
 	if err != nil {

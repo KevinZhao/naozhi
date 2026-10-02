@@ -36,5 +36,25 @@
     "cron_live.js",
     "cron_trigger.js",
     "cron_view.js"
+  ],
+  "leaves": [
+    "contract.js",
+    "cron_schedule.js",
+    "nz_util.js",
+    "platform.js",
+    "session_stream.js",
+    "state.js",
+    "ws_manager.js"
+  ],
+  "lateBindingTables": {
+    "hooks": "state.js",
+    "nzViews": "nz_util.js"
+  },
+  "injectionAllow": [
+    "nz_util.js:registerActions"
+  ],
+  "shellRoots": [
+    "cron_view.js",
+    "dashboard.js"
   ]
 }
