@@ -6,7 +6,8 @@
 // already covered (rule_send_engine.go). Eight checks, all AST-on-declarations
 // over non-test files in pkgDir:
 //
-//	C1 ctor point: newSendEngine( may only be called from a function named
+//	C1 ctor point: newSendEngine(, newWSBroadcaster( and
+//	   newSubscriberRegistry( may only be called from a function named
 //	   buildWSStack; buildWSStack( may only be called from buildDashboard.
 //	C2 engine reach: a `.engine` selector's base must be a *Hub/*SendHandler
 //	   method receiver, a `w *wiring` parameter named w, or `hs.wiring`.
@@ -51,8 +52,9 @@ import (
 	"strings"
 )
 
-// siblingCtorBaseline is the count of newSendEngine( / buildWSStack( call
-// sites outside their one allowed caller. Zero since buildWSStack became the
+// siblingCtorBaseline is the count of newSendEngine( / newWSBroadcaster( /
+// newSubscriberRegistry( / buildWSStack( call sites outside their one allowed
+// caller. Zero since buildWSStack became the
 // engine's only constructor (#2897 S5c2); the constant stays as a strict check.
 const siblingCtorBaseline = 0
 
@@ -213,12 +215,14 @@ func scanSiblingCtorPoints(fset *token.FileSet, files []siblingSrcFile) []Violat
 				if !ok {
 					return true
 				}
-				switch calleeName(call.Fun) {
-				case "newSendEngine":
+				switch name := calleeName(call.Fun); name {
+				case "newSendEngine", "newWSBroadcaster", "newSubscriberRegistry":
+					// A second broadcaster or registry compiles and runs; its
+					// frames just reach no client the Hub admitted.
 					if fd.Name.Name != "buildWSStack" {
 						out = append(out, Violation{Rule: "send_engine_sibling", File: filepath.ToSlash(sf.path),
 							Line:    fset.Position(call.Pos()).Line,
-							Message: fmt.Sprintf("newSendEngine called from %s, not buildWSStack: the engine is a sibling the composition root builds once (D7), not something another function may construct", fd.Name.Name)})
+							Message: fmt.Sprintf("%s called from %s, not buildWSStack: the engine, the broadcaster and its registry are siblings the composition root builds once (D7), not something another function may construct", name, fd.Name.Name)})
 					}
 				case "buildWSStack":
 					if fd.Name.Name != "buildDashboard" {

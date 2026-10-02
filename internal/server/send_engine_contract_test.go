@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -253,14 +254,24 @@ func TestSendEngine_NotifyAfterDrainDoesNotArmPending(t *testing.T) {
 
 // TestBuildServer_SharesOneWSStack pins buildWSStack's one-of-each: the
 // dispatcher's engine (wiring), the dashboard's (SendHandler) and the Hub's
-// are one instance; it notifies the one broadcaster the Hub and the producers
-// hold; and that broadcaster fans out to the Hub's own registry. A second
-// broadcaster or registry anywhere compiles and runs — frames just stop
-// reaching the clients the Hub admitted.
+// are one instance; it notifies wiring.bcast, which is the Hub's broadcaster
+// and fans out to the Hub's own registry; and every dependency the engine and
+// the Hub both read, or that the engine takes from wiring, is the instance
+// buildServer made. The Hub and the engine get them from two separate
+// literals, so each one is non-nil here: nil == nil would pass a dropped
+// field. A second broadcaster or registry anywhere compiles and runs — frames
+// just stop reaching the clients the Hub admitted.
 func TestBuildServer_SharesOneWSStack(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
-	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
+	sched := cron.NewScheduler(cron.SchedulerConfig{MaxJobs: 1, AllowNilRouter: true}, cron.SchedulerDeps{})
+	projects, err := project.NewManager(t.TempDir(), project.PlannerDefaults{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := map[string]session.AgentOpts{"a": {}}
+	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude",
+		Scheduler: sched, ProjectManager: projects, Agents: agents, AllowedRoot: t.TempDir()})
 	t.Cleanup(srv.appCancel)
 	hub, w := srv.hub, hs.wiring
 
@@ -282,8 +293,23 @@ func TestBuildServer_SharesOneWSStack(t *testing.T) {
 	if w.engine.router != sendEngineRouter(router) || hub.router != HubRouter(router) {
 		t.Error("engine and Hub do not share the Server's router")
 	}
-	if w.engine.resolver != hub.resolver || w.engine.allowedRoot != hub.tailers.allowedRoot {
-		t.Error("engine and Hub do not share the resolver / allowedRoot")
+	if w.engine.resolver == nil || w.engine.resolver != hub.resolver {
+		t.Error("engine and Hub do not share the resolver")
+	}
+	if w.engine.allowedRoot == "" || w.engine.allowedRoot != hub.tailers.allowedRoot {
+		t.Errorf("engine.allowedRoot = %q, tailers.allowedRoot = %q", w.engine.allowedRoot, hub.tailers.allowedRoot)
+	}
+	if w.engine.scheduler != CronView(sched) || hub.scheduler != CronView(sched) {
+		t.Error("engine and Hub do not share the Scheduler — cron prompt auto-save and stub revival would stop on the send path")
+	}
+	if w.engine.queue != MessageEnqueuer(w.msgQueue) || w.engine.guard != w.sessionGuard {
+		t.Error("engine.queue / engine.guard are not the dispatcher's — IM and dashboard sends would serialise on different queues / locks")
+	}
+	if w.engine.projectMgr != projects {
+		t.Error("engine.projectMgr is not the Server's project manager")
+	}
+	if reflect.ValueOf(w.engine.agents).UnsafePointer() != reflect.ValueOf(agents).UnsafePointer() {
+		t.Error("engine.agents is not the agent map buildServer was given")
 	}
 	// The engine's ctx is its own child of appCtx: a SIGTERM (appCancel)
 	// still reaches in-flight engine sends without Hub.Shutdown.

@@ -12,9 +12,12 @@ import (
 // dashboard Hub on purpose"; after #2552 no constructor path could produce
 // one — buildDashboard runs unconditionally — so the flag documented a state
 // that did not exist. What is worth pinning is the fact that made the flag
-// dead: every constructed Server has a Hub with an engine, and the IM entry
-// (serverCaps, which buildDispatcher hands the dispatcher) holds that same
-// engine.
+// dead: every constructed Server has a Hub with an engine, and wiring — where
+// buildDispatcher takes serverCaps.send from — holds that same engine. That
+// buildDispatcher really reads w.engine is not observable from here (the
+// dispatcher keeps its Capabilities private); lint C1/C2 rule out any other
+// engine it could reach, and TestBuildDispatcher_RequiresEngine pins what
+// happens if it is absent.
 func TestSendWithBroadcast_HubAlwaysWired(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})

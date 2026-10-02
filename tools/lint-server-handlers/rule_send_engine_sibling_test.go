@@ -103,6 +103,7 @@ func (h *Hub) Shutdown() {
 		"build_dashboard.go": `package server
 
 func (s *Server) buildWSStack(w *wiring) *Hub {
+	w.bcast = newWSBroadcaster(newSubscriberRegistry())
 	e := newSendEngine(sendEngineOpts{})
 	w.engine = e
 	return NewHub(HubOptions{Engine: e})
@@ -185,6 +186,19 @@ func rogueCaller(s *Server, w *wiring) {
 	fset, files = parseSiblingPkg(t, withRogueCaller)
 	if vs := scanSiblingCtorPoints(fset, files); len(vs) != 1 {
 		t.Fatalf("m6 buildWSStack called outside buildDashboard: want 1, got %d: %+v", len(vs), vs)
+	}
+
+	// m6b: a build step hands a producer its own broadcaster over its own
+	// registry. Two more disallowed call sites.
+	withStrayBcast := withExtra(siblingCleanPkg(), "stray_extra.go", `package server
+
+func (s *Server) buildScratch(hs *handlerSet) {
+	_ = newWSBroadcaster(newSubscriberRegistry())
+}
+`)
+	fset, files = parseSiblingPkg(t, withStrayBcast)
+	if vs := scanSiblingCtorPoints(fset, files); len(vs) != 2 {
+		t.Fatalf("m6b stray broadcaster + registry outside buildWSStack: want 2, got %d: %+v", len(vs), vs)
 	}
 }
 
