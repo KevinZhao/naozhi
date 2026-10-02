@@ -62,11 +62,11 @@ func newTestDispatcherWithPlatform(p platform.Platform) *Dispatcher {
 	if fp == nil {
 		// Wrap any non-fake platform into a dispatcher using newTestDispatcher's
 		// config; we only need a minimal setup.
-		d := newTestDispatcher(&fakePlatform{}, nil)
+		d := newTestDispatcher(&fakePlatform{})
 		d.platforms = map[string]platform.Platform{p.Name(): p}
 		return d
 	}
-	return newTestDispatcher(fp, nil)
+	return newTestDispatcher(fp)
 }
 
 func TestAckQueuedWithReaction_NoMessageID(t *testing.T) {
@@ -87,7 +87,7 @@ func TestAckQueuedWithReaction_NoMessageID(t *testing.T) {
 func TestAckQueuedWithReaction_NonReactorPlatform(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{} // no Reactor capability
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	msg := platform.IncomingMessage{Platform: "fake", MessageID: "m1", ChatID: "c1"}
 	if d.ackQueuedWithReaction(context.Background(), msg, nil) {
 		t.Fatal("expected false when platform lacks Reactor")
@@ -175,7 +175,7 @@ func TestClearQueuedReaction_EmptyIDIsNoOp(t *testing.T) {
 func TestClearQueuedReaction_NonReactorIsNoOp(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	// Must not panic and must leave no side effects.
 	d.clearQueuedReaction(context.Background(), "fake", "m1", nil)
 }
@@ -192,7 +192,7 @@ func TestClearQueuedReaction_ErrorSwallowed(t *testing.T) {
 func TestClearQueuedReactions_NonReactorIsNoOp(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	// Must not panic and must leave no side effects.
 	d.clearQueuedReactions(context.Background(), "fake",
 		[]QueuedMsg{{MessageID: "m1"}}, nil)
@@ -278,7 +278,7 @@ func TestAckThenClear_NoLingeringHourglass(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := &loadDeleteReactor{}
-			d := newTestDispatcher(&fakePlatform{}, nil)
+			d := newTestDispatcher(&fakePlatform{})
 			d.platforms = map[string]platform.Platform{"fake": r}
 			msg := platform.IncomingMessage{Platform: "fake", MessageID: "m1", ChatID: "c1"}
 

@@ -25,7 +25,12 @@ func newAgentRouteDispatcher(t *testing.T) *Dispatcher {
 		Agents:        map[string]session.AgentOpts{},
 		AgentCommands: map[string]string{"review": "code-reviewer"},
 		Guard:         newFakeGuard(),
-		Dedup:         platform.NewDedup(100),
+		// Queue: this test only exercises isKnownAgent (never BuildHandler),
+		// so Guard vs. Queue wiring makes no behavioural difference. Wired
+		// anyway for consistency with newTestDispatcher's #3004/T-P1 default
+		// of a real queue (see dispatch_test.go).
+		Queue: NewMessageQueue(5, 0),
+		Dedup: platform.NewDedup(100),
 		SendFn: func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 			return &clievent.SendResult{Text: "ok"}, nil
 		},
@@ -78,6 +83,8 @@ func TestIsKnownAgent_MultipleCommands(t *testing.T) {
 			"ops":    "ops-agent",
 		},
 		Guard: newFakeGuard(),
+		// Queue: see comment in newAgentRouteDispatcher above.
+		Queue: NewMessageQueue(5, 0),
 		Dedup: platform.NewDedup(100),
 		SendFn: func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 			return &clievent.SendResult{Text: "ok"}, nil

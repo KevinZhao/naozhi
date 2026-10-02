@@ -117,32 +117,62 @@ func (g *fakeGuard) Release(key string) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func newTestDispatcher(fp *fakePlatform, sendFn func(context.Context, string, Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error)) *Dispatcher {
-	if sendFn == nil {
-		sendFn = func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
-			return &clievent.SendResult{Text: "ok"}, nil
-		}
+// dispatcherTestOption configures the DispatcherConfig newTestDispatcher
+// builds. #3004/T-P1: the default now wires a real *MessageQueue, matching
+// build_server.go's production wiring (which always constructs one) rather
+// than silently exercising the Guard-based fallback that production never
+// reaches (see #3004 measured_state #7, "legacy 路径在生产中走不到"). Pass
+// withQueue(nil) to opt a specific test back into the Guard path while it
+// still exists in dispatch.go (removed in #3004-D).
+type dispatcherTestOption func(*DispatcherConfig)
+
+// withSendFn overrides the default Send hook via fakeCapabilities
+// (DispatcherConfig.Capabilities), not the deprecated SendFn closure field —
+// this is the shape #3004-C2's turnSender expects test doubles to take.
+func withSendFn(fn func(context.Context, string, Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error)) dispatcherTestOption {
+	return func(cfg *DispatcherConfig) {
+		fc, _ := cfg.Capabilities.(fakeCapabilities)
+		fc.send = fn
+		cfg.Capabilities = fc
 	}
-	d, err := NewDispatcher(DispatcherConfig{
-		Router:                routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 10})),
-		Platforms:             map[string]platform.Platform{"fake": fp},
-		Agents:                map[string]session.AgentOpts{},
-		AgentCommands:         map[string]string{},
-		Guard:                 newFakeGuard(),
-		Dedup:                 platform.NewDedup(100),
-		SendFn:                sendFn,
-		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
+}
+
+// withQueue overrides the default real queue; nil forces the Guard-based
+// legacy fallback path in dispatch.go's BuildHandler.
+func withQueue(q *MessageQueue) dispatcherTestOption {
+	return func(cfg *DispatcherConfig) { cfg.Queue = q }
+}
+
+func newTestDispatcher(fp *fakePlatform, opts ...dispatcherTestOption) *Dispatcher {
+	cfg := DispatcherConfig{
+		Router:        routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 10})),
+		Platforms:     map[string]platform.Platform{"fake": fp},
+		Agents:        map[string]session.AgentOpts{},
+		AgentCommands: map[string]string{},
+		Guard:         newFakeGuard(),
+		Queue:         NewMessageQueue(5, 0),
+		Dedup:         platform.NewDedup(100),
+		Capabilities: fakeCapabilities{
+			send: func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+				return &clievent.SendResult{Text: "ok"}, nil
+			},
+			takeover: func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
+		},
 		WatchdogNoOutputKills: new(atomic.Int64),
 		WatchdogTotalKills:    new(atomic.Int64),
 		NoOutputTimeout:       5 * time.Second,
 		TotalTimeout:          30 * time.Second,
-	})
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	d, err := NewDispatcher(cfg)
 	if err != nil {
-		// R250-ARCH-12: helper passes a real SendFn so wireup never fails.
-		// Panic so a future helper edit that drops SendFn fails loudly in
+		// R250-ARCH-12: helper passes a real Send capability so wireup never
+		// fails. Panic so a future helper edit that drops it fails loudly in
 		// the helper rather than producing a nil dispatcher and confusing
 		// later assertions about Send behaviour.
-		panic("newTestDispatcher: NewDispatcher returned error with SendFn set: " + err.Error())
+		panic("newTestDispatcher: NewDispatcher returned error with Capabilities set: " + err.Error())
 	}
 	return d
 }
@@ -203,7 +233,7 @@ func TestParseCronAdd(t *testing.T) {
 
 func TestReplyText_UnknownPlatform(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	msg := platform.IncomingMessage{Platform: "nonexistent", ChatID: "c1"}
 	if d.replyText(context.Background(), msg, "hi", nil) {
 		t.Error("replyText should return false for unknown platform")
@@ -212,7 +242,7 @@ func TestReplyText_UnknownPlatform(t *testing.T) {
 
 func TestReplyText_KnownPlatform(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	if !d.replyText(context.Background(), incomingMsg("x"), "hello", slog.Default()) {
 		t.Error("replyText should return true for known platform")
 	}
@@ -227,7 +257,7 @@ func TestReplyText_KnownPlatform(t *testing.T) {
 
 func TestDispatchCommand_Help(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	if !d.dispatchCommand(context.Background(), incomingMsg("/help"), "/help", slog.Default()) {
 		t.Fatal("expected /help to be handled")
 	}
@@ -241,7 +271,7 @@ func TestDispatchCommand_Help(t *testing.T) {
 
 func TestDispatchCommand_HelpWithAgents(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.agentCommands = map[string]string{"review": "code-reviewer"}
 	d.dispatchCommand(context.Background(), incomingMsg("/help"), "/help", slog.Default())
 	if !strings.Contains(fp.lastReply(), "review") {
@@ -251,8 +281,7 @@ func TestDispatchCommand_HelpWithAgents(t *testing.T) {
 
 func TestDispatchCommand_New_Basic(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
-	d.queue = NewMessageQueue(5, 0)
+	d := newTestDispatcher(fp)
 	if !d.dispatchCommand(context.Background(), incomingMsg("/new"), "/new", slog.Default()) {
 		t.Fatal("expected /new to be handled")
 	}
@@ -263,8 +292,7 @@ func TestDispatchCommand_New_Basic(t *testing.T) {
 
 func TestDispatchCommand_Clear(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
-	d.queue = NewMessageQueue(5, 0)
+	d := newTestDispatcher(fp)
 	if !d.dispatchCommand(context.Background(), incomingMsg("/clear"), "/clear", slog.Default()) {
 		t.Fatal("expected /clear to be handled")
 	}
@@ -275,7 +303,7 @@ func TestDispatchCommand_Clear(t *testing.T) {
 
 func TestDispatchCommand_New_UnknownAgent(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.agentCommands = map[string]string{"review": "reviewer"}
 	d.dispatchCommand(context.Background(), incomingMsg("/new"), "/new unknown-agent", slog.Default())
 	if !strings.Contains(fp.lastReply(), "未知") {
@@ -285,9 +313,8 @@ func TestDispatchCommand_New_UnknownAgent(t *testing.T) {
 
 func TestDispatchCommand_New_NamedAgent(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.agentCommands = map[string]string{"review": "reviewer"}
-	d.queue = NewMessageQueue(5, 0)
 	d.dispatchCommand(context.Background(), incomingMsg("/new"), "/new review", slog.Default())
 	if !strings.Contains(fp.lastReply(), "重置") {
 		t.Errorf("expected reset confirmation for named agent, got %q", fp.lastReply())
@@ -299,7 +326,7 @@ func TestDispatchCommand_New_NamedAgent(t *testing.T) {
 // EqualFold scan over stored (possibly mixed-case) values.
 func TestResolveAgentToken(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.agentCommands = map[string]string{"review": "ReviewerBot", "ops": "ops-agent"}
 
 	cases := []struct {
@@ -329,8 +356,7 @@ func TestResolveAgentToken(t *testing.T) {
 // replied "未知的 agent" while the unbound branch resolved fine.
 func TestDispatchCommand_New_ProjectBound_MixedCaseAgent(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
-	d.queue = NewMessageQueue(5, 0)
+	d := newTestDispatcher(fp)
 	// agentCommands keys are lowercased by applyDefaults; values keep the
 	// operator-supplied (mixed) case.
 	d.agentCommands = map[string]string{"review": "ReviewerBot"}
@@ -375,7 +401,7 @@ func TestNormalizeSlashCommand(t *testing.T) {
 
 func TestDispatchCommand_CaseInsensitive(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	if !d.dispatchCommand(context.Background(), incomingMsg("/Help"), "/Help", slog.Default()) {
 		t.Fatal("expected /Help to be handled case-insensitively")
 	}
@@ -386,7 +412,7 @@ func TestDispatchCommand_CaseInsensitive(t *testing.T) {
 
 func TestDispatchCommand_Pwd(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	if !d.dispatchCommand(context.Background(), incomingMsg("/pwd"), "/pwd", slog.Default()) {
 		t.Fatal("expected /pwd to be handled")
 	}
@@ -397,7 +423,7 @@ func TestDispatchCommand_Pwd(t *testing.T) {
 
 func TestDispatchCommand_CronNoScheduler(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.scheduler = nil
 	// /cron is always "handled" (returns true) even with nil scheduler
 	if !d.dispatchCommand(context.Background(), incomingMsg("/cron list"), "/cron list", slog.Default()) {
@@ -411,7 +437,7 @@ func TestDispatchCommand_CronNoScheduler(t *testing.T) {
 
 func TestDispatchCommand_Unknown(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	if d.dispatchCommand(context.Background(), incomingMsg("/foobar"), "/foobar", slog.Default()) {
 		t.Fatal("unknown command should not be handled")
 	}
@@ -423,7 +449,7 @@ func TestDispatchCommand_Unknown(t *testing.T) {
 
 func TestBuildHandler_DedupDropsDuplicate(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	h := d.BuildHandler()
 	ctx := context.Background()
 	// Use a /help message so we don't need GetOrCreate.
@@ -445,7 +471,7 @@ func TestBuildHandler_DedupDropsDuplicate(t *testing.T) {
 
 func TestBuildHandler_Help(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.BuildHandler()(context.Background(), incomingMsg("/help"))
 	if !strings.Contains(fp.lastReply(), "/help") {
 		t.Errorf("expected /help in reply, got %q", fp.lastReply())
@@ -459,10 +485,10 @@ func TestBuildHandler_Help(t *testing.T) {
 func TestBuildHandler_EmptyText(t *testing.T) {
 	fp := &fakePlatform{}
 	called := false
-	d := newTestDispatcher(fp, func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+	d := newTestDispatcher(fp, withSendFn(func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		called = true
 		return &clievent.SendResult{Text: "ok"}, nil
-	})
+	}))
 	d.BuildHandler()(context.Background(), incomingMsg("  "))
 	if called {
 		t.Error("sendFn should not be called for whitespace-only message")
@@ -475,7 +501,7 @@ func TestBuildHandler_EmptyText(t *testing.T) {
 
 func TestBuildHandler_UnknownSlash(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.BuildHandler()(context.Background(), incomingMsg("/unknowncmd"))
 	if !strings.Contains(fp.lastReply(), "未知命令") {
 		t.Errorf("expected unknown-command message, got %q", fp.lastReply())
@@ -489,7 +515,7 @@ func TestBuildHandler_UnknownSlash(t *testing.T) {
 // ESC starts an ANSI colour run; a tab splits slog attributes downstream).
 func TestBuildHandler_UnknownSlash_SanitizesAttackerControl(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	// Embed ESC (0x1b), DEL (0x7f), and a tab — all should be replaced.
 	d.BuildHandler()(context.Background(), incomingMsg("/\x1b[31mevil\x7f\tcmd"))
 	reply := fp.lastReply()
@@ -509,8 +535,7 @@ func TestBuildHandler_UnknownSlash_SanitizesAttackerControl(t *testing.T) {
 
 func TestBuildHandler_PathSlash_NotUnknown(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
-	d.queue = NewMessageQueue(5, 0)
+	d := newTestDispatcher(fp)
 	d.BuildHandler()(context.Background(), incomingMsg("/home/user/file.go を確認"))
 	for _, r := range fp.allReplies() {
 		if strings.Contains(r, "未知命令") {
@@ -523,10 +548,17 @@ func TestBuildHandler_PathSlash_NotUnknown(t *testing.T) {
 // BuildHandler — guard path busy
 // ---------------------------------------------------------------------------
 
+// TestBuildHandler_GuardPath_Busy exercises dispatch.go's "Fallback:
+// Guard-based path" branch, which production never reaches today
+// (build_server.go always wires a queue — #3004 measured_state #7) and
+// which #3004-D deletes outright. It is deliberately opted BACK into via
+// withQueue(nil): until D lands, the branch is still live code and this is
+// its only coverage. See TestBuildHandler_QueueBusy_SecondMessageQueued
+// below for the queue-path equivalent that newTestDispatcher now exercises
+// by default.
 func TestBuildHandler_GuardPath_Busy(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
-	d.queue = nil // force guard path
+	d := newTestDispatcher(fp, withQueue(nil)) // force guard path
 	key := session.SessionKey("fake", "direct", "chat1", "general")
 	d.guard.TryAcquire(key) // pre-acquire
 	d.BuildHandler()(context.Background(), incomingMsg("hello"))
@@ -536,14 +568,35 @@ func TestBuildHandler_GuardPath_Busy(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// BuildHandler — queue path busy (owner already holds the key)
+// ---------------------------------------------------------------------------
+
+// TestBuildHandler_QueueBusy_SecondMessageQueued pins BuildHandler's
+// production-reachable busy path (the queue is always wired in
+// build_server.go): a second message for a key the first already owns gets
+// queued with an ack reply, not the Guard-path's "正在处理" text. newTestDispatcher
+// defaults to a real queue, so no extra wiring is needed.
+func TestBuildHandler_QueueBusy_SecondMessageQueued(t *testing.T) {
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp)
+	key := session.SessionKey("fake", "direct", "chat1", "general")
+	// Pre-acquire ownership of key, as if a first message's ownerLoop were
+	// already running.
+	d.queue.Enqueue(key, QueuedMsg{Text: "first", EnqueueAt: time.Now()})
+	d.BuildHandler()(context.Background(), incomingMsg("hello"))
+	if !strings.Contains(fp.lastReply(), "消息已收到") {
+		t.Errorf("expected queued ack, got %q", fp.lastReply())
+	}
+}
+
+// ---------------------------------------------------------------------------
 // BuildHandler — queue maxDepth=0 drop-notify
 // ---------------------------------------------------------------------------
 
 func TestBuildHandler_QueueDrop_Notify(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
 	q := NewMessageQueue(0, 0)
-	d.queue = q
+	d := newTestDispatcher(fp, withQueue(q))
 	// Mark session busy
 	key := session.SessionKey("fake", "direct", "chat1", "general")
 	q.Enqueue(key, QueuedMsg{Text: "busy", EnqueueAt: time.Now()})
@@ -565,8 +618,9 @@ func TestBuildHandler_QueueDrop_Notify(t *testing.T) {
 
 func TestSendAndReply_GetOrCreateError_DefaultMessage(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil) // no wrapper → GetOrCreate will fail
-	d.queue = nil
+	d := newTestDispatcher(fp) // no wrapper → GetOrCreate will fail
+	// sendAndReply is called directly here (not via BuildHandler), so it
+	// never reads d.queue; no queue wiring is needed either way.
 	msg := incomingMsg("hello")
 	d.sendAndReply(context.Background(), "key1", "hello", nil, "general",
 		session.AgentOpts{}, msg, slog.Default(), true)
@@ -583,11 +637,12 @@ func TestSendAndReply_GetOrCreateError_DefaultMessage(t *testing.T) {
 func TestSendAndReply_UnknownPlatform(t *testing.T) {
 	fp := &fakePlatform{}
 	called := false
-	d := newTestDispatcher(fp, func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+	d := newTestDispatcher(fp, withSendFn(func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		called = true
 		return &clievent.SendResult{Text: "ok"}, nil
-	})
-	d.queue = nil
+	}))
+	// sendAndReply is called directly here (not via BuildHandler), so it
+	// never reads d.queue; no queue wiring is needed either way.
 	msg := platform.IncomingMessage{
 		Platform: "unknown", EventID: "e1", UserID: "u1",
 		ChatID: "c1", ChatType: "direct", Text: "hello",
@@ -605,7 +660,7 @@ func TestSendAndReply_UnknownPlatform(t *testing.T) {
 
 func TestSendSplitReply_Short(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.SendSplitReply(context.Background(), fp, "c1", "short message")
 	if fp.replyCount() != 1 || fp.lastReply() != "short message" {
 		t.Errorf("reply = %q, want %q", fp.lastReply(), "short message")
@@ -614,7 +669,7 @@ func TestSendSplitReply_Short(t *testing.T) {
 
 func TestSendSplitReply_Long_Paginates(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	// >4000 chars → 2+ chunks
 	d.SendSplitReply(context.Background(), fp, "c1", strings.Repeat("A", 8001))
 	if fp.replyCount() < 2 {
@@ -632,7 +687,7 @@ func (z *zeroMaxPlatform) MaxReplyLength() int { return 0 }
 
 func TestSendSplitReply_ZeroMax_Defaults4000(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.SendSplitReply(context.Background(), &zeroMaxPlatform{fp}, "c1", "hello")
 	if fp.replyCount() != 1 {
 		t.Errorf("reply count = %d, want 1", fp.replyCount())
@@ -740,98 +795,24 @@ func TestOwnerLoop_GenMismatch(t *testing.T) {
 
 func TestDiscardQueue_Nil(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
-	d.queue = nil
+	// withQueue(nil) is the nil-safety case under test here, not a stand-in
+	// for the Guard-fallback branch: discardQueue's own `if d.queue != nil`
+	// guard is what this pins (dispatch.go), independent of BuildHandler's
+	// routing decision.
+	d := newTestDispatcher(fp, withQueue(nil))
 	d.discardQueue(context.Background(), platform.IncomingMessage{}, "any-key") // must not panic
 }
 
 func TestDiscardQueue_WithQueue(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
 	q := NewMessageQueue(5, 0)
-	d.queue = q
+	d := newTestDispatcher(fp, withQueue(q))
 	key := "test-key"
 	q.Enqueue(key, QueuedMsg{Text: "m"})
 	d.discardQueue(context.Background(), platform.IncomingMessage{}, key)
 	if q.Depth(key) != 0 {
 		t.Errorf("depth = %d after discard, want 0", q.Depth(key))
 	}
-}
-
-// ---------------------------------------------------------------------------
-// ShouldNotify dropNotifyTimes path
-// ---------------------------------------------------------------------------
-
-func TestShouldNotify_DropPath(t *testing.T) {
-	q := NewMessageQueue(0, 0)
-	if !q.ShouldNotify("k") {
-		t.Fatal("first call should return true")
-	}
-	if q.ShouldNotify("k") {
-		t.Fatal("immediate second call should be rate-limited")
-	}
-}
-
-func TestShouldNotify_DropPath_Eviction(t *testing.T) {
-	q := NewMessageQueue(0, 0)
-	for i := 0; i < dropNotifyMaxKeys; i++ {
-		q.ShouldNotify(fmt.Sprintf("key-%d", i))
-	}
-	if !q.ShouldNotify("overflow-key") {
-		t.Fatal("should notify after eviction at capacity")
-	}
-	q.mu.Lock()
-	size := q.dropNotifyLRU.Len()
-	idxSize := len(q.dropNotifyIndex)
-	q.mu.Unlock()
-	if size > dropNotifyMaxKeys {
-		t.Errorf("dropNotifyLRU size = %d > cap %d", size, dropNotifyMaxKeys)
-	}
-	if idxSize != size {
-		t.Errorf("dropNotifyIndex size %d != LRU size %d", idxSize, size)
-	}
-}
-
-// TestShouldNotify_DropPath_BackPointerConsistent pins the R249-PERF-12 (#932)
-// refactor invariant: dropNotifyIndex maps directly to *dropNotifyEntry and each
-// entry's elem back-pointer must always reference the live list element, so the
-// LRU stays in lock-step with the map across refresh and eviction.
-func TestShouldNotify_DropPath_BackPointerConsistent(t *testing.T) {
-	q := NewMessageQueue(0, 0)
-	q.ShouldNotify("a")
-	q.ShouldNotify("b")
-
-	q.mu.Lock()
-	for key, entry := range q.dropNotifyIndex {
-		if entry.elem == nil {
-			t.Fatalf("entry %q has nil elem back-pointer", key)
-		}
-		if got := entry.elem.Value.(*dropNotifyEntry); got != entry {
-			t.Fatalf("entry %q elem points at a different entry", key)
-		}
-		if entry.key != key {
-			t.Fatalf("index key %q != entry.key %q", key, entry.key)
-		}
-	}
-	q.mu.Unlock()
-
-	// Fill to capacity then overflow; the eviction must drop exactly one key
-	// and keep the map and list the same size (no dangling back-pointers).
-	for i := 0; i < dropNotifyMaxKeys; i++ {
-		q.ShouldNotify(fmt.Sprintf("fill-%d", i))
-	}
-	q.mu.Lock()
-	if q.dropNotifyLRU.Len() != len(q.dropNotifyIndex) {
-		t.Fatalf("LRU/index size mismatch after overflow: %d vs %d",
-			q.dropNotifyLRU.Len(), len(q.dropNotifyIndex))
-	}
-	for e := q.dropNotifyLRU.Front(); e != nil; e = e.Next() {
-		entry := e.Value.(*dropNotifyEntry)
-		if q.dropNotifyIndex[entry.key] != entry {
-			t.Fatalf("list entry %q missing/stale in index", entry.key)
-		}
-	}
-	q.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -900,7 +881,7 @@ func TestHandleCdCommand_AbsPath(t *testing.T) {
 		t.Fatalf("EvalSymlinks: %v", err)
 	}
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.allowedRoot = tmpDir // restrict to tmpDir
 
 	msg := incomingMsg("/cd " + tmpDir)
@@ -913,7 +894,7 @@ func TestHandleCdCommand_AbsPath(t *testing.T) {
 
 func TestHandleCdCommand_NonExistentDir(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 
 	msg := incomingMsg("/cd /nonexistent/path/abc123")
 	d.handleCdCommand(context.Background(), msg, "/cd /nonexistent/path/abc123", slog.Default())
@@ -926,7 +907,7 @@ func TestHandleCdCommand_NonExistentDir(t *testing.T) {
 func TestHandleCdCommand_OutsideAllowedRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.allowedRoot = "/some/other/root"
 
 	msg := incomingMsg("/cd " + tmpDir)
@@ -956,7 +937,7 @@ func TestHandleCdCommand_CaseInsensitiveChild(t *testing.T) {
 		t.Skip("filesystem is case-sensitive; case-fold containment not exercisable here")
 	}
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.allowedRoot = child // mixed-case root
 
 	// /cd the lowercase spelling — byte prefix mismatches, inode walk rescues.
@@ -970,7 +951,7 @@ func TestHandleCdCommand_CaseInsensitiveChild(t *testing.T) {
 
 func TestHandleCdCommand_EmptyPath(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	msg := incomingMsg("/cd")
 	d.handleCdCommand(context.Background(), msg, "/cd", slog.Default())
 	if !strings.Contains(fp.lastReply(), "用法") {
@@ -980,7 +961,7 @@ func TestHandleCdCommand_EmptyPath(t *testing.T) {
 
 func TestHandleCdCommand_UnknownPlatform_NoReply(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	msg := platform.IncomingMessage{
 		Platform: "unknown", EventID: "e1", UserID: "u1",
 		ChatID: "c1", ChatType: "direct", Text: "/cd /tmp",
@@ -997,7 +978,7 @@ func TestHandleCdCommand_UnknownPlatform_NoReply(t *testing.T) {
 
 func TestHandleProjectCommand_NilManager(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.projectMgr = nil
 
 	d.handleProjectCommand(context.Background(), incomingMsg("/project"), "/project", slog.Default())
@@ -1009,7 +990,7 @@ func TestHandleProjectCommand_NilManager(t *testing.T) {
 
 func TestHandleProjectCommand_UnknownPlatform(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.projectMgr = nil
 
 	msg := platform.IncomingMessage{
@@ -1029,7 +1010,7 @@ func TestHandleProjectCommand_UnknownPlatform(t *testing.T) {
 
 func TestDispatchCommand_Cd_Handled(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	// /cd is only handled if platform is known
 	handled := d.dispatchCommand(context.Background(), incomingMsg("/cd"), "/cd /tmp", slog.Default())
 	if !handled {
@@ -1039,7 +1020,7 @@ func TestDispatchCommand_Cd_Handled(t *testing.T) {
 
 func TestDispatchCommand_Project_Handled(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.projectMgr = nil // nil manager → reply with "未启用"
 
 	handled := d.dispatchCommand(context.Background(), incomingMsg("/project"), "/project", slog.Default())
@@ -1066,7 +1047,7 @@ func makeTestScheduler(t *testing.T) CronCommands {
 
 func TestHandleCronCommand_Help(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.scheduler = makeTestScheduler(t)
 
 	d.dispatchCommand(context.Background(), incomingMsg("/cron"), "/cron", slog.Default())
@@ -1077,7 +1058,7 @@ func TestHandleCronCommand_Help(t *testing.T) {
 
 func TestHandleCronCommand_List_Empty(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.scheduler = makeTestScheduler(t)
 
 	d.dispatchCommand(context.Background(), incomingMsg("/cron list"), "/cron list", slog.Default())
@@ -1088,7 +1069,7 @@ func TestHandleCronCommand_List_Empty(t *testing.T) {
 
 func TestHandleCronCommand_Add_InvalidFormat(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.scheduler = makeTestScheduler(t)
 
 	d.dispatchCommand(context.Background(), incomingMsg("/cron add"), "/cron add", slog.Default())
@@ -1099,7 +1080,7 @@ func TestHandleCronCommand_Add_InvalidFormat(t *testing.T) {
 
 func TestHandleCronCommand_Del_MissingID(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.scheduler = makeTestScheduler(t)
 
 	d.dispatchCommand(context.Background(), incomingMsg("/cron del"), "/cron del", slog.Default())
@@ -1110,7 +1091,7 @@ func TestHandleCronCommand_Del_MissingID(t *testing.T) {
 
 func TestHandleCronCommand_Del_NotFound(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.scheduler = makeTestScheduler(t)
 
 	d.dispatchCommand(context.Background(), incomingMsg("/cron del"), "/cron del nosuchjob", slog.Default())
@@ -1121,7 +1102,7 @@ func TestHandleCronCommand_Del_NotFound(t *testing.T) {
 
 func TestHandleCronCommand_Pause_MissingID(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.scheduler = makeTestScheduler(t)
 
 	d.dispatchCommand(context.Background(), incomingMsg("/cron pause"), "/cron pause", slog.Default())
@@ -1132,7 +1113,7 @@ func TestHandleCronCommand_Pause_MissingID(t *testing.T) {
 
 func TestHandleCronCommand_Resume_MissingID(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.scheduler = makeTestScheduler(t)
 
 	d.dispatchCommand(context.Background(), incomingMsg("/cron resume"), "/cron resume", slog.Default())
@@ -1143,7 +1124,7 @@ func TestHandleCronCommand_Resume_MissingID(t *testing.T) {
 
 func TestHandleCronCommand_Add_InvalidSchedule(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 	d.scheduler = makeTestScheduler(t)
 
 	// Valid format but invalid cron expression for robfig/cron
@@ -1239,11 +1220,11 @@ func TestBuildHandler_GroupChatGate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			fp := &fakePlatform{}
-			d := newTestDispatcher(fp, nil)
-			// Ensure non-slash path uses the queue branch (not guard) so the
-			// ownerLoop runs inline on the owner and replies synchronously
-			// via the GetOrCreate error arm.
-			d.queue = NewMessageQueue(5, 0)
+			// newTestDispatcher defaults to a real queue, so the non-slash
+			// path below runs the queue branch (not Guard): ownerLoop runs
+			// inline on the owner and replies synchronously via the
+			// GetOrCreate error arm.
+			d := newTestDispatcher(fp)
 
 			msg := platform.IncomingMessage{
 				Platform:  "fake",

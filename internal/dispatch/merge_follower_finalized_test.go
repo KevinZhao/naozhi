@@ -173,11 +173,16 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 	// session can be pre-registered below.
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 10})
 	d, err := NewDispatcher(DispatcherConfig{
-		Router:                routerOf(router),
-		Platforms:             map[string]platform.Platform{"fake": probe},
-		Agents:                map[string]session.AgentOpts{},
-		AgentCommands:         map[string]string{},
-		Guard:                 newFakeGuard(),
+		Router:        routerOf(router),
+		Platforms:     map[string]platform.Platform{"fake": probe},
+		Agents:        map[string]session.AgentOpts{},
+		AgentCommands: map[string]string{},
+		Guard:         newFakeGuard(),
+		// Queue: this test calls d.sendAndReply directly (never
+		// BuildHandler), so Guard vs. Queue wiring makes no behavioural
+		// difference. Wired anyway for consistency with newTestDispatcher's
+		// #3004/T-P1 default of a real queue (see dispatch_test.go).
+		Queue:                 NewMessageQueue(5, 0),
 		Dedup:                 platform.NewDedup(100),
 		SendFn:                sendFn,
 		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },

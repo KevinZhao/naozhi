@@ -190,7 +190,7 @@ func TestHandleCronAdd_PromptVsScheduleErrorReply(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			fp := &fakePlatform{}
-			d := newTestDispatcher(fp, nil)
+			d := newTestDispatcher(fp)
 			d.scheduler = &fakeCronScheduler{addJobErr: c.addJobErr, classifyResult: c.classify}
 
 			var got string

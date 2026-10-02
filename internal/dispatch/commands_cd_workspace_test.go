@@ -25,7 +25,7 @@ func TestHandleCdCommand_WorkspacePersistedAfterReset(t *testing.T) {
 	}
 
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 
 	msg := incomingMsg("/cd " + tmpDir)
 	d.handleCdCommand(context.Background(), msg, "/cd "+tmpDir, slog.Default())
@@ -61,7 +61,7 @@ func TestHandleCdCommand_WorkspaceReplacesExistingOverride(t *testing.T) {
 	}
 
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, nil)
+	d := newTestDispatcher(fp)
 
 	msg1 := incomingMsg("/cd " + dir1)
 	d.handleCdCommand(context.Background(), msg1, "/cd "+dir1, slog.Default())
