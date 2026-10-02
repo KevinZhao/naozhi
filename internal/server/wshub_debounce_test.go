@@ -325,3 +325,34 @@ func TestWSBroadcaster_DebounceFiresSessionsUpdate(t *testing.T) {
 	default:
 	}
 }
+
+// TestHub_BroadcastSessionsUpdateForwardsToBroadcaster covers the Hub-level
+// entry point every sessions_update producer still calls (routerEvents,
+// scratch, discovery, the node cache, server loops): a NewHub-built hub must
+// route BroadcastSessionsUpdate into bcast's debounce window, and that
+// window's fire must deliver sessionsUpdateMsg to an authenticated client.
+// TestWSBroadcaster_DebounceFiresSessionsUpdate drives the broadcaster
+// directly and stays green with the Hub forward emptied.
+func TestHub_BroadcastSessionsUpdateForwardsToBroadcaster(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+	timer := &manualDebounceTimer{}
+	hub.bcast.debounce.timer = timer // idle until the first trigger below
+	c := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
+	c.authenticated.Store(true)
+	registerSub(hub, c, "")
+
+	hub.BroadcastSessionsUpdate()
+	if !timer.expire() {
+		t.Fatal("Hub.BroadcastSessionsUpdate did not open a debounce window on bcast")
+	}
+	hub.bcast.debounce.onTimer()
+
+	data, ok := recvRaw(t, c)
+	if !ok {
+		t.Fatal("debounce fire delivered no sessions_update to the authenticated client")
+	}
+	if string(data) != string(sessionsUpdateMsg) {
+		t.Fatalf("debounce fire sent %s, want %s", data, sessionsUpdateMsg)
+	}
+}
