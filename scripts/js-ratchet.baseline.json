@@ -168,9 +168,9 @@
     "configureDeps": 0
   },
   "send_message.js": {
-    "lines": 599,
-    "maxFnLines": 223,
-    "fnOver100": 2,
+    "lines": 593,
+    "maxFnLines": 102,
+    "fnOver100": 1,
     "topLevelLetVar": 1,
     "configureDeps": 0
   },

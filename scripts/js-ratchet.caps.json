@@ -7,7 +7,6 @@
       "dashboard.js",
       "discovery.js",
       "file_refs.js",
-      "send_message.js",
       "split_view.js",
       "tuning.js"
     ]
