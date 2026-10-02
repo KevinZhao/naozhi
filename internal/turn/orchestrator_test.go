@@ -72,6 +72,28 @@ func TestSubmit_DeclinedOwnerReleasesTheKey(t *testing.T) {
 	}
 }
 
+// TestSubmit_DeclinedOwnerDropsWhatQueuedBehindIt (#3004 分叉 13): a request
+// queued (and acked AckQueued) while the owner's Admit was deciding is told
+// DropShutdown when the decline discards it.
+func TestSubmit_DeclinedOwnerDropsWhatQueuedBehindIt(t *testing.T) {
+	t.Parallel()
+	h := newHarness(8, ModeCollect)
+	b := newOrigin(h.rec, "b", "ws:b")
+	adm := &fakeAdmission{rec: h.rec, decline: true}
+	adm.onAdmit = func() {
+		if ack := h.submit("m2", b, adm); ack != AckQueued {
+			t.Errorf("Submit during the owner's Admit = %v, want AckQueued", ack)
+		}
+	}
+	if ack := h.submit("m1", newOrigin(h.rec, "a", "ws:a"), adm); ack != AckShuttingDown {
+		t.Fatalf("Submit = %v, want AckShuttingDown", ack)
+	}
+	h.rec.assertOrder(t, "admitted:b:queued", "dropped:b:shutdown", "admitted:a:shutting_down")
+	if d := h.q.depth("k"); d != 0 {
+		t.Fatalf("queue depth after the decline = %d, want 0", d)
+	}
+}
+
 // TestSubmit_EvictionDropsTheEvictedOrigin (#3004 分叉 14): a full queue
 // evicts its oldest message and tells that message's own origin.
 func TestSubmit_EvictionDropsTheEvictedOrigin(t *testing.T) {

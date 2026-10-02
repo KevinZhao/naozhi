@@ -127,3 +127,19 @@ func TestDetached_Declined(t *testing.T) {
 		t.Fatal("a declined detached turn ran")
 	}
 }
+
+// TestDetached_NilOriginIsSilent: a detached turn with no Origin still runs,
+// with zero options and no delivery, in both detached kinds.
+func TestDetached_NilOriginIsSilent(t *testing.T) {
+	t.Parallel()
+	for _, p := range []Priority{PriorityNormal, PriorityNow} {
+		h := newHarness(8, ModePassthrough)
+		if ack := h.o.Submit(context.Background(), Request{Key: "k", Text: "solo", Priority: p}, &fakeAdmission{rec: h.rec}); ack != AckDetached {
+			t.Fatalf("priority %d: Submit = %v, want AckDetached", p, ack)
+		}
+		h.rec.assertOrder(t, "start:detached", "get:k", "send:k:solo", "after:k")
+		if n := h.rec.count("idle"); n != 0 {
+			t.Fatalf("priority %d: detached turn reported idle %d times", p, n)
+		}
+	}
+}

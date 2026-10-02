@@ -26,7 +26,8 @@ type inflight struct {
 	batch     []Msg
 	first     bool
 	receivers []*receiver
-	stage     Stage
+	out       Outcome // the outcome so far; recovery delivers it with Panic set
+	afterTurn bool    // Send returned and Sender.AfterTurn has not run yet
 }
 
 // receiversFor groups batch by Sink in first-appearance order: a group's
@@ -126,10 +127,11 @@ func (o *Orchestrator) runTurn(ctx context.Context, key string, t *inflight, opt
 	}
 	sess, st, err := o.s.GetOrCreate(ctx, key, opts)
 	if err != nil {
-		o.deliver(ctx, key, t, Outcome{Stage: StageSession, Err: err}, false)
+		t.out.Err = err
+		o.deliver(ctx, key, t, t.out, false)
 		return
 	}
-	t.stage = StageSend
+	t.out = Outcome{Stage: StageSend, Sess: sess}
 	var callbacks []clievent.EventCallback
 	for _, r := range t.receivers {
 		if r.d == nil {
@@ -140,29 +142,45 @@ func (o *Orchestrator) runTurn(ctx context.Context, key string, t *inflight, opt
 		}
 	}
 	result, err := o.s.Send(ctx, key, sess, text, images, spec, joinCallbacks(callbacks))
-	out := Outcome{Stage: StageSend, Err: err, Sess: sess, Result: result}
+	t.out.Err, t.out.Result, t.afterTurn = err, result, true
 	if err == nil {
-		out.Stage = StageDone
+		t.out.Stage = StageDone
 	}
-	t.stage = out.Stage
-	o.deliver(ctx, key, t, out, true)
+	o.deliver(ctx, key, t, t.out, false)
 }
 
-// deliver finishes the non-blocking receivers, then (if Send ran) the
-// Sender's AfterTurn broadcast, then the blocking receivers (#3004 分叉 21).
-func (o *Orchestrator) deliver(ctx context.Context, key string, t *inflight, out Outcome, afterTurn bool) {
+// deliver finishes the non-blocking receivers not yet finished, then (if it
+// is still owed) the Sender's AfterTurn broadcast, then the blocking
+// receivers (#3004 分叉 21). recovering guards each call, since a panic here
+// would escape the recover.
+func (o *Orchestrator) deliver(ctx context.Context, key string, t *inflight, out Outcome, recovering bool) {
+	call := func(hook string, fn func()) {
+		if recovering {
+			guarded(key, hook, fn)
+		} else {
+			fn()
+		}
+	}
 	finish := func(blocking bool) {
 		for _, r := range t.receivers {
-			if r.d == nil || r.done || r.d.Blocking() != blocking {
+			if r.d == nil || r.done {
 				continue
 			}
-			r.done = true
-			r.d.Finish(ctx, out)
+			call("Finish", func() {
+				// done goes up first so a receiver that panics is not called again.
+				r.done = true
+				if r.d.Blocking() != blocking {
+					r.done = false
+					return
+				}
+				r.d.Finish(ctx, out)
+			})
 		}
 	}
 	finish(false)
-	if afterTurn {
-		o.s.AfterTurn(key)
+	if t.afterTurn {
+		t.afterTurn = false
+		call("AfterTurn", func() { o.s.AfterTurn(key) })
 	}
 	finish(true)
 }
@@ -182,11 +200,11 @@ func joinCallbacks(cbs []clievent.EventCallback) clievent.EventCallback {
 }
 
 // recovered handles a panic in a turn on key: it counts and logs it,
-// discards the queue (each dropped origin sees DropPanic), then finishes
-// every receiver of the in-flight turn t (nil between turns) that had not
-// been finished with a Panic outcome. A receiver whose Begin was never
-// reached is begun here; one whose Begin or Finish panicked is not called
-// again.
+// discards the queue (each dropped origin sees DropPanic), then delivers the
+// in-flight turn t's outcome so far (nil between turns), with Panic set, to
+// every receiver not yet finished, running a still-owed AfterTurn in its
+// usual place. A receiver whose Begin was never reached is begun here; one
+// whose Begin or Finish panicked is not called again.
 func (o *Orchestrator) recovered(ctx context.Context, key string, owner Origin, t *inflight, r any) {
 	metrics.PanicRecoveredTotal.Add(1)
 	slog.Error("turn: panic recovered", "key", key, "panic", r, "stack", string(debug.Stack()))
@@ -199,20 +217,13 @@ func (o *Orchestrator) recovered(ctx context.Context, key string, owner Origin, 
 	if t.receivers == nil {
 		guarded(key, "Sink", func() { t.receivers = receiversFor(owner, t.batch, t.first) })
 	}
-	out := Outcome{Stage: t.stage, Panic: true}
 	for _, rc := range t.receivers {
-		if rc.done || (rc.begun && rc.d == nil) {
-			continue
+		if !rc.begun {
+			rc.begun = true
+			guarded(key, "Begin", func() { rc.d = rc.origin.Begin(ctx, rc.info) })
 		}
-		rc.done = true
-		guarded(key, "Finish", func() {
-			if !rc.begun {
-				rc.begun = true
-				rc.d = rc.origin.Begin(ctx, rc.info)
-			}
-			if rc.d != nil {
-				rc.d.Finish(ctx, out)
-			}
-		})
 	}
+	out := t.out
+	out.Panic = true
+	o.deliver(ctx, key, t, out, true)
 }

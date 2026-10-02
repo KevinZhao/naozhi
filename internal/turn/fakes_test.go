@@ -109,6 +109,22 @@ type fakeOrigin struct {
 	mu       sync.Mutex
 	infos    []TurnInfo
 	outcomes []Outcome
+	// doneCtx lists the Finish/Dropped calls that got an already-Done ctx.
+	doneCtx []string
+}
+
+func (o *fakeOrigin) noteCtx(ctx context.Context, hook string) {
+	if ctx.Err() != nil {
+		o.mu.Lock()
+		o.doneCtx = append(o.doneCtx, hook)
+		o.mu.Unlock()
+	}
+}
+
+func (o *fakeOrigin) doneCtxCalls() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return slices.Clone(o.doneCtx)
 }
 
 func (o *fakeOrigin) Sink() string { return o.sink }
@@ -136,7 +152,8 @@ func (o *fakeOrigin) Begin(_ context.Context, t TurnInfo) Delivery {
 	return &fakeDelivery{o: o}
 }
 
-func (o *fakeOrigin) Dropped(_ context.Context, why DropReason) {
+func (o *fakeOrigin) Dropped(ctx context.Context, why DropReason) {
+	o.noteCtx(ctx, "dropped")
 	o.rec.add("dropped:%s:%s", o.name, dropName(why))
 	if o.panicIn == "dropped" {
 		panic("dropped " + o.name)
@@ -164,7 +181,8 @@ func (d *fakeDelivery) SessionReady(_ context.Context, st sessionview.SessionSta
 	return d.o.onEvent
 }
 
-func (d *fakeDelivery) Finish(_ context.Context, out Outcome) {
+func (d *fakeDelivery) Finish(ctx context.Context, out Outcome) {
+	d.o.noteCtx(ctx, "finish")
 	d.o.mu.Lock()
 	d.o.outcomes = append(d.o.outcomes, out)
 	d.o.mu.Unlock()
@@ -290,11 +308,16 @@ type fakeAdmission struct {
 	async   bool
 	decline bool
 	ctx     context.Context
+	// onAdmit runs inside Admit before the decision.
+	onAdmit func()
 	wg      sync.WaitGroup
 }
 
 func (a *fakeAdmission) Admit(kind RunKind) (func(fn func(ctx context.Context)), bool) {
 	a.rec.add("admit:%s", runKindName(kind))
+	if a.onAdmit != nil {
+		a.onAdmit()
+	}
 	if a.decline {
 		return nil, false
 	}

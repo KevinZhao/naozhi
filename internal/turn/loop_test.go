@@ -133,6 +133,7 @@ func TestOwnerLoop_OwnerObservesBatchItIsNotIn(t *testing.T) {
 	h.submit("m1", owner, adm)
 	h.rec.waitFor(t, "send:k:m1", 1)
 	h.submit("m2", newOrigin(h.rec, "ws", "ws:1"), adm)
+	h.submit("m3", newOrigin(h.rec, "ws2", "ws:2"), adm)
 	release()
 	h.rec.waitFor(t, "begin:im:observer", 1)
 	release()
@@ -140,10 +141,12 @@ func TestOwnerLoop_OwnerObservesBatchItIsNotIn(t *testing.T) {
 	adm.wg.Wait()
 
 	infos := owner.turnInfos()
-	if len(infos) != 2 || infos[0].Role != RoleHead || !infos[0].First || infos[1].Role != RoleObserver || infos[1].First {
-		t.Fatalf("owner TurnInfos = %+v, want [First head, non-First observer]", infos)
+	if len(infos) != 2 || infos[0].Role != RoleHead || !infos[0].First || infos[0].Merged != 1 ||
+		infos[1].Role != RoleObserver || infos[1].First || infos[1].Merged != 2 || len(infos[1].Mates) != 0 {
+		t.Fatalf("owner TurnInfos = %+v, want [First head of 1, non-First observer of a 2-request batch]", infos)
 	}
-	if got := owner.finished(); len(got) != 2 || got[1].Stage != StageDone || got[1].Result == nil || got[1].Result.Text != "re:m2" {
+	want := "re:" + h.s.texts()[1]
+	if got := owner.finished(); len(got) != 2 || got[1].Stage != StageDone || got[1].Result == nil || got[1].Result.Text != want {
 		t.Fatalf("owner outcomes = %+v, want the drain turn's result delivered to the observer", got)
 	}
 }
@@ -326,13 +329,17 @@ func TestOwnerLoop_ShutdownDropsQueued(t *testing.T) {
 
 	o.Submit(context.Background(), Request{Key: "k", Text: "m1", Origin: newOrigin(rec, "a", "ws:a")}, adm)
 	rec.waitFor(t, "send:k:m1", 1)
-	o.Submit(context.Background(), Request{Key: "k", Text: "m2", Origin: newOrigin(rec, "b", "ws:b")}, adm)
+	b := newOrigin(rec, "b", "ws:b")
+	o.Submit(context.Background(), Request{Key: "k", Text: "m2", Origin: b}, adm)
 	cancel()
 	gate <- struct{}{}
 	rec.waitFor(t, "idle", 1)
 	adm.wg.Wait()
 
 	rec.assertOrder(t, "finish:a:done", "dropped:b:shutdown", "idle")
+	if got := b.doneCtxCalls(); len(got) != 0 {
+		t.Fatalf("shutdown told b on a cancelled ctx (%v); IM clears its reaction with it", got)
+	}
 	if isOwner, _, _, _, _ := q.Enqueue("k", Msg{Text: "next"}); !isOwner {
 		t.Fatal("ownership not released after shutdown")
 	}
@@ -478,6 +485,8 @@ func TestOwnerLoop_PanicInAHook(t *testing.T) {
 			adm := &fakeAdmission{rec: h.rec, async: true}
 			b, c := newOrigin(h.rec, "b", "ws:b"), newOrigin(h.rec, "c", "ws:c")
 			b.panicIn = hook
+			// c is finished after AfterTurn, also on the recovery path.
+			c.blocking = true
 
 			h.submit("m1", newOrigin(h.rec, "a", "ws:a"), adm)
 			h.rec.waitFor(t, "send:k:m1", 1)
@@ -505,6 +514,96 @@ func TestOwnerLoop_PanicInAHook(t *testing.T) {
 			wantC := map[string]string{"finish": "finish:c:done+panic", "begin": "finish:c:session+panic"}[hook]
 			if h.rec.count(wantC) != 1 {
 				t.Fatalf("c not told (%s): %v", wantC, h.rec.snapshot())
+			}
+			if hook == "begin" {
+				// The drain turn never reached Send: AfterTurn only for the first.
+				if n := h.rec.count("after:k"); n != 1 {
+					t.Fatalf("AfterTurn ran %d times, want 1", n)
+				}
+				return
+			}
+			// Send had returned: the Panic outcome keeps its result, and the
+			// owed AfterTurn still runs between non-blocking and blocking.
+			h.rec.assertOrder(t, "after:k", "finish:b:done", "finish:a:done+panic", "after:k", wantC)
+			if n := h.rec.count("after:k"); n != 2 {
+				t.Fatalf("AfterTurn ran %d times, want once per turn (2)", n)
+			}
+			want := "re:" + h.s.texts()[1]
+			if got := c.finished(); len(got) != 1 || got[0].Result == nil || got[0].Result.Text != want || got[0].Sess == nil {
+				t.Fatalf("c outcome = %+v, want the Panic outcome to carry the turn's result %q", got, want)
+			}
+		})
+	}
+}
+
+// TestOwnerLoop_PanicTellsOnADetachedCtx (#2013/#2262): when shutdown races a
+// panic, the recovery's Finish and Dropped calls get a ctx that is not Done,
+// so an IM origin can still clear its reactions.
+func TestOwnerLoop_PanicTellsOnADetachedCtx(t *testing.T) {
+	rec := newRecorder()
+	q := NewQueueWithMode(8, time.Hour, ModeCollect)
+	s := newSender(rec)
+	s.panicIf = func(string) bool { return true }
+	o := New(q, s)
+	gate := make(chan struct{})
+	s.gate = gate
+	ctx, cancel := context.WithCancel(context.Background())
+	adm := &fakeAdmission{rec: rec, async: true, ctx: ctx}
+	a, b := newOrigin(rec, "a", "ws:a"), newOrigin(rec, "b", "ws:b")
+
+	o.Submit(context.Background(), Request{Key: "k", Text: "m1", Origin: a}, adm)
+	rec.waitFor(t, "send:k:m1", 1)
+	o.Submit(context.Background(), Request{Key: "k", Text: "m2", Origin: b}, adm)
+	cancel()
+	gate <- struct{}{}
+	rec.waitFor(t, "idle", 1)
+	adm.wg.Wait()
+
+	rec.assertOrder(t, "dropped:b:panic", "finish:a:send+panic", "idle")
+	for _, org := range []*fakeOrigin{a, b} {
+		if got := org.doneCtxCalls(); len(got) != 0 {
+			t.Fatalf("%s told on a cancelled ctx: %v", org.name, got)
+		}
+	}
+}
+
+// TestOwnerLoop_PanicDuringRecovery: a Begin or Finish that panics while the
+// recovery is telling receivers is counted, and the receivers after it are
+// still told.
+func TestOwnerLoop_PanicDuringRecovery(t *testing.T) {
+	for _, hook := range []string{"finish", "begin"} {
+		t.Run(hook, func(t *testing.T) {
+			h := newHarness(8, ModeCollect)
+			h.s.panicIf = func(text string) bool { return text != "m1" }
+			release := h.hold()
+			adm := &fakeAdmission{rec: h.rec, async: true}
+			a := newOrigin(h.rec, "a", "ws:a")
+			b, c, d := newOrigin(h.rec, "b", "ws:b"), newOrigin(h.rec, "c", "ws:c"), newOrigin(h.rec, "d", "ws:d")
+			// finish: Send panics, then b's first Finish panics in the recovery.
+			// begin: b's Begin panics the turn, then c's in the recovery.
+			b.panicIn, c.panicIn = hook, map[string]string{"finish": "", "begin": "begin"}[hook]
+			before := metrics.PanicRecoveredTotal.Value()
+
+			h.submit("m1", a, adm)
+			h.rec.waitFor(t, "send:k:m1", 1)
+			h.submit("m2", b, adm)
+			h.submit("m3", c, adm)
+			h.submit("m4", d, adm)
+			release()
+			if hook == "finish" {
+				release()
+			}
+			h.rec.waitFor(t, "idle", 1)
+			adm.wg.Wait()
+
+			if delta := metrics.PanicRecoveredTotal.Value() - before; delta != 2 {
+				t.Fatalf("PanicRecoveredTotal moved by %d, want 2 (the turn and the hook in recovery)", delta)
+			}
+			stage := map[string]string{"finish": "send", "begin": "session"}[hook]
+			for _, name := range []string{"d", "a"} {
+				if ev := "finish:" + name + ":" + stage + "+panic"; h.rec.count(ev) != 1 {
+					t.Fatalf("missing %s after a panic in recovery: %v", ev, h.rec.snapshot())
+				}
 			}
 		})
 	}

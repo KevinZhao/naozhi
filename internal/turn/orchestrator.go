@@ -58,8 +58,9 @@ func (o *Orchestrator) Submit(ctx context.Context, r Request, a Admission) Ack {
 
 	start, ok := a.Admit(RunOwner)
 	if !ok {
-		// Release ownership so a later request can own the key.
-		o.q.Discard(r.Key)
+		// Release ownership so a later request can own the key; anything
+		// queued behind it since was acked AckQueued and is told.
+		o.dropQueued(ctx, r.Key, DropShutdown)
 		admitted(ctx, r.Origin, AckShuttingDown)
 		return AckShuttingDown
 	}

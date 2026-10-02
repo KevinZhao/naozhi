@@ -54,7 +54,7 @@ type DropReason uint8
 
 const (
 	DropReset    DropReason = iota // Reset discarded the queue (/new, /clear)
-	DropShutdown                   // the owner loop's ctx ended with messages still queued
+	DropShutdown                   // the owner loop's ctx ended, or its Admission declined, with messages queued
 	DropPanic                      // a turn on the key panicked and the queue was discarded
 	DropEvicted                    // a newer message pushed it out of a full queue
 )
@@ -66,9 +66,10 @@ type Origin interface {
 	// one Begin per turn between them. IM uses "im:<platform>:<chat>", a WS
 	// send "ws:<conn>:<sendID>", HTTP "http:<key>".
 	Sink() string
-	// Admitted reports Submit's Ack. It runs inside Submit, before the turn's
-	// goroutine (if any) starts, so an ack is in place before the turn can
-	// finish and clear it (#1963).
+	// Admitted reports Submit's Ack. It runs inside Submit; for AckOwner and
+	// AckDetached that is before the turn's goroutine (if any) starts, so the
+	// ack is in place before the turn can finish and clear it (#1963). An
+	// AckQueued request may already be drained into a running turn by then.
 	Admitted(ctx context.Context, a Ack)
 	// SessionOpts returns the options for GetOrCreate. Only the origin that
 	// holds the owner loop (or runs a detached turn) is asked, once per turn.
@@ -125,8 +126,8 @@ type Delivery interface {
 type Stage uint8
 
 const (
-	StageSession Stage = iota // GetOrCreate failed (or the turn panicked before Send)
-	StageSend                 // Send failed (or the turn panicked during Send or delivery)
+	StageSession Stage = iota // GetOrCreate failed (or the turn panicked before it returned)
+	StageSend                 // Send failed (or the turn panicked between GetOrCreate and Send returning)
 	StageDone                 // Send succeeded
 )
 
@@ -134,7 +135,9 @@ const (
 type Outcome struct {
 	Stage Stage
 	Err   error
-	// Panic is true when the turn panicked; Stage is how far it had got.
+	// Panic is true when the turn panicked. The other fields are what the
+	// turn had reached (Result is set once Send returned), so a receiver
+	// checks Panic before Stage.
 	Panic  bool
 	Sess   Session
 	Result *clievent.SendResult
@@ -160,7 +163,7 @@ type Sender interface {
 	GetOrCreate(ctx context.Context, key string, o sessionview.AgentOpts) (Session, sessionview.SessionStatus, error)
 	Send(ctx context.Context, key string, s Session, text string, img []clievent.Attachment, spec SendSpec, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 	// AfterTurn broadcasts the session's post-turn state; it runs once per
-	// turn that reached Send.
+	// turn whose Send returned, even if delivery then panicked.
 	AfterTurn(key string)
 	// Interrupt aborts the in-flight turn (ModeInterrupt's first follow-up).
 	Interrupt(key string) sessionview.InterruptOutcome
