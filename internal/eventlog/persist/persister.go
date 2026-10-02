@@ -111,6 +111,10 @@ type Persister struct {
 	// no removal in flight.
 	dropping map[string]*dropState
 
+	// failing holds the keys whose write path is currently failing, for the
+	// warning throttle in failure.go. Run-goroutine only.
+	failing map[string]*failureState
+
 	// fs is the filesystem classification captured at startup; never
 	// mutated after NewPersister returns.
 	fs FSDetection
@@ -220,6 +224,7 @@ func NewPersister(opts Options) (*Persister, error) {
 		closeCh:  make(chan struct{}),
 		writers:  make(map[string]*perKeyWriter),
 		dropping: make(map[string]*dropState),
+		failing:  make(map[string]*failureState),
 		fs:       DetectFS(opts.Dir),
 	}
 	if !p.fs.Supported {

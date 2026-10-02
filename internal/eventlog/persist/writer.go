@@ -24,6 +24,7 @@ func (p *Persister) dropInMemoryLocked(key string) {
 		}
 		delete(p.writers, key)
 	}
+	delete(p.failing, key)
 }
 
 // removeKeyFiles unlinks the log + idx for stem. Runs on a goroutine
@@ -157,6 +158,15 @@ type perKeyWriter struct {
 	dirty        bool
 	firstDirtyAt time.Time
 	lastActivity time.Time
+
+	// poisoned marks a writer whose files can no longer be written by
+	// retrying: logBuf has latched a write error, or an idx append failed
+	// part-way and a retry would append after a torn entry. The run
+	// goroutine retires it (failure.go) instead of flushing it again.
+	poisoned bool
+	// flushErr carries a flush result from a parallelFsync worker back to
+	// the run goroutine; settled and cleared right after the fan-out.
+	flushErr error
 }
 
 // flush writes pending idx entries with strict log→idx ordering, fsyncs
@@ -167,9 +177,10 @@ func (w *perKeyWriter) flush(p *Persister) error {
 	}
 	// Phase 1: drain bufio, then fsync the log fd. Both must complete before
 	// any idx write touches disk (recovery.go: idx must never run ahead of
-	// log). On failure dirty stays true so the next tick retries; the bufio
-	// Flush error surfaces the original stashed Write failure.
+	// log). A bufio Flush error is latched — every retry returns it — so the
+	// writer is poisoned rather than left dirty for the next tick.
 	if err := w.logBuf.Flush(); err != nil {
+		w.poisoned = true
 		return fmt.Errorf("flush log buffer: %w", err)
 	}
 	if err := w.logFile.Sync(); err != nil {
@@ -195,6 +206,9 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		// contract), so the aliasing is safe. If it ever retains `entries`,
 		// the stride<=1 path must copy here.
 		if err := w.idxWriter.AppendBatch(kept); err != nil {
+			// A short write leaves a torn entry at the idx tail and a retry
+			// would append after it, misaligning every later entry.
+			w.poisoned = true
 			return fmt.Errorf("append idx batch: %w", err)
 		}
 		idxAppended = true

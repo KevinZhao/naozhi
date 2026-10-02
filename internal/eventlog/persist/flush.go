@@ -35,14 +35,19 @@ func (p *Persister) flushAllLocked() error {
 	// is recorded under p.scratch.allErrMu (a field to avoid a heap escape).
 	var firstErr error
 	p.parallelFsync(dirtyKeys, dirtyWs, func(k string, w *perKeyWriter) {
-		if err := w.flush(p); err != nil {
+		w.flushErr = w.flush(p)
+		if w.flushErr != nil {
 			p.scratch.allErrMu.Lock()
 			if firstErr == nil {
-				firstErr = fmt.Errorf("flush %s: %w", k, err)
+				firstErr = fmt.Errorf("flush %s: %w", k, w.flushErr)
 			}
 			p.scratch.allErrMu.Unlock()
 		}
 	})
+	for i, w := range dirtyWs {
+		p.settleFlush(dirtyKeys[i], w, "flush", w.flushErr)
+		w.flushErr = nil
+	}
 	// Drop writer pointers so closed writers are not pinned until the next Flush.
 	clear(dirtyWs)
 	return firstErr
@@ -102,12 +107,13 @@ func (p *Persister) tickFlush() {
 	}
 	p.scratch.tickKeys = keys
 	p.scratch.tickWs = ws
-	p.parallelFsync(keys, ws, func(k string, w *perKeyWriter) {
-		if err := w.flush(p); err != nil {
-			slog.Warn("event log persist: debounced flush failed",
-				"key", k, "err", err)
-		}
+	p.parallelFsync(keys, ws, func(_ string, w *perKeyWriter) {
+		w.flushErr = w.flush(p)
 	})
+	for i, w := range ws {
+		p.settleFlush(keys[i], w, "debounced flush", w.flushErr)
+		w.flushErr = nil
+	}
 	// Drop writer pointers so closed writers are not pinned until the next tick.
 	clear(ws)
 }
