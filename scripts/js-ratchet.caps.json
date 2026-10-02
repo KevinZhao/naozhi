@@ -2,13 +2,7 @@
   "maxFnLines": {
     "default": 120,
     "exempt": [
-      "cron_drawer.js",
-      "cron_view.js",
-      "dashboard.js",
-      "discovery.js",
-      "file_refs.js",
-      "split_view.js",
-      "tuning.js"
+      "dashboard.js"
     ]
   },
   "lines": {

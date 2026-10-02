@@ -86,7 +86,7 @@ func TestDashboardJS_SidebarAutoRestoreWired(t *testing.T) {
 	if !strings.Contains(body, "if (splitDock.anyDrawerOpen()) return;") {
 		t.Error("restoreSidebarAfterDrawer must bail via splitDock.anyDrawerOpen while a drawer is still open — only the last close restores")
 	}
-	if !strings.Contains(js, "return { anyDrawerOpen, bringToFront, enter, exit };") {
+	if !strings.Contains(js, "const splitDock = { anyDrawerOpen, bringToFront, enter, exit };") {
 		t.Error("split-view block must hand its anyDrawerOpen to splitDock for the sidebar-restore guard")
 	}
 

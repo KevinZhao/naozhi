@@ -1328,9 +1328,6 @@ function ensureCronRunningTick() {
 // selectors (e2e/dashboard.test.js never asserts inner structure). The new
 // visual class is `cj-row`.
 function cronJobCardHtml(j) {
-  const nextAbs = j.next_run ? formatAbsTime(j.next_run) : '';
-  const lastAbs = j.last_run_at ? formatAbsTime(j.last_run_at) : '';
-  const agoStr = j.last_run_at ? formatAgoColloquial(j.last_run_at) : '';
   const titleStr = (j.title || '').trim() || firstNonEmptyLine(j.prompt || '', 60);
   const hasTitle = !!titleStr;
   // Placeholder string preserved verbatim (未设置 prompt（点右侧 edit 按钮
@@ -1339,7 +1336,6 @@ function cronJobCardHtml(j) {
   // full phrasing is exposed via the title attribute / menu → edit.
   const emptyPromptHint = '未设置 prompt（点右侧 edit 按钮配置）';
   const displayTitle = hasTitle ? titleStr : '未设置 prompt';
-  const human = humanizeCron(j.schedule);
 
   const isPaused = !!j.paused;
   const isError = !!j.last_error && !isPaused;
@@ -1353,72 +1349,10 @@ function cronJobCardHtml(j) {
   if (isRunning) rowClasses.push('is-running');
   if (isActive) rowClasses.push('is-active');
 
-  // When-column: running → "运行中 Xs"（实时计时）; paused → "已暂停"; else colloquial relative time.
-  // P0 cron-run-history (RFC §8.1) — running takes precedence over paused
-  // (a TriggerNow on a paused job is rejected backend-side, so this just
-  // reflects the actual scheduled / manual run).
-  let whenLabel = '';
-  let whenImminent = false;
-  if (isRunning) {
-    whenLabel = formatRunningElapsed(j.current_run.started_at);
-  } else if (isPaused) {
-    whenLabel = '已暂停';
-  } else if (j.next_run) {
-    const w = formatWhenColloquial(j.next_run);
-    whenLabel = w.label;
-    whenImminent = w.imminent;
-  }
-  const whenTitle = isRunning
-    ? ' title="run_id ' + escAttr(j.current_run.run_id || '') + (j.current_run.phase ? ' — phase ' + escAttr(j.current_run.phase) : '') + '"'
-    : (nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '');
-  const whenClasses = 'cj-when' +
-    (whenImminent ? ' imminent' : '') +
-    (isPaused && !isRunning ? ' paused' : '') +
-    (isRunning ? ' running' : '');
-  const whenCol = whenLabel
-    ? '<div class="' + whenClasses + '"' + whenTitle + '>' + esc(whenLabel) + '</div>'
-    : '<div class="cj-when"></div>';
-
+  const when = cronJobWhen(j, isRunning, isPaused);
   // P2 cron-run-history (RFC §8.1 / §8.4) — 成功率小徽章 + recent_runs hover tooltip。
-  // 仅当 stats.total > 0 时渲染（新建 / 从未跑过的 job 没数据，徽章空白会显得噪声）。
-  // 三档配色：100%=绿（数字徽章）、80-99%=中性、<80%=红警告。
-  // Hover 出 5 个状态气泡（最旧→最新），CSS 用纯 :hover 触发 .cj-stats-pop 显隐。
   const statsBadge = cronStatsBadgeHtml(j);
-
-  // Sub-row: clickable schedule chip (→ edit modal) + selective icons + optional
-  // last-run chip. Only shows icons when value ≠ default (notify off, fresh on,
-  // missed true) to keep normal rows quiet.
-  // schedule chip — accessible. role=button + tabindex=0 + Enter/Space
-  // handler so a keyboard user can open the edit modal focused at the
-  // schedule field without mousing.
-  const scheduleChip = '<span class="cj-schedule" role="button" tabindex="0"' +
-    ' data-action="cron-edit" data-action-keydown="cron-edit"' +
-    ' title="点击修改时间">' + esc(human + cronTimezoneSuffix()) + '</span>';
-  let iconGlyphs = '';
-  // ☁️ placement 徽标（RFC §7.2）：第三个正交标识，排最前；
-  // last_error_class 提供 terminal 着色（transport 红+⚠）。
-  iconGlyphs += cronPlacementBadgeHtml(j.placement || '', j.last_error_class || '');
-  if (j.notify === false) {
-    iconGlyphs += '<span class="cj-icon notify-off" title="IM 通知已关闭">&#128277;</span>';
-  }
-  if (j.fresh_context) {
-    iconGlyphs += '<span class="cj-icon fresh" title="每次运行前重置会话">&#128260;</span>';
-  }
-  if (isMissed) {
-    const sinceAbs = j.missed_since ? formatAbsTime(j.missed_since) : '';
-    const tip = sinceAbs ? '上次应跑于 ' + sinceAbs + '；进程可能刚重启或休眠过' : '已错过至少一次调度';
-    iconGlyphs += '<span class="cj-icon missed" title="' + escAttr(tip) + '">&#9888;</span>';
-  }
-  const lastRunChip = agoStr
-    ? '<span class="cj-ago"' + (lastAbs ? ' title="last run: ' + escAttr(lastAbs) + '"' : '') + '>上次 ' + esc(agoStr) + '</span>'
-    : '';
-  // whenMobile surfaces the when-column content inline in the sub-row on
-  // narrow viewports where the dedicated .cj-when column is hidden via
-  // CSS. Includes the paused label so mobile users see state.
-  const whenMobile = whenLabel
-    ? '<span class="cj-when-inline' + (whenImminent ? ' imminent' : '') + (isPaused ? ' paused' : '') + '">' + esc(whenLabel) + '</span>'
-    : '';
-  const subRow = '<div class="cj-sub">' + scheduleChip + iconGlyphs + lastRunChip + whenMobile + '</div>';
+  const subRow = cronJobSubRowHtml(j, when, isPaused, isMissed);
 
   // Error strip: inline one-line summary for non-paused rows with last_error.
   const errorStrip = isError
@@ -1448,11 +1382,76 @@ function cronJobCardHtml(j) {
       '<div class="cj-title' + (hasTitle ? '' : ' placeholder') + '" title="' + escAttr(titleStr || emptyPromptHint) + '">' + esc(displayTitle) + '</div>' +
       subRow +
     '</div>' +
-    whenCol +
+    when.col +
     statsBadge +
     '<div class="cj-actions">' + runBtn + menuBtn + '</div>' +
     errorStrip +
   '</div>';
+}
+
+// cronJobWhen is a row's when-column: running → "运行中 Xs"（实时计时）;
+// paused → "已暂停"; else colloquial relative time. Running takes precedence
+// over paused (P0 cron-run-history, RFC §8.1): a TriggerNow on a paused job is
+// rejected backend-side, so a run on a paused row is a real one.
+function cronJobWhen(j, isRunning, isPaused) {
+  const nextAbs = j.next_run ? formatAbsTime(j.next_run) : '';
+  let label = '';
+  let imminent = false;
+  if (isRunning) {
+    label = formatRunningElapsed(j.current_run.started_at);
+  } else if (isPaused) {
+    label = '已暂停';
+  } else if (j.next_run) {
+    const w = formatWhenColloquial(j.next_run);
+    label = w.label;
+    imminent = w.imminent;
+  }
+  const title = isRunning
+    ? ' title="run_id ' + escAttr(j.current_run.run_id || '') + (j.current_run.phase ? ' — phase ' + escAttr(j.current_run.phase) : '') + '"'
+    : (nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '');
+  const classes = 'cj-when' +
+    (imminent ? ' imminent' : '') +
+    (isPaused && !isRunning ? ' paused' : '') +
+    (isRunning ? ' running' : '');
+  const col = label
+    ? '<div class="' + classes + '"' + title + '>' + esc(label) + '</div>'
+    : '<div class="cj-when"></div>';
+  return { label, imminent, col };
+}
+
+// cronJobSubRowHtml is the row's sub-row: the clickable schedule chip (→ edit
+// modal), icons only where a value differs from the default (notify off,
+// fresh on, missed), the last-run chip, and the when label for narrow
+// viewports, where CSS hides the .cj-when column.
+function cronJobSubRowHtml(j, when, isPaused, isMissed) {
+  const lastAbs = j.last_run_at ? formatAbsTime(j.last_run_at) : '';
+  const agoStr = j.last_run_at ? formatAgoColloquial(j.last_run_at) : '';
+  // role=button + tabindex=0 + Enter/Space handler so a keyboard user can
+  // open the edit modal focused at the schedule field without mousing.
+  const scheduleChip = '<span class="cj-schedule" role="button" tabindex="0"' +
+    ' data-action="cron-edit" data-action-keydown="cron-edit"' +
+    ' title="点击修改时间">' + esc(humanizeCron(j.schedule) + cronTimezoneSuffix()) + '</span>';
+  // ☁️ placement 徽标（RFC §7.2）：第三个正交标识，排最前；
+  // last_error_class 提供 terminal 着色（transport 红+⚠）。
+  let iconGlyphs = cronPlacementBadgeHtml(j.placement || '', j.last_error_class || '');
+  if (j.notify === false) {
+    iconGlyphs += '<span class="cj-icon notify-off" title="IM 通知已关闭">&#128277;</span>';
+  }
+  if (j.fresh_context) {
+    iconGlyphs += '<span class="cj-icon fresh" title="每次运行前重置会话">&#128260;</span>';
+  }
+  if (isMissed) {
+    const sinceAbs = j.missed_since ? formatAbsTime(j.missed_since) : '';
+    const tip = sinceAbs ? '上次应跑于 ' + sinceAbs + '；进程可能刚重启或休眠过' : '已错过至少一次调度';
+    iconGlyphs += '<span class="cj-icon missed" title="' + escAttr(tip) + '">&#9888;</span>';
+  }
+  const lastRunChip = agoStr
+    ? '<span class="cj-ago"' + (lastAbs ? ' title="last run: ' + escAttr(lastAbs) + '"' : '') + '>上次 ' + esc(agoStr) + '</span>'
+    : '';
+  const whenMobile = when.label
+    ? '<span class="cj-when-inline' + (when.imminent ? ' imminent' : '') + (isPaused ? ' paused' : '') + '">' + esc(when.label) + '</span>'
+    : '';
+  return '<div class="cj-sub">' + scheduleChip + iconGlyphs + lastRunChip + whenMobile + '</div>';
 }
 
 // cronStatsBadgeHtml — P2 cron-run-history (RFC §8.1 / §8.4) 列表卡片成功率徽章。
@@ -1729,62 +1728,44 @@ function clearCronSearch() {
 
 
 
-function renderCronPanel() {
-  // Guard against an async race: fetchCronJobs().then(renderCronPanel) and the
-  // WS run_ended handler fire after the user may have switched away from
-  // the cron view. Painting then would be wasted (the container is hidden) or
-  // could fight the active view. Only paint when cron is the active view.
-  // (Was `if (selectedKey) return` when cron borrowed #main; now cron has its
-  // own #cron-main container and is gated purely on activeView.)
-  if (ui.activeView !== 'cron') return;
-  const main = document.getElementById('cron-main');
-  if (!main) return;
-  // Shell-preserving repaint: when the cron panel is already mounted (user
-  // is just typing in the search box or toggling a chip), we only want to
-  // repaint the list + drawer. Rebuilding the shell would wipe the input
-  // value and steal focus. Detect by probing for the list host element.
-  if (document.getElementById('cron-list-items')) {
-    renderCronList();
-    renderCronDrawer();
-    return;
-  }
-  // cron-v2-polish §3.3: missed banner。Count 取自 cronJobs 本地缓存，
-  // 与 attention 计数同源。点击切到 attention filter，与 header cron-badge
-  // 的红点导航保持一致的"点进去看哪些 job 需要关注"语义。
+// cronMissedBannerHtml — cron-v2-polish §3.3: missed banner。Count 取自
+// cronJobs 本地缓存，与 attention 计数同源。点击切到 attention filter，与 header
+// cron-badge 的红点导航保持一致的"点进去看哪些 job 需要关注"语义。
+function cronMissedBannerHtml() {
   const missedCount = cronJobs.filter(j => j.missed).length;
-  const missedBanner = missedCount > 0
-    ? '<div class="cron-missed-banner" role="alert" data-action="cron-filter" data-status="attention" title="进程重启或休眠期间错过的调度不会自动补跑">' +
-        '<span class="cmb-icon">&#9888;</span>' +
-        '<span class="cmb-text">有 ' + missedCount + ' 个任务曾错过调度 — 进程重启或休眠空窗期未补跑。点此查看。</span>' +
-      '</div>'
-    : '';
-  const chipActive = s => cronFilterStatus === s ? ' active' : '';
-  const chipPressed = s => cronFilterStatus === s ? 'true' : 'false';
-  // Status summary chip for the title row. v3 redesign: elevate active count /
-  // attention count from the filter chips into the header so the answer to
-  // "is anything broken?" is visible before reading row labels.
-  //
-  // The two buckets are mutually exclusive — a paused / errored / missed job
-  // counts as "需关注" and is excluded from "运行中" so activeCount +
-  // attentionCount ≤ cronJobs.length always.
-  const attentionCount = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
+  if (missedCount === 0) return '';
+  return '<div class="cron-missed-banner" role="alert" data-action="cron-filter" data-status="attention" title="进程重启或休眠期间错过的调度不会自动补跑">' +
+      '<span class="cmb-icon">&#9888;</span>' +
+      '<span class="cmb-text">有 ' + missedCount + ' 个任务曾错过调度 — 进程重启或休眠空窗期未补跑。点此查看。</span>' +
+    '</div>';
+}
+
+// cronSummaryChipHtml is the title row's status summary. The two buckets are
+// mutually exclusive — a paused / errored / missed job counts as "需关注" and
+// is excluded from "运行中" — so the two counts never exceed cronJobs.length.
+// It stays hidden: a data-only fallback for tests that grep for
+// "运行中 N · 需关注 N"; the overview chip strip is the visible UI.
+function cronSummaryChipHtml(attentionCount) {
   const activeCount = cronJobs.filter(j => !j.paused && !j.last_error && !j.missed).length;
-  // Legacy summaryChip kept as data-only fallback for any test that greps for
-  // "运行中 N · 需关注 N"; v3 overview chip strip below is the visible UI.
   const summaryParts = [];
   if (activeCount > 0) summaryParts.push('运行中 ' + activeCount);
   if (attentionCount > 0) summaryParts.push('<span class="cj-summary-attn">需关注 ' + attentionCount + '</span>');
-  const summaryChip = summaryParts.length > 0
+  return summaryParts.length > 0
     ? '<span class="cj-summary" hidden>· ' + summaryParts.join(' · ') + '</span>'
     : '';
-  // Adaptive filter bar — search row only when cronJobs > 5 (ChatGPT-style
-  // compact mode: search adds noise at small scale). The status chips row
-  // additionally shows whenever something 需关注 exists (the rail badge says
-  // "需关注 N" — the panel must offer the matching 需关注 chip) or a non-default
-  // filter is active (the missed-banner sets 'attention'; without chips a
-  // ≤5-job install had no visible way back to 全部).
+}
+
+// cronFilterBarHtml is the adaptive filter bar. The search row shows only
+// when cronJobs > 5 (search adds noise at small scale). The status chips row
+// additionally shows whenever something 需关注 exists (the rail badge says
+// "需关注 N" — the panel must offer the matching 需关注 chip) or a non-default
+// filter is active (the missed-banner sets 'attention'; without chips a
+// ≤5-job install had no visible way back to 全部).
+function cronFilterBarHtml(attentionCount) {
   const showSearchRow = cronJobs.length > 5;
-  const showFilterBar = showSearchRow || attentionCount > 0 || cronFilterStatus !== 'all';
+  if (!showSearchRow && attentionCount === 0 && cronFilterStatus === 'all') return '';
+  const chipActive = s => cronFilterStatus === s ? ' active' : '';
+  const chipPressed = s => cronFilterStatus === s ? 'true' : 'false';
   // 单一 chip 模板：新增 需关注 chip 的同时不增加 inline onclick 字面量数
   // （CSP ratchet TestDashboardCSP_GeneratedHandlerSurfaceRatchet）。
   const statusChip = (status, label, extraCls) =>
@@ -1798,23 +1779,41 @@ function renderCronPanel() {
         '<button type="button" class="cron-search-clear" data-action="cron-search-clear" title="清空搜索" aria-label="清空搜索">&times;</button>' +
       '</div>'
     : '';
-  const filterBar = showFilterBar
-    ? '<div class="cron-filter-bar">' +
-        searchRow +
-        '<div class="cron-status-chips" role="group" aria-label="按状态筛选">' +
-          statusChip('all', '全部') +
-          statusChip('active', '运行中') +
-          attentionChip +
-          // cron-v2-polish §3.4 Increment D: 排序 select 放 chips 行末尾
-          '<select class="cron-sort-select" aria-label="排序方式" data-action-change="cron-sort">' +
-            '<option value="created_desc"' + (cronSortOrder === 'created_desc' ? ' selected' : '') + '>最新创建</option>' +
-            '<option value="next_asc"' + (cronSortOrder === 'next_asc' ? ' selected' : '') + '>接下来</option>' +
-            '<option value="last_desc"' + (cronSortOrder === 'last_desc' ? ' selected' : '') + '>最近运行</option>' +
-            '<option value="title_asc"' + (cronSortOrder === 'title_asc' ? ' selected' : '') + '>按名字</option>' +
-          '</select>' +
-        '</div>' +
-      '</div>'
-    : '';
+  return '<div class="cron-filter-bar">' +
+      searchRow +
+      '<div class="cron-status-chips" role="group" aria-label="按状态筛选">' +
+        statusChip('all', '全部') +
+        statusChip('active', '运行中') +
+        attentionChip +
+        // cron-v2-polish §3.4 Increment D: 排序 select 放 chips 行末尾
+        '<select class="cron-sort-select" aria-label="排序方式" data-action-change="cron-sort">' +
+          '<option value="created_desc"' + (cronSortOrder === 'created_desc' ? ' selected' : '') + '>最新创建</option>' +
+          '<option value="next_asc"' + (cronSortOrder === 'next_asc' ? ' selected' : '') + '>接下来</option>' +
+          '<option value="last_desc"' + (cronSortOrder === 'last_desc' ? ' selected' : '') + '>最近运行</option>' +
+          '<option value="title_asc"' + (cronSortOrder === 'title_asc' ? ' selected' : '') + '>按名字</option>' +
+        '</select>' +
+      '</div>' +
+    '</div>';
+}
+
+function renderCronPanel() {
+  // Guard against an async race: fetchCronJobs().then(renderCronPanel) and the
+  // WS run_ended handler fire after the user may have switched away from
+  // the cron view. Painting then would be wasted (the container is hidden) or
+  // could fight the active view. Only paint when cron is the active view.
+  if (ui.activeView !== 'cron') return;
+  const main = document.getElementById('cron-main');
+  if (!main) return;
+  // Shell-preserving repaint: when the cron panel is already mounted (user
+  // is just typing in the search box or toggling a chip), we only want to
+  // repaint the list + drawer. Rebuilding the shell would wipe the input
+  // value and steal focus. Detect by probing for the list host element.
+  if (document.getElementById('cron-list-items')) {
+    renderCronList();
+    renderCronDrawer();
+    return;
+  }
+  const attentionCount = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
   let html =
     '<div class="cron-detail">' +
       '<div class="cron-detail-body">' +
@@ -1822,24 +1821,20 @@ function renderCronPanel() {
           '<div class="cron-list-head">' +
             '<div class="cron-list-head-title">' +
               '<button class="btn-mobile-back" data-action="cron-mobile-back" title="返回会话列表" aria-label="返回会话列表">&#8592;</button>' +
-              '<h3>定时任务' + summaryChip + '</h3>' +
+              '<h3>定时任务' + cronSummaryChipHtml(attentionCount) + '</h3>' +
             '</div>' +
             '<button type="button" class="cron-new-btn" data-action="cron-new" aria-label="新建定时任务">' +
               '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
               ' 新建' +
             '</button>' +
           '</div>' +
-          filterBar +
-          missedBanner +
+          cronFilterBarHtml(attentionCount) +
+          cronMissedBannerHtml() +
           '<div id="cron-list-items"></div>' +
         '</div>' +
-        // cron-panel-consolidation RFC §4.1 / §4.2: drawer pane is always
-        // present in the DOM but only shown (`.is-open`) when
-        // cronDrawerState.jobId is non-null. Inline content is filled by
-        // renderCronDrawer below; the existing `#cron-timeline-panel`
-        // host lives inside the drawer, so cronTimelineHtml /
-        // cronTimelineLoadMore / cronTimelineRefreshHead all keep
-        // working unchanged.
+        // cron-panel-consolidation RFC §4.1 / §4.2: the drawer pane is always
+        // in the DOM but only shown (`.is-open`) when cronDrawerState.jobId is
+        // non-null; renderCronDrawer below fills it.
         '<aside class="cron-detail-pane" id="cron-detail-pane" role="region" aria-label="任务详情"></aside>' +
       '</div>' +
     '</div>';

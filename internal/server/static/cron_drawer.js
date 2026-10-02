@@ -159,6 +159,71 @@ function syncCronDrawerHeaderHeight(host) {
   host._cronDrawerHeaderObs = obs;
 }
 
+// cronDrawerActionsHtml is the drawer's action row.
+// Round 2 R-4 disable matrix (RFC §4.3.1):
+//   normal      → "立即执行" (enabled, primary)
+//   paused      → "立即执行" (disabled, "请先恢复")
+//   running     → "运行中…"  (disabled + pulse, "请等待结束")
+//   just-triggered (≤ 1s)   → "触发中…"  (disabled + spinner)
+//   just-triggered (1-3 s)  → "已派发 ✓" (disabled, success)
+//   just-triggered (3-10 s) → "已派发 ✓" (disabled, quiet hold)
+// running takes precedence over just-triggered so a real WS-confirmed
+// run-state always wins over the optimistic local lock.
+function cronDrawerActionsHtml(j, id, isPaused) {
+  const trig = deps.cronTriggerButtonState(j);
+  const pauseBtn = isPaused
+    ? '<button type="button" class="cda-btn" data-action="cron-resume" data-id="' + escAttr(id) + '" title="恢复任务调度">\u25B6 恢复</button>'
+    : '<button type="button" class="cda-btn" data-action="cron-pause" data-id="' + escAttr(id) + '" title="暂停后调度跳过">\u23F8 暂停</button>';
+  return '<nav class="cron-drawer-actions" aria-label="任务操作">' +
+    '<button type="button" class="' + trig.cls + '"' +
+      (trig.disabled ? ' disabled aria-disabled="true"' : '') +
+      ' data-action="cron-run-now" data-id="' + escAttr(id) + '"' +
+      ' title="' + escAttr(trig.tooltip) + '">' + esc(trig.label) + '</button>' +
+    pauseBtn +
+    // P3 §5: ✎ 编辑按钮已移除——spec 卡可点击进编辑 modal。
+    '<button type="button" class="cda-btn danger" data-action="cron-delete" data-id="' + escAttr(id) + '" title="删除任务及其历史">\uD83D\uDDD1 删除</button>' +
+  '</nav>';
+}
+
+// cronDrawerRunningHtml is the high-contrast running banner that replaces the
+// spec sections while a run is in flight (cron-dashboard-redesign P1 §4.3),
+// so the live elapsed clock becomes the focal point.
+function cronDrawerRunningHtml(cr, id) {
+  const elapsed = deps.formatRunningElapsed(cr.started_at);
+  const phase = cr.phase ? cronPhaseLabel(cr.phase) : '执行中…';
+  const triggerKind = cronTriggerLabel(cr.trigger);
+  const runShort = (cr.run_id || '').slice(0, 8);
+  const sessShort = (cr.session_id || '').slice(0, 8);
+  const sessChip = sessShort ? ' \u00B7 session ' + esc(sessShort) : '';
+  return '<section class="cron-drawer-running" role="status" aria-live="polite" data-job-id="' + escAttr(id) + '">' +
+    '<div class="cdr-clock">' + esc(elapsed) + '</div>' +
+    '<div class="cdr-info">' +
+      '<div class="cdr-state">正在执行 · ' + esc(phase) + '</div>' +
+      '<div class="cdr-detail">' +
+        (triggerKind ? '触发 ' + esc(triggerKind) + ' · ' : '') +
+        'run ' + esc(runShort) + esc(sessChip) +
+      '</div>' +
+    '</div>' +
+  '</section>';
+}
+
+// cronDrawerLiveHtml is the 实时输出 container (cron-live RFC §4.1), shown
+// while the job runs or while cronLive still holds this run's events, so the
+// operator can replay the stream after the run ends. deps.repaintCronLive /
+// appendEventsToContainer fill it.
+function cronDrawerLiveHtml(id, isRunning) {
+  const hasLiveEvents = cronLive.jobId === id && cronLive.events && cronLive.events.length > 0;
+  if (!isRunning && !hasLiveEvents) return '';
+  return '<section class="cron-drawer-live" data-job-id="' + escAttr(id) + '">' +
+    '<header class="cdl-header">' +
+      '<h3 class="cdl-title">实时输出</h3>' +
+      '<span class="cdl-status" id="cron-live-status" aria-live="polite"></span>' +
+    '</header>' +
+    '<div class="cdl-truncated" id="cron-live-truncated" hidden></div>' +
+    '<div class="cdl-events" id="cron-live-events" data-job-id="' + escAttr(id) + '"></div>' +
+  '</section>';
+}
+
 // cronDrawerHtml builds the per-job drawer body. Returns an HTML string from
 // the input job + cron_live.js's cronLive state (cron-live RFC §4.1: live
 // section visibility depends on whether cronLive holds events for this
@@ -169,17 +234,10 @@ function cronDrawerHtml(j) {
   const titleStr = (j.title || '').trim() || deps.firstNonEmptyLine(j.prompt || '', 60) || '未命名任务';
   const isPaused = !!j.paused;
   const isRunning = !!(j.current_run && j.current_run.started_at);
-  // schedule / workdir / prompt now live inside cronDrawerSpecHtml(j); they
-  // are consumed off `j` directly, no top-level locals needed here.
 
-  // Header — only title + close. cron-dashboard-redesign P3 §6: schedule +
-  // workdir chips moved into the spec sections below ("什么时候" / "在哪里")
-  // so each piece of definition has a single canonical surface and the
-  // header stays light on mobile (≤480px viewports gain ~40px above the
-  // fold). The schedule chip stays around as an inline-styled `cj-schedule`
-  // span so the tests grepping that class still self-locate even though
-  // it's no longer in the header row. tabindex="-1" on cdh-title remains
-  // so openCronDetail can move focus there for screen readers.
+  // Header — only title + close; schedule and workdir live in the spec
+  // sections (cron-dashboard-redesign P3 §6). tabindex="-1" on cdh-title lets
+  // openCronDetail move focus there for screen readers.
   const headerHtml = '<header class="cron-drawer-header">' +
     '<div class="cdh-row1">' +
       '<h2 class="cdh-title" tabindex="-1" title="' + escAttr(titleStr) + '">' + esc(titleStr) + '</h2>' +
@@ -189,101 +247,19 @@ function cronDrawerHtml(j) {
     '</div>' +
   '</header>';
 
-  // cron-dashboard-redesign P3 §3 — task spec sections. Three cards
-  // (做什么 / 什么时候 / 在哪里) + 其他 (compact). Each section is a
-  // read-mostly view; clicking the section opens the existing edit modal,
-  // mirroring the schedule-chip's "click to edit" pattern. Suppressed
-  // when the job is currently running (the running banner takes over the
-  // top of the drawer for the duration of the in-flight run).
+  // cron-dashboard-redesign P3 §3 — task spec sections (做什么 / 什么时候 /
+  // 在哪里 / 其他); clicking one opens the edit modal. The running banner
+  // replaces them, and the cockpit, while a run is in flight.
   const specHtml = isRunning ? '' : cronDrawerSpecHtml(j);
-
-  // cron-dashboard-redesign P1 §4.3 — KPI cockpit replaces the v2 prompt
-  // block + meta grid. Four headline numbers (next run / success rate /
-  // avg duration / last result) answer operators' first three questions
-  // without scrolling. When the job is currently running the cockpit
-  // collapses into the running banner (currentHtml below), so we suppress
-  // it here in the running branch.
   const cockpitHtml = isRunning ? '' : cronDrawerCockpitHtml(j);
 
-  // Prompt + meta now live in a collapsible <details> so the cockpit
-  // owns the fold above. Defaults to closed; the prompt preview line in
-  // <summary> still reveals the first line at a glance.
-  // Prompt fold + notify/fresh-context meta block were removed per UX
-  // feedback: operators rarely re-read the prompt body inline (the 编辑
-  // button already opens the full edit modal which has the textarea).
-  // Keeping an empty <details class="cron-drawer-summary"> marker so the
-  // cron-panel-consolidation contract test (which greps for this opening
-  // tag) and the existing CSS rules don't regress.
+  // An empty <details class="cron-drawer-summary"> marker: the
+  // cron-panel-consolidation contract test and existing CSS rules key off it.
   const summaryHtml = '<details class="cron-drawer-summary" hidden></details>';
 
-  // Action row.
-  // Round 2 R-4 disable matrix (RFC §4.3.1):
-  //   normal      → "立即执行" (enabled, primary)
-  //   paused      → "立即执行" (disabled, "请先恢复")
-  //   running     → "运行中…"  (disabled + pulse, "请等待结束")
-  //   just-triggered (≤ 1s)   → "触发中…"  (disabled + spinner)
-  //   just-triggered (1-3 s)  → "已派发 ✓" (disabled, success)
-  //   just-triggered (3-10 s) → "已派发 ✓" (disabled, quiet hold)
-  // running takes precedence over just-triggered so a real WS-confirmed
-  // run-state always wins over the optimistic local lock.
-  const trig = deps.cronTriggerButtonState(j);
-  const triggerDisabled = trig.disabled;
-  const triggerLabel = trig.label;
-  const triggerTooltip = trig.tooltip;
-  const triggerCls = trig.cls;
-  const pauseBtn = isPaused
-    ? '<button type="button" class="cda-btn" data-action="cron-resume" data-id="' + escAttr(id) + '" title="恢复任务调度">\u25B6 恢复</button>'
-    : '<button type="button" class="cda-btn" data-action="cron-pause" data-id="' + escAttr(id) + '" title="暂停后调度跳过">\u23F8 暂停</button>';
-  const actionsHtml = '<nav class="cron-drawer-actions" aria-label="任务操作">' +
-    '<button type="button" class="' + triggerCls + '"' +
-      (triggerDisabled ? ' disabled aria-disabled="true"' : '') +
-      ' data-action="cron-run-now" data-id="' + escAttr(id) + '"' +
-      ' title="' + escAttr(triggerTooltip) + '">' + esc(triggerLabel) + '</button>' +
-    pauseBtn +
-    // P3 §5: ✎ 编辑按钮已移除——spec 卡可点击进编辑 modal。
-    '<button type="button" class="cda-btn danger" data-action="cron-delete" data-id="' + escAttr(id) + '" title="删除任务及其历史">\uD83D\uDDD1 删除</button>' +
-  '</nav>';
-
-  // Current execution (conditional). cron-dashboard-redesign P1 §4.3 —
-  // when a run is in flight, the cockpit grid is replaced by a high-
-  // contrast running banner so the live elapsed clock + abort affordance
-  // become the focal point.
-  let currentHtml = '';
-  if (isRunning) {
-    const cr = j.current_run;
-    const elapsed = deps.formatRunningElapsed(cr.started_at);
-    const phase = cr.phase ? cronPhaseLabel(cr.phase) : '执行中…';
-    const triggerKind = cronTriggerLabel(cr.trigger);
-    const runShort = (cr.run_id || '').slice(0, 8);
-    const sessShort = (cr.session_id || '').slice(0, 8);
-    const sessChip = sessShort ? ' \u00B7 session ' + esc(sessShort) : '';
-    currentHtml = '<section class="cron-drawer-running" role="status" aria-live="polite" data-job-id="' + escAttr(id) + '">' +
-      '<div class="cdr-clock">' + esc(elapsed) + '</div>' +
-      '<div class="cdr-info">' +
-        '<div class="cdr-state">正在执行 · ' + esc(phase) + '</div>' +
-        '<div class="cdr-detail">' +
-          (triggerKind ? '触发 ' + esc(triggerKind) + ' · ' : '') +
-          'run ' + esc(runShort) + esc(sessChip) +
-        '</div>' +
-      '</div>' +
-    '</section>';
-  }
-
-  // cron-live RFC §4.1: 实时输出容器。任务跑中或本轮已积累事件时显示，
-  // 让 run 结束后操作员还能回看本轮事件流。container 元素由 cronLive
-  // 状态驱动，deps.repaintCronLive / appendEventsToContainer 写入。
-  const hasLiveEvents = cronLive.jobId === id && cronLive.events && cronLive.events.length > 0;
-  let liveHtml = '';
-  if (isRunning || hasLiveEvents) {
-    liveHtml = '<section class="cron-drawer-live" data-job-id="' + escAttr(id) + '">' +
-      '<header class="cdl-header">' +
-        '<h3 class="cdl-title">实时输出</h3>' +
-        '<span class="cdl-status" id="cron-live-status" aria-live="polite"></span>' +
-      '</header>' +
-      '<div class="cdl-truncated" id="cron-live-truncated" hidden></div>' +
-      '<div class="cdl-events" id="cron-live-events" data-job-id="' + escAttr(id) + '"></div>' +
-    '</section>';
-  }
+  const actionsHtml = cronDrawerActionsHtml(j, id, isPaused);
+  const currentHtml = isRunning ? cronDrawerRunningHtml(j.current_run, id) : '';
+  const liveHtml = cronDrawerLiveHtml(id, isRunning);
 
   // History section (timeline reuses cron-timeline-panel host id).
   const historyHtml = '<section class="cron-drawer-history">' +
@@ -292,11 +268,6 @@ function cronDrawerHtml(j) {
 
   // cron-dashboard-redesign P3 §3 — final order.
   //   header → (running banner | spec sections) → live → history → sticky actions
-  // The cockpit (cockpitHtml) returns '' but stays in the chain so removing
-  // it later is a one-line edit. The legacy <details cron-drawer-summary>
-  // marker is rendered by `summaryHtml` so contract tests still grep it.
-  // Spec sections are suppressed in the running branch — the banner is the
-  // focal point during a live run, definition can wait.
   return headerHtml + cockpitHtml + currentHtml + liveHtml + specHtml + summaryHtml + historyHtml +
     actionsHtml.replace('<nav class="cron-drawer-actions"', '<nav class="cron-drawer-actions is-sticky"');
 }

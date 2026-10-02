@@ -325,113 +325,68 @@ function removeSidebarCard(key) {
   if (card) card.remove();
 }
 
-// dismissSession removes a session from the sidebar. The × button deletes
-// immediately with no confirmation — per operator preference, the friction
-// isn't worth it. Accidental deletes are recoverable by re-entering the
-// prompt (pending) or reopening the CLI (remote/discovered).
-async function dismissSession(key, node, opts) {
-  node = node || 'local';
-  delete perSession.drafts[key];
-  delete perSession.scrollPos[deps.sid(key, node)];
-  // Drop the cached git state so a later key reuse can't inherit this
-  // session's branch chip before its own fetch resolves.
-  delete deps.gitStateCache[deps.sid(key, node)];
-  // deps.sessionBackends is normally consumed on first sendMessage. A dismiss
-  // before any send leaves the entry behind; clear it defensively so a
-  // subsequent re-create with the same key (unlikely but possible if the
-  // ms timestamp collides on rapid double-create) doesn't inherit a
-  // stale backend pick.
-  delete perSession.backends[key];
-  delete perSession.accessProfiles[key];
+// clearMainIfSelected empties the main panel when the dismissed session is
+// the one on screen.
+function clearMainIfSelected(key) {
+  if (selection.key !== key) return;
+  selection.key = null;
+  if (sessionStream.subscribedKey === key) sessionStream.unsubscribe();
+  showMainEmpty();
+}
 
-  // cron-panel-consolidation RFC §4.2: defensive guard. Cron stubs are
-  // filtered server-side so this branch should never run in production —
-  // but if a future server bug ever leaks a cron key through, we must
-  // NOT call DELETE /api/sessions (the scheduler still owns the stub).
-  if (isCronSessionKey(key)) {
-    // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side
-    // and should never appear in the sidebar at all — this branch only
-    // executes if a future server bug leaks one through. Guard-rail behaviour:
-    // remove the rogue card from the DOM but DO NOT call DELETE /api/sessions
-    // (the cron scheduler still owns the stub) and DO NOT mutate any cron
-    // panel state. Single source of truth for cron-job lifecycle remains
-    // the 定时任务 panel (cronDelete → DELETE /api/cron).
-    if (selection.key === key) {
-      selection.key = null;
-      if (sessionStream.subscribedKey === key) sessionStream.unsubscribe();
-      document.getElementById('main').innerHTML = deps.mainEmptyHtml();
-      deps.wireQuickAskInput();
+function showMainEmpty() {
+  document.getElementById('main').innerHTML = deps.mainEmptyHtml();
+  deps.wireQuickAskInput();
+}
+
+function resyncSidebar() {
+  sessionList.lastVersion = 0;
+  deps.debouncedFetchSessions();
+}
+
+// dismissDiscovered kills an external (discovered) CLI via
+// /api/discovered/close; its card goes once the server confirms.
+async function dismissDiscovered(key, node) {
+  const d = deps.findDiscovered(deps.parseDiscoveredPid(key), node);
+  if (!d) { showToast('未找到该外部会话', 'warning'); return; }
+  try {
+    const headers = {'Content-Type': 'application/json'};
+    const token = deps.getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    try {
+      await fetchJSON(NZ_CONTRACT.API.discovered_close, {
+        timeoutMs: 10000,
+        method: 'POST', headers,
+        body: JSON.stringify({pid: d.pid, session_id: d.session_id || '', cwd: d.cwd || '', proc_start_time: d.proc_start_time || 0, node: node || ''})
+      });
+    } catch (err) {
+      if (err && err.status) deps.showAPIError('关闭外部会话', err.status, err.message || '');
+      else deps.showNetworkError('关闭外部会话', err);
+      return;
+    }
+    deps.dropDiscovered(d.pid, d.node);
+    if (selection.pendingDiscovered && deps.sameDiscovered(selection.pendingDiscovered, d.pid, d.node)) {
+      selection.pendingDiscovered = null;
+      deps.stopPreviewPolling();
+      showMainEmpty();
     }
     removeSidebarCard(key);
-    sessionList.lastVersion = 0;
-    deps.debouncedFetchSessions();
-    return;
-  }
+    resyncSidebar();
+  } catch (e) { deps.showNetworkError('关闭外部会话', e); }
+}
 
-  // If it's a pending (never-sent) session, just remove from localStorage
-  if (perSession.workspaces[key] !== undefined) {
-    deps.removePendingSession(key);
-    delete sessionList.sessionsData[deps.sid(key, node)];
-    if (selection.key === key) {
-      selection.key = null;
-      document.getElementById('main').innerHTML = deps.mainEmptyHtml();
-      deps.wireQuickAskInput();
-    }
-    sessionList.lastVersion = 0;
-    deps.debouncedFetchSessions();
-    return;
-  }
-
-  // Discovered session — kill external process via /api/discovered/close
-  if (deps.isDiscoveredKey(key)) {
-    const d = deps.findDiscovered(deps.parseDiscoveredPid(key), node);
-    if (!d) { showToast('未找到该外部会话', 'warning'); return; }
-    try {
-      const headers = {'Content-Type': 'application/json'};
-      const token = deps.getToken();
-      if (token) headers['Authorization'] = 'Bearer ' + token;
-      try {
-        await fetchJSON(NZ_CONTRACT.API.discovered_close, {
-          timeoutMs: 10000,
-          method: 'POST', headers,
-          body: JSON.stringify({pid: d.pid, session_id: d.session_id || '', cwd: d.cwd || '', proc_start_time: d.proc_start_time || 0, node: node || ''})
-        });
-      } catch (err) {
-        if (err && err.status) deps.showAPIError('关闭外部会话', err.status, err.message || '');
-        else deps.showNetworkError('关闭外部会话', err);
-        return;
-      }
-      deps.dropDiscovered(d.pid, d.node);
-      if (selection.pendingDiscovered && deps.sameDiscovered(selection.pendingDiscovered, d.pid, d.node)) {
-        selection.pendingDiscovered = null;
-        deps.stopPreviewPolling();
-        document.getElementById('main').innerHTML = deps.mainEmptyHtml();
-        deps.wireQuickAskInput();
-      }
-      removeSidebarCard(key);
-      sessionList.lastVersion = 0;
-      deps.debouncedFetchSessions();
-    } catch (e) { deps.showNetworkError('关闭外部会话', e); }
-    return;
-  }
-
-  // Optimistic delete: the card vanishes immediately rather than freezing
-  // for the server's teardown round-trip. The backend's DELETE /api/sessions
-  // now unregisters the session synchronously and runs the slow teardown
-  // (proc.Close up to 8s + event-log/attachment cleanup) in a detached
-  // goroutine (RemoveAsync), so 200 means "gone from the list" and arrives
-  // fast — but we don't even wait for it to update the UI.
+// dismissManaged deletes optimistically: the card vanishes immediately rather
+// than freezing for the server's teardown round-trip. DELETE /api/sessions
+// unregisters synchronously and tears down in a detached goroutine
+// (RemoveAsync), so 200 means "gone from the list" — but the UI does not even
+// wait for it.
+function dismissManaged(key, node) {
   const skey = deps.sid(key, node);
   // Mark dismissed so an in-flight poll / sessions_update event can't
   // resurrect the card before DELETE confirms (cleared in finally below).
   sessionList.optimisticDeleteKeys.add(skey);
   delete sessionList.sessionsData[skey];
-  if (selection.key === key) {
-    selection.key = null;
-    if (sessionStream.subscribedKey === key) sessionStream.unsubscribe();
-    document.getElementById('main').innerHTML = deps.mainEmptyHtml();
-    deps.wireQuickAskInput();
-  }
+  clearMainIfSelected(key);
   removeSidebarCard(key);
 
   const headers = {'Content-Type': 'application/json'};
@@ -457,9 +412,54 @@ async function dismissSession(key, node, opts) {
       // comes back (operator must re-select it — we intentionally don't
       // restore the cleared main panel to avoid masking a failed delete).
       sessionList.optimisticDeleteKeys.delete(skey);
-      sessionList.lastVersion = 0;
-      deps.debouncedFetchSessions();
+      resyncSidebar();
     });
+}
+
+// dismissSession removes a session from the sidebar. The × button deletes
+// immediately with no confirmation — per operator preference, the friction
+// isn't worth it. Accidental deletes are recoverable by re-entering the
+// prompt (pending) or reopening the CLI (remote/discovered).
+async function dismissSession(key, node, opts) {
+  node = node || 'local';
+  delete perSession.drafts[key];
+  delete perSession.scrollPos[deps.sid(key, node)];
+  // Drop the cached git state so a later key reuse can't inherit this
+  // session's branch chip before its own fetch resolves.
+  delete deps.gitStateCache[deps.sid(key, node)];
+  // perSession.backends is normally consumed on first sendMessage; a dismiss
+  // before any send would leave a stale backend pick for a re-created key.
+  delete perSession.backends[key];
+  delete perSession.accessProfiles[key];
+
+  // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side,
+  // so this branch only runs if a server bug leaks one into the sidebar.
+  // Remove the rogue card but DO NOT call DELETE /api/sessions (the cron
+  // scheduler still owns the stub) and DO NOT touch cron panel state.
+  if (isCronSessionKey(key)) {
+    clearMainIfSelected(key);
+    removeSidebarCard(key);
+    resyncSidebar();
+    return;
+  }
+
+  // If it's a pending (never-sent) session, just remove from localStorage
+  if (perSession.workspaces[key] !== undefined) {
+    deps.removePendingSession(key);
+    delete sessionList.sessionsData[deps.sid(key, node)];
+    if (selection.key === key) {
+      selection.key = null;
+      showMainEmpty();
+    }
+    resyncSidebar();
+    return;
+  }
+
+  if (deps.isDiscoveredKey(key)) {
+    await dismissDiscovered(key, node);
+    return;
+  }
+  dismissManaged(key, node);
 }
 
 // Operator-facing rename flow. Prompts for a new display label; empty input

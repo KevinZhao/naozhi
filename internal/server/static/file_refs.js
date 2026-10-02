@@ -492,16 +492,106 @@ function triggerFileDownload(wrapEl) {
   a.remove();
 }
 
+// renderPreviewByMime renders the types that never go through the preview
+// JSON (SVG, images, PDF, HTML) straight from the raw / render endpoints, and
+// reports whether it did.
+function renderPreviewByMime(project, node, path, body, mime) {
+  // SVG must be checked BEFORE the generic image/ branch: image/svg+xml starts
+  // with "image/" but cannot flow through <img src=...mode=raw>. The server
+  // refuses inline SVG via raw (project_files.go: serveRaw rejects svg+xml)
+  // because SVG can embed <script> and on* handlers that execute same-origin
+  // on top-level navigation. It renders in the sandboxed iframe instead, the
+  // same way HTML does.
+  if (mime.startsWith('image/svg+xml')) {
+    renderSandboxedBlob(project, node, path, body, 'image/svg+xml');
+    return true;
+  }
+  if (mime.startsWith('image/')) {
+    body.innerHTML = '';
+    const img = document.createElement('img');
+    img.src = fileApiUrl(project, node, path, 'raw');
+    img.alt = path;
+    img.loading = 'lazy';
+    body.appendChild(img);
+    return true;
+  }
+  if (mime === 'application/pdf') {
+    body.innerHTML = '';
+    const frame = document.createElement('iframe');
+    // Defense-in-depth: serveRaw forces application/pdf to an attachment
+    // download so this never inline-renders today. sandbox="" guards the
+    // case where Content-Disposition is stripped (proxy) or serveRaw later
+    // renders PDF inline — zero capabilities, no plugin/script execution,
+    // while the native PDF viewer still works.
+    frame.setAttribute('sandbox', '');
+    frame.src = fileApiUrl(project, node, path, 'raw');
+    frame.title = path;
+    body.appendChild(frame);
+    return true;
+  }
+  // HTML / XHTML: render in a sandboxed iframe pointed at the server's inline
+  // render form; renderSandboxedBlob below lists the layers. Opened as a
+  // top-level page the same URL would run workspace HTML same-origin to the
+  // dashboard (stored XSS via the CLI's Write tool), which is why the server
+  // answers that form only inside an iframe.
+  if (mime.startsWith('text/html') || mime.startsWith('application/xhtml')) {
+    renderSandboxedBlob(project, node, path, body, 'text/html');
+    return true;
+  }
+  return false;
+}
+
+// renderPreviewText fills the drawer from the preview endpoint's JSON: a
+// placeholder for binary content, rich rendering for markdown / tex, and a
+// line-numbered listing for everything else.
+function renderPreviewText(project, node, path, body, data, line) {
+  if (data.binary) {
+    const binMime = String(data.mime || '');
+    // HTML / XHTML / SVG land in `binary:true` by design (R176-SEC-H3:
+    // active-content bytes never flow through the preview JSON content
+    // field). The server detects the MIME from the bytes, so the iframe
+    // parses the right document type.
+    if (binMime.startsWith('text/html') || binMime.startsWith('application/xhtml') || binMime.startsWith('image/svg+xml')) {
+      renderPreviewByMime(project, node, path, body, binMime);
+      return;
+    }
+    body.innerHTML = '<div class="fv-binary">Binary file — click <strong>download</strong> to save.<span class="fv-mime">' + esc(binMime) + '</span></div>';
+    return;
+  }
+  const parts = [];
+  if (data.truncated) {
+    parts.push('<div class="fv-truncated">file truncated at ' + formatFileSize(1024 * 1024) + ' (total ' + formatFileSize(data.size || 0) + ') — download for full content</div>');
+  }
+  const lang = inferLang(path, data.mime || '');
+  // Route through deps.renderRich — same renderer chat bubbles use so behaviour
+  // (math, mermaid, tables, lists, file-refs) stays consistent across
+  // surfaces. Source-code files keep the line-number gutter layout.
+  if (lang === 'markdown' || lang === 'tex') {
+    const mode = lang === 'tex' ? 'tex' : 'markdown';
+    parts.push('<div class="fv-rich">' + deps.renderRich(data.content || '', { mode: mode }) + '</div>');
+  } else {
+    const raw = data.content || '';
+    const lines = raw.split('\n');
+    const gutter = lines.map((_, i) => String(i + 1)).join('\n');
+    parts.push('<pre class="fv-lined"><span class="fv-gutter" aria-hidden="true">' + gutter + '</span><code class="fv-code">' + esc(raw) + '</code></pre>');
+  }
+  body.innerHTML = parts.join('');
+  // Flush the KaTeX / Mermaid pending slots deps.renderRich produced above.
+  deps.runPendingAsync();
+  // Mirror chat-side file-ref chip injection so paths inside the preview
+  // body also get [preview]/[download] affordances.
+  body.querySelectorAll('.fv-rich').forEach(scanEventForFileRefs);
+  if (line) scrollToPreviewLine(body, parseInt(line, 10));
+}
+
 async function openFilePreview(wrapEl) {
   const drawer = document.getElementById('fv-drawer');
   const body = document.getElementById('fv-body');
   const title = document.getElementById('fv-title');
   const meta = document.getElementById('fv-meta');
   if (!drawer || !body || !title || !meta) return;
-  // Warm-start async renderers the moment the drawer opens. deps.loadKatex /
-  // deps.loadMermaid are idempotent no-ops once ready; kicking them off in
-  // parallel with the preview fetch eliminates first-open pending flicker
-  // on .md / .tex files that contain math or diagrams.
+  // Warm-start async renderers the moment the drawer opens (idempotent once
+  // ready), in parallel with the preview fetch.
   deps.loadKatex();
   deps.loadMermaid();
   const project = wrapEl.dataset.project;
@@ -529,50 +619,7 @@ async function openFilePreview(wrapEl) {
   title.textContent = headerPath + (line ? ':' + line : '');
   meta.textContent = (mime ? mime + ' \u00b7 ' : '') + formatFileSize(size);
   body.innerHTML = '<div class="fv-loading">loading\u2026</div>';
-
-  // SVG must be checked BEFORE the generic image/ branch: image/svg+xml starts
-  // with "image/" but cannot flow through <img src=...mode=raw>. The server
-  // refuses inline SVG via raw (project_files.go: serveRaw rejects svg+xml)
-  // because SVG can embed <script> and on* handlers that execute same-origin
-  // on top-level navigation. It renders in the sandboxed iframe instead, the
-  // same way HTML does.
-  if (mime.startsWith('image/svg+xml')) {
-    renderSandboxedBlob(project, node, path, body, 'image/svg+xml');
-    return;
-  }
-  // Image / PDF: use raw endpoint directly, no JSON round trip.
-  if (mime.startsWith('image/')) {
-    body.innerHTML = '';
-    const img = document.createElement('img');
-    img.src = fileApiUrl(project, node, path, 'raw');
-    img.alt = path;
-    img.loading = 'lazy';
-    body.appendChild(img);
-    return;
-  }
-  if (mime === 'application/pdf') {
-    body.innerHTML = '';
-    const frame = document.createElement('iframe');
-    // Defense-in-depth: serveRaw forces application/pdf to an attachment
-    // download so this never inline-renders today. sandbox="" guards the
-    // case where Content-Disposition is stripped (proxy) or serveRaw later
-    // renders PDF inline — zero capabilities, no plugin/script execution,
-    // while the native PDF viewer still works.
-    frame.setAttribute('sandbox', '');
-    frame.src = fileApiUrl(project, node, path, 'raw');
-    frame.title = path;
-    body.appendChild(frame);
-    return;
-  }
-  // HTML / XHTML: render in a sandboxed iframe pointed at the server's inline
-  // render form; renderSandboxedBlob below lists the layers. Opened as a
-  // top-level page the same URL would run workspace HTML same-origin to the
-  // dashboard (stored XSS via the CLI's Write tool), which is why the server
-  // answers that form only inside an iframe.
-  if (mime.startsWith('text/html') || mime.startsWith('application/xhtml')) {
-    renderSandboxedBlob(project, node, path, body, 'text/html');
-    return;
-  }
+  if (renderPreviewByMime(project, node, path, body, mime)) return;
 
   // Text / unknown: go through preview endpoint which returns structured JSON.
   try {
@@ -584,54 +631,7 @@ async function openFilePreview(wrapEl) {
       body.innerHTML = '<div class="fv-error">preview failed (' + r.status + ')</div>';
       return;
     }
-    const data = await r.json();
-    if (data.binary) {
-      const binMime = String(data.mime || '');
-      // HTML / XHTML / SVG land in `binary:true` by design (R176-SEC-H3:
-      // active-content bytes never flow through the preview JSON content
-      // field). Render them in the sandboxed iframe rather than showing a
-      // "please download" placeholder; the server detects the MIME from the
-      // bytes, so the iframe parses the right document type.
-      if (binMime.startsWith('text/html') || binMime.startsWith('application/xhtml')) {
-        renderSandboxedBlob(project, node, path, body, 'text/html');
-        return;
-      }
-      if (binMime.startsWith('image/svg+xml')) {
-        renderSandboxedBlob(project, node, path, body, 'image/svg+xml');
-        return;
-      }
-      body.innerHTML = '<div class="fv-binary">Binary file — click <strong>download</strong> to save.<span class="fv-mime">' + esc(binMime) + '</span></div>';
-      return;
-    }
-    const parts = [];
-    if (data.truncated) {
-      parts.push('<div class="fv-truncated">file truncated at ' + formatFileSize(1024 * 1024) + ' (total ' + formatFileSize(data.size || 0) + ') — download for full content</div>');
-    }
-    const lang = inferLang(path, data.mime || '');
-    // Route through deps.renderRich — same renderer chat bubbles use so behaviour
-    // (math, mermaid, tables, lists, file-refs) stays consistent across
-    // surfaces. Source-code files keep the line-number gutter layout.
-    if (lang === 'markdown' || lang === 'tex') {
-      const mode = lang === 'tex' ? 'tex' : 'markdown';
-      parts.push('<div class="fv-rich">' + deps.renderRich(data.content || '', { mode: mode }) + '</div>');
-    } else {
-      const raw = data.content || '';
-      const lines = raw.split('\n');
-      const gutter = lines.map((_, i) => String(i + 1)).join('\n');
-      parts.push('<pre class="fv-lined"><span class="fv-gutter" aria-hidden="true">' + gutter + '</span><code class="fv-code">' + esc(raw) + '</code></pre>');
-    }
-    body.innerHTML = parts.join('');
-    // Flush KaTeX / Mermaid pending slots produced by deps.renderRich above.
-    // Without this call, first-open of a .md file with math would leave
-    // `<span class="katex-pending">` placeholders on screen until a chat
-    // render happened to fire from another code path.
-    deps.runPendingAsync();
-    // Mirror chat-side file-ref chip injection so paths inside the preview
-    // body also get [preview]/[download] affordances.
-    {
-      body.querySelectorAll('.fv-rich').forEach(scanEventForFileRefs);
-    }
-    if (line) scrollToPreviewLine(body, parseInt(line, 10));
+    renderPreviewText(project, node, path, body, await r.json(), line);
   } catch (e) {
     body.innerHTML = '<div class="fv-error">' + esc(String(e && e.message || e)) + '</div>';
   }

@@ -188,23 +188,33 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 	if strings.Contains(fn, "++transcript.previewGen") {
 		t.Error("previewDiscovered must not bump transcript.previewGen itself — the bump belongs to stopPreviewPolling()")
 	}
-	if strings.Count(fn, "if (gen !== transcript.previewGen) return;") < 3 {
-		t.Error("previewDiscovered must check the generation after the awaited fetch (ok + error paths) AND inside the poll tick")
+	if strings.Count(fn, "if (gen !== transcript.previewGen) return;") < 2 {
+		t.Error("previewDiscovered must check the generation after the awaited fetch (ok + error paths)")
 	}
-	idxSet := strings.Index(fn, "timers.preview = setInterval(")
+	// The poll tick lives in startPreviewPolling, armed with the caller's gen:
+	// it re-checks before the fetch (a tick queued before clearInterval) and
+	// after it (a newer preview superseded this one mid-fetch).
+	poll := jsFuncBody(t, js, "startPreviewPolling")
+	if !strings.Contains(poll, "timers.preview = setInterval(") {
+		t.Fatal("startPreviewPolling must arm timers.preview = setInterval(")
+	}
+	if strings.Count(poll, "if (gen !== transcript.previewGen) return;") < 2 {
+		t.Error("the preview poll tick must check the generation before and after its fetch")
+	}
+	idxSet := strings.Index(fn, "startPreviewPolling(gen, url);")
 	if idxSet < 0 {
-		t.Fatal("timers.preview = setInterval( not found")
+		t.Fatal("previewDiscovered must arm the poll with startPreviewPolling(gen, url)")
 	}
 	idxGen := strings.Index(fn, "if (gen !== transcript.previewGen) return;\n    const el = document.getElementById('events-scroll');")
 	if idxGen < 0 || idxGen > idxSet {
-		t.Fatal("generation check must precede the #events-scroll lookup and timers.preview = setInterval(")
+		t.Fatal("generation check must precede the #events-scroll lookup and startPreviewPolling(gen, url)")
 	}
 	// Between the post-fetch generation check and arming the interval there
 	// must be NO stopPreviewPolling() call: it bumps _previewGen and would
 	// invalidate this very call (its tick would bail on the first fire). The
 	// prologue call already cleared any older generation's interval.
 	if strings.Contains(fn[idxGen:idxSet], "deps.stopPreviewPolling();") {
-		t.Error("previewDiscovered must not call stopPreviewPolling() between the gen check and setInterval — it would invalidate its own generation")
+		t.Error("previewDiscovered must not call stopPreviewPolling() between the gen check and startPreviewPolling — it would invalidate its own generation")
 	}
 }
 
