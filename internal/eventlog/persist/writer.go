@@ -219,12 +219,9 @@ func (w *perKeyWriter) flush(p *Persister) error {
 	// is discarded and the stride cursor advanced: AppendBatch only reached
 	// the page cache, and clearing the retry buffer on a transient Sync error
 	// stranded idx bytes that recovery later used to truncate durable log (#1816).
-	// The failed writer is poisoned rather than retried: the entries are
-	// already appended, so a retry would append them a second time, and a
-	// later Recover could cut the log back to a stale duplicate. Retiring
-	// lets Recover reconcile against what the files actually hold.
 	if idxAppended {
 		if err := w.idxWriter.Sync(); err != nil {
+			// Not retried: a retry would append the same entries a second time.
 			w.poisoned = true
 			return fmt.Errorf("sync idx: %w", err)
 		}
