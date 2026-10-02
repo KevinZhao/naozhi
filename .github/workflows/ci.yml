@@ -57,7 +57,7 @@ jobs:
   # The branch-protection required check. It passes only when every shard
   # passed, so protection keeps naming one stable job however the shards move.
   test:
-    needs: [test-shard, ratchet-raises]
+    needs: [test-shard, ratchet-raises, lint-js]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -67,6 +67,11 @@ jobs:
       # Skipped on pushes to master, where there is no base to compare.
       - name: No unapproved ratchet raise
         run: test "${{ needs.ratchet-raises.result }}" = success -o "${{ needs.ratchet-raises.result }}" = skipped
+      # S19-0 (#3025): lint-js is already a required context in its own
+      # right (D3), but test also needing it means the one check branch
+      # protection has always named cannot go green while the JS gate is red.
+      - name: lint-js passed
+        run: test "${{ needs.lint-js.result }}" = success
 
   # A pull request that loosens a ratchet — a baseline constant, a JS metric,
   # a dependency edge, a lint exemption — needs a ledger line citing an issue

@@ -36,6 +36,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATIC_DIR = path.join(ROOT, 'internal', 'server', 'static');
 const BASELINE_PATH = path.join(ROOT, 'scripts', 'js-ratchet.baseline.json');
+const CAPS_PATH = path.join(ROOT, 'scripts', 'js-ratchet.caps.json');
 
 // sw.js is a 27-line service worker with its own scope; not worth ratcheting.
 const EXCLUDE = new Set(['sw.js']);
@@ -96,6 +97,19 @@ function configureDeps(program) {
   return n;
 }
 
+// importsOf lists the relative module specifiers a file imports (its own
+// import graph edges). An absolute or bare specifier would be a dependency
+// outside static/, which is out of scope for the cycle check.
+function importsOf(program) {
+  const out = [];
+  for (const st of program.body) {
+    if (st.type !== 'ImportDeclaration') continue;
+    const spec = st.source.value;
+    if (spec.startsWith('./') || spec.startsWith('../')) out.push(path.basename(spec));
+  }
+  return out;
+}
+
 export function measureSource(src, espree = loadEspree()) {
   const lines = src.split('\n');
   const total = lines.length - (src.endsWith('\n') ? 1 : 0);
@@ -116,15 +130,145 @@ function measure(file, espree) {
   return measureSource(fs.readFileSync(path.join(STATIC_DIR, file), 'utf8'), espree);
 }
 
-function snapshot() {
-  const espree = loadEspree();
-  const out = {};
-  const files = fs
+function staticFiles() {
+  return fs
     .readdirSync(STATIC_DIR)
     .filter((f) => f.endsWith('.js') && !EXCLUDE.has(f))
     .sort();
-  for (const f of files) out[f] = measure(f, espree);
+}
+
+function snapshot() {
+  const espree = loadEspree();
+  const out = {};
+  for (const f of staticFiles()) out[f] = measure(f, espree);
   return out;
+}
+
+// importGraph maps every static/*.js file to the files it imports (D-S19:
+// the module graph the no-module-side-effects / cycle checks both read).
+export function importGraph(espree = loadEspree()) {
+  const graph = {};
+  for (const f of staticFiles()) {
+    const src = fs.readFileSync(path.join(STATIC_DIR, f), 'utf8');
+    const program = espree.parse(src, { ecmaVersion: 'latest', sourceType: 'module', loc: true });
+    graph[f] = importsOf(program);
+  }
+  return graph;
+}
+
+// sccs returns every strongly-connected component of size > 1 in graph
+// (Tarjan): a cycle, however many files long the loop runs through.
+export function sccs(graph) {
+  let index = 0;
+  const stack = [];
+  const onStack = new Set();
+  const indices = new Map();
+  const low = new Map();
+  const out = [];
+  const connect = (v) => {
+    indices.set(v, index);
+    low.set(v, index);
+    index++;
+    stack.push(v);
+    onStack.add(v);
+    for (const w of graph[v] ?? []) {
+      if (!graph[w]) continue; // not a tracked file (excluded or external)
+      if (!indices.has(w)) {
+        connect(w);
+        low.set(v, Math.min(low.get(v), low.get(w)));
+      } else if (onStack.has(w)) {
+        low.set(v, Math.min(low.get(v), indices.get(w)));
+      }
+    }
+    if (low.get(v) === indices.get(v)) {
+      const comp = [];
+      let w;
+      do {
+        w = stack.pop();
+        onStack.delete(w);
+        comp.push(w);
+      } while (w !== v);
+      out.push(comp);
+    }
+  };
+  for (const v of Object.keys(graph)) if (!indices.has(v)) connect(v);
+  return out.filter((c) => c.length > 1);
+}
+
+// loadCaps reads scripts/js-ratchet.caps.json and validates its shape. Every
+// failure here is fail-closed: --check (and --write) must not silently run
+// with a broken or missing cap.
+export function loadCaps(capsPath = CAPS_PATH) {
+  if (!fs.existsSync(capsPath)) {
+    return { errors: [`missing ${path.relative(ROOT, capsPath)}; the js-ratchet caps must exist`] };
+  }
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(capsPath, 'utf8'));
+  } catch (e) {
+    return { errors: [`${path.relative(ROOT, capsPath)} is not valid JSON: ${e.message}`] };
+  }
+  const errors = [];
+  for (const key of ['maxFnLines', 'lines', 'sideEffectLegacy', 'cycleLegacy']) {
+    if (!(key in raw)) errors.push(`caps is missing the top-level key "${key}"`);
+  }
+  if (errors.length) return { errors };
+  if (typeof raw.maxFnLines !== 'object' || raw.maxFnLines === null || Array.isArray(raw.maxFnLines)) {
+    errors.push('caps.maxFnLines must be an object');
+  } else {
+    if (typeof raw.maxFnLines.default !== 'number') errors.push('caps.maxFnLines.default must be a number');
+    if (!Array.isArray(raw.maxFnLines.exempt)) errors.push('caps.maxFnLines.exempt must be an array');
+  }
+  if (typeof raw.lines !== 'object' || raw.lines === null || Array.isArray(raw.lines)) {
+    errors.push('caps.lines must be an object');
+  }
+  if (!Array.isArray(raw.sideEffectLegacy)) errors.push('caps.sideEffectLegacy must be an array');
+  if (!Array.isArray(raw.cycleLegacy)) errors.push('caps.cycleLegacy must be an array');
+  if (errors.length) return { errors };
+  return { caps: raw };
+}
+
+// capProblems checks the caps against the current measurement and the
+// import graph: a cap pointing at a file that does not exist, an exempt or
+// legacy entry that is already clean (must be moved out), a file over its
+// cap (whether brand new or long-standing), and an import cycle not fully
+// accounted for in cycleLegacy.
+export function capProblems(current, graph, caps) {
+  const problems = [];
+  const exists = (f) => f in current;
+  for (const f of caps.maxFnLines.exempt) {
+    if (!exists(f)) { problems.push(`caps.maxFnLines.exempt: ${f} does not exist in static/`); continue; }
+    if (current[f].maxFnLines <= caps.maxFnLines.default) {
+      problems.push(`caps.maxFnLines.exempt: ${f} is already <= ${caps.maxFnLines.default} (${current[f].maxFnLines}) — move it out of exempt`);
+    }
+  }
+  for (const f of Object.keys(caps.lines)) {
+    if (!exists(f)) { problems.push(`caps.lines: ${f} does not exist in static/`); continue; }
+    if (current[f].lines > caps.lines[f]) {
+      problems.push(`caps.lines: ${f} is ${current[f].lines} lines, over the cap of ${caps.lines[f]}`);
+    }
+  }
+  const exempt = new Set(caps.maxFnLines.exempt);
+  for (const [f, m] of Object.entries(current)) {
+    const limit = exempt.has(f) ? Infinity : caps.maxFnLines.default;
+    if (m.maxFnLines > limit) {
+      problems.push(`${f}: maxFnLines ${m.maxFnLines} exceeds the cap of ${limit}${exempt.has(f) ? '' : ' (not in caps.maxFnLines.exempt)'}`);
+    }
+  }
+  for (const f of caps.sideEffectLegacy) {
+    if (!exists(f)) problems.push(`caps.sideEffectLegacy: ${f} does not exist in static/`);
+  }
+  const cyclic = new Set(sccs(graph).flat());
+  for (const f of caps.cycleLegacy) {
+    if (!exists(f)) { problems.push(`caps.cycleLegacy: ${f} does not exist in static/`); continue; }
+    if (!cyclic.has(f)) problems.push(`caps.cycleLegacy: ${f} is no longer part of an import cycle — move it out`);
+  }
+  for (const f of cyclic) {
+    if (!caps.cycleLegacy.includes(f)) {
+      problems.push(`${f} is part of an import cycle (${[...sccs(graph).find((c) => c.includes(f))].join(' <-> ')}) and not in caps.cycleLegacy`);
+    }
+  }
+  return problems;
 }
 
 // compare returns every way current is out of step with baseline.
@@ -158,7 +302,20 @@ export function compare(current, baseline) {
   return out;
 }
 
-function check(current) {
+// checkCaps loads and validates the caps file and, if that succeeds, checks
+// it against current and the import graph. Shared by --check and --write:
+// both read caps, and neither may run against a broken one.
+function checkCaps(current, graph) {
+  const { caps, errors } = loadCaps();
+  if (errors) return errors;
+  return capProblems(current, graph, caps);
+}
+
+function check(current, graph) {
+  const capErrors = checkCaps(current, graph);
+  if (capErrors.length) {
+    for (const p of capErrors) console.error(`js-ratchet caps: ${p}`);
+  }
   if (!fs.existsSync(BASELINE_PATH)) {
     console.error(`missing baseline ${path.relative(ROOT, BASELINE_PATH)}; run --write first`);
     return 1;
@@ -167,8 +324,8 @@ function check(current) {
   if (problems.length) {
     for (const p of problems) console.error(p);
     console.error(`js-ratchet: ${problems.length} metric(s) out of step with the baseline`);
-    return 1;
   }
+  if (capErrors.length || problems.length) return 1;
   console.log('js-ratchet: OK');
   return 0;
 }
@@ -185,7 +342,15 @@ export function raisedMetrics(current, baseline) {
   return out;
 }
 
-function write(current) {
+// write never touches caps.json (comment at the top of this file): a cap
+// problem here still fails the run, since --write reads the same caps and a
+// broken or over-cap one must not be baselined silently.
+function write(current, graph) {
+  const capErrors = checkCaps(current, graph);
+  if (capErrors.length) {
+    for (const p of capErrors) console.error(`js-ratchet caps: ${p}`);
+    return 1;
+  }
   if (fs.existsSync(BASELINE_PATH)) {
     const raised = raisedMetrics(current, JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8')));
     if (raised.length) {
@@ -203,9 +368,10 @@ function write(current) {
 // Run as a script; imported by the tests for measureSource.
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const current = snapshot();
+  const graph = importGraph();
   const mode = process.argv[2] ?? '--check';
-  if (mode === '--check') process.exit(check(current));
-  else if (mode === '--write') process.exit(write(current));
+  if (mode === '--check') process.exit(check(current, graph));
+  else if (mode === '--write') process.exit(write(current, graph));
   else {
     console.error(`unknown mode ${mode}; use --check | --write`);
     process.exit(2);

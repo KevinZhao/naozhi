@@ -6,13 +6,28 @@
 // fields at the use site. These rules close the two other routes that copy a
 // value instead of sharing it:
 //
-//   nz/configure-deps   configureX({ … }) may only inject functions and const
-//                       bindings. A let, an object field or a literal is
-//                       copied into the callee's deps table once and goes
-//                       stale when the owner reassigns it.
-//   nz/no-exported-let  an exported let is a second sharing mechanism (an ES
-//                       live binding importers can read but not write); export
-//                       a const state object or a function instead.
+//   nz/configure-deps          configureX({ … }) may only inject functions
+//                               and const bindings. A let, an object field or
+//                               a literal is copied into the callee's deps
+//                               table once and goes stale when the owner
+//                               reassigns it.
+//   nz/no-exported-let         an exported let is a second sharing mechanism
+//                               (an ES live binding importers can read but
+//                               not write); export a const state object or a
+//                               function instead.
+//   nz/no-module-side-effects  a module may declare state (functions,
+//                               classes, const bindings whose initialiser is
+//                               a pure expression) at load time, but may not
+//                               run anything — a module graph where "import"
+//                               means "run arbitrary code in this order" is
+//                               not one a reader can hold in their head.
+//                               wsm.on / onReady / onStateChange / onAuthFail
+//                               are the one standing exception (D2, #3024
+//                               R2): the WS dispatch table's registration
+//                               calls, whose own shape check-ws-receivers.mjs
+//                               owns. The caller passes the files this rule
+//                               should skip (scripts/js-ratchet.caps.json's
+//                               sideEffectLegacy — eslint.config.mjs reads it).
 //
 // Tests: node --test scripts/eslint-plugin-nz.test.mjs
 
@@ -131,10 +146,115 @@ const noExportedLet = {
   },
 };
 
+// isPureExpr reports whether evaluating node can only ever bind a name — no
+// DOM/network/global touch, no function call escaping the small whitelist
+// below. Deliberately recursive on object/array literals and new/Object.*
+// so `Object.freeze({ a: new Set([1]) })` is still pure.
+function isPureExpr(node) {
+  if (!node) return true;
+  switch (node.type) {
+    case 'Literal':
+    case 'Identifier':
+    case 'FunctionExpression':
+    case 'ArrowFunctionExpression':
+    case 'ClassExpression':
+      return true;
+    case 'TemplateLiteral':
+      return node.expressions.every(isPureExpr);
+    case 'ObjectExpression':
+      return node.properties.every((p) => (p.type === 'SpreadElement' ? isPureExpr(p.argument) : isPureExpr(p.value)));
+    case 'ArrayExpression':
+      return node.elements.every((e) => e === null || isPureExpr(e));
+    case 'UnaryExpression':
+      return isPureExpr(node.argument);
+    case 'BinaryExpression':
+    case 'LogicalExpression':
+      return isPureExpr(node.left) && isPureExpr(node.right);
+    case 'ConditionalExpression':
+      return isPureExpr(node.test) && isPureExpr(node.consequent) && isPureExpr(node.alternate);
+    case 'MemberExpression':
+      return isPureExpr(node.object);
+    case 'NewExpression':
+      return node.callee.type === 'Identifier' && /^(Set|Map|WeakMap|WeakSet|RegExp)$/.test(node.callee.name)
+        && node.arguments.every(isPureExpr);
+    case 'CallExpression':
+      return node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier'
+        && node.callee.object.name === 'Object' && node.callee.property.type === 'Identifier'
+        && /^(freeze|create|assign)$/.test(node.callee.property.name)
+        && node.arguments.every(isPureExpr);
+    default:
+      return false;
+  }
+}
+
+// isWsmRegistration reports the one standing exception: a top-level call
+// that registers a handler or lifecycle hook on the managed wsm object (D2).
+function isWsmRegistration(expr) {
+  if (expr.type !== 'CallExpression') return false;
+  const c = expr.callee;
+  return c.type === 'MemberExpression' && c.object.type === 'Identifier' && c.object.name === 'wsm'
+    && c.property.type === 'Identifier' && /^(on|onReady|onStateChange|onAuthFail)$/.test(c.property.name);
+}
+
+const noModuleSideEffects = {
+  meta: {
+    type: 'problem',
+    docs: { description: 'a module may declare state at load time but may not run anything (D-S19)' },
+    schema: [],
+    messages: {
+      sideEffect: 'top-level {{what}} runs code at import time; a module may only declare functions, classes, imports/exports, and const bindings whose initialiser is a pure expression (object/array/new Set|Map|RegExp/Object.freeze|create|assign).',
+    },
+  },
+  create(context) {
+    // checkOne reports st (a Program-level statement, or the declaration an
+    // `export` wraps — `export const y = init()` launders the same call
+    // through a declaration ExportNamedDeclaration otherwise waves through).
+    function checkOne(st) {
+      switch (st.type) {
+        case 'ImportDeclaration':
+        case 'FunctionDeclaration':
+        case 'ClassDeclaration':
+          return;
+        case 'VariableDeclaration': {
+          const bad = st.declarations.find((d) => d.init !== null && !isPureExpr(d.init));
+          if (bad) context.report({ node: bad.init, messageId: 'sideEffect', data: { what: `'${st.kind}' initialiser` } });
+          return;
+        }
+        case 'ExpressionStatement':
+          if (isWsmRegistration(st.expression)) return;
+          context.report({ node: st, messageId: 'sideEffect', data: { what: 'statement' } });
+          return;
+        default:
+          context.report({ node: st, messageId: 'sideEffect', data: { what: st.type.replace(/Statement$/, '').toLowerCase() || st.type } });
+      }
+    }
+    return {
+      Program(program) {
+        for (const st of program.body) {
+          switch (st.type) {
+            case 'ExportNamedDeclaration':
+              if (st.declaration) checkOne(st.declaration);
+              continue;
+            case 'ExportDefaultDeclaration':
+              if (/Function|Class/.test(st.declaration.type)) continue;
+              if (!isPureExpr(st.declaration)) context.report({ node: st.declaration, messageId: 'sideEffect', data: { what: 'default export' } });
+              continue;
+            case 'ExportAllDeclaration':
+              continue;
+            default:
+              checkOne(st);
+          }
+        }
+      },
+    };
+  },
+};
+
 export default {
   meta: { name: 'eslint-plugin-nz' },
   rules: {
     'configure-deps': configureDeps,
     'no-exported-let': noExportedLet,
+    'no-module-side-effects': noModuleSideEffects,
   },
 };

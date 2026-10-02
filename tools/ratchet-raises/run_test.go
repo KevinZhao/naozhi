@@ -53,6 +53,46 @@ func TestRun_EveryBaselineSourceIsRead(t *testing.T) {
 	}
 }
 
+// Creating scripts/js-ratchet.caps.json for the first time must not demand a
+// ledger entry for each of its initial exempt/legacy entries: they are
+// today's real violations being recorded, not new ones (#3025 S19-0).
+func TestRun_CreatingCapsIsNotARaise(t *testing.T) {
+	t.Parallel()
+	base := fakeTree{}
+	head := fakeTree{
+		jsCapsPath: `{"maxFnLines":{"default":120,"exempt":["a.js"]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`,
+	}
+	problems, rs, err := run(base, head, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs) != 0 {
+		t.Errorf("raises = %v, want none", rs)
+	}
+	if len(problems) != 0 {
+		t.Errorf("problems = %v, want none", problems)
+	}
+}
+
+// Once caps.json exists in base, a later addition to one of its lists is an
+// ordinary raise again.
+func TestRun_WideningCapsAfterItExistsIsARaise(t *testing.T) {
+	t.Parallel()
+	const existing = `{"maxFnLines":{"default":120,"exempt":["a.js"]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`
+	base := fakeTree{jsCapsPath: existing}
+	head := fakeTree{
+		jsCapsPath: `{"maxFnLines":{"default":120,"exempt":["a.js","b.js"]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`,
+	}
+	_, rs, err := run(base, head, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"js-caps:exempt:b.js"}
+	if got := gates(rs); !slices.Equal(got, want) {
+		t.Fatalf("raises = %v, want %v", got, want)
+	}
+}
+
 func TestGrepPaths(t *testing.T) {
 	t.Parallel()
 	got := grepPaths("origin/master:internal/a_test.go\n3f2e1d:tools/x/main.go\n")

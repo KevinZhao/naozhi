@@ -14,10 +14,17 @@ import (
 // metric is one ratchet value. A key that exists only in head is a raise
 // from zero when newIsRaise is set (a new coupling edge, a new exemption) and
 // a new ratchet otherwise (a new baseline constant, a new JS file whose lines
-// the TOTAL already counts).
+// the TOTAL already counts). A key that exists only in base — the baseline
+// lost the file that carried it, or the whole document — is a raise to -1
+// when goneIsRaise is set: deleting the ratchet silently un-does it (#3025
+// S19-0). anyChangeIsRaise raises on a value change in either direction, for
+// metrics whose value is not itself ordered (a sha-derived int for a golden
+// pin: a smaller number is not an improvement).
 type metric struct {
-	value      int64
-	newIsRaise bool
+	value            int64
+	newIsRaise       bool
+	goneIsRaise      bool
+	anyChangeIsRaise bool
 }
 
 type metrics map[string]metric
@@ -70,8 +77,80 @@ func jsRatchet(raw string, into metrics) error {
 			into["js-ratchet:"+file+"."+name] = metric{value: v}
 		}
 	}
+	// Deleting a file's metrics, or the whole document, must not silently
+	// erase the sum/max it fed (#2900 follow-up: the critique that found
+	// raises() only ever walked head's keys).
 	for k, v := range totals {
-		into["js-ratchet:"+k] = metric{value: v}
+		into["js-ratchet:"+k] = metric{value: v, goneIsRaise: true}
+	}
+	return nil
+}
+
+// jsCaps reads scripts/js-ratchet.caps.json: the fail-closed caps that sit
+// alongside js-ratchet.baseline.json (#3025 S19-0). maxFnLines.default and
+// lines.<file> are ratchet constants (goneIsRaise: deleting the cap must not
+// silently remove it). exempt / sideEffectLegacy / cycleLegacy are escape
+// hatches (newIsRaise: a new entry loosens the gate; dropping one — the file
+// got clean — is free, same as any other ratchet improvement).
+func jsCaps(raw string, into metrics) error {
+	if raw == "" {
+		return nil
+	}
+	var doc struct {
+		MaxFnLines struct {
+			Default *float64 `json:"default"`
+			Exempt  []string `json:"exempt"`
+		} `json:"maxFnLines"`
+		Lines            map[string]int64 `json:"lines"`
+		SideEffectLegacy []string         `json:"sideEffectLegacy"`
+		CycleLegacy      []string         `json:"cycleLegacy"`
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return fmt.Errorf("js-ratchet caps: %w", err)
+	}
+	if doc.MaxFnLines.Default != nil {
+		into["js-caps:maxFnLines.default"] = metric{value: int64(*doc.MaxFnLines.Default), goneIsRaise: true}
+	}
+	for _, f := range doc.MaxFnLines.Exempt {
+		into["js-caps:exempt:"+f] = metric{value: 1, newIsRaise: true}
+	}
+	for f, v := range doc.Lines {
+		into["js-caps:lines."+f] = metric{value: v, goneIsRaise: true}
+	}
+	for _, f := range doc.SideEffectLegacy {
+		into["js-caps:sideEffectLegacy:"+f] = metric{value: 1, newIsRaise: true}
+	}
+	for _, f := range doc.CycleLegacy {
+		into["js-caps:cycleLegacy:"+f] = metric{value: 1, newIsRaise: true}
+	}
+	return nil
+}
+
+// goldenPins reads test/e2e/golden/pins.json: a map from golden fixture file
+// to its sha256 (hex). Only the first 12 hex chars are kept, as an int64 —
+// enough entropy to make a collision between two genuinely different
+// renderings not worth engineering ratchet metrics around, and small enough
+// to fit the same int64 every other metric uses. Creating the file (base has
+// none of these keys) is not a raise — see run()'s bootstrap exception, which
+// this alone cannot implement (this function sees only one side at a time).
+func goldenPins(raw string, into metrics) error {
+	if raw == "" {
+		return nil
+	}
+	var doc map[string]string
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return fmt.Errorf("golden pins: %w", err)
+	}
+	for file, sha := range doc {
+		short := sha
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		v, err := strconv.ParseInt(short, 16, 64)
+		if err != nil {
+			return fmt.Errorf("golden pins: %s: bad sha %q: %w", file, sha, err)
+		}
+		into["golden:"+file] = metric{value: v, goneIsRaise: true, anyChangeIsRaise: true}
 	}
 	return nil
 }
@@ -153,17 +232,29 @@ type raise struct {
 	To   int64  `json:"to"`
 }
 
-// raises lists every value that went up between base and head, sorted by gate.
+// raises lists every value that went up between base and head, sorted by
+// gate. A key base held but head lost is a raise to -1 when base marked it
+// goneIsRaise; walking head alone would miss exactly that (#3025 S19-0).
 func raises(base, head metrics) []raise {
 	var out []raise
+	seen := make(map[string]bool, len(head))
 	for k, h := range head {
+		seen[k] = true
 		b, existed := base[k]
 		switch {
 		case !existed && h.newIsRaise:
 			out = append(out, raise{Gate: k, From: 0, To: h.value})
 		case existed && h.value > b.value:
 			out = append(out, raise{Gate: k, From: b.value, To: h.value})
+		case existed && h.value < b.value && (h.anyChangeIsRaise || b.anyChangeIsRaise):
+			out = append(out, raise{Gate: k, From: b.value, To: h.value})
 		}
+	}
+	for k, b := range base {
+		if seen[k] || !b.goneIsRaise {
+			continue
+		}
+		out = append(out, raise{Gate: k, From: b.value, To: -1})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Gate < out[j].Gate })
 	return out

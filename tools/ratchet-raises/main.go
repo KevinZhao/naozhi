@@ -19,7 +19,9 @@ import (
 
 const (
 	jsRatchetPath  = "scripts/js-ratchet.baseline.json"
+	jsCapsPath     = "scripts/js-ratchet.caps.json"
 	jsDepsPath     = "scripts/js-deps-baseline.json"
+	goldenPinsPath = "test/e2e/golden/pins.json"
 	exemptionsPath = "tools/lint-server-handlers/exemptions.yaml"
 	ledgerPath     = "scripts/ratchet-raises.jsonl"
 )
@@ -66,6 +68,18 @@ func run(base, head tree, labels labelSource) ([]string, []raise, error) {
 		return nil, nil, fmt.Errorf("head: %w", err)
 	}
 	rs := raises(bm, hm)
+	// Creating scripts/js-ratchet.caps.json establishes a new ratchet, not a
+	// raise: its first exempt/legacy/cycle entries are today's already-real
+	// violations, not ones this change introduces (#3025 S19-0's own PR —
+	// jsCaps parses one side at a time and cannot tell "first ever" from
+	// "incrementally added" by itself).
+	baseCaps, err := base.read(jsCapsPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if strings.TrimSpace(baseCaps) == "" {
+		rs = withoutPrefix(rs, "js-caps:")
+	}
 	bl, err := base.read(ledgerPath)
 	if err != nil {
 		return nil, nil, err
@@ -93,7 +107,8 @@ func collect(t tree) (metrics, error) {
 	}
 	goConsts(files, m)
 	for path, parse := range map[string]func(string, metrics) error{
-		jsRatchetPath: jsRatchet, jsDepsPath: jsDeps, exemptionsPath: exemptions,
+		jsRatchetPath: jsRatchet, jsCapsPath: jsCaps, jsDepsPath: jsDeps,
+		goldenPinsPath: goldenPins, exemptionsPath: exemptions,
 	} {
 		raw, err := t.read(path)
 		if err != nil {
@@ -104,6 +119,17 @@ func collect(t tree) (metrics, error) {
 		}
 	}
 	return m, nil
+}
+
+// withoutPrefix drops every raise whose gate starts with prefix.
+func withoutPrefix(rs []raise, prefix string) []raise {
+	out := rs[:0:0]
+	for _, r := range rs {
+		if !strings.HasPrefix(r.Gate, prefix) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // gitTree reads a committed revision. A path absent there reads as "".

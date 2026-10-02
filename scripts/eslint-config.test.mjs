@@ -12,10 +12,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import nz from './eslint-plugin-nz.mjs';
+import { loadCaps } from './js-ratchet.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATIC_DIR = path.join(ROOT, 'internal', 'server', 'static');
-const { ESLint } = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'))('eslint');
+const { ESLint, Linter } = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'))('eslint');
 
 // sw.js is a service worker with its own scope; contract.js is generated (and
 // ignored by eslint), though it is a module like the rest.
@@ -49,6 +51,41 @@ test('every dashboard script is a module with only the shared globals', async ()
   const configs = await effectiveConfigs(path.join(ROOT, 'eslint.config.mjs'));
   assert.ok(Object.keys(configs).length >= 25, `only ${Object.keys(configs).length} scripts found`);
   assert.deepEqual(problems(configs, shared), []);
+});
+
+// nz/no-module-side-effects applies to every file except sw.js, contract.js
+// (generated, parsed as a script) and caps.sideEffectLegacy (S19-0, #3025).
+// The legacy list may only shrink — a file that is already clean has to move
+// out, so this also actually lints every legacy file and requires it to
+// still be dirty, or the list has gone stale.
+test('nz/no-module-side-effects covers every file but the legacy list, which is still genuinely dirty', async () => {
+  const { caps, errors } = loadCaps();
+  assert.equal(errors, undefined, errors);
+  const legacy = new Set(caps.sideEffectLegacy);
+  const configs = await effectiveConfigs(path.join(ROOT, 'eslint.config.mjs'));
+  const enabledIn = (cfg) => {
+    const r = cfg?.rules?.['nz/no-module-side-effects'];
+    return Array.isArray(r) ? r[0] === 2 || r[0] === 'error' : r === 2 || r === 'error';
+  };
+  const problems = [];
+  for (const [f, cfg] of Object.entries(configs)) {
+    if (f === 'contract.js') continue; // generated, parsed as a script — see NOT_MODULES
+    const want = !legacy.has(f);
+    if (enabledIn(cfg) !== want) {
+      problems.push(`${f}: nz/no-module-side-effects enabled=${enabledIn(cfg)}, want ${want} (legacy=${legacy.has(f)})`);
+    }
+  }
+  const linter = new Linter();
+  for (const f of legacy) {
+    const src = fs.readFileSync(path.join(STATIC_DIR, f), 'utf8');
+    const messages = linter.verify(src, {
+      languageOptions: { ecmaVersion: 2022, sourceType: 'module' },
+      plugins: { nz },
+      rules: { 'nz/no-module-side-effects': 'error' },
+    });
+    if (messages.length === 0) problems.push(`${f}: in caps.sideEffectLegacy but clean — move it out`);
+  }
+  assert.deepEqual(problems, []);
 });
 
 test('problems names a script-mode file and an extra global', () => {

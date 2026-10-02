@@ -61,3 +61,42 @@ tester.run('no-exported-let', nz.rules['no-exported-let'], {
     { code: 'let { a, b: [c] } = {}; export { a, c };', errors: [{ messageId: 'exportedLet', data: { name: 'a', kind: 'let' } }, { messageId: 'exportedLet', data: { name: 'c', kind: 'let' } }] },
   ],
 });
+
+tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
+  valid: [
+    "import { a } from './x.js';",
+    "export { a } from './x.js';",
+    'export const o = {};',
+    'function f() {}',
+    'class C {}',
+    // Pure-expression initialisers, recursively.
+    "const RE = new RegExp('x' + 'y');",
+    'const s = new Set([1, 2]);',
+    'const frozen = Object.freeze({ a: new Set([1]), b: [1, 2] });',
+    'const created = Object.create(null);',
+    'const assigned = Object.assign({}, { a: 1 });',
+    'const n = 1 + 2;',
+    'const t = `a${1}b`;',
+    // D2: the WS dispatch table's registration calls are the one exception.
+    "wsm.on(NZ_CONTRACT.WS.history, (msg) => f(msg));",
+    'wsm.onReady(() => f());',
+    'wsm.onStateChange((s) => f(s));',
+    'wsm.onAuthFail((msg) => f(msg));',
+  ],
+  invalid: [
+    // A bare top-level call.
+    { code: 'f();', errors: [{ messageId: 'sideEffect' }] },
+    // Side effects laundered through a `const` initialiser.
+    { code: "const t = setInterval(() => {}, 1000);", errors: [{ messageId: 'sideEffect' }] },
+    { code: "const x = document.addEventListener('click', f);", errors: [{ messageId: 'sideEffect' }] },
+    // Top-level control flow.
+    { code: 'if (x) { f(); }', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'try { f(); } catch (e) {}', errors: [{ messageId: 'sideEffect' }] },
+    // A call laundered through an export.
+    { code: 'export const y = init();', errors: [{ messageId: 'sideEffect' }] },
+    // A call on a managed object other than wsm's own methods is not the D2
+    // exception.
+    { code: 'sessionStream.reset();', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'wsm.connect();', errors: [{ messageId: 'sideEffect' }] },
+  ],
+});
