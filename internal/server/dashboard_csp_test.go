@@ -505,7 +505,7 @@ func generatedOnclickBundle(t *testing.T) []string {
 // must be rejected — add a data-action dispatch entry instead. (Pure file
 // splits that move handlers between bundle files leave the total unchanged.)
 //
-// 2 = dashboard.js 1 + msg_nav.js 1, both CSP-legal element-property
+// 2 = event_stream.js 1 + msg_nav.js 1, both CSP-legal element-property
 // assignments (btn.onclick = …), not inline attributes — the attribute
 // surface went to 0 across the bundle in the #1980 PR-1/PR-2 data-action
 // migration.

@@ -471,6 +471,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/event_stream.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/features.js",
     "handler_type": "http.HandlerFunc"
   },
