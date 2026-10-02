@@ -12,22 +12,23 @@ import (
 // TestRouter_SessionRunsHealth_MapsTheStoreCounters: the router's snapshot is
 // what /health's run_stores.session serves (#2792), so it must carry the
 // store's real state — disabled when nothing persists, enabled with its loss
-// counters otherwise.
+// counters otherwise. Goes through Runs().Health(), the RunLedger facet
+// accessor (#3023): a nil Router must report disabled rather than panic.
 func TestRouter_SessionRunsHealth_MapsTheStoreCounters(t *testing.T) {
-	disabled := &Router{ss: newSessionTable(), sessionRuns: runhistory.NewStore("", 0, 0)}
-	if h := disabled.SessionRunsHealth(); h.Enabled {
+	disabled := &Router{ss: newSessionTable(), runs: RunLedger{runs: runhistory.NewStore("", 0, 0)}}
+	if h := disabled.Runs().Health(); h.Enabled {
 		t.Errorf("no-persistence router reported %+v, want Enabled=false", h)
 	}
 	var nilRouter *Router
-	if h := nilRouter.SessionRunsHealth(); h.Enabled {
+	if h := nilRouter.Runs().Health(); h.Enabled {
 		t.Error("nil router must report disabled")
 	}
 
 	root := filepath.Join(t.TempDir(), "session-runs")
 	store := runhistory.NewStore(root, 5, time.Hour)
 	t.Cleanup(store.Close)
-	r := &Router{ss: newSessionTable(), sessionRuns: store}
-	if h := r.SessionRunsHealth(); !h.Enabled || h.WriteFailedOther != 0 {
+	r := &Router{ss: newSessionTable(), runs: RunLedger{runs: store}}
+	if h := r.Runs().Health(); !h.Enabled || h.WriteFailedOther != 0 {
 		t.Fatalf("fresh store = %+v, want enabled with zero counters", h)
 	}
 
@@ -50,7 +51,7 @@ func TestRouter_SessionRunsHealth_MapsTheStoreCounters(t *testing.T) {
 		t.Skip("write into a 0500 dir succeeded (running as root?); failure path not exercised")
 	}
 
-	if h := r.SessionRunsHealth(); h.WriteFailedOther != 1 || h.WriteFailedDiskFull != 0 {
+	if h := r.Runs().Health(); h.WriteFailedOther != 1 || h.WriteFailedDiskFull != 0 {
 		t.Errorf("snapshot = %+v, want write_failed_other=1 disk_full=0", h)
 	}
 }

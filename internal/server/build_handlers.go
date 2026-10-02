@@ -82,7 +82,7 @@ func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers 
 func buildCostHandlers(opts ServerOptions, router *session.Router) *dashcost.Handlers {
 	var ledger *costledger.Store
 	if router != nil {
-		ledger = router.CostLedger()
+		ledger = router.Runs().CostLedger()
 	}
 	return dashcost.New(dashcost.Deps{
 		Ledger: ledger,

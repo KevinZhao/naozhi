@@ -274,7 +274,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		BackendID: backendID,
 		WorkDir:   resolvedWorkDir,
 		Model:     cfg.Sysession.Runner.Model,
-		Ledger:    router.CostLedger(),
+		Ledger:    router.Runs().CostLedger(),
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("new runner: %w", err)

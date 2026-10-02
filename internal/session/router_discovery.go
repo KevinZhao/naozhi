@@ -242,8 +242,8 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		s := &ManagedSession{
 			key:      key,
 			exempt:   isExemptKey(key),
-			runStore: r.sessionRuns,
-			costAcct: r.costAcct,
+			runStore: r.runs.runs,
+			costAcct: r.runs.cost,
 		}
 		s.setWorkspace(workspace)
 		s.SetCLIName(r.backends.CLIName())
@@ -325,8 +325,8 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 		s := &ManagedSession{
 			key:      key,
 			exempt:   true,
-			runStore: r.sessionRuns,
-			costAcct: r.costAcct,
+			runStore: r.runs.runs,
+			costAcct: r.runs.cost,
 		}
 		if len(chainIDs) > 0 {
 			s.prevSessionIDs = slices.Clone(chainIDs)

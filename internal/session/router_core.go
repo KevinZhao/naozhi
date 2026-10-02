@@ -190,12 +190,10 @@ type Router struct {
 
 	storePath string
 
-	// sessionRuns persists per-run wall-clock timing. Constructed in NewRouter
-	// from the store's datadir.Layout, injected into every ManagedSession; nil when
-	// StorePath is empty. Closed in Shutdown to flush the async write worker.
-	sessionRuns *runhistory.Store
-	// costAcct is the shared ledger sink handed to every ManagedSession.
-	costAcct *costAccounting
+	// runs is the run-history and cost-ledger facet (run_ledger.go): the
+	// per-session run-timing store and the shared cost-accounting sink
+	// handed to every ManagedSession. Reached through Runs().
+	runs RunLedger
 
 	// kid is the known-session-IDs facet: IDs set, FIFO order, dirty flag,
 	// gen and the gen-memoised save snapshot, in internal/session/knownids.
@@ -662,10 +660,10 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Run-history store is rooted next to the session store (its own config,
 	// NOT cron's). Empty StorePath disables persistence (no-op store).
 	if cfg.StorePath != "" {
-		r.sessionRuns = runhistory.NewStore(datadir.ForStore(cfg.StorePath).SessionRunsRoot(), 0, 0)
+		r.runs.runs = runhistory.NewStore(datadir.ForStore(cfg.StorePath).SessionRunsRoot(), 0, 0)
 	}
 	// Cost ledger lives beside the session store; disabled by config or when
-	// nothing persists. costAcct is always non-nil so sessions never nil-check.
+	// nothing persists. r.runs.cost is always non-nil so sessions never nil-check.
 	var ledger *costledger.Store
 	if cfg.StorePath != "" && !cfg.CostLedger.Disabled {
 		ledger = costledger.NewStore(datadir.ForStore(cfg.StorePath).CostRoot(), costledger.Options{
@@ -673,7 +671,7 @@ func NewRouter(cfg RouterConfig) *Router {
 			RollupDays:    cfg.CostLedger.RollupDays,
 		})
 	}
-	r.costAcct = newCostAccounting(ledger, cfg.CostRunOwner)
+	r.runs.cost = newCostAccounting(ledger, cfg.CostRunOwner)
 
 	// nil HistoryLoader → production claude-factory-backed implementation so
 	// the rest of the router can call r.hist.loader unconditionally (#458).
@@ -781,8 +779,8 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 		prevSessionIDs:     entry.PrevSessionIDs,
 		prevSessionOrigins: entry.PrevSessionOrigins,
 		exempt:             isExemptKey(key),
-		runStore:           r.sessionRuns,
-		costAcct:           r.costAcct,
+		runStore:           r.runs.runs,
+		costAcct:           r.runs.cost,
 	}
 	storeTotalCost(&s.totalCost, entry.TotalCost)
 	// Legacy stores (predating cost_spent) seed costSpent from TotalCost so the

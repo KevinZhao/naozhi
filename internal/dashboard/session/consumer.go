@@ -30,8 +30,8 @@ import (
 )
 
 // RouterView is the 18 router methods this package calls. *session.Router
-// provides 16; internal/server's sessionRouterView adds the two CLI facts from
-// Router.Backends() and carries the compile-time assertion.
+// provides 14; sessionRouterView adds the two CLI facts from Backends() and
+// the two run-history methods from Runs() (RunLedger, #3023), plus the compile-time assertion.
 //
 // Still 18 and not the ≤6 the issue guessed: this package serves
 // /api/sessions, which is the list, the per-session detail, the run history,

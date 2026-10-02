@@ -954,8 +954,8 @@ func (r *Router) installFreshSession(tx sessTx,
 		persistedHistory: oldHistory,
 		prevSessionIDs:   prevIDs,
 		exempt:           exempt,
-		runStore:         r.sessionRuns,
-		costAcct:         r.costAcct,
+		runStore:         r.runs.runs,
+		costAcct:         r.runs.cost,
 		// Runs later, when the CLI reports its session ID: its own transaction.
 		onSessionID: func(id string) {
 			r.ss.Update(func(tx sessTx) {
@@ -1384,8 +1384,8 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 			persistedHistory: freshHistory,
 			prevSessionIDs:   slices.Clone(old.prevSessionIDs),
 			exempt:           old.exempt,
-			runStore:         r.sessionRuns,
-			costAcct:         r.costAcct,
+			runStore:         r.runs.runs,
+			costAcct:         r.runs.cost,
 			onSessionID: func(id string) {
 				r.ss.Update(func(tx sessTx) {
 					r.kid.Track(id)

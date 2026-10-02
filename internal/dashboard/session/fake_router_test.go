@@ -78,11 +78,20 @@ func (f *fakeRouter) Workspace(string) string                      { return "" }
 func (f *fakeRouter) DiscoveryExcludeIDs() map[string]bool         { return nil }
 
 // realRouter is internal/server's sessionRouterView for the tests here that
-// build a real Router: the two CLI facts live on its backend facet.
+// build a real Router: the two CLI facts live on its backend facet, and the
+// two run-history methods live on its RunLedger facet (Router.Runs(), #3023).
 type realRouter struct{ *sessionpkg.Router }
 
 func (r realRouter) CLIName() string    { return r.Backends().CLIName() }
 func (r realRouter) CLIVersion() string { return r.Backends().CLIVersion() }
+
+func (r realRouter) SessionRuns(key string, limit int, before time.Time) []runhistory.SessionRun {
+	return r.Runs().List(key, limit, before)
+}
+
+func (r realRouter) SessionRunStats(key string) runhistory.SessionRunStats {
+	return r.Runs().Stats(key)
+}
 
 // TestHandleDelete_DrivenByFakeRouter: the local-node delete path forwards the
 // validated key to RouterView.RemoveAsync and maps its bool to 200 / 404.

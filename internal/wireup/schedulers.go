@@ -124,7 +124,7 @@ func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		AgentCommands: deps.Cfg.AgentCommands,
 		Telemetry:     deps.Telemetry,
 		Sandbox:       sandboxRunner,
-		Ledger:        deps.Router.CostLedger(),
+		Ledger:        deps.Router.Runs().CostLedger(),
 	})
 	if err := scheduler.Start(); err != nil {
 		return out, fmt.Errorf("start cron scheduler: %w", err)
