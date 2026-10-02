@@ -61,6 +61,112 @@ func TestRaises_JSRatchet_NewFileCannotAbsorbALongFunction(t *testing.T) {
 	}
 }
 
+// configureDeps, deadInjections, innerHTMLAssign, htmlInsert and
+// lateBindings are gated like lines: only their sum (S20a, #3026 D-S20-4).
+// Moving an innerHTML assignment with its function, or counting an injection
+// where it lands instead of where it is passed, is not a raise; one more of
+// any of them anywhere is.
+func TestRaises_JSRatchet_TotalOnlyMetrics(t *testing.T) {
+	t.Parallel()
+	const b = `{"a.js":{"lines":10,"configureDeps":5,"deadInjections":1,"innerHTMLAssign":2,"htmlInsert":1,"lateBindings":3},` +
+		`"b.js":{"lines":10,"configureDeps":0,"deadInjections":0,"innerHTMLAssign":0,"htmlInsert":0,"lateBindings":0}}`
+	base := metrics{}
+	if err := jsRatchet(b, base); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("moving every one of them to another file", func(t *testing.T) {
+		head := metrics{}
+		const h = `{"a.js":{"lines":10,"configureDeps":0,"deadInjections":0,"innerHTMLAssign":1,"htmlInsert":0,"lateBindings":0},` +
+			`"b.js":{"lines":10,"configureDeps":5,"deadInjections":1,"innerHTMLAssign":1,"htmlInsert":1,"lateBindings":3}}`
+		if err := jsRatchet(h, head); err != nil {
+			t.Fatal(err)
+		}
+		if rs := raises(base, head); len(rs) != 0 {
+			t.Errorf("raises = %v, want none", rs)
+		}
+	})
+	t.Run("one more of each", func(t *testing.T) {
+		head := metrics{}
+		const h = `{"a.js":{"lines":10,"configureDeps":5,"deadInjections":1,"innerHTMLAssign":2,"htmlInsert":1,"lateBindings":3},` +
+			`"b.js":{"lines":10,"configureDeps":1,"deadInjections":1,"innerHTMLAssign":1,"htmlInsert":1,"lateBindings":1}}`
+		if err := jsRatchet(h, head); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{
+			"js-ratchet:TOTAL.configureDeps",
+			"js-ratchet:TOTAL.deadInjections",
+			"js-ratchet:TOTAL.htmlInsert",
+			"js-ratchet:TOTAL.innerHTMLAssign",
+			"js-ratchet:TOTAL.lateBindings",
+		}
+		if got := gates(raises(base, head)); !slices.Equal(got, want) {
+			t.Errorf("raises = %v, want %v", got, want)
+		}
+	})
+}
+
+// The S20a revision itself: configureDeps moves from the files that pass the
+// dependencies (dashboard.js) to the ones that receive them, the sum
+// unchanged, and the _global entry and the new metrics appear. None of it is
+// a raise.
+func TestRaises_JSRatchet_CountingInjectionsWhereTheyLand(t *testing.T) {
+	t.Parallel()
+	base, head := metrics{}, metrics{}
+	if err := jsRatchet(`{"dashboard.js":{"lines":100,"configureDeps":5},"r.js":{"lines":10,"configureDeps":0}}`, base); err != nil {
+		t.Fatal(err)
+	}
+	const h = `{"dashboard.js":{"lines":100,"configureDeps":0,"innerHTMLAssign":4},"r.js":{"lines":10,"configureDeps":5,"deadInjections":1},` +
+		`"_global":{"htmlSinks":9,"importCycles":1}}`
+	if err := jsRatchet(h, head); err != nil {
+		t.Fatal(err)
+	}
+	if rs := raises(base, head); len(rs) != 0 {
+		t.Errorf("raises = %v, want none", rs)
+	}
+}
+
+// _global is not a file: its metrics are GLOBAL.<name>, ordered, and losing
+// them (or the entry) is a raise to -1.
+func TestRaises_JSRatchet_Global(t *testing.T) {
+	t.Parallel()
+	base := metrics{}
+	if err := jsRatchet(`{"a.js":{"lines":1},"_global":{"htmlSinks":10,"importCycles":0,"unresolvedImports":0}}`, base); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := base["js-ratchet:_global.htmlSinks"]; ok {
+		t.Error("_global read as a file")
+	}
+	t.Run("a new import cycle", func(t *testing.T) {
+		head := metrics{}
+		if err := jsRatchet(`{"a.js":{"lines":1},"_global":{"htmlSinks":9,"importCycles":1,"unresolvedImports":0}}`, head); err != nil {
+			t.Fatal(err)
+		}
+		rs := raises(base, head)
+		if want := []string{"js-ratchet:GLOBAL.importCycles"}; !slices.Equal(gates(rs), want) {
+			t.Fatalf("raises = %v, want %v (htmlSinks went down)", rs, want)
+		}
+		if rs[0].From != 0 || rs[0].To != 1 {
+			t.Errorf("raise = %+v, want From 0 To 1", rs[0])
+		}
+	})
+	t.Run("deleting the entry", func(t *testing.T) {
+		head := metrics{}
+		if err := jsRatchet(`{"a.js":{"lines":1}}`, head); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"js-ratchet:GLOBAL.htmlSinks", "js-ratchet:GLOBAL.importCycles", "js-ratchet:GLOBAL.unresolvedImports"}
+		rs := raises(base, head)
+		if got := gates(rs); !slices.Equal(got, want) {
+			t.Fatalf("raises = %v, want %v", got, want)
+		}
+		for _, r := range rs {
+			if r.To != -1 {
+				t.Errorf("gate %s: To = %d, want -1", r.Gate, r.To)
+			}
+		}
+	})
+}
+
 // The revision that introduces a metric has no total for it at the base, so
 // the new total is a new ratchet, not a raise from zero.
 func TestRaises_JSRatchet_IntroducingAMetric(t *testing.T) {
@@ -267,6 +373,22 @@ func TestRaises_JSCaps(t *testing.T) {
 			}
 		})
 	}
+	t.Run("leaves: a new one is free, a dropped one raises", func(t *testing.T) {
+		lb, lh := metrics{}, metrics{}
+		if err := jsCaps(`{"maxFnLines":{"default":120,"exempt":[]},"lines":{},"sideEffectLegacy":[],"cycleLegacy":[],"leaves":["a.js","b.js"]}`, lb); err != nil {
+			t.Fatal(err)
+		}
+		if err := jsCaps(`{"maxFnLines":{"default":120,"exempt":[]},"lines":{},"sideEffectLegacy":[],"cycleLegacy":[],"leaves":["b.js","c.js"]}`, lh); err != nil {
+			t.Fatal(err)
+		}
+		rs := raises(lb, lh)
+		if want := []string{"js-caps:leaf:a.js"}; !slices.Equal(gates(rs), want) {
+			t.Fatalf("raises = %v, want %v", rs, want)
+		}
+		if rs[0].To != -1 {
+			t.Errorf("raise = %+v, want To -1", rs[0])
+		}
+	})
 	t.Run("deleting the whole caps file", func(t *testing.T) {
 		head := metrics{}
 		// jsCaps(\"\", head) is a no-op, same as the file being gone.
