@@ -12,13 +12,10 @@ import (
 // the way buildWSStack does: a broadcaster over a fresh registry, an engine
 // that notifies it, and a Hub over both. Hub dependencies go in opts and the
 // engine-only ones (Guard, Queue, Agents, ProjectMgr, ScratchPool) in eo.
-// Router, Resolver, Scheduler and AllowedRoot are shared and come from opts;
-// Ctx and Notify are derived here, and so are opts.Engine and opts.Broadcaster.
-//
-// Like buildServer, it always wires a queue and a guard: an unset eo.Queue
-// gets a collect-mode queue with no collect window, so a test's sends take the
-// owner-loop path production takes. The cleanup fails the test if any send
-// fell through to sessionSendLegacy anyway.
+// Shared ones (Router, Resolver, Scheduler, AllowedRoot) come from opts. Like
+// buildServer it always wires a queue and a guard (an unset eo.Queue gets a
+// collect-mode queue), so sends take production's owner-loop path; the
+// cleanup fails the test if one fell through to sessionSendLegacy anyway.
 func newHubForTest(t testing.TB, opts HubOptions, eo sendEngineOpts) *Hub {
 	t.Helper()
 	if opts.Engine != nil || opts.Broadcaster != nil {

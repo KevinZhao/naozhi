@@ -58,3 +58,23 @@ func TestLegacySendInvokes_AtomicCounter(t *testing.T) {
 		t.Errorf("after 3 bumps LegacySendInvokes = %d, want 3", got)
 	}
 }
+
+// TestLegacySendInvokes_SessionSendAdvances is the positive control for the
+// newHubForTest cleanup gate: that gate reads a counter no helper-built test
+// can advance any more, so this drives one real sessionSend through a
+// queue-less engine and proves the counter still fires. The engine is drained
+// first so sessionSendLegacy returns busy without starting a turn. Delete it
+// with sessionSendLegacy.
+func TestLegacySendInvokes_SessionSendAdvances(t *testing.T) {
+	e := newSendEngine(sendEngineOpts{
+		Router: session.NewRouter(session.RouterConfig{}),
+		Guard:  session.NewGuard(),
+	})
+	e.drain()
+	if _, status, err := e.sessionSend(sendParams{Key: "dashboard:direct:legacy:general", Text: "hi"}, nil); err != nil || status != sendAckBusy {
+		t.Fatalf("sessionSend on a drained queue-less engine = (%q, %v), want (%q, nil)", status, err, sendAckBusy)
+	}
+	if got := e.LegacySendInvokes(); got != 1 {
+		t.Fatalf("LegacySendInvokes after one queue-less sessionSend = %d, want 1", got)
+	}
+}
