@@ -25,9 +25,11 @@ const (
 	routerMethodBaseline = 143
 	// routerTypeRefBaseline counts the identifier Router outside method
 	// receivers and its own declaration: parameters, results, fields,
-	// aliases, conversions, composite literals. A package func taking *Router,
-	// a routerOps{r *Router} wrapper or `type R = Router` with methods on R
-	// would each slip past the method count; they all land here.
+	// aliases, conversions, composite literals. A package func taking *Router
+	// or a routerOps{r *Router} wrapper would each slip past the method count;
+	// they land here. An alias that mentions Router (`type R = Router`,
+	// `type RP = *Router`) is Router under another spelling: every use of it
+	// counts here too, and a method on R counts as a Router method.
 	routerTypeRefBaseline = 5
 )
 
@@ -216,46 +218,53 @@ func measureRouter(fset *token.FileSet, files map[string]*ast.File, lines map[st
 	}
 
 	for _, name := range names {
-		f := files[name]
-		for _, d := range f.Decls {
-			switch d := d.(type) {
-			case *ast.GenDecl:
+		for _, d := range files[name].Decls {
+			if d, ok := d.(*ast.GenDecl); ok {
 				for _, s := range d.Specs {
 					if ts, ok := s.(*ast.TypeSpec); ok {
-						types[ts.Name.Name] = decl{ts, f}
+						types[ts.Name.Name] = decl{ts, files[name]}
 					}
-				}
-			case *ast.FuncDecl:
-				if d.Recv == nil || len(d.Recv.List) != 1 {
-					continue
-				}
-				base := recvBase(d.Recv.List[0].Type)
-				methodsOf[base] = append(methodsOf[base], method{d, f})
-				if base == "Router" {
-					m.methods = append(m.methods, pos(d.Pos())+" "+d.Name.Name)
 				}
 			}
 		}
+	}
+	router := aliasSpellings(files, map[string]bool{"Router": true}, false)
+	forbidden := aliasSpellings(files, routerForbidden, true)
+
+	for _, name := range names {
+		f := files[name]
+		for _, d := range f.Decls {
+			d, ok := d.(*ast.FuncDecl)
+			if !ok || d.Recv == nil || len(d.Recv.List) != 1 {
+				continue
+			}
+			base := recvBase(d.Recv.List[0].Type)
+			methodsOf[base] = append(methodsOf[base], method{d, f})
+			if router[base] {
+				m.methods = append(m.methods, pos(d.Pos())+" "+d.Name.Name)
+			}
+		}
 		// Router named anywhere but a receiver or its own declaration.
+		count := func(n ast.Node) bool { return countRouterRef(n, router, &m, pos) }
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.FuncDecl:
 				if x.Type != nil {
-					ast.Inspect(x.Type, func(n ast.Node) bool { return countRouterRef(n, &m, pos) })
+					ast.Inspect(x.Type, count)
 				}
 				if x.Body != nil {
-					ast.Inspect(x.Body, func(n ast.Node) bool { return countRouterRef(n, &m, pos) })
+					ast.Inspect(x.Body, count)
 				}
 				return false
 			}
-			return countRouterRef(n, &m, pos)
+			return count(n)
 		})
 	}
 
-	router, ok := types["Router"]
+	routerDecl, ok := types["Router"]
 	var st *ast.StructType
 	if ok {
-		st, ok = router.spec.Type.(*ast.StructType)
+		st, ok = routerDecl.spec.Type.(*ast.StructType)
 	}
 	if !ok {
 		return m
@@ -271,7 +280,7 @@ func measureRouter(fset *token.FileSet, files map[string]*ast.File, lines map[st
 	visit := func(at ast.Node, file *ast.File, where string, follow bool) {
 		table := tableImportName(file)
 		typeRefs(at, func(id *ast.Ident) {
-			if routerForbidden[id.Name] {
+			if forbidden[id.Name] {
 				m.isolation = append(m.isolation, fmt.Sprintf("%s: %s names %s", pos(id.Pos()), where, id.Name))
 				return
 			}
@@ -295,7 +304,7 @@ func measureRouter(fset *token.FileSet, files map[string]*ast.File, lines map[st
 			skip = skip || n.Name == "ss"
 		}
 		if !skip {
-			visit(fl.Type, router.file, "Router field", true)
+			visit(fl.Type, routerDecl.file, "Router field", true)
 		}
 	}
 	for len(queue) > 0 {
@@ -314,34 +323,83 @@ func measureRouter(fset *token.FileSet, files map[string]*ast.File, lines map[st
 	return m
 }
 
-// countRouterRef records an identifier Router that names the type. Field,
-// method and selected names, keyed literal fields and the type's own
-// declaration are names, not references.
-func countRouterRef(n ast.Node, m *routerMeasure, pos func(token.Pos) string) bool {
+// aliasSpellings is seed plus every alias, at any scope, whose right-hand
+// side mentions a name already in the set, chains included: for Router that
+// is `type R = Router`, `type RP = *Router`, `type RR = R`. With table, an
+// alias naming a sessiontable type joins too. A defined type
+// (`type X Router`) is a new type with none of Router's methods, so it is a
+// reference, not a spelling.
+func aliasSpellings(files map[string]*ast.File, seed map[string]bool, table bool) map[string]bool {
+	type alias struct {
+		spec  *ast.TypeSpec
+		table string
+	}
+	var aliases []alias
+	for _, f := range files {
+		imp := tableImportName(f)
+		ast.Inspect(f, func(n ast.Node) bool {
+			if ts, ok := n.(*ast.TypeSpec); ok && ts.Assign.IsValid() {
+				aliases = append(aliases, alias{ts, imp})
+			}
+			return true
+		})
+	}
+	set := maps.Clone(seed)
+	for grew := true; grew; {
+		grew = false
+		for _, a := range aliases {
+			name := a.spec.Name.Name
+			join := func() {
+				if !set[name] {
+					set[name], grew = true, true
+				}
+			}
+			typeRefs(a.spec.Type, func(id *ast.Ident) {
+				if set[id.Name] {
+					join()
+				}
+			}, func(pkg, _ *ast.Ident) {
+				if table && a.table != "" && pkg.Name == a.table {
+					join()
+				}
+			})
+		}
+	}
+	return set
+}
+
+// countRouterRef records an identifier that names Router under one of its
+// spellings. Field, method and selected names, keyed literal fields and a
+// type's own name are names, not references.
+func countRouterRef(n ast.Node, router map[string]bool, m *routerMeasure, pos func(token.Pos) string) bool {
+	count := func(n ast.Node) bool { return countRouterRef(n, router, m, pos) }
 	switch x := n.(type) {
 	case *ast.Field:
 		if x.Type != nil {
-			ast.Inspect(x.Type, func(n ast.Node) bool { return countRouterRef(n, m, pos) })
+			ast.Inspect(x.Type, count)
 		}
 		return false
 	case *ast.TypeSpec:
 		if x.TypeParams != nil {
-			ast.Inspect(x.TypeParams, func(n ast.Node) bool { return countRouterRef(n, m, pos) })
+			ast.Inspect(x.TypeParams, count)
 		}
-		ast.Inspect(x.Type, func(n ast.Node) bool { return countRouterRef(n, m, pos) })
+		ast.Inspect(x.Type, count)
 		return false
 	case *ast.SelectorExpr:
-		ast.Inspect(x.X, func(n ast.Node) bool { return countRouterRef(n, m, pos) })
+		ast.Inspect(x.X, count)
 		return false
 	case *ast.KeyValueExpr:
 		if _, isName := x.Key.(*ast.Ident); !isName {
-			ast.Inspect(x.Key, func(n ast.Node) bool { return countRouterRef(n, m, pos) })
+			ast.Inspect(x.Key, count)
 		}
-		ast.Inspect(x.Value, func(n ast.Node) bool { return countRouterRef(n, m, pos) })
+		ast.Inspect(x.Value, count)
 		return false
 	case *ast.Ident:
-		if x.Name == "Router" {
+		switch {
+		case x.Name == "Router":
 			m.refs = append(m.refs, pos(x.Pos()))
+		case router[x.Name]:
+			m.refs = append(m.refs, pos(x.Pos())+" ("+x.Name+")")
 		}
 	}
 	return true
@@ -529,7 +587,26 @@ func TestRouterBudget_CatchesEachRule(t *testing.T) {
 		{"pointer receiver method", map[string]string{"x.go": "package session\nfunc (r *Router) Three() {}\n"}, nil, nil, []string{"methods"}},
 		{"value receiver method", map[string]string{"x.go": "package session\nfunc (r Router) Three() {}\n"}, nil, nil, []string{"methods"}},
 		{"method removed", map[string]string{"router.go": strings.Replace(routerFixture["router.go"], "func (r Router) Two(v sessView) {}", "", 1)}, nil, nil, []string{"methods"}},
-		{"alias with methods", map[string]string{"x.go": "package session\ntype R = Router\nfunc (r *R) X() {}\n"}, nil, nil, []string{"refs"}},
+		{"alias with methods", map[string]string{"x.go": "package session\ntype R = Router\nfunc (r *R) X() {}\n"}, nil, nil, []string{"methods", "refs"}},
+		{"alias chain with methods", map[string]string{"x.go": "package session\ntype RR = R\ntype R = Router\nfunc (r RR) X() {}\n"}, nil, nil, []string{"methods", "refs"}},
+		// The alias declaration costs one reference; dropping a *Router
+		// elsewhere pays for it, so only the method count can see the method.
+		{"alias paid for by a dropped reference", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }", "type routerAlias = Router\nfunc (r *routerAlias) Hidden() {}", 1)}, nil, nil, []string{"methods"}},
+		// Under the alias every use is a reference, so swapping a *Router
+		// for *routerAlias no longer hides the package func taking it.
+		{"alias replaces an existing *Router", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }",
+			"type session struct{ r *routerAlias }\ntype routerAlias = Router\nfunc (r *routerAlias) HiddenOne() {}\nfunc hiddenFree(r *routerAlias) {}", 1)}, nil, nil, []string{"methods", "refs"}},
+		{"pointer alias stands in for *Router", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"type session struct{ r *Router }", "type session struct{ r RP }\ntype RP = *Router", 1)}, nil, nil, []string{"refs"}},
+		{"facet method takes a Router alias", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"peek(n int)", "peek(r *R)", 1) + "type R = Router\n"}, nil, nil, []string{"isolation", "refs"}},
+		{"facet method takes an alias of sessTx", map[string]string{"facets.go": strings.Replace(routerFixture["facets.go"],
+			"peek(n int)", "peek(tx myTx)", 1) + "type myTx = sessTx\n"}, nil, nil, []string{"isolation"}},
+		{"facet method takes an alias of the table", map[string]string{"facets.go": strings.NewReplacer(
+			"package session\n", "package session\nimport st \""+sessiontableImport+"\"\n",
+			"peek(n int)", "peek(t *myTable)").Replace(routerFixture["facets.go"]) + "type myTable = st.Table[int, int, int]\n"}, nil, nil, []string{"isolation"}},
 		{"wrapper struct", map[string]string{"x.go": "package session\ntype routerOps struct{ r *Router }\n"}, nil, nil, []string{"refs"}},
 		{"package func param", map[string]string{"x.go": "package session\nfunc resetFoo(r *Router) {}\n"}, nil, nil, []string{"refs"}},
 		{"conversion", map[string]string{"x.go": "package session\nvar _ = (*Router)(nil)\n"}, nil, nil, []string{"refs"}},
