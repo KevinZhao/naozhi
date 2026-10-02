@@ -1,0 +1,42 @@
+{
+  "maxFnLines": {
+    "default": 120,
+    "exempt": [
+      "cron_drawer.js",
+      "cron_view.js",
+      "dashboard.js",
+      "discovery.js",
+      "file_refs.js",
+      "render_md.js",
+      "send_message.js",
+      "split_view.js",
+      "tuning.js"
+    ]
+  },
+  "lines": {
+    "dashboard.js": 6011
+  },
+  "sideEffectLegacy": [
+    "agent_view.js",
+    "asset_browser.js",
+    "auth_modal.js",
+    "cron_view.js",
+    "dashboard.js",
+    "file_refs.js",
+    "files_view.js",
+    "mobile_nav.js",
+    "msg_nav.js",
+    "nz_util.js",
+    "self_update.js",
+    "session_header.js",
+    "split_view.js",
+    "voice.js"
+  ],
+  "cycleLegacy": [
+    "cron_attention.js",
+    "cron_drawer.js",
+    "cron_live.js",
+    "cron_trigger.js",
+    "cron_view.js"
+  ]
+}

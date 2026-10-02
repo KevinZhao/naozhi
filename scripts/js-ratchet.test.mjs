@@ -2,7 +2,10 @@
 // function and how it compares against the baseline.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compare, measureSource, raisedMetrics } from './js-ratchet.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { compare, measureSource, raisedMetrics, loadCaps, capProblems, sccs, importsOfSource } from './js-ratchet.mjs';
 
 // body returns n lines of statements, so a function around it spans n + 2.
 const body = (n) => Array.from({ length: n }, (_, i) => `  x(${i});`).join('\n');
@@ -68,6 +71,183 @@ test('--write refuses to raise, and only to raise', () => {
   const base = { 'a.js': { lines: 10, maxFnLines: 5 } };
   assert.deepEqual(raisedMetrics({ 'a.js': { lines: 11, maxFnLines: 4 } }, base), ['a.js lines 10 -> 11']);
   assert.deepEqual(raisedMetrics({ 'a.js': { lines: 9, maxFnLines: 5 }, 'n.js': { lines: 50 } }, base), []);
+});
+
+// --- caps: fail-closed schema checks (S19-0, #3025) -----------------------
+
+function withCapsFile(content, fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'js-ratchet-caps-'));
+  const file = path.join(dir, 'caps.json');
+  if (content !== null) fs.writeFileSync(file, content);
+  try {
+    return fn(file);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('loadCaps fails closed when the file is missing', () => {
+  withCapsFile(null, (file) => {
+    const { errors, caps } = loadCaps(file);
+    assert.equal(caps, undefined);
+    assert.match(errors[0], /missing/);
+  });
+});
+
+test('loadCaps fails closed on a top-level key rename', () => {
+  withCapsFile(
+    JSON.stringify({ maxFn: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] }),
+    (file) => {
+      const { errors } = loadCaps(file);
+      assert.ok(errors.some((e) => /maxFnLines/.test(e)), errors);
+    },
+  );
+});
+
+test('loadCaps fails closed when default is not a number', () => {
+  withCapsFile(
+    JSON.stringify({ maxFnLines: { default: '120', exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] }),
+    (file) => {
+      const { errors } = loadCaps(file);
+      assert.ok(errors.some((e) => /default must be a positive safe integer/.test(e)), errors);
+    },
+  );
+});
+
+test('loadCaps fails closed on a default or a line cap that is not a safe integer', () => {
+  // 1e19 is a JSON number, but no int64 holds it: tools/ratchet-raises must
+  // not be the only side that notices (#3057 review).
+  for (const d of [1e19, 120.5, 0, -1]) {
+    withCapsFile(
+      JSON.stringify({ maxFnLines: { default: d, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] }),
+      (file) => {
+        const { errors } = loadCaps(file);
+        assert.ok(errors?.some((e) => /default must be a positive safe integer/.test(e)), `default ${d}: ${errors}`);
+      },
+    );
+  }
+  for (const v of [1e19, 6011.5, -1, '6011', null]) {
+    withCapsFile(
+      JSON.stringify({ maxFnLines: { default: 120, exempt: [] }, lines: { 'dashboard.js': v }, sideEffectLegacy: [], cycleLegacy: [] }),
+      (file) => {
+        const { errors } = loadCaps(file);
+        assert.ok(errors?.some((e) => /caps\.lines\.dashboard\.js must be a non-negative safe integer/.test(e)), `lines ${v}: ${errors}`);
+      },
+    );
+  }
+});
+
+test('loadCaps accepts a well-formed caps file', () => {
+  withCapsFile(
+    JSON.stringify({ maxFnLines: { default: 120, exempt: ['a.js'] }, lines: { 'dashboard.js': 100 }, sideEffectLegacy: [], cycleLegacy: [] }),
+    (file) => {
+      const { errors, caps } = loadCaps(file);
+      assert.equal(errors, undefined);
+      assert.equal(caps.maxFnLines.default, 120);
+    },
+  );
+});
+
+// --- caps: cross-checked against a measurement and the import graph -------
+
+test('capProblems: a new file over the default cap fails', () => {
+  const caps = { maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] };
+  const current = { 'n.js': { lines: 10, maxFnLines: 121 } };
+  const problems = capProblems(current, {}, caps);
+  assert.ok(problems.some((p) => /n\.js: maxFnLines 121 exceeds the cap/.test(p)), problems);
+});
+
+test('capProblems: an exempt file already at or under the default must move out', () => {
+  const caps = { maxFnLines: { default: 120, exempt: ['a.js'] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] };
+  const current = { 'a.js': { lines: 10, maxFnLines: 90 } };
+  const problems = capProblems(current, {}, caps);
+  assert.ok(problems.some((p) => /a\.js is already <= 120/.test(p)), problems);
+});
+
+test('capProblems: an exempt file still over the default is fine', () => {
+  const caps = { maxFnLines: { default: 120, exempt: ['a.js'] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] };
+  const current = { 'a.js': { lines: 10, maxFnLines: 200 } };
+  assert.deepEqual(capProblems(current, {}, caps), []);
+});
+
+test('capProblems: a cap pointing at a file not in static/ fails', () => {
+  const caps = { maxFnLines: { default: 120, exempt: ['missing.js'] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] };
+  const current = { 'a.js': { lines: 10, maxFnLines: 10 } };
+  const problems = capProblems(current, {}, caps);
+  assert.ok(problems.some((p) => /missing\.js does not exist/.test(p)), problems);
+});
+
+test('capProblems: an over-cap dashboard.js line count fails', () => {
+  const caps = { maxFnLines: { default: 120, exempt: [] }, lines: { 'dashboard.js': 100 }, sideEffectLegacy: [], cycleLegacy: [] };
+  const current = { 'dashboard.js': { lines: 101, maxFnLines: 10 } };
+  const problems = capProblems(current, {}, caps);
+  assert.ok(problems.some((p) => /dashboard\.js is 101 lines, over the cap of 100/.test(p)), problems);
+});
+
+test('sccs finds a two-file import cycle', () => {
+  const graph = { 'a.js': ['b.js'], 'b.js': ['a.js'], 'c.js': [] };
+  assert.deepEqual(
+    sccs(graph).map((c) => [...c].sort()),
+    [['a.js', 'b.js']],
+  );
+});
+
+test('importsOf: an import, a named re-export and export * are all edges', () => {
+  const src = [
+    "import { a } from './a.js';",
+    "import './side.js';",
+    "export { b } from './b.js';",
+    "export * from './c.js';",
+    "export * as ns from '../d.js';",
+    "const local = 1;",
+    "export { local };", // no source: not an edge
+    "export const other = 2;",
+    "import bare from 'bare-pkg';", // outside static/: not an edge
+    "const lazy = () => import('./lazy.js');", // runs later: not an edge
+  ].join('\n');
+  assert.deepEqual(importsOfSource(src), ['a.js', 'side.js', 'b.js', 'c.js', 'd.js']);
+});
+
+test('sccs finds a cycle that closes through a re-export', () => {
+  // utilities.js imports nz_util.js; nz_util.js re-exports from utilities.js.
+  const graph = {
+    'utilities.js': importsOfSource("import { esc } from './nz_util.js';\nexport function configureUtilities() {}\n"),
+    'nz_util.js': importsOfSource("export { configureUtilities } from './utilities.js';\nexport const esc = 1;\n"),
+    'star.js': importsOfSource("export * from './nz_util.js';\n"),
+  };
+  assert.deepEqual(sccs(graph).map((c) => [...c].sort()), [['nz_util.js', 'utilities.js']]);
+});
+
+test('capProblems: an import cycle not listed in cycleLegacy fails', () => {
+  const caps = { maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] };
+  const current = { 'a.js': { lines: 1, maxFnLines: 1 }, 'b.js': { lines: 1, maxFnLines: 1 } };
+  const graph = { 'a.js': ['b.js'], 'b.js': ['a.js'] };
+  const problems = capProblems(current, graph, caps);
+  assert.ok(problems.some((p) => /a\.js is part of an import cycle/.test(p)), problems);
+  assert.ok(problems.some((p) => /b\.js is part of an import cycle/.test(p)), problems);
+});
+
+test('capProblems: cycleLegacy exactly matching the real cycle is clean', () => {
+  const caps = { maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: ['a.js', 'b.js'] };
+  const current = { 'a.js': { lines: 1, maxFnLines: 1 }, 'b.js': { lines: 1, maxFnLines: 1 } };
+  const graph = { 'a.js': ['b.js'], 'b.js': ['a.js'] };
+  assert.deepEqual(capProblems(current, graph, caps), []);
+});
+
+test('capProblems: a cycleLegacy entry no longer in a cycle must move out', () => {
+  const caps = { maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: ['a.js', 'b.js'] };
+  const current = { 'a.js': { lines: 1, maxFnLines: 1 }, 'b.js': { lines: 1, maxFnLines: 1 } };
+  const graph = { 'a.js': [], 'b.js': [] }; // cycle fixed
+  const problems = capProblems(current, graph, caps);
+  assert.ok(problems.some((p) => /a\.js is no longer part of an import cycle/.test(p)), problems);
+  assert.ok(problems.some((p) => /b\.js is no longer part of an import cycle/.test(p)), problems);
+});
+
+test('capProblems: a sideEffectLegacy entry pointing at a missing file fails', () => {
+  const caps = { maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: ['missing.js'], cycleLegacy: [] };
+  const current = { 'a.js': { lines: 1, maxFnLines: 1 } };
+  const problems = capProblems(current, {}, caps);
+  assert.ok(problems.some((p) => /sideEffectLegacy: missing\.js does not exist/.test(p)), problems);
 });
 
 test('configureDeps counts what configure calls inject', () => {

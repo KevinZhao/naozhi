@@ -15,6 +15,16 @@
 // rules in scripts/eslint-plugin-nz.mjs are plain objects, not a package.
 
 import nz from './scripts/eslint-plugin-nz.mjs';
+import { loadCaps } from './scripts/js-ratchet.mjs';
+
+// js-ratchet.caps.json's sideEffectLegacy is read here, not duplicated: the
+// legacy list for nz/no-module-side-effects must be the one js-ratchet.mjs
+// --check also enforces shrink-only (S19-0, #3025).
+const { caps, errors } = loadCaps();
+if (errors) {
+  throw new Error(`eslint.config.mjs: js-ratchet.caps.json is invalid: ${errors.join('; ')}`);
+}
+const sideEffectLegacy = new Set(caps.sideEffectLegacy);
 
 const ro = (names) => Object.fromEntries(names.map((n) => [n, 'readonly']));
 const rw = (names) => Object.fromEntries(names.map((n) => [n, 'writable']));
@@ -202,6 +212,19 @@ export default [
     rules: {
       'nz/configure-deps': 'error',
       'nz/no-exported-let': 'error',
+    },
+  },
+  // A module may declare state at load time but may not run anything
+  // (D-S19). contract.js is excluded like sw.js (generated, and not in
+  // moduleFiles — see the comment on contract.js below); dashboard.js (the
+  // composition root) and sideEffectLegacy's other entries are today's real
+  // violations (js-ratchet.caps.json's sideEffectLegacy, shrink-only — a
+  // file moves out once it is clean).
+  {
+    files: [...moduleFiles].filter((f) => f !== 'contract.js' && !sideEffectLegacy.has(f)).map((f) => `internal/server/static/${f}`),
+    plugins: { nz },
+    rules: {
+      'nz/no-module-side-effects': 'error',
     },
   },
 ];

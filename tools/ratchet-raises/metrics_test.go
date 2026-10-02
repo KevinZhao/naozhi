@@ -140,3 +140,198 @@ handle_baseline:
 		t.Errorf("raises = %v, want %v", got, want)
 	}
 }
+
+// Deleting a file's metrics (and TOTAL.lines with them) must surface as a
+// raise to -1 even though head no longer carries the key at all (#3025).
+func TestRaises_JSRatchet_DeletingBaselineIsARaise(t *testing.T) {
+	t.Parallel()
+	base, head := metrics{}, metrics{}
+	if err := jsRatchet(`{"a.js":{"lines":100,"maxFnLines":80,"fnOver100":0,"configureDeps":2}}`, base); err != nil {
+		t.Fatal(err)
+	}
+	// head carries nothing at all: the whole baseline file was deleted. Only
+	// the totals/max are goneIsRaise — js-ratchet --check still holds each
+	// file's own metrics shrink-only, so losing a.js's own keys is covered
+	// there, not by ratchet-raises.
+	want := []string{
+		"js-ratchet:MAX.maxFnLines",
+		"js-ratchet:TOTAL.configureDeps",
+		"js-ratchet:TOTAL.fnOver100",
+		"js-ratchet:TOTAL.lines",
+	}
+	got := gates(raises(base, head))
+	if !slices.Equal(got, want) {
+		t.Fatalf("raises = %v, want %v", got, want)
+	}
+	for _, r := range raises(base, head) {
+		if r.To != -1 {
+			t.Errorf("gate %s: To = %d, want -1 (gone)", r.Gate, r.To)
+		}
+	}
+}
+
+func TestRaises_JSCaps(t *testing.T) {
+	t.Parallel()
+	base := metrics{}
+	const b = `{"maxFnLines":{"default":120,"exempt":["a.js"]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`
+	if err := jsCaps(b, base); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("raising the default", func(t *testing.T) {
+		head := metrics{}
+		const h = `{"maxFnLines":{"default":121,"exempt":["a.js"]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`
+		if err := jsCaps(h, head); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"js-caps:maxFnLines.default"}
+		if got := gates(raises(base, head)); !slices.Equal(got, want) {
+			t.Errorf("raises = %v, want %v", got, want)
+		}
+	})
+	t.Run("a new exemption", func(t *testing.T) {
+		head := metrics{}
+		const h = `{"maxFnLines":{"default":120,"exempt":["a.js","b.js"]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`
+		if err := jsCaps(h, head); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"js-caps:exempt:b.js"}
+		if got := gates(raises(base, head)); !slices.Equal(got, want) {
+			t.Errorf("raises = %v, want %v", got, want)
+		}
+	})
+	t.Run("dropping a clean exemption is free", func(t *testing.T) {
+		head := metrics{}
+		const h = `{"maxFnLines":{"default":120,"exempt":[]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`
+		if err := jsCaps(h, head); err != nil {
+			t.Fatal(err)
+		}
+		if rs := raises(base, head); len(rs) != 0 {
+			t.Errorf("raises = %v, want none", rs)
+		}
+	})
+	t.Run("deleting the dashboard.js line cap", func(t *testing.T) {
+		head := metrics{}
+		const h = `{"maxFnLines":{"default":120,"exempt":["a.js"]},"lines":{},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`
+		if err := jsCaps(h, head); err != nil {
+			t.Fatal(err)
+		}
+		rs := raises(base, head)
+		want := []string{"js-caps:lines.dashboard.js"}
+		if got := gates(rs); !slices.Equal(got, want) {
+			t.Fatalf("raises = %v, want %v", got, want)
+		}
+		if rs[0].From != 6511 || rs[0].To != -1 {
+			t.Errorf("raise = %+v, want From 6511 To -1", rs[0])
+		}
+	})
+	t.Run("a new sideEffectLegacy entry", func(t *testing.T) {
+		head := metrics{}
+		const h = `{"maxFnLines":{"default":120,"exempt":["a.js"]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js","b.js"],"cycleLegacy":[]}`
+		if err := jsCaps(h, head); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"js-caps:sideEffectLegacy:b.js"}
+		if got := gates(raises(base, head)); !slices.Equal(got, want) {
+			t.Errorf("raises = %v, want %v", got, want)
+		}
+	})
+	t.Run("a new cycleLegacy entry", func(t *testing.T) {
+		head := metrics{}
+		const h = `{"maxFnLines":{"default":120,"exempt":["a.js"]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js"],"cycleLegacy":["c.js"]}`
+		if err := jsCaps(h, head); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"js-caps:cycleLegacy:c.js"}
+		if got := gates(raises(base, head)); !slices.Equal(got, want) {
+			t.Errorf("raises = %v, want %v", got, want)
+		}
+	})
+	// A default no int64 holds must be a decode error, not a float64 the
+	// conversion maps to MinInt64 on amd64 (a 120 -> MinInt64 "lowering"
+	// that would wave the cap's removal through).
+	for _, d := range []string{"1e19", "9223372036854775808", "120.5", "1.2e2"} {
+		t.Run("default "+d+" fails closed", func(t *testing.T) {
+			head := metrics{}
+			h := `{"maxFnLines":{"default":` + d + `,"exempt":[]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`
+			if err := jsCaps(h, head); err == nil {
+				t.Fatalf("jsCaps accepted default %s: %v", d, head)
+			}
+		})
+	}
+	for _, v := range []string{"1e19", "6511.5"} {
+		t.Run("lines "+v+" fails closed", func(t *testing.T) {
+			head := metrics{}
+			h := `{"maxFnLines":{"default":120,"exempt":[]},"lines":{"dashboard.js":` + v + `},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`
+			if err := jsCaps(h, head); err == nil {
+				t.Fatalf("jsCaps accepted lines %s: %v", v, head)
+			}
+		})
+	}
+	t.Run("deleting the whole caps file", func(t *testing.T) {
+		head := metrics{}
+		// jsCaps(\"\", head) is a no-op, same as the file being gone.
+		rs := raises(base, head)
+		want := []string{"js-caps:lines.dashboard.js", "js-caps:maxFnLines.default"}
+		if got := gates(rs); !slices.Equal(got, want) {
+			t.Fatalf("raises = %v, want %v", got, want)
+		}
+		for _, r := range rs {
+			if r.To != -1 {
+				t.Errorf("gate %s: To = %d, want -1", r.Gate, r.To)
+			}
+		}
+	})
+}
+
+// A pin's sha is not an ordered quantity: ratchet-raises must catch a change
+// in either direction, and must not require an entry just because the file
+// was created (the first set of pins is recorded, not raised). A pin added
+// to an existing document is covered at run() level, in run_test.go.
+func TestRaises_GoldenPins(t *testing.T) {
+	t.Parallel()
+	base := metrics{}
+	if err := goldenPins(`{"event_render_unknown.json":"aaaaaaaaaaaa0000"}`, base); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("changing a pin either direction raises", func(t *testing.T) {
+		for _, sha := range []string{"ffffffffffff0000", "000000000001ffff"} {
+			head := metrics{}
+			if err := goldenPins(`{"event_render_unknown.json":"`+sha+`"}`, head); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"golden:event_render_unknown.json"}
+			if got := gates(raises(base, head)); !slices.Equal(got, want) {
+				t.Errorf("sha %s: raises = %v, want %v", sha, got, want)
+			}
+		}
+	})
+	t.Run("deleting a pin raises", func(t *testing.T) {
+		head := metrics{}
+		want := []string{"golden:event_render_unknown.json"}
+		rs := raises(base, head)
+		if got := gates(rs); !slices.Equal(got, want) {
+			t.Fatalf("raises = %v, want %v", got, want)
+		}
+		if rs[0].To != -1 {
+			t.Errorf("raise = %+v, want To -1", rs[0])
+		}
+	})
+	t.Run("an unchanged pin does not raise", func(t *testing.T) {
+		head := metrics{}
+		if err := goldenPins(`{"event_render_unknown.json":"aaaaaaaaaaaa0000"}`, head); err != nil {
+			t.Fatal(err)
+		}
+		if rs := raises(base, head); len(rs) != 0 {
+			t.Errorf("raises = %v, want none", rs)
+		}
+	})
+	t.Run("creating the file for the first time does not raise", func(t *testing.T) {
+		base, head := metrics{}, metrics{}
+		if err := goldenPins(`{"event_render_known.json":"112233445566"}`, head); err != nil {
+			t.Fatal(err)
+		}
+		if rs := raises(base, head); len(rs) != 0 {
+			t.Errorf("raises = %v, want none", rs)
+		}
+	})
+}
