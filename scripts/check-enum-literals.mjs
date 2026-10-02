@@ -33,15 +33,18 @@
 //      `x.type`, `x?.type`, `x['type']`, `x && x.type`, `x.type || ''`, or a
 //      name a const binds to one of those (`const t = x.type`,
 //      `const { type: t } = x`).
-//   d. Each ANCHORS Set is declared once, exactly as
+//   d. Each ANCHORS Set is declared exactly once across all the dashboard's
+//      modules — in whichever file it lives, so moving it out of dashboard.js
+//      needs no edit here — exactly as
 //      `const NAME = new Set(NZ_CONTRACT.ENUMS.<column>)`, and every other
-//      reference to NAME is a `NAME.has(...)` call — so a hand-added
-//      (`.add`, `.filter`, a spread plus one kind) or swapped column fails.
+//      reference to NAME in any file is a `NAME.has(...)` call — so a
+//      hand-added (`.add`, `.filter`, a spread plus one kind), swapped column
+//      or second copy fails.
 //      No file assigns to, deletes, or calls a mutating method (push,
 //      splice, …) on an NZ_CONTRACT.ENUMS member or on NZ_CONTRACT.ENUMS.
 //   Blind guards: a file that does not parse fails, every KIND_SENTINELS
-//   file must compare `.type` with a kind at least once, and every ANCHORS
-//   file must be in the tree.
+//   file must compare `.type` with a kind at least once, and an ANCHORS Set
+//   declared nowhere fails.
 //
 //   Limits, so nobody reads this as full coverage: aliases are by name per
 //   file, not by scope (a const alias makes every same-named identifier in
@@ -133,10 +136,9 @@ export const KIND_SENTINELS = ['dashboard.js', 'running_banner.js'];
 
 export const KIND_ENUMS = ['EVENT_TYPE', 'EVENT_TYPE_INTERNAL', 'EVENT_TYPE_MD_IGNORE'];
 
-// ANCHORS: per file, the kind Sets that must be exactly a contract column (d).
-export const ANCHORS = {
-  'dashboard.js': { INTERNAL_EVENT_TYPES: 'EVENT_TYPE_INTERNAL', MARKDOWN_EXPORT_IGNORE: 'EVENT_TYPE_MD_IGNORE' },
-};
+// ANCHORS: the kind Sets that must be exactly a contract column (d), by name;
+// each is looked for in every file.
+export const ANCHORS = { INTERNAL_EVENT_TYPES: 'EVENT_TYPE_INTERNAL', MARKDOWN_EXPORT_IGNORE: 'EVENT_TYPE_MD_IGNORE' };
 const MUTATORS = new Set(['push', 'pop', 'shift', 'unshift', 'splice', 'sort', 'reverse', 'fill', 'copyWithin']);
 
 // contractKindProblems is check (a) over NZ_CONTRACT.ENUMS.
@@ -194,6 +196,7 @@ export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = K
   const otherHits = new Map(Object.entries(other).map(([f, vs]) => [f, new Map(vs.map((v) => [v, 0]))]));
   const kindCmp = new Map();
   const counts = { kindComparisons: 0, otherComparisons: 0, lookups: 0 };
+  const decls = new Map(Object.keys(anchors).map((k) => [k, []])); // name → [{ file, d }] over the whole tree
   for (const [file, src] of Object.entries(files)) {
     if (file === 'contract.js') continue;
     let ast;
@@ -225,8 +228,6 @@ export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = K
         }
       }
     });
-    const anchor = anchors[file] || {};
-    const decls = new Map(Object.keys(anchor).map((k) => [k, []]));
     const callees = new Set();
     walk(ast, (n, parent) => {
       if (n.type === 'CallExpression') callees.add(unchain(n.callee));
@@ -237,22 +238,13 @@ export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = K
         problems.push(`${at(n)}: changes NZ_CONTRACT.ENUMS at run time — the lists are the backend's, change kindTable instead`);
       }
       if (n.type !== 'Identifier' || !decls.has(n.name)) return;
-      if (parent?.type === 'VariableDeclarator' && parent.id === n) decls.get(n.name).push(parent);
+      if (parent?.type === 'VariableDeclarator' && parent.id === n) decls.get(n.name).push({ file, d: parent });
       else if (parent?.type === 'MemberExpression' && !parent.computed && parent.property === n) return; // x.NAME is another name
       else if (parent?.type === 'Property' && parent.key === n && !parent.computed && !parent.shorthand) return; // { NAME: v }
       else if (!(parent?.type === 'MemberExpression' && parent.object === n && !parent.computed && parent.property.name === 'has' && callees.has(parent))) {
-        problems.push(`${at(n)}: ${n.name} is used other than as ${n.name}.has(...) — it must stay exactly NZ_CONTRACT.ENUMS.${anchor[n.name]}`);
+        problems.push(`${at(n)}: ${n.name} is used other than as ${n.name}.has(...) — it must stay exactly NZ_CONTRACT.ENUMS.${anchors[n.name]}`);
       }
     });
-    for (const [name, ds] of decls) {
-      if (ds.length !== 1) problems.push(`${file}: ${name} is declared ${ds.length} times, want once — the anchor check has gone blind`);
-      for (const d of ds) {
-        const init = d.init;
-        const exact = init?.type === 'NewExpression' && init.callee.type === 'Identifier' && init.callee.name === 'Set' &&
-          enumsOf(init.arguments[0]) === anchor[name] && init.arguments[0].type === 'MemberExpression';
-        if (!exact) problems.push(`${at(d)}: ${name} must be exactly new Set(NZ_CONTRACT.ENUMS.${anchor[name]})`);
-      }
-    }
     const compared = (node, v) => {
       if (kinds.has(v)) {
         counts.kindComparisons++;
@@ -306,8 +298,17 @@ export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = K
   for (const [file, vs] of otherHits) {
     for (const [v, hits] of vs) if (!hits) problems.push(`OTHER_TYPES['${file}'] lists ${JSON.stringify(v)}, which no .type comparison in ${file} uses — drop the dead entry`);
   }
-  for (const f of Object.keys(anchors)) {
-    if (!(f in files)) problems.push(`${f}: not in the tree — the anchor check has gone blind`);
+  for (const [name, ds] of decls) {
+    if (ds.length !== 1) {
+      const where = ds.length ? ` (${ds.map(({ file, d }) => `${file}:${d.loc.start.line}`).join(', ')})` : '';
+      problems.push(`${name} is declared ${ds.length} times across the dashboard modules${where}, want once — the anchor check has gone blind`);
+    }
+    for (const { file, d } of ds) {
+      const init = d.init;
+      const exact = init?.type === 'NewExpression' && init.callee.type === 'Identifier' && init.callee.name === 'Set' &&
+        enumsOf(init.arguments[0]) === anchors[name] && init.arguments[0].type === 'MemberExpression';
+      if (!exact) problems.push(`${file}:${d.loc.start.line}: ${name} must be exactly new Set(NZ_CONTRACT.ENUMS.${anchors[name]})`);
+    }
   }
   for (const f of sentinels) {
     if (!kindCmp.get(f)) problems.push(`${f}: no .type comparison with a kind — the kind scan has gone blind`);

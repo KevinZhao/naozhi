@@ -39,9 +39,10 @@ func TestServiceWorker_NoServiceWorkerAllowed(t *testing.T) {
 }
 
 // TestDashboardJS_RNEW_SEC008_DataRawAlwaysEscAttr pins the RNEW-SEC-008
-// contract: every `data-raw="..."` attribute emission in dashboard.js must
-// route user content through `escAttr(` — never through `renderMd(` or any
-// other helper. The invariant matters because attribute escaping and HTML
+// contract: every `data-raw="..."` attribute emission in the dashboard's
+// modules (readDashboardJS: all of static/*.js, so a renderer moving out of
+// dashboard.js stays covered) must route user content through `escAttr(` —
+// never through `renderMd(` or any other helper. The invariant matters because attribute escaping and HTML
 // escaping differ: escAttr() encodes quote/&/< for attribute context, while
 // renderMd() emits raw HTML (intended for innerHTML). Routing markdown-
 // rendered HTML into an attribute would let a crafted message close the
@@ -50,22 +51,18 @@ func TestServiceWorker_NoServiceWorkerAllowed(t *testing.T) {
 // regression gate so any future data-raw site inherits the same escaping.
 func TestDashboardJS_RNEW_SEC008_DataRawAlwaysEscAttr(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
 	// Operate on raw source: stripJSComments is naive about `//` inside JS
 	// string literals and would eat real code. `data-raw=` is a specific
 	// enough token that false positives from code comments are unlikely,
 	// and even if one appeared the shape-based classification below would
 	// skip pure literals rather than misfire.
-	js := string(data)
+	js := readDashboardJS(t)
 
 	// Locate every `data-raw=` occurrence. We classify the value expression
 	// that follows each match.
 	locs := regexp.MustCompile(`data-raw=`).FindAllStringIndex(js, -1)
 	if len(locs) == 0 {
-		t.Fatal("RNEW-SEC-008: no data-raw= occurrences found — test anchor is stale, verify dashboard.js still uses this attribute or remove the contract")
+		t.Fatal("RNEW-SEC-008: no data-raw= occurrences found — test anchor is stale, verify the dashboard still uses this attribute or remove the contract")
 	}
 	// Require at least the 2 currently-known sites (copy + ask). If the
 	// count drops below, the audit anchor moved and the test should be

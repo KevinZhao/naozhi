@@ -15,6 +15,9 @@ import (
 // slice, never for embed.FS.ReadFile's per-call copy.
 func TestStaticAssetBytes_Cached(t *testing.T) {
 	t.Parallel()
+	// A deliberate sample, one key per kind of asset (page, modules, manifest,
+	// service worker): the property is the cache mechanism, shared by every
+	// entry. That every module is in the table is TestStaticJS_ModuleInventory.
 	for _, key := range []string{"dashboard.html", "dashboard.js", "agent_view.js", "asset_browser.js", "manifest.json", "sw.js"} {
 		a := staticAssetBytes(key)
 		if a == nil {

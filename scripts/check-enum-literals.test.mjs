@@ -66,7 +66,7 @@ const clean = {
   'b.js': "const k = ['user', 'other']; addEventListener('x', (ev) => { if (ev.type === 'keydown') k.push(ev.type); });\nif (e.type !== 'result') {}\n",
   'contract.js': "export const NZ_CONTRACT = { ENUMS: { EVENT_TYPE: ['user', 'text'] } };",
 };
-const anchors = { 'a.js': { S: 'EVENT_TYPE_INTERNAL' } };
+const anchors = { S: 'EVENT_TYPE_INTERNAL' };
 const check = (files, o = other, sentinels = ['a.js', 'b.js']) => kindProblems(files, contract, o, sentinels, anchors);
 
 test('contractKindProblems wants three non-empty lists, the two columns inside EVENT_TYPE', () => {
@@ -115,7 +115,7 @@ const BAD = [
   ['an anchor Set passed on', 'mutate(S);', /S is used other than as S\.has/],
   ['an anchor Set reassigned', 'S = new Set();', /S is used other than as S\.has/],
   ['an anchor .has taken off uncalled', 'const h = S.has;', /S is used other than as S\.has/],
-  ['an anchor declared twice', 'function g() { const S = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL); return S.has(1); }', /a\.js: S is declared 2 times/],
+  ['an anchor declared twice', 'function g() { const S = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL); return S.has(1); }', /S is declared 2 times across the dashboard modules \(a\.js:1, a\.js:\d+\)/],
   ['an ENUMS list pushed to', "NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL.push('user');", /changes NZ_CONTRACT\.ENUMS at run time/],
   ['an ENUMS list spliced', 'NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL.splice(0, 1);', /changes NZ_CONTRACT\.ENUMS at run time/],
   ['an ENUMS list reassigned', 'NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL = [];', /changes NZ_CONTRACT\.ENUMS at run time/],
@@ -137,7 +137,7 @@ const ANCHOR_BAD = [
   ['a spread plus one kind', "const S = new Set([...NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL, 'user']);", /S must be exactly/],
   ['a computed column', "const S = new Set(NZ_CONTRACT.ENUMS['EVENT_TYPE_INTERNAL']);", /S must be exactly/],
   ['not a Set', 'const S = NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL;', /S must be exactly/],
-  ['gone', 'const S2 = 1;', /a\.js: S is declared 0 times, want once — the anchor check has gone blind/],
+  ['gone', 'const S2 = 1;', /^S is declared 0 times across the dashboard modules, want once — the anchor check has gone blind$/],
 ];
 for (const [name, decl, want] of ANCHOR_BAD) {
   test(`kindProblems rejects an anchor Set ${name}`, () => {
@@ -147,9 +147,21 @@ for (const [name, decl, want] of ANCHOR_BAD) {
   });
 }
 
-test('kindProblems fails an anchor file that is not in the tree', () => {
-  const { 'a.js': _, ...withoutA } = clean;
-  assert.ok(check(withoutA, {}, []).problems.includes('a.js: not in the tree — the anchor check has gone blind'));
+test('kindProblems finds an anchor in whichever file declares it, and only once in the tree', () => {
+  // Moved: the Set and its readers leave a.js for c.js; nothing to edit here.
+  const moved = { ...clean, 'a.js': clean['a.js'].replace(ANCHOR_DECL, ''), 'c.js': ANCHOR_DECL + '\nexport function hidden(e) { return S.has(e.type); }\n' };
+  assert.deepEqual(check(moved).problems, []);
+  // Still checked there.
+  const grown = { ...moved, 'c.js': moved['c.js'] + "S.add('user');" };
+  assert.ok(check(grown).problems.some((p) => /^c\.js:\d+: S is used other than as S\.has/.test(p)), check(grown).problems.join('\n'));
+  const swapped = { ...moved, 'c.js': moved['c.js'].replace('EVENT_TYPE_INTERNAL', 'EVENT_TYPE_MD_IGNORE') };
+  assert.ok(check(swapped).problems.includes('c.js:1: S must be exactly new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL)'));
+  // A second copy in another file is a restated set, not a second anchor.
+  const copied = { ...clean, 'c.js': ANCHOR_DECL };
+  assert.ok(check(copied).problems.includes('S is declared 2 times across the dashboard modules (a.js:1, c.js:1), want once — the anchor check has gone blind'));
+  // And a reader in another file is held to .has too.
+  const reader = { ...clean, 'c.js': 'S.forEach(f);' };
+  assert.ok(check(reader).problems.some((p) => /^c\.js:1: S is used other than as S\.has/.test(p)));
 });
 
 test('kindProblems leaves an anchor read through .has, another S and ENUMS reads alone', () => {

@@ -93,6 +93,9 @@ func TestPrecompressGzip_Guards(t *testing.T) {
 // re-compressed on the fly by gzipMiddleware.
 func TestStaticAsset_Precompressed(t *testing.T) {
 	t.Parallel()
+	// A deliberate sample of compress:true assets: precompression is one code
+	// path for every entry, so the sample tests the mechanism, not coverage.
+	// That every module is in the table is TestStaticJS_ModuleInventory.
 	for _, key := range []string{"dashboard.html", "dashboard.js", "agent_view.js", "asset_browser.js"} {
 		a := staticAssets[key]
 		if a.gz == nil {
