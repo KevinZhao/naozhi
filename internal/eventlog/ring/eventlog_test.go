@@ -598,7 +598,7 @@ func TestEventLog_LastEventAt(t *testing.T) {
 		t.Errorf("LastEventAt = %v; want in [%v, %v]", got, before, after)
 	}
 
-	// AppendBatch is used by InjectHistory on shim reconnect. Replayed
+	// AppendBatchReplay is used by InjectHistory on shim reconnect. Replayed
 	// entries have historical Time fields and must not advance the live
 	// activity clock — doing so would make Router.Cleanup think a
 	// reconnected-but-idle session is actively streaming.
@@ -608,17 +608,28 @@ func TestEventLog_LastEventAt(t *testing.T) {
 	// Append at line 476 so got.After(prevLive) is never a same-tick tie.
 	// No condition to poll — we are waiting for wall-clock to advance.
 	time.Sleep(10 * time.Millisecond)
-	l.AppendBatch([]clievent.EventEntry{
+	l.AppendBatchReplay([]clievent.EventEntry{
 		{Type: "user", Time: 1000, Summary: "ancient"},
 		{Type: "assistant", Time: 2000, Summary: "older"},
 	})
 	if got := l.LastEventAt(); !got.Equal(prevLive) {
-		t.Errorf("AppendBatch advanced LastEventAt from %v to %v; replay should not count as live activity", prevLive, got)
+		t.Errorf("AppendBatchReplay advanced LastEventAt from %v to %v; replay should not count as live activity", prevLive, got)
 	}
 
 	// A subsequent live Append must advance it again.
 	l.Append(clievent.EventEntry{Type: "tool_use", Summary: "Read"})
 	if got := l.LastEventAt(); !got.After(prevLive) {
 		t.Errorf("live Append after batch did not advance LastEventAt: %v vs prev %v", got, prevLive)
+	}
+
+	// AppendBatch is the live CLI stream (Process.logEventAt): it must advance
+	// the heartbeat too, or Router.Cleanup kills a long turn that is still
+	// streaming events as stuck.
+	// Rewind the heartbeat instead of sleeping so the comparison cannot tie.
+	stale := time.Now().Add(-time.Hour)
+	l.lastEventAt.Store(stale.UnixNano())
+	l.AppendBatch([]clievent.EventEntry{{Type: "tool_use", Summary: "Bash"}})
+	if got := l.LastEventAt(); !got.After(stale) {
+		t.Errorf("live AppendBatch did not advance LastEventAt: %v vs stale %v", got, stale)
 	}
 }
