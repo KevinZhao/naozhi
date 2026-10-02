@@ -46,10 +46,16 @@ func TestNewOrder_DiscardBeforeReset_ClearsReactions(t *testing.T) {
 			t.Errorf("unexpected reaction cleared: %q", id)
 		}
 	}
-	// Cleanup deleted the map entry, so the next Enqueue on key becomes owner
-	// rather than queueing behind a stale entry.
-	if isOwner, _, _, _, _ := d.queue.Enqueue(key, turn.Msg{Text: "post-teardown"}); !isOwner {
-		t.Error("queue not empty after teardown: Enqueue did not become owner")
+	// The teardown left the key idle: the next Enqueue becomes owner. That
+	// alone is DiscardAndReturn's doing (it clears busy); gen 0 is what pins
+	// Cleanup, because DiscardAndReturn bumped the retained entry's gen to 1
+	// and only deleting the entry resets it (cf. TestQueue_Cleanup_RemovesMapEntry).
+	isOwner, _, _, gen, _ := d.queue.Enqueue(key, turn.Msg{Text: "post-teardown"})
+	if !isOwner {
+		t.Error("queue not idle after teardown: Enqueue did not become owner")
+	}
+	if gen != 0 {
+		t.Errorf("Cleanup did not delete the map entry: next Enqueue got gen %d, want 0", gen)
 	}
 }
 

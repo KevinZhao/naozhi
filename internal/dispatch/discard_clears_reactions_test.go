@@ -189,7 +189,7 @@ func TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions(t *testing.T) {
 
 // TestDiscardAndReturn_ReturnsQueuedFIFO pins the queue-level contract that
 // powers the fix: DiscardAndReturn surfaces the dropped messages in FIFO
-// order while still tearing the queue down (Depth 0, ownership released).
+// order while still tearing the queue down (ring emptied, ownership released).
 func TestDiscardAndReturn_ReturnsQueuedFIFO(t *testing.T) {
 	q := turn.NewQueueWithMode(8, 0, turn.ModeCollect)
 	const key = "k"
@@ -204,5 +204,10 @@ func TestDiscardAndReturn_ReturnsQueuedFIFO(t *testing.T) {
 	// A subsequent DiscardAndReturn on the now-empty queue returns nil.
 	if again := q.DiscardAndReturn(key); again != nil {
 		t.Errorf("expected nil on empty queue, got %+v", again)
+	}
+	// Ownership was released: the next Enqueue becomes owner instead of
+	// queueing behind the discarded turn.
+	if isOwner, _, _, _, _ := q.Enqueue(key, turn.Msg{Text: "next"}); !isOwner {
+		t.Error("DiscardAndReturn did not release ownership: next Enqueue did not become owner")
 	}
 }
