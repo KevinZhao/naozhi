@@ -19,12 +19,11 @@
 //   - send_engine_ownership (rule 3b-send): send 块字段只能声明在 sendEngine
 //     上、不能回到 Hub；send.go / send_owner_loop.go / send_engine.go 内不得
 //     出现 *Hub 接收者（#2551）。
-//   - send_engine_sibling: the engine (and its broadcaster) is a sibling the
-//     composition root builds, not something Hub owns and lends out via an
-//     accessor (rule_send_engine_sibling.go, #2897 S5).
+//   - send_engine_sibling: the engine is a composition-root sibling, not
+//     something Hub owns and lends out (rule_send_engine_sibling.go).
 //   - stale_exemption: exemptions 条目必须指向存在的文件。
-//   - struct_budget / server_field_liveness: rule_server_fields.go; the same
-//     struct_budget check also pins HubOptions and sendEngineOpts.
+//   - struct_budget / server_field_liveness: rule_server_fields.go
+//     (struct_budget also pins HubOptions and sendEngineOpts).
 //   - option_liveness: HubOptions / sendEngineOpts 的每个字段都必须被某个以
 //     该类型为参数的函数读取（rule_option_liveness.go，#2897 S5）。
 //   - sublock_encapsulation: a sub-object's lock is taken by its own methods
