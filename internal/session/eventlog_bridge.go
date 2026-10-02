@@ -93,6 +93,50 @@ func (s *ManagedSession) loadGapFill() []clievent.EventEntry {
 	return nil
 }
 
+// withGapFill splices the gap-fill turns with Time in [page[0].Time, before)
+// (before <= 0: no upper bound) into a memory page by Time, after page
+// entries of equal Time. The page keeps its order and its first entry, the
+// caller's next cursor, so consecutive pages split the turns between them.
+// A turn whose UUID the page already holds (a later InjectHistory appended
+// the transcript tail, #3028) is skipped.
+func (s *ManagedSession) withGapFill(page []clievent.EventEntry, before int64) []clievent.EventEntry {
+	gf := s.loadGapFill()
+	if len(gf) == 0 || len(page) == 0 {
+		return page
+	}
+	lo := page[0].Time
+	var onPage map[string]struct{}
+	var add []clievent.EventEntry
+	for _, f := range gf {
+		if f.Time < lo || (before > 0 && f.Time >= before) {
+			continue
+		}
+		if onPage == nil {
+			onPage = make(map[string]struct{}, len(page))
+			for _, e := range page {
+				onPage[e.UUID] = struct{}{}
+			}
+		}
+		if _, dup := onPage[f.UUID]; dup && f.UUID != "" {
+			continue
+		}
+		add = append(add, f)
+	}
+	if len(add) == 0 {
+		return page
+	}
+	out := make([]clievent.EventEntry, 0, len(page)+len(add))
+	j := 0
+	for _, e := range page {
+		for j < len(add) && add[j].Time < e.Time {
+			out = append(out, add[j])
+			j++
+		}
+		out = append(out, e)
+	}
+	return append(out, add[j:]...)
+}
+
 // bridgeEncBuf pools a bytes.Buffer + json.Encoder pair so the bridge hot path
 // (≥5 events/s × N sessions) avoids the encodeState allocation json.Marshal
 // performs per call. Mirrors jsonEncPool in internal/server/dashboard.go.

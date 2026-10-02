@@ -3,6 +3,7 @@ package session
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"path/filepath"
@@ -561,6 +562,29 @@ func TestWithGapFill_InitialPageOnlyAdds(t *testing.T) {
 	}
 	if !slices.Equal(rest, want) || fills != len(gf) {
 		t.Fatalf("initial page = %v, want %v plus the %d fill turns", uuidsOf(got), want, len(gf))
+	}
+}
+
+// TestWithGapFill_DiskErrorKeepsFill: a short memory page whose disk top-up
+// fails is served as end-of-history, and it still carries its fill turns.
+func TestWithGapFill_DiskErrorKeepsFill(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.InjectHistoryIfEmpty([]clievent.EventEntry{
+		{UUID: "m1", Time: 1000, Type: "user", Detail: "q1"},
+		{UUID: "m3", Time: 3000, Type: "user", Detail: "q3"},
+	})
+	gf := []clievent.EventEntry{{UUID: "g2", Time: 2000, Type: "user", Detail: "q2"}}
+	s.gapFillCell().turns.Store(&gf)
+	src := &fakeHistorySource{err: errors.New("disk read failed")}
+	s.SetHistorySource(src)
+
+	pg := s.EventEntriesBeforeCtx(context.Background(), 9000, 5)
+	if src.calls != 1 {
+		t.Fatalf("disk tier read %d times, want 1 (the memory page is short)", src.calls)
+	}
+	if got, want := uuidsOf(pg), []string{"m1", "g2", "m3"}; !slices.Equal(got, want) {
+		t.Fatalf("page = %v, want %v (the fill turn survives the failed top-up)", got, want)
 	}
 }
 
