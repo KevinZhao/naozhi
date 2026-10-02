@@ -70,14 +70,14 @@
     "configureDeps": 0
   },
   "cron_view.js": {
-    "lines": 2642,
+    "lines": 2639,
     "maxFnLines": 127,
     "fnOver100": 3,
     "topLevelLetVar": 11,
     "configureDeps": 24
   },
   "dashboard.js": {
-    "lines": 6491,
+    "lines": 6470,
     "maxFnLines": 249,
     "fnOver100": 7,
     "topLevelLetVar": 0,

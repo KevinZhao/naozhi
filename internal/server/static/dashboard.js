@@ -4876,27 +4876,6 @@ wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
     if (added.length > 0) announce('新会话已创建');
   });
 });
-// Unified run-lifecycle frames (#2540): one wire shape for every run
-// producer, discriminated by subsystem. cron's optimistic patches ride
-// nz.bus with the field names cron_view has always consumed (job_id), so
-// the projection happens here, once, at the wire boundary.
-const cronRun = (msg) => msg.subsystem === 'cron';
-const cronMsgOf = (msg) => Object.assign({}, msg, { job_id: msg.owner_id });
-// P0 cron-run-history (RFC §7.2) — drive the "运行中 Xs" inline badge
-// without waiting for a list refetch; cronApplyRunStarted repaints both the
-// list and the per-job drawer.
-wsm.on(NZ_CONTRACT.WS.run_started, (msg) => emitCron('cron:run-started', cronMsgOf(msg)), cronRun);
-wsm.on(NZ_CONTRACT.WS.run_ended, (msg) => {
-  // P0 — terminal frame, fires for every terminal state (succeeded /
-  // failed / skipped / timed_out / canceled); only succeeded should
-  // celebrate (Phase D absorbed the legacy cron_result frame).
-  const cronMsg = cronMsgOf(msg);
-  if (cronMsg.state === 'succeeded') announce('定时任务已完成');
-  emitCron('cron:run-ended', cronMsg);
-  // P2 — refresh the timeline head through the rAF-debounced wrapper
-  // so bursty terminal frames for one job collapse per paint frame.
-  if (cronMsg.job_id) emitCron('cron:timeline-refresh-head', cronMsg.job_id);
-}, cronRun);
 // System-daemon run boundary. fetchSystemDaemons is the only path that
 // updates the 系统 rail attention badge; without this a daemon failing in
 // the background never lit the badge until the operator opened the view.

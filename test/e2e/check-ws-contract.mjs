@@ -84,8 +84,8 @@ for (const f of Object.values(schema.frames)) {
 }
 // Fields the dashboard adds itself before handing a frame on, with where.
 const FRONTEND_FIELDS = {
-  // dashboard.js maps a run frame's owner_id onto job_id for the cron bus.
-  job_id: 'cron:run-started / cron:run-ended bus detail',
+  // cron_view.js maps a run frame's owner_id onto job_id (cronMsgOf).
+  job_id: 'cron_view run_started / run_ended claims (cronMsgOf)',
 };
 const fieldReads = new Map(); // field -> Set(file)
 for (const f of fs.readdirSync(staticDir)) {
