@@ -227,55 +227,189 @@ async function sendMessage() {
   }
 }
 
-// sendComposerTurn is the gated half of sendMessage: the caller holds the
-// `composer.sending` gate for its whole duration. targetKey/targetNode are the session
-// the operator hit send on; a switch during the orient wait aborts the send
-// rather than redirecting the captured text to the newly selected session.
-async function sendComposerTurn(targetKey, targetNode) {
-  // Auto-orient runs as a fire-and-forget vision side-call after upload
-  // (maybeAutoOrient). If the user hits send within its ~12s window, the
-  // server would TakeAll the upload BEFORE the rotation's in-place Replace
-  // lands — composer.sending the original sideways image. Transparently wait for any
-  // in-flight orient to settle (hard-capped at ORIENT_MAX_WAIT_MS) so the
-  // rotated bytes are in the store before we consume the file_ids. Silent by
-  // design: no toast, the user already clicked send and the rotation is
-  // best-effort.
-  await deps.awaitPendingOrients();
-  if (!selection.key || selection.key !== targetKey || selection.node !== targetNode) return;
-  // The composer stayed editable during the wait: re-read the text and re-run
-  // the synchronous checks. Without the uploading re-check an id-less upload
-  // dropped mid-wait was filtered out of fileIDs and then deleted by
-  // clearPendingFiles() — the attachment vanished without a trace.
-  const input = document.getElementById('msg-input');
-  const text = getMsgValue(input);
-  if (!text && composer.pendingFiles.length === 0) return;
-  if (!validateComposerForSend(text)) return;
+// composerSendBlocked runs the two checks sendComposerTurn still needs after
+// validateComposerForSend: a failed upload must be removed/retried, and the
+// shim's 12 MB NDJSON line cap (base64 inflates ~1.33×, so raw image bytes
+// must stay under ~9 MB) needs a clear toast. PDFs are excluded — they
+// travel as file_ref, so a mixed image+PDF send must not trip the cap on
+// the PDF's own 20 MB limit.
+function composerSendBlocked() {
   const failed = composer.pendingFiles.filter(f => f.status === 'error');
   if (failed.length > 0) {
     const detail = failed[0].error || '';
     const tail = detail ? '（' + detail.slice(0, 120) + '）' : '';
     showToast('图片上传失败' + tail + '，请移除或重试', 'error');
-    return;
+    return true;
   }
-  // The shim NDJSON line cap is 12 MB; base64 inflates by ~1.33× so the
-  // raw image batch must stay under ~9 MB to fit alongside the JSON
-  // envelope. Pre-check here so users get a clear "too large — split into
-  // fewer pictures" message instead of a silent "没 working" (R192 regression).
-  //
-  // PDFs do NOT count toward this budget — they travel as file_ref (server
-  // persists the bytes to the session workspace; only the path string ends
-  // up in the NDJSON line). Filtering by kind here keeps mixed image+PDF
-  // sends from tripping the cap on the PDF's 20 MB that will never hit
-  // stdin anyway.
   const totalBytes = composer.pendingFiles.reduce((n, f) => {
     if (f.kind === 'pdf' || f.serverKind === 'file_ref') return n;
     return n + (f.normalizedSize || f.file.size || 0);
   }, 0);
-  const batchCap = 9 * 1024 * 1024;
-  if (totalBytes > batchCap) {
+  if (totalBytes > 9 * 1024 * 1024) {
     showToast('图片总大小 ' + Math.ceil(totalBytes / 1024 / 1024) + ' MB 超过 9 MB 上限，请分批发送或减少图片', 'warning');
+    return true;
+  }
+  return false;
+}
+
+// trySendViaWS is the preferred path for TEXT-ONLY sends. File-bearing sends
+// MUST go over HTTP instead: a WS send's uploadStore owner is frozen at
+// WebSocket-upgrade time (wsDeriveUploadOwner → setUploadOwner), while
+// /api/sessions/upload reads the CURRENT nz_anon cookie — the two can diverge
+// once the cookie's 1h TTL (anonCookieMaxAgeSeconds) elapses on a long-lived
+// tab, breaking TakeAll with "file not found or expired". HTTP always uses
+// the upload's own cookie, so it never hits this. Returns true once the frame
+// is out (caller must stop); false to fall through to HTTP (not connected,
+// carries files, or wsm.send itself failed).
+function trySendViaWS(text, fileIDs, input) {
+  if (!wsm.isConnected() || fileIDs.length > 0) return false;
+  const id = 'r' + (++wsm.sendCounter);
+  const sendMsg = { type: 'send', key: selection.key, text: text, id: id };
+  if (selection.node && selection.node !== 'local') sendMsg.node = selection.node;
+  if (perSession.workspaces[selection.key]) sendMsg.workspace = perSession.workspaces[selection.key];
+  if (perSession.backends[selection.key]) sendMsg.backend = perSession.backends[selection.key];
+  if (perSession.accessProfiles[selection.key]) sendMsg.access_profile = perSession.accessProfiles[selection.key];
+  if (!wsm.send(sendMsg)) return false;
+  // Workspace/backend/access profile are consumed once on session spawn;
+  // forget them only now that the frame is out — a failed wsm.send above
+  // falls through to HTTP, which must still see them.
+  if (sendMsg.workspace) {
+    delete perSession.workspaces[selection.key];
+    delete perSession.nodes[selection.key];
+  }
+  delete perSession.backends[selection.key];
+  delete perSession.accessProfiles[selection.key];
+  // Optimistic render: show the user message immediately without waiting
+  // for the CLI to echo it back as a "user" event.
+  renderOptimisticUserMsg(text, id);
+  if (input) clearMsg(input);
+  delete perSession.drafts[selection.key];
+  clearPendingFiles();
+  if (text) perSession.lastSent[deps.sid(selection.key, selection.node)] = text;
+  // Confirmed send: workspace/node/backend were consumed above, so rewrite
+  // the durable blob without this key — only on this success path, so a
+  // failed send (falling through to HTTP) keeps the entry for that retry.
+  deps.persistPending();
+  return true;
+}
+
+// buildSendPayload builds the HTTP POST body and, in the same pass, consumes
+// (deletes) the pending workspace/backend/access_profile for this session —
+// they are spawn-time-only inputs the server reads once, so they must not
+// ride along on a retry of the same POST.
+function buildSendPayload(text, fileIDs) {
+  const payload = { key: selection.key, text: text };
+  if (fileIDs.length > 0) payload.file_ids = fileIDs;
+  if (selection.node && selection.node !== 'local') payload.node = selection.node;
+  if (perSession.workspaces[selection.key]) {
+    payload.workspace = perSession.workspaces[selection.key];
+    delete perSession.workspaces[selection.key];
+    delete perSession.nodes[selection.key];
+  }
+  if (perSession.backends[selection.key]) {
+    payload.backend = perSession.backends[selection.key];
+    delete perSession.backends[selection.key];
+  }
+  if (perSession.accessProfiles[selection.key]) {
+    payload.access_profile = perSession.accessProfiles[selection.key];
+    delete perSession.accessProfiles[selection.key];
+  }
+  return payload;
+}
+
+// handleSendRejected runs the !r.ok branch: restores the composer and the
+// optimistic-running flip, then surfaces 401/403 (auth modal), 429 (rate
+// limiter) or the generic API error. files_consumed means the server already
+// took the pre-uploaded attachments out of the uploadStore before rejecting
+// (post-TakeAll 4xx/5xx) — drop the now-dead ids and ask for a re-attach;
+// pre-TakeAll rejections never set the flag, so unsent attachments stay put.
+async function handleSendRejected(r, sentSid, text, input) {
+  perSession.httpSendPending.delete(sentSid); // rejected synchronously — no async frame will follow
+  if (input) setMsgValue(input, text);
+  rollbackOptimisticRunning(selection.key, selection.node);
+  // Some error paths still write text/plain; fall back to text() so we
+  // always surface the real message instead of a generic "send failed".
+  const raw = await r.text().catch(() => '');
+  let detail = '', filesConsumed = false;
+  try {
+    const j = JSON.parse(raw);
+    if (j && j.error) detail = j.error;
+    if (j && j.files_consumed) filesConsumed = true;
+  } catch (_) { if (raw) detail = raw; }
+  if (filesConsumed) {
+    clearPendingFiles();
+    showToast('附件已失效，请重新添加后再发送', 'warning');
+  }
+  if (r.status === 401 || r.status === 403) {
+    deps.showAuthModal();
     return;
   }
+  if (r.status === 429) {
+    // The server names the limiter that fired; there is no queue-full 429 here.
+    showToast(detail || '请求过于频繁，请稍后重试', 'warning');
+    return;
+  }
+  deps.showAPIError('发送消息', r.status, detail);
+}
+
+// finishHttpSend runs the 2xx branch: clears the composer, then rolls the
+// pre-send optimistic flip back on ack:"reset" (/clear, /new — no turn
+// spawned) and otherwise mirrors the WS path's optimistic bubble while WS
+// is live (the WS-down fallback keeps its legacy no-bubble behaviour).
+async function finishHttpSend(r, sentSid, text, input) {
+  // Record the sent text BEFORE awaiting the body (interrupt re-fill
+  // source; also a secondary onSendError gate).
+  if (text) perSession.lastSent[sentSid] = text;
+  let ackStatus = '';
+  try { const j = await r.json(); if (j && j.status) ackStatus = j.status; } catch (_) {}
+
+  if (input) clearMsg(input);
+  delete perSession.drafts[selection.key];
+  clearPendingFiles();
+  // Confirmed send: the pending maps were consumed in buildSendPayload;
+  // rewrite the durable blob without this key, same as the WS path.
+  deps.persistPending();
+  if (ackStatus === 'reset') {
+    rollbackOptimisticRunning(selection.key, selection.node);
+    delete perSession.lastSent[sentSid]; // no turn ran, nothing to re-fill on interrupt
+    perSession.httpSendPending.delete(sentSid);
+  } else if (wsm.isConnected()) {
+    renderOptimisticUserMsg(text);
+  }
+  armFallbackEventPoll();
+}
+
+// armFallbackEventPoll speeds up event polling for 15s after an HTTP send
+// lands while WS is down, then backs off to the normal interval. No-op when
+// WS is connected: the live event stream already pushes updates.
+function armFallbackEventPoll() {
+  if (wsm.isConnected()) return;
+  if (timers.events) clearInterval(timers.events);
+  timers.events = setInterval(() => deps.fetchEvents(false), 500);
+  setTimeout(() => {
+    if (timers.events) clearInterval(timers.events);
+    if (!wsm.isConnected()) timers.events = setInterval(() => deps.fetchEvents(false), 1000);
+  }, 15000);
+}
+
+// sendComposerTurn is the gated half of sendMessage: the caller holds the
+// `composer.sending` gate for its whole duration. targetKey/targetNode are the session
+// the operator hit send on; a switch during the orient wait aborts the send
+// rather than redirecting the captured text to the newly selected session.
+async function sendComposerTurn(targetKey, targetNode) {
+  // Auto-orient (maybeAutoOrient) runs as a fire-and-forget vision side-call
+  // after upload; transparently wait for it to settle (capped at
+  // ORIENT_MAX_WAIT_MS) so the rotated bytes land before we consume
+  // file_ids. Silent by design — the user already clicked send.
+  await deps.awaitPendingOrients();
+  if (!selection.key || selection.key !== targetKey || selection.node !== targetNode) return;
+  // The composer stayed editable during the wait: re-read text/files so an
+  // id-less upload dropped mid-wait doesn't silently vanish from fileIDs.
+  const input = document.getElementById('msg-input');
+  const text = getMsgValue(input);
+  if (!text && composer.pendingFiles.length === 0) return;
+  if (!validateComposerForSend(text)) return;
+  if (composerSendBlocked()) return;
   const fileIDs = composer.pendingFiles.map(f => f.id).filter(Boolean);
 
   // Flip the send→stop button + running banner BEFORE the network round trip,
@@ -287,76 +421,14 @@ async function sendComposerTurn(targetKey, targetNode) {
   // prevents a stuck banner if the server never responds.
   markSessionOptimisticRunning(selection.key, selection.node);
 
-  // WS path: preferred for TEXT-ONLY sends. Sends carrying file_ids MUST go
-  // over HTTP instead: the uploadStore owner for a WS send is the one frozen
-  // at WebSocket upgrade time (wsDeriveUploadOwner → setUploadOwner, never
-  // refreshed in no-token mode), while /api/sessions/upload derives its owner
-  // from the CURRENT nz_anon cookie. The nz_anon label expires after
-  // anonCookieMaxAgeSeconds (1h) with no sliding renewal on old servers, so a
-  // long-lived dashboard tab ends up with upload-owner ≠ WS-owner and every
-  // file-bearing WS send fails TakeAll with "file not found or expired".
-  // HTTP sends carry the same cookie the upload just used (or freshly
-  // minted), so the two owners can never diverge. Token-mode deployments are
-  // owner-stable either way; routing on file presence keeps them on the same
-  // path for consistency.
-  if (wsm.isConnected() && fileIDs.length === 0) {
-    const id = 'r' + (++wsm.sendCounter);
-    const sendMsg = { type: 'send', key: selection.key, text: text, id: id };
-    // No file_ids here by construction — file-bearing sends take the HTTP
-    // path above so the uploadStore owner matches the upload's cookie.
-    if (selection.node && selection.node !== 'local') sendMsg.node = selection.node;
-    if (perSession.workspaces[selection.key]) sendMsg.workspace = perSession.workspaces[selection.key];
-    if (perSession.backends[selection.key]) sendMsg.backend = perSession.backends[selection.key];
-    if (perSession.accessProfiles[selection.key]) sendMsg.access_profile = perSession.accessProfiles[selection.key];
-    if (wsm.send(sendMsg)) {
-      // Workspace/backend/access profile are consumed once on session spawn;
-      // forget them only now that the frame is out. A failed wsm.send falls
-      // through to the HTTP path below, which must still see them.
-      if (sendMsg.workspace) {
-        delete perSession.workspaces[selection.key];
-        delete perSession.nodes[selection.key];
-      }
-      delete perSession.backends[selection.key];
-      delete perSession.accessProfiles[selection.key];
-      // Optimistic render: show user message immediately without waiting
-      // for the CLI to echo it back as a "user" event.
-      renderOptimisticUserMsg(text, id);
-      if (input) clearMsg(input);
-      delete perSession.drafts[selection.key];
-      clearPendingFiles();
-      if (text) perSession.lastSent[deps.sid(selection.key, selection.node)] = text;
-      // Confirmed send: the workspace/node/backend were consumed above (and
-      // deleted from the in-memory maps), so rewrite the durable blob without
-      // this key. Only on the success path — a failed wsm.send falls through to
-      // HTTP below and must keep the entry for that retry.
-      deps.persistPending();
-      return;
-    }
-    // WS send failed, fall through to HTTP path below
-  }
+  if (trySendViaWS(text, fileIDs, input)) return;
 
   // HTTP POST fallback — JSON only; files already on server.
   try {
     const headers = { 'Content-Type': 'application/json' };
     const token = deps.getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-
-    const payload = { key: selection.key, text: text };
-    if (fileIDs.length > 0) payload.file_ids = fileIDs;
-    if (selection.node && selection.node !== 'local') payload.node = selection.node;
-    if (perSession.workspaces[selection.key]) {
-      payload.workspace = perSession.workspaces[selection.key];
-      delete perSession.workspaces[selection.key];
-      delete perSession.nodes[selection.key];
-    }
-    if (perSession.backends[selection.key]) {
-      payload.backend = perSession.backends[selection.key];
-      delete perSession.backends[selection.key];
-    }
-    if (perSession.accessProfiles[selection.key]) {
-      payload.access_profile = perSession.accessProfiles[selection.key];
-      delete perSession.accessProfiles[selection.key];
-    }
+    const payload = buildSendPayload(text, fileIDs);
 
     // Mark this tab as the originator BEFORE the request leaves (text or
     // image-only alike): a send_error for this turn can arrive over the WS
@@ -364,89 +436,11 @@ async function sendComposerTurn(targetKey, targetNode) {
     const sentSid = deps.sid(selection.key, selection.node);
     perSession.httpSendPending.add(sentSid);
     const r = await fetch(NZ_CONTRACT.API.sessions_send, {method:'POST', headers, body: JSON.stringify(payload)});
-
     if (!r.ok) {
-      perSession.httpSendPending.delete(sentSid); // rejected synchronously — no async frame will follow
-      if (input) setMsgValue(input, text);
-      rollbackOptimisticRunning(selection.key, selection.node);
-      // Some error paths still write text/plain; fall back to text() so we
-      // always surface the real message instead of a generic "send failed".
-      const raw = await r.text().catch(() => '');
-      let detail = '', filesConsumed = false;
-      try {
-        const j = JSON.parse(raw);
-        if (j && j.error) detail = j.error;
-        if (j && j.files_consumed) filesConsumed = true;
-      } catch (_) { if (raw) detail = raw; }
-      // files_consumed: the server already took the pre-uploaded attachments
-      // out of the uploadStore before rejecting (post-TakeAll 4xx/5xx), so the
-      // chips we still hold reference dead ids — a retry would fail with
-      // "file not found or expired". Drop them and ask for a re-attach.
-      // Pre-TakeAll rejections (and 401/403/429 from the middleware/limiter)
-      // never set the flag, so the user's unsent attachments stay put.
-      if (filesConsumed) {
-        clearPendingFiles();
-        showToast('附件已失效，请重新添加后再发送', 'warning');
-      }
-      if (r.status === 401 || r.status === 403) {
-        deps.showAuthModal();
-        return;
-      }
-      if (r.status === 429) {
-        // The server names the limiter that fired (send vs upload rate limit);
-        // there is no queue-full 429 on this path, so never invent one.
-        showToast(detail || '请求过于频繁，请稍后重试', 'warning');
-        return;
-      }
-      deps.showAPIError('发送消息', r.status, detail);
+      await handleSendRejected(r, sentSid, text, input);
       return;
     }
-
-    // /clear and /new return status:"reset" — no CLI turn to run, so don't
-    // flip to 'running'. Every other success ('accepted'/'queued') should
-    // show the banner immediately. Read the body once (before clearing the
-    // input) so we can branch on status without reviving the stale text.
-    // Record the sent text BEFORE awaiting the body (interrupt re-fill source;
-    // also a secondary onSendError gate).
-    if (text) perSession.lastSent[sentSid] = text;
-    let ackStatus = '';
-    try { const j = await r.json(); if (j && j.status) ackStatus = j.status; } catch (_) {}
-
-    // Clear input only after confirmed success
-    if (input) clearMsg(input);
-    delete perSession.drafts[selection.key];
-    clearPendingFiles();
-    // Confirmed send: the pending maps were consumed above; rewrite the durable
-    // blob without this key. Only on this 2xx path so a failed send keeps the
-    // entry for retry.
-    deps.persistPending();
-    if (ackStatus === 'reset') {
-      // /clear and /new do not spawn a turn — undo the pre-send optimistic flip
-      // so the running banner doesn't hang on a no-op command.
-      rollbackOptimisticRunning(selection.key, selection.node);
-      delete perSession.lastSent[sentSid]; // no turn ran, nothing to re-fill on interrupt
-      perSession.httpSendPending.delete(sentSid);
-    } else {
-      // Optimistic running flip already applied above — keep it.
-      // Optimistic bubble parity with the WS path — but ONLY while WS is
-      // connected: the live event stream (onHistory/onEvent) is what removes
-      // .optimistic-msg when the real "user" event arrives. The WS-down
-      // fallback keeps its legacy no-bubble behaviour (appendEvents also
-      // replaces the bubble now, but the poll echo lags up to a tick).
-      if (wsm.isConnected()) renderOptimisticUserMsg(text);
-    }
-
-    // Speed up polling when WS not connected
-    if (!wsm.isConnected()) {
-      if (timers.events) clearInterval(timers.events);
-      timers.events = setInterval(() => deps.fetchEvents(false), 500);
-      setTimeout(() => {
-        if (timers.events) clearInterval(timers.events);
-        if (!wsm.isConnected()) {
-          timers.events = setInterval(() => deps.fetchEvents(false), 1000);
-        }
-      }, 15000);
-    }
+    await finishHttpSend(r, sentSid, text, input);
   } catch (e) {
     perSession.httpSendPending.delete(deps.sid(selection.key, selection.node));
     if (input) setMsgValue(input, text);

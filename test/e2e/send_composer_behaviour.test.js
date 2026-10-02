@@ -25,29 +25,37 @@ test.beforeEach(({ }, testInfo) => {
 const KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const PROJ = '/home/user/workspace/myproject';
 const SEND = '**/api/sessions/send';
+// A chip's thumbnail must decode: a broken <img> fires a capture-phase error
+// event, and the global handler's toast would race the one under test.
+const PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
 /** @type {Awaited<ReturnType<typeof startMockServer>>} */
 let mock;
 test.beforeAll(async () => { mock = await startMockServer(); });
 test.afterAll(async () => { await new Promise((r) => mock.server.close(r)); });
 
-/** Opens KEY with text in the composer and, when withFile, one uploaded chip. */
-async function compose(page, text, { withFile = false } = {}) {
-  await page.goto(mock.url + '/dashboard');
+/**
+ * Opens KEY with text in the composer and, when withFile (or file, whose
+ * fields override the ready chip's), one uploaded chip; each of more adds
+ * another chip the same way.
+ */
+async function compose(page, text, { withFile = false, file = null, more = [], url = mock.url } = {}) {
+  await page.goto(url + '/dashboard');
   await page.click(`.session-card[data-key="${KEY}"]`);
   await page.waitForSelector('#msg-input');
-  await page.evaluate(({ text, withFile }) => {
+  const chips = [...(file || withFile ? [file || {}] : []), ...more];
+  await page.evaluate(({ text, chips, pixel }) => {
     const t = window.nz.test;
     t.setMsgValue(document.getElementById('msg-input'), text);
-    if (withFile) {
+    chips.forEach((chip, i) => {
       t.pendingFiles.push({
-        id: 'file-1', kind: 'image', status: 'ready', normalizedSize: 16,
+        id: 'file-' + (i + 1), kind: 'image', status: 'ready', normalizedSize: 16,
         file: new File([new Uint8Array(16)], 'photo.png', { type: 'image/png' }),
-        blobUrl: 'data:image/png;base64,iVBORw0KGgo=',
+        blobUrl: pixel, ...chip,
       });
-      t.renderFilePreviews();
-    }
-  }, { text, withFile });
+    });
+    if (chips.length) t.renderFilePreviews();
+  }, { text, chips, pixel: PIXEL });
 }
 
 const send = (page) => page.evaluate(() => window.nz.test.sendMessage());
@@ -55,6 +63,30 @@ const inputText = (page) => page.$eval('#msg-input', (el) => el.innerText.trim()
 const fileCount = (page) => page.evaluate(() => window.nz.test.pendingFiles.length);
 const toast = (page) => page.$eval('#toast', (el) => el.textContent);
 const display = (page, id) => page.evaluate((i) => document.getElementById(i).style.display, id);
+
+/**
+ * Records the delay of every setInterval/setTimeout armed from here on, and
+ * keeps each timeout's callback so fireTimeout can run it early.
+ */
+const spyTimers = (page) => page.evaluate(() => {
+  const w = /** @type {any} */ (window);
+  w.__armed = { interval: [], timeout: [] };
+  w.__timeoutFns = [];
+  for (const [name, list] of [['setInterval', 'interval'], ['setTimeout', 'timeout']]) {
+    const orig = w[name];
+    w[name] = (fn, ms, ...rest) => {
+      w.__armed[list].push(ms);
+      if (list === 'timeout') w.__timeoutFns.push([ms, fn]);
+      return orig(fn, ms, ...rest);
+    };
+  }
+});
+const armedTimers = (page) => page.evaluate(() => /** @type {any} */ (window).__armed);
+/** Runs the callback of the latest timeout armed with delay ms, now. */
+const fireTimeout = (page, ms) => page.evaluate((d) => {
+  const fns = /** @type {any} */ (window).__timeoutFns.filter(([m]) => m === d);
+  fns[fns.length - 1][1]();
+}, ms);
 
 /** The optimistic flip was undone: send is back, stop is gone. */
 async function expectIdle(page) {
@@ -200,6 +232,80 @@ test('the HTTP path keeps a pending session\'s durable entry until a send is acc
   expect(await page.evaluate((k) => window.nz.test.sessionWorkspaces[k], key)).toBeUndefined();
 });
 
+// composerSendBlocked's own two checks (#3025 S19-7): a failed upload and
+// the 9 MB batch cap. Both must stop the send before it ever reaches the
+// network — asserted here via the absence of a POST body, not just the
+// toast — and leave the chip in place for the user to remove or retry.
+test('a failed upload blocks the send and keeps the chip for retry', async ({ page }) => {
+  await compose(page, 'has a bad upload', { file: { id: '', status: 'error', error: 'image decode failed' } });
+  const bodies = await reply(page, 200, { status: 'accepted' });
+  await send(page);
+  expect(bodies).toHaveLength(0);
+  expect(await inputText(page)).toBe('has a bad upload');
+  expect(await fileCount(page)).toBe(1);
+  expect(await toast(page)).toContain('图片上传失败（image decode failed）');
+  await expectIdle(page);
+});
+
+test('a batch over the 9 MB cap blocks the send without touching the server', async ({ page }) => {
+  await compose(page, 'too much', { file: { normalizedSize: 10 * 1024 * 1024 } });
+  const bodies = await reply(page, 200, { status: 'accepted' });
+  await send(page);
+  expect(bodies).toHaveLength(0);
+  expect(await inputText(page)).toBe('too much');
+  expect(await fileCount(page)).toBe(1);
+  expect(await toast(page)).toContain('图片总大小 10 MB 超过 9 MB 上限');
+  await expectIdle(page);
+});
+
+// armFallbackEventPoll: with the socket down nothing pushes the turn's
+// events, so an accepted HTTP send polls them every 500 ms and drops back to
+// the 1 s cadence after 15 s.
+test('with the socket down, an accepted send speeds up event polling for 15 s', async ({ page }) => {
+  await reply(page, 200, { status: 'accepted' });
+  await compose(page, 'poll me');
+  await spyTimers(page);
+  await send(page);
+  const armed = await armedTimers(page);
+  expect(armed.interval).toContain(500);
+  expect(armed.timeout).toContain(15000);
+  // The WS-down fallback keeps its legacy no-bubble behaviour.
+  await expect(page.locator('#events-scroll .optimistic-msg')).toHaveCount(0);
+
+  // After the 15 s window the poll drops back to 1 s, not to 500 ms again.
+  const before = armed.interval.length;
+  await fireTimeout(page, 15000);
+  const rearmed = (await armedTimers(page)).interval.slice(before);
+  expect(rearmed).toContain(1000);
+  expect(rearmed).not.toContain(500);
+});
+
+// finishHttpSend records the sent text before reading the ack: it is what
+// an interrupt puts back into an empty composer.
+test('an accepted HTTP send leaves its text for the interrupt re-fill', async ({ page }) => {
+  await reply(page, 200, { status: 'accepted' });
+  await page.route('**/api/sessions/interrupt', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
+  await compose(page, 'refill me');
+  await send(page);
+  expect(await inputText(page)).toBe('');
+  await page.evaluate(() => window.nz.test.interruptSession());
+  expect(await inputText(page)).toBe('refill me');
+});
+
+// The 9 MB cap is on base64-inflated image bytes only: PDFs and file_ref
+// attachments travel by reference, so their size must not block the send.
+test('PDF and file_ref attachments do not count toward the 9 MB image cap', async ({ page }) => {
+  const big = 10 * 1024 * 1024;
+  await compose(page, 'mixed batch', {
+    withFile: true,
+    more: [{ kind: 'pdf', normalizedSize: big }, { serverKind: 'file_ref', normalizedSize: big }],
+  });
+  const bodies = await reply(page, 200, { status: 'accepted' });
+  await send(page);
+  expect(bodies.map((b) => b.file_ids)).toEqual([['file-1', 'file-2', 'file-3']]);
+  expect(await inputText(page)).toBe('');
+});
+
 test.describe('over the WebSocket', () => {
   /** @type {Awaited<ReturnType<typeof startMockServer>>} */
   let wsMock;
@@ -232,5 +338,65 @@ test.describe('over the WebSocket', () => {
     expect(await blob()).not.toHaveProperty(key);
     expect(await page.evaluate((k) => window.nz.test.sessionWorkspaces[k], key)).toBeUndefined();
     expect(await display(page, 'btn-stop')).toBe('flex');
+  });
+
+  // trySendViaWS declines file-bearing sends even on a live socket: the WS
+  // upload owner is frozen at upgrade time and can diverge from the cookie
+  // the upload used, so attachments always ride the HTTP POST.
+  test('a send carrying files takes HTTP even while the socket is up', async ({ page }) => {
+    await compose(page, 'with a photo', { withFile: true, url: wsMock.url });
+    await page.waitForFunction(() => window.nz.test.wsm.state === window.nz.test.WS_STATES.CONNECTED);
+    const bodies = await reply(page, 200, { status: 'accepted' });
+    await spyTimers(page);
+    await send(page);
+
+    const conn = wsMock.wsConnections[wsMock.wsConnections.length - 1];
+    expect(conn.messages.filter((m) => m.type === 'send')).toHaveLength(0);
+    expect(bodies).toEqual([expect.objectContaining({ key: KEY, text: 'with a photo', file_ids: ['file-1'] })]);
+    expect(await inputText(page)).toBe('');
+    expect(await fileCount(page)).toBe(0);
+    // With the socket live the HTTP path mirrors the WS path's optimistic bubble.
+    await expect(page.locator('#events-scroll .optimistic-msg')).toHaveCount(1);
+    // The live socket pushes the turn's events: no fallback poll.
+    expect((await armedTimers(page)).interval).not.toContain(500);
+  });
+
+  // A send_error frame reaches every tab watching the key; only a tab with
+  // an HTTP send still in flight (httpSendPending) or a turn's text on record
+  // (lastSent) acts on it. An accepted send keeps both; a rejected send and
+  // a reset ack must drop them, or a later frame toasts about a turn that
+  // never ran.
+  test('a late send_error is honoured after an accepted HTTP send, ignored after a rejected or reset one', async ({ page }) => {
+    /** Pushes a send_error for KEY, then a barrier frame; returns every toast shown meanwhile. */
+    const lateSendError = async () => {
+      await page.evaluate(() => {
+        const w = /** @type {any} */ (window);
+        const el = document.getElementById('toast');
+        w.__toasts = [];
+        new MutationObserver(() => w.__toasts.push(el.textContent)).observe(el, { childList: true, characterData: true, subtree: true });
+      });
+      const conn = wsMock.wsConnections[wsMock.wsConnections.length - 1];
+      conn.send({ type: 'send_error', key: KEY, error: 'late failure' });
+      conn.send({ type: 'interrupt_ack', status: 'not_running' });
+      await page.waitForFunction(() => /** @type {any} */ (window).__toasts.includes('会话未在运行，无需中断'));
+      return page.evaluate(() => /** @type {any} */ (window).__toasts);
+    };
+    const opened = (text) => compose(page, text, { withFile: true, url: wsMock.url })
+      .then(() => page.waitForFunction(() => window.nz.test.wsm.state === window.nz.test.WS_STATES.CONNECTED));
+
+    await opened('accepted');
+    await reply(page, 200, { status: 'accepted' });
+    await send(page);
+    expect((await lateSendError()).join('|')).toContain('late failure');
+    await expectIdle(page);
+
+    for (const [text, status, body] of [['rejected', 400, { error: 'workspace rejected' }], ['/clear', 200, { status: 'reset' }]]) {
+      await page.unroute(SEND);
+      await page.goto('about:blank');
+      await opened(text);
+      await reply(page, status, body);
+      await send(page);
+      expect((await lateSendError()).join('|')).not.toContain('late failure');
+    }
   });
 });
