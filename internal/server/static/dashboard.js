@@ -2014,12 +2014,8 @@ function selectSession(key, node) {
 
 // --- Markdown export (UX P2) ---
 
-// MARKDOWN_EXPORT_IGNORE captures event types that carry no user-visible
-// content in the dashboard render path (tool_use + internal agent
-// bookkeeping + the result envelope duplicated by streaming `text`
-// events). The export pipeline drops them to keep the emitted document
-// aligned with what the operator actually read in the UI.
-const MARKDOWN_EXPORT_IGNORE = new Set(['tool_use', 'result', 'agent', 'task_start', 'task_progress', 'task_done', 'thinking', 'ask_question']);
+// Kinds the export drops (clievent kindTable's MarkdownIgnore column says why).
+const MARKDOWN_EXPORT_IGNORE = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_MD_IGNORE);
 
 // sessionMarkdownFilename returns a safe, dated filename for a session
 // export. Strips filesystem-hostile characters from the title and caps
@@ -2098,7 +2094,7 @@ function formatSessionMarkdown(meta, events) {
         lines.push(raw);
       }
       lines.push('');
-    } else if (e.type === 'system' || e.type === 'init') {
+    } else if (e.type === 'system') {
       // Surface system notices as blockquotes so reviewers see session
       // boundaries (init, restart) without mixing them into conversation.
       const summary = e.summary || e.type;
@@ -2937,12 +2933,8 @@ function appendEvents(events) {
   navSync();
 }
 
-// Event types that are tracked in the running banner but never rendered
-// as a chat bubble in the events stream. Kept as a single source of truth
-// so appendEvents / onHistory / preview-poll stay in sync.
-// NOTE: 'todo' is intentionally NOT in this set — TodoWrite updates are
-// rendered as their own chat bubbles via renderTodoList below.
-const INTERNAL_EVENT_TYPES = new Set(['tool_use','result','agent','task_start','task_progress','task_done']);
+// Kinds kept out of the transcript (clievent kindTable's Internal column says why).
+const INTERNAL_EVENT_TYPES = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL);
 // Unified backend behaviour (supersedes Multi-Backend RFC §8.3 D17): both
 // Claude (stream-json) and Kiro (ACP) tool_use events are filtered out of
 // the main transcript so the chat reads cleanly. Transient tool activity
@@ -3341,7 +3333,7 @@ function eventHtml(/** @type {EventEntry} */ e, opts) {
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
   // CLI-synthesised interrupt marker: SIGINT-aborted turn, not user intent.
   if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return '';
-  const icons = {init:ICONS.gear,system:ICONS.gear,user:ICONS.user,text:ICONS.spark,todo:ICONS.todo};
+  const icons = {system:ICONS.gear,user:ICONS.user,text:ICONS.spark,todo:ICONS.todo};
   let icon = icons[e.type] || '';
   // Assistant turns on the claude backend get the clawd mascot instead of
   // the default \u2726 glyph. Other backends (kiro, gemini, ...) keep the glyph

@@ -103,8 +103,8 @@ func IsActivityType(t string) bool { return kindByName[t].Activity }
 
 // IsInternalEventType mirrors the dashboard's isInternalEvent(): true means the
 // UI filters the entry out of the main transcript (KindInfo.Internal).
-// internal/server/internal_event_types_parity_test.go pins it to the
-// dashboard's INTERNAL_EVENT_TYPES.
+// contractjs generates that column into ENUMS.EVENT_TYPE_INTERNAL, which the
+// dashboard's INTERNAL_EVENT_TYPES is built from.
 func IsInternalEventType(t string) bool { return kindByName[t].Internal }
 
 // IsVisibleEntry reports whether the dashboard would render this entry as a
