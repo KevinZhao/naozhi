@@ -12,6 +12,7 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"sync"
@@ -48,6 +49,20 @@ func mergeWithEventLog(eventLogDir, key string, fallback history.Source) history
 	return &merged.Source{
 		Local:    newEventLogLocalSource(eventLogDir, key),
 		Fallback: fallback,
+	}
+}
+
+// fillPersistGaps stores the fallback turns hidden behind persist_gap records
+// of local (the event-log tail tier 1 read, reaching below floor, the oldest
+// injected Time) for withGapFill. No-op unless the source is a merged.Source.
+func (s *ManagedSession) fillPersistGaps(ctx context.Context, local []clievent.EventEntry, floor int64) {
+	ms, ok := s.loadHistorySource().(*merged.Source)
+	if !ok {
+		return
+	}
+	if gf := ms.GapFill(ctx, local, floor, maxPersistedHistory); len(gf) > 0 {
+		s.gapFill.Store(&gf)
+		slog.Info("filled persist gaps from fallback history", "key", s.key, "entries", len(gf))
 	}
 }
 

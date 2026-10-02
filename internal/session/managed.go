@@ -410,6 +410,12 @@ type ManagedSession struct {
 	// pagination reads after the session is reachable.
 	historySource atomic.Pointer[historySourceBox]
 
+	// gapFill holds the fallback turns behind persist_gap records of the
+	// injected event-log tail, oldest first (fillPersistGaps). Read paths
+	// splice them into memory pages via withGapFill; persistedHistory never
+	// holds them.
+	gapFill atomic.Pointer[[]clievent.EventEntry]
+
 	// storeMarshalCache memoizes the last (storeEntry → JSON) result so
 	// saveStore skips re-marshalling unchanged sessions (#1523). Keyed on the
 	// storeEntry value via equalStoreEntry, so any persisted-field change

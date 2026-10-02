@@ -93,6 +93,9 @@ var wireEgress = wireEgressRules{
 	Generics: []string{
 		"slices.Reverse", "slices.IsSortedFunc", "slices.SortStableFunc",
 		"slices.BinarySearchFunc", "slices.Clone",
+		// A holder: Store / Load encode nothing, and what Load returns is
+		// checked wherever it egresses.
+		"sync/atomic.Pointer",
 	},
 	Sentinels: []egressSentinel{
 		{"internal/server", "(*internal/server.wsClient).SendJSON"},
