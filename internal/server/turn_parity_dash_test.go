@@ -200,7 +200,10 @@ func TestTurnParity09_Dash_DetachedTurnPanicCrashesProcess(t *testing.T) {
 		ws := h.ws()
 		ws.send("w1", "hello")
 		turns.turn(t, "turn", parityOutcome{Panic: "parity-row09-unrecovered"})
+		// The goroutine's deferred release runs while the panic unwinds, so an
+		// idle engine is no proof of survival; outlast the crash instead.
 		h.waitEngineIdle()
+		<-time.After(2 * time.Second)
 		t.Log("parity-row09-survived")
 		return
 	}
@@ -209,7 +212,7 @@ func TestTurnParity09_Dash_DetachedTurnPanicCrashesProcess(t *testing.T) {
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()
-	if err == nil || strings.Contains(out.String(), "parity-row09-survived") {
+	if err == nil || strings.Contains(out.String(), "--- PASS: TestTurnParity09_Dash") {
 		t.Fatalf("child survived a dashboard passthrough-turn panic (err=%v):\n%s", err, out.String())
 	}
 	if !strings.Contains(out.String(), "panic: parity-row09-unrecovered") {
