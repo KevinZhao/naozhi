@@ -121,6 +121,15 @@ func TestHubShutdown_SendDrainPositionInSource(t *testing.T) {
 	if next := strings.Index(sd[1:], "\nfunc "); next >= 0 {
 		sd = sd[:next+1]
 	}
+	// Match calls, not prose: Shutdown's comments name these markers too, so a
+	// deleted call could otherwise be "found" in the comment that explains it.
+	lines := strings.Split(sd, "\n")
+	for i, line := range lines {
+		if j := strings.Index(line, "//"); j >= 0 {
+			lines[i] = line[:j]
+		}
+	}
+	sd = strings.Join(lines, "\n")
 
 	// Ordered low → high, each with the reason a violation breaks something.
 	steps := []struct{ marker, why string }{
