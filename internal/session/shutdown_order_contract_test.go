@@ -26,20 +26,20 @@ func TestShutdown_HistoryCtxCancelledFirst(t *testing.T) {
 	// Sanity: the router was constructed without NewRouter, so historyCtx
 	// was never wired. Supply one so the test exercises the real cancel path
 	// rather than the nil-guard short-circuit.
-	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
+	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
 
 	// Observe historyCtx from a witness goroutine. It must fire before
 	// Shutdown returns. We synchronise via a channel so the test does not
 	// depend on Go's scheduler fairness.
 	ctxDone := make(chan struct{})
 	go func() {
-		<-r.historyCtx.Done()
+		<-r.hist.ctx.Done()
 		close(ctxDone)
 	}()
 
 	// Sanity: before Shutdown, the ctx is live.
 	select {
-	case <-r.historyCtx.Done():
+	case <-r.hist.ctx.Done():
 		t.Fatal("historyCtx fired before Shutdown was called")
 	case <-time.After(20 * time.Millisecond):
 	}
@@ -61,7 +61,7 @@ func TestShutdown_HistoryCtxCancelledFirst(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("historyCtx was NOT cancelled within 5s of Shutdown starting — " +
 			"the R172-ARCH-D11 ordering contract was broken. shutdown() must " +
-			"call r.historyCancel() BEFORE blocking on historyWg.Wait().")
+			"call r.hist.cancel() BEFORE blocking on historyWg.Wait().")
 	}
 
 	// Let Shutdown finish (it will; no running sessions) with a hard cap.
@@ -75,7 +75,7 @@ func TestShutdown_HistoryCtxCancelledFirst(t *testing.T) {
 
 // TestShutdown_CancelBeforeWait_KeepsShutdownFast is the behavioural replacement
 // for TestShutdown_HistoryCtxCancelPreceedsHistoryWgWait, whose regexp asserted
-// that r.historyCancel() appears before r.historyWg.Wait() in shutdown()'s source
+// that r.hist.cancel() appears before r.hist.wg.Wait() in shutdown()'s source
 // (Epic I #2547).
 //
 // That anchor's own comment said the sibling test above "catches a regression that
@@ -90,15 +90,15 @@ func TestShutdown_HistoryCtxCancelledFirst(t *testing.T) {
 func TestShutdown_CancelBeforeWait_KeepsShutdownFast(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
-	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
+	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
 
 	// An in-flight history load: holds historyWg, parks on historyCtx.
 	started := make(chan struct{})
-	r.historyWg.Add(1)
+	r.hist.wg.Add(1)
 	go func() {
-		defer r.historyWg.Done()
+		defer r.hist.wg.Done()
 		close(started)
-		<-r.historyCtx.Done()
+		<-r.hist.ctx.Done()
 	}()
 	<-started
 
@@ -114,7 +114,7 @@ func TestShutdown_CancelBeforeWait_KeepsShutdownFast(t *testing.T) {
 	// Premise: the task must actually have been released, or a fast Shutdown would
 	// mean the wait was skipped rather than satisfied.
 	select {
-	case <-r.historyCtx.Done():
+	case <-r.hist.ctx.Done():
 	default:
 		t.Error("historyCtx was never cancelled; Shutdown returned without releasing the in-flight load")
 	}

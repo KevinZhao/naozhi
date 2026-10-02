@@ -10,7 +10,7 @@ func TestNewRouter_KeepsItsOwnBackendDirs(t *testing.T) {
 	r := NewRouter(RouterConfig{BackendDirs: dirs})
 	t.Cleanup(r.Shutdown)
 	dirs["kiro"] = "/elsewhere"
-	if got := r.backendDirs["kiro"]; got != "/kiro/sessions" {
+	if got := r.hist.backendDirs["kiro"]; got != "/kiro/sessions" {
 		t.Errorf("router kiro dir = %q after the caller's map changed, want /kiro/sessions", got)
 	}
 }

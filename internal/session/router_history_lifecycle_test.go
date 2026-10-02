@@ -12,15 +12,15 @@ import (
 // must be refused rather than spawned past historyWg.Wait().
 func TestRunHistoryTask_SkipsAfterCancel(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
-	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
-	r.historyCancel()
+	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
+	r.hist.cancel()
 
 	var ran atomic.Bool
-	if r.runHistoryTask(func(_ context.Context) { ran.Store(true) }) {
+	if r.hist.runHistoryTask(func(_ context.Context) { ran.Store(true) }) {
 		t.Fatal("runHistoryTask returned true after historyCtx cancelled — must refuse")
 	}
 	// runHistoryTask returned false synchronously, no goroutine launched.
-	r.historyWg.Wait()
+	r.hist.wg.Wait()
 	if ran.Load() {
 		t.Fatal("task body ran after historyCtx was cancelled")
 	}
@@ -36,13 +36,13 @@ func TestRunHistoryTask_SkipsAfterCancel(t *testing.T) {
 // no-op on the counter, so the sequence is safe.
 func TestRunHistoryTask_CancelledPathDoesNotTouchWaitGroup(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
-	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
+	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
 
 	// Drain the WaitGroup once so a stray Add() after this point would be a
 	// reuse-before-Wait violation.
-	r.historyWg.Wait()
+	r.hist.wg.Wait()
 
-	r.historyCancel()
+	r.hist.cancel()
 
 	// Refused spawn must not Add to (and then Done) the freshly-drained WG.
 	// If runHistoryTask did Add(1) here it would either panic on reuse or
@@ -54,11 +54,11 @@ func TestRunHistoryTask_CancelledPathDoesNotTouchWaitGroup(t *testing.T) {
 		}
 	}()
 
-	if r.runHistoryTask(func(_ context.Context) {}) {
+	if r.hist.runHistoryTask(func(_ context.Context) {}) {
 		t.Fatal("runHistoryTask returned true after historyCtx cancelled — must refuse")
 	}
 	// Must not block: counter must still be zero (no transient Add leaked).
-	r.historyWg.Wait()
+	r.hist.wg.Wait()
 }
 
 // TestRunHistoryTask_RunsAndPropagatesCtx confirms the happy path: the
@@ -66,14 +66,14 @@ func TestRunHistoryTask_CancelledPathDoesNotTouchWaitGroup(t *testing.T) {
 // it returns.
 func TestRunHistoryTask_RunsAndPropagatesCtx(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
-	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
-	defer r.historyCancel()
+	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
+	defer r.hist.cancel()
 
 	done := make(chan struct{})
 	var sawCtx atomic.Bool
-	if !r.runHistoryTask(func(ctx context.Context) {
+	if !r.hist.runHistoryTask(func(ctx context.Context) {
 		// Confirm we got the historyCtx, not Background.
-		if ctx == r.historyCtx {
+		if ctx == r.hist.ctx {
 			sawCtx.Store(true)
 		}
 		close(done)
@@ -85,9 +85,9 @@ func TestRunHistoryTask_RunsAndPropagatesCtx(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("task did not run within 1s")
 	}
-	r.historyWg.Wait() // must not deadlock — Done was deferred inside runHistoryTask
+	r.hist.wg.Wait() // must not deadlock — Done was deferred inside runHistoryTask
 	if !sawCtx.Load() {
-		t.Fatal("task body did not receive r.historyCtx")
+		t.Fatal("task body did not receive r.hist.ctx")
 	}
 }
 
@@ -99,7 +99,7 @@ func TestRunHistoryTask_NilCtxFallsBackToBackground(t *testing.T) {
 	r := &Router{ss: newSessionTable()} // historyCtx left nil
 
 	done := make(chan struct{})
-	if !r.runHistoryTask(func(ctx context.Context) {
+	if !r.hist.runHistoryTask(func(ctx context.Context) {
 		if ctx == nil {
 			t.Error("nil-historyCtx fallback passed nil ctx to fn; want context.Background")
 		}
@@ -112,5 +112,5 @@ func TestRunHistoryTask_NilCtxFallsBackToBackground(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("task did not run within 1s")
 	}
-	r.historyWg.Wait()
+	r.hist.wg.Wait()
 }

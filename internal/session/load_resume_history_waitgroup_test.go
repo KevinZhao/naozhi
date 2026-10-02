@@ -41,17 +41,17 @@ func TestLoadResumeHistoryOnSpawn_CancelledPathDoesNotTouchWaitGroup(t *testing.
 	// Wait/Add never overlap. Many iterations make the window deterministic
 	// under -race.
 	for iter := 0; iter < 300; iter++ {
-		r := &Router{ss: newSessionTable(), claudeDir: "/tmp/does-not-matter"}
-		r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
-		r.historyCancel() // Shutdown signalled before the spawn lands.
+		r := &Router{ss: newSessionTable(), hist: HistoryIO{claudeDir: "/tmp/does-not-matter"}}
+		r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
+		r.hist.cancel() // Shutdown signalled before the spawn lands.
 
 		panicCh := make(chan any, 2)
 		start := make(chan struct{})
 		var done sync.WaitGroup
 		done.Add(2)
 
-		// Detached Wait, like shutdown()'s `go r.historyWg.Wait()`.
-		wg := &r.historyWg
+		// Detached Wait, like shutdown()'s `go r.hist.wg.Wait()`.
+		wg := &r.hist.wg
 		go func() {
 			defer done.Done()
 			defer func() {
@@ -72,7 +72,7 @@ func TestLoadResumeHistoryOnSpawn_CancelledPathDoesNotTouchWaitGroup(t *testing.
 				}
 			}()
 			<-start
-			r.loadResumeHistoryOnSpawn(context.Background(), &ManagedSession{key: "k"}, "k", "resume-id", "/ws", nil, nil)
+			r.hist.loadResumeHistoryOnSpawn(context.Background(), &ManagedSession{key: "k"}, "k", "resume-id", "/ws", nil, nil)
 		}()
 
 		close(start)
@@ -101,11 +101,10 @@ func TestLoadResumeHistoryOnSpawn_CancelledPathDoesNotTouchWaitGroup(t *testing.
 func TestLoadResumeHistoryOnSpawn_CancelDuringSpawnNoPanic(t *testing.T) {
 	for iter := 0; iter < 300; iter++ {
 		r := &Router{
-			ss:            newSessionTable(),
-			claudeDir:     "/tmp/does-not-matter",
-			historyLoader: stubHistoryLoader{entries: mkEntries("h", 1)},
+			ss:   newSessionTable(),
+			hist: HistoryIO{claudeDir: "/tmp/does-not-matter", loader: stubHistoryLoader{entries: mkEntries("h", 1)}},
 		}
-		r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
+		r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
 
 		panicCh := make(chan any, 2)
 		start := make(chan struct{})
@@ -121,10 +120,10 @@ func TestLoadResumeHistoryOnSpawn_CancelDuringSpawnNoPanic(t *testing.T) {
 				}
 			}()
 			<-start
-			r.loadResumeHistoryOnSpawn(context.Background(), &ManagedSession{key: "k"}, "k", "resume-id", "/ws", nil, nil)
+			r.hist.loadResumeHistoryOnSpawn(context.Background(), &ManagedSession{key: "k"}, "k", "resume-id", "/ws", nil, nil)
 		}()
 
-		// Shutdown side: locked cancel (router_cleanup.go) then detached Wait.
+		// Shutdown side: the locked cancel shutdown() runs, then a detached Wait.
 		go func() {
 			defer done.Done()
 			defer func() {
@@ -133,10 +132,8 @@ func TestLoadResumeHistoryOnSpawn_CancelDuringSpawnNoPanic(t *testing.T) {
 				}
 			}()
 			<-start
-			r.historyWgMu.Lock()
-			r.historyCancel()
-			r.historyWgMu.Unlock()
-			r.historyWg.Wait()
+			r.hist.cancelTasks()
+			r.hist.wg.Wait()
 		}()
 
 		close(start)
@@ -156,22 +153,21 @@ func TestLoadResumeHistoryOnSpawn_CancelDuringSpawnNoPanic(t *testing.T) {
 func TestLoadResumeHistoryOnSpawn_LivePathLoadsAndAccounts(t *testing.T) {
 	called := make(chan struct{})
 	r := &Router{
-		ss:            newSessionTable(),
-		claudeDir:     "/tmp/does-not-matter",
-		historyLoader: stubHistoryLoader{entries: mkEntries("h", 3), called: called},
+		ss:   newSessionTable(),
+		hist: HistoryIO{claudeDir: "/tmp/does-not-matter", loader: stubHistoryLoader{entries: mkEntries("h", 3), called: called}},
 	}
-	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
-	defer r.historyCancel()
+	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
+	defer r.hist.cancel()
 
 	s := &ManagedSession{key: "k"}
-	r.loadResumeHistoryOnSpawn(context.Background(), s, "k", "resume-id", "/ws", nil, nil)
+	r.hist.loadResumeHistoryOnSpawn(context.Background(), s, "k", "resume-id", "/ws", nil, nil)
 
 	select {
 	case <-called:
 	case <-time.After(2 * time.Second):
 		t.Fatal("history loader was not invoked on the live path")
 	}
-	r.historyWg.Wait() // must not deadlock — Done deferred inside the IIFE
+	r.hist.wg.Wait() // must not deadlock — Done deferred inside the IIFE
 
 	if got := len(s.EventEntries()); got != 3 {
 		t.Fatalf("live path injected %d entries, want 3", got)
@@ -181,11 +177,11 @@ func TestLoadResumeHistoryOnSpawn_LivePathLoadsAndAccounts(t *testing.T) {
 // TestLoadResumeHistoryOnSpawn_NoResumeIDIsNoOp guards the early-return
 // preconditions so the WaitGroup is never touched when there's nothing to load.
 func TestLoadResumeHistoryOnSpawn_NoResumeIDIsNoOp(t *testing.T) {
-	r := &Router{ss: newSessionTable(), claudeDir: "/tmp/x"}
-	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
-	defer r.historyCancel()
-	r.historyWg.Wait()
+	r := &Router{ss: newSessionTable(), hist: HistoryIO{claudeDir: "/tmp/x"}}
+	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
+	defer r.hist.cancel()
+	r.hist.wg.Wait()
 
-	r.loadResumeHistoryOnSpawn(context.Background(), &ManagedSession{key: "k"}, "k", "", "/ws", nil, nil)
-	r.historyWg.Wait() // zero counter, no block
+	r.hist.loadResumeHistoryOnSpawn(context.Background(), &ManagedSession{key: "k"}, "k", "", "/ws", nil, nil)
+	r.hist.wg.Wait() // zero counter, no block
 }

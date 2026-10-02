@@ -97,6 +97,20 @@ func (b *BackendRegistry) wrapperFor(backend string) (*cli.Wrapper, string) {
 	return b.bk.WrapperFor(backend)
 }
 
+// sourceWrapperFor returns the wrapper whose history reader serves a session
+// on backend ("" = the default ID): that backend's row, else the fallback
+// wrapper. Unlike wrapperFor it does not try the default backend's row for an
+// unknown ID, so a misconfigured Backend() still gets a usable source.
+func (b *BackendRegistry) sourceWrapperFor(backend string) *cli.Wrapper {
+	if backend == "" {
+		backend = b.bk.DefaultID()
+	}
+	if w := b.bk.Runtime(backend).Wrapper; w != nil {
+		return w
+	}
+	return b.bk.Fallback()
+}
+
 // managerFor returns the shim.Manager for the given backend ID (empty = router
 // default). Returns nil when none is configured, so callers must guard.
 func (b *BackendRegistry) managerFor(backend string) *shim.Manager {

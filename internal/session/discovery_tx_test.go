@@ -184,7 +184,7 @@ func TestNewRouter_RestoresTheStore(t *testing.T) {
 		HistoryLoader: loader,
 	})
 	t.Cleanup(r.Shutdown)
-	r.historyWg.Wait() // history loaders and the orphan sweep
+	r.hist.wg.Wait() // history loaders and the orphan sweep
 
 	if got := r.Workspace("feishu:direct:restored"); got != "/srv/override" {
 		t.Errorf("Workspace = %q, want the stored override", got)

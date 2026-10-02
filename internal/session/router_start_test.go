@@ -10,7 +10,7 @@ import (
 // lifecycle hook extracted from NewRouter for R245-ARCH-46 / #906) is
 // idempotent. It is guarded by startOnce (R20260607-ARCH-1), so repeated
 // calls must not spawn redundant orphan sweeps or overwrite
-// r.attachmentTracker (which would leak the first tracker's goroutine).
+// r.hist.tracker (which would leak the first tracker's goroutine).
 func TestRouter_Start_Idempotent(t *testing.T) {
 	tmp := t.TempDir()
 	r := NewRouter(RouterConfig{
@@ -23,13 +23,13 @@ func TestRouter_Start_Idempotent(t *testing.T) {
 
 	// NewRouter already consumed startOnce via startBackgroundLifecycle.
 	// Capture the tracker pointer installed at construction time.
-	trackerAfterNew := r.attachmentTracker
+	trackerAfterNew := r.hist.tracker
 
 	// Subsequent calls must be no-ops: startOnce.Do skips the body.
 	r.startBackgroundLifecycle()
 	r.startBackgroundLifecycle()
 
-	if r.attachmentTracker != trackerAfterNew {
+	if r.hist.tracker != trackerAfterNew {
 		t.Error("startBackgroundLifecycle called multiple times overwrote attachmentTracker — startOnce guard not working (R20260607-ARCH-1)")
 	}
 }
@@ -49,7 +49,7 @@ func TestRouter_Start_NoEventLogDir(t *testing.T) {
 
 	r.startBackgroundLifecycle()
 
-	if r.attachmentTracker != nil {
+	if r.hist.tracker != nil {
 		t.Error("attachmentTracker should be nil when eventLogDir is unset")
 	}
 }

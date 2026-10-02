@@ -35,12 +35,12 @@ func (f *fakeHistoryLoader) LoadHistoryChainTail(_ context.Context, _ string, id
 func TestNewRouter_HistoryLoaderDefault(t *testing.T) {
 	t.Parallel()
 	r := NewRouter(RouterConfig{})
-	if r.historyLoader == nil {
+	if r.hist.loader == nil {
 		t.Fatal("NewRouter left historyLoader nil; expected claudeTranscriptLoader default")
 	}
-	l, ok := r.historyLoader.(claudeTranscriptLoader)
+	l, ok := r.hist.loader.(claudeTranscriptLoader)
 	if !ok {
-		t.Fatalf("default historyLoader = %T, want claudeTranscriptLoader", r.historyLoader)
+		t.Fatalf("default historyLoader = %T, want claudeTranscriptLoader", r.hist.loader)
 	}
 	if l.pick == nil {
 		t.Fatal("default claudeTranscriptLoader.pick is nil, want history.PickFactory")
@@ -143,11 +143,11 @@ func TestNewRouter_HistoryLoaderInjected(t *testing.T) {
 	want := []clievent.EventEntry{{Time: 1, Type: "user", Summary: "hi"}}
 	fake := &fakeHistoryLoader{entries: want}
 	r := NewRouter(RouterConfig{HistoryLoader: fake})
-	if r.historyLoader != fake {
-		t.Fatalf("historyLoader = %p, want injected fake %p", r.historyLoader, fake)
+	if r.hist.loader != fake {
+		t.Fatalf("historyLoader = %p, want injected fake %p", r.hist.loader, fake)
 	}
 
-	got := r.historyLoader.LoadHistoryChainTail(context.Background(), "/claude", []string{"sid"}, "/ws", 10)
+	got := r.hist.loader.LoadHistoryChainTail(context.Background(), "/claude", []string{"sid"}, "/ws", 10)
 	if fake.calls != 1 {
 		t.Fatalf("loader call count = %d, want 1", fake.calls)
 	}

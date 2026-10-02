@@ -36,10 +36,10 @@ func TestShimReconnect_NoDoubleInjectContract(t *testing.T) {
 	// Locate the JSONL-load block: the load site is uniquely identified by
 	// the LoadHistoryChainTail + claudeDir guard pair. Walk every guard
 	// in the file and verify the fix invariants near each one. Since #458
-	// the load goes through the injected r.historyLoader.LoadHistoryChainTail
+	// the load goes through the injected r.hist.loader.LoadHistoryChainTail
 	// rather than discovery.LoadHistoryChainTailCtx; matching the shorter
 	// "LoadHistoryChainTail" substring keeps the pin stable across both.
-	const guard = "if r.claudeDir != \"\""
+	const guard = "if r.hist.claudeDir != \"\""
 	idx := 0
 	checked := 0
 	for {
@@ -101,7 +101,7 @@ func TestShimReconnect_NoDoubleInjectContract(t *testing.T) {
 
 	if checked == 0 {
 		t.Fatal("router_shim.go has no JSONL-load block matching the " +
-			"`if r.claudeDir != \"\"` + LoadHistoryChainTail shape. " +
+			"`if r.hist.claudeDir != \"\"` + LoadHistoryChainTail shape. " +
 			"If the load site moved, update this contract test to find " +
 			"its new shape.")
 	}

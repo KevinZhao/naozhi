@@ -367,7 +367,7 @@ func gapLoaderRouter(t *testing.T, key string, records []string, times []int64, 
 	}
 	hctx, hcancel := context.WithCancel(context.Background())
 	t.Cleanup(hcancel)
-	r := &Router{ss: newSessionTable(), historyCtx: hctx, eventLogPersister: p, eventLogDir: dir}
+	r := &Router{ss: newSessionTable(), hist: HistoryIO{ctx: hctx, persister: p, eventLogDir: dir}}
 	s := &ManagedSession{key: key}
 	s.SetHistorySource(&merged.Source{Local: newEventLogLocalSource(dir, key), Fallback: fb})
 	r.ss.Update(func(tx sessTx) { tx.Put(key, s) })
@@ -405,7 +405,7 @@ func TestPersistGapFill_InjectDoesNotWait(t *testing.T) {
 	testhelper.Eventually(t, s.hasInjectedHistory, 5*time.Second,
 		"tier 1 did not inject while the fallback read was blocked")
 	release()
-	r.historyWg.Wait()
+	r.hist.wg.Wait()
 
 	page, _ := s.EventInitialPageCtx(context.Background(), DefaultVisibleTarget, 0)
 	got := map[string]int{}
@@ -449,7 +449,7 @@ func TestPersistGapFill_GapRecordBelowCut(t *testing.T) {
 	close(fb.release)
 	r, s := gapLoaderRouter(t, key, records, times, fb)
 	r.startBackgroundHistoryLoaders()
-	r.historyWg.Wait()
+	r.hist.wg.Wait()
 
 	mem := s.SnapshotPersistedHistory()
 	if len(mem) != maxPersistedHistory || mem[0].UUID != "t0" || mem[len(mem)-1].UUID != fmt.Sprintf("t%d", maxPersistedHistory-1) {

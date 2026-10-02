@@ -2191,12 +2191,12 @@ func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
 		})
 		r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 		stateOf(r).picks.backend = make(map[string]string)
-		r.claudeDir = t.TempDir() // empty: no claude jsonl exists anywhere
+		r.hist.claudeDir = t.TempDir() // empty: no claude jsonl exists anywhere
 		kiroDir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(kiroDir, kiroSID+".json"), []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		r.backendDirs = map[string]string{"kiro": kiroDir}
+		r.hist.backendDirs = map[string]string{"kiro": kiroDir}
 		return r
 	}
 
@@ -2333,7 +2333,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 	t.Run("invalid resumeID downgrades to empty", func(t *testing.T) {
 		// claudeDir + workspace set, jsonl missing → resolveResumeID returns "".
 		r := mkRouter()
-		r.claudeDir = t.TempDir()
+		r.hist.claudeDir = t.TempDir()
 		sp := resolveT(r, "feishu:user:bob:agent1",
 			"00000000-0000-0000-0000-000000000000", AgentOpts{Workspace: "/some/ws"})
 		if sp.ResumeID != "" {

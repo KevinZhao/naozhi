@@ -37,12 +37,12 @@ func TestRouter_InjectedPersister_Wins(t *testing.T) {
 	})
 	t.Cleanup(r.Shutdown)
 
-	if r.eventLogPersister == nil {
+	if r.hist.persister == nil {
 		t.Fatal("eventLogPersister is nil despite EventLogPersister injected")
 	}
-	if r.eventLogPersister != p {
+	if r.hist.persister != p {
 		t.Errorf("router did not adopt injected persister: got %p want %p",
-			r.eventLogPersister, p)
+			r.hist.persister, p)
 	}
 }
 
@@ -58,7 +58,7 @@ func TestRouter_NoPersisterWhenNeitherSet(t *testing.T) {
 		StorePath: filepath.Join(tmp, "sessions.json"),
 	})
 	t.Cleanup(r.Shutdown)
-	if r.eventLogPersister != nil {
+	if r.hist.persister != nil {
 		t.Error("eventLogPersister should be nil when neither dir nor injected persister set")
 	}
 }

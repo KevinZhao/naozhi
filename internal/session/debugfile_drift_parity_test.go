@@ -50,7 +50,7 @@ func mkClaudeDriftRouter(t *testing.T, debugDir string) *Router {
 	stateOf(r).picks.backend = make(map[string]string)
 	r.setBackendEffortsForTest(make(map[string]string))
 	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "claude-sonnet-5" })
-	r.claudeDir = t.TempDir()
+	r.hist.claudeDir = t.TempDir()
 	r.cliDebugDir = debugDir
 	return r
 }

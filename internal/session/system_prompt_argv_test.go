@@ -43,8 +43,8 @@ func mkSystemPromptRouter(t *testing.T) *Router {
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)
-	r.claudeDir = t.TempDir()
-	r.backendDirs = map[string]string{"kiro": t.TempDir()}
+	r.hist.claudeDir = t.TempDir()
+	r.hist.backendDirs = map[string]string{"kiro": t.TempDir()}
 	return r
 }
 

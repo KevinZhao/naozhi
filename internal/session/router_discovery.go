@@ -375,7 +375,7 @@ func (r *Router) refreshStub(tx sessTx, existing *ManagedSession, workspace, las
 		existing.ReplacePrevSessionIDs(chainIDs)
 		// workspace 变了 historySource 里也要刷（cwd 变化会导致
 		// projDirName 命中不同的 claude 项目目录）。
-		r.attachHistorySource(existing)
+		r.hist.attachHistorySource(existing, r.backends.sourceWrapperFor(existing.Backend()))
 		changed = true
 	}
 	// Only mark dirty when something changed: the cron scheduler re-registers

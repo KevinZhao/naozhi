@@ -11,6 +11,7 @@ import (
 	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // routerWithWorkspace spins up a Router with a session whose
@@ -78,8 +79,8 @@ func TestTrackerIntegration_BumpsMetaThroughSink(t *testing.T) {
 
 	// Build the same sink installPersistSink would install.
 	sink := newEventLogSink(
-		r.eventLogPersister.SinkFor(key),
-		r.attachmentTracker,
+		r.hist.persister.SinkFor(key),
+		r.hist.tracker,
 		persist.KeyHash(key),
 	)
 	// Fire a live event carrying the attachment path.
@@ -96,8 +97,8 @@ func TestTrackerIntegration_BumpsMetaThroughSink(t *testing.T) {
 	// deterministic.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = r.eventLogPersister.Flush(ctx)
-	if err := r.attachmentTracker.Flush(ctx); err != nil {
+	_ = r.hist.persister.Flush(ctx)
+	if err := r.hist.tracker.Flush(ctx); err != nil {
 		t.Fatalf("tracker.Flush: %v", err)
 	}
 
@@ -115,6 +116,48 @@ func TestTrackerIntegration_BumpsMetaThroughSink(t *testing.T) {
 	}
 }
 
+// TestTrackerIntegration_InstalledSinksBumpMeta: the sink pair the spawn
+// path installs (installPersistSink → bindPersistSink) carries the tracker on
+// both of its paths. Append goes through the single-entry sink, a two-entry
+// AppendBatch through the batch sink; each references its own attachment, so
+// a sink built without the tracker leaves that attachment's .meta unbumped.
+func TestTrackerIntegration_InstalledSinksBumpMeta(t *testing.T) {
+	ws := t.TempDir()
+	key := "dashboard:direct:alice:installed"
+	r, _ := routerWithWorkspace(t, ws, key)
+
+	now := time.Now().UTC()
+	day := now.Format("2006-01-02")
+	relOne, metaOne := writeAttachmentPair(t, ws, day, "one", now)
+	relBatch, metaBatch := writeAttachmentPair(t, ws, day, "batch", now)
+
+	log := ring.NewEventLog(16)
+	r.History().bindPersistSink(log, key)
+	log.Append(clievent.EventEntry{UUID: "single", Time: 1700000000000, Type: "user", ImagePaths: []string{relOne}})
+	log.AppendBatch([]clievent.EventEntry{
+		{UUID: "batch-a", Time: 1700000000001, Type: "user", Summary: "no image"},
+		{UUID: "batch-b", Time: 1700000000002, Type: "user", ImagePaths: []string{relBatch}},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.hist.persister.Flush(ctx)
+	if err := r.hist.tracker.Flush(ctx); err != nil {
+		t.Fatalf("tracker.Flush: %v", err)
+	}
+	for _, c := range []struct{ path, via string }{{metaOne, "Append (single-entry sink)"}, {metaBatch, "AppendBatch (batch sink)"}} {
+		raw, err := os.ReadFile(c.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m attachment.Meta
+		_ = json.Unmarshal(raw, &m)
+		if !m.HasReference(persist.KeyHash(key)) {
+			t.Errorf("attachment written via %s: meta missing keyhash reference: %+v", c.via, m)
+		}
+	}
+}
+
 // TestTrackerIntegration_ReplayPhaseSkipsBump: a replay-phase batch
 // must NOT update the tracker (would inflate LastReferencedAt with
 // a fresh time and defeat the refTTL expiry).
@@ -127,8 +170,8 @@ func TestTrackerIntegration_ReplayPhaseSkipsBump(t *testing.T) {
 	rel, metaPath := writeAttachmentPair(t, ws, now.Format("2006-01-02"), "r1", now)
 
 	sink := newEventLogSink(
-		r.eventLogPersister.SinkFor(key),
-		r.attachmentTracker,
+		r.hist.persister.SinkFor(key),
+		r.hist.tracker,
 		persist.KeyHash(key),
 	)
 	sink([]clievent.EventEntry{{
@@ -138,8 +181,8 @@ func TestTrackerIntegration_ReplayPhaseSkipsBump(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = r.eventLogPersister.Flush(ctx)
-	_ = r.attachmentTracker.Flush(ctx)
+	_ = r.hist.persister.Flush(ctx)
+	_ = r.hist.tracker.Flush(ctx)
 
 	raw, _ := os.ReadFile(metaPath)
 	var m attachment.Meta
@@ -164,16 +207,16 @@ func TestTrackerIntegration_RemoveClearsRefs(t *testing.T) {
 	rel, metaPath := writeAttachmentPair(t, ws, now.Format("2006-01-02"), "rm", now)
 
 	sink := newEventLogSink(
-		r.eventLogPersister.SinkFor(key),
-		r.attachmentTracker,
+		r.hist.persister.SinkFor(key),
+		r.hist.tracker,
 		persist.KeyHash(key),
 	)
 	sink([]clievent.EventEntry{{UUID: "u", Time: 1, Type: "user", ImagePaths: []string{rel}}}, false)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = r.eventLogPersister.Flush(ctx)
-	_ = r.attachmentTracker.Flush(ctx)
+	_ = r.hist.persister.Flush(ctx)
+	_ = r.hist.tracker.Flush(ctx)
 
 	// Pre-condition: keyhash present.
 	raw, _ := os.ReadFile(metaPath)
@@ -193,14 +236,14 @@ func TestTrackerIntegration_RemoveClearsRefs(t *testing.T) {
 	}
 
 	// Remove the session → OnSessionRemoved walks ws and clears.
-	if r.attachmentTracker == nil {
+	if r.hist.tracker == nil {
 		t.Fatalf("attachment tracker not initialized")
 	}
-	beforeStats := r.attachmentTracker.Stats()
+	beforeStats := r.hist.tracker.Stats()
 	if !r.Remove(key) {
 		t.Fatal("Remove returned false")
 	}
-	afterStats := r.attachmentTracker.Stats()
+	afterStats := r.hist.tracker.Stats()
 	t.Logf("tracker stats before=%+v after=%+v", beforeStats, afterStats)
 
 	// Re-read into a fresh Meta. json.Unmarshal does NOT zero
@@ -226,7 +269,7 @@ func TestTrackerIntegration_DisabledConfig(t *testing.T) {
 		// EventLogDir empty → tracker disabled.
 	})
 	t.Cleanup(r.Shutdown)
-	if r.attachmentTracker != nil {
+	if r.hist.tracker != nil {
 		t.Fatal("tracker created despite disabled event log")
 	}
 
