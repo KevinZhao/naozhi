@@ -40,6 +40,15 @@ type TestProcess struct {
 	// ShadowVal is returned once by TakeShadowUsage (partial-turn accounting).
 	ShadowVal clievent.ShadowUsage
 	SendFunc  func(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
+	// PassthroughVal is what SupportsPassthrough reports; true routes a
+	// passthrough-mode turn to SendPassthrough instead of Send.
+	PassthroughVal bool
+	// SendPassthroughFunc, when set, handles SendPassthrough with the turn's
+	// priority; nil falls back to Send.
+	SendPassthroughFunc func(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error)
+	// InterruptViaControlFunc, when set, handles InterruptViaControl; nil
+	// reports a delivered interrupt.
+	InterruptViaControlFunc func() error
 }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
@@ -51,12 +60,18 @@ func NewTestProcess() *TestProcess {
 	}
 }
 
-func (p *TestProcess) Alive() bool                { return p.AliveVal }
-func (p *TestProcess) IsRunning() bool            { return p.StateVal == cli.StateRunning }
-func (p *TestProcess) Close()                     { p.AliveVal = false; p.StateVal = cli.StateDead }
-func (p *TestProcess) Kill()                      { p.AliveVal = false; p.StateVal = cli.StateDead }
-func (p *TestProcess) Interrupt()                 {}
-func (p *TestProcess) InterruptViaControl() error { return nil }
+func (p *TestProcess) Alive() bool     { return p.AliveVal }
+func (p *TestProcess) IsRunning() bool { return p.StateVal == cli.StateRunning }
+func (p *TestProcess) Close()          { p.AliveVal = false; p.StateVal = cli.StateDead }
+func (p *TestProcess) Kill()           { p.AliveVal = false; p.StateVal = cli.StateDead }
+func (p *TestProcess) Interrupt()      {}
+
+func (p *TestProcess) InterruptViaControl() error {
+	if p.InterruptViaControlFunc != nil {
+		return p.InterruptViaControlFunc()
+	}
+	return nil
+}
 
 func (p *TestProcess) Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 	if p.SendFunc != nil {
@@ -65,9 +80,12 @@ func (p *TestProcess) Send(ctx context.Context, text string, images []clievent.A
 	return &clievent.SendResult{Text: "mock response"}, nil
 }
 
-// SendPassthrough mirrors Send for tests that don't care about passthrough
-// semantics. Ignores priority; returns the same mock result as Send.
+// SendPassthrough runs SendPassthroughFunc when set; otherwise it mirrors
+// Send and ignores priority.
 func (p *TestProcess) SendPassthrough(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error) {
+	if p.SendPassthroughFunc != nil {
+		return p.SendPassthroughFunc(ctx, text, images, onEvent, priority)
+	}
 	return p.Send(ctx, text, images, onEvent)
 }
 
@@ -78,9 +96,9 @@ func (p *TestProcess) DiscardPassthroughPending(reason error) {}
 // PassthroughDepth always reports 0 on the test stub.
 func (p *TestProcess) PassthroughDepth() int { return 0 }
 
-// SupportsPassthrough defaults to false so tests that don't opt in use the
-// legacy Send path; wrap TestProcess or use a real *cli.Process to exercise it.
-func (p *TestProcess) SupportsPassthrough() bool { return false }
+// SupportsPassthrough reports PassthroughVal, false by default so tests that
+// don't opt in use the serialized Send path.
+func (p *TestProcess) SupportsPassthrough() bool { return p.PassthroughVal }
 
 func (p *TestProcess) SessionID() string                      { return "" }
 func (p *TestProcess) State() cli.ProcessState                { return p.StateVal }
