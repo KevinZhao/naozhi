@@ -177,3 +177,62 @@ test.describe('cron 面板展示回归', () => {
     await ctx.close();
   });
 });
+
+// 行与面板外壳的各段：cronJobCardHtml 的 when 列（cronJobWhen）与子行
+// （cronJobSubRowHtml），renderCronPanel 的错过横幅、隐藏的汇总 chip 与筛选栏。
+test('行的 when 列与子行图标、面板的错过横幅 / 汇总 / 筛选栏按 job 状态渲染', async ({ browser }) => {
+  const now = Date.now();
+  const base = { work_dir: '/home/user/workspace/myproject', created_at: now - 86400000, recent_runs: [] };
+  const mock = await startMockServer({
+    cronJobs: [
+      { ...base, id: 'cj-run', schedule: '0 6 * * *', prompt: 'running job', notify: false, fresh_context: true,
+        next_run: now + 3600000, current_run: { run_id: 'run-xyz', phase: 'sending', started_at: now - 3000 } },
+      { ...base, id: 'cj-paused', schedule: '0 7 * * *', prompt: 'paused job', paused: true, next_run: now + 3600000 },
+      { ...base, id: 'cj-missed', schedule: '0 8 * * *', prompt: 'missed job', missed: true, missed_since: now - 7200000,
+        next_run: now + 3600000, last_run_at: now - 7200000 },
+      { ...base, id: 'cj-err', schedule: '0 9 * * *', prompt: 'failing job', last_error: 'boom happened', next_run: now + 3600000 },
+    ],
+  });
+  const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+  const page = await ctx.newPage();
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.click('#abnav-cron');
+    const row = (/** @type {string} */ id) => page.locator(`.cj-row[data-cron-id="${id}"]`);
+    await expect(row('cj-err')).toHaveCount(1);
+
+    // Running: the when column is the live clock, titled with the run, and the
+    // sub-row carries the non-default icons plus the inline when label.
+    const runWhen = row('cj-run').locator('.cj-when');
+    await expect(runWhen).toHaveClass(/running/);
+    await expect(runWhen).toHaveAttribute('title', 'run_id run-xyz — phase sending');
+    const runSub = row('cj-run').locator('.cj-sub');
+    await expect(runSub.locator('.cj-schedule')).toHaveAttribute('data-action', 'cron-edit');
+    await expect(runSub.locator('.cj-icon.notify-off')).toHaveCount(1);
+    await expect(runSub.locator('.cj-icon.fresh')).toHaveCount(1);
+    await expect(runSub.locator('.cj-icon.missed')).toHaveCount(0);
+    await expect(runSub.locator('.cj-when-inline')).toHaveCount(1);
+
+    // Paused: 已暂停 in both when slots, no run button.
+    await expect(row('cj-paused').locator('.cj-when')).toHaveText('已暂停');
+    await expect(row('cj-paused').locator('.cj-when-inline.paused')).toHaveText('已暂停');
+    await expect(row('cj-paused').locator('.cj-run')).toHaveCount(0);
+
+    // Missed: the warning icon and the last-run chip; error: the strip.
+    await expect(row('cj-missed').locator('.cj-sub .cj-icon.missed')).toHaveCount(1);
+    await expect(row('cj-missed').locator('.cj-sub .cj-ago')).toContainText('上次');
+    await expect(row('cj-missed').locator('.cj-when')).toHaveAttribute('title', /^next run: /);
+    await expect(row('cj-err').locator('.cj-error .cj-err-text')).toHaveText('boom happened');
+
+    // Panel chrome.
+    await expect(page.locator('.cron-missed-banner .cmb-text')).toContainText('有 1 个任务曾错过调度');
+    await expect(page.locator('.cj-summary')).toHaveText('· 运行中 1 · 需关注 3');
+    await expect(page.locator('.cron-filter-bar .cron-status-chip[data-status="attention"]')).toHaveText('需关注 3');
+    await expect(page.locator('.cron-filter-bar .cron-sort-select option')).toHaveCount(4);
+    await expect(page.locator('#cron-search-input')).toHaveCount(0);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});

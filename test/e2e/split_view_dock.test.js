@@ -74,3 +74,85 @@ test('追问抽屉在桌面停靠为分屏，对话流保持可见，关闭后�
   await ctx.close();
   mock.server.close();
 });
+
+// 打开追问抽屉（与上面同一条真实路径），返回 page。
+async function openDockedPage(browser, mock, viewport = { width: 1600, height: 900 }) {
+  const ctx = await browser.newContext({ viewport });
+  const page = await ctx.newPage();
+  await page.goto(mock.url + '/dashboard');
+  await page.waitForSelector('.session-card');
+  await page.click(`.session-card[data-key="${KEY}"]`);
+  await openAskDrawer(page);
+  return { ctx, page };
+}
+
+async function openAskDrawer(page) {
+  const askBtn = page.locator('.event-ask-btn').first();
+  await askBtn.evaluate((el) => el.closest('.msg, .event, [data-msg-time]')?.scrollIntoView());
+  await askBtn.hover({ force: true });
+  await askBtn.click({ force: true });
+  await expect(page.locator('body')).toHaveClass(/nz-split-open/);
+}
+
+const splitW = (page) => page.evaluate(() =>
+  parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w')));
+const savedW = (page) => page.evaluate(() => localStorage.getItem('nz:split_w'));
+
+function longReplyMock() {
+  return startMockServer({
+    events: [
+      { type: 'user', detail: 'hello', time: Date.now() - 8000, uuid: 'ev-usr-1' },
+      { type: 'text', detail: '这是一条足够长的回复。' + '内容填充，凑到追问按钮的长度闸以上。'.repeat(30), time: Date.now() - 5000, uuid: 'ev-txt-2' },
+    ],
+  });
+}
+
+test('拖动分屏缝改宽度并记住（重载后仍生效），双击复原为一半并忘掉', async ({ browser }) => {
+  const mock = await longReplyMock();
+  const { ctx, page } = await openDockedPage(browser, mock);
+  try {
+    // 默认宽度是视口的一半。
+    expect(await splitW(page)).toBe(800);
+
+    // 向左拖 200px：分屏变宽 200px，松手时写进 localStorage。
+    const box = await page.locator('#split-resizer').boundingBox();
+    if (!box) throw new Error('split-resizer has no box');
+    const y = box.y + box.height / 2;
+    await page.mouse.move(box.x + box.width / 2, y);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 - 100, y);
+    await page.mouse.move(box.x + box.width / 2 - 200, y);
+    await page.mouse.up();
+    await expect.poll(() => splitW(page)).toBe(1000);
+    expect(await savedW(page)).toBe('1000');
+
+    // 重载：保存的宽度在加载时生效，再次打开抽屉不会被拉回一半。
+    await page.reload();
+    await page.waitForSelector('.session-card');
+    expect(await splitW(page)).toBe(1000);
+    await page.click(`.session-card[data-key="${KEY}"]`);
+    await openAskDrawer(page);
+    expect(await splitW(page)).toBe(1000);
+
+    // 双击分屏缝：回到一半，并删掉保存的宽度。
+    await page.locator('#split-resizer').dblclick();
+    await expect.poll(() => splitW(page)).toBe(800);
+    expect(await savedW(page)).toBeNull();
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('分屏打开时缩放视口：没有自定义宽度就跟随一半', async ({ browser }) => {
+  const mock = await longReplyMock();
+  const { ctx, page } = await openDockedPage(browser, mock);
+  try {
+    expect(await splitW(page)).toBe(800);
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await expect.poll(() => splitW(page)).toBe(700);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});

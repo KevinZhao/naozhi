@@ -80,3 +80,67 @@ test('chat file-ref previews: PDF frame has no capabilities, HTML uses the inlin
     mock.server.close();
   }
 });
+
+test('chat file-ref previews: images load raw, text gets a gutter, binary content a placeholder or the HTML frame', async ({ browser }) => {
+  const now = Date.now();
+  const files = ['docs/shot.png', 'src/main.go', 'docs/page.bin', 'bin/tool'];
+  const reply = 'wrote ' + files.map((f) => '`' + f + '`').join(' and ');
+  const mock = await startMockServer({
+    eventsByKey: {
+      [SESSION_KEY]: [
+        { time: now - 2000, type: 'user', summary: 'make them', detail: 'make them' },
+        { time: now - 1000, type: 'text', summary: reply, detail: reply },
+      ],
+    },
+    projectFiles: {
+      myproject: {
+        exists: {
+          'docs/shot.png': { exists: true, size: 10, mime: 'image/png' },
+          'src/main.go': { exists: true, size: 30, mime: 'text/plain' },
+          'docs/page.bin': { exists: true, size: 10, mime: 'application/octet-stream' },
+          'bin/tool': { exists: true, size: 10, mime: 'application/octet-stream' },
+        },
+        previews: {
+          'src/main.go': { content: 'package main\nfunc main() {}\n', mime: 'text/plain', size: 30 },
+          'docs/page.bin': { binary: true, mime: 'text/html', size: 10 },
+          'bin/tool': { binary: true, mime: 'application/x-mach-binary', size: 10 },
+        },
+      },
+    },
+  });
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const page = await ctx.newPage();
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.click(`.session-card[data-key="${SESSION_KEY}"]`);
+    const previewBtn = (/** @type {string} */ p) =>
+      page.locator(`.fr-slot.fr-verified[data-path="${p}"] .fr-btn-preview`);
+    await expect(previewBtn('bin/tool')).toHaveCount(1, { timeout: 8000 });
+    const body = page.locator('#fv-body');
+
+    // An image goes straight to the raw endpoint, no preview JSON.
+    await previewBtn('docs/shot.png').click();
+    await expect(body.locator('img')).toHaveCount(1);
+    expect(await body.locator('img').getAttribute('src')).toContain('mode=raw');
+    await expect(page.locator('#fv-title')).toHaveText('docs/shot.png');
+
+    // Text: the preview JSON's content in a line-numbered listing.
+    await previewBtn('src/main.go').click();
+    await expect(body.locator('pre.fv-lined code.fv-code')).toHaveText('package main\nfunc main() {}\n');
+    await expect(body.locator('.fv-gutter')).toHaveText('1\n2\n3');
+
+    // Binary HTML (sniffed by the server) renders in the inline render frame.
+    await previewBtn('docs/page.bin').click();
+    const frame = body.locator('iframe');
+    await expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
+    expect(await frame.getAttribute('src')).toContain('mode=render');
+
+    // Any other binary: a download placeholder naming the MIME.
+    await previewBtn('bin/tool').click();
+    await expect(body.locator('.fv-binary .fv-mime')).toHaveText('application/x-mach-binary');
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});

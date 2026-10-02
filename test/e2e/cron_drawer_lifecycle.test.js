@@ -180,3 +180,49 @@ test('列表被清空后抽屉进缺失兜底，不无限重拉', async ({ brows
   await ctx.close();
   mock2.server.close();
 });
+
+test('运行中的 job：抽屉换成运行横幅 + 实时输出容器，暂停的 job 显示恢复按钮', async ({ browser }) => {
+  // cronDrawerHtml 的三段：运行横幅（cronDrawerRunningHtml）、实时输出容器
+  // （cronDrawerLiveHtml）、动作行（cronDrawerActionsHtml）。运行中时 spec 区
+  // 让位给横幅，立即执行按钮禁用。
+  const now = Date.now();
+  const list = jobs();
+  list[0].current_run = {
+    run_id: 'run-1234abcd-rest', session_id: 'sess-5678efgh-rest',
+    started_at: now - 5000, phase: 'spawning', trigger: 'manual',
+  };
+  list[1].paused = true;
+  const mock3 = await startMockServer({ cronJobs: list });
+  const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+  const page = await ctx.newPage();
+  try {
+    await page.goto(mock3.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.click('#abnav-cron');
+    await page.click('.cj-row[data-cron-id="cron-life-1"]');
+    const pane = page.locator('.cron-detail-pane.is-open');
+    const banner = pane.locator('.cron-drawer-running');
+    await expect(banner).toHaveAttribute('data-job-id', 'cron-life-1');
+    await expect(banner.locator('.cdr-state')).toHaveText('正在执行 · 正在启动会话');
+    await expect(banner.locator('.cdr-detail')).toHaveText('触发 手动触发 · run run-1234 · session sess-567');
+    await expect(pane.locator('.cron-drawer-live #cron-live-events')).toHaveAttribute('data-job-id', 'cron-life-1');
+    await expect(pane.locator('.cron-drawer-spec')).toHaveCount(0);
+    const runNow = pane.locator('.cron-drawer-actions.is-sticky [data-action="cron-run-now"]');
+    await expect(runNow).toBeDisabled();
+    await expect(runNow).toHaveText('▷ 运行中…');
+    await expect(pane.locator('.cron-drawer-actions [data-action="cron-pause"]')).toHaveCount(1);
+    await expect(pane.locator('.cron-drawer-actions [data-action="cron-delete"]')).toHaveCount(1);
+
+    // 暂停的 job：没有横幅和实时输出，spec 区回来，动作行给恢复。
+    await page.click('.cj-row[data-cron-id="cron-life-2"]');
+    await expect(pane.locator('.cron-drawer-header')).toContainText('second job prompt');
+    await expect(pane.locator('.cron-drawer-running')).toHaveCount(0);
+    await expect(pane.locator('.cron-drawer-live')).toHaveCount(0);
+    await expect(pane.locator('.cron-drawer-spec')).toHaveCount(1);
+    await expect(pane.locator('.cron-drawer-actions [data-action="cron-resume"]')).toHaveCount(1);
+    await expect(pane.locator('.cron-drawer-actions [data-action="cron-run-now"]')).toBeDisabled();
+  } finally {
+    await ctx.close();
+    mock3.server.close();
+  }
+});

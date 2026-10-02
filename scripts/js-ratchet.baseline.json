@@ -77,9 +77,9 @@
     "lateBindings": 0
   },
   "cron_drawer.js": {
-    "lines": 590,
-    "maxFnLines": 136,
-    "fnOver100": 1,
+    "lines": 561,
+    "maxFnLines": 70,
+    "fnOver100": 0,
     "topLevelLetVar": 1,
     "configureDeps": 14,
     "deadInjections": 0,
@@ -132,9 +132,9 @@
     "lateBindings": 0
   },
   "cron_view.js": {
-    "lines": 2613,
-    "maxFnLines": 127,
-    "fnOver100": 3,
+    "lines": 2608,
+    "maxFnLines": 103,
+    "fnOver100": 1,
     "topLevelLetVar": 11,
     "configureDeps": 0,
     "deadInjections": 0,
@@ -154,9 +154,9 @@
     "lateBindings": 5
   },
   "discovery.js": {
-    "lines": 254,
-    "maxFnLines": 149,
-    "fnOver100": 1,
+    "lines": 252,
+    "maxFnLines": 72,
+    "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 19,
     "deadInjections": 0,
@@ -199,8 +199,8 @@
   },
   "file_refs.js": {
     "lines": 922,
-    "maxFnLines": 144,
-    "fnOver100": 1,
+    "maxFnLines": 61,
+    "fnOver100": 0,
     "topLevelLetVar": 6,
     "configureDeps": 11,
     "deadInjections": 0,
@@ -341,10 +341,10 @@
     "lateBindings": 0
   },
   "split_view.js": {
-    "lines": 215,
-    "maxFnLines": 163,
-    "fnOver100": 1,
-    "topLevelLetVar": 1,
+    "lines": 210,
+    "maxFnLines": 43,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
     "configureDeps": 4,
     "deadInjections": 0,
     "innerHTMLAssign": 0,
@@ -375,12 +375,12 @@
   },
   "tuning.js": {
     "lines": 525,
-    "maxFnLines": 132,
-    "fnOver100": 2,
+    "maxFnLines": 112,
+    "fnOver100": 1,
     "topLevelLetVar": 1,
     "configureDeps": 20,
     "deadInjections": 0,
-    "innerHTMLAssign": 5,
+    "innerHTMLAssign": 2,
     "htmlInsert": 0,
     "lateBindings": 0
   },
@@ -418,7 +418,7 @@
     "lateBindings": 0
   },
   "_global": {
-    "htmlSinks": 179,
+    "htmlSinks": 176,
     "importCycles": 1,
     "unresolvedImports": 0,
     "reexports": 0,

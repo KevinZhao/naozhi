@@ -1,9 +1,5 @@
 // discovery.js — extracted from dashboard.js (#2558 D4).
 //
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
-//
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects; its helpers are
@@ -75,11 +71,7 @@ async function scanDiscovered() {
     const data = await fetchJSON(NZ_CONTRACT.API.discovered, { headers, timeoutMs: 10000 });
     sessionList.discoveredItems = data || [];
     // #1770: only force a full sidebar re-render when the discovered set
-    // actually changed. Previously every 30s (connected) / 5s (disconnected)
-    // scan unconditionally set sessionList.lastVersion=0, defeating fetchSessions' version
-    // short-circuit and rebuilding the whole sidebar DOM even when nothing
-    // changed — wasted CPU/layout on low-end phones. Mirror the
-    // nodesHash/historyHash pattern fetchSessions already uses.
+    // actually changed (the nodesHash/historyHash pattern fetchSessions uses).
     const discoveredHash = JSON.stringify(sessionList.discoveredItems);
     if (discoveredHash === sessionList.lastDiscoveredJSON) return;
     sessionList.lastDiscoveredJSON = discoveredHash;
@@ -91,32 +83,11 @@ async function scanDiscovered() {
   }
 }
 
-async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, typeLabel) {
-  // Generation guard: two rapid clicks on different discovered cards both
-  // pass the synchronous prologue, then the first call's awaited fetch used to
-  // resolve into the SECOND card's #events-scroll and arm a second
-  // setInterval without clearing the first (timers.preview was simply
-  // overwritten → leaked interval appending the wrong session's events).
-  // deps.stopPreviewPolling() bumps transcript.previewGen, so capture AFTER calling it.
-  deps.stopPreviewPolling();
-  const gen = transcript.previewGen;
-  // Deselect any managed session. We null `selection.key` but deliberately
-  // leave `selectedNode` intact — it now doubles as the sidebar filter and
-  // nulling it would strand the user on an empty list until their next
-  // refresh. The "no managed session selected" state is fully represented
-  // by `selection.key === null`; other call sites check it that way.
-  selection.key = null;
-  if (sessionStream.subscribedKey) sessionStream.unsubscribe();
-  if (timers.events) { clearInterval(timers.events); timers.events = null; }
-  deps.mobileEnterChat();
-
-  // Highlight the discovered card
-  deps.setActiveSessionCard(discoveredKey(pid, node), node || 'local');
-
-  const base = cwd.split('/').pop() || cwd;
-  const main = document.getElementById('main');
-  main.innerHTML =
-    '<div class="main-header">' +
+// discoveredPreviewHtml is the read-only panel a discovered (external) CLI
+// session previews in: header, empty events pane, nav pill and a composer
+// whose first send takes the session over.
+function discoveredPreviewHtml(base, typeLabel) {
+  return '<div class="main-header">' +
       '<button type="button" class="btn-mobile-back" data-action="mobile-back" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + deps.ICONS.back + '</button>' +
       '<div class="main-header-content">' +
         '<h2>' + esc(base) + '</h2>' +
@@ -138,27 +109,104 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, typeL
         '<button type="button" class="btn-icon btn-send" id="btn-send" data-action="msg-send" title="发送" aria-label="发送消息">' + deps.ICONS.send + '</button>' +
       '</div>' +
     '</div>';
+}
+
+// appendPreviewEvents appends the events a preview poll found past the ones
+// already shown, with time dividers, keeping a bottom-anchored pane anchored.
+function appendPreviewEvents(el, fresh) {
+  const empty = el.querySelector('.empty-state');
+  if (empty) empty.remove();
+  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  let prevT = deps.lastDividerTime(el);
+  fresh.forEach(e => {
+    if (deps.isInternalEvent(e)) return;
+    const h = deps.eventHtml(e); if (!h) return;
+    const t = e.time || 0;
+    if (t && (prevT === 0 || t - prevT >= deps.EVENT_DIVIDER_GAP_MS)) {
+      el.insertAdjacentHTML('beforeend', deps.timeDividerHtml(t));
+    }
+    el.insertAdjacentHTML('beforeend', h);
+    if (t) prevT = t;
+  });
+  if (wasBottom) el.scrollTop = el.scrollHeight;
+  deps.navSync();
+}
+
+// startPreviewPolling re-fetches the preview every 2s and appends what is new.
+// timers.preview is provably null when it is called: only previewDiscovered
+// arms it, after its generation check, and any older generation's interval
+// was cleared by the deps.stopPreviewPolling() in its prologue.
+function startPreviewPolling(gen, url) {
+  // #1770: a fetch can outlast the 2s interval on a slow link; without this
+  // flag consecutive ticks pile up concurrent requests.
+  let previewInFlight = false;
+  timers.preview = setInterval(async () => {
+    // Defence-in-depth against a tick queued before a newer
+    // previewDiscovered()'s clearInterval landed.
+    if (gen !== transcript.previewGen) return;
+    if (previewInFlight) return;
+    previewInFlight = true;
+    try {
+      const headers = {};
+      const t = deps.getToken();
+      if (t) headers['Authorization'] = 'Bearer ' + t;
+      const r = await fetch(url, { headers });
+      if (!r.ok) return;
+      const all = await r.json();
+      if (gen !== transcript.previewGen) return;
+      if (all.length <= transcript.previewEventCount) return;
+      const fresh = all.slice(transcript.previewEventCount);
+      transcript.previewEventCount = all.length;
+      const el = document.getElementById('events-scroll');
+      if (!el) { deps.stopPreviewPolling(); return; }
+      appendPreviewEvents(el, fresh);
+    } catch (_) {
+    } finally {
+      previewInFlight = false;
+    }
+  }, 2000);
+}
+
+async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, typeLabel) {
+  // Generation guard: two rapid clicks on different discovered cards both
+  // pass the synchronous prologue; the first call's fetch must not resolve
+  // into the second card's #events-scroll or arm a second interval.
+  // deps.stopPreviewPolling() bumps transcript.previewGen, so capture AFTER calling it.
+  deps.stopPreviewPolling();
+  const gen = transcript.previewGen;
+  // Deselect any managed session. We null `selection.key` but deliberately
+  // leave `selectedNode` intact — it doubles as the sidebar filter and
+  // nulling it would strand the user on an empty list until their next
+  // refresh.
+  selection.key = null;
+  if (sessionStream.subscribedKey) sessionStream.unsubscribe();
+  if (timers.events) { clearInterval(timers.events); timers.events = null; }
+  deps.mobileEnterChat();
+
+  // Highlight the discovered card
+  deps.setActiveSessionCard(discoveredKey(pid, node), node || 'local');
+
+  const base = cwd.split('/').pop() || cwd;
+  const main = document.getElementById('main');
+  main.innerHTML = discoveredPreviewHtml(base, typeLabel);
   deps.navRebuild(); // clear stale nav state before async preview fetch
   selection.pendingDiscovered = {pid: pid, sessionId: sessionId, cwd: cwd, procStartTime: procStartTime, node: node};
 
   try {
     const nodeParam = node ? '&node=' + encodeURIComponent(node) : '';
     // Pass cwd so the backend resolves the JSONL via an O(1) os.Stat on the
-    // CWD-derived path instead of the fallback scan + its 60s negative cache.
-    // Without this hint a single transient miss (card shown before the JSONL
-    // flushed, or while claude renamed it during compaction) poisons preview
-    // for the full TTL, leaving a blank splash that only "fixes itself" once
-    // the cache expires.
+    // CWD-derived path instead of the fallback scan + its 60s negative cache,
+    // where a single transient miss poisons preview for the full TTL.
     const cwdParam = cwd ? '&cwd=' + encodeURIComponent(cwd) : '';
+    const url = NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam;
     const headers = {};
     const t = deps.getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    // RNEW-UX-003: 10s timeout — discovered preview loads a ~200-event tail
-    // from a JSONL transcript; a hung read shouldn't trap the user on a
-    // "加载中..." splash indefinitely.
+    // RNEW-UX-003: 10s timeout — a hung JSONL read shouldn't trap the user
+    // on a "加载中..." splash indefinitely.
     let events;
     try {
-      events = await fetchJSON(NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam, { headers, timeoutMs: 10000 });
+      events = await fetchJSON(url, { headers, timeoutMs: 10000 });
     } catch (err) {
       if (gen !== transcript.previewGen) return;
       const errText = err.message || '';
@@ -183,64 +231,14 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, typeL
       deps.stickEventsBottom();
     }
     deps.navRebuild();
-    // timers.preview is provably null here: it is only ever armed below, after
-    // this generation check, and any older generation's interval was cleared
-    // by the deps.stopPreviewPolling() in our own prologue. Do NOT call
-    // deps.stopPreviewPolling() at this point — it would bump transcript.previewGen and
-    // invalidate this very call.
+    // Do NOT call deps.stopPreviewPolling() here — it would bump
+    // transcript.previewGen and invalidate this very call.
     transcript.previewEventCount = events.length;
-    const capturedSid = sessionId;
-    // #1770: guard against overlapping ticks. Each tick re-fetches the full
-    // preview event list; on a slow link a fetch can outlast the 2s interval,
-    // so without this flag consecutive ticks pile up concurrent requests.
-    // Mirrors _fetchEventsInFlight on the main events poll.
-    let previewInFlight = false;
-    timers.preview = setInterval(async () => {
-      // A newer previewDiscovered() already cleared this interval in its
-      // prologue; the check is defence-in-depth against a tick that was
-      // queued before clearInterval landed.
-      if (gen !== transcript.previewGen) return;
-      if (previewInFlight) return;
-      previewInFlight = true;
-      try {
-        const headers2 = {};
-        const t2 = deps.getToken();
-        if (t2) headers2['Authorization'] = 'Bearer ' + t2;
-        const r2 = await fetch(NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(capturedSid) + nodeParam + cwdParam, { headers: headers2 });
-        if (!r2.ok) return;
-        const all = await r2.json();
-        if (gen !== transcript.previewGen) return;
-        if (all.length <= transcript.previewEventCount) return;
-        const fresh = all.slice(transcript.previewEventCount);
-        transcript.previewEventCount = all.length;
-        const el2 = document.getElementById('events-scroll');
-        if (!el2) { deps.stopPreviewPolling(); return; }
-        const empty = el2.querySelector('.empty-state');
-        if (empty) empty.remove();
-        const wasBottom = el2.scrollTop + el2.clientHeight >= el2.scrollHeight - 30;
-        let prevT2 = deps.lastDividerTime(el2);
-        fresh.forEach(e => {
-          if (deps.isInternalEvent(e)) return;
-          const h = deps.eventHtml(e); if (!h) return;
-          const t = e.time || 0;
-          if (t && (prevT2 === 0 || t - prevT2 >= deps.EVENT_DIVIDER_GAP_MS)) {
-            el2.insertAdjacentHTML('beforeend', deps.timeDividerHtml(t));
-          }
-          el2.insertAdjacentHTML('beforeend', h);
-          if (t) prevT2 = t;
-        });
-        if (wasBottom) el2.scrollTop = el2.scrollHeight;
-        deps.navSync();
-      } catch (_) {
-      } finally {
-        previewInFlight = false;
-      }
-    }, 2000);
+    startPreviewPolling(gen, url);
   } catch (e) {
     deps.showNetworkError('预览会话', e);
   }
 }
-
 
 export {
   discoveredKey,
