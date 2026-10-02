@@ -594,6 +594,43 @@ func TestIMTurn_GetOrCreateError_DefaultMessage(t *testing.T) {
 	}
 }
 
+// TestIMTurn_StageDecidesTheErrorReply: the delivery answers a failure by
+// the stage it happened at. Only a failed Send is a reply error for /health
+// (replyErrorCount); a failed GetOrCreate is answered by
+// handleGetOrCreateError and leaves the counter alone.
+func TestIMTurn_StageDecidesTheErrorReply(t *testing.T) {
+	errBoom := errors.New("boom")
+	for _, tc := range []struct {
+		name       string
+		sender     *testSender
+		wantErrors int64
+	}{
+		{"GetOrCreate fails", &testSender{getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+			return nil, 0, errBoom
+		}}, 0},
+		{"Send fails", &testSender{
+			getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+				return fakeSession{}, session.SessionExisting, nil
+			},
+			send: func(context.Context, string, turn.Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+				return nil, errBoom
+			},
+		}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakePlatform{}
+			d := newTestDispatcher(fp, withSender(tc.sender))
+			runIMTurn(context.Background(), d, "key1", "hello", incomingMsg("hello"), true)
+			if fp.replyCount() != 1 {
+				t.Fatalf("replies = %v, want one error reply", fp.allReplies())
+			}
+			if got := d.replyErrorCount.Load(); got != tc.wantErrors {
+				t.Errorf("replyErrorCount = %d, want %d", got, tc.wantErrors)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // BuildHandler — unknown platform gets no turn
 // ---------------------------------------------------------------------------
