@@ -527,248 +527,220 @@ function removePendingSession(key) {
   persistPending();
 }
 
+// fetchSessionsPayload GETs /api/sessions. null is a failed poll the caller
+// reports as false (an auth failure, after prompting for a token, or an HTTP
+// error); a network error throws. The 8 s timeout releases a hung response
+// before the next 5 s poll tick (RNEW-UX-003).
+async function fetchSessionsPayload() {
+  const headers = {};
+  const t = getToken();
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  try {
+    return await fetchJSON(NZ_CONTRACT.API.sessions, { headers, timeoutMs: 8000 });
+  } catch (err) {
+    if (err.status === 401 || err.status === 403) {
+      showAuthModal({ auto: true }); // background poll: respects de-dupe + cooldown
+      return null;
+    }
+    if (err.status) return null;
+    throw err;
+  }
+}
+
+// sessionsUnchanged reports whether the poll carries nothing new, and
+// otherwise records it as the last one seen. stats.version changes on session
+// add/remove/rename/reset; nodes and history have no version and compare as
+// JSON. Process state flips (running↔ready, last_response) never advance the
+// version, which over a live socket the session_state push covers; under
+// WS-fallback polling REST is the only state source, so the short-circuit
+// would freeze the sidebar and it applies only while connected (#2431).
+// renderSidebar is idempotent, so the 5 s fallback repaint is the intended
+// cost.
+function sessionsUnchanged(data, wsConnected) {
+  const version = (data.stats && data.stats.version) || 0;
+  const nodesHash = JSON.stringify(data.nodes || {});
+  const historyHash = JSON.stringify(data.history_sessions || []);
+  if (wsConnected && version === sessionList.lastVersion && version > 0 && nodesHash === sessionList.lastNodesJSON && historyHash === sessionList.lastHistoryJSON) return true;
+  sessionList.lastVersion = version;
+  sessionList.lastNodesJSON = nodesHash;
+  sessionList.lastHistoryJSON = historyHash;
+  return false;
+}
+
+function applySessionsStats(data) {
+  if (data.nodes) sessionList.nodesData = data.nodes;
+  if (data.stats.default_workspace) serverInfo.defaultWorkspace = data.stats.default_workspace;
+  if (data.stats.projects) sessionList.projectsData = data.stats.projects;
+  if (data.stats.cli_name) serverInfo.defaultCLIName = data.stats.cli_name;
+  if (data.stats.cli_version) serverInfo.defaultCLIVersion = data.stats.cli_version;
+  // The Home panel's health strip reads uptime / watchdog / active-count off
+  // the full stats object without a second fetch.
+  serverInfo.lastStatsSnapshot = data.stats;
+  sessionList.historySessionsData = data.history_sessions || [];
+}
+
+// mergeBackendSessions folds the polled sessions into sessionsData, adds each
+// key to backendKeys and returns the list the sidebar paints from.
+function mergeBackendSessions(polled, backendKeys) {
+  // A session the operator just dismissed stays out until its DELETE
+  // resolves, or a lagging poll re-adds the card; a failed delete clears the
+  // key and the session reappears on the next poll.
+  const live = sessionList.optimisticDeleteKeys.size > 0
+    ? polled.filter(s => !sessionList.optimisticDeleteKeys.has(sid(s.key, s.node || 'local')))
+    : polled;
+  return live.map(s => {
+    const n = s.node || 'local';
+    const sKey = sid(s.key, n);
+    // Keep the optimistic 'running' flip while the REST snapshot still lags
+    // the send, or the banner hides until the session_state push catches up.
+    // It lands in the returned copy too: a re-render from the cached payload
+    // (project collapse, sidebar search) would otherwise paint the card idle
+    // while the banner shows running (#2431).
+    if (perSession.optimisticRunning[sKey] && s.state !== 'running') {
+      s = Object.assign({}, s, { state: 'running' });
+    }
+    // A new workspace (/cd, or the first snapshot after spawn resolved the
+    // real cwd) can be another repo, another worktree or no repo at all.
+    const prevWS = sessionList.sessionsData[sKey] && sessionList.sessionsData[sKey].workspace;
+    if (prevWS !== undefined && prevWS !== s.workspace) {
+      invalidateGitState(s.key, n);
+    }
+    sessionList.sessionsData[sKey] = s;
+    backendKeys.add(s.key);
+    return s;
+  });
+}
+
+// reconcilePending forgets the pending sessions the backend now lists and
+// persists once: the durable blob must drop them, or a reload re-injects a
+// ghost card, and removePendingSession per key would re-serialize the whole
+// blob once per key.
+function reconcilePending(backendKeys) {
+  let reconciledAny = false;
+  for (const key of Object.keys(perSession.workspaces)) {
+    if (!backendKeys.has(key)) continue;
+    delete perSession.workspaces[key];
+    delete perSession.nodes[key];
+    delete perSession.backends[key];
+    delete perSession.accessProfiles[key];
+    delete perSession.pendingTuning[key];
+    reconciledAny = true;
+  }
+  if (reconciledAny) persistPending();
+}
+
+// appendPendingCards adds a card for each pending session the backend does
+// not list yet. After reconcilePending no such key is left; the check keeps
+// the backend copy the only card if the two calls are ever reordered.
+function appendPendingCards(sessions, backendKeys) {
+  for (const key of Object.keys(perSession.workspaces)) {
+    if (!backendKeys.has(key)) sessions.push(pendingCardFor(key));
+  }
+}
+
+// pendingCardFor is the sidebar row of a session this browser created but the
+// backend does not list yet.
+function pendingCardFor(key) {
+  const parts = key.split(':');
+  // The agent chip shows the palette pick off the key tail; a legacy
+  // 3-segment key degrades to "general".
+  const pendingAgent = parts.length >= 4 && parts[3] ? parts[3] : 'general';
+  // The CLI brand (sidebar icon, chat header) follows the backend pick before
+  // the first message spawns the wrapper; a kiro pick must not show the
+  // claude logomark. With one backend there is no picker and no pick, and the
+  // lone backend is defaultCLIName. See backendDisplayName godoc.
+  const pendingBackend = perSession.backends[key] || '';
+  const pendingCLIName = backendDisplayName(pendingBackend) || serverInfo.defaultCLIName;
+  // On the default backend the live version (from system/init, refreshed
+  // every poll) beats the manifest, which is cached up to 60 s and would flash
+  // the pre-upgrade version; another backend has no live source, and the
+  // default's version would mislabel it. R20260613-pending-version.
+  const isDefaultBackend = !pendingBackend || (serverInfo.cliBackends !== null && pendingBackend === serverInfo.cliBackends.default);
+  const pendingCLIVersion = isDefaultBackend
+    ? (serverInfo.defaultCLIVersion || backendDisplayVersion(pendingBackend))
+    : (backendDisplayVersion(pendingBackend) || serverInfo.defaultCLIVersion);
+  // Mirror the server's project/project_fallback shape, so an unregistered
+  // workspace groups under its basename from the first paint (#2431).
+  const pendingWS = perSession.workspaces[key];
+  const pendingProject = matchProject(pendingWS);
+  const pendingFallback = pendingProject ? '' : workspaceFallbackName(pendingWS);
+  return {
+    key: key,
+    state: 'new',
+    platform: parts[0] || 'dashboard',
+    agent: pendingAgent,
+    workspace: pendingWS,
+    // "now" sorts the card to the bottom (oldest first) at once; 0 would sort
+    // it to the top until the real session, stamped about the same, snaps it
+    // down.
+    created_at: Date.now(),
+    last_active: 0,
+    last_prompt: '',
+    last_response: '',
+    node: perSession.nodes[key] || 'local',
+    project: pendingProject || pendingFallback,
+    project_fallback: !!pendingFallback,
+    backend: pendingBackend,
+    access_profile: perSession.accessProfiles[key] || '',
+    cli_name: pendingCLIName,
+    cli_version: pendingCLIVersion,
+  };
+}
+
+// reconcileMainStateAfterPoll brings the open session's banner and send/stop
+// buttons to the REST state when a session_state push was missed. With the
+// socket down REST is the only source and always wins. Over a live socket
+// only the finished direction applies (the turn is over and no optimistic
+// running window is open: a terminal 'result' or 'ready' push was dropped),
+// since reconciling toward running is the push side's job and a lagging
+// snapshot would flicker the banner.
+function reconcileMainStateAfterPoll(wsConnected) {
+  if (!selection.key) return;
+  const sKey = sid(selection.key, selection.node);
+  const sd = sessionList.sessionsData[sKey];
+  if (sd && (!wsConnected || (sd.state !== 'running' && !perSession.optimisticRunning[sKey]))) {
+    // updateSendButton is not idempotent ('running' re-seeds agent rows,
+    // 'ready' resets turn state and scroll) and this runs every 5 s under
+    // fallback: re-apply only what differs from the last applied state (#2431).
+    const applied = selection.lastAppliedMainState;
+    if (!(applied && applied.key === sKey && applied.state === sd.state)) {
+      updateMainState(sd.state);
+    }
+  } else if (sd && wsConnected && sd.state === 'running') {
+    // A dropped 'running' push: the sidebar paints running from REST while
+    // the banner, which only the push flips to running, stays idle. Heal it
+    // only while the banner is fully hidden, so a banner that is correctly
+    // showing (live activity, background agents) never flickers.
+    const banner = document.getElementById('running-banner');
+    if (banner && banner.classList.contains('nz-hidden')) {
+      updateMainState('running');
+    }
+  }
+}
+
 async function fetchSessions() {
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    // RNEW-UX-003: 8s timeout — sessions poll runs every 5s so a hung
-    // response must release before the next tick fires.
-    let data;
-    try {
-      data = await fetchJSON(NZ_CONTRACT.API.sessions, { headers, timeoutMs: 8000 });
-    } catch (err) {
-      if (err.status === 401 || err.status === 403) {
-        showAuthModal({ auto: true }); // background poll: respects de-dupe + cooldown
-        return false;
-      }
-      if (err.status) return false;
-      throw err;
-    }
-    // Use server-side version counter for efficient change detection.
-    // Falls back to JSON comparison for nodes/history which lack a version.
-    const version = (data.stats && data.stats.version) || 0;
-    const nodesHash = JSON.stringify(data.nodes || {});
-    const historyHash = JSON.stringify(data.history_sessions || []);
-    // The effort tier changes at turn boundaries, which do NOT advance
-    // stats.version (storeGen only moves on session add/remove/rename/reset).
-    // renderMainShell doesn't run on turn completion either, so this poll is
-    // the only path by which a new tier reaches the screen — and it has to
-    // happen BEFORE the version short-circuit below, which is exactly where an
-    // earlier revision of this code sat and silently never fired.
+    let data = await fetchSessionsPayload();
+    if (!data) return false;
+    // The effort tier, spawn diagnosis and overlay drift change at turn
+    // boundaries, which do not advance stats.version, and renderMainShell does
+    // not run on turn completion: they repaint here, before the short-circuit.
     // docs/rfc/kiro-effort-visibility.md §5.1 / R1b
     if (selection.key) setHeaderEffortChip(data.sessions);
     if (selection.key) setHeaderSpawnDiagChip(data.sessions);
     if (selection.key) setHeaderOverlayDriftChip(data.sessions);
-    // #2431: under WS-fallback polling this REST poll is the ONLY state source,
-    // and process state transitions (running↔ready, last_response, sc-time)
-    // never advance stats.version — storeGen moves on add/remove/rename/reset
-    // only, and with the socket down no session_state push zeroes lastVersion.
-    // The version short-circuit would therefore freeze the sidebar and the
-    // "WS disconnected → always reconcile" block further down never ran. Skip
-    // the gate while disconnected; renderSidebar is idempotent so the 5 s
-    // repaint is the intended fallback cost.
     const wsConnected = wsm.state === WS_STATES.CONNECTED;
-    if (wsConnected && version === sessionList.lastVersion && version > 0 && nodesHash === sessionList.lastNodesJSON && historyHash === sessionList.lastHistoryJSON) return;
-    sessionList.lastVersion = version;
-    sessionList.lastNodesJSON = nodesHash;
-    sessionList.lastHistoryJSON = historyHash;
-    if (data.nodes) sessionList.nodesData = data.nodes;
-    if (data.stats.default_workspace) serverInfo.defaultWorkspace = data.stats.default_workspace;
-    if (data.stats.projects) sessionList.projectsData = data.stats.projects;
-    if (data.stats.cli_name) serverInfo.defaultCLIName = data.stats.cli_name;
-    if (data.stats.cli_version) serverInfo.defaultCLIVersion = data.stats.cli_version;
-    // R110-P1 Home panel: stash the full stats object so the health strip
-    // can read uptime / watchdog / active-count without a second fetch.
-    serverInfo.lastStatsSnapshot = data.stats;
-    sessionList.historySessionsData = data.history_sessions || [];
-
-    // Track which keys the backend knows about
+    if (sessionsUnchanged(data, wsConnected)) return;
+    applySessionsStats(data);
     const backendKeys = new Set();
-    // Drop sessions the operator just dismissed but whose DELETE hasn't been
-    // confirmed yet. A lagging poll / sessions_update event would otherwise
-    // re-add the card (and re-populate sessionsData) after we optimistically
-    // removed it. The key is cleared from _optimisticDeleteKeys once DELETE
-    // resolves, so a genuinely-still-present session (failed delete) reappears
-    // on the next fetch.
-    if (sessionList.optimisticDeleteKeys.size > 0) {
-      data = Object.assign({}, data, {
-        sessions: (data.sessions || []).filter(s => !sessionList.optimisticDeleteKeys.has(sid(s.key, s.node || 'local'))),
-      });
-    }
-    // #2431: map (not forEach) so the optimistic 'running' copy below lands in
-    // the payload handed to renderSidebar / stashed as _lastSidebarData — the
-    // original objects still say 'ready', so a re-render from the cached
-    // payload (toggleProjectCollapsed, sidebar search) painted the card idle
-    // while the main banner showed running.
-    const sessions = (data.sessions || []).map(s => {
-      const n = s.node || 'local';
-      const sKey = sid(s.key, n);
-      // Preserve the optimistic 'running' flip when the REST snapshot is still
-      // lagging behind the send — otherwise the banner appears for a split
-      // second, then a /api/sessions poll rewrites state to 'ready' and hides
-      // it until the server's real session_state broadcast catches up.
-      if (perSession.optimisticRunning[sKey] && s.state !== 'running') {
-        s = Object.assign({}, s, { state: 'running' });
-      }
-      // A workspace change (/cd, or the first snapshot after spawn resolved
-      // the real cwd) invalidates the cached git state — the new directory can
-      // be a different repo, a different worktree, or no repo at all.
-      const prevWS = sessionList.sessionsData[sKey] && sessionList.sessionsData[sKey].workspace;
-      if (prevWS !== undefined && prevWS !== s.workspace) {
-        invalidateGitState(s.key, n);
-      }
-      sessionList.sessionsData[sKey] = s;
-      backendKeys.add(s.key);
-      return s;
-    });
-    data = Object.assign({}, data, { sessions });
-
-    // Remove pending sessions that now exist in backend, then persist ONCE.
-    // The durable localStorage blob must drop the now-real keys so a stale
-    // pending entry can't re-inject a ghost card on the next reload — but
-    // routing each key through removePendingSession would re-serialize the
-    // whole blob per key (M full JSON writes converging to one final state).
-    // Delete in-memory here and call persistPending() a single time after.
-    let reconciledAny = false;
-    for (const key of Object.keys(perSession.workspaces)) {
-      if (backendKeys.has(key)) {
-        delete perSession.workspaces[key];
-        delete perSession.nodes[key];
-        delete perSession.backends[key];
-        delete perSession.accessProfiles[key];
-        delete perSession.pendingTuning[key];
-        reconciledAny = true;
-      }
-    }
-    if (reconciledAny) persistPending();
-
-    // Merge pending dashboard sessions into data for sidebar rendering
-    const pendingKeys = Object.keys(perSession.workspaces);
-    if (pendingKeys.length > 0) {
-      if (!data.sessions) data.sessions = [];
-      for (const key of pendingKeys) {
-        if (!backendKeys.has(key)) {
-          const parts = key.split(':');
-          // Read the agentID off the key tail so the sidebar's agent chip
-          // reflects the user's palette pick rather than always "general".
-          // Legacy 3-segment keys (shouldn't exist post-Round 167 but be
-          // defensive) degrade to "general".
-          const pendingAgent = parts.length >= 4 && parts[3] ? parts[3] : 'general';
-          // Pre-populate cli_name / cli_version / backend from the user's
-          // backend pick so the sidebar icon (cliIcon) and chat header
-          // (renderMainShell / updateHeaderCLI) show the right CLI brand
-          // BEFORE the first message spawns the wrapper. Without this, a
-          // kiro pending session inherits defaultCLIName ("claude-code")
-          // and renders the claude logomark — directly contradicting the
-          // operator's choice. See backendDisplayName godoc.
-          //
-          // pendingBackend is empty in single-backend mode (renderBackendPicker
-          // returns '' for ≤1 backend, so #new-backend doesn't exist and
-          // sessionBackends[key] is never set). Fall back to defaultCLIName
-          // — which is router.CLIName() = the lone configured backend's
-          // display name — so single-backend kiro deployments also get the
-          // right icon instead of degrading to the 'cli' default branch.
-          const pendingBackend = perSession.backends[key] || '';
-          const pendingCLIName = backendDisplayName(pendingBackend) || serverInfo.defaultCLIName;
-          // defaultCLIVersion is the DEFAULT backend's live version, tracked
-          // from each session's system/init frame and refreshed from stats
-          // every poll; backendDisplayVersion() reads the /api/cli/backends
-          // manifest cached up to 60s client-side. For a pending session on the
-          // default backend, prefer the live value so a host claude upgrade
-          // under a long-lived naozhi doesn't make the just-created card flash
-          // the pre-upgrade version during the manifest's stale window. A
-          // non-default backend (e.g. kiro) has no live source here, so keep
-          // its manifest value — preferring defaultCLIVersion would mislabel it
-          // with the default backend's version. R20260613-pending-version.
-          const isDefaultBackend = !pendingBackend || (serverInfo.cliBackends !== null && pendingBackend === serverInfo.cliBackends.default);
-          const pendingCLIVersion = isDefaultBackend
-            ? (serverInfo.defaultCLIVersion || backendDisplayVersion(pendingBackend))
-            : (backendDisplayVersion(pendingBackend) || serverInfo.defaultCLIVersion);
-          // #2431: mirror the server's project/project_fallback shape so an
-          // unregistered workspace groups under its basename from the first
-          // paint instead of sitting in 未分组 until the first send promotes it.
-          const pendingWS = perSession.workspaces[key];
-          const pendingProject = matchProject(pendingWS);
-          const pendingFallback = pendingProject ? '' : workspaceFallbackName(pendingWS);
-          data.sessions.push({
-            key: key,
-            state: 'new',
-            platform: parts[0] || 'dashboard',
-            agent: pendingAgent,
-            workspace: pendingWS,
-            // Stamp the pending card with "now" so the sidebar sort (oldest
-            // top, newest bottom — see renderSidebar) lands it at the bottom
-            // immediately. Leaving created_at/last_active at 0 sorts it to the
-            // TOP, then the real backend session (with a real created_at) snaps
-            // it to the bottom — the card visibly jumps. The server-stamped
-            // created_at on the real session is ~equal, so no jump on promote.
-            created_at: Date.now(),
-            last_active: 0,
-            last_prompt: '',
-            last_response: '',
-            node: perSession.nodes[key] || 'local',
-            project: pendingProject || pendingFallback,
-            project_fallback: !!pendingFallback,
-            backend: pendingBackend,
-            access_profile: perSession.accessProfiles[key] || '',
-            cli_name: pendingCLIName,
-            cli_version: pendingCLIVersion,
-          });
-        }
-      }
-    }
-
+    data = Object.assign({}, data, { sessions: mergeBackendSessions(data.sessions || [], backendKeys) });
+    reconcilePending(backendKeys);
+    appendPendingCards(data.sessions, backendKeys);
     renderSidebar(data);
-    // Stash the last successful /api/sessions payload so the sidebar
-    // search oninput handler can re-render locally without DoS'ing the
-    // server with /api/sessions requests on every keystroke. The renderer
-    // is idempotent — re-calling it with the same data just re-paints.
+    // The sidebar search re-renders from this payload rather than polling the
+    // server on every keystroke.
     sessionList.lastSidebarData = data;
-
-    // Reconcile main area state: if the selected session's state changed
-    // (e.g. session_state WS message was missed), propagate the server-side
-    // truth to the banner and send/stop buttons.
-    //
-    // When WS is disconnected, REST is the only state source — always reconcile.
-    // When WS is connected, reconcile ONLY the "finished" direction: if the
-    // REST snapshot says the turn is over (state !== 'running') and we're not
-    // inside the optimistic-running window, then a terminal WS signal (the
-    // 'result' event and/or the 'ready' session_state broadcast) was dropped on
-    // the still-open connection — without this fallback the "处理中..." banner
-    // stays stuck until the operator switches sessions or reconnects. We never
-    // reconcile toward 'running' over a live WS: that's the push side's job, and
-    // a lagging REST snapshot would flicker the banner (the very reason the
-    // optimistic-running flip at line 469-475 exists).
-    if (selection.key) {
-      const sKey = sid(selection.key, selection.node);
-      const sd = sessionList.sessionsData[sKey];
-      if (sd && (!wsConnected || (sd.state !== 'running' && !perSession.optimisticRunning[sKey]))) {
-        // #2431: updateSendButton is not idempotent ('running' re-seeds agent
-        // rows from the REST snapshot; 'ready' resets turn state + loading
-        // indicator + scroll) and this runs every 5 s under fallback — only
-        // re-apply when REST differs from what the main area last applied.
-        const applied = selection.lastAppliedMainState;
-        if (!(applied && applied.key === sKey && applied.state === sd.state)) {
-          updateMainState(sd.state);
-        }
-      } else if (sd && wsConnected && sd.state === 'running') {
-        // Self-heal a DROPPED 'running' session_state push. renderSidebar above
-        // always paints the card from the REST snapshot, so the sidebar shows
-        // this selected session as running — but the right-side banner is only
-        // ever flipped to running by the WS push (the block above refuses to
-        // reconcile toward running to avoid banner flicker). If that push was
-        // lost, the sidebar says running while the banner stays idle — the one
-        // left/right desync the push-only rule leaves open. Reconcile toward
-        // running ONLY when the banner is still fully hidden: an already-visible
-        // banner (live activity, or zero-downtime background agents) is left
-        // untouched, so this can't flicker a banner that's correctly showing.
-        const banner = document.getElementById('running-banner');
-        if (banner && banner.classList.contains('nz-hidden')) {
-          updateMainState('running');
-        }
-      }
-    }
+    reconcileMainStateAfterPoll(wsConnected);
     if (selection.key) updateHeaderCLI();
     return true;
   } catch (e) {
@@ -809,14 +781,40 @@ function renderSidebar(data) {
   if (st.projects) sessionList.projectsData = st.projects;
 
   const list = document.getElementById('session-list');
+  // R110-P2 empty-state CTA: keeps the "no sessions" text E2E asserts and adds
+  // the header `+` button's action for first-time users.
+  const html = sidebarHtml(buildSidebarItems(data)) || '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
+  // Keyed reconcile: only the rows whose markup changed are replaced, so a
+  // poll with nothing new touches no DOM, in-place patches (state dot, unread
+  // chip, a removed card) compare as they stand, and kept nodes keep the
+  // list's scroll position.
+  if (reconcileChildren(list, html, sidebarRowKey) && selection.key) {
+    // A replaced card drops the cached active-card ref; re-resolve it so
+    // selector switches stay O(1) on the next click.
+    setActiveSessionCard(selection.key, selection.node);
+  }
 
-  // Merge discovered into sessions — tag them as source=terminal
-  const allItemsUnfiltered = (data.sessions || []).map(s => {
+  // The history button's count is an archive size, not an unread count, and
+  // stays hidden; the popover header shows it (ui-polish-light-theme D10).
+  const hBadge = document.getElementById('history-badge');
+  if (hBadge) hBadge.style.display = 'none';
+
+  // The Home panel's 最近会话 list mirrors every repaint (R110-P1).
+  renderRecentSessionsPanel();
+}
+
+// buildSidebarItems is every row the sidebar lists: managed sessions and
+// discovered terminal sessions from every connected node (each card carries
+// a node badge), oldest first. It sorts in place the list it caches as
+// allSessionsCache, whose order msg_nav walks. Cron stubs never reach it: the
+// server filters them (cron-panel-consolidation RFC §4.2).
+function buildSidebarItems(data) {
+  const items = (data.sessions || []).map(s => {
     if (!s.source) s.source = 'managed';
     return s;
   });
   sessionList.discoveredItems.forEach(d => {
-    allItemsUnfiltered.push({
+    items.push({
       key: discoveredKey(d.pid, d.node),
       state: d.state || 'ready',
       cli_name: d.cli_name || 'cli',
@@ -830,198 +828,121 @@ function renderSidebar(data) {
       _discovered: d,
     });
   });
-
-  // Workspace sidebar: managed + discovered sessions (full cache, pre-filter).
-  sessionList.allSessionsCache = allItemsUnfiltered;
-
-  // The sidebar lists every connected node's sessions together — the old
-  // per-node filter (driven by the sidebar node selector) was removed when
-  // that selector moved into the New Session modal. Each card carries a
-  // .sc-node badge (sessionCardHtml) so operators can still tell which
-  // connection a session lives on. selectedNode now only tracks which node
-  // the *currently-open* session lives on (for dispatch / header), not a
-  // sidebar visibility filter, so nothing here is hidden.
-  const allItems = allItemsUnfiltered;
-
-  // Stable sidebar order: oldest at top, newest at bottom, position never
-  // shifts on activity or state change. Each session ships a server-stamped
-  // created_at (unix ms); pre-feature payloads fall back to last_active so
-  // the upgrade boot keeps existing rows in roughly their previous order
-  // before they get re-stamped.
-  allItems.sort((a, b) => {
+  sessionList.allSessionsCache = items;
+  // Stable order: a row never moves on activity or state change. created_at
+  // is server-stamped (unix ms); a pre-feature payload falls back to
+  // last_active.
+  items.sort((a, b) => {
     const aC = a.created_at || a.last_active || 0;
     const bC = b.created_at || b.last_active || 0;
     if (aC !== bC) return aC - bC;
     return (a.key || '').localeCompare(b.key || '');
   });
+  return items;
+}
 
-  // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side
-  // (internal/server/dashboard_session.go) so allItems never contains cron
-  // keys here. The previous `cronVisibleKeys` whitelist + per-render filter
-  // are gone — the project-grouping branch below walks allItems directly.
-  const visibleItems = allItems;
-
-  let html = '';
-  {
-    // Project lookup by (node,name) so we can reach favorite/github flags.
-    const projIndex = {};
-    sessionList.projectsData.forEach(p => {
-      projIndex[(p.node || 'local') + ':' + p.name] = p;
-    });
-
-    // Group sessions by (node,name) so remote + local projects with same name stay separate.
-    // Fallback groups (project name derived from workspace basename, not a
-    // registered ProjectManager project) include the workspace path in the
-    // key so two unrelated folders that share a basename (e.g. /a/tmp and
-    // /b/tmp) do not collapse into a single mislabeled group.
-    const groups = {};
-    const ungrouped = [];
-    // visibleItems already applied the cron visibility gate up above, so
-    // every entry here is either (a) not a cron session, or (b) a cron
-    // session the operator has explicitly opened. Visible cron sessions
-    // keep flowing through the project-grouping logic so they land next
-    // to their workspace peers, matching the "I want to see THIS one"
-    // intent; project-less cron sessions fall into the catch-all
-    // ungrouped bucket — no dedicated 定时任务 sidebar section any more.
-    visibleItems.forEach(s => {
-      const pn = s.project || '';
-      if (pn) {
-        const node = s.node || 'local';
-        const k = s.project_fallback
-          ? node + ':' + pn + ':' + (s.workspace || '')
-          : node + ':' + pn;
-        if (!groups[k]) {
-          groups[k] = {
-            name: pn,
-            node,
-            items: [],
-            fallback: !!s.project_fallback,
-            workspace: s.workspace || '',
-          };
-        }
-        groups[k].items.push(s);
-      } else {
-        ungrouped.push(s);
-      }
-    });
-    // Favorite projects get an empty group so their header is always rendered.
-    // The sidebar lists every connected node's sessions together (the per-node
-    // filter was removed in #2180 when the node selector moved into the New
-    // Session modal), so every favorite's header renders regardless of which
-    // node it lives on — matching the unfiltered session list above.
-    sessionList.projectsData.forEach(p => {
-      if (!p.favorite) return;
-      const pNode = p.node || 'local';
-      const k = pNode + ':' + p.name;
-      if (!groups[k]) groups[k] = {name: p.name, node: pNode, items: []};
-    });
-
-    const groupKeys = Object.keys(groups);
-    // cron-panel-consolidation RFC §4.2: no dedicated cron sidebar section;
-    // cron stubs are filtered server-side and the dashboard sidebar is
-    // reserved for human conversation surfaces. Scheduled-task management
-    // lives in the 定时任务 panel.
-    if (groupKeys.length > 0) {
-      // Pre-compute per-group sort keys once. Order is { tier asc, created
-      // asc, name asc }: tier keeps favorites pinned to the top and fallback
-      // (unregistered workspace-basename) groups sunk to the bottom, while
-      // `created` carries the project's server-stamped CreatedAt (unix ms).
-      // Fallback groups have no project entry, so we derive their anchor
-      // from the earliest session in the group — ad-hoc quick sessions
-      // therefore land in the order their workspace was first opened.
-      const sortKeys = {};
-      groupKeys.forEach(k => {
-        const g = groups[k];
-        const p = projIndex[k];
-        let created = (p && p.created_at) ? p.created_at : 0;
-        if (!created) {
-          // Project entry missing CreatedAt (pre-feature server, or fallback
-          // group without a registered project): fall back to the earliest
-          // session's created_at so the group still has a stable anchor.
-          // If every session in the group is also unstamped (very-pre-feature
-          // server with empty last_active), `earliest` stays 0 and the
-          // comparator falls through to name.localeCompare — fine, the
-          // first re-stamp on next save will give them stable anchors.
-          let earliest = 0;
-          for (const s of g.items) {
-            const c = s.created_at || s.last_active || 0;
-            if (c && (earliest === 0 || c < earliest)) earliest = c;
-          }
-          created = earliest;
-        }
-        const tier = g.fallback ? 2 : ((p && p.favorite) ? 0 : 1);
-        sortKeys[k] = { tier, created, name: g.name };
-      });
-      groupKeys.sort((a, b) => {
-        const ka = sortKeys[a], kb = sortKeys[b];
-        if (ka.tier !== kb.tier) return ka.tier - kb.tier;
-        if (ka.created !== kb.created) return ka.created - kb.created;
-        return ka.name.localeCompare(kb.name);
-      });
-      groupKeys.forEach(k => {
-        const g = groups[k];
-        const p = projIndex[k] || {
-          name: g.name,
-          node: g.node,
-          favorite: false,
-          fallback: !!g.fallback,
-          workspace: g.workspace || '',
-        };
-        p._sessionCount = g.items.length;
-        html += g.fallback ? sectionHeaderFallbackHtml(p) : sectionHeaderHtml(p);
-        if (sessionList.collapsedProjects.has(k)) return;
-        if (g.items.length > 0) {
-          html += g.items.map(sessionCardHtml).join('');
-        }
-        // Empty favorite groups intentionally render no row below the header:
-        // the top-right `+` button is the sole create affordance.
-      });
-      // NOTE: the dedicated 定时任务 sidebar section was removed.
-      // cron stubs no longer reach the dashboard at all (server-side
-      // filter, see cron-panel-consolidation RFC §4.3). Truly project-less
-      // sessions still fall into the catch-all "未分组" bucket below.
-      if (ungrouped.length > 0) {
-        // Final catch-all: sessions with no project name AND no workspace
-        // (rare — usually transient takeover/planner edge cases). The old
-        // "Other" label predated the workspace-basename fallback; keep a
-        // bucket but label it clearly so it isn't mistaken for a real group.
-        html += '<div class="section-header"><span class="sh-name">未分组</span></div>';
-        html += ungrouped.map(sessionCardHtml).join('');
-      }
-    } else {
-      html = visibleItems.map(sessionCardHtml).join('');
+// groupSidebarItems buckets the rows by project, keyed by (node, name) so a
+// remote and a local project of the same name stay apart. A fallback group
+// (named after the workspace basename, no registered project) adds the path
+// to its key, so /a/tmp and /b/tmp do not collapse into one mislabeled group.
+// Every favorite project gets a group, empty or not, so its header always
+// renders.
+function groupSidebarItems(items) {
+  const groups = {};
+  const ungrouped = [];
+  items.forEach(s => {
+    const pn = s.project || '';
+    if (!pn) { ungrouped.push(s); return; }
+    const node = s.node || 'local';
+    const k = s.project_fallback
+      ? node + ':' + pn + ':' + (s.workspace || '')
+      : node + ':' + pn;
+    if (!groups[k]) {
+      groups[k] = {
+        name: pn,
+        node,
+        items: [],
+        fallback: !!s.project_fallback,
+        workspace: s.workspace || '',
+      };
     }
+    groups[k].items.push(s);
+  });
+  sessionList.projectsData.forEach(p => {
+    if (!p.favorite) return;
+    const pNode = p.node || 'local';
+    const k = pNode + ':' + p.name;
+    if (!groups[k]) groups[k] = {name: p.name, node: pNode, items: []};
+  });
+  return { groups, ungrouped };
+}
+
+// sortedGroupKeys orders the groups { tier, created, name }: favorites on top,
+// fallback groups at the bottom, then by the project's server-stamped
+// created_at. A group without one (a fallback group, or a pre-feature server)
+// is anchored by its earliest session, so ad-hoc sessions land in the order
+// their workspace was first opened; with no stamp at all, name decides.
+function sortedGroupKeys(groups, projIndex) {
+  const sortKeys = {};
+  const groupKeys = Object.keys(groups);
+  groupKeys.forEach(k => {
+    const g = groups[k];
+    const p = projIndex[k];
+    let created = (p && p.created_at) ? p.created_at : 0;
+    if (!created) {
+      let earliest = 0;
+      for (const s of g.items) {
+        const c = s.created_at || s.last_active || 0;
+        if (c && (earliest === 0 || c < earliest)) earliest = c;
+      }
+      created = earliest;
+    }
+    const tier = g.fallback ? 2 : ((p && p.favorite) ? 0 : 1);
+    sortKeys[k] = { tier, created, name: g.name };
+  });
+  return groupKeys.sort((a, b) => {
+    const ka = sortKeys[a], kb = sortKeys[b];
+    if (ka.tier !== kb.tier) return ka.tier - kb.tier;
+    if (ka.created !== kb.created) return ka.created - kb.created;
+    return ka.name.localeCompare(kb.name);
+  });
+}
+
+// sidebarHtml renders the rows grouped under their project headers, the
+// sessions with no project at all last under 未分组, and a collapsed project as
+// its header alone. An empty favorite group renders its header and no row:
+// the top-right `+` button is the create affordance.
+function sidebarHtml(items) {
+  // Indexed by (node, name) to reach a project's favorite/github flags.
+  const projIndex = {};
+  sessionList.projectsData.forEach(p => {
+    projIndex[(p.node || 'local') + ':' + p.name] = p;
+  });
+  const { groups, ungrouped } = groupSidebarItems(items);
+  const groupKeys = sortedGroupKeys(groups, projIndex);
+  if (groupKeys.length === 0) return items.map(sessionCardHtml).join('');
+  let html = '';
+  groupKeys.forEach(k => {
+    const g = groups[k];
+    const p = projIndex[k] || {
+      name: g.name,
+      node: g.node,
+      favorite: false,
+      fallback: !!g.fallback,
+      workspace: g.workspace || '',
+    };
+    p._sessionCount = g.items.length;
+    html += g.fallback ? sectionHeaderFallbackHtml(p) : sectionHeaderHtml(p);
+    if (sessionList.collapsedProjects.has(k)) return;
+    if (g.items.length > 0) {
+      html += g.items.map(sessionCardHtml).join('');
+    }
+  });
+  if (ungrouped.length > 0) {
+    html += '<div class="section-header"><span class="sh-name">未分组</span></div>';
+    html += ungrouped.map(sessionCardHtml).join('');
   }
-
-  // R110-P2 empty-state CTA: keep the legacy "no sessions" text (E2E asserts
-  // it via toContain) but add a visible call-to-action so first-time users
-  // aren't left staring at a dead sidebar. createNewSession is the same handler
-  // the header `+` button invokes.
-  if (!html) html = '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
-  // Keyed reconcile: only the cards (and headers) whose markup changed are
-  // replaced, so a 1 Hz poll with nothing new touches no DOM, and in-place
-  // patches (state dot, unread chip, a removed card) are compared as they
-  // stand rather than against a cached string.
-  // Kept nodes stay where they are, so the list keeps its scroll position
-  // without a restore.
-  if (reconcileChildren(list, html, sidebarRowKey) && selection.key) {
-    // A replaced card drops the cached active-card ref; re-resolve it so
-    // selector switches stay O(1) on the next click.
-    setActiveSessionCard(selection.key, selection.node);
-  }
-
-  // History badge (ui-polish-light-theme D10): the always-on total count
-  // ("84") had no action value — it's an archive size, not an unread count —
-  // and pulled the eye on every load. The count still shows inside the
-  // popover header ("历史（84）"); the button badge stays hidden unless a
-  // future alert-grade state (.is-alert/.is-warn) needs it.
-  const hBadge = document.getElementById('history-badge');
-  if (hBadge) hBadge.style.display = 'none';
-
-  // R110-P1 Home panel: refresh after every sidebar repaint so the
-  // "最近会话" list mirrors the authoritative snapshot. Gated by selectedKey
-  // inside the helper so the main shell's active session view isn't touched.
-  renderRecentSessionsPanel();
+  return html;
 }
 
 // projectDisplayLabel returns the operator-facing name for a project,

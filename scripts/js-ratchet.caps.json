@@ -12,7 +12,7 @@
     ]
   },
   "lines": {
-    "dashboard.js": 4849
+    "dashboard.js": 4770
   },
   "sideEffectLegacy": [
     "agent_view.js",
