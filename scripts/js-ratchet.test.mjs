@@ -331,8 +331,11 @@ test('innerHTMLAssign counts every assignment operator and the computed form', (
     "el['innerHTML'] = e;",
     'const x = el.innerHTML;', // a read, not a sink
     'el.textContent = f;',
+    'Object.assign(el, { innerHTML: g, title: t });', // copied in by its key
+    "Reflect.set(el, 'innerHTML', h);",
+    "Reflect.set(el, 'title', t);",
   ));
-  assert.equal(m.innerHTMLAssign, 5);
+  assert.equal(m.innerHTMLAssign, 7);
   assert.equal(m.htmlInsert, 0);
 });
 
@@ -348,8 +351,11 @@ test('htmlInsert counts the other HTML-string sinks, and only those', () => {
     'x.toString();', // inherited Object.prototype names are not sinks
     'x.constructor(h);',
     'log.write(h);', // write on anything but document
+    'frame.srcdoc = h;',
+    'Object.assign(el, { outerHTML: h }, { srcdoc: h, toString: h });',
+    "Reflect.set(frame, 'srcdoc', h);",
   ));
-  assert.equal(m.htmlInsert, 7);
+  assert.equal(m.htmlInsert, 11);
   assert.equal(m.innerHTMLAssign, 0);
 });
 
@@ -412,8 +418,13 @@ test('lateBindings counts hooks.X / nzViews.X writes, an object literal by its k
     'Object.assign(h, { a, b, c });',
     'other.x = 1;',
     'const y = h.openLightbox;',
+    'const H = h;', // an alias of the table writes into it
+    'H.x = f;',
+    "Object.defineProperty(h, 'z', { value: f });",
+    'Object.defineProperties(nzViews, { p: { value: f }, q: { value: f } });',
+    "Reflect.set(H, 'w', f);",
   );
-  assert.equal(measureSource(src, undefined, '', REAL_CAPS).lateBindings, 6);
+  assert.equal(measureSource(src, undefined, '', REAL_CAPS).lateBindings, 11);
   // Not imported from state.js / nz_util.js: some other object called hooks.
   assert.equal(measureSource(js('const hooks = {};', 'hooks.x = 1;'), undefined, '', REAL_CAPS).lateBindings, 0);
   // The tables come from caps.lateBindingTables, where ratchet-raises sees a
@@ -462,13 +473,13 @@ test('configureDeps counts injections where they land, whatever the receiver is 
   assert.equal(measureSource(js('const deps = { a: null };', 'function wire(impl) { deps.a = impl.a; }', 'deps.a();')).configureDeps, 0);
 });
 
-test('configureDeps no longer depends on how the caller spells the injection', () => {
+test('configureDeps is counted at the receiver, however the caller spells the injection', () => {
   const receiver = js(
     'const deps = { a: null, b: null };',
     'export function configureVoice(impl) { for (const k of Object.keys(deps)) deps[k] = impl[k]; }',
     'export function go() { deps.a(); deps.b(); }',
   );
-  // Passing a variable instead of a literal used to count 0 at the caller.
+  // The caller passes a variable, not a literal: nothing to count there.
   const caller = js("import { configureVoice } from './voice.js';", 'const d = { a, b };', 'configureVoice(d);');
   assert.equal(measureSource(caller).configureDeps, 0);
   assert.equal(measureSource(receiver).configureDeps, 2);
@@ -506,6 +517,38 @@ test('configureDeps: a spread, a private helper or a default export does not hid
   // Only the parameter that carries the injection: a helper given a data
   // argument by its position is not a receiver on the others.
   assert.equal(measureSource(voice('function setDeps(i, d) { Object.assign(deps, d); }\nexport function wireFoo(impl) { setDeps(impl, {}); }')).configureDeps, 0);
+});
+
+test('configureDeps: a table read through destructuring or an alias still counts', () => {
+  const keyed = 'export function configureX(impl) { for (const k of Object.keys(deps)) deps[k] = impl[k]; }';
+  const whole = 'export function configureX(impl) { deps = impl; }';
+  const uses = {
+    destructured: 'const { a, b } = deps; a(); b();',
+    'renamed and defaulted': 'const { a: x, b: y = null } = deps; x(); y();',
+    'a member alias': 'const x = deps.a; x(); const y = deps.b; y();',
+    'an alias of the table': 'const d = deps; d.a(); const { b } = d; b();',
+    'a destructuring assignment': 'let a, b; ({ a, b } = deps); a(); b();',
+    'a rest element': 'const { ...r } = deps; r.a(); r.b();',
+  };
+  for (const [store, receiver] of Object.entries({ keyed, whole })) {
+    for (const [name, use] of Object.entries(uses)) {
+      const m = measureSource(js('let deps = { a: null, b: null };', receiver, `export function go() { ${use} }`));
+      assert.equal(m.configureDeps, 2, `${store} copy, ${name}`);
+      assert.equal(m.deadInjections, 0, `${store} copy, ${name}`);
+    }
+  }
+  // A call by runtime key through an alias calls through the table.
+  const computed = js('const deps = { a: null, b: null };', keyed, "export function go(k) { const d = deps; d[k](); }");
+  assert.equal(measureSource(computed).configureDeps, 2);
+});
+
+test('configureDeps: a local or a parameter that shadows the table is not the table', () => {
+  const src = (receiver) => js('const deps = { a: null };', receiver, 'export function go() { deps.a(); }');
+  assert.equal(measureSource(src('export function f(impl) { const deps = {}; Object.assign(deps, impl); deps.a(); }')).configureDeps, 0);
+  assert.equal(measureSource(src('export function f(deps) { deps.a = deps.b; }')).configureDeps, 0);
+  // The controls: the same copies into the module's deps.
+  assert.equal(measureSource(src('export function f(impl) { Object.assign(deps, impl); }')).configureDeps, 1);
+  assert.equal(measureSource(src('export function f(impl) { deps.a = impl.b; }')).configureDeps, 1);
 });
 
 test('configureDeps: data handed to a helper stays data', () => {
@@ -641,6 +684,24 @@ test('shell: a slot that only forwards, and an upcall that could be an import', 
   assert.equal(g.metrics.upcallNotUp, 2);
   assert.match(g.details.upcallNotUp.join('\n'), /other\.js: shell\.nothing is not registered/);
   assert.match(g.details.upcallNotUp.join('\n'), /dashboard\.js does not reach other\.js/);
+
+  // A destructured slot is a use like shell.X: it counts, and is checked.
+  const destructured = js("import { shell } from './shell.js';", 'const { selectSession, nothing } = shell;', 'selectSession(1);', 'nothing();');
+  assert.equal(measureSource(destructured).configureDeps, 2);
+  g = global({ ...good, 'other.js': destructured });
+  assert.equal(g.metrics.upcallNotUp, 2, g.details.upcallNotUp.join('\n'));
+  // A read that hides its slot is a finding of its own.
+  const opaque = {
+    'a computed slot': 'export function f(k) { shell[k](); }',
+    'an alias': 'const s = shell; s.selectSession(1);',
+    'a rest element': 'const { ...s } = shell; s.selectSession(1);',
+    'shell passed on': 'register(shell);',
+  };
+  for (const [name, body] of Object.entries(opaque)) {
+    g = global({ ...good, 'view.js': js("import { shell } from './shell.js';", body) });
+    assert.equal(g.metrics.upcallNotUp, 1, name);
+    assert.match(g.details.upcallNotUp[0], /view\.js:2: shell read other than as shell\.X/, name);
+  }
 });
 
 test('compare and raisedMetrics treat _global as the cross-file entry', () => {

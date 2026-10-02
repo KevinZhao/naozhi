@@ -198,24 +198,47 @@ function patternNames(p, out = []) {
   return out;
 }
 
-// htmlSinkArgs returns the arguments of node that land in the DOM as HTML,
-// or null when node is not a sink. kind says which metric it counts in.
-// A Map, not an object literal: `p in {…}` would also match toString.
+// staticKeys: the keys an object pattern takes (const { a, b: x } = t is
+// a, b), or null when one is computed or a rest element takes the rest.
+function staticKeys(p) {
+  if (p.type !== 'ObjectPattern') return null;
+  const keys = p.properties.map((q) => (q.type === 'Property' ? propName({ computed: q.computed, property: q.key }) : null));
+  return keys.includes(null) ? null : keys;
+}
+
+const IMPORT_SPECIFIER = new Set(['ImportSpecifier', 'ImportDefaultSpecifier', 'ImportNamespaceSpecifier']);
+
+// htmlSinks returns the HTML sinks node is: for each, the arguments that
+// land in the DOM as HTML and the metric (kind) it counts in. A property
+// sink is one whether it is assigned (el.innerHTML = s), copied in by a
+// literal key (Object.assign(el, { innerHTML: s })) or set by name
+// (Reflect.set(el, 'innerHTML', s)). A property named by a runtime value
+// (el[k] = s) is not resolved.
+// Maps, not object literals: `p in {…}` would also match toString.
+const HTML_PROP = new Map([['innerHTML', 'innerHTMLAssign'], ['outerHTML', 'htmlInsert'], ['srcdoc', 'htmlInsert']]);
 const HTML_CALL_ARG = new Map([['insertAdjacentHTML', 1], ['setHTMLUnsafe', 0], ['createContextualFragment', 0], ['parseFromString', 0]]);
-function htmlSink(node) {
+function htmlSinks(node) {
   if (node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression') {
-    const p = propName(node.left);
-    if (p === 'innerHTML') return { kind: 'innerHTMLAssign', args: [node.right] };
-    if (p === 'outerHTML') return { kind: 'htmlInsert', args: [node.right] };
+    const kind = HTML_PROP.get(propName(node.left));
+    return kind ? [{ kind, args: [node.right] }] : [];
   }
-  if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression') {
-    const p = propName(node.callee);
-    if (HTML_CALL_ARG.has(p)) return { kind: 'htmlInsert', args: node.arguments.slice(HTML_CALL_ARG.get(p), HTML_CALL_ARG.get(p) + 1) };
-    if ((p === 'write' || p === 'writeln') && node.callee.object.type === 'Identifier' && node.callee.object.name === 'document') {
-      return { kind: 'htmlInsert', args: node.arguments };
-    }
+  if (node.type !== 'CallExpression' || node.callee.type !== 'MemberExpression') return [];
+  const callee = memberPath(node.callee);
+  if (callee === 'Object.assign') {
+    return node.arguments.slice(1).filter((a) => a.type === 'ObjectExpression').flatMap((a) => a.properties
+      .filter((q) => q.type === 'Property' && HTML_PROP.has(propName({ computed: q.computed, property: q.key })))
+      .map((q) => ({ kind: HTML_PROP.get(propName({ computed: q.computed, property: q.key })), args: [q.value] })));
   }
-  return null;
+  if (callee === 'Reflect.set') {
+    const k = node.arguments[1]?.type === 'Literal' ? HTML_PROP.get(String(node.arguments[1].value)) : undefined;
+    return k ? [{ kind: k, args: node.arguments.slice(2, 3) }] : [];
+  }
+  const p = propName(node.callee);
+  if (HTML_CALL_ARG.has(p)) return [{ kind: 'htmlInsert', args: node.arguments.slice(HTML_CALL_ARG.get(p), HTML_CALL_ARG.get(p) + 1) }];
+  if ((p === 'write' || p === 'writeln') && node.callee.object.type === 'Identifier' && node.callee.object.name === 'document') {
+    return [{ kind: 'htmlInsert', args: node.arguments }];
+  }
+  return [];
 }
 
 // fnName names a function the way its callers reach it: a declaration or a
@@ -275,6 +298,7 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
     allowHits: new Set(),
     deadInjections: [],
     shellUses: new Set(),
+    shellOpaque: [], // lines reading shell other than by a static slot
     shellRegs: [], // ObjectExpression args of registerShell(...)
     tables: new Set(), // local names of the late-binding tables
     shellNames: new Set(), // local names of shell.js's shell
@@ -336,6 +360,14 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
     if (file === module) tables.add(name);
     for (const l of localOf(module, name)) tables.add(l);
   }
+  // A local alias of a table (const H = hooks) writes into the table too.
+  for (let grew = true; grew;) {
+    grew = false;
+    visit(program, (n) => {
+      if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init?.type === 'Identifier' &&
+          tables.has(n.init.name) && !tables.has(n.id.name)) { tables.add(n.id.name); grew = true; }
+    });
+  }
   const shellNames = facts.shellNames;
   for (const l of localOf(SHELL_MODULE, 'shell')) shellNames.add(l);
   const registerShellNames = new Set(localOf(SHELL_MODULE, 'registerShell'));
@@ -353,20 +385,27 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
       stack.push(n);
       pushed = true;
     }
-    const sink = htmlSink(n);
-    if (sink) facts.sinks.push({ ...sink, line: n.loc.start.line, inFns: [...stack] });
+    for (const sink of htmlSinks(n)) facts.sinks.push({ ...sink, line: n.loc.start.line, inFns: [...stack] });
     if (n.type === 'CallExpression') facts.calls.push({ node: n, inFns: [...stack] });
     if (n.type === 'AssignmentExpression' && n.left.type === 'MemberExpression' &&
         n.left.object.type === 'Identifier' && tables.has(n.left.object.name)) {
       facts.lateBindings += n.right.type === 'ObjectExpression' ? n.right.properties.length : 1;
     }
-    if (n.type === 'CallExpression' && memberPath(n.callee) === 'Object.assign' &&
-        n.arguments[0]?.type === 'Identifier' && tables.has(n.arguments[0].name)) {
+    const tableCall = n.type === 'CallExpression' && n.arguments[0]?.type === 'Identifier' && tables.has(n.arguments[0].name)
+      ? memberPath(n.callee) : null;
+    if (tableCall === 'Object.assign' || tableCall === 'Object.defineProperties') {
       for (const a of n.arguments.slice(1)) facts.lateBindings += a.type === 'ObjectExpression' ? a.properties.length : 1;
     }
-    if (n.type === 'MemberExpression' && n.object.type === 'Identifier' && shellNames.has(n.object.name)) {
-      const p = propName(n);
-      if (p !== null) facts.shellUses.add(p);
+    if (tableCall === 'Object.defineProperty' || tableCall === 'Reflect.set') facts.lateBindings++;
+    // A shell slot is used as shell.X or destructured by its static key
+    // (const { X } = shell). Any other read of shell (shell[k], an alias, a
+    // rest element, shell passed on) hides which slot it reaches: a finding.
+    if (n.type === 'Identifier' && shellNames.has(n.name) && isReference(n, parent, key) && !IMPORT_SPECIFIER.has(parent?.type)) {
+      const slot = parent?.type === 'MemberExpression' && key === 'object' ? propName(parent) : null;
+      const slots = parent?.type === 'VariableDeclarator' && key === 'init' ? staticKeys(parent.id) : null;
+      if (slot !== null) facts.shellUses.add(slot);
+      else if (slots) slots.forEach((x) => facts.shellUses.add(x));
+      else facts.shellOpaque.push(n.loc.start.line);
     }
     if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && registerShellNames.has(n.callee.name)) {
       facts.shellRegs.push({ arg: n.arguments[0], line: n.loc.start.line });
@@ -395,12 +434,16 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
 // parameter and the parameters of a callback given to a call on one
 // (Object.entries(p).forEach(([k, v]) => …)) carry its fields too. The keys
 // landed are counted (a whole-table copy counts the table's keys); a key the
-// module never reads is dead.
+// module never reads is dead. A use of the table counts however it is
+// spelt: deps.f(), const { f } = deps; f(), const f = deps.f; f(),
+// const d = deps; d.f().
 //
 // Known gaps: a class constructor or a method of an exported object as the
 // receiver; a parameter handed on through .call / .apply or a member call
 // (helpers.set(p)); a callback stored and only passed on (listeners.push(cb));
-// a field copied by a static copy into a slot the module never calls.
+// a field copied by a static copy into a slot the module never calls; a
+// table slot reached only through a function's return value or another
+// object's member (o.t = deps; o.t.f()).
 function findInjections(program, facts, exportedLocal, defaultFn, allow) {
   const receivers = new Map(); // fn node -> { name, fn, at: receiving parameter indices }
   const receive = (name, fn, indices) => {
@@ -424,20 +467,32 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
   const reads = new Set();
   const calledPaths = new Set();
   const calledRoots = new Set(); // bindings something is called through: t.f(), t[k](), const f = t[k]; f()
-  const memberAliases = []; // [local, root] for const local = t.x / t[k]
+  // aliases: [local, path, root] for a local bound to a member of root, or
+  // to root itself: const f = t.x, const f = t[k] (no path), const d = t,
+  // const { x, y: { z } } = t, ({ x } = t). Calling through the local calls
+  // through root, and reading the local reads the path.
+  const aliases = [];
+  const alias = (pattern, path, root) => {
+    if (pattern.type === 'AssignmentPattern') return alias(pattern.left, path, root);
+    if (pattern.type === 'Identifier') { aliases.push([pattern.name, path, root]); return; }
+    if (pattern.type !== 'ObjectPattern') return;
+    for (const q of pattern.properties) {
+      if (q.type === 'RestElement') { alias(q.argument, path, root); continue; }
+      const k = propName({ computed: q.computed, property: q.key });
+      alias(q.value, k !== null && path !== null ? `${path}.${k}` : null, root);
+    }
+  };
   visit(program, (n, parent, key) => {
     if (n.type === 'MemberExpression') {
       const writeTarget = parent?.type === 'AssignmentExpression' && key === 'left';
       const path = memberPath(n);
       if (path && !writeTarget) reads.add(path);
     }
-    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init?.type === 'MemberExpression') {
-      memberAliases.push([n.id.name, rootIdent(n.init)]);
-    }
-    if (n.type === 'VariableDeclarator' && n.id.type === 'ObjectPattern' && n.init?.type === 'Identifier') {
-      for (const q of n.id.properties) {
-        if (q.type === 'Property' && !q.computed && q.key.type === 'Identifier') reads.add(`${n.init.name}.${q.key.name}`);
-      }
+    const bind = n.type === 'VariableDeclarator' ? [n.id, n.init]
+      : n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'ObjectPattern' ? [n.left, n.right] : null;
+    if (bind?.[1] && (bind[1].type === 'Identifier' || bind[1].type === 'MemberExpression')) {
+      const root = rootIdent(bind[1]);
+      if (root) alias(bind[0], memberPath(bind[1]), root);
     }
     if (isReference(n, parent, key) && !(parent?.type === 'AssignmentExpression' && key === 'left') &&
         !(parent?.type === 'VariableDeclarator' && key === 'id')) reads.add(n.name);
@@ -447,7 +502,21 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
       if (n.callee.type === 'MemberExpression') calledRoots.add(rootIdent(n.callee));
     }
   });
-  for (const [l, t] of memberAliases) if (calledPaths.has(l)) calledRoots.add(t);
+  // Resolve the aliases to a fixed point (an alias of an alias).
+  const under = (set, l) => [...set].filter((c) => c === l || c.startsWith(l + '.')).map((c) => c.slice(l.length));
+  for (let grew = true; grew;) {
+    grew = false;
+    const add = (set, x) => { if (!set.has(x)) { set.add(x); grew = true; } };
+    for (const [l, path, root] of aliases) {
+      if (l === root) continue;
+      if (calledRoots.has(l)) add(calledRoots, root);
+      const called = under(calledPaths, l);
+      if (called.length) add(calledRoots, root);
+      if (path === null) continue;
+      for (const rest of called) add(calledPaths, path + rest);
+      for (const rest of under(reads, l)) add(reads, path + rest);
+    }
+  }
   const tableKeys = (t) => {
     const d = facts.top.get(t);
     const literal = d?.type === 'VariableDeclarator' && d.init?.type === 'ObjectExpression'
@@ -696,6 +765,7 @@ function upcalls(all, graph, shellRoots) {
   }
   for (const [f, facts] of Object.entries(all)) {
     if (f === SHELL_MODULE) continue;
+    for (const line of facts.shellOpaque) notUp.push(`${f}:${line}: shell read other than as shell.X or const { X } = shell, so its slot is unknown`);
     for (const slot of [...facts.shellUses].sort()) {
       const root = owner.get(slot);
       if (!root) notUp.push(`${f}: shell.${slot} is not registered by any root module`);
