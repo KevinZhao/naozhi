@@ -36,7 +36,7 @@ func TestMarshalBroadcastAuth_FansOutToAllAuthenticated(t *testing.T) {
 	registerSub(hub, c1, "")
 	registerSub(hub, c2, "")
 
-	hub.marshalBroadcastAuth(wsproto.NewRunStarted(wsproto.RunStarted{Subsystem: "cron", OwnerID: "abc", RunID: "def"}))
+	hub.bcast.marshalBroadcastAuth(wsproto.NewRunStarted(wsproto.RunStarted{Subsystem: "cron", OwnerID: "abc", RunID: "def"}))
 
 	for i, c := range []*wsClient{c1, c2} {
 		data, ok := recvRaw(t, c)
@@ -64,7 +64,7 @@ func TestBroadcastSessionReady_ViaMarshalHelper(t *testing.T) {
 	c, out := newCapturedClient(t, hub)
 	registerSub(hub, c, "")
 
-	hub.BroadcastSessionReady("feishu:p2p:bob")
+	hub.bcast.BroadcastSessionReady("feishu:p2p:bob")
 
 	msg, ok := recvMsg(t, out)
 	if !ok {
@@ -87,7 +87,7 @@ func TestMarshalBroadcastAuth_ZeroAuthClients_NoPanic(t *testing.T) {
 
 	// No clients registered.
 	// Must not panic.
-	hub.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "aaaa", RunID: "bbbb", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
+	hub.bcast.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "aaaa", RunID: "bbbb", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
 }
 
 // TestMarshalBroadcastAuth_ZeroAuthClients_NoSendRaw confirms that with zero
@@ -101,7 +101,7 @@ func TestMarshalBroadcastAuth_ZeroAuthClients_NoSendRaw(t *testing.T) {
 	c := &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
 	hub.register(c)
 
-	hub.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "cccc", RunID: "dddd", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
+	hub.bcast.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "cccc", RunID: "dddd", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
 
 	select {
 	case <-c.send:
@@ -122,7 +122,7 @@ func TestMarshalBroadcastAuth_WithAuthClient_Delivers(t *testing.T) {
 	c.authenticated.Store(true)
 	registerSub(hub, c, "")
 
-	hub.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "eeee", RunID: "ffff", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
+	hub.bcast.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "eeee", RunID: "ffff", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
 
 	data, ok := recvRaw(t, c)
 	if !ok {
@@ -152,7 +152,7 @@ func TestSnapshotAuthenticated_SingleLockWindow(t *testing.T) {
 	registerSub(hub, c1, "")
 	registerSub(hub, c2, "")
 
-	snapPtr, snap := hub.snapshotAuthenticated()
+	snapPtr, snap := hub.bcast.snapshotAuthenticated()
 	if got := len(snap); got != 2 {
 		t.Errorf("snapshot len = %d, want 2", got)
 	}
@@ -165,7 +165,7 @@ func TestSnapshotAuthenticated_EmptyMirror(t *testing.T) {
 	hub, _ := newTestHub("tok")
 	t.Cleanup(hub.Shutdown)
 
-	snapPtr, snap := hub.snapshotAuthenticated()
+	snapPtr, snap := hub.bcast.snapshotAuthenticated()
 	if len(snap) != 0 {
 		t.Errorf("snapshot len = %d, want 0", len(snap))
 	}
@@ -197,7 +197,7 @@ func TestMarshalBroadcastAuth_ConcurrentRegisterAndBroadcast(t *testing.T) {
 					return
 				default:
 				}
-				hub.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "j", RunID: "r", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
+				hub.bcast.BroadcastRunStarted(runtelemetry.RunStartedEvent{Subsystem: runtelemetry.SubsystemCron, OwnerID: "j", RunID: "r", Trigger: runtelemetry.TriggerManual, StartedAt: time.Now()})
 			}
 		}()
 	}

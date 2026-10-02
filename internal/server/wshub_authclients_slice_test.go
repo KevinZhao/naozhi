@@ -103,7 +103,7 @@ func TestSnapshotAuthenticated_ReturnsTheAuthenticatedSet(t *testing.T) {
 	pending := &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
 	hub.register(pending) // handshake still pending
 
-	snapPtr, snap := hub.snapshotAuthenticated()
+	snapPtr, snap := hub.bcast.snapshotAuthenticated()
 	seen := map[*wsClient]bool{}
 	for _, c := range snap {
 		seen[c] = true
@@ -139,7 +139,7 @@ func TestAuthSet_ConcurrentChurn(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				hub.BroadcastSessionReady("k")
+				hub.bcast.BroadcastSessionReady("k")
 			}
 		}
 	}()

@@ -654,6 +654,32 @@ func TestWS_SendAccepted(t *testing.T) {
 	}
 }
 
+// TestWS_SendBroadcastsRunningToAuthenticatedClient follows a send end to end
+// through the engine's notifier: the session_state "running" frame the engine
+// emits must reach the authenticated client that sent it. It only arrives if
+// the engine notifies the Hub's broadcaster and that broadcaster fans out over
+// the Hub's own registry; a notifier wired anywhere else stays silent and the
+// read below runs into dialWS's deadline.
+func TestWS_SendBroadcastsRunningToAuthenticatedClient(t *testing.T) {
+	hub, router := newTestHubWithAgents("", nil)
+	const key = "test:d:u:general"
+	router.InjectSession(key, session.NewTestProcess())
+
+	url, cleanup := startWSServer(t, hub)
+	defer cleanup()
+
+	conn := dialWS(t, url)
+	defer conn.Close()
+
+	wsWrite(t, conn, node.ClientMsg{Type: "send", Key: key, Text: "hello", ID: "req-running"})
+	for {
+		resp := readUntilType(t, conn, "session_state")
+		if resp.Key == key && resp.State == "running" {
+			return
+		}
+	}
+}
+
 // readUntilType drains and discards WS frames until one matching wantType
 // arrives, or fails the test on read error / 5s deadline (the same deadline
 // dialWS installed via SetReadDeadline). Used by tests that exercise paths

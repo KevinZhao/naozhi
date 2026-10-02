@@ -71,3 +71,33 @@ func TestHubBroadcaster_DropsSysessionErrorMsg(t *testing.T) {
 		t.Error("cron error_msg stripped; the policy is per-subsystem, not global")
 	}
 }
+
+// TestHubBroadcaster_RunStartedReachesClient drives run_started through the
+// seam cron and sysession are bound to in production
+// (runTelemetry.Bind(newHubBroadcaster(s.hub))), so the hubBroadcaster method
+// and the Hub's forward to bcast are both on the path. The marshal tests call
+// hub.bcast directly and would stay green with either link dropped.
+func TestHubBroadcaster_RunStartedReachesClient(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+	c := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
+	c.authenticated.Store(true)
+	registerSub(hub, c, "")
+
+	newHubBroadcaster(hub).BroadcastRunStarted(runtelemetry.RunStartedEvent{
+		Subsystem: runtelemetry.SubsystemCron, OwnerID: "job1", RunID: "aaaabbbbccccdddd",
+		Trigger: runtelemetry.TriggerManual, StartedAt: time.Now(),
+	})
+
+	data, ok := recvRaw(t, c)
+	if !ok {
+		t.Fatal("run_started never reached the authenticated client through newHubBroadcaster(hub)")
+	}
+	var frame wsproto.RunStarted
+	if err := json.Unmarshal(data, &frame); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if frame.Type != "run_started" || frame.Subsystem != "cron" || frame.OwnerID != "job1" || frame.RunID != "aaaabbbbccccdddd" {
+		t.Fatalf("frame = %+v, want the cron run_started for job1/aaaabbbbccccdddd", frame)
+	}
+}

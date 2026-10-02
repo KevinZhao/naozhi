@@ -253,3 +253,106 @@ func TestDebouncer_RealTimerFires(t *testing.T) {
 	}
 	waitReturns(t, &wg)
 }
+
+// TestWSBroadcaster_WaitCoversAnOpenWindow pins that the debouncer takes its
+// slots in the broadcaster's own pending WaitGroup: Shutdown's bcast.wait is
+// what holds it until a sessions_update fire that opened before close has
+// returned. A debouncer counting on any other WaitGroup leaves wait with
+// nothing to wait for, and a late fire runs past Shutdown.
+func TestWSBroadcaster_WaitCoversAnOpenWindow(t *testing.T) {
+	t.Parallel()
+	b := newWSBroadcaster(newSubscriberRegistry())
+	timer := &manualDebounceTimer{}
+	b.debounce.timer = timer
+	b.BroadcastSessionsUpdate() // opens a window: one pending slot
+
+	done := make(chan struct{})
+	go func() { b.wait(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("bcast.wait returned while a debounce window was open — the window's slot is not in bcast.pending")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if !timer.expire() {
+		t.Fatal("BroadcastSessionsUpdate did not arm the debounce timer")
+	}
+	b.debounce.onTimer()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bcast.wait did not return after the window's fire completed")
+	}
+}
+
+// TestWSBroadcaster_DebounceFiresSessionsUpdate pins newWSBroadcaster's
+// wiring: the debounce window BroadcastSessionsUpdate opens must, when it
+// fires, deliver exactly sessionsUpdateMsg to an authenticated client. A
+// debouncer built over any other callback would leave every sidebar refresh
+// undelivered with the window accounting still balanced.
+func TestWSBroadcaster_DebounceFiresSessionsUpdate(t *testing.T) {
+	t.Parallel()
+	reg := newSubscriberRegistry()
+	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
+	c.authenticated.Store(true)
+	reg.add(c)
+	b := newWSBroadcaster(reg)
+	timer := &manualDebounceTimer{}
+	b.debounce.timer = timer
+
+	b.BroadcastSessionsUpdate()
+	select {
+	case data := <-c.send:
+		t.Fatalf("sessions_update sent before the debounce window fired: %s", data)
+	default:
+	}
+	if !timer.expire() {
+		t.Fatal("BroadcastSessionsUpdate did not arm the debounce timer")
+	}
+	b.debounce.onTimer()
+
+	select {
+	case data := <-c.send:
+		if string(data) != string(sessionsUpdateMsg) {
+			t.Fatalf("debounce fire sent %s, want %s", data, sessionsUpdateMsg)
+		}
+	default:
+		t.Fatal("debounce fire delivered no sessions_update to the authenticated client")
+	}
+	select {
+	case data := <-c.send:
+		t.Fatalf("debounce fire sent a second frame: %s", data)
+	default:
+	}
+}
+
+// TestHub_BroadcastSessionsUpdateForwardsToBroadcaster covers the Hub-level
+// entry point every sessions_update producer still calls (routerEvents,
+// scratch, discovery, the node cache, server loops): a NewHub-built hub must
+// route BroadcastSessionsUpdate into bcast's debounce window, and that
+// window's fire must deliver sessionsUpdateMsg to an authenticated client.
+// TestWSBroadcaster_DebounceFiresSessionsUpdate drives the broadcaster
+// directly and stays green with the Hub forward emptied.
+func TestHub_BroadcastSessionsUpdateForwardsToBroadcaster(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+	timer := &manualDebounceTimer{}
+	hub.bcast.debounce.timer = timer // idle until the first trigger below
+	c := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
+	c.authenticated.Store(true)
+	registerSub(hub, c, "")
+
+	hub.BroadcastSessionsUpdate()
+	if !timer.expire() {
+		t.Fatal("Hub.BroadcastSessionsUpdate did not open a debounce window on bcast")
+	}
+	hub.bcast.debounce.onTimer()
+
+	data, ok := recvRaw(t, c)
+	if !ok {
+		t.Fatal("debounce fire delivered no sessions_update to the authenticated client")
+	}
+	if string(data) != string(sessionsUpdateMsg) {
+		t.Fatalf("debounce fire sent %s, want %s", data, sessionsUpdateMsg)
+	}
+}

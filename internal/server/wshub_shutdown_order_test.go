@@ -85,16 +85,16 @@ func TestHubShutdown_WiredLinkersNiledAfterClientWGWait(t *testing.T) {
 // inside Shutdown (#2551). The barrier used to be four inline statements
 // (sendTrackMu / sendClosed / sendWG.Wait); collapsing it into one call makes
 // it look movable, and it is not: the goroutines drain waits on re-enter the
-// Hub through sendNotifier (BroadcastSessionReady, broadcastState,
-// BroadcastSessionsUpdate), so drain has to run after the debouncer is closed
-// (a late BroadcastSessionsUpdate then declines instead of taking a clientWG
+// broadcaster through sendNotifier (BroadcastSessionReady, broadcastState,
+// BroadcastSessionsUpdate), so drain has to run after the broadcaster is closed
+// (a late BroadcastSessionsUpdate then declines instead of taking a pending
 // slot) and before the nodes close.
 //
 // -race cannot catch a misplaced barrier (an ordering against a WaitGroup is
 // not a data race) and the behavioural tests cannot either — they would simply
 // hang until the suite's own timeout. Hence a source-order assertion:
 //
-//	h.cancel()  <  h.debounce.close()  <  h.clientWG.Wait()  <  drain()  <  nodes Close
+//	h.cancel() < h.bcast.close() < h.clientWG.Wait() < h.bcast.wait() < drain() < nodes Close
 func TestHubShutdown_SendDrainPositionInSource(t *testing.T) {
 	t.Parallel()
 
@@ -121,12 +121,22 @@ func TestHubShutdown_SendDrainPositionInSource(t *testing.T) {
 	if next := strings.Index(sd[1:], "\nfunc "); next >= 0 {
 		sd = sd[:next+1]
 	}
+	// Match calls, not prose: Shutdown's comments name these markers too, so a
+	// deleted call could otherwise be "found" in the comment that explains it.
+	lines := strings.Split(sd, "\n")
+	for i, line := range lines {
+		if j := strings.Index(line, "//"); j >= 0 {
+			lines[i] = line[:j]
+		}
+	}
+	sd = strings.Join(lines, "\n")
 
 	// Ordered low → high, each with the reason a violation breaks something.
 	steps := []struct{ marker, why string }{
 		{"h.cancel()", "without ctx cancelled first, drain blocks for the full remote-RPC timeout instead of returning promptly"},
-		{"h.debounce.close()", "the debouncer closes first, so a drained goroutine's BroadcastSessionsUpdate declines instead of taking a clientWG slot past the Wait"},
+		{"h.bcast.close()", "the broadcaster closes first, so a drained goroutine's BroadcastSessionsUpdate declines instead of taking a pending slot past bcast.wait"},
 		{"h.clientWG.Wait()", "client goroutines settle first; drain is the send-side barrier"},
+		{"h.bcast.wait()", "a sessions_update fire that started before close must finish before the marshal cache, admission and nodes are torn down"},
 		{"h.engine.drain()", "the send barrier sits here; see sendEngine.drain's CALL-SITE PRECONDITIONS"},
 		{"h.nodes.Conns()", "nodes must close AFTER drain, or an in-flight remote RPC writes to a closed nc.conn"},
 	}

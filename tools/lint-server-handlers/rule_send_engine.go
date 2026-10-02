@@ -12,8 +12,9 @@
 //
 // Three checks, all AST-on-declarations (no go/types pass, no build tags):
 //
-//	A. Neither sendEngine nor SendHandler may declare a field of type *Hub.
-//	   That is the core boundary RFC §2.1 draws — the engine and the HTTP
+//	A. None of sendEngine, SendHandler and wsBroadcaster (the engine's
+//	   notifier, #2897 S5) may declare a field of type *Hub. That is the core
+//	   boundary RFC §2.1 draws — the engine, its notifier and the HTTP
 //	   handler depend on the send pipeline, not on the WebSocket layer — and
 //	   the regression most likely to be added back "just for one call". #2551
 //	   shipped this as a six-name blocklist (queue/guard/wg/...) on Hub, which
@@ -51,8 +52,9 @@ const sendHandlerFile = "dashboard_send.go"
 // sendBoundaryTypes are the structs that must not hold a *Hub (check A), with
 // the file each is expected to live in for the "type not found" message.
 var sendBoundaryTypes = map[string]string{
-	"sendEngine":  "send_engine.go",
-	"SendHandler": sendHandlerFile,
+	"sendEngine":    "send_engine.go",
+	"SendHandler":   sendHandlerFile,
+	"wsBroadcaster": "wshub_broadcast.go",
 }
 
 // scanSendEngineOwnership implements rule 3b-send.

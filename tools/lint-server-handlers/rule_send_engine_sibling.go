@@ -64,17 +64,16 @@ const siblingCtorBaseline = 1
 const siblingEngineReachBaseline = 3
 
 // siblingHubNotifierBaseline is the count of sendNotifier-shaped methods
-// still declared on *Hub. S5b moves two (BroadcastSessionReady,
-// broadcastSendError move with the broadcast methods; the other two keep a
-// one-line transitional forward until S5c2's producers stop needing them).
-const siblingHubNotifierBaseline = 4
+// still declared on *Hub. Today: the one-line BroadcastSessionsUpdate
+// forward to wsBroadcaster that the composition root's producers still
+// call; S5c2 rewires them to the broadcaster and drives this to 0.
+const siblingHubNotifierBaseline = 1
 
 // siblingFieldReadBaseline is the count of direct `h.engine.<field>` /
 // `h.bcast.<field>` reads inside *Hub methods, as opposed to method calls.
-// Today: LegacySendInvokes reads h.engine.legacyInvokes directly; S5b moves
-// the method onto *sendEngine itself, where that read is no longer a reach
-// across the boundary.
-const siblingFieldReadBaseline = 1
+// Zero: LegacySendInvokes lives on *sendEngine, so its counter read is no
+// longer a reach across the boundary. The constant stays as a strict check.
+const siblingFieldReadBaseline = 0
 
 // sendEngineHolders are the only (ownerType, fieldName) pairs allowed to
 // declare a *sendEngine field (C4). wiring.engine and serverCaps.send do not

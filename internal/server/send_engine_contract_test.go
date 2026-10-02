@@ -110,15 +110,15 @@ func TestSendEngine_QueueTypedNilGate(t *testing.T) {
 }
 
 // TestSendEngine_NotifyNeverNil pins the two ways notify could end up nil: not
-// passed at all, or passed as a typed-nil *Hub (which reads non-nil through the
-// interface). Either one panics on the first broadcast — inside the owner
+// passed at all, or passed as a typed-nil *wsBroadcaster (which reads non-nil
+// through the interface). Either one panics on the first broadcast — inside the owner
 // goroutine, where ownerLoop's recover turns it into a silently dropped message
 // plus one log line.
 func TestSendEngine_NotifyNeverNil(t *testing.T) {
 	t.Parallel()
 	for name, o := range map[string]sendEngineOpts{
 		"absent":    {},
-		"typed-nil": {Notify: (*Hub)(nil)},
+		"typed-nil": {Notify: (*wsBroadcaster)(nil)},
 	} {
 		e := newSendEngineForTest(o)
 		if e.notify == nil {
@@ -169,8 +169,8 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 		t.Errorf("engine.allowedRoot = %q, tailers.allowedRoot = %q — a path allowed on one side would not be on the other",
 			hub.engine.allowedRoot, hub.tailers.allowedRoot)
 	}
-	if hub.engine.notify != sendNotifier(hub) {
-		t.Error("engine.notify is not the Hub that built it")
+	if hub.engine.notify != sendNotifier(hub.bcast) {
+		t.Error("engine.notify is not the Hub's broadcaster — send-path session_state / send_error frames would reach a different client set")
 	}
 	// drain's precondition 1 ("h.cancel() has been called") only shortens
 	// wg.Wait if the goroutines it waits for were started under the SAME ctx
@@ -182,23 +182,39 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	// The send-block fields must be gone from Hub: the whole point of #2551.
 	// Enforced structurally by the build (they no longer exist), so this only
 	// documents the intent for the next reader.
-	if got := hub.LegacySendInvokes(); got != 0 {
-		t.Errorf("fresh Hub LegacySendInvokes = %d, want 0", got)
+	if got := hub.engine.LegacySendInvokes(); got != 0 {
+		t.Errorf("fresh engine LegacySendInvokes = %d, want 0", got)
 	}
 }
 
-// TestSendEngine_NotifyAfterDrainDoesNotArmClientWG is RFC send-engine-extraction
-// §6 test ③: once Shutdown has drained the engine, no notify path may
-// clientWG.Add — the debounce arm in BroadcastSessionsUpdate is the one that
-// can, and once closed it must decline. A late
+// TestNewHub_BroadcasterSharesRegistry pins that the broadcaster fans out to
+// the Hub's own subscriber registry. A broadcaster over a fresh registry
+// compiles, starts and broadcasts without error — to nobody, so every
+// session_state / sessions_update frame silently stops reaching dashboards.
+func TestNewHub_BroadcasterSharesRegistry(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(HubOptions{Router: session.NewRouter(session.RouterConfig{})})
+	t.Cleanup(hub.Shutdown)
+	if hub.bcast == nil {
+		t.Fatal("NewHub did not build the broadcaster")
+	}
+	if hub.bcast.recipients != hub.subs {
+		t.Error("bcast.recipients is not hub.subs — broadcasts would go to a registry no client ever joins")
+	}
+}
+
+// TestSendEngine_NotifyAfterDrainDoesNotArmPending is RFC send-engine-extraction
+// §6 test ③: once Shutdown has drained the engine, no notify path may take a
+// bcast.pending slot — the debounce arm in BroadcastSessionsUpdate is the one
+// that can, and once closed it must decline. A late
 // remoteSend goroutine that slipped past drain would otherwise arm a
 // broadcast callback that runs after Shutdown emptied the client set.
 //
 // Observed behaviourally: after Shutdown, every sendNotifier method is called
 // through the engine's own handle; the debounce timer must stay disarmed and
-// clientWG.Wait must return immediately (a stuck Wait means an Add with no
-// matching Done was registered post-drain).
-func TestSendEngine_NotifyAfterDrainDoesNotArmClientWG(t *testing.T) {
+// both bcast.wait and clientWG.Wait must return immediately (a stuck Wait
+// means an Add with no matching Done was registered post-drain).
+func TestSendEngine_NotifyAfterDrainDoesNotArmPending(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(HubOptions{Router: session.NewRouter(session.RouterConfig{})})
 	hub.Shutdown()
@@ -212,21 +228,22 @@ func TestSendEngine_NotifyAfterDrainDoesNotArmClientWG(t *testing.T) {
 	n.broadcastState("k", "running", "")
 	n.broadcastSendError("k", "boom")
 
-	hub.debounce.mu.Lock()
-	armed := hub.debounce.armed
-	hub.debounce.mu.Unlock()
+	hub.bcast.debounce.mu.Lock()
+	armed := hub.bcast.debounce.armed
+	hub.bcast.debounce.mu.Unlock()
 	if armed {
-		t.Error("BroadcastSessionsUpdate armed the debounce timer after Shutdown — clientWG.Add happened past drain")
+		t.Error("BroadcastSessionsUpdate armed the debounce timer after Shutdown — a pending slot was taken past drain")
 	}
 
 	done := make(chan struct{})
 	go func() {
+		hub.bcast.wait()
 		hub.clientWG.Wait()
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("clientWG.Wait did not return after post-Shutdown notify calls — a post-drain Add leaked")
+		t.Fatal("bcast.wait / clientWG.Wait did not return after post-Shutdown notify calls — a post-drain Add leaked")
 	}
 }

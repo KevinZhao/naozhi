@@ -296,5 +296,5 @@ func (h *Hub) PurgeNodeSubscriptions(nodeID string) {
 	if err != nil {
 		return
 	}
-	h.broadcastToAuthenticated(data)
+	h.bcast.broadcastToAuthenticated(data)
 }

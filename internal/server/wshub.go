@@ -12,14 +12,15 @@ import (
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
 // Hub manages WebSocket client connections and event subscriptions. Its
 // state lives in sub-objects that own their locks and fields: subs (who is
 // connected, authenticated and subscribed), admit (connection caps, rate
-// limits, credentials), engine (the send pipeline), debounce
-// (sessions_update coalescing) and tailers (agent JSONL tailing). The Hub
+// limits, credentials), engine (the send pipeline), bcast (frame fan-out and
+// sessions_update coalescing) and tailers (agent JSONL tailing). The Hub
 // wires them together and orders their teardown in Shutdown.
 type Hub struct {
 	// subs is who is connected, authenticated and subscribed to what.
@@ -53,17 +54,17 @@ type Hub struct {
 	// looks for a new one (defaultResubscribeInterval; tests shorten it).
 	resubscribeInterval time.Duration
 
-	// clientWG tracks per-client pump/eventPushLoop goroutines plus the
-	// debounce callback; owned by the connection lifecycle (conn.Close),
-	// whereas the send goroutines are owned by sendEngine (ctx cancel + drain).
+	// clientWG tracks per-client pump/eventPushLoop goroutines; owned by the
+	// connection lifecycle (conn.Close), whereas the send goroutines are owned
+	// by sendEngine (ctx cancel + drain) and debounce fires by bcast.
 	clientWG sync.WaitGroup
 
 	// admit owns the connection caps, rate limits and credential checks.
 	admit *connAdmission
 
-	// debounce coalesces sessions_update broadcasts; each pending fire holds
-	// a clientWG slot, so Shutdown's Wait covers a late-running broadcast.
-	debounce *debouncer
+	// bcast is the engine's sendNotifier and owns the broadcast paths; it
+	// shares subs as its recipients. Shutdown closes it, then waits for it.
+	bcast *wsBroadcaster
 
 	// tailers is the agentTailer registry behind agent_subscribe /
 	// agent_unsubscribe; initialised by NewHub, torn down in Shutdown.
@@ -145,10 +146,10 @@ func NewHub(opts HubOptions) *Hub {
 	}
 	h.tailers = newTailerRegistry(opts.AllowedRoot)
 	h.historyMarshalCache = newHistoryMarshalCache()
-	h.debounce = newDebouncer(&h.clientWG, h.doBroadcastSessionsUpdate)
-	// Built last: h is now usable as the engine's sendNotifier. The engine
-	// keeps its own reference to each shared dependency (see sendEngine's
-	// INVARIANT note) rather than a *Hub back-pointer.
+	h.bcast = newWSBroadcaster(h.subs)
+	// Built last: the engine notifies h.bcast, never h, and keeps its own
+	// reference to each shared dependency (see sendEngine's INVARIANT note)
+	// rather than a *Hub back-pointer.
 	h.engine = newSendEngine(sendEngineOpts{
 		Queue:       opts.Queue,
 		Guard:       opts.Guard,
@@ -160,10 +161,26 @@ func NewHub(opts HubOptions) *Hub {
 		ScratchPool: opts.ScratchPool,
 		Scheduler:   opts.Scheduler,
 		AllowedRoot: opts.AllowedRoot,
-		Notify:      h,
+		Notify:      h.bcast,
 	})
 	return h
 }
+
+// DroppedMessages returns the total number of messages dropped across all
+// clients since the process started (lock-free atomic load).
+func (h *Hub) DroppedMessages() int64 {
+	return h.droppedTotal.Load()
+}
+
+// BroadcastSessionsUpdate, BroadcastRunStarted and BroadcastRunEnded forward
+// to bcast for the producers the composition root still wires to the Hub.
+func (h *Hub) BroadcastSessionsUpdate() { h.bcast.BroadcastSessionsUpdate() }
+
+// BroadcastRunStarted forwards to bcast.
+func (h *Hub) BroadcastRunStarted(ev runtelemetry.RunStartedEvent) { h.bcast.BroadcastRunStarted(ev) }
+
+// BroadcastRunEnded forwards to bcast.
+func (h *Hub) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) { h.bcast.BroadcastRunEnded(ev) }
 
 func (h *Hub) register(c *wsClient) {
 	h.subs.add(c)
@@ -255,9 +272,9 @@ var unregisterNodesPool = sync.Pool{
 func (h *Hub) Shutdown() {
 	h.cancel() // cancel in-flight send goroutines
 
-	// Before the clients go: no broadcast may take a clientWG slot past the
-	// Wait below, and a window that never fired gives its slot back here.
-	h.debounce.close()
+	// Before the clients go: no sessions_update fire may open past the
+	// bcast.wait below, and a window that never fired gives its slot back here.
+	h.bcast.close()
 
 	// Close client conns first, then wait for pumps/eventPushLoop, so
 	// node/router teardown cannot race unregister → RemoveClient. drain hands
@@ -290,6 +307,9 @@ func (h *Hub) Shutdown() {
 	// completeSubscribe → maybeWireLinkerTailer would otherwise find the set
 	// gone and silently drop a wiring. After Wait no client goroutine remains.
 	h.clientWG.Wait()
+	// A fire that started before close may still be fanning out; let it
+	// finish before the marshal cache and admission state go.
+	h.bcast.wait()
 	h.tailers.releaseLinkers()
 
 	// Safe after clientWG.Wait — no eventPushLoop calls getOrMarshal again.
@@ -299,7 +319,7 @@ func (h *Hub) Shutdown() {
 	h.admit.close()
 
 	// Send barrier. Position is load-bearing and drain's godoc spells out why:
-	// h.cancel() and h.debounce.close() above, none of the registry's locks
+	// h.cancel() and h.bcast.close() above, none of the registry's locks
 	// or the debouncer's held (the drained goroutines re-enter them
 	// through sendNotifier), and before the node Close loop below.
 	// wshub_shutdown_order_test.go pins the source order.

@@ -234,7 +234,7 @@ func TestHandleAuth_TokenJoinsTheAuthenticatedSet(t *testing.T) {
 		t.Fatal("client authenticated before auth")
 	}
 	hub.handleAuth(c, node.ClientMsg{Type: "auth", Token: "secret"})
-	ptr, snap := hub.snapshotAuthenticated()
+	ptr, snap := hub.bcast.snapshotAuthenticated()
 	defer releaseBroadcastSnap(ptr, snap)
 	if len(snap) != 1 || snap[0] != c {
 		t.Errorf("authenticated set after token auth = %d clients, want exactly c", len(snap))

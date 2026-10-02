@@ -14,11 +14,11 @@ import (
 //
 // errMsg must be the localised label from asyncErrorMessage — never the raw
 // error, which can embed workspace paths or session keys.
-func (h *Hub) broadcastSendError(key, errMsg string) {
+func (b *wsBroadcaster) broadcastSendError(key, errMsg string) {
 	if key == "" || errMsg == "" {
 		return
 	}
-	h.fanOutToSubscribers(key, func() any {
+	b.fanOutToSubscribers(key, func() any {
 		return wsproto.NewSendError(wsproto.SendError{Key: key, Error: errMsg})
 	})
 }
@@ -42,15 +42,15 @@ func informationalSendErr(err error) bool {
 // at least one subscriber exists, so callers on hot failure paths pay nothing
 // for unwatched sessions. Shared by broadcastSessionSystemEvent and
 // broadcastSendError.
-func (h *Hub) fanOutToSubscribers(key string, build func() any) {
+func (b *wsBroadcaster) fanOutToSubscribers(key string, build func() any) {
 	// Zero-subscriber fast path before any pool round trip or marshal. The
 	// lock-free count is at most one critical section stale; a false "0" only
 	// suppresses a best-effort notice no live subscriber could have received.
-	if h.subs.count(key) == 0 {
+	if b.recipients.count(key) == 0 {
 		return
 	}
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
-	snap := h.subs.subscribersOf(key, (*snapPtr)[:0])
+	snap := b.recipients.subscribersOf(key, (*snapPtr)[:0])
 
 	if len(snap) > 0 {
 		if data, err := marshalPooled(build()); err == nil {

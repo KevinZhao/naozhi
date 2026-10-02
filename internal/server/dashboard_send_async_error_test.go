@@ -98,13 +98,13 @@ func TestBroadcastSendError_Scoping(t *testing.T) {
 	other, otherOut := newCapturedClient(t, hub)
 	registerSub(hub, other, "feishu:p2p:bob")
 
-	hub.broadcastSendError("", "x")
-	hub.broadcastSendError("feishu:p2p:alice", "")
+	hub.bcast.broadcastSendError("", "x")
+	hub.bcast.broadcastSendError("feishu:p2p:alice", "")
 	if _, ok := recvMsg(t, subOut); ok {
 		t.Fatal("empty key/error must emit nothing")
 	}
 
-	hub.broadcastSendError("feishu:p2p:alice", "会话启动失败")
+	hub.bcast.broadcastSendError("feishu:p2p:alice", "会话启动失败")
 	msg, ok := recvMsg(t, subOut)
 	if !ok {
 		t.Fatal("subscriber received no frame")

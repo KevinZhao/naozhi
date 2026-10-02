@@ -111,9 +111,9 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 		o.Ctx = context.Background()
 	}
 	notify := o.Notify
-	// Typed-nil unwrap, same hazard as queue below: a nil *Hub boxed into the
-	// interface reads non-nil, so the guard has to look at the concrete type.
-	if hn, ok := notify.(*Hub); ok && hn == nil {
+	// Typed-nil unwrap, same hazard as queue below: a nil *wsBroadcaster boxed
+	// into the interface reads non-nil, so the guard looks at the concrete type.
+	if bn, ok := notify.(*wsBroadcaster); ok && bn == nil {
 		notify = nil
 	}
 	if notify == nil {
@@ -172,11 +172,11 @@ func (e *sendEngine) TrackSend() (release func(), shuttingDown bool) {
 //  1. h.cancel() has been called. Otherwise wg.Wait blocks for the full
 //     remote-RPC timeout (60s in dashboard_send.go, remoteNodeProxyTimeout for
 //     the WS path) instead of returning as soon as ctx is cancelled.
-//  2. The debouncer is already closed. The waited goroutines call
+//  2. The broadcaster is already closed. The waited goroutines call
 //     BroadcastSessionsUpdate through sendNotifier, and a trigger that opens
-//     a debounce window takes a clientWG slot — a send goroutine can enlarge
-//     clientWG. Draining before the debouncer is closed arms a callback that
-//     runs after Shutdown has drained the subscriber registry.
+//     a debounce window takes a bcast.pending slot — a send goroutine can
+//     enlarge it. Draining before bcast.close() arms a callback that runs
+//     after Shutdown has drained the subscriber registry.
 //  3. The caller holds NONE of the subscriber registry's locks or the
 //     debouncer's. The waited goroutines re-enter them through sendNotifier
 //     (BroadcastSessionReady / broadcastState → the registry's authMu,
@@ -191,6 +191,19 @@ func (e *sendEngine) drain() {
 	e.closed = true
 	e.trackMu.Unlock()
 	e.wg.Wait()
+}
+
+// LegacySendInvokes returns the total number of times sessionSend fell
+// through to the deprecated sessionSendLegacy path. Production engines wire a
+// real MessageQueue and never increment this; once every test fixture does
+// too, sessionSendLegacy can be deleted (#710).
+func (e *sendEngine) LegacySendInvokes() int64 {
+	// A nil receiver reads 0: package callers may probe a not-yet-built engine
+	// through an interface, and R-LEGACY-SEND tooling depends on it.
+	if e == nil {
+		return 0
+	}
+	return e.legacyInvokes.Load()
 }
 
 // sendErrorCallback adapts broadcastSendError to the sessionSend onAsyncError
@@ -318,7 +331,7 @@ func (e *sendEngine) resolveAttachmentWorkspace(key, reqWorkspace string) (strin
 	return e.validateWorkspace(ws)
 }
 
-// nopNotifier absorbs broadcasts for an engine built without a Hub, so the
+// nopNotifier absorbs broadcasts for an engine built without a broadcaster, so the
 // engine itself carries no nil checks on the send hot path.
 type nopNotifier struct{}
 
