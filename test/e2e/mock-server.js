@@ -12,8 +12,32 @@ const STATIC_DIR = path.join(__dirname, '..', '..', 'internal', 'server', 'stati
 // commit that regenerates contract.js (#2539). startMockServer listens only
 // once it has loaded.
 let NZ_CONTRACT;
-const contractReady = import(require('url').pathToFileURL(path.join(STATIC_DIR, 'contract.js')).href)
-  .then((m) => { NZ_CONTRACT = m.NZ_CONTRACT; });
+// The event routes answer only with entries the backend can send: each is
+// checked against the WS schema's EventEntry def (the wire view) before it
+// leaves, so a spec's fixture cannot carry a field or a type no server has.
+const WS_DEFS = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'internal', 'wsproto', 'wsproto.schema.json'), 'utf8')).defs;
+let schemaViolations, EVENT_ENTRIES;
+const contractReady = Promise.all([
+  import(require('url').pathToFileURL(path.join(STATIC_DIR, 'contract.js')).href)
+    .then((m) => { NZ_CONTRACT = m.NZ_CONTRACT; }),
+  import(require('url').pathToFileURL(path.join(__dirname, '..', '..', 'scripts', 'check-mock-rest.mjs')).href)
+    .then((m) => { ({ schemaViolations, EVENT_ENTRIES } = m); }),
+]);
+
+// sendEntries answers an event route with entries, or with 500 naming every
+// violation when one is not a shape the backend produces.
+function sendEntries(res, route, entries, headers = { 'Content-Type': 'application/json' }) {
+  const bad = schemaViolations(entries, EVENT_ENTRIES, WS_DEFS, route);
+  if (bad.length) {
+    const error = `mock fixture is not an EventEntry the backend sends: ${bad.join(', ')}`;
+    console.error(`mock-server: ${error}`);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error }));
+    return;
+  }
+  res.writeHead(200, headers);
+  res.end(JSON.stringify(entries));
+}
 
 // The dashboard CSP exactly as production serves it (routes.go / #1980).
 // A Go drift test (TestDashboardCSP_MockServerHeaderInSync) compares this
@@ -237,6 +261,7 @@ function defaultGitStates() {
  * @param {number} [overrides.sendStatus] - Status code for POST /api/sessions/send.
  * @param {object} [overrides.sessionRuns] - session key → GET /api/sessions/runs payload ({runs, stats}); unknown keys 404 (header runstats stay empty).
  * @param {object[]} [overrides.discovered] - GET /api/discovered payload (default: none).
+ * @param {object[]} [overrides.discoveredPreview] - GET /api/discovered/preview entries (default: none).
  * POST /api/scratch/open always succeeds with a fixed scratch session (the
  * 追问 drawer's open path); its event polling rides the sessions_events route.
  * @param {number} [overrides.sessionsDelayMs] - Hold GET /api/sessions responses
@@ -321,6 +346,7 @@ function startMockServer(overrides = {}) {
   // in between — the window where a spliced cache row would otherwise be trusted.
   const compactCronListDelayMs = overrides.compactCronListDelayMs || 0;
   const discoveredData = overrides.discovered || [];
+  const discoveredPreview = overrides.discoveredPreview || [];
   let discoveredCloseCalls = [];
   const requireAuth = overrides.requireAuth || false;
   const authToken = overrides.authToken || 'test-token-123';
@@ -514,7 +540,7 @@ function startMockServer(overrides = {}) {
         // handlers.go default branch: the in-memory ring only.
         out = all.slice(-eventsRingSize);
       }
-      const reply = () => { res.writeHead(200, headers); res.end(JSON.stringify(out)); };
+      const reply = () => sendEntries(res, 'sessions_events', out, headers);
       if (after > 0 && eventsTailDelayMs > 0) setTimeout(reply, eventsTailDelayMs);
       else reply();
       return;
@@ -658,8 +684,7 @@ function startMockServer(overrides = {}) {
 
     if (pathname === NZ_CONTRACT.API.discovered_preview && req.method === 'GET') {
       if (!checkAuth()) return;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end('[]');
+      sendEntries(res, 'discovered_preview', discoveredPreview);
       return;
     }
 
@@ -797,8 +822,7 @@ function startMockServer(overrides = {}) {
       const all = agentEvents[taskId] || [];
       // Inclusive, like the server: entries AT the watermark come back again.
       const page = all.filter(e => (e.time || 0) >= after).slice(0, limit);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(page));
+      sendEntries(res, 'sessions_agent_events', page);
       return;
     }
 

@@ -499,9 +499,6 @@
         "duration_ms": {
           "type": "integer"
         },
-        "first_prompt_id": {
-          "type": "string"
-        },
         "image_paths": {
           "type": "array",
           "items": {
@@ -513,12 +510,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "internal_agent_id": {
-          "type": "string"
-        },
-        "jsonl_path": {
-          "type": "string"
         },
         "last_tool": {
           "type": "string"
@@ -533,9 +524,6 @@
           "type": "string"
         },
         "task_id": {
-          "type": "string"
-        },
-        "task_type": {
           "type": "string"
         },
         "team_name": {
@@ -561,7 +549,23 @@
           "type": "integer"
         },
         "type": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "user",
+            "text",
+            "thinking",
+            "tool_use",
+            "tool_result",
+            "agent",
+            "todo",
+            "ask_question",
+            "task_start",
+            "task_progress",
+            "task_done",
+            "result",
+            "system",
+            "persist_gap"
+          ]
         },
         "uuid": {
           "type": "string"

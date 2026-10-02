@@ -10,7 +10,9 @@ import (
 	"strings"
 )
 
-// TodoItem mirrors one entry in Claude Code's TodoWrite tool input.
+// TodoItem mirrors one entry in Claude Code's TodoWrite tool input. It is a
+// parsed view only: a todo entry's Detail carries the CLI's own bytes
+// (ParseTodosWithRaw), so these tags read the wire shape, they do not set it.
 type TodoItem struct {
 	Content    string `json:"content"`
 	Status     string `json:"status"` // pending | in_progress | completed

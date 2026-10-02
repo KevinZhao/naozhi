@@ -2,6 +2,7 @@ package clievent
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -112,6 +113,42 @@ func TestParseTodosWithRaw_RawIsArrayLiteral(t *testing.T) {
 	}
 	if len(out) != 2 {
 		t.Fatalf("round-trip len mismatch: %d", len(out))
+	}
+}
+
+// cliTodoWriteInput is a TodoWrite tool_use input in the shape Claude Code
+// sends it: every item carries content, status and activeForm.
+const cliTodoWriteInput = `{"todos":[` +
+	`{"content":"Read the failing test","status":"completed","activeForm":"Reading the failing test"},` +
+	`{"content":"Fix the off-by-one in the pager","status":"in_progress","activeForm":"Fixing the off-by-one in the pager"},` +
+	`{"content":"Run go test ./...","status":"pending","activeForm":"Running go test ./..."}]}`
+
+// A todo entry's detail is the CLI's own bytes, so TodoItem is only a parsed
+// view of them; it must still read all three keys the CLI writes, and say
+// them back the same way, or the IM summary loses activeForm without a sound.
+func TestTodoItem_RoundTripsTheCLIShape(t *testing.T) {
+	t.Parallel()
+	todos, raw, ok := ParseTodosWithRaw(json.RawMessage(cliTodoWriteInput))
+	if !ok || len(todos) != 3 {
+		t.Fatalf("ParseTodosWithRaw = %+v, %v", todos, ok)
+	}
+	if got := todos[1]; got.Content != "Fix the off-by-one in the pager" || got.Status != "in_progress" ||
+		got.ActiveForm != "Fixing the off-by-one in the pager" {
+		t.Errorf("parsed %+v", got)
+	}
+	var cli, back []map[string]string
+	if err := json.Unmarshal(raw, &cli); err != nil {
+		t.Fatal(err)
+	}
+	again, err := json.Marshal(todos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(again, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back, cli) {
+		t.Errorf("TodoItem says the CLI's todos back as %s, the CLI wrote %s", again, raw)
 	}
 }
 
