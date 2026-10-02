@@ -29,7 +29,8 @@
 //                      not hide the sink it wraps)
 //   importCycles       strongly-connected components of the import graph
 //   unresolvedImports  imports naming an export the target does not have (a
-//                      link error: the whole page fails to load)
+//                      link error: the whole page fails to load), and
+//                      namespace imports of a table module read as a whole
 //   reexports          `export … from` relays
 //   leafImports        imports from a caps.leaves module to a non-leaf
 //   upcallForwarders   shell slots not backed by a root module's own code
@@ -150,10 +151,19 @@ function visit(root, fn, parent = null, key = null) {
 
 const isFn = (n) => n?.type === 'FunctionDeclaration' || n?.type === 'FunctionExpression' || n?.type === 'ArrowFunctionExpression';
 
-// propName is a member's static property name: x.p and x['p'] are both p.
+// staticString is the string a literal spells: 'p', 1, or a template with
+// no expressions (`p`); anything else is null.
+function staticString(n) {
+  if (n?.type === 'Literal') return String(n.value);
+  if (n?.type === 'TemplateLiteral' && !n.expressions.length) return n.quasis[0].value.cooked;
+  return null;
+}
+
+// propName is a member's static property name: x.p, x['p'] and x[`p`] are
+// all p (so is an object key, 'p': v included).
 function propName(m) {
-  if (!m.computed) return m.property.type === 'Identifier' ? m.property.name : null;
-  return m.property.type === 'Literal' ? String(m.property.value) : null;
+  if (!m.computed && m.property.type === 'Identifier') return m.property.name;
+  return staticString(m.property);
 }
 
 // memberPath spells an Identifier / static member chain: a, a.b, a.b.c.
@@ -212,7 +222,8 @@ const IMPORT_SPECIFIER = new Set(['ImportSpecifier', 'ImportDefaultSpecifier', '
 // land in the DOM as HTML and the metric (kind) it counts in. A property
 // sink is one whether it is assigned (el.innerHTML = s), copied in by a
 // literal key (Object.assign(el, { innerHTML: s })) or set by name
-// (Reflect.set(el, 'innerHTML', s)). A property named by a runtime value
+// (Reflect.set(el, 'innerHTML', s)); srcdoc also as an attribute
+// (setAttribute('srcdoc', s)). A property named by a runtime value
 // (el[k] = s) is not resolved.
 // Maps, not object literals: `p in {…}` would also match toString.
 const HTML_PROP = new Map([['innerHTML', 'innerHTMLAssign'], ['outerHTML', 'htmlInsert'], ['srcdoc', 'htmlInsert']]);
@@ -230,10 +241,15 @@ function htmlSinks(node) {
       .map((q) => ({ kind: HTML_PROP.get(propName({ computed: q.computed, property: q.key })), args: [q.value] })));
   }
   if (callee === 'Reflect.set') {
-    const k = node.arguments[1]?.type === 'Literal' ? HTML_PROP.get(String(node.arguments[1].value)) : undefined;
+    const k = HTML_PROP.get(staticString(node.arguments[1]));
     return k ? [{ kind: k, args: node.arguments.slice(2, 3) }] : [];
   }
   const p = propName(node.callee);
+  // srcdoc is an attribute too; HTML attribute names are case-insensitive.
+  const attr = p === 'setAttribute' ? 0 : p === 'setAttributeNS' ? 1 : -1;
+  if (attr >= 0 && staticString(node.arguments[attr])?.toLowerCase() === 'srcdoc') {
+    return [{ kind: 'htmlInsert', args: node.arguments.slice(attr + 1, attr + 2) }];
+  }
   if (HTML_CALL_ARG.has(p)) return [{ kind: 'htmlInsert', args: node.arguments.slice(HTML_CALL_ARG.get(p), HTML_CALL_ARG.get(p) + 1) }];
   if ((p === 'write' || p === 'writeln') && node.callee.object.type === 'Identifier' && node.callee.object.name === 'document') {
     return [{ kind: 'htmlInsert', args: node.arguments }];
@@ -280,6 +296,61 @@ export const NO_CAPS = Object.freeze({ lateBindingTables: {}, injectionAllow: []
 // call shell.X(...).
 export const SHELL_MODULE = 'shell.js';
 
+// desugarNamespaces: a namespace import of shell.js or of a late-binding
+// table's module (import * as S) reaches the table through a member: S.hooks,
+// S.shell, S.registerShell, or one destructured (const { hooks: H } = S).
+// Each member becomes a binding named "S.hooks" (no identifier has a dot, so
+// it shadows nothing), recorded as an import of hooks like the named form, so
+// every check after this sees it the same way. Any other read of S (S[k], an
+// alias, S passed on, a rest element), or a dynamic import() of the
+// module, hides which table it reaches: for
+// shell.js an opaque shell read (upcallNotUp), for a table module an
+// nsOpaque entry (unresolvedImports). The AST is rewritten in place.
+function desugarNamespaces(program, facts, caps) {
+  const wanted = new Map([[SHELL_MODULE, new Set(['shell', 'registerShell'])]]); // module -> export names
+  for (const [name, module] of Object.entries(caps.lateBindingTables)) wanted.set(module, new Set([...(wanted.get(module) ?? []), name]));
+  const ns = new Map(facts.imports.filter((i) => i.imported === '*' && wanted.has(i.from)).map((i) => [i.local, i.from]));
+  const opaque = (local, from, line) => {
+    if (from === SHELL_MODULE) facts.shellOpaque.push(line);
+    else facts.nsOpaque.push({ local, from, line });
+  };
+  const members = []; // [MemberExpression, binding name, imported, from]
+  visit(program, (n, parent, key) => {
+    // import('./shell.js') hands over the same namespace, but as a value
+    // this analysis does not follow.
+    if (n.type === 'ImportExpression') {
+      const from = moduleFile(staticString(n.source) ?? '');
+      if (wanted.has(from)) opaque(null, from, n.loc.start.line);
+    }
+    if (n.type !== 'Identifier' || !ns.has(n.name) || !isReference(n, parent, key) || IMPORT_SPECIFIER.has(parent?.type)) return;
+    const from = ns.get(n.name);
+    const names = wanted.get(from);
+    const line = n.loc.start.line;
+    if (parent?.type === 'MemberExpression' && key === 'object') {
+      const p = propName(parent);
+      if (p === null) opaque(n.name, from, line);
+      else if (names.has(p)) members.push([parent, `${n.name}.${p}`, p, from]);
+      return;
+    }
+    if (parent?.type === 'VariableDeclarator' && key === 'init' && staticKeys(parent.id)) {
+      for (const q of parent.id.properties) {
+        const p = propName({ computed: q.computed, property: q.key });
+        if (!names.has(p)) continue;
+        const v = q.value.type === 'AssignmentPattern' ? q.value.left : q.value;
+        if (v.type === 'Identifier') { facts.imports.push({ local: v.name, imported: p, from, line }); facts.nsBound.add(v); }
+        else opaque(n.name, from, line); // a nested pattern (const { shell: { x } } = S): not followed, so a finding
+      }
+      return;
+    }
+    opaque(n.name, from, line);
+  });
+  for (const [m, name, imported, from] of members) {
+    for (const k of Object.keys(m)) if (!SKIP_KEYS.has(k)) delete m[k];
+    Object.assign(m, { type: 'Identifier', name });
+    if (!facts.imports.some((i) => i.local === name)) facts.imports.push({ local: name, imported, from, line: m.loc.start.line });
+  }
+}
+
 // analyzeProgram collects everything the per-file metrics and the _global
 // checks need from one module.
 function analyzeProgram(program, file, caps = NO_CAPS) {
@@ -302,6 +373,8 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
     shellRegs: [], // ObjectExpression args of registerShell(...)
     tables: new Set(), // local names of the late-binding tables
     shellNames: new Set(), // local names of shell.js's shell
+    nsOpaque: [], // { local, from, line }: a table module's namespace read as a whole
+    nsBound: new Set(), // the pattern identifiers desugarNamespaces bound (declarations, not reads)
   };
   const exportedLocal = new Set();
   let defaultFn = null; // export default function (…) {…}
@@ -354,6 +427,7 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
       }
     }
   }
+  desugarNamespaces(program, facts, caps);
   const localOf = (module, name) => facts.imports.filter((i) => i.from === module && i.imported === name).map((i) => i.local);
   const tables = facts.tables;
   for (const [name, module] of Object.entries(caps.lateBindingTables)) {
@@ -400,7 +474,7 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
     // A shell slot is used as shell.X or destructured by its static key
     // (const { X } = shell). Any other read of shell (shell[k], an alias, a
     // rest element, shell passed on) hides which slot it reaches: a finding.
-    if (n.type === 'Identifier' && shellNames.has(n.name) && isReference(n, parent, key) && !IMPORT_SPECIFIER.has(parent?.type)) {
+    if (n.type === 'Identifier' && shellNames.has(n.name) && isReference(n, parent, key) && !IMPORT_SPECIFIER.has(parent?.type) && !facts.nsBound.has(n)) {
       const slot = parent?.type === 'MemberExpression' && key === 'object' ? propName(parent) : null;
       const slots = parent?.type === 'VariableDeclarator' && key === 'init' ? staticKeys(parent.id) : null;
       if (slot !== null) facts.shellUses.add(slot);
@@ -796,6 +870,10 @@ export function measureGlobal(all, graph, caps = NO_CAPS) {
       if (i.imported !== null && !exportsOf(all, i.from).has(i.imported)) {
         details.unresolvedImports.push(`${f}:${i.line}: ${i.from} does not export ${i.imported}`);
       }
+    }
+    for (const { local, from, line } of facts.nsOpaque) {
+      const how = local === null ? `import() of ${from} read as a value` : `${local} (import * from ${from}) read other than as ${local}.X or const { X } = ${local}`;
+      details.unresolvedImports.push(`${f}:${line}: ${how}, so the late-binding table it reaches is unknown`);
     }
   }
   const leafSet = new Set(leaves);

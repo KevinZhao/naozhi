@@ -334,8 +334,12 @@ test('innerHTMLAssign counts every assignment operator and the computed form', (
     'Object.assign(el, { innerHTML: g, title: t });', // copied in by its key
     "Reflect.set(el, 'innerHTML', h);",
     "Reflect.set(el, 'title', t);",
+    'el[`innerHTML`] = i;', // a template with no expressions is a constant key
+    'Reflect.set(el, `innerHTML`, j);',
+    "Object.assign(el, { 'innerHTML': k, [`innerHTML`]: l });",
+    'el[`innerHTML${x}`] = m;', // a runtime key is not resolved
   ));
-  assert.equal(m.innerHTMLAssign, 7);
+  assert.equal(m.innerHTMLAssign, 11);
   assert.equal(m.htmlInsert, 0);
 });
 
@@ -354,8 +358,12 @@ test('htmlInsert counts the other HTML-string sinks, and only those', () => {
     'frame.srcdoc = h;',
     'Object.assign(el, { outerHTML: h }, { srcdoc: h, toString: h });',
     "Reflect.set(frame, 'srcdoc', h);",
+    "frame.setAttribute('srcdoc', h);", // srcdoc as an attribute, any case
+    "frame.setAttribute('SrcDoc', h);",
+    "frame.setAttributeNS(null, 'srcdoc', h);",
+    "frame.setAttribute('title', h);",
   ));
-  assert.equal(m.htmlInsert, 11);
+  assert.equal(m.htmlInsert, 14);
   assert.equal(m.innerHTMLAssign, 0);
 });
 
@@ -372,6 +380,11 @@ test('htmlSinks: a wrapper does not hide the sink it wraps', () => {
     'b.js': js("import { setHTML } from './a.js';", 'setHTML(c, x);'),
   };
   assert.equal(global(wrapped).metrics.htmlSinks, 4);
+  // A call through a namespace import is a call to the wrapper.
+  assert.equal(global({ ...wrapped, 'c.js': js("import * as A from './a.js';", 'A.setHTML(d, y);', 'A.other(d, y);') }).metrics.htmlSinks, 5);
+  // A wrapper over setAttribute('srcdoc', html) wraps the value, not the name.
+  const attr = { 'a.js': js("function frameHTML(f, s) { f.setAttribute('srcdoc', s); }", 'frameHTML(a, x);', 'frameHTML(b, y);') };
+  assert.equal(global(attr).metrics.htmlSinks, 3);
   // A wrapper of the wrapper, an import alias and a call through an injected
   // table are all calls to a sink.
   const deeper = {
@@ -391,8 +404,9 @@ test('htmlSinks: a wrapper does not hide the sink it wraps', () => {
   };
   // 1 assignment + setHTML() inside paint + p() twice + deps.setHTML().
   assert.equal(global(deeper).metrics.htmlSinks, 5);
-  // Through a late-binding table too.
+  // Through a late-binding table too, imported by name or as a namespace.
   assert.equal(global({ ...deeper, 'c.js': js("import { hooks } from './state.js';", 'hooks.setHTML(e, z);') }).metrics.htmlSinks, 6);
+  assert.equal(global({ ...deeper, 'c.js': js("import * as St from './state.js';", 'St.hooks.setHTML(e, z);') }).metrics.htmlSinks, 6);
   // Passing only the element a wrapper writes to does not make the caller a
   // wrapper: frame() and its two calls add nothing over setHTML's one call.
   const element = {
@@ -431,6 +445,45 @@ test('lateBindings counts hooks.X / nzViews.X writes, an object literal by its k
   // dropped one: without them nothing is a late binding.
   assert.equal(measureSource(src).lateBindings, 0);
   assert.deepEqual(REAL_CAPS.lateBindingTables, { hooks: 'state.js', nzViews: 'nz_util.js' });
+});
+
+test('lateBindings: a namespace import reaches the table through its member', () => {
+  const state = js('export const hooks = {};', 'export const other = {};', 'export function foo() {}');
+  const util = js('export const nzViews = {};');
+  const src = js(
+    "import * as St from './state.js';",
+    "import * as U from './nz_util.js';",
+    'St.hooks.a = f;',
+    "St['hooks'].b = f;",
+    'const { hooks: H } = St;', // destructured, renamed
+    'H.c = f;',
+    'const { hooks = null } = St;', // shorthand with a default
+    'hooks.d = f;',
+    'const K = St.hooks;', // an alias of the member
+    'K.e = f;',
+    'Object.assign(St.hooks, { g, h });',
+    'U.nzViews.v = f;',
+    'St.other.x = 1;', // another export of state.js: not a table
+    'St.foo();',
+    'const { foo } = St;',
+  );
+  assert.equal(measureSource(src, undefined, '', REAL_CAPS).lateBindings, 8);
+  let g = global({ 'state.js': state, 'nz_util.js': util, 'a.js': src });
+  assert.equal(g.metrics.unresolvedImports, 0, g.details.unresolvedImports.join('\n'));
+  // A read of the namespace that hides which export it reaches is a finding.
+  const opaque = {
+    'a computed member': 'St[k].x = f;',
+    'an alias': 'const S2 = St; S2.hooks.x = f;',
+    'a rest element': 'const { ...r } = St; r.hooks.x = f;',
+    'a nested pattern': 'const { hooks: { x } } = St;',
+    'the namespace passed on': 'register(St);',
+    'a dynamic import': "import('./state.js').then((m) => { m.hooks.x = f; });",
+  };
+  for (const [name, body] of Object.entries(opaque)) {
+    g = global({ 'state.js': state, 'a.js': js("import * as St from './state.js';", body) });
+    assert.equal(g.metrics.unresolvedImports, 1, name);
+    assert.match(g.details.unresolvedImports[0], /a\.js:2: (St \(import \* from state\.js\) read other than as St\.X|import\(\) of state\.js read as a value)/, name);
+  }
 });
 
 test('configureDeps counts injections where they land, whatever the receiver is called', () => {
@@ -699,6 +752,48 @@ test('shell: a slot that only forwards, and an upcall that could be an import', 
   };
   for (const [name, body] of Object.entries(opaque)) {
     g = global({ ...good, 'view.js': js("import { shell } from './shell.js';", body) });
+    assert.equal(g.metrics.upcallNotUp, 1, name);
+    assert.match(g.details.upcallNotUp[0], /view\.js:2: shell read other than as shell\.X/, name);
+  }
+
+  // A namespace import of shell.js is the same table: S.shell.X and a
+  // destructured shell are uses, S.registerShell a registration.
+  const nsView = {
+    'S.shell.X': 'export function click(k) { S.shell.selectSession(k); }',
+    "S['shell'].X": "export function click(k) { S['shell'].selectSession(k); }",
+    'const { shell: sh } = S': 'const { shell: sh } = S; sh.selectSession(1);',
+    'const { shell } = S': 'const { shell } = S; shell.selectSession(1);',
+    'const { selectSession } = S.shell': 'const { selectSession } = S.shell; selectSession(1);',
+  };
+  for (const [name, body] of Object.entries(nsView)) {
+    const view = js("import * as S from './shell.js';", body);
+    assert.equal(measureSource(view).configureDeps, 1, name);
+    g = global({ ...good, 'view.js': view });
+    assert.equal(g.metrics.upcallNotUp, 0, `${name}: ${g.details.upcallNotUp.join('\n')}`);
+    g = global({ ...good, 'view.js': view, 'other.js': view.replace('./view.js', '') });
+    assert.match(g.details.upcallNotUp.join('\n'), /dashboard\.js does not reach other\.js/, name);
+  }
+  g = global({ ...good, 'other.js': js("import * as S from './shell.js';", 'S.shell.nothing();') });
+  assert.match(g.details.upcallNotUp.join('\n'), /other\.js: shell\.nothing is not registered/);
+  // Registered through the namespace: from the root it fills the slot, from
+  // anywhere else it is outside the roots.
+  const nsRoot = good['dashboard.js'].replace("import { registerShell } from './shell.js';", "import * as S from './shell.js';").replace('registerShell({', 'S.registerShell({');
+  g = global({ ...good, 'dashboard.js': nsRoot });
+  assert.equal(g.metrics.upcallForwarders + g.metrics.upcallNotUp, 0, [...g.details.upcallForwarders, ...g.details.upcallNotUp].join('\n'));
+  g = global({ ...good, 'view.js': good['view.js'] + js("import * as S from './shell.js';", 'function f() { return 1; }', 'S.registerShell({ f });') });
+  assert.match(g.details.upcallForwarders.join('\n'), /view\.js:\d+: registerShell outside the root modules/);
+  // A namespace read that hides its slot is an opaque shell read.
+  const nsOpaque = {
+    'a computed member': 'S[k].selectSession(1);',
+    'an alias': 'const T = S; T.shell.selectSession(1);',
+    'a rest element': 'const { ...r } = S; r.shell.selectSession(1);',
+    'a nested pattern': 'const { shell: { selectSession } } = S;',
+    'the namespace passed on': 'register(S);',
+    'S.shell passed on': 'register(S.shell);',
+    'a dynamic import': "import('./shell.js').then((m) => m.shell.selectSession(1));",
+  };
+  for (const [name, body] of Object.entries(nsOpaque)) {
+    g = global({ ...good, 'view.js': js("import * as S from './shell.js';", body) });
     assert.equal(g.metrics.upcallNotUp, 1, name);
     assert.match(g.details.upcallNotUp[0], /view\.js:2: shell read other than as shell\.X/, name);
   }
