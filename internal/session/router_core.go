@@ -16,12 +16,12 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/datadir"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 
 	// History backends (claudejsonl / kirojsonl) are blank-imported in
 	// internal/wireup, not here, so this package stays backend-agnostic; the
 	// generic naozhilog tier is constructed via eventlog_bridge.go (#403, #567).
+	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/backendstore"
 	"github.com/naozhi/naozhi/internal/session/knownids"
@@ -508,7 +508,7 @@ func chatKeyFor(key string) string {
 
 // HistoryLoader abstracts loading a session's persisted JSONL history tail
 // across a prev_session_ids chain, so unit tests can inject a fixture without
-// wiring the whole discovery chain (#458). Production: discoveryHistoryLoader.
+// wiring the whole discovery chain (#458). Production: claudeTranscriptLoader.
 type HistoryLoader interface {
 	// LoadHistoryChainTail walks the JSONL files for ids (newest→oldest)
 	// under claudeDir/cwd and returns up to limit entries. ctx cancellation
@@ -516,12 +516,45 @@ type HistoryLoader interface {
 	LoadHistoryChainTail(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []clievent.EventEntry
 }
 
-// discoveryHistoryLoader is the production HistoryLoader backed by the
-// discovery package. Stateless; the zero value is ready to use.
-type discoveryHistoryLoader struct{}
+// transcriptView adapts a (ids, cwd) pair to history.SessionView so
+// claudeTranscriptLoader can hand it to the "claude" factory without a
+// ManagedSession. SessionKey/SessionID are unused by that factory and
+// return "".
+type transcriptView struct {
+	ids []string
+	cwd string
+}
 
-func (discoveryHistoryLoader) LoadHistoryChainTail(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []clievent.EventEntry {
-	return discovery.LoadHistoryChainTailCtx(ctx, claudeDir, ids, cwd, limit)
+func (v transcriptView) SessionKey() string         { return "" }
+func (v transcriptView) Workspace() string          { return v.cwd }
+func (v transcriptView) SessionID() string          { return "" }
+func (v transcriptView) SnapshotChainIDs() []string { return v.ids }
+
+// claudeTranscriptLoader is the production HistoryLoader: it resolves the
+// "claude" factory via pick and reads LoadBefore(ctx, 0, limit). A nil pick
+// falls back to history.PickFactory (NewRouter installs it explicitly). A
+// missing factory (a binary that does not link internal/wireup) warns once
+// and yields nil (see #3020).
+type claudeTranscriptLoader struct {
+	pick func(string) history.FactoryFn
+}
+
+func (l claudeTranscriptLoader) LoadHistoryChainTail(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []clievent.EventEntry {
+	pick := l.pick
+	if pick == nil {
+		pick = history.PickFactory
+	}
+	factory := pick("claude")
+	if factory == nil {
+		history.WarnMissingFactory("claude")
+		return nil
+	}
+	src := factory(transcriptView{ids: ids, cwd: cwd}, history.Wiring{ClaudeDir: claudeDir})
+	if src == nil {
+		return nil
+	}
+	entries, _ := src.LoadBefore(ctx, 0, limit)
+	return entries
 }
 
 // RouterConfig holds configuration for the session router.
@@ -600,8 +633,9 @@ type RouterConfig struct {
 	EventLogPersister *persist.Persister
 
 	// HistoryLoader loads a session's persisted JSONL history tail across a
-	// prev_session_ids chain. nil ⇒ discovery.LoadHistoryChainTailCtx; tests
-	// inject a fixture (#458).
+	// prev_session_ids chain. nil ⇒ claudeTranscriptLoader (history.PickFactory
+	// "claude"), which yields no history unless internal/wireup is linked;
+	// tests inject a fixture (#458).
 	HistoryLoader HistoryLoader
 
 	// Observer receives the router's session-list and key-retirement
@@ -681,10 +715,10 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 	r.costAcct = newCostAccounting(ledger, cfg.CostRunOwner)
 
-	// nil HistoryLoader → production discovery-backed implementation so the
-	// rest of the router can call r.historyLoader unconditionally (#458).
+	// nil HistoryLoader → production claude-factory-backed implementation so
+	// the rest of the router can call r.historyLoader unconditionally (#458).
 	if r.historyLoader == nil {
-		r.historyLoader = discoveryHistoryLoader{}
+		r.historyLoader = claudeTranscriptLoader{pick: history.PickFactory}
 	}
 	// Spin up the event-log persister BEFORE touching the session store; the
 	// startup load path needs a live sink for restored ManagedSessions. A

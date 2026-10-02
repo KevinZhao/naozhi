@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/history"
 )
 
@@ -160,6 +162,39 @@ func TestSource_LoadBefore_DegradesOnMisconfig(t *testing.T) {
 				t.Errorf("misconfig must yield nil entries, got %d", len(got))
 			}
 		})
+	}
+}
+
+// TestSource_LoadBefore_TailEquivalence pins that LoadBefore(ctx, 0, limit),
+// the call session's claudeTranscriptLoader makes, returns exactly what
+// discovery.LoadHistoryChainTailCtx returns for the same chain, by running
+// both on one fixture (see #3020).
+func TestSource_LoadBefore_TailEquivalence(t *testing.T) {
+	t.Parallel()
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/cjsonl-tail-equiv"
+	dirName := claudefs.ProjectSlug(cwd)
+	id := "44444444-4444-4444-4444-444444444bb4"
+
+	lines := make([]string, 0, 8)
+	for i := 0; i < 8; i++ {
+		lines = append(lines, userLineAt(fmt.Sprintf("tail-%d", i), int64(3000+i)))
+	}
+	writeSessionJSONL(t, claudeDir, dirName, id, lines)
+
+	src := New(claudeDir, cwd, func() []string { return []string{id} })
+	viaSource, err := src.LoadBefore(context.Background(), 0, 5)
+	if err != nil {
+		t.Fatalf("Source.LoadBefore: %v", err)
+	}
+
+	viaDiscovery := discovery.LoadHistoryChainTailCtx(context.Background(), claudeDir, []string{id}, cwd, 5)
+
+	if len(viaSource) == 0 {
+		t.Fatal("Source.LoadBefore(ctx, 0, 5) returned no entries on a non-empty fixture")
+	}
+	if !reflect.DeepEqual(viaSource, viaDiscovery) {
+		t.Fatalf("Source.LoadBefore(ctx,0,n) = %+v, want discovery.LoadHistoryChainTailCtx result %+v", viaSource, viaDiscovery)
 	}
 }
 
