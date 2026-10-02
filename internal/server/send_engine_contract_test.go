@@ -1,6 +1,7 @@
 package server
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -165,7 +166,7 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	if hub.engine.guard != guard {
 		t.Error("engine.guard is not the guard passed to NewHub")
 	}
-	if _, ok := hub.engine.agents["a"]; !ok || len(hub.engine.agents) != len(agents) {
+	if reflect.ValueOf(hub.engine.agents).UnsafePointer() != reflect.ValueOf(agents).UnsafePointer() {
 		t.Error("engine.agents is not the agent map passed to NewHub")
 	}
 	if hub.engine.projectMgr != projectMgr {

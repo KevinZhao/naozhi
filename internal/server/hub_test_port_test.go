@@ -1,8 +1,11 @@
 package server
 
 import (
+	"context"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -32,19 +35,33 @@ func newHubForTest(opts HubOptions, eo sendEngineOpts) *Hub {
 // overwritten here, so the port refuses it instead.
 func TestNewHubForTest_RejectsMisplacedDeps(t *testing.T) {
 	t.Parallel()
-	cases := map[string]func(){
-		"guard in opts":     func() { newHubForTest(HubOptions{Guard: session.NewGuard()}, sendEngineOpts{}) },
-		"allowedRoot in eo": func() { newHubForTest(HubOptions{}, sendEngineOpts{AllowedRoot: "/tmp/nz-root"}) },
-		"notify in eo":      func() { newHubForTest(HubOptions{}, sendEngineOpts{Notify: nopNotifier{}}) },
+	// One case per refused field: five engine-only fields in opts, six shared
+	// or Hub-derived fields in eo. Dropping any one check from the port fails
+	// exactly one case.
+	cases := map[string]struct {
+		opts HubOptions
+		eo   sendEngineOpts
+	}{
+		"guard in opts":       {opts: HubOptions{Guard: session.NewGuard()}},
+		"queue in opts":       {opts: HubOptions{Queue: &dispatch.MessageQueue{}}},
+		"agents in opts":      {opts: HubOptions{Agents: map[string]session.AgentOpts{}}},
+		"projectMgr in opts":  {opts: HubOptions{ProjectMgr: &project.Manager{}}},
+		"scratchPool in opts": {opts: HubOptions{ScratchPool: &session.ScratchPool{}}},
+		"router in eo":        {eo: sendEngineOpts{Router: &session.Router{}}},
+		"resolver in eo":      {eo: sendEngineOpts{Resolver: &session.KeyResolver{}}},
+		"scheduler in eo":     {eo: sendEngineOpts{Scheduler: fakeCronSessions{}}},
+		"allowedRoot in eo":   {eo: sendEngineOpts{AllowedRoot: "/tmp/nz-root"}},
+		"ctx in eo":           {eo: sendEngineOpts{Ctx: context.Background()}},
+		"notify in eo":        {eo: sendEngineOpts{Notify: nopNotifier{}}},
 	}
-	for name, build := range cases {
+	for name, c := range cases {
 		func() {
 			defer func() {
 				if recover() == nil {
 					t.Errorf("%s: newHubForTest accepted it", name)
 				}
 			}()
-			build()
+			newHubForTest(c.opts, c.eo)
 		}()
 	}
 }
