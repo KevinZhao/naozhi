@@ -3,11 +3,11 @@ package server
 import (
 	"time"
 
-	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
-// MessageEnqueuer is the *dispatch.MessageQueue subset Hub depends on for
-// the dashboard-side write path.
+// MessageEnqueuer is the *turn.Queue subset Hub depends on for the
+// dashboard-side write path.
 //
 // Contract:
 //   - Enqueue returning isOwner=true: the caller becomes owner goroutine and
@@ -17,14 +17,14 @@ import (
 //   - Discard drops queued messages for key without invoking handlers.
 //   - CollectDelay is static config; Mode drives broadcast-debounce decisions.
 type MessageEnqueuer interface {
-	Enqueue(key string, msg dispatch.QueuedMsg) (isOwner, enqueued, shouldInterrupt bool, gen uint64, evictedID string)
-	DoneOrDrain(key string, gen uint64) []dispatch.QueuedMsg
+	Enqueue(key string, msg turn.Msg) (isOwner, enqueued, shouldInterrupt bool, gen uint64, evictedID string)
+	DoneOrDrain(key string, gen uint64) []turn.Msg
 	Discard(key string)
-	Mode() dispatch.QueueMode
+	Mode() turn.Mode
 	CollectDelay() time.Duration
 }
 
-// Compile-time guarantee: *dispatch.MessageQueue satisfies MessageEnqueuer.
-// This is the editing barrier — adding a method to MessageEnqueuer that
-// MessageQueue does not implement breaks the build immediately.
-var _ MessageEnqueuer = (*dispatch.MessageQueue)(nil)
+// Compile-time guarantee: *turn.Queue satisfies MessageEnqueuer. This is the
+// editing barrier — adding a method to MessageEnqueuer that Queue does not
+// implement breaks the build immediately.
+var _ MessageEnqueuer = (*turn.Queue)(nil)

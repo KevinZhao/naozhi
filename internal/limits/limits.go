@@ -5,11 +5,11 @@
 package limits
 
 // MaxCoalescedText is a *soft* cap on the merged-prompt size produced by
-// dispatch.CoalesceMessages. Worst-case output is cap + per-message ingress
-// cap + framing (~5 MB), safely under the shim's 12 MB stdin line ceiling.
-// Reverse-RPC handlers and IM ingress reject oversized payloads against this
-// same value so the trust boundary holds at every entry point. Kept a const
-// so the cap cannot be mutated at run time.
+// turn.Coalesce. Worst-case output is cap + per-message ingress cap + framing
+// (~5 MB), safely under the shim's 12 MB stdin line ceiling. Reverse-RPC
+// handlers and IM ingress reject oversized payloads against this same value
+// so the trust boundary holds at every entry point. Kept a const so the cap
+// cannot be mutated at run time.
 const MaxCoalescedText = 4 * 1024 * 1024
 
 // MaxStreamJSONLine is the cap on a single claude stream-json / tool-result

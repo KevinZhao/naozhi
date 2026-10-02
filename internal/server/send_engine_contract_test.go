@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // newSendEngineForTest builds an engine the way tests should: through the real
@@ -91,7 +91,7 @@ func TestSendEngine_TrackSendRacesDrain(t *testing.T) {
 
 // TestSendEngine_QueueTypedNilGate pins the #377 typed-nil hazard at its new
 // home. send.go gates the legacy guard path on `e.queue == nil`; boxing a nil
-// concrete *dispatch.MessageQueue into the interface field would make that read
+// concrete *turn.Queue into the interface field would make that read
 // false and silently disable the gate.
 func TestSendEngine_QueueTypedNilGate(t *testing.T) {
 	t.Parallel()
@@ -99,15 +99,15 @@ func TestSendEngine_QueueTypedNilGate(t *testing.T) {
 		t.Errorf("engine built without Queue: queue = %v, want a nil interface", e.queue)
 	}
 	// The shape that actually bites: a nil CONCRETE pointer. This is why
-	// sendEngineOpts.Queue is *dispatch.MessageQueue and not MessageEnqueuer —
+	// sendEngineOpts.Queue is *turn.Queue and not MessageEnqueuer —
 	// an interface-typed opt field would box this before the constructor's nil
 	// check runs. Passing it through the concrete field must still leave the
 	// interface field nil.
-	var nilQueue *dispatch.MessageQueue
+	var nilQueue *turn.Queue
 	if e := newSendEngineForTest(sendEngineOpts{Queue: nilQueue}); e.queue != nil {
-		t.Errorf("engine built with a nil *dispatch.MessageQueue: queue = %v, want a nil interface — send.go's legacy-fallback gate is disabled", e.queue)
+		t.Errorf("engine built with a nil *turn.Queue: queue = %v, want a nil interface — send.go's legacy-fallback gate is disabled", e.queue)
 	}
-	q := dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
 	if e := newSendEngineForTest(sendEngineOpts{Queue: q}); e.queue == nil {
 		t.Error("engine built with a real Queue: queue is nil")
 	}

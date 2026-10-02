@@ -7,7 +7,7 @@ package server
 // same PR and names the row number.
 //
 // Everything runs on a real Server from buildServerWithHandlers, so the IM
-// dispatcher and the dashboard send engine share the one MessageQueue the
+// dispatcher and the dashboard send engine share the one turn.Queue the
 // composition root builds. Sessions are injected TestProcesses whose turns the
 // test scripts one by one. Every wait is for an expected event, with
 // parityWait as its deadline; no test sleeps to let something happen.

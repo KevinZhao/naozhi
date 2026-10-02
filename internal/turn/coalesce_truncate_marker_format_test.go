@@ -1,4 +1,4 @@
-package dispatch
+package turn
 
 import (
 	"strings"
@@ -8,35 +8,35 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// TestCoalesceMessages_TruncateMarker_FormatLock pins the byte-for-byte format
+// TestCoalesce_TruncateMarker_FormatLock pins the byte-for-byte format
 // of the multi-message truncation tail so a future refactor cannot silently
 // regress to fmt.Fprintf — R241-CR-7 (#487) noted the marker had drifted
 // between fmt.Fprintf and the WriteString fast path; this test ensures the
 // merged tail uses the documented "\n[系统] 已省略 N 条后续消息（合并超出长度
 // 上限）。\n" template literally and reports the count via decimal AppendInt.
 //
-// Without this pin, the existing TestCoalesceMessages_TotalBytesCap only
+// Without this pin, the existing TestCoalesce_TotalBytesCap only
 // asserts substring "已省略" — a regression that switched the formatter back
 // to fmt.Sprintf("\n[系统] 已省略 %d ...") would still pass that assertion
 // even though the pre-fix R20260526-PERF parity (zero-alloc on hot coalesce
 // path) would be lost.
-func TestCoalesceMessages_TruncateMarker_FormatLock(t *testing.T) {
+func TestCoalesce_TruncateMarker_FormatLock(t *testing.T) {
 	t.Parallel()
-	// Use the same per-msg sizing pattern as TestCoalesceMessages_TotalBytesCap
+	// Use the same per-msg sizing pattern as TestCoalesce_TotalBytesCap
 	// so we are guaranteed to overshoot the cap and trigger the truncated > 0
 	// branch.
 	per := maxCoalescedTextBytes/4 + 1
 	big := strings.Repeat("x", per)
 	const overflow = 8 // arbitrary; 8 × per safely > maxCoalescedTextBytes
-	msgs := make([]QueuedMsg, 0, overflow)
+	msgs := make([]Msg, 0, overflow)
 	for i := 0; i < overflow; i++ {
-		msgs = append(msgs, QueuedMsg{
+		msgs = append(msgs, Msg{
 			Text:      big,
 			Images:    []clievent.Attachment{{Data: []byte{byte(i)}, MimeType: "image/png"}},
 			EnqueueAt: time.Date(2026, 4, 16, 14, 0, i, 0, time.UTC),
 		})
 	}
-	text, _ := CoalesceMessages(msgs)
+	text, _ := Coalesce(msgs)
 
 	// The marker carries the count of dropped messages — locate it and pin
 	// the exact prefix/suffix shape. We do not pin the count's literal value

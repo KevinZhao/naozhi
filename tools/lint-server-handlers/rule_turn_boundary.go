@@ -21,14 +21,13 @@
 // the third turn entry (#3004 decision 6, deferred to its own issue): the
 // most likely place for a new caller to bypass the port unseen.
 //
-// G-c (*MessageQueue's and dispatch.SessionRouter's exported method sets)
-// lives in internal/dispatch/queue_surface_test.go: it reads no source, so
-// it runs under `go test`.
+// G-c (turn.Queue's and dispatch.SessionRouter's exported method sets) lives
+// in the queue_surface_test.go files of internal/turn and internal/dispatch:
+// it reads no source, so it runs under `go test`.
 //
-// dispatch and server are required: an unreadable one is reported, so a
-// misconfigured -server-pkg cannot narrow the scope. turn (absent until
-// #3004's C1) and upstream are scanned only if present; C1 must make turn
-// required once it creates the package.
+// dispatch, server and turn are required: an unreadable one is reported, so
+// a misconfigured -server-pkg cannot narrow the scope. upstream is scanned
+// only if present.
 package main
 
 import (
@@ -141,7 +140,7 @@ func scanTurnBoundary(serverPkg string) []Violation {
 	if errV != nil {
 		return errV
 	}
-	turnFiles, errV := parseDir(filepath.Join(parent, "turn"), false)
+	turnFiles, errV := parseDir(filepath.Join(parent, "turn"), true)
 	if errV != nil {
 		return errV
 	}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // fakeReactorPlatform is a fakePlatform that also implements platform.Reactor.
@@ -127,7 +128,7 @@ func TestClearQueuedReactions_RemovesOnlyThoseWithMessageID(t *testing.T) {
 	d := newTestDispatcherWithPlatform(fp)
 	d.platforms = map[string]platform.Platform{"fake": fp}
 
-	queued := []QueuedMsg{
+	queued := []turn.Msg{
 		{Text: "a", MessageID: "m1"},
 		{Text: "b", MessageID: ""}, // no ID — skipped
 		{Text: "c", MessageID: "m3"},
@@ -195,7 +196,7 @@ func TestClearQueuedReactions_NonReactorIsNoOp(t *testing.T) {
 	d := newTestDispatcher(fp)
 	// Must not panic and must leave no side effects.
 	d.clearQueuedReactions(context.Background(), "fake",
-		[]QueuedMsg{{MessageID: "m1"}}, nil)
+		[]turn.Msg{{MessageID: "m1"}}, nil)
 }
 
 func TestClearQueuedReactions_ErrorsSwallowed(t *testing.T) {
@@ -206,7 +207,7 @@ func TestClearQueuedReactions_ErrorsSwallowed(t *testing.T) {
 
 	// Should not panic; errors are logged and swallowed.
 	d.clearQueuedReactions(context.Background(), "fake",
-		[]QueuedMsg{{MessageID: "m1"}}, nil)
+		[]turn.Msg{{MessageID: "m1"}}, nil)
 }
 
 // loadDeleteReactor models Feishu's reaction-cache contract

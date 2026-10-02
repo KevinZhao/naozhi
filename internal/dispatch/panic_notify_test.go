@@ -21,6 +21,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 func testIncomingMsg() platform.IncomingMessage {
@@ -56,16 +57,15 @@ func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
 
 	key := session.SessionKey("fake", "direct", "chat-panic", "general")
 	// Seed queued messages so we can verify Discard clears them.
-	d.queue.Enqueue(key, QueuedMsg{Text: "m1", EnqueueAt: time.Now()})
-	d.queue.Enqueue(key, QueuedMsg{Text: "m2", EnqueueAt: time.Now()})
-	if depth := d.queue.Depth(key); depth == 0 {
-		t.Fatalf("setup: expected nonzero depth, got %d", depth)
+	d.queue.Enqueue(key, turn.Msg{Text: "m1", EnqueueAt: time.Now()}) // owner
+	if _, enqueued, _, _, _ := d.queue.Enqueue(key, turn.Msg{Text: "m2", EnqueueAt: time.Now()}); !enqueued {
+		t.Fatal("setup: m2 was not queued behind the owner")
 	}
 
 	d.handleOwnerLoopPanic(key, testIncomingMsg(), "synthetic test panic", nil)
 
-	if depth := d.queue.Depth(key); depth != 0 {
-		t.Errorf("queue depth after panic recover = %d, want 0 (Discard not invoked)", depth)
+	if dropped := d.queue.DiscardAndReturn(key); dropped != nil {
+		t.Errorf("queue after panic recover still holds %d messages, want 0 (Discard not invoked)", len(dropped))
 	}
 }
 

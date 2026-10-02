@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // The server binds both of the router's notification slots, and a retired key
@@ -28,14 +28,15 @@ func TestServer_BindsRouterEvents(t *testing.T) {
 	})
 
 	const key = "feishu:direct:u:general"
-	hs.wiring.msgQueue.Enqueue(key, dispatch.QueuedMsg{Text: "first"})
-	hs.wiring.msgQueue.Enqueue(key, dispatch.QueuedMsg{Text: "queued"})
-	if d := hs.wiring.msgQueue.Depth(key); d != 1 {
-		t.Fatalf("precondition: depth %d, want 1", d)
+	if isOwner, _, _, _, _ := hs.wiring.msgQueue.Enqueue(key, turn.Msg{Text: "first"}); !isOwner {
+		t.Fatal("precondition: first Enqueue did not become owner")
+	}
+	if isOwner, enqueued, _, _, _ := hs.wiring.msgQueue.Enqueue(key, turn.Msg{Text: "queued"}); isOwner || !enqueued {
+		t.Fatalf("precondition: second Enqueue not queued behind owner (isOwner=%v enqueued=%v), want depth 1", isOwner, enqueued)
 	}
 	relay.KeyRetired(key, "sid-retired")
-	if d := hs.wiring.msgQueue.Depth(key); d != 0 {
-		t.Errorf("a key retired through the relay kept %d queued messages", d)
+	if kept := hs.wiring.msgQueue.DiscardAndReturn(key); kept != nil {
+		t.Errorf("a key retired through the relay kept %d queued messages", len(kept))
 	}
 	hs.sessionH.FlushRetiredStore()
 	store, err := buildRetiredStoreWithErr(stateDir)

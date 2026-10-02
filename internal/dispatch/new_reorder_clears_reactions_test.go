@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // #2185: the /new command handler must run discardQueue (the #2013
@@ -24,9 +25,9 @@ func TestNewOrder_DiscardBeforeReset_ClearsReactions(t *testing.T) {
 	d, rp := newReactorDispatcher(t)
 	const key = "im:direct:u1:general"
 
-	d.queue.Enqueue(key, QueuedMsg{Text: "owner", MessageID: "m0"})
-	d.queue.Enqueue(key, QueuedMsg{Text: "f1", MessageID: "m1"})
-	d.queue.Enqueue(key, QueuedMsg{Text: "f2", MessageID: "m2"})
+	d.queue.Enqueue(key, turn.Msg{Text: "owner", MessageID: "m0"})
+	d.queue.Enqueue(key, turn.Msg{Text: "f1", MessageID: "m1"})
+	d.queue.Enqueue(key, turn.Msg{Text: "f2", MessageID: "m2"})
 
 	msg := platform.IncomingMessage{Platform: "fake", ChatID: "u1"}
 
@@ -45,8 +46,10 @@ func TestNewOrder_DiscardBeforeReset_ClearsReactions(t *testing.T) {
 			t.Errorf("unexpected reaction cleared: %q", id)
 		}
 	}
-	if d.queue.Depth(key) != 0 {
-		t.Errorf("queue depth = %d after teardown, want 0", d.queue.Depth(key))
+	// Cleanup deleted the map entry, so the next Enqueue on key becomes owner
+	// rather than queueing behind a stale entry.
+	if isOwner, _, _, _, _ := d.queue.Enqueue(key, turn.Msg{Text: "post-teardown"}); !isOwner {
+		t.Error("queue not empty after teardown: Enqueue did not become owner")
 	}
 }
 
@@ -60,9 +63,9 @@ func TestNewOrder_ResetBeforeDiscard_LeavesReactions(t *testing.T) {
 	d, rp := newReactorDispatcher(t)
 	const key = "im:direct:u1:general"
 
-	d.queue.Enqueue(key, QueuedMsg{Text: "owner", MessageID: "m0"})
-	d.queue.Enqueue(key, QueuedMsg{Text: "f1", MessageID: "m1"})
-	d.queue.Enqueue(key, QueuedMsg{Text: "f2", MessageID: "m2"})
+	d.queue.Enqueue(key, turn.Msg{Text: "owner", MessageID: "m0"})
+	d.queue.Enqueue(key, turn.Msg{Text: "f1", MessageID: "m1"})
+	d.queue.Enqueue(key, turn.Msg{Text: "f2", MessageID: "m2"})
 
 	msg := platform.IncomingMessage{Platform: "fake", ChatID: "u1"}
 

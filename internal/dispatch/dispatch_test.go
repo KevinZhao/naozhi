@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // ---------------------------------------------------------------------------
@@ -118,7 +119,7 @@ func (g *fakeGuard) Release(key string) {
 // ---------------------------------------------------------------------------
 
 // dispatcherTestOption configures the DispatcherConfig newTestDispatcher
-// builds. #3004/T-P1: the default now wires a real *MessageQueue, matching
+// builds. #3004/T-P1: the default now wires a real *turn.Queue, matching
 // build_server.go's production wiring (which always constructs one) rather
 // than silently exercising the Guard-based fallback that production never
 // reaches (see #3004 measured_state #7, "legacy 路径在生产中走不到"). Pass
@@ -139,7 +140,7 @@ func withSendFn(fn func(context.Context, string, Session, string, []clievent.Att
 
 // withQueue overrides the default real queue; nil forces the Guard-based
 // legacy fallback path in dispatch.go's BuildHandler.
-func withQueue(q *MessageQueue) dispatcherTestOption {
+func withQueue(q *turn.Queue) dispatcherTestOption {
 	return func(cfg *DispatcherConfig) { cfg.Queue = q }
 }
 
@@ -150,7 +151,7 @@ func newTestDispatcher(fp *fakePlatform, opts ...dispatcherTestOption) *Dispatch
 		Agents:        map[string]session.AgentOpts{},
 		AgentCommands: map[string]string{},
 		Guard:         newFakeGuard(),
-		Queue:         NewMessageQueue(5, 0),
+		Queue:         turn.NewQueueWithMode(5, 0, turn.ModeCollect),
 		Dedup:         platform.NewDedup(100),
 		Capabilities: fakeCapabilities{
 			send: func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
@@ -582,7 +583,7 @@ func TestBuildHandler_QueueBusy_SecondMessageQueued(t *testing.T) {
 	key := session.SessionKey("fake", "direct", "chat1", "general")
 	// Pre-acquire ownership of key, as if a first message's ownerLoop were
 	// already running.
-	d.queue.Enqueue(key, QueuedMsg{Text: "first", EnqueueAt: time.Now()})
+	d.queue.Enqueue(key, turn.Msg{Text: "first", EnqueueAt: time.Now()})
 	d.BuildHandler()(context.Background(), incomingMsg("hello"))
 	if !strings.Contains(fp.lastReply(), "消息已收到") {
 		t.Errorf("expected queued ack, got %q", fp.lastReply())
@@ -595,11 +596,11 @@ func TestBuildHandler_QueueBusy_SecondMessageQueued(t *testing.T) {
 
 func TestBuildHandler_QueueDrop_Notify(t *testing.T) {
 	fp := &fakePlatform{}
-	q := NewMessageQueue(0, 0)
+	q := turn.NewQueueWithMode(0, 0, turn.ModeCollect)
 	d := newTestDispatcher(fp, withQueue(q))
 	// Mark session busy
 	key := session.SessionKey("fake", "direct", "chat1", "general")
-	q.Enqueue(key, QueuedMsg{Text: "busy", EnqueueAt: time.Now()})
+	q.Enqueue(key, turn.Msg{Text: "busy", EnqueueAt: time.Now()})
 	d.BuildHandler()(context.Background(), platform.IncomingMessage{
 		Platform: "fake", EventID: "e2", UserID: "u1",
 		ChatID: "chat1", ChatType: "direct", Text: "second",
@@ -778,10 +779,10 @@ func TestReplyTracker_WaitReady_CtxCancel(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOwnerLoop_GenMismatch(t *testing.T) {
-	q := NewMessageQueue(5, 10*time.Millisecond)
+	q := turn.NewQueueWithMode(5, 10*time.Millisecond, turn.ModeCollect)
 	key := session.SessionKey("fake", "direct", "chat1", "general")
-	_, _, _, gen, _ := q.Enqueue(key, QueuedMsg{Text: "first", EnqueueAt: time.Now()})
-	q.Enqueue(key, QueuedMsg{Text: "second", EnqueueAt: time.Now()})
+	_, _, _, gen, _ := q.Enqueue(key, turn.Msg{Text: "first", EnqueueAt: time.Now()})
+	q.Enqueue(key, turn.Msg{Text: "second", EnqueueAt: time.Now()})
 	q.Discard(key)
 	// Old gen → nil → stale owner stops
 	if r := q.DoneOrDrain(key, gen); r != nil {
@@ -805,33 +806,25 @@ func TestDiscardQueue_Nil(t *testing.T) {
 
 func TestDiscardQueue_WithQueue(t *testing.T) {
 	fp := &fakePlatform{}
-	q := NewMessageQueue(5, 0)
+	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
 	d := newTestDispatcher(fp, withQueue(q))
 	key := "test-key"
-	q.Enqueue(key, QueuedMsg{Text: "m"})
+	q.Enqueue(key, turn.Msg{Text: "owner"})  // becomes owner
+	q.Enqueue(key, turn.Msg{Text: "queued"}) // sits behind the owner
 	d.discardQueue(context.Background(), platform.IncomingMessage{}, key)
-	if q.Depth(key) != 0 {
-		t.Errorf("depth = %d after discard, want 0", q.Depth(key))
+	// An emptied ring makes a second DiscardAndReturn return nil.
+	if dropped := q.DiscardAndReturn(key); dropped != nil {
+		t.Errorf("DiscardAndReturn after discardQueue = %v, want nil (ring already emptied)", dropped)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// CollectDelay / ShouldSendWait
+// CollectDelay
 // ---------------------------------------------------------------------------
 
 func TestCollectDelay(t *testing.T) {
-	if got := NewMessageQueue(5, 200*time.Millisecond).CollectDelay(); got != 200*time.Millisecond {
+	if got := turn.NewQueueWithMode(5, 200*time.Millisecond, turn.ModeCollect).CollectDelay(); got != 200*time.Millisecond {
 		t.Errorf("CollectDelay = %v, want 200ms", got)
-	}
-}
-
-func TestShouldSendWait(t *testing.T) {
-	q := NewMessageQueue(5, 0)
-	if !q.ShouldSendWait("k") {
-		t.Fatal("first call should return true")
-	}
-	if q.ShouldSendWait("k") {
-		t.Fatal("second call should be rate-limited")
 	}
 }
 

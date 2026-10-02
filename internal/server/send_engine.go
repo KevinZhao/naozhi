@@ -20,11 +20,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // sendEngine is the enqueue → guard → router → TrackSend chain that both
@@ -35,7 +35,7 @@ import (
 // nil guard or router panics on the legacy / attachment-fallback paths.
 type sendEngine struct {
 	// ── owned state (migrated off Hub) ──
-	// queue is the MessageEnqueuer interface, not *dispatch.MessageQueue, so
+	// queue is the MessageEnqueuer interface, not *turn.Queue, so
 	// tests can swap it. Only a non-nil concrete queue is boxed: send.go's
 	// `e.queue == nil` legacy-fallback gate depends on a typed nil never
 	// landing here (#377).
@@ -82,13 +82,13 @@ type sendEngine struct {
 // at one call site rather than a silently-zero field.
 type sendEngineOpts struct {
 	// Queue is the CONCRETE type, not MessageEnqueuer: taking the interface
-	// here would box a nil *dispatch.MessageQueue before newSendEngine's nil
+	// here would box a nil *turn.Queue before newSendEngine's nil
 	// check ever runs, so `e.queue == nil` would read false and silently
 	// disable send.go's legacy-fallback gate (#377 — reintroduced once during
 	// #2551 and caught by TestNewHub_NilQueue_LeavesInterfaceFieldNil). Also
 	// what consumer-interfaces.md §4.5 prescribes: keep concrete types at
 	// construction time.
-	Queue       *dispatch.MessageQueue
+	Queue       *turn.Queue
 	Guard       *session.Guard
 	Ctx         context.Context
 	Router      sendEngineRouter
@@ -140,7 +140,7 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 	// dispatch queue's rate-limit / collect-window / passthrough modes; Error
 	// level so a misconfigured production wiring is visible in journalctl.
 	if o.Queue == nil {
-		slog.Error("server: send engine constructed without MessageQueue; falling back to legacy guard path (dispatch queue features disabled, R-LEGACY-SEND blocker)")
+		slog.Error("server: send engine constructed without a Queue; falling back to legacy guard path (dispatch queue features disabled, R-LEGACY-SEND blocker)")
 	} else {
 		e.queue = o.Queue
 	}
@@ -204,7 +204,7 @@ func (e *sendEngine) drain() {
 
 // LegacySendInvokes returns the total number of times sessionSend fell
 // through to the deprecated sessionSendLegacy path. Production engines wire a
-// real MessageQueue and never increment this; once every test fixture does
+// real turn.Queue and never increment this; once every test fixture does
 // too, sessionSendLegacy can be deleted (#710).
 func (e *sendEngine) LegacySendInvokes() int64 {
 	// A nil receiver reads 0: package callers may probe a not-yet-built engine

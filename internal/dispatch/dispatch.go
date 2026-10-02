@@ -24,6 +24,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
+	"github.com/naozhi/naozhi/internal/turn"
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
@@ -35,9 +36,9 @@ const platformReplyTimeout = 15 * time.Second
 // not blocked on a slow IM API yet the notice still lands before SIGKILL.
 const shutdownReplyTimeout = 5 * time.Second
 
-// SessionGuard gates concurrent messages to one session. MessageQueue is the
-// production IM implementation; session.Guard and test fakes also satisfy it,
-// so keep the method set minimal. Kept as an interface deliberately (#1170).
+// SessionGuard gates concurrent messages to one session when no Queue is
+// configured. session.Guard and test fakes satisfy it, so keep the method set
+// minimal. Kept as an interface deliberately (#1170).
 type SessionGuard interface {
 	TryAcquire(key string) bool
 	ShouldSendWait(key string) bool
@@ -71,7 +72,7 @@ type Dispatcher struct {
 	// non-nil. See docs/rfc/key-resolver.md.
 	resolver    KeyResolver
 	guard       SessionGuard // used by Dashboard/WS path
-	queue       *MessageQueue
+	queue       *turn.Queue
 	dedup       *platform.Dedup
 	allowedRoot string
 	claudeDir   string
@@ -152,7 +153,7 @@ type DispatcherConfig struct {
 	// NewDispatcher fabricates a fallback from Agents / ProjectMgr.
 	Resolver    KeyResolver
 	Guard       SessionGuard
-	Queue       *MessageQueue
+	Queue       *turn.Queue
 	Dedup       *platform.Dedup
 	AllowedRoot string
 	ClaudeDir   string
@@ -513,7 +514,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		// is handled by the CLI commandQueue + Process sendSlot FIFO. Protocols
 		// without --replay-user-messages (e.g. ACP) silently downgrade to the
 		// sendMu-serialized Send path.
-		if d.queue != nil && d.queue.Mode() == ModePassthrough {
+		if d.queue != nil && d.queue.Mode() == turn.ModePassthrough {
 			lg.Info("message received (passthrough)", "agent", agentID, "text_len", len(cleanText), "images", len(images))
 			// Detach from the webhook ctx (handlers return in seconds, turns
 			// take minutes) but keep d.stopCtx as the cancel source so the
@@ -529,7 +530,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 
 		// Enqueue message. If queue is nil or disabled, fall back to Guard.
 		if d.queue != nil {
-			qm := QueuedMsg{
+			qm := turn.Msg{
 				Text:      cleanText,
 				Images:    images,
 				MessageID: msg.MessageID,
@@ -584,7 +585,7 @@ func (d *Dispatcher) ownerLoop(
 	ctx context.Context,
 	key string,
 	gen uint64,
-	first QueuedMsg,
+	first turn.Msg,
 	agentID string,
 	opts sessionview.AgentOpts,
 	msg platform.IncomingMessage,
@@ -600,7 +601,7 @@ func (d *Dispatcher) ownerLoop(
 	// handleOwnerLoopPanic's DiscardAndReturn cannot see it, so track it here
 	// and clear its reactions in the recover defer. `first` is not tracked:
 	// the owner's own message never gets a queued reaction.
-	var pendingClear []QueuedMsg
+	var pendingClear []turn.Msg
 	defer func() {
 		if r := recover(); r != nil {
 			// Turn ctx may already be Done (shutdown racing the panic); detach.
@@ -636,7 +637,7 @@ func (d *Dispatcher) ownerLoop(
 		// Out of the ring from here until cleared below; the recover defer
 		// owns cleanup on panic.
 		pendingClear = queued
-		text, images := CoalesceMessages(queued)
+		text, images := turn.Coalesce(queued)
 		lg.Info("processing queued messages", "count", len(queued), "merged_len", len(text))
 		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, false)
 		// Clear the drained batch's queued reactions. Detached via

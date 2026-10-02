@@ -1,4 +1,4 @@
-package dispatch
+package turn
 
 import (
 	"strings"
@@ -8,18 +8,18 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-func TestCoalesceMessages_Empty(t *testing.T) {
+func TestCoalesce_Empty(t *testing.T) {
 	t.Parallel()
-	text, images := CoalesceMessages(nil)
+	text, images := Coalesce(nil)
 	if text != "" || images != nil {
 		t.Fatalf("expected empty, got %q, %v", text, images)
 	}
 }
 
-func TestCoalesceMessages_Single(t *testing.T) {
+func TestCoalesce_Single(t *testing.T) {
 	t.Parallel()
 	imgs := []clievent.Attachment{{Data: []byte("img"), MimeType: "image/png"}}
-	text, images := CoalesceMessages([]QueuedMsg{
+	text, images := Coalesce([]Msg{
 		{Text: "hello", Images: imgs, EnqueueAt: time.Date(2026, 4, 16, 14, 2, 0, 0, time.UTC)},
 	})
 	if text != "hello" {
@@ -30,14 +30,14 @@ func TestCoalesceMessages_Single(t *testing.T) {
 	}
 }
 
-func TestCoalesceMessages_Multiple(t *testing.T) {
+func TestCoalesce_Multiple(t *testing.T) {
 	t.Parallel()
-	msgs := []QueuedMsg{
+	msgs := []Msg{
 		{Text: "帮我写个函数", EnqueueAt: time.Date(2026, 4, 16, 14, 2, 0, 0, time.UTC)},
 		{Text: "要用Go", Images: []clievent.Attachment{{Data: []byte("a"), MimeType: "image/png"}}, EnqueueAt: time.Date(2026, 4, 16, 14, 2, 30, 0, time.UTC)},
 		{Text: "还有记得加测试", EnqueueAt: time.Date(2026, 4, 16, 14, 3, 0, 0, time.UTC)},
 	}
-	text, images := CoalesceMessages(msgs)
+	text, images := Coalesce(msgs)
 
 	if !strings.HasPrefix(text, "[以下是用户在你处理上一条消息期间追加发送的内容]") {
 		t.Fatalf("missing prefix, got:\n%s", text)
@@ -56,39 +56,39 @@ func TestCoalesceMessages_Multiple(t *testing.T) {
 	}
 }
 
-func TestCoalesceMessages_ImagesConcat(t *testing.T) {
+func TestCoalesce_ImagesConcat(t *testing.T) {
 	t.Parallel()
-	msgs := []QueuedMsg{
+	msgs := []Msg{
 		{Text: "A", Images: []clievent.Attachment{{Data: []byte("1")}}, EnqueueAt: time.Now()},
 		{Text: "B", Images: []clievent.Attachment{{Data: []byte("2")}, {Data: []byte("3")}}, EnqueueAt: time.Now()},
 	}
-	_, images := CoalesceMessages(msgs)
+	_, images := Coalesce(msgs)
 	if len(images) != 3 {
 		t.Fatalf("images len = %d, want 3", len(images))
 	}
 }
 
-// TestCoalesceMessages_TotalBytesCap verifies that the merged prompt stays
+// TestCoalesce_TotalBytesCap verifies that the merged prompt stays
 // bounded under maxCoalescedTextBytes even when many queued messages arrive.
 // Pre-fix, N × per-msg queued messages produced N × per-msg merged prompts;
 // now we cap the running size, drop the tail, and emit a truncation marker
 // while preserving all images. Sized to per-message cap so 8 msgs exceed
 // maxCoalescedTextBytes on any reasonable ingress cap. R60-GO-M4.
-func TestCoalesceMessages_TotalBytesCap(t *testing.T) {
+func TestCoalesce_TotalBytesCap(t *testing.T) {
 	t.Parallel()
 	// Use a message size that, multiplied by 8, safely exceeds the coalesce
 	// cap regardless of future bumps to per-msg ingress caps.
 	per := maxCoalescedTextBytes/4 + 1 // 8 × per > 2 × cap
 	big := strings.Repeat("x", per)
-	msgs := make([]QueuedMsg, 0, 8)
+	msgs := make([]Msg, 0, 8)
 	for i := 0; i < 8; i++ {
-		msgs = append(msgs, QueuedMsg{
+		msgs = append(msgs, Msg{
 			Text:      big,
 			Images:    []clievent.Attachment{{Data: []byte("i"), MimeType: "image/png"}},
 			EnqueueAt: time.Date(2026, 4, 16, 14, 0, i, 0, time.UTC),
 		})
 	}
-	text, images := CoalesceMessages(msgs)
+	text, images := Coalesce(msgs)
 
 	// Each image always flows through regardless of truncation so attached
 	// screenshots are never silently lost.
@@ -110,17 +110,17 @@ func TestCoalesceMessages_TotalBytesCap(t *testing.T) {
 	}
 }
 
-// TestCoalesceMessages_SingleMessageTruncatesOversize covers R61-GO-5:
+// TestCoalesce_SingleMessageTruncatesOversize covers R61-GO-5:
 // a single oversize message must not bypass the coalesce cap even though
 // ingress paths have their own gates. Defense in depth.
-func TestCoalesceMessages_SingleMessageTruncatesOversize(t *testing.T) {
+func TestCoalesce_SingleMessageTruncatesOversize(t *testing.T) {
 	t.Parallel()
 	big := strings.Repeat("y", maxCoalescedTextBytes+1024)
-	msgs := []QueuedMsg{{
+	msgs := []Msg{{
 		Text:      big,
 		EnqueueAt: time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC),
 	}}
-	text, _ := CoalesceMessages(msgs)
+	text, _ := Coalesce(msgs)
 	if len(text) > maxCoalescedTextBytes+len("\n[系统] 内容已截断。\n")+4 {
 		t.Errorf("single-message path did not truncate: len=%d, cap=%d", len(text), maxCoalescedTextBytes)
 	}

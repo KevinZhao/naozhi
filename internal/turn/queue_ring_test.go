@@ -1,4 +1,4 @@
-package dispatch
+package turn
 
 import (
 	"testing"
@@ -10,9 +10,9 @@ import (
 func TestMsgRing_PushDrainFIFO(t *testing.T) {
 	t.Parallel()
 	var r msgRing
-	r.push(QueuedMsg{Text: "A"}, 4)
-	r.push(QueuedMsg{Text: "B"}, 4)
-	r.push(QueuedMsg{Text: "C"}, 4)
+	r.push(Msg{Text: "A"}, 4)
+	r.push(Msg{Text: "B"}, 4)
+	r.push(Msg{Text: "C"}, 4)
 	if r.len() != 3 {
 		t.Fatalf("len = %d, want 3", r.len())
 	}
@@ -31,12 +31,12 @@ func TestMsgRing_PushDrainFIFO(t *testing.T) {
 func TestMsgRing_EvictsOldestOnFull(t *testing.T) {
 	t.Parallel()
 	var r msgRing
-	if ev, _ := r.push(QueuedMsg{Text: "A"}, 3); ev {
+	if ev, _ := r.push(Msg{Text: "A"}, 3); ev {
 		t.Fatal("first push should not evict")
 	}
-	r.push(QueuedMsg{Text: "B"}, 3)
-	r.push(QueuedMsg{Text: "C"}, 3)
-	if ev, dropped := r.push(QueuedMsg{Text: "D"}, 3); !ev {
+	r.push(Msg{Text: "B"}, 3)
+	r.push(Msg{Text: "C"}, 3)
+	if ev, dropped := r.push(Msg{Text: "D"}, 3); !ev {
 		t.Fatal("push at capacity must report eviction")
 	} else if dropped.Text != "A" {
 		t.Fatalf("evicted message = %q, want oldest 'A'", dropped.Text)
@@ -56,7 +56,7 @@ func TestMsgRing_WrapAroundIndices(t *testing.T) {
 	// should still walk the ring correctly even after a partial drain
 	// pattern. We simulate that by interleaving evictions.
 	for i := 0; i < 5; i++ {
-		r.push(QueuedMsg{Text: string(rune('A' + i))}, 3) // A B C, then evict A->[B C D], evict B->[C D E]
+		r.push(Msg{Text: string(rune('A' + i))}, 3) // A B C, then evict A->[B C D], evict B->[C D E]
 	}
 	out := r.drainAll()
 	if len(out) != 3 || out[0].Text != "C" || out[1].Text != "D" || out[2].Text != "E" {
@@ -66,7 +66,7 @@ func TestMsgRing_WrapAroundIndices(t *testing.T) {
 	// Reuse the same ring after drain — head=used=0 again, capacity
 	// preserved.
 	for i := 0; i < 4; i++ {
-		r.push(QueuedMsg{Text: string(rune('a' + i))}, 3) // a b c, evict a -> [b c d]
+		r.push(Msg{Text: string(rune('a' + i))}, 3) // a b c, evict a -> [b c d]
 	}
 	out = r.drainAll()
 	if len(out) != 3 || out[0].Text != "b" || out[1].Text != "c" || out[2].Text != "d" {
@@ -81,9 +81,9 @@ func TestMsgRing_ResetClearsRefs(t *testing.T) {
 	t.Parallel()
 	var r msgRing
 	canary := []byte{1, 2, 3}
-	r.push(QueuedMsg{Text: "X", Images: nil, MessageID: "m"}, 4)
+	r.push(Msg{Text: "X", Images: nil, MessageID: "m"}, 4)
 	// Place a large-ish payload via Images so we can detect retention.
-	r.push(QueuedMsg{Text: "Y"}, 4)
+	r.push(Msg{Text: "Y"}, 4)
 	r.reset()
 	if r.len() != 0 {
 		t.Fatalf("post-reset len = %d, want 0", r.len())
@@ -104,9 +104,9 @@ func TestMsgRing_ResetClearsRefs(t *testing.T) {
 func TestMsgRing_DrainInto_ReusesScratch(t *testing.T) {
 	t.Parallel()
 	var r msgRing
-	r.push(QueuedMsg{Text: "A"}, 4)
-	r.push(QueuedMsg{Text: "B"}, 4)
-	r.push(QueuedMsg{Text: "C"}, 4)
+	r.push(Msg{Text: "A"}, 4)
+	r.push(Msg{Text: "B"}, 4)
+	r.push(Msg{Text: "C"}, 4)
 
 	first := r.drainInto(nil)
 	if len(first) != 3 || first[0].Text != "A" || first[2].Text != "C" {
@@ -114,8 +114,8 @@ func TestMsgRing_DrainInto_ReusesScratch(t *testing.T) {
 	}
 
 	// Refill and drain into the same backing array; it must be reused.
-	r.push(QueuedMsg{Text: "D"}, 4)
-	r.push(QueuedMsg{Text: "E"}, 4)
+	r.push(Msg{Text: "D"}, 4)
+	r.push(Msg{Text: "E"}, 4)
 	second := r.drainInto(first)
 	if len(second) != 2 || second[0].Text != "D" || second[1].Text != "E" {
 		t.Fatalf("second drain = %#v, want [D E]", second)
@@ -132,9 +132,9 @@ func TestMsgRing_DrainInto_GrowsWhenDstTooSmall(t *testing.T) {
 	t.Parallel()
 	var r msgRing
 	for i := 0; i < 3; i++ {
-		r.push(QueuedMsg{Text: string(rune('A' + i))}, 4)
+		r.push(Msg{Text: string(rune('A' + i))}, 4)
 	}
-	small := make([]QueuedMsg, 0, 1)
+	small := make([]Msg, 0, 1)
 	smallBase := unsafe.Pointer(&small[:cap(small)][0])
 	out := r.drainInto(small)
 	if len(out) != 3 {
@@ -149,7 +149,7 @@ func TestMsgRing_DrainInto_GrowsWhenDstTooSmall(t *testing.T) {
 func TestMsgRing_DrainInto_EmptyReturnsNil(t *testing.T) {
 	t.Parallel()
 	var r msgRing
-	if got := r.drainInto(make([]QueuedMsg, 0, 8)); got != nil {
+	if got := r.drainInto(make([]Msg, 0, 8)); got != nil {
 		t.Fatalf("empty drainInto = %#v, want nil", got)
 	}
 }
@@ -160,8 +160,8 @@ func TestMsgRing_DrainInto_EmptyReturnsNil(t *testing.T) {
 func TestMsgRing_DrainInto_ZeroesConsumedSlots(t *testing.T) {
 	t.Parallel()
 	var r msgRing
-	r.push(QueuedMsg{Text: "X", MessageID: "m1"}, 4)
-	r.push(QueuedMsg{Text: "Y", MessageID: "m2"}, 4)
+	r.push(Msg{Text: "X", MessageID: "m1"}, 4)
+	r.push(Msg{Text: "Y", MessageID: "m2"}, 4)
 	_ = r.drainInto(nil)
 	for i := 0; i < cap(r.buf); i++ {
 		if r.buf[i].Text != "" || r.buf[i].MessageID != "" {
@@ -170,18 +170,18 @@ func TestMsgRing_DrainInto_ZeroesConsumedSlots(t *testing.T) {
 	}
 }
 
-// TestMsgQueue_DoneOrDrain_ScratchReuseAcrossTurns is an end-to-end check that
-// the MessageQueue reuses one backing array across coalesced follow-up turns
+// TestQueue_DoneOrDrain_ScratchReuseAcrossTurns is an end-to-end check that
+// the Queue reuses one backing array across coalesced follow-up turns
 // (ModeCollect) without corrupting the FIFO contract. Simulates the ownerLoop:
 // drain -> consume -> enqueue more -> drain again. R20260606-PERF-3 (#1827).
-func TestMsgQueue_DoneOrDrain_ScratchReuseAcrossTurns(t *testing.T) {
+func TestQueue_DoneOrDrain_ScratchReuseAcrossTurns(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(8, 0)
-	_, _, _, gen, _ := q.Enqueue("k", QueuedMsg{Text: "owner"})
+	q := NewQueue(8, 0)
+	_, _, _, gen, _ := q.Enqueue("k", Msg{Text: "owner"})
 
 	// Turn 1 follow-ups.
-	q.Enqueue("k", QueuedMsg{Text: "a1"})
-	q.Enqueue("k", QueuedMsg{Text: "a2"})
+	q.Enqueue("k", Msg{Text: "a1"})
+	q.Enqueue("k", Msg{Text: "a2"})
 	batch1 := q.DoneOrDrain("k", gen)
 	if len(batch1) != 2 || batch1[0].Text != "a1" || batch1[1].Text != "a2" {
 		t.Fatalf("batch1 = %#v, want [a1 a2]", batch1)
@@ -189,7 +189,7 @@ func TestMsgQueue_DoneOrDrain_ScratchReuseAcrossTurns(t *testing.T) {
 	base1 := &batch1[:cap(batch1)][0]
 
 	// Turn 2 follow-ups — fewer messages, must reuse the same backing array.
-	q.Enqueue("k", QueuedMsg{Text: "b1"})
+	q.Enqueue("k", Msg{Text: "b1"})
 	batch2 := q.DoneOrDrain("k", gen)
 	if len(batch2) != 1 || batch2[0].Text != "b1" {
 		t.Fatalf("batch2 = %#v, want [b1]", batch2)
@@ -204,21 +204,21 @@ func TestMsgQueue_DoneOrDrain_ScratchReuseAcrossTurns(t *testing.T) {
 	}
 }
 
-// TestMsgQueue_DoneOrDrain_ScratchReuse_NoAlloc proves the steady-state
+// TestQueue_DoneOrDrain_ScratchReuse_NoAlloc proves the steady-state
 // coalesced-turn drain no longer allocates a backing slice per turn once the
 // scratch is warmed.
-func TestMsgQueue_DoneOrDrain_ScratchReuse_NoAlloc(t *testing.T) {
-	q := NewMessageQueue(8, 0)
-	_, _, _, gen, _ := q.Enqueue("k", QueuedMsg{Text: "owner"})
+func TestQueue_DoneOrDrain_ScratchReuse_NoAlloc(t *testing.T) {
+	q := NewQueue(8, 0)
+	_, _, _, gen, _ := q.Enqueue("k", Msg{Text: "owner"})
 	// Warm the scratch.
-	q.Enqueue("k", QueuedMsg{Text: "w1"})
-	q.Enqueue("k", QueuedMsg{Text: "w2"})
-	q.Enqueue("k", QueuedMsg{Text: "w3"})
+	q.Enqueue("k", Msg{Text: "w1"})
+	q.Enqueue("k", Msg{Text: "w2"})
+	q.Enqueue("k", Msg{Text: "w3"})
 	_ = q.DoneOrDrain("k", gen)
 
 	allocs := testing.AllocsPerRun(50, func() {
-		q.Enqueue("k", QueuedMsg{Text: "x1"})
-		q.Enqueue("k", QueuedMsg{Text: "x2"})
+		q.Enqueue("k", Msg{Text: "x1"})
+		q.Enqueue("k", Msg{Text: "x2"})
 		_ = q.DoneOrDrain("k", gen)
 	})
 	if allocs != 0 {
@@ -226,74 +226,18 @@ func TestMsgQueue_DoneOrDrain_ScratchReuse_NoAlloc(t *testing.T) {
 	}
 }
 
-// TestMsgQueue_ReleaseWithDrain_UsesRingScratch regresses R202606g-PERF-018:
-// ReleaseWithDrain must drain via the ring's scratch (drainInto) rather than
-// allocating a fresh slice (drainAll). When the owning sessionQueue has already
-// warmed its scratch (sized to hold the next batch) via a prior DoneOrDrain,
-// the batch delivered by ReleaseWithDrain must be backed by that same scratch
-// array — not a freshly allocated one.
-func TestMsgQueue_ReleaseWithDrain_UsesRingScratch(t *testing.T) {
-	t.Parallel()
-	q := NewMessageQueue(8, 0)
-
-	// Owner turn warms the ring scratch via DoneOrDrain; ownership is kept
-	// because the drained batch is non-empty.
-	_, _, _, gen, _ := q.Enqueue("k", QueuedMsg{Text: "owner"})
-	q.Enqueue("k", QueuedMsg{Text: "w1"})
-	q.Enqueue("k", QueuedMsg{Text: "w2"})
-	_ = q.DoneOrDrain("k", gen)
-
-	// Grab a reference to the warmed scratch backing array on the live
-	// sessionQueue (re-sliced to full cap so we can observe writes past len).
-	q.mu.Lock()
-	sq := q.queues["k"]
-	if sq == nil {
-		q.mu.Unlock()
-		t.Fatal("sessionQueue evicted unexpectedly after non-empty DoneOrDrain")
-	}
-	if cap(sq.ring.scratch) < 2 {
-		q.mu.Unlock()
-		t.Fatalf("scratch cap = %d, expected warmed to >=2", cap(sq.ring.scratch))
-	}
-	scratch := sq.ring.scratch[:cap(sq.ring.scratch)]
-	q.mu.Unlock()
-
-	// Two follow-ups land in the busy window, then the SessionGuard path
-	// releases-with-drain.
-	q.Enqueue("k", QueuedMsg{Text: "x1"})
-	q.Enqueue("k", QueuedMsg{Text: "x2"})
-
-	var got []string
-	q.ReleaseWithDrain("k", func(m QueuedMsg) {
-		got = append(got, m.Text)
-	})
-	if len(got) != 2 || got[0] != "x1" || got[1] != "x2" {
-		t.Fatalf("drained = %v, want [x1 x2]", got)
-	}
-
-	// drainInto writes the drained messages into the warmed scratch array in
-	// place (cap was >=2, so no realloc). If ReleaseWithDrain had instead used
-	// drainAll, the drained batch would be a brand-new slice and this captured
-	// scratch array would still hold the cleared/old values. Observing the new
-	// values here proves the scratch was reused.
-	if scratch[0].Text != "x1" || scratch[1].Text != "x2" {
-		t.Fatalf("warmed scratch = [%q %q] after drain, want [x1 x2] — ReleaseWithDrain allocated a fresh slice (drainAll) instead of reusing scratch",
-			scratch[0].Text, scratch[1].Text)
-	}
-}
-
-// TestMsgQueue_Enqueue_RingPath_FullEvictsAndDrains is an end-to-end check
-// that the ring buffer integration into MessageQueue still produces the
-// FIFO drain order documented on Enqueue/DoneOrDrain. Mirrors
+// TestQueue_Enqueue_RingPath_FullEvictsAndDrains is an end-to-end check
+// that the ring buffer integration into Queue still produces the FIFO
+// drain order documented on Enqueue/DoneOrDrain. Mirrors
 // TestEnqueue_EvictsOldest but uses a higher push count so the ring
 // genuinely wraps several times.
-func TestMsgQueue_Enqueue_RingPath_FullEvictsAndDrains(t *testing.T) {
+func TestQueue_Enqueue_RingPath_FullEvictsAndDrains(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(3, 0)
-	_, _, _, gen, _ := q.Enqueue("k", QueuedMsg{Text: "owner"}) // owner
+	q := NewQueue(3, 0)
+	_, _, _, gen, _ := q.Enqueue("k", Msg{Text: "owner"}) // owner
 
 	for i := 0; i < 10; i++ {
-		q.Enqueue("k", QueuedMsg{Text: string(rune('0' + i)), EnqueueAt: time.Now()})
+		q.Enqueue("k", Msg{Text: string(rune('0' + i)), EnqueueAt: time.Now()})
 	}
 
 	msgs := q.DoneOrDrain("k", gen)

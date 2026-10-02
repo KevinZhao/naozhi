@@ -21,6 +21,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 const mergeHintText = "已合并到上一条回复。"
@@ -182,7 +183,7 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 		// BuildHandler), so Guard vs. Queue wiring makes no behavioural
 		// difference. Wired anyway for consistency with newTestDispatcher's
 		// #3004/T-P1 default of a real queue (see dispatch_test.go).
-		Queue:                 NewMessageQueue(5, 0),
+		Queue:                 turn.NewQueueWithMode(5, 0, turn.ModeCollect),
 		Dedup:                 platform.NewDedup(100),
 		SendFn:                sendFn,
 		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },

@@ -192,7 +192,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Same per-field text cap as the WS path (maxWSSendTextBytes): the body
-	// MaxBytesReader alone would let one multi-MB text reach CoalesceMessages
+	// MaxBytesReader alone would let one multi-MB text reach turn.Coalesce
 	// and CLI stdin.
 	if len(text) > maxWSSendTextBytes {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "text too long"})

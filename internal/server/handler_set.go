@@ -45,12 +45,12 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
-	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // handlerSet carries the dashboard handlers from construction to route
@@ -118,7 +118,7 @@ func (hs *handlerSet) checkLimiters(schedulerWired bool) {
 type wiring struct {
 	dedup         *platform.Dedup
 	sessionGuard  *session.Guard
-	msgQueue      *dispatch.MessageQueue
+	msgQueue      *turn.Queue
 	startedAt     time.Time
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string

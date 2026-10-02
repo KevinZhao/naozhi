@@ -151,13 +151,13 @@ type RelayOptions struct {
 	RunTelemetry *runtelemetry.Relay
 }
 
-// QueueOptions are the dispatch-queue knobs. Grouped out of the flat
+// QueueOptions are the turn-queue knobs. Grouped out of the flat
 // ServerOptions in #2553: they are set together from one config block and read
-// only by the MessageQueue constructor.
+// only by the turn.Queue constructor.
 type QueueOptions struct {
 	MaxDepth     int
 	CollectDelay time.Duration
-	Mode         string // "collect" (default) or "interrupt"; see dispatch.ParseQueueMode
+	Mode         string // "collect" (default) or "interrupt"; see turn.ParseMode
 }
 
 // UpdateOptions is the self-update surface behind /api/system/update.

@@ -1,4 +1,4 @@
-package dispatch
+package turn
 
 import (
 	"fmt"
@@ -10,8 +10,8 @@ import (
 
 func TestEnqueue_FirstMessageBecomesOwner(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 500*time.Millisecond)
-	isOwner, enqueued, _, gen, _ := q.Enqueue("k1", QueuedMsg{Text: "hello"})
+	q := NewQueue(10, 500*time.Millisecond)
+	isOwner, enqueued, _, gen, _ := q.Enqueue("k1", Msg{Text: "hello"})
 	if !isOwner {
 		t.Fatal("first message should become owner")
 	}
@@ -23,10 +23,10 @@ func TestEnqueue_FirstMessageBecomesOwner(t *testing.T) {
 
 func TestEnqueue_SubsequentMessagesEnqueued(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 500*time.Millisecond)
-	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	q := NewQueue(10, 500*time.Millisecond)
+	q.Enqueue("k1", Msg{Text: "A"}) // owner
 
-	isOwner, enqueued, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	isOwner, enqueued, _, _, _ := q.Enqueue("k1", Msg{Text: "B"})
 	if isOwner {
 		t.Fatal("second message should not become owner")
 	}
@@ -34,17 +34,17 @@ func TestEnqueue_SubsequentMessagesEnqueued(t *testing.T) {
 		t.Fatal("second message should be enqueued")
 	}
 
-	if d := q.Depth("k1"); d != 1 {
+	if d := q.depth("k1"); d != 1 {
 		t.Fatalf("depth = %d, want 1", d)
 	}
 }
 
 func TestEnqueue_MaxDepthZero_Drops(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(0, 0)
-	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	q := NewQueue(0, 0)
+	q.Enqueue("k1", Msg{Text: "A"}) // owner
 
-	isOwner, enqueued, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	isOwner, enqueued, _, _, _ := q.Enqueue("k1", Msg{Text: "B"})
 	if isOwner || enqueued {
 		t.Fatalf("maxDepth=0 should drop: isOwner=%v, enqueued=%v", isOwner, enqueued)
 	}
@@ -52,14 +52,14 @@ func TestEnqueue_MaxDepthZero_Drops(t *testing.T) {
 
 func TestEnqueue_EvictsOldest(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(2, 0)
-	_, _, _, gen, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	q := NewQueue(2, 0)
+	_, _, _, gen, _ := q.Enqueue("k1", Msg{Text: "A"}) // owner
 
-	q.Enqueue("k1", QueuedMsg{Text: "B", MessageID: "mB"})
-	q.Enqueue("k1", QueuedMsg{Text: "C", MessageID: "mC"})
+	q.Enqueue("k1", Msg{Text: "B", MessageID: "mB"})
+	q.Enqueue("k1", Msg{Text: "C", MessageID: "mC"})
 	// Queue full (depth 2): D evicts the oldest (B). #1945: Enqueue must
 	// surface B's MessageID so the caller can clear B's dangling reaction.
-	_, _, _, _, evictedID := q.Enqueue("k1", QueuedMsg{Text: "D", MessageID: "mD"})
+	_, _, _, _, evictedID := q.Enqueue("k1", Msg{Text: "D", MessageID: "mD"})
 	if evictedID != "mB" {
 		t.Fatalf("evictedID = %q, want oldest 'mB' so its queued reaction can be cleared (#1945)", evictedID)
 	}
@@ -78,9 +78,9 @@ func TestEnqueue_EvictsOldest(t *testing.T) {
 // a reaction. #1945.
 func TestEnqueue_NoEvictionReturnsEmptyID(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(4, 0)
-	q.Enqueue("k1", QueuedMsg{Text: "A", MessageID: "mA"}) // owner
-	_, _, _, _, evictedID := q.Enqueue("k1", QueuedMsg{Text: "B", MessageID: "mB"})
+	q := NewQueue(4, 0)
+	q.Enqueue("k1", Msg{Text: "A", MessageID: "mA"}) // owner
+	_, _, _, _, evictedID := q.Enqueue("k1", Msg{Text: "B", MessageID: "mB"})
 	if evictedID != "" {
 		t.Fatalf("evictedID = %q, want empty when queue not full", evictedID)
 	}
@@ -88,8 +88,8 @@ func TestEnqueue_NoEvictionReturnsEmptyID(t *testing.T) {
 
 func TestDoneOrDrain_EmptyReleasesOwnership(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 0)
-	_, _, _, gen, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	q := NewQueue(10, 0)
+	_, _, _, gen, _ := q.Enqueue("k1", Msg{Text: "A"}) // owner
 
 	msgs := q.DoneOrDrain("k1", gen)
 	if msgs != nil {
@@ -97,7 +97,7 @@ func TestDoneOrDrain_EmptyReleasesOwnership(t *testing.T) {
 	}
 
 	// Ownership released — next enqueue should become owner.
-	isOwner, _, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	isOwner, _, _, _, _ := q.Enqueue("k1", Msg{Text: "B"})
 	if !isOwner {
 		t.Fatal("should become owner after release")
 	}
@@ -105,10 +105,10 @@ func TestDoneOrDrain_EmptyReleasesOwnership(t *testing.T) {
 
 func TestDoneOrDrain_NonEmptyKeepsOwnership(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 0)
-	_, _, _, gen, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
-	q.Enqueue("k1", QueuedMsg{Text: "B"})
-	q.Enqueue("k1", QueuedMsg{Text: "C"})
+	q := NewQueue(10, 0)
+	_, _, _, gen, _ := q.Enqueue("k1", Msg{Text: "A"}) // owner
+	q.Enqueue("k1", Msg{Text: "B"})
+	q.Enqueue("k1", Msg{Text: "C"})
 
 	msgs := q.DoneOrDrain("k1", gen)
 	if len(msgs) != 2 {
@@ -116,7 +116,7 @@ func TestDoneOrDrain_NonEmptyKeepsOwnership(t *testing.T) {
 	}
 
 	// Ownership still held — new enqueue should not become owner.
-	isOwner, enqueued, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "D"})
+	isOwner, enqueued, _, _, _ := q.Enqueue("k1", Msg{Text: "D"})
 	if isOwner {
 		t.Fatal("should not become owner while still held")
 	}
@@ -127,18 +127,18 @@ func TestDoneOrDrain_NonEmptyKeepsOwnership(t *testing.T) {
 
 func TestDiscard_ClearsQueueAndReleasesOwnership(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 0)
-	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
-	q.Enqueue("k1", QueuedMsg{Text: "B"})
+	q := NewQueue(10, 0)
+	q.Enqueue("k1", Msg{Text: "A"}) // owner
+	q.Enqueue("k1", Msg{Text: "B"})
 
 	q.Discard("k1")
 
-	if d := q.Depth("k1"); d != 0 {
+	if d := q.depth("k1"); d != 0 {
 		t.Fatalf("depth = %d after discard", d)
 	}
 
 	// Next enqueue becomes owner.
-	isOwner, _, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "C"})
+	isOwner, _, _, _, _ := q.Enqueue("k1", Msg{Text: "C"})
 	if !isOwner {
 		t.Fatal("should become owner after discard")
 	}
@@ -146,16 +146,16 @@ func TestDiscard_ClearsQueueAndReleasesOwnership(t *testing.T) {
 
 func TestDiscard_InvalidatesStaleOwner(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 0)
-	_, _, _, gen, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}) // gen=0
-	q.Enqueue("k1", QueuedMsg{Text: "B"})
+	q := NewQueue(10, 0)
+	_, _, _, gen, _ := q.Enqueue("k1", Msg{Text: "A"}) // gen=0
+	q.Enqueue("k1", Msg{Text: "B"})
 
 	// Simulate /new: discard bumps generation.
 	q.Discard("k1")
 
 	// New owner starts with new generation.
-	_, _, _, gen2, _ := q.Enqueue("k1", QueuedMsg{Text: "C"})
-	q.Enqueue("k1", QueuedMsg{Text: "D"})
+	_, _, _, gen2, _ := q.Enqueue("k1", Msg{Text: "C"})
+	q.Enqueue("k1", Msg{Text: "D"})
 
 	// Stale owner tries DoneOrDrain with old gen — should get nil.
 	msgs := q.DoneOrDrain("k1", gen)
@@ -172,7 +172,7 @@ func TestDiscard_InvalidatesStaleOwner(t *testing.T) {
 
 func TestShouldNotify_RateLimits(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 0)
+	q := NewQueue(10, 0)
 
 	if !q.ShouldNotify("k1") {
 		t.Fatal("first call should return true")
@@ -190,12 +190,12 @@ func TestShouldNotify_RateLimits(t *testing.T) {
 // active for everyone after the first observer).
 func TestShouldNotify_ConcurrentRLockFastPath(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 0)
+	q := NewQueue(10, 0)
 
 	// Prime the queue branch: Enqueue makes a sessionQueue in q.queues,
 	// then ShouldNotify publishes lastNotifyNs so subsequent calls take
 	// the cooldown-active fast path.
-	q.Enqueue("k", QueuedMsg{Text: "owner"})
+	q.Enqueue("k", Msg{Text: "owner"})
 	if !q.ShouldNotify("k") {
 		t.Fatal("first ShouldNotify should fire (cooldown empty)")
 	}
@@ -228,155 +228,25 @@ func TestShouldNotify_ConcurrentRLockFastPath(t *testing.T) {
 
 func TestIsolation_DifferentKeys(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 0)
-	q.Enqueue("k1", QueuedMsg{Text: "A"}) // k1 owner
-	q.Enqueue("k2", QueuedMsg{Text: "B"}) // k2 owner — independent
+	q := NewQueue(10, 0)
+	q.Enqueue("k1", Msg{Text: "A"}) // k1 owner
+	q.Enqueue("k2", Msg{Text: "B"}) // k2 owner — independent
 
-	isOwner, _, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "C"})
+	isOwner, _, _, _, _ := q.Enqueue("k1", Msg{Text: "C"})
 	if isOwner {
 		t.Fatal("k1 is busy, should not become owner")
 	}
 
-	isOwner, _, _, _, _ = q.Enqueue("k2", QueuedMsg{Text: "D"})
+	isOwner, _, _, _, _ = q.Enqueue("k2", Msg{Text: "D"})
 	if isOwner {
 		t.Fatal("k2 is busy, should not become owner")
 	}
 }
 
-func TestSessionGuardCompat_TryAcquireRelease(t *testing.T) {
-	t.Parallel()
-	q := NewMessageQueue(10, 0)
-
-	if !q.TryAcquire("k1") {
-		t.Fatal("TryAcquire should succeed on idle key")
-	}
-	if q.TryAcquire("k1") {
-		t.Fatal("TryAcquire should fail on busy key")
-	}
-
-	q.Release("k1")
-
-	if !q.TryAcquire("k1") {
-		t.Fatal("TryAcquire should succeed after Release")
-	}
-}
-
-// TestRelease_DrainsQueuedMessages locks in R37-REL1: if the Dashboard/WS
-// Guard path acquires a session via TryAcquire and IM Enqueue lands messages
-// during the busy window, ReleaseWithDrain must surface those messages to the
-// caller (FIFO) rather than leaving them stranded until a future Enqueue.
-func TestRelease_DrainsQueuedMessages(t *testing.T) {
-	t.Parallel()
-	q := NewMessageQueue(10, 0)
-
-	// Dashboard Guard path acquires the session.
-	if !q.TryAcquire("k1") {
-		t.Fatal("TryAcquire should succeed on idle key")
-	}
-
-	// Two IM messages land while the session is busy.
-	if _, enqueued, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}); !enqueued {
-		t.Fatal("A should be enqueued during busy window")
-	}
-	if _, enqueued, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"}); !enqueued {
-		t.Fatal("B should be enqueued during busy window")
-	}
-
-	var drained []string
-	q.ReleaseWithDrain("k1", func(m QueuedMsg) {
-		drained = append(drained, m.Text)
-	})
-
-	if len(drained) != 2 {
-		t.Fatalf("drained = %d, want 2", len(drained))
-	}
-	if drained[0] != "A" || drained[1] != "B" {
-		t.Fatalf("drained order = %v, want [A B]", drained)
-	}
-
-	// Post-drain the session must be fully releasable: next TryAcquire
-	// starts idle and Depth returns 0.
-	if d := q.Depth("k1"); d != 0 {
-		t.Fatalf("Depth = %d, want 0 after drain", d)
-	}
-	if !q.TryAcquire("k1") {
-		t.Fatal("TryAcquire should succeed after ReleaseWithDrain")
-	}
-}
-
-// TestRelease_StrandHandlerDrains locks in the R37-REL1 (#769) fix: when a
-// strand handler is registered, the plain SessionGuard Release path must
-// recover messages that landed via a concurrent IM-side Enqueue rather than
-// parking them until a (possibly never-arriving) next Enqueue.
-func TestRelease_StrandHandlerDrains(t *testing.T) {
-	t.Parallel()
-	q := NewMessageQueue(10, 0)
-
-	var recovered []string
-	q.SetStrandHandler(func(key string, m QueuedMsg) {
-		if key != "k1" {
-			t.Errorf("strand handler key = %q, want k1", key)
-		}
-		recovered = append(recovered, m.Text)
-	})
-
-	// Dashboard Guard path holds the session while two IM messages land.
-	if !q.TryAcquire("k1") {
-		t.Fatal("TryAcquire should succeed on idle key")
-	}
-	if _, enqueued, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}); !enqueued {
-		t.Fatal("A should be enqueued during busy window")
-	}
-	if _, enqueued, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"}); !enqueued {
-		t.Fatal("B should be enqueued during busy window")
-	}
-
-	// Plain Release (the SessionGuard contract) must now drain via the handler.
-	q.Release("k1")
-
-	if len(recovered) != 2 || recovered[0] != "A" || recovered[1] != "B" {
-		t.Fatalf("recovered = %v, want [A B]", recovered)
-	}
-	if d := q.Depth("k1"); d != 0 {
-		t.Fatalf("Depth = %d, want 0 after strand drain", d)
-	}
-	if !q.TryAcquire("k1") {
-		t.Fatal("TryAcquire should succeed after strand drain")
-	}
-}
-
-// TestRelease_NoStrandHandlerParks confirms the legacy contract still holds
-// when no handler is registered: messages stay parked (not lost, not drained)
-// and a later Enqueue owner sweeps them via DoneOrDrain.
-func TestRelease_NoStrandHandlerParks(t *testing.T) {
-	t.Parallel()
-	q := NewMessageQueue(10, 0)
-
-	if !q.TryAcquire("k1") {
-		t.Fatal("TryAcquire should succeed on idle key")
-	}
-	if _, enqueued, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}); !enqueued {
-		t.Fatal("A should be enqueued during busy window")
-	}
-
-	q.Release("k1") // no handler → park in place
-
-	// Message is still queued, key is idle. A new Enqueue becomes owner and
-	// DoneOrDrain hands back the parked message.
-	isOwner, _, _, gen, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
-	if !isOwner {
-		t.Fatal("post-Release Enqueue should become owner on idle key")
-	}
-	drained := q.DoneOrDrain("k1", gen)
-	if len(drained) != 1 || drained[0].Text != "A" {
-		t.Fatalf("drained = %v, want [A] (parked message recovered by new owner)", drained)
-	}
-}
-
 func TestLastNotify_CleanedOnDrain(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 0)
-	_, _, _, gen, _ := q.Enqueue("k1", QueuedMsg{Text: "A"})
+	q := NewQueue(10, 0)
+	_, _, _, gen, _ := q.Enqueue("k1", Msg{Text: "A"})
 
 	// Trigger a notify entry.
 	q.ShouldNotify("k1")
@@ -392,8 +262,8 @@ func TestLastNotify_CleanedOnDrain(t *testing.T) {
 
 func TestLastNotify_CleanedOnDiscard(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 0)
-	q.Enqueue("k1", QueuedMsg{Text: "A"})
+	q := NewQueue(10, 0)
+	q.Enqueue("k1", Msg{Text: "A"})
 	q.ShouldNotify("k1")
 
 	q.Discard("k1")
@@ -410,7 +280,7 @@ func TestLastNotify_CleanedOnDiscard(t *testing.T) {
 // must not carry over a stale key/ts.
 func TestShouldNotify_PoolRecyclesEvictedEntry(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(0, 0) // maxDepth<=0 forces the drop/LRU path
+	q := NewQueue(0, 0) // maxDepth<=0 forces the drop/LRU path
 
 	// Saturate the LRU with dropNotifyMaxKeys distinct cold keys. Each first
 	// call fires; immediate second call on the same key is cooled down.
@@ -445,7 +315,7 @@ func TestShouldNotify_PoolRecyclesEvictedEntry(t *testing.T) {
 // path that #1694 optimizes. After the LRU saturates, each iteration evicts a
 // tail entry and inserts a new one; with the pool this should allocate nothing.
 func BenchmarkShouldNotify_ColdKeyChurn(b *testing.B) {
-	q := NewMessageQueue(0, 0)
+	q := NewQueue(0, 0)
 	// Pre-saturate so every benchmarked call hits the evict+recycle path.
 	for i := 0; i < dropNotifyMaxKeys; i++ {
 		q.ShouldNotify(fmt.Sprintf("warm%d", i))
@@ -457,11 +327,11 @@ func BenchmarkShouldNotify_ColdKeyChurn(b *testing.B) {
 	}
 }
 
-func TestParseQueueMode(t *testing.T) {
+func TestParseMode(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		in   string
-		want QueueMode
+		want Mode
 	}{
 		{"", ModeCollect},
 		{"collect", ModeCollect},
@@ -471,18 +341,18 @@ func TestParseQueueMode(t *testing.T) {
 		{"unknown", ModeCollect},
 	}
 	for _, c := range cases {
-		if got := ParseQueueMode(c.in); got != c.want {
-			t.Errorf("ParseQueueMode(%q) = %v, want %v", c.in, got, c.want)
+		if got := ParseMode(c.in); got != c.want {
+			t.Errorf("ParseMode(%q) = %v, want %v", c.in, got, c.want)
 		}
 	}
 }
 
 func TestEnqueue_CollectMode_NoInterruptSignal(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueueWithMode(10, 0, ModeCollect)
-	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	q := NewQueueWithMode(10, 0, ModeCollect)
+	q.Enqueue("k1", Msg{Text: "A"}) // owner
 
-	_, enqueued, shouldInterrupt, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	_, enqueued, shouldInterrupt, _, _ := q.Enqueue("k1", Msg{Text: "B"})
 	if !enqueued {
 		t.Fatal("B should be enqueued")
 	}
@@ -493,13 +363,13 @@ func TestEnqueue_CollectMode_NoInterruptSignal(t *testing.T) {
 
 func TestEnqueue_InterruptMode_FirstFollowupSetsSignal(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueueWithMode(10, 0, ModeInterrupt)
-	_, _, shouldInterruptOwner, gen, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	q := NewQueueWithMode(10, 0, ModeInterrupt)
+	_, _, shouldInterruptOwner, gen, _ := q.Enqueue("k1", Msg{Text: "A"}) // owner
 	if shouldInterruptOwner {
 		t.Fatal("owner path must not request interrupt (nothing to interrupt yet)")
 	}
 
-	_, enqueued, shouldInterrupt, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	_, enqueued, shouldInterrupt, _, _ := q.Enqueue("k1", Msg{Text: "B"})
 	if !enqueued {
 		t.Fatal("B should be enqueued")
 	}
@@ -508,7 +378,7 @@ func TestEnqueue_InterruptMode_FirstFollowupSetsSignal(t *testing.T) {
 	}
 
 	// Second queued message on the same running turn must NOT re-signal.
-	_, _, shouldInterrupt2, _, _ := q.Enqueue("k1", QueuedMsg{Text: "C"})
+	_, _, shouldInterrupt2, _, _ := q.Enqueue("k1", Msg{Text: "C"})
 	if shouldInterrupt2 {
 		t.Fatal("second follow-up must not re-trigger interrupt")
 	}
@@ -521,7 +391,7 @@ func TestEnqueue_InterruptMode_FirstFollowupSetsSignal(t *testing.T) {
 	}
 	// Simulate next turn completing: owner still holds ownership, a new
 	// follow-up arrives during the next in-flight turn.
-	_, _, shouldInterrupt3, _, _ := q.Enqueue("k1", QueuedMsg{Text: "D"})
+	_, _, shouldInterrupt3, _, _ := q.Enqueue("k1", Msg{Text: "D"})
 	if !shouldInterrupt3 {
 		t.Fatal("after drain, next turn's first follow-up must interrupt again")
 	}
@@ -529,10 +399,10 @@ func TestEnqueue_InterruptMode_FirstFollowupSetsSignal(t *testing.T) {
 
 func TestEnqueue_InterruptMode_QueueDisabledNoSignal(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueueWithMode(0, 0, ModeInterrupt)
-	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	q := NewQueueWithMode(0, 0, ModeInterrupt)
+	q.Enqueue("k1", Msg{Text: "A"}) // owner
 
-	_, enqueued, shouldInterrupt, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	_, enqueued, shouldInterrupt, _, _ := q.Enqueue("k1", Msg{Text: "B"})
 	if enqueued {
 		t.Fatal("disabled queue must drop")
 	}
@@ -549,11 +419,11 @@ func TestEnqueue_InterruptMode_QueueDisabledNoSignal(t *testing.T) {
 // would silently suppress the interrupt.
 func TestEnqueue_InterruptMode_ReleaseOwnership_ResetsInterruptFlag(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueueWithMode(10, 0, ModeInterrupt)
+	q := NewQueueWithMode(10, 0, ModeInterrupt)
 
 	// Turn 1: owner + interrupting follow-up.
-	_, _, _, gen, _ := q.Enqueue("k1", QueuedMsg{Text: "A1"})
-	if _, _, shouldInterrupt, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B1"}); !shouldInterrupt {
+	_, _, _, gen, _ := q.Enqueue("k1", Msg{Text: "A1"})
+	if _, _, shouldInterrupt, _, _ := q.Enqueue("k1", Msg{Text: "B1"}); !shouldInterrupt {
 		t.Fatal("turn 1 follow-up must request interrupt")
 	}
 
@@ -569,13 +439,13 @@ func TestEnqueue_InterruptMode_ReleaseOwnership_ResetsInterruptFlag(t *testing.T
 	// Turn 2: new owner arrives (fresh session/chat activity). A follow-up
 	// during turn 2 must again be able to trigger an interrupt, proving the
 	// release path reset interruptRequested.
-	_, _, _, gen2, _ := q.Enqueue("k1", QueuedMsg{Text: "A2"})
+	_, _, _, gen2, _ := q.Enqueue("k1", Msg{Text: "A2"})
 	if gen2 == gen {
 		// Not strictly required (release path does not bump gen), but document
 		// the assumption: same sessionQueue key, ownership cycled.
 		_ = gen2
 	}
-	if _, _, shouldInterrupt, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B2"}); !shouldInterrupt {
+	if _, _, shouldInterrupt, _, _ := q.Enqueue("k1", Msg{Text: "B2"}); !shouldInterrupt {
 		t.Fatal("turn 2 follow-up after ownership release must request interrupt")
 	}
 }
@@ -584,9 +454,9 @@ func TestEnqueue_InterruptMode_ReleaseOwnership_ResetsInterruptFlag(t *testing.T
 // by a fresh turn does not silently suppress the first interrupt.
 func TestEnqueue_InterruptMode_Discard_ResetsInterruptFlag(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueueWithMode(10, 0, ModeInterrupt)
-	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
-	if _, _, shouldInterrupt, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"}); !shouldInterrupt {
+	q := NewQueueWithMode(10, 0, ModeInterrupt)
+	q.Enqueue("k1", Msg{Text: "A"}) // owner
+	if _, _, shouldInterrupt, _, _ := q.Enqueue("k1", Msg{Text: "B"}); !shouldInterrupt {
 		t.Fatal("first follow-up must interrupt")
 	}
 
@@ -594,19 +464,19 @@ func TestEnqueue_InterruptMode_Discard_ResetsInterruptFlag(t *testing.T) {
 	q.Discard("k1")
 
 	// New owner.
-	q.Enqueue("k1", QueuedMsg{Text: "C"})
-	if _, _, shouldInterrupt, _, _ := q.Enqueue("k1", QueuedMsg{Text: "D"}); !shouldInterrupt {
+	q.Enqueue("k1", Msg{Text: "C"})
+	if _, _, shouldInterrupt, _, _ := q.Enqueue("k1", Msg{Text: "D"}); !shouldInterrupt {
 		t.Fatal("after Discard, next turn's first follow-up must interrupt")
 	}
 }
 
-// TestMessageQueue_Cleanup_RemovesMapEntry verifies Cleanup drops the entry
-// Discard retains for gen-monotonicity, and the next Enqueue starts at gen=0.
-func TestMessageQueue_Cleanup_RemovesMapEntry(t *testing.T) {
+// TestQueue_Cleanup_RemovesMapEntry verifies Cleanup drops the entry Discard
+// retains for gen-monotonicity, and the next Enqueue starts at gen=0.
+func TestQueue_Cleanup_RemovesMapEntry(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(10, 0)
-	q.Enqueue("k1", QueuedMsg{Text: "A"})
-	q.Enqueue("k2", QueuedMsg{Text: "A"})
+	q := NewQueue(10, 0)
+	q.Enqueue("k1", Msg{Text: "A"})
+	q.Enqueue("k2", Msg{Text: "A"})
 	q.Discard("k1") // retains the map entry with bumped gen
 
 	q.mu.Lock()
@@ -631,7 +501,7 @@ func TestMessageQueue_Cleanup_RemovesMapEntry(t *testing.T) {
 		t.Fatalf("len(queues) dropped by %d, want 1", got)
 	}
 
-	isOwner, _, _, gen, _ := q.Enqueue("k1", QueuedMsg{Text: "fresh"})
+	isOwner, _, _, gen, _ := q.Enqueue("k1", Msg{Text: "fresh"})
 	if !isOwner || gen != 0 {
 		t.Fatalf("post-Cleanup: isOwner=%v, gen=%d; want true, 0", isOwner, gen)
 	}
@@ -640,7 +510,7 @@ func TestMessageQueue_Cleanup_RemovesMapEntry(t *testing.T) {
 // TestConcurrent_EnqueueDrain verifies no races under concurrent access.
 func TestConcurrent_EnqueueDrain(t *testing.T) {
 	t.Parallel()
-	q := NewMessageQueue(50, 0)
+	q := NewQueue(50, 0)
 	const goroutines = 20
 	const msgsPerGoroutine = 100
 
@@ -652,7 +522,7 @@ func TestConcurrent_EnqueueDrain(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < msgsPerGoroutine; j++ {
-				q.Enqueue("shared", QueuedMsg{Text: "msg"})
+				q.Enqueue("shared", Msg{Text: "msg"})
 			}
 		}()
 	}
@@ -664,7 +534,7 @@ func TestConcurrent_EnqueueDrain(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < msgsPerGoroutine; j++ {
 				q.DoneOrDrain("shared", 0) // gen=0 matches initial
-				q.Depth("shared")
+				q.depth("shared")
 			}
 		}()
 	}
@@ -676,17 +546,10 @@ func TestConcurrent_EnqueueDrain(t *testing.T) {
 // ShouldNotify dropNotifyTimes path
 // ---------------------------------------------------------------------------
 //
-// #3004/T-P1: moved here from dispatch_test.go. These construct a
-// *MessageQueue directly and never touch a Dispatcher, so they belong next
-// to the rest of the MessageQueue unit tests (and will move with
-// msgqueue.go to internal/turn in #3004-B without needing to be split out
-// of dispatch_test.go at that point). All three were grouped under one
-// "ShouldNotify dropNotifyTimes path" heading in dispatch_test.go, so all
-// three move together rather than splitting the pair that reads
-// dropNotifyLRU/dropNotifyIndex directly from the one that doesn't.
+// These construct a Queue directly and never touch a Dispatcher.
 
 func TestShouldNotify_DropPath(t *testing.T) {
-	q := NewMessageQueue(0, 0)
+	q := NewQueue(0, 0)
 	if !q.ShouldNotify("k") {
 		t.Fatal("first call should return true")
 	}
@@ -696,7 +559,7 @@ func TestShouldNotify_DropPath(t *testing.T) {
 }
 
 func TestShouldNotify_DropPath_Eviction(t *testing.T) {
-	q := NewMessageQueue(0, 0)
+	q := NewQueue(0, 0)
 	for i := 0; i < dropNotifyMaxKeys; i++ {
 		q.ShouldNotify(fmt.Sprintf("key-%d", i))
 	}
@@ -720,7 +583,7 @@ func TestShouldNotify_DropPath_Eviction(t *testing.T) {
 // entry's elem back-pointer must always reference the live list element, so the
 // LRU stays in lock-step with the map across refresh and eviction.
 func TestShouldNotify_DropPath_BackPointerConsistent(t *testing.T) {
-	q := NewMessageQueue(0, 0)
+	q := NewQueue(0, 0)
 	q.ShouldNotify("a")
 	q.ShouldNotify("b")
 

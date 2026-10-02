@@ -1,4 +1,4 @@
-package dispatch
+package turn
 
 import (
 	"reflect"
@@ -6,20 +6,21 @@ import (
 	"testing"
 )
 
-// G-c (#2897 T3004): SessionRouter's exported method set equals an explicit
-// list of names, not merely a count, so a rename is as visible as an
-// addition. Both directions fail: a name added or removed must come with an
-// edit to this list in the same change. #3004 has the plan that shrinks it.
-// The Queue half of G-c is internal/turn/queue_surface_test.go.
-var sessionRouterMethodNames = []string{
-	"DiscardPassthroughPending",
-	"GetOrCreate",
-	"InterruptSessionViaControl",
-	"NotifyIdle",
-	"Reset",
-	"ResetChatAndSetWorkspace",
-	"SetWorkspace",
-	"Workspace",
+// G-c (#2897 T3004): Queue's exported method set equals an explicit list of
+// names, not merely a count, so a rename is as visible as an addition. Both
+// directions fail: a name added or removed must come with an edit to this
+// list in the same change. Every name here has a production caller outside
+// turn; #3004-E narrows the set further. SessionRouter's half of G-c is
+// internal/dispatch/queue_surface_test.go.
+var queueMethodNames = []string{
+	"Cleanup",
+	"CollectDelay",
+	"Discard",
+	"DiscardAndReturn",
+	"DoneOrDrain",
+	"Enqueue",
+	"Mode",
+	"ShouldNotify",
 }
 
 func exportedMethodNames(t reflect.Type) []string {
@@ -61,9 +62,9 @@ func assertMethodSet(t *testing.T, label string, got []string, want []string) {
 		label, got, wantSorted, extra, missing)
 }
 
-// TestSessionRouterSurface_Ratchet pins G-c's SessionRouter half.
-func TestSessionRouterSurface_Ratchet(t *testing.T) {
+// TestQueueSurface_Ratchet pins G-c's Queue half.
+func TestQueueSurface_Ratchet(t *testing.T) {
 	t.Parallel()
-	got := exportedMethodNames(reflect.TypeFor[SessionRouter]())
-	assertMethodSet(t, "SessionRouter", got, sessionRouterMethodNames)
+	got := exportedMethodNames(reflect.TypeFor[*Queue]())
+	assertMethodSet(t, "*Queue", got, queueMethodNames)
 }

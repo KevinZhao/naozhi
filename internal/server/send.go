@@ -21,6 +21,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // sendWithBroadcast wraps sess.Send with dashboard state broadcasts ("running"
@@ -227,7 +228,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 	// Passthrough mode: every send gets its own goroutine; the CLI's
 	// commandQueue + sendSlot FIFO handle ordering. Protocols without replay
 	// fall back to serialized Send inside sendWithBroadcast (usePassthrough).
-	if e.queue.Mode() == dispatch.ModePassthrough {
+	if e.queue.Mode() == turn.ModePassthrough {
 		release, shuttingDown := e.TrackSend()
 		if shuttingDown {
 			return false, sendAckBusy, nil
@@ -247,7 +248,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 		return false, sendAckAccepted, nil
 	}
 
-	qm := dispatch.QueuedMsg{
+	qm := turn.Msg{
 		Text:      p.Text,
 		Images:    p.Images,
 		EnqueueAt: time.Now(),
@@ -383,9 +384,9 @@ func (e *sendEngine) autoSaveCronPrompt(phase, key, text string) {
 	}
 }
 
-// Deprecated: sessionSend with a configured MessageQueue handles all production
+// Deprecated: sessionSend with a configured turn.Queue handles all production
 // paths. sessionSendLegacy keeps the pre-queue guard/interrupt behaviour only
-// for tests that do not wire a MessageQueue. Removal tracked in docs/TODO.md
+// for tests that do not wire a turn.Queue. Removal tracked in docs/TODO.md
 // R-LEGACY-SEND: delete it with its sole caller branch once every test wires one.
 func (e *sendEngine) sessionSendLegacy(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
 	key := p.Key

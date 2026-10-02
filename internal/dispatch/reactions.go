@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // reactionAckTimeout bounds how long AddReaction/RemoveReaction can block:
@@ -109,7 +110,7 @@ func (d *Dispatcher) clearQueuedReaction(ctx context.Context, platformName, mess
 // clearQueuedReactions removes the "queued" reaction from each drained
 // message; called from ownerLoop after a drain batch. Errors are logged and
 // swallowed — a lingering reaction is cosmetic.
-func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName string, queued []QueuedMsg, lg *slog.Logger) {
+func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName string, queued []turn.Msg, lg *slog.Logger) {
 	if len(queued) == 0 {
 		return
 	}
