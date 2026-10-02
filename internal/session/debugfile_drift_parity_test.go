@@ -51,7 +51,7 @@ func mkClaudeDriftRouter(t *testing.T, debugDir string) *Router {
 	r.setBackendEffortsForTest(make(map[string]string))
 	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "claude-sonnet-5" })
 	r.hist.claudeDir = t.TempDir()
-	r.cliDebugDir = debugDir
+	r.spawn.cliDebugDir = debugDir
 	return r
 }
 
@@ -72,10 +72,10 @@ func TestDebugFileDriftParity_NoFalseDrift(t *testing.T) {
 	wrapper, backendID := r.backends.wrapperFor("claude")
 	bd := r.backends.backendDefaultsFor(backendID)
 	realArgs := wrapper.Protocol.BuildArgs(
-		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugFileFor(key), "", bd.Args))
+		r.spawn.argvSpawnOptions(bd.Model, bd.Effort, r.spawn.cliDebugFileFor(key), "", bd.Args))
 
 	// Drift-side reconstruction for the surviving shim of the same session.
-	driftArgs := r.driftCompareArgs(wrapper, backendID, key, s, &shim.SpawnOverlay{})
+	driftArgs := driftArgsFor(r).driftCompareArgs(wrapper, backendID, key, s, &shim.SpawnOverlay{})
 
 	if !slices.Equal(realArgs, driftArgs) {
 		t.Fatalf("drift reconstruction diverges from real spawn — every naozhi "+
@@ -105,7 +105,7 @@ func TestDebugFileDriftParity_PathHelpersAgree(t *testing.T) {
 	r := mkClaudeDriftRouter(t, t.TempDir())
 	key := "dashboard:direct:2026-09-02-151927-3-naozhi:general"
 
-	if got, want := r.cliDebugPathFor(key), r.cliDebugFileFor(key); got != want {
+	if got, want := r.spawn.cliDebugPathFor(key), r.spawn.cliDebugFileFor(key); got != want {
 		t.Errorf("cliDebugPathFor = %q, cliDebugFileFor = %q — drift and spawn "+
 			"would emit different --debug-file values", got, want)
 	}
@@ -121,7 +121,7 @@ func TestDebugFileDriftParity_ReadOnlyWhenComparing(t *testing.T) {
 	key := "dashboard:direct:never-respawns:general"
 	wrapper, backendID := r.backends.wrapperFor("claude")
 
-	_ = r.driftCompareArgs(wrapper, backendID, key, nil, nil)
+	_ = driftArgsFor(r).driftCompareArgs(wrapper, backendID, key, nil, nil)
 
 	entries, err := filepath.Glob(filepath.Join(debugDir, "*"))
 	if err != nil {
@@ -140,7 +140,7 @@ func TestDebugFileDriftParity_CaptureOffEmitsNoFlag(t *testing.T) {
 	key := "dashboard:direct:no-capture:general"
 	wrapper, backendID := r.backends.wrapperFor("claude")
 
-	args := r.driftCompareArgs(wrapper, backendID, key, nil, nil)
+	args := driftArgsFor(r).driftCompareArgs(wrapper, backendID, key, nil, nil)
 	if slices.Contains(args, "--debug-file") {
 		t.Errorf("capture disabled but argv carries --debug-file: %v", args)
 	}

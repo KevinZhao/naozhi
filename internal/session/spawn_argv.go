@@ -33,7 +33,7 @@ func ArgvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs [
 }
 
 // argvSpawnOptions is ArgvSpawnOptions with the two router-owned paths filled in
-// from this Router.
-func (r *Router) argvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs []string) cli.SpawnOptions {
-	return ArgvSpawnOptions(model, effort, debugFile, systemPrompt, extraArgs, r.naozhiSettingsFile, r.mcpConfigFile)
+// from the spawn facet.
+func (c *spawnConfig) argvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs []string) cli.SpawnOptions {
+	return ArgvSpawnOptions(model, effort, debugFile, systemPrompt, extraArgs, c.naozhiSettingsFile, c.mcpConfigFile)
 }

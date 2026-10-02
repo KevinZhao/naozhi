@@ -21,11 +21,11 @@ func TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect(t *testing.T) {
 	resetBackendGauge(t, backend)
 
 	r := &Router{
-		ss:           newSessionTable(),
-		maxProcs:     3,
-		ttl:          1 * time.Hour, // long TTL so the idle session is NOT expired
-		pruneTTL:     72 * time.Hour,
-		totalTimeout: 5 * time.Minute,
+		ss:       newSessionTable(),
+		maxProcs: 3,
+		ttl:      1 * time.Hour, // long TTL so the idle session is NOT expired
+		pruneTTL: 72 * time.Hour,
+		spawn:    spawnConfig{totalTimeout: 5 * time.Minute},
 	}
 	// One live, idle (not running), recently-active session: survives the
 	// tick untouched (no close, no prune, alive count unchanged).
@@ -60,11 +60,11 @@ func TestCleanup_ReconcileGate_NoOpSkipsReconcile(t *testing.T) {
 	resetBackendGauge(t, backend)
 
 	r := &Router{
-		ss:           newSessionTable(),
-		maxProcs:     3,
-		ttl:          1 * time.Hour,
-		pruneTTL:     72 * time.Hour,
-		totalTimeout: 5 * time.Minute,
+		ss:       newSessionTable(),
+		maxProcs: 3,
+		ttl:      1 * time.Hour,
+		pruneTTL: 72 * time.Hour,
+		spawn:    spawnConfig{totalTimeout: 5 * time.Minute},
 	}
 	proc := newIdleProc()
 	s := injectSession(r, "key-skip", proc)
@@ -93,11 +93,11 @@ func TestCleanup_ReconcileGate_PruneDrivesGaugeToZero(t *testing.T) {
 	resetBackendGauge(t, backend)
 
 	r := &Router{
-		ss:           newSessionTable(),
-		maxProcs:     3,
-		ttl:          1 * time.Minute,
-		pruneTTL:     1 * time.Minute,
-		totalTimeout: 5 * time.Minute,
+		ss:       newSessionTable(),
+		maxProcs: 3,
+		ttl:      1 * time.Minute,
+		pruneTTL: 1 * time.Minute,
+		spawn:    spawnConfig{totalTimeout: 5 * time.Minute},
 	}
 	// Dead process aged past pruneTTL → shouldPrune true → unregister.
 	proc := newDeadProc()

@@ -66,7 +66,7 @@ func spawnShimState(t *testing.T, r *Router, key, resumeID string, opts AgentOpt
 	if sp.Wrapper == nil {
 		t.Fatalf("no wrapper for backend %q", sp.BackendID)
 	}
-	spawnOpts := r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
+	spawnOpts := r.spawn.argvSpawnOptions(sp.Model, sp.Effort, r.spawn.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
 	spawnOpts.ResumeID = sp.ResumeID
 	overlay := sp.Overlay
 	spawnOpts.SpawnOverlay = &overlay
@@ -95,7 +95,7 @@ func TestAgentOverlayDrift_ModelOverrideIsNotDrift(t *testing.T) {
 	}
 
 	wrapper, backendID := r.backends.wrapperFor(state.Backend)
-	drift, stored, current := r.shimArgsDrift(wrapper, backendID, state, s)
+	drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s)
 	if drift {
 		t.Fatalf("agents[].model session misread as drift — every naozhi restart would kill it\n"+
 			"  stored:  %v\n  current: %v", stored, current)
@@ -119,7 +119,7 @@ func TestAgentOverlayDrift_EffortAndExtraArgsAreNotDrift(t *testing.T) {
 	}
 
 	wrapper, backendID := r.backends.wrapperFor(state.Backend)
-	if drift, stored, current := r.shimArgsDrift(wrapper, backendID, state, s); drift {
+	if drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); drift {
 		t.Fatalf("agents[].effort/extra_args session misread as drift\n  stored:  %v\n  current: %v", stored, current)
 	}
 }
@@ -139,7 +139,7 @@ func TestAgentOverlayDrift_BackendConfigChangeIsStillDrift(t *testing.T) {
 
 		r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "claude-haiku-4.5" }) // operator edits cli.model, restarts naozhi
 		wrapper, backendID := r.backends.wrapperFor(state.Backend)
-		drift, stored, current := r.shimArgsDrift(wrapper, backendID, state, s)
+		drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s)
 		if !drift {
 			t.Fatalf("backend model change masked by overlay — the restart that applies it would never trigger\n"+
 				"  stored:  %v\n  current: %v", stored, current)
@@ -160,7 +160,7 @@ func TestAgentOverlayDrift_BackendConfigChangeIsStillDrift(t *testing.T) {
 		r.setBackendExtraArgsForTest(map[string][]string{"claude": {"--max-turns", "50"}})
 
 		wrapper, backendID := r.backends.wrapperFor(state.Backend)
-		drift, _, current := r.shimArgsDrift(wrapper, backendID, state, s)
+		drift, _, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s)
 		if !drift {
 			t.Fatalf("backend extra_args change masked by overlay: %v", current)
 		}
@@ -193,13 +193,13 @@ func TestAgentOverlayDrift_AccessProfileDefaultModel(t *testing.T) {
 	}
 
 	wrapper, backendID := r.backends.wrapperFor(state.Backend)
-	if drift, stored, current := r.shimArgsDrift(wrapper, backendID, state, s); drift {
+	if drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); drift {
 		t.Fatalf("access-profile session misread as drift\n  stored:  %v\n  current: %v", stored, current)
 	}
 
 	// Operator edits the profile's default_model → genuine drift.
 	setAccessProfiles(r, map[string]AccessProfile{"work": {DefaultModel: "claude-haiku-4.5"}})
-	if drift, _, current := r.shimArgsDrift(wrapper, backendID, state, s); !drift {
+	if drift, _, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); !drift {
 		t.Fatalf("profile default_model change masked: %v", current)
 	}
 }
@@ -220,12 +220,12 @@ func TestAgentOverlayDrift_TuningStaysOnTop(t *testing.T) {
 		t.Fatalf("tuning did not outrank the agent model in the spawn argv: %v", state.CLIArgs)
 	}
 	wrapper, backendID := r.backends.wrapperFor(state.Backend)
-	if drift, stored, current := r.shimArgsDrift(wrapper, backendID, state, s); drift {
+	if drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); drift {
 		t.Fatalf("tuned + agent-override session misread as drift\n  stored:  %v\n  current: %v", stored, current)
 	}
 	// Tuning change is still real drift (unchanged §4.5 semantics).
 	s.SetTuningModel("claude-sonnet-4.6")
-	if drift, _, _ := r.shimArgsDrift(wrapper, backendID, state, s); !drift {
+	if drift, _, _ := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); !drift {
 		t.Fatal("tuning change no longer surfaces as drift")
 	}
 }
@@ -247,7 +247,7 @@ func TestAgentOverlayDrift_ResumeArgsStripped(t *testing.T) {
 	state.CLIArgs = append(slices.Clone(state.CLIArgs), "--resume", "sess-2494-resume")
 
 	wrapper, backendID := r.backends.wrapperFor(state.Backend)
-	drift, stored, _ := r.shimArgsDrift(wrapper, backendID, state, s)
+	drift, stored, _ := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s)
 	if drift {
 		t.Fatalf("resumed agent-override session misread as drift; stored=%v", stored)
 	}
@@ -282,7 +282,7 @@ func TestAgentOverlayDrift_LegacyStateFallsBack(t *testing.T) {
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
 		state.SpawnOverlay = nil // written by a pre-#2494 shim
 
-		if drift, stored, current := r.shimArgsDrift(wrapper, backendID, state, s); drift {
+		if drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); drift {
 			t.Fatalf("legacy no-override shim misread as drift\n  stored:  %v\n  current: %v", stored, current)
 		}
 	})
@@ -296,7 +296,7 @@ func TestAgentOverlayDrift_LegacyStateFallsBack(t *testing.T) {
 		state, _ := spawnShimState(t, r, key, "", AgentOpts{Backend: "claude", Workspace: "/ws", Model: "sonnet"})
 		state.SpawnOverlay = nil
 
-		drift, _, _ := r.shimArgsDrift(wrapper, backendID, state, s)
+		drift, _, _ := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s)
 		if !drift {
 			t.Fatal("legacy agent-override shim: expected the documented one-time drift (pre-fix behaviour)")
 		}
@@ -308,13 +308,13 @@ func TestAgentOverlayDrift_LegacyStateFallsBack(t *testing.T) {
 	t.Run("nil session (adopt path) with legacy state does not panic", func(t *testing.T) {
 		state := shim.State{Key: "dashboard:direct:2494-legacy-adopt:general", Backend: "claude",
 			CLIArgs: []string{"-p", "--model", "opusplan"}}
-		_, _, _ = r.shimArgsDrift(wrapper, backendID, state, nil)
+		_, _, _ = driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, nil)
 	})
 
 	t.Run("empty stored argv is never drift and logs nothing", func(t *testing.T) {
 		logs.Reset()
 		state := shim.State{Key: "dashboard:direct:2494-legacy-empty:general", Backend: "claude"}
-		if drift, _, _ := r.shimArgsDrift(wrapper, backendID, state, nil); drift {
+		if drift, _, _ := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, nil); drift {
 			t.Fatal("empty CLIArgs must not read as drift")
 		}
 		if logs.Len() != 0 {
@@ -345,7 +345,7 @@ func TestAgentOverlayDrift_KnownEmptyOverlayIsNotLegacy(t *testing.T) {
 		t.Fatal("spawn path must always hand the shim a non-nil overlay")
 	}
 	wrapper, backendID := r.backends.wrapperFor(state.Backend)
-	if drift, _, _ := r.shimArgsDrift(wrapper, backendID, state, s); drift {
+	if drift, _, _ := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, s); drift {
 		t.Fatal("no-override session misread as drift")
 	}
 	if strings.Contains(logs.String(), "predates spawn-overlay") {
@@ -368,7 +368,7 @@ func TestAgentOverlayDrift_CompareHasNoSpawnSideEffects(t *testing.T) {
 	wrapper, backendID := r.backends.wrapperFor("claude")
 	state := shim.State{Key: key, Backend: "claude", CLIArgs: []string{"-p", "--model", "opusplan"},
 		SpawnOverlay: &shim.SpawnOverlay{Model: "sonnet", AccessProfile: "work"}}
-	_, _, _ = r.shimArgsDrift(wrapper, backendID, state, nil)
+	_, _, _ = driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, nil)
 
 	if got := stateOf(r).picks.backend[key]; got != "kiro" {
 		t.Errorf("drift compare consumed backendOverrides[%s]: got %q", key, got)

@@ -13,7 +13,7 @@ import (
 // TestEffortDriftCheck_MirrorsSpawn).
 //
 // Source-level rather than behavioural for the same reason its Effort twin is:
-// deleting `MCPConfigFile: r.mcpConfigFile` from argvSpawnOptions compiles and
+// dropping c.mcpConfigFile from argvSpawnOptions compiles and
 // passes every behavioural test — the configured MCP set just silently stops
 // reaching the CLI, and the operator sees "cli.mcp_config does nothing" with no
 // failing test anywhere.
@@ -71,7 +71,7 @@ func TestMCPConfigDriftParity_NoFalsePositive(t *testing.T) {
 	key := "dashboard:direct:mcp-parity:general"
 	r := &Router{ss: newSessionTable()}
 	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "opus" })
-	r.mcpConfigFile = mcpPath
+	r.spawn.mcpConfigFile = mcpPath
 	proto := &cli.ClaudeProtocol{}
 
 	bd := r.backends.backendDefaultsFor("claude")
@@ -79,11 +79,11 @@ func TestMCPConfigDriftParity_NoFalsePositive(t *testing.T) {
 	// What classifyShimState's drift check builds (driftCompareArgs → read-only
 	// debug path).
 	driftArgs := proto.BuildArgs(
-		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugPathFor(key), "", bd.Args))
+		r.spawn.argvSpawnOptions(bd.Model, bd.Effort, r.spawn.cliDebugPathFor(key), "", bd.Args))
 	// What the spawn builds for a session on backend defaults
 	// (router_lifecycle.go → side-effecting debug path).
 	spawnArgs := proto.BuildArgs(
-		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugFileFor(key), "", bd.Args))
+		r.spawn.argvSpawnOptions(bd.Model, bd.Effort, r.spawn.cliDebugFileFor(key), "", bd.Args))
 
 	if !slices.Equal(stripResumeArgs(spawnArgs), stripResumeArgs(driftArgs)) {
 		t.Errorf("drift check disagrees with the real spawn:\n spawn = %v\n drift = %v",

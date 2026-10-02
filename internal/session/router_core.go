@@ -3,10 +3,8 @@ package session
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"maps"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -202,8 +200,9 @@ type Router struct {
 	// store never calls back into Router). Zero value is usable.
 	kid knownids.Store
 
-	noOutputTimeout time.Duration
-	totalTimeout    time.Duration
+	// spawn is the spawn facet (spawn_config.go): the CLI timeouts, the
+	// router-owned argv paths and the test spawn hook. Immutable after NewRouter.
+	spawn spawnConfig
 
 	// observer receives the notifications notifyChange / notifyKeyRetired
 	// raise; nil drops them. Fixed at construction.
@@ -228,35 +227,12 @@ type Router struct {
 	// already in (#1822).
 	stopped atomic.Bool
 
-	// cliDebugDir, when non-empty, is where each spawned Claude CLI writes its
-	// `--debug-file` log. Set only when NAOZHI_CLI_DEBUG opts in at construction;
-	// empty keeps every spawn bit-identical. spawn() derives a per-session path.
-	cliDebugDir string
-
-	// naozhiSettingsFile mirrors RouterConfig.NaozhiSettingsFile ("" = legacy
-	// `--setting-sources user`). Immutable after NewRouter; the router_shim
-	// arg-drift check must pass the SAME value or --settings sessions look drifted.
-	naozhiSettingsFile string
-	// mcpConfigFile mirrors RouterConfig.MCPConfigFile ("" omits `--mcp-config`).
-	// Immutable after NewRouter; the shim arg-drift comparison must mirror the spawn argv exactly.
-	mcpConfigFile string
-
-	// spawnHook, when set, replaces the CLI spawn in spawnProcess, so tests
-	// can hand back a process of their own at a moment of their choosing.
-	// nil in production.
-	spawnHook func(ctx context.Context, opts cli.SpawnOptions) (processIface, error)
-
 	// resolver is the shared KeyResolver exposed via Resolver() so Dispatcher /
 	// Hub / upstream wiring read one instance instead of drifting copies (#604).
 	// nil when the caller did not opt in. Read-only after NewRouter; KeyResolver
 	// is immutable post-construction so concurrent readers are safe.
 	resolver *KeyResolver
 }
-
-// spawnerFunc is the signature panicSafeSpawnFn executes; tests inject a
-// function that panics instead of constructing a real cli.Wrapper. Production
-// wraps (*cli.Wrapper).Spawn in a closure at the call site.
-type spawnerFunc func(context.Context, cli.SpawnOptions) (*cli.Process, error)
 
 // pendingSpawnSlot is a one-shot RAII token returned by
 // (*Router).acquirePendingSpawnSlot. It guards the pending-spawn count against
@@ -299,70 +275,6 @@ func (s *pendingSpawnSlot) release() {
 			s.released = true
 		}
 	})
-}
-
-// spawnProcess starts the session's CLI process: spawnHook when a test set
-// one, otherwise the backend's runner under panicSafeSpawn.
-func (r *Router) spawnProcess(ctx context.Context, wrapper *cli.Wrapper, opts cli.SpawnOptions, key, backendID string) (processIface, error) {
-	if r.spawnHook != nil {
-		return r.spawnHook(ctx, opts)
-	}
-	proc, err := panicSafeSpawn(ctx, wrapper.Runner(), opts, key, backendID)
-	if err != nil {
-		// Never a typed-nil *cli.Process inside a non-nil interface.
-		return nil, err
-	}
-	return proc, nil
-}
-
-// panicSafeSpawn invokes the runner's Spawn inside a deferred recover so a
-// panic from the spawn path cannot leave pendingSpawns stranded (which would make every subsequent GetOrCreate fail with
-// ErrMaxProcs until restart). The panic becomes a regular error so the
-// caller's standard "spawn process: %w" wrap applies.
-//
-// Takes cli.Runner (the placement seam) rather than *cli.Wrapper so sandbox
-// placements reuse the same protection; (*cli.Wrapper)(nil).Runner() returns
-// nil, which is checked here.
-func panicSafeSpawn(
-	ctx context.Context,
-	r cli.Runner,
-	opts cli.SpawnOptions,
-	key, backendID string,
-) (*cli.Process, error) {
-	if r == nil {
-		// Wrap ErrNoCLIWrapper so error classification treats a nil runner
-		// identically to the nil-wrapper guard upstream.
-		return nil, fmt.Errorf("no runner for backend %q: %w", backendID, ErrNoCLIWrapper)
-	}
-	return panicSafeSpawnFn(ctx, r.Spawn, opts, key, backendID)
-}
-
-// panicSafeSpawnFn is the testable core: tests inject a spawnerFunc that
-// panics to verify the recover path without a real wrapper.
-func panicSafeSpawnFn(
-	ctx context.Context,
-	spawn spawnerFunc,
-	opts cli.SpawnOptions,
-	key, backendID string,
-) (proc *cli.Process, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Counter and slog record are paired inside the recover arm so
-			// naozhi_spawn_panic_recovered_total counts exactly one per absorbed panic.
-			metrics.SpawnPanicRecoveredTotal.Add(1)
-			slog.Error("spawnSession: wrapper.Spawn panicked",
-				"key", key, "backend", backendID, "panic", r,
-				"stack", string(debug.Stack()))
-			// Unprefixed: the caller wraps with "spawn process: %w". %w when the
-			// panic value is an error preserves the errors.Is/As chain.
-			if e, ok := r.(error); ok {
-				err = fmt.Errorf("panic: %w", e)
-			} else {
-				err = fmt.Errorf("panic: %v", r)
-			}
-		}
-	}()
-	return spawn(ctx, opts)
 }
 
 // newSessionTable returns an empty session table indexed the way the router
@@ -627,14 +539,16 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 
 	r := &Router{
-		observer:        cfg.Observer,
-		maxProcs:        cfg.MaxProcs,
-		ttl:             cfg.TTL,
-		pruneTTL:        cfg.PruneTTL,
-		defaultCWD:      cfg.Workspace,
-		storePath:       cfg.StorePath,
-		noOutputTimeout: cfg.NoOutputTimeout,
-		totalTimeout:    cfg.TotalTimeout,
+		observer:   cfg.Observer,
+		maxProcs:   cfg.MaxProcs,
+		ttl:        cfg.TTL,
+		pruneTTL:   cfg.PruneTTL,
+		defaultCWD: cfg.Workspace,
+		storePath:  cfg.StorePath,
+		spawn: spawnConfig{
+			noOutputTimeout: cfg.NoOutputTimeout,
+			totalTimeout:    cfg.TotalTimeout,
+		},
 		hist: HistoryIO{
 			claudeDir:   cfg.ClaudeDir,
 			backendDirs: maps.Clone(cfg.BackendDirs),
@@ -703,9 +617,9 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Data root = event-log dir's parent, so debug capture stays off when the
 	// event log is disabled. resolveCLIDebugDir returns "" on any failure so a
 	// debug-dir problem never blocks spawning.
-	r.cliDebugDir = resolveCLIDebugDir(cfg.EventLogDir)
-	r.naozhiSettingsFile = cfg.NaozhiSettingsFile
-	r.mcpConfigFile = cfg.MCPConfigFile
+	r.spawn.cliDebugDir = resolveCLIDebugDir(cfg.EventLogDir)
+	r.spawn.naozhiSettingsFile = cfg.NaozhiSettingsFile
+	r.spawn.mcpConfigFile = cfg.MCPConfigFile
 	// The history ctx is cancelled only by Shutdown so startup history loads and
 	// reconnect-time JSONL parses abort promptly on slow filesystems.
 	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())

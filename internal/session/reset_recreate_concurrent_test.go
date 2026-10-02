@@ -25,7 +25,7 @@ func TestResetAndRecreate_ConcurrentSameKey_OneSpawnAtATime(t *testing.T) {
 	var inSpawn, maxInSpawn atomic.Int32
 	spawnEntered := make(chan struct{}, 4)
 	releaseSpawn := make(chan struct{})
-	r.spawnHook = func(context.Context, cli.SpawnOptions) (processIface, error) {
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) {
 		n := inSpawn.Add(1)
 		for {
 			m := maxInSpawn.Load()
@@ -93,7 +93,7 @@ func TestTakeover_DuringInFlightSpawn_Refuses(t *testing.T) {
 	key := "feishu:direct:takeover-inflight:general"
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	r.spawnHook = func(context.Context, cli.SpawnOptions) (processIface, error) {
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) {
 		close(entered)
 		<-release
 		return newIdleProc(), nil

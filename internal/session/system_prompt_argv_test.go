@@ -54,7 +54,7 @@ func mkSystemPromptRouter(t *testing.T) *Router {
 func spawnArgvFor(r *Router, key string, opts AgentOpts) []string {
 	sp := resolveT(r, key, "", opts)
 	return sp.Wrapper.Protocol.BuildArgs(
-		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
+		r.spawn.argvSpawnOptions(sp.Model, sp.Effort, r.spawn.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
 }
 
 // appendSystemPromptValues returns every value following an
@@ -261,7 +261,7 @@ func TestSystemPrompt_NoDriftRestart(t *testing.T) {
 	}
 
 	wrapper, backendID := r.backends.wrapperFor(state.Backend)
-	if drift, stored, current := r.shimArgsDrift(wrapper, backendID, state, sess); drift {
+	if drift, stored, current := driftArgsFor(r).shimArgsDrift(wrapper, backendID, state, sess); drift {
 		t.Fatalf("prompted session misread as arg-drift — every naozhi restart would kill it\n"+
 			"  stored:  %v\n  current: %v", stored, current)
 	}
@@ -273,7 +273,7 @@ func TestSystemPrompt_NoDriftRestart(t *testing.T) {
 	ov := *state.SpawnOverlay
 	ov.AppendSystemPrompt = "AGENT\n\nPLAN v2"
 	changed.SpawnOverlay = &ov
-	if drift, _, _ := r.shimArgsDrift(wrapper, backendID, changed, sess); !drift {
+	if drift, _, _ := driftArgsFor(r).shimArgsDrift(wrapper, backendID, changed, sess); !drift {
 		t.Fatal("changed system prompt not detected as drift")
 	}
 }

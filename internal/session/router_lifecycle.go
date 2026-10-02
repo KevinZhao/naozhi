@@ -1,8 +1,8 @@
 // Package session router lifecycle methods.
 //
 // This file holds session lifecycle: GetOrCreate / spawn / Reset / Rename /
-// workspace overrides / history wiring. router.go retains the Router struct
-// definition, NewRouter, and infrastructure helpers (panicSafeSpawn etc.).
+// workspace overrides / history wiring. router_core.go retains the Router
+// struct definition and NewRouter; spawn_config.go holds the spawn helpers.
 // Functions that need the session table's lock take a sessTx / sessView,
 // which only exists inside a table transaction.
 package session
@@ -791,7 +791,7 @@ func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID st
 	// the arg-drift comparison cannot diverge. DebugFile uses the
 	// side-effecting cliDebugFileFor (log pre-created 0600) where drift uses
 	// the read-only cliDebugPathFor.
-	res.spawnOpts = r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
+	res.spawnOpts = r.spawn.argvSpawnOptions(sp.Model, sp.Effort, r.spawn.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
 	// ResumeID is session state, not config: the drift side strips it
 	// (stripResumeArgs) so a resumed session is not read as drift.
 	res.spawnOpts.ResumeID = res.resumeID
@@ -802,8 +802,8 @@ func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID st
 	// Process wiring BuildArgs never reads.
 	res.spawnOpts.Key = key
 	res.spawnOpts.WorkingDir = res.workspace
-	res.spawnOpts.NoOutputTimeout = r.noOutputTimeout
-	res.spawnOpts.TotalTimeout = r.totalTimeout
+	res.spawnOpts.NoOutputTimeout = r.spawn.noOutputTimeout
+	res.spawnOpts.TotalTimeout = r.spawn.totalTimeout
 
 	// The snapshot is taken in this same critical section. The pending slot,
 	// taken last, keeps a concurrent Cleanup from pruning the slot we are about
@@ -831,7 +831,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 		tx.Ext().spawns.EndSpawn(key, res.doneCh)
 	})
 
-	if res.wrapper == nil && r.spawnHook == nil {
+	if res.wrapper == nil && r.spawn.hook == nil {
 		return nil, fmt.Errorf("spawn process (backend %q): %w", res.backendID, ErrNoCLIWrapper)
 	}
 	// Expand the access-profile env overlay outside the lock (reads *_FILE
@@ -844,7 +844,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 		}
 		res.spawnOpts.EnvOverlay = overlay
 	}
-	proc, err := r.spawnProcess(ctx, res.wrapper, res.spawnOpts, key, res.backendID)
+	proc, err := r.spawn.spawnProcess(ctx, res.wrapper, res.spawnOpts, key, res.backendID)
 	if err != nil {
 		return nil, fmt.Errorf("spawn process: %w", err)
 	}
@@ -1463,35 +1463,4 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	slog.Info("session renamed", "old", oldKey, "new", newKey)
 	r.notifyChange()
 	return true
-}
-
-// stripResumeArgs removes --resume <id> pairs from a CLI arg slice for the
-// drift check: --resume is session-specific, not a config change.
-// `--append-system-prompt` is NOT stripped — it travels in the overlay and a
-// changed prompt correctly reads as drift (#2493). Returns the original slice
-// unchanged when --resume is absent.
-func stripResumeArgs(args []string) []string {
-	hasResume := false
-	for _, a := range args {
-		if a == "--resume" {
-			hasResume = true
-			break
-		}
-	}
-	if !hasResume {
-		return args
-	}
-	out := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--resume" {
-			// Skip the flag and its value; a trailing bare `--resume` must
-			// also go or it spuriously reads as drift.
-			if i+1 < len(args) {
-				i++
-			}
-			continue
-		}
-		out = append(out, args[i])
-	}
-	return out
 }

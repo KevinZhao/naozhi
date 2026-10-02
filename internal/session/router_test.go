@@ -827,11 +827,11 @@ func TestCleanupExpiredSession(t *testing.T) {
 // streamed tool_use / thinking / assistant event proves the turn is alive.
 func TestCleanupRunningSession_LiveEventsBlockStuckKill(t *testing.T) {
 	r := &Router{
-		ss:           newSessionTable(),
-		maxProcs:     3,
-		ttl:          1 * time.Minute,
-		pruneTTL:     72 * time.Hour,
-		totalTimeout: 5 * time.Minute, // stuckThreshold = 10 min
+		ss:       newSessionTable(),
+		maxProcs: 3,
+		ttl:      1 * time.Minute,
+		pruneTTL: 72 * time.Hour,
+		spawn:    spawnConfig{totalTimeout: 5 * time.Minute}, // stuckThreshold = 10 min
 	}
 	proc := newRunningProc()
 	// Ancient lastActive (25 min ago) would normally trip stuck_running, but
@@ -855,11 +855,11 @@ func TestCleanupRunningSession_LiveEventsBlockStuckKill(t *testing.T) {
 // AND LastEventAt stale (or zero) means the turn is not making progress.
 func TestCleanupRunningSession_NoLiveEventsStillKilled(t *testing.T) {
 	r := &Router{
-		ss:           newSessionTable(),
-		maxProcs:     3,
-		ttl:          1 * time.Minute,
-		pruneTTL:     72 * time.Hour,
-		totalTimeout: 5 * time.Minute,
+		ss:       newSessionTable(),
+		maxProcs: 3,
+		ttl:      1 * time.Minute,
+		pruneTTL: 72 * time.Hour,
+		spawn:    spawnConfig{totalTimeout: 5 * time.Minute},
 	}
 	proc := newRunningProc()
 	// LastEventAt deliberately left at zero so "max(lastActive, LastEventAt)"

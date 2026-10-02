@@ -56,11 +56,11 @@ func TestCleanup_StuckRunning_DeathReasonNotStampedWhenProcReplaced(t *testing.T
 	// clean deathReason.
 
 	r := &Router{
-		ss:           newSessionTable(),
-		maxProcs:     3,
-		ttl:          1 * time.Minute,
-		pruneTTL:     72 * time.Hour,
-		totalTimeout: 5 * time.Minute,
+		ss:       newSessionTable(),
+		maxProcs: 3,
+		ttl:      1 * time.Minute,
+		pruneTTL: 72 * time.Hour,
+		spawn:    spawnConfig{totalTimeout: 5 * time.Minute},
 	}
 	proc := newRunningProc()
 	s := injectSession(r, "key-stuck", proc)

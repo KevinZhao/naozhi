@@ -85,15 +85,6 @@ func cliDebugDirWith(eventLogDir string, getenv func(string) string) (dir, why s
 	return datadir.FromRoot(dataDir).CLIDebugRoot(), ""
 }
 
-// cliDebugPathFor returns the per-session debug-file path WITHOUT touching the
-// filesystem, or "" when CLI debug capture is off. The file name reuses the
-// event-log key-hash stem so a session's debug log lines up with its <stem>.log
-// event file. driftCompareArgs uses this (not cliDebugFileFor) so the startup
-// drift pass never conjures debug logs for sessions that will not respawn.
-func (r *Router) cliDebugPathFor(key string) string {
-	return CLIDebugPath(r.cliDebugDir, key)
-}
-
 // CLIDebugPath returns the debug-log path a session key gets under dir, or ""
 // when debug capture is off (dir empty). Exported so `naozhi config check
 // --effective` reports the same `--debug-file` value a spawn would pass instead
@@ -103,30 +94,4 @@ func CLIDebugPath(dir, key string) string {
 		return ""
 	}
 	return filepath.Join(dir, persist.KeyHash(key)+".log")
-}
-
-// cliDebugFileFor returns cliDebugPathFor's path after pre-creating and
-// hardening the file, for the spawn path. The file is overwritten on every
-// spawn — debug capture is a live-tail diagnostic, not an audit trail.
-func (r *Router) cliDebugFileFor(key string) string {
-	path := r.cliDebugPathFor(key)
-	if path == "" {
-		return ""
-	}
-	// The claude child creates --debug-file under its own umask, so the log
-	// (which may contain API keys) can land world-readable; pre-create at 0600
-	// and Chmod to repair a pre-existing file O_CREATE leaves untouched (#2171).
-	// No O_EXCL — the file legitimately pre-exists from a prior spawn. Errors
-	// are fail-open (warn + still return path): hardening must never block a spawn.
-	if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600); err != nil {
-		slog.Warn("cli debug file pre-create failed; continuing without hardening",
-			"path", path, "err", err)
-	} else {
-		_ = f.Close()
-		if err := os.Chmod(path, 0o600); err != nil {
-			slog.Warn("cli debug file chmod 0600 failed; log may be world-readable",
-				"path", path, "err", err)
-		}
-	}
-	return path
 }
