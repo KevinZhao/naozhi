@@ -15,16 +15,14 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // argvConstructorFile is the single production site allowed to build a
 // cli.SpawnOptions literal for a spawn or drift argv.
 const argvConstructorFile = "spawn_argv.go"
-
-// argvOwnerFiles are the paths that consume the constructor and must NOT build
-// competing literals of their own.
-var argvOwnerFiles = []string{"router_lifecycle.go", "router_shim.go"}
 
 // spawnOptionsLiteralFields returns the field names set by every
 // cli.SpawnOptions composite literal in file, plus how many literals it found.
@@ -68,7 +66,8 @@ func spawnOptionsLiteralFields(t *testing.T, file string) (fields []string, lite
 // side and absent on the drift side makes every naozhi restart classify every
 // live session as arg-drift and kill its CLI.
 //
-// If a future change reintroduces a literal on either consumer, this test fails
+// Every other non-test file of the package must build none, so a literal
+// reintroduced on either consumer fails here wherever that consumer lives,
 // and points back at the constructor.
 func TestSpawnArgv_SingleSourceOfTruth(t *testing.T) {
 	t.Parallel()
@@ -78,11 +77,23 @@ func TestSpawnArgv_SingleSourceOfTruth(t *testing.T) {
 			"the argv constructor must stay the single source of truth",
 			argvConstructorFile, n)
 	}
-	for _, file := range argvOwnerFiles {
+	paths, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanned := 0
+	for _, file := range paths {
+		if file == argvConstructorFile || strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		scanned++
 		if _, n := spawnOptionsLiteralFields(t, file); n != 0 {
 			t.Errorf("%s builds %d cli.SpawnOptions literal(s) of its own — route it "+
 				"through argvSpawnOptions (%s) instead, or the two argv paths will "+
 				"drift apart again", file, n, argvConstructorFile)
 		}
+	}
+	if scanned < 40 {
+		t.Fatalf("scanned %d production files besides %s, below the floor of 40: the scan has gone blind", scanned, argvConstructorFile)
 	}
 }

@@ -2,8 +2,12 @@
 package session
 
 import (
-	"os"
-	"regexp"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,47 +20,120 @@ import (
 // test pinned the invariant, so a future "quick fix" could silently
 // reintroduce the duplication.
 //
-// We grep the lifecycle file for the canonical write pattern
-// `workspace = opts.Workspace`. There must be exactly ONE such site
-// (inside resolveSpawnParams). The pre-fix shape of #735
-// (separate resolution branches in Resume/ResetAndRecreate) would
-// re-add this assignment in two more spots and trip the assertion.
+// Every non-test file of the package is searched (the rule follows the code,
+// not a file name) for an assignment of `opts.Workspace` to a variable named
+// workspace, `=` or `:=`. There must be exactly ONE such site, inside
+// (*Router).resolveSpawnParams. The pre-fix shape of #735 (separate
+// resolution branches in Resume/ResetAndRecreate) would re-add this
+// assignment in two more spots and trip the assertion, wherever those
+// functions live.
 //
-// Excluded: comments, test fixtures, and assignments scoped to other
-// fields (e.g. `spawnOpts.Workspace = …`). The regex matches the bare
-// local-variable assignment only.
+// Assignments to other fields (e.g. `spawnOpts.Workspace = …`) are not
+// counted: only the bare local variable is the decision.
 func TestWorkspaceResolution_SingleSiteContract(t *testing.T) {
-	body, err := os.ReadFile("router_lifecycle.go")
+	paths, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("read router_lifecycle.go: %v", err)
+		t.Fatal(err)
 	}
-	// The canonical assignment is `workspace = opts.Workspace` — the
-	// merge step that takes the per-request override. Any duplicate
-	// would copy this exact line.
-	re := regexp.MustCompile(`(?m)^\s*workspace\s*=\s*opts\.Workspace\b`)
-	matches := re.FindAllIndex(body, -1)
-	if len(matches) != 1 {
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, p := range paths {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, p, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", p, err)
+		}
+		files = append(files, f)
+	}
+	if len(files) < 40 {
+		t.Fatalf("parsed %d production files, below the floor of 40: the scan has gone blind", len(files))
+	}
+	sites := workspaceDecisionSites(fset, files)
+	if len(sites) != 1 {
 		t.Fatalf("R222-ARCH-12 (#735) contract broken: workspace decision must live "+
 			"in exactly one place (resolveSpawnParams). Found %d "+
-			"`workspace = opts.Workspace` sites; expected 1. If you intentionally "+
+			"`workspace = opts.Workspace` sites %v; expected 1. If you intentionally "+
 			"reintroduced a second workspace resolver, route it through "+
 			"resolveSpawnParams or update this test with the new contract.",
-			len(matches))
+			len(sites), sites)
 	}
-	// Sanity: the surviving site must sit within resolveSpawnParams,
-	// not bare-floating in the spawn or ResetAndRecreate. Find the
-	// preceding `func` declaration.
-	idx := matches[0][0]
-	prefix := body[:idx]
-	funcRe := regexp.MustCompile(`(?m)^func \(r \*Router\) (\w+)`)
-	allFuncs := funcRe.FindAllSubmatch(prefix, -1)
-	if len(allFuncs) == 0 {
-		t.Fatal("could not locate enclosing func for workspace assignment")
-	}
-	enclosing := string(allFuncs[len(allFuncs)-1][1])
-	if enclosing != "resolveSpawnParams" {
-		t.Errorf("workspace decision moved out of resolveSpawnParams into %q. "+
+	if sites[0].fn != "(*Router).resolveSpawnParams" {
+		t.Errorf("workspace decision moved out of resolveSpawnParams into %s (%s). "+
 			"Move it back, or update this contract test if the refactor is intentional.",
-			enclosing)
+			sites[0].fn, sites[0].at)
+	}
+}
+
+type workspaceSite struct{ at, fn string }
+
+// workspaceDecisionSites returns every `workspace = opts.Workspace` (or :=)
+// in files with the top-level function that holds it.
+func workspaceDecisionSites(fset *token.FileSet, files []*ast.File) []workspaceSite {
+	var sites []workspaceSite
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			fn := fd.Name.Name
+			if fd.Recv != nil && len(fd.Recv.List) == 1 {
+				recv := recvBase(fd.Recv.List[0].Type)
+				if _, star := fd.Recv.List[0].Type.(*ast.StarExpr); star {
+					recv = "*" + recv
+				}
+				fn = "(" + recv + ")." + fn
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok || len(as.Lhs) != len(as.Rhs) {
+					return true
+				}
+				for i, lhs := range as.Lhs {
+					id, ok := lhs.(*ast.Ident)
+					if !ok || id.Name != "workspace" {
+						continue
+					}
+					sel, ok := as.Rhs[i].(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "Workspace" {
+						continue
+					}
+					if x, ok := sel.X.(*ast.Ident); ok && x.Name == "opts" {
+						at := fset.Position(as.Pos())
+						sites = append(sites, workspaceSite{at: fmt.Sprintf("%s:%d", at.Filename, at.Line), fn: fn})
+					}
+				}
+				return true
+			})
+		}
+	}
+	return sites
+}
+
+// The site finder counts `=` and `:=` to the bare local, in methods and plain
+// functions alike, and nothing that only resembles it.
+func TestWorkspaceDecisionSites_Fixture(t *testing.T) {
+	t.Parallel()
+	const src = `package session
+func (r *Router) a(opts AgentOpts) { var workspace string; workspace = opts.Workspace; _ = workspace }
+func b(opts AgentOpts) { workspace := opts.Workspace; _ = workspace }
+func c(opts, other AgentOpts, so *spawnParams) {
+	so.workspace = opts.Workspace
+	workspace := other.Workspace
+	workspace = opts.Model
+	_ = workspace
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "fixture.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := workspaceDecisionSites(fset, []*ast.File{f})
+	want := []workspaceSite{{"fixture.go:2", "(*Router).a"}, {"fixture.go:3", "b"}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("sites = %v, want %v", got, want)
 	}
 }
