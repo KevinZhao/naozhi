@@ -356,6 +356,15 @@ jobs:
       - name: Check WS receivers (no hand-rolled frame-type dispatch)
         run: node scripts/check-ws-receivers.mjs
 
+      # ws_manager.js and session_stream.js are leaves node can import (R7):
+      # dispatch order, the auth_ok / auth_fail lifecycle, the outage clock and
+      # the subscription bookkeeping run here without a browser.
+      - name: Test the WS manager
+        run: node --test scripts/ws-manager.test.mjs
+
+      - name: Test the session stream
+        run: node --test scripts/session-stream.test.mjs
+
       - name: Test the nested WS field check
         run: node --test scripts/ws-contract-nested.test.mjs
 

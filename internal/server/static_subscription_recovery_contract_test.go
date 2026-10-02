@@ -45,6 +45,11 @@ func TestDashboardJS_SubscriptionTimeoutClearsClientBookkeeping(t *testing.T) {
 	// broadcast.
 	toIdx := strings.Index(body, "'subscription_timeout'")
 	tail := body[toIdx:]
+	// Only the timeout branch itself: needSub's resubscribe further down also
+	// zeroes lastEventTimeWs and would satisfy the check on its own.
+	if end := strings.Index(tail, "\n    }\n"); end >= 0 {
+		tail = tail[:end]
+	}
 	for _, want := range []string{
 		"sessionStream.subscribedKey = null",
 		"sessionStream.subscribedNode = null",
