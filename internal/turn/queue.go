@@ -1,6 +1,8 @@
-// Package turn holds the per-session message queue and the merge of queued
-// messages into one prompt. The IM dispatcher and the dashboard send engine
-// drain the same Queue instance, built once in the server composition root
+// Package turn runs a session key's turns: the per-session message queue,
+// the merge of queued messages into one prompt, and the Orchestrator that
+// owns the drain loop and delivers each turn's outcome to the entry points
+// whose messages it carried. The IM dispatcher and the dashboard send engine
+// share one Queue instance, built once in the server composition root
 // (#3004).
 package turn
 
@@ -22,6 +24,9 @@ type Msg struct {
 	// add/remove the "queued" reaction on the user's original message.
 	MessageID string
 	EnqueueAt time.Time
+	// Origin is the submitting entry point (nil for messages enqueued
+	// directly, which the Orchestrator treats as silent).
+	Origin Origin
 }
 
 // Mode selects how new messages that arrive while a session is busy are
@@ -280,22 +285,39 @@ func (q *Queue) getOrCreate(key string) *sessionQueue {
 // evictedID is the MessageID of the oldest message dropped to make room, or
 // "" — the caller clears that message's dangling queued reaction (#1945).
 func (q *Queue) Enqueue(key string, msg Msg) (isOwner, enqueued, shouldInterrupt bool, gen uint64, evictedID string) {
+	r := q.enqueue(key, msg)
+	if r.evicted {
+		evictedID = r.dropped.MessageID
+	}
+	return r.isOwner, r.enqueued, r.shouldInterrupt, r.gen, evictedID
+}
+
+// enqueueResult is Enqueue's result with the evicted message whole, so the
+// Orchestrator can tell the evicted message's own Origin.
+type enqueueResult struct {
+	isOwner, enqueued, shouldInterrupt bool
+	gen                                uint64
+	evicted                            bool
+	dropped                            Msg
+}
+
+func (q *Queue) enqueue(key string, msg Msg) enqueueResult {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	sq := q.getOrCreate(key)
 	if !sq.busy {
 		sq.busy = true
-		return true, false, false, sq.gen, ""
+		return enqueueResult{isOwner: true, gen: sq.gen}
 	}
 
 	// maxDepth<=0: queue disabled, degrade to drop.
 	if q.maxDepth <= 0 {
-		return false, false, false, 0, ""
+		return enqueueResult{}
 	}
 
-	if evicted, dropped := sq.ring.push(msg, q.maxDepth); evicted {
-		evictedID = dropped.MessageID
+	r := enqueueResult{enqueued: true}
+	if r.evicted, r.dropped = sq.ring.push(msg, q.maxDepth); r.evicted {
 		// Queue-full eviction is silent data loss for the sender; Warn so
 		// operators can observe backpressure, rate-limited per key.
 		now := time.Now().UnixNano()
@@ -311,9 +333,9 @@ func (q *Queue) Enqueue(key string, msg Msg) (isOwner, enqueued, shouldInterrupt
 	// the CLI would ignore a second control_request mid-abort.
 	if q.mode == ModeInterrupt && !sq.interruptRequested {
 		sq.interruptRequested = true
-		return false, true, true, 0, evictedID
+		r.shouldInterrupt = true
 	}
-	return false, true, false, 0, evictedID
+	return r
 }
 
 // DoneOrDrain is called by the owner goroutine after processing a message.
