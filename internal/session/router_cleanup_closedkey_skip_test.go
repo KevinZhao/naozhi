@@ -18,11 +18,11 @@ import (
 // rewrite locked in (see TestCleanup_PruneSnapshot_ReVerifiesUnderLock).
 func TestCleanup_IdleClosedSession_StaysOneTick(t *testing.T) {
 	r := &Router{
-		ss:           newSessionTable(),
-		maxProcs:     3,
-		ttl:          1 * time.Minute,
-		pruneTTL:     5 * time.Minute, // smaller than the idle age below
-		totalTimeout: 5 * time.Minute,
+		ss:       newSessionTable(),
+		maxProcs: 3,
+		ttl:      1 * time.Minute,
+		pruneTTL: 5 * time.Minute, // smaller than the idle age below
+		spawn:    spawnConfig{totalTimeout: 5 * time.Minute},
 	}
 	proc := newIdleProc()
 	s := injectSession(r, "key1", proc)

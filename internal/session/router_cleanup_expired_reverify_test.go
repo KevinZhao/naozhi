@@ -11,11 +11,11 @@ import (
 // proc, deathReason must be stamped "idle_timeout" and the proc closed.
 func TestCleanup_Expired_DeathReasonStampedWhenProcUnchanged(t *testing.T) {
 	r := &Router{
-		ss:           newSessionTable(),
-		maxProcs:     3,
-		ttl:          1 * time.Minute,
-		pruneTTL:     72 * time.Hour,
-		totalTimeout: 5 * time.Minute,
+		ss:       newSessionTable(),
+		maxProcs: 3,
+		ttl:      1 * time.Minute,
+		pruneTTL: 72 * time.Hour,
+		spawn:    spawnConfig{totalTimeout: 5 * time.Minute},
 	}
 	proc := newIdleProc() // alive, not running → eligible for idle TTL expiry
 	s := injectSession(r, "key-idle", proc)

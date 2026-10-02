@@ -224,7 +224,7 @@ func (r *Router) Cleanup() {
 		}
 	})
 	ttl := r.ttl
-	totalTimeout := r.totalTimeout
+	totalTimeout := r.spawn.totalTimeout
 
 	if totalTimeout <= 0 {
 		totalTimeout = cli.DefaultTotalTimeout

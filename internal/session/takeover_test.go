@@ -211,7 +211,7 @@ func TestTakeover_ParksConcurrentGetOrCreate(t *testing.T) {
 	r := newTakeoverTestRouter(3)
 	key := "feishu:direct:user-park:general"
 	var spawns atomic.Int32
-	r.spawnHook = func(context.Context, cli.SpawnOptions) (processIface, error) {
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) {
 		spawns.Add(1)
 		return newIdleProc(), nil
 	}

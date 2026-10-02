@@ -12,7 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/costledger"
 )
 
-// gatedSpawn is a spawnHook the test controls: each call signals entered,
+// gatedSpawn is a spawn.hook the test controls: each call signals entered,
 // then waits for release before handing back its process.
 type gatedSpawn struct {
 	entered chan struct{}
@@ -47,10 +47,10 @@ func (g *gatedSpawn) hook(ctx context.Context, _ cli.SpawnOptions) (processIface
 // spawnRouter is a real Router whose spawns go through the hook.
 func spawnRouter(t *testing.T, maxProcs int, hook func(context.Context, cli.SpawnOptions) (processIface, error)) *Router {
 	t.Helper()
-	// A wrapper the spawn never runs (spawnHook replaces it), for the CLI
+	// A wrapper the spawn never runs (spawn.hook replaces it), for the CLI
 	// name and version the new session records.
 	r := NewRouter(RouterConfig{MaxProcs: maxProcs, Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
-	r.spawnHook = hook
+	r.spawn.hook = hook
 	t.Cleanup(r.Shutdown)
 	return r
 }
@@ -257,7 +257,7 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 
 	// The retry consumes it onto the session.
 	proc := newIdleProc()
-	r.spawnHook = func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil }
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil }
 	s, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
 	if err != nil {
 		t.Fatalf("retry: %v", err)
@@ -279,7 +279,7 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 func TestSpawnSession_ShutdownGateRefusesLateSpawns(t *testing.T) {
 	called := false
 	r := NewRouter(RouterConfig{MaxProcs: 4, Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
-	r.spawnHook = func(context.Context, cli.SpawnOptions) (processIface, error) {
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) {
 		called = true
 		return newIdleProc(), nil
 	}

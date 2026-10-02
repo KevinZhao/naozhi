@@ -100,15 +100,15 @@ func TestCLIDebugFileFor(t *testing.T) {
 	key := "dashboard:direct:2026-06-09-naozhi:general"
 
 	// Disabled router → empty path regardless of key.
-	rOff := &Router{ss: newSessionTable(), cliDebugDir: ""}
-	if p := rOff.cliDebugFileFor(key); p != "" {
+	rOff := &Router{ss: newSessionTable(), spawn: spawnConfig{cliDebugDir: ""}}
+	if p := rOff.spawn.cliDebugFileFor(key); p != "" {
 		t.Errorf("disabled: want \"\", got %q", p)
 	}
 
 	// Enabled router → <dir>/<keyhash>.log, stem identical to the event log.
 	dir := t.TempDir()
-	rOn := &Router{ss: newSessionTable(), cliDebugDir: dir}
-	got := rOn.cliDebugFileFor(key)
+	rOn := &Router{ss: newSessionTable(), spawn: spawnConfig{cliDebugDir: dir}}
+	got := rOn.spawn.cliDebugFileFor(key)
 	want := filepath.Join(dir, persist.KeyHash(key)+".log")
 	if got != want {
 		t.Errorf("debug file = %q, want %q", got, want)
@@ -141,14 +141,14 @@ func TestCLIDebugFileFor_RepairsWorldReadable(t *testing.T) {
 	}
 	key := "dashboard:direct:2026-06-09-naozhi:general"
 	dir := t.TempDir()
-	r := &Router{ss: newSessionTable(), cliDebugDir: dir}
+	r := &Router{ss: newSessionTable(), spawn: spawnConfig{cliDebugDir: dir}}
 
 	path := filepath.Join(dir, persist.KeyHash(key)+".log")
 	if err := os.WriteFile(path, []byte("stale debug output\n"), 0o644); err != nil {
 		t.Fatalf("seed world-readable file: %v", err)
 	}
 
-	got := r.cliDebugFileFor(key)
+	got := r.spawn.cliDebugFileFor(key)
 	if got != path {
 		t.Fatalf("debug file = %q, want %q", got, path)
 	}
