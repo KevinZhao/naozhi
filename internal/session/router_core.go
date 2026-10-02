@@ -1156,10 +1156,10 @@ func (r *Router) ListSessions() []SessionSnapshot {
 
 // ListSessionsWithVersion returns the session snapshot slice paired with the
 // gen value sampled in the same View, so /api/sessions tags data with exactly
-// the version that produced it (separate ss.Gen() + ListSessions() reads
-// could publish data with a stale version, #726). Writers bump gen inside
-// their Update, so a View observes an atomically produced (sessions, gen)
-// pair.
+// the version that produced it (separate ss.Gen() + ListSessions() reads could
+// publish a stale version, #726). Writers bump gen inside their Update, so the
+// pair is atomic. BumpVersion's render-only bumps advance the same gen, so a
+// changed version can come with unchanged sessions.
 func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]
