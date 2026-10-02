@@ -1,0 +1,272 @@
+[
+  {
+    "name": "plain",
+    "input": "just a sentence",
+    "html": "just a sentence<br>"
+  },
+  {
+    "name": "empty",
+    "input": "",
+    "html": ""
+  },
+  {
+    "name": "html is escaped",
+    "input": "<script>alert(1)</script> & <b>bold</b>",
+    "html": "&lt;script&gt;alert(1)&lt;/script&gt; &amp; &lt;b&gt;bold&lt;/b&gt;<br>"
+  },
+  {
+    "name": "__bold__ at word boundaries only",
+    "input": "a __bold__ b, __all__ = [], snake_case__name__x, pkg/__init__.py",
+    "html": "a <strong>bold</strong> b, <strong>all</strong> = [], snake_case__name__x, pkg/__init__.py<br>"
+  },
+  {
+    "name": "inline",
+    "input": "**bold** *em* _em_ ~~strike~~ `code` [link](https://example.com/a?b=1&c=2) <https://example.com> https://example.com/x",
+    "html": "<strong>bold</strong> <em>em</em> _em_ <del>strike</del> <code class=\"md-code\">code</code> <a href=\"https://example.com/a?b=1&amp;c=2\" class=\"md-link\" target=\"_blank\" rel=\"noopener noreferrer\">link</a> &lt;<a href=\"https://example.com\" class=\"md-link\" target=\"_blank\" rel=\"noopener noreferrer\">https://example.com</a>&gt; <a href=\"https://example.com/x\" class=\"md-link\" target=\"_blank\" rel=\"noopener noreferrer\">https://example.com/x</a><br>"
+  },
+  {
+    "name": "headings",
+    "input": "# h1\n## h2\n### h3\n#### h4\n##### h5\n###### h6\n####### seven",
+    "html": "<strong class=\"md-h1\">h1</strong>\n<strong class=\"md-h2\">h2</strong>\n<strong class=\"md-h3\">h3</strong>\n<strong class=\"md-h4\">h4</strong>\n##### h5<br>###### h6<br>####### seven<br>"
+  },
+  {
+    "name": "paragraphs and breaks",
+    "input": "line one\nline two\n\nnew paragraph",
+    "html": "line one<br>line two<br><div class=\"md-blank\"></div>new paragraph<br>"
+  },
+  {
+    "name": "blockquote",
+    "input": "> quoted **text**\n> second line\n\nafter",
+    "html": "<blockquote class=\"md-quote\">quoted <strong>text</strong><br>second line</blockquote><div class=\"md-blank\"></div>after<br>"
+  },
+  {
+    "name": "nested quote",
+    "input": "> outer\n> > inner",
+    "html": "<blockquote class=\"md-quote\">outer<br>&gt; inner</blockquote>"
+  },
+  {
+    "name": "hr",
+    "input": "above\n\n---\n\nbelow",
+    "html": "above<br><div class=\"md-blank\"></div>---<br><div class=\"md-blank\"></div>below<br>"
+  },
+  {
+    "name": "unordered list",
+    "input": "- a\n- b\n  - b1\n  - b2\n- c",
+    "html": "<ul class=\"md-ul\"><li>a</li><li>b<ul class=\"md-ul\"><li>b1</li><li>b2</li></ul></li><li>c</li></ul>"
+  },
+  {
+    "name": "ordered list",
+    "input": "1. one\n2. two\n   1. two.one\n3. three",
+    "html": "<ol class=\"md-ol\"><li>one</li><li>two<ol class=\"md-ol\"><li>two.one</li></ol></li><li>three</li></ol>"
+  },
+  {
+    "name": "mixed list",
+    "input": "1. first\n   - bullet\n   - bullet\n2. second\n- loose",
+    "html": "<ol class=\"md-ol\"><li>first<ul class=\"md-ul\"><li>bullet</li><li>bullet</li></ul></li><li>second<ul class=\"md-ul\"><li>loose</li></ul></li></ol>"
+  },
+  {
+    "name": "task list",
+    "input": "- [x] done\n- [ ] todo",
+    "html": "<ul class=\"md-ul\"><li><input type=\"checkbox\" class=\"md-task\" disabled checked> done</li><li><input type=\"checkbox\" class=\"md-task\" disabled> todo</li></ul>"
+  },
+  {
+    "name": "deep list",
+    "input": "- 1\n  - 2\n    - 3\n      - 4\n        - 5\n          - 6\n            - 7",
+    "html": "<ul class=\"md-ul\"><li>1<ul class=\"md-ul\"><li>2<ul class=\"md-ul\"><li>3<ul class=\"md-ul\"><li>4<ul class=\"md-ul\"><li>5<ul class=\"md-ul\"><li>6<ul class=\"md-ul\"><li>7</li></ul></li></ul></li></ul></li></ul></li></ul></li></ul></li></ul>"
+  },
+  {
+    "name": "same depth, different column",
+    "input": "- a\n - b\n1. c\n 2. d",
+    "html": "<ul class=\"md-ul\"><li>a</li><li>b<ol class=\"md-ol\"><li>c</li></ol><ol class=\"md-ol\" start=\"2\"><li>d</li></ol></li></ul>"
+  },
+  {
+    "name": "opposite kind at the depth cap",
+    "input": "- 1\n  - 2\n    - 3\n      - 4\n        - 5\n          - 6\n            - 7\n            1. 8",
+    "html": "<ul class=\"md-ul\"><li>1<ul class=\"md-ul\"><li>2<ul class=\"md-ul\"><li>3<ul class=\"md-ul\"><li>4<ul class=\"md-ul\"><li>5<ul class=\"md-ul\"><li>6<ul class=\"md-ul\"><li>7</li></ul><ol class=\"md-ol\"><li>8</li></ol></li></ul></li></ul></li></ul></li></ul></li></ul></li></ul>"
+  },
+  {
+    "name": "table",
+    "input": "| Col A | Col B |\n|:------|------:|\n| 1 | **2** |\n| `x` | y |",
+    "html": "<div class=\"md-table-wrap\"><table class=\"md-table\"><thead><tr><th>Col A</th><th>Col B</th></tr></thead><tbody><tr><td>1</td><td><strong>2</strong></td></tr><tr><td><code class=\"md-code\">x</code></td><td>y</td></tr></tbody></table></div>"
+  },
+  {
+    "name": "table without leading pipe",
+    "input": "a | b\n--- | ---\n1 | 2",
+    "html": "a | b<br>--- | ---<br>1 | 2<br>"
+  },
+  {
+    "name": "CRLF",
+    "input": "# title\r\n\r\n- a\r\n- b\r\n\r\n| x | y |\r\n|---|---|\r\n| 1 | 2 |\r\nend\rline",
+    "html": "<strong class=\"md-h1\">title</strong>\n<div class=\"md-blank\"></div><ul class=\"md-ul\"><li>a</li><li>b</li></ul><div class=\"md-blank\"></div><div class=\"md-table-wrap\"><table class=\"md-table\"><thead><tr><th>x</th><th>y</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table></div>end<br>line<br>"
+  },
+  {
+    "name": "fence js",
+    "input": "```js\nconst a = 1 < 2;\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"js\">const a = 1 &lt; 2;</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence js with braces",
+    "input": "```js {1,3}\nlet x;\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"js\">let x;</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence python with file",
+    "input": "```python:main.py\nprint(\"hi\")\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"python\">print(\"hi\")</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence c++",
+    "input": "```c++\nint main() {}\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"c++\">int main() {}</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence c#",
+    "input": "```c#\nclass A {}\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"c#\">class A {}</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence objective-c",
+    "input": "```objective-c\n@interface A @end\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"objective-c\">@interface A @end</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence stray punctuation",
+    "input": "```we!rd$lang\nx\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"werdlang\">x</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence go",
+    "input": "```go\nfunc main() {}\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"go\">func main() {}</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence bash",
+    "input": "```bash\necho $HOME\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"bash\">echo $HOME</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence json",
+    "input": "```json\n{\"a\": 1}\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"json\">{\"a\": 1}</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence diff",
+    "input": "```diff\n- a\n+ b\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"diff\">- a\n+ b</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence mermaid",
+    "input": "```mermaid\ngraph TD\n  A-->B\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"mermaid-wrap\"><pre id=\"mmd-N\" class=\"mermaid-pending\"></pre></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "two mermaid fences",
+    "input": "```mermaid\ngraph LR\n  X-->Y\n```\n\n```mermaid\ngraph LR\n  Y-->Z\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"mermaid-wrap\"><pre id=\"mmd-N\" class=\"mermaid-pending\"></pre></div><div class=\"md-blank\"></div><div class=\"md-blank\"></div><div class=\"md-blank\"></div><div class=\"mermaid-wrap\"><pre id=\"mmd-N\" class=\"mermaid-pending\"></pre></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence math",
+    "input": "```math\nE = mc^2\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-math-display\"><span id=\"ktx-N\" class=\"katex-pending\">E = mc^2</span></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence latex",
+    "input": "```latex\n\\frac{a}{b}\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-math-display\"><span id=\"ktx-N\" class=\"katex-pending\">\\frac{a}{b}</span></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence tex",
+    "input": "```tex\nx^2\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-math-display\"><span id=\"ktx-N\" class=\"katex-pending\">x^2</span></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence without language",
+    "input": "```\nsome code\nmore code\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code>some code\nmore code</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence that is a path list",
+    "input": "```\n/home/user/workspace/myproject/a.go\n/home/user/workspace/myproject/b.go  # the second\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap md-pathlist\"><div class=\"md-pathline\"><code>/home/user/workspace/myproject/a.go</code></div><div class=\"md-pathline\"><code>/home/user/workspace/myproject/b.go</code><span class=\"md-pathnote\"># the second</span></div><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy file paths\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence constructor",
+    "input": "```constructor\nx\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"constructor\">x</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence __proto__",
+    "input": "```__proto__\nx\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"__proto__\">x</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence toString",
+    "input": "```toString\nx\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"toString\">x</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "fence hasOwnProperty",
+    "input": "```hasOwnProperty\nx\n```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"hasOwnProperty\">x</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "single-line fence",
+    "input": "```ls -la```",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code>ls -la</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "unclosed fence",
+    "input": "before\n```js\nconst streaming = true;\nnot closed",
+    "html": "before<br>```js<br>const streaming = true;<br>not closed<br>"
+  },
+  {
+    "name": "unclosed fence without language",
+    "input": "```\npartial",
+    "html": "<div class=\"md-code-wrap\"><pre class=\"md-pre\"><code>partial</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div>"
+  },
+  {
+    "name": "display math $$",
+    "input": "before\n\n$$\\sum_{i=1}^n i$$\n\nafter",
+    "html": "before<br><div class=\"md-blank\"></div><div class=\"md-blank\"></div><div class=\"md-math-display\"><span id=\"ktx-N\" class=\"katex-pending\">\\sum_{i=1}^n i</span></div><div class=\"md-blank\"></div><div class=\"md-blank\"></div>after<br>"
+  },
+  {
+    "name": "display math \\[",
+    "input": "\\[ a^2 + b^2 = c^2 \\]",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-math-display\"><span id=\"ktx-N\" class=\"katex-pending\">a^2 + b^2 = c^2</span></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "begin environment",
+    "input": "\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}",
+    "html": "<div class=\"md-blank\"></div><div class=\"md-math-display\"><span id=\"ktx-N\" class=\"katex-pending\">\\begin{aligned} a &amp;= b \\\\ c &amp;= d \\end{aligned}</span></div><div class=\"md-blank\"></div>"
+  },
+  {
+    "name": "inline math \\(",
+    "input": "where \\(x + y\\) holds",
+    "html": "where <span id=\"ktx-N\" class=\"katex-pending\">x + y</span> holds<br>"
+  },
+  {
+    "name": "inline math across lines",
+    "input": "where \\(x +\ny\\) holds",
+    "html": "where <span id=\"ktx-N\" class=\"katex-pending\">x +\ny</span> holds<br>"
+  },
+  {
+    "name": "inline math $",
+    "input": "cost $x^2 + y$ here",
+    "html": "cost <span id=\"ktx-N\" class=\"katex-pending\">x^2 + y</span> here<br>"
+  },
+  {
+    "name": "dollar amounts are not math",
+    "input": "it costs $5 and $10",
+    "html": "it costs $5 and $10<br>"
+  },
+  {
+    "name": "code span keeps \\(",
+    "input": "regex `\\(\\d+\\)` matches",
+    "html": "regex <code class=\"md-code\">\\(\\d+\\)</code> matches<br>"
+  },
+  {
+    "name": "everything",
+    "input": "# Report\n\nIntro with **bold**.\n\n- item\n- item\n\n```js\nx()\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n> note\n\n$$x$$",
+    "html": "<strong class=\"md-h1\">Report</strong>\n<div class=\"md-blank\"></div>Intro with <strong>bold</strong>.<br><div class=\"md-blank\"></div><ul class=\"md-ul\"><li>item</li><li>item</li></ul><div class=\"md-blank\"></div><div class=\"md-blank\"></div><div class=\"md-code-wrap\"><pre class=\"md-pre\"><code data-lang=\"js\">x()</code></pre><div class=\"md-code-actions\"><button type=\"button\" class=\"md-code-btn md-copy-btn\" data-action=\"code-copy\" aria-label=\"Copy code snippet\">copy</button></div></div><div class=\"md-blank\"></div><div class=\"md-blank\"></div><div class=\"md-table-wrap\"><table class=\"md-table\"><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table></div><div class=\"md-blank\"></div><blockquote class=\"md-quote\">note</blockquote><div class=\"md-blank\"></div><div class=\"md-blank\"></div><div class=\"md-math-display\"><span id=\"ktx-N\" class=\"katex-pending\">x</span></div><div class=\"md-blank\"></div>"
+  }
+]

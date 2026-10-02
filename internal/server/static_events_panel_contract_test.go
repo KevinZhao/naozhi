@@ -17,6 +17,7 @@
 package server
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -150,45 +151,48 @@ func TestDashboardJS_HeaderFetchErrorPathsStaleChecked(t *testing.T) {
 	}
 }
 
-// readDashboardJS returns the dashboard's own module PLUS the modules split
-// out of it (#2558 D4). Source-level contract tests assert on behaviour that
-// used to live in one file; concatenating keeps them valid across the split
-// without each test having to know which module a helper landed in. Tests
-// that must pin a specific file read that file directly instead.
+// readDashboardJS returns every dashboard module (#2558 D4) concatenated:
+// source-level contract tests assert on behaviour that used to live in one
+// file, and reading the whole set keeps them valid whichever module a helper
+// moves to. The set is derived from static/ on disk, not listed by hand, so a
+// new module is in it the moment it lands; sw.js is not a dashboard module
+// (it is served at /sw.js, outside the page's module graph). Each file must
+// also be in the embedded asset table: staticAssets drops a key whose embed
+// fails to read, so a missing entry is a Fatal here rather than a module the
+// tests silently stop seeing. Tests that must pin a specific file read that
+// file directly instead.
 func readDashboardJS(t *testing.T) string {
 	t.Helper()
 	var b []byte
-	for _, name := range []string{
-		"dashboard.js",
-		"render_md.js",
-		"self_update.js",
-		"voice.js",
-		"session_header.js",
-		"composer_files.js",
-		"mobile_nav.js",
-		"split_view.js",
-		"system_view.js",
-		"running_banner.js",
-		"file_refs.js",
-		"utilities.js",
-		"discovery.js",
-		"tuning.js",
-		"msg_nav.js",
-		"sidebar_project.js",
-		"state.js",
-		"auth_modal.js",
-		"send_message.js",
-		"platform.js",
-		"ws_manager.js",
-		"session_stream.js",
-	} {
+	for _, name := range dashboardModules(t) {
 		data := staticAssetBytes(name)
 		if data == nil {
-			t.Fatalf("%s not embedded", name)
+			t.Fatalf("static/%s is not in the embedded asset table (static_assets.go)", name)
 		}
 		b = append(append(b, data...), '\n')
 	}
 	return string(b)
+}
+
+// dashboardModules lists static/*.js except sw.js, sorted. It fails the test
+// when the directory cannot be read or holds suspiciously few modules, so a
+// wrong working directory cannot pass every source scan vacuously.
+func dashboardModules(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir("static")
+	if err != nil {
+		t.Fatalf("read static/: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		if n := e.Name(); !e.IsDir() && strings.HasSuffix(n, ".js") && n != "sw.js" {
+			names = append(names, n)
+		}
+	}
+	if len(names) < 20 {
+		t.Fatalf("static/ holds %d dashboard modules, want at least 20: %v", len(names), names)
+	}
+	return names // os.ReadDir sorts by name
 }
 
 // readDashboardHTMLAndCSS returns dashboard.html concatenated with every

@@ -9,9 +9,9 @@ import (
 
 // Regression tests for #2431 P3 items 4-8 (sidebar / mobile / history search):
 //
-//  4. a pending session card must group by workspace basename (mirroring the
-//     server's workspaceFallbackName) instead of landing in 未分组 until the
-//     first send promotes it;
+//  4. workspaceFallbackName (the group a pending card lands in) must agree
+//     with the server's: a pending session card groups by workspace basename
+//     instead of landing in 未分组 until the first send promotes it;
 //  5. the history-search count chip must decide "filtered" on the trimmed
 //     query — a whitespace-only query is not a filter, so no "(N / N)";
 //  6. discovered cards must be keyed by pid AND node — two nodes can run a
@@ -38,27 +38,11 @@ func extractJSFunctionOpt(js, name string) string {
 	return rest[:end+2] + "\n"
 }
 
-func TestDashboard_PendingCardWorkspaceFallback(t *testing.T) {
+// TestDashboard_WorkspaceFallbackNameMatchesServer runs workspaceFallbackName
+// over the server's table. That the pending card is grouped by it is
+// behaviour, covered in a browser by test/e2e/session_list_behaviour.test.js.
+func TestDashboard_WorkspaceFallbackNameMatchesServer(t *testing.T) {
 	js := readDashboardJS(t)
-
-	// Contract: the pending-card push must stamp project + project_fallback
-	// from the workspace basename when the workspace is not a registered
-	// project — the same shape /api/sessions emits, so the card lands in the
-	// same group before and after the first send.
-	start := strings.Index(js, "const pendingKeys = Object.keys(perSession.workspaces);")
-	if start < 0 {
-		t.Fatal("dashboard.js: pending-card merge block not found")
-	}
-	block := js[start:]
-	if end := strings.Index(block, "renderSidebar(data);"); end > 0 {
-		block = block[:end]
-	}
-	if !strings.Contains(block, "project_fallback:") {
-		t.Error("pending-card push must set project_fallback (workspace basename group, #2431 item 4)")
-	}
-	if !strings.Contains(block, "workspaceFallbackName(") {
-		t.Error("pending-card push must derive the group from workspaceFallbackName(workspace)")
-	}
 
 	fn := extractJSFunction(t, js, "workspaceFallbackName")
 	// Same table as internal/dashboard/session/fallback_test.go so the

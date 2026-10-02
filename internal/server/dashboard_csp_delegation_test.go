@@ -70,7 +70,11 @@ func TestDashboardBundle_NoInterpolatedDataAction(t *testing.T) {
 func TestDashboardCSP_CDNURLsMatchBundle(t *testing.T) {
 	t.Parallel()
 	// #2558 D4: the lazy CDN loaders live in render_md.js; keep scanning
-	// dashboard.js too so a future move back stays covered.
+	// dashboard.js too so a future move back stays covered. The two files are
+	// a deliberate choice, not a module list to keep in step: they are where
+	// the loaders live, and the reverse check below (every pinned URL is seen)
+	// fails loudly if a loader moves anywhere else. Every module being served
+	// at all is TestStaticJS_ModuleInventory's job.
 	var js []byte
 	for _, name := range []string{"dashboard.js", "render_md.js"} {
 		b := staticAssetBytes(name)

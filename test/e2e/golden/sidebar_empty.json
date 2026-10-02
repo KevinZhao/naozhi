@@ -1,0 +1,5 @@
+{
+  "rows": [
+    "<div class=\"no-sessions\">no sessions<br><button type=\"button\" class=\"no-sessions-cta\" data-action=\"session-new\">+ 开启你的第一个会话</button></div>"
+  ]
+}
