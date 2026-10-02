@@ -22,8 +22,8 @@ import (
 	"testing"
 )
 
-// fetchSessionsDecl finds fetchSessions' declaration whether or not its
-// module exports it (session_list.js does, since S19-5).
+// fetchSessionsDecl finds fetchSessions' declaration with or without an
+// export prefix (session_list.js exports it).
 var fetchSessionsDecl = regexp.MustCompile(`(?m)^(export )?async function fetchSessions\(`)
 
 func TestDashboardJS_EffortTagWiring(t *testing.T) {
