@@ -14,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 func newAgentRouteDispatcher(t *testing.T) *Dispatcher {
@@ -29,7 +30,7 @@ func newAgentRouteDispatcher(t *testing.T) *Dispatcher {
 		// so Guard vs. Queue wiring makes no behavioural difference. Wired
 		// anyway for consistency with newTestDispatcher's #3004/T-P1 default
 		// of a real queue (see dispatch_test.go).
-		Queue: NewMessageQueue(5, 0),
+		Queue: turn.NewQueueWithMode(5, 0, turn.ModeCollect),
 		Dedup: platform.NewDedup(100),
 		SendFn: func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 			return &clievent.SendResult{Text: "ok"}, nil
@@ -84,7 +85,7 @@ func TestIsKnownAgent_MultipleCommands(t *testing.T) {
 		},
 		Guard: newFakeGuard(),
 		// Queue: see comment in newAgentRouteDispatcher above.
-		Queue: NewMessageQueue(5, 0),
+		Queue: turn.NewQueueWithMode(5, 0, turn.ModeCollect),
 		Dedup: platform.NewDedup(100),
 		SendFn: func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 			return &clievent.SendResult{Text: "ok"}, nil

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // TestClearQueuedReactions_DetachedCtxSurvivesCancel verifies the #2262 fix
@@ -26,7 +27,7 @@ func TestClearQueuedReactions_DetachedCtxSurvivesCancel(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	cancel() // ownerLoop's stopCtx already Done (shutdown-during-turn)
 
-	queued := []QueuedMsg{{MessageID: "m1"}, {MessageID: "m2"}}
+	queued := []turn.Msg{{MessageID: "m1"}, {MessageID: "m2"}}
 	d.clearQueuedReactions(context.WithoutCancel(parent), fp.Name(), queued, nil)
 
 	fp.mu.Lock()

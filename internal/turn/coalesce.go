@@ -1,4 +1,4 @@
-package dispatch
+package turn
 
 import (
 	"strconv"
@@ -21,17 +21,17 @@ const coalescePrefixLen = len(coalescePrefix)
 // most one per-message payload (1 MB) plus framing — worst case ~5 MB, under
 // the shim's 12 MB maxStdinLineBytes ceiling. Without it a queue of MaxDepth=N
 // could amplify N × 1 MB into a single CLI stdin write. Source of truth is
-// internal/limits so upstream's reverse RPC need not import dispatch.
+// internal/limits so upstream's reverse RPC need not import turn.
 const maxCoalescedTextBytes = limits.MaxCoalescedText
 
-// CoalesceMessages merges multiple queued messages into a single prompt.
+// Coalesce merges multiple queued messages into a single prompt.
 //
 // Single message: returned as-is. Multiple messages: prefixed with a system
 // hint and timestamped. If the coalesced result would exceed
 // maxCoalescedTextBytes, later messages are dropped with a visible truncation
 // marker — their images are still preserved so attached screenshots are not
 // silently lost. Images from all messages are concatenated in order.
-func CoalesceMessages(msgs []QueuedMsg) (string, []clievent.Attachment) {
+func Coalesce(msgs []Msg) (string, []clievent.Attachment) {
 	if len(msgs) == 0 {
 		return "", nil
 	}

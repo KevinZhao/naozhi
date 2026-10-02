@@ -4,24 +4,24 @@
 > **Source**: [server-split-phase4-design.md](server-split-phase4-design.md) §四.1.3 / §四.4
 > **Enforcement**: AST linter rule 4 (Phase 1 前完成) 验证 `// satisfies:` 注释与本文件方法集一致。
 
-本文件枚举 server / dashboard / wshub 包对外部具体类型（如 `*dispatch.MessageQueue`）的依赖**接口**，并显式表达**跨方法时序契约**——这种 cross-method invariant 在单方法 godoc 里写不下，必须在本文档钉死。
+本文件枚举 server / dashboard / wshub 包对外部具体类型（如 `*turn.Queue`）的依赖**接口**，并显式表达**跨方法时序契约**——这种 cross-method invariant 在单方法 godoc 里写不下，必须在本文档钉死。
 
 ---
 
 ## 1. `wshub.MessageEnqueuer` — Hub 写路径
 
 **Consumer**: `internal/server/wshub.go` (Phase 4 后 → `internal/wshub/`)
-**Producer**: `*dispatch.MessageQueue` (`internal/dispatch/msgqueue.go`)
+**Producer**: `*turn.Queue` (`internal/turn/queue.go`)
 **Source**: [internal/server/wshub_types.go](../../internal/server/wshub_types.go)
 
 ### 方法集
 
 ```go
 type MessageEnqueuer interface {
-    Enqueue(key string, msg dispatch.QueuedMsg) (isOwner, enqueued, shouldInterrupt bool, gen uint64)
-    DoneOrDrain(key string, gen uint64) []dispatch.QueuedMsg
+    Enqueue(key string, msg turn.Msg) (isOwner, enqueued, shouldInterrupt bool, gen uint64, evictedID string)
+    DoneOrDrain(key string, gen uint64) []turn.Msg
     Discard(key string)
-    Mode() dispatch.QueueMode
+    Mode() turn.Mode
     CollectDelay() time.Duration
 }
 ```
@@ -51,7 +51,7 @@ owner-loop 退出条件：
 
 #### CT-MQ-3: Mode 静态读取
 
-`Mode()` 返回值在 `*MessageQueue` 生命周期内不变（构造时设定）。Hub 可缓存到 wsclient.go 局部 — 不需每次重读。
+`Mode()` 返回值在 `*turn.Queue` 生命周期内不变（构造时设定）。Hub 可缓存到 wsclient.go 局部 — 不需每次重读。
 
 #### CT-MQ-4: CollectDelay 静态读取
 
@@ -59,20 +59,20 @@ owner-loop 退出条件：
 
 ### 演化策略
 
-- **加方法**：`MessageEnqueuer` 加方法 → `*dispatch.MessageQueue` 必须先实现，否则编译失败（var _ 编译期 gate）
+- **加方法**：`MessageEnqueuer` 加方法 → `*turn.Queue` 必须先实现，否则编译失败（var _ 编译期 gate）
 - **改签名**：禁止；调用方约束变化要新增方法 + deprecated 路径
 
 ### 实现侧 godoc 模板
 
 ```go
-// MessageQueue ...
+// Queue ...
 //
 // satisfies: server.MessageEnqueuer (internal/server/wshub_types.go)
 //
 // Cross-method contract (see docs/design/server-consumer-contracts.md):
 //   - CT-MQ-1: Enqueue isOwner=true → caller drives DoneOrDrain to drain
 //   - CT-MQ-2: Discard skips DoneOrDrain; caller must exit owner-loop separately
-type MessageQueue struct { ... }
+type Queue struct { ... }
 ```
 
 linter rule 4 (Phase 1 前) 解析此 godoc 头比对方法集。

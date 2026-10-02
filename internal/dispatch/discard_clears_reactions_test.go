@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // #2013: every "queued message permanently dropped" path must clear the
@@ -21,13 +22,13 @@ import (
 // the dropped IDs, leaving ⏳ hanging forever.
 
 // drainAndDiscardReactor wires a fakeReactorPlatform into a Dispatcher with a
-// real MessageQueue so the Discard paths can be exercised end to end.
+// real turn.Queue so the Discard paths can be exercised end to end.
 func newReactorDispatcher(t *testing.T) (*Dispatcher, *fakeReactorPlatform) {
 	t.Helper()
 	rp := &fakeReactorPlatform{}
 	d := &Dispatcher{
 		platforms: map[string]platform.Platform{"fake": rp},
-		queue:     NewMessageQueue(8, 0),
+		queue:     turn.NewQueueWithMode(8, 0, turn.ModeCollect),
 	}
 	return d, rp
 }
@@ -48,9 +49,9 @@ func TestDiscardQueue_ClearsQueuedReactions(t *testing.T) {
 	const key = "im:direct:u1:general"
 
 	// Owner + two queued follow-ups (each carrying a HOURGLASS reaction).
-	d.queue.Enqueue(key, QueuedMsg{Text: "owner", MessageID: "m0"})
-	d.queue.Enqueue(key, QueuedMsg{Text: "f1", MessageID: "m1"})
-	d.queue.Enqueue(key, QueuedMsg{Text: "f2", MessageID: "m2"})
+	d.queue.Enqueue(key, turn.Msg{Text: "owner", MessageID: "m0"})
+	d.queue.Enqueue(key, turn.Msg{Text: "f1", MessageID: "m1"})
+	d.queue.Enqueue(key, turn.Msg{Text: "f2", MessageID: "m2"})
 
 	msg := platform.IncomingMessage{Platform: "fake", ChatID: "u1"}
 	d.discardQueue(context.Background(), msg, key)
@@ -73,8 +74,8 @@ func TestOwnerLoopCtxDone_ClearsQueuedReactions(t *testing.T) {
 	d, rp := newReactorDispatcher(t)
 	const key = "im:direct:u1:general"
 
-	d.queue.Enqueue(key, QueuedMsg{Text: "owner", MessageID: "m0"})
-	d.queue.Enqueue(key, QueuedMsg{Text: "f1", MessageID: "m1"})
+	d.queue.Enqueue(key, turn.Msg{Text: "owner", MessageID: "m0"})
+	d.queue.Enqueue(key, turn.Msg{Text: "f1", MessageID: "m1"})
 
 	// Simulate the ctx.Done arm of ownerLoop's drain loop.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -94,9 +95,9 @@ func TestOwnerLoopPanic_ClearsQueuedReactions(t *testing.T) {
 	d, rp := newReactorDispatcher(t)
 	const key = "im:direct:u1:general"
 
-	d.queue.Enqueue(key, QueuedMsg{Text: "owner", MessageID: "m0"})
-	d.queue.Enqueue(key, QueuedMsg{Text: "f1", MessageID: "m1"})
-	d.queue.Enqueue(key, QueuedMsg{Text: "f2", MessageID: "m2"})
+	d.queue.Enqueue(key, turn.Msg{Text: "owner", MessageID: "m0"})
+	d.queue.Enqueue(key, turn.Msg{Text: "f1", MessageID: "m1"})
+	d.queue.Enqueue(key, turn.Msg{Text: "f2", MessageID: "m2"})
 
 	msg := platform.IncomingMessage{Platform: "fake", ChatID: "u1"}
 	// handleOwnerLoopPanic discards the queue and clears reactions; the
@@ -143,7 +144,7 @@ func TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions(t *testing.T) {
 	d := &Dispatcher{
 		platforms: map[string]platform.Platform{"fake": rp},
 		// collectDelay 0 → drain timer fires immediately.
-		queue:  NewMessageQueue(8, 0),
+		queue:  turn.NewQueueWithMode(8, 0, turn.ModeCollect),
 		router: router,
 		caps:   NoopCapabilities{},
 	}
@@ -152,14 +153,14 @@ func TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions(t *testing.T) {
 	msg := platform.IncomingMessage{Platform: "fake", ChatID: "u1", MessageID: "m0"}
 
 	// Owner acquires ownership (no queued reaction on its own message).
-	owner := QueuedMsg{Text: "owner", MessageID: "m0"}
+	owner := turn.Msg{Text: "owner", MessageID: "m0"}
 	isOwner, _, _, gen, _ := d.queue.Enqueue(key, owner)
 	if !isOwner {
 		t.Fatalf("expected owner on first Enqueue")
 	}
 	// Follow-up sits in the ring carrying a HOURGLASS reaction; it will be
 	// drained out by DoneOrDrain then lost to a panic in sendAndReply.
-	d.queue.Enqueue(key, QueuedMsg{Text: "f1", MessageID: "m1"})
+	d.queue.Enqueue(key, turn.Msg{Text: "f1", MessageID: "m1"})
 
 	// ownerLoop recovers the panic internally; it must not propagate.
 	// Pass a non-nil logger: ownerLoop enriches it via lg.With at entry,
@@ -188,23 +189,25 @@ func TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions(t *testing.T) {
 
 // TestDiscardAndReturn_ReturnsQueuedFIFO pins the queue-level contract that
 // powers the fix: DiscardAndReturn surfaces the dropped messages in FIFO
-// order while still tearing the queue down (Depth 0, ownership released).
+// order while still tearing the queue down (ring emptied, ownership released).
 func TestDiscardAndReturn_ReturnsQueuedFIFO(t *testing.T) {
-	q := NewMessageQueue(8, 0)
+	q := turn.NewQueueWithMode(8, 0, turn.ModeCollect)
 	const key = "k"
-	q.Enqueue(key, QueuedMsg{Text: "owner", MessageID: "m0"})
-	q.Enqueue(key, QueuedMsg{Text: "a", MessageID: "m1"})
-	q.Enqueue(key, QueuedMsg{Text: "b", MessageID: "m2"})
+	q.Enqueue(key, turn.Msg{Text: "owner", MessageID: "m0"})
+	q.Enqueue(key, turn.Msg{Text: "a", MessageID: "m1"})
+	q.Enqueue(key, turn.Msg{Text: "b", MessageID: "m2"})
 
 	dropped := q.DiscardAndReturn(key)
 	if len(dropped) != 2 || dropped[0].MessageID != "m1" || dropped[1].MessageID != "m2" {
 		t.Fatalf("DiscardAndReturn FIFO contract broken: %+v", dropped)
 	}
-	if q.Depth(key) != 0 {
-		t.Errorf("depth = %d after DiscardAndReturn, want 0", q.Depth(key))
-	}
 	// A subsequent DiscardAndReturn on the now-empty queue returns nil.
 	if again := q.DiscardAndReturn(key); again != nil {
 		t.Errorf("expected nil on empty queue, got %+v", again)
+	}
+	// Ownership was released: the next Enqueue becomes owner instead of
+	// queueing behind the discarded turn.
+	if isOwner, _, _, _, _ := q.Enqueue(key, turn.Msg{Text: "next"}); !isOwner {
+		t.Error("DiscardAndReturn did not release ownership: next Enqueue did not become owner")
 	}
 }

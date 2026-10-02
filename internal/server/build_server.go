@@ -15,11 +15,11 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/planner"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
-	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 	"github.com/naozhi/naozhi/internal/uiprefs"
 )
 
@@ -86,10 +86,10 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	w := &wiring{
 		dedup:        platform.NewDedup(defaultDedupCapacity),
 		sessionGuard: session.NewGuard(),
-		msgQueue: dispatch.NewMessageQueueWithMode(
+		msgQueue: turn.NewQueueWithMode(
 			opts.Queue.MaxDepth,
 			opts.Queue.CollectDelay,
-			dispatch.ParseQueueMode(opts.Queue.Mode),
+			turn.ParseMode(opts.Queue.Mode),
 		),
 		startedAt:     time.Now(),
 		agents:        agents,

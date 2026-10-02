@@ -108,6 +108,8 @@ func writeTurnBoundaryRoot(t *testing.T, dirs map[string]map[string]string) stri
 // server (qualified ones), proving the rule sums across both directories and
 // recognises both call forms. sMarker == 3 is exactly every baseline (marker
 // 3+3 == 6, slash 6+5 == 11, queue 2+2 == 4, WithValue 1).
+// turn is a required directory, so every fixture carries one; this default
+// file matches nothing and shifts no count.
 func baselineDirs(sMarker int) map[string]map[string]string {
 	return map[string]map[string]string{
 		"dispatch": {
@@ -121,6 +123,9 @@ func baselineDirs(sMarker int) map[string]map[string]string {
 			"s_marker.go": markerCallSrc("server", "dispatch", sMarker),
 			"s_queue.go":  queueEscapeSrc("server", 2),
 			"s_slash.go":  slashLiteralSrc("server", 5),
+		},
+		"turn": {
+			"t_noop.go": "package turn\n",
 		},
 	}
 }
@@ -268,26 +273,12 @@ func TestScanTurnBoundary_UpstreamMarkerAndQueueCounted(t *testing.T) {
 	}
 }
 
-// internal/turn absent (as it is until #3004's C1) is scanned as empty, not
-// an error: this pins that the directory may not exist on disk at all.
-func TestScanTurnBoundary_TurnDirectoryAbsentIsNotAnError(t *testing.T) {
-	t.Parallel()
-	root := cleanFixture(t)
-	if _, err := os.Stat(filepath.Join(root, "turn")); err == nil {
-		t.Fatal("fixture unexpectedly created a turn directory")
-	}
-	vs := scanTurnBoundary(filepath.Join(root, "server"))
-	if len(vs) != 0 {
-		t.Fatalf("absent turn directory produced violations: %+v", vs)
-	}
-}
-
-// dispatch and server are required: unlike the optional turn/upstream
-// directories, a missing one is reported, not silently scanned as empty — a
+// dispatch, server and turn are required: unlike the optional upstream
+// directory, a missing one is reported, not silently scanned as empty — a
 // misconfigured -server-pkg must not be able to narrow the rule's scope.
 func TestScanTurnBoundary_MissingRequiredDirectoryErrors(t *testing.T) {
 	t.Parallel()
-	for _, missing := range []string{"dispatch", "server"} {
+	for _, missing := range []string{"dispatch", "server", "turn"} {
 		t.Run(missing, func(t *testing.T) {
 			t.Parallel()
 			dirs := baselineDirs(3)

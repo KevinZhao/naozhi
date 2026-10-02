@@ -3,13 +3,13 @@ package server
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // TestNewHub_NilQueue_LeavesInterfaceFieldNil pins the typed-nil guard for
 // the R242-GO-10 (#377) change that turned Hub.queue from a concrete
-// *dispatch.MessageQueue into the MessageEnqueuer interface (the field now
+// *turn.Queue into the MessageEnqueuer interface (the field now
 // lives on sendEngine, #2551). Assigning a
 // nil concrete pointer straight into an interface field would make
 // `e.queue == nil` read false and silently disable the legacy-fallback
@@ -24,7 +24,7 @@ func TestNewHub_NilQueue_LeavesInterfaceFieldNil(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	q := dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
 	withQueue := newHubForTest(HubOptions{Router: router}, sendEngineOpts{Guard: guard, Queue: q})
 	t.Cleanup(withQueue.Shutdown)
 	if withQueue.engine.queue == nil {
@@ -34,7 +34,7 @@ func TestNewHub_NilQueue_LeavesInterfaceFieldNil(t *testing.T) {
 
 // TestLegacySendInvokes_AtomicCounter pins the R-LEGACY-SEND (#710) hook.
 // LegacySendInvokes() is the migration handle: production Hubs wire a
-// real MessageQueue and never bump the counter; tests that omit Queue
+// real turn.Queue and never bump the counter; tests that omit Queue
 // fall through `if e.queue == nil { sessionSendLegacy }` in send.go and
 // the counter advances. Once every test fixture wires a queue stub, the
 // counter stays at zero and sessionSendLegacy can be deleted alongside

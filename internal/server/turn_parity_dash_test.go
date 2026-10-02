@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 func TestTurnParity01_Dash_DrainTurnFailureIsSilent(t *testing.T) {
@@ -315,7 +315,7 @@ func TestTurnParity13_Dash_ShutdownDrainDiscardsQueue(t *testing.T) {
 	h.waitEngineIdle()
 	turns.noMoreTurns(t)
 	q := h.hs.wiring.msgQueue
-	if isOwner, _, _, _, _ := q.Enqueue(parityKey, dispatch.QueuedMsg{Text: "probe"}); !isOwner {
+	if isOwner, _, _, _, _ := q.Enqueue(parityKey, turn.Msg{Text: "probe"}); !isOwner {
 		t.Fatal("dashboard owner exiting on ctx cancel left the key owned")
 	}
 	q.Discard(parityKey)
@@ -463,7 +463,7 @@ func TestTurnParity25_Dash_ShutdownAdmissionBusy(t *testing.T) {
 			}
 			turns.noMoreTurns(t)
 			q := h.hs.wiring.msgQueue
-			if isOwner, _, _, _, _ := q.Enqueue(parityKey, dispatch.QueuedMsg{Text: "probe"}); !isOwner {
+			if isOwner, _, _, _, _ := q.Enqueue(parityKey, turn.Msg{Text: "probe"}); !isOwner {
 				t.Fatal("a send refused during shutdown left the key owned")
 			}
 			q.Discard(parityKey)

@@ -8,7 +8,7 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // ownerLoop processes the first send turn and then drains any messages that
@@ -18,7 +18,7 @@ import (
 // gen is the queue generation at enqueue time; if Discard (e.g. /new) bumps
 // it mid-flight, DoneOrDrain returns nil and the loop exits. Caller must
 // arrange engine.wg accounting via TrackSend — ownerLoop never touches wg.
-func (e *sendEngine) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyncError asyncErrorFn) {
+func (e *sendEngine) ownerLoop(key string, gen uint64, first turn.Msg, onAsyncError asyncErrorFn) {
 	defer func() {
 		if r := recover(); r != nil {
 			e.handleOwnerLoopPanic(key, onAsyncError, r)
@@ -46,7 +46,7 @@ func (e *sendEngine) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg,
 			return // empty or generation mismatch — stop.
 		}
 
-		text, images := dispatch.CoalesceMessages(queued)
+		text, images := turn.Coalesce(queued)
 		slog.Debug("send: processing queued messages", "key", key, "count", len(queued), "merged_len", len(text))
 		// onAsyncError only applies to the first turn (one ack per request);
 		// subsequent coalesced turns log failures without a back-channel.

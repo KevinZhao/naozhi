@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 func TestHandleOwnerLoopPanic_CallsOnAsyncError(t *testing.T) {
 	hub, _ := newTestHub("")
-	hub.engine.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	hub.engine.queue = turn.NewQueueWithMode(5, 0, turn.ModeCollect)
 	t.Cleanup(hub.Shutdown)
 
 	var (
@@ -45,7 +45,7 @@ func TestHandleOwnerLoopPanic_NilOnAsyncErrorNoCrash(t *testing.T) {
 	// HTTP path uses nil onAsyncError because the 202 ack has already
 	// been shipped; the recover path must tolerate that silently.
 	hub, _ := newTestHub("")
-	hub.engine.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	hub.engine.queue = turn.NewQueueWithMode(5, 0, turn.ModeCollect)
 	t.Cleanup(hub.Shutdown)
 
 	defer func() {
@@ -58,21 +58,20 @@ func TestHandleOwnerLoopPanic_NilOnAsyncErrorNoCrash(t *testing.T) {
 
 func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
 	hub, _ := newTestHub("")
-	q := dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
 	hub.engine.queue = q
 	t.Cleanup(hub.Shutdown)
 
 	key := "key-c"
-	q.Enqueue(key, dispatch.QueuedMsg{Text: "m1", EnqueueAt: time.Now()})
-	q.Enqueue(key, dispatch.QueuedMsg{Text: "m2", EnqueueAt: time.Now()})
-	if depth := q.Depth(key); depth == 0 {
-		t.Fatalf("setup: expected nonzero depth, got %d", depth)
+	q.Enqueue(key, turn.Msg{Text: "m1", EnqueueAt: time.Now()}) // owner
+	if _, enqueued, _, _, _ := q.Enqueue(key, turn.Msg{Text: "m2", EnqueueAt: time.Now()}); !enqueued {
+		t.Fatal("setup: m2 was not queued behind the owner")
 	}
 
 	hub.engine.handleOwnerLoopPanic(key, nil, "synthetic test panic")
 
-	if depth := q.Depth(key); depth != 0 {
-		t.Errorf("queue depth after panic recover = %d, want 0", depth)
+	if dropped := q.DiscardAndReturn(key); dropped != nil {
+		t.Errorf("queue after panic recover still holds %d messages, want 0", len(dropped))
 	}
 }
 
@@ -81,7 +80,7 @@ func TestHandleOwnerLoopPanic_OnAsyncErrorPanicAbsorbed(t *testing.T) {
 	// when the process is under duress. The nested recover inside
 	// handleOwnerLoopPanic must swallow it so the outer defer finishes.
 	hub, _ := newTestHub("")
-	hub.engine.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	hub.engine.queue = turn.NewQueueWithMode(5, 0, turn.ModeCollect)
 	t.Cleanup(hub.Shutdown)
 
 	called := false

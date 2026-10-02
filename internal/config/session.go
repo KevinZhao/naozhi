@@ -91,7 +91,7 @@ func (c *Config) QueueMaxDepth() int {
 }
 
 // QueueMode returns the raw queue mode string; callers normalise via
-// dispatch.ParseQueueMode (a string here avoids a config → dispatch cycle).
+// turn.ParseMode (a string here avoids a config → turn cycle).
 func (c *Config) QueueMode() string {
 	return c.Session.Queue.Mode
 }

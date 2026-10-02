@@ -49,7 +49,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	// Per-field byte cap. wsMaxMessageSize bounds the whole frame, but queued
-	// max-size payloads get concatenated by CoalesceMessages into a single
+	// max-size payloads get concatenated by turn.Coalesce into a single
 	// stdin write; maxCoalescedTextBytes and maxStdinLineBytes backstop that.
 	if len(msg.Text) > maxWSSendTextBytes {
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "text too long"}))
