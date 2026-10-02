@@ -17,9 +17,14 @@
 package server
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// fetchSessionsDecl finds fetchSessions' declaration whether or not its
+// module exports it (session_list.js does, since S19-5).
+var fetchSessionsDecl = regexp.MustCompile(`(?m)^(export )?async function fetchSessions\(`)
 
 func TestDashboardJS_EffortTagWiring(t *testing.T) {
 	t.Parallel()
@@ -68,8 +73,8 @@ func TestDashboardJS_EffortTagWiring(t *testing.T) {
 	// stats.version" pins the same order by running it.
 	const pollSite = `if (selection.key) setHeaderEffortChip(data.sessions);`
 	fetchBody := ""
-	if i := strings.Index(js, "\nasync function fetchSessions("); i >= 0 {
-		fetchBody = js[i:]
+	if loc := fetchSessionsDecl.FindStringIndex(js); loc != nil {
+		fetchBody = js[loc[0]:]
 		if end := strings.Index(fetchBody, "\n}\n"); end >= 0 {
 			fetchBody = fetchBody[:end]
 		}

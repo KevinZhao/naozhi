@@ -21,6 +21,7 @@ import * as nzUtil from '/static/nz_util.js';
 import * as renderMd from '/static/render_md.js';
 import * as runningBanner from '/static/running_banner.js';
 import * as sendMessage from '/static/send_message.js';
+import * as sessionListModule from '/static/session_list.js';
 import { sessionStream } from '/static/session_stream.js';
 import * as sessionHeader from '/static/session_header.js';
 import * as sidebarProject from '/static/sidebar_project.js';
@@ -53,7 +54,7 @@ function stateField(name, obj, key) {
 
 expose(authModal, ['createNewSession', 'doCreateInProject', 'getSelectedNode', 'highlight', 'openProjectPalette', 'pickPaletteCustom', 'renderNodePicker', 'wireNodePicker']);
 expose(composerFiles, ['ORIENT_MAX_WAIT_MS', 'awaitPendingOrients', 'handleFiles', 'maybeAutoOrient', 'openFilePicker', 'removeFile', 'renderFilePreviews', 'retryUpload']);
-expose(dashboard, ['applyFeatureGates', 'closeHistoryPopover', 'debouncedFetchSessions', 'fetchSessions', 'getNodeStatus', 'maybeShowOnboarding', 'renderMainShell', 'renderSidebar', 'restorePending', 'selectSession', 'sessionCardKey', 'setActivityView', 'toggleHistory', 'updateHeaderCLI', 'updateStatusBar']);
+expose(dashboard, ['applyFeatureGates', 'closeHistoryPopover', 'maybeShowOnboarding', 'renderMainShell', 'selectSession', 'sessionCardKey', 'setActivityView', 'toggleHistory', 'updateHeaderCLI']);
 expose(discovery, ['scanDiscovered']);
 expose(eventRender, ['eventAlreadyRendered', 'eventHtml']);
 expose(eventStream, ['appendEvents', 'fetchEvents', 'renderEvents', 'trimEventsScroll']);
@@ -65,6 +66,7 @@ expose(renderMd, ['BLOCK_SPLIT_RE', 'LIST_ITEM_RE', 'LIST_SHAPE_RE', 'MAX_LIST_D
 expose(runningBanner, ['fmtDuration', 'interruptSession', 'scrollSlackPx', 'turnState']);
 expose(sendMessage, ['clearPendingFiles', 'getMsgValue', 'markSessionOptimisticRunning', 'renderOptimisticUserMsg', 'sendMessage', 'setMsgValue']);
 expose(sessionHeader, ['renderSessionRunsPanel', 'setHeaderRunStats']);
+expose(sessionListModule, ['debouncedFetchSessions', 'fetchSessions', 'getNodeStatus', 'renderSidebar', 'restorePending', 'updateStatusBar']);
 expose(sidebarProject, ['showGitRemote', 'toggleProjectCollapsed']);
 expose(systemView, ['reconcileSelectedNode']);
 expose(tuning, ['dismissSession', 'removeSidebarCard', 'renameSession']);

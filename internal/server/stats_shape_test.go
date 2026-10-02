@@ -19,9 +19,9 @@ import (
 // future refactor that adds/removes a field without bumping the dashboard.js
 // contract trips immediately instead of producing silent UI breakage.
 //
-// dashboard.js today consumes: version / agents / default_workspace /
+// The dashboard today consumes: version / agents / default_workspace /
 // projects / cli_name / cli_version / workspace_id / workspace_name / system
-// (see renderSidebar + fetchSessions in internal/server/static/dashboard.js).
+// (see renderSidebar + fetchSessions in internal/server/static/session_list.js).
 // The dynamic counters active/running/ready/total/uptime/backend/max_procs/
 // watchdog are exposed for curl/monitoring consumers so we lock them too.
 func TestHandleAPISessions_StatsStructShape(t *testing.T) {
@@ -99,7 +99,7 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 	}
 
 	// system retained as map[string]any with the 5 known fingerprint keys —
-	// changing these requires a dashboard.js renderSidebar update.
+	// changing these requires a session_list.js renderSidebar update.
 	sys, ok := stats["system"].(map[string]any)
 	if !ok {
 		t.Fatalf("system wrong type: %T", stats["system"])

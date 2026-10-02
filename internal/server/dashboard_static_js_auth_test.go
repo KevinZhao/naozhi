@@ -29,7 +29,7 @@ func TestDashboardJS_RequiresAuth_TokenMode(t *testing.T) {
 	// The body should be the plain "unauthorized" / empty 401 response,
 	// not a slice of the embedded asset.
 	body := w.Body.String()
-	for _, leak := range []string{"PLATFORM_ORIGINS", "function ", "/api/sessions"} {
+	for _, leak := range []string{"CHEATSHEET_ENTRIES", "function ", "/api/sessions"} {
 		if strings.Contains(body, leak) {
 			t.Errorf("#923 regression: 401 body leaks JS source token %q (would let scanner fingerprint deployment)", leak)
 		}
@@ -328,8 +328,8 @@ func TestCronLiveJS_RequiresAuth_TokenMode(t *testing.T) {
 
 // TestWSModulesJS_RequiresAuth_TokenMode: same SEC-4 gate for the modules
 // split out of dashboard.js with the WS manager (S18d2, #3024), and for
-// features.js (S19-P, #3025), event_render.js and ask_card.js (S19-3), and
-// event_stream.js (S19-E).
+// features.js (S19-P, #3025), event_render.js and ask_card.js (S19-3),
+// event_stream.js (S19-E) and session_list.js (S19-5).
 func TestWSModulesJS_RequiresAuth_TokenMode(t *testing.T) {
 	t.Parallel()
 	srv := newTestServerWithToken(&mockPlatform{}, "secret")
@@ -342,6 +342,7 @@ func TestWSModulesJS_RequiresAuth_TokenMode(t *testing.T) {
 		"event_render.js":   "renderEventsWithDividers",
 		"ask_card.js":       "composeAskAnswerFromGroups",
 		"event_stream.js":   "EARLIER_SKIP_MAX_PAGES",
+		"session_list.js":   "PLATFORM_ORIGINS",
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/static/"+name, nil)
 		w := httptest.NewRecorder()

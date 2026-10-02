@@ -134,6 +134,9 @@ var askCardJS embed.FS
 //go:embed static/event_stream.js
 var eventStreamJS embed.FS
 
+//go:embed static/session_list.js
+var sessionListJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -250,6 +253,7 @@ var staticAssets = func() map[string]staticAsset {
 		{"event_render.js", eventRenderJS, "static/event_render.js", true},
 		{"ask_card.js", askCardJS, "static/ask_card.js", true},
 		{"event_stream.js", eventStreamJS, "static/event_stream.js", true},
+		{"session_list.js", sessionListJS, "static/session_list.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},
