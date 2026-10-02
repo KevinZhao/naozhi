@@ -143,7 +143,7 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	}
 	s.touchLastActive()
 	s.initCreatedAtIfUnset()
-	r.attachHistorySource(s)
+	r.hist.attachHistorySource(s, r.backends.sourceWrapperFor(s.Backend()))
 	r.ss.Update(func(tx sessTx) {
 		tx.Put(key, s)
 		tx.AddActive(1)

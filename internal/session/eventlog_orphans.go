@@ -89,9 +89,9 @@ func sweepOrphanEventLogs(dir string, knownKeys map[string]struct{}, now time.Ti
 // the result. Called once from NewRouter after the session map is populated;
 // errors are logged, never fatal. A goroutine because directory walks over
 // thousands of sessions on slow storage can take seconds and the Router should
-// serve immediately. historyWg-tracked so Shutdown order is deterministic.
+// serve immediately. Tracked by the history wg so Shutdown order is deterministic.
 func (r *Router) runOrphanSweep() {
-	if r.eventLogDir == "" {
+	if r.hist.eventLogDir == "" {
 		return
 	}
 	// Snapshot known keys in one View so we don't race concurrent spawns.
@@ -103,20 +103,20 @@ func (r *Router) runOrphanSweep() {
 		}
 	})
 
-	// runHistoryTask takes historyWg.Add(1) under r.historyWgMu, atomic with
-	// Shutdown's historyCancel(), so a Start after Shutdown cannot panic with
+	// runHistoryTask takes wg.Add(1) under r.hist.wgMu, atomic with
+	// Shutdown's cancelTasks(), so a Start after Shutdown cannot panic with
 	// "WaitGroup is reused before previous Wait has returned" (#2186). It is a
-	// no-op when historyCtx is already cancelled. The sweep ignores ctx.
-	r.runHistoryTask(func(context.Context) {
-		n, err := sweepOrphanEventLogs(r.eventLogDir, known, time.Now())
+	// no-op when the history ctx is already cancelled. The sweep ignores ctx.
+	r.hist.runHistoryTask(func(context.Context) {
+		n, err := sweepOrphanEventLogs(r.hist.eventLogDir, known, time.Now())
 		if err != nil {
 			slog.Warn("eventlog orphan sweep failed",
-				"dir", r.eventLogDir, "err", err)
+				"dir", r.hist.eventLogDir, "err", err)
 			return
 		}
 		if n > 0 {
 			slog.Info("eventlog orphan sweep completed",
-				"dir", r.eventLogDir, "removed", n)
+				"dir", r.hist.eventLogDir, "removed", n)
 		}
 	})
 }

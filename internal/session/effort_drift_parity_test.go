@@ -122,8 +122,8 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 		r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "kiro" })
 		stateOf(r).picks.backend = make(map[string]string)
 		r.setBackendEffortsForTest(backendEfforts)
-		r.claudeDir = t.TempDir()
-		r.backendDirs = map[string]string{"kiro": t.TempDir()}
+		r.hist.claudeDir = t.TempDir()
+		r.hist.backendDirs = map[string]string{"kiro": t.TempDir()}
 		return r
 	}
 

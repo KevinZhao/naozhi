@@ -22,7 +22,7 @@ import (
 // extracted helper on a freshly-constructed Router with no sessions
 // and none of the persistence wiring set up. The expected behaviour
 // is a quiet return: no goroutines spawned (tier 1 gated on
-// r.eventLogPersister != nil and tier 2 on r.claudeDir != ""), no
+// r.hist.persister != nil and tier 2 on r.hist.claudeDir != ""), no
 // panics, no historyWg work to wait for.
 func TestStartBackgroundHistoryLoaders_NoOpOnEmptyRouter(t *testing.T) {
 	t.Parallel()
@@ -31,8 +31,8 @@ func TestStartBackgroundHistoryLoaders_NoOpOnEmptyRouter(t *testing.T) {
 	defer cancel()
 
 	r := &Router{
-		ss:         newSessionTable(),
-		historyCtx: ctx,
+		ss:   newSessionTable(),
+		hist: HistoryIO{ctx: ctx},
 	}
 
 	// Direct call — compiles only if the helper exists. The
@@ -40,5 +40,5 @@ func TestStartBackgroundHistoryLoaders_NoOpOnEmptyRouter(t *testing.T) {
 	// invariant: an accidentally-launched goroutine that blocks
 	// indefinitely would deadlock this test.
 	r.startBackgroundHistoryLoaders()
-	r.historyWg.Wait()
+	r.hist.wg.Wait()
 }

@@ -39,7 +39,7 @@ func TestShutdown_RunsItsBodyOnce(t *testing.T) {
 	// so counting its invocations counts body entries without needing a hook in
 	// the middle of teardown.
 	var calls int
-	r.historyCancel = func() { calls++ }
+	r.hist.cancel = func() { calls++ }
 
 	r.Shutdown()
 	if calls != 1 {
@@ -63,7 +63,7 @@ func TestShutdown_ConcurrentCallersRunTheBodyOnce(t *testing.T) {
 
 	var mu sync.Mutex
 	calls := 0
-	r.historyCancel = func() {
+	r.hist.cancel = func() {
 		mu.Lock()
 		calls++
 		mu.Unlock()

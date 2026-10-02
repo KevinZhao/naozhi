@@ -16,7 +16,7 @@ import (
 func TestBindNewSessionHistory_NoPersisterSafe(t *testing.T) {
 	r := NewRouter(RouterConfig{MaxProcs: 2, TTL: time.Hour})
 	t.Cleanup(r.Shutdown)
-	if r.eventLogPersister != nil {
+	if r.hist.persister != nil {
 		t.Fatal("test expects no persister (EventLogDir empty)")
 	}
 
@@ -33,7 +33,7 @@ func TestBindNewSessionHistory_NoPersisterSafe(t *testing.T) {
 
 	// nil proc is safe here: installPersistSink early-returns on a nil
 	// persister before ever touching proc. The call must not panic.
-	r.bindNewSessionHistory(context.Background(), s, nil, key, "", "", nil, nil)
+	r.hist.bindNewSessionHistory(context.Background(), s, nil, key, "", "", nil, nil)
 
 	if !s.hasInjectedHistory() {
 		t.Fatal("seeded history lost after bindNewSessionHistory")

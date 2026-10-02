@@ -39,7 +39,7 @@ func newEventLogRouter(t *testing.T, devMode bool) (*Router, string) {
 // regression where NewPersister silently errors out.
 func TestEventLogIntegration_PersisterStartsWhenDirSet(t *testing.T) {
 	r, dir := newEventLogRouter(t, false)
-	if r.eventLogPersister == nil {
+	if r.hist.persister == nil {
 		t.Fatal("eventLogPersister is nil despite EventLogDir set")
 	}
 	// Directory must exist.
@@ -54,7 +54,7 @@ func TestEventLogIntegration_PersisterStartsWhenDirSet(t *testing.T) {
 // tests build on.
 func TestEventLogIntegration_DirectSinkWorks(t *testing.T) {
 	r, dir := newEventLogRouter(t, false)
-	sinkBuilder := r.eventLogPersister.SinkFor("k")
+	sinkBuilder := r.hist.persister.SinkFor("k")
 	// Tests construct the sink with a nil tracker and empty keyhash
 	// to exercise the persist path in isolation. Integration through
 	// the Router (see completeSpawn/installPersistSink) supplies real
@@ -69,11 +69,11 @@ func TestEventLogIntegration_DirectSinkWorks(t *testing.T) {
 
 	// Wait for the persister to drain + fsync.
 	testhelper.Eventually(t, func() bool {
-		return r.eventLogPersister.Stats().Written >= 1
+		return r.hist.persister.Stats().Written >= 1
 	}, time.Second, "persister never wrote")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_ = r.eventLogPersister.Flush(ctx)
+	_ = r.hist.persister.Flush(ctx)
 
 	// Read back via naozhilog.Source.
 	src := naozhilog.New(dir, "k")
@@ -87,8 +87,8 @@ func TestEventLogIntegration_DirectSinkWorks(t *testing.T) {
 	if got[0].Summary != "live" {
 		t.Errorf("entry is %q, want 'live'", got[0].Summary)
 	}
-	if r.eventLogPersister.Stats().ReplayLeak != 1 {
-		t.Errorf("ReplayLeak=%d, want 1", r.eventLogPersister.Stats().ReplayLeak)
+	if r.hist.persister.Stats().ReplayLeak != 1 {
+		t.Errorf("ReplayLeak=%d, want 1", r.hist.persister.Stats().ReplayLeak)
 	}
 }
 
@@ -101,13 +101,13 @@ func TestEventLogIntegration_RouterDropKeyRemovesFiles(t *testing.T) {
 
 	// Direct sink so we don't need a full cli.Process — the Router's
 	// Remove path exercises DropKey independently of the spawn.
-	sink := newEventLogSink(r.eventLogPersister.SinkFor(key), nil, "")
+	sink := newEventLogSink(r.hist.persister.SinkFor(key), nil, "")
 	sink([]clievent.EventEntry{{UUID: "aa", Time: 1, Type: "user"}}, false)
 
 	// Flush so the file definitely exists on disk before we remove.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_ = r.eventLogPersister.Flush(ctx)
+	_ = r.hist.persister.Flush(ctx)
 
 	logPath := persist.LogPath(dir, key)
 	if _, err := os.Stat(logPath); err != nil {
@@ -118,7 +118,7 @@ func TestEventLogIntegration_RouterDropKeyRemovesFiles(t *testing.T) {
 	// doesn't contain `key` because we didn't spawn, so Remove
 	// returns false — but the event log drop is still worth
 	// validating in isolation.
-	r.dropEventLogForKey(key)
+	r.hist.dropEventLogForKey(key)
 
 	// File should be gone.
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
@@ -145,14 +145,14 @@ func TestEventLogIntegration_RestartLoadsLatest(t *testing.T) {
 		EventLogDir: eventLogDir,
 	})
 	key := "dashboard:direct:alice:general"
-	sink := newEventLogSink(r1.eventLogPersister.SinkFor(key), nil, "")
+	sink := newEventLogSink(r1.hist.persister.SinkFor(key), nil, "")
 	sink([]clievent.EventEntry{
 		{UUID: "aaa", Time: 100, Type: "user", Summary: "hi", Images: []string{"data:image/jpeg;base64,XYZ="}},
 		{UUID: "bbb", Time: 200, Type: "text", Summary: "hello"},
 		{UUID: "ccc", Time: 300, Type: "user", Summary: "again"},
 	}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	_ = r1.eventLogPersister.Flush(ctx)
+	_ = r1.hist.persister.Flush(ctx)
 	cancel()
 	r1.Shutdown()
 
@@ -192,7 +192,7 @@ func TestEventLogIntegration_RestartLoadsLatest(t *testing.T) {
 // (DevMode=false) is tested separately via TestEventLogIntegration_DirectSinkWorks.
 func TestEventLogIntegration_ReplayLeakObservable(t *testing.T) {
 	r, _ := newEventLogRouter(t, true)
-	sink := newEventLogSink(r.eventLogPersister.SinkFor("k"), nil, "")
+	sink := newEventLogSink(r.hist.persister.SinkFor("k"), nil, "")
 
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -201,7 +201,7 @@ func TestEventLogIntegration_ReplayLeakObservable(t *testing.T) {
 	}()
 	sink([]clievent.EventEntry{{UUID: "aa", Time: 1, Type: "user"}}, true)
 
-	if got := r.eventLogPersister.Stats().ReplayLeak; got == 0 {
+	if got := r.hist.persister.Stats().ReplayLeak; got == 0 {
 		t.Errorf("Stats().ReplayLeak=%d want >0", got)
 	}
 }
@@ -218,9 +218,9 @@ func TestEventLogIntegration_DisabledByEmptyDir(t *testing.T) {
 		// EventLogDir intentionally empty.
 	})
 	t.Cleanup(r.Shutdown)
-	if r.eventLogPersister != nil {
+	if r.hist.persister != nil {
 		t.Errorf("persister created despite empty EventLogDir")
 	}
 	// Recycle the helper so we also confirm DropKey is a no-op.
-	r.dropEventLogForKey("any")
+	r.hist.dropEventLogForKey("any")
 }

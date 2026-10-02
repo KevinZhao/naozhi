@@ -178,11 +178,11 @@ type Router struct {
 	// overrides (wsStore.overrides): this is purely the fallback cwd handed
 	// to CLI processes when a session has no per-chat override (#732).
 	defaultCWD string // default cwd for CLI processes
-	claudeDir  string // ~/.claude dir for loading session history
-	// backendDirs maps a backend ID to its transcript directory, plumbed into
-	// history.Wiring at attachHistorySource time and read by resume
-	// validation. A private copy of RouterConfig.BackendDirs.
-	backendDirs map[string]string
+	// hist is the history I/O facet (history_io.go): transcript and event-log
+	// directories, the history loader, the event-log persister, the attachment
+	// tracker and the cancel/wait bookkeeping of history goroutines. Reached
+	// through History().
+	hist HistoryIO
 
 	// removes tracks RemoveAsync teardown goroutines, so tests can join them.
 	// Production never waits on it: Shutdown must not block on a teardown.
@@ -211,29 +211,12 @@ type Router struct {
 	// raise; nil drops them. Fixed at construction.
 	observer Observer
 
-	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
-	historyWg sync.WaitGroup
-	// historyWgMu serialises the "check historyCtx.Err() then historyWg.Add(1)"
-	// pair against Shutdown's historyCancel() (#2186): a cancel landing between
-	// the nil-Err check and the Add could re-add to a WaitGroup already drained
-	// to 0 with a Wait in flight ("WaitGroup is reused before previous Wait has
-	// returned"). Shutdown takes this lock around historyCancel() (NOT around
-	// Wait), so a producer that passed the check completes its Add before the
-	// cancel is observable, and any later producer sees Err()!=nil and bails.
-	historyWgMu sync.Mutex
-
-	// historyCtx is cancelled on Shutdown so in-flight LoadHistory*Ctx calls
-	// abort promptly instead of blocking the drain on slow filesystems.
-	// Paired with historyCancel (set by NewRouter, called from Shutdown).
-	historyCtx    context.Context
-	historyCancel context.CancelFunc
-
 	// shutdownOnce guards Shutdown against re-entry: a double call would race
-	// the broadcast timer, re-cancel historyCtx and double-detach shim processes.
+	// the broadcast timer, re-cancel the history ctx and double-detach shim processes.
 	shutdownOnce sync.Once
 
 	// startOnce guards startBackgroundLifecycle against re-entry: a second run
-	// would overwrite r.attachmentTracker (leaking the first tracker's
+	// would overwrite r.hist.tracker (leaking the first tracker's
 	// goroutine) and schedule a redundant orphan sweep.
 	startOnce sync.Once
 
@@ -247,12 +230,6 @@ type Router struct {
 	// already in (#1822).
 	stopped atomic.Bool
 
-	// eventLogDir is where per-session event log files live. Empty disables
-	// event log persistence (tests / opt-out); non-empty wires eventLogPersister
-	// for writes and naozhilog.Source for reads.
-	eventLogDir       string
-	eventLogPersister *persist.Persister
-
 	// cliDebugDir, when non-empty, is where each spawned Claude CLI writes its
 	// `--debug-file` log. Set only when NAOZHI_CLI_DEBUG opts in at construction;
 	// empty keeps every spawn bit-identical. spawn() derives a per-session path.
@@ -265,16 +242,6 @@ type Router struct {
 	// mcpConfigFile mirrors RouterConfig.MCPConfigFile ("" omits `--mcp-config`).
 	// Immutable after NewRouter; the shim arg-drift comparison must mirror the spawn argv exactly.
 	mcpConfigFile string
-
-	// attachmentTracker is the refcount tracker that bridges event-log persist
-	// events to .meta sidecar updates. nil when eventLogDir is unset (no event
-	// source). See docs/rfc/attachment-refcount.md.
-	attachmentTracker *attachmentTracker
-
-	// historyLoader loads a session's persisted JSONL history tail across a
-	// prev_session_ids chain; tests inject a fixture (#458). Never nil and
-	// read-only after NewRouter.
-	historyLoader HistoryLoader
 
 	// spawnHook, when set, replaces the CLI spawn in spawnProcess, so tests
 	// can hand back a process of their own at a moment of their choosing.
@@ -667,14 +634,16 @@ func NewRouter(cfg RouterConfig) *Router {
 		ttl:             cfg.TTL,
 		pruneTTL:        cfg.PruneTTL,
 		defaultCWD:      cfg.Workspace,
-		claudeDir:       cfg.ClaudeDir,
-		backendDirs:     maps.Clone(cfg.BackendDirs),
 		storePath:       cfg.StorePath,
 		noOutputTimeout: cfg.NoOutputTimeout,
 		totalTimeout:    cfg.TotalTimeout,
-		eventLogDir:     cfg.EventLogDir,
-		historyLoader:   cfg.HistoryLoader,
-		resolver:        cfg.Resolver,
+		hist: HistoryIO{
+			claudeDir:   cfg.ClaudeDir,
+			backendDirs: maps.Clone(cfg.BackendDirs),
+			eventLogDir: cfg.EventLogDir,
+			loader:      cfg.HistoryLoader,
+		},
+		resolver: cfg.Resolver,
 	}
 	// wsStore, kid and pp are zero-value usable (maps allocated lazily).
 	r.ss = newSessionTable()
@@ -707,16 +676,16 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.costAcct = newCostAccounting(ledger, cfg.CostRunOwner)
 
 	// nil HistoryLoader → production claude-factory-backed implementation so
-	// the rest of the router can call r.historyLoader unconditionally (#458).
-	if r.historyLoader == nil {
-		r.historyLoader = claudeTranscriptLoader{pick: history.PickFactory}
+	// the rest of the router can call r.hist.loader unconditionally (#458).
+	if r.hist.loader == nil {
+		r.hist.loader = claudeTranscriptLoader{pick: history.PickFactory}
 	}
 	// Spin up the event-log persister BEFORE touching the session store; the
 	// startup load path needs a live sink for restored ManagedSessions. A
 	// caller-owned Persister wins; otherwise EventLogDir triggers in-router construction.
 	switch {
 	case cfg.EventLogPersister != nil:
-		r.eventLogPersister = cfg.EventLogPersister
+		r.hist.persister = cfg.EventLogPersister
 	case cfg.EventLogDir != "":
 		p, err := persist.NewPersister(persist.Options{
 			Dir:       cfg.EventLogDir,
@@ -727,9 +696,9 @@ func NewRouter(cfg RouterConfig) *Router {
 		if err != nil {
 			slog.Error("event log persister init failed; disabling event log persistence",
 				"dir", cfg.EventLogDir, "err", err)
-			r.eventLogDir = ""
+			r.hist.eventLogDir = ""
 		} else {
-			r.eventLogPersister = p
+			r.hist.persister = p
 		}
 	}
 	// CLI debug capture (opt-in via NAOZHI_CLI_DEBUG), read once at startup.
@@ -739,9 +708,9 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.cliDebugDir = resolveCLIDebugDir(cfg.EventLogDir)
 	r.naozhiSettingsFile = cfg.NaozhiSettingsFile
 	r.mcpConfigFile = cfg.MCPConfigFile
-	// historyCtx is cancelled only by Shutdown so startup history loads and
+	// The history ctx is cancelled only by Shutdown so startup history loads and
 	// reconnect-time JSONL parses abort promptly on slow filesystems.
-	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
+	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
 
 	// Load every session ID ever used; Seed(nil) is a no-op.
 	r.kid.Seed(loadKnownIDs(r.storePath))
@@ -894,7 +863,7 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 // construction: runOrphanSweep (reaps <keyhash>.log files for sessions with no
 // live entry, RFC event-log-persistence §4.4) and startAttachmentTracker
 // (refcount worker driven by OnPersistedEntry events). startOnce-guarded;
-// both also guard-check r.eventLogDir.
+// both also guard-check r.hist.eventLogDir.
 //
 // retireAutoChainOnce is intentionally NOT here: it must run synchronously
 // BEFORE the Tier 1 / Tier 2 history goroutines spawn so they observe the
@@ -902,13 +871,13 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 func (r *Router) startBackgroundLifecycle() {
 	r.startOnce.Do(func() {
 		r.runOrphanSweep()
-		r.startAttachmentTracker()
+		r.hist.startAttachmentTracker(r.workspaceResolverForTracker())
 	})
 }
 
 // startBackgroundHistoryLoaders launches the tier 1 / tier 2 history-load
 // goroutines for every restored session. Tier 1 (naozhilog, when
-// r.eventLogPersister is set) preserves Images / AskQuestion / agent-team
+// r.hist.persister is set) preserves Images / AskQuestion / agent-team
 // linkage Claude JSONL cannot represent. Tier 2 (Claude CLI JSONL) skips
 // sessions tier 1 filled; shim-managed sessions wait shimReconnectGraceDelay
 // so ReconnectShims can inject first, then backfill only if still empty. One
@@ -927,20 +896,20 @@ func (r *Router) startBackgroundHistoryLoaders() {
 	})
 
 	// Tier 1: naozhilog (in-process per-session log).
-	if r.eventLogPersister != nil {
+	if r.hist.persister != nil {
 		sem := historyLoadSem
 		for _, s := range sessions {
-			r.historyWg.Add(1)
+			r.hist.wg.Add(1)
 			go func() {
-				defer r.historyWg.Done()
+				defer r.hist.wg.Done()
 				select {
 				case sem <- struct{}{}:
-				case <-r.historyCtx.Done():
+				case <-r.hist.ctx.Done():
 					return
 				}
 				defer func() { <-sem }()
-				src := newEventLogLocalSource(r.eventLogDir, s.key)
-				all, err := src.LoadLatest(r.historyCtx, 2*maxPersistedHistory)
+				src := newEventLogLocalSource(r.hist.eventLogDir, s.key)
+				all, err := src.LoadLatest(r.hist.ctx, 2*maxPersistedHistory)
 				if err != nil || len(all) == 0 {
 					return
 				}
@@ -955,13 +924,13 @@ func (r *Router) startBackgroundHistoryLoaders() {
 				slog.Info("loaded session history from naozhi event log",
 					"key", s.key, "entries", len(entries))
 				r.notifyChange()
-				s.fillPersistGaps(r.historyCtx, all, entries[0].Time)
+				s.fillPersistGaps(r.hist.ctx, all, entries[0].Time)
 			}()
 		}
 	}
 
 	// Tier 2: Claude CLI JSONL.
-	if r.claudeDir == "" {
+	if r.hist.claudeDir == "" {
 		return
 	}
 	shimKeys := r.backends.shimManagedKeys()
@@ -971,18 +940,18 @@ func (r *Router) startBackgroundHistoryLoaders() {
 			continue
 		}
 		deferred := shimKeys[s.key]
-		r.historyWg.Add(1)
+		r.hist.wg.Add(1)
 		go func() {
-			defer r.historyWg.Done()
+			defer r.hist.wg.Done()
 			if deferred {
-				// Wait for ReconnectShims' first pass; historyCtx cancel aborts.
+				// Wait for ReconnectShims' first pass; the history ctx cancel aborts.
 				// NewTimer + Stop (not time.After) so a fast shutdown does not
 				// leak a timer per goroutine for the whole grace window.
 				graceTimer := time.NewTimer(shimReconnectGraceDelay)
 				select {
 				case <-graceTimer.C:
 					// Fired — no Stop needed, channel already drained.
-				case <-r.historyCtx.Done():
+				case <-r.hist.ctx.Done():
 					if !graceTimer.Stop() {
 						<-graceTimer.C
 					}
@@ -999,7 +968,7 @@ func (r *Router) startBackgroundHistoryLoaders() {
 			}
 			select {
 			case sem <- struct{}{}:
-			case <-r.historyCtx.Done():
+			case <-r.hist.ctx.Done():
 				return
 			}
 			defer func() { <-sem }()
@@ -1017,8 +986,8 @@ func (r *Router) startBackgroundHistoryLoaders() {
 			// newest→oldest and stops at maxPersistedHistory entries.
 			ids := s.SnapshotChainIDs()
 
-			allEntries := r.historyLoader.LoadHistoryChainTail(
-				r.historyCtx, r.claudeDir, ids, s.Workspace(), maxPersistedHistory,
+			allEntries := r.hist.loader.LoadHistoryChainTail(
+				r.hist.ctx, r.hist.claudeDir, ids, s.Workspace(), maxPersistedHistory,
 			)
 			if len(allEntries) == 0 {
 				return
@@ -1210,43 +1179,4 @@ func (r *Router) DiscardPassthroughPending(key string, reason error) {
 	if sess := r.SessionFor(key); sess != nil {
 		sess.DiscardPassthroughPending(reason)
 	}
-}
-
-// runHistoryTask launches fn in a goroutine tracked by r.historyWg, parented
-// on r.historyCtx. Returns false (no goroutine) when historyCtx is already
-// cancelled, guarding the late Add(1) race against historyWg.Wait(). Router
-// still owns historyCtx/historyCancel/historyWg directly (#748); inline sites
-// that also need a semaphore + per-task timeout stay in place.
-//
-// The historyWg.Add(1) must be visible to Shutdown before the goroutine
-// begins observable work.
-func (r *Router) runHistoryTask(fn func(ctx context.Context)) bool {
-	if r.historyCtx == nil {
-		// Test routers built by struct literal (skip NewRouter) get a
-		// never-cancelled background; production Router always wires
-		// historyCtx in NewRouter before any caller can reach here.
-		r.historyWg.Add(1)
-		go func() {
-			defer r.historyWg.Done()
-			fn(context.Background())
-		}()
-		return true
-	}
-	// Decide spawn-or-refuse BEFORE Add(1): an Add-then-compensating-Done shape
-	// lets Shutdown's Wait() observe the transient +1 and return, after which a
-	// later Add re-adds to a drained WaitGroup (#1655). The Err() check and the
-	// Add(1) must be one critical section vs Shutdown's historyCancel() (#2186);
-	// see historyWgMu.
-	r.historyWgMu.Lock()
-	if r.historyCtx.Err() != nil {
-		r.historyWgMu.Unlock()
-		return false
-	}
-	r.historyWg.Add(1)
-	r.historyWgMu.Unlock()
-	go func() {
-		defer r.historyWg.Done()
-		fn(r.historyCtx)
-	}()
-	return true
 }

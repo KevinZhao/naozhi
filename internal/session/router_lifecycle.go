@@ -19,7 +19,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
-	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -36,7 +35,7 @@ import (
 // Post-condition: s.loadHistorySource() is non-nil (Noop at worst).
 func (r *Router) publishSession(tx sessTx, key string, s *ManagedSession, alreadyAttached bool) {
 	if !alreadyAttached {
-		r.attachHistorySource(s)
+		r.hist.attachHistorySource(s, r.backends.sourceWrapperFor(s.Backend()))
 	}
 	if s.loadHistorySource() == nil {
 		// Defence-in-depth against a mistaken alreadyAttached=true: log the
@@ -53,33 +52,23 @@ func (r *Router) publishSession(tx sessTx, key string, s *ManagedSession, alread
 	tx.Put(key, s)
 }
 
-// attachHistorySource picks the right history.Source for a session based on
-// its backend ID and installs it, so EventEntriesBeforeCtx's disk fallback is
-// live before the first pagination request. Composition (RFC §3.4 / §3.5):
-// the local tier is the naozhi event log (empty when eventLogDir is unset);
-// the fallback tier is the backend wrapper's per-format reader
+// attachHistorySource installs the history.Source for a session, so
+// EventEntriesBeforeCtx's disk fallback is live before the first pagination
+// request. wrapper is the one for the session's backend, which Router resolves
+// with BackendRegistry.sourceWrapperFor. Composition (RFC §3.4 / §3.5): the
+// local tier is the naozhi event log (empty when eventLogDir is unset); the
+// fallback tier is the backend wrapper's per-format reader
 // (Wrapper.NewHistorySource, Noop for unknown backends); MergedSource
 // UUID-dedupes and time-sorts both.
-func (r *Router) attachHistorySource(s *ManagedSession) {
+func (h *HistoryIO) attachHistorySource(s *ManagedSession, wrapper *cli.Wrapper) {
 	if s == nil {
 		return
 	}
-	backend := s.Backend()
-	if backend == "" {
-		backend = r.backends.bk.DefaultID()
-	}
-
-	// Unknown backend ID falls back to the default wrapper so a misconfigured
-	// Backend() still gets a usable source instead of Noop.
-	wrapper := r.backends.bk.Runtime(backend).Wrapper
-	if wrapper == nil {
-		wrapper = r.backends.bk.Fallback()
-	}
 
 	deps := history.Wiring{
-		ClaudeDir:   r.claudeDir,
-		BackendDirs: r.backendDirs,
-		EventLogDir: r.eventLogDir,
+		ClaudeDir:   h.claudeDir,
+		BackendDirs: h.backendDirs,
+		EventLogDir: h.eventLogDir,
 	}
 
 	// Wrapper.NewHistorySource never returns nil; the guard pins that
@@ -89,9 +78,9 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 		fallback = history.Noop{}
 	}
 
-	// mergeWithEventLog returns fallback unchanged when r.eventLogDir is
+	// mergeWithEventLog returns fallback unchanged when h.eventLogDir is
 	// empty, otherwise layers the event-log local tier in front of it.
-	s.SetHistorySource(mergeWithEventLog(r.eventLogDir, s.key, fallback))
+	s.SetHistorySource(mergeWithEventLog(h.eventLogDir, s.key, fallback))
 }
 
 // The reset family. Every variant removes the key(s) from the table in one
@@ -492,7 +481,7 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	// ResumeID guard: drop when the backend's on-disk resume target is missing
 	// so the spawn falls through to a fresh session instead of failing on
 	// "No conversation found". The probe is backend-aware (see resolveResumeID).
-	resumeID = resolveResumeID(backendID, r.claudeDir, r.backendDirs, workspace, key, resumeID)
+	resumeID = resolveResumeID(backendID, r.hist.claudeDir, r.hist.backendDirs, workspace, key, resumeID)
 
 	// Canonicalize on-disk case for fresh spawns: on case-insensitive APFS a
 	// differently-cased spelling forks two project identities for one tree.
@@ -912,7 +901,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 		return winner, nil
 	}
 
-	r.bindNewSessionHistory(ctx, s, proc, key, res.resumeID, res.workspace, prevIDs, oldHistory)
+	r.hist.bindNewSessionHistory(ctx, s, proc, key, res.resumeID, res.workspace, prevIDs, oldHistory)
 	r.notifyChange()
 	return s, nil
 }
@@ -925,7 +914,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 //
 // LOCK: must NOT be called with the table lock held — history is injected under
 // historyMu, which is never held together with the table lock (router_core.go).
-func (r *Router) bindNewSessionHistory(
+func (h *HistoryIO) bindNewSessionHistory(
 	ctx context.Context,
 	s *ManagedSession,
 	proc processIface,
@@ -935,8 +924,8 @@ func (r *Router) bindNewSessionHistory(
 	prevIDs []string,
 	oldHistory []clievent.EventEntry,
 ) {
-	r.loadResumeHistoryOnSpawn(ctx, s, key, resumeID, workspace, prevIDs, oldHistory)
-	r.installPersistSink(proc, key)
+	h.loadResumeHistoryOnSpawn(ctx, s, key, resumeID, workspace, prevIDs, oldHistory)
+	h.installPersistSink(proc, key)
 }
 
 // installFreshSession attaches a freshly-spawned process to the router
@@ -1063,67 +1052,52 @@ func (r *Router) installFreshSession(tx sessTx,
 // EventLog. No-op when the persister is disabled or proc is not a real
 // *cli.Process (test fakes). Must be called AFTER any InjectHistory calls
 // have completed (RFC §3.2.2).
-func (r *Router) installPersistSink(proc processIface, key string) {
-	if r.eventLogPersister == nil {
-		return
+func (h *HistoryIO) installPersistSink(proc processIface, key string) {
+	if realProc, ok := proc.(*cli.Process); ok {
+		h.bindPersistSink(realProc.EventLog(), key)
 	}
-	realProc, ok := proc.(*cli.Process)
-	if !ok {
-		return
-	}
-	log := realProc.EventLog()
-	if log == nil {
-		return
-	}
-	persisterSink := r.eventLogPersister.SinkFor(key)
-	keyhash := persist.KeyHash(key)
-	sink := newEventLogSink(persisterSink, r.attachmentTracker, keyhash)
-	// Single-entry sink lets EventLog.Append skip a 1-slot slice literal;
-	// both sinks feed the same persisterSink (#410).
-	sinkOne := newEventLogSinkOne(persisterSink, r.attachmentTracker, keyhash)
-	log.SetPersistSinkPair(sink, sinkOne)
 }
 
 // loadResumeHistoryOnSpawn synchronously loads the JSONL chain for a resume
 // with no in-memory history yet and injects it into s. No-op otherwise.
 //
-// historyWg tracks the call so Shutdown can drain in-flight loads. The load
-// ctx is parented on r.historyCtx (Shutdown's historyCancel wakes the reader
+// h.wg tracks the call so Shutdown can drain in-flight loads. The load
+// ctx is parented on h.ctx (Shutdown's cancelTasks wakes the reader
 // immediately) with the caller ctx fanned in via context.AfterFunc, and is
-// skipped entirely once historyCtx is already cancelled.
+// skipped entirely once h.ctx is already cancelled.
 //
 // LOCK: must NOT be called with the table lock held — InjectHistory acquires
 // session.historyMu independently, and the reader can take seconds.
-func (r *Router) loadResumeHistoryOnSpawn(
+func (h *HistoryIO) loadResumeHistoryOnSpawn(
 	ctx context.Context,
 	s *ManagedSession,
 	key, resumeID, workspace string,
 	prevIDs []string,
 	oldHistory []clievent.EventEntry,
 ) {
-	if resumeID == "" || r.claudeDir == "" || len(oldHistory) > 0 {
+	if resumeID == "" || h.claudeDir == "" || len(oldHistory) > 0 {
 		return
 	}
 
 	// Decide skip-or-load BEFORE Add(1), and make check+Add one critical
-	// section vs Shutdown's historyCancel() under historyWgMu: an Add(1) on a
+	// section vs Shutdown's cancelTasks() under wgMu: an Add(1) on a
 	// WaitGroup already drained to 0 while Shutdown's Wait() runs is a
 	// WaitGroup misuse that can panic (#1655, #2186). Mirrors runHistoryTask.
-	r.historyWgMu.Lock()
-	if r.historyCtx != nil && r.historyCtx.Err() != nil {
-		r.historyWgMu.Unlock()
+	h.wgMu.Lock()
+	if h.ctx != nil && h.ctx.Err() != nil {
+		h.wgMu.Unlock()
 		return
 	}
-	r.historyWg.Add(1)
-	r.historyWgMu.Unlock()
+	h.wg.Add(1)
+	h.wgMu.Unlock()
 
 	ids := make([]string, 0, len(prevIDs)+1)
 	ids = append(ids, prevIDs...)
 	ids = append(ids, resumeID)
 
 	func() {
-		defer r.historyWg.Done()
-		parent := r.historyCtx
+		defer h.wg.Done()
+		parent := h.ctx
 		if parent == nil {
 			parent = context.Background()
 		}
@@ -1133,8 +1107,8 @@ func (r *Router) loadResumeHistoryOnSpawn(
 			stop := context.AfterFunc(ctx, histCancel)
 			defer stop()
 		}
-		allEntries := r.historyLoader.LoadHistoryChainTail(
-			histCtx, r.claudeDir, ids, workspace, maxPersistedHistory,
+		allEntries := h.loader.LoadHistoryChainTail(
+			histCtx, h.claudeDir, ids, workspace, maxPersistedHistory,
 		)
 		if len(allEntries) > 0 {
 			s.InjectHistory(allEntries)

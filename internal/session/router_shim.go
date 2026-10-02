@@ -366,7 +366,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 			// async JSONL load skipped this key (shimManagedKeys claimed it), so
 			// backfill persistedHistory here (InjectHistory is proc-nil safe) or
 			// the dashboard panel stays blank until the user sends something.
-			if r.claudeDir != "" && state.SessionID != "" {
+			if r.hist.claudeDir != "" && state.SessionID != "" {
 				ids := make([]string, 0, len(sessPrevIDs)+1)
 				ids = append(ids, sessPrevIDs...)
 				ids = append(ids, state.SessionID)
@@ -375,8 +375,8 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 				func() {
 					histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 					defer histCancel()
-					histEntries := r.historyLoader.LoadHistoryChainTail(
-						histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
+					histEntries := r.hist.loader.LoadHistoryChainTail(
+						histCtx, r.hist.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
 					)
 					if len(histEntries) > 0 {
 						sess.InjectHistory(histEntries)
@@ -490,19 +490,19 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// break ordering against JSONL user entries. Only load when
 		// persistedHistory is empty — ReattachProcessNoCallback below snapshots
 		// it into the fresh proc, so re-injecting would double-fill proc.EventLog.
-		if r.claudeDir != "" && !sess.hasInjectedHistory() {
+		if r.hist.claudeDir != "" && !sess.hasInjectedHistory() {
 			ids := make([]string, 0, len(sessPrevIDs)+1)
 			ids = append(ids, sessPrevIDs...)
 			if state.SessionID != "" {
 				ids = append(ids, state.SessionID)
 			}
-			// parentCtx, not r.historyCtx: historyCtx is cancelled as Shutdown's
+			// parentCtx, not r.hist.ctx: that is cancelled as Shutdown's
 			// FIRST action, so a reconcile tick during the drain window would
 			// load zero entries and leave the panel empty. maxPersistedHistory +
 			// shimReconnectTimeout still bound hung storage.
 			histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
-			histEntries := r.historyLoader.LoadHistoryChainTail(
-				histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
+			histEntries := r.hist.loader.LoadHistoryChainTail(
+				histCtx, r.hist.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
 			)
 			histCancel()
 			if len(histEntries) > 0 {
@@ -530,7 +530,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// Persist sink goes last so the InjectHistory + shim replay above land
 		// with sinkReady=false and are dropped rather than written back to disk
 		// (RFC §3.2.2).
-		r.installPersistSink(proc, state.Key)
+		r.hist.installPersistSink(proc, state.Key)
 
 		// Sidebar label instead of "(no prompt)".
 		sess.extractLastPromptFromProcess()

@@ -35,21 +35,21 @@ type EventLogHealth struct {
 }
 
 // EventLogStats returns a snapshot of the persister's observability state;
-// EventLogHealth{Enabled:false} when disabled. Lives here so /health (server
-// package) need not import persist directly.
-func (r *Router) EventLogStats() EventLogHealth {
-	if r == nil || r.eventLogPersister == nil {
+// EventLogHealth{Enabled:false} when disabled or h is nil. Lives here so
+// /health (server package) need not import persist directly.
+func (h *HistoryIO) EventLogStats() EventLogHealth {
+	if h == nil || h.persister == nil {
 		return EventLogHealth{}
 	}
-	s := r.eventLogPersister.Stats()
+	s := h.persister.Stats()
 	var lastMs int64
 	if s.LastDrainAgo > 0 {
 		lastMs = s.LastDrainAgo.Milliseconds()
 	}
 	return EventLogHealth{
 		Enabled:        true,
-		Dir:            r.eventLogDir,
-		WriterAlive:    r.eventLogPersister.WriterAlive(),
+		Dir:            h.eventLogDir,
+		WriterAlive:    h.persister.WriterAlive(),
 		ChannelDepth:   s.ChannelDepth,
 		ChannelCap:     s.ChannelCap,
 		LastDrainMsAgo: lastMs,
@@ -86,15 +86,15 @@ type AttachmentTrackerHealth struct {
 }
 
 // AttachmentTrackerStats mirrors EventLogStats for the tracker. Returns
-// Enabled=false when no tracker was constructed (eventLogDir="").
-func (r *Router) AttachmentTrackerStats() AttachmentTrackerHealth {
-	if r == nil || r.attachmentTracker == nil {
+// Enabled=false when no tracker was constructed (eventLogDir="") or h is nil.
+func (h *HistoryIO) AttachmentTrackerStats() AttachmentTrackerHealth {
+	if h == nil || h.tracker == nil {
 		return AttachmentTrackerHealth{}
 	}
-	s := r.attachmentTracker.Stats()
+	s := h.tracker.Stats()
 	return AttachmentTrackerHealth{
 		Enabled:      true,
-		WriterAlive:  r.attachmentTracker.WriterAlive(),
+		WriterAlive:  h.tracker.WriterAlive(),
 		ChannelDepth: s.ChannelDepth,
 		ChannelCap:   s.ChannelCap,
 		LastDrainMs:  s.LastDrainMs,

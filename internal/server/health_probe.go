@@ -24,7 +24,7 @@ func EventLogHealthProbe(router *session.Router) HealthProbe {
 		if router == nil || auth == nil {
 			return
 		}
-		el := router.EventLogStats()
+		el := router.History().EventLogStats()
 		if !el.Enabled {
 			return
 		}
@@ -166,7 +166,7 @@ func AttachmentTrackerHealthProbe(router *session.Router) HealthProbe {
 		if router == nil || auth == nil {
 			return
 		}
-		at := router.AttachmentTrackerStats()
+		at := router.History().AttachmentTrackerStats()
 		if !at.Enabled {
 			return
 		}

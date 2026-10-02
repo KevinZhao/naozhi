@@ -58,9 +58,8 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 	})
 
 	r = &Router{
-		ss:          newSessionTable(),
-		claudeDir:   "/claude/dir",
-		backendDirs: map[string]string{"kiro": "/kiro/dir"},
+		ss:   newSessionTable(),
+		hist: HistoryIO{claudeDir: "/claude/dir", backendDirs: map[string]string{"kiro": "/kiro/dir"}},
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude-routed": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude-routed"),
@@ -84,7 +83,7 @@ func TestAttachHistorySource_RoutesToBackendWrapper(t *testing.T) {
 	s.SetBackend("kiro-routed")
 	s.setWorkspace("/tmp/ws")
 
-	r.attachHistorySource(s)
+	r.hist.attachHistorySource(s, r.backends.sourceWrapperFor(s.Backend()))
 
 	src := s.loadHistorySource()
 	if src == nil {
@@ -117,7 +116,7 @@ func TestAttachHistorySource_FallsBackToDefaultWhenSessionBackendEmpty(t *testin
 	// SetBackend deliberately omitted — Backend() returns "".
 	s.setWorkspace("/tmp/ws")
 
-	r.attachHistorySource(s)
+	r.hist.attachHistorySource(s, r.backends.sourceWrapperFor(s.Backend()))
 
 	src := s.loadHistorySource()
 	if src == nil {
@@ -154,7 +153,7 @@ func TestAttachHistorySource_NilWrapperUsesNoop(t *testing.T) {
 	s.SetBackend("orphan-backend")
 	s.setWorkspace("/tmp/ws")
 
-	r.attachHistorySource(s)
+	r.hist.attachHistorySource(s, r.backends.sourceWrapperFor(s.Backend()))
 	src := s.loadHistorySource()
 	if src == nil {
 		t.Fatal("attachHistorySource produced nil source despite nil wrapper")
@@ -178,13 +177,13 @@ func TestAttachHistorySource_NoEventLogDirSkipsMerged(t *testing.T) {
 	r, _, _ := makeRoutedRouter(t, "claude-routed")
 	// Confirm the router actually has eventLogDir empty. (Default zero
 	// from the literal above.)
-	if r.eventLogDir != "" {
-		t.Fatalf("test setup regression: eventLogDir = %q", r.eventLogDir)
+	if r.hist.eventLogDir != "" {
+		t.Fatalf("test setup regression: eventLogDir = %q", r.hist.eventLogDir)
 	}
 
 	s := &ManagedSession{key: "feishu:direct:eve:general"}
 	s.SetBackend("claude-routed")
-	r.attachHistorySource(s)
+	r.hist.attachHistorySource(s, r.backends.sourceWrapperFor(s.Backend()))
 
 	src := s.loadHistorySource()
 	if src == nil {
@@ -203,11 +202,11 @@ func TestAttachHistorySource_NoEventLogDirSkipsMerged(t *testing.T) {
 // naozhilog images on the upgrade path.
 func TestAttachHistorySource_WithEventLogDirInstallsMerged(t *testing.T) {
 	r, _, _ := makeRoutedRouter(t, "claude-routed")
-	r.eventLogDir = t.TempDir()
+	r.hist.eventLogDir = t.TempDir()
 
 	s := &ManagedSession{key: "feishu:direct:frank:general"}
 	s.SetBackend("claude-routed")
-	r.attachHistorySource(s)
+	r.hist.attachHistorySource(s, r.backends.sourceWrapperFor(s.Backend()))
 
 	src := s.loadHistorySource()
 	if src == nil {
@@ -233,7 +232,7 @@ func TestAttachHistorySource_NilSession(t *testing.T) {
 	t.Parallel()
 	r := &Router{ss: newSessionTable()}
 	// Must not panic.
-	r.attachHistorySource(nil)
+	r.hist.attachHistorySource(nil, nil)
 }
 
 // TestRouter_KiroBackendDirRoundTrip verifies the new RouterConfig
@@ -248,8 +247,8 @@ func TestRouter_KiroBackendDirRoundTrip(t *testing.T) {
 		return history.Noop{}
 	})
 	r := &Router{
-		ss:          newSessionTable(),
-		backendDirs: map[string]string{"kiro": "/the/kiro/dir"},
+		ss:   newSessionTable(),
+		hist: HistoryIO{backendDirs: map[string]string{"kiro": "/the/kiro/dir"}},
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
 		"kiro-rt-probe": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-rt-probe"),
@@ -260,7 +259,7 @@ func TestRouter_KiroBackendDirRoundTrip(t *testing.T) {
 	s := &ManagedSession{key: "feishu:direct:greta:general"}
 	s.SetBackend("kiro-rt-probe")
 
-	r.attachHistorySource(s)
+	r.hist.attachHistorySource(s, r.backends.sourceWrapperFor(s.Backend()))
 
 	if saw != "/the/kiro/dir" {
 		t.Errorf("HistoryWiring.BackendDir(kiro) = %q; want /the/kiro/dir", saw)
@@ -278,9 +277,8 @@ func TestRouter_KiroBackendDirRoundTrip(t *testing.T) {
 func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		ss:          newSessionTable(),
-		claudeDir:   "/claude/dir",
-		backendDirs: map[string]string{"kiro": "/kiro/sessions/cli"},
+		ss:   newSessionTable(),
+		hist: HistoryIO{claudeDir: "/claude/dir", backendDirs: map[string]string{"kiro": "/kiro/sessions/cli"}},
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
@@ -293,7 +291,7 @@ func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 	s.SetBackend("kiro")
 	s.setWorkspace("/tmp/ws")
 
-	r.attachHistorySource(s)
+	r.hist.attachHistorySource(s, r.backends.sourceWrapperFor(s.Backend()))
 
 	src := s.loadHistorySource()
 	if src == nil {
@@ -302,6 +300,64 @@ func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 	// EventLogDir is empty → fallback installed directly, no merged wrapper.
 	if _, ok := src.(*kirojsonl.Source); !ok {
 		t.Fatalf("kiro session got %T; want *kirojsonl.Source", src)
+	}
+}
+
+// TestHistorySource_RouterSitesResolveTheSessionBackend: HistoryIO has no
+// backends, so each Router site that attaches a source resolves the session's
+// own backend wrapper first. publishSession (every spawn and restore) and
+// refreshStub (a cron stub whose chain changed) must both hand over the kiro
+// wrapper for a kiro session, not the default backend's.
+func TestHistorySource_RouterSitesResolveTheSessionBackend(t *testing.T) {
+	t.Parallel()
+	r := &Router{
+		ss:   newSessionTable(),
+		hist: HistoryIO{claudeDir: "/claude/dir", backendDirs: map[string]string{"kiro": "/kiro/sessions/cli"}},
+	}
+	r.setWrappersForTest(map[string]*cli.Wrapper{
+		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+	})
+	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
+	r.editBackendsForTest(func(c *backendstore.Config) { c.Wrapper = r.backends.bk.Runtime("claude").Wrapper })
+	s := &ManagedSession{key: "cron:stub:kiro"}
+	s.SetBackend("kiro")
+	s.setWorkspace("/tmp/ws")
+
+	r.ss.Update(func(tx sessTx) { r.publishSession(tx, s.key, s, false) })
+	if _, ok := s.loadHistorySource().(*kirojsonl.Source); !ok {
+		t.Errorf("publishSession: kiro session got %T; want *kirojsonl.Source", s.loadHistorySource())
+	}
+
+	s.SetHistorySource(history.Noop{})
+	r.ss.Update(func(tx sessTx) { r.refreshStub(tx, s, "", "", []string{"prev-1"}) })
+	if _, ok := s.loadHistorySource().(*kirojsonl.Source); !ok {
+		t.Errorf("refreshStub: kiro stub got %T; want *kirojsonl.Source", s.loadHistorySource())
+	}
+}
+
+// TestSourceWrapperFor_RowThenFallback pins the resolution attachHistorySource
+// had inline before it moved to BackendRegistry: the session's backend row
+// ("" = the default ID's row), else the fallback wrapper. Unlike wrapperFor,
+// an unknown ID does not get the default backend's row. The fallback differs
+// from every row here, so each branch is visible.
+func TestSourceWrapperFor_RowThenFallback(t *testing.T) {
+	t.Parallel()
+	wClaude := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude")
+	wKiro := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro")
+	wFallback := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "fallback")
+	b := BackendRegistry{bk: backendstore.New(backendstore.Config{
+		Wrapper:        wFallback,
+		DefaultBackend: "kiro",
+		Runtimes:       map[string]BackendRuntime{"claude": {Wrapper: wClaude}, "kiro": {Wrapper: wKiro}},
+	})}
+	for _, c := range []struct {
+		backend string
+		want    *cli.Wrapper
+	}{{"claude", wClaude}, {"", wKiro}, {"unknown", wFallback}} {
+		if got := b.sourceWrapperFor(c.backend); got != c.want {
+			t.Errorf("sourceWrapperFor(%q) = %p, want %s's wrapper %p", c.backend, got, c.want.BackendID, c.want)
+		}
 	}
 }
 

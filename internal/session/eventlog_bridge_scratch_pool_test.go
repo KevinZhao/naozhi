@@ -27,7 +27,7 @@ import (
 func TestEventLogBridge_PooledScratch_MultiBatchPreservesOrderAndContent(t *testing.T) {
 	r, dir := newEventLogRouter(t, false)
 	key := "scratch-pool-key"
-	sink := newEventLogSink(r.eventLogPersister.SinkFor(key), nil, "")
+	sink := newEventLogSink(r.hist.persister.SinkFor(key), nil, "")
 
 	// Batches of widths 3, 1-via-multi (use 2 so we stay on the multi path),
 	// then 5 — recycling the same scratch each time across changing widths.
@@ -55,9 +55,9 @@ func TestEventLogBridge_PooledScratch_MultiBatchPreservesOrderAndContent(t *test
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	testhelper.Eventually(t, func() bool {
-		return r.eventLogPersister.Stats().Written >= 1
+		return r.hist.persister.Stats().Written >= 1
 	}, time.Second, "persister never wrote")
-	_ = r.eventLogPersister.Flush(ctx)
+	_ = r.hist.persister.Flush(ctx)
 
 	src := naozhilog.New(dir, key)
 	got, err := src.LoadLatest(context.Background(), 1000)

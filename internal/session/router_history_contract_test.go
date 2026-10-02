@@ -5,65 +5,72 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 // TestRunHistoryTaskHelperPinned guards the R222-ARCH-17 (#748) helper:
-// once the full HistorySubsystem extraction lands (#383), this contract
-// can move alongside the new owner. Until then, runHistoryTask is the
-// canonical late-Add(1)-safe spawner — its presence on Router is
-// load-bearing for any future subsystem that wants history-tracked
-// goroutines without re-baking the historyCtx.Err() race fix.
+// runHistoryTask is the canonical late-Add(1)-safe spawner, and since S12d
+// (#3023) it lives on HistoryIO, the facet that owns the history ctx and wait
+// group. Its presence there is load-bearing for any caller that wants
+// history-tracked goroutines without re-baking the ctx.Err() race fix.
 func TestRunHistoryTaskHelperPinned(t *testing.T) {
-	// AST-parse router_core.go and assert the method is defined on
-	// Router with the expected `func(ctx context.Context)` signature.
-	// A literal grep would catch a rename; the AST check additionally
-	// catches a signature drift (e.g. someone changing the callback to
-	// no-ctx, which would silently break the historyCtx-aware adoption
-	// path described in the godoc).
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "router_core.go", nil, parser.SkipObjectResolution)
+	// AST-parse every non-test file of the package and assert the method is
+	// defined on *HistoryIO, exactly once, with the expected
+	// `func(ctx context.Context)` signature. A literal grep would catch a
+	// rename; the AST check additionally catches a signature drift (e.g.
+	// someone changing the callback to no-ctx, which would silently break the
+	// ctx-aware adoption path described in the godoc) and does not depend on
+	// which file holds it.
+	paths, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("parse router_core.go: %v", err)
+		t.Fatal(err)
 	}
-
-	var found *ast.FuncDecl
-	for _, d := range f.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "runHistoryTask" {
+	fset := token.NewFileSet()
+	var found []*ast.FuncDecl
+	parsed := 0
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
-		if fn.Recv == nil || len(fn.Recv.List) != 1 {
-			continue
+		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
 		}
-		// Receiver must be (*Router).
-		star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
-		if !ok {
-			continue
+		parsed++
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != "runHistoryTask" || fn.Recv == nil || len(fn.Recv.List) != 1 {
+				continue
+			}
+			// Receiver must be (*HistoryIO).
+			star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
+			if !ok {
+				continue
+			}
+			if ident, ok := star.X.(*ast.Ident); ok && ident.Name == "HistoryIO" {
+				found = append(found, fn)
+			}
 		}
-		ident, ok := star.X.(*ast.Ident)
-		if !ok || ident.Name != "Router" {
-			continue
-		}
-		found = fn
-		break
 	}
-	if found == nil {
-		t.Fatal("runHistoryTask method removed from *Router. " +
-			"R222-ARCH-17 (#748) requires the late-Add(1)-safe spawner " +
-			"to remain available on Router until the full HistorySubsystem " +
-			"split (#383) lands. If the split DID land, move this test to " +
-			"the new owner package and update the contract.")
+	if parsed < 40 {
+		t.Fatalf("parsed %d non-test files, want at least 40: the scan has gone blind", parsed)
 	}
+	if len(found) != 1 {
+		t.Fatalf("found %d runHistoryTask methods on *HistoryIO, want 1. "+
+			"R222-ARCH-17 (#748) requires the late-Add(1)-safe spawner "+
+			"to stay on the facet that owns the history ctx and wait group.", len(found))
+	}
+	fn := found[0]
 
 	// Param: exactly one, of shape `func(ctx context.Context)`.
-	if found.Type.Params == nil || len(found.Type.Params.List) != 1 {
-		t.Fatalf("runHistoryTask must take exactly one param (the task fn); got %v", found.Type.Params)
+	if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 {
+		t.Fatalf("runHistoryTask must take exactly one param (the task fn); got %v", fn.Type.Params)
 	}
-	paramType, ok := found.Type.Params.List[0].Type.(*ast.FuncType)
+	paramType, ok := fn.Type.Params.List[0].Type.(*ast.FuncType)
 	if !ok {
-		t.Fatalf("runHistoryTask param must be a func; got %T", found.Type.Params.List[0].Type)
+		t.Fatalf("runHistoryTask param must be a func; got %T", fn.Type.Params.List[0].Type)
 	}
 	if paramType.Params == nil || len(paramType.Params.List) != 1 {
 		t.Fatalf("task fn must take exactly one ctx arg; got %v", paramType.Params)
@@ -81,12 +88,12 @@ func TestRunHistoryTaskHelperPinned(t *testing.T) {
 	// Return type: bool (refuse-on-cancel signal). A signature change to
 	// `func ... ` (no return) would silently strip the late-Add(1)
 	// observability and let callers assume success.
-	if found.Type.Results == nil || len(found.Type.Results.List) != 1 {
-		t.Fatalf("runHistoryTask must return one value (bool); got %v", found.Type.Results)
+	if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
+		t.Fatalf("runHistoryTask must return one value (bool); got %v", fn.Type.Results)
 	}
-	retIdent, ok := found.Type.Results.List[0].Type.(*ast.Ident)
+	retIdent, ok := fn.Type.Results.List[0].Type.(*ast.Ident)
 	if !ok || retIdent.Name != "bool" {
-		t.Errorf("runHistoryTask return type drifted from bool; got %v", found.Type.Results.List[0].Type)
+		t.Errorf("runHistoryTask return type drifted from bool; got %v", fn.Type.Results.List[0].Type)
 	}
 }
 

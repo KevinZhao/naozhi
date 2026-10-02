@@ -72,19 +72,20 @@ func (r *Router) workspaceResolverForTracker() tracker.WorkspaceResolver {
 	}
 }
 
-// startAttachmentTracker spins up the tracker bound to r's eventLogDir +
-// session table. Called from NewRouter AFTER the persister + session map are
-// constructed so the resolver closure is ready to serve lookups. On init
-// failure we log + continue without tracking; attachments then fall back to
-// pure upload-TTL GC.
-func (r *Router) startAttachmentTracker() {
-	if r.eventLogDir == "" {
+// startAttachmentTracker spins up the tracker bound to h's eventLogDir, with
+// workspaces resolving a keyhash (Router passes workspaceResolverForTracker,
+// which reads the session table). Called from NewRouter AFTER the persister +
+// session map are constructed so the resolver closure is ready to serve
+// lookups. On init failure we log + continue without tracking; attachments
+// then fall back to pure upload-TTL GC.
+func (h *HistoryIO) startAttachmentTracker(workspaces tracker.WorkspaceResolver) {
+	if h.eventLogDir == "" {
 		// Without the event-log persistence tier no OnPersistedEntry signals
 		// arrive, so the tracker would never bump.
 		return
 	}
 	t, err := tracker.NewTracker(tracker.Options{
-		Workspaces: r.workspaceResolverForTracker(),
+		Workspaces: workspaces,
 		Observer:   attachmentMetricsObserver{},
 	})
 	if err != nil {
@@ -92,24 +93,24 @@ func (r *Router) startAttachmentTracker() {
 			"err", err)
 		return
 	}
-	r.attachmentTracker = t
+	h.tracker = t
 }
 
 // stopAttachmentTracker flushes pending bumps and releases the worker
 // goroutine. Called from Router.shutdown AFTER the persister has stopped so no
 // more OnPersistedEntry callbacks arrive while draining.
 //
-// Intentionally parents on context.Background, NOT r.historyCtx: shutdown's
-// first action cancels historyCtx, so deriving from it would give the drain
+// Intentionally parents on context.Background, NOT h.ctx: shutdown's
+// first action cancels h.ctx, so deriving from it would give the drain
 // loop zero time to flush. The 5s budget is the load-bearing bound.
-func (r *Router) stopAttachmentTracker() {
-	if r.attachmentTracker == nil {
+func (h *HistoryIO) stopAttachmentTracker() {
+	if h.tracker == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := r.attachmentTracker.Stop(ctx); err != nil {
+	if err := h.tracker.Stop(ctx); err != nil {
 		slog.Warn("attachment tracker stop timed out",
-			"err", err, "stats", r.attachmentTracker.Stats())
+			"err", err, "stats", h.tracker.Stats())
 	}
 }

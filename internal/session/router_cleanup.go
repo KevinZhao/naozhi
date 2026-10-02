@@ -80,10 +80,10 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	}
 	// Drop the on-disk event log so a future session reusing the key starts
 	// empty. Best-effort: a failed DropKey only leaves stale bytes behind.
-	r.dropEventLogForKey(key)
+	r.hist.dropEventLogForKey(key)
 	// Clear the attachment tracker's refs so double-TTL GC reclaims images.
 	// Best-effort: stale keyhash entries do not affect correctness.
-	r.clearAttachmentTrackerRefs(key, snap.workspace)
+	r.hist.clearAttachmentTrackerRefs(key, snap.workspace)
 	// Free the resident run-history ring (on-disk records stay) so the
 	// per-session ring map stays bounded.
 	r.sessionRuns.Invalidate(key)
@@ -139,20 +139,20 @@ func (r *Router) RemoveAsync(key string) bool {
 
 // dropEventLogForKey removes a session's persisted event log files (.log +
 // .idx). Safe with no persister or never-written keys. The timeout ctx derives
-// from r.historyCtx so an in-flight Shutdown cancels DropKey at the next
-// syscall boundary instead of blocking Remove for the full 2s; r.historyCtx is
+// from h.ctx so an in-flight Shutdown cancels DropKey at the next
+// syscall boundary instead of blocking Remove for the full 2s; h.ctx is
 // nil only in tests that bypass NewRouter, which fall back to Background.
-func (r *Router) dropEventLogForKey(key string) {
-	if r.eventLogPersister == nil {
+func (h *HistoryIO) dropEventLogForKey(key string) {
+	if h.persister == nil {
 		return
 	}
-	parent := r.historyCtx
+	parent := h.ctx
 	if parent == nil {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
-	if err := r.eventLogPersister.DropKey(ctx, key); err != nil {
+	if err := h.persister.DropKey(ctx, key); err != nil {
 		slog.Warn("event log drop failed", "key", key, "err", err)
 	}
 }
@@ -161,18 +161,18 @@ func (r *Router) dropEventLogForKey(key string) {
 // .meta file under `workspace` loses this session's keyhash. Safe with no
 // tracker or empty workspace. The short timeout keeps a slow FS from wedging
 // Router.Remove (a failure only delays GC by a generation) and is parented on
-// r.historyCtx so Shutdown cancels the walk; tests fall back to Background.
-func (r *Router) clearAttachmentTrackerRefs(key, workspace string) {
-	if r.attachmentTracker == nil || workspace == "" {
+// h.ctx so Shutdown cancels the walk; tests fall back to Background.
+func (h *HistoryIO) clearAttachmentTrackerRefs(key, workspace string) {
+	if h.tracker == nil || workspace == "" {
 		return
 	}
-	parent := r.historyCtx
+	parent := h.ctx
 	if parent == nil {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
-	if err := r.attachmentTracker.OnSessionRemoved(ctx, persist.KeyHash(key), workspace); err != nil {
+	if err := h.tracker.OnSessionRemoved(ctx, persist.KeyHash(key), workspace); err != nil {
 		slog.Warn("attachment tracker clear failed",
 			"key", key, "workspace", workspace, "err", err)
 	}
@@ -545,7 +545,7 @@ func (r *Router) saveIfDirty() {
 // Idempotent: subsequent calls return immediately after the first completes.
 //
 // CONTRACT: Shutdown assumes the naozhi process terminates shortly after it
-// returns. Two watcher goroutines (the `r.historyWg.Wait()` wrapper below and
+// returns. Two watcher goroutines (the wg.Wait() wrapper in HistoryIO.waitTasks and
 // the shim reconcile ticker in Scheduler.Stop) may outlive Shutdown when
 // blocked on hung I/O, relying on OS teardown; a reusable Router would leak one
 // per cycle. TestShutdown_SingleShotContract enforces that `shutdownOnce` stays
@@ -556,30 +556,14 @@ func (r *Router) Shutdown() {
 
 func (r *Router) shutdown() {
 	// Cancel the history ctx so in-flight LoadHistory*Ctx calls abort instead
-	// of blocking on slow reads; the bounded Wait below is the hard deadline.
-	// historyWgMu makes the cancel atomic vs the "check Err() then Add(1)" pair
-	// in runHistoryTask / loadResumeHistoryOnSpawn, so Wait() never races a late Add (#2186).
-	if r.historyCancel != nil {
-		r.historyWgMu.Lock()
-		r.historyCancel()
-		r.historyWgMu.Unlock()
-	}
+	// of blocking on slow reads; the bounded wait below is the hard deadline.
+	// cancelTasks is atomic vs the "check Err() then Add(1)" pair in
+	// runHistoryTask / loadResumeHistoryOnSpawn, so the wait never races a late Add (#2186).
+	r.hist.cancelTasks()
 
-	// Wait for history-loading goroutines, but not forever if FS I/O is hung
-	// (e.g. NFS); a leaked goroutine on timeout is bounded by the single-shot
-	// contract above. Do NOT replace historyWg.Wait() with a ctx-aware
-	// pattern: WaitGroup has none; the select IS the bounded wait.
-	historyDone := make(chan struct{})
-	go func() {
-		// Goroutine intentionally left running on timeout; cleaned up on process exit.
-		r.historyWg.Wait()
-		close(historyDone)
-	}()
-	historyTimer := time.NewTimer(5 * time.Second)
-	select {
-	case <-historyDone:
-		historyTimer.Stop()
-	case <-historyTimer.C:
+	// Wait for history-loading goroutines, but not forever if FS I/O is hung;
+	// a leaked goroutine on timeout is bounded by the single-shot contract above.
+	if !r.hist.waitTasks(5 * time.Second) {
 		slog.Warn("shutdown: history loading timed out after 5s, proceeding")
 	}
 	// Deadline timer: broadcast to unblock the wait on timeout. The broadcast
@@ -682,21 +666,12 @@ func (r *Router) shutdown() {
 	wg.Wait()
 
 	// Flush & stop the event-log persister last so batches still in the
-	// in-channel reach disk. The ctx parent is context.Background, NOT
-	// r.historyCtx: that was cancelled at the top of shutdown, so a child would
-	// see ctx.Err() immediately and the persister would skip flushing.
-	if r.eventLogPersister != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := r.eventLogPersister.Stop(ctx); err != nil {
-			slog.Warn("event log persister stop timed out",
-				"err", err, "stats", r.eventLogPersister.Stats())
-		}
-	}
+	// in-channel reach disk.
+	r.hist.stopPersister()
 
 	// Stop the attachment tracker AFTER the persister so no OnPersistedEntry
 	// bumps arrive during its drain (a bump after Stop would silently drop).
-	r.stopAttachmentTracker()
+	r.hist.stopAttachmentTracker()
 
 	// Flush the session-run-history write worker so records from the final
 	// turns reach disk. Close blocks on the bounded queue draining; nil store is a no-op.

@@ -50,8 +50,8 @@ func mkOverlayRouter(t *testing.T) *Router {
 	stateOf(r).picks.accessProfile = make(map[string]string)
 	r.setBackendEffortsForTest(map[string]string{"kiro": "high"})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "opusplan" })
-	r.claudeDir = t.TempDir()
-	r.backendDirs = map[string]string{"kiro": t.TempDir()}
+	r.hist.claudeDir = t.TempDir()
+	r.hist.backendDirs = map[string]string{"kiro": t.TempDir()}
 	return r
 }
 
