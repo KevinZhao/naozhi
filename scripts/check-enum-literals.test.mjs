@@ -1,7 +1,7 @@
 // node --test scripts/check-enum-literals.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkAll, contractKindProblems, deathReasonKeys, kindProblems, literalHits, run } from './check-enum-literals.mjs';
+import { checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run } from './check-enum-literals.mjs';
 
 const nzUtil = `
 const OTHER = { a: 1 };
@@ -62,7 +62,8 @@ const contract = {
 };
 const other = { 'b.js': ['keydown'] };
 const clean = {
-  'a.js': "const S = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL);\nconst icons = { user: 1, text: 2 };\nfunction f(e) { if (e.type === 'user' || e.type === 'event') return icons[e.type]; switch (e.type) { case 'text': return 3; } }\n",
+  'a.js': "const S = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL);\nconst icons = { user: 1, text: 2 };\nfunction f(e) { if (e.type === 'user' || e.type === 'event') return icons[e.type]; switch (e.type) { case 'text': return 3; } }\n" +
+    "const EVENT_WHOLE = new Map([['user', 1]]);\nconst EVENT_CONTENT = new Map([['text', 2], ['tool_use', 3], ['result', 4]]);\nconst EVENT_ICONS = new Map([['user', 5]]);\n",
   'b.js': "const k = ['user', 'other']; addEventListener('x', (ev) => { if (ev.type === 'keydown') k.push(ev.type); });\nif (e.type !== 'result') {}\n",
   'contract.js': "export const NZ_CONTRACT = { ENUMS: { EVENT_TYPE: ['user', 'text'] } };",
 };
@@ -193,13 +194,79 @@ test('kindProblems leaves one kind literal, a non-.type comparison and a non-.ty
   assert.deepEqual(check(ok).problems, []);
 });
 
+test('eventTableProblems passes a clean split, flags a missing kind, and is fine with the tables living in different files', () => {
+  assert.deepEqual(eventTableProblems(clean, contract), []);
+
+  const missingKind = { ...clean, 'a.js': clean['a.js'].replace("['result', 4]", '') };
+  assert.deepEqual(eventTableProblems(missingKind, contract), [
+    'EVENT_WHOLE and EVENT_CONTENT together do not cover kind "result" — eventHtml would fall through to the unknown-type chip',
+  ]);
+
+  const split = {
+    'event_render.js': "const EVENT_WHOLE = new Map([['user', 1]]);\n",
+    'other.js': "const EVENT_CONTENT = new Map([['text', 2], ['tool_use', 3], ['result', 4]]);\n",
+    'icons.js': "const EVENT_ICONS = new Map([['text', 5]]);\n",
+  };
+  assert.deepEqual(eventTableProblems(split, contract), []);
+});
+
+test('eventTableProblems flags a key that is not a kind in any table, and a key both WHOLE and CONTENT hold', () => {
+  // A stale kind (init, which D4 removed), a typo and a same-length swap.
+  const stale = {
+    ...clean,
+    'a.js': clean['a.js']
+      .replace("['result', 4]]", "['result', 4], ['init', 6]]")
+      .replace("new Map([['user', 1]])", "new Map([['user', 1], ['tool_reslt', 7]])")
+      .replace("new Map([['user', 5]])", "new Map([['usr', 5]])"),
+  };
+  assert.deepEqual(eventTableProblems(stale, contract), [
+    'EVENT_WHOLE has key "tool_reslt", which ENUMS.EVENT_TYPE does not list',
+    'EVENT_CONTENT has key "init", which ENUMS.EVENT_TYPE does not list',
+    'EVENT_ICONS has key "usr", which ENUMS.EVENT_TYPE does not list',
+  ]);
+
+  const overlap = { ...clean, 'a.js': clean['a.js'].replace("new Map([['user', 1]])", "new Map([['user', 1], ['text', 8]])") };
+  assert.deepEqual(eventTableProblems(overlap, contract), [
+    'EVENT_WHOLE and EVENT_CONTENT both have key "text" — EVENT_WHOLE wins, so the EVENT_CONTENT entry is dead',
+  ]);
+});
+
+test('eventTableProblems goes blind loudly when a table is declared nowhere, or not as a Map literal', () => {
+  const noContent = { 'a.js': "const EVENT_WHOLE = new Map([['user', 1]]);\nconst EVENT_ICONS = new Map([['user', 5]]);\n" };
+  assert.deepEqual(eventTableProblems(noContent, contract), [
+    'EVENT_CONTENT is not declared anywhere as `new Map([[kind, …], …])` — the event-table scan has gone blind',
+    'EVENT_WHOLE and EVENT_CONTENT together do not cover kind "text" — eventHtml would fall through to the unknown-type chip',
+    'EVENT_WHOLE and EVENT_CONTENT together do not cover kind "tool_use" — eventHtml would fall through to the unknown-type chip',
+    'EVENT_WHOLE and EVENT_CONTENT together do not cover kind "result" — eventHtml would fall through to the unknown-type chip',
+  ]);
+
+  // A plain object instead of a Map is not a recognised declaration either —
+  // the dynamic-key lookup it protects against is exactly what a Map table
+  // closes off.
+  const plainObject = { ...clean, 'a.js': clean['a.js'].replace("new Map([['user', 1]])", "{ user: 1 }") };
+  assert.ok(eventTableProblems(plainObject, contract).some((p) => /EVENT_WHOLE is not declared/.test(p)));
+
+  const noIcons = { ...clean, 'a.js': clean['a.js'].replace(/const EVENT_ICONS = .*\n/, '') };
+  assert.deepEqual(eventTableProblems(noIcons, contract), [
+    'EVENT_ICONS is not declared anywhere as `new Map([[kind, …], …])` — the event-table scan has gone blind',
+  ]);
+});
+
 test('checkAll reports every check, death_reason and kinds alike, over one tree', () => {
   const full = { ...contract, ENUMS: { ...contract.ENUMS, DEATH_REASON: ['idle_timeout', 'evicted', 'cli_exited'] } };
   const tree = { ...clean, 'nz_util.js': nzUtil };
   assert.deepEqual(checkAll(tree, full, other, ['a.js', 'b.js'], anchors).problems, []);
-  const bad = { ...tree, 'a.js': clean['a.js'] + "if (e.type === 'txt' || r === 'evicted') {}" };
+  const bad = {
+    ...tree,
+    'a.js': clean['a.js'].replace("['result', 4]", '') + "if (e.type === 'txt' || r === 'evicted') {}",
+  };
   const { problems } = checkAll(bad, { ...full, ENUMS: { ...full.ENUMS, EVENT_TYPE_MD_IGNORE: [] } }, other, ['a.js', 'b.js'], anchors);
-  for (const want of [/a\.js: hardcodes death_reason literal\(s\) evicted/, /EVENT_TYPE_MD_IGNORE is missing or empty/, /a\.js:\d+: \.type compared with "txt"/]) {
+  for (const want of [
+    /a\.js: hardcodes death_reason literal\(s\) evicted/,
+    /EVENT_TYPE_MD_IGNORE is missing or empty/,
+    /a\.js:\d+: \.type compared with "txt"/,
+    /do not cover kind "result"/,
+  ]) {
     assert.ok(problems.some((p) => want.test(p)), `${want} not in:\n${problems.join('\n')}`);
   }
 });

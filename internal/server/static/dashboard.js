@@ -3261,193 +3261,179 @@ function stripLeakedToolCalls(text) {
   return { prose: text.slice(0, start).replace(/\s+$/, ''), leaked: text.slice(start, end) };
 }
 
-// eventHtml renders one EventEntry bubble.
-// opts.includeInternal=true keeps tool_use / task_* / agent / result
-// events that the parent view hides (banner handles them there). The sub-agent
-// internal view (agent_view.js) needs them — a team member's work is almost
-// entirely tool_use; filtering those out leaves the panel looking
-// empty even when the jsonl transcript is full of content. RFC v4 §3.6.7 /
-// §3.6.1 contract: parent and agent views share the bubble renderer but
-// differ on the filter policy.
-function eventHtml(/** @type {EventEntry} */ e, opts) {
-  if (e && e.type === 'thinking') return '';
-  const includeInternal = !!(opts && opts.includeInternal);
-  if (!includeInternal && isInternalEvent(e)) return '';
-  // AskUserQuestion interactive card: dedicated renderer with option buttons.
-  // The matching tool_use entry is already filtered out via INTERNAL_EVENT_TYPES,
-  // so the card stands alone in the transcript.
-  if (e.type === 'ask_question') return renderAskQuestionCard(e);
-  // Filter out Claude Code system XML injected as user messages
+// EVENT_WHOLE renders a type's entire bubble, bypassing the generic
+// icon/content/time wrapper below (thinking is invisible; ask_question is
+// its own card). A Map, not a plain object: an unlisted e.type like
+// 'constructor' must resolve to undefined, not an inherited Object.prototype
+// member (#3025 S19-2; same reason for EVENT_CONTENT/EVENT_ICONS).
+const EVENT_WHOLE = new Map([
+  ['thinking', () => ''],
+  ['ask_question', renderAskQuestionCard],
+]);
+
+// EVENT_CONTENT fills div.event-content for a type still using the generic
+// wrapper. agent/result/task_* are plain escaped text (defaultTextContentHtml);
+// persist_gap shares the unrecognised-type chip (defaultEventChip).
+const EVENT_CONTENT = new Map([
+  ['system', (e) => esc(e.summary || e.type)],
+  ['text', textOrUserContentHtml],
+  ['user', textOrUserContentHtml],
+  ['todo', (e) => renderTodoList(e.detail, e.summary)],
+  ['tool_use', (e) => (e.tool_call ? toolUseHtml(e) : defaultTextContentHtml(e))],
+  ['tool_result', toolResultHtml],
+  ['agent', defaultTextContentHtml],
+  ['result', defaultTextContentHtml],
+  ['task_start', defaultTextContentHtml],
+  ['task_progress', defaultTextContentHtml],
+  ['task_done', defaultTextContentHtml],
+  ['persist_gap', defaultEventChip],
+]);
+
+// EVENT_ICONS: the .event-icon glyph for a handful of known types; anything
+// else (including the clawd-mascot override in eventIconHtml, which is
+// dynamic) stays blank.
+const EVENT_ICONS = new Map([
+  ['system', ICONS.gear],
+  ['user', ICONS.user],
+  ['text', ICONS.spark],
+  ['todo', ICONS.todo],
+]);
+
+// shouldHideEvent is eventHtml's pre-filter, run before any table lookup:
+// an internal type without includeInternal, injected system XML, and the
+// CLI's own SIGINT interrupt marker.
+function shouldHideEvent(e, includeInternal) {
+  if (!includeInternal && isInternalEvent(e)) return true;
   const raw = e.detail || e.summary || '';
-  if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
-  // CLI-synthesised interrupt marker: SIGINT-aborted turn, not user intent.
-  if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return '';
-  const icons = {system:ICONS.gear,user:ICONS.user,text:ICONS.spark,todo:ICONS.todo};
-  let icon = icons[e.type] || '';
-  // Assistant turns on the claude backend get the clawd mascot instead of
-  // the default \u2726 glyph. Other backends (kiro, gemini, ...) keep the glyph
-  // so each backend has a distinct visual identity in the transcript.
+  if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return true;
+  if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return true;
+  return false;
+}
+
+// eventIconHtml: EVENT_ICONS, plus the clawd mascot for a claude-backend
+// assistant turn in place of the default glyph (other backends keep theirs).
+function eventIconHtml(e) {
+  let icon = EVENT_ICONS.get(e.type) || '';
   if (e.type === 'text') {
     const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
     const backendID = sess.backend || perSession.backends[selection.key] || (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
     if (backendID === 'claude' || backendID === '') icon = CLAWD_SVG;
   }
+  return icon;
+}
 
-  // Strip redundant "[+N image(s)]" suffix when thumbnails are present
-  let cleanRaw = e.detail || e.summary || '';
-  if (e.images && e.images.length > 0) cleanRaw = cleanRaw.replace(/ \[\+\d+ image\(s\)\]$/, '');
+// defaultEventChip: the fallback .event-content for persist_gap and any
+// unrecognised type — a chip with the literal type string, its title the
+// detail/summary, and the summary repeated after so it stays visible.
+function defaultEventChip(e) {
+  const title = escAttr(e.detail || e.summary || '');
+  const tail = e.summary ? ' ' + esc(e.summary) : '';
+  return '<span class="event-chip" title="' + title + '">' + esc(e.type || '') + '</span>' + tail;
+}
 
-  let content = '';
-  if (e.type === 'system') {
-    content = esc(e.summary || e.type);
-  } else if (e.type === 'text' || e.type === 'user') {
-    // Guard against a leaked tool-call block (the model wrote <invoke …>
-    // syntax into a text turn instead of emitting a structured tool_use).
-    // Render the real prose normally and fold the malformed XML behind a
-    // collapsed warning so the bubble stays readable; esc() keeps the raw
-    // payload inert (it is displayed as text, never parsed as HTML).
-    const leak = stripLeakedToolCalls(cleanRaw);
-    if (leak) {
-      content = renderMd(leak.prose || e.type) +
-        '<details class="leaked-toolcall"><summary class="leaked-toolcall-summary">' +
-        '⚠ 模型输出了未执行的工具调用（已折叠）</summary>' +
-        '<pre class="leaked-toolcall-body">' + esc(leak.leaked) + '</pre></details>';
-    } else {
-      content = renderMd(cleanRaw || e.type);
-    }
-  } else if (e.type === 'todo') {
-    content = renderTodoList(e.detail, e.summary);
-  } else if (e.type === 'tool_use' && e.tool_call) {
-    // ACP rich tool progress row (kiro). Originally introduced by
-    // Multi-Backend RFC §8.3 D17. The main transcript filters tool_use
-    // events out (see isInternalEvent), so this branch only fires inside
-    // the subagent panel where eventHtml(..., {includeInternal:true})
-    // surfaces the per-agent tool runs:
-    //   ▶ <title>          [kind · status]     ← summary line
-    //     stdout / stderr / raw                ← collapsed body
-    //
-    // Status pill colors (matches RFC §8.4 traffic-light convention):
-    //   ""           — neutral grey (initial invocation, awaiting result)
-    //   in_progress  — blue
-    //   completed    — green
-    //   failed       — red
-    //
-    // Output extraction is best-effort: kiro emits
-    // {"items":[{"Json":{"exit_status":"...","stdout":"..."}}]} but other
-    // backends may use a different shape. We try the kiro path first,
-    // then fall back to pretty-printed JSON.
-    const tc = e.tool_call;
-    const status = tc.status || '';
-    const kind = tc.kind || '';
-    const title = tc.title || tc.name || tc.id || '(tool)';
-    const statusClass = 'tc-status tc-status-' + (status || 'pending');
-    const statusLabel = status || 'pending';
-    let bodyText = '';
-    if (tc.output_json) {
-      try {
-        const parsed = JSON.parse(tc.output_json);
-        if (parsed && Array.isArray(parsed.items) && parsed.items.length > 0 &&
-            parsed.items[0] && parsed.items[0].Json && typeof parsed.items[0].Json.stdout === 'string') {
-          bodyText = parsed.items[0].Json.stdout;
-        } else {
-          bodyText = JSON.stringify(parsed, null, 2);
-        }
-      } catch { bodyText = tc.output_json; }
-    } else if (tc.input_json) {
-      try {
-        bodyText = JSON.stringify(JSON.parse(tc.input_json), null, 2);
-      } catch { bodyText = tc.input_json; }
-    }
-    const bodyHtml = bodyText
-      ? '<pre class="tc-body">' + esc(bodyText.length > 8000 ? bodyText.slice(0, 8000) + '\n…' : bodyText) + '</pre>'
-      : '';
-    const kindBadge = kind ? '<span class="tc-kind">' + esc(kind) + '</span>' : '';
-    content = '<details class="tc-wrap"' + (status === 'failed' ? ' open' : '') + '>' +
-      '<summary class="tc-summary">' +
-      '<span class="tc-icon" aria-hidden="true">🛠</span>' +
-      '<span class="tc-title">' + esc(title) + '</span>' +
-      kindBadge +
-      '<span class="' + statusClass + '">' + esc(statusLabel) + '</span>' +
-      '</summary>' + bodyHtml + '</details>';
-  } else if (e.type === 'tool_result') {
-    // RFC v4 agent-team-ui §3.6.7 — fold long outputs by default. The
-    // summary is the first line (< 120 chars) and the full detail is
-    // capped at 16 KB server-side. When the CLI emitted a
-    // <persisted-output>, the Tool field carries "persisted:tool-results/
-    // <id>.ext" so the frontend can offer a fetch-full button.
-    var summary = e.summary || '(tool result)';
-    var detail = e.detail || '';
-    var persistedPath = '';
-    if (typeof e.tool === 'string' && e.tool.indexOf('persisted:') === 0) {
-      persistedPath = e.tool.slice('persisted:'.length);
-    }
-    var detailHtml = detail
-      ? '<pre class="tr-detail">' + esc(detail) + '</pre>'
-      : '';
-    var persistedBtn = '';
-    if (persistedPath && selection.key) {
-      var toolURL = NZ_CONTRACT.API.sessions_tool_result + '?key=' + encodeURIComponent(selection.key) +
-        '&node=' + encodeURIComponent(selection.node || 'local') +
-        '&path=' + encodeURIComponent(persistedPath);
-      persistedBtn = '<a class="tr-persisted" href="' + escAttr(toolURL) +
-        '" target="_blank" rel="noopener noreferrer" title="查看完整输出">📎 打开完整输出</a>';
-    }
-    content = '<details class="tr-wrap"><summary class="tr-summary">' +
-      esc(summary) + '</summary>' + detailHtml + persistedBtn + '</details>';
-  } else {
-    content = esc(e.detail || e.summary || e.type);
-  }
+// defaultTextContentHtml: plain-text content for a known type with no
+// structure of its own (agent, result, task_*).
+function defaultTextContentHtml(e) {
+  return esc(e.detail || e.summary || e.type);
+}
 
-  // Render image thumbnails for user messages. When ImagePaths is populated
-  // (image was persisted to the workspace attachment directory), the click
-  // target is the full-size /api/sessions/attachment URL instead of the
-  // thumbnail itself — the lightbox then shows the original image rather
-  // than a 600 px blur. Falls back to the data URI for legacy entries that
-  // predate the persist path. The thumbnail's <img src> is always the data
-  // URI so the bubble render stays instant (no network fetch for preview).
-  //
-  // Cache-busting: the attachment store re-uses date-partitioned UUIDs,
-  // so two sessions cannot legitimately share an attachment URL — but if
-  // the browser has a cached 404 from a GC-expired attachment, it will
-  // short-circuit onerror on the very first load AFTER the attachment is
-  // restored (unlikely but possible during operator file shuffles). A
-  // per-event `?v=<time>` query string side-steps the negative cache
-  // without invalidating legitimate hits.
-  //
-  // Fallback to thumb on load failure: the lightbox's loadWithFallback
-  // covers both HTTP 404 (attachment GC'd) and Content-Type mismatch
-  // (it checks naturalWidth===0 after onload). See the lightbox IIFE's
-  // loadWithFallback comment for rationale. RFC §3.6.3.
-  let imgHtml = '';
-  if (e.images && e.images.length > 0) {
-    const paths = e.image_paths || [];
-    const cacheBust = e.time ? ('&v=' + e.time) : '';
-    imgHtml = '<div class="event-images">' + e.images.map((src, i) => {
-      const p = paths[i] || '';
-      let full = src;
-      if (p && selection.key) {
-        full = NZ_CONTRACT.API.sessions_attachment + '?key=' + encodeURIComponent(selection.key) +
-          '&path=' + encodeURIComponent(p) + cacheBust;
+// textOrUserContentHtml folds a leaked tool-call block (the model wrote
+// <invoke …> into a text turn) behind a collapsed warning instead of
+// breaking the bubble; esc() keeps it inert.
+function textOrUserContentHtml(e, cleanRaw) {
+  const leak = stripLeakedToolCalls(cleanRaw);
+  if (!leak) return renderMd(cleanRaw || e.type);
+  return renderMd(leak.prose || e.type) +
+    '<details class="leaked-toolcall"><summary class="leaked-toolcall-summary">' +
+    '⚠ 模型输出了未执行的工具调用（已折叠）</summary>' +
+    '<pre class="leaked-toolcall-body">' + esc(leak.leaked) + '</pre></details>';
+}
+
+// toolUseHtml: the ACP rich tool progress row (kiro, includeInternal-only).
+// Output extraction tries the kiro {items:[{Json:{stdout}}]} shape first,
+// then falls back to pretty-printed JSON.
+function toolUseHtml(e) {
+  const tc = e.tool_call;
+  const status = tc.status || '';
+  const kind = tc.kind || '';
+  const title = tc.title || tc.name || tc.id || '(tool)';
+  const statusClass = 'tc-status tc-status-' + (status || 'pending');
+  const statusLabel = status || 'pending';
+  let bodyText = '';
+  if (tc.output_json) {
+    try {
+      const parsed = JSON.parse(tc.output_json);
+      if (parsed && Array.isArray(parsed.items) && parsed.items.length > 0 &&
+          parsed.items[0] && parsed.items[0].Json && typeof parsed.items[0].Json.stdout === 'string') {
+        bodyText = parsed.items[0].Json.stdout;
+      } else {
+        bodyText = JSON.stringify(parsed, null, 2);
       }
-      // No inline onclick: a document-level delegated listener in the
-      // lightbox IIFE handles clicks on .event-images img[data-full] and
-      // opens the whole group (RFC lightbox-gallery-nav §3). Delegation
-      // survives the poll-driven innerHTML re-renders that destroy and
-      // recreate these nodes.
-      return '<img src="' + escAttr(src) + '" loading="lazy" ' +
-        'data-full="' + escAttr(full) + '" ' +
-        'data-thumb="' + escAttr(src) + '">';
-    }).join('') + '</div>';
+    } catch { bodyText = tc.output_json; }
+  } else if (tc.input_json) {
+    try {
+      bodyText = JSON.stringify(JSON.parse(tc.input_json), null, 2);
+    } catch { bodyText = tc.input_json; }
   }
+  const bodyHtml = bodyText
+    ? '<pre class="tc-body">' + esc(bodyText.length > 8000 ? bodyText.slice(0, 8000) + '\n…' : bodyText) + '</pre>'
+    : '';
+  const kindBadge = kind ? '<span class="tc-kind">' + esc(kind) + '</span>' : '';
+  return '<details class="tc-wrap"' + (status === 'failed' ? ' open' : '') + '>' +
+    '<summary class="tc-summary">' +
+    '<span class="tc-icon" aria-hidden="true">🛠</span>' +
+    '<span class="tc-title">' + esc(title) + '</span>' +
+    kindBadge +
+    '<span class="' + statusClass + '">' + esc(statusLabel) + '</span>' +
+    '</summary>' + bodyHtml + '</details>';
+}
 
-  // Copy + ask-aside bubble actions share one display rule: only long
-  // messages (>500 raw chars) expose the toolbar, and both buttons fade in
-  // on .event hover / keyboard focus via `.hover-only` (see CSS
-  // .event-copy-btn.hover-only / .event-ask-btn.hover-only). Short bubbles
-  // stay uncluttered; long bubbles are where "select-and-copy gets
-  // clobbered by re-render" actually hurts, and where a separate aside
-  // thread is worth opening. Keeping the gate identical for both buttons is
-  // the contract — don't let them diverge.
+// toolResultHtml folds long outputs by default; a <persisted-output> Tool
+// field of "persisted:tool-results/<id>.ext" gets a fetch-full button.
+function toolResultHtml(e) {
+  const summary = e.summary || '(tool result)';
+  const detail = e.detail || '';
+  let persistedPath = '';
+  if (typeof e.tool === 'string' && e.tool.indexOf('persisted:') === 0) {
+    persistedPath = e.tool.slice('persisted:'.length);
+  }
+  const detailHtml = detail ? '<pre class="tr-detail">' + esc(detail) + '</pre>' : '';
+  let persistedBtn = '';
+  if (persistedPath && selection.key) {
+    const toolURL = NZ_CONTRACT.API.sessions_tool_result + '?key=' + encodeURIComponent(selection.key) +
+      '&node=' + encodeURIComponent(selection.node || 'local') +
+      '&path=' + encodeURIComponent(persistedPath);
+    persistedBtn = '<a class="tr-persisted" href="' + escAttr(toolURL) +
+      '" target="_blank" rel="noopener noreferrer" title="查看完整输出">📎 打开完整输出</a>';
+  }
+  return '<details class="tr-wrap"><summary class="tr-summary">' +
+    esc(summary) + '</summary>' + detailHtml + persistedBtn + '</details>';
+}
+
+// eventImagesHtml: user-message thumbnails. The click target is the
+// full-size attachment URL when image_paths is populated, else the data URI;
+// `?v=<time>` cache-busts a GC'd attachment. Click handling is delegated
+// (the lightbox IIFE), so it survives innerHTML re-renders.
+function eventImagesHtml(e) {
+  if (!e.images || e.images.length === 0) return '';
+  const paths = e.image_paths || [];
+  const cacheBust = e.time ? ('&v=' + e.time) : '';
+  return '<div class="event-images">' + e.images.map((src, i) => {
+    const p = paths[i] || '';
+    let full = src;
+    if (p && selection.key) {
+      full = NZ_CONTRACT.API.sessions_attachment + '?key=' + encodeURIComponent(selection.key) +
+        '&path=' + encodeURIComponent(p) + cacheBust;
+    }
+    return '<img src="' + escAttr(src) + '" loading="lazy" ' +
+      'data-full="' + escAttr(full) + '" ' +
+      'data-thumb="' + escAttr(src) + '">';
+  }).join('') + '</div>';
+}
+
+// eventActionsHtml: copy / ask-aside buttons, one shared >500-char gate so
+// they cannot drift apart (both hover-revealed via .hover-only).
+function eventActionsHtml(e, cleanRaw) {
   const isLong = !!cleanRaw && cleanRaw.length > 500;
   const copyBtn = isLong && (e.type === 'text' || e.type === 'user')
     ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-action="event-copy" title="复制" aria-label="复制消息">复制</button>'
@@ -3455,18 +3441,32 @@ function eventHtml(/** @type {EventEntry} */ e, opts) {
   const askBtn = isLong && e.type === 'text'
     ? '<button class="event-ask-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" data-action="ask-aside" title="基于此内容追问">' + ICONS.preview + ' 追问</button>'
     : '';
+  return { copyBtn, askBtn };
+}
+
+// eventHtml renders one EventEntry bubble via EVENT_WHOLE or EVENT_CONTENT.
+// opts.includeInternal=true keeps tool_use/task_*/agent/result events the
+// parent view hides — agent_view.js's sub-agent panel needs them, since a
+// team member's work is almost entirely tool_use.
+function eventHtml(/** @type {EventEntry} */ e, opts) {
+  const includeInternal = !!(opts && opts.includeInternal);
+  if (shouldHideEvent(e, includeInternal)) return '';
+  if (EVENT_WHOLE.has(e.type)) return EVENT_WHOLE.get(e.type)(e);
+  const icon = eventIconHtml(e);
+
+  // Strip redundant "[+N image(s)]" suffix when thumbnails are present.
+  let cleanRaw = e.detail || e.summary || '';
+  if (e.images && e.images.length > 0) cleanRaw = cleanRaw.replace(/ \[\+\d+ image\(s\)\]$/, '');
+
+  const content = (EVENT_CONTENT.get(e.type) || defaultEventChip)(e, cleanRaw);
+  const imgHtml = eventImagesHtml(e);
+  const { copyBtn, askBtn } = eventActionsHtml(e, cleanRaw);
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
-  // data-uuid carries the backend's authoritative entry identity (crypto/rand
-  // hex from internal/cli/uuid.go, round-tripped via the event-log entry). It
-  // is the idempotency key for user-bubble dedup: a process restart re-subscribe
-  // replays history, and without a stable per-event identity the same user
-  // message renders twice (optimistic bubble already consumed, time cursor
-  // didn't advance). See docs/rfc/dashboard-event-uuid-idempotent-render.md.
-  // Attribute is omitted (not empty) when uuid is absent so "no uuid" events
-  // (some CLI-synthesised entries) stay distinguishable and never collide.
+  // data-uuid: the backend's entry identity, the dedup key for a restart's
+  // history replay (docs/rfc/dashboard-event-uuid-idempotent-render.md).
   const uuidAttr = e.uuid ? ' data-uuid="' + escAttr(e.uuid) + '"' : '';
-  return '<div class="event ' + esc(e.type||'') + '"' + timeAttr + uuidAttr + '>' +
+  return '<div class="event ' + escAttr(e.type || '') + '"' + timeAttr + uuidAttr + '>' +
     '<span class="event-icon">' + icon + '</span>' +
     '<div class="event-content">' + content + imgHtml + copyBtn + askBtn + '</div></div>';
 }

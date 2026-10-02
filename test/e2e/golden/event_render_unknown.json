@@ -8,7 +8,7 @@
       "time": 1767268800000
     },
     "opts": null,
-    "html": "<div class=\"event persist_gap\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">eventlog: disk full</div></div>"
+    "html": "<div class=\"event persist_gap\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"eventlog: disk full\">persist_gap</span> 12 events were not persisted</div></div>"
   },
   {
     "name": "persist_gap without detail",
@@ -18,7 +18,7 @@
       "time": 1767268800000
     },
     "opts": null,
-    "html": "<div class=\"event persist_gap\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">3 events were not persisted</div></div>"
+    "html": "<div class=\"event persist_gap\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"3 events were not persisted\">persist_gap</span> 3 events were not persisted</div></div>"
   },
   {
     "name": "zz_future",
@@ -29,7 +29,7 @@
       "time": 1767268800000
     },
     "opts": null,
-    "html": "<div class=\"event zz_future\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">payload</div></div>"
+    "html": "<div class=\"event zz_future\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"payload\">zz_future</span> a kind from a newer server</div></div>"
   },
   {
     "name": "zz_future bare",
@@ -38,7 +38,7 @@
       "time": 1767268800000
     },
     "opts": null,
-    "html": "<div class=\"event zz_future\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\">zz_future</div></div>"
+    "html": "<div class=\"event zz_future\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"\">zz_future</span></div></div>"
   },
   {
     "name": "type constructor",
@@ -49,7 +49,7 @@
       "time": 1767268800000
     },
     "opts": null,
-    "html": "<div class=\"event constructor\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">function Object() { [native code] }</span><div class=\"event-content\">detail</div></div>"
+    "html": "<div class=\"event constructor\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"detail\">constructor</span> proto name</div></div>"
   },
   {
     "name": "type __proto__",
@@ -59,7 +59,7 @@
       "time": 1767268800000
     },
     "opts": null,
-    "html": "<div class=\"event __proto__\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">[object Object]</span><div class=\"event-content\">proto name</div></div>"
+    "html": "<div class=\"event __proto__\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"proto name\">__proto__</span> proto name</div></div>"
   },
   {
     "name": "type toString",
@@ -69,7 +69,7 @@
       "time": 1767268800000
     },
     "opts": null,
-    "html": "<div class=\"event toString\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">function toString() { [native code] }</span><div class=\"event-content\">proto name</div></div>"
+    "html": "<div class=\"event toString\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"proto name\">toString</span> proto name</div></div>"
   },
   {
     "name": "type toString, internal",
@@ -81,6 +81,27 @@
     "opts": {
       "includeInternal": true
     },
-    "html": "<div class=\"event toString\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\">function toString() { [native code] }</span><div class=\"event-content\">d</div></div>"
+    "html": "<div class=\"event toString\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"d\">toString</span></div></div>"
+  },
+  {
+    "name": "markup in type, summary and detail",
+    "input": {
+      "type": "<img src=x onerror=alert(1)>",
+      "summary": "<b>s</b>",
+      "detail": "\"><svg onload=1>",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event &lt;img src=x onerror=alert(1)&gt;\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"&quot;&gt;&lt;svg onload=1&gt;\">&lt;img src=x onerror=alert(1)&gt;</span> &lt;b&gt;s&lt;/b&gt;</div></div>"
+  },
+  {
+    "name": "markup in type and summary, no detail",
+    "input": {
+      "type": "x\"><i>",
+      "summary": "\"><svg onload=2>",
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event x&quot;&gt;&lt;i&gt;\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\"><span class=\"event-icon\"></span><div class=\"event-content\"><span class=\"event-chip\" title=\"&quot;&gt;&lt;svg onload=2&gt;\">x\"&gt;&lt;i&gt;</span> \"&gt;&lt;svg onload=2&gt;</div></div>"
   }
 ]
