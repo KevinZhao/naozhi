@@ -94,14 +94,27 @@ test('the previewed discovered session: close lands, then card and preview go', 
   } finally { await close(); }
 });
 
-test('a leaked cron stub on screen: the panel clears and no DELETE is sent', async ({ browser }) => {
+test('a leaked cron stub on screen: its card and the panel go, no DELETE is sent', async ({ browser }) => {
   const { page, deletes, close } = await open(browser);
   try {
     await page.click(`.session-card[data-key="${KEY}"]`);
     await expect(page.locator('#main #events-scroll')).toHaveCount(1);
-    // Stand in for the server bug: the stub is the selected session.
-    await page.evaluate(() => { window.nz.test.selectedKey = 'cron:job-leaked'; });
-    await dismiss(page, 'cron:job-leaked');
+    // Stand in for the server bug: the stub has a sidebar card and is the
+    // selected session. The card is counted synchronously after the call,
+    // before the resync's re-render could drop it on dismissSession's behalf.
+    const left = await page.evaluate((k) => {
+      const src = document.querySelector('.session-card[data-key="' + k + '"]');
+      const stub = /** @type {HTMLElement} */ (src.cloneNode(true));
+      stub.dataset.key = 'cron:job-leaked';
+      src.parentNode.appendChild(stub);
+      const count = () => document.querySelectorAll('.session-card[data-key="cron:job-leaked"]').length;
+      const before = count();
+      window.nz.test.selectedKey = 'cron:job-leaked';
+      window.nz.test.dismissSession('cron:job-leaked', 'local');
+      return [before, count()];
+    }, KEY);
+    expect(left, 'the stub card is there, then removed by the dismiss itself').toEqual([1, 0]);
+    await expect(page.locator('.session-card[data-key="cron:job-leaked"]')).toHaveCount(0);
     await expect(page.locator('#main #quick-ask-input')).toHaveCount(1);
     expect(await selectedKey(page)).toBeNull();
     await expect(page.locator(`.session-card[data-key="${KEY}"]`)).toHaveCount(1);

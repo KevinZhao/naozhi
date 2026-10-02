@@ -576,7 +576,7 @@ function renderPreviewText(project, node, path, body, data, line) {
     parts.push('<pre class="fv-lined"><span class="fv-gutter" aria-hidden="true">' + gutter + '</span><code class="fv-code">' + esc(raw) + '</code></pre>');
   }
   body.innerHTML = parts.join('');
-  // Flush the KaTeX / Mermaid pending slots deps.renderRich produced above.
+  // Flush renderRich's KaTeX/Mermaid slots, or a first .md open shows katex-pending.
   deps.runPendingAsync();
   // Mirror chat-side file-ref chip injection so paths inside the preview
   // body also get [preview]/[download] affordances.

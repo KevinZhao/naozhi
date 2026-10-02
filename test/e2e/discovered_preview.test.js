@@ -17,7 +17,7 @@ test.beforeEach(({ }, testInfo) => {
   }
 });
 
-test('a discovered preview paints the panel, loads the tail and appends what the poll finds', async ({ browser }) => {
+test('a discovered preview paints the panel, loads the tail and appends what the poll finds exactly once', async ({ browser }) => {
   const now = Date.now();
   const preview = [
     { type: 'user', summary: 'first question', detail: 'first question', time: now - 60000, uuid: 'dp-1' },
@@ -32,6 +32,8 @@ test('a discovered preview paints the panel, loads the tail and appends what the
   });
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
   const page = await ctx.newPage();
+  let previewRequests = 0;
+  page.on('request', (r) => { if (r.url().includes('/api/discovered/preview')) previewRequests++; });
   try {
     await page.goto(mock.url + '/dashboard');
     await page.locator('.session-card[data-key^="_discovered:777"]').click();
@@ -49,9 +51,14 @@ test('a discovered preview paints the panel, loads the tail and appends what the
     // The CLI writes more; the next poll tick appends it below what is shown.
     preview.push({ type: 'text', summary: 'later answer', detail: 'later answer', time: now - 1000, uuid: 'dp-3' });
     await expect(events).toContainText('later answer', { timeout: 6000 });
+    // Let a full later tick land: the in-flight guard means request n+2 only
+    // goes out after tick n+1 has finished appending (or not).
+    const seen = previewRequests;
+    await expect.poll(() => previewRequests, { timeout: 8000 }).toBeGreaterThanOrEqual(seen + 2);
     const text = await events.innerText();
     expect(text.indexOf('first answer')).toBeLessThan(text.indexOf('later answer'));
-    expect(text.split('first answer').length - 1, 'the poll appends only the new tail').toBe(1);
+    expect(text.split('first answer').length - 1, 'the old tail is not repeated').toBe(1);
+    expect(text.split('later answer').length - 1, 'the new tail is appended once, not every tick').toBe(1);
   } finally {
     await ctx.close();
     mock.server.close();
