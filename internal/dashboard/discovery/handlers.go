@@ -195,7 +195,7 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 		if entries == nil {
 			entries = []clievent.EventEntry{}
 		}
-		httputil.WriteJSON(w, entries)
+		httputil.WriteJSON(w, clievent.ForWire(entries))
 		return
 	}
 
@@ -225,7 +225,7 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 		entries = []clievent.EventEntry{}
 	}
 
-	httputil.WriteJSON(w, entries)
+	httputil.WriteJSON(w, clievent.ForWire(entries))
 }
 
 // HandleTakeover serves POST /api/discovered/takeover — kill an external CLI

@@ -109,6 +109,37 @@ func TestAgentEvents_Happy(t *testing.T) {
 	}
 }
 
+// TestAgentEvents_SendsTheWireView: the REST transcript of a sub-agent is the
+// same wire view the WS agent_event frame carries — a credential the agent
+// printed is redacted on both paths.
+func TestAgentEvents_SendsTheWireView(t *testing.T) {
+	const secret = "sk-ant-api03-RRRRRRRRRRRRRRRRRRRRRRRR"
+	dir := claudeProjectsTestRoot(t)
+	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"key ` + secret + `"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
+	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", []string{line})
+	linker := subagent.NewLinker()
+	linker.SeedFromHistory([]clievent.EventEntry{{
+		Type: "task_start", ToolUseID: "toolu_W", TaskID: "t1",
+		InternalAgentID: "agent-bbbbbbbbbbbbbbbbb", JSONLPath: path, Subagent: "worker",
+	}})
+	h := &Handler{
+		allowedRoot: claudeProjectsAllowedRoot(),
+		linkerFor:   func(string) agentlink.AgentLinker { return linker },
+	}
+
+	w := httptest.NewRecorder()
+	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", "", ""))
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, `"text"`) {
+		t.Fatalf("status=%d body=%s", w.Code, body)
+	}
+	for _, leak := range []string{"jsonl_path", "internal_agent_id", secret} {
+		if strings.Contains(body, leak) {
+			t.Errorf("agent_events body carries %q: %s", leak, body)
+		}
+	}
+}
+
 func TestAgentEvents_Pending_WhenLinkerUnaware(t *testing.T) {
 	t.Parallel()
 	linker := subagent.NewLinker()

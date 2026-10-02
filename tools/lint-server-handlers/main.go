@@ -25,6 +25,9 @@
 //     (rule_sublock.go).
 //   - no_late_setters: session / cron / sysession / upstream take their
 //     collaborators at construction (rule_late_setters.go).
+//   - wire_egress: an EventEntry leaves the process only as its wire view
+//     (rule_wire_egress.go). Typed over the whole module, so it runs from
+//     main beside collectViolations, whose tests use fixture directories.
 //
 // Two rules were deleted in #2554:
 //   - iface_match scanned for godoc `satisfies:` comments and cross-checked them
@@ -89,6 +92,7 @@ var ruleIDs = []string{
 	"server_field_liveness",
 	"sublock_encapsulation",
 	"no_late_setters",
+	"wire_egress",
 }
 
 type Violation struct {
@@ -123,6 +127,8 @@ func main() {
 		genBaseline  = flag.Bool("gen-baseline", false, "(re)generate handle_baseline section of exemptions.yaml from current source and exit")
 		serverPkg    = flag.String("server-pkg", "internal/server", "server package directory")
 		dashboardPkg = flag.String("dashboard-pkg", "internal/dashboard", "dashboard package directory (may not exist yet)")
+		moduleRoot   = flag.String("module-root", ".", "module root the typed rules load")
+		egressReport = flag.Bool("egress-report", false, "list every wire_egress conversion site with its verdict on stderr")
 	)
 	flag.Parse()
 
@@ -157,6 +163,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "scan %s: %v\n", *serverPkg, err)
 		os.Exit(2)
 	}
+	typed, err := collectTypedViolations(*moduleRoot, *egressReport)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "typed rules: %v\n", err)
+		os.Exit(2)
+	}
+	vs = append(vs, typed...)
 
 	if os.Getenv("LINT_VERBOSE") == "1" {
 		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b partially landed — send-block slice is enforced (send_engine_ownership, #2551); the general AST field_block 对账 was owed to Phase 4b, which ADR-001 shelved. rule 4 method-set 对账 + rule 5 git tag 对账 due Phase 1 (server-split-phase4-design.md v0.6.1 §六.2.0.4)")

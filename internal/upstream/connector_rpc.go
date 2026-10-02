@@ -88,7 +88,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		// #2456: re-admit the watermark ms (same rule as the WS subscribe
 		// catch-up) so a same-ms sibling is not lost across the relay.
-		return marshalResult(sess.EventEntriesSince(clievent.SinceInclusive(p.After)))
+		return marshalResult(clievent.ForWire(sess.EventEntriesSince(clievent.SinceInclusive(p.After))))
 
 	case "fetch_backends":
 		// Return THIS node's backend manifest for the primary's node-aware
