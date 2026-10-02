@@ -573,7 +573,7 @@ S12g 的拆分是纯搬迁，每个顶层声明（连同 doc 注释）和每个�
   - router_rename.go（129）：RenameSession。
   - respawn_snapshot.go（157）：snapshotOldSession 到 countUserTurns。
   - HistoryIO 的四个方法（attachHistorySource、bindNewSessionHistory、installPersistSink、loadResumeHistoryOnSpawn）回到 history_io.go（172 → 297）。
-- router_core.go（1094 → 848 行）拆出 router_restore.go（259）：restoreStore、restoreSessionFromEntry、startBackgroundHistoryLoaders。
+- router_core.go（1094 → 848 行）拆出 router_restore.go（254）：restoreStore、restoreSessionFromEntry、startBackgroundHistoryLoaders。
 
 终值（S12g 实测）：字段 18（目标 ≤22），方法 99（目标 ≤100），`*Router` 在接收者以外出现 5 次，facet 闭包 17 个类型、0 违规，最长的非测试文件是 managed_query.go（862 行，目标 ≤900），行数豁免 0 个。`TestRouterBudget` 对这些数严格相等；`TestRouterBudget_AtTarget` 拿实测值和终值常量 `routerFieldTargetBaseline`、`routerMethodTargetBaseline`、`routerFileLinesTargetBaseline` 比较，所以把基线跟着一个变大的 Router 一起调高，这个测试照样会红。三个终值常量名里带 Baseline，调高它们要在 scripts/ratchet-raises.jsonl 登记。
 
