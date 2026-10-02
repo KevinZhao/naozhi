@@ -136,12 +136,6 @@ func (r *Router) SetSessionBackend(key, backend string) {
 	}
 }
 
-// SessionBackend returns the backend override for key, or "" if none.
-func (r *Router) SessionBackend(key string) (backend string) {
-	r.ss.View(func(v sessView) { backend = v.Ext().PickedBackend(key) })
-	return backend
-}
-
 // setPick sets (or, for "", clears) key's entry in a pick map. It reports
 // false when a brand-new key is refused because the map is at
 // maxBackendOverrides; updating an existing key never hits the cap.
@@ -167,12 +161,6 @@ func (r *Router) SetSessionAccessProfile(key, profile string) {
 		slog.Warn("accessProfileOverrides at capacity; dropping override",
 			"key", key, "cap", maxBackendOverrides)
 	}
-}
-
-// SessionAccessProfile returns the access-profile override for key, or "".
-func (r *Router) SessionAccessProfile(key string) (profile string) {
-	r.ss.View(func(v sessView) { profile = v.Ext().PickedAccessProfile(key) })
-	return profile
 }
 
 // CLIPath returns the CLI binary path for health checks.

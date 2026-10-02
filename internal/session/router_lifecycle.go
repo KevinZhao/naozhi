@@ -548,7 +548,7 @@ func (r *Router) consumePendingTuning(tx sessTx, key string, ov sessionOverrides
 
 // snapshotOldSession captures the per-session fields a spawn needs after it
 // leaves the transaction. Pure read; nil-safe. It takes a View because these
-// fields are written inside transactions by sibling paths (RegisterCronStub,
+// fields are written inside transactions by sibling paths (RegisterCronStubWithChain,
 // evictOldest, the spawn itself), so reading them outside one races those
 // writers.
 func snapshotOldSession(_ sessView, old *ManagedSession) ([]string, float64, float64, int64, sessionOverrides) {

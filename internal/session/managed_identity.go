@@ -95,7 +95,7 @@ func (s *ManagedSession) updateCLIIdentity(mut func(cliIdentityBox) cliIdentityB
 func (s *ManagedSession) Backend() string { return s.loadCLIIdentity().backend }
 
 // SetBackend records the backend ID for this session. Called at spawn time
-// and (rarely) by reconnectShims after a naozhi restart.
+// and (rarely) by ReconnectShimsCtx after a naozhi restart.
 func (s *ManagedSession) SetBackend(id string) {
 	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
 		cur.backend = id

@@ -121,19 +121,6 @@ func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
 	return s.EventEntries()
 }
 
-// EventEntriesForKeyAppend is the buffer-reusing variant of EventEntriesForKey:
-// it appends the keyed session's event log onto dst and returns the grown slice,
-// or dst unchanged when the key is unknown (#1885). Ownership matches
-// ManagedSession.EventEntriesAppend: the caller must not retain dst across
-// calls; the returned slice shares dst's backing array.
-func (r *Router) EventEntriesForKeyAppend(dst []clievent.EventEntry, key string) []clievent.EventEntry {
-	s := r.ss.Load(key)
-	if s == nil {
-		return dst
-	}
-	return s.EventEntriesAppend(dst)
-}
-
 // InterruptSession sends SIGINT to the CLI process for the given session key.
 // Returns true if the session was found and interrupted.
 // WARNING: SIGINT terminates the whole CLI process on Claude `-p` mode, killing
@@ -279,23 +266,15 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	return effectiveKey
 }
 
-// RegisterCronStub creates a suspended exempt session for a cron job so the
-// job appears in the dashboard before its first execution. Key format is
-// "cron:<jobID>"; an existing entry has workspace/lastPrompt refreshed in
+// RegisterCronStubWithChain creates a suspended exempt session for a cron job
+// so the job appears in the dashboard before its first execution. Key format
+// is "cron:<jobID>"; an existing entry has workspace/lastPrompt refreshed in
 // place. The stub has no process or session ID; the first GetOrCreate reuses
 // it. A non-cron key panics rather than leaving a dangling no-op stub (RFC v2.1 §8.1).
-func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
-	if !IsCronKey(key) {
-		panic(fmt.Sprintf("session: RegisterCronStub called with non-cron key %q", key))
-	}
-	r.registerStub(key, workspace, lastPrompt, nil)
-}
-
-// RegisterCronStubWithChain 在 RegisterCronStub 的基础上注入 session-ID 链：
-// stub 没有自己的 sessionID（exempt=true，无进程），但 historySource 查 JSONL
-// 要用 chain（cron 即上一次成功执行的 cron.Job.LastSessionID），否则
-// fresh_context=true 每次 Reset 后 dashboard 只能看到空白事件面板。
-// chainIDs 空 / nil 时行为与 RegisterCronStub 相同。
+//
+// chainIDs 是注入的 session-ID 链：stub 没有自己的 sessionID，但 historySource
+// 查 JSONL 要用 chain（cron 即上一次成功执行的 cron.Job.LastSessionID），否则
+// fresh_context=true 每次 Reset 后 dashboard 只能看到空白事件面板。nil 表示没有链。
 func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
 	if !IsCronKey(key) {
 		panic(fmt.Sprintf("session: RegisterCronStubWithChain called with non-cron key %q", key))
@@ -305,7 +284,7 @@ func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, ch
 
 // RegisterSystemStub creates a suspended exempt session for a sysession daemon
 // that needs a long-lived ManagedSession (RFC v2.1 §6). Key format is
-// "sys:<daemon-name>"; misuse panics, mirroring RegisterCronStub.
+// "sys:<daemon-name>"; misuse panics, mirroring RegisterCronStubWithChain.
 // existing 分支下如果 workspace/lastPrompt 没变就 no-op（避免每 tick 强刷
 // 触发不必要的 saveIfDirty + WS fanout）。
 func (r *Router) RegisterSystemStub(key, workspace, lastPrompt string) {

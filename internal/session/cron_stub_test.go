@@ -15,7 +15,7 @@ func TestRegisterCronStub_CreatesFreshStub(t *testing.T) {
 	var notified int
 	observe(r).changed = func() { notified++ }
 
-	r.RegisterCronStub("cron:job-1", "/tmp/work", "initial prompt")
+	r.RegisterCronStubWithChain("cron:job-1", "/tmp/work", "initial prompt", nil)
 
 	if notified != 1 {
 		t.Fatalf("onChange fired %d times on first stub, want 1", notified)
@@ -49,7 +49,7 @@ func TestRegisterCronStub_NoOpOnIdenticalRefresh(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
 	// Initial creation.
-	r.RegisterCronStub("cron:job-2", "/w", "p")
+	r.RegisterCronStubWithChain("cron:job-2", "/w", "p", nil)
 
 	// Reset tracking to isolate the second call.
 	observe(r).changed = func() {}
@@ -60,7 +60,7 @@ func TestRegisterCronStub_NoOpOnIdenticalRefresh(t *testing.T) {
 	})
 
 	// Reload with identical values — must NOT mark dirty / bump version.
-	r.RegisterCronStub("cron:job-2", "/w", "p")
+	r.RegisterCronStubWithChain("cron:job-2", "/w", "p", nil)
 
 	var dirty bool
 	r.ss.View(func(v sessView) {
@@ -93,7 +93,7 @@ func TestRegisterCronStub_DirtyOnActualChange(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			r := newTestRouter(3)
-			r.RegisterCronStub("cron:job-3", "/w", "p")
+			r.RegisterCronStubWithChain("cron:job-3", "/w", "p", nil)
 
 			var notified int
 			observe(r).changed = func() { notified++ }
@@ -103,7 +103,7 @@ func TestRegisterCronStub_DirtyOnActualChange(t *testing.T) {
 				genBefore = tx.Gen()
 			})
 
-			r.RegisterCronStub("cron:job-3", c.newWorkspace, c.newPrompt)
+			r.RegisterCronStubWithChain("cron:job-3", c.newWorkspace, c.newPrompt, nil)
 
 			if notified != 1 {
 				t.Errorf("onChange fired %d times on %s, want 1", notified, c.name)
@@ -129,7 +129,7 @@ func TestRegisterCronStub_DirtyOnActualChange(t *testing.T) {
 func TestRegisterCronStub_EmptyValuesDoNotClobber(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
-	r.RegisterCronStub("cron:job-4", "/keep", "keepme")
+	r.RegisterCronStubWithChain("cron:job-4", "/keep", "keepme", nil)
 
 	observe(r).changed = func() {}
 	r.ss.Update(func(tx sessTx) {
@@ -137,7 +137,7 @@ func TestRegisterCronStub_EmptyValuesDoNotClobber(t *testing.T) {
 	})
 
 	// Both empty — no data change expected.
-	r.RegisterCronStub("cron:job-4", "", "")
+	r.RegisterCronStubWithChain("cron:job-4", "", "", nil)
 
 	var dirty bool
 	r.ss.View(func(v sessView) {
@@ -250,17 +250,16 @@ func TestRegisterCronStubWithChain_DirtyOnChainChange(t *testing.T) {
 	}
 }
 
-// TestRegisterCronStubWithChain_NilChainLeavesExistingChain fixes the legacy
-// compatibility rule: the nil/empty chain branch (how RegisterCronStub 走到
-// 这里) must NOT wipe an already-recorded chain. Otherwise the old
-// RegisterCronStub signature (used by legacy integrations or tests) would
+// TestRegisterCronStubWithChain_NilChainLeavesExistingChain fixes the
+// compatibility rule: the nil/empty chain branch must NOT wipe an
+// already-recorded chain. Otherwise a caller with no chain to hand would
 // silently blow away cron history lookup on every reload.
 func TestRegisterCronStubWithChain_NilChainLeavesExistingChain(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
 	r.RegisterCronStubWithChain("cron:job-c4", "/w", "p", []string{"sess-keep"})
 
-	r.RegisterCronStub("cron:job-c4", "/w", "p") // equivalent to nil chain
+	r.RegisterCronStubWithChain("cron:job-c4", "/w", "p", nil)
 
 	var s *ManagedSession
 	r.ss.View(func(v sessView) {
@@ -343,7 +342,7 @@ func TestRegisterCronStub_OverSubQuotaStillRegisters(t *testing.T) {
 	total := maxCronExempt + 3
 	for i := 0; i < total; i++ {
 		key := "cron:job-over-" + strconv.Itoa(i)
-		r.RegisterCronStub(key, "/w", "p")
+		r.RegisterCronStubWithChain(key, "/w", "p", nil)
 	}
 
 	var got int

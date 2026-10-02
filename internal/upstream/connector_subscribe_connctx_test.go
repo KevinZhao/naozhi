@@ -43,7 +43,7 @@ func TestSubscribe_AfterConnCtxCancel_NoStreamGoroutine(t *testing.T) {
 	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
 	// Register a live, subscribable session so that WITHOUT the guard the
 	// subscribe would call SubscribeEvents and spawn a streamEvents goroutine.
-	r.RegisterCronStub(key, "/tmp/arch3-test", "prompt")
+	r.RegisterCronStubWithChain(key, "/tmp/arch3-test", "prompt", nil)
 	if r.SessionFor(key) == nil {
 		t.Fatal("setup: RegisterCronStub did not install a subscribable session")
 	}

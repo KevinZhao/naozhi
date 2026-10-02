@@ -148,7 +148,7 @@ const (
 // holds the table lock (write) must NEVER acquire sendMu — release the table lock first.
 // s.historyMu protects persistedHistory independently; never held with sendMu or the table lock.
 // Read-only operations run as Views (ListSessions) or as the single-value
-// reads Load and Count (SessionFor, Stats); Version is a lock-free atomic.
+// reads Load and Count (SessionFor, Stats); ss.Gen() is a lock-free atomic.
 //
 // Fields used to carry a `// 读写:` annotation naming every router_*.go file that
 // touches them, enforced by tools/check-router-fields. Both are gone (G3 #2667):
@@ -241,9 +241,9 @@ type Router struct {
 	// the broadcast timer, re-cancel historyCtx and double-detach shim processes.
 	shutdownOnce sync.Once
 
-	// startOnce guards startBackgroundLifecycle against re-entry (NewRouter and
-	// Start() both call it): a second run would overwrite r.attachmentTracker
-	// (leaking the first tracker's goroutine) and schedule a redundant orphan sweep.
+	// startOnce guards startBackgroundLifecycle against re-entry: a second run
+	// would overwrite r.attachmentTracker (leaking the first tracker's
+	// goroutine) and schedule a redundant orphan sweep.
 	startOnce sync.Once
 
 	// stopped is set true inside Shutdown's transaction immediately before the
@@ -779,7 +779,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.startBackgroundHistoryLoaders()
 
 	// Orphan sweep + attachment tracker are background side effects funnelled
-	// through startBackgroundLifecycle (startOnce-guarded; Start() shares it).
+	// through startBackgroundLifecycle (startOnce-guarded).
 	r.startBackgroundLifecycle()
 
 	return r
@@ -1045,13 +1045,6 @@ func (r *Router) startBackgroundHistoryLoaders() {
 	}
 }
 
-// Start exposes the background-lifecycle hook so callers can defer the side
-// effects; NewRouter still invokes it eagerly. ctx is accepted for
-// forward-compat — sweepers currently honour r.historyCtx.
-func (r *Router) Start(_ context.Context) {
-	r.startBackgroundLifecycle()
-}
-
 // Observer receives the router's lifecycle notifications, always outside the
 // table lock.
 type Observer interface {
@@ -1103,19 +1096,6 @@ func ChatKey(platform, chatType, chatID string) string {
 // DefaultWorkspace returns the router's default working directory.
 func (r *Router) DefaultWorkspace() string {
 	return r.defaultCWD
-}
-
-// Version returns a monotonic counter incremented on every session mutation;
-// the dashboard polls it from /api/sessions to skip full JSON comparison.
-// Lock-free (atomic).
-//
-// The same counter serves two audiences: data version (session map changed;
-// bumped inside an Update) and render version (BumpVersion from non-session
-// mutations such as project favorite toggles). A Version() change therefore
-// does NOT guarantee ListSessions() returns new data; the cost is one
-// redundant debounced saveStore.
-func (r *Router) Version() uint64 {
-	return r.ss.Gen()
 }
 
 // BumpVersion forces a version increment + onChange broadcast even when no
@@ -1176,10 +1156,10 @@ func (r *Router) ListSessions() []SessionSnapshot {
 
 // ListSessionsWithVersion returns the session snapshot slice paired with the
 // gen value sampled in the same View, so /api/sessions tags data with exactly
-// the version that produced it (separate Version() + ListSessions() reads
-// could publish data with a stale version, #726). Writers bump gen inside
-// their Update, so a View observes an atomically produced (sessions, gen)
-// pair.
+// the version that produced it (separate ss.Gen() + ListSessions() reads could
+// publish a stale version, #726). Writers bump gen inside their Update, so the
+// pair is atomic. BumpVersion's render-only bumps advance the same gen, so a
+// changed version can come with unchanged sessions.
 func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]

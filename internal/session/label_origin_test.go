@@ -148,7 +148,7 @@ func TestSetUserLabelWithOrigin_RaceWindow(t *testing.T) {
 }
 
 // TestRegisterSystemStub_HappyPath verifies the system-stub registration
-// path mirrors RegisterCronStub's behaviour minus the chain.
+// path mirrors a nil-chain RegisterCronStubWithChain.
 func TestRegisterSystemStub_HappyPath(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
@@ -190,7 +190,7 @@ func TestRegisterCronStub_PanicOnWrongPrefix(t *testing.T) {
 			t.Error("expected panic when key is not cron: prefix")
 		}
 	}()
-	r.RegisterCronStub("sys:wrong", "/w", "p")
+	r.RegisterCronStubWithChain("sys:wrong", "/w", "p", nil)
 }
 
 // TestVisitSessions_StreamingFilter verifies the iterator visits all

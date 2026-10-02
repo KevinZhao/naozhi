@@ -20,7 +20,7 @@ import (
 func TestHandleOpen_InheritsAccessProfileAndModel(t *testing.T) {
 	r := session.NewRouter(session.RouterConfig{MaxProcs: 3})
 	const srcKey = "cron:inherit-src"
-	r.RegisterCronStub(srcKey, "", "")
+	r.RegisterCronStubWithChain(srcKey, "", "", nil)
 	src := r.SessionFor(srcKey)
 	if src == nil {
 		t.Fatal("stub source session not registered")

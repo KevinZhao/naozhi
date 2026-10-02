@@ -14,7 +14,7 @@ func TestCountExemptCombined(t *testing.T) {
 	r := newTestRouter(3)
 
 	for i := 0; i < 5; i++ {
-		r.RegisterCronStub("cron:job-"+strconv.Itoa(i), "/w", "p")
+		r.RegisterCronStubWithChain("cron:job-"+strconv.Itoa(i), "/w", "p", nil)
 	}
 
 	r.ss.View(func(v sessView) {

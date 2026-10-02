@@ -65,20 +65,7 @@ func (r *Router) shimManagers() []*shim.Manager {
 	return out
 }
 
-// ReconnectShims discovers surviving shim processes and reconnects sessions.
-// Called after NewRouter. Uses the router's historyCtx so SIGTERM during
-// startup aborts the per-shim handshakes instead of blocking shutdown.
-func (r *Router) ReconnectShims() {
-	r.reconnectShims(r.historyCtx)
-}
-
-// ReconnectShimsCtx is the context-aware variant used by the reconcile loop so
-// SIGTERM during a handshake aborts promptly instead of waiting per session.
-func (r *Router) ReconnectShimsCtx(ctx context.Context) {
-	r.reconnectShims(ctx)
-}
-
-// shimState classifies how reconnectShims should dispatch a discovered shim.
+// shimState classifies how ReconnectShimsCtx should dispatch a discovered shim.
 // The zero value (shimStateSkip) is the safe no-op, so a new bool flag that
 // defaults false cannot silently reroute an existing case.
 type shimState int
@@ -91,7 +78,7 @@ const (
 	shimStateReconnect                  // ready for Reattach
 )
 
-// classifyShimState is a pure decision tree over the inputs reconnectShims
+// classifyShimState is a pure decision tree over the inputs ReconnectShimsCtx
 // observes per discovered shim, kept separate so it can be table-tested.
 //
 // Order matters: spawning > orphan > hasLiveProc > wrapperNil > argsDrift.
@@ -265,7 +252,11 @@ func (r *Router) adoptLiveShim(tx sessTx, state shim.State, backendID string) *M
 	return s
 }
 
-func (r *Router) reconnectShims(parentCtx context.Context) {
+// ReconnectShimsCtx discovers surviving shim processes and reconnects their
+// sessions. main calls it once after NewRouter and the reconcile loop calls it
+// on every tick; parentCtx bounds the per-shim handshakes so SIGTERM aborts
+// them promptly instead of waiting per session.
+func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 	managers := r.shimManagers()
 	if len(managers) == 0 {
 		return
@@ -568,7 +559,7 @@ func (r *Router) settleReconnected(n int) {
 	r.ss.Update(func(tx sessTx) { r.countActive(tx) })
 }
 
-// shimTarget is what reconnectShims knows about the session a shim belongs
+// shimTarget is what ReconnectShimsCtx knows about the session a shim belongs
 // to, read in one transaction.
 type shimTarget struct {
 	sess     *ManagedSession
@@ -592,7 +583,7 @@ func lookupShimTarget(v sessView, key string) shimTarget {
 }
 
 // adoptShimTarget adopts a live shim whose key had no session and no spawn
-// in flight when reconnectShims looked. It re-checks first: a concurrent
+// in flight when ReconnectShimsCtx looked. It re-checks first: a concurrent
 // spawn may have installed the session, or its in-flight marker, since. A
 // session that is there now wins over adopting a duplicate; a spawn in flight
 // reports spawning so classifyShimState skips instead of adopting a competing

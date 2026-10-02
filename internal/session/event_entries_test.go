@@ -768,30 +768,6 @@ func TestEventEntriesAppend_LiveProcessPreservesPrefix(t *testing.T) {
 	}
 }
 
-// TestEventEntriesForKeyAppend pins the Router-level append wrapper:
-// unknown key returns dst unchanged; known key appends its history.
-func TestEventEntriesForKeyAppend(t *testing.T) {
-	t.Parallel()
-	r := NewRouter(RouterConfig{})
-	s := &ManagedSession{key: "alpha"}
-	s.persistedHistory = []clievent.EventEntry{{Time: 100, Summary: "a"}}
-	r.ss.Update(func(tx sessTx) {
-		tx.Put("alpha", s)
-	})
-
-	// Unknown key: dst unchanged.
-	dst := []clievent.EventEntry{{Time: 1, Summary: "keep"}}
-	if got := r.EventEntriesForKeyAppend(dst, "missing"); len(got) != 1 || got[0].Summary != "keep" {
-		t.Fatalf("unknown key mutated dst: got %+v", got)
-	}
-
-	// Known key appends after prefix.
-	got := r.EventEntriesForKeyAppend(dst[:0], "alpha")
-	if len(got) != 1 || got[0].Summary != "a" {
-		t.Fatalf("known key append: got %+v", got)
-	}
-}
-
 // TestEventEntriesSinceAppend_BinarySearch_R20260613PERF1 exercises the
 // binary-search optimisation in the dead-session (persistedHistory) branch.
 // Each sub-case asserts that EventEntriesSinceAppend returns exactly the same
