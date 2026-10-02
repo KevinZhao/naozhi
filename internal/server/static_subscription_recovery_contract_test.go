@@ -48,6 +48,7 @@ func TestDashboardJS_SubscriptionTimeoutClearsClientBookkeeping(t *testing.T) {
 	for _, want := range []string{
 		"wsm.subscribedKey = null",
 		"wsm.subscribedNode = null",
+		"wsm._subscriptionSuspended = false",
 		"wsm.lastEventTimeWs = 0",
 	} {
 		if !strings.Contains(tail, want) {

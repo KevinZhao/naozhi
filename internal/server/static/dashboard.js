@@ -3984,7 +3984,7 @@ const wsm = {
   isConnected() { return this.state === WS_STATES.CONNECTED; }
 };
 
-// Session-stream frame handlers; the subscription bookkeeping is still wsm's.
+// Session-stream frame handlers; the subscription bookkeeping lives on wsm.
 const sessionFrames = {
   onHistory(msg) {
     if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;

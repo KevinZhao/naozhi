@@ -1,12 +1,16 @@
 // @ts-check
-// sessionFrames — the history / event / send_ack / session_state handlers that
-// left wsm in S18d1 (#3024) — still keep the session subscription's
-// bookkeeping on wsm, driven through a real socket:
+// sessionFrames — the history / event / send_ack / session_state handlers —
+// keep the session subscription's bookkeeping on wsm, driven through a real
+// socket:
 //  - a reconnect resumes after the last event a history or an event frame
 //    delivered (the cursor both frames advance);
+//  - one subscribe consumes one opening frame: a second frame flagged initial
+//    appends instead of repainting;
 //  - a send_ack for another session subscribes it from an initial page (the
 //    cursor is reset, not carried over);
-//  - a running push for the session already subscribed does not resubscribe.
+//  - a running push for the session already subscribed does not resubscribe;
+//    a dead→running push resubscribes from an initial page, and so does a
+//    running push after a suspended subscribe.
 // A bookkeeping write that lands on sessionFrames instead of wsm leaves wsm's
 // fields stale without throwing, so each case asserts a frame the mock saw.
 const { test, expect } = require('@playwright/test');
@@ -23,8 +27,9 @@ test.beforeEach(({ }, testInfo) => {
 const subs = (conn, key) => conn.messages.filter((m) => m.type === 'subscribe' && m.key === key);
 const ev = (text, time) => ({ type: 'text', detail: text, summary: text, time, uuid: 'u-' + text });
 
-// open selects KEY_A over a connected socket and acks its subscribe.
-async function open(browser, mock) {
+// open selects KEY_A over a connected socket and acks its subscribe; ack
+// carries extra fields for the subscribed frame (e.g. a reason).
+async function open(browser, mock, ack = {}) {
   const ctx = await browser.newContext({ ...desktop });
   const page = await ctx.newPage();
   const errors = [];
@@ -35,7 +40,7 @@ async function open(browser, mock) {
   await page.click(`.session-card[data-key="${KEY_A}"]`);
   const conn = mock.wsConnections[mock.wsConnections.length - 1];
   await expect.poll(() => subs(conn, KEY_A).length).toBe(1);
-  conn.send({ type: 'subscribed', key: KEY_A });
+  conn.send({ type: 'subscribed', key: KEY_A, ...ack });
   await page.waitForFunction((key) => wsm.subscribedKey === key, KEY_A);
   return { ctx, page, conn, errors };
 }
@@ -81,6 +86,19 @@ test.describe('sessionFrames keep the bookkeeping on wsm', () => {
     await ctx.close();
   });
 
+  test('one subscribe consumes one opening frame: a second initial frame appends', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const T = Date.now() + 60000;
+    conn.send({ type: 'history', key: KEY_A, initial: true, events: [ev('i1', T)] });
+    await shown(page, 'i1');
+    conn.send({ type: 'history', key: KEY_A, initial: true, events: [ev('i2', T + 1)] });
+    await shown(page, 'i2');
+    await expect(page.locator('#events-scroll .event[data-uuid="u-i1"]'),
+      'the second frame was appended, not painted over the first').toHaveCount(1);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
   test('a send_ack for another session subscribes it from an initial page', async ({ browser }) => {
     const { ctx, page, conn, errors } = await open(browser, mock);
     conn.send({ type: 'event', key: KEY_A, event: ev('a1', Date.now() + 60000) });
@@ -100,6 +118,36 @@ test.describe('sessionFrames keep the bookkeeping on wsm', () => {
     await page.waitForFunction((key) => sessionsData[sid(key, 'local')].state === 'running', KEY_A);
     await barrier(page, conn);
     expect(subs(conn, KEY_A).length, 'an already-live subscription is left alone').toBe(1);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  // reSub asserts that the running push sent a second subscribe for KEY_A,
+  // asking for an initial page rather than resuming after the cursor.
+  async function reSub(conn) {
+    await expect.poll(() => subs(conn, KEY_A).length, { message: 'running must resubscribe' }).toBe(2);
+    const sub = subs(conn, KEY_A)[1];
+    expect(sub.after, 'the resubscribe asks for an initial page').toBeUndefined();
+    expect(sub.limit).toBeGreaterThan(0);
+  }
+
+  test('a dead→running push resubscribes from an initial page', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    conn.send({ type: 'event', key: KEY_A, event: ev('d1', Date.now() + 60000) });
+    await shown(page, 'd1');
+    // Back to back, so no sessions poll lands between the two pushes.
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'dead' });
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
+    await reSub(conn);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a running push after a suspended subscribe resubscribes', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock, { reason: 'suspended' });
+    await page.waitForFunction(() => wsm._subscriptionSuspended === true);
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
+    await reSub(conn);
     expect(errors).toEqual([]);
     await ctx.close();
   });
