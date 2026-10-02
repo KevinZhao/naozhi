@@ -12,14 +12,17 @@ import (
 // edit to this list in the same change. #3004 has the plan that shrinks it.
 // The Queue half of G-c is internal/turn/queue_surface_test.go.
 var sessionRouterMethodNames = []string{
-	"DiscardPassthroughPending",
-	"GetOrCreate",
 	"InterruptSessionViaControl",
-	"NotifyIdle",
-	"Reset",
 	"ResetChatAndSetWorkspace",
-	"SetWorkspace",
 	"Workspace",
+}
+
+// turnsMethodNames is G-c's Turns half: the dispatcher reaches the
+// orchestrator for exactly these three (#3004 C2).
+var turnsMethodNames = []string{
+	"Reset",
+	"ShouldNotify",
+	"Submit",
 }
 
 func exportedMethodNames(t reflect.Type) []string {
@@ -66,4 +69,11 @@ func TestSessionRouterSurface_Ratchet(t *testing.T) {
 	t.Parallel()
 	got := exportedMethodNames(reflect.TypeFor[SessionRouter]())
 	assertMethodSet(t, "SessionRouter", got, sessionRouterMethodNames)
+}
+
+// TestTurnsSurface_Ratchet pins G-c's Turns half.
+func TestTurnsSurface_Ratchet(t *testing.T) {
+	t.Parallel()
+	got := exportedMethodNames(reflect.TypeFor[Turns]())
+	assertMethodSet(t, "Turns", got, turnsMethodNames)
 }

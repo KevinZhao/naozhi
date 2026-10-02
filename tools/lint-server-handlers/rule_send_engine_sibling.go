@@ -14,8 +14,7 @@
 //	C3 accessor: no FuncDecl or FuncLit (other than newSendEngine) may return
 //	   *sendEngine.
 //	C4 holder whitelist: a struct field of type *sendEngine must be one of
-//	   Hub.engine, SendHandler.engine, wiring.engine, serverCaps.send,
-//	   HubOptions.Engine.
+//	   Hub.engine, SendHandler.engine, wiring.engine, HubOptions.Engine.
 //	C5 Hub is not a notifier: *Hub must not declare BroadcastSessionReady,
 //	   BroadcastSessionsUpdate, broadcastState or broadcastSendError.
 //	C6 notifier does not point back: any type declaring broadcastState or
@@ -82,7 +81,6 @@ var sendEngineHolders = map[string]map[string]bool{
 	"Hub":         {"engine": true},
 	"SendHandler": {"engine": true},
 	"wiring":      {"engine": true},
-	"serverCaps":  {"send": true},
 	"HubOptions":  {"Engine": true},
 }
 
@@ -380,7 +378,7 @@ func scanSiblingHolderWhitelist(fset *token.FileSet, files []siblingSrcFile) []V
 					}
 					out = append(out, Violation{Rule: "send_engine_sibling", File: filepath.ToSlash(sf.path),
 						Line:    fset.Position(fld.Pos()).Line,
-						Message: fmt.Sprintf("%s.%s holds a *sendEngine; only Hub.engine, SendHandler.engine, wiring.engine, serverCaps.send and HubOptions.Engine may (C4) — a new holder is a new way to pass the engine around outside the composition root", ts.Name.Name, fname)})
+						Message: fmt.Sprintf("%s.%s holds a *sendEngine; only Hub.engine, SendHandler.engine, wiring.engine and HubOptions.Engine may (C4) — a new holder is a new way to pass the engine around outside the composition root", ts.Name.Name, fname)})
 				}
 			}
 			return true

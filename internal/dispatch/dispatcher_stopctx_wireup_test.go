@@ -19,8 +19,8 @@ import (
 func TestNewDispatcher_StopCtxDefault_BackgroundFallback(t *testing.T) {
 	t.Parallel()
 	d, err := NewDispatcher(DispatcherConfig{
-		Dedup:              platform.NewDedup(0),
-		AllowMissingSender: true,
+		Dedup: platform.NewDedup(0),
+		Turns: testTurns(),
 		// StopCtx intentionally omitted to exercise the fallback branch.
 	})
 	if err != nil {
@@ -49,9 +49,9 @@ func TestNewDispatcher_StopCtxPropagated(t *testing.T) {
 	stopCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d, err := NewDispatcher(DispatcherConfig{
-		Dedup:              platform.NewDedup(0),
-		AllowMissingSender: true,
-		StopCtx:            stopCtx,
+		Dedup:   platform.NewDedup(0),
+		Turns:   testTurns(),
+		StopCtx: stopCtx,
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)

@@ -12,8 +12,8 @@ import (
 )
 
 // ownerLoop processes the first send turn and then drains any messages that
-// arrived meanwhile, coalescing them into a single follow-up turn. Mirrors
-// dispatch.Dispatcher.ownerLoop with the hub's broadcast + session routing.
+// arrived meanwhile, coalescing them into a single follow-up turn: the
+// dashboard's counterpart of turn.Orchestrator's owner loop, which IM uses.
 //
 // gen is the queue generation at enqueue time; if Discard (e.g. /new) bumps
 // it mid-flight, DoneOrDrain returns nil and the loop exits. Caller must
@@ -51,7 +51,7 @@ func (e *sendEngine) ownerLoop(key string, gen uint64, first turn.Msg, onAsyncEr
 		// onAsyncError only applies to the first turn (one ack per request);
 		// subsequent coalesced turns log failures without a back-channel.
 		e.runTurn(key, text, images, nil)
-		// Reset 前 Stop + drain（与 dispatch.ownerLoop 对齐）：残留 tick 会让
+		// Reset 前 Stop + drain：残留 tick 会让
 		// DoneOrDrain 多调一次、刚入队的消息被静默丢弃。
 		if !collectTimer.Stop() {
 			select {

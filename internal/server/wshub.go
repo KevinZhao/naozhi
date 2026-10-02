@@ -31,8 +31,8 @@ type Hub struct {
 	// router is the HubRouter consumer subset (consumer.go) so tests can
 	// inject a fake.
 	router HubRouter
-	// engine is the send pipeline; SendHandler and serverCaps hold the same
-	// instance, all three taken from buildWSStack's wiring.
+	// engine is the send pipeline; SendHandler holds the same instance, both
+	// taken from buildWSStack's wiring.
 	// Named engine, not send, because wsClient already has a `send` channel
 	// and h.send / c.send would read alike.
 	engine *sendEngine

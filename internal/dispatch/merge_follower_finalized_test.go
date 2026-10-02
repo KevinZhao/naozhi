@@ -11,10 +11,8 @@ package dispatch
 
 import (
 	"context"
-	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,7 +90,7 @@ func (p *residualEditPlatform) texts() []string {
 }
 
 // TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner drives the REAL
-// sendAndReply follower path (a MergedCount>1 result with Text=="") and injects
+// IM delivery follower path (a MergedCount>1 result with Text=="") and injects
 // a residual interim event while that path is collapsing the banner. With the
 // #2338 fix, dispatch.go has called markFinalized() before the merge-hint edit,
 // so editLoop's `if t.finalized.Load() { continue }` guard drops the residual
@@ -120,7 +118,7 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 	sendFn := func(
 		_ context.Context,
 		_ string,
-		_ Session,
+		_ turn.Session,
 		_ string,
 		_ []clievent.Attachment,
 		cb clievent.EventCallback,
@@ -173,31 +171,11 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 	// Build the dispatcher around a router we still hold concretely, so the
 	// session can be pre-registered below.
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 10})
-	d, err := NewDispatcher(DispatcherConfig{
-		Router:        routerOf(router),
-		Platforms:     map[string]platform.Platform{"fake": probe},
-		Agents:        map[string]session.AgentOpts{},
-		AgentCommands: map[string]string{},
-		Guard:         newFakeGuard(),
-		// Queue: this test calls d.sendAndReply directly (never
-		// BuildHandler), so Guard vs. Queue wiring makes no behavioural
-		// difference. Wired anyway for consistency with newTestDispatcher's
-		// #3004/T-P1 default of a real queue (see dispatch_test.go).
-		Queue:                 turn.NewQueueWithMode(5, 0, turn.ModeCollect),
-		Dedup:                 platform.NewDedup(100),
-		SendFn:                sendFn,
-		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
-		WatchdogNoOutputKills: new(atomic.Int64),
-		WatchdogTotalKills:    new(atomic.Int64),
-		NoOutputTimeout:       5 * time.Second,
-		TotalTimeout:          30 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("NewDispatcher: %v", err)
-	}
+	d := newTestDispatcher(fp, withRouter(router), withSendFn(sendFn))
+	d.platforms = map[string]platform.Platform{"fake": probe}
 
 	// Pre-register the session so GetOrCreate does not try to spawn a real CLI
-	// process (the test router has no wrapper) — without this sendAndReply
+	// process (the test router has no wrapper) — without this the turn
 	// bails before ever reaching the follower branch.
 	const key = "fake:direct:chat1:general"
 	router.InjectSession(key, session.NewTestProcess())
@@ -205,17 +183,10 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	d.sendAndReply(ctx,
-		key,
-		"hello", nil,
-		"general", session.AgentOpts{},
-		platform.IncomingMessage{
-			Platform: "fake", EventID: "e1",
-			UserID: "u1", ChatID: "chat1", ChatType: "direct", Text: "hello",
-		},
-		slog.Default(),
-		false,
-	)
+	runIMTurn(ctx, d, key, "hello", platform.IncomingMessage{
+		Platform: "fake", EventID: "e1",
+		UserID: "u1", ChatID: "chat1", ChatType: "direct", Text: "hello",
+	}, false)
 
 	edits := probe.texts()
 

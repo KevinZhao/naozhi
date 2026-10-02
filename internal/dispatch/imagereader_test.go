@@ -80,8 +80,8 @@ func TestReadTurnImages_ByteBudget(t *testing.T) {
 			}
 
 			d, err := NewDispatcher(DispatcherConfig{
-				AllowMissingSender: true,
-				ImageReader:        &fakeImageReader{files: files},
+				Turns:       testTurns(),
+				ImageReader: &fakeImageReader{files: files},
 			})
 			if err != nil {
 				t.Fatalf("NewDispatcher: %v", err)
@@ -119,8 +119,8 @@ func TestReadTurnImages_ByteBudget(t *testing.T) {
 // TestReadTurnImages_NoPaths returns the text unchanged with no attachments.
 func TestReadTurnImages_NoPaths(t *testing.T) {
 	d, err := NewDispatcher(DispatcherConfig{
-		AllowMissingSender: true,
-		ImageReader:        &fakeImageReader{},
+		Turns:       testTurns(),
+		ImageReader: &fakeImageReader{},
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
@@ -141,7 +141,7 @@ func TestReadTurnImages_NoPaths(t *testing.T) {
 // without an explicit field. R245-ARCH-33 (#884).
 func TestImageReader_DefaultIsOsImageReader(t *testing.T) {
 	d, err := NewDispatcher(DispatcherConfig{
-		AllowMissingSender: true,
+		Turns: testTurns(),
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
@@ -160,8 +160,8 @@ func TestImageReader_DefaultIsOsImageReader(t *testing.T) {
 func TestImageReader_OverrideHonoured(t *testing.T) {
 	fake := &fakeImageReader{}
 	d, err := NewDispatcher(DispatcherConfig{
-		AllowMissingSender: true,
-		ImageReader:        fake,
+		Turns:       testTurns(),
+		ImageReader: fake,
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
@@ -172,7 +172,7 @@ func TestImageReader_OverrideHonoured(t *testing.T) {
 }
 
 // TestOsImageReader_ReadFileMissingReturnsError pins the sole production
-// guarantee callers in sendAndReply rely on: a missing file produces a
+// guarantee callers in the IM delivery rely on: a missing file produces a
 // non-nil error so the path is rewritten to "[图片]" without a partial
 // attachment. We do not assert the exact error type — that is os.ReadFile's
 // contract — only that one is returned.
@@ -185,7 +185,7 @@ func TestOsImageReader_ReadFileMissingReturnsError(t *testing.T) {
 }
 
 // fakeImageReader records calls and returns canned results. Useful for
-// tests asserting that sendAndReply routes attachment reads through the
+// tests asserting that the IM delivery routes attachment reads through the
 // seam rather than the global os.ReadFile.
 type fakeImageReader struct {
 	files map[string][]byte

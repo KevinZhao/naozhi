@@ -10,7 +10,7 @@ import (
 // sendEnginePkg is the set of files rule 3b-send reads. A "" value writes
 // nothing so a missing-file case can be exercised.
 type sendEnginePkg struct {
-	hub, engine, send, ownerLoop, handler, bcast string
+	hub, engine, send, ownerLoop, handler, bcast, sender string
 }
 
 func writeSendEnginePkg(t *testing.T, p sendEnginePkg) string {
@@ -23,6 +23,7 @@ func writeSendEnginePkg(t *testing.T, p sendEnginePkg) string {
 		"send_owner_loop.go": p.ownerLoop,
 		"dashboard_send.go":  p.handler,
 		"wshub_broadcast.go": p.bcast,
+		"turn_sender.go":     p.sender,
 	} {
 		if src == "" {
 			continue
@@ -74,8 +75,12 @@ func cleanPkg() sendEnginePkg {
 		ownerLoop: "package server\nfunc (e *sendEngine) ownerLoop() {}\n",
 		handler:   handlerOK,
 		bcast:     bcastOK,
+		sender:    senderOK,
 	}
 }
+
+// senderOK is the turn sender holding the router and the broadcaster only.
+const senderOK = "package server\ntype turnSender struct {\n\trouter turnRouter\n\tnotify sendNotifier\n}\nfunc (s turnSender) NotifyIdle() {}\n"
 
 // bcastOK is the broadcaster with no way back to the Hub: recipients and its
 // own debouncer only.
@@ -129,6 +134,34 @@ func TestSendEngineOwnership_FlagsHubFieldOnBroadcaster(t *testing.T) {
 	}
 	if vs[0].Line == 0 {
 		t.Errorf("field violation has no line number: %+v", vs[0])
+	}
+}
+
+// TestSendEngineOwnership_FlagsHubFieldOnTurnSender is check A for
+// turn.Orchestrator's session side: a turnSender holding a *Hub would make
+// the IM turn path reach the WebSocket layer (#3004).
+func TestSendEngineOwnership_FlagsHubFieldOnTurnSender(t *testing.T) {
+	p := cleanPkg()
+	p.sender = "package server\ntype turnSender struct {\n\trouter turnRouter\n\thub *Hub\n}\n"
+	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
+	if len(vs) != 1 || !strings.Contains(vs[0].Message, `turnSender declares field "hub" of type *Hub`) {
+		t.Fatalf("want 1 turnSender *Hub-field violation, got %d:\n%s", len(vs), msgs(vs))
+	}
+}
+
+// TestSendEngineOwnership_FlagsMissingTurnSender: losing or renaming
+// turnSender must be loud, and turn_sender.go is a pipeline file (check B).
+func TestSendEngineOwnership_FlagsMissingTurnSender(t *testing.T) {
+	p := cleanPkg()
+	p.sender = ""
+	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
+	if !strings.Contains(msgs(vs), "type turnSender not found") {
+		t.Fatalf("want a 'turnSender not found' violation, got %d:\n%s", len(vs), msgs(vs))
+	}
+	p.sender = senderOK + "func (h *Hub) sendTurn() {}\n"
+	vs = scanSendEngineOwnership(writeSendEnginePkg(t, p))
+	if len(vs) != 1 || !strings.Contains(vs[0].Message, "sendTurn has a *Hub receiver") {
+		t.Fatalf("want 1 *Hub-receiver violation in turn_sender.go, got %d:\n%s", len(vs), msgs(vs))
 	}
 }
 

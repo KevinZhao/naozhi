@@ -1,21 +1,18 @@
 // build_dispatch.go — construction of the IM-facing dispatcher (#2633).
 //
-// dispatch.NewDispatcher used to be called inside Start, because its StopCtx
-// wanted the caller's ctx and Start was the first place that existed. E2
-// #2552 gave the Server an appCtx at construction and made Start link the
-// caller's ctx into it, so that reason is gone — but the call stayed, and with
-// it a field (healthH.dispatcherMetrics) that was declared at construction and
-// assigned in Start: the same setter-vs-Start window #431 closed everywhere
-// else, spelled as a bare assignment `grep '\.Set[A-Z]'` could not see.
-//
-// buildServerWithHandlers now calls buildDispatcher before it builds
-// HealthHandler, and Start only calls BuildHandler on the result.
+// buildServerWithHandlers calls buildDispatcher before it builds
+// HealthHandler, so the dispatcher's metrics closure is a constructor
+// argument; Start only calls BuildHandler on the result. The dispatcher's
+// turns run on a turn.Orchestrator built here over the composition root's
+// queue (the one the dashboard engine also holds) and a turnSender; the
+// Orchestrator is a local, not a Server field.
 package server
 
 import (
 	"fmt"
 
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // buildDispatcher wires the dispatcher from the Server state that already
@@ -32,19 +29,20 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 	// Same for the router and resolver: a nil pointer boxed into the
 	// interface field would defeat the dispatcher's nil checks.
 	var router dispatch.SessionRouter
+	var sendRouter turnRouter
 	if s.router != nil {
-		router = dispatchRouter{s.router}
+		router, sendRouter = s.router, s.router
 	}
 	var resolver dispatch.KeyResolver
 	if w.resolver != nil {
 		resolver = w.resolver
 	}
-	// The engine comes from buildWSStack, which buildDashboard has run by
-	// now; without it every IM send would nil-deref on its first message.
-	caps := serverCaps{s: s, send: w.engine}
-	if caps.send == nil {
-		panic("server: buildDispatcher needs w.engine; buildDashboard must run first")
+	// The broadcaster comes from buildWSStack, which buildDashboard has run
+	// by now; without it every IM turn would nil-deref broadcasting its state.
+	if w.bcast == nil {
+		panic("server: buildDispatcher needs w.bcast; buildDashboard must run first")
 	}
+	turns := turn.New(w.msgQueue, turnSender{router: sendRouter, notify: w.bcast})
 	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:                router,
 		Platforms:             s.platforms,
@@ -53,26 +51,25 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 		Scheduler:             cronCommands,
 		ProjectMgr:            s.projectMgr,
 		Resolver:              resolver,
-		Guard:                 w.sessionGuard,
-		Queue:                 w.msgQueue,
+		Turns:                 turns,
 		Dedup:                 w.dedup,
 		AllowedRoot:           w.allowedRoot,
 		ClaudeDir:             s.claudeDir,
-		Capabilities:          caps,
+		Capabilities:          serverCaps{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,
 		TotalTimeout:          s.totalTimeout,
 		WatchdogNoOutputKills: w.watchdog.noOutPtr(),
 		WatchdogTotalKills:    w.watchdog.totalPtr(),
-		// Service ctx so the passthrough send goroutine observes SIGTERM
-		// instead of waiting out its internal totalTimeout (#1320). appCtx is
-		// cancelled by Start's linker when the caller's ctx is.
+		// Service ctx so a detached IM turn observes SIGTERM instead of
+		// waiting out its internal totalTimeout (#1320). appCtx is cancelled
+		// by Start's linker when the caller's ctx is.
 		StopCtx: s.appCtx,
 	})
 	if err != nil {
-		// The only error NewDispatcher returns is ErrSendWireupMissing, and
-		// serverCaps always carries Send — so this is a programming fault in
-		// this package, not a configuration fault, and no config can reach
-		// it. Fail at construction rather than on first message.
+		// The only error NewDispatcher returns is ErrTurnsWireupMissing, and
+		// Turns is always set above — so this is a programming fault in this
+		// package, not a configuration fault. Fail at construction rather
+		// than on first message.
 		panic(fmt.Sprintf("server: dispatch wireup: %v", err))
 	}
 	return d

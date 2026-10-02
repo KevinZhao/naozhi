@@ -7,7 +7,6 @@ package dispatch
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -16,7 +15,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // ---------------------------------------------------------------------------
@@ -192,13 +191,13 @@ func TestDispatcher_AskQuestionFired_SuppressesImages(t *testing.T) {
 	sendFn := func(
 		_ context.Context,
 		_ string,
-		_ Session,
+		_ turn.Session,
 		_ string,
 		_ []clievent.Attachment,
 		onEvent clievent.EventCallback,
 	) (*clievent.SendResult, error) {
 		// Fire AskQuestion via onEvent so askQuestionFired is set before
-		// sendAndReply inspects the tracker.
+		// the IM delivery inspects the tracker.
 		if onEvent != nil {
 			onEvent(clievent.Event{
 				Type: "assistant",
@@ -222,17 +221,10 @@ func TestDispatcher_AskQuestionFired_SuppressesImages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	d.sendAndReply(ctx,
-		"fake:direct:chat1:general",
-		"hello", nil,
-		"general", session.AgentOpts{},
-		platform.IncomingMessage{
-			Platform: "fake", EventID: "e1",
-			UserID: "u1", ChatID: "chat1", ChatType: "direct", Text: "hello",
-		},
-		slog.Default(),
-		false,
-	)
+	runIMTurn(ctx, d, "fake:direct:chat1:general", "hello", platform.IncomingMessage{
+		Platform: "fake", EventID: "e1",
+		UserID: "u1", ChatID: "chat1", ChatType: "direct", Text: "hello",
+	}, false)
 
 	imageMu.Lock()
 	n := imagesSent

@@ -1,8 +1,8 @@
-// send.go contains sendWithBroadcast, the canonical wrapper for sending
-// messages to a session with dashboard state notifications. Every entry point
-// that sends user messages (IM, HTTP API, WebSocket) must use it rather than
-// sess.Send so the dashboard sees running/ready transitions; cron is the only
-// exception (own notification path via BroadcastCronResult).
+// send.go is the dashboard's send path: sessionSend validates an HTTP or
+// WebSocket send and runs it through the engine's owner loop. Its turns, like
+// IM turns (turnSender), go through sendTurn and broadcastAfterTurn so the
+// dashboard sees running/ready transitions; cron is the only entry that sends
+// without them (own notification path via BroadcastCronResult).
 package server
 
 import (
@@ -25,7 +25,7 @@ import (
 )
 
 // sendWithBroadcast wraps sess.Send with dashboard state broadcasts ("running"
-// before, session snapshot after); serverCaps.Send delegates here.
+// before, session snapshot after).
 // sess must be non-nil; callers must check the error from GetOrCreate first.
 func (e *sendEngine) sendWithBroadcast(
 	ctx context.Context,
@@ -52,36 +52,11 @@ func (e *sendEngine) sendWithBroadcastPriority(
 	onEvent clievent.EventCallback,
 	priority string,
 ) (*clievent.SendResult, error) {
-	// Only the running-state transition here; the post-send (debounced)
-	// BroadcastSessionsUpdate covers the sessions snapshot.
-	e.notify.BroadcastSessionReady(key)
-
 	if priority == "" && dispatch.IsUrgent(ctx) {
 		priority = "now"
 	}
-
-	var (
-		result *clievent.SendResult
-		err    error
-	)
-	switch {
-	case usePassthrough(ctx, sess):
-		result, err = sess.SendPassthrough(ctx, text, images, onEvent, priority)
-	case priority == "now":
-		// ACP / legacy protocols: emulate urgent by interrupting the in-flight
-		// turn first. Best-effort — the message still lands on the next turn.
-		sess.InterruptViaControl()
-		result, err = sess.Send(ctx, text, images, onEvent)
-	default:
-		result, err = sess.Send(ctx, text, images, onEvent)
-	}
-
-	if rs := e.router.SessionFor(key); rs != nil {
-		snap := rs.Snapshot()
-		e.notify.broadcastState(key, snap.State, snap.DeathReason)
-	}
-	e.notify.BroadcastSessionsUpdate()
-
+	result, err := sendTurn(ctx, e.notify, key, sess, text, images, onEvent, usePassthrough(ctx, sess), priority)
+	broadcastAfterTurn(e.router, e.notify, key)
 	return result, err
 }
 
@@ -141,7 +116,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 
 	// /clear and /new — the CLI built-in doesn't work in stream-json; also
 	// drop the pending queue. Case-insensitive so CJK mobile IMEs that
-	// auto-capitalize ("/Clear") still reset (as dispatch.normalizeSlashCommand).
+	// auto-capitalize ("/Clear") still reset (as turn.NormalizeCommand).
 	trimmed := strings.ToLower(strings.TrimSpace(p.Text))
 	if trimmed == "/clear" || trimmed == "/new" {
 		if e.queue != nil {
@@ -149,7 +124,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 		}
 		// queue.Discard 只清排队消息；in-flight 的 SendPassthrough goroutine
 		// 也要通知到，否则它们继续占着 sendSlot 直到超时，新消息被
-		// ErrTooManyPending 拒绝（与 IM 路径 dispatch.discardQueue 对齐）。
+		// ErrTooManyPending 拒绝（与 IM 路径 turn.Orchestrator.Reset 对齐）。
 		if sess := e.router.SessionFor(key); sess != nil {
 			sess.DiscardPassthroughPending(clierr.ErrSessionReset)
 		}
@@ -257,7 +232,7 @@ func (e *sendEngine) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool,
 	if !isOwner {
 		if shouldInterrupt {
 			// Interrupt mode: abort the in-flight turn so the queued follow-up
-			// runs promptly (mirrors dispatch.go). Non-Sent outcomes degrade to Collect.
+			// runs promptly (as turn.Orchestrator does). Non-Sent outcomes degrade to Collect.
 			switch outcome := e.router.InterruptSessionViaControl(key); outcome {
 			case session.InterruptSent:
 				slog.Debug("send: aborted active turn to process follow-up", "key", key)

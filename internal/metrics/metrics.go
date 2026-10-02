@@ -53,7 +53,7 @@ var (
 	SpawnPanicRecoveredTotal = expvar.NewInt("naozhi_spawn_panic_recovered_total")
 
 	// PanicRecoveredTotal counts panics that crossed any recover() boundary
-	// (dashboard WS readPump, remote-node send/interrupt, dispatch ownerLoop,
+	// (dashboard WS readPump, remote-node send/interrupt, turn owner loop,
 	// feishu cleanupNoncesTick). No per-site split — correlate with the
 	// slog.Error stack dumps by timestamp. Superset of SpawnPanicRecoveredTotal.
 	PanicRecoveredTotal = expvar.NewInt("naozhi_panic_recovered_total")

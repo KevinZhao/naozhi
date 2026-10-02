@@ -11,11 +11,8 @@ import (
 // purpose"; after #2552 no constructor path could produce one — buildDashboard
 // runs unconditionally — so the flag documented a state that did not exist.
 // What is worth pinning is the fact that made the flag dead: every constructed
-// Server has a Hub with an engine, and wiring — where buildDispatcher takes
-// serverCaps.send from — holds that same engine. That buildDispatcher really
-// reads w.engine is not observable from here (the dispatcher keeps its
-// Capabilities private); lint C1/C2 rule out any other engine it could reach,
-// and TestBuildDispatcher_RequiresEngine pins what happens if it is absent.
+// Server has a Hub with an engine, and wiring holds that same engine; lint
+// C1/C2 rule out any other engine a build step could reach.
 func TestBuildServer_HubAlwaysWired(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
@@ -26,25 +23,26 @@ func TestBuildServer_HubAlwaysWired(t *testing.T) {
 		t.Fatal("buildServer produced a Server without a Hub / send engine — the hub-less mode #2634 removed has come back")
 	}
 	if hs.wiring.engine != srv.hub.engine {
-		t.Fatal("wiring.engine is not the Hub's engine — the dispatcher's serverCaps would send through a different pipeline than the dashboard")
+		t.Fatal("wiring.engine is not the Hub's engine — the build steps would hand out a different pipeline than the dashboard's")
 	}
 }
 
-// TestBuildDispatcher_RequiresEngine pins buildDispatcher's construction-time
-// refusal: without it a wiring that skipped buildWSStack would build a
-// dispatcher whose first IM message nil-derefs inside serverCaps.Send.
-func TestBuildDispatcher_RequiresEngine(t *testing.T) {
+// TestBuildDispatcher_RequiresBroadcaster pins buildDispatcher's
+// construction-time refusal: without it a wiring that skipped buildWSStack
+// would build a dispatcher whose first IM turn nil-derefs in turnSender's
+// running-state broadcast.
+func TestBuildDispatcher_RequiresBroadcaster(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
 	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	t.Cleanup(srv.appCancel)
 
-	// The Server is already built; dropping the engine from its wiring now
-	// only affects the second buildDispatcher call below.
-	hs.wiring.engine = nil
+	// The Server is already built; dropping the broadcaster from its wiring
+	// now only affects the second buildDispatcher call below.
+	hs.wiring.bcast = nil
 	defer func() {
 		if recover() == nil {
-			t.Fatal("buildDispatcher accepted a wiring with no engine")
+			t.Fatal("buildDispatcher accepted a wiring with no broadcaster")
 		}
 	}()
 	srv.buildDispatcher(hs.wiring)

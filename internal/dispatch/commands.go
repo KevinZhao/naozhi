@@ -16,6 +16,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // trimUnicodeSpace strips all Unicode whitespace (U+3000 ideographic space,
@@ -48,27 +49,25 @@ func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage
 	return true
 }
 
-// normalizeSlashCommand lowercases the leading "/command" token only (CJK
-// IMEs auto-capitalize, e.g. "/New foo") and strips trailing whitespace so
-// IMEs that append a space don't break the bare "/help" equality check.
-func normalizeSlashCommand(trimmed string) string {
-	if !strings.HasPrefix(trimmed, "/") {
-		return trimmed
-	}
-	sp := strings.IndexByte(trimmed, ' ')
-	if sp < 0 {
-		// No ASCII space, but trailing unicode whitespace (U+3000) may remain.
-		return strings.TrimRightFunc(strings.ToLower(trimmed), unicode.IsSpace)
-	}
-	return strings.TrimRightFunc(strings.ToLower(trimmed[:sp])+trimmed[sp:], unicode.IsSpace)
-}
-
-// dispatchCommand handles slash commands (/help, /new, /clear, /cron, /cd, /pwd, /project).
-// Returns true if the message was a command and was handled. A switch rather
-// than a handler table: arms carry unique preconditions (/cd consults the
-// project binding, /urgent splits empty args, /cron needs a scheduler).
+// dispatchCommand handles slash commands (/help, /new, /clear, /urgent, /cron,
+// /cd, /pwd, /project, /stop). Returns true if the message was a command and
+// was handled. turn.Parse recognises the turn commands; the rest match its
+// normalized Text. A switch rather than a handler table: arms carry unique
+// preconditions (/cd consults the project binding, /cron needs a scheduler).
 func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) bool {
-	trimmed = normalizeSlashCommand(trimmed)
+	cmd := turn.Parse(trimmed)
+	switch cmd.Kind {
+	case turn.CmdReset:
+		d.handleNewCommand(ctx, msg, cmd.Arg, log)
+		return true
+	case turn.CmdUrgent:
+		d.handleUrgentCommand(ctx, msg, cmd.Arg, log)
+		return true
+	case turn.CmdUrgentUsage:
+		d.replyText(ctx, msg, "用法：/urgent <紧急消息>（该消息会立即中断正在进行的回复）", log)
+		return true
+	}
+	trimmed = cmd.Text
 	switch {
 	case trimmed == "/cron" || strings.HasPrefix(trimmed, "/cron "):
 		if d.scheduler != nil {
@@ -105,22 +104,8 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		d.handleProjectCommand(ctx, msg, trimmed, log)
 		return true
 
-	case trimmed == "/new" || strings.HasPrefix(trimmed, "/new ") ||
-		trimmed == "/clear" || strings.HasPrefix(trimmed, "/clear "):
-		d.handleNewCommand(ctx, msg, trimmed, log)
-		return true
-
 	case trimmed == "/stop" || strings.HasPrefix(trimmed, "/stop "):
 		d.handleStopCommand(ctx, msg, log)
-		return true
-
-	case strings.HasPrefix(trimmed, "/urgent "):
-		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "/urgent "))
-		d.handleUrgentCommand(ctx, msg, rest, log)
-		return true
-
-	case trimmed == "/urgent":
-		d.replyText(ctx, msg, "用法：/urgent <紧急消息>（该消息会立即中断正在进行的回复）", log)
 		return true
 
 	default:
@@ -193,32 +178,17 @@ func (d *Dispatcher) interruptChat(platform, chatType, chatID string) sessionvie
 	return best
 }
 
-// handleUrgentCommand dispatches a priority:"now" passthrough message: the CLI
-// aborts any in-flight turn and runs the urgent message next; pending messages
-// are failed with ErrAbortedByUrgent. Protocols without passthrough (ACP) fall
-// back to InterruptViaControl + legacy Send.
+// handleUrgentCommand submits text at turn.PriorityNow: the CLI aborts any
+// in-flight turn and runs the urgent message next; pending messages are
+// failed with ErrAbortedByUrgent. Protocols without passthrough (ACP) fall
+// back to InterruptViaControl + Send. turn.Parse never yields an empty text.
 func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.IncomingMessage, text string, log *slog.Logger) {
-	if text == "" {
-		d.replyText(ctx, msg, "用法：/urgent <紧急消息>", log)
-		return
-	}
-
 	// Resolve via KeyResolver so /urgent gets the same project-bound opts as
 	// the main IM path (docs/rfc/key-resolver.md §2.1 #3).
 	agentID := "general"
 	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-
-	log.Info("/urgent dispatched", "key", key, "text_len", len(text))
-
-	// Ack with a reaction so the user knows the urgent was received.
-	d.ackQueuedWithReaction(ctx, msg, log)
-
-	// Spawn like regular passthrough sends; priority travels via ctx. Cancel
-	// from d.stopCtx so the goroutine aborts on SIGTERM instead of running its
-	// full totalTimeout (systemd TimeoutStopSec, #1320); values from ctx so
-	// per-request slog attrs / auth survive.
-	sendCtx := mergeStopAndValues(d.stopCtx, ctx)
-	d.goSendAndReply(WithUrgent(WithPassthrough(sendCtx)), key, text, nil, agentID, opts, msg, log, false)
+	o := d.newIMOrigin(msg, log, key, agentID, opts, imUrgent, len(text), 0)
+	d.submit(ctx, o, turn.Request{Key: key, Text: text, Priority: turn.PriorityNow})
 }
 
 func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.IncomingMessage) {
@@ -266,12 +236,13 @@ func (d *Dispatcher) resolveAgentToken(agentToReset string) (string, bool) {
 	return "", false
 }
 
-func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
-	agentToReset := ""
-	if parts := strings.SplitN(trimmed, " ", 2); len(parts) > 1 {
-		// agentCommands keys are lowercased in applyDefaults; match case-insensitively.
-		agentToReset = strings.ToLower(trimUnicodeSpace(parts[1]))
-	}
+// handleNewCommand resets the chat's session for /new and /clear; arg is the
+// optional agent token. The reset goes through Turns.Reset, which discards
+// the key's queue (clearing the dropped messages' ⏳) before the session
+// reset retires the key (#2185), and keeps the /cd workspace override.
+func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.IncomingMessage, arg string, log *slog.Logger) {
+	// agentCommands keys are lowercased in applyDefaults; match case-insensitively.
+	agentToReset := strings.ToLower(trimUnicodeSpace(arg))
 
 	// Project-bound chat: /new resets planner, /new {agent} resets that agent.
 	// Read the binding through the resolver so /new and the IM hot path see
@@ -279,17 +250,12 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 	if b := d.resolver.ProjectBindingForChat(msg.Platform, msg.ChatType, msg.ChatID); b.Bound {
 		if agentToReset == "" {
 			plannerKey := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
-			// discardQueue BEFORE Reset: Reset fires the observer's KeyRetired → msgQueue.Cleanup,
-			// which drops the ring without clearing parked ⏳ reactions (#2185).
-			d.discardQueue(ctx, msg, plannerKey)
-			d.router.Reset(plannerKey)
+			d.turns.Reset(ctx, plannerKey, false)
 			d.replyText(ctx, msg, "项目 "+b.Name+" 的 planner 已重置。", log)
 		} else {
 			if id, ok := d.resolveAgentToken(agentToReset); ok {
 				key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
-				// #2185: discardQueue before Reset — see the planner branch above.
-				d.discardQueue(ctx, msg, key)
-				d.router.Reset(key)
+				d.turns.Reset(ctx, key, false)
 				d.replyText(ctx, msg, "会话已重置 ("+id+")。", log)
 			} else {
 				// User input: sanitize before echoing into chat (bidi spoofing).
@@ -320,9 +286,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 		}
 	}
 	key := sessionkey.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-	// #2185: discardQueue before Reset — see the planner branch above.
-	d.discardQueue(ctx, msg, key)
-	d.router.Reset(key)
+	d.turns.Reset(ctx, key, false)
 	label := ""
 	if agentID != "general" {
 		label = " (" + agentID + ")"

@@ -1,6 +1,6 @@
 package dispatch
 
-// #2291: once sendAndReply has committed (or is about to commit) the final
+// #2291: once the IM delivery has committed (or is about to commit) the final
 // answer to the banner, a residual buffered editCh signal must NOT trigger a
 // status redraw that overwrites the real answer with stale interim status.
 

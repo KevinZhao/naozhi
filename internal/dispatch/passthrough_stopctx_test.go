@@ -45,7 +45,7 @@ func TestMergeStopAndValues_DoneFollowsCancelSrc(t *testing.T) {
 
 // TestMergeStopAndValues_ValueLookupFromValuesSrcFirst confirms that
 // per-request slog attrs / auth values attached to the webhook ctx
-// remain reachable through the merged ctx. Without this, sendAndReply's
+// remain reachable through the merged ctx. Without this, the IM delivery's
 // downstream value lookups (request_id, planner trace, etc.) would
 // silently fail after the merge. The fallback chain still consults
 // cancelSrc so service-ctx-attached values (cron / sysession trace IDs)

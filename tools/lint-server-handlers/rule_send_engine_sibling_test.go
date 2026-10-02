@@ -134,8 +134,7 @@ type wiring struct {
 		"send.go": `package server
 
 type serverCaps struct {
-	s    *Server
-	send *sendEngine
+	s *Server
 }
 `,
 	}
@@ -295,7 +294,7 @@ func TestScanSiblingHolderWhitelist(t *testing.T) {
 	t.Parallel()
 	fset, files := parseSiblingPkg(t, siblingCleanPkg())
 	if vs := scanSiblingHolderWhitelist(fset, files); len(vs) != 0 {
-		t.Fatalf("clean (Hub.engine, HubOptions.Engine, wiring.engine, serverCaps.send all whitelisted): want 0, got %d: %+v", len(vs), vs)
+		t.Fatalf("clean (Hub.engine, HubOptions.Engine, wiring.engine all whitelisted): want 0, got %d: %+v", len(vs), vs)
 	}
 
 	// m7: a new struct holds *sendEngine.
@@ -308,6 +307,20 @@ type engineBox struct {
 	fset, files = parseSiblingPkg(t, withBox)
 	if vs := scanSiblingHolderWhitelist(fset, files); len(vs) != 1 {
 		t.Fatalf("m7 engineBox: want 1, got %d: %+v", len(vs), vs)
+	}
+
+	// serverCaps lost its engine when IM sends moved to turnSender (#3004);
+	// giving it one back is a new holder like any other.
+	withCapsSend := withExtra(siblingCleanPkg(), "send.go", `package server
+
+type serverCaps struct {
+	s    *Server
+	send *sendEngine
+}
+`)
+	fset, files = parseSiblingPkg(t, withCapsSend)
+	if vs := scanSiblingHolderWhitelist(fset, files); len(vs) != 1 {
+		t.Fatalf("serverCaps.send: want 1, got %d: %+v", len(vs), vs)
 	}
 }
 
