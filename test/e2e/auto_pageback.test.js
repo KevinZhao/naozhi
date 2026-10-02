@@ -1,8 +1,9 @@
 // @ts-check
 // The initial history page is the newest INITIAL_HISTORY_LIMIT (100) entries.
-// dashboard.js hides the INTERNAL_EVENT_TYPES, so a session whose last 100
-// entries are all internal (a parallel agent team's tool_use / task_progress
-// churn) renders a blank transcript and strands the operator on the
+// The transcript hides the INTERNAL_EVENT_TYPES (event_render.js's
+// isInternalEvent), so a session whose last 100 entries are all internal (a
+// parallel agent team's tool_use / task_progress churn) renders a blank
+// transcript and strands the operator on the
 // "该会话最近仅有 agent 活动" placeholder. maybeAutoPageBack recovers by paging
 // backwards until a visible bubble appears, bounded by AUTO_PAGEBACK_MAX.
 //
@@ -18,7 +19,7 @@
 // blank page ever recovers or that the recovery ever stops.
 //
 // The JS/Go internal-kind parity that file's first test checked is
-// structural: dashboard.js builds INTERNAL_EVENT_TYPES from
+// structural: event_render.js builds INTERNAL_EVENT_TYPES from
 // NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL, which contractjs generates from the
 // clievent kindTable column IsInternalEventType reads.
 //

@@ -1,6 +1,6 @@
 // @ts-check
 // The model sometimes writes tool-call syntax verbatim into an assistant *text*
-// block instead of emitting a structured tool_use. dashboard.js's
+// block instead of emitting a structured tool_use. event_render.js's
 // stripLeakedToolCalls detects that and folds the malformed payload behind a
 // collapsed <details> so the bubble shows the prose, not a wall of XML.
 //
@@ -87,7 +87,7 @@ test.describe('leaked tool-call fold', () => {
       const got = folded === null ? false : folded;
       if (got !== s.leak) disagreements.push({ name: s.name, want: s.leak, got });
     }
-    expect(disagreements, 'dashboard.js and leakguard.Detect disagree on these samples')
+    expect(disagreements, 'event_render.js and leakguard.Detect disagree on these samples')
       .toEqual([]);
     } finally {
       await cleanup();
