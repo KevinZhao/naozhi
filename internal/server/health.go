@@ -269,7 +269,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 			NoOutputTimeout: h.noOutputTimeoutStr,
 			TotalTimeout:    h.totalTimeoutStr,
 		},
-		CLIAvailable: cliAvailable(h.router.CLIPath()),
+		CLIAvailable: cliAvailable(h.router.Backends().CLIPath()),
 		ConfigSHA256: h.configSHA256,
 		ConfigPath:   h.configPath,
 	}

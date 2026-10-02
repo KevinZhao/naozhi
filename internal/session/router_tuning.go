@@ -109,7 +109,7 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 			pending, err = true, r.setPendingTuning(tx, key, model, effort)
 			return
 		}
-		wrapper, backendID := r.wrapperFor(sess.Backend())
+		wrapper, backendID := r.backends.wrapperFor(sess.Backend())
 		// A missing wrapper degrades to zero caps: a model override is still
 		// safe to record (only feeds the next spawn's flags); an effort tier
 		// needs a capability we cannot confirm, so it is rejected below.
@@ -134,7 +134,7 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		// agents[].effort layer arrives via AgentOpts at send time, so an
 		// agent-tiered session on a tier-less kiro backend may take the RPC path
 		// and lose its agent tier until the next respawn (kiro-effort-control §4.5.1).
-		effectiveEffort := r.backendDefaultsFor(backendID).Effort
+		effectiveEffort := r.backends.backendDefaultsFor(backendID).Effort
 		if effort != nil {
 			if *effort != "" {
 				effectiveEffort = *effort

@@ -24,20 +24,20 @@ import (
 // edit applied. The table is fixed once built, so a fixture that changes one
 // property builds a new one; hand-built routers start from the empty config.
 func (r *Router) editBackendsForTest(edit func(c *backendstore.Config)) {
-	c := r.bk.Config()
+	c := r.backends.bk.Config()
 	if c.Runtimes == nil {
 		c.Runtimes = map[string]BackendRuntime{}
 	}
 	edit(&c)
 	manifests := map[string][]cli.ModelInfo{}
 	for id := range c.Runtimes {
-		if m := r.bk.Manifest(id); m != nil {
+		if m := r.backends.bk.Manifest(id); m != nil {
 			manifests[id] = m
 		}
 	}
-	r.bk = backendstore.New(c)
+	r.backends.bk = backendstore.New(c)
 	for id, m := range manifests {
-		r.bk.SetManifest(id, m)
+		r.backends.bk.SetManifest(id, m)
 	}
 }
 
@@ -80,15 +80,15 @@ func (r *Router) setConfiguredModelListsForTest(m map[string][]string) {
 
 func (r *Router) setModelManifestsForTest(m map[string][]cli.ModelInfo) {
 	r.editBackendsForTest(func(*backendstore.Config) {})
-	for id := range r.bk.Config().Runtimes {
-		r.bk.SetManifest(id, nil)
+	for id := range r.backends.bk.Config().Runtimes {
+		r.backends.bk.SetManifest(id, nil)
 	}
 	for id, v := range m {
-		r.bk.SetManifest(id, v)
+		r.backends.bk.SetManifest(id, v)
 	}
 }
 
 // setAccessProfiles publishes m as r's access-profile registry.
 func setAccessProfiles(r *Router, m map[string]AccessProfile) {
-	r.accessProfiles.Store(&m)
+	r.backends.accessProfiles.Store(&m)
 }

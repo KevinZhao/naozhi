@@ -255,7 +255,7 @@ func TestBackendEffortsFeedDriftCheck(t *testing.T) {
 	r.editBackendsForTest(func(c *backendstore.Config) { c.Model = "claude-fable-5" })
 	r.setBackendEffortsForTest(map[string]string{"kiro": "xhigh"})
 
-	bd := r.backendDefaultsFor("kiro")
+	bd := r.backends.backendDefaultsFor("kiro")
 	if bd.Effort != "xhigh" {
 		t.Fatalf("backendDefaultsFor(kiro).Effort = %q, want xhigh", bd.Effort)
 	}

@@ -6,8 +6,9 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// Router is the consumer-side subset of *session.Router the access-profile
-// handlers use, so the sub-package never imports internal/server.
+// Router is the consumer-side subset of *session.BackendRegistry (wired as
+// router.Backends()) the access-profile handlers use, so the sub-package
+// never imports internal/server.
 type Router interface {
 	// AccessProfileInfos projects the registry down to non-sensitive display
 	// fields + a secret_ok bit; env values and *_FILE contents never cross.

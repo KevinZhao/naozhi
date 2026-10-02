@@ -45,7 +45,7 @@ func newGitHandler(t *testing.T, ws string) *Handlers {
 		chatKey := gitTestKey[:strings.LastIndexByte(gitTestKey, ':')]
 		r.SetWorkspace(chatKey, ws)
 	}
-	h := New(Deps{Router: r, ValidateWS: passthroughValidateWS})
+	h := New(Deps{Router: realRouter{r}, ValidateWS: passthroughValidateWS})
 	return h
 }
 
@@ -252,7 +252,7 @@ func TestHandleGit_LiveSessionWorkspaceWinsOverChatOverride(t *testing.T) {
 	sess := r.InjectSession(gitTestKey, &sessionpkg.TestProcess{AliveVal: true})
 	sess.SetWorkspaceForTest(liveRepo)
 
-	h := New(Deps{Router: r, ValidateWS: passthroughValidateWS})
+	h := New(Deps{Router: realRouter{r}, ValidateWS: passthroughValidateWS})
 	_, body := doGit(t, h, "key="+gitTestKey)
 	if body.Branch != "live-branch" {
 		t.Errorf("branch = %q, want live-branch (the live session's cwd)", body.Branch)

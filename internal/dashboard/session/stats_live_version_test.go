@@ -22,7 +22,7 @@ func TestHandleList_CLIVersion_TracksLiveUpgrade(t *testing.T) {
 	r := sessionpkg.NewRouter(sessionpkg.RouterConfig{Wrapper: w, MaxProcs: 3})
 
 	h := New(Deps{
-		Router:        r,
+		Router:        realRouter{r},
 		NodeAccess:    noNodeAccessor{},
 		NodeCache:     node.NewCacheManager(func() map[string]node.Conn { return nil }, func() {}),
 		StartedAt:     time.Now(),

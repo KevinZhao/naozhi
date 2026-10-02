@@ -135,7 +135,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		// Empty StateDir yields an in-memory prefs store (no persistence).
 		uiSettingsH: uisettings.New(uiprefs.New(opts.StateDir)),
 		// Empty ConfigPath keeps the create endpoint disabled (400).
-		accessProfilesH: accessprofile.New(router, opts.Config.Path, opts.Config.AccessProfileSecretsDir),
+		accessProfilesH: accessprofile.New(router.Backends(), opts.Config.Path, opts.Config.AccessProfileSecretsDir),
 		cronH:           buildCronHandlers(opts, claudeDir),
 		transcribeH:     buildTranscribeHandler(opts),
 	}
@@ -255,7 +255,7 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 	}
 	var routerView dashsession.RouterView
 	if router != nil {
-		routerView = router
+		routerView = sessionRouterView{router}
 	}
 	sessionH := dashsession.New(dashsession.Deps{
 		// /api/sessions snapshot enrichment goes through the hub's tailer registry.

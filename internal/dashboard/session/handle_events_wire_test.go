@@ -43,7 +43,7 @@ func TestHandleEvents_WireView(t *testing.T) {
 		proc.EventLog.Append(e)
 	}
 	r.InjectSession(key, proc)
-	h := New(Deps{Router: r})
+	h := New(Deps{Router: realRouter{r}})
 	for _, q := range []string{"", "&after=1", "&before=3000&limit=10"} {
 		rec := httptest.NewRecorder()
 		h.HandleEvents(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/events?key="+key+q, nil))

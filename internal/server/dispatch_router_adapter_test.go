@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
@@ -58,5 +59,20 @@ func TestServerCaps_SendRefusesAForeignSession(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "did not produce") {
 			t.Errorf("Send(%T) err = %v, want the wiring-fault error", sess, err)
 		}
+	}
+}
+
+// TestServerCaps_ReplyFooterDefaultsToRouterBackend: a session that pinned no
+// backend is tagged with the router's default backend, not claude's.
+func TestServerCaps_ReplyFooterDefaultsToRouterBackend(t *testing.T) {
+	w := cli.NewWrapper("/nonexistent/kiro-cli", &cli.ClaudeProtocol{}, "kiro")
+	r := session.NewRouter(session.RouterConfig{Wrapper: w, MaxProcs: 1})
+	t.Cleanup(r.Shutdown)
+	c := serverCaps{s: &Server{router: r}}
+	if got := c.ReplyFooter(""); got != "kiro" {
+		t.Errorf("ReplyFooter(\"\") = %q, want the default backend's tag kiro", got)
+	}
+	if got := c.ReplyFooter("claude"); got != "cc" {
+		t.Errorf("ReplyFooter(claude) = %q, want cc", got)
 	}
 }

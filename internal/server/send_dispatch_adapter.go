@@ -42,7 +42,7 @@ func (c serverCaps) Takeover(ctx context.Context, chatKey, key string, opts sess
 // replyTagForBackend returns "" for unknown ids so dispatch skips the footer.
 func (c serverCaps) ReplyFooter(backendID string) string {
 	if backendID == "" {
-		backendID = c.s.router.DefaultBackend()
+		backendID = c.s.router.Backends().DefaultBackend()
 	}
 	return replyTagForBackend(backendID)
 }

@@ -29,9 +29,9 @@ import (
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
-// RouterView is the 18 *session.Router methods this package calls, out of 77
-// exported. *session.Router satisfies it structurally; the compile-time
-// assertion lives at the wiring site (internal/server).
+// RouterView is the 18 router methods this package calls. *session.Router
+// provides 16; internal/server's sessionRouterView adds the two CLI facts from
+// Router.Backends() and carries the compile-time assertion.
 //
 // Still 18 and not the ≤6 the issue guessed: this package serves
 // /api/sessions, which is the list, the per-session detail, the run history,

@@ -40,7 +40,7 @@ func newRunsHandler(t *testing.T, n int) *Handlers {
 	// we need them visible now.
 	r.Shutdown()
 
-	return New(Deps{Router: r})
+	return New(Deps{Router: realRouter{r}})
 }
 
 func doRuns(t *testing.T, h *Handlers, query string) (*http.Response, runsListResp) {

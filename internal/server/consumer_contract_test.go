@@ -40,7 +40,7 @@ var _ sendNotifier = (*wsBroadcaster)(nil)
 // or the narrowing would be undone by the assertion itself. server already
 // imports both sides.
 var (
-	_ dashsession.RouterView      = (*session.Router)(nil)
+	_ dashsession.RouterView      = sessionRouterView{}
 	_ dashsession.ProjectSource   = (*project.Manager)(nil)
 	_ dashsession.NodeCacheReader = (*node.CacheManager)(nil)
 	_ dashsession.RetiredReader   = (*discovery.RetiredStore)(nil)

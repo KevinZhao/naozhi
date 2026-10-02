@@ -46,7 +46,7 @@ func WriteSecretFile(path, content string) error {
 // yaml.Node surgery (preserving comments/ordering). It rejects an existing id,
 // validates env through the same envpolicy leaf as load, and writes atomically
 // 0600. It does NOT touch the live Router; the caller sequences disk before
-// memory (validate → WriteSecretFile → AppendAccessProfile → Router.AddAccessProfile).
+// memory (validate → WriteSecretFile → AppendAccessProfile → BackendRegistry.AddAccessProfile).
 func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 	if err := ValidateAccessProfileID(id); err != nil {
 		return err

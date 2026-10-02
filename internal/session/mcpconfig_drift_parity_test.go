@@ -74,7 +74,7 @@ func TestMCPConfigDriftParity_NoFalsePositive(t *testing.T) {
 	r.mcpConfigFile = mcpPath
 	proto := &cli.ClaudeProtocol{}
 
-	bd := r.backendDefaultsFor("claude")
+	bd := r.backends.backendDefaultsFor("claude")
 
 	// What classifyShimState's drift check builds (driftCompareArgs → read-only
 	// debug path).

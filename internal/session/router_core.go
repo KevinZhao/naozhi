@@ -166,21 +166,12 @@ type Router struct {
 	// lock-free Active / Gen), because the spawn bookkeeping, workspace
 	// overrides and picks kept in routerState must change atomically with it.
 	ss *sessiontable.Table[*ManagedSession, routerState, routerStateView]
-	// bk is the backend table (internal/session/backendstore), fixed once
-	// NewRouter returns; nil on a hand-built test Router, which reads as empty.
-	bk *backendstore.Store
-	// accessProfiles is the named auth/upstream overlay registry (RFC
-	// project-access-profile). Nil/empty ⇒ every session runs on the global
-	// baseline. Copy-on-write behind an atomic pointer: AddAccessProfile
-	// publishes a whole new map, so readers load it without the table lock and never see
-	// a half-inserted entry. Read it through profiles().
-	accessProfiles atomic.Pointer[map[string]AccessProfile]
-	// defaultAccessProfile is applied when a session resolves to no explicit
-	// profile (lowest precedence); "" = global-baseline fallthrough. Read-only after NewRouter.
-	defaultAccessProfile string
-	maxProcs             int
-	ttl                  time.Duration
-	pruneTTL             time.Duration
+	// backends is the backend table and access-profile registry
+	// (backend_registry.go), reached through Backends().
+	backends BackendRegistry
+	maxProcs int
+	ttl      time.Duration
+	pruneTTL time.Duration
 	//
 	// Named defaultCWD (not "workspace") to disambiguate from node identity
 	// (Config.Workspace), remote nodes (Config.Workspaces) and per-chat
@@ -687,7 +678,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 	// wsStore, kid and pp are zero-value usable (maps allocated lazily).
 	r.ss = newSessionTable()
-	r.bk = backendstore.New(backendstore.Config{
+	r.backends.bk = backendstore.New(backendstore.Config{
 		Wrapper:        cfg.Wrapper,
 		DefaultBackend: cfg.DefaultBackend,
 		Model:          cfg.Model,
@@ -696,9 +687,9 @@ func NewRouter(cfg RouterConfig) *Router {
 	})
 	if cfg.AccessProfiles != nil {
 		profiles := cfg.AccessProfiles
-		r.accessProfiles.Store(&profiles)
+		r.backends.accessProfiles.Store(&profiles)
 	}
-	r.defaultAccessProfile = cfg.DefaultAccessProfile
+	r.backends.defaultAccessProfile = cfg.DefaultAccessProfile
 	// Run-history store is rooted next to the session store (its own config,
 	// NOT cron's). Empty StorePath disables persistence (no-op store).
 	if cfg.StorePath != "" {
@@ -810,8 +801,8 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 	// Resolve the wrapper that owned this session's backend so the snapshot
 	// carries the correct CLI identity after a pure restore (no shim reconnect).
 	// Pre-multi-backend entries have empty Backend → router default.
-	restoreWrapper, restoreBackendID := r.wrapperFor(entry.Backend)
-	cliName, cliVersion := r.CLIName(), r.CLIVersion()
+	restoreWrapper, restoreBackendID := r.backends.wrapperFor(entry.Backend)
+	cliName, cliVersion := r.backends.CLIName(), r.backends.CLIVersion()
 	if restoreWrapper != nil {
 		cliName = restoreWrapper.CLIName
 		cliVersion = restoreWrapper.CLIVersion
@@ -973,7 +964,7 @@ func (r *Router) startBackgroundHistoryLoaders() {
 	if r.claudeDir == "" {
 		return
 	}
-	shimKeys := r.shimManagedKeys()
+	shimKeys := r.backends.shimManagedKeys()
 	sem := historyLoadSem
 	for _, s := range sessions {
 		if s.getSessionID() == "" {

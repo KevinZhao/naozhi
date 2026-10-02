@@ -52,7 +52,7 @@ func TestCreateAccessProfile_BedrockNoSecret(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 	// Live registry updated (no restart).
-	if !srv.router.HasAccessProfile("bedrock-opus") {
+	if !srv.router.Backends().HasAccessProfile("bedrock-opus") {
 		t.Error("profile not live after create")
 	}
 	// config.yaml written.
@@ -176,7 +176,7 @@ func TestCreateAccessProfile_ConcurrentWritesAllPersist(t *testing.T) {
 		if _, ok := cfg.AccessProfiles[id]; !ok {
 			t.Errorf("profile %s missing from config.yaml after concurrent create", id)
 		}
-		if !srv.router.HasAccessProfile(id) {
+		if !srv.router.Backends().HasAccessProfile(id) {
 			t.Errorf("profile %s missing from live registry", id)
 		}
 	}

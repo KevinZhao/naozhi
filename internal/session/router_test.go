@@ -372,28 +372,28 @@ func TestRouterBackendIDsAndWrapperFor(t *testing.T) {
 		DefaultBackend:  "kiro",
 	})
 
-	ids := r.BackendIDs()
+	ids := r.backends.BackendIDs()
 	if len(ids) != 2 || ids[0] != "kiro" {
 		t.Fatalf("BackendIDs = %v, want default-first [kiro, claude]", ids)
 	}
-	if got := r.DefaultBackend(); got != "kiro" {
+	if got := r.backends.DefaultBackend(); got != "kiro" {
 		t.Errorf("DefaultBackend = %q, want kiro", got)
 	}
 
 	// Explicit lookup
-	w, id := r.wrapperFor("claude")
+	w, id := r.backends.wrapperFor("claude")
 	if w != claudeW || id != "claude" {
 		t.Errorf("wrapperFor(claude) = %v, %q; want claudeW, claude", w, id)
 	}
 
 	// Empty → default
-	w, id = r.wrapperFor("")
+	w, id = r.backends.wrapperFor("")
 	if w != kiroW || id != "kiro" {
 		t.Errorf("wrapperFor(\"\") = %v, %q; want kiroW, kiro", w, id)
 	}
 
 	// Unknown → default (silent fallback)
-	w, id = r.wrapperFor("gemini")
+	w, id = r.backends.wrapperFor("gemini")
 	if w != kiroW || id != "kiro" {
 		t.Errorf("wrapperFor(unknown) = %v, %q; want kiroW, kiro", w, id)
 	}
@@ -403,14 +403,14 @@ func TestRouterLegacySingleWrapperMode(t *testing.T) {
 	w := &cli.Wrapper{BackendID: "claude", CLIName: "claude-code"}
 	r := NewRouter(RouterConfig{Wrapper: w})
 
-	ids := r.BackendIDs()
+	ids := r.backends.BackendIDs()
 	if len(ids) != 1 || ids[0] != "claude" {
 		t.Errorf("legacy BackendIDs = %v, want [claude]", ids)
 	}
-	if got := r.DefaultBackend(); got != "claude" {
+	if got := r.backends.DefaultBackend(); got != "claude" {
 		t.Errorf("legacy DefaultBackend = %q, want claude", got)
 	}
-	if got := r.BackendWrapper("claude"); got != w {
+	if got := r.backends.BackendWrapper("claude"); got != w {
 		t.Errorf("legacy BackendWrapper(claude) = %v, want wrapper", got)
 	}
 }
@@ -2373,7 +2373,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	// Regression: a session whose process exited but whose entry is still
 	// in the session table must resume against the SAME backend it ran on. Before
-	// this fix, resolveSpawnParams fell through to r.bk.DefaultID()
+	// this fix, resolveSpawnParams fell through to r.backends.bk.DefaultID()
 	// when opts.Backend was empty AND backendOverrides[key] was already
 	// consumed (one-shot). For a kiro session that meant the second turn
 	// silently respawned under claude with the kiro session_id, which then
@@ -2556,7 +2556,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 
 	t.Run("default profile applies when nothing else picks one", func(t *testing.T) {
 		r := mkRouter()
-		r.defaultAccessProfile = "bedrock-opus"
+		r.backends.defaultAccessProfile = "bedrock-opus"
 		sp := resolveT(r, "feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (default applied)", sp.AccessProfileID)
@@ -2571,7 +2571,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 
 	t.Run("explicit opts profile beats default", func(t *testing.T) {
 		r := mkRouter()
-		r.defaultAccessProfile = "bedrock-opus"
+		r.backends.defaultAccessProfile = "bedrock-opus"
 		sp := resolveT(r, "feishu:user:bob:agent1", "",
 			AgentOpts{AccessProfile: "1p-fable"})
 		if sp.AccessProfileID != "1p-fable" {
@@ -2581,7 +2581,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 
 	t.Run("resume lock beats default", func(t *testing.T) {
 		r := mkRouter()
-		r.defaultAccessProfile = "1p-fable"
+		r.backends.defaultAccessProfile = "1p-fable"
 		key := "feishu:user:bob:agent1"
 		old := &ManagedSession{key: key}
 		old.SetAccessProfile("bedrock-opus")
@@ -2594,7 +2594,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 
 	t.Run("unknown default profile falls back to global baseline", func(t *testing.T) {
 		r := mkRouter()
-		r.defaultAccessProfile = "ghost-profile"
+		r.backends.defaultAccessProfile = "ghost-profile"
 		sp := resolveT(r, "feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.AccessProfileID != "" || sp.AccessProfileEnv != nil {
 			t.Errorf("expected empty profile (unknown default → baseline), got id=%q env=%v",

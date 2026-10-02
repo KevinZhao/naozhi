@@ -67,8 +67,8 @@ func profileDefaultModelFor(profiles map[string]AccessProfile, id string) string
 
 // accessProfileDefaultModel is profileDefaultModelFor over the current
 // registry, for the drift check.
-func (r *Router) accessProfileDefaultModel(id string) string {
-	return profileDefaultModelFor(r.profiles(), id)
+func (b *BackendRegistry) accessProfileDefaultModel(id string) string {
+	return profileDefaultModelFor(b.profiles(), id)
 }
 
 // EffectiveArgvLayers is mergeArgvLayers for an offline caller — `naozhi
