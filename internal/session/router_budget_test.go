@@ -34,15 +34,19 @@ const (
 // Every non-test file in the package root stays within
 // routerFileLinesTargetBaseline lines. The two files above it carry an
 // exemption that may only shrink; a file that sinks more than
-// routerLinesSlack below its exemption re-samples it, and one back under
-// the limit drops its exemption.
+// routerLinesSlackBaseline below its exemption re-samples it, and one back
+// under the limit drops its exemption. routerLineExemptionsBaseline counts
+// the exemptions, so a third one is a raise the ratchet ledger sees, however
+// it is spelled.
 const routerFileLinesTargetBaseline = 900
 
 const routerCoreLinesBaseline = 1281
 
 const routerLifecycleLinesBaseline = 1523
 
-const routerLinesSlack = 30
+const routerLineExemptionsBaseline = 2
+
+const routerLinesSlackBaseline = 30
 
 // S12's end state. Asserted against measured values once the split lands
 // (S12g); until then they are only reported.
@@ -77,6 +81,7 @@ type routerLimits struct {
 	fields, methods, refs int
 	lineLimit             int
 	exempt                map[string]int
+	exemptions            int // how many entries exempt may hold
 	// floors against a parse that has gone blind
 	minFiles, minMethods, minClosure int
 }
@@ -84,7 +89,7 @@ type routerLimits struct {
 func realRouterLimits() routerLimits {
 	return routerLimits{
 		fields: routerFieldBaseline, methods: routerMethodBaseline, refs: routerTypeRefBaseline,
-		lineLimit: routerFileLinesTargetBaseline,
+		lineLimit: routerFileLinesTargetBaseline, exemptions: routerLineExemptionsBaseline,
 		exempt: map[string]int{
 			"router_core.go":      routerCoreLinesBaseline,
 			"router_lifecycle.go": routerLifecycleLinesBaseline,
@@ -381,11 +386,17 @@ func budgetProblems(m routerMeasure, l routerLimits) []string {
 			add("lines", "%s is %d lines, within the %d limit: delete its exemption constant", name, n, l.lineLimit)
 		case exempt && n > base:
 			add("lines", "%s grew to %d lines, above its exemption of %d: split it", name, n, base)
-		case exempt && base-n > routerLinesSlack:
-			add("lines", "%s is %d lines, %d below its exemption of %d (slack %d): re-sample the constant to %d", name, n, base-n, base, routerLinesSlack, n)
+		case exempt && base-n > routerLinesSlackBaseline:
+			add("lines", "%s is %d lines, %d below its exemption of %d (slack %d): re-sample the constant to %d", name, n, base-n, base, routerLinesSlackBaseline, n)
 		case !exempt && n > l.lineLimit:
 			add("lines", "%s is %d lines, above the %d limit: split it", name, n, l.lineLimit)
 		}
+	}
+	switch {
+	case len(l.exempt) > l.exemptions:
+		add("exemptions", "%d files are exempt from the line limit, above the baseline of %d: split the file instead (#3023)", len(l.exempt), l.exemptions)
+	case len(l.exempt) < l.exemptions:
+		add("exemptions", "%d files are exempt from the line limit (baseline %d): lower routerLineExemptionsBaseline to %d", len(l.exempt), l.exemptions, len(l.exempt))
 	}
 	for name := range l.exempt {
 		if _, ok := m.lines[name]; !ok {
@@ -472,7 +483,7 @@ type session struct{ r *Router }
 `,
 }
 
-var routerFixtureLimits = routerLimits{fields: 5, methods: 2, refs: 3, lineLimit: 900, exempt: map[string]int{"big.go": 1000}}
+var routerFixtureLimits = routerLimits{fields: 5, methods: 2, refs: 3, lineLimit: 900, exemptions: 1, exempt: map[string]int{"big.go": 1000}}
 
 var routerFixtureLines = map[string]int{"router.go": 20, "facets.go": 12, "big.go": 990}
 
@@ -540,6 +551,10 @@ func TestRouterBudget_CatchesEachRule(t *testing.T) {
 		{"exempt file shrank past the slack", nil, map[string]int{"router.go": 20, "facets.go": 12, "big.go": 969}, nil, []string{"lines"}},
 		{"exempt file back under the limit", nil, map[string]int{"router.go": 20, "facets.go": 12, "big.go": 900}, nil, []string{"lines"}},
 		{"exempt file deleted", nil, map[string]int{"router.go": 20, "facets.go": 12}, nil, []string{"lines"}},
+		{"exemption added", nil, map[string]int{"router.go": 20, "facets.go": 12, "big.go": 990, "huge.go": 950},
+			func(l *routerLimits) { l.exempt = map[string]int{"big.go": 1000, "huge.go": 950} }, []string{"exemptions"}},
+		{"exemption dropped", nil, map[string]int{"router.go": 20, "facets.go": 12, "big.go": 990},
+			func(l *routerLimits) { l.exemptions = 2 }, []string{"exemptions"}},
 		{"no Router struct", map[string]string{"router.go": "package session\ntype Router interface{}\n"}, nil,
 			func(l *routerLimits) { l.fields, l.methods, l.refs = 0, 0, 1 }, []string{"blind"}},
 		{"too few files", nil, nil, func(l *routerLimits) { l.minFiles = 3 }, []string{"blind"}},
