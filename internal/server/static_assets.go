@@ -113,6 +113,15 @@ var cronAttentionJS embed.FS
 //go:embed static/cron_live.js
 var cronLiveJS embed.FS
 
+//go:embed static/platform.js
+var platformJS embed.FS
+
+//go:embed static/ws_manager.js
+var wsManagerJS embed.FS
+
+//go:embed static/session_stream.js
+var sessionStreamJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -222,6 +231,9 @@ var staticAssets = func() map[string]staticAsset {
 		{"cron_trigger.js", cronTriggerJS, "static/cron_trigger.js", true},
 		{"cron_attention.js", cronAttentionJS, "static/cron_attention.js", true},
 		{"cron_live.js", cronLiveJS, "static/cron_live.js", true},
+		{"platform.js", platformJS, "static/platform.js", true},
+		{"ws_manager.js", wsManagerJS, "static/ws_manager.js", true},
+		{"session_stream.js", sessionStreamJS, "static/session_stream.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},

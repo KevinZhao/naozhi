@@ -40,11 +40,11 @@ test('cron-live claims subscribed / session_state / error without touching the s
   const conn = mock.wsConnections[mock.wsConnections.length - 1];
   await expect.poll(() => subs(conn, 'cron:cron-001')).toBe(1);
   const status = page.locator('#cron-live-status');
-  const mainKey = await page.evaluate(() => wsm.subscribedKey);
+  const mainKey = await page.evaluate(() => sessionStream.subscribedKey);
 
   conn.send({ type: 'subscribed', key: 'cron:cron-001', reason: 'suspended' });
   await expect(status).toHaveText('等待事件…');
-  expect(await page.evaluate(() => wsm.subscribedKey), 'the cron ack must not become the session subscription').toBe(mainKey);
+  expect(await page.evaluate(() => sessionStream.subscribedKey), 'the cron ack must not become the session subscription').toBe(mainKey);
 
   // An event the suspended sub already holds sets the re-sub threshold: after
   // is its time (T), not the run start (about now - 5s).

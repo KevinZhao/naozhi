@@ -9,7 +9,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { cronDrawerState } from './cron_drawer.js';
 import { renderCronTimelinePanel } from './cron_timeline.js';
-import { getToken } from './dashboard.js';
+import { getToken } from './platform.js';
 import { esc, escAttr, fetchJSON } from './nz_util.js';
 import { showAPIError } from './utilities.js';
 

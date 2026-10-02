@@ -486,6 +486,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/platform.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/render_md.js",
     "handler_type": "http.HandlerFunc"
   },
@@ -507,6 +512,11 @@
   {
     "method": "GET",
     "path": "/static/session_header.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/session_stream.js",
     "handler_type": "http.HandlerFunc"
   },
   {
@@ -542,6 +552,11 @@
   {
     "method": "GET",
     "path": "/static/voice.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/ws_manager.js",
     "handler_type": "http.HandlerFunc"
   },
   {

@@ -19,12 +19,14 @@ import * as nzUtil from '/static/nz_util.js';
 import * as renderMd from '/static/render_md.js';
 import * as runningBanner from '/static/running_banner.js';
 import * as sendMessage from '/static/send_message.js';
+import { sessionStream } from '/static/session_stream.js';
 import * as sessionHeader from '/static/session_header.js';
 import * as sidebarProject from '/static/sidebar_project.js';
 import * as systemView from '/static/system_view.js';
 import * as tuning from '/static/tuning.js';
 import * as utilities from '/static/utilities.js';
 import * as voice from '/static/voice.js';
+import * as wsManager from '/static/ws_manager.js';
 import { composer, perSession, selection, sessionList, timers, transcript, ui } from '/static/state.js';
 
 const surface = {};
@@ -49,7 +51,7 @@ function stateField(name, obj, key) {
 
 expose(authModal, ['createNewSession', 'doCreateInProject', 'getSelectedNode', 'highlight', 'openProjectPalette', 'pickPaletteCustom', 'renderNodePicker', 'wireNodePicker']);
 expose(composerFiles, ['ORIENT_MAX_WAIT_MS', 'awaitPendingOrients', 'handleFiles', 'maybeAutoOrient', 'openFilePicker', 'removeFile', 'renderFilePreviews', 'retryUpload']);
-expose(dashboard, ['WS_STATES', 'appendEvents', 'applyFeatureGates', 'closeHistoryPopover', 'debouncedFetchSessions', 'eventAlreadyRendered', 'eventHtml', 'fetchEvents', 'fetchSessions', 'getNodeStatus', 'maybeShowOnboarding', 'renderEvents', 'renderMainShell', 'renderSidebar', 'restorePending', 'selectSession', 'sessionCardKey', 'setActivityView', 'toggleHistory', 'trimEventsScroll', 'updateHeaderCLI', 'updateStatusBar', 'wsm']);
+expose(dashboard, ['appendEvents', 'applyFeatureGates', 'closeHistoryPopover', 'debouncedFetchSessions', 'eventAlreadyRendered', 'eventHtml', 'fetchEvents', 'fetchSessions', 'getNodeStatus', 'maybeShowOnboarding', 'renderEvents', 'renderMainShell', 'renderSidebar', 'restorePending', 'selectSession', 'sessionCardKey', 'setActivityView', 'toggleHistory', 'trimEventsScroll', 'updateHeaderCLI', 'updateStatusBar']);
 expose(discovery, ['scanDiscovered']);
 expose(fileRefs, ['isFileRefCandidate', 'sid', 'splitPathLine']);
 expose(mobileNav, ['isMobile', 'mobileEnterChat', 'mobileShowList', 'toggleSidebarCollapsed']);
@@ -64,6 +66,26 @@ expose(systemView, ['reconcileSelectedNode']);
 expose(tuning, ['dismissSession', 'removeSidebarCard', 'renameSession']);
 expose(utilities, ['MAX_LIVE_DOM_EVENTS', 'promptDialog']);
 expose(voice, ['MAX_REC_SECS', 'updateVoiceTimer']);
+expose(wsManager, ['WS_STATES']);
+
+// wsm and sessionStream are strict: reading or writing a field the object does
+// not declare (one that moved to its owner) throws instead of reading
+// undefined, so a test left on the old home fails loudly (S18, #3024).
+const strict = (obj, name) => new Proxy(obj, {
+  get(t, k) {
+    if (typeof k === 'string' && !(k in t)) throw new Error('e2e-shim: ' + name + ' declares no field ' + k);
+    return t[k];
+  },
+  set(t, k, v) {
+    if (!(k in t)) throw new Error('e2e-shim: ' + name + ' declares no field ' + String(k));
+    t[k] = v;
+    return true;
+  },
+});
+for (const [name, obj] of [['wsm', wsManager.wsm], ['sessionStream', sessionStream]]) {
+  const p = strict(obj, name);
+  Object.defineProperty(surface, name, { get: () => p, enumerable: true, configurable: true });
+}
 
 stateField('navIdx', msgNav.navState, 'idx');
 stateField('navPopoverOpen', msgNav.navState, 'popoverOpen');

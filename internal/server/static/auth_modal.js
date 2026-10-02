@@ -11,6 +11,8 @@
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList, transcript } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus } from './nz_util.js';
+import { sessionStream } from './session_stream.js';
+import { wsm } from './ws_manager.js';
 
 const deps = {
   applyFeatureGates: null,
@@ -35,7 +37,6 @@ const deps = {
   statusLabelForNode: null,
   stopPreviewPolling: null,
   updateStatusBar: null,
-  wsm: null,
 };
 export function configureAuthModal(impl) {
   for (const k of Object.keys(deps)) {
@@ -121,8 +122,8 @@ async function saveToken() {
       _authModalCooldownUntil = 0; // fresh session — drop any dismiss cooldown
       const overlay = document.querySelector('.modal-overlay');
       if (overlay) overlay.remove();
-      deps.wsm.disconnect();
-      deps.wsm.connect();
+      wsm.disconnect();
+      wsm.connect();
       deps.fetchSessions();
     } else if (r.status === 429) {
       // R110-P2 WS auth rate-limit countdown: the old catch-all else
@@ -189,7 +190,7 @@ function startLoginRetryCountdown(seconds) {
 // repeated every second; routing the countdown into deps.updateStatusBar keeps
 // the signal visible but out of the way. Triggered by an
 // auth_fail(Error="too many attempts") message that carries a retry_after
-// hint. On expiry the gate clears and deps.wsm.connect() fires once so the user
+// hint. On expiry the gate clears and wsm.connect() fires once so the user
 // doesn't have to click anything — matches the UX-P1 auto-recover spec.
 //
 // Idempotent: calling twice (e.g. a second in-flight reconnect that races
@@ -197,33 +198,32 @@ function startLoginRetryCountdown(seconds) {
 // countdown reflects the freshest server directive, not a stale one.
 let _wsAuthCountdownTimer = null;
 function startWSAuthRetryCountdown(seconds) {
-  if (typeof deps.wsm === 'undefined' || !deps.wsm) return;
   if (!Number.isFinite(seconds) || seconds <= 0) seconds = 60;
-  deps.wsm._authBlockUntil = Date.now() + seconds * 1000;
+  wsm._authBlockUntil = Date.now() + seconds * 1000;
   if (_wsAuthCountdownTimer) {
     clearInterval(_wsAuthCountdownTimer);
     _wsAuthCountdownTimer = null;
   }
   // Repaint the sidebar immediately so the "鉴权过于频繁 · Ns" row appears
   // without waiting for the next 1s tick. deps.updateStatusBar reads
-  // deps.wsm._authBlockUntil directly, so we don't need to pass the remaining
+  // wsm._authBlockUntil directly, so we don't need to pass the remaining
   // seconds around.
   deps.updateStatusBar();
   _wsAuthCountdownTimer = setInterval(() => {
-    if (Date.now() >= deps.wsm._authBlockUntil) {
+    if (Date.now() >= wsm._authBlockUntil) {
       clearInterval(_wsAuthCountdownTimer);
       _wsAuthCountdownTimer = null;
-      deps.wsm._authBlockUntil = 0;
+      wsm._authBlockUntil = 0;
       // Clear the existing reconnect timer so connect() fires immediately
       // rather than waiting out whatever backoff was scheduled alongside
       // the countdown. Reset backoff so post-recovery reconnect behaves
       // like a fresh page load. No toast here — the sidebar status row
       // already moved from "鉴权过于频繁" to "connecting..." which is the
       // user-visible signal.
-      if (deps.wsm.reconnectTimer) { clearTimeout(deps.wsm.reconnectTimer); deps.wsm.reconnectTimer = null; }
-      deps.wsm.backoff = 1000;
+      if (wsm.reconnectTimer) { clearTimeout(wsm.reconnectTimer); wsm.reconnectTimer = null; }
+      wsm.backoff = 1000;
       deps.updateStatusBar();
-      deps.wsm.connect();
+      wsm.connect();
       return;
     }
     deps.updateStatusBar();
@@ -1310,7 +1310,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   deps.eagerBindWorkspace(key, projectPath, nodeId);
 
   deps.stopPreviewPolling();
-  deps.wsm.unsubscribe();
+  sessionStream.unsubscribe();
   selection.key = key;
   selection.node = nodeId || 'local';
   try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
@@ -1353,7 +1353,7 @@ function doCreateSession() {
   if (workspace) deps.eagerBindWorkspace(key, workspace, targetNode);
 
   deps.stopPreviewPolling();
-  deps.wsm.unsubscribe();
+  sessionStream.unsubscribe();
   selection.key = key;
   selection.node = targetNode;
   try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
@@ -1412,7 +1412,7 @@ function createQuickSession(initialText, onTextStranded) {
   deps.persistPending();
 
   deps.stopPreviewPolling();
-  deps.wsm.unsubscribe();
+  sessionStream.unsubscribe();
   selection.key = key;
   selection.node = 'local';
   try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}

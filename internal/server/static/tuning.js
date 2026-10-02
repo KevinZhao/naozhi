@@ -11,6 +11,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, isCronSessionKey, showToast } from './nz_util.js';
+import { sessionStream } from './session_stream.js';
 
 const deps = {
   debouncedFetchSessions: null,
@@ -33,7 +34,6 @@ const deps = {
   sid: null,
   stopPreviewPolling: null,
   wireQuickAskInput: null,
-  wsm: null,
 };
 export function configureTuning(impl) {
   for (const k of Object.keys(deps)) {
@@ -358,7 +358,7 @@ async function dismissSession(key, node, opts) {
     // the 定时任务 panel (cronDelete → DELETE /api/cron).
     if (selection.key === key) {
       selection.key = null;
-      if (deps.wsm.subscribedKey === key) deps.wsm.unsubscribe();
+      if (sessionStream.subscribedKey === key) sessionStream.unsubscribe();
       document.getElementById('main').innerHTML = deps.mainEmptyHtml();
       deps.wireQuickAskInput();
     }
@@ -428,7 +428,7 @@ async function dismissSession(key, node, opts) {
   delete sessionList.sessionsData[skey];
   if (selection.key === key) {
     selection.key = null;
-    if (deps.wsm.subscribedKey === key) deps.wsm.unsubscribe();
+    if (sessionStream.subscribedKey === key) sessionStream.unsubscribe();
     document.getElementById('main').innerHTML = deps.mainEmptyHtml();
     deps.wireQuickAskInput();
   }

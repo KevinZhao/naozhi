@@ -1,6 +1,6 @@
 {
   "agent_view.js": {
-    "lines": 736,
+    "lines": 732,
     "maxFnLines": 66,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -77,18 +77,18 @@
     "configureDeps": 0
   },
   "cron_view.js": {
-    "lines": 2620,
+    "lines": 2618,
     "maxFnLines": 127,
     "fnOver100": 3,
     "topLevelLetVar": 11,
     "configureDeps": 24
   },
   "dashboard.js": {
-    "lines": 6279,
+    "lines": 6011,
     "maxFnLines": 249,
     "fnOver100": 7,
     "topLevelLetVar": 0,
-    "configureDeps": 181
+    "configureDeps": 175
   },
   "discovery.js": {
     "lines": 254,
@@ -132,6 +132,13 @@
     "topLevelLetVar": 0,
     "configureDeps": 0
   },
+  "platform.js": {
+    "lines": 23,
+    "maxFnLines": 6,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0
+  },
   "render_md.js": {
     "lines": 1095,
     "maxFnLines": 303,
@@ -163,6 +170,13 @@
   "session_header.js": {
     "lines": 412,
     "maxFnLines": 33,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0
+  },
+  "session_stream.js": {
+    "lines": 76,
+    "maxFnLines": 18,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0
@@ -203,7 +217,7 @@
     "configureDeps": 0
   },
   "utilities.js": {
-    "lines": 1093,
+    "lines": 1087,
     "maxFnLines": 91,
     "fnOver100": 0,
     "topLevelLetVar": 4,
@@ -214,6 +228,13 @@
     "maxFnLines": 73,
     "fnOver100": 0,
     "topLevelLetVar": 7,
+    "configureDeps": 0
+  },
+  "ws_manager.js": {
+    "lines": 196,
+    "maxFnLines": 33,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
     "configureDeps": 0
   }
 }

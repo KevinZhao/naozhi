@@ -45,11 +45,16 @@ func TestDashboardJS_SubscriptionTimeoutClearsClientBookkeeping(t *testing.T) {
 	// broadcast.
 	toIdx := strings.Index(body, "'subscription_timeout'")
 	tail := body[toIdx:]
+	// Only the timeout branch itself: needSub's resubscribe further down also
+	// zeroes lastEventTimeWs and would satisfy the check on its own.
+	if end := strings.Index(tail, "\n    }\n"); end >= 0 {
+		tail = tail[:end]
+	}
 	for _, want := range []string{
-		"wsm.subscribedKey = null",
-		"wsm.subscribedNode = null",
-		"wsm._subscriptionSuspended = false",
-		"wsm.lastEventTimeWs = 0",
+		"sessionStream.subscribedKey = null",
+		"sessionStream.subscribedNode = null",
+		"sessionStream._subscriptionSuspended = false",
+		"sessionStream.lastEventTimeWs = 0",
 	} {
 		if !strings.Contains(tail, want) {
 			t.Errorf("subscription_timeout handling must include %q so the next running broadcast triggers a fresh subscribe", want)
@@ -190,10 +195,10 @@ func TestDashboardJS_SubscribedAckKeepsNodeForNonPendingTab(t *testing.T) {
 	js := readDashboardJS(t)
 
 	body := wsOnHandler(t, js, "subscribed", false)
-	if !strings.Contains(body, "wsm.subscribedNode = wsm._pendingSubscribeNode || msg.node || 'local'") {
+	if !strings.Contains(body, "sessionStream.subscribedNode = sessionStream._pendingSubscribeNode || msg.node || 'local'") {
 		t.Error("subscribed handler must resolve subscribedNode as `_pendingSubscribeNode || msg.node || 'local'` — a fanned-out remote ack must not rewrite a remote key's node to 'local'")
 	}
-	if strings.Contains(body, "wsm.subscribedNode = wsm._pendingSubscribeNode || 'local'") {
+	if strings.Contains(body, "sessionStream.subscribedNode = sessionStream._pendingSubscribeNode || 'local'") {
 		t.Error("subscribed handler must not fall straight back to 'local' when not pending — see rationale above")
 	}
 }

@@ -100,7 +100,7 @@ func TestDashboardJS_OptimisticRunningWrittenBackToSidebarPayload(t *testing.T) 
 	}
 }
 
-// TestDashboardJS_WSSetStateRespectsHiddenTab pins #2431 P3: wsm.setState must
+// TestDashboardJS_WSSetStateRespectsHiddenTab pins #2431 P3: wsStateChanged must
 // not (re)arm the fallback pollers while document.hidden — stopPollers already
 // suspended them and startPollers re-arms on visibilitychange.
 func TestDashboardJS_WSSetStateRespectsHiddenTab(t *testing.T) {
@@ -109,10 +109,10 @@ func TestDashboardJS_WSSetStateRespectsHiddenTab(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read embedded dashboard.js: %v", err)
 	}
-	body := jsBlockBody(t, string(data), "  setState(s) {")
+	body := jsBlockBody(t, string(data), "function wsStateChanged(s, prev) {")
 
 	if !strings.Contains(body, "document.hidden") {
-		t.Fatal("wsm.setState has no document.hidden gate — a WS transition on a hidden tab re-arms pollers stopPollers just suspended")
+		t.Fatal("wsStateChanged has no document.hidden gate — a WS transition on a hidden tab re-arms pollers stopPollers just suspended")
 	}
 	// Every fallback interval armed in setState must sit behind the gate.
 	for _, arm := range []string{
@@ -123,12 +123,12 @@ func TestDashboardJS_WSSetStateRespectsHiddenTab(t *testing.T) {
 	} {
 		i := strings.Index(body, arm)
 		if i < 0 {
-			t.Fatalf("expected %q in setState", arm)
+			t.Fatalf("expected %q in wsStateChanged", arm)
 		}
 		lineStart := strings.LastIndex(body[:i], "\n") + 1
 		line := body[lineStart:i]
 		if !strings.Contains(line, "visible") && !strings.Contains(line, "!document.hidden") {
-			t.Errorf("%q is armed unconditionally in setState (line=%q); must be gated on tab visibility", arm, strings.TrimSpace(line))
+			t.Errorf("%q is armed unconditionally in wsStateChanged (line=%q); must be gated on tab visibility", arm, strings.TrimSpace(line))
 		}
 	}
 }

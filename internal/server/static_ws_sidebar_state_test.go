@@ -134,8 +134,8 @@ func TestDashboardJS_InterruptAckSurfacesStatus(t *testing.T) {
 func TestDashboardJS_ErrorFrameGuardsPendingSubscribeKey(t *testing.T) {
 	t.Parallel()
 	errCase := wsOnHandler(t, readDashboardJS(t), "error", false)
-	if !strings.Contains(errCase, "msg.key === wsm._pendingSubscribeKey") {
-		t.Error("error case must compare msg.key against wsm._pendingSubscribeKey before clearing pending state")
+	if !strings.Contains(errCase, "msg.key === sessionStream._pendingSubscribeKey") {
+		t.Error("error case must compare msg.key against sessionStream._pendingSubscribeKey before clearing pending state")
 	}
 	if !strings.Contains(errCase, "if (!msg.key && msg.node && msg.error === 'node disconnected')") {
 		t.Error("error case must recognise the PurgeNodeSubscriptions frame (keyless + msg.node + 'node disconnected')")

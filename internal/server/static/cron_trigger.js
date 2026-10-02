@@ -9,7 +9,7 @@
 // the exported cronTriggerCooldownClear.
 
 import { NZ_CONTRACT } from './contract.js';
-import { getToken } from './dashboard.js';
+import { getToken } from './platform.js';
 import { showToast } from './nz_util.js';
 import { showAPIError, showNetworkError } from './utilities.js';
 import { cronDrawerState, renderCronDrawer } from './cron_drawer.js';

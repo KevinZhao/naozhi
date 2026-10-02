@@ -17,7 +17,23 @@
 //       define (a handler left on wsm after a move) or to an imported binding
 //       is refused. check-ws-contract's
 //       field check only reads `msg.<field>`, so a renamed parameter would
-//       drop that handler's reads out of it without a sound.
+//       drop that handler's reads out of it without a sound. A wsm.onAuthFail
+//       callback is held to the same rule: it reads auth_fail's fields.
+//   R5  wsm, sessionStream and cronLive are managed objects, each a literal in
+//       its owner file (MANAGED):
+//       (a) outside the owner the name appears only as `name.<key>` or in an
+//           import from the owner: no alias, argument, computed access, spread
+//           or re-export, and nowhere a property of that name (deps.wsm,
+//           configureX({ wsm }));
+//       (b) every `name.<key>`, and `this.<key>` in the literal's methods,
+//           names a key the literal declares (derived from the AST);
+//       (c) no assignment creates a key the literal does not declare;
+//       (d) wsm declares exactly WSM_CORE, so business state cannot come back
+//           (an extra key) and the list cannot go stale (a missing one), and
+//           every declared key of the three is referenced somewhere.
+//   R7  leaves (LEAVES): ws_manager.js, session_stream.js and platform.js
+//       import only the modules listed, so node and the modules evaluated
+//       before dashboard.js can import them without a cycle.
 //
 // check-ws-contract.mjs reads the registered type set through check() too.
 // Fixtures for every rule: scripts/check-ws-receivers.test.mjs.
@@ -141,6 +157,12 @@ export function checkSource(file, src, outbound) {
       }
       regs.push({ file, line: n.loc.start.line, key, claim: n.arguments.length === 3 });
     }
+    if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && !n.callee.computed &&
+        n.callee.object.type === 'Identifier' && n.callee.object.name === 'wsm' && n.callee.property.name === 'onAuthFail' &&
+        isFn(n.arguments[0])) {
+      firstParamMsg(n.arguments[0], 'onAuthFail callback', n);
+      checkForwards(n.arguments[0], n);
+    }
   });
   return { problems, regs };
 }
@@ -163,12 +185,113 @@ export function check(files, outbound) {
   return { problems, regs };
 }
 
+// R5: each managed object and its owner file. WSM_CORE is wsm's closed key
+// set: the connection, the dispatch table and the lifecycle callbacks.
+export const MANAGED = { wsm: 'ws_manager.js', sessionStream: 'session_stream.js', cronLive: 'cron_live.js' };
+export const WSM_CORE = [
+  'conn', 'state', 'backoff', 'maxBackoff', 'reconnectTimer', 'pingTimer', 'sendCounter',
+  '_everConnected', '_authBlockUntil', '_disconnectedSince', '_ready', '_stateChange', '_authFail', '_frames',
+  'connect', 'cleanup', 'disconnect', 'scheduleReconnect', 'on', 'onReady', 'onStateChange', 'onAuthFail',
+  'onMessage', 'startPing', 'send', 'setState', 'isConnected',
+];
+// R7: what each leaf may import.
+export const LEAVES = {
+  'platform.js': [],
+  'ws_manager.js': ['./contract.js', './platform.js'],
+  'session_stream.js': ['./contract.js', './state.js', './ws_manager.js'],
+};
+
+const keyName = (k) => (k.type === 'Identifier' ? k.name : (k.type === 'Literal' ? String(k.value) : null));
+
+// checkModules applies R5 and R7 across files ([name, source] pairs).
+export function checkModules(files, { managed = MANAGED, core = { wsm: WSM_CORE }, leaves = LEAVES } = {}) {
+  const problems = [];
+  const asts = new Map(files.map(([f, src]) => [f, espree.parse(src, { ecmaVersion: 'latest', sourceType: 'module', loc: true })]));
+  const at = (f, n) => `${f}:${n.loc.start.line}`;
+  // The owner literals and their declared keys.
+  const decl = new Map();
+  for (const [name, owner] of Object.entries(managed)) {
+    let lit = null;
+    walk(asts.get(owner), (n) => {
+      if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.id.name === name && n.init && n.init.type === 'ObjectExpression') lit = n.init;
+    });
+    if (!lit) { problems.push(`${owner}: no \`const ${name} = { … }\` literal to derive ${name}'s keys from (R5)`); continue; }
+    decl.set(name, { owner, lit, keys: new Set(lit.properties.map((p) => !p.computed && p.key && keyName(p.key)).filter(Boolean)), used: new Set() });
+  }
+  const access = (f, name, key, node, write) => {
+    const d = decl.get(name);
+    if (!d) return;
+    d.used.add(key);
+    if (d.keys.has(key)) return;
+    problems.push(write
+      ? `${at(f, node)}: assigns ${name}.${key}, which ${name} does not declare — declare it in ${d.owner}'s literal (R5c)`
+      : `${at(f, node)}: ${name}.${key} is not a key ${name} declares in ${d.owner} (R5b)`);
+  };
+  const isWrite = (n, parents) => {
+    const p = parents[parents.length - 1];
+    return (p && p.type === 'AssignmentExpression' && p.left === n) || (p && p.type === 'UpdateExpression');
+  };
+  const seen = new WeakSet(); // espree shares one node for `{ x }` / `import { x }`
+  for (const [f, ast] of asts) {
+    walk(ast, (n, parents) => {
+      const p = parents[parents.length - 1];
+      if (n.type === 'ImportDeclaration' || n.type === 'ExportNamedDeclaration' || n.type === 'ExportAllDeclaration') {
+        if (n.source && leaves[f] && !leaves[f].includes(n.source.value)) {
+          problems.push(`${at(f, n)}: ${f} is a leaf and may import only ${leaves[f].join(', ') || 'nothing'}, not ${n.source.value} (R7)`);
+        }
+      }
+      if (n.type === 'ImportExpression' && leaves[f]) problems.push(`${at(f, n)}: ${f} is a leaf and may not import() (R7)`);
+      if (n.type === 'MemberExpression' && !n.computed && n.object.type === 'ThisExpression') {
+        // this.<key> inside an owner literal's methods (arrows keep `this`).
+        for (const [name, d] of decl) {
+          if (d.owner !== f) continue;
+          const method = parents.find((q) => q.type === 'Property' && d.lit.properties.includes(q));
+          if (!method || !isFn(method.value)) continue;
+          const inner = parents.slice(parents.indexOf(method) + 2);
+          if (inner.some((q) => q.type === 'FunctionExpression' || q.type === 'FunctionDeclaration')) continue;
+          access(f, name, n.property.name, n, isWrite(n, parents));
+        }
+      }
+      if (n.type !== 'Identifier' || !Object.hasOwn(managed, n.name) || seen.has(n)) return;
+      seen.add(n);
+      const name = n.name;
+      const owner = managed[name];
+      if (p && p.type === 'MemberExpression' && p.object === n && !p.computed) {
+        access(f, name, p.property.name, p, isWrite(p, parents.slice(0, -1)));
+        return;
+      }
+      if (p && ((p.type === 'MemberExpression' && p.property === n && !p.computed) || (p.type === 'Property' && p.key === n && !p.computed))) {
+        problems.push(`${at(f, n)}: a property named ${name} — import ${name} from ${owner} where it is used (R5a)`);
+        return;
+      }
+      if (p && p.type === 'ImportSpecifier') {
+        const decl0 = parents[parents.length - 2];
+        if (decl0.source.value !== './' + owner) problems.push(`${at(f, n)}: ${name} is imported from ${decl0.source.value}, not its owner ${owner} (R5a)`);
+        if (p.local.name !== name) problems.push(`${at(f, n)}: ${name} is imported as ${p.local.name}; keep its name (R5a)`);
+        return;
+      }
+      if (f === owner) return;
+      problems.push(`${at(f, n)}: ${name} outside ${owner} only as ${name}.<key> — no alias, argument, computed access, spread or re-export (R5a)`);
+    });
+  }
+  for (const [name, d] of decl) {
+    if (core[name]) {
+      for (const k of d.keys) if (!core[name].includes(k)) problems.push(`${d.owner}: ${name} declares ${k}, which is not in its core set — business state goes to the module that owns it (R5d)`);
+      for (const k of core[name]) if (!d.keys.has(k)) problems.push(`${d.owner}: the core set lists ${name}.${k}, which ${name} no longer declares — drop the entry (R5d)`);
+    }
+    for (const k of d.keys) if (!d.used.has(k)) problems.push(`${d.owner}: ${name}.${k} is declared but never referenced (R5d)`);
+  }
+  for (const leaf of Object.keys(leaves)) if (!asts.has(leaf)) problems.push(`${leaf}: leaf not found (R7)`);
+  return problems;
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const schema = JSON.parse(fs.readFileSync(path.join(ROOT, 'internal', 'wsproto', 'wsproto.schema.json'), 'utf8'));
   const dir = path.join(ROOT, 'internal', 'server', 'static');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.js') && f !== 'contract.js' && f !== 'sw.js').sort()
     .map((f) => [f, fs.readFileSync(path.join(dir, f), 'utf8')]);
   const { problems, regs } = check(files, new Set(schema.types));
+  problems.push(...checkModules(files));
   for (const p of problems) console.error(p);
   if (problems.length) { console.error(`check-ws-receivers: ${problems.length} problem(s)`); process.exit(1); }
   console.log(`check-ws-receivers: OK (${regs.length} registrations over ${schema.types.length} outbound types)`);

@@ -178,6 +178,9 @@ func readDashboardJS(t *testing.T) string {
 		"state.js",
 		"auth_modal.js",
 		"send_message.js",
+		"platform.js",
+		"ws_manager.js",
+		"session_stream.js",
 	} {
 		data := staticAssetBytes(name)
 		if data == nil {

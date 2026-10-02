@@ -325,3 +325,28 @@ func TestCronLiveJS_RequiresAuth_TokenMode(t *testing.T) {
 		}
 	}
 }
+
+// TestWSModulesJS_RequiresAuth_TokenMode: same SEC-4 gate for the modules
+// split out of dashboard.js with the WS manager (S18d2, #3024).
+func TestWSModulesJS_RequiresAuth_TokenMode(t *testing.T) {
+	t.Parallel()
+	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+
+	for name, src := range map[string]string{
+		"platform.js":       "authHeaders",
+		"ws_manager.js":     "scheduleReconnect",
+		"session_stream.js": "INITIAL_HISTORY_LIMIT",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/static/"+name, nil)
+		w := httptest.NewRecorder()
+		srv.mux.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("/static/%s unauth GET = %d, want 401 (SEC-4 #1328)", name, w.Code)
+		}
+		for _, leak := range []string{"function ", "export ", src} {
+			if strings.Contains(w.Body.String(), leak) {
+				t.Errorf("#923 regression: 401 body leaks %s source token %q", name, leak)
+			}
+		}
+	}
+}
