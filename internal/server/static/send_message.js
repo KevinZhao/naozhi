@@ -397,10 +397,10 @@ function armFallbackEventPoll() {
 // the operator hit send on; a switch during the orient wait aborts the send
 // rather than redirecting the captured text to the newly selected session.
 async function sendComposerTurn(targetKey, targetNode) {
-  // Auto-orient runs as a fire-and-forget vision side-call after upload;
-  // transparently wait for it to settle (capped at ORIENT_MAX_WAIT_MS) so
-  // the rotated bytes land before we consume file_ids. Silent by design —
-  // the user already clicked send.
+  // Auto-orient (maybeAutoOrient) runs as a fire-and-forget vision side-call
+  // after upload; transparently wait for it to settle (capped at
+  // ORIENT_MAX_WAIT_MS) so the rotated bytes land before we consume
+  // file_ids. Silent by design — the user already clicked send.
   await deps.awaitPendingOrients();
   if (!selection.key || selection.key !== targetKey || selection.node !== targetNode) return;
   // The composer stayed editable during the wait: re-read text/files so an
