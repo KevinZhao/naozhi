@@ -25,7 +25,7 @@ func TestNewHub_NilQueue_LeavesInterfaceFieldNil(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
 	q := dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
-	withQueue := NewHub(HubOptions{Router: router, Guard: guard, Queue: q})
+	withQueue := newHubForTest(HubOptions{Router: router}, sendEngineOpts{Guard: guard, Queue: q})
 	t.Cleanup(withQueue.Shutdown)
 	if withQueue.engine.queue == nil {
 		t.Fatal("Hub built with a real Queue: engine.queue is nil, want non-nil interface")

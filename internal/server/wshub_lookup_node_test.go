@@ -21,11 +21,10 @@ func TestHub_LookupNode(t *testing.T) {
 		"node-a": &fakeCapNode{id: "node-a"},
 	})
 
-	hub := NewHub(HubOptions{
+	hub := newHubForTest(HubOptions{
 		Router: router,
-		Guard:  guard,
 		Nodes:  nodes,
-	})
+	}, sendEngineOpts{Guard: guard})
 
 	got, ok := hub.lookupNode("node-a")
 	if !ok {

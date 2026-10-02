@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -144,13 +145,12 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	guard := session.NewGuard()
 	resolver := &session.KeyResolver{}
 	agents := map[string]session.AgentOpts{"a": {}}
-	hub := NewHub(HubOptions{
+	projectMgr := &project.Manager{}
+	hub := newHubForTest(HubOptions{
 		Router:      router,
-		Guard:       guard,
 		Resolver:    resolver,
-		Agents:      agents,
 		AllowedRoot: "/tmp/nz-root",
-	})
+	}, sendEngineOpts{Guard: guard, Agents: agents, ProjectMgr: projectMgr})
 	t.Cleanup(hub.Shutdown)
 
 	if hub.engine == nil {
@@ -164,6 +164,12 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	}
 	if hub.engine.guard != guard {
 		t.Error("engine.guard is not the guard passed to NewHub")
+	}
+	if _, ok := hub.engine.agents["a"]; !ok || len(hub.engine.agents) != len(agents) {
+		t.Error("engine.agents is not the agent map passed to NewHub")
+	}
+	if hub.engine.projectMgr != projectMgr {
+		t.Error("engine.projectMgr is not the project manager passed to NewHub")
 	}
 	if hub.engine.allowedRoot != hub.tailers.allowedRoot {
 		t.Errorf("engine.allowedRoot = %q, tailers.allowedRoot = %q — a path allowed on one side would not be on the other",
@@ -193,7 +199,7 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 // session_state / sessions_update frame silently stops reaching dashboards.
 func TestNewHub_BroadcasterSharesRegistry(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(HubOptions{Router: session.NewRouter(session.RouterConfig{})})
+	hub := newHubForTest(HubOptions{Router: session.NewRouter(session.RouterConfig{})}, sendEngineOpts{})
 	t.Cleanup(hub.Shutdown)
 	if hub.bcast == nil {
 		t.Fatal("NewHub did not build the broadcaster")
@@ -216,7 +222,7 @@ func TestNewHub_BroadcasterSharesRegistry(t *testing.T) {
 // means an Add with no matching Done was registered post-drain).
 func TestSendEngine_NotifyAfterDrainDoesNotArmPending(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(HubOptions{Router: session.NewRouter(session.RouterConfig{})})
+	hub := newHubForTest(HubOptions{Router: session.NewRouter(session.RouterConfig{})}, sendEngineOpts{})
 	hub.Shutdown()
 
 	if _, shuttingDown := hub.engine.TrackSend(); !shuttingDown {

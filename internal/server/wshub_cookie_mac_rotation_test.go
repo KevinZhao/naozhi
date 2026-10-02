@@ -22,9 +22,9 @@ func TestHub_CookieMACFn_PropagatesRotation(t *testing.T) {
 	t.Parallel()
 
 	current := "MAC_v1"
-	hub := NewHub(HubOptions{
+	hub := newHubForTest(HubOptions{
 		CookieMACFn: func() string { return current },
-	})
+	}, sendEngineOpts{})
 
 	if got := hub.admit.cookieMAC(); got != "MAC_v1" {
 		t.Fatalf("initial cookieMAC = %q, want %q — getter callback not wired", got, "MAC_v1")
@@ -50,9 +50,9 @@ func TestHub_CookieMACFn_PropagatesRotation(t *testing.T) {
 func TestHub_CookieMAC_StaticFallback(t *testing.T) {
 	t.Parallel()
 
-	hub := NewHub(HubOptions{
+	hub := newHubForTest(HubOptions{
 		CookieMAC: "static-mac",
-	})
+	}, sendEngineOpts{})
 
 	if got := hub.admit.cookieMAC(); got != "static-mac" {
 		t.Fatalf("static fallback cookieMAC = %q, want %q — NewHub must wrap opts.CookieMAC in a closure for the legacy test signature", got, "static-mac")
@@ -74,7 +74,7 @@ func TestHub_CookieMAC_StaticFallback(t *testing.T) {
 func TestHub_CookieMAC_NilCallback_SafeEmpty(t *testing.T) {
 	t.Parallel()
 
-	hub := NewHub(HubOptions{}) // no MAC provided
+	hub := newHubForTest(HubOptions{}, sendEngineOpts{}) // no MAC provided
 	if got := hub.admit.cookieMAC(); got != "" {
 		t.Fatalf("unset cookieMAC = %q, want empty string — NewHub must install a safe-empty closure even when neither option is set, otherwise deriveUploadOwner panics on the constant-time compare path", got)
 	}
