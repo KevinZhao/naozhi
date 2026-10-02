@@ -19,6 +19,11 @@ type Property struct {
 	Ref string `json:"$ref,omitempty"`
 	// Items describes array elements.
 	Items *Property `json:"items,omitempty"`
+	// Enum, when set, is the closed set of values a string may take. The
+	// describer never fills it (a Go string type does not know its values);
+	// the schema's owner sets it after describing, as wsproto does for
+	// EventEntry.type.
+	Enum []string `json:"enum,omitempty"`
 }
 
 // Object describes a JSON object: its properties and the keys always present.

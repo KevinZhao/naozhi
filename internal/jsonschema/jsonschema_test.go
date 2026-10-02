@@ -51,3 +51,26 @@ func TestDescriber(t *testing.T) {
 	_ = describeNode{}.hidden
 	_ = describeNode{}.Skip
 }
+
+// Enum is the one key the describer never fills: it is absent until the
+// schema's owner sets it, and then renders as JSON-schema's "enum".
+func TestProperty_Enum(t *testing.T) {
+	t.Parallel()
+	plain, err := json.Marshal(Property{Type: "string"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(plain); got != `{"type":"string"}` {
+		t.Errorf("an unset enum rendered: %s", got)
+	}
+	closed, err := json.Marshal(Property{Type: "string", Enum: []string{"a", "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(closed); got != `{"type":"string","enum":["a","b"]}` {
+		t.Errorf("enum = %s", got)
+	}
+	if p := New().Object(reflect.TypeOf(describeBase{})).Properties["id"]; p.Enum != nil {
+		t.Errorf("the describer filled an enum: %+v", p)
+	}
+}

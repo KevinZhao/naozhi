@@ -3,8 +3,11 @@ package wsproto_test
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/jsonschema"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
@@ -86,5 +89,34 @@ func TestSchema_IsGenerated(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Error("wsproto.schema.json is stale: run `go generate ./internal/wsproto`")
+	}
+}
+
+// The committed EventEntry def is the wire view: type is closed over the kind
+// registry, and no field ForWire clears is declared, so the dashboard checks
+// that read this file hold a read of one to be an error.
+func TestSchema_EventEntryIsTheWireView(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("wsproto.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Defs map[string]jsonschema.Object `json:"defs"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	def, ok := doc.Defs["clievent.EventEntry"]
+	if !ok {
+		t.Fatal("no clievent.EventEntry def")
+	}
+	if got := def.Properties["type"].Enum; !slices.Equal(got, clievent.AllKinds()) {
+		t.Errorf("type enum = %v, want clievent.AllKinds() %v", got, clievent.AllKinds())
+	}
+	for _, k := range clievent.WireOmittedFields() {
+		if _, ok := def.Properties[k]; ok {
+			t.Errorf("the def declares %s, which ForWire clears", k)
+		}
 	}
 }

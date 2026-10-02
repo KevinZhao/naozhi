@@ -40,6 +40,14 @@ func ForWireOne(e *EventEntry) *EventEntry {
 	return &v
 }
 
+// WireOmittedFields returns the JSON keys of the fields ForWire clears. The
+// WS schema leaves them out of the EventEntry def (wsproto.SchemaJSON), so the
+// dashboard contract checks reject a read of one; TestWireOmittedFields_MatchProjection
+// holds this list to what wireView really clears.
+func WireOmittedFields() []string {
+	return []string{"task_type", "internal_agent_id", "jsonl_path", "first_prompt_id"}
+}
+
 func wireView(e EventEntry) (EventEntry, bool) {
 	changed := false
 	if e.TaskType != "" || e.InternalAgentID != "" || e.JSONLPath != "" || e.FirstPromptID != "" {
