@@ -371,7 +371,7 @@ type spawnParams struct {
 // args + resumeID resolution; any spawn-adjacent path (Takeover, Reattach…)
 // MUST route through it rather than re-implement the precedence (#735).
 // workspace_resolver_contract_test.go asserts exactly one
-// `workspace = opts.Workspace` site survives in this file. No I/O beyond
+// `workspace = opts.Workspace` site survives in the package. No I/O beyond
 // bounded stat/ReadDir probes; consumes the one-shot dashboard backend pick.
 func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentOpts) spawnParams {
 	// One registry snapshot for the whole resolution: the overlay env and the

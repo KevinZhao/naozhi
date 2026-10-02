@@ -2,8 +2,14 @@
 package metrics_test
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -20,23 +26,116 @@ import (
 
 type wiringCase struct {
 	name    string
-	path    string
+	path    string // a file, or sessionPkg for every non-test file of the session package
 	pattern string // regex anchored somewhere in the file
+}
+
+// sessionPkg stands for the whole internal/session package root: the Router
+// split (#3023) moves functions between its files, so the session counters
+// are pinned to the package, not to the file a function happened to live in.
+const sessionPkg = "../session"
+
+// sessionSourceFloor is far below the package's real file count; a scan that
+// finds fewer has gone blind and would pass everything.
+const sessionSourceFloor = 40
+
+// sessionSources returns every non-test .go file of the session package root,
+// keyed by path.
+func sessionSources(t *testing.T) map[string][]byte {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(sessionPkg, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcs := map[string][]byte{}
+	for _, p := range paths {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		srcs[p] = b
+	}
+	if len(srcs) < sessionSourceFloor {
+		t.Fatalf("found %d non-test files in %s, below the floor of %d: the scan has gone blind",
+			len(srcs), sessionPkg, sessionSourceFloor)
+	}
+	return srcs
+}
+
+// parseSessionSources parses sessionSources.
+func parseSessionSources(t *testing.T) (*token.FileSet, []*ast.File) {
+	t.Helper()
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for p, src := range sessionSources(t) {
+		f, err := parser.ParseFile(fset, p, src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", p, err)
+		}
+		files = append(files, f)
+	}
+	return fset, files
+}
+
+// isMetricsAdd reports whether n is the call metrics.<counter>.Add(...).
+func isMetricsAdd(n ast.Node, counter string) bool {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	add, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || add.Sel.Name != "Add" {
+		return false
+	}
+	ctr, ok := add.X.(*ast.SelectorExpr)
+	if !ok || ctr.Sel.Name != counter {
+		return false
+	}
+	pkg, ok := ctr.X.(*ast.Ident)
+	return ok && pkg.Name == "metrics"
+}
+
+// metricsAddSites returns the position of every metrics.<counter>.Add call in
+// files, and how many of them have an enclosing node for which within is true.
+func metricsAddSites(fset *token.FileSet, files []*ast.File, counter string, within func(outer, site ast.Node) bool) (all []string, inside int) {
+	for _, f := range files {
+		var stack []ast.Node
+		ast.Inspect(f, func(n ast.Node) bool {
+			if n == nil {
+				stack = stack[:len(stack)-1]
+				return true
+			}
+			if isMetricsAdd(n, counter) {
+				at := fset.Position(n.Pos())
+				all = append(all, fmt.Sprintf("%s:%d", filepath.Base(at.Filename), at.Line))
+				for _, outer := range stack {
+					if within(outer, n) {
+						inside++
+						break
+					}
+				}
+			}
+			stack = append(stack, n)
+			return true
+		})
+	}
+	return all, inside
 }
 
 func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 	t.Parallel()
 	cases := []wiringCase{
 		{
-			// router-split (Phase 1): spawnSession moved to router_lifecycle.go.
 			name:    "SessionCreateTotal fires in spawnSession success path",
-			path:    "../session/router_lifecycle.go",
+			path:    sessionPkg,
 			pattern: `metrics\.SessionCreateTotal\.Add\(1\)`,
 		},
 		{
-			// router-split (#1375): evictOldest moved to router_capacity.go.
 			name:    "SessionEvictTotal fires in evictOldest success path",
-			path:    "../session/router_capacity.go",
+			path:    sessionPkg,
 			pattern: `metrics\.SessionEvictTotal\.Add\(1\)`,
 		},
 		{
@@ -78,12 +177,10 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// R172-ARCH-D10: lives inside panicSafeSpawnFn's recover arm so
 			// it is incremented once per absorbed panic. Wiring outside the
 			// recover arm (or removing it entirely) would silence the
-			// operator's "spawn panic happened" signal.
-			//
-			// router-split (Phase 6): panicSafeSpawnFn stayed with router.go
-			// which was renamed to router_core.go.
+			// operator's "spawn panic happened" signal; the arm itself is
+			// pinned by TestOBS2_SpawnPanicRecoveredInRecoverArm.
 			name:    "SpawnPanicRecoveredTotal fires in panicSafeSpawnFn recover arm",
-			path:    "../session/router_core.go",
+			path:    sessionPkg,
 			pattern: `metrics\.SpawnPanicRecoveredTotal\.Add\(1\)`,
 		},
 		{
@@ -91,11 +188,8 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// hasInjectedHistory() short-circuit — must count. Wiring on the
 			// happy path would turn the signal into "all shim-managed loads"
 			// and drown out the "reconnect missed" flag.
-			//
-			// router-split (Phase 6): NewRouter (where this counter lives)
-			// stayed with router.go which was renamed to router_core.go.
 			name:    "ShimReconnectGraceBackfillTotal fires in grace-deferred backfill path",
-			path:    "../session/router_core.go",
+			path:    sessionPkg,
 			pattern: `metrics\.ShimReconnectGraceBackfillTotal\.Add\(1\)`,
 		},
 		{
@@ -103,26 +197,23 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// so every caller (HTTP / WS / dispatch) contributes to the same signal.
 			// Wiring inside ManagedSession.InterruptViaControl would work but
 			// leaks the metrics dependency into the lower layer.
-			//
-			// router-split (Phase 5): InterruptSessionViaControl moved to
-			// router_discovery.go.
 			name:    "InterruptSentTotal fires on InterruptSent branch",
-			path:    "../session/router_discovery.go",
+			path:    sessionPkg,
 			pattern: `metrics\.InterruptSentTotal\.Add\(1\)`,
 		},
 		{
 			name:    "InterruptNoTurnTotal fires on InterruptNoTurn branch",
-			path:    "../session/router_discovery.go",
+			path:    sessionPkg,
 			pattern: `metrics\.InterruptNoTurnTotal\.Add\(1\)`,
 		},
 		{
 			name:    "InterruptUnsupportedTotal fires on InterruptUnsupported branch",
-			path:    "../session/router_discovery.go",
+			path:    sessionPkg,
 			pattern: `metrics\.InterruptUnsupportedTotal\.Add\(1\)`,
 		},
 		{
 			name:    "InterruptErrorTotal fires on InterruptError branch",
-			path:    "../session/router_discovery.go",
+			path:    sessionPkg,
 			pattern: `metrics\.InterruptErrorTotal\.Add\(1\)`,
 		},
 		{
@@ -170,15 +261,24 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			data, err := os.ReadFile(c.path)
-			if err != nil {
-				t.Fatalf("read %s: %v", c.path, err)
+			var srcs map[string][]byte
+			if c.path == sessionPkg {
+				srcs = sessionSources(t)
+			} else {
+				data, err := os.ReadFile(c.path)
+				if err != nil {
+					t.Fatalf("read %s: %v", c.path, err)
+				}
+				srcs = map[string][]byte{c.path: data}
 			}
 			re := regexp.MustCompile(c.pattern)
-			if !re.Match(data) {
-				t.Errorf("%s: pattern %q not found in %s — counter wiring likely removed or renamed",
-					c.name, c.pattern, c.path)
+			for _, data := range srcs {
+				if re.Match(data) {
+					return
+				}
 			}
+			t.Errorf("%s: pattern %q not found in %s — counter wiring likely removed or renamed",
+				c.name, c.pattern, c.path)
 		})
 	}
 }
@@ -238,26 +338,46 @@ func TestOBS1_PanicRecoveredWiredIntoTopSites(t *testing.T) {
 // incrementing it on the happy path would turn the counter into "spawn
 // attempts" instead of "panics absorbed" and silently invert its operational
 // meaning. Source-level check because the happy path has no panic-injection
-// seam that would drive the bug at runtime.
+// seam that would drive the bug at runtime. Every Add in the session package
+// must sit in the body of an if whose init calls recover(), whichever file
+// panicSafeSpawnFn lives in.
 func TestOBS2_SpawnPanicRecoveredInRecoverArm(t *testing.T) {
 	t.Parallel()
-	// router-split (Phase 6): panicSafeSpawnFn stayed with router.go which
-	// was renamed to router_core.go.
-	data, err := os.ReadFile("../session/router_core.go")
-	if err != nil {
-		t.Fatalf("read router_core.go: %v", err)
+	fset, files := parseSessionSources(t)
+	all, inside := metricsAddSites(fset, files, "SpawnPanicRecoveredTotal", isRecoverArm)
+	if len(all) == 0 || inside != len(all) {
+		t.Errorf("metrics.SpawnPanicRecoveredTotal.Add sites %v, %d of them inside a "+
+			"`if r := recover(); r != nil` arm. The counter must live only in the "+
+			"recover branch of panicSafeSpawnFn — incrementing it on the happy "+
+			"path (every Spawn call) would turn 'panics absorbed' into 'spawn "+
+			"attempts' and break the R172-ARCH-D10 signal.", all, inside)
 	}
-	// Match the recover arm up to the counter Add. `(?s)` lets `.` cross
-	// newlines; the non-greedy `.*?` ensures we find the nearest Add after
-	// the recover check, not a later one in a different function.
-	re := regexp.MustCompile(`(?s)if r := recover\(\); r != nil \{.*?metrics\.SpawnPanicRecoveredTotal\.Add\(1\)`)
-	if !re.Match(data) {
-		t.Error("metrics.SpawnPanicRecoveredTotal.Add(1) not found inside a " +
-			"`if r := recover(); r != nil` arm in router_core.go. The counter must " +
-			"live in the recover branch of panicSafeSpawnFn — incrementing it " +
-			"on the happy path (every Spawn call) would turn 'panics absorbed' " +
-			"into 'spawn attempts' and break the R172-ARCH-D10 signal.")
+}
+
+// isRecoverArm reports whether site sits in the body of outer, an
+// `if x := recover(); x != nil` statement: the arm that runs on a panic.
+func isRecoverArm(outer, site ast.Node) bool {
+	ifs, ok := outer.(*ast.IfStmt)
+	if !ok || ifs.Init == nil || site.Pos() < ifs.Body.Pos() || site.End() > ifs.Body.End() {
+		return false
 	}
+	cond, ok := ifs.Cond.(*ast.BinaryExpr)
+	if !ok || cond.Op != token.NEQ {
+		return false
+	}
+	if id, ok := cond.Y.(*ast.Ident); !ok || id.Name != "nil" {
+		return false
+	}
+	found := false
+	ast.Inspect(ifs.Init, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "recover" && len(call.Args) == 0 {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // TestOBS2_WSAuthFailBothBranches pins that WSAuthFailTotal is incremented
@@ -322,52 +442,31 @@ func TestOBS2_WSAuthFailNotInMainHub(t *testing.T) {
 // hoisted to the function prologue (which would count one per call rather
 // than one per outcome class) nor dropped into a goroutine.
 //
-// The check matches the outcome switch block in InterruptSessionViaControl
-// and looks for each of the 4 counters inside it. R172-ARCH-D10.
-//
-// router-split (Phase 5): InterruptSessionViaControl moved to
-// router_discovery.go.
+// Every Add of the 4 counters in the session package must sit in a case of a
+// switch on a variable named outcome (InterruptSessionViaControl's), whichever
+// file holds it. R172-ARCH-D10.
 func TestOBS2_InterruptCountersInOutcomeSwitch(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("../session/router_discovery.go")
-	if err != nil {
-		t.Fatalf("read router_discovery.go: %v", err)
-	}
-	// (?s) so `.*?` crosses newlines; match the switch head through the
-	// matching right brace heuristically with a reasonable upper bound to
-	// avoid consuming the whole file when a future edit removes the switch.
-	blockRe := regexp.MustCompile(`(?s)switch outcome \{.*?^\s*\}`)
-	blockRe.Longest()
-	blocks := blockRe.FindAll(data, -1)
-	if len(blocks) == 0 {
-		// fallback: scan for any switch on outcome variable — the regex
-		// above is newline-multiline anchored; if gofmt changed indentation
-		// we still want the test to find the block.
-		blockRe = regexp.MustCompile(`(?s)switch outcome \{[^}]*\}`)
-		blocks = blockRe.FindAll(data, -1)
-	}
-	if len(blocks) == 0 {
-		t.Fatalf("no `switch outcome { ... }` block found in router_discovery.go; Interrupt " +
-			"outcome counters must live inside that switch to stay per-outcome")
-	}
-	want := []string{
-		"metrics.InterruptSentTotal.Add(1)",
-		"metrics.InterruptNoTurnTotal.Add(1)",
-		"metrics.InterruptUnsupportedTotal.Add(1)",
-		"metrics.InterruptErrorTotal.Add(1)",
-	}
-	found := make(map[string]bool, len(want))
-	for _, b := range blocks {
-		for _, w := range want {
-			if regexp.MustCompile(regexp.QuoteMeta(w)).Match(b) {
-				found[w] = true
-			}
+	fset, files := parseSessionSources(t)
+	inOutcomeCase := func(outer, site ast.Node) bool {
+		sw, ok := outer.(*ast.SwitchStmt)
+		if !ok || site.Pos() < sw.Body.Pos() || site.End() > sw.Body.End() {
+			return false
 		}
+		tag, ok := sw.Tag.(*ast.Ident)
+		return ok && tag.Name == "outcome"
 	}
-	for _, w := range want {
-		if !found[w] {
-			t.Errorf("%s not found inside any `switch outcome` block — it must sit "+
-				"inside the per-outcome switch to preserve the outcome-class signal", w)
+	for _, counter := range []string{
+		"InterruptSentTotal",
+		"InterruptNoTurnTotal",
+		"InterruptUnsupportedTotal",
+		"InterruptErrorTotal",
+	} {
+		all, inside := metricsAddSites(fset, files, counter, inOutcomeCase)
+		if len(all) == 0 || inside != len(all) {
+			t.Errorf("metrics.%s.Add sites %v, %d of them inside a `switch outcome` case: "+
+				"it must sit only inside the per-outcome switch to preserve the "+
+				"outcome-class signal", counter, all, inside)
 		}
 	}
 }
