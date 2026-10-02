@@ -12,11 +12,8 @@
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, transcript } from './state.js';
 import { esc, escAttr, showToast, nzViews } from './nz_util.js';
-import {
-  eventHtml,
-  fetchEvents,
-  renderEventsWithDividers,
-} from './dashboard.js';
+import { fetchEvents } from './dashboard.js';
+import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { wsm } from './ws_manager.js';
 import {
   sid,

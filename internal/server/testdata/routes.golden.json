@@ -391,6 +391,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/ask_card.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/asset_browser.js",
     "handler_type": "http.HandlerFunc"
   },
@@ -457,6 +462,11 @@
   {
     "method": "GET",
     "path": "/static/discovery.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/event_render.js",
     "handler_type": "http.HandlerFunc"
   },
   {

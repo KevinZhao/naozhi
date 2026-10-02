@@ -42,10 +42,10 @@
 //      or second copy fails.
 //      No file assigns to, deletes, or calls a mutating method (push,
 //      splice, …) on an NZ_CONTRACT.ENUMS member or on NZ_CONTRACT.ENUMS.
-//   e. EVENT_WHOLE ∪ EVENT_CONTENT (dashboard.js's eventHtml dispatch Maps,
-//      S19-2, #3025 D4) together hold every ENUMS.EVENT_TYPE kind — a kind
-//      neither lists would silently render as the unknown-type chip — and
-//      share no key; every key of those two and of EVENT_ICONS is a kind.
+//   e. EVENT_WHOLE ∪ EVENT_CONTENT (event_render.js's eventHtml dispatch
+//      Maps, S19-2, #3025 D4) together hold every ENUMS.EVENT_TYPE kind — a
+//      kind neither lists would silently render as the unknown-type chip —
+//      and share no key; every key of those two and of EVENT_ICONS is a kind.
 //   Blind guards: a file that does not parse fails, every KIND_SENTINELS
 //   file must compare `.type` with a kind at least once, an ANCHORS Set
 //   declared nowhere fails, and so does an EVENT_TABLES Map declared nowhere.

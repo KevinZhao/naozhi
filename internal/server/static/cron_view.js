@@ -4,13 +4,8 @@ import {
   fetchCLIBackends,
   renderBackendPicker,
 } from './auth_modal.js';
-import {
-  eventHtml,
-  isInternalEvent,
-  lastDividerTime,
-  renderEventsWithDividers,
-  setActivityView,
-} from './dashboard.js';
+import { setActivityView } from './dashboard.js';
+import { eventHtml, isInternalEvent, lastDividerTime, renderEventsWithDividers } from './event_render.js';
 import { authHeaders, getToken, lsGet, lsSet } from './platform.js';
 import { sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
