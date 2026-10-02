@@ -15,6 +15,11 @@
     "html": "&lt;script&gt;alert(1)&lt;/script&gt; &amp; &lt;b&gt;bold&lt;/b&gt;<br>"
   },
   {
+    "name": "__bold__ at word boundaries only",
+    "input": "a __bold__ b, __all__ = [], snake_case__name__x, pkg/__init__.py",
+    "html": "a <strong>bold</strong> b, <strong>all</strong> = [], snake_case__name__x, pkg/__init__.py<br>"
+  },
+  {
     "name": "inline",
     "input": "**bold** *em* _em_ ~~strike~~ `code` [link](https://example.com/a?b=1&c=2) <https://example.com> https://example.com/x",
     "html": "<strong>bold</strong> <em>em</em> _em_ <del>strike</del> <code class=\"md-code\">code</code> <a href=\"https://example.com/a?b=1&amp;c=2\" class=\"md-link\" target=\"_blank\" rel=\"noopener noreferrer\">link</a> &lt;<a href=\"https://example.com\" class=\"md-link\" target=\"_blank\" rel=\"noopener noreferrer\">https://example.com</a>&gt; <a href=\"https://example.com/x\" class=\"md-link\" target=\"_blank\" rel=\"noopener noreferrer\">https://example.com/x</a><br>"
@@ -68,6 +73,16 @@
     "name": "deep list",
     "input": "- 1\n  - 2\n    - 3\n      - 4\n        - 5\n          - 6\n            - 7",
     "html": "<ul class=\"md-ul\"><li>1<ul class=\"md-ul\"><li>2<ul class=\"md-ul\"><li>3<ul class=\"md-ul\"><li>4<ul class=\"md-ul\"><li>5<ul class=\"md-ul\"><li>6<ul class=\"md-ul\"><li>7</li></ul></li></ul></li></ul></li></ul></li></ul></li></ul></li></ul>"
+  },
+  {
+    "name": "same depth, different column",
+    "input": "- a\n - b\n1. c\n 2. d",
+    "html": "<ul class=\"md-ul\"><li>a</li><li>b<ol class=\"md-ol\"><li>c</li></ol><ol class=\"md-ol\" start=\"2\"><li>d</li></ol></li></ul>"
+  },
+  {
+    "name": "opposite kind at the depth cap",
+    "input": "- 1\n  - 2\n    - 3\n      - 4\n        - 5\n          - 6\n            - 7\n            1. 8",
+    "html": "<ul class=\"md-ul\"><li>1<ul class=\"md-ul\"><li>2<ul class=\"md-ul\"><li>3<ul class=\"md-ul\"><li>4<ul class=\"md-ul\"><li>5<ul class=\"md-ul\"><li>6<ul class=\"md-ul\"><li>7</li></ul><ol class=\"md-ol\"><li>8</li></ol></li></ul></li></ul></li></ul></li></ul></li></ul></li></ul>"
   },
   {
     "name": "table",

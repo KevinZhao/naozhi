@@ -1,9 +1,10 @@
 // @ts-check
-// sendComposerTurn's branches, pinned in a browser before S19-7 (#3025) splits
-// it: the WS path, the HTTP path's rejections (4xx with and without
-// files_consumed, 429, 401), the `reset` ack, and a network failure. What each
-// branch owes the operator is the composer text (put back on failure, even
-// when the box changed while the request was in flight; cleared on success),
+// sendComposerTurn's branches, pinned in a browser so the function can be
+// split without a shape test (see #3025): the WS path, the HTTP path's
+// rejections (4xx with and without files_consumed, 429, 401), the `reset`
+// ack, and a network failure. What each branch owes the operator is the
+// composer text (put back on failure, even when the box changed while the
+// request was in flight; cleared on success),
 // the attachment chips (dropped only when the server consumed them),
 // the optimistic running flip (kept only for a turn that runs) and the
 // pending-session blob in localStorage (consumed only by a send that went out).

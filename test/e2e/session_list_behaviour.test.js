@@ -1,9 +1,7 @@
 // @ts-check
 // Session-list behaviour that fetchSessions / renderSidebar / msg_nav own,
-// pinned in a browser so S19 (#3025) can split and move those functions
-// without a test that knows their shape. These replace Go source greps of
-// fetchSessions' body (dashboard_ws_fallback_state_test.go,
-// static_sidebar_p3_test.go):
+// pinned in a browser rather than by the functions' source shape, so they
+// can be split and moved (see #3025):
 //
 //  1. The fallback reconcile compares REST with the state the main area last
 //     applied, and does not re-apply one it already applied (updateSendButton

@@ -11,22 +11,14 @@ import (
 	"testing"
 )
 
-// TestStaticJS_ModuleInventory holds every dashboard module on disk to the
-// three things production needs to serve it. The Playwright suite cannot see
-// a gap here: mock-server.js serves /static/*.js straight from disk, so a
-// module with no embed entry or no Go route passes e2e and 404s in the real
-// binary. For each static/*.js except sw.js:
-//
-//   - it is in the embedded asset table (staticAssetBytes, which is nil when
-//     the embed entry is missing or failed to read);
-//   - testdata/routes.golden.json lists GET /static/<name>, and every
-//     /static/*.js route the golden lists is a file on disk;
-//   - through the real mux in token mode, an anonymous GET answers 401 and an
-//     authenticated GET answers 200 with exactly that module's bytes, so a
-//     route wired to the wrong asset fails too.
-//
-// The route list is read from the golden JSON rather than routes.go: the
-// golden is what routes_snapshot_test.go already keeps in step with the mux.
+// TestStaticJS_ModuleInventory holds every static/*.js except sw.js to what
+// production needs to serve it; e2e cannot see a gap, since mock-server.js
+// serves modules from disk. Each module must be in the embedded asset table
+// (staticAssetBytes non-nil), have a GET /static/<name> route in
+// testdata/routes.golden.json (kept in step with the mux by
+// routes_snapshot_test.go; every /static/*.js route there must exist on disk),
+// and, through the real mux in token mode, answer 401 anonymously and 200
+// with exactly its own bytes when authenticated.
 func TestStaticJS_ModuleInventory(t *testing.T) {
 	t.Parallel()
 

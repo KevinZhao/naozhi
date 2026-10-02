@@ -301,6 +301,146 @@
     "html": "<div class=\"event ask_question\"><span class=\"event-icon\">?</span><div class=\"event-content\">Ask</div></div>"
   },
   {
+    "name": "ask_question multi_select",
+    "input": {
+      "type": "ask_question",
+      "summary": "Which checks?",
+      "ask_question": {
+        "tool_use_id": "toolu_ask_2",
+        "items": [
+          {
+            "question": "Which checks?",
+            "header": "Checks",
+            "multi_select": true,
+            "options": [
+              {
+                "label": "lint"
+              },
+              {
+                "label": "race",
+                "description": "-race"
+              }
+            ]
+          },
+          {
+            "question": "Ship <now>?",
+            "options": [
+              {
+                "label": "yes"
+              },
+              {
+                "label": "no"
+              }
+            ]
+          }
+        ]
+      },
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event ask_question\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\" data-tool-use-id=\"toolu_ask_2\"><span class=\"event-icon\">?</span><div class=\"event-content ask-card\"><div class=\"ask-title\">AskUserQuestion · 全部作答后提交</div><div class=\"ask-q-group\" data-qi=\"0\" data-multi=\"1\"><div class=\"ask-q-header\">Checks</div><div class=\"ask-q-text\">Which checks?</div><div class=\"ask-q-hint\">可多选</div><div class=\"ask-opts\"><button class=\"ask-opt\" type=\"button\" data-tuid=\"toolu_ask_2\" data-qi=\"0\" data-oi=\"0\" data-multi=\"1\" data-header=\"Checks\" data-label=\"lint\" data-action=\"ask-option-toggle\"><span class=\"ask-opt-label\">lint</span></button><button class=\"ask-opt\" type=\"button\" data-tuid=\"toolu_ask_2\" data-qi=\"0\" data-oi=\"1\" data-multi=\"1\" data-header=\"Checks\" data-label=\"race\" data-action=\"ask-option-toggle\"><span class=\"ask-opt-label\">race</span><span class=\"ask-opt-desc\">-race</span></button></div></div><div class=\"ask-q-group\" data-qi=\"1\" data-multi=\"0\"><div class=\"ask-q-text\">Ship &lt;now&gt;?</div><div class=\"ask-opts\"><button class=\"ask-opt\" type=\"button\" data-tuid=\"toolu_ask_2\" data-qi=\"1\" data-oi=\"0\" data-multi=\"0\" data-header=\"\" data-label=\"yes\" data-action=\"ask-option-toggle\"><span class=\"ask-opt-label\">yes</span></button><button class=\"ask-opt\" type=\"button\" data-tuid=\"toolu_ask_2\" data-qi=\"1\" data-oi=\"1\" data-multi=\"0\" data-header=\"\" data-label=\"no\" data-action=\"ask-option-toggle\"><span class=\"ask-opt-label\">no</span></button></div></div><div class=\"ask-submit-row\"><button class=\"ask-submit\" type=\"button\" data-tuid=\"toolu_ask_2\" disabled data-action=\"ask-submit\">提交全部回答</button></div></div></div>"
+  },
+  {
+    "name": "ask_question already answered",
+    "input": {
+      "type": "ask_question",
+      "summary": "Which approach?",
+      "ask_question": {
+        "tool_use_id": "toolu_ask_1",
+        "items": [
+          {
+            "question": "Which approach?",
+            "header": "Approach",
+            "multi_select": false,
+            "options": [
+              {
+                "label": "Fast",
+                "description": "ship today"
+              },
+              {
+                "label": "Safe",
+                "description": "one more review"
+              }
+            ]
+          }
+        ]
+      },
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event ask_question\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\" data-tool-use-id=\"toolu_ask_1\"><span class=\"event-icon\">?</span><div class=\"event-content ask-card\"><div class=\"ask-title\">AskUserQuestion · 全部作答后提交</div><div class=\"ask-q-group\" data-qi=\"0\" data-multi=\"0\"><div class=\"ask-q-header\">Approach</div><div class=\"ask-q-text\">Which approach?</div><div class=\"ask-opts\"><button class=\"ask-opt\" type=\"button\" data-tuid=\"toolu_ask_1\" data-qi=\"0\" data-oi=\"0\" data-multi=\"0\" data-header=\"Approach\" data-label=\"Fast\" disabled data-action=\"ask-option-toggle\"><span class=\"ask-opt-label\">Fast</span><span class=\"ask-opt-desc\">ship today</span></button><button class=\"ask-opt\" type=\"button\" data-tuid=\"toolu_ask_1\" data-qi=\"0\" data-oi=\"1\" data-multi=\"0\" data-header=\"Approach\" data-label=\"Safe\" disabled data-action=\"ask-option-toggle\"><span class=\"ask-opt-label\">Safe</span><span class=\"ask-opt-desc\">one more review</span></button></div></div><div class=\"ask-submit-row\"><button class=\"ask-submit\" type=\"button\" data-tuid=\"toolu_ask_1\" disabled data-action=\"ask-submit\">提交全部回答</button></div><div class=\"ask-status\">已回答</div></div></div>"
+  },
+  {
+    "name": "ask_question, backend with askuser",
+    "input": {
+      "type": "ask_question",
+      "summary": "Which approach?",
+      "ask_question": {
+        "tool_use_id": "toolu_ask_1",
+        "items": [
+          {
+            "question": "Which approach?",
+            "header": "Approach",
+            "multi_select": false,
+            "options": [
+              {
+                "label": "Fast",
+                "description": "ship today"
+              },
+              {
+                "label": "Safe",
+                "description": "one more review"
+              }
+            ]
+          }
+        ]
+      },
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event ask_question\" data-time=\"1767268800000\" title=\"2026-01-01 12:00:00\" data-tool-use-id=\"toolu_ask_1\"><span class=\"event-icon\">?</span><div class=\"event-content ask-card\"><div class=\"ask-title\">AskUserQuestion · 全部作答后提交</div><div class=\"ask-q-group\" data-qi=\"0\" data-multi=\"0\"><div class=\"ask-q-header\">Approach</div><div class=\"ask-q-text\">Which approach?</div><div class=\"ask-opts\"><button class=\"ask-opt\" type=\"button\" data-tuid=\"toolu_ask_1\" data-qi=\"0\" data-oi=\"0\" data-multi=\"0\" data-header=\"Approach\" data-label=\"Fast\" data-action=\"ask-option-toggle\"><span class=\"ask-opt-label\">Fast</span><span class=\"ask-opt-desc\">ship today</span></button><button class=\"ask-opt\" type=\"button\" data-tuid=\"toolu_ask_1\" data-qi=\"0\" data-oi=\"1\" data-multi=\"0\" data-header=\"Approach\" data-label=\"Safe\" data-action=\"ask-option-toggle\"><span class=\"ask-opt-label\">Safe</span><span class=\"ask-opt-desc\">one more review</span></button></div></div><div class=\"ask-submit-row\"><button class=\"ask-submit\" type=\"button\" data-tuid=\"toolu_ask_1\" disabled data-action=\"ask-submit\">提交全部回答</button></div></div></div>"
+  },
+  {
+    "name": "ask_question, backend without askuser (degraded)",
+    "input": {
+      "type": "ask_question",
+      "summary": "Which checks?",
+      "ask_question": {
+        "tool_use_id": "toolu_ask_2",
+        "items": [
+          {
+            "question": "Which checks?",
+            "header": "Checks",
+            "multi_select": true,
+            "options": [
+              {
+                "label": "lint"
+              },
+              {
+                "label": "race",
+                "description": "-race"
+              }
+            ]
+          },
+          {
+            "question": "Ship <now>?",
+            "options": [
+              {
+                "label": "yes"
+              },
+              {
+                "label": "no"
+              }
+            ]
+          }
+        ]
+      },
+      "time": 1767268800000
+    },
+    "opts": null,
+    "html": "<div class=\"event ask_question ask-degraded\"><span class=\"event-icon\">?</span><div class=\"event-content\"><div class=\"ask-degraded-hint\">当前后端不支持 AskUserQuestion，请直接回复你的选择：</div><div class=\"ask-degraded-q\"><strong>Checks</strong>: Which checks?<div class=\"ask-degraded-opts\">· lint<br>· race</div></div><div class=\"ask-degraded-q\">Ship &lt;now&gt;?<div class=\"ask-degraded-opts\">· yes<br>· no</div></div></div></div>"
+  },
+  {
     "name": "tool_use hidden by default",
     "input": {
       "type": "tool_use",

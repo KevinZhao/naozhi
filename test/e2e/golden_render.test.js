@@ -1,11 +1,12 @@
 // @ts-check
 // Golden renderings of the dashboard's three big renderers — eventHtml,
-// renderMd and the sidebar (fetchSessions → renderSidebar) — recorded before
-// S19 (#3025) splits them, so that every split and move that follows has to
-// reproduce today's markup byte for byte.
+// renderMd and the sidebar (fetchSessions → renderSidebar). A split or move
+// of these renderers has to reproduce the markup byte for byte (see #3025).
 //
 //   golden/event_render_known.json    every kind the backend sends, and the
-//                                     variants a branch keys on
+//                                     variants a branch keys on (ask cards:
+//                                     multi_select, answered, a backend
+//                                     without askuser)
 //   golden/event_render_unknown.json  persist_gap and types no renderer
 //                                     knows, including Object.prototype names
 //                                     (S19-2 changes these on purpose)
@@ -15,7 +16,9 @@
 //   golden/sidebar.json               the sidebar rows plus the order of
 //                                     sessionList.allSessionsCache (msg_nav's
 //                                     session order), over managed, discovered
-//                                     and pending sessions
+//                                     and pending sessions, with unread chips,
+//                                     agent badges and last responses
+//   golden/sidebar_empty.json         the empty sidebar
 //
 // golden/pins.json holds each file's sha256 and every run checks the file
 // against its pin before comparing. UPDATE_GOLDEN=1 rewrites the golden files
@@ -85,7 +88,7 @@ test('pins.json pins exactly the golden files, each to its current sha256', () =
   const pins = readPins();
   const files = fs.readdirSync(GOLDEN_DIR).filter((f) => f.endsWith('.json') && f !== 'pins.json').sort();
   expect(Object.keys(pins).sort()).toEqual(files);
-  expect(files).toEqual(['event_render_known.json', 'event_render_unknown.json', 'render_md.json', 'sidebar.json']);
+  expect(files).toEqual(['event_render_known.json', 'event_render_unknown.json', 'render_md.json', 'sidebar.json', 'sidebar_empty.json']);
   for (const f of files) {
     expect(pins[f], `pin for ${f}`).toMatch(/^[0-9a-f]{64}$/);
     expect(sha256(fs.readFileSync(path.join(GOLDEN_DIR, f))), `golden/${f} vs its pin`).toBe(pins[f]);
@@ -93,11 +96,11 @@ test('pins.json pins exactly the golden files, each to its current sha256', () =
 });
 
 /** @param {import('@playwright/test').Page} page */
-async function openDashboard(page, mock) {
+async function openDashboard(page, mock, ready = '.session-card') {
   await page.route(/cdn\.jsdelivr\.net/, (route) => route.abort());
   await page.clock.setFixedTime(NOW);
   await page.goto(mock.url + '/dashboard');
-  await page.waitForSelector('.session-card');
+  await page.waitForSelector(ready);
 }
 
 // ─── eventHtml ────────────────────────────────────────────────────────────────
@@ -113,10 +116,25 @@ const ASK = {
     options: [{ label: 'Fast', description: 'ship today' }, { label: 'Safe', description: 'one more review' }],
   }],
 };
+const ASK_MULTI = {
+  tool_use_id: 'toolu_ask_2',
+  items: [
+    { question: 'Which checks?', header: 'Checks', multi_select: true, options: [{ label: 'lint' }, { label: 'race', description: '-race' }] },
+    { question: 'Ship <now>?', options: [{ label: 'yes' }, { label: 'no' }] },
+  ],
+};
+// Two backends, only claude declares askuser: featureForCurrent then keys on
+// the selected session's backend instead of answering true.
+const BACKENDS = {
+  default: 'claude',
+  backends: [{ id: 'claude', features: { askuser: true } }, { id: 'kiro', features: {} }],
+};
 
-// Each case: { name, e, opts?, selected? }. selected sets selection.key for
-// that case only (the attachment / persisted-output links and the text icon
-// read it); backend overrides the selected session's backend.
+// Each case: { name, e, opts?, selected?, backends?, answered? }. selected
+// sets selection.key for that case only (the attachment / persisted-output
+// links and the text icon read it); backend overrides the selected session's
+// backend. backends installs BACKENDS as serverInfo.cliBackends; answered
+// marks the ask card's tool_use_id as answered.
 const KNOWN = [
   { name: 'system', e: { type: 'system', summary: 'session started', time: T0, uuid: 'u-sys' } },
   { name: 'system without summary', e: { type: 'system', time: T0 } },
@@ -143,6 +161,10 @@ const KNOWN = [
   { name: 'ask_question', e: { type: 'ask_question', summary: 'Which approach?', ask_question: ASK, time: T0 } },
   { name: 'ask_question without items', e: { type: 'ask_question', summary: 'Ask', time: T0 } },
   { name: 'ask_question with an option-less item', e: { type: 'ask_question', summary: 'Ask', ask_question: { tool_use_id: 't2', items: [{ question: 'q', options: [] }] }, time: T0 } },
+  { name: 'ask_question multi_select', e: { type: 'ask_question', summary: 'Which checks?', ask_question: ASK_MULTI, time: T0 } },
+  { name: 'ask_question already answered', answered: true, e: { type: 'ask_question', summary: 'Which approach?', ask_question: ASK, time: T0 } },
+  { name: 'ask_question, backend with askuser', selected: { backend: 'claude' }, backends: true, e: { type: 'ask_question', summary: 'Which approach?', ask_question: ASK, time: T0 } },
+  { name: 'ask_question, backend without askuser (degraded)', selected: { backend: 'kiro' }, backends: true, e: { type: 'ask_question', summary: 'Which checks?', ask_question: ASK_MULTI, time: T0 } },
   { name: 'tool_use hidden by default', e: { type: 'tool_use', summary: 'Bash', tool: 'Bash', time: T0 } },
   { name: 'tool_use internal, no tool_call', opts: { includeInternal: true }, e: { type: 'tool_use', summary: 'Bash: ls', tool: 'Bash', time: T0 } },
   { name: 'tool_use internal, kiro stdout', opts: { includeInternal: true }, e: { type: 'tool_use', summary: 'shell', time: T0, tool_call: { id: 'tc1', title: 'ls -la', kind: 'execute', status: 'completed', output_json: JSON.stringify({ items: [{ Json: { exit_status: '0', stdout: 'a\nb' } }] }) } } },
@@ -180,10 +202,10 @@ const UNKNOWN = [
 ];
 
 async function renderEvents(page, cases) {
-  return page.evaluate(async ({ cases, sel }) => {
+  return page.evaluate(async ({ cases, sel, backends }) => {
     const t = window.nz.test;
-    const { selection, sessionList } = await import('/static/state.js');
-    const prev = { key: selection.key, node: selection.node };
+    const { selection, sessionList, serverInfo, transcript } = await import('/static/state.js');
+    const prev = { key: selection.key, node: selection.node, cliBackends: serverInfo.cliBackends };
     const out = [];
     // No await below: the cases render in one task, so no poll can interleave
     // with the temporary selection.
@@ -196,6 +218,9 @@ async function renderEvents(page, cases) {
         saved = sessionList.sessionsData[sk];
         if (c.selected.backend) sessionList.sessionsData[sk] = Object.assign({}, saved, { backend: c.selected.backend });
       }
+      if (c.backends) serverInfo.cliBackends = backends;
+      const tuid = c.answered ? c.e.ask_question.tool_use_id : '';
+      if (tuid) transcript.askAnswered.add(tuid);
       try {
         out.push({ name: c.name, input: c.e, opts: c.opts || null, html: t.eventHtml(c.e, c.opts) });
       } finally {
@@ -204,10 +229,12 @@ async function renderEvents(page, cases) {
           selection.node = prev.node;
           sessionList.sessionsData[sk] = saved;
         }
+        serverInfo.cliBackends = prev.cliBackends;
+        if (tuid) transcript.askAnswered.delete(tuid);
       }
     }
     return out;
-  }, { cases, sel: SEL });
+  }, { cases, sel: SEL, backends: BACKENDS });
 }
 
 test.describe('golden: eventHtml', () => {
@@ -237,6 +264,7 @@ const MD = [
   ['plain', 'just a sentence'],
   ['empty', ''],
   ['html is escaped', '<script>alert(1)</script> & <b>bold</b>'],
+  ['__bold__ at word boundaries only', 'a __bold__ b, __all__ = [], snake_case__name__x, pkg/__init__.py'],
   ['inline', '**bold** *em* _em_ ~~strike~~ `code` [link](https://example.com/a?b=1&c=2) <https://example.com> https://example.com/x'],
   ['headings', '# h1\n## h2\n### h3\n#### h4\n##### h5\n###### h6\n####### seven'],
   ['paragraphs and breaks', 'line one\nline two\n\nnew paragraph'],
@@ -248,6 +276,8 @@ const MD = [
   ['mixed list', '1. first\n   - bullet\n   - bullet\n2. second\n- loose'],
   ['task list', '- [x] done\n- [ ] todo'],
   ['deep list', '- 1\n  - 2\n    - 3\n      - 4\n        - 5\n          - 6\n            - 7'],
+  ['same depth, different column', '- a\n - b\n1. c\n 2. d'],
+  ['opposite kind at the depth cap', '- 1\n  - 2\n    - 3\n      - 4\n        - 5\n          - 6\n            - 7\n            1. 8'],
   ['table', '| Col A | Col B |\n|:------|------:|\n| 1 | **2** |\n| `x` | y |'],
   ['table without leading pipe', 'a | b\n--- | ---\n1 | 2'],
   ['CRLF', '# title\r\n\r\n- a\r\n- b\r\n\r\n| x | y |\r\n|---|---|\r\n| 1 | 2 |\r\nend\rline'],
@@ -308,10 +338,10 @@ function sidebarSessions() {
   const s = (key, extra) => ({ ...base, key, state: 'ready', last_active: T0 + 30 * MIN, ...extra });
   return {
     sessions: [
-      s('dashboard:direct:2026-01-01-120300-a:general', { workspace: '/home/user/workspace/myproject', project: 'myproject', created_at: T0 + 3 * MIN, last_prompt: 'third in myproject' }),
+      s('dashboard:direct:2026-01-01-120300-a:general', { workspace: '/home/user/workspace/myproject', project: 'myproject', created_at: T0 + 3 * MIN, last_prompt: 'third in myproject', last_response: 'Done: the "fix" & <its> tests pass, and the race run is clean too.' }),
       s('dashboard:direct:2026-01-01-120100-b:general', { workspace: '/home/user/workspace/myproject', project: 'myproject', created_at: T0 + 1 * MIN, last_prompt: 'first in myproject' }),
-      s('dashboard:direct:2026-01-01-120200-c:reviewer', { agent: 'reviewer', workspace: '/home/user/workspace/myproject', project: 'myproject', created_at: T0 + 2 * MIN, last_prompt: 'second in myproject', state: 'running' }),
-      s('dashboard:direct:2026-01-01-120150-d:general', { workspace: '/home/user/workspace/otherproject', project: 'otherproject', created_at: T0 + 90 * 1000, last_prompt: 'other' }),
+      s('dashboard:direct:2026-01-01-120200-c:reviewer', { agent: 'reviewer', workspace: '/home/user/workspace/myproject', project: 'myproject', created_at: T0 + 2 * MIN, last_prompt: 'second in myproject', state: 'running', subagents: [{ name: 'explore' }, { name: 'review', background: true }] }),
+      s('dashboard:direct:2026-01-01-120150-d:general', { workspace: '/home/user/workspace/otherproject', project: 'otherproject', created_at: T0 + 90 * 1000, last_prompt: 'other', last_response: 'short reply' }),
       s('dashboard:direct:2026-01-01-120050-e:general', { node: 'remote1', workspace: '/srv/myproject', project: 'myproject', created_at: T0 + 50 * 1000, last_prompt: 'on remote1' }),
       s('dashboard:direct:2026-01-01-120400-f:general', { workspace: '/tmp/x/scratch', project: 'scratch', project_fallback: true, created_at: T0 + 4 * MIN, last_prompt: 'fallback group' }),
       s('dashboard:direct:2026-01-01-120450-g:general', { workspace: '', project: '', created_at: T0 + 270 * 1000, last_prompt: 'no project at all' }),
@@ -344,6 +374,13 @@ function sidebarDiscovered() {
   ];
 }
 
+// Unread completed turns, by session key (local node): one under the 99 cap,
+// one over it.
+const UNREAD = {
+  'dashboard:direct:2026-01-01-120100-b:general': 3,
+  'dashboard:direct:2026-01-01-115900-h:general': 120,
+};
+
 // Pending sessions this browser created: one the backend does not list yet
 // (an unregistered workspace, so it groups by basename) and one it already
 // lists (reconciled away).
@@ -359,10 +396,11 @@ test.describe('golden: sidebar', () => {
     try {
       await openDashboard(page, mock);
       await expect(page.locator('.session-card[data-key^="_discovered:"]')).toHaveCount(2);
-      const out = await page.evaluate(async (pending) => {
+      const out = await page.evaluate(async ({ pending, unread }) => {
         const t = window.nz.test;
-        const { sessionList } = await import('/static/state.js');
+        const { sessionList, perSession } = await import('/static/state.js');
         for (const [k, ws] of Object.entries(pending)) t.sessionWorkspaces[k] = ws;
+        for (const [k, n] of Object.entries(unread)) perSession.unread[t.sid(k, 'local')] = n;
         await t.fetchSessions();
         const list = document.getElementById('session-list');
         return {
@@ -370,8 +408,24 @@ test.describe('golden: sidebar', () => {
           allSessionsCache: sessionList.allSessionsCache.map((s) => (s.node || 'local') + ' ' + s.key),
           pendingLeft: Object.keys(t.sessionWorkspaces).sort(),
         };
-      }, PENDING);
+      }, { pending: PENDING, unread: UNREAD });
       checkGolden('sidebar.json', { ...out, rows: out.rows.map(normalize) });
+    } finally { mock.server.close(); }
+  });
+
+  test('no sessions, no projects', async ({ page }) => {
+    const mock = await startMockServer({
+      sessions: {
+        sessions: [],
+        stats: { total: 0, running: 0, ready: 0, active: 0, uptime: '0s', backend: 'cc', max_procs: 10, default_workspace: '/tmp', agents: ['general'], projects: [], version: 1 },
+        nodes: { local: { display_name: 'Local', status: 'ok' } },
+      },
+      discovered: [],
+    });
+    try {
+      await openDashboard(page, mock, '#session-list .no-sessions');
+      const rows = await page.evaluate(() => [...document.getElementById('session-list').children].map((el) => el.outerHTML));
+      checkGolden('sidebar_empty.json', { rows: rows.map(normalize) });
     } finally { mock.server.close(); }
   });
 });
