@@ -19,8 +19,13 @@
 //   - send_engine_ownership (rule 3b-send): send 块字段只能声明在 sendEngine
 //     上、不能回到 Hub；send.go / send_owner_loop.go / send_engine.go 内不得
 //     出现 *Hub 接收者（#2551）。
+//   - send_engine_sibling: the engine is a composition-root sibling, not
+//     something Hub owns and lends out (rule_send_engine_sibling.go).
 //   - stale_exemption: exemptions 条目必须指向存在的文件。
-//   - struct_budget / server_field_liveness: rule_server_fields.go.
+//   - struct_budget / server_field_liveness: rule_server_fields.go
+//     (struct_budget also pins HubOptions and sendEngineOpts).
+//   - option_liveness: HubOptions / sendEngineOpts 的每个字段都必须被某个以
+//     该类型为参数的函数读取（rule_option_liveness.go，#2897 S5）。
 //   - sublock_encapsulation: a sub-object's lock is taken by its own methods
 //     (rule_sublock.go).
 //   - no_late_setters: session / cron / sysession / upstream take their
@@ -87,9 +92,11 @@ var ruleIDs = []string{
 	"handle_decl",
 	"file_size",
 	"send_engine_ownership",
+	"send_engine_sibling",
 	"stale_exemption",
 	"struct_budget",
 	"server_field_liveness",
+	"option_liveness",
 	"sublock_encapsulation",
 	"no_late_setters",
 	"wire_egress",
@@ -223,9 +230,19 @@ func collectViolations(serverPkg, dashboardPkg string, exempts *exemptions, now 
 	// 流水线文件不得出现 *Hub 方法；检查的是声明本身。
 	vs = append(vs, scanSendEngineOwnership(serverPkg)...)
 
+	// send_engine_sibling: the engine (and, from S5b, the broadcaster) is a
+	// composition-root sibling, not something Hub owns and lends out (#2897 S5).
+	vs = append(vs, scanSendEngineSibling(serverPkg)...)
+
 	// struct_budget / server_field_liveness: Server keeps only what something
-	// reads after construction (#2897 S4).
+	// reads after construction (#2897 S4); the same struct_budget rule also
+	// pins HubOptions and sendEngineOpts (#2897 S5).
 	vs = append(vs, scanServerFields(serverPkg)...)
+
+	// option_liveness: every HubOptions / sendEngineOpts field is read by a
+	// function taking that type (#2897 S5) — the companion check to
+	// struct_budget, which only pins the count.
+	vs = append(vs, scanOptionLiveness(serverPkg)...)
 
 	// sublock_encapsulation: a sub-object's lock is taken by its own methods
 	// (#2897 S6).
