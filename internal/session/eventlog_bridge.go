@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/naozhi/naozhi/internal/attachment/tracker"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -61,9 +62,35 @@ func (s *ManagedSession) fillPersistGaps(ctx context.Context, local []clievent.E
 		return
 	}
 	if gf := ms.GapFill(ctx, local, floor, maxPersistedHistory); len(gf) > 0 {
-		s.gapFill.Store(&gf)
+		s.gapFillCell().turns.Store(&gf)
 		slog.Info("filled persist gaps from fallback history", "key", s.key, "entries", len(gf))
 	}
+}
+
+// gapFillCell is the gap fill a logical session's structs share.
+type gapFillCell struct {
+	turns atomic.Pointer[[]clievent.EventEntry]
+}
+
+// gapFillCell returns s's cell, allocating it on first use. CompareAndSwap
+// makes a concurrent first use from tier 1 and from a successor's publish
+// agree on one cell.
+func (s *ManagedSession) gapFillCell() *gapFillCell {
+	if c := s.gapFill.Load(); c != nil {
+		return c
+	}
+	s.gapFill.CompareAndSwap(nil, new(gapFillCell))
+	return s.gapFill.Load()
+}
+
+// loadGapFill returns the stored fill turns, nil when there are none.
+func (s *ManagedSession) loadGapFill() []clievent.EventEntry {
+	if c := s.gapFill.Load(); c != nil {
+		if gf := c.turns.Load(); gf != nil {
+			return *gf
+		}
+	}
+	return nil
 }
 
 // bridgeEncBuf pools a bytes.Buffer + json.Encoder pair so the bridge hot path

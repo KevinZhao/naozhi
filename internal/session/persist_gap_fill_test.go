@@ -7,9 +7,11 @@ import (
 	"math/rand"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
@@ -216,7 +218,7 @@ func TestPersistGapFill_NeverFewer(t *testing.T) {
 				nw.SetHistorySource(src)
 				nw.InjectHistoryIfEmpty(tail)
 				nw.fillPersistGaps(ctx, lookBack, tail[0].Time)
-				if nw.gapFill.Load() != nil {
+				if nw.loadGapFill() != nil {
 					filledCases++
 				}
 				ro, _ := walkReachable(old, cfg.page, cfg.frontend)
@@ -491,7 +493,7 @@ func TestWithGapFill_BoundaryOnce(t *testing.T) {
 		{UUID: "g3", Time: 3000, Type: "user", Detail: "on the boundary"},
 		{UUID: "g35", Time: 3500, Type: "user", Detail: "inside"},
 	}
-	s.gapFill.Store(&gf)
+	s.gapFillCell().turns.Store(&gf)
 
 	var order []string
 	seen := map[string]int{}
@@ -543,7 +545,7 @@ func TestWithGapFill_InitialPageOnlyAdds(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		gf = append(gf, clievent.EventEntry{UUID: fmt.Sprintf("g%d", i), Time: int64(1010 + i), Type: "user", Detail: "fill"})
 	}
-	with.gapFill.Store(&gf)
+	with.gapFillCell().turns.Store(&gf)
 
 	ctx := context.Background()
 	want := uuidsOf(without.EventLastNVisibleCtx(ctx, 5, 100))
@@ -585,7 +587,7 @@ func TestWithGapFill_SkipsUUIDOnPage(t *testing.T) {
 	for i := 2; i <= 4; i++ {
 		gf = append(gf, clievent.EventEntry{UUID: fmt.Sprintf("c%d", i), Time: int64(i*1000 + 5), Type: "user", Detail: fmt.Sprintf("q%d", i)})
 	}
-	s.gapFill.Store(&gf)
+	s.gapFillCell().turns.Store(&gf)
 	s.InjectHistory(slices.Clone(gf))
 
 	ctx := context.Background()
@@ -614,6 +616,112 @@ func TestWithGapFill_SkipsUUIDOnPage(t *testing.T) {
 	for _, u := range []string{"l1", "l5", "c2", "c3", "c4"} {
 		if seen[u] != 1 {
 			t.Errorf("load-earlier serves %s %d times, want 1: %v", u, seen[u], seen)
+		}
+	}
+}
+
+// TestGapFill_FollowsTheLogicalSession: a respawn and a rename replace the
+// ManagedSession struct; the fill rows stay reachable on the new one, on the
+// initial page and on load-earlier pages. A fill tier 1 stores into a struct
+// a spawn has already replaced (the slow fallback read) reaches the live one.
+func TestGapFill_FollowsTheLogicalSession(t *testing.T) {
+	t.Parallel()
+	mem := []clievent.EventEntry{
+		{UUID: "l1", Time: 1000, Type: "user", Detail: "q1"},
+		{UUID: "l5", Time: 5000, Type: "user", Detail: "q5"},
+	}
+	gf := []clievent.EventEntry{{UUID: "c3", Time: 3005, Type: "user", Detail: "q3"}}
+	r := spawnRouter(t, 4, func(context.Context, cli.SpawnOptions) (processIface, error) {
+		// fakeProcess drops InjectHistory, so it starts with the history the
+		// spawn path would have injected.
+		return &fakeProcess{isAlive: true, entries: slices.Clone(mem)}, nil
+	})
+	ctx := context.Background()
+	servesFill := func(t *testing.T, s *ManagedSession) {
+		t.Helper()
+		page, _ := s.EventInitialPageCtx(ctx, DefaultVisibleTarget, 0)
+		if got := uuidsOf(page); !slices.Equal(got, []string{"l1", "c3", "l5"}) {
+			t.Errorf("initial page %v, want [l1 c3 l5]", got)
+		}
+		seen := map[string]int{}
+		before := int64(0)
+		for range 10 {
+			pg := s.EventEntriesBeforeCtx(ctx, before, 1)
+			if len(pg) == 0 {
+				break
+			}
+			for _, e := range pg {
+				seen[e.UUID]++
+			}
+			before = pg[0].Time
+		}
+		if seen["c3"] != 1 {
+			t.Errorf("load-earlier serves the fill row %d times, want 1: %v", seen["c3"], seen)
+		}
+	}
+
+	t.Run("respawn and rename", func(t *testing.T) {
+		const key, renamed = "feishu:p2p:gapfill-follow", "feishu:p2p:gapfill-follow-renamed"
+		old := injectSession(r, key, nil)
+		old.InjectHistoryIfEmpty(slices.Clone(mem))
+		old.gapFillCell().turns.Store(&gf)
+		s, err := spawnIn(r, key, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s == old {
+			t.Fatal("test premise broken: the respawn must install a new struct")
+		}
+		servesFill(t, s)
+		if !r.RenameSession(key, renamed) {
+			t.Fatal("RenameSession returned false")
+		}
+		servesFill(t, r.SessionFor(renamed))
+	})
+
+	t.Run("fill stored after the respawn", func(t *testing.T) {
+		const key = "feishu:p2p:gapfill-late"
+		old := injectSession(r, key, nil)
+		local := []clievent.EventEntry{
+			mem[0],
+			{Time: 5000, Type: schema.GapEntryType, Detail: "dropped=1"},
+			mem[1],
+		}
+		old.SetHistorySource(&merged.Source{Local: gapSrc{local}, Fallback: gapSrc{gf}})
+		old.InjectHistoryIfEmpty(slices.Clone(mem))
+		s, err := spawnIn(r, key, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		old.fillPersistGaps(ctx, local, mem[0].Time)
+		servesFill(t, s)
+	})
+}
+
+// TestGapFillCell_ConcurrentFirstUseAgrees: tier 1 storing a fill and a
+// successor's publish may both find s without a cell; every caller must get
+// the cell s keeps, or the fill lands in a cell the live struct never reads.
+func TestGapFillCell_ConcurrentFirstUseAgrees(t *testing.T) {
+	t.Parallel()
+	for range 500 {
+		s := &ManagedSession{key: "k"}
+		start := make(chan struct{})
+		got := make([]*gapFillCell, 4)
+		var wg sync.WaitGroup
+		for i := range got {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				got[i] = s.gapFillCell()
+			}()
+		}
+		close(start)
+		wg.Wait()
+		for i, c := range got {
+			if c != s.gapFill.Load() {
+				t.Fatalf("caller %d got a cell s does not keep", i)
+			}
 		}
 	}
 }

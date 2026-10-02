@@ -582,14 +582,14 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 // A turn whose UUID the page already holds (a later InjectHistory appended
 // the transcript tail, #3028) is skipped.
 func (s *ManagedSession) withGapFill(page []clievent.EventEntry, before int64) []clievent.EventEntry {
-	gf := s.gapFill.Load()
-	if gf == nil || len(page) == 0 {
+	gf := s.loadGapFill()
+	if len(gf) == 0 || len(page) == 0 {
 		return page
 	}
 	lo := page[0].Time
 	var onPage map[string]struct{}
 	var add []clievent.EventEntry
-	for _, f := range *gf {
+	for _, f := range gf {
 		if f.Time < lo || (before > 0 && f.Time >= before) {
 			continue
 		}
