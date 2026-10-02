@@ -228,11 +228,19 @@ export function loadCaps(capsPath = CAPS_PATH) {
   if (typeof raw.maxFnLines !== 'object' || raw.maxFnLines === null || Array.isArray(raw.maxFnLines)) {
     errors.push('caps.maxFnLines must be an object');
   } else {
-    if (typeof raw.maxFnLines.default !== 'number') errors.push('caps.maxFnLines.default must be a number');
+    // A safe integer, like the int64 tools/ratchet-raises decodes it into:
+    // 1e19 or 120.5 would otherwise pass here and read as anything there.
+    if (!Number.isSafeInteger(raw.maxFnLines.default) || raw.maxFnLines.default < 1) {
+      errors.push('caps.maxFnLines.default must be a positive safe integer');
+    }
     if (!Array.isArray(raw.maxFnLines.exempt)) errors.push('caps.maxFnLines.exempt must be an array');
   }
   if (typeof raw.lines !== 'object' || raw.lines === null || Array.isArray(raw.lines)) {
     errors.push('caps.lines must be an object');
+  } else {
+    for (const [f, v] of Object.entries(raw.lines)) {
+      if (!Number.isSafeInteger(v) || v < 0) errors.push(`caps.lines.${f} must be a non-negative safe integer`);
+    }
   }
   if (!Array.isArray(raw.sideEffectLegacy)) errors.push('caps.sideEffectLegacy must be an array');
   if (!Array.isArray(raw.cycleLegacy)) errors.push('caps.cycleLegacy must be an array');

@@ -246,6 +246,27 @@ func TestRaises_JSCaps(t *testing.T) {
 			t.Errorf("raises = %v, want %v", got, want)
 		}
 	})
+	// A default no int64 holds must be a decode error, not a float64 the
+	// conversion maps to MinInt64 on amd64 (a 120 -> MinInt64 "lowering"
+	// that would wave the cap's removal through).
+	for _, d := range []string{"1e19", "9223372036854775808", "120.5", "1.2e2"} {
+		t.Run("default "+d+" fails closed", func(t *testing.T) {
+			head := metrics{}
+			h := `{"maxFnLines":{"default":` + d + `,"exempt":[]},"lines":{"dashboard.js":6511},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`
+			if err := jsCaps(h, head); err == nil {
+				t.Fatalf("jsCaps accepted default %s: %v", d, head)
+			}
+		})
+	}
+	for _, v := range []string{"1e19", "6511.5"} {
+		t.Run("lines "+v+" fails closed", func(t *testing.T) {
+			head := metrics{}
+			h := `{"maxFnLines":{"default":120,"exempt":[]},"lines":{"dashboard.js":` + v + `},"sideEffectLegacy":["a.js"],"cycleLegacy":[]}`
+			if err := jsCaps(h, head); err == nil {
+				t.Fatalf("jsCaps accepted lines %s: %v", v, head)
+			}
+		})
+	}
 	t.Run("deleting the whole caps file", func(t *testing.T) {
 		head := metrics{}
 		// jsCaps(\"\", head) is a no-op, same as the file being gone.

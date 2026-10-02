@@ -146,9 +146,14 @@ const noExportedLet = {
   },
 };
 
-// isPureExpr reports whether evaluating node can only ever bind a name — no
-// DOM/network/global touch, no function call escaping the small whitelist
-// below. Deliberately recursive on object/array literals and new/Object.*
+// isPureExpr reports whether evaluating node runs no call escaping the small
+// whitelist below and writes nothing (no assignment, update or `delete`). It
+// is a syntactic check, not a proof of purity: reading a property, global or
+// DOM (`document.title`) is allowed, and so are the forms that can reach user
+// code only through a value the rule does not resolve — a getter behind a
+// name, and implicit ToPrimitive (a template literal, a binary operator, a
+// computed key or `new RegExp(o)` applied to an object whose toString /
+// valueOf runs code). Deliberately recursive on object/array literals and new/Object.*
 // so `Object.freeze({ a: new Set([1]) })` is still pure. The sub-expressions
 // that run at evaluation time are checked: computed member properties and
 // object keys, a class's heritage, computed member keys, static field
@@ -179,7 +184,8 @@ function isPureExpr(node) {
     case 'ArrayExpression':
       return node.elements.every((e) => e === null || isPureExpr(e));
     case 'UnaryExpression':
-      return isPureExpr(node.argument);
+      // `delete window.x` mutates whatever the operand names.
+      return node.operator !== 'delete' && isPureExpr(node.argument);
     case 'BinaryExpression':
     case 'LogicalExpression':
       return isPureExpr(node.left) && isPureExpr(node.right);
@@ -268,13 +274,24 @@ function isPureClass(node) {
 // isWsmRegistration reports the one standing exception: a top-level call
 // that registers a handler or lifecycle hook on the managed wsm object (D2).
 // Its arguments must be pure too — the registration is exempt, not whatever
-// `wsm.on(X, init())` would evaluate to build the handler.
-function isWsmRegistration(expr) {
+// `wsm.on(X, init())` would evaluate to build the handler. "The managed wsm
+// object" is checked by binding, not by name: `wsm` must be
+// `import { wsm } from './ws_manager.js'`, or ws_manager.js's own top-level
+// `const wsm` — a module-local `const wsm = { on: init }` is not exempt.
+function isWsmRegistration(expr, sourceCode, filename) {
   if (expr.type !== 'CallExpression') return false;
   const c = expr.callee;
-  return c.type === 'MemberExpression' && !c.computed && c.object.type === 'Identifier' && c.object.name === 'wsm'
+  if (!(c.type === 'MemberExpression' && !c.computed && c.object.type === 'Identifier' && c.object.name === 'wsm'
     && /^(on|onReady|onStateChange|onAuthFail)$/.test(c.property.name)
-    && expr.arguments.every(isPureExpr);
+    && expr.arguments.every(isPureExpr))) return false;
+  const v = findVariable(sourceCode.getScope(c.object), 'wsm');
+  const def = v?.defs[0];
+  if (!def) return false;
+  if (def.type === 'ImportBinding') {
+    return def.node.type === 'ImportSpecifier' && def.node.imported.name === 'wsm'
+      && /(^|\/)ws_manager\.js$/.test(def.parent.source.value);
+  }
+  return /(^|[\\/])ws_manager\.js$/.test(filename) && def.type === 'Variable' && def.parent.kind === 'const';
 }
 
 const noModuleSideEffects = {
@@ -309,7 +326,7 @@ const noModuleSideEffects = {
           return;
         }
         case 'ExpressionStatement':
-          if (isWsmRegistration(st.expression)) return;
+          if (isWsmRegistration(st.expression, context.sourceCode, context.filename)) return;
           context.report({ node: st, messageId: 'sideEffect', data: { what: 'statement' } });
           return;
         default:

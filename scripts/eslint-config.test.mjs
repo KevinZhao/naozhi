@@ -59,7 +59,28 @@ test('every dashboard script is a module with only the shared globals', async ()
 // (generated, parsed as a script) and caps.sideEffectLegacy (S19-0, #3025).
 // The legacy list may only shrink — a file that is already clean has to move
 // out, so this also actually lints every legacy file and requires it to
-// still be dirty, or the list has gone stale.
+// still be dirty, or the list has gone stale. Membership is per file: a
+// legacy file may gain more side effects without failing here (S19's
+// migration PRs shrink the list; a per-file count is not ratcheted).
+// legacyProblem judges one legacy file's lint messages. Only the rule's own
+// findings prove the file dirty: a parse error (or any other rule's message)
+// would otherwise keep a clean file on the list forever.
+export function legacyProblem(f, messages) {
+  const fatal = messages.filter((m) => m.fatal);
+  if (fatal.length) return `${f}: does not parse: ${fatal.map((m) => m.message).join('; ')}`;
+  if (!messages.some((m) => m.ruleId === 'nz/no-module-side-effects')) {
+    return `${f}: in caps.sideEffectLegacy but clean — move it out`;
+  }
+  return null;
+}
+
+test('legacyProblem: only the rule\'s own finding keeps a file on the legacy list', () => {
+  assert.equal(legacyProblem('a.js', [{ ruleId: 'nz/no-module-side-effects', message: 'x' }]), null);
+  assert.match(legacyProblem('a.js', []), /clean — move it out/);
+  assert.match(legacyProblem('a.js', [{ ruleId: 'no-undef', message: 'x' }]), /clean — move it out/);
+  assert.match(legacyProblem('a.js', [{ ruleId: null, fatal: true, message: 'Parsing error: x' }]), /does not parse: Parsing error/);
+});
+
 test('nz/no-module-side-effects covers every file but the legacy list, which is still genuinely dirty', async () => {
   const { caps, errors } = loadCaps();
   assert.equal(errors, undefined, errors);
@@ -81,11 +102,12 @@ test('nz/no-module-side-effects covers every file but the legacy list, which is 
   for (const f of legacy) {
     const src = fs.readFileSync(path.join(STATIC_DIR, f), 'utf8');
     const messages = linter.verify(src, {
-      languageOptions: { ecmaVersion: 2022, sourceType: 'module' },
+      languageOptions: { ecmaVersion: 'latest', sourceType: 'module' },
       plugins: { nz },
       rules: { 'nz/no-module-side-effects': 'error' },
-    });
-    if (messages.length === 0) problems.push(`${f}: in caps.sideEffectLegacy but clean — move it out`);
+    }, { filename: path.join(STATIC_DIR, f) });
+    const p = legacyProblem(f, messages);
+    if (p) problems.push(p);
   }
   assert.deepEqual(problems, []);
 });

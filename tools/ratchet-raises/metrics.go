@@ -90,14 +90,18 @@ func jsRatchet(raw string, into metrics) error {
 // lines.<file> are ratchet constants (goneIsRaise: deleting the cap must not
 // silently remove it). exempt / sideEffectLegacy / cycleLegacy are escape
 // hatches (newIsRaise: a new entry loosens the gate; dropping one — the file
-// got clean — is free, same as any other ratchet improvement).
+// got clean — is free, same as any other ratchet improvement). default is
+// decoded as an int64, like every other ratchet value here: encoding/json
+// then rejects 1e19 or 120.5 outright, where a float64 converted with
+// int64(...) is implementation-defined out of range (amd64 gives MinInt64,
+// so "default": 1e19 would read as a cap lowered below 120 and pass).
 func jsCaps(raw string, into metrics) error {
 	if raw == "" {
 		return nil
 	}
 	var doc struct {
 		MaxFnLines struct {
-			Default *float64 `json:"default"`
+			Default *int64   `json:"default"`
 			Exempt  []string `json:"exempt"`
 		} `json:"maxFnLines"`
 		Lines            map[string]int64 `json:"lines"`
@@ -108,7 +112,7 @@ func jsCaps(raw string, into metrics) error {
 		return fmt.Errorf("js-ratchet caps: %w", err)
 	}
 	if doc.MaxFnLines.Default != nil {
-		into["js-caps:maxFnLines.default"] = metric{value: int64(*doc.MaxFnLines.Default), goneIsRaise: true}
+		into["js-caps:maxFnLines.default"] = metric{value: *doc.MaxFnLines.Default, goneIsRaise: true}
 	}
 	for _, f := range doc.MaxFnLines.Exempt {
 		into["js-caps:exempt:"+f] = metric{value: 1, newIsRaise: true}

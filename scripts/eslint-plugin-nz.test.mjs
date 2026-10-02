@@ -62,6 +62,8 @@ tester.run('no-exported-let', nz.rules['no-exported-let'], {
   ],
 });
 
+const WSM = "import { wsm } from './ws_manager.js'; ";
+
 tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
   valid: [
     "import { a } from './x.js';",
@@ -84,12 +86,15 @@ tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
     'class D extends Base { static n = 1; x = f(); m() { g(); } }',
     'export default class { static s = new Set(); }',
     'const E = class { static k = {}; };',
-    // D2: the WS dispatch table's registration calls are the one exception.
-    "wsm.on(NZ_CONTRACT.WS.history, (msg) => f(msg));",
-    'wsm.onReady(() => f());',
-    'wsm.onStateChange((s) => f(s));',
-    'wsm.onAuthFail((msg) => f(msg));',
-    'wsm.on(NZ_CONTRACT.WS.history, handleHistory);',
+    // D2: the WS dispatch table's registration calls are the one exception,
+    // on the wsm ws_manager.js exports (or, in ws_manager.js, its own const).
+    `${WSM}wsm.on(NZ_CONTRACT.WS.history, (msg) => f(msg));`,
+    `${WSM}wsm.onReady(() => f());`,
+    `${WSM}wsm.onStateChange((s) => f(s));`,
+    `${WSM}wsm.onAuthFail((msg) => f(msg));`,
+    `${WSM}wsm.on(NZ_CONTRACT.WS.history, handleHistory);`,
+    "import { WS_STATES, wsm } from '../static/ws_manager.js'; wsm.on('x', f);",
+    { code: "export const wsm = { on() {} }; wsm.on('x', () => {});", filename: '/repo/internal/server/static/ws_manager.js' },
     // Destructuring with pure defaults and computed keys, and an accessor
     // literal bound to a name (its getter runs only when read later).
     "const { a = 1, ['k' + 'ey']: kk, ...rest } = {};",
@@ -121,7 +126,19 @@ tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
     // A computed member names whatever the variable holds, not wsm's method.
     { code: "wsm[on]('x', f);", errors: [{ messageId: 'sideEffect' }] },
     // The registration is exempt; building its handler by a call is not.
-    { code: "wsm.on('x', init());", errors: [{ messageId: 'sideEffect' }] },
+    { code: `${WSM}wsm.on('x', init());`, errors: [{ messageId: 'sideEffect' }] },
+    // The exception is the imported wsm, not any binding named wsm: a local
+    // object, an unresolved global, a renamed import of something else, or
+    // wsm from another module.
+    { code: "const wsm = { on: init }; wsm.on('x');", errors: [{ messageId: 'sideEffect' }] },
+    { code: "wsm.on('x', f);", errors: [{ messageId: 'sideEffect' }] },
+    { code: "import { other as wsm } from './ws_manager.js'; wsm.on('x', f);", errors: [{ messageId: 'sideEffect' }] },
+    { code: "import { wsm } from './fake_ws_manager.jsx'; wsm.on('x', f);", errors: [{ messageId: 'sideEffect' }] },
+    { code: "import wsm from './ws_manager.js'; wsm.on('x', f);", errors: [{ messageId: 'sideEffect' }] },
+    { code: "export const wsm = { on: init }; wsm.on('x');", filename: '/repo/internal/server/static/not_ws_manager.js', errors: [{ messageId: 'sideEffect' }] },
+    { code: "let wsm = { on() {} }; wsm.on('x', () => {});", filename: '/repo/internal/server/static/ws_manager.js', errors: [{ messageId: 'sideEffect' }] },
+    // `delete` mutates what its operand names.
+    { code: 'const x = delete window.foo;', errors: [{ messageId: 'sideEffect' }] },
     // Object.assign/freeze mutate their first argument; only a fresh literal
     // keeps them pure.
     { code: 'const g = Object.assign(window, { x: 1 });', errors: [{ messageId: 'sideEffect' }] },

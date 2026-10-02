@@ -109,9 +109,32 @@ test('loadCaps fails closed when default is not a number', () => {
     JSON.stringify({ maxFnLines: { default: '120', exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] }),
     (file) => {
       const { errors } = loadCaps(file);
-      assert.ok(errors.some((e) => /default must be a number/.test(e)), errors);
+      assert.ok(errors.some((e) => /default must be a positive safe integer/.test(e)), errors);
     },
   );
+});
+
+test('loadCaps fails closed on a default or a line cap that is not a safe integer', () => {
+  // 1e19 is a JSON number, but no int64 holds it: tools/ratchet-raises must
+  // not be the only side that notices (#3057 review).
+  for (const d of [1e19, 120.5, 0, -1]) {
+    withCapsFile(
+      JSON.stringify({ maxFnLines: { default: d, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [] }),
+      (file) => {
+        const { errors } = loadCaps(file);
+        assert.ok(errors?.some((e) => /default must be a positive safe integer/.test(e)), `default ${d}: ${errors}`);
+      },
+    );
+  }
+  for (const v of [1e19, 6011.5, -1, '6011', null]) {
+    withCapsFile(
+      JSON.stringify({ maxFnLines: { default: 120, exempt: [] }, lines: { 'dashboard.js': v }, sideEffectLegacy: [], cycleLegacy: [] }),
+      (file) => {
+        const { errors } = loadCaps(file);
+        assert.ok(errors?.some((e) => /caps\.lines\.dashboard\.js must be a non-negative safe integer/.test(e)), `lines ${v}: ${errors}`);
+      },
+    );
+  }
 });
 
 test('loadCaps accepts a well-formed caps file', () => {
