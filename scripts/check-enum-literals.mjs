@@ -42,9 +42,12 @@
 //      or second copy fails.
 //      No file assigns to, deletes, or calls a mutating method (push,
 //      splice, …) on an NZ_CONTRACT.ENUMS member or on NZ_CONTRACT.ENUMS.
+//   e. EVENT_WHOLE ∪ EVENT_CONTENT (dashboard.js's eventHtml dispatch Maps,
+//      S19-2, #3025 D4) together hold every ENUMS.EVENT_TYPE kind — a kind
+//      neither lists would silently render as the unknown-type chip.
 //   Blind guards: a file that does not parse fails, every KIND_SENTINELS
-//   file must compare `.type` with a kind at least once, and an ANCHORS Set
-//   declared nowhere fails.
+//   file must compare `.type` with a kind at least once, an ANCHORS Set
+//   declared nowhere fails, and so does an EVENT_TABLES Map declared nowhere.
 //
 //   Limits, so nobody reads this as full coverage: aliases are by name per
 //   file, not by scope (a const alias makes every same-named identifier in
@@ -316,11 +319,74 @@ export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = K
   return { problems, counts };
 }
 
+// EVENT_TABLES: the dashboard's two eventHtml dispatch Maps (S19-2, #3025
+// D4). Together their keys must cover every ENUMS.EVENT_TYPE kind — a kind
+// with no entry in either falls through to the unknown-type chip silently.
+export const EVENT_TABLES = ['EVENT_WHOLE', 'EVENT_CONTENT'];
+
+// mapLiteralKeys reads `const NAME = new Map([[key, …], …])`'s own key
+// literals, or null if init is not that shape.
+function mapLiteralKeys(init) {
+  if (init?.type !== 'NewExpression' || init.callee.type !== 'Identifier' || init.callee.name !== 'Map') return null;
+  const arr = init.arguments[0];
+  if (arr?.type !== 'ArrayExpression') return null;
+  const keys = [];
+  for (const pair of arr.elements) {
+    if (pair?.type !== 'ArrayExpression' || pair.elements.length < 1) return null;
+    const k = str(pair.elements[0]);
+    if (k === null) return null;
+    keys.push(k);
+  }
+  return keys;
+}
+
+// eventTableProblems is check (e): EVENT_WHOLE ∪ EVENT_CONTENT ⊇
+// ENUMS.EVENT_TYPE, wherever those two Maps are declared.
+export function eventTableProblems(files, contract) {
+  const kinds = new Set(contract.ENUMS?.EVENT_TYPE || []);
+  const found = new Map();
+  for (const [file, src] of Object.entries(files)) {
+    if (file === 'contract.js') continue;
+    let ast;
+    try {
+      ast = espree.parse(src, { ecmaVersion: 'latest', sourceType: 'module', loc: true });
+    } catch {
+      continue; // reported elsewhere by kindProblems
+    }
+    walk(ast, (n) => {
+      if (n.type !== 'VariableDeclarator' || n.id.type !== 'Identifier' || !EVENT_TABLES.includes(n.id.name)) return;
+      const keys = mapLiteralKeys(n.init);
+      if (keys === null) return;
+      if (found.has(n.id.name)) return; // a second declaration; decls-style duplicate check is out of scope here
+      found.set(n.id.name, keys);
+    });
+  }
+  const problems = [];
+  const union = new Set();
+  for (const name of EVENT_TABLES) {
+    const keys = found.get(name);
+    if (!keys) {
+      problems.push(`${name} is not declared anywhere as \`new Map([[kind, …], …])\` — the event-table scan has gone blind`);
+      continue;
+    }
+    for (const k of keys) union.add(k);
+  }
+  for (const k of kinds) {
+    if (!union.has(k)) problems.push(`EVENT_WHOLE and EVENT_CONTENT together do not cover kind ${JSON.stringify(k)} — eventHtml would fall through to the unknown-type chip`);
+  }
+  return problems;
+}
+
 // checkAll runs every check above over one tree (file name → source); the CLI
 // prints what it returns.
 export function checkAll(files, contract, other = OTHER_TYPES, sentinels = KIND_SENTINELS, anchors = ANCHORS) {
   const kind = kindProblems(files, contract, other, sentinels, anchors);
-  const problems = [...run(files, contract.ENUMS?.DEATH_REASON || []), ...contractKindProblems(contract.ENUMS), ...kind.problems];
+  const problems = [
+    ...run(files, contract.ENUMS?.DEATH_REASON || []),
+    ...contractKindProblems(contract.ENUMS),
+    ...kind.problems,
+    ...eventTableProblems(files, contract),
+  ];
   return { problems, counts: kind.counts };
 }
 

@@ -455,6 +455,9 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .event{display:flex;gap:10px;padding:6px 24px;max-width:clamp(760px,65vw,1200px);margin-left:auto;margin-right:auto;width:100%;box-sizing:border-box}
 .event-icon{width:36px;height:36px;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:var(--nz-fs-md)}
 .event-content{flex:1;font-size:15px;line-height:1.6;word-break:break-word;overflow-wrap:anywhere;min-width:0;white-space:normal;transition:box-shadow .3s ease}
+/* defaultEventChip's fallback label for persist_gap and any type the
+   dashboard build does not recognise (S19-2, #3025). */
+.event-chip{display:inline-block;font-size:var(--nz-fs-2xs);padding:1px 8px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text-mute)}
 .md-blank{display:block;height:0.75em}
 /* User messages: right-aligned bubble */
 .event.user{flex-direction:row-reverse}
