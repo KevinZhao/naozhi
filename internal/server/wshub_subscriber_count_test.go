@@ -78,7 +78,7 @@ func TestSubscriberCount_RemoveReportsEmptiedKeys(t *testing.T) {
 // TestHandleSubscribe_NotFoundReleasesTheReservation: the slot reserved
 // before the session lookup is given back when there is no session.
 func TestHandleSubscribe_NotFoundReleasesTheReservation(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	defer hub.Shutdown()
 	c := newTestWSClient()
 	hub.register(c)
@@ -99,7 +99,7 @@ func TestHandleSubscribe_NotFoundReleasesTheReservation(t *testing.T) {
 // TestHandleSubscribe_AfterDrainIsIgnored: a subscribe racing Shutdown finds
 // its client drained and takes no slot.
 func TestHandleSubscribe_AfterDrainIsIgnored(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	const key = "test:d:u:general"
 	c := newTestWSClient()
 	hub.register(c)
@@ -189,7 +189,7 @@ func TestRegistry_InstallAfterTheSlotWasTakenRejoins(t *testing.T) {
 // TestShutdown_ReleasesConnectionSlots: the drained clients give their
 // maxWSConns slots back; unregister no longer can, since they are gone.
 func TestShutdown_ReleasesConnectionSlots(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	for i := 0; i < 2; i++ {
 		if !hub.admit.reserveConn() {
 			t.Fatal("reserveConn refused")
@@ -205,7 +205,7 @@ func TestShutdown_ReleasesConnectionSlots(t *testing.T) {
 // TestHandleUnsubscribe_LastSubscriberDropsTheMarshalCache: the cached
 // history frame goes with the key's last subscriber, not before.
 func TestHandleUnsubscribe_LastSubscriberDropsTheMarshalCache(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	defer hub.Shutdown()
 	const key = "test:d:u:general"
 	a, b := newTestWSClient(), newTestWSClient()
@@ -226,7 +226,7 @@ func TestHandleUnsubscribe_LastSubscriberDropsTheMarshalCache(t *testing.T) {
 // TestHandleAuth_TokenJoinsTheAuthenticatedSet: a client that authenticates
 // with the token receives the "all authenticated" broadcasts from then on.
 func TestHandleAuth_TokenJoinsTheAuthenticatedSet(t *testing.T) {
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	defer hub.Shutdown()
 	c := &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
 	hub.register(c)
@@ -246,7 +246,7 @@ func TestHandleAuth_TokenJoinsTheAuthenticatedSet(t *testing.T) {
 // session is gone, instead of waiting out its timeout and expiring the newer
 // subscription.
 func TestResubscribe_StaleLoopLeavesTheNewerSubscription(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	defer hub.Shutdown()
 	hub.resubscribeInterval = time.Millisecond
 	const key = "test:d:u:gone"
@@ -273,7 +273,7 @@ func TestResubscribe_StaleLoopLeavesTheNewerSubscription(t *testing.T) {
 // the loop gives up, frees the slot (and the marshal cache with the last
 // subscriber) and tells the client.
 func TestResubscribe_TimeoutExpiresTheSubscription(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	defer hub.Shutdown()
 	hub.resubscribeInterval = time.Millisecond
 	const key = "test:d:u:gone"

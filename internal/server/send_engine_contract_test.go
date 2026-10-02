@@ -151,7 +151,7 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	resolver := &session.KeyResolver{}
 	agents := map[string]session.AgentOpts{"a": {}}
 	projectMgr := &project.Manager{}
-	hub := newHubForTest(HubOptions{
+	hub := newHubForTest(t, HubOptions{
 		Router:      router,
 		Resolver:    resolver,
 		AllowedRoot: "/tmp/nz-root",
@@ -197,7 +197,7 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 // session_state / sessions_update frame silently stops reaching dashboards.
 func TestNewHub_BroadcasterSharesRegistry(t *testing.T) {
 	t.Parallel()
-	hub := newHubForTest(HubOptions{Router: session.NewRouter(session.RouterConfig{})}, sendEngineOpts{})
+	hub := newHubForTest(t, HubOptions{Router: session.NewRouter(session.RouterConfig{})}, sendEngineOpts{})
 	t.Cleanup(hub.Shutdown)
 	if hub.bcast == nil {
 		t.Fatal("NewHub did not build the broadcaster")
@@ -220,7 +220,7 @@ func TestNewHub_BroadcasterSharesRegistry(t *testing.T) {
 // means an Add with no matching Done was registered post-drain).
 func TestSendEngine_NotifyAfterDrainDoesNotArmPending(t *testing.T) {
 	t.Parallel()
-	hub := newHubForTest(HubOptions{Router: session.NewRouter(session.RouterConfig{})}, sendEngineOpts{})
+	hub := newHubForTest(t, HubOptions{Router: session.NewRouter(session.RouterConfig{})}, sendEngineOpts{})
 	hub.Shutdown()
 
 	if _, shuttingDown := hub.engine.TrackSend(); !shuttingDown {

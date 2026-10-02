@@ -91,11 +91,10 @@ func TestUploadOwner_InvalidCookieStillMintsFresh(t *testing.T) {
 func newAnonTestHub(t *testing.T) *Hub {
 	t.Helper()
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
-	return newHubForTest(HubOptions{
+	return newHubForTest(t, HubOptions{
 		Router: router, DashToken: "",
 		Auth: &auth.Handlers{},
-	}, sendEngineOpts{Guard: guard})
+	}, sendEngineOpts{})
 }
 
 // TestHandleUpgrade_SetCookieRidesThe101 pins the responseHeader fix: gorilla

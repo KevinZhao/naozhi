@@ -26,7 +26,7 @@ import (
 
 // TestEventPush_MultiSubscriber_SameMsWaves_DistinctUUIDs (#2432 P2).
 func TestEventPush_MultiSubscriber_SameMsWaves_DistinctUUIDs(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	proc.EventLog.Append(clievent.EventEntry{Time: 1000, UUID: "seed", Type: "user", Summary: "hi"})
 	router.InjectSession("test:d:u:general", proc)
@@ -74,7 +74,7 @@ func TestEventPush_MultiSubscriber_SameMsWaves_DistinctUUIDs(t *testing.T) {
 // with after=T must return the entries AT T as well (frontend dedups by UUID)
 // so a same-ms sibling appended after the client's last delivery is not lost.
 func TestWS_SubscribeWithAfter_ReadmitsAfterMillisecond(t *testing.T) {
-	hub, router := newTestHub("")
+	hub, router := newTestHub(t, "")
 	proc := session.NewTestProcess()
 	proc.EventLog.Append(clievent.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
 	proc.EventLog.Append(clievent.EventEntry{Time: 2000, UUID: "a", Type: "thinking", Summary: "..."})
@@ -122,7 +122,7 @@ func TestWS_Subscribe_ZeroEvents_AlwaysSendsInitialHistory(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hub, router := newTestHub("")
+			hub, router := newTestHub(t, "")
 			router.InjectSession("test:d:u:general", tc.proc)
 
 			url, cleanup := startWSServer(t, hub)

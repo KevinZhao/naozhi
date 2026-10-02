@@ -14,7 +14,7 @@ import (
 
 func newHubForAgentTest(t *testing.T) *Hub {
 	t.Helper()
-	hub, _ := newTestHub("test-token")
+	hub, _ := newTestHub(t, "test-token")
 	t.Cleanup(hub.Shutdown)
 	return hub
 }

@@ -16,15 +16,14 @@ func TestHub_LookupNode(t *testing.T) {
 	t.Parallel()
 
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
 	nodes := newNodeRegistry(map[string]node.Conn{
 		"node-a": &fakeCapNode{id: "node-a"},
 	})
 
-	hub := newHubForTest(HubOptions{
+	hub := newHubForTest(t, HubOptions{
 		Router: router,
 		Nodes:  nodes,
-	}, sendEngineOpts{Guard: guard})
+	}, sendEngineOpts{})
 
 	got, ok := hub.lookupNode("node-a")
 	if !ok {

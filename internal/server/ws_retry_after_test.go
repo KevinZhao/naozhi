@@ -18,7 +18,7 @@ import (
 func TestHandleAuth_RateLimitEmitsRetryAfter(t *testing.T) {
 	t.Parallel()
 
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	// Always-deny limiter simulates a bucket that's already been drained —
 	// this is the structural branch the UI relies on; the limiter policy
 	// itself is orthogonal and covered by TestHandleLogin_Sets429AndRetryAfterOnRateLimit.
@@ -66,7 +66,7 @@ func TestHandleAuth_RateLimitEmitsRetryAfter(t *testing.T) {
 func TestHandleAuth_InvalidTokenOmitsRetryAfter(t *testing.T) {
 	t.Parallel()
 
-	hub, _ := newTestHub("secret")
+	hub, _ := newTestHub(t, "secret")
 	// Limiter permissive so we land in the invalid-token branch, not the
 	// rate-limit branch.
 	hub.admit.authLimiter = func(ip string) bool { return true }

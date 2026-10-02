@@ -22,8 +22,7 @@ func TestHubShutdown_UnsubInvokedOutsideHubMu(t *testing.T) {
 	t.Parallel()
 
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
-	hub := newHubForTest(HubOptions{Router: router}, sendEngineOpts{Guard: guard})
+	hub := newHubForTest(t, HubOptions{Router: router}, sendEngineOpts{})
 
 	// Build a fake wsClient with a subscription map. The unsub closure
 	// flips the flag once invoked; if it is ever called inside the registry lock the

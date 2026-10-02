@@ -26,7 +26,7 @@ func recvRaw(t *testing.T, c *wsClient) ([]byte, bool) {
 // frame to EVERY authenticated client, exactly mirroring the per-call sites it
 // replaced (broadcastState / BroadcastSessionReady / cron+daemon run events).
 func TestMarshalBroadcastAuth_FansOutToAllAuthenticated(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	c1 := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
@@ -58,7 +58,7 @@ func TestMarshalBroadcastAuth_FansOutToAllAuthenticated(t *testing.T) {
 // shared helper. Guards against a regression where the helper swallows the
 // frame for a wire struct it cannot marshal.
 func TestBroadcastSessionReady_ViaMarshalHelper(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	c, out := newCapturedClient(t, hub)
@@ -82,7 +82,7 @@ func TestBroadcastSessionReady_ViaMarshalHelper(t *testing.T) {
 // when NewHub has no authenticated clients, BroadcastRunStarted must not
 // panic and must not deliver any frame.
 func TestMarshalBroadcastAuth_ZeroAuthClients_NoPanic(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	// No clients registered.
@@ -94,7 +94,7 @@ func TestMarshalBroadcastAuth_ZeroAuthClients_NoPanic(t *testing.T) {
 // authenticated clients BroadcastRunStarted does not attempt to deliver
 // any frame (the SendRaw path is never reached).
 func TestMarshalBroadcastAuth_ZeroAuthClients_NoSendRaw(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	// Register an unauthenticated client: the authenticated set stays empty.
@@ -115,7 +115,7 @@ func TestMarshalBroadcastAuth_ZeroAuthClients_NoSendRaw(t *testing.T) {
 // one authenticated client is present the fast-path does not fire and the frame
 // is delivered normally.
 func TestMarshalBroadcastAuth_WithAuthClient_Delivers(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	c := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
@@ -142,7 +142,7 @@ func TestMarshalBroadcastAuth_WithAuthClient_Delivers(t *testing.T) {
 // empty-check shares that one snapshot. Two authenticated clients must both be
 // present; the snapshot is returned to the pool by the helper.
 func TestSnapshotAuthenticated_SingleLockWindow(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	c1 := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
@@ -162,7 +162,7 @@ func TestSnapshotAuthenticated_SingleLockWindow(t *testing.T) {
 // TestSnapshotAuthenticated_EmptyMirror confirms the snapshot is empty when no
 // authenticated clients exist, which is what drives the marshal fast-path skip.
 func TestSnapshotAuthenticated_EmptyMirror(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	snapPtr, snap := hub.bcast.snapshotAuthenticated()
@@ -177,7 +177,7 @@ func TestSnapshotAuthenticated_EmptyMirror(t *testing.T) {
 // authenticated set.
 // Run with -race.
 func TestMarshalBroadcastAuth_ConcurrentRegisterAndBroadcast(t *testing.T) {
-	hub, _ := newTestHub("tok")
+	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 
 	const writers = 4

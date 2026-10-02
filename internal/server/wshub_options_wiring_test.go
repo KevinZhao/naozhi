@@ -18,14 +18,13 @@ func TestNewHub_SchedulerAndScratchPoolFromOptions(t *testing.T) {
 	t.Parallel()
 
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
 	pool := session.NewScratchPool(router, session.DefaultScratchMax, session.DefaultScratchTTL)
 	var sched CronView = fakeCronSessions{}
 
-	hub := newHubForTest(HubOptions{
+	hub := newHubForTest(t, HubOptions{
 		Router:    router,
 		Scheduler: sched,
-	}, sendEngineOpts{Guard: guard, ScratchPool: pool})
+	}, sendEngineOpts{ScratchPool: pool})
 
 	if hub.scheduler == nil {
 		t.Fatal("hub.scheduler nil — HubOptions.Scheduler not wired at construction (#431)")

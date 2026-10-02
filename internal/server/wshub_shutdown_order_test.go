@@ -30,8 +30,7 @@ func TestHubShutdown_WiredLinkersNiledAfterClientWGWait(t *testing.T) {
 	t.Parallel()
 
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
-	hub := newHubForTest(HubOptions{Router: router}, sendEngineOpts{Guard: guard})
+	hub := newHubForTest(t, HubOptions{Router: router}, sendEngineOpts{})
 
 	if linkersReleased(hub) {
 		t.Fatal("wired linkers released before Shutdown — NewHub contract changed")

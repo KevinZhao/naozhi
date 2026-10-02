@@ -11,7 +11,7 @@ import (
 // closure below asserts the lock is free; were it called under the lock,
 // TryLock would fail.
 func TestUnregister_UnsubClosuresInvokedOutsideMu(t *testing.T) {
-	hub, _ := newTestHub("")
+	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 
 	// A subscription whose unsub closure tries to take the registry's lock:
