@@ -146,7 +146,7 @@ const (
 // `lead` is how far local may be OLDER than its fallback twin, `lag` how far
 // NEWER. Only "user" gets the naozhi→CLI orientation.
 func skewWindowFor(entryType string) (lead, lag int64) {
-	if entryType == "user" {
+	if entryType == clievent.KindUser {
 		return contentSkewLeadMS, contentSkewEpsilonMS
 	}
 	return contentSkewEpsilonMS, contentSkewLagMS

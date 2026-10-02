@@ -9,7 +9,7 @@ import (
 // import internal/cli (#1370). The conversion lives solely in
 // router_adapter.go; widen this struct and the adapter together.
 type SystemEventEntry struct {
-	// Type mirrors clievent.EventEntry.Type; AutoTitler filters on "user".
+	// Type mirrors clievent.EventEntry.Type; AutoTitler filters on clievent.KindUser.
 	Type string
 	// Summary mirrors clievent.EventEntry.Summary (brief per-turn text).
 	Summary string

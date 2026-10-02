@@ -41,8 +41,8 @@ func TestIsActivityType_Set(t *testing.T) {
 }
 
 // TestKindTable pins the registry: names are unique and non-empty, and the
-// three derived sets are exactly the ones the literal switch / map held before
-// the table existed (and the dashboard's two hand-written Sets still hold).
+// three derived sets equal the sets pinned below (which the dashboard's two
+// hand-written Sets also hold).
 func TestKindTable(t *testing.T) {
 	seen := map[string]bool{}
 	for _, k := range kindTable {

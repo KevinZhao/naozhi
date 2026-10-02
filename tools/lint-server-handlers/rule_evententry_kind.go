@@ -12,9 +12,15 @@
 //     a switch on it;
 //  4. kind parameters: a parameter that appears in a kind position of its own
 //     function (history.NewDerivedEntry's entryType) makes the matching
-//     argument of every static call a kind position;
+//     argument of every static call a kind position. The reverse holds too: a
+//     parameter of a module function that every static call feeds a kind (an
+//     entry's Type, a kind variable or parameter, a Kind* constant) or a string
+//     literal, at least one a kind, and that is never taken as a value, is a
+//     kind parameter (ring's entryAffectsAgentState), so handing a kind to a
+//     helper does not hide the helper's comparisons;
 //  5. kind variables: a local that appears in a kind position, or is set from
-//     an EventEntry's Type, makes its every assignment and comparison one.
+//     an EventEntry's Type, makes its every assignment and comparison one, the
+//     elements (or map keys) of a ranged composite literal included.
 //
 // A kind position accepts a clievent Kind* constant whose value
 // clievent.IsKnownKind reports registered (this tool links the real clievent,
@@ -24,7 +30,11 @@
 // package's constant, a field read, a call result.
 //
 // Not covered: a kind reaching Type through a struct field, a function result,
-// a closure parameter or reflection, and Type read through strings.* helpers.
+// a closure parameter or reflection; a helper parameter some call feeds a
+// non-kind (or reached through a value, an interface or a variadic); a range
+// over a non-literal; set membership (map index, slices.Contains); Type read
+// through strings.* helpers; and structs mirroring EventEntry
+// (sysession.SystemEventEntry, persist's gapEntryJSON, pinned by its own test).
 // Sentinels pin files and packages that must keep producing kind positions.
 package main
 
@@ -52,7 +62,7 @@ var kindSentinels = []string{
 type kindSite struct {
 	Pkg, File string
 	Line      int
-	Where     string // literal | assign | compare | case | arg | var
+	Where     string // literal | assign | compare | case | arg | var | range
 	Form      string
 	Verdict   string // ok | violation
 	Why       string
@@ -70,7 +80,15 @@ type kindWalker struct {
 	vars      map[*types.Var]bool
 	positions []kindPos // of the latest pass
 	funcs     []*kindFunc
+	// Call-site evidence for the reverse of rule 4, of the latest pass.
+	calls   map[kindParamKey]*kindArgs
+	called  map[*ast.Ident]bool
+	asValue map[string]bool
 }
+
+// kindArgs: some static call passes a kind to the parameter, or a non-kind
+// other than a string literal.
+type kindArgs struct{ kind, other bool }
 
 type kindPos struct {
 	e     ast.Expr
@@ -97,6 +115,7 @@ func scanEventEntryKind(prog *typedProgram, sentinels []string) ([]kindSite, []V
 		for _, p := range w.positions {
 			w.absorb(p)
 		}
+		w.promoteCallees()
 		if len(w.params)+len(w.vars) == before {
 			break
 		}
@@ -137,6 +156,7 @@ func scanEventEntryKind(prog *typedProgram, sentinels []string) ([]kindSite, []V
 // collect walks every package and records the kind positions known so far.
 func (w *kindWalker) collect() {
 	w.positions = w.positions[:0]
+	w.calls, w.called, w.asValue = map[kindParamKey]*kindArgs{}, map[*ast.Ident]bool{}, map[string]bool{}
 	for _, p := range w.prog.Pkgs {
 		if p.Rel == entryPkg {
 			continue
@@ -251,7 +271,19 @@ func (w *kindWalker) visit(n ast.Node) bool {
 				}
 			}
 		}
+	case *ast.RangeStmt:
+		if x.Value != nil && w.isKindVar(x.Value) {
+			w.addRangeLit(x.X, false)
+		}
+		if x.Key != nil && w.isKindVar(x.Key) {
+			w.addRangeLit(x.X, true)
+		}
+	case *ast.Ident:
+		if fn, ok := info.Uses[x].(*types.Func); ok && !w.called[x] {
+			w.asValue[relToModule(w.prog.Module, fn.Origin().FullName())] = true
+		}
 	case *ast.CallExpr:
+		w.noteCall(x)
 		if name := w.staticCallee(x); name != "" {
 			for i, a := range x.Args {
 				if w.params[kindParamKey{name, i}] {
@@ -261,6 +293,86 @@ func (w *kindWalker) visit(n ast.Node) bool {
 		}
 	}
 	return true
+}
+
+// addRangeLit makes the elements (key: the map keys) of a ranged composite
+// literal kind positions.
+func (w *kindWalker) addRangeLit(x ast.Expr, key bool) {
+	lit, ok := ast.Unparen(x).(*ast.CompositeLit)
+	if !ok {
+		return
+	}
+	for _, el := range lit.Elts {
+		kv, isKV := el.(*ast.KeyValueExpr)
+		switch {
+		case isKV && key:
+			w.add(kv.Key, "range")
+		case isKV:
+			w.add(kv.Value, "range")
+		case !key:
+			w.add(el, "range")
+		}
+	}
+}
+
+// noteCall records what a static call to a module function passes to each
+// parameter, for promoteCallees.
+func (w *kindWalker) noteCall(c *ast.CallExpr) {
+	fn, id := w.callee(c)
+	if fn == nil {
+		return
+	}
+	w.called[id] = true
+	if fn.Pkg() == nil || relToModule(w.prog.Module, fn.Pkg().Path()) == fn.Pkg().Path() {
+		return
+	}
+	sig := fn.Type().(*types.Signature)
+	name := relToModule(w.prog.Module, fn.Origin().FullName())
+	for i, a := range c.Args {
+		k := kindParamKey{name, i}
+		st := w.calls[k]
+		if st == nil {
+			st = &kindArgs{}
+			w.calls[k] = st
+		}
+		lit, isLit := ast.Unparen(a).(*ast.BasicLit)
+		switch {
+		case sig.Variadic() && i >= sig.Params().Len()-1:
+			st.other = true
+		case w.isAnchor(a) || w.isKindConst(a):
+			st.kind = true
+		case isLit && lit.Kind == token.STRING:
+		default:
+			st.other = true
+		}
+	}
+}
+
+// promoteCallees is the reverse of rule 4: a parameter every static call feeds
+// a kind or a string literal, at least one a kind, becomes a kind parameter.
+func (w *kindWalker) promoteCallees() {
+	for k, a := range w.calls {
+		if a.kind && !a.other && !w.asValue[k.Func] {
+			w.params[k] = true
+		}
+	}
+}
+
+// isKindConst: e names a clievent Kind* constant, registered or not (classify
+// judges registration).
+func (w *kindWalker) isKindConst(e ast.Expr) bool {
+	var id *ast.Ident
+	switch x := ast.Unparen(e).(type) {
+	case *ast.Ident:
+		id = x
+	case *ast.SelectorExpr:
+		id = x.Sel
+	}
+	if id == nil {
+		return false
+	}
+	o, ok := w.info().Uses[id].(*types.Const)
+	return ok && o.Pkg() != nil && relToModule(w.prog.Module, o.Pkg().Path()) == entryPkg && strings.HasPrefix(o.Name(), "Kind")
 }
 
 // absorb promotes the parameter or local a position names, and a local set
@@ -421,6 +533,14 @@ func (w *kindWalker) isEntry(t types.Type) bool {
 }
 
 func (w *kindWalker) staticCallee(c *ast.CallExpr) string {
+	if fn, _ := w.callee(c); fn != nil {
+		return relToModule(w.prog.Module, fn.Origin().FullName())
+	}
+	return ""
+}
+
+// callee returns the function a call names and the identifier naming it.
+func (w *kindWalker) callee(c *ast.CallExpr) (*types.Func, *ast.Ident) {
 	var id *ast.Ident
 	switch f := ast.Unparen(c.Fun).(type) {
 	case *ast.Ident:
@@ -429,12 +549,12 @@ func (w *kindWalker) staticCallee(c *ast.CallExpr) string {
 		id = f.Sel
 	}
 	if id == nil {
-		return ""
+		return nil, nil
 	}
 	if fn, ok := w.info().Uses[id].(*types.Func); ok {
-		return relToModule(w.prog.Module, fn.Origin().FullName())
+		return fn, id
 	}
-	return ""
+	return nil, nil
 }
 
 func (w *kindWalker) relFile(name string) string {

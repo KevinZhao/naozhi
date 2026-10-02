@@ -33,6 +33,8 @@ func Derive(t string) clievent.EventEntry { return clievent.EventEntry{Type: t} 
 `
 
 const kindImports = `import (
+	"strings"
+
 	"example.com/fx/internal/cli/clievent"
 	"example.com/fx/internal/hist"
 )
@@ -40,6 +42,7 @@ const kindImports = `import (
 var (
 	_ clievent.EventEntry
 	_ = hist.Derive
+	_ strings.Builder
 )
 `
 
@@ -93,6 +96,48 @@ func F(w *W) { w.Type = "text" }`},
 	{"localparam", "violation", "string literal", `func derive(t string) clievent.EventEntry { return clievent.EventEntry{Type: t} }
 
 func F() clievent.EventEntry { return derive("text") }`},
+	// A helper every call hands a kind is a kind parameter too (reverse of
+	// rule 4), so moving a comparison into it does not hide the literal.
+	{"helpercompare", "violation", "string literal", `func isUser(t string) bool { return t == "usr" }
+
+func F(e clievent.EventEntry) bool { return isUser(e.Type) }`},
+	{"helpermethod", "violation", "string literal", `type L struct{}
+
+func (L) affects(t string) bool {
+	switch t {
+	case clievent.KindAgent, "task_start":
+		return true
+	}
+	return false
+}
+
+func F(l L, e *clievent.EventEntry) bool { return l.affects(e.Type) }`},
+	{"helperchain", "violation", "string literal", `func inner(t string) bool { return t == "usr" }
+
+func outer(t string) bool { return inner(t) }
+
+func F(e clievent.EventEntry) bool { return outer(e.Type) }`},
+	{"helperrange", "violation", "string literal", `func isUser(t string) bool {
+	for _, k := range []string{clievent.KindUser, "usr"} {
+		if t == k {
+			return true
+		}
+	}
+	return false
+}
+
+func F(e clievent.EventEntry) bool { return isUser(e.Type) }`},
+	{"helperrangekey", "violation", "string literal", `func F(e clievent.EventEntry) bool {
+	for k := range map[string]bool{"usr": true} {
+		if e.Type == k {
+			return true
+		}
+	}
+	return false
+}`},
+	{"helperlitarg", "violation", "string literal", `func is(t string) bool { return t == clievent.KindUser }
+
+func F(e clievent.EventEntry) bool { return is(e.Type) || is("text") }`},
 	// Constants other than registered clievent Kind*, and untraceable values.
 	{"otherconst", "violation", "outside clievent's Kind*", `const k = "text"
 
@@ -146,6 +191,32 @@ func F(e clievent.EventEntry, user bool) clievent.EventEntry {
 	_ = hist.Derive(k)
 	return derive(k)
 }`},
+	{"helperclean", "clean", "", `func isUser(t string) bool {
+	for _, k := range []string{clievent.KindUser, clievent.KindText} {
+		if t == k {
+			return true
+		}
+	}
+	return t == clievent.KindTodo
+}
+
+func F(e clievent.EventEntry) bool { return isUser(e.Type) && isUser(clievent.KindAgent) }`},
+	// A helper some call hands a non-kind, or one taken as a value, is not
+	// a kind parameter: its literals are out of scope, not false positives.
+	{"helpermixed", "nosite", "", `type Ev struct{ Type string }
+
+func short(s string) bool { return s == "x" }
+
+func F(e clievent.EventEntry, o Ev) bool { return short(e.Type) || short(o.Type) }`},
+	{"helpervalue", "nosite", "", `func is(t string) bool { return t == "x" }
+
+var G = is
+
+func F(e clievent.EventEntry) bool { return is(e.Type) }`},
+	{"helpervariadic", "nosite", "", `func first(xs ...string) string { return xs[0] }
+
+func F(e clievent.EventEntry) string { return first(e.Type) + first("x") }`},
+	{"helperstdlib", "nosite", "", `func F(e clievent.EventEntry) bool { return strings.EqualFold(e.Type, clievent.KindUser) }`},
 	// Another type's Type field (cli.Event, ContentBlock) is not a kind.
 	{"othertype", "nosite", "", `type Event struct{ Type string }
 

@@ -72,7 +72,7 @@ type pendingTaskDone struct {
 // dispatch under l.mu. Must stay in lockstep with the case labels below.
 func entryAffectsAgentState(t string) bool {
 	switch t {
-	case "agent", "task_start", "task_progress", "task_done", "result", "user":
+	case clievent.KindAgent, clievent.KindTaskStart, clievent.KindTaskProgress, clievent.KindTaskDone, clievent.KindResult, clievent.KindUser:
 		return true
 	}
 	return false
@@ -419,7 +419,7 @@ func (l *EventLog) recordAgentRingPosLocked(entryType, toolUseID string, ringIdx
 	if toolUseID == "" {
 		return
 	}
-	if entryType != "agent" && entryType != "task_start" {
+	if entryType != clievent.KindAgent && entryType != clievent.KindTaskStart {
 		return
 	}
 	if l.agentRingByToolUse == nil {
@@ -429,7 +429,7 @@ func (l *EventLog) recordAgentRingPosLocked(entryType, toolUseID string, ringIdx
 	if !ok {
 		pos = noAgentRingPos
 	}
-	if entryType == "agent" {
+	if entryType == clievent.KindAgent {
 		pos.agentIdx = ringIdx
 	} else {
 		pos.taskStartIdx = ringIdx

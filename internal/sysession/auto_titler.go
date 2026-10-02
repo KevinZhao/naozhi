@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -437,7 +438,7 @@ func buildExcerptFromHistory(entries []SystemEventEntry) string {
 	}
 	var sb strings.Builder
 	for _, e := range entries {
-		if e.Type != "user" {
+		if e.Type != clievent.KindUser {
 			continue
 		}
 		s := strings.TrimSpace(e.Summary)
