@@ -359,7 +359,7 @@ jobs:
       - name: Test the nested WS field check
         run: node --test scripts/ws-contract-nested.test.mjs
 
-      - name: Test the death_reason enum check
+      - name: Test the enum-literal checks (death_reason, EventEntry kinds)
         run: node --test scripts/check-enum-literals.test.mjs
 
       # The e2e mock stands in for the backend: a field it returns that the Go
@@ -368,7 +368,7 @@ jobs:
       - name: Check the e2e mock's REST shapes
         run: node --test scripts/check-mock-rest.test.mjs
 
-      - name: Check death_reason is read from the generated contract
+      - name: Check death_reason and the kinds are read from the generated contract
         run: node scripts/check-enum-literals.mjs
 
       # The flaky-report regexes fail open — a pattern that stops matching files

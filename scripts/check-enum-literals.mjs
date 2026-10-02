@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// check-enum-literals.mjs — the death_reason wire vocabulary is generated
-// into contract.js (internal/contractjs, #2909 G5 PR2); this checks the
-// dashboard actually reads it from there instead of restating it.
+// check-enum-literals.mjs — wire vocabularies generated into contract.js
+// (internal/contractjs) that the dashboard must read from there instead of
+// restating them.
 //
-// Two checks:
+// death_reason (#2909 G5 PR2):
 //   1. nz_util.js's DEATH_REASONS table has exactly the keys
 //      NZ_CONTRACT.ENUMS.DEATH_REASON lists — neither a reason the backend
 //      declares and the table forgot, nor one the table still has after the
@@ -16,14 +16,28 @@
 //      moving ~90 existing comparisons onto the generated list is a separate,
 //      larger change (tracked in #2909's follow-up), not a measurement gate.
 //
+// EventEntry kinds (S13b-4, #3021), from the AST (espree), contract.js aside:
+//   a. ENUMS.EVENT_TYPE, EVENT_TYPE_INTERNAL and EVENT_TYPE_MD_IGNORE are
+//      non-empty, and the last two are subsets of the first.
+//   b. No array literal holds two or more kind literals — counted, so
+//      `new Set([...X, 'tool_use', 'result'])` is a restated set too — and
+//      every key of an object literal looked up by `[x.type]` is a kind.
+//   c. A string compared with `.type` (===, !==, ==, !=, a switch case) is a
+//      WS frame type, a kind, or listed for its file in OTHER_TYPES; an
+//      OTHER_TYPES entry no comparison uses is dead and fails.
+//   Blind guards: a file that does not parse fails, and every KIND_SENTINELS
+//   file must compare `.type` with a kind at least once.
+//
 //   node scripts/check-enum-literals.mjs
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 import { stripComments } from './js-deps-freeze.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATIC_DIR = path.join(ROOT, 'internal', 'server', 'static');
+const espree = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'))('espree');
 
 // deathReasonKeys extracts the DEATH_REASONS object's own top-level keys from
 // nz_util.js's source (not evaluated: the file is a browser ES module).
@@ -75,6 +89,131 @@ export function run(files, contractReasons) {
   return problems;
 }
 
+// OTHER_TYPES: per file, the `.type` values that are neither a WS frame type
+// nor a kind. Each must be compared at least once in its file (c).
+export const OTHER_TYPES = {
+  'auth_modal.js': ['quick', 'project'], // the auth dialog's mode
+  'composer_files.js': ['application/pdf'], // File.type
+  'cron_view.js': ['keydown'], // DOM events
+  'dashboard.js': ['keydown', 'unhandledrejection'],
+};
+
+// KIND_SENTINELS: files that must compare `.type` with a kind, so a scan that
+// stops seeing them fails instead of passing empty.
+export const KIND_SENTINELS = ['dashboard.js', 'running_banner.js'];
+
+export const KIND_ENUMS = ['EVENT_TYPE', 'EVENT_TYPE_INTERNAL', 'EVENT_TYPE_MD_IGNORE'];
+
+// contractKindProblems is check (a) over NZ_CONTRACT.ENUMS.
+export function contractKindProblems(enums) {
+  const problems = [];
+  for (const k of KIND_ENUMS) {
+    if (!Array.isArray(enums?.[k]) || enums[k].length === 0) problems.push(`contract.js: ENUMS.${k} is missing or empty`);
+  }
+  const all = new Set(enums?.EVENT_TYPE || []);
+  for (const k of KIND_ENUMS.slice(1)) {
+    for (const v of enums?.[k] || []) if (!all.has(v)) problems.push(`contract.js: ENUMS.${k} has ${JSON.stringify(v)}, which ENUMS.EVENT_TYPE does not list`);
+  }
+  return problems;
+}
+
+const walk = (n, fn) => {
+  if (!n || typeof n.type !== 'string') return;
+  fn(n);
+  for (const [k, v] of Object.entries(n)) {
+    if (k === 'loc') continue;
+    if (Array.isArray(v)) v.forEach((c) => walk(c, fn));
+    else if (v && typeof v === 'object') walk(v, fn);
+  }
+};
+const isTypeMember = (n) => n?.type === 'MemberExpression' && !n.computed && n.property.name === 'type';
+// str: the value of a string literal or of a template with no expressions.
+const str = (n) => {
+  if (n?.type === 'Literal' && typeof n.value === 'string') return n.value;
+  if (n?.type === 'TemplateLiteral' && n.expressions.length === 0) return n.quasis[0].value.cooked;
+  return null;
+};
+const keyName = (p) => (p.type !== 'Property' || p.computed ? null : p.key.type === 'Identifier' ? p.key.name : str(p.key));
+
+// kindProblems is checks (b) and (c) plus the blind guards over files
+// (name → source); counts reports what was seen.
+export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = KIND_SENTINELS) {
+  const problems = [];
+  const kinds = new Set(contract.ENUMS?.EVENT_TYPE || []);
+  const ws = new Set(Object.values(contract.WS || {}));
+  const otherHits = new Map(Object.entries(other).map(([f, vs]) => [f, new Map(vs.map((v) => [v, 0]))]));
+  const kindCmp = new Map();
+  const counts = { kindComparisons: 0, otherComparisons: 0, lookups: 0 };
+  for (const [file, src] of Object.entries(files)) {
+    if (file === 'contract.js') continue;
+    let ast;
+    try {
+      ast = espree.parse(src, { ecmaVersion: 'latest', sourceType: 'module', loc: true });
+    } catch (err) {
+      problems.push(`${file}: does not parse (${err.message}) — the kind scan cannot see it`);
+      continue;
+    }
+    const at = (n) => `${file}:${n.loc.start.line}`;
+    const objects = new Map();
+    walk(ast, (n) => {
+      if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init?.type === 'ObjectExpression') {
+        objects.set(n.id.name, [...(objects.get(n.id.name) || []), n.init]);
+      }
+    });
+    const compared = (node, v) => {
+      if (kinds.has(v)) {
+        counts.kindComparisons++;
+        kindCmp.set(file, (kindCmp.get(file) || 0) + 1);
+      } else if (otherHits.get(file)?.has(v)) {
+        counts.otherComparisons++;
+        otherHits.get(file).set(v, otherHits.get(file).get(v) + 1);
+      } else if (!ws.has(v)) {
+        problems.push(`${at(node)}: .type compared with ${JSON.stringify(v)}, which is not a WS frame type, an ENUMS.EVENT_TYPE kind, or listed for ${file} in OTHER_TYPES`);
+      }
+    };
+    walk(ast, (n) => {
+      if (n.type === 'ArrayExpression') {
+        const hit = n.elements.map(str).filter((v) => v !== null && kinds.has(v));
+        if (hit.length >= 2) problems.push(`${at(n)}: array restates ${hit.length} kinds (${hit.join(', ')}) — read NZ_CONTRACT.ENUMS.EVENT_TYPE*`);
+      }
+      if (n.type === 'MemberExpression' && n.computed && isTypeMember(n.property)) {
+        const tables = n.object.type === 'ObjectExpression' ? [n.object] : n.object.type === 'Identifier' ? objects.get(n.object.name) || [] : [];
+        for (const t of tables) {
+          counts.lookups++;
+          for (const p of t.properties) {
+            const k = keyName(p);
+            if (k === null) problems.push(`${at(p)}: a table looked up by [.type] has a key that is not a static name`);
+            else if (!kinds.has(k)) problems.push(`${at(p)}: a table looked up by [.type] has key ${JSON.stringify(k)}, which ENUMS.EVENT_TYPE does not list`);
+          }
+        }
+      }
+      if (n.type === 'BinaryExpression' && /^[!=]==?$/.test(n.operator)) {
+        for (const [a, b] of [[n.left, n.right], [n.right, n.left]]) {
+          if (isTypeMember(a) && str(b) !== null) compared(n, str(b));
+        }
+      }
+      if (n.type === 'SwitchStatement' && isTypeMember(n.discriminant)) {
+        for (const c of n.cases) if (str(c.test) !== null) compared(c, str(c.test));
+      }
+    });
+  }
+  for (const [file, vs] of otherHits) {
+    for (const [v, hits] of vs) if (!hits) problems.push(`OTHER_TYPES['${file}'] lists ${JSON.stringify(v)}, which no .type comparison in ${file} uses — drop the dead entry`);
+  }
+  for (const f of sentinels) {
+    if (!kindCmp.get(f)) problems.push(`${f}: no .type comparison with a kind — the kind scan has gone blind`);
+  }
+  return { problems, counts };
+}
+
+// checkAll runs every check above over one tree (file name → source); the CLI
+// prints what it returns.
+export function checkAll(files, contract, other = OTHER_TYPES, sentinels = KIND_SENTINELS) {
+  const kind = kindProblems(files, contract, other, sentinels);
+  const problems = [...run(files, contract.ENUMS?.DEATH_REASON || []), ...contractKindProblems(contract.ENUMS), ...kind.problems];
+  return { problems, counts: kind.counts };
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   // contract.js is the ES module the dashboard's modules import.
   const { NZ_CONTRACT: contract } = await import(pathToFileURL(path.join(STATIC_DIR, 'contract.js')).href);
@@ -82,11 +221,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   for (const f of fs.readdirSync(STATIC_DIR).filter((f) => f.endsWith('.js') && f !== 'sw.js')) {
     files[f] = fs.readFileSync(path.join(STATIC_DIR, f), 'utf8');
   }
-  const problems = run(files, contract.ENUMS.DEATH_REASON);
+  const { problems, counts } = checkAll(files, contract);
   if (problems.length) {
     for (const p of problems) console.error(p);
     console.error(`check-enum-literals: ${problems.length} problem(s)`);
     process.exit(1);
   }
-  console.log(`check-enum-literals: OK (${contract.ENUMS.DEATH_REASON.length} death reasons, ${Object.keys(files).length - 2} files checked)`);
+  const { kindComparisons, otherComparisons, lookups } = counts;
+  console.log(`check-enum-literals: OK (${contract.ENUMS.DEATH_REASON.length} death reasons, ${contract.ENUMS.EVENT_TYPE.length} kinds; ` +
+    `${kindComparisons} kind and ${otherComparisons} other .type comparisons, ${lookups} [.type] table(s); ${Object.keys(files).length - 2} files checked)`);
 }

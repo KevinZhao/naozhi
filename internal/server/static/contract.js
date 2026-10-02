@@ -99,5 +99,8 @@ export const NZ_CONTRACT = {
   ENUMS: {
     DEATH_REASON: ['cli_exited', 'evicted', 'idle_timeout', 'killed', 'no_output_timeout', 'readloop_panic', 'shim_eof', 'shim_oversize_then_eof', 'shim_oversize_then_read_error', 'shim_read_error', 'total_timeout'],
     SESSION_STATE: ['dead', 'ready', 'running'],
+    EVENT_TYPE: ['user', 'text', 'thinking', 'tool_use', 'tool_result', 'agent', 'todo', 'ask_question', 'task_start', 'task_progress', 'task_done', 'result', 'system', 'persist_gap'],
+    EVENT_TYPE_INTERNAL: ['tool_use', 'agent', 'task_start', 'task_progress', 'task_done', 'result'],
+    EVENT_TYPE_MD_IGNORE: ['thinking', 'tool_use', 'agent', 'ask_question', 'task_start', 'task_progress', 'task_done', 'result'],
   },
 };

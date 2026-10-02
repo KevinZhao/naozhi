@@ -28,7 +28,7 @@
     "configureDeps": 0
   },
   "contract.js": {
-    "lines": 103,
+    "lines": 106,
     "maxFnLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -84,7 +84,7 @@
     "configureDeps": 24
   },
   "dashboard.js": {
-    "lines": 6287,
+    "lines": 6279,
     "maxFnLines": 249,
     "fnOver100": 7,
     "topLevelLetVar": 0,

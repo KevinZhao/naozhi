@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/wsproto"
@@ -64,31 +65,35 @@ export const NZ_CONTRACT = {
 	}
 	b.WriteString("  },\n")
 
-	// ENUMS: the death_reason and session-state wire vocabularies, so the
-	// dashboard can check a value it received against the full set instead of
-	// restating each member as a literal (#2909 G5). SESSION_STATE is not yet
-	// enforced against literal comparisons — see the PR for why.
+	// ENUMS: wire vocabularies the dashboard reads instead of restating each
+	// member as a literal (#2909 G5); the EVENT_TYPE lists are clievent's
+	// kindTable columns (S13b-4). SESSION_STATE is not yet enforced against
+	// literal comparisons — see the PR for why.
 	deathReasons := append([]string{}, cliinfo.AllDeathReasons()...)
 	deathReasons = append(deathReasons, session.DeathReasonIdleTimeout, session.DeathReasonEvicted)
 	sort.Strings(deathReasons)
-	b.WriteString("  ENUMS: {\n    DEATH_REASON: [")
-	for i, r := range deathReasons {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		fmt.Fprintf(&b, "'%s'", r)
-	}
-	b.WriteString("],\n    SESSION_STATE: [")
-	for i, s := range cliinfo.AllSessionStates() {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		fmt.Fprintf(&b, "'%s'", s)
-	}
-	b.WriteString("],\n  },\n")
+	b.WriteString("  ENUMS: {\n")
+	writeEnum(&b, "DEATH_REASON", deathReasons)
+	writeEnum(&b, "SESSION_STATE", cliinfo.AllSessionStates())
+	writeEnum(&b, "EVENT_TYPE", clievent.AllKinds())
+	writeEnum(&b, "EVENT_TYPE_INTERNAL", clievent.InternalKinds())
+	writeEnum(&b, "EVENT_TYPE_MD_IGNORE", clievent.MarkdownIgnoreKinds())
+	b.WriteString("  },\n")
 
 	b.WriteString("};\n")
 	return b.String(), nil
+}
+
+// writeEnum writes one ENUMS line: `    NAME: ['a', 'b'],`.
+func writeEnum(b *strings.Builder, name string, values []string) {
+	fmt.Fprintf(b, "    %s: [", name)
+	for i, v := range values {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(b, "'%s'", v)
+	}
+	b.WriteString("],\n")
 }
 
 // apiPaths reads the deduped, sorted /api/* paths from routes.golden.json.
