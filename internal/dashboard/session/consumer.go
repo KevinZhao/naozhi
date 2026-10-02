@@ -1,7 +1,7 @@
 // consumer.go — the consumer-side dependency interfaces this package needs
 // (#2561).
 //
-// Deps used to name concrete types: *session.Router (77 exported methods when measured),
+// Deps used to name concrete types: *session.Router (54 exported methods when measured),
 // *project.Manager, *node.CacheManager, *discovery.RetiredStore. The physical
 // split worked — no dashboard sub-package imports internal/server — but taking
 // the whole type back means this package is coupled to every future method on
@@ -36,8 +36,8 @@ import (
 // Still 18 and not the ≤6 the issue guessed: this package serves
 // /api/sessions, which is the list, the per-session detail, the run history,
 // the label/tuning writes and the interrupt — the Router really is its
-// datasource. What the narrowing buys is that the other 59 methods can change
-// without touching this package.
+// datasource. What the narrowing buys is that the Router's other 40 exported
+// methods can change without touching this package.
 type RouterView interface {
 	// Session list + change detection (the 1 Hz dashboard poll).
 	ListSessionsWithVersion() ([]sessionpkg.SessionSnapshot, uint64)

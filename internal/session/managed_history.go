@@ -257,7 +257,7 @@ func (s *ManagedSession) InjectHistory(entries []clievent.EventEntry) {
 // InjectHistoryIfEmpty atomically injects entries only when persistedHistory is
 // currently empty, returning true if the injection happened. The emptiness
 // check and the append run under a single historyMu hold so concurrent startup
-// loaders (router_core.go Tier1/Tier2) and ReconnectShims cannot both pass a
+// loaders (router_restore.go Tier1/Tier2) and ReconnectShims cannot both pass a
 // separate hasInjectedHistory() check and double-append the same conversation
 // (#1812).
 func (s *ManagedSession) InjectHistoryIfEmpty(entries []clievent.EventEntry) bool {

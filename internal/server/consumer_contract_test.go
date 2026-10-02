@@ -47,7 +47,7 @@ var (
 )
 
 // Same for dashproject and dashcron (#2561 E6-b). The measured narrowing is in
-// each package's consumer.go: 3 of the 77 *session.Router methods (when measured) for
+// each package's consumer.go: 3 of the 54 exported *session.Router methods (when measured) for
 // dashproject, 23 of *cron.Scheduler's 48 for dashcron. dashproject's router
 // goes through projectRouter (project_router_adapter.go), which carries its
 // own guards.
