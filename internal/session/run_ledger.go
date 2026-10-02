@@ -8,9 +8,9 @@ import (
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
-// RunLedger is the run-history and cost-ledger facet (#3023, epic #2897
-// S12e): the per-session run-timing store and the shared cost-accounting
-// sink Router hands to every ManagedSession. Reached through Router.Runs().
+// RunLedger is the run-history and cost-ledger facet: the per-session
+// run-timing store and the shared cost-accounting sink Router hands to every
+// ManagedSession. Reached through Router.Runs().
 type RunLedger struct {
 	// runs persists per-run wall-clock timing. Constructed in NewRouter from
 	// the store's datadir.Layout, injected into every ManagedSession; nil

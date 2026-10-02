@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
@@ -13,7 +14,7 @@ import (
 // what /health's run_stores.session serves (#2792), so it must carry the
 // store's real state — disabled when nothing persists, enabled with its loss
 // counters otherwise. Goes through Runs().Health(), the RunLedger facet
-// accessor (#3023): a nil Router must report disabled rather than panic.
+// accessor: a nil Router must report disabled rather than panic.
 func TestRouter_SessionRunsHealth_MapsTheStoreCounters(t *testing.T) {
 	disabled := &Router{ss: newSessionTable(), runs: RunLedger{runs: runhistory.NewStore("", 0, 0)}}
 	if h := disabled.Runs().Health(); h.Enabled {
@@ -22,6 +23,9 @@ func TestRouter_SessionRunsHealth_MapsTheStoreCounters(t *testing.T) {
 	var nilRouter *Router
 	if h := nilRouter.Runs().Health(); h.Enabled {
 		t.Error("nil router must report disabled")
+	}
+	if l := nilRouter.Runs().CostLedger(); l != nil {
+		t.Errorf("nil router CostLedger() = %v, want nil", l)
 	}
 
 	root := filepath.Join(t.TempDir(), "session-runs")
@@ -53,5 +57,38 @@ func TestRouter_SessionRunsHealth_MapsTheStoreCounters(t *testing.T) {
 
 	if h := r.Runs().Health(); h.WriteFailedOther != 1 || h.WriteFailedDiskFull != 0 {
 		t.Errorf("snapshot = %+v, want write_failed_other=1 disk_full=0", h)
+	}
+}
+
+// TestRouter_RemoveFreesRunHistoryRing: Remove drops the session's resident
+// run-history ring (on-disk records stay), so the per-session ring map stays
+// bounded. Observed through staleness: a record another writer put on disk
+// after the ring warmed is invisible until the ring is freed and re-warmed.
+func TestRouter_RemoveFreesRunHistoryRing(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	r := NewRouter(RouterConfig{MaxProcs: 2, StorePath: storePath})
+	t.Cleanup(r.Shutdown)
+	const key = "test:direct:ring:general"
+	installSession(t, r, key, nil)
+
+	start := time.Now().Add(-time.Hour)
+	run := func(id string, d int64) runhistory.SessionRun {
+		return runhistory.SessionRun{RunID: id, SessionKey: key, StartedAt: start,
+			EndedAt: start.Add(time.Duration(d) * time.Millisecond), DurationMS: d,
+			Outcome: runhistory.OutcomeCompleted}
+	}
+	r.runs.runs.Append(run("00000000000000a1", 100)) // warms the ring
+	other := runhistory.NewStore(datadir.ForStore(storePath).SessionRunsRoot(), 0, 0)
+	other.Append(run("00000000000000a2", 200))
+	other.Close()
+	if got := r.Runs().List(key, 0, time.Time{}); len(got) != 1 {
+		t.Fatalf("before Remove: %d runs, want the 1 resident in the warmed ring", len(got))
+	}
+
+	if !r.Remove(key) {
+		t.Fatal("Remove returned false")
+	}
+	if got := r.Runs().List(key, 0, time.Time{}); len(got) != 2 {
+		t.Errorf("after Remove: %d runs, want 2 re-warmed from disk (ring not freed?)", len(got))
 	}
 }

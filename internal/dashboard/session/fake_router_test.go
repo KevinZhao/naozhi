@@ -79,7 +79,7 @@ func (f *fakeRouter) DiscoveryExcludeIDs() map[string]bool         { return nil 
 
 // realRouter is internal/server's sessionRouterView for the tests here that
 // build a real Router: the two CLI facts live on its backend facet, and the
-// two run-history methods live on its RunLedger facet (Router.Runs(), #3023).
+// two run-history methods live on its RunLedger facet (Router.Runs()).
 type realRouter struct{ *sessionpkg.Router }
 
 func (r realRouter) CLIName() string    { return r.Backends().CLIName() }
