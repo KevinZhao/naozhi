@@ -44,7 +44,7 @@ type gapEntryJSON struct {
 
 // gapEntryType is the EventEntry.Type of a persistence-gap record, owned by
 // schema so readers share it. Additive: consumers that do not know it render
-// the summary text through their default branch (dashboard.js eventHtml).
+// the summary text through their default branch (event_render.js eventHtml).
 const gapEntryType = schema.GapEntryType
 
 func (s *sessionSink) accept(entries []Entry, replayPhase bool) {

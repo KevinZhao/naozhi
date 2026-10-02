@@ -640,7 +640,8 @@ func SanitizePromptForTransport(s string) string {
 // claudeSystemInjectedTagNames enumerates the XML-like tags Claude Code and
 // its plugins inject as synthetic user messages — operational noise that must
 // not become a session title or history entry. Kept in lockstep with the UI
-// filter in internal/server/static/dashboard.js (eventHtml + formatSessionMarkdown).
+// filters in internal/server/static/ (event_render.js eventHtml, dashboard.js
+// formatSessionMarkdown).
 var claudeSystemInjectedTagNames = [...]string{
 	"task-notification",
 	"system-reminder",

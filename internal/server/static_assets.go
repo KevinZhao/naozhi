@@ -125,6 +125,12 @@ var sessionStreamJS embed.FS
 //go:embed static/features.js
 var featuresJS embed.FS
 
+//go:embed static/event_render.js
+var eventRenderJS embed.FS
+
+//go:embed static/ask_card.js
+var askCardJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -238,6 +244,8 @@ var staticAssets = func() map[string]staticAsset {
 		{"ws_manager.js", wsManagerJS, "static/ws_manager.js", true},
 		{"session_stream.js", sessionStreamJS, "static/session_stream.js", true},
 		{"features.js", featuresJS, "static/features.js", true},
+		{"event_render.js", eventRenderJS, "static/event_render.js", true},
+		{"ask_card.js", askCardJS, "static/ask_card.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},

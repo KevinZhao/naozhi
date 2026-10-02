@@ -1,7 +1,14 @@
 {
   "agent_view.js": {
-    "lines": 732,
+    "lines": 728,
     "maxFnLines": 66,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0
+  },
+  "ask_card.js": {
+    "lines": 277,
+    "maxFnLines": 93,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0
@@ -77,14 +84,14 @@
     "configureDeps": 0
   },
   "cron_view.js": {
-    "lines": 2618,
+    "lines": 2613,
     "maxFnLines": 127,
     "fnOver100": 3,
     "topLevelLetVar": 11,
     "configureDeps": 24
   },
   "dashboard.js": {
-    "lines": 5981,
+    "lines": 5300,
     "maxFnLines": 249,
     "fnOver100": 6,
     "topLevelLetVar": 0,
@@ -94,6 +101,13 @@
     "lines": 254,
     "maxFnLines": 149,
     "fnOver100": 1,
+    "topLevelLetVar": 0,
+    "configureDeps": 0
+  },
+  "event_render.js": {
+    "lines": 420,
+    "maxFnLines": 41,
+    "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0
   },

@@ -23,7 +23,7 @@ var inlineStyleAttrRe = regexp.MustCompile(`\bstyle\s*=\s*\\?"`)
 // inline value can never disagree.
 func TestDashboardBundle_NoInlineStyleAttributes(t *testing.T) {
 	t.Parallel()
-	files := append([]string{"dashboard.html"}, generatedOnclickBundle...)
+	files := append([]string{"dashboard.html"}, generatedOnclickBundle(t)...)
 	for _, name := range files {
 		data := staticAssetBytes(name)
 		if data == nil {
