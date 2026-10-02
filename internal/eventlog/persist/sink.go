@@ -3,6 +3,7 @@ package persist
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
@@ -169,8 +170,10 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	defer putEntryArena(job.arena)
 	w, err := p.writerFor(job.Key, job.Stem)
 	if err != nil {
-		slog.Error("event log persist: cannot open writer",
-			"key", job.Key, "err", err)
+		n := len(job.Entries)
+		p.droppedCnt.Add(int64(n))
+		p.opts.Observer.OnDrop(n)
+		p.noteFailure(job.Key, "open writer", err)
 		return
 	}
 
@@ -181,7 +184,7 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// One stack Record reused per entry: MarshalRecordInto only reads it
 	// synchronously and never retains the pointer (#2088).
 	var rec schema.Record
-	for _, e := range job.Entries {
+	for i, e := range job.Entries {
 		rec.V = schema.WireVersion
 		rec.Seq = w.nextSeq
 		rec.Type = schema.TypeEntry
@@ -201,13 +204,23 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		// to anything still pending in the bufio buffer.
 		n, err := WriteRecordRaw(w.logBuf, body)
 		if err != nil {
-			// Drop just this record; WriteRecordRaw writes the whole frame or
-			// nothing, so file state stays consistent.
-			p.droppedCnt.Add(1)
-			p.opts.Observer.OnDrop(1)
-			slog.Warn("event log persist: write entry failed",
-				"key", job.Key, "seq", w.nextSeq, "err", err)
-			continue
+			if errors.Is(err, ErrEmptyBody) || errors.Is(err, schema.ErrRecordTooLarge) {
+				// Rejected before any byte reached logBuf: drop just this record.
+				p.droppedCnt.Add(1)
+				p.opts.Observer.OnDrop(1)
+				slog.Warn("event log persist: write entry failed",
+					"key", job.Key, "seq", w.nextSeq, "err", err)
+				continue
+			}
+			// An I/O error is latched in logBuf, so the rest of the batch would
+			// fail the same way: drop it and retire the writer (failure.go).
+			rest := len(job.Entries) - i
+			p.droppedCnt.Add(int64(rest))
+			p.opts.Observer.OnDrop(rest)
+			w.poisoned = true
+			p.noteFailure(job.Key, "write entry", err)
+			p.retireWriter(job.Key, w)
+			return
 		}
 		// Pending idx entry — we hold it until fsync time to keep
 		// log-before-idx ordering (see recovery.go).
@@ -239,8 +252,7 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// old/new files.
 	if w.bytes >= p.opts.MaxFileBytes {
 		if err := w.flush(p); err != nil {
-			slog.Warn("event log persist: pre-rotate flush failed",
-				"key", job.Key, "err", err)
+			p.settleFlush(job.Key, w, "pre-rotate flush", err)
 		} else if err := p.rotate(job.Key, job.Stem, w); err != nil {
 			slog.Warn("event log persist: rotate failed",
 				"key", job.Key, "err", err)

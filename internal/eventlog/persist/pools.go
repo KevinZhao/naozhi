@@ -115,9 +115,18 @@ var logBufPool = sync.Pool{
 // acquireLogBuf returns a pooled *bufio.Writer rebound to file.
 func acquireLogBuf(file *os.File) *bufio.Writer {
 	bw := logBufPool.Get().(*bufio.Writer)
+	if logFileWriterHook != nil {
+		bw.Reset(logFileWriterHook(file))
+		return bw
+	}
 	bw.Reset(file)
 	return bw
 }
+
+// logFileWriterHook is a test-only seam that interposes on the log fd under
+// logBuf, e.g. to fail writes the way a full disk does. Always nil in
+// production.
+var logFileWriterHook func(*os.File) io.Writer
 
 // releaseLogBuf returns a bufio.Writer to the pool. Callers MUST have
 // flushed already — the slot is rebound to io.Discard so a retained
