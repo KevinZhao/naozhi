@@ -1,5 +1,5 @@
 // consumer.go: per-consumer interface subsets of *session.Router (HubRouter /
-// ScratchRouter / SendRouter) and *Hub (HubBroadcaster). Declared here (not in
+// ScratchRouter / SendRouter) and *wsBroadcaster (HubBroadcaster). Declared here (not in
 // session) so tests can inject fakes; the concrete types satisfy them
 // structurally, guarded by consumer_contract_test.go. See
 // docs/rfc/consumer-interfaces.md §3.2.2.
@@ -63,11 +63,11 @@ type sendEngineRouter interface {
 }
 
 // sendNotifier is *sendEngine's only way out to the dashboard, and the
-// hand-off point for Epic K (#2549): when the broadcast facet is carved onto
-// its own type, only the implementer changes and the engine stays put.
+// hand-off point for Epic K (#2549): the broadcast facet is its own type,
+// *wsBroadcaster, so the engine depends on it and not on the Hub.
 // Deliberately not HubBroadcaster — 4 of its 6 methods are cron / daemon
 // run-lifecycle, and it lacks the two unexported methods needed here.
-// *Hub satisfies it; consumer_contract_test.go guards the binding.
+// *wsBroadcaster satisfies it; consumer_contract_test.go guards the binding.
 type sendNotifier interface {
 	BroadcastSessionReady(key string)
 	BroadcastSessionsUpdate()
@@ -84,10 +84,10 @@ type ScratchRouter interface {
 	RenameSession(oldKey, newKey string) bool
 }
 
-// HubBroadcaster names the broadcast / fan-out facet of *Hub — the "push a
+// HubBroadcaster names the broadcast / fan-out facet, *wsBroadcaster — the "push a
 // frame to authenticated WS clients" surface producers (the router observer's SessionsChanged,
 // send paths, cron / sysession run-lifecycle hooks, node register/deregister)
-// reach for. *Hub satisfies it structurally; consumer_contract_test.go guards
+// reach for. *wsBroadcaster satisfies it structurally; consumer_contract_test.go guards
 // the binding. Prefer the narrower subsets (SessionsBus.Publish,
 // scratch.Broadcaster) when only part of this surface is needed.
 type HubBroadcaster interface {

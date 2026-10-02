@@ -41,21 +41,21 @@ func TestNewHub_NilQueue_LeavesInterfaceFieldNil(t *testing.T) {
 // its sole caller branch.
 func TestLegacySendInvokes_AtomicCounter(t *testing.T) {
 	// nil receiver: defensive — package callers may probe a not-yet-built
-	// Hub via interface; the helper documents this returns 0 instead of
+	// engine via interface; the helper documents this returns 0 instead of
 	// panicking. R-LEGACY-SEND tooling depends on this.
-	var hNil *Hub
-	if got := hNil.LegacySendInvokes(); got != 0 {
-		t.Fatalf("nil Hub LegacySendInvokes = %d, want 0", got)
+	var eNil *sendEngine
+	if got := eNil.LegacySendInvokes(); got != 0 {
+		t.Fatalf("nil engine LegacySendInvokes = %d, want 0", got)
 	}
 
-	h := &Hub{engine: newSendEngine(sendEngineOpts{})}
-	if got := h.LegacySendInvokes(); got != 0 {
-		t.Fatalf("fresh Hub LegacySendInvokes = %d, want 0", got)
+	e := newSendEngine(sendEngineOpts{})
+	if got := e.LegacySendInvokes(); got != 0 {
+		t.Fatalf("fresh engine LegacySendInvokes = %d, want 0", got)
 	}
-	h.engine.legacyInvokes.Add(1)
-	h.engine.legacyInvokes.Add(1)
-	h.engine.legacyInvokes.Add(1)
-	if got := h.LegacySendInvokes(); got != 3 {
+	e.legacyInvokes.Add(1)
+	e.legacyInvokes.Add(1)
+	e.legacyInvokes.Add(1)
+	if got := e.LegacySendInvokes(); got != 3 {
 		t.Errorf("after 3 bumps LegacySendInvokes = %d, want 3", got)
 	}
 }

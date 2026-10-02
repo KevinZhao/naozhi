@@ -140,7 +140,7 @@ func BenchmarkHubFanOutToSubscribers(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					h.fanOutToSubscribers(benchKey, frame)
+					h.bcast.fanOutToSubscribers(benchKey, frame)
 				}
 			})
 		})
@@ -156,7 +156,7 @@ func BenchmarkHubSnapshotAuthenticated(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ptr, snap := h.snapshotAuthenticated()
+			ptr, snap := h.bcast.snapshotAuthenticated()
 			releaseBroadcastSnap(ptr, snap)
 		}
 	})
@@ -188,7 +188,7 @@ func BenchmarkHubBroadcastSessionsUpdate(b *testing.B) {
 		b.ResetTimer()
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
-				h.BroadcastSessionsUpdate()
+				h.bcast.BroadcastSessionsUpdate()
 			}
 		})
 	})

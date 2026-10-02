@@ -236,7 +236,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 			// interrupt_ack reaches only the originating tab; fan the failure out
 			// to every dashboard subscribed to this remote session. The summary
 			// is re-sanitised because it is broadcast verbatim (#433).
-			h.broadcastSessionSystemEvent(capturedKey, "中断失败："+osutil.SanitizeForLog(err.Error(), 512))
+			h.bcast.broadcastSessionSystemEvent(capturedKey, "中断失败："+osutil.SanitizeForLog(err.Error(), 512))
 			return
 		}
 		status := "ok"
@@ -343,7 +343,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 			// send_ack reaches only the originating tab; fan the failure out to
 			// every dashboard subscribed to this remote session (whose EventLog
 			// lives on the node). Summary is re-sanitised: broadcast verbatim (#433).
-			h.broadcastSessionSystemEvent(capturedKey, "发送失败："+osutil.SanitizeForLog(err.Error(), 512))
+			h.bcast.broadcastSessionSystemEvent(capturedKey, "发送失败："+osutil.SanitizeForLog(err.Error(), 512))
 		} else {
 			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: "accepted", Key: capturedKey, Node: nodeID}))
 			// Refresh the remote subscription so the connector re-creates
@@ -351,6 +351,6 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 			// process died between the last subscribe and this send).
 			nc.RefreshSubscription(capturedKey)
 		}
-		h.BroadcastSessionsUpdate()
+		h.bcast.BroadcastSessionsUpdate()
 	}()
 }

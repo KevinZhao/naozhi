@@ -53,11 +53,37 @@ func releaseBroadcastSnap(snapPtr *[]*wsClient, snap []*wsClient) {
 	broadcastClientSnapPool.Put(snapPtr)
 }
 
+// wsBroadcaster is the dashboard notifier: it fans frames out to the clients
+// in recipients (the Hub's own registry, so both see one set of subscribers)
+// and coalesces sessions_update through debounce. It holds neither a Hub nor
+// the engine, which is what lets sendEngine notify it without a cycle back
+// into the Hub. Each pending debounce fire holds a slot in pending; close
+// stops new fires and wait blocks until the last one has returned.
+type wsBroadcaster struct {
+	recipients *subscriberRegistry
+	debounce   *debouncer
+	pending    sync.WaitGroup
+}
+
+// newWSBroadcaster builds a broadcaster over recipients.
+func newWSBroadcaster(recipients *subscriberRegistry) *wsBroadcaster {
+	b := &wsBroadcaster{recipients: recipients}
+	b.debounce = newDebouncer(&b.pending, b.doBroadcastSessionsUpdate)
+	return b
+}
+
+// close stops future sessions_update fires; one already running keeps its
+// pending slot until it returns.
+func (b *wsBroadcaster) close() { b.debounce.close() }
+
+// wait blocks until every pending sessions_update fire has returned.
+func (b *wsBroadcaster) wait() { b.pending.Wait() }
+
 // broadcastToAuthenticated sends raw data to all authenticated WebSocket clients.
 // The recipient snapshot is taken before the per-client SendRaw loop so
 // register / unregister never serialise behind a broadcast.
-func (h *Hub) broadcastToAuthenticated(data []byte) {
-	snapPtr, snap := h.snapshotAuthenticated()
+func (b *wsBroadcaster) broadcastToAuthenticated(data []byte) {
+	snapPtr, snap := b.snapshotAuthenticated()
 	for _, c := range snap {
 		c.SendRaw(data)
 	}
@@ -67,9 +93,9 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 // snapshotAuthenticated returns a pooled snapshot of the authenticated
 // clients. The caller MUST return it via releaseBroadcastSnap once the
 // fan-out completes.
-func (h *Hub) snapshotAuthenticated() (*[]*wsClient, []*wsClient) {
+func (b *wsBroadcaster) snapshotAuthenticated() (*[]*wsClient, []*wsClient) {
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
-	return snapPtr, h.subs.authenticated((*snapPtr)[:0])
+	return snapPtr, b.recipients.authenticated((*snapPtr)[:0])
 }
 
 // marshalBroadcastAuth marshals v and fans it out to every authenticated client.
@@ -78,8 +104,8 @@ func (h *Hub) snapshotAuthenticated() (*[]*wsClient, []*wsClient) {
 // (#2141). A marshal failure drops the frame: the WS payload structs are
 // fixed-shape and cannot fail in practice, and dropping beats panicking the
 // producer goroutine.
-func (h *Hub) marshalBroadcastAuth(v any) {
-	snapPtr, snap := h.snapshotAuthenticated()
+func (b *wsBroadcaster) marshalBroadcastAuth(v any) {
+	snapPtr, snap := b.snapshotAuthenticated()
 	if len(snap) == 0 {
 		releaseBroadcastSnap(snapPtr, snap)
 		return
@@ -99,28 +125,28 @@ func (h *Hub) marshalBroadcastAuth(v any) {
 // This mirrors BroadcastSessionReady: the "running" start is sent to everyone,
 // so the final state must also reach everyone — otherwise clients not subscribed
 // to this session would see a stale "running" dot in the sidebar forever.
-func (h *Hub) broadcastState(key, state, reason string) {
-	h.marshalBroadcastAuth(wsproto.NewSessionState(wsproto.SessionState{Key: key, State: state, Reason: reason}))
+func (b *wsBroadcaster) broadcastState(key, state, reason string) {
+	b.marshalBroadcastAuth(wsproto.NewSessionState(wsproto.SessionState{Key: key, State: state, Reason: reason}))
 }
 
 // BroadcastSessionReady sends a session_state "running" to ALL authenticated clients
 // so they can auto-subscribe. Unlike broadcastState, this is not limited to already-
 // subscribed clients — needed for new sessions where nobody is subscribed yet.
-func (h *Hub) BroadcastSessionReady(key string) {
-	h.marshalBroadcastAuth(wsproto.NewSessionState(wsproto.SessionState{Key: key, State: "running"}))
+func (b *wsBroadcaster) BroadcastSessionReady(key string) {
+	b.marshalBroadcastAuth(wsproto.NewSessionState(wsproto.SessionState{Key: key, State: "running"}))
 }
 
 // BroadcastSessionsUpdate asks for a sessions_update broadcast. Bursts
 // coalesce: the broadcast fires debounceInterval after the last call, and no
 // later than maxDebounceDelay after the first, so a sustained burst still
 // refreshes clients.
-func (h *Hub) BroadcastSessionsUpdate() {
-	h.debounce.trigger()
+func (b *wsBroadcaster) BroadcastSessionsUpdate() {
+	b.debounce.trigger()
 }
 
-func (h *Hub) doBroadcastSessionsUpdate() {
+func (b *wsBroadcaster) doBroadcastSessionsUpdate() {
 	data := sessionsUpdateMsg
-	h.broadcastToAuthenticated(data)
+	b.broadcastToAuthenticated(data)
 }
 
 // BroadcastRunStarted emits the subsystem-neutral run_started frame (#2540).
@@ -129,9 +155,9 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 // cron produces and falls back to SanitizeForLog for anything else — which is
 // exactly the treatment daemon names (compiled-in, but defence-in-depth
 // against a future config-derived producer) got from their dedicated frame.
-func (h *Hub) BroadcastRunStarted(ev runtelemetry.RunStartedEvent) {
+func (b *wsBroadcaster) BroadcastRunStarted(ev runtelemetry.RunStartedEvent) {
 	rec := ev.Record()
-	h.marshalBroadcastAuth(wsproto.NewRunStarted(wsproto.RunStarted{
+	b.marshalBroadcastAuth(wsproto.NewRunStarted(wsproto.RunStarted{
 		Subsystem: string(rec.Subsystem),
 		OwnerID:   sanitizeHexIDForBroadcast(rec.OwnerID, 64),
 		RunID:     sanitizeHexIDForBroadcast(rec.RunID, 64),
@@ -150,9 +176,9 @@ func (h *Hub) BroadcastRunStarted(ev runtelemetry.RunStartedEvent) {
 // it. cron passes it through (already path-redacted + SanitizeForLog'd by
 // recordResultP0); sysession's is dropped before this method is reached — see
 // hubBroadcaster.BroadcastRunEnded, which owns that policy.
-func (h *Hub) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
+func (b *wsBroadcaster) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
 	rec := ev.Record()
-	h.marshalBroadcastAuth(wsproto.NewRunEnded(wsproto.RunEnded{
+	b.marshalBroadcastAuth(wsproto.NewRunEnded(wsproto.RunEnded{
 		Subsystem:  string(rec.Subsystem),
 		OwnerID:    sanitizeHexIDForBroadcast(rec.OwnerID, 64),
 		RunID:      sanitizeHexIDForBroadcast(rec.RunID, 64),
@@ -175,11 +201,11 @@ func (h *Hub) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
 //
 // summary MUST be caller-sanitised (osutil.SanitizeForLog): it is broadcast
 // verbatim to dashboards and would otherwise be an injection primitive.
-func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
+func (b *wsBroadcaster) broadcastSessionSystemEvent(key, summary string) {
 	if key == "" || summary == "" {
 		return
 	}
-	h.fanOutToSubscribers(key, func() any {
+	b.fanOutToSubscribers(key, func() any {
 		ev := clievent.EventEntry{
 			Time:    time.Now().UnixMilli(),
 			Type:    clievent.KindSystem,
@@ -187,25 +213,6 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 		}
 		return wsproto.NewEvent(wsproto.Event{Key: key, Event: &ev})
 	})
-}
-
-// DroppedMessages returns the total number of messages dropped across all
-// clients since the process started (lock-free atomic load).
-func (h *Hub) DroppedMessages() int64 {
-	return h.droppedTotal.Load()
-}
-
-// LegacySendInvokes returns the total number of times sessionSend fell
-// through to the deprecated sessionSendLegacy path. Production Hubs wire a
-// real MessageQueue and never increment this; once every test fixture does
-// too, sessionSendLegacy can be deleted (#710).
-func (h *Hub) LegacySendInvokes() int64 {
-	// A nil receiver reads 0: package callers may probe a not-yet-built Hub
-	// through an interface, and R-LEGACY-SEND tooling depends on it.
-	if h == nil {
-		return 0
-	}
-	return h.engine.legacyInvokes.Load()
 }
 
 // sanitizeHexIDForBroadcast returns id unchanged when it matches the

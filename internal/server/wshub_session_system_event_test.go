@@ -52,7 +52,7 @@ func TestBroadcastSessionSystemEvent_ReachesSubscribers(t *testing.T) {
 	sub, subOut := newCapturedClient(t, hub)
 	registerSub(hub, sub, "feishu:p2p:alice")
 
-	hub.broadcastSessionSystemEvent("feishu:p2p:alice", "发送失败：remote down")
+	hub.bcast.broadcastSessionSystemEvent("feishu:p2p:alice", "发送失败：remote down")
 
 	msg, ok := recvMsg(t, subOut)
 	if !ok {
@@ -88,7 +88,7 @@ func TestBroadcastSessionSystemEvent_SkipsNonSubscribers(t *testing.T) {
 	other, otherOut := newCapturedClient(t, hub)
 	registerSub(hub, other, "feishu:p2p:bob")
 
-	hub.broadcastSessionSystemEvent("feishu:p2p:alice", "发送失败：remote down")
+	hub.bcast.broadcastSessionSystemEvent("feishu:p2p:alice", "发送失败：remote down")
 
 	recvNone(t, otherOut)
 }
@@ -104,7 +104,7 @@ func TestBroadcastSessionSystemEvent_NoSubscribersNoop(t *testing.T) {
 	c, out := newCapturedClient(t, hub)
 	registerSub(hub, c, "feishu:p2p:elsewhere")
 
-	hub.broadcastSessionSystemEvent("node1:p2p:unwatched", "发送失败：x")
+	hub.bcast.broadcastSessionSystemEvent("node1:p2p:unwatched", "发送失败：x")
 
 	recvNone(t, out)
 }
@@ -123,7 +123,7 @@ func TestBroadcastSessionSystemEvent_ZeroCountFastPath(t *testing.T) {
 	c, out := newCapturedClient(t, hub)
 	registerSub(hub, c, "feishu:p2p:elsewhere")
 
-	hub.broadcastSessionSystemEvent("feishu:p2p:zero", "发送失败：x")
+	hub.bcast.broadcastSessionSystemEvent("feishu:p2p:zero", "发送失败：x")
 
 	recvNone(t, out)
 }
@@ -145,7 +145,7 @@ func TestBroadcastSessionSystemEvent_MultipleSubscribers(t *testing.T) {
 	other, otherOut := newCapturedClient(t, hub)
 	registerSub(hub, other, "feishu:p2p:bob")
 
-	hub.broadcastSessionSystemEvent(key, "发送失败：remote down")
+	hub.bcast.broadcastSessionSystemEvent(key, "发送失败：remote down")
 
 	for i, out := range outs {
 		msg, ok := recvMsg(t, out)
@@ -211,7 +211,7 @@ func TestBroadcastSessionSystemEvent_ConcurrentChurn(t *testing.T) {
 			case <-done:
 				return
 			default:
-				hub.broadcastSessionSystemEvent(key, "发送失败：x")
+				hub.bcast.broadcastSessionSystemEvent(key, "发送失败：x")
 			}
 		}
 	}()
@@ -261,7 +261,7 @@ func TestBroadcastSessionSystemEvent_FullKeyAmongManyClients(t *testing.T) {
 		otherOuts = append(otherOuts, out)
 	}
 
-	hub.broadcastSessionSystemEvent(key, "发送失败：remote down")
+	hub.bcast.broadcastSessionSystemEvent(key, "发送失败：remote down")
 
 	for i, out := range outs {
 		msg, ok := recvMsg(t, out)
@@ -284,8 +284,8 @@ func TestBroadcastSessionSystemEvent_EmptyArgsNoop(t *testing.T) {
 	sub, subOut := newCapturedClient(t, hub)
 	registerSub(hub, sub, "feishu:p2p:alice")
 
-	hub.broadcastSessionSystemEvent("", "发送失败：x")
-	hub.broadcastSessionSystemEvent("feishu:p2p:alice", "")
+	hub.bcast.broadcastSessionSystemEvent("", "发送失败：x")
+	hub.bcast.broadcastSessionSystemEvent("feishu:p2p:alice", "")
 
 	recvNone(t, subOut)
 }

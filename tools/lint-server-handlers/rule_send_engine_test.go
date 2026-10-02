@@ -10,7 +10,7 @@ import (
 // sendEnginePkg is the set of files rule 3b-send reads. A "" value writes
 // nothing so a missing-file case can be exercised.
 type sendEnginePkg struct {
-	hub, engine, send, ownerLoop, handler string
+	hub, engine, send, ownerLoop, handler, bcast string
 }
 
 func writeSendEnginePkg(t *testing.T, p sendEnginePkg) string {
@@ -22,6 +22,7 @@ func writeSendEnginePkg(t *testing.T, p sendEnginePkg) string {
 		"send.go":            p.send,
 		"send_owner_loop.go": p.ownerLoop,
 		"dashboard_send.go":  p.handler,
+		"wshub_broadcast.go": p.bcast,
 	} {
 		if src == "" {
 			continue
@@ -72,8 +73,13 @@ func cleanPkg() sendEnginePkg {
 		send:      "package server\nfunc (e *sendEngine) sessionSendLegacy() {}\n",
 		ownerLoop: "package server\nfunc (e *sendEngine) ownerLoop() {}\n",
 		handler:   handlerOK,
+		bcast:     bcastOK,
 	}
 }
+
+// bcastOK is the broadcaster with no way back to the Hub: recipients and its
+// own debouncer only.
+const bcastOK = "package server\ntype wsBroadcaster struct {\n\trecipients *subscriberRegistry\n\tdebounce *debouncer\n}\nfunc (b *wsBroadcaster) broadcastState(key, state, reason string) {}\n"
 
 func msgs(vs []Violation) string {
 	var b strings.Builder
@@ -108,6 +114,32 @@ func TestSendEngineOwnership_FlagsHubFieldOnEngine(t *testing.T) {
 	}
 	if vs[0].Line == 0 {
 		t.Errorf("field violation has no line number: %+v", vs[0])
+	}
+}
+
+// TestSendEngineOwnership_FlagsHubFieldOnBroadcaster is check A for the
+// engine's notifier: a broadcaster holding a *Hub would rebuild the
+// engine → notifier → Hub cycle the sibling split removes (#2897 S5).
+func TestSendEngineOwnership_FlagsHubFieldOnBroadcaster(t *testing.T) {
+	p := cleanPkg()
+	p.bcast = "package server\ntype wsBroadcaster struct {\n\trecipients *subscriberRegistry\n\thub *Hub\n}\n"
+	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
+	if len(vs) != 1 || !strings.Contains(vs[0].Message, `wsBroadcaster declares field "hub" of type *Hub`) {
+		t.Fatalf("want 1 wsBroadcaster *Hub-field violation, got %d:\n%s", len(vs), msgs(vs))
+	}
+	if vs[0].Line == 0 {
+		t.Errorf("field violation has no line number: %+v", vs[0])
+	}
+}
+
+// TestSendEngineOwnership_FlagsMissingBroadcaster: dropping or renaming the
+// broadcaster must be loud, not a check A that silently covers one type less.
+func TestSendEngineOwnership_FlagsMissingBroadcaster(t *testing.T) {
+	p := cleanPkg()
+	p.bcast = ""
+	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
+	if len(vs) != 1 || !strings.Contains(vs[0].Message, "type wsBroadcaster not found") {
+		t.Fatalf("want a single 'wsBroadcaster not found' violation, got %d:\n%s", len(vs), msgs(vs))
 	}
 }
 
