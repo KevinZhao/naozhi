@@ -25,37 +25,11 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	// started (not created) in registerDashboard against appCtx.
 	s.uploadStore = newUploadStore()
 
-	s.hub = NewHub(HubOptions{
-		Router:    s.router,
-		Agents:    hs.wiring.agents,
-		DashToken: s.dashboardToken,
-		// Live getter, not a snapshot: RotateCookieGen must invalidate WS
-		// upgrades on the next handshake (#1398).
-		CookieMACFn:      s.auth.CookieMAC,
-		Guard:            hs.wiring.sessionGuard,
-		Queue:            hs.wiring.msgQueue,
-		Nodes:            s.nodes,
-		ProjectMgr:       s.projectMgr,
-		Resolver:         hs.wiring.resolver,
-		Scheduler:        hs.wiring.scheduler,
-		ScratchPool:      s.scratchPool,
-		AllowedRoot:      hs.wiring.allowedRoot,
-		TrustedProxy:     s.auth.TrustedProxy,
-		WSAuthLimiter:    s.auth.LoginAllow,
-		WSUpgradeLimiter: s.auth.WSUpgradeAllow,
-		// HandleUpgrade mints nz_anon for uploadOwner and refuses the
-		// upgrade if minting fails; never falls back to clientIP (#1326).
-		Auth:        s.auth,
-		UploadStore: s.uploadStore,
-		// appCtx is created in buildServer, so the Hub is parented from birth;
-		// there is no longer a window where it runs under a Background fallback
-		// until Start replaces it.
-		ParentCtx: s.appCtx,
-	})
+	s.hub = s.buildWSStack(hs.wiring)
 
 	hs.sendH = &SendHandler{
 		nodeAccess:    s.nodes,
-		engine:        s.hub.engine,
+		engine:        hs.wiring.engine,
 		uploadStore:   s.uploadStore,
 		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.TrustedProxy), // 10 uploads/min per IP
 		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.TrustedProxy), // 30 sends/min per IP (burst 30)
@@ -68,7 +42,7 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	// goroutine starts in registerDashboard.
 	if s.scratchPool != nil {
 		hs.scratchH = scratch.New(scratch.Deps{
-			Broadcaster: s.hub,
+			Broadcaster: hs.wiring.bcast,
 			Router:      scratchRouter{s.hub.router},
 			Pool:        s.scratchPool,
 			OpenLimit:   newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy),
@@ -91,12 +65,56 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	// and the Hub binds to it here — at construction time, so no request can
 	// be served by a Hub the router does not yet reach.
 	if hs.wiring.routerEvents != nil {
-		hs.wiring.routerEvents.BindSessionsChanged(s.hub.BroadcastSessionsUpdate)
+		hs.wiring.routerEvents.BindSessionsChanged(hs.wiring.bcast.BroadcastSessionsUpdate)
 	}
 
 	// cron and sysession share one relay, built in main.go before the Hub;
 	// per-subsystem WS payload selection happens inside hubBroadcaster.
 	if hs.wiring.runTelemetry != nil {
-		hs.wiring.runTelemetry.Bind(newHubBroadcaster(s.hub))
+		hs.wiring.runTelemetry.Bind(newHubBroadcaster(hs.wiring.bcast))
 	}
+}
+
+// buildWSStack builds the WebSocket stack as three siblings in dependency
+// order: the broadcaster (owns the subscriber registry), the send engine
+// (notifies the broadcaster) and the Hub (uses both). w keeps the engine and
+// the broadcaster for the other build steps, so nothing reaches them back
+// through the Hub.
+func (s *Server) buildWSStack(w *wiring) *Hub {
+	w.bcast = newWSBroadcaster(newSubscriberRegistry())
+	w.engine = newSendEngine(sendEngineOpts{
+		Queue:       w.msgQueue,
+		Guard:       w.sessionGuard,
+		Ctx:         s.appCtx,
+		Router:      s.router,
+		Resolver:    w.resolver,
+		Agents:      w.agents,
+		ProjectMgr:  s.projectMgr,
+		ScratchPool: s.scratchPool,
+		Scheduler:   w.scheduler,
+		AllowedRoot: w.allowedRoot,
+		Notify:      w.bcast,
+	})
+	return NewHub(HubOptions{
+		Router:    s.router,
+		DashToken: s.dashboardToken,
+		// Live getter, not a snapshot: RotateCookieGen must invalidate WS
+		// upgrades on the next handshake (#1398).
+		CookieMACFn:      s.auth.CookieMAC,
+		Nodes:            s.nodes,
+		Resolver:         w.resolver,
+		Scheduler:        w.scheduler,
+		AllowedRoot:      w.allowedRoot,
+		TrustedProxy:     s.auth.TrustedProxy,
+		WSAuthLimiter:    s.auth.LoginAllow,
+		WSUpgradeLimiter: s.auth.WSUpgradeAllow,
+		// HandleUpgrade mints nz_anon for uploadOwner and refuses the
+		// upgrade if minting fails; never falls back to clientIP (#1326).
+		Auth:        s.auth,
+		UploadStore: s.uploadStore,
+		// appCtx is created in buildServer, so the Hub is parented from birth.
+		ParentCtx:   s.appCtx,
+		Engine:      w.engine,
+		Broadcaster: w.bcast,
+	})
 }

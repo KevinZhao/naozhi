@@ -4,29 +4,31 @@ import (
 	"context"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/dispatch"
-	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// newHubForTest is the one place tests call NewHub. Hub dependencies go in
-// opts and the engine-only ones (Guard, Queue, Agents, ProjectMgr,
-// ScratchPool) in eo. Router, Resolver, Scheduler and AllowedRoot are shared
-// and come from opts; Ctx and Notify are derived from the Hub. Today the body
-// copies eo into HubOptions and calls NewHub, so behaviour is unchanged; when
-// the composition root builds the engine as a sibling, only this body moves.
+// newHubForTest is the one place tests call NewHub, and it builds the stack
+// the way buildWSStack does: a broadcaster over a fresh registry, an engine
+// that notifies it, and a Hub over both. Hub dependencies go in opts and the
+// engine-only ones (Guard, Queue, Agents, ProjectMgr, ScratchPool) in eo.
+// Router, Resolver, Scheduler and AllowedRoot are shared and come from opts;
+// Ctx and Notify are derived here, and so are opts.Engine and opts.Broadcaster.
 func newHubForTest(opts HubOptions, eo sendEngineOpts) *Hub {
-	if opts.Guard != nil || opts.Queue != nil || opts.Agents != nil || opts.ProjectMgr != nil || opts.ScratchPool != nil {
-		panic("newHubForTest: engine-only dependencies belong in eo, not opts")
+	if opts.Engine != nil || opts.Broadcaster != nil {
+		panic("newHubForTest: the port builds Engine and Broadcaster; leave them unset in opts")
 	}
 	if eo.Router != nil || eo.Resolver != nil || eo.Scheduler != nil || eo.AllowedRoot != "" || eo.Ctx != nil || eo.Notify != nil {
 		panic("newHubForTest: shared and Hub-derived dependencies come from opts; leave them unset in eo")
 	}
-	opts.Guard = eo.Guard
-	opts.Queue = eo.Queue
-	opts.Agents = eo.Agents
-	opts.ProjectMgr = eo.ProjectMgr
-	opts.ScratchPool = eo.ScratchPool
+	bcast := newWSBroadcaster(newSubscriberRegistry())
+	eo.Router = opts.Router
+	eo.Resolver = opts.Resolver
+	eo.Scheduler = opts.Scheduler
+	eo.AllowedRoot = opts.AllowedRoot
+	eo.Ctx = opts.ParentCtx
+	eo.Notify = bcast
+	opts.Engine = newSendEngine(eo)
+	opts.Broadcaster = bcast
 	return NewHub(opts)
 }
 
@@ -35,18 +37,16 @@ func newHubForTest(opts HubOptions, eo sendEngineOpts) *Hub {
 // overwritten here, so the port refuses it instead.
 func TestNewHubForTest_RejectsMisplacedDeps(t *testing.T) {
 	t.Parallel()
-	// One case per refused field: five engine-only fields in opts, six shared
-	// or Hub-derived fields in eo. Dropping any one check from the port fails
-	// exactly one case.
+	// One case per refused field: the two siblings the port builds itself in
+	// opts (the engine-only fields no longer exist on HubOptions, so the
+	// compiler refuses those), six shared or Hub-derived fields in eo.
+	// Dropping any one check from the port fails exactly one case.
 	cases := map[string]struct {
 		opts HubOptions
 		eo   sendEngineOpts
 	}{
-		"guard in opts":       {opts: HubOptions{Guard: session.NewGuard()}},
-		"queue in opts":       {opts: HubOptions{Queue: &dispatch.MessageQueue{}}},
-		"agents in opts":      {opts: HubOptions{Agents: map[string]session.AgentOpts{}}},
-		"projectMgr in opts":  {opts: HubOptions{ProjectMgr: &project.Manager{}}},
-		"scratchPool in opts": {opts: HubOptions{ScratchPool: &session.ScratchPool{}}},
+		"engine in opts":      {opts: HubOptions{Engine: newSendEngine(sendEngineOpts{})}},
+		"broadcaster in opts": {opts: HubOptions{Broadcaster: newWSBroadcaster(newSubscriberRegistry())}},
 		"router in eo":        {eo: sendEngineOpts{Router: &session.Router{}}},
 		"resolver in eo":      {eo: sendEngineOpts{Resolver: &session.KeyResolver{}}},
 		"scheduler in eo":     {eo: sendEngineOpts{Scheduler: fakeCronSessions{}}},

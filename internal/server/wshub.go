@@ -9,10 +9,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
-	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
-	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -20,8 +17,9 @@ import (
 // state lives in sub-objects that own their locks and fields: subs (who is
 // connected, authenticated and subscribed), admit (connection caps, rate
 // limits, credentials), engine (the send pipeline), bcast (frame fan-out and
-// sessions_update coalescing) and tailers (agent JSONL tailing). The Hub
-// wires them together and orders their teardown in Shutdown.
+// sessions_update coalescing) and tailers (agent JSONL tailing). engine and
+// bcast are siblings buildWSStack builds and hands in; the Hub uses them and
+// orders the teardown of all of them in Shutdown.
 type Hub struct {
 	// subs is who is connected, authenticated and subscribed to what.
 	subs *subscriberRegistry
@@ -33,7 +31,8 @@ type Hub struct {
 	// router is the HubRouter consumer subset (consumer.go) so tests can
 	// inject a fake.
 	router HubRouter
-	// engine owns the send pipeline; SendHandler holds the same instance.
+	// engine is the send pipeline; SendHandler and serverCaps hold the same
+	// instance, all three taken from buildWSStack's wiring.
 	// Named engine, not send, because wsClient already has a `send` channel
 	// and h.send / c.send would read alike.
 	engine *sendEngine
@@ -47,7 +46,7 @@ type Hub struct {
 	// and first-prompt auto-save. Nil keeps both dormant.
 	scheduler   CronView
 	uploadStore *uploadStore    // optional, for resolving WS-sent file_ids
-	ctx         context.Context // cancelled on Shutdown to stop in-flight sends
+	ctx         context.Context // cancelled on Shutdown to stop push loops and WS remote proxies
 	cancel      context.CancelFunc
 
 	// resubscribeInterval is how often a push loop whose process went away
@@ -79,7 +78,6 @@ type Hub struct {
 // HubOptions holds configuration for a Hub.
 type HubOptions struct {
 	Router    *session.Router
-	Agents    map[string]session.AgentOpts
 	DashToken string
 	// CookieMAC is a static auth-cookie HMAC for tests without AuthHandlers.
 	CookieMAC string
@@ -87,20 +85,15 @@ type HubOptions struct {
 	// upgrade reads the live auth.CookieMAC() and cookie rotation is not
 	// bypassed via WS (#1398).
 	CookieMACFn func() string
-	Guard       *session.Guard
-	Queue       *dispatch.MessageQueue
 	// Nodes is the Server-owned node registry. Nil (bare test Hubs) gets a
 	// private empty registry so every nodes access stays nil-safe.
-	Nodes      *nodeRegistry
-	ProjectMgr *project.Manager
+	Nodes *nodeRegistry
 	// Resolver, when non-nil, gives WS subscribe/send the same planner-binding
 	// precedence as IM dispatch; nil falls back to the inline merge.
 	Resolver *session.KeyResolver
 	// Scheduler is the optional CronView hook; nil keeps stub revival and
 	// prompt auto-save dormant.
-	Scheduler CronView
-	// ScratchPool resolves AgentOpts for ephemeral scratch keys.
-	ScratchPool      *session.ScratchPool
+	Scheduler        CronView
 	AllowedRoot      string
 	TrustedProxy     bool
 	WSAuthLimiter    func(ip string) bool
@@ -116,12 +109,21 @@ type HubOptions struct {
 	// earlier in buildServer, so there is no window where a Hub is serving
 	// upgrades with an unwired store.
 	UploadStore *uploadStore
+	// Engine and Broadcaster are the siblings buildWSStack builds first; the
+	// engine notifies Broadcaster, and the Hub shares its recipients. Both
+	// are required: NewHub panics on either being nil.
+	Engine      *sendEngine
+	Broadcaster *wsBroadcaster
 }
 
-// NewHub creates a new WebSocket hub. h.ctx derives from opts.ParentCtx (Background when nil) so a parent
-// cancel reaches Hub goroutines even without Shutdown(); CancelFunc is
-// idempotent so both paths compose.
+// NewHub creates a new WebSocket hub around the engine and broadcaster
+// buildWSStack built. h.ctx derives from opts.ParentCtx (Background when nil)
+// so a parent cancel reaches Hub goroutines even without Shutdown();
+// CancelFunc is idempotent so both paths compose.
 func NewHub(opts HubOptions) *Hub {
+	if opts.Engine == nil || opts.Broadcaster == nil {
+		panic("server: NewHub needs the Engine and Broadcaster buildWSStack builds")
+	}
 	parent := opts.ParentCtx
 	if parent == nil {
 		parent = context.Background()
@@ -132,8 +134,10 @@ func NewHub(opts HubOptions) *Hub {
 		nodes = newNodeRegistry(nil)
 	}
 	h := &Hub{
-		subs:        newSubscriberRegistry(),
+		subs:        opts.Broadcaster.recipients,
 		router:      opts.Router,
+		engine:      opts.Engine,
+		bcast:       opts.Broadcaster,
 		nodes:       nodes,
 		resolver:    opts.Resolver,
 		scheduler:   opts.Scheduler,
@@ -146,23 +150,6 @@ func NewHub(opts HubOptions) *Hub {
 	}
 	h.tailers = newTailerRegistry(opts.AllowedRoot)
 	h.historyMarshalCache = newHistoryMarshalCache()
-	h.bcast = newWSBroadcaster(h.subs)
-	// Built last: the engine notifies h.bcast, never h, and keeps its own
-	// reference to each shared dependency (see sendEngine's INVARIANT note)
-	// rather than a *Hub back-pointer.
-	h.engine = newSendEngine(sendEngineOpts{
-		Queue:       opts.Queue,
-		Guard:       opts.Guard,
-		Ctx:         ctx,
-		Router:      opts.Router,
-		Resolver:    opts.Resolver,
-		Agents:      opts.Agents,
-		ProjectMgr:  opts.ProjectMgr,
-		ScratchPool: opts.ScratchPool,
-		Scheduler:   opts.Scheduler,
-		AllowedRoot: opts.AllowedRoot,
-		Notify:      h.bcast,
-	})
 	return h
 }
 
@@ -171,16 +158,6 @@ func NewHub(opts HubOptions) *Hub {
 func (h *Hub) DroppedMessages() int64 {
 	return h.droppedTotal.Load()
 }
-
-// BroadcastSessionsUpdate, BroadcastRunStarted and BroadcastRunEnded forward
-// to bcast for the producers the composition root still wires to the Hub.
-func (h *Hub) BroadcastSessionsUpdate() { h.bcast.BroadcastSessionsUpdate() }
-
-// BroadcastRunStarted forwards to bcast.
-func (h *Hub) BroadcastRunStarted(ev runtelemetry.RunStartedEvent) { h.bcast.BroadcastRunStarted(ev) }
-
-// BroadcastRunEnded forwards to bcast.
-func (h *Hub) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) { h.bcast.BroadcastRunEnded(ev) }
 
 func (h *Hub) register(c *wsClient) {
 	h.subs.add(c)
@@ -270,7 +247,7 @@ var unregisterNodesPool = sync.Pool{
 // while holding subMu. Breaking this is an ABBA deadlock that surfaces as systemd
 // TimeoutStopSec + SIGKILL (shutdown_lock_order_test.go).
 func (h *Hub) Shutdown() {
-	h.cancel() // cancel in-flight send goroutines
+	h.cancel() // stop push loops and WS remote proxies; drain cancels the engine's own ctx
 
 	// Before the clients go: no sessions_update fire may open past the
 	// bcast.wait below, and a window that never fired gives its slot back here.

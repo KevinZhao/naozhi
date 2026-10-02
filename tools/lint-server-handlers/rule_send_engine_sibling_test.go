@@ -88,6 +88,10 @@ type Hub struct {
 	engine *sendEngine
 }
 
+type HubOptions struct {
+	Engine *sendEngine
+}
+
 func NewHub(opts HubOptions) *Hub {
 	return &Hub{engine: opts.Engine}
 }
@@ -99,6 +103,7 @@ func (h *Hub) Shutdown() {
 		"build_dashboard.go": `package server
 
 func (s *Server) buildWSStack(w *wiring) *Hub {
+	w.bcast = newWSBroadcaster(newSubscriberRegistry())
 	e := newSendEngine(sendEngineOpts{})
 	w.engine = e
 	return NewHub(HubOptions{Engine: e})
@@ -181,6 +186,19 @@ func rogueCaller(s *Server, w *wiring) {
 	fset, files = parseSiblingPkg(t, withRogueCaller)
 	if vs := scanSiblingCtorPoints(fset, files); len(vs) != 1 {
 		t.Fatalf("m6 buildWSStack called outside buildDashboard: want 1, got %d: %+v", len(vs), vs)
+	}
+
+	// m6b: a build step hands a producer its own broadcaster over its own
+	// registry. Two more disallowed call sites.
+	withStrayBcast := withExtra(siblingCleanPkg(), "stray_extra.go", `package server
+
+func (s *Server) buildScratch(hs *handlerSet) {
+	_ = newWSBroadcaster(newSubscriberRegistry())
+}
+`)
+	fset, files = parseSiblingPkg(t, withStrayBcast)
+	if vs := scanSiblingCtorPoints(fset, files); len(vs) != 2 {
+		t.Fatalf("m6b stray broadcaster + registry outside buildWSStack: want 2, got %d: %+v", len(vs), vs)
 	}
 }
 
@@ -277,7 +295,7 @@ func TestScanSiblingHolderWhitelist(t *testing.T) {
 	t.Parallel()
 	fset, files := parseSiblingPkg(t, siblingCleanPkg())
 	if vs := scanSiblingHolderWhitelist(fset, files); len(vs) != 0 {
-		t.Fatalf("clean (Hub.engine, wiring.engine, serverCaps.send all whitelisted): want 0, got %d: %+v", len(vs), vs)
+		t.Fatalf("clean (Hub.engine, HubOptions.Engine, wiring.engine, serverCaps.send all whitelisted): want 0, got %d: %+v", len(vs), vs)
 	}
 
 	// m7: a new struct holds *sendEngine.
@@ -451,6 +469,6 @@ func TestRatchetViolation(t *testing.T) {
 func TestScanSendEngineSibling_RealPackage(t *testing.T) {
 	t.Parallel()
 	if vs := scanSendEngineSibling("../../internal/server"); len(vs) != 0 {
-		t.Errorf("internal/server should sit exactly at today's baselines (#2897 S5a): %+v", vs)
+		t.Errorf("internal/server should sit exactly at today's baselines: %+v", vs)
 	}
 }

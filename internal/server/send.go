@@ -24,7 +24,7 @@ import (
 )
 
 // sendWithBroadcast wraps sess.Send with dashboard state broadcasts ("running"
-// before, session snapshot after); Server.sendWithBroadcast delegates here.
+// before, session snapshot after); serverCaps.Send delegates here.
 // sess must be non-nil; callers must check the error from GetOrCreate first.
 func (e *sendEngine) sendWithBroadcast(
 	ctx context.Context,
@@ -90,27 +90,6 @@ func usePassthrough(ctx context.Context, sess *session.ManagedSession) bool {
 		return false
 	}
 	return dispatch.IsPassthrough(ctx)
-}
-
-// sendWithBroadcast is the IM / cron entry into the send engine: the Hub is
-// non-nil for the Server's whole life (buildDashboard, #2552), so this is a
-// plain delegate. It used to branch on a Headless flag for hub-less Servers
-// (#379); no constructor path has been able to produce one since #2552, so the
-// flag, the nil-hub fallback and its fail-loud panic were removed (#2634).
-//
-// sess must be non-nil; callers must check the error from GetOrCreate first.
-func (s *Server) sendWithBroadcast(
-	ctx context.Context,
-	key string,
-	sess *session.ManagedSession,
-	text string,
-	images []clievent.Attachment,
-	onEvent clievent.EventCallback,
-) (*clievent.SendResult, error) {
-	if sess == nil {
-		return nil, fmt.Errorf("sendWithBroadcast: session is nil")
-	}
-	return s.hub.engine.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
 }
 
 // sendParams holds parsed input for a session send request (HTTP and WebSocket).

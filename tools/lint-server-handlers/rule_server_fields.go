@@ -27,10 +27,10 @@ import (
 // serverFieldBaseline is Server's field count.
 const serverFieldBaseline = 25
 
-// hubOptionsFieldBaseline is HubOptions's field count (#2897 S5a drops the
-// dead AgentCmds; S5c2 later drops the five fields only sendEngineOpts reads
-// and adds Engine/Broadcaster).
-const hubOptionsFieldBaseline = 19
+// hubOptionsFieldBaseline is HubOptions's field count (#2897 S5a dropped the
+// dead AgentCmds; S5c2 dropped the five fields only sendEngineOpts reads and
+// added Engine/Broadcaster).
+const hubOptionsFieldBaseline = 16
 
 // sendEngineOptsFieldBaseline is sendEngineOpts's field count.
 const sendEngineOptsFieldBaseline = 11

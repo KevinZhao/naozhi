@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -135,11 +137,13 @@ func TestSendEngine_NotifyNeverNil(t *testing.T) {
 }
 
 // TestNewHub_SharesDependenciesWithEngine is the twin of
-// hub_shared_state_test.go's nodes-registry assertion. The engine keeps its own
-// reference to each shared dependency instead of a *Hub back-pointer (RFC
-// §2.1), which is only safe while both sides point at the SAME instance —
-// otherwise a value the Hub path observes and one the send path observes can
-// drift, and the bug shows up as "the send used the wrong workspace/profile".
+// hub_shared_state_test.go's nodes-registry assertion, for the Hubs tests
+// build through newHubForTest. The engine keeps its own reference to each
+// shared dependency instead of a *Hub back-pointer (RFC §2.1), which is only
+// safe while both sides point at the SAME instance — otherwise a value the Hub
+// path observes and one the send path observes can drift, and the bug shows
+// up as "the send used the wrong workspace/profile". The production stack is
+// TestBuildServer_SharesOneWSStack's.
 func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
@@ -178,13 +182,6 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	}
 	if hub.engine.notify != sendNotifier(hub.bcast) {
 		t.Error("engine.notify is not the Hub's broadcaster — send-path session_state / send_error frames would reach a different client set")
-	}
-	// drain's precondition 1 ("h.cancel() has been called") only shortens
-	// wg.Wait if the goroutines it waits for were started under the SAME ctx
-	// the Hub cancels. A fresh context here would make remoteSend's 60s cap
-	// the effective shutdown bound (#2632).
-	if hub.engine.ctx != hub.ctx {
-		t.Error("engine.ctx is not the Hub's ctx — Hub.Shutdown's cancel would not reach in-flight remote sends")
 	}
 	// The send-block fields must be gone from Hub: the whole point of #2551.
 	// Enforced structurally by the build (they no longer exist), so this only
@@ -252,5 +249,128 @@ func TestSendEngine_NotifyAfterDrainDoesNotArmPending(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("bcast.wait / clientWG.Wait did not return after post-Shutdown notify calls — a post-drain Add leaked")
+	}
+}
+
+// TestBuildServer_SharesOneWSStack pins buildWSStack's one-of-each: the
+// dispatcher's engine (wiring), the dashboard's (SendHandler) and the Hub's
+// are one instance; it notifies wiring.bcast, which is the Hub's broadcaster
+// and fans out to the Hub's own registry; and every dependency the engine and
+// the Hub both read, or that the engine takes from wiring, is the instance
+// buildServer made. The Hub and the engine get them from two separate
+// literals, so each one is non-nil here: nil == nil would pass a dropped
+// field. A second broadcaster or registry anywhere compiles and runs — frames
+// just stop reaching the clients the Hub admitted.
+func TestBuildServer_SharesOneWSStack(t *testing.T) {
+	t.Parallel()
+	router := session.NewRouter(session.RouterConfig{})
+	sched := cron.NewScheduler(cron.SchedulerConfig{MaxJobs: 1, AllowNilRouter: true}, cron.SchedulerDeps{})
+	projects, err := project.NewManager(t.TempDir(), project.PlannerDefaults{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := map[string]session.AgentOpts{"a": {}}
+	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude",
+		Scheduler: sched, ProjectManager: projects, Agents: agents, AllowedRoot: t.TempDir()})
+	t.Cleanup(srv.appCancel)
+	hub, w := srv.hub, hs.wiring
+
+	if w.engine == nil || w.bcast == nil {
+		t.Fatal("buildWSStack left wiring.engine / wiring.bcast unset")
+	}
+	if hub.engine != w.engine || hs.sendH.engine != w.engine {
+		t.Error("Hub, SendHandler and wiring do not share one engine")
+	}
+	if hub.bcast != w.bcast {
+		t.Error("the Hub's broadcaster is not wiring.bcast — construction-time producers would broadcast to a different client set")
+	}
+	if w.engine.notify != sendNotifier(w.bcast) {
+		t.Error("engine.notify is not wiring.bcast — send-path session_state / send_error frames would reach a different client set")
+	}
+	if hub.subs != w.bcast.recipients {
+		t.Error("hub.subs is not bcast.recipients — broadcasts would go to a registry no client ever joins")
+	}
+	if w.engine.router != sendEngineRouter(router) || hub.router != HubRouter(router) {
+		t.Error("engine and Hub do not share the Server's router")
+	}
+	if w.engine.resolver == nil || w.engine.resolver != hub.resolver {
+		t.Error("engine and Hub do not share the resolver")
+	}
+	if w.engine.allowedRoot == "" || w.engine.allowedRoot != hub.tailers.allowedRoot {
+		t.Errorf("engine.allowedRoot = %q, tailers.allowedRoot = %q", w.engine.allowedRoot, hub.tailers.allowedRoot)
+	}
+	if w.engine.scheduler != CronView(sched) || hub.scheduler != CronView(sched) {
+		t.Error("engine and Hub do not share the Scheduler — cron prompt auto-save and stub revival would stop on the send path")
+	}
+	if w.engine.queue != MessageEnqueuer(w.msgQueue) || w.engine.guard != w.sessionGuard {
+		t.Error("engine.queue / engine.guard are not the dispatcher's — IM and dashboard sends would serialise on different queues / locks")
+	}
+	if w.engine.projectMgr != projects {
+		t.Error("engine.projectMgr is not the Server's project manager")
+	}
+	if reflect.ValueOf(w.engine.agents).UnsafePointer() != reflect.ValueOf(agents).UnsafePointer() {
+		t.Error("engine.agents is not the agent map buildServer was given")
+	}
+	// The engine's ctx is its own child of appCtx: a SIGTERM (appCancel)
+	// still reaches in-flight engine sends without Hub.Shutdown.
+	srv.appCancel()
+	select {
+	case <-w.engine.ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelling appCtx did not cancel the engine's ctx")
+	}
+}
+
+// TestSendEngine_DrainCancelsOwnCtx replaces the "engine.ctx == hub.ctx"
+// contract: drain cancels the engine's own ctx before it waits, so a tracked
+// goroutine blocked on e.ctx (remoteSend's RPC, ownerLoop's collect wait)
+// returns at once instead of after its timeout — and the parent is untouched.
+func TestSendEngine_DrainCancelsOwnCtx(t *testing.T) {
+	t.Parallel()
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	e := newSendEngineForTest(sendEngineOpts{Ctx: parent})
+
+	release, shuttingDown := e.TrackSend()
+	if shuttingDown {
+		t.Fatal("fresh engine: TrackSend reported shuttingDown")
+	}
+	go func() {
+		defer release()
+		<-e.ctx.Done()
+	}()
+	drained := make(chan struct{})
+	go func() {
+		e.drain()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain did not return within 2s: it waited on a goroutine blocked on e.ctx without cancelling it")
+	}
+	if parent.Err() != nil {
+		t.Error("drain cancelled the parent ctx; it may cancel only the engine's own")
+	}
+}
+
+// TestNewHub_RequiresEngine pins NewHub's construction-time refusal: a Hub
+// that built its own engine or broadcaster as a fallback would be a second
+// send pipeline / client set that buildWSStack's siblings never see.
+func TestNewHub_RequiresEngine(t *testing.T) {
+	t.Parallel()
+	for name, opts := range map[string]HubOptions{
+		"neither":        {},
+		"no engine":      {Broadcaster: newWSBroadcaster(newSubscriberRegistry())},
+		"no broadcaster": {Engine: newSendEngineForTest(sendEngineOpts{})},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: NewHub accepted it", name)
+				}
+			}()
+			NewHub(opts)
+		}()
 	}
 }

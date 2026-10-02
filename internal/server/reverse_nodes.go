@@ -23,6 +23,6 @@ func (s *Server) attachReverseNodeServer(rs *node.ReverseServer) {
 		s.nodes.Remove(id)
 		s.nodeCache.PurgeNode(id)
 		s.hub.PurgeNodeSubscriptions(id)
-		s.hub.BroadcastSessionsUpdate()
+		s.hub.bcast.BroadcastSessionsUpdate()
 	}
 }

@@ -146,7 +146,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// Start links its own ctx into appCancel rather than minting a second one.
 	s.appCtx, s.appCancel = context.WithCancel(context.Background())
 
-	// Scratch pool ahead of the Hub: HubOptions.ScratchPool needs it and it
+	// Scratch pool ahead of the Hub: the send engine needs it and it
 	// only depends on the router. The "scratch:" prefix keeps entries off the
 	// sidebar and out of sessions.json; the sweeper goroutine starts in
 	// registerDashboard so an early failure does not leak the ticker.
@@ -168,12 +168,12 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		func() map[string]node.Conn {
 			return s.nodes.NodesSnapshot()
 		},
-		s.hub.BroadcastSessionsUpdate,
+		w.bcast.BroadcastSessionsUpdate,
 	)
 
 	s.discoveryCache = newDiscoveryCache(claudeDir, s.router.ManagedExcludeSets, opts.ProjectManager)
 
-	hs.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, s.hub.BroadcastSessionsUpdate, s.appCtx)
+	hs.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, w.bcast.BroadcastSessionsUpdate, s.appCtx)
 	hs.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache, s.hub.ctx)
 	agentIDs := agentIDList(agents)
 	hs.costH = buildCostHandlers(opts, router)

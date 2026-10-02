@@ -53,13 +53,15 @@ type sendEngine struct {
 	// legacyInvokes counts sessionSend falls-through to sessionSendLegacy
 	// (nil queue); production steady state must read zero (#710).
 	legacyInvokes atomic.Int64
+	// ctx is the engine's own child of sendEngineOpts.Ctx; drain cancels it.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// ── shared dependencies ──
 	// INVARIANT: read-only after construction. Hub keeps its own reference to
 	// each of these because the subscribe / broadcast / eventpush paths use
 	// them too; both sides must point at the same instance
 	// (send_engine_contract_test.go). Deduplicating them is Epic K (#2549).
-	ctx         context.Context // cancelled by Hub.Shutdown to stop in-flight sends
 	router      sendEngineRouter
 	resolver    *session.KeyResolver
 	agents      map[string]session.AgentOpts
@@ -75,7 +77,7 @@ type sendEngine struct {
 	notify sendNotifier
 }
 
-// sendEngineOpts mirrors the subset of HubOptions the engine needs. Kept as a
+// sendEngineOpts is what buildWSStack hands newSendEngine. Kept as a
 // struct (not positional args) so a new dependency is a compile-time addition
 // at one call site rather than a silently-zero field.
 type sendEngineOpts struct {
@@ -100,16 +102,18 @@ type sendEngineOpts struct {
 }
 
 // newSendEngine is the only constructor. It does not reject a nil Router:
-// hand-rolled test hubs go through NewHub(HubOptions{}) with no Router, and
-// their send paths fail at GetOrCreate exactly as they do today. What it does
-// guarantee is that ctx and notify are usable, because both have failure modes
-// that are silent or fatal rather than a plain error.
+// test hubs built through newHubForTest with no Router fail their send paths
+// at GetOrCreate. What it does guarantee is that ctx and notify are usable,
+// because both have failure modes that are silent or fatal rather than a
+// plain error. The engine's ctx is its own child of o.Ctx, so drain can cancel
+// it without reaching into whoever owns the parent.
 func newSendEngine(o sendEngineOpts) *sendEngine {
 	if o.Ctx == nil {
 		// Mirrors NewHub's ParentCtx handling. context.WithTimeout(nil, …)
 		// panics, and the remote-proxy call site is a detached goroutine.
 		o.Ctx = context.Background()
 	}
+	ctx, cancel := context.WithCancel(o.Ctx)
 	notify := o.Notify
 	// Typed-nil unwrap, same hazard as queue below: a nil *wsBroadcaster boxed
 	// into the interface reads non-nil, so the guard looks at the concrete type.
@@ -121,7 +125,8 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 	}
 	e := &sendEngine{
 		guard:       o.Guard,
-		ctx:         o.Ctx,
+		ctx:         ctx,
+		cancel:      cancel,
 		router:      o.Router,
 		resolver:    o.Resolver,
 		agents:      o.Agents,
@@ -155,23 +160,26 @@ func (e *sendEngine) TrackSend() (release func(), shuttingDown bool) {
 	return e.wg.Done, false
 }
 
-// drain closes the send admission window and waits for the goroutines
-// registered through TrackSend. Idempotent: closed is a monotonic bool under
-// trackMu and WaitGroup.Wait tolerates concurrent callers.
+// drain cancels the engine's ctx, closes the send admission window and waits
+// for the goroutines registered through TrackSend. Idempotent: cancel is,
+// closed is a monotonic bool under trackMu, and WaitGroup.Wait tolerates
+// concurrent callers.
 //
 // Barrier semantics: a racing TrackSend lands on one side of the closed store;
 // afterwards nobody Adds, so wg.Wait cannot be escaped.
 //
-// It does NOT cover Server.sendWithBroadcast (send.go) — the IM / cron entry is
-// a synchronous call that never registers on wg.
+// It does NOT cover serverCaps.Send (send_dispatch_adapter.go) — the IM / cron
+// entry is a synchronous call that never registers on wg.
 //
 // CALL-SITE PRECONDITIONS (all three are hard; violating one either hangs
 // Shutdown forever or lets a broadcast run past it, and -race cannot see
 // either because neither is a data race):
 //
-//  1. h.cancel() has been called. Otherwise wg.Wait blocks for the full
-//     remote-RPC timeout (60s in dashboard_send.go, remoteNodeProxyTimeout for
-//     the WS path) instead of returning as soon as ctx is cancelled.
+//  1. The caller's own ctx is cancelled (h.cancel() for the Hub's WS remote
+//     proxies, which TrackSend under h.ctx). drain cancels e.ctx itself, which
+//     covers the engine's goroutines; a tracked goroutine under an uncancelled
+//     ctx makes wg.Wait block for the full remote-RPC timeout
+//     (remoteNodeProxyTimeout for the WS path).
 //  2. The broadcaster is already closed. The waited goroutines call
 //     BroadcastSessionsUpdate through sendNotifier, and a trigger that opens
 //     a debounce window takes a bcast.pending slot — a send goroutine can
@@ -187,6 +195,7 @@ func (e *sendEngine) TrackSend() (release func(), shuttingDown bool) {
 // It must also run before the node connections are closed, so an in-flight
 // remote RPC cannot write to a closed nc.conn.
 func (e *sendEngine) drain() {
+	e.cancel()
 	e.trackMu.Lock()
 	e.closed = true
 	e.trackMu.Unlock()
@@ -239,7 +248,7 @@ const remoteSendTimeout = 60 * time.Second
 // remoteSend forwards an HTTP send to a remote node in a tracked goroutine and
 // returns false — without spawning anything — when the engine is draining.
 //
-// The goroutine inherits e.ctx so Hub.Shutdown cancels an in-flight RPC, and
+// The goroutine inherits e.ctx so drain cancels an in-flight RPC, and
 // caps it at remoteSendTimeout so a hung node cannot hold a drain slot for the
 // process lifetime. There is no ack channel on the HTTP path, so a transport
 // error fans out to the key's subscribers via broadcastSendError (F1);

@@ -11,8 +11,8 @@ import (
 )
 
 // TestNewHub_SchedulerAndScratchPoolFromOptions pins R176-ARCH-M3 (#431):
-// Scheduler and ScratchPool must be wired into the Hub at construction via
-// HubOptions, not through post-construction SetX setters whose call order
+// Scheduler and ScratchPool must be wired at construction (HubOptions and
+// sendEngineOpts), not through post-construction SetX setters whose call order
 // relative to Hub.Start() was a hidden invariant and recurring race source.
 func TestNewHub_SchedulerAndScratchPoolFromOptions(t *testing.T) {
 	t.Parallel()
@@ -31,7 +31,7 @@ func TestNewHub_SchedulerAndScratchPoolFromOptions(t *testing.T) {
 		t.Fatal("hub.scheduler nil — HubOptions.Scheduler not wired at construction (#431)")
 	}
 	if hub.engine.scratchPool != pool {
-		t.Fatal("the send engine's scratchPool is not HubOptions.ScratchPool (#431)")
+		t.Fatal("the send engine's scratchPool is not sendEngineOpts.ScratchPool (#431)")
 	}
 }
 

@@ -1,12 +1,12 @@
 package server
 
-// SessionsBus is the publish abstraction over Hub.BroadcastSessionsUpdate
+// SessionsBus is the publish abstraction over bcast.BroadcastSessionsUpdate
 // (#777). Producers publish a "sessions changed" signal without holding a
 // *Hub; the Hub is the one subscriber that debounces it into a WebSocket
 // frame (wshub_broadcast.go). Created once in buildServer and never
 // replaced; the Hub binding is filled in by registerDashboard, so producers
 // may hold a reference before the Hub exists. New code should call Publish
-// rather than s.hub.BroadcastSessionsUpdate() directly.
+// rather than s.hub.bcast.BroadcastSessionsUpdate() directly.
 type SessionsBus interface {
 	// Publish coalesces a "sessions changed" notification. Fire-and-forget:
 	// the transport may debounce, so producers must never expect ordering
@@ -21,7 +21,7 @@ type hubSessionsBus struct {
 	getHub func() *Hub
 }
 
-// Publish forwards to Hub.BroadcastSessionsUpdate when the Hub is wired;
+// Publish forwards to the Hub's bcast.BroadcastSessionsUpdate when wired;
 // otherwise no-op. Dropping pre-Hub publishes is safe: the Hub rebuilds
 // fresh state on its own first broadcast pass.
 func (b *hubSessionsBus) Publish() {
@@ -29,7 +29,7 @@ func (b *hubSessionsBus) Publish() {
 		return
 	}
 	if h := b.getHub(); h != nil {
-		h.BroadcastSessionsUpdate()
+		h.bcast.BroadcastSessionsUpdate()
 	}
 }
 
