@@ -1,7 +1,6 @@
 // event_render.js — one EventEntry to one transcript bubble (eventHtml and its
 // EVENT_WHOLE/EVENT_CONTENT/EVENT_ICONS tables), plus the time-divider and
-// dedup helpers the transcript, cron and agent views share. Moved verbatim
-// from dashboard.js (S19-3, #3025).
+// dedup helpers the transcript, cron and agent views share.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr } from './nz_util.js';

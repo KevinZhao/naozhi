@@ -10,7 +10,9 @@
 //
 // Nothing executes, the CLI emits a normal end_turn, and the turn stalls.
 // Anchor is kept byte-for-byte in lockstep with LEAKED_TOOLCALL_RE in
-// internal/server/static/dashboard.js (asserted by a server test).
+// internal/server/static/event_render.js; testdata/samples.json pins the two
+// to the same verdicts (samples_test.go here, leaked_toolcall_fold.test.js in
+// the e2e suite).
 package leakguard
 
 import (
@@ -18,7 +20,7 @@ import (
 	"strings"
 )
 
-// Anchor mirrors LEAKED_TOOLCALL_RE in dashboard.js byte-for-byte. It is
+// Anchor mirrors LEAKED_TOOLCALL_RE in event_render.js byte-for-byte. It is
 // deliberately strict (own-line `call` / `<function_calls>` marker right before
 // `<invoke name="`); do not loosen it to match dangling <invoke>.
 const Anchor = `(?:^|\n)[ \t]*(?:call|<function_calls>)[ \t]*\n[ \t]*<invoke name="`
@@ -39,7 +41,7 @@ func Detect(text string) bool {
 // Strip splits a leaked assistant body into the prose before the leaked block
 // and the block itself (marker line through the LAST </invoke>, plus an
 // optional trailing </function_calls>). Returns ("", "", false) when no leak
-// is present. Mirrors stripLeakedToolCalls in dashboard.js.
+// is present. Mirrors stripLeakedToolCalls in event_render.js.
 func Strip(text string) (prose, leaked string, found bool) {
 	loc := re.FindStringIndex(text)
 	if loc == nil {

@@ -1,6 +1,6 @@
 {
   "agent_view.js": {
-    "lines": 729,
+    "lines": 728,
     "maxFnLines": 66,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -105,7 +105,7 @@
     "configureDeps": 0
   },
   "event_render.js": {
-    "lines": 421,
+    "lines": 420,
     "maxFnLines": 41,
     "fnOver100": 0,
     "topLevelLetVar": 0,

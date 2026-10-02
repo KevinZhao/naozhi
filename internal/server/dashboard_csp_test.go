@@ -479,19 +479,12 @@ func TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate(t *testing.T) {
 // strings can emit inline `onclick=` attributes into innerHTML. dashboard.html
 // loads all of these with <script defer>, so an `onclick=` emitted from any of
 // them is exactly as much a reason for script-src to keep `'unsafe-inline'` as
-// one emitted from dashboard.js. R202606-CR-2: the cron-view extraction (PR-1)
-// moved ~41 generated handlers out of dashboard.js into cron_view.js; before
-// this, the ratchet only watched dashboard.js, so those handlers fell out of
-// coverage and could grow unbounded. Any future view extraction MUST add its
-// file here so the surface stays pinned. Keep in sync with the <script src>
-// list in static/dashboard.html.
-var generatedOnclickBundle = []string{
-	"dashboard.js",
-	"cron_view.js",
-	"agent_view.js",
-	"asset_browser.js",
-	"files_view.js",
-	"nz_util.js",
+// one emitted from dashboard.js. It is derived from static/ (dashboardModules)
+// rather than hand-listed, so code split out of dashboard.js into a new module
+// cannot fall out of these CSP/XSS scans without anything failing.
+func generatedOnclickBundle(t *testing.T) []string {
+	t.Helper()
+	return dashboardModules(t)
 }
 
 // generatedOnclickCap is the downward-only ratchet on the TOTAL number of inline
@@ -512,9 +505,10 @@ var generatedOnclickBundle = []string{
 // must be rejected — add a data-action dispatch entry instead. (Pure file
 // splits that move handlers between bundle files leave the total unchanged.)
 //
-// 2 = dashboard.js 2, both CSP-legal element-property assignments
-// (btn.onclick = …), not inline attributes — the attribute surface went to
-// 0 across the bundle in the #1980 PR-1/PR-2 data-action migration.
+// 2 = dashboard.js 1 + msg_nav.js 1, both CSP-legal element-property
+// assignments (btn.onclick = …), not inline attributes — the attribute
+// surface went to 0 across the bundle in the #1980 PR-1/PR-2 data-action
+// migration.
 // It was 86 while two comments (dashboard.js, nz_util.js) still spelled out the
 // counted token — the count is textual, so prose inflated it by 2 and made
 // nz_util.js look like it had a handler when it had none. Both were reworded,
@@ -551,8 +545,9 @@ func TestDashboardCSP_GeneratedHandlerSurfaceRatchet(t *testing.T) {
 
 	onclickRe := regexp.MustCompile(`\bonclick\s*=`)
 	total := 0
-	perFile := make(map[string]int, len(generatedOnclickBundle))
-	for _, name := range generatedOnclickBundle {
+	bundle := generatedOnclickBundle(t)
+	perFile := make(map[string]int, len(bundle))
+	for _, name := range bundle {
 		body, err := os.ReadFile(filepath.Join(staticDir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -595,7 +590,7 @@ func TestDashboardCSP_RatchetCountsNoCommentTokens(t *testing.T) {
 	onclickRe := regexp.MustCompile(`\bonclick\s*=`)
 	lineCommentRe := regexp.MustCompile(`^\s*(//|\*|/\*)`)
 
-	for _, name := range generatedOnclickBundle {
+	for _, name := range generatedOnclickBundle(t) {
 		body, err := os.ReadFile(filepath.Join(staticDir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)

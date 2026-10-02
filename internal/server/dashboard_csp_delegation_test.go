@@ -23,7 +23,7 @@ var inlineHandlerAttrRe = regexp.MustCompile(`\bon[a-z]+\s*=\s*\\?["']`)
 // attribute anyway, so any new one is a silently dead control.
 func TestDashboardBundle_NoInlineHandlerAttributes(t *testing.T) {
 	t.Parallel()
-	files := append([]string{"dashboard.html"}, generatedOnclickBundle...)
+	files := append([]string{"dashboard.html"}, generatedOnclickBundle(t)...)
 	for _, name := range files {
 		data := staticAssetBytes(name)
 		if data == nil {
@@ -49,7 +49,7 @@ func TestDashboardBundle_NoInterpolatedDataAction(t *testing.T) {
 	// shape; the cron menu's data-menu-action stays scoped to its own
 	// listener and fixed item table, so it is exempt by attribute name.
 	bad := regexp.MustCompile(`data-action[a-z-]*=\\?"' \+`)
-	for _, name := range generatedOnclickBundle {
+	for _, name := range generatedOnclickBundle(t) {
 		data := staticAssetBytes(name)
 		if data == nil {
 			t.Fatalf("%s not embedded", name)

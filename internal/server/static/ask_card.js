@@ -1,7 +1,7 @@
 // ask_card.js — the AskUserQuestion card: its renderer, the option-toggle and
 // submit handlers, and the answered-lock that history and live user events
-// apply. Moved verbatim from dashboard.js (S19-3, #3025): event_render.js
-// imports the renderer, dashboard.js registers the two data-action handlers.
+// apply. event_render.js imports the renderer; dashboard.js registers the two
+// data-action handlers.
 import { NZ_CONTRACT } from './contract.js';
 import { getToken } from './platform.js';
 import { hooks, selection, transcript } from './state.js';

@@ -311,13 +311,12 @@ import {
       }
       return;
     }
-    // Delegate to dashboard.js's shared renderer so the sub-agent panel and
-    // parent view stay visually identical (markdown, tool_result folding,
+    // Delegate to event_render.js's shared renderer so the sub-agent panel
+    // and parent view stay visually identical (markdown, tool_result folding,
     // image thumbnails, time dividers). renderEventsWithDividers /
-    // eventHtml are exported by dashboard.js right next to their
-    // definitions; fall back to a plain-text stub only if both are somehow
-    // missing (unexpected — contract is enforced by dashboard.html script
-    // ordering).
+    // eventHtml are imported from event_render.js; fall back to a plain-text
+    // stub only if both are somehow missing (unexpected — the static import
+    // fails the module load first).
     // includeInternal=true keeps tool_use / task_* bubbles that
     // the parent view hides — for a sub-agent panel those ARE the content.
     var renderOpts = { includeInternal: true };
