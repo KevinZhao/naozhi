@@ -79,8 +79,10 @@ func (p *Persister) settleFlush(key string, w *perKeyWriter, stage string, err e
 
 // retireWriter closes a poisoned writer and forgets it so the next batch
 // reopens the pair through Recover. Every record still in pendingIdx is
-// counted as dropped: Recover truncates the log to the idx edge, so none of
-// them survives (an upper bound — a torn idx append may have landed a few).
+// counted as dropped: Recover truncates the log to the idx edge, so they are
+// lost unless their idx entries reached the file. That makes the count an
+// upper bound: a torn idx append may have landed a few, and after an idx
+// fsync failure the appended entries usually all survive.
 func (p *Persister) retireWriter(key string, w *perKeyWriter) {
 	if lost := len(w.pendingIdx); lost > 0 {
 		p.droppedCnt.Add(int64(lost))

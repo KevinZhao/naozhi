@@ -160,8 +160,9 @@ type perKeyWriter struct {
 	lastActivity time.Time
 
 	// poisoned marks a writer whose files can no longer be written by
-	// retrying: logBuf has latched a write error, or an idx append failed
-	// part-way and a retry would append after a torn entry. The run
+	// retrying: logBuf has latched a write error, an idx append failed
+	// part-way and a retry would append after a torn entry, or an idx fsync
+	// failed and a retry would append the same entries twice. The run
 	// goroutine retires it (failure.go) instead of flushing it again.
 	poisoned bool
 	// flushErr carries a flush result from a parallelFsync worker back to
@@ -218,8 +219,13 @@ func (w *perKeyWriter) flush(p *Persister) error {
 	// is discarded and the stride cursor advanced: AppendBatch only reached
 	// the page cache, and clearing the retry buffer on a transient Sync error
 	// stranded idx bytes that recovery later used to truncate durable log (#1816).
+	// The failed writer is poisoned rather than retried: the entries are
+	// already appended, so a retry would append them a second time, and a
+	// later Recover could cut the log back to a stale duplicate. Retiring
+	// lets Recover reconcile against what the files actually hold.
 	if idxAppended {
 		if err := w.idxWriter.Sync(); err != nil {
+			w.poisoned = true
 			return fmt.Errorf("sync idx: %w", err)
 		}
 		p.fsyncCnt.Add(1)

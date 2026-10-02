@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/eventlog/schema"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -260,5 +261,84 @@ func TestNoteFailure_Throttles(t *testing.T) {
 	p.noteRecovered(key)
 	if _, ok := p.failing[key]; ok {
 		t.Fatalf("noteRecovered left the key in p.failing")
+	}
+}
+
+// TestFlush_IdxSyncFailure_Poisons: after an idx fsync failure the entries
+// are already appended, so retrying would append them a second time and a
+// later Recover could cut the log back to a stale duplicate. The writer must
+// be poisoned instead, and Recover over what it left must keep every record
+// with an idx whose seqs strictly increase.
+func TestFlush_IdxSyncFailure_Poisons(t *testing.T) {
+	p, dir := newTestPersister(t, func(o *Options) { o.IdxStride = 1 })
+	const key = "fk-idx-sync"
+	sink := p.SinkFor(key)
+	sink([]Entry{entry(t, 1700000001000, "before")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
+	defer cancel()
+	if err := p.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// The run goroutine is gone, so the test owns a hand-built writer.
+	logPath := LogPath(dir, key)
+	idxPath := filepath.Join(dir, KeyHash(key)+idxExt)
+	rec, err := Recover(logPath, idxPath)
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	idxW, err := NewIdxWriter(idxPath, 0o600)
+	if err != nil {
+		t.Fatalf("open idx: %v", err)
+	}
+	w := &perKeyWriter{
+		key: key, stem: KeyHash(key),
+		logFile: logFile, logBuf: acquireLogBuf(logFile), idxWriter: idxW,
+		logPath: logPath, idxPath: idxPath,
+		nextSeq: rec.NextSeq, bytes: rec.LogSize,
+	}
+	for i := 0; i < 2; i++ {
+		n, err := WriteRecordRaw(w.logBuf, []byte(`{}`))
+		if err != nil {
+			t.Fatalf("write record: %v", err)
+		}
+		w.pendingIdx = append(w.pendingIdx, schema.IdxEntry{Seq: w.nextSeq, ByteOff: w.bytes, Len: int32(n)})
+		w.bytes += n
+		w.nextSeq++
+	}
+	w.dirty = true
+
+	idxW.syncFailHook = func() error { return errors.New("injected idx fsync EIO") }
+	if err := w.flush(p); err == nil {
+		t.Fatalf("flush: expected the injected idx fsync error")
+	}
+	if !w.poisoned {
+		t.Fatalf("an idx fsync failure left the writer unpoisoned; a retry would append its entries twice")
+	}
+	_ = w.close()
+
+	rec, err = Recover(logPath, idxPath)
+	if err != nil {
+		t.Fatalf("Recover after the failure: %v", err)
+	}
+	if rec.NextSeq != w.nextSeq {
+		t.Errorf("Recover NextSeq = %d, want %d: records whose idx entries reached the file were cut", rec.NextSeq, w.nextSeq)
+	}
+	idx, err := ReadAllIdx(idxPath)
+	if err != nil {
+		t.Fatalf("ReadAllIdx: %v", err)
+	}
+	for i := 1; i < len(idx); i++ {
+		if idx[i].Seq <= idx[i-1].Seq || idx[i].ByteOff <= idx[i-1].ByteOff {
+			t.Fatalf("idx entry %d (seq %d off %d) does not follow entry %d (seq %d off %d)",
+				i, idx[i].Seq, idx[i].ByteOff, i-1, idx[i-1].Seq, idx[i-1].ByteOff)
+		}
 	}
 }
