@@ -81,6 +81,7 @@ import {
   CRON_LIVE_AGENT_ONLY_HTML,
   CRON_LIVE_MAX_EVENTS,
   EVENT_DIVIDER_GAP_MS,
+  announce,
   confirmDialog,
   formatAbsTime,
   shortPath,
@@ -95,18 +96,11 @@ import {
 // list / drawer / create+edit forms / cron-expression parsing / run timeline
 // + transcript / live event subscription / context menus.
 //
-// Loaded as a plain <script defer> AFTER dashboard.js (dashboard.html), so all
-// top-level functions / let / const here remain in the SAME shared global
-// scope they had inside dashboard.js — this is a pure file split with no
-// binding-scope change. Cron code calls dashboard.js globals (lsGet, wsm, esc
-// via window alias, eventHtml, …) at call time; dashboard.js's WebSocket core
-// calls cron functions (setCronLiveStatus, isCronLiveKey, cronApplyRun*, …) —
-// both directions keep working because everything stays global.
-//
-// Load order matters only for load-time initializers: this file runs after
-// dashboard.js, so the cronSortOrder initializer below finds lsGet already
-// defined, and the bootstrap fetchCronJobs() at the tail (moved here from
-// dashboard.js) runs after every cron function is defined.
+// This module imports dashboard.js, so dashboard evaluates first: the
+// cronSortOrder initializer below finds lsGet ready, and the wsm.on
+// registrations and bootstrap fetchCronJobs() at the tail run after every
+// cron function is defined. dashboard reaches back only through nz.bus and
+// hooks (bottom of file).
 
 /* ===== Cron Tab ===== */
 
@@ -2608,11 +2602,23 @@ registerActions({
   'cron-mobile-back': () => mobileBack(),
 });
 
-// ─── nz.bus subscriptions (#2557 PR-E1) ────────────────────────────────────
-// dashboard's WS core drives the cron view through these events instead of
-// window-bridge calls (the reverse dashboard→view edge must not become an
-// import — it would invert module execution order). dispatchEvent is
-// synchronous, so handler ordering matches the old direct calls.
+// ─── WS run frames and nz.bus subscriptions ────────────────────────────────
+// Run frames (#2540) from subsystem cron: the handlers key on job_id, so
+// owner_id is projected onto it here, once, at the wire boundary.
+const cronRun = (msg) => msg.subsystem === 'cron';
+const cronMsgOf = (msg) => Object.assign({}, msg, { job_id: msg.owner_id });
+wsm.on(NZ_CONTRACT.WS.run_started, (msg) => cronApplyRunStarted(cronMsgOf(msg)), cronRun);
+wsm.on(NZ_CONTRACT.WS.run_ended, (msg) => {
+  // Every terminal state lands here; only succeeded celebrates.
+  if (msg.state === 'succeeded') announce('定时任务已完成');
+  cronApplyRunEnded(cronMsgOf(msg));
+  // The refetch hydrates counters / last_error_class over the optimistic
+  // patch; the head refresh is rAF-debounced so a burst collapses per paint.
+  fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
+  if (msg.owner_id) cronTimelineRefreshHeadDebounced(msg.owner_id);
+}, cronRun);
+// dashboard's cron-live code drives the view through nz.bus (#2557 PR-E1):
+// dashboard cannot import cron_view, which imports it.
 nzBus.addEventListener('cron:live-status', (e) => setCronLiveStatus(e.detail));
 nzBus.addEventListener('cron:live-repaint', () => repaintCronLive());
 nzBus.addEventListener('cron:live-ensure-subscription', () => ensureCronLiveSubscription());
@@ -2621,15 +2627,6 @@ nzBus.addEventListener('cron:live-event', (e) => {
   setCronLiveStatus('live');
   updateCronLiveTruncated();
 });
-nzBus.addEventListener('cron:run-started', (e) => cronApplyRunStarted(e.detail));
-nzBus.addEventListener('cron:run-ended', (e) => {
-  cronApplyRunEnded(e.detail);
-  // Refetch so counters / last_error_class hydrate from the backend; the
-  // optimistic patch on the same row is overwritten cleanly (moved verbatim
-  // from the WS dispatch site).
-  fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
-});
-nzBus.addEventListener('cron:timeline-refresh-head', (e) => cronTimelineRefreshHeadDebounced(e.detail));
 nzBus.addEventListener('cron:open-panel', () => openCronPanel());
 
 // Reads of cron-owned state that dashboard consults (the frozen-run set,

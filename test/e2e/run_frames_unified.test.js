@@ -2,10 +2,10 @@
 //
 // 统一 run 帧（#2540）：wire 上只有 run_started / run_ended 两种 run 帧，
 // subsystem 字段区分来源。本 spec 从 mock 的 WS 端真的推帧进来，覆盖两条
-// 分发路径 —— cron（投影 owner_id → job_id 后走 nz.bus，驱动列表行的
-// 运行中标记）与 sysession（触发系统面板的 daemons 拉取，点亮后台失败
-// 徽章的唯一路径）。cron_run_started_bus.test.js 覆盖的是 bus 之后的
-// 乐观更新；本 spec 覆盖的是 wire 到 bus 之间那一段，两者相接。
+// 分发路径 —— cron（cron_view 的认领把 owner_id 投影成 job_id，驱动列表行
+// 的运行中标记）与 sysession（触发系统面板的 daemons 拉取，点亮后台失败
+// 徽章的唯一路径）。cron_run_started_bus.test.js 不连 WS、同步调用
+// wsm.onMessage；本 spec 覆盖的是从 socket 到分发表的整段。
 //
 // 跑法：cd test/e2e && npx playwright test run_frames_unified.test.js --project=desktop-chrome
 
