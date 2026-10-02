@@ -6,8 +6,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 // HistoryIO is Router's history facet: where transcripts and event logs live,
@@ -169,4 +172,126 @@ func (h *HistoryIO) stopPersister() {
 		slog.Warn("event log persister stop timed out",
 			"err", err, "stats", h.persister.Stats())
 	}
+}
+
+// attachHistorySource installs the history.Source for a session, so
+// EventEntriesBeforeCtx's disk fallback is live before the first pagination
+// request. wrapper is the one for the session's backend, which Router resolves
+// with BackendRegistry.sourceWrapperFor. Composition (RFC §3.4 / §3.5): the
+// local tier is the naozhi event log (empty when eventLogDir is unset); the
+// fallback tier is the backend wrapper's per-format reader
+// (Wrapper.NewHistorySource, Noop for unknown backends); MergedSource
+// UUID-dedupes and time-sorts both.
+func (h *HistoryIO) attachHistorySource(s *ManagedSession, wrapper *cli.Wrapper) {
+	if s == nil {
+		return
+	}
+
+	deps := history.Wiring{
+		ClaudeDir:   h.claudeDir,
+		BackendDirs: h.backendDirs,
+		EventLogDir: h.eventLogDir,
+	}
+
+	// Wrapper.NewHistorySource never returns nil; the guard pins that
+	// contract at the boundary.
+	var fallback history.Source = wrapper.NewHistorySource(s, deps)
+	if fallback == nil {
+		fallback = history.Noop{}
+	}
+
+	// mergeWithEventLog returns fallback unchanged when h.eventLogDir is
+	// empty, otherwise layers the event-log local tier in front of it.
+	s.SetHistorySource(mergeWithEventLog(h.eventLogDir, s.key, fallback))
+}
+
+// bindNewSessionHistory loads the resume-history chain into a freshly-spawned
+// session and THEN installs the event-log persist sink, in that exact order:
+// SetPersistSink must run only AFTER every InjectHistory call, otherwise the
+// bulk replay entries are written back to disk instead of being dropped as
+// replayPhase (RFC §3.2.2 / §3.2.3, #733).
+//
+// LOCK: must NOT be called with the table lock held — history is injected under
+// historyMu, which is never held together with the table lock (router_core.go).
+func (h *HistoryIO) bindNewSessionHistory(
+	ctx context.Context,
+	s *ManagedSession,
+	proc processIface,
+	key string,
+	resumeID string,
+	workspace string,
+	prevIDs []string,
+	oldHistory []clievent.EventEntry,
+) {
+	h.loadResumeHistoryOnSpawn(ctx, s, key, resumeID, workspace, prevIDs, oldHistory)
+	h.installPersistSink(proc, key)
+}
+
+// installPersistSink wires the event-log persister into the given Process's
+// EventLog. No-op when the persister is disabled or proc is not a real
+// *cli.Process (test fakes). Must be called AFTER any InjectHistory calls
+// have completed (RFC §3.2.2).
+func (h *HistoryIO) installPersistSink(proc processIface, key string) {
+	if realProc, ok := proc.(*cli.Process); ok {
+		h.bindPersistSink(realProc.EventLog(), key)
+	}
+}
+
+// loadResumeHistoryOnSpawn synchronously loads the JSONL chain for a resume
+// with no in-memory history yet and injects it into s. No-op otherwise.
+//
+// h.wg tracks the call so Shutdown can drain in-flight loads. The load
+// ctx is parented on h.ctx (Shutdown's cancelTasks wakes the reader
+// immediately) with the caller ctx fanned in via context.AfterFunc, and is
+// skipped entirely once h.ctx is already cancelled.
+//
+// LOCK: must NOT be called with the table lock held — InjectHistory acquires
+// session.historyMu independently, and the reader can take seconds.
+func (h *HistoryIO) loadResumeHistoryOnSpawn(
+	ctx context.Context,
+	s *ManagedSession,
+	key, resumeID, workspace string,
+	prevIDs []string,
+	oldHistory []clievent.EventEntry,
+) {
+	if resumeID == "" || h.claudeDir == "" || len(oldHistory) > 0 {
+		return
+	}
+
+	// Decide skip-or-load BEFORE Add(1), and make check+Add one critical
+	// section vs Shutdown's cancelTasks() under wgMu: an Add(1) on a
+	// WaitGroup already drained to 0 while Shutdown's Wait() runs is a
+	// WaitGroup misuse that can panic (#1655, #2186). Mirrors runHistoryTask.
+	h.wgMu.Lock()
+	if h.ctx != nil && h.ctx.Err() != nil {
+		h.wgMu.Unlock()
+		return
+	}
+	h.wg.Add(1)
+	h.wgMu.Unlock()
+
+	ids := make([]string, 0, len(prevIDs)+1)
+	ids = append(ids, prevIDs...)
+	ids = append(ids, resumeID)
+
+	func() {
+		defer h.wg.Done()
+		parent := h.ctx
+		if parent == nil {
+			parent = context.Background()
+		}
+		histCtx, histCancel := context.WithTimeout(parent, 15*time.Second)
+		defer histCancel()
+		if ctx != nil {
+			stop := context.AfterFunc(ctx, histCancel)
+			defer stop()
+		}
+		allEntries := h.loader.LoadHistoryChainTail(
+			histCtx, h.claudeDir, ids, workspace, maxPersistedHistory,
+		)
+		if len(allEntries) > 0 {
+			s.InjectHistory(allEntries)
+			slog.Info("loaded session history on resume", "key", key, "entries", len(allEntries), "chain", len(ids))
+		}
+	}()
 }

@@ -6,7 +6,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// The O(n) oracle is the production countUserTurns helper (router_lifecycle.go):
+// The O(n) oracle is the production countUserTurns helper (respawn_snapshot.go):
 // the exact value a full scan of persistedHistory produces. The incremental
 // count maintained by InjectHistory (R20260603140013-PERF-2) must always agree
 // with it.

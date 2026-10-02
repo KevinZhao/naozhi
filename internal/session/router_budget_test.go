@@ -40,24 +40,20 @@ const (
 )
 
 // Every non-test file in the package root stays within
-// routerFileLinesTargetBaseline lines. The two files above it carry an
+// routerFileLinesTargetBaseline lines. A file above it would need an
 // exemption that may only shrink; a file that sinks more than
 // routerLinesSlackBaseline below its exemption re-samples it, and one back
 // under the limit drops its exemption. routerLineExemptionsBaseline counts
-// the exemptions, so a third one is a raise the ratchet ledger sees, however
-// it is spelled.
+// the exemptions, so a new one is a raise the ratchet ledger sees, however
+// it is spelled. None is left.
 const routerFileLinesTargetBaseline = 900
 
-const routerCoreLinesBaseline = 1094
-
-const routerLifecycleLinesBaseline = 1466
-
-const routerLineExemptionsBaseline = 2
+const routerLineExemptionsBaseline = 0
 
 const routerLinesSlackBaseline = 30
 
-// S12's end state. Asserted against measured values once the split lands
-// (S12g); until then they are only reported.
+// S12's end state, held against the measured values by
+// TestRouterBudget_AtTarget.
 const routerFieldTargetBaseline = 22
 
 const routerMethodTargetBaseline = 100
@@ -98,10 +94,7 @@ func realRouterLimits() routerLimits {
 	return routerLimits{
 		fields: routerFieldBaseline, methods: routerMethodBaseline, refs: routerTypeRefBaseline,
 		lineLimit: routerFileLinesTargetBaseline, exemptions: routerLineExemptionsBaseline,
-		exempt: map[string]int{
-			"router_core.go":      routerCoreLinesBaseline,
-			"router_lifecycle.go": routerLifecycleLinesBaseline,
-		},
+		exempt:   map[string]int{},
 		minFiles: 40, minMethods: 50, minClosure: 5,
 	}
 }
@@ -546,12 +539,84 @@ func TestRouterBudget(t *testing.T) {
 	t.Parallel()
 	m := measureRealRouter(t)
 	l := realRouterLimits()
-	t.Logf("files %d, fields %d, methods %d, refs %d (%s); router_core.go %d lines, router_lifecycle.go %d lines; S12 target fields ≤%d, methods ≤%d",
-		m.files, len(m.fields), len(m.methods), len(m.refs), strings.Join(m.refs, ", "),
-		m.lines["router_core.go"], m.lines["router_lifecycle.go"], routerFieldTargetBaseline, routerMethodTargetBaseline)
+	t.Logf("files %d, fields %d, methods %d, refs %d (%s); longest files %s",
+		m.files, len(m.fields), len(m.methods), len(m.refs), strings.Join(m.refs, ", "), longestFiles(m.lines, 5))
 	for _, p := range budgetProblems(m, l) {
 		if !strings.HasPrefix(p, "isolation: ") {
 			t.Error(p)
+		}
+	}
+}
+
+// longestFiles lists the n longest files with their line counts.
+func longestFiles(lines map[string]int, n int) string {
+	names := slices.SortedFunc(maps.Keys(lines), func(a, b string) int {
+		if lines[a] != lines[b] {
+			return lines[b] - lines[a]
+		}
+		return strings.Compare(a, b)
+	})
+	var out []string
+	for _, name := range names[:min(n, len(names))] {
+		out = append(out, fmt.Sprintf("%s %d", name, lines[name]))
+	}
+	return strings.Join(out, ", ")
+}
+
+// routerTarget is S12's end state: ceilings, not baselines.
+type routerTarget struct{ fields, methods, lines int }
+
+// targetProblems holds a measure to the end state. It reads the measured
+// counts, so a baseline raised to match a grown Router still fails here.
+func targetProblems(m routerMeasure, tg routerTarget) []string {
+	var out []string
+	if len(m.fields) > tg.fields {
+		out = append(out, fmt.Sprintf("fields: Router has %d fields, above S12's target of %d", len(m.fields), tg.fields))
+	}
+	if len(m.methods) > tg.methods {
+		out = append(out, fmt.Sprintf("methods: Router has %d methods, above S12's target of %d", len(m.methods), tg.methods))
+	}
+	for _, name := range slices.Sorted(maps.Keys(m.lines)) {
+		if n := m.lines[name]; n > tg.lines {
+			out = append(out, fmt.Sprintf("lines: %s is %d lines, above S12's target of %d", name, n, tg.lines))
+		}
+	}
+	return out
+}
+
+func TestRouterBudget_AtTarget(t *testing.T) {
+	t.Parallel()
+	m := measureRealRouter(t)
+	l := realRouterLimits()
+	if m.files < l.minFiles || !m.structFound || len(m.methods) < l.minMethods {
+		t.Fatalf("parsed %d files, Router found: %v, %d methods: the measure has gone blind", m.files, m.structFound, len(m.methods))
+	}
+	tg := routerTarget{routerFieldTargetBaseline, routerMethodTargetBaseline, routerFileLinesTargetBaseline}
+	t.Logf("fields %d (target ≤%d), methods %d (target ≤%d), longest file %s (target ≤%d)",
+		len(m.fields), tg.fields, len(m.methods), tg.methods, longestFiles(m.lines, 1), tg.lines)
+	for _, p := range targetProblems(m, tg) {
+		t.Error(p)
+	}
+}
+
+func TestRouterBudget_AtTargetCatchesEachRule(t *testing.T) {
+	m := measureFixture(t, nil, nil)
+	at := routerTarget{fields: 5, methods: 2, lines: 990}
+	if got := targetProblems(m, at); len(got) != 0 {
+		t.Fatalf("the fixture is at its target but was flagged: %q", got)
+	}
+	for _, tc := range []struct {
+		name   string
+		target routerTarget
+		rule   string
+	}{
+		{"one field over", routerTarget{4, 2, 990}, "fields"},
+		{"one method over", routerTarget{5, 1, 990}, "methods"},
+		{"one line over", routerTarget{5, 2, 989}, "lines"},
+	} {
+		got := targetProblems(m, tc.target)
+		if len(got) != 1 || !strings.HasPrefix(got[0], tc.rule+": ") {
+			t.Errorf("%s: problems = %q, want one %q", tc.name, got, tc.rule)
 		}
 	}
 }

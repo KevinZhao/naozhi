@@ -2,8 +2,8 @@ package session
 
 // R215-ARCH-P2-2 regression tests. attachHistorySource was previously
 // called manually at every site that inserted into the session table —
-// 5 production paths (router_core.go reload, router_discovery.go
-// register/takeover ×2, router_lifecycle.go spawn / rename). Missing
+// 5 production paths (router_restore.go reload, router_discovery.go
+// register/takeover ×2, router_lifecycle.go spawn, router_rename.go). Missing
 // the call at any of them would leave EventEntriesBeforeCtx returning
 // empty and the dashboard "history" drawer silently blank for that
 // session. The fix funnels every insertion through publishSession

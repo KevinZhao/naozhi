@@ -1,11 +1,11 @@
 // consumer.go — the consumer-side dependency interfaces this package needs
 // (#2561).
 //
-// Deps named concrete types: *session.Router (77 exported methods when measured),
+// Deps named concrete types: *session.Router (54 exported methods when measured),
 // *session.KeyResolver, *project.Manager, *node.CacheManager. Each interface
 // below is the MEASURED call surface — grep h.<field>.<Method> across the
 // package — and the result is the point: this package needed 3 Router methods
-// out of 77 then and one KeyResolver method.
+// out of 54 and one KeyResolver method.
 //
 // Declared here rather than in internal/dashboard/contracts because these are
 // per-consumer shapes: dashsession uses 18 Router methods, this package uses 3,
@@ -39,7 +39,7 @@ type ProjectStore interface {
 	EffectivePlannerPrompt(p *projectpkg.Project) string
 }
 
-// RouterView is the 3 *session.Router methods this package calls, out of 77 when measured:
+// RouterView is the 3 *session.Router methods this package calls, out of 54 when measured:
 // the planner-restart path (look up, recreate) plus the version bump that makes
 // the dashboard re-render. The router's own methods return the concrete
 // session; the adapter where this package is wired converts to these shapes.
