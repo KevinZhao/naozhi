@@ -579,17 +579,30 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 // (before <= 0: no upper bound) into a memory page by Time, after page
 // entries of equal Time. The page keeps its order and its first entry, the
 // caller's next cursor, so consecutive pages split the turns between them.
+// A turn whose UUID the page already holds (a later InjectHistory appended
+// the transcript tail, #3028) is skipped.
 func (s *ManagedSession) withGapFill(page []clievent.EventEntry, before int64) []clievent.EventEntry {
 	gf := s.gapFill.Load()
 	if gf == nil || len(page) == 0 {
 		return page
 	}
 	lo := page[0].Time
+	var onPage map[string]struct{}
 	var add []clievent.EventEntry
 	for _, f := range *gf {
-		if f.Time >= lo && (before <= 0 || f.Time < before) {
-			add = append(add, f)
+		if f.Time < lo || (before > 0 && f.Time >= before) {
+			continue
 		}
+		if onPage == nil {
+			onPage = make(map[string]struct{}, len(page))
+			for _, e := range page {
+				onPage[e.UUID] = struct{}{}
+			}
+		}
+		if _, dup := onPage[f.UUID]; dup && f.UUID != "" {
+			continue
+		}
+		add = append(add, f)
 	}
 	if len(add) == 0 {
 		return page

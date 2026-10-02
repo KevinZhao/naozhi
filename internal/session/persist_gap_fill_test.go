@@ -162,6 +162,10 @@ func walkReachable(s *ManagedSession, pageLimit int, frontend bool) (map[string]
 	return seen, served
 }
 
+// gapLeadMS mirrors merged's contentSkewLeadMS, the upper widening of a gap
+// window.
+const gapLeadMS = 3000
+
 func gapContentKey(e clievent.EventEntry) string {
 	return fmt.Sprintf("%s\x1f%s\x1f%v", e.Type, e.Detail, e.Images)
 }
@@ -173,8 +177,9 @@ func gapContentKey(e clievent.EventEntry) string {
 // server-style and frontend-style. Asserted per case:
 //  1. every local UUID old serves, new serves too (local entries never lost);
 //  2. new serves no UUID twice, and no user/text content inside the memory
-//     window more often than old did plus the drops of that content (no twin
-//     leaks; a window may also recover an unmarked drop right after it);
+//     window more often than old did plus the drops of that content a gap
+//     window can recover: marked ones, and an unmarked tail drop within the
+//     lead bound of the last gap record (no twin leaks);
 //  3. a marked-dropped user/text turn inside the memory window (3 s clear of
 //     its floor) is served by content.
 //
@@ -249,9 +254,25 @@ func TestPersistGapFill_NeverFewer(t *testing.T) {
 					return out
 				}
 				co, cn := contentCount(ro), contentCount(rn)
+				// A fill may serve the twin of a marked drop, or of an
+				// unmarked tail drop whose twin is within the lead bound of
+				// the last gap record; drops elsewhere do not excuse a twin.
+				lastGap := int64(-1 << 62)
+				for _, e := range c.local {
+					if e.Type == schema.GapEntryType {
+						lastGap = e.Time
+					}
+				}
+				marked := map[string]bool{}
+				for _, d := range c.markedDrops {
+					marked[d.UUID] = true
+				}
 				dropped := map[string]int{}
 				for _, d := range c.drops {
-					dropped[gapContentKey(d)]++
+					tw := byUUID[c.twinOf[d.UUID]]
+					if tw.Time >= floor && (marked[d.UUID] || tw.Time <= lastGap+gapLeadMS) {
+						dropped[gapContentKey(d)]++
+					}
 				}
 				for k, n := range cn {
 					if n > co[k]+dropped[k] {
@@ -547,4 +568,52 @@ func uuidsOf(es []clievent.EventEntry) []string {
 		out = append(out, e.UUID)
 	}
 	return out
+}
+
+// TestWithGapFill_SkipsUUIDOnPage: a later InjectHistory (the shim and drift
+// paths of #3028) can append the transcript tail after tier 1 filled the
+// gap, so memory holds the fill turns' own rows. Each UUID is still served
+// once, on the initial page and on load-earlier pages.
+func TestWithGapFill_SkipsUUIDOnPage(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.InjectHistoryIfEmpty([]clievent.EventEntry{
+		{UUID: "l1", Time: 1000, Type: "user", Detail: "q1"},
+		{UUID: "l5", Time: 5000, Type: "user", Detail: "q5"},
+	})
+	var gf []clievent.EventEntry
+	for i := 2; i <= 4; i++ {
+		gf = append(gf, clievent.EventEntry{UUID: fmt.Sprintf("c%d", i), Time: int64(i*1000 + 5), Type: "user", Detail: fmt.Sprintf("q%d", i)})
+	}
+	s.gapFill.Store(&gf)
+	s.InjectHistory(slices.Clone(gf))
+
+	ctx := context.Background()
+	page, _ := s.EventInitialPageCtx(ctx, DefaultVisibleTarget, 0)
+	got := map[string]int{}
+	for _, e := range page {
+		got[e.UUID]++
+	}
+	for _, u := range []string{"l1", "l5", "c2", "c3", "c4"} {
+		if got[u] != 1 {
+			t.Errorf("initial page serves %s %d times, want 1: %v", u, got[u], uuidsOf(page))
+		}
+	}
+	seen := map[string]int{}
+	before := int64(9000)
+	for range 20 {
+		pg := s.EventEntriesBeforeCtx(ctx, before, 2)
+		if len(pg) == 0 {
+			break
+		}
+		for _, e := range pg {
+			seen[e.UUID]++
+		}
+		before = pg[0].Time
+	}
+	for _, u := range []string{"l1", "l5", "c2", "c3", "c4"} {
+		if seen[u] != 1 {
+			t.Errorf("load-earlier serves %s %d times, want 1: %v", u, seen[u], seen)
+		}
+	}
 }
