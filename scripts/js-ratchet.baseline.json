@@ -149,8 +149,8 @@
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 25,
-    "htmlInsert": 8,
+    "innerHTMLAssign": 21,
+    "htmlInsert": 6,
     "lateBindings": 5
   },
   "discovery.js": {
@@ -180,7 +180,11 @@
     "maxFnLines": 74,
     "fnOver100": 0,
     "topLevelLetVar": 0,
-    "configureDeps": 0
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 4,
+    "htmlInsert": 2,
+    "lateBindings": 0
   },
   "features.js": {
     "lines": 30,
