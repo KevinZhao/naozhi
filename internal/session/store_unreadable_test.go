@@ -248,6 +248,7 @@ func TestRouter_StoreWriteBlocks_ScopedToOwnFiles(t *testing.T) {
 
 	r := NewRouter(RouterConfig{MaxProcs: 1, StorePath: storePath})
 	t.Cleanup(func() { storeReadBlocked.Delete(storePath) })
+	t.Cleanup(r.Shutdown)
 	blocks := r.StoreWriteBlocks()
 	if len(blocks) != 1 || blocks[0].Path != storePath || blocks[0].Label != "session store" {
 		t.Fatalf("StoreWriteBlocks() = %+v, want exactly this router's sessions.json", blocks)
