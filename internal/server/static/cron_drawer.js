@@ -7,14 +7,15 @@
 // Consumers read it via the live import binding; the two writers outside
 // this file go through exported helpers (cronDrawerForgetJob for the delete
 // flow). Everything the drawer needs from the view proper — jobs array,
-// panel repaint, the trigger-cooldown button pair, cron-live wiring — is
-// injected once via configureCronDrawer(); the module edge stays one-way.
+// panel repaint, the trigger-cooldown button pair, cron-live repaint — is
+// injected once via configureCronDrawer(), so that edge stays one-way; the
+// live stream's state and unsubscribe come from cron_live.js.
 
-import { wsm } from './dashboard.js';
 import { esc, escAttr } from './nz_util.js';
 import { formatAbsTime } from './utilities.js';
 import { cronTimezoneSuffix, humanizeCron } from './cron_schedule.js';
 import { cronExpandedRunId, renderCronTimelineForJob } from './cron_timeline.js';
+import { cronLive, unsubscribeCronLive } from './cron_live.js';
 
 const deps = {
   cronAttentionRefresh: null, // §7.4: pull confirmation queue on open
@@ -159,8 +160,8 @@ function syncCronDrawerHeaderHeight(host) {
 }
 
 // cronDrawerHtml builds the per-job drawer body. Returns an HTML string from
-// the input job + the global wsm.cronLive state (cron-live RFC §4.1: live
-// section visibility depends on whether wsm.cronLive holds events for this
+// the input job + cron_live.js's cronLive state (cron-live RFC §4.1: live
+// section visibility depends on whether cronLive holds events for this
 // jobId — this avoids threading a per-call state arg through the drawer
 // re-render chain). DOM mutation lives in renderCronDrawer.
 function cronDrawerHtml(j) {
@@ -269,10 +270,9 @@ function cronDrawerHtml(j) {
   }
 
   // cron-live RFC §4.1: 实时输出容器。任务跑中或本轮已积累事件时显示，
-  // 让 run 结束后操作员还能回看本轮事件流。container 元素由 wsm.cronLive
+  // 让 run 结束后操作员还能回看本轮事件流。container 元素由 cronLive
   // 状态驱动，deps.repaintCronLive / appendEventsToContainer 写入。
-  const liveJobId = wsm.cronLive ? wsm.cronLive.jobId : null;
-  const hasLiveEvents = liveJobId === id && wsm.cronLive.events && wsm.cronLive.events.length > 0;
+  const hasLiveEvents = cronLive.jobId === id && cronLive.events && cronLive.events.length > 0;
   let liveHtml = '';
   if (isRunning || hasLiveEvents) {
     liveHtml = '<section class="cron-drawer-live" data-job-id="' + escAttr(id) + '">' +
@@ -543,9 +543,7 @@ function closeCronDetail() {
   }
   // cron-live RFC §3: drawer 关闭即撤销 cron live 订阅；事件数组随 unsub 清空，
   // 下次再开任意 drawer 不会带过来旧 job 的事件。
-  if (wsm.cronLive && wsm.cronLive.jobId) {
-    wsm.unsubscribeCronLive();
-  }
+  if (cronLive.jobId) unsubscribeCronLive();
   cronDrawerState.jobId = null;
   // Remove `.is-active` from any list row so the sidebar-style highlight
   // clears synchronously even before renderCronList re-paints.

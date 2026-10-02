@@ -101,7 +101,6 @@ import {
 } from './file_refs.js';
 import {
   AVATAR_GROUP_GAP_MS,
-  CRON_LIVE_MAX_EVENTS,
   EARLIER_PAGE_LIMIT,
   EVENT_DIVIDER_GAP_MS,
   INITIAL_HISTORY_LIMIT,
@@ -524,7 +523,7 @@ function setActivityView(view) {
   // Enter the target view.
   if (view === 'assets') { if (nzViews.asset) nzViews.asset.show(); }
   else if (view === 'files') { if (nzViews.files) nzViews.files.show(); }
-  else if (view === 'cron') { emitCron('cron:open-panel'); }
+  else if (view === 'cron') { nzBus.dispatchEvent(new CustomEvent('cron:open-panel')); }
   else if (view === 'system') { openSystemPanel(); }
   else if (view === 'settings') { renderSettingsView(); }
 }
@@ -3730,16 +3729,6 @@ function renderSettingsView() {
 
 const WS_STATES = { OFF: 'off', CONNECTING: 'connecting', AUTH: 'authenticating', CONNECTED: 'connected', DISCONNECTED: 'disconnected' };
 
-// emitCron dispatches a cron-view command over nz.bus (#2557 PR-E1):
-// dashboard's WS core no longer calls cron_view functions through the
-// window bridge — cron subscribes to these events at module init.
-// EventTarget dispatch is synchronous, so ordering semantics match the
-// old direct calls; if cron_view ever failed to load, dispatch is a no-op
-// (same resilience the old typeof guards bought).
-
-
-const emitCron = (type, detail) => nzBus.dispatchEvent(new CustomEvent(type, { detail }));
-
 const wsm = {
   conn: null,
   state: WS_STATES.OFF,
@@ -3775,24 +3764,8 @@ const wsm = {
   // it. updateStatusBar reads it to render "已断开 N 秒/分" inline hint so
   // users distinguish "just lost the WS 2s ago" from "dead for 10 min".
   _disconnectedSince: 0,
-
-  // cron-live RFC: 第二条独立的订阅通道，与主订阅 (subscribedKey) 并存。
-  // cron drawer 打开 + 任务运行中时订阅 'cron:<jobId>'，让操作员看到
-  // claude 子进程的流式输出。fresh 模式 (scheduler_run.go:318) 每次 run
-  // 前 Reset(key)，stub 重建后 EventLog 是空的，初次 sub 必返
-  // suspended + 0 events，等 session_state running 后 re-sub —— 这是
-  // 默认路径不是 edge case。详见 docs/rfc 与 plan §1.3。
-  cronLive: {
-    jobId: null,
-    pendingJobId: null,
-    subscribedKey: null,
-    lastEventTimeMs: 0,
-    runStartedAt: 0,
-    events: [],
-    truncatedCount: 0,
-    suspended: false,
-    status: 'idle', // 'idle' | 'pending' | 'live' | 'stopped'
-  },
+  // _ready: onReady callbacks, run in registration order after auth_ok's core.
+  _ready: [],
 
   connect() {
     if (this.conn && (this.conn.readyState === WebSocket.OPEN || this.conn.readyState === WebSocket.CONNECTING)) return;
@@ -3881,6 +3854,8 @@ const wsm = {
     this._frames.set(type, t);
   },
 
+  onReady(fn) { this._ready.push(fn); },
+
   onMessage(msg) {
     const t = this._frames.get(msg.type);
     if (!t) return;
@@ -3938,42 +3913,6 @@ const wsm = {
     this.lastEventTimeWs = 0;
   },
 
-  // cron-live RFC §1.2: 镜像 subscribe()，订阅 cron stub session 拿实时事件流。
-  // after = lastEventTimeMs || runStartedAtMs：避免拉到上轮 run 的残留（cron
-  // stub EventLog 可能跨 run 持续；fresh 模式下被 Reset 销毁后是空的）。
-  subscribeCronLive(jobId, runStartedAtMs) {
-    if (!jobId) return;
-    if (this.cronLive.jobId === jobId && this.cronLive.subscribedKey) return; // already subscribed
-    if (this.cronLive.jobId && this.cronLive.jobId !== jobId) {
-      this.unsubscribeCronLive();
-    }
-    const key = 'cron:' + jobId;
-    this.cronLive.jobId = jobId;
-    this.cronLive.pendingJobId = jobId;
-    this.cronLive.runStartedAt = runStartedAtMs || 0;
-    this.cronLive.status = 'pending';
-    emitCron('cron:live-status', 'pending');
-    const msg = { type: NZ_CONTRACT.WS.subscribe, key: key };
-    const after = this.cronLive.lastEventTimeMs || runStartedAtMs || 0;
-    if (after > 0) msg.after = after;
-    this.send(msg);
-  },
-
-  unsubscribeCronLive() {
-    if (this.cronLive.subscribedKey) {
-      this.send({ type: NZ_CONTRACT.WS.unsubscribe, key: this.cronLive.subscribedKey });
-    }
-    this.cronLive.jobId = null;
-    this.cronLive.pendingJobId = null;
-    this.cronLive.subscribedKey = null;
-    this.cronLive.lastEventTimeMs = 0;
-    this.cronLive.runStartedAt = 0;
-    this.cronLive.events = [];
-    this.cronLive.truncatedCount = 0;
-    this.cronLive.suspended = false;
-    this.cronLive.status = 'idle';
-  },
-
   /* -- WS event handlers -- */
 
   onConnected() {
@@ -3983,33 +3922,6 @@ const wsm = {
         this.lastEventTimeWs = transcript.lastEventTime;
       }
       this.subscribe(selection.key, selection.node);
-    }
-    // cron-live RFC §3: 重连后若已有 cron live 订阅，后端 conn 已亡 sub 已丢，
-    // 必须重发 subscribe 帧。直接走 wsm.subscribeCronLive 不行 —— 它的"已订
-    // 同 jobId 直接 no-op"短路会让我们什么都不做。
-    //
-    // 仅在任务"仍在跑"时重 sub。若断网期间任务已经结束，重 sub 只会拉到一个
-    // suspended 的 stub（fresh 模式 stub 已销毁），status 卡在 'pending' 看起
-    // 来像还在等事件 —— 但事件永远不会来。让它停留在终态视图（events 数组
-    // 仍含上轮事件，可回看）。
-    if (this.cronLive.jobId) {
-      const jobId = this.cronLive.jobId;
-      // cron_view owns the jobs list and publishes a reader in hooks.
-      const jobs = hooks.cronJobs ? hooks.cronJobs() : null;
-      const job = Array.isArray(jobs) ? jobs.find(j => j && j.id === jobId) : null;
-      const isRunning = !!(job && job.current_run && job.current_run.started_at);
-      if (isRunning) {
-        this.cronLive.subscribedKey = null;
-        this.cronLive.pendingJobId = null;
-        this.cronLive.suspended = false;
-        const runStartedAt = this.cronLive.runStartedAt;
-        // 清 jobId 让 subscribeCronLive 不被 "已订同 jobId" 短路命中
-        this.cronLive.jobId = null;
-        this.subscribeCronLive(jobId, runStartedAt);
-      }
-      // 任务已结束：保持 events 数组供回看，status 已是 'stopped'
-    } else {
-      emitCron('cron:live-ensure-subscription');
     }
   },
 
@@ -4587,79 +4499,6 @@ const wsm = {
     if (msg.reason) debouncedFetchSessions();
   },
 
-  // cron-live RFC §1.3 / §2.3: cron stub spawn 完成会广播 session_state running，
-  // suspended sub 此时升级 —— re-sub 才能拿到 eventPushLoop 推送。fresh 模式下
-  // 这是默认路径（每次 run 前 Reset 销毁旧 stub）。
-  onCronLiveSessionState(msg) {
-    if (msg.state === 'running' && this.cronLive.suspended) {
-      const jobId = this.cronLive.jobId;
-      if (jobId) {
-        this.cronLive.suspended = false;
-        // 不清 lastEventTimeMs / events —— after= 用最末事件时间继续接续
-        this.cronLive.subscribedKey = null;
-        this.cronLive.pendingJobId = jobId;
-        const key = 'cron:' + jobId;
-        const after = this.cronLive.lastEventTimeMs || this.cronLive.runStartedAt || 0;
-        const subMsg = { type: NZ_CONTRACT.WS.subscribe, key: key };
-        if (after > 0) subMsg.after = after;
-        this.send(subMsg);
-      }
-      return;
-    }
-    // 后端可能发来 'dead' (process 死亡) 或 reason='subscription_timeout'
-    // (resubscribeEvents 60s 窗口超时, wshub_eventpush.go:308)。两者均表示
-    // 流不会再有事件 —— 切到 stopped，事件保留可回看。
-    if (msg.state === 'dead' || msg.reason === 'subscription_timeout') {
-      this.cronLive.status = 'stopped';
-      emitCron('cron:live-status', 'stopped');
-    }
-  },
-
-  // cron-live RFC §5: 首批 history 帧到达。EventEntriesSince(after) 后端无条数
-  // 上限（After>0 时 Limit 被忽略），前端必须自己截尾到 CRON_LIVE_MAX_EVENTS。
-  onCronLiveHistory(msg) {
-    if (hooks.isCronSessionFrozen && hooks.isCronSessionFrozen(msg.key)) return;
-    const incoming = msg.events || [];
-    if (incoming.length === 0) return;
-    const lastTime = this.cronLive.lastEventTimeMs;
-    // Same-ms siblings pass the time gate; same-ms replays are dropped by uuid
-    // against the buffered array (mirrors onHistory's same-ms rule).
-    const seen = new Set((this.cronLive.events || []).map(e => e.uuid).filter(Boolean));
-    const newOnes = incoming.filter(e => !e.time || e.time > lastTime ||
-      (e.time === lastTime && !(e.uuid && seen.has(e.uuid))));
-    let merged = (this.cronLive.events || []).concat(newOnes);
-    if (merged.length > CRON_LIVE_MAX_EVENTS) {
-      const dropped = merged.length - CRON_LIVE_MAX_EVENTS;
-      this.cronLive.truncatedCount = (this.cronLive.truncatedCount || 0) + dropped;
-      merged = merged.slice(-CRON_LIVE_MAX_EVENTS);
-    }
-    this.cronLive.events = merged;
-    if (newOnes.length > 0) {
-      const last = newOnes[newOnes.length - 1];
-      if (last.time && last.time > this.cronLive.lastEventTimeMs) this.cronLive.lastEventTimeMs = last.time;
-    }
-    this.cronLive.status = 'live';
-    emitCron('cron:live-repaint');
-  },
-
-  onCronLiveEvent(msg) {
-    if (hooks.isCronSessionFrozen && hooks.isCronSessionFrozen(msg.key)) return;
-    const ev = msg.event;
-    if (!ev) return;
-    if (ev.time && ev.time < this.cronLive.lastEventTimeMs) return;
-    if (ev.time && ev.time === this.cronLive.lastEventTimeMs && ev.uuid &&
-        (this.cronLive.events || []).some(e => e.uuid === ev.uuid)) return;
-    this.cronLive.events = this.cronLive.events || [];
-    this.cronLive.events.push(ev);
-    if (this.cronLive.events.length > CRON_LIVE_MAX_EVENTS) {
-      this.cronLive.events.shift();
-      this.cronLive.truncatedCount = (this.cronLive.truncatedCount || 0) + 1;
-    }
-    if (ev.time) this.cronLive.lastEventTimeMs = ev.time;
-    this.cronLive.status = 'live';
-    emitCron('cron:live-event', ev);
-  },
-
   setState(s) {
     const prev = this.state;
     this.state = s;
@@ -4736,6 +4575,7 @@ wsm.on(NZ_CONTRACT.WS.auth_ok, () => {
   wsm.backoff = 1000;
   wsm.startPing();
   wsm.onConnected();
+  wsm._ready.forEach((fn) => fn());
 });
 // Classify the in-band WS auth error by pattern: the server emits
 // "too many attempts" for rate-limit lockouts (should be a warn
@@ -4758,14 +4598,6 @@ wsm.on(NZ_CONTRACT.WS.auth_fail, (msg) => {
   }
   wsm.conn.close();
 });
-// cron-live RFC §2.2: cron live 订阅命中时不污染主订阅状态
-wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
-  wsm.cronLive.subscribedKey = msg.key;
-  wsm.cronLive.pendingJobId = null;
-  wsm.cronLive.suspended = (msg.reason === 'suspended');
-  wsm.cronLive.status = wsm.cronLive.suspended ? 'pending' : 'live';
-  emitCron('cron:live-status', wsm.cronLive.status);
-}, (msg) => wsm.cronLive.pendingJobId && msg.key === ('cron:' + wsm.cronLive.pendingJobId));
 wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
   // Server confirmed subscription — apply authoritative state
   wsm.subscribedKey = wsm._pendingSubscribeKey || msg.key;
@@ -4795,13 +4627,6 @@ wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
 // a key this tab no longer tracks — nothing to reconcile. Registered so
 // the frame is a documented no-op rather than an unhandled type.
 wsm.on(NZ_CONTRACT.WS.unsubscribed, () => {});
-// cron-live RFC §2.2: 错误命中 cron live pending → 单独清理
-wsm.on(NZ_CONTRACT.WS.error, () => {
-  wsm.cronLive.pendingJobId = null;
-  wsm.cronLive.subscribedKey = null;
-  wsm.cronLive.status = 'stopped';
-  emitCron('cron:live-status', 'stopped');
-}, (msg) => msg.key && wsm.cronLive.pendingJobId && msg.key === ('cron:' + wsm.cronLive.pendingJobId));
 wsm.on(NZ_CONTRACT.WS.error, (msg) => {
   // PurgeNodeSubscriptions broadcast: error{node, "node disconnected"}
   // reaches every tab regardless of what it is subscribed to. Drop only
@@ -4848,15 +4673,11 @@ wsm.on(NZ_CONTRACT.WS.error, (msg) => {
     wsm._pendingSubscribeNode = null;
   }
 });
-const cronLiveKey = (msg) => hooks.isCronLiveKey && hooks.isCronLiveKey(msg.key);
-wsm.on(NZ_CONTRACT.WS.history, (msg) => wsm.onCronLiveHistory(msg), cronLiveKey);
 wsm.on(NZ_CONTRACT.WS.history, (msg) => wsm.onHistory(msg));
-wsm.on(NZ_CONTRACT.WS.event, (msg) => wsm.onCronLiveEvent(msg), cronLiveKey);
 wsm.on(NZ_CONTRACT.WS.event, (msg) => wsm.onEvent(msg));
 wsm.on(NZ_CONTRACT.WS.send_ack, (msg) => wsm.onSendAck(msg));
 wsm.on(NZ_CONTRACT.WS.send_error, (msg) => wsm.onSendError(msg));
 wsm.on(NZ_CONTRACT.WS.interrupt_ack, (msg) => wsm.onInterruptAck(msg));
-wsm.on(NZ_CONTRACT.WS.session_state, (msg) => wsm.onCronLiveSessionState(msg), cronLiveKey);
 wsm.on(NZ_CONTRACT.WS.session_state, (msg) => wsm.onSessionState(msg));
 wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
   // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
@@ -4949,14 +4770,10 @@ function stopPreviewPolling() {
 }
 
 /* ===== Cron Tab =====
-   The cron (定时任务) view was extracted to static/cron_view.js (PR-1,
-   RFC dashboard-cron-view-extraction). It loads as a plain <script defer>
-   after this file, so its top-level functions / state stay in the shared
-   global scope. dashboard.js's WebSocket core still calls cron functions
-   (setCronLiveStatus / isCronLiveKey / cronApplyRunStarted / …) and cron
-   calls back into dashboard.js globals — both work because everything is
-   global. Shared helpers appendEventsToContainer() / authHeaders() that
-   happened to live in this region moved with it and remain global. */
+   The cron (定时任务) view lives in cron_view.js and the modules it imports
+   (cron_live.js owns the live stream). They import this file, never the
+   reverse; dashboard reaches them through nz.bus ('cron:open-panel'), hooks
+   and the wsm.on / wsm.onReady registrations they make at load. */
 
 /* ===== Sidebar resizer (desktop only) ===== */
 (function(){

@@ -8,7 +8,7 @@
 //
 //   - wsm.onEvent / wsm.onHistory (the WS socket)  → ws_dom_trim.test.js
 //   - appendEvents (the HTTP-poll fallback)        → here
-//   - the cron:live-event bus subscription         → here
+//   - cron_live's claim on a cron key's event frame → here
 //
 // The two here replaced internal/server/static_event_dom_cap_test.go, which
 // grepped dashboard.js for `const MAX_LIVE_DOM_EVENTS`, `function
@@ -74,7 +74,7 @@ test.describe('#398 live append paths bound the DOM', () => {
     }
   });
 
-  test('cron:live-event caps #cron-live-events at CRON_LIVE_MAX_EVENTS', async ({ browser }) => {
+  test('a cron live event frame caps #cron-live-events at CRON_LIVE_MAX_EVENTS', async ({ browser }) => {
     // The container only exists while a run is in flight, so the fixture gives
     // cron-001 a current_run.
     const jobs = [{
@@ -99,25 +99,27 @@ test.describe('#398 live append paths bound the DOM', () => {
       await page.click('.cj-row[data-cron-id="cron-001"]');
       await page.waitForSelector('#cron-live-events');
 
-      // Dispatch on nz.bus — the same channel dashboard.js's WS core uses to
-      // hand each frame to the cron view. CRON_LIVE_MAX_EVENTS lives in
-      // utilities.js module scope and is not on the page's instrumentation
-      // surface, so the bound is established without naming it: push a large
-      // round, count, push another equally large round, count again. A
-      // container that trims lands on the same number twice; one that only
-      // appends doubles.
+      // Push event frames through wsm.onMessage, the dispatch the socket feeds:
+      // opening the drawer made cron:cron-001 the pending cron live key (the
+      // subscribe itself goes nowhere, there is no socket). CRON_LIVE_MAX_EVENTS
+      // lives in utilities.js module scope and is not on the page's
+      // instrumentation surface, so the bound is established without naming
+      // it: push a large round, count, push another equally large round, count
+      // again. A container that trims lands on the same number twice; one that
+      // only appends doubles.
       const ROUND = 350;
       const result = await page.evaluate((n) => {
         const w = /** @type {any} */ (window);
-        if (!w.nz || !w.nz.bus) return { err: 'nz.bus missing' };
+        if (!w.wsm) return { err: 'wsm missing' };
         const el = document.getElementById('cron-live-events');
         const base = Date.now();
         /** @param {number} from */
         const push = (from) => {
           for (let i = from; i < from + n; i++) {
-            w.nz.bus.dispatchEvent(new CustomEvent('cron:live-event', {
-              detail: { type: 'text', detail: 'cron chunk ' + i, time: base + i, uuid: 'cl-' + i },
-            }));
+            w.wsm.onMessage({
+              type: 'event', key: 'cron:cron-001',
+              event: { type: 'text', detail: 'cron chunk ' + i, time: base + i, uuid: 'cl-' + i },
+            });
           }
           return el.querySelectorAll(':scope > .event').length;
         };
