@@ -66,7 +66,8 @@ const clean = {
   'b.js': "const k = ['user', 'other']; addEventListener('x', (ev) => { if (ev.type === 'keydown') k.push(ev.type); });\nif (e.type !== 'result') {}\n",
   'contract.js': "export const NZ_CONTRACT = { ENUMS: { EVENT_TYPE: ['user', 'text'] } };",
 };
-const check = (files, o = other, sentinels = ['a.js', 'b.js']) => kindProblems(files, contract, o, sentinels);
+const anchors = { 'a.js': { S: 'EVENT_TYPE_INTERNAL' } };
+const check = (files, o = other, sentinels = ['a.js', 'b.js']) => kindProblems(files, contract, o, sentinels, anchors);
 
 test('contractKindProblems wants three non-empty lists, the two columns inside EVENT_TYPE', () => {
   assert.deepEqual(contractKindProblems(contract.ENUMS), []);
@@ -107,6 +108,19 @@ const BAD = [
   ['a typo in a const array passed to .indexOf', "const L = ['txt']; L.indexOf(e.type);", /\.type compared with "txt"/],
   ['a kind-keyed object used as a set', "const S2 = new Set(Object.keys({ tool_use: 1, result: 1 }));", /object restates 2 kinds as a set \(tool_use, result\)/],
   ['a kind-keyed true table', "const HIDE = { tool_use: true, result: true }; HIDE[e.type];", /object restates 2 kinds as a set/],
+  ['one kind literal added to a spread ENUMS list', "const S2 = new Set([...NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL, 'user']);", /array adds kind "user" to a spread NZ_CONTRACT\.ENUMS list/],
+  ["a typo against an inline (e.type || '')", "if ((e.type || '') === 'txt') {}", /\.type compared with "txt"/],
+  ['a typo against an inline (e && e.type)', "switch (e && e.type) { case 'txt': break; }", /\.type compared with "txt"/],
+  ['an anchor Set grown with .add', "S.add('user');", /a\.js:\d+: S is used other than as S\.has\(\.\.\.\)/],
+  ['an anchor Set passed on', 'mutate(S);', /S is used other than as S\.has/],
+  ['an anchor Set reassigned', 'S = new Set();', /S is used other than as S\.has/],
+  ['an anchor .has taken off uncalled', 'const h = S.has;', /S is used other than as S\.has/],
+  ['an anchor declared twice', 'function g() { const S = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL); return S.has(1); }', /a\.js: S is declared 2 times/],
+  ['an ENUMS list pushed to', "NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL.push('user');", /changes NZ_CONTRACT\.ENUMS at run time/],
+  ['an ENUMS list spliced', 'NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL.splice(0, 1);', /changes NZ_CONTRACT\.ENUMS at run time/],
+  ['an ENUMS list reassigned', 'NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL = [];', /changes NZ_CONTRACT\.ENUMS at run time/],
+  ['an ENUMS element overwritten', "NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL[0] = 'user';", /changes NZ_CONTRACT\.ENUMS at run time/],
+  ['an ENUMS list deleted', 'delete NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL;', /changes NZ_CONTRACT\.ENUMS at run time/],
 ];
 for (const [name, extra, want] of BAD) {
   test(`kindProblems rejects ${name}`, () => {
@@ -114,6 +128,36 @@ for (const [name, extra, want] of BAD) {
     assert.ok(problems.some((p) => want.test(p)), problems.join('\n') || '(no problems)');
   });
 }
+
+const ANCHOR_DECL = 'const S = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL);';
+const ANCHOR_BAD = [
+  ['swapped to another column', 'const S = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_MD_IGNORE);', /a\.js:1: S must be exactly new Set\(NZ_CONTRACT\.ENUMS\.EVENT_TYPE_INTERNAL\)/],
+  ['filtered', "const S = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL.filter((k) => k !== 'user'));", /S must be exactly/],
+  ['one literal kind', "const S = new Set(['tool_use']);", /S must be exactly/],
+  ['a spread plus one kind', "const S = new Set([...NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL, 'user']);", /S must be exactly/],
+  ['a computed column', "const S = new Set(NZ_CONTRACT.ENUMS['EVENT_TYPE_INTERNAL']);", /S must be exactly/],
+  ['not a Set', 'const S = NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL;', /S must be exactly/],
+  ['gone', 'const S2 = 1;', /a\.js: S is declared 0 times, want once — the anchor check has gone blind/],
+];
+for (const [name, decl, want] of ANCHOR_BAD) {
+  test(`kindProblems rejects an anchor Set ${name}`, () => {
+    assert.ok(clean['a.js'].startsWith(ANCHOR_DECL));
+    const { problems } = check({ ...clean, 'a.js': clean['a.js'].replace(ANCHOR_DECL, decl) });
+    assert.ok(problems.some((p) => want.test(p)), problems.join('\n') || '(no problems)');
+  });
+}
+
+test('kindProblems fails an anchor file that is not in the tree', () => {
+  const { 'a.js': _, ...withoutA } = clean;
+  assert.ok(check(withoutA, {}, []).problems.includes('a.js: not in the tree — the anchor check has gone blind'));
+});
+
+test('kindProblems leaves an anchor read through .has, another S and ENUMS reads alone', () => {
+  const ok = { ...clean, 'a.js': clean['a.js'] + "if (S.has(e.type)) {} if (S?.has(e.kind)) {} x.S = 1; const o = { S: 1 };" +
+    "const all = new Set([...NZ_CONTRACT.ENUMS.EVENT_TYPE, 'other']); NZ_CONTRACT.ENUMS.EVENT_TYPE.includes(e.type); [...NZ_CONTRACT.ENUMS.EVENT_TYPE].sort();" +
+    "if ((e.summary || e.type) === 'txt') {}" };
+  assert.deepEqual(check(ok).problems, []);
+});
 
 test('kindProblems fails a dead OTHER_TYPES entry, including one for a file it never saw', () => {
   const dead = check(clean, { 'b.js': ['keydown', 'click'], 'gone.js': ['quick'] }).problems;
@@ -140,9 +184,9 @@ test('kindProblems leaves one kind literal, a non-.type comparison and a non-.ty
 test('checkAll reports every check, death_reason and kinds alike, over one tree', () => {
   const full = { ...contract, ENUMS: { ...contract.ENUMS, DEATH_REASON: ['idle_timeout', 'evicted', 'cli_exited'] } };
   const tree = { ...clean, 'nz_util.js': nzUtil };
-  assert.deepEqual(checkAll(tree, full, other, ['a.js', 'b.js']).problems, []);
+  assert.deepEqual(checkAll(tree, full, other, ['a.js', 'b.js'], anchors).problems, []);
   const bad = { ...tree, 'a.js': clean['a.js'] + "if (e.type === 'txt' || r === 'evicted') {}" };
-  const { problems } = checkAll(bad, { ...full, ENUMS: { ...full.ENUMS, EVENT_TYPE_MD_IGNORE: [] } }, other, ['a.js', 'b.js']);
+  const { problems } = checkAll(bad, { ...full, ENUMS: { ...full.ENUMS, EVENT_TYPE_MD_IGNORE: [] } }, other, ['a.js', 'b.js'], anchors);
   for (const want of [/a\.js: hardcodes death_reason literal\(s\) evicted/, /EVENT_TYPE_MD_IGNORE is missing or empty/, /a\.js:\d+: \.type compared with "txt"/]) {
     assert.ok(problems.some((p) => want.test(p)), `${want} not in:\n${problems.join('\n')}`);
   }
