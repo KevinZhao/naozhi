@@ -78,13 +78,15 @@ func TestClaudeTranscriptLoader_InjectedPick(t *testing.T) {
 		return factory
 	}}
 
-	got := loader.LoadHistoryChainTail(context.Background(), "/claude", []string{"sid"}, "/ws", 10)
+	// Two IDs, oldest first: the claude factory walks them from the end
+	// (newest first), so a reordered slice would load the wrong session.
+	got := loader.LoadHistoryChainTail(context.Background(), "/claude", []string{"old", "new"}, "/ws", 10)
 
 	if gotID != "claude" {
 		t.Errorf("pick called with id=%q, want \"claude\"", gotID)
 	}
-	if gotCWD != "/ws" || len(gotIDs) != 1 || gotIDs[0] != "sid" {
-		t.Errorf("factory saw Workspace=%q SnapshotChainIDs=%v, want /ws [sid]", gotCWD, gotIDs)
+	if gotCWD != "/ws" || !reflect.DeepEqual(gotIDs, []string{"old", "new"}) {
+		t.Errorf("factory saw Workspace=%q SnapshotChainIDs=%v, want /ws [old new] (order preserved)", gotCWD, gotIDs)
 	}
 	if gotClaudeDir != "/claude" {
 		t.Errorf("factory saw Wiring.ClaudeDir=%q, want /claude", gotClaudeDir)
@@ -113,6 +115,21 @@ func TestClaudeTranscriptLoader_MissingFactory(t *testing.T) {
 	t.Parallel()
 	loader := claudeTranscriptLoader{pick: func(string) history.FactoryFn { return nil }}
 	got := loader.LoadHistoryChainTail(context.Background(), "/claude", []string{"sid"}, "/ws", 10)
+	if got != nil {
+		t.Fatalf("got %v, want nil", got)
+	}
+}
+
+// TestClaudeTranscriptLoader_NilPickFallsBack verifies a zero-value loader
+// falls back to history.PickFactory instead of calling a nil func. The
+// session test binary does not link internal/wireup, so the global registry
+// has no "claude" factory and the fallback degrades to an empty load.
+func TestClaudeTranscriptLoader_NilPickFallsBack(t *testing.T) {
+	t.Parallel()
+	if history.PickFactory("claude") != nil {
+		t.Fatal("precondition: a \"claude\" factory is registered in this binary, so the empty-load expectation no longer holds; update this test")
+	}
+	got := claudeTranscriptLoader{}.LoadHistoryChainTail(context.Background(), "/claude", []string{"sid"}, "/ws", 10)
 	if got != nil {
 		t.Fatalf("got %v, want nil", got)
 	}

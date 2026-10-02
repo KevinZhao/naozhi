@@ -531,16 +531,20 @@ func (v transcriptView) SessionID() string          { return "" }
 func (v transcriptView) SnapshotChainIDs() []string { return v.ids }
 
 // claudeTranscriptLoader is the production HistoryLoader: it resolves the
-// "claude" factory via pick and reads LoadBefore(ctx, 0, limit). pick must be
-// non-nil; NewRouter installs history.PickFactory. A missing factory (a
-// binary that does not link internal/wireup) warns once and yields nil
-// (see #3020).
+// "claude" factory via pick and reads LoadBefore(ctx, 0, limit). A nil pick
+// falls back to history.PickFactory (NewRouter installs it explicitly). A
+// missing factory (a binary that does not link internal/wireup) warns once
+// and yields nil (see #3020).
 type claudeTranscriptLoader struct {
 	pick func(string) history.FactoryFn
 }
 
 func (l claudeTranscriptLoader) LoadHistoryChainTail(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []clievent.EventEntry {
-	factory := l.pick("claude")
+	pick := l.pick
+	if pick == nil {
+		pick = history.PickFactory
+	}
+	factory := pick("claude")
 	if factory == nil {
 		history.WarnMissingFactory("claude")
 		return nil

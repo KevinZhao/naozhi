@@ -86,7 +86,7 @@ ADR 决策 (a) 在表述里明确：`GetOrCreate` 去前缀变裸 `OrCreate` **�
 |------|-------------|------|
 | `HistorySource.LoadBefore` | 接口 `cli/history.go:89`；实现 5 处：`cli/history.go:99`（Noop）、`history/claudejsonl/source.go:79`、`history/kirojsonl/source.go:152`、`history/naozhilog/source.go:132`、`history/merged/source.go:68` | 本地分页加载，已是 `Load` |
 | `naozhilog.Source.LoadLatest` | `history/naozhilog/source.go:98` | 本地加载最新，已是 `Load` |
-| `HistoryLoader.LoadHistoryChainTail` | 接口 `session/router_core.go:762`；实现 `router_core.go:769`（wrap `discovery.LoadHistoryChainTailCtx`） | 本地 JSONL 链遍历，已是 `Load` |
+| `HistoryLoader.LoadHistoryChainTail` | 接口 `session/router_core.go:512`；实现 `claudeTranscriptLoader`（`router_core.go:542`，经 `history.PickFactory("claude")` 调 `LoadBefore`，#3020） | 本地 JSONL 链遍历，已是 `Load` |
 
 **结论**：(b)/(c) 两条决策对现有代码库均**零 rename**——`Fetch*` 全部保留（网络语义），`Load*` 全部已合规。PR-3 实际上只需在文档/护栏层确认无新增违规，无生产代码改动。
 

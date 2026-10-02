@@ -688,7 +688,7 @@ dispatch → session, platform (registry)
 cron → session (Reader), platform (Notifier)
 sysession → session (sys-namespace stub registration)
 upstream → session (Reader), node (reverse protocol)
-session → cli (Process / EventLog / Caps), shim (manager hint), discovery, persist
+session → cli (Process / EventLog / Caps), shim (manager hint), history (claude transcript via PickFactory), persist
 cli → backend (Profile), persist (PersistSink), shim (protocol shape), osutil
 platform → osutil
 所有包 → log/slog（结构化日志）
