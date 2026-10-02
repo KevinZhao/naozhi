@@ -1,4 +1,7 @@
 import { NZ_CONTRACT } from './contract.js';
+import { authHeaders, getToken, lsGet, lsRemove, lsSet } from './platform.js';
+import { INITIAL_HISTORY_LIMIT, sessionStream } from './session_stream.js';
+import { WS_STATES, wsm } from './ws_manager.js';
 import { composer, hooks, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, reconcileChildren, registerActions, sessionExitChipHtml, patchCardExitChip } from './nz_util.js';
 import {
@@ -103,7 +106,6 @@ import {
   AVATAR_GROUP_GAP_MS,
   EARLIER_PAGE_LIMIT,
   EVENT_DIVIDER_GAP_MS,
-  INITIAL_HISTORY_LIMIT,
   MAX_LIVE_DOM_EVENTS,
   announce,
   configureUtilities,
@@ -241,18 +243,6 @@ function collectWorkspaceSessionIDs(sessions) {
   return ids;
 }
 
-// RNEW-UX-004: unified localStorage helper. Use these for NEW keys only —
-// legacy 'nz_' / 'naozhi_' call sites are intentionally left alone to
-// preserve persisted user state across upgrades. LS_SCHEMA is reserved for
-// future breaking changes (bump + migrate on read). All three helpers
-// swallow quota/disabled errors so callers never need their own try/catch.
-const LS_PREFIX = 'nz:';
-function lsSet(key, value) { try { localStorage.setItem(LS_PREFIX + key, JSON.stringify(value)); } catch (e) { /* quota / disabled */ } }
-function lsGet(key, fallback) { try { const v = localStorage.getItem(LS_PREFIX + key); return v == null ? fallback : JSON.parse(v); } catch (e) { return fallback; } }
-function lsRemove(key) { try { localStorage.removeItem(LS_PREFIX + key); } catch (e) {} }
-// Migration of existing 'nz_'/'naozhi_' keys is deferred — touching live
-// persisted state across 17 call sites is riskier than the double-prefix
-// quirk it would fix. Revisit when LS_SCHEMA is bumped.
 
 // Pending-session persistence (#cwd-fallback fix). The three pending maps
 // (sessionWorkspaces/sessionNodes/sessionBackends) used to live ONLY in JS
@@ -461,17 +451,6 @@ document.addEventListener('DOMContentLoaded', function () {
   // `#main`, which is repainted via innerHTML (mainEmptyHtml()), so its submit
   // handler is (re)bound in wireQuickAskInput() — the designated re-wire hook.
 });
-
-function getToken() { return ''; }
-// authHeaders builds the Authorization header set for fetch calls. Moved
-// here from cron_view (#2557 PR-E1): it wraps getToken, which lives in this
-// file, and both views consume it.
-function authHeaders() {
-  const headers = {};
-  const t = getToken();
-  if (t) headers['Authorization'] = 'Bearer ' + t;
-  return headers;
-}
 
 // setActivityView is the root view-router. It is the single owner of the
 // mutually-exclusive body.nz-view-* classes and the rail button active state.
@@ -2001,9 +1980,9 @@ function selectSession(key, node) {
 
   const changed = prevKey !== key || prevNode !== node;
   if (wsm.isConnected()) {
-    if (changed) wsm.unsubscribe();
-    wsm.lastEventTimeWs = 0;
-    wsm.subscribe(key, node);
+    if (changed) sessionStream.unsubscribe();
+    sessionStream.lastEventTimeWs = 0;
+    sessionStream.subscribe(key, node);
     if (timers.events) { clearInterval(timers.events); timers.events = null; }
   } else {
     fetchEvents(true);
@@ -3717,274 +3696,47 @@ function renderSettingsView() {
   if (sysBtn) sysBtn.addEventListener('click', function () { setActivityView('system'); });
 }
 
-/* ===== WebSocket Connection Manager ===== */
+/* ===== WebSocket state: status bar, fallback pollers, announcements ===== */
 
-const WS_STATES = { OFF: 'off', CONNECTING: 'connecting', AUTH: 'authenticating', CONNECTED: 'connected', DISCONNECTED: 'disconnected' };
-
-const wsm = {
-  conn: null,
-  state: WS_STATES.OFF,
-  backoff: 1000,
-  maxBackoff: 30000,
-  reconnectTimer: null,
-  pingTimer: null,
-  subscribedKey: null,
-  subscribedNode: null,
-  lastEventTimeWs: 0,
-  sendCounter: 0,
-  _initialSubscribe: false,
-  // _everConnected gates the "已重新连接" toast to only fire AFTER the
-  // first successful WS handshake, so a page-load from an already-up
-  // state doesn't emit a bogus "reconnected" toast. Once true, every
-  // subsequent CONNECTED transition from any non-CONNECTED state
-  // triggers the toast — matches the UX P1 spec of surfacing recovery
-  // back to the user.
-  _everConnected: false,
-  // _authBlockUntil is a unix-ms wall-clock deadline. While Date.now() <
-  // _authBlockUntil, connect() skips dialing and scheduleReconnect() pushes
-  // the next attempt to the deadline instead of its own exponential backoff.
-  // Set by startWSAuthRetryCountdown when the server emits auth_fail with
-  // retry_after=N (rate-limit lockout). Without this gate the default
-  // reconnect loop would immediately dial a fresh WS, hit the same 429,
-  // and rack up more lockout events in the journal.
-  _authBlockUntil: 0,
-  // R110-P1 WS outage duration display: wall-clock ms when the connection
-  // first left the CONNECTED state (or 0 when connected). setState maintains
-  // this: any CONNECTED→non-CONNECTED transition writes Date.now() if the
-  // field is still 0 (first outage arm — don't stomp an earlier outage while
-  // cycling connecting → auth → connecting during backoff); CONNECTED clears
-  // it. updateStatusBar reads it to render "已断开 N 秒/分" inline hint so
-  // users distinguish "just lost the WS 2s ago" from "dead for 10 min".
-  _disconnectedSince: 0,
-  // _ready: onReady callbacks, run in registration order after auth_ok's core.
-  _ready: [],
-
-  connect() {
-    if (this.conn && (this.conn.readyState === WebSocket.OPEN || this.conn.readyState === WebSocket.CONNECTING)) return;
-    // Respect the auth rate-limit gate: skip the dial if we're still within
-    // the lockout window. scheduleReconnect re-arms a timer pointing at the
-    // deadline so we come back exactly when the server says we can.
-    if (this._authBlockUntil > 0 && Date.now() < this._authBlockUntil) {
-      this.scheduleReconnect();
-      return;
+// wsStateChanged follows wsm (ws_manager.js): every transition repaints the
+// status bar; CONNECTED stops the REST fallback pollers, DISCONNECTED arms them.
+function wsStateChanged(s, prev) {
+  updateStatusBar();
+  if (s === WS_STATES.CONNECTED) {
+    // RNEW-UX-010 — sighted users see the dot flip; AT users get the
+    // transition announced politely. Only announce when it's a real
+    // transition (prev !== CONNECTED) to avoid re-announcing on no-op
+    // state refreshes.
+    if (prev !== WS_STATES.CONNECTED) announce(wsm._everConnected ? '已重新连接' : '已连接');
+    // WS connected: stop session polling, rely on push
+    if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
+    // Reduce discovered scan frequency
+    if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
+    // #2431: a hidden tab has had its pollers suspended by stopPollers;
+    // re-arming here would undo that. startPollers re-arms on return.
+    if (!document.hidden) timers.discoveredPoll = setInterval(scanDiscovered, 30000);
+    // Pull fresh node/session state immediately to clear stale data
+    debouncedFetchSessions();
+  } else if (s === WS_STATES.DISCONNECTED) {
+    // RNEW-UX-010 — announce only on real transitions from connected, so
+    // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
+    if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
+    // WS lost: start fallback polling — unless the tab is hidden (#2431):
+    // stopPollers already suspended everything and startPollers re-arms on
+    // visibilitychange from the then-current WS state.
+    const visible = !document.hidden;
+    if (visible && !timers.sessionPoll) timers.sessionPoll = setInterval(fetchSessions, 5000);
+    if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
+    if (visible) timers.discoveredPoll = setInterval(scanDiscovered, 5000);
+    if (selection.key && !timers.events) {
+      transcript.lastEventTime = sessionStream.lastEventTimeWs;
+      if (visible) timers.events = setInterval(() => fetchEvents(false), 1000);
     }
+  }
+}
+wsm.onStateChange(wsStateChanged);
 
-    this.setState(WS_STATES.CONNECTING);
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.conn = new WebSocket(proto + '//' + location.host + '/ws');
-
-    this.conn.onopen = () => {
-      this.setState(WS_STATES.AUTH);
-      const token = getToken();
-      this.conn.send(JSON.stringify({ type: NZ_CONTRACT.WS.auth, token: token }));
-    };
-
-    this.conn.onmessage = (evt) => {
-      try { this.onMessage(JSON.parse(evt.data)); }
-      catch (err) { console.error('ws parse error:', err); }
-    };
-
-    this.conn.onclose = () => {
-      this.cleanup();
-      this.setState(WS_STATES.DISCONNECTED);
-      this.scheduleReconnect();
-    };
-
-    this.conn.onerror = () => {};
-  },
-
-  cleanup() {
-    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
-  },
-
-  disconnect() {
-    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
-    this.cleanup();
-    if (this.conn) { this.conn.close(); this.conn = null; }
-    this.subscribedKey = null;
-    this.subscribedNode = null;
-    this._pendingSubscribeKey = null;
-    this._pendingSubscribeNode = null;
-    this.setState(WS_STATES.OFF);
-  },
-
-  scheduleReconnect() {
-    if (this.reconnectTimer) return;
-    // Pick the later of: the exponential-backoff delay, and the auth-block
-    // deadline. If an auth rate-limit countdown is active, we must not
-    // dial before it expires — the exponential curve would otherwise
-    // happily re-try every 1-30s and wake the 429 bucket over and over.
-    const now = Date.now();
-    const authGap = Math.max(0, this._authBlockUntil - now);
-    // RNEW-UX-001: add randomised jitter (0-500ms) on top of the computed
-    // delay. Without jitter, N tabs that all dropped together on the same
-    // server restart would redial on identical millisecond ticks, briefly
-    // saturating the upgrade limiter and causing a thundering herd. The
-    // jitter is additive (never shortens the gate) so the auth-block
-    // invariant above is preserved.
-    const jitter = Math.floor(Math.random() * 500);
-    const delay = Math.max(this.backoff, authGap) + jitter;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connect();
-    }, delay);
-    this.backoff = Math.min(this.backoff * 2, this.maxBackoff);
-  },
-
-  // _frames is the receive dispatch table: an outbound NZ_CONTRACT.WS type to
-  // its claims (handlers with a `when`, tried in registration order, the first
-  // match wins) and its one unconditional handler, run when no claim matches.
-  // No match, or an unregistered type, drops the frame.
-  _frames: new Map(),
-
-  on(type, fn, when) {
-    if (!Object.hasOwn(NZ_CONTRACT.WS, type)) throw new Error('wsm.on: unknown frame type ' + type);
-    const t = this._frames.get(type) || { claims: [], fallback: null };
-    if (when) t.claims.push({ fn, when });
-    else if (t.fallback) throw new Error('wsm.on: ' + type + ' already has a handler');
-    else t.fallback = fn;
-    this._frames.set(type, t);
-  },
-
-  onReady(fn) { this._ready.push(fn); },
-
-  onMessage(msg) {
-    const t = this._frames.get(msg.type);
-    if (!t) return;
-    const c = t.claims.find((x) => x.when(msg));
-    if (c) c.fn(msg);
-    else if (t.fallback) t.fallback(msg);
-  },
-
-  startPing() {
-    if (this.pingTimer) clearInterval(this.pingTimer);
-    this.pingTimer = setInterval(() => {
-      if (this.conn && this.conn.readyState === WebSocket.OPEN) {
-        this.conn.send(JSON.stringify({ type: NZ_CONTRACT.WS.ping }));
-      }
-    }, 30000);
-  },
-
-  send(msg) {
-    if (this.conn && this.conn.readyState === WebSocket.OPEN) {
-      this.conn.send(JSON.stringify(msg));
-      return true;
-    }
-    return false;
-  },
-
-  subscribe(key, node) {
-    node = node || 'local';
-    this._pendingSubscribeKey = key;
-    this._pendingSubscribeNode = node;
-    const msg = { type: NZ_CONTRACT.WS.subscribe, key: key };
-    if (node && node !== 'local') msg.node = node;
-    this._initialSubscribe = (this.lastEventTimeWs === 0);
-    if (this.lastEventTimeWs > 0) {
-      msg.after = this.lastEventTimeWs;
-    } else {
-      // Initial subscribe: ask for only the last INITIAL_HISTORY_LIMIT events.
-      // Keeps the first frame fast on large sessions; older events are fetched
-      // on demand via the "load earlier" button that calls GET
-      // /api/sessions/events?before=..&limit=..
-      msg.limit = INITIAL_HISTORY_LIMIT;
-    }
-    this.send(msg);
-  },
-
-  unsubscribe() {
-    if (this.subscribedKey) {
-      const msg = { type: NZ_CONTRACT.WS.unsubscribe, key: this.subscribedKey };
-      if (this.subscribedNode && this.subscribedNode !== 'local') msg.node = this.subscribedNode;
-      this.send(msg);
-    }
-    this.subscribedKey = null;
-    this.subscribedNode = null;
-    this._pendingSubscribeKey = null;
-    this._pendingSubscribeNode = null;
-    this.lastEventTimeWs = 0;
-  },
-
-  onConnected() {
-    if (timers.events) { clearInterval(timers.events); timers.events = null; }
-    if (selection.key) {
-      if (transcript.lastEventTime > 0 && this.lastEventTimeWs === 0) {
-        this.lastEventTimeWs = transcript.lastEventTime;
-      }
-      this.subscribe(selection.key, selection.node);
-    }
-  },
-
-  setState(s) {
-    const prev = this.state;
-    this.state = s;
-    // R110-P1 outage duration timestamp maintenance. Arm on first
-    // transition OUT of CONNECTED (or from a cold OFF start that never
-    // reached CONNECTED — treat any persistent non-CONNECTED as outage).
-    // Guard with `=== 0` so a connecting→auth→connecting cycle during
-    // backoff doesn't reset the clock to zero mid-outage. Clear on
-    // entering CONNECTED so the next outage arms fresh.
-    if (s === WS_STATES.CONNECTED) {
-      this._disconnectedSince = 0;
-    } else if (prev === WS_STATES.CONNECTED && this._disconnectedSince === 0) {
-      // Just left a healthy connection — stamp the wall clock.
-      this._disconnectedSince = Date.now();
-    } else if (this._disconnectedSince === 0 && s !== WS_STATES.OFF) {
-      // Cold-start / never-connected case: arm from the first
-      // CONNECTING attempt so the user sees a duration even before the
-      // first successful handshake. OFF (the initial synthetic state)
-      // is excluded — pre-boot doesn't count as outage.
-      this._disconnectedSince = Date.now();
-    }
-    updateStatusBar();
-    // (Removed _updateStatusTick — issue #434: the 1s repaint timer was a
-    // no-op since #sidebar-status DOM was deleted; selectedNode reconciliation
-    // is already driven by this updateStatusBar() call.)
-    if (s === WS_STATES.CONNECTED) {
-      // No reconnect toast: the sidebar status row already conveys the
-      // transition (amber "connecting..." dot → green "connected" dot,
-      // and .status-outage drops off) which is the user-visible signal.
-      // The previous top-of-screen toast was redundant and on mobile
-      // covered the header. _everConnected stays on the wsm struct because
-      // future consumers may still want to differentiate first-handshake
-      // from reconnect (e.g. fresh session poll vs. no-op).
-      // RNEW-UX-010 — sighted users see the dot flip; AT users get the
-      // transition announced politely. Only announce when it's a real
-      // transition (prev !== CONNECTED) to avoid re-announcing on no-op
-      // state refreshes.
-      if (prev !== WS_STATES.CONNECTED) announce(this._everConnected ? '已重新连接' : '已连接');
-      this._everConnected = true;
-      // WS connected: stop session polling, rely on push
-      if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
-      // Reduce discovered scan frequency
-      if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
-      // #2431: a hidden tab has had its pollers suspended by stopPollers;
-      // re-arming here would undo that. startPollers re-arms on return.
-      if (!document.hidden) timers.discoveredPoll = setInterval(scanDiscovered, 30000);
-      // Pull fresh node/session state immediately to clear stale data
-      debouncedFetchSessions();
-    } else if (s === WS_STATES.DISCONNECTED) {
-      // RNEW-UX-010 — announce only on real transitions from connected, so
-      // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
-      if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
-      // WS lost: start fallback polling — unless the tab is hidden (#2431):
-      // stopPollers already suspended everything and startPollers re-arms on
-      // visibilitychange from the then-current WS state.
-      const visible = !document.hidden;
-      if (visible && !timers.sessionPoll) timers.sessionPoll = setInterval(fetchSessions, 5000);
-      if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
-      if (visible) timers.discoveredPoll = setInterval(scanDiscovered, 5000);
-      if (selection.key && !timers.events) {
-        transcript.lastEventTime = this.lastEventTimeWs;
-        if (visible) timers.events = setInterval(() => fetchEvents(false), 1000);
-      }
-    }
-  },
-
-  isConnected() { return this.state === WS_STATES.CONNECTED; }
-};
-
-// Session-stream frame handlers; the subscription bookkeeping lives on wsm.
+// Session-stream frame handlers; the subscription bookkeeping is sessionStream.
 const sessionFrames = {
   onHistory(msg) {
     if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;
@@ -4002,9 +3754,9 @@ const sessionFrames = {
     // 时间戳守卫整批丢弃 —— 即"运行中重复点击会话后消息丢失/顺序错乱"。
     // backfill 帧不带 initial 标记，所以无论何时落地都只走增量 append，
     // _initialSubscribe 留给真正的初始帧消费。
-    const isInitial = wsm._initialSubscribe && msg.initial === true;
+    const isInitial = sessionStream._initialSubscribe && msg.initial === true;
     // 只有真正消费了初始帧才清标记（旧代码无条件清，是上述丢帧的直接原因）。
-    if (isInitial) wsm._initialSubscribe = false;
+    if (isInitial) sessionStream._initialSubscribe = false;
 
     // Rebuild the answered-set from history BEFORE rendering so card
     // re-renders show the correct locked state. The Set is in-memory so
@@ -4134,7 +3886,7 @@ const sessionFrames = {
 
     if (events.length > 0) {
       const last = events[events.length - 1];
-      if (last.time > wsm.lastEventTimeWs) wsm.lastEventTimeWs = last.time;
+      if (last.time > sessionStream.lastEventTimeWs) sessionStream.lastEventTimeWs = last.time;
     }
     // Build turnState from events
     if (isInitial) {
@@ -4204,7 +3956,7 @@ const sessionFrames = {
     if (hooks.isCronSessionFrozen && hooks.isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
-    if (ev.time > wsm.lastEventTimeWs) wsm.lastEventTimeWs = ev.time;
+    if (ev.time > sessionStream.lastEventTimeWs) sessionStream.lastEventTimeWs = ev.time;
     // Turn boundaries: reset state, don't feed into applyEventToTurnState
     if (ev.type === 'user') {
       const text = ev.detail || ev.summary || '';
@@ -4340,9 +4092,9 @@ const sessionFrames = {
       // the user was previously viewing a different session — subscribedKey
       // was set to the old key, blocking the subscribe for the new one.
       const ackKey = msg.key || selection.key;
-      if (ackKey && wsm.subscribedKey !== ackKey && wsm._pendingSubscribeKey !== ackKey) {
-        wsm.lastEventTimeWs = 0;
-        wsm.subscribe(ackKey, selection.node);
+      if (ackKey && sessionStream.subscribedKey !== ackKey && sessionStream._pendingSubscribeKey !== ackKey) {
+        sessionStream.lastEventTimeWs = 0;
+        sessionStream.subscribe(ackKey, selection.node);
       }
       // Re-subscribe is NOT needed here for already-subscribed sessions.
       // The existing eventPushLoop is still connected to the process's event
@@ -4445,12 +4197,12 @@ const sessionFrames = {
     // dashboard 静止直到手动重新点击会话（bug: 出结果后不自动更新）。
     // 清掉之后，下一次 running 广播经 case 1 重新订阅，拿到完整初始帧。
     if (msg.reason === 'subscription_timeout' &&
-        wsm.subscribedKey === msg.key &&
-        (wsm.subscribedNode || 'local') === msgNode) {
-      wsm.subscribedKey = null;
-      wsm.subscribedNode = null;
-      wsm._subscriptionSuspended = false;
-      wsm.lastEventTimeWs = 0;
+        sessionStream.subscribedKey === msg.key &&
+        (sessionStream.subscribedNode || 'local') === msgNode) {
+      sessionStream.subscribedKey = null;
+      sessionStream.subscribedNode = null;
+      sessionStream._subscriptionSuspended = false;
+      sessionStream.lastEventTimeWs = 0;
     }
     const prev = sessionList.sessionsData[sKey] || {};
     const prevState = prev.state;   // capture before mutation
@@ -4543,13 +4295,13 @@ const sessionFrames = {
     // sessions — that would cause full re-render and wipe the optimistic user message.
     if (msg.key === selection.key && msgNode === selection.node && msg.state === 'running') {
       const needSub = (
-        (wsm.subscribedKey !== msg.key && wsm._pendingSubscribeKey !== msg.key) || // case 1: not subscribed and no pending subscribe
+        (sessionStream.subscribedKey !== msg.key && sessionStream._pendingSubscribeKey !== msg.key) || // case 1: not subscribed and no pending subscribe
         (wasDead && !msg.reason) ||                                   // case 2
-        (wsm.subscribedKey === msg.key && wsm._subscriptionSuspended) // case 3
+        (sessionStream.subscribedKey === msg.key && sessionStream._subscriptionSuspended) // case 3
       );
       if (needSub) {
-        wsm.lastEventTimeWs = 0;
-        wsm.subscribe(msg.key, selection.node);
+        sessionStream.lastEventTimeWs = 0;
+        sessionStream.subscribe(msg.key, selection.node);
       }
     }
     // State changed: force next fetchSessions to re-render sidebar.
@@ -4562,13 +4314,6 @@ const sessionFrames = {
 
 /* ===== WS receive table: one registration per outbound frame type ===== */
 
-wsm.on(NZ_CONTRACT.WS.auth_ok, () => {
-  wsm.setState(WS_STATES.CONNECTED);
-  wsm.backoff = 1000;
-  wsm.startPing();
-  wsm.onConnected();
-  wsm._ready.forEach((fn) => fn());
-});
 // Classify the in-band WS auth error by pattern: the server emits
 // "too many attempts" for rate-limit lockouts (should be a warn
 // toast, not an error; the operator just needs to wait), and
@@ -4579,7 +4324,7 @@ wsm.on(NZ_CONTRACT.WS.auth_ok, () => {
 // 重试" hint. Older servers omit the field — parseInt of
 // undefined is NaN, and startWSAuthRetryCountdown clamps to a
 // 60s default so the UX degrades gracefully.
-wsm.on(NZ_CONTRACT.WS.auth_fail, (msg) => {
+wsm.onAuthFail((msg) => {
   const raw = (msg.error || '').toString();
   if (raw.toLowerCase().includes('too many')) {
     let retryAfter = parseInt(msg.retry_after, 10);
@@ -4588,25 +4333,24 @@ wsm.on(NZ_CONTRACT.WS.auth_fail, (msg) => {
   } else {
     showAPIError('WebSocket 鉴权', 401, raw || '令牌无效');
   }
-  wsm.conn.close();
 });
 wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
   // Server confirmed subscription — apply authoritative state
-  wsm.subscribedKey = wsm._pendingSubscribeKey || msg.key;
+  sessionStream.subscribedKey = sessionStream._pendingSubscribeKey || msg.key;
   // 非 pending 时以帧自带的 node 为准，不退到 'local'：relay 重建远端订阅
   // (remoteDropped) 或 reconnect 后，远端 subscribed 经 relay 扇出给该 key
   // 下所有 tab（relay 每帧注入 node，reverseconn 也带 Node）。非 pending 的
   // tab 若被改写成 'local'，之后 subscription_timeout 处理要求 node 匹配就
   // 不再清簿记 → 不重订阅，原 bug 复现。
-  wsm.subscribedNode = wsm._pendingSubscribeNode || msg.node || 'local';
-  wsm._pendingSubscribeKey = null;
-  wsm._pendingSubscribeNode = null;
+  sessionStream.subscribedNode = sessionStream._pendingSubscribeNode || msg.node || 'local';
+  sessionStream._pendingSubscribeKey = null;
+  sessionStream._pendingSubscribeNode = null;
   // Track whether the server started an eventPushLoop for this subscription.
   // "suspended" means the session had no process — no live events will arrive
   // until the process starts, at which point onSessionState triggers re-subscribe.
-  wsm._subscriptionSuspended = (msg.reason === 'suspended');
-  if (msg.state && msg.key === selection.key && wsm.subscribedNode === selection.node) {
-    const subSKey = sid(msg.key, wsm.subscribedNode);
+  sessionStream._subscriptionSuspended = (msg.reason === 'suspended');
+  if (msg.state && msg.key === selection.key && sessionStream.subscribedNode === selection.node) {
+    const subSKey = sid(msg.key, sessionStream.subscribedNode);
     if (sessionList.sessionsData[subSKey]) {
       sessionList.sessionsData[subSKey].state = msg.state;
       updateMainState(msg.state);
@@ -4614,7 +4358,7 @@ wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
   }
 });
 // Server ack for an explicit unsubscribe (wshub_subscribe.go, three
-// emit sites incl. the relayed remote ack). wsm.unsubscribe() already
+// emit sites incl. the relayed remote ack). sessionStream.unsubscribe() already
 // cleared subscribedKey/Node synchronously and a relayed ack may name
 // a key this tab no longer tracks — nothing to reconcile. Registered so
 // the frame is a documented no-op rather than an unhandled type.
@@ -4626,13 +4370,13 @@ wsm.on(NZ_CONTRACT.WS.error, (msg) => {
   // to local via the existing reconcile path, and re-fetch so the
   // sidebar reflects the node's sessions going away.
   if (!msg.key && msg.node && msg.error === 'node disconnected') {
-    if (wsm.subscribedNode === msg.node) {
-      wsm.subscribedKey = null;
-      wsm.subscribedNode = null;
+    if (sessionStream.subscribedNode === msg.node) {
+      sessionStream.subscribedKey = null;
+      sessionStream.subscribedNode = null;
     }
-    if (wsm._pendingSubscribeNode === msg.node) {
-      wsm._pendingSubscribeKey = null;
-      wsm._pendingSubscribeNode = null;
+    if (sessionStream._pendingSubscribeNode === msg.node) {
+      sessionStream._pendingSubscribeKey = null;
+      sessionStream._pendingSubscribeNode = null;
     }
     // The selected session lived on the dead node: no pushes can reach
     // it any more and its key means nothing under the `local` node
@@ -4660,9 +4404,9 @@ wsm.on(NZ_CONTRACT.WS.error, (msg) => {
   // arrives as a bare `error`) must not wipe an unrelated in-flight
   // subscribe. Keyless frames without a node are the legacy shape of a
   // subscribe rejection and still clear pending.
-  if (!msg.key || msg.key === wsm._pendingSubscribeKey) {
-    wsm._pendingSubscribeKey = null;
-    wsm._pendingSubscribeNode = null;
+  if (!msg.key || msg.key === sessionStream._pendingSubscribeKey) {
+    sessionStream._pendingSubscribeKey = null;
+    sessionStream._pendingSubscribeNode = null;
   }
 });
 wsm.on(NZ_CONTRACT.WS.history, (msg) => sessionFrames.onHistory(msg));
@@ -4682,8 +4426,8 @@ wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
     // a no-process subscribe returns "subscribed" + persisted history but
     // no live eventPushLoop, so subscribedKey may not be set while the
     // pending flag was already cleared. This ensures recovery.
-    if (selection.key && !wsm.subscribedKey && sessionList.sessionsData[sid(selection.key, selection.node)]) {
-      wsm.subscribe(selection.key, selection.node);
+    if (selection.key && !sessionStream.subscribedKey && sessionList.sessionsData[sid(selection.key, selection.node)]) {
+      sessionStream.subscribe(selection.key, selection.node);
     }
     const added = Object.keys(sessionList.sessionsData || {}).filter(k => !prevSessKeys.has(k));
     if (added.length > 0) announce('新会话已创建');
@@ -4702,7 +4446,6 @@ const daemonRun = () => {
 const sysRun = (msg) => msg.subsystem === 'sysession';
 wsm.on(NZ_CONTRACT.WS.run_started, daemonRun, sysRun);
 wsm.on(NZ_CONTRACT.WS.run_ended, daemonRun, sysRun);
-wsm.on(NZ_CONTRACT.WS.pong, () => {});
 
 /* ===== WS Helper Functions ===== */
 
@@ -4900,15 +4643,15 @@ function showOnboarding() {
 // is visible to importers, unlike a window-property copy.)
 // Wire the markdown renderers' dashboard-side helpers (#2558 D4). Runs in
 // dashboard's module body, before any render call.
-configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, featureForCurrent, fetchEvents, fetchSessions, getToken, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton, wsm });
-configureAuthModal({ applyFeatureGates, debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar, wsm });
+configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, featureForCurrent, fetchEvents, fetchSessions, getToken, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton });
+configureAuthModal({ applyFeatureGates, debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar });
 configureSidebarProject({ PICKER_SELECT_ONLY_STYLE, PICKER_SELECT_STYLE, accessProfileChipInfo, debouncedFetchSessions, fetchAccessProfiles, fetchCLIBackends, fetchSessions, getToken, projectDisplayLabel, projectDisplayPrefix, renderAccessProfilePicker, renderBackendPicker, renderSidebar, showAPIError, showNetworkError });
 configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions, escCloseVoiceOverlay, handleFiles, refreshBanner, resetTurnState, selectSession, sid });
-configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput, wsm });
-configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml, wsm });
-configureUtilities({ getToken, renderSystemView, wsm });
+configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput });
+configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml });
+configureUtilities({ getToken, renderSystemView });
 configureFileRefs({ AVATAR_GROUP_GAP_MS, ICONS, collapseSidebarForDrawer, getToken, isInternalEvent, loadKatex, loadMermaid, matchProject, renderRich, restoreSidebarAfterDrawer, runPendingAsync });
-configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid, wsm });
+configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid });
 configureSystemView({ formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, setActivityView, timeAgo, wireQuickAskInput });
 configureSplitView({ lsGet, lsRemove, lsSet, stickEventsBottom });
 configureSelfUpdate({ confirmDialog, markSessionOptimisticRunning });
@@ -4965,7 +4708,7 @@ wsm.connect();
     // connection liveness is independently maintained by the server's
     // protocol-level Ping/Pong (writePump, wsPingPeriod≈54s), so dropping the
     // app ping loses no liveness detection. Re-armed in startPollers on resume.
-    if (wsm && wsm.pingTimer) wsm.cleanup();
+    if (wsm.pingTimer) wsm.cleanup();
   };
   const startPollers = () => {
     if (!timers.sessionPoll) {
@@ -4978,7 +4721,7 @@ wsm.connect();
       // #2431: the 5 s sessions poll is a WS-outage fallback. Over a live
       // socket session_state pushes already drive the sidebar; arming the
       // interval here made it run alongside WS until the next reconnect.
-      if (!(wsm && wsm.state === WS_STATES.CONNECTED)) {
+      if (!(wsm.state === WS_STATES.CONNECTED)) {
         timers.sessionPoll = setInterval(fetchSessions, 5000);
       }
     }
@@ -4999,14 +4742,14 @@ wsm.connect();
     // eventTimer is a WS-outage fallback. If WS is live, events already
     // arrive via the socket and the timer is redundant; let the normal
     // WS state transitions re-arm it if the socket drops.
-    if (!timers.events && selection.key && wsm && wsm.state !== WS_STATES.CONNECTED) {
+    if (!timers.events && selection.key && wsm.state !== WS_STATES.CONNECTED) {
       fetchEvents(false);
       timers.events = setInterval(() => fetchEvents(false), 1000);
     }
     // #1770: re-arm the WS ping we paused in stopPollers, but only when the
     // socket is actually live — a dropped/offline socket has no ping to keep
     // and will re-arm via auth_ok on reconnect.
-    if (wsm && !wsm.pingTimer && wsm.conn && wsm.conn.readyState === WebSocket.OPEN) {
+    if (!wsm.pingTimer && wsm.conn && wsm.conn.readyState === WebSocket.OPEN) {
       wsm.startPing();
     }
   };
@@ -6191,23 +5934,12 @@ initSwipeBack();
 
 
 export {
-  authHeaders,
   eventHtml,
   fetchEvents,
-  getToken,
   isInternalEvent,
   lastDividerTime,
-  lsGet,
-  lsSet,
   renderEventsWithDividers,
   setActivityView,
-  wsm,
-
-
-
-
-
-
 };
 
 // ─── data-action registry (#1980 PR-2, docs/rfc/csp-data-action.md) ────────
@@ -6276,4 +6008,4 @@ registerActions({
 });
 
 // Read by the e2e suite through test/e2e/e2e-shim.js.
-export { WS_STATES, appendEvents, applyFeatureGates, closeHistoryPopover, debouncedFetchSessions, eventAlreadyRendered, fetchSessions, getNodeStatus, maybeShowOnboarding, renderEvents, renderMainShell, renderSidebar, restorePending, selectSession, sessionCardKey, toggleHistory, trimEventsScroll, updateHeaderCLI, updateStatusBar };
+export { appendEvents, applyFeatureGates, closeHistoryPopover, debouncedFetchSessions, eventAlreadyRendered, fetchSessions, getNodeStatus, maybeShowOnboarding, renderEvents, renderMainShell, renderSidebar, restorePending, selectSession, sessionCardKey, toggleHistory, trimEventsScroll, updateHeaderCLI, updateStatusBar };

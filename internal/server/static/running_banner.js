@@ -11,6 +11,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList } from './state.js';
 import { escAttr, nzViews, showToast } from './nz_util.js';
+import { wsm } from './ws_manager.js';
 
 const deps = {
   ICONS: null,
@@ -19,7 +20,6 @@ const deps = {
   setMsgValue: null,
   showNetworkError: null,
   sid: null,
-  wsm: null,
 };
 export function configureRunningBanner(impl) {
   for (const k of Object.keys(deps)) {
@@ -365,10 +365,10 @@ function interruptSession() {
       delete perSession.lastSent[deps.sid(selection.key, selection.node)];
     }
   }
-  if (deps.wsm.isConnected()) {
+  if (wsm.isConnected()) {
     const req = { type: 'interrupt', key: selection.key, id: 'int' + Date.now() };
     if (targetNode) req.node = targetNode;
-    deps.wsm.send(req);
+    wsm.send(req);
     showToast('已发送中断', 'warning');
   } else {
     // HTTP fallback when WebSocket is disconnected

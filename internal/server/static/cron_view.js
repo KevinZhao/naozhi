@@ -5,17 +5,15 @@ import {
   renderBackendPicker,
 } from './auth_modal.js';
 import {
-  authHeaders,
   eventHtml,
-  getToken,
   isInternalEvent,
   lastDividerTime,
-  lsGet,
-  lsSet,
   renderEventsWithDividers,
   setActivityView,
-  wsm,
 } from './dashboard.js';
+import { authHeaders, getToken, lsGet, lsSet } from './platform.js';
+import { sessionStream } from './session_stream.js';
+import { wsm } from './ws_manager.js';
 import {
   processEventsForDisplay,
   regroupAvatars,
@@ -722,7 +720,7 @@ function openCronPanel() {
   // sidebar filter now (see previewDiscovered comment) and must survive
   // opening the cron panel so the user comes back to the right node list.
   selection.key = null;
-  if (wsm.subscribedKey) wsm.unsubscribe();
+  if (sessionStream.subscribedKey) sessionStream.unsubscribe();
   if (timers.events) { clearInterval(timers.events); timers.events = null; }
   setActiveSessionCard(null);
   // NOTE: no mobileEnterChat() here. Cron is a standalone view, not a chat

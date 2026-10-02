@@ -1,5 +1,5 @@
 // cron_live.js — the cron live stream (cron-live RFC): a second subscription
-// channel beside the session one (wsm.subscribedKey). While a cron drawer is
+// channel beside the session one (sessionStream). While a cron drawer is
 // open on a running job it subscribes 'cron:<jobId>' so the operator sees the
 // claude child's streamed output. Fresh mode (scheduler_run.go:318) resets the
 // stub before every run, so the first subscribe always returns suspended + 0
@@ -13,7 +13,7 @@
 
 import { NZ_CONTRACT } from './contract.js';
 import { hooks, selection } from './state.js';
-import { wsm } from './dashboard.js';
+import { wsm } from './ws_manager.js';
 import { CRON_LIVE_MAX_EVENTS } from './utilities.js';
 import { appendEventsToContainer, isCronSessionFrozen, repaintCronLive, setCronLiveStatus, updateCronLiveTruncated } from './cron_view.js';
 
@@ -29,7 +29,7 @@ export const cronLive = {
   status: 'idle', // 'idle' | 'pending' | 'live' | 'stopped'
 };
 
-// cron-live RFC §1.2: 镜像 wsm.subscribe()，订阅 cron stub session 拿实时事件流。
+// cron-live RFC §1.2: 镜像 sessionStream.subscribe()，订阅 cron stub session 拿实时事件流。
 // after = lastEventTimeMs || runStartedAtMs：避免拉到上轮 run 的残留（cron
 // stub EventLog 可能跨 run 持续；fresh 模式下被 Reset 销毁后是空的）。
 export function subscribeCronLive(jobId, runStartedAtMs) {

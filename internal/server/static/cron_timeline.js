@@ -10,7 +10,7 @@
 
 import { NZ_CONTRACT } from './contract.js';
 import { showAuthModal } from './auth_modal.js';
-import { getToken } from './dashboard.js';
+import { getToken } from './platform.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { formatAbsTime, showAPIError, showNetworkError } from './utilities.js';
 import {

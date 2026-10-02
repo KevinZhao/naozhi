@@ -11,11 +11,11 @@
 import { NZ_CONTRACT } from './contract.js';
 import { selection, serverInfo, sessionList, ui } from './state.js';
 import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_util.js';
+import { wsm } from './ws_manager.js';
 
 const deps = {
   getToken: null,
   renderSystemView: null,
-  wsm: null,
 };
 export function configureUtilities(impl) {
   for (const k of Object.keys(deps)) {
@@ -545,17 +545,17 @@ function showNetworkError(action, err, duration) {
 // immediate connect. Triggered by the sidebar-status "reconnect" button
 // that surfaces after backoff has grown past 8s (see updateStatusBar).
 // Idempotent: double-click only results in one connect attempt because
-// deps.wsm.connect short-circuits when the socket is already OPEN/CONNECTING.
+// wsm.connect short-circuits when the socket is already OPEN/CONNECTING.
 function reconnectNow() {
-  if (deps.wsm.reconnectTimer) {
-    clearTimeout(deps.wsm.reconnectTimer);
-    deps.wsm.reconnectTimer = null;
+  if (wsm.reconnectTimer) {
+    clearTimeout(wsm.reconnectTimer);
+    wsm.reconnectTimer = null;
   }
-  deps.wsm.backoff = 1000;
+  wsm.backoff = 1000;
   // No toast: the sidebar status row already flips to "connecting..." when
-  // deps.wsm.connect() sets CONNECTING, and the outage/reconnect button update
+  // wsm.connect() sets CONNECTING, and the outage/reconnect button update
   // through updateStatusBar. A toast here was redundant with that signal.
-  deps.wsm.connect();
+  wsm.connect();
 }
 
 function fallbackCopy(text) {
@@ -948,11 +948,6 @@ const EVENT_DIVIDER_GAP_MS = 5 * 60 * 1000;
 // independent: a 30s gap groups avatars but emits no divider.
 const AVATAR_GROUP_GAP_MS = 30 * 1000;
 
-// INITIAL_HISTORY_LIMIT caps how many events the server sends on a fresh
-// subscribe / first fetch. Keeps big sessions snappy on first paint; older
-// pages load lazily via the "load earlier" button. Server caps at 500
-// regardless (maxEventsPageLimit) so 100-500 is the effective window.
-const INITIAL_HISTORY_LIMIT = 100;
 const EARLIER_PAGE_LIMIT = 100;
 
 // UX3 (#398): the live-push path (appendEvents) does insertAdjacentHTML('beforeend')
@@ -1066,7 +1061,6 @@ export {
   CRON_LIVE_MAX_EVENTS,
   EARLIER_PAGE_LIMIT,
   EVENT_DIVIDER_GAP_MS,
-  INITIAL_HISTORY_LIMIT,
   MAX_LIVE_DOM_EVENTS,
   announce,
   confirmDialog,

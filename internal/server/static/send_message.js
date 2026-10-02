@@ -12,6 +12,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, sessionList, timers } from './state.js';
 import { turnState } from './running_banner.js';
 import { showToast, patchCardExitChip } from './nz_util.js';
+import { wsm } from './ws_manager.js';
 
 const deps = {
   EVENT_DIVIDER_GAP_MS: null,
@@ -38,7 +39,6 @@ const deps = {
   stickEventsBottom: null,
   timeDividerHtml: null,
   updateSendButton: null,
-  wsm: null,
 };
 export function configureSendMessage(impl) {
   for (const k of Object.keys(deps)) {
@@ -299,8 +299,8 @@ async function sendComposerTurn(targetKey, targetNode) {
   // minted), so the two owners can never diverge. Token-mode deployments are
   // owner-stable either way; routing on file presence keeps them on the same
   // path for consistency.
-  if (deps.wsm.isConnected() && fileIDs.length === 0) {
-    const id = 'r' + (++deps.wsm.sendCounter);
+  if (wsm.isConnected() && fileIDs.length === 0) {
+    const id = 'r' + (++wsm.sendCounter);
     const sendMsg = { type: 'send', key: selection.key, text: text, id: id };
     // No file_ids here by construction — file-bearing sends take the HTTP
     // path above so the uploadStore owner matches the upload's cookie.
@@ -308,9 +308,9 @@ async function sendComposerTurn(targetKey, targetNode) {
     if (perSession.workspaces[selection.key]) sendMsg.workspace = perSession.workspaces[selection.key];
     if (perSession.backends[selection.key]) sendMsg.backend = perSession.backends[selection.key];
     if (perSession.accessProfiles[selection.key]) sendMsg.access_profile = perSession.accessProfiles[selection.key];
-    if (deps.wsm.send(sendMsg)) {
+    if (wsm.send(sendMsg)) {
       // Workspace/backend/access profile are consumed once on session spawn;
-      // forget them only now that the frame is out. A failed deps.wsm.send falls
+      // forget them only now that the frame is out. A failed wsm.send falls
       // through to the HTTP path below, which must still see them.
       if (sendMsg.workspace) {
         delete perSession.workspaces[selection.key];
@@ -327,7 +327,7 @@ async function sendComposerTurn(targetKey, targetNode) {
       if (text) perSession.lastSent[deps.sid(selection.key, selection.node)] = text;
       // Confirmed send: the workspace/node/backend were consumed above (and
       // deleted from the in-memory maps), so rewrite the durable blob without
-      // this key. Only on the success path — a failed deps.wsm.send falls through to
+      // this key. Only on the success path — a failed wsm.send falls through to
       // HTTP below and must keep the entry for that retry.
       deps.persistPending();
       return;
@@ -433,16 +433,16 @@ async function sendComposerTurn(targetKey, targetNode) {
       // .optimistic-msg when the real "user" event arrives. The WS-down
       // fallback keeps its legacy no-bubble behaviour (appendEvents also
       // replaces the bubble now, but the poll echo lags up to a tick).
-      if (deps.wsm.isConnected()) renderOptimisticUserMsg(text);
+      if (wsm.isConnected()) renderOptimisticUserMsg(text);
     }
 
     // Speed up polling when WS not connected
-    if (!deps.wsm.isConnected()) {
+    if (!wsm.isConnected()) {
       if (timers.events) clearInterval(timers.events);
       timers.events = setInterval(() => deps.fetchEvents(false), 500);
       setTimeout(() => {
         if (timers.events) clearInterval(timers.events);
-        if (!deps.wsm.isConnected()) {
+        if (!wsm.isConnected()) {
           timers.events = setInterval(() => deps.fetchEvents(false), 1000);
         }
       }, 15000);

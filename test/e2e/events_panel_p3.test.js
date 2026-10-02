@@ -220,13 +220,14 @@ test.describe('Events panel #2430 P3 / #2432 protocol', () => {
         // B1: unsubscribed frame — no throw, no state change. Seed the
         // bookkeeping first: with the mock's WS off it is null, and a
         // handler that nulls it would compare equal.
-        ws.subscribedKey = 'seeded-key';
-        ws.subscribedNode = 'seeded-node';
+        const ss = g('sessionStream');
+        ss.subscribedKey = 'seeded-key';
+        ss.subscribedNode = 'seeded-node';
         ws.onMessage({ type: 'unsubscribed', key: 'whatever' });
-        const subAfter = { key: ws.subscribedKey, node: ws.subscribedNode };
+        const subAfter = { key: ss.subscribedKey, node: ss.subscribedNode };
         const subBefore = { key: 'seeded-key', node: 'seeded-node' };
-        ws.subscribedKey = null;
-        ws.subscribedNode = null;
+        ss.subscribedKey = null;
+        ss.subscribedNode = null;
 
         // Draft the operator was typing must survive the deselect.
         const inp = document.getElementById('msg-input');

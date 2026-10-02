@@ -1,6 +1,6 @@
 // @ts-check
 // sessionFrames — the history / event / send_ack / session_state handlers —
-// keep the session subscription's bookkeeping on wsm, driven through a real
+// keep the session subscription's bookkeeping on sessionStream, driven through a real
 // socket:
 //  - a reconnect resumes after the last event a history or an event frame
 //    delivered (the cursor both frames advance);
@@ -15,7 +15,7 @@
 //    (toast, optimistic bubble, running flip); for a session sent to and then
 //    left it only rolls the running flip back; a tab that sent nothing ignores
 //    it.
-// A bookkeeping write that lands on sessionFrames instead of wsm leaves wsm's
+// A bookkeeping write that lands on sessionFrames instead of sessionStream leaves its
 // fields stale without throwing, so each case asserts a frame the mock saw.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
@@ -45,7 +45,7 @@ async function open(browser, mock, ack = {}) {
   const conn = mock.wsConnections[mock.wsConnections.length - 1];
   await expect.poll(() => subs(conn, KEY_A).length).toBe(1);
   conn.send({ type: 'subscribed', key: KEY_A, ...ack });
-  await page.waitForFunction((key) => wsm.subscribedKey === key, KEY_A);
+  await page.waitForFunction((key) => sessionStream.subscribedKey === key, KEY_A);
   return { ctx, page, conn, errors };
 }
 
@@ -69,7 +69,7 @@ async function barrier(page, conn) {
   await expect.poll(() => conn.messages.filter((m) => m.type === 'ping').length).toBe(n + 1);
 }
 
-test.describe('sessionFrames keep the bookkeeping on wsm', () => {
+test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
   let mock;
   test.beforeAll(async () => { mock = await startMockServer({ ws: true }); });
   test.afterAll(() => mock.server.close());
@@ -158,7 +158,7 @@ test.describe('sessionFrames keep the bookkeeping on wsm', () => {
 
   test('a running push after a suspended subscribe resubscribes', async ({ browser }) => {
     const { ctx, page, conn, errors } = await open(browser, mock, { reason: 'suspended' });
-    await page.waitForFunction(() => wsm._subscriptionSuspended === true);
+    await page.waitForFunction(() => sessionStream._subscriptionSuspended === true);
     conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
     await reSub(conn);
     expect(errors).toEqual([]);

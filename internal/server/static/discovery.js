@@ -11,6 +11,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList, timers, transcript } from './state.js';
 import { esc, fetchJSON } from './nz_util.js';
+import { sessionStream } from './session_stream.js';
 
 const deps = {
   EVENT_DIVIDER_GAP_MS: null,
@@ -32,7 +33,6 @@ const deps = {
   stickEventsBottom: null,
   stopPreviewPolling: null,
   timeDividerHtml: null,
-  wsm: null,
 };
 export function configureDiscovery(impl) {
   for (const k of Object.keys(deps)) {
@@ -106,7 +106,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, typeL
   // refresh. The "no managed session selected" state is fully represented
   // by `selection.key === null`; other call sites check it that way.
   selection.key = null;
-  if (deps.wsm.subscribedKey) deps.wsm.unsubscribe();
+  if (sessionStream.subscribedKey) sessionStream.unsubscribe();
   if (timers.events) { clearInterval(timers.events); timers.events = null; }
   deps.mobileEnterChat();
 

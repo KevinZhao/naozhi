@@ -62,7 +62,7 @@ test.describe('WS dispatch table', () => {
   });
 
   test('unsubscribe resets the event cursor, so the next subscribe asks for an initial page', async ({ browser }) => {
-    // auth_modal's new-session paths call wsm.unsubscribe() and leave the
+    // auth_modal's new-session paths call sessionStream.unsubscribe() and leave the
     // subscribe to sessions_update's auto-subscribe, which (unlike
     // selectSession) does not zero lastEventTimeWs itself.
     const ctx = await browser.newContext({ ...desktop });
@@ -70,9 +70,9 @@ test.describe('WS dispatch table', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
     await page.evaluate((key) => {
-      wsm.lastEventTimeWs = 12345;
-      wsm.unsubscribe();
-      wsm.subscribe(key, 'local');
+      sessionStream.lastEventTimeWs = 12345;
+      sessionStream.unsubscribe();
+      sessionStream.subscribe(key, 'local');
     }, KEY_B);
     const conn = mock.wsConnections[mock.wsConnections.length - 1];
     await expect.poll(() => subscribes(conn, KEY_B).length).toBe(1);

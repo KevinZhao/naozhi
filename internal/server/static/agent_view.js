@@ -16,8 +16,8 @@ import {
   eventHtml,
   fetchEvents,
   renderEventsWithDividers,
-  wsm,
 } from './dashboard.js';
+import { wsm } from './ws_manager.js';
 import {
   sid,
 } from './file_refs.js';
@@ -387,9 +387,7 @@ import {
       node: selection.node || 'local',
       task_id: taskID,
     };
-    if (wsm && typeof wsm.send === 'function') {
-      wsm.send(msg);
-    }
+    wsm.send(msg);
   }
 
   function unsubscribeCurrent() {
@@ -401,9 +399,7 @@ import {
       node: selection.node || 'local',
       task_id: taskID,
     };
-    if (wsm && typeof wsm.send === 'function') {
-      wsm.send(msg);
-    }
+    wsm.send(msg);
   }
 
   // ─── Breadcrumb ────────────────────────────────────────────────────
