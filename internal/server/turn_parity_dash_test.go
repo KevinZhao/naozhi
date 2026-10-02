@@ -201,9 +201,10 @@ func TestTurnParity09_Dash_DetachedTurnPanicCrashesProcess(t *testing.T) {
 		ws.send("w1", "hello")
 		turns.turn(t, "turn", parityOutcome{Panic: "parity-row09-unrecovered"})
 		// The goroutine's deferred release runs while the panic unwinds, so an
-		// idle engine is no proof of survival; outlast the crash instead.
+		// idle engine is no proof of survival. The expected event is this
+		// process dying; parityWait is its deadline, as for every wait here.
 		h.waitEngineIdle()
-		<-time.After(2 * time.Second)
+		<-time.After(parityWait)
 		t.Log("parity-row09-survived")
 		return
 	}

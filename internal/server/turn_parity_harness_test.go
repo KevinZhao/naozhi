@@ -9,7 +9,8 @@ package server
 // Everything runs on a real Server from buildServerWithHandlers, so the IM
 // dispatcher and the dashboard send engine share the one MessageQueue the
 // composition root builds. Sessions are injected TestProcesses whose turns the
-// test scripts one by one; nothing waits on a clock.
+// test scripts one by one. Every wait is for an expected event, with
+// parityWait as its deadline; no test sleeps to let something happen.
 
 import (
 	"bytes"

@@ -383,6 +383,10 @@ func TestTurnParity15_IM_DrainTimerRearms(t *testing.T) {
 		t.Fatalf("second drain = %q", c.Text)
 	}
 	h.waitDone(owner, "owner loop")
+	if h.plat.removedFor("m2") != 1 || h.plat.removedFor("m3") != 1 {
+		t.Fatalf("drained IM messages kept their ⏳: removed m2=%d m3=%d, want 1 each",
+			h.plat.removedFor("m2"), h.plat.removedFor("m3"))
+	}
 }
 
 func TestTurnParity16_IM_InterruptModeInterruptsOnce(t *testing.T) {
@@ -470,6 +474,9 @@ func TestTurnParity24_IM_QueuedAck(t *testing.T) {
 		turns.answer(okTurn("R1"))
 		turns.turn(t, "drain turn", okTurn("R2"))
 		h.waitDone(owner, "owner loop")
+		if h.plat.removedFor("m2") != 1 {
+			t.Fatal("drained IM message kept its ⏳")
+		}
 	})
 	t.Run("plain platform gets one rate-limited text", func(t *testing.T) {
 		h := newParityHarness(t, parityOpts{})
