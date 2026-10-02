@@ -15,7 +15,7 @@ const (
 	// that does not match a reserved namespace prefix.
 	RoleIM
 	// RoleCron is a cron-scheduler-owned stub. Key shape "cron:{jobID}";
-	// see RegisterCronStub.
+	// see RegisterCronStubWithChain.
 	RoleCron
 	// RoleProject is a project-scoped planner session. Key shape
 	// "project:{name}:planner".

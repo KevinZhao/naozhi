@@ -480,11 +480,11 @@ func TestRouterStoreRestoreUserLabel(t *testing.T) {
 func TestRouterSetGetSessionBackend(t *testing.T) {
 	r := NewRouter(RouterConfig{})
 	r.SetSessionBackend("k1", "kiro")
-	if got := r.SessionBackend("k1"); got != "kiro" {
+	if got := pickedBackendForTest(r, "k1"); got != "kiro" {
 		t.Errorf("GetSessionBackend = %q, want kiro", got)
 	}
 	r.SetSessionBackend("k1", "") // clears
-	if got := r.SessionBackend("k1"); got != "" {
+	if got := pickedBackendForTest(r, "k1"); got != "" {
 		t.Errorf("GetSessionBackend after clear = %q, want empty", got)
 	}
 }

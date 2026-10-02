@@ -298,7 +298,7 @@ type ManagedSession struct {
 	deathReason atomic.Pointer[string] // why process died, empty if alive
 	// overlayDrift is the reconcile-computed per-field diff between the live
 	// shim's argv and a fresh spawn under current config (#2543). Written by
-	// reconnectShims outside the table lock, read lock-free by snapshot(); nil = none.
+	// ReconnectShimsCtx outside the table lock, read lock-free by snapshot(); nil = none.
 	overlayDrift atomic.Pointer[[]OverlayFieldDrift]
 	// userLabel is an operator-set display name overriding summary/last_prompt
 	// in the dashboard. Empty = unset.

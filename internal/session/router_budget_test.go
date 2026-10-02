@@ -25,7 +25,7 @@ const (
 	routerFieldBaseline = 35
 	// routerMethodBaseline counts methods whose receiver is Router, *Router
 	// or a type that stands in for Router.
-	routerMethodBaseline = 143
+	routerMethodBaseline = 134
 	// routerTypeRefBaseline counts the identifier Router outside method
 	// receivers and its own declaration: parameters, results, fields,
 	// aliases, conversions, composite literals. A package func taking *Router
@@ -48,7 +48,7 @@ const (
 // it is spelled.
 const routerFileLinesTargetBaseline = 900
 
-const routerCoreLinesBaseline = 1281
+const routerCoreLinesBaseline = 1261
 
 const routerLifecycleLinesBaseline = 1523
 

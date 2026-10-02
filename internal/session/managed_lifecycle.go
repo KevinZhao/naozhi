@@ -45,7 +45,7 @@ func (s *ManagedSession) isAlive() bool {
 }
 
 // ReattachProcess safely injects a reconnected shim process into this session.
-// Called by Router.reconnectShims after naozhi restart.
+// Called by Router.ReconnectShimsCtx after naozhi restart.
 func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()

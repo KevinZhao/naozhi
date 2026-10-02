@@ -21,7 +21,7 @@ func TestStreamEvents_NotifyClosedAfterReset_EmitsTerminalState(t *testing.T) {
 
 	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
 	const key = "cron:stream-events-nil-test"
-	r.RegisterCronStub(key, "/tmp/stream-events-test", "prompt")
+	r.RegisterCronStubWithChain(key, "/tmp/stream-events-test", "prompt", nil)
 
 	// Sanity: session is present before reset.
 	if r.SessionFor(key) == nil {
@@ -54,7 +54,7 @@ func TestStreamEvents_NotifyClosedAfterReset_EmitsTerminalState(t *testing.T) {
 
 	// Prime streamEvents by re-registering a stub so the initial SessionFor
 	// passes; the closed-notify branch is what we are testing.
-	r.RegisterCronStub(key, "/tmp/stream-events-test", "prompt")
+	r.RegisterCronStubWithChain(key, "/tmp/stream-events-test", "prompt", nil)
 	if r.SessionFor(key) == nil {
 		t.Fatal("setup: re-register did not install session")
 	}

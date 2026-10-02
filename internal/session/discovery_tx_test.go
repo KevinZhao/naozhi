@@ -47,7 +47,7 @@ func TestRegisterCronStub_LeavesALiveSessionAlone(t *testing.T) {
 	s := injectSession(r, key, newIdleProc())
 	s.setWorkspace("/srv/running")
 
-	r.RegisterCronStub(key, "/srv/reloaded", "prompt")
+	r.RegisterCronStubWithChain(key, "/srv/reloaded", "prompt", nil)
 	if got := s.Workspace(); got != "/srv/running" {
 		t.Errorf("workspace = %q, want the running session's /srv/running", got)
 	}
@@ -90,10 +90,10 @@ func TestSetSessionTuning_RespawnWakesAShutdownWaitingOnTheSession(t *testing.T)
 func TestSessionPicks_CapAndRoundTrip(t *testing.T) {
 	r := newTestRouter(4)
 	r.SetSessionAccessProfile("feishu:direct:ap:general", "work")
-	if got := r.SessionAccessProfile("feishu:direct:ap:general"); got != "work" {
+	if got := pickedAccessProfileForTest(r, "feishu:direct:ap:general"); got != "work" {
 		t.Errorf("SessionAccessProfile = %q, want work", got)
 	}
-	if got := r.SessionBackend("feishu:direct:ap:general"); got != "" {
+	if got := pickedBackendForTest(r, "feishu:direct:ap:general"); got != "" {
 		t.Errorf("an access-profile pick leaked into the backend picks: %q", got)
 	}
 
@@ -101,11 +101,11 @@ func TestSessionPicks_CapAndRoundTrip(t *testing.T) {
 		r.SetSessionBackend(fmt.Sprintf("feishu:direct:cap-%d:general", i), "claude")
 	}
 	r.SetSessionBackend("feishu:direct:cap-over:general", "kiro")
-	if got := r.SessionBackend("feishu:direct:cap-over:general"); got != "" {
+	if got := pickedBackendForTest(r, "feishu:direct:cap-over:general"); got != "" {
 		t.Errorf("a new pick past the cap was recorded: %q", got)
 	}
 	r.SetSessionBackend("feishu:direct:cap-0:general", "kiro")
-	if got := r.SessionBackend("feishu:direct:cap-0:general"); got != "kiro" {
+	if got := pickedBackendForTest(r, "feishu:direct:cap-0:general"); got != "kiro" {
 		t.Errorf("updating an existing pick at the cap = %q, want kiro", got)
 	}
 }

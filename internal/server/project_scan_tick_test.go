@@ -37,10 +37,12 @@ func TestProjectScanTick_BumpsRouterVersionOnChange(t *testing.T) {
 		ProjectManager: mgr,
 	})
 
+	version := func() uint64 { _, v := router.ListSessionsWithVersion(); return v }
+
 	// No change → no bump.
-	before := router.Version()
+	before := version()
 	srv.projectScanTick()
-	if got := router.Version(); got != before {
+	if got := version(); got != before {
 		t.Fatalf("unchanged project set bumped version %d → %d", before, got)
 	}
 
@@ -49,7 +51,7 @@ func TestProjectScanTick_BumpsRouterVersionOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.projectScanTick()
-	afterAdd := router.Version()
+	afterAdd := version()
 	if afterAdd == before {
 		t.Fatalf("project added but router version stayed %d", before)
 	}
@@ -59,7 +61,7 @@ func TestProjectScanTick_BumpsRouterVersionOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.projectScanTick()
-	if got := router.Version(); got == afterAdd {
+	if got := version(); got == afterAdd {
 		t.Fatalf("project removed but router version stayed %d", afterAdd)
 	}
 }

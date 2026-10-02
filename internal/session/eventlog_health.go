@@ -66,12 +66,6 @@ func (r *Router) EventLogStats() EventLogHealth {
 // Keeps the persist import live (only its Stats struct is used here).
 var _ = persist.Stats{}
 
-// EventLogWriterHealthy returns a single boolean suitable for a monitor rule.
-func (r *Router) EventLogWriterHealthy() bool {
-	s := r.EventLogStats()
-	return !s.Enabled || s.WriterAlive
-}
-
 // Keeps the `time` import live.
 var _ = time.Nanosecond
 

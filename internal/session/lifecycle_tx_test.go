@@ -182,10 +182,10 @@ func TestResetChatAndSetWorkspace_ReleasesTheSlotsAndOnlyTheBackendPick(t *testi
 	if got := r.ss.Active(); got != 0 {
 		t.Errorf("active = %d after the chat reset, want 0", got)
 	}
-	if got := r.SessionBackend(key); got != "" {
+	if got := pickedBackendForTest(r, key); got != "" {
 		t.Errorf("backend pick = %q after the chat reset, want cleared", got)
 	}
-	if got := r.SessionAccessProfile(key); got != "work" {
+	if got := pickedAccessProfileForTest(r, key); got != "work" {
 		t.Errorf("access-profile pick = %q after the chat reset, want it kept", got)
 	}
 }

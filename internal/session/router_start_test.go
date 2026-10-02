@@ -1,16 +1,15 @@
 package session
 
 import (
-	"context"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// TestRouter_Start_Idempotent locks in that Router.Start (the lifecycle
-// hook extracted from NewRouter for R245-ARCH-46 / #906) is idempotent.
-// startBackgroundLifecycle is guarded by startOnce (R20260607-ARCH-1), so
-// multiple Start calls must not spawn redundant orphan sweeps or overwrite
+// TestRouter_Start_Idempotent locks in that startBackgroundLifecycle (the
+// lifecycle hook extracted from NewRouter for R245-ARCH-46 / #906) is
+// idempotent. It is guarded by startOnce (R20260607-ARCH-1), so repeated
+// calls must not spawn redundant orphan sweeps or overwrite
 // r.attachmentTracker (which would leak the first tracker's goroutine).
 func TestRouter_Start_Idempotent(t *testing.T) {
 	tmp := t.TempDir()
@@ -26,20 +25,19 @@ func TestRouter_Start_Idempotent(t *testing.T) {
 	// Capture the tracker pointer installed at construction time.
 	trackerAfterNew := r.attachmentTracker
 
-	// Subsequent Start calls must be no-ops: startOnce.Do skips the body.
-	r.Start(context.Background())
-	r.Start(context.Background())
+	// Subsequent calls must be no-ops: startOnce.Do skips the body.
+	r.startBackgroundLifecycle()
+	r.startBackgroundLifecycle()
 
 	if r.attachmentTracker != trackerAfterNew {
-		t.Error("Start called multiple times overwrote attachmentTracker — startOnce guard not working (R20260607-ARCH-1)")
+		t.Error("startBackgroundLifecycle called multiple times overwrote attachmentTracker — startOnce guard not working (R20260607-ARCH-1)")
 	}
 }
 
-// TestRouter_Start_NoEventLogDir verifies that Start is safe to call
-// when EventLogDir is unset — both runOrphanSweep and
-// startAttachmentTracker short-circuit on the empty-dir guard, so
-// neither a sweep goroutine nor an attachment tracker should be
-// installed.
+// TestRouter_Start_NoEventLogDir verifies that startBackgroundLifecycle is
+// safe to call when EventLogDir is unset — both runOrphanSweep and
+// startAttachmentTracker short-circuit on the empty-dir guard, so neither a
+// sweep goroutine nor an attachment tracker should be installed.
 func TestRouter_Start_NoEventLogDir(t *testing.T) {
 	tmp := t.TempDir()
 	r := NewRouter(RouterConfig{
@@ -49,7 +47,7 @@ func TestRouter_Start_NoEventLogDir(t *testing.T) {
 	})
 	t.Cleanup(r.Shutdown)
 
-	r.Start(context.Background())
+	r.startBackgroundLifecycle()
 
 	if r.attachmentTracker != nil {
 		t.Error("attachmentTracker should be nil when eventLogDir is unset")

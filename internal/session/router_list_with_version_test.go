@@ -18,9 +18,9 @@ func TestListSessionsWithVersion_PairsAtomically(t *testing.T) {
 	if len(snaps) != 0 {
 		t.Fatalf("empty router: snapshots = %d, want 0", len(snaps))
 	}
-	// Version() reads the same atomic counter — must agree.
-	if got := r.Version(); got != v0 {
-		t.Errorf("Version() = %d, ListSessionsWithVersion version = %d (must match for unmutated router)", got, v0)
+	// ss.Gen() reads the same atomic counter — must agree.
+	if got := r.ss.Gen(); got != v0 {
+		t.Errorf("ss.Gen() = %d, ListSessionsWithVersion version = %d (must match for unmutated router)", got, v0)
 	}
 
 	// BumpVersion advances storeGen exactly once; the next call must

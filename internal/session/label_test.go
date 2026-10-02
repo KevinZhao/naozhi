@@ -168,10 +168,10 @@ func TestBumpVersion_NotifiesAndIncrements(t *testing.T) {
 	r := newTestRouter(3)
 	var notified int
 	observe(r).changed = func() { notified++ }
-	before := r.Version()
+	before := r.ss.Gen()
 	r.BumpVersion()
-	if after := r.Version(); after <= before {
-		t.Errorf("Version did not advance: before=%d after=%d", before, after)
+	if after := r.ss.Gen(); after <= before {
+		t.Errorf("version did not advance: before=%d after=%d", before, after)
 	}
 	if notified == 0 {
 		t.Errorf("expected onChange to fire on BumpVersion")
