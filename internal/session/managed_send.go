@@ -23,6 +23,8 @@ import (
 // `priority` is one of "", "now", "next", "later"; empty lets the CLI default
 // ("next") win. "now" aborts the in-flight turn (docs/rfc/passthrough-mode.md §5.6).
 func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback, priority string) (*clievent.SendResult, error) {
+	s.turnWaiters.Add(1)
+	defer s.turnWaiters.Add(-1)
 	s.touchLastActive()
 
 	prompt := textutil.TruncateRunes(text, 120)
@@ -123,6 +125,8 @@ func (s *ManagedSession) mapSendError(proc processIface, err error) {
 // Send delivers a message to the claude process and returns the result.
 // Messages to the same session are serialized via sendMu.
 func (s *ManagedSession) Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
+	s.turnWaiters.Add(1)
+	defer s.turnWaiters.Add(-1)
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 

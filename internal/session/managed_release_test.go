@@ -3,11 +3,15 @@ package session
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // sidProc is an idle fakeProcess that reports a CLI session id, so a spawn
@@ -37,6 +41,39 @@ func (h *resumeRecorder) hook(_ context.Context, opts cli.SpawnOptions) (process
 	}
 	h.procs = append(h.procs, p)
 	return p, nil
+}
+
+// pendingProc is an idle process holding one passthrough message the CLI has
+// not started yet.
+type pendingProc struct{ *fakeProcess }
+
+func (pendingProc) PassthroughDepth() int { return 1 }
+
+// liveSendProc fails a Send that reaches it after it was closed, as a real
+// process returns ErrProcessExited.
+type liveSendProc struct{ *fakeProcess }
+
+func (p liveSendProc) Send(ctx context.Context, text string, images []clievent.Attachment, cb clievent.EventCallback) (*clievent.SendResult, error) {
+	if !p.Alive() {
+		return nil, clierr.ErrProcessExited
+	}
+	return p.fakeProcess.Send(ctx, text, images, cb)
+}
+
+// heldPassthroughProc parks SendPassthrough until release is closed, the way
+// a queued message waits for the CLI to start it.
+type heldPassthroughProc struct {
+	*fakeProcess
+	entered, release chan struct{}
+}
+
+func (p heldPassthroughProc) SendPassthrough(ctx context.Context, text string, images []clievent.Attachment, cb clievent.EventCallback, _ string) (*clievent.SendResult, error) {
+	close(p.entered)
+	<-p.release
+	if !p.Alive() {
+		return nil, clierr.ErrProcessExited
+	}
+	return p.fakeProcess.Send(ctx, text, images, cb)
 }
 
 func cronAliveCount(r *Router) (n int) {
@@ -94,8 +131,9 @@ func TestReleaseIdleProcess_NextGetOrCreateResumesSameSession(t *testing.T) {
 }
 
 // What ReleaseIdleProcess refuses: a user session (never released behind its
-// owner's back), a turn still running, a Send holding sendMu, and a session
-// whose process is already gone. Each leaves the process as it was.
+// owner's back), a turn still running, a Send holding or queued on sendMu, a
+// passthrough message the CLI has not started, and a session whose process is
+// already gone. Each leaves the process as it was.
 func TestReleaseIdleProcess_Refusals(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -119,6 +157,19 @@ func TestReleaseIdleProcess_Refusals(t *testing.T) {
 			s := &ManagedSession{key: "cron:job-send", exempt: true}
 			s.storeProcess(p)
 			s.sendMu.Lock()
+			return s, p
+		}},
+		{"turn_waiting", func() (*ManagedSession, *fakeProcess) {
+			p := newIdleProc()
+			s := &ManagedSession{key: "cron:job-wait", exempt: true}
+			s.storeProcess(p)
+			s.turnWaiters.Add(1)
+			return s, p
+		}},
+		{"passthrough_pending", func() (*ManagedSession, *fakeProcess) {
+			p := newIdleProc()
+			s := &ManagedSession{key: "cron:job-pt", exempt: true}
+			s.storeProcess(pendingProc{p})
 			return s, p
 		}},
 		{"dead", func() (*ManagedSession, *fakeProcess) {
@@ -146,6 +197,64 @@ func TestReleaseIdleProcess_Refusals(t *testing.T) {
 				t.Errorf("a refused release stamped death reason %q", got)
 			}
 		})
+	}
+}
+
+// A dashboard message queued on sendMu behind the cron run's Send must not
+// lose its process: the release that runs as the cron Send unlocks would
+// otherwise win the lock (TryLock barges past a woken waiter) and close it.
+func TestReleaseIdleProcess_RefusedWhileSendQueued(t *testing.T) {
+	t.Parallel()
+	p := liveSendProc{newIdleProc()}
+	s := &ManagedSession{key: "cron:job-queued", exempt: true}
+	s.storeProcess(p)
+
+	s.sendMu.Lock() // the cron run's Send
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.Send(context.Background(), "follow-up", nil, nil)
+		errc <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for s.turnWaiters.Load() == 0 && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	s.sendMu.Unlock()
+	if s.ReleaseIdleProcess() {
+		t.Error("ReleaseIdleProcess closed the process a queued Send was waiting for")
+	}
+	if err := <-errc; err != nil {
+		t.Errorf("queued Send: %v, want it to reach a live process", err)
+	}
+	if !p.Alive() {
+		t.Error("process closed")
+	}
+	if !s.ReleaseIdleProcess() {
+		t.Error("release refused once the queued Send returned")
+	}
+}
+
+// A passthrough message handed to the CLI but not yet started leaves the
+// process idle and sendMu free; the release must still wait for it.
+func TestReleaseIdleProcess_RefusedDuringPassthroughSend(t *testing.T) {
+	t.Parallel()
+	p := heldPassthroughProc{fakeProcess: newIdleProc(), entered: make(chan struct{}), release: make(chan struct{})}
+	s := &ManagedSession{key: "cron:job-passthrough", exempt: true}
+	s.storeProcess(p)
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.SendPassthrough(context.Background(), "follow-up", nil, nil, "")
+		errc <- err
+	}()
+	<-p.entered
+	released := s.ReleaseIdleProcess()
+	close(p.release)
+	if err := <-errc; err != nil {
+		t.Errorf("SendPassthrough: %v", err)
+	}
+	if released {
+		t.Error("ReleaseIdleProcess closed the process under a pending passthrough message")
 	}
 }
 
