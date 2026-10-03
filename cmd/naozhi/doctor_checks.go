@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/selfupdate"
 )
@@ -271,8 +270,8 @@ func (d *doctor) checkZeroDowntimeScopes() {
 // Secure and can leak on a downgrade of the proxy hop. Warn, not FAIL —
 // doctor reserves FAIL for "broken now".
 func (d *doctor) checkServerSecurity() {
-	cfg, err := config.Load(d.configPath)
-	if err != nil || cfg == nil {
+	cfg, err := d.loadConfig()
+	if err != nil {
 		d.add("server security", "pass", "skipped (config not loaded)")
 		return
 	}

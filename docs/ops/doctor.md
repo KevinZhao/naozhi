@@ -41,9 +41,14 @@ naozhi doctor --timeout 2s
 | `dispatch` | 有成功回复（显示多久前）/ 还没消息或刚启动 | 自启动起只有失败没有成功；或配了平台、启动超 10 分钟仍零条 IM 入站（平台可能没连上） | - |
 | `pprof` | `/api/debug/pprof/` 200 | 403（远端调用 / hardening 生效）或意外码 | - |
 | `state dir` | `~/.naozhi` 可写 | 目录不存在（首次运行） | 存在但不可写 / 非目录 |
+| `cli backend <id>` | 配置的路径 `--version` 成功（显示版本与路径） | 非默认 backend 探测失败；或 id 未注册（启动时跳过） | 默认 backend 探测失败（没有健康的兄弟 backend 时启动直接拒绝；有则默认路由的会话起不来） |
+| `transcribe creds` | `transcribe.enabled` 时 AWS 凭证链取得到凭证（显示来源）；未启用则 skipped | 取不到凭证，语音消息会失败 | - |
+| `transcribe ffmpeg` | 找得到 ffmpeg（`NAOZHI_FFMPEG_PATH` 优先，其次 `$PATH`）；未启用则 skipped | 找不到，ogg/flac/pcm 以外的语音格式转不了 | - |
 | `zero-downtime` | `naozhi-shim-*.scope` 有 ≥1 | 0 个 scope（sudoers hardening 未生效） | systemctl list-units 失败 |
 
 `cli runtime` 到 `dispatch` 五项和 `config-drift` 读的是同一次带 token 的 `GET /health`（整次 doctor 只发一次）。没有 token、token 被拒或 `/health` 不可达时，这五项各输出一行 `skipped (…)`，不计 fail。`/health` 的 `platforms` 只是启动时注册的名字，没有连接状态，所以「平台没连上」只能从 `dispatch` 的入站计数推断：这个计数不含斜杠命令，只收到 `/help` 之类命令（或确实没人发消息）的安静 bot 启动 10 分钟后也会报这条 warn（不影响退出码）；启动时长按本机时钟对比服务端的 `config_loaded_at` 计算，`--addr` 指向远端时两边时钟偏差会让判断提前或推后。
+
+`cli backend <id>` 对 `cli.backends`（或单 backend 的 `cli.path`）里每一项跑一遍启动时同款 `--version` 探测，读的是配置里的路径，不是 `$PATH` 上的默认二进制（后者是下方 `=== CLI Backends ===` 段的内容）。`cli backend`、`transcribe creds`、`transcribe ffmpeg` 都按**运行 doctor 的用户**解析：路径里的 `~`、`$PATH`、AWS 凭证链都可能和 launchd / systemd 下的服务用户不同，以服务用户身份跑 doctor 才是准确结论。配置读不出时这几项输出 `skipped (config not loaded)`，由 `naozhi config check` 负责报错。整次 doctor 只读一次配置。
 
 ## 退出码
 
@@ -68,6 +73,9 @@ $ naozhi doctor
 ✓ dispatch               last successful reply 4m12s ago · messages=37 reply_errors=0 send_fails=0
 ✓ pprof                  reachable at http://127.0.0.1:8180/api/debug/pprof/
 ✓ state dir              /home/ec2-user/.naozhi writable
+✓ cli backend claude     2.1.288 at /home/ec2-user/.local/bin/claude
+✓ transcribe creds       AWS credentials from EC2RoleProvider
+✓ transcribe ffmpeg      /usr/bin/ffmpeg
 ✓ zero-downtime          2 shim scope(s) active (sudoers hardening is working)
 ```
 
