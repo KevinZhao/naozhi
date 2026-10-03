@@ -30,7 +30,9 @@ test('a missing or non-function slot fails the registration and fills nothing', 
         const { shell, registerShell } = await fresh();
         const impl = implOf(g);
         if (bad === undefined) delete impl[drop]; else impl[drop] = bad;
-        assert.throws(() => registerShell(impl), new RegExp('shell slot missing: ' + drop));
+        // Dropping a one-slot group's only slot leaves a registration of nothing.
+        const want = Object.keys(impl).length ? 'shell slot missing: ' + drop : 'shell: registration names no slot';
+        assert.throws(() => registerShell(impl), new RegExp(want));
         assert.ok(Object.values(shell).every((v) => v === null), 'a failed registration must not fill any slot');
       }
     }
@@ -79,4 +81,17 @@ test('the table is sealed: no slot can be added past registerShell', async () =>
   const { shell } = await fresh();
   assert.ok(Object.isSealed(shell));
   assert.throws(() => { shell.extra = () => 0; }, TypeError);
+});
+
+test("each shell root registers exactly one group, and every group has its root", async () => {
+  const fs = await import('node:fs');
+  const { SHELL_GROUPS } = await fresh();
+  const roots = JSON.parse(fs.readFileSync(new URL('./js-ratchet.caps.json', import.meta.url), 'utf8')).shellRoots;
+  const registered = roots.map((f) => {
+    const src = fs.readFileSync(new URL('../internal/server/static/' + f, import.meta.url), 'utf8');
+    const calls = [...src.matchAll(/^registerShell\(\{([^}]*)\}\);$/gm)];
+    assert.equal(calls.length, 1, f + ' must call registerShell once at top level');
+    return calls[0][1].split(',').map((k) => k.trim()).sort().join(',');
+  });
+  assert.deepEqual(registered.sort(), SHELL_GROUPS.map((g) => [...g].sort().join(',')).sort());
 });

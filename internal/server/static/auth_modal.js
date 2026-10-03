@@ -1,15 +1,13 @@
 // auth_modal.js — extracted from dashboard.js (#2558 D4).
 //
 // Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
+// move; the import block and the export block below are the only additions.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects and helpers are
-// imported. session_list.js imports this module, so the four session_list
-// functions it calls back are injected once via configureAuthModal(), called
-// from dashboard's module body; renderMainShell is a shell slot.
+// imported. session_list.js imports this module, so the session_list functions
+// it calls back are shell slots, as is dashboard's renderMainShell.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList, transcript } from './state.js';
 import { esc, escAttr, showToast, trapFocus } from './nz_util.js';
@@ -21,18 +19,6 @@ import { getNodeDisplayName, getNodeStatus, isMultiNode, nodeColor, projectDispl
 import { navRebuild } from './msg_nav.js';
 import { sendMessage } from './send_message.js';
 import { shell } from './shell.js';
-
-const deps = {
-  debouncedFetchSessions: null,
-  fetchSessions: null,
-  updateStatusBar: null,
-};
-export function configureAuthModal(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('auth_modal dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
 
 // --- Auth modal ---
 
@@ -53,7 +39,7 @@ async function saveToken() {
       if (overlay) overlay.remove();
       wsm.disconnect();
       wsm.connect();
-      deps.fetchSessions();
+      shell.fetchSessions();
     } else if (r.status === 429) {
       // Rate-limited, token never compared: gate the input for Retry-After
       // (plain integer seconds) instead of inviting more 429s.
@@ -115,7 +101,7 @@ function startLoginRetryCountdown(seconds) {
 }
 
 // startWSAuthRetryCountdown arms the auth rate-limit gate and drives an
-// inline sidebar-status countdown (via deps.updateStatusBar, so it stays out
+// inline sidebar-status countdown (via shell.updateStatusBar, so it stays out
 // of the way on mobile) rather than a toast. Triggered by an
 // auth_fail(Error="too many attempts") message that carries a retry_after
 // hint. On expiry the gate clears and wsm.connect() fires once so the user
@@ -133,10 +119,10 @@ function startWSAuthRetryCountdown(seconds) {
     _wsAuthCountdownTimer = null;
   }
   // Repaint the sidebar immediately so the "鉴权过于频繁 · Ns" row appears
-  // without waiting for the next 1s tick. deps.updateStatusBar reads
+  // without waiting for the next 1s tick. shell.updateStatusBar reads
   // wsm._authBlockUntil directly, so we don't need to pass the remaining
   // seconds around.
-  deps.updateStatusBar();
+  shell.updateStatusBar();
   _wsAuthCountdownTimer = setInterval(() => {
     if (Date.now() >= wsm._authBlockUntil) {
       clearInterval(_wsAuthCountdownTimer);
@@ -150,11 +136,11 @@ function startWSAuthRetryCountdown(seconds) {
       // user-visible signal.
       if (wsm.reconnectTimer) { clearTimeout(wsm.reconnectTimer); wsm.reconnectTimer = null; }
       wsm.backoff = 1000;
-      deps.updateStatusBar();
+      shell.updateStatusBar();
       wsm.connect();
       return;
     }
-    deps.updateStatusBar();
+    shell.updateStatusBar();
   }, 1000);
 }
 
@@ -1065,7 +1051,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   shell.renderMainShell();
   navRebuild();
   sessionList.lastVersion = 0;
-  deps.debouncedFetchSessions();
+  shell.debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
 
@@ -1108,7 +1094,7 @@ function doCreateSession() {
   shell.renderMainShell();
   navRebuild();
   sessionList.lastVersion = 0;
-  deps.debouncedFetchSessions();
+  shell.debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
 
@@ -1167,7 +1153,7 @@ function createQuickSession(initialText, onTextStranded) {
   shell.renderMainShell();
   navRebuild();
   sessionList.lastVersion = 0;
-  deps.debouncedFetchSessions();
+  shell.debouncedFetchSessions();
   const text = (initialText || '').trim();
   // requestAnimationFrame ensures the composer DOM produced by shell.renderMainShell
   // is laid out before we write into it. Falls back to setTimeout when rAF

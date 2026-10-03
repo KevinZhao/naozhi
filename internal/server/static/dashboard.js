@@ -44,7 +44,7 @@ import {
   renderSystemView,
   stopSystemPoll,
 } from './system_view.js';
-import { configureRunningBanner, interruptSession, resetTurnState, saveScrollPos, updateSendButton } from './running_banner.js';
+import { interruptSession, resetTurnState, saveScrollPos, updateSendButton } from './running_banner.js';
 import { closeFilePreview, regroupAvatars, startFileRefObserver } from './file_refs.js';
 import {
   applyFeatureGates,
@@ -70,12 +70,10 @@ import {
   timeDividerHtml,
 } from './utilities.js';
 import {
-  configureDiscovery,
   previewDiscovered,
   scanDiscovered,
 } from './discovery.js';
 import {
-  configureTuning,
   dismissSession,
   fetchGitState,
   invalidateGitState,
@@ -85,20 +83,18 @@ import {
 } from './tuning.js';
 import { navDismissPopover, navMsg, navRebuild, navShowList } from './msg_nav.js';
 import {
-  configureSidebarProject,
   openProjectSettings,
   showGitRemote,
   toggleFavorite,
   toggleProjectCollapsed,
 } from './sidebar_project.js';
-import { backendDisplayName, backendDisplayVersion, configureAuthModal, createNewSession, doCreateSession, keyTailDisplay, saveToken, startWSAuthRetryCountdown } from './auth_modal.js';
+import { backendDisplayName, backendDisplayVersion, createNewSession, doCreateSession, keyTailDisplay, saveToken, startWSAuthRetryCountdown } from './auth_modal.js';
 import { fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
 import {
-  configureSendMessage,
   handleKey,
   sendMessage,
 } from './send_message.js';
-import { collectWorkspaceSessionIDs, debouncedFetchSessions, fetchSessions, onSessionsApplied, originBadgeHtml, renderSidebar, restorePending, updateCardUnreadChip, updateMainState, updateStatusBar } from './session_list.js';
+import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, restorePending, updateCardUnreadChip, updateMainState } from './session_list.js';
 import { findDiscovered, isDiscoveredKey, matchProject, parseDiscoveredPid, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
 // Service worker registration
@@ -1547,34 +1543,16 @@ function showOnboarding() {
 
 /* ===== Initialization ===== */
 
-// Multi-Backend RFC §8.5: fire fetchCLIBackends at boot so the chip / cost
-// unit / context bar all have backend metadata available on the first
-// renderHeader call. Failure / single-backend deployments still work — the
-// chip-render helpers return '' when cliBackends is null.
-// Wire the extracted modules BEFORE the bootstrap sequence below. Some of
-// them run at load time (discovery's scanDiscovered, the pollers) and read
-// their injected deps immediately: with the configure block placed after the
-// bootstrap, deps.getToken was still undefined and the discovered-session
-// scan failed silently (#2558 D4-6 — six e2e specs, no console error beyond
-// one warn line).
-// ─── module exports (#2557 PR-E2) ───────────────────────────────────────────
-// The view modules import these instead of dereferencing the window bridge.
-// dashboard is the dependency root: it imports only nz_util, so the graph
-// stays acyclic and module execution order matches the historical tag order.
-// (let bindings like lastEventTime export as live views — reassignment here
-// is visible to importers, unlike a window-property copy.)
-// Wire the markdown renderers' dashboard-side helpers (#2558 D4). Runs in
-// dashboard's module body, before any render call.
-configureSendMessage({ fetchEvents, fetchSessions });
-configureAuthModal({ debouncedFetchSessions, fetchSessions, updateStatusBar });
-configureSidebarProject({ debouncedFetchSessions, fetchSessions, renderSidebar });
-configureTuning({ debouncedFetchSessions, fetchSessions });
-configureDiscovery({ debouncedFetchSessions });
-configureRunningBanner({ debouncedFetchSessions });
+// Fill dashboard's shell slots before the bootstrap below: the pollers and
+// the discovered-session scan it starts may call back up at once.
 registerShell({ renderMainHeader, renderMainShell, selectSession, setActivityView });
 initSplitWidth();
 initSidebarCollapsed();
 
+// Multi-Backend RFC §8.5: fire fetchCLIBackends at boot so the chip / cost
+// unit / context bar all have backend metadata available on the first
+// renderHeader call. Failure / single-backend deployments still work — the
+// chip-render helpers return '' when cliBackends is null.
 fetchCLIBackends();
 // RFC project-access-profile §8.3: fire at boot so the session-card chip has
 // profile metadata (label/colour) on the first renderSidebar. Failure /

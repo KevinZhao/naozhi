@@ -274,10 +274,15 @@ test('with the socket down, an accepted send speeds up event polling for 15 s', 
   await reply(page, 200, { status: 'accepted' });
   await compose(page, 'poll me');
   await spyTimers(page);
+  let polls = 0;
+  page.on('request', (r) => { if (new URL(r.url()).pathname === '/api/sessions/events') polls++; });
   await send(page);
   const armed = await armedTimers(page);
   expect(armed.interval).toContain(500);
   expect(armed.timeout).toContain(15000);
+  // The fast poll replaced the 1 s one and must itself reach the server (it
+  // calls event_stream's fetchEvents back through shell.fetchEvents).
+  await expect.poll(() => polls, { timeout: 3000 }).toBeGreaterThanOrEqual(3);
   // The WS-down fallback keeps its legacy no-bubble behaviour.
   await expect(page.locator('#events-scroll .optimistic-msg')).toHaveCount(0);
 

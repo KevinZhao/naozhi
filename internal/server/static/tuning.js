@@ -1,15 +1,13 @@
 // tuning.js — extracted from dashboard.js (#2558 D4).
 //
 // Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
+// move; the import block and the export block below are the only additions.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects and helpers are
-// imported. session_list.js imports this module, so the two session_list
-// functions it calls back are injected once via configureTuning(), called from
-// dashboard's module body; renderMainHeader is a shell slot.
+// imported. session_list.js imports this module, so the session_list functions
+// it calls back are shell slots, as is dashboard's renderMainHeader.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, isCronSessionKey, showToast } from './nz_util.js';
@@ -20,17 +18,6 @@ import { dropDiscovered, findDiscovered, isDiscoveredKey, parseDiscoveredPid, sa
 import { gitChipHtml, gitStateCache, setHeaderGitChip } from './session_header.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
-
-const deps = {
-  debouncedFetchSessions: null,
-  fetchSessions: null,
-};
-export function configureTuning(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('tuning dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
 
 // ===== Session tuning popover =====
 // Per-session model/effort switching from the header chips.
@@ -252,7 +239,7 @@ async function postTuningOverride(kind, value) {
     }
     // Pull fresh state now rather than waiting out the poll interval; the
     // repaint clears the pending dim with the server-confirmed value.
-    setTimeout(() => { restore(); deps.fetchSessions(); }, 800);
+    setTimeout(() => { restore(); shell.fetchSessions(); }, 800);
   } catch (e) {
     restore();
     tuningToast('切换请求失败：网络错误', true);
@@ -320,7 +307,7 @@ function showMainEmpty() {
 
 function resyncSidebar() {
   sessionList.lastVersion = 0;
-  deps.debouncedFetchSessions();
+  shell.debouncedFetchSessions();
 }
 
 // dismissDiscovered kills an external (discovered) CLI via
@@ -485,7 +472,7 @@ async function renameSession() {
     sessionList.sessionsData[cacheKey].user_label = next;
   }
   sessionList.lastVersion = 0;
-  deps.debouncedFetchSessions();
+  shell.debouncedFetchSessions();
   // Header-only repaint: a full renderMainShell would rebuild #events-scroll
   // empty with nothing refetching the conversation (see renderMainHeader).
   shell.renderMainHeader();

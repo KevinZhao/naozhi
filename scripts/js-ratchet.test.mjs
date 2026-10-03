@@ -904,6 +904,38 @@ test('shell: a slot that only forwards, and an upcall that could be an import', 
   }
 });
 
+test('shell: a root below dashboard owns its slots, checked against what it reaches', () => {
+  // session_list.js is a root (caps.shellRoots) that dashboard imports; the
+  // view it imports calls fetchSessions back up through the shell.
+  const sources = {
+    'shell.js': js('const slots = {};', 'export const shell = slots;', 'export function registerShell(t) { Object.assign(slots, t); }'),
+    'ws.js': js('export const wsm = { state: 0 };'),
+    'dashboard.js': js("import './session_list.js';", "import './other.js';"),
+    'session_list.js': js(
+      "import { registerShell } from './shell.js';",
+      "import { wsm } from './ws.js';",
+      "import './view.js';",
+      'function payload() { return wsm.state; }',
+      'function fetchSessions() { return payload(); }',
+      'registerShell({ fetchSessions });',
+    ),
+    'view.js': js("import { shell } from './shell.js';", 'export function rename() { shell.fetchSessions(); }'),
+    'other.js': js('export function x() {}'),
+  };
+  let g = global(sources);
+  assert.equal(g.metrics.upcallForwarders + g.metrics.upcallNotUp, 0, [...g.details.upcallForwarders, ...g.details.upcallNotUp].join('\n'));
+  // A module dashboard reaches but session_list does not: an import would do.
+  g = global({ ...sources, 'other.js': js("import { shell } from './shell.js';", 'export function x() { shell.fetchSessions(); }') });
+  assert.deepEqual(g.details.upcallNotUp, ['other.js: shell.fetchSessions — session_list.js does not reach other.js through imports, so import it directly']);
+  // A getNodeStatus-shaped slot (only imports) is a forwarder: it belongs in a leaf.
+  g = global({ ...sources, 'session_list.js': sources['session_list.js'].replace('registerShell({ fetchSessions });', 'function getNodeStatus() { return wsm.state; }\nregisterShell({ fetchSessions, getNodeStatus });') });
+  assert.equal(g.metrics.upcallForwarders, 1);
+  assert.match(g.details.upcallForwarders[0], /session_list\.js:\d+: shell slot getNodeStatus \(getNodeStatus\) uses nothing of session_list\.js's own/);
+  // Outside caps.shellRoots the same registration is refused.
+  g = global(sources, { ...REAL_CAPS, leaves: [], shellRoots: ['dashboard.js'] });
+  assert.match(g.details.upcallForwarders.join('\n'), /session_list\.js:\d+: registerShell outside the root modules/);
+});
+
 test('compare and raisedMetrics treat _global as the cross-file entry', () => {
   const base = { 'a.js': { lines: 1 }, [GLOBAL]: { importCycles: 0, htmlSinks: 5 } };
   assert.deepEqual(compare({ 'a.js': { lines: 1 }, [GLOBAL]: { importCycles: 0, htmlSinks: 5 } }, base), []);

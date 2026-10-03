@@ -3,8 +3,8 @@
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects and helpers are
-// imported. session_list.js imports this module, so debouncedFetchSessions is
-// injected once via configureDiscovery(), called from dashboard's module body.
+// imported. session_list.js imports this module, so debouncedFetchSessions is a
+// shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList, timers, transcript } from './state.js';
 import { esc, fetchJSON } from './nz_util.js';
@@ -16,16 +16,7 @@ import { getToken } from './platform.js';
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { navRebuild, navSync } from './msg_nav.js';
 import { processEventsForDisplay } from './file_refs.js';
-
-const deps = {
-  debouncedFetchSessions: null,
-};
-export function configureDiscovery(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('discovery dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+import { shell } from './shell.js';
 
 /* ===== Discovery & Takeover ===== */
 
@@ -45,7 +36,7 @@ async function scanDiscovered() {
     sessionList.lastDiscoveredJSON = discoveredHash;
     // Trigger sidebar re-render to merge discovered into project groups
     sessionList.lastVersion = 0;
-    deps.debouncedFetchSessions();
+    shell.debouncedFetchSessions();
   } catch (e) {
     console.warn('scanDiscovered error:', e.message);
   }
