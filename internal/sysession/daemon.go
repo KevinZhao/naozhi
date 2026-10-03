@@ -26,6 +26,10 @@ type TickReport struct {
 	Acted int
 	// Skipped breaks down rejections by reason (e.g. "min_turns"). May be nil.
 	Skipped map[string]int
+	// Counts holds daemon-specific counters copied verbatim into
+	// DaemonRun.Stats. Keys must not be "examined", "acted" or start with
+	// "skipped_" (those names belong to the fields above). May be nil.
+	Counts map[string]int64
 }
 
 // Daemon is the minimum contract every built-in worker implements. Manager

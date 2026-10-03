@@ -274,15 +274,21 @@ type GCResult struct {
 	Removed int
 	// WouldRemove counts would-be deletions by reason (dry-run and live).
 	WouldRemove map[ReapReason]int
+	// WouldRemoveBytes sums the payload sizes WouldRemove counts (.meta
+	// sidecars excluded); a payload whose size cannot be read adds 0.
+	WouldRemoveBytes int64
 	// Stopped is true when the sweep returned early because MaxRemove was hit.
 	Stopped bool
 }
 
-func (r *GCResult) bump(reason ReapReason) {
+func (r *GCResult) bump(reason ReapReason, fe fs.DirEntry) {
 	if r.WouldRemove == nil {
 		r.WouldRemove = make(map[ReapReason]int, 3)
 	}
 	r.WouldRemove[reason]++
+	if info, err := fe.Info(); err == nil {
+		r.WouldRemoveBytes += info.Size()
+	}
 }
 
 // GCWithRefs is the refcount-aware reaper. For every payload under
@@ -391,7 +397,7 @@ func GCWithRefs(ctx context.Context, workspace string, opts GCOptions) (GCResult
 				}
 			}
 
-			res.bump(reason)
+			res.bump(reason, fe)
 
 			if opts.DryRun {
 				slog.Info("attachment GC: would remove",

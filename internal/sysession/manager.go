@@ -547,10 +547,10 @@ func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTrigg
 // stored on DaemonRun.  Returns nil for a fully-zero report so the
 // JSON serialisation omits the field.
 func flattenTickReport(r TickReport) map[string]int64 {
-	if r.Examined == 0 && r.Acted == 0 && len(r.Skipped) == 0 {
+	if r.Examined == 0 && r.Acted == 0 && len(r.Skipped) == 0 && len(r.Counts) == 0 {
 		return nil
 	}
-	out := make(map[string]int64, 2+len(r.Skipped))
+	out := make(map[string]int64, 2+len(r.Skipped)+len(r.Counts))
 	if r.Examined != 0 {
 		out["examined"] = int64(r.Examined)
 	}
@@ -559,6 +559,9 @@ func flattenTickReport(r TickReport) map[string]int64 {
 	}
 	for k, v := range r.Skipped {
 		out["skipped_"+k] = int64(v)
+	}
+	for k, v := range r.Counts {
+		out[k] = v
 	}
 	return out
 }
