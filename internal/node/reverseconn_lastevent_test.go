@@ -129,3 +129,27 @@ func TestReverseConn_SubscribeErrorForgetsWatermark(t *testing.T) {
 		t.Fatal("subscribe_error left the key's watermark behind")
 	}
 }
+
+// TestReverseConn_MarkDisconnectedForgetsBook: a dropped conn releases its
+// sinks and watermarks together, so nothing it held survives the drop.
+func TestReverseConn_MarkDisconnectedForgetsBook(t *testing.T) {
+	rc, _, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+	const key = "feishu:direct:u1:general"
+
+	rc.subMu.Lock()
+	rc.book.add(&mockSink{id: 1}, key, 500)
+	rc.subMu.Unlock()
+
+	rc.markDisconnected()
+
+	rc.subMu.Lock()
+	subs := len(rc.book.subs)
+	rc.subMu.Unlock()
+	if subs != 0 {
+		t.Fatalf("markDisconnected left %d keys with sinks", subs)
+	}
+	if _, ok := reverseWatermark(rc, key); ok {
+		t.Fatal("markDisconnected left the key's watermark behind")
+	}
+}

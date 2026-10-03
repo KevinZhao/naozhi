@@ -35,8 +35,8 @@ type wsRelay struct {
 	connReady chan struct{} // non-nil while a dial is in progress; closed when done
 	book      subBook       // guarded by mu
 	// remoteDropped marks keys whose remote subscription the primary discarded
-	// (session_state{reason:"subscription_timeout"}) while the key still has
-	// populated; without it Subscribe would take the alreadySubscribed branch
+	// (session_state{reason:"subscription_timeout"}) while a local sink still
+	// holds the key; without it Subscribe would take the alreadySubscribed branch
 	// and never rebuild the remote subscription. Single-shot: the next
 	// Subscribe re-sends `subscribe` and clears it (#2421).
 	remoteDropped map[string]bool
