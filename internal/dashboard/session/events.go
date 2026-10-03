@@ -24,11 +24,22 @@ func eventsBefore(entries []clievent.EventEntry, before int64) []clievent.EventE
 	return out
 }
 
+// setHasMore writes the X-Events-Has-More header ("1"/"0"); an absent header
+// means a legacy server or a relay path that cannot tell.
+func setHasMore(w http.ResponseWriter, hasMore bool) {
+	if hasMore {
+		w.Header().Set("X-Events-Has-More", "1")
+	} else {
+		w.Header().Set("X-Events-Has-More", "0")
+	}
+}
+
 // HandleEvents serves GET /api/sessions/events?key=&node=&after=&before=&limit=.
 // `after` (ms) is an incremental fetch with Time >= after (watermark re-admitted,
 // #2456; client dedups by uuid); `before` (ms) pages strictly older entries,
 // newest `limit` of them in chronological order; `limit` alone sizes the
-// initial page. `after` wins over `before`; no params returns full history.
+// initial page. The initial and `before` pages set X-Events-Has-More. `after`
+// wins over `before`; no params returns full history.
 func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
@@ -108,11 +119,7 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 			if hasMore {
 				page = page[len(page)-pageLimit:]
 			}
-			if hasMore {
-				w.Header().Set("X-Events-Has-More", "1")
-			} else {
-				w.Header().Set("X-Events-Has-More", "0")
-			}
+			setHasMore(w, hasMore)
 			httputil.WriteJSON(w, clievent.ForWire(page))
 			return
 		}
@@ -160,11 +167,7 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		// this branch; an absent header means legacy server / remote relay.
 		var hasMore bool
 		entries, hasMore = sess.EventInitialPageCtx(r.Context(), visTarget, 0)
-		if hasMore {
-			w.Header().Set("X-Events-Has-More", "1")
-		} else {
-			w.Header().Set("X-Events-Has-More", "0")
-		}
+		setHasMore(w, hasMore)
 	case beforeStr != "":
 		pageLimit := limit
 		if pageLimit == 0 {
@@ -172,10 +175,13 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		// "Load earlier": a plain time-ordered page — the visible-aware reader
 		// would skip internal events the operator is paging toward.
-		// EventEntriesBeforeCtx falls back to the backend's history.Source
+		// EventPageBeforeCtx falls back to the backend's history.Source
 		// (JSONL for claude) when memory no longer holds entries older than
 		// `before`; the request ctx lets a cancelled fetch unblock disk I/O.
-		entries = sess.EventEntriesBeforeCtx(r.Context(), before, pageLimit)
+		// X-Events-Has-More is always set, failing open on a degraded read.
+		var hasMore bool
+		entries, hasMore = sess.EventPageBeforeCtx(r.Context(), before, pageLimit)
+		setHasMore(w, hasMore)
 	default:
 		entries = sess.EventEntries()
 	}
