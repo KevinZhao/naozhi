@@ -35,7 +35,7 @@ type cronCommandScheduler interface {
 type cronDispatchAdapter struct{ s cronCommandScheduler }
 
 // projectCronJob copies the dispatch-read fields (ID / Schedule / Prompt /
-// Paused / FreshContext) into the dispatch-side projection. nil maps to the zero value so
+// Paused / FreshContext / AutoPaused) into the dispatch-side projection. nil maps to the zero value so
 // a scheduler that returns (nil, nil) cannot panic the adapter.
 func projectCronJob(j *cron.Job) dispatch.CronJob {
 	if j == nil {
@@ -47,6 +47,7 @@ func projectCronJob(j *cron.Job) dispatch.CronJob {
 		Prompt:       j.Prompt,
 		Paused:       j.Paused,
 		FreshContext: j.FreshContext,
+		AutoPaused:   j.Paused && j.PausedReason == cron.PausedReasonAutoFailures,
 	}
 }
 

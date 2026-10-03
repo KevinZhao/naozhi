@@ -183,6 +183,10 @@ var (
 	CronRunTimedOutTotal  = expvar.NewInt("naozhi_cron_run_timed_out_total")
 	CronRunCanceledTotal  = expvar.NewInt("naozhi_cron_run_canceled_total")
 
+	// CronAutoPausedTotal counts jobs the scheduler paused after their
+	// consecutive-failure streak reached cron.auto_pause_after_failures.
+	CronAutoPausedTotal = expvar.NewInt("naozhi_cron_auto_paused_total")
+
 	// CronSandboxRunFailedTotal counts sandbox-placement runs ending in
 	// RunStateFailed (timed-out runs go to CronSandboxRunTimedOutTotal, #2091).
 	// Transport failures carry double-run risk, so operators alert on this

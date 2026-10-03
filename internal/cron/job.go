@@ -167,6 +167,16 @@ type Job struct {
 	// ——计数从首次 run 累积，不回填。
 	RunCounters JobRunCounters `json:"run_counters,omitempty"`
 
+	// ConsecutiveFailures counts failed and timed-out runs since the last
+	// success, resume or edit; skipped and canceled runs leave it alone.
+	// Reaching the scheduler's auto-pause threshold pauses the job.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+
+	// PausedReason says why a paused job is paused: "" for a manual pause,
+	// PausedReasonAutoFailures when the failure streak paused it. Resume
+	// clears it.
+	PausedReason string `json:"paused_reason,omitempty"`
+
 	entryID cronEntryID // runtime only, not persisted
 
 	// cachedPeriod is the schedule period (Next-Next delta) precomputed by
@@ -178,6 +188,30 @@ type Job struct {
 	// HasMissedScheduleCached skips cronParser.Parse on every 1Hz tick (#477).
 	// nil = not yet registered; callers fall back to the parse path.
 	cachedSched robfigcron.Schedule // runtime only, not persisted
+}
+
+// PausedReasonAutoFailures is Job.PausedReason for a job the scheduler
+// paused after too many consecutive failed or timed-out runs.
+const PausedReasonAutoFailures = "auto_failures"
+
+// extendsFailureStreak reports whether a run ending in state counts toward
+// Job.ConsecutiveFailures. Skipped and canceled runs (contention, overlap,
+// shutdown) are not the job's fault and do not.
+func extendsFailureStreak(state RunState) bool {
+	return state == RunStateFailed || state == RunStateTimedOut
+}
+
+// nextFailureStreak is ConsecutiveFailures after a run that ended in state:
+// a counted failure extends the streak, a success ends it, anything else
+// leaves it unchanged.
+func nextFailureStreak(streak int, state RunState) int {
+	switch {
+	case extendsFailureStreak(state):
+		return streak + 1
+	case state == RunStateSucceeded:
+		return 0
+	}
+	return streak
 }
 
 // RunState 是单次 cron 执行的终态分类。运行中态不进 RunState（用 runInflight

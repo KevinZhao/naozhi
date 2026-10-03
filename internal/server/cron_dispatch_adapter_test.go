@@ -76,13 +76,22 @@ func TestCronDispatchAdapter_ClassifyError_PreservesSentinelChain(t *testing.T) 
 // TestCronDispatchAdapter_ProjectCronJob pins the 5-field projection and its
 // nil tolerance: a handler reading a field the projection does not copy
 // would read a zero value, so adding a field to dispatch.CronJob must extend
-// projectCronJob in the same change (cron_consumer.go godoc).
+// projectCronJob in the same change (cron_consumer.go godoc). AutoPaused is
+// derived: only a paused job whose reason is the failure streak.
 func TestCronDispatchAdapter_ProjectCronJob(t *testing.T) {
 	j := &cron.Job{ID: "id1", Schedule: "@hourly", Prompt: "p", Paused: true, FreshContext: true}
 	got := projectCronJob(j)
 	want := dispatch.CronJob{ID: "id1", Schedule: "@hourly", Prompt: "p", Paused: true, FreshContext: true}
 	if got != want {
 		t.Errorf("projectCronJob = %+v, want %+v", got, want)
+	}
+	j.PausedReason = cron.PausedReasonAutoFailures
+	if got := projectCronJob(j); !got.AutoPaused {
+		t.Errorf("auto-paused job projected AutoPaused=false: %+v", got)
+	}
+	j.Paused = false
+	if got := projectCronJob(j); got.AutoPaused {
+		t.Errorf("active job with a stale reason projected AutoPaused=true: %+v", got)
 	}
 	if zero := projectCronJob(nil); zero != (dispatch.CronJob{}) {
 		t.Errorf("projectCronJob(nil) = %+v, want zero value", zero)

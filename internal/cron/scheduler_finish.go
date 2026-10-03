@@ -175,21 +175,21 @@ func (s *Scheduler) deleteJobRuns(jobID string) {
 	s.sandboxState().DeleteJobAttention(jobID)
 }
 
-// finishRun is the single terminal hook for every cron execution path.
-// It centralises:
+// finishRun is the single terminal hook for every cron execution path:
 //   - per-state metrics increment (CronRun*Total)
 //   - persistent state write via recordTerminalResult (success / non-canceled error)
 //   - cron_run_ended WS broadcast
 //   - JobRunCounters bump (under s.tbl.mu, alongside recordTerminalResult)
+//   - auto-pause at s.autoPauseAfter failures, before the gate is released;
+//     pausedAfter is that streak (0 = not paused) for the caller's notice
 //
-// It takes the run's identity (rc) and how it ended (out) separately, so a
-// terminal branch spells only its outcome. Adding a new error class is one
-// mapping plus one runOutcome literal at the call site.
-func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
+// rc is the run's identity and out how it ended, so a terminal branch spells
+// only its outcome; a new error class is one mapping plus one runOutcome literal.
+func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 	if rc.term != nil && !rc.term.claim() {
 		slog.Warn("cron: a second finish for one run was dropped",
 			"run_id", rc.runID, "state", string(out.state), "err_class", string(out.errClass))
-		return
+		return 0
 	}
 	// Defensive no-job guard (#837): a run with no job identity has nothing to
 	// key its terminal record and run_ended by. Finalize this run's gate and
@@ -198,7 +198,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 		slog.Error("cron: finishRun called without a job id; finalizing inflight gate and skipping terminal protocol",
 			"run_id", rc.runID, "state", string(out.state), "err_class", string(out.errClass))
 		rc.finalizer.finalize()
-		return
+		return 0
 	}
 	// endedAt via the injected clock (#643) so DurationMS is deterministic
 	// under a fake clock; reuse the caller's pre-computed value when set so
@@ -329,6 +329,11 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) {
 	// even when the record is skipped (cancel / skipPersist paths included),
 	// dropped as orphan, or has no store.
 	s.appendLedger(rc, out)
+
+	if jobPersistOK && extendsFailureStreak(out.state) {
+		return s.autoPauseIfDue(rc.jobID)
+	}
+	return 0
 }
 
 // endedErrMsg is the message run_ended carries: the persisted, sanitised copy
@@ -421,7 +426,7 @@ func (s *Scheduler) emitSyntheticSkipped(jobID string, viaTriggerNow bool, errCl
 
 // JobState is the runtime-mutable terminal-result half of the Job struct: the
 // LastRunAt / LastResult / LastError / LastErrorClass / LastSessionID /
-// RunCounters cluster that every finishRun rewrites. It is a SEPARATE type from
+// RunCounters / ConsecutiveFailures cluster that every finishRun rewrites. It is a SEPARATE type from
 // Job's wire-config fields so the runtime-state field set is enumerated in
 // exactly one place; capture (Job.snapshotResultState) and rollback (restore)
 // both route through it without changing the on-disk JSON shape (#764).
@@ -434,6 +439,7 @@ type JobState struct {
 	LastErrorClass ErrorClass
 	LastSessionID  string
 	Counters       JobRunCounters
+	Streak         int
 }
 
 func (p JobState) restore(j *Job) {
@@ -443,6 +449,7 @@ func (p JobState) restore(j *Job) {
 	j.LastErrorClass = p.LastErrorClass
 	j.LastSessionID = p.LastSessionID
 	j.RunCounters = p.Counters
+	j.ConsecutiveFailures = p.Streak
 }
 
 // snapshotResultState captures the runtime-mutable terminal-result state into
@@ -457,6 +464,7 @@ func (j *Job) snapshotResultState() JobState {
 		LastErrorClass: j.LastErrorClass,
 		LastSessionID:  j.LastSessionID,
 		Counters:       j.RunCounters,
+		Streak:         j.ConsecutiveFailures,
 	}
 }
 

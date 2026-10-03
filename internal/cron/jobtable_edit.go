@@ -144,6 +144,8 @@ func (t *jobTable) update(id string, upd JobUpdate) (updateResult, error) {
 	}
 	preUpdate := *j
 	upd.applyTo(j)
+	// An edit is the user's attempt at a fix: the failure streak starts over.
+	j.ConsecutiveFailures = 0
 	if placementIsSandbox(j.Placement) && j.WorkDir != "" {
 		*j = preUpdate
 		return updateResult{}, ErrSandboxWorkDir
@@ -211,6 +213,7 @@ func (t *jobTable) fillPrompt(id, prompt string) (fillResult, error) {
 	}
 	var r fillResult
 	wasPaused := j.Paused
+	prevReason, prevStreak := j.PausedReason, j.ConsecutiveFailures
 	if wasPaused {
 		p, err := t.resumeLocked(j)
 		if err != nil {
@@ -222,6 +225,7 @@ func (t *jobTable) fillPrompt(id, prompt string) (fillResult, error) {
 	snap, err := t.persistLocked()
 	if err != nil {
 		j.Prompt, j.Paused = "", wasPaused
+		j.PausedReason, j.ConsecutiveFailures = prevReason, prevStreak
 		return fillResult{}, err
 	}
 	r.snap = snap

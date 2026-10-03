@@ -183,6 +183,10 @@ type SchedulerConfig struct {
 	// on deployments running 300s+ batch jobs so the daily false alarm stops
 	// without losing the metric. Zero/negative fall back to the default (#519).
 	SlowThreshold time.Duration
+	// AutoPauseAfterFailures pauses a job after this many consecutive failed
+	// or timed-out runs, so a broken job stops notifying every tick. Zero
+	// means defaultAutoPauseAfterFailures; negative disables auto-pause.
+	AutoPauseAfterFailures int
 	// AllowNilRouter opts the constructor out of the boot-time "router
 	// required" slog.Error (#510). Production always sets Router; the flag
 	// lets in-package tests that never reach executeOpt / registerStub build
@@ -229,6 +233,10 @@ const defaultExecTimeout = 5 * time.Minute
 // cap cannot be disabled. See docs/rfc/cron-v2-polish.md for sizing rationale.
 const DefaultMaxJobsPerChat = 10
 
+// defaultAutoPauseAfterFailures is the failure streak that auto-pauses a job
+// when SchedulerConfig.AutoPauseAfterFailures is zero.
+const defaultAutoPauseAfterFailures = 5
+
 // applyDefaults fills in zero-valued fields with their package-level defaults
 // and clamps oversized values. Idempotent — a no-op on an already-defaulted
 // config. Pointer receiver mutates in place; copy first if the original must
@@ -247,6 +255,9 @@ func (cfg *SchedulerConfig) applyDefaults() {
 	}
 	if cfg.ExecTimeout <= 0 {
 		cfg.ExecTimeout = defaultExecTimeout
+	}
+	if cfg.AutoPauseAfterFailures == 0 {
+		cfg.AutoPauseAfterFailures = defaultAutoPauseAfterFailures
 	}
 	if cfg.Location == nil {
 		cfg.Location = time.Local

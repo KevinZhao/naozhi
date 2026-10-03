@@ -457,7 +457,9 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 		if !j.FreshContext {
 			status = " [保留上下文]"
 		}
-		if j.Paused {
+		if j.AutoPaused {
+			status += " [自动暂停：连续失败]"
+		} else if j.Paused {
 			status += " [暂停]"
 		}
 		safeSchedule := sanitizeCronDisplay(j.Schedule, 30)

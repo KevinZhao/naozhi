@@ -1109,7 +1109,7 @@ function cronJobCardHtml(j) {
 }
 
 // cronJobWhen is a row's when-column: running → "运行中 Xs"（实时计时）;
-// paused → "已暂停"; else colloquial relative time. Running takes precedence
+// paused → "已暂停"/"已自动暂停"; else colloquial relative time. Running takes precedence
 // over paused (P0 cron-run-history, RFC §8.1): a TriggerNow on a paused job is
 // rejected backend-side, so a run on a paused row is a real one.
 function cronJobWhen(j, isRunning, isPaused) {
@@ -1119,7 +1119,7 @@ function cronJobWhen(j, isRunning, isPaused) {
   if (isRunning) {
     label = formatRunningElapsed(j.current_run.started_at);
   } else if (isPaused) {
-    label = '已暂停';
+    label = j.paused_reason === 'auto_failures' ? '已自动暂停' : '已暂停';
   } else if (j.next_run) {
     const w = formatWhenColloquial(j.next_run);
     label = w.label;

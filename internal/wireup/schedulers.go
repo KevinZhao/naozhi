@@ -117,6 +117,8 @@ func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		AllowedRoot:   deps.Workspace,
 		JitterMax:     deps.Cfg.ParseCronJitterMax(),
 		ParentCtx:     deps.ParentCtx,
+
+		AutoPauseAfterFailures: deps.Cfg.Cron.AutoPauseAfterFailures,
 	}, cron.SchedulerDeps{
 		Router:        newCronRouterAdapter(deps.Router),
 		NotifySender:  newPlatformNotifySender(deps.Platforms),

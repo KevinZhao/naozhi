@@ -320,6 +320,10 @@ cron:
   # 默认 2m。"0" 关闭抖动（回退到 v1 行为）。上限硬编码 10m。TriggerNow
   # （dashboard 的 "run now" 按钮）始终跳过抖动立即执行。
   jitter_max: "2m"
+  # 连续失败（failed / timed_out）达到这个次数自动暂停该 job，避免坏掉的任务
+  # 每个 tick 都刷一条失败通知；跳过（并发上限 / 上一轮未完）和取消不计数，
+  # 成功、恢复、编辑都会清零。默认 5；负数关闭。恢复用 /cron resume <id> 或控制台。
+  auto_pause_after_failures: 5
 
 # System Session daemons: naozhi 内置后台线程框架 (docs/rfc/system-session.md)。
 # enabled 是总开关; 每个 daemon 还有自己的 enabled。

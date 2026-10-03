@@ -449,19 +449,33 @@ func (s *Scheduler) finishOrphanRun(p sandboxstore.Pending, js orphanJobSnapshot
 	// this process's CAS gate was never taken for it. The same job's run-B may be
 	// live RIGHT NOW holding the gate; a finalizer bound to s.jobInflight(jobID)
 	// would Store(false) run-B's gate and let a third tick double-run.
-	s.finishRun(
-		runCtx{
-			jobID: p.JobID, runID: p.RunID, startedAt: startedAt,
-			trigger:   runtelemetry.TriggerScheduled,
-			finalizer: &runFinalizer{},
-			snap:      jobSnapshot{prompt: js.prompt, workDir: js.workDir, fresh: js.freshContext},
-		},
-		runOutcome{
-			state: orphanTerminalState, errClass: orphanTerminalErrClass,
-			errMsg:  orphanTerminalErrMsg,
-			sandbox: true,
-		},
-	)
+	rc := runCtx{
+		jobID: p.JobID, runID: p.RunID, startedAt: startedAt,
+		trigger:   runtelemetry.TriggerScheduled,
+		finalizer: &runFinalizer{},
+		snap:      jobSnapshot{prompt: js.prompt, workDir: js.workDir, fresh: js.freshContext},
+	}
+	paused := s.finishRun(rc, runOutcome{
+		state: orphanTerminalState, errClass: orphanTerminalErrClass,
+		errMsg:  orphanTerminalErrMsg,
+		sandbox: true,
+	})
+	if paused > 0 {
+		s.deliverOrphanPauseNotice(rc, paused)
+	}
+}
+
+// deliverOrphanPauseNotice announces that a reconciled orphan's failure
+// auto-paused its job. Orphans send no per-run notice, so the notice target
+// is resolved here from a fresh snapshot of the now-paused job.
+func (s *Scheduler) deliverOrphanPauseNotice(rc runCtx, paused int) {
+	snap, ok := s.tbl.runSnapshot(rc.jobID)
+	if !ok {
+		return
+	}
+	rc.snap = snap
+	rc.notifyTo = s.resolveNotifyTarget(snap.platName, snap.chatID, snap.notifyPlat, snap.notifyChat, snap.notify)
+	s.deliverFailureNotice(rc, orphanTerminalErrClass, orphanTerminalState, s.sandboxRunBudget(), paused)
 }
 
 // removeReconciledPending drops the pending file once reconcile has
