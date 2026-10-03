@@ -620,6 +620,37 @@ test('configureDeps: data handed to a helper stays data', () => {
   assert.equal(measureSource(src).configureDeps, 0);
 });
 
+test('configureDeps: a keyed write into a list is a list element', () => {
+  // cron_state.js's cronRefetchFullJob splices a re-fetched job into the jobs
+  // cache by index while the module calls the list's methods (find, filter).
+  const store = (decl) => js(
+    decl,
+    'export function refetch(id, fresh) { const i = S.jobs.findIndex((j) => j.id === id); S.jobs[i] = Object.assign({}, fresh); }',
+    'export function first() { return S.jobs.find((j) => j.ok) || S.jobs.filter(Boolean); }',
+  );
+  assert.equal(measureSource(store('const S = { jobs: [], cap: 0 };')).configureDeps, 0);
+  assert.equal(measureSource(js('const jobs = [];', 'export function put(i, j) { jobs[i] = j; }', 'export function n() { return jobs.filter(Boolean); }')).configureDeps, 0);
+  // The control: the same write into an object, or a list that is not
+  // initialised as an array literal, lands the whole table.
+  assert.equal(measureSource(store('const S = { jobs: {}, cap: 0 };')).configureDeps, 2);
+  assert.equal(measureSource(store('const S = { jobs: null, cap: 0 };')).configureDeps, 2);
+  assert.equal(measureSource(js('const deps = { a: null };', 'export function put(k, impl) { deps[k] = impl[k]; }', 'export function go() { deps.a(); }')).configureDeps, 1);
+  // A list the module calls through by anything but its own methods, or an
+  // element of which it calls, is a table however it is initialised: the
+  // configure loop over a deps list, and a list of handlers.
+  assert.equal(measureSource(js('const deps = [];', 'export function configure(impl) { for (const k of Object.keys(impl)) deps[k] = impl[k]; }', 'export function go() { deps.a(); deps.b(); }')).configureDeps, 2);
+  const handlers = (decl, call) => measureSource(js(decl, 'export function on(i, f) { fns[i] = f; S.hs[i] = f; }', `export function fire(i) { ${call} }`)).configureDeps;
+  const lists = 'const fns = []; const S = { hs: [] };';
+  assert.equal(handlers(lists, 'fns[0](); S.hs[0]();'), 2);
+  assert.equal(handlers(lists, 'fns[i](); S.hs[i].call(null);'), 2);
+  assert.equal(handlers(lists, 'fns.find(Boolean)(); S.hs.at(-1).apply(null, []);'), 2);
+  assert.equal(handlers(lists, 'fns.forEach((h) => h()); for (const h of S.hs) h();'), 2);
+  assert.equal(handlers(lists, 'const f = fns[i]; f(); const g = S.hs.find(Boolean); g.call(null);'), 2);
+  assert.equal(handlers(lists, 'const l = S.hs; l[i](); fns.slice().length;'), 1);
+  // The data control: the same writes, read only by list methods, stay data.
+  assert.equal(handlers(lists, 'return fns.filter(Boolean).length + S.hs.findIndex((h) => h.ok);'), 0);
+});
+
 test('deadInjections: a deps key the module never reads', () => {
   const src = (extra) => js(
     `const deps = { a: null, b: null${extra} };`,

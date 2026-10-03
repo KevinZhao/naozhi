@@ -6,16 +6,18 @@
 // events and re-subscribes on session_state running — the default path, not an
 // edge case. See docs/rfc and plan §1.3.
 //
-// Owns cronLive and its five frame claims; cron_view.js paints it. The two
-// import each other and only call across at frame / event time, never at load.
-// cron_view is the graph entry, so this module evaluates first and its onReady
-// re-subscribe runs before cron_view's ensureCronLiveSubscription.
+// Owns cronLive, its five frame claims and their paint into the drawer's
+// #cron-live-events. cron_view.js imports this module, so it evaluates first
+// and its onReady re-subscribe runs before cron_view's.
 
 import { NZ_CONTRACT } from './contract.js';
-import { hooks, selection } from './state.js';
+import { selection } from './state.js';
 import { wsm } from './ws_manager.js';
-import { CRON_LIVE_MAX_EVENTS } from './utilities.js';
-import { appendEventsToContainer, isCronSessionFrozen, repaintCronLive, setCronLiveStatus, updateCronLiveTruncated } from './cron_view.js';
+import { CRON_LIVE_AGENT_ONLY_HTML, CRON_LIVE_MAX_EVENTS, EVENT_DIVIDER_GAP_MS, lastDividerTime, timeDividerHtml } from './utilities.js';
+import { eventHtml, renderEventsWithDividers } from './event_render.js';
+import { processEventsForDisplay, regroupAvatars } from './file_refs.js';
+import { isInternalEvent } from './session_ident.js';
+import { cronDrawerState, cronStore, isCronSessionFrozen } from './cron_state.js';
 
 export const cronLive = {
   jobId: null,
@@ -151,6 +153,132 @@ function onCronLiveEvent(msg) {
   updateCronLiveTruncated();
 }
 
+// setCronLiveStatus 将 cronLive.status 字符串投影到 DOM 上。
+// 三态：'pending' / 'live' / 'stopped'，'idle' 时清空文本。
+export function setCronLiveStatus(state) {
+  const el = document.getElementById('cron-live-status');
+  if (!el) return;
+  const labels = {
+    idle: '',
+    pending: '等待事件…',
+    live: '实时',
+    stopped: '已停止',
+  };
+  el.textContent = labels[state] || '';
+  el.className = 'cdl-status cdl-status-' + state;
+}
+
+function updateCronLiveTruncated() {
+  const trunc = document.getElementById('cron-live-truncated');
+  if (!trunc) return;
+  const n = cronLive.truncatedCount || 0;
+  if (n > 0) {
+    trunc.hidden = false;
+    trunc.textContent = '已折叠 ' + n + ' 条更早事件，请等任务结束后查看历史详情';
+  } else {
+    trunc.hidden = true;
+  }
+}
+
+// repaintCronLive 把 cronLive.events 数组重渲到 #cron-live-events 容器。
+// 在 renderCronDrawer 重渲后调一次，让重建的 DOM 立刻显示已累积的事件。
+// jobId 一致性守卫：若 cronLive.jobId 与当前 drawer 的 jobId 不一致就清空，
+// 避免 ensureCronLiveSubscription 还未完成切换前一帧渲到错的 drawer。
+// 事件到了但全被 INTERNAL_EVENT_TYPES 过滤光（典型 parallel agent team：
+// 整段都是 agent / task_* / tool_use）。若留空 innerHTML，CSS
+// .cdl-events:empty::before 会误报"暂无事件"，与顶部"已折叠 N 条"自相矛盾。
+// 渲染占位文案，对齐主面板 appendEvents 的同款兜底。
+export function repaintCronLive() {
+  const el = document.getElementById('cron-live-events');
+  if (!el) return;
+  const drawerJobId = cronDrawerState.jobId;
+  if (drawerJobId && cronLive.jobId && cronLive.jobId !== drawerJobId) {
+    el.innerHTML = '';
+    return;
+  }
+  const events = cronLive.events || [];
+  const display = processEventsForDisplay(events);
+  const html = renderEventsWithDividers(display, 0);
+  if (html) {
+    el.innerHTML = html;
+  } else if (events.length > 0) {
+    el.innerHTML = CRON_LIVE_AGENT_ONLY_HTML;
+  } else {
+    el.innerHTML = '';
+  }
+  regroupAvatars(el);
+  el.scrollTop = el.scrollHeight;
+  updateCronLiveTruncated();
+  setCronLiveStatus(cronLive.status);
+}
+
+// appendEventsToContainer 是 appendEvents 的容器化变体：不动主面板的
+// turnState / banner / navUserEls / optimistic-msg，只把事件 HTML 追加到
+// 指定容器。供 cron live 增量推送复用。
+function appendEventsToContainer(el, events) {
+  if (!el) return;
+  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  // 若容器当前只挂着 agent-only 占位（repaintCronLive 渲过），在追加真实
+  // 事件前清掉它，避免占位与事件并存。lastDividerTime 等读取也不会被它干扰。
+  if (el.querySelector('.cdl-agent-only')) el.innerHTML = '';
+  let prevT = lastDividerTime(el);
+  events.forEach(e => {
+    if (isInternalEvent(e)) return;
+    const h = eventHtml(e); if (!h) return;
+    const t = e.time || 0;
+    if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
+      el.insertAdjacentHTML('beforeend', timeDividerHtml(t));
+    }
+    el.insertAdjacentHTML('beforeend', h);
+    if (t) prevT = t;
+  });
+  trimCronLiveDom(el);
+  // 头像分组：cron live 容器在 #events-scroll 之外，不被主 observer 覆盖，
+  // 追加后显式重算 .nz-grouped（与 appendEvents/抽屉同款）。
+  regroupAvatars(el);
+  if (wasBottom) el.scrollTop = el.scrollHeight;
+}
+
+// #398-sibling: onCronLiveEvent caps the data model at CRON_LIVE_MAX_EVENTS
+// (events.shift) but the incremental push only ever appends to the container,
+// so its DOM grew unbounded across a long cron run. Trim the oldest .event
+// bubbles from the top to keep the DOM in sync with the data cap.
+function trimCronLiveDom(el) {
+  let bubbles = el.querySelectorAll(':scope > .event').length;
+  if (bubbles > CRON_LIVE_MAX_EVENTS) {
+    let node = el.firstChild;
+    while (node && bubbles > CRON_LIVE_MAX_EVENTS) {
+      const next = node.nextSibling;
+      if (node.nodeType === 1 && node.classList && node.classList.contains('event')) bubbles--;
+      el.removeChild(node);
+      node = next;
+    }
+  }
+}
+
+// ensureCronLiveSubscription 是 cron live 订阅状态的中心协调器。语义：
+//   - drawer 关闭 → 撤销订阅
+//   - drawer 开 + 任务跑 + 未订阅 → 订阅
+//   - drawer 开 + 任务跑 + 已订阅同 jobId → no-op
+//   - drawer 开 + 任务跑 + 已订阅别的 jobId → 切换
+//   - drawer 开 + 任务空闲 → no-op（保留已订内容供回看；首次开 idle 任务则不订）
+// 故意不在 cronApplyRunEnded 钩 unsub —— 让操作员看完本轮事件，关 drawer 才撤。
+export function ensureCronLiveSubscription() {
+  const jobId = cronDrawerState.jobId;
+  if (!jobId) {
+    if (cronLive.jobId) unsubscribeCronLive();
+    return;
+  }
+  if (cronLive.jobId && cronLive.jobId !== jobId) {
+    unsubscribeCronLive();
+  }
+  if (cronLive.jobId === jobId) return;
+  const job = cronStore.jobs.find(j => j && j.id === jobId);
+  const isRunning = !!(job && job.current_run && job.current_run.started_at);
+  if (!isRunning) return;
+  subscribeCronLive(jobId, job.current_run.started_at);
+}
+
 // cron-live RFC §2.2: the acks and errors that answer a pending cron live
 // subscribe stay out of the session subscription's bookkeeping.
 const cronLivePending = (msg) => cronLive.pendingJobId && msg.key === ('cron:' + cronLive.pendingJobId);
@@ -183,8 +311,7 @@ wsm.on(NZ_CONTRACT.WS.session_state, (msg) => onCronLiveSessionState(msg), cronL
 wsm.onReady(() => {
   const jobId = cronLive.jobId;
   if (!jobId) return;
-  const jobs = hooks.cronJobs();
-  const job = Array.isArray(jobs) ? jobs.find(j => j && j.id === jobId) : null;
+  const job = cronStore.jobs.find(j => j && j.id === jobId);
   if (!(job && job.current_run && job.current_run.started_at)) return;
   cronLive.subscribedKey = null;
   cronLive.pendingJobId = null;

@@ -1,14 +1,12 @@
 // cron_attention.js — the §7.4 confirmation queue: fetch, card rendering and
 // the confirm action (cron_view.js split, attention region).
 //
-// Owns cronAttentionState. It reads which job the drawer shows through
-// cron_drawer.js's live cronDrawerState and repaints through
-// cron_timeline.js; neither module imports this one (they receive the queue
-// functions via their configure calls), so the edges stay one-way.
+// It fetches into cron_state's cronStore.attention and never paints the
+// timeline itself: cron_timeline.js imports this module for the banner, so
+// the callers (cron_view, cron_drawer) repaint after a refresh or confirm.
 
 import { NZ_CONTRACT } from './contract.js';
-import { cronDrawerState } from './cron_drawer.js';
-import { renderCronTimelinePanel } from './cron_timeline.js';
+import { cronStore } from './cron_state.js';
 import { getToken } from './platform.js';
 import { esc, escAttr, fetchJSON } from './nz_util.js';
 import { showAPIError } from './utilities.js';
@@ -22,10 +20,8 @@ import { showAPIError } from './utilities.js';
 //   确认未完成，重放 → POST /replay (server Stops the original microVM first
 //                       — §6.2 rule 1 — then re-injects the input snapshot)
 //
-// cronAttentionState holds the last fetched queue (array of items) so the
-// banner renders synchronously inside cronTimelineHtml; cronAttentionRefresh
-// repopulates it.
-let cronAttentionState = { items: [], loaded: false };
+// cronStore.attention holds the last fetched queue (array of items);
+// cronAttentionRefresh repopulates it.
 
 // cronAttentionReasonLabel maps a queue item's reason to operator-facing text.
 function cronAttentionReasonLabel(reason) {
@@ -37,10 +33,10 @@ function cronAttentionReasonLabel(reason) {
   }
 }
 
-// cronAttentionQueueHtml renders the queue banner from cronAttentionState.
+// cronAttentionQueueHtml renders the queue banner from cronStore.attention.
 // Returns '' when the queue is empty so a healthy setup shows nothing.
 export function cronAttentionQueueHtml() {
-  const items = (cronAttentionState && Array.isArray(cronAttentionState.items)) ? cronAttentionState.items : [];
+  const items = Array.isArray(cronStore.attention.items) ? cronStore.attention.items : [];
   if (items.length === 0) return '';
   const cards = items.map(cronAttentionCardHtml).join('');
   return '<div class="ctr-queue" role="region" aria-label="待确认的云沙箱 run">' +
@@ -109,24 +105,25 @@ function cronFormatTime(ms) {
   }
 }
 
-// cronAttentionRefresh fetches GET /api/cron/attention and repaints the queue
-// banner if the open cron panel is showing. Best-effort; auth errors are
-// swallowed (the periodic poll retries).
+// cronAttentionRefresh fetches GET /api/cron/attention into cronStore.attention.
+// Best-effort; auth errors are swallowed (the periodic poll retries). Resolves
+// true when it stored a queue, false when it kept the last good one.
 export async function cronAttentionRefresh() {
   try {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const data = await fetchJSON(NZ_CONTRACT.API.cron_attention, { headers, timeoutMs: 8000 });
-    cronAttentionState = { items: (data && Array.isArray(data.items)) ? data.items : [], loaded: true };
+    cronStore.attention = { items: (data && Array.isArray(data.items)) ? data.items : [], loaded: true };
   } catch (e) {
-    if (e && e.status) return; // auth / rate-limit — leave the last good state
-    cronAttentionState = { items: [], loaded: true };
+    if (e && e.status) return false; // auth / rate-limit — leave the last good state
+    cronStore.attention = { items: [], loaded: true };
   }
-  if (cronDrawerState.jobId !== null) renderCronTimelinePanel(cronDrawerState.jobId);
+  return true;
 }
 
-// cronAttentionConfirm resolves a queue item as "already done" (no replay).
+// cronAttentionConfirm resolves a queue item as "already done" (no replay),
+// resolving true once a re-fetched queue was stored.
 export async function cronAttentionConfirm(runId) {
   try {
     const headers = { 'Content-Type': 'application/json' };
@@ -136,11 +133,11 @@ export async function cronAttentionConfirm(runId) {
     if (!r.ok) {
       const raw = await r.text().catch(() => '');
       showAPIError('确认 run', r.status, raw);
-      return;
+      return false;
     }
   } catch (e) {
     showAPIError('确认 run', 0, String(e));
-    return;
+    return false;
   }
-  await cronAttentionRefresh();
+  return cronAttentionRefresh();
 }

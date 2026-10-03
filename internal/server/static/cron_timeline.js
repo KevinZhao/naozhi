@@ -3,12 +3,14 @@
 // (#2715 D4 follow-up: cron_view.js four-region split, region 2).
 //
 // Owns cronTimelineState (per-job window/cache) and cronExpandedRunId (the
-// single inline-expanded row). Everything it needs from the cron view proper
-// — which job the drawer shows, the jobs array, the list repaint — is
-// injected once via configureCronTimeline(), called from cron_view.js's
-// module body; the dependency edge stays one-way (view → timeline).
+// single inline-expanded row). Which job the drawer shows and the jobs array
+// come from cron_state.js; the timeline repaints after the attention queue
+// and the job cost are fetched.
 
 import { NZ_CONTRACT } from './contract.js';
+import { cronDrawerState, cronJobCostCache, cronStore, fetchCronJobs } from './cron_state.js';
+import { cronErrorClassLabel, cronJobLedgerCostHtml } from './cron_format.js';
+import { cronAttentionQueueHtml } from './cron_attention.js';
 import { getToken } from './platform.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { formatAbsTime, showAPIError, showAuthModal, showNetworkError } from './utilities.js';
@@ -22,21 +24,6 @@ import {
   runStateLabel,
 } from './nz_util.js';
 
-const deps = {
-  cronAttentionQueueHtml: null, // §7.4 confirmation queue block stitched into the panel
-  cronDetailJobId: null, // () => string|null — which job the drawer shows
-  cronErrorClassLabel: null,
-  cronJobLedgerCostHtml: null, // per-job 30d ledger block stitched into the panel
-  cronJobs: null, // () => Job[] — the live jobs array
-  cronRecentRunsCap: null, // () => number — server-side recent_runs cap
-  fetchCronJobs: null,
-};
-export function configureCronTimeline(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('cron_timeline dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
 
 // P2 cron-run-history (RFC §8.2) — 时间轴每个 job 的本地状态。
 // runs / nextBefore: 分页列表 + 游标；details: 已 fetch 的单条 run 详情缓存
@@ -118,7 +105,7 @@ function cronTimelineHtml(jobId, job, st) {
   // §7.5 cost小字：纯前端聚合已加载 run 的 cost_usd（只有云沙箱 run 带）。
   // 标注"已加载 N 条"避免误读为全量账单——这是轻量可见性，非账单系统。
   const costSummary = cronTimelineCostSummaryHtml(st.runs);
-  const ledgerCost = deps.cronJobLedgerCostHtml(jobId);
+  const ledgerCost = cronJobLedgerCostHtml(jobId);
   const rowsHtml = st.runs.length === 0
     ? '<div class="ct-empty">暂无执行记录。下次调度或点击「立即执行」触发首次运行。</div>'
     : st.runs.map(r => cronTimelineRowHtml(jobId, r, st)).join('');
@@ -154,7 +141,7 @@ function cronTimelineHtml(jobId, job, st) {
   // failed-transport / orphaned side-effecting run is visible the moment the
   // operator opens any cron panel. Global (cross-job); '' when the queue is
   // empty. Fetched independently by cronAttentionRefresh().
-  const queueBanner = deps.cronAttentionQueueHtml();
+  const queueBanner = cronAttentionQueueHtml();
   return queueBanner +
     '<div class="ct-head">' +
       '<h3>' + esc(headTitle) + '</h3>' +
@@ -241,7 +228,7 @@ function cronTimelineRowHtml(jobId, r, st) {
   const subParts = [];
   if (r.trigger) subParts.push('<span class="ctr-trigger">' + esc(r.trigger) + '</span>');
   if (errCls) {
-    subParts.push('<span class="ctr-errcls">' + esc(deps.cronErrorClassLabel(errCls)) + '</span>');
+    subParts.push('<span class="ctr-errcls">' + esc(cronErrorClassLabel(errCls)) + '</span>');
   }
   // §7.5 per-run cost小字 — only sandbox runs carry cost_usd in the summary.
   if (r.cost_usd) {
@@ -346,7 +333,7 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   let body;
   if (detail.error_msg) {
     const errLabel = detail.error_class
-      ? ' <span class="ctr-final-tag">' + esc(deps.cronErrorClassLabel(detail.error_class)) + '</span>'
+      ? ' <span class="ctr-final-tag">' + esc(cronErrorClassLabel(detail.error_class)) + '</span>'
       : '';
     body = '<div class="ctr-final err">' +
         '<div class="ctr-final-label">运行失败' + errLabel + '</div>' +
@@ -598,11 +585,11 @@ async function cronTimelineFetchDetail(jobId, runId) {
       st.details[runId] = { __error: '网络错误' };
     }
   }
-  // cron-panel-consolidation RFC §4.6: 用 deps.cronDetailJobId() 判定当前 drawer
+  // cron-panel-consolidation RFC §4.6: 用 cronDrawerState.jobId 判定当前 drawer
   // 还停在同一 job 上；selectedKey 在 cron 面板下永远为 null，已不能用。
   // §16: 行内展开后 panel 重绘已经把 .ctr-detail 内的骨架替换为真实 detail，
   // 不再需要单独刷 sheet body（sheet 已废弃）。
-  if (deps.cronDetailJobId() === jobId) renderCronTimelinePanel(jobId);
+  if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
 }
 
 // cronTimelineFetchTranscript fetches the JSONL-derived turn timeline
@@ -628,7 +615,7 @@ async function cronTimelineFetchTranscript(jobId, runId) {
       st.details[runId].__transcript = { fallback: 'missing', turns: [], __fetchErr: true };
     }
   }
-  if (deps.cronDetailJobId() === jobId) renderCronTimelinePanel(jobId);
+  if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
 }
 
 // cronTimelineFetchSnapshot fetches the §7.3 input snapshot (content-
@@ -652,7 +639,7 @@ async function cronTimelineFetchSnapshot(jobId, runId) {
       st.details[runId].__snapshot = { available: false };
     }
   }
-  if (deps.cronDetailJobId() === jobId) renderCronTimelinePanel(jobId);
+  if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
 }
 
 // cronSnapshotPanelHtml renders the §7.3 input-snapshot collapsible from a
@@ -696,7 +683,7 @@ function cronSnapshotPanelHtml(snap) {
 function renderCronTimelinePanel(jobId) {
   const host = document.getElementById('cron-timeline-panel');
   if (!host) return;
-  const job = (deps.cronJobs() || []).find(x => x && x.id === jobId);
+  const job = (cronStore.jobs || []).find(x => x && x.id === jobId);
   const st = getCronTimelineState(jobId);
   // R243-PERF-12 (#817): identity-check the rendered HTML against the
   // last paint for this job. cronTimelineHtml builds up to ~200 row
@@ -772,7 +759,7 @@ function cronTimelineLoadMore(jobId, onDone) {
       // operator is still looking at the drawer for this job. The drawer
       // could have been closed or switched mid-fetch — st.runs is already
       // populated for next time, so no information is lost.
-      if (deps.cronDetailJobId() === jobId) renderCronTimelinePanel(jobId);
+      if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
       // Fire the post-load hook after st.loading is cleared and the panel is
       // re-rendered, so a callback that expands a run (#2090) operates on the
       // settled state. Guarded to a successful load and isolated so a throwing
@@ -811,19 +798,19 @@ function cronTimelineRefreshHeadDebounced(jobId) {
 }
 
 // cronTimelineRefreshHead — WS run_ended（cron）触发。如果当前 drawer 打开
-// 的就是该 job（deps.cronDetailJobId() === jobId），fetch /api/cron/runs?limit=10
+// 的就是该 job（cronDrawerState.jobId === jobId），fetch /api/cron/runs?limit=10
 // 替换头 10 条；否则直接返回——列表 stats 由 cron_view 的 run_ended handler
 // 刷新（fetchCronJobs + renderCronPanel）。
 //
 // cron-panel-consolidation RFC §4.6: 路由门由 selectedKey 切到
-// deps.cronDetailJobId() — cron 面板下 selectedKey 始终为 null（openCronPanel 已
+// cronDrawerState.jobId — cron 面板下 selectedKey 始终为 null（openCronPanel 已
 // 清空），不再适合做"当前看的是哪条 cron"判定。
 //
 // 调用方应优先走 cronTimelineRefreshHeadDebounced（rAF-debounced wrapper）以
 // 在 bursty run_ended 序列下避免 N 次 sort+innerHTML 重建（R243-PERF-7
 // / #812）。直接调用本函数仍合法（手动 trigger / 测试路径）。
 async function cronTimelineRefreshHead(jobId) {
-  if (deps.cronDetailJobId() !== jobId) return;
+  if (cronDrawerState.jobId !== jobId) return;
   const st = getCronTimelineState(jobId);
   // R220-FE-4: in-flight guard。用户快速触发多次 TriggerNow 时 run_ended
   // 会连续到达，每次都启动 fetch；后返回的请求覆盖先返回的 → 顺序取决于
@@ -838,7 +825,7 @@ async function cronTimelineRefreshHead(jobId) {
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     // 过期请求：开始 fetch 之后又有更新一轮 refreshHead 启动了，丢弃本次结果。
     if (st._refreshToken !== token) return;
-    if (deps.cronDetailJobId() !== jobId) return;
+    if (cronDrawerState.jobId !== jobId) return;
     const head = (data && Array.isArray(data.runs)) ? data.runs : [];
     if (head.length === 0) return;
     // 把头 10 条与现有 runs 合并（用 run_id 去重 + 按 started_at 倒序排）。
@@ -879,14 +866,14 @@ async function cronTimelineRefreshHead(jobId) {
 
 
 // renderCronTimelineForJob is a thin wrapper around the legacy
-// renderCronTimelineForSession that uses deps.cronDetailJobId()-keyed reconcile
+// renderCronTimelineForSession that uses cronDrawerState.jobId-keyed reconcile
 // instead of selectedKey. It re-uses the same #cron-timeline-panel host
 // (now living inside the drawer instead of mainShell), so cronTimelineHtml
 // / cronTimelineRowHtml / cronTimelineDetailHtml work unchanged.
 function renderCronTimelineForJob(jobId) {
   const host = document.getElementById('cron-timeline-panel');
   if (!host) return;
-  const job = (deps.cronJobs() || []).find(x => x && x.id === jobId);
+  const job = (cronStore.jobs || []).find(x => x && x.id === jobId);
   const st = getCronTimelineState(jobId);
   if (st.lastMountAt > 0 && Date.now() - st.lastMountAt > CRON_TIMELINE_FRESH_MS) {
     st.runs = [];
@@ -903,7 +890,7 @@ function renderCronTimelineForJob(jobId) {
     // 更多，留给首次「加载更多」以 nextBefore 向 /api/cron/runs 确认。
     // stats.total（累计运行数）≤ 已有行数时也已到结尾，省一次空翻页请求。
     const total = (job.stats && job.stats.total) | 0;
-    st.done = (deps.cronRecentRunsCap() > 0 && job.recent_runs.length < deps.cronRecentRunsCap()) ||
+    st.done = (cronStore.recentRunsCap > 0 && job.recent_runs.length < cronStore.recentRunsCap) ||
       (total > 0 && total <= st.runs.length);
   }
   st.lastMountAt = Date.now();
@@ -915,12 +902,41 @@ function renderCronTimelineForJob(jobId) {
   st.lastRenderedHtml = html;
   host.innerHTML = html;
   if (!job) {
-    deps.fetchCronJobs().then(() => {
-      if (deps.cronDetailJobId() === jobId) renderCronTimelineForJob(jobId);
+    fetchCronJobs().then(() => {
+      if (cronDrawerState.jobId === jobId) renderCronTimelineForJob(jobId);
     }).catch(() => {});
   }
 }
 
+// cronJobCostRefresh pulls the job's 30-day ledger total and repaints the
+// timeline head when the drawer still shows this job. Errors leave the
+// previous figure in place.
+export async function cronJobCostRefresh(jobId) {
+  if (!jobId) return;
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const to = new Date();
+    const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
+    const resp = await fetch(NZ_CONTRACT.API.cost_summary + '?group_by=job&job_id=' + encodeURIComponent(jobId) +
+      '&from=' + encodeURIComponent(from.toISOString()) + '&to=' + encodeURIComponent(to.toISOString()), { headers });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    let usd = 0, entries = 0;
+    for (const b of (data && Array.isArray(data.buckets) ? data.buckets : [])) {
+      if (b && b.unit === 'USD' && typeof b.amount === 'number') { usd += b.amount; entries += (b.entries | 0); }
+    }
+    cronJobCostCache[jobId] = { usd: usd, entries: entries, dropped: (data && data.dropped) | 0 };
+    if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
+  } catch (_) {}
+}
+
+// renderOpenCronTimeline repaints the timeline of the job the drawer shows,
+// if any: what a caller does once cron_attention has re-fetched the queue.
+export function renderOpenCronTimeline() {
+  if (cronDrawerState.jobId !== null) renderCronTimelinePanel(cronDrawerState.jobId);
+}
 
 export {
   cronExpandedRunId,

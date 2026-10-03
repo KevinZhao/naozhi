@@ -212,10 +212,6 @@ export const hooks = {
   getActiveScratchKey: null,
   closeScratchDrawer: null,
   askAside: null,
-  // Published by cron_view, which owns them: is this cron session's run
-  // frozen, and the current jobs list.
-  isCronSessionFrozen: null,
-  cronJobs: null,
 };
 
 // perSession: per-session maps keyed by session id (sid), each filled and

@@ -243,7 +243,8 @@ function defaultGitStates() {
  *   or null for a 404. Without it the route is absent (404). Calls land in `costSummaryCalls`
  *   as {group_by, job_id}.
  * @param {object[]} [overrides.cronAttention] - §7.4 queue items for GET /api/cron/attention.
- *   POST /api/cron/runs/<id>/confirm records the id in `cronConfirmCalls` and drops the item.
+ *   POST /api/cron/runs/<id>/confirm records the id in `cronConfirmCalls` and drops the item;
+ *   POST /api/cron/runs/<id>/replay does the same with `cronReplayCalls` (the {job_id} body).
  *   Without it the route is absent (404), as for a scheduler with no queue.
  * @param {object} [overrides.projectFiles] - Workspace file browser data, keyed by project name:
  *   { [project]: { dirs: { [dir]: entries[] }, previews: { [relPath]: previewJSON },
@@ -317,6 +318,7 @@ function startMockServer(overrides = {}) {
   const costSummaryCalls = [];
   const cronAttention = overrides.cronAttention ? overrides.cronAttention.slice() : null;
   const cronConfirmCalls = [];
+  const cronReplayCalls = [];
   const projectFiles = overrides.projectFiles || null;
   const fileRequests = [];
   // agentEvents: task_id -> ordered transcript entries. The real handler filters
@@ -845,6 +847,22 @@ function startMockServer(overrides = {}) {
       res.end(JSON.stringify({ status: 'ok' }));
       return;
     }
+    // The §7.4 `确认未完成，重放` action: the server stops the original run,
+    // replays it and resolves the queue item (cronReplayResp).
+    if (cronAttention && pathname.startsWith('/api/cron/runs/') && pathname.endsWith('/replay') && req.method === 'POST') {
+      if (!checkAuth()) return;
+      const runId = decodeURIComponent(pathname.slice('/api/cron/runs/'.length, -'/replay'.length));
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        cronReplayCalls.push({ run_id: runId, job_id: JSON.parse(body || '{}').job_id });
+        const i = cronAttention.findIndex(it => it.run_id === runId);
+        if (i >= 0) cronAttention.splice(i, 1);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', new_run_id: 'replay-' + runId }));
+      });
+      return;
+    }
 
     // /api/cron/runs/<run_id>/snapshot?job_id=… — §7.3 输入快照面板。
     // 必须排在下面那条通配 /api/cron/runs/<id> 之前，否则 run_id 会被解析成
@@ -1140,6 +1158,7 @@ function startMockServer(overrides = {}) {
         get cronPatchCalls() { return cronPatchCalls; },
         get cronDeleteCalls() { return cronDeleteCalls; },
         get cronConfirmCalls() { return cronConfirmCalls; },
+        get cronReplayCalls() { return cronReplayCalls; },
         get fileRequests() { return fileRequests; },
         get fullCronListCalls() { return fullCronListCalls; },
         get cronListGetCount() { return cronListGetCount; },

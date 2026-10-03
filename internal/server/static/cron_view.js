@@ -1,15 +1,10 @@
 import { NZ_CONTRACT } from './contract.js';
-import { hooks, selection, serverInfo, sessionList, timers, ui } from './state.js';
+import { selection, serverInfo, sessionList, timers, ui } from './state.js';
 import { fetchCLIBackends, renderBackendPicker } from './backend_catalog.js';
 import { setActivityView } from './dashboard.js';
-import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { authHeaders, getToken, lsGet, lsSet } from './platform.js';
 import { sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
-import {
-  processEventsForDisplay,
-  regroupAvatars,
-} from './file_refs.js';
 import {
   mobileBack,
 } from './mobile_nav.js';
@@ -20,28 +15,24 @@ import {
   freqUpdate,
   humanizeCron,
   parseCronToFreq,
-  setCronTimezoneMeta,
   cronTimezoneSuffix,
 } from './cron_schedule.js';
-import { cronAttentionConfirm, cronAttentionQueueHtml, cronAttentionRefresh } from './cron_attention.js';
-import { cronLive, subscribeCronLive, unsubscribeCronLive } from './cron_live.js';
+import { cronAttentionConfirm, cronAttentionRefresh } from './cron_attention.js';
+import { cronLive, ensureCronLiveSubscription, setCronLiveStatus } from './cron_live.js';
+import { cronDrawerState, cronFrozenRuns, cronRefetchFullJob, cronRunClearedAtLocal, cronStore, cronTriggerCooldownClear, fetchCronJobs } from './cron_state.js';
+import { cronErrorClassLabel, firstNonEmptyLine, formatAgoColloquial, formatRunningElapsed, formatWhenColloquial } from './cron_format.js';
+import { registerShell } from './shell.js';
 import {
   closeCronDetail,
-  configureCronDrawer,
   cronDrawerForgetJob,
-  cronDrawerState,
   cronDrawerSpecPromptToggle,
   openCronDetail,
   renderCronDrawer,
 } from './cron_drawer.js';
 import {
-  configureCronTrigger,
-  cronTriggerButtonState,
-  cronTriggerCooldownClear,
   cronTriggerNow,
 } from './cron_trigger.js';
 import {
-  configureCronTimeline,
   cronExpandedRunId,
   cronTimelineState,
   cronTimelineCollapse,
@@ -50,13 +41,12 @@ import {
   cronTimelineSelectRun,
   cronTimelineToggleShowAll,
   navigateExpandedRun,
-  renderCronTimelinePanel,
+  renderOpenCronTimeline,
 } from './cron_timeline.js';
 import {
   esc,
   escAttr,
   fetchJSON,
-  formatCostUSD,
   nzBus,
   nzViews,
   reconcileChildren,
@@ -69,20 +59,14 @@ import {
 import {
 } from './render_md.js';
 import {
-  CRON_LIVE_AGENT_ONLY_HTML,
-  CRON_LIVE_MAX_EVENTS,
-  EVENT_DIVIDER_GAP_MS,
   announce,
   confirmDialog,
   formatAbsTime,
-  lastDividerTime,
   setActiveSessionCard,
   shortPath,
   showAPIError,
   showNetworkError,
-  timeDividerHtml,
 } from './utilities.js';
-import { isInternalEvent } from './session_ident.js';
 // cron_view.js — Cron (定时任务) dashboard view.
 //
 // RFC docs/rfc/dashboard-cron-view-extraction.md (PR-1). Extracted verbatim
@@ -94,28 +78,13 @@ import { isInternalEvent } from './session_ident.js';
 // cronSortOrder initializer below finds lsGet ready, and the wsm.on
 // registrations and bootstrap fetchCronJobs() at the tail run after every
 // cron function is defined. dashboard reaches back only through nz.bus and
-// hooks (bottom of file); cron_live.js imports this module back and calls in
-// only at frame time.
+// nzViews.cron; the cron modules it imports reach back only through the two
+// shell slots it registers (openCronPanel, renderCronPanel).
 
 /* ===== Cron Tab ===== */
 
-let cronJobs = [];
 // resize-fallback listener dedup flag (was a window property pre-#2557-E3).
 let cronLayoutWindowListener = null;
-// Configured default IM target for cron completion notifications, or null
-// when the server has no default configured. Used to render helpful copy
-// alongside the notify toggle in create/edit modals.
-let cronNotifyDefault = null;
-// recent_runs_cap from GET /api/cron — the server-side per-job cap on the
-// embedded recent_runs preview (recentRunsPerJob). 0 until the first fetch.
-// renderCronTimelineForJob uses it to tell "history fully in hand" (len <
-// cap) from "first page only" (len == cap) without a second literal here.
-let cronRecentRunsCap = 0;
-
-// cronJobCostCache: jobId → last-30-day ledger totals for the job (local +
-// sandbox runs), fetched when the drawer opens; complements the timeline's
-// "已加载 N 条" sum which only covers loaded rows.
-const cronJobCostCache = {};
 
 
 
@@ -457,8 +426,8 @@ function collectCronContextValue() {
 // with false on save.
 function buildCronNotifyToggleHtml(currentNotify, hasOverride, overridePlat, overrideChat) {
   let defaultHint;
-  if (cronNotifyDefault && cronNotifyDefault.platform && cronNotifyDefault.chat_id) {
-    defaultHint = '→ ' + esc(cronNotifyDefault.platform) + ' (' + esc(cronNotifyDefault.chat_id) + ')';
+  if (cronStore.notifyDefault && cronStore.notifyDefault.platform && cronStore.notifyDefault.chat_id) {
+    defaultHint = '→ ' + esc(cronStore.notifyDefault.platform) + ' (' + esc(cronStore.notifyDefault.chat_id) + ')';
   } else {
     defaultHint = '未配置默认通知目标；展开下方填写自定义目标，或在 config.yaml 的 cron.notify_default 中配置。';
   }
@@ -759,88 +728,6 @@ function filterCronJobs(jobs, query, status) {
   });
 }
 
-// firstNonEmptyLine 取文本的首个非空行并按 rune 截断到 limit。
-// 与后端 cron.JobTitleOrFallback 行为对齐——显式 title 为空时前后端
-// 应该渲染一致的 fallback 标题。limit 默认 60 rune 匹配卡片视觉宽度。
-function firstNonEmptyLine(text, limit) {
-  if (!text) return '';
-  const lines = String(text).split('\n');
-  let line = '';
-  for (const l of lines) {
-    const t = l.trim();
-    if (t) { line = t; break; }
-  }
-  if (!line) return '';
-  const max = limit > 0 ? limit : 60;
-  // Array.from 处理 UTF-16 surrogate pair（emoji、非 BMP 字符），避免
-  // substring 切断代理对产生替换字符。
-  const chars = Array.from(line);
-  if (chars.length <= max) return line;
-  return chars.slice(0, max).join('') + '…';
-}
-
-// calendarDayDelta returns the number of calendar days between two epoch-ms
-// (positive if `b` is later than `a` in local time). Uses local midnight so
-// "昨天" / "明天" align with wall-clock date, not 24h intervals — a run
-// 25h ago from now=01:00 is actually 前天, not 昨天.
-function calendarDayDelta(a, b) {
-  const da = new Date(a);
-  const db = new Date(b);
-  const a0 = new Date(da.getFullYear(), da.getMonth(), da.getDate()).getTime();
-  const b0 = new Date(db.getFullYear(), db.getMonth(), db.getDate()).getTime();
-  return Math.round((b0 - a0) / 86400000);
-}
-
-// formatWhenColloquial renders a future epoch-ms as a short human-readable
-// phrase for the "when" column. Buckets:
-//
-//   - imminent  (<10m)        → "5 分钟后"
-//   - short     (<1h)          → "32 分钟后"
-//   - same day                 → "约 14 小时后"
-//   - tomorrow, early (<12:00) → "明早 04:00"
-//   - tomorrow, late           → "明日 20:00"
-//   - >=2 days                 → "3 天后 · 02:00"
-//
-// Returns {label, imminent} so callers choose their own highlight class.
-function formatWhenColloquial(ms) {
-  if (!ms) return { label: '—', imminent: false };
-  const now = Date.now();
-  const d = ms - now;
-  if (d < 0) return { label: '即将', imminent: true };
-  if (d < 60 * 1000) return { label: '片刻后', imminent: true };
-  if (d < 10 * 60 * 1000) return { label: Math.max(1, Math.floor(d / 60000)) + ' 分钟后', imminent: true };
-  if (d < 60 * 60 * 1000) return { label: Math.floor(d / 60000) + ' 分钟后', imminent: false };
-  const dayDelta = calendarDayDelta(now, ms);
-  const tgt = new Date(ms);
-  const pad = n => (n < 10 ? '0' + n : '' + n);
-  const hhmm = pad(tgt.getHours()) + ':' + pad(tgt.getMinutes());
-  if (dayDelta === 0) {
-    return { label: '约 ' + Math.floor(d / 3600000) + ' 小时后', imminent: false };
-  }
-  if (dayDelta === 1) {
-    const prefix = tgt.getHours() < 12 ? '明早' : '明日';
-    return { label: prefix + ' ' + hhmm, imminent: false };
-  }
-  return { label: dayDelta + ' 天后 · ' + hhmm, imminent: false };
-}
-
-// formatAgoColloquial — past epoch-ms → short Chinese "刚刚 / 3 分钟前 /
-// 2 小时前 / 昨天 HH:MM / 3 天前". Uses calendar days so "昨天" means
-// yesterday's date, not 24-48h ago (a 25h-old run from 01:00 is 前天).
-function formatAgoColloquial(ms) {
-  if (!ms) return '';
-  const now = Date.now();
-  const d = now - ms;
-  if (d < 60 * 1000) return '刚刚';
-  if (d < 60 * 60 * 1000) return Math.floor(d / 60000) + ' 分钟前';
-  const dayDelta = calendarDayDelta(ms, now);
-  if (dayDelta === 0) return Math.floor(d / 3600000) + ' 小时前';
-  const tgt = new Date(ms);
-  const pad = n => (n < 10 ? '0' + n : '' + n);
-  if (dayDelta === 1) return '昨天 ' + pad(tgt.getHours()) + ':' + pad(tgt.getMinutes());
-  return dayDelta + ' 天前';
-}
-
 // Cron ⋯ menu — single-active-menu model.
 //
 // Only one menu may be open at a time. A single module-level `cronMenuOnDoc`
@@ -929,7 +816,7 @@ function toggleCronMenu(id) {
   }
   // Close any other open menu before opening this one.
   closeCronMenus();
-  const j = (cronJobs || []).find(x => x && x.id === id);
+  const j = (cronStore.jobs || []).find(x => x && x.id === id);
   if (!j) return;
   const items = [];
   if (!j.paused) items.push({ label: '立即运行', action: 'run' });
@@ -969,7 +856,7 @@ function toggleCronMenu(id) {
   window.addEventListener('resize', cronMenuOnScroll);
 }
 
-// cronApplyRunStarted optimistically patches the in-memory cronJobs row so
+// cronApplyRunStarted optimistically patches the in-memory cronStore.jobs row so
 // the "运行中" badge renders without a list refetch. P0 cron-run-history
 // (RFC §7.2 / §8.1) — the run-ended event triggers the authoritative
 // refetch a few seconds later. Tolerates an unknown job_id (we may receive
@@ -977,7 +864,7 @@ function toggleCronMenu(id) {
 // it; in that case the next fetchCronJobs reconciles).
 function cronApplyRunStarted(msg) {
   if (!msg || !msg.job_id) return;
-  const list = Array.isArray(cronJobs) ? cronJobs : [];
+  const list = Array.isArray(cronStore.jobs) ? cronStore.jobs : [];
   const j = list.find(x => x && x.id === msg.job_id);
   if (!j) {
     // Optimistic miss: fallback to a refetch so the UI catches up.
@@ -1025,30 +912,13 @@ function cronApplyRunStarted(msg) {
   ensureCronLiveSubscription();
 }
 
-// cronFrozenRuns 是 timed_out（或其他非 succeeded/skipped 终态）后
-// 冻结事件流的 jobID 集合。命中后，sessionFrames.onEvent 对该 cron session
-// 的实时事件直接丢弃，避免 dashboard 在 cron 历史卡显示"超时"
-// 的同时事件流仍在追加（CLI 子进程没立刻停，会再吐几个 ghost
-// 事件）。下一次 run_started（cron）同 job 时清空。
-//
-// 后端 cron deadline 已经主动 InterruptViaControl 让 CLI 收尾，
-// 但 control_request 到 result 事件之间还有 ~几百 ms ~ 几秒延迟；
-// 这里是第二道防线，让 dashboard 视觉上立即冻结。
-const cronFrozenRuns = new Set();
-
 // cronApplyRunEnded patches the local row before the authoritative
 // fetchCronJobs lands. We clear current_run so the running-badge stops
 // flashing immediately; the subsequent refetch fills in last_error_class
 // / counters / last_run_at.
-// cronRunClearedAtLocal: jobId → 本地清除 current_run 的时刻。与
-// current_run.applied_at_local 互为镜像，挡住反方向的同一竞态：一个生成于
-// run_ended 帧之前、落地于其后的 list 响应仍带 current_run，会让刚熄灭的
-// 运行中徽章复活一拍。
-const cronRunClearedAtLocal = new Map();
-
 function cronApplyRunEnded(msg) {
   if (!msg || !msg.job_id) return;
-  const list = Array.isArray(cronJobs) ? cronJobs : [];
+  const list = Array.isArray(cronStore.jobs) ? cronStore.jobs : [];
   const j = list.find(x => x && x.id === msg.job_id);
   if (!j) return;
   j.current_run = null;
@@ -1077,157 +947,6 @@ function cronApplyRunEnded(msg) {
     setCronLiveStatus('stopped');
   }
   renderCronPanel();
-}
-
-// isCronSessionFrozen 判断当前 selectedKey 是否是被冻结的 cron session。
-// cron session key 的形态是 "cron:" + jobID（见 session.CronKey）；只有
-// dashboard 当前看的就是这条 cron 的实时面板时才需要丢事件，其他视图
-// 不受影响。
-export function isCronSessionFrozen(key) {
-  if (!key || typeof key !== 'string') return false;
-  if (!key.startsWith('cron:')) return false;
-  return cronFrozenRuns.has(key.slice('cron:'.length));
-}
-
-/* ===== cron live event stream（cron-live RFC） ===== */
-
-// setCronLiveStatus 将 cronLive.status（cron_live.js）字符串投影到 DOM 上。
-// 三态：'pending' / 'live' / 'stopped'，'idle' 时清空文本。
-export function setCronLiveStatus(state) {
-  const el = document.getElementById('cron-live-status');
-  if (!el) return;
-  const labels = {
-    idle: '',
-    pending: '等待事件…',
-    live: '实时',
-    stopped: '已停止',
-  };
-  el.textContent = labels[state] || '';
-  el.className = 'cdl-status cdl-status-' + state;
-}
-
-export function updateCronLiveTruncated() {
-  const trunc = document.getElementById('cron-live-truncated');
-  if (!trunc) return;
-  const n = cronLive.truncatedCount || 0;
-  if (n > 0) {
-    trunc.hidden = false;
-    trunc.textContent = '已折叠 ' + n + ' 条更早事件，请等任务结束后查看历史详情';
-  } else {
-    trunc.hidden = true;
-  }
-}
-
-// repaintCronLive 把 cronLive.events 数组重渲到 #cron-live-events 容器。
-// 在 renderCronDrawer 重渲后调一次，让重建的 DOM 立刻显示已累积的事件。
-// jobId 一致性守卫：若 cronLive.jobId 与当前 drawer 的 jobId 不一致就清空，
-// 避免 ensureCronLiveSubscription 还未完成切换前一帧渲到错的 drawer。
-export function repaintCronLive() {
-  const el = document.getElementById('cron-live-events');
-  if (!el) return;
-  const drawerJobId = cronDrawerState.jobId;
-  if (drawerJobId && cronLive.jobId && cronLive.jobId !== drawerJobId) {
-    el.innerHTML = '';
-    return;
-  }
-  const events = cronLive.events || [];
-  const display = processEventsForDisplay(events);
-  const html = renderEventsWithDividers(display, 0);
-  if (html) {
-    el.innerHTML = html;
-  } else if (events.length > 0) {
-    // 事件到了但全被 INTERNAL_EVENT_TYPES 过滤光（典型 parallel agent team：
-    // 整段都是 agent / task_* / tool_use）。若留空 innerHTML，CSS
-    // .cdl-events:empty::before 会误报"暂无事件"，与顶部"已折叠 N 条"自相矛盾。
-    // 渲染占位文案，对齐主面板 appendEvents 的同款兜底。
-    el.innerHTML = CRON_LIVE_AGENT_ONLY_HTML;
-  } else {
-    el.innerHTML = '';
-  }
-  regroupAvatars(el);
-  el.scrollTop = el.scrollHeight;
-  updateCronLiveTruncated();
-  setCronLiveStatus(cronLive.status);
-}
-
-// appendEventsToContainer 是 appendEvents 的容器化变体：不动主面板的
-// turnState / banner / navUserEls / optimistic-msg，只把事件 HTML 追加到
-// 指定容器。供 cron live 增量推送复用。
-export function appendEventsToContainer(el, events) {
-  if (!el) return;
-  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
-  // 若容器当前只挂着 agent-only 占位（repaintCronLive 渲过），在追加真实
-  // 事件前清掉它，避免占位与事件并存。lastDividerTime 等读取也不会被它干扰。
-  if (el.querySelector('.cdl-agent-only')) el.innerHTML = '';
-  let prevT = lastDividerTime(el);
-  events.forEach(e => {
-    if (isInternalEvent(e)) return;
-    const h = eventHtml(e); if (!h) return;
-    const t = e.time || 0;
-    if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
-      el.insertAdjacentHTML('beforeend', timeDividerHtml(t));
-    }
-    el.insertAdjacentHTML('beforeend', h);
-    if (t) prevT = t;
-  });
-  // #398-sibling: onCronLiveEvent caps the data model at CRON_LIVE_MAX_EVENTS
-  // (events.shift) but the incremental push only ever appends here, so the
-  // container DOM grew unbounded across a long cron run. Trim the oldest
-  // .event bubbles from the top to keep the DOM in sync with the data cap.
-  let bubbles = el.querySelectorAll(':scope > .event').length;
-  if (bubbles > CRON_LIVE_MAX_EVENTS) {
-    let node = el.firstChild;
-    while (node && bubbles > CRON_LIVE_MAX_EVENTS) {
-      const next = node.nextSibling;
-      if (node.nodeType === 1 && node.classList && node.classList.contains('event')) bubbles--;
-      el.removeChild(node);
-      node = next;
-    }
-  }
-  // 头像分组：cron live 容器在 #events-scroll 之外，不被主 observer 覆盖，
-  // 追加后显式重算 .nz-grouped（与 appendEvents/抽屉同款）。
-  regroupAvatars(el);
-  if (wasBottom) el.scrollTop = el.scrollHeight;
-}
-
-// ensureCronLiveSubscription 是 cron live 订阅状态的中心协调器。语义：
-//   - drawer 关闭 → 撤销订阅
-//   - drawer 开 + 任务跑 + 未订阅 → 订阅
-//   - drawer 开 + 任务跑 + 已订阅同 jobId → no-op
-//   - drawer 开 + 任务跑 + 已订阅别的 jobId → 切换
-//   - drawer 开 + 任务空闲 → no-op（保留已订内容供回看；首次开 idle 任务则不订）
-// 故意不在 cronApplyRunEnded 钩 unsub —— 让操作员看完本轮事件，关 drawer 才撤。
-function ensureCronLiveSubscription() {
-  const jobId = cronDrawerState.jobId;
-  if (!jobId) {
-    if (cronLive.jobId) unsubscribeCronLive();
-    return;
-  }
-  if (cronLive.jobId && cronLive.jobId !== jobId) {
-    unsubscribeCronLive();
-  }
-  if (cronLive.jobId === jobId) return;
-  const job = (typeof cronJobs !== 'undefined' && Array.isArray(cronJobs))
-    ? cronJobs.find(j => j && j.id === jobId)
-    : null;
-  const isRunning = !!(job && job.current_run && job.current_run.started_at);
-  if (!isRunning) return;
-  subscribeCronLive(jobId, job.current_run.started_at);
-}
-
-// formatRunningElapsed returns a colloquial "正在运行 12s / 2m" label for
-// the inline badge. Floors to seconds; wraps to "Nm Ss" past 60s.
-function formatRunningElapsed(startedAt) {
-  if (!startedAt) return '正在运行';
-  const ms = Date.now() - startedAt;
-  if (ms < 0) return '正在运行';
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return '运行中 ' + sec + 's';
-  const m = Math.floor(sec / 60);
-  const s = sec - m * 60;
-  if (m < 60) return '运行中 ' + m + 'm ' + s + 's';
-  const h = Math.floor(m / 60);
-  return '运行中 ' + h + 'h ' + (m - h * 60) + 'm';
 }
 
 // Polling timer that re-renders cron rows so "运行中 Xs" advances each
@@ -1266,10 +985,10 @@ function cronRunningTickPaintScoped() {
   if (!host) return;
   const rows = host.querySelectorAll('.cj-row.is-running');
   if (!rows.length) return;
-  // Build a quick lookup so we don't O(N) scan cronJobs once per row.
+  // Build a quick lookup so we don't O(N) scan cronStore.jobs once per row.
   const byId = new Map();
-  if (Array.isArray(cronJobs)) {
-    for (const j of cronJobs) {
+  if (Array.isArray(cronStore.jobs)) {
+    for (const j of cronStore.jobs) {
       if (j && j.id) byId.set(j.id, j);
     }
   }
@@ -1290,7 +1009,7 @@ function cronRunningTickPaintScoped() {
 }
 
 function ensureCronRunningTick() {
-  const anyRunning = Array.isArray(cronJobs) && cronJobs.some(j => j && j.current_run);
+  const anyRunning = Array.isArray(cronStore.jobs) && cronStore.jobs.some(j => j && j.current_run);
   // Stop conditions（任何一个成立即清掉 timer）：
   //   - 无 running job
   //   - 当前选中了某个 session（renderCronPanel 第一行就 return,timer 等于在浪费 CPU）
@@ -1510,38 +1229,6 @@ function cronStatsBadgeHtml(j) {
 function cronStateDotClass(state) { return runStateDot(state); }
 function cronStateLabel(state) { return runStateLabel(state); }
 
-// cronErrorClassLabel —— 后端 ErrorClass 枚举的中文友好名。RFC §9 错误分类映射。
-// 未知值原样返回，方便排查（不应发生但容错）。
-function cronErrorClassLabel(cls) {
-  switch (cls) {
-    case 'session_error': return '会话错误';
-    case 'send_error': return '发送失败';
-    case 'deadline_exceeded': return '超时';
-    case 'canceled': return '已取消';
-    case 'workdir_unreachable': return '工作目录不可达';
-    case 'workdir_outside_root': return '工作目录越界';
-    case 'overlap_skipped': return '重叠跳过';
-    case 'router_missing': return '路由未就绪';
-    case 'paused_concurrent': return '暂停时被抢';
-    case 'deleted_concurrent': return '运行中被删除';
-    case 'panic': return '内部异常';
-    // interrupted 与 canceled 同为 RunState=canceled，区别是谁中止的：进程
-    // 自己没了（drain 超预算或被硬杀）。措辞必须与"已取消"分开，否则操作员
-    // 会把一次被杀的运行读成自己点过取消。
-    case 'interrupted': return '进程中断（未跑完）';
-    // 重启存活的 CLI 被启动时的 argv 漂移检查关掉：是操作员自己的配置修改
-    // 结束了这次 run，不是重启本身 —— 与 interrupted 分开命名，操作员才
-    // 知道该看的是自己改了什么，而不是找一个不存在的崩溃（#2749 语义）。
-    case 'config_drift': return '配置变更中止（升级时改了模型/参数）';
-    // 云沙箱三态（agentcore-cloud-sandbox RFC §6.1/§7.2）。transport 是
-    // §6.2 双跑风险态：流断了但 microVM 状态未知，徽标走红色 + ⚠。
-    case 'sandbox_failed': return '云沙箱任务失败';
-    case 'sandbox_transport': return '云沙箱断流（状态未知）';
-    case 'sandbox_unavailable': return '云沙箱未配置';
-    default: return cls || '';
-  }
-}
-
 // cronPlacementBadgeHtml —— ☁️ 云沙箱徽标（RFC §7.2）。placement 是与
 // backend pill / origin badge 正交的第三个标识：本机任务返回空串（零增量），
 // 云沙箱任务渲染 ☁️ pill；terminal 三态由 error_class 着色：
@@ -1593,44 +1280,10 @@ async function cronReplayRunInner(jobId, runId, fromQueue) {
     return;
   }
   if (fromQueue) {
-    await cronAttentionRefresh();
+    if (await cronAttentionRefresh()) renderOpenCronTimeline();
   }
   // Refresh the timeline so the new replay run shows up at the head.
   if (cronDrawerState.jobId === jobId) cronTimelineRefreshHeadDebounced(jobId);
-}
-
-// cronJobCostRefresh pulls the job's 30-day ledger total and repaints the
-// timeline head when the drawer still shows this job. Errors leave the
-// previous figure in place.
-async function cronJobCostRefresh(jobId) {
-  if (!jobId) return;
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const to = new Date();
-    const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
-    const resp = await fetch(NZ_CONTRACT.API.cost_summary + '?group_by=job&job_id=' + encodeURIComponent(jobId) +
-      '&from=' + encodeURIComponent(from.toISOString()) + '&to=' + encodeURIComponent(to.toISOString()), { headers });
-    if (!resp.ok) return;
-    const data = await resp.json();
-    let usd = 0, entries = 0;
-    for (const b of (data && Array.isArray(data.buckets) ? data.buckets : [])) {
-      if (b && b.unit === 'USD' && typeof b.amount === 'number') { usd += b.amount; entries += (b.entries | 0); }
-    }
-    cronJobCostCache[jobId] = { usd: usd, entries: entries, dropped: (data && data.dropped) | 0 };
-    if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
-  } catch (_) {}
-}
-
-// cronJobLedgerCostHtml renders the job's 30-day ledger figure (all runs,
-// local + sandbox) or '' before the fetch lands / when nothing was spent.
-function cronJobLedgerCostHtml(jobId) {
-  const c = cronJobCostCache[jobId];
-  if (!c || !(c.usd > 0)) return '';
-  const title = '近 30 天账本合计：' + c.entries + ' 次运行（本地 + 云沙箱），CLI 估算口径' +
-    (c.dropped > 0 ? '；账本曾丢弃 ' + c.dropped + ' 条，可能偏低' : '');
-  return '<span class="ct-cost-ledger" title="' + escAttr(title) + '">30 天 ' + esc(formatCostUSD(c.usd)) + '</span>';
 }
 
 // cronEscClose — 全局 Esc 的 cron 分支委托入口。
@@ -1658,7 +1311,7 @@ function renderCronList() {
   const host = document.getElementById('cron-list-items');
   if (!host) return;
   const filterActive = cronFilterQuery !== '' || cronFilterStatus !== 'all';
-  if (!filterActive && cronJobs.length === 0) {
+  if (!filterActive && cronStore.jobs.length === 0) {
     host.innerHTML =
       '<div class="cron-empty">' +
         '<div class="cron-empty-icon" aria-hidden="true">&#9201;</div>' +
@@ -1668,7 +1321,7 @@ function renderCronList() {
       '</div>';
     return;
   }
-  const matched = filterCronJobs(cronJobs, cronFilterQuery, cronFilterStatus);
+  const matched = filterCronJobs(cronStore.jobs, cronFilterQuery, cronFilterStatus);
   if (matched.length === 0) {
     host.innerHTML =
       '<div class="cron-filter-empty">' +
@@ -1694,7 +1347,7 @@ function renderCronList() {
 // onCronSearchInput is the input oninput handler. Reads the live value,
 // writes it to module state, then repaints only the items container. Cheap
 // and local: typing 50 chars triggers 50 O(N) filter passes on the in-memory
-// cronJobs array, no server round-trips.
+// cronStore.jobs array, no server round-trips.
 function onCronSearchInput() {
   const input = document.getElementById('cron-search-input');
   cronFilterQuery = input ? (input.value || '').trim() : '';
@@ -1726,10 +1379,10 @@ function clearCronSearch() {
 }
 
 // cronMissedBannerHtml — cron-v2-polish §3.3: missed banner。Count 取自
-// cronJobs 本地缓存，与 attention 计数同源。点击切到 attention filter，与 header
+// cronStore.jobs 本地缓存，与 attention 计数同源。点击切到 attention filter，与 header
 // cron-badge 的红点导航保持一致的"点进去看哪些 job 需要关注"语义。
 function cronMissedBannerHtml() {
-  const missedCount = cronJobs.filter(j => j.missed).length;
+  const missedCount = cronStore.jobs.filter(j => j.missed).length;
   if (missedCount === 0) return '';
   return '<div class="cron-missed-banner" role="alert" data-action="cron-filter" data-status="attention" title="进程重启或休眠期间错过的调度不会自动补跑">' +
       '<span class="cmb-icon">&#9888;</span>' +
@@ -1739,11 +1392,11 @@ function cronMissedBannerHtml() {
 
 // cronSummaryChipHtml is the title row's status summary. The two buckets are
 // mutually exclusive — a paused / errored / missed job counts as "需关注" and
-// is excluded from "运行中" — so the two counts never exceed cronJobs.length.
+// is excluded from "运行中" — so the two counts never exceed cronStore.jobs.length.
 // It stays hidden: a data-only fallback for tests that grep for
 // "运行中 N · 需关注 N"; the overview chip strip is the visible UI.
 function cronSummaryChipHtml(attentionCount) {
-  const activeCount = cronJobs.filter(j => !j.paused && !j.last_error && !j.missed).length;
+  const activeCount = cronStore.jobs.filter(j => !j.paused && !j.last_error && !j.missed).length;
   const summaryParts = [];
   if (activeCount > 0) summaryParts.push('运行中 ' + activeCount);
   if (attentionCount > 0) summaryParts.push('<span class="cj-summary-attn">需关注 ' + attentionCount + '</span>');
@@ -1753,13 +1406,13 @@ function cronSummaryChipHtml(attentionCount) {
 }
 
 // cronFilterBarHtml is the adaptive filter bar. The search row shows only
-// when cronJobs > 5 (search adds noise at small scale). The status chips row
+// when cronStore.jobs > 5 (search adds noise at small scale). The status chips row
 // additionally shows whenever something 需关注 exists (the rail badge says
 // "需关注 N" — the panel must offer the matching 需关注 chip) or a non-default
 // filter is active (the missed-banner sets 'attention'; without chips a
 // ≤5-job install had no visible way back to 全部).
 function cronFilterBarHtml(attentionCount) {
-  const showSearchRow = cronJobs.length > 5;
+  const showSearchRow = cronStore.jobs.length > 5;
   if (!showSearchRow && attentionCount === 0 && cronFilterStatus === 'all') return '';
   const chipActive = s => cronFilterStatus === s ? ' active' : '';
   const chipPressed = s => cronFilterStatus === s ? 'true' : 'false';
@@ -1810,7 +1463,7 @@ function renderCronPanel() {
     renderCronDrawer();
     return;
   }
-  const attentionCount = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
+  const attentionCount = cronStore.jobs.filter(j => j.paused || j.last_error || j.missed).length;
   let html =
     '<div class="cron-detail">' +
       '<div class="cron-detail-body">' +
@@ -1917,136 +1570,6 @@ function setupCronLayoutObserver() {
   body._cronLayoutObs = obs;
 }
 
-
-// keepRefetchedPrompts carries a re-fetched full prompt across a compact poll.
-//
-// The 1 Hz poll replaces the whole cache, so the non-truncated row
-// cronRefetchFullJob splices in on drawer/editor open used to survive about one
-// millisecond — measured 726 ms -> 727 ms in a MutationObserver trace, i.e. the
-// drawer's 做什么 section never actually showed the prompt it re-fetched (#494
-// case 4). The retired source anchor could only see that the call existed.
-//
-// The prefix guard makes it safe: a clipped body is by construction a prefix of
-// what it was clipped from, so an edit landing between refreshes changes the
-// clipped text and the stale full copy is dropped instead of resurrected.
-//
-// prompt_truncated deliberately STAYS true on a merged row. It means "the wire
-// row was clipped", and cronRefetchFullJob early-returns { ok: true, job: cached }
-// when it is false — so clearing it would let the editor open from cache and Save
-// a prompt that changed since the merge, which is the data loss #494's follow-up
-// exists to prevent. Carrying a full body for display costs nothing; skipping the
-// editor's re-fetch costs the user their prompt.
-function keepRefetchedPrompts(prev, fresh) {
-  const full = new Map();
-  for (const p of prev || []) {
-    if (p && p.id && typeof p.prompt === 'string' && p.prompt.length > 0) full.set(p.id, p.prompt);
-  }
-  if (full.size === 0) return fresh;
-  return fresh.map(j => {
-    const had = (j && j.prompt_truncated && typeof j.prompt === 'string') ? full.get(j.id) : undefined;
-    if (typeof had !== 'string' || had.length <= j.prompt.length || !had.startsWith(j.prompt)) return j;
-    return Object.assign({}, j, { prompt: had });
-  });
-}
-
-async function fetchCronJobs() {
-  // 响应新旧的判据：比这个时刻更新的本地乐观补丁不被本响应覆盖（下方
-  // stale-clobber 保护）。取在请求发出前，宁可偏早（多保留补丁一拍）也
-  // 不偏晚（把新补丁误判为旧）。
-  const fetchStartedAt = Date.now();
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    // RNEW-UX-003: 8s timeout — cron list is polled periodically; a hung
-    // disk/fs call must release before the next tick fires.
-    //
-    // R236-SEC-08 (#494): poll path opts into compact mode so the wire
-    // shape carries `prompt` clipped to 256 UTF-8 bytes per job instead
-    // of the legacy full prompt (which scaled to 8 KiB × N jobs every
-    // tick). Each list row sets `prompt_truncated:true` for jobs whose
-    // full body was clipped — the editor open path (cronEditFetchFull)
-    // re-fetches a single job without compact when the user actually
-    // needs the bytes.
-    let data;
-    try {
-      data = await fetchJSON(NZ_CONTRACT.API.cron + '?compact=1', { headers, timeoutMs: 8000 });
-    } catch (err) {
-      if (err.status) return;
-      throw err;
-    }
-    const freshJobs = keepRefetchedPrompts(cronJobs, data.jobs || []);
-    // Stale-clobber 保护：这个响应可能生成于一个 WS run_started / run_ended
-    // 帧之前、却落地于其后（本地 e2e 用 compactCronListDelayMs 稳定复现；
-    // 真实后端在 list 事务较长时同样可能）。整体替换 cronJobs 会让旧响应
-    // 冲掉更新的乐观补丁 —— 运行中徽章闪没，或反向复活一拍。规则：只信
-    // 比本次 fetch 发起时刻更新的本地补丁，其余以服务端为准。
-    for (const nj of freshJobs) {
-      if (!nj || !nj.id) continue;
-      const prev = (Array.isArray(cronJobs) ? cronJobs : []).find(o => o && o.id === nj.id);
-      if (!prev) continue;
-      const appliedAt = prev.current_run && prev.current_run.applied_at_local;
-      if (prev.current_run && !nj.current_run && appliedAt && appliedAt > fetchStartedAt) {
-        nj.current_run = prev.current_run;
-      }
-      const clearedAt = cronRunClearedAtLocal.get(nj.id);
-      if (nj.current_run && !prev.current_run && clearedAt && clearedAt > fetchStartedAt) {
-        nj.current_run = null;
-      }
-    }
-    cronJobs = freshJobs;
-    cronNotifyDefault = data.notify_default || null;
-    cronRecentRunsCap = (data.recent_runs_cap | 0) > 0 ? (data.recent_runs_cap | 0) : 0;
-    setCronTimezoneMeta(data);
-    // Badge surfaces jobs needing intervention (last run errored, or a
-    // scheduled run was missed across a restart), not the raw total — avoids
-    // a persistent red dot on healthy setups. #2435: manually paused jobs are
-    // a deliberate operator state, so they no longer light the rail dot; the
-    // in-view 需关注 filter / header chip still include paused for context.
-    const attention = cronJobs.filter(j => j.last_error || j.missed).length;
-    // Surface the attention dot on the rail's 自动化 icon so the alert is
-    // visible from any view. (The legacy header cron-badge was removed once
-    // the sidebar 定时任务 quick-button folded into the rail's 自动化 entry.)
-    const railBadge = document.getElementById('abnav-cron-badge');
-    if (railBadge) {
-      railBadge.hidden = attention === 0;
-    }
-  } catch (e) { console.error('fetch cron:', e); }
-}
-
-// cronTriggerNow calls POST /api/cron/trigger to kick off a job immediately
-// without waiting for the next scheduled tick. Useful when the operator
-// wants to verify a prompt edit or rerun after a transient failure.
-//
-// Round 2 review R-4: visual-feedback contract (cron-panel-consolidation-ui
-// RFC §4.3.1). The backend's jobRunningGuard already serializes against
-// double-click — the issue is *user perception*. WS cron_run_started lands
-// 200-500 ms after the API ACK, so a naive "fire-and-forget + toast" leaves
-// the button looking pristine for that whole window and operators reflexively
-// click again. The flow we want is:
-//
-//   click → button locks (spinner) → API returns OK → "已派发 ✓" 2 s
-//        → debounce floor stays in effect another N s → unlock when WS
-//          cron_run_started lands OR debounce floor elapses, whichever
-//          is later.
-//
-// 10 s is the debounce floor: longer than the worst-case API + WS round
-// trip we've measured (~3 s under load) but short enough that a real
-// scheduled tick during the window won't get visually swallowed.
-//
-// Contract notes:
-//   - Backend rejects paused jobs with 409 ErrJobPaused; the button is
-//     hidden for paused jobs (cronJobCardHtml), so 409 here usually means a
-//     pause landed between render and click — surface it via showAPIError
-//     and immediately clear cronJustTriggered so the user can retry.
-//   - 409 "already running" maps to the same "请等待结束" path the
-//     disabled-running-state already shows; we reuse showAPIError so the
-//     status code remains visible for L2 support.
-//   - We do NOT wait for cron_run_started before unlocking — under WS
-//     disconnection the event might never arrive. The 10 s floor + the
-//     subsequent fetchCronJobs poll will reconcile.
-
-
 async function cronPause(id) {
   // RNEW-UX-003 (#444): fetchJSON wraps fetch with AbortController + 10s
   // timeout so a NAT-dropped TCP connection no longer hangs the pause
@@ -2090,7 +1613,7 @@ async function cronDelete(id) {
   // - 3 s countdown via confirmDialog's new countdownSecs option —
   //   long enough to catch fat-finger Enter, short enough not to
   //   annoy
-  const job = (Array.isArray(cronJobs) ? cronJobs.find(j => j.id === id) : null) || {};
+  const job = (Array.isArray(cronStore.jobs) ? cronStore.jobs.find(j => j.id === id) : null) || {};
   const title = job.title || job.user_label || '';
   const runCount = (job.stats && (job.stats.total | 0)) || 0;
   const isRunning = !!(job.current_run);
@@ -2145,55 +1668,6 @@ async function cronDelete(id) {
     if (e && e.status) { showAPIError('删除定时任务', e.status, (e.message || '').slice(0, 500)); return; }
     showNetworkError('删除定时任务', e);
   }
-}
-
-// cronRefetchFullJob refills `cronJobs[i].prompt` for a single job from
-// the non-compact /api/cron endpoint (R236-SEC-08 / #494). The poll path
-// uses ?compact=1 which clips prompts to 256 bytes — that's fine for the
-// list view but the editor / drawer detail need the full body before the
-// user can save without truncating their own data.
-//
-// Returns one of:
-//   { ok: true,  job }              — full prompt, safe to edit & save
-//   { ok: false, reason: 'missing' }— job not in cronJobs cache
-//   { ok: false, reason: 'fetch'  } — cache had truncated prompt and the
-//                                     refetch failed; caller MUST refuse
-//                                     to open the editor. Saving the
-//                                     truncated body would silently
-//                                     destroy the user's data.
-async function cronRefetchFullJob(id) {
-  const cached = cronJobs.find(j => j.id === id);
-  if (!cached) return { ok: false, reason: 'missing' };
-  // Skip the round trip only for a row that was never clipped AND never spliced
-  // by an earlier refetch. A spliced row carries a full body but says nothing
-  // about whether the prompt has changed since, so trusting it let the editor
-  // open — and Save — a stale prompt: open a drawer, have the prompt rewritten
-  // elsewhere, open the editor, and the old body goes back to disk. Measured in
-  // test/e2e/cron_compact_prompt.test.js before this guard existed.
-  if (!cached.prompt_truncated && !cached.prompt_refetched) return { ok: true, job: cached };
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    // No compact param — list endpoint returns full prompts. We pull
-    // the whole list here because there is no per-job GET endpoint
-    // exposed; the rate limiter on the list route is shared with the
-    // poll, and an editor open is a once-per-user-action event so the
-    // extra body is not a hot path.
-    const data = await fetchJSON(NZ_CONTRACT.API.cron, { headers, timeoutMs: 8000 });
-    const jobs = (data && data.jobs) || [];
-    const fresh = jobs.find(j => j.id === id);
-    if (fresh && !fresh.prompt_truncated) {
-      // Splice the full-prompt copy back into the cache so subsequent
-      // editor opens / drawer renders see the full body without another
-      // network round trip.
-      const idx = cronJobs.findIndex(j => j.id === id);
-      const spliced = Object.assign({}, fresh, { prompt_refetched: true });
-      if (idx >= 0) cronJobs[idx] = spliced;
-      return { ok: true, job: spliced };
-    }
-  } catch (e) { /* fall through to fetch-failure */ }
-  return { ok: false, reason: 'fetch' };
 }
 
 // Edit an existing cron job. Opens a modal pre-populated with the current
@@ -2339,7 +1813,7 @@ function buildEditCronWorkspaceBody(currentDir) {
 async function doEditCronJob(id) {
   const overlay = document.querySelector('.modal-overlay');
   if (!overlay) return;
-  const job = cronJobs.find(j => j.id === id);
+  const job = cronStore.jobs.find(j => j.id === id);
   if (!job) { showToast('未找到该任务', 'warning'); return; }
 
   const newPrompt = document.getElementById('edit-cron-prompt')?.value || '';
@@ -2440,37 +1914,12 @@ async function doEditCronJob(id) {
   }
 }
 
+registerShell({ openCronPanel, renderCronPanel });
 // Expose the Esc-close delegate so dashboard.js's Global Esc handler can route
 // the cron branch here without referencing cron-internal globals across the
 // script boundary (dashboard-cron-view-extraction RFC §2.6 B1). The optional
 // call (nz.views.cron && …escClose()) degrades gracefully if cron_view.js
 // fails to load, instead of throwing `cronExpandedRunId is not defined`.
-configureCronTrigger({ cronJobs: () => cronJobs });
-configureCronDrawer({
-  cronAttentionRefresh,
-  cronJobCostRefresh,
-  cronJobs: () => cronJobs,
-  cronRefetchFullJob,
-  cronTriggerButtonState,
-  ensureCronLiveSubscription,
-  fetchCronJobs,
-  firstNonEmptyLine,
-  formatAgoColloquial,
-  formatRunningElapsed,
-  formatWhenColloquial,
-  openCronPanel,
-  renderCronPanel,
-  repaintCronLive,
-});
-configureCronTimeline({
-  cronAttentionQueueHtml,
-  cronDetailJobId: () => cronDrawerState.jobId,
-  cronErrorClassLabel,
-  cronJobLedgerCostHtml,
-  cronJobs: () => cronJobs,
-  cronRecentRunsCap: () => cronRecentRunsCap,
-  fetchCronJobs,
-});
 nzViews.cron = { escClose: cronEscClose };
 
 // §16 inline-expand 回归: ↑↓ 切上一条 / 下一条 run（仅当某行展开时）。
@@ -2548,7 +1997,7 @@ registerActions({
   'cron-open': activate((el) => openCronDetail(cronIdOf(el), el)),
   'cron-tl-showall': (el) => cronTimelineToggleShowAll(el),
   'cron-tl-more': (el) => cronTimelineLoadMore(el.dataset.job),
-  'cron-att-confirm': (el) => cronAttentionConfirm(el.dataset.run),
+  'cron-att-confirm': (el) => cronAttentionConfirm(el.dataset.run).then((done) => done && renderOpenCronTimeline()),
   'cron-att-replay': (el) => cronAttentionReplay(el.dataset.job, el.dataset.run),
   'cron-tl-select': activate((el, e) => {
     // Guard: clicks inside the expanded .ctr-detail (input snapshot, replay
@@ -2592,10 +2041,3 @@ wsm.on(NZ_CONTRACT.WS.run_ended, (msg) => {
 wsm.onReady(() => { if (!cronLive.jobId) ensureCronLiveSubscription(); });
 // dashboard cannot import cron_view (#2557 PR-E1), so it opens the panel over nz.bus.
 nzBus.addEventListener('cron:open-panel', () => openCronPanel());
-
-// Reads of cron-owned state: the frozen-run set for dashboard, which cannot
-// import cron_view, and the jobs list (reassigned on every fetch, so a getter
-// rather than an exported let) for cron_live's reconnect. dashboard's
-// `hooks.x && …` call shape keeps working if cron_view ever fails to load.
-hooks.isCronSessionFrozen = isCronSessionFrozen;
-hooks.cronJobs = function () { return cronJobs; };
