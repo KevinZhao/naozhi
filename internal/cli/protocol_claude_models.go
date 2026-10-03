@@ -37,16 +37,18 @@ type modelCache struct {
 }
 
 // AvailableModels returns the models the settings file this process spawned with
-// allows, in file order. Nil when the file names none, which lets the dashboard
-// fall through to its configured and observed tiers.
+// allows, in file order. Nil when the file names none, or when the settings
+// source is unknown (a reattached process whose argv named none), which lets
+// the dashboard fall through to its configured and observed tiers.
 //
 // This is the optional facet Process.AvailableModels surfaces; for stream-json
 // the list is a settings key rather than something the agent reports.
 func (p *ClaudeProtocol) AvailableModels() []ModelInfo {
-	path := ""
-	if sp := p.settingsPath.Load(); sp != nil {
-		path = *sp
+	sp := p.settingsPath.Load()
+	if sp == nil {
+		return nil
 	}
+	path := *sp
 	if path == "" {
 		dir := claudefs.DefaultDir()
 		if dir == "" {
@@ -55,6 +57,36 @@ func (p *ClaudeProtocol) AvailableModels() []ModelInfo {
 		path = filepath.Join(dir, "settings.json")
 	}
 	return p.models.get(path)
+}
+
+// seedSettingsFromArgs records the settings source from a shim-recorded spawn
+// argv, for a reattached process that never ran BuildArgs. Fill-if-unset, and
+// a no-op when argv names no source.
+func (p *ClaudeProtocol) seedSettingsFromArgs(args []string) {
+	if src, ok := settingsSourceFromArgs(args); ok {
+		p.settingsPath.CompareAndSwap(nil, &src)
+	}
+}
+
+// settingsSourceFromArgs inverts BuildArgs' settings flags: `--settings <file>`
+// yields the file, `--setting-sources user` yields localSettingsMarker. Last
+// occurrence wins; a file usableSettingsFile rejects is ignored.
+func settingsSourceFromArgs(args []string) (src string, ok bool) {
+	for i := 0; i+1 < len(args); i++ {
+		switch args[i] {
+		case "--settings":
+			if f := usableSettingsFile(args[i+1]); f != "" {
+				src, ok = f, true
+			}
+			i++
+		case "--setting-sources":
+			if args[i+1] == "user" {
+				src, ok = localSettingsMarker, true
+			}
+			i++
+		}
+	}
+	return src, ok
 }
 
 // get returns the cached list for path, re-reading when the file's size or

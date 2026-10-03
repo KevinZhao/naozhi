@@ -370,10 +370,9 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// leaves the dashboard stuck on a "running" spinner.
 		proc.SetOnTurnDone(func() { r.notifyChange() })
 
-		// SpawnReconnect has no SpawnOptions, so the spawn-pinned effort tier is
-		// recovered from the argv the shim recorded. Fill-if-unset: a metadata
-		// report already consumed from the replay stays authoritative.
-		proc.SeedEffortFromArgs(state.CLIArgs)
+		// SpawnReconnect has no SpawnOptions, so launch-time state (effort tier,
+		// settings file) is recovered from the argv the shim recorded.
+		proc.SeedFromSpawnArgs(state.CLIArgs)
 
 		// SpawnReconnect has no cwd (shim owns it), so the SubagentLinker has an
 		// empty projectDir and Resolve bails on every team agent task_id. Replay

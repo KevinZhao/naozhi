@@ -130,3 +130,115 @@ func containsPair(args []string, flag, value string) bool {
 	}
 	return false
 }
+
+// TestClaudeAvailableModels_UnknownSourceIsNil: a reattached process never ran
+// BuildArgs, so guessing ~/.claude/settings.json would hand the dashboard the
+// interactive cc's list instead of the one this process enforces.
+func TestClaudeAvailableModels_UnknownSourceIsNil(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeSettings(t, filepath.Join(home, ".claude", "settings.json"), `{"availableModels":["claude-opus-5"]}`)
+
+	p, ok := (&ClaudeProtocol{}).Clone().(*ClaudeProtocol)
+	if !ok {
+		t.Fatal("Clone did not return a *ClaudeProtocol")
+	}
+	if got := p.AvailableModels(); got != nil {
+		t.Errorf("AvailableModels() = %+v, want nil for an unknown settings source", got)
+	}
+}
+
+// TestClaudeAvailableModels_ReattachSeedsFromArgv: the shim-recorded argv is
+// enough to recover either settings source BuildArgs can choose.
+func TestClaudeAvailableModels_ReattachSeedsFromArgv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeSettings(t, filepath.Join(home, ".claude", "settings.json"), `{"availableModels":["claude-opus-5"]}`)
+	owned := filepath.Join(t.TempDir(), "naozhi-settings.json")
+	writeSettings(t, owned, `{"availableModels":["claude-opus-5-5[1m]","claude-sonnet-5-5[1m]"]}`)
+
+	cases := map[string]struct {
+		opts SpawnOptions
+		want []ModelInfo
+	}{
+		"naozhi-owned file": {SpawnOptions{SettingsFile: owned}, []ModelInfo{{ID: "claude-opus-5-5[1m]"}, {ID: "claude-sonnet-5-5[1m]"}}},
+		"user settings":     {SpawnOptions{}, []ModelInfo{{ID: "claude-opus-5"}}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			argv := (&ClaudeProtocol{}).BuildArgs(tc.opts)
+			p := &ClaudeProtocol{}
+			p.seedSettingsFromArgs(argv)
+			if got := p.AvailableModels(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("AvailableModels() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClaudeSeedSettings_FillIfUnset: a source BuildArgs already recorded wins.
+func TestClaudeSeedSettings_FillIfUnset(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "a.json")
+	writeSettings(t, first, `{"availableModels":["claude-opus-5"]}`)
+	p := &ClaudeProtocol{}
+	p.BuildArgs(SpawnOptions{SettingsFile: first})
+	p.seedSettingsFromArgs([]string{"--settings", filepath.Join(dir, "b.json")})
+	if got := p.AvailableModels(); len(got) != 1 || got[0].ID != "claude-opus-5" {
+		t.Errorf("AvailableModels() = %+v, want the BuildArgs file's list", got)
+	}
+}
+
+func TestSettingsSourceFromArgs(t *testing.T) {
+	cases := []struct {
+		name   string
+		args   []string
+		want   string
+		wantOK bool
+	}{
+		{"owned file", []string{"-p", "--setting-sources", "", "--settings", "/abs/s.json", "--verbose"}, "/abs/s.json", true},
+		{"user", []string{"--setting-sources", "user"}, localSettingsMarker, true},
+		{"absent", []string{"-p", "--verbose"}, "", false},
+		{"dangling", []string{"--settings"}, "", false},
+		{"relative file ignored", []string{"--settings", "rel.json"}, "", false},
+		{"flag-shaped file ignored", []string{"--settings", "-x"}, "", false},
+		{"last wins", []string{"--setting-sources", "user", "--settings", "/abs/s.json"}, "/abs/s.json", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := settingsSourceFromArgs(tc.args)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("settingsSourceFromArgs(%q) = (%q, %v), want (%q, %v)", tc.args, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestProcess_SeedFromSpawnArgs_Settings reaches the protocol through the
+// Process method the reconnect path calls.
+func TestProcess_SeedFromSpawnArgs_Settings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"availableModels":["claude-sonnet-5-5[1m]"]}`)
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	defer srv.conn.Close()
+	p.SeedFromSpawnArgs([]string{"--setting-sources", "", "--settings", path})
+	if got := p.AvailableModels(); len(got) != 1 || got[0].ID != "claude-sonnet-5-5[1m]" {
+		t.Errorf("AvailableModels() = %+v, want the argv file's list", got)
+	}
+
+	// ACP reports its own manifest; a --settings flag in argv must not change it.
+	acp := &ACPProtocol{BackendID: "kiro"}
+	q, srv2 := shimTestPair(acp)
+	defer srv2.conn.Close()
+	before := acp.AvailableModels()
+	q.SeedFromSpawnArgs([]string{"--settings", path})
+	if got := q.AvailableModels(); !reflect.DeepEqual(got, before) {
+		t.Errorf("ACP AvailableModels() = %+v after seeding, want unchanged %+v", got, before)
+	}
+}

@@ -69,10 +69,10 @@ func TestProcess_SeedEffort_ReportWins(t *testing.T) {
 	})
 }
 
-// SeedEffortFromArgs is the reconnect-path seed: the tier is recovered from
+// SeedFromSpawnArgs is the reconnect-path seed: the tier is recovered from
 // the argv the shim recorded at spawn (shim.State.CLIArgs), the same tokens
 // BuildArgs emits.
-func TestProcess_SeedEffortFromArgs(t *testing.T) {
+func TestProcess_SeedFromSpawnArgs_Effort(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -91,7 +91,7 @@ func TestProcess_SeedEffortFromArgs(t *testing.T) {
 			t.Parallel()
 			p, srv := shimTestPair(&ClaudeProtocol{})
 			defer srv.conn.Close()
-			p.SeedEffortFromArgs(tc.args)
+			p.SeedFromSpawnArgs(tc.args)
 			if got := p.Effort(); got != tc.want {
 				t.Errorf("Effort() = %q, want %q", got, tc.want)
 			}
