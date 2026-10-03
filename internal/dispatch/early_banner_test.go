@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -226,5 +227,64 @@ func TestReplyTracker_StopWaitsForBannerInFlight(t *testing.T) {
 	<-stopped
 	if got := p.allReplies(); !slices.Equal(got, []string{thinkingLine}) {
 		t.Errorf("replies = %q, want %q", got, []string{thinkingLine})
+	}
+}
+
+// slowErrorPlatform holds every non-banner Reply until a banner Reply starts
+// or 300ms pass, the window in which a still-armed fallback would fire.
+type slowErrorPlatform struct {
+	ackOrderPlatform
+	banner     chan struct{}
+	bannerOnce sync.Once
+}
+
+func (p *slowErrorPlatform) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
+	if msg.Text == thinkingLine {
+		p.bannerOnce.Do(func() { close(p.banner) })
+	} else {
+		select {
+		case <-p.banner:
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	return p.ackOrderPlatform.Reply(ctx, msg)
+}
+
+// TestFallbackBanner_NoBannerBelowErrorText: a turn that fails before the
+// delay sends only the error text, even when that Reply outlasts the delay.
+func TestFallbackBanner_NoBannerBelowErrorText(t *testing.T) {
+	t.Parallel()
+	fail := errors.New("boom")
+	cases := []struct {
+		name        string
+		getOrCreate func() (turn.Session, session.SessionStatus, error)
+		send        func() (*clievent.SendResult, error)
+	}{
+		{"session", func() (turn.Session, session.SessionStatus, error) { return nil, 0, fail }, answer},
+		{"send", existingSession, func() (*clievent.SendResult, error) { return nil, fail }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := &slowErrorPlatform{banner: make(chan struct{})}
+			p.supportsInterim = true
+			p.addErr = errors.New("rate limited")
+			sender := &testSender{
+				getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+					return tc.getOrCreate()
+				},
+				send: func(context.Context, string, turn.Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+					return tc.send()
+				},
+			}
+			d := newTestDispatcher(&fakePlatform{}, withSender(sender))
+			d.platforms = map[string]platform.Platform{"fake": p}
+			d.fallbackBannerDelay = 10 * time.Millisecond
+			runIMTurn(context.Background(), d, reactorKey, "hi", reactorMsg("m1", "hi"), true)
+			got := p.allReplies()
+			if len(got) != 1 || got[0] == thinkingLine {
+				t.Errorf("replies = %q, want only the error text", got)
+			}
+		})
 	}
 }

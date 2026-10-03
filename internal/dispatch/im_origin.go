@@ -190,6 +190,10 @@ func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 	defer func() {
 		d.clearQueuedReactions(context.WithoutCancel(ctx), o.msg.Platform, dl.queuedIDs(), dl.lg)
 	}()
+	if out.Stage != turn.StageDone && dl.tracker != nil {
+		// Before the error text, so a fallback banner cannot post below it.
+		dl.tracker.stop()
+	}
 	switch out.Stage {
 	case turn.StageSession:
 		replyCtx, cleanup, errMsg := d.handleGetOrCreateError(ctx, out.Err, dl.lg)

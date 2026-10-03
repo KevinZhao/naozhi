@@ -35,7 +35,7 @@ type replyTracker struct {
 	// agentID is embedded into AskUserQuestion cards so the answer routes back
 	// to the asking agent session rather than "general" (#2148).
 	agentID string
-	// thinkingMsgID is written by the Reply goroutine spawned in onEvent and
+	// thinkingMsgID is written by the banner goroutine postBanner spawns and
 	// read by editLoop/imDelivery; on ctx cancel waitReady may return before
 	// msgIDReady closes, so the read races the write — hence atomic.
 	thinkingMsgID atomic.Pointer[string]
