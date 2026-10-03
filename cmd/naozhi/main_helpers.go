@@ -196,6 +196,18 @@ func sysSessionsWorkDir(cfg *config.Config, storePath string) string {
 	return lay.SysSessionsRoot()
 }
 
+// shimManagerConfig is the shim.Manager configuration main starts with.
+func shimManagerConfig(cfg *config.Config) shim.ManagerConfig {
+	return shim.ManagerConfig{
+		StateDir:        osutil.ExpandHome(cfg.Session.Shim.StateDir),
+		IdleTimeout:     cfg.ShimIdleTimeout(),
+		WatchdogTimeout: cfg.ShimWatchdogTimeout(),
+		BufferSize:      cfg.Session.Shim.BufferSize,
+		MaxBufBytes:     cfg.ShimMaxBufferBytes(),
+		MaxShims:        cfg.Session.Shim.MaxShims,
+	}
+}
+
 // buildSysessionManager wires sysession.Manager from cfg.Sysession. Returns
 // (nil, "", nil) when disabled so the caller's nil guard stays meaningful, and
 // (nil, "", err) when enabled but unusable — the caller logs and continues
@@ -236,6 +248,25 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		return nil, "", fmt.Errorf("new runner: %w", err)
 	}
 
+	mgr, err := sysession.NewManager(sysession.Config{
+		Enabled:     true,
+		TickTimeout: cfg.SysessionTickTimeout(),
+		Runner:      runner,
+		Router:      router,
+		Daemons:     sysessionDaemons(cfg),
+		// attachment-gc sweeps these roots; nil-safe inside the lister.
+		WorkspaceRoots: workspaceRootLister{router: router, projectMgr: projectMgr},
+		Telemetry:      telemetry,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("new manager: %w", err)
+	}
+	return mgr, resolvedWorkDir, nil
+}
+
+// sysessionDaemons builds each daemon's runtime config from cfg.Sysession.Daemons
+// and the durations config.Load parsed for it.
+func sysessionDaemons(cfg *config.Config) map[string]sysession.DaemonRuntimeConfig {
 	daemons := make(map[string]sysession.DaemonRuntimeConfig, len(cfg.Sysession.Daemons))
 	for name, dcfg := range cfg.Sysession.Daemons {
 		durations := cfg.SysessionDaemonDurations(name)
@@ -285,21 +316,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 			Specific:   specific,
 		}
 	}
-
-	mgr, err := sysession.NewManager(sysession.Config{
-		Enabled:     true,
-		TickTimeout: cfg.SysessionTickTimeout(),
-		Runner:      runner,
-		Router:      router,
-		Daemons:     daemons,
-		// attachment-gc sweeps these roots; nil-safe inside the lister.
-		WorkspaceRoots: workspaceRootLister{router: router, projectMgr: projectMgr},
-		Telemetry:      telemetry,
-	})
-	if err != nil {
-		return nil, "", fmt.Errorf("new manager: %w", err)
-	}
-	return mgr, resolvedWorkDir, nil
+	return daemons
 }
 
 // absConfigPath resolves the -config flag to an absolute path so the

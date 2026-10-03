@@ -134,6 +134,10 @@ func TestLoad_FallbackValuesParsedOnce(t *testing.T) {
 		}
 	}
 
+	if got := mustLoad(t, "sysession:\n  runner:\n    jsonl_max_age: 48h\n").SysessionJSONLMaxAge(); got != 48*time.Hour {
+		t.Errorf("SysessionJSONLMaxAge with jsonl_max_age 48h = %v, want 48h", got)
+	}
+
 	for name, c := range map[string]*Config{"empty file": mustLoad(t, ""), "zero value": {}} {
 		if c.ShimIdleTimeout() != 4*time.Hour || c.ShimWatchdogTimeout() != 30*time.Minute ||
 			c.ShimMaxBufferBytes() != 50<<20 || c.SysessionTickTimeout() != 30*time.Second ||

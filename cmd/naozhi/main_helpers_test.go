@@ -9,8 +9,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/shim"
+	"github.com/naozhi/naozhi/internal/sysession"
 )
 
 // TestSysSessionsWorkDir pins the resolution order the image-orient vision
@@ -172,5 +175,43 @@ func TestNoParseDurationInMain(t *testing.T) {
 	}
 	if scanned < 10 {
 		t.Fatalf("scanned %d files; the walk is not looking at cmd/naozhi", scanned)
+	}
+}
+
+// TestShimManagerConfig pins which config value feeds each shim.Manager field;
+// every value differs from its default so a swapped or dropped accessor shows.
+func TestShimManagerConfig(t *testing.T) {
+	stateDir := t.TempDir()
+	cfg := loadConfigBody(t, "session:\n  shim:\n    state_dir: "+stateDir+"\n    idle_timeout: 2h\n"+
+		"    disconnect_watchdog: 45m\n    buffer_size: 123\n    max_buffer_bytes: 1gb\n    max_shims: 3\n")
+	want := shim.ManagerConfig{
+		StateDir: stateDir, IdleTimeout: 2 * time.Hour, WatchdogTimeout: 45 * time.Minute,
+		BufferSize: 123, MaxBufBytes: 1 << 30, MaxShims: 3,
+	}
+	if got := shimManagerConfig(cfg); !reflect.DeepEqual(got, want) {
+		t.Errorf("shimManagerConfig = %+v, want %+v", got, want)
+	}
+}
+
+// TestSysessionDaemons pins which parsed duration feeds each daemon knob.
+func TestSysessionDaemons(t *testing.T) {
+	cfg := loadConfigBody(t, "sysession:\n  daemons:\n"+
+		"    auto-titler:\n      tick: 1m\n      min_rename_interval: 10m\n"+
+		"    attachment-gc:\n      tick: 2h\n      upload_ttl: 36h\n      ref_ttl: 720h\n")
+	got := sysessionDaemons(cfg)
+	at, gc := got[sysession.DaemonAutoTitler], got[sysession.DaemonAttachmentGC]
+	for _, c := range []struct {
+		name      string
+		got, want any
+	}{
+		{"auto-titler tick", at.Tick, time.Minute},
+		{"auto-titler min_rename_interval", at.Specific["min_rename_interval"], 10 * time.Minute},
+		{"attachment-gc tick", gc.Tick, 2 * time.Hour},
+		{"attachment-gc upload_ttl", gc.Specific["upload_ttl"], 36 * time.Hour},
+		{"attachment-gc ref_ttl", gc.Specific["ref_ttl"], 720 * time.Hour},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
 	}
 }
