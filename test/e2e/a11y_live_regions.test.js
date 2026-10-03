@@ -8,11 +8,14 @@
 //      role and the elapsed chip is aria-hidden;
 //  (b) a turn that streams, then gets its result and the ready push, is
 //      announced exactly once, with its elapsed time;
-//  (c) a turn that ends in a non-ready state says the turn ended;
+//  (c) a turn that ends in a non-ready state, or that the user stopped, says
+//      the turn ended;
 //  (d) opening a ready session, switching away from a running one, or
 //      creating a session while a running one is open, is silent;
 //  (e) a send rolled back by its ack (/clear's reset) never became a turn and
-//      is silent.
+//      is silent;
+//  (f) toggling voice mode re-applies the state on screen, even for a new
+//      session's first send that has no snapshot entry yet.
 //
 // Run: cd test/e2e && npx playwright test a11y_live_regions.test.js --project=desktop-chrome
 
@@ -132,6 +135,28 @@ test('a turn that ends in a non-ready state says the turn ended', async ({ brows
   }
 });
 
+test('a turn stopped with the stop button says the turn ended, and the next one is a reply', async ({ browser }) => {
+  const { ctx, page, conn, errors } = await open(browser, READY);
+  try {
+    state(conn, READY, 'running');
+    await page.click('#btn-stop');
+    await expect.poll(() => conn.messages.filter((m) => m.type === 'interrupt').length).toBe(1);
+    event(conn, READY, { type: 'result', summary: 'interrupted' });
+    state(conn, READY, 'ready');
+    await expect.poll(() => turnEnds(page)).toEqual(['回合已结束']);
+
+    state(conn, READY, 'running');
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    state(conn, READY, 'ready');
+    await expect.poll(() => turnEnds(page)).toEqual(['回合已结束', '回复完成']);
+    await quiesce(page);
+    expect(await turnEnds(page)).toEqual(['回合已结束', '回复完成']);
+    expect(errors).toEqual([]);
+  } finally {
+    await ctx.close();
+  }
+});
+
 test('opening a ready session or switching away from a running one is silent', async ({ browser }) => {
   const { ctx, page, conn, errors } = await open(browser, RUNNING);
   try {
@@ -180,6 +205,32 @@ test('a send its ack rolls back is not announced as a turn end', async ({ browse
     await expect(page.locator('#btn-send')).toBeVisible();
     await quiesce(page);
     expect(await turnEnds(page)).toEqual([]);
+    expect(errors).toEqual([]);
+  } finally {
+    await ctx.close();
+  }
+});
+
+// A new session has no snapshot entry until the server lists it, so its first
+// send is running only in the last applied state.
+test('toggling voice mode during a new session\'s first send keeps the turn running and silent', async ({ browser }) => {
+  const { ctx, page, conn, errors } = await open(browser, READY);
+  try {
+    await page.evaluate(async () => {
+      const { doCreateInProject } = await import('/static/auth_modal.js');
+      doCreateInProject('/home/user/myproject', 'myproject', 'local', '', 'general');
+    });
+    const selected = () => page.evaluate(async () => (await import('/static/state.js')).selection.key);
+    await expect.poll(selected).toMatch(/^dashboard:/);
+    expect(await selected()).not.toBe(READY);
+    await page.evaluate(() => { setMsgValue(document.getElementById('msg-input'), 'hello'); sendMessage(); });
+    await expect.poll(() => conn.messages.filter((m) => m.type === 'send').length).toBe(1);
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    await page.click('#btn-mic');
+    await expect(page.locator('#input-area')).toHaveClass(/voice-mode/);
+    await quiesce(page);
+    expect(await turnEnds(page)).toEqual([]);
+    await expect(page.locator('#btn-stop')).toBeVisible();
     expect(errors).toEqual([]);
   } finally {
     await ctx.close();

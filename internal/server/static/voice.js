@@ -96,9 +96,9 @@ function toggleInputMode() {
   } else {
     releaseMicStream();
   }
-  // Sync send/stop button visibility after mode toggle
-  const sd = sessionList.sessionsData[sid(selection.key, selection.node || 'local')];
-  updateSendButton(sd ? sd.state || '' : '');
+  // Re-apply the on-screen state for the new mode (a new session's first send has no snapshot entry yet).
+  const k = sid(selection.key, selection.node), ap = selection.lastAppliedMainState, sd = sessionList.sessionsData[k];
+  updateSendButton(ap && ap.key === k ? ap.state : (sd ? sd.state || '' : ''));
 }
 
 // --- Touch handlers for hold-to-talk ---

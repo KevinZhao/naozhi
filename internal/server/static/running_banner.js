@@ -19,11 +19,12 @@ import { shell } from './shell.js';
 // --- Running banner: tool activity + agent tracking ---
 
 // turnState is shared by reference (send_message and agent_view import it), so
-// it is reset in place and never reassigned.
+// it is reset in place and never reassigned. interruptedKey (the session the
+// user stopped) outlives resetTurnState until that turn's end is applied.
 const turnState = {
   toolCount: 0, currentTool: null, agents: [], isThinking: false,
   thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: 0, isWriting: false,
-  timerId: null, justSent: false
+  timerId: null, justSent: false, interruptedKey: ''
 };
 
 // resetTurnState clears the per-turn banner state. opts.keepTimer preserves
@@ -330,6 +331,7 @@ function interruptSession() {
   if (!selection.key) return;
   const sd = sessionList.sessionsData[sid(selection.key, selection.node || 'local')];
   if (!sd || sd.state !== 'running') return;
+  turnState.interruptedKey = sid(selection.key, selection.node);
   const targetNode = selection.node && selection.node !== 'local' ? selection.node : '';
   // Claude Code 风格：中断时把刚发的那条用户文本回填到输入框方便改写。
   // 只在输入框当前为空时回填，避免覆盖用户已经开始输入的新内容；回填后
@@ -417,13 +419,10 @@ function restoreScrollPos(key, node) {
 const scrollSlackPx = 80;
 
 // Turn watchdog: while the selected session is "running", periodically pull
-// the authoritative REST snapshot so the banner self-heals if a terminal WS
-// signal (the 'result' event and/or the 'ready' session_state broadcast) is
-// dropped on a still-open connection. Without this the "处理中..." banner stays
-// stuck until the operator switches sessions or reconnects — the bug this fixes.
-// fetchSessions reconciles via updateMainState (see the relaxed gate in
-// fetchSessions); the watchdog just supplies the missing tick, since the
-// session poll is stopped while WS is connected.
+// the authoritative REST snapshot so the banner self-heals when a terminal WS
+// signal (the 'result' event or the 'ready' push) is dropped on an open socket.
+// fetchSessions reconciles via updateMainState; the watchdog only supplies the
+// tick, since the session poll is stopped while WS is connected.
 const TURN_WATCHDOG_INTERVAL_MS = 15000;
 function startTurnWatchdog() {
   if (timers.turnWatchdog) return;
@@ -443,11 +442,11 @@ function stopTurnWatchdog() {
 
 // announceTurnEnd tells screen readers the open session's turn ended. Only its
 // running → non-running edge speaks, so the result event and the ready push
-// after it announce once between them.
+// after it announce once between them. A turn the user stopped is not a reply.
 function announceTurnEnd(prev, state) {
   if (!selection.key || !prev || prev.state !== 'running' || prev.key !== sid(selection.key, selection.node)) return;
   const elapsed = turnElapsedText();
-  announce(state !== 'ready' ? '回合已结束' : '回复完成' + (elapsed ? '，用时 ' + elapsed : ''));
+  announce(state !== 'ready' || turnState.interruptedKey === prev.key ? '回合已结束' : '回复完成' + (elapsed ? '，用时 ' + elapsed : ''));
 }
 
 // updateSendButton applies a session state to the composer and banner.
@@ -469,6 +468,7 @@ function updateSendButton(state, opts) {
   } else {
     stopTurnWatchdog();
     if (!(opts && opts.silent)) announceTurnEnd(prev, state);
+    turnState.interruptedKey = '';
     // resetTurnState → refreshBanner will hide the banner since the session
     // is no longer "running". If background agents are still active (e.g.
     // zero-downtime restart), refreshBanner keeps the banner visible.
