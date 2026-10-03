@@ -10,6 +10,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // Every grouped option reaches the consumer it names, and not a same-typed
@@ -27,8 +28,13 @@ func TestServerOptions_GroupsReachTheirConsumers(t *testing.T) {
 		Identity:       IdentityOptions{WorkspaceID: "ws-id", WorkspaceName: "ws-name", Version: "v9.8.7"},
 		Watchdog:       WatchdogOptions{NoOutput: 3 * time.Minute, Total: 7 * time.Minute},
 		Features:       FeatureOptions{PublicTmp: true},
+		Queue:          QueueOptions{MaxDepth: 3, CollectDelay: 70 * time.Millisecond, Mode: "interrupt"},
 	})
 
+	// The Orchestrator's queue is built from hs.wiring.queue (buildWSStack).
+	if want := (turn.QueueOptions{MaxDepth: 3, CollectDelay: 70 * time.Millisecond, Mode: turn.ModeInterrupt}); hs.wiring.queue != want {
+		t.Errorf("turn queue options = %+v, want %+v", hs.wiring.queue, want)
+	}
 	if s.noOutputTimeout != 3*time.Minute || s.totalTimeout != 7*time.Minute {
 		t.Errorf("server timeouts = %v / %v, want 3m / 7m", s.noOutputTimeout, s.totalTimeout)
 	}
