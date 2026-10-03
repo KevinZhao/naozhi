@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/selfupdate"
 )
@@ -93,31 +91,6 @@ func (d *doctor) checkSystemd() {
 	// Sanitize bidi/C1/ANSI escapes so a crafted unit file cannot flip the
 	// operator's terminal display.
 	d.add("systemd", "pass", "active · "+osutil.SanitizeForLog(show, 512))
-}
-
-func (d *doctor) checkHealth() {
-	url := d.addr + "/health"
-	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		d.add("http /health", "fail", "request build: "+err.Error())
-		return
-	}
-	resp, err := d.httpClient().Do(req)
-	if err != nil {
-		d.add("http /health", "fail", fmt.Sprintf("%s unreachable: %v", url, err))
-		return
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	// Response echoes to the terminal; a hijacked addr could emit escapes.
-	bodyStr := osutil.SanitizeForLog(strings.TrimSpace(string(body)), 512)
-	if resp.StatusCode != http.StatusOK {
-		d.add("http /health", "fail", fmt.Sprintf("status=%d body=%s", resp.StatusCode, bodyStr))
-		return
-	}
-	d.add("http /health", "pass", bodyStr)
 }
 
 func (d *doctor) checkAuth() {
@@ -297,8 +270,8 @@ func (d *doctor) checkZeroDowntimeScopes() {
 // Secure and can leak on a downgrade of the proxy hop. Warn, not FAIL —
 // doctor reserves FAIL for "broken now".
 func (d *doctor) checkServerSecurity() {
-	cfg, err := config.Load(d.configPath)
-	if err != nil || cfg == nil {
+	cfg, err := d.loadConfig()
+	if err != nil {
 		d.add("server security", "pass", "skipped (config not loaded)")
 		return
 	}
@@ -365,32 +338,22 @@ func (d *doctor) checkConfigDrift() {
 	}
 	diskSum := fmt.Sprintf("%x", sha256.Sum256(data))
 
-	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.addr+"/health", nil)
-	if err != nil {
-		d.add("config-drift", "fail", "request build: "+err.Error())
+	h := d.fetchHealth()
+	switch {
+	case h.err != nil:
+		d.add("config-drift", "pass", "skipped (process unreachable: "+h.err.Error()+")")
+		return
+	case h.status != http.StatusOK:
+		d.add("config-drift", "pass", fmt.Sprintf("skipped (/health status=%d)", h.status))
+		return
+	case h.decodeErr != nil:
+		d.add("config-drift", "warn", "cannot parse /health JSON: "+osutil.SanitizeForLog(h.decodeErr.Error(), 512))
+		return
+	case !h.authenticated():
+		d.add("config-drift", "pass", "skipped (token not accepted by /health; see auth)")
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+d.token)
-	resp, err := d.httpClient().Do(req)
-	if err != nil {
-		d.add("config-drift", "pass", "skipped (process unreachable: "+err.Error()+")")
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		d.add("config-drift", "pass", fmt.Sprintf("skipped (/health status=%d)", resp.StatusCode))
-		return
-	}
-	var health struct {
-		ConfigSHA256   string `json:"config_sha256"`
-		ConfigLoadedAt string `json:"config_loaded_at"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&health); err != nil {
-		d.add("config-drift", "warn", "cannot parse /health JSON: "+err.Error())
-		return
-	}
+	health := h.payload
 	if health.ConfigSHA256 == "" {
 		d.add("config-drift", "warn", "process reports no config fingerprint (predates #2538); upgrade to compare")
 		return

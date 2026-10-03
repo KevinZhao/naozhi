@@ -147,6 +147,16 @@ type doctor struct {
 	// sibling's pooled connection mid-RoundTrip (#2473).
 	client *http.Client
 
+	// health memoises the run's single GET /health; see fetchHealth.
+	health *healthReply
+	// config memoises the run's single config.Load; see loadConfig.
+	config *doctorConfig
+
+	// awsCredentials and ffmpegPath default to the transcribe package's
+	// checks; tests inject stubs.
+	awsCredentials func(ctx context.Context, region string) (string, error)
+	ffmpegPath     func() (string, error)
+
 	hasFail  bool
 	findings []finding
 }
@@ -165,10 +175,13 @@ func (d *doctor) run() {
 	d.checkSystemd()
 	d.checkHealth()
 	d.checkAuth()
+	d.checkServerState()
 	d.checkConfigDrift()
 	d.checkPprof()
 	d.checkExpvar()
 	d.checkStateDir()
+	d.checkCLIBackends()
+	d.checkTranscribe()
 	d.checkZeroDowntimeScopes()
 	d.checkServerSecurity()
 	d.render()
@@ -217,11 +230,11 @@ func (d *doctor) renderBackendsSection() {
 
 	// Missing/malformed config falls back to "what the binary CAN drive" so
 	// a fresh install still gets a useful section.
-	cfg, cfgErr := config.Load(d.configPath)
+	cfg, cfgErr := d.loadConfig()
 	defaultBackend := "claude"
 	var cfgBackends []config.CLIBackendConfig
 	var cfgReverseNodes map[string]config.ReverseNodeEntry
-	if cfgErr == nil && cfg != nil {
+	if cfgErr == nil {
 		defaultBackend = cfg.DefaultBackendID()
 		cfgBackends = cfg.EnabledBackends()
 		cfgReverseNodes = cfg.ReverseNodes

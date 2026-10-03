@@ -46,11 +46,16 @@ func TestCheckConfigDrift(t *testing.T) {
 	}
 	diskSum := fmt.Sprintf("%x", sha256.Sum256([]byte("platforms: {}\n")))
 
+	// Like the real handler, only an accepted token gets the authenticated
+	// section; anyone else sees status and uptime.
 	healthWith := func(sum string) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			body := `{"status":"ok"`
-			if sum != "" {
-				body += `,"config_sha256":"` + sum + `","config_loaded_at":"2026-09-05T10:00:00Z"`
+			body := `{"status":"ok","uptime":"1h"`
+			if r.Header.Get("Authorization") == "Bearer tok" {
+				body += `,"cli_available":true`
+				if sum != "" {
+					body += `,"config_sha256":"` + sum + `","config_loaded_at":"2026-09-05T10:00:00Z"`
+				}
 			}
 			body += `}`
 			_, _ = w.Write([]byte(body))
@@ -90,6 +95,19 @@ func TestCheckConfigDrift(t *testing.T) {
 		f := driftFinding(t, d)
 		if f.Level != "pass" || !strings.Contains(f.Detail, "skipped") {
 			t.Errorf("finding = %+v, want pass/skipped", f)
+		}
+	})
+
+	// A rejected token gets the public body, which has no fingerprint; that
+	// is not an old process, so it must not warn "predates #2538".
+	t.Run("rejected_token_skips", func(t *testing.T) {
+		srv := healthWith(diskSum)
+		defer srv.Close()
+		d := driftDoctor(t, srv, "wrong", cfgPath)
+		d.checkConfigDrift()
+		f := driftFinding(t, d)
+		if f.Level != "pass" || !strings.Contains(f.Detail, "token not accepted") {
+			t.Errorf("finding = %+v, want pass/token not accepted", f)
 		}
 	})
 

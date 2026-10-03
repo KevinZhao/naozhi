@@ -1,0 +1,27 @@
+{
+  "status": "ok",
+  "uptime": "1h0m0s",
+  "version": "v0.0.0-contract",
+  "cli_available": true,
+  "platforms": {},
+  "eventlog": {
+    "writer_alive": true,
+    "channel_depth": 1,
+    "channel_cap": 2,
+    "dropped_total": 3
+  },
+  "attachment_tracker": {
+    "writer_alive": true,
+    "channel_depth": 1,
+    "channel_cap": 2,
+    "dropped_total": 3
+  },
+  "dispatch": {
+    "message_count": 1,
+    "reply_error_count": 2,
+    "send_fail_count": 3,
+    "last_reply_success_ago": "4s"
+  },
+  "config_sha256": "deadbeef",
+  "config_loaded_at": "2026-01-02T03:04:05Z"
+}
