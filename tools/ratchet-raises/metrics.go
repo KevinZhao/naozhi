@@ -118,8 +118,10 @@ func jsCaps(raw string, into metrics) error {
 		Leaves           []string         `json:"leaves"`
 		// The lists js-ratchet's analysis reads (S20a): an allowed receiver
 		// or a new shell root zeroes or frees counts; a dropped late-binding
-		// table stops counting its writes.
+		// table stops counting its writes; a legacy receiver (S20k) passes
+		// the closed-receiver check.
 		InjectionAllow    []string          `json:"injectionAllow"`
+		InjectionLegacy   []string          `json:"injectionLegacy"`
 		ShellRoots        []string          `json:"shellRoots"`
 		LateBindingTables map[string]string `json:"lateBindingTables"`
 	}
@@ -149,6 +151,9 @@ func jsCaps(raw string, into metrics) error {
 	for _, a := range doc.InjectionAllow {
 		into[capsSections["injectionAllow"]+a] = metric{value: 1, newIsRaise: true}
 	}
+	for _, a := range doc.InjectionLegacy {
+		into[capsSections["injectionLegacy"]+a] = metric{value: 1, newIsRaise: true}
+	}
 	for _, f := range doc.ShellRoots {
 		into[capsSections["shellRoots"]+f] = metric{value: 1, newIsRaise: true}
 	}
@@ -164,6 +169,7 @@ func jsCaps(raw string, into metrics) error {
 // rule as for the whole document.
 var capsSections = map[string]string{
 	"injectionAllow":    "js-caps:injectionAllow:",
+	"injectionLegacy":   "js-caps:injectionLegacy:",
 	"shellRoots":        "js-caps:shellRoot:",
 	"lateBindingTables": "js-caps:lateBindingTable:",
 }

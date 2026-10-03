@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   compare, measureSource, raisedMetrics, loadCaps, capProblems, sccs, importsOfSource,
-  analyzeSources, measureGlobal, NO_CAPS, GLOBAL,
+  analyzeSources, measureGlobal, receiverProblems, NO_CAPS, GLOBAL,
 } from './js-ratchet.mjs';
 
 // The real caps: the late-binding tables, the injection allowlist and the
@@ -286,6 +286,8 @@ test('loadCaps fails closed without the analysis lists, or with a malformed one'
     ['injectionAllow', ['registerActions'], /injectionAllow must be an array of "file.js:function"/],
     ['injectionAllow', 'nz_util.js:registerActions', /injectionAllow must be an array/],
     ['shellRoots', 'dashboard.js', /shellRoots must be an array/],
+    ['injectionLegacy', 'tuning.js:configureTuning', /injectionLegacy must be an array of "file.js:function"/],
+    ['injectionLegacy', ['configureTuning'], /injectionLegacy must be an array of "file.js:function"/],
   ]) {
     withCapsFile(JSON.stringify({ ...base, [key]: v }), (file) => {
       const { errors } = loadCaps(file);
@@ -298,9 +300,10 @@ test('capProblems: an analysis list naming a file not in static/ fails', () => {
   const caps = {
     maxFnLines: { default: 120, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], leaves: [],
     lateBindingTables: { hooks: 'gone_state.js' }, injectionAllow: ['gone_util.js:registerActions'], shellRoots: ['gone_root.js'],
+    injectionLegacy: ['gone_view.js:configureGone'],
   };
   const problems = capProblems({ 'a.js': { lines: 1, maxFnLines: 1 } }, {}, caps);
-  for (const re of [/lateBindingTables\.hooks: gone_state\.js does not exist/, /injectionAllow: gone_util\.js does not exist/, /shellRoots: gone_root\.js does not exist/]) {
+  for (const re of [/lateBindingTables\.hooks: gone_state\.js does not exist/, /injectionAllow: gone_util\.js does not exist/, /shellRoots: gone_root\.js does not exist/, /injectionLegacy: gone_view\.js does not exist/]) {
     assert.ok(problems.some((p) => re.test(p)), `${re}: ${problems}`);
   }
 });
@@ -677,6 +680,63 @@ test('caps.injectionAllow: registerActions is the data-action registry, not inje
   assert.equal(measureSource(src, undefined, 'nz_util.js').configureDeps, 1);
   assert.equal(measureSource(src, undefined, 'other.js', REAL_CAPS).deadInjections, 0);
   assert.deepEqual(REAL_CAPS.injectionAllow, ['nz_util.js:registerActions']);
+});
+
+// S20k: the receivers are a closed set. receiver builds a module that takes
+// a two-key deps table through fn (its parameter spelt param).
+const receiver = (fn, param = 'impl') => js(
+  'const deps = { a: null, b: null };',
+  `export function ${fn}(${param}) { for (const k of Object.keys(deps)) deps[k] = ${param}[k]; }`,
+  'export function go() { deps.a(); deps.b(); }',
+);
+const receiversOf = (sources, caps) => receiverProblems(analyzeSources(sources, undefined, caps), caps);
+
+test('injectionLegacy: a receiver not on a list fails, whatever it is called', () => {
+  const caps = { ...NO_CAPS, injectionLegacy: ['tuning.js:configureTuning'] };
+  for (const [fn, param] of [['configureFoo', 'impl'], ['wireFoo', 'impl'], ['initFoo', 'd']]) {
+    const problems = receiversOf({ 'view.js': receiver(fn, param) }, caps);
+    assert.ok(problems.some((p) => p.startsWith(`view.js:2: ${fn} receives injected dependencies (deps.a, deps.b)`)), `${fn}: ${problems}`);
+  }
+  // The legacy name in another file, or another name in the legacy file, is
+  // not the entry.
+  assert.equal(receiversOf({ 'view.js': receiver('configureTuning') }, caps).filter((p) => p.startsWith('view.js:2: configureTuning ')).length, 1);
+  assert.equal(receiversOf({ 'tuning.js': receiver('wireTuning') }, caps).filter((p) => p.startsWith('tuning.js:2: wireTuning ')).length, 1);
+  // The listed receiver, registerActions on injectionAllow and shell.js's
+  // registerShell are the whole set.
+  const shell = js('const slots = {};', 'export const shell = slots;', 'export function registerShell(impl) { Object.assign(slots, impl); }', 'export function go() { slots.f(); }');
+  const registry = js(
+    'const nzActions = Object.create(null);',
+    'export function registerActions(map) { for (const k of Object.keys(map)) nzActions[k] = map[k]; }',
+    "document.addEventListener('click', (e) => { nzActions[e.target.dataset.action](e); });",
+  );
+  const closed = { ...caps, injectionAllow: ['nz_util.js:registerActions'] };
+  assert.deepEqual(receiversOf({ 'tuning.js': receiver('configureTuning'), 'nz_util.js': registry, 'shell.js': shell }, closed), []);
+  // The same two sources anywhere else are receivers like any other.
+  assert.deepEqual(receiversOf({ 'a.js': registry, 'b.js': shell }, closed).filter((p) => !p.startsWith('caps.')).map((p) => p.split(' ').slice(0, 2).join(' ')),
+    ['a.js:2: registerActions', 'b.js:3: registerShell']);
+});
+
+test('injectionLegacy: an entry no receiver matches is stale', () => {
+  const caps = { ...NO_CAPS, injectionLegacy: ['tuning.js:configureTuning', 'gone.js:configureGone'] };
+  const problems = receiversOf({ 'tuning.js': receiver('configureTuning') }, caps);
+  assert.deepEqual(problems, ['caps.injectionLegacy: gone.js:configureGone no longer receives an injection — drop it from the list']);
+  // A receiver that no longer lands anything leaves its entry stale too.
+  const drained = js('export function configureTuning(impl) { return impl; }');
+  assert.deepEqual(receiversOf({ 'tuning.js': drained }, { ...NO_CAPS, injectionLegacy: ['tuning.js:configureTuning'] }),
+    ['caps.injectionLegacy: tuning.js:configureTuning no longer receives an injection — drop it from the list']);
+});
+
+test('injectionLegacy: a listed receiver that gains a key still fails its file\'s configureDeps', () => {
+  const caps = { ...NO_CAPS, injectionLegacy: ['tuning.js:configureTuning'] };
+  const grown = js(
+    'const deps = { a: null, b: null, c: null };',
+    'export function configureTuning(impl) { for (const k of Object.keys(deps)) deps[k] = impl[k]; }',
+    'export function go() { deps.a(); deps.b(); deps.c(); }',
+  );
+  assert.deepEqual(receiversOf({ 'tuning.js': grown }, caps), []);
+  const before = measureSource(receiver('configureTuning'), undefined, 'tuning.js', caps);
+  const after = measureSource(grown, undefined, 'tuning.js', caps);
+  assert.deepEqual(compare({ 'tuning.js': after }, { 'tuning.js': before }).filter((p) => /configureDeps/.test(p)), ['tuning.js: configureDeps grew 2 -> 3 (ratchet: may only shrink)']);
 });
 
 test('importCycles: an edge through a re-export and a /static/ specifier closes a cycle', () => {

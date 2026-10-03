@@ -149,7 +149,7 @@ test('no static script switches an nz/* rule off inline', () => {
 test('nzInlineOverrides names nz/* and blanket disables, not other rules', () => {
   const flagged = [
     '// eslint-disable-next-line nz/no-module-side-effects\nf();',
-    'f(); // eslint-disable-line nz/configure-deps -- because',
+    'f(); // eslint-disable-line nz/shell-bindings -- because',
     '/* eslint-disable no-console, nz/no-exported-let */',
     '/* eslint-disable */',
     '// eslint-disable-next-line',

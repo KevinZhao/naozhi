@@ -44,7 +44,8 @@
 //   node scripts/js-ratchet.mjs --write   # ratchet the baseline down
 //
 // --check fails on any metric above its baseline (growth) AND on any metric
-// below it (the improving PR must ship the tightened baseline — run --write).
+// below it (the improving PR must ship the tightened baseline — run --write),
+// and on an injection receiver outside the closed set (receiverProblems).
 // --write refuses to raise a value: deliberate growth requires hand-editing
 // scripts/js-ratchet.baseline.json and an approved scripts/ratchet-raises.jsonl
 // entry (tools/ratchet-raises). That tool also holds the sums across files
@@ -288,8 +289,12 @@ function fnName(fn, parent, key) {
 //                      the check. A new entry is a raise there
 //   shellRoots         the modules allowed to registerShell (a new one is a
 //                      raise there)
+//   injectionLegacy    "file:fn" receivers of injected dependencies left over
+//                      from before shell.js, shrink-only (a new entry is a
+//                      raise there; a stale one fails the check). Any other
+//                      receiver fails the check, whatever its count
 // NO_CAPS is the empty set of each, for analysing a fixture.
-export const NO_CAPS = Object.freeze({ lateBindingTables: {}, injectionAllow: [], shellRoots: [], leaves: [] });
+export const NO_CAPS = Object.freeze({ lateBindingTables: {}, injectionAllow: [], injectionLegacy: [], shellRoots: [], leaves: [] });
 
 // SHELL_MODULE — the upcall table (S20f): the root modules register their
 // orchestration functions once with registerShell({...}) and lower modules
@@ -367,6 +372,7 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
     lateBindings: 0,
     injections: new Map(), // "T.k" -> receiver function name
     allowHits: new Set(),
+    receivers: new Map(), // receiver function name -> { line, keys }, besides injectionAllow's
     deadInjections: [],
     shellUses: new Set(),
     shellOpaque: [], // lines reading shell other than by a static slot
@@ -732,6 +738,8 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
     // module calls), not again where registerShell fills it.
     if (facts.file === SHELL_MODULE && name === 'registerShell') continue;
     if (allow.includes(`${facts.file}:${name}`)) { facts.allowHits.add(`${facts.file}:${name}`); continue; }
+    if (!facts.receivers.has(name)) facts.receivers.set(name, { line: fn.loc.start.line, keys: [] });
+    facts.receivers.get(name).keys.push(...keys);
     for (const k of keys) if (!facts.injections.has(k)) facts.injections.set(k, name);
   }
   // A registry (T.*) is read by runtime key; it has no static key to miss.
@@ -1000,8 +1008,8 @@ function readSources() {
 export const GLOBAL = '_global';
 
 // snapshot measures every file, plus the _global entry. problems are the
-// findings that fail the run outright (a stale caps.injectionAllow entry);
-// details back each _global count.
+// findings that fail the run outright (receiverProblems); details back each
+// _global count.
 function snapshot(caps) {
   const espree = loadEspree();
   const sources = readSources();
@@ -1011,9 +1019,26 @@ function snapshot(caps) {
   const graph = importGraph(espree);
   const { metrics, details } = measureGlobal(all, graph, caps);
   out[GLOBAL] = metrics;
-  const hits = new Set(Object.values(all).flatMap((a) => [...a.allowHits]));
-  const problems = caps.injectionAllow.filter((a) => !hits.has(a)).map((a) => `caps.injectionAllow: ${a} no longer receives an injection — drop it from the list`);
-  return { current: out, graph, details, problems };
+  return { current: out, graph, details, problems: receiverProblems(all, caps) };
+}
+
+// receiverProblems closes the set of injection receivers (S20k): besides
+// shell.js's registerShell, only a caps.injectionAllow or caps.injectionLegacy
+// entry may receive one, and an entry no receiver matches is stale.
+export function receiverProblems(all, caps) {
+  const legacy = caps.injectionLegacy ?? [];
+  const allowHits = new Set(Object.values(all).flatMap((a) => [...a.allowHits]));
+  const problems = caps.injectionAllow.filter((a) => !allowHits.has(a)).map((a) => `caps.injectionAllow: ${a} no longer receives an injection — drop it from the list`);
+  const legacyHits = new Set();
+  for (const [f, facts] of Object.entries(all)) {
+    for (const [name, { line, keys }] of facts.receivers) {
+      const id = `${f}:${name}`;
+      if (legacy.includes(id)) { legacyHits.add(id); continue; }
+      problems.push(`${f}:${line}: ${name} receives injected dependencies (${keys.join(', ')}); import them, or upcall through shell.X (caps.injectionLegacy is shrink-only)`);
+    }
+  }
+  for (const a of legacy) if (!legacyHits.has(a)) problems.push(`caps.injectionLegacy: ${a} no longer receives an injection — drop it from the list`);
+  return problems;
 }
 
 // importGraph maps every static/*.js file to the files it imports (D-S19:
@@ -1108,10 +1133,15 @@ export function loadCaps(capsPath = CAPS_PATH) {
   if (typeof tables !== 'object' || tables === null || Array.isArray(tables) || !Object.values(tables).every((m) => typeof m === 'string')) {
     errors.push('caps.lateBindingTables must map a table name to the module that exports it');
   }
-  if (!Array.isArray(raw.injectionAllow) || !raw.injectionAllow.every((a) => typeof a === 'string' && /^[^:]+\.js:[A-Za-z_$][\w$]*$/.test(a))) {
+  const receiverList = (v) => Array.isArray(v) && v.every((a) => typeof a === 'string' && /^[^:]+\.js:[A-Za-z_$][\w$]*$/.test(a));
+  if (!receiverList(raw.injectionAllow)) {
     errors.push('caps.injectionAllow must be an array of "file.js:function"');
   }
   if (!Array.isArray(raw.shellRoots)) errors.push('caps.shellRoots must be an array');
+  // Optional: absent is the empty list, the strictest one.
+  if ('injectionLegacy' in raw && !receiverList(raw.injectionLegacy)) {
+    errors.push('caps.injectionLegacy must be an array of "file.js:function"');
+  }
   if (errors.length) return { errors };
   return { caps: raw };
 }
@@ -1156,9 +1186,11 @@ export function capProblems(current, graph, caps) {
   for (const [t, f] of Object.entries(caps.lateBindingTables ?? {})) {
     if (!exists(f)) problems.push(`caps.lateBindingTables.${t}: ${f} does not exist in static/`);
   }
-  for (const a of caps.injectionAllow ?? []) {
-    const f = a.slice(0, a.indexOf(':'));
-    if (!exists(f)) problems.push(`caps.injectionAllow: ${f} does not exist in static/`);
+  for (const list of ['injectionAllow', 'injectionLegacy']) {
+    for (const a of caps[list] ?? []) {
+      const f = a.slice(0, a.indexOf(':'));
+      if (!exists(f)) problems.push(`caps.${list}: ${f} does not exist in static/`);
+    }
   }
   const cyclic = new Set(sccs(graph).flat());
   for (const f of caps.cycleLegacy) {

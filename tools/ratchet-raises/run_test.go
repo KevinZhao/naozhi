@@ -136,6 +136,29 @@ func TestRun_CapsAnalysisLists(t *testing.T) {
 	}
 }
 
+// The PR that adds caps.injectionLegacy (S20k) records today's receivers;
+// after that a new one is a raise.
+func TestRun_CapsInjectionLegacy(t *testing.T) {
+	t.Parallel()
+	const pre = `{"maxFnLines":{"default":120,"exempt":[]},"lines":{},"sideEffectLegacy":[],"cycleLegacy":[],"leaves":[]`
+	doc := func(rest string) fakeTree { return fakeTree{jsCapsPath: pre + rest + "}"} }
+	const seeded = `,"injectionLegacy":["tuning.js:configureTuning","discovery.js:configureDiscovery"]`
+	_, rs, err := run(doc(""), doc(seeded), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs) != 0 {
+		t.Errorf("creating the section: raises = %v, want none", rs)
+	}
+	_, rs, err = run(doc(seeded), doc(`,"injectionLegacy":["tuning.js:configureTuning","view.js:wireView"]`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"js-caps:injectionLegacy:view.js:wireView"}; !slices.Equal(gates(rs), want) {
+		t.Errorf("raises = %v, want %v", gates(rs), want)
+	}
+}
+
 // The first pins.json is recorded, not raised; once base has one, a pin head
 // adds is a raise like a changed or deleted one.
 func TestRun_GoldenPins_AddedPinRaisesOnlyOnceBaseHasPins(t *testing.T) {
