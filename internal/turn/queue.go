@@ -2,8 +2,8 @@
 // the merge of queued messages into one prompt, and the Orchestrator that
 // owns the drain loop and delivers each turn's outcome to the entry points
 // whose messages it carried. The IM dispatcher and the dashboard send engine
-// share one Queue instance, built once in the server composition root
-// (#3004).
+// submit to one Orchestrator over one Queue, built once in the server
+// composition root (#3004).
 package turn
 
 import (

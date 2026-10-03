@@ -1,14 +1,13 @@
-// send_engine.go — sendEngine owns the send pipeline: the per-key dispatch
-// queue, the spawn guard, and the accounting that lets Shutdown wait for
-// in-flight send goroutines. Hub (WS entry) and SendHandler (HTTP entry) each
-// hold one *sendEngine and no longer know about each other.
+// send_engine.go — sendEngine is the dashboard's send pipeline: it submits
+// validated sends to turn.Orchestrator and keeps the accounting that lets
+// Shutdown wait for the turn goroutines it starts. Hub (WS entry) and
+// SendHandler (HTTP entry) each hold one *sendEngine and no longer know about
+// each other.
 //
-// The pipeline methods themselves stay in send.go / send_owner_loop.go with an
-// (e *sendEngine) receiver — moving the bodies here would put this file over
-// the package's 500-line limit, and two contract tests read "send.go" by
-// filename (one of them the R175-SEC-P1 log-injection redaction gate, which
-// would go silently green against a file that no longer holds sessionSend).
-// See docs/rfc/send-engine-extraction.md §2.2.
+// sessionSend stays in send.go: two contract tests read "send.go" by filename
+// (one of them the R175-SEC-P1 log-injection redaction gate, which would go
+// silently green against a file that no longer holds sessionSend). See
+// docs/rfc/send-engine-extraction.md §2.2.
 package server
 
 import (
@@ -17,7 +16,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/node"
@@ -27,20 +25,17 @@ import (
 	"github.com/naozhi/naozhi/internal/turn"
 )
 
-// sendEngine is the enqueue → guard → router → TrackSend chain that both
-// transports share. Construct it only with newSendEngine: a zero value is a
-// hazard, not a convenience — allowedRoot "" disables validateWorkspace's
-// containment check entirely (server_validate.go), a nil ctx panics inside the
-// detached remote-proxy goroutine where net/http's recover cannot reach, and a
-// nil guard or router panics on the legacy / attachment-fallback paths.
+// sendEngine is the validate → Submit → TrackSend chain that both transports
+// share. Construct it only with newSendEngine: a zero value is a hazard, not a
+// convenience — allowedRoot "" disables validateWorkspace's containment check
+// entirely (server_validate.go), a nil ctx panics inside the detached
+// remote-proxy goroutine where net/http's recover cannot reach, and a nil
+// turns or router panics on the send / attachment-fallback paths.
 type sendEngine struct {
 	// ── owned state (migrated off Hub) ──
-	// queue is the MessageEnqueuer interface, not *turn.Queue, so
-	// tests can swap it. Only a non-nil concrete queue is boxed: send.go's
-	// `e.queue == nil` legacy-fallback gate depends on a typed nil never
-	// landing here (#377).
-	queue MessageEnqueuer
-	guard *session.Guard
+	// turns runs every turn, the IM dispatcher's too (one Orchestrator over
+	// the composition root's queue).
+	turns *turn.Orchestrator
 	// wg tracks background send goroutines so drain can wait for them before
 	// router/session state is torn down.
 	wg sync.WaitGroup
@@ -50,9 +45,6 @@ type sendEngine struct {
 	// drain and dereference torn-down maps.
 	trackMu sync.Mutex
 	closed  bool
-	// legacyInvokes counts sessionSend falls-through to sessionSendLegacy
-	// (nil queue); production steady state must read zero (#710).
-	legacyInvokes atomic.Int64
 	// ctx is the engine's own child of sendEngineOpts.Ctx; drain cancels it.
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -67,12 +59,11 @@ type sendEngine struct {
 	agents      map[string]session.AgentOpts
 	projectMgr  *project.Manager
 	scratchPool *session.ScratchPool
-	scheduler   CronView
 	allowedRoot string
 
 	// notify is the only way out to the dashboard; never nil after
-	// newSendEngine (a nil interface would panic inside the owner goroutine,
-	// where ownerLoop's recover would swallow it and the message would just
+	// newSendEngine (a nil interface would panic inside a turn goroutine,
+	// where the turn's recover would swallow it and the message would just
 	// vanish).
 	notify sendNotifier
 }
@@ -81,31 +72,22 @@ type sendEngine struct {
 // struct (not positional args) so a new dependency is a compile-time addition
 // at one call site rather than a silently-zero field.
 type sendEngineOpts struct {
-	// Queue is the CONCRETE type, not MessageEnqueuer: taking the interface
-	// here would box a nil *turn.Queue before newSendEngine's nil
-	// check ever runs, so `e.queue == nil` would read false and silently
-	// disable send.go's legacy-fallback gate (#377 — reintroduced once during
-	// #2551 and caught by TestNewHub_NilQueue_LeavesInterfaceFieldNil). Also
-	// what consumer-interfaces.md §4.5 prescribes: keep concrete types at
-	// construction time.
-	Queue       *turn.Queue
-	Guard       *session.Guard
+	Turns       *turn.Orchestrator
 	Ctx         context.Context
 	Router      sendEngineRouter
 	Resolver    *session.KeyResolver
 	Agents      map[string]session.AgentOpts
 	ProjectMgr  *project.Manager
 	ScratchPool *session.ScratchPool
-	Scheduler   CronView
 	AllowedRoot string
 	Notify      sendNotifier
 }
 
-// newSendEngine is the only constructor. It does not reject a nil Router:
-// test hubs built through newHubForTest with no Router fail their send paths
-// at GetOrCreate. What it does guarantee is that ctx and notify are usable,
-// because both have failure modes that are silent or fatal rather than a
-// plain error. The engine's ctx is its own child of o.Ctx, so drain can cancel
+// newSendEngine is the only constructor. It does not reject a nil Router or
+// Turns: an engine built for a test that never sends needs neither, and
+// newHubForTest wires both. What it does guarantee is that ctx and notify
+// are usable, because both have failure modes that are silent or fatal
+// rather than a plain error. The engine's ctx is its own child of o.Ctx, so drain can cancel
 // it without reaching into whoever owns the parent.
 func newSendEngine(o sendEngineOpts) *sendEngine {
 	if o.Ctx == nil {
@@ -115,16 +97,16 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 	}
 	ctx, cancel := context.WithCancel(o.Ctx)
 	notify := o.Notify
-	// Typed-nil unwrap, same hazard as queue below: a nil *wsBroadcaster boxed
-	// into the interface reads non-nil, so the guard looks at the concrete type.
+	// Typed-nil unwrap: a nil *wsBroadcaster boxed into the interface reads
+	// non-nil, so the guard looks at the concrete type.
 	if bn, ok := notify.(*wsBroadcaster); ok && bn == nil {
 		notify = nil
 	}
 	if notify == nil {
 		notify = nopNotifier{}
 	}
-	e := &sendEngine{
-		guard:       o.Guard,
+	return &sendEngine{
+		turns:       o.Turns,
 		ctx:         ctx,
 		cancel:      cancel,
 		router:      o.Router,
@@ -132,19 +114,9 @@ func newSendEngine(o sendEngineOpts) *sendEngine {
 		agents:      o.Agents,
 		projectMgr:  o.ProjectMgr,
 		scratchPool: o.ScratchPool,
-		scheduler:   o.Scheduler,
 		allowedRoot: o.AllowedRoot,
 		notify:      notify,
 	}
-	// A nil queue routes every send through sessionSendLegacy and loses the
-	// dispatch queue's rate-limit / collect-window / passthrough modes; Error
-	// level so a misconfigured production wiring is visible in journalctl.
-	if o.Queue == nil {
-		slog.Error("server: send engine constructed without a Queue; falling back to legacy guard path (dispatch queue features disabled, R-LEGACY-SEND blocker)")
-	} else {
-		e.queue = o.Queue
-	}
-	return e
 }
 
 // TrackSend reserves a wg slot for a background send goroutine and returns a
@@ -177,35 +149,6 @@ func (e *sendEngine) drain() {
 	e.wg.Wait()
 }
 
-// LegacySendInvokes returns the total number of times sessionSend fell
-// through to the deprecated sessionSendLegacy path. Production engines wire a
-// real turn.Queue and never increment this; once every test fixture does
-// too, sessionSendLegacy can be deleted (#710).
-func (e *sendEngine) LegacySendInvokes() int64 {
-	// A nil receiver reads 0: package callers may probe a not-yet-built engine
-	// through an interface, and R-LEGACY-SEND tooling depends on it.
-	if e == nil {
-		return 0
-	}
-	return e.legacyInvokes.Load()
-}
-
-// sendErrorCallback adapts broadcastSendError to the sessionSend onAsyncError
-// signature for the HTTP send path (was Hub.httpSendErrorCallback).
-//
-// Informational outcomes are dropped: this callback fans out to every
-// subscriber of the key, so if A's HTTP send is aborted by B's /urgent, B's tab
-// would otherwise tear down its own optimistic bubble. session_state settles
-// the UI instead; real failures still fan out.
-func (e *sendEngine) sendErrorCallback(key string) asyncErrorFn {
-	return func(err error, errMsg string) {
-		if informationalSendErr(err) {
-			return
-		}
-		e.notify.broadcastSendError(key, errMsg)
-	}
-}
-
 // ── method surface for SendHandler (#2632) ──
 //
 // Everything below exists so dashboard_send.go never reaches into an engine
@@ -227,8 +170,8 @@ const remoteSendTimeout = 60 * time.Second
 // caps it at remoteSendTimeout so a hung node cannot hold a drain slot for the
 // process lifetime. There is no ack channel on the HTTP path, so a transport
 // error fans out to the key's subscribers via broadcastSendError (F1);
-// remote transport errors are never informational, so unlike
-// sendErrorCallback nothing is filtered.
+// remote transport errors are never informational, so unlike httpOrigin
+// nothing is filtered.
 func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace string) (accepted bool) {
 	release, shuttingDown := e.TrackSend()
 	if shuttingDown {

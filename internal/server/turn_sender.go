@@ -1,16 +1,21 @@
 // turn_sender.go — turnSender is turn.Orchestrator's session side
-// (turn.Sender): it creates and sends on the router's sessions and tells the
-// dashboard about each turn. It holds the router and the broadcaster, never
-// the Hub (send_engine_ownership check A). sendTurn and broadcastAfterTurn
-// are shared with the dashboard's own send path in send.go.
+// (turn.Sender) for every entry, IM and dashboard: it creates and sends on
+// the router's sessions and tells the dashboard about each turn. It holds the
+// router and the broadcaster, never the Hub (send_engine_ownership check A).
 package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/turn"
 )
 
@@ -33,12 +38,26 @@ var (
 type turnSender struct {
 	router turnRouter
 	notify sendNotifier
+	// prompts saves a cron session's first successful prompt; nil without
+	// a scheduler.
+	prompts cronPromptSaver
+}
+
+// cronPromptSaver is the scheduler surface turnSender uses.
+type cronPromptSaver interface {
+	SetJobPrompt(jobID, prompt string) error
 }
 
 // GetOrCreate returns a missing session as a nil interface: a nil
 // *ManagedSession inside a non-nil turn.Session would reach Send.
 func (s turnSender) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+	start := time.Now()
 	sess, status, err := s.router.GetOrCreate(ctx, key, opts)
+	if err == nil && status != session.SessionExisting {
+		// Debug, not Info: router.spawnSession already logs "session spawned"
+		// at Info for every spawn.
+		slog.Debug("send: session spawned", "key", key, "status", status, "elapsed_ms", time.Since(start).Milliseconds())
+	}
 	if sess == nil {
 		return nil, status, err
 	}
@@ -57,7 +76,27 @@ func (s turnSender) Send(ctx context.Context, key string, ts turn.Session, text 
 	if spec.Priority == turn.PriorityNow {
 		priority = "now"
 	}
-	return sendTurn(ctx, s.notify, key, sess, text, images, onEvent, spec.Passthrough && sess.SupportsPassthrough(), priority)
+	start := time.Now()
+	passthrough := spec.Passthrough && sess.SupportsPassthrough()
+	result, err := sendTurn(ctx, s.notify, key, sess, text, images, onEvent, passthrough, priority)
+	if err == nil {
+		s.autoSaveCronPrompt(key, text)
+	}
+	slog.Debug("send: turn complete", "key", key, "elapsed_ms", time.Since(start).Milliseconds())
+	return result, err
+}
+
+// autoSaveCronPrompt persists a successful turn's text as the cron job's
+// prompt; a no-op for non-cron keys or without a scheduler.
+// ErrPromptAlreadySet (every turn after the first) is benign and not logged.
+func (s turnSender) autoSaveCronPrompt(key, text string) {
+	if s.prompts == nil || !sessionkey.IsCronKey(key) {
+		return
+	}
+	jobID := strings.TrimPrefix(key, sessionkey.CronKeyPrefix)
+	if err := s.prompts.SetJobPrompt(jobID, text); err != nil && !errors.Is(err, cron.ErrPromptAlreadySet) {
+		slog.Warn("send: set cron prompt", "key", key, "err", err)
+	}
 }
 
 func (s turnSender) AfterTurn(key string) { broadcastAfterTurn(s.router, s.notify, key) }

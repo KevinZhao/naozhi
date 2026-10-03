@@ -104,7 +104,6 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		wsRollback = rb
 	}
 
-	capturedID, capturedKey := msg.ID, key
 	reset, status, err := h.engine.sessionSend(sendParams{
 		Key:           key,
 		Text:          msg.Text,
@@ -113,11 +112,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		ResumeID:      msg.ResumeID,
 		Backend:       msg.Backend,
 		AccessProfile: msg.AccessProfile,
-	}, func(_ error, errMsg string) {
-		// Originator-only channel: informational outcomes (/urgent abort,
-		// reset) are reported here on purpose — the sender wants to know.
-		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: "error", Key: capturedKey, Error: errMsg}))
-	})
+	}, h.engine.wsOrigin(c, msg.ID, key))
 	if err != nil {
 		if wsRollback != nil {
 			wsRollback()

@@ -10,7 +10,7 @@ import (
 // sendEnginePkg is the set of files rule 3b-send reads. A "" value writes
 // nothing so a missing-file case can be exercised.
 type sendEnginePkg struct {
-	hub, engine, send, ownerLoop, handler, bcast, sender string
+	hub, engine, send, origins, handler, bcast, sender string
 }
 
 func writeSendEnginePkg(t *testing.T, p sendEnginePkg) string {
@@ -20,7 +20,7 @@ func writeSendEnginePkg(t *testing.T, p sendEnginePkg) string {
 		"wshub.go":           p.hub,
 		"send_engine.go":     p.engine,
 		"send.go":            p.send,
-		"send_owner_loop.go": p.ownerLoop,
+		"dash_origin.go":     p.origins,
 		"dashboard_send.go":  p.handler,
 		"wshub_broadcast.go": p.bcast,
 		"turn_sender.go":     p.sender,
@@ -39,8 +39,7 @@ const hubOK = "package server\ntype Hub struct {\n\tengine *sendEngine\n\trouter
 
 const engineOK = `package server
 type sendEngine struct {
-	queue MessageEnqueuer
-	guard *session.Guard
+	turns *turn.Orchestrator
 	wg sync.WaitGroup
 	allowedRoot string
 	notify sendNotifier
@@ -69,15 +68,19 @@ func (h *SendHandler) handleBind() {
 
 func cleanPkg() sendEnginePkg {
 	return sendEnginePkg{
-		hub:       hubOK,
-		engine:    engineOK,
-		send:      "package server\nfunc (e *sendEngine) sessionSendLegacy() {}\n",
-		ownerLoop: "package server\nfunc (e *sendEngine) ownerLoop() {}\n",
-		handler:   handlerOK,
-		bcast:     bcastOK,
-		sender:    senderOK,
+		hub:     hubOK,
+		engine:  engineOK,
+		send:    "package server\nfunc (e *sendEngine) sessionOptsFor() {}\n",
+		origins: originsOK,
+		handler: handlerOK,
+		bcast:   bcastOK,
+		sender:  senderOK,
 	}
 }
+
+// originsOK is the dashboard's two turn origins, holding the client, the
+// notifier and the engine's opts lookup, never the Hub.
+const originsOK = "package server\ntype wsOrigin struct {\n\tdashOrigin\n\tc *wsClient\n}\ntype httpOrigin struct {\n\tdashOrigin\n\tnotify sendNotifier\n}\nfunc (e *sendEngine) wsOrigin() {}\n"
 
 // senderOK is the turn sender holding the router and the broadcaster only.
 const senderOK = "package server\ntype turnSender struct {\n\trouter turnRouter\n\tnotify sendNotifier\n}\nfunc (s turnSender) NotifyIdle() {}\n"
@@ -109,7 +112,7 @@ func TestSendEngineOwnership_CleanLayout(t *testing.T) {
 // six-name field blocklist could never see.
 func TestSendEngineOwnership_FlagsHubFieldOnEngine(t *testing.T) {
 	p := cleanPkg()
-	p.engine = "package server\ntype sendEngine struct {\n\thub *Hub\n\tqueue MessageEnqueuer\n}\nfunc (e *sendEngine) sessionSend() {}\nfunc (e *sendEngine) validateWorkspace(p string) (string, error) { return p, nil }\nfunc (e *sendEngine) TrackSend() (func(), bool) { return nil, false }\n"
+	p.engine = "package server\ntype sendEngine struct {\n\thub *Hub\n\tturns *turn.Orchestrator\n}\nfunc (e *sendEngine) sessionSend() {}\nfunc (e *sendEngine) validateWorkspace(p string) (string, error) { return p, nil }\nfunc (e *sendEngine) TrackSend() (func(), bool) { return nil, false }\n"
 	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
 	if len(vs) != 1 {
 		t.Fatalf("want 1 violation, got %d:\n%s", len(vs), msgs(vs))
@@ -146,6 +149,38 @@ func TestSendEngineOwnership_FlagsHubFieldOnTurnSender(t *testing.T) {
 	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
 	if len(vs) != 1 || !strings.Contains(vs[0].Message, `turnSender declares field "hub" of type *Hub`) {
 		t.Fatalf("want 1 turnSender *Hub-field violation, got %d:\n%s", len(vs), msgs(vs))
+	}
+}
+
+// TestSendEngineOwnership_FlagsHubFieldOnOrigins is check A for the
+// dashboard's turn origins: either one holding a *Hub would let a turn's
+// delivery reach the WebSocket layer instead of the one client it answers.
+func TestSendEngineOwnership_FlagsHubFieldOnOrigins(t *testing.T) {
+	for _, typ := range []string{"wsOrigin", "httpOrigin"} {
+		p := cleanPkg()
+		p.origins = strings.Replace(originsOK, "type "+typ+" struct {\n", "type "+typ+" struct {\n\thub *Hub\n", 1)
+		vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
+		if len(vs) != 1 || !strings.Contains(vs[0].Message, typ+` declares field "hub" of type *Hub`) {
+			t.Fatalf("want 1 %s *Hub-field violation, got %d:\n%s", typ, len(vs), msgs(vs))
+		}
+	}
+}
+
+// TestSendEngineOwnership_FlagsMissingOrigins: losing or renaming an origin
+// must be loud, and dash_origin.go is a pipeline file (check B).
+func TestSendEngineOwnership_FlagsMissingOrigins(t *testing.T) {
+	p := cleanPkg()
+	p.origins = ""
+	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
+	for _, want := range []string{"type wsOrigin not found", "type httpOrigin not found"} {
+		if !strings.Contains(msgs(vs), want) {
+			t.Errorf("missing %q in:\n%s", want, msgs(vs))
+		}
+	}
+	p.origins = originsOK + "func (h *Hub) deliver() {}\n"
+	vs = scanSendEngineOwnership(writeSendEnginePkg(t, p))
+	if len(vs) != 1 || !strings.Contains(vs[0].Message, "deliver has a *Hub receiver") {
+		t.Fatalf("want 1 *Hub-receiver violation in dash_origin.go, got %d:\n%s", len(vs), msgs(vs))
 	}
 }
 
@@ -228,13 +263,13 @@ func (h *SendHandler) handleSend() {
 // instead of 12.
 func TestSendEngineOwnership_FlagsHubReceiverInPipelineFile(t *testing.T) {
 	p := cleanPkg()
-	p.send = "package server\nfunc (e *sendEngine) sessionSendLegacy() {}\nfunc (h *Hub) sneakyHelper() {}\n"
-	p.ownerLoop = "package server\nfunc (h *Hub) ownerLoop() {}\n"
+	p.send = "package server\nfunc (e *sendEngine) sessionOptsFor() {}\nfunc (h *Hub) sneakyHelper() {}\n"
+	p.engine = engineOK + "func (h *Hub) TrackSend() {}\n"
 	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
 	if len(vs) != 2 {
 		t.Fatalf("want 2 violations (one per file), got %d:\n%s", len(vs), msgs(vs))
 	}
-	for _, want := range []string{"sneakyHelper has a *Hub receiver", "ownerLoop has a *Hub receiver"} {
+	for _, want := range []string{"sneakyHelper has a *Hub receiver", "TrackSend has a *Hub receiver"} {
 		if !strings.Contains(msgs(vs), want) {
 			t.Errorf("missing %q in:\n%s", want, msgs(vs))
 		}

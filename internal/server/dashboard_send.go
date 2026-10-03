@@ -317,7 +317,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		Key: key, Text: text, Images: images,
 		Workspace: workspace, ResumeID: resumeID, Backend: backend,
 		AccessProfile: accessProfile,
-	}, h.engine.sendErrorCallback(key))
+	}, h.engine.httpOrigin(key))
 	if err != nil {
 		cleanup()
 		// Forward only the localised label: the raw error may embed workspace

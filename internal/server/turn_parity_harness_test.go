@@ -7,8 +7,8 @@ package server
 // same PR and names the row number.
 //
 // Everything runs on a real Server from buildServerWithHandlers, so the IM
-// dispatcher and the dashboard send engine share the one turn.Queue the
-// composition root builds. Sessions are injected TestProcesses whose turns the
+// dispatcher and the dashboard send engine share the one turn.Orchestrator
+// (and its queue) the composition root builds. Sessions are injected TestProcesses whose turns the
 // test scripts one by one. Every wait is for an expected event, with
 // parityWait as its deadline; no test sleeps to let something happen.
 
@@ -19,12 +19,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
@@ -353,6 +355,7 @@ type parityOpts struct {
 	interim       bool
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
+	cron          bool // wire a real cron scheduler (parityHarness.sched)
 }
 
 type parityHarness struct {
@@ -361,6 +364,7 @@ type parityHarness struct {
 	hs     *handlerSet
 	router *session.Router
 	plat   *parityPlatform
+	sched  *cron.Scheduler // nil unless parityOpts.cron
 	im     platform.MessageHandler
 	// imCtx is the inbound ctx every IM message carries; cancelled at cleanup
 	// so an owner loop parked in its drain wait cannot outlive the test.
@@ -391,6 +395,10 @@ func newParityHarness(t *testing.T, o parityOpts) *parityHarness {
 		p = parityReactorPlatform{plat}
 	}
 	router := session.NewRouter(session.RouterConfig{})
+	var sched *cron.Scheduler
+	if o.cron {
+		sched = cron.NewScheduler(cron.SchedulerConfig{MaxJobs: 5, StorePath: filepath.Join(t.TempDir(), "cron_jobs.json"), AllowNilRouter: true}, cron.SchedulerDeps{})
+	}
 	srv, hs := buildServerWithHandlers(ServerOptions{
 		Addr:          ":0",
 		Router:        router,
@@ -399,8 +407,9 @@ func newParityHarness(t *testing.T, o parityOpts) *parityHarness {
 		Agents:        o.agents,
 		AgentCommands: o.agentCommands,
 		Queue:         QueueOptions{MaxDepth: o.maxDepth, CollectDelay: o.collect, Mode: o.mode},
+		Scheduler:     sched,
 	})
-	h := &parityHarness{t: t, srv: srv, hs: hs, router: router, plat: plat, im: srv.dispatcher.BuildHandler()}
+	h := &parityHarness{t: t, srv: srv, hs: hs, router: router, plat: plat, sched: sched, im: srv.dispatcher.BuildHandler()}
 	h.imCtx, h.imCancel = context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		h.imCancel()
@@ -508,8 +517,8 @@ func (h *parityHarness) httpSend(t *testing.T, text string) string {
 func (h *parityHarness) engine() *sendEngine { return h.hs.wiring.engine }
 
 // waitEngineIdle returns once every goroutine the dashboard engine started has
-// finished — the owner loop, its drain turns and their error callbacks. Call
-// it only when no further dashboard send is in flight.
+// finished — the owner loop, its drain turns and their deliveries. Call it
+// only when no further dashboard send is in flight.
 func (h *parityHarness) waitEngineIdle() {
 	h.t.Helper()
 	waitEngineIdle(h.t, h.engine())

@@ -32,8 +32,10 @@ const serverFieldBaseline = 25
 // added Engine/Broadcaster).
 const hubOptionsFieldBaseline = 16
 
-// sendEngineOptsFieldBaseline is sendEngineOpts's field count.
-const sendEngineOptsFieldBaseline = 11
+// sendEngineOptsFieldBaseline is sendEngineOpts's field count (#3004 D
+// swapped Queue and Guard for Turns, and the cron autosave took Scheduler
+// to turnSender).
+const sendEngineOptsFieldBaseline = 9
 
 // additionalStructBudgets are the struct_budget subjects besides Server:
 // plain opts carriers pinned on count alone (server_field_liveness's

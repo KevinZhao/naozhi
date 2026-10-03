@@ -10,7 +10,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // newSendEngineForTest builds an engine the way tests should: through the real
@@ -89,34 +88,10 @@ func TestSendEngine_TrackSendRacesDrain(t *testing.T) {
 	wg.Wait()
 }
 
-// TestSendEngine_QueueTypedNilGate pins the #377 typed-nil hazard at its new
-// home. send.go gates the legacy guard path on `e.queue == nil`; boxing a nil
-// concrete *turn.Queue into the interface field would make that read
-// false and silently disable the gate.
-func TestSendEngine_QueueTypedNilGate(t *testing.T) {
-	t.Parallel()
-	if e := newSendEngineForTest(sendEngineOpts{}); e.queue != nil {
-		t.Errorf("engine built without Queue: queue = %v, want a nil interface", e.queue)
-	}
-	// The shape that actually bites: a nil CONCRETE pointer. This is why
-	// sendEngineOpts.Queue is *turn.Queue and not MessageEnqueuer —
-	// an interface-typed opt field would box this before the constructor's nil
-	// check runs. Passing it through the concrete field must still leave the
-	// interface field nil.
-	var nilQueue *turn.Queue
-	if e := newSendEngineForTest(sendEngineOpts{Queue: nilQueue}); e.queue != nil {
-		t.Errorf("engine built with a nil *turn.Queue: queue = %v, want a nil interface — send.go's legacy-fallback gate is disabled", e.queue)
-	}
-	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
-	if e := newSendEngineForTest(sendEngineOpts{Queue: q}); e.queue == nil {
-		t.Error("engine built with a real Queue: queue is nil")
-	}
-}
-
 // TestSendEngine_NotifyNeverNil pins the two ways notify could end up nil: not
 // passed at all, or passed as a typed-nil *wsBroadcaster (which reads non-nil
 // through the interface). Either one panics on the first broadcast — inside the owner
-// goroutine, where ownerLoop's recover turns it into a silently dropped message
+// goroutine, where the turn's recover turns it into a silently dropped message
 // plus one log line.
 func TestSendEngine_NotifyNeverNil(t *testing.T) {
 	t.Parallel()
@@ -147,7 +122,6 @@ func TestSendEngine_NotifyNeverNil(t *testing.T) {
 func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
-	guard := session.NewGuard()
 	resolver := &session.KeyResolver{}
 	agents := map[string]session.AgentOpts{"a": {}}
 	projectMgr := &project.Manager{}
@@ -155,7 +129,7 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 		Router:      router,
 		Resolver:    resolver,
 		AllowedRoot: "/tmp/nz-root",
-	}, sendEngineOpts{Guard: guard, Agents: agents, ProjectMgr: projectMgr})
+	}, sendEngineOpts{Agents: agents, ProjectMgr: projectMgr})
 	t.Cleanup(hub.Shutdown)
 
 	if hub.engine == nil {
@@ -167,8 +141,8 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	if hub.engine.resolver != hub.resolver {
 		t.Error("engine.resolver is not the Hub's resolver instance")
 	}
-	if hub.engine.guard != guard {
-		t.Error("engine.guard is not the guard passed to NewHub")
+	if hub.engine.turns == nil {
+		t.Error("the port left engine.turns unset — every send would panic at Submit")
 	}
 	if reflect.ValueOf(hub.engine.agents).UnsafePointer() != reflect.ValueOf(agents).UnsafePointer() {
 		t.Error("engine.agents is not the agent map passed to NewHub")
@@ -182,12 +156,6 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	}
 	if hub.engine.notify != sendNotifier(hub.bcast) {
 		t.Error("engine.notify is not the Hub's broadcaster — send-path session_state / send_error frames would reach a different client set")
-	}
-	// The send-block fields must be gone from Hub: the whole point of #2551.
-	// Enforced structurally by the build (they no longer exist), so this only
-	// documents the intent for the next reader.
-	if got := hub.engine.LegacySendInvokes(); got != 0 {
-		t.Errorf("fresh engine LegacySendInvokes = %d, want 0", got)
 	}
 }
 
@@ -299,11 +267,11 @@ func TestBuildServer_SharesOneWSStack(t *testing.T) {
 	if w.engine.allowedRoot == "" || w.engine.allowedRoot != hub.tailers.allowedRoot {
 		t.Errorf("engine.allowedRoot = %q, tailers.allowedRoot = %q", w.engine.allowedRoot, hub.tailers.allowedRoot)
 	}
-	if w.engine.scheduler != CronView(sched) || hub.scheduler != CronView(sched) {
-		t.Error("engine and Hub do not share the Scheduler — cron prompt auto-save and stub revival would stop on the send path")
+	if hub.scheduler != CronView(sched) {
+		t.Error("the Hub does not have the Server's Scheduler — stub revival would stop on the subscribe path")
 	}
-	if w.engine.queue != MessageEnqueuer(w.msgQueue) || w.engine.guard != w.sessionGuard {
-		t.Error("engine.queue / engine.guard are not the dispatcher's — IM and dashboard sends would serialise on different queues / locks")
+	if w.turns == nil || w.engine.turns != w.turns {
+		t.Error("engine.turns is not wiring.turns, the dispatcher's — IM and dashboard turns would run on different queues")
 	}
 	if w.engine.projectMgr != projects {
 		t.Error("engine.projectMgr is not the Server's project manager")
@@ -323,7 +291,7 @@ func TestBuildServer_SharesOneWSStack(t *testing.T) {
 
 // TestSendEngine_DrainCancelsOwnCtx replaces the "engine.ctx == hub.ctx"
 // contract: drain cancels the engine's own ctx before it waits, so a tracked
-// goroutine blocked on e.ctx (remoteSend's RPC, ownerLoop's collect wait)
+// goroutine blocked on e.ctx (remoteSend's RPC, an owner loop's collect wait)
 // returns at once instead of after its timeout — and the parent is untouched.
 func TestSendEngine_DrainCancelsOwnCtx(t *testing.T) {
 	t.Parallel()
