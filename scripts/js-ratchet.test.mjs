@@ -620,6 +620,23 @@ test('configureDeps: data handed to a helper stays data', () => {
   assert.equal(measureSource(src).configureDeps, 0);
 });
 
+test('configureDeps: a keyed write into a list is a list element', () => {
+  // cron_state.js's cronRefetchFullJob splices a re-fetched job into the jobs
+  // cache by index while the module calls the list's methods (find, filter).
+  const store = (decl) => js(
+    decl,
+    'export function refetch(id, fresh) { const i = S.jobs.findIndex((j) => j.id === id); S.jobs[i] = Object.assign({}, fresh); }',
+    'export function first() { return S.jobs.find((j) => j.ok) || S.jobs.filter(Boolean); }',
+  );
+  assert.equal(measureSource(store('const S = { jobs: [], cap: 0 };')).configureDeps, 0);
+  assert.equal(measureSource(js('const jobs = [];', 'export function put(i, j) { jobs[i] = j; }', 'export function n() { return jobs.filter(Boolean); }')).configureDeps, 0);
+  // The control: the same write into an object, or a list that is not
+  // initialised as an array literal, lands the whole table.
+  assert.equal(measureSource(store('const S = { jobs: {}, cap: 0 };')).configureDeps, 2);
+  assert.equal(measureSource(store('const S = { jobs: null, cap: 0 };')).configureDeps, 2);
+  assert.equal(measureSource(js('const deps = { a: null };', 'export function put(k, impl) { deps[k] = impl[k]; }', 'export function go() { deps.a(); }')).configureDeps, 1);
+});
+
 test('deadInjections: a deps key the module never reads', () => {
   const src = (extra) => js(
     `const deps = { a: null, b: null${extra} };`,

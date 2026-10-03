@@ -668,10 +668,12 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
     // through it. A copy to a static target (slot = x.f, deps.a = x.a) lands
     // its path; a whole binding (deps = x, deps = { ...x }) the whole table,
     // when a function is called straight off it (deps.f(), not el.classList.add()).
+    // A runtime-keyed write into a list the module initialises as an array
+    // literal (jobs[i] = job, store.jobs[i] = job) is an element of data.
     const land = (target) => {
       const t = rootIdent(target);
       if (!moduleBinding(t)) return;
-      if (target.type === 'MemberExpression' && propName(target) === null) { if (calledRoots.has(t)) whole(t); return; }
+      if (target.type === 'MemberExpression' && propName(target) === null) { if (calledRoots.has(t) && !isListLiteral(facts, target.object)) whole(t); return; }
       const path = memberPath(target);
       if (path && calledPaths.has(path)) keys.push(path);
       else if (target.type === 'Identifier' && [...calledPaths].some((c) => c.startsWith(path + '.') && !c.slice(path.length + 1).includes('.'))) whole(t);
@@ -707,6 +709,17 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
   }
   // A registry (T.*) is read by runtime key; it has no static key to miss.
   for (const k of facts.injections.keys()) if (!k.endsWith('.*') && !reads.has(k)) facts.deadInjections.push(k);
+}
+
+// isListLiteral: n is a module binding, or a static member path into one,
+// whose initialiser is an array literal (const jobs = [], const s = { jobs: [] }).
+function isListLiteral(facts, n) {
+  const path = memberPath(n)?.split('.');
+  let v = path && facts.top.get(path[0])?.init;
+  for (const k of path?.slice(1) ?? []) {
+    v = v?.type === 'ObjectExpression' ? v.properties.find((q) => q.type === 'Property' && propName({ computed: q.computed, property: q.key }) === k)?.value : undefined;
+  }
+  return v?.type === 'ArrayExpression';
 }
 
 function perFileMetrics(facts) {
