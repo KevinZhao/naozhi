@@ -101,7 +101,7 @@ cmd/naozhi/main.go
   -> envpolicy    共享 env 过滤原语
   -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame + schema）
   -> jsonschema   Go 类型 → 契约检查读取的 JSON schema（WS frame 与 REST 响应共用，嵌套结构体展开进 defs）
-  -> replyfmt     回复成形规则（单条截断标记 / [i/N] 页码 / 分页宽度预留），dispatch 与 cron 共用
+  -> replyfmt     回复成形规则（单条截断标记 / [i/N] 页码 / 分页宽度预留 / 代码块感知的分段 SplitText），dispatch 与 cron 共用
   -> contractjs   生成 static/contract.js 的构建器（WS/API/ENUMS 三段；ENUMS 含 death_reason、session state 与 EventEntry kind 词表）
   -> datadir      store 文件所在目录的布局策略（Layout 值类型，只派生 sibling）
 
