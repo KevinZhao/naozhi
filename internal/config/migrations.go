@@ -9,9 +9,11 @@ package config
 // current schema.
 //
 // Migrations operate on a yaml.Node document, not on Config: the point is to
-// preserve the operator's comments, key order and formatting. A migration that
-// round-tripped through Config would hand back a machine-formatted file with
-// every comment stripped.
+// keep the operator's comments and key order. A migration that round-tripped
+// through Config would hand back a file with every comment stripped. A comment
+// on a node a migration removes moves to a neighbouring key; none is dropped.
+// The yaml.v3 encoder still normalizes layout: blank lines, comment column
+// alignment and indentation are not preserved, which the dry run shows.
 
 import (
 	"fmt"
@@ -58,14 +60,15 @@ var migrations = []migration{
 			case droppedForModern:
 				changes = append(changes, change{"nodes", "ignored", "both 'nodes' and 'workspaces' configured; using 'workspaces'"})
 			}
-			if session := yamlChildMap(root, "session"); session != nil {
+			if si := yamlChildIndex(root, "session"); si >= 0 && root.Content[si+1].Kind == yaml.MappingNode {
+				sessionKey, session := root.Content[si], root.Content[si+1]
 				switch renameKey(session, "workspace", "cwd") {
 				case renamed:
 					changes = append(changes, change{"session.workspace", "rewritten", "'session.workspace' is deprecated, please rename to 'session.cwd'"})
 				case droppedForModern:
 					changes = append(changes, change{"session.workspace", "ignored", "both 'session.cwd' and deprecated 'session.workspace' configured; using 'cwd'"})
 				}
-				if _, did := removeKey(session, "auto_chain"); did {
+				if removeKey(session, sessionKey, "auto_chain") {
 					changes = append(changes, change{"session.auto_chain", "ignored", "'session.auto_chain' is deprecated and has no effect; remove this block from config"})
 				}
 			}
@@ -204,45 +207,104 @@ func renameKey(m *yaml.Node, from, to string) renameOutcome {
 		return absent
 	}
 	if toIdx >= 0 {
-		m.Content = append(m.Content[:fromIdx], m.Content[fromIdx+2:]...)
+		// The modern key stays, so m cannot become empty and needs no owner.
+		removeAt(m, nil, fromIdx)
 		return droppedForModern
 	}
 	m.Content[fromIdx].Value = to
 	return renamed
 }
 
-// removeKey drops a key and its value, reporting whether it was there. It
-// returns the removed KEY node so a caller that is replacing one key with
-// another can carry the operator's comments across (see takeComments).
-func removeKey(m *yaml.Node, key string) (*yaml.Node, bool) {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			removed := m.Content[i]
-			m.Content = append(m.Content[:i], m.Content[i+2:]...)
-			return removed, true
-		}
+// removeKey drops a key and its value, reporting whether it was there. owner is
+// the key m hangs under, the comments' last resort (see removeAt).
+func removeKey(m, owner *yaml.Node, key string) bool {
+	i := yamlChildIndex(m, key)
+	if i < 0 {
+		return false
 	}
-	return nil, false
+	removeAt(m, owner, i)
+	return true
 }
 
-// takeComments moves from's comments onto to. A migration that replaces one key
-// with another must not silently delete the operator's note: the note may now be
-// stale (this one described a flag that no longer sits in args), but deleting
-// text nobody asked us to delete is worse than leaving something to edit — and
-// the dry run shows exactly what moved.
-func takeComments(to, from *yaml.Node) {
-	if to == nil || from == nil {
-		return
+// removeAt drops the pair at m.Content[i] and re-homes every comment in it. A
+// migration deletes keys nobody needs any more, never the operator's text: the
+// note may now be stale, but deleting text nobody asked us to delete is worse
+// than leaving something to edit, and the dry run shows where it moved.
+func removeAt(m, owner *yaml.Node, i int) {
+	var texts []string
+	collectComments(m.Content[i], &texts)
+	collectComments(m.Content[i+1], &texts)
+	m.Content = append(m.Content[:i], m.Content[i+2:]...)
+	rehomeComments(m, owner, i, texts)
+}
+
+// rehomeComments puts texts where a removed pair stood at index at of mapping
+// m: above the next key, else below the previous one, else (m is now empty) on
+// owner.
+func rehomeComments(m, owner *yaml.Node, at int, texts []string) {
+	switch {
+	case len(texts) == 0:
+	case at < len(m.Content):
+		m.Content[at].HeadComment = joinComments(append(texts, m.Content[at].HeadComment))
+	case len(m.Content) >= 2:
+		prev := m.Content[len(m.Content)-2]
+		prev.FootComment = joinComments(append([]string{prev.FootComment}, texts...))
+	case owner != nil:
+		owner.HeadComment = joinComments(append([]string{owner.HeadComment}, texts...))
+	default:
+		m.HeadComment = joinComments(append([]string{m.HeadComment}, texts...))
 	}
-	if to.HeadComment == "" {
-		to.HeadComment = from.HeadComment
+}
+
+// collectComments appends every comment in n's subtree to out, in document
+// order.
+func collectComments(n *yaml.Node, out *[]string) {
+	*out = append(*out, n.HeadComment, n.LineComment)
+	for _, c := range n.Content {
+		collectComments(c, out)
 	}
-	if to.LineComment == "" {
-		to.LineComment = from.LineComment
+	*out = append(*out, n.FootComment)
+}
+
+// joinComments joins the non-empty comment blocks, one per line group.
+func joinComments(parts []string) string {
+	var b strings.Builder
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(p)
 	}
-	if to.FootComment == "" {
-		to.FootComment = from.FootComment
+	return b.String()
+}
+
+// takeComments moves every comment in the srcs subtrees onto the pair key/val
+// that replaces them, overwriting nothing: the first line comment fills val's
+// line slot when the pair has none, foot comments append to key's foot, and
+// the rest append to key's head in document order.
+func takeComments(key, val *yaml.Node, srcs ...*yaml.Node) {
+	var head, foot []string
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		head = append(head, n.HeadComment)
+		if n.LineComment != "" && key.LineComment == "" && val.LineComment == "" {
+			val.LineComment = n.LineComment
+		} else {
+			head = append(head, n.LineComment)
+		}
+		for _, c := range n.Content {
+			walk(c)
+		}
+		foot = append(foot, n.FootComment)
 	}
+	for _, n := range srcs {
+		walk(n)
+	}
+	key.HeadComment = joinComments(append([]string{key.HeadComment}, head...))
+	key.FootComment = joinComments(append([]string{key.FootComment}, foot...))
 }
 
 // liftAgentSystemPrompts moves `--append-system-prompt <text>` out of every
@@ -259,41 +321,52 @@ func liftAgentSystemPrompts(root *yaml.Node) ([]change, error) {
 	}
 	var changes []change
 	for i := 0; i+1 < len(agents.Content); i += 2 {
-		id, agent := agents.Content[i].Value, agents.Content[i+1]
+		idKey, agent := agents.Content[i], agents.Content[i+1]
+		id := idKey.Value
 		if agent.Kind != yaml.MappingNode {
 			continue
 		}
-		argsNode := yamlChildSeq(agent, "args")
-		if argsNode == nil {
+		argsAt := yamlChildIndex(agent, "args")
+		if argsAt < 0 || agent.Content[argsAt+1].Kind != yaml.SequenceNode {
 			continue
 		}
+		argsKey, argsNode := agent.Content[argsAt], agent.Content[argsAt+1]
 		var args []string
 		if err := argsNode.Decode(&args); err != nil {
 			return changes, fmt.Errorf("agents[%s].args: %w", id, err)
 		}
-		kept, lifted, found := splitLegacySystemPromptArgs(args)
+		keptIdx, liftedIdx, lifted, found := splitLegacySystemPromptArgs(args)
 		if !found {
 			continue
 		}
-		existing := yamlChildScalar(agent, "system_prompt")
+		var spKey, existing *yaml.Node
+		if j := yamlChildIndex(agent, "system_prompt"); j >= 0 && agent.Content[j+1].Kind == yaml.ScalarNode {
+			spKey, existing = agent.Content[j], agent.Content[j+1]
+		}
 		if lifted != "" && existing != nil && existing.Value != "" && existing.Value != lifted {
 			return changes, fmt.Errorf("agents[%s]: both system_prompt and %s in args are set to different values; resolve it by hand", id, legacySystemPromptFlag)
 		}
-		// Rewrite args (or drop the key when nothing is left) and set the
-		// dedicated field. When args goes away entirely its comments move to
-		// system_prompt, which is where the operator will look next.
-		var orphanedComments *yaml.Node
-		if len(kept) == 0 {
-			orphanedComments, _ = removeKey(agent, "args")
+		// Rewrite args, or drop the key when nothing is left. The items that
+		// stay keep their own nodes, so their comments and quoting survive;
+		// gone holds the nodes whose comments need a new home.
+		var gone []*yaml.Node
+		if len(keptIdx) == 0 {
+			gone = []*yaml.Node{argsKey, argsNode}
+			agent.Content = append(agent.Content[:argsAt], agent.Content[argsAt+2:]...)
 		} else {
-			argsNode.Content = argsNode.Content[:0]
-			for _, a := range kept {
-				argsNode.Content = append(argsNode.Content, &yaml.Node{
-					Kind: yaml.ScalarNode, Value: a, Style: yaml.DoubleQuotedStyle,
-				})
+			for _, j := range liftedIdx {
+				gone = append(gone, argsNode.Content[j])
 			}
+			kept := make([]*yaml.Node, 0, len(keptIdx))
+			for _, j := range keptIdx {
+				kept = append(kept, argsNode.Content[j])
+			}
+			argsNode.Content = kept
 		}
-		if lifted != "" {
+		switch {
+		case lifted != "":
+			// The comments follow the text to system_prompt, which is where
+			// the operator will look next.
 			style := yaml.DoubleQuotedStyle
 			if strings.ContainsAny(lifted, "\n\"") {
 				style = yaml.LiteralStyle
@@ -301,11 +374,24 @@ func liftAgentSystemPrompts(root *yaml.Node) ([]change, error) {
 			if existing != nil {
 				existing.Value = lifted
 				existing.Style = style
+				takeComments(spKey, existing, gone...)
 			} else {
 				key := &yaml.Node{Kind: yaml.ScalarNode, Value: "system_prompt"}
-				takeComments(key, orphanedComments)
-				agent.Content = append(agent.Content, key,
-					&yaml.Node{Kind: yaml.ScalarNode, Value: lifted, Style: style})
+				val := &yaml.Node{Kind: yaml.ScalarNode, Value: lifted, Style: style}
+				takeComments(key, val, gone...)
+				agent.Content = append(agent.Content, key, val)
+			}
+		default:
+			// A bare flag lifts nothing: its comments stay where it stood, on
+			// args when that survives, else beside where args was.
+			var texts []string
+			for _, n := range gone {
+				collectComments(n, &texts)
+			}
+			if len(keptIdx) > 0 {
+				argsKey.HeadComment = joinComments(append([]string{argsKey.HeadComment}, texts...))
+			} else {
+				rehomeComments(agent, idKey, argsAt, texts)
 			}
 		}
 		field := fmt.Sprintf("agents[%s]", id)
@@ -321,14 +407,14 @@ func liftAgentSystemPrompts(root *yaml.Node) ([]change, error) {
 	return changes, nil
 }
 
-// yamlChildSeq returns the sequence node for key, or nil.
-func yamlChildSeq(m *yaml.Node, key string) *yaml.Node {
+// yamlChildIndex returns the index of key's key node in mapping m, or -1.
+func yamlChildIndex(m *yaml.Node, key string) int {
 	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key && m.Content[i+1].Kind == yaml.SequenceNode {
-			return m.Content[i+1]
+		if m.Content[i].Value == key {
+			return i
 		}
 	}
-	return nil
+	return -1
 }
 
 // yamlChildScalar returns the scalar node for key, or nil.

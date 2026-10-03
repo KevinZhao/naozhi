@@ -44,40 +44,33 @@ func validateSystemPrompt(field, prompt string) error {
 	return nil
 }
 
-// splitLegacySystemPromptArgs returns args minus legacySystemPromptFlag
-// occurrences (`--flag value` and `--flag=value`, mirroring
-// cli.filterDeniedFlags), the joined values, and whether anything was removed.
-func splitLegacySystemPromptArgs(args []string) (kept []string, lifted string, found bool) {
-	for _, a := range args {
-		if a == legacySystemPromptFlag || strings.HasPrefix(a, legacySystemPromptFlag+"=") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return args, "", false
-	}
-	kept = make([]string, 0, len(args))
+// splitLegacySystemPromptArgs finds legacySystemPromptFlag in args (`--flag
+// value` and `--flag=value`, mirroring cli.filterDeniedFlags). It returns the
+// indices of the items that stay and of the items it consumed, the joined
+// values, and whether the flag occurred. Indices rather than strings let the
+// migration keep the operator's own yaml nodes (comments, quoting) for what
+// stays.
+func splitLegacySystemPromptArgs(args []string) (keptIdx, liftedIdx []int, lifted string, found bool) {
 	var vals []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if v, isEq := strings.CutPrefix(a, legacySystemPromptFlag+"="); isEq {
 			vals = append(vals, v)
+			liftedIdx = append(liftedIdx, i)
 			continue
 		}
 		if a == legacySystemPromptFlag {
+			liftedIdx = append(liftedIdx, i)
 			// Same rule as cli.filterDeniedFlags: the next token is the value
 			// unless it looks like another flag.
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				vals = append(vals, args[i+1])
+				liftedIdx = append(liftedIdx, i+1)
 				i++
 			}
 			continue
 		}
-		kept = append(kept, a)
+		keptIdx = append(keptIdx, i)
 	}
-	if len(kept) == 0 {
-		kept = nil
-	}
-	return kept, strings.Join(vals, "\n\n"), true
+	return keptIdx, liftedIdx, strings.Join(vals, "\n\n"), len(liftedIdx) > 0
 }
