@@ -1,8 +1,9 @@
 package server
 
 // wshub_eventpush_burst_test.go — #3008: a notify wave larger than one
-// history frame must reach the subscriber in full and in order, and the
-// cursor never advances past an entry that was not delivered.
+// history frame must reach the subscriber in full and in order, the cursor
+// never advances past an entry that was not delivered, and a dropped frame is
+// retried without waiting for another Append.
 
 import (
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 const (
@@ -108,11 +110,15 @@ func TestBackfillSubscriberEvents_DroppedFrameDoesNotAdvanceCursor(t *testing.T)
 	// Each wave fits one frame into the cap-1 buffer and drops the next.
 	wantWM := []int64{burst[49].Time, burst[99].Time, burst[burstLen-1].Time}
 	wantDropped := []int64{1, 2, 2}
+	wantPending := []bool{true, true, false}
 	for wave := range wantWM {
-		alive, b := hub.backfillSubscriberEvents(c, key, sess, csr, buf)
+		alive, pending, b := hub.backfillSubscriberEvents(c, key, sess, csr, buf)
 		buf = b
 		if !alive {
 			t.Fatalf("wave %d: alive = false on an open client", wave)
+		}
+		if pending != wantPending[wave] {
+			t.Fatalf("wave %d: pending = %v, want %v", wave, pending, wantPending[wave])
 		}
 		if wm := csr.Watermark(); wm != wantWM[wave] {
 			t.Fatalf("wave %d: watermark = %d, want %d (cursor advanced past an unsent frame)", wave, wm, wantWM[wave])
@@ -137,7 +143,62 @@ func TestBackfillSubscriberEvents_DroppedFrameDoesNotAdvanceCursor(t *testing.T)
 	assertBurstInOrder(t, got)
 
 	// Fully caught up: a further wave sends nothing.
-	if alive, _ := hub.backfillSubscriberEvents(c, key, sess, csr, buf); !alive || len(c.send) != 0 {
-		t.Fatalf("caught-up wave: alive = %v, queued = %d; want true, 0", alive, len(c.send))
+	if alive, pending, _ := hub.backfillSubscriberEvents(c, key, sess, csr, buf); !alive || pending || len(c.send) != 0 {
+		t.Fatalf("caught-up wave: alive = %v, pending = %v, queued = %d; want true, false, 0", alive, pending, len(c.send))
+	}
+}
+
+// A dropped frame in an idle session (no further Append, so no notify) is
+// retried on the push loop's timer until the whole wave has arrived.
+func TestEventPushLoop_DroppedFrameRetriedWithoutNextAppend(t *testing.T) {
+	hub, router := newTestHub(t, "")
+	defer hub.Shutdown()
+	hub.historyRetryInterval = 5 * time.Millisecond
+	proc := session.NewTestProcess()
+	const key = "test:d:u:general"
+	sess := router.InjectSession(key, proc)
+
+	c := newTestWSClient()
+	c.send = make(chan []byte, 1)
+	defer c.closeDone()
+	hub.register(c)
+	notify, unsub := sess.SubscribeEvents()
+	gen := subscribeTest(hub, c, key, unsub)
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		hub.eventPushLoop(c, key, gen, notify, sess, clievent.NewSinceCursor())
+	}()
+
+	// The only notify of the test: the loop fills the cap-1 buffer and drops
+	// the next frame before anything is read.
+	proc.EventLog.AppendBatch(burstEntries())
+	testhelper.Eventually(t, func() bool { return c.dropped.Load() > 0 }, 3*time.Second,
+		"no frame dropped on the cap-1 send buffer")
+
+	deadline := time.Now().Add(3 * time.Second)
+
+	var got []string
+	for len(got) < burstLen {
+		select {
+		case data := <-c.send:
+			var msg node.ServerMsg
+			if err := json.Unmarshal(data, &msg); err != nil {
+				t.Fatalf("decode frame: %v", err)
+			}
+			for _, e := range msg.Events {
+				got = append(got, e.UUID)
+			}
+		case <-time.After(time.Until(deadline)):
+			t.Fatalf("delivered %d of %d entries; the dropped frame was never retried", len(got), burstLen)
+		}
+	}
+	assertBurstInOrder(t, got)
+
+	c.closeDone()
+	select {
+	case <-loopDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("eventPushLoop did not exit after the client closed")
 	}
 }

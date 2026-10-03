@@ -52,6 +52,10 @@ type Hub struct {
 	// resubscribeInterval is how often a push loop whose process went away
 	// looks for a new one (defaultResubscribeInterval; tests shorten it).
 	resubscribeInterval time.Duration
+	// historyRetryInterval is how soon a push loop retries a history frame
+	// dropped on a full send buffer (defaultHistoryRetryInterval; tests
+	// shorten it).
+	historyRetryInterval time.Duration
 
 	// clientWG tracks per-client pump/eventPushLoop goroutines; owned by the
 	// connection lifecycle (conn.Close), whereas the send goroutines are owned
@@ -146,7 +150,8 @@ func NewHub(opts HubOptions) *Hub {
 		ctx:         ctx,
 		cancel:      cancel,
 
-		resubscribeInterval: defaultResubscribeInterval,
+		resubscribeInterval:  defaultResubscribeInterval,
+		historyRetryInterval: defaultHistoryRetryInterval,
 	}
 	h.tailers = newTailerRegistry(opts.AllowedRoot)
 	h.historyMarshalCache = newHistoryMarshalCache()

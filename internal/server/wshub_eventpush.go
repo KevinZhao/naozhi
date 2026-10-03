@@ -21,6 +21,12 @@ const (
 	defaultResubscribeInterval = 5 * time.Second
 )
 
+// defaultHistoryRetryInterval paces retries of a history frame dropped on a
+// full send buffer. Each retry that drops again counts toward wsDropThreshold,
+// so a client that never drains is closed and resyncs within ~16s per stalled
+// subscription (the drop counter is per client, shared by all its keys).
+const defaultHistoryRetryInterval = 250 * time.Millisecond
+
 // maxHistoryPushEntries is the per-frame chunk size of a WS "history" push:
 // a full-ring catch-up (500 entries, ~100 KB) goes out as several ordered
 // frames instead of one, so no single frame hogs the client's send buffer.
@@ -86,6 +92,17 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 	// One buffer per goroutine, reused across notify waves by
 	// backfillSubscriberEvents (#1740); the drain never retains it.
 	var evBuf []clievent.EventEntry
+	// retry re-runs the drain after a frame was dropped on a full send buffer,
+	// so an idle session's remaining entries do not wait for the next Append.
+	// It is created on the first drop and armed only while one is pending;
+	// retryC is nil otherwise, which disables its select arm.
+	var retry *time.Timer
+	var retryC <-chan time.Time
+	defer func() {
+		if retry != nil {
+			retry.Stop()
+		}
+	}()
 	for {
 		select {
 		case _, ok := <-notify:
@@ -101,21 +118,12 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 					csr.Reset()
 				}
 				sess = newSess
-				// Catch up unconditionally: resubscribeEvents may have consumed one
-				// pending notification while probing newNotify, and in an idle
-				// session the next Append could be seconds away (#744).
-				alive, b := h.backfillSubscriberEvents(c, key, sess, csr, evBuf)
-				evBuf = b
-				if !alive {
-					return
-				}
-				continue
+				// Fall through to the drain unconditionally: resubscribeEvents may
+				// have consumed one pending notification while probing newNotify,
+				// and in an idle session the next Append could be seconds away (#744).
 			}
-			alive, b := h.backfillSubscriberEvents(c, key, sess, csr, evBuf)
-			evBuf = b
-			if !alive {
-				return
-			}
+		case <-retryC:
+			// A frame was dropped last drain: drain again from the watermark.
 		case <-c.done:
 			return
 		case <-h.ctx.Done():
@@ -123,20 +131,36 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 			// (a half-open socket may never propagate conn.Close via readPump).
 			return
 		}
+		alive, pending, b := h.backfillSubscriberEvents(c, key, sess, csr, evBuf)
+		evBuf = b
+		if !alive {
+			return
+		}
+		switch {
+		case pending && retry == nil:
+			retry = time.NewTimer(h.historyRetryInterval)
+			retryC = retry.C
+		case pending:
+			retry.Reset(h.historyRetryInterval)
+			retryC = retry.C
+		case retry != nil:
+			retry.Stop()
+			retryC = nil
+		}
 	}
 }
 
 // backfillSubscriberEvents drains new entries for sess through the caller's
 // SinceCursor and writes them to c, in order, as "history" frames of at most
-// maxHistoryPushEntries. Returns (alive, buf) — the caller must exit when alive
-// is false (the client closed mid-drain) and retain buf for the next wave.
+// maxHistoryPushEntries. The caller exits when alive is false (client closed
+// mid-drain), retries soon when pending is true (a frame was not enqueued and
+// entries remain), and keeps the returned buf for the next drain.
 //
-// The cursor advances per frame and only once the frame is enqueued: a marshal
-// error or a send dropped on a full buffer stops the wave with the rest still
-// above the watermark, so the next notify retries from there (#3008). The
-// inclusive watermark query + UUID dedup keep same-millisecond entries split
+// The cursor advances per frame and only once the frame is enqueued, so a
+// marshal error or a dropped send leaves the rest above the watermark (#3008).
+// The inclusive watermark query + UUID dedup keep same-millisecond entries split
 // across waves or frames from being lost or resent (#2402).
-func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, csr *clievent.SinceCursor, buf []clievent.EventEntry) (bool, []clievent.EventEntry) {
+func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, csr *clievent.SinceCursor, buf []clievent.EventEntry) (alive, pending bool, _ []clievent.EventEntry) {
 	// buf[:0] lets both the dead-session and live-process paths reuse capacity
 	// across notify waves (#1740); entries are consumed synchronously below and
 	// never retained. QueryAfter re-admits the watermark millisecond; Filter
@@ -149,7 +173,7 @@ func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.Ma
 	for len(entries) > 0 {
 		select {
 		case <-c.done:
-			return false, fetched
+			return false, false, fetched
 		default:
 		}
 		chunk := entries[:min(len(entries), maxHistoryPushEntries)]
@@ -157,15 +181,19 @@ func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.Ma
 		// lock-step tabs still coalesce onto one marshal per chunk.
 		data, err := h.marshalHistoryFrame(key, csr.Watermark(), chunk)
 		if err != nil {
-			return true, fetched
+			// Deterministic for these entries: the next notify retries, a
+			// timer would only repeat the failure.
+			return true, false, fetched
 		}
 		if !c.trySendRaw(data) {
-			return true, fetched
+			// A drop that closed c (wsDropThreshold) ends the loop at its
+			// next select on c.done.
+			return true, true, fetched
 		}
 		csr.Advance(chunk)
 		entries = entries[len(chunk):]
 	}
-	return true, fetched
+	return true, false, fetched
 }
 
 // resubscribeEvents waits for a new process to be attached to the session and
