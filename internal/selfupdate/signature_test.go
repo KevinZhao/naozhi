@@ -177,9 +177,9 @@ func TestReadSigFile_Oversized_Rejected(t *testing.T) {
 }
 
 // TestTrustedSigKeysEmptyThisPhase pins the invariant that the embedded trust
-// set is intentionally empty until the key-trust phase, so the unwired
-// primitive hard-fails (ErrEmptyTrustSet) rather than silently passing if a
-// later phase wires it in before provisioning a key.
+// set is intentionally empty until the key-trust phase, so Download keeps its
+// unsigned behaviour and the primitive hard-fails (ErrEmptyTrustSet) rather
+// than silently passing.
 func TestTrustedSigKeysEmptyThisPhase(t *testing.T) {
 	if len(trustedSigKeys) != 0 {
 		t.Fatalf("trustedSigKeys must stay empty this phase, got %d keys", len(trustedSigKeys))

@@ -1,12 +1,15 @@
 package selfupdate
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -15,8 +18,8 @@ import (
 const maxSigBytes = 4 * 1024 // 4 KB
 
 // trustedSigKeys is the ed25519 trust set. Intentionally empty until the
-// key-trust RFC embeds a reviewed key; while empty verifySignature hard-fails
-// (ErrEmptyTrustSet) so the primitive can never silently pass.
+// key-trust RFC embeds a reviewed key; while empty Download skips the
+// signature step and verifySignature hard-fails (ErrEmptyTrustSet).
 var trustedSigKeys []ed25519.PublicKey
 
 // Signature-verification sentinels, distinct so callers need no string matching.
@@ -56,7 +59,8 @@ func strictIntegrityRequested() bool {
 
 // enforceStrongTrust is the Download-time gate: a no-op unless strict mode is
 // requested, then requires an embedded trust set or a checksums pin (verified
-// for real by verifyPinnedChecksumsFile) or fails with ErrStrictNoStrongTrust.
+// for real by verifyReleaseSignature / verifyPinnedChecksumsFile) or fails
+// with ErrStrictNoStrongTrust.
 func enforceStrongTrust() error {
 	if !strictIntegrityRequested() {
 		return nil
@@ -72,8 +76,7 @@ func enforceStrongTrust() error {
 
 // verifySignature checks a base64 ed25519 sig against payload with each key in
 // trustSet and returns the index of the first that verifies (ErrEmptyTrustSet /
-// ErrMalformedSignature / ErrNoTrustedKey otherwise). Unwired in production
-// until a reviewed key is embedded.
+// ErrMalformedSignature / ErrNoTrustedKey otherwise).
 func verifySignature(payload, sig []byte, trustSet []ed25519.PublicKey) (keyIndex int, err error) {
 	if len(trustSet) == 0 {
 		return -1, ErrEmptyTrustSet
@@ -111,6 +114,34 @@ func TrustedSigKeys() []ed25519.PublicKey {
 // and sentinels the upgrade path uses.
 func VerifyChecksumsSignature(payload, sig []byte, trustSet []ed25519.PublicKey) (keyIndex int, err error) {
 	return verifySignature(payload, sig, trustSet)
+}
+
+// verifyReleaseSignature fetches rel.SigURL through fetchFile's guards and
+// requires it to verify checksums.txt against the embedded trust set. Every
+// failure is fatal, a missing .sig included: a fallback to the unsigned chain
+// would let an attacker downgrade the check by deleting the asset.
+func verifyReleaseSignature(ctx context.Context, rel *Release, dir, sumPath string) error {
+	if rel.SigURL == "" {
+		return fmt.Errorf("verify signature: release %s has no signature URL", rel.Tag)
+	}
+	sigPath := filepath.Join(dir, "checksums.txt.sig")
+	if err := fetchFile(ctx, rel.SigURL, sigPath, maxSigBytes); err != nil {
+		return fmt.Errorf("verify signature: download: %w", err)
+	}
+	sig, err := readSigFile(sigPath)
+	if err != nil {
+		return fmt.Errorf("verify signature: %w", err)
+	}
+	payload, err := os.ReadFile(sumPath)
+	if err != nil {
+		return fmt.Errorf("verify signature: read checksums: %w", err)
+	}
+	idx, err := verifySignature(payload, sig, trustedSigKeys)
+	if err != nil {
+		return fmt.Errorf("verify signature: %w", err)
+	}
+	slog.Info("selfupdate: checksums signature verified", "tag", rel.Tag, "key_index", idx)
+	return nil
 }
 
 // readSigFile reads a signature file with a small size cap.
