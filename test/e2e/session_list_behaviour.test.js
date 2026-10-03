@@ -7,7 +7,8 @@
 //     applied, and does not re-apply one it already applied (updateSendButton
 //     is not idempotent).
 //  2. A pending session the backend now lists is dropped from the durable
-//     localStorage blob, so a reload cannot resurrect it as a ghost card.
+//     localStorage blob, so a reload cannot resurrect it as a ghost card, and
+//     its parked tuning is dropped with it.
 //  3. Cmd+↓ / Cmd+↑ / Cmd+N walk the selected session's group in the sidebar's
 //     order (created_at, oldest first), which msg_nav reads from
 //     sessionList.allSessionsCache.
@@ -18,6 +19,11 @@
 //     REST 'running' is applied only when the socket is down; over a live
 //     socket it is a lagging snapshot and must not re-run the running
 //     transition (stop button, agent re-seed).
+//  6. With the banner hidden, the same REST 'running' over a live socket is a
+//     dropped push and is applied, so the stop button appears.
+//  7. A collapsed project renders its header (with a count) and no cards,
+//     across a repaint and a reload; a fallback group folds on its own
+//     node:name:workspace key, apart from a same-named folder elsewhere.
 //
 // Their twins already in the suite: the WS-down version gate and the
 // optimistic-running write-back are ws_fallback_state.test.js tests 1 and 3,
@@ -84,17 +90,20 @@ test('a poll that applies a new snapshot repaints the header CLI label', async (
   } finally { mock.server.close(); }
 });
 
-// lagRunningBehindVisibleBanner leaves the banner up, as refreshBanner does
-// for background agents after a turn ends, then has REST say 'running' with a
-// bumped version so the poll gets past the short-circuit. It returns what
-// fetchSessions returned: true means the payload was applied and the hooks ran.
-async function lagRunningBehindVisibleBanner(page, sessions) {
+// restRunningBehindBanner opens an idle session, optionally leaves the banner
+// up (as refreshBanner does for background agents after a turn ends), then
+// has REST say 'running' with a bumped version so the poll gets past the
+// short-circuit. It returns what fetchSessions returned: true means the
+// payload was applied and the hooks ran.
+async function restRunningBehindBanner(page, sessions, { showBanner }) {
   await page.click(`.session-card[data-key="${KEY}"]`);
   await page.waitForSelector('#msg-input');
   const display = (id) => page.evaluate((i) => document.getElementById(i).style.display, id);
   await expect.poll(() => display('btn-send')).toBe('flex');
   await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
-  await page.evaluate(() => document.getElementById('running-banner').classList.remove('nz-hidden'));
+  if (showBanner) {
+    await page.evaluate(() => document.getElementById('running-banner').classList.remove('nz-hidden'));
+  }
   sessions.sessions.find((s) => s.key === KEY).state = 'running';
   sessions.stats.version++;
   const applied = await page.evaluate(() => window.nz.test.fetchSessions());
@@ -108,8 +117,20 @@ test('over a live socket, a lagging REST running does not re-run the running tra
   try {
     await page.goto(mock.url + '/dashboard');
     await page.waitForFunction(() => window.nz.test.wsm.state === 'connected');
-    const got = await lagRunningBehindVisibleBanner(page, sessions);
+    const got = await restRunningBehindBanner(page, sessions, { showBanner: true });
     expect(got).toEqual({ applied: true, stop: 'none', send: 'flex' });
+    expect(await page.evaluate(() => window.nz.test.wsm.state)).toBe('connected');
+  } finally { mock.server.close(); }
+});
+
+test('over a live socket, a REST running heals a hidden banner (the running push was dropped)', async ({ page }) => {
+  const sessions = defaultSessions();
+  const mock = await startMockServer({ sessions, ws: true });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForFunction(() => window.nz.test.wsm.state === 'connected');
+    const got = await restRunningBehindBanner(page, sessions, { showBanner: false });
+    expect(got).toEqual({ applied: true, stop: 'flex', send: 'none' });
     expect(await page.evaluate(() => window.nz.test.wsm.state)).toBe('connected');
   } finally { mock.server.close(); }
 });
@@ -121,7 +142,7 @@ test('with the socket down, the same REST running is applied', async ({ page }) 
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
     expect(await page.evaluate(() => window.nz.test.wsm.state)).not.toBe('connected');
-    const got = await lagRunningBehindVisibleBanner(page, sessions);
+    const got = await restRunningBehindBanner(page, sessions, { showBanner: true });
     expect(got).toEqual({ applied: true, stop: 'flex', send: 'none' });
   } finally { mock.server.close(); }
 });
@@ -139,11 +160,19 @@ test('a pending session the backend lists is dropped from localStorage, so a rel
     }, PROJ);
     expect((await blob())[key]).toEqual({ ws: PROJ });
     await expect(page.locator(`.session-card.new-card[data-key="${key}"]`)).toHaveCount(1);
+    // A model/effort pick on the unspawned session is parked here (tuning.js);
+    // the header chips fall back to it while the key has no server row.
+    const tuning = (k) => page.evaluate(async (kk) => (await import('/static/state.js')).perSession.pendingTuning[kk], k);
+    await page.evaluate(async (k) => {
+      (await import('/static/state.js')).perSession.pendingTuning[k] = { model: 'stale-model', effort: 'high' };
+    }, key);
+    expect(await tuning(key)).toEqual({ model: 'stale-model', effort: 'high' });
 
     // The first send spawned it: the backend lists the key now.
     sessions.sessions.push({ ...sessions.sessions[0], key, state: 'ready', last_prompt: 'spawned', created_at: Date.now() });
     await page.evaluate(() => window.nz.test.fetchSessions());
     expect(await page.evaluate((k) => window.nz.test.sessionWorkspaces[k], key)).toBeUndefined();
+    expect(await tuning(key)).toBeUndefined();
     expect(await blob()).not.toHaveProperty(key);
     await expect(page.locator(`.session-card[data-key="${key}"]`)).not.toHaveClass(/new-card/);
 
@@ -156,6 +185,68 @@ test('a pending session the backend lists is dropped from localStorage, so a rel
     await expect(page.locator(`.session-card[data-key="${KEY}"]`)).toHaveCount(1);
     await expect(page.locator(`.session-card[data-key="${key}"]`)).toHaveCount(0);
     expect(await page.evaluate((k) => window.nz.test.sessionWorkspaces[k], key)).toBeUndefined();
+  } finally { mock.server.close(); }
+});
+
+const KEY3 = 'dashboard:direct:2026-01-01-120002-3:myproject';
+const OTHER = 'dashboard:direct:2026-01-01-120001-2:otherproject';
+
+test('a collapsed project keeps its header and drops its cards across a repaint and a reload', async ({ page }) => {
+  const sessions = defaultSessions();
+  const mock = await startMockServer({ sessions });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    const header = page.locator('.section-header', { hasText: 'myproject' });
+    const toggle = header.locator('[data-action="project-collapse"]');
+    const card = (k) => page.locator(`.session-card[data-key="${k}"]`);
+    await toggle.click();
+    await expect(card(KEY)).toHaveCount(0);
+    await expect(card(KEY3)).toHaveCount(0);
+    await expect(card(OTHER)).toHaveCount(1);
+    await expect(header).toHaveCount(1);
+    await expect(header.locator('.sh-count')).toHaveText('2');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+    // A poll that applies a new snapshot re-renders the list from scratch.
+    sessions.stats.version++;
+    expect(await page.evaluate(() => window.nz.test.fetchSessions())).toBe(true);
+    await expect(card(KEY)).toHaveCount(0);
+    await expect(card(OTHER)).toHaveCount(1);
+
+    await page.reload();
+    await page.waitForSelector(`.session-card[data-key="${OTHER}"]`);
+    await expect(card(KEY)).toHaveCount(0);
+    await expect(header.locator('.sh-count')).toHaveText('2');
+
+    await toggle.click();
+    await expect(card(KEY)).toHaveCount(1);
+    await expect(card(KEY3)).toHaveCount(1);
+    await expect(header.locator('.sh-count')).toHaveCount(0);
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  } finally { mock.server.close(); }
+});
+
+test('a fallback group folds on its own workspace, not on a same-named folder elsewhere', async ({ page }) => {
+  const sessions = defaultSessions();
+  const T = Date.UTC(2026, 0, 1, 12, 0, 0);
+  const tk = (id) => `dashboard:direct:2026-01-01-${id}:general`;
+  const tmp = (id, ws) => ({
+    key: tk(id), state: 'ready', platform: 'dashboard', agent: 'general',
+    cli_name: 'claude', workspace: ws, project: 'tmp', project_fallback: true, node: 'local',
+    created_at: T, last_active: T, last_prompt: ws,
+  });
+  sessions.sessions.push(tmp('130000-a', '/a/tmp'), tmp('130000-b', '/b/tmp'));
+  const mock = await startMockServer({ sessions });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    const headerA = page.locator('.section-header-fallback', { has: page.locator('.sh-name[title$="/a/tmp"]') });
+    await expect(page.locator('.section-header-fallback')).toHaveCount(2);
+    await headerA.locator('[data-action="project-collapse"]').click();
+    await expect(page.locator(`.session-card[data-key="${tk('130000-a')}"]`)).toHaveCount(0);
+    await expect(page.locator(`.session-card[data-key="${tk('130000-b')}"]`)).toHaveCount(1);
+    await expect(headerA.locator('.sh-count')).toHaveText('1');
   } finally { mock.server.close(); }
 });
 
