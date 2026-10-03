@@ -32,11 +32,17 @@ naozhi 把所有状态放在 `~/.naozhi/` 下，不依赖外部数据库。下�
 attachments 的回收**首选**内置 `attachment-gc` daemon
 (`docs/rfc/attachment-gc-daemon.md`),它按双 TTL(upload 7d / ref 30d)、
 refcount 感知地清理各 workspace 下的附件,无需停服。开启方式见 config 的
-`sysession.daemons.attachment-gc`(默认关闭 + `dry_run: true`):
+`sysession.daemons.attachment-gc`(默认 `enabled: false` + `dry_run: true`;
+daemon 关闭时 dry-run 也不会跑):
 
-1. 先保持 `dry_run: true` 跑几个周期,观察 `naozhi_attachment_gc_would_reap_*`
-   分桶指标 —— 重点看 `meta_no_refs` 桶(可能含 tracker 尚未 bump 的活跃引用)。
-2. 风险可接受后,把 `dry_run` 设 false、`enabled` 设 true 开启真删。
+1. 设 `enabled: true`,保持 `dry_run: true`,重启后跑几个周期。在 dashboard
+   「系统」视图的 attachment-gc 卡片看「本次统计」:三个「可回收·…」分桶计数与
+   「可回收体积」(所有 workspace 根的合计);逐根明细见每个根一条的
+   `attachment-gc: sweep summary` Info 日志(`files` / `bytes` / 各分桶),
+   逐文件明细见 `attachment GC: would remove`。重点看 `meta_no_refs` 桶(可能含
+   tracker 尚未 bump 的活跃引用)。`server.debug_mode` 打开时
+   `/api/debug/vars` 的 `naozhi_attachment_gc_would_reap_*` 计数器也可参考。
+2. 风险可接受后,把 `dry_run` 设 false 开启真删。
 
 **手动清理仅在以下场景需要**:(a) 已解绑的 override / 已删除 project 的旧
 workspace —— daemon 枚举不到,需手动删;(b) `EventLogDir==""` 部署下 refTTL

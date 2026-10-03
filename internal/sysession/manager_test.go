@@ -776,3 +776,15 @@ func withRegistry(t *testing.T, replacement []builtinDaemonFactory) {
 		registryTestMu.Unlock()
 	})
 }
+
+// TestFlattenTickReport_CountsVerbatim: Counts keys land in Stats unprefixed,
+// and a report carrying only Counts is not treated as empty.
+func TestFlattenTickReport_CountsVerbatim(t *testing.T) {
+	got := flattenTickReport(TickReport{Counts: map[string]int64{"would_reap_bytes": 0, "dry_run": 1}})
+	if got == nil {
+		t.Fatal("Counts-only report flattened to nil")
+	}
+	if v, ok := got["would_reap_bytes"]; !ok || v != 0 || got["dry_run"] != 1 || len(got) != 2 {
+		t.Errorf("Stats=%v, want exactly {would_reap_bytes:0 dry_run:1}", got)
+	}
+}

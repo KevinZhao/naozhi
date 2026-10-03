@@ -143,6 +143,15 @@ export function formatDurationShort(ms) {
   const rm = m - h * 60;
   return h + 'h ' + (rm < 10 ? '0' + rm : rm) + 'm';
 }
+// formatBytes renders a byte count as a compact human size (KiB/MiB/GiB);
+// 0 / missing returns ''. Integer-ish display — these are coarse signals.
+export function formatBytes(n) {
+  if (!n || n < 0) return '';
+  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + ' GiB';
+  if (n >= 1 << 20) return Math.round(n / (1 << 20)) + ' MiB';
+  if (n >= 1 << 10) return Math.round(n / (1 << 10)) + ' KiB';
+  return n + ' B';
+}
 // formatRunDuration —— 时间轴行 / 详情区"耗时"文案。>1000ms 用 "Xs"，否则 "Xms"。
 // 0 / 缺省返回 ''——running 状态没 duration_ms，调用方应传 0 跳过渲染。
 export function formatRunDuration(ms) {
