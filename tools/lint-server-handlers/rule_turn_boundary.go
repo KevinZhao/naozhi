@@ -62,7 +62,7 @@ const turnSlashLiteralBaseline = 0
 // ctxMarkerCallNames are G-a's first slice: the four ctx marker functions
 // (#3004 分叉 8). A bare Ident covers an unqualified call from inside
 // dispatch itself; calleeName (rule_send_engine_sibling.go) also matches the
-// qualified form server's send.go uses (dispatch.IsUrgent(ctx)).
+// qualified form a server caller would use (dispatch.IsUrgent(ctx)).
 var ctxMarkerCallNames = map[string]bool{
 	"WithPassthrough": true,
 	"IsPassthrough":   true,

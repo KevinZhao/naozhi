@@ -636,7 +636,7 @@ func TestWS_SendAccepted(t *testing.T) {
 	defer conn.Close()
 
 	wsWrite(t, conn, node.ClientMsg{Type: "send", Key: "test:d:u:general", Text: "hello", ID: "req-1"})
-	// sendWithBroadcastPriority emits a "session_state running" broadcast on
+	// The turn's sendTurn emits a "session_state running" broadcast on
 	// the same client connection just before sessionSend completes (R236-PERF-01),
 	// so it can race the send_ack into the read pipe. Skip non-target frames
 	// instead of pinning a fragile "first frame" assumption.
