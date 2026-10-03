@@ -138,7 +138,7 @@ func TestDiscover_RemovesStateWithBinaryMismatch(t *testing.T) {
 
 	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 	m.naozhiBin = "/nonexistent/not-naozhi"
-	states, err := m.Discover()
+	states, _, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
