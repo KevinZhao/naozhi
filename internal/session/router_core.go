@@ -839,8 +839,8 @@ func (r *Router) SessionFor(key string) *ManagedSession {
 
 // DiscardPassthroughPending fires reason to any in-flight passthrough sends for
 // the keyed session (no-op when absent), so consumers such as
-// dispatch.discardQueue go through the router seam rather than the concrete
-// *ManagedSession (#1612).
+// turn.Orchestrator.Reset (via server's turnSender) go through the router
+// seam rather than the concrete *ManagedSession (#1612).
 func (r *Router) DiscardPassthroughPending(key string, reason error) {
 	if sess := r.SessionFor(key); sess != nil {
 		sess.DiscardPassthroughPending(reason)

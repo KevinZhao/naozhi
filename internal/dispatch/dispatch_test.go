@@ -88,94 +88,102 @@ func (f *fakePlatform) allReplies() []string {
 }
 
 // ---------------------------------------------------------------------------
-// Fake guard
-// ---------------------------------------------------------------------------
-
-type fakeGuard struct {
-	mu       sync.Mutex
-	acquired map[string]bool
-}
-
-func newFakeGuard() *fakeGuard { return &fakeGuard{acquired: make(map[string]bool)} }
-
-func (g *fakeGuard) TryAcquire(key string) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.acquired[key] {
-		return false
-	}
-	g.acquired[key] = true
-	return true
-}
-func (g *fakeGuard) ShouldSendWait(_ string) bool { return true }
-func (g *fakeGuard) Release(key string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	delete(g.acquired, key)
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// dispatcherTestOption configures the DispatcherConfig newTestDispatcher
-// builds. #3004/T-P1: the default now wires a real *turn.Queue, matching
-// build_server.go's production wiring (which always constructs one) rather
-// than silently exercising the Guard-based fallback that production never
-// reaches (see #3004 measured_state #7, "legacy 路径在生产中走不到"). Pass
-// withQueue(nil) to opt a specific test back into the Guard path while it
-// still exists in dispatch.go (removed in #3004-D).
-type dispatcherTestOption func(*DispatcherConfig)
+// testDispatcherConfig is what a dispatcherTestOption edits: the
+// DispatcherConfig plus the queue and Sender newTestDispatcher builds the
+// dispatcher's turn.Orchestrator from, so every test runs IM turns through
+// the real orchestrator.
+type testDispatcherConfig struct {
+	DispatcherConfig
+	queue  *turn.Queue
+	sender *testSender
+}
 
-// withSendFn overrides the default Send hook via fakeCapabilities
-// (DispatcherConfig.Capabilities), not the deprecated SendFn closure field —
-// this is the shape #3004-C2's turnSender expects test doubles to take.
-func withSendFn(fn func(context.Context, string, Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error)) dispatcherTestOption {
-	return func(cfg *DispatcherConfig) {
-		fc, _ := cfg.Capabilities.(fakeCapabilities)
-		fc.send = fn
-		cfg.Capabilities = fc
+type dispatcherTestOption func(*testDispatcherConfig)
+
+// withSendFn replaces the test Sender's Send.
+func withSendFn(fn func(context.Context, string, turn.Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error)) dispatcherTestOption {
+	return func(cfg *testDispatcherConfig) { cfg.sender.send = fn }
+}
+
+// withQueue replaces the default collect-mode queue.
+func withQueue(q *turn.Queue) dispatcherTestOption {
+	return func(cfg *testDispatcherConfig) { cfg.queue = q }
+}
+
+// withRouter makes r both the dispatcher's SessionRouter and the router the
+// default Sender reaches, so a test can inject sessions into it.
+func withRouter(r *session.Router) dispatcherTestOption {
+	return func(cfg *testDispatcherConfig) {
+		cfg.Router = r
+		cfg.sender.router = r
 	}
 }
 
-// withQueue overrides the default real queue; nil forces the Guard-based
-// legacy fallback path in dispatch.go's BuildHandler.
-func withQueue(q *turn.Queue) dispatcherTestOption {
-	return func(cfg *DispatcherConfig) { cfg.Queue = q }
+// withSender replaces the default Sender (a testSender over the router).
+func withSender(s *testSender) dispatcherTestOption {
+	return func(cfg *testDispatcherConfig) { cfg.sender = s }
 }
 
 func newTestDispatcher(fp *fakePlatform, opts ...dispatcherTestOption) *Dispatcher {
-	cfg := DispatcherConfig{
-		Router:        routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 10})),
-		Platforms:     map[string]platform.Platform{"fake": fp},
-		Agents:        map[string]session.AgentOpts{},
-		AgentCommands: map[string]string{},
-		Guard:         newFakeGuard(),
-		Queue:         turn.NewQueueWithMode(5, 0, turn.ModeCollect),
-		Dedup:         platform.NewDedup(100),
-		Capabilities: fakeCapabilities{
-			send: func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
-				return &clievent.SendResult{Text: "ok"}, nil
+	router := session.NewRouter(session.RouterConfig{MaxProcs: 10})
+	cfg := testDispatcherConfig{
+		DispatcherConfig: DispatcherConfig{
+			Router:        router,
+			Platforms:     map[string]platform.Platform{"fake": fp},
+			Agents:        map[string]session.AgentOpts{},
+			AgentCommands: map[string]string{},
+			Dedup:         platform.NewDedup(100),
+			Capabilities: fakeCapabilities{
+				takeover: func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
 			},
-			takeover: func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
+			WatchdogNoOutputKills: new(atomic.Int64),
+			WatchdogTotalKills:    new(atomic.Int64),
+			NoOutputTimeout:       5 * time.Second,
+			TotalTimeout:          30 * time.Second,
 		},
-		WatchdogNoOutputKills: new(atomic.Int64),
-		WatchdogTotalKills:    new(atomic.Int64),
-		NoOutputTimeout:       5 * time.Second,
-		TotalTimeout:          30 * time.Second,
+		queue:  turn.NewQueueWithMode(5, 0, turn.ModeCollect),
+		sender: &testSender{router: router},
 	}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	d, err := NewDispatcher(cfg)
+	cfg.Turns = turn.New(cfg.queue, cfg.sender)
+	d, err := NewDispatcher(cfg.DispatcherConfig)
 	if err != nil {
-		// R250-ARCH-12: helper passes a real Send capability so wireup never
-		// fails. Panic so a future helper edit that drops it fails loudly in
-		// the helper rather than producing a nil dispatcher and confusing
-		// later assertions about Send behaviour.
-		panic("newTestDispatcher: NewDispatcher returned error with Capabilities set: " + err.Error())
+		// The helper always sets Turns, so wireup never fails; panic so a
+		// helper edit that drops it fails here, not in a later assertion.
+		panic("newTestDispatcher: NewDispatcher returned error with Turns set: " + err.Error())
 	}
 	return d
+}
+
+// testTurns is a Turns for construction-only tests that never run a turn.
+func testTurns() Turns {
+	return turn.New(turn.NewQueueWithMode(5, 0, turn.ModeCollect), &testSender{})
+}
+
+// inlineAdmission runs every turn on the caller's goroutine, so a test that
+// submits directly returns only after the turn's delivery finished.
+type inlineAdmission struct{ ctx context.Context }
+
+func (a inlineAdmission) Admit(turn.RunKind) (func(fn func(context.Context)), bool) {
+	return func(fn func(context.Context)) { fn(a.ctx) }, true
+}
+
+// runIMTurn runs one IM turn for msg on key through d's Turns, synchronously:
+// an owner turn (TurnInfo.First) when first, else a PriorityNow detached turn
+// (not First). It bypasses BuildHandler's front matter, so the platform need
+// not be registered.
+func runIMTurn(ctx context.Context, d *Dispatcher, key, text string, msg platform.IncomingMessage, first bool) {
+	o := d.newIMOrigin(msg, slog.Default(), key, "general", session.AgentOpts{}, imMessage, len(text), 0)
+	r := turn.Request{Key: key, Text: text, Origin: o}
+	if !first {
+		r.Priority = turn.PriorityNow
+	}
+	d.turns.Submit(ctx, r, inlineAdmission{ctx})
 }
 
 func incomingMsg(text string) platform.IncomingMessage {
@@ -383,23 +391,6 @@ func TestDispatchCommand_New_ProjectBound_MixedCaseAgent(t *testing.T) {
 	}
 }
 
-func TestNormalizeSlashCommand(t *testing.T) {
-	t.Parallel()
-	cases := []struct{ in, want string }{
-		{"/Help", "/help"},
-		{"/NEW", "/new"},
-		{"/Cd /Path/To/Dir", "/cd /Path/To/Dir"},
-		{"/cron add \"Job Name\"", "/cron add \"Job Name\""},
-		{"hello world", "hello world"}, // non-slash passthrough
-		{"/help", "/help"},             // already lowercase
-	}
-	for _, tc := range cases {
-		if got := normalizeSlashCommand(tc.in); got != tc.want {
-			t.Errorf("normalizeSlashCommand(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 func TestDispatchCommand_CaseInsensitive(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp)
@@ -486,7 +477,7 @@ func TestBuildHandler_Help(t *testing.T) {
 func TestBuildHandler_EmptyText(t *testing.T) {
 	fp := &fakePlatform{}
 	called := false
-	d := newTestDispatcher(fp, withSendFn(func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+	d := newTestDispatcher(fp, withSendFn(func(_ context.Context, _ string, _ turn.Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		called = true
 		return &clievent.SendResult{Text: "ok"}, nil
 	}))
@@ -546,44 +537,20 @@ func TestBuildHandler_PathSlash_NotUnknown(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BuildHandler — guard path busy
-// ---------------------------------------------------------------------------
-
-// TestBuildHandler_GuardPath_Busy exercises dispatch.go's "Fallback:
-// Guard-based path" branch, which production never reaches today
-// (build_server.go always wires a queue — #3004 measured_state #7) and
-// which #3004-D deletes outright. It is deliberately opted BACK into via
-// withQueue(nil): until D lands, the branch is still live code and this is
-// its only coverage. See TestBuildHandler_QueueBusy_SecondMessageQueued
-// below for the queue-path equivalent that newTestDispatcher now exercises
-// by default.
-func TestBuildHandler_GuardPath_Busy(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, withQueue(nil)) // force guard path
-	key := session.SessionKey("fake", "direct", "chat1", "general")
-	d.guard.TryAcquire(key) // pre-acquire
-	d.BuildHandler()(context.Background(), incomingMsg("hello"))
-	if !strings.Contains(fp.lastReply(), "正在处理") {
-		t.Errorf("expected busy message, got %q", fp.lastReply())
-	}
-}
-
-// ---------------------------------------------------------------------------
 // BuildHandler — queue path busy (owner already holds the key)
 // ---------------------------------------------------------------------------
 
-// TestBuildHandler_QueueBusy_SecondMessageQueued pins BuildHandler's
-// production-reachable busy path (the queue is always wired in
-// build_server.go): a second message for a key the first already owns gets
-// queued with an ack reply, not the Guard-path's "正在处理" text. newTestDispatcher
-// defaults to a real queue, so no extra wiring is needed.
+// TestBuildHandler_QueueBusy_SecondMessageQueued pins BuildHandler's busy
+// path: a second message for a key the first already owns gets queued with
+// an ack reply, not the disabled-queue "正在处理" text.
 func TestBuildHandler_QueueBusy_SecondMessageQueued(t *testing.T) {
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
+	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
+	d := newTestDispatcher(fp, withQueue(q))
 	key := session.SessionKey("fake", "direct", "chat1", "general")
-	// Pre-acquire ownership of key, as if a first message's ownerLoop were
+	// Pre-acquire ownership of key, as if a first message's owner loop were
 	// already running.
-	d.queue.Enqueue(key, turn.Msg{Text: "first", EnqueueAt: time.Now()})
+	q.Enqueue(key, turn.Msg{Text: "first", EnqueueAt: time.Now()})
 	d.BuildHandler()(context.Background(), incomingMsg("hello"))
 	if !strings.Contains(fp.lastReply(), "消息已收到") {
 		t.Errorf("expected queued ack, got %q", fp.lastReply())
@@ -611,47 +578,87 @@ func TestBuildHandler_QueueDrop_Notify(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// sendAndReply — GetOrCreate error paths
+// IM turn — GetOrCreate error paths
 // ---------------------------------------------------------------------------
 
-// sendAndReply is tested directly. Without a real wrapper, GetOrCreate fails and
-// sendAndReply replies with an appropriate error message.
-
-func TestSendAndReply_GetOrCreateError_DefaultMessage(t *testing.T) {
+// Without a real wrapper GetOrCreate fails, and the turn's StageSession
+// outcome is replied with the session-creation error message.
+func TestIMTurn_GetOrCreateError_DefaultMessage(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp) // no wrapper → GetOrCreate will fail
-	// sendAndReply is called directly here (not via BuildHandler), so it
-	// never reads d.queue; no queue wiring is needed either way.
 	msg := incomingMsg("hello")
-	d.sendAndReply(context.Background(), "key1", "hello", nil, "general",
-		session.AgentOpts{}, msg, slog.Default(), true)
+	runIMTurn(context.Background(), d, "key1", "hello", msg, true)
 	// Default error → "会话创建失败" message
 	if !strings.Contains(fp.lastReply(), "会话") {
 		t.Errorf("expected session creation error message, got %q", fp.lastReply())
 	}
 }
 
+// TestIMTurn_StageDecidesTheErrorReply: the delivery answers a failure by
+// the stage it happened at. Only a failed Send is a reply error for /health
+// (replyErrorCount); a failed GetOrCreate is answered by
+// handleGetOrCreateError and leaves the counter alone.
+func TestIMTurn_StageDecidesTheErrorReply(t *testing.T) {
+	errBoom := errors.New("boom")
+	for _, tc := range []struct {
+		name       string
+		sender     *testSender
+		wantErrors int64
+	}{
+		{"GetOrCreate fails", &testSender{getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+			return nil, 0, errBoom
+		}}, 0},
+		{"Send fails", &testSender{
+			getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+				return fakeSession{}, session.SessionExisting, nil
+			},
+			send: func(context.Context, string, turn.Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+				return nil, errBoom
+			},
+		}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakePlatform{}
+			d := newTestDispatcher(fp, withSender(tc.sender))
+			runIMTurn(context.Background(), d, "key1", "hello", incomingMsg("hello"), true)
+			if fp.replyCount() != 1 {
+				t.Fatalf("replies = %v, want one error reply", fp.allReplies())
+			}
+			if got := d.replyErrorCount.Load(); got != tc.wantErrors {
+				t.Errorf("replyErrorCount = %d, want %d", got, tc.wantErrors)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
-// sendAndReply — unknown platform exits before GetOrCreate
+// BuildHandler — unknown platform gets no turn
 // ---------------------------------------------------------------------------
 
-func TestSendAndReply_UnknownPlatform(t *testing.T) {
+// A message from a platform the dispatcher does not know is never submitted:
+// neither GetOrCreate nor Send runs, since there is nowhere to reply.
+func TestBuildHandler_UnknownPlatformGetsNoTurn(t *testing.T) {
 	fp := &fakePlatform{}
-	called := false
-	d := newTestDispatcher(fp, withSendFn(func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
-		called = true
-		return &clievent.SendResult{Text: "ok"}, nil
-	}))
-	// sendAndReply is called directly here (not via BuildHandler), so it
-	// never reads d.queue; no queue wiring is needed either way.
-	msg := platform.IncomingMessage{
-		Platform: "unknown", EventID: "e1", UserID: "u1",
-		ChatID: "c1", ChatType: "direct", Text: "hello",
+	var calls atomic.Int64
+	sender := &testSender{
+		getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+			calls.Add(1)
+			return nil, 0, errors.New("unexpected GetOrCreate")
+		},
+		send: func(context.Context, string, turn.Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+			calls.Add(1)
+			return &clievent.SendResult{Text: "ok"}, nil
+		},
 	}
-	d.sendAndReply(context.Background(), "key1", "hello", nil, "general",
-		session.AgentOpts{}, msg, slog.Default(), true)
-	if called {
-		t.Error("sendFn should not be called for unknown platform")
+	d := newTestDispatcher(fp, withSender(sender))
+	for _, text := range []string{"hello", "/urgent now"} {
+		d.BuildHandler()(context.Background(), platform.IncomingMessage{
+			Platform: "unknown", EventID: "e-" + text, UserID: "u1",
+			ChatID: "c1", ChatType: "direct", Text: text,
+		})
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("Sender reached %d times for an unknown platform, want 0", n)
 	}
 }
 
@@ -771,50 +778,6 @@ func TestReplyTracker_WaitReady_CtxCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("waitReady should return on context cancel")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ownerLoop gen-mismatch
-// ---------------------------------------------------------------------------
-
-func TestOwnerLoop_GenMismatch(t *testing.T) {
-	q := turn.NewQueueWithMode(5, 10*time.Millisecond, turn.ModeCollect)
-	key := session.SessionKey("fake", "direct", "chat1", "general")
-	_, _, _, gen, _ := q.Enqueue(key, turn.Msg{Text: "first", EnqueueAt: time.Now()})
-	q.Enqueue(key, turn.Msg{Text: "second", EnqueueAt: time.Now()})
-	q.Discard(key)
-	// Old gen → nil → stale owner stops
-	if r := q.DoneOrDrain(key, gen); r != nil {
-		t.Errorf("stale owner should get nil, got %v", r)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// discardQueue nil-safe
-// ---------------------------------------------------------------------------
-
-func TestDiscardQueue_Nil(t *testing.T) {
-	fp := &fakePlatform{}
-	// withQueue(nil) is the nil-safety case under test here, not a stand-in
-	// for the Guard-fallback branch: discardQueue's own `if d.queue != nil`
-	// guard is what this pins (dispatch.go), independent of BuildHandler's
-	// routing decision.
-	d := newTestDispatcher(fp, withQueue(nil))
-	d.discardQueue(context.Background(), platform.IncomingMessage{}, "any-key") // must not panic
-}
-
-func TestDiscardQueue_WithQueue(t *testing.T) {
-	fp := &fakePlatform{}
-	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
-	d := newTestDispatcher(fp, withQueue(q))
-	key := "test-key"
-	q.Enqueue(key, turn.Msg{Text: "owner"})  // becomes owner
-	q.Enqueue(key, turn.Msg{Text: "queued"}) // sits behind the owner
-	d.discardQueue(context.Background(), platform.IncomingMessage{}, key)
-	// An emptied ring makes a second DiscardAndReturn return nil.
-	if dropped := q.DiscardAndReturn(key); dropped != nil {
-		t.Errorf("DiscardAndReturn after discardQueue = %v, want nil (ring already emptied)", dropped)
 	}
 }
 
@@ -1213,10 +1176,9 @@ func TestBuildHandler_GroupChatGate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			fp := &fakePlatform{}
-			// newTestDispatcher defaults to a real queue, so the non-slash
-			// path below runs the queue branch (not Guard): ownerLoop runs
-			// inline on the owner and replies synchronously via the
-			// GetOrCreate error arm.
+			// The non-slash path below runs an owner turn inline on this
+			// goroutine and replies synchronously via the GetOrCreate error
+			// arm.
 			d := newTestDispatcher(fp)
 
 			msg := platform.IncomingMessage{
@@ -1244,67 +1206,43 @@ func TestBuildHandler_GroupChatGate(t *testing.T) {
 // R248-TEST-2 — Capabilities precedence in NewDispatcher
 // ---------------------------------------------------------------------------
 
-// stubCaps is a Capabilities implementation that returns a sentinel error
-// from Send so the precedence test can identify which wiring path the
-// dispatcher resolved without driving a full Send through router/platform.
+// stubCaps is a Capabilities implementation whose ReplyFooter names it, so
+// the precedence test can identify which wiring path the dispatcher resolved.
 type stubCaps struct{ id string }
 
-func (s stubCaps) Send(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
-	return nil, fmt.Errorf("stubCaps:%s", s.id)
-}
 func (stubCaps) Takeover(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false }
-func (stubCaps) ReplyFooter(_ string) string                                       { return "" }
+func (s stubCaps) ReplyFooter(_ string) string                                     { return "stubCaps:" + s.id }
 
 // TestNewDispatcher_CapabilitiesPrecedence pins the three-way precedence
-// resolution in NewDispatcher (capabilities.go / dispatch.go ~line 286):
+// resolution in NewDispatcher:
 //
 //  1. cfg.Capabilities wins when set, even if a legacy *Fn closure is also
-//     provided. The closure is silently shadowed — operators migrating to
-//     Capabilities should not have a stale SendFn quietly take over.
-//  2. Only legacy SendFn (no Capabilities) → constructor wraps in
-//     closureCapabilities so the historical wireup keeps working.
+//     provided; the closure is silently shadowed.
+//  2. Only a legacy closure (no Capabilities) → closureCapabilities adapter.
 //  3. Both unset → NoopCapabilities{} (covered by R248-TEST-6 below).
-//
-// The sentinel error pattern is the cheapest way to identify which path
-// won without standing up a full router + session + platform stack: each
-// wiring returns a distinguishing error string when Send fires.
 func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
 	t.Parallel()
 
-	sendFnSentinel := errors.New("legacy-sendfn-fired")
-	legacySendFn := func(_ context.Context, _ string, _ Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
-		return nil, sendFnSentinel
-	}
-
+	legacyFooter := func(string) string { return "legacy-footer-fn" }
 	cases := []struct {
-		name       string
-		cfg        DispatcherConfig
-		wantErrSub string // substring expected from caps.Send
+		name string
+		cfg  DispatcherConfig
+		want string // d.caps.ReplyFooter's result
 	}{
 		{
-			name: "only SendFn → closureCapabilities adapter",
-			cfg: DispatcherConfig{
-				Router: routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 1})),
-				SendFn: legacySendFn,
-			},
-			wantErrSub: "legacy-sendfn-fired",
+			name: "only ReplyFooterFn → closureCapabilities adapter",
+			cfg:  DispatcherConfig{ReplyFooterFn: legacyFooter},
+			want: "legacy-footer-fn",
 		},
 		{
 			name: "only Capabilities → used directly",
-			cfg: DispatcherConfig{
-				Router:       routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 1})),
-				Capabilities: stubCaps{id: "caps-only"},
-			},
-			wantErrSub: "stubCaps:caps-only",
+			cfg:  DispatcherConfig{Capabilities: stubCaps{id: "caps-only"}},
+			want: "stubCaps:caps-only",
 		},
 		{
-			name: "both set → Capabilities wins (SendFn shadowed)",
-			cfg: DispatcherConfig{
-				Router:       routerOf(session.NewRouter(session.RouterConfig{MaxProcs: 1})),
-				Capabilities: stubCaps{id: "caps-wins"},
-				SendFn:       legacySendFn,
-			},
-			wantErrSub: "stubCaps:caps-wins",
+			name: "both set → Capabilities wins (closure shadowed)",
+			cfg:  DispatcherConfig{Capabilities: stubCaps{id: "caps-wins"}, ReplyFooterFn: legacyFooter},
+			want: "stubCaps:caps-wins",
 		},
 	}
 
@@ -1312,6 +1250,7 @@ func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			tc.cfg.Turns = testTurns()
 			d, err := NewDispatcher(tc.cfg)
 			if err != nil {
 				t.Fatalf("NewDispatcher: %v", err)
@@ -1319,13 +1258,8 @@ func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
 			if d.caps == nil {
 				t.Fatal("d.caps is nil — constructor must always install a Capabilities implementation")
 			}
-			_, err = d.caps.Send(context.Background(), "k", nil, "msg", nil, nil)
-			if err == nil {
-				t.Fatalf("d.caps.Send returned nil error, want substring %q", tc.wantErrSub)
-			}
-			if !strings.Contains(err.Error(), tc.wantErrSub) {
-				t.Errorf("d.caps.Send error = %q, want substring %q (precedence resolved to wrong wiring)",
-					err.Error(), tc.wantErrSub)
+			if got := d.caps.ReplyFooter("claude"); got != tc.want {
+				t.Errorf("d.caps.ReplyFooter = %q, want %q (precedence resolved to wrong wiring)", got, tc.want)
 			}
 		})
 	}
@@ -1337,25 +1271,15 @@ func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
 
 // TestNewDispatcher_CapsAlwaysNonNil pins the constructor invariant that
 // d.caps is non-nil for any DispatcherConfig — including the all-zero case.
-// The hot path (dispatch.go) calls d.caps.Send / d.caps.Takeover unconditionally
-// without nil guards; a regression that left d.caps zero on some construction
-// path would surface as a nil-pointer panic on the first IM message instead
-// of a clear constructor-time signal.
-//
-// This test paired with R248-TEST-1 (NoopCapabilities semantics) covers the
-// "no wiring at all" branch end-to-end: Takeover returns false, ReplyFooter
-// returns "" — exactly the documented defaults for the headless construction.
-// Send is intentionally NOT exercised here (it panics by contract; that
-// branch is covered separately by TestNoopCapabilities_SendPanics).
+// The IM reply path calls d.caps.Takeover / d.caps.ReplyFooter
+// unconditionally without nil guards; a regression that left d.caps zero on
+// some construction path would surface as a nil-pointer panic on the first
+// IM message instead of a clear constructor-time signal.
 func TestNewDispatcher_CapsAlwaysNonNil(t *testing.T) {
 	t.Parallel()
-	// AllowMissingSender opts out of the R248-ARCH-2 boot-panic gate; this
-	// test specifically exercises the empty-config path where NoopCapabilities
-	// is installed as the default. Production wiring leaves AllowMissingSender
-	// false so missing Send wireup still panics at constructor time.
-	d, err := NewDispatcher(DispatcherConfig{AllowMissingSender: true})
+	d, err := NewDispatcher(DispatcherConfig{Turns: testTurns()})
 	if err != nil {
-		t.Fatalf("NewDispatcher with AllowMissingSender: %v", err)
+		t.Fatalf("NewDispatcher with only Turns: %v", err)
 	}
 	if d.caps == nil {
 		t.Fatal("d.caps is nil for empty DispatcherConfig — hot path will nil-panic on first message")

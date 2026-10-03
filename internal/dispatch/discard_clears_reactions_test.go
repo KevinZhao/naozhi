@@ -3,34 +3,51 @@ package dispatch
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/session"
-
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // #2013: every "queued message permanently dropped" path must clear the
-// HOURGLASS reaction of the dropped messages. The two ownerLoop Discard paths
-// (ctx.Done on restart, panic recovery) and the /new + /clear discardQueue
-// path previously called queue.Discard which reset the ring without surfacing
-// the dropped IDs, leaving ⏳ hanging forever.
+// HOURGLASS reaction of the dropped messages: /new and /clear (Reset), the
+// owner loop exiting on ctx.Done (restart), and panic recovery, including a
+// drained batch the panic caught in flight. These run through the real
+// turn.Orchestrator, so each path is the one production takes.
 
-// drainAndDiscardReactor wires a fakeReactorPlatform into a Dispatcher with a
-// real turn.Queue so the Discard paths can be exercised end to end.
-func newReactorDispatcher(t *testing.T) (*Dispatcher, *fakeReactorPlatform) {
+const reactorKey = "fake:direct:chat1:general"
+
+// newReactorDispatcher wires a fakeReactorPlatform into a Dispatcher whose
+// Turns run on q through sender.
+func newReactorDispatcher(t *testing.T, q *turn.Queue, sender *testSender) (*Dispatcher, *fakeReactorPlatform) {
 	t.Helper()
 	rp := &fakeReactorPlatform{}
-	d := &Dispatcher{
-		platforms: map[string]platform.Platform{"fake": rp},
-		queue:     turn.NewQueueWithMode(8, 0, turn.ModeCollect),
-	}
+	d := newTestDispatcher(&fakePlatform{}, withQueue(q), withSender(sender))
+	d.platforms = map[string]platform.Platform{"fake": rp}
 	return d, rp
+}
+
+// reactorMsg is an inbound message on the reactor chat carrying platform
+// message ID id.
+func reactorMsg(id, text string) platform.IncomingMessage {
+	m := incomingMsg(text)
+	m.EventID, m.MessageID = "evt-"+id, id
+	return m
+}
+
+// queueIM parks one IM request per id behind whoever owns reactorKey, each
+// with its own imOrigin, as Submit would for a message that arrived busy.
+func queueIM(d *Dispatcher, q *turn.Queue, ids ...string) {
+	for _, id := range ids {
+		o := d.newIMOrigin(reactorMsg(id, id), slog.Default(), reactorKey, "general", session.AgentOpts{}, imMessage, len(id), 0)
+		q.Enqueue(reactorKey, turn.Msg{Text: id, MessageID: id, Origin: o})
+	}
 }
 
 func removedIDs(rp *fakeReactorPlatform) []string {
@@ -40,152 +57,131 @@ func removedIDs(rp *fakeReactorPlatform) []string {
 	for _, c := range rp.removed {
 		ids = append(ids, c.msgID)
 	}
+	slices.Sort(ids)
 	return ids
 }
 
-// TestDiscardQueue_ClearsQueuedReactions covers the /new + /clear path.
-func TestDiscardQueue_ClearsQueuedReactions(t *testing.T) {
-	d, rp := newReactorDispatcher(t)
-	const key = "im:direct:u1:general"
-
-	// Owner + two queued follow-ups (each carrying a HOURGLASS reaction).
-	d.queue.Enqueue(key, turn.Msg{Text: "owner", MessageID: "m0"})
-	d.queue.Enqueue(key, turn.Msg{Text: "f1", MessageID: "m1"})
-	d.queue.Enqueue(key, turn.Msg{Text: "f2", MessageID: "m2"})
-
-	msg := platform.IncomingMessage{Platform: "fake", ChatID: "u1"}
-	d.discardQueue(context.Background(), msg, key)
-
-	got := removedIDs(rp)
-	if len(got) != 2 {
-		t.Fatalf("expected 2 reactions cleared (m1, m2), got %v", got)
+func wantRemoved(t *testing.T, rp *fakeReactorPlatform, want ...string) {
+	t.Helper()
+	if got := removedIDs(rp); !slices.Equal(got, want) {
+		t.Fatalf("reactions cleared = %v, want %v", got, want)
 	}
-	want := map[string]bool{"m1": true, "m2": true}
-	for _, id := range got {
-		if !want[id] {
-			t.Errorf("unexpected reaction cleared: %q", id)
-		}
-	}
+}
+
+// TestReset_ClearsQueuedReactions covers the /new + /clear path.
+func TestReset_ClearsQueuedReactions(t *testing.T) {
+	q := turn.NewQueueWithMode(8, 0, turn.ModeCollect)
+	d, rp := newReactorDispatcher(t, q, &testSender{})
+	q.Enqueue(reactorKey, turn.Msg{Text: "owner"}) // the running owner
+	queueIM(d, q, "m1", "m2")
+
+	d.BuildHandler()(context.Background(), reactorMsg("m3", "/new"))
+
+	wantRemoved(t, rp, "m1", "m2")
 }
 
 // TestOwnerLoopCtxDone_ClearsQueuedReactions covers the systemctl-restart
-// path: the turn ctx is cancelled while follow-ups sit in the queue.
+// path: the turn ctx is cancelled while a follow-up sits in the queue. The
+// hour-long collect delay leaves ctx.Done as the loop's only way out.
 func TestOwnerLoopCtxDone_ClearsQueuedReactions(t *testing.T) {
-	d, rp := newReactorDispatcher(t)
-	const key = "im:direct:u1:general"
-
-	d.queue.Enqueue(key, turn.Msg{Text: "owner", MessageID: "m0"})
-	d.queue.Enqueue(key, turn.Msg{Text: "f1", MessageID: "m1"})
-
-	// Simulate the ctx.Done arm of ownerLoop's drain loop.
+	q := turn.NewQueueWithMode(8, time.Hour, turn.ModeCollect)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	msg := platform.IncomingMessage{Platform: "fake", ChatID: "u1"}
-	dropped := d.queue.DiscardAndReturn(key)
-	d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, dropped, nil)
-
-	if got := removedIDs(rp); len(got) != 1 || got[0] != "m1" {
-		t.Fatalf("expected m1 reaction cleared on ctx.Done, got %v", got)
+	defer cancel()
+	var d *Dispatcher
+	sender := &testSender{}
+	sender.getOrCreate = func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+		queueIM(d, q, "m1")
+		cancel()
+		return nil, 0, errors.New("first turn fails cleanly")
 	}
+	d, rp := newReactorDispatcher(t, q, sender)
+
+	runIMTurn(ctx, d, reactorKey, "owner", reactorMsg("m0", "owner"), true)
+
+	wantRemoved(t, rp, "m1")
 }
 
 // TestOwnerLoopPanic_ClearsQueuedReactions covers the panic-recovery path:
-// the process survives, the platform is reachable, so reactions must clear.
+// the process survives, the platform is reachable, so the reactions of the
+// messages the panic dropped must clear — and the owner's own message, which
+// never got one, is left alone.
 func TestOwnerLoopPanic_ClearsQueuedReactions(t *testing.T) {
-	d, rp := newReactorDispatcher(t)
-	const key = "im:direct:u1:general"
-
-	d.queue.Enqueue(key, turn.Msg{Text: "owner", MessageID: "m0"})
-	d.queue.Enqueue(key, turn.Msg{Text: "f1", MessageID: "m1"})
-	d.queue.Enqueue(key, turn.Msg{Text: "f2", MessageID: "m2"})
-
-	msg := platform.IncomingMessage{Platform: "fake", ChatID: "u1"}
-	// handleOwnerLoopPanic discards the queue and clears reactions; the
-	// "请稍后重试" reply goes through replyText which is nil-safe here (no
-	// sender configured -> best effort).
-	d.handleOwnerLoopPanic(key, msg, "boom", nil)
-
-	got := removedIDs(rp)
-	if len(got) != 2 {
-		t.Fatalf("expected 2 reactions cleared on panic (m1, m2), got %v", got)
+	q := turn.NewQueueWithMode(8, 0, turn.ModeCollect)
+	var d *Dispatcher
+	sender := &testSender{}
+	sender.getOrCreate = func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+		queueIM(d, q, "m1", "m2")
+		panic("boom")
 	}
+	d, rp := newReactorDispatcher(t, q, sender)
+
+	runIMTurn(context.Background(), d, reactorKey, "owner", reactorMsg("m0", "owner"), true)
+
+	wantRemoved(t, rp, "m1", "m2")
 }
 
 // TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions covers
-// R20260614-LOGIC-001: when a drain batch has already been pulled OUT of the
-// ring by DoneOrDrain and the subsequent sendAndReply panics, the drained
-// batch's HOURGLASS reactions must still be cleared. handleOwnerLoopPanic's
-// DiscardAndReturn only sees the ring (now empty for the drained batch), so
-// without the recover-defer's pendingClear cleanup those reactions would hang
-// until the platform reaction-cache TTL (feishu: 12h), falsely telling the
-// user the message is still queued.
-//
-// Setup: the FIRST turn's GetOrCreate returns an error (clean turn, no panic,
-// no queued reaction on the owner's own message). A follow-up is enqueued so
-// the drain loop pulls it out; the SECOND GetOrCreate panics, exercising the
-// drained-batch path.
+// R20260614-LOGIC-001: a drain batch is already out of the ring when its
+// turn panics, so the queue discard cannot see it; the turn's own delivery
+// must still clear its HOURGLASS reactions, or they hang until the platform
+// reaction-cache TTL (feishu: 12h). The first turn fails cleanly; the drain
+// turn's GetOrCreate panics.
 func TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions(t *testing.T) {
-	rp := &fakeReactorPlatform{}
+	q := turn.NewQueueWithMode(8, 0, turn.ModeCollect)
+	var d *Dispatcher
 	var calls atomic.Int64
-	router := &fakeSessionRouter{
-		notifyIdle: func() {},
-		getOrCreate: func(_ context.Context, _ string, _ session.AgentOpts) (Session, session.SessionStatus, error) {
-			n := calls.Add(1)
-			if n == 1 {
-				// First (owner) turn: fail cleanly so sendAndReply returns
-				// via handleGetOrCreateError without panicking.
-				return nil, session.SessionStatus(0), errors.New("first turn fails cleanly")
-			}
-			// Drain turn: panic INSIDE sendAndReply, after the batch has
-			// already been removed from the ring by DoneOrDrain.
-			panic("boom during drained turn")
-		},
-	}
-	d := &Dispatcher{
-		platforms: map[string]platform.Platform{"fake": rp},
-		// collectDelay 0 → drain timer fires immediately.
-		queue:  turn.NewQueueWithMode(8, 0, turn.ModeCollect),
-		router: router,
-		caps:   NoopCapabilities{},
-	}
-
-	const key = "im:direct:u1:general"
-	msg := platform.IncomingMessage{Platform: "fake", ChatID: "u1", MessageID: "m0"}
-
-	// Owner acquires ownership (no queued reaction on its own message).
-	owner := turn.Msg{Text: "owner", MessageID: "m0"}
-	isOwner, _, _, gen, _ := d.queue.Enqueue(key, owner)
-	if !isOwner {
-		t.Fatalf("expected owner on first Enqueue")
-	}
-	// Follow-up sits in the ring carrying a HOURGLASS reaction; it will be
-	// drained out by DoneOrDrain then lost to a panic in sendAndReply.
-	d.queue.Enqueue(key, turn.Msg{Text: "f1", MessageID: "m1"})
-
-	// ownerLoop recovers the panic internally; it must not propagate.
-	// Pass a non-nil logger: ownerLoop enriches it via lg.With at entry,
-	// matching production wiring (BuildHandler always supplies one).
-	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
-	d.ownerLoop(context.Background(), key, gen, owner, "general", session.AgentOpts{}, msg, lg)
-
-	// Wait briefly for any cleanup; the clear happens synchronously inside
-	// the recover defer before ownerLoop returns, but poll to be robust.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if len(removedIDs(rp)) > 0 {
-			break
+	sender := &testSender{}
+	sender.getOrCreate = func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+		if calls.Add(1) == 1 {
+			queueIM(d, q, "m1")
+			return nil, 0, errors.New("first turn fails cleanly")
 		}
-		time.Sleep(time.Millisecond)
+		panic("boom during drained turn")
 	}
+	d, rp := newReactorDispatcher(t, q, sender)
 
-	got := removedIDs(rp)
-	if len(got) != 1 || got[0] != "m1" {
-		t.Fatalf("expected drained batch reaction m1 cleared on panic, got %v", got)
+	runIMTurn(context.Background(), d, reactorKey, "owner", reactorMsg("m0", "owner"), true)
+
+	if calls.Load() != 2 {
+		t.Fatalf("GetOrCreate calls = %d, want 2 (first + drain)", calls.Load())
 	}
-	if calls.Load() < 2 {
-		t.Fatalf("expected at least 2 GetOrCreate calls (first + drain), got %d", calls.Load())
+	wantRemoved(t, rp, "m1")
+}
+
+// TestDetachedTurn_ClearsItsOwnReaction pins #1946: a passthrough or /urgent
+// turn never enters a drain batch, so its delivery clears the ⏳ its
+// admission put on the message.
+func TestDetachedTurn_ClearsItsOwnReaction(t *testing.T) {
+	q := turn.NewQueueWithMode(8, 0, turn.ModePassthrough)
+	d, rp := newReactorDispatcher(t, q, &testSender{
+		send: func(context.Context, string, turn.Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+			return nil, errors.New("fast fail")
+		},
+		getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+			return fakeSession{}, session.SessionExisting, nil
+		},
+	})
+	o := d.newIMOrigin(reactorMsg("m1", "hi"), slog.Default(), reactorKey, "general", session.AgentOpts{}, imMessage, 2, 0)
+	d.turns.Submit(context.Background(), turn.Request{Key: reactorKey, Text: "hi", Origin: o}, inlineAdmission{context.Background()})
+
+	rp.mu.Lock()
+	added := len(rp.added)
+	rp.mu.Unlock()
+	if added != 1 {
+		t.Fatalf("detached admission added %d reactions, want 1", added)
+	}
+	wantRemoved(t, rp, "m1")
+	// The detached turn is its own Primary, so its failed Send is counted.
+	if n := d.replyErrorCount.Load(); n != 1 {
+		t.Errorf("replyErrorCount = %d, want 1", n)
 	}
 }
+
+// fakeSession is a turn.Session for tests whose Sender never reaches a real
+// session.
+type fakeSession struct{}
+
+func (fakeSession) Backend() string { return "claude" }
 
 // TestDiscardAndReturn_ReturnsQueuedFIFO pins the queue-level contract that
 // powers the fix: DiscardAndReturn surfaces the dropped messages in FIFO

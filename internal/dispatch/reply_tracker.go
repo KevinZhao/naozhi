@@ -29,14 +29,14 @@ type replyTracker struct {
 	// to the asking agent session rather than "general" (#2148).
 	agentID string
 	// thinkingMsgID is written by the Reply goroutine spawned in onEvent and
-	// read by editLoop/sendAndReply; on ctx cancel waitReady may return before
+	// read by editLoop/imDelivery; on ctx cancel waitReady may return before
 	// msgIDReady closes, so the read races the write — hence atomic.
 	thinkingMsgID atomic.Pointer[string]
 	msgIDReady    chan struct{}
 	sent          sync.Once
 	editCh        chan struct{} // buffered(1), signals editLoop to redraw
 	done          chan struct{} // closed when the owning turn completes; exits editLoop
-	// finalized is set by sendAndReply just before it writes the final answer
+	// finalized is set by imDelivery.reply just before it writes the final answer
 	// onto the banner. editLoop checks it on wake so a residual buffered editCh
 	// signal cannot repaint stale interim status over the real answer (#2291).
 	finalized atomic.Bool
@@ -77,7 +77,7 @@ type replyTracker struct {
 	singleUseToken bool
 
 	// askQuestionFired records that this turn emitted an AskUserQuestion card;
-	// sendAndReply uses it to suppress the bailout text `claude -p` produces
+	// imDelivery.reply uses it to suppress the bailout text `claude -p` produces
 	// after auto-rejecting the tool, so only the card surfaces. Written from
 	// onEvent, read after waitReady — atomic suffices.
 	askQuestionFired atomic.Bool
@@ -409,7 +409,7 @@ func (t *replyTracker) editLoop() {
 	for {
 		select {
 		case <-t.editCh:
-			// Skip the redraw once sendAndReply committed the final answer; a
+			// Skip the redraw once imDelivery.reply committed the final answer; a
 			// residual buffered signal must not repaint stale status (#2291).
 			if t.finalized.Load() {
 				continue

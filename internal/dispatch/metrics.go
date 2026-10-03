@@ -10,11 +10,11 @@ import "expvar"
 // contribute to the same value.
 var (
 	// dispatchMessageTotal counts non-slash IM messages accepted by
-	// BuildHandler / sendAndReply (mirrors Dispatcher.messageCount).
+	// BuildHandler (mirrors Dispatcher.messageCount).
 	dispatchMessageTotal = expvar.NewInt("naozhi_dispatch_message_total")
 
-	// dispatchReplyErrorTotal counts errors returned by Capabilities.Send
-	// during sendAndReply (includes timeouts / ErrSessionReset): Claude
+	// dispatchReplyErrorTotal counts failed sends an IM turn reported
+	// (handleSendError; includes timeouts / ErrSessionReset): Claude
 	// errored but the platform reply path was healthy.
 	dispatchReplyErrorTotal = expvar.NewInt("naozhi_dispatch_reply_error_total")
 

@@ -15,10 +15,10 @@ import (
 // (scripts/ratchet-raises.jsonl).
 const (
 	inFuncBlocksOver5Baseline = 31
-	docOver10Baseline         = 41
+	docOver10Baseline         = 40
 	packageDocOver60Baseline  = 1
 	reviewAnchorsBaseline     = 0
-	historyPhrasesBaseline    = 43
+	historyPhrasesBaseline    = 42
 )
 
 // budgetFloor: a repository this size has far more issue references than

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
-	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // reactionAckTimeout bounds how long AddReaction/RemoveReaction can block:
@@ -71,7 +70,7 @@ func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.Incomin
 		useLg.Debug("merge follower text fallback skipped", "reason", "single_use_token", "platform", msg.Platform)
 		return
 	}
-	if d.queue != nil && !d.queue.ShouldNotify(key) {
+	if !d.turns.ShouldNotify(key) {
 		return
 	}
 	_ = mergedCount // reserved for future reaction variant showing count
@@ -79,11 +78,9 @@ func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.Incomin
 }
 
 // clearQueuedReaction removes the "queued" (HOURGLASS) reaction from one
-// message after the turn that consumed it completed. Used by the passthrough
-// / /urgent path (#1946), which never enters ownerLoop's drain batch where
-// clearQueuedReactions runs; otherwise the HOURGLASS lingers until the
-// platform's reaction-cache TTL. Best-effort and nil-safe: failures are
-// logged at Debug and swallowed.
+// message whose request was dropped (imOrigin.Dropped); otherwise the
+// HOURGLASS lingers until the platform's reaction-cache TTL. Best-effort and
+// nil-safe: failures are logged at Debug and swallowed.
 func (d *Dispatcher) clearQueuedReaction(ctx context.Context, platformName, messageID string, lg *slog.Logger) {
 	if messageID == "" {
 		return
@@ -107,11 +104,11 @@ func (d *Dispatcher) clearQueuedReaction(ctx context.Context, platformName, mess
 	}
 }
 
-// clearQueuedReactions removes the "queued" reaction from each drained
-// message; called from ownerLoop after a drain batch. Errors are logged and
-// swallowed — a lingering reaction is cosmetic.
-func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName string, queued []turn.Msg, lg *slog.Logger) {
-	if len(queued) == 0 {
+// clearQueuedReactions removes the "queued" reaction from each message a
+// turn answered (imDelivery.Finish). Errors are logged and swallowed — a
+// lingering reaction is cosmetic.
+func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName string, messageIDs []string, lg *slog.Logger) {
+	if len(messageIDs) == 0 {
 		return
 	}
 	p := d.platforms[platformName]
@@ -126,20 +123,20 @@ func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName stri
 	// drag reactionAckTimeout × N, and the reactions are purely cosmetic.
 	rctx, cancel := context.WithTimeout(ctx, reactionAckTimeout)
 	defer cancel()
-	for _, m := range queued {
-		if m.MessageID == "" {
+	for _, id := range messageIDs {
+		if id == "" {
 			continue
 		}
 		if rctx.Err() != nil {
 			// Batch deadline exceeded; stop rather than log N identical failures.
 			return
 		}
-		if err := reactor.RemoveReaction(rctx, m.MessageID, platform.ReactionQueued); err != nil {
+		if err := reactor.RemoveReaction(rctx, id, platform.ReactionQueued); err != nil {
 			useLg := lg
 			if useLg == nil {
 				useLg = slog.Default()
 			}
-			useLg.Debug("remove queued reaction failed", "msg_id", m.MessageID, "err", err)
+			useLg.Debug("remove queued reaction failed", "msg_id", id, "err", err)
 		}
 	}
 }

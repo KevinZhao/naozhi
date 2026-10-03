@@ -5,48 +5,30 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
-// TestNewDispatcher_MissingSendReturnsError pins R250-ARCH-12: missing
-// Send wireup must surface as an ErrSendWireupMissing return value, not
-// a constructor-time panic. The previous implementation panicked, which
-// took down the entire process before the systemd unit could log a clean
-// boot diagnostic. Returning an error lets the caller (Server.Start) wrap
-// it with context and exit cleanly.
-//
-// We assert three things to keep the contract tight:
-//  1. NewDispatcher returns (nil, ErrSendWireupMissing) for empty config
-//     (no Capabilities, no SendFn, AllowMissingSender=false).
-//  2. errors.Is matches the sentinel — callers may rely on it for a
-//     non-string check.
-//  3. AllowMissingSender opts out and yields a non-nil dispatcher (the
-//     existing test seam for headless builds keeps working).
-func TestNewDispatcher_MissingSendReturnsError(t *testing.T) {
+// TestNewDispatcher_MissingTurnsReturnsError pins R250-ARCH-12 for the turn
+// wiring: a dispatcher without Turns would fail on its first IM message,
+// after the healthcheck has passed, so NewDispatcher refuses it with
+// ErrTurnsWireupMissing — for a nil Turns and for a nil *turn.Orchestrator
+// boxed into one — and accepts any real one.
+func TestNewDispatcher_MissingTurnsReturnsError(t *testing.T) {
 	t.Parallel()
-
-	// Case 1: empty config — should fail with the sentinel.
-	d, err := NewDispatcher(DispatcherConfig{})
-	if err == nil {
-		t.Fatal("NewDispatcher with empty config returned nil error; missing-Send wireup must surface as an error")
+	for name, turns := range map[string]Turns{"nil": nil, "typed nil": (*turn.Orchestrator)(nil)} {
+		d, err := NewDispatcher(DispatcherConfig{Turns: turns})
+		if !errors.Is(err, ErrTurnsWireupMissing) {
+			t.Errorf("%s Turns: err = %v, want ErrTurnsWireupMissing", name, err)
+		}
+		if d != nil {
+			t.Errorf("%s Turns: dispatcher = %v, want nil on error", name, d)
+		}
 	}
-	if !errors.Is(err, ErrSendWireupMissing) {
-		t.Errorf("err = %v, want errors.Is(err, ErrSendWireupMissing)", err)
-	}
-	if d != nil {
-		t.Errorf("dispatcher = %v, want nil on error", d)
-	}
-
-	// Case 2: AllowMissingSender opt-out — must succeed, returning a
-	// usable dispatcher with NoopCapabilities installed. This locks the
-	// existing test-seam contract used by headless tests.
-	d2, err := NewDispatcher(DispatcherConfig{
-		AllowMissingSender: true,
-		Agents:             map[string]session.AgentOpts{"general": {}},
+	d, err := NewDispatcher(DispatcherConfig{
+		Turns:  testTurns(),
+		Agents: map[string]session.AgentOpts{"general": {}},
 	})
-	if err != nil {
-		t.Fatalf("NewDispatcher with AllowMissingSender returned err=%v, want nil", err)
-	}
-	if d2 == nil {
-		t.Fatal("AllowMissingSender returned nil dispatcher")
+	if err != nil || d == nil {
+		t.Fatalf("NewDispatcher with Turns = (%v, %v), want a dispatcher", d, err)
 	}
 }

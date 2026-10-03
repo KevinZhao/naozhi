@@ -7,6 +7,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // fixedFooterCaps is a minimal Capabilities stub returning a constant
@@ -21,7 +22,7 @@ func (f fixedFooterCaps) ReplyFooter(string) string { return f.footer }
 
 // TestDispatcher_DecorateReplyText_Components covers each branch of
 // decorateReplyText (R219-CR-7 / #656) so the helper extraction from
-// sendAndReply doesn't silently change observable wire behaviour:
+// the IM delivery doesn't silently change observable wire behaviour:
 //
 //   - merge-group head appends the "*— 合并了 N 条消息的回复*" chip
 //   - per-session ReplyFooter is appended when non-empty
@@ -142,7 +143,7 @@ func TestDispatcher_DecorateReplyText_NilCapsIsPanic(t *testing.T) {
 // _ static checks ensure the helper signature stays compatible with
 // session.ManagedSession (most call sites pass a *session.ManagedSession
 // produced by Router.GetOrCreate).
-var _ = func(d *Dispatcher, s Session, ctx context.Context) string {
+var _ = func(d *Dispatcher, s turn.Session, ctx context.Context) string {
 	_ = ctx
 	return d.decorateReplyText(&clievent.SendResult{}, s)
 }

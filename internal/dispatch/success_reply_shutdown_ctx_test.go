@@ -9,7 +9,7 @@ import (
 //
 // A passthrough turn's ctx is bound to d.stopCtx (mergeStopAndValues) so an
 // in-flight turn can observe SIGTERM. The success-reply section of
-// sendAndReply (waitReady / EditMessage / SendSplitReply / outbound image
+// the IM delivery (waitReady / EditMessage / SendSplitReply / outbound image
 // Reply) delivers the generated answer. If a graceful shutdown cancels the
 // merged ctx in the race window between d.caps.Send returning and the reply
 // being delivered, the section must NOT deliver on the Done ctx — that aborts

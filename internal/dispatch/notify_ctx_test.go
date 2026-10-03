@@ -64,7 +64,7 @@ func TestNotifyCtx_TimeoutHonored(t *testing.T) {
 
 // TestNotifyCtx_NilParentSafe — call sites pass nil parent today
 // (panic-recovery + ask_question card both pre-detach completely).
-// The factory must not panic on nil parent, otherwise ownerLoop panic
+// The factory must not panic on nil parent, otherwise turn-panic
 // recovery would itself crash and never reach the "处理异常" reply.
 func TestNotifyCtx_NilParentSafe(t *testing.T) {
 	t.Parallel()

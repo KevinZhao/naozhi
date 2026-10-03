@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 const (
@@ -215,27 +216,27 @@ func (o *orderLog) snapshot() []string {
 	return append([]string(nil), o.ev...)
 }
 
-// idleOrderDispatchRouter logs NotifyIdle. The real Server exposes no seam for
-// the order of NotifyIdle against panic handling, so row 10 rebuilds the
+// idleOrderSender logs NotifyIdle. The real Server exposes no seam for the
+// order of NotifyIdle against panic handling, so row 10 rebuilds the
 // dispatcher over the Server's own queue, platform and Capabilities with this
-// router in front.
-type idleOrderDispatchRouter struct {
-	dispatchRouter
+// Sender in front.
+type idleOrderSender struct {
+	turnSender
 	log *orderLog
 }
 
-func (r idleOrderDispatchRouter) NotifyIdle() {
-	r.log.add("idle")
-	r.dispatchRouter.NotifyIdle()
+func (s idleOrderSender) NotifyIdle() {
+	s.log.add("idle")
+	s.turnSender.NotifyIdle()
 }
 
-// newSessionDispatchRouter reports every GetOrCreate as a fresh session — the
-// one status an injected session can never produce (row 17).
-type newSessionDispatchRouter struct{ dispatchRouter }
+// newSessionSender reports every GetOrCreate as a fresh session — the one
+// status an injected session can never produce (row 17).
+type newSessionSender struct{ turnSender }
 
-func (r newSessionDispatchRouter) GetOrCreate(ctx context.Context, key string, opts sessionview.AgentOpts) (dispatch.Session, sessionview.SessionStatus, error) {
-	s, _, err := r.dispatchRouter.GetOrCreate(ctx, key, opts)
-	return s, sessionview.SessionNew, err
+func (s newSessionSender) GetOrCreate(ctx context.Context, key string, opts sessionview.AgentOpts) (turn.Session, sessionview.SessionStatus, error) {
+	sess, _, err := s.turnSender.GetOrCreate(ctx, key, opts)
+	return sess, sessionview.SessionNew, err
 }
 
 // takeoverRecordingCaps records Takeover calls on the way to the real caps.
@@ -249,18 +250,22 @@ func (c takeoverRecordingCaps) Takeover(ctx context.Context, chatKey, key string
 	return c.serverCaps.Takeover(ctx, chatKey, key, opts)
 }
 
-// rebuiltIM builds a second dispatcher over h's Server state with router and
-// caps swapped in.
-func (h *parityHarness) rebuiltIM(t *testing.T, router dispatch.SessionRouter, caps dispatch.Capabilities) platform.MessageHandler {
+// turnSender is the Sender buildDispatcher gives the IM orchestrator.
+func (h *parityHarness) turnSender() turnSender {
+	return turnSender{router: h.router, notify: h.hs.wiring.bcast}
+}
+
+// rebuiltIM builds a second dispatcher over h's Server state, its turns on
+// the Server's queue, with sender and caps swapped in.
+func (h *parityHarness) rebuiltIM(t *testing.T, sender turn.Sender, caps dispatch.Capabilities) platform.MessageHandler {
 	t.Helper()
 	w := h.hs.wiring
 	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
-		Router:       router,
+		Router:       h.router,
 		Platforms:    h.srv.platforms,
 		Agents:       w.agents,
 		Resolver:     w.resolver,
-		Guard:        w.sessionGuard,
-		Queue:        w.msgQueue,
+		Turns:        turn.New(w.msgQueue, sender),
 		Dedup:        platform.NewDedup(64),
 		Capabilities: caps,
 		StopCtx:      h.srv.appCtx,
@@ -276,7 +281,7 @@ func TestTurnParity10_IM_NotifyIdleAfterPanicHandling(t *testing.T) {
 	turns := h.session(parityKey, false)
 	log := &orderLog{}
 	h.plat.setOnReply(func(text string) { log.add("reply " + text) })
-	im := h.rebuiltIM(t, idleOrderDispatchRouter{dispatchRouter{h.router}, log}, serverCaps{s: h.srv, send: h.engine()})
+	im := h.rebuiltIM(t, idleOrderSender{h.turnSender(), log}, serverCaps{s: h.srv})
 
 	done := make(chan struct{})
 	go func() {
@@ -408,8 +413,8 @@ func TestTurnParity17_IM_FirstTurnTakeoverAndNewSessionNotice(t *testing.T) {
 	h := newParityHarness(t, parityOpts{reactor: true, interim: true})
 	turns := h.session(parityKey, false)
 	log := &orderLog{}
-	im := h.rebuiltIM(t, newSessionDispatchRouter{dispatchRouter{h.router}},
-		takeoverRecordingCaps{serverCaps{s: h.srv, send: h.engine()}, log})
+	im := h.rebuiltIM(t, newSessionSender{h.turnSender()},
+		takeoverRecordingCaps{serverCaps{s: h.srv}, log})
 
 	done := make(chan struct{})
 	go func() {
@@ -534,9 +539,9 @@ func TestTurnParity27_IM_NoCronPromptAutosave(t *testing.T) {
 	turns := h.session(cronKey, false)
 	sess := h.router.SessionFor(cronKey)
 	done := make(chan error, 1)
-	caps := serverCaps{s: h.srv, send: h.engine()}
+	sender := h.turnSender()
 	go func() {
-		_, err := caps.Send(context.Background(), cronKey, sess, "do Y", nil, nil)
+		_, err := sender.Send(context.Background(), cronKey, sess, "do Y", nil, turn.SendSpec{}, nil)
 		done <- err
 	}()
 	turns.turn(t, "IM-entry turn on a cron key", okTurn("R"))

@@ -310,8 +310,8 @@ func TestOBS1_PanicRecoveredWiredIntoTopSites(t *testing.T) {
 		// R243-ARCH-2 split: remote WS interrupt + send goroutines moved
 		// from wshub.go to wshub_send.go alongside handleSend / handleInterrupt.
 		{"../server/wshub_send.go", `serverMetrics\.PanicRecovered\(\)`},
-		{"../dispatch/dispatch.go", `metrics\.PanicRecoveredTotal\.Add\(1\)`},      // ownerLoop (core IM turn loop)
-		{"../platform/feishu/feishu.go", `metrics\.PanicRecoveredTotal\.Add\(1\)`}, // cleanupNoncesTick (replay protection)
+		{"../turn/loop.go", `metrics\.PanicRecoveredTotal\.Add\(1\)`},             // owner loop + detached turns (core IM turn loop, #3004)
+		{"../platform/feishu/nonce.go", `metrics\.PanicRecoveredTotal\.Add\(1\)`}, // cleanupNoncesTick (replay protection)
 	}
 	hit := 0
 	var missing []string

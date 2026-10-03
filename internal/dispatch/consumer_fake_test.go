@@ -3,11 +3,11 @@ package dispatch
 import (
 	"context"
 	"errors"
-	"sync/atomic"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
-	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -91,7 +91,7 @@ func TestDispatcher_AcceptsFakeProjectStore(t *testing.T) {
 // must collapse it to untyped nil.
 func TestNewDispatcher_NilProjectMgrStaysUntypedNil(t *testing.T) {
 	t.Parallel()
-	d, err := NewDispatcher(DispatcherConfig{ProjectMgr: nil, AllowMissingSender: true})
+	d, err := NewDispatcher(DispatcherConfig{ProjectMgr: nil, Turns: testTurns()})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
 	}
@@ -104,33 +104,9 @@ func TestNewDispatcher_NilProjectMgrStaysUntypedNil(t *testing.T) {
 // Dispatcher tests. Methods marked "not configured" panic so a test
 // that accidentally exercises an unexpected code path surfaces
 // immediately rather than silently returning zero values.
-//
-// Usage: construct with the specific method closures your test needs;
-// leave the rest at their default-panic behavior.
 type fakeSessionRouter struct {
-	getOrCreateCalls atomic.Int64
-
-	getOrCreate               func(ctx context.Context, key string, opts session.AgentOpts) (Session, session.SessionStatus, error)
-	notifyIdle                func()
-	discardPassthroughPending func(key string, reason error)
-	interruptViaControl       func(key string) session.InterruptOutcome
+	interruptViaControl func(key string) session.InterruptOutcome
 }
-
-func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (Session, session.SessionStatus, error) {
-	f.getOrCreateCalls.Add(1)
-	if f.getOrCreate == nil {
-		panic("fakeSessionRouter.GetOrCreate not configured")
-	}
-	return f.getOrCreate(ctx, key, opts)
-}
-
-func (f *fakeSessionRouter) DiscardPassthroughPending(key string, reason error) {
-	if f.discardPassthroughPending != nil {
-		f.discardPassthroughPending(key, reason)
-	}
-}
-
-func (f *fakeSessionRouter) Reset(string) { panic("fakeSessionRouter.Reset not configured") }
 
 func (f *fakeSessionRouter) ResetChatAndSetWorkspace(string, string) {
 	panic("fakeSessionRouter.ResetChatAndSetWorkspace not configured")
@@ -140,10 +116,6 @@ func (f *fakeSessionRouter) Workspace(string) string {
 	panic("fakeSessionRouter.Workspace not configured")
 }
 
-func (f *fakeSessionRouter) SetWorkspace(string, string) {
-	panic("fakeSessionRouter.SetWorkspace not configured")
-}
-
 func (f *fakeSessionRouter) InterruptSessionViaControl(key string) session.InterruptOutcome {
 	if f.interruptViaControl == nil {
 		panic("fakeSessionRouter.InterruptSessionViaControl not configured")
@@ -151,78 +123,53 @@ func (f *fakeSessionRouter) InterruptSessionViaControl(key string) session.Inter
 	return f.interruptViaControl(key)
 }
 
-func (f *fakeSessionRouter) NotifyIdle() {
-	if f.notifyIdle != nil {
-		f.notifyIdle()
-	}
-}
-
-// TestDispatcher_AcceptsFakeSessionRouter is the smoke test that
-// proves the consumer-interfaces refactor actually lets tests swap in
-// a fake router. Without it, this file would compile but nothing would
-// demonstrate end-to-end injectability.
-//
-// Scope: only constructs a Dispatcher with a fakeSessionRouter and
-// verifies router field assignment + structural typing holds. The
-// handler-level IM flow (dispatch.BuildHandler → sendAndReply →
-// router.GetOrCreate) is covered by existing dispatch_test.go via
-// real Router; repeating it with a fake would duplicate coverage
-// without adding signal. Future tests exercising narrow paths (e.g.
-// an ErrMaxProcs user-message assertion) go in this file.
+// TestDispatcher_AcceptsFakeSessionRouter is the smoke test that proves the
+// consumer-interfaces refactor actually lets tests swap in a fake router: a
+// routing call reaches the fake through the interface seam.
 func TestDispatcher_AcceptsFakeSessionRouter(t *testing.T) {
 	t.Parallel()
 
-	var notified int
+	var interrupted []string
 	fake := &fakeSessionRouter{
-		notifyIdle: func() { notified++ },
-	}
-	// Compile-time: fake satisfies SessionRouter.
-	var _ SessionRouter = fake
-
-	d := &Dispatcher{router: fake}
-
-	// Runtime: a routing call reaches the fake through the interface seam.
-	// (GetSession was dropped from SessionRouter in #1587 once its only
-	// production caller moved to the DiscardPassthroughPending seam, so we
-	// exercise a method that remains on the interface.)
-	d.router.NotifyIdle()
-	if notified != 1 {
-		t.Errorf("expected NotifyIdle to reach fake once, got %d", notified)
-	}
-}
-
-// TestDispatcher_DiscardQueueRoutesThroughSeam proves discardQueue clears
-// passthrough pending via the SessionRouter interface seam rather than
-// dereferencing a concrete *session.ManagedSession behind a session lookup
-// (R20260602190132-ARCH-4, #1612). The seam means the fake observes the
-// (key, reason) call directly — and is why GetSession no longer needs to be
-// on the dispatch SessionRouter interface (#1587).
-func TestDispatcher_DiscardQueueRoutesThroughSeam(t *testing.T) {
-	t.Parallel()
-
-	var gotKey string
-	var gotReason error
-	called := 0
-	fake := &fakeSessionRouter{
-		discardPassthroughPending: func(key string, reason error) {
-			called++
-			gotKey = key
-			gotReason = reason
+		interruptViaControl: func(key string) session.InterruptOutcome {
+			interrupted = append(interrupted, key)
+			return session.InterruptSent
 		},
 	}
 	var _ SessionRouter = fake
 
 	d := &Dispatcher{router: fake}
-	d.discardQueue(context.Background(), platform.IncomingMessage{}, "im:direct:u1:general")
+	if got := d.router.InterruptSessionViaControl("im:direct:u1:general"); got != session.InterruptSent || len(interrupted) != 1 {
+		t.Errorf("InterruptSessionViaControl through the seam = %v, calls %v; want Sent, one call", got, interrupted)
+	}
+}
 
-	if called != 1 {
-		t.Fatalf("expected DiscardPassthroughPending called once via seam, got %d", called)
+// TestDispatcher_ResetRoutesThroughTurns proves /new reaches the session's
+// in-flight passthrough sends and the session reset through Turns (the
+// orchestrator's Sender), never the session itself (#1612): the Sender
+// observes (key, ErrSessionReset) and then the reset of that key.
+func TestDispatcher_ResetRoutesThroughTurns(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	sender := &testSender{
+		discardPending: func(key string, reason error) {
+			if !errors.Is(reason, clierr.ErrSessionReset) {
+				t.Errorf("DiscardPending reason = %v, want ErrSessionReset", reason)
+			}
+			calls = append(calls, "discard "+key)
+		},
+		reset: func(key string, discardOverride bool) {
+			calls = append(calls, fmt.Sprintf("reset %s %v", key, discardOverride))
+		},
 	}
-	if gotKey != "im:direct:u1:general" {
-		t.Errorf("key not forwarded through seam: got %q", gotKey)
-	}
-	if !errors.Is(gotReason, clierr.ErrSessionReset) {
-		t.Errorf("reason not forwarded through seam: got %v, want ErrSessionReset", gotReason)
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp, withSender(sender))
+	d.BuildHandler()(context.Background(), incomingMsg("/new"))
+
+	want := []string{"discard fake:direct:chat1:general", "reset fake:direct:chat1:general false"}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("Sender calls = %q, want %q (discard before reset, override kept)", calls, want)
 	}
 }
 
@@ -239,31 +186,24 @@ func TestFakeSessionRouter_UnconfiguredPanics(t *testing.T) {
 		}
 	}()
 	fake := &fakeSessionRouter{}
-	fake.Reset("any")
+	fake.Workspace("any")
 }
 
 // TestNewDispatcher_NilRouterStaysUntypedNil pins the typed-nil fix:
-// when DispatcherConfig.Router is nil, the Dispatcher.router
-// interface field must hold untyped nil so subsequent
-// `if d.router != nil` guards behave correctly (e.g.
-// discardQueue at dispatch.go ~404). A naive assignment
-// `d.router = cfg.Router` would store a typed-nil (*session.Router
-// value nil wrapped in interface), making != nil return true and
-// panicking on the next method call.
+// when DispatcherConfig.Router is nil, or a nil *session.Router boxed into
+// it, the Dispatcher.router interface field must hold untyped nil so
+// `if d.router != nil` guards behave correctly.
 func TestNewDispatcher_NilRouterStaysUntypedNil(t *testing.T) {
 	t.Parallel()
-	// AllowMissingSender: this test exercises only nil-router/discardQueue
-	// behaviour and never reaches the IM Send path, so opt out of the
-	// boot-panic check that was added in R248-ARCH-2.
-	d, err := NewDispatcher(DispatcherConfig{Router: nil, AllowMissingSender: true})
-	if err != nil {
-		t.Fatalf("NewDispatcher: %v", err)
+	for _, r := range []SessionRouter{nil, (*session.Router)(nil)} {
+		d, err := NewDispatcher(DispatcherConfig{Router: r, Turns: testTurns()})
+		if err != nil {
+			t.Fatalf("NewDispatcher: %v", err)
+		}
+		if d.router != nil {
+			t.Fatalf("Dispatcher.router should be untyped nil when cfg.Router is %#v; typed-nil trap reintroduced", r)
+		}
 	}
-	if d.router != nil {
-		t.Fatal("Dispatcher.router should be untyped nil when cfg.Router is nil; typed-nil trap reintroduced")
-	}
-	// discardQueue with a nil router must be a no-op, not a panic.
-	d.discardQueue(context.Background(), platform.IncomingMessage{}, "irrelevant:key:0:general")
 }
 
 // TestNewDispatcher_ResolverFabricatedWhenNil pins the contract that
@@ -279,11 +219,9 @@ func TestNewDispatcher_ResolverFabricatedWhenNil(t *testing.T) {
 	t.Parallel()
 
 	// Case 1: no Resolver, no ProjectMgr — should still get a usable resolver.
-	// AllowMissingSender: this case asserts on resolver / keyForChat only,
-	// not the IM Send path; opt out of R248-ARCH-2 boot-panic.
 	d, err := NewDispatcher(DispatcherConfig{
-		Agents:             map[string]session.AgentOpts{"general": {}},
-		AllowMissingSender: true,
+		Agents: map[string]session.AgentOpts{"general": {}},
+		Turns:  testTurns(),
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
@@ -298,7 +236,7 @@ func TestNewDispatcher_ResolverFabricatedWhenNil(t *testing.T) {
 
 	// Case 2: explicit Resolver passes through unchanged.
 	custom := session.NewKeyResolver(map[string]session.AgentOpts{"general": {}}, nil)
-	d2, err := NewDispatcher(DispatcherConfig{Resolver: custom, AllowMissingSender: true})
+	d2, err := NewDispatcher(DispatcherConfig{Resolver: custom, Turns: testTurns()})
 	if err != nil {
 		t.Fatalf("NewDispatcher (custom resolver): %v", err)
 	}
@@ -320,9 +258,9 @@ func TestNewDispatcher_PrefersRouterResolver(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{Resolver: shared})
 
 	d, err := NewDispatcher(DispatcherConfig{
-		Router:             routerOf(router),
-		Agents:             map[string]session.AgentOpts{"general": {}},
-		AllowMissingSender: true,
+		Router: routerOf(router),
+		Agents: map[string]session.AgentOpts{"general": {}},
+		Turns:  testTurns(),
 	})
 	if err != nil {
 		t.Fatalf("NewDispatcher: %v", err)
@@ -353,10 +291,10 @@ func TestNewDispatcher_ResolverPrecedence(t *testing.T) {
 		router := session.NewRouter(session.RouterConfig{Resolver: routerOwned})
 
 		d, err := NewDispatcher(DispatcherConfig{
-			Router:             routerOf(router),
-			Resolver:           explicit,
-			Agents:             map[string]session.AgentOpts{"general": {}},
-			AllowMissingSender: true,
+			Router:   routerOf(router),
+			Resolver: explicit,
+			Agents:   map[string]session.AgentOpts{"general": {}},
+			Turns:    testTurns(),
 		})
 		if err != nil {
 			t.Fatalf("NewDispatcher: %v", err)
@@ -371,8 +309,8 @@ func TestNewDispatcher_ResolverPrecedence(t *testing.T) {
 		t.Parallel()
 		// No cfg.Resolver, no cfg.Router → fabricated path.
 		d, err := NewDispatcher(DispatcherConfig{
-			Agents:             map[string]session.AgentOpts{"general": {}},
-			AllowMissingSender: true,
+			Agents: map[string]session.AgentOpts{"general": {}},
+			Turns:  testTurns(),
 		})
 		if err != nil {
 			t.Fatalf("NewDispatcher: %v", err)
@@ -389,9 +327,9 @@ func TestNewDispatcher_ResolverPrecedence(t *testing.T) {
 		// than panicking on the nil Router.Resolver() result.
 		router := session.NewRouter(session.RouterConfig{})
 		d, err := NewDispatcher(DispatcherConfig{
-			Router:             routerOf(router),
-			Agents:             map[string]session.AgentOpts{"general": {}},
-			AllowMissingSender: true,
+			Router: routerOf(router),
+			Agents: map[string]session.AgentOpts{"general": {}},
+			Turns:  testTurns(),
 		})
 		if err != nil {
 			t.Fatalf("NewDispatcher: %v", err)

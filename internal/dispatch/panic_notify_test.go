@@ -1,17 +1,10 @@
 package dispatch
 
-// RETRY3 regression tests. Before Round 97 the ownerLoop panic recover
-// only logged + Discard'd the queue — the IM peer was left waiting for a
-// reply that would never arrive. The handleOwnerLoopPanic helper now
-// also sends a Chinese "please retry" message via the same platform.Reply
-// path used by the rest of dispatch.
-//
-// These tests exercise the helper directly because an end-to-end
-// ownerLoop panic is hard to construct in unit tests: router.GetOrCreate
-// fails before reaching sendFn under the test harness (no real wrapper),
-// so a panicking sendFn never runs. The extracted helper lets us pin the
-// three post-recover behaviours (log, Discard, reply) with a minimal
-// stub.
+// RETRY3 regression tests: a turn that panics must not leave the IM peer
+// waiting for a reply that never arrives. The orchestrator recovers the
+// panic, discards the key's queue, and the IM delivery answers with a
+// Chinese "please retry" message via the same platform.Reply path used by
+// the rest of dispatch.
 
 import (
 	"context"
@@ -31,16 +24,23 @@ func testIncomingMsg() platform.IncomingMessage {
 	}
 }
 
-func TestHandleOwnerLoopPanic_SendsReplyToUser(t *testing.T) {
+// panickingSender panics in GetOrCreate, after running before (if set).
+func panickingSender(before func()) *testSender {
+	return &testSender{getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+		if before != nil {
+			before()
+		}
+		panic("synthetic test panic")
+	}}
+}
+
+func TestTurnPanic_SendsReplyToUser(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-
+	d := newTestDispatcher(fp, withSender(panickingSender(nil)))
 	key := session.SessionKey("fake", "direct", "chat-panic", "general")
-	msg := testIncomingMsg()
 
-	// Invoke the recover helper with a synthetic panic value.
-	d.handleOwnerLoopPanic(key, msg, "synthetic test panic", nil)
+	runIMTurn(context.Background(), d, key, "hello", testIncomingMsg(), true)
 
 	if fp.replyCount() != 1 {
 		t.Fatalf("reply count = %d, want 1 (panic notify must reach user)", fp.replyCount())
@@ -50,58 +50,43 @@ func TestHandleOwnerLoopPanic_SendsReplyToUser(t *testing.T) {
 	}
 }
 
-func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
+func TestTurnPanic_DiscardsQueue(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-
+	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
 	key := session.SessionKey("fake", "direct", "chat-panic", "general")
-	// Seed queued messages so we can verify Discard clears them.
-	d.queue.Enqueue(key, turn.Msg{Text: "m1", EnqueueAt: time.Now()}) // owner
-	if _, enqueued, _, _, _ := d.queue.Enqueue(key, turn.Msg{Text: "m2", EnqueueAt: time.Now()}); !enqueued {
-		t.Fatal("setup: m2 was not queued behind the owner")
-	}
+	d := newTestDispatcher(fp, withQueue(q), withSender(panickingSender(func() {
+		if _, enqueued, _, _, _ := q.Enqueue(key, turn.Msg{Text: "m2", EnqueueAt: time.Now()}); !enqueued {
+			t.Error("setup: m2 was not queued behind the owner")
+		}
+	})))
 
-	d.handleOwnerLoopPanic(key, testIncomingMsg(), "synthetic test panic", nil)
+	runIMTurn(context.Background(), d, key, "m1", testIncomingMsg(), true)
 
-	if dropped := d.queue.DiscardAndReturn(key); dropped != nil {
+	if dropped := q.DiscardAndReturn(key); dropped != nil {
 		t.Errorf("queue after panic recover still holds %d messages, want 0 (Discard not invoked)", len(dropped))
 	}
-}
-
-func TestHandleOwnerLoopPanic_NilQueueNoCrash(t *testing.T) {
-	t.Parallel()
-	fp := &fakePlatform{}
-	// withQueue(nil) pins handleOwnerLoopPanic's own nil-queue guard (it is
-	// called directly here, not via BuildHandler), which production can
-	// still reach today via the Guard-based deployment path.
-	d := newTestDispatcher(fp, withQueue(nil))
-
-	// Must not panic on nil queue. The reply still goes out.
-	d.handleOwnerLoopPanic("any-key", testIncomingMsg(), "synthetic test panic", nil)
-
-	if fp.replyCount() != 1 {
-		t.Errorf("reply count = %d, want 1 even with nil queue", fp.replyCount())
+	if isOwner, _, _, _, _ := q.Enqueue(key, turn.Msg{Text: "next"}); !isOwner {
+		t.Error("the panicked owner still holds the key: next Enqueue did not become owner")
 	}
 }
 
-func TestHandleOwnerLoopPanic_ReplyPanicAbsorbed(t *testing.T) {
+func TestTurnPanic_ReplyPanicAbsorbed(t *testing.T) {
 	t.Parallel()
 	// Simulate a platform SDK that panics on Reply (e.g., nil chat
-	// handle). The nested recover inside handleOwnerLoopPanic must
-	// swallow this cascade so the caller's outer defer is not unwound
-	// and the process can drain other owners.
+	// handle). The recovery must swallow this cascade so the caller's
+	// goroutine is not unwound and the process can drain other owners.
 	fp := &panicReplyPlatform{}
-	d := newTestDispatcher(nil) // base dispatcher without fake platform
+	d := newTestDispatcher(&fakePlatform{}, withSender(panickingSender(nil)))
 	d.platforms = map[string]platform.Platform{"fake": fp}
-
-	// This call must not re-panic past the test frame.
 	defer func() {
 		if r := recover(); r != nil {
-			t.Fatalf("nested panic escaped handleOwnerLoopPanic: %v", r)
+			t.Fatalf("nested panic escaped the turn's recovery: %v", r)
 		}
 	}()
-	d.handleOwnerLoopPanic("any-key", testIncomingMsg(), "synthetic test panic", nil)
+
+	runIMTurn(context.Background(), d, "any-key", "hello", testIncomingMsg(), true)
+
 	if !fp.called {
 		t.Errorf("panic-notifying Reply was not attempted")
 	}

@@ -3,7 +3,7 @@ package dispatch
 // #2147: on single-use-token platforms (Weixin iLink) a standalone TodoWrite
 // Reply must NOT be sent. The context_token is consumed by the first Reply and
 // rejected on reuse, so a TodoWrite checklist would burn the token before the
-// final answer is delivered via sendAndReply, causing the real answer to be
+// final answer is delivered via the IM delivery, causing the real answer to be
 // rejected upstream and silently lost.
 
 import (

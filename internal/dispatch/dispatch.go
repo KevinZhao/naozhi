@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -16,7 +15,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/limits"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -35,15 +33,6 @@ const platformReplyTimeout = 15 * time.Second
 // context.Canceled path; shorter than platformReplyTimeout so teardown is
 // not blocked on a slow IM API yet the notice still lands before SIGKILL.
 const shutdownReplyTimeout = 5 * time.Second
-
-// SessionGuard gates concurrent messages to one session when no Queue is
-// configured. session.Guard and test fakes satisfy it, so keep the method set
-// minimal. Kept as an interface deliberately (#1170).
-type SessionGuard interface {
-	TryAcquire(key string) bool
-	ShouldSendWait(key string) bool
-	Release(key string)
-}
 
 // Dispatcher holds the dependencies needed to dispatch incoming IM messages
 // to the session router, handle slash commands, and stream results back.
@@ -70,9 +59,10 @@ type Dispatcher struct {
 	projectMgr ProjectStore
 	// resolver centralises (key, opts) derivation; NewDispatcher guarantees
 	// non-nil. See docs/rfc/key-resolver.md.
-	resolver    KeyResolver
-	guard       SessionGuard // used by Dashboard/WS path
-	queue       *turn.Queue
+	resolver KeyResolver
+	// turns runs every IM turn (Submit) and reset (Reset); non-nil after
+	// NewDispatcher.
+	turns       Turns
 	dedup       *platform.Dedup
 	allowedRoot string
 	claudeDir   string
@@ -95,15 +85,13 @@ type Dispatcher struct {
 	// Operational counters exposed via /health for triaging. Incremented
 	// atomically and never reset (monotonic since process start).
 	messageCount       atomic.Int64 // all non-slash-command IM messages accepted
-	replyErrorCount    atomic.Int64 // errors returned by Capabilities.Send (includes timeouts)
+	replyErrorCount    atomic.Int64 // failed sends reported to the user (includes timeouts)
 	sendFailCount      atomic.Int64 // user-visible reply failures (platform send errors)
 	lastReplySuccessNs atomic.Int64 // UnixNano of most recent successful user-visible reply; 0 until first success
 
-	// caps groups the host-supplied hooks (Send / Takeover / ReplyFooter).
-	// Always non-nil after NewDispatcher (Capabilities, wrapped legacy *Fn
-	// closures, or NoopCapabilities{}). NewDispatcher returns
-	// ErrSendWireupMissing when no usable Send is supplied and
-	// AllowMissingSender is false; NoopCapabilities.Send still panics if reached.
+	// caps groups the host-supplied hooks (Takeover / ReplyFooter). Always
+	// non-nil after NewDispatcher (Capabilities, wrapped legacy *Fn closures,
+	// or NoopCapabilities{}).
 	caps Capabilities
 
 	// inboundLogCache memoizes the per-(platform,user,chat) logger built in
@@ -151,16 +139,16 @@ type DispatcherConfig struct {
 	ProjectMgr *project.Manager
 	// Resolver is the central (key, opts) derivation. Optional: when nil,
 	// NewDispatcher fabricates a fallback from Agents / ProjectMgr.
-	Resolver    KeyResolver
-	Guard       SessionGuard
-	Queue       *turn.Queue
+	Resolver KeyResolver
+	// Turns is required: NewDispatcher returns ErrTurnsWireupMissing without it.
+	Turns       Turns
 	Dedup       *platform.Dedup
 	AllowedRoot string
 	ClaudeDir   string
 
-	// Capabilities groups the host-supplied hooks (Send / Takeover /
-	// ReplyFooter). Wins over the legacy *Fn closures when both are set;
-	// nil falls back to the closures, then NoopCapabilities{}.
+	// Capabilities groups the host-supplied hooks (Takeover / ReplyFooter).
+	// Wins over the legacy *Fn closures when both are set; nil falls back to
+	// the closures, then NoopCapabilities{}.
 	Capabilities Capabilities
 
 	// ReplyFooterFn returns the per-session reply tag (e.g. "cc" / "kiro")
@@ -168,8 +156,8 @@ type DispatcherConfig struct {
 	// footer.
 	//
 	// Deprecated: prefer DispatcherConfig.Capabilities. Removal, together
-	// with SendFn / TakeoverFn / closureCapabilities, is gated on test
-	// migrations (#374).
+	// with TakeoverFn / closureCapabilities, is gated on test migrations
+	// (#374).
 	ReplyFooterFn func(backendID string) string
 
 	NoOutputTimeout       time.Duration
@@ -181,11 +169,6 @@ type DispatcherConfig struct {
 	// defaults to osImageReader{}; tests inject a fake (#884).
 	ImageReader ImageReader
 
-	// SendFn forwards a turn payload to the session router after guard /
-	// queue gating has succeeded.
-	//
-	// Deprecated: prefer DispatcherConfig.Capabilities (#374).
-	SendFn func(ctx context.Context, key string, sess Session, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 	// TakeoverFn is the optional auto-takeover hook invoked on the first
 	// message of every chat. nil is treated as "return false".
 	//
@@ -195,36 +178,32 @@ type DispatcherConfig struct {
 	// StopCtx is the process-shutdown context the passthrough goroutine
 	// observes. Optional — nil falls back to context.Background() (#1320).
 	StopCtx context.Context
-
-	// AllowMissingSender opts out of the constructor-time "Send must be
-	// wired" check for tests that never touch the send path. Production
-	// MUST leave this false so a missing wireup fails loud at boot instead
-	// of panicking on the first user message.
-	AllowMissingSender bool
 }
 
-// ErrSendWireupMissing is returned by NewDispatcher when no usable Send hook
-// was supplied; tests may opt out via DispatcherConfig.AllowMissingSender.
-var ErrSendWireupMissing = errors.New("dispatch: Capabilities.Send is required (set DispatcherConfig.Capabilities or DispatcherConfig.SendFn; tests may set AllowMissingSender)")
+// ErrTurnsWireupMissing is returned by NewDispatcher when DispatcherConfig.Turns
+// is nil: every IM message would otherwise fail on its first turn, after the
+// healthcheck has passed.
+var ErrTurnsWireupMissing = errors.New("dispatch: DispatcherConfig.Turns is required")
 
-// NewDispatcher constructs a Dispatcher from cfg. Returns ErrSendWireupMissing
-// when neither cfg.Capabilities (with a non-noop Send) nor cfg.SendFn is set
-// and AllowMissingSender is false. Nil cfg.Router / cfg.Scheduler /
-// cfg.ProjectMgr pointers are collapsed to untyped nil so `!= nil` gates behave.
+// NewDispatcher constructs a Dispatcher from cfg. Returns
+// ErrTurnsWireupMissing when cfg.Turns is nil (or a typed nil). Nil
+// cfg.Router / cfg.Scheduler / cfg.ProjectMgr pointers are collapsed to
+// untyped nil so `!= nil` gates behave.
 func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
+	if isNilInterface(cfg.Turns) {
+		return nil, ErrTurnsWireupMissing
+	}
 	var router SessionRouter
-	if cfg.Router != nil {
+	if !isNilInterface(cfg.Router) {
 		router = cfg.Router
 	}
 	resolver := resolveOrFabricateKeyResolver(cfg)
 	// Capabilities precedence: cfg.Capabilities, else legacy *Fn closures
-	// wrapped in closureCapabilities, else NoopCapabilities{} (whose Send
-	// panics; Takeover / ReplyFooter return false / "").
+	// wrapped in closureCapabilities, else NoopCapabilities{}.
 	caps := cfg.Capabilities
 	if caps == nil {
-		if cfg.SendFn != nil || cfg.TakeoverFn != nil || cfg.ReplyFooterFn != nil {
+		if cfg.TakeoverFn != nil || cfg.ReplyFooterFn != nil {
 			caps = closureCapabilities{
-				send:        cfg.SendFn,
 				takeover:    cfg.TakeoverFn,
 				replyFooter: cfg.ReplyFooterFn,
 			}
@@ -232,38 +211,16 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 			caps = NoopCapabilities{}
 		}
 	}
-	// Surface missing Send wireup at constructor time: a runtime panic on
-	// the first message would arrive after healthcheck and put systemd into
-	// a restart loop.
-	if !cfg.AllowMissingSender {
-		hasSend := false
-		switch c := caps.(type) {
-		case NoopCapabilities:
-			hasSend = false
-		case closureCapabilities:
-			hasSend = c.send != nil
-		default:
-			// Other implementations are presumed to wire Send.
-			hasSend = true
-		}
-		if !hasSend {
-			return nil, ErrSendWireupMissing
-		}
-	}
-	if cfg.Capabilities != nil && (cfg.SendFn != nil || cfg.TakeoverFn != nil || cfg.ReplyFooterFn != nil) {
-		slog.Warn("dispatch: DispatcherConfig.Capabilities set; legacy SendFn/TakeoverFn/ReplyFooterFn ignored",
-			"send_fn_set", cfg.SendFn != nil,
+	if cfg.Capabilities != nil && (cfg.TakeoverFn != nil || cfg.ReplyFooterFn != nil) {
+		slog.Warn("dispatch: DispatcherConfig.Capabilities set; legacy TakeoverFn/ReplyFooterFn ignored",
 			"takeover_fn_set", cfg.TakeoverFn != nil,
 			"reply_footer_fn_set", cfg.ReplyFooterFn != nil)
 	}
 	// Collapse a typed-nil CronCommands (nil pointer boxed into the
 	// interface) so `d.scheduler != nil` gates behave (#1178).
-	scheduler := cfg.Scheduler
-	if scheduler != nil {
-		v := reflect.ValueOf(scheduler)
-		if v.Kind() == reflect.Pointer && v.IsNil() {
-			scheduler = nil
-		}
+	var scheduler CronCommands
+	if !isNilInterface(cfg.Scheduler) {
+		scheduler = cfg.Scheduler
 	}
 	// Same typed-nil collapse for ProjectStore (#457).
 	var projectStore ProjectStore
@@ -278,8 +235,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		scheduler:             scheduler,
 		projectMgr:            projectStore,
 		resolver:              resolver,
-		guard:                 cfg.Guard,
-		queue:                 cfg.Queue,
+		turns:                 cfg.Turns,
 		dedup:                 cfg.Dedup,
 		allowedRoot:           cfg.AllowedRoot,
 		claudeDir:             cfg.ClaudeDir,
@@ -322,6 +278,16 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		d.stopCtx = context.Background()
 	}
 	return d, nil
+}
+
+// isNilInterface reports whether v is nil or a nil pointer boxed into an
+// interface, which would pass a `!= nil` gate and panic on first use.
+func isNilInterface(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 // fallbackDedupKey builds "fallback:<platform>:<chatID>:<messageID>:<unixMinute>"
@@ -448,264 +414,17 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	}, true
 }
 
-// handleQueuedNonOwner runs the queue non-owner branch: interrupt-mode control
-// request for the active turn, plus the enqueue-vs-disabled acknowledgement.
-// shouldInterrupt / enqueued / evictedID come from queue.Enqueue; a non-empty
-// evictedID is the oldest queued message dropped by backpressure, whose
-// HOURGLASS reaction is cleared here (#1945).
-func (d *Dispatcher) handleQueuedNonOwner(ctx context.Context, msg platform.IncomingMessage, p preparedInbound, shouldInterrupt, enqueued bool, evictedID string) {
-	lg, key := p.lg, p.key
-	// An evicted message never enters a DoneOrDrain batch, so ownerLoop's
-	// clearQueuedReactions never reaches it; clear its HOURGLASS here (#1945).
-	if evictedID != "" {
-		d.clearQueuedReaction(ctx, msg.Platform, evictedID, lg)
-	}
-	// Interrupt mode: fire a control_request so the in-flight turn aborts;
-	// the owner loop's Send() then returns and drains this message as the
-	// next prompt. All non-Sent outcomes degrade to Collect semantics.
-	if shouldInterrupt {
-		switch outcome := d.router.InterruptSessionViaControl(key); outcome {
-		case sessionview.InterruptSent:
-			lg.Info("interrupt mode: aborted active turn to process follow-up",
-				"key", key)
-		case sessionview.InterruptNoTurn:
-			// Turn not active yet; the owner loop drains the follow-up later.
-			lg.Debug("interrupt mode: session idle or spawning, will process follow-up after current turn",
-				"key", key)
-		case sessionview.InterruptNoSession:
-			lg.Debug("interrupt mode: session not found, falling back to collect",
-				"key", key)
-		case sessionview.InterruptUnsupported:
-			lg.Debug("interrupt mode: protocol does not support stdin interrupt, falling back to collect",
-				"key", key)
-		case sessionview.InterruptError:
-			// ManagedSession.InterruptViaControl already warned; paired dispatch-side trace.
-			lg.Warn("interrupt mode: transport error, falling back to collect",
-				"key", key)
-		}
-	}
-	if enqueued {
-		// Prefer an in-place reaction on the user's message; fall back to the
-		// rate-limited text notice if the platform can't react.
-		if !d.ackQueuedWithReaction(ctx, msg, lg) {
-			if d.queue.ShouldNotify(key) {
-				d.replyText(ctx, msg, "消息已收到，待当前回复完成后一并处理。", lg)
-			}
-		}
-	} else {
-		// Queue disabled (maxDepth<=0): drop with a rate-limited notice.
-		if d.queue.ShouldNotify(key) {
-			d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", lg)
-		}
-	}
-}
-
-// BuildHandler returns a platform.MessageHandler wired to this Dispatcher.
+// BuildHandler returns a platform.MessageHandler wired to this Dispatcher:
+// a message that survives prepareInbound is submitted as an IM turn.
 func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 	return func(ctx context.Context, msg platform.IncomingMessage) {
 		p, ok := d.prepareInbound(ctx, msg)
 		if !ok {
 			return
 		}
-		lg, agentID, cleanText := p.lg, p.agentID, p.cleanText
-		key, opts, images := p.key, p.opts, p.images
-
-		// Passthrough: every message gets its own goroutine; ordering/merging
-		// is handled by the CLI commandQueue + Process sendSlot FIFO. Protocols
-		// without --replay-user-messages (e.g. ACP) silently downgrade to the
-		// sendMu-serialized Send path.
-		if d.queue != nil && d.queue.Mode() == turn.ModePassthrough {
-			lg.Info("message received (passthrough)", "agent", agentID, "text_len", len(cleanText), "images", len(images))
-			// Detach from the webhook ctx (handlers return in seconds, turns
-			// take minutes) but keep d.stopCtx as the cancel source so the
-			// goroutine still aborts on SIGTERM (#1320).
-			sendCtx := mergeStopAndValues(d.stopCtx, ctx)
-			// Ack BEFORE spawning so AddReaction stores the reaction_id before
-			// goSendAndReply's deferred clearQueuedReaction can run on a fast-fail
-			// turn; the reverse order leaves a permanent HOURGLASS (#1963).
-			d.ackQueuedWithReaction(ctx, msg, lg)
-			d.goSendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, lg, true)
-			return
-		}
-
-		// Enqueue message. If queue is nil or disabled, fall back to Guard.
-		if d.queue != nil {
-			qm := turn.Msg{
-				Text:      cleanText,
-				Images:    images,
-				MessageID: msg.MessageID,
-				EnqueueAt: time.Now(),
-			}
-			isOwner, enqueued, shouldInterrupt, gen, evictedID := d.queue.Enqueue(key, qm)
-			if !isOwner {
-				d.handleQueuedNonOwner(ctx, msg, p, shouldInterrupt, enqueued, evictedID)
-				return
-			}
-			// I am the owner — enter the process-and-drain loop.
-			lg.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
-			d.ownerLoop(ctx, key, gen, qm, agentID, opts, msg, lg)
-			return
-		}
-
-		// Fallback: Guard-based path (no queue configured).
-		if !d.guard.TryAcquire(key) {
-			if d.guard.ShouldSendWait(key) {
-				d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", lg)
-			}
-			return
-		}
-		defer d.guard.Release(key)
-		defer d.router.NotifyIdle()
-
-		lg.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
-		d.sendAndReply(ctx, key, cleanText, images, agentID, opts, msg, lg, true)
+		o := d.newIMOrigin(msg, p.lg, p.key, p.agentID, p.opts, imMessage, len(p.cleanText), len(p.images))
+		d.submit(ctx, o, turn.Request{Key: p.key, Text: p.cleanText, Images: p.images})
 	}
-}
-
-// discardQueue is a nil-safe helper to clear queued messages for a key. In
-// passthrough mode it also fires ErrSessionReset to in-flight SendPassthrough
-// callers, and it clears the HOURGLASS reaction of every dropped message
-// (#2013). ctx is the command handler's live request ctx, so no detach.
-func (d *Dispatcher) discardQueue(ctx context.Context, msg platform.IncomingMessage, key string) {
-	if d.queue != nil {
-		dropped := d.queue.DiscardAndReturn(key)
-		d.clearQueuedReactions(ctx, msg.Platform, dropped, nil)
-	}
-	if d.router != nil {
-		d.router.DiscardPassthroughPending(key, clierr.ErrSessionReset)
-	}
-}
-
-// ownerLoop processes the first message, then drains and coalesces queued
-// messages until the queue is empty. gen is the Enqueue generation cookie: if
-// Discard bumps it (e.g. /new), DoneOrDrain returns nil and the loop exits so
-// two goroutines never own the same key. A deferred recover releases
-// ownership on panic.
-func (d *Dispatcher) ownerLoop(
-	ctx context.Context,
-	key string,
-	gen uint64,
-	first turn.Msg,
-	agentID string,
-	opts sessionview.AgentOpts,
-	msg platform.IncomingMessage,
-	lg *slog.Logger,
-) {
-	// Enrich once per ownerLoop rather than per drained turn.
-	lg = lg.With("key", key, "agent", agentID)
-	// Defer order matters (LIFO): NotifyIdle is registered first so it runs
-	// AFTER the recover below — the session must not read "idle" while a
-	// panic is still mid-flight.
-	defer d.router.NotifyIdle()
-	// A drained batch is out of the ring before sendAndReply runs; on panic
-	// handleOwnerLoopPanic's DiscardAndReturn cannot see it, so track it here
-	// and clear its reactions in the recover defer. `first` is not tracked:
-	// the owner's own message never gets a queued reaction.
-	var pendingClear []turn.Msg
-	defer func() {
-		if r := recover(); r != nil {
-			// Turn ctx may already be Done (shutdown racing the panic); detach.
-			if len(pendingClear) > 0 {
-				d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, pendingClear, lg)
-			}
-			d.handleOwnerLoopPanic(key, msg, r, lg)
-		}
-	}()
-
-	d.sendAndReply(ctx, key, first.Text, first.Images, agentID, opts, msg, lg, true)
-
-	// Drain loop: after each turn, wait collectDelay then drain.
-	collectTimer := time.NewTimer(d.queue.CollectDelay())
-	defer collectTimer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			// Clear HOURGLASS on messages still queued when the ctx is
-			// cancelled (e.g. restart); the ⏳ would otherwise survive in the
-			// platform's reaction cache. ctx is Done, so detach (#2013).
-			dropped := d.queue.DiscardAndReturn(key)
-			d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, dropped, lg)
-			return
-		case <-collectTimer.C:
-		}
-
-		queued := d.queue.DoneOrDrain(key, gen)
-		if queued == nil {
-			return // Queue empty or generation mismatch — stop.
-		}
-
-		// Out of the ring from here until cleared below; the recover defer
-		// owns cleanup on panic.
-		pendingClear = queued
-		text, images := turn.Coalesce(queued)
-		lg.Info("processing queued messages", "count", len(queued), "merged_len", len(text))
-		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, false)
-		// Clear the drained batch's queued reactions. Detached via
-		// WithoutCancel: on a shutdown-during-turn race ctx is already Done and
-		// a child WithTimeout would be born cancelled (#2262).
-		d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, queued, lg)
-		// Cleared normally; drop the recover fallback handle.
-		pendingClear = nil
-		// Go 1.23+: Reset on a Timer whose channel was just consumed by the case arm above is race-free; no Stop+drain needed.
-		collectTimer.Reset(d.queue.CollectDelay())
-	}
-}
-
-// handleOwnerLoopPanic is the deferred panic recovery for ownerLoop (split
-// out so it is unit-testable): logs the panic with stack, discards the queue
-// so a stale owner is not left holding the key, and replies "please retry".
-// A nested recover absorbs a cascading panic from the reply. lg may be nil
-// (falls back to slog.Default).
-func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessage, r any, lg *slog.Logger) {
-	metrics.PanicRecoveredTotal.Add(1)
-	if lg == nil {
-		lg = slog.Default()
-	}
-	lg.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
-	if d.queue != nil {
-		// The process survives and the platform is reachable, so clear the
-		// HOURGLASS of the dropped messages (#2013). No live request ctx here.
-		dropped := d.queue.DiscardAndReturn(key)
-		d.clearQueuedReactions(context.WithoutCancel(context.Background()), msg.Platform, dropped, lg)
-	}
-	func() {
-		defer func() {
-			if rr := recover(); rr != nil {
-				lg.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
-			}
-		}()
-		notifyCtx, cancel := NotifyCtx(context.Background(), NotifyKindOwnerLoopPanic, platformReplyTimeout)
-		defer cancel()
-		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
-	}()
-}
-
-// goSendAndReply runs sendAndReply in its own goroutine with a panic recover,
-// so a panic in one detached passthrough / /urgent turn fails only that turn
-// (#1773). Reuses handleOwnerLoopPanic for log + discard + retry reply.
-func (d *Dispatcher) goSendAndReply(
-	ctx context.Context,
-	key, text string,
-	images []clievent.Attachment,
-	agentID string,
-	opts sessionview.AgentOpts,
-	msg platform.IncomingMessage,
-	lg *slog.Logger,
-	isFirst bool,
-) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				d.handleOwnerLoopPanic(key, msg, r, lg)
-			}
-		}()
-		// Clear the HOURGLASS the passthrough / /urgent ack added once the
-		// turn finishes; this path never enters ownerLoop's drain loop (#1946).
-		// WithoutCancel: the turn ctx may be expired or Canceled by then;
-		// clearQueuedReaction re-bounds with its own timeout.
-		defer d.clearQueuedReaction(context.WithoutCancel(ctx), msg.Platform, msg.MessageID, lg)
-		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, isFirst)
-	}()
 }
 
 // resolveReplyCtx returns a context safe for an end-of-turn reply: when ctx is
@@ -725,7 +444,7 @@ func resolveReplyCtx(ctx context.Context) (replyCtx context.Context, cleanup fun
 	return notifyCtx, cancel
 }
 
-// handleGetOrCreateError maps a router.GetOrCreate failure into the reply ctx,
+// handleGetOrCreateError maps a failed GetOrCreate (turn.StageSession) into the reply ctx,
 // an optional cleanup, and a Chinese error message (via usermsg.ForSendError
 // so it cannot drift from the WS send_ack path). cleanup is non-nil on the
 // shutdown / context.Canceled branch and MUST be deferred by the caller.
@@ -747,9 +466,11 @@ func (d *Dispatcher) handleGetOrCreateError(
 	return replyCtx, cleanup, errMsg
 }
 
-// handleSendError maps a Capabilities.Send failure into the user-facing error
+// handleSendError maps a failed send (turn.StageSend) into the user-facing error
 // reply, watchdog counter bumps, and metrics increments (#624). It does NOT
 // report whether the error reply landed — that failure is only logged at Warn.
+// Only the turn's primary delivery counts, so a turn answered in two chats
+// counts once.
 func (d *Dispatcher) handleSendError(
 	ctx context.Context,
 	err error,
@@ -757,23 +478,26 @@ func (d *Dispatcher) handleSendError(
 	msg platform.IncomingMessage,
 	p platform.Platform,
 	lg *slog.Logger,
+	primary bool,
 ) {
 	// ErrSessionReset is a user control-flow signal (/new, /clear), not an
 	// error: no extra reply and no /health error-counter bump.
 	if errors.Is(err, clierr.ErrSessionReset) {
 		return
 	}
-	d.replyErrorCount.Add(1)
-	dispatchReplyErrorTotal.Add(1)
 	lg.Error("send to claude", "err", err)
 	// usermsg.UserMessage renders the configured timeout durations in
 	// Chinese (dashboard uses the generic ForSendError). Watchdog counters
 	// stay here because the IM side owns that configuration.
-	switch {
-	case errors.Is(err, clierr.ErrNoOutputTimeout):
-		d.watchdogNoOutputKills.Add(1)
-	case errors.Is(err, clierr.ErrTotalTimeout):
-		d.watchdogTotalKills.Add(1)
+	if primary {
+		d.replyErrorCount.Add(1)
+		dispatchReplyErrorTotal.Add(1)
+		switch {
+		case errors.Is(err, clierr.ErrNoOutputTimeout):
+			d.watchdogNoOutputKills.Add(1)
+		case errors.Is(err, clierr.ErrTotalTimeout):
+			d.watchdogTotalKills.Add(1)
+		}
 	}
 	errMsg := usermsg.UserMessage(err, key, d.noOutputTimeout, d.totalTimeout)
 	// IM-only emoji decoration for the timeout cases. Other surfaces
@@ -791,133 +515,6 @@ func (d *Dispatcher) handleSendError(
 		d.sendFailCount.Add(1)
 		dispatchSendFailTotal.Add(1)
 		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
-	}
-}
-
-// sendAndReply performs one turn: GetOrCreate session, send message, deliver reply.
-// isFirst indicates whether this is the first message (triggers takeover/session-new
-// notifications); queued follow-ups skip these.
-func (d *Dispatcher) sendAndReply(
-	ctx context.Context,
-	key, text string,
-	images []clievent.Attachment,
-	agentID string,
-	opts sessionview.AgentOpts,
-	msg platform.IncomingMessage,
-	lg *slog.Logger,
-	isFirst bool,
-) {
-	// Takeover only on the first message. The bool result is ignored: on
-	// success the external session was registered for resume and GetOrCreate
-	// rebuilds with it; on false GetOrCreate spawns fresh. Same caller flow.
-	if isFirst {
-		_ = d.caps.Takeover(ctx, sessionkey.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
-	}
-
-	sess, sessStatus, err := d.router.GetOrCreate(ctx, key, opts)
-	if err != nil {
-		replyCtx, cleanup, errMsg := d.handleGetOrCreateError(ctx, err, lg)
-		if cleanup != nil {
-			defer cleanup()
-		}
-		d.replyText(replyCtx, msg, errMsg, lg)
-		return
-	}
-
-	p := d.platforms[msg.Platform]
-	if p == nil {
-		lg.Error("unknown platform")
-		return
-	}
-
-	// Session lifecycle notifications only on first message.
-	if isFirst {
-		if sessStatus == sessionview.SessionNew && platform.SupportsInterimMessages(p) {
-			d.replyText(ctx, msg, "新会话已创建（之前的上下文已失效）。", lg)
-		}
-	}
-
-	tracker := newIMEventTracker(ctx, p, msg.ChatID, msg.ChatType, agentID)
-	defer tracker.stop()
-
-	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)
-	if err != nil {
-		d.handleSendError(ctx, err, key, msg, p, lg)
-		return
-	}
-
-	lg.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD,
-		"merged_count", result.MergedCount, "merged_with_head", result.MergedWithHead)
-
-	// Passthrough merge fan-out: follower slots get MergedCount>1 and empty
-	// Text; the head slot delivered the reply, so followers surface a short
-	// "合并" hint on the user's message instead.
-	if result.MergedCount > 1 && result.Text == "" {
-		// A follower's tracker may already have posted a "💭思考中…" banner
-		// (interim fan-out claims all slots); with no final text it would be
-		// orphaned, so collapse it into the merge hint (#2290).
-		tracker.waitReady(ctx)
-		// Finalize before the edit so a late editLoop redraw does not
-		// overwrite the hint with the stale banner (#2338).
-		tracker.markFinalized()
-		if msgID := tracker.getThinkingMsgID(); msgID != "" {
-			if err := p.EditMessage(ctx, msgID, "已合并到上一条回复。"); err != nil {
-				slog.Debug("merge follower banner edit failed", "msg_id", msgID, "err", err)
-			}
-		}
-		d.ackMergedFollower(ctx, msg, key, result.MergedCount, lg)
-		d.markReplySuccess()
-		return
-	}
-
-	// Record success regardless of text length: an empty result (tool-only
-	// turn) is still a healthy roundtrip for /health's lastReplySuccess.
-	d.markReplySuccess()
-
-	replyText := d.decorateReplyText(result, sess)
-	outImages, replyText := d.readTurnImages(replyText)
-
-	// Passthrough turns are bound to d.stopCtx; if SIGTERM lands between
-	// Send returning and delivery, a Done ctx would silently drop the answer.
-	// Swap to the shutdown-budget ctx like the error paths (#2316).
-	ctx, cleanup := resolveReplyCtx(ctx)
-	if cleanup != nil {
-		defer cleanup()
-	}
-
-	tracker.waitReady(ctx)
-
-	// Finalize before the final edit so a late editLoop redraw cannot
-	// overwrite the real answer with stale interim status (#2291).
-	tracker.markFinalized()
-
-	// AskUserQuestion: `claude -p` auto-rejects the tool and emits a bailout
-	// text redundant with the card; replace it with a wait-hint on the banner
-	// so the IM view is card + one "waiting" line. Dashboard renders the card
-	// natively, so suppressing the text only drops a duplicate bubble.
-	if tracker.askQuestionFired.Load() {
-		if msgID := tracker.getThinkingMsgID(); msgID != "" {
-			// Best-effort; log and move on.
-			if err := p.EditMessage(ctx, msgID, "⏳ 等待你的选择…"); err != nil {
-				slog.Debug("ask_question: banner edit failed", "err", err)
-			}
-		}
-		lg.Info("ask_question suppressed redundant reply", "result_len", len(result.Text))
-	} else if replyText != "" {
-		if msgID := tracker.getThinkingMsgID(); msgID != "" {
-			if err := p.EditMessage(ctx, msgID, replyText); err != nil {
-				slog.Warn("edit message failed, sending new", "err", err)
-				d.SendSplitReply(ctx, p, msg.ChatID, replyText)
-			}
-		} else {
-			d.SendSplitReply(ctx, p, msg.ChatID, replyText)
-		}
-	}
-
-	// outImages derive from replyText; when the card suppresses the text,
-	// suppress its images too or orphaned bubbles follow the card (#1959).
-	if !tracker.askQuestionFired.Load() {
-		d.sendOutboundImages(ctx, p, msg.ChatID, outImages)
 	}
 }
 
@@ -973,7 +570,7 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 // decorateReplyText post-processes the raw CLI result text for IM delivery:
 // redacts secrets, localises API errors, appends the merge-group chip and the
 // per-session ReplyFooter. Returns "" when nothing should be sent (#656).
-func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess Session) string {
+func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Session) string {
 	// Redact credential shapes (sk-ant-, ghp_, AKIA, …) BEFORE localising so
 	// an echoed plaintext token never reaches the IM channel (#1571).
 	replyText := localizeAPIError(textutil.RedactSecrets(result.Text))

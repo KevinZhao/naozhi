@@ -32,8 +32,9 @@ type inflight struct {
 
 // receiversFor groups batch by Sink in first-appearance order: a group's
 // first member is its head and the rest are its Mates. owner joins as an
-// Observer when no batch member shares its sink (#3004 分叉 19a). Requests
-// with a nil Origin receive nothing.
+// Observer when no batch member shares its sink (#3004 分叉 19a); the
+// receiver on owner's sink is the Primary. Requests with a nil Origin
+// receive nothing.
 func receiversFor(owner Origin, batch []Msg, first bool) []*receiver {
 	var out []*receiver
 	bySink := make(map[string]*receiver, len(batch))
@@ -50,8 +51,13 @@ func receiversFor(owner Origin, batch []Msg, first bool) []*receiver {
 		bySink[sink] = r
 		out = append(out, r)
 	}
-	if owner != nil && bySink[owner.Sink()] == nil {
-		out = append(out, &receiver{origin: owner, info: TurnInfo{Role: RoleObserver, Merged: len(batch)}})
+	if owner == nil {
+		return out
+	}
+	if r := bySink[owner.Sink()]; r != nil {
+		r.info.Primary = true
+	} else {
+		out = append(out, &receiver{origin: owner, info: TurnInfo{Role: RoleObserver, Merged: len(batch), Primary: true}})
 	}
 	return out
 }

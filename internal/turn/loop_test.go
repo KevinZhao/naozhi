@@ -107,8 +107,13 @@ func TestOwnerLoop_OneDeliveryPerSink(t *testing.T) {
 			t.Fatalf("%s recorded %d times; members of one sink must share the head's delivery", ev, n)
 		}
 	}
-	if infos := b.turnInfos(); len(infos) != 1 || len(infos[0].Mates) != 2 || infos[0].Mates[0] != c || infos[0].Mates[1] != d {
-		t.Fatalf("head TurnInfo = %+v, want Mates [c d]", infos)
+	if infos := b.turnInfos(); len(infos) != 1 || len(infos[0].Mates) != 2 || infos[0].Mates[0] != c || infos[0].Mates[1] != d || !infos[0].Primary {
+		t.Fatalf("head TurnInfo = %+v, want the Primary (owner a's sink) with Mates [c d]", infos)
+	}
+	for _, w := range []*fakeOrigin{w1, w2} {
+		if infos := w.turnInfos(); len(infos) != 1 || infos[0].Primary {
+			t.Fatalf("%s TurnInfo = %+v, want one non-Primary head (not the owner's sink)", w.name, infos)
+		}
 	}
 	if n := h.rec.count("finish:b:done"); n != 1 {
 		t.Fatalf("http sink finished %d times, want 1", n)
@@ -141,9 +146,9 @@ func TestOwnerLoop_OwnerObservesBatchItIsNotIn(t *testing.T) {
 	adm.wg.Wait()
 
 	infos := owner.turnInfos()
-	if len(infos) != 2 || infos[0].Role != RoleHead || !infos[0].First || infos[0].Merged != 1 ||
-		infos[1].Role != RoleObserver || infos[1].First || infos[1].Merged != 2 || len(infos[1].Mates) != 0 {
-		t.Fatalf("owner TurnInfos = %+v, want [First head of 1, non-First observer of a 2-request batch]", infos)
+	if len(infos) != 2 || infos[0].Role != RoleHead || !infos[0].First || infos[0].Merged != 1 || !infos[0].Primary ||
+		infos[1].Role != RoleObserver || infos[1].First || infos[1].Merged != 2 || len(infos[1].Mates) != 0 || !infos[1].Primary {
+		t.Fatalf("owner TurnInfos = %+v, want [First Primary head of 1, non-First Primary observer of a 2-request batch]", infos)
 	}
 	want := "re:" + h.s.texts()[1]
 	if got := owner.finished(); len(got) != 2 || got[1].Stage != StageDone || got[1].Result == nil || got[1].Result.Text != want {

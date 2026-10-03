@@ -15,15 +15,8 @@ import (
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/projectapi"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
+	"github.com/naozhi/naozhi/internal/turn"
 )
-
-// Session is what the dispatcher reads off the session the router hands it:
-// the backend, for the reply footer. The value otherwise travels unchanged
-// to Capabilities.Send, and the host that produced it (server) reads the
-// rest.
-type Session interface {
-	Backend() string
-}
 
 // KeyResolver is the *session.KeyResolver surface the dispatcher uses: the
 // routed key and opts for a chat, the bare key, and the chat's project
@@ -34,26 +27,25 @@ type KeyResolver interface {
 	ProjectBindingForChat(platform, chatType, chatID string) projectapi.ProjectBinding
 }
 
-// SessionRouter is the subset of *session.Router that Dispatcher uses. The
-// router's own GetOrCreate returns the concrete session, so production passes
-// an adapter (server's dispatchRouter); a missing session must arrive as a
-// nil interface.
+// SessionRouter is the subset of *session.Router that Dispatcher's slash
+// commands use; turns go through Turns. *session.Router satisfies it.
 // Adding a new Router call from dispatch requires extending this interface —
 // kept small so growth is visible in review.
 type SessionRouter interface {
-	GetOrCreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, sessionview.SessionStatus, error)
-	// DiscardPassthroughPending clears in-flight passthrough sends for the
-	// keyed session (no-op when absent). Routed through the interface so
-	// discardQueue never touches the session itself (#1612).
-	DiscardPassthroughPending(key string, reason error)
-	Reset(key string)
 	Workspace(chatKey string) string
-	SetWorkspace(chatKey, path string)
 	// ResetChatAndSetWorkspace atomically resets the chat and installs a new
 	// workspace override (#2342) — used by /cd to avoid the reset/set race.
 	ResetChatAndSetWorkspace(chatKeyPrefix, path string)
 	InterruptSessionViaControl(key string) sessionview.InterruptOutcome
-	NotifyIdle()
+}
+
+// Turns is the *turn.Orchestrator surface the dispatcher submits IM turns
+// through: every message, /urgent, and the /new and /clear resets.
+type Turns interface {
+	Submit(ctx context.Context, r turn.Request, a turn.Admission) turn.Ack
+	Reset(ctx context.Context, key string, discardOverride bool)
+	// ShouldNotify rate-limits the queued and busy text notices per key.
+	ShouldNotify(key string) bool
 }
 
 // ProjectStore is the subset of *project.Manager that Dispatcher's slash-

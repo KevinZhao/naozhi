@@ -160,40 +160,15 @@ func (e *sendEngine) TrackSend() (release func(), shuttingDown bool) {
 	return e.wg.Done, false
 }
 
-// drain cancels the engine's ctx, closes the send admission window and waits
-// for the goroutines registered through TrackSend. Idempotent: cancel is,
-// closed is a monotonic bool under trackMu, and WaitGroup.Wait tolerates
-// concurrent callers.
-//
-// Barrier semantics: a racing TrackSend lands on one side of the closed store;
-// afterwards nobody Adds, so wg.Wait cannot be escaped.
-//
-// It does NOT cover serverCaps.Send (send_dispatch_adapter.go) — the IM / cron
-// entry is a synchronous call that never registers on wg.
-//
-// CALL-SITE PRECONDITIONS (all three are hard; violating one either hangs
-// Shutdown forever or lets a broadcast run past it, and -race cannot see
-// either because neither is a data race):
-//
-//  1. The caller's own ctx is cancelled (h.cancel() for the Hub's WS remote
-//     proxies, which TrackSend under h.ctx). drain cancels e.ctx itself, which
-//     covers the engine's goroutines; a tracked goroutine under an uncancelled
-//     ctx makes wg.Wait block for the full remote-RPC timeout
-//     (remoteNodeProxyTimeout for the WS path).
-//  2. The broadcaster is already closed. The waited goroutines call
-//     BroadcastSessionsUpdate through sendNotifier, and a trigger that opens
-//     a debounce window takes a bcast.pending slot — a send goroutine can
-//     enlarge it. Draining before bcast.close() arms a callback that runs
-//     after Shutdown has drained the subscriber registry.
-//  3. The caller holds NONE of the subscriber registry's locks or the
-//     debouncer's. The waited goroutines re-enter them through sendNotifier
-//     (BroadcastSessionReady / broadcastState → the registry's authMu,
-//     BroadcastSessionsUpdate → debouncer.trigger). Calling drain while
-//     holding any of them is a deterministic deadlock: the in-flight
-//     goroutine blocks on that lock while Shutdown holds it waiting for wg.
-//
-// It must also run before the node connections are closed, so an in-flight
-// remote RPC cannot write to a closed nc.conn.
+// drain cancels the engine's ctx, closes TrackSend's admission window and
+// waits for every goroutine it admitted; idempotent. IM turns run untracked.
+// Three hard preconditions, invisible to -race (send-engine-extraction.md §3):
+// the caller's own ctx is cancelled (h.cancel() for the WS remote proxies),
+// else wg.Wait sits out a remote RPC's timeout; the broadcaster is closed,
+// else a waited BroadcastSessionsUpdate arms a debounce callback past
+// Shutdown; the caller holds none of the subscriber registry's or
+// debouncer's locks, which the waited goroutines re-enter (deadlock). It
+// runs before the node connections close, so no RPC writes a closed conn.
 func (e *sendEngine) drain() {
 	e.cancel()
 	e.trackMu.Lock()

@@ -30,7 +30,7 @@ func resolveOrFabricateKeyResolver(cfg DispatcherConfig) KeyResolver {
 	if cfg.Resolver != nil {
 		return cfg.Resolver
 	}
-	if rs, ok := cfg.Router.(routerResolverSource); ok {
+	if rs, ok := cfg.Router.(routerResolverSource); ok && !isNilInterface(cfg.Router) {
 		if r := rs.Resolver(); r != nil {
 			return r
 		}
