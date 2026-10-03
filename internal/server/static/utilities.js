@@ -7,14 +7,9 @@ import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_util.js';
 import { wsm } from './ws_manager.js';
-import { getToken, lsSet } from './platform.js';
+import { authHeaders, getToken, lsSet } from './platform.js';
 import { sid } from './session_ident.js';
 import { featureForBackend } from './features.js';
-
-// Late-bound hooks: assigned by the code below, read by other modules at event
-// time (never at load time) — the shape they had as dashboard module-scope
-// lets before this extraction.
-let costSummaryCache = null;
 
 // --- Utilities ---
 
@@ -269,43 +264,53 @@ function buildCostHealthLines(c) {
 }
 
 // costCardTitle explains what the ledger figure is (and is not): a CLI
-// estimate at list/contract price, never an invoice.
-function costCardTitle(c) {
-  let t = '近 30 天账本合计（会话 + cron + 云沙箱），CLI 估算口径，非账单';
+// estimate at list/contract price, never an invoice. `scope` says what the
+// figure sums.
+function costCardTitle(c, scope = '会话 + cron + 云沙箱') {
+  let t = '近 30 天账本合计（' + scope + '），CLI 估算口径，非账单';
   if (c.unknown > 0) t += '；含 ' + c.unknown + ' 条未知定价（模型不在 CLI 价表，按默认模型估算）';
   if (c.dropped > 0) t += '；账本曾丢弃 ' + c.dropped + ' 条，金额可能偏低';
   return t;
 }
 
-// refreshCostSummary pulls the ledger's last-30-day totals at most once per
-// 30 s (attempts, not successes, so a failing endpoint is not hammered on
-// every repaint), one fetch in flight at a time, and resolves true when the
-// cache took a new snapshot, so the caller can repaint. Failures keep the
-// previous snapshot (or the session-sum fallback) — never blank the card.
+// refreshCostSummary pulls the ledger's last-30-day totals, for the whole
+// ledger or one session key (a daemon books under sys:<name>), into
+// costSummaries. Each key is asked at most once per 30 s (attempts, not
+// successes, so a failing endpoint is not hammered on every repaint), one
+// fetch in flight at a time; resolves true when the key took a new snapshot,
+// so the caller can repaint. Failures keep the previous snapshot.
 const COST_SUMMARY_TTL_MS = 30 * 1000;
-let costSummaryLastAttempt = 0;
-let costSummaryInFlight = false;
-async function refreshCostSummary() {
+const costSummaries = new Map();
+async function refreshCostSummary(sessionKey = '') {
+  let e = costSummaries.get(sessionKey);
+  if (!e) costSummaries.set(sessionKey, e = { at: 0, inFlight: false, c: null });
   const now = Date.now();
-  if (costSummaryInFlight || (now - costSummaryLastAttempt) < COST_SUMMARY_TTL_MS) return false;
-  costSummaryLastAttempt = now;
-  costSummaryInFlight = true;
+  if (e.inFlight || (now - e.at) < COST_SUMMARY_TTL_MS) return false;
+  e.at = now;
+  e.inFlight = true;
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const to = new Date();
-    const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
-    const resp = await fetch(NZ_CONTRACT.API.cost_summary + '?group_by=unit&from=' + encodeURIComponent(from.toISOString()) +
-      '&to=' + encodeURIComponent(to.toISOString()), { headers });
-    if (!resp.ok) return false;
-    costSummaryCache = summarizeCostBuckets(await resp.json());
+    const data = await fetchCostSummary('group_by=unit' + (sessionKey ? '&session_key=' + encodeURIComponent(sessionKey) : ''));
+    if (!data) return false;
+    e.c = summarizeCostBuckets(data);
     return true;
   } catch (_) {
     return false;
   } finally {
-    costSummaryInFlight = false;
+    e.inFlight = false;
   }
+}
+
+// cachedCostSummary is refreshCostSummary(sessionKey)'s last snapshot, or null.
+const cachedCostSummary = (sessionKey = '') => (costSummaries.get(sessionKey) || { c: null }).c;
+
+// fetchCostSummary GETs /api/cost/summary for the last 30 days with `query`
+// (already encoded) and resolves the body, or null on a non-2xx answer.
+async function fetchCostSummary(query) {
+  const to = new Date();
+  const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
+  const resp = await fetch(NZ_CONTRACT.API.cost_summary + '?' + query + '&from=' + encodeURIComponent(from.toISOString()) +
+    '&to=' + encodeURIComponent(to.toISOString()), { headers: authHeaders() });
+  return resp.ok ? resp.json() : null;
 }
 
 // renderServiceOverviewHtml builds the 服务概览 section for the 系统 view:
@@ -319,7 +324,7 @@ async function refreshCostSummary() {
 // credits sub-line for kiro sessions and an honest hover explanation),
 // otherwise the legacy live-session sum labelled as such.
 function costStatHtml(stats) {
-  const c = costSummaryCache;
+  const c = cachedCostSummary();
   if (!c) {
     return '<div class="svc-stat" title="当前会话列表 total_cost 之和（不含已删会话 / cron）">' +
         '<div class="svc-stat-value">' + esc(formatHomeCost(stats.totalCost)) + '</div>' +
@@ -355,7 +360,7 @@ function renderServiceOverviewHtml() {
       costStatHtml(stats) +
     '</div>';
   const healthLines = buildHomeHealthLines(serverInfo.lastStatsSnapshot);
-  for (const l of buildCostHealthLines(costSummaryCache)) healthLines.push(l);
+  for (const l of buildCostHealthLines(cachedCostSummary())) healthLines.push(l);
   const healthHtml = healthLines.length === 0
     ? ''
     : '<div class="svc-health" role="status" aria-label="服务健康">' +
@@ -1384,12 +1389,16 @@ export {
   MAX_LIVE_DOM_EVENTS,
   announce,
   authModalCooldown,
+  cachedCostSummary,
   confirmDialog,
   copyCodeBlock,
   copyEventContent,
+  costCardTitle,
   decodeEscEntities,
   dismissAuthModal,
+  fetchCostSummary,
   formatAbsTime,
+  formatHomeCost,
   formatTimeFull,
   historyDayLabel,
   mainEmptyHtml,
