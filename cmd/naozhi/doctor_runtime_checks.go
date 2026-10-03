@@ -33,7 +33,9 @@ func (d *doctor) loadConfig() (*config.Config, error) {
 // checkCLIBackends runs the `<path> --version` probe startup runs on every
 // configured backend. A failed default is a fail (startup exits when no
 // sibling answers; otherwise every default-bound spawn errors), a failed
-// sibling is a warn. Paths resolve as the invoking user, not the service user.
+// sibling is a warn. A default id with no runtime is graded on the entry
+// startup falls back to (the first registered one). Paths resolve as the
+// invoking user, not the service user.
 func (d *doctor) checkCLIBackends() {
 	cfg, err := d.loadConfig()
 	if err != nil {
@@ -47,7 +49,8 @@ func (d *doctor) checkCLIBackends() {
 		known             bool
 	}
 	var results []result
-	anyHealthy := false
+	anyHealthy, defaultKnown := false, false
+	fallback := -1
 	for _, b := range cfg.EnabledBackends() {
 		profile, ok := backend.Get(b.ID)
 		if !ok {
@@ -59,6 +62,10 @@ func (d *doctor) checkCLIBackends() {
 		v := w.Probe(ctx)
 		cancel()
 		anyHealthy = anyHealthy || v != ""
+		defaultKnown = defaultKnown || b.ID == defaultID
+		if fallback < 0 {
+			fallback = len(results)
+		}
 		results = append(results, result{id: b.ID, path: w.CLIPath, version: v, known: true})
 	}
 	for _, r := range results {
@@ -68,6 +75,8 @@ func (d *doctor) checkCLIBackends() {
 			path = "(no path configured and none found on the install paths / $PATH)"
 		}
 		switch {
+		case !r.known && r.id == defaultID:
+			// Reported below with the fallback's consequence.
 		case !r.known:
 			d.add(category, "warn", "not a registered backend id — startup skips this entry")
 		case r.version != "":
@@ -79,6 +88,22 @@ func (d *doctor) checkCLIBackends() {
 		default:
 			d.add(category, "fail", "default backend: --version failed at "+path+" — startup will refuse to run")
 		}
+	}
+	if defaultKnown {
+		return
+	}
+	category := "cli backend " + defaultID
+	why := "default backend: has no cli.backends entry"
+	if _, ok := backend.Get(defaultID); !ok {
+		why = "default backend: not a registered backend id"
+	}
+	switch {
+	case !anyHealthy:
+		d.add(category, "fail", why+" — startup will refuse to run")
+	case results[fallback].version != "":
+		d.add(category, "warn", why+" — default-bound sessions run on "+results[fallback].id+" instead")
+	default:
+		d.add(category, "fail", why+" — default-bound sessions run on "+results[fallback].id+", whose --version failed")
 	}
 }
 
@@ -100,7 +125,7 @@ func (d *doctor) checkTranscribe() {
 	}
 	checkCreds := d.awsCredentials
 	if checkCreds == nil {
-		checkCreds = transcribe.CheckCredentials
+		checkCreds = settingsEnvCredentials
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
@@ -119,4 +144,13 @@ func (d *doctor) checkTranscribe() {
 	} else {
 		d.add("transcribe ffmpeg", "pass", path)
 	}
+}
+
+// settingsEnvCredentials is transcribe.CheckCredentials after the filtered
+// ~/.claude/settings.json env that startup applies before transcribe.New, so
+// AWS keys supplied there count here as they do for the service. A missing or
+// unreadable settings file leaves the environment as is, as at startup.
+func settingsEnvCredentials(ctx context.Context, region string) (string, error) {
+	_ = applyClaudeEnvSettings(ctx)
+	return transcribe.CheckCredentials(ctx, region)
 }
