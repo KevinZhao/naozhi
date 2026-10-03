@@ -121,9 +121,9 @@ const (
 
 	// shimReconnectGraceDelay is how long the deferred history-load path waits
 	// for ReconnectShims' first pass before backfilling JSONL for a session that
-	// shimManagedKeys() claimed at startup. Covers a shim that exits between the
-	// two Discover() calls; hasInjectedHistory() gates the backfill so the happy
-	// path pays only the wait + a read-lock check.
+	// shimManagedKeys() claimed at startup. Covers a shim that exits between its
+	// Inspect and the first Discover; hasInjectedHistory() gates the backfill so
+	// the happy path pays only the wait + a read-lock check.
 	shimReconnectGraceDelay = 5 * time.Second
 
 	// knownIDsSaveInterval throttles knownIDs fsync to limit disk I/O.

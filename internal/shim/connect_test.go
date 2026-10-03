@@ -320,7 +320,7 @@ func TestConnect_ServerClosesBeforeHello(t *testing.T) {
 func TestDiscover_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	states, err := m.Discover()
+	states, _, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestDiscover_NonExistentDir(t *testing.T) {
 	dir := t.TempDir()
 	nonExistent := filepath.Join(dir, "does_not_exist")
 	m := mustNewManager(t, ManagerConfig{StateDir: nonExistent})
-	states, err := m.Discover()
+	states, _, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestDiscover_SkipsNonJSONFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("not a state"), 0600) //nolint:errcheck
 
 	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	states, err := m.Discover()
+	states, _, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestDiscover_RemovesOnlyStrandedTempFiles(t *testing.T) {
 	}
 
 	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	if _, err := m.Discover(); err != nil {
+	if _, _, err := m.Discover(); err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
 
@@ -396,7 +396,7 @@ func TestDiscover_RemovesCorruptStateFile(t *testing.T) {
 	os.WriteFile(corruptPath, []byte("bad json {{{"), 0600) //nolint:errcheck
 
 	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	states, err := m.Discover()
+	states, _, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestDiscover_RemovesStateWithDeadPID(t *testing.T) {
 	}
 
 	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	states, err := m.Discover()
+	states, _, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestDiscover_RemovesStateWithMissingSocket(t *testing.T) {
 	// by default via mustNewManager → NewManager. That matches /proc/self/exe
 	// so the binary-identity check passes and we hit the socket-stat check.
 	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	states, err := m.Discover()
+	states, _, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
