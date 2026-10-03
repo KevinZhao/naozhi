@@ -448,15 +448,11 @@ func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.
 	return s
 }
 
-// defaultStdioMaxSize is log.stdio_max_size's default: about eleven days of
-// stdout at the INFO volume measured on a live instance.
-const defaultStdioMaxSize = 64 << 20
-
 // addStdioCaps registers the stdout and stderr size caps. Taking the files
 // lets tests hand in regular files; production passes os.Stdout and os.Stderr,
 // which the cap leaves alone unless they are O_APPEND regular files.
 func addStdioCaps(s *datadir.Sweeper, cfg *config.Config, stdout, stderr *os.File) {
-	maxSize := parseBytesOrDefault(cfg.Log.StdioMaxSize, defaultStdioMaxSize)
+	maxSize := cfg.LogStdioMaxSize()
 	if maxSize <= 0 {
 		return
 	}

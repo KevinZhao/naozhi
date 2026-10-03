@@ -80,6 +80,8 @@ type Config struct {
 	cachedShimIdleTimeout     time.Duration      `yaml:"-"`
 	cachedShimWatchdogTimeout time.Duration      `yaml:"-"`
 	cachedShimMaxBufferBytes  int64              `yaml:"-"`
+	cachedStdioMaxSize        int64              `yaml:"-"`
+	stdioCapOff               bool               `yaml:"-"`
 	cachedSysession           sysessionDurations `yaml:"-"`
 }
 

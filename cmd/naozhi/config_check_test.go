@@ -203,6 +203,7 @@ func TestConfigCheck_ReplacedValuesExit1(t *testing.T) {
 		"shim idle timeout": {"session:\n  shim:\n    idle_timeout: 4 hours\n", "session.shim.idle_timeout"},
 		"shim buffer size":  {"session:\n  shim:\n    max_buffer_bytes: 50 megs\n", "session.shim.max_buffer_bytes"},
 		"jsonl max age":     {"sysession:\n  runner:\n    jsonl_max_age: 7d\n", "sysession.runner.jsonl_max_age"},
+		"stdio max size":    {"log:\n  stdio_max_size: 64 megs\n", "log.stdio_max_size"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var out bytes.Buffer

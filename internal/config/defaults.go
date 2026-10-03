@@ -42,6 +42,7 @@ const (
 	defaultShimIdleTimeout      = 4 * time.Hour
 	defaultShimWatchdogTimeout  = 30 * time.Minute
 	defaultShimMaxBufferBytes   = 50 << 20
+	defaultStdioMaxSize         = 64 << 20 // about eleven days of INFO-level stdout
 	defaultSysessionTick        = 30 * time.Second
 	defaultSysessionJSONLMaxAge = 7 * 24 * time.Hour
 )

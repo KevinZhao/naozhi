@@ -24,7 +24,7 @@ func reportFallback(key, action, reason string) {
 
 // resolveFallbackValues parses, once, the values whose consumers fall back
 // instead of failing: the cron time zone, the shim lifetimes and buffer size,
-// and the sysession durations. Load calls it; each unusable value is reported
+// the stdio cap, and the sysession durations. Load calls it; each unusable value is reported
 // and cached as zero, which the accessors turn into the default.
 func resolveFallbackValues(cfg *Config) {
 	if name := strings.TrimSpace(cfg.Cron.Timezone); name != "" && !strings.EqualFold(name, "Local") {
@@ -38,14 +38,11 @@ func resolveFallbackValues(cfg *Config) {
 		"a shim exits after 4h without a client")
 	cfg.cachedShimWatchdogTimeout, _ = fallbackDuration(shim.WatchdogTimeout, "session.shim.disconnect_watchdog", false,
 		"the disconnect watchdog fires after 30m")
-	if s := shim.MaxBufferBytes; s != "" {
-		if n, ok := parseByteSize(s); ok && n > 0 {
-			cfg.cachedShimMaxBufferBytes = n
-		} else {
-			reportFallback("session.shim.max_buffer_bytes", "fallback",
-				"not a positive size such as 50MB; the ring buffer holds 50MB")
-		}
-	}
+	cfg.cachedShimMaxBufferBytes, _ = fallbackSize(shim.MaxBufferBytes, "session.shim.max_buffer_bytes", false,
+		"the ring buffer holds 50MB")
+	stdioMax, set := fallbackSize(cfg.Log.StdioMaxSize, "log.stdio_max_size", true,
+		"stdout and stderr are capped at 64MB")
+	cfg.cachedStdioMaxSize, cfg.stdioCapOff = stdioMax, set && stdioMax == 0
 
 	sys := &cfg.cachedSysession
 	sys.tickTimeout, _ = fallbackDuration(cfg.Sysession.TickTimeout, "sysession.tick_timeout", false,
@@ -87,6 +84,23 @@ func fallbackDuration(s, key string, zeroOK bool, uses string) (d time.Duration,
 	want := "a positive duration"
 	if zeroOK {
 		want = "a duration of 0 or more"
+	}
+	reportFallback(key, "fallback", "not "+want+"; "+uses)
+	return 0, false
+}
+
+// fallbackSize is fallbackDuration for a byte size such as "50MB".
+func fallbackSize(s, key string, zeroOK bool, uses string) (n int64, set bool) {
+	if s == "" {
+		return 0, false
+	}
+	n, ok := parseByteSize(s)
+	if ok && (n > 0 || (zeroOK && n == 0)) {
+		return n, true
+	}
+	want := "a positive size such as 50MB"
+	if zeroOK {
+		want = "a size such as 64MB, or 0"
 	}
 	reportFallback(key, "fallback", "not "+want+"; "+uses)
 	return 0, false

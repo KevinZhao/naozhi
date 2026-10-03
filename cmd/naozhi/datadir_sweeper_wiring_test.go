@@ -154,8 +154,7 @@ func TestSweeperRegistersTheStdioCaps(t *testing.T) {
 	if !slices.Contains(names, "stdio-stdout") || !slices.Contains(names, "stdio-stderr") {
 		t.Errorf("default config registers %v, want stdio-stdout and stdio-stderr", names)
 	}
-	off := &config.Config{}
-	off.Log.StdioMaxSize = "0"
+	off := loadConfigBody(t, "log:\n  stdio_max_size: \"0\"\n")
 	for _, n := range newDataDirSweeper(off, layout, nil, "").Names() {
 		if strings.HasPrefix(n, "stdio-") {
 			t.Errorf("stdio_max_size \"0\" still registers %s", n)

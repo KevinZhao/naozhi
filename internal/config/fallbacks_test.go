@@ -46,6 +46,10 @@ func TestLoad_ReportsReplacedValues(t *testing.T) {
 		{"ref ttl negative", "sysession:\n  daemons:\n    attachment_gc:\n      ref_ttl: -1h\n",
 			"sysession.daemons.attachment_gc.ref_ttl", "fallback",
 			func(c *Config) bool { return c.SysessionDaemonDurations("attachment_gc").RefTTL == 0 }},
+		{"stdio max size", "log:\n  stdio_max_size: 64 megs\n", "log.stdio_max_size", "fallback",
+			func(c *Config) bool { return c.LogStdioMaxSize() == 64<<20 }},
+		{"stdio max size negative", "log:\n  stdio_max_size: -1MB\n", "log.stdio_max_size", "fallback",
+			func(c *Config) bool { return c.LogStdioMaxSize() == 64<<20 }},
 		{"jsonl max age", "sysession:\n  runner:\n    jsonl_max_age: 7d\n", "sysession.runner.jsonl_max_age", "fallback",
 			func(c *Config) bool { return c.SysessionJSONLMaxAge() == 7*24*time.Hour }},
 		{"jsonl max age negative", "sysession:\n  runner:\n    jsonl_max_age: -1h\n", "sysession.runner.jsonl_max_age", "fallback",
@@ -101,6 +105,7 @@ func TestLoad_ValidValuesAreNotReported(t *testing.T) {
 // main used to hard-code, and a zero-value Config (no Load) reads the same.
 func TestLoad_FallbackValuesParsedOnce(t *testing.T) {
 	body := "session:\n  shim:\n    idle_timeout: 2h\n    disconnect_watchdog: 45m\n    max_buffer_bytes: 1gb\n" +
+		"log:\n  stdio_max_size: \"0\"\n" +
 		"sysession:\n  tick_timeout: 45s\n  runner:\n    jsonl_max_age: \"0\"\n  daemons:\n" +
 		"    auto_titler:\n      tick: 1m\n      min_rename_interval: 10m\n" +
 		"    attachment_gc:\n      upload_ttl: \"0\"\n      ref_ttl: 720h\n"
@@ -121,6 +126,7 @@ func TestLoad_FallbackValuesParsedOnce(t *testing.T) {
 		{"ShimIdleTimeout", cfg.ShimIdleTimeout(), 2 * time.Hour},
 		{"ShimWatchdogTimeout", cfg.ShimWatchdogTimeout(), 45 * time.Minute},
 		{"ShimMaxBufferBytes", cfg.ShimMaxBufferBytes(), int64(1 << 30)},
+		{"LogStdioMaxSize (\"0\" turns the cap off)", cfg.LogStdioMaxSize(), int64(0)},
 		{"SysessionTickTimeout", cfg.SysessionTickTimeout(), 45 * time.Second},
 		{"SysessionJSONLMaxAge (\"0\" turns the sweep off)", cfg.SysessionJSONLMaxAge(), time.Duration(0)},
 		{"auto_titler tick", at.Tick, time.Minute},
@@ -137,14 +143,18 @@ func TestLoad_FallbackValuesParsedOnce(t *testing.T) {
 	if got := mustLoad(t, "sysession:\n  runner:\n    jsonl_max_age: 48h\n").SysessionJSONLMaxAge(); got != 48*time.Hour {
 		t.Errorf("SysessionJSONLMaxAge with jsonl_max_age 48h = %v, want 48h", got)
 	}
+	if got := mustLoad(t, "log:\n  stdio_max_size: 8MB\n").LogStdioMaxSize(); got != 8<<20 {
+		t.Errorf("LogStdioMaxSize with stdio_max_size 8MB = %d, want 8MB", got)
+	}
 
 	for name, c := range map[string]*Config{"empty file": mustLoad(t, ""), "zero value": {}} {
 		if c.ShimIdleTimeout() != 4*time.Hour || c.ShimWatchdogTimeout() != 30*time.Minute ||
 			c.ShimMaxBufferBytes() != 50<<20 || c.SysessionTickTimeout() != 30*time.Second ||
-			c.SysessionJSONLMaxAge() != 7*24*time.Hour || c.SysessionDaemonDurations("x").Tick != 30*time.Second {
-			t.Errorf("%s: defaults not applied: idle=%v watchdog=%v buf=%d tick_timeout=%v jsonl=%v tick=%v", name,
+			c.SysessionJSONLMaxAge() != 7*24*time.Hour || c.SysessionDaemonDurations("x").Tick != 30*time.Second ||
+			c.LogStdioMaxSize() != 64<<20 {
+			t.Errorf("%s: defaults not applied: idle=%v watchdog=%v buf=%d tick_timeout=%v jsonl=%v tick=%v stdio=%d", name,
 				c.ShimIdleTimeout(), c.ShimWatchdogTimeout(), c.ShimMaxBufferBytes(), c.SysessionTickTimeout(),
-				c.SysessionJSONLMaxAge(), c.SysessionDaemonDurations("x").Tick)
+				c.SysessionJSONLMaxAge(), c.SysessionDaemonDurations("x").Tick, c.LogStdioMaxSize())
 		}
 	}
 }
