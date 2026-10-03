@@ -300,7 +300,7 @@ func decodeRecords(ctx context.Context, br *bufio.Reader, path string, out *[]cl
 		// stampUUID, and persist's gap record, UUID-less by design (see
 		// persist.gapEntryJSON). Any other miss flags a producer bug or a
 		// hand-edited file: keep the entry (dropping would lose history) and
-		// count it for one summary warning per read.
+		// count it for one summary warning per decode pass.
 		if entry.UUID == "" && entry.Type != clievent.KindPersistGap {
 			if missing == 0 {
 				firstSeq, firstTime = rec.Seq, entry.Time
