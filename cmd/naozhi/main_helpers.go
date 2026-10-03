@@ -541,3 +541,14 @@ func addStdioCaps(s *datadir.Sweeper, cfg *config.Config, stdout, stderr *os.Fil
 // immediately at startup so a long-lived instance is not the only thing that
 // gets swept.
 const dataDirSweepInterval = time.Hour
+
+// newProjectManager builds the project manager for cfg.Projects; the caller
+// checks Root != "" and runs the first Scan.
+func newProjectManager(cfg *config.Config, layout datadir.Layout) (*project.Manager, error) {
+	return project.NewManager(osutil.ExpandHome(cfg.Projects.Root), project.PlannerDefaults{
+		Model:  cfg.Projects.PlannerDefaults.Model,
+		Prompt: cfg.Projects.PlannerDefaults.Prompt,
+	}, project.WithIncludeRoot(cfg.Projects.IncludeRoot),
+		project.WithExclude(cfg.Projects.Exclude),
+		project.WithIndexPath(layout.ProjectsIndexPath()))
+}

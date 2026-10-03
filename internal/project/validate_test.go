@@ -141,3 +141,39 @@ func TestValidateProjectName(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateExcludePattern(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		pattern string
+		ok      bool
+	}{
+		{"archive", true},
+		{"tmp-*", true},
+		{"build?", true},
+		{"[a-c]*", true},
+		{"[*]", true},
+		{`\*`, true},
+		{"项目*", true},
+		{".cache", true},
+
+		{"", false},
+		{"[", false},
+		{"[a-", false},
+		{"tmp-*[", false},
+		{"build-*[a-", false},
+		{`a*\`, false},
+		{"a/b", false},
+		{"*/", false},
+		{"a\x00b", false},
+		{"a\nb", false},
+		{"a\u202eb", false},
+		{strings.Repeat("a", MaxProjectNameBytes+1), false},
+	}
+	for _, c := range cases {
+		err := ValidateExcludePattern(c.pattern)
+		if (err == nil) != c.ok {
+			t.Errorf("ValidateExcludePattern(%q) = %v, want ok=%v", c.pattern, err, c.ok)
+		}
+	}
+}

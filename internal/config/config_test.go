@@ -641,6 +641,25 @@ func TestValidateConfig_ModelInjection(t *testing.T) {
 	}
 }
 
+// projects.exclude round-trips from YAML, and a pattern filepath.Match would
+// reject or one holding a path separator fails Load, naming its index.
+func TestLoad_ProjectsExclude(t *testing.T) {
+	t.Parallel()
+	cfg, err := Load(writeCfg(t, "projects:\n  root: /tmp\n  exclude: [\"tmp-*\", archive]\n"))
+	if err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if got := cfg.Projects.Exclude; len(got) != 2 || got[0] != "tmp-*" || got[1] != "archive" {
+		t.Errorf("Projects.Exclude = %q, want [tmp-* archive]", got)
+	}
+	for _, bad := range []string{`"["`, `"tmp-*["`, `"a/b"`, `""`} {
+		_, err := Load(writeCfg(t, "projects:\n  root: /tmp\n  exclude: [ok, "+bad+"]\n"))
+		if err == nil || !strings.Contains(err.Error(), "projects.exclude[1]") {
+			t.Errorf("Load(exclude %s) = %v, want a projects.exclude[1] error", bad, err)
+		}
+	}
+}
+
 // TestValidateConfig_UpstreamTokenSentinel pins R164029-SEC-4: an upstream
 // token set to the example placeholder "your-secret-token" must be rejected
 // by validateConfig to prevent operators from accidentally deploying with the

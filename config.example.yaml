@@ -385,6 +385,11 @@ projects:
   root: "/path/to/your/workspace"
   planner_defaults:
     model: "sonnet"
+  # Every non-hidden subdirectory of root is a project. exclude opts more out:
+  # basename globs (filepath.Match: * ? [a-z]; no "/"), matched case-sensitively
+  # against each direct subdirectory. A discovery filter only: include_root
+  # still spans excluded directories.
+  # exclude: ["tmp-*", "archive"]
   # Two SINGLE-OPERATOR opt-ins, both default false. Leave them off on any
   # shared / multi-operator deployment or wherever the dashboard token is
   # shared: the token is the only barrier, and both widen what an
