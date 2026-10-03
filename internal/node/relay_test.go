@@ -176,6 +176,24 @@ func TestWSRelay_Close_idempotent(t *testing.T) {
 	relay.Close() // must not panic
 }
 
+// TestWSRelay_CloseForgetsBook: Close releases every sink, watermark and
+// remote-drop mark the relay held.
+func TestWSRelay_CloseForgetsBook(t *testing.T) {
+	relay := newWSRelay(NewHTTPClient("n", "http://127.0.0.1:1", "", ""))
+	relay.mu.Lock()
+	relay.book.add(&mockSink{id: 1}, "key1", 500)
+	relay.remoteDropped["key1"] = true
+	relay.mu.Unlock()
+
+	relay.Close()
+
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	if n, m, d := len(relay.book.subs), len(relay.book.lastEvent), len(relay.remoteDropped); n != 0 || m != 0 || d != 0 {
+		t.Fatalf("after Close: %d keys with sinks, %d watermarks, %d remote-drop marks; want none", n, m, d)
+	}
+}
+
 // ---- Close during concurrent dial does not leak goroutine ----
 
 func TestWSRelay_Close_duringDial_noLeak(t *testing.T) {
@@ -272,8 +290,8 @@ func TestWSRelay_RemoveClient(t *testing.T) {
 	relay.RemoveClient(sink1)
 
 	relay.mu.Lock()
-	key1 := append([]EventSink(nil), relay.subs["key1"]...)
-	_, key2Left := relay.subs["key2"]
+	key1 := append([]EventSink(nil), relay.book.subs["key1"]...)
+	_, key2Left := relay.book.subs["key2"]
 	relay.mu.Unlock()
 
 	for _, s := range key1 {

@@ -250,7 +250,7 @@ func TestReverseConn_ReadLoop_event(t *testing.T) {
 
 	sink := &mockSink{id: 1}
 	rc.subMu.Lock()
-	rc.subs["mykey"] = []EventSink{sink}
+	rc.book.subs["mykey"] = []EventSink{sink}
 	rc.subMu.Unlock()
 
 	event := &clievent.EventEntry{Time: 1234, Type: "text", Summary: "hello"}
@@ -273,7 +273,7 @@ func TestReverseConn_ReadLoop_subscribed(t *testing.T) {
 
 	sink := &mockSink{id: 1}
 	rc.subMu.Lock()
-	rc.subs["mykey"] = []EventSink{sink}
+	rc.book.subs["mykey"] = []EventSink{sink}
 	rc.subMu.Unlock()
 
 	wsConn.WriteJSON(ReverseMsg{Type: "subscribed", Key: "mykey"})
@@ -311,7 +311,7 @@ func TestReverseConn_Unsubscribe(t *testing.T) {
 
 	sink := &mockSink{id: 1}
 	rc.subMu.Lock()
-	rc.subs["mykey"] = []EventSink{sink}
+	rc.book.subs["mykey"] = []EventSink{sink}
 	rc.subMu.Unlock()
 
 	go func() {
@@ -342,7 +342,7 @@ func TestReverseConn_RefreshSubscription(t *testing.T) {
 
 	sink := &mockSink{id: 1}
 	rc.subMu.Lock()
-	rc.subs["mykey"] = []EventSink{sink}
+	rc.book.subs["mykey"] = []EventSink{sink}
 	rc.subMu.Unlock()
 
 	msgCh := make(chan ReverseMsg, 2)
@@ -388,8 +388,8 @@ func TestReverseConn_RemoveClient(t *testing.T) {
 	sink2 := &mockSink{id: 2}
 
 	rc.subMu.Lock()
-	rc.subs["key1"] = []EventSink{sink1, sink2}
-	rc.subs["key2"] = []EventSink{sink1}
+	rc.book.subs["key1"] = []EventSink{sink1, sink2}
+	rc.book.subs["key2"] = []EventSink{sink1}
 	rc.subMu.Unlock()
 
 	// Drain wire messages.
@@ -406,12 +406,12 @@ func TestReverseConn_RemoveClient(t *testing.T) {
 	rc.RemoveClient(sink1)
 
 	rc.subMu.Lock()
-	for _, s := range rc.subs["key1"] {
+	for _, s := range rc.book.subs["key1"] {
 		if s == sink1 {
 			t.Error("sink1 should have been removed from key1")
 		}
 	}
-	if _, ok := rc.subs["key2"]; ok {
+	if _, ok := rc.book.subs["key2"]; ok {
 		t.Error("key2 should have been removed since only sink1 was there")
 	}
 	rc.subMu.Unlock()
@@ -816,7 +816,7 @@ func TestReverseConn_ReadLoop_subscribeError(t *testing.T) {
 
 	sink := &mockSink{id: 1}
 	rc.subMu.Lock()
-	rc.subs["badkey"] = []EventSink{sink}
+	rc.book.subs["badkey"] = []EventSink{sink}
 	rc.subMu.Unlock()
 
 	wsConn.WriteJSON(ReverseMsg{Type: "subscribe_error", Key: "badkey", Error: "session not found"})
@@ -829,7 +829,7 @@ func TestReverseConn_ReadLoop_subscribeError(t *testing.T) {
 	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected error event delivered to sink")
 
 	rc.subMu.Lock()
-	_, exists := rc.subs["badkey"]
+	_, exists := rc.book.subs["badkey"]
 	rc.subMu.Unlock()
 	if exists {
 		t.Error("subscribe_error should have removed 'badkey' from subs")
@@ -877,7 +877,7 @@ func TestReverseConn_SubscribeError_KeyRemovalPrecedesDelivery(t *testing.T) {
 
 	sink := newRawGateSink()
 	rc.subMu.Lock()
-	rc.subs["badkey"] = []EventSink{sink}
+	rc.book.subs["badkey"] = []EventSink{sink}
 	rc.subMu.Unlock()
 
 	wsConn.WriteJSON(ReverseMsg{Type: "subscribe_error", Key: "badkey", Error: "session not found"})
@@ -892,7 +892,7 @@ func TestReverseConn_SubscribeError_KeyRemovalPrecedesDelivery(t *testing.T) {
 	// delivered yet. This is exactly the state the old poll loop could
 	// observe before asserting RawMsgCount() != 0.
 	rc.subMu.Lock()
-	_, exists := rc.subs["badkey"]
+	_, exists := rc.book.subs["badkey"]
 	rc.subMu.Unlock()
 	if exists {
 		t.Error("key should already be removed once SendRaw is reached")
@@ -917,7 +917,7 @@ func TestReverseConn_EventsCappedOnPush(t *testing.T) {
 
 	sink := &mockSink{id: 1}
 	rc.subMu.Lock()
-	rc.subs["mykey"] = []EventSink{sink}
+	rc.book.subs["mykey"] = []EventSink{sink}
 	rc.subMu.Unlock()
 
 	// Build 800 events — well above the 500 cap. Each entry carries an
@@ -964,7 +964,7 @@ func TestReverseConn_EventsUnderCapPassesThrough(t *testing.T) {
 
 	sink := &mockSink{id: 1}
 	rc.subMu.Lock()
-	rc.subs["mykey"] = []EventSink{sink}
+	rc.book.subs["mykey"] = []EventSink{sink}
 	rc.subMu.Unlock()
 
 	events := make([]clievent.EventEntry, 100)

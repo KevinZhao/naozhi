@@ -61,7 +61,7 @@ type ReverseConn struct {
 	reqSeq    atomic.Int64
 
 	subMu sync.Mutex
-	subs  map[string][]EventSink // session key → local browser clients
+	book  subBook // guarded by subMu
 
 	// subWG tracks the detached Subscribe history-fetch goroutines so Close()
 	// never returns while one could still SendJSON after teardown (#2294).
@@ -99,7 +99,7 @@ func newReverseConnWithMeta(id, displayName, remoteAddr string, conn *websocket.
 		},
 		conn:       conn,
 		pending:    make(map[string]chan reverseResult),
-		subs:       make(map[string][]EventSink),
+		book:       newSubBook(),
 		status:     "ok",
 		done:       make(chan struct{}),
 		baseCtx:    baseCtx,
@@ -367,12 +367,9 @@ func (c *ReverseConn) ProxyInterruptSession(ctx context.Context, key string) (bo
 
 func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	c.subMu.Lock()
-	alreadySub := len(c.subs[key]) > 0
-	// Same client re-subscribing keeps one entry, or every frame would be
-	// delivered twice; it still gets its `subscribed` ack + history page.
-	if !containsSink(c.subs[key], cl) {
-		c.subs[key] = append(c.subs[key], cl)
-	}
+	// A same-client re-subscribe keeps one entry but still gets its
+	// `subscribed` ack + history page.
+	alreadySub := !c.book.add(cl, key, after)
 	// Add under subMu so Close()'s subWG.Wait() never races it.
 	c.subWG.Add(1)
 	c.subMu.Unlock()
@@ -389,6 +386,7 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 			if err != nil {
 				return
 			}
+			c.observeEntries(key, entries)
 			cl.SendJSON(wsproto.NewSubscribed(wsproto.Subscribed{Key: key, Node: c.id}))
 			if len(entries) > 0 {
 				cl.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Node: c.id, Events: entries, Initial: true}))
@@ -400,7 +398,7 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 		if err := c.writeJSON(ReverseMsg{Type: "subscribe", Key: key, After: after}); err != nil {
 			slog.Warn("reverse subscribe write failed", "node", c.id, "key", key, "err", err)
 			c.subMu.Lock()
-			removeSub(c.subs, key, cl)
+			c.book.remove(cl, key)
 			c.subMu.Unlock()
 			// No history goroutine on this path; release the token.
 			c.subWG.Done()
@@ -420,6 +418,7 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 				slog.Debug("reverse first-subscribe fetch events failed", "node", c.id, "key", key, "err", err)
 				return
 			}
+			c.observeEntries(key, entries)
 			if len(entries) > 0 {
 				cl.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Node: c.id, Events: entries, Initial: true}))
 			}
@@ -432,7 +431,7 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 // a racing Unsubscribe may cause a redundant subscribe the remote tolerates.
 func (c *ReverseConn) RefreshSubscription(key string) {
 	c.subMu.Lock()
-	hasSubs := len(c.subs[key]) > 0
+	hasSubs := c.book.has(key)
 	c.subMu.Unlock()
 	if hasSubs {
 		if err := c.writeJSON(ReverseMsg{Type: "subscribe", Key: key}); err != nil {
@@ -443,7 +442,7 @@ func (c *ReverseConn) RefreshSubscription(key string) {
 
 func (c *ReverseConn) Unsubscribe(cl EventSink, key string) {
 	c.subMu.Lock()
-	empty := removeSub(c.subs, key, cl)
+	empty := c.book.remove(cl, key)
 	c.subMu.Unlock()
 
 	if empty {
@@ -456,7 +455,7 @@ func (c *ReverseConn) Unsubscribe(cl EventSink, key string) {
 
 func (c *ReverseConn) RemoveClient(cl EventSink) {
 	c.subMu.Lock()
-	emptyKeys := removeSubAll(c.subs, cl)
+	emptyKeys := c.book.removeAll(cl)
 	c.subMu.Unlock()
 
 	for _, key := range emptyKeys {
@@ -466,49 +465,42 @@ func (c *ReverseConn) RemoveClient(cl EventSink) {
 	}
 }
 
-// subSnapPool reuses the subscriber snapshot built on every remote event
-// (dozens per second during a turn).
-var subSnapPool = sync.Pool{
-	New: func() any {
-		s := make([]EventSink, 0, 16)
-		return &s
-	},
+// observeEntries advances key's watermark to the newest entry delivered.
+func (c *ReverseConn) observeEntries(key string, entries []clievent.EventEntry) {
+	if t := newestEventTime(entries); t > 0 {
+		c.subMu.Lock()
+		c.book.observe(key, t)
+		c.subMu.Unlock()
+	}
 }
 
-// broadcastToSubs snapshots subscribers for key, marshals out, and sends to all.
-// If deleteKey is true, the key is removed from the subscription map.
-func (c *ReverseConn) broadcastToSubs(key string, out any, deleteKey bool) {
-	c.subMu.Lock()
-	subs := c.subs[key]
-	snapPtr := subSnapPool.Get().(*[]EventSink)
-	clients := *snapPtr
-	if cap(clients) < len(subs) {
-		clients = make([]EventSink, len(subs))
-	} else {
-		clients = clients[:len(subs)]
+func newestEventTime(entries []clievent.EventEntry) int64 {
+	var newest int64
+	for i := range entries {
+		newest = max(newest, entries[i].Time)
 	}
-	copy(clients, subs)
+	return newest
+}
+
+// broadcastToSubs snapshots subscribers for key, marshals out, and sends to
+// all. eventTime > 0 advances key's watermark in the same critical section;
+// deleteKey forgets the key.
+func (c *ReverseConn) broadcastToSubs(key string, out any, eventTime int64, deleteKey bool) {
+	c.subMu.Lock()
+	c.book.observe(key, eventTime)
+	snap := c.book.snapshot(key)
 	if deleteKey {
-		delete(c.subs, key)
+		c.book.drop(key)
 	}
 	c.subMu.Unlock()
 
 	data, err := json.Marshal(out)
 	if err == nil {
-		for _, cl := range clients {
+		for _, cl := range *snap {
 			cl.SendRaw(data)
 		}
 	}
-
-	// Clear pointers so disconnected sinks are not pinned by the pool.
-	for i := range clients {
-		clients[i] = nil
-	}
-	// Never pool an arbitrarily large backing array after a subscriber spike.
-	if cap(clients) <= 256 {
-		*snapPtr = clients[:0]
-		subSnapPool.Put(snapPtr)
-	}
+	releaseSnapshot(snap)
 }
 
 func (c *ReverseConn) readLoop() {
@@ -570,7 +562,11 @@ func (c *ReverseConn) readLoop() {
 			}
 
 		case "event":
-			c.broadcastToSubs(msg.Key, wsproto.NewEvent(wsproto.Event{Key: msg.Key, Event: msg.Event, Node: c.id}), false)
+			var t int64
+			if msg.Event != nil {
+				t = msg.Event.Time
+			}
+			c.broadcastToSubs(msg.Key, wsproto.NewEvent(wsproto.Event{Key: msg.Key, Event: msg.Event, Node: c.id}), t, false)
 
 		case "events":
 			// Keep the tail (most recent) when capping.
@@ -578,16 +574,16 @@ func (c *ReverseConn) readLoop() {
 			if len(events) > maxPushedHistoryEvents {
 				events = events[len(events)-maxPushedHistoryEvents:]
 			}
-			c.broadcastToSubs(msg.Key, wsproto.NewHistory(wsproto.History{Key: msg.Key, Events: events, Node: c.id}), false)
+			c.broadcastToSubs(msg.Key, wsproto.NewHistory(wsproto.History{Key: msg.Key, Events: events, Node: c.id}), newestEventTime(events), false)
 
 		case "session_state":
-			c.broadcastToSubs(msg.Key, wsproto.NewSessionState(wsproto.SessionState{Key: msg.Key, State: msg.State, Reason: truncateLabelUTF8(msg.Reason, maxPushedNodeStringBytes), Node: c.id}), false)
+			c.broadcastToSubs(msg.Key, wsproto.NewSessionState(wsproto.SessionState{Key: msg.Key, State: msg.State, Reason: truncateLabelUTF8(msg.Reason, maxPushedNodeStringBytes), Node: c.id}), 0, false)
 
 		case "subscribed":
-			c.broadcastToSubs(msg.Key, wsproto.NewSubscribed(wsproto.Subscribed{Key: msg.Key, Node: c.id}), false)
+			c.broadcastToSubs(msg.Key, wsproto.NewSubscribed(wsproto.Subscribed{Key: msg.Key, Node: c.id}), 0, false)
 
 		case "subscribe_error":
-			c.broadcastToSubs(msg.Key, wsproto.NewError(wsproto.Error{Key: msg.Key, Node: c.id, Error: truncateLabelUTF8(msg.Error, maxPushedNodeStringBytes)}), true)
+			c.broadcastToSubs(msg.Key, wsproto.NewError(wsproto.Error{Key: msg.Key, Node: c.id, Error: truncateLabelUTF8(msg.Error, maxPushedNodeStringBytes)}), 0, true)
 		}
 	}
 }
@@ -610,6 +606,6 @@ func (c *ReverseConn) markDisconnected() {
 	// Drop sink references so disconnected browsers are not kept live for the
 	// hub's 90s subscription TTL.
 	c.subMu.Lock()
-	clear(c.subs)
+	c.book.reset()
 	c.subMu.Unlock()
 }

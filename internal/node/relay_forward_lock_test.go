@@ -34,7 +34,7 @@ func TestForwardEvent_FanOutReleasesLock(t *testing.T) {
 
 	// Seed a subscriber directly (bypass the WS connect path).
 	r.mu.Lock()
-	r.subs[key] = []EventSink{blk}
+	r.book.subs[key] = []EventSink{blk}
 	r.mu.Unlock()
 
 	// Drive the fan-out in a goroutine; it will block inside SendRaw.
@@ -51,7 +51,7 @@ func TestForwardEvent_FanOutReleasesLock(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		r.mu.Lock()
-		_ = r.subs[key]
+		_ = r.book.subs[key]
 		r.mu.Unlock()
 		close(done)
 	}()
