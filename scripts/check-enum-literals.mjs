@@ -17,8 +17,9 @@
 //      larger change (tracked in #2909's follow-up), not a measurement gate.
 //
 // EventEntry kinds (S13b-4, #3021), from the AST (espree), contract.js aside:
-//   a. ENUMS.EVENT_TYPE, EVENT_TYPE_INTERNAL and EVENT_TYPE_MD_IGNORE are
-//      non-empty, and the last two are subsets of the first.
+//   a. ENUMS.EVENT_TYPE, EVENT_TYPE_INTERNAL, EVENT_TYPE_NO_BUBBLE and
+//      EVENT_TYPE_MD_IGNORE are non-empty, and the last three are subsets of
+//      the first.
 //   b. No array literal holds two or more kind literals — counted, so
 //      `new Set([...X, 'tool_use', 'result'])` is a restated set too — or a
 //      spread of an NZ_CONTRACT.ENUMS list plus even one kind literal, no
@@ -43,9 +44,11 @@
 //      No file assigns to, deletes, or calls a mutating method (push,
 //      splice, …) on an NZ_CONTRACT.ENUMS member or on NZ_CONTRACT.ENUMS.
 //   e. EVENT_WHOLE ∪ EVENT_CONTENT (event_render.js's eventHtml dispatch
-//      Maps, S19-2, #3025 D4) together hold every ENUMS.EVENT_TYPE kind — a
-//      kind neither lists would silently render as the unknown-type chip —
-//      and share no key; every key of those two and of EVENT_ICONS is a kind.
+//      Maps, S19-2, #3025 D4) ∪ ENUMS.EVENT_TYPE_NO_BUBBLE (hidden before
+//      either Map is read) hold every ENUMS.EVENT_TYPE kind — a kind none
+//      lists would silently render as the unknown-type chip — and no two of
+//      the three share a key; every key of the Maps and of EVENT_ICONS is a
+//      kind.
 //   Blind guards: a file that does not parse fails, every KIND_SENTINELS
 //   file must compare `.type` with a kind at least once, an ANCHORS Set
 //   declared nowhere fails, and so does an EVENT_TABLES Map declared nowhere.
@@ -139,11 +142,15 @@ export const OTHER_TYPES = {
 // stops seeing them fails instead of passing empty.
 export const KIND_SENTINELS = ['dashboard.js', 'running_banner.js'];
 
-export const KIND_ENUMS = ['EVENT_TYPE', 'EVENT_TYPE_INTERNAL', 'EVENT_TYPE_MD_IGNORE'];
+export const KIND_ENUMS = ['EVENT_TYPE', 'EVENT_TYPE_INTERNAL', 'EVENT_TYPE_NO_BUBBLE', 'EVENT_TYPE_MD_IGNORE'];
 
 // ANCHORS: the kind Sets that must be exactly a contract column (d), by name;
 // each is looked for in every file.
-export const ANCHORS = { INTERNAL_EVENT_TYPES: 'EVENT_TYPE_INTERNAL', MARKDOWN_EXPORT_IGNORE: 'EVENT_TYPE_MD_IGNORE' };
+export const ANCHORS = {
+  INTERNAL_EVENT_TYPES: 'EVENT_TYPE_INTERNAL',
+  NO_BUBBLE_EVENT_TYPES: 'EVENT_TYPE_NO_BUBBLE',
+  MARKDOWN_EXPORT_IGNORE: 'EVENT_TYPE_MD_IGNORE',
+};
 const MUTATORS = new Set(['push', 'pop', 'shift', 'unshift', 'splice', 'sort', 'reverse', 'fill', 'copyWithin']);
 
 // contractKindProblems is check (a) over NZ_CONTRACT.ENUMS.
@@ -322,9 +329,10 @@ export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = K
 }
 
 // EVENT_TABLES: the dashboard's eventHtml Maps (S19-2, #3025 D4). Every key
-// is a kind; WHOLE and CONTENT share none and together cover every
-// ENUMS.EVENT_TYPE kind — a kind with no entry in either falls through to
-// the unknown-type chip silently. EVENT_ICONS need not cover anything.
+// is a kind; WHOLE, CONTENT and ENUMS.EVENT_TYPE_NO_BUBBLE share none and
+// together cover every ENUMS.EVENT_TYPE kind — a kind with no entry in any
+// falls through to the unknown-type chip silently. EVENT_ICONS need not
+// cover anything.
 export const EVENT_TABLES = ['EVENT_WHOLE', 'EVENT_CONTENT', 'EVENT_ICONS'];
 
 // mapLiteralKeys reads `const NAME = new Map([[key, …], …])`'s own key
@@ -376,12 +384,18 @@ export function eventTableProblems(files, contract) {
   }
   const whole = found.get('EVENT_WHOLE') || [];
   const content = found.get('EVENT_CONTENT') || [];
+  const noBubble = contract.ENUMS?.EVENT_TYPE_NO_BUBBLE || [];
   for (const k of whole) {
     if (content.includes(k)) problems.push(`EVENT_WHOLE and EVENT_CONTENT both have key ${JSON.stringify(k)} — EVENT_WHOLE wins, so the EVENT_CONTENT entry is dead`);
   }
-  const union = new Set([...whole, ...content]);
+  for (const [name, keys] of [['EVENT_WHOLE', whole], ['EVENT_CONTENT', content]]) {
+    for (const k of keys) {
+      if (noBubble.includes(k)) problems.push(`${name} has key ${JSON.stringify(k)}, which ENUMS.EVENT_TYPE_NO_BUBBLE lists — shouldHideEvent hides it first, so the entry is dead`);
+    }
+  }
+  const union = new Set([...whole, ...content, ...noBubble]);
   for (const k of kinds) {
-    if (!union.has(k)) problems.push(`EVENT_WHOLE and EVENT_CONTENT together do not cover kind ${JSON.stringify(k)} — eventHtml would fall through to the unknown-type chip`);
+    if (!union.has(k)) problems.push(`EVENT_WHOLE, EVENT_CONTENT and ENUMS.EVENT_TYPE_NO_BUBBLE together do not cover kind ${JSON.stringify(k)} — eventHtml would fall through to the unknown-type chip`);
   }
   return problems;
 }

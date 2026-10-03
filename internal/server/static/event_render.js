@@ -108,14 +108,11 @@ function stripLeakedToolCalls(text) {
 }
 
 // EVENT_WHOLE renders a type's entire bubble, bypassing the generic
-// icon/content/time wrapper below (thinking is invisible; ask_question is
-// its own card). A Map, not a plain object: an unlisted e.type like
-// 'constructor' must resolve to undefined, not an inherited Object.prototype
-// member (#3025 S19-2; same reason for EVENT_CONTENT/EVENT_ICONS).
-const EVENT_WHOLE = new Map([
-  ['thinking', () => ''],
-  ['ask_question', renderAskQuestionCard],
-]);
+// icon/content/time wrapper below (ask_question is its own card). A Map, not
+// a plain object: an unlisted e.type like 'constructor' must resolve to
+// undefined, not an inherited Object.prototype member (#3025 S19-2; same
+// reason for EVENT_CONTENT/EVENT_ICONS).
+const EVENT_WHOLE = new Map([['ask_question', renderAskQuestionCard]]);
 
 // EVENT_CONTENT fills div.event-content for a type still using the generic
 // wrapper. agent/result/task_* are plain escaped text (defaultTextContentHtml);
@@ -145,11 +142,13 @@ const EVENT_ICONS = new Map([
   ['todo', ICONS.todo],
 ]);
 
-// shouldHideEvent is eventHtml's pre-filter, run before any table lookup:
-// an internal type without includeInternal, injected system XML, and the
-// CLI's own SIGINT interrupt marker.
+// shouldHideEvent is eventHtml's pre-filter, run before any table lookup: a
+// NO_BUBBLE kind in every view (the server's visible count skips the same
+// kindTable column), an internal type without includeInternal, injected
+// system XML, and the CLI's own SIGINT interrupt marker.
+const NO_BUBBLE_EVENT_TYPES = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_NO_BUBBLE);
 function shouldHideEvent(e, includeInternal) {
-  if (!includeInternal && isInternalEvent(e)) return true;
+  if (NO_BUBBLE_EVENT_TYPES.has(e.type) || (!includeInternal && isInternalEvent(e))) return true;
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return true;
   if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return true;

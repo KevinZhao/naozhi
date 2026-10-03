@@ -106,6 +106,33 @@ func TestEventLastNVisibleCtx_FallsThroughToDisk(t *testing.T) {
 	}
 }
 
+// TestEventLastNVisibleCtx_ThinkingTailFallsThroughToDisk: a memory tier of
+// nothing but thinking holds no bubbles, so the reader must go to disk.
+func TestEventLastNVisibleCtx_ThinkingTailFallsThroughToDisk(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	for i := 0; i < 40; i++ {
+		s.persistedHistory = append(s.persistedHistory, clievent.EventEntry{Time: int64(101 + i), Type: clievent.KindThinking})
+	}
+	var disk []clievent.EventEntry
+	for i := 1; i <= 100; i++ {
+		disk = append(disk, clievent.EventEntry{Time: int64(i), Type: clievent.KindText})
+	}
+	fake := &pagingHistorySource{all: disk}
+	s.SetHistorySource(fake)
+
+	got := s.EventLastNVisibleCtx(context.Background(), 30, maxVisibleTotal)
+	if fake.calls == 0 {
+		t.Error("disk never consulted despite an all-thinking memory tier")
+	}
+	if visibleCount(got) < 30 {
+		t.Errorf("visible=%d want >=30", visibleCount(got))
+	}
+	if got[len(got)-1].Time != 140 {
+		t.Errorf("newest entry Time=%d want 140 (thinking tail kept for turnState)", got[len(got)-1].Time)
+	}
+}
+
 // TestEventLastNVisibleCtx_DiskExhausted: memory all-internal and disk has no
 // visible events → reader returns what it has without spinning forever.
 func TestEventLastNVisibleCtx_DiskExhausted(t *testing.T) {

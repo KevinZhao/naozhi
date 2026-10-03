@@ -11,6 +11,10 @@
 //     text block sharing the thinking block's millisecond (one CLI frame's
 //     content blocks; ACP's trailing thinking/text/result) was dropped. The
 //     gate is now strict `<` and same-ms events dedup by uuid instead.
+//  3. thinking draws no bubble in any view, the internal (agent) view
+//     included: shouldHideEvent hides ENUMS.EVENT_TYPE_NO_BUBBLE, the column
+//     the server's visible count skips (#3034). A 40-thinking + 5-text
+//     history frame paints exactly the 5 replies.
 //
 // The mock server rejects /ws to force HTTP fallback, so (2) pushes history
 // frames through `wsm.onMessage` (the dispatch table a live socket feeds) and
@@ -160,6 +164,55 @@ test.describe('Session events panel regressions', () => {
 
     expect(result.first).toBe(2);
     expect(result.replay).toBe(2);
+
+    await ctx.close();
+  });
+
+  test('history frame: a thinking-heavy tail page paints every text bubble and no thinking', async ({ browser }) => {
+    const { ctx, page } = await openSession(browser, mock);
+
+    const result = await page.evaluate(() => {
+      // eslint-disable-next-line no-eval
+      const sk = eval('typeof selectedKey !== "undefined" ? selectedKey : null');
+      const sn = eval('typeof selectedNode !== "undefined" ? selectedNode : "local"');
+      const w = eval('typeof wsm !== "undefined" ? wsm : null');
+      if (!w || !sk) return { err: 'globals missing' };
+      const el = document.getElementById('events-scroll');
+      const times = [...el.querySelectorAll('.event[data-time]')].map(n => Number(n.getAttribute('data-time')));
+      const T = Math.max(...times, Date.now()) + 240000;
+      // The issue's page shape: 40 thinking + 5 text, 8 thinking before each reply.
+      const events = [];
+      for (let r = 0; r < 5; r++) {
+        for (let t = 0; t < 8; t++) {
+          events.push({ type: 'thinking', detail: 'step', time: T + r * 10 + t, uuid: `TH-flood-${r}-${t}` });
+        }
+        events.push({ type: 'text', detail: `FLOOD_REPLY_${r}`, time: T + r * 10 + 8, uuid: `TX-flood-${r}` });
+      }
+      w.onMessage({ type: 'history', key: sk, node: sn, events });
+      return {
+        text: el.querySelectorAll('.event.text[data-uuid^="TX-flood-"]').length,
+        thinking: el.querySelectorAll('.event.thinking, .event[data-uuid^="TH-flood-"]').length,
+      };
+    });
+
+    expect(result.err).toBeUndefined();
+    expect(result.text).toBe(5);
+    expect(result.thinking).toBe(0);
+
+    await ctx.close();
+  });
+
+  test('eventHtml draws no bubble for thinking, in the internal view too', async ({ browser }) => {
+    const { ctx, page } = await openSession(browser, mock);
+
+    const html = await page.evaluate(() => {
+      const w = /** @type {any} */ (window);
+      const e = { type: 'thinking', detail: 'hmm', time: 1, uuid: 'TH-views' };
+      return { main: w.eventHtml(e), internal: w.eventHtml(e, { includeInternal: true }) };
+    });
+
+    expect(html.main).toBe('');
+    expect(html.internal).toBe('');
 
     await ctx.close();
   });
