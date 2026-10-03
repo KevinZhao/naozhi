@@ -10,7 +10,11 @@
 //    cursor is reset, not carried over);
 //  - a running push for the session already subscribed does not resubscribe;
 //    a dead→running push resubscribes from an initial page, and so does a
-//    running push after a suspended subscribe;
+//    running push after a suspended subscribe, a running push after a
+//    subscription_timeout dropped the subscription, and the running push for a
+//    dead session this tab sent to (the optimistic flip already wrote running);
+//  - a backfill history frame carrying a user event locks the question card
+//    already on screen;
 //  - a send_error for the session on screen undoes the send this tab made
 //    (toast, optimistic bubble, running flip); for a session sent to and then
 //    left it only rolls the running flip back; a tab that sent nothing ignores
@@ -18,7 +22,7 @@
 // A bookkeeping write that lands on sessionFrames instead of sessionStream leaves its
 // fields stale without throwing, so each case asserts a frame the mock saw.
 const { test, expect } = require('@playwright/test');
-const { startMockServer } = require('./mock-server');
+const { startMockServer, defaultSessions } = require('./mock-server');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const KEY_A = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -165,6 +169,35 @@ test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
     await ctx.close();
   });
 
+  test('a subscription_timeout drops the subscription, so the next running push resubscribes', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    // Back to back, so no sessions poll lands between the two pushes.
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'ready', reason: 'subscription_timeout' });
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
+    await reSub(conn);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a backfill history frame carrying a user event locks the question card already on screen', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const T = Date.now() + 60000;
+    conn.send({ type: 'event', key: KEY_A, event: {
+      type: 'ask_question', time: T, uuid: 'ask-1',
+      ask_question: { tool_use_id: 'tu-1', items: [{ header: 'Color', question: 'Pick one', options: [{ label: 'Red' }, { label: 'Blue' }] }] },
+    } });
+    const card = page.locator('#events-scroll .event.ask_question[data-tool-use-id="tu-1"]');
+    await expect(card.locator('.ask-opt').first()).toBeEnabled();
+    // Only the user event: the frame holds no ask→user pair for the answered-set
+    // hydration to find, so the lock has to come from the user event landing.
+    conn.send({ type: 'history', key: KEY_A, events: [{ type: 'user', detail: 'answered elsewhere', time: T + 1000, uuid: 'usr-1' }] });
+    await page.waitForSelector('#events-scroll .event[data-uuid="usr-1"]');
+    await expect(card.locator('.ask-opt').first()).toBeDisabled();
+    await expect(card.locator('.ask-status')).toHaveCount(1);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
   test('a send_error for the session on screen undoes the send it failed', async ({ browser }) => {
     const { ctx, page, conn, errors } = await open(browser, mock);
     await sendText(page, conn, 'm1');
@@ -205,6 +238,31 @@ test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
     conn.send({ type: 'event', key: KEY_A, event: ev('n1', Date.now() + 60000) });
     await shown(page, 'n1'); // the send_error ahead of it has been handled
     await expect(page.locator('#toast')).not.toContainText('发送消息失败');
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+});
+
+test.describe('a send from this tab to a dead session', () => {
+  let mock;
+  test.beforeAll(async () => {
+    const data = defaultSessions();
+    data.sessions.find((s) => s.key === KEY_A).state = 'dead';
+    mock = await startMockServer({ ws: true, sessions: data });
+  });
+  test.afterAll(() => mock.server.close());
+
+  // The send flips the state to running before the round trip, so the running
+  // push that follows finds 'running' already there; the resubscribe must judge
+  // on the state the flip replaced.
+  test('resubscribes on the running push the revival sends', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    expect(await running(page, KEY_A)).toBe('dead');
+    await sendText(page, conn, 'wake');
+    expect(await running(page, KEY_A), 'the send flipped the state optimistically').toBe('running');
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
+    await expect.poll(() => subs(conn, KEY_A).length, { message: 'running must resubscribe' }).toBe(2);
+    expect(subs(conn, KEY_A)[1].after, 'the resubscribe asks for an initial page').toBeUndefined();
     expect(errors).toEqual([]);
     await ctx.close();
   });
