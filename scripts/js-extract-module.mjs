@@ -194,7 +194,7 @@ const asDeps = needs.filter((n) => !NZ_UTIL.has(n) && !STATE.has(n)).sort();
 // silently (the first D4-6 pass injected _lastSidebarData that way: it was
 // null at configure time, so the sidebar re-render path read null for the
 // rest of the page's life). Such values belong in a state.js object instead
-// (eslint nz/configure-deps rejects the injection too).
+// (eslint nz/shell-bindings rejects the injection too).
 const restLets = new Set(
   [...restDecls.entries()].filter(([, kind]) => kind === 'let').map(([n]) => n)
 );

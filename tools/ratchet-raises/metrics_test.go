@@ -389,6 +389,21 @@ func TestRaises_JSCaps(t *testing.T) {
 			t.Errorf("raise = %+v, want To -1", rs[0])
 		}
 	})
+	// S20k: injectionLegacy is shrink-only; a receiver put back on it is a
+	// raise, one drained off it is free.
+	t.Run("injectionLegacy: a new entry raises, a dropped one is free", func(t *testing.T) {
+		lb, lh := metrics{}, metrics{}
+		if err := jsCaps(`{"maxFnLines":{"default":120,"exempt":[]},"lines":{},"sideEffectLegacy":[],"cycleLegacy":[],"injectionLegacy":["a.js:configureA","b.js:configureB"]}`, lb); err != nil {
+			t.Fatal(err)
+		}
+		if err := jsCaps(`{"maxFnLines":{"default":120,"exempt":[]},"lines":{},"sideEffectLegacy":[],"cycleLegacy":[],"injectionLegacy":["b.js:configureB","c.js:wireC"]}`, lh); err != nil {
+			t.Fatal(err)
+		}
+		rs := raises(lb, lh)
+		if want := []string{"js-caps:injectionLegacy:c.js:wireC"}; !slices.Equal(gates(rs), want) {
+			t.Fatalf("raises = %v, want %v", rs, want)
+		}
+	})
 	t.Run("deleting the whole caps file", func(t *testing.T) {
 		head := metrics{}
 		// jsCaps(\"\", head) is a no-op, same as the file being gone.

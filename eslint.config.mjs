@@ -217,12 +217,14 @@ export default [
   },
   ...perFile,
   // Shared state crosses module boundaries only as a const state object the
-  // owner exports (scripts/eslint-plugin-nz.mjs).
+  // owner exports, and dependencies only as imports or shell.X upcalls: a
+  // configureX export outside caps.injectionLegacy fails nz/shell-bindings
+  // (scripts/eslint-plugin-nz.mjs).
   {
     files: [...moduleFiles].map((f) => `internal/server/static/${f}`),
     plugins: { nz },
     rules: {
-      'nz/configure-deps': 'error',
+      'nz/shell-bindings': ['error', { legacy: caps.injectionLegacy }],
       'nz/deps-keys': 'error',
       'nz/no-exported-let': 'error',
     },

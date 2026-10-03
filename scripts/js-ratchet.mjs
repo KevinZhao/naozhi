@@ -44,7 +44,8 @@
 //   node scripts/js-ratchet.mjs --write   # ratchet the baseline down
 //
 // --check fails on any metric above its baseline (growth) AND on any metric
-// below it (the improving PR must ship the tightened baseline — run --write).
+// below it (the improving PR must ship the tightened baseline — run --write),
+// and on an injection receiver outside the closed set (receiverProblems).
 // --write refuses to raise a value: deliberate growth requires hand-editing
 // scripts/js-ratchet.baseline.json and an approved scripts/ratchet-raises.jsonl
 // entry (tools/ratchet-raises). That tool also holds the sums across files
@@ -288,8 +289,12 @@ function fnName(fn, parent, key) {
 //                      the check. A new entry is a raise there
 //   shellRoots         the modules allowed to registerShell (a new one is a
 //                      raise there)
+//   injectionLegacy    "file:fn" receivers of injected dependencies left over
+//                      from before shell.js, shrink-only (a new entry is a
+//                      raise there; a stale one fails the check). Any other
+//                      receiver fails the check, whatever its count
 // NO_CAPS is the empty set of each, for analysing a fixture.
-export const NO_CAPS = Object.freeze({ lateBindingTables: {}, injectionAllow: [], shellRoots: [], leaves: [] });
+export const NO_CAPS = Object.freeze({ lateBindingTables: {}, injectionAllow: [], injectionLegacy: [], shellRoots: [], leaves: [] });
 
 // SHELL_MODULE — the upcall table (S20f): the root modules register their
 // orchestration functions once with registerShell({...}) and lower modules
@@ -367,6 +372,7 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
     lateBindings: 0,
     injections: new Map(), // "T.k" -> receiver function name
     allowHits: new Set(),
+    receivers: new Map(), // receiver function name -> { line, keys }, besides injectionAllow's
     deadInjections: [],
     shellUses: new Set(),
     shellOpaque: [], // lines reading shell other than by a static slot
@@ -377,7 +383,7 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
     nsBound: new Set(), // the pattern identifiers desugarNamespaces bound (declarations, not reads)
   };
   const exportedLocal = new Set();
-  let defaultFn = null; // export default function (…) {…}
+  let defaultExport = null; // export default function (…) {…} / { … }
   for (const st of program.body) {
     if (st.type === 'ImportDeclaration') {
       const from = moduleFile(st.source.value);
@@ -399,7 +405,7 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
       facts.exportNames.add('default');
       const d = st.declaration;
       if (d.type === 'Identifier') exportedLocal.add(d.name);
-      else if (isFn(d)) defaultFn = { name: d.id?.name ?? 'default', fn: d };
+      else if (isFn(d) || d.type === 'ObjectExpression') defaultExport = { name: d.id?.name ?? 'default', node: d };
     }
     if (st.type === 'ExportNamedDeclaration') {
       for (const sp of st.specifiers) {
@@ -492,19 +498,19 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
     if (pushed) stack.pop();
   };
   walk(program, null, null);
-  findInjections(program, facts, exportedLocal, defaultFn, caps.injectionAllow);
+  findInjections(program, facts, exportedLocal, defaultExport, caps.injectionAllow);
   return facts;
 }
 
-// findInjections: a function another module can call (an export, the
-// default export) that copies its parameter's fields (p.x, p[k], a
-// destructured field, a spread of p, Object.assign from p) into a
-// module-scope binding is receiving injected dependencies, whatever it is
-// called. So is one that stores a whole parameter, or anything made from one,
-// in a binding the module then calls. A parameter (or a field of one) handed
-// to a function of this module by a bare call makes that function a receiver
-// on that parameter position, to a fixed point: a thin export over a private
-// helper lands the same keys. The bindings of a for-of / for-in over a
+// findInjections: a function another module can call (an export, the default
+// export, a method of an exported object literal) that copies its parameter's
+// fields (p.x, p[k], a destructured field, a spread of p, Object.assign from
+// p) into a module-scope binding is receiving injected dependencies, whatever
+// it is called. So is one that stores a whole parameter, or anything made from
+// one, in a binding the module then calls. A parameter (or a field of one)
+// handed to a function of this module by a bare call makes that function a
+// receiver on that parameter position, to a fixed point: a thin export over a
+// private helper lands the same keys. The bindings of a for-of / for-in over a
 // parameter and the parameters of a callback given to a call on one
 // (Object.entries(p).forEach(([k, v]) => …)) carry its fields too. The keys
 // landed are counted (a whole-table copy counts the table's keys); a key the
@@ -512,13 +518,12 @@ function analyzeProgram(program, file, caps = NO_CAPS) {
 // spelt: deps.f(), const { f } = deps; f(), const f = deps.f; f(),
 // const d = deps; d.f().
 //
-// Known gaps: a class constructor or a method of an exported object as the
-// receiver; a parameter handed on through .call / .apply or a member call
-// (helpers.set(p)); a callback stored and only passed on (listeners.push(cb));
-// a field copied by a static copy into a slot the module never calls; a
-// table slot reached only through a function's return value or another
-// object's member (o.t = deps; o.t.f()).
-function findInjections(program, facts, exportedLocal, defaultFn, allow) {
+// Known gaps: a class constructor as the receiver; a parameter handed on
+// through .call / .apply or a member call (helpers.set(p)); a callback
+// stored and only passed on (listeners.push(cb)); a field copied by a static
+// copy into a slot the module never calls; a table slot reached only through
+// a function's return value or another object's member (o.t = deps; o.t.f()).
+function findInjections(program, facts, exportedLocal, defaultExport, allow) {
   const receivers = new Map(); // fn node -> { name, fn, at: receiving parameter indices }
   const receive = (name, fn, indices) => {
     if (!receivers.has(fn)) receivers.set(fn, { name, fn, at: new Set() });
@@ -528,12 +533,21 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
     return grew;
   };
   const every = (fn) => fn.params.map((_, i) => i);
+  // An exported function, or a function-valued property of an exported
+  // object literal (api.wire).
+  const exported = (name, node) => {
+    if (isFn(node)) { receive(name, node, every(node)); return; }
+    if (node?.type !== 'ObjectExpression') return;
+    for (const q of node.properties) {
+      const k = q.type === 'Property' && isFn(q.value) ? propName({ computed: q.computed, property: q.key }) : null;
+      if (k !== null) receive(`${name}.${k}`, q.value, every(q.value));
+    }
+  };
   for (const name of exportedLocal) {
     const d = facts.top.get(name);
-    const fn = d?.type === 'FunctionDeclaration' ? d : (d?.type === 'VariableDeclarator' && isFn(d.init) ? d.init : null);
-    if (fn) receive(name, fn, every(fn));
+    exported(name, d?.type === 'VariableDeclarator' ? d.init : d);
   }
-  if (defaultFn) receive(defaultFn.name, defaultFn.fn, every(defaultFn.fn));
+  if (defaultExport) exported(defaultExport.name, defaultExport.node);
   // The functions of this module a bare call reaches, by name.
   const local = new Map();
   for (const f of facts.fns) if (f.bound && f.name) local.set(f.name, [...(local.get(f.name) ?? []), f.node]);
@@ -732,6 +746,8 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
     // module calls), not again where registerShell fills it.
     if (facts.file === SHELL_MODULE && name === 'registerShell') continue;
     if (allow.includes(`${facts.file}:${name}`)) { facts.allowHits.add(`${facts.file}:${name}`); continue; }
+    if (!facts.receivers.has(name)) facts.receivers.set(name, { line: fn.loc.start.line, keys: [] });
+    facts.receivers.get(name).keys.push(...keys);
     for (const k of keys) if (!facts.injections.has(k)) facts.injections.set(k, name);
   }
   // A registry (T.*) is read by runtime key; it has no static key to miss.
@@ -1000,8 +1016,8 @@ function readSources() {
 export const GLOBAL = '_global';
 
 // snapshot measures every file, plus the _global entry. problems are the
-// findings that fail the run outright (a stale caps.injectionAllow entry);
-// details back each _global count.
+// findings that fail the run outright (receiverProblems); details back each
+// _global count.
 function snapshot(caps) {
   const espree = loadEspree();
   const sources = readSources();
@@ -1011,9 +1027,26 @@ function snapshot(caps) {
   const graph = importGraph(espree);
   const { metrics, details } = measureGlobal(all, graph, caps);
   out[GLOBAL] = metrics;
-  const hits = new Set(Object.values(all).flatMap((a) => [...a.allowHits]));
-  const problems = caps.injectionAllow.filter((a) => !hits.has(a)).map((a) => `caps.injectionAllow: ${a} no longer receives an injection — drop it from the list`);
-  return { current: out, graph, details, problems };
+  return { current: out, graph, details, problems: receiverProblems(all, caps) };
+}
+
+// receiverProblems closes the set of injection receivers (S20k): besides
+// shell.js's registerShell, only a caps.injectionAllow or caps.injectionLegacy
+// entry may receive one, and an entry no receiver matches is stale.
+export function receiverProblems(all, caps) {
+  const legacy = caps.injectionLegacy;
+  const allowHits = new Set(Object.values(all).flatMap((a) => [...a.allowHits]));
+  const problems = caps.injectionAllow.filter((a) => !allowHits.has(a)).map((a) => `caps.injectionAllow: ${a} no longer receives an injection — drop it from the list`);
+  const legacyHits = new Set();
+  for (const [f, facts] of Object.entries(all)) {
+    for (const [name, { line, keys }] of facts.receivers) {
+      const id = `${f}:${name}`;
+      if (legacy.includes(id)) { legacyHits.add(id); continue; }
+      problems.push(`${f}:${line}: ${name} receives injected dependencies (${keys.join(', ')}); import them, or upcall through shell.X (caps.injectionLegacy is shrink-only)`);
+    }
+  }
+  for (const a of legacy) if (!legacyHits.has(a)) problems.push(`caps.injectionLegacy: ${a} no longer receives an injection — drop it from the list`);
+  return problems;
 }
 
 // importGraph maps every static/*.js file to the files it imports (D-S19:
@@ -1080,7 +1113,7 @@ export function loadCaps(capsPath = CAPS_PATH) {
     return { errors: [`${path.relative(ROOT, capsPath)} is not valid JSON: ${e.message}`] };
   }
   const errors = [];
-  for (const key of ['maxFnLines', 'lines', 'sideEffectLegacy', 'cycleLegacy', 'leaves', 'lateBindingTables', 'injectionAllow', 'shellRoots']) {
+  for (const key of ['maxFnLines', 'lines', 'sideEffectLegacy', 'cycleLegacy', 'leaves', 'lateBindingTables', 'injectionAllow', 'injectionLegacy', 'shellRoots']) {
     if (!(key in raw)) errors.push(`caps is missing the top-level key "${key}"`);
   }
   if (errors.length) return { errors };
@@ -1108,8 +1141,14 @@ export function loadCaps(capsPath = CAPS_PATH) {
   if (typeof tables !== 'object' || tables === null || Array.isArray(tables) || !Object.values(tables).every((m) => typeof m === 'string')) {
     errors.push('caps.lateBindingTables must map a table name to the module that exports it');
   }
-  if (!Array.isArray(raw.injectionAllow) || !raw.injectionAllow.every((a) => typeof a === 'string' && /^[^:]+\.js:[A-Za-z_$][\w$]*$/.test(a))) {
+  const receiverList = (v) => Array.isArray(v) && v.every((a) => typeof a === 'string' && /^[^:]+\.js:[A-Za-z_$][\w$]*$/.test(a));
+  if (!receiverList(raw.injectionAllow)) {
     errors.push('caps.injectionAllow must be an array of "file.js:function"');
+  }
+  // Required even once drained ([]): a dropped section would come back as a
+  // new one, which tools/ratchet-raises records without a raise.
+  if (!receiverList(raw.injectionLegacy)) {
+    errors.push('caps.injectionLegacy must be an array of "file.js:function"');
   }
   if (!Array.isArray(raw.shellRoots)) errors.push('caps.shellRoots must be an array');
   if (errors.length) return { errors };
@@ -1156,9 +1195,11 @@ export function capProblems(current, graph, caps) {
   for (const [t, f] of Object.entries(caps.lateBindingTables ?? {})) {
     if (!exists(f)) problems.push(`caps.lateBindingTables.${t}: ${f} does not exist in static/`);
   }
-  for (const a of caps.injectionAllow ?? []) {
-    const f = a.slice(0, a.indexOf(':'));
-    if (!exists(f)) problems.push(`caps.injectionAllow: ${f} does not exist in static/`);
+  for (const list of ['injectionAllow', 'injectionLegacy']) {
+    for (const a of caps[list] ?? []) {
+      const f = a.slice(0, a.indexOf(':'));
+      if (!exists(f)) problems.push(`caps.${list}: ${f} does not exist in static/`);
+    }
   }
   const cyclic = new Set(sccs(graph).flat());
   for (const f of caps.cycleLegacy) {

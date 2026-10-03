@@ -48,6 +48,14 @@
   "injectionAllow": [
     "nz_util.js:registerActions"
   ],
+  "injectionLegacy": [
+    "auth_modal.js:configureAuthModal",
+    "discovery.js:configureDiscovery",
+    "running_banner.js:configureRunningBanner",
+    "send_message.js:configureSendMessage",
+    "sidebar_project.js:configureSidebarProject",
+    "tuning.js:configureTuning"
+  ],
   "shellRoots": [
     "cron_view.js",
     "dashboard.js"

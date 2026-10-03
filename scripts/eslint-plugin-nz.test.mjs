@@ -18,7 +18,7 @@ RuleTester.itOnly = it.only;
 
 const tester = new RuleTester({ languageOptions: { ecmaVersion: 2022, sourceType: 'module' } });
 
-tester.run('configure-deps', nz.rules['configure-deps'], {
+tester.run('shell-bindings', nz.rules['shell-bindings'], {
   valid: [
     // Functions, consts, classes and imports are shared, never copied stale.
     "import { a } from './x.js'; function f() {} const o = {}; class C {} configureX({ a, f, o, C });",
@@ -49,6 +49,30 @@ tester.run('configure-deps', nz.rules['configure-deps'], {
     // Every offending property is reported, not just the first.
     { code: 'let a = 1; let b = 2; function f() {} configureX({ a, f, b });', errors: [{ messageId: 'mutable' }, { messageId: 'mutable' }] },
     { code: 'const o = {}; let b = 2; configureX({ ...o, b });', errors: [{ messageId: 'notBinding' }, { messageId: 'mutable' }] },
+  ],
+});
+
+// S20k: no module takes a new dependency table; the legacy option names the
+// receivers that still do, by file and function.
+const legacy = [{ legacy: ['tuning.js:configureTuning'] }];
+tester.run('shell-bindings: no new configureX export', nz.rules['shell-bindings'], {
+  valid: [
+    { code: 'export function configureTuning(impl) { return impl; }', filename: 'static/tuning.js', options: legacy },
+    // Calling a legacy receiver, and a name that only starts like one, are out of scope.
+    { code: "import { configureTuning } from './tuning.js'; configureTuning({});", filename: 'static/dashboard.js', options: legacy },
+    { code: 'export function configured() {} export const configure = 1; export function reconfigureX() {}', filename: 'static/view.js', options: legacy },
+  ],
+  invalid: [
+    { code: 'export function configureFoo(impl) { return impl; }', filename: 'static/view.js', options: legacy, errors: [{ messageId: 'newConfigure', data: { name: 'configureFoo' } }] },
+    // The legacy name is allowed only in its own file, and a second one in that file is new.
+    { code: 'export function configureTuning(impl) { return impl; }', filename: 'static/view.js', options: legacy, errors: [{ messageId: 'newConfigure' }] },
+    { code: 'export function configureMore(impl) { return impl; }', filename: 'static/tuning.js', options: legacy, errors: [{ messageId: 'newConfigure' }] },
+    // Every export spelling, and no option at all.
+    { code: 'export const configureFoo = (impl) => impl;', filename: 'static/view.js', errors: [{ messageId: 'newConfigure' }] },
+    { code: 'function configureFoo() {} export { configureFoo };', filename: 'static/view.js', errors: [{ messageId: 'newConfigure' }] },
+    { code: 'function wire() {} export { wire as configureFoo };', filename: 'static/view.js', errors: [{ messageId: 'newConfigure', data: { name: 'configureFoo' } }] },
+    { code: 'export default function configureFoo() {}', filename: 'static/view.js', errors: [{ messageId: 'newConfigure' }] },
+    { code: 'function configureFoo() {} export default configureFoo;', filename: 'static/view.js', errors: [{ messageId: 'newConfigure', data: { name: 'configureFoo' } }] },
   ],
 });
 

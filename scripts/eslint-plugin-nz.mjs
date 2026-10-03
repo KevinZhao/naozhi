@@ -6,11 +6,15 @@
 // fields at the use site. These rules close the two other routes that copy a
 // value instead of sharing it:
 //
-//   nz/configure-deps          configureX({ … }) and registerShell({ … })
+//   nz/shell-bindings          configureX({ … }) and registerShell({ … })
 //                               may only hand over functions and const
 //                               bindings. A let, an object field or a literal
 //                               is copied into the callee's table once and
-//                               goes stale when the owner reassigns it.
+//                               goes stale when the owner reassigns it. No
+//                               module exports a new configureX: the option
+//                               `legacy` lists the "file.js:configureX"
+//                               receivers still allowed (js-ratchet.caps.json's
+//                               injectionLegacy — eslint.config.mjs reads it).
 //   nz/deps-keys               a module's `deps = { … }` literal is the list
 //                               of what it is handed; deps.X (or a
 //                               destructured X) naming no key of it is a call
@@ -71,19 +75,43 @@ function isSharedBinding(variable) {
   }
 }
 
-const configureDeps = {
+// exportedNames: the local and exported names an export declaration binds.
+function exportedNames(node) {
+  const d = node.declaration;
+  if (node.type === 'ExportDefaultDeclaration') return d.type === 'Identifier' ? [d.name] : d.id ? [d.id.name] : [];
+  if (d?.type === 'FunctionDeclaration') return [d.id.name];
+  if (d?.type === 'VariableDeclaration') return d.declarations.filter((x) => x.id.type === 'Identifier').map((x) => x.id.name);
+  const spec = (n) => (n.type === 'Identifier' ? n.name : String(n.value));
+  return [...new Set((node.specifiers ?? []).flatMap((x) => [spec(x.local), spec(x.exported)]))];
+}
+
+const shellBindings = {
   meta: {
     type: 'problem',
-    docs: { description: 'configureX deps and registerShell slots may only be functions or const bindings' },
-    schema: [],
+    docs: { description: 'configureX deps and registerShell slots may only be functions or const bindings; no new configureX export' },
+    schema: [{
+      type: 'object',
+      properties: { legacy: { type: 'array', items: { type: 'string' } } },
+      additionalProperties: false,
+    }],
     messages: {
       mutable: "'{{name}}' is a {{kind}}: {{callee}} would keep a copy. Inject a function, or move the value into a const state object the module imports.",
       notBinding: '{{callee}} values must be functions or const bindings; a {{type}} is copied once. Read shared state from its const state object instead.',
+      newConfigure: "'{{name}}' would take this module's dependencies by injection: import them, or upcall through shell.X (caps.injectionLegacy is shrink-only).",
     },
   },
   create(context) {
     const sourceCode = context.sourceCode;
+    const legacy = new Set(context.options[0]?.legacy ?? []);
+    const file = context.filename.split(/[\\/]/).pop();
+    const checkExport = (node) => {
+      for (const name of exportedNames(node)) {
+        if (CONFIGURE_RE.test(name) && !legacy.has(`${file}:${name}`)) context.report({ node, messageId: 'newConfigure', data: { name } });
+      }
+    };
     return {
+      ExportNamedDeclaration: checkExport,
+      ExportDefaultDeclaration: checkExport,
       CallExpression(node) {
         const callee = tableCallee(node.callee);
         if (!callee) return;
@@ -429,7 +457,7 @@ const noModuleSideEffects = {
 export default {
   meta: { name: 'eslint-plugin-nz' },
   rules: {
-    'configure-deps': configureDeps,
+    'shell-bindings': shellBindings,
     'deps-keys': depsKeys,
     'no-exported-let': noExportedLet,
     'no-module-side-effects': noModuleSideEffects,
