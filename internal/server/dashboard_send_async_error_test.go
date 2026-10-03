@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // postSendJSON issues an authenticated JSON POST to handleSend and returns the
@@ -117,42 +119,68 @@ func TestBroadcastSendError_Scoping(t *testing.T) {
 	}
 }
 
-// TestHTTPSendErrorCallback_SkipsInformationalErrors pins the M1 rule: the HTTP
-// callback fans out to EVERY subscriber of the key, so outcomes the user
+// TestHTTPOrigin_SkipsInformationalErrors pins the M1 rule: the HTTP origin
+// fans a failed turn out to EVERY subscriber of the key, so outcomes the user
 // already knows about (ErrAbortedByUrgent / ErrSessionReset /
 // ErrReconnectedUnknown — session_state corrects the UI) must not become a
 // send_error that would tear down a second tab's own optimistic state. The WS
-// path keeps reporting them because it can address the originator alone.
-// Real failures (spawn error) must still fan out.
-func TestHTTPSendErrorCallback_SkipsInformationalErrors(t *testing.T) {
+// origin keeps reporting them because it can address the originator alone.
+// Real failures (spawn error) and a panic must still fan out.
+func TestHTTPOrigin_SkipsInformationalErrors(t *testing.T) {
 	const key = "feishu:p2p:alice"
 	hub, _ := newTestHub(t, "tok")
 	t.Cleanup(hub.Shutdown)
 	sub, subOut := newCapturedClient(t, hub)
 	registerSub(hub, sub, key)
 
-	cb := hub.engine.sendErrorCallback(key)
+	d := hub.engine.httpOrigin(key).Begin(context.Background(), turn.TurnInfo{Role: turn.RoleHead})
 	for _, e := range []error{
 		clierr.ErrAbortedByUrgent,
 		fmt.Errorf("passthrough: %w", clierr.ErrSessionReset), // wrapped — errors.Is, not ==
 		clierr.ErrReconnectedUnknown,
 	} {
-		cb(e, asyncErrorMessage(e))
+		d.Finish(context.Background(), turn.Outcome{Stage: turn.StageSend, Err: e})
 	}
 	if m, ok := recvMsg(t, subOut); ok {
 		t.Fatalf("informational error must not fan out, got %+v", m)
 	}
 
 	spawnErr := errors.New("spawn process: exec: no wrapper")
-	cb(spawnErr, asyncErrorMessage(spawnErr))
+	d.Finish(context.Background(), turn.Outcome{Stage: turn.StageSession, Err: spawnErr})
 	m, ok := recvMsg(t, subOut)
-	if !ok || m.Type != "send_error" || m.Key != key {
+	if !ok || m.Type != "send_error" || m.Key != key || m.Error != asyncErrorMessage(spawnErr) {
 		t.Fatalf("real failure must fan out as send_error, got ok=%v %+v", ok, m)
 	}
-	// Literal-message sites (interrupt timeout / owner-loop panic) pass a nil
-	// error and must still reach subscribers.
-	cb(nil, "处理异常，请稍后重试。")
-	if m, ok := recvMsg(t, subOut); !ok || m.Error != "处理异常，请稍后重试。" {
-		t.Fatalf("nil-error literal message must fan out, got ok=%v %+v", ok, m)
+	// A panicked turn has no error and must still reach subscribers.
+	d.Finish(context.Background(), turn.Outcome{Stage: turn.StageSend, Panic: true})
+	if m, ok := recvMsg(t, subOut); !ok || m.Error != turnPanicMsg {
+		t.Fatalf("panic must fan out, got ok=%v %+v", ok, m)
+	}
+	d.Finish(context.Background(), turn.Outcome{Stage: turn.StageDone})
+	if m, ok := recvMsg(t, subOut); ok {
+		t.Fatalf("a successful turn must not fan out, got %+v", m)
+	}
+}
+
+// TestWSOrigin_ReportsInformationalErrors is the WS side of the rule above:
+// the error ack reaches the sending tab alone, so an informational outcome
+// still clears that send's bubble.
+func TestWSOrigin_ReportsInformationalErrors(t *testing.T) {
+	const key = "feishu:p2p:alice"
+	hub, _ := newTestHub(t, "tok")
+	t.Cleanup(hub.Shutdown)
+	c, out := newCapturedClient(t, hub)
+
+	d := hub.engine.wsOrigin(c, "w1", key).Begin(context.Background(), turn.TurnInfo{Role: turn.RoleHead})
+	for _, e := range []error{
+		clierr.ErrAbortedByUrgent,
+		fmt.Errorf("passthrough: %w", clierr.ErrSessionReset),
+		clierr.ErrReconnectedUnknown,
+	} {
+		d.Finish(context.Background(), turn.Outcome{Stage: turn.StageSend, Err: e})
+		m, ok := recvMsg(t, out)
+		if !ok || m.Type != "send_ack" || m.ID != "w1" || m.Status != "error" || m.Error != asyncErrorMessage(e) {
+			t.Fatalf("%v: got ok=%v %+v, want an error ack for w1", e, ok, m)
+		}
 	}
 }

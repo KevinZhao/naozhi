@@ -70,8 +70,8 @@ const siblingHubNotifierBaseline = 0
 
 // siblingFieldReadBaseline is the count of direct `h.engine.<field>` /
 // `h.bcast.<field>` reads inside *Hub methods, as opposed to method calls.
-// Zero: LegacySendInvokes lives on *sendEngine, so its counter read is no
-// longer a reach across the boundary. The constant stays as a strict check.
+// Zero: Hub methods call the engine and the broadcaster, they never read
+// their fields. The constant stays as a strict check.
 const siblingFieldReadBaseline = 0
 
 // sendEngineHolders are the only (ownerType, fieldName) pairs allowed to

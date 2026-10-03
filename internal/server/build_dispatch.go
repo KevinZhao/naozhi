@@ -3,16 +3,14 @@
 // buildServerWithHandlers calls buildDispatcher before it builds
 // HealthHandler, so the dispatcher's metrics closure is a constructor
 // argument; Start only calls BuildHandler on the result. The dispatcher's
-// turns run on a turn.Orchestrator built here over the composition root's
-// queue (the one the dashboard engine also holds) and a turnSender; the
-// Orchestrator is a local, not a Server field.
+// turns run on the turn.Orchestrator buildWSStack built for the dashboard
+// engine too; it lives in wiring, not on Server.
 package server
 
 import (
 	"fmt"
 
 	"github.com/naozhi/naozhi/internal/dispatch"
-	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // buildDispatcher wires the dispatcher from the Server state that already
@@ -29,20 +27,18 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 	// Same for the router and resolver: a nil pointer boxed into the
 	// interface field would defeat the dispatcher's nil checks.
 	var router dispatch.SessionRouter
-	var sendRouter turnRouter
 	if s.router != nil {
-		router, sendRouter = s.router, s.router
+		router = s.router
 	}
 	var resolver dispatch.KeyResolver
 	if w.resolver != nil {
 		resolver = w.resolver
 	}
-	// The broadcaster comes from buildWSStack, which buildDashboard has run
-	// by now; without it every IM turn would nil-deref broadcasting its state.
-	if w.bcast == nil {
-		panic("server: buildDispatcher needs w.bcast; buildDashboard must run first")
+	// The Orchestrator comes from buildWSStack, which buildDashboard has run
+	// by now; a nil one would fail every IM message at Submit.
+	if w.turns == nil {
+		panic("server: buildDispatcher needs w.turns; buildDashboard must run first")
 	}
-	turns := turn.New(w.msgQueue, turnSender{router: sendRouter, notify: w.bcast})
 	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:                router,
 		Platforms:             s.platforms,
@@ -51,7 +47,7 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 		Scheduler:             cronCommands,
 		ProjectMgr:            s.projectMgr,
 		Resolver:              resolver,
-		Turns:                 turns,
+		Turns:                 w.turns,
 		Dedup:                 w.dedup,
 		AllowedRoot:           w.allowedRoot,
 		ClaudeDir:             s.claudeDir,

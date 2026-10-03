@@ -23,11 +23,6 @@ func (b *wsBroadcaster) broadcastSendError(key, errMsg string) {
 	})
 }
 
-// asyncErrorFn is the sessionSend post-ack failure callback: err is the
-// underlying error (nil at the literal-message sites — interrupt timeout,
-// owner-loop panic), msg the localised user-facing label.
-type asyncErrorFn func(err error, msg string)
-
 // informationalSendErr reports whether err is a passthrough outcome the user
 // already knows about: their own /urgent preemption, a /clear-/new reset, or a
 // reconnect with unknown state. session_state corrects the UI for all three.

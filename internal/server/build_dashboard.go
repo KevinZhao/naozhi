@@ -13,6 +13,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // buildDashboard constructs the WebSocket hub and the handlers that depend on
@@ -75,23 +76,28 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	}
 }
 
-// buildWSStack builds the WebSocket stack as three siblings in dependency
-// order: the broadcaster (owns the subscriber registry), the send engine
-// (notifies the broadcaster) and the Hub (uses both). w keeps the engine and
-// the broadcaster for the other build steps, so nothing reaches them back
-// through the Hub.
+// buildWSStack builds the WebSocket stack in dependency order: the
+// broadcaster (owns the subscriber registry), the turn.Orchestrator every
+// entry's turns run on (its turnSender notifies the broadcaster), the send
+// engine (submits to the Orchestrator) and the Hub (uses the engine and the
+// broadcaster). w keeps the broadcaster, the Orchestrator and the engine for
+// the other build steps, so nothing reaches them back through the Hub.
 func (s *Server) buildWSStack(w *wiring) *Hub {
 	w.bcast = newWSBroadcaster(newSubscriberRegistry())
+	// A nil *session.Router boxed into the interface would read non-nil.
+	var router turnRouter
+	if s.router != nil {
+		router = s.router
+	}
+	w.turns = turn.New(w.msgQueue, turnSender{router: router, notify: w.bcast, prompts: w.scheduler})
 	w.engine = newSendEngine(sendEngineOpts{
-		Queue:       w.msgQueue,
-		Guard:       w.sessionGuard,
+		Turns:       w.turns,
 		Ctx:         s.appCtx,
 		Router:      s.router,
 		Resolver:    w.resolver,
 		Agents:      w.agents,
 		ProjectMgr:  s.projectMgr,
 		ScratchPool: s.scratchPool,
-		Scheduler:   w.scheduler,
 		AllowedRoot: w.allowedRoot,
 		Notify:      w.bcast,
 	})

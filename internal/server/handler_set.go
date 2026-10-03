@@ -135,8 +135,10 @@ type wiring struct {
 	// watchdog holds the no-output / total watchdog-kill counters; the
 	// dispatcher, the session handlers and /health each get pointers into it.
 	watchdog watchdogCounters
-	// engine and bcast are set by buildWSStack; the dispatcher, SendHandler
-	// and the broadcast producers take them from here, not from the Hub.
+	// engine, bcast and turns are set by buildWSStack; the dispatcher,
+	// SendHandler and the broadcast producers take them from here, not from
+	// the Hub.
 	engine *sendEngine
 	bcast  *wsBroadcaster
+	turns  *turn.Orchestrator
 }

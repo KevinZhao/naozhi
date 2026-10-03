@@ -47,7 +47,7 @@ func (l *lockedBuf) String() string {
 }
 
 // TestAutoSaveCronPrompt_SuppressesAlreadySet pins R20260531-CR-001: after the
-// first turn writes the prompt, every later IM turn gets ErrPromptAlreadySet
+// first turn writes the prompt, every later turn gets ErrPromptAlreadySet
 // from SetJobPrompt. That sentinel is benign auto-save behaviour and MUST NOT
 // emit a Warn line — otherwise each cron turn floods the journal.
 func TestAutoSaveCronPrompt_SuppressesAlreadySet(t *testing.T) {
@@ -57,10 +57,10 @@ func TestAutoSaveCronPrompt_SuppressesAlreadySet(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	saver := &fakeCronPromptSaver{err: cron.ErrPromptAlreadySet}
-	e := newSendEngine(sendEngineOpts{Scheduler: saver})
+	s := turnSender{prompts: saver}
 
 	key := sessionkey.CronKey("job123")
-	e.autoSaveCronPrompt("send", key, "do the thing")
+	s.autoSaveCronPrompt(key, "do the thing")
 
 	if saver.calls != 1 {
 		t.Fatalf("SetJobPrompt calls = %d, want 1", saver.calls)
@@ -82,12 +82,10 @@ func TestAutoSaveCronPrompt_WarnsOnRealError(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	saver := &fakeCronPromptSaver{err: errors.New("disk full")}
-	e := newSendEngine(sendEngineOpts{Scheduler: saver})
-
-	e.autoSaveCronPrompt("passthrough", sessionkey.CronKey("jobX"), "txt")
+	turnSender{prompts: saver}.autoSaveCronPrompt(sessionkey.CronKey("jobX"), "txt")
 
 	out := lb.String()
-	if !strings.Contains(out, "passthrough: set cron prompt") {
+	if !strings.Contains(out, "send: set cron prompt") {
 		t.Fatalf("expected Warn line for non-sentinel error, got: %s", out)
 	}
 }
@@ -96,11 +94,10 @@ func TestAutoSaveCronPrompt_WarnsOnRealError(t *testing.T) {
 // scheduler, or for a non-cron key, SetJobPrompt must never be called.
 func TestAutoSaveCronPrompt_NoSchedulerOrNonCron(t *testing.T) {
 	// nil scheduler.
-	newSendEngine(sendEngineOpts{}).autoSaveCronPrompt("send", sessionkey.CronKey("j"), "t")
+	turnSender{}.autoSaveCronPrompt(sessionkey.CronKey("j"), "t")
 
 	saver := &fakeCronPromptSaver{}
-	e := newSendEngine(sendEngineOpts{Scheduler: saver})
-	e.autoSaveCronPrompt("send", "feishu:p2p:abc", "t") // non-cron key
+	turnSender{prompts: saver}.autoSaveCronPrompt("feishu:p2p:abc", "t") // non-cron key
 	if saver.calls != 0 {
 		t.Fatalf("SetJobPrompt called for non-cron key / nil scheduler: calls=%d", saver.calls)
 	}

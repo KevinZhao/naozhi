@@ -17,8 +17,8 @@
 //     violation (#2636) — an inflated baseline silently admits that much
 //     growth, so shrinking a file means re-sampling its entry.
 //   - send_engine_ownership (rule 3b-send): send 块字段只能声明在 sendEngine
-//     上、不能回到 Hub；send.go / send_owner_loop.go / send_engine.go 内不得
-//     出现 *Hub 接收者（#2551）。
+//     上、不能回到 Hub；send.go / send_engine.go / turn_sender.go /
+//     dash_origin.go 内不得出现 *Hub 接收者（#2551）。
 //   - send_engine_sibling: the engine is a composition-root sibling, not
 //     something Hub owns and lends out (rule_send_engine_sibling.go).
 //   - stale_exemption: exemptions 条目必须指向存在的文件。

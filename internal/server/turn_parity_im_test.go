@@ -1,9 +1,9 @@
 package server
 
 // IM-side rows of #3004's divergence table: what the dispatcher's owner loop,
-// detached turns and slash commands do today. Test names carry the row number.
-// C2 moves the IM pipeline onto the shared orchestrator without changing IM
-// behaviour, so it may rewire the helpers here but not edit an assertion.
+// detached turns and slash commands do. Test names carry the row number. C2
+// and D moved the IM pipeline onto the shared orchestrator without changing
+// IM behaviour, so they rewired the helpers here but edited no assertion.
 
 import (
 	"context"
@@ -18,7 +18,6 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
-	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/turn"
 )
 
@@ -531,23 +530,22 @@ func TestTurnParity26_IM_OptsResolvedOncePerOwnerLoop(t *testing.T) {
 	h.waitDone(owner, "owner loop")
 }
 
+// Row 27: an IM key is never a cron key, so the autosave turnSender does for
+// every entry since D never fires for an IM message.
 func TestTurnParity27_IM_NoCronPromptAutosave(t *testing.T) {
 	h := newParityHarness(t, parityOpts{})
 	saver := &fakeCronPromptSaver{}
-	h.engine().scheduler = saver
-	cronKey := sessionkey.CronKey("job1")
-	turns := h.session(cronKey, false)
-	sess := h.router.SessionFor(cronKey)
-	done := make(chan error, 1)
+	turns := h.session(parityKey, false)
 	sender := h.turnSender()
+	sender.prompts = saver
+	im := h.rebuiltIM(t, sender, serverCaps{s: h.srv})
+	done := make(chan struct{})
 	go func() {
-		_, err := sender.Send(context.Background(), cronKey, sess, "do Y", nil, turn.SendSpec{}, nil)
-		done <- err
+		defer close(done)
+		im(h.imCtx, h.imMsg("m1", "do Y"))
 	}()
-	turns.turn(t, "IM-entry turn on a cron key", okTurn("R"))
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
+	turns.turn(t, "IM turn", okTurn("R"))
+	h.waitDone(done, "owner loop")
 	if saver.calls != 0 {
 		t.Fatalf("SetJobPrompt calls = %d through the IM entry, want 0", saver.calls)
 	}

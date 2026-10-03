@@ -41,30 +41,28 @@ import (
 	"strings"
 )
 
-// turnCtxMarkerBaseline is G-a's first slice: ctx marker call sites. 3, all
-// in server's dashboard send path, since IM turns carry turn.SendSpec (#3004
-// C2); it only goes down (#3004 has the per-phase plan).
-const turnCtxMarkerBaseline = 3
+// turnCtxMarkerBaseline is G-a's first slice: ctx marker call sites. 0:
+// every turn carries turn.SendSpec, and the check keeps a marker from
+// creeping back.
+const turnCtxMarkerBaseline = 0
 
 // turnCtxWithValueBaseline is G-a's second slice: context.WithValue( call
-// sites in dispatch, server and turn (today only withSendOpts in
-// dispatch/passthrough_ctx.go). 1 is #3004's measured state; the target is 0.
-const turnCtxWithValueBaseline = 1
+// sites in dispatch, server and turn. 0: send options travel in
+// turn.SendSpec, not in the ctx.
+const turnCtxWithValueBaseline = 0
 
 // turnQueueEscapeBaseline is G-b: .Enqueue(/.DoneOrDrain( call sites outside
-// turn. 2, both in server's dashboard owner loop, since IM turns run on
-// turn.Orchestrator (#3004 C2); the target is 0.
-const turnQueueEscapeBaseline = 2
+// turn. 0: every entry's turns run on turn.Orchestrator.
+const turnQueueEscapeBaseline = 0
 
 // turnSlashLiteralBaseline is G-d: slash-command literal occurrences in
-// dispatch/server. 4, all in server's sessionSend, since dispatch parses with
-// turn.Parse (#3004 C2); the target is 0.
-const turnSlashLiteralBaseline = 4
+// dispatch/server. 0: both parse with turn.Parse.
+const turnSlashLiteralBaseline = 0
 
 // ctxMarkerCallNames are G-a's first slice: the four ctx marker functions
 // (#3004 分叉 8). A bare Ident covers an unqualified call from inside
 // dispatch itself; calleeName (rule_send_engine_sibling.go) also matches the
-// qualified form server's send.go uses (dispatch.IsUrgent(ctx)).
+// qualified form a server caller would use (dispatch.IsUrgent(ctx)).
 var ctxMarkerCallNames = map[string]bool{
 	"WithPassthrough": true,
 	"IsPassthrough":   true,
@@ -78,9 +76,8 @@ var turnQueueEscapeMethods = map[string]bool{
 	"DoneOrDrain": true,
 }
 
-// turnSlashLiterals are G-d's six literal forms (#3004: dispatch parses them
-// with turn.Parse since C2, send.go's inline checks still spell them out;
-// turn.Parse is meant to be the one place that does).
+// turnSlashLiterals are G-d's six literal forms (#3004: turn.Parse is the one
+// place that spells them out).
 var turnSlashLiterals = map[string]bool{
 	"/new":     true,
 	"/new ":    true,

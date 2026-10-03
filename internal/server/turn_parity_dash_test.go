@@ -1,27 +1,37 @@
 package server
 
-// Dashboard-side rows of #3004's divergence table: what sessionSend, the
-// engine's owner loop and its detached passthrough turns do today. D flips the
-// rows the table marks "D"; each flip edits the assertion here in the same PR
-// and names the row.
+// Dashboard-side rows of #3004's divergence table. Since D the dashboard's
+// turns run on turn.Orchestrator like IM's, through wsOrigin / httpOrigin; the
+// rows the table marks "D" were flipped to their new values here, each test
+// name saying what the row is now.
 
 import (
-	"bytes"
 	"context"
-	"os"
-	"os/exec"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/turn"
 )
 
-func TestTurnParity01_Dash_DrainTurnFailureIsSilent(t *testing.T) {
+// onlyErrorAck fails t unless acks is exactly one error ack, for id, saying msg.
+func onlyErrorAck(t *testing.T, acks []parityFrame, id, msg string) {
+	t.Helper()
+	if len(acks) != 1 || acks[0].ID != id || acks[0].Error != msg {
+		t.Fatalf("error acks = %+v, want exactly one %q for %s", acks, msg, id)
+	}
+}
+
+// Row 1 flipped in D: a merged follow-up turn's failure reaches the sends it
+// carried, not the owner's already-answered one.
+func TestTurnParity01_Dash_DrainTurnFailureReported(t *testing.T) {
 	t.Run("send fails", func(t *testing.T) {
 		h := newParityHarness(t, parityOpts{})
 		turns := h.session(parityKey, false)
@@ -35,9 +45,7 @@ func TestTurnParity01_Dash_DrainTurnFailureIsSilent(t *testing.T) {
 		turns.answer(okTurn("R1"))
 		turns.turn(t, "drain turn", parityOutcome{Err: errParityBoom})
 		h.waitEngineIdle()
-		if acks := ws.errorAcks(); len(acks) != 0 {
-			t.Fatalf("drain-turn failure produced error acks %+v, want none", acks)
-		}
+		onlyErrorAck(t, ws.errorAcks(), "w2", asyncErrorMessage(errParityBoom))
 	})
 	t.Run("session lookup fails", func(t *testing.T) {
 		agents := map[string]session.AgentOpts{"general": {}}
@@ -54,37 +62,26 @@ func TestTurnParity01_Dash_DrainTurnFailureIsSilent(t *testing.T) {
 		turns.answer(okTurn("R1"))
 		h.waitEngineIdle()
 		turns.noMoreTurns(t)
-		if acks := ws.errorAcks(); len(acks) != 0 {
-			t.Fatalf("drain-turn GetOrCreate failure produced error acks %+v, want none", acks)
+		acks := ws.errorAcks()
+		if len(acks) != 1 || acks[0].ID != "w2" || acks[0].Error == "" {
+			t.Fatalf("drain-turn GetOrCreate failure: error acks %+v, want one for w2", acks)
 		}
 	})
 }
 
-func TestTurnParity02_Dash_FirstTurnFailureReportedOnlyInPassthrough(t *testing.T) {
-	for _, mode := range []string{"collect", "interrupt"} {
-		t.Run(mode+" is silent", func(t *testing.T) {
+// Row 2 flipped in D: a first turn's failure is reported in every mode.
+func TestTurnParity02_Dash_FirstTurnFailureReported(t *testing.T) {
+	for _, mode := range []string{"collect", "interrupt", "passthrough"} {
+		t.Run(mode, func(t *testing.T) {
 			h := newParityHarness(t, parityOpts{mode: mode})
-			turns := h.session(parityKey, false)
+			turns := h.session(parityKey, mode == "passthrough")
 			ws := h.ws()
 			ws.send("w1", "first")
-			turns.turn(t, "owner turn", parityOutcome{Err: errParityBoom})
+			turns.turn(t, "first turn", parityOutcome{Err: errParityBoom})
 			h.waitEngineIdle()
-			if acks := ws.errorAcks(); len(acks) != 0 {
-				t.Fatalf("%s first-turn failure produced error acks %+v, want none", mode, acks)
-			}
+			onlyErrorAck(t, ws.errorAcks(), "w1", asyncErrorMessage(errParityBoom))
 		})
 	}
-	t.Run("passthrough reports", func(t *testing.T) {
-		h := newParityHarness(t, parityOpts{mode: "passthrough"})
-		turns := h.session(parityKey, true)
-		ws := h.ws()
-		ws.send("w1", "first")
-		turns.turn(t, "turn", parityOutcome{Err: errParityBoom})
-		f := ws.waitFor(t, "error ack", func(f parityFrame) bool { return f.Type == "send_ack" && f.Status == "error" })
-		if f.ID != "w1" || f.Error != asyncErrorMessage(errParityBoom) {
-			t.Fatalf("passthrough failure ack = %+v", f)
-		}
-	})
 }
 
 func TestTurnParity03_Dash_ResetOnlyOnExactCommand(t *testing.T) {
@@ -109,6 +106,8 @@ func TestTurnParity03_Dash_ResetOnlyOnExactCommand(t *testing.T) {
 	turns.noMoreTurns(t)
 }
 
+// Row 4: a dashboard /new drops the workspace override and refreshes every
+// tab's session list.
 func TestTurnParity04_Dash_ResetDiscardsWorkspaceOverride(t *testing.T) {
 	h := newParityHarness(t, parityOpts{})
 	h.session(parityKey, false)
@@ -119,36 +118,36 @@ func TestTurnParity04_Dash_ResetDiscardsWorkspaceOverride(t *testing.T) {
 	if got := h.router.Workspace(parityChatKey); got != "" {
 		t.Fatalf("workspace override after dashboard /new = %q, want it discarded", got)
 	}
+	ws.waitFor(t, "sessions_update after /new", func(f parityFrame) bool { return f.Type == "sessions_update" })
 }
 
-func TestTurnParity06_Dash_UrgentOnlyInPassthroughCaseSensitive(t *testing.T) {
-	t.Run("collect sends it as text", func(t *testing.T) {
-		h := newParityHarness(t, parityOpts{})
-		turns := h.session(parityKey, true)
-		ws := h.ws()
-		ws.send("w1", "/urgent hi")
-		if c := turns.turn(t, "turn", okTurn("R")); c.Text != "/urgent hi" || c.Priority != "" || c.Passthrough {
-			t.Fatalf("collect /urgent turn = %+v, want the literal text through Send", c)
-		}
-		h.waitEngineIdle()
-	})
-	t.Run("passthrough", func(t *testing.T) {
-		h := newParityHarness(t, parityOpts{mode: "passthrough"})
-		turns := h.session(parityKey, true)
-		ws := h.ws()
-		for i, tc := range []struct{ in, text, priority string }{
-			{"/urgent hi", "hi", "now"},
-			{"/URGENT hi", "/URGENT hi", ""},
-			{"/urgent", "/urgent", ""},
-		} {
-			ws.send("w"+string(rune('0'+i)), tc.in)
-			c := turns.turn(t, tc.in, okTurn("R"))
-			if c.Text != tc.text || c.Priority != tc.priority {
-				t.Errorf("%q: turn = %+v, want text %q priority %q", tc.in, c, tc.text, tc.priority)
+// Row 6 flipped in D: /urgent is recognised in every mode, case-insensitively,
+// and a bare /urgent is a validation error that starts no turn.
+func TestTurnParity06_Dash_UrgentAnyModeCaseInsensitive(t *testing.T) {
+	for _, mode := range []string{"collect", "interrupt", "passthrough"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newParityHarness(t, parityOpts{mode: mode})
+			turns := h.session(parityKey, true)
+			ws := h.ws()
+			for i, in := range []string{"/urgent hi", "/URGENT  hi"} {
+				id := "w" + string(rune('0'+i))
+				ws.send(id, in)
+				if s := ws.ack(t, id); s != "accepted" {
+					t.Fatalf("%q ack = %q, want accepted (a detached turn runs now)", in, s)
+				}
+				c := turns.turn(t, in, okTurn("R"))
+				if c.Text != "hi" || c.Priority != "now" || !c.Passthrough {
+					t.Errorf("%q: turn = %+v, want text hi, priority now, via SendPassthrough", in, c)
+				}
+				h.waitEngineIdle()
 			}
-			h.waitEngineIdle()
-		}
-	})
+			ws.send("wb", "/urgent")
+			if f := ws.waitFor(t, "bare /urgent ack", func(f parityFrame) bool { return f.Type == "send_ack" && f.ID == "wb" }); f.Status != "error" || f.Error != "用法：/urgent <紧急消息>" {
+				t.Fatalf("bare /urgent ack = %+v, want the usage error", f)
+			}
+			turns.noMoreTurns(t)
+		})
+	}
 }
 
 func TestTurnParity07_Dash_UrgentTargetsCurrentKey(t *testing.T) {
@@ -187,62 +186,41 @@ func TestTurnParity08_Dash_PassthroughSignal(t *testing.T) {
 	}
 }
 
-// parityChildEnv selects the child half of the row-9 crash test.
-const parityChildEnv = "NAOZHI_TURN_PARITY_CHILD"
-
-// TestTurnParity09_Dash_DetachedTurnPanicCrashesProcess pins that a panic in a
-// dashboard passthrough turn is NOT recovered: it takes the process down. The
-// panic runs in a child copy of this test binary so the crash is observable.
-func TestTurnParity09_Dash_DetachedTurnPanicCrashesProcess(t *testing.T) {
-	if os.Getenv(parityChildEnv) == "row09" {
-		h := newParityHarness(t, parityOpts{mode: "passthrough"})
-		turns := h.session(parityKey, true)
-		ws := h.ws()
-		ws.send("w1", "hello")
-		turns.turn(t, "turn", parityOutcome{Panic: "parity-row09-unrecovered"})
-		// The goroutine's deferred release runs while the panic unwinds, so an
-		// idle engine is no proof of survival. The expected event is this
-		// process dying; parityWait is its deadline, as for every wait here.
-		h.waitEngineIdle()
-		<-time.After(parityWait)
-		t.Log("parity-row09-survived")
-		return
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestTurnParity09_Dash_DetachedTurnPanicCrashesProcess$", "-test.count=1", "-test.v")
-	cmd.Env = append(os.Environ(), parityChildEnv+"=row09")
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	err := cmd.Run()
-	if err == nil || strings.Contains(out.String(), "--- PASS: TestTurnParity09_Dash") {
-		t.Fatalf("child survived a dashboard passthrough-turn panic (err=%v):\n%s", err, out.String())
-	}
-	if !strings.Contains(out.String(), "panic: parity-row09-unrecovered") {
-		t.Fatalf("child failed without the scripted panic:\n%s", out.String())
+// Row 9 flipped in D: a detached dashboard turn's panic is recovered and
+// reported, and the engine goes on serving.
+func TestTurnParity09_Dash_DetachedTurnPanicIsRecovered(t *testing.T) {
+	for _, tc := range []struct{ name, mode, text string }{
+		{"passthrough turn", "passthrough", "hello"},
+		{"urgent turn", "collect", "/urgent hello"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newParityHarness(t, parityOpts{mode: tc.mode})
+			turns := h.session(parityKey, true)
+			ws := h.ws()
+			ws.send("w1", tc.text)
+			if s := ws.ack(t, "w1"); s != "accepted" {
+				t.Fatalf("detached send ack = %q, want accepted", s)
+			}
+			turns.turn(t, "detached turn", parityOutcome{Panic: "parity: detached turn panic"})
+			h.waitEngineIdle()
+			onlyErrorAck(t, ws.errorAcks(), "w1", parityPanicReply)
+			ws.send("w2", "after")
+			turns.turn(t, "the next turn", okTurn("R"))
+			h.waitEngineIdle()
+		})
 	}
 }
 
-// idleOrderEngineRouter logs NotifyIdle in front of the real router (row 10;
-// see idleOrderDispatchRouter for why the engine is rebuilt).
-type idleOrderEngineRouter struct {
-	*session.Router
-	log *orderLog
-}
-
-func (r idleOrderEngineRouter) NotifyIdle() {
-	r.log.add("idle")
-	r.Router.NotifyIdle()
-}
-
-// rebuiltEngine builds a second send engine over h's queue, guard and
-// broadcaster with router swapped in.
-func (h *parityHarness) rebuiltEngine(t *testing.T, router sendEngineRouter) *sendEngine {
+// rebuiltEngine builds a second send engine over h's queue, router and
+// broadcaster, its turns on a fresh Orchestrator over that queue with sender
+// in front.
+func (h *parityHarness) rebuiltEngine(t *testing.T, sender turn.Sender) *sendEngine {
 	t.Helper()
 	w := h.hs.wiring
 	e := newSendEngine(sendEngineOpts{
-		Queue:    w.msgQueue,
-		Guard:    w.sessionGuard,
+		Turns:    turn.New(w.msgQueue, sender),
 		Ctx:      h.srv.appCtx,
-		Router:   router,
+		Router:   h.router,
 		Resolver: w.resolver,
 		Agents:   w.agents,
 		Notify:   w.bcast,
@@ -251,25 +229,51 @@ func (h *parityHarness) rebuiltEngine(t *testing.T, router sendEngineRouter) *se
 	return e
 }
 
-func TestTurnParity10_Dash_NotifyIdleBeforePanicHandling(t *testing.T) {
+// finishLog logs each Finish its origin's deliveries get, in front of them.
+type finishLog struct {
+	turn.Origin
+	log *orderLog
+}
+
+func (o finishLog) Begin(ctx context.Context, t turn.TurnInfo) turn.Delivery {
+	d := o.Origin.Begin(ctx, t)
+	if d == nil {
+		return nil
+	}
+	return finishLogDelivery{d, o.log}
+}
+
+type finishLogDelivery struct {
+	turn.Delivery
+	log *orderLog
+}
+
+func (d finishLogDelivery) Finish(ctx context.Context, out turn.Outcome) {
+	d.log.add(fmt.Sprintf("finish panic=%v", out.Panic))
+	d.Delivery.Finish(ctx, out)
+}
+
+// Row 10 flipped in D: NotifyIdle runs after the panic has been delivered.
+func TestTurnParity10_Dash_NotifyIdleAfterPanicHandling(t *testing.T) {
 	h := newParityHarness(t, parityOpts{})
 	turns := h.session(parityKey, false)
 	log := &orderLog{}
-	e := h.rebuiltEngine(t, idleOrderEngineRouter{h.router, log})
-	if _, status, err := e.sessionSend(sendParams{Key: parityKey, Text: "first"}, func(_ error, msg string) {
-		log.add("async " + msg)
-	}); err != nil || status != sendAckAccepted {
+	e := h.rebuiltEngine(t, idleOrderSender{h.turnSender(), log})
+	ws := h.ws()
+	if _, status, err := e.sessionSend(sendParams{Key: parityKey, Text: "first"}, finishLog{e.wsOrigin(ws.c, "w1", parityKey), log}); err != nil || status != sendAckAccepted {
 		t.Fatalf("sessionSend = %q, %v", status, err)
 	}
 	turns.turn(t, "owner turn", parityOutcome{Panic: "parity: owner turn panic"})
 	waitEngineIdle(t, e)
-	want := []string{"idle", "async " + parityPanicReply}
+	want := []string{"finish panic=true", "idle"}
 	if got := log.snapshot(); strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Fatalf("dashboard owner-loop panic order = %q, want %q (NotifyIdle runs before the recover)", got, want)
+		t.Fatalf("dashboard owner-loop panic order = %q, want %q (NotifyIdle runs after the recover)", got, want)
 	}
+	onlyErrorAck(t, ws.errorAcks(), "w1", parityPanicReply)
 }
 
-func TestTurnParity11_Dash_PanicIsNotCounted(t *testing.T) {
+// Row 11 flipped in D: a dashboard turn's panic is counted.
+func TestTurnParity11_Dash_PanicIsCounted(t *testing.T) {
 	h := newParityHarness(t, parityOpts{})
 	turns := h.session(parityKey, false)
 	ws := h.ws()
@@ -278,12 +282,14 @@ func TestTurnParity11_Dash_PanicIsNotCounted(t *testing.T) {
 	turns.turn(t, "owner turn", parityOutcome{Panic: "parity: owner turn panic"})
 	ws.waitFor(t, "panic ack", func(f parityFrame) bool { return f.Type == "send_ack" && f.Status == "error" })
 	h.waitEngineIdle()
-	if got := metrics.PanicRecoveredTotal.Value() - before; got != 0 {
-		t.Fatalf("PanicRecoveredTotal moved by %d on a dashboard owner-loop panic, want 0", got)
+	if got := metrics.PanicRecoveredTotal.Value() - before; got != 1 {
+		t.Fatalf("PanicRecoveredTotal moved by %d on a dashboard owner-loop panic, want 1", got)
 	}
 }
 
-func TestTurnParity12_Dash_DrainPanicReportedToFirstSend(t *testing.T) {
+// Row 12 flipped in D: a drain turn's panic reaches the send it carried and
+// the send it discarded, never the owner's already-finished first send.
+func TestTurnParity12_Dash_DrainPanicReportedToBatch(t *testing.T) {
 	h := newParityHarness(t, parityOpts{})
 	turns := h.session(parityKey, false)
 	ws := h.ws()
@@ -292,11 +298,22 @@ func TestTurnParity12_Dash_DrainPanicReportedToFirstSend(t *testing.T) {
 	ws.send("w2", "second")
 	ws.ack(t, "w2")
 	turns.answer(okTurn("R1"))
-	turns.turn(t, "drain turn", parityOutcome{Panic: "parity: drain turn panic"})
+	turns.next(t, "drain turn")
+	ws.send("w3", "third")
+	ws.ack(t, "w3")
+	turns.answer(parityOutcome{Panic: "parity: drain turn panic"})
 	h.waitEngineIdle()
+	turns.noMoreTurns(t)
 	acks := ws.errorAcks()
-	if len(acks) != 1 || acks[0].ID != "w1" || acks[0].Error != parityPanicReply {
-		t.Fatalf("error acks after a drain-turn panic = %+v, want one %q for w1 (the already-finished first send)", acks, parityPanicReply)
+	ids := make([]string, 0, len(acks))
+	for _, a := range acks {
+		if a.Error != parityPanicReply {
+			t.Errorf("error ack %+v, want %q", a, parityPanicReply)
+		}
+		ids = append(ids, a.ID)
+	}
+	if slices.Sort(ids); strings.Join(ids, ",") != "w2,w3" {
+		t.Fatalf("error acks after a drain-turn panic went to %q, want w2 (in the turn) and w3 (discarded), not w1", ids)
 	}
 }
 
@@ -324,25 +341,48 @@ func TestTurnParity13_Dash_ShutdownDrainDiscardsQueue(t *testing.T) {
 	}
 }
 
-func TestTurnParity14_Dash_EvictedSendIsNotTold(t *testing.T) {
-	h := newParityHarness(t, parityOpts{maxDepth: 1})
-	turns := h.session(parityKey, false)
-	ws := h.ws()
-	ws.send("w1", "first")
-	turns.next(t, "owner turn")
-	ws.send("w2", "second")
-	ws.send("w3", "third")
-	if a, b := ws.ack(t, "w2"), ws.ack(t, "w3"); a != "queued" || b != "queued" {
-		t.Fatalf("acks = %q, %q", a, b)
-	}
-	turns.answer(okTurn("R1"))
-	if c := turns.turn(t, "drain turn", okTurn("R2")); c.Text != "third" {
-		t.Fatalf("drain turn = %q, want only the surviving message", c.Text)
-	}
-	h.waitEngineIdle()
-	if acks := ws.errorAcks(); len(acks) != 0 {
-		t.Fatalf("evicted send got %+v, want nothing", acks)
-	}
+// Row 14 flipped in D: a WS send pushed out of a full queue is told. An HTTP
+// one is not: it has no per-request channel, and a send_error would reach
+// every tab on the key.
+func TestTurnParity14_Dash_EvictedSendIsTold(t *testing.T) {
+	t.Run("ws", func(t *testing.T) {
+		h := newParityHarness(t, parityOpts{maxDepth: 1})
+		turns := h.session(parityKey, false)
+		ws := h.ws()
+		ws.send("w1", "first")
+		turns.next(t, "owner turn")
+		ws.send("w2", "second")
+		ws.send("w3", "third")
+		if a, b := ws.ack(t, "w2"), ws.ack(t, "w3"); a != "queued" || b != "queued" {
+			t.Fatalf("acks = %q, %q", a, b)
+		}
+		turns.answer(okTurn("R1"))
+		if c := turns.turn(t, "drain turn", okTurn("R2")); c.Text != "third" {
+			t.Fatalf("drain turn = %q, want only the surviving message", c.Text)
+		}
+		h.waitEngineIdle()
+		onlyErrorAck(t, ws.errorAcks(), "w2", evictedSendMsg)
+	})
+	t.Run("http is silent", func(t *testing.T) {
+		h := newParityHarness(t, parityOpts{maxDepth: 1})
+		turns := h.session(parityKey, false)
+		ws := h.ws()
+		h.httpSend(t, "first")
+		turns.next(t, "owner turn")
+		for _, text := range []string{"second", "third"} {
+			if s := h.httpSend(t, text); s != "queued" {
+				t.Fatalf("HTTP %s status = %q", text, s)
+			}
+		}
+		turns.answer(okTurn("R1"))
+		if c := turns.turn(t, "drain turn", okTurn("R2")); c.Text != "third" {
+			t.Fatalf("drain turn = %q, want only the surviving message", c.Text)
+		}
+		h.waitEngineIdle()
+		if errs := ws.framesOfType("send_error"); len(errs) != 0 {
+			t.Fatalf("evicted HTTP send: send_error frames %+v, want none", errs)
+		}
+	})
 }
 
 func TestTurnParity15_Dash_DrainTimerRearms(t *testing.T) {
@@ -380,28 +420,18 @@ func TestTurnParity16_Dash_InterruptModeInterruptsOnce(t *testing.T) {
 	h.waitEngineIdle()
 }
 
-// newSessionEngineRouter reports every GetOrCreate as a fresh session (row 17).
-type newSessionEngineRouter struct{ *session.Router }
-
-func (r newSessionEngineRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
-	s, _, err := r.Router.GetOrCreate(ctx, key, opts)
-	return s, session.SessionNew, err
-}
-
 func TestTurnParity17_Dash_NoTakeoverNoNewSessionNotice(t *testing.T) {
 	h := newParityHarness(t, parityOpts{interim: true})
 	turns := h.session(parityKey, false)
-	e := h.rebuiltEngine(t, newSessionEngineRouter{h.router})
-	var asyncMsgs []string
-	if _, _, err := e.sessionSend(sendParams{Key: parityKey, Text: "first"}, func(_ error, msg string) {
-		asyncMsgs = append(asyncMsgs, msg)
-	}); err != nil {
+	e := h.rebuiltEngine(t, newSessionSender{h.turnSender()})
+	ws := h.ws()
+	if _, _, err := e.sessionSend(sendParams{Key: parityKey, Text: "first"}, e.wsOrigin(ws.c, "w1", parityKey)); err != nil {
 		t.Fatal(err)
 	}
 	turns.turn(t, "owner turn on a fresh session", okTurn("R1"))
 	waitEngineIdle(t, e)
-	if r := h.plat.allReplies(); len(r) != 0 || len(asyncMsgs) != 0 {
-		t.Fatalf("dashboard first turn on a new session: IM replies %q, async %q; want neither", r, asyncMsgs)
+	if r, acks := h.plat.allReplies(), ws.errorAcks(); len(r) != 0 || len(acks) != 0 {
+		t.Fatalf("dashboard first turn on a new session: IM replies %q, error acks %+v; want neither", r, acks)
 	}
 }
 
@@ -488,21 +518,33 @@ func TestTurnParity26_Dash_OptsResolvedPerTurn(t *testing.T) {
 	turns.noMoreTurns(t) // the drain turn re-resolved opts and its GetOrCreate refused them
 }
 
+// Row 27: the autosave moved into turnSender (D), the Sender every entry's
+// turns go through; through the production wiring, a failed turn on a cron
+// key leaves the job's empty prompt alone and a successful one fills it.
 func TestTurnParity27_Dash_CronPromptAutosave(t *testing.T) {
-	h := newParityHarness(t, parityOpts{})
-	saver := &fakeCronPromptSaver{}
-	h.engine().scheduler = saver
-	cronKey := sessionkey.CronKey("job1")
+	h := newParityHarness(t, parityOpts{cron: true})
+	job := &cron.Job{Schedule: "@every 1h", Platform: "dashboard", ChatID: "c1", ChatType: "direct", Paused: true}
+	if err := h.sched.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	prompt := func() string {
+		j, _ := h.sched.GetJob(job.ID)
+		return j.Prompt
+	}
+	cronKey := sessionkey.CronKey(job.ID)
 	turns := h.session(cronKey, false)
 	ws := h.ws()
-	ws.sendTo(cronKey, "w1", "do X")
-	turns.turn(t, "successful cron turn", okTurn("R"))
-	h.waitEngineIdle()
-	ws.sendTo(cronKey, "w2", "do Z")
+	ws.sendTo(cronKey, "w1", "do Z")
 	turns.turn(t, "failed cron turn", parityOutcome{Err: errParityBoom})
 	h.waitEngineIdle()
-	if saver.calls != 1 || saver.lastJobID != "job1" || saver.lastPrompt != "do X" {
-		t.Fatalf("SetJobPrompt calls=%d job=%q prompt=%q, want one call for the successful turn", saver.calls, saver.lastJobID, saver.lastPrompt)
+	if p := prompt(); p != "" {
+		t.Fatalf("job prompt after a failed turn = %q, want it left empty", p)
+	}
+	ws.sendTo(cronKey, "w2", "do X")
+	turns.turn(t, "successful cron turn", okTurn("R"))
+	h.waitEngineIdle()
+	if p := prompt(); p != "do X" {
+		t.Fatalf("job prompt after a successful turn = %q, want %q", p, "do X")
 	}
 }
 
@@ -522,7 +564,4 @@ func TestTurnParity28_Dash_QueuePathNotLegacy(t *testing.T) {
 	turns.answer(okTurn("R1"))
 	turns.turn(t, "drain turn", okTurn("R2"))
 	h.waitEngineIdle()
-	if n := h.engine().LegacySendInvokes(); n != 0 {
-		t.Fatalf("LegacySendInvokes = %d, want 0 on a production-built Server", n)
-	}
 }

@@ -195,7 +195,7 @@ func (s *Scheduler) sendWithWatchdog(sendCtx context.Context, sendCancel context
 	// otherwise Process.State is already Ready and the interrupt is a no-op.
 	abortCh, stopWatchdog := runDeadlineWatchdog(sendCtx, sess, s.watchdogInterruptTimeout())
 
-	// Direct Send without sendWithBroadcast — cron jobs notify via the IM
+	// Direct Send, not through turnSender — cron jobs notify via the IM
 	// deliverNotice path and the cron_run_ended WS frame.
 	result, err := sess.Send(sendCtx, text)
 
