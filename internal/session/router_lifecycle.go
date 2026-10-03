@@ -51,7 +51,8 @@ func (r *Router) publishSession(tx sessTx, key string, s *ManagedSession, alread
 }
 
 // GetOrCreate returns an existing session or creates a new one.
-// AgentOpts overrides the router defaults for model and args.
+// AgentOpts overrides the router defaults for model and args. A dead session
+// whose resume target is gone comes back as SessionResumeLost.
 func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, SessionStatus, error) {
 	// Flag-injection guard: opts.Model originates from dashboard WS, upstream
 	// RPC, or planner config and must be validated at the router boundary.
@@ -145,6 +146,11 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 				return nil, 0, fmt.Errorf("session %s: %w: %w", key, ErrShimStuck, err)
 			}
 			return nil, 0, fmt.Errorf("session %s: %w", key, err)
+		}
+		// The resume guard dropped the transcript of a session that had one:
+		// the respawn is fresh and the conversation's context is gone.
+		if status == SessionResumed && resumedID != "" && res.resumeID == "" && !res.yielded {
+			status = SessionResumeLost
 		}
 		return s, status, nil
 	}
@@ -385,6 +391,11 @@ type spawnReservation struct {
 	// in the same critical section.
 	old  *ManagedSession
 	snap respawnSnapshot
+
+	// yielded is set by completeSpawn when it returned a live session another
+	// path installed meanwhile instead of its own, so the reservation's resume
+	// facts do not describe the returned session.
+	yielded bool
 }
 
 // reserveSpawn is the first phase of a spawn, run inside the caller's
@@ -573,6 +584,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 	})
 	if winner != nil {
 		proc.Close()
+		res.yielded = true
 		return winner, nil
 	}
 

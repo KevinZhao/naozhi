@@ -3,8 +3,12 @@ package session
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
@@ -71,4 +75,116 @@ func TestSpawnSession_RejectedAfterStopped(t *testing.T) {
 		}
 		assertNoLeak(t, r)
 	})
+}
+
+// newResumeGuardRouter is a router whose resume guard probes an empty scratch
+// claude dir.
+func newResumeGuardRouter(t *testing.T) *Router {
+	t.Helper()
+	r := NewRouter(RouterConfig{
+		MaxProcs:  3,
+		Wrapper:   cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
+		ClaudeDir: t.TempDir(),
+	})
+	t.Cleanup(r.Shutdown)
+	return r
+}
+
+// TestGetOrCreate_ReportsADroppedResumeTarget: a dead session with an ID
+// whose transcript is gone respawns fresh and reports SessionResumeLost; with
+// the transcript on disk, or with no ID to resume, it stays SessionResumed.
+func TestGetOrCreate_ReportsADroppedResumeTarget(t *testing.T) {
+	t.Parallel()
+	const key, ws, sid = "feishu:direct:alice:general", "/home/u/proj", "sess-1"
+	cases := []struct {
+		name       string
+		sessionID  string
+		transcript bool
+		want       SessionStatus
+		wantResume string
+	}{
+		{"transcript present", sid, true, SessionResumed, sid},
+		{"transcript missing", sid, false, SessionResumeLost, ""},
+		{"no session id", "", false, SessionResumed, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newResumeGuardRouter(t)
+			if tc.transcript {
+				jsonl := claudefs.SessionJSONL(r.hist.claudeDir, ws, sid)
+				if err := os.MkdirAll(filepath.Dir(jsonl), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(jsonl, []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var resumeID string
+			r.spawn.hook = func(_ context.Context, opts cli.SpawnOptions) (processIface, error) {
+				resumeID = opts.ResumeID
+				return newIdleProc(), nil
+			}
+			dead := injectSession(r, key, newDeadProc())
+			dead.setWorkspace(ws)
+			dead.setSessionID(tc.sessionID)
+
+			_, st, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st != tc.want || resumeID != tc.wantResume {
+				t.Errorf("status = %d, spawn resume = %q; want %d, %q", st, resumeID, tc.want, tc.wantResume)
+			}
+		})
+	}
+	t.Run("fresh key", func(t *testing.T) {
+		t.Parallel()
+		r := newResumeGuardRouter(t)
+		r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) { return newIdleProc(), nil }
+		if _, st, err := r.GetOrCreate(context.Background(), key, AgentOpts{}); err != nil || st != SessionNew {
+			t.Errorf("status = %d, err = %v; want SessionNew", st, err)
+		}
+	})
+}
+
+// TestGetOrCreate_YieldedSpawnIsNotResumeLost: a resume whose transcript is
+// gone but whose spawn yields to a live session installed meanwhile returns
+// that session, which lost nothing, so the status is not SessionResumeLost.
+func TestGetOrCreate_YieldedSpawnIsNotResumeLost(t *testing.T) {
+	t.Parallel()
+	const key = "feishu:direct:alice:general"
+	r := newResumeGuardRouter(t)
+	g := newGatedSpawn()
+	r.spawn.hook = g.hook
+	dead := injectSession(r, key, newDeadProc())
+	dead.setWorkspace("/home/u/proj")
+	dead.setSessionID("sess-1")
+
+	type result struct {
+		s   *ManagedSession
+		st  SessionStatus
+		err error
+	}
+	out := make(chan result, 1)
+	go func() {
+		s, st, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
+		out <- result{s, st, err}
+	}()
+	waitEntered(t, g)
+	winner := injectSession(r, key, newIdleProc())
+	close(g.release)
+
+	var got result
+	select {
+	case got = <-out:
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetOrCreate did not return")
+	}
+	if got.err != nil || got.s != winner {
+		t.Fatalf("GetOrCreate = %p, %v; want the session installed meanwhile", got.s, got.err)
+	}
+	if got.st == SessionResumeLost {
+		t.Error("status = SessionResumeLost for a session this spawn did not install")
+	}
 }

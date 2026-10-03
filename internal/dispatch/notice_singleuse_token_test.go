@@ -13,8 +13,16 @@ import (
 
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/turn"
 )
+
+// fakeSingleUseInterim is a single-use, non-Reactor platform that claims
+// interim support, so the resume-lost notice reaches the single-use gate
+// rather than stopping at SupportsInterimMessages.
+type fakeSingleUseInterim struct{ fakeSingleUseReactorless }
+
+func (f *fakeSingleUseInterim) SupportsInterimMessages() bool { return true }
 
 // noticeSite triggers one non-answer notice for chat1 on platform name.
 // rateLimited sites spend chat1's ShouldNotify cooldown when they send.
@@ -48,6 +56,18 @@ var noticeSites = []noticeSite{
 	{name: "merged", text: "已合并到上一条回复", rateLimited: true, fire: func(_ *testing.T, d *Dispatcher, name string) {
 		d.ackMergedFollower(context.Background(), noticeMsg(name), noticeKey(name), 2, nil)
 	}},
+	{name: "resume_lost", text: "之前的会话记录已丢失", fire: func(_ *testing.T, d *Dispatcher, name string) {
+		fireSessionReady(d, name, sessionview.SessionResumeLost)
+	}},
+}
+
+// fireSessionReady runs one first-turn delivery's SessionReady with st.
+func fireSessionReady(d *Dispatcher, name string, st sessionview.SessionStatus) {
+	msg := noticeMsg(name)
+	o := d.newIMOrigin(msg, slog.Default(), noticeKey(name), "general", session.AgentOpts{}, imMessage, len(msg.Text), 0)
+	dl := &imDelivery{o: o, info: turn.TurnInfo{First: true}, p: d.platforms[name], lg: slog.Default()}
+	dl.SessionReady(context.Background(), st)
+	dl.tracker.stop()
 }
 
 func noticeDispatcher(site noticeSite, p platform.Platform) *Dispatcher {
@@ -69,7 +89,7 @@ func TestNotices_SingleUseTokenGate(t *testing.T) {
 	for _, site := range noticeSites {
 		t.Run(site.name+"/single_use", func(t *testing.T) {
 			t.Parallel()
-			fp := &fakeSingleUseReactorless{}
+			fp := &fakeSingleUseInterim{}
 			d := noticeDispatcher(site, fp)
 			site.fire(t, d, fp.Name())
 			if n := fp.replyCount(); n != 0 {

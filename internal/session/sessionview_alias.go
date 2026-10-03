@@ -15,9 +15,10 @@ type (
 )
 
 const (
-	SessionExisting = sessionview.SessionExisting
-	SessionResumed  = sessionview.SessionResumed
-	SessionNew      = sessionview.SessionNew
+	SessionExisting   = sessionview.SessionExisting
+	SessionResumed    = sessionview.SessionResumed
+	SessionNew        = sessionview.SessionNew
+	SessionResumeLost = sessionview.SessionResumeLost
 
 	InterruptSent        = sessionview.InterruptSent
 	InterruptNoSession   = sessionview.InterruptNoSession
