@@ -13,7 +13,8 @@ import (
 // slice to h.historyCache; append-in-place would mutate the backing
 // array readers still hold a reference to.
 //
-// The canonical refresh path is loadHistorySessions, which today does:
+// The canonical refresh path is loadHistorySessionsCtx (loadHistorySessions
+// only adds the scan deadline), which today does:
 //
 //	all := discovery.RecentSessions(...)
 //	...
@@ -37,10 +38,10 @@ func TestHistoryCache_AliasingInvariant(t *testing.T) {
 	src := []byte(packageGoSource(t))
 	body := string(src)
 
-	// 1) Look up loadHistorySessions body.
-	startIdx := strings.Index(body, "func (h *Handlers) loadHistorySessions()")
+	// 1) Look up loadHistorySessionsCtx body.
+	startIdx := strings.Index(body, "func (h *Handlers) loadHistorySessionsCtx(")
 	if startIdx < 0 {
-		t.Fatal("loadHistorySessions is no longer defined anywhere in the package. " +
+		t.Fatal("loadHistorySessionsCtx is no longer defined anywhere in the package. " +
 			"If renamed, update this test; if removed, re-audit the cache refresh " +
 			"path for the R62-GO-5 aliasing invariant.")
 	}
@@ -54,9 +55,9 @@ func TestHistoryCache_AliasingInvariant(t *testing.T) {
 		loadBody = rest
 	}
 
-	// 2) Confirm loadHistorySessions assigns to h.historyCache.
+	// 2) Confirm loadHistorySessionsCtx assigns to h.historyCache.
 	if !strings.Contains(loadBody, "h.historyCache = ") {
-		t.Error("loadHistorySessions no longer assigns h.historyCache via `=`. " +
+		t.Error("loadHistorySessionsCtx no longer assigns h.historyCache via `=`. " +
 			"R62-GO-5: the cache refresh path MUST replace h.historyCache with a " +
 			"fresh slice (not append into the existing backing array) or readers " +
 			"holding the old header will observe writes through their alias.")

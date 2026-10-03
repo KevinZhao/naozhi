@@ -178,19 +178,24 @@ func recentSessionsUnder(ctx context.Context, root, claudeDir string, limit int,
 		resCap = limit
 	}
 	result := make([]RecentSession, 0, resCap)
+	extracting := true
 	for i := range all {
 		if limit > 0 && len(result) >= limit {
 			break
 		}
 		// extractFirstPrompt opens+reads a JSONL per result; honour
 		// cancellation here too so a slow FS cannot pin the leader (#2134).
-		if err := ctx.Err(); err != nil {
-			slog.Warn("recent sessions prompt extraction cancelled; returning partial result",
-				"extracted", len(result), "err", err)
-			break
+		// Cancellation stops the reads, not the result: the sessions the walk
+		// already found are still returned, just without a prompt (#3141).
+		if extracting {
+			if err := ctx.Err(); err != nil {
+				slog.Warn("recent sessions prompt extraction cancelled; returning sessions without prompts",
+					"extracted", len(result), "remaining", resCap-len(result), "err", err)
+				extracting = false
+			}
 		}
 		path := jsonlPaths[all[i].SessionID]
-		if all[i].LastPrompt == "" && all[i].Summary == "" && path != "" {
+		if extracting && all[i].LastPrompt == "" && all[i].Summary == "" && path != "" {
 			all[i].LastPrompt = extractFirstPrompt(path)
 		}
 		result = append(result, all[i])
