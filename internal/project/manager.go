@@ -2,6 +2,7 @@ package project
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -41,6 +42,11 @@ type Manager struct {
 	// project.yaml carries none; guarded by scanMu.
 	indexPath string
 	index     *projectIndex
+
+	// scanLogged and scanCount (scanMu) hold the project count the last Scan
+	// logged, so a scan that finds the same number logs at DEBUG.
+	scanLogged bool
+	scanCount  int
 
 	// scanDiskHook, when set (tests only), runs at the end of every scanDisk.
 	scanDiskHook func()
@@ -183,7 +189,12 @@ func (m *Manager) Scan() error {
 	m.index.replace(res.nextIndex)
 	m.sweepLegacyStubs()
 
-	slog.Info("scanned projects", "root", m.root, "count", len(res.projects))
+	level := slog.LevelDebug
+	if !m.scanLogged || m.scanCount != len(res.projects) {
+		level = slog.LevelInfo
+	}
+	m.scanLogged, m.scanCount = true, len(res.projects)
+	slog.Log(context.Background(), level, "scanned projects", "root", m.root, "count", len(res.projects))
 	return nil
 }
 

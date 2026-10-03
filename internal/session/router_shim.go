@@ -21,7 +21,9 @@ import (
 
 // shimManagedKeys returns the set of session keys that have a surviving shim
 // process. Called by NewRouter to skip async JSONL loading for sessions that
-// will be fully restored by ReconnectShims (replay + JSONL user entries).
+// will be fully restored by ReconnectShims (replay + JSONL user entries). It
+// reads through Inspect, so the cleanup and the first discovery log stay with
+// the startup ReconnectShimsCtx.
 func (b *BackendRegistry) shimManagedKeys() map[string]bool {
 	managers := b.shimManagers()
 	if len(managers) == 0 {
@@ -29,12 +31,14 @@ func (b *BackendRegistry) shimManagedKeys() map[string]bool {
 	}
 	seen := make(map[string]bool)
 	for _, mgr := range managers {
-		states, err := mgr.Discover()
+		entries, err := mgr.Inspect()
 		if err != nil {
 			continue
 		}
-		for _, s := range states {
-			seen[s.Key] = true
+		for _, e := range entries {
+			if e.Verdict == shim.StateLive {
+				seen[e.State.Key] = true
+			}
 		}
 	}
 	if len(seen) == 0 {
@@ -209,13 +213,18 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 
 	// Aggregate states across all managers and dedupe on key, as each shim
 	// is uniquely identified by the session key regardless of backend.
+	// A tick whose live set no manager saw change logs at DEBUG.
 	seenKey := make(map[string]bool)
 	var states []shim.State
+	level := slog.LevelDebug
 	for _, mgr := range managers {
-		ss, err := mgr.Discover()
+		ss, changed, err := mgr.Discover()
 		if err != nil {
 			slog.Warn("shim discovery failed", "err", err)
 			continue
+		}
+		if changed {
+			level = slog.LevelInfo
 		}
 		for _, s := range ss {
 			if seenKey[s.Key] {
@@ -225,7 +234,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 			states = append(states, s)
 		}
 	}
-	slog.Info("shim discovery complete", "found", len(states))
+	slog.Log(parentCtx, level, "shim discovery complete", "found", len(states))
 
 	reconnected := 0
 	driftCheck := driftArgs{backends: &r.backends, spawn: &r.spawn}
