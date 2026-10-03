@@ -2,6 +2,7 @@ package shim
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net"
@@ -101,7 +102,7 @@ func TestConnect_Success(t *testing.T) {
 	srv.serveHello(t, token)
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	handle, err := m.connect(srv.path, token, 0)
+	handle, err := m.connect(context.Background(), srv.path, token, 0)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -131,7 +132,7 @@ func TestConnect_WrongToken_AuthFailed(t *testing.T) {
 	srv.serveHello(t, realToken)
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	_, err := m.connect(srv.path, wrongToken, 0)
+	_, err := m.connect(context.Background(), srv.path, wrongToken, 0)
 	if err == nil {
 		t.Fatal("expected error for wrong token, got nil")
 	}
@@ -153,7 +154,7 @@ func TestConnect_AuthFailed_Response(t *testing.T) {
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(srv.path, token, 0)
+	_, err := m.connect(context.Background(), srv.path, token, 0)
 	if err == nil {
 		t.Fatal("expected error for auth_failed, got nil")
 	}
@@ -174,7 +175,7 @@ func TestConnect_UnexpectedMessageType(t *testing.T) {
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(srv.path, token, 0)
+	_, err := m.connect(context.Background(), srv.path, token, 0)
 	if err == nil {
 		t.Fatal("expected error for unexpected message type, got nil")
 	}
@@ -196,7 +197,7 @@ func TestConnect_AuthFailed_SanitizesMsg(t *testing.T) {
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(srv.path, token, 0)
+	_, err := m.connect(context.Background(), srv.path, token, 0)
 	if err == nil {
 		t.Fatal("expected error for auth_failed, got nil")
 	}
@@ -221,7 +222,7 @@ func TestConnect_UnexpectedType_SanitizesType(t *testing.T) {
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(srv.path, token, 0)
+	_, err := m.connect(context.Background(), srv.path, token, 0)
 	if err == nil {
 		t.Fatal("expected error for unexpected message type, got nil")
 	}
@@ -264,7 +265,7 @@ func TestConnect_RejectsHelloProtocolVersionTooNew(t *testing.T) {
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(srv.path, token, 0)
+	_, err := m.connect(context.Background(), srv.path, token, 0)
 	if err == nil {
 		t.Fatal("expected error for too-new protocol_version, got nil")
 	}
@@ -283,7 +284,7 @@ func TestConnect_BadJSON_HelloLine(t *testing.T) {
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(srv.path, token, 0)
+	_, err := m.connect(context.Background(), srv.path, token, 0)
 	if err == nil {
 		t.Fatal("expected error for bad JSON hello, got nil")
 	}
@@ -291,7 +292,7 @@ func TestConnect_BadJSON_HelloLine(t *testing.T) {
 
 func TestConnect_DialFailure(t *testing.T) {
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-	_, err := m.connect("/nonexistent/path/shim.sock", []byte("token"), 0)
+	_, err := m.connect(context.Background(), "/nonexistent/path/shim.sock", []byte("token"), 0)
 	if err == nil {
 		t.Fatal("expected error for non-existent socket, got nil")
 	}
@@ -309,7 +310,7 @@ func TestConnect_ServerClosesBeforeHello(t *testing.T) {
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
-	_, err := m.connect(srv.path, token, 0)
+	_, err := m.connect(context.Background(), srv.path, token, 0)
 	if err == nil {
 		t.Fatal("expected error when server closes before hello, got nil")
 	}
