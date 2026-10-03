@@ -5,7 +5,8 @@
 // change keeps its DOM node, so:
 //
 //   1. a repaint with nothing changed (a status-chip click) keeps every node;
-//   2. a run_started frame for job A replaces A's row and no other;
+//   2. a run_started frame for job A replaces A's row and no other, and the
+//      paint arms the 1Hz tick that advances its elapsed label;
 //   3. a keyboard user focused on row B stays focused while A changes;
 //   4. a sort switch moves the nodes into the new order instead of rebuilding;
 //   5. deleting a job removes its row and leaves the others' nodes alone;
@@ -138,6 +139,13 @@ test('(2) run_started for one job replaces that row only', async ({ browser }) =
     expect(await keptRows(page), 'every row but cron-c keeps its node')
       .toEqual(CREATED_ORDER.filter((id) => id !== 'cron-c'));
     expect(await rowOrder(page), 'the replaced row stays in place').toEqual(CREATED_ORDER);
+    // The paint also arms the 1Hz tick (renderCronList is ensureCronRunningTick's
+    // only caller): nothing else repaints, yet the elapsed label advances.
+    const when = page.locator('.cj-row[data-cron-id="cron-c"] .cj-when.running');
+    const first = await when.textContent();
+    expect(first).toMatch(/^运行中 \d+s$/);
+    await expect.poll(() => when.textContent(), { timeout: 2500, message: 'the running tick advances the elapsed label' })
+      .not.toBe(first);
     expect(pageErrors).toEqual([]);
   } finally {
     await ctx.close();
