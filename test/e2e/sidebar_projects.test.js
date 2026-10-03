@@ -60,11 +60,16 @@ test('clicking GitHub icon on an ssh remote shows the URL toast fallback', async
 });
 
 // toggleProjectCollapsed repaints from the last payload (shell.renderSidebar,
-// session_list's slot) with no round-trip: /api/sessions is held unanswered,
-// so a repaint can only come from the cached render.
+// session_list's slot) with no round-trip. The hold is installed before a
+// reload and lets only the first /api/sessions through, so no response can
+// land after the click: a repaint can only come from the cached render.
 test('the collapse chevron folds and unfolds a project from the cached payload', async ({ page }) => {
   const KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
-  await page.route((url) => url.pathname === '/api/sessions', () => {});
+  let served = 0;
+  await page.route((url) => url.pathname === '/api/sessions', (route) => {
+    if (served++ === 0) return route.fallback();
+  });
+  await page.reload();
   const chevron = () => page.locator('.section-header', { hasText: 'myproject' }).locator('.sh-btn[data-action="project-collapse"]');
   const card = page.locator(`.session-card[data-key="${KEY}"]`);
   await expect(card).toHaveCount(1);
