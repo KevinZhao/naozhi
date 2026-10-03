@@ -11,11 +11,13 @@ package weixin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,14 +49,9 @@ type Weixin struct {
 	// dispatch bounds concurrent handler goroutines and lets Stop() drain them.
 	dispatch platform.BoundedDispatch
 
-	// contextTokens caches the latest context_token per user for reply, with
+	// contextTokens caches each user's recent context_tokens for reply, with
 	// an update stamp so one-off users are evicted instead of accumulating.
-	contextTokens sync.Map // map[userID]*tokenEntry
-}
-
-type tokenEntry struct {
-	token     string
-	updatedNs int64 // time.Now().UnixNano() at Store
+	contextTokens sync.Map // map[userID]*tokenRing
 }
 
 // tokenTTL is the idle time after which a cached context_token is evicted;
@@ -210,15 +207,19 @@ func (w *Weixin) cleanupTokensLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cutoff := time.Now().Add(-tokenTTL).UnixNano()
-			w.contextTokens.Range(func(k, v any) bool {
-				if e, ok := v.(*tokenEntry); ok && e.updatedNs < cutoff {
-					w.contextTokens.Delete(k)
-				}
-				return true
-			})
+			w.evictIdleTokens(time.Now().Add(-tokenTTL).UnixNano())
 		}
 	}
+}
+
+// evictIdleTokens drops every ring whose newest token predates cutoffNs.
+func (w *Weixin) evictIdleTokens(cutoffNs int64) {
+	w.contextTokens.Range(func(k, v any) bool {
+		if r, ok := v.(*tokenRing); ok && r.evictIfIdle(cutoffNs) {
+			w.contextTokens.CompareAndDelete(k, r)
+		}
+		return true
+	})
 }
 
 // Reply sends a text message to a WeChat user.
@@ -233,23 +234,66 @@ func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 		return "", nil
 	}
 
-	ct, _ := w.contextTokens.Load(msg.ChatID)
-	entry, _ := ct.(*tokenEntry)
-	var contextToken string
-	if entry != nil {
-		contextToken = entry.token
-	}
-	if contextToken == "" {
-		// ChatID comes from the relay; sanitize before it reaches err.Error().
-		return "", fmt.Errorf("weixin: no context_token for user %q (no inbound message yet)",
-			osutil.SanitizeForLog(msg.ChatID, 128))
-	}
-
-	if err := w.api.sendMessage(ctx, msg.ChatID, msg.Text, contextToken); err != nil {
-		return "", fmt.Errorf("weixin send: %w", err)
+	v, _ := w.contextTokens.Load(msg.ChatID)
+	ring, _ := v.(*tokenRing)
+	if err := w.sendWithRing(ctx, ring, msg.ChatID, msg.Text); err != nil {
+		return "", err
 	}
 	// Sanitized ChatID: downstream slog/IM surfaces print the id verbatim.
 	return fmt.Sprintf("weixin:%s:%d", osutil.SanitizeForLog(msg.ChatID, 128), time.Now().UnixMilli()), nil
+}
+
+// sendWithRing sends via the newest unspent token and moves to the next one
+// only on a parsed upstream rejection (nothing was delivered). Any other error
+// returns at once with the token handed back: the message may have gone out,
+// and a retry on another token would deliver it twice.
+func (w *Weixin) sendWithRing(ctx context.Context, ring *tokenRing, chatID, text string) error {
+	var lastErr error
+	tried := make([]string, 0, tokenRingCap+1)
+	for range tokenRingCap + 1 {
+		var token string
+		var reserved, ok bool
+		if ring != nil {
+			token, reserved, ok = ring.take()
+		}
+		if !ok || slices.Contains(tried, token) {
+			break
+		}
+		tried = append(tried, token)
+		err := w.api.sendMessage(ctx, chatID, text, token)
+		if err == nil {
+			return nil
+		}
+		lastErr = fmt.Errorf("weixin send: %w", err)
+		if !errors.Is(err, errUpstreamRejected) {
+			if reserved {
+				ring.release(token)
+			}
+			return lastErr
+		}
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	// ChatID comes from the relay; sanitize before it reaches err.Error().
+	return fmt.Errorf("weixin: no context_token for user %q (no inbound message yet)",
+		osutil.SanitizeForLog(chatID, 128))
+}
+
+// cacheContextToken pushes an inbound token onto the user's ring, starting a
+// fresh ring if the cleanup loop evicted the cached one mid-push.
+func (w *Weixin) cacheContextToken(user, token string, nowNs int64) {
+	for {
+		v, ok := w.contextTokens.Load(user)
+		if !ok {
+			v, _ = w.contextTokens.LoadOrStore(user, &tokenRing{updatedNs: nowNs})
+		}
+		r := v.(*tokenRing)
+		if r.push(token, nowNs) {
+			return
+		}
+		w.contextTokens.CompareAndDelete(user, r)
+	}
 }
 
 // EditMessage is not supported by WeChat iLink Bot API.
@@ -355,10 +399,7 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 			// memory per user for the TTL window; real tokens are UUID-scale.
 			const maxContextTokenLen = 512
 			if msg.ContextToken != "" && len(msg.ContextToken) <= maxContextTokenLen {
-				w.contextTokens.Store(from, &tokenEntry{
-					token:     msg.ContextToken,
-					updatedNs: time.Now().UnixNano(),
-				})
+				w.cacheContextToken(from, msg.ContextToken, time.Now().UnixNano())
 			} else if len(msg.ContextToken) > maxContextTokenLen {
 				// Replies to this user will fail; log the length only, never the token.
 				slog.Warn("weixin context_token exceeds cap, dropping (replies to this user will fail)",
