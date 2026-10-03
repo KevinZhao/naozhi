@@ -205,6 +205,51 @@ func TestReverseServer_Displacement_MigratesSubscriptions(t *testing.T) {
 	f.expectNoDeregister(t, 200*time.Millisecond)
 }
 
+// TestReverseServer_RedialDisplacesHandshake_KeepsParkedSubscriptions: a
+// redial that displaces a successor still mid-handshake must not overwrite
+// the parked conn the successor claimed; the newest link adopts its sinks.
+func TestReverseServer_RedialDisplacesHandshake_KeepsParkedSubscriptions(t *testing.T) {
+	f := newGraceFixture(t, 5*time.Second)
+	held := make(chan struct{})
+	release := make(chan struct{})
+	var hookCalls atomic.Int32
+	f.rs.testHookBeforeAck = func(*ReverseConn) {
+		if hookCalls.Add(1) == 2 {
+			close(held)
+			<-release
+		}
+	}
+	ws1, rc1 := f.dial(t)
+	sink := &mockSink{id: 1}
+	subscribeOnLink(t, rc1, ws1, sink, 300)
+	ws1.Close()
+	f.waitLingering(t)
+
+	ws2 := dialReverseNode(t, f.srv)
+	t.Cleanup(func() { ws2.Close() })
+	if err := ws2.WriteJSON(ReverseMsg{Type: "register", NodeID: "node-1", Token: "tok", Hostname: "h"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-held:
+	case <-time.After(3 * time.Second):
+		t.Fatal("link 2 never reached the ack hook")
+	}
+
+	ws3, rc3 := f.dial(t)
+	close(release)
+	if sub := readNodeFrame(t, ws3, "subscribe"); sub.Key != graceKey || sub.After != 300 {
+		t.Fatalf("resubscribe = {key %q, after %d}, want {%q, 300}", sub.Key, sub.After, graceKey)
+	}
+	if got := bookSinks(rc3, graceKey); len(got) != 1 || got[0] != sink {
+		t.Fatalf("newest link holds %v, want the sink parked before the handshake", got)
+	}
+	if f.lingering("node-1") != nil {
+		t.Fatal("parked entry survived the adoption")
+	}
+	f.expectNoDeregister(t, 200*time.Millisecond)
+}
+
 // expectReconnecting requires sink's only frame to be the keyed refusal.
 func expectReconnecting(t *testing.T, sink *mockSink, node string) {
 	t.Helper()
