@@ -23,10 +23,11 @@
 #                            unless the shell already set the key. That feeds
 #                            transcription and the sysession Bedrock auth, and
 #                            every key the shim also forwards reaches each
-#                            spawned CLI as well: the Anthropic and AWS
+#                            session CLI as well: the Anthropic and AWS
 #                            credentials, AWS_REGION, ANTHROPIC_MODEL,
 #                            CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_BASE_URL and
-#                            more. Proxy keys stay in naozhi's own process.
+#                            more. Proxy keys skip session CLIs (only the
+#                            sysession runner's `claude -p` gets them).
 #                            Spawned cc also reads the file itself, unless
 #                            naozhi_settings.enabled points it at an isolated
 #                            copy without `env` (the process env still flows).
