@@ -8,6 +8,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/datadir"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -47,7 +48,7 @@ func TestSweeperActuallySweepsTheShimStateDir(t *testing.T) {
 	deadLog := plantOld(t, shimDir, shim.LogFilePrefix+"999999999.log")
 
 	storeDir := t.TempDir()
-	cliDebugLog := plantOld(t, filepath.Join(storeDir, "cli-debug"), "aaaaaaaaaaaaaaaa.log")
+	cliDebugLog := plantOld(t, filepath.Join(storeDir, "cli-debug"), shim.KeyHash("gone")+".log")
 
 	// cfg.Session.Shim.StateDir is deliberately left EMPTY: that is the default
 	// configuration and the case that used to break.
@@ -72,6 +73,40 @@ func TestSweeperActuallySweepsTheShimStateDir(t *testing.T) {
 	// registered with an empty Dir where "swept nothing" looks normal.
 	if _, ok := got["sys-sessions"]; ok {
 		t.Errorf("sys-sessions registered with no work dir: %+v", got)
+	}
+}
+
+// TestSweeperKeepsCLIDebugLogOfALiveShim: age is not proof a session is over —
+// a shim attached to naozhi never idles out, so a CLI can sit untouched for
+// weeks. The cli-debug pass must ask the shim state dir, and keep the log of
+// any session whose shim still runs while sweeping the one whose shim is gone.
+func TestSweeperKeepsCLIDebugLogOfALiveShim(t *testing.T) {
+	shimDir := t.TempDir()
+	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: shimDir})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	const liveKey, goneKey = "feishu:direct:alice:general", "feishu:direct:bob:general"
+	state := shim.State{Version: 1, ShimPID: os.Getpid(), Key: liveKey}
+	if err := shim.WriteStateFile(shim.StateFilePath(shimDir, shim.KeyHash(liveKey)), state); err != nil {
+		t.Fatal(err)
+	}
+	// Named by the real producer, so the two key hashes cannot drift apart.
+	layout := datadir.ForStore(filepath.Join(t.TempDir(), "sessions.json"))
+	debugDir := layout.CLIDebugRoot()
+	liveLog := plantOld(t, debugDir, filepath.Base(session.CLIDebugPath(debugDir, liveKey)))
+	goneLog := plantOld(t, debugDir, filepath.Base(session.CLIDebugPath(debugDir, goneKey)))
+
+	got := newDataDirSweeper(&config.Config{}, layout, mgr, "").RunOnce()
+
+	if got["cli-debug"].Removed != 1 {
+		t.Errorf("cli-debug removed %d, want 1", got["cli-debug"].Removed)
+	}
+	if _, err := os.Stat(liveLog); err != nil {
+		t.Errorf("the live session's debug log was swept: %v", err)
+	}
+	if _, err := os.Stat(goneLog); err == nil {
+		t.Error("the debug log of a session with no shim is still there")
 	}
 }
 
