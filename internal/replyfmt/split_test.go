@@ -13,6 +13,7 @@ func split(text string, maxRunes int) []string {
 
 func TestSplitText_Fences(t *testing.T) {
 	t.Parallel()
+	indentedLine := "    " + strings.Repeat("x", 25) + "\n"
 	cases := []struct {
 		name     string
 		text     string
@@ -26,6 +27,33 @@ func TestSplitText_Fences(t *testing.T) {
 			want: []string{
 				"```go\nl1\nl2\nl3\nl4\nl5\n```",
 				"```go\nl6\nl7\nl8\nl9\n```\n",
+			},
+		},
+		{
+			name:     "a closing line just past the cut joins the chunk",
+			text:     "intro\n```go\ncode line\n```\nafter text here\n",
+			maxRunes: 25,
+			want: []string{
+				"intro\n```go\ncode line\n```",
+				"\nafter text here\n",
+			},
+		},
+		{
+			name:     "a closing line joins the chunk with its newline when that fits",
+			text:     "intro\n```go\ncode line\n```\nafter text here\n",
+			maxRunes: 26,
+			want: []string{
+				"intro\n```go\ncode line\n```\n",
+				"after text here\n",
+			},
+		},
+		{
+			name:     "a marker line with an info string does not close a fence",
+			text:     "```\nl1\n```go\nl2\nl3\nl4\nl5\nl6\n```\n",
+			maxRunes: 20,
+			want: []string{
+				"```\nl1\n```go\nl2\n```",
+				"```\nl3\nl4\nl5\nl6\n```\n",
 			},
 		},
 		{
@@ -127,6 +155,17 @@ func TestSplitText_Fences(t *testing.T) {
 			want: []string{
 				"```\nyyyyyyyy",
 				"yyyyyyyyyyyy",
+			},
+		},
+		{
+			// Reopen (16) and close (7) each fit the 20-rune cap but not together.
+			name:     "reopen plus close over a quarter of the budget falls back to a plain cut",
+			text:     "    ```abcdefgh\n" + strings.Repeat(indentedLine, 5) + "    ```\n",
+			maxRunes: 80,
+			want: []string{
+				"    ```abcdefgh\n" + indentedLine + "    ```",
+				indentedLine + indentedLine,
+				indentedLine + indentedLine + "    ```\n",
 			},
 		},
 	}
@@ -321,7 +360,7 @@ func FuzzSplitText(f *testing.F) {
 // checkSplit asserts SplitText's contract for one input: chunks within
 // maxRunes, no more of them than upperBoundChunks, the input recovered by
 // dropping the synthesized lines, and each repaired chunk but the last
-// fence-balanced.
+// fence-balanced with at most maxRunes/4 synthesized runes.
 func checkSplit(t *testing.T, text string, maxRunes int) {
 	t.Helper()
 	n := utf8.RuneCountInString(text)
@@ -359,6 +398,9 @@ func checkSplit(t *testing.T, text string, maxRunes int) {
 		if !p.plain {
 			if open != nil && p.head != open.opener+"\n" {
 				t.Errorf("part %d head %q, want the reopened %q", i, p.head, open.opener)
+			}
+			if over := utf8.RuneCountInString(p.head + p.tail); over > maxRunes/4 {
+				t.Errorf("part %d synthesizes %d runes > maxRunes/4 = %d", i, over, maxRunes/4)
 			}
 			if i < len(parts)-1 && scanFences(chunks[i], nil) != nil {
 				t.Errorf("chunk %d is not fence-balanced: %q", i, chunks[i])
