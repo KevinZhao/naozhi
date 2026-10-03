@@ -6,11 +6,11 @@
 //    chip 绝不能出现 —— 否则每次刷新都会先闪一个「有更新」再消失，操作员被
 //    训练成无视它。
 // 2. 服务端说有更新时 chip 出现，并带上目标版本号。
-// 3. 点 chip 弹出确认框（confirmDialog 是 dashboard 注入的唯一依赖，S20c
-//    删死注入时必须留住它），取消后不发 apply。
+// 3. 点 chip 必须经 dashboard 注入的 confirmDialog 弹出确认框，取消后不发
+//    apply。
 //
-// 原 static_update_chip_test.go 只 grep HTML 里的 `hidden` 属性；这里两个
-// 方向都行为化（同一份 markup，分别在无路由 / 有更新两种 mock 下渲染）。
+// 原 static_update_chip_test.go 只 grep HTML 里的 `hidden` 属性；这里三条
+// 契约都行为化（同一份 markup，分别在无路由 / 有更新两种 mock 下渲染）。
 //
 // 跑法：cd test/e2e && npx playwright test update_chip.test.js --project=desktop-chrome
 
