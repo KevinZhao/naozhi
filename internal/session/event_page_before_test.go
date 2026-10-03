@@ -17,6 +17,17 @@ func textRun(start int64, n int) []clievent.EventEntry {
 	return out
 }
 
+// dupKeyRun is 5:K stored twice (a UUID spooled twice) under 6:y, with 4:x
+// below when older is set: a page holding 5:K 6:y has an unread entry only
+// if 4:x exists.
+func dupKeyRun(older bool) []clievent.EventEntry {
+	out := []clievent.EventEntry{sameMSEntry(5, "K"), sameMSEntry(5, "K"), sameMSEntry(6, "y")}
+	if older {
+		out = append([]clievent.EventEntry{sameMSEntry(4, "x")}, out...)
+	}
+	return out
+}
+
 func cancelledCtx() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -60,6 +71,12 @@ func TestEventPageBeforeCtx_HasMore(t *testing.T) {
 		{name: "nil source, short memory", mem: textRun(100, 3), before: 200, limit: 10, wantLen: 3, want: false},
 		{name: "zero-Time memory head skips the disk", mem: []clievent.EventEntry{{Time: 0, Type: "text"}},
 			src: &pagingHistorySource{all: textRun(1, 1)}, before: 200, limit: 10, wantLen: 1, want: true},
+		{name: "held key twice on disk, older entry below", src: &pagingHistorySource{all: dupKeyRun(true)},
+			before: 7, limit: 2, wantLen: 2, want: true},
+		{name: "held key twice on disk, nothing older", src: &pagingHistorySource{all: dupKeyRun(false)},
+			before: 7, limit: 2, wantLen: 2, want: false},
+		{name: "held key twice in memory, older entry below", mem: dupKeyRun(true),
+			before: 7, limit: 2, wantLen: 2, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,5 +161,23 @@ func TestEventInitialPageCtx_FailsOpenOnSourceError(t *testing.T) {
 	}
 	if !hasMore {
 		t.Error("hasMore=false although the disk tier below memory was never read")
+	}
+}
+
+// The initial page probes with the same widening: when its disk page ends on
+// a held key stored twice, the probe must not use up its read on the two
+// copies and hide the older entry.
+func TestEventInitialPageCtx_HasMoreWithHeldKeyTwiceOnDisk(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	disk := append(dupKeyRun(true)[:3], textRun(6, visibleDiskPageSize-1)...)
+	s.SetHistorySource(&pagingHistorySource{all: disk})
+	entries, hasMore := s.EventInitialPageCtx(context.Background(), 1, 1)
+	if len(entries) != visibleDiskPageSize || entries[0].UUID != "K" {
+		t.Fatalf("got %d entries from %s, want a full disk page from 5:K",
+			len(entries), uuidList(entries[:min(1, len(entries))]))
+	}
+	if !hasMore {
+		t.Error("hasMore=false but 4:x is still unread")
 	}
 }
