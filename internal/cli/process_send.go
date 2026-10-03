@@ -131,7 +131,7 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 
 	// Watchdog: one periodic timer instead of per-event Stop/drain/Reset,
 	// re-armed after each fire; Stop()+drain on early return via defer.
-	checkInterval := watchdogCheckInterval(noOutputDur)
+	checkInterval := p.checkInterval(noOutputDur)
 	turnStart := time.Now()
 	lastOutput := turnStart
 	watchdog := time.NewTimer(checkInterval)

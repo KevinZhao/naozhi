@@ -16,22 +16,21 @@ type passthroughOut struct {
 	err error
 }
 
-// setWatchdogTiming shortens the package-level watchdog knobs for one test.
-// Tests calling it must not run in parallel.
-func setWatchdogTiming(t *testing.T, minInterval, bailGrace time.Duration) {
-	t.Helper()
-	oldIv, oldGrace := watchdogMinCheckInterval, passthroughBailGrace
-	watchdogMinCheckInterval, passthroughBailGrace = minInterval, bailGrace
-	t.Cleanup(func() { watchdogMinCheckInterval, passthroughBailGrace = oldIv, oldGrace })
-}
+// Watchdog tunings: fastWatchdog checks every few milliseconds; parkedWatchdog
+// never ticks within a test and bails right at totalTimeout.
+var (
+	fastWatchdog   = watchdogTuning{minCheckInterval: 5 * time.Millisecond}
+	parkedWatchdog = watchdogTuning{minCheckInterval: time.Hour, bailGrace: time.Nanosecond}
+)
 
 // startWatchdogShim returns a passthrough shim whose Process runs with the
-// given budgets, its readLoop started.
-func startWatchdogShim(t *testing.T, noOutput, total time.Duration) *passthroughShim {
+// given budgets and tuning, its readLoop started.
+func startWatchdogShim(t *testing.T, noOutput, total time.Duration, tune watchdogTuning) *passthroughShim {
 	t.Helper()
 	sh := newPassthroughShim(t)
 	sh.proc.noOutputTimeout = noOutput
 	sh.proc.totalTimeout = total
+	sh.proc.wdTuning = tune
 	t.Cleanup(sh.close)
 	go sh.proc.readLoop()
 	return sh
@@ -75,8 +74,7 @@ func waitDead(t *testing.T, p *Process) {
 // every queued caller (the claimed head and the one queued behind it) gets
 // the classified ErrNoOutputTimeout instead of waiting for the bail timer.
 func TestPassthroughWatchdog_NoOutputKillsAndClassifiesEveryCaller(t *testing.T) {
-	setWatchdogTiming(t, 5*time.Millisecond, 30*time.Second)
-	sh := startWatchdogShim(t, 80*time.Millisecond, time.Minute)
+	sh := startWatchdogShim(t, 80*time.Millisecond, time.Minute, fastWatchdog)
 
 	uuidA, outA := sh.sendAsync(t, context.Background(), "A")
 	_, outB := sh.sendAsync(t, context.Background(), "B")
@@ -105,8 +103,7 @@ func TestPassthroughWatchdog_NoOutputKillsAndClassifiesEveryCaller(t *testing.T)
 // total_timeout with ErrTotalTimeout: output resets the no-output clock but
 // not the turn's total budget.
 func TestPassthroughWatchdog_TotalTimeoutDespiteOutput(t *testing.T) {
-	setWatchdogTiming(t, 5*time.Millisecond, 30*time.Second)
-	sh := startWatchdogShim(t, time.Second, 200*time.Millisecond)
+	sh := startWatchdogShim(t, time.Second, 200*time.Millisecond, fastWatchdog)
 
 	uuidA, outA := sh.sendAsync(t, context.Background(), "A")
 	sh.emitInit("s1")
@@ -149,7 +146,8 @@ func (s *passthroughShim) streamFor(d time.Duration) {
 
 // runTwoQueuedTurns queues A and B, then plays two healthy turns of turnDur
 // each, B's starting when A's result lands. B finishes about 2×turnDur after
-// it was enqueued.
+// it was enqueued. Callers pick turnDur = 500ms under an 800ms budget: 300ms
+// of headroom per turn, B's age 200ms over budget, so -race load flips neither.
 func runTwoQueuedTurns(t *testing.T, sh *passthroughShim, turnDur time.Duration) (outA, outB <-chan passthroughOut) {
 	t.Helper()
 	uuidA, outA := sh.sendAsync(t, context.Background(), "A")
@@ -168,10 +166,9 @@ func runTwoQueuedTurns(t *testing.T, sh *passthroughShim, turnDur time.Duration)
 // total_timeout is a per-turn budget: B ran ~2×turnDur from enqueue but only
 // turnDur of its own turn, so the watchdog must not kill it.
 func TestPassthroughWatchdog_TotalBudgetIsPerTurn(t *testing.T) {
-	setWatchdogTiming(t, 5*time.Millisecond, 30*time.Second)
-	sh := startWatchdogShim(t, 200*time.Millisecond, 400*time.Millisecond)
+	sh := startWatchdogShim(t, 400*time.Millisecond, 800*time.Millisecond, fastWatchdog)
 
-	outA, outB := runTwoQueuedTurns(t, sh, 250*time.Millisecond)
+	outA, outB := runTwoQueuedTurns(t, sh, 500*time.Millisecond)
 	for name, out := range map[string]<-chan passthroughOut{"A": outA, "B": outB} {
 		o := waitOut(t, name, out, 3*time.Second)
 		if o.err != nil || o.res == nil || o.res.Text != "done "+name {
@@ -187,10 +184,9 @@ func TestPassthroughWatchdog_TotalBudgetIsPerTurn(t *testing.T) {
 // slot queued behind a healthy turn is not orphaned. The watchdog is parked
 // (no-output budget 1h, so its first tick is 30s out) and only bail can act.
 func TestPassthroughBail_QueuedSlotIsNotOrphaned(t *testing.T) {
-	setWatchdogTiming(t, time.Hour, 0)
-	sh := startWatchdogShim(t, time.Hour, 400*time.Millisecond)
+	sh := startWatchdogShim(t, time.Hour, 800*time.Millisecond, parkedWatchdog)
 
-	outA, outB := runTwoQueuedTurns(t, sh, 250*time.Millisecond)
+	outA, outB := runTwoQueuedTurns(t, sh, 500*time.Millisecond)
 	for name, out := range map[string]<-chan passthroughOut{"A": outA, "B": outB} {
 		o := waitOut(t, name, out, 3*time.Second)
 		if o.err != nil || o.res == nil || o.res.Text != "done "+name {
@@ -202,8 +198,7 @@ func TestPassthroughBail_QueuedSlotIsNotOrphaned(t *testing.T) {
 // With the watchdog parked, a turn that overruns totalTimeout+grace still
 // unblocks its caller with ErrOrphanedSlot: the backstop stays a backstop.
 func TestPassthroughBail_StillFiresWhenTheWatchdogDoesNot(t *testing.T) {
-	setWatchdogTiming(t, time.Hour, 0)
-	sh := startWatchdogShim(t, time.Hour, 80*time.Millisecond)
+	sh := startWatchdogShim(t, time.Hour, 80*time.Millisecond, parkedWatchdog)
 
 	uuidA, outA := sh.sendAsync(t, context.Background(), "A")
 	sh.emitInit("s1")
@@ -216,10 +211,10 @@ func TestPassthroughBail_StillFiresWhenTheWatchdogDoesNot(t *testing.T) {
 
 // A canceled caller's tombstone still means the CLI owes a result, so the
 // next sender behind a silent CLI gets ErrNoOutputTimeout instead of joining
-// a queue that never drains.
+// a queue that never drains. Joining a non-empty queue leaves both turn
+// clocks alone, so repeated messages cannot keep a wedged CLI alive.
 func TestPassthroughWatchdog_TombstoneQueueIsNotIdle(t *testing.T) {
-	setWatchdogTiming(t, 5*time.Millisecond, 30*time.Second)
-	sh := startWatchdogShim(t, 80*time.Millisecond, time.Minute)
+	sh := startWatchdogShim(t, 80*time.Millisecond, time.Minute, fastWatchdog)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	_, outA := sh.sendAsync(t, ctx, "A")
@@ -227,6 +222,7 @@ func TestPassthroughWatchdog_TombstoneQueueIsNotIdle(t *testing.T) {
 	if o := waitOut(t, "A", outA, 3*time.Second); !errors.Is(o.err, context.Canceled) {
 		t.Fatalf("A: err = %v, want context.Canceled", o.err)
 	}
+	startA, outputA := sh.turnClocks()
 
 	_, outB := sh.sendAsync(t, context.Background(), "B")
 	o := waitOut(t, "B", outB, 3*time.Second)
@@ -234,17 +230,31 @@ func TestPassthroughWatchdog_TombstoneQueueIsNotIdle(t *testing.T) {
 		t.Errorf("B: err = %v, want ErrNoOutputTimeout", o.err)
 	}
 	waitDead(t, sh.proc)
+	if start, output := sh.turnClocks(); !start.Equal(startA) || !output.Equal(outputA) {
+		t.Errorf("B's append moved the turn clocks (start %v→%v, output %v→%v), want A's kept",
+			startA, start, outputA, output)
+	}
+}
+
+// turnClocks reads the passthrough watchdog's turn start and last output.
+func (s *passthroughShim) turnClocks() (turnStart, lastOutput time.Time) {
+	s.proc.slots.mu.Lock()
+	turnStart = s.proc.slots.turnStartedAt
+	s.proc.slots.mu.Unlock()
+	return turnStart, s.proc.lastOutputAt()
 }
 
 // A CLI idle for longer than no_output_timeout before a send is not stalled:
 // the no-output clock starts with the message that enters the empty queue.
 func TestPassthroughWatchdog_IdleSilenceBeforeTheSendIsNotAStall(t *testing.T) {
-	setWatchdogTiming(t, 5*time.Millisecond, 30*time.Second)
-	sh := startWatchdogShim(t, 200*time.Millisecond, time.Minute)
+	sh := startWatchdogShim(t, 200*time.Millisecond, time.Minute, fastWatchdog)
 	sh.proc.markOutput(time.Now().Add(-time.Hour))
 
+	sent := time.Now()
 	uuidA, outA := sh.sendAsync(t, context.Background(), "A")
-	<-time.After(100 * time.Millisecond) // the CLI takes a while to start
+	if start, output := sh.turnClocks(); start.Before(sent) || output.Before(sent) {
+		t.Fatalf("after the send: turn start %v, last output %v; want both at or after %v", start, output, sent)
+	}
 	sh.emitInit("s1")
 	sh.emitReplay(uuidA, "A")
 	sh.emitResult("s1", "done A")
@@ -255,7 +265,9 @@ func TestPassthroughWatchdog_IdleSilenceBeforeTheSendIsNotAStall(t *testing.T) {
 
 // The kill hands every live queued slot the classified error itself rather
 // than leaving them to readLoop's ErrProcessExited; a canceled tombstone is
-// skipped but still keeps the queue owed.
+// skipped but still keeps the queue owed. Death reason and slot errors land
+// before Kill: the tick runs while the test holds the shim write lock, so it
+// parks inside Kill and the state at killCh's close is what readLoop would see.
 func TestPassthroughWatchdogTick_ClassifiesEverySlot(t *testing.T) {
 	sh := newPassthroughShim(t)
 	t.Cleanup(sh.close)
@@ -283,9 +295,25 @@ func TestPassthroughWatchdogTick_ClassifiesEverySlot(t *testing.T) {
 		t.Fatalf("within budget: alive=%v depth=%d, want untouched", p.Alive(), p.PassthroughDepth())
 	}
 
-	err := p.passthroughWatchdogTick(now, time.Second, time.Hour)
+	p.link.wMu.Lock()
+	tickErr := make(chan error, 1)
+	go func() { tickErr <- p.passthroughWatchdogTick(now, time.Second, time.Hour) }()
+	select {
+	case <-p.killCh:
+	case <-time.After(3 * time.Second):
+		p.link.wMu.Unlock()
+		t.Fatal("Kill not issued")
+	}
+	reasonAtKill := p.DeathReason()
+	queuedAtKill := len(live1.errCh) + len(live2.errCh)
+	p.link.wMu.Unlock()
+	err := <-tickErr
 	if !errors.Is(err, clierr.ErrNoOutputTimeout) {
 		t.Fatalf("err = %v, want ErrNoOutputTimeout", err)
+	}
+	if reasonAtKill != DeathReasonNoOutputTimeout || queuedAtKill != 2 {
+		t.Errorf("at Kill: reason %q, %d slot errors; want %q and 2 delivered first",
+			reasonAtKill, queuedAtKill, DeathReasonNoOutputTimeout)
 	}
 	for i, s := range []*sendSlot{live1, live2} {
 		select {
@@ -299,11 +327,6 @@ func TestPassthroughWatchdogTick_ClassifiesEverySlot(t *testing.T) {
 	}
 	if len(tomb.errCh) != 0 {
 		t.Error("canceled tombstone got an error; nobody waits on it")
-	}
-	select {
-	case <-p.killCh:
-	default:
-		t.Error("Kill not issued")
 	}
 	if got := p.DeathReason(); got != DeathReasonNoOutputTimeout {
 		t.Errorf("DeathReason = %q, want %q", got, DeathReasonNoOutputTimeout)
@@ -345,7 +368,7 @@ func TestWatchdogCheckInterval(t *testing.T) {
 		{20 * time.Second, 5 * time.Second},
 		{10 * time.Minute, 30 * time.Second},
 	} {
-		if got := watchdogCheckInterval(c.noOut); got != c.want {
+		if got := watchdogCheckInterval(c.noOut, time.Second); got != c.want {
 			t.Errorf("watchdogCheckInterval(%v) = %v, want %v", c.noOut, got, c.want)
 		}
 	}
@@ -354,7 +377,6 @@ func TestWatchdogCheckInterval(t *testing.T) {
 // Send shares turnDeadlineVerdict: a silent turn dies of no-output and a
 // streaming one of the total budget, each with its own death reason.
 func TestSendWatchdog_SharedVerdict(t *testing.T) {
-	setWatchdogTiming(t, 5*time.Millisecond, 30*time.Second)
 	for _, c := range []struct {
 		name            string
 		noOutput, total time.Duration
@@ -368,6 +390,7 @@ func TestSendWatchdog_SharedVerdict(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			sh := newPassthroughShim(t)
 			sh.proc.noOutputTimeout, sh.proc.totalTimeout = c.noOutput, c.total
+			sh.proc.wdTuning = fastWatchdog
 			sh.proc.turn.state = StateReady
 			t.Cleanup(sh.close)
 			go sh.proc.readLoop()

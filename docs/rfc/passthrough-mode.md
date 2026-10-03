@@ -787,7 +787,7 @@ Dispatch 层映射：
 
 - 到点时先非阻塞读 resultCh / errCh，已送达的结果或错误优先返回，watchdog kill 之后不会双重上报；
 - 进程已死 → `ErrProcessExited`；
-- 当前 turn 起点距今不足 `totalTimeout + passthroughBailGrace`（30s）→ 按剩余时间重新上膛，排在长 turn 后面的 slot 不会被误判 orphan；
+- 当前 turn 起点距今不足 `totalTimeout` + 30s 宽限 → 按剩余时间重新上膛，排在长 turn 后面的 slot 不会被误判 orphan；
 - 否则 tombstone + `ErrOrphanedSlot`——此时 watchdog 早该触发，真正只在 bug 时出现。
 
 ### 6.5 背压
