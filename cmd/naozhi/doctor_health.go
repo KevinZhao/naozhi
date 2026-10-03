@@ -206,7 +206,7 @@ func (d *doctor) dispatchFinding(p healthPayload, hasPlatforms bool) {
 		// config is loaded once at startup, so its load time is the start time.
 		loadedAt, err := time.Parse(time.RFC3339, p.ConfigLoadedAt)
 		if err == nil && time.Since(loadedAt) > dispatchQuietWarnAfter {
-			d.addRemote("dispatch", "warn", "no inbound IM messages since start at "+p.ConfigLoadedAt+" — platform may not be connected")
+			d.addRemote("dispatch", "warn", "no inbound IM messages (slash commands not counted) since start at "+p.ConfigLoadedAt+" — platform may not be connected")
 			return
 		}
 		d.add("dispatch", "pass", "no inbound IM messages yet · "+counts)
