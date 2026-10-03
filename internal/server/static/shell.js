@@ -26,5 +26,6 @@ export function registerShell(impl) {
   if (stray) throw new Error(stray in shell ? 'shell slot ' + stray + ' belongs to another root' : 'shell has no slot ' + stray);
   const bad = group.find((k) => typeof impl[k] !== 'function' || shell[k] !== null);
   if (bad) throw new Error((shell[bad] === null ? 'shell slot missing: ' : 'shell slot registered twice: ') + bad);
+  if (!group.length) throw new Error('shell: registration names no slot');
   for (const k of group) shell[k] = impl[k];
 }

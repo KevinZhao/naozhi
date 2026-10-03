@@ -49,6 +49,12 @@ test('a slot the table does not declare fails the registration', async () => {
   assert.throws(() => registerShell({ extra: () => 0 }), /shell has no slot extra/);
 });
 
+test('a registration that names no slot fails', async () => {
+  const { shell, registerShell } = await fresh();
+  assert.throws(() => registerShell({}), /shell: registration names no slot/);
+  assert.ok(Object.values(shell).every((v) => v === null));
+});
+
 test("another root's slot fails the registration and fills nothing", async () => {
   const gs = await groups();
   for (const [i, g] of gs.entries()) {

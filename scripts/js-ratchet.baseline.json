@@ -407,8 +407,8 @@
     "lateBindings": 0
   },
   "shell.js": {
-    "lines": 30,
-    "maxFnLines": 8,
+    "lines": 31,
+    "maxFnLines": 9,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
