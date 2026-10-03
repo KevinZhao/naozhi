@@ -51,19 +51,11 @@ export async function fetchEvents(full) {
     // a hung response must release well before the next tick or the UI
     // falls behind the live stream.
     let events;
-    // The initial (`full`) fetch reads the X-Events-Has-More header so it can
-    // mount "load earlier" off the server's truncation decision rather than the
-    // brittle len>=INITIAL_HISTORY_LIMIT guess. _eventsHeaders captures the raw
-    // Response headers for that one call; incremental polls don't need them.
-    let hasMoreHeader = null;
+    // The initial (`full`) fetch mounts "load earlier" off the server's
+    // truncation decision rather than a len>=INITIAL_HISTORY_LIMIT guess.
+    let hasMore = null;
     try {
-      const onResp = full ? (resp) => {
-        // null when the header is absent (legacy server / remote-node relay) —
-        // leave hasMoreHeader null so renderEvents falls back to the length
-        // heuristic rather than treating "absent" as an authoritative false.
-        const v = resp && resp.headers ? resp.headers.get('X-Events-Has-More') : null;
-        if (v != null) hasMoreHeader = (v === '1' || v === 'true');
-      } : null;
+      const onResp = full ? (resp) => { hasMore = hasMoreHeader(resp); } : null;
       events = await fetchJSON(url, { headers, timeoutMs: 5000, onResponse: onResp });
     } catch (err) {
       if (err.status) return; // HTTP non-2xx — mirror legacy !r.ok early-return
@@ -76,9 +68,7 @@ export async function fetchEvents(full) {
     if (stale()) return;
 
     if (full) {
-      // Pass the server's authoritative hasMore when the header was present;
-      // null means "fall back to the length heuristic" (legacy / remote node).
-      renderEvents(events, hasMoreHeader);
+      renderEvents(events, hasMore);
     } else {
       appendEvents(events);
     }
@@ -156,6 +146,13 @@ export function dedupEarlierPage(events, cursorMS, seenKeys) {
 }
 // @contract-end dedupEarlierPage
 
+// hasMoreHeader reads X-Events-Has-More; null when absent (an older server
+// or relay), which leaves the caller its length heuristic.
+function hasMoreHeader(resp) {
+  const v = resp && resp.headers ? resp.headers.get('X-Events-Has-More') : null;
+  return v == null ? null : v === '1' || v === 'true';
+}
+
 // The load-earlier cursor: a ms plus the keys of the entries held there.
 function setEarlierCursor(ms, keys) {
   transcript.oldestFetchedEventTime = ms;
@@ -227,8 +224,11 @@ async function loadEarlierEvents(maxPages) {
       // Advance before DOM work, so the floor holds even for an all-internal page.
       setEarlierCursor(page.oldestMS, page.seenKeys);
       const shown = prependEvents(page.events);
-      // A short (or empty) page means the history is exhausted.
-      if (raw.length < limit) { updateEarlierButton('done'); return; }
+      // The header is authoritative; only without it is a short page the end.
+      const hm = hasMoreHeader(r);
+      if (hm === false || (hm === null && raw.length < limit)) { updateEarlierButton('done'); return; }
+      // More exists yet a short page brought nothing new: the read degraded.
+      if (!page.events.length && raw.length < limit) { updateEarlierButton('error'); return; }
       if (!page.events.length && page.oldestMS >= c.ms) {
         // Nothing new in a full page (a same-ms group wider than a page, or a
         // server ignoring `before`): step past the ms strictly, once a click.
