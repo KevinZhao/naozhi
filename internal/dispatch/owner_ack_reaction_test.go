@@ -22,9 +22,10 @@ import (
 // GetOrCreate in the order they happen.
 type ackOrderPlatform struct {
 	fakePlatform
-	logMu  sync.Mutex
-	log    []string
-	addErr error
+	logMu      sync.Mutex
+	log        []string
+	addErr     error
+	replyPanic bool
 }
 
 func (p *ackOrderPlatform) record(s string) {
@@ -41,6 +42,9 @@ func (p *ackOrderPlatform) events() []string {
 
 func (p *ackOrderPlatform) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
 	p.record("reply")
+	if p.replyPanic {
+		panic("synthetic platform Reply panic")
+	}
 	return p.fakePlatform.Reply(ctx, msg)
 }
 
@@ -112,6 +116,17 @@ func TestOwnerTurn_AcksWithReactionAndClearsItAfterTheReply(t *testing.T) {
 				t.Errorf("events = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestOwnerTurn_ReplyPanicStillClearsReaction: the turn layer does not call a
+// Finish that panicked again, so Finish itself must clear the ⏳.
+func TestOwnerTurn_ReplyPanicStillClearsReaction(t *testing.T) {
+	t.Parallel()
+	p := &ackOrderPlatform{replyPanic: true}
+	runOwnerTurn(p, p.record, existingSession, answer)
+	if got, want := p.events(), []string{"add:m1", "session", "reply", "remove:m1"}; !slices.Equal(got, want) {
+		t.Errorf("events = %v, want %v", got, want)
 	}
 }
 

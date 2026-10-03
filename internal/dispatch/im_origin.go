@@ -157,8 +157,9 @@ func (dl *imDelivery) SessionReady(ctx context.Context, _ sessionview.SessionSta
 }
 
 // Finish replies with the turn's outcome, then clears the ⏳ of every request
-// this delivery answers. On a panic the ⏳ go first and the reply is the
-// generic retry notice.
+// this delivery answers, also when the reply panics: the turn layer never
+// calls a panicked Finish again. On a panic outcome the ⏳ go first and the
+// reply is the generic retry notice.
 func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 	o, d := dl.o, dl.o.d
 	if dl.tracker != nil {
@@ -175,6 +176,11 @@ func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 		d.replyText(notifyCtx, o.msg, "处理异常，请稍后重试。", dl.lg)
 		return
 	}
+	// WithoutCancel: on a shutdown-during-turn race ctx is already Done and
+	// a child WithTimeout would be born cancelled (#2262).
+	defer func() {
+		d.clearQueuedReactions(context.WithoutCancel(ctx), o.msg.Platform, dl.queuedIDs(), dl.lg)
+	}()
 	switch out.Stage {
 	case turn.StageSession:
 		replyCtx, cleanup, errMsg := d.handleGetOrCreateError(ctx, out.Err, dl.lg)
@@ -190,9 +196,6 @@ func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 	if dl.tracker != nil {
 		dl.tracker.stop()
 	}
-	// WithoutCancel: on a shutdown-during-turn race ctx is already Done and
-	// a child WithTimeout would be born cancelled (#2262).
-	d.clearQueuedReactions(context.WithoutCancel(ctx), o.msg.Platform, dl.queuedIDs(), dl.lg)
 }
 
 // queuedIDs are the message IDs carrying a ⏳ that this delivery answers: the
