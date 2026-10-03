@@ -605,19 +605,11 @@ async function previewRecentSession(expectedKey, sessionId, cwd) {
   }
 }
 
-// CHEATSHEET_ENTRIES is the single source of truth for the shortcut modal.
-// Keeping it as an array (instead of raw HTML) lets tests grep for specific
-// rows and lets the render path escape user-visible text consistently.
-// The `keys` arrays are rendered as <kbd> chips joined by "+".
-//
-// R110-P2 extension: added "斜杠命令" and "上传" sections so the Help panel
-// documents features that were only discoverable via README / source until
-// now. Slash commands mirror the router in `internal/dispatch/commands.go`
-// (`/new`, `/cron`, `/help`, `/pwd`, `/cd`, `/project`); upload keys
-// describe the `.btn-icon` paperclip and the `dragover/drop` handler on
-// `#input-area`. Features that are NOT yet implemented (image paste,
-// `@` file autocomplete) are deliberately omitted — the Help panel must
-// stay a promise of actually-working UX.
+// CHEATSHEET_ENTRIES is the single source of truth for the shortcut modal;
+// `keys` render as <kbd> chips joined by "+". Rows promise working UX only.
+// '斜杠命令' lists exactly what turn.Parse handles in sessionSend (send.go);
+// the IM-only section mirrors internal/dispatch/commands.go.
+// TestCheatsheetDashboardSlashCommandsAreRecognised pins the split.
 const CHEATSHEET_ENTRIES = [
   { section: '会话' },
   { keys: ['Cmd/Ctrl', '1'], alt: ['Cmd/Ctrl', '9'], desc: '切换到项目组内第 N 个会话' },
@@ -631,12 +623,17 @@ const CHEATSHEET_ENTRIES = [
   { keys: ['Alt', '↑'], alt: ['Alt', '↓'], desc: '跳到上/下一条消息' },
   { keys: ['Esc'], desc: '关闭弹窗 / 关闭历史面板' },
   { section: '斜杠命令' },
-  { keys: ['/new'], desc: '重置当前 agent 对话（/new review 切到 code-reviewer 等 agent）' },
+  { keys: ['/new'], desc: '重置当前会话（不带参数；/new <agent> 在这里会当普通消息发送）' },
+  { keys: ['/clear'], desc: '重置当前会话（同 /new）' },
+  { keys: ['/urgent'], desc: '/urgent <消息> 立即中断当前回复并优先发送（需后端支持抢占）' },
+  { section: '斜杠命令（仅 IM 平台）' },
+  { keys: ['/new <agent>'], desc: '重置指定 agent 的对话（如 /new review 对应 code-reviewer）' },
   { keys: ['/cd'], desc: '切换工作目录（/cd <path>；受 session.cwd 的 allowed_root 限制）' },
   { keys: ['/pwd'], desc: '显示当前工作目录' },
   { keys: ['/project'], desc: '绑定会话到项目（/project <name> 或 /project off 解绑）' },
   { keys: ['/cron'], desc: '定时任务：/cron add "<schedule>" <prompt> · /cron list · /cron del <id>' },
-  { keys: ['/help'], desc: '显示可用命令（IM 平台内也可用）' },
+  { keys: ['/help'], desc: '显示可用命令' },
+  { keys: ['/stop'], desc: '中断当前回复（保留排队消息）；dashboard 上用双击 Esc' },
   { section: '上传' },
   { keys: ['📎'], desc: '点击输入栏左侧图标选图（单文件最多 40MB，总计 20 张）' },
   { keys: ['拖拽'], desc: '把图片拖入输入区，边框变蓝即可放下上传' },
