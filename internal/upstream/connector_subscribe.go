@@ -18,8 +18,9 @@ import (
 // streamEvents pumps sess's events and state changes for key to the primary.
 // sess is the session the subscribe handler already acked; re-resolving it
 // here would let a Reset in between end the stream silently. Unless ctx ends
-// or a write fails, it returns only after writing exactly one terminal
-// session_state (nil sess or closed notify), so the primary re-subscribes.
+// or a write fails, it returns only after writing one final session_state with
+// key's current router state (nil sess or closed notify; see
+// writeTerminalState), so the primary re-subscribes.
 func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error, key string, sess Session, notify <-chan struct{}) {
 	if sess == nil {
 		c.writeTerminalState(writeJSON, key)
