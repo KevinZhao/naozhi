@@ -12,7 +12,10 @@
 //	G-b queue escape: .Enqueue(/.DoneOrDrain( call sites in dispatch, server
 //	   and upstream. turn is excluded: it is where the queue's own drain
 //	   protocol is meant to live, so G-b asks whether anything outside turn
-//	   still reaches around the port.
+//	   still reaches around the port. Its second slice scans turn itself:
+//	   exported declarations that name the unexported queue type, which
+//	   would hand a *queue to another package without touching
+//	   *Orchestrator's method set.
 //	G-d slash literals: the six "/new"/"/clear"/"/urgent" (with and without
 //	   a trailing space) string literals in dispatch/server. turn is
 //	   excluded: turn/parse.go is their one sanctioned home.
@@ -54,6 +57,16 @@ const turnCtxWithValueBaseline = 0
 // turnQueueEscapeBaseline is G-b: .Enqueue(/.DoneOrDrain( call sites outside
 // turn. 0: the queue type is unexported and only turn.Orchestrator holds one.
 const turnQueueEscapeBaseline = 0
+
+// turnQueueTypeExportBaseline is G-b's second slice: exported declarations in
+// turn whose signature, reachable fields or value name the queue type or its
+// constructor. 0: an exported QueueOf(*Orchestrator) *queue would let server
+// call DiscardAndReturn or Cleanup on the queue past both G-b's call scan and
+// G-c's method set.
+const turnQueueTypeExportBaseline = 0
+
+// turnQueueTypeNames are the identifiers G-b's second slice looks for.
+var turnQueueTypeNames = map[string]bool{"queue": true, "newQueue": true}
 
 // turnSlashLiteralBaseline is G-d: slash-command literal occurrences in
 // dispatch/server. 0: both parse with turn.Parse.
@@ -165,6 +178,7 @@ func scanTurnBoundary(serverPkg string) []Violation {
 	out = append(out, ratchetViolation("turn_boundary", "turnCtxMarkerBaseline", turnCtxMarkerBaseline, scanCtxMarkerCalls(fset, markerFiles), serverPkg)...)
 	out = append(out, ratchetViolation("turn_boundary", "turnCtxWithValueBaseline", turnCtxWithValueBaseline, scanContextWithValue(fset, withValueFiles), serverPkg)...)
 	out = append(out, ratchetViolation("turn_boundary", "turnQueueEscapeBaseline", turnQueueEscapeBaseline, scanQueueEscapeCalls(fset, queueFiles), serverPkg)...)
+	out = append(out, ratchetViolation("turn_boundary", "turnQueueTypeExportBaseline", turnQueueTypeExportBaseline, scanQueueTypeExports(fset, turnFiles), serverPkg)...)
 	out = append(out, ratchetViolation("turn_boundary", "turnSlashLiteralBaseline", turnSlashLiteralBaseline, scanSlashLiterals(fset, slashFiles), serverPkg)...)
 	return out
 }
@@ -234,6 +248,112 @@ func scanQueueEscapeCalls(fset *token.FileSet, files []turnBoundarySrcFile) []Vi
 		})
 	}
 	return out
+}
+
+// scanQueueTypeExports implements G-b's second slice. It reports an exported
+// func (package-level, or a method on an exported type) whose signature names
+// the queue type; an exported type whose exported or embedded fields (an
+// embedded *queue promotes its methods), interface methods or other type
+// expression do; and an exported var or const whose type or value does.
+func scanQueueTypeExports(fset *token.FileSet, files []turnBoundarySrcFile) []Violation {
+	var out []Violation
+	for _, sf := range files {
+		report := func(n ast.Node, what string) {
+			if n == nil || !namesQueueType(n) {
+				return
+			}
+			out = append(out, Violation{Rule: "turn_boundary", File: filepath.ToSlash(sf.path),
+				Line:    fset.Position(n.Pos()).Line,
+				Message: fmt.Sprintf("%s names the unexported queue type: only *turn.Orchestrator may hold it, so nothing exported may hand one out (#3004 G-b)", what)})
+		}
+		for _, decl := range sf.f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Name.IsExported() && (d.Recv == nil || exportedRecvType(d.Recv)) {
+					report(d.Type, "func "+d.Name.Name)
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					switch sp := spec.(type) {
+					case *ast.TypeSpec:
+						if sp.Name.IsExported() {
+							reportExportedType(sp.Type, "type "+sp.Name.Name, report)
+						}
+					case *ast.ValueSpec:
+						for _, id := range sp.Names {
+							if !id.IsExported() {
+								continue
+							}
+							report(sp.Type, "var "+id.Name)
+							for _, v := range sp.Values {
+								report(v, "var "+id.Name)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// namesQueueType reports whether n mentions the queue type or its
+// constructor. Parameter and field names are skipped: only their types count.
+func namesQueueType(n ast.Node) bool {
+	found := false
+	ast.Inspect(n, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch x := n.(type) {
+		case *ast.Field:
+			found = namesQueueType(x.Type)
+			return false
+		case *ast.Ident:
+			found = turnQueueTypeNames[x.Name]
+		}
+		return true
+	})
+	return found
+}
+
+// exportedRecvType reports whether a method's receiver base type is exported.
+func exportedRecvType(recv *ast.FieldList) bool {
+	typ := recv.List[0].Type
+	for {
+		switch x := typ.(type) {
+		case *ast.StarExpr:
+			typ = x.X
+		case *ast.IndexExpr:
+			typ = x.X
+		case *ast.IndexListExpr:
+			typ = x.X
+		case *ast.Ident:
+			return x.IsExported()
+		default:
+			return true
+		}
+	}
+}
+
+// reportExportedType reports the parts of an exported type another package
+// can reach: exported and embedded struct fields, and any other type
+// expression whole (interface methods included).
+func reportExportedType(typ ast.Expr, what string, report func(ast.Node, string)) {
+	st, ok := typ.(*ast.StructType)
+	if !ok {
+		report(typ, what)
+		return
+	}
+	for _, fld := range st.Fields.List {
+		reach := len(fld.Names) == 0
+		for _, id := range fld.Names {
+			reach = reach || id.IsExported()
+		}
+		if reach {
+			report(fld.Type, "a field of "+what)
+		}
+	}
 }
 
 // scanSlashLiterals implements G-d.

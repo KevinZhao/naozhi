@@ -104,16 +104,40 @@ func writeTurnBoundaryRoot(t *testing.T, dirs map[string]map[string]string) stri
 	return root
 }
 
-// baselineDirs is the layout at every baseline. All four are 0 since #3004
-// D, so dispatch carries only near-misses and server and turn nothing (turn
-// is a required directory, so every fixture carries one). The down-direction
+// turnNoiseSrc is turn's real shape around the queue, which G-b's second
+// slice must not count: the unexported type and constructor, an unexported
+// field holding it, exported methods on the unexported type (one returning
+// it), an unexported helper returning it, and an exported func with a
+// parameter merely named queue.
+const turnNoiseSrc = `package turn
+
+type queue struct{}
+
+func newQueue() *queue { return &queue{} }
+
+func (q *queue) DiscardAndReturn(key string) []string { return nil }
+
+func (q *queue) Self() *queue { return q }
+
+type Orchestrator struct{ q *queue }
+
+func New() *Orchestrator { return &Orchestrator{q: newQueue()} }
+
+func queueOf(o *Orchestrator) *queue { return o.q }
+
+func Describe(queue string) string { return queue }
+`
+
+// baselineDirs is the layout at every baseline. All five are 0 since #3004,
+// so dispatch and turn carry only near-misses and server nothing (turn is a
+// required directory, so every fixture carries one). The down-direction
 // check needs a baseline above 0; TestRatchetViolation
 // (rule_send_engine_sibling_test.go) covers it on the shared helper.
 func baselineDirs() map[string]map[string]string {
 	return map[string]map[string]string{
 		"dispatch": {"d_noise.go": noiseSrc},
 		"server":   {"s_noop.go": "package server\n"},
-		"turn":     {"t_noop.go": "package turn\n"},
+		"turn":     {"t_noise.go": turnNoiseSrc},
 	}
 }
 
@@ -179,6 +203,52 @@ func TestScanTurnBoundary_ExtraQueueEscape(t *testing.T) {
 	vs := scanTurnBoundary(filepath.Join(root, "server"))
 	if !hasRatchetViolation(vs, "turnQueueEscapeBaseline") {
 		t.Fatalf("extra queue escape call not reported: %+v", vs)
+	}
+}
+
+// G-b's second slice: each way an exported declaration in turn could hand
+// out the queue is reported (mutation: "加 func QueueOf(*Orchestrator) *queue
+// → G-b 失败").
+func TestScanTurnBoundary_QueueTypeExport(t *testing.T) {
+	t.Parallel()
+	for name, src := range map[string]string{
+		"exported func returns it":        "func QueueOf(o *Orchestrator) *queue { return o.q }",
+		"exported method returns it":      "func (o *Orchestrator) Queue() *queue { return o.q }",
+		"exported func takes it":          "func Drain(q *queue) {}",
+		"result inside a func type":       "func Getter(o *Orchestrator) func() *queue { return nil }",
+		"embedded in an exported struct":  "type Handle struct{ *queue }",
+		"exported field":                  "type Holder struct{ Q *queue }",
+		"exported interface method":       "type Getter interface{ Q() *queue }",
+		"exported alias":                  "type Queue = queue",
+		"exported var built by newQueue":  "var Default = newQueue()",
+		"exported var typed as the queue": "var Default *queue",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root := cleanFixture(t)
+			writeExtra(t, root, "turn", "t_export.go", "package turn\n\n"+src+"\n")
+			vs := scanTurnBoundary(filepath.Join(root, "server"))
+			v, ok := findRatchetViolation(vs, "turnQueueTypeExportBaseline")
+			if !ok {
+				t.Fatalf("%s was not reported: %+v", src, vs)
+			}
+			if !strings.Contains(v.Message, "t_export.go:3") {
+				t.Errorf("violation does not point at t_export.go:3: %s", v.Message)
+			}
+		})
+	}
+}
+
+// G-b's second slice scans turn only: the same exported helper in server
+// (where it could not compile against the real package anyway) is not its
+// business.
+func TestScanTurnBoundary_QueueTypeExportScansTurnOnly(t *testing.T) {
+	t.Parallel()
+	root := cleanFixture(t)
+	writeExtra(t, root, "server", "s_queue_type.go", "package server\n\nfunc QueueOf() *queue { return nil }\n")
+	vs := scanTurnBoundary(filepath.Join(root, "server"))
+	if v, ok := findRatchetViolation(vs, "turnQueueTypeExportBaseline"); ok {
+		t.Fatalf("a server declaration was counted by G-b's second slice: %+v", v)
 	}
 }
 
