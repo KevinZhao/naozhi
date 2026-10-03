@@ -11,9 +11,16 @@ package persist
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestFlushAll_ScratchSliceReused verifies that p.scratch.allKeys / p.scratch.allWs
@@ -89,34 +96,45 @@ func TestFlushAll_NoDirtyWriters_NoError(t *testing.T) {
 	}
 }
 
-// TestFlushAll_ErrMuStillCollectsErrors verifies that promoting flushAllErrMu
-// to a Persister field does not break error collection from parallel flush
-// workers. We exercise successive Flush calls to also confirm the mutex is
-// correctly re-usable (not left locked across invocations). [R20260603-PERF-17]
-func TestFlushAll_ErrMuStillCollectsErrors(t *testing.T) {
-	t.Parallel()
-	p, _ := newTestPersister(t)
-
+// TestFlushAll_ReportsOneFailingWriterAmongParallelFlushes: with more than
+// two dirty writers flushAllLocked fans out over parallelFsync workers. A
+// failure in one of them must come back from Flush wrapped with that writer's
+// key, and must not stick: the next Flush after the disk recovers succeeds.
+// Not parallel: logFileWriterHook is package-global.
+func TestFlushAll_ReportsOneFailingWriterAmongParallelFlushes(t *testing.T) {
+	p, dir := newTestPersister(t, func(o *Options) { o.FlushInterval = time.Hour })
 	const n = 4
-	for i := 0; i < n; i++ {
-		key := fmt.Sprintf("errkey-%02d", i)
-		sink := p.SinkFor(key)
-		sink([]Entry{entry(t, int64(1700000002000+int64(i)), fmt.Sprintf("e%d", i))}, false)
+	const failKey = "errkey-02"
+	full := new(atomic.Bool)
+	failPath := LogPath(dir, failKey)
+	logFileWriterHook = func(f *os.File) io.Writer {
+		if f.Name() != failPath {
+			return f
+		}
+		return fullDisk{f: f, full: full}
+	}
+	t.Cleanup(func() { logFileWriterHook = nil })
+
+	write := func(round int64) {
+		for i := 0; i < n; i++ {
+			key := fmt.Sprintf("errkey-%02d", i)
+			p.SinkFor(key)([]Entry{entry(t, 1700000002000+round*100+int64(i), fmt.Sprintf("r%d-%d", round, i))}, false)
+		}
 	}
 
-	// First Flush: all writers are dirty, should succeed (no I/O error).
-	ctx := context.Background()
-	if err := p.Flush(ctx); err != nil {
-		t.Fatalf("first Flush: %v", err)
+	write(0)
+	full.Store(true)
+	err := flushOrFail(t, p)
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("Flush with one writer on a full disk: err=%v, want ENOSPC", err)
+	}
+	if want := "flush " + failKey + ":"; !strings.Contains(err.Error(), want) {
+		t.Errorf("Flush error %q does not name the failing writer (want %q)", err, want)
 	}
 
-	// Write again, then flush a second time to confirm mutex is reusable.
-	for i := 0; i < n; i++ {
-		key := fmt.Sprintf("errkey-%02d", i)
-		sink := p.SinkFor(key)
-		sink([]Entry{entry(t, int64(1700000003000+int64(i)), fmt.Sprintf("f%d", i))}, false)
-	}
-	if err := p.Flush(ctx); err != nil {
-		t.Fatalf("second Flush: %v", err)
+	full.Store(false)
+	write(1)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush after the disk recovered: %v", err)
 	}
 }
