@@ -1,7 +1,7 @@
 // node --test scripts/check-enum-literals.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run } from './check-enum-literals.mjs';
+import { ANCHORS, checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run } from './check-enum-literals.mjs';
 
 const nzUtil = `
 const OTHER = { a: 1 };
@@ -58,7 +58,12 @@ test('run reports a blind check when nz_util.js has no DEATH_REASONS block', () 
 
 const contract = {
   WS: { event: 'event', history: 'history' },
-  ENUMS: { EVENT_TYPE: ['user', 'text', 'tool_use', 'result'], EVENT_TYPE_INTERNAL: ['tool_use', 'result'], EVENT_TYPE_MD_IGNORE: ['tool_use'] },
+  ENUMS: {
+    EVENT_TYPE: ['user', 'text', 'thinking', 'tool_use', 'result'],
+    EVENT_TYPE_INTERNAL: ['tool_use', 'result'],
+    EVENT_TYPE_NO_BUBBLE: ['thinking'],
+    EVENT_TYPE_MD_IGNORE: ['tool_use'],
+  },
 };
 const other = { 'b.js': ['keydown'] };
 const clean = {
@@ -70,13 +75,19 @@ const clean = {
 const anchors = { S: 'EVENT_TYPE_INTERNAL' };
 const check = (files, o = other, sentinels = ['a.js', 'b.js']) => kindProblems(files, contract, o, sentinels, anchors);
 
-test('contractKindProblems wants three non-empty lists, the two columns inside EVENT_TYPE', () => {
+test('contractKindProblems wants four non-empty lists, the three columns inside EVENT_TYPE', () => {
   assert.deepEqual(contractKindProblems(contract.ENUMS), []);
   const missing = contractKindProblems({ EVENT_TYPE: ['user'], EVENT_TYPE_INTERNAL: [] });
-  assert.deepEqual(missing, ['contract.js: ENUMS.EVENT_TYPE_INTERNAL is missing or empty', 'contract.js: ENUMS.EVENT_TYPE_MD_IGNORE is missing or empty']);
+  assert.deepEqual(missing, [
+    'contract.js: ENUMS.EVENT_TYPE_INTERNAL is missing or empty',
+    'contract.js: ENUMS.EVENT_TYPE_NO_BUBBLE is missing or empty',
+    'contract.js: ENUMS.EVENT_TYPE_MD_IGNORE is missing or empty',
+  ]);
   const outside = contractKindProblems({ ...contract.ENUMS, EVENT_TYPE_MD_IGNORE: ['tool_use', 'txt'] });
   assert.deepEqual(outside, ['contract.js: ENUMS.EVENT_TYPE_MD_IGNORE has "txt", which ENUMS.EVENT_TYPE does not list']);
-  assert.equal(contractKindProblems(undefined).length, 3);
+  const noBubbleOutside = contractKindProblems({ ...contract.ENUMS, EVENT_TYPE_NO_BUBBLE: ['thinkin'] });
+  assert.deepEqual(noBubbleOutside, ['contract.js: ENUMS.EVENT_TYPE_NO_BUBBLE has "thinkin", which ENUMS.EVENT_TYPE does not list']);
+  assert.equal(contractKindProblems(undefined).length, 4);
 });
 
 test('kindProblems passes a clean tree and counts what it saw, contract.js aside', () => {
@@ -199,7 +210,7 @@ test('eventTableProblems passes a clean split, flags a missing kind, and is fine
 
   const missingKind = { ...clean, 'a.js': clean['a.js'].replace("['result', 4]", '') };
   assert.deepEqual(eventTableProblems(missingKind, contract), [
-    'EVENT_WHOLE and EVENT_CONTENT together do not cover kind "result" — eventHtml would fall through to the unknown-type chip',
+    'EVENT_WHOLE, EVENT_CONTENT and ENUMS.EVENT_TYPE_NO_BUBBLE together do not cover kind "result" — eventHtml would fall through to the unknown-type chip',
   ]);
 
   const split = {
@@ -231,13 +242,43 @@ test('eventTableProblems flags a key that is not a kind in any table, and a key 
   ]);
 });
 
+test('eventTableProblems counts ENUMS.EVENT_TYPE_NO_BUBBLE as covered, and a Map entry for one as dead', () => {
+  // clean covers thinking through EVENT_TYPE_NO_BUBBLE alone.
+  assert.ok(!clean['a.js'].includes("'thinking'"));
+  const noColumn = { ...contract, ENUMS: { ...contract.ENUMS, EVENT_TYPE_NO_BUBBLE: [] } };
+  assert.deepEqual(eventTableProblems(clean, noColumn), [
+    'EVENT_WHOLE, EVENT_CONTENT and ENUMS.EVENT_TYPE_NO_BUBBLE together do not cover kind "thinking" — eventHtml would fall through to the unknown-type chip',
+  ]);
+  const whole = { ...clean, 'a.js': clean['a.js'].replace("new Map([['user', 1]])", "new Map([['user', 1], ['thinking', () => '']])") };
+  assert.deepEqual(eventTableProblems(whole, contract), [
+    'EVENT_WHOLE has key "thinking", which ENUMS.EVENT_TYPE_NO_BUBBLE lists — shouldHideEvent hides it first, so the entry is dead',
+  ]);
+  const content = { ...clean, 'a.js': clean['a.js'].replace("['result', 4]]", "['result', 4], ['thinking', 9]]") };
+  assert.deepEqual(eventTableProblems(content, contract), [
+    'EVENT_CONTENT has key "thinking", which ENUMS.EVENT_TYPE_NO_BUBBLE lists — shouldHideEvent hides it first, so the entry is dead',
+  ]);
+});
+
+test('ANCHORS holds NO_BUBBLE_EVENT_TYPES to the EVENT_TYPE_NO_BUBBLE column', () => {
+  const decls = (noBubble) => ({
+    'a.js': 'const INTERNAL_EVENT_TYPES = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL);\n' +
+      'const MARKDOWN_EXPORT_IGNORE = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_MD_IGNORE);\n' + noBubble +
+      '\nexport function hide(e) { return NO_BUBBLE_EVENT_TYPES.has(e.type) || INTERNAL_EVENT_TYPES.has(e.type) || MARKDOWN_EXPORT_IGNORE.has(e.type); }\n',
+  });
+  const run2 = (files) => kindProblems(files, contract, {}, [], ANCHORS).problems;
+  assert.deepEqual(run2(decls('const NO_BUBBLE_EVENT_TYPES = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_NO_BUBBLE);')), []);
+  assert.deepEqual(run2(decls("const NO_BUBBLE_EVENT_TYPES = new Set(['thinking']);")), [
+    'a.js:3: NO_BUBBLE_EVENT_TYPES must be exactly new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_NO_BUBBLE)',
+  ]);
+});
+
 test('eventTableProblems goes blind loudly when a table is declared nowhere, or not as a Map literal', () => {
   const noContent = { 'a.js': "const EVENT_WHOLE = new Map([['user', 1]]);\nconst EVENT_ICONS = new Map([['user', 5]]);\n" };
   assert.deepEqual(eventTableProblems(noContent, contract), [
     'EVENT_CONTENT is not declared anywhere as `new Map([[kind, …], …])` — the event-table scan has gone blind',
-    'EVENT_WHOLE and EVENT_CONTENT together do not cover kind "text" — eventHtml would fall through to the unknown-type chip',
-    'EVENT_WHOLE and EVENT_CONTENT together do not cover kind "tool_use" — eventHtml would fall through to the unknown-type chip',
-    'EVENT_WHOLE and EVENT_CONTENT together do not cover kind "result" — eventHtml would fall through to the unknown-type chip',
+    'EVENT_WHOLE, EVENT_CONTENT and ENUMS.EVENT_TYPE_NO_BUBBLE together do not cover kind "text" — eventHtml would fall through to the unknown-type chip',
+    'EVENT_WHOLE, EVENT_CONTENT and ENUMS.EVENT_TYPE_NO_BUBBLE together do not cover kind "tool_use" — eventHtml would fall through to the unknown-type chip',
+    'EVENT_WHOLE, EVENT_CONTENT and ENUMS.EVENT_TYPE_NO_BUBBLE together do not cover kind "result" — eventHtml would fall through to the unknown-type chip',
   ]);
 
   // A plain object instead of a Map is not a recognised declaration either —

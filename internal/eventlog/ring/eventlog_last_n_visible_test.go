@@ -7,7 +7,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// countVisible counts entries the dashboard would render (non-internal).
+// countVisible counts entries the dashboard would render as a bubble.
 func countVisible(entries []clievent.EventEntry) int {
 	n := 0
 	for i := range entries {
@@ -29,7 +29,11 @@ func TestIsInternalEventType(t *testing.T) {
 			t.Errorf("clievent.IsVisibleEntry(%q) = true, want false", ty)
 		}
 	}
-	visible := []string{"user", "text", "thinking", "init", "system", "todo", "ask_question"}
+	// thinking is not internal, yet the dashboard draws no bubble for it.
+	if clievent.IsInternalEventType("thinking") || clievent.IsVisibleEntry(clievent.EventEntry{Type: "thinking"}) {
+		t.Errorf("thinking: want not internal and not visible")
+	}
+	visible := []string{"user", "text", "init", "system", "todo", "ask_question"}
 	for _, ty := range visible {
 		if clievent.IsInternalEventType(ty) {
 			t.Errorf("clievent.IsInternalEventType(%q) = true, want false", ty)
@@ -111,6 +115,32 @@ func TestLastNVisible_AllInternal(t *testing.T) {
 	// maxTotal caps the slice length even when the visible target is unmet.
 	if len(got) > 100 {
 		t.Errorf("len = %d, want <= maxTotal 100", len(got))
+	}
+}
+
+// TestLastNVisible_ThinkingFlood: thinking renders as nothing, so a tail of
+// 40 thinking entries must not satisfy a 30-bubble target on its own — the
+// walk carries on to the 5 texts before them.
+func TestLastNVisible_ThinkingFlood(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	tm := int64(0)
+	for i := 0; i < 5; i++ {
+		tm++
+		l.Append(clievent.EventEntry{Time: tm, Type: clievent.KindText, Summary: "reply"})
+	}
+	for i := 0; i < 40; i++ {
+		tm++
+		l.Append(clievent.EventEntry{Time: tm, Type: clievent.KindThinking, Summary: "hmm"})
+	}
+	got := l.LastNVisible(30, 0)
+	if len(got) != 45 || countVisible(got) != 5 {
+		t.Fatalf("len = %d, visible = %d, want all 45 entries carrying the 5 texts", len(got), countVisible(got))
+	}
+	for i := range got {
+		if got[i].Time != int64(i+1) {
+			t.Fatalf("got[%d].Time = %d, want %d (contiguous, chronological)", i, got[i].Time, i+1)
+		}
 	}
 }
 

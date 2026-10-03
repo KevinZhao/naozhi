@@ -67,6 +67,7 @@ func TestContractJS_EventTypeEnums(t *testing.T) {
 		"EVENT_TYPE":           clievent.AllKinds(),
 		"EVENT_TYPE_INTERNAL":  clievent.InternalKinds(),
 		"EVENT_TYPE_MD_IGNORE": clievent.MarkdownIgnoreKinds(),
+		"EVENT_TYPE_NO_BUBBLE": clievent.NoBubbleKinds(),
 	} {
 		if len(want) == 0 {
 			t.Fatalf("clievent returned no kinds for %s", name)

@@ -11,6 +11,9 @@
 //     text block sharing the thinking block's millisecond (one CLI frame's
 //     content blocks; ACP's trailing thinking/text/result) was dropped. The
 //     gate is now strict `<` and same-ms events dedup by uuid instead.
+//  3. thinking draws no bubble in any view, the internal (agent) view
+//     included: shouldHideEvent hides ENUMS.EVENT_TYPE_NO_BUBBLE, the column
+//     the server's visible count skips (#3034).
 //
 // The mock server rejects /ws to force HTTP fallback, so (2) pushes history
 // frames through `wsm.onMessage` (the dispatch table a live socket feeds) and
@@ -160,6 +163,21 @@ test.describe('Session events panel regressions', () => {
 
     expect(result.first).toBe(2);
     expect(result.replay).toBe(2);
+
+    await ctx.close();
+  });
+
+  test('eventHtml draws no bubble for thinking, in the internal view too', async ({ browser }) => {
+    const { ctx, page } = await openSession(browser, mock);
+
+    const html = await page.evaluate(() => {
+      const w = /** @type {any} */ (window);
+      const e = { type: 'thinking', detail: 'hmm', time: 1, uuid: 'TH-views' };
+      return { main: w.eventHtml(e), internal: w.eventHtml(e, { includeInternal: true }) };
+    });
+
+    expect(html.main).toBe('');
+    expect(html.internal).toBe('');
 
     await ctx.close();
   });

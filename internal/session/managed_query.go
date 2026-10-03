@@ -576,7 +576,7 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 }
 
 // countVisibleEntries returns how many entries the dashboard would render as
-// chat bubbles (the inverse of the INTERNAL_EVENT_TYPES filter).
+// chat bubbles (clievent.IsVisibleEntry).
 func countVisibleEntries(entries []clievent.EventEntry) int {
 	n := 0
 	for i := range entries {

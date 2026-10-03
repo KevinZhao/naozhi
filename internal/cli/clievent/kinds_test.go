@@ -40,9 +40,9 @@ func TestIsActivityType_Set(t *testing.T) {
 	}
 }
 
-// TestKindTable pins the registry: names are unique and non-empty, and the
-// three derived sets equal the sets pinned below (which the dashboard's two
-// hand-written Sets also hold).
+// TestKindTable pins the registry: names are unique and non-empty, the
+// derived sets equal the sets pinned below, Internal and NoBubble are
+// disjoint, and IsVisibleEntry is exactly "neither of the two".
 func TestKindTable(t *testing.T) {
 	seen := map[string]bool{}
 	for _, k := range kindTable {
@@ -69,6 +69,7 @@ func TestKindTable(t *testing.T) {
 	}{
 		{"activity", IsActivityType, nil, []string{"tool_use", "thinking", "agent", "task_start", "task_progress", "todo"}},
 		{"internal", IsInternalEventType, InternalKinds(), []string{"tool_use", "result", "agent", "task_start", "task_progress", "task_done"}},
+		{"no-bubble", nil, NoBubbleKinds(), []string{"thinking"}},
 		{"markdown-ignore", nil, MarkdownIgnoreKinds(), []string{"tool_use", "result", "agent", "task_start", "task_progress", "task_done", "thinking", "ask_question"}},
 	}
 	for _, s := range sets {
@@ -84,7 +85,7 @@ func TestKindTable(t *testing.T) {
 				t.Errorf("%s(%q) = %v, want %v", s.name, k, s.pred(k), want[k])
 			}
 		}
-		if s.list != nil {
+		if s.pred == nil || s.list != nil { // a list-only set is checked even when its column is empty (nil)
 			got := map[string]bool{}
 			for _, k := range s.list {
 				got[k] = true
@@ -97,6 +98,19 @@ func TestKindTable(t *testing.T) {
 					t.Errorf("%s list lacks %q", s.name, w)
 				}
 			}
+		}
+	}
+	noBubble := map[string]bool{}
+	for _, k := range NoBubbleKinds() {
+		noBubble[k] = true
+	}
+	for _, k := range append(AllKinds(), "", "init", "unknown_kind") {
+		internal := IsInternalEventType(k)
+		if internal && noBubble[k] {
+			t.Errorf("%q is both Internal and NoBubble", k)
+		}
+		if got, want := IsVisibleEntry(EventEntry{Type: k}), !internal && !noBubble[k]; got != want {
+			t.Errorf("IsVisibleEntry(%q) = %v, want %v", k, got, want)
 		}
 	}
 	for _, bad := range []string{"", "init", "txt", "Text"} {

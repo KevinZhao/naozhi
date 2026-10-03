@@ -77,6 +77,7 @@ export const NZ_CONTRACT = {
 	writeEnum(&b, "SESSION_STATE", cliinfo.AllSessionStates())
 	writeEnum(&b, "EVENT_TYPE", clievent.AllKinds())
 	writeEnum(&b, "EVENT_TYPE_INTERNAL", clievent.InternalKinds())
+	writeEnum(&b, "EVENT_TYPE_NO_BUBBLE", clievent.NoBubbleKinds())
 	writeEnum(&b, "EVENT_TYPE_MD_IGNORE", clievent.MarkdownIgnoreKinds())
 	b.WriteString("  },\n")
 

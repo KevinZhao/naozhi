@@ -43,6 +43,42 @@ func TestEventInitialPageCtx_HasMoreWhenOlderExists(t *testing.T) {
 	}
 }
 
+// TestEventInitialPageCtx_ThinkingTailKeepsReplies: the tail is 5 replies
+// then 40 thinking entries, which the dashboard renders as nothing. Counting
+// thinking as a bubble stopped the read at the newest 30 thinking entries
+// (zero bubbles on first paint); the page must reach the replies and keep
+// walking into disk for the rest of the target.
+func TestEventInitialPageCtx_ThinkingTailKeepsReplies(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	for i := 0; i < 45; i++ {
+		ty := clievent.KindThinking
+		if i < 5 {
+			ty = clievent.KindText
+		}
+		s.persistedHistory = append(s.persistedHistory, clievent.EventEntry{Time: int64(101 + i), Type: ty})
+	}
+	var disk []clievent.EventEntry
+	for i := 1; i <= 100; i++ {
+		disk = append(disk, clievent.EventEntry{Time: int64(i), Type: clievent.KindText})
+	}
+	s.SetHistorySource(&pagingHistorySource{all: disk})
+
+	entries, _ := s.EventInitialPageCtx(context.Background(), DefaultVisibleTarget, maxVisibleTotal)
+	replies := 0
+	for _, e := range entries {
+		if e.Type == clievent.KindText && e.Time >= 101 {
+			replies++
+		}
+	}
+	if replies != 5 {
+		t.Errorf("page carries %d of the 5 in-memory replies, want all 5", replies)
+	}
+	if v := visibleCount(entries); v < DefaultVisibleTarget {
+		t.Errorf("visible = %d, want >= %d (the disk tier tops the page up)", v, DefaultVisibleTarget)
+	}
+}
+
 // TestEventInitialPageCtx_NoMoreWhenSliceIsOldest: the returned slice already
 // starts at the very first event → hasMore must be false (no useless button).
 func TestEventInitialPageCtx_NoMoreWhenSliceIsOldest(t *testing.T) {

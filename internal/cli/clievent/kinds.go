@@ -29,26 +29,30 @@ const (
 )
 
 // KindInfo classifies one kind. Internal: the dashboard filters it out of the
-// transcript (no chat bubble), and the visible-aware history readers
-// (EventLog.LastNVisible, ManagedSession.EventLastNVisibleCtx) do not count it,
-// so a first page flooded by an agent team still carries renderable messages.
+// transcript (no chat bubble) unless a view asks for internal events, and the
+// visible-aware history readers (EventLog.LastNVisible,
+// ManagedSession.EventLastNVisibleCtx) do not count it, so a first page
+// flooded by an agent team still carries renderable messages. NoBubble: not
+// Internal (internal-event filters keep it), but the dashboard renders it as
+// nothing in every view, so those readers do not count it either.
 // Activity: it updates EventLog.lastActivitySummary, the "what is the agent
 // doing" tail live appends and the history replay scan must agree on.
 // MarkdownIgnore: the dashboard's markdown export leaves it out.
 type KindInfo struct {
 	Name           string
 	Internal       bool
+	NoBubble       bool
 	Activity       bool
 	MarkdownIgnore bool
 }
 
 // kindTable is the single registry of kinds; kinds_test.go pins its sets. A
-// new kind also needs an EVENT_WHOLE or EVENT_CONTENT entry in the dashboard
-// (scripts/check-enum-literals.mjs fails until it has one).
+// new kind that is not NoBubble also needs an EVENT_WHOLE or EVENT_CONTENT
+// entry in the dashboard (scripts/check-enum-literals.mjs fails until it has one).
 var kindTable = []KindInfo{
 	{Name: KindUser},
 	{Name: KindText},
-	{Name: KindThinking, Activity: true, MarkdownIgnore: true},
+	{Name: KindThinking, NoBubble: true, Activity: true, MarkdownIgnore: true},
 	{Name: KindToolUse, Internal: true, Activity: true, MarkdownIgnore: true},
 	{Name: KindToolResult},
 	{Name: KindAgent, Internal: true, Activity: true, MarkdownIgnore: true},
@@ -86,6 +90,9 @@ func AllKinds() []string { return kindNames(func(KindInfo) bool { return true })
 // InternalKinds returns the kinds the dashboard keeps out of the transcript.
 func InternalKinds() []string { return kindNames(func(k KindInfo) bool { return k.Internal }) }
 
+// NoBubbleKinds returns the kinds the dashboard renders as nothing.
+func NoBubbleKinds() []string { return kindNames(func(k KindInfo) bool { return k.NoBubble }) }
+
 // MarkdownIgnoreKinds returns the kinds the markdown export leaves out.
 func MarkdownIgnoreKinds() []string {
 	return kindNames(func(k KindInfo) bool { return k.MarkdownIgnore })
@@ -99,7 +106,7 @@ func IsKnownKind(t string) bool {
 
 // IsActivityType reports whether an entry of type t updates the lastActivity
 // summary (KindInfo.Activity). Distinct from IsInternalEventType: thinking and
-// todo are activity yet visible, result and task_done are internal yet not
+// todo are activity yet not internal, result and task_done are internal yet not
 // activity — do NOT conflate the two sets.
 func IsActivityType(t string) bool { return kindByName[t].Activity }
 
@@ -110,8 +117,10 @@ func IsActivityType(t string) bool { return kindByName[t].Activity }
 func IsInternalEventType(t string) bool { return kindByName[t].Internal }
 
 // IsVisibleEntry reports whether the dashboard would render this entry as a
-// visible chat bubble. The inverse of IsInternalEventType, lifted to the
-// EventEntry shape for the visible-aware history readers.
+// visible chat bubble in the main transcript: neither Internal nor NoBubble.
+// The visible-aware history readers count with it. An unregistered type
+// counts as visible (the dashboard renders it as the unknown-type chip).
 func IsVisibleEntry(e EventEntry) bool {
-	return !IsInternalEventType(e.Type)
+	k := kindByName[e.Type]
+	return !k.Internal && !k.NoBubble
 }
