@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	"github.com/naozhi/naozhi/internal/cliinfo"
+)
 
 // Single source of truth for config defaults: each duration is declared once
 // and applyDefaults derives the string form via .String(), so applyDefaults
@@ -28,8 +32,8 @@ const (
 const (
 	defaultSessionTTL        = 30 * time.Minute
 	defaultSessionPruneTTL   = 72 * time.Hour
-	defaultNoOutputTimeout   = 2 * time.Minute
-	defaultTotalTimeout      = 5 * time.Minute
+	defaultNoOutputTimeout   = cliinfo.DefaultNoOutputTimeout
+	defaultTotalTimeout      = cliinfo.DefaultTotalTimeout
 	defaultCronExecTimeout   = 5 * time.Minute
 	defaultQueueCollectDelay = 500 * time.Millisecond
 	defaultCronJitterMax     = 2 * time.Minute

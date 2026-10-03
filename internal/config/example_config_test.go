@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,6 +59,35 @@ func TestExampleConfig_TrustedProxyOff(t *testing.T) {
 	}
 	if on {
 		t.Error("config.example.yaml sets server.trusted_proxy: true; the template must default to false")
+	}
+}
+
+// TestExampleConfig_WatchdogShowsDefaults: the template's watchdog values are
+// what an operator reads as the defaults, so they must be the cliinfo ones.
+func TestExampleConfig_WatchdogShowsDefaults(t *testing.T) {
+	session := yamlChildMap(readExampleRoot(t), "session")
+	if session == nil {
+		t.Fatal("config.example.yaml has no session block")
+	}
+	wd := yamlChildMap(session, "watchdog")
+	if wd == nil {
+		t.Fatal("config.example.yaml has no session.watchdog block")
+	}
+	for _, tc := range []struct {
+		key  string
+		want time.Duration
+	}{
+		{"no_output_timeout", cliinfo.DefaultNoOutputTimeout},
+		{"total_timeout", cliinfo.DefaultTotalTimeout},
+	} {
+		n := yamlChildScalar(wd, tc.key)
+		if n == nil {
+			t.Errorf("session.watchdog.%s missing", tc.key)
+			continue
+		}
+		if got, err := time.ParseDuration(n.Value); err != nil || got != tc.want {
+			t.Errorf("session.watchdog.%s = %q, want %v (err %v)", tc.key, n.Value, tc.want, err)
+		}
 	}
 }
 

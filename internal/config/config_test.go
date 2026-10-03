@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cliinfo"
 )
 
 func TestExpandEnvVars(t *testing.T) {
@@ -166,8 +168,14 @@ func TestParseWatchdog(t *testing.T) {
 		{
 			name:           "defaults when empty",
 			yaml:           `{}`,
-			expectNoOutput: 2 * time.Minute,
-			expectTotal:    5 * time.Minute,
+			expectNoOutput: cliinfo.DefaultNoOutputTimeout,
+			expectTotal:    cliinfo.DefaultTotalTimeout,
+		},
+		{
+			name:           "defaults when the watchdog block is empty",
+			yaml:           `session: {watchdog: {}}`,
+			expectNoOutput: cliinfo.DefaultNoOutputTimeout,
+			expectTotal:    cliinfo.DefaultTotalTimeout,
 		},
 		{
 			name:    "error on invalid no_output_timeout",
