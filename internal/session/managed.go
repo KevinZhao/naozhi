@@ -330,9 +330,11 @@ type ManagedSession struct {
 
 	// costSpent is the genuine cumulative spend (sum of per-turn deltas, see
 	// runhistory.TurnCostDelta): monotonic across process replacements,
-	// unlike totalCost which RESETS on resume. lastCumulativeCost is the
-	// previous raw CLI reading the next delta diffs against. Both are
-	// Float64bits-packed and written only from accountTurnCost.
+	// unlike totalCost, the current process's own reading. lastCumulativeCost
+	// is the previous raw CLI reading the next delta diffs against; a resumed
+	// process starts it at the cost the CLI restores (resumed_cost.go). Both
+	// are Float64bits-packed and, after install, written only from
+	// accountTurnCost.
 	costSpent          atomic.Uint64
 	lastCumulativeCost atomic.Uint64
 	// lastCumulative is the full per-incarnation baseline (USD, per-model
