@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"path/filepath"
+	"slices"
 
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -24,6 +25,9 @@ const projectsIndexVersion = 1
 type indexFile struct {
 	Version   int              `json:"version"`
 	CreatedAt map[string]int64 `json:"created_at"`
+	// StubCleanupDone lists the roots whose legacy Scan-written stubs have
+	// been swept, so a stub restored or committed later is never removed.
+	StubCleanupDone []string `json:"stub_cleanup_done,omitempty"`
 }
 
 // projectIndex is naozhi's own per-project bookkeeping — today the sidebar
@@ -36,6 +40,10 @@ type projectIndex struct {
 	// saved is the map last read from or written to disk; save is skipped
 	// while createdAt still equals it.
 	saved map[string]int64
+	// stubCleanupDone mirrors indexFile.StubCleanupDone (sorted);
+	// savedStubCleanupDone is its last persisted value.
+	stubCleanupDone      []string
+	savedStubCleanupDone []string
 	// readOnly is set when the file is on disk but could not be used (I/O
 	// error, over the cap, symlink, newer version): overwriting it would
 	// destroy state this build cannot read, so order stays in memory.
@@ -76,8 +84,10 @@ func loadProjectIndex(path string) *projectIndex {
 				idx.createdAt[p] = ms
 			}
 		}
+		idx.stubCleanupDone = slices.Compact(slices.Sorted(slices.Values(f.StubCleanupDone)))
 	}
 	idx.saved = maps.Clone(idx.createdAt)
+	idx.savedStubCleanupDone = slices.Clone(idx.stubCleanupDone)
 	return idx
 }
 
@@ -86,7 +96,32 @@ func loadProjectIndex(path string) *projectIndex {
 // of a run is a Warn, repeats are Debug until a save succeeds again.
 func (idx *projectIndex) replace(next map[string]int64) {
 	idx.createdAt = next
-	if idx.path == "" || idx.readOnly || maps.Equal(next, idx.saved) {
+	idx.flush()
+}
+
+// durable reports whether every CreatedAt in memory is also on disk, i.e.
+// a stub's order survives a restart once the stub itself is gone.
+func (idx *projectIndex) durable() bool {
+	return idx.path != "" && !idx.readOnly && maps.Equal(idx.createdAt, idx.saved)
+}
+
+// stubCleanupPending reports whether root's legacy stubs are yet to be swept.
+func (idx *projectIndex) stubCleanupPending(root string) bool {
+	_, found := slices.BinarySearch(idx.stubCleanupDone, root)
+	return !found
+}
+
+// markStubCleanupDone records root as swept and persists the flag.
+func (idx *projectIndex) markStubCleanupDone(root string) {
+	if i, found := slices.BinarySearch(idx.stubCleanupDone, root); !found {
+		idx.stubCleanupDone = slices.Insert(idx.stubCleanupDone, i, root)
+	}
+	idx.flush()
+}
+
+func (idx *projectIndex) flush() {
+	if idx.path == "" || idx.readOnly ||
+		(maps.Equal(idx.createdAt, idx.saved) && slices.Equal(idx.stubCleanupDone, idx.savedStubCleanupDone)) {
 		return
 	}
 	if err := idx.save(); err != nil {
@@ -102,11 +137,16 @@ func (idx *projectIndex) replace(next map[string]int64) {
 		slog.Info("persist projects index recovered", "path", idx.path)
 		idx.saveFailing = false
 	}
-	idx.saved = maps.Clone(next)
+	idx.saved = maps.Clone(idx.createdAt)
+	idx.savedStubCleanupDone = slices.Clone(idx.stubCleanupDone)
 }
 
 func (idx *projectIndex) save() error {
-	data, err := json.Marshal(indexFile{Version: projectsIndexVersion, CreatedAt: idx.createdAt})
+	data, err := json.Marshal(indexFile{
+		Version:         projectsIndexVersion,
+		CreatedAt:       idx.createdAt,
+		StubCleanupDone: idx.stubCleanupDone,
+	})
 	if err != nil {
 		return fmt.Errorf("marshal projects index: %w", err)
 	}
