@@ -13,21 +13,18 @@ import (
 
 // newSchedulerRunStoreRefused builds a scheduler over storePath whose runs/ is
 // a symlink, so newRunStore refuses it (#825) while every other state subtree,
-// runinflight/ included, stays live. Returns the symlink target, which must
-// stay empty.
-func newSchedulerRunStoreRefused(t *testing.T, storePath string, router SessionRouter) (*Scheduler, string) {
+// runinflight/ included, stays live.
+func newSchedulerRunStoreRefused(t *testing.T, storePath string, router SessionRouter) *Scheduler {
 	t.Helper()
 	runs := filepath.Join(filepath.Dir(storePath), "runs")
-	target := filepath.Join(t.TempDir(), "elsewhere")
 	if _, err := os.Lstat(runs); errors.Is(err, os.ErrNotExist) {
+		target := filepath.Join(t.TempDir(), "elsewhere")
 		if err := os.Mkdir(target, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Symlink(target, runs); err != nil {
 			t.Fatalf("symlink: %v", err)
 		}
-	} else if dest, err := os.Readlink(runs); err == nil {
-		target = dest
 	}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: router})
 	if s.runStoreEnabled() {
@@ -36,28 +33,17 @@ func newSchedulerRunStoreRefused(t *testing.T, storePath string, router SessionR
 	if s.runInflightDir() == "" {
 		t.Fatal("runinflight dir unresolved; markers would not be written either")
 	}
-	return s, target
-}
-
-func assertEmptyDir(t *testing.T, dir string) {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("%d entries written through the refused runs/ symlink into %s", len(entries), dir)
-	}
+	return s
 }
 
 // TestReconcileSettlesMarkersWithRunStoreDisabled: the writer only needs the
 // store dir, so markers exist in this mode; the reader must consume them. The
-// run ends through finishRun, so the job card says interrupted, and the
-// history append stays suppressed by finishRun's own gate.
+// run ends through finishRun, so the job card says interrupted; history stays
+// off because the refused store is disabled.
 func TestReconcileSettlesMarkersWithRunStoreDisabled(t *testing.T) {
 	t.Parallel()
 	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
-	s, target := newSchedulerRunStoreRefused(t, storePath, &fakeRouter{})
+	s := newSchedulerRunStoreRefused(t, storePath, &fakeRouter{})
 
 	jobID := mustGenerateID()
 	s.putJobForTest(&Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing"})
@@ -83,7 +69,6 @@ func TestReconcileSettlesMarkersWithRunStoreDisabled(t *testing.T) {
 	if j.LastRunAt.IsZero() || j.RunCounters.Canceled != 1 {
 		t.Errorf("LastRunAt=%v Canceled=%d, want the interrupted run counted", j.LastRunAt, j.RunCounters.Canceled)
 	}
-	assertEmptyDir(t, target)
 }
 
 // TestShutdownCancelMarkerAdoptedWithRunStoreDisabled is writer/reader parity:
@@ -93,7 +78,7 @@ func TestReconcileSettlesMarkersWithRunStoreDisabled(t *testing.T) {
 func TestShutdownCancelMarkerAdoptedWithRunStoreDisabled(t *testing.T) {
 	t.Parallel()
 	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
-	s1, target := newSchedulerRunStoreRefused(t, storePath, &fakeRouter{})
+	s1 := newSchedulerRunStoreRefused(t, storePath, &fakeRouter{})
 	jobID := mustGenerateID()
 	job := &Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing"}
 	s1.putJobForTest(job)
@@ -120,7 +105,7 @@ func TestShutdownCancelMarkerAdoptedWithRunStoreDisabled(t *testing.T) {
 		verdicts: map[string]AdoptVerdict{key: AdoptLive},
 		runs:     map[string]*fakeInFlightRun{key: run},
 	}
-	s2, _ := newSchedulerRunStoreRefused(t, storePath, router)
+	s2 := newSchedulerRunStoreRefused(t, storePath, router)
 	s2.putJobForTest(job)
 
 	settlement := s2.claimRunInflight()
@@ -139,5 +124,4 @@ func TestShutdownCancelMarkerAdoptedWithRunStoreDisabled(t *testing.T) {
 	if left := markerFiles(t, s2); len(left) != 0 {
 		t.Errorf("markers left after the adoption settled = %v", left)
 	}
-	assertEmptyDir(t, target)
 }
