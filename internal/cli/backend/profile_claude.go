@@ -1,10 +1,13 @@
 package backend
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // claudeProfile returns the Profile describing Anthropic's claude-code CLI
@@ -36,6 +39,8 @@ func claudeProfile() Profile {
 			}
 			return claudefs.SessionJSONL(claudeDir, workspace, sessionID)
 		},
+		// claude --resume restores the transcript's last cost-state line.
+		ResumedCost: claudeResumedCost,
 		TerminalLabel: func(entrypoint string) string {
 			if entrypoint == "claude-vscode" {
 				return "Claude VS Extension"
@@ -55,4 +60,19 @@ func claudeProfile() Profile {
 			"mcp_sse":          true,
 		},
 	}
+}
+
+// claudeResumedCost reads the cost-state line `claude --resume` restores.
+func claudeResumedCost(target, sessionID string) (float64, map[string]clievent.ModelUsage, bool, error) {
+	st, found, err := claudefs.LastCostState(target, sessionID)
+	if err != nil || !found {
+		return 0, nil, found, err
+	}
+	var models map[string]clievent.ModelUsage
+	if len(st.ModelUsage) > 0 && string(st.ModelUsage) != "null" {
+		if err := json.Unmarshal(st.ModelUsage, &models); err != nil {
+			return 0, nil, false, fmt.Errorf("decode cost-state modelUsage: %w", err)
+		}
+	}
+	return st.TotalCostUSD, models, true, nil
 }

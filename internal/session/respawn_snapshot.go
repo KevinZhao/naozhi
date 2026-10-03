@@ -33,10 +33,10 @@ func snapshotOldSession(_ sessView, old *ManagedSession) ([]string, float64, flo
 	// position; installFreshSession stamps now when zero.
 	oldCreatedAt := old.createdAt.Load()
 	// costSpent MUST carry across the replacement (same logical session).
-	// lastCumulativeCost is deliberately NOT carried: the new CLI re-counts
-	// from ~0, so the baseline must restart at 0 (see TurnCostDelta). Known
-	// bounded loss: a turn still in flight on the OLD process lands its delta
-	// on the orphaned struct; cost is advisory, not billing-authoritative (#2284).
+	// lastCumulativeCost is NOT carried: the new CLI counts from 0, or from the
+	// cost-state a resume restores (resumed_cost.go). Known bounded loss: a turn
+	// still in flight on the OLD process lands its delta on the orphaned struct;
+	// cost is advisory, not billing-authoritative (#2284).
 	oldCostSpent := loadTotalCost(&old.costSpent)
 	// Overrides are snapshotted HERE, in the same transaction, from the same
 	// object as history/cost/createdAt. installFreshSession must not re-read
