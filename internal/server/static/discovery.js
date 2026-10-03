@@ -8,6 +8,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList, timers, transcript } from './state.js';
 import { esc, fetchJSON } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
+import { discoveredKey } from './session_ident.js';
 
 const deps = {
   EVENT_DIVIDER_GAP_MS: null,
@@ -38,28 +39,6 @@ export function configureDiscovery(impl) {
 }
 
 /* ===== Discovery & Takeover ===== */
-
-// Discovered-card identity is (pid, node): pids repeat across nodes, so every
-// key/lookup/removal goes through these helpers (#2431). Key shape is
-// '_discovered:<pid>:<node>' — pid stays in slot 1 for parseDiscoveredPid.
-function discoveredKey(pid, node) {
-  return '_discovered:' + pid + ':' + (node || 'local');
-}
-function isDiscoveredKey(key) {
-  return typeof key === 'string' && key.startsWith('_discovered:');
-}
-function parseDiscoveredPid(key) {
-  return parseInt(key.split(':')[1], 10);
-}
-function sameDiscovered(d, pid, node) {
-  return d.pid === pid && (d.node || 'local') === (node || 'local');
-}
-function findDiscovered(pid, node) {
-  return sessionList.discoveredItems.find(d => sameDiscovered(d, pid, node)) || null;
-}
-function dropDiscovered(pid, node) {
-  sessionList.discoveredItems = sessionList.discoveredItems.filter(d => !sameDiscovered(d, pid, node));
-}
 
 async function scanDiscovered() {
   try {
@@ -241,12 +220,6 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, typeL
 }
 
 export {
-  discoveredKey,
-  dropDiscovered,
-  findDiscovered,
-  isDiscoveredKey,
-  parseDiscoveredPid,
   previewDiscovered,
-  sameDiscovered,
   scanDiscovered,
 };

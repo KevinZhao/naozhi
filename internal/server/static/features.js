@@ -1,10 +1,10 @@
 // features.js — backend feature-flag lookups (Multi-Backend RFC §8.2/§8.3).
-// A leaf: no DOM access, no load-time side effects. Reads serverInfo,
-// selection and sessionList from state.js, and sid from file_refs.js (the
-// no-cycle gate verifies file_refs.js does not import this back). Extracted
-// from dashboard.js (S19-P, #3025, ruling D1: lands here, not auth_modal.js).
+// A leaf (caps.leaves): no DOM access, no load-time side effects. Reads
+// serverInfo, selection and sessionList from state.js, and sid from
+// session_ident.js. Extracted from dashboard.js (S19-P, #3025, ruling D1:
+// lands here, not auth_modal.js).
 import { serverInfo, selection, sessionList } from './state.js';
-import { sid } from './file_refs.js';
+import { sid } from './session_ident.js';
 
 // featureForBackend resolves a backend feature flag. Missing/unknown
 // backend/no cache yet all default to false (spec: "missing key == false").

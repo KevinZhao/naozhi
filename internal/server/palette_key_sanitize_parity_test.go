@@ -25,20 +25,32 @@ import (
 // skip when node is not on PATH. The static contract tests always run.
 
 // extractJSFunction returns the source of a top-level `function name(` up to
-// and including its closing `}` at column 0.
+// and including its closing `}` at column 0. An `export function name(`
+// declaration is found too and returned without the `export `, so a helper
+// that moves into an inline-export module stays runnable as a plain script.
 func extractJSFunction(t *testing.T, js, name string) string {
 	t.Helper()
-	marker := "\nfunction " + name + "("
-	i := strings.Index(js, marker)
+	i := jsFunctionStart(js, name)
 	if i < 0 {
 		t.Fatalf("dashboard.js: function %s not found", name)
 	}
-	rest := js[i+1:]
+	rest := js[i:]
 	end := strings.Index(rest, "\n}\n")
 	if end < 0 {
 		t.Fatalf("dashboard.js: function %s has no column-0 closing brace", name)
 	}
 	return rest[:end+2] + "\n"
+}
+
+// jsFunctionStart is the offset of the `function name(` that opens a top-level
+// declaration of name, exported or not; -1 when there is none.
+func jsFunctionStart(js, name string) int {
+	for _, prefix := range []string{"\nfunction ", "\nexport function "} {
+		if i := strings.Index(js, prefix+name+"("); i >= 0 {
+			return i + len(prefix) - len("function ")
+		}
+	}
+	return -1
 }
 
 // runNode executes script with node and returns its stdout. Skips when node

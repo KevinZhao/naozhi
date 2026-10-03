@@ -2,7 +2,7 @@
 // merge with pending (not yet sent) sessions, the cards and badges, the status
 // bar, the node helpers, and the WS state, subscription and session_state frames.
 import { NZ_CONTRACT } from './contract.js';
-import { getToken, lsGet, lsSet } from './platform.js';
+import { getToken, lsGet } from './platform.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { perSession, selection, serverInfo, sessionList, timers, transcript } from './state.js';
@@ -10,15 +10,16 @@ import { esc, escAttr, fetchJSON, patchCardExitChip, reconcileChildren, sessionE
 import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { deselectNodeSession, reconcileSelectedNode } from './system_view.js';
 import { turnState } from './running_banner.js';
-import { isMultiNode, nodeColor, setActiveSessionCard, sid } from './file_refs.js';
-import { announce, formatAbsTime, renderRecentSessionsPanel, timeAgo } from './utilities.js';
-import { discoveredKey, scanDiscovered } from './discovery.js';
+import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, renderRecentSessionsPanel, setActiveSessionCard, timeAgo } from './utilities.js';
+import { scanDiscovered } from './discovery.js';
 import { invalidateGitState } from './tuning.js';
-import { ICONS, sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
+import { sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
 import { accessProfileChipHtml, backendDisplayName, backendDisplayVersion, showAuthModal } from './auth_modal.js';
 import { updateSendButton } from './msg_nav.js';
 import { _optimisticRunningTimers } from './send_message.js';
 import { fetchEvents } from './event_stream.js';
+import { discoveredKey, getNodeDisplayName, isMultiNode, matchProject, nodeColor, sessionTypeTag, sid } from './session_ident.js';
+import { ICONS } from './icons.js';
 
 // collectWorkspaceSessionIDs returns the set of Claude session UUIDs that the
 // sidebar already represents — current session_id PLUS any prev_session_ids
@@ -41,34 +42,6 @@ export function collectWorkspaceSessionIDs(sessions) {
 }
 
 
-// Pending-session persistence (#cwd-fallback fix). The three pending maps
-// (sessionWorkspaces/sessionNodes/sessionBackends) used to live ONLY in JS
-// memory, so a page reload before the first send dropped the chosen workspace.
-// The next send then carried no `workspace`, the backend never wrote a
-// per-chat override (send.go gates SetWorkspace on a non-empty workspace), and
-// the spawn fell through to defaultCWD = workspace root — the session landed in
-// the wrong directory. We mirror the maps into localStorage so a reload (or
-// even a never-sent session) rehydrates the workspace and the first send still
-// carries it. This only re-hydrates state the user authored in THIS browser —
-// no fuzzy cross-session guessing (the semantics #1567 deliberately removed).
-const PENDING_LS_KEY = 'pending_sessions';
-const PENDING_LS_MAX = 64; // bound localStorage size — far above realistic un-sent backlog
-
-// persistPending snapshots the in-memory pending maps to localStorage. Called
-// after every mutation of the three maps. lsSet swallows quota/disabled errors.
-export function persistPending() {
-  const keys = Object.keys(perSession.workspaces).slice(0, PENDING_LS_MAX);
-  const obj = {};
-  for (const k of keys) {
-    const entry = { ws: perSession.workspaces[k] };
-    if (perSession.nodes[k] && perSession.nodes[k] !== 'local') entry.node = perSession.nodes[k];
-    if (perSession.backends[k]) entry.backend = perSession.backends[k];
-    if (perSession.accessProfiles[k]) entry.access_profile = perSession.accessProfiles[k];
-    obj[k] = entry;
-  }
-  lsSet(PENDING_LS_KEY, obj);
-}
-
 // restorePending rehydrates the in-memory pending maps from localStorage at
 // boot, BEFORE the first fetchSessions/send. Idempotent via _pendingRestored
 // (multiple DOMContentLoaded listeners exist). Every entry is shape-validated:
@@ -88,37 +61,6 @@ export function restorePending() {
     if (v.backend) perSession.backends[k] = v.backend;
     if (typeof v.access_profile === 'string' && v.access_profile) perSession.accessProfiles[k] = v.access_profile;
   }
-}
-
-// eagerBindWorkspace tells the backend the chosen workspace the moment a
-// session is created, instead of waiting for the first send to carry it. This
-// writes the per-chat override eagerly (server-side validateWorkspace +
-// SetWorkspace), so even a session opened in another browser/device — or one
-// reloaded before its first send — spawns into the right directory. Local
-// nodes only: remote sessions resolve their workspace on their own node.
-// Fire-and-forget — never blocks or fails the creation flow: localStorage /
-// network errors are swallowed rather than aborting session creation.
-export function eagerBindWorkspace(key, workspace, node) {
-  if (!key || !workspace) return;
-  const nd = node || 'local';
-  if (nd !== 'local') return;
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
-    fetch(NZ_CONTRACT.API.sessions_bind, {
-      method: 'POST', headers,
-      body: JSON.stringify({ key: key, node: nd, workspace: workspace }),
-    }).catch(() => {});
-  } catch (_) { /* never break creation over a bind */ }
-}
-
-export function removePendingSession(key) {
-  delete perSession.workspaces[key];
-  delete perSession.nodes[key];
-  delete perSession.backends[key];
-  delete perSession.accessProfiles[key];
-  persistPending();
 }
 
 // fetchSessionsPayload GETs /api/sessions. null is a failed poll the caller
@@ -516,37 +458,6 @@ function sidebarHtml(items) {
   return html;
 }
 
-// projectDisplayLabel returns the operator-facing name for a project,
-// preferring the explicit ProjectConfig.display_name override (R110-P2 /
-// #448) and falling back to the directory-derived `p.name` so projects
-// without a configured display_name keep their existing UI label.
-//
-// Pure: returns a string, no escaping. Callers MUST run the result
-// through esc() / escAttr() before injecting it into HTML — same
-// contract as `p.name`. Truthy guards on both fields tolerate the
-// pre-config case (`p.config` undefined on legacy /api/projects shapes
-// or remote-merge entries that the cache layer hasn't yet stamped).
-export function projectDisplayLabel(p) {
-  if (!p) return '';
-  const cfg = p.config || {};
-  const dn = (cfg.display_name || '').trim();
-  if (dn) return dn;
-  return p.name || '';
-}
-
-// projectDisplayPrefix renders the optional emoji in front of the name.
-// Returns "" when the project has no emoji configured. The trailing
-// space lives inside the returned string so callers can simply
-// concatenate prefix + label without conditional whitespace.
-export function projectDisplayPrefix(p) {
-  if (!p) return '';
-  const cfg = p.config || {};
-  const em = (cfg.emoji || '').trim();
-  if (!em) return '';
-  return em + ' ';
-}
-
-// Match a workspace path to a project from projectsData (longest prefix wins)
 // workspaceFallbackName mirrors internal/dashboard/session/handlers.go's
 // workspaceFallbackName: the folder basename used as a sidebar group label
 // when the workspace is not a registered project. '' for empty, "/" and ".".
@@ -556,23 +467,6 @@ function workspaceFallbackName(ws) {
   if (!trimmed) return '';
   const base = trimmed.slice(trimmed.lastIndexOf('/') + 1);
   return (!base || base === '.') ? '' : base;
-}
-
-export function matchProject(workspace) {
-  if (!workspace || !sessionList.projectsData || sessionList.projectsData.length === 0) return '';
-  const ws = workspace.endsWith('/') ? workspace : workspace + '/';
-  let best = '', bestLen = 0;
-  for (const p of sessionList.projectsData) {
-    const prefix = p.path.endsWith('/') ? p.path : p.path + '/';
-    if (ws.startsWith(prefix) && p.path.length > bestLen) {
-      best = p.name; bestLen = p.path.length;
-    }
-  }
-  return best;
-}
-
-export function sessionTypeTag(label) {
-  return '<span class="sc-type-tag">' + esc(label || 'CLI') + '</span>';
 }
 
 // PLATFORM_ORIGINS maps the first component of a session key (the platform
@@ -921,16 +815,6 @@ export function updateStatusBar() {
 // Single-node setups (local only, or one remote only) hide the whole thing —
 // there is nothing to choose between.
 
-// getNodeDisplayName returns the human label for a node id. Falls back to the
-// raw id for remotes whose display_name the server hasn't populated yet, and
-// uses a Chinese '本地' for 'local' to match the rest of the UI.
-export function getNodeDisplayName(id) {
-  if (!id || id === 'local') return '本地';
-  const nd = sessionList.nodesData[id];
-  if (nd && nd.display_name) return nd.display_name;
-  return id;
-}
-
 // getNodeStatus returns a normalized status key (ok/connecting/offline/
 // unreachable/error) for a node. 'local' tracks the WS state machine; remotes
 // read from the server-side node health snapshot. Falls back to 'offline' when
@@ -944,18 +828,6 @@ export function getNodeStatus(id) {
   const nd = sessionList.nodesData[id];
   if (!nd) return 'offline';
   return nd.status || 'offline';
-}
-
-// statusLabelForNode maps a normalized status to a short Chinese/English label
-// used inside the trigger and each dropdown row.
-export function statusLabelForNode(status) {
-  const m = {
-    ok: 'connected', connected: 'connected',
-    connecting: 'connecting', authenticating: 'authenticating',
-    offline: 'offline', unreachable: 'unreachable',
-    error: 'error', disconnected: 'disconnected',
-  };
-  return m[status] || status;
 }
 
 /* ===== WebSocket state: status bar, fallback pollers, announcements ===== */

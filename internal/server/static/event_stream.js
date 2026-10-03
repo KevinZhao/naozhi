@@ -7,14 +7,15 @@ import { INITIAL_HISTORY_LIMIT, sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { hooks, perSession, selection, sessionList, transcript } from './state.js';
 import { fetchJSON, nzViews, showToast } from './nz_util.js';
-import { eventAlreadyRendered, eventHtml, isInternalEvent, lastDividerTime, leadingTimeDivider, removeOptimisticMsg, renderEventsWithDividers } from './event_render.js';
+import { eventAlreadyRendered, eventHtml, leadingTimeDivider, removeOptimisticMsg, renderEventsWithDividers } from './event_render.js';
 import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.js';
 import { runPendingAsync } from './render_md.js';
-import { processEventsForDisplay, sid } from './file_refs.js';
+import { processEventsForDisplay } from './file_refs.js';
 import { navRebuild, navSync, updateSendButton } from './msg_nav.js';
-import { applyEventToTurnState, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, scrollSlackPx, stickEventsBottom, turnState } from './running_banner.js';
+import { applyEventToTurnState, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, scrollSlackPx, turnState } from './running_banner.js';
 import { rollbackOptimisticRunning } from './send_message.js';
-import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, showAPIError, timeDividerHtml } from './utilities.js';
+import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
+import { isInternalEvent, sid } from './session_ident.js';
 
 export async function fetchEvents(full) {
   if (!selection.key) return;

@@ -8,6 +8,7 @@
 import { selection } from './state.js';
 import { esc, showToast } from './nz_util.js';
 import { splitDock } from './split_view.js';
+import { isMobile, mobileQuery } from './utilities.js';
 
 const deps = {
   ICONS: null,
@@ -28,27 +29,14 @@ export function configureMobileNav(impl) {
 
 /* ===== Mobile Navigation ===== */
 
-const mobileQuery = window.matchMedia('(max-width:768px)');
-function isMobile() { return mobileQuery.matches; }
-
 // Re-initialise when crossing the 768px breakpoint (e.g. orientation change)
-mobileQuery.addEventListener('change', e => {
+mobileQuery().addEventListener('change', e => {
   if (!e.matches) {
     document.body.classList.remove('mobile-list-view', 'mobile-chat-view');
   } else {
     initMobile();
   }
 });
-
-function mobileEnterChat() {
-  if (!isMobile()) return;
-  // #2431: switching sessions while already in chat view must not stack
-  // another entry — replace ours so a single back press leaves chat.
-  if (history.state && history.state.view === 'chat') history.replaceState({ view: 'chat' }, '');
-  else history.pushState({ view: 'chat' }, '');
-  document.body.classList.remove('mobile-list-view');
-  document.body.classList.add('mobile-chat-view');
-}
 
 function mobileShowList() {
   document.body.classList.remove('mobile-chat-view');
@@ -560,9 +548,7 @@ export {
   initSwipeBack,
   initSwipeDelete,
   initViewportTracking,
-  isMobile,
   mobileBack,
-  mobileEnterChat,
   mobileShowList,
   restoreSidebarAfterDrawer,
   toggleSidebarCollapsed,

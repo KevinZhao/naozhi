@@ -438,36 +438,6 @@ function restoreScrollPos(key, node) {
 //   - WS push assistant_chunk      → maybeStickBottom (only if at bottom)
 //   - WS push result event         → maybeStickBottom (only if at bottom)
 const scrollSlackPx = 80;
-// stickEventsBottom forces the events pane to the last bubble and keeps it there
-// across the async layout tail — lazy-loaded images, mermaid diagrams, katex
-// formulas, and the "load earlier" button that inserts at the top after the
-// initial scrollTop assignment all change scrollHeight after the first paint.
-// Used by session-open flows where losing the bottom anchor would hide the
-// newest messages (the whole point of opening the session).
-function stickEventsBottom() {
-  const el = document.getElementById('events-scroll');
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
-  requestAnimationFrame(() => {
-    el.scrollTop = el.scrollHeight;
-    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-  });
-  // Re-stick after each lazy-loaded image, but only while the user hasn't
-  // scrolled away from the bottom. Without this guard, a session opened
-  // seconds ago whose images are still loading will yank the viewport back
-  // to the bottom the moment any image finishes — even if the user has
-  // since scrolled up to read history (common on mobile/slow networks).
-  el.querySelectorAll('img').forEach(img => {
-    if (img.complete) return;
-    const restick = () => {
-      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 30) {
-        el.scrollTop = el.scrollHeight;
-      }
-    };
-    img.addEventListener('load', restick, { once: true });
-    img.addEventListener('error', restick, { once: true });
-  });
-}
 
 
 export {
@@ -482,7 +452,6 @@ export {
   saveScrollPos,
   scrollSlackPx,
   startTurnTimer,
-  stickEventsBottom,
   turnState,
 };
 

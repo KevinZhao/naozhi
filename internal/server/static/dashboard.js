@@ -4,8 +4,7 @@ import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { composer, hooks, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml } from './nz_util.js';
-import { featureForBackend } from './features.js';
-import { eventHtml, isInternalEvent, lastDividerTime, renderEventsWithDividers } from './event_render.js';
+import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
 import { fetchEvents, renderEvents } from './event_stream.js';
 import {
@@ -16,9 +15,7 @@ import {
   renderRich,
   runPendingAsync,
 } from './render_md.js';
-import { configureSelfUpdate } from './self_update.js';
 import {
-  configureSessionHeader,
   fetchSessionRuns,
   gitChipHtml,
   gitStateCache,
@@ -29,7 +26,6 @@ import {
 } from './session_header.js';
 import {
   awaitPendingOrients,
-  configureComposerFiles,
   handleFiles,
   onThumbDragEnd,
   onThumbDragLeave,
@@ -49,9 +45,7 @@ import {
   initSwipeBack,
   initSwipeDelete,
   initViewportTracking,
-  isMobile,
   mobileBack,
-  mobileEnterChat,
   restoreSidebarAfterDrawer,
   toggleSidebarCollapsed,
 } from './mobile_nav.js';import {
@@ -62,7 +56,7 @@ import {
   voiceTouchStart,
 } from './voice.js';
 import {
-  configureSplitView,
+  initSplitWidth,
   splitDock,
 } from './split_view.js';
 import {
@@ -79,7 +73,6 @@ import {
   resetTurnState,
   saveScrollPos,
   startTurnTimer,
-  stickEventsBottom,
 } from './running_banner.js';
 import {
   FILE_REF_HAS_EXT,
@@ -87,50 +80,53 @@ import {
   configureFileRefs,
   fencedPathList,
   fileRefCode,
-  formatFileSize,
   isFileRefCandidate,
-  isMultiNode,
-  nodeColor,
   processEventsForDisplay,
   regroupAvatars,
-  setActiveSessionCard,
-  sid,
   splitPathLine,
   startFileRefObserver,
 } from './file_refs.js';
 import {
   AVATAR_GROUP_GAP_MS,
   EVENT_DIVIDER_GAP_MS,
+  applyFeatureGates,
+  closeHistoryPopover,
   configureUtilities,
   confirmDialog,
   copyCodeBlock,
   copyEventContent,
   decodeEscEntities,
+  eagerBindWorkspace,
   formatAbsTime,
+  getMsgValue,
   historyDayLabel,
+  isMobile,
+  lastDividerTime,
   mainEmptyHtml,
+  mobileEnterChat,
+  persistPending,
   promptDialog,
   reconnectNow,
   refreshCostSummary,
+  removePendingSession,
+  removeSidebarCard,
   renderServiceOverviewHtml,
   safeUrl,
+  setActiveSessionCard,
+  setMsgValue,
   shortPath,
   showAPIError,
   showNetworkError,
   startSidebarTimeTick,
+  stickEventsBottom,
+  stopPreviewPolling,
   stopSidebarTimeTick,
   timeAgo,
   timeDividerHtml,
 } from './utilities.js';
 import {
   configureDiscovery,
-  discoveredKey,
-  dropDiscovered,
-  findDiscovered,
-  isDiscoveredKey,
-  parseDiscoveredPid,
   previewDiscovered,
-  sameDiscovered,
   scanDiscovered,
 } from './discovery.js';
 import {
@@ -139,7 +135,6 @@ import {
   fetchGitState,
   invalidateGitState,
   openTuningPopover,
-  removeSidebarCard,
   renameSession,
   repaintGitChip,
 } from './tuning.js';
@@ -152,7 +147,6 @@ import {
   updateSendButton,
 } from './msg_nav.js';
 import {
-  ICONS,
   configureSidebarProject,
   openProjectSettings,
   showGitRemote,
@@ -179,12 +173,12 @@ import {
 } from './auth_modal.js';
 import {
   configureSendMessage,
-  getMsgValue,
   handleKey,
   sendMessage,
-  setMsgValue,
 } from './send_message.js';
-import { collectWorkspaceSessionIDs, debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, matchProject, onSessionsApplied, originBadgeHtml, persistPending, projectDisplayLabel, projectDisplayPrefix, removePendingSession, renderSidebar, restorePending, sessionTypeTag, statusLabelForNode, updateCardUnreadChip, updateMainState, updateStatusBar } from './session_list.js';
+import { collectWorkspaceSessionIDs, debouncedFetchSessions, fetchSessions, getNodeStatus, onSessionsApplied, originBadgeHtml, renderSidebar, restorePending, updateCardUnreadChip, updateMainState, updateStatusBar } from './session_list.js';
+import { discoveredKey, dropDiscovered, findDiscovered, getNodeDisplayName, isDiscoveredKey, isInternalEvent, isMultiNode, matchProject, nodeColor, parseDiscoveredPid, projectDisplayLabel, projectDisplayPrefix, sameDiscovered, sessionTypeTag, sid, statusLabelForNode } from './session_ident.js';
+import { ICONS } from './icons.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
@@ -445,11 +439,6 @@ onSessionsApplied(() => { if (selection.key) updateHeaderCLI(); });
 // --- History Popover ---
 
 
-function closeHistoryPopover() {
-  if (ui.activePopoverBackdrop) { ui.activePopoverBackdrop.remove(); ui.activePopoverBackdrop = null; }
-  if (ui.activePopover) { ui.activePopover.remove(); ui.activePopover = null; }
-}
-
 document.addEventListener('click', function(e) {
   if (ui.activePopover && !ui.activePopover.contains(e.target) && !e.target.closest('#btn-history')) {
     closeHistoryPopover();
@@ -622,86 +611,6 @@ function applyHistoryFilter(merged, query) {
       '</div>' +
       '</div>';
   }).join('');
-}
-
-// applyFeatureGates updates the input-area controls to reflect the
-// active session's backend features. Called after every renderMainShell
-// / selectSession / cliBackends fetch — cheap, just toggles aria + class.
-// Multi-Backend RFC §8.3 D9 / D11-D15.
-//
-// Important: NEVER silently disable. Per RFC §8.7: "all gated controls
-// must have a hover/aria tooltip explaining why" — the title attribute
-// carries the operator-readable reason.
-function applyFeatureGates() {
-  if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return;
-  if (serverInfo.cliBackends.backends.length <= 1) return; // single-backend mode
-
-  const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
-  const backendID = sess.backend || serverInfo.cliBackends.default || '';
-  const backendName = (() => {
-    const e = serverInfo.cliBackends.backends.find(b => b && b.id === backendID);
-    return (e && (e.display_name || e.id)) || backendID || 'this backend';
-  })();
-
-  // D14 image_input: file picker accepts both images + PDF; if image is
-  // disabled but PDF still works, leave the button enabled — most kiro
-  // deployments support image so this branch rarely hits in practice.
-  // Audio is governed separately (D15) by the voice button.
-  const imageOK = featureForBackend(backendID, 'image_input');
-  const filePickBtn = document.querySelector('button[data-action="file-picker"]');
-  if (filePickBtn) {
-    if (!imageOK) {
-      filePickBtn.classList.add('feat-disabled');
-      filePickBtn.title = '当前后端 (' + backendName + ') 不支持图片上传';
-      filePickBtn.setAttribute('aria-disabled', 'true');
-      // Review #118 HIGH-1: rely on the native disabled property as the
-      // hard gate, not just CSS — `cursor:not-allowed` is cosmetic and
-      // a keyboard activation (Enter/Space on focus) would still fire
-      // onclick. Browsers skip click events on disabled buttons entirely,
-      // and `applyFeatureGates` is the single re-entry point so the
-      // pair stays in sync.
-      filePickBtn.disabled = true;
-    } else {
-      filePickBtn.classList.remove('feat-disabled');
-      filePickBtn.title = '上传图片或 PDF';
-      filePickBtn.removeAttribute('aria-disabled');
-      filePickBtn.disabled = false;
-    }
-  }
-
-  // D15 audio_input: kiro acp 申报 audio:false 但 naozhi 后端会先转写
-  // 再喂 prompt — 所以这里**不真正 disable**，只把 tooltip 改成提示性
-  // 文案，让用户知道音频会经过转写阶段。
-  const audioOK = featureForBackend(backendID, 'audio_input');
-  const micBtn = document.getElementById('btn-mic');
-  const holdBtn = document.getElementById('btn-hold-talk');
-  // Review #118 HIGH-2: when audio is supported again (e.g. user switches
-  // from kiro back to claude in the same browser session), we MUST reset
-  // titles to their template defaults — otherwise the kiro-era hint
-  // ("会先转写为文字") sticks forever. Default titles mirror
-  // renderMainShell template (line ~2152 / ~2154).
-  const micDefaultTitle = composer.voiceInputMode ? '切换键盘' : '切换语音';
-  const holdDefaultTitle = '按住说话改录音';
-  if (!audioOK) {
-    const audioHint = '当前后端 (' + backendName + ') 不直接接收音频，naozhi 会先转写为文字再发送';
-    if (micBtn) {
-      micBtn.classList.add('feat-degraded');
-      micBtn.title = audioHint;
-    }
-    if (holdBtn) {
-      holdBtn.classList.add('feat-degraded');
-      holdBtn.title = audioHint;
-    }
-  } else {
-    if (micBtn) {
-      micBtn.classList.remove('feat-degraded');
-      micBtn.title = micDefaultTitle;
-    }
-    if (holdBtn) {
-      holdBtn.classList.remove('feat-degraded');
-      holdBtn.title = holdDefaultTitle;
-    }
-  }
 }
 
 // Keyboard activation for role=listitem session cards.
@@ -1576,17 +1485,6 @@ function updateHeaderCLI() {
   }
 }
 
-function stopPreviewPolling() {
-  if (timers.preview) { clearInterval(timers.preview); timers.preview = null; }
-  transcript.previewEventCount = 0;
-  // Invalidate any in-flight previewDiscovered(): every caller of this
-  // function (selectSession, the createSession paths, a newer preview) is
-  // moving the operator off the discovered panel, so a preview fetch that
-  // resolves afterwards must neither paint into the now-managed
-  // #events-scroll nor re-arm previewTimer.
-  transcript.previewGen++;
-}
-
 /* ===== Cron Tab =====
    The cron (定时任务) view lives in cron_view.js and the modules it imports
    (cron_live.js owns the live stream). They import this file, never the
@@ -1732,14 +1630,11 @@ configureSidebarProject({ accessProfileChipInfo, debouncedFetchSessions, fetchAc
 configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions, escCloseVoiceOverlay, handleFiles, refreshBanner, resetTurnState, selectSession, sid });
 configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput });
 configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml });
-configureUtilities({ getToken, renderSystemView });
+configureUtilities({ renderSystemView });
 configureFileRefs({ AVATAR_GROUP_GAP_MS, ICONS, collapseSidebarForDrawer, getToken, isInternalEvent, loadKatex, loadMermaid, matchProject, renderRich, restoreSidebarAfterDrawer, runPendingAsync });
 configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid });
 configureSystemView({ formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, setActivityView, timeAgo, wireQuickAskInput });
-configureSplitView({ lsGet, lsRemove, lsSet, stickEventsBottom });
-configureSelfUpdate({ confirmDialog });
-configureSessionHeader({ formatAbsTime, getToken, sid });
-configureComposerFiles({ ICONS, formatFileSize, getToken, showAuthModal });
+initSplitWidth();
 configureMobileNav({ ICONS, dismissSession, lsGet, lsSet, renameSession, selectSession });
 configureVoice({ ICONS, getMsgValue, getToken, sendMessage, setMsgValue, sid, updateSendButton });
 configureRenderMd({
@@ -3084,4 +2979,4 @@ registerActions({
 });
 
 // Read by the e2e suite through test/e2e/e2e-shim.js.
-export { applyFeatureGates, closeHistoryPopover, maybeShowOnboarding, renderMainShell, selectSession, sessionCardKey, toggleHistory, updateHeaderCLI };
+export { maybeShowOnboarding, renderMainShell, selectSession, sessionCardKey, toggleHistory, updateHeaderCLI };

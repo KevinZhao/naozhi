@@ -12,6 +12,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, isCronSessionKey, showToast } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
+import { removeSidebarCard } from './utilities.js';
 
 const deps = {
   debouncedFetchSessions: null,
@@ -314,17 +315,6 @@ function invalidateGitState(key, node) {
   if (key === selection.key) fetchGitState(key, node || 'local');
 }
 
-// removeSidebarCard drops a session card from the DOM without waiting for
-// the next renderSidebar. The next render reconciles against the DOM, so a
-// card whose removal the server refused (a failed DELETE re-fetches the list)
-// comes back.
-function removeSidebarCard(key) {
-  // Escape like setActiveSessionCard: discovered keys embed the node name, so
-  // a `"` or `\` would otherwise make querySelector throw mid-takeover/dismiss.
-  const card = document.querySelector('.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
-  if (card) card.remove();
-}
-
 // clearMainIfSelected empties the main panel when the dismissed session is
 // the one on screen.
 function clearMainIfSelected(key) {
@@ -519,7 +509,6 @@ export {
   fetchGitState,
   invalidateGitState,
   openTuningPopover,
-  removeSidebarCard,
   renameSession,
   repaintGitChip,
 };

@@ -1,6 +1,6 @@
 {
   "agent_view.js": {
-    "lines": 728,
+    "lines": 726,
     "maxFnLines": 66,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -44,11 +44,11 @@
     "lateBindings": 0
   },
   "composer_files.js": {
-    "lines": 467,
+    "lines": 458,
     "maxFnLines": 65,
     "fnOver100": 0,
     "topLevelLetVar": 2,
-    "configureDeps": 4,
+    "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 1,
     "htmlInsert": 0,
@@ -132,7 +132,7 @@
     "lateBindings": 0
   },
   "cron_view.js": {
-    "lines": 2602,
+    "lines": 2604,
     "maxFnLines": 103,
     "fnOver100": 1,
     "topLevelLetVar": 11,
@@ -143,7 +143,7 @@
     "lateBindings": 3
   },
   "dashboard.js": {
-    "lines": 3087,
+    "lines": 2982,
     "maxFnLines": 120,
     "fnOver100": 1,
     "topLevelLetVar": 0,
@@ -154,7 +154,7 @@
     "lateBindings": 5
   },
   "discovery.js": {
-    "lines": 252,
+    "lines": 225,
     "maxFnLines": 72,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -165,7 +165,7 @@
     "lateBindings": 0
   },
   "event_render.js": {
-    "lines": 420,
+    "lines": 390,
     "maxFnLines": 41,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -176,7 +176,7 @@
     "lateBindings": 0
   },
   "event_stream.js": {
-    "lines": 902,
+    "lines": 903,
     "maxFnLines": 74,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -198,10 +198,10 @@
     "lateBindings": 0
   },
   "file_refs.js": {
-    "lines": 922,
+    "lines": 862,
     "maxFnLines": 61,
     "fnOver100": 0,
-    "topLevelLetVar": 6,
+    "topLevelLetVar": 5,
     "configureDeps": 11,
     "deadInjections": 0,
     "innerHTMLAssign": 9,
@@ -209,7 +209,7 @@
     "lateBindings": 0
   },
   "files_view.js": {
-    "lines": 440,
+    "lines": 441,
     "maxFnLines": 59,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -219,8 +219,19 @@
     "htmlInsert": 0,
     "lateBindings": 2
   },
+  "icons.js": {
+    "lines": 54,
+    "maxFnLines": 0,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 0,
+    "htmlInsert": 0,
+    "lateBindings": 0
+  },
   "mobile_nav.js": {
-    "lines": 570,
+    "lines": 556,
     "maxFnLines": 118,
     "fnOver100": 1,
     "topLevelLetVar": 3,
@@ -275,7 +286,7 @@
     "lateBindings": 0
   },
   "running_banner.js": {
-    "lines": 488,
+    "lines": 457,
     "maxFnLines": 95,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -286,18 +297,18 @@
     "lateBindings": 0
   },
   "self_update.js": {
-    "lines": 373,
+    "lines": 363,
     "maxFnLines": 61,
     "fnOver100": 0,
     "topLevelLetVar": 5,
-    "configureDeps": 1,
+    "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 1,
     "htmlInsert": 0,
     "lateBindings": 0
   },
   "send_message.js": {
-    "lines": 593,
+    "lines": 590,
     "maxFnLines": 102,
     "fnOver100": 1,
     "topLevelLetVar": 1,
@@ -308,18 +319,29 @@
     "lateBindings": 0
   },
   "session_header.js": {
-    "lines": 410,
+    "lines": 400,
     "maxFnLines": 33,
     "fnOver100": 0,
     "topLevelLetVar": 0,
-    "configureDeps": 3,
+    "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 7,
     "htmlInsert": 0,
     "lateBindings": 0
   },
+  "session_ident.js": {
+    "lines": 127,
+    "maxFnLines": 12,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 0,
+    "htmlInsert": 0,
+    "lateBindings": 0
+  },
   "session_list.js": {
-    "lines": 1263,
+    "lines": 1135,
     "maxFnLines": 100,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -341,7 +363,7 @@
     "lateBindings": 0
   },
   "sidebar_project.js": {
-    "lines": 596,
+    "lines": 544,
     "maxFnLines": 102,
     "fnOver100": 2,
     "topLevelLetVar": 0,
@@ -352,18 +374,18 @@
     "lateBindings": 0
   },
   "split_view.js": {
-    "lines": 210,
+    "lines": 190,
     "maxFnLines": 43,
     "fnOver100": 0,
     "topLevelLetVar": 0,
-    "configureDeps": 4,
+    "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 0,
     "htmlInsert": 0,
     "lateBindings": 0
   },
   "state.js": {
-    "lines": 276,
+    "lines": 272,
     "maxFnLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -385,7 +407,7 @@
     "lateBindings": 0
   },
   "tuning.js": {
-    "lines": 525,
+    "lines": 514,
     "maxFnLines": 112,
     "fnOver100": 1,
     "topLevelLetVar": 1,
@@ -396,11 +418,11 @@
     "lateBindings": 0
   },
   "utilities.js": {
-    "lines": 1087,
+    "lines": 1363,
     "maxFnLines": 91,
     "fnOver100": 0,
     "topLevelLetVar": 4,
-    "configureDeps": 2,
+    "configureDeps": 1,
     "deadInjections": 0,
     "innerHTMLAssign": 4,
     "htmlInsert": 0,

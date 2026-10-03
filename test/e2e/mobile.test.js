@@ -32,6 +32,22 @@ test.describe('Mobile dashboard', () => {
     return { ctx, page };
   }
 
+  // mobile_nav.js re-derives the list/chat classes when the viewport crosses
+  // the 768px breakpoint (its 'change' listener on utilities.js's
+  // mobileQuery()); a desktop load sets neither class, so only that listener
+  // can add one. The 700px and 800px steps bracket the breakpoint, so a
+  // listener on a query whose edge lies outside 700-800px fails here.
+  test('crossing the 768px breakpoint re-derives the list/chat view', async ({ browser }) => {
+    const { ctx, page } = await open(browser, desktop);
+    const body = page.locator('body');
+    await expect(body).not.toHaveClass(/mobile-list-view/);
+    await page.setViewportSize({ width: 700, height: 844 });
+    await expect(body).toHaveClass(/mobile-list-view/);
+    await page.setViewportSize({ width: 800, height: 844 });
+    await expect(body).not.toHaveClass(/mobile-list-view/);
+    await ctx.close();
+  });
+
   test('on mobile: sidebar starts visible (list view)', async ({ browser }) => {
     const { ctx, page } = await open(browser, iPhone);
 

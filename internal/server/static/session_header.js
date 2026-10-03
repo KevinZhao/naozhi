@@ -7,23 +7,13 @@
 // new.
 //
 // Layering (D4-1 rule): never import dashboard back — shared state is read
-// from the state.js objects, its helpers are injected once via
-// configureSessionHeader().
+// from the state.js objects, its helpers are imported.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList } from './state.js';
 import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, runStateDot, runStateLabel } from './nz_util.js';
-
-const deps = {
-  formatAbsTime: null,
-  getToken: null,
-  sid: null,
-};
-export function configureSessionHeader(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('session_header dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+import { getToken } from './platform.js';
+import { sid } from './session_ident.js';
+import { formatAbsTime } from './utilities.js';
 
 // ---- Session run-history timeline (docs/rfc/session-run-metrics.md §8) ----
 //
@@ -81,10 +71,10 @@ function sessionRunsStatsHtml(stats) {
 
 function sessionRunRowHtml(r) {
   const meta = sessionRunStateMeta(r.state);
-  // deps.formatAbsTime is the dashboard's single timestamp formatter; use it for
+  // formatAbsTime is the dashboard's single timestamp formatter; use it for
   // both the visible label and the hover title (ux-contract: timestamps carry
-  // a deps.formatAbsTime title). A relative/colloquial label could be layered later.
-  const started = r.started_at ? deps.formatAbsTime(r.started_at) : '';
+  // a formatAbsTime title). A relative/colloquial label could be layered later.
+  const started = r.started_at ? formatAbsTime(r.started_at) : '';
   const startedShort = started || '—';
   const dur = sessionRunStatLabel(r.duration_ms || 0);
   const sub = [];
@@ -171,7 +161,7 @@ async function fetchSessionRuns(key, node) {
   if (node && node !== 'local') { panel.hidden = true; setHeaderRunStats(''); return; }
   try {
     const headers = {};
-    const t = deps.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const resp = await fetch(NZ_CONTRACT.API.sessions_runs + '?key=' + encodeURIComponent(key), { headers });
     // Stale-check the error branch too: the header we would clear belongs to
@@ -233,7 +223,7 @@ function gitChipHtml(g) {
     '</span>';
 }
 
-// gitStateCache holds the last resolved payload per deps.sid(key, node). The header
+// gitStateCache holds the last resolved payload per sid(key, node). The header
 // is rebuilt from scratch by renderMainShell on every rename / re-select, which
 // wipes the chip node; repainting from cache keeps the chip from flickering
 // out and back on each rebuild, and avoids a redundant fetch per repaint.
@@ -316,9 +306,9 @@ function setHeaderEffortChip(sessions) {
       // the tag rather than leaving the previous session's tier behind.
       effort = row ? row.effort : '';
     } else {
-      effort = (sessionList.sessionsData[deps.sid(selection.key, selection.node)] || {}).effort;
+      effort = (sessionList.sessionsData[sid(selection.key, selection.node)] || {}).effort;
     }
-    if (!effort && !sessionList.sessionsData[deps.sid(selection.key, selection.node)] && perSession.pendingTuning[selection.key]) {
+    if (!effort && !sessionList.sessionsData[sid(selection.key, selection.node)] && perSession.pendingTuning[selection.key]) {
       effort = perSession.pendingTuning[selection.key].effort || '';
     }
   }
@@ -354,7 +344,7 @@ function setHeaderSpawnDiagChip(sessions) {
       const row = sessions.find(s => s && s.key === selection.key && (s.node || 'local') === node);
       diags = row ? row.spawn_diags : null;
     } else {
-      diags = (sessionList.sessionsData[deps.sid(selection.key, selection.node)] || {}).spawn_diags;
+      diags = (sessionList.sessionsData[sid(selection.key, selection.node)] || {}).spawn_diags;
     }
   }
   const html = spawnDiagChipHtml(diags);
@@ -388,7 +378,7 @@ function setHeaderOverlayDriftChip(sessions) {
       const row = sessions.find(s => s && s.key === selection.key && (s.node || 'local') === node);
       drift = row ? row.overlay_drift : null;
     } else {
-      drift = (sessionList.sessionsData[deps.sid(selection.key, selection.node)] || {}).overlay_drift;
+      drift = (sessionList.sessionsData[sid(selection.key, selection.node)] || {}).overlay_drift;
     }
   }
   const html = overlayDriftChipHtml(drift);

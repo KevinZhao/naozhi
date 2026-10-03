@@ -174,6 +174,15 @@ test('HTTP 401 restores the text and asks for the token', async ({ page }) => {
   await expectIdle(page);
 });
 
+// composer_files.js's upload path has its own 401 branch: an attachment the
+// server refuses for auth must open the token prompt, like a refused send.
+test('an upload answered 401 asks for the token', async ({ page }) => {
+  await page.route('**/api/sessions/upload', (route) => route.fulfill({ status: 401, contentType: 'application/json', body: '{"error":"unauthorized"}' }));
+  await compose(page, 'with a pdf');
+  await page.evaluate(() => window.nz.test.handleFiles([new File([new Uint8Array(16)], 'a.pdf', { type: 'application/pdf' })]));
+  await expect(page.locator('.modal-overlay [aria-label="Dashboard API token"]')).toBeVisible();
+});
+
 test('a network failure restores the text and rolls the running flip back', async ({ page }) => {
   const held = await holdSend(page, (route) => route.abort('failed'));
   await compose(page, 'offline');

@@ -6,20 +6,10 @@
 // chip self-registers its DOMContentLoaded bootstrap.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back (that cycle puts dashboard's own consts in TDZ). The one dashboard
-// helper this chip calls is injected once via configureSelfUpdate().
+// back (that cycle puts dashboard's own consts in TDZ).
 import { NZ_CONTRACT } from './contract.js';
 import { showToast } from './nz_util.js';
-
-const deps = {
-  confirmDialog: null,
-};
-export function configureSelfUpdate(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('self_update dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+import { confirmDialog } from './utilities.js';
 
 // --- Self-Update Chip ---
 //
@@ -300,7 +290,7 @@ async function onUpdateChipClick() {
   }
   if (!updateCanApply(st)) {
     const titleMap = { restart: '新版本已就绪', install: '有新版本可用' };
-    await deps.confirmDialog({
+    await confirmDialog({
       title: titleMap[st.action] || '版本状态',
       message: st.action === 'restart'
         ? (st.staged || '') + ' 已下载完成，重启后生效'
@@ -313,7 +303,7 @@ async function onUpdateChipClick() {
     return;
   }
   const prompt = updateApplyPrompt(st);
-  const ok = await deps.confirmDialog({
+  const ok = await confirmDialog({
     title: prompt.title,
     message: prompt.message,
     detail: updateChipDetail(st),

@@ -7,19 +7,10 @@ import { NZ_CONTRACT } from './contract.js';
 import { composer } from './state.js';
 import { esc, escAttr, showToast } from './nz_util.js';
 import { featureForCurrent } from './features.js';
-
-const deps = {
-  ICONS: null,
-  formatFileSize: null,
-  getToken: null,
-  showAuthModal: null,
-};
-export function configureComposerFiles(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('composer_files dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+import { showAuthModal } from './auth_modal.js';
+import { ICONS } from './icons.js';
+import { getToken } from './platform.js';
+import { formatFileSize } from './utilities.js';
 
 // --- File handling ---
 //
@@ -202,10 +193,10 @@ async function uploadEntry(entry) {
     const fd = new FormData();
     fd.append('file', file);
     const headers = {};
-    const token = deps.getToken();
+    const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
     const r = await fetch(NZ_CONTRACT.API.sessions_upload, { method: 'POST', headers, body: fd });
-    if (r.status === 401 || r.status === 403) { deps.showAuthModal(); throw new Error('unauthorized'); }
+    if (r.status === 401 || r.status === 403) { showAuthModal(); throw new Error('unauthorized'); }
     if (!r.ok) {
       const txt = await r.text().catch(() => '');
       let msg = 'upload failed: ' + r.status;
@@ -266,7 +257,7 @@ async function maybeAutoOrient(entry) {
   const timer = setTimeout(() => ctrl.abort(), ORIENT_MAX_WAIT_MS);
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const token = deps.getToken();
+    const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
     const r = await fetch(NZ_CONTRACT.API.sessions_orient, {
       method: 'POST', headers, body: JSON.stringify({ id: entry.id }), signal: ctrl.signal,
@@ -426,7 +417,7 @@ function renderFilePreviews() {
              '<div class="pdf-name" title="' + escAttr(entry.file.name || 'document.pdf') + '">' +
                esc((entry.file.name || 'document.pdf')) +
              '</div>' +
-             '<div class="pdf-size">' + esc(deps.formatFileSize(entry.file.size || 0)) + '</div>' +
+             '<div class="pdf-size">' + esc(formatFileSize(entry.file.size || 0)) + '</div>' +
            '</div>' +
          '</div>')
       : '<img src="' + entry.blobUrl + '" draggable="false">';
@@ -442,7 +433,7 @@ function renderFilePreviews() {
       '>' +
       body +
       overlay +
-      '<button class="remove" type="button" data-action="file-remove" title="\u79fb\u9664" aria-label="\u79fb\u9664">' + deps.ICONS.close + '</button>' +
+      '<button class="remove" type="button" data-action="file-remove" title="\u79fb\u9664" aria-label="\u79fb\u9664">' + ICONS.close + '</button>' +
       '</div>';
   }).join('');
 }
