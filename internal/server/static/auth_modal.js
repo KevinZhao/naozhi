@@ -6,36 +6,26 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; its helpers are
-// injected once via configureAuthModal(), called from dashboard's module body.
+// module evaluates. Shared state is read from the state.js objects and helpers are
+// imported. session_list.js imports this module, so the four session_list
+// functions it calls back are injected once via configureAuthModal(), called
+// from dashboard's module body; renderMainShell is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList, transcript } from './state.js';
 import { esc, escAttr, showToast, trapFocus } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { accessProfileChipInfo, fetchAccessProfiles, fetchCLIBackends, renderAccessProfilePicker, renderBackendPicker } from './backend_catalog.js';
+import { authModalCooldown, eagerBindWorkspace, mobileEnterChat, persistPending, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, stopPreviewPolling } from './utilities.js';
+import { getNodeDisplayName, isMultiNode, nodeColor, projectDisplayLabel, projectDisplayPrefix, statusLabelForNode } from './session_ident.js';
+import { navRebuild } from './msg_nav.js';
+import { sendMessage } from './send_message.js';
+import { shell } from './shell.js';
 
 const deps = {
   debouncedFetchSessions: null,
-  eagerBindWorkspace: null,
   fetchSessions: null,
-  getNodeDisplayName: null,
   getNodeStatus: null,
-  isMultiNode: null,
-  mobileEnterChat: null,
-  navRebuild: null,
-  nodeColor: null,
-  persistPending: null,
-  projectDisplayLabel: null,
-  projectDisplayPrefix: null,
-  renderMainShell: null,
-  sendMessage: null,
-  setActiveSessionCard: null,
-  setMsgValue: null,
-  shortPath: null,
-  showNetworkError: null,
-  statusLabelForNode: null,
-  stopPreviewPolling: null,
   updateStatusBar: null,
 };
 export function configureAuthModal(impl) {
@@ -46,67 +36,6 @@ export function configureAuthModal(impl) {
 }
 
 // --- Auth modal ---
-
-// Auth-prompt de-dupe + debounce. Two guards keep the token modal from
-// machine-gunning back open: (1) only ever one overlay at a time, and
-// (2) after the operator explicitly dismisses the prompt, suppress
-// *background* re-prompts (the 5s /api/sessions poll, WS reconnect) for a
-// cooldown window. User-initiated actions (send / upload) pass {auto:false}
-// and bypass the cooldown so a click still gets immediate feedback. A
-// successful login clears the cooldown.
-let _authModalCooldownUntil = 0;
-const AUTH_MODAL_COOLDOWN_MS = 60000;
-
-function showAuthModal(opts) {
-  opts = opts || {};
-  // De-dupe: never stack a second auth prompt over an existing modal.
-  if (document.querySelector('.modal-overlay')) return;
-  // Debounce: a freshly-dismissed prompt should not be reopened by the
-  // next background poll. User actions (auto !== true) always prompt.
-  if (opts.auto && Date.now() < _authModalCooldownUntil) return;
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true" aria-label="Dashboard API token">' +
-      // R110-P3 brand lockup: `>_` mark + `naozhi` wordmark anchors the
-      // login screen so operators recognize they're on the right service.
-      // Mirrors the `>_` glyph used in the empty state; pure text (no image
-      // asset) keeps the static bundle tiny.
-      '<div class="auth-brand">' +
-        '<div class="ab-mark" aria-hidden="true">&gt;_</div>' +
-        '<div class="ab-wordmark">' +
-          '<span class="ab-name">naozhi</span>' +
-          '<span class="ab-tag">Claude Code on IM</span>' +
-        '</div>' +
-      '</div>' +
-      '<h3>Dashboard API Token</h3>' +
-      // R110-P3 brand/onboarding hint: first-time operators often don't know
-      // where the token comes from. Points them at the one configuration
-      // surface (dashboard_token in config.yaml). Kept concise; full docs live
-      // in README.md and docs/ops/ so the modal stays task-focused.
-      '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +
-      '<input id="token-input" type="password" placeholder="请输入 dashboard token…" data-action-keydown="token-input-key">' +
-      '<div class="modal-btns">' +
-        '<button type="button" data-action="auth-dismiss">取消</button>' +
-        '<button type="button" class="primary" data-action="token-save">保存</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-  trapFocus(overlay);
-  // Guarded: a quick-ask session unmounts every overlay, so the input can be
-  // gone by the time this fires — bare .focus() throws from the timer.
-  setTimeout(() => { const i = document.getElementById('token-input'); if (i) i.focus(); }, 100);
-}
-
-// dismissAuthModal closes the auth prompt and starts the background-reprompt
-// cooldown so the next /api/sessions poll (or WS reconnect) doesn't pop it
-// straight back open. The operator can still trigger it immediately via an
-// explicit send/upload.
-function dismissAuthModal() {
-  _authModalCooldownUntil = Date.now() + AUTH_MODAL_COOLDOWN_MS;
-  const overlay = document.querySelector('.modal-overlay');
-  if (overlay) overlay.remove();
-}
 
 async function saveToken() {
   const input = document.getElementById('token-input');
@@ -119,7 +48,7 @@ async function saveToken() {
       body: JSON.stringify({token: t})
     });
     if (r.ok) {
-      _authModalCooldownUntil = 0; // fresh session — drop any dismiss cooldown
+      authModalCooldown.until = 0; // fresh session — drop any dismiss cooldown
       const overlay = document.querySelector('.modal-overlay');
       if (overlay) overlay.remove();
       wsm.disconnect();
@@ -141,7 +70,7 @@ async function saveToken() {
       document.getElementById('token-input').placeholder = 'invalid token — try again';
     }
   } catch(e) {
-    deps.showNetworkError('', e);
+    showNetworkError('', e);
   }
 }
 
@@ -235,7 +164,7 @@ function startWSAuthRetryCountdown(seconds) {
 // button (wired by refreshBackendPicker) instead of silently showing no
 // picker as if the node had a single backend.
 function renderBackendFetchFailed(node) {
-  return '<span class="cp-backend-fail">' + esc(deps.getNodeDisplayName(node)) + ' 后端清单获取失败 ' +
+  return '<span class="cp-backend-fail">' + esc(getNodeDisplayName(node)) + ' 后端清单获取失败 ' +
     '<button type="button" class="settings-syslink-btn cp-backend-retry">重试</button></span>';
 }
 
@@ -268,7 +197,7 @@ function getSelectedBackend() {
 // CLI display name surfaced by /api/cli/backends ("claude-code" / "kiro").
 // Used to populate cli_name on dashboard-only pending sessions BEFORE the
 // server has spawned the wrapper — without this, the sidebar icon
-// (cliIcon) and header label (deps.renderMainShell / updateHeaderCLI) fall
+// (cliIcon) and header label (shell.renderMainShell / updateHeaderCLI) fall
 // through to defaultCLIName ("claude-code") and a kiro session shows the
 // claude logomark + "claude-code v..." until the first message lands and
 // the server-side SetCLIName broadcasts the correct value.
@@ -316,19 +245,19 @@ function backendDisplayVersion(backendID) {
 // 'local' is always pinned first (defensive: even if the server's nodes
 // payload omits it). Remotes follow, ordered by display name.
 function renderNodePicker() {
-  if (!deps.isMultiNode()) return '';
+  if (!isMultiNode()) return '';
   const ids = Object.keys(sessionList.nodesData);
   if (ids.indexOf('local') === -1) ids.unshift('local');
   const sorted = ids.slice().sort((a, b) => {
     if (a === 'local' && b !== 'local') return -1;
     if (b === 'local' && a !== 'local') return 1;
-    return deps.getNodeDisplayName(a).localeCompare(deps.getNodeDisplayName(b));
+    return getNodeDisplayName(a).localeCompare(getNodeDisplayName(b));
   });
   const current = selection.node || 'local';
   const options = sorted.map(id => {
     const selected = id === current ? ' selected' : '';
     const status = deps.getNodeStatus(id);
-    const label = deps.getNodeDisplayName(id) + ' · ' + deps.statusLabelForNode(status);
+    const label = getNodeDisplayName(id) + ' · ' + statusLabelForNode(status);
     return '<option value="' + escAttr(id) + '"' + selected + '>' + esc(label) + '</option>';
   }).join('');
   return '<div class="nz-field">' +
@@ -711,7 +640,7 @@ function fuzzyMatch(query, text) {
 }
 
 // matchProjectPath fuzzy-matches the query against the path AS RENDERED
-// (deps.shortPath: home prefix collapsed to ~, long paths truncated) so the
+// (shortPath: home prefix collapsed to ~, long paths truncated) so the
 // returned ranges index into the same string buildProjectRow highlights.
 // Matching the raw path and then painting the ranges onto the short path
 // shifted every <mark> by the collapsed prefix length (and could run past
@@ -720,7 +649,7 @@ function fuzzyMatch(query, text) {
 // prefix), the row still qualifies with the full-path score but no
 // highlight, so the result set is never narrower than before.
 function matchProjectPath(query, path) {
-  const shown = fuzzyMatch(query, deps.shortPath(path));
+  const shown = fuzzyMatch(query, shortPath(path));
   if (shown) return shown;
   const full = fuzzyMatch(query, path);
   return full ? {score: full.score, ranges: []} : null;
@@ -867,7 +796,7 @@ function buildProjectRow(s, idx) {
   el.dataset.idx = String(idx);
   const nodeId = p.node || 'local';
   const nodeBadge = nodeId !== 'local'
-    ? '<span class="cp-node" data-nz-bg="' + escAttr(deps.nodeColor(nodeId)) + '">' + esc(nodeId) + '</span>'
+    ? '<span class="cp-node" data-nz-bg="' + escAttr(nodeColor(nodeId)) + '">' + esc(nodeId) + '</span>'
     : '';
   // R110-P3 palette favorite indicator: replace the leading ▸ glyph with
   // a ★ when the project is favorited so the tier-0 ranking is visually
@@ -886,8 +815,8 @@ function buildProjectRow(s, idx) {
   // when it differs from the directory name — keeps the dirname
   // visible for operators who think in paths but adds the human
   // label for the rest.
-  const emojiPrefix = deps.projectDisplayPrefix(p);
-  const displayName = deps.projectDisplayLabel(p);
+  const emojiPrefix = projectDisplayPrefix(p);
+  const displayName = projectDisplayLabel(p);
   const dispHint = (displayName && displayName !== p.name)
     ? ' <span class="cp-name-alias">(' + esc(displayName) + ')</span>'
     : '';
@@ -896,7 +825,7 @@ function buildProjectRow(s, idx) {
     '<div class="cp-main">' +
       '<div class="cp-name">' + (emojiPrefix ? esc(emojiPrefix) : '') +
         highlight(p.name, s.nameRanges) + dispHint + '</div>' +
-      '<div class="cp-path">' + highlight(deps.shortPath(p.path), s.pathRanges) + '</div>' +
+      '<div class="cp-path">' + highlight(shortPath(p.path), s.pathRanges) + '</div>' +
     '</div>' + nodeBadge;
   el.addEventListener('click', () => pickPaletteProject(p));
   return el;
@@ -907,8 +836,8 @@ function buildProjectRow(s, idx) {
 // a remote node resolves its own default on dispatch, so name the node
 // instead of echoing the local path (#2429).
 function quickRowHint(node) {
-  if (!node || node === 'local') return serverInfo.defaultWorkspace ? deps.shortPath(serverInfo.defaultWorkspace) : '';
-  return deps.getNodeDisplayName(node) + ' · 默认工作区';
+  if (!node || node === 'local') return serverInfo.defaultWorkspace ? shortPath(serverInfo.defaultWorkspace) : '';
+  return getNodeDisplayName(node) + ' · 默认工作区';
 }
 
 function buildQuickRow(idx) {
@@ -1123,19 +1052,19 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   // Durably persist the pending workspace and eagerly bind it server-side so a
   // reload-before-first-send (the proven cwd-fallback trigger) no longer drops
   // the workspace. This is the primary fix path (project palette open).
-  deps.persistPending();
-  deps.eagerBindWorkspace(key, projectPath, nodeId);
+  persistPending();
+  eagerBindWorkspace(key, projectPath, nodeId);
 
-  deps.stopPreviewPolling();
+  stopPreviewPolling();
   sessionStream.unsubscribe();
   selection.key = key;
   selection.node = nodeId || 'local';
   try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
   transcript.lastEventTime = 0;
-  deps.mobileEnterChat();
-  deps.setActiveSessionCard(key, selection.node);
-  deps.renderMainShell();
-  deps.navRebuild();
+  mobileEnterChat();
+  setActiveSessionCard(key, selection.node);
+  shell.renderMainShell();
+  navRebuild();
   sessionList.lastVersion = 0;
   deps.debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
@@ -1166,19 +1095,19 @@ function doCreateSession() {
   if (accessProfile) perSession.accessProfiles[key] = accessProfile;
   if (targetNode !== 'local') perSession.nodes[key] = targetNode;
   // Persist + eager-bind so the custom workspace survives a reload-before-send.
-  deps.persistPending();
-  if (workspace) deps.eagerBindWorkspace(key, workspace, targetNode);
+  persistPending();
+  if (workspace) eagerBindWorkspace(key, workspace, targetNode);
 
-  deps.stopPreviewPolling();
+  stopPreviewPolling();
   sessionStream.unsubscribe();
   selection.key = key;
   selection.node = targetNode;
   try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
   transcript.lastEventTime = 0;
-  deps.mobileEnterChat();
-  deps.setActiveSessionCard(key, targetNode);
-  deps.renderMainShell();
-  deps.navRebuild();
+  mobileEnterChat();
+  setActiveSessionCard(key, targetNode);
+  shell.renderMainShell();
+  navRebuild();
   sessionList.lastVersion = 0;
   deps.debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
@@ -1191,18 +1120,18 @@ function doCreateSession() {
 // /cd later if they want a different workspace, or rename the session.
 //
 // When `initialText` is non-empty, it is dropped into the composer after
-// deps.renderMainShell paints AND deps.sendMessage is invoked — so submitQuickAsk
+// shell.renderMainShell paints AND sendMessage is invoked — so submitQuickAsk
 // ships "type in empty-state → Enter → question flies" without the user
 // having to click the composer a second time.
 //
-// deps.renderMainShell is synchronous and writes `#msg-input` into the DOM
-// immediately, but we still defer the deps.setMsgValue + deps.sendMessage call by
+// shell.renderMainShell is synchronous and writes `#msg-input` into the DOM
+// immediately, but we still defer the setMsgValue + sendMessage call by
 // one rAF tick so the browser has a chance to flush layout (contenteditable
 // focus + selection state is finicky before paint). If `#msg-input` is
 // still missing after the tick we ship text back to the caller via the
 // optional `onTextStranded` callback so the caller can re-enable its own
 // input and surface a toast — prevents silent message loss if a future
-// deps.renderMainShell refactor becomes async or conditional.
+// shell.renderMainShell refactor becomes async or conditional.
 //
 // Rationale: the modal + palette are the right default for project work, but
 // they add 2-3 clicks to the common "quick lookup" case. Surfacing this
@@ -1226,22 +1155,22 @@ function createQuickSession(initialText, onTextStranded) {
   // Backend left unset → router falls back to the configured default.
   // Persist so a reload-before-send keeps the workspace. No eager-bind: quick
   // sessions use serverInfo.defaultWorkspace, so the override would just mirror defaultCWD.
-  deps.persistPending();
+  persistPending();
 
-  deps.stopPreviewPolling();
+  stopPreviewPolling();
   sessionStream.unsubscribe();
   selection.key = key;
   selection.node = 'local';
   try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
   transcript.lastEventTime = 0;
-  deps.mobileEnterChat();
-  deps.setActiveSessionCard(key, 'local');
-  deps.renderMainShell();
-  deps.navRebuild();
+  mobileEnterChat();
+  setActiveSessionCard(key, 'local');
+  shell.renderMainShell();
+  navRebuild();
   sessionList.lastVersion = 0;
   deps.debouncedFetchSessions();
   const text = (initialText || '').trim();
-  // requestAnimationFrame ensures the composer DOM produced by deps.renderMainShell
+  // requestAnimationFrame ensures the composer DOM produced by shell.renderMainShell
   // is laid out before we write into it. Falls back to setTimeout when rAF
   // is unavailable (shouldn't happen on any supported browser but keeps the
   // branch testable in jsdom-style runners).
@@ -1258,9 +1187,9 @@ function createQuickSession(initialText, onTextStranded) {
       return;
     }
     if (text) {
-      deps.setMsgValue(input, text);
-      // deps.sendMessage reads from #msg-input directly — no extra threading needed.
-      deps.sendMessage();
+      setMsgValue(input, text);
+      // sendMessage reads from #msg-input directly — no extra threading needed.
+      sendMessage();
     } else {
       input.focus();
     }
@@ -1269,7 +1198,7 @@ function createQuickSession(initialText, onTextStranded) {
 
 // submitQuickAsk is the Enter-key / submit-button handler for the empty-state
 // "问点什么？" composer. Reads the textarea, creates a quick session, and
-// forwards the text to deps.sendMessage() in one shot — so the user goes
+// forwards the text to sendMessage() in one shot — so the user goes
 // "type → Enter → see answer" with zero intermediate clicks.
 function submitQuickAsk(e) {
   if (e && e.preventDefault) e.preventDefault();
@@ -1278,7 +1207,7 @@ function submitQuickAsk(e) {
   const text = (ta.value || '').trim();
   if (!text) { ta.focus(); return; }
   // Disable while the session spins up so a double-Enter can't fire two
-  // sessions. deps.renderMainShell synchronously replaces the empty-state DOM
+  // sessions. shell.renderMainShell synchronously replaces the empty-state DOM
   // including this textarea, so the "re-enable" obligation falls on the
   // stranded-text callback below (only hit when the composer failed to
   // materialise, an edge case we still want to recover from).
@@ -1366,7 +1295,6 @@ export {
   backendDisplayName,
   backendDisplayVersion,
   createNewSession,
-  dismissAuthModal,
   doCreateInProject,
   doCreateSession,
   getSelectedNode,
@@ -1376,7 +1304,6 @@ export {
   pickPaletteCustom,
   renderNodePicker,
   saveToken,
-  showAuthModal,
   startWSAuthRetryCountdown,
   wireNodePicker,
   wireQuickAskInput,

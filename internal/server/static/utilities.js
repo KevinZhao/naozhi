@@ -923,6 +923,67 @@ function promptDialog(opts) {
   });
 }
 
+// Auth-prompt de-dupe + debounce. Two guards keep the token modal from
+// machine-gunning back open: (1) only ever one overlay at a time, and
+// (2) after the operator explicitly dismisses the prompt, suppress
+// *background* re-prompts (the 5s /api/sessions poll, WS reconnect) for a
+// cooldown window. User-initiated actions (send / upload) pass {auto:false}
+// and bypass the cooldown so a click still gets immediate feedback. A
+// successful login clears the cooldown.
+const authModalCooldown = { until: 0 };
+const AUTH_MODAL_COOLDOWN_MS = 60000;
+
+function showAuthModal(opts) {
+  opts = opts || {};
+  // De-dupe: never stack a second auth prompt over an existing modal.
+  if (document.querySelector('.modal-overlay')) return;
+  // Debounce: a freshly-dismissed prompt should not be reopened by the
+  // next background poll. User actions (auto !== true) always prompt.
+  if (opts.auto && Date.now() < authModalCooldown.until) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="Dashboard API token">' +
+      // R110-P3 brand lockup: `>_` mark + `naozhi` wordmark anchors the
+      // login screen so operators recognize they're on the right service.
+      // Mirrors the `>_` glyph used in the empty state; pure text (no image
+      // asset) keeps the static bundle tiny.
+      '<div class="auth-brand">' +
+        '<div class="ab-mark" aria-hidden="true">&gt;_</div>' +
+        '<div class="ab-wordmark">' +
+          '<span class="ab-name">naozhi</span>' +
+          '<span class="ab-tag">Claude Code on IM</span>' +
+        '</div>' +
+      '</div>' +
+      '<h3>Dashboard API Token</h3>' +
+      // R110-P3 brand/onboarding hint: first-time operators often don't know
+      // where the token comes from. Points them at the one configuration
+      // surface (dashboard_token in config.yaml). Kept concise; full docs live
+      // in README.md and docs/ops/ so the modal stays task-focused.
+      '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +
+      '<input id="token-input" type="password" placeholder="请输入 dashboard token…" data-action-keydown="token-input-key">' +
+      '<div class="modal-btns">' +
+        '<button type="button" data-action="auth-dismiss">取消</button>' +
+        '<button type="button" class="primary" data-action="token-save">保存</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  trapFocus(overlay);
+  // Guarded: a quick-ask session unmounts every overlay, so the input can be
+  // gone by the time this fires — bare .focus() throws from the timer.
+  setTimeout(() => { const i = document.getElementById('token-input'); if (i) i.focus(); }, 100);
+}
+
+// dismissAuthModal closes the auth prompt and starts the background-reprompt
+// cooldown so the next /api/sessions poll (or WS reconnect) doesn't pop it
+// straight back open. The operator can still trigger it immediately via an
+// explicit send/upload.
+function dismissAuthModal() {
+  authModalCooldown.until = Date.now() + AUTH_MODAL_COOLDOWN_MS;
+  const overlay = document.querySelector('.modal-overlay');
+  if (overlay) overlay.remove();
+}
+
 // Time-divider threshold: insert a visual gap label when the interval between
 // adjacent rendered events exceeds this many ms. 5 minutes matches iMessage-ish
 // chat grouping — tight enough to separate turns, loose enough to not spam.
@@ -1325,10 +1386,12 @@ export {
   EVENT_DIVIDER_GAP_MS,
   MAX_LIVE_DOM_EVENTS,
   announce,
+  authModalCooldown,
   confirmDialog,
   copyCodeBlock,
   copyEventContent,
   decodeEscEntities,
+  dismissAuthModal,
   formatAbsTime,
   formatTimeFull,
   historyDayLabel,
@@ -1341,6 +1404,7 @@ export {
   safeUrl,
   shortPath,
   showAPIError,
+  showAuthModal,
   showNetworkError,
   startSidebarTimeTick,
   stopSidebarTimeTick,

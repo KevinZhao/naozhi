@@ -3,7 +3,7 @@
 // and are both directly observable.
 //
 // 1. Path highlight ranges must be computed against the path the row actually
-//    shows. Rows render deps.shortPath(p.path), which collapses the home prefix
+//    shows. Rows render shortPath(p.path), which collapses the home prefix
 //    to "~", so ranges taken from the full path land on the wrong characters
 //    when applied to the shorter string. The retired anchor checked this by
 //    requiring `matchProjectPath(q, p.path)` to appear and

@@ -59,16 +59,15 @@ func TestDashboardJS_QuickRow_FollowsSelectedNode(t *testing.T) {
 	}
 	script := `
 // quickRowHint lives in auth_modal.js — shared state arrives via the
-// state.js objects and helpers via injected deps; mirror both surfaces.
+// state.js objects and shortPath / getNodeDisplayName are imports (from
+// utilities.js and session_ident.js); stub both surfaces.
 const serverInfo = { defaultWorkspace: '/home/ec2-user/workspace/naozhi' };
 const sessionList = { nodesData: { n1: { display_name: 'GPU 盒子' }, n2: {} } };
-const deps = {
-  shortPath: (p) => p.replace('/home/ec2-user', '~'),
-  getNodeDisplayName: (id) => {
-    if (!id || id === 'local') return '本地';
-    const nd = sessionList.nodesData[id];
-    return nd && nd.display_name ? nd.display_name : id;
-  },
+const shortPath = (p) => p.replace('/home/ec2-user', '~');
+const getNodeDisplayName = (id) => {
+  if (!id || id === 'local') return '本地';
+  const nd = sessionList.nodesData[id];
+  return nd && nd.display_name ? nd.display_name : id;
 };
 ` + extractJSFunction(t, js, "quickRowHint") + `
 const out = { local: quickRowHint('local'), empty: quickRowHint(''), n1: quickRowHint('n1'), n2: quickRowHint('n2') };

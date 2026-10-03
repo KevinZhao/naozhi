@@ -9,10 +9,9 @@
 // module body; the dependency edge stays one-way (view → timeline).
 
 import { NZ_CONTRACT } from './contract.js';
-import { showAuthModal } from './auth_modal.js';
 import { getToken } from './platform.js';
 import { renderMd, runPendingAsync } from './render_md.js';
-import { formatAbsTime, showAPIError, showNetworkError } from './utilities.js';
+import { formatAbsTime, showAPIError, showAuthModal, showNetworkError } from './utilities.js';
 import {
   esc,
   escAttr,

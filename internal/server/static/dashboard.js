@@ -11,7 +11,6 @@ import { fetchEvents, renderEvents } from './event_stream.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderSpawnDiagChip } from './session_header.js';
 import {
-  awaitPendingOrients,
   handleFiles,
   onThumbDragEnd,
   onThumbDragLeave,
@@ -21,7 +20,6 @@ import {
   onThumbKeyDown,
   openFilePicker,
   removeFile,
-  renderFilePreviews,
   retryUpload,
 } from './composer_files.js';
 import {
@@ -46,32 +44,26 @@ import {
   renderSystemView,
   stopSystemPoll,
 } from './system_view.js';
-import { configureRunningBanner, interruptSession, resetTurnState, saveScrollPos, startTurnTimer, updateSendButton } from './running_banner.js';
+import { configureRunningBanner, interruptSession, resetTurnState, saveScrollPos, updateSendButton } from './running_banner.js';
 import { closeFilePreview, regroupAvatars, startFileRefObserver } from './file_refs.js';
 import {
-  EVENT_DIVIDER_GAP_MS,
   applyFeatureGates,
   closeHistoryPopover,
   confirmDialog,
   copyCodeBlock,
   copyEventContent,
-  eagerBindWorkspace,
+  dismissAuthModal,
   formatAbsTime,
   getMsgValue,
   historyDayLabel,
   isMobile,
-  lastDividerTime,
   mobileEnterChat,
-  persistPending,
   reconnectNow,
-  removeSidebarCard,
   setActiveSessionCard,
   setMsgValue,
-  shortPath,
   showAPIError,
   showNetworkError,
   startSidebarTimeTick,
-  stickEventsBottom,
   stopPreviewPolling,
   stopSidebarTimeTick,
   timeAgo,
@@ -91,7 +83,7 @@ import {
   renameSession,
   repaintGitChip,
 } from './tuning.js';
-import { navDismissPopover, navMsg, navRebuild, navShowList, navSync } from './msg_nav.js';
+import { navDismissPopover, navMsg, navRebuild, navShowList } from './msg_nav.js';
 import {
   configureSidebarProject,
   openProjectSettings,
@@ -99,7 +91,7 @@ import {
   toggleFavorite,
   toggleProjectCollapsed,
 } from './sidebar_project.js';
-import { backendDisplayName, backendDisplayVersion, configureAuthModal, createNewSession, dismissAuthModal, doCreateSession, keyTailDisplay, saveToken, showAuthModal, startWSAuthRetryCountdown } from './auth_modal.js';
+import { backendDisplayName, backendDisplayVersion, configureAuthModal, createNewSession, doCreateSession, keyTailDisplay, saveToken, startWSAuthRetryCountdown } from './auth_modal.js';
 import { fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
 import {
   configureSendMessage,
@@ -107,7 +99,7 @@ import {
   sendMessage,
 } from './send_message.js';
 import { collectWorkspaceSessionIDs, debouncedFetchSessions, fetchSessions, getNodeStatus, onSessionsApplied, originBadgeHtml, renderSidebar, restorePending, updateCardUnreadChip, updateMainState, updateStatusBar } from './session_list.js';
-import { discoveredKey, dropDiscovered, findDiscovered, getNodeDisplayName, isDiscoveredKey, isMultiNode, matchProject, nodeColor, parseDiscoveredPid, projectDisplayLabel, projectDisplayPrefix, sid, statusLabelForNode } from './session_ident.js';
+import { findDiscovered, isDiscoveredKey, matchProject, parseDiscoveredPid, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
@@ -1573,13 +1565,13 @@ function showOnboarding() {
 // is visible to importers, unlike a window-property copy.)
 // Wire the markdown renderers' dashboard-side helpers (#2558 D4). Runs in
 // dashboard's module body, before any render call.
-configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, fetchEvents, fetchSessions, getToken, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton });
-configureAuthModal({ debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar });
+configureSendMessage({ fetchEvents, fetchSessions });
+configureAuthModal({ debouncedFetchSessions, fetchSessions, getNodeStatus, updateStatusBar });
 configureSidebarProject({ debouncedFetchSessions, fetchSessions, renderSidebar });
 configureTuning({ debouncedFetchSessions, fetchSessions });
 configureDiscovery({ debouncedFetchSessions });
 configureRunningBanner({ debouncedFetchSessions });
-registerShell({ renderMainHeader, selectSession, setActivityView });
+registerShell({ renderMainHeader, renderMainShell, selectSession, setActivityView });
 initSplitWidth();
 initSidebarCollapsed();
 
