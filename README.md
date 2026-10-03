@@ -391,8 +391,9 @@ session:
   max_procs: 3                            # 最大并发 CLI 进程
   ttl: "30m"                              # 空闲回收超时
   watchdog:
-    no_output_timeout: "2m"               # 无输出超时
-    total_timeout: "5m"                   # 单轮总超时
+    no_output_timeout: "15m"              # 无输出超时；工具运行时 Claude CLI 每 30s 发 heartbeat，
+                                          # 所以这里只拦模型长时间静默生成或 CLI 卡死
+    total_timeout: "2h"                   # 单轮总超时
   store_path: "~/.naozhi/sessions.json"
   queue:                                  # 忙时消息策略
     mode: "collect"                       # collect | interrupt | passthrough

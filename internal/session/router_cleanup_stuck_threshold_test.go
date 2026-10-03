@@ -7,16 +7,16 @@ import (
 
 // TestCleanup_StuckThresholdFollowsTotalTimeout pins that Cleanup's
 // stuck-running threshold is twice the configured total timeout, read from the
-// spawn facet. Every other Cleanup test configures 5 minutes, which is also
-// cli.DefaultTotalTimeout, so a Cleanup that ignored the configured value and
-// fell back to the default would pass them all; 1 minute tells the two apart.
+// spawn facet. 1 minute sits far below cli.DefaultTotalTimeout, so a Cleanup
+// that ignored the configured value and fell back to the default would keep
+// the silent session alive.
 func TestCleanup_StuckThresholdFollowsTotalTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		silent time.Duration
 		killed bool
 	}{
-		// 3m > 2×1m: stuck under the configured timeout, not under the 10m default.
+		// 3m > 2×1m: stuck under the configured timeout, far inside twice the default.
 		{"silent past twice the configured timeout", 3 * time.Minute, true},
 		// 90s < 2×1m: a threshold below twice the timeout would kill it.
 		{"silent within twice the configured timeout", 90 * time.Second, false},
