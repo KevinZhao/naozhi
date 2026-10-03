@@ -356,6 +356,9 @@ function startMockServer(overrides = {}) {
   let discoveredCloseCalls = [];
   const requireAuth = overrides.requireAuth || false;
   const authToken = overrides.authToken || 'test-token-123';
+  // loginStatus400: when set, POST /api/auth/login answers 400 with this
+  // string as the JSON "error" (the trusted_proxy XFF refusal).
+  const loginStatus400 = overrides.loginStatus400 || '';
   // deleteStatus lets a test force DELETE /api/sessions to fail (e.g. 500)
   // so the dismiss-failure re-sync path can be exercised.
   const deleteStatus = overrides.deleteStatus || 200;
@@ -449,6 +452,11 @@ function startMockServer(overrides = {}) {
       req.on('data', c => (body += c));
       req.on('end', () => {
         loginCalls.push(body);
+        if (loginStatus400) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: loginStatus400 }));
+          return;
+        }
         try {
           const data = JSON.parse(body);
           if (data.token === authToken) {

@@ -366,6 +366,10 @@ const noScriptLoginHTML = `<!DOCTYPE html>
 <p><a href="/dashboard">Back to login</a></p>
 </body></html>`
 
+// xffRequiredBody names the setting and both fixes: the login UIs show it
+// verbatim, and the operator behind a LAN address is its usual reader.
+const xffRequiredBody = `{"error":"server.trusted_proxy is on but this request carries no usable X-Forwarded-For: open the dashboard through the reverse proxy, or set server.trusted_proxy: false for direct/LAN access"}`
+
 func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	// HandleLogin sits outside RequireAuth (it GRANTS auth), so apply the
 	// same-origin gate manually; also catches misconfigured reverse proxies.
@@ -384,7 +388,7 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 			"remote", r.RemoteAddr, "xff", r.Header.Get("X-Forwarded-For"))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		if _, err := w.Write([]byte(`{"error":"missing X-Forwarded-For header"}`)); err != nil {
+		if _, err := w.Write([]byte(xffRequiredBody)); err != nil {
 			slog.Debug("write XFF error response", "err", err)
 		}
 		return
@@ -521,6 +525,7 @@ document.getElementById('login-form').addEventListener('submit', async function(
   try{
     var res=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
     if(res.ok){window.location.href='/dashboard'}
+    else if(res.status===400){var m='';try{m=String((await res.json()).error||'')}catch(_){}document.getElementById('err').textContent=(m||'invalid token').slice(0,300)}
     else{document.getElementById('err').textContent=res.status===429?'尝试过多，请稍后再试':'invalid token'}
   }catch(e){document.getElementById('err').textContent='network error'}
 });

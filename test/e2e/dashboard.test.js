@@ -664,6 +664,37 @@ test.describe('Auth modal & login', () => {
     authMock.server.close();
   });
 
+  test('a 400 login refusal shows the server reason, not invalid token', async ({ browser }) => {
+    const reason = 'server.trusted_proxy is on <b>x</b>';
+    const authMock = await startMockServer({
+      requireAuth: true,
+      authToken: 'secret-token',
+      loginStatus400: reason,
+    });
+
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(authMock.url + '/dashboard');
+    await page.waitForSelector('.modal-overlay');
+
+    await page.fill('#token-input', 'secret-token');
+    await page.click('.modal-btns button.primary');
+
+    const hint = page.locator('.modal-overlay .auth-hint');
+    await expect(hint).toHaveText(reason);
+    // Rendered as text: the markup in the reason must not become an element.
+    await expect(hint.locator('b')).toHaveCount(0);
+    const tokenInput = page.locator('#token-input');
+    await expect(tokenInput).toHaveAttribute('placeholder', /login refused/);
+    await expect(tokenInput).not.toHaveAttribute('placeholder', /invalid token/);
+    // The token was never compared, so it is kept for the retry.
+    await expect(tokenInput).toHaveValue('secret-token');
+    expect(authMock.loginCalls).toHaveLength(1);
+
+    await ctx.close();
+    authMock.server.close();
+  });
+
   test('Enter key in token input triggers login', async ({ browser }) => {
     const authMock = await startMockServer({
       requireAuth: true,

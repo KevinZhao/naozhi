@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -91,7 +92,26 @@ func TestHandleLogin_TrustedProxyRequiresXFF(t *testing.T) {
 				if !strings.Contains(w.Body.String(), "X-Forwarded-For") {
 					t.Errorf("body should reference X-Forwarded-For, got %q", w.Body.String())
 				}
+				assertXFFRefusalNamesFix(t, w.Body.Bytes())
 			}
 		})
+	}
+}
+
+// assertXFFRefusalNamesFix: both login UIs render the 400's "error" field
+// as the reason, so it must parse and name the setting plus each way out —
+// "missing X-Forwarded-For header" alone read as a token problem.
+func assertXFFRefusalNamesFix(t *testing.T, body []byte) {
+	t.Helper()
+	var got struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("400 body is not JSON: %v (%q)", err, body)
+	}
+	for _, want := range []string{"server.trusted_proxy", "reverse proxy", "server.trusted_proxy: false"} {
+		if !strings.Contains(got.Error, want) {
+			t.Errorf("400 error %q lacks %q", got.Error, want)
+		}
 	}
 }

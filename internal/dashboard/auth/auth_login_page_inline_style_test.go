@@ -41,3 +41,21 @@ func TestLoginPage_RateLimitedMessage(t *testing.T) {
 		t.Error("login page script lacks the 429 message 尝试过多，请稍后再试")
 	}
 }
+
+// TestLoginPage_RefusalShowsServerReason: a 400 is a refusal before the token
+// compare (trusted_proxy without X-Forwarded-For); the page must show the
+// server's "error" text instead of "invalid token", via textContent only.
+func TestLoginPage_RefusalShowsServerReason(t *testing.T) {
+	scripts := extractInlineBlocks(loginPageHTML, inlineScriptRe)
+	if len(scripts) != 1 {
+		t.Fatalf("want 1 inline <script>, got %d", len(scripts))
+	}
+	js := scripts[0]
+	branch := regexp.MustCompile(`if\(res\.status===400\)\{[^\n]*\(await res\.json\(\)\)\.error[^\n]*getElementById\('err'\)\.textContent=`)
+	if !branch.MatchString(js) {
+		t.Error("login page script does not show the 400 body's error via textContent — a trusted_proxy refusal reads as 'invalid token'")
+	}
+	if strings.Contains(js, "innerHTML") {
+		t.Error("login page script writes innerHTML — the server reason must go in as text")
+	}
+}
