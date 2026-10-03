@@ -11,10 +11,11 @@ import "time"
 // /cron handlers read. Adding a field here requires extending the adapter's
 // projection function in the same change.
 type CronJob struct {
-	ID       string
-	Schedule string
-	Prompt   string
-	Paused   bool
+	ID           string
+	Schedule     string
+	Prompt       string
+	Paused       bool
+	FreshContext bool
 }
 
 // CronJobRequest carries the creation parameters for /cron add; the host
@@ -26,6 +27,9 @@ type CronJobRequest struct {
 	ChatID    string
 	ChatType  string
 	CreatedBy string
+	// FreshContext resets the job's session before every run; false keeps
+	// one conversation across runs.
+	FreshContext bool
 }
 
 // Dispatch-side cron error codes. The string values MUST stay byte-identical

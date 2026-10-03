@@ -326,6 +326,7 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 		reply("用法: /cron <add|list|del|pause|resume>\n" +
 			"  /cron add \"@every 30m\" 检查服务状态\n" +
 			"  /cron add \"0 9 * * 1-5\" /review 扫描 open PRs\n" +
+			"  /cron add --keep-context \"0 18 * * *\" 接着昨天的进度写日报\n" +
 			"  /cron list\n" +
 			"  /cron del <id>\n" +
 			"  /cron pause <id>\n" +
@@ -333,24 +334,32 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 	}
 }
 
-// handleCronAdd implements /cron add "<schedule>" <prompt>.
+// cronAddUsage is the /cron add synopsis shown on a malformed invocation.
+const cronAddUsage = "用法: /cron add [--keep-context] \"<schedule>\" <prompt>"
+
+// handleCronAdd implements /cron add [--keep-context] "<schedule>" <prompt>.
+// IM jobs start every run from a fresh session unless --keep-context is
+// given: the chat has no other way to see or change the mode, and a kept
+// context grows by one turn per run.
 func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string, reply func(string), log *slog.Logger) {
 	if len(parts) < 3 {
-		reply("用法: /cron add \"<schedule>\" <prompt>\n例: /cron add \"@every 30m\" 检查服务状态")
+		reply(cronAddUsage + "\n例: /cron add \"@every 30m\" 检查服务状态")
 		return
 	}
-	schedule, prompt, err := ParseCronAdd(parts[2])
+	args, err := ParseCronAdd(parts[2])
 	if err != nil {
-		reply("格式错误: " + err.Error() + "\n用法: /cron add \"<schedule>\" <prompt>")
+		reply("格式错误: " + err.Error() + "\n" + cronAddUsage)
 		return
 	}
+	schedule := args.Schedule
 	job, next, err := d.scheduler.AddJob(CronJobRequest{
-		Schedule:  schedule,
-		Prompt:    prompt,
-		Platform:  msg.Platform,
-		ChatID:    msg.ChatID,
-		ChatType:  msg.ChatType,
-		CreatedBy: msg.UserID,
+		Schedule:     schedule,
+		Prompt:       args.Prompt,
+		Platform:     msg.Platform,
+		ChatID:       msg.ChatID,
+		ChatType:     msg.ChatType,
+		CreatedBy:    msg.UserID,
+		FreshContext: !args.KeepContext,
 	})
 	if err != nil {
 		// Never echo err.Error(): it leaks the normalized schedule and parser
@@ -362,12 +371,23 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		return
 	}
 	// Defence-in-depth against future parser relaxations.
-	reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s",
+	reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s\n%s",
 		job.ID,
 		osutil.SanitizeForLog(job.Schedule, 256),
-		formatCronNext(next)))
+		formatCronNext(next),
+		cronContextNote(job.FreshContext)))
 	log.Info("cron job created", "id", job.ID,
-		"schedule", osutil.SanitizeForLog(job.Schedule, 256))
+		"schedule", osutil.SanitizeForLog(job.Schedule, 256),
+		"fresh_context", job.FreshContext)
+}
+
+// cronContextNote tells the creator which context mode the new job runs in
+// and how to get the other one.
+func cronContextNote(fresh bool) string {
+	if fresh {
+		return "每次执行都从新会话开始；需要延续上次的上下文，请创建时加 --keep-context"
+	}
+	return "每次执行延续同一会话的上下文"
 }
 
 // cronAddErrReply maps a /cron add failure's wire code (from
@@ -434,8 +454,11 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 	sb.WriteString("定时任务:\n")
 	for _, j := range jobs {
 		status := ""
+		if !j.FreshContext {
+			status = " [保留上下文]"
+		}
 		if j.Paused {
-			status = " [暂停]"
+			status += " [暂停]"
 		}
 		safeSchedule := sanitizeCronDisplay(j.Schedule, 30)
 		safePrompt := sanitizeCronDisplay(j.Prompt, 30)
@@ -695,31 +718,63 @@ var smartQuoteNormalizer = strings.NewReplacer(
 // textutil package so this edge doesn't import the cron domain package (#1707).
 const maxCronIDLen = textutil.MaxCronIDLen
 
-// ParseCronAdd parses the args of /cron add: "schedule" prompt
-func ParseCronAdd(args string) (schedule, prompt string, err error) {
+// CronAddArgs is the parsed form of /cron add's arguments.
+type CronAddArgs struct {
+	Schedule string
+	Prompt   string
+	// KeepContext is set by a leading --keep-context (or --keep).
+	KeepContext bool
+}
+
+// ParseCronAdd parses the args of /cron add: [--keep-context] "schedule" prompt
+func ParseCronAdd(args string) (CronAddArgs, error) {
 	args = smartQuoteNormalizer.Replace(args)
+	keep, args, err := cutCronAddFlag(args)
+	if err != nil {
+		return CronAddArgs{}, err
+	}
 	if !strings.HasPrefix(args, "\"") {
-		return "", "", fmt.Errorf("schedule must be quoted, e.g. \"@every 30m\"")
+		return CronAddArgs{}, fmt.Errorf("schedule must be quoted, e.g. \"@every 30m\"")
 	}
-	rest, tail, ok := strings.Cut(args[1:], "\"")
+	schedule, tail, ok := strings.Cut(args[1:], "\"")
 	if !ok {
-		return "", "", fmt.Errorf("missing closing quote for schedule")
+		return CronAddArgs{}, fmt.Errorf("missing closing quote for schedule")
 	}
-	schedule = rest
 	// Shared with the dashboard edge so the two policies cannot drift (#1315).
 	if err := textutil.ValidateCronScheduleChars(schedule); err != nil {
-		return "", "", err
+		return CronAddArgs{}, err
 	}
 	// Char screening alone passes an all-whitespace schedule; reject it clearly.
 	if strings.TrimSpace(schedule) == "" {
-		return "", "", fmt.Errorf("定时表达式不能为空")
+		return CronAddArgs{}, fmt.Errorf("定时表达式不能为空")
 	}
-	prompt = strings.TrimSpace(tail)
+	prompt := strings.TrimSpace(tail)
 	// Same helper as dashboard validateCronPrompt / Scheduler.SetJobPrompt so
 	// IM and dashboard ingress never diverge (#1315). LF/Tab stay allowed for
 	// multi-line playbooks; CR is not rejected here unlike the dashboard.
 	if err := textutil.ValidateCronPromptStrict(prompt); err != nil {
-		return "", "", err
+		return CronAddArgs{}, err
 	}
-	return schedule, prompt, nil
+	return CronAddArgs{Schedule: schedule, Prompt: prompt, KeepContext: keep}, nil
+}
+
+// cutCronAddFlag strips an optional option token in front of the quoted
+// schedule. Phone keyboards turn "--" into an en or em dash, CJK IMEs into
+// a full-width hyphen, and may capitalize the word, so any dash run and any
+// letter case is accepted. A schedule is always quoted, so any other
+// dash-led token is an unknown option.
+func cutCronAddFlag(args string) (keep bool, rest string, err error) {
+	args = strings.TrimLeftFunc(args, unicode.IsSpace)
+	name := strings.TrimLeft(args, "-\u2013\u2014\u2212\uff0d")
+	if len(name) == len(args) {
+		return false, args, nil
+	}
+	end := strings.IndexFunc(name, func(r rune) bool { return r == '"' || unicode.IsSpace(r) })
+	if end < 0 {
+		end = len(name)
+	}
+	if !strings.EqualFold(name[:end], "keep-context") && !strings.EqualFold(name[:end], "keep") {
+		return false, "", fmt.Errorf("未知选项（仅支持 --keep-context）")
+	}
+	return true, strings.TrimLeftFunc(name[end:], unicode.IsSpace), nil
 }

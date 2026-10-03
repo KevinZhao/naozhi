@@ -237,16 +237,19 @@ func TestParseCronAdd(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sched, prompt, err := ParseCronAdd(tt.args)
+			got, err := ParseCronAdd(tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error = %v, wantErr = %v", err, tt.wantErr)
 			}
 			if !tt.wantErr {
-				if sched != tt.wantSchedule {
-					t.Errorf("schedule = %q, want %q", sched, tt.wantSchedule)
+				if got.Schedule != tt.wantSchedule {
+					t.Errorf("schedule = %q, want %q", got.Schedule, tt.wantSchedule)
 				}
-				if prompt != tt.wantPrompt {
-					t.Errorf("prompt = %q, want %q", prompt, tt.wantPrompt)
+				if got.Prompt != tt.wantPrompt {
+					t.Errorf("prompt = %q, want %q", got.Prompt, tt.wantPrompt)
+				}
+				if got.KeepContext {
+					t.Errorf("KeepContext = true without the flag")
 				}
 			}
 		})
