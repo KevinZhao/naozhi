@@ -759,12 +759,13 @@ func ParseCronAdd(args string) (CronAddArgs, error) {
 }
 
 // cutCronAddFlag strips an optional option token in front of the quoted
-// schedule. Phone keyboards turn "--" into an en or em dash and may
-// capitalize the word, so any dash run and any letter case is accepted. A
-// schedule is always quoted, so any other dash-led token is an unknown option.
+// schedule. Phone keyboards turn "--" into an en or em dash, CJK IMEs into
+// a full-width hyphen, and may capitalize the word, so any dash run and any
+// letter case is accepted. A schedule is always quoted, so any other
+// dash-led token is an unknown option.
 func cutCronAddFlag(args string) (keep bool, rest string, err error) {
 	args = strings.TrimLeftFunc(args, unicode.IsSpace)
-	name := strings.TrimLeft(args, "-\u2013\u2014")
+	name := strings.TrimLeft(args, "-\u2013\u2014\u2212\uff0d")
 	if len(name) == len(args) {
 		return false, args, nil
 	}
