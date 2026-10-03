@@ -34,6 +34,7 @@ func TestAppendJSONStringBytes_MatchesEncoder(t *testing.T) {
 		{"html chars unescaped", []byte("<div>&amp;</div>")},
 		{"cjk", []byte("中文测试")},
 		{"emoji", []byte("👋hi")},
+		{"literal U+FFFD", []byte("a\ufffdb")},
 		{"line separator U+2028", []byte("a b")},
 		{"paragraph separator U+2029", []byte("a b")},
 		{"big payload", bytes.Repeat([]byte("the quick brown fox jumps over the lazy dog. "), 200)},
@@ -138,6 +139,7 @@ func FuzzAppendJSONStringBytes(f *testing.F) {
 	for _, seed := range []string{
 		"", "hello", `q"b\s`, "a\tb\nc\x00\x1f\x7f", "<&>", "中文👋",
 		"a\u2028b\u2029c", "a\xffb", "\xe4\xb8", "\xc0\xaf", "\xed\xa0\x80",
+		"a\ufffdb",
 	} {
 		f.Add([]byte(seed))
 	}
