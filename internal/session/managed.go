@@ -277,6 +277,10 @@ type ManagedSession struct {
 	meteringCache atomic.Pointer[meteringCache]
 	sendMu        sync.Mutex   // serializes messages to the same session
 	historyMu     sync.RWMutex // protects persistedHistory reads/writes (independent of sendMu)
+	// turnWaiters counts Send calls from before they queue on sendMu until
+	// they return, and SendPassthrough calls for their whole duration, so
+	// ReleaseIdleProcess sees a turn that sendMu.TryLock cannot.
+	turnWaiters atomic.Int32
 	// costMu serializes the read-modify-write of costSpent/lastCumulativeCost
 	// in finishRun, which runs OUTSIDE sendMu on both paths (Send releases
 	// sendMu before returning; passthrough is lock-free), so this mutex is

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -208,5 +209,51 @@ func TestCronRouterAdapter_GetOrCreateTagsCapacity(t *testing.T) {
 	}
 	if !errors.Is(err, cron.ErrSessionCapacity) {
 		t.Errorf("GetOrCreate err = %v, want it tagged cron.ErrSessionCapacity", err)
+	}
+}
+
+// ReleaseProcess closes an idle cron session's process, keeps the session and
+// bumps the list version (so the dashboard re-renders the row as released);
+// an unknown key or a running turn is refused without a bump.
+func TestCronRouterAdapter_ReleaseProcess(t *testing.T) {
+	t.Parallel()
+	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
+	t.Cleanup(r.Shutdown)
+	a := cronRouterAdapter{r: r}
+	const key = "cron:job-adapter-release"
+
+	if a.ReleaseProcess(key) {
+		t.Fatal("ReleaseProcess = true for a key with no session")
+	}
+
+	running := session.NewTestProcess()
+	running.StateVal = cli.StateRunning
+	r.InjectSession(key, running).MarkExemptForTest()
+	_, v0, _ := r.ListSessionsIfChanged(0)
+	if a.ReleaseProcess(key) {
+		t.Fatal("ReleaseProcess = true while the turn is running")
+	}
+	if !running.Alive() {
+		t.Fatal("a refused release closed the running process")
+	}
+	if _, _, changed := r.ListSessionsIfChanged(v0); changed {
+		t.Error("a refused release bumped the list version")
+	}
+
+	idle := session.NewTestProcess()
+	s := r.InjectSession(key, idle)
+	s.MarkExemptForTest()
+	_, v1, _ := r.ListSessionsIfChanged(0)
+	if !a.ReleaseProcess(key) {
+		t.Fatal("ReleaseProcess refused an idle exempt cron session")
+	}
+	if idle.Alive() {
+		t.Error("released process is still alive")
+	}
+	if r.SessionFor(key) != s {
+		t.Error("release dropped the session")
+	}
+	if _, _, changed := r.ListSessionsIfChanged(v1); !changed {
+		t.Error("release did not bump the list version; the dashboard keeps showing the process alive")
 	}
 }
