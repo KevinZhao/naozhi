@@ -292,9 +292,8 @@ sheet 底部 `‹上次 / ↻重跑 / 下次›` 三按钮。复用 `recentRunsC
 - **不改持久化 schema**。
 - 老 run JSON 文件无 SessionID（早期版本）→ transcript 端点 `fallback:"missing"`，前端切原始日志 tab。
 - **缓存策略修订（评审 S2）**：现 `sw.js` 实际是 no-op，bump 它无效。改为：
-  - `dashboard.html / dashboard.js / *.css` 服务端响应 `Cache-Control: no-cache, must-revalidate` + ETag → 浏览器每次 revalidate。
-  - `<script src="/static/dashboard.js?v=<build-sha>">` build 期注入 build SHA → 强制 cache-bust。
-  - 这一改动归到 P0（最先发布的 PR），后续阶段无需再 bump。
+  - `dashboard.html` 服务端响应 `Cache-Control: no-cache, must-revalidate` + ETag → 浏览器每次 revalidate。
+  - 页面里的 `/static/*.js`、`*.css` 由服务端在启动时改写为按文件内容哈希的 `?v=<hash>` URL（JS 经 import map 映射，见 `internal/server/static_versioning.go`）；`v` 与当前哈希一致时响应 `private, max-age=31536000, immutable`，其余（无 `v` / 过期 `v`）仍为 `no-cache, must-revalidate` + ETag（#3006）。
 
 ## 7. 测试策略
 

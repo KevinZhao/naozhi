@@ -23,9 +23,8 @@ import "net/http"
 // serveStaticJS returns the handler for one embedded JS module.
 //
 // 404 when the asset is missing (a build that dropped an embed rather than a
-// silent empty body), JS content-type + nosniff, must-revalidate so a module
-// edit is picked up without a hard reload, then the ETag short-circuit before
-// the body.
+// silent empty body), JS content-type + nosniff, the cache policy its ?v=
+// earns (staticCacheControl), then the ETag short-circuit before the body.
 func serveStaticJS(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if staticAssetBytes(name) == nil {
@@ -34,7 +33,7 @@ func serveStaticJS(name string) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/javascript")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		w.Header().Set("Cache-Control", staticCacheControl(r, name))
 		if serveStaticWithETag(w, r, name) {
 			return
 		}
@@ -54,7 +53,7 @@ func handleDashboardCSS(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	w.Header().Set("Cache-Control", staticCacheControl(r, name))
 	if serveStaticWithETag(w, r, name) {
 		return
 	}

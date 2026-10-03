@@ -215,8 +215,8 @@ var dashboardCSSFiles = []string{
 
 func readDashboardHTMLAndCSS(t *testing.T) string {
 	t.Helper()
-	var b []byte
-	for _, name := range append([]string{"dashboard.html"}, dashboardCSSFiles...) {
+	b := append(rawDashboardHTML(t), '\n')
+	for _, name := range dashboardCSSFiles {
 		data := staticAssetBytes(name)
 		if data == nil {
 			t.Fatalf("%s not embedded", name)
@@ -224,4 +224,15 @@ func readDashboardHTMLAndCSS(t *testing.T) string {
 		b = append(append(b, data...), '\n')
 	}
 	return string(b)
+}
+
+// rawDashboardHTML is dashboard.html as written; staticAssets holds the
+// rendered page, whose URLs carry ?v= and whose head carries generated tags.
+func rawDashboardHTML(t *testing.T) []byte {
+	t.Helper()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read embedded dashboard.html: %v", err)
+	}
+	return data
 }

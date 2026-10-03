@@ -12,15 +12,14 @@ import (
 //
 // #1980: script-src carries no 'unsafe-inline' — the dashboard bundle wires
 // every handler through the nz.actions data-action delegation, and the only
-// inline <script> (the theme bootstrap, which must run before first paint)
-// is allowlisted by SHA-256 hash. The hash is computed at package init from
-// the embedded dashboard.html (mirroring the login page's loginPageCSP), so
-// an edit to the inline block re-derives the hash instead of silently
-// breaking the page. The jsdelivr sources are pinned to the exact versioned
-// files the lazy loaders inject (an /npm/ prefix is an anyone-can-publish
-// namespace, i.e. an allowlist bypass); TestDashboardCSP_CDNURLsMatchBundle
-// keeps them in lockstep with dashboard.js.
-var dashboardCSP = buildDashboardCSP()
+// inline scripts (the theme bootstrap, which must run before first paint, and
+// the generated import map and entry loaders) are allowlisted by SHA-256 hash,
+// computed from the page as served, so an edit re-derives the hash instead of
+// silently breaking the page. The jsdelivr sources are pinned to the exact versioned files the
+// lazy loaders inject (an /npm/ prefix is an anyone-can-publish namespace,
+// i.e. an allowlist bypass); TestDashboardCSP_CDNURLsMatchBundle keeps them in
+// lockstep with dashboard.js.
+var dashboardCSP = buildDashboardCSP(staticAssets["dashboard.html"].bytes)
 
 // cdn URLs the dashboard's lazy loaders inject (SRI-pinned in dashboard.js).
 const (
@@ -37,12 +36,22 @@ const (
 // contribute an empty-string hash to the allowlist.
 var dashInlineScriptRe = regexp.MustCompile(`(?s)<script>(.*?)</script>`)
 
-func buildDashboardCSP() string {
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		panic(fmt.Sprintf("dashboard CSP self-test: read embedded dashboard.html: %v", err))
+// dashImportMapRe matches the import map renderDashboardHTML generates.
+var dashImportMapRe = regexp.MustCompile(`(?s)<script type="importmap">(.*?)</script>`)
+
+func cspHash(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+}
+
+// buildDashboardCSP derives the policy for page. The raw page carries no
+// import map or entry loaders, so it yields the policy without those hashes,
+// which is the one the e2e mock serves next to the raw page.
+func buildDashboardCSP(page []byte) string {
+	if page == nil {
+		panic("dashboard CSP self-test: dashboard.html is not embedded")
 	}
-	blocks := dashInlineScriptRe.FindAllStringSubmatch(string(data), -1)
+	blocks := dashInlineScriptRe.FindAllStringSubmatch(string(page), -1)
 	// Exactly one inline block (the theme bootstrap) is expected. Zero means
 	// the regex drifted from the markup (the CSP would then block the block);
 	// more than one means someone added inline script — that needs the same
@@ -50,12 +59,21 @@ func buildDashboardCSP() string {
 	if len(blocks) != 1 {
 		panic(fmt.Sprintf("dashboard CSP self-test: found %d inline <script> blocks in dashboard.html, want exactly 1 (theme bootstrap)", len(blocks)))
 	}
-	sum := sha256.Sum256([]byte(blocks[0][1]))
-	hash := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	hashes := cspHash(blocks[0][1])
+	maps := dashImportMapRe.FindAllStringSubmatch(string(page), -1)
+	if len(maps) > 1 {
+		panic(fmt.Sprintf("dashboard CSP self-test: found %d import maps in dashboard.html, want at most 1", len(maps)))
+	}
+	for _, m := range maps {
+		hashes += " " + cspHash(m[1])
+	}
+	for _, m := range moduleLoaderRe.FindAllStringSubmatch(string(page), -1) {
+		hashes += " " + cspHash(m[1])
+	}
 
 	return strings.Join([]string{
 		"default-src 'self'",
-		"script-src 'self' " + hash + " " + cdnMermaidJS + " " + cdnKatexJS,
+		"script-src 'self' " + hashes + " " + cdnMermaidJS + " " + cdnKatexJS,
 		"connect-src 'self'",
 		// #2559 D6-3 dropped the last generated style="" attribute, so inline
 		// styles are no longer needed. KaTeX's stylesheet is the one external
