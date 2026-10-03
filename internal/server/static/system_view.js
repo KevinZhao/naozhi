@@ -1,33 +1,18 @@
 // system_view.js — extracted from dashboard.js (#2558 D4).
 //
 // Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
+// move; the import block and the export block below are the only additions.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; its helpers are
-// injected once via configureSystemView(), called from dashboard's module body.
+// module evaluates. Shared state is read from the state.js objects; the one
+// call back into dashboard (setActivityView) goes through shell.js.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, ui } from './state.js';
 import { esc, fetchJSON, formatDurationShort, showToast } from './nz_util.js';
-
-const deps = {
-  formatAbsTime: null,
-  getMsgValue: null,
-  mainEmptyHtml: null,
-  refreshCostSummary: null,
-  renderServiceOverviewHtml: null,
-  setActivityView: null,
-  timeAgo: null,
-  wireQuickAskInput: null,
-};
-export function configureSystemView(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('system_view dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+import { wireQuickAskInput } from './auth_modal.js';
+import { shell } from './shell.js';
+import { formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, timeAgo } from './utilities.js';
 
 // ===== System view (sysession daemons) =====
 //
@@ -46,7 +31,7 @@ let systemDaemons = [];
 let systemPollTimer = null;
 
 function openSystemPanel() {
-  if (ui.activeView !== 'system') { deps.setActivityView('system'); return; }
+  if (ui.activeView !== 'system') { shell.setActivityView('system'); return; }
   renderSystemView();              // paint from cache (instant)
   fetchSystemDaemons().then(renderSystemView).catch(function () {});
   startSystemPoll();
@@ -147,7 +132,7 @@ function systemStatLabel(key) {
 function renderSystemView() {
   const root = document.getElementById('system-main');
   if (!root) return;
-  deps.refreshCostSummary().then((updated) => updated && ui.activeView === 'system' && renderSystemView()).catch(() => {});
+  refreshCostSummary().then((updated) => updated && ui.activeView === 'system' && renderSystemView()).catch(() => {});
   const cards = systemDaemons.map(function (d) {
     const lr = d.last_run;
     const st = systemStateMeta(lr && lr.state);
@@ -162,15 +147,15 @@ function renderSystemView() {
     if (d.process_started_at) {
       const started = Date.parse(d.process_started_at);
       if (!isNaN(started)) {
-        metaRows += '<span>启动于 <b title="' + esc(deps.formatAbsTime(started)) + '">' + esc(deps.timeAgo(started)) + '</b></span>';
+        metaRows += '<span>启动于 <b title="' + esc(formatAbsTime(started)) + '">' + esc(timeAgo(started)) + '</b></span>';
       }
     }
     let lastRunBlock = '<div class="sys-meta"><span>尚未运行</span></div>';
     let statsBlock = '';
     if (lr) {
       const ended = lr.ended_at ? Date.parse(lr.ended_at) : NaN;
-      const whenTxt = !isNaN(ended) ? deps.timeAgo(ended) : '—';
-      const whenTitle = !isNaN(ended) ? deps.formatAbsTime(ended) : '';
+      const whenTxt = !isNaN(ended) ? timeAgo(ended) : '—';
+      const whenTitle = !isNaN(ended) ? formatAbsTime(ended) : '';
       const triggerTxt = lr.trigger === 'manual' ? '手动' : '定时';
       lastRunBlock =
         '<div class="sys-meta">' +
@@ -212,7 +197,7 @@ function renderSystemView() {
   root.innerHTML =
     '<div class="system-head"><h1>系统任务</h1></div>' +
     '<div class="system-body">' +
-      deps.renderServiceOverviewHtml() +
+      renderServiceOverviewHtml() +
       '<div class="system-intro">naozhi 内置的后台守护进程。它们由系统自动调度，只读展示运行状态，配置通过 YAML 调整后重启生效。</div>' +
       body +
     '</div>';
@@ -233,13 +218,13 @@ function renderSystemView() {
 // and the sidebar refetch removes the node's cards.
 function deselectNodeSession(nodeID) {
   const inp = document.getElementById('msg-input');
-  const draft = inp ? deps.getMsgValue(inp) : '';
+  const draft = inp ? getMsgValue(inp) : '';
   if (draft) perSession.drafts[selection.key] = draft;
   selection.key = null;
   const main = document.getElementById('main');
   if (main) {
-    main.innerHTML = deps.mainEmptyHtml();
-    deps.wireQuickAskInput();
+    main.innerHTML = mainEmptyHtml();
+    wireQuickAskInput();
   }
   showToast('节点 ' + nodeID + ' 已断开，已退出该节点上的会话', 'warning');
 }

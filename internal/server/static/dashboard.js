@@ -1,5 +1,6 @@
 import { NZ_CONTRACT } from './contract.js';
 import { authHeaders, getToken, lsGet, lsRemove, lsSet } from './platform.js';
+import { registerShell } from './shell.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { composer, hooks, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
@@ -33,8 +34,8 @@ import {
 } from './composer_files.js';
 import {
   collapseSidebarForDrawer,
-  configureMobileNav,
   initMobile,
+  initSidebarCollapsed,
   initSwipeBack,
   initSwipeDelete,
   initViewportTracking,
@@ -53,7 +54,6 @@ import {
   splitDock,
 } from './split_view.js';
 import {
-  configureSystemView,
   fetchSystemDaemons,
   openSystemPanel,
   renderSystemView,
@@ -91,10 +91,8 @@ import {
   persistPending,
   promptDialog,
   reconnectNow,
-  refreshCostSummary,
   removePendingSession,
   removeSidebarCard,
-  renderServiceOverviewHtml,
   setActiveSessionCard,
   setMsgValue,
   shortPath,
@@ -1614,9 +1612,9 @@ configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions,
 configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput });
 configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml });
 configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid });
-configureSystemView({ formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, setActivityView, timeAgo, wireQuickAskInput });
+registerShell({ selectSession, setActivityView });
 initSplitWidth();
-configureMobileNav({ ICONS, dismissSession, lsGet, lsSet, renameSession, selectSession });
+initSidebarCollapsed();
 configureVoice({ ICONS, getMsgValue, getToken, sendMessage, setMsgValue, sid, updateSendButton });
 
 fetchCLIBackends();

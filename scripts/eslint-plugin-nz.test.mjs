@@ -28,15 +28,24 @@ tester.run('configure-deps', nz.rules['configure-deps'], {
     "let s = 1; reconfigureX({ s });",
     // A const inside a function body is still a const.
     "function boot() { const local = {}; configureX({ local }); }",
+    // registerShell slots follow the same rule, bare or through a namespace.
+    "import * as S from './shell.js'; function f() {} const g = () => 1; registerShell({ f, g }); S.registerShell({ f });",
+    // Only the shell's own name: another method called registerX is out of scope.
+    'let s = 1; S.registerOther({ s });',
   ],
   invalid: [
-    { code: 'let s = 1; configureX({ s });', errors: [{ messageId: 'mutable', data: { name: 's', kind: 'let', target: 'X' } }] },
-    { code: 'var v = 1; configureX({ v });', errors: [{ messageId: 'mutable', data: { name: 'v', kind: 'var', target: 'X' } }] },
-    { code: 'function boot(p) { configureX({ p }); }', errors: [{ messageId: 'mutable', data: { name: 'p', kind: 'Parameter', target: 'X' } }] },
-    { code: 'configureX({ undeclared });', errors: [{ messageId: 'mutable', data: { name: 'undeclared', kind: 'global', target: 'X' } }] },
-    { code: 'const o = { m: {} }; configureX({ m: o.m });', errors: [{ messageId: 'notBinding', data: { target: 'X', type: 'MemberExpression' } }] },
-    { code: 'configureX({ n: 3 });', errors: [{ messageId: 'notBinding', data: { target: 'X', type: 'Literal' } }] },
-    { code: 'const o = {}; configureX({ ...o });', errors: [{ messageId: 'notBinding', data: { target: 'X', type: 'SpreadElement' } }] },
+    { code: 'let s = 1; configureX({ s });', errors: [{ messageId: 'mutable', data: { name: 's', kind: 'let', callee: 'configureX' } }] },
+    { code: 'var v = 1; configureX({ v });', errors: [{ messageId: 'mutable', data: { name: 'v', kind: 'var', callee: 'configureX' } }] },
+    { code: 'function boot(p) { configureX({ p }); }', errors: [{ messageId: 'mutable', data: { name: 'p', kind: 'Parameter', callee: 'configureX' } }] },
+    { code: 'configureX({ undeclared });', errors: [{ messageId: 'mutable', data: { name: 'undeclared', kind: 'global', callee: 'configureX' } }] },
+    { code: 'const o = { m: {} }; configureX({ m: o.m });', errors: [{ messageId: 'notBinding', data: { callee: 'configureX', type: 'MemberExpression' } }] },
+    { code: 'configureX({ n: 3 });', errors: [{ messageId: 'notBinding', data: { callee: 'configureX', type: 'Literal' } }] },
+    { code: 'const o = {}; configureX({ ...o });', errors: [{ messageId: 'notBinding', data: { callee: 'configureX', type: 'SpreadElement' } }] },
+    // A registered shell slot that is a let would be called stale after the
+    // root reassigns it.
+    { code: 'let current = () => 1; registerShell({ current });', errors: [{ messageId: 'mutable', data: { name: 'current', kind: 'let', callee: 'registerShell' } }] },
+    { code: "import * as S from './shell.js'; let current = () => 1; S.registerShell({ current });", errors: [{ messageId: 'mutable', data: { name: 'current', kind: 'let', callee: 'registerShell' } }] },
+    { code: 'const o = { f() {} }; registerShell({ f: o.f });', errors: [{ messageId: 'notBinding', data: { callee: 'registerShell', type: 'MemberExpression' } }] },
     // Every offending property is reported, not just the first.
     { code: 'let a = 1; let b = 2; function f() {} configureX({ a, f, b });', errors: [{ messageId: 'mutable' }, { messageId: 'mutable' }] },
     { code: 'const o = {}; let b = 2; configureX({ ...o, b });', errors: [{ messageId: 'notBinding' }, { messageId: 'mutable' }] },
@@ -104,6 +113,8 @@ tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
     'const spread = { ...{ a: 1 }, ...base };',
     'const merged = Object.assign({}, { a: 1 }, base);',
     'const frozenAcc = Object.freeze({ get x() { return init(); } });',
+    // shell.js's slot table: sealing a fresh literal mutates nothing else.
+    'export const shell = Object.seal({ selectSession: null });',
   ],
   invalid: [
     // A bare top-level call.
@@ -139,10 +150,11 @@ tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
     { code: "let wsm = { on() {} }; wsm.on('x', () => {});", filename: '/repo/internal/server/static/ws_manager.js', errors: [{ messageId: 'sideEffect' }] },
     // `delete` mutates what its operand names.
     { code: 'const x = delete window.foo;', errors: [{ messageId: 'sideEffect' }] },
-    // Object.assign/freeze mutate their first argument; only a fresh literal
+    // Object.assign/freeze/seal mutate their first argument; only a fresh literal
     // keeps them pure.
     { code: 'const g = Object.assign(window, { x: 1 });', errors: [{ messageId: 'sideEffect' }] },
     { code: 'const g = Object.freeze(window);', errors: [{ messageId: 'sideEffect' }] },
+    { code: 'const g = Object.seal(window);', errors: [{ messageId: 'sideEffect' }] },
     { code: 'const g = Object[assign]({}, {});', errors: [{ messageId: 'sideEffect' }] },
     // Calls laundered through a computed member property or object key.
     { code: 'const z = window[setTimeout(() => {}, 0)];', errors: [{ messageId: 'sideEffect' }] },

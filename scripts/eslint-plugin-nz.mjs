@@ -6,11 +6,11 @@
 // fields at the use site. These rules close the two other routes that copy a
 // value instead of sharing it:
 //
-//   nz/configure-deps          configureX({ … }) may only inject functions
-//                               and const bindings. A let, an object field or
-//                               a literal is copied into the callee's deps
-//                               table once and goes stale when the owner
-//                               reassigns it.
+//   nz/configure-deps          configureX({ … }) and registerShell({ … })
+//                               may only hand over functions and const
+//                               bindings. A let, an object field or a literal
+//                               is copied into the callee's table once and
+//                               goes stale when the owner reassigns it.
 //   nz/no-exported-let         an exported let is a second sharing mechanism
 //                               (an ES live binding importers can read but
 //                               not write); export a const state object or a
@@ -32,6 +32,14 @@
 // Tests: node --test scripts/eslint-plugin-nz.test.mjs
 
 const CONFIGURE_RE = /^configure[A-Z]/;
+
+// tableCallee names the call when it hands a table over: configureX(…), or
+// registerShell(…) called bare or through a namespace (S.registerShell).
+function tableCallee(callee) {
+  if (callee.type === 'Identifier') return CONFIGURE_RE.test(callee.name) || callee.name === 'registerShell' ? callee.name : null;
+  if (callee.type === 'MemberExpression' && !callee.computed && callee.property.type === 'Identifier' && callee.property.name === 'registerShell') return 'registerShell';
+  return null;
+}
 
 function findVariable(scope, name) {
   for (let s = scope; s; s = s.upper) {
@@ -62,37 +70,37 @@ function isSharedBinding(variable) {
 const configureDeps = {
   meta: {
     type: 'problem',
-    docs: { description: 'configureX deps may only be functions or const bindings' },
+    docs: { description: 'configureX deps and registerShell slots may only be functions or const bindings' },
     schema: [],
     messages: {
-      mutable: "'{{name}}' is a {{kind}}: configure{{target}} would keep a copy. Inject a function, or move the value into a const state object the module imports.",
-      notBinding: 'configure{{target}} deps must be functions or const bindings; a {{type}} is copied once. Read shared state from its const state object instead.',
+      mutable: "'{{name}}' is a {{kind}}: {{callee}} would keep a copy. Inject a function, or move the value into a const state object the module imports.",
+      notBinding: '{{callee}} values must be functions or const bindings; a {{type}} is copied once. Read shared state from its const state object instead.',
     },
   },
   create(context) {
     const sourceCode = context.sourceCode;
     return {
       CallExpression(node) {
-        if (node.callee.type !== 'Identifier' || !CONFIGURE_RE.test(node.callee.name)) return;
+        const callee = tableCallee(node.callee);
+        if (!callee) return;
         const arg = node.arguments[0];
         if (!arg || arg.type !== 'ObjectExpression') return;
-        const target = node.callee.name.slice('configure'.length);
         for (const prop of arg.properties) {
           if (prop.type !== 'Property') {
-            context.report({ node: prop, messageId: 'notBinding', data: { target, type: prop.type } });
+            context.report({ node: prop, messageId: 'notBinding', data: { callee, type: prop.type } });
             continue;
           }
           const value = prop.value;
           if (value.type === 'FunctionExpression' || value.type === 'ArrowFunctionExpression') continue;
           if (value.type !== 'Identifier') {
-            context.report({ node: value, messageId: 'notBinding', data: { target, type: value.type } });
+            context.report({ node: value, messageId: 'notBinding', data: { callee, type: value.type } });
             continue;
           }
           const variable = findVariable(sourceCode.getScope(value), value.name);
           if (isSharedBinding(variable)) continue;
           const def = variable && variable.defs[0];
           const kind = !def ? 'global' : def.type === 'Variable' ? def.parent.kind : def.type;
-          context.report({ node: value, messageId: 'mutable', data: { name: value.name, kind, target } });
+          context.report({ node: value, messageId: 'mutable', data: { name: value.name, kind, callee } });
         }
       },
     };
@@ -158,7 +166,7 @@ const noExportedLet = {
 // that run at evaluation time are checked: computed member properties and
 // object keys, a class's heritage, computed member keys, static field
 // initialisers and static blocks, and (isPurePattern) a destructuring
-// pattern's defaults and computed keys. Object.assign/freeze mutate their
+// pattern's defaults and computed keys. Object.assign/freeze/seal mutate their
 // first argument, so it must be a fresh object or array literal. Reading a
 // property can run a getter: a spread or Object.assign source written as a
 // literal with get/set accessors is rejected (definesAccessor), but a
@@ -203,15 +211,16 @@ function isPureExpr(node) {
   }
 }
 
-// isPureObjectCall reports Object.create(...), or Object.assign/freeze whose
-// target is a literal created right there (so nothing outside is mutated).
+// isPureObjectCall reports Object.create(...), or Object.assign/freeze/seal
+// whose target is a literal created right there (so nothing outside is
+// mutated).
 // Object.assign reads every source's properties and writes the target's, so
 // a source literal's getter, or a target literal's setter, would run.
 function isPureObjectCall(node) {
   const c = node.callee;
   if (c.type !== 'MemberExpression' || c.computed || c.object.type !== 'Identifier' || c.object.name !== 'Object') return false;
   if (c.property.name === 'create') return true;
-  if (c.property.name !== 'assign' && c.property.name !== 'freeze') return false;
+  if (c.property.name !== 'assign' && c.property.name !== 'freeze' && c.property.name !== 'seal') return false;
   const target = node.arguments[0];
   if (c.property.name === 'assign' && node.arguments.some(definesAccessor)) return false;
   return !!target && (target.type === 'ObjectExpression' || target.type === 'ArrayExpression');
@@ -300,7 +309,7 @@ const noModuleSideEffects = {
     docs: { description: 'a module may declare state at load time but may not run anything (D-S19)' },
     schema: [],
     messages: {
-      sideEffect: 'top-level {{what}} runs code at import time; a module may only declare functions, classes, imports/exports, and const bindings whose initialiser is a pure expression (object/array/new Set|Map|RegExp/Object.freeze|create|assign).',
+      sideEffect: 'top-level {{what}} runs code at import time; a module may only declare functions, classes, imports/exports, and const bindings whose initialiser is a pure expression (object/array/new Set|Map|RegExp/Object.freeze|seal|create|assign).',
     },
   },
   create(context) {

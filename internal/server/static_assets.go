@@ -146,6 +146,9 @@ var iconsJS embed.FS
 //go:embed static/file_ref_parse.js
 var fileRefParseJS embed.FS
 
+//go:embed static/shell.js
+var shellJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -266,6 +269,7 @@ var staticAssets = func() map[string]staticAsset {
 		{"session_ident.js", sessionIdentJS, "static/session_ident.js", true},
 		{"icons.js", iconsJS, "static/icons.js", true},
 		{"file_ref_parse.js", fileRefParseJS, "static/file_ref_parse.js", true},
+		{"shell.js", shellJS, "static/shell.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},
