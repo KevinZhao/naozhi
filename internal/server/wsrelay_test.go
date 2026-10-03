@@ -147,7 +147,7 @@ func TestWSRelay_ConnectAndSubscribe(t *testing.T) {
 	defer nc.Close()
 
 	client := newTestWSClient()
-	nc.Subscribe(client, "test:d:u:general", 0)
+	nc.Subscribe(client, "test:d:u:general", 0, 0)
 
 	msg := readClientMsg(t, client, 2*time.Second)
 	if msg.Type != "subscribed" {
@@ -170,7 +170,7 @@ func TestWSRelay_EventForwarding(t *testing.T) {
 	defer nc.Close()
 
 	client := newTestWSClient()
-	nc.Subscribe(client, "test:d:u:general", 0)
+	nc.Subscribe(client, "test:d:u:general", 0, 0)
 	// The remote's `subscribed` reached the client through the relay's
 	// readLoop, so the loop is already running.
 	_ = readClientMsg(t, client, 2*time.Second) // subscribed
@@ -204,12 +204,12 @@ func TestWSRelay_MultipleClients(t *testing.T) {
 	defer nc.Close()
 
 	client1 := newTestWSClient()
-	nc.Subscribe(client1, "test:d:u:general", 0)
+	nc.Subscribe(client1, "test:d:u:general", 0, 0)
 	_ = readClientMsg(t, client1, 2*time.Second) // subscribed
 
 	// Second client subscribes to same key (uses HTTP history path)
 	client2 := newTestWSClient()
-	nc.Subscribe(client2, "test:d:u:general", 0)
+	nc.Subscribe(client2, "test:d:u:general", 0, 0)
 	msg2 := readClientMsg(t, client2, 2*time.Second)
 	if msg2.Type != "subscribed" {
 		t.Errorf("client2: type = %q, want subscribed", msg2.Type)
@@ -247,7 +247,7 @@ func TestWSRelay_Unsubscribe(t *testing.T) {
 	defer nc.Close()
 
 	client := newTestWSClient()
-	nc.Subscribe(client, "test:d:u:general", 0)
+	nc.Subscribe(client, "test:d:u:general", 0, 0)
 	_ = readClientMsg(t, client, 2*time.Second) // subscribed
 
 	nc.Unsubscribe(client, "test:d:u:general")
@@ -268,7 +268,7 @@ func TestWSRelay_Close(t *testing.T) {
 	nc := node.NewHTTPClient("remote", ts.URL, "", "Remote")
 
 	client := newTestWSClient()
-	nc.Subscribe(client, "test:d:u:general", 0)
+	nc.Subscribe(client, "test:d:u:general", 0, 0)
 	_ = readClientMsg(t, client, 2*time.Second)
 
 	nc.Close()
@@ -289,7 +289,7 @@ func TestWSRelay_Reconnect(t *testing.T) {
 	defer nc.Close()
 
 	client := newTestWSClient()
-	nc.Subscribe(client, "test:d:u:general", 0)
+	nc.Subscribe(client, "test:d:u:general", 0, 0)
 	_ = readClientMsg(t, client, 2*time.Second) // subscribed
 
 	// Close the remote connection to trigger reconnect
@@ -317,7 +317,7 @@ func TestWSRelay_AuthFailed(t *testing.T) {
 	defer nc.Close()
 
 	client := newTestWSClient()
-	nc.Subscribe(client, "test:d:u:general", 0)
+	nc.Subscribe(client, "test:d:u:general", 0, 0)
 
 	msg := readClientMsg(t, client, 2*time.Second)
 	if msg.Type != "error" {
@@ -334,7 +334,7 @@ func TestWSRelay_RemoveClient(t *testing.T) {
 	defer nc.Close()
 
 	client := newTestWSClient()
-	nc.Subscribe(client, "test:d:u:general", 0)
+	nc.Subscribe(client, "test:d:u:general", 0, 0)
 	_ = readClientMsg(t, client, 2*time.Second)
 	if !mock.subscribed("test:d:u:general") {
 		t.Fatal("premise: the remote should hold the subscription before RemoveClient")

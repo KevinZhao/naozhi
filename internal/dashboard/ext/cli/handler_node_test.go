@@ -69,10 +69,10 @@ func (f *fakeConn) ProxyInterruptSession(_ context.Context, _ string) (bool, err
 func (f *fakeConn) ProxySetSessionLabel(_ context.Context, _, _ string) (bool, error) {
 	return true, nil
 }
-func (f *fakeConn) Subscribe(_ node.EventSink, _ string, _ int64) {}
-func (f *fakeConn) Unsubscribe(_ node.EventSink, _ string)        {}
-func (f *fakeConn) RefreshSubscription(_ string)                  {}
-func (f *fakeConn) RemoveClient(_ node.EventSink)                 {}
+func (f *fakeConn) Subscribe(_ node.EventSink, _ string, _ int64, _ int) {}
+func (f *fakeConn) Unsubscribe(_ node.EventSink, _ string)               {}
+func (f *fakeConn) RefreshSubscription(_ string)                         {}
+func (f *fakeConn) RemoveClient(_ node.EventSink)                        {}
 
 // fakeNodeAccess resolves a single node id to conn. When conn is nil,
 // LookupNode writes a 404 (mirroring the real nodeRegistry's "unknown node"

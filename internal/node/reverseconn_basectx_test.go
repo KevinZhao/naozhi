@@ -111,7 +111,7 @@ func TestReverseConn_SubscribeHistoryAbortsOnClose(t *testing.T) {
 	}()
 
 	sink := &mockSink{id: 1}
-	rc.Subscribe(sink, "stall-key", 0)
+	rc.Subscribe(sink, "stall-key", 0, 0)
 
 	// Give the goroutine a moment to reach FetchEvents → rpc() and park.
 	time.Sleep(50 * time.Millisecond)

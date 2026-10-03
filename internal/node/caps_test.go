@@ -34,6 +34,18 @@ func TestLogUnknownCaps(t *testing.T) {
 			t.Errorf("expected no WARN, got: %q", buf.String())
 		}
 	})
+	t.Run("SubscribeHistoryKnown", func(t *testing.T) {
+		// Every upstream connector advertises it; unknown, every same-version
+		// node would WARN on each register.
+		buf, mu, restore := captureSlog(t)
+		defer restore()
+		logUnknownCaps("n", []string{CapSubscribeHistory})
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(buf.String(), "unknown capabilities") {
+			t.Errorf("%q is not a known cap: %q", CapSubscribeHistory, buf.String())
+		}
+	})
 	t.Run("SomeUnknown", func(t *testing.T) {
 		buf, mu, restore := captureSlog(t)
 		defer restore()

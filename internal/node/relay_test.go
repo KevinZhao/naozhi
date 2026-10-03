@@ -87,7 +87,7 @@ func TestWSRelay_Subscribe_connectsAndSubscribes(t *testing.T) {
 	relay := newWSRelay(node)
 
 	sink := &mockSink{id: 1}
-	relay.Subscribe(sink, "feishu:group:123", 0)
+	relay.Subscribe(sink, "feishu:group:123", 0, 0)
 
 	doneCh := make(chan struct{})
 	go func() {
@@ -115,7 +115,7 @@ func TestWSRelay_Subscribe_connectFailureSendsError(t *testing.T) {
 	relay := newWSRelay(node)
 
 	sink := &mockSink{id: 1}
-	relay.Subscribe(sink, "key", 0)
+	relay.Subscribe(sink, "key", 0, 0)
 
 	msgs := sink.JSONMsgs()
 	if len(msgs) == 0 {
@@ -152,7 +152,7 @@ func TestWSRelay_Unsubscribe_sendsUnsubscribed(t *testing.T) {
 	relay := newWSRelay(node)
 
 	sink := &mockSink{id: 1}
-	relay.Subscribe(sink, "key1", 0) // dials and subscribes before returning
+	relay.Subscribe(sink, "key1", 0, 0) // dials and subscribes before returning
 	relay.Unsubscribe(sink, "key1")
 
 	found := false
@@ -232,7 +232,7 @@ func TestWSRelay_Close_duringDial_noLeak(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			sink := &mockSink{}
-			relay.Subscribe(sink, "key", 0)
+			relay.Subscribe(sink, "key", 0, 0)
 		}()
 	}
 
@@ -283,9 +283,9 @@ func TestWSRelay_RemoveClient(t *testing.T) {
 	sink2 := &mockSink{id: 2}
 
 	// Subscribe registers the sink before it returns; no wait is needed.
-	relay.Subscribe(sink1, "key1", 0)
-	relay.Subscribe(sink2, "key1", 0)
-	relay.Subscribe(sink1, "key2", 0)
+	relay.Subscribe(sink1, "key1", 0, 0)
+	relay.Subscribe(sink2, "key1", 0, 0)
+	relay.Subscribe(sink1, "key2", 0, 0)
 
 	relay.RemoveClient(sink1)
 
@@ -350,7 +350,7 @@ func TestWSRelay_ReadLoop_deliversEvents(t *testing.T) {
 	sink := &mockSink{id: 1}
 	// rawMsgs is initialized empty by default
 
-	relay.Subscribe(sink, "feishu:group:123", 0)
+	relay.Subscribe(sink, "feishu:group:123", 0, 0)
 
 	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() > 0 }, 2*time.Second, "expected at least one event delivered to sink")
 
@@ -410,8 +410,8 @@ func TestWSRelay_SecondSubscriberGetsHistory(t *testing.T) {
 	sink1 := &mockSink{id: 1}
 	sink2 := &mockSink{id: 2}
 
-	relay.Subscribe(sink1, "key1", 0) // dials and writes the subscribe before returning
-	relay.Subscribe(sink2, "key1", 0) // second subscriber — should NOT send subscribe to remote
+	relay.Subscribe(sink1, "key1", 0, 0) // dials and writes the subscribe before returning
+	relay.Subscribe(sink2, "key1", 0, 0) // second subscriber — should NOT send subscribe to remote
 
 	// Wait for history HTTP call.
 	select {
@@ -422,11 +422,47 @@ func TestWSRelay_SecondSubscriberGetsHistory(t *testing.T) {
 
 	// A first subscribe on another key travels the same ordered connection,
 	// so once the server has read it, it has read anything sink2 sent.
-	relay.Subscribe(&mockSink{id: 3}, "barrier", 0)
+	relay.Subscribe(&mockSink{id: 3}, "barrier", 0, 0)
 	testhelper.Eventually(t, sawBarrier.Load, 2*time.Second, "server never read the barrier subscribe")
 	if n := subscribeMsgCount.Load(); n != 1 {
 		t.Errorf("expected exactly 1 subscribe message to remote, got %d", n)
 	}
 
 	relay.Close()
+}
+
+// TestWSRelay_FirstSubscribeCarriesLimit: the relay's first subscribe hands
+// the remote primary the browser's page size, so it answers with its
+// visible-aware page and has_more rather than the legacy full log.
+func TestWSRelay_FirstSubscribeCarriesLimit(t *testing.T) {
+	got := make(chan ClientMsg, 1)
+	srv := wsTestServer(t, func(conn *websocket.Conn) {
+		defer conn.Close()
+		if !authHandshake(t, conn) {
+			return
+		}
+		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var msg ClientMsg
+		if err := conn.ReadJSON(&msg); err == nil {
+			got <- msg
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	defer srv.Close()
+	relay := newWSRelay(newRelayNode(srv))
+	defer relay.Close()
+
+	relay.Subscribe(&mockSink{id: 1}, "feishu:group:123", 0, 100)
+	select {
+	case msg := <-got:
+		if msg.Type != "subscribe" || msg.Limit != 100 || msg.After != 0 {
+			t.Fatalf("relay subscribe = {type %q after %d limit %d}, want {subscribe 0 100}", msg.Type, msg.After, msg.Limit)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for the relay's subscribe")
+	}
 }

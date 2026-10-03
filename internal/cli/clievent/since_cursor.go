@@ -28,6 +28,17 @@ func NewSinceCursor() *SinceCursor {
 	return &SinceCursor{}
 }
 
+// NewSinceCursorAt returns a cursor for a stream whose consumer already holds
+// everything before afterMS. No UUID at afterMS is known, so the first query
+// re-admits that millisecond, as SinceInclusive does. afterMS <= 0 is
+// NewSinceCursor.
+func NewSinceCursorAt(afterMS int64) *SinceCursor {
+	if afterMS <= 0 {
+		return NewSinceCursor()
+	}
+	return &SinceCursor{watermark: afterMS}
+}
+
 // Reset rewinds the cursor to the pre-subscribe state. Used on session
 // pointer swap (e.g. /new): the new event log's timestamps can predate the
 // old watermark, so the first notify after a swap must deliver everything.

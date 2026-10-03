@@ -72,7 +72,7 @@ func newWSRelay(node *HTTPClient) *wsRelay {
 
 // Subscribe subscribes a local client to a remote session key.
 // Connects to the remote node on first call.
-func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
+func (r *wsRelay) Subscribe(c EventSink, key string, after int64, limit int) {
 	if err := r.ensureConnected(); err != nil {
 		c.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Node: r.node.ID, Error: "relay connect: " + err.Error()}))
 		return
@@ -102,8 +102,10 @@ func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 	}
 
 	// First subscriber or remote rebuild: the remote answers with `subscribed`
-	// + an Initial history frame that readLoop fans out to every local subscriber.
-	r.writeJSON(ClientMsg{Type: string(wsproto.TypeSubscribe), Key: key, After: after})
+	// + an Initial history frame that readLoop fans out to every local
+	// subscriber. limit gets the remote's visible-aware page with has_more
+	// instead of its legacy full-log replay.
+	r.writeJSON(ClientMsg{Type: string(wsproto.TypeSubscribe), Key: key, After: after, Limit: limit})
 }
 
 // Unsubscribe removes a local client from a remote session key.

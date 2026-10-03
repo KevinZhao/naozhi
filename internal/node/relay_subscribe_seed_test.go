@@ -58,7 +58,7 @@ func TestWSRelay_Subscribe_SeedsLastEventForRaceSafeReconnect(t *testing.T) {
 	const after int64 = 1_700_000_000_000 // arbitrary but non-zero unix ms
 
 	sink := &seedTestSink{}
-	r.Subscribe(sink, key, after)
+	r.Subscribe(sink, key, after, 0)
 
 	// Snapshot the same way reconnect() does. Without the seed,
 	// lastEvent[key] is the zero value because no event has flowed from
@@ -112,8 +112,8 @@ func TestWSRelay_Subscribe_SeedOnlyOnFirstSubscriber(t *testing.T) {
 	const firstAfter int64 = 1_700_000_000_000
 	const laterAfter int64 = 1 // would REGRESS lastEvent if (wrongly) written
 
-	r.Subscribe(&seedTestSink{}, key, firstAfter)
-	r.Subscribe(&seedTestSink{}, key, laterAfter)
+	r.Subscribe(&seedTestSink{}, key, firstAfter, 0)
+	r.Subscribe(&seedTestSink{}, key, laterAfter, 0)
 
 	r.mu.Lock()
 	got := r.book.lastEvent[key]

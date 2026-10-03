@@ -123,3 +123,21 @@ func TestSinceCursor_Reset(t *testing.T) {
 		t.Fatalf("dedup set not cleared on reset: %d entries", len(csr.sentAtWM))
 	}
 }
+
+// TestNewSinceCursorAt_ReadmitsAfterMillisecond: a cursor started at after
+// queries from that millisecond on, like SinceInclusive, and dedups nothing
+// there yet; after <= 0 is the deliver-everything cursor.
+func TestNewSinceCursorAt_ReadmitsAfterMillisecond(t *testing.T) {
+	csr := NewSinceCursorAt(2000)
+	if got := csr.QueryAfter(); got != SinceInclusive(2000) {
+		t.Fatalf("QueryAfter = %d, want %d", got, SinceInclusive(2000))
+	}
+	if got := csr.Filter([]EventEntry{{Time: 2000, UUID: "a"}, {Time: 3000, UUID: "c"}}); len(got) != 2 {
+		t.Fatalf("Filter kept %d entries, want both", len(got))
+	}
+	for _, after := range []int64{0, -5} {
+		if got := NewSinceCursorAt(after).QueryAfter(); got != -1 {
+			t.Fatalf("NewSinceCursorAt(%d).QueryAfter = %d, want -1", after, got)
+		}
+	}
+}

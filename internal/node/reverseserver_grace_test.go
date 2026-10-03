@@ -49,9 +49,15 @@ func newGraceFixture(t *testing.T, grace time.Duration) *graceFixture {
 // dial registers a node link and returns it with the primary-side conn.
 func (f *graceFixture) dial(t *testing.T) (*websocket.Conn, *ReverseConn) {
 	t.Helper()
+	return f.dialCaps(t, nil)
+}
+
+// dialCaps is dial for a node advertising caps.
+func (f *graceFixture) dialCaps(t *testing.T, caps []string) (*websocket.Conn, *ReverseConn) {
+	t.Helper()
 	ws := dialReverseNode(t, f.srv)
 	t.Cleanup(func() { ws.Close() })
-	if resp := reverseAuth(t, ws, "node-1", "tok", "h"); resp.Type != "registered" {
+	if resp := reverseAuthWithCaps(t, ws, "node-1", "tok", caps); resp.Type != "registered" {
 		t.Fatalf("expected registered, got %q", resp.Type)
 	}
 	select {
@@ -94,7 +100,7 @@ func bookSinks(rc *ReverseConn, key string) []EventSink {
 // first subscriber triggers, so the watermark ends at newest.
 func subscribeOnLink(t *testing.T, rc *ReverseConn, ws *websocket.Conn, sink EventSink, newest int64) {
 	t.Helper()
-	rc.Subscribe(sink, graceKey, 0)
+	rc.Subscribe(sink, graceKey, 0, 0)
 	readNodeFrame(t, ws, "subscribe")
 	answerFetchEvents(t, ws, []clievent.EventEntry{{Time: newest}})
 	testhelper.Eventually(t, func() bool {
@@ -275,7 +281,7 @@ func TestReverseConn_SubscribeOnDroppedConn_KeyedError(t *testing.T) {
 	f.waitLingering(t)
 
 	late := &mockSink{id: 2}
-	rc1.Subscribe(late, graceKey, 0)
+	rc1.Subscribe(late, graceKey, 0, 0)
 	expectReconnecting(t, late, "node-1")
 	if got := bookSinks(rc1, graceKey); len(got) != 1 || got[0] != parked {
 		t.Fatalf("parked key holds %v, want only the sink from before the drop", got)
@@ -297,7 +303,7 @@ func TestReverseConn_SubscribeWriteFails_KeyedError(t *testing.T) {
 	defer rc.Close()
 
 	sink := &mockSink{id: 1}
-	rc.Subscribe(sink, graceKey, 0)
+	rc.Subscribe(sink, graceKey, 0, 0)
 	expectReconnecting(t, sink, "node-1")
 	if n := len(bookSinks(rc, graceKey)); n != 0 {
 		t.Fatalf("a failed subscribe left %d sinks behind", n)
@@ -350,7 +356,7 @@ func TestReverseConn_HeirReceivesCallsRoutedToPredecessor(t *testing.T) {
 	readNodeFrame(t, ws2, "unsubscribe")
 
 	second := &mockSink{id: 2}
-	rc1.Subscribe(second, graceKey, 0)
+	rc1.Subscribe(second, graceKey, 0, 0)
 	readNodeFrame(t, ws2, "subscribe")
 	answerFetchEvents(t, ws2, nil)
 	if got := bookSinks(rc2, graceKey); len(got) != 1 || got[0] != second {

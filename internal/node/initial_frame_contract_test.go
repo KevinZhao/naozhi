@@ -17,10 +17,10 @@ import (
 // remote session ever gets, and both are emitted from a goroutine that races
 // the "subscribed" ack, so the client cannot fall back on arrival order.
 //
-// Conversely readLoop's `case "events"` relays a remote streamEvents batch —
-// incremental by construction (the remote connector emits only "subscribed" on
-// subscribe and pushes on EventLog append thereafter), so it must NOT set the
-// flag or a live conversation gets full-page-replaced mid-turn.
+// Conversely readLoop's `case "events"` relays a remote streamEvents batch,
+// incremental unless the node itself marked it as the page a want_history
+// subscribe asked for, so it may only copy the node's flag, never set it, or a
+// live conversation gets full-page-replaced mid-turn.
 func TestRemoteHistoryFrames_MarkOpeningPage(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

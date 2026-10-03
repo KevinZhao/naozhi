@@ -25,6 +25,10 @@ type Session interface {
 	Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 	SubscribeEvents() (<-chan struct{}, func())
 	EventEntriesSince(afterMS int64) []clievent.EventEntry
+	// InitialHistoryPage is the opening page a want_history subscribe gets:
+	// the visible-aware newest slice for a page-size hint, and whether older
+	// history exists.
+	InitialHistoryPage(ctx context.Context, limit int) ([]clievent.EventEntry, bool)
 	LogSystemEvent(summary string)
 	Snapshot() sessionview.SessionSnapshot
 	State() string

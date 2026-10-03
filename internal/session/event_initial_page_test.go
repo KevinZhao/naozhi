@@ -220,3 +220,20 @@ func TestEventInitialPageCtx_MemoryHasOlder(t *testing.T) {
 		t.Errorf("hasMore=false but ring holds entries older than Time=%d", entries[0].Time)
 	}
 }
+
+// TestInitialHistoryPage_ClampsPageSizeHint: a subscribe's limit is a page
+// size, not a bubble goal. Above DefaultVisibleTarget, or unset, it reads
+// DefaultVisibleTarget bubbles; a smaller limit is honoured.
+func TestInitialHistoryPage_ClampsPageSizeHint(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	for i := 1; i <= 2*DefaultVisibleTarget; i++ {
+		s.persistedHistory = append(s.persistedHistory, clievent.EventEntry{Time: int64(i), Type: clievent.KindText})
+	}
+	for _, tc := range []struct{ limit, want int }{{100, DefaultVisibleTarget}, {0, DefaultVisibleTarget}, {5, 5}} {
+		entries, hasMore := s.InitialHistoryPage(context.Background(), tc.limit)
+		if len(entries) != tc.want || !hasMore {
+			t.Errorf("limit %d: %d entries hasMore=%v, want %d with hasMore", tc.limit, len(entries), hasMore, tc.want)
+		}
+	}
+}
